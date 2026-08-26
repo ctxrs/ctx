@@ -656,6 +656,8 @@ impl SemanticVectorStore {
         let mut replacements = Vec::new();
         let mut resolved = Vec::new();
         let mut retire = Vec::new();
+        let mut pending_chunks = Vec::new();
+        let mut pending_documents = 0_usize;
 
         for record in &page.records {
             if !generation.includes(record) {
@@ -723,19 +725,8 @@ impl SemanticVectorStore {
                         record.event_id
                     ));
                 }
-                let embeddings = embedder.embed_chunks(&chunks)?;
-                if embeddings.len() != chunks.len()
-                    || embeddings
-                        .iter()
-                        .any(|embedding| embedding.len() != SEMANTIC_DIMENSIONS)
-                {
-                    return Err(SemanticVectorStoreError::unavailable(
-                        "source-backed semantic embedder returned an invalid batch",
-                    )
-                    .into());
-                }
-                replacements.extend(chunks.into_iter().zip(embeddings));
-                outcome.records_embedded = outcome.records_embedded.saturating_add(1);
+                pending_chunks.extend(chunks);
+                pending_documents = pending_documents.saturating_add(1);
             }
             resolved.push(ResolvedSourceDocument {
                 event_id: record.event_id,
@@ -789,6 +780,21 @@ impl SemanticVectorStore {
                     ))
                 })
         })?;
+        if !pending_chunks.is_empty() {
+            let embeddings = embedder.embed_chunks(&pending_chunks)?;
+            if embeddings.len() != pending_chunks.len()
+                || embeddings
+                    .iter()
+                    .any(|embedding| embedding.len() != SEMANTIC_DIMENSIONS)
+            {
+                return Err(SemanticVectorStoreError::unavailable(
+                    "source-backed semantic embedder returned an invalid batch",
+                )
+                .into());
+            }
+            replacements.extend(pending_chunks.into_iter().zip(embeddings));
+            outcome.records_embedded = outcome.records_embedded.saturating_add(pending_documents);
+        }
         let publication =
             self.publish_source_page(&replacements, &metadata_updates, &retire, &existing_lookup)?;
         frontier.processed_source_documents = processed_documents;

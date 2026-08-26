@@ -29,6 +29,7 @@ struct SemanticHostEnvironment {
     coreml_compute_mode: Option<String>,
     thread_override: Option<usize>,
     batch_size_override: Option<usize>,
+    active_percent_override: Option<u8>,
     deprecated_model_onnx_present: bool,
 }
 
@@ -55,6 +56,7 @@ impl SemanticHostEnvironment {
             coreml_compute_mode: env::var("CTX_SEMANTIC_COREML_NATIVE_COMPUTE").ok(),
             thread_override: env_usize("CTX_SEMANTIC_THREADS"),
             batch_size_override: env_usize("CTX_SEMANTIC_EMBED_BATCH"),
+            active_percent_override: env_u8_bounded("CTX_SEMANTIC_ACTIVE_PERCENT"),
             deprecated_model_onnx_present: env::var_os("CTX_SEMANTIC_MODEL_ONNX").is_some(),
         }
     }
@@ -73,6 +75,13 @@ fn env_usize(name: &str) -> Option<usize> {
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|value| *value > 0)
+}
+
+fn env_u8_bounded(name: &str) -> Option<u8> {
+    env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<u8>().ok())
+        .filter(|value| (1..=100).contains(value))
 }
 
 pub fn semantic_worker_cache_dir(data_root: &Path) -> PathBuf {
@@ -174,6 +183,7 @@ fn semantic_model_config_from_environment(
         SemanticModelConfig::new(SemanticModelPaths::new(model_cache_dir, runtime_paths))
             .with_thread_override(environment.thread_override)
             .with_batch_size_override(environment.batch_size_override)
+            .with_active_percent_override(environment.active_percent_override)
             .with_deprecated_model_onnx_present(environment.deprecated_model_onnx_present);
     config = match parse_backend_preference(environment.backend_preference.as_deref()) {
         Ok(preference) => config.with_backend_preference(preference),

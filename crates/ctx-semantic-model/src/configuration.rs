@@ -134,6 +134,7 @@ pub struct SemanticModelConfig {
     coreml_compute_mode_error: Option<String>,
     thread_override: Option<usize>,
     batch_size_override: Option<usize>,
+    active_percent_override: Option<u8>,
     deprecated_model_onnx_present: bool,
 }
 
@@ -147,6 +148,7 @@ impl SemanticModelConfig {
             coreml_compute_mode_error: None,
             thread_override: None,
             batch_size_override: None,
+            active_percent_override: None,
             deprecated_model_onnx_present: false,
         }
     }
@@ -183,6 +185,11 @@ impl SemanticModelConfig {
         self
     }
 
+    pub fn with_active_percent_override(mut self, active_percent: Option<u8>) -> Self {
+        self.active_percent_override = active_percent;
+        self
+    }
+
     pub fn with_deprecated_model_onnx_present(mut self, present: bool) -> Self {
         self.deprecated_model_onnx_present = present;
         self
@@ -215,6 +222,10 @@ impl SemanticModelConfig {
 
     pub(crate) const fn batch_size_override(&self) -> Option<usize> {
         self.batch_size_override
+    }
+
+    pub(crate) const fn active_percent_override(&self) -> Option<u8> {
+        self.active_percent_override
     }
 
     pub(crate) const fn deprecated_model_onnx_present(&self) -> bool {

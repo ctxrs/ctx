@@ -217,7 +217,7 @@ impl SharedSemanticRuntime {
         let quiet_policy = embedder
             .as_ref()
             .ok_or_else(|| anyhow!("semantic embedder was not initialized"))?
-            .quiet_policy();
+            .quiet_policy(config);
         drop(embedder);
         let active = started.elapsed();
         let remaining = deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
@@ -633,11 +633,15 @@ impl SemanticEmbedder {
         }
     }
 
-    pub(super) fn quiet_policy(&self) -> SemanticQuietPolicy {
-        semantic_quiet_policy(
+    pub(super) fn quiet_policy(&self, config: &SemanticModelConfig) -> SemanticQuietPolicy {
+        let mut policy = semantic_quiet_policy(
             SemanticSystemResources::current(),
             self.backend.compute_class(),
-        )
+        );
+        if let Some(active_percent) = config.active_percent_override() {
+            policy.active_percent = active_percent;
+        }
+        policy
     }
 }
 
