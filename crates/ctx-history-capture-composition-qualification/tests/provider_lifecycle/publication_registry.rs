@@ -403,14 +403,8 @@ fn terminal_failure_on_either_side_of_success_keeps_replacement_atomic() {
         assert!(failed.commit.manifest().source_route(&first_id).is_none());
         assert!(failed.commit.manifest().source_route(&second_id).is_none());
         let failed_index = ctx_history_index::VerifiedIndex::open(temp.path()).unwrap();
-        assert!(failed_index
-            .search_event_candidates("atomicterminalfirst", 8)
-            .unwrap()
-            .is_empty());
-        assert!(failed_index
-            .search_event_candidates("atomicterminalsecond", 8)
-            .unwrap()
-            .is_empty());
+        assert!(search_event_candidates(&failed_index, "atomicterminalfirst", 8).is_empty());
+        assert!(search_event_candidates(&failed_index, "atomicterminalsecond", 8).is_empty());
         drop(failed_index);
 
         let mut succeeded_registry = SourceBackedProviderRegistry::new();
@@ -788,13 +782,7 @@ fn logical_all_publication_withdraws_removed_root_without_deleting_history() {
     assert_eq!(published.manifest().sources.len(), 2);
     assert!(published.manifest().source_route(&work_id).is_some());
     assert!(published.manifest().source_route(&personal_id).is_some());
-    assert_eq!(
-        published
-            .search_event_candidates("workonly", 8)
-            .unwrap()
-            .len(),
-        1
-    );
+    assert_eq!(search_event_candidates(&published, "workonly", 8).len(), 1);
     assert_eq!(published.manifest().provider_roots().len(), 1);
     assert_eq!(
         published.manifest().provider_roots()[0].definition().id,

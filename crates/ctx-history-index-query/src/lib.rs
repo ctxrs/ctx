@@ -21,6 +21,7 @@ use records::{
     core_event_fast_preflight, stored_core_event_record, stored_core_event_record_with_size,
     stored_core_event_record_with_source_json, EventAddressCandidate, SessionEventAddressCandidate,
 };
+use records::{ranked_event_ref_at_address, ranked_event_ref_at_address_with_order};
 
 #[cfg(any(test, feature = "test-support"))]
 use std::cell::{Cell, RefCell};

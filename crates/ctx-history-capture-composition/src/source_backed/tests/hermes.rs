@@ -9,6 +9,7 @@ use ctx_history_provider_hermes::test_support::{
 use rusqlite::Connection;
 
 use super::super::*;
+use crate::test_support_paths::complete_lexical_events;
 use crate::{
     hermes_route_control_exact_due, provider_source_for_path,
     register_hermes_explicit_source_backed_route,
@@ -147,7 +148,7 @@ fn fixture_registry(data_root: &Path, database: &Path) -> SourceBackedProviderRe
 
 fn unique_search_record(index_root: &Path, needle: &str) -> CoreRecord {
     let index = VerifiedIndex::open(index_root).unwrap();
-    let candidates = index.search_event_candidates(needle, 8).unwrap();
+    let candidates = complete_lexical_events(&index, needle, Default::default(), 8);
     candidates
         .iter()
         .find_map(|candidate| {

@@ -165,7 +165,9 @@ where
                         fields.core_record,
                         "core_record",
                     )?)?;
-                    if core.session_id.encode_canonical()? != witness_session.encode_canonical()?
+                    if SessionAuthorityKey::for_core_record(&core)? != key
+                        || core.session_id.encode_canonical()?
+                            != witness_session.encode_canonical()?
                         || core.source.identity().encode_canonical()?
                             != witness_owner.encode_canonical()?
                     {

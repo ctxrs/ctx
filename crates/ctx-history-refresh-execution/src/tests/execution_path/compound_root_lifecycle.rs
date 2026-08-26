@@ -208,15 +208,15 @@ fn refresh(
 }
 
 fn stable_record_bytes(index: &VerifiedIndex, marker: &str) -> (String, Vec<u8>) {
-    let hits = index.search_event_candidates(marker, 8).unwrap();
+    let hits = index.complete_lexical_search(marker, 8).unwrap();
     assert_eq!(hits.len(), 1, "{marker}");
-    let hit = &hits[0];
+    let event = exact_event(index, &hits[0]);
     let record = index
-        .core_record_by_id(hit.event.event_id.as_uuid())
+        .core_record_by_id(event.event_id.as_uuid())
         .unwrap()
         .unwrap();
     (
-        ctx_history_index::source_token(&hit.event.source),
+        ctx_history_index::source_token(&event.source),
         serde_json::to_vec(&record).unwrap(),
     )
 }
@@ -227,7 +227,7 @@ fn assert_root_filter(index: &VerifiedIndex, id: &str, expected: usize) {
         .provider_root_source_tokens(&[id.to_owned()], &[])
         .unwrap();
     let hits = index
-        .search_event_candidates_with_filters(
+        .complete_filtered_lexical_search(
             match id {
                 "alpha" => "lifecycleinitial0",
                 "beta" => "lifecycleinitial1",
@@ -247,7 +247,7 @@ fn initial_count(index: &VerifiedIndex) -> usize {
     (0..3)
         .map(|index_value| {
             index
-                .search_event_candidates(&format!("lifecycleinitial{index_value}"), 8)
+                .complete_lexical_search(&format!("lifecycleinitial{index_value}"), 8)
                 .unwrap()
                 .len()
         })
@@ -276,38 +276,25 @@ struct StableSourceBytes {
 }
 
 fn stable_source_bytes(index: &VerifiedIndex, marker: &str) -> StableSourceBytes {
-    let hits = index.search_event_candidates(marker, 8).unwrap();
+    let hits = index.complete_lexical_search(marker, 8).unwrap();
     assert_eq!(hits.len(), 1, "{marker}");
-    let source = &hits[0].event.source;
+    let event = exact_event(index, &hits[0]);
+    let source = &event.source;
     let route = index
         .manifest()
         .source_routes()
         .iter()
         .find(|route| route.sources().iter().any(|member| member == source))
         .unwrap();
-    let mut sessions = hits
-        .iter()
-        .map(|hit| serde_json::to_vec(&hit.event.session_id).unwrap())
-        .collect::<Vec<_>>();
-    sessions.sort();
-    let mut events = hits
-        .iter()
-        .map(|hit| serde_json::to_vec(&hit.event.event_id).unwrap())
-        .collect::<Vec<_>>();
-    events.sort();
-    let mut records = hits
-        .iter()
-        .map(|hit| {
-            serde_json::to_vec(
-                &index
-                    .core_record_by_id(hit.event.event_id.as_uuid())
-                    .unwrap()
-                    .unwrap(),
-            )
+    let sessions = vec![serde_json::to_vec(&event.session_id).unwrap()];
+    let events = vec![serde_json::to_vec(&event.event_id).unwrap()];
+    let records = vec![serde_json::to_vec(
+        &index
+            .core_record_by_id(event.event_id.as_uuid())
             .unwrap()
-        })
-        .collect::<Vec<_>>();
-    records.sort();
+            .unwrap(),
+    )
+    .unwrap()];
     let token = ctx_history_index::source_token(source);
     StableSourceBytes {
         route_identity: serde_json::to_vec(route.route_identity()).unwrap(),
@@ -326,7 +313,7 @@ fn assert_root_marker(index: &VerifiedIndex, id: &str, marker: &str, expected: u
         .provider_root_source_tokens(&[id.to_owned()], &[])
         .unwrap();
     let hits = index
-        .search_event_candidates_with_filters(
+        .complete_filtered_lexical_search(
             marker,
             &EventSearchFilters {
                 allowed_source_keys: Some(allowed),
@@ -461,7 +448,7 @@ fn configured_codex_root_keeps_unsafe_static_child_membership_while_peer_advance
     let unavailable = VerifiedIndex::open(&index_root).unwrap();
     assert_eq!(
         unavailable
-            .search_event_candidates(SESSION_ADVANCED, 8)
+            .complete_lexical_search(SESSION_ADVANCED, 8)
             .unwrap()
             .len(),
         1
@@ -509,7 +496,7 @@ fn configured_codex_root_keeps_unsafe_static_child_membership_while_peer_advance
     assert_root_marker(&restored, ROOT_ID, HISTORY_MARKER, 1);
     assert_eq!(
         restored
-            .search_event_candidates(SESSION_ADVANCED, 8)
+            .complete_lexical_search(SESSION_ADVANCED, 8)
             .unwrap()
             .len(),
         1
@@ -548,7 +535,7 @@ fn unavailable_only_released_member_is_carried_while_automatic_peer_advances() {
         let missing = VerifiedIndex::open(&index_root).unwrap();
         assert_eq!(
             missing
-                .search_event_candidates("automaticpeeradvanced", 8)
+                .complete_lexical_search("automaticpeeradvanced", 8)
                 .unwrap()
                 .len(),
             1
@@ -623,11 +610,11 @@ fn removing_final_released_alias_preserves_shared_route_history_without_refreshi
             serde_json::to_vec(&route).unwrap()
         );
         assert!(removed
-            .search_event_candidates("removedfinalaliasmutation", 8)
+            .complete_lexical_search("removedfinalaliasmutation", 8)
             .unwrap()
             .is_empty());
         assert!(removed
-            .search_event_candidates("disabledautomaticmutation", 8)
+            .complete_lexical_search("disabledautomaticmutation", 8)
             .unwrap()
             .is_empty());
         drop(removed);
@@ -643,21 +630,21 @@ fn removing_final_released_alias_preserves_shared_route_history_without_refreshi
         ));
         assert_eq!(
             resumed
-                .search_event_candidates("disabledautomaticmutation", 8)
+                .complete_lexical_search("disabledautomaticmutation", 8)
                 .unwrap()
                 .len(),
             1
         );
         assert_eq!(
             resumed
-                .search_event_candidates("lifecycleinitial0", 8)
+                .complete_lexical_search("lifecycleinitial0", 8)
                 .unwrap()
                 .len(),
             1
         );
         assert_eq!(
             resumed
-                .search_event_candidates("lifecycleinitial1", 8)
+                .complete_lexical_search("lifecycleinitial1", 8)
                 .unwrap()
                 .len(),
             1
@@ -704,13 +691,13 @@ fn shared_compound_route_survives_warm_policy_moves_absence_and_alias_removal() 
         assert_eq!(initial_count(&automatic_off), 3);
         assert_eq!(
             automatic_off
-                .search_event_candidates("configuredoffrecord", 8)
+                .complete_lexical_search("configuredoffrecord", 8)
                 .unwrap()
                 .len(),
             1
         );
         assert!(automatic_off
-            .search_event_candidates("automaticnewrecord", 8)
+            .complete_lexical_search("automaticnewrecord", 8)
             .unwrap()
             .is_empty());
         assert_eq!(
@@ -725,7 +712,7 @@ fn shared_compound_route_survives_warm_policy_moves_absence_and_alias_removal() 
         refresh(&base, provider, &roots, false, &data_root, &index_root);
         assert!(VerifiedIndex::open(&index_root)
             .unwrap()
-            .search_event_candidates("automaticnewrecord", 8)
+            .complete_lexical_search("automaticnewrecord", 8)
             .unwrap()
             .is_empty());
 
@@ -733,7 +720,7 @@ fn shared_compound_route_survives_warm_policy_moves_absence_and_alias_removal() 
         assert_eq!(
             VerifiedIndex::open(&index_root)
                 .unwrap()
-                .search_event_candidates("automaticnewrecord", 8)
+                .complete_lexical_search("automaticnewrecord", 8)
                 .unwrap()
                 .len(),
             1
@@ -770,7 +757,7 @@ fn shared_compound_route_survives_warm_policy_moves_absence_and_alias_removal() 
         let missing = VerifiedIndex::open(&index_root).unwrap();
         assert_eq!(
             missing
-                .search_event_candidates("remainingpeeradvanced", 8)
+                .complete_lexical_search("remainingpeeradvanced", 8)
                 .unwrap()
                 .len(),
             1
@@ -835,12 +822,12 @@ fn shared_compound_route_survives_warm_policy_moves_absence_and_alias_removal() 
             initial_alpha
         );
         assert!(removed
-            .search_event_candidates("removedaliasnewrecord", 8)
+            .complete_lexical_search("removedaliasnewrecord", 8)
             .unwrap()
             .is_empty());
         assert_eq!(
             removed
-                .search_event_candidates("remainingafterremoval", 8)
+                .complete_lexical_search("remainingafterremoval", 8)
                 .unwrap()
                 .len(),
             1

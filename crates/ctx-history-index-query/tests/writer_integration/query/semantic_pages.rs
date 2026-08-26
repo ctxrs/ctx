@@ -244,9 +244,8 @@ fn semantic_filter_projection_matches_lexical_filter_semantics_without_core_deco
         },
     ];
     for filters in parity_filters {
-        let lexical_batch = index
-            .search_event_candidates_with_filters_batch("shared parity needle", &filters, 10)
-            .unwrap();
+        let lexical_batch =
+            lexical_search_batch(&index, &["shared parity needle"], &filters, 10).unwrap();
         assert!(lexical_batch.complete);
         if filters.workspace.is_some() || filters.file.is_some() {
             assert!(lexical_batch.counters.term_expansions > 0);
@@ -256,23 +255,21 @@ fn semantic_filter_projection_matches_lexical_filter_semantics_without_core_deco
         let lexical = lexical_batch
             .candidates
             .into_iter()
-            .map(|candidate| candidate.event.event_id.as_uuid())
+            .map(|candidate| candidate.event.event_id)
             .collect::<HashSet<_>>();
-        let listed = index
-            .list_event_candidates_with_filters_batch(&filters, 10)
-            .unwrap();
+        let listed = lexical_list_batch(&index, &filters, 10).unwrap();
         assert!(listed.complete);
         assert_eq!(
             listed
                 .candidates
                 .into_iter()
-                .map(|candidate| candidate.event.event_id.as_uuid())
+                .map(|candidate| candidate.event.event_id)
                 .collect::<HashSet<_>>(),
             lexical,
             "manual body and list candidates must share exact filter semantics"
         );
         ctx_history_index_query::reset_core_record_decodes();
-        let semantic = index.semantic_filter_projection(&filters).unwrap();
+        let semantic = semantic_projection(&index, &filters).unwrap();
         assert_eq!(semantic.generation_id(), index.generation_id());
         assert_eq!(semantic.event_ids().collect::<HashSet<_>>(), lexical);
         assert_eq!(
@@ -287,7 +284,7 @@ fn semantic_filter_projection_matches_lexical_filter_semantics_without_core_deco
         ..EventSearchFilters::default()
     };
     assert!(matches!(
-        index.semantic_filter_projection(&invalid),
+        semantic_projection(&index, &invalid),
         Err(IndexError::EmptyQueryFilter { field: "provider" })
     ));
 }
@@ -327,9 +324,7 @@ fn retrieval_derived_user_message_is_not_a_semantic_candidate() {
     assert_eq!(core_page.items.len(), 1);
     assert_eq!(core_page.items[0].event_id, ordinary.event_id);
 
-    let projection = index
-        .semantic_filter_projection(&EventSearchFilters::default())
-        .unwrap();
+    let projection = semantic_projection(&index, &EventSearchFilters::default()).unwrap();
     assert_eq!(
         projection.event_ids().collect::<Vec<_>>(),
         vec![ordinary.event_id.as_uuid()]

@@ -60,6 +60,12 @@ fn replace_metadata_version(index_root: &Path, version: u64) -> VerifiedIndex {
         serde_json::from_slice(current.publication_metadata().unwrap()).unwrap();
     metadata["version"] = json!(version);
     if version != SOURCE_REFRESH_PUBLICATION_METADATA_VERSION {
+        metadata
+            .as_object_mut()
+            .unwrap()
+            .remove("committed_rejection_diagnostics");
+    }
+    if version < 3 {
         metadata.as_object_mut().unwrap().remove("route_controls");
     }
     if version == 1 {

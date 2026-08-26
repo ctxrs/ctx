@@ -6,8 +6,19 @@ use ctx_history_core::{
     ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceKey, SourceObservation,
     TypedKey, CORE_ACTIVITY_REVISION,
 };
+use ctx_history_index::EventSearchFilters;
 use ctx_history_index::{GenerationWriter, WriterOptions};
 use ctx_semantic_model::SEMANTIC_DIMENSIONS;
+
+#[test]
+fn semantic_query_boundary_rejects_more_than_32_vectors() {
+    assert!(validate_semantic_query_vector_count(32).is_ok());
+    let error = validate_semantic_query_vector_count(33).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "source-backed semantic query vector count must be at most 32"
+    );
+}
 
 #[test]
 fn semantic_query_pin_rejects_a_different_core_generation() {
@@ -185,7 +196,8 @@ fn semantic_filter_is_applied_before_top_k_across_more_than_4096_candidates() ->
         workspace: Some("ONLY-target".to_owned()),
         ..EventSearchFilters::default()
     };
-    let projection = index.semantic_filter_projection(&filters)?;
+    let filter = CompiledSearchFilter::compile(filters)?;
+    let projection = index.semantic_filter_projection(&filter)?;
     assert_eq!(projection.len(), 1);
 
     let mut pin = semantic_query_pin_from_readiness(
@@ -194,19 +206,26 @@ fn semantic_filter_is_applied_before_top_k_across_more_than_4096_candidates() ->
     )?;
     let (candidates, diagnostics) = pin.search(
         &index,
-        &filters,
-        &normalized_test_embedding(1.0, 0.0),
+        &filter,
+        &[
+            normalized_test_embedding(0.0, 1.0),
+            normalized_test_embedding(1.0, 0.0),
+        ],
         1,
-        None,
     )?;
     assert_eq!(candidates.len(), 1);
     assert_eq!(
-        candidates[0].event.event_id.as_uuid(),
+        candidates[0].event.event_id,
         target_event_id.expect("target event ID")
     );
     assert_eq!(diagnostics["iterations"], 1);
     assert_eq!(diagnostics["events_scored"], 1);
     assert_eq!(diagnostics["chunks_scanned"], 1);
+    assert_eq!(diagnostics["query_vectors"], 2);
+    assert_eq!(diagnostics["vector_passes"], 1);
+    assert_eq!(diagnostics["dot_products"], 2);
+    assert_eq!(diagnostics["metadata_records_loaded"], 1);
+    assert_eq!(diagnostics["core_records_decoded"], 0);
     assert_eq!(
         diagnostics["filtered_candidates"],
         UNRELATED_EVENTS as usize
@@ -321,34 +340,28 @@ fn semantic_query_scores_only_active_flat_events_that_match_core_metadata() -> R
         SourceBackedGenerationPin::Ready(pinned),
     )?;
 
-    let shared = EventSearchFilters {
+    let shared = CompiledSearchFilter::compile(EventSearchFilters {
         workspace: Some("shared".to_owned()),
         ..EventSearchFilters::default()
-    };
-    let (candidates, diagnostics) = pin.search(
-        &index,
-        &shared,
-        &normalized_test_embedding(1.0, 0.0),
-        3,
-        None,
-    )?;
+    })?;
+    let (candidates, diagnostics) =
+        pin.search(&index, &shared, &[normalized_test_embedding(1.0, 0.0)], 3)?;
     assert_eq!(candidates.len(), 1);
     assert_eq!(
-        candidates[0].event.event_id.as_uuid(),
+        candidates[0].event.event_id,
         active_event_id.expect("active event ID")
     );
     assert_eq!(diagnostics["events_scored"], 1);
 
-    let filtered_only = EventSearchFilters {
+    let filtered_only = CompiledSearchFilter::compile(EventSearchFilters {
         workspace: Some("filtered-only".to_owned()),
         ..EventSearchFilters::default()
-    };
+    })?;
     let (candidates, diagnostics) = pin.search(
         &index,
         &filtered_only,
-        &normalized_test_embedding(1.0, 0.0),
+        &[normalized_test_embedding(1.0, 0.0)],
         3,
-        None,
     )?;
     assert!(candidates.is_empty());
     assert_eq!(diagnostics["events_scored"], 0);

@@ -16,7 +16,8 @@ use ctx_history_core::{
     SourceAnchor, SourceFrontier, SourceObservation, TypedKey,
 };
 use ctx_history_index::{
-    GenerationWriter, SourceRouteIdentity, WriterOptions, MAX_SEMANTIC_EVENT_PAGE_ITEMS,
+    CompiledSearchFilter, EventRecord, GenerationWriter, LexicalExecution, LexicalMode,
+    SourceRouteIdentity, VerifiedIndex, WriterOptions, MAX_SEMANTIC_EVENT_PAGE_ITEMS,
 };
 use serde_json::{json, Value};
 
@@ -48,6 +49,40 @@ use super::{
 };
 
 const READINESS_QUERY: &str = "readiness-boundary-regression";
+
+fn complete_lexical_candidates(
+    index: &VerifiedIndex,
+    query: &str,
+    limit: usize,
+) -> Vec<EventRecord> {
+    let queries = [query];
+    let filter = CompiledSearchFilter::compile(Default::default()).unwrap();
+    let observed = index
+        .execute_lexical(LexicalExecution::new(
+            LexicalMode::Search(&queries),
+            &filter,
+            limit,
+        ))
+        .unwrap();
+    assert!(observed.batch.complete, "lexical search must be complete");
+    observed
+        .batch
+        .candidates
+        .into_iter()
+        .map(|candidate| {
+            let event = index
+                .event_by_id(candidate.event.event_id)
+                .unwrap()
+                .expect("selected lexical event must hydrate");
+            assert_eq!(
+                event.event_id.digest(),
+                candidate.event.event_identity_digest,
+                "selected lexical event must preserve its exact identity"
+            );
+            event
+        })
+        .collect()
+}
 
 fn daemon_args() -> DaemonRunArgs {
     DaemonRunArgs {
@@ -434,11 +469,8 @@ fn notification_failure_cannot_revoke_a_ready_searchable_core_publication() {
     )
     .unwrap();
     let pinned_generation = refresh_off.pin.generation_id().to_owned();
-    let hits = refresh_off
-        .pin
-        .into_index()
-        .search_event_candidates(READINESS_QUERY, 10)
-        .unwrap();
+    let index = refresh_off.pin.into_index();
+    let hits = complete_lexical_candidates(&index, READINESS_QUERY, 10);
     let published_generation = core_job["published_generation"]
         .as_str()
         .expect("published generation");
@@ -451,7 +483,7 @@ fn notification_failure_cannot_revoke_a_ready_searchable_core_publication() {
     assert_eq!(pinned_generation, published_generation);
     assert_eq!(hits.len(), 1);
     assert_eq!(
-        hits[0].event.provider_session_id.as_deref(),
+        hits[0].provider_session_id.as_deref(),
         Some("readiness-session")
     );
 

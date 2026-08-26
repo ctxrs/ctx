@@ -1,21 +1,22 @@
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use ctx_history_index_query::{EventSearchFilters, VerifiedIndex};
+use ctx_history_index_query::{CompiledSearchFilter, EventSearchFilters, VerifiedIndex};
 use serde_json::Value;
 
 use crate::generation::PinnedGenerationRead;
-use crate::presentation::presentations_for_search_hits;
-use crate::search::{collect_search_hits_observed, ObservedSearchExecutionError};
+use crate::presentation::hydrate_ranked_search_collection;
+use crate::search::{
+    collect_search_hits_observed, search_filters_with_refs, ObservedSearchExecutionError,
+};
 use crate::{
     normalize_search_request, reference_needs_retained_peer, render_search_json,
-    resolve_search_backend, search_filters_with_refs, validate_search_request,
-    ActiveSessionExclusion, CompactPresentationProjection, CompactRefResolver, GenerationReadError,
-    GenerationReadPort, GenerationReadReceipt, GenerationReadRequest, GenerationReadTarget,
-    HistorySemanticPort, NormalizedSearchQuery, RetainedPeerRead, SearchCollection,
-    SearchExecutionError, SearchExecutionResult, SearchFailurePhase, SearchJsonInput, SearchPolicy,
-    SearchPresentation, SearchRenderMetrics, SearchRequest, SearchResultCommands,
-    SearchWorkReceipt,
+    resolve_search_backend, validate_search_request, ActiveSessionExclusion,
+    CompactPresentationProjection, CompactRefResolver, GenerationReadError, GenerationReadPort,
+    GenerationReadReceipt, GenerationReadRequest, GenerationReadTarget, HistorySemanticPort,
+    NormalizedSearchQuery, RetainedPeerRead, SearchCollection, SearchExecutionError,
+    SearchExecutionResult, SearchFailurePhase, SearchJsonInput, SearchPolicy, SearchPresentation,
+    SearchRenderMetrics, SearchRequest, SearchResultCommands, SearchWorkReceipt,
 };
 
 /// Query implementation contract for one caller-supplied, already-verified
@@ -57,22 +58,31 @@ impl<'index> PinnedHistoryQuery<'index> {
                         SearchFailurePhase::QueryPreparation,
                     )
                 })?;
-        let collection = collect_search_hits_observed(
+        let compiled_filter = CompiledSearchFilter::compile(filters.clone()).map_err(|error| {
+            ObservedSearchExecutionError::new(
+                error.into(),
+                SearchWorkReceipt::default(),
+                SearchFailurePhase::QueryPreparation,
+            )
+        })?;
+        let ranked_collection = collect_search_hits_observed(
             &request,
             self.index,
-            &filters,
+            &compiled_filter,
             policy.semantic,
             semantic_port,
         )?;
-        let presentations = presentations_for_search_hits(
+        let work = ranked_collection.work;
+        let (collection, presentations) = hydrate_ranked_search_collection(
             self.index,
-            &collection.result_window.hits,
+            ranked_collection,
             &NormalizedSearchQuery::from_request(&request),
+            &compiled_filter,
         )
         .map_err(|error| {
             ObservedSearchExecutionError::new(
                 error.into(),
-                collection.work,
+                work,
                 SearchFailurePhase::ResultProjection,
             )
         })?;
@@ -236,19 +246,6 @@ pub struct SearchApplicationReadModelInput<'input> {
     pub semantic_fallback_code: Option<&'input str>,
     pub semantic_fallback_detail: Option<&'input str>,
     pub metrics: SearchRenderMetrics<'input>,
-}
-
-pub fn execute_search<Generation, Semantic>(
-    request: SearchApplicationRequest,
-    generation_port: &mut Generation,
-    semantic_port: &Semantic,
-) -> std::result::Result<SearchApplicationResult, SearchApplicationError<Generation::Error>>
-where
-    Generation: GenerationReadPort,
-    Semantic: HistorySemanticPort,
-{
-    execute_search_observed(request, generation_port, semantic_port)
-        .map_err(ObservedSearchApplicationError::into_error)
 }
 
 pub fn execute_search_observed<Generation, Semantic>(

@@ -237,7 +237,7 @@ pub(super) fn refresh_all_provider_sources_route_local_with_reconciliation(
                         ExactMemberFallbackRequired.to_string(),
                     ));
                 }
-                let route_results = provider_route_results(
+                let mut route_results = provider_route_results(
                     ProviderPublicationFacts {
                         selected_route_ids: &context
                             .selected_route_ids()
@@ -254,6 +254,13 @@ pub(super) fn refresh_all_provider_sources_route_local_with_reconciliation(
                     &expected_selected_route_ids,
                 )
                 .map_err(|error| IndexError::PublicationMetadata(format!("{error:#}")))?;
+                let committed_rejection_diagnostics =
+                    publication::preserve_carried_rejection_diagnostics(
+                    &mut route_results,
+                    context.snapshot(),
+                    retained_generation.as_ref(),
+                )
+                    .map_err(|error| IndexError::PublicationMetadata(format!("{error:#}")))?;
                 let current = SourceBackedRefreshCurrent::from_sources(
                     context.snapshot().sources(),
                     context.removed_source_count(),
@@ -321,8 +328,11 @@ pub(super) fn refresh_all_provider_sources_route_local_with_reconciliation(
                     &scope,
                     previous_generation.as_deref(),
                     &publication,
-                    route_observations,
-                    context.route_controls().clone(),
+                    publication::PublicationMetadataEvidence {
+                        committed_rejection_diagnostics: &committed_rejection_diagnostics,
+                        route_observations,
+                        route_controls: context.route_controls().clone(),
+                    },
                 )
                 .map_err(|error| IndexError::PublicationMetadata(format!("{error:#}")))
             },
@@ -373,7 +383,7 @@ pub(super) fn refresh_all_provider_sources_route_local_with_reconciliation(
             "capture-owned source refresh receipt does not match its retained generation cardinalities"
         );
     }
-    let route_results = provider_route_results(
+    let mut route_results = provider_route_results(
         ProviderPublicationFacts {
             selected_route_ids: &receipt.selected_route_ids,
             successful_route_outcomes: &receipt.successful_route_outcomes,
@@ -385,6 +395,11 @@ pub(super) fn refresh_all_provider_sources_route_local_with_reconciliation(
         },
         &registry_failures,
         &expected_selected_route_ids,
+    )?;
+    let committed_rejection_diagnostics = publication::preserve_carried_rejection_diagnostics(
+        &mut route_results,
+        receipt.commit.snapshot(),
+        retained_generation.as_ref(),
     )?;
     let (published_explicit_source_catalog, catalog_route_bindings) =
         reconcile_published_catalog_witness(
@@ -460,8 +475,11 @@ pub(super) fn refresh_all_provider_sources_route_local_with_reconciliation(
             &scope,
             previous_generation.as_deref(),
             &publication,
-            route_observations,
-            receipt.route_controls.clone(),
+            publication::PublicationMetadataEvidence {
+                committed_rejection_diagnostics: &committed_rejection_diagnostics,
+                route_observations,
+                route_controls: receipt.route_controls.clone(),
+            },
         )?;
         let writer = GenerationWriter::open(index_root, WriterOptions::default())?
             .into_writer()

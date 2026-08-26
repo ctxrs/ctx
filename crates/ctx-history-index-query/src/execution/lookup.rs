@@ -215,6 +215,58 @@ impl VerifiedIndex {
         Ok(Some(ordered))
     }
 
+    /// Returns a complete requested-order mapping to thin Search references.
+    /// Stored Core JSON is not decoded; final winners are hydrated exactly
+    /// once by the read application after ranking and diversification.
+    pub fn ranked_event_refs_by_ids_if_bounded(
+        &self,
+        event_ids: &[Uuid],
+        maximum_events: usize,
+    ) -> Result<Option<Vec<RankedEventRef>>> {
+        if event_ids.len() > maximum_events {
+            return Ok(None);
+        }
+        if event_ids.is_empty() {
+            return Ok(Some(Vec::new()));
+        }
+        let fields = fields_from_schema(self.searcher.schema())?;
+        let mut requested = BTreeSet::new();
+        for event_id in event_ids {
+            if !requested.insert(*event_id) {
+                return Err(IndexError::DuplicateEventIdentity(event_id.to_string()));
+            }
+        }
+        let query = TermSetQuery::new(
+            requested
+                .iter()
+                .map(|event_id| Term::from_field_text(fields.event_id, &event_id.to_string()))
+                .collect::<Vec<_>>(),
+        );
+        let addresses = self.searcher.search(&query, &DocSetCollector)?;
+        let mut refs = BTreeMap::new();
+        for address in addresses {
+            let (event, _) = ranked_event_ref_at_address(&self.searcher, address, fields)?;
+            if !requested.contains(&event.event_id) {
+                return Err(IndexError::InvalidStoredDocumentField("event_id"));
+            }
+            let event_id = event.event_id;
+            if refs.insert(event_id, event).is_some() {
+                return Err(IndexError::DuplicateEventIdentity(event_id.to_string()));
+            }
+        }
+        if refs.len() != requested.len() {
+            return Ok(None);
+        }
+        let mut ordered = Vec::with_capacity(event_ids.len());
+        for event_id in event_ids {
+            let Some(event) = refs.remove(event_id) else {
+                return Ok(None);
+            };
+            ordered.push(event);
+        }
+        Ok(Some(ordered))
+    }
+
     /// Returns a complete, requested-order Core mapping when the batch is
     /// within the caller's count and stored-Core byte budgets and every event
     /// is present.
@@ -588,6 +640,27 @@ impl VerifiedIndex {
     /// lookup from an ambiguous one.
     pub fn events_by_id_prefix(&self, prefix: &str) -> Result<Vec<EventRecord>> {
         let fields = fields_from_schema(self.searcher.schema())?;
+        self.event_id_prefix_hits(prefix)?
+            .into_iter()
+            .map(|(event_id, address)| {
+                let event = stored_event_record(&self.searcher, address, fields)?;
+                if event.event_id.as_uuid() != event_id {
+                    return Err(IndexError::InvalidStoredDocumentField("event_id"));
+                }
+                Ok(event)
+            })
+            .collect()
+    }
+
+    /// Returns at most two indexed event UUID-prefix matches without loading
+    /// stored Core. This is sufficient for compact-reference resolution.
+    pub fn event_ids_by_id_prefix(&self, prefix: &str) -> Result<Vec<Uuid>> {
+        self.event_id_prefix_hits(prefix)
+            .map(|hits| hits.into_iter().map(|(event_id, _)| event_id).collect())
+    }
+
+    fn event_id_prefix_hits(&self, prefix: &str) -> Result<Vec<(Uuid, DocAddress)>> {
+        let fields = fields_from_schema(self.searcher.schema())?;
         let query = RegexQuery::from_pattern(
             &format!("{}.*", canonical_uuid_prefix(prefix)?),
             fields.event_id,
@@ -613,12 +686,20 @@ impl VerifiedIndex {
         });
         type PrefixHit = (Reverse<(u64, u64)>, DocAddress);
         let hits: Vec<PrefixHit> = self.searcher.search(&query, &collector)?;
-        let mut events = hits
+        let mut hits = hits
             .into_iter()
-            .map(|(_, address)| stored_event_record(&self.searcher, address, fields))
-            .collect::<Result<Vec<_>>>()?;
-        events.sort_by_key(|event| event.event_id.as_uuid());
-        Ok(events)
+            .map(|(Reverse((high, low)), address)| {
+                (
+                    Uuid::from_u128((u128::from(high) << 64) | u128::from(low)),
+                    address,
+                )
+            })
+            .collect::<Vec<_>>();
+        hits.sort_by_key(|(event_id, _)| *event_id);
+        if hits.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+            return Err(IndexError::DuplicateEventIdentity(hits[0].0.to_string()));
+        }
+        Ok(hits)
     }
 
     pub fn session_by_id(&self, session_id: Uuid) -> Result<Option<SessionRecord>> {
@@ -628,12 +709,29 @@ impl VerifiedIndex {
     /// Returns at most two UUID-prefix matches, enough to distinguish a unique
     /// lookup from an ambiguous one.
     pub fn sessions_by_id_prefix(&self, prefix: &str) -> Result<Vec<SessionRecord>> {
+        let session_ids = self.session_ids_by_id_prefix(prefix)?;
+        let mut sessions = Vec::with_capacity(session_ids.len());
+        for session_id in session_ids {
+            let Some(session) = self.session_record_by_id(session_id)? else {
+                return Err(IndexError::InvalidStoredDocumentField("session_id"));
+            };
+            sessions.push(session);
+        }
+        Ok(sessions)
+    }
+
+    /// Returns at most two indexed session UUID-prefix matches without
+    /// loading stored Core. This is sufficient for compact-reference
+    /// resolution and preserves UUID-ascending ambiguity order.
+    pub fn session_ids_by_id_prefix(&self, prefix: &str) -> Result<Vec<Uuid>> {
         let fields = fields_from_schema(self.searcher.schema())?;
         let query = RegexQuery::from_pattern(
             &format!("{}.*", canonical_uuid_prefix(prefix)?),
             fields.session_id,
         )?;
-        self.session_records_for_ambiguity_query(&query)
+        Ok(self
+            .searcher
+            .search(&query, &SessionIdCollector::new(ID_PREFIX_MATCH_LIMIT))?)
     }
 
     /// Returns at most two sessions for an exact provider-native session key.

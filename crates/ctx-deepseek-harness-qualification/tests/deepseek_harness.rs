@@ -1,5 +1,7 @@
 use assert_cmd::cargo::CommandCargoExt as _;
-use ctx_history_index_query::VerifiedIndex;
+use ctx_history_index_query::{
+    CompiledSearchFilter, EventSearchCandidate, LexicalExecution, LexicalMode, VerifiedIndex,
+};
 use serde_json::{json, Value};
 use std::{
     ffi::OsStr,
@@ -606,6 +608,29 @@ fn one_matching_result<'a>(search: &'a Value, query: &str) -> &'a Value {
     result
 }
 
+fn complete_lexical_candidates(
+    index: &VerifiedIndex,
+    query: &str,
+    limit: usize,
+) -> Vec<EventSearchCandidate> {
+    let filter = CompiledSearchFilter::compile(Default::default()).unwrap();
+    let queries = [query];
+    let batch = index
+        .execute_lexical(LexicalExecution::new(
+            LexicalMode::Search(&queries),
+            &filter,
+            limit,
+        ))
+        .unwrap()
+        .batch;
+    assert!(
+        batch.complete,
+        "lexical execution must complete: {:?}",
+        batch.exhaustion
+    );
+    batch.candidates.into_iter().map(Into::into).collect()
+}
+
 fn assert_citation(result: &Value) {
     let citations = result["citations"].as_array().expect("result citations");
     assert_eq!(citations.len(), 1, "{result:#}");
@@ -1111,13 +1136,11 @@ fn complete_tail_body_is_searchable_and_tantivy_stores_only_core_record() {
 
     let lexical = harness.data_root.join("search/lexical");
     let index = VerifiedIndex::open(&lexical).expect("open verified lexical generation");
-    let hits = index
-        .search_event_candidates(tail, 10)
-        .expect("search tail term in Tantivy");
+    let hits = complete_lexical_candidates(&index, tail, 10);
     assert_eq!(hits.len(), 1);
     let expected_event_id = hits[0].event.event_id;
     let stored = index
-        .core_event_by_id(expected_event_id.as_uuid())
+        .core_event_by_id(expected_event_id)
         .expect("load tail record from stored Core")
         .expect("tail record exists in stored Core");
     assert_eq!(

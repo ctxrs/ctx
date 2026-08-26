@@ -1,5 +1,7 @@
 use super::*;
 
+mod core_match;
+
 pub(super) const TRANSCRIPT_EVENT_TYPES: &[&str] = &["message", "summary"];
 pub(super) const CALL_EVENT_TYPES: &[&str] = &["tool_call", "command_started"];
 pub(super) const OUTPUT_EVENT_TYPES: &[&str] =
@@ -12,9 +14,10 @@ pub(super) struct CanonicalAnyOfTerms {
     pub(super) terms: Vec<Term>,
 }
 
-/// Exact metadata and bounded stored-Core predicates for manual lexical work.
+/// Backend adapter derived from the canonical `CompiledSearchFilter` for one
+/// metered manual lexical execution.
 #[derive(Debug, Clone)]
-pub(super) struct ManualFilterPlan {
+pub(super) struct LexicalFilterAdapter {
     pub(super) required: Vec<CanonicalAnyOfTerms>,
     pub(super) prohibited: Vec<CanonicalAnyOfTerms>,
     pub(super) since_unix_ms: Option<i64>,
@@ -114,11 +117,12 @@ pub(super) fn validate_manual_filter_inputs(filters: &EventSearchFilters) -> Res
 /// Compiles the generic filter contract into sorted, deduplicated exact term
 /// groups. Every caller-controlled byte and every exact term is charged before
 /// it is retained. `None` means the meter rejected the next operation.
-pub(super) fn compile_manual_filter_plan(
-    filters: &EventSearchFilters,
+pub(super) fn compile_lexical_filter_adapter(
+    compiled: &CompiledSearchFilter,
     fields: Fields,
     meter: &mut LexicalWorkMeter,
-) -> Result<Option<ManualFilterPlan>> {
+) -> Result<Option<LexicalFilterAdapter>> {
+    let filters = compiled.filters();
     let mut required = Vec::new();
     let mut prohibited = Vec::new();
     let mut match_none = false;
@@ -321,7 +325,7 @@ pub(super) fn compile_manual_filter_plan(
     required.dedup();
     prohibited.sort();
     prohibited.dedup();
-    Ok(Some(ManualFilterPlan {
+    Ok(Some(LexicalFilterAdapter {
         required,
         prohibited,
         since_unix_ms: filters.since_unix_ms,
@@ -452,9 +456,10 @@ fn validated_substring_filter(
 pub(super) fn filtered_event_query(
     body_query: Box<dyn Query>,
     source_identity_query: Option<Box<dyn Query>>,
-    filters: &EventSearchFilters,
+    compiled: &CompiledSearchFilter,
     fields: Fields,
 ) -> Result<Box<dyn Query>> {
+    let filters = compiled.filters();
     let mut clauses = vec![(Occur::Must, body_query)];
     add_filter_clause(
         &mut clauses,

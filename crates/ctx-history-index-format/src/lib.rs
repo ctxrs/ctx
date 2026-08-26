@@ -63,9 +63,9 @@ pub use ctx_history_capture_model::provider_source_config_digest;
 #[doc(hidden)]
 pub use index_document::{
     core_content_bytes, EventRangeOrderKey, IndexDocument, SemanticEventOrderKey,
-    SessionAuthorityKey, SessionEventOrderKey, SourceEventOrderKey, EVENT_RANGE_ORDER_KEY_LEN,
-    SEMANTIC_EVENT_ORDER_KEY_LEN, SESSION_AUTHORITY_KEY_LEN, SESSION_EVENT_ORDER_KEY_LEN,
-    SOURCE_EVENT_ORDER_KEY_LEN, SOURCE_EVENT_ORDER_SIZE_SUFFIX_LEN,
+    SessionAuthorityClaims, SessionAuthorityKey, SessionEventOrderKey, SourceEventOrderKey,
+    EVENT_RANGE_ORDER_KEY_LEN, SEMANTIC_EVENT_ORDER_KEY_LEN, SESSION_AUTHORITY_KEY_LEN,
+    SESSION_EVENT_ORDER_KEY_LEN, SOURCE_EVENT_ORDER_KEY_LEN, SOURCE_EVENT_ORDER_SIZE_SUFFIX_LEN,
     SOURCE_EVENT_ORDER_SOURCE_PREFIX_LEN,
 };
 #[doc(hidden)]

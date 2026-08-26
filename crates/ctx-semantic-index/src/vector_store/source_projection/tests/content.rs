@@ -41,7 +41,8 @@ fn control_filter_and_full_tail_remain_generation_exact() -> Result<()> {
     };
     let mut query = vec![0.0; SEMANTIC_DIMENSIONS];
     query[0] = 1.0;
-    let search = scan_exact_generation(&pin, &query, 1, None, Instant::now())?;
+    let search =
+        scan_exact_generation(&pin, std::slice::from_ref(&query), 1, None, Instant::now())?;
     assert_eq!(search.hits[0].event_id, tail_event);
     for directory in [
         fixture.semantic_path.clone(),

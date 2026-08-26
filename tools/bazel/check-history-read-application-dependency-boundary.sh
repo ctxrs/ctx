@@ -161,7 +161,7 @@ if grep -REn --include='*.rs' \
   exit 1
 fi
 for authority in \
-  execute_search \
+  'execute_search(_observed)?' \
   execute_locate \
   execute_show_event \
   execute_show_session_page \

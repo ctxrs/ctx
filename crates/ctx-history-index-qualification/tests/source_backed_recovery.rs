@@ -22,7 +22,8 @@ use ctx_history_core::{
     SourceObservation, TypedKey, CORE_ACTIVITY_REVISION,
 };
 use ctx_history_index::{
-    CommitReceipt, GenerationWriter, IndexError, VerifiedIndex, WriterOptions,
+    CommitReceipt, CompiledSearchFilter, GenerationWriter, IndexError, LexicalExecution,
+    LexicalMode, VerifiedIndex, WriterOptions,
 };
 use tantivy::{store::Compressor, Index};
 use tempfile::{tempdir, TempDir};
@@ -1241,18 +1242,38 @@ fn assert_generation(root: &Path, generation_id: &str, present: &str, absent: &s
     assert_reader_terms(&index, present, absent);
 }
 
+fn complete_lexical_candidates(
+    index: &VerifiedIndex,
+    query: &str,
+    limit: usize,
+) -> Vec<ctx_history_index::EventSearchCandidate> {
+    let filter = CompiledSearchFilter::compile(Default::default()).unwrap();
+    let queries = [query];
+    let batch = index
+        .execute_lexical(LexicalExecution::new(
+            LexicalMode::Search(&queries),
+            &filter,
+            limit,
+        ))
+        .unwrap()
+        .batch;
+    assert!(
+        batch.complete,
+        "lexical execution must complete: {:?}",
+        batch.exhaustion
+    );
+    batch.candidates.into_iter().map(Into::into).collect()
+}
+
 fn assert_reader_terms(index: &VerifiedIndex, present: &str, absent: &str) {
     assert_eq!(
-        index.search_event_candidates(present, 10).unwrap().len(),
+        complete_lexical_candidates(index, present, 10).len(),
         1,
         "expected {present:?} in generation {}",
         index.generation_id()
     );
     assert!(
-        index
-            .search_event_candidates(absent, 10)
-            .unwrap()
-            .is_empty(),
+        complete_lexical_candidates(index, absent, 10).is_empty(),
         "did not expect {absent:?} in generation {}",
         index.generation_id()
     );

@@ -169,11 +169,13 @@ fn successful_codex_route_derives_rejected_records_from_committed_core_sources()
     assert_eq!(result.rejected_record_total, 1);
     assert_eq!(publication.current.rejected_records, 1);
     assert_eq!(
-        VerifiedIndex::open(&index_root)
-            .unwrap()
-            .search_event_candidates("validpeerrecordmarker", 10)
-            .unwrap()
-            .len(),
+        complete_lexical_candidates(
+            &VerifiedIndex::open(&index_root).unwrap(),
+            "validpeerrecordmarker",
+            10,
+        )
+        .unwrap()
+        .len(),
         1
     );
 }
@@ -336,7 +338,9 @@ fn codex_nested_root_advisory_is_admitted_from_each_childs_own_bytes() {
         great_grandchild_marker,
     ] {
         assert_eq!(
-            verified.search_event_candidates(marker, 10).unwrap().len(),
+            complete_lexical_candidates(&verified, marker, 10)
+                .unwrap()
+                .len(),
             1
         );
     }
@@ -468,8 +472,7 @@ fn codex_deep_root_advisory_chain_has_exact_linear_cardinality() {
         SOURCES
     );
     assert_eq!(
-        verified
-            .search_event_candidates(deepest_marker, 10)
+        complete_lexical_candidates(&verified, deepest_marker, 10)
             .unwrap()
             .len(),
         1
@@ -577,8 +580,7 @@ fn registered_codex_parent_and_exact_subdir_share_route_scoped_ownership() {
     let verified = VerifiedIndex::open(&index_root).unwrap();
     assert!(!verified.manifest().sources.is_empty());
     assert_eq!(
-        verified
-            .search_event_candidates("automaticrootmarker", 10)
+        complete_lexical_candidates(&verified, "automaticrootmarker", 10)
             .unwrap()
             .len(),
         1
@@ -586,8 +588,7 @@ fn registered_codex_parent_and_exact_subdir_share_route_scoped_ownership() {
     // The parent automatic route retains its existing exact source ownership;
     // the successful exact import owns no duplicate sources.
     assert_eq!(
-        verified
-            .search_event_candidates("explicitrootmarker", 10)
+        complete_lexical_candidates(&verified, "explicitrootmarker", 10)
             .unwrap()
             .len(),
         1
@@ -623,11 +624,13 @@ fn registered_codex_parent_and_exact_subdir_share_route_scoped_ownership() {
         0
     );
     assert_eq!(
-        VerifiedIndex::open(&index_root)
-            .unwrap()
-            .search_event_candidates("explicitappendafterimportmarker", 10)
-            .unwrap()
-            .len(),
+        complete_lexical_candidates(
+            &VerifiedIndex::open(&index_root).unwrap(),
+            "explicitappendafterimportmarker",
+            10,
+        )
+        .unwrap()
+        .len(),
         1
     );
 }

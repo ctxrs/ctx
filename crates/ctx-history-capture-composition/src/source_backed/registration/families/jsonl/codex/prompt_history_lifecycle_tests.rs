@@ -27,7 +27,7 @@ use crate::provider::source_backed::{
     refresh_source_backed_generation, SourceBackedProviderRegistry, SourceBackedRoute,
     SourceBackedSelectorAuthority, SourceBackedSourceFailureClass,
 };
-use crate::test_support_paths::tempdir;
+use crate::test_support_paths::{complete_lexical_events, tempdir};
 use crate::{
     ProviderCatalogSupport, ProviderImportSupport, ProviderSource, ProviderSourceKind,
     ProviderSourceStatus,
@@ -189,16 +189,10 @@ fn active_source_family_contract_prompt_history_rejects_scanner_leaf_open_same_l
     let retained = VerifiedIndex::open(&index_root).unwrap();
     assert_eq!(retained.document_count(), 1);
     assert_eq!(
-        retained
-            .search_event_candidates("retained seed", 8)
-            .unwrap()
-            .len(),
+        complete_lexical_events(&retained, "retained seed", Default::default(), 8).len(),
         1
     );
-    assert!(retained
-        .search_event_candidates("descriptor", 8)
-        .unwrap()
-        .is_empty());
+    assert!(complete_lexical_events(&retained, "descriptor", Default::default(), 8).is_empty());
 }
 
 #[test]
@@ -444,7 +438,7 @@ fn active_source_family_contract_prompt_history_preserves_append_noop_rewrite_an
         refresh_source_backed_generation(&index_root, &registry, WriterOptions::default()).unwrap();
     let cold_id = cold.commit.generation_id;
     let index = VerifiedIndex::open(&index_root).unwrap();
-    let one = index.search_event_candidates("one", 8).unwrap();
+    let one = complete_lexical_events(&index, "one", Default::default(), 8);
     assert_eq!(one.len(), 1);
     let first_event_id = one[0].event.event_id;
 
@@ -455,7 +449,10 @@ fn active_source_family_contract_prompt_history_preserves_append_noop_rewrite_an
     let appended_id = appended.commit.generation_id;
     let index = VerifiedIndex::open(&index_root).unwrap();
     assert_eq!(index.document_count(), 2);
-    assert_eq!(index.search_event_candidates("two", 8).unwrap().len(), 1);
+    assert_eq!(
+        complete_lexical_events(&index, "two", Default::default(), 8).len(),
+        1
+    );
 
     let unchanged =
         refresh_source_backed_generation(&index_root, &registry, WriterOptions::default()).unwrap();
@@ -471,7 +468,7 @@ fn active_source_family_contract_prompt_history_preserves_append_noop_rewrite_an
     refresh_source_backed_generation(&index_root, &registry, WriterOptions::default()).unwrap();
     let index = VerifiedIndex::open(&index_root).unwrap();
     assert_eq!(index.document_count(), 2);
-    let rewritten = index.search_event_candidates("rewritten", 8).unwrap();
+    let rewritten = complete_lexical_events(&index, "rewritten", Default::default(), 8);
     assert_eq!(rewritten.len(), 1);
     assert_eq!(rewritten[0].event.event_id, first_event_id);
 
@@ -479,17 +476,19 @@ fn active_source_family_contract_prompt_history_preserves_append_noop_rewrite_an
     tail.pop();
     append(&history, &tail);
     refresh_source_backed_generation(&index_root, &registry, WriterOptions::default()).unwrap();
-    assert!(VerifiedIndex::open(&index_root)
-        .unwrap()
-        .search_event_candidates("deferred", 8)
-        .unwrap()
-        .is_empty());
+    assert!(complete_lexical_events(
+        &VerifiedIndex::open(&index_root).unwrap(),
+        "deferred",
+        Default::default(),
+        8,
+    )
+    .is_empty());
     append(&history, b"\n");
     refresh_source_backed_generation(&index_root, &registry, WriterOptions::default()).unwrap();
     let index = VerifiedIndex::open(&index_root).unwrap();
     assert_eq!(index.document_count(), 3);
     assert_eq!(
-        index.search_event_candidates("deferred", 8).unwrap().len(),
+        complete_lexical_events(&index, "deferred", Default::default(), 8).len(),
         1
     );
 }

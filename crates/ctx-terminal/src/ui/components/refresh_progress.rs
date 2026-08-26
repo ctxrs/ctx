@@ -467,9 +467,9 @@ fn shared_refresh_progress(
         },
     );
 
-    let sessions = format_count_u64(snapshot.progress.processed_sessions);
-    let messages = format_count_u64(snapshot.progress.processed_messages);
-    let tool_calls = format_count_u64(snapshot.progress.processed_tool_calls);
+    let sessions = format_count(snapshot.progress.processed_sessions);
+    let messages = format_count(snapshot.progress.processed_messages);
+    let tool_calls = format_count(snapshot.progress.processed_tool_calls);
     let scanned = format_bytes(snapshot.progress.processed_bytes);
     let elapsed = snapshot
         .progress
@@ -570,9 +570,9 @@ fn setup_live_refresh_progress(
         },
     );
 
-    let sessions = format_count_u64(snapshot.progress.processed_sessions);
-    let messages = format_count_u64(snapshot.progress.processed_messages);
-    let tool_calls = format_count_u64(snapshot.progress.processed_tool_calls);
+    let sessions = format_count(snapshot.progress.processed_sessions);
+    let messages = format_count(snapshot.progress.processed_messages);
+    let tool_calls = format_count(snapshot.progress.processed_tool_calls);
     let scanned = format_bytes(snapshot.progress.processed_bytes);
     let elapsed = snapshot
         .progress
@@ -755,8 +755,8 @@ fn source_count_text(snapshot: &RefreshProgressSnapshot) -> String {
     if snapshot.total_sources_known {
         format!(
             "{} / {}",
-            format_count_u64(snapshot.progress.completed_sources),
-            format_count_u64(
+            format_count(snapshot.progress.completed_sources),
+            format_count(
                 snapshot
                     .progress
                     .total_sources
@@ -802,12 +802,6 @@ fn bounded_dynamic_text(value: &str) -> String {
         end -= 1;
     }
     format!("{}{}", &value[..end], SUFFIX)
-}
-
-fn format_count_u64(value: u64) -> String {
-    usize::try_from(value)
-        .map(format_count)
-        .unwrap_or_else(|_| value.to_string())
 }
 
 #[cfg(test)]

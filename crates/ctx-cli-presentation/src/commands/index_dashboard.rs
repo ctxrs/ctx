@@ -159,16 +159,13 @@ fn render_searchable_fields(readiness: &Value, context: &RenderContext) -> Docum
         values.push(("Processed", format_bytes(bytes)));
     }
     if let Some(sources) = u64_at(readiness, &["lexical", "indexed_sources"]) {
-        values.push(("Sources", format_count_u64(sources)));
+        values.push(("Sources", format_count(sources)));
     }
     if let Some(sessions) = u64_at(readiness, &["lexical", "indexed_sessions"]) {
-        values.push(("Sessions", format_count_u64(sessions)));
+        values.push(("Sessions", format_count(sessions)));
     }
     if let Some(records) = u64_at(readiness, &["lexical", "indexed_items"]) {
-        values.push((
-            "Records",
-            format!("{} searchable", format_count_u64(records)),
-        ));
+        values.push(("Records", format!("{} searchable", format_count(records))));
     }
     let field_values = values
         .iter()
@@ -181,7 +178,7 @@ fn render_active(readiness: &Value, context: &RenderContext) -> Document {
     let mut document = render_refresh_progress(readiness, context);
     let current = if bool_at(readiness, &["initialized"]) {
         u64_at(readiness, &["lexical", "indexed_items"])
-            .map(|count| format!("{} searchable records", format_count_u64(count)))
+            .map(|count| format!("{} searchable records", format_count(count)))
             .unwrap_or_else(|| "searchable generation published".to_owned())
     } else {
         "not published".to_owned()
@@ -248,11 +245,11 @@ fn render_semantic(readiness: &Value, context: &RenderContext) -> Document {
         .map(|total| {
             format!(
                 "{} / {} records",
-                format_count_u64(embedded),
-                format_count_u64(total)
+                format_count(embedded),
+                format_count(total)
             )
         })
-        .unwrap_or_else(|| format!("{} records", format_count_u64(embedded)));
+        .unwrap_or_else(|| format!("{} records", format_count(embedded)));
     document.push_blank();
     document.append(fields(context, &[Field::new("Embedded", &embedded_value)]));
     document
@@ -337,26 +334,6 @@ fn append_separated(document: &mut Document, other: Document) {
 
 fn humanize(value: &str) -> String {
     value.replace('_', " ")
-}
-
-fn format_count_u64(value: u64) -> String {
-    if let Ok(value) = usize::try_from(value) {
-        return format_count(value);
-    }
-
-    let digits = value.to_string();
-    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
-    let first_group_len = digits.len() % 3;
-    for (index, ch) in digits.chars().enumerate() {
-        if index > 0
-            && (index == first_group_len
-                || (index > first_group_len && (index - first_group_len).is_multiple_of(3)))
-        {
-            out.push(',');
-        }
-        out.push(ch);
-    }
-    out
 }
 
 fn value_at<'a>(value: &'a Value, path: &[&str]) -> Option<&'a Value> {
@@ -465,6 +442,8 @@ mod tests {
     fn searchable_generation_and_refresh_progress_are_separate_truths() {
         let rendered = render_dashboard(&readiness(), &context(80), true).render_plain();
         assert!(rendered.starts_with("✓ Your history is searchable"));
+        assert!(rendered.contains("3,486"));
+        assert!(rendered.contains("854,466 searchable"));
         assert!(rendered.contains("Refresh"));
         assert!(rendered.contains("Agent histories  OpenCode"));
         assert!(rendered.contains("Sessions         18"));
@@ -547,10 +526,5 @@ mod tests {
         let styled = document.render(&context);
         assert!(styled.contains("\u{1b}["));
         assert_eq!(strip_ansi(&styled), document.render_plain());
-    }
-
-    #[test]
-    fn count_formatting_preserves_the_full_u64_domain() {
-        assert_eq!(format_count_u64(u64::MAX), "18,446,744,073,709,551,615");
     }
 }
