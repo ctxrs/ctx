@@ -531,9 +531,9 @@ fn protocol_mismatch_is_a_distinct_typed_error() {
     std::fs::write(&pro, b"#!/bin/sh\nprintf '{\"protocol_version\":2}\\n'\n").unwrap();
     std::fs::set_permissions(&pro, std::fs::Permissions::from_mode(0o700)).unwrap();
     let error = CompanionBridge::default()
-        .launch_mcp(
+        .launch_cli(
             &InstalledCompanion::new(&pro),
-            McpRequest::new(b"{}\n"),
+            CliRequest::new(Vec::new()),
             &CancellationToken::new(),
         )
         .unwrap_err();
@@ -565,7 +565,8 @@ fn pre_handshake_exit_is_retryable_unavailable_not_protocol_mismatch() {
     assert_eq!(error.code(), "companion_unavailable");
     assert!(error.retryable());
     let document = cli_launch_error_document(&error);
-    assert_eq!(document["details"]["stderr"], "loader diagnostic");
+    assert_eq!(document["details"]["stderr_present"], true);
+    assert!(document["details"].get("stderr").is_none());
     assert_eq!(document["details"]["stderr_truncated"], false);
     assert!(document["details"]
         .get("observed_protocol_version")

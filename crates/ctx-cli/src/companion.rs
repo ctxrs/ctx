@@ -568,8 +568,8 @@ fn cli_launch_error_document(error: &CompanionLaunchError) -> Value {
             stderr,
             stderr_truncated,
         } => json!({
-            "reason": "companion exited before Protocol V3 handshake",
-            "stderr": String::from_utf8_lossy(stderr),
+            "reason": "companion exited before Protocol V4 handshake",
+            "stderr_present": !stderr.is_empty(),
             "stderr_truncated": stderr_truncated,
         }),
         CompanionLaunchError::InvalidLaunch { reason } => json!({"reason": reason}),
