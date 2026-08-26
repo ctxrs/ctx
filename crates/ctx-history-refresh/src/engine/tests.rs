@@ -23,11 +23,41 @@ use ctx_history_core::{
     EventIdentityInput, NativeItemKey, NativeSessionKey, ScannedSourceCounts, SessionIdentityInput,
     SourceAnchor, SourceKey, SourceObservation, TypedKey,
 };
-use ctx_history_index::SourceRouteIdentity;
+use ctx_history_index::{
+    CompiledSearchFilter, EventSearchCandidate, EventSearchFilters, LexicalExecution, LexicalMode,
+    SourceRouteIdentity,
+};
 use ctx_history_refresh_execution::{
     source_backed_requested_route_observations, verify_generation_query_readiness,
     GenerationQueryReadiness,
 };
+
+fn complete_lexical_candidates(
+    index: &VerifiedIndex,
+    natural_text: &str,
+    limit: usize,
+) -> Result<Vec<EventSearchCandidate>> {
+    let alternatives = [natural_text];
+    let filter = CompiledSearchFilter::compile(EventSearchFilters::default())?;
+    let observed = index
+        .execute_lexical(LexicalExecution::new(
+            LexicalMode::Search(&alternatives),
+            &filter,
+            limit,
+        ))
+        .map_err(|failure| failure.error)?;
+    assert!(
+        observed.batch.complete,
+        "lexical test helper requires a complete batch: {:?}",
+        observed.batch.exhaustion
+    );
+    Ok(observed
+        .batch
+        .candidates
+        .into_iter()
+        .map(Into::into)
+        .collect())
+}
 
 #[path = "tests/harness.rs"]
 mod harness;

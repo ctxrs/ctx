@@ -8,7 +8,10 @@ use ctx_history_core::{
     ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceKey, SourceObservation,
     TypedKey, CORE_ACTIVITY_REVISION,
 };
-use ctx_history_index::{GenerationWriter, VerifiedIndex, WriterOptions};
+use ctx_history_index::{
+    CompiledSearchFilter, GenerationWriter, LexicalExecution, LexicalMode, VerifiedIndex,
+    WriterOptions,
+};
 use rusqlite::Connection;
 use serde_json::Value;
 use support::*;
@@ -170,6 +173,24 @@ fn command_output_omits_canaries(label: &str, output: &std::process::Output) {
     assert_bytes_omit_canaries(&format!("{label} stderr"), &output.stderr);
 }
 
+fn complete_lexical_candidates(
+    index: &VerifiedIndex,
+    mode: LexicalMode<'_>,
+    filter: &CompiledSearchFilter,
+    limit: usize,
+) -> Vec<ctx_history_index::EventSearchCandidate> {
+    let batch = index
+        .execute_lexical(LexicalExecution::new(mode, filter, limit))
+        .unwrap()
+        .batch;
+    assert!(
+        batch.complete,
+        "lexical execution must complete: {:?}",
+        batch.exhaustion
+    );
+    batch.candidates.into_iter().map(Into::into).collect()
+}
+
 #[test]
 fn mcp_activity_is_searchable_but_stays_out_of_analytics_usage_and_diagnostics() {
     let temp = tempdir();
@@ -178,14 +199,17 @@ fn mcp_activity_is_searchable_but_stays_out_of_analytics_usage_and_diagnostics()
     let analytics_path = temp.path().join("analytics.jsonl");
     let attributed_event_id = seed_attributed_core(&data_root);
     let verified = VerifiedIndex::open(data_root.join("search/lexical")).unwrap();
+    let filter = CompiledSearchFilter::compile(Default::default()).unwrap();
     for term in [BODY_ORACLE, SERVER_CANARY, TOOL_CANARY] {
-        let candidates = verified.search_event_candidates(term, 10).unwrap();
+        let queries = [term];
+        let candidates =
+            complete_lexical_candidates(&verified, LexicalMode::Search(&queries), &filter, 10);
         assert_eq!(
             candidates.len(),
             1,
             "searchable Core activity did not match {term}"
         );
-        assert_eq!(candidates[0].event.event_id.as_uuid(), attributed_event_id);
+        assert_eq!(candidates[0].event.event_id, attributed_event_id);
     }
     let projected = ctx_history_index::project_body_search(
         verified

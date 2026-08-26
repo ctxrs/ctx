@@ -319,9 +319,7 @@ fn publication_bytes(
     let aggregates = serde_json::to_vec(&manifest.core_record_aggregates).unwrap();
     let source_routes = serde_json::to_vec(manifest.source_routes()).unwrap();
     let route_controls = serde_json::to_vec(&receipt.route_controls).unwrap();
-    let mut records = index
-        .search_event_candidates(marker, 32)
-        .unwrap()
+    let mut records = search_event_candidates(&index, marker, 32)
         .into_iter()
         .filter_map(|candidate| {
             index
@@ -366,10 +364,7 @@ fn assert_publication_bytes_eq(
 }
 
 fn records_matching(index_root: &Path, marker: &str) -> Vec<CoreRecord> {
-    VerifiedIndex::open(index_root)
-        .unwrap()
-        .search_event_candidates(marker, 32)
-        .unwrap()
+    search_event_candidates(&VerifiedIndex::open(index_root).unwrap(), marker, 32)
         .into_iter()
         .map(|candidate| {
             VerifiedIndex::open(index_root)
@@ -395,16 +390,15 @@ fn auggie_record_owned_by_root(index_root: &Path, root_id: &str, marker: &str) -
         .provider_root_source_tokens(&[root_id.to_owned()], &[])
         .unwrap();
     assert_eq!(allowed.len(), 1, "{root_id} must own one Auggie source");
-    let matches = index
-        .search_event_candidates_with_filters(
-            marker,
-            &EventSearchFilters {
-                allowed_source_keys: Some(allowed.clone()),
-                ..EventSearchFilters::default()
-            },
-            16,
-        )
-        .unwrap();
+    let matches = search_event_candidates_with_filters(
+        &index,
+        &[marker],
+        &EventSearchFilters {
+            allowed_source_keys: Some(allowed.clone()),
+            ..EventSearchFilters::default()
+        },
+        16,
+    );
     assert!(
         !matches.is_empty(),
         "{root_id} must own matching Auggie events"

@@ -7,8 +7,77 @@ mod configured_root_moves;
 
 use super::*;
 use ctx_history_capture::{SourceBackedRoute, SourceBackedRouteDriver};
-use ctx_history_index::EventSearchFilters;
+use ctx_history_index::{
+    CompiledSearchFilter, EventRecord, EventSearchCandidate, EventSearchFilters, LexicalExecution,
+    LexicalMode,
+};
 use rusqlite::Connection;
+
+pub(super) trait CompleteLexicalSearch {
+    fn complete_lexical_search(
+        &self,
+        natural_text: &str,
+        limit: usize,
+    ) -> Result<Vec<EventSearchCandidate>>;
+
+    fn complete_filtered_lexical_search(
+        &self,
+        natural_text: &str,
+        filters: &EventSearchFilters,
+        limit: usize,
+    ) -> Result<Vec<EventSearchCandidate>>;
+}
+
+impl CompleteLexicalSearch for VerifiedIndex {
+    fn complete_lexical_search(
+        &self,
+        natural_text: &str,
+        limit: usize,
+    ) -> Result<Vec<EventSearchCandidate>> {
+        self.complete_filtered_lexical_search(natural_text, &EventSearchFilters::default(), limit)
+    }
+
+    fn complete_filtered_lexical_search(
+        &self,
+        natural_text: &str,
+        filters: &EventSearchFilters,
+        limit: usize,
+    ) -> Result<Vec<EventSearchCandidate>> {
+        let filter = CompiledSearchFilter::compile(filters.clone())?;
+        let alternatives = [natural_text];
+        let observed = self
+            .execute_lexical(LexicalExecution::new(
+                LexicalMode::Search(&alternatives),
+                &filter,
+                limit,
+            ))
+            .map_err(|failure| failure.error)?;
+        assert!(
+            observed.batch.complete,
+            "lexical test helper requires a complete batch: {:?}",
+            observed.batch.exhaustion
+        );
+        Ok(observed
+            .batch
+            .candidates
+            .into_iter()
+            .map(Into::into)
+            .collect())
+    }
+}
+
+fn exact_event(index: &VerifiedIndex, candidate: &EventSearchCandidate) -> EventRecord {
+    let event = index
+        .event_by_id(candidate.event.event_id)
+        .unwrap()
+        .expect("lexical winner must exist in its verified generation");
+    assert_eq!(
+        event.event_id.digest(),
+        candidate.event.event_identity_digest,
+        "lexical winner hydration must preserve its exact identity"
+    );
+    event
+}
 
 #[test]
 fn requested_watch_observations_preserve_present_and_missing_routes() {

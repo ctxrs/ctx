@@ -1,5 +1,6 @@
 //! Registry-policy coverage owned by the refresh execution crate.
 
+use super::execution_path::CompleteLexicalSearch;
 use super::*;
 use super::{discovery_fixture, run_report};
 use ctx_history_capture::legacy_automatic_source_backed_route_identity;
@@ -501,7 +502,7 @@ fn mixed_codex_and_unsupported_warp_routes_continue_with_typed_evidence() {
     assert_eq!(verified.manifest().sources.len(), 1);
     assert_eq!(
         verified
-            .search_event_candidates("registrypolicyvalidmarker", 10)
+            .complete_lexical_search("registrypolicyvalidmarker", 10)
             .unwrap()
             .len(),
         1
@@ -595,7 +596,7 @@ fn all_route_execution_preserves_a_healthy_peer_during_source_local_registration
     assert_eq!(verified.manifest().sources.len(), 1);
     assert_eq!(
         verified
-            .search_event_candidates("registrypolicyvalidmarker", 10)
+            .complete_lexical_search("registrypolicyvalidmarker", 10)
             .unwrap()
             .len(),
         1

@@ -11,6 +11,9 @@ use ctx_history_core::CaptureProvider;
 use ctx_history_index::VerifiedIndex;
 use ctx_history_source_discovery::{CursorProbeFragment, CursorTranscriptProbeOutcome};
 
+#[path = "support/lexical.rs"]
+mod lexical_test_support;
+
 const ALPHA_MARKER: &str = "openclaw alpha retained lifecycle marker";
 const BETA_MARKER: &str = "openclaw beta retained lifecycle marker";
 
@@ -53,7 +56,7 @@ fn route_ids(registry: &SourceBackedProviderRegistry) -> Vec<String> {
 
 fn assert_marker(index: &VerifiedIndex, marker: &str) {
     assert!(
-        !index.search_event_candidates(marker, 8).unwrap().is_empty(),
+        !lexical_test_support::search_event_candidates(index, marker, 8).is_empty(),
         "missing indexed marker {marker:?}"
     );
 }

@@ -26,8 +26,9 @@ use ctx_history_core::{
     SourceKey, SourceObservation, TypedKey, CORE_ACTIVITY_REVISION, MAX_CORE_CONTENT_BYTES,
 };
 use ctx_history_index::{
-    EventSearchFilters, GenerationWriter, IndexError, SearchContentScope, SessionRecord,
-    WriterOptions, LEXICAL_QUERY_LIMITS,
+    CompiledSearchFilter, EventSearchCandidate, EventSearchFilters, GenerationWriter, IndexError,
+    LexicalExecution, LexicalMode, SearchContentScope, SessionRecord, VerifiedIndex, WriterOptions,
+    LEXICAL_QUERY_LIMITS,
 };
 use serde_json::{json, Value};
 use tempfile::tempdir;
@@ -109,6 +110,24 @@ fn generation_with_retained_peer(
             retained_peer: ctx_history_read_application::RetainedPeerRead::IfAvailable,
         },
     )
+}
+
+fn complete_lexical_candidates(
+    index: &VerifiedIndex,
+    mode: LexicalMode<'_>,
+    filter: &CompiledSearchFilter,
+    limit: usize,
+) -> Vec<EventSearchCandidate> {
+    let batch = index
+        .execute_lexical(LexicalExecution::new(mode, filter, limit))
+        .unwrap()
+        .batch;
+    assert!(
+        batch.complete,
+        "lexical execution must complete: {:?}",
+        batch.exhaustion
+    );
+    batch.candidates.into_iter().map(Into::into).collect()
 }
 
 #[test]
@@ -497,11 +516,12 @@ fn omitted_and_explicit_all_resolve_to_identical_weighted_retrieval() {
             request.semantic_weight,
             |index, _data_root, queries, filters, candidate_limit| {
                 Ok((
-                    index.search_event_candidates_any_with_filters(
-                        queries,
-                        filters.filters(),
+                    complete_lexical_candidates(
+                        index,
+                        LexicalMode::Search(queries),
+                        filters,
                         candidate_limit,
-                    )?,
+                    ),
                     json!({"fixture": "weighted"}),
                 ))
             },

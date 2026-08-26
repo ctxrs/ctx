@@ -23,9 +23,9 @@ impl ExactHistoryBytes {
 }
 
 fn exact_history_bytes(index: &VerifiedIndex, marker: &str) -> ExactHistoryBytes {
-    let hits = index.search_event_candidates(marker, 8).unwrap();
+    let hits = index.complete_lexical_search(marker, 8).unwrap();
     assert_eq!(hits.len(), 1, "{marker}");
-    let event = &hits[0].event;
+    let event = exact_event(index, &hits[0]);
     assert!(index
         .session_by_id(event.session_id.as_uuid())
         .unwrap()
@@ -293,7 +293,7 @@ fn partial_released_codex_overlap_move_remove_readd_preserves_exact_identity() {
     assert_eq!(tokens, vec![baseline.source_token]);
     assert_eq!(
         readded
-            .search_event_candidates_with_filters(
+            .complete_filtered_lexical_search(
                 marker,
                 &EventSearchFilters {
                     allowed_source_keys: Some(tokens),
@@ -568,11 +568,11 @@ fn removed_standalone_named_codex_root_retains_exact_history_until_readded() {
         moved_exact
     );
     assert!(restarted
-        .search_event_candidates("removedoldpathdecoy", 8)
+        .complete_lexical_search("removedoldpathdecoy", 8)
         .unwrap()
         .is_empty());
     assert!(restarted
-        .search_event_candidates("removedmovedpathdecoy", 8)
+        .complete_lexical_search("removedmovedpathdecoy", 8)
         .unwrap()
         .is_empty());
     drop(restarted);
@@ -617,7 +617,7 @@ fn removed_standalone_named_codex_root_retains_exact_history_until_readded() {
     assert_eq!(source_tokens, vec![moved_exact.source_token.clone()]);
     assert_eq!(
         readded
-            .search_event_candidates_with_filters(
+            .complete_filtered_lexical_search(
                 "standaloneremovalretention",
                 &EventSearchFilters {
                     allowed_source_keys: Some(source_tokens),

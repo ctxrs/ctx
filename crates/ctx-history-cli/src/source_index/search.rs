@@ -939,7 +939,7 @@ fn collect_search_hits_with_port<P: HistorySemanticPort>(
     let plan = ctx_history_read_application::plan_search(planned, policy)
         .map_err(SourceSearchFailure::from)
         .map_err(SourceSearchFailure::into_anyhow)?;
-    let index = VerifiedIndex::open_pinned(&index_root(data_root))?;
+    let index = VerifiedIndex::open_pinned(index_root(data_root))?;
     let mut observation = initial_search_observation();
     let (_, application) = search_existing_generation_with_port(
         plan,

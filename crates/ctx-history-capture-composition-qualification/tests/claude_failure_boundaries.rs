@@ -11,6 +11,9 @@ use ctx_history_capture_composition::{
 use ctx_history_core::CaptureProvider;
 use ctx_history_index::{VerifiedIndex, WriterOptions};
 
+#[path = "support/lexical.rs"]
+mod lexical_test_support;
+
 fn write_session(root: &Path, session: &str, uuid: &str, marker: &str) {
     write_project_session(root, "project", session, uuid, marker);
 }
@@ -88,10 +91,7 @@ fn refresh(
 }
 
 fn marker_count(index: &Path, marker: &str) -> usize {
-    VerifiedIndex::open(index)
-        .unwrap()
-        .search_event_candidates(marker, 16)
-        .unwrap()
+    lexical_test_support::search_event_candidates(&VerifiedIndex::open(index).unwrap(), marker, 16)
         .len()
 }
 
