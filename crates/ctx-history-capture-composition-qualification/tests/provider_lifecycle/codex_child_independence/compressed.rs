@@ -418,7 +418,7 @@ fn exact_compressed_route_rejects_conflicting_concatenated_frame_owners() {
 }
 
 #[test]
-fn automatic_compressed_route_rejects_later_concatenated_frame_owner() {
+fn automatic_compressed_route_fails_without_a_usable_frame_owner() {
     let temp = tempdir().unwrap();
     let sessions = temp.path().join("sessions");
     let index_root = temp.path().join("index");
@@ -450,11 +450,13 @@ fn automatic_compressed_route_rejects_later_concatenated_frame_owner() {
     );
 
     let registry = register_tree(&[&sessions]);
-    let receipt = refresh_source_backed_generation(&index_root, &registry, writer_options())
-        .expect("ambiguous rollout ownership is a leaf-local quarantine");
-    assert!(receipt.failed_routes.is_empty());
-    assert_eq!(receipt.logical_source_failures.total(), 1);
-    assert!(receipt.sources.is_empty());
+    let error = refresh_source_backed_generation(&index_root, &registry, writer_options())
+        .expect_err("ambiguous ownership leaves no usable logical source");
+    let SourceBackedCoordinatorError::NoUsableLogicalSources { failed_sources } = error else {
+        panic!("unexpected compressed ownership error: {error:?}");
+    };
+    assert_eq!(failed_sources.total(), 1);
+    assert!(VerifiedIndex::open(&index_root).is_err());
 }
 
 #[test]
