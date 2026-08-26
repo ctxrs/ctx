@@ -158,6 +158,9 @@ fn daemon_semantic_job_report(
     } else {
         last_run_reason.clone()
     };
+    let embedding_runtime = (context.daemon_running && context.semantic_runtime_active)
+        .then(|| crate::query_service::daemon_query_service_embedding_runtime(data_root))
+        .flatten();
     compact_json(json!({
         "status": status,
         "enabled": enabled,
@@ -192,6 +195,7 @@ fn daemon_semantic_job_report(
         "model_key": status_value
             .as_ref()
             .and_then(|value| json_string(value, "model_key")),
+        "embedding_runtime": embedding_runtime,
         "daemon_mode": context.daemon_mode.as_str(),
     }))
 }

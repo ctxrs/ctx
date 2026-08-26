@@ -436,11 +436,21 @@ pub(super) fn semantic_onnxruntime_candidates(
 
 #[cfg(all(ctx_semantic_fastembed, target_os = "linux", target_arch = "x86_64"))]
 pub(super) fn nvidia_accelerator_present() -> bool {
-    nvidia_accelerator_present_in(Path::new("/proc"), Path::new("/sys"))
+    nvidia_accelerator_present_in(
+        Path::new("/proc"),
+        Path::new("/sys"),
+        Path::new("/dev"),
+        Path::new("/usr/lib/wsl/lib"),
+    )
 }
 
 #[cfg(any(all(target_os = "linux", target_arch = "x86_64"), test))]
-fn nvidia_accelerator_present_in(proc_root: &Path, sys_root: &Path) -> bool {
+fn nvidia_accelerator_present_in(
+    proc_root: &Path,
+    sys_root: &Path,
+    dev_root: &Path,
+    wsl_driver_root: &Path,
+) -> bool {
     proc_root.join("driver/nvidia/version").is_file()
         || sys_root.join("module/nvidia").is_dir()
         || fs::read_dir(sys_root.join("class/drm")).is_ok_and(|entries| {
@@ -449,6 +459,7 @@ fn nvidia_accelerator_present_in(proc_root: &Path, sys_root: &Path) -> bool {
                     .is_ok_and(|vendor| vendor.trim().eq_ignore_ascii_case("0x10de"))
             })
         })
+        || (dev_root.join("dxg").exists() && wsl_driver_root.join("libnvidia-ml.so.1").is_file())
 }
 
 #[cfg(ctx_semantic_fastembed)]
@@ -559,14 +570,61 @@ mod ort_runtime_tests {
         let temp = tempfile::tempdir().unwrap();
         let proc_root = temp.path().join("proc");
         let sys_root = temp.path().join("sys");
+        let dev_root = temp.path().join("dev");
+        let wsl_driver_root = temp.path().join("usr/lib/wsl/lib");
         fs::create_dir_all(proc_root.join("driver/nvidia")).unwrap();
         fs::write(proc_root.join("driver/nvidia/version"), b"test").unwrap();
-        assert!(nvidia_accelerator_present_in(&proc_root, &sys_root));
+        assert!(nvidia_accelerator_present_in(
+            &proc_root,
+            &sys_root,
+            &dev_root,
+            &wsl_driver_root,
+        ));
 
         fs::remove_file(proc_root.join("driver/nvidia/version")).unwrap();
         fs::create_dir_all(sys_root.join("class/drm/card0/device")).unwrap();
         fs::write(sys_root.join("class/drm/card0/device/vendor"), b"0x10de\n").unwrap();
-        assert!(nvidia_accelerator_present_in(&proc_root, &sys_root));
+        assert!(nvidia_accelerator_present_in(
+            &proc_root,
+            &sys_root,
+            &dev_root,
+            &wsl_driver_root,
+        ));
+    }
+
+    #[test]
+    fn nvidia_probe_requires_wsl_gpu_and_nvidia_evidence() {
+        let temp = tempfile::tempdir().unwrap();
+        let proc_root = temp.path().join("proc");
+        let sys_root = temp.path().join("sys");
+        let dev_root = temp.path().join("dev");
+        let wsl_driver_root = temp.path().join("usr/lib/wsl/lib");
+        fs::create_dir_all(&dev_root).unwrap();
+        fs::write(dev_root.join("dxg"), b"test").unwrap();
+        assert!(!nvidia_accelerator_present_in(
+            &proc_root,
+            &sys_root,
+            &dev_root,
+            &wsl_driver_root,
+        ));
+
+        fs::remove_file(dev_root.join("dxg")).unwrap();
+        fs::create_dir_all(&wsl_driver_root).unwrap();
+        fs::write(wsl_driver_root.join("libnvidia-ml.so.1"), b"test").unwrap();
+        assert!(!nvidia_accelerator_present_in(
+            &proc_root,
+            &sys_root,
+            &dev_root,
+            &wsl_driver_root,
+        ));
+
+        fs::write(dev_root.join("dxg"), b"test").unwrap();
+        assert!(nvidia_accelerator_present_in(
+            &proc_root,
+            &sys_root,
+            &dev_root,
+            &wsl_driver_root,
+        ));
     }
 
     #[test]
