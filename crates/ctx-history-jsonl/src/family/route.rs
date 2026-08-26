@@ -27,7 +27,7 @@ use ctx_history_core::{
     TypedKey,
 };
 use ctx_history_source_io::{
-    open_provider_source_path_mapped as open_provider_source_path,
+    open_provider_source_path_mapped as open_provider_source_path, opened_file_prefix_sha256,
     PROVIDER_JSONL_INVENTORY_MAX_DEPTH, PROVIDER_JSONL_INVENTORY_MAX_DIRECTORIES,
     PROVIDER_JSONL_INVENTORY_MAX_METADATA_ENTRIES, PROVIDER_JSONL_INVENTORY_MAX_PATH_BYTES,
 };
@@ -699,6 +699,10 @@ impl<E: JsonlFamilyError> JsonlFamilyLeaf<E> {
 
     pub fn source_path(&self) -> &Path {
         &self.source_path
+    }
+
+    pub fn authority_path(&self) -> &Path {
+        &self.authority_path
     }
 
     pub fn authority(&self) -> &Arc<ProviderSourceRoot<E>> {

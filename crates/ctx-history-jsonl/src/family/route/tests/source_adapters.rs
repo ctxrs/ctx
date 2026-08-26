@@ -500,7 +500,7 @@ fn unobserved_membership_uses_parent_enumeration_without_opening_the_leaf() {
 }
 
 #[test]
-fn canonical_inventory_rejects_duplicate_logical_sources_before_staging() {
+fn canonical_inventory_collapses_byte_identical_logical_source_aliases() {
     let temp = tempfile::tempdir().unwrap();
     let first_path = temp.path().join("first.jsonl");
     let second_path = temp.path().join("second.jsonl");
@@ -514,27 +514,240 @@ fn canonical_inventory_rejects_duplicate_logical_sources_before_staging() {
         .clone();
     let second = JsonlFamilyLeaf::observe(
         first.source().clone(),
-        second_path,
+        second_path.clone(),
         Arc::clone(first.authority()),
         PathBuf::from("second.jsonl"),
         TypedKey::utf8("second-binding").unwrap(),
     )
     .unwrap();
 
-    let error = JsonlFamilyInventory::present(
+    let inventory = JsonlFamilyInventory::present(
         CaptureProvider::Pi,
         temp.path(),
         Arc::clone(first.authority()),
         vec![first, second],
     )
+    .unwrap();
+
+    // One leaf is retained and the physical alias is fenced without turning a
+    // healthy logical source into a quarantined or failed source.
+    assert_eq!(inventory.accepted_len(), 1);
+    assert_eq!(inventory.quarantined_len(), 0);
+    assert_eq!(inventory.exact_dependencies.len(), 1);
+
+    // The retained leaf is determined by stable physical ordering: the smallest
+    // source path wins, independent of file length or modification time.
+    let retained = inventory.accepted_leaves().next().unwrap();
+    assert_eq!(retained.source_path(), first_path);
+    assert_eq!(
+        retained.source(),
+        discovered.accepted_leaves().next().unwrap().source()
+    );
+
+    inventory.exact_dependencies[0]
+        .revalidate_dependency()
+        .unwrap();
+    fs::write(&second_path, b"changed\n").unwrap();
+    assert!(inventory.exact_dependencies[0]
+        .revalidate_dependency()
+        .is_err());
+}
+
+#[test]
+fn canonical_inventory_preserves_unrelated_source_when_deduplicating() {
+    let temp = tempfile::tempdir().unwrap();
+    let first_path = temp.path().join("first.jsonl");
+    let second_path = temp.path().join("second.jsonl");
+    let third_path = temp.path().join("third.jsonl");
+    fs::write(&first_path, TEST_RECORD).unwrap();
+    fs::write(&second_path, TEST_RECORD).unwrap();
+    fs::write(&third_path, TEST_RECORD).unwrap();
+    let discovered = TestAdapter.discover(temp.path()).unwrap();
+
+    // Two leaves collide on `first`s source; `third` is an independent source.
+    let first = discovered
+        .accepted_leaves()
+        .find(|leaf| leaf.source_path() == first_path)
+        .unwrap()
+        .clone();
+    let second = JsonlFamilyLeaf::observe(
+        first.source().clone(),
+        second_path.clone(),
+        Arc::clone(first.authority()),
+        PathBuf::from("second.jsonl"),
+        TypedKey::utf8("second-binding").unwrap(),
+    )
+    .unwrap();
+    let third = discovered
+        .accepted_leaves()
+        .find(|leaf| leaf.source_path() == third_path)
+        .unwrap()
+        .clone();
+
+    let inventory = JsonlFamilyInventory::present(
+        CaptureProvider::Pi,
+        temp.path(),
+        Arc::clone(first.authority()),
+        vec![first, second, third],
+    )
+    .unwrap();
+
+    assert_eq!(inventory.accepted_len(), 2);
+    assert_eq!(inventory.quarantined_len(), 0);
+    assert_eq!(inventory.exact_dependencies.len(), 1);
+
+    // The unrelated source is untouched and still published.
+    let accepted_paths: Vec<&Path> = inventory
+        .accepted_leaves()
+        .map(|leaf| leaf.source_path())
+        .collect();
+    assert!(accepted_paths.contains(&third_path.as_path()));
+    assert!(accepted_paths.contains(&first_path.as_path()));
+}
+
+#[test]
+fn canonical_inventory_requires_provider_resolution_for_divergent_duplicates() {
+    let temp = tempfile::tempdir().unwrap();
+    let first_path = temp.path().join("first.jsonl");
+    let second_path = temp.path().join("second.jsonl");
+    let third_path = temp.path().join("third.jsonl");
+    fs::write(&first_path, TEST_RECORD).unwrap();
+    fs::write(&second_path, b"{\"message\":\"different\"}\n").unwrap();
+    fs::write(&third_path, TEST_RECORD).unwrap();
+    let discovered = TestAdapter.discover(temp.path()).unwrap();
+    let first = discovered
+        .accepted_leaves()
+        .find(|leaf| leaf.source_path() == first_path)
+        .unwrap()
+        .clone();
+    let second = JsonlFamilyLeaf::observe(
+        first.source().clone(),
+        second_path.clone(),
+        Arc::clone(first.authority()),
+        PathBuf::from("second.jsonl"),
+        TypedKey::utf8("second-binding").unwrap(),
+    )
+    .unwrap();
+    let third = discovered
+        .accepted_leaves()
+        .find(|leaf| leaf.source_path() == third_path)
+        .unwrap()
+        .clone();
+
+    let error = JsonlFamilyInventory::present(
+        CaptureProvider::Pi,
+        temp.path(),
+        Arc::clone(first.authority()),
+        vec![first, second, third],
+    )
     .unwrap_err();
 
     assert!(error
         .to_string()
-        .contains("duplicate logical source identity"));
-    assert!(!error
+        .contains("provider must resolve divergent copies semantically"));
+}
+
+#[test]
+fn canonical_inventory_deduplication_is_deterministic_regardless_of_leaf_order() {
+    let temp = tempfile::tempdir().unwrap();
+    let first_path = temp.path().join("first.jsonl");
+    let second_path = temp.path().join("zzz.jsonl");
+    fs::write(&first_path, TEST_RECORD).unwrap();
+    fs::write(&second_path, TEST_RECORD).unwrap();
+    let discovered = TestAdapter.discover(temp.path()).unwrap();
+    let first = discovered
+        .accepted_leaves()
+        .find(|leaf| leaf.source_path() == first_path)
+        .unwrap()
+        .clone();
+    let second = JsonlFamilyLeaf::observe(
+        first.source().clone(),
+        second_path.clone(),
+        Arc::clone(first.authority()),
+        PathBuf::from("zzz.jsonl"),
+        TypedKey::utf8("second-binding").unwrap(),
+    )
+    .unwrap();
+
+    // The larger path sorts after the smaller one, so `first` must be retained
+    // even when the colliding leaf is supplied first.
+    let forward = JsonlFamilyInventory::present(
+        CaptureProvider::Pi,
+        temp.path(),
+        Arc::clone(first.authority()),
+        vec![first.clone(), second.clone()],
+    )
+    .unwrap();
+    let reversed = JsonlFamilyInventory::present(
+        CaptureProvider::Pi,
+        temp.path(),
+        Arc::clone(first.authority()),
+        vec![second, first],
+    )
+    .unwrap();
+
+    for inventory in [&forward, &reversed] {
+        assert_eq!(inventory.accepted_len(), 1);
+        assert_eq!(inventory.quarantined_len(), 0);
+        assert_eq!(inventory.exact_dependencies.len(), 1);
+        assert_eq!(
+            inventory.accepted_leaves().next().unwrap().source_path(),
+            first_path
+        );
+    }
+}
+
+#[test]
+fn canonical_inventory_still_rejects_duplicate_physical_member_among_accepted_leaves() {
+    // Two accepted leaves that resolve to the same physical path are a distinct
+    // invariant from a duplicate logical source and must still fail. This avoids
+    // the shared root-authority disposition checks so it is independent of host
+    // path canonicalization.
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("same.jsonl");
+    fs::write(&path, TEST_RECORD).unwrap();
+    let discovered = TestAdapter.discover(temp.path()).unwrap();
+    let authority = Arc::clone(&discovered.authorities[0]);
+    let one = JsonlFamilyLeaf::observe(
+        SourceKey::derive_provider_native(
+            CaptureProvider::Pi.as_str(),
+            TEST_SOURCE_FORMAT,
+            TEST_SCHEMA,
+            1,
+            "terminal-witness-file",
+            TypedKey::bytes(b"one".to_vec()).unwrap(),
+        )
+        .unwrap(),
+        path.clone(),
+        Arc::clone(&authority),
+        PathBuf::from("same.jsonl"),
+        TypedKey::utf8("one-binding").unwrap(),
+    )
+    .unwrap();
+    let two = JsonlFamilyLeaf::observe(
+        SourceKey::derive_provider_native(
+            CaptureProvider::Pi.as_str(),
+            TEST_SOURCE_FORMAT,
+            TEST_SCHEMA,
+            1,
+            "terminal-witness-file",
+            TypedKey::bytes(b"two".to_vec()).unwrap(),
+        )
+        .unwrap(),
+        path.clone(),
+        Arc::clone(&authority),
+        PathBuf::from("same.jsonl"),
+        TypedKey::utf8("two-binding").unwrap(),
+    )
+    .unwrap();
+
+    let error =
+        JsonlFamilyInventory::present(CaptureProvider::Pi, temp.path(), authority, vec![one, two])
+            .unwrap_err();
+
+    assert!(error
         .to_string()
-        .contains("source replacement has already started"));
+        .contains("physical inventory contains duplicate member"));
 }
 
 #[test]
