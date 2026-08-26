@@ -633,29 +633,6 @@ impl<L: CaptureLifecycleSink> SourceBackedGenerationSink<'_, L> {
         failure: SourceBackedRouteError,
         carried_forward: bool,
     ) -> SourceBackedCoordinatorResult<(), L::Error> {
-        self.record_logical_source_failure_with_empty_admission(
-            source,
-            failure,
-            carried_forward,
-            false,
-        )
-    }
-
-    pub fn record_logical_source_quarantine(
-        &mut self,
-        source: SourceKey,
-        failure: SourceBackedRouteError,
-    ) -> SourceBackedCoordinatorResult<(), L::Error> {
-        self.record_logical_source_failure_with_empty_admission(source, failure, false, true)
-    }
-
-    fn record_logical_source_failure_with_empty_admission(
-        &mut self,
-        source: SourceKey,
-        failure: SourceBackedRouteError,
-        carried_forward: bool,
-        allows_empty_route: bool,
-    ) -> SourceBackedCoordinatorResult<(), L::Error> {
         if !failure.kind.is_logical_source_failure() {
             return Err(SourceBackedCoordinatorError::InvalidLogicalSourceFailure {
                 detail: "non-local failure was reported as a logical-source outcome",
@@ -677,7 +654,6 @@ impl<L: CaptureLifecycleSink> SourceBackedGenerationSink<'_, L> {
                     &failure.detail,
                     MAX_SOURCE_BACKED_FAILURE_DETAIL_BYTES,
                 ),
-                allows_empty_route,
             });
         Ok(())
     }

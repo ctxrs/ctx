@@ -1,27 +1,4 @@
 pub mod provider_sources;
-pub use ctx_history_source_io::{
-    ProviderJsonlInventory, ProviderJsonlInventoryLimits, PROVIDER_JSONL_INVENTORY_MAX_DEPTH,
-    PROVIDER_JSONL_INVENTORY_MAX_DIRECTORIES, PROVIDER_JSONL_INVENTORY_MAX_ELIGIBLE_PATHS,
-    PROVIDER_JSONL_INVENTORY_MAX_METADATA_ENTRIES, PROVIDER_JSONL_INVENTORY_MAX_PATH_BYTES,
-};
-
-pub fn inventory_provider_jsonl_paths(
-    root: &std::path::Path,
-    limits: ProviderJsonlInventoryLimits,
-) -> Result<ProviderJsonlInventory> {
-    ctx_history_source_io::inventory_provider_jsonl_paths(root, limits).map_err(Into::into)
-}
-
-pub fn inventory_provider_regular_paths(
-    root: &std::path::Path,
-    limits: ProviderJsonlInventoryLimits,
-) -> Result<ProviderJsonlInventory> {
-    ctx_history_source_io::inventory_provider_regular_paths(root, limits).map_err(Into::into)
-}
-
-pub fn provider_regular_file_len(path: &std::path::Path) -> Result<u64> {
-    ctx_history_source_io::provider_regular_file_len(path).map_err(Into::into)
-}
 pub use provider_sources::{
     configured_root_capabilities, configured_root_capability,
     discover_canonical_automatic_provider_sources_with_context,
@@ -60,12 +37,6 @@ pub use ctx_history_capture_model::{
 mod error;
 pub use error::{CaptureError, ProviderJsonlInventoryLimit, Result};
 
-pub(crate) mod common {
-    pub(crate) mod identity;
-    pub(crate) mod io;
-}
-pub use common::identity::compute_payload_hash;
-
 pub(crate) mod provider;
 
 /// Reads only persisted route-control bytes; it never opens Hermes provider data.
@@ -93,7 +64,6 @@ pub fn hermes_route_control_database_identity(control: &[u8]) -> Option<[u8; 32]
     ctx_history_capture_composition::hermes_route_control_database_identity(control)
 }
 
-pub use provider::adapter::{CaptureWorkLimit, ProviderAdapterContext, ProviderImportOptions};
 pub use provider::source_backed::register_nanoclaw_source_backed_route_with_base_sources;
 pub use provider::source_backed::{
     automatic_provider_root_coexistence_route_identity,

@@ -46,7 +46,6 @@ members = [
     "crates/ctx-history-providers-task-docs",
     "crates/ctx-history-native-jsonl-parsers",
     "crates/ctx-deepseek-harness-qualification",
-    "crates/ctx-grok-build-qualification",
     "crates/ctx-history-read-application",
     "crates/ctx-history-refresh",
     "crates/ctx-history-refresh-execution",

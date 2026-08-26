@@ -1,4 +1,6 @@
+load("@crates//:defs.bzl", "crate_deps", "crate_edition")
 load("//crates/ctx-cli-contract-tests:test_targets.bzl", "ctx_cli_contract_test")
+load("//tools/bazel:ctx_rust.bzl", "ctx_rust_test")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -31,4 +33,29 @@ ctx_cli_contract_test(
     ],
     extra_crates = ["rusqlite"],
     tags = ["cli-contract", "privacy"],
+)
+
+ctx_rust_test(
+    name = "grok_build_tests",
+    testonly = True,
+    srcs = ["tests/grok_build.rs"],
+    crate_name = "ctx_grok_build_qualification",
+    crate_root = "tests/grok_build.rs",
+    edition = crate_edition(),
+    compile_data = ["//:public_test_fixtures"],
+    data = [
+        "//:public_test_fixtures",
+        "//crates/ctx-cli:ctx",
+    ],
+    deps = crate_deps([
+        "assert_cmd",
+        "serde_json",
+        "tempfile",
+    ]),
+    rustc_env = {
+        "CARGO_MANIFEST_DIR": "crates/ctx-cli-qualification",
+    },
+    env = {
+        "CARGO_BIN_EXE_ctx": "$(rootpath //crates/ctx-cli:ctx)",
+    },
 )

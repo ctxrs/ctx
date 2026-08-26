@@ -4,15 +4,6 @@ use std::{collections::BTreeMap, path::Path};
 
 pub use ctx_history_capture_composition::source_backed::*;
 
-pub(crate) mod family {
-    #[allow(
-        dead_code,
-        reason = "capture-local provider compatibility aliases retain the pre-split path"
-    )]
-    pub(crate) type CaptureProviderRuntime =
-        ctx_history_capture_composition::CaptureProviderRuntime;
-}
-
 use crate::{DiscoveryContext, DiscoveryReport};
 
 pub fn build_automatic_source_backed_registry(

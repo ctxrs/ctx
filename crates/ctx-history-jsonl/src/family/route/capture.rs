@@ -231,12 +231,8 @@ pub(super) fn capture<R: JsonlFamilyRuntime>(
             let carried_forward = bases
                 .iter()
                 .any(|base| base.observation().source().exact_descriptor_eq(source));
-            if adapter.provider() == CaptureProvider::Codex {
-                sink.record_logical_source_quarantine(source.clone(), failure)
-            } else {
-                sink.record_logical_source_failure(source.clone(), failure, carried_forward)
-            }
-            .map_err(route_internal)?;
+            sink.record_logical_source_failure(source.clone(), failure, carried_forward)
+                .map_err(route_internal)?;
         }
     }
     let mut rejected_quarantine_sources = HashMap::new();
@@ -423,15 +419,11 @@ pub(super) fn capture<R: JsonlFamilyRuntime>(
                 .source()
                 .exact_descriptor_eq(&quarantined.failure_source)
         });
-        if adapter.provider() == CaptureProvider::Codex {
-            sink.record_logical_source_quarantine(quarantined.failure_source.clone(), failure)
-        } else {
-            sink.record_logical_source_failure(
-                quarantined.failure_source.clone(),
-                failure,
-                carried_forward,
-            )
-        }
+        sink.record_logical_source_failure(
+            quarantined.failure_source.clone(),
+            failure,
+            carried_forward,
+        )
         .map_err(route_internal)?;
     }
     let mut quarantined_source_ownership = rejected_quarantine_sources;
