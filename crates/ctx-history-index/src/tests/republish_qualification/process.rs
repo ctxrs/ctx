@@ -9,6 +9,8 @@ pub(super) struct IsolatedProcessUsage {
     pub(super) status: ExitStatus,
     pub(super) peak_rss_bytes: u64,
     pub(super) process_cpu_seconds: f64,
+    pub(super) filesystem_read_block_operations: u64,
+    pub(super) filesystem_write_block_operations: u64,
 }
 
 fn timeval_seconds(value: libc::timeval) -> f64 {
@@ -41,5 +43,9 @@ pub(super) fn wait4_operation(child: &Child) -> io::Result<IsolatedProcessUsage>
         status: ExitStatus::from_raw(status),
         peak_rss_bytes: peak_rss_kib.saturating_mul(1024),
         process_cpu_seconds: timeval_seconds(usage.ru_utime) + timeval_seconds(usage.ru_stime),
+        filesystem_read_block_operations: u64::try_from(usage.ru_inblock)
+            .map_err(|_| io::Error::other("wait4 returned negative input block operations"))?,
+        filesystem_write_block_operations: u64::try_from(usage.ru_oublock)
+            .map_err(|_| io::Error::other("wait4 returned negative output block operations"))?,
     })
 }
