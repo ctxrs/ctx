@@ -11,6 +11,7 @@ use ctx_history_refresh::{
 };
 
 #[cfg(test)]
+#[path = "contract_tests/failure_contract_tests.rs"]
 mod failure_contract_tests;
 
 #[test]

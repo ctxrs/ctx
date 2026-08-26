@@ -896,4 +896,5 @@ pub(super) fn source_route_ledger_now_ms() -> u64 {
 }
 
 #[cfg(test)]
+#[path = "attempt_helpers/tests.rs"]
 mod tests;
