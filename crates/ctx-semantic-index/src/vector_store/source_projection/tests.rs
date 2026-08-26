@@ -77,10 +77,12 @@ impl SemanticDocumentBuilder for CoreBuilder {
 #[derive(Default)]
 struct MarkerEmbedder {
     chunks: usize,
+    calls: usize,
 }
 
 impl SemanticBatchEmbedder for MarkerEmbedder {
     fn embed_chunks(&mut self, chunks: &[SemanticChunkDocument]) -> Result<Vec<Vec<f32>>> {
+        self.calls = self.calls.saturating_add(1);
         self.chunks = self.chunks.saturating_add(chunks.len());
         Ok(chunks
             .iter()
@@ -625,6 +627,57 @@ fn mixed_core_roles_build_and_pin_only_the_semantic_candidate() -> Result<()> {
     };
     assert_eq!(pin.stats().active_events, 1);
     assert_eq!(pin.active_events()[0].event_id, user.event_id.as_uuid());
+    Ok(())
+}
+
+#[test]
+fn page_embedding_batches_multiple_documents_in_one_embedder_call() -> Result<()> {
+    let fixture = Fixture::new(1)?;
+    let first = fixture.record_with_role(0, 1, "first eligible user question", EventRole::User)?;
+    let second_body = "second eligible user question ".repeat(50);
+    let second = fixture.record_with_role(0, 2, &second_body, EventRole::User)?;
+    let root = fixture.data_root.join("index-page-embedding-batch");
+    let fixture_source = &fixture.sources[0];
+    let mut writer = GenerationWriter::open(&root, WriterOptions::default())?
+        .into_writer()
+        .map_err(crate::committed_generation_recovery_error)?;
+    writer.begin_source(fixture_source.source.clone())?;
+    writer.add_core_record(first.clone())?;
+    writer.add_core_record(second.clone())?;
+    let observation = SourceObservation::new(
+        fixture_source.source.clone(),
+        "fixture-page-embedding-batch",
+        b"page-embedding-batch".to_vec(),
+    )?;
+    writer.certify_source(CertifiedSource::certify(
+        observation.clone(),
+        observation,
+        "fixture-parser-v1",
+        [1; 32],
+        ScannedSourceCounts {
+            complete_records: 2,
+            retained_records: 2,
+            indexed_documents: 2,
+            certified_bytes: 100,
+            ..ScannedSourceCounts::default()
+        },
+    )?)?;
+    writer.commit(|_| true)?;
+    let index = VerifiedIndex::open(root)?;
+
+    let mut store = SemanticVectorStore::open(&fixture.semantic_path)?;
+    let mut builder = CoreBuilder::default();
+    let mut embedder = MarkerEmbedder::default();
+    let outcome = reconcile_all(&mut store, &index, &mut builder, &mut embedder)?;
+    assert_eq!(outcome.records_embedded, 2);
+    assert_eq!(outcome.records_reused, 0);
+    assert_eq!(embedder.calls, 1);
+    assert_eq!(embedder.chunks, 3);
+    assert_eq!(
+        builder.calls,
+        vec![first.event_id.as_uuid(), second.event_id.as_uuid()]
+    );
+    assert_eq!(active_events(&store)?, 2);
     Ok(())
 }
 
