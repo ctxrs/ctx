@@ -4,9 +4,8 @@ use std::{
     mem::size_of,
     os::windows::{
         ffi::OsStringExt as _,
-        io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle},
+        io::{AsRawHandle, FromRawHandle as _, OwnedHandle},
         process::CommandExt as _,
-        thread::JoinHandleExt as _,
     },
     process::{Child, Command},
     ptr,
@@ -139,7 +138,8 @@ pub(super) fn read_pipe<T: Read + AsRawHandle>(
     if available == 0 {
         return Ok(PipeRead::Pending);
     }
-    match pipe.read(&mut buffer[..buffer.len().min(available as usize)])? {
+    let readable = buffer.len().min(available as usize);
+    match pipe.read(&mut buffer[..readable])? {
         0 => Ok(PipeRead::Closed),
         read => Ok(PipeRead::Data(read)),
     }
@@ -204,24 +204,30 @@ impl PipeWriter {
 
     pub(super) fn cancel_and_join(mut self) -> io::Result<()> {
         use windows_sys::Win32::Foundation::{GetLastError, ERROR_NOT_FOUND};
-        use windows_sys::Win32::System::Threading::CancelSynchronousIo;
+        use windows_sys::Win32::System::IO::CancelSynchronousIo;
 
         let Some(worker) = self.worker.take() else {
             return Ok(());
         };
         // Set the flag before native cancellation. If the writer is between
-        // writes (`ERROR_NOT_FOUND`), it cannot begin another blocking write;
-        // if it is in one, CancelSynchronousIo completes it with cancellation.
+        // writes (`ERROR_NOT_FOUND`), retry across that race; if it is in a
+        // write, CancelSynchronousIo completes it with cancellation.
         self.cancelled.store(true, Ordering::Release);
-        let cancellation_error = if unsafe { CancelSynchronousIo(worker.as_raw_handle()) } == 0 {
+        let cancellation_error = loop {
+            if worker.is_finished() {
+                break None;
+            }
+            if unsafe { CancelSynchronousIo(worker.as_raw_handle()) } != 0 {
+                break None;
+            }
             let error = unsafe { GetLastError() };
             if error != ERROR_NOT_FOUND {
-                Some(io::Error::from_raw_os_error(error as i32))
-            } else {
-                None
+                break Some(io::Error::from_raw_os_error(error as i32));
             }
-        } else {
-            None
+            // The writer can be between its cancellation check and the next
+            // blocking write. Retry until that write is either cancelled or
+            // the worker observes the flag and exits.
+            std::thread::yield_now();
         };
         match worker.join() {
             Ok(_) => cancellation_error.map_or(Ok(()), Err),

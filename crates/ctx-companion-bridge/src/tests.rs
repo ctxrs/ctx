@@ -550,6 +550,7 @@ fn known_outcome_after_wall_deadline_writes_ack_before_teardown() {
     )
     .unwrap();
     let pid = response_pid(&response);
+    thread::sleep(Duration::from_millis(125));
     let started = Instant::now();
     response
         .finish(McpFinishOutcome::WrittenAndFlushed)

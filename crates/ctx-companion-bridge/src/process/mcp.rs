@@ -1,10 +1,13 @@
 use std::{
-    io::{self, Write as _},
+    io,
     process::{Child, ChildStderr, ChildStdin, ChildStdout, ExitStatus, Stdio},
     sync::mpsc::{self, Receiver, SyncSender, TryRecvError},
     thread,
     time::{Duration, Instant},
 };
+
+#[cfg(unix)]
+use std::io::Write as _;
 
 use crate::{
     limits::LimitConfiguration,
@@ -16,9 +19,12 @@ use crate::{
 use super::{classify_exit, configure_command, platform};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(5);
-// The only post-outcome operation deadline. It covers receipt write/flush and
-// direct-child exit validation in the established bounded delivery window.
+// The one final-delivery deadline starts when Core receives the response. It
+// bounds unknown outcome wait, receipt write/flush, and direct-child exit.
+#[cfg(not(test))]
 const FINALIZATION_GRACE: Duration = Duration::from_secs(60);
+#[cfg(test)]
+const FINALIZATION_GRACE: Duration = Duration::from_millis(500);
 
 pub(crate) struct McpProcessOutput {
     pub(crate) response_frame: Vec<u8>,
@@ -175,15 +181,9 @@ impl LifecycleOwner {
                 });
             }
             if self.cancellation.is_cancelled() {
-                if let Ok(outcome) = outcome_receiver.try_recv() {
-                    return self.finalize(outcome);
-                }
                 return Err(self.terminated(TerminationReason::Cancelled));
             }
             if self.started.elapsed() >= self.wall_time {
-                if let Ok(outcome) = outcome_receiver.try_recv() {
-                    return self.finalize(outcome);
-                }
                 return Err(self.terminated(TerminationReason::WallTime));
             }
             if self.request_complete && self.frame_seen {
@@ -196,7 +196,7 @@ impl LifecycleOwner {
                 response_sender
                     .send(Ok(response))
                     .map_err(|_| BridgeError::WorkerFailed)?;
-                return self.await_outcome(outcome_receiver);
+                return self.await_outcome(outcome_receiver, Instant::now() + FINALIZATION_GRACE);
             }
             self.sleep_until(self.started + self.wall_time);
         }
@@ -205,32 +205,36 @@ impl LifecycleOwner {
     fn await_outcome(
         &mut self,
         outcome_receiver: Receiver<McpFinishOutcome>,
+        deadline: Instant,
     ) -> Result<(), BridgeError> {
         loop {
             // A queued known outcome wins over cancellation/deadline checks.
             match outcome_receiver.try_recv() {
-                Ok(outcome) => return self.finalize(outcome),
+                Ok(outcome) => return self.finalize(outcome, deadline),
                 Err(TryRecvError::Disconnected) => return Err(BridgeError::WorkerFailed),
                 Err(TryRecvError::Empty) => {}
             }
             if self.cancellation.is_cancelled() {
                 if let Ok(outcome) = outcome_receiver.try_recv() {
-                    return self.finalize(outcome);
+                    return self.finalize(outcome, deadline);
                 }
                 return Err(self.terminated(TerminationReason::Cancelled));
             }
-            if self.started.elapsed() >= self.wall_time {
+            if Instant::now() >= deadline {
                 if let Ok(outcome) = outcome_receiver.try_recv() {
-                    return self.finalize(outcome);
+                    return self.finalize(outcome, deadline);
                 }
                 return Err(self.terminated(TerminationReason::WallTime));
             }
-            self.sleep_until(self.started + self.wall_time);
+            self.sleep_until(deadline);
         }
     }
 
-    fn finalize(&mut self, outcome: McpFinishOutcome) -> Result<(), BridgeError> {
-        let deadline = Instant::now() + FINALIZATION_GRACE;
+    fn finalize(
+        &mut self,
+        outcome: McpFinishOutcome,
+        deadline: Instant,
+    ) -> Result<(), BridgeError> {
         self.write_receipt(outcome, deadline)?;
         self.stdin.take();
         loop {
@@ -296,8 +300,10 @@ impl LifecycleOwner {
         #[cfg(windows)]
         {
             let stdin = self.stdin.take().ok_or(BridgeError::WorkerFailed)?;
-            self.pipe_writer =
-                Some(platform::PipeWriter::spawn(stdin, frame).map_err(BridgeError::Transport)?);
+            self.pipe_writer = Some(
+                platform::PipeWriter::spawn(stdin, frame.to_vec())
+                    .map_err(BridgeError::Transport)?,
+            );
             loop {
                 if let Some(result) = self
                     .pipe_writer
@@ -337,25 +343,25 @@ impl LifecycleOwner {
                     Err(error) => return Err(BridgeError::Transport(error)),
                 }
             }
-        }
-        loop {
-            if Instant::now() >= deadline {
-                return Err(BridgeError::Transport(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "MCP receipt flush timed out",
-                )));
-            }
-            match self
-                .stdin
-                .as_mut()
-                .ok_or(BridgeError::WorkerFailed)?
-                .flush()
-            {
-                Ok(()) => return Ok(()),
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                    self.sleep_until(deadline)
+            loop {
+                if Instant::now() >= deadline {
+                    return Err(BridgeError::Transport(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "MCP receipt flush timed out",
+                    )));
                 }
-                Err(error) => return Err(BridgeError::Transport(error)),
+                match self
+                    .stdin
+                    .as_mut()
+                    .ok_or(BridgeError::WorkerFailed)?
+                    .flush()
+                {
+                    Ok(()) => return Ok(()),
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        self.sleep_until(deadline)
+                    }
+                    Err(error) => return Err(BridgeError::Transport(error)),
+                }
             }
         }
     }
@@ -448,6 +454,7 @@ impl Drop for LifecycleOwner {
     }
 }
 
+#[cfg(unix)]
 fn write_zero(message: &'static str) -> BridgeError {
     BridgeError::Transport(io::Error::new(io::ErrorKind::WriteZero, message))
 }

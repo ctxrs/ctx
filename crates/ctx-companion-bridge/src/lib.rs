@@ -404,3 +404,5 @@ impl Drop for ConcurrencyPermit {
 
 #[cfg(test)]
 mod tests;
+#[cfg(all(test, windows))]
+mod tests_windows;
