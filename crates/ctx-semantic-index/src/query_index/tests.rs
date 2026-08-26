@@ -11,6 +11,16 @@ use ctx_history_index::{GenerationWriter, WriterOptions};
 use ctx_semantic_model::SEMANTIC_DIMENSIONS;
 
 #[test]
+fn semantic_query_boundary_rejects_more_than_32_vectors() {
+    assert!(validate_semantic_query_vector_count(32).is_ok());
+    let error = validate_semantic_query_vector_count(33).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "source-backed semantic query vector count must be at most 32"
+    );
+}
+
+#[test]
 fn semantic_query_pin_rejects_a_different_core_generation() {
     let pin = SemanticQueryPin {
         core_generation_id: "generation-a".to_owned(),

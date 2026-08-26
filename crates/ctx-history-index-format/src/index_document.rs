@@ -7,8 +7,9 @@ use tantivy::schema::{
 use uuid::Uuid;
 
 use ctx_history_core::{
-    CoreContent, CoreRecord, ProviderNativeCopyProof, SourceKey, StableEntityId, StableEntityKind,
-    TypedKey, MAX_CORE_CONTENT_BYTES, MAX_ENCODED_CORE_RECORD_BYTES,
+    CoreContent, CoreRecord, ProviderNativeCopyProof, ProviderNativeSessionRelationship, SourceKey,
+    StableEntityId, StableEntityKind, TypedKey, MAX_CORE_CONTENT_BYTES,
+    MAX_ENCODED_CORE_RECORD_BYTES,
 };
 
 use crate::{Fields, IndexError, Result};
@@ -35,9 +36,27 @@ pub const SESSION_AUTHORITY_UUID_PREFIX_LEN: usize = 16;
 const SESSION_AUTHORITY_SESSION_OFFSET: usize = SESSION_AUTHORITY_UUID_PREFIX_LEN;
 const SESSION_AUTHORITY_SOURCE_OFFSET: usize =
     SESSION_AUTHORITY_SESSION_OFFSET + StableEntityId::CANONICAL_LEN;
-pub const SESSION_AUTHORITY_KEY_LEN: usize =
+const SESSION_AUTHORITY_PARENT_PRESENT_OFFSET: usize =
     SESSION_AUTHORITY_SOURCE_OFFSET + StableEntityId::CANONICAL_LEN;
+const SESSION_AUTHORITY_PARENT_OFFSET: usize = SESSION_AUTHORITY_PARENT_PRESENT_OFFSET + 1;
+const SESSION_AUTHORITY_ROOT_PRESENT_OFFSET: usize =
+    SESSION_AUTHORITY_PARENT_OFFSET + StableEntityId::CANONICAL_LEN;
+const SESSION_AUTHORITY_ROOT_OFFSET: usize = SESSION_AUTHORITY_ROOT_PRESENT_OFFSET + 1;
+const SESSION_AUTHORITY_RELATIONSHIP_OFFSET: usize =
+    SESSION_AUTHORITY_ROOT_OFFSET + StableEntityId::CANONICAL_LEN;
+pub const SESSION_AUTHORITY_KEY_LEN: usize = SESSION_AUTHORITY_RELATIONSHIP_OFFSET + 1;
 const SESSION_AUTHORITY_FIELD: &str = "session_authority";
+
+/// Direct provider claims carried by one sparse session-authority witness.
+///
+/// These are literal record facts only. They contain no traversal, inferred
+/// topology, or fallback family identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionAuthorityClaims {
+    pub parent_session_id: Option<StableEntityId>,
+    pub root_session_id: Option<StableEntityId>,
+    pub relationship: Option<ProviderNativeSessionRelationship>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct SessionAuthorityKey([u8; SESSION_AUTHORITY_KEY_LEN]);
@@ -46,6 +65,37 @@ impl SessionAuthorityKey {
     /// Constructs the exact query-safe key for one fully qualified session
     /// coordinate. The private representation prevents partial UUID terms.
     pub fn exact(session_id: StableEntityId, source_owner: StableEntityId) -> Result<Self> {
+        Self::with_claims(
+            session_id,
+            source_owner,
+            SessionAuthorityClaims {
+                parent_session_id: None,
+                root_session_id: None,
+                relationship: None,
+            },
+        )
+    }
+
+    /// Binds the exact source-owned session coordinate to one record's direct
+    /// literal relationship claims. Query-time grouping coalesces only these
+    /// sparse verified witnesses and never loads the stored Core body.
+    pub fn for_core_record(record: &CoreRecord) -> Result<Self> {
+        Self::with_claims(
+            record.session_id,
+            record.source.identity(),
+            SessionAuthorityClaims {
+                parent_session_id: record.parent_session_id,
+                root_session_id: record.root_session_id,
+                relationship: record.session_relationship,
+            },
+        )
+    }
+
+    fn with_claims(
+        session_id: StableEntityId,
+        source_owner: StableEntityId,
+        claims: SessionAuthorityClaims,
+    ) -> Result<Self> {
         if session_id.entity_kind() != StableEntityKind::Session
             || source_owner.entity_kind() != StableEntityKind::Source
             || session_id.source_digest() != source_owner.digest()
@@ -58,7 +108,21 @@ impl SessionAuthorityKey {
         key[..SESSION_AUTHORITY_UUID_PREFIX_LEN].copy_from_slice(session_id.as_uuid().as_bytes());
         key[SESSION_AUTHORITY_SESSION_OFFSET..SESSION_AUTHORITY_SOURCE_OFFSET]
             .copy_from_slice(&session_id.encode_canonical()?);
-        key[SESSION_AUTHORITY_SOURCE_OFFSET..].copy_from_slice(&source_owner.encode_canonical()?);
+        key[SESSION_AUTHORITY_SOURCE_OFFSET..SESSION_AUTHORITY_PARENT_PRESENT_OFFSET]
+            .copy_from_slice(&source_owner.encode_canonical()?);
+        encode_optional_session_claim(
+            &mut key,
+            SESSION_AUTHORITY_PARENT_PRESENT_OFFSET,
+            SESSION_AUTHORITY_PARENT_OFFSET,
+            claims.parent_session_id,
+        )?;
+        encode_optional_session_claim(
+            &mut key,
+            SESSION_AUTHORITY_ROOT_PRESENT_OFFSET,
+            SESSION_AUTHORITY_ROOT_OFFSET,
+            claims.root_session_id,
+        )?;
+        key[SESSION_AUTHORITY_RELATIONSHIP_OFFSET] = relationship_tag(claims.relationship);
         Ok(Self(key))
     }
 
@@ -73,7 +137,7 @@ impl SessionAuthorityKey {
                 SESSION_AUTHORITY_FIELD,
             ));
         }
-        Self::exact(session_id, source_owner)?;
+        Self::with_claims(session_id, source_owner, key.direct_claims()?)?;
         Ok(key)
     }
 
@@ -115,8 +179,9 @@ impl SessionAuthorityKey {
         let session_id = StableEntityId::decode_canonical(
             &self.0[SESSION_AUTHORITY_SESSION_OFFSET..SESSION_AUTHORITY_SOURCE_OFFSET],
         )?;
-        let source_owner =
-            StableEntityId::decode_canonical(&self.0[SESSION_AUTHORITY_SOURCE_OFFSET..])?;
+        let source_owner = StableEntityId::decode_canonical(
+            &self.0[SESSION_AUTHORITY_SOURCE_OFFSET..SESSION_AUTHORITY_PARENT_PRESENT_OFFSET],
+        )?;
         if session_id.entity_kind() != StableEntityKind::Session
             || source_owner.entity_kind() != StableEntityKind::Source
             || session_id.source_digest() != source_owner.digest()
@@ -128,12 +193,97 @@ impl SessionAuthorityKey {
         Ok((session_id, source_owner))
     }
 
+    pub fn direct_claims(self) -> Result<SessionAuthorityClaims> {
+        Ok(SessionAuthorityClaims {
+            parent_session_id: decode_optional_session_claim(
+                &self.0,
+                SESSION_AUTHORITY_PARENT_PRESENT_OFFSET,
+                SESSION_AUTHORITY_PARENT_OFFSET,
+            )?,
+            root_session_id: decode_optional_session_claim(
+                &self.0,
+                SESSION_AUTHORITY_ROOT_PRESENT_OFFSET,
+                SESSION_AUTHORITY_ROOT_OFFSET,
+            )?,
+            relationship: relationship_from_tag(self.0[SESSION_AUTHORITY_RELATIONSHIP_OFFSET])?,
+        })
+    }
+
     pub fn as_bytes(&self) -> &[u8; SESSION_AUTHORITY_KEY_LEN] {
         &self.0
     }
     pub fn into_bytes(self) -> [u8; SESSION_AUTHORITY_KEY_LEN] {
         self.0
     }
+}
+
+fn encode_optional_session_claim(
+    target: &mut [u8; SESSION_AUTHORITY_KEY_LEN],
+    present_offset: usize,
+    value_offset: usize,
+    value: Option<StableEntityId>,
+) -> Result<()> {
+    if let Some(value) = value {
+        if value.entity_kind() != StableEntityKind::Session {
+            return Err(IndexError::InvalidStoredDocumentField(
+                SESSION_AUTHORITY_FIELD,
+            ));
+        }
+        target[present_offset] = 1;
+        target[value_offset..value_offset + StableEntityId::CANONICAL_LEN]
+            .copy_from_slice(&value.encode_canonical()?);
+    }
+    Ok(())
+}
+
+fn decode_optional_session_claim(
+    encoded: &[u8; SESSION_AUTHORITY_KEY_LEN],
+    present_offset: usize,
+    value_offset: usize,
+) -> Result<Option<StableEntityId>> {
+    let bytes = &encoded[value_offset..value_offset + StableEntityId::CANONICAL_LEN];
+    match encoded[present_offset] {
+        0 if bytes.iter().all(|byte| *byte == 0) => Ok(None),
+        1 => {
+            let value = StableEntityId::decode_canonical(bytes)?;
+            if value.entity_kind() != StableEntityKind::Session {
+                return Err(IndexError::InvalidStoredDocumentField(
+                    SESSION_AUTHORITY_FIELD,
+                ));
+            }
+            Ok(Some(value))
+        }
+        _ => Err(IndexError::InvalidStoredDocumentField(
+            SESSION_AUTHORITY_FIELD,
+        )),
+    }
+}
+
+fn relationship_tag(value: Option<ProviderNativeSessionRelationship>) -> u8 {
+    match value {
+        None => 0,
+        Some(ProviderNativeSessionRelationship::Root) => 1,
+        Some(ProviderNativeSessionRelationship::Delegated) => 2,
+        Some(ProviderNativeSessionRelationship::Forked) => 3,
+        Some(ProviderNativeSessionRelationship::ResumedFrom) => 4,
+        Some(ProviderNativeSessionRelationship::WorkflowChild) => 5,
+    }
+}
+
+fn relationship_from_tag(value: u8) -> Result<Option<ProviderNativeSessionRelationship>> {
+    Ok(match value {
+        0 => None,
+        1 => Some(ProviderNativeSessionRelationship::Root),
+        2 => Some(ProviderNativeSessionRelationship::Delegated),
+        3 => Some(ProviderNativeSessionRelationship::Forked),
+        4 => Some(ProviderNativeSessionRelationship::ResumedFrom),
+        5 => Some(ProviderNativeSessionRelationship::WorkflowChild),
+        _ => {
+            return Err(IndexError::InvalidStoredDocumentField(
+                SESSION_AUTHORITY_FIELD,
+            ))
+        }
+    })
 }
 
 pub const SEMANTIC_EVENT_ORDER_KEY_LEN: usize = 32;
@@ -801,8 +951,7 @@ impl IndexDocument {
         core_record_bytes: Vec<u8>,
         core_content_bytes: usize,
     ) -> Result<Self> {
-        let session_authority =
-            SessionAuthorityKey::exact(record.session_id, record.source.identity())?;
+        let session_authority = SessionAuthorityKey::for_core_record(&record)?;
         let source_token = crate::source_token(&record.source);
         let source = IndexSourceFields::new(&record.source, &source_token);
         let core_record_encoded_bytes = core_record_bytes.len();

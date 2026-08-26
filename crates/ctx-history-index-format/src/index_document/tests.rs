@@ -214,7 +214,7 @@ fn session_authority_attachment_is_canonical_and_one_shot() {
     let fields = fields_from_schema(&schema).unwrap();
     let core_source = source("codex_session_jsonl");
     let record = core_record(&core_source);
-    let expected = SessionAuthorityKey::exact(record.session_id, core_source.identity())
+    let expected = SessionAuthorityKey::for_core_record(&record)
         .unwrap()
         .into_bytes();
     let encoded = record.encode_stored().unwrap();
@@ -268,6 +268,53 @@ fn session_authority_exact_key_binds_full_session_and_source_identities() {
     .unwrap();
     assert!(matches!(
         SessionAuthorityKey::exact(record.session_id, foreign_source.identity()),
+        Err(IndexError::InvalidStoredDocumentField("session_authority"))
+    ));
+}
+
+#[test]
+fn session_authority_key_round_trips_only_direct_literal_claims() {
+    let core_source = source("codex_session_jsonl");
+    let mut record = core_record(&core_source);
+    let parent = record.session_id;
+    let root = record.session_id;
+    record.parent_session_id = Some(parent);
+    record.root_session_id = Some(root);
+    record.session_relationship = Some(ProviderNativeSessionRelationship::Forked);
+
+    let key = SessionAuthorityKey::for_core_record(&record).unwrap();
+    let decoded = SessionAuthorityKey::decode(key.as_bytes()).unwrap();
+    assert_eq!(
+        decoded.identities().unwrap(),
+        (record.session_id, core_source.identity())
+    );
+    assert_eq!(
+        decoded.direct_claims().unwrap(),
+        SessionAuthorityClaims {
+            parent_session_id: Some(parent),
+            root_session_id: Some(root),
+            relationship: Some(ProviderNativeSessionRelationship::Forked),
+        }
+    );
+}
+
+#[test]
+fn session_authority_key_rejects_noncanonical_direct_claim_encodings() {
+    let core_source = source("codex_session_jsonl");
+    let record = core_record(&core_source);
+    let exact = SessionAuthorityKey::exact(record.session_id, core_source.identity()).unwrap();
+
+    let mut absent_claim_with_payload = exact.into_bytes();
+    absent_claim_with_payload[SESSION_AUTHORITY_PARENT_OFFSET] = 1;
+    assert!(matches!(
+        SessionAuthorityKey::decode(&absent_claim_with_payload),
+        Err(IndexError::InvalidStoredDocumentField("session_authority"))
+    ));
+
+    let mut invalid_relationship = exact.into_bytes();
+    invalid_relationship[SESSION_AUTHORITY_RELATIONSHIP_OFFSET] = u8::MAX;
+    assert!(matches!(
+        SessionAuthorityKey::decode(&invalid_relationship),
         Err(IndexError::InvalidStoredDocumentField("session_authority"))
     ));
 }

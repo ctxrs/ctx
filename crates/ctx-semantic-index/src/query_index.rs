@@ -17,6 +17,8 @@ use super::{
     vector_store_search::{scan_exact_generation, SEMANTIC_EXACT_TOP_K_MAX},
 };
 
+const MAX_SEMANTIC_QUERY_VECTORS: usize = 32;
+
 #[derive(Debug, Error)]
 #[error("source-backed semantic search is not ready ({code}): {detail}")]
 pub struct SemanticNotReady {
@@ -111,6 +113,7 @@ impl SemanticQueryPin {
         embeddings: &[Vec<f32>],
         candidate_limit: usize,
     ) -> Result<(Vec<EventSearchCandidate>, Value)> {
+        validate_semantic_query_vector_count(embeddings.len())?;
         validate_semantic_query_generation(index.generation_id(), self)?;
         let Some(pinned) = self.pinned.as_ref() else {
             return Ok((
@@ -162,6 +165,15 @@ impl SemanticQueryPin {
             .as_ref()
             .map(|(_, projection)| projection as *const SemanticFilterProjection as usize)
     }
+}
+
+fn validate_semantic_query_vector_count(count: usize) -> Result<()> {
+    if count > MAX_SEMANTIC_QUERY_VECTORS {
+        return Err(anyhow!(
+            "source-backed semantic query vector count must be at most {MAX_SEMANTIC_QUERY_VECTORS}"
+        ));
+    }
+    Ok(())
 }
 
 fn semantic_candidates_with_embedding(

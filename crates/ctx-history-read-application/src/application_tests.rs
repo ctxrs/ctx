@@ -41,9 +41,8 @@ use crate::{
     ListEventsRequest, ListEventsStreamCallback, ListEventsStreamCompletion,
     ListEventsStreamControl, ListEventsStreamPage, LocateApplicationRequest, LocateRequest,
     LocateResult, NormalizedSearchQuery, PinnedHistoryQuery, RetainedPeerRead,
-    SearchApplicationError,
-    SearchApplicationReadModelInput, SearchApplicationRequest, SearchBackend,
-    SearchDiversificationStatus, SearchFailurePhase, SearchJsonInput, SearchPolicy,
+    SearchApplicationError, SearchApplicationReadModelInput, SearchApplicationRequest,
+    SearchBackend, SearchDiversificationStatus, SearchFailurePhase, SearchJsonInput, SearchPolicy,
     SearchRenderMetrics, SearchRequest, SearchResultCommands, SemanticAvailability, SemanticReason,
     SessionEventMode, ShowEventApplicationRequest, ShowEventRequest, ShowSessionApplicationRequest,
     ShowSessionPageRequest, ShowSessionStreamCallback, ShowSessionStreamControl,
@@ -224,21 +223,44 @@ fn publish(root: &Path) -> (VerifiedIndex, Vec<CoreRecord>) {
 
 fn publish_grouped_search(root: &Path) -> (VerifiedIndex, Vec<CoreRecord>) {
     let source = source_named("coalesced-grouping.jsonl");
-    let mut family_root = record_for_session(&source, "family-root", 1, "user", "root body");
+    let mut family_root =
+        record_for_session(&source, "family-root", 1, "user", "groupneedle root body");
     family_root.root_session_id = Some(family_root.session_id);
     family_root.session_relationship = Some(ProviderNativeSessionRelationship::Root);
-    let child_absent = record_for_session(&source, "family-child", 1, "assistant", "child body");
-    let mut child_positive =
-        record_for_session(&source, "family-child", 2, "assistant", "child witness");
+    let child_absent = record_for_session(
+        &source,
+        "family-child",
+        1,
+        "assistant",
+        "groupneedle child body",
+    );
+    let mut child_positive = record_for_session(
+        &source,
+        "family-child",
+        2,
+        "assistant",
+        "groupneedle child witness",
+    );
     child_positive.parent_session_id = Some(family_root.session_id);
     child_positive.root_session_id = Some(family_root.session_id);
     child_positive.session_relationship = Some(ProviderNativeSessionRelationship::Delegated);
-    let mut sibling = record_for_session(&source, "family-sibling", 1, "assistant", "sibling body");
+    let mut sibling = record_for_session(
+        &source,
+        "family-sibling",
+        1,
+        "assistant",
+        "groupneedle sibling body",
+    );
     sibling.parent_session_id = Some(family_root.session_id);
     sibling.root_session_id = Some(family_root.session_id);
     sibling.session_relationship = Some(ProviderNativeSessionRelationship::Delegated);
-    let independent =
-        record_for_session(&source, "independent", 1, "assistant", "independent body");
+    let independent = record_for_session(
+        &source,
+        "independent",
+        1,
+        "assistant",
+        "groupneedle independent body",
+    );
     let records = vec![
         family_root,
         child_absent,
@@ -962,6 +984,66 @@ fn semantic_and_hybrid_share_coalesced_family_shaping_and_remain_indeterminate()
             SearchDiversificationStatus::Indeterminate
         );
         assert_eq!(collection.diversification.changed_final_top_n, None);
+    }
+}
+
+#[test]
+fn grouped_search_decodes_only_final_winners_for_every_backend() {
+    let temp = tempdir().unwrap();
+    let (index, records) = publish_grouped_search(temp.path());
+    let semantic_candidates = records
+        .iter()
+        .enumerate()
+        .map(|(position, record)| {
+            let event = index
+                .event_by_id(record.event_id.as_uuid())
+                .unwrap()
+                .unwrap();
+            EventSearchCandidate {
+                event: RankedEventRef::from(&event),
+                score: (records.len() - position) as f32,
+            }
+        })
+        .collect::<Vec<_>>();
+    let semantic = FixedSemanticPort(semantic_candidates);
+    let query = PinnedHistoryQuery::new(&index, None);
+
+    for backend in [
+        SearchBackend::Lexical,
+        SearchBackend::Semantic,
+        SearchBackend::Hybrid,
+    ] {
+        let mut request = lexical_request();
+        request.query = "groupneedle".to_owned();
+        request.events = false;
+        request.limit = 3;
+        request.backend = Some(backend);
+        request.semantic_weight = 0.5;
+        let plan = plan_search(
+            request,
+            SearchPolicy {
+                default_backend: backend,
+                semantic: SemanticAvailability::Available,
+            },
+        )
+        .unwrap();
+
+        ctx_history_index_query::reset_stored_event_record_materializations();
+        ctx_history_index_query::reset_stored_core_event_record_materializations();
+        ctx_history_index_query::reset_core_record_decodes();
+        let search = query.search(plan, None, &semantic).unwrap();
+        let winners = search.collection.result_window.hits.len();
+
+        assert_eq!(winners, 3);
+        assert_eq!(
+            ctx_history_index_query::stored_event_record_materializations(),
+            0
+        );
+        assert_eq!(
+            ctx_history_index_query::stored_core_event_record_materializations(),
+            winners
+        );
+        assert_eq!(ctx_history_index_query::core_record_decodes(), winners);
     }
 }
 
