@@ -246,19 +246,60 @@ fn unmanaged_installation_with_active_state_remains_fenced() -> Result<()> {
 }
 
 #[test]
-fn scheduler_state_path_is_installation_scoped() {
+fn scheduler_state_path_remains_installation_scoped() {
     let install = Path::new("/opt/ctx/bin/ctx");
     assert_eq!(
         state_path(install),
         Path::new("/opt/ctx/bin/.ctx.upgrade-state.json")
     );
+}
+
+#[test]
+fn daemon_coordination_is_user_scoped_by_canonical_executable() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let user_state = temp.path().join("user-state");
+    let first_bin = temp.path().join("first").join("bin");
+    let second_bin = temp.path().join("second").join("bin");
+    fs::create_dir_all(&first_bin)?;
+    fs::create_dir_all(&second_bin)?;
+    let first = first_bin.join("ctx");
+    let second = second_bin.join("ctx");
+    fs::write(&first, b"first ctx executable")?;
+    fs::write(&second, b"second ctx executable")?;
+
+    let first_paths = installation_daemon_coordination_paths_in(&user_state, &first)?;
+    let aliased_first = first_bin.join("..").join("bin").join("ctx");
     assert_eq!(
-        installation_daemon_coordination_paths_for(install),
-        (
-            PathBuf::from("/opt/ctx/bin/.ctx.daemon-quiescence.lock"),
-            PathBuf::from("/opt/ctx/bin/.ctx.daemon-quiescence-acks"),
-        )
+        installation_daemon_coordination_paths_in(&user_state, &aliased_first)?,
+        first_paths,
+        "path aliases for one executable must share coordination"
     );
+    assert_eq!(
+        first_paths.0.file_name().and_then(|name| name.to_str()),
+        Some(DAEMON_QUIESCENCE_LOCK_FILE)
+    );
+    assert_eq!(
+        first_paths.1.file_name().and_then(|name| name.to_str()),
+        Some(DAEMON_QUIESCENCE_ACK_DIR)
+    );
+    let expected_coordination_root = user_state.join(DAEMON_INSTALLATION_STATE_DIR);
+    assert_eq!(
+        first_paths.0.parent().and_then(Path::parent),
+        Some(expected_coordination_root.as_path())
+    );
+
+    let second_paths = installation_daemon_coordination_paths_in(&user_state, &second)?;
+    assert_ne!(
+        first_paths.0.parent(),
+        second_paths.0.parent(),
+        "distinct executable paths must not share coordination"
+    );
+    assert_eq!(
+        state_path(&first),
+        first.with_file_name(".ctx.upgrade-state.json"),
+        "daemon coordination must not move scheduler state"
+    );
+    Ok(())
 }
 
 #[test]

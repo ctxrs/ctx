@@ -137,11 +137,9 @@ fn failed_restart_intent_write_preserves_partial_acknowledgement() -> Result<()>
     let lock = open_installation_daemon_quiescence_lock_at(&lock_path)?;
     fs2::FileExt::lock_shared(&lock)?;
     let lease = InstallationDaemonLease {
-        coordination: Some(InstallationDaemonCoordination {
-            lock,
-            registration_path: registration_path.clone(),
-            registration_id: "partial".to_owned(),
-        }),
+        lock,
+        registration_path: registration_path.clone(),
+        registration_id: "partial".to_owned(),
         data_root: blocked_root,
         trigger: DaemonTriggerCommandArg::Search,
         loop_interval_seconds: None,
@@ -650,8 +648,10 @@ fn durable_daemon_disable_wins_over_handoff_restart() -> Result<()> {
         DaemonTriggerCommandArg::Setup,
         "ua_01890f3e-2c80-7000-8000-000000000005",
     )?;
+    let replacement = temp.path().join("replacement-ctx");
+    fs::write(&replacement, b"replacement ctx image")?;
     begin_daemon_upgrade_handoff(temp.path(), "ua_01890f3e-2c80-7000-8000-000000000005")?
-        .resume_with(Path::new("definitely-not-a-real-ctx-executable"))?;
+        .resume_with(&replacement)?;
     assert_eq!(
         read_daemon_upgrade_handoff(temp.path())
             .and_then(|value| value["phase"].as_str().map(ToOwned::to_owned))

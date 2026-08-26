@@ -5,7 +5,9 @@ use ctx_cli_presentation::upgrade::{
     render_auto_mode, render_error, render_outcome, UpgradeArgs, UpgradeCommand,
 };
 use ctx_upgrade_engine::{
-    run_hosted_transaction, HostedTransactionArgs, UpgradeOutcome, UpgradePolicy,
+    managed_install_marker_for_current_exe, run_hosted_transaction,
+    unmanaged_install_conversion_guidance, HostedTransactionArgs, ManagedInstallMarker,
+    UpgradeOutcome, UpgradePolicy,
 };
 
 use crate::{
@@ -78,7 +80,8 @@ pub fn run(
             return Ok(());
         }
         let current = AppConfig::load(&data_root)?;
-        if !current.auto_upgrade_enabled() || current.persistent_automatic_upgrade_driver_enabled()
+        if !super::effective_auto_upgrade_enabled(&current)
+            || current.persistent_automatic_upgrade_driver_enabled()
         {
             return Ok(());
         }
@@ -127,6 +130,7 @@ pub fn run(
                 )
             }
             Some(UpgradeCommand::Enable) => {
+                require_managed_install_for_auto_upgrade()?;
                 insert_upgrade_simple_analytics(telemetry, UpgradeStatus::AutoEnabled);
                 set_auto_mode(&data_root, "apply")?;
                 render_auto_mode(true, args.format.is_json(), ui)
@@ -148,6 +152,17 @@ pub fn run(
         insert_upgrade_error_analytics(telemetry, error);
     }
     render_error(result, !args.json_output(), ui)
+}
+
+fn require_managed_install_for_auto_upgrade() -> Result<()> {
+    match managed_install_marker_for_current_exe()? {
+        ManagedInstallMarker::Valid(_) => Ok(()),
+        ManagedInstallMarker::Absent => Err(anyhow!(
+            "ctx is not installed by the hosted installer; {}",
+            unmanaged_install_conversion_guidance()
+        )),
+        ManagedInstallMarker::Invalid { reason } => Err(anyhow!(reason)),
+    }
 }
 
 fn validate_hidden_upgrade_protocol(args: &UpgradeArgs) -> Result<()> {

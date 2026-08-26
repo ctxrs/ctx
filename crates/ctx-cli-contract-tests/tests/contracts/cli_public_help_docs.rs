@@ -914,7 +914,7 @@ fn docs_commands_expose_embedded_docs_and_man_pages() {
 }
 
 #[test]
-fn status_and_doctor_report_effective_upgrade_auto_mode() {
+fn status_and_doctor_report_external_install_auto_off() {
     let temp = tempdir();
     for command in ["status", "doctor"] {
         let default = json_output(
@@ -922,8 +922,16 @@ fn status_and_doctor_report_effective_upgrade_auto_mode() {
                 .args([command, "--format=json"])
                 .env_remove("CTX_UPGRADE_AUTO"),
         );
-        assert_eq!(default["upgrade"]["auto"], "apply");
-        assert_eq!(default["upgrade"]["auto_enabled"], true);
+        assert_eq!(default["upgrade"]["auto"], "off");
+        assert_eq!(default["upgrade"]["auto_enabled"], false);
+
+        let process_enable = json_output(
+            ctx(&temp)
+                .args([command, "--format=json"])
+                .env("CTX_UPGRADE_AUTO", "apply"),
+        );
+        assert_eq!(process_enable["upgrade"]["auto"], "off");
+        assert_eq!(process_enable["upgrade"]["auto_enabled"], false);
 
         let process_opt_out = json_output(
             ctx(&temp)
@@ -995,6 +1003,8 @@ fn status_and_doctor_require_safe_handoff_for_absent_and_invalid_markers() {
     for command in ["status", "doctor"] {
         let invalid = json_output(ctx(&temp).args([command, "--format=json"]));
         assert_eq!(invalid["upgrade"]["install"]["marker"], "corrupt");
+        assert_eq!(invalid["upgrade"]["auto"], "off");
+        assert_eq!(invalid["upgrade"]["auto_enabled"], false);
         let error = invalid["upgrade"]["install"]["error"].as_str().unwrap();
         assert!(error.contains("parse ctx install marker"), "{error}");
         assert_safe_platform_install_action(error);
@@ -1014,28 +1024,30 @@ fn status_and_doctor_require_safe_handoff_for_absent_and_invalid_markers() {
             assert_safe_platform_install_action(finding);
         }
     }
+
+    let stderr = failure_stderr(ctx(&temp).args(["upgrade", "enable"]));
+    assert!(stderr.contains("parse ctx install marker"), "{stderr}");
+    assert_safe_platform_install_action(&stderr);
+    assert!(!data_root(&temp).join("config.toml").exists());
 }
 
 #[test]
-fn upgrade_auto_mode_has_one_human_or_machine_receipt() {
+fn external_install_upgrade_enable_fails_without_writing_config() {
     let temp = tempdir();
-    let human = ctx(&temp)
+    let failed = ctx(&temp)
         .args(["upgrade", "enable"])
         .assert()
-        .success()
+        .failure()
         .get_output()
         .clone();
-    let stdout = String::from_utf8(human.stdout).unwrap();
-    assert_eq!(stdout.matches("Automatic upgrades enabled").count(), 1);
-    assert!(!stdout.contains("ctx automatic upgrade"), "{stdout}");
-    assert!(human.stderr.is_empty(), "{:?}", human.stderr);
-
-    let enabled = json_output(ctx(&temp).args(["upgrade", "--format=json", "enable"]));
-    assert_eq!(enabled["schema_version"], 1);
-    assert_eq!(enabled["command"], "upgrade_enable");
-    assert_eq!(enabled["status"], "enabled");
-    assert_eq!(enabled["auto"], "apply");
-    assert_eq!(enabled["enabled"], true);
+    assert!(failed.stdout.is_empty(), "{:?}", failed.stdout);
+    let stderr = String::from_utf8(failed.stderr).unwrap();
+    assert!(
+        stderr.contains("ctx is not installed by the hosted installer"),
+        "{stderr}"
+    );
+    assert_safe_platform_install_action(&stderr);
+    assert!(!data_root(&temp).join("config.toml").exists());
 
     let disabled = json_output(ctx(&temp).args(["upgrade", "--format=json", "disable"]));
     assert_eq!(disabled["schema_version"], 1);

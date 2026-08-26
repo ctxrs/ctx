@@ -57,12 +57,12 @@ pub(super) fn render_status(
             "reason": format!("{error:#}"),
         }),
     };
-    let auto_mode = config.auto_upgrade_mode();
+    let auto_mode = super::super::effective_auto_upgrade_mode(config);
     ctx_cli_presentation::upgrade::render_status(
         ctx_cli_presentation::upgrade::UpgradeStatusView {
             current_version,
             auto_upgrade: auto_mode.as_str(),
-            auto_enabled: config.auto_upgrade_enabled(),
+            auto_enabled: auto_mode.enabled(),
             state: &state,
             install: &install,
         },

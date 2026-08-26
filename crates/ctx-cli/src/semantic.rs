@@ -115,7 +115,7 @@ pub(crate) fn initialize() -> Result<()> {
 fn daemon_cli_config<'a>(config: &'a crate::config::AppConfig) -> DaemonCliConfig<'a> {
     DaemonCliConfig::new(
         config.analytics.enabled,
-        config.auto_upgrade_enabled(),
+        crate::upgrade::automatic_upgrade_eligible_hint(config),
         Cow::Borrowed(config.upgrade.channel.as_str()),
         config.upgrade.interval,
         DaemonConfig {
@@ -134,7 +134,7 @@ fn daemon_cli_config<'a>(config: &'a crate::config::AppConfig) -> DaemonCliConfi
 
 fn owned_daemon_cli_config(config: crate::config::AppConfig) -> DaemonCliConfig<'static> {
     let analytics_enabled = config.analytics.enabled;
-    let automatic_upgrade_enabled = config.auto_upgrade_enabled();
+    let automatic_upgrade_enabled = crate::upgrade::automatic_upgrade_eligible_hint(&config);
     let upgrade_interval = config.upgrade.interval;
     let daemon_enabled = config.automatic_indexing_enabled();
     let daemon_mode = match config.daemon.mode {

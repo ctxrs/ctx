@@ -24,30 +24,20 @@ pub fn prepare_daemon_uninstall(data_root: &Path) -> Result<Value> {
         .context("remove canonical ctx daemon supervisor before uninstall")?;
 
     let installation_deadline = Instant::now() + DAEMON_INSTALLATION_QUIESCE_TIMEOUT;
-    // Unmanaged installations never hold the installation-wide quiescence
-    // lock - their daemons run uncoordinated - and the executable directory
-    // may be a read-only package-manager directory where the lock cannot be
-    // created. Per-root quiescing above stays authoritative for their
-    // daemons, so only the exclusive acquisition is skipped.
-    let installation_quiescence = if ctx_upgrade_engine::current_exe_is_unmanaged() {
+    let installation_quiescence = loop {
+        reject_undiscovered_installation_roots(&roots)?;
         quiesce_daemon_roots(&roots, &expected_executable)?;
-        None
-    } else {
-        Some(loop {
-            reject_undiscovered_installation_roots(&roots)?;
-            quiesce_daemon_roots(&roots, &expected_executable)?;
-            if let Some(quiescence) =
-                crate::daemon_autostart::installation::try_acquire_installation_daemon_quiescence()?
-            {
-                break quiescence;
-            }
-            if Instant::now() >= installation_deadline {
-                return Err(anyhow!(
-                    "timed out waiting for installation-wide ctx daemon quiescence; keep the ctx binary and retry `ctx daemon disable --prepare-uninstall`"
-                ));
-            }
-            std::thread::sleep(DAEMON_UPGRADE_POLL_INTERVAL);
-        })
+        if let Some(quiescence) =
+            crate::daemon_autostart::installation::try_acquire_installation_daemon_quiescence()?
+        {
+            break quiescence;
+        }
+        if Instant::now() >= installation_deadline {
+            return Err(anyhow!(
+                "timed out waiting for installation-wide ctx daemon quiescence; keep the ctx binary and retry `ctx daemon disable --prepare-uninstall`"
+            ));
+        }
+        std::thread::sleep(DAEMON_UPGRADE_POLL_INTERVAL);
     };
 
     reject_undiscovered_installation_roots(&roots)?;

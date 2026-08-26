@@ -5,6 +5,11 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt as _;
+#[cfg(windows)]
+use std::os::windows::ffi::OsStrExt as _;
+
 use anyhow::{anyhow, Context, Result};
 use ctx_history_core::utc_now;
 use ctx_history_platform::platform_security::restrict_private_file_handle;
@@ -21,6 +26,7 @@ pub const STATE_FILE: &str = "upgrade-state.json";
 pub const STATE_SCHEMA_VERSION: u64 = 1;
 const DAEMON_QUIESCENCE_LOCK_FILE: &str = "daemon-quiescence.lock";
 const DAEMON_QUIESCENCE_ACK_DIR: &str = "daemon-quiescence-acks";
+const DAEMON_INSTALLATION_STATE_DIR: &str = "daemon-installations";
 const INITIAL_FAILURE_BACKOFF: Duration = Duration::from_secs(60);
 const MAX_FAILURE_BACKOFF: Duration = Duration::from_secs(6 * 60 * 60);
 const DUE_HINT_STATE_MAX_BYTES: u64 = 64 * 1024;
@@ -324,22 +330,55 @@ pub fn terminal_installation_upgrade_attempt_id() -> Result<Option<String>> {
 
 pub fn installation_daemon_coordination_paths() -> Result<(PathBuf, PathBuf)> {
     let install_path = super::install::current_install_path()?;
-    Ok(installation_daemon_coordination_paths_for(&install_path))
+    installation_daemon_coordination_paths_for(&install_path)
 }
 
 pub fn installation_executable_path() -> Result<PathBuf> {
     super::install::current_install_path()
 }
 
-pub fn installation_daemon_coordination_paths_for(install_path: &Path) -> (PathBuf, PathBuf) {
-    let name = install_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("ctx");
-    (
-        install_path.with_file_name(format!(".{name}.{DAEMON_QUIESCENCE_LOCK_FILE}")),
-        install_path.with_file_name(format!(".{name}.{DAEMON_QUIESCENCE_ACK_DIR}")),
-    )
+pub fn installation_daemon_coordination_paths_for(
+    install_path: &Path,
+) -> Result<(PathBuf, PathBuf)> {
+    let user_state_root = ctx_history_platform::managed_data_root()
+        .context("resolve environment-independent ctx user state")?;
+    installation_daemon_coordination_paths_in(&user_state_root, install_path)
+}
+
+fn installation_daemon_coordination_paths_in(
+    user_state_root: &Path,
+    install_path: &Path,
+) -> Result<(PathBuf, PathBuf)> {
+    let canonical = fs::canonicalize(install_path)
+        .with_context(|| format!("canonicalize ctx executable {}", install_path.display()))?;
+    let namespace = executable_path_namespace(&canonical);
+    let installation_root = user_state_root
+        .join(DAEMON_INSTALLATION_STATE_DIR)
+        .join(namespace);
+    Ok((
+        installation_root.join(DAEMON_QUIESCENCE_LOCK_FILE),
+        installation_root.join(DAEMON_QUIESCENCE_ACK_DIR),
+    ))
+}
+
+#[cfg(unix)]
+fn executable_path_namespace(path: &Path) -> String {
+    super::sha256_hex(path.as_os_str().as_bytes())
+}
+
+#[cfg(windows)]
+fn executable_path_namespace(path: &Path) -> String {
+    let bytes = path
+        .as_os_str()
+        .encode_wide()
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>();
+    super::sha256_hex(&bytes)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn executable_path_namespace(path: &Path) -> String {
+    super::sha256_hex(path.to_string_lossy().as_bytes())
 }
 
 pub(super) fn begin_manual_attempt_locked(

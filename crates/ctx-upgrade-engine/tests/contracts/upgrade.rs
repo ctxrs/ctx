@@ -9,6 +9,9 @@ mod runtime_publication;
 #[path = "upgrade/release_validation.rs"]
 mod release_validation;
 
+#[path = "upgrade/unmanaged.rs"]
+mod unmanaged;
+
 fn assert_safe_platform_install_action(action: &str) {
     assert!(
         action.contains("ctx daemon disable --prepare-uninstall --format=json"),
@@ -271,11 +274,15 @@ fn upgrade_status_requires_safe_handoff_for_absent_and_invalid_markers() {
 
     let absent = json_output(ctx(&temp).args(["upgrade", "status", "--format=json"]));
     assert_eq!(absent["install"]["marker"], "absent");
+    assert_eq!(absent["auto_upgrade"]["mode"], "off");
+    assert_eq!(absent["auto_upgrade"]["enabled"], false);
     assert_safe_platform_install_action(absent["install"]["action"].as_str().unwrap());
 
     fs::write(hosted_install_marker_path(&binary), b"{not-json").unwrap();
     let invalid = json_output(ctx(&temp).args(["upgrade", "status", "--format=json"]));
     assert_eq!(invalid["install"]["marker"], "corrupt");
+    assert_eq!(invalid["auto_upgrade"]["mode"], "off");
+    assert_eq!(invalid["auto_upgrade"]["enabled"], false);
     let reason = invalid["install"]["reason"].as_str().unwrap();
     assert!(reason.contains("parse ctx install marker"), "{reason}");
     assert_safe_platform_install_action(reason);
@@ -298,6 +305,8 @@ fn upgrade_status_requires_safe_handoff_for_absent_and_invalid_markers() {
 fn upgrade_enable_and_disable_persist_private_config_with_analytics_disabled() {
     for (command_name, expected_mode) in [("enable", "apply"), ("disable", "off")] {
         let temp = tempdir();
+        let binary = bind_test_ctx_binary(&temp);
+        unmanaged::install_managed_contract_marker(&binary);
         let first = temp.path().join(format!("{command_name}-state"));
         let second = first.join("nested");
         let data_root = second.join("ctx");
@@ -329,6 +338,8 @@ fn upgrade_enable_and_disable_repair_legacy_config_permissions() {
     for (command_name, expected_mode) in [("enable", "apply"), ("disable", "off")] {
         for legacy_permissions in [0o400, 0o444, 0o644, 0o664] {
             let temp = tempdir();
+            let binary = bind_test_ctx_binary(&temp);
+            unmanaged::install_managed_contract_marker(&binary);
             let data_root = temp
                 .path()
                 .join(format!("{command_name}-{legacy_permissions:o}-state"));
@@ -362,6 +373,8 @@ fn upgrade_enable_and_disable_reject_symlinked_config_without_changing_target() 
 
     for command_name in ["enable", "disable"] {
         let temp = tempdir();
+        let binary = bind_test_ctx_binary(&temp);
+        unmanaged::install_managed_contract_marker(&binary);
         let data_root = temp.path().join(format!("{command_name}-state"));
         let target = temp.path().join(format!("{command_name}-outside.toml"));
         let config = data_root.join("config.toml");
@@ -394,6 +407,8 @@ fn upgrade_enable_creates_protected_nested_root_and_config_on_windows() {
     use ctx_history_platform::platform_security::{verify_private_directory, verify_private_file};
 
     let temp = tempdir();
+    let binary = bind_test_ctx_binary(&temp);
+    unmanaged::install_managed_contract_marker(&binary);
     let first = temp.path().join("upgrade-state");
     let nested = first.join("nested");
     let data_root = nested.join("ctx");
@@ -1353,168 +1368,6 @@ fn upgrade_lock_rejects_a_live_os_lock_owner() {
     assert_eq!(
         unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(&lock), libc::LOCK_UN) },
         0
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn upgrade_rejects_unmanaged_install_before_network() {
-    let temp = tempdir();
-    let binary = managed_candidate(&temp, "ia_removed_unmanaged_marker");
-    fs::remove_file(install_marker_path(&binary)).unwrap();
-    let stderr = failure_stderr(
-        ctx_from_binary(&temp, &binary)
-            .args(["upgrade", "--dry-run"])
-            .env(
-                "CTX_RELEASE_METADATA_URL",
-                "file:///definitely/not/a/real/ctx-release-metadata.env",
-            )
-            .env(
-                "CTX_RELEASE_METADATA_SIGNATURE_URL",
-                "file:///definitely/not/a/real/ctx-release-metadata.env.sig",
-            ),
-    );
-    assert!(
-        stderr.contains("ctx is not installed by the hosted installer"),
-        "{stderr}"
-    );
-    assert!(
-        !stderr.contains("download release metadata"),
-        "unmanaged installs should fail before metadata fetch: {stderr}"
-    );
-}
-
-/// The metadata environment `fake_release_env` would set, without its
-/// `CTX_UPGRADE_TEST_TARGET` redirect: the running executable itself stays
-/// the upgrade subject.
-#[cfg(unix)]
-fn unmanaged_release_env<'a>(command: &'a mut Command, release: &FakeRelease) -> &'a mut Command {
-    command
-        .env("CTX_RELEASE_METADATA_URL", file_url(&release.metadata))
-        .env(
-            "CTX_RELEASE_METADATA_SIGNATURE_URL",
-            file_url(&release.signature),
-        )
-        .env(
-            "CTX_RELEASE_METADATA_PUBLIC_KEY_PEM",
-            TEST_RELEASE_PUBLIC_KEY_PEM,
-        )
-}
-
-#[cfg(unix)]
-fn assert_unmanaged_check_outcome(output: &Value) {
-    assert_eq!(output["status"], json!("available"), "{output:#}");
-    assert_eq!(output["update_available"], json!(true), "{output:#}");
-    assert_eq!(output["managed"], json!(false), "{output:#}");
-    assert!(
-        output["warnings"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|warning| warning
-                .as_str()
-                .unwrap_or_default()
-                .contains("ctx is not installed by the hosted installer")),
-        "missing unmanaged warning: {output:#}"
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn unmanaged_read_only_installation_check_is_lock_free_and_stateless() {
-    let temp = tempdir();
-    let release = fake_release(&temp, "9.9.9");
-    let _runtime = add_fake_release_runtime(&temp, &release);
-    let binary = managed_candidate(&temp, "ia_readonly_unmanaged_check");
-    fs::remove_file(install_marker_path(&binary)).unwrap();
-    let bin_dir = binary.parent().unwrap();
-    fs::set_permissions(bin_dir, fs::Permissions::from_mode(0o555)).unwrap();
-    struct Restore<'a>(&'a Path);
-    impl Drop for Restore<'_> {
-        fn drop(&mut self) {
-            let _ = fs::set_permissions(self.0, fs::Permissions::from_mode(0o755));
-        }
-    }
-    let _restore = Restore(bin_dir);
-
-    let output = json_output(unmanaged_release_env(
-        ctx_from_binary(&temp, &binary).args(["upgrade", "check", "--format=json"]),
-        &release,
-    ));
-
-    assert_unmanaged_check_outcome(&output);
-    assert!(
-        !installation_lock_path(&binary).exists(),
-        "unmanaged check must not lock beside the executable"
-    );
-    assert!(
-        !scheduler_state_path(&binary).exists(),
-        "unmanaged check must not write scheduler state beside the executable"
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn unmanaged_writable_installation_check_leaves_no_installation_files() {
-    let temp = tempdir();
-    let release = fake_release(&temp, "9.9.9");
-    let _runtime = add_fake_release_runtime(&temp, &release);
-    let binary = managed_candidate(&temp, "ia_writable_unmanaged_check");
-    fs::remove_file(install_marker_path(&binary)).unwrap();
-
-    let output = json_output(unmanaged_release_env(
-        ctx_from_binary(&temp, &binary).args(["upgrade", "check", "--format=json"]),
-        &release,
-    ));
-
-    assert_unmanaged_check_outcome(&output);
-    assert!(
-        !installation_lock_path(&binary).exists(),
-        "unmanaged check must not lock beside the executable"
-    );
-    assert!(
-        !scheduler_state_path(&binary).exists(),
-        "unmanaged check must not write scheduler state beside the executable"
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn unmanaged_read_only_installation_apply_reports_unmanaged_guidance() {
-    let temp = tempdir();
-    let release = fake_release(&temp, "9.9.9");
-    let binary = managed_candidate(&temp, "ia_readonly_unmanaged_apply");
-    fs::remove_file(install_marker_path(&binary)).unwrap();
-    let bin_dir = binary.parent().unwrap();
-    fs::set_permissions(bin_dir, fs::Permissions::from_mode(0o555)).unwrap();
-    struct Restore<'a>(&'a Path);
-    impl Drop for Restore<'_> {
-        fn drop(&mut self) {
-            let _ = fs::set_permissions(self.0, fs::Permissions::from_mode(0o755));
-        }
-    }
-    let _restore = Restore(bin_dir);
-
-    let stderr = failure_stderr(unmanaged_release_env(
-        ctx_from_binary(&temp, &binary).args(["upgrade", "--dry-run"]),
-        &release,
-    ));
-
-    assert!(
-        stderr.contains("ctx is not installed by the hosted installer"),
-        "{stderr}"
-    );
-    assert!(
-        !stderr.contains("download release metadata"),
-        "unmanaged apply must fail before metadata fetch: {stderr}"
-    );
-    assert!(
-        !stderr.contains("owner-safe"),
-        "unmanaged apply must not fail on executable-directory safety: {stderr}"
-    );
-    assert!(
-        !installation_lock_path(&binary).exists(),
-        "unmanaged apply must not lock beside the executable"
     );
 }
 
