@@ -31,8 +31,21 @@ impl CodexNativeScanner {
 
         self.counters.structural_json_parses =
             self.counters.structural_json_parses.saturating_add(1);
-        let Some(probe) = classify_codex_record(record)
-            .ok()
+        let classified = classify_codex_record(record).ok();
+        if classified
+            .as_ref()
+            .is_some_and(|probe| probe.lineage_malformed() && probe.item_completed_discriminator())
+        {
+            self.reject_record(
+                physical,
+                Some("item_completed"),
+                SourceBackedRecordRejectionClass::MalformedRecord,
+                "Codex item_completed envelope selectors are ambiguous",
+                false,
+            );
+            return Ok(CodexRecordProjection::default());
+        }
+        let Some(probe) = classified
             .filter(|probe| !probe.lineage_malformed())
             .or_else(|| classify_after_selector_ambiguity(record))
         else {
@@ -115,6 +128,7 @@ impl CodexNativeScanner {
                 let mut built = match build_source_backed_event_row(
                     physical.raw_ordinal,
                     kind,
+                    &owner.native_session_id,
                     &retained,
                     record,
                 )? {
@@ -122,6 +136,21 @@ impl CodexNativeScanner {
                     Err(CodexRetainedNonMaterialized::ValidUnmaterializable) => {
                         self.counters.ignored_records =
                             self.counters.ignored_records.saturating_add(1);
+                        return Ok(CodexRecordProjection::default());
+                    }
+                    Err(CodexRetainedNonMaterialized::KnownNonMaterialized) => {
+                        self.counters.ignored_records =
+                            self.counters.ignored_records.saturating_add(1);
+                        return Ok(CodexRecordProjection::default());
+                    }
+                    Err(CodexRetainedNonMaterialized::Unsupported) => {
+                        self.reject_record(
+                            physical,
+                            Some(payload_type),
+                            SourceBackedRecordRejectionClass::UnsupportedRecord,
+                            "Codex item_completed variant is not projected; response_item remains authoritative where available",
+                            false,
+                        );
                         return Ok(CodexRecordProjection::default());
                     }
                     Err(CodexRetainedNonMaterialized::Malformed) => {
@@ -535,6 +564,7 @@ fn codex_record_payload_type(class: CodexRecordClass) -> &'static str {
         CodexRecordClass::Retained(CodexRetainedKind::Reasoning) => "reasoning",
         CodexRecordClass::Retained(CodexRetainedKind::Compacted) => "compacted",
         CodexRecordClass::Retained(CodexRetainedKind::ToolCall) => "tool_call",
+        CodexRecordClass::Retained(CodexRetainedKind::ItemCompleted) => "item_completed",
         CodexRecordClass::ExcludedResult(CodexResultKind::FunctionCallOutput) => {
             "function_call_output"
         }

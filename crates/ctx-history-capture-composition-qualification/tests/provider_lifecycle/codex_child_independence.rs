@@ -17,7 +17,7 @@ use ctx_history_core::{
 };
 use ctx_history_index::{GenerationWriter, RevalidationTarget, WriterOptions};
 
-const CURRENT_PARSER_REVISION: &str = "codex-nativepath-core-activity-v9-record-coverage";
+const CURRENT_PARSER_REVISION: &str = "codex-nativepath-core-activity-v10-item-completed-plan";
 
 #[path = "codex_child_independence/quarantine.rs"]
 mod quarantine;
@@ -718,6 +718,8 @@ fn source_snapshot(
     }
 }
 
+#[path = "codex_child_independence/item_completed.rs"]
+mod item_completed;
 #[path = "codex_child_independence/projection_behaviors.rs"]
 mod projection_behaviors;
 #[path = "codex_child_independence/terminal_results.rs"]
