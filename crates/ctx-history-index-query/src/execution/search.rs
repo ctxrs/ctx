@@ -1,6 +1,4 @@
 use super::*;
-use crate::records::stored_event_record_with_size;
-
 impl EventCandidateQueryReceipt {
     fn record_query_execution(&mut self) -> Result<()> {
         self.query_executions = self
@@ -16,22 +14,6 @@ impl EventCandidateQueryReceipt {
             .collector_hits
             .checked_add(hits)
             .ok_or(IndexError::CountOverflow)?;
-        Ok(())
-    }
-
-    fn record_decoded(&mut self, encoded_core_bytes: usize) -> Result<()> {
-        let encoded_core_bytes =
-            u64::try_from(encoded_core_bytes).map_err(|_| IndexError::CountOverflow)?;
-        let records_decoded = self
-            .records_decoded
-            .checked_add(1)
-            .ok_or(IndexError::CountOverflow)?;
-        let encoded_core_bytes_decoded = self
-            .encoded_core_bytes_decoded
-            .checked_add(encoded_core_bytes)
-            .ok_or(IndexError::CountOverflow)?;
-        self.records_decoded = records_decoded;
-        self.encoded_core_bytes_decoded = encoded_core_bytes_decoded;
         Ok(())
     }
 }
@@ -56,6 +38,7 @@ thread_local! {
 const EVENT_RANGE_ORDER_FAST_FIELD: &str = "event_range_order";
 
 mod executor;
+mod semantic_projection;
 
 #[derive(Debug, Clone, Copy)]
 enum ManualLexicalMode<'a> {
@@ -799,23 +782,6 @@ fn next_body_doc(postings: &[Option<SegmentPostings>]) -> Option<DocId> {
         .filter_map(|postings| postings.as_ref().map(|postings| postings.doc()))
         .filter(|doc| *doc != TERMINATED)
         .min()
-}
-
-fn validate_materialized_event(
-    order: ctx_history_index_format::EventRangeOrderKey,
-    event: &EventRecord,
-    fast_event_id: Uuid,
-) -> Result<()> {
-    if event.event_id.as_uuid() != fast_event_id
-        || event.event_id.digest() != order.event_identity_digest()
-        || event.event_sequence != order.event_sequence()
-        || event.occurred_at_unix_ms != order.occurred_at_unix_ms()
-    {
-        return Err(IndexError::InvalidStoredDocumentField(
-            EVENT_RANGE_ORDER_FAST_FIELD,
-        ));
-    }
-    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

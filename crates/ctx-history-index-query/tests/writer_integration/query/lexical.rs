@@ -103,7 +103,7 @@ fn script_aware_analysis_indexes_cjk_and_long_technical_identifiers() {
             .into_iter()
             .map(|candidate| candidate.event.event_id)
             .collect::<Vec<_>>(),
-        vec![cjk.event_id]
+        vec![cjk.event_id.as_uuid()]
     );
     assert_eq!(
         index
@@ -112,7 +112,7 @@ fn script_aware_analysis_indexes_cjk_and_long_technical_identifiers() {
             .into_iter()
             .map(|candidate| candidate.event.event_id)
             .collect::<Vec<_>>(),
-        vec![identifier.event_id]
+        vec![identifier.event_id.as_uuid()]
     );
 }
 
@@ -143,7 +143,7 @@ fn multi_term_search_ranks_full_coverage_before_one_term_partial_matches() {
             .iter()
             .map(|candidate| candidate.event.event_id)
             .collect::<Vec<_>>(),
-        vec![exact.event_id, partial.event_id]
+        vec![exact.event_id.as_uuid(), partial.event_id.as_uuid()]
     );
     let batch = index
         .search_event_candidates_batch("coveragealpha coveragebeta", 10)
@@ -173,12 +173,12 @@ fn multi_term_search_ranks_full_coverage_before_one_term_partial_matches() {
             .unwrap()[0]
             .event
             .event_id,
-        exact.event_id
+        exact.event_id.as_uuid()
     );
 }
 
 #[test]
-fn coverage_ranking_executes_once_and_materializes_each_ranked_candidate_once() {
+fn coverage_ranking_executes_once_and_projects_each_ranked_candidate_without_core() {
     let temp = tempdir().unwrap();
     let source = source("coverage-decode-count.jsonl");
     let full = document(&source, 1, "decodealpha decodebeta decodegamma");
@@ -188,11 +188,11 @@ fn coverage_ranking_executes_once_and_materializes_each_ranked_candidate_once() 
         &format!("{} {}", "decodealpha ".repeat(32), "decodebeta ".repeat(32)),
     );
     let one_term = document(&source, 3, &"decodealpha ".repeat(96));
-    let expected = vec![full.event_id, two_terms.event_id, one_term.event_id];
-    let expected_encoded_core_bytes = [&full, &two_terms, &one_term]
-        .into_iter()
-        .map(|record| u64::try_from(record.encode_stored().unwrap().len()).unwrap())
-        .sum::<u64>();
+    let expected = vec![
+        full.event_id.as_uuid(),
+        two_terms.event_id.as_uuid(),
+        one_term.event_id.as_uuid(),
+    ];
     let index = publish_records(&temp, &source, vec![one_term, two_terms, full]);
 
     ctx_history_index_query::reset_stored_event_record_materializations();
@@ -208,16 +208,13 @@ fn coverage_ranking_executes_once_and_materializes_each_ranked_candidate_once() 
     );
     assert_eq!(
         ctx_history_index_query::stored_event_record_materializations(),
-        candidates.len(),
-        "the manual pass decodes each retained Core record exactly once"
+        0,
+        "the manual pass must retain thin references without decoding Core"
     );
     assert_eq!(observed.receipt.query_executions, 1);
     assert_eq!(observed.receipt.collector_hits, 3);
-    assert_eq!(observed.receipt.records_decoded, 3);
-    assert_eq!(
-        observed.receipt.encoded_core_bytes_decoded,
-        expected_encoded_core_bytes
-    );
+    assert_eq!(observed.receipt.records_decoded, 0);
+    assert_eq!(observed.receipt.encoded_core_bytes_decoded, 0);
 }
 
 #[test]
@@ -245,23 +242,13 @@ fn candidate_query_receipt_needs_no_drop() {
 }
 
 #[test]
-fn candidate_decode_failure_preserves_completed_low_level_work() {
+fn candidate_reference_failure_preserves_completed_low_level_work() {
     let temp = tempdir().unwrap();
     let source = source("partial-failure-receipt.jsonl");
     let first = document(&source, 1, "partialfailurereceiptneedle first");
     let second = document(&source, 2, "partialfailurereceiptneedle second");
-    let encoded_sizes = [&first, &second]
-        .into_iter()
-        .map(|record| {
-            (
-                record.event_id,
-                u64::try_from(record.encode_stored().unwrap().len()).unwrap(),
-            )
-        })
-        .collect::<std::collections::HashMap<_, _>>();
     let index = publish_records(&temp, &source, vec![first, second]);
-    let successful = observed_candidates(&index, "partialfailurereceiptneedle", 2).unwrap();
-    let first_decoded_bytes = encoded_sizes[&successful.candidates[0].event.event_id];
+    observed_candidates(&index, "partialfailurereceiptneedle", 2).unwrap();
 
     ctx_history_index_query::fail_lexical_candidate_materialization_after(1);
     let failure = observed_candidates(&index, "partialfailurereceiptneedle", 2).unwrap_err();
@@ -272,15 +259,12 @@ fn candidate_decode_failure_preserves_completed_low_level_work() {
     ));
     assert_eq!(failure.receipt.query_executions, 1);
     assert_eq!(failure.receipt.collector_hits, 2);
-    assert_eq!(failure.receipt.records_decoded, 1);
-    assert_eq!(
-        failure.receipt.encoded_core_bytes_decoded,
-        first_decoded_bytes
-    );
+    assert_eq!(failure.receipt.records_decoded, 0);
+    assert_eq!(failure.receipt.encoded_core_bytes_decoded, 0);
 }
 
 #[test]
-fn candidate_decode_failure_injection_is_cleared_after_each_query() {
+fn candidate_reference_failure_injection_is_cleared_after_each_query() {
     let temp = tempdir().unwrap();
     let source = source("failure-injection-reset.jsonl");
     let index = publish_records(
@@ -394,8 +378,8 @@ fn timestamps_never_break_equal_relevance_ties() {
     let lexical = index
         .search_event_candidates_batch("stable tie needle", 10)
         .unwrap();
-    assert_eq!(lexical.candidates[0].event.event_id, expected);
-    assert_eq!(lexical.candidates[1].event.event_id, newer);
+    assert_eq!(lexical.candidates[0].event.event_id, expected.as_uuid());
+    assert_eq!(lexical.candidates[1].event.event_id, newer.as_uuid());
 
     let listed = index
         .list_event_candidates_with_filters_batch(
@@ -406,8 +390,8 @@ fn timestamps_never_break_equal_relevance_ties() {
             10,
         )
         .unwrap();
-    assert_eq!(listed.candidates[0].event.event_id, expected);
-    assert_eq!(listed.candidates[1].event.event_id, newer);
+    assert_eq!(listed.candidates[0].event.event_id, expected.as_uuid());
+    assert_eq!(listed.candidates[1].event.event_id, newer.as_uuid());
 }
 
 #[test]
@@ -443,7 +427,7 @@ fn exact_boundary_matches_exhaustive_order_and_decodes_only_possible_winners() {
         compact_preferred.event_id.as_uuid() < exact_winner.event_id.as_uuid(),
         "the compact UUID alone would select the wrong limit-one winner"
     );
-    let exact_winner_id = exact_winner.event_id;
+    let exact_winner_id = exact_winner.event_id.as_uuid();
 
     let index = publish_records_in_one_segment(
         &temp,
@@ -473,13 +457,116 @@ fn exact_boundary_matches_exhaustive_order_and_decodes_only_possible_winners() {
 }
 
 #[test]
+fn bounded_top_k_is_the_exact_exhaustive_prefix_across_ties_and_filters() {
+    let temp = tempdir().unwrap();
+    let source = source("exact-filtered-top-k-oracle.jsonl");
+    let mut records = Vec::new();
+    let mut session_ids = Vec::new();
+    for index in 0_u8..12 {
+        let mut record = document_for_session(
+            &source,
+            &format!("top-k-session-{index}"),
+            u64::from(index) + 1,
+            "exact filtered top k oracle needle",
+        );
+        let mut digest = [0x30; 32];
+        digest[0] = 11 - index;
+        digest[31] = index;
+        record = with_event_identity_digest(record, digest);
+        record.occurred_at_unix_ms = Some(10_000 + i64::from(index));
+        if index % 2 == 0 {
+            add_literal_fact(
+                &mut record,
+                LiteralFactKind::File,
+                format!("src/oracle-{index}.rs"),
+            );
+        }
+        session_ids.push(record.session_id.as_uuid());
+        records.push(record);
+    }
+    records.reverse();
+    let index = publish_records(&temp, &source, records);
+    let filters = [
+        EventSearchFilters::default(),
+        EventSearchFilters {
+            file: Some("oracle-".to_owned()),
+            ..EventSearchFilters::default()
+        },
+        EventSearchFilters {
+            since_unix_ms: Some(10_006),
+            ..EventSearchFilters::default()
+        },
+        EventSearchFilters {
+            excluded_session_ids: vec![session_ids[1], session_ids[4], session_ids[9]],
+            ..EventSearchFilters::default()
+        },
+        EventSearchFilters {
+            file: Some("oracle-".to_owned()),
+            since_unix_ms: Some(10_004),
+            excluded_session_ids: vec![session_ids[6]],
+            ..EventSearchFilters::default()
+        },
+        EventSearchFilters {
+            provider: Some("custom".to_owned()),
+            ..EventSearchFilters::default()
+        },
+    ];
+
+    for filter in filters {
+        let exhaustive = index
+            .search_event_candidates_with_filters_batch(
+                "exact filtered top k oracle needle",
+                &filter,
+                12,
+            )
+            .unwrap();
+        assert!(exhaustive.complete);
+        assert!(exhaustive.candidate_set_exhaustive);
+        let exact_order = exhaustive
+            .candidates
+            .iter()
+            .map(|candidate| {
+                (
+                    candidate.event.event_identity_digest,
+                    candidate.score.to_bits(),
+                    candidate.coverage,
+                )
+            })
+            .collect::<Vec<_>>();
+        for limit in 1..=12 {
+            let bounded = index
+                .search_event_candidates_with_filters_batch(
+                    "exact filtered top k oracle needle",
+                    &filter,
+                    limit,
+                )
+                .unwrap();
+            assert!(bounded.complete);
+            let observed = bounded
+                .candidates
+                .iter()
+                .map(|candidate| {
+                    (
+                        candidate.event.event_identity_digest,
+                        candidate.score.to_bits(),
+                        candidate.coverage,
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(observed, exact_order[..exact_order.len().min(limit)]);
+            assert_eq!(bounded.candidate_set_exhaustive, exact_order.len() <= limit);
+        }
+    }
+}
+
+#[test]
 fn better_primary_rank_replacement_decodes_once_and_worse_rank_does_not() {
     let temp = tempdir().unwrap();
     let source = source("exact-primary-boundary.jsonl");
     let initial = document(&source, 1, "primaryalpha");
     let better = document(&source, 2, "primaryalpha primarybeta");
     let worse = document(&source, 3, "primaryalpha");
-    let expected = better.event_id;
+    let expected = better.event_id.as_uuid();
     let index = publish_records_in_one_segment(&temp, &source, vec![initial, better, worse]);
 
     index.reset_manual_lexical_io_observability_for_test();
@@ -779,7 +866,7 @@ fn alternatives_execute_one_manual_pass_and_report_deduplicated_coverage() {
     assert_eq!(batch.counters.candidate_docs, 3);
     assert_eq!(batch.counters.body_posting_advances, 4);
     assert_eq!(batch.counters.term_expansions, 0);
-    assert_eq!(batch.candidates[0].event.event_id, second_id);
+    assert_eq!(batch.candidates[0].event.event_id, second_id.as_uuid());
     assert_eq!(
         batch.candidates[0].coverage,
         ctx_history_index_query::LexicalTermCoverage {
@@ -790,7 +877,7 @@ fn alternatives_execute_one_manual_pass_and_report_deduplicated_coverage() {
     let first = batch
         .candidates
         .iter()
-        .find(|candidate| candidate.event.event_id == first_id)
+        .find(|candidate| candidate.event.event_id == first_id.as_uuid())
         .unwrap();
     assert_eq!(
         first.coverage,
@@ -1100,7 +1187,7 @@ fn heap_truncation_and_work_exhaustion_have_distinct_complete_signals() {
 
     let leading_encoded_bytes = u64::try_from(
         index
-            .core_record_by_id(complete.candidates[0].event.event_id.as_uuid())
+            .core_record_by_id(complete.candidates[0].event.event_id)
             .unwrap()
             .unwrap()
             .encode_stored()
@@ -1175,20 +1262,23 @@ fn thirty_two_term_fanout_streams_one_stable_segment_at_a_time() {
         .collect::<Vec<_>>();
     let query = terms.join(" ");
     let mut expected = Vec::with_capacity(SEGMENTS);
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
-        .unwrap()
-        .into_writer()
-        .unwrap();
-    writer.test_disable_merges().unwrap();
     for segment_index in 0..SEGMENTS {
         let source = source(&format!("fanout-segment-{segment_index}.jsonl"));
         let record = document(&source, 1, &query);
         expected.push(record.event_id);
+        // Publish each source independently so the fixture proves the
+        // cross-segment streaming bound without depending on the indexer's
+        // asynchronous flush grouping within one publication.
+        let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+            .unwrap()
+            .into_writer()
+            .unwrap();
+        writer.test_disable_merges().unwrap();
         writer.begin_source(source.clone()).unwrap();
         writer.add_core_record(record).unwrap();
         writer.certify_source(certificate(&source, 1, 1)).unwrap();
+        writer.commit(|_| true).unwrap();
     }
-    writer.commit(|_| true).unwrap();
     expected.sort_by_key(|event_id| event_id.digest());
 
     let index = VerifiedIndex::open(temp.path()).unwrap();
@@ -1209,9 +1299,12 @@ fn thirty_two_term_fanout_streams_one_stable_segment_at_a_time() {
         batch
             .candidates
             .iter()
-            .map(|candidate| candidate.event.event_id)
+            .map(|candidate| candidate.event.event_identity_digest)
             .collect::<Vec<_>>(),
-        expected,
+        expected
+            .iter()
+            .map(|event_id| event_id.digest())
+            .collect::<Vec<_>>(),
         "full rank ties must use the stable identity key, not segment order"
     );
     assert_eq!(
@@ -1242,9 +1335,12 @@ fn thirty_two_term_fanout_streams_one_stable_segment_at_a_time() {
         top_three
             .candidates
             .iter()
-            .map(|candidate| candidate.event.event_id)
+            .map(|candidate| candidate.event.event_identity_digest)
             .collect::<Vec<_>>(),
-        expected[..3],
+        expected[..3]
+            .iter()
+            .map(|event_id| event_id.digest())
+            .collect::<Vec<_>>(),
         "the global fixed heap must retain the best ties across all segments"
     );
 
@@ -1363,6 +1459,12 @@ fn manual_body_and_list_execution_ignore_deleted_source_revisions() {
         .unwrap();
     assert!(listed.complete);
     assert_eq!(listed.candidates.len(), 1);
-    assert_eq!(listed.candidates[0].event.event_id, replacement.event_id);
-    assert_ne!(listed.candidates[0].event.event_id, deleted.event_id);
+    assert_eq!(
+        listed.candidates[0].event.event_id,
+        replacement.event_id.as_uuid()
+    );
+    assert_ne!(
+        listed.candidates[0].event.event_id,
+        deleted.event_id.as_uuid()
+    );
 }

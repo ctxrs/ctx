@@ -78,7 +78,7 @@ impl HistorySemanticQuery for ProjectedSemanticQuery<'_> {
             candidates: self
                 .candidates
                 .iter()
-                .filter(|candidate| projection.contains(candidate.event.event_id.as_uuid()))
+                .filter(|candidate| projection.contains(candidate.event.event_id))
                 .cloned()
                 .collect(),
             diagnostics: json!({"adapter": "projected-test"}),
@@ -245,10 +245,12 @@ fn semantic_and_hybrid_recall_filtered_copy_with_absent_ancestor_end_to_end() {
         .unwrap()
         .is_none());
     let candidate = |record: &CoreRecord, score| EventSearchCandidate {
-        event: index
-            .event_by_id(record.event_id.as_uuid())
-            .unwrap()
-            .unwrap(),
+        event: ctx_history_index_query::RankedEventRef::from(
+            &index
+                .event_by_id(record.event_id.as_uuid())
+                .unwrap()
+                .unwrap(),
+        ),
         score,
     };
     let semantic = ProjectedSemanticPort {

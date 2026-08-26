@@ -648,10 +648,19 @@ impl VerifiedIndex {
                     "test_lexical_candidate_materialization_failure",
                 ));
             }
-            let (event, encoded_core_bytes) =
-                stored_event_record_with_size(&self.searcher, candidate.address, fields)?;
-            receipt.record_decoded(encoded_core_bytes)?;
-            validate_materialized_event(candidate.order, &event, fast.0)?;
+            let (event, encoded_core_bytes) = ranked_event_ref_at_address_with_order(
+                &self.searcher,
+                candidate.address,
+                fields,
+                candidate.order,
+            )?;
+            if encoded_core_bytes != candidate.order.encoded_core_bytes()
+                || event.event_id != fast.0
+            {
+                return Err(IndexError::InvalidStoredDocumentField(
+                    EVENT_RANGE_ORDER_FAST_FIELD,
+                ));
+            }
             candidates.push(LexicalSearchCandidate {
                 event,
                 score: candidate.score,
@@ -915,110 +924,5 @@ impl VerifiedIndex {
             retained.push(Reverse(candidate));
         }
         Ok(CandidateExamination::Accepted)
-    }
-
-    /// Selects semantic-eligible event IDs with the existing generic metadata
-    /// predicate. Semantic consumers intentionally retain their independent
-    /// non-lexical query implementation.
-    pub fn semantic_filter_projection(
-        &self,
-        filters: &EventSearchFilters,
-    ) -> Result<SemanticFilterProjection> {
-        let compiled = CompiledSearchFilter::compile(filters.clone())?;
-        self.semantic_filter_projection_compiled(&compiled)
-    }
-
-    pub fn semantic_filter_projection_compiled(
-        &self,
-        filter: &CompiledSearchFilter,
-    ) -> Result<SemanticFilterProjection> {
-        validate_event_sort_fast_fields(&self.searcher)?;
-        let fields = fields_from_schema(self.searcher.schema())?;
-        let semantic_eligibility = Box::new(BooleanQuery::intersection(vec![
-            Box::new(TermQuery::new(
-                Term::from_field_text(fields.event_type, "message"),
-                IndexRecordOption::Basic,
-            )),
-            Box::new(TermQuery::new(
-                Term::from_field_text(fields.role, "user"),
-                IndexRecordOption::Basic,
-            )),
-        ]));
-        let source_identity_query = self.source_identity_query(filter.filters(), fields)?;
-        let query =
-            filtered_event_query(semantic_eligibility, source_identity_query, filter, fields)?;
-        let addresses = self
-            .searcher
-            .search(query.as_ref(), &DocSetCollector)
-            .map_err(IndexError::from)?;
-        let mut event_ids = HashSet::with_capacity(addresses.len());
-        for address in addresses {
-            let (event_id, _, _) = core_event_fast_preflight(&self.searcher, address)?;
-            if !event_ids.insert(event_id) {
-                return Err(IndexError::DuplicateEventIdentity(event_id.to_string()));
-            }
-        }
-        Ok(SemanticFilterProjection {
-            generation_id: self.generation_id.clone(),
-            event_ids,
-        })
-    }
-
-    fn source_identity_query(
-        &self,
-        filters: &EventSearchFilters,
-        fields: Fields,
-    ) -> Result<Option<Box<dyn Query>>> {
-        if !filters.has_source_identity_filter() {
-            return Ok(None);
-        }
-        filters.validate_source_identity_filters()?;
-        let mut clauses: Vec<(Occur, Box<dyn Query>)> = vec![(
-            Occur::Must,
-            Box::new(TermQuery::new(
-                Term::from_field_text(fields.provider, "custom"),
-                IndexRecordOption::Basic,
-            )),
-        )];
-        if let Some(history_source) = filters.history_source.as_deref() {
-            let Some((history_provider_key, history_source_id)) =
-                history_source.trim().split_once('/')
-            else {
-                return Ok(Some(Box::new(EmptyQuery)));
-            };
-            clauses.push((
-                Occur::Must,
-                Box::new(TermQuery::new(
-                    Term::from_field_text(fields.custom_provider_key, history_provider_key),
-                    IndexRecordOption::Basic,
-                )),
-            ));
-            clauses.push((
-                Occur::Must,
-                Box::new(TermQuery::new(
-                    Term::from_field_text(fields.custom_source_id, history_source_id),
-                    IndexRecordOption::Basic,
-                )),
-            ));
-        }
-        if let Some(provider_key) = filters.provider_key.as_deref().map(str::trim) {
-            clauses.push((
-                Occur::Must,
-                Box::new(TermQuery::new(
-                    Term::from_field_text(fields.custom_provider_key, provider_key),
-                    IndexRecordOption::Basic,
-                )),
-            ));
-        }
-        if let Some(source_id) = filters.source_id.as_deref().map(str::trim) {
-            clauses.push((
-                Occur::Must,
-                Box::new(TermQuery::new(
-                    Term::from_field_text(fields.custom_source_id, source_id),
-                    IndexRecordOption::Basic,
-                )),
-            ));
-        }
-        Ok(Some(Box::new(BooleanQuery::new(clauses))))
     }
 }

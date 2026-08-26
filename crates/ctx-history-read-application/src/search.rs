@@ -1,12 +1,12 @@
 use anyhow::{anyhow, Result};
 use ctx_history_core::{
     AgentScope, CaptureProvider, EventType, ProviderNativeEventCopy,
-    ProviderNativeSessionRelationship, StableEntityId,
+    ProviderNativeSessionRelationship,
 };
 use ctx_history_index_query::{
     CompiledSearchFilter, EventRecord, EventSearchCandidate, EventSearchFilters, IndexError,
-    LexicalSearchBatch, LexicalSearchError, SearchAgentScope, SearchFamilyKey,
-    SessionGroupingClaims, VerifiedIndex, MAX_LEXICAL_QUERY_RESULTS,
+    LexicalSearchBatch, LexicalSearchError, RankedEventRef, SearchAgentScope, SearchFamilyKey,
+    SearchSessionCoordinate, SessionGroupingClaims, VerifiedIndex, MAX_LEXICAL_QUERY_RESULTS,
 };
 #[cfg(test)]
 use ctx_history_index_query::{LexicalSearchResult, SearchContentScope};
@@ -52,7 +52,7 @@ use semantic_batch::{
     semantic_retrieval_failure,
 };
 use shaping::{
-    dense_result_window, session_champions, shape_family_result_window, FamilyShapingOutcome,
+    dense_result_window, session_champions_by, shape_family_result_window, FamilyShapingOutcome,
 };
 
 /// Evidence-tunable fixed horizon for one ordinary lexical session search.
@@ -171,8 +171,8 @@ pub enum SearchExecutionError {
 pub type SearchExecutionResult<T> = std::result::Result<T, SearchExecutionError>;
 
 #[derive(Debug)]
-pub struct SearchCollection {
-    pub result_window: SearchResultWindow,
+pub struct SearchCollection<Event = SearchEventMetadata> {
+    pub result_window: SearchResultWindow<Event>,
     pub candidate_pool: usize,
     pub candidate_pool_truncated: bool,
     pub lexical_diagnostics: Option<SearchLexicalDiagnostics>,
@@ -202,9 +202,9 @@ pub struct SearchLexicalExhaustionDiagnostics {
 }
 
 #[derive(Debug)]
-pub struct SearchResultWindow {
+pub struct SearchResultWindow<Event = SearchEventMetadata> {
     pub limit: usize,
-    pub hits: Vec<SearchHit>,
+    pub hits: Vec<SearchHit<Event>>,
     pub more_available: bool,
 }
 
@@ -215,11 +215,14 @@ pub struct SemanticFallbackDiagnostics {
 }
 
 #[derive(Debug, Clone)]
-pub struct SearchHit {
-    pub event: SearchEventMetadata,
+pub struct SearchHit<Event = SearchEventMetadata> {
+    pub event: Event,
     pub score: f32,
     pub more_matches_in_session: usize,
 }
+
+pub(crate) type RankedSearchCollection = SearchCollection<RankedEventRef>;
+pub(crate) type RankedSearchResultWindow = SearchResultWindow<RankedEventRef>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchEventMetadata {
@@ -277,8 +280,16 @@ pub fn collect_search_hits<P: HistorySemanticPort>(
     semantic_port: &P,
 ) -> SearchExecutionResult<SearchCollection> {
     let compiled = CompiledSearchFilter::compile(filters.clone())?;
-    collect_search_hits_observed(request, index, &compiled, semantic, semantic_port)
-        .map_err(|failure| *failure.error)
+    let ranked = collect_search_hits_observed(request, index, &compiled, semantic, semantic_port)
+        .map_err(|failure| *failure.error)?;
+    crate::presentation::hydrate_ranked_search_collection(
+        index,
+        ranked,
+        &NormalizedSearchQuery::from_request(request),
+        &compiled,
+    )
+    .map(|(collection, _)| collection)
+    .map_err(Into::into)
 }
 
 fn collect_search_hits_with_receipt<P: HistorySemanticPort>(
@@ -288,7 +299,7 @@ fn collect_search_hits_with_receipt<P: HistorySemanticPort>(
     semantic: SemanticAvailability,
     semantic_port: &P,
     tracker: &mut SearchWorkTracker,
-) -> SearchExecutionResult<SearchCollection> {
+) -> SearchExecutionResult<RankedSearchCollection> {
     let prepared = prepare_semantic_search(request, index, filter, semantic, tracker)?;
     let (requested_backend, normalized_query) = match prepared {
         PreparedSemanticSearch::Complete(collection) => return Ok(collection),
@@ -338,13 +349,22 @@ where
     let filter = CompiledSearchFilter::compile(filters.clone())?;
     let prepared = prepare_semantic_search(request, index, &filter, semantic, &mut tracker)?;
     let (requested_backend, normalized_query) = match prepared {
-        PreparedSemanticSearch::Complete(collection) => return Ok(collection),
+        PreparedSemanticSearch::Complete(collection) => {
+            return crate::presentation::hydrate_ranked_search_collection(
+                index,
+                collection,
+                &NormalizedSearchQuery::from_request(request),
+                &filter,
+            )
+            .map(|(collection, _)| collection)
+            .map_err(Into::into)
+        }
         PreparedSemanticSearch::Query {
             requested_backend,
             normalized_query,
         } => (requested_backend, normalized_query),
     };
-    collect_prepared_semantic_search_using(
+    let ranked = collect_prepared_semantic_search_using(
         request,
         index,
         &filter,
@@ -352,14 +372,22 @@ where
         normalized_query,
         semantic_search,
         &mut tracker,
+    )?;
+    crate::presentation::hydrate_ranked_search_collection(
+        index,
+        ranked,
+        &NormalizedSearchQuery::from_request(request),
+        &filter,
     )
+    .map(|(collection, _)| collection)
+    .map_err(Into::into)
 }
 
 // Keeping the already-complete bounded result inline avoids a heap allocation
 // on ordinary lexical searches; this local enum is not retained across calls.
 #[allow(clippy::large_enum_variant)]
 enum PreparedSemanticSearch {
-    Complete(SearchCollection),
+    Complete(RankedSearchCollection),
     Query {
         requested_backend: SearchBackend,
         normalized_query: NormalizedSearchQuery,
@@ -448,7 +476,7 @@ fn lexical_fallback(
     not_ready: HistorySemanticError,
     status: &'static str,
     tracker: &mut SearchWorkTracker,
-) -> SearchExecutionResult<SearchCollection> {
+) -> SearchExecutionResult<RankedSearchCollection> {
     lexical_fallback_with_diagnostics(
         request,
         index,
@@ -471,7 +499,7 @@ fn lexical_fallback_with_diagnostics(
     status: &'static str,
     semantic_query_diagnostics: Vec<Value>,
     tracker: &mut SearchWorkTracker,
-) -> SearchExecutionResult<SearchCollection> {
+) -> SearchExecutionResult<RankedSearchCollection> {
     let normalized_query = NormalizedSearchQuery::from_request(request);
     let queries = normalized_query.texts();
     let mut collection = collect_lexical_search_hits(
@@ -517,7 +545,7 @@ fn collect_lexical_search_hits(
     event_results: bool,
     filter: &CompiledSearchFilter,
     tracker: &mut SearchWorkTracker,
-) -> SearchExecutionResult<SearchCollection> {
+) -> SearchExecutionResult<RankedSearchCollection> {
     let dense = event_results || filter.filters().session_id.is_some();
     if limit == 0 {
         return Ok(empty_lexical_collection(limit, tracker.work));
@@ -542,7 +570,7 @@ fn collect_lexical_search_hits(
         batch,
         limit,
         dense,
-        |coordinates| index.session_grouping_claims(coordinates),
+        |coordinates| index.session_grouping_claims_for_search(coordinates),
         tracker.work,
     )
 }
@@ -553,11 +581,11 @@ fn collect_lexical_search_hits_using<LexicalSearch, GroupingClaims>(
     dense: bool,
     lexical_search: LexicalSearch,
     grouping_claims: GroupingClaims,
-) -> SearchExecutionResult<SearchCollection>
+) -> SearchExecutionResult<RankedSearchCollection>
 where
     LexicalSearch: FnOnce(usize) -> LexicalSearchResult<LexicalSearchBatch>,
     GroupingClaims: FnOnce(
-        &[(StableEntityId, StableEntityId)],
+        &[SearchSessionCoordinate],
     ) -> ctx_history_index_query::Result<Vec<SessionGroupingClaims>>,
 {
     if limit == 0 {
@@ -583,10 +611,10 @@ fn shape_lexical_batch_using<GroupingClaims>(
     dense: bool,
     grouping_claims: GroupingClaims,
     work: SearchWorkReceipt,
-) -> SearchExecutionResult<SearchCollection>
+) -> SearchExecutionResult<RankedSearchCollection>
 where
     GroupingClaims: FnOnce(
-        &[(StableEntityId, StableEntityId)],
+        &[SearchSessionCoordinate],
     ) -> ctx_history_index_query::Result<Vec<SessionGroupingClaims>>,
 {
     let candidate_pool = batch.candidates.len();
@@ -626,7 +654,7 @@ where
     })
 }
 
-fn empty_lexical_collection(limit: usize, work: SearchWorkReceipt) -> SearchCollection {
+fn empty_lexical_collection(limit: usize, work: SearchWorkReceipt) -> RankedSearchCollection {
     SearchCollection {
         result_window: SearchResultWindow {
             limit,
@@ -676,10 +704,10 @@ fn shape_search_candidates_using<GroupingClaims>(
     dense: bool,
     completeness: DiversificationCompleteness,
     grouping_claims: GroupingClaims,
-) -> SearchExecutionResult<(SearchResultWindow, SearchDiversificationDecision)>
+) -> SearchExecutionResult<(RankedSearchResultWindow, SearchDiversificationDecision)>
 where
     GroupingClaims: FnOnce(
-        &[(StableEntityId, StableEntityId)],
+        &[SearchSessionCoordinate],
     ) -> ctx_history_index_query::Result<Vec<SessionGroupingClaims>>,
 {
     if dense || limit == 0 {
@@ -693,19 +721,30 @@ where
         ));
     }
 
-    let champions = session_champions(candidates);
-    let coordinates = champions
+    let mut coordinate_positions = std::collections::HashMap::new();
+    let mut coordinates = Vec::new();
+    for candidate in candidates {
+        let coordinate = candidate.event.session_coordinate();
+        if let std::collections::hash_map::Entry::Vacant(entry) =
+            coordinate_positions.entry(coordinate)
+        {
+            entry.insert(coordinates.len());
+            coordinates.push(coordinate);
+        }
+    }
+    let claims = grouping_claims(&coordinates)?;
+    validate_grouping_claims(&coordinates, &claims)?;
+    let champions = session_champions_by(candidates, |candidate| {
+        claims[coordinate_positions[&candidate.event.session_coordinate()]].session_id
+    });
+    let families = champions
         .iter()
         .map(|champion| {
-            (
-                champion.candidate.event.session_id,
-                champion.candidate.event.source.identity(),
+            SearchFamilyKey::from(
+                &claims[coordinate_positions[&champion.candidate.event.session_coordinate()]],
             )
         })
         .collect::<Vec<_>>();
-    let claims = grouping_claims(&coordinates)?;
-    validate_grouping_claims(&coordinates, &claims)?;
-    let families = claims.iter().map(SearchFamilyKey::from).collect::<Vec<_>>();
     let FamilyShapingOutcome {
         result_window,
         distinct_families,
@@ -733,16 +772,14 @@ where
 }
 
 fn validate_grouping_claims(
-    coordinates: &[(StableEntityId, StableEntityId)],
+    coordinates: &[SearchSessionCoordinate],
     claims: &[SessionGroupingClaims],
 ) -> ctx_history_index_query::Result<()> {
     if coordinates.len() != claims.len()
-        || coordinates
-            .iter()
-            .zip(claims)
-            .any(|(&(session_id, source_owner), claims)| {
-                claims.session_id != session_id || claims.source_owner != source_owner
-            })
+        || coordinates.iter().zip(claims).any(|(coordinate, claims)| {
+            claims.session_id.as_uuid() != coordinate.session_id
+                || claims.source_owner.digest() != coordinate.source_owner_digest
+        })
     {
         return Err(IndexError::InvalidStoredDocumentField("session_authority"));
     }

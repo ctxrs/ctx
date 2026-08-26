@@ -150,14 +150,13 @@ fn limit_200_search_reduces_each_large_core_body_before_retaining_presentations(
     let mut source_request = request(RefreshArg::Off);
     source_request.events = true;
     source_request.limit = ctx_history_read_application::MAX_SEARCH_RESULTS;
-    let index = open_index(temp.path()).unwrap();
-    let filters = index_search_filters(&source_request, &index).unwrap();
-    let collection = collect_search_hits_with_backend(
+    let (value, collection, _) = search_existing_generation(
         &source_request,
-        &index,
+        open_index(temp.path()).unwrap(),
         temp.path(),
         source_request.semantic_weight,
-        &filters,
+        "existing_generation",
+        1,
     )
     .unwrap();
     assert_eq!(
@@ -165,42 +164,15 @@ fn limit_200_search_reduces_each_large_core_body_before_retaining_presentations(
         ctx_history_read_application::MAX_SEARCH_RESULTS
     );
     assert!(!collection.result_window.more_available);
-    let normalized_query = NormalizedSearchQuery::from_request(&source_request);
-
-    let presentations = presentations_for_search_hits_with_budget(
-        &index,
-        &collection.result_window.hits,
-        &normalized_query,
-        &CompiledSearchFilter::compile(filters.clone()).unwrap(),
-        SEARCH_PRESENTATION_HYDRATION_BUDGET,
-    )
-    .unwrap();
-    let retained_snippet_bytes = presentations
-        .iter()
-        .map(|presentation| presentation.snippet.len())
-        .sum::<usize>();
-    assert!(retained_snippet_bytes <= SEARCH_PRESENTATION_MAX_RETAINED_SNIPPET_BYTES);
-    assert!(presentations.iter().all(|presentation| {
-        presentation.snippet_truncated
-            && !presentation.snippet.is_empty()
-            && presentation.snippet.chars().count() <= SEARCH_SNIPPET_MAX_CHARS
-            && presentation.snippet.contains(TEST_QUERY)
-            && presentation.snippet.len() < body_bytes
-    }));
-
-    let value = search_json(
-        &source_request,
-        temp.path(),
-        &index,
-        &collection,
-        &filters,
-        &presentations,
-        "existing_generation",
-        1,
-        std::time::Duration::ZERO,
-    )
-    .unwrap();
     let results = value["results"].as_array().unwrap();
+    let retained_snippet_bytes = results
+        .iter()
+        .map(|result| result["snippet"].as_str().unwrap().len())
+        .sum::<usize>();
+    assert!(
+        retained_snippet_bytes
+            <= ctx_history_read_application::SEARCH_PRESENTATION_MAX_RETAINED_SNIPPET_BYTES
+    );
     assert_eq!(
         results.len(),
         ctx_history_read_application::MAX_SEARCH_RESULTS
@@ -209,6 +181,7 @@ fn limit_200_search_reduces_each_large_core_body_before_retaining_presentations(
         !result["snippet"].as_str().unwrap().is_empty()
             && result["snippet"].as_str().unwrap().chars().count() <= SEARCH_SNIPPET_MAX_CHARS
             && result["snippet"].as_str().unwrap().contains(TEST_QUERY)
+            && result["snippet"].as_str().unwrap().len() < body_bytes
             && result["snippet_truncated"] == true
             && result["snippet_max_chars"] == SEARCH_SNIPPET_MAX_CHARS
     }));
@@ -217,21 +190,6 @@ fn limit_200_search_reduces_each_large_core_body_before_retaining_presentations(
         ctx_history_read_application::MAX_SEARCH_RESULTS
     );
     assert_eq!(value["result_window"]["more_available"], false);
-
-    let retention_error = presentations_for_search_hits_with_budget(
-        &index,
-        &collection.result_window.hits,
-        &normalized_query,
-        &CompiledSearchFilter::compile(filters.clone()).unwrap(),
-        SearchPresentationHydrationBudget {
-            maximum_retained_snippet_bytes: retained_snippet_bytes - 1,
-        },
-    )
-    .unwrap_err();
-    let typed = retention_error
-        .downcast_ref::<SearchPresentationRetentionBudgetExceeded>()
-        .expect("snippet retention failure must stay typed");
-    assert_eq!(typed.retained_snippet_bytes, retained_snippet_bytes);
 }
 
 include!("search_presentation_hydration.rs");

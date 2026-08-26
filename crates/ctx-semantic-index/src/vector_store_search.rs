@@ -141,13 +141,7 @@ pub(super) fn scan_exact_generation(
             end_char: chunk.end_char as usize,
         });
     }
-    hits.sort_by(|left, right| {
-        right
-            .similarity
-            .total_cmp(&left.similarity)
-            .then_with(|| left.event_id.cmp(&right.event_id))
-    });
-    hits.truncate(limit);
+    debug_assert!(hits.len() <= limit);
     Ok(SemanticVectorSearch {
         hits,
         stats: SemanticVectorSearchStats {

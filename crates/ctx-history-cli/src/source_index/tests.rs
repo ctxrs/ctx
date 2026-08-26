@@ -23,8 +23,8 @@ use ctx_history_core::{
     SourceKey, SourceObservation, TypedKey, CORE_ACTIVITY_REVISION, MAX_CORE_CONTENT_BYTES,
 };
 use ctx_history_index::{
-    AgentScope, CompiledSearchFilter, EventSearchFilters, GenerationWriter, IndexError,
-    SearchContentScope, SessionRecord, WriterOptions, LEXICAL_QUERY_LIMITS,
+    AgentScope, EventSearchFilters, GenerationWriter, IndexError, SearchContentScope,
+    SessionRecord, WriterOptions, LEXICAL_QUERY_LIMITS,
 };
 use serde_json::{json, Value};
 use tempfile::tempdir;
@@ -48,11 +48,8 @@ use super::{
         render_show_document, search_json, SEARCH_SNIPPET_MAX_BYTES, SEARCH_SNIPPET_MAX_CHARS,
     },
     search::{
-        presentations_for_search_hits_with_budget, resolve_source_search_backend,
-        semantic_reason_code, NormalizedSearchQuery, SearchCollection, SearchEventMetadata,
-        SearchHit, SearchPresentation, SearchPresentationHydrationBudget,
-        SearchPresentationRetentionBudgetExceeded, SearchResultWindow,
-        SEARCH_PRESENTATION_HYDRATION_BUDGET, SEARCH_PRESENTATION_MAX_RETAINED_SNIPPET_BYTES,
+        resolve_source_search_backend, semantic_reason_code, NormalizedSearchQuery,
+        SearchCollection, SearchEventMetadata, SearchHit, SearchPresentation, SearchResultWindow,
     },
     show::{
         canonical_show_output_bytes, event_window_value, mcp_show_event, mcp_show_session,
@@ -66,9 +63,6 @@ mod recovery;
 const TEST_SESSION_ID: &str = "019fa000-0000-7000-8000-0000000000d1";
 const TEST_QUERY: &str = "pinnedgenerationrouting";
 
-fn compiled_search_filter() -> CompiledSearchFilter {
-    CompiledSearchFilter::compile(EventSearchFilters::default()).unwrap()
-}
 const TEST_MCP_OUTPUT_LIMIT: usize = crate::presentation_limit::CLI_PRESENTATION_MAX_OUTPUT_BYTES;
 
 fn history_config(daemon_enabled: bool, semantic_search_enabled: bool) -> config::AppConfig {

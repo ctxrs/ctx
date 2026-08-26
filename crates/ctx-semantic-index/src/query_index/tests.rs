@@ -205,7 +205,7 @@ fn semantic_filter_is_applied_before_top_k_across_more_than_4096_candidates() ->
     )?;
     assert_eq!(candidates.len(), 1);
     assert_eq!(
-        candidates[0].event.event_id.as_uuid(),
+        candidates[0].event.event_id,
         target_event_id.expect("target event ID")
     );
     assert_eq!(diagnostics["iterations"], 1);
@@ -338,7 +338,7 @@ fn semantic_query_scores_only_active_flat_events_that_match_core_metadata() -> R
         pin.search(&index, &shared, &[normalized_test_embedding(1.0, 0.0)], 3)?;
     assert_eq!(candidates.len(), 1);
     assert_eq!(
-        candidates[0].event.event_id.as_uuid(),
+        candidates[0].event.event_id,
         active_event_id.expect("active event ID")
     );
     assert_eq!(diagnostics["events_scored"], 1);

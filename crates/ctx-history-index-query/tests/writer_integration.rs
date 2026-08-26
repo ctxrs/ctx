@@ -231,7 +231,7 @@ fn filtered_session_ids(index: &VerifiedIndex, filters: EventSearchFilters) -> V
             .search_event_candidates_with_filters("shared needle", &filters, 10)
             .unwrap()
             .into_iter()
-            .map(|candidate| candidate.event.session_id.as_uuid())
+            .map(|candidate| candidate.event.session_id)
             .collect(),
     )
 }

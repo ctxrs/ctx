@@ -9,7 +9,7 @@ const MAX_SESSION_GROUPING_CLAIM_RECORDS: usize = 4_097;
 ///
 /// This matches the manual lexical executor's segment ceiling.
 const MAX_SESSION_GROUPING_SEGMENT_PROBES: usize = 512;
-/// Bounds the complete exact `(segment, SessionAuthorityKey)` cross-product.
+/// Bounds the complete `(segment, compact session coordinate)` cross-product.
 const MAX_SESSION_GROUPING_TERM_SEEKS: usize =
     MAX_SESSION_GROUPING_COORDINATES * MAX_SESSION_GROUPING_SEGMENT_PROBES;
 /// Includes deleted documents, so a delete-heavy posting list cannot evade it;
@@ -24,6 +24,7 @@ const MAX_SESSION_GROUPING_CORE_BYTES: usize = 256 * 1024 * 1024;
 struct SessionGroupingWorkMeter {
     segment_probes: usize,
     term_seeks: usize,
+    dictionary_terms: usize,
     posting_visits: usize,
     live_witnesses: usize,
     core_bytes: usize,
@@ -64,6 +65,15 @@ impl SessionGroupingWorkMeter {
             amount,
             MAX_SESSION_GROUPING_TERM_SEEKS,
             "exact authority term seeks",
+        )
+    }
+
+    fn dictionary_term(&mut self) -> Result<()> {
+        Self::charge(
+            &mut self.dictionary_terms,
+            1,
+            MAX_SESSION_GROUPING_TERM_SEEKS,
+            "authority dictionary terms",
         )
     }
 
@@ -133,13 +143,8 @@ impl VerifiedIndex {
                 maximum: MAX_SESSION_GROUPING_COORDINATES,
             });
         }
-        if coordinates.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let fields = fields_from_schema(self.searcher.schema())?;
         let mut requested = BTreeSet::new();
-        let mut ordered_keys = Vec::with_capacity(coordinates.len());
+        let mut compact = Vec::with_capacity(coordinates.len());
         for &(session_id, source_owner) in coordinates {
             let key = SessionAuthorityKey::exact(session_id, source_owner)?;
             if !requested.insert(key) {
@@ -147,12 +152,60 @@ impl VerifiedIndex {
                     "{session_id}@{source_owner}"
                 )));
             }
-            ordered_keys.push(key);
+            compact.push(SearchSessionCoordinate {
+                session_id: session_id.as_uuid(),
+                source_owner_digest: source_owner.digest(),
+            });
+        }
+        let claims = self.session_grouping_claims_for_search(&compact)?;
+        if claims.len() != coordinates.len()
+            || claims
+                .iter()
+                .zip(coordinates)
+                .any(|(claims, &(session_id, source_owner))| {
+                    claims.session_id != session_id || claims.source_owner != source_owner
+                })
+        {
+            return Err(IndexError::InvalidStoredDocumentField("session_authority"));
+        }
+        Ok(claims)
+    }
+
+    /// Resolves compact candidate coordinates to their exact sparse session
+    /// authority and coalesces all live witnesses in the same bounded scan.
+    /// A verified generation guarantees that a compact session UUID names at
+    /// most one full session identity; the full source digest prevents a
+    /// candidate from crossing source ownership while resolving that UUID.
+    pub fn session_grouping_claims_for_search(
+        &self,
+        coordinates: &[SearchSessionCoordinate],
+    ) -> Result<Vec<SessionGroupingClaims>> {
+        if coordinates.len() > MAX_SESSION_GROUPING_COORDINATES {
+            return Err(IndexError::InvalidSessionGroupingCoordinateCount {
+                requested: coordinates.len(),
+                maximum: MAX_SESSION_GROUPING_COORDINATES,
+            });
+        }
+        if coordinates.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let fields = fields_from_schema(self.searcher.schema())?;
+        let mut requested = BTreeSet::new();
+        for coordinate in coordinates.iter().copied() {
+            if !requested.insert(coordinate) {
+                return Err(IndexError::DuplicateSessionGroupingCoordinate(format!(
+                    "{}@{}",
+                    coordinate.session_id,
+                    hex(&coordinate.source_owner_digest),
+                )));
+            }
         }
 
         let mut meter = SessionGroupingWorkMeter {
             segment_probes: 0,
             term_seeks: 0,
+            dictionary_terms: 0,
             posting_visits: 0,
             live_witnesses: 0,
             core_bytes: 0,
@@ -175,49 +228,72 @@ impl VerifiedIndex {
         // unmetered progress across segments.
         meter.term_seeks(term_seek_count)?;
 
+        let mut resolved_keys = BTreeMap::<SearchSessionCoordinate, SessionAuthorityKey>::new();
         let mut live_witness_counts = BTreeMap::<SessionAuthorityKey, usize>::new();
         let mut witness_events = BTreeSet::new();
         let mut witnesses = Vec::new();
         for (segment_ord, segment) in stable_segments {
             let inverted = segment.inverted_index(fields.session_authority)?;
-            for key in &requested {
-                let term = Term::from_field_bytes(fields.session_authority, key.as_bytes());
-                let Some(term_info) = inverted.get_term_info(&term)? else {
-                    continue;
-                };
-                let mut postings =
-                    inverted.read_postings_from_terminfo(&term_info, IndexRecordOption::Basic)?;
-                let mut doc_id = postings.doc();
-                while doc_id != TERMINATED {
-                    meter.posting_visit()?;
-                    if !segment.is_deleted(doc_id) {
-                        let live_witnesses = live_witness_counts.entry(*key).or_default();
-                        *live_witnesses = live_witnesses
-                            .checked_add(1)
-                            .ok_or(IndexError::CountOverflow)?;
-                        if *live_witnesses > MAX_SESSION_GROUPING_WITNESSES_PER_COORDINATE {
-                            return Err(IndexError::InvalidStoredDocumentField(
-                                "session_authority",
-                            ));
-                        }
-                        meter.live_witness()?;
-                        let address = DocAddress::new(
-                            u32::try_from(segment_ord).map_err(|_| IndexError::CountOverflow)?,
-                            doc_id,
-                        );
-                        // The fast fields are the only Core metadata consulted
-                        // during admission. This charges aggregate Core bytes
-                        // before any stored document is loaded or decoded.
-                        let facts = core_document_fast_facts(&self.searcher, address)?;
-                        meter.core_bytes(facts.encoded_core_bytes)?;
-                        if !witness_events.insert(facts.event_id) {
-                            return Err(IndexError::DuplicateEventIdentity(
-                                facts.event_id.to_string(),
-                            ));
-                        }
-                        witnesses.push(GroupingWitness { key: *key, address });
+            for coordinate in &requested {
+                let prefix = SessionAuthorityKey::uuid_prefix_from_uuid(coordinate.session_id);
+                let range_end =
+                    SessionAuthorityKey::uuid_range_end_from_uuid(coordinate.session_id);
+                let mut terms = inverted
+                    .terms()
+                    .range()
+                    .ge(prefix)
+                    .lt(&range_end)
+                    .into_stream()?;
+                while terms.advance() {
+                    meter.dictionary_term()?;
+                    let key = SessionAuthorityKey::decode(terms.key())?;
+                    let (session_id, source_owner) = key.identities()?;
+                    if session_id.as_uuid() != coordinate.session_id
+                        || source_owner.digest() != coordinate.source_owner_digest
+                    {
+                        return Err(IndexError::InvalidStoredDocumentField("session_authority"));
                     }
-                    doc_id = postings.advance();
+                    if resolved_keys
+                        .insert(*coordinate, key)
+                        .is_some_and(|prior| prior != key)
+                    {
+                        return Err(IndexError::InvalidStoredDocumentField("session_authority"));
+                    }
+                    let mut postings = inverted
+                        .read_postings_from_terminfo(terms.value(), IndexRecordOption::Basic)?;
+                    let mut doc_id = postings.doc();
+                    while doc_id != TERMINATED {
+                        meter.posting_visit()?;
+                        if !segment.is_deleted(doc_id) {
+                            let live_witnesses = live_witness_counts.entry(key).or_default();
+                            *live_witnesses = live_witnesses
+                                .checked_add(1)
+                                .ok_or(IndexError::CountOverflow)?;
+                            if *live_witnesses > MAX_SESSION_GROUPING_WITNESSES_PER_COORDINATE {
+                                return Err(IndexError::InvalidStoredDocumentField(
+                                    "session_authority",
+                                ));
+                            }
+                            meter.live_witness()?;
+                            let address = DocAddress::new(
+                                u32::try_from(segment_ord)
+                                    .map_err(|_| IndexError::CountOverflow)?,
+                                doc_id,
+                            );
+                            // The fast fields are the only Core metadata consulted
+                            // during admission. This charges aggregate Core bytes
+                            // before any stored document is loaded or decoded.
+                            let facts = core_document_fast_facts(&self.searcher, address)?;
+                            meter.core_bytes(facts.encoded_core_bytes)?;
+                            if !witness_events.insert(facts.event_id) {
+                                return Err(IndexError::DuplicateEventIdentity(
+                                    facts.event_id.to_string(),
+                                ));
+                            }
+                            witnesses.push(GroupingWitness { key, address });
+                        }
+                        doc_id = postings.advance();
+                    }
                 }
             }
         }
@@ -232,7 +308,7 @@ impl VerifiedIndex {
                 fields.session_authority,
                 "session_authority",
             )?)?;
-            if stored_key != witness.key || !requested.contains(&stored_key) {
+            if stored_key != witness.key {
                 return Err(IndexError::InvalidStoredDocumentField("session_authority"));
             }
             if SessionAuthorityKey::exact(record.session_id, record.source.identity())?
@@ -269,14 +345,28 @@ impl VerifiedIndex {
             }
         }
 
-        let mut ordered = Vec::with_capacity(ordered_keys.len());
-        for (key, &(session_id, source_owner)) in ordered_keys.iter().zip(coordinates) {
+        let mut ordered = Vec::with_capacity(coordinates.len());
+        for coordinate in coordinates {
+            let Some(key) = resolved_keys.get(coordinate) else {
+                return Err(IndexError::MissingSessionGroupingCoordinate(format!(
+                    "{}@{}",
+                    coordinate.session_id,
+                    hex(&coordinate.source_owner_digest),
+                )));
+            };
             let Some(accumulator) = grouped.remove(key) else {
                 return Err(IndexError::MissingSessionGroupingCoordinate(format!(
-                    "{session_id}@{source_owner}"
+                    "{}@{}",
+                    coordinate.session_id,
+                    hex(&coordinate.source_owner_digest),
                 )));
             };
             if !(1..=MAX_SESSION_GROUPING_WITNESSES_PER_COORDINATE).contains(&accumulator.witnesses)
+            {
+                return Err(IndexError::InvalidStoredDocumentField("session_authority"));
+            }
+            if accumulator.claims.session_id.as_uuid() != coordinate.session_id
+                || accumulator.claims.source_owner.digest() != coordinate.source_owner_digest
             {
                 return Err(IndexError::InvalidStoredDocumentField("session_authority"));
             }
@@ -394,6 +484,7 @@ mod tests {
         let mut meter = SessionGroupingWorkMeter {
             segment_probes: 0,
             term_seeks: 0,
+            dictionary_terms: 0,
             posting_visits: 0,
             live_witnesses: 0,
             core_bytes: 0,

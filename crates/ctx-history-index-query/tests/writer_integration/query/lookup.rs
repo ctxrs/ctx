@@ -28,7 +28,7 @@ fn pinned_query_api_returns_typed_records_in_deterministic_order() {
     assert_eq!(
         candidates
             .iter()
-            .map(|candidate| candidate.event.event_id.as_uuid())
+            .map(|candidate| candidate.event.event_id)
             .collect::<Vec<_>>(),
         expected_search_ids
     );
@@ -52,6 +52,16 @@ fn pinned_query_api_returns_typed_records_in_deterministic_order() {
 
     let event_id = first.event_id.to_string();
     let event_prefix = &event_id[..8];
+    ctx_history_index_query::reset_stored_event_record_materializations();
+    assert_eq!(
+        index.event_ids_by_id_prefix(event_prefix).unwrap(),
+        vec![first.event_id.as_uuid()]
+    );
+    assert_eq!(
+        ctx_history_index_query::stored_event_record_materializations(),
+        0,
+        "IDs-only event prefix resolution must not load Core"
+    );
     assert_eq!(
         index.events_by_id_prefix(event_prefix).unwrap()[0].event_id,
         first.event_id
@@ -100,6 +110,16 @@ fn pinned_query_api_returns_typed_records_in_deterministic_order() {
 
     let session_id = first.session_id.to_string();
     let session_prefix = &session_id[..8];
+    ctx_history_index_query::reset_stored_event_record_materializations();
+    assert_eq!(
+        index.session_ids_by_id_prefix(session_prefix).unwrap(),
+        vec![first.session_id.as_uuid()]
+    );
+    assert_eq!(
+        ctx_history_index_query::stored_event_record_materializations(),
+        0,
+        "IDs-only session prefix resolution must not load Core"
+    );
     assert_eq!(
         index.sessions_by_id_prefix(session_prefix).unwrap(),
         vec![session]
@@ -192,7 +212,7 @@ fn decoded_core_event_preserves_searchable_literal_files_in_provider_order() {
             )
             .unwrap();
         assert_eq!(matches.len(), 1);
-        assert_eq!(matches[0].event.event_id, expected.event_id);
+        assert_eq!(matches[0].event.event_id, expected.event_id.as_uuid());
     }
 }
 
@@ -235,7 +255,7 @@ fn literal_file_fact_is_searchable_without_repository_attribution() {
             .into_iter()
             .map(|candidate| candidate.event.event_id)
             .collect::<Vec<_>>(),
-        vec![unknown.event_id]
+        vec![unknown.event_id.as_uuid()]
     );
 }
 
@@ -672,7 +692,7 @@ fn semantic_pairing_many_segments_merges_each_order_term_once_across_pages_and_r
 }
 
 #[test]
-fn candidate_collectors_decode_core_only_for_bounded_selected_results() {
+fn lexical_candidates_remain_thin_while_other_collectors_decode_only_selected_results() {
     const EVENT_COUNT: u64 = 64;
     const AMBIGUITY_LIMIT: usize = 2;
 
@@ -801,7 +821,8 @@ fn candidate_collectors_decode_core_only_for_bounded_selected_results() {
     assert_eq!(candidates.len(), 5);
     assert_eq!(
         ctx_history_index_query::stored_event_record_materializations(),
-        5
+        0,
+        "lexical ranking must return thin references without decoding Core"
     );
     assert_eq!(
         ctx_history_index_query::stored_core_event_record_materializations(),

@@ -256,7 +256,7 @@ fn semantic_filter_projection_matches_lexical_filter_semantics_without_core_deco
         let lexical = lexical_batch
             .candidates
             .into_iter()
-            .map(|candidate| candidate.event.event_id.as_uuid())
+            .map(|candidate| candidate.event.event_id)
             .collect::<HashSet<_>>();
         let listed = index
             .list_event_candidates_with_filters_batch(&filters, 10)
@@ -266,7 +266,7 @@ fn semantic_filter_projection_matches_lexical_filter_semantics_without_core_deco
             listed
                 .candidates
                 .into_iter()
-                .map(|candidate| candidate.event.event_id.as_uuid())
+                .map(|candidate| candidate.event.event_id)
                 .collect::<HashSet<_>>(),
             lexical,
             "manual body and list candidates must share exact filter semantics"

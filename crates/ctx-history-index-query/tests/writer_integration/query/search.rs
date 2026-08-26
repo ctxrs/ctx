@@ -65,13 +65,17 @@ fn copied_events_remain_searchable_and_preserve_exact_copy_claims() {
         unknown.event_id,
         unique.event_id,
     ]);
+    let expected_digests = expected
+        .iter()
+        .map(|event_id| event_id.digest())
+        .collect::<HashSet<_>>();
     let lexical = index
         .search_event_candidates("lineagewindowneedle", 4)
         .unwrap();
     assert_eq!(lexical.len(), 4);
     assert_eq!(
         candidate_ids(&lexical).into_iter().collect::<HashSet<_>>(),
-        expected
+        expected_digests
     );
     let listed = index
         .list_event_candidates_with_filters(&EventSearchFilters::default(), 4)
@@ -79,7 +83,7 @@ fn copied_events_remain_searchable_and_preserve_exact_copy_claims() {
     assert_eq!(listed.len(), 4);
     assert_eq!(
         candidate_ids(&listed).into_iter().collect::<HashSet<_>>(),
-        expected
+        expected_digests
     );
 
     let semantic = index
@@ -141,7 +145,7 @@ fn multiple_exact_session_exclusions_filter_lexical_and_semantic_candidates() {
     assert_eq!(
         lexical
             .iter()
-            .map(|candidate| candidate.event.session_id.as_uuid())
+            .map(|candidate| candidate.event.session_id)
             .collect::<Vec<_>>(),
         vec![retained.session_id.as_uuid()]
     );
@@ -151,7 +155,7 @@ fn multiple_exact_session_exclusions_filter_lexical_and_semantic_candidates() {
     assert_eq!(
         listed
             .iter()
-            .map(|candidate| candidate.event.session_id.as_uuid())
+            .map(|candidate| candidate.event.session_id)
             .collect::<Vec<_>>(),
         vec![retained.session_id.as_uuid()]
     );
@@ -236,10 +240,14 @@ fn agent_scope_filter_uses_only_explicit_core_agent_scope() {
         .search_event_candidates_with_filters("primaryauthorityneedle", &primary_scope, 3)
         .unwrap();
     let expected_primary = HashSet::from([primary.event_id, delegated.event_id, workflow.event_id]);
+    let expected_primary_digests = expected_primary
+        .iter()
+        .map(|event_id| event_id.digest())
+        .collect::<HashSet<_>>();
     assert_eq!(lexical.len(), 3);
     assert_eq!(
         candidate_ids(&lexical).into_iter().collect::<HashSet<_>>(),
-        expected_primary
+        expected_primary_digests
     );
 
     let semantic = index.semantic_filter_projection(&primary_scope).unwrap();
@@ -261,7 +269,10 @@ fn agent_scope_filter_uses_only_explicit_core_agent_scope() {
             2,
         )
         .unwrap();
-    assert_eq!(candidate_ids(&explicit_subagent), vec![forked.event_id]);
+    assert_eq!(
+        candidate_ids(&explicit_subagent),
+        vec![forked.event_id.digest()]
+    );
 
     for expected in [&delegated, &workflow] {
         let explicit_session = index
@@ -275,7 +286,10 @@ fn agent_scope_filter_uses_only_explicit_core_agent_scope() {
                 1,
             )
             .unwrap();
-        assert_eq!(candidate_ids(&explicit_session), vec![expected.event_id]);
+        assert_eq!(
+            candidate_ids(&explicit_session),
+            vec![expected.event_id.digest()]
+        );
 
         let direct = index
             .core_record_by_id(expected.event_id.as_uuid())
@@ -349,7 +363,7 @@ fn copied_bodies_contribute_ordinary_search_postings() {
     assert_eq!(duplicated_hits.len(), COPIES as usize + 2);
     assert!(duplicated_hits
         .iter()
-        .any(|candidate| candidate.event.event_id == expected_copy.event_id));
+        .any(|candidate| candidate.event.event_id == expected_copy.event_id.as_uuid()));
 
     let (searcher, _) = open_unverified_generation(duplicated_temp.path());
     let fields = fields_from_schema(searcher.schema()).unwrap();
@@ -772,7 +786,7 @@ fn complete_core_body_beyond_16k_round_trips_reopens_and_has_no_stored_preview()
         index.search_event_candidates("tailonlyneedle", 10).unwrap()[0]
             .event
             .event_id,
-        expected.event_id
+        expected.event_id.as_uuid()
     );
 
     let (searcher, _) = open_unverified_generation(temp.path());
@@ -877,7 +891,7 @@ fn retrieval_derived_records_are_absent_from_discovery_but_present_in_core_enume
                 .list_event_candidates_with_filters(&EventSearchFilters::default(), 10)
                 .unwrap()
         ),
-        vec![ordinary.event_id]
+        vec![ordinary.event_id.digest()]
     );
 
     for expected in [&excluded_call, &excluded_output] {
@@ -1009,24 +1023,17 @@ fn class_aware_record(
     record
 }
 
-fn candidate_ids(candidates: &[EventSearchCandidate]) -> Vec<StableEntityId> {
+fn candidate_ids(candidates: &[EventSearchCandidate]) -> Vec<[u8; 32]> {
     candidates
         .iter()
-        .map(|candidate| candidate.event.event_id)
-        .collect()
-}
-
-fn candidate_event_types(candidates: &[EventSearchCandidate]) -> HashSet<&str> {
-    candidates
-        .iter()
-        .map(|candidate| candidate.event.event_type.as_str())
+        .map(|candidate| candidate.event.event_identity_digest)
         .collect()
 }
 
 fn candidate_score(candidates: &[EventSearchCandidate], event_id: StableEntityId) -> Score {
     candidates
         .iter()
-        .find(|candidate| candidate.event.event_id == event_id)
+        .find(|candidate| candidate.event.event_identity_digest == event_id.digest())
         .unwrap()
         .score
 }
@@ -1089,7 +1096,7 @@ fn all_scope_applies_class_weights_and_retains_unknown_types_with_stable_ties() 
 
     let message_id = ids_by_type["message"];
     let message_score = candidate_score(&omitted, message_id);
-    assert_eq!(omitted[0].event.event_id, message_id);
+    assert_eq!(omitted[0].event.event_identity_digest, message_id.digest());
     assert_score_ratio(
         candidate_score(&omitted, ids_by_type["summary"]),
         message_score,
@@ -1116,16 +1123,14 @@ fn all_scope_applies_class_weights_and_retains_unknown_types_with_stable_ties() 
     }
 
     let mut expected_fallback_tie = [
-        ids_by_type["tool_call"],
-        ids_by_type["command_started"],
-        ids_by_type["notice"],
-        ids_by_type["future_searchable_type"],
+        ids_by_type["tool_call"].digest(),
+        ids_by_type["command_started"].digest(),
+        ids_by_type["notice"].digest(),
+        ids_by_type["future_searchable_type"].digest(),
     ];
-    expected_fallback_tie.sort_by_key(|event_id| event_id.as_uuid());
+    expected_fallback_tie.sort();
     assert_eq!(candidate_ids(&omitted)[2..6], expected_fallback_tie);
-    assert!(omitted
-        .iter()
-        .any(|candidate| candidate.event.event_type == "future_searchable_type"));
+    assert!(candidate_ids(&omitted).contains(&ids_by_type["future_searchable_type"].digest()));
 }
 
 #[test]
@@ -1156,6 +1161,10 @@ fn explicit_scopes_filter_search_list_and_semantic_projection_with_ordinary_io_w
     let message_id = records[0].event_id;
     let call_id = records[2].event_id;
     let output_id = records[4].event_id;
+    let record_ids_by_type = records
+        .iter()
+        .map(|record| (record.event_type.clone(), record.event_id.digest()))
+        .collect::<Vec<_>>();
     let (_temp, index) = publish_class_aware_records(records);
 
     let all = index.search_event_candidates("scopeneedle", 20).unwrap();
@@ -1183,8 +1192,19 @@ fn explicit_scopes_filter_search_list_and_semantic_projection_with_ordinary_io_w
         let listed = index
             .list_event_candidates_with_filters(&filters, 20)
             .unwrap();
-        assert_eq!(candidate_event_types(&searched), expected_types);
-        assert_eq!(candidate_event_types(&listed), expected_types);
+        let expected_ids = record_ids_by_type
+            .iter()
+            .filter(|(event_type, _)| expected_types.contains(event_type.as_str()))
+            .map(|(_, event_id)| *event_id)
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            candidate_ids(&searched).into_iter().collect::<HashSet<_>>(),
+            expected_ids
+        );
+        assert_eq!(
+            candidate_ids(&listed).into_iter().collect::<HashSet<_>>(),
+            expected_ids
+        );
 
         let semantic = index.semantic_filter_projection(&filters).unwrap();
         match scope {
@@ -1277,7 +1297,7 @@ fn output_heavy_candidates_do_not_starve_the_stronger_transcript_before_top_docs
     let weighted = index
         .search_event_candidates("saturationneedle", 1)
         .unwrap();
-    assert_eq!(weighted[0].event.event_id, transcript_id);
+    assert_eq!(weighted[0].event.event_id, transcript_id.as_uuid());
 }
 
 #[test]

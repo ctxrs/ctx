@@ -20,11 +20,12 @@ use ctx_history_index::{
 };
 use ctx_history_index_format::{provider_source_config_digest, source_token};
 use ctx_history_index_query::{
-    CoreEventPageBudget, CoreEventRangeFilters, CoreEventRangeSelection, EventSearchCandidate,
-    SearchContentScope, VerifiedIndex,
+    CompiledSearchFilter, CoreEventPageBudget, CoreEventRangeFilters, CoreEventRangeSelection,
+    EventSearchCandidate, EventSearchFilters, RankedEventRef, SearchContentScope, VerifiedIndex,
 };
 use serde_json::{json, Value};
 use tempfile::tempdir;
+use uuid::Uuid;
 
 use crate::{
     decode_session_event_cursor, encode_session_event_cursor, event_query_event_read_model,
@@ -39,7 +40,8 @@ use crate::{
     HistorySemanticError, HistorySemanticPort, HistorySemanticQuery, ListEventsPageRequest,
     ListEventsRequest, ListEventsStreamCallback, ListEventsStreamCompletion,
     ListEventsStreamControl, ListEventsStreamPage, LocateApplicationRequest, LocateRequest,
-    LocateResult, PinnedHistoryQuery, RetainedPeerRead, SearchApplicationError,
+    LocateResult, NormalizedSearchQuery, PinnedHistoryQuery, RetainedPeerRead,
+    SearchApplicationError,
     SearchApplicationReadModelInput, SearchApplicationRequest, SearchBackend,
     SearchDiversificationStatus, SearchFailurePhase, SearchJsonInput, SearchPolicy,
     SearchRenderMetrics, SearchRequest, SearchResultCommands, SemanticAvailability, SemanticReason,
@@ -494,6 +496,227 @@ impl HistorySemanticQuery for FixedSemanticQuery<'_> {
 }
 
 #[test]
+fn canonical_winner_hydration_is_single_bounded_and_fail_closed() {
+    let temp = tempdir().unwrap();
+    let (index, records) = publish(temp.path());
+    let request = lexical_request();
+    let filter = CompiledSearchFilter::compile(Default::default()).unwrap();
+    let query = NormalizedSearchQuery::from_request(&request);
+    let ranked = || {
+        crate::search::collect_search_hits_observed(
+            &request,
+            &index,
+            &filter,
+            SemanticAvailability::Unavailable(SemanticReason::PolicyDisabled),
+            &UnusedSemanticPort,
+        )
+        .unwrap()
+    };
+
+    ctx_history_index_query::reset_stored_event_record_materializations();
+    ctx_history_index_query::reset_stored_core_event_record_materializations();
+    ctx_history_index_query::reset_core_record_decodes();
+    let ranked_collection = ranked();
+    assert_eq!(
+        ctx_history_index_query::stored_event_record_materializations(),
+        0
+    );
+    assert_eq!(
+        ctx_history_index_query::stored_core_event_record_materializations(),
+        0,
+        "ranking and shaping must not hydrate Core winners early"
+    );
+    assert_eq!(ctx_history_index_query::core_record_decodes(), 0);
+    let (collection, presentations) =
+        crate::presentation::hydrate_ranked_search_collection_with_budget(
+            &index,
+            ranked_collection,
+            &query,
+            &filter,
+            crate::SearchPresentationHydrationBudget {
+                maximum_retained_snippet_bytes:
+                    crate::SEARCH_PRESENTATION_MAX_RETAINED_SNIPPET_BYTES,
+            },
+        )
+        .unwrap();
+    assert_eq!(collection.result_window.hits.len(), records.len());
+    assert_eq!(presentations.len(), records.len());
+    assert_eq!(
+        ctx_history_index_query::stored_event_record_materializations(),
+        0
+    );
+    assert_eq!(
+        ctx_history_index_query::stored_core_event_record_materializations(),
+        records.len(),
+        "only final winners are hydrated"
+    );
+    assert_eq!(
+        ctx_history_index_query::core_record_decodes(),
+        records.len()
+    );
+    let retained_snippet_bytes = presentations
+        .iter()
+        .map(|presentation| presentation.snippet.len())
+        .sum::<usize>();
+
+    let retention_error = crate::presentation::hydrate_ranked_search_collection_with_budget(
+        &index,
+        ranked(),
+        &query,
+        &filter,
+        crate::SearchPresentationHydrationBudget {
+            maximum_retained_snippet_bytes: retained_snippet_bytes - 1,
+        },
+    )
+    .unwrap_err();
+    let typed = retention_error
+        .downcast_ref::<crate::SearchPresentationRetentionBudgetExceeded>()
+        .expect("snippet retention failure must stay typed");
+    assert_eq!(typed.retained_snippet_bytes, retained_snippet_bytes);
+
+    let mut excessive = ranked();
+    let first = excessive.result_window.hits[0].clone();
+    excessive.result_window.hits = vec![first.clone(); crate::MAX_SEARCH_RESULTS + 1];
+    let excessive_error =
+        crate::presentation::hydrate_ranked_search_collection(&index, excessive, &query, &filter)
+            .unwrap_err();
+    assert!(excessive_error
+        .to_string()
+        .contains("search presentation cannot hydrate more than 200 hits"));
+
+    let mut duplicate = ranked();
+    duplicate.result_window.hits = vec![first.clone(), first.clone()];
+    let duplicate_error =
+        crate::presentation::hydrate_ranked_search_collection(&index, duplicate, &query, &filter)
+            .unwrap_err();
+    assert!(duplicate_error
+        .to_string()
+        .contains("search result duplicated Core event"));
+
+    let mut missing = ranked();
+    missing.result_window.hits.truncate(1);
+    missing.result_window.hits[0].event.event_id = uuid::Uuid::nil();
+    let missing_error =
+        crate::presentation::hydrate_ranked_search_collection(&index, missing, &query, &filter)
+            .unwrap_err();
+    assert_eq!(
+        missing_error.to_string(),
+        "pinned Core lookup omitted search event 00000000-0000-0000-0000-000000000000"
+    );
+
+    let mutations: [fn(&mut RankedEventRef); 5] = [
+        |event| event.event_identity_digest[31] ^= 1,
+        |event| event.session_id = Uuid::nil(),
+        |event| event.source_owner_digest[31] ^= 1,
+        |event| event.event_sequence = event.event_sequence.saturating_add(1),
+        |event| event.has_event_copy = !event.has_event_copy,
+    ];
+    for mutate in mutations {
+        let mut misaligned = ranked();
+        misaligned.result_window.hits.truncate(1);
+        mutate(&mut misaligned.result_window.hits[0].event);
+        let misaligned_error = crate::presentation::hydrate_ranked_search_collection(
+            &index, misaligned, &query, &filter,
+        )
+        .unwrap_err();
+        assert!(misaligned_error
+            .to_string()
+            .contains("misaligned ranked metadata"));
+    }
+    let mut misaligned_time = ranked();
+    misaligned_time.result_window.hits.truncate(1);
+    misaligned_time.result_window.hits[0]
+        .event
+        .occurred_at_unix_ms = Some(i64::MIN);
+    let misaligned_time_error = crate::presentation::hydrate_ranked_search_collection(
+        &index,
+        misaligned_time,
+        &query,
+        &filter,
+    )
+    .unwrap_err();
+    assert!(misaligned_time_error
+        .to_string()
+        .contains("misaligned ranked metadata"));
+
+    let rejecting_filter = CompiledSearchFilter::compile(EventSearchFilters {
+        provider: Some("provider-with-no-events".to_owned()),
+        ..EventSearchFilters::default()
+    })
+    .unwrap();
+    let filter_error = crate::presentation::hydrate_ranked_search_collection(
+        &index,
+        ranked(),
+        &query,
+        &rejecting_filter,
+    )
+    .unwrap_err();
+    assert!(filter_error
+        .to_string()
+        .contains("no longer matches the compiled Search filter"));
+}
+
+#[test]
+fn dense_limit_windows_preserve_exact_order_more_available_and_winner_only_hydration() {
+    let temp = tempdir().unwrap();
+    let (index, records) = publish(temp.path());
+    let filters = EventSearchFilters::default();
+    let full = crate::collect_search_hits(
+        &lexical_request(),
+        &index,
+        &filters,
+        SemanticAvailability::Unavailable(SemanticReason::PolicyDisabled),
+        &UnusedSemanticPort,
+    )
+    .unwrap();
+    let exact_order = full
+        .result_window
+        .hits
+        .iter()
+        .map(|hit| hit.event.event_id)
+        .collect::<Vec<_>>();
+    assert_eq!(exact_order.len(), records.len());
+
+    for limit in 1..=records.len() {
+        let mut request = lexical_request();
+        request.limit = limit;
+        ctx_history_index_query::reset_stored_event_record_materializations();
+        ctx_history_index_query::reset_stored_core_event_record_materializations();
+        ctx_history_index_query::reset_core_record_decodes();
+        let collection = crate::collect_search_hits(
+            &request,
+            &index,
+            &filters,
+            SemanticAvailability::Unavailable(SemanticReason::PolicyDisabled),
+            &UnusedSemanticPort,
+        )
+        .unwrap();
+        assert_eq!(
+            collection
+                .result_window
+                .hits
+                .iter()
+                .map(|hit| hit.event.event_id)
+                .collect::<Vec<_>>(),
+            exact_order[..limit]
+        );
+        assert_eq!(
+            collection.result_window.more_available,
+            limit < exact_order.len()
+        );
+        assert_eq!(
+            ctx_history_index_query::stored_event_record_materializations(),
+            0
+        );
+        assert_eq!(
+            ctx_history_index_query::stored_core_event_record_materializations(),
+            limit
+        );
+        assert_eq!(ctx_history_index_query::core_record_decodes(), limit);
+    }
+}
+
+#[test]
 fn search_application_pins_once_opens_semantics_once_and_requests_peer_lazily() {
     let temp = tempdir().unwrap();
     let (index, _) = publish(temp.path());
@@ -563,6 +786,20 @@ fn search_application_pins_once_opens_semantics_once_and_requests_peer_lazily() 
         read_model["retrieval"]["generation_id"],
         result.receipt().generation_id
     );
+    ctx_history_index_query::reset_stored_event_record_materializations();
+    ctx_history_index_query::reset_stored_core_event_record_materializations();
+    let compact_read_model = result.project_read_model(&read_model).unwrap();
+    assert_eq!(compact_read_model["results"].as_array().unwrap().len(), 3);
+    assert_eq!(
+        ctx_history_index_query::stored_event_record_materializations(),
+        0,
+        "compact Search rendering must resolve indexed IDs without reloading EventRecord"
+    );
+    assert_eq!(
+        ctx_history_index_query::stored_core_event_record_materializations(),
+        0,
+        "compact Search rendering must not hydrate Core after final winners"
+    );
 
     let compact_index = VerifiedIndex::open_pinned(temp.path()).unwrap();
     let mut compact_generation = RecordingGenerationPort::new(compact_index);
@@ -590,7 +827,7 @@ fn search_application_pins_once_opens_semantics_once_and_requests_peer_lazily() 
 }
 
 #[test]
-fn decode_failure_reaches_the_application_terminal_error_with_partial_work() {
+fn candidate_reference_failure_reaches_the_application_terminal_error_with_partial_work() {
     let temp = tempdir().unwrap();
     let (index, _) = publish(temp.path());
     let plan = plan_search(
@@ -611,7 +848,9 @@ fn decode_failure_reaches_the_application_terminal_error_with_partial_work() {
         &mut generation,
         &UnusedSemanticPort,
     ) {
-        Ok(_) => panic!("injected decode failure must reach the application terminal error"),
+        Ok(_) => {
+            panic!("injected candidate-reference failure must reach the application terminal error")
+        }
         Err(failure) => failure,
     };
 
@@ -623,10 +862,8 @@ fn decode_failure_reaches_the_application_terminal_error_with_partial_work() {
     assert_eq!(work.retrieval_rounds, Some(1));
     assert_eq!(work.query_executions, Some(1));
     assert_eq!(work.candidate_rows, Some(3));
-    assert_eq!(work.records_decoded, Some(1));
-    assert!(work
-        .encoded_core_bytes_decoded
-        .is_some_and(|bytes| bytes > 0));
+    assert_eq!(work.records_decoded, Some(0));
+    assert_eq!(work.encoded_core_bytes_decoded, Some(0));
 }
 
 #[test]
@@ -676,15 +913,15 @@ fn semantic_and_hybrid_share_coalesced_family_shaping_and_remain_indeterminate()
         .unwrap();
     let semantic_candidates = vec![
         EventSearchCandidate {
-            event: child_absent,
+            event: RankedEventRef::from(&child_absent),
             score: 100.0,
         },
         EventSearchCandidate {
-            event: sibling,
+            event: RankedEventRef::from(&sibling),
             score: 90.0,
         },
         EventSearchCandidate {
-            event: independent,
+            event: RankedEventRef::from(&independent),
             score: 80.0,
         },
     ];
@@ -735,10 +972,12 @@ fn provider_root_and_group_selectors_share_one_source_predicate_across_backends(
     let semantic_candidates = [(4, 400.0), (1, 300.0), (2, 200.0), (3, 100.0)]
         .into_iter()
         .map(|(record, score)| EventSearchCandidate {
-            event: index
-                .event_by_id(records[record].event_id.as_uuid())
-                .unwrap()
-                .unwrap(),
+            event: RankedEventRef::from(
+                &index
+                    .event_by_id(records[record].event_id.as_uuid())
+                    .unwrap()
+                    .unwrap(),
+            ),
             score,
         })
         .collect::<Vec<_>>();
@@ -792,9 +1031,7 @@ fn provider_root_and_group_selectors_share_one_source_predicate_across_backends(
                     Ok(HistorySemanticBatch {
                         candidates: semantic_candidates
                             .iter()
-                            .filter(|candidate| {
-                                projection.contains(candidate.event.event_id.as_uuid())
-                            })
+                            .filter(|candidate| projection.contains(candidate.event.event_id))
                             .cloned()
                             .collect(),
                         diagnostics: json!({"adapter": "semantic-filter-projection-test"}),
@@ -881,7 +1118,7 @@ fn rendered_semantic_result_preserves_exact_ids() {
         .unwrap()
         .unwrap();
     let semantic = FixedSemanticPort(vec![EventSearchCandidate {
-        event: candidate,
+        event: RankedEventRef::from(&candidate),
         score: 1.0,
     }]);
     let mut request = lexical_request();

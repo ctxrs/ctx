@@ -213,7 +213,7 @@ fn semantic_candidates_with_embedding(
         .map(|hit| hit.event_id)
         .collect::<Vec<_>>();
     let records = index
-        .events_by_ids_if_bounded(&event_ids, SEMANTIC_EXACT_TOP_K_MAX)?
+        .ranked_event_refs_by_ids_if_bounded(&event_ids, SEMANTIC_EXACT_TOP_K_MAX)?
         .ok_or_else(|| {
             semantic_not_ready(
                 "semantic_projection_event_mismatch",
@@ -225,11 +225,7 @@ fn semantic_candidates_with_embedding(
         })?;
     let mut candidates = Vec::with_capacity(records.len());
     for (hit, record) in positive_hits.into_iter().zip(records) {
-        if record.event_id.as_uuid() != hit.event_id
-            || record.event_type != "message"
-            || record.role.as_deref() != Some("user")
-            || !projection.contains(hit.event_id)
-        {
+        if record.event_id != hit.event_id || !projection.contains(hit.event_id) {
             return Err(semantic_not_ready(
                 "semantic_projection_event_mismatch",
                 format!(

@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use crate::HistorySemanticQuery;
 
 use super::*;
@@ -13,7 +11,7 @@ pub(super) fn collect_prepared_semantic_query<Query>(
     normalized_query: NormalizedSearchQuery,
     semantic_query: &mut Query,
     tracker: &mut SearchWorkTracker,
-) -> SearchExecutionResult<SearchCollection>
+) -> SearchExecutionResult<RankedSearchCollection>
 where
     Query: HistorySemanticQuery,
 {
@@ -75,7 +73,7 @@ pub(super) fn collect_prepared_semantic_search_using<SemanticSearch>(
     normalized_query: NormalizedSearchQuery,
     mut semantic_search: SemanticSearch,
     tracker: &mut SearchWorkTracker,
-) -> SearchExecutionResult<SearchCollection>
+) -> SearchExecutionResult<RankedSearchCollection>
 where
     SemanticSearch: FnMut(
         &[&str],
@@ -121,7 +119,7 @@ pub(super) fn semantic_retrieval_failure(
     error: HistorySemanticError,
     semantic_query_diagnostics: Vec<Value>,
     tracker: &mut SearchWorkTracker,
-) -> SearchExecutionResult<SearchCollection> {
+) -> SearchExecutionResult<RankedSearchCollection> {
     if requested_backend == SearchBackend::Hybrid {
         lexical_fallback_with_diagnostics(
             request,
@@ -148,41 +146,21 @@ fn finish_prepared_semantic_search(
     batch: HistorySemanticBatch,
     semantic_query_diagnostics: Vec<Value>,
     tracker: &mut SearchWorkTracker,
-) -> SearchExecutionResult<SearchCollection> {
+) -> SearchExecutionResult<RankedSearchCollection> {
     let HistorySemanticBatch {
         candidates,
         diagnostics: semantic_scan_diagnostics,
     } = batch;
-    let mut semantic_by_event = HashMap::<StableEntityId, EventSearchCandidate>::new();
-    for candidate in candidates {
-        semantic_by_event
-            .entry(candidate.event.event_id)
-            .and_modify(|existing| {
-                if candidate.score > existing.score {
-                    *existing = candidate.clone();
-                }
-            })
-            .or_insert(candidate);
+    if candidates.len() > SOURCE_FUSION_CANDIDATES {
+        return Err(anyhow!(
+            "semantic backend returned {} candidates, maximum is {SOURCE_FUSION_CANDIDATES}",
+            candidates.len()
+        )
+        .into());
     }
-    let mut semantic_candidates = semantic_by_event.into_values().collect::<Vec<_>>();
-    semantic_candidates.sort_by(|left, right| {
-        right
-            .score
-            .total_cmp(&left.score)
-            .then_with(|| {
-                left.event
-                    .event_id
-                    .as_uuid()
-                    .cmp(&right.event.event_id.as_uuid())
-            })
-            .then_with(|| {
-                left.event
-                    .event_id
-                    .digest()
-                    .cmp(&right.event.event_id.digest())
-            })
-    });
-    semantic_candidates.truncate(SOURCE_FUSION_CANDIDATES);
+    // The semantic backend owns strict-max per-event deduplication and final
+    // rank order. Re-sorting here would be a second product semantics path.
+    let semantic_candidates = candidates;
     let semantic_candidates_truncated = semantic_candidates.len() == SOURCE_FUSION_CANDIDATES;
     let semantic_diagnostics = json!({
         "query_count": queries.len(),
@@ -222,12 +200,12 @@ fn finish_prepared_semantic_search(
         };
     let candidate_pool = candidates.len();
     tracker.set_phase(SearchFailurePhase::ResultProjection);
-    let (result_window, diversification, concentration) = shape_search_candidates_using(
+    let (result_window, diversification) = shape_search_candidates_using(
         &candidates,
         request.limit,
         dense_search(request),
         DiversificationCompleteness::BackendUnknown,
-        |coordinates| index.session_grouping_claims(coordinates),
+        |coordinates| index.session_grouping_claims_for_search(coordinates),
     )?;
     Ok(SearchCollection {
         result_window,
@@ -235,7 +213,6 @@ fn finish_prepared_semantic_search(
         candidate_pool_truncated,
         lexical_diagnostics,
         diversification,
-        concentration,
         requested_backend,
         effective_backend: requested_backend,
         semantic_weight: if requested_backend == SearchBackend::Semantic {

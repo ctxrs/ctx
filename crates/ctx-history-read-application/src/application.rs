@@ -5,7 +5,7 @@ use ctx_history_index_query::{CompiledSearchFilter, EventSearchFilters, Verified
 use serde_json::Value;
 
 use crate::generation::PinnedGenerationRead;
-use crate::presentation::presentations_for_search_hits;
+use crate::presentation::hydrate_ranked_search_collection;
 use crate::search::{collect_search_hits_observed, ObservedSearchExecutionError};
 use crate::{
     normalize_search_request, reference_needs_retained_peer, render_search_json,
@@ -64,23 +64,24 @@ impl<'index> PinnedHistoryQuery<'index> {
                 SearchFailurePhase::QueryPreparation,
             )
         })?;
-        let collection = collect_search_hits_observed(
+        let ranked_collection = collect_search_hits_observed(
             &request,
             self.index,
             &compiled_filter,
             policy.semantic,
             semantic_port,
         )?;
-        let presentations = presentations_for_search_hits(
+        let work = ranked_collection.work;
+        let (collection, presentations) = hydrate_ranked_search_collection(
             self.index,
-            &collection.result_window.hits,
+            ranked_collection,
             &NormalizedSearchQuery::from_request(&request),
             &compiled_filter,
         )
         .map_err(|error| {
             ObservedSearchExecutionError::new(
                 error.into(),
-                collection.work,
+                work,
                 SearchFailurePhase::ResultProjection,
             )
         })?;

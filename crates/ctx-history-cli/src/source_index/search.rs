@@ -44,12 +44,6 @@ use super::{
 use ctx_history_read_application::SearchBackend;
 
 pub(in crate::source_index) use hydration::SearchPresentation;
-#[cfg(test)]
-pub(super) use hydration::{
-    presentations_for_search_hits_with_budget, SearchPresentationHydrationBudget,
-    SearchPresentationRetentionBudgetExceeded, SEARCH_PRESENTATION_HYDRATION_BUDGET,
-    SEARCH_PRESENTATION_MAX_RETAINED_SNIPPET_BYTES,
-};
 use observation::{
     initial_search_observation, observed_refresh_for_search, search_existing_generation_with_port,
 };

@@ -1,4 +1,4 @@
-use super::{EventRecord, EventSearchCandidate};
+use super::{EventSearchCandidate, RankedEventRef};
 use ctx_history_index_format::{IndexError, Result};
 
 /// Fixed admission ceilings for one lexical search request.
@@ -254,7 +254,7 @@ pub struct LexicalTermCoverage {
 /// Candidate shape returned by completeness-aware batch APIs.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LexicalSearchCandidate {
-    pub event: EventRecord,
+    pub event: RankedEventRef,
     /// Class-weighted BM25 score. Coverage is deliberately separate and ranks
     /// before this value.
     pub score: f32,

@@ -4,6 +4,7 @@ use tantivy::schema::{
     document::{ReferenceValue, ReferenceValueLeaf},
     Document, Field, Value,
 };
+use uuid::Uuid;
 
 use ctx_history_core::{
     CoreContent, CoreRecord, ProviderNativeCopyProof, SourceKey, StableEntityId, StableEntityKind,
@@ -84,17 +85,30 @@ impl SessionAuthorityKey {
                 SESSION_AUTHORITY_FIELD,
             ));
         }
-        Ok(*session_id.as_uuid().as_bytes())
+        Ok(Self::uuid_prefix_from_uuid(session_id.as_uuid()))
     }
 
     pub fn uuid_range_end(session_id: StableEntityId) -> Result<Vec<u8>> {
+        if session_id.entity_kind() != StableEntityKind::Session {
+            return Err(IndexError::InvalidStoredDocumentField(
+                SESSION_AUTHORITY_FIELD,
+            ));
+        }
+        Ok(Self::uuid_range_end_from_uuid(session_id.as_uuid()))
+    }
+
+    pub fn uuid_prefix_from_uuid(session_id: Uuid) -> [u8; SESSION_AUTHORITY_UUID_PREFIX_LEN] {
+        *session_id.as_bytes()
+    }
+
+    pub fn uuid_range_end_from_uuid(session_id: Uuid) -> Vec<u8> {
         let mut end = Vec::with_capacity(SESSION_AUTHORITY_KEY_LEN + 1);
-        end.extend_from_slice(&Self::uuid_prefix(session_id)?);
+        end.extend_from_slice(&Self::uuid_prefix_from_uuid(session_id));
         end.extend(std::iter::repeat_n(
             u8::MAX,
             SESSION_AUTHORITY_KEY_LEN - SESSION_AUTHORITY_UUID_PREFIX_LEN + 1,
         ));
-        Ok(end)
+        end
     }
 
     pub fn identities(self) -> Result<(StableEntityId, StableEntityId)> {
