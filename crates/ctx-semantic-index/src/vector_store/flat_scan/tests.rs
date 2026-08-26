@@ -104,6 +104,7 @@ fn exact_slice_and_byte_scans_match_the_f32_oracle() {
             let mut best = FlatScanHit {
                 event_id: event_id(event as u128 + 1),
                 chunk_ordinal: 0,
+                query_ordinal: 0,
                 similarity: oracle_dot(&query, &chunks[0]),
                 location: None,
             };
@@ -111,6 +112,7 @@ fn exact_slice_and_byte_scans_match_the_f32_oracle() {
                 let candidate = FlatScanHit {
                     event_id: best.event_id,
                     chunk_ordinal: chunk as u32,
+                    query_ordinal: 0,
                     similarity: oracle_dot(&query, vector),
                     location: None,
                 };
@@ -178,6 +180,107 @@ fn exact_slice_and_byte_scans_match_the_f32_oracle() {
     }
     assert_eq!(slice_result.counters.dot_products, EVENTS * CHUNKS);
     assert_eq!(byte_result.counters.dot_products, EVENTS * CHUNKS);
+}
+
+#[test]
+fn multivector_scan_matches_scalar_top_k_union_and_max_dedupe() {
+    use std::collections::HashMap;
+
+    const DIMENSIONS: usize = 13;
+    const EVENTS: usize = 64;
+    const CHUNKS: usize = 3;
+    const QUERIES: usize = 5;
+    const TOP_K: usize = 17;
+
+    let mut state = 0xa409_3822_299f_31d0_u64;
+    let mut next_vector = || {
+        normalized(
+            (0..DIMENSIONS)
+                .map(|_| {
+                    state = state
+                        .wrapping_mul(6_364_136_223_846_793_005)
+                        .wrapping_add(1_442_695_040_888_963_407);
+                    let unit = ((state >> 40) as u32) as f32 / ((1_u32 << 24) - 1) as f32;
+                    (unit * 2.0) - 1.0
+                })
+                .collect(),
+        )
+    };
+    let queries = (0..QUERIES).map(|_| next_vector()).collect::<Vec<_>>();
+    let query_refs = queries.iter().map(Vec::as_slice).collect::<Vec<_>>();
+    let vectors = (0..EVENTS)
+        .map(|_| (0..CHUNKS).map(|_| next_vector()).collect::<Vec<_>>())
+        .collect::<Vec<_>>();
+    let records = || {
+        vectors.iter().enumerate().flat_map(|(event, chunks)| {
+            chunks.iter().enumerate().map(move |(chunk, vector)| {
+                (
+                    ActiveChunk::new(event_id(event as u128 + 1), chunk as u32),
+                    vector.as_slice(),
+                )
+            })
+        })
+    };
+
+    let config = FlatScanConfig::new(DIMENSIONS, TOP_K);
+    let mut batched = ExactFlatF32Scan::new_multi(&query_refs, config).unwrap();
+    batched.scan_f32(records()).unwrap();
+    let batched = batched.finish().unwrap();
+
+    let mut scalar_union = HashMap::<Uuid, FlatScanHit>::new();
+    for (query_ordinal, query) in queries.iter().enumerate() {
+        let mut scalar = ExactFlatF32Scan::new(query, config).unwrap();
+        scalar.scan_f32(records()).unwrap();
+        for mut hit in scalar.finish().unwrap().hits {
+            hit.query_ordinal = query_ordinal;
+            scalar_union
+                .entry(hit.event_id)
+                .and_modify(|existing| {
+                    if hit.similarity.total_cmp(&existing.similarity) == Ordering::Greater {
+                        *existing = hit;
+                    }
+                })
+                .or_insert(hit);
+        }
+    }
+    let mut expected = scalar_union.into_values().collect::<Vec<_>>();
+    expected.sort_unstable_by(|left, right| right.cmp(left));
+    expected.truncate(TOP_K);
+
+    assert_eq!(batched.hits.len(), expected.len());
+    for (actual, expected) in batched.hits.iter().zip(&expected) {
+        assert_eq!(actual.event_id, expected.event_id);
+        assert_eq!(actual.chunk_ordinal, expected.chunk_ordinal);
+        assert_eq!(actual.query_ordinal, expected.query_ordinal);
+        assert_eq!(actual.similarity.to_bits(), expected.similarity.to_bits());
+    }
+    assert_eq!(batched.counters.chunks_scanned, EVENTS * CHUNKS);
+    assert_eq!(batched.counters.dot_products, EVENTS * CHUNKS * QUERIES);
+    assert_eq!(
+        batched.counters.vector_bytes_read,
+        EVENTS * CHUNKS * DIMENSIONS * std::mem::size_of::<f32>()
+    );
+}
+
+#[test]
+fn multivector_equal_scores_keep_first_query_before_lower_chunk() {
+    let first_query = [1.0, 0.0];
+    let second_query = [0.0, 1.0];
+    let queries = [first_query.as_slice(), second_query.as_slice()];
+    let records = [
+        (ActiveChunk::new(event_id(1), 0), second_query.as_slice()),
+        (ActiveChunk::new(event_id(1), 5), first_query.as_slice()),
+        (ActiveChunk::new(event_id(2), 0), first_query.as_slice()),
+    ];
+    let mut scan = ExactFlatF32Scan::new_multi(&queries, FlatScanConfig::new(2, 2)).unwrap();
+    scan.scan_f32(records).unwrap();
+    let result = scan.finish().unwrap();
+
+    assert_eq!(result.hits[0].event_id, event_id(1));
+    assert_eq!(result.hits[0].query_ordinal, 0);
+    assert_eq!(result.hits[0].chunk_ordinal, 5);
+    assert_eq!(result.hits[1].event_id, event_id(2));
+    assert_eq!(result.hits[1].query_ordinal, 0);
 }
 
 #[test]
@@ -353,6 +456,10 @@ fn heap_never_retains_more_than_top_k() {
 
 #[test]
 fn query_validation_rejects_bad_contracts() {
+    assert!(matches!(
+        ExactFlatF32Scan::new_multi(&[], FlatScanConfig::new(2, 1)),
+        Err(FlatScanError::NoQueries)
+    ));
     assert!(matches!(
         ExactFlatF32Scan::new(&[1.0], FlatScanConfig::new(0, 1)),
         Err(FlatScanError::ZeroDimensions)

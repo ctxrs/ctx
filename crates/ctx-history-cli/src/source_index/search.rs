@@ -949,7 +949,7 @@ where
     SemanticSearch: FnMut(
         &VerifiedIndex,
         &Path,
-        &str,
+        &[&str],
         &ctx_history_index::CompiledSearchFilter,
         usize,
     ) -> Result<(Vec<EventSearchCandidate>, Value)>,
@@ -961,8 +961,8 @@ where
         index,
         filters,
         SemanticAvailability::Available,
-        |query, filters, candidate_limit| {
-            semantic_search(index, data_root, query, filters, candidate_limit)
+        |queries, filters, candidate_limit| {
+            semantic_search(index, data_root, queries, filters, candidate_limit)
                 .map(|(candidates, diagnostics)| HistorySemanticBatch {
                     candidates,
                     diagnostics,

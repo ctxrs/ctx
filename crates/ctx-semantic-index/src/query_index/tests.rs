@@ -197,9 +197,11 @@ fn semantic_filter_is_applied_before_top_k_across_more_than_4096_candidates() ->
     let (candidates, diagnostics) = pin.search(
         &index,
         &filter,
-        &normalized_test_embedding(1.0, 0.0),
+        &[
+            normalized_test_embedding(0.0, 1.0),
+            normalized_test_embedding(1.0, 0.0),
+        ],
         1,
-        None,
     )?;
     assert_eq!(candidates.len(), 1);
     assert_eq!(
@@ -209,6 +211,11 @@ fn semantic_filter_is_applied_before_top_k_across_more_than_4096_candidates() ->
     assert_eq!(diagnostics["iterations"], 1);
     assert_eq!(diagnostics["events_scored"], 1);
     assert_eq!(diagnostics["chunks_scanned"], 1);
+    assert_eq!(diagnostics["query_vectors"], 2);
+    assert_eq!(diagnostics["vector_passes"], 1);
+    assert_eq!(diagnostics["dot_products"], 2);
+    assert_eq!(diagnostics["metadata_records_loaded"], 1);
+    assert_eq!(diagnostics["core_records_decoded"], 0);
     assert_eq!(
         diagnostics["filtered_candidates"],
         UNRELATED_EVENTS as usize
@@ -327,13 +334,8 @@ fn semantic_query_scores_only_active_flat_events_that_match_core_metadata() -> R
         workspace: Some("shared".to_owned()),
         ..EventSearchFilters::default()
     })?;
-    let (candidates, diagnostics) = pin.search(
-        &index,
-        &shared,
-        &normalized_test_embedding(1.0, 0.0),
-        3,
-        None,
-    )?;
+    let (candidates, diagnostics) =
+        pin.search(&index, &shared, &[normalized_test_embedding(1.0, 0.0)], 3)?;
     assert_eq!(candidates.len(), 1);
     assert_eq!(
         candidates[0].event.event_id.as_uuid(),
@@ -348,9 +350,8 @@ fn semantic_query_scores_only_active_flat_events_that_match_core_metadata() -> R
     let (candidates, diagnostics) = pin.search(
         &index,
         &filtered_only,
-        &normalized_test_embedding(1.0, 0.0),
+        &[normalized_test_embedding(1.0, 0.0)],
         3,
-        None,
     )?;
     assert!(candidates.is_empty());
     assert_eq!(diagnostics["events_scored"], 0);

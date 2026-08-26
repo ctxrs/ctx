@@ -100,9 +100,18 @@ impl HistorySemanticError {
 }
 
 pub trait HistorySemanticQuery {
+    /// Prepare one normalized alternative in caller order.
+    ///
+    /// Implementations retain the resulting vector on the query session so a
+    /// later [`Self::candidates`] call can score all alternatives in one exact
+    /// vector traversal. Returning diagnostics here lets callers preserve the
+    /// completed prefix when a later alternative fails.
+    fn prepare_alternative(&mut self, query: &str) -> Result<Value, HistorySemanticError>;
+
+    /// Retrieve one globally ranked candidate pool for every prepared
+    /// alternative.
     fn candidates(
         &mut self,
-        query: &str,
         filter: &CompiledSearchFilter,
         candidate_limit: usize,
     ) -> Result<HistorySemanticBatch, HistorySemanticError>;

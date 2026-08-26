@@ -23,7 +23,7 @@ use ctx_history_index_query::{
     CoreEventPageBudget, CoreEventRangeFilters, CoreEventRangeSelection, EventSearchCandidate,
     SearchContentScope, VerifiedIndex,
 };
-use serde_json::json;
+use serde_json::{json, Value};
 use tempfile::tempdir;
 
 use crate::{
@@ -65,9 +65,12 @@ impl HistorySemanticPort for UnusedSemanticPort {
 }
 
 impl HistorySemanticQuery for UnusedSemanticQuery {
+    fn prepare_alternative(&mut self, _query: &str) -> Result<Value, HistorySemanticError> {
+        panic!("lexical application query must not prepare semantic alternatives")
+    }
+
     fn candidates(
         &mut self,
-        _query: &str,
         _filter: &ctx_history_index_query::CompiledSearchFilter,
         _candidate_limit: usize,
     ) -> Result<HistorySemanticBatch, HistorySemanticError> {
@@ -442,9 +445,12 @@ impl HistorySemanticPort for CountingSemanticPort {
 }
 
 impl HistorySemanticQuery for CountingSemanticQuery {
+    fn prepare_alternative(&mut self, _query: &str) -> Result<Value, HistorySemanticError> {
+        Ok(json!({"adapter": "test-query"}))
+    }
+
     fn candidates(
         &mut self,
-        _query: &str,
         _filter: &ctx_history_index_query::CompiledSearchFilter,
         _candidate_limit: usize,
     ) -> Result<HistorySemanticBatch, HistorySemanticError> {
@@ -471,9 +477,12 @@ impl HistorySemanticPort for FixedSemanticPort {
 }
 
 impl HistorySemanticQuery for FixedSemanticQuery<'_> {
+    fn prepare_alternative(&mut self, _query: &str) -> Result<Value, HistorySemanticError> {
+        Ok(json!({"adapter": "fixed-test-query"}))
+    }
+
     fn candidates(
         &mut self,
-        _query: &str,
         _filter: &ctx_history_index_query::CompiledSearchFilter,
         _candidate_limit: usize,
     ) -> Result<HistorySemanticBatch, HistorySemanticError> {

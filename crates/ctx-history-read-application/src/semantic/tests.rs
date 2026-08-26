@@ -35,6 +35,7 @@ impl CallLog {
 struct FakeSemanticPort {
     calls: CallLog,
     begin_error: Option<HistorySemanticError>,
+    prepare_error: Option<(String, HistorySemanticError)>,
 }
 
 impl FakeSemanticPort {
@@ -42,6 +43,7 @@ impl FakeSemanticPort {
         Self {
             calls,
             begin_error: None,
+            prepare_error: None,
         }
     }
 
@@ -49,6 +51,19 @@ impl FakeSemanticPort {
         Self {
             calls,
             begin_error: Some(error),
+            prepare_error: None,
+        }
+    }
+
+    fn failing_alternative(
+        calls: CallLog,
+        query: impl Into<String>,
+        error: HistorySemanticError,
+    ) -> Self {
+        Self {
+            calls,
+            begin_error: None,
+            prepare_error: Some((query.into(), error)),
         }
     }
 }
@@ -66,26 +81,39 @@ impl HistorySemanticPort for FakeSemanticPort {
         }
         Ok(FakeSemanticQuery {
             calls: self.calls.clone(),
+            prepare_error: self.prepare_error.clone(),
         })
     }
 }
 
 struct FakeSemanticQuery {
     calls: CallLog,
+    prepare_error: Option<(String, HistorySemanticError)>,
 }
 
 impl HistorySemanticQuery for FakeSemanticQuery {
-    fn candidates(
+    fn prepare_alternative(
         &mut self,
         query: &str,
+    ) -> std::result::Result<Value, HistorySemanticError> {
+        self.calls.push(format!("prepare:{query}"));
+        if let Some((failed_query, error)) = self.prepare_error.as_ref() {
+            if query == failed_query {
+                return Err(error.clone());
+            }
+        }
+        Ok(json!({"fake_query": query}))
+    }
+
+    fn candidates(
+        &mut self,
         _filter: &CompiledSearchFilter,
         candidate_limit: usize,
     ) -> std::result::Result<HistorySemanticBatch, HistorySemanticError> {
-        self.calls
-            .push(format!("candidates:{query}:{candidate_limit}"));
+        self.calls.push(format!("candidates:{candidate_limit}"));
         Ok(HistorySemanticBatch {
             candidates: Vec::new(),
-            diagnostics: json!({"fake_query": query}),
+            diagnostics: json!({"fake_scan": true}),
         })
     }
 }
@@ -168,7 +196,7 @@ fn fake_port_begins_once_before_ordered_query_calls() -> Result<()> {
     )?;
 
     assert_eq!(collection.semantic_status, "ready");
-    assert_eq!(collection.work.retrieval_rounds, Some(3));
+    assert_eq!(collection.work.retrieval_rounds, Some(2));
     assert_eq!(collection.candidate_pool, 0);
     assert!(!collection.candidate_pool_truncated);
     assert_eq!(
@@ -180,9 +208,53 @@ fn fake_port_begins_once_before_ordered_query_calls() -> Result<()> {
         calls.values(),
         vec![
             "begin_query",
-            "candidates:first query:1600",
-            "candidates:second query:1600",
+            "prepare:first query",
+            "prepare:second query",
+            "candidates:1600",
         ]
+    );
+    Ok(())
+}
+
+#[test]
+fn ordered_prepare_failure_preserves_prefix_and_never_starts_vector_scan() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let index = empty_index(temp.path())?;
+    let calls = CallLog::default();
+    let port = FakeSemanticPort::failing_alternative(
+        calls.clone(),
+        "second query",
+        HistorySemanticError::not_ready(
+            SemanticReason::QueryServiceUnavailable,
+            "second embedding failed",
+            true,
+        ),
+    );
+    let request = semantic_request(SearchBackend::Hybrid);
+
+    let collection = collect_search_hits(
+        &request,
+        &index,
+        &EventSearchFilters::default(),
+        SemanticAvailability::Available,
+        &port,
+    )?;
+
+    assert_eq!(collection.effective_backend, SearchBackend::Lexical);
+    assert_eq!(collection.semantic_status, "unavailable");
+    assert_eq!(collection.work.retrieval_rounds, Some(1));
+    let diagnostics = collection
+        .semantic_diagnostics
+        .expect("hybrid fallback diagnostics");
+    assert_eq!(diagnostics["query_count"], 2);
+    assert_eq!(diagnostics["queries"].as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        diagnostics["queries"][0]["diagnostics"]["fake_query"],
+        "first query"
+    );
+    assert_eq!(
+        calls.values(),
+        vec!["begin_query", "prepare:first query", "prepare:second query",]
     );
     Ok(())
 }

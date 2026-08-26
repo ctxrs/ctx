@@ -43,6 +43,7 @@ pub struct SemanticQuerySession<'a> {
     pin: SemanticQueryPin,
     index: &'a VerifiedIndex,
     data_root: &'a Path,
+    embeddings: Vec<Vec<f32>>,
 }
 
 impl SemanticQuerySession<'_> {
@@ -56,25 +57,22 @@ impl SemanticQuerySession<'_> {
             pin,
             index,
             data_root,
+            embeddings: Vec::new(),
         })
     }
 
-    fn search(
+    fn prepare_alternative(
         &mut self,
         query: &str,
-        filter: &CompiledSearchFilter,
-        candidate_limit: usize,
-    ) -> std::result::Result<(Vec<EventSearchCandidate>, Value), SemanticQueryError> {
-        self.search_with(query, filter, candidate_limit, daemon_query_embedding)
+    ) -> std::result::Result<Value, SemanticQueryError> {
+        self.prepare_alternative_with(query, daemon_query_embedding)
     }
 
-    fn search_with<EmbedQuery>(
+    fn prepare_alternative_with<EmbedQuery>(
         &mut self,
         query: &str,
-        filter: &CompiledSearchFilter,
-        candidate_limit: usize,
         mut embed_query: EmbedQuery,
-    ) -> std::result::Result<(Vec<EventSearchCandidate>, Value), SemanticQueryError>
+    ) -> std::result::Result<Value, SemanticQueryError>
     where
         EmbedQuery: FnMut(&Path, &str) -> Result<Option<(Vec<f32>, u64)>>,
     {
@@ -83,10 +81,9 @@ impl SemanticQuerySession<'_> {
             .requires_embedding(self.index)
             .map_err(SemanticQueryError::from)?
         {
-            return self
-                .pin
-                .search(self.index, filter, &[], candidate_limit, None)
-                .map_err(SemanticQueryError::from);
+            return Ok(compact_json(json!({
+                "query_embed_ms": null,
+            })));
         }
         let (embedding, query_embed_ms) = embed_query(self.data_root, query)
             .map_err(SemanticQueryError::from)?
@@ -97,14 +94,19 @@ impl SemanticQuerySession<'_> {
                     true,
                 )
             })?;
+        self.embeddings.push(embedding);
+        Ok(compact_json(json!({
+            "query_embed_ms": query_embed_ms,
+        })))
+    }
+
+    fn search(
+        &mut self,
+        filter: &CompiledSearchFilter,
+        candidate_limit: usize,
+    ) -> std::result::Result<(Vec<EventSearchCandidate>, Value), SemanticQueryError> {
         self.pin
-            .search(
-                self.index,
-                filter,
-                &embedding,
-                candidate_limit,
-                Some(query_embed_ms),
-            )
+            .search(self.index, filter, &self.embeddings, candidate_limit)
             .map_err(SemanticQueryError::from)
     }
 
@@ -118,18 +120,26 @@ impl SemanticQuerySession<'_> {
             pin,
             index,
             data_root,
+            embeddings: Vec::new(),
         }
     }
 }
 
 impl HistorySemanticQuery for SemanticQuerySession<'_> {
-    fn candidates(
+    fn prepare_alternative(
         &mut self,
         query: &str,
+    ) -> std::result::Result<Value, HistorySemanticError> {
+        self.prepare_alternative(query)
+            .map_err(HistorySemanticError::from)
+    }
+
+    fn candidates(
+        &mut self,
         filter: &CompiledSearchFilter,
         candidate_limit: usize,
     ) -> std::result::Result<HistorySemanticBatch, HistorySemanticError> {
-        self.search(query, filter, candidate_limit)
+        self.search(filter, candidate_limit)
             .map(|(candidates, diagnostics)| HistorySemanticBatch {
                 candidates,
                 diagnostics,

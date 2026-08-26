@@ -57,9 +57,12 @@ impl HistorySemanticPort for ProjectedSemanticPort {
 }
 
 impl HistorySemanticQuery for ProjectedSemanticQuery<'_> {
+    fn prepare_alternative(&mut self, _query: &str) -> Result<Value, HistorySemanticError> {
+        Ok(json!({"adapter": "projected-test-query"}))
+    }
+
     fn candidates(
         &mut self,
-        _query: &str,
         filter: &ctx_history_index_query::CompiledSearchFilter,
         _candidate_limit: usize,
     ) -> Result<HistorySemanticBatch, HistorySemanticError> {

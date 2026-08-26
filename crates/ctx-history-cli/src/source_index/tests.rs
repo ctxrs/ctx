@@ -504,10 +504,10 @@ fn omitted_and_explicit_all_resolve_to_identical_weighted_retrieval() {
             temp.path(),
             request.semantic_weight,
             filters,
-            |index, _data_root, query, filters, candidate_limit| {
+            |index, _data_root, queries, filters, candidate_limit| {
                 Ok((
                     index.search_event_candidates_any_with_filters(
-                        &[query],
+                        queries,
                         filters.filters(),
                         candidate_limit,
                     )?,
