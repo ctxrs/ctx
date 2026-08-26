@@ -644,11 +644,20 @@ fn codex_mixed_session_replay_preserves_source_backed_rejection_counts() {
     assert_eq!(carried_source["carried_forward"], true, "{carried:#}");
     assert_eq!(carried_source["current_rejected_records"], 1, "{carried:#}");
     assert_eq!(carried_source["rejected_record_total"], 1, "{carried:#}");
+    let carried_diagnostics = carried_source["rejection_diagnostics"]
+        .as_array()
+        .unwrap_or_else(|| panic!("missing carried rejection diagnostics in {carried:#}"));
+    assert_eq!(carried_diagnostics.len(), 1, "{carried:#}");
+    assert_eq!(carried_diagnostics[0]["line"], 3, "{carried:#}");
+    assert_eq!(
+        carried_diagnostics[0]["class"], "malformed_record",
+        "{carried:#}"
+    );
     assert!(
-        carried_source["rejection_diagnostics"]
-            .as_array()
-            .is_some_and(Vec::is_empty),
-        "failed-attempt rejection must not borrow carried certificate capacity: {carried:#}"
+        carried_diagnostics[0]["detail"]
+            .as_str()
+            .is_some_and(|detail| !detail.is_empty()),
+        "the carried diagnostic must remain committed while the new failed-attempt rejection is suppressed: {carried:#}"
     );
 
     let search = json_output(ctx(&temp).args([

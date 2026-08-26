@@ -188,6 +188,7 @@ mod tests {
                     "receipt": receipt.to_json(),
                     "route_observations": [null],
                     "route_controls": {},
+                    "committed_rejection_diagnostics": {},
                 }))
                 .map_err(|error| {
                     ctx_history_index::IndexError::PublicationMetadata(error.to_string())

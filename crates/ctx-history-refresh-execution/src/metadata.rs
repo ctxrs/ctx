@@ -1,9 +1,11 @@
 use super::*;
 use ctx_history_index::MAX_PUBLICATION_METADATA_BYTES;
 
-pub const SOURCE_REFRESH_PUBLICATION_METADATA_VERSION: u64 = 3;
+pub const SOURCE_REFRESH_PUBLICATION_METADATA_VERSION: u64 = 4;
 const LEGACY_SOURCE_REFRESH_PUBLICATION_METADATA_VERSION: u64 = 1;
 const PREVIOUS_SOURCE_REFRESH_PUBLICATION_METADATA_VERSION: u64 = 2;
+const ROUTE_CONTROL_SOURCE_REFRESH_PUBLICATION_METADATA_VERSION: u64 = 3;
+pub(crate) const COMMITTED_REJECTION_DIAGNOSTICS_FIELD: &str = "committed_rejection_diagnostics";
 
 /// Provider-neutral query-readiness verdict for one physically verified Core
 /// generation.
@@ -46,11 +48,20 @@ pub struct SourceBackedPublicationMetadata {
 impl SourceBackedPublicationMetadata {
     #[doc(hidden)]
     pub fn encode(&self) -> ctx_history_index::Result<Vec<u8>> {
+        self.encode_with_committed_rejection_diagnostics(&json!({}))
+    }
+
+    pub(crate) fn encode_with_committed_rejection_diagnostics(
+        &self,
+        committed_rejection_diagnostics: &Value,
+    ) -> ctx_history_index::Result<Vec<u8>> {
         if self.version != SOURCE_REFRESH_PUBLICATION_METADATA_VERSION {
             return Err(IndexError::PublicationMetadata(
-                "new Core source-refresh publications must use metadata v3".to_owned(),
+                "new Core source-refresh publications must use metadata v4".to_owned(),
             ));
         }
+        parse_committed_rejection_diagnostics(Some(committed_rejection_diagnostics))
+            .map_err(|error| IndexError::PublicationMetadata(error.to_string()))?;
         validate_v2_receipt(&self.receipt, None, &self.refresh_scope)
             .map_err(|error| IndexError::PublicationMetadata(error.to_string()))?;
         let route_ids = receipt_route_ids(&self.receipt)
@@ -81,7 +92,8 @@ impl SourceBackedPublicationMetadata {
                 "route control exceeds its bounded contract".to_owned(),
             ));
         }
-        let encoded = self.encode_with_observations(route_observations)?;
+        let encoded =
+            self.encode_with_observations(route_observations, committed_rejection_diagnostics)?;
         if encoded.len() <= MAX_PUBLICATION_METADATA_BYTES {
             return Ok(encoded);
         }
@@ -89,7 +101,10 @@ impl SourceBackedPublicationMetadata {
         // authority. Drop them as one deterministic unit before rejecting a
         // legitimate exact receipt; startup then performs the normal
         // fail-closed refresh for every route.
-        let encoded = self.encode_with_observations(vec![Value::Null; route_ids.len()])?;
+        let encoded = self.encode_with_observations(
+            vec![Value::Null; route_ids.len()],
+            committed_rejection_diagnostics,
+        )?;
         if encoded.len() > MAX_PUBLICATION_METADATA_BYTES {
             return Err(IndexError::PublicationMetadataTooLarge {
                 actual: encoded.len(),
@@ -102,6 +117,7 @@ impl SourceBackedPublicationMetadata {
     fn encode_with_observations(
         &self,
         route_observations: Vec<Value>,
+        committed_rejection_diagnostics: &Value,
     ) -> ctx_history_index::Result<Vec<u8>> {
         let route_controls = self
             .route_controls
@@ -121,12 +137,19 @@ impl SourceBackedPublicationMetadata {
             "receipt": self.receipt,
             "route_observations": route_observations,
             "route_controls": route_controls,
+            (COMMITTED_REJECTION_DIAGNOSTICS_FIELD): committed_rejection_diagnostics,
         }));
         serde_json::to_vec(&value)
             .map_err(|error| IndexError::PublicationMetadata(error.to_string()))
     }
 
     pub fn decode(index: &VerifiedIndex) -> Result<Self> {
+        Self::decode_with_committed_rejection_diagnostics(index).map(|(metadata, _)| metadata)
+    }
+
+    pub(crate) fn decode_with_committed_rejection_diagnostics(
+        index: &VerifiedIndex,
+    ) -> Result<(Self, Option<Vec<SourceBackedRefreshRecordRejection>>)> {
         let bytes = index
             .publication_metadata()
             .ok_or_else(|| anyhow!("active Core publication has no source-refresh metadata"))?;
@@ -146,6 +169,7 @@ impl SourceBackedPublicationMetadata {
             version,
             LEGACY_SOURCE_REFRESH_PUBLICATION_METADATA_VERSION
                 | PREVIOUS_SOURCE_REFRESH_PUBLICATION_METADATA_VERSION
+                | ROUTE_CONTROL_SOURCE_REFRESH_PUBLICATION_METADATA_VERSION
                 | SOURCE_REFRESH_PUBLICATION_METADATA_VERSION
         ) {
             bail!("unsupported Core source-refresh publication metadata version");
@@ -158,8 +182,15 @@ impl SourceBackedPublicationMetadata {
             "route_observations",
             "version",
         ]);
-        if version == SOURCE_REFRESH_PUBLICATION_METADATA_VERSION {
+        if matches!(
+            version,
+            ROUTE_CONTROL_SOURCE_REFRESH_PUBLICATION_METADATA_VERSION
+                | SOURCE_REFRESH_PUBLICATION_METADATA_VERSION
+        ) {
             expected.insert("route_controls");
+        }
+        if version == SOURCE_REFRESH_PUBLICATION_METADATA_VERSION {
+            expected.insert(COMMITTED_REJECTION_DIAGNOSTICS_FIELD);
         }
         if fields.keys().map(String::as_str).collect::<BTreeSet<_>>() != expected {
             bail!("Core source-refresh publication metadata has unknown or missing fields");
@@ -187,6 +218,7 @@ impl SourceBackedPublicationMetadata {
                 validate_receipt_generation(&receipt, index)?;
             }
             PREVIOUS_SOURCE_REFRESH_PUBLICATION_METADATA_VERSION
+            | ROUTE_CONTROL_SOURCE_REFRESH_PUBLICATION_METADATA_VERSION
             | SOURCE_REFRESH_PUBLICATION_METADATA_VERSION => {
                 validate_v2_receipt(&receipt, Some(index), &refresh_scope)?;
             }
@@ -222,7 +254,11 @@ impl SourceBackedPublicationMetadata {
             .iter()
             .map(|route| route.route_identity().clone())
             .collect::<BTreeSet<_>>();
-        let route_controls = if version == SOURCE_REFRESH_PUBLICATION_METADATA_VERSION {
+        let route_controls = if matches!(
+            version,
+            ROUTE_CONTROL_SOURCE_REFRESH_PUBLICATION_METADATA_VERSION
+                | SOURCE_REFRESH_PUBLICATION_METADATA_VERSION
+        ) {
             fields
                 .get("route_controls")
                 .and_then(Value::as_object)
@@ -241,15 +277,26 @@ impl SourceBackedPublicationMetadata {
         } else {
             BTreeMap::new()
         };
-        Ok(Self {
-            version,
-            request_id,
-            operation,
-            refresh_scope,
-            receipt,
-            route_observations,
-            route_controls,
-        })
+        let committed_rejection_diagnostics = (version
+            == SOURCE_REFRESH_PUBLICATION_METADATA_VERSION)
+            .then(|| {
+                parse_committed_rejection_diagnostics(
+                    fields.get(COMMITTED_REJECTION_DIAGNOSTICS_FIELD),
+                )
+            })
+            .transpose()?;
+        Ok((
+            Self {
+                version,
+                request_id,
+                operation,
+                refresh_scope,
+                receipt,
+                route_observations,
+                route_controls,
+            },
+            committed_rejection_diagnostics,
+        ))
     }
 
     pub fn response_value(&self) -> Value {
@@ -280,30 +327,77 @@ impl SourceBackedPublicationMetadata {
         match source_count {
             Some(1..) => true,
             Some(0) => {
-                self.version == SOURCE_REFRESH_PUBLICATION_METADATA_VERSION
-                    && required_route_results(self.receipt.get("route_results"))
-                        .and_then(|route_results| {
-                            crate::receipt_parse::parse_zero_source_authority(
-                                self.receipt.get("zero_source_authority"),
-                                &route_results,
-                            )
-                            .map(|authority| (route_results, authority))
-                        })
-                        .is_ok_and(|(route_results, authority)| {
-                            if authority.is_empty() {
-                                route_results.is_empty()
-                                    && self.refresh_scope == SourceBackedRefreshScope::All
-                                    && index.manifest().source_routes().is_empty()
-                            } else {
-                                authority
-                                    .iter()
-                                    .all(|entry| entry.generation_id == index.generation_id())
-                            }
-                        })
+                matches!(
+                    self.version,
+                    ROUTE_CONTROL_SOURCE_REFRESH_PUBLICATION_METADATA_VERSION
+                        | SOURCE_REFRESH_PUBLICATION_METADATA_VERSION
+                ) && required_route_results(self.receipt.get("route_results"))
+                    .and_then(|route_results| {
+                        crate::receipt_parse::parse_zero_source_authority(
+                            self.receipt.get("zero_source_authority"),
+                            &route_results,
+                        )
+                        .map(|authority| (route_results, authority))
+                    })
+                    .is_ok_and(|(route_results, authority)| {
+                        if authority.is_empty() {
+                            route_results.is_empty()
+                                && self.refresh_scope == SourceBackedRefreshScope::All
+                                && index.manifest().source_routes().is_empty()
+                        } else {
+                            authority
+                                .iter()
+                                .all(|entry| entry.generation_id == index.generation_id())
+                        }
+                    })
             }
             None => false,
         }
     }
+}
+
+fn parse_committed_rejection_diagnostics(
+    value: Option<&Value>,
+) -> Result<Vec<SourceBackedRefreshRecordRejection>> {
+    let route_results = required_route_results(value)?;
+    let diagnostic_total = route_results.iter().try_fold(0_usize, |total, result| {
+        if result.outcome.changed() != Some(false)
+            || result.source_failure_total != 0
+            || !result.source_failures.is_empty()
+            || result.rejected_record_total != result.rejection_diagnostics.len() as u64
+        {
+            bail!("committed rejection-diagnostic ledger is inconsistent");
+        }
+        total
+            .checked_add(result.rejection_diagnostics.len())
+            .ok_or_else(|| anyhow!("committed rejection-diagnostic ledger total overflow"))
+    })?;
+    if diagnostic_total > ctx_history_capture_runtime::MAX_RECORDED_SOURCE_BACKED_RECORD_REJECTIONS
+    {
+        bail!("committed rejection-diagnostic ledger exceeds its bounded contract");
+    }
+    let diagnostics = route_results
+        .into_iter()
+        .flat_map(|result| result.rejection_diagnostics)
+        .collect::<Vec<_>>();
+    let unique = diagnostics
+        .iter()
+        .map(|rejection| {
+            (
+                rejection.source_identity.as_str(),
+                rejection.provider.as_str(),
+                rejection.source_selector.as_str(),
+                rejection.line,
+                rejection.payload_type.as_str(),
+                rejection.class.as_str(),
+                rejection.detail.as_str(),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    if unique.len() != diagnostics.len() {
+        bail!("committed rejection-diagnostic ledger contains a duplicate diagnostic");
+    }
+    Ok(diagnostics)
 }
 
 fn encode_route_control(control: &[u8]) -> String {
@@ -453,6 +547,95 @@ mod tests {
             route_observations: BTreeMap::new(),
             route_controls: BTreeMap::new(),
         }
+    }
+
+    fn rejection(
+        route_identity: &str,
+        source_identity: &str,
+        line: u64,
+    ) -> SourceBackedRefreshRecordRejection {
+        SourceBackedRefreshRecordRejection {
+            route_identity: route_identity.to_owned(),
+            source_identity: source_identity.to_owned(),
+            provider: "qwen_code".to_owned(),
+            source_selector: "/tmp/qwen.jsonl".to_owned(),
+            line,
+            payload_type: "message".to_owned(),
+            class: "malformed_record".to_owned(),
+            detail: "invalid shape".to_owned(),
+        }
+    }
+
+    fn ledger_json(
+        entries: impl IntoIterator<Item = (String, Vec<SourceBackedRefreshRecordRejection>)>,
+    ) -> Value {
+        Value::Object(
+            entries
+                .into_iter()
+                .map(|(route_identity, diagnostics)| {
+                    let mut result =
+                        SourceBackedRefreshRouteResult::succeeded(route_identity.clone(), false);
+                    result.rejected_record_total = diagnostics.len() as u64;
+                    result.rejection_diagnostics = diagnostics;
+                    (route_identity, result.compact_json())
+                })
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn metadata_v4_keeps_the_committed_ledger_outside_the_typed_receipt() {
+        let value = metadata(json!({"route_results": {}}));
+        let receipt = value.receipt.clone();
+
+        let encoded = value.encode().unwrap();
+        let encoded: Value = serde_json::from_slice(&encoded).unwrap();
+
+        assert_eq!(
+            encoded["version"],
+            SOURCE_REFRESH_PUBLICATION_METADATA_VERSION
+        );
+        assert_eq!(encoded[COMMITTED_REJECTION_DIAGNOSTICS_FIELD], json!({}));
+        assert_eq!(encoded["receipt"], receipt);
+        assert!(encoded["receipt"]
+            .get(COMMITTED_REJECTION_DIAGNOSTICS_FIELD)
+            .is_none());
+    }
+
+    #[test]
+    fn committed_ledger_rejects_malformed_duplicate_and_over_bound_evidence() {
+        assert!(parse_committed_rejection_diagnostics(Some(&json!([]))).is_err());
+
+        let source_identity = "33".repeat(32);
+        let first_route = "11".repeat(32);
+        let second_route = "22".repeat(32);
+        let duplicate = ledger_json([
+            (
+                first_route.clone(),
+                vec![rejection(&first_route, &source_identity, 3)],
+            ),
+            (
+                second_route.clone(),
+                vec![rejection(&second_route, &source_identity, 3)],
+            ),
+        ]);
+        assert!(format!(
+            "{:#}",
+            parse_committed_rejection_diagnostics(Some(&duplicate)).unwrap_err()
+        )
+        .contains("duplicate diagnostic"));
+
+        let over_bound = ledger_json([(
+            first_route.clone(),
+            (0..=ctx_history_capture_runtime::MAX_RECORDED_SOURCE_BACKED_RECORD_REJECTIONS)
+                .map(|line| rejection(&first_route, &source_identity, line as u64 + 1))
+                .collect(),
+        )]);
+        assert!(format!(
+            "{:#}",
+            parse_committed_rejection_diagnostics(Some(&over_bound)).unwrap_err()
+        )
+        .contains("bounded contract"));
     }
 
     #[test]

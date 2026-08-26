@@ -61,6 +61,7 @@ fn core_publication_fixture() -> (tempfile::TempDir, std::path::PathBuf, String)
                 "receipt": receipt.to_json(),
                 "route_observations": [null],
                 "route_controls": {},
+                "committed_rejection_diagnostics": {},
             }))
             .map_err(|error| ctx_history_index::IndexError::PublicationMetadata(error.to_string()))
         },
@@ -586,7 +587,9 @@ fn legacy_zero_source_publication_is_not_projected_as_ready() {
         .as_object_mut()
         .unwrap()
         .remove("zero_source_authority");
-    metadata.as_object_mut().unwrap().remove("route_controls");
+    let metadata_fields = metadata.as_object_mut().unwrap();
+    metadata_fields.remove("route_controls");
+    metadata_fields.remove("committed_rejection_diagnostics");
     drop(current);
     let writer = GenerationWriter::open(&index_root, WriterOptions::default())
         .unwrap()

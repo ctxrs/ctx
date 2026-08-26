@@ -116,6 +116,7 @@ fn publication_metadata(
     });
     if version == SOURCE_REFRESH_PUBLICATION_METADATA_VERSION {
         metadata["route_controls"] = json!({});
+        metadata["committed_rejection_diagnostics"] = json!({});
     }
     serde_json::to_vec(&metadata).unwrap()
 }
