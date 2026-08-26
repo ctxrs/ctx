@@ -594,6 +594,38 @@ fn retryable_terminal_failure() -> crate::semantic::SourceBackedRefreshTerminalE
     })
 }
 
+fn source_unclaimed_terminal_failure(
+    retryable: bool,
+) -> crate::semantic::SourceBackedRefreshTerminalError {
+    let blocked = SourceRouteIdentity::from_sha256("ab".repeat(32)).unwrap();
+    let retryable_route = SourceRouteIdentity::from_sha256("cd".repeat(32)).unwrap();
+    crate::semantic::SourceBackedRefreshTerminalError::from(RefreshTerminalOutcome {
+        code: RefreshOutcomeCode::SourceUnclaimed,
+        class: RefreshOutcomeClass::Coverage,
+        retryable,
+        affected_routes: if retryable {
+            BTreeSet::from([blocked.clone(), retryable_route.clone()])
+        } else {
+            BTreeSet::from([blocked.clone()])
+        },
+        retryable_routes: if retryable {
+            BTreeSet::from([retryable_route])
+        } else {
+            BTreeSet::new()
+        },
+        blocked_routes: BTreeSet::from([blocked]),
+        physical_attempt_id: "00000000-0000-0000-0000-000000000123".to_owned(),
+        retained_generation: Some("cd".repeat(32)),
+        published_generation: None,
+        retry_advice: Some(if retryable {
+            RefreshRetryAdvice::RetryRetryableRoutesAndInspectBlocked
+        } else {
+            RefreshRetryAdvice::InspectSources
+        }),
+        detail: None,
+    })
+}
+
 fn mutated_terminal_failure(
     mutate: impl FnOnce(&mut crate::semantic::SourceBackedRefreshTerminalError),
 ) -> crate::semantic::SourceBackedRefreshTerminalError {
@@ -1211,6 +1243,17 @@ fn malformed_typed_failures_remain_silent_and_nonzero() {
                 terminal.retry_advice = Some("inspect_sources".to_owned());
             }),
         ),
+        ("source_unclaimed_without_advice", {
+            let mut terminal = source_unclaimed_terminal_failure(false);
+            terminal.retry_advice = None;
+            terminal
+        }),
+        ("source_unclaimed_without_blocked_culprit", {
+            let mut terminal = source_unclaimed_terminal_failure(true);
+            terminal.blocked_routes.clear();
+            terminal.affected_routes = terminal.retryable_routes.clone();
+            terminal
+        }),
         (
             "malformed_attempt_identity",
             mutated_terminal_failure(|terminal| {
@@ -1229,6 +1272,40 @@ fn malformed_typed_failures_remain_silent_and_nonzero() {
         let (status, output) = run_terminal_failure(terminal);
         assert_eq!(status, ExitCode::FAILURE, "{name}");
         assert!(output.is_empty(), "{name}: {output:?}");
+    }
+}
+
+#[test]
+fn source_unclaimed_failure_writes_the_singleton_and_mixed_contracts() {
+    for retryable in [false, true] {
+        let (status, output) = run_terminal_failure(source_unclaimed_terminal_failure(retryable));
+        assert_eq!(status, ExitCode::FAILURE);
+        let response: Value = serde_json::from_slice(output.strip_suffix(b"\n").unwrap()).unwrap();
+        assert_eq!(response["error_code"], "source_unclaimed");
+        assert_eq!(response["details"]["class"], "coverage");
+        assert_eq!(response["retryable"], retryable);
+        assert_eq!(
+            response["details"]["retry_advice"],
+            if retryable {
+                json!("retry_retryable_routes_and_inspect_blocked")
+            } else {
+                json!("inspect_sources")
+            }
+        );
+        assert_eq!(
+            response["details"]["retryable_routes"]
+                .as_array()
+                .unwrap()
+                .len(),
+            usize::from(retryable)
+        );
+        assert_eq!(
+            response["details"]["blocked_routes"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
     }
 }
 

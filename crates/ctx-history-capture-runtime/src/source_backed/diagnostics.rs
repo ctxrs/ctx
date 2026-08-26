@@ -454,6 +454,15 @@ impl SourceBackedLogicalSourceFailures {
             .unwrap_or_default()
     }
 
+    pub fn route_retryability(&self) -> impl Iterator<Item = (&SourceRouteIdentity, bool)> {
+        self.route_totals.keys().map(|route_identity| {
+            (
+                route_identity,
+                self.route_retryable_total(route_identity) != 0,
+            )
+        })
+    }
+
     pub fn all_failures_allow_empty_route(&self) -> bool {
         !self.is_empty()
             && self.route_allows_empty.len() == self.route_totals.len()

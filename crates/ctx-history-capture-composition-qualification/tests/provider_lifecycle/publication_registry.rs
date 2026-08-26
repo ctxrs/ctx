@@ -1359,6 +1359,13 @@ fn mutating_refresh_rejects_an_unclaimed_base_source_from_the_same_family() {
         GEMINI_CLI_SOURCE_FORMAT,
         41,
     ));
+    let incomplete_route = incomplete_registry
+        .routes()
+        .next()
+        .unwrap()
+        .route_identity
+        .clone()
+        .unwrap();
     let error = refresh_source_backed_generation(
         temp.path(),
         &incomplete_registry,
@@ -1368,8 +1375,12 @@ fn mutating_refresh_rejects_an_unclaimed_base_source_from_the_same_family() {
 
     assert!(matches!(
         error,
-        SourceBackedCoordinatorError::UnclaimedBaseSource { ref source_id }
-            if source_id == &initial_source.identity().to_string()
+        SourceBackedCoordinatorError::UnclaimedBaseSource {
+            ref source_id,
+            ref route_identity,
+            ..
+        } if source_id == &initial_source.identity().to_string()
+            && route_identity == &incomplete_route
     ));
     let retained = VerifiedIndex::open(temp.path()).unwrap();
     assert_eq!(retained.generation_id(), initial_generation);

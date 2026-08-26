@@ -197,8 +197,15 @@ where
     },
     #[error("source {source_id} was staged by more than one provider route")]
     DuplicateSourceOwner { source_id: String },
-    #[error("base source {source_id} was not claimed by any provider route in this refresh")]
-    UnclaimedBaseSource { source_id: String },
+    #[error(
+        "base source {source_id} was not claimed by provider route {route_identity:?} in this refresh"
+    )]
+    UnclaimedBaseSource {
+        source_id: String,
+        route_identity: SourceRouteIdentity,
+        route_failures: Vec<SourceBackedFailedRouteOutcome>,
+        logical_source_failures: SourceBackedLogicalSourceFailures,
+    },
     #[error("source deletion was not certified by its supplied authoritative inventory")]
     InvalidDeletionWitness,
     #[error("retained source deletion {source_id} could not be recertified: {detail}")]

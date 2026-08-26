@@ -1,22 +1,22 @@
 use super::*;
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(super) struct SourceBackedRefreshFailureOutcome {
-    pub(super) code: &'static str,
-    pub(super) class: &'static str,
+    pub(super) code: RefreshOutcomeCode,
+    pub(super) class: RefreshOutcomeClass,
     pub(super) retryable: bool,
     pub(super) affected_routes: BTreeSet<SourceRouteIdentity>,
     pub(super) retryable_routes: BTreeSet<SourceRouteIdentity>,
     pub(super) blocked_routes: BTreeSet<SourceRouteIdentity>,
-    pub(super) retry_advice: Option<&'static str>,
+    pub(super) retry_advice: Option<RefreshRetryAdvice>,
 }
 
 impl SourceBackedRefreshFailureOutcome {
     pub(super) fn new(
-        code: &'static str,
-        class: &'static str,
+        code: RefreshOutcomeCode,
+        class: RefreshOutcomeClass,
         retryable: bool,
         affected_routes: BTreeSet<SourceRouteIdentity>,
-        retry_advice: Option<&'static str>,
+        retry_advice: Option<RefreshRetryAdvice>,
     ) -> Self {
         let (retryable_routes, blocked_routes) = if retryable {
             (affected_routes.clone(), BTreeSet::new())
@@ -34,12 +34,12 @@ impl SourceBackedRefreshFailureOutcome {
     }
 
     pub(super) fn with_route_dispositions(
-        code: &'static str,
-        class: &'static str,
+        code: RefreshOutcomeCode,
+        class: RefreshOutcomeClass,
         retryable: bool,
         retryable_routes: BTreeSet<SourceRouteIdentity>,
         blocked_routes: BTreeSet<SourceRouteIdentity>,
-        retry_advice: Option<&'static str>,
+        retry_advice: Option<RefreshRetryAdvice>,
     ) -> Self {
         let affected_routes = retryable_routes.union(&blocked_routes).cloned().collect();
         Self {
@@ -60,8 +60,8 @@ impl SourceBackedRefreshFailureOutcome {
         detail: Option<&str>,
     ) -> Value {
         compact_json(json!({
-            "code": self.code,
-            "class": self.class,
+            "code": self.code.as_str(),
+            "class": self.class.as_str(),
             "retryable": self.retryable,
             "affected_routes": self.affected_routes
                 .iter()
@@ -77,7 +77,7 @@ impl SourceBackedRefreshFailureOutcome {
                 .collect::<Vec<_>>(),
             "physical_attempt_id": physical_attempt_id,
             "retained_generation": retained_generation,
-            "retry_advice": self.retry_advice,
+            "retry_advice": self.retry_advice.map(RefreshRetryAdvice::as_str),
             "detail": detail,
         }))
     }
@@ -98,7 +98,7 @@ pub(super) enum SourceBackedRefreshFailureType {
 }
 
 impl SourceBackedRefreshFailureType {
-    const fn outcome_code(self) -> RefreshOutcomeCode {
+    pub(super) const fn outcome_code(self) -> RefreshOutcomeCode {
         match self {
             Self::UnsupportedSchema => RefreshOutcomeCode::UnsupportedSchema,
             Self::MalformedSource => RefreshOutcomeCode::MalformedSource,
@@ -245,14 +245,20 @@ impl SourceBackedRefreshAttempt {
             .as_deref()
             .filter(|error| error.contains(TERMINAL_COVERAGE_ERROR_CODE))
             .map(|_| TERMINAL_COVERAGE_ERROR_CODE)
-            .or_else(|| self.failure_outcome.as_ref().map(|outcome| outcome.code))
+            .or_else(|| {
+                self.failure_outcome
+                    .as_ref()
+                    .map(|outcome| outcome.code.as_str())
+            })
     }
 
     fn failure_reason(&self) -> Option<&'static str> {
         if self.failure_code() == Some(TERMINAL_COVERAGE_ERROR_CODE) {
             return Some("provider_terminal_coverage_unavailable");
         }
-        self.failure_outcome.as_ref().map(|outcome| outcome.class)
+        self.failure_outcome
+            .as_ref()
+            .map(|outcome| outcome.class.as_str())
     }
 
     fn request_generation_changed(&self) -> Option<bool> {

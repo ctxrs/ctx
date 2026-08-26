@@ -60,6 +60,7 @@ enum FailureCode {
     UnsupportedSchema,
     SourceFailures,
     LogicalSourceFailures,
+    SourceUnclaimed,
     SourceRefreshFailed,
     SourceRefreshInternal,
     ResourceUnavailable,
@@ -78,6 +79,7 @@ impl FailureCode {
             "unsupported_schema" => Some(Self::UnsupportedSchema),
             "source_failures" => Some(Self::SourceFailures),
             "logical_source_failures" => Some(Self::LogicalSourceFailures),
+            "source_unclaimed" => Some(Self::SourceUnclaimed),
             "source_refresh_failed" => Some(Self::SourceRefreshFailed),
             "source_refresh_internal" => Some(Self::SourceRefreshInternal),
             "resource_unavailable" => Some(Self::ResourceUnavailable),
@@ -98,6 +100,7 @@ impl FailureCode {
             Self::MalformedSource => "unreadable",
             Self::UnsupportedSchema | Self::IndexIncompatible => "incompatible",
             Self::SourceFailures | Self::LogicalSourceFailures => "mixed",
+            Self::SourceUnclaimed => "coverage",
             Self::SourceRefreshFailed | Self::SourceRefreshInternal => "internal",
             Self::ResourceUnavailable => "resource_unavailable",
             Self::IndexCorruption => "corruption",
@@ -119,7 +122,7 @@ impl FailureCode {
             | Self::UnsupportedSchema
             | Self::IndexIncompatible
             | Self::IndexCorruption => !retryable,
-            Self::SourceFailures | Self::LogicalSourceFailures => true,
+            Self::SourceFailures | Self::LogicalSourceFailures | Self::SourceUnclaimed => true,
         }
     }
 
@@ -134,6 +137,10 @@ impl FailureCode {
                     (true, "retry_affected_routes") | (false, "inspect_sources")
                 )
             }
+            Self::SourceUnclaimed => matches!(
+                (retryable, advice),
+                (false, "inspect_sources") | (true, "retry_retryable_routes_and_inspect_blocked")
+            ),
             Self::SourceRefreshFailed | Self::SourceRefreshInternal | Self::ResourceUnavailable => {
                 matches!(advice, "retry_request" | "retry_affected_routes")
             }
@@ -168,6 +175,8 @@ fn valid_terminal_failure(terminal: &crate::semantic::SourceBackedRefreshTermina
         )
         || (!terminal.affected_routes.is_empty()
             && terminal.retryable == terminal.retryable_routes.is_empty())
+        || (matches!(code, FailureCode::SourceUnclaimed)
+            && (terminal.blocked_routes.is_empty() || terminal.retry_advice.is_none()))
     {
         return false;
     }
@@ -179,9 +188,11 @@ fn valid_terminal_failure(terminal: &crate::semantic::SourceBackedRefreshTermina
 
 fn retry_advice_is_retryable(advice: &str) -> Option<bool> {
     match advice {
-        "retry_affected_routes" | "retry_request" | "retry_admission" | "retry_finalization" => {
-            Some(true)
-        }
+        "retry_affected_routes"
+        | "retry_retryable_routes_and_inspect_blocked"
+        | "retry_request"
+        | "retry_admission"
+        | "retry_finalization" => Some(true),
         "inspect_sources" | "upgrade_or_reconfigure" | "rebuild_index" => Some(false),
         _ => None,
     }
