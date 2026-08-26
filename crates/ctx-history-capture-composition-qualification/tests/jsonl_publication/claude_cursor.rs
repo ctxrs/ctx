@@ -4,8 +4,11 @@ use std::{
     path::Path,
 };
 
-use ctx_history_core::{CaptureProvider, CoreRecord};
-use ctx_history_index::{VerifiedIndex, WriterOptions};
+use ctx_history_core::{CaptureProvider, CertifiedSource, CoreRecord, ScannedSourceCounts};
+use ctx_history_index::{
+    CompiledSearchFilter, EventSearchFilters, GenerationWriter, LexicalExecution, LexicalMode,
+    VerifiedIndex, WriterOptions,
+};
 use serde_json::{json, Value};
 
 use super::*;
@@ -17,6 +20,8 @@ use crate::{
 };
 
 const CURSOR_SOURCE_FORMAT: &str = "cursor_agent_transcript_jsonl_tree";
+const CURSOR_PARSER_REVISION: &str = "cursor-shared-jsonl-core-activity-v2-top-level-role";
+const PRIOR_CURSOR_PARSER_REVISION: &str = "cursor-shared-jsonl-core-activity-v2-record-rejections";
 
 fn writer_options() -> WriterOptions {
     WriterOptions {
@@ -115,6 +120,21 @@ fn indexed_records(
         .collect::<Vec<_>>();
     records.sort_by_key(|record| record.event_sequence);
     records
+}
+
+fn lexical_match_count(index: &VerifiedIndex, text: &str) -> usize {
+    let filter = CompiledSearchFilter::compile(EventSearchFilters::default()).unwrap();
+    let queries = [text];
+    let batch = index
+        .execute_lexical(LexicalExecution::new(
+            LexicalMode::Search(&queries),
+            &filter,
+            8,
+        ))
+        .unwrap()
+        .batch;
+    assert!(batch.complete, "lexical test query did not complete");
+    batch.candidates.len()
 }
 
 fn certified_prefix_bytes(index: &Path, provider: CaptureProvider) -> u64 {
@@ -219,7 +239,6 @@ fn cursor_message(role: &str, timestamp: &str, text: &str) -> Value {
         "timestamp": timestamp,
         "role": role,
         "message": {
-            "role": role,
             "content": [{"type": "text", "text": text}]
         }
     })
@@ -244,6 +263,213 @@ fn cursor_route_publishes_cold_append_and_recovers_from_carried_checkpoint() {
         cursor_message("user", "2026-08-16T00:00:00Z", "literal first"),
         cursor_message("assistant", "2026-08-16T00:00:01Z", "literal second"),
         cursor_message("assistant", "2026-08-16T00:00:02Z", "race-before"),
+    );
+}
+
+#[test]
+fn cursor_malformed_nested_role_rejects_only_that_record() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = temp.path().join("cursor-data");
+    let index = temp.path().join("cursor-index");
+    let native_session_id = "cursor-record-isolation-session";
+    let transcript = root
+        .join("projects/project/agent-transcripts")
+        .join(native_session_id)
+        .join(format!("{native_session_id}.jsonl"));
+    let malformed_nested_role = json!({
+        "timestamp": "2026-08-26T00:00:01Z",
+        "role": "assistant",
+        "message": {
+            "role": {"unexpected": "assistant"},
+            "content": [{"type": "text", "text": "cursornestedroleinvalidmarker"}]
+        }
+    });
+    write_transcript(
+        &transcript,
+        &[
+            cursor_message(
+                "user",
+                "2026-08-26T00:00:00Z",
+                "cursorisolationbeforemarker",
+            ),
+            malformed_nested_role,
+            cursor_message(
+                "assistant",
+                "2026-08-26T00:00:02Z",
+                "cursorisolationaftermarker",
+            ),
+        ],
+    );
+
+    let receipt = refresh_source_backed_generation(
+        &index,
+        &registry(CaptureProvider::Cursor, CURSOR_SOURCE_FORMAT, &root),
+        writer_options(),
+    )
+    .unwrap();
+
+    assert!(receipt.failed_routes.is_empty());
+    assert!(receipt.logical_source_failures.is_empty());
+    assert_eq!(receipt.successful_route_ids.len(), 1);
+    assert_eq!(
+        receipt.record_completion(),
+        SourceBackedRecordCompletion::CompletedWithRejections
+    );
+    assert_eq!(receipt.record_rejections.total(), 1);
+    assert_eq!(receipt.sources.len(), 1);
+    assert_eq!(
+        receipt.sources[0].counts(),
+        ScannedSourceCounts {
+            complete_records: 3,
+            retained_records: 2,
+            rejected_records: 1,
+            ignored_records: 0,
+            indexed_documents: 2,
+            certified_bytes: fs::metadata(&transcript).unwrap().len(),
+        }
+    );
+    let [rejection] = receipt.record_rejections.rejections() else {
+        panic!("one malformed nested-role rejection expected");
+    };
+    assert!(rejection.is_committed());
+    assert_eq!(rejection.provider, CaptureProvider::Cursor);
+    assert_eq!(rejection.source_selector, transcript.display().to_string());
+    assert_eq!(rejection.line_number, 2);
+    assert_eq!(
+        rejection.class,
+        SourceBackedRecordRejectionClass::UnsupportedRecord
+    );
+    assert_eq!(
+        rejection.detail,
+        "Cursor record has a well-formed but unsupported shape"
+    );
+
+    assert_literal_bodies(
+        &indexed_records(&index, CaptureProvider::Cursor, native_session_id),
+        &["cursorisolationbeforemarker", "cursorisolationaftermarker"],
+    );
+    let published = VerifiedIndex::open(&index).unwrap();
+    for marker in ["cursorisolationbeforemarker", "cursorisolationaftermarker"] {
+        assert_eq!(
+            lexical_match_count(&published, marker),
+            1,
+            "valid Cursor sibling was not searchable: {marker}"
+        );
+    }
+    assert_eq!(
+        lexical_match_count(&published, "cursornestedroleinvalidmarker"),
+        0
+    );
+}
+
+#[test]
+fn cursor_top_level_role_revision_reparses_unchanged_prior_rejection_state() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = temp.path().join("cursor-data");
+    let index = temp.path().join("cursor-index");
+    let native_session_id = "cursor-parser-migration-session";
+    let marker = "cursortoplevelrolemigrationmarker";
+    let transcript = root
+        .join("projects/project/agent-transcripts")
+        .join(native_session_id)
+        .join(format!("{native_session_id}.jsonl"));
+    write_transcript(
+        &transcript,
+        &[cursor_message("user", "2026-08-26T00:00:00Z", marker)],
+    );
+    let source_bytes = fs::read(&transcript).unwrap();
+    let registry = registry(CaptureProvider::Cursor, CURSOR_SOURCE_FORMAT, &root);
+    refresh_source_backed_generation(&index, &registry, writer_options()).unwrap();
+
+    let current = VerifiedIndex::open(&index).unwrap();
+    let current_certificate = current
+        .manifest()
+        .sources
+        .iter()
+        .find(|source| source.observation().source().provider() == CaptureProvider::Cursor.as_str())
+        .unwrap()
+        .clone();
+    let source = current_certificate.observation().source().clone();
+    let source_routes = current.manifest().source_routes().to_vec();
+    let current_counts = current_certificate.counts();
+    assert_eq!(current_counts.complete_records, 1);
+    assert_eq!(current_counts.certified_bytes, source_bytes.len() as u64);
+    let prior_certificate = CertifiedSource::certify_with_frontier(
+        current_certificate.observation().clone(),
+        current_certificate.observation().clone(),
+        PRIOR_CURSOR_PARSER_REVISION,
+        *current_certificate.content_digest(),
+        ScannedSourceCounts {
+            complete_records: 1,
+            retained_records: 0,
+            rejected_records: 1,
+            ignored_records: 0,
+            indexed_documents: 0,
+            certified_bytes: current_counts.certified_bytes,
+        },
+        current_certificate.frontier().cloned(),
+    )
+    .unwrap();
+    drop(current);
+
+    let mut writer = GenerationWriter::open(&index, writer_options())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    writer.begin_source(source.clone()).unwrap();
+    writer.certify_source(prior_certificate).unwrap();
+    writer.set_present_source_routes(source_routes).unwrap();
+    let prior_generation = writer.commit(|_| true).unwrap().generation_id;
+
+    let prior = VerifiedIndex::open(&index).unwrap();
+    let prior_source = prior
+        .manifest()
+        .sources
+        .iter()
+        .find(|certificate| certificate.observation().source() == &source)
+        .unwrap();
+    assert_eq!(prior_source.parser_revision(), PRIOR_CURSOR_PARSER_REVISION);
+    assert_eq!(prior_source.counts().rejected_records, 1);
+    assert_eq!(lexical_match_count(&prior, marker), 0);
+    drop(prior);
+    assert_eq!(fs::read(&transcript).unwrap(), source_bytes);
+
+    let migrated = refresh_source_backed_generation(&index, &registry, writer_options()).unwrap();
+
+    assert!(migrated.failed_routes.is_empty());
+    assert!(migrated.logical_source_failures.is_empty());
+    assert!(migrated.record_rejections.is_empty());
+    assert_eq!(migrated.successful_route_ids.len(), 1);
+    assert_eq!(
+        migrated.record_completion(),
+        SourceBackedRecordCompletion::Completed
+    );
+    assert_ne!(migrated.commit.generation_id, prior_generation);
+    let migrated_source = migrated
+        .sources
+        .iter()
+        .find(|certificate| certificate.observation().source() == &source)
+        .unwrap();
+    assert_eq!(migrated_source.parser_revision(), CURSOR_PARSER_REVISION);
+    assert_eq!(
+        migrated_source.counts(),
+        ScannedSourceCounts {
+            complete_records: 1,
+            retained_records: 1,
+            rejected_records: 0,
+            ignored_records: 0,
+            indexed_documents: 1,
+            certified_bytes: source_bytes.len() as u64,
+        }
+    );
+    assert_eq!(fs::read(&transcript).unwrap(), source_bytes);
+    assert_literal_bodies(
+        &indexed_records(&index, CaptureProvider::Cursor, native_session_id),
+        &[marker],
+    );
+    assert_eq!(
+        lexical_match_count(&VerifiedIndex::open(&index).unwrap(), marker),
+        1
     );
 }
 

@@ -60,7 +60,7 @@ const NATIVE_EVENT_LOGICAL_KIND: &str = "cursor.logical-event-v3";
 const LOGICAL_SESSION_KIND: &str = "cursor-session";
 const LOGICAL_EVENT_KIND: &str = "cursor-event";
 const SOURCE_SCHEMA_VARIANT: &str = "cursor-agent-transcript-jsonl-v1";
-const PARSER_REVISION: &str = "cursor-shared-jsonl-core-activity-v2-record-rejections";
+const PARSER_REVISION: &str = "cursor-shared-jsonl-core-activity-v2-top-level-role";
 const EVENT_SEQUENCE_PARTS: u64 = u16::MAX as u64 + 1;
 
 mod binding;

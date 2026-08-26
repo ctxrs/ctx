@@ -453,12 +453,12 @@ pub(crate) fn write_native_cursor_fixture(temp: &TempDir, query: &str) -> String
             json!({
                 "timestamp": "2026-06-24T12:00:00Z",
                 "role": "user",
-                "message": {"role": "user", "content": [{"type": "text", "text": query}]}
+                "message": {"content": [{"type": "text", "text": query}]}
             }),
             json!({
                 "timestamp": "2026-06-24T12:00:01Z",
                 "role": "assistant",
-                "message": {"role": "assistant", "content": [{"type": "text", "text": "native import ok"}]}
+                "message": {"content": [{"type": "text", "text": "native import ok"}]}
             })
         ),
     )

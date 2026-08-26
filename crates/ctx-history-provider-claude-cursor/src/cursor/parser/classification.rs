@@ -7,7 +7,7 @@ use serde::{
 
 use super::{
     bounded_strings::{BoundedStringVisitor, MAX_CURSOR_ATOM_BYTES},
-    CursorRejectionKind,
+    CursorRejectionKind, MAX_CURSOR_CONTENT_BLOCKS,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -148,14 +148,27 @@ impl<'de> Visitor<'de> for CursorClassificationVisitor {
                 message.role,
             )
         } else if let Some(content) = top_level {
-            (CursorContentLocation::TopLevel, content, None)
+            (
+                CursorContentLocation::TopLevel,
+                content,
+                ClassifiedMessageRole::default(),
+            )
         } else {
             (
                 CursorContentLocation::None,
                 ClassifiedContent::default(),
-                None,
+                ClassifiedMessageRole::default(),
             )
         };
+        let message_role = message_role.0;
+        if matches!(
+            (role.as_deref(), message_role.as_deref()),
+            (Some(role), Some(message_role)) if role != message_role
+        ) {
+            return Err(de::Error::custom(
+                "Cursor nested message role must match the top-level role",
+            ));
+        }
         shape_safe &= content.valid;
         let admission = cursor_record_admission(
             role.as_deref(),
@@ -278,7 +291,7 @@ fn cursor_record_admission(
         && matches!(record_type, None | Some("message"))
         && status.is_none()
         && role == Some("user")
-        && message_role == Some("user")
+        && matches!(message_role, None | Some("user"))
     {
         return CursorRecordAdmission::UserMessage;
     }
@@ -286,7 +299,7 @@ fn cursor_record_admission(
         && matches!(record_type, None | Some("message"))
         && status.is_none()
         && role == Some("assistant")
-        && message_role == Some("assistant")
+        && matches!(message_role, None | Some("assistant"))
     {
         return CursorRecordAdmission::AssistantMessage;
     }
@@ -320,19 +333,24 @@ where
 
 #[derive(Deserialize)]
 struct ClassifiedMessage {
-    #[serde(default, deserialize_with = "deserialize_optional_atom")]
-    role: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_message_role")]
+    role: ClassifiedMessageRole,
     #[serde(default)]
     content: ClassifiedContent,
 }
 
-fn deserialize_optional_atom<'de, D>(
+#[derive(Default)]
+struct ClassifiedMessageRole(Option<String>);
+
+fn deserialize_message_role<'de, D>(
     deserializer: D,
-) -> std::result::Result<Option<String>, D::Error>
+) -> std::result::Result<ClassifiedMessageRole, D::Error>
 where
     D: Deserializer<'de>,
 {
-    Option::<BoundedAtom>::deserialize(deserializer).map(|value| value.map(|atom| atom.0))
+    let role = Option::<BoundedAtom>::deserialize(deserializer)?
+        .ok_or_else(|| de::Error::custom("Cursor nested message role must be a string"))?;
+    Ok(ClassifiedMessageRole(Some(role.0)))
 }
 
 #[derive(Debug, Default)]
@@ -365,6 +383,11 @@ impl<'de> Visitor<'de> for ClassifiedContentVisitor {
     {
         let mut kinds = Vec::new();
         while let Some(kind) = sequence.next_element::<ClassifiedBlock>()? {
+            if kinds.len() == MAX_CURSOR_CONTENT_BLOCKS {
+                return Err(de::Error::custom(
+                    "Cursor content exceeds the stable part-ordinal bound",
+                ));
+            }
             kinds.push(kind.0);
         }
         Ok(ClassifiedContent { kinds, valid: true })

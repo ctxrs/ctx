@@ -586,14 +586,9 @@ fn recover_failure_outcome(
     }
     let retry_advice = match fields.get("retry_advice") {
         None | Some(Value::Null) => None,
-        Some(Value::String(value)) => Some(
-            value
-                .parse::<RefreshRetryAdvice>()
-                .map_err(|_| {
-                    anyhow!("durable terminal source refresh outcome has invalid retry advice")
-                })?
-                .as_str(),
-        ),
+        Some(Value::String(value)) => Some(value.parse::<RefreshRetryAdvice>().map_err(|_| {
+            anyhow!("durable terminal source refresh outcome has invalid retry advice")
+        })?),
         Some(_) => bail!("durable terminal source refresh outcome has invalid retry advice"),
     };
     let retryable_routes = fields
@@ -604,6 +599,18 @@ fn recover_failure_outcome(
         .get("blocked_routes")
         .map(|_| recover_outcome_routes(fields, "blocked_routes"))
         .transpose()?;
+    if code == RefreshOutcomeCode::SourceUnclaimed
+        && (class != RefreshOutcomeClass::Coverage
+            || blocked_routes.as_ref().is_none_or(BTreeSet::is_empty)
+            || retry_advice
+                != Some(if retryable {
+                    RefreshRetryAdvice::RetryRetryableRoutesAndInspectBlocked
+                } else {
+                    RefreshRetryAdvice::InspectSources
+                }))
+    {
+        bail!("durable terminal source refresh source-unclaimed outcome is inconsistent");
+    }
     match (retryable_routes, blocked_routes) {
         (Some(retryable_routes), Some(blocked_routes)) => {
             if !retryable_routes.is_disjoint(&blocked_routes)
@@ -616,8 +623,8 @@ fn recover_failure_outcome(
             }
             Ok(Some(
                 SourceBackedRefreshFailureOutcome::with_route_dispositions(
-                    code.as_str(),
-                    class.as_str(),
+                    code,
+                    class,
                     retryable,
                     retryable_routes,
                     blocked_routes,
@@ -626,8 +633,8 @@ fn recover_failure_outcome(
             ))
         }
         (None, None) => Ok(Some(SourceBackedRefreshFailureOutcome::new(
-            code.as_str(),
-            class.as_str(),
+            code,
+            class,
             retryable,
             affected_routes,
             retry_advice,
@@ -680,27 +687,43 @@ fn legacy_failure_outcome(
     scope: &SourceBackedRefreshScope,
 ) -> SourceBackedRefreshFailureOutcome {
     let (class, retryable, retry_advice) = match failure_type {
-        SourceBackedRefreshFailureType::UnsupportedSchema => {
-            ("incompatible", false, "upgrade_or_reconfigure")
-        }
-        SourceBackedRefreshFailureType::MalformedSource => ("unreadable", false, "inspect_sources"),
-        SourceBackedRefreshFailureType::SourceUnavailable => {
-            ("unavailable", true, "retry_affected_routes")
-        }
-        SourceBackedRefreshFailureType::SourceChanged => {
-            ("source_changed", true, "retry_affected_routes")
-        }
-        SourceBackedRefreshFailureType::SourceFailures => ("mixed", true, "retry_affected_routes"),
-        SourceBackedRefreshFailureType::AllProviderTerminalCoverageUnavailable => {
-            ("coverage", true, "retry_request")
-        }
+        SourceBackedRefreshFailureType::UnsupportedSchema => (
+            RefreshOutcomeClass::Incompatible,
+            false,
+            RefreshRetryAdvice::UpgradeOrReconfigure,
+        ),
+        SourceBackedRefreshFailureType::MalformedSource => (
+            RefreshOutcomeClass::Unreadable,
+            false,
+            RefreshRetryAdvice::InspectSources,
+        ),
+        SourceBackedRefreshFailureType::SourceUnavailable => (
+            RefreshOutcomeClass::Unavailable,
+            true,
+            RefreshRetryAdvice::RetryAffectedRoutes,
+        ),
+        SourceBackedRefreshFailureType::SourceChanged => (
+            RefreshOutcomeClass::SourceChanged,
+            true,
+            RefreshRetryAdvice::RetryAffectedRoutes,
+        ),
+        SourceBackedRefreshFailureType::SourceFailures => (
+            RefreshOutcomeClass::Mixed,
+            true,
+            RefreshRetryAdvice::RetryAffectedRoutes,
+        ),
+        SourceBackedRefreshFailureType::AllProviderTerminalCoverageUnavailable => (
+            RefreshOutcomeClass::Coverage,
+            true,
+            RefreshRetryAdvice::RetryRequest,
+        ),
     };
     let affected_routes = match scope {
         SourceBackedRefreshScope::All => BTreeSet::new(),
         SourceBackedRefreshScope::Exact(routes) => routes.clone(),
     };
     SourceBackedRefreshFailureOutcome::new(
-        failure_type.as_str(),
+        failure_type.outcome_code(),
         class,
         retryable,
         affected_routes,
@@ -840,121 +863,9 @@ fn recover_timings(job: &Value) -> Result<(Option<SourceBackedRefreshTimings>, u
 }
 
 #[cfg(test)]
-mod failure_type_recovery_tests {
-    use super::*;
-
-    #[test]
-    fn recovery_accepts_source_backed_legacy_failure_types() {
-        for (failure_type, expected) in [
-            (
-                "unsupported_schema",
-                SourceBackedRefreshFailureType::UnsupportedSchema,
-            ),
-            (
-                "malformed_source",
-                SourceBackedRefreshFailureType::MalformedSource,
-            ),
-            (
-                "source_unavailable",
-                SourceBackedRefreshFailureType::SourceUnavailable,
-            ),
-            (
-                "source_changed",
-                SourceBackedRefreshFailureType::SourceChanged,
-            ),
-            (
-                "source_failures",
-                SourceBackedRefreshFailureType::SourceFailures,
-            ),
-            (
-                "all_provider_terminal_coverage_unavailable",
-                SourceBackedRefreshFailureType::AllProviderTerminalCoverageUnavailable,
-            ),
-        ] {
-            let job = json!({ "failure_type": failure_type });
-            assert_eq!(
-                recover_optional_failure_type(&job).unwrap(),
-                Some(expected),
-                "{failure_type}",
-            );
-            assert_eq!(expected.as_str(), failure_type);
-        }
-    }
-
-    #[test]
-    fn recovery_rejects_failure_types_outside_source_backed_legacy_vocabulary() {
-        for failure_type in [
-            RefreshOutcomeCode::Completed,
-            RefreshOutcomeCode::CompletedWithRejections,
-            RefreshOutcomeCode::IndexCorruption,
-            RefreshOutcomeCode::SourceRefreshInternal,
-        ] {
-            let job = json!({ "failure_type": failure_type.as_str() });
-            assert!(
-                recover_optional_failure_type(&job).is_err(),
-                "{}",
-                failure_type.as_str(),
-            );
-        }
-
-        let job = json!({ "failure_type": "not_a_code" });
-        assert!(recover_optional_failure_type(&job).is_err());
-    }
-}
+#[path = "recovery/failure_type_recovery_tests.rs"]
+mod failure_type_recovery_tests;
 
 #[cfg(test)]
-mod failure_outcome_scope_tests {
-    use super::*;
-
-    fn route(byte: char) -> SourceRouteIdentity {
-        SourceRouteIdentity::from_sha256(byte.to_string().repeat(64)).unwrap()
-    }
-
-    fn exact_scope(route: &SourceRouteIdentity) -> SourceBackedRefreshScope {
-        SourceBackedRefreshScope::Exact(BTreeSet::from([route.clone()]))
-    }
-
-    #[test]
-    fn exact_recovery_rejects_out_of_scope_retryable_disposition() {
-        let admitted = route('a');
-        let peer = route('b');
-        let job = json!({
-            "structured_outcome": {
-                "code": "source_changed",
-                "class": "source_changed",
-                "retryable": true,
-                "affected_routes": [peer.as_str()],
-                "retryable_routes": [peer.as_str()],
-                "blocked_routes": [],
-                "retry_advice": "retry_automatically"
-            }
-        });
-
-        let error = recover_failure_outcome(&job, &exact_scope(&admitted), None)
-            .expect_err("out-of-scope retryable route must fail closed");
-
-        assert!(format!("{error:#}").contains("exceeds its exact scope"));
-    }
-
-    #[test]
-    fn exact_recovery_rejects_out_of_scope_blocked_disposition() {
-        let admitted = route('a');
-        let peer = route('b');
-        let job = json!({
-            "structured_outcome": {
-                "code": "malformed_source",
-                "class": "unreadable",
-                "retryable": false,
-                "affected_routes": [peer.as_str()],
-                "retryable_routes": [],
-                "blocked_routes": [peer.as_str()],
-                "retry_advice": "repair_source"
-            }
-        });
-
-        let error = recover_failure_outcome(&job, &exact_scope(&admitted), None)
-            .expect_err("out-of-scope blocked route must fail closed");
-
-        assert!(format!("{error:#}").contains("exceeds its exact scope"));
-    }
-}
+#[path = "recovery/failure_outcome_scope_tests.rs"]
+mod failure_outcome_scope_tests;

@@ -533,6 +533,15 @@ Daemon-owned source refresh events additionally include:
   active cold setup attempt has complete exact accounting and has passed its
   credibility gate. `eta_seconds` retains its legacy meaning.
 
+A failed `structured_outcome` uses closed `code`, `class`, retryability, route
+disposition, and retry-advice values. `source_unclaimed` means an existing Core
+source was not claimed by its expected successful provider route during this
+refresh. It has class `coverage` and always blocks the culpable route. With no
+other retryable route it is non-retryable and advises `inspect_sources`; when
+independent unpublished routes remain eligible, only those routes are
+retryable and the advice is
+`retry_retryable_routes_and_inspect_blocked`.
+
 Source record and byte counters reset or clear at source and finalization
 boundaries. A scan with no authoritative total does not fabricate a total or
 ETA; the common transfer fields use `total_bytes: 0` and `percent: 0.0` as

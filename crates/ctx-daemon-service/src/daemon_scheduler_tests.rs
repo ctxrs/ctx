@@ -8,7 +8,8 @@ use std::{
 };
 
 use ctx_history_capture::{
-    SourceBackedRefreshScope, SourceBackedRouteError, SourceBackedRouteErrorKind,
+    SourceBackedCoordinatorError, SourceBackedRefreshScope, SourceBackedRouteError,
+    SourceBackedRouteErrorKind,
 };
 use ctx_history_core::{
     derive_event_id, derive_session_id, AgentScope, CertifiedSource, CoreRecord,
