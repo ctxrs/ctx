@@ -67,10 +67,16 @@ fn production_descriptor_is_hash_pinned_and_cache_probe_is_offline() {
 }
 
 #[test]
-fn cached_bundle_compatibility_requires_the_exact_explicit_manifest_override() {
-    assert!(compatibility_descriptor(Some(CACHED_COREML_COMPATIBILITY_MANIFEST_SHA256,)).is_some());
-    assert!(compatibility_descriptor(Some("576c".repeat(16).as_str())).is_none());
-    assert!(compatibility_descriptor(None).is_none());
+fn cached_bundle_compatibility_is_pinned_to_the_exact_known_manifest() {
+    let descriptor = compatibility_descriptor();
+    assert_eq!(
+        descriptor.manifest_sha256,
+        CACHED_COREML_COMPATIBILITY_MANIFEST_SHA256
+    );
+    assert_eq!(
+        descriptor.schema_version,
+        COREML_BUNDLE_CONTRACT.schema_version
+    );
 }
 
 #[test]
