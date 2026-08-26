@@ -113,9 +113,7 @@ fn codex_core_envelope_rejection_preserves_siblings_and_their_ids() {
     );
     let rejected_index = VerifiedIndex::open(&index_root).unwrap();
     let sibling_ids = [before_marker, after_marker].map(|marker| {
-        rejected_index
-            .search_event_candidates(marker, 8)
-            .unwrap()
+        search_event_candidates(&rejected_index, marker, 8)
             .into_iter()
             .find(|candidate| {
                 candidate.event.provider_session_id.as_deref() == Some(native_session_id)
@@ -148,9 +146,7 @@ fn codex_core_envelope_rejection_preserves_siblings_and_their_ids() {
         .into_iter()
         .zip(sibling_ids.iter().copied())
     {
-        assert!(repaired_index
-            .search_event_candidates(marker, 8)
-            .unwrap()
+        assert!(search_event_candidates(&repaired_index, marker, 8)
             .into_iter()
             .any(|candidate| candidate.event.event_id == event_id));
     }
@@ -164,9 +160,7 @@ fn codex_core_envelope_rejection_preserves_siblings_and_their_ids() {
         .into_iter()
         .zip(sibling_ids.iter().copied())
     {
-        assert!(replayed_index
-            .search_event_candidates(marker, 8)
-            .unwrap()
+        assert!(search_event_candidates(&replayed_index, marker, 8)
             .into_iter()
             .any(|candidate| candidate.event.event_id == event_id));
     }

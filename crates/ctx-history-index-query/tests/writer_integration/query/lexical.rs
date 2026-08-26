@@ -607,15 +607,15 @@ fn logical_verification_rejects_malformed_identity_scalars_and_order() {
 
     #[derive(Clone, Copy)]
     enum Mutation {
-        EventIdHigh,
-        EventIdLow,
-        EventRangeOrder,
+        IdHigh,
+        IdLow,
+        RangeOrder,
     }
 
     for (field_name, mutation) in [
-        ("event_id_high", Mutation::EventIdHigh),
-        ("event_id_low", Mutation::EventIdLow),
-        ("event_range_order", Mutation::EventRangeOrder),
+        ("event_id_high", Mutation::IdHigh),
+        ("event_id_low", Mutation::IdLow),
+        ("event_range_order", Mutation::RangeOrder),
     ] {
         let temp = tempdir().unwrap();
         let source = source(&format!("malformed-{field_name}.jsonl"));
@@ -633,9 +633,9 @@ fn logical_verification_rejects_malformed_identity_scalars_and_order() {
         let fields = fields_from_schema(searcher.schema()).unwrap();
         let original = indexed_document(record);
         let target = match mutation {
-            Mutation::EventIdHigh => fields.event_id_high,
-            Mutation::EventIdLow => fields.event_id_low,
-            Mutation::EventRangeOrder => fields.event_range_order,
+            Mutation::IdHigh => fields.event_id_high,
+            Mutation::IdLow => fields.event_id_low,
+            Mutation::RangeOrder => fields.event_range_order,
         };
         let mut forged = TantivyDocument::default();
         for (field, value) in original.iter_fields_and_values() {
@@ -644,9 +644,9 @@ fn logical_verification_rejects_malformed_identity_scalars_and_order() {
             }
         }
         match mutation {
-            Mutation::EventIdHigh => forged.add_u64(target, ((event_uuid >> 64) as u64) ^ 1),
-            Mutation::EventIdLow => forged.add_u64(target, (event_uuid as u64) ^ 1),
-            Mutation::EventRangeOrder => forged.add_bytes(
+            Mutation::IdHigh => forged.add_u64(target, ((event_uuid >> 64) as u64) ^ 1),
+            Mutation::IdLow => forged.add_u64(target, (event_uuid as u64) ^ 1),
+            Mutation::RangeOrder => forged.add_bytes(
                 target,
                 &[0_u8; ctx_history_index_format::EVENT_RANGE_ORDER_KEY_LEN],
             ),
@@ -669,8 +669,8 @@ fn logical_verification_rejects_malformed_identity_scalars_and_order() {
             Err(error) => error,
         };
         let expected_error_field = match mutation {
-            Mutation::EventIdHigh | Mutation::EventIdLow => "core_record",
-            Mutation::EventRangeOrder => field_name,
+            Mutation::IdHigh | Mutation::IdLow => "core_record",
+            Mutation::RangeOrder => field_name,
         };
         assert!(
             matches!(

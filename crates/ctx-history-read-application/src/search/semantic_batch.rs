@@ -131,7 +131,7 @@ fn finish_prepared_semantic_search(
             let lexical_batch = record_lexical_batch(
                 tracker,
                 index.execute_lexical(LexicalExecution::new(
-                    LexicalMode::Search(&queries),
+                    LexicalMode::Search(queries),
                     filter,
                     SOURCE_FUSION_CANDIDATES,
                 )),

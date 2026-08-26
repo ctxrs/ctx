@@ -75,68 +75,6 @@ fn compare_identity_prefix_ascending(candidate_prefix: u64, worst_digest: [u8; 3
     exact_digest_prefix(worst_digest).cmp(&candidate_prefix)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn exact_identity_tiebreak_uses_bytes_after_the_uuid() {
-        let mut lower = [7_u8; 32];
-        let mut higher = lower;
-        lower[31] = 1;
-        higher[31] = 2;
-
-        assert_eq!(&lower[..16], &higher[..16]);
-        assert_eq!(compare_identity_ascending(lower, higher), Ordering::Greater);
-        assert_eq!(compare_identity_ascending(higher, lower), Ordering::Less);
-    }
-
-    #[test]
-    fn exact_prefix_excludes_uuid_overwrites_and_later_bytes() {
-        let mut first = [7_u8; 32];
-        let mut second = first;
-        first[6] = 0x0f;
-        second[6] = 0xf0;
-        second[31] ^= 1;
-
-        assert_eq!(exact_digest_prefix(first), exact_digest_prefix(second));
-    }
-
-    #[test]
-    fn six_byte_prefix_is_rejection_only() {
-        let worst = [0x40; 32];
-
-        assert_eq!(
-            compare_identity_prefix_ascending(0x50_5050_5050_50, worst),
-            Ordering::Less,
-            "a larger prefix is exactly worse and may be rejected"
-        );
-        assert_eq!(
-            compare_identity_prefix_ascending(0x30_3030_3030_30, worst),
-            Ordering::Greater,
-            "a smaller prefix may win but still needs its exact order key"
-        );
-        assert_eq!(
-            compare_identity_prefix_ascending(0x40_4040_4040_40, worst),
-            Ordering::Equal,
-            "an equal prefix cannot decide the full identity order"
-        );
-    }
-
-    #[test]
-    fn exact_identity_tie_uses_the_stable_address() {
-        assert_eq!(
-            compare_stable_address_parts((2, 4), (3, 0)),
-            Ordering::Greater
-        );
-        assert_eq!(
-            compare_stable_address_parts((2, 4), (2, 5)),
-            Ordering::Greater
-        );
-        assert_eq!(compare_stable_address_parts((3, 0), (2, 4)), Ordering::Less);
-    }
-}
-
 impl VerifiedIndex {
     #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
@@ -754,5 +692,67 @@ impl VerifiedIndex {
             retained.push(Reverse(candidate));
         }
         Ok(CandidateExamination::Accepted)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exact_identity_tiebreak_uses_bytes_after_the_uuid() {
+        let mut lower = [7_u8; 32];
+        let mut higher = lower;
+        lower[31] = 1;
+        higher[31] = 2;
+
+        assert_eq!(&lower[..16], &higher[..16]);
+        assert_eq!(compare_identity_ascending(lower, higher), Ordering::Greater);
+        assert_eq!(compare_identity_ascending(higher, lower), Ordering::Less);
+    }
+
+    #[test]
+    fn exact_prefix_excludes_uuid_overwrites_and_later_bytes() {
+        let mut first = [7_u8; 32];
+        let mut second = first;
+        first[6] = 0x0f;
+        second[6] = 0xf0;
+        second[31] ^= 1;
+
+        assert_eq!(exact_digest_prefix(first), exact_digest_prefix(second));
+    }
+
+    #[test]
+    fn six_byte_prefix_is_rejection_only() {
+        let worst = [0x40; 32];
+
+        assert_eq!(
+            compare_identity_prefix_ascending(0x5050_5050_5050, worst),
+            Ordering::Less,
+            "a larger prefix is exactly worse and may be rejected"
+        );
+        assert_eq!(
+            compare_identity_prefix_ascending(0x3030_3030_3030, worst),
+            Ordering::Greater,
+            "a smaller prefix may win but still needs its exact order key"
+        );
+        assert_eq!(
+            compare_identity_prefix_ascending(0x4040_4040_4040, worst),
+            Ordering::Equal,
+            "an equal prefix cannot decide the full identity order"
+        );
+    }
+
+    #[test]
+    fn exact_identity_tie_uses_the_stable_address() {
+        assert_eq!(
+            compare_stable_address_parts((2, 4), (3, 0)),
+            Ordering::Greater
+        );
+        assert_eq!(
+            compare_stable_address_parts((2, 4), (2, 5)),
+            Ordering::Greater
+        );
+        assert_eq!(compare_stable_address_parts((3, 0), (2, 4)), Ordering::Less);
     }
 }
