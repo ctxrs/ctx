@@ -208,6 +208,43 @@ fn untrusted_state_remains_fail_closed_while_installation_is_locked() -> Result<
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn unmanaged_read_only_installation_is_never_active_without_a_lock() -> Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let (temp, install_path) = test_installation()?;
+    // No install marker: an unmanaged, third-party packaged installation.
+    // Make the executable directory read-only to prove no installation lock
+    // or coordination file is required to observe it.
+    let bin = install_path.parent().unwrap();
+    fs::set_permissions(bin, fs::Permissions::from_mode(0o555))?;
+
+    assert!(!installation_upgrade_is_active_for(&install_path)?);
+
+    fs::set_permissions(bin, fs::Permissions::from_mode(0o755))?;
+    drop(temp);
+    Ok(())
+}
+
+#[test]
+fn unmanaged_installation_with_active_state_remains_fenced() -> Result<()> {
+    let (_temp, install_path) = test_installation()?;
+    // No install marker, but a leftover active scheduler record must still
+    // fence: the unmanaged shortcut never bypasses active-state observation.
+    atomic_write_json(
+        &state_path(&install_path),
+        &json!({
+            "schema_version": STATE_SCHEMA_VERSION,
+            "status": "applying",
+            "attempt_id": "ua_unmanaged_active_test",
+        }),
+    )?;
+
+    assert!(installation_upgrade_is_active_for(&install_path)?);
+    Ok(())
+}
+
 #[test]
 fn scheduler_state_path_is_installation_scoped() {
     let install = Path::new("/opt/ctx/bin/ctx");

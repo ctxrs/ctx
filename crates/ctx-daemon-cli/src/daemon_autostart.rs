@@ -69,6 +69,8 @@ pub use handoff::{
 };
 #[cfg(test)]
 use handoff::{read_daemon_upgrade_handoff, write_daemon_upgrade_handoff};
+#[cfg(test)]
+use installation::InstallationDaemonCoordination;
 pub(super) use installation::InstallationDaemonLease;
 #[cfg(test)]
 use installation::{

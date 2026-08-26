@@ -179,6 +179,11 @@ impl UpgradeState {
 }
 
 pub(super) fn claim_automatic_upgrade(interval: Duration) -> Result<AutoUpgradeClaim> {
+    // Unmanaged installations never self-upgrade; the automatic scheduler
+    // stays dormant without touching their executable directory.
+    if super::install::current_exe_is_unmanaged() {
+        return Ok(AutoUpgradeClaim::NotDue);
+    }
     let Some(lock) = UpgradeLock::try_acquire()? else {
         return Ok(AutoUpgradeClaim::Contended);
     };
@@ -223,8 +228,18 @@ pub fn installation_upgrade_is_active() -> Result<bool> {
 }
 
 fn installation_upgrade_is_active_for(install_path: &Path) -> Result<bool> {
-    if observe_installation_upgrade(install_path) == InstallationUpgradeObservation::Active {
+    let observation = observe_installation_upgrade(install_path);
+    if observation == InstallationUpgradeObservation::Active {
         return Ok(true);
+    }
+    // An unmanaged installation never mutates through the hosted installer,
+    // so it has no installation-lock protocol to observe and its executable
+    // directory may not even be writable. Corrupt or unknown state records
+    // still fail closed through the lock protocol below.
+    if observation != InstallationUpgradeObservation::Untrusted
+        && super::install::installation_is_unmanaged_at(install_path)
+    {
+        return Ok(false);
     }
     if InstallationLock::try_acquire(install_path)?.is_some() {
         return Ok(false);
@@ -274,6 +289,11 @@ pub fn active_installation_upgrade_attempt_id() -> Result<Option<String>> {
     });
     if active_attempt.is_some() {
         return Ok(active_attempt);
+    }
+    // An unmanaged installation never owns an upgrade attempt and has no
+    // installation lock to consult.
+    if super::install::installation_is_unmanaged_at(&install_path) {
+        return Ok(None);
     }
     if InstallationLock::try_acquire(&install_path)?.is_none() {
         return Err(anyhow!(

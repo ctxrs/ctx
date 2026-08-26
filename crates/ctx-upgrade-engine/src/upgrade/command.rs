@@ -14,9 +14,10 @@ use ctx_history_platform::platform_security::{
 
 use super::download::DownloadedArtifact;
 use super::install::{
-    apply_artifact, capture_install_snapshot, classify_repair_requirements, current_install_path,
-    pending_recovery, recover_interrupted_install, remove_terminal_recovery, ApplyResult,
-    InstallRecovery, PendingRecovery, TerminalRecovery,
+    absent_install_marker_error, apply_artifact, capture_install_snapshot,
+    classify_repair_requirements, current_exe_is_unmanaged, current_install_path, pending_recovery,
+    recover_interrupted_install, remove_terminal_recovery, ApplyResult, InstallRecovery,
+    PendingRecovery, TerminalRecovery,
 };
 #[cfg(unix)]
 use super::install::{
@@ -387,9 +388,16 @@ fn check_upgrade<D: DaemonUpgradePort + ?Sized>(
             }
         }
     }
+    // Unmanaged installations have no installation lock or scheduler state
+    // beside the executable: the check is lock-free and stateless so
+    // read-only package-manager directories keep working.
+    if current_exe_is_unmanaged() {
+        let plan = build_upgrade_plan(engine, policy, channel_override, false)?;
+        return Ok(check_outcome(command, plan, None));
+    }
     let lock = UpgradeLock::acquire(data_root)?;
     let attempt = begin_manual_attempt_locked(data_root, &lock, command)?;
-    let plan = match build_upgrade_plan(engine, &lock, policy, channel_override, false) {
+    let plan = match build_upgrade_plan(engine, policy, channel_override, false) {
         Ok(plan) => plan,
         Err(error) => {
             let _ = write_state_error_locked(
@@ -408,6 +416,19 @@ fn check_upgrade<D: DaemonUpgradePort + ?Sized>(
         "up_to_date"
     };
     write_state_checked_locked(data_root, &lock, &attempt, &plan, status, policy.interval)?;
+    Ok(check_outcome(command, plan, Some(attempt.id().to_owned())))
+}
+
+fn check_outcome(
+    command: &'static str,
+    plan: UpgradePlan,
+    attempt_id: Option<String>,
+) -> UpgradeOutcome {
+    let status = if plan.update_available {
+        "available"
+    } else {
+        "up_to_date"
+    };
     let message = if plan.update_available {
         format!(
             "ctx {} is available (current {}, channel {}).",
@@ -417,7 +438,7 @@ fn check_upgrade<D: DaemonUpgradePort + ?Sized>(
         format!("ctx {} is up to date.", plan.current_version)
     };
     let warnings = plan.warnings.clone();
-    Ok(UpgradeOutcome {
+    UpgradeOutcome {
         command,
         status,
         message,
@@ -425,8 +446,8 @@ fn check_upgrade<D: DaemonUpgradePort + ?Sized>(
         applied: false,
         dry_run: false,
         warnings,
-        attempt_id: Some(attempt.id().to_owned()),
-    })
+        attempt_id,
+    }
 }
 
 fn apply_upgrade<D: DaemonUpgradePort + ?Sized>(
@@ -551,10 +572,16 @@ fn apply_upgrade<D: DaemonUpgradePort + ?Sized>(
     {
         env::remove_var(RECOVERY_REEXEC_ENV);
     }
+    // Unmanaged installations cannot self-upgrade. Fail with the conversion
+    // guidance before acquiring any installation-scoped state so read-only
+    // package-manager directories report the same actionable error.
+    if current_exe_is_unmanaged() {
+        return Err(absent_install_marker_error());
+    }
     let upgrade_lock = UpgradeLock::acquire(data_root)?;
     let attempt = begin_manual_attempt_locked(data_root, &upgrade_lock, "manual_apply")?;
     let result = (|| -> Result<UpgradeOutcome> {
-        let plan = build_upgrade_plan(engine, &upgrade_lock, policy, channel_override, true)?;
+        let plan = build_upgrade_plan(engine, policy, channel_override, true)?;
         let repairs = classify_repair_requirements(
             engine.semantic_layout,
             &plan,
@@ -842,7 +869,6 @@ fn record_post_apply_state(
 
 fn build_upgrade_plan<D: DaemonUpgradePort + ?Sized>(
     engine: &UpgradeEngine<'_, D>,
-    lock: &UpgradeLock,
     policy: UpgradePolicy<'_>,
     channel_override: Option<&str>,
     require_managed: bool,
@@ -855,7 +881,6 @@ fn build_upgrade_plan<D: DaemonUpgradePort + ?Sized>(
         .to_owned();
     let mut warnings = Vec::new();
     let snapshot = capture_install_snapshot(
-        lock.installation(),
         require_managed,
         &platform,
         &channel,

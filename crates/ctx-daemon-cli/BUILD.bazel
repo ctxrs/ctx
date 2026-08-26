@@ -218,3 +218,13 @@ daemon_cli_binary_contract(
         "tier-nightly",
     ],
 )
+
+daemon_cli_binary_contract(
+    name = "unmanaged_daemon_tests",
+    src = "tests/contracts/unmanaged_daemon.rs",
+    extra_deps = ["@crates//libc"],
+    tags = [
+        "exclusive",
+        "release-gate",
+    ],
+)

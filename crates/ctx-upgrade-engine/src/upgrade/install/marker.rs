@@ -1,5 +1,5 @@
 use std::{
-    env,
+    env, io,
     path::{Path, PathBuf},
 };
 
@@ -47,8 +47,17 @@ pub(in crate::upgrade) fn install_fingerprint(path: &Path) -> Result<InstallFing
     let binary = std::fs::read(path)
         .with_context(|| format!("read managed ctx executable {}", path.display()))?;
     let marker_path = install_marker_path(path);
-    let marker = std::fs::read(&marker_path)
-        .with_context(|| format!("read ctx install marker {}", marker_path.display()))?;
+    // An unmanaged installation has no marker beside its executable, so its
+    // plan-time fingerprint digests an empty marker. Managed publication
+    // paths still require a valid marker before any fingerprint comparison.
+    let marker = match std::fs::read(&marker_path) {
+        Ok(marker) => marker,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("read ctx install marker {}", marker_path.display()))
+        }
+    };
     Ok(InstallFingerprint {
         binary_sha256: sha256_hex(&binary),
         marker_sha256: sha256_hex(&marker),
@@ -154,11 +163,31 @@ pub(in crate::upgrade) fn install_marker_for_plan(
     }
 }
 
-fn absent_install_marker_error() -> anyhow::Error {
+pub(in crate::upgrade) fn absent_install_marker_error() -> anyhow::Error {
     anyhow!(
         "ctx is not installed by the hosted installer; {}",
         unmanaged_install_conversion_guidance()
     )
+}
+
+/// An installation is unmanaged when no install marker is plainly present
+/// beside the executable (third-party packaging, source builds). A present
+/// but invalid marker is a distinct inconsistent state and keeps the
+/// fail-closed managed-install errors.
+pub(in crate::upgrade) fn installation_is_unmanaged_at(path: &Path) -> bool {
+    matches!(
+        std::fs::symlink_metadata(install_marker_path(path)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound
+    )
+}
+
+/// Whether the running ctx is an unmanaged installation whose executable
+/// directory the hosted installer never mutates. Resolution failures count
+/// as managed so unexpected states stay fail-closed.
+pub fn current_exe_is_unmanaged() -> bool {
+    current_install_path()
+        .map(|path| installation_is_unmanaged_at(&path))
+        .unwrap_or(false)
 }
 
 #[cfg(windows)]

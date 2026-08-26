@@ -25,13 +25,15 @@ pub use hosted_transaction::{
     run as run_hosted_transaction, HostedTransactionAction, HostedTransactionArgs,
 };
 pub(in crate::upgrade) use lock_fs::{read_stable_file, StableFileKind};
+pub(in crate::upgrade) use marker::absent_install_marker_error;
 #[cfg(any(unix, test))]
 pub(in crate::upgrade) use marker::classify_install_marker_at;
 pub(in crate::upgrade) use marker::install_marker_path;
+pub(in crate::upgrade) use marker::installation_is_unmanaged_at;
 pub use marker::is_valid_install_attempt_id;
 pub(super) use marker::InstallFingerprint;
 pub use marker::{
-    current_install_path, invalid_install_marker_recovery_guidance,
+    current_exe_is_unmanaged, current_install_path, invalid_install_marker_recovery_guidance,
     unmanaged_install_conversion_guidance, InstallMarker,
 };
 pub use marker::{managed_install_marker_for_current_exe, ManagedInstallMarker};
@@ -97,7 +99,6 @@ pub(in crate::upgrade) struct InstallSnapshot {
 }
 
 pub(in crate::upgrade) fn capture_install_snapshot(
-    _installation_lock: &InstallationLock,
     require_managed: bool,
     platform: &str,
     channel: &str,

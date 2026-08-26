@@ -1,14 +1,22 @@
 use super::*;
 
 pub(crate) struct InstallationDaemonLease {
-    pub(super) lock: fs::File,
-    pub(super) registration_path: PathBuf,
-    pub(super) registration_id: String,
+    /// Installation-scoped coordination shared with installation upgrades.
+    /// Present only for managed installations; unmanaged installations never
+    /// write coordination beside their executable.
+    pub(super) coordination: Option<InstallationDaemonCoordination>,
     pub(super) data_root: PathBuf,
     pub(super) trigger: DaemonTriggerCommandArg,
     pub(super) loop_interval_seconds: Option<u64>,
     pub(super) persistent: bool,
     pub(super) status: &'static str,
+}
+
+/// Quiescence-lock and registration state beside a managed executable.
+pub(super) struct InstallationDaemonCoordination {
+    pub(super) lock: fs::File,
+    pub(super) registration_path: PathBuf,
+    pub(super) registration_id: String,
 }
 
 #[derive(Debug)]
@@ -29,6 +37,22 @@ impl InstallationDaemonLease {
         allow_active_upgrade: bool,
         persistent: bool,
     ) -> Result<Option<Self>> {
+        // Unmanaged installations never create installation-scoped
+        // coordination beside the executable, which may be a read-only
+        // package-manager directory. Their daemons run uncoordinated.
+        if ctx_upgrade_engine::current_exe_is_unmanaged() {
+            if installation_daemon_admission_is_fenced(allow_active_upgrade)? {
+                return Ok(None);
+            }
+            return Ok(Some(Self {
+                coordination: None,
+                data_root: data_root.to_path_buf(),
+                trigger,
+                loop_interval_seconds,
+                persistent,
+                status: "live",
+            }));
+        }
         let lock = open_installation_daemon_quiescence_lock()?;
         match fs2::FileExt::try_lock_shared(&lock) {
             Ok(()) => {}
@@ -46,9 +70,11 @@ impl InstallationDaemonLease {
         let registration_id = Uuid::now_v7().to_string();
         let registration_path = registration_root.join(format!("{registration_id}.json"));
         let mut lease = Self {
-            lock,
-            registration_path,
-            registration_id,
+            coordination: Some(InstallationDaemonCoordination {
+                lock,
+                registration_path,
+                registration_id,
+            }),
             data_root: data_root.to_path_buf(),
             trigger,
             loop_interval_seconds,
@@ -58,13 +84,16 @@ impl InstallationDaemonLease {
         lease.write_status("live", None)?;
         if installation_daemon_admission_is_fenced(allow_active_upgrade)? {
             lease.status = "removed";
-            let _ = fs::remove_file(&lease.registration_path);
+            let _ = lease.remove_registration();
             return Ok(None);
         }
         Ok(Some(lease))
     }
 
     pub(crate) fn acknowledge(mut self, attempt_id: &str) -> Result<()> {
+        if self.coordination.is_none() {
+            return Ok(());
+        }
         self.status = "quiescing";
         self.write_status("quiescing", Some(attempt_id))?;
         write_daemon_restart_request(self.data_root.as_path(), self.trigger, attempt_id)?;
@@ -74,11 +103,14 @@ impl InstallationDaemonLease {
     }
 
     pub(super) fn write_status(&self, status: &str, attempt_id: Option<&str>) -> Result<()> {
+        let Some(coordination) = self.coordination.as_ref() else {
+            return Ok(());
+        };
         write_private_json_file(
-            &self.registration_path,
+            &coordination.registration_path,
             &compact_json(json!({
                 "schema_version": 1,
-                "registration_id": self.registration_id,
+                "registration_id": coordination.registration_id,
                 "status": status,
                 "attempt_id": attempt_id,
                 "pid": process::id(),
@@ -91,6 +123,13 @@ impl InstallationDaemonLease {
             })),
         )
     }
+
+    fn remove_registration(&self) -> std::io::Result<()> {
+        match self.coordination.as_ref() {
+            Some(coordination) => fs::remove_file(&coordination.registration_path),
+            None => Ok(()),
+        }
+    }
 }
 
 fn installation_daemon_admission_is_fenced(allow_active_upgrade: bool) -> Result<bool> {
@@ -102,10 +141,12 @@ fn installation_daemon_admission_is_fenced(allow_active_upgrade: bool) -> Result
 
 impl Drop for InstallationDaemonLease {
     fn drop(&mut self) {
-        if self.status == "live" {
-            let _ = fs::remove_file(&self.registration_path);
+        if let Some(coordination) = self.coordination.as_ref() {
+            if self.status == "live" {
+                let _ = fs::remove_file(&coordination.registration_path);
+            }
+            let _ = fs2::FileExt::unlock(&coordination.lock);
         }
-        let _ = fs2::FileExt::unlock(&self.lock);
     }
 }
 
@@ -215,6 +256,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn unmanaged_installation_lease_runs_without_coordination() {
+        // The unit-test executable has no install marker beside it, so this
+        // process models an unmanaged third-party packaged installation.
+        let temp = tempfile::tempdir().unwrap();
+        let lease = InstallationDaemonLease::acquire(
+            &temp.path().join("data"),
+            DaemonTriggerCommandArg::Search,
+            None,
+            false,
+            true,
+        )
+        .unwrap()
+        .expect("unmanaged daemon lease");
+
+        assert!(
+            lease.coordination.is_none(),
+            "unmanaged daemons must not hold installation coordination"
+        );
+        lease
+            .acknowledge("ua_01890f3e-2c80-7000-8000-000000000013")
+            .unwrap();
+    }
+
+    #[test]
     fn new_registration_writes_only_explicit_persistent_restart_policy() {
         let temp = tempfile::tempdir().unwrap();
         let registration_path = temp.path().join("registration.json");
@@ -226,9 +291,11 @@ mod tests {
             .open(temp.path().join("lock"))
             .unwrap();
         let lease = InstallationDaemonLease {
-            lock,
-            registration_path: registration_path.clone(),
-            registration_id: "registration".to_owned(),
+            coordination: Some(InstallationDaemonCoordination {
+                lock,
+                registration_path: registration_path.clone(),
+                registration_id: "registration".to_owned(),
+            }),
             data_root: temp.path().join("data"),
             trigger: DaemonTriggerCommandArg::Search,
             loop_interval_seconds: Some(23),
@@ -257,9 +324,11 @@ mod tests {
             .open(temp.path().join("lock"))
             .unwrap();
         let lease = InstallationDaemonLease {
-            lock,
-            registration_path: registration_path.clone(),
-            registration_id: "finite-registration".to_owned(),
+            coordination: Some(InstallationDaemonCoordination {
+                lock,
+                registration_path: registration_path.clone(),
+                registration_id: "finite-registration".to_owned(),
+            }),
             data_root: temp.path().join("data"),
             trigger: DaemonTriggerCommandArg::Search,
             loop_interval_seconds: None,

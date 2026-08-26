@@ -177,7 +177,7 @@ where
             interval: current.interval(),
             semantic_enabled: current.semantic_enabled(),
         };
-        let plan = build_upgrade_plan(engine, lock.as_ref().unwrap(), policy, None, true)?;
+        let plan = build_upgrade_plan(engine, policy, None, true)?;
         let repairs = classify_repair_requirements(
             engine.semantic_layout,
             &plan,

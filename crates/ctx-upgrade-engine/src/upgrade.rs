@@ -24,7 +24,7 @@ pub use diagnostics::{
     managed_install_executable, upgrade_diagnostics, ManagedInstallDiagnostic, UpgradeDiagnostics,
 };
 pub use install::{
-    current_install_path, installation_hosted_uninstall_is_active,
+    current_exe_is_unmanaged, current_install_path, installation_hosted_uninstall_is_active,
     installation_hosted_uninstall_is_active_for_executable,
     invalid_install_marker_recovery_guidance, is_valid_install_attempt_id,
     managed_install_marker_for_current_exe, run_hosted_transaction,

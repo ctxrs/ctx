@@ -60,9 +60,14 @@ order; in PowerShell, use `Get-Command ctx -All`.
 
 An absent install marker is normal for a source build or package-manager
 install and leaves ctx unmanaged. The hosted installer will not silently adopt
-that executable. A marker that is malformed, unsupported, path-mismatched, or
-does not match the binary hash leaves the executable and marker as an
-inconsistent pair; do not edit or overwrite the sidecar in place.
+that executable. Unmanaged installations never write installation-scoped
+coordination beside the executable, so read-only package-manager directories
+(for example Nix) keep working; the daemon runs without installation
+coordination, `ctx upgrade check` stays lock-free, and `ctx upgrade` reports
+the unmanaged guidance instead of a directory-permission error. A marker that
+is malformed, unsupported, path-mismatched, or does not match the binary hash
+leaves the executable and marker as an inconsistent pair; do not edit or
+overwrite the sidecar in place.
 
 Before moving or removing either an unmanaged executable or an inconsistent
 executable/marker pair, run the lifecycle handoff with the currently installed

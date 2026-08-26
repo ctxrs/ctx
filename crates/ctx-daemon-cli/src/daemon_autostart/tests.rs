@@ -137,9 +137,11 @@ fn failed_restart_intent_write_preserves_partial_acknowledgement() -> Result<()>
     let lock = open_installation_daemon_quiescence_lock_at(&lock_path)?;
     fs2::FileExt::lock_shared(&lock)?;
     let lease = InstallationDaemonLease {
-        lock,
-        registration_path: registration_path.clone(),
-        registration_id: "partial".to_owned(),
+        coordination: Some(InstallationDaemonCoordination {
+            lock,
+            registration_path: registration_path.clone(),
+            registration_id: "partial".to_owned(),
+        }),
         data_root: blocked_root,
         trigger: DaemonTriggerCommandArg::Search,
         loop_interval_seconds: None,
