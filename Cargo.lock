@@ -1055,7 +1055,6 @@ dependencies = [
  "ctx-history-source-discovery",
  "ctx-history-source-io",
  "rusqlite",
- "serde_json",
  "tempfile",
 ]
 
