@@ -1,5 +1,5 @@
 load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")
-load("//tools/bazel:ctx_rust.bzl", "ctx_rust_test")
+load("//tools/bazel:ctx_rust.bzl", "ctx_rust_binary", "ctx_rust_test")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -27,4 +27,120 @@ ctx_rust_test(
         "//crates/ctx-history-index:lib",
     ],
     proc_macro_deps = all_crate_deps(proc_macro_dev = True),
+)
+
+ctx_rust_test(
+    name = "jsonl_publication_tests",
+    testonly = True,
+    srcs = ["tests/jsonl_publication.rs"] + glob(["tests/jsonl_publication/**/*.rs"]),
+    crate_name = "ctx_history_capture_composition_jsonl_qualification",
+    crate_root = "tests/jsonl_publication.rs",
+    edition = crate_edition(),
+    aliases = aliases(normal_dev = True, proc_macro_dev = True),
+    data = ["//:gemini_resume_test_fixtures"],
+    deps = all_crate_deps(normal_dev = True) + [
+        "//crates/ctx-history-capture-composition:test_support_lib",
+        "//crates/ctx-history-capture-model:lib",
+        "//crates/ctx-history-core:lib",
+        "//crates/ctx-history-index:lib",
+        "//crates/ctx-history-openclaw-schema:test_support_lib",
+        "//crates/ctx-history-provider-gemini:test_support_lib",
+        "//crates/ctx-history-provider-native-jsonl:test_support_lib",
+        "//crates/ctx-history-provider-openclaw-sqlite:test_support_lib",
+        "//crates/ctx-history-provider-runtime:test_support_lib",
+        "//crates/ctx-history-source-discovery:lib",
+        "//crates/ctx-history-source-io:test_support_lib",
+    ],
+    proc_macro_deps = all_crate_deps(proc_macro_dev = True),
+    rustc_env = {"CARGO_MANIFEST_DIR": "crates/ctx-history-capture-composition-qualification"},
+)
+
+ctx_rust_test(
+    name = "claude_failure_boundary_tests",
+    testonly = True,
+    srcs = ["tests/claude_failure_boundaries.rs"],
+    crate_name = "ctx_history_capture_composition_qualification_claude",
+    crate_root = "tests/claude_failure_boundaries.rs",
+    edition = crate_edition(),
+    aliases = aliases(normal_dev = True, proc_macro_dev = True),
+    deps = all_crate_deps(normal_dev = True) + [
+        "//crates/ctx-history-capture-composition:lib",
+        "//crates/ctx-history-core:lib",
+        "//crates/ctx-history-index:lib",
+    ],
+    proc_macro_deps = all_crate_deps(proc_macro_dev = True),
+)
+
+ctx_rust_test(
+    name = "provider_lifecycle_tests",
+    testonly = True,
+    srcs = ["tests/provider_lifecycle.rs"] + glob(["tests/provider_lifecycle/**/*.rs"]),
+    crate_name = "ctx_history_capture_composition_provider_lifecycle_qualification",
+    crate_root = "tests/provider_lifecycle.rs",
+    data = ["//:public_test_fixtures"],
+    edition = crate_edition(),
+    aliases = aliases(normal_dev = True, proc_macro_dev = True),
+    deps = all_crate_deps(normal_dev = True) + [
+        "//crates/ctx-history-capture-composition:test_support_lib",
+        "//crates/ctx-history-capture-model:lib",
+        "//crates/ctx-history-capture-runtime:lib",
+        "//crates/ctx-history-core:lib",
+        "//crates/ctx-history-index:lib",
+        "//crates/ctx-history-provider-codex:test_support_lib",
+        "//crates/ctx-history-provider-gemini:test_support_lib",
+        "//crates/ctx-history-provider-runtime:test_support_lib",
+        "//crates/ctx-history-providers-sqlite-selected:test_support_lib",
+        "//crates/ctx-history-source-discovery:lib",
+    ],
+    proc_macro_deps = all_crate_deps(proc_macro_dev = True),
+    rustc_env = {"CARGO_MANIFEST_DIR": "crates/ctx-history-capture-composition-qualification"},
+)
+
+ctx_rust_test(
+    name = "openclaw_configured_root_lifecycle_tests",
+    testonly = True,
+    srcs = ["tests/openclaw_configured_root_lifecycle.rs"],
+    crate_name = "ctx_history_capture_composition_openclaw_root_lifecycle_qualification",
+    crate_root = "tests/openclaw_configured_root_lifecycle.rs",
+    edition = crate_edition(),
+    aliases = aliases(normal_dev = True, proc_macro_dev = True),
+    deps = all_crate_deps(normal_dev = True) + [
+        "//crates/ctx-history-capture-composition:test_support_lib",
+        "//crates/ctx-history-capture-model:lib",
+        "//crates/ctx-history-core:lib",
+        "//crates/ctx-history-index:lib",
+        "//crates/ctx-history-source-discovery:lib",
+    ],
+    proc_macro_deps = all_crate_deps(proc_macro_dev = True),
+    rustc_env = {"CARGO_MANIFEST_DIR": "crates/ctx-history-capture-composition-qualification"},
+)
+
+CUSTOM_HISTORY_CORE_FIXTURE_DEPS = [
+    "//crates/ctx-history-capture-composition:lib",
+    "//crates/ctx-history-core:lib",
+    "//crates/ctx-history-index:lib",
+    "//crates/ctx-history-source-io:lib",
+]
+
+ctx_rust_binary(
+    name = "custom_history_core_fixture",
+    testonly = True,
+    srcs = ["tests/custom_history_core_fixture.rs"],
+    crate_name = "custom_history_core_fixture",
+    crate_root = "tests/custom_history_core_fixture.rs",
+    edition = crate_edition(),
+    aliases = aliases(normal_dev = True),
+    deps = all_crate_deps(normal_dev = True) + CUSTOM_HISTORY_CORE_FIXTURE_DEPS,
+)
+
+ctx_rust_test(
+    name = "custom_history_core_fixture_tests",
+    srcs = ["tests/custom_history_core_fixture.rs"],
+    crate_name = "custom_history_core_fixture_tests",
+    crate_root = "tests/custom_history_core_fixture.rs",
+    edition = crate_edition(),
+    aliases = aliases(normal_dev = True),
+    data = ["//:public_test_fixtures"],
+    deps = all_crate_deps(normal_dev = True) + CUSTOM_HISTORY_CORE_FIXTURE_DEPS,
+    rustc_env = {"CARGO_MANIFEST_DIR": "crates/ctx-history-capture-composition-qualification"},
 )

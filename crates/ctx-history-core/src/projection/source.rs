@@ -34,6 +34,48 @@ impl SourceAnchor {
     }
 }
 
+/// Opaque logical scope applied to a provider source anchor.
+///
+/// Scope lineage is supplied by the caller's durable source catalog. It is
+/// never derived from a physical path here and is not part of the serialized
+/// Core contract by itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SourceAnchorScope {
+    Unqualified,
+    Lineage([u8; 32]),
+}
+
+impl SourceAnchorScope {
+    /// Qualifies an anchor without changing its provider-owned namespace.
+    pub fn qualify(self, anchor: SourceAnchor) -> ProjectionContractResult<SourceAnchor> {
+        match (self, anchor) {
+            (Self::Unqualified, anchor) => Ok(anchor),
+            (Self::Lineage(root_lineage), SourceAnchor::ProviderNative { namespace, key }) => {
+                Ok(SourceAnchor::ProviderNative {
+                    namespace,
+                    key: TypedKey::composite(vec![TypedKey::bytes(root_lineage.to_vec())?, key])?,
+                })
+            }
+            (Self::Lineage(root_lineage), SourceAnchor::CatalogLineage(local_lineage)) => {
+                Ok(SourceAnchor::CatalogLineage(derive_scoped_catalog_lineage(
+                    root_lineage,
+                    local_lineage,
+                )))
+            }
+        }
+    }
+}
+
+fn derive_scoped_catalog_lineage(root_lineage: [u8; 32], local_lineage: [u8; 32]) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(b"ctx.source-anchor-scope/catalog-lineage/v1\0");
+    for lineage in [root_lineage, local_lineage] {
+        digest.update((lineage.len() as u64).to_be_bytes());
+        digest.update(lineage);
+    }
+    digest.finalize().into()
+}
+
 /// Persistent canonical source lineage.
 ///
 /// Physical paths and mutable source fingerprints are not identity inputs.
@@ -56,12 +98,33 @@ impl SourceKey {
         namespace: impl Into<String>,
         key: TypedKey,
     ) -> ProjectionContractResult<Self> {
-        Self::derive(
+        Self::derive_provider_native_scoped(
+            provider,
+            source_format,
+            schema_variant,
+            provider_identity_version,
+            namespace,
+            key,
+            SourceAnchorScope::Unqualified,
+        )
+    }
+
+    pub fn derive_provider_native_scoped(
+        provider: impl Into<String>,
+        source_format: impl Into<String>,
+        schema_variant: impl Into<String>,
+        provider_identity_version: u32,
+        namespace: impl Into<String>,
+        key: TypedKey,
+        scope: SourceAnchorScope,
+    ) -> ProjectionContractResult<Self> {
+        Self::derive_scoped(
             provider,
             source_format,
             schema_variant,
             provider_identity_version,
             SourceAnchor::provider_native(namespace, key)?,
+            scope,
         )
     }
 
@@ -72,9 +135,28 @@ impl SourceKey {
         provider_identity_version: u32,
         anchor: SourceAnchor,
     ) -> ProjectionContractResult<Self> {
+        Self::derive_scoped(
+            provider,
+            source_format,
+            schema_variant,
+            provider_identity_version,
+            anchor,
+            SourceAnchorScope::Unqualified,
+        )
+    }
+
+    pub fn derive_scoped(
+        provider: impl Into<String>,
+        source_format: impl Into<String>,
+        schema_variant: impl Into<String>,
+        provider_identity_version: u32,
+        anchor: SourceAnchor,
+        scope: SourceAnchorScope,
+    ) -> ProjectionContractResult<Self> {
         let provider = provider.into();
         let source_format = source_format.into();
         let schema_variant = schema_variant.into();
+        let anchor = scope.qualify(anchor)?;
         validate_text("provider", &provider, MAX_PROVIDER_BYTES)?;
         validate_text("source_format", &source_format, MAX_SOURCE_FORMAT_BYTES)?;
         validate_text("schema_variant", &schema_variant, MAX_SCHEMA_VARIANT_BYTES)?;

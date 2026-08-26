@@ -1,12 +1,15 @@
 use std::{io, path::PathBuf};
 
-use ctx_history_core::{ScannedSourceCounts, SourceKey, SourceObservation, StableEntityId};
+use ctx_history_core::{
+    ScannedSourceCounts, SourceAnchorScope, SourceKey, SourceObservation, StableEntityId,
+};
 use ctx_history_source_io::{ProviderSourceRoot, SourceIoError};
 use sha2::{Digest, Sha256};
 
 use super::{
     projection::{
-        cline_session_id, cline_source_key, owns_cline_source, project_messages, PARSER_REVISION,
+        cline_session_id, cline_source_key_scoped, owns_cline_source, project_messages,
+        PARSER_REVISION,
     },
     source::{discover_cline_sdk_tree, read_bound_leaf_files, ClineSdkError, SessionLeaf},
 };
@@ -25,6 +28,7 @@ pub struct ClineSdkDocumentLeaf {
     snapshot: SessionLeaf,
     source_key: SourceKey,
     session_id: StableEntityId,
+    source_anchor_scope: SourceAnchorScope,
 }
 
 #[derive(Debug)]
@@ -39,14 +43,24 @@ type ClineSdkDocumentTree = CompleteDocumentTree<ClineSdkDocumentLeaf, ClineSdkT
 pub struct ClineSdkDocumentTreeAdapter<L, S, C> {
     selected_root: PathBuf,
     data_root: PathBuf,
+    source_anchor_scope: SourceAnchorScope,
     _lifecycle: crate::ProviderLifecycleMarker<L, S, C>,
 }
 
 impl<L, S, C> ClineSdkDocumentTreeAdapter<L, S, C> {
     pub fn new(selected_root: PathBuf, data_root: PathBuf) -> Self {
+        Self::new_scoped(selected_root, data_root, SourceAnchorScope::Unqualified)
+    }
+
+    pub fn new_scoped(
+        selected_root: PathBuf,
+        data_root: PathBuf,
+        source_anchor_scope: SourceAnchorScope,
+    ) -> Self {
         Self {
             selected_root,
             data_root,
+            source_anchor_scope,
             _lifecycle: std::marker::PhantomData,
         }
     }
@@ -84,8 +98,21 @@ where
         Ok(leaf.source_key.clone())
     }
 
+    fn durable_replay_source(
+        &self,
+        _authority: &Self::TreeAuthority,
+        leaf: &Self::Leaf,
+    ) -> SourceBackedRouteResult<Option<SourceKey>> {
+        Ok(Some(leaf.source_key.clone()))
+    }
+
     fn discover_complete(&self) -> SourceBackedRouteResult<ClineSdkDocumentTree> {
-        bind_tree(&self.selected_root, &self.data_root).map_err(route_error)
+        bind_tree_scoped(
+            &self.selected_root,
+            &self.data_root,
+            self.source_anchor_scope,
+        )
+        .map_err(route_error)
     }
 
     fn scan_changed(
@@ -120,14 +147,23 @@ where
     }
 }
 
+#[cfg(test)]
 fn bind_tree(
     selected_root: &std::path::Path,
     data_root: &std::path::Path,
 ) -> Result<ClineSdkDocumentTree, ClineSdkError> {
+    bind_tree_scoped(selected_root, data_root, SourceAnchorScope::Unqualified)
+}
+
+fn bind_tree_scoped(
+    selected_root: &std::path::Path,
+    data_root: &std::path::Path,
+    source_anchor_scope: SourceAnchorScope,
+) -> Result<ClineSdkDocumentTree, ClineSdkError> {
     let snapshot = discover_cline_sdk_tree(selected_root, data_root)?;
     let mut observed = Vec::with_capacity(snapshot.leaves.len());
     for leaf in snapshot.leaves {
-        let source_key = cline_source_key(&leaf.provider_session_id)
+        let source_key = cline_source_key_scoped(&leaf.provider_session_id, source_anchor_scope)
             .map_err(|error| ClineSdkError::Invalid(error.to_string()))?;
         let session_id = cline_session_id(&source_key, &leaf.provider_session_id)
             .map_err(|error| ClineSdkError::Invalid(error.to_string()))?;
@@ -137,6 +173,7 @@ fn bind_tree(
                 snapshot: leaf,
                 source_key,
                 session_id,
+                source_anchor_scope,
             },
         ));
     }
@@ -160,6 +197,9 @@ where
     L: CaptureLifecycleSink,
     S: DocumentRecordSpool,
 {
+    if let Some(detail) = leaf.snapshot.catalog_binding_failure.as_deref() {
+        return Err(invalid_route(detail));
+    }
     let (manifest, messages) =
         read_bound_leaf_files(&authority.root, &leaf.snapshot).map_err(route_error)?;
     let source_revision = source_revision(&leaf.snapshot, manifest.as_deref(), messages.as_deref());
@@ -178,6 +218,7 @@ where
             &leaf.snapshot,
             &leaf.source_key,
             leaf.session_id,
+            leaf.source_anchor_scope,
             source_revision,
             bytes,
         ) {
@@ -287,6 +328,7 @@ pub(super) fn test_project_leaf(
         &leaf.snapshot,
         &leaf.source_key,
         leaf.session_id,
+        leaf.source_anchor_scope,
         [7; 32],
         bytes,
     )

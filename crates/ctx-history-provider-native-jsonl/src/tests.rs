@@ -69,12 +69,23 @@ fn antigravity_dialect_prefers_the_full_transcript_sibling() {
 #[test]
 fn qoder_dialect_admits_transcript_and_direct_project_jsonl_only() {
     let temp = tempdir().unwrap();
-    let root = temp.path().join(".qoder/projects");
+    let root = temp.path().join("renamed-qoder-history");
     let transcript = root.join("legacy/transcript/legacy.jsonl");
+    let legacy_direct = root.join("legacy/direct.jsonl");
     let direct = root.join("current/direct.jsonl");
     let nested = root.join("current/nested/not-a-session.jsonl");
+    let nested_transcript = root.join("legacy/transcript/nested/not-a-session.jsonl");
+    let root_session = root.join("not-a-project-session.jsonl");
     let sidecar = root.join("current/state.json");
-    for path in [&transcript, &direct, &nested, &sidecar] {
+    for path in [
+        &transcript,
+        &legacy_direct,
+        &direct,
+        &nested,
+        &nested_transcript,
+        &root_session,
+        &sidecar,
+    ] {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, b"{}\n").unwrap();
     }
@@ -90,12 +101,31 @@ fn qoder_dialect_admits_transcript_and_direct_project_jsonl_only() {
     )
     .unwrap();
 
-    assert_eq!(count, 2);
+    assert_eq!(count, 3);
     assert_eq!(
         visited,
         [
             Path::new("current/direct.jsonl").to_path_buf(),
+            Path::new("legacy/direct.jsonl").to_path_buf(),
             Path::new("legacy/transcript/legacy.jsonl").to_path_buf(),
         ]
+    );
+
+    let project_root = root.join("legacy");
+    let mut project_visited = Vec::new();
+    let project_count = visit_native_jsonl_files_with::<crate::NativeJsonlError>(
+        &project_root,
+        CaptureProvider::Qoder,
+        &mut |path| {
+            project_visited.push(path.strip_prefix(&project_root).unwrap().to_path_buf());
+            Ok(())
+        },
+    )
+    .unwrap();
+
+    assert_eq!(project_count, 1);
+    assert_eq!(
+        project_visited,
+        [Path::new("transcript/legacy.jsonl").to_path_buf()]
     );
 }

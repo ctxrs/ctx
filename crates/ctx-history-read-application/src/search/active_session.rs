@@ -1,7 +1,7 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{anyhow, Result};
-use ctx_history_index_query::{ExcludedSessionTree, SessionRecord, VerifiedIndex};
+use ctx_history_index_query::{ExcludedSessionTree, SessionGroupingClaims, VerifiedIndex};
 use uuid::Uuid;
 
 use super::{ActiveSessionExclusion, SearchRequest};
@@ -61,36 +61,68 @@ pub(super) fn resolved_manual_session_exclusion_ids(
 pub(super) fn excluded_active_session_tree(
     index: &VerifiedIndex,
     active_session: &ActiveSessionExclusion,
-) -> Result<ExcludedSessionTree> {
-    let sessions = index.sessions_by_provider_session_id(
-        &active_session.provider_session_id,
-        Some(&active_session.provider),
-    )?;
-    let ancestries = sessions
-        .iter()
-        .map(SessionAncestry::from)
-        .collect::<Vec<_>>();
-    let root_session_id = resolved_unique_session_tree_root_id(&ancestries, |session_id| {
-        Ok(index
-            .session_by_id(session_id)?
-            .as_ref()
-            .map(SessionAncestry::from))
-    })?;
-    let session_ids = match root_session_id {
-        Some(root_session_id) => resolved_session_tree_ids(root_session_id, |session_ids| {
-            Ok(index.session_ids_claiming_lineage_to_any(
-                session_ids,
-                MAX_ACTIVE_SESSION_TREE_SESSIONS + 1,
-            )?)
-        })?
-        .unwrap_or_default(),
-        None => Vec::new(),
+) -> Option<ExcludedSessionTree> {
+    // Automatic exclusion is a safety exception: any lookup or proof failure
+    // abstains instead of widening to provider-native metadata.
+    let sessions = index
+        .sessions_by_provider_session_id(
+            &active_session.provider_session_id,
+            Some(&active_session.provider),
+            None,
+            None,
+        )
+        .ok()?;
+    let [active_session] = sessions.as_slice() else {
+        return None;
     };
-    Ok(ExcludedSessionTree {
-        provider: active_session.provider.clone(),
-        provider_session_id: active_session.provider_session_id.clone(),
-        session_ids,
-    })
+    let active_claims = index
+        .session_grouping_claims_by_id(active_session.session_id.as_uuid())
+        .ok()
+        .flatten()?;
+    if active_claims.session_id != active_session.session_id {
+        return None;
+    }
+    let ancestries = [SessionAncestry::from(&active_claims)];
+    let session_ids = proven_active_session_tree_ids(
+        &ancestries,
+        |session_id| {
+            Ok(index
+                .session_grouping_claims_by_id(session_id)?
+                .as_ref()
+                .map(SessionAncestry::from))
+        },
+        |session_ids| {
+            Ok(index
+                .session_grouping_claims_claiming_lineage_to_any(
+                    session_ids,
+                    MAX_ACTIVE_SESSION_TREE_SESSIONS + 1,
+                )?
+                .iter()
+                .map(SessionAncestry::from)
+                .collect())
+        },
+    )?;
+    Some(ExcludedSessionTree { session_ids })
+}
+
+pub(super) fn proven_active_session_tree_ids<F, G>(
+    sessions: &[SessionAncestry],
+    session_by_id: F,
+    related_session_ids: G,
+) -> Option<Vec<Uuid>>
+where
+    F: FnMut(Uuid) -> Result<Option<SessionAncestry>>,
+    G: FnMut(&[Uuid]) -> Result<Vec<SessionAncestry>>,
+{
+    let [_active_session] = sessions else {
+        return None;
+    };
+    let root_session_id = resolved_unique_session_tree_root_id(sessions, session_by_id)
+        .ok()
+        .flatten()?;
+    resolved_session_tree_ids(root_session_id, related_session_ids)
+        .ok()
+        .flatten()
 }
 
 pub(super) fn resolved_session_tree_ids<F>(
@@ -98,8 +130,11 @@ pub(super) fn resolved_session_tree_ids<F>(
     mut related_session_ids: F,
 ) -> Result<Option<Vec<Uuid>>>
 where
-    F: FnMut(&[Uuid]) -> Result<Vec<Uuid>>,
+    F: FnMut(&[Uuid]) -> Result<Vec<SessionAncestry>>,
 {
+    // Parent/root claims name exact provider-root-scoped session identities.
+    // Do not compare source owners here: providers such as Codex own one
+    // source per session, so a valid tree necessarily crosses source owners.
     let mut session_ids = BTreeSet::from([root_session_id]);
     for _ in 0..=MAX_ACTIVE_SESSION_ANCESTORS {
         let anchors = session_ids.iter().copied().collect::<Vec<_>>();
@@ -107,13 +142,62 @@ where
         if related.len() > MAX_ACTIVE_SESSION_TREE_SESSIONS {
             return Ok(None);
         }
-        let previous_len = session_ids.len();
-        session_ids.extend(related);
-        if session_ids.len() > MAX_ACTIVE_SESSION_TREE_SESSIONS {
+        let mut discovered = BTreeMap::new();
+        for candidate in related {
+            if session_ids.contains(&candidate.session_id) {
+                continue;
+            }
+            if discovered.insert(candidate.session_id, candidate).is_some() {
+                return Ok(None);
+            }
+            let claims = [
+                candidate.parent_session_id,
+                candidate.claimed_root_session_id,
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+            if claims.is_empty() {
+                return Ok(None);
+            }
+        }
+        if discovered.is_empty() {
+            return Ok(Some(session_ids.into_iter().collect()));
+        }
+        if session_ids.len() + discovered.len() > MAX_ACTIVE_SESSION_TREE_SESSIONS
+            || discovered.values().any(|candidate| {
+                [
+                    candidate.parent_session_id,
+                    candidate.claimed_root_session_id,
+                ]
+                .into_iter()
+                .flatten()
+                .any(|claim| !session_ids.contains(&claim) && !discovered.contains_key(&claim))
+            })
+        {
             return Ok(None);
         }
-        if session_ids.len() == previous_len {
-            return Ok(Some(session_ids.into_iter().collect()));
+        while !discovered.is_empty() {
+            let ready = discovered
+                .values()
+                .filter(|candidate| {
+                    [
+                        candidate.parent_session_id,
+                        candidate.claimed_root_session_id,
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .all(|claim| session_ids.contains(&claim))
+                })
+                .map(|candidate| candidate.session_id)
+                .collect::<Vec<_>>();
+            if ready.is_empty() {
+                return Ok(None);
+            }
+            for session_id in ready {
+                discovered.remove(&session_id);
+                session_ids.insert(session_id);
+            }
         }
     }
     Ok(None)
@@ -126,8 +210,8 @@ pub(super) struct SessionAncestry {
     pub(super) claimed_root_session_id: Option<Uuid>,
 }
 
-impl From<&SessionRecord> for SessionAncestry {
-    fn from(session: &SessionRecord) -> Self {
+impl From<&SessionGroupingClaims> for SessionAncestry {
+    fn from(session: &SessionGroupingClaims) -> Self {
         Self {
             session_id: session.session_id.as_uuid(),
             parent_session_id: session.parent_session_id.map(|id| id.as_uuid()),

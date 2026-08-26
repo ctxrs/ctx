@@ -564,6 +564,7 @@ fn worker_budget_coordinates_indexers_runtime_and_scanners() {
         complete_inventories: &mut harness.complete_inventories,
         route_index: 0,
         route_identity: test_route_identity(),
+        base_route_aliases: BTreeSet::new(),
         base_route_control: None,
         resources: SourceBackedRouteResources::production(harness.leaf_worker_budget),
         logical_source_failures: &mut harness.logical_source_failures,

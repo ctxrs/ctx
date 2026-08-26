@@ -19,8 +19,8 @@ use ctx_history_core::{
     ActivityResult, ActivityTextCapture, AgentScope, CaptureProvider, CertifiedSource,
     CoreActivity, CoreRecord, CoreRecordError, EventIdentityInput, LiteralFactKind, NativeItemKey,
     NativeSessionKey, PositionStability, ProjectionContractError, ScannedSourceCounts,
-    SessionIdentityInput, SourceAnchor, SourceKey, StableEntityId, SubrecordSelector, TypedKey,
-    CORE_ACTIVITY_REVISION,
+    SessionIdentityInput, SourceAnchor, SourceAnchorScope, SourceKey, StableEntityId,
+    SubrecordSelector, TypedKey, CORE_ACTIVITY_REVISION,
 };
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -156,9 +156,10 @@ pub(crate) struct DeepAgentsSourceBackedScannerV0 {
 }
 
 impl DeepAgentsSourceBackedScannerV0 {
-    pub(crate) fn open(
+    pub(crate) fn open_scoped(
         selection: DeepAgentsDatabaseSelectionV0,
         imported_at: DateTime<Utc>,
+        source_scope: SourceAnchorScope,
     ) -> DeepAgentsSourceBackedResultV0<Self> {
         let (source_root, sqlite_snapshot) =
             open_root_authorized_snapshot(&selection.data_root, selection.path())?;
@@ -166,7 +167,7 @@ impl DeepAgentsSourceBackedScannerV0 {
         let conn = sqlite_snapshot.connection()?;
         deepagents_validate_schema(conn, selection.path())?;
         let schema_fingerprint = sqlite_schema_fingerprint(conn)?;
-        let source = deepagents_source_key()?;
+        let source = deepagents_source_key_scoped(source_scope)?;
         let schema_evidence = deepagents_schema_evidence(&schema_fingerprint)?;
         let logical_fingerprint = deepagents_logical_fingerprint(conn, &schema_evidence)?;
         let mut content_digest = Sha256::new();
@@ -528,17 +529,25 @@ fn open_root_authorized_snapshot_with_hook(
     Ok((source_root, sqlite_snapshot))
 }
 
+#[cfg(test)]
 fn deepagents_source_key() -> DeepAgentsSourceBackedResultV0<SourceKey> {
+    deepagents_source_key_scoped(SourceAnchorScope::Unqualified)
+}
+
+fn deepagents_source_key_scoped(
+    source_scope: SourceAnchorScope,
+) -> DeepAgentsSourceBackedResultV0<SourceKey> {
     let anchor = SourceAnchor::provider_native(
         DEEPAGENTS_SOURCE_ANCHOR_NAMESPACE,
         TypedKey::utf8(DEEPAGENTS_SOURCE_ANCHOR_KEY)?,
     )?;
-    Ok(SourceKey::derive(
+    Ok(SourceKey::derive_scoped(
         CaptureProvider::DeepAgents.as_str(),
         DEEPAGENTS_SQLITE_SOURCE_FORMAT,
         DEEPAGENTS_SOURCE_SCHEMA_VARIANT,
         1,
         anchor,
+        source_scope,
     )?)
 }
 

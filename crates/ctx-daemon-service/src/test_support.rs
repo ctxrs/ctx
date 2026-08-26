@@ -60,6 +60,7 @@ pub(crate) struct TestObservation;
 impl DaemonObservationPort for TestObservation {
     fn provider_refresh_event(
         &self,
+        _data_root: &Path,
         _job: &Value,
         _successor_pending: bool,
     ) -> Option<PublicEventV1> {

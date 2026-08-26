@@ -4,13 +4,13 @@ use tantivy::{indexer::NoMergePolicy, Index, ReloadPolicy};
 
 use crate::{
     fields_from_schema, validate_schema, writer_support::construct_index_writer_with_retry,
-    GenerationManifest, IndexError, Result, WriterOptions,
+    GenerationManifest, IndexError, Result, VerifiedIndex, WriterOptions,
 };
 use ctx_history_index_format::{register_body_analyzer, verify_searcher_structure};
 use ctx_history_index_generation::DurableMmapDirectory;
 
 use super::{
-    canonical_commit_payload, certify_activated_generation, lexical_index_settings,
+    canonical_commit_payload, certify_candidate_physical_integrity, lexical_index_settings,
     load_active_generation_pointer, load_generation_retention_lease, load_publication_for_metas,
     meta_generation, open_slot_index, payload_generation_id, physical_integrity_audit,
     publish_active_generation_pointer, reclaim_inactive_generation_directories,
@@ -20,7 +20,6 @@ use super::{
     INDEX_GENERATIONS_DIRECTORY,
 };
 
-#[cfg(windows)]
 use super::{publish_active_generation_pointer_validated, validate_candidate_managed_files};
 
 mod clone {
@@ -49,6 +48,7 @@ pub(crate) use clone::{
 pub(crate) enum CurrentRepublishOutcome {
     Published(ActiveGenerationPointer),
     CommittedVisible {
+        #[cfg_attr(not(test), allow(dead_code))]
         pointer: ActiveGenerationPointer,
         recovery: RepublishRecovery,
     },
@@ -177,6 +177,10 @@ fn republish_candidate(
     current_manifest: Arc<GenerationManifest>,
     current_generation_id: String,
 ) -> Result<CurrentRepublishOutcome> {
+    let predecessor_fence = ctx_history_index_generation::ActiveGenerationPointerFence::capture(
+        root,
+        Some(base_pointer),
+    )?;
     republish_checkpoint(RepublishStage::AfterCandidateCreation, Some(candidate_path))?;
     candidate.validate_binding()?;
     let candidate_index = candidate.index();
@@ -262,46 +266,55 @@ fn republish_candidate(
     candidate.validate_binding()?;
     let next_pointer =
         ActiveGenerationPointer::new(verified.slot.clone(), Some(base_pointer.active().clone()))?;
+    #[cfg(windows)]
+    let mut terminal_guard = Some(
+        ctx_history_index_generation::acquire_terminal_publication_guard(
+            root,
+            candidate_path,
+            &verified.index,
+            Some(base_pointer),
+        )?,
+    );
+    certify_candidate_physical_integrity(
+        root,
+        &predecessor_fence,
+        &verified.slot,
+        &verified.index,
+        &verified.physical_integrity_audit,
+    )?;
+    let _reopened_candidate = VerifiedIndex::open_certified_candidate_before_activation(
+        root,
+        &predecessor_fence,
+        &verified.slot,
+    )?;
     republish_checkpoint(
         RepublishStage::BeforePointerPublication,
         Some(candidate_path),
     )?;
     candidate.validate_binding()?;
-    #[cfg(windows)]
     let publication_result =
         publish_active_generation_pointer_validated(root, &next_pointer, || {
-            let terminal_guard = ctx_history_index_generation::acquire_terminal_publication_guard(
-                root,
-                candidate_path,
-                &verified.index,
-                Some(base_pointer),
-            )?;
             candidate.validate_binding()?;
             validate_candidate_managed_files(&verified.index, candidate_path, Some(base_pointer))?;
-            let terminal_verified = verify_candidate(
+            ctx_history_index_generation::verify_candidate_physical_integrity_read_only(
                 root,
-                base_pointer,
-                candidate_path,
-                candidate_directory_name,
-                base_metas,
-                publication_metadata.as_deref(),
-                &current_manifest,
-                &current_generation_id,
-            )
-            .map_err(|_| ctx_history_index_generation::GenerationError::ChecksumMismatch)?;
-            if terminal_verified.slot != verified.slot {
-                return Err(
+                &predecessor_fence,
+                &verified.slot,
+                &verified.index,
+            )?;
+            #[cfg(windows)]
+            {
+                let terminal_guard = terminal_guard.take().ok_or(
                     ctx_history_index_generation::GenerationError::ConcurrentGenerationChange,
-                );
+                )?;
+                terminal_guard.verify_physical_fence(&verified.physical_integrity_audit)?;
+                terminal_guard.verify_identities()?;
+                Ok(terminal_guard)
             }
-            terminal_guard.verify_physical_fence(&verified.physical_integrity_audit)?;
-            candidate.validate_binding()?;
-            terminal_guard.verify_identities()?;
-            Ok(terminal_guard)
+            #[cfg(not(windows))]
+            Ok(())
         });
-    #[cfg(not(windows))]
-    let publication_result = publish_active_generation_pointer(root, &next_pointer);
-    let outcome = match publication_result {
+    match publication_result {
         Ok(PointerPublicationOutcome::Durable) => {
             Ok(CurrentRepublishOutcome::Published(next_pointer))
         }
@@ -311,21 +324,7 @@ fn republish_candidate(
         // The atomic-write contract guarantees that every `Err` occurred
         // before replacement, so the predecessor remains query authority.
         Err(error) => Err(error),
-    };
-    if let Ok(
-        CurrentRepublishOutcome::Published(pointer)
-        | CurrentRepublishOutcome::CommittedVisible { pointer, .. },
-    ) = &outcome
-    {
-        let _ = certify_activated_generation(
-            root,
-            pointer,
-            pointer.active(),
-            &verified.index,
-            &verified.physical_integrity_audit,
-        );
     }
-    outcome
 }
 
 struct VerifiedRepublishCandidate {

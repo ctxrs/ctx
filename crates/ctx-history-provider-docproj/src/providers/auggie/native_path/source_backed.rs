@@ -12,8 +12,8 @@ use ctx_history_core::{
     derive_event_id, derive_session_id, AgentScope, CoreActivity, CoreRecord, CoreRecordError,
     EventIdentityInput, LiteralFactKind, NativeItemKey, NativeSessionKey, ProjectionContractError,
     ProviderDeclaredFact, ProviderNativeSessionRelationship, ScannedSourceCounts,
-    SessionIdentityInput, SourceAnchor, SourceKey, SourceObservation, StableEntityId, TypedKey,
-    CORE_ACTIVITY_REVISION,
+    SessionIdentityInput, SourceAnchorScope, SourceKey, SourceObservation, StableEntityId,
+    TypedKey, CORE_ACTIVITY_REVISION,
 };
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -365,6 +365,39 @@ fn auggie_tree_fingerprint(
     digest.finalize().into()
 }
 
+fn scope_auggie_document_fingerprint(
+    fingerprint: [u8; 32],
+    source_anchor_scope: SourceAnchorScope,
+    domain: &[u8],
+) -> [u8; 32] {
+    let SourceAnchorScope::Lineage(root_lineage) = source_anchor_scope else {
+        return fingerprint;
+    };
+    let mut digest = Sha256::new();
+    digest.update(domain);
+    digest.update(root_lineage);
+    digest.update(fingerprint);
+    digest.finalize().into()
+}
+
+fn scope_auggie_document_tree(
+    tree: &mut AuggieDocumentTree,
+    source_anchor_scope: SourceAnchorScope,
+) {
+    for leaf in &mut tree.leaves {
+        leaf.fingerprint = DocumentLeafFingerprint::new(scope_auggie_document_fingerprint(
+            leaf.fingerprint.as_bytes(),
+            source_anchor_scope,
+            b"ctx.auggie-document-root-scoped-leaf-v1\0",
+        ));
+    }
+    tree.tree_fingerprint = scope_auggie_document_fingerprint(
+        tree.tree_fingerprint,
+        source_anchor_scope,
+        b"ctx.auggie-document-root-scoped-tree-v1\0",
+    );
+}
+
 fn revalidate_auggie_tree(tree: &AuggieDocumentTree) -> AuggieSourceBackedResult<[u8; 32]> {
     let (selection_tag, authority_fingerprint) = match &tree.authority {
         AuggieTreeAuthority::File { root, selected, .. } => {
@@ -411,14 +444,24 @@ fn revalidate_auggie_tree(tree: &AuggieDocumentTree) -> AuggieSourceBackedResult
 pub struct AuggieDocumentTreeAdapter<B = ()> {
     root: AuggieSourceBackedRoot,
     context: ProviderAdapterContext,
+    source_anchor_scope: SourceAnchorScope,
     _binding: PhantomData<fn() -> B>,
 }
 
 impl<B> AuggieDocumentTreeAdapter<B> {
     pub fn new(root: AuggieSourceBackedRoot, context: ProviderAdapterContext) -> Self {
+        Self::new_scoped(root, context, SourceAnchorScope::Unqualified)
+    }
+
+    pub fn new_scoped(
+        root: AuggieSourceBackedRoot,
+        context: ProviderAdapterContext,
+        source_anchor_scope: SourceAnchorScope,
+    ) -> Self {
         Self {
             root,
             context,
+            source_anchor_scope,
             _binding: PhantomData,
         }
     }
@@ -448,12 +491,14 @@ where
 
     fn discover_complete(&self) -> SourceBackedRouteResult<AuggieDocumentTree> {
         let inventory = discover_auggie_source_backed_unfenced(&self.root).map_err(route_error)?;
-        inventory.into_complete_tree().ok_or_else(|| {
+        let mut tree = inventory.into_complete_tree().ok_or_else(|| {
             SourceBackedRouteError::new(
                 SourceBackedRouteErrorKind::Unavailable,
                 "Auggie selected route inventory is temporarily unavailable",
             )
-        })
+        })?;
+        scope_auggie_document_tree(&mut tree, self.source_anchor_scope);
+        Ok(tree)
     }
 
     fn scan_changed(
@@ -462,11 +507,25 @@ where
         leaf: &Self::Leaf,
         sink: &mut ChangedDocumentSink<'_, '_, B>,
     ) -> SourceBackedRouteResult<DocumentSourceTerminal> {
-        scan_changed_auggie_document::<B>(authority, leaf, &self.context, sink)
+        scan_changed_auggie_document::<B>(
+            authority,
+            leaf,
+            &self.context,
+            self.source_anchor_scope,
+            sink,
+        )
     }
 
     fn revalidate_complete(&self, tree: &AuggieDocumentTree) -> SourceBackedRouteResult<[u8; 32]> {
-        revalidate_auggie_tree(tree).map_err(route_error)
+        revalidate_auggie_tree(tree)
+            .map(|fingerprint| {
+                scope_auggie_document_fingerprint(
+                    fingerprint,
+                    self.source_anchor_scope,
+                    b"ctx.auggie-document-root-scoped-tree-v1\0",
+                )
+            })
+            .map_err(route_error)
     }
 }
 
@@ -474,6 +533,7 @@ fn scan_changed_auggie_document<B>(
     authority: &AuggieTreeAuthority,
     leaf: &AuggieDocumentLeaf,
     context: &ProviderAdapterContext,
+    source_anchor_scope: SourceAnchorScope,
     sink: &mut ChangedDocumentSink<'_, '_, B>,
 ) -> SourceBackedRouteResult<DocumentSourceTerminal>
 where
@@ -493,7 +553,8 @@ where
     if !leaf.matches(&stamp) {
         return Err(route_error(CaptureError::SourceChangedDuringCapture));
     }
-    let source = auggie_source_key(&session.provider_session_id).map_err(route_error)?;
+    let source = auggie_source_key_scoped(&session.provider_session_id, source_anchor_scope)
+        .map_err(route_error)?;
     let session_id =
         auggie_session_id(&source, &session.provider_session_id).map_err(route_error)?;
     let observation = auggie_source_observation(&source, &stamp).map_err(route_error)?;
@@ -503,8 +564,15 @@ where
     let mut event_ids = HashSet::with_capacity(events.len());
     let mut indexed_documents = 0_u64;
     for event in events {
-        let document = auggie_core_record(&source, session_id, &session, content_digest, event)
-            .map_err(route_error)?;
+        let document = auggie_core_record(
+            &source,
+            session_id,
+            source_anchor_scope,
+            &session,
+            content_digest,
+            event,
+        )
+        .map_err(route_error)?;
         if !event_ids.insert(document.event_id) {
             return Err(route_error(
                 AuggieSourceBackedError::DuplicateEventIdentity(document.event_id),
@@ -543,17 +611,23 @@ fn owns_auggie_source(source: &SourceKey) -> bool {
         && source.provider_identity_version() == 1
 }
 
+#[cfg(test)]
 fn auggie_source_key(native_session_id: &str) -> AuggieSourceBackedResult<SourceKey> {
-    let anchor = SourceAnchor::provider_native(
-        AUGGIE_SOURCE_ANCHOR_NAMESPACE,
-        TypedKey::utf8(native_session_id)?,
-    )?;
-    Ok(SourceKey::derive(
+    auggie_source_key_scoped(native_session_id, SourceAnchorScope::Unqualified)
+}
+
+fn auggie_source_key_scoped(
+    native_session_id: &str,
+    source_anchor_scope: SourceAnchorScope,
+) -> AuggieSourceBackedResult<SourceKey> {
+    Ok(SourceKey::derive_provider_native_scoped(
         ctx_history_core::CaptureProvider::Auggie.as_str(),
         AUGGIE_SESSION_JSON_SOURCE_FORMAT,
         AUGGIE_SOURCE_SCHEMA_VARIANT,
         1,
-        anchor,
+        AUGGIE_SOURCE_ANCHOR_NAMESPACE,
+        TypedKey::utf8(native_session_id)?,
+        source_anchor_scope,
     )?)
 }
 
@@ -575,6 +649,7 @@ fn auggie_session_id(
 fn auggie_core_record(
     source: &SourceKey,
     session_id: StableEntityId,
+    source_anchor_scope: SourceAnchorScope,
     session: &ParsedAuggieSession,
     content_digest: [u8; 32],
     parsed: ParsedAuggieEvent,
@@ -584,8 +659,9 @@ fn auggie_core_record(
             AuggieLineageEvidence::Root => (Some(AgentScope::Primary), None, None, None),
             AuggieLineageEvidence::Child { parent, root } => (
                 Some(AgentScope::Subagent),
-                Some(related_auggie_session_id(parent)?),
-                root.map(related_auggie_session_id).transpose()?,
+                Some(related_auggie_session_id(parent, source_anchor_scope)?),
+                root.map(|root| related_auggie_session_id(root, source_anchor_scope))
+                    .transpose()?,
                 Some(ProviderNativeSessionRelationship::Delegated),
             ),
             AuggieLineageEvidence::Unknown => (None, None, None, None),
@@ -694,8 +770,11 @@ fn auggie_lineage_evidence(session: &ParsedAuggieSession) -> AuggieLineageEviden
     }
 }
 
-fn related_auggie_session_id(native_session_id: &str) -> AuggieSourceBackedResult<StableEntityId> {
-    let source = auggie_source_key(native_session_id)?;
+fn related_auggie_session_id(
+    native_session_id: &str,
+    source_anchor_scope: SourceAnchorScope,
+) -> AuggieSourceBackedResult<StableEntityId> {
+    let source = auggie_source_key_scoped(native_session_id, source_anchor_scope)?;
     auggie_session_id(&source, native_session_id)
 }
 

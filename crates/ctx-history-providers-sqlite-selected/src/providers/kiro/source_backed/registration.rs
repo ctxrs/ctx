@@ -6,7 +6,7 @@ use std::{
 };
 
 use super::{
-    kiro_source_key, observe_kiro_logical_snapshot, require_legacy_sqlite_format,
+    kiro_source_key_scoped, observe_kiro_logical_snapshot, require_legacy_sqlite_format,
     scan_kiro_snapshot, KiroSourceBackedErrorV0, KiroSourceBackedScan,
     KIRO_SOURCE_BACKED_PARSER_REVISION, SOURCE_BACKED_PAGE_ROWS,
 };
@@ -24,7 +24,7 @@ use crate::{
     },
     CaptureError, SelectedSqliteCaptureBinding, KIRO_SQLITE_SOURCE_FORMAT,
 };
-use ctx_history_core::SourceKey;
+use ctx_history_core::{SourceAnchorScope, SourceKey};
 
 use super::super::{
     absolute_kiro_path,
@@ -53,6 +53,7 @@ struct KiroPresentAuthority {
 struct KiroDocumentTreeAdapter<B> {
     data_root: PathBuf,
     path: PathBuf,
+    source_scope: SourceAnchorScope,
     binding: std::marker::PhantomData<fn() -> B>,
 }
 
@@ -68,13 +69,14 @@ impl<B: SelectedSqliteCaptureBinding> ReplacementDocumentTree for KiroDocumentTr
     }
 
     fn owns_source(&self, source: &SourceKey) -> bool {
-        kiro_source_key().is_ok_and(|owned| owned.exact_descriptor_eq(source))
+        kiro_source_key_scoped(self.source_scope)
+            .is_ok_and(|owned| owned.exact_descriptor_eq(source))
     }
 
     fn discover_complete(
         &self,
     ) -> SourceBackedRouteResult<CompleteDocumentTree<Self::Leaf, Self::TreeAuthority>> {
-        let source = kiro_source_key().map_err(route_error)?;
+        let source = kiro_source_key_scoped(self.source_scope).map_err(route_error)?;
         match observe_kiro_inventory(&self.data_root, &self.path).map_err(kiro_scan_error)? {
             KiroPhysicalInventory::Present(present) => {
                 let fingerprint = present.logical_fingerprint;
@@ -191,15 +193,17 @@ impl<B: SelectedSqliteCaptureBinding> ReplacementDocumentTree for KiroDocumentTr
     }
 }
 
-pub(crate) fn source_backed_driver<B: SelectedSqliteCaptureBinding>(
+pub(crate) fn source_backed_driver_scoped<B: SelectedSqliteCaptureBinding>(
     provider: &str,
     source_format: &str,
     source_path: &Path,
     data_root: &Path,
+    source_scope: SourceAnchorScope,
 ) -> SourceBackedRouteDriver<B::Lifecycle, B::RouteControl> {
     let adapter = KiroDocumentTreeAdapter::<B> {
         data_root: data_root.to_path_buf(),
         path: source_path.to_path_buf(),
+        source_scope,
         binding: std::marker::PhantomData,
     };
     ctx_history_capture_runtime::replacement_document_tree_driver(

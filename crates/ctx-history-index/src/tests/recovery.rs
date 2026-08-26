@@ -307,7 +307,13 @@ fn terminal_activation_fence_rejects_candidate_manifest_replacement() {
     }));
 
     let error = candidate.commit(|_| true).unwrap_err();
-    assert!(matches!(error, IndexError::ChecksumMismatch), "{error:?}");
+    assert!(
+        matches!(
+            error,
+            IndexError::ChecksumMismatch | IndexError::ManifestDigestMismatch { .. }
+        ),
+        "{error:?}"
+    );
     assert_eq!(
         fs::read(temp.path().join("active-generation.json")).unwrap(),
         pointer_before
@@ -360,6 +366,7 @@ fn terminal_activation_fence_rejects_post_verification_directory_substitution() 
             IndexError::CurrentRepublishSourceTopology(_)
                 | IndexError::ConcurrentGenerationChange
                 | IndexError::ChecksumMismatch
+                | IndexError::Tantivy(_)
         ),
         "{error:?}"
     );

@@ -28,14 +28,14 @@ pub(crate) use ctx_history_provider_runtime::{
     read_bounded_record_complete_and_prefix_sha256,
     read_bounded_record_full_complete_and_prefix_sha256, read_bounded_record_unhashed,
     JsonlAppendOccurrenceState, JsonlCheckpoint, JsonlFamilyAdapter, JsonlFamilyAppendMode,
-    JsonlFamilyBaseScope, JsonlFamilyExecutionPosition, JsonlFamilyInventoryMode,
-    JsonlFamilyProjectionMode, JsonlFamilyProjector, JsonlFamilyPublication,
-    JsonlFamilyRejectedLeaf, JsonlFamilyRootMissingMode, JsonlFamilySemanticExecutor,
-    JsonlFamilySemanticPage, JsonlFamilySemanticPreflight, JsonlFamilySemanticSummary,
-    JsonlFileObservation, JsonlOversizedRecordPolicy, JsonlPage, JsonlPhysicalDigest,
-    JsonlPhysicalRecord, JsonlPhysicalStreamPosition, JsonlProbe, JsonlRecordEvidence,
-    JsonlRecordFraming, JsonlRecordRef, JsonlScanOutcome, JsonlSemanticPreflightMode,
-    JsonlSourceChange, JsonlSourceIdentity,
+    JsonlFamilyExecutionPosition, JsonlFamilyInventoryMode, JsonlFamilyProjectionMode,
+    JsonlFamilyProjector, JsonlFamilyPublication, JsonlFamilyRejectedLeaf,
+    JsonlFamilyRootMissingMode, JsonlFamilySemanticExecutor, JsonlFamilySemanticPage,
+    JsonlFamilySemanticPreflight, JsonlFamilySemanticSummary, JsonlFileObservation,
+    JsonlOversizedRecordPolicy, JsonlPage, JsonlPhysicalDigest, JsonlPhysicalRecord,
+    JsonlPhysicalStreamPosition, JsonlProbe, JsonlRecordEvidence, JsonlRecordFraming,
+    JsonlRecordRef, JsonlScanOutcome, JsonlSemanticPreflightMode, JsonlSourceChange,
+    JsonlSourceIdentity,
 };
 
 /// Capture-only composition for the extracted native-JSONL provider package.

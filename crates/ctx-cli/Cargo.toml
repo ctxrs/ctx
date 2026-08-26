@@ -53,6 +53,7 @@ ctx-agent-application = { path = "../ctx-agent-application" }
 ctx-agent-integrations = { path = "../ctx-agent-integrations" }
 ctx-cli-presentation = { path = "../ctx-cli-presentation" }
 ctx-daemon-cli = { path = "../ctx-daemon-cli" }
+ctx-daemon-runtime = { path = "../ctx-daemon-runtime" }
 ctx-history-capture = { path = "../ctx-history-capture" }
 ctx-client-observability = { path = "../ctx-client-observability" }
 ctx-companion-bridge = { path = "../ctx-companion-bridge" }

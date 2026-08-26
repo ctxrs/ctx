@@ -166,6 +166,12 @@ impl<R: SourceBackedRegistryRoute> SourceBackedRouteRegistry<R> {
     pub fn pop(&mut self) -> Option<R> {
         self.routes.pop()
     }
+
+    /// Retains registered routes without exposing the registry's backing
+    /// storage. Composition uses this only for one-way compatibility bridges.
+    pub fn retain(&mut self, keep: impl FnMut(&R) -> bool) {
+        self.routes.retain(keep);
+    }
 }
 
 impl<R> Deref for SourceBackedRouteRegistry<R> {

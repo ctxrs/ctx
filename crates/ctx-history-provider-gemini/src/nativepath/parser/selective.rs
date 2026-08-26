@@ -73,6 +73,8 @@ impl<'de> Deserialize<'de> for GeminiRecordProbe {
                 let mut session_id_seen = false;
                 let mut timestamp_seen = false;
                 let mut start_time_seen = false;
+                let mut project_hash_seen = false;
+                let mut kind_seen = false;
                 let mut record_type_seen = false;
                 let mut tool_calls_seen = false;
                 let mut set_seen = false;
@@ -94,6 +96,14 @@ impl<'de> Deserialize<'de> for GeminiRecordProbe {
                         }
                         "startTime" => {
                             reject_duplicate_selector(&mut start_time_seen, "startTime")?;
+                            map.next_value::<IgnoredAny>()?;
+                        }
+                        "projectHash" => {
+                            reject_duplicate_selector(&mut project_hash_seen, "projectHash")?;
+                            map.next_value::<IgnoredAny>()?;
+                        }
+                        "kind" => {
+                            reject_duplicate_selector(&mut kind_seen, "kind")?;
                             map.next_value::<IgnoredAny>()?;
                         }
                         "type" => {
@@ -294,6 +304,7 @@ impl GeminiRecordProbe {
 struct GeminiHeaderDto {
     session_id: String,
     start_time: Option<String>,
+    project_hash: Option<String>,
     kind: Option<String>,
     #[serde(default)]
     directories: Vec<String>,
@@ -305,25 +316,23 @@ pub(super) fn decode_header(
 ) -> std::result::Result<GeminiSession, String> {
     let header: GeminiHeaderDto = serde_json::from_slice(payload)
         .map_err(|error| format!("invalid Gemini header: {error}"))?;
-    let native_session_id = header.session_id.trim();
-    if native_session_id.is_empty() {
+    if header.session_id.trim().is_empty() {
         return Err("Gemini header has an empty sessionId".to_owned());
     }
-    let (parent_native_session_id, path_agent_scope) = match layout {
-        GeminiTranscriptLayout::Primary => (None, AgentScope::Primary),
+    let parent_native_session_id = match layout {
+        GeminiTranscriptLayout::Primary => None,
         GeminiTranscriptLayout::Subagent {
             parent_native_session_id_hint,
-        } => (
-            Some(parent_native_session_id_hint.clone()),
-            AgentScope::Subagent,
-        ),
+        } => Some(parent_native_session_id_hint.clone()),
     };
-    let agent_scope =
-        if parent_native_session_id.is_some() || header.kind.as_deref() == Some("subagent") {
-            AgentScope::Subagent
-        } else {
-            path_agent_scope
-        };
+    // Layout contributes only an unresolved parent-session hint. Persisted
+    // scope semantics must come from provider-native header data so moving an
+    // unchanged recording between accepted layouts cannot change its output.
+    let agent_scope = if header.kind.as_deref() == Some("subagent") {
+        AgentScope::Subagent
+    } else {
+        AgentScope::Primary
+    };
     let mut directories = header
         .directories
         .into_iter()
@@ -335,11 +344,14 @@ pub(super) fn decode_header(
         [directory] => (Some(directory.clone()), false),
         _ => (None, true),
     };
+    let started_at = header.start_time.as_deref().and_then(parse_timestamp);
     Ok(GeminiSession {
-        native_session_id: native_session_id.to_owned(),
+        native_session_id: header.session_id,
+        native_start_time: header.start_time,
+        project_hash: header.project_hash,
         parent_native_session_id,
         agent_scope,
-        started_at: header.start_time.as_deref().and_then(parse_timestamp),
+        started_at,
         cwd,
         cwd_ambiguous,
         native_kind: header.kind,

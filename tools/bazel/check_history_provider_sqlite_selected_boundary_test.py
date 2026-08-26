@@ -114,11 +114,6 @@ sqlite_route!(Warp, "warp", true, true, NamedSurface, NamedSurface);
             "impl ctx_history_providers_sqlite_selected::SelectedSqliteCaptureBinding for Binding {}\n",
             encoding="utf-8",
         )
-        (self.capture / "src/source_backed/tests").mkdir(parents=True)
-        (self.capture / "src/source_backed/tests/sqlite_selected.rs").write_text(
-            "ctx_history_providers_sqlite_selected::fail_next_opened_snapshot_cleanup_for_test();\n",
-            encoding="utf-8",
-        )
         self.write_capture_composition()
 
     def tearDown(self) -> None:
@@ -275,6 +270,47 @@ sqlite_route!(Warp, "warp", true, true, NamedSurface, NamedSurface);
         )
         with self.assertRaisesRegex(BoundaryError, "exact thin composition"):
             self.validate()
+        self.write_capture_composition()
+        self.validate()
+
+    def test_each_scoped_pack_driver_is_required(self) -> None:
+        facade = self.capture_facade()
+        original = facade.read_text()
+        for provider in PROVIDERS:
+            with self.subTest(provider=provider):
+                scoped = f"{provider}_source_backed_driver_scoped"
+                function = original.index(f"fn register_{provider}_source_backed_route")
+                driver = original.index(scoped, function)
+                facade.write_text(
+                    original[:driver]
+                    + f"{provider}_source_backed_driver"
+                    + original[driver + len(scoped) :],
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(BoundaryError, "exact thin composition"):
+                    self.validate()
+        facade.write_text(original, encoding="utf-8")
+
+    def test_each_root_lineage_scope_is_required(self) -> None:
+        facade = self.capture_facade()
+        original = facade.read_text()
+        scoped_lineage = """source_root_lineage.map_or(
+            ctx_history_core::SourceAnchorScope::Unqualified,
+            ctx_history_core::SourceAnchorScope::Lineage,
+        )"""
+        for provider in PROVIDERS:
+            with self.subTest(provider=provider):
+                function = original.index(f"fn register_{provider}_source_backed_route")
+                scope = original.index(scoped_lineage, function)
+                facade.write_text(
+                    original[:scope]
+                    + "ctx_history_core::SourceAnchorScope::Unqualified"
+                    + original[scope + len(scoped_lineage) :],
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(BoundaryError, "exact thin composition"):
+                    self.validate()
+        facade.write_text(original, encoding="utf-8")
 
     def test_capture_provider_logic_growth_is_rejected(self) -> None:
         facade = self.capture_facade()

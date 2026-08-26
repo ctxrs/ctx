@@ -16,6 +16,98 @@ const PARENT: &str = "parent-session";
 const CHILD: &str = "child-session";
 
 #[test]
+fn root_scope_composes_once_with_hermes_profile_and_session_lineage() {
+    use ctx_history_core::{SourceAnchorScope, SourceKey};
+
+    let provider_source = |profile: &str| crate::ProviderSource {
+        provider: CaptureProvider::Hermes,
+        path: std::path::PathBuf::from(format!("/tmp/profiles/{profile}/state.db")),
+        exists: true,
+        source_format: HERMES_SQLITE_SOURCE_FORMAT,
+        source_kind: ProviderSourceKind::NativeHistory,
+        import_support: ProviderImportSupport::Explicit,
+        catalog_support: ProviderCatalogSupport::None,
+        status: crate::ProviderSourceStatus::Available,
+        unsupported_reason: None,
+        route_provenance: Default::default(),
+    };
+    let released = SourceKey::derive_provider_native(
+        CaptureProvider::Hermes.as_str(),
+        HERMES_SQLITE_SOURCE_FORMAT,
+        HERMES_PROFILE_SOURCE_SCHEMA_VARIANT,
+        1,
+        HERMES_SOURCE_ANCHOR_NAMESPACE,
+        TypedKey::utf8("alpha").unwrap(),
+    )
+    .unwrap();
+    let unqualified = HermesSourceCandidate::automatic("/tmp", provider_source("alpha"))
+        .unwrap()
+        .source;
+    assert!(released.exact_descriptor_eq(&unqualified));
+    assert_eq!(
+        released.identity().encode_canonical().unwrap(),
+        unqualified.identity().encode_canonical().unwrap()
+    );
+
+    let first_profile = HermesSourceCandidate::automatic_scoped(
+        "/tmp",
+        provider_source("alpha"),
+        SourceAnchorScope::Lineage([0x11; 32]),
+    )
+    .unwrap()
+    .source;
+    let second_profile = HermesSourceCandidate::automatic_scoped(
+        "/tmp",
+        provider_source("alpha"),
+        SourceAnchorScope::Lineage([0x22; 32]),
+    )
+    .unwrap()
+    .source;
+    let first_session = hermes_session_source_key(&first_profile, "shared-session").unwrap();
+    let second_session = hermes_session_source_key(&second_profile, "shared-session").unwrap();
+    assert_ne!(first_session.identity(), second_session.identity());
+    assert_ne!(
+        projection_context(&first_session).session_id,
+        projection_context(&second_session).session_id
+    );
+
+    let expected_child_anchor = SourceAnchor::provider_native(
+        HERMES_SESSION_SOURCE_ANCHOR_NAMESPACE,
+        TypedKey::composite(vec![
+            TypedKey::bytes(
+                first_profile
+                    .identity()
+                    .encode_canonical()
+                    .unwrap()
+                    .to_vec(),
+            )
+            .unwrap(),
+            TypedKey::utf8("shared-session").unwrap(),
+        ])
+        .unwrap(),
+    )
+    .unwrap();
+    let expected_child = SourceKey::derive(
+        CaptureProvider::Hermes.as_str(),
+        HERMES_SQLITE_SOURCE_FORMAT,
+        HERMES_SESSION_SOURCE_SCHEMA_VARIANT,
+        1,
+        expected_child_anchor,
+    )
+    .unwrap();
+    assert!(expected_child.exact_descriptor_eq(&first_session));
+
+    let sibling_profile = HermesSourceCandidate::automatic_scoped(
+        "/tmp",
+        provider_source("beta"),
+        SourceAnchorScope::Lineage([0x11; 32]),
+    )
+    .unwrap()
+    .source;
+    assert_ne!(first_profile.identity(), sibling_profile.identity());
+}
+
+#[test]
 fn direct_core_projection_is_complete_and_has_no_recursive_ancestry_sql() {
     let production = [
         include_str!("../source_backed.rs"),
@@ -284,6 +376,7 @@ fn automatic_candidate(data_root: &Path, database: &Path) -> HermesSourceCandida
             catalog_support: ProviderCatalogSupport::None,
             status: crate::ProviderSourceStatus::Available,
             unsupported_reason: None,
+            route_provenance: Default::default(),
         },
     )
     .unwrap()

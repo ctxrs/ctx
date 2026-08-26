@@ -150,6 +150,10 @@ where
         self.record_rejections.merge(rejections);
     }
 
+    pub fn record_rejection(&mut self, rejection: SourceBackedRecordRejectionDraft) {
+        self.record_rejections.record(rejection);
+    }
+
     pub(super) fn take_record_rejections(&mut self) -> SourceBackedRecordRejectionDrafts {
         std::mem::take(&mut self.record_rejections)
     }

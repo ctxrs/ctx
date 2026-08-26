@@ -84,6 +84,7 @@ CTX_CLI_DEPS = [
     "//crates/ctx-companion-bridge:lib",
     "//crates/ctx-cli-presentation:lib",
     "//crates/ctx-daemon-cli:lib",
+    "//crates/ctx-daemon-runtime:lib",
     "//crates/ctx-history-capture:lib",
     "//crates/ctx-history-cli:lib",
     "//crates/ctx-history-core:lib",
@@ -103,6 +104,7 @@ CTX_CLI_TEST_DEPS = [
     "//crates/ctx-companion-bridge:lib",
     "//crates/ctx-cli-presentation:test_support_lib",
     "//crates/ctx-daemon-cli:test_support_lib",
+    "//crates/ctx-daemon-runtime:lib",
     "//crates/ctx-history-capture:lib",
     "//crates/ctx-history-cli:test_support_lib",
     "//crates/ctx-history-core:lib",
@@ -124,6 +126,7 @@ CTX_CLI_QUALIFICATION_DEPS = [
     "//crates/ctx-companion-bridge:lib",
     "//crates/ctx-cli-presentation:qualification_lib",
     "//crates/ctx-daemon-cli:qualification_lib",
+    "//crates/ctx-daemon-runtime:lib",
     "//crates/ctx-history-capture:lib",
     "//crates/ctx-history-cli:lib",
     "//crates/ctx-history-core:lib",
@@ -278,6 +281,11 @@ ctx_rust_test(
 )
 
 test_suite(
+    name = "cli_public_help_docs_tests",
+    tests = ["//crates/ctx-cli-contract-tests:cli_public_help_docs_tests"],
+)
+
+test_suite(
     name = "test_targets_minimal_fixture",
     tests = ["//crates/ctx-cli-contract-tests:test_targets_minimal_fixture"],
     tags = ["manual"],
@@ -290,40 +298,20 @@ test_suite(
 )
 
 ctx_cli_integration_test(
-    name = "cli_public_help_docs_tests",
-    src = "tests/cli_public_help_docs.rs",
-    tags = ["cli-contract"],
-    test_support = [
-        "base",
-        "fixtures",
-    ],
-)
-
-ctx_cli_integration_test(
     name = "cloud_removed_tests",
     src = "tests/cloud_removed.rs",
     extra_data = ["//:cloud_removed_build_inputs"],
     tags = ["privacy", "security"],
 )
 
-ctx_cli_integration_test(
+test_suite(
     name = "hosted_uninstall_fence_tests",
-    src = "tests/hosted_uninstall_fence.rs",
-    binary = ":ctx_hosted_uninstall_test_host",
-    extra_crates = [
-        "fs2",
-        "sha2",
-    ],
+    tests = ["//crates/ctx-cli-contract-tests:hosted_uninstall_fence_tests"],
 )
 
-ctx_cli_integration_test(
+test_suite(
     name = "index_tests",
-    src = "tests/index.rs",
-    extra_crates = ["anstream"],
-    test_support = [
-        "base",
-        "fixtures",
-    ],
+    tests = ["//crates/ctx-cli-qualification:index_tests"],
 )
 
 test_suite(
@@ -350,13 +338,6 @@ ctx_cli_integration_test(
 ctx_cli_integration_test(
     name = "status_store_cutover_tests",
     src = "tests/status_store_cutover.rs",
-)
-
-ctx_cli_integration_test(
-    name = "stats_tests",
-    src = "tests/stats.rs",
-    extra_crates = ["rusqlite"],
-    tags = ["cli-contract", "privacy"],
 )
 
 test_suite(

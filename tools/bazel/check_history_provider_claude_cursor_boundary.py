@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 import tomllib
 from pathlib import Path
@@ -28,6 +29,15 @@ REQUIRED = {
 
 class BoundaryError(RuntimeError):
     pass
+
+
+def has_concrete_capture_binding(source: str, adapter: str) -> bool:
+    """Allow rustfmt whitespace while fixing the runtime type and lineage input."""
+    return re.search(
+        rf"\b{re.escape(adapter)}\s*::\s*<\s*CaptureProviderRuntime\s*,?\s*>\s*"
+        r"\(\s*source_root_lineage\s*,?\s*\)",
+        source,
+    ) is not None
 
 
 def manifest(path: Path) -> dict:
@@ -55,7 +65,15 @@ def validate_pack(path: Path, build: Path) -> None:
     for fragment in ("ctx_history_capture::", "ctx_history_index::", "CaptureJsonlRuntime", "IndexCaptureLifecycle", "SourceBackedProviderRegistry"):
         if fragment in source:
             raise BoundaryError(f"Claude/Cursor pack gained capture authority: {fragment}")
-    for fragment in ("pub fn claude_jsonl_adapter<B>", "pub fn cursor_jsonl_adapter<B>", "ProviderJsonlRuntime<B>", "CaptureProvider::Claude", "CaptureProvider::Cursor"):
+    for fragment in (
+        "pub fn claude_jsonl_adapter<B>",
+        "pub fn claude_jsonl_adapter_for_named_home<B>",
+        "pub fn cursor_jsonl_adapter<B>",
+        "pub fn cursor_jsonl_adapter_with_source_root_lineage<B>",
+        "ProviderJsonlRuntime<B>",
+        "CaptureProvider::Claude",
+        "CaptureProvider::Cursor",
+    ):
         if fragment not in source:
             raise BoundaryError(f"Claude/Cursor provider surface is incomplete: {fragment}")
     build_source = build.read_text(encoding="utf-8")
@@ -72,9 +90,15 @@ def validate_capture(cargo: Path, build: Path, modules: Path, direct: Path, othe
         raise BoundaryError("capture Bazel composition does not depend on Claude/Cursor pack")
     if "mod claude" in modules.read_text(encoding="utf-8") or "mod cursor" in modules.read_text(encoding="utf-8"):
         raise BoundaryError("capture still owns Claude or Cursor modules")
-    if "claude_jsonl_adapter::<CaptureProviderRuntime>()" not in direct.read_text(encoding="utf-8"):
+    if not has_concrete_capture_binding(
+        direct.read_text(encoding="utf-8"),
+        "claude_jsonl_adapter_for_named_home",
+    ):
         raise BoundaryError("capture Claude registration is not bound to its concrete runtime")
-    if "cursor_jsonl_adapter::<CaptureProviderRuntime>()" not in other.read_text(encoding="utf-8"):
+    if not has_concrete_capture_binding(
+        other.read_text(encoding="utf-8"),
+        "cursor_jsonl_adapter_with_source_root_lineage",
+    ):
         raise BoundaryError("capture Cursor registration is not bound to its concrete runtime")
     if "ctx_history_provider_claude_cursor" not in sources.read_text(encoding="utf-8"):
         raise BoundaryError("capture Cursor discovery binding drifted")

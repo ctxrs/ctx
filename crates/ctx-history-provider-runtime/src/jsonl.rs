@@ -23,7 +23,7 @@ pub use ctx_history_jsonl::{
     restore_ordered_pending_exchange_entries, selected_content_fits as jsonl_selected_content_fits,
     sorted_pending_exchange_entries, take_pending_exchange, JsonlActivityObservedBytes,
     JsonlAppendOccurrenceState, JsonlCheckpoint, JsonlCheckpointedTerminalAuthority,
-    JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyBaseScope, JsonlFamilyExecutionPosition,
+    JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyExecutionPosition,
     JsonlFamilyInventoryMode, JsonlFamilyMembershipObservation, JsonlFamilyOpenedMember,
     JsonlFamilyOptimizedLeafOutcome, JsonlFamilyProjectionMode, JsonlFamilyProjector,
     JsonlFamilyPublication, JsonlFamilyRejectedLeaf, JsonlFamilyRootMissingMode,

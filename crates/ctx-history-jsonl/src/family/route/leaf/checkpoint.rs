@@ -31,8 +31,50 @@ pub(super) fn terminal_proof_for_checkpoint<R: JsonlFamilyRuntime>(
     checkpoint: &FamilyCheckpoint,
     append_only_trust_allowed: bool,
 ) -> JsonlResult<JsonlFamilyTerminalProof<JsonlRuntimeError<R>>, JsonlRuntimeError<R>> {
-    if leaf.whole_record || !adapter.append_mode().certified_suffix() {
-        JsonlFamilyTerminalProof::exact_file(adapter, leaf, certificate)
+    let retained = checkpoint.physical.source_observation();
+    let force_authentication = retained.differs_only_by_change_identity(leaf.observation());
+    if force_authentication {
+        if let Some(admitted_eof_sha256) = checkpoint.exact_admitted_eof_sha256() {
+            JsonlFamilyTerminalProof::forced_frozen_prefix_with_hash(
+                adapter,
+                leaf,
+                certificate,
+                retained.length(),
+                admitted_eof_sha256,
+                super::super::terminal::JsonlFamilyTerminalPrefixHash::Sha256,
+            )
+        } else if checkpoint.physical.complete_prefix_end() == retained.length() {
+            JsonlFamilyTerminalProof::forced_frozen_prefix_with_hash(
+                adapter,
+                leaf,
+                certificate,
+                retained.length(),
+                *checkpoint.physical.complete_prefix_sha256(),
+                super::super::terminal::JsonlFamilyTerminalPrefixHash::SharedJsonlDomain,
+            )
+        } else {
+            Err(JsonlRuntimeError::<R>::source_changed())
+        }
+    } else if leaf.whole_record || !adapter.append_mode().certified_suffix() {
+        if let Some(admitted_eof_sha256) = checkpoint.exact_admitted_eof_sha256() {
+            JsonlFamilyTerminalProof::frozen_prefix(
+                adapter,
+                leaf,
+                certificate,
+                retained.length(),
+                admitted_eof_sha256,
+            )
+        } else if checkpoint.physical.complete_prefix_end() == retained.length() {
+            JsonlFamilyTerminalProof::frozen_shared_prefix(
+                adapter,
+                leaf,
+                certificate,
+                retained.length(),
+                *checkpoint.physical.complete_prefix_sha256(),
+            )
+        } else {
+            JsonlFamilyTerminalProof::exact_file(adapter, leaf, certificate)
+        }
     } else if append_only_trust_allowed
         && adapter.append_trust_contract() == JsonlFamilyAppendTrustContract::AppendOnlySameObjectV1
         && adapter.allows_direct_append_for_leaf(leaf)
@@ -42,8 +84,9 @@ pub(super) fn terminal_proof_for_checkpoint<R: JsonlFamilyRuntime>(
             leaf,
             certificate,
             checkpoint.physical.complete_prefix_end(),
+            checkpoint.exact_admitted_eof_sha256(),
         )
-    } else if let Some(admitted_eof_sha256) = checkpoint.admitted_eof_sha256 {
+    } else if let Some(admitted_eof_sha256) = checkpoint.exact_admitted_eof_sha256() {
         JsonlFamilyTerminalProof::frozen_prefix(
             adapter,
             leaf,

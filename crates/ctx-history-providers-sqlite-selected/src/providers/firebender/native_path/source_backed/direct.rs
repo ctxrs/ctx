@@ -4,13 +4,18 @@ use std::{
     sync::Mutex,
 };
 
-use ctx_history_core::{CertifiedSource, CoreRecord, ScannedSourceCounts, SourceKey};
+use ctx_history_core::{
+    CertifiedSource, CoreRecord, ScannedSourceCounts, SourceAnchorScope, SourceKey,
+};
 use rusqlite::{params_from_iter, Connection};
 use sha2::{Digest, Sha256};
 
+#[cfg(test)]
+use super::firebender_source_key;
 use super::{
-    canonical_row_bytes, firebender_core_record, firebender_session_id, firebender_source_key,
-    firebender_workspace, increment, FirebenderSourceBackedError, FirebenderSourceBackedResult,
+    canonical_row_bytes, firebender_core_record, firebender_session_id,
+    firebender_source_key_scoped, firebender_workspace, increment, FirebenderSourceBackedError,
+    FirebenderSourceBackedResult,
 };
 use crate::{
     document_inventory_authority,
@@ -78,6 +83,7 @@ struct FirebenderPresentAuthority {
 struct FirebenderDocumentTreeAdapter<B> {
     data_root: PathBuf,
     path: PathBuf,
+    source_scope: SourceAnchorScope,
     binding: std::marker::PhantomData<fn() -> B>,
 }
 
@@ -93,7 +99,7 @@ impl<B: SelectedSqliteCaptureBinding> ReplacementDocumentTree for FirebenderDocu
     }
 
     fn owns_source(&self, source: &SourceKey) -> bool {
-        firebender_database_path_and_source(&self.path)
+        firebender_database_path_and_source_scoped(&self.path, self.source_scope)
             .is_ok_and(|(_, owned)| owned.exact_descriptor_eq(source))
     }
 
@@ -101,7 +107,8 @@ impl<B: SelectedSqliteCaptureBinding> ReplacementDocumentTree for FirebenderDocu
         &self,
     ) -> SourceBackedRouteResult<CompleteDocumentTree<Self::Leaf, Self::TreeAuthority>> {
         let (database_path, source) =
-            firebender_database_path_and_source(&self.path).map_err(route_error)?;
+            firebender_database_path_and_source_scoped(&self.path, self.source_scope)
+                .map_err(route_error)?;
         match open_database_leaf(&self.data_root, &database_path).map_err(route_error)? {
             OpenDatabaseLeaf::Present(snapshot) => {
                 let opening_evidence = snapshot.evidence().map_err(route_error)?.clone();
@@ -150,7 +157,8 @@ impl<B: SelectedSqliteCaptureBinding> ReplacementDocumentTree for FirebenderDocu
             ));
         };
         let (database_path, _) =
-            firebender_database_path_and_source(&self.path).map_err(route_error)?;
+            firebender_database_path_and_source_scoped(&self.path, self.source_scope)
+                .map_err(route_error)?;
         let snapshot = take_opened_snapshot(&authority.snapshot)?;
         sink.begin_source(leaf.clone())?;
         let scan = scan_opened_snapshot(&snapshot, &database_path, leaf.clone(), &mut |page| {
@@ -197,15 +205,17 @@ impl<B: SelectedSqliteCaptureBinding> ReplacementDocumentTree for FirebenderDocu
     }
 }
 
-pub(crate) fn source_backed_driver<B: SelectedSqliteCaptureBinding>(
+pub(crate) fn source_backed_driver_scoped<B: SelectedSqliteCaptureBinding>(
     provider: &str,
     source_format: &str,
     source_path: &Path,
     data_root: &Path,
+    source_scope: SourceAnchorScope,
 ) -> SourceBackedRouteDriver<B::Lifecycle, B::RouteControl> {
     let adapter = FirebenderDocumentTreeAdapter::<B> {
         data_root: data_root.to_path_buf(),
         path: source_path.to_path_buf(),
+        source_scope,
         binding: std::marker::PhantomData,
     };
     ctx_history_capture_runtime::replacement_document_tree_driver(
@@ -635,11 +645,19 @@ fn hash_decoded_row(hasher: &mut Sha256, decoded: &DecodedRow) {
     }
 }
 
+#[cfg(test)]
 pub(in crate::providers::firebender::native_path) fn firebender_database_path_and_source(
     explicit_path: &Path,
 ) -> FirebenderSourceBackedResult<(PathBuf, SourceKey)> {
+    firebender_database_path_and_source_scoped(explicit_path, SourceAnchorScope::Unqualified)
+}
+
+fn firebender_database_path_and_source_scoped(
+    explicit_path: &Path,
+    source_scope: SourceAnchorScope,
+) -> FirebenderSourceBackedResult<(PathBuf, SourceKey)> {
     let database_path = firebender_database_path(explicit_path)?;
-    let source = firebender_source_key()?;
+    let source = firebender_source_key_scoped(source_scope)?;
     Ok((database_path, source))
 }
 

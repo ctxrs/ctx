@@ -2,7 +2,7 @@ use serde_json::{json, Map, Value};
 
 use crate::operation_descriptor::McpOperation;
 
-use super::{count_bucket, CountBucket};
+use super::{count_bucket, duration_bucket, CountBucket, DurationBucket, SearchTerminalFacts};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum McpMethodV1 {
@@ -99,6 +99,7 @@ pub struct McpResultMetadataV1 {
     pub result_truncated: Option<bool>,
     pub events_truncated: Option<bool>,
     pub response_bound: Option<McpResponseBoundV1>,
+    pub search: Option<SearchTerminalFacts>,
 }
 
 impl McpResultMetadataV1 {
@@ -128,6 +129,7 @@ impl McpOperation {
             self.error_class().map(McpErrorClassV1::as_str),
         );
         let result = self.result();
+        let search = result.search;
         insert_optional_bucket(properties, "result_count_bucket", result.result_count);
         insert_optional_bool(properties, "zero_result", result.zero_result);
         insert_optional_bool(properties, "result_truncated", result.result_truncated);
@@ -137,6 +139,45 @@ impl McpOperation {
             "response_bound",
             result.response_bound.map(McpResponseBoundV1::as_str),
         );
+        if let Some(search) = search {
+            insert_optional_duration(
+                properties,
+                "refresh_duration_bucket",
+                search.refresh_duration.map(duration_bucket),
+            );
+            insert_optional_enum(
+                properties,
+                "search_refresh_status",
+                search.refresh_status.map(|status| status.as_str()),
+            );
+            insert_optional_bucket(
+                properties,
+                "search_refresh_source_count_bucket",
+                search.refresh_source_count.map(count_bucket),
+            );
+            insert_optional_duration(
+                properties,
+                "query_duration_bucket",
+                search.query_duration.map(duration_bucket),
+            );
+            insert_optional_enum(
+                properties,
+                "search_backend_requested",
+                search.backend_requested.map(|backend| backend.as_str()),
+            );
+            insert_optional_enum(
+                properties,
+                "search_backend_effective",
+                search.backend_effective.map(|backend| backend.as_str()),
+            );
+            insert_optional_duration(
+                properties,
+                "search_output_duration_bucket",
+                search.output_duration.map(duration_bucket),
+            );
+            insert_optional_bool(properties, "search_output_served", search.output_served);
+            search.health.insert_properties(properties);
+        }
     }
 }
 
@@ -323,6 +364,16 @@ fn insert_optional_bucket(
     }
 }
 
+fn insert_optional_duration(
+    properties: &mut Map<String, Value>,
+    name: &'static str,
+    value: Option<DurationBucket>,
+) {
+    if let Some(value) = value {
+        properties.insert(name.to_owned(), json!(value.as_str()));
+    }
+}
+
 fn insert_count(properties: &mut Map<String, Value>, key: &'static str, value: u64) {
     properties.insert(key.to_owned(), json!(count_bucket(value).as_str()));
 }
@@ -358,6 +409,24 @@ mod tests {
                 "zero_result",
             ]
         );
+    }
+
+    #[test]
+    fn search_serialization_preserves_authoritative_existing_generation_status() {
+        let operation = McpOperation::tool_call(ObservedMcpProductOperation::Search).with_result(
+            McpResultMetadataV1 {
+                search: Some(SearchTerminalFacts {
+                    refresh_status: Some(crate::analytics::RefreshStatus::ExistingGeneration),
+                    ..SearchTerminalFacts::default()
+                }),
+                ..McpResultMetadataV1::default()
+            },
+        );
+        let mut properties = Map::new();
+
+        operation.insert_properties(&mut properties);
+
+        assert_eq!(properties["search_refresh_status"], "existing_generation");
     }
 
     #[test]

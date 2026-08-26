@@ -31,6 +31,20 @@ ALLOWED_EVENT_ORIGIN_SUPPORT = {
     "explicit_no_copy",
     "unknown",
 }
+ALLOWED_CONFIGURED_ROOT_STATES = {"enabled", "intentional_automatic_exact"}
+ALLOWED_CONFIGURED_ROOT_PATH_KINDS = {"directory", "file"}
+ALLOWED_CONFIGURED_ROOT_EXPANDERS = {
+    "exact_source",
+    "claude_home_v1",
+    "codex_home_v1",
+    "openclaw_state_root_v1",
+    "cline_common_data_root_v1",
+    "openhands_kind_v1",
+}
+OPENHANDS_CONFIGURED_ROOT_KINDS = {
+    "current-conversations",
+    "legacy-persistence",
+}
 EXPECTED_PROVIDER_LINEAGE_SUPPORT = {
     "codex": ("exact_relationship", "unknown"),
     "pi": ("exact_relationship", "unknown"),
@@ -68,7 +82,7 @@ PUBLIC_DOCS_WITH_SELF_CONTAINED_CLAIMS = (
 PUBLIC_PRIVATE_BOUNDARY_SCAN_PATHS = PUBLIC_DOCS_WITH_SELF_CONTAINED_CLAIMS
 CODEX_PUBLIC_CLAIM_TEST_SUITE = (
     REPO_ROOT
-    / "crates/ctx-history-capture-composition/src/source_backed/tests/codex_child_independence.rs"
+    / "crates/ctx-history-capture-composition-qualification/tests/provider_lifecycle/codex_child_independence.rs"
 )
 FORBIDDEN_PUBLIC_CLAIM_RE = re.compile(
     r"ctx-" + r"private|private\s+conformance|conformance\s+evidence|"
@@ -107,6 +121,10 @@ PUBLIC_COVERAGE_PATHS = {
     "crates/ctx-cli-contract-tests/tests/contracts/support/native_providers/workspace_sources.rs",
     "crates/ctx-cli-contract-tests/tests/contracts/setup_sources_import.rs",
     "crates/ctx-history-capture/src/lib.rs",
+    "crates/ctx-history-source-discovery-qualification/tests/configured_roots.rs",
+    "crates/ctx-history-source-discovery-qualification/tests/default_discovery.rs",
+    "crates/ctx-history-source-discovery-qualification/tests/env_discovery.rs",
+    "crates/ctx-history-source-discovery-qualification/tests/manual_unsupported.rs",
     "crates/ctx-history-source-discovery/src/provider_sources/resolvers/simple_tests.rs",
 }
 
@@ -270,6 +288,61 @@ def validate_implemented_path(path: Any, provider_id: str, index: int) -> None:
             fail(f"{label}.notes[{note_index}] contains private path wording")
 
 
+def validate_configured_root(value: Any, provider_id: str) -> None:
+    label = f"providers[{provider_id}].configured_root"
+    configured_root = expect_type(value, dict, label)
+    state = require_non_empty_string(configured_root.get("state"), f"{label}.state")
+    if state not in ALLOWED_CONFIGURED_ROOT_STATES:
+        fail(f"{label}.state has unsupported value: {state}")
+    if state == "intentional_automatic_exact":
+        if set(configured_root) != {"state"}:
+            fail(f"{label} intentional state must contain exactly state")
+        return
+
+    if set(configured_root) != {"state", "expected_path_kind", "expander"}:
+        fail(
+            f"{label} enabled state must contain exactly state, expected_path_kind, and expander"
+        )
+    path_kind = require_non_empty_string(
+        configured_root.get("expected_path_kind"),
+        f"{label}.expected_path_kind",
+    )
+    if path_kind not in ALLOWED_CONFIGURED_ROOT_PATH_KINDS:
+        fail(f"{label}.expected_path_kind has unsupported value: {path_kind}")
+
+    expander = expect_type(configured_root.get("expander"), dict, f"{label}.expander")
+    expander_kind = require_non_empty_string(
+        expander.get("kind"),
+        f"{label}.expander.kind",
+    )
+    if expander_kind not in ALLOWED_CONFIGURED_ROOT_EXPANDERS:
+        fail(f"{label}.expander.kind has unsupported value: {expander_kind}")
+    expected_expander_fields = {"kind"}
+    if expander_kind == "exact_source":
+        expected_expander_fields.update({"source_format", "route_role"})
+        require_non_empty_string(
+            expander.get("source_format"),
+            f"{label}.expander.source_format",
+        )
+        require_non_empty_string(
+            expander.get("route_role"),
+            f"{label}.expander.route_role",
+        )
+    elif expander_kind == "openhands_kind_v1":
+        expected_expander_fields.add("root_kinds")
+        root_kinds = require_string_list(
+            expander.get("root_kinds"),
+            f"{label}.expander.root_kinds",
+        )
+        if (
+            len(root_kinds) != len(set(root_kinds))
+            or set(root_kinds) != OPENHANDS_CONFIGURED_ROOT_KINDS
+        ):
+            fail(f"{label}.expander.root_kinds must list the exact OpenHands root kinds")
+    if set(expander) != expected_expander_fields:
+        fail(f"{label}.expander contains fields that do not match {expander_kind}")
+
+
 def validate_provider(provider: Any, index: int, seen_ids: set[str]) -> None:
     label = f"providers[{index}]"
     expect_type(provider, dict, label)
@@ -288,6 +361,7 @@ def validate_provider(provider: Any, index: int, seen_ids: set[str]) -> None:
 
     require_non_empty_string(provider.get("display_name"), f"providers[{provider_id}].display_name")
     require_non_empty_string(provider.get("capture_provider"), f"providers[{provider_id}].capture_provider")
+    validate_configured_root(provider.get("configured_root"), provider_id)
 
     status = require_non_empty_string(provider.get("status"), f"providers[{provider_id}].status")
     if status not in ALLOWED_STATUSES:

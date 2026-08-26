@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     ffi::OsStr,
     path::{Path, PathBuf},
     sync::Arc,
@@ -8,8 +9,8 @@ use chrono::{DateTime, Utc};
 use ctx_history_core::{
     admit_provider_declared_fact, derive_event_id, derive_native_session_id, CaptureProvider,
     CoreActivity, CoreRecord, CoreRecordError, EventIdentityInput, LiteralFactKind, NativeItemKey,
-    PositionStability, ProjectionContractError, ProviderDeclaredFact, SourceKey, StableEntityId,
-    SubrecordSelector, TypedKey, CORE_ACTIVITY_REVISION, MAX_CORE_CONTENT_BYTES,
+    PositionStability, ProjectionContractError, ProviderDeclaredFact, SourceAnchorScope, SourceKey,
+    StableEntityId, SubrecordSelector, TypedKey, CORE_ACTIVITY_REVISION, MAX_CORE_CONTENT_BYTES,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -22,6 +23,10 @@ use crate::{
     NativeJsonlError as CaptureError, NativeJsonlRuntime, ProviderJsonlInventoryLimit, Result,
 };
 use ctx_history_capture_model::ProviderSourceFailureKind;
+use ctx_history_capture_runtime::{
+    BaseEventLookup, SourceBackedRecordRejectionClass, SourceBackedRecordRejectionDraft,
+    SourceBackedRecordRejectionDrafts,
+};
 use ctx_history_jsonl::{
     fit_jsonl_activity, observe_opened_file, probe_first_record, FallbackEventIdentityState,
     JsonlActivityObservedBytes, JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyError,
@@ -82,6 +87,7 @@ pub struct DirectJsonlFamilyAdapter<R: NativeJsonlRuntime> {
     source_format: &'static str,
     schema_variant: &'static str,
     parser_revision: &'static str,
+    source_anchor_scope: SourceAnchorScope,
     runtime: std::marker::PhantomData<R>,
 }
 
@@ -105,8 +111,20 @@ impl<R: NativeJsonlRuntime> DirectJsonlFamilyAdapter<R> {
             source_format,
             schema_variant,
             parser_revision,
+            source_anchor_scope: SourceAnchorScope::Unqualified,
             runtime: std::marker::PhantomData,
         }
+    }
+
+    /// Qualifies provider-native source anchors for one durable provider root.
+    ///
+    /// `None` preserves the released unqualified source identity exactly.
+    pub const fn with_source_root_lineage(mut self, source_root_lineage: Option<[u8; 32]>) -> Self {
+        self.source_anchor_scope = match source_root_lineage {
+            Some(lineage) => SourceAnchorScope::Lineage(lineage),
+            None => SourceAnchorScope::Unqualified,
+        };
+        self
     }
 
     const fn effective_parser_revision(self) -> &'static str {
@@ -117,13 +135,14 @@ impl<R: NativeJsonlRuntime> DirectJsonlFamilyAdapter<R> {
     }
 
     fn source_key(self, native_session_id: &str) -> DirectJsonlAdapterResult<SourceKey> {
-        Ok(SourceKey::derive_provider_native(
+        Ok(SourceKey::derive_provider_native_scoped(
             self.provider.as_str(),
             self.source_format,
             self.schema_variant,
             DIRECT_JSONL_SOURCE_IDENTITY_VERSION,
             format!("{}.direct-jsonl-session", self.provider.as_str()),
             TypedKey::utf8(native_session_id)?,
+            self.source_anchor_scope,
         )?)
     }
 
@@ -189,8 +208,12 @@ impl<R: NativeJsonlRuntime> DirectJsonlFamilyAdapter<R> {
                 if observation != opening {
                     return Err(CaptureError::SourceChangedDuringCapture);
                 }
-                if super::super::dialect::native_jsonl_file_is_selected(self.provider, root, false)
-                {
+                if super::super::dialect::native_jsonl_file_is_selected(
+                    self.provider,
+                    root,
+                    root,
+                    false,
+                ) {
                     bind_opened_leaf(
                         self,
                         root,
@@ -367,7 +390,13 @@ impl<R: NativeJsonlRuntime> DirectJsonlDirectoryTraversal<'_, R> {
             }
             let child_path = absolute_path.join(&name);
             let child_relative_path = relative_path.join(&name);
-            let selected = selected_file(self.adapter.provider, directory, &child_path, &name)?;
+            let selected = selected_file(
+                self.adapter.provider,
+                self.source_root,
+                directory,
+                &child_path,
+                &name,
+            )?;
             let opened = match directory.open_child(&name) {
                 Ok(opened) => opened,
                 Err(error) if selected && self.adapter.provider == CaptureProvider::Tabnine => {
@@ -423,6 +452,7 @@ fn membership_open_error_is_ignorable(selected: bool, error: &CaptureError) -> b
 
 fn selected_file(
     provider: CaptureProvider,
+    source_root: &Path,
     directory: &ProviderSourceDirectory<CaptureError>,
     path: &Path,
     name: &OsStr,
@@ -441,6 +471,7 @@ fn selected_file(
         };
     Ok(super::super::dialect::native_jsonl_file_is_selected(
         provider,
+        source_root,
         path,
         full_transcript_is_regular,
     ))
@@ -548,6 +579,10 @@ struct DirectJsonlFamilyProjector<R: NativeJsonlRuntime> {
     projector: DirectJsonlProjector,
     fallback_identities: FallbackEventIdentityState<JsonlRuntimeLookup<R>, CaptureError>,
     rejected_records: u64,
+    record_rejections: SourceBackedRecordRejectionDrafts,
+    accepted_event_ids: HashSet<StableEntityId>,
+    append_base_event_lookup: Option<JsonlRuntimeLookup<R>>,
+    source_selector: String,
 }
 
 impl<R: NativeJsonlRuntime> DirectJsonlFamilyProjector<R> {
@@ -570,6 +605,9 @@ impl<R: NativeJsonlRuntime> DirectJsonlFamilyProjector<R> {
             imported_at,
             Some(binding.session.clone()),
         )?;
+        let append_base_event_lookup = (mode == JsonlFamilyProjectionMode::CertifiedAppend)
+            .then(|| base_event_lookup.clone())
+            .flatten();
         let fallback_identities = FallbackEventIdentityState::new(
             source.clone(),
             session_id,
@@ -587,6 +625,10 @@ impl<R: NativeJsonlRuntime> DirectJsonlFamilyProjector<R> {
             projector,
             fallback_identities,
             rejected_records: 0,
+            record_rejections: SourceBackedRecordRejectionDrafts::default(),
+            accepted_event_ids: HashSet::new(),
+            append_base_event_lookup,
+            source_selector: leaf.source_path().display().to_string(),
         })
     }
 
@@ -599,6 +641,44 @@ impl<R: NativeJsonlRuntime> DirectJsonlFamilyProjector<R> {
             return Err(DirectJsonlAdapterError::NativeSessionChanged);
         }
         Ok(session)
+    }
+
+    fn reject_record(&mut self, raw_ordinal: u64, detail: String) -> Result<()> {
+        self.rejected_records = self
+            .rejected_records
+            .checked_add(1)
+            .ok_or_else(|| capture_error(DirectJsonlAdapterError::CountMismatch))?;
+        self.record_rejections
+            .record(SourceBackedRecordRejectionDraft {
+                source: self.source.clone(),
+                provider: self.adapter.provider,
+                source_selector: self.source_selector.clone(),
+                line_number: raw_ordinal.saturating_add(1),
+                payload_type: None,
+                class: SourceBackedRecordRejectionClass::MalformedRecord,
+                detail,
+            });
+        Ok(())
+    }
+
+    fn conflicts_with_accepted_identity(&self, records: &[CoreRecord]) -> Result<bool> {
+        let mut record_event_ids = HashSet::with_capacity(records.len());
+        for record in records {
+            if !record_event_ids.insert(record.event_id)
+                || self.accepted_event_ids.contains(&record.event_id)
+            {
+                return Ok(true);
+            }
+            if let Some(base_event_lookup) = self.append_base_event_lookup.as_ref() {
+                let exists = base_event_lookup
+                    .contains(record.event_id.as_uuid())
+                    .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
+                if exists {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
     }
 }
 
@@ -616,17 +696,23 @@ impl<R: NativeJsonlRuntime> JsonlFamilyProjector for DirectJsonlFamilyProjector<
             if !projected.events.is_empty() {
                 return Err(capture_error(DirectJsonlAdapterError::CountMismatch));
             }
-            let rejected = u64::try_from(projected.rejections.len())
-                .map_err(|_| capture_error(DirectJsonlAdapterError::CountMismatch))?;
-            self.rejected_records = self
-                .rejected_records
-                .checked_add(rejected)
-                .ok_or_else(|| capture_error(DirectJsonlAdapterError::CountMismatch))?;
+            for rejection in projected.rejections {
+                self.reject_record(rejection.raw_ordinal, rejection.reason)?;
+            }
             return Ok(());
         }
         let session = self.validate_session().map_err(capture_error)?.clone();
+        let raw_ordinal = projected.events.first().map(|event| event.raw_ordinal);
+        if projected
+            .events
+            .iter()
+            .any(|event| Some(event.raw_ordinal) != raw_ordinal)
+        {
+            return Err(capture_error(DirectJsonlAdapterError::CountMismatch));
+        }
+        let mut records = Vec::with_capacity(projected.events.len());
         for event in projected.events {
-            emit(
+            records.push(
                 project_event(
                     self.adapter,
                     &self.source,
@@ -636,7 +722,22 @@ impl<R: NativeJsonlRuntime> JsonlFamilyProjector for DirectJsonlFamilyProjector<
                     event,
                 )
                 .map_err(capture_error)?,
+            );
+        }
+        if self.conflicts_with_accepted_identity(&records)? {
+            let raw_ordinal =
+                raw_ordinal.ok_or_else(|| capture_error(DirectJsonlAdapterError::CountMismatch))?;
+            self.reject_record(
+                raw_ordinal,
+                "provider record reused an event identity already accepted from this source"
+                    .to_owned(),
             )?;
+            return Ok(());
+        }
+        self.accepted_event_ids
+            .extend(records.iter().map(|record| record.event_id));
+        for record in records {
+            emit(record)?;
         }
         Ok(())
     }
@@ -648,6 +749,10 @@ impl<R: NativeJsonlRuntime> JsonlFamilyProjector for DirectJsonlFamilyProjector<
 
     fn rejected_records(&self) -> u64 {
         self.rejected_records
+    }
+
+    fn take_record_rejections(&mut self) -> SourceBackedRecordRejectionDrafts {
+        std::mem::take(&mut self.record_rejections)
     }
 }
 
@@ -858,6 +963,10 @@ fn capture_error(error: DirectJsonlAdapterError) -> CaptureError {
         other => CaptureError::InvalidPayload(other.to_string()),
     }
 }
+
+#[cfg(test)]
+#[path = "source_backed_source_scope_tests.rs"]
+mod source_scope_tests;
 
 #[cfg(test)]
 #[path = "source_backed_result_tests.rs"]

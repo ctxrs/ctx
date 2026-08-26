@@ -283,6 +283,31 @@ impl<E: JsonlFamilyError> JsonlReader<E> {
                 source_change = JsonlSourceChange::Unchanged;
                 skip_scan = true;
                 unchanged_checkpoint = Some(previous.clone());
+            } else if previous_observation.differs_only_by_change_identity(&observation) {
+                if let Some(admitted_eof_sha256) = previous.admitted_eof_sha256() {
+                    super::authenticate_frozen_prefix_sha256(
+                        identity.source_path(),
+                        source_file.as_ref(),
+                        &observation,
+                        observation.length(),
+                        admitted_eof_sha256,
+                    )?;
+                } else if previous.complete_prefix_end() == previous_observation.length() {
+                    super::authenticate_frozen_prefix(
+                        identity.source_path(),
+                        source_file.as_ref(),
+                        &observation,
+                        observation.length(),
+                        *previous.complete_prefix_sha256(),
+                    )?;
+                } else {
+                    return Err(E::source_changed());
+                }
+                complete_prefix_end = previous.complete_prefix_end();
+                next_physical_ordinal = previous.next_physical_ordinal();
+                source_change = JsonlSourceChange::Unchanged;
+                skip_scan = true;
+                unchanged_checkpoint = Some(previous.clone());
             } else if physical_suffix_resume
                 && same_file
                 && observation.length() >= previous.complete_prefix_end()
@@ -375,12 +400,20 @@ impl<E: JsonlFamilyError> JsonlReader<E> {
                 next_physical_ordinal = probe.next_physical_ordinal;
             }
         }
-        let full_hasher = if used_direct_append {
-            bind_admitted_eof.then(|| {
-                semantic_append_resume
-                    .as_ref()
-                    .and_then(|resume| resume.previous.restore_admitted_eof_hasher())
-                    .expect("direct admitted-EOF resume was validated above")
+        let full_hasher = if whole_record || skip_scan {
+            None
+        } else if used_direct_append {
+            let restored = semantic_append_resume
+                .as_ref()
+                .and_then(|resume| resume.previous.restore_admitted_eof_hasher());
+            Some(match restored {
+                Some(restored) => restored,
+                None => hash_prefix::<E, _>(
+                    identity.source_path(),
+                    &mut file,
+                    complete_prefix_end,
+                    JsonlResumableSha256::new(),
+                )?,
             })
         } else if semantic_append_resume
             .as_ref()
@@ -388,19 +421,25 @@ impl<E: JsonlFamilyError> JsonlReader<E> {
         {
             Some(JsonlResumableSha256::new())
         } else {
-            bind_admitted_eof
-                .then(|| {
-                    hash_prefix::<E, _>(
-                        identity.source_path(),
-                        &mut file,
-                        complete_prefix_end,
-                        JsonlResumableSha256::new(),
-                    )
-                })
-                .transpose()?
+            let restored = (source_change == JsonlSourceChange::Append)
+                .then_some(previous)
+                .flatten()
+                .filter(|previous| previous.source_observation().length() == complete_prefix_end)
+                .and_then(JsonlCheckpoint::restore_admitted_eof_hasher);
+            Some(match restored {
+                Some(restored) => restored,
+                None => hash_prefix::<E, _>(
+                    identity.source_path(),
+                    &mut file,
+                    complete_prefix_end,
+                    JsonlResumableSha256::new(),
+                )?,
+            })
         };
         file.seek(SeekFrom::Start(complete_prefix_end))?;
-        let (reader, physical) = if whole_record {
+        let (reader, physical) = if skip_scan {
+            (None, None)
+        } else if whole_record {
             (Some(BufReader::new(file)), None)
         } else {
             (
@@ -886,10 +925,30 @@ impl<E: JsonlFamilyError> JsonlReader<E> {
                 self.source_file.revalidate()?;
             }
         } else {
-            if !self.append_log {
+            if self.observation.differs_only_by_change_identity(&current) {
+                if let Some(admitted_eof_sha256) = checkpoint.admitted_eof_sha256() {
+                    super::authenticate_frozen_prefix_sha256(
+                        self.identity.source_path(),
+                        self.source_file.as_ref(),
+                        &current,
+                        current.length(),
+                        admitted_eof_sha256,
+                    )?;
+                } else if checkpoint.complete_prefix_end() == self.observation.length() {
+                    super::authenticate_frozen_prefix(
+                        self.identity.source_path(),
+                        self.source_file.as_ref(),
+                        &current,
+                        current.length(),
+                        *checkpoint.complete_prefix_sha256(),
+                    )?;
+                } else {
+                    return Err(E::source_changed());
+                }
+                self.source_file.revalidate_same_object()?;
+            } else if !self.append_log {
                 return Err(E::source_changed());
-            }
-            if self.direct_append_resume {
+            } else if self.direct_append_resume {
                 if !self.observation.admits_frozen_prefix_in(&current) {
                     return Err(E::source_changed());
                 }

@@ -54,19 +54,31 @@ pub(super) fn discover_root(
     }
 }
 
-pub(super) fn task_source_key(
+pub(super) fn task_source_key_scoped(
     dialect: TaskJsonNativeDialect,
     task: &ClineLiveTaskObservation,
+    source_anchor_scope: SourceAnchorScope,
 ) -> TaskJsonSourceBackedResult<SourceKey> {
-    Ok(SourceKey::derive(
+    task_source_key_for_id_scoped(
+        dialect,
+        task.directory_task_id.as_ref(),
+        source_anchor_scope,
+    )
+}
+
+pub(super) fn task_source_key_for_id_scoped(
+    dialect: TaskJsonNativeDialect,
+    task_id: &str,
+    source_anchor_scope: SourceAnchorScope,
+) -> TaskJsonSourceBackedResult<SourceKey> {
+    Ok(SourceKey::derive_provider_native_scoped(
         dialect.provider.as_str(),
         dialect.source_format,
         SOURCE_SCHEMA_VARIANT,
         1,
-        SourceAnchor::provider_native(
-            SOURCE_ANCHOR_NAMESPACE,
-            TypedKey::utf8(task.directory_task_id.as_ref())?,
-        )?,
+        SOURCE_ANCHOR_NAMESPACE,
+        TypedKey::utf8(task_id)?,
+        source_anchor_scope,
     )?)
 }
 

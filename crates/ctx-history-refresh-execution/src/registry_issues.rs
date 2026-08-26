@@ -32,6 +32,25 @@ pub fn reject_blocking_automatic_registry_issues(
     let mut blocker_count = 0usize;
     let mut blocker_details = Vec::new();
     for issue in issues {
+        if let SourceBackedAutomaticRegistryIssue::Discovery(issue) = issue {
+            if issue.kind != DiscoveryIssueKind::ConfiguredRootConflict {
+                continue;
+            }
+            blocker_count = blocker_count.saturating_add(1);
+            if blocker_details.len() < SOURCE_REFRESH_BUILD_ISSUE_LIMIT {
+                blocker_details.push(format!(
+                    "{} {}: {}",
+                    issue.provider.as_str(),
+                    issue
+                        .path
+                        .as_deref()
+                        .map(|path| path.display().to_string())
+                        .unwrap_or_else(|| "configured root".to_owned()),
+                    issue.reason,
+                ));
+            }
+            continue;
+        }
         let SourceBackedAutomaticRegistryIssue::Unavailable { source, reason } = issue else {
             continue;
         };
@@ -105,6 +124,32 @@ pub fn automatic_registry_route_failures(
         });
     }
     Ok(failures.into_values().collect())
+}
+
+pub(super) fn terminal_registry_route_failures(
+    failures: Vec<ctx_history_capture::SourceBackedFailedRoute>,
+    registry: &SourceBackedProviderRegistry,
+    scope: &SourceBackedRefreshScope,
+) -> Vec<ctx_history_capture::SourceBackedFailedRoute> {
+    // Discovered-winner identities deliberately coalesce alternate physical
+    // candidates. If any selected candidate registered executable or
+    // certified-missing capture authority, capture owns the route's one
+    // terminal outcome. A registry issue for a losing candidate must not
+    // fabricate a second, overlapping route-level failure.
+    let capture_owned_routes = registry
+        .routes()
+        .filter(|route| route.selection.is_some())
+        .filter_map(|route| route.route_identity.as_ref())
+        .filter(|route| match scope {
+            SourceBackedRefreshScope::All => true,
+            SourceBackedRefreshScope::Exact(selected) => selected.contains(*route),
+        })
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    failures
+        .into_iter()
+        .filter(|failure| !capture_owned_routes.contains(&failure.route_identity))
+        .collect()
 }
 
 #[derive(Clone, Copy)]
@@ -185,6 +230,7 @@ pub(super) fn automatic_registry_route_less_blockers(
                     issue.kind,
                     DiscoveryIssueKind::NoDiskHistory
                         | DiscoveryIssueKind::InsufficientOfficialEvidence
+                        | DiscoveryIssueKind::ConfiguredRootMissing
                 ) =>
             {
                 continue;

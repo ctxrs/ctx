@@ -70,7 +70,7 @@ fn fresh_home_search_mvp_flow() {
         "codex",
         "--format=json",
     ]));
-    assert_eq!(search["schema_version"], 1);
+    assert_eq!(search["schema_version"], 2);
     assert_omits_keys(
         &search,
         &[

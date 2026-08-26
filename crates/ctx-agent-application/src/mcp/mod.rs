@@ -13,7 +13,7 @@ use ctx_agent_integrations::{
         McpInputLine, McpServerIdentity, McpToolKind, McpUsage, RequestDescriptor,
         MCP_MAX_LINE_BYTES, MCP_PRESENTATION_MAX_OUTPUT_BYTES,
     },
-    tool_backend::{OpaqueMcpProxyError, ToolBackend, ToolUsageFacts},
+    tool_backend::{OpaqueMcpProxyError, ToolBackend, ToolSearchFailurePhase, ToolUsageFacts},
 };
 use ctx_client_observability::analytics::{McpErrorClassV1, McpStopReasonV1, Outcome};
 use serde_json::{json, Value};
@@ -175,7 +175,12 @@ where
                                 reason: McpStopReasonV1::StdoutFlushError,
                                 error: error.into(),
                             })?;
-                            telemetry.record_delivered(descriptor, None, request_started.elapsed());
+                            telemetry.record_delivered(
+                                descriptor,
+                                None,
+                                None,
+                                request_started.elapsed(),
+                            );
                             continue;
                         }
                         let mut handled = handle_protocol_message(
@@ -234,49 +239,104 @@ where
             ),
         };
         let response = handled.value;
+        let mut delivered_usage = handled.usage;
         if let Some(response) = response {
-            let encoded = encode_response_line(&response).map_err(|error| {
-                telemetry.record_response_failure(
-                    descriptor,
-                    request_started.elapsed(),
-                    McpErrorClassV1::ResponseSerialize,
-                );
-                McpServeFailure {
-                    reason: McpStopReasonV1::ResponseSerializeError,
-                    error: error.into(),
+            let encoded = match encode_response_line(&response) {
+                Ok(encoded) => encoded,
+                Err(error) => {
+                    mark_search_failure(&mut delivered_usage, ToolSearchFailurePhase::Render, None);
+                    telemetry.record_response_failure(
+                        descriptor,
+                        request_started.elapsed(),
+                        McpErrorClassV1::ResponseSerialize,
+                        delivered_usage.as_ref().map(|usage| &usage.facts),
+                    );
+                    return Err(McpServeFailure {
+                        reason: McpStopReasonV1::ResponseSerializeError,
+                        error: error.into(),
+                    });
                 }
-            })?;
-            stdout.write_all(encoded.as_bytes()).map_err(|error| {
+            };
+            let output_started = Instant::now();
+            if let Err(error) = stdout.write_all(encoded.as_bytes()) {
+                mark_search_failure(
+                    &mut delivered_usage,
+                    ToolSearchFailurePhase::Output,
+                    Some(output_started.elapsed()),
+                );
                 telemetry.record_response_failure(
                     descriptor,
                     request_started.elapsed(),
                     McpErrorClassV1::ResponseWrite,
+                    delivered_usage.as_ref().map(|usage| &usage.facts),
                 );
-                McpServeFailure {
+                return Err(McpServeFailure {
                     reason: McpStopReasonV1::StdoutWriteError,
                     error: error.into(),
-                }
-            })?;
-            stdout.flush().map_err(|error| {
+                });
+            }
+            if let Err(error) = stdout.flush() {
+                mark_search_failure(
+                    &mut delivered_usage,
+                    ToolSearchFailurePhase::Output,
+                    Some(output_started.elapsed()),
+                );
                 telemetry.record_response_failure(
                     descriptor,
                     request_started.elapsed(),
                     McpErrorClassV1::ResponseFlush,
+                    delivered_usage.as_ref().map(|usage| &usage.facts),
                 );
-                McpServeFailure {
+                return Err(McpServeFailure {
                     reason: McpStopReasonV1::StdoutFlushError,
                     error: error.into(),
-                }
-            })?;
+                });
+            }
+            mark_search_output_completed(&mut delivered_usage, output_started.elapsed());
             let duration = request_started.elapsed();
-            if let Some(McpUsage { operation, facts }) = handled.usage {
+            let telemetry_usage = delivered_usage.as_ref().map(|usage| usage.facts);
+            if let Some(McpUsage { operation, facts }) = delivered_usage {
                 usage_port.record_delivered(operation, facts, &response, encoded.len(), duration);
             }
-            telemetry.record_delivered(descriptor, Some(&response), duration);
+            telemetry.record_delivered(
+                descriptor,
+                Some(&response),
+                telemetry_usage.as_ref(),
+                duration,
+            );
         } else {
-            telemetry.record_delivered(descriptor, None, request_started.elapsed());
+            telemetry.record_delivered(descriptor, None, None, request_started.elapsed());
         }
     }
+}
+
+fn mark_search_failure(
+    usage: &mut Option<McpUsage>,
+    phase: ToolSearchFailurePhase,
+    output_duration: Option<Duration>,
+) {
+    let Some(search) = usage
+        .as_mut()
+        .and_then(|usage| usage.facts.search_execution.as_mut())
+    else {
+        return;
+    };
+    search.output_served = Some(false);
+    if let Some(duration) = output_duration {
+        search.output_duration = Some(duration);
+    }
+    search.failure_phase = Some(phase);
+}
+
+fn mark_search_output_completed(usage: &mut Option<McpUsage>, output_duration: Duration) {
+    let Some(search) = usage
+        .as_mut()
+        .and_then(|usage| usage.facts.search_execution.as_mut())
+    else {
+        return;
+    };
+    search.output_duration = Some(output_duration);
+    search.output_served = Some(true);
 }
 
 fn append_companion_tool_definitions<B: ToolBackend>(

@@ -1,6 +1,21 @@
 use super::*;
 use ctx_history_core::EventRole;
 
+#[test]
+fn source_and_session_identities_are_root_scoped() {
+    let released = source_key("same-session").unwrap();
+    let compatibility = source_key_scoped("same-session", SourceAnchorScope::Unqualified).unwrap();
+    let first = source_key_scoped("same-session", SourceAnchorScope::Lineage([1; 32])).unwrap();
+    let second = source_key_scoped("same-session", SourceAnchorScope::Lineage([2; 32])).unwrap();
+
+    assert!(released.exact_descriptor_eq(&compatibility));
+    assert_ne!(first.identity(), second.identity());
+    assert_ne!(
+        session_id(&first, "same-session").unwrap(),
+        session_id(&second, "same-session").unwrap()
+    );
+}
+
 fn event(event_type: EventType, body: CursorEventBody) -> CursorNativeEvent {
     CursorNativeEvent {
         native_order: super::super::projection::CursorNativeOrder {

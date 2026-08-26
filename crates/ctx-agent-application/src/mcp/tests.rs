@@ -8,6 +8,10 @@ use ctx_agent_integrations::tool_backend::{
     OpaqueMcpProxyError, ToolBackend, ToolExecutionError, ToolOperation, ToolOutcome,
     ToolUsageFacts,
 };
+use ctx_client_observability::{
+    analytics::{Outcome, SearchFailurePhase, SearchTerminalFacts},
+    operation_descriptor::{ObservedMcpProductOperation, OperationDescriptor},
+};
 use ctx_history_core::CaptureProvider;
 use serde_json::{json, Value};
 
@@ -67,6 +71,12 @@ impl ToolBackend for TestBackend {
 
 struct TracedUsagePort(Arc<Mutex<Vec<&'static str>>>);
 
+type ResponseRun = (
+    Result<(), McpServeFailure>,
+    Vec<&'static str>,
+    Vec<(Outcome, SearchTerminalFacts)>,
+);
+
 impl McpUsagePort for TracedUsagePort {
     fn record_delivered(
         &mut self,
@@ -80,12 +90,12 @@ impl McpUsagePort for TracedUsagePort {
     }
 }
 
-fn run_one_response(failure: OutputFailure) -> (Result<(), McpServeFailure>, Vec<&'static str>) {
+fn run_one_response(failure: OutputFailure, tool: &str, arguments: Value) -> ResponseRun {
     let request = serde_json::to_vec(&json!({
         "jsonrpc": "2.0",
-        "id": "status",
+        "id": tool,
         "method": "tools/call",
-        "params": {"name": "status", "arguments": {}}
+        "params": {"name": tool, "arguments": arguments}
     }))
     .unwrap();
     let initialized = serde_json::to_vec(&json!({
@@ -100,13 +110,27 @@ fn run_one_response(failure: OutputFailure) -> (Result<(), McpServeFailure>, Vec
         trace: trace.clone(),
     };
     let delivery_trace = trace.clone();
+    let search_events = Arc::new(Mutex::new(Vec::new()));
+    let recorded_search_events = search_events.clone();
     let telemetry = McpTelemetry::start(true, move |events| {
         let mut trace = delivery_trace.lock().unwrap();
         for event in events {
             let label = match event {
                 ctx_client_observability::analytics::PublicEventV1::OperationCompleted(event) => {
                     match &event.descriptor {
-                        ctx_client_observability::operation_descriptor::OperationDescriptor::Mcp(_) => "submit_mcp",
+                        OperationDescriptor::Mcp(operation) => {
+                            if operation.product_operation()
+                                == Some(ObservedMcpProductOperation::Search)
+                            {
+                                if let Some(search) = operation.result().search {
+                                    recorded_search_events
+                                        .lock()
+                                        .unwrap()
+                                        .push((event.outcome, search));
+                                }
+                            }
+                            "submit_mcp"
+                        }
                         _ => continue,
                     }
                 }
@@ -130,12 +154,13 @@ fn run_one_response(failure: OutputFailure) -> (Result<(), McpServeFailure>, Vec
         telemetry,
     );
     let trace = trace.lock().unwrap().clone();
-    (result, trace)
+    let search_events = search_events.lock().unwrap().clone();
+    (result, trace, search_events)
 }
 
 #[test]
 fn response_flush_precedes_the_one_usage_commit_and_post_flush_telemetry() {
-    let (delivered, trace) = run_one_response(OutputFailure::None);
+    let (delivered, trace, _) = run_one_response(OutputFailure::None, "status", json!({}));
     assert!(delivered.is_ok());
     assert_eq!(
         trace
@@ -158,13 +183,81 @@ fn response_flush_precedes_the_one_usage_commit_and_post_flush_telemetry() {
     assert!(!trace.contains(&"submit_pro"), "{trace:?}");
 
     for failure in [OutputFailure::Write, OutputFailure::Flush] {
-        let (result, trace) = run_one_response(failure);
+        let (result, trace, _) = run_one_response(failure, "status", json!({}));
         assert!(matches!(
             result.unwrap_err().reason,
             McpStopReasonV1::StdoutWriteError | McpStopReasonV1::StdoutFlushError
         ));
         assert!(!trace.contains(&"local_usage"), "{trace:?}");
     }
+}
+
+#[test]
+fn early_search_validation_failure_keeps_preparation_and_actual_delivery_facts() {
+    let (result, _, events) = run_one_response(OutputFailure::None, "search", json!({}));
+
+    assert!(result.is_ok());
+    let (outcome, search) = events.into_iter().next().expect("search terminal event");
+    assert_eq!(outcome, Outcome::Failure);
+    assert_eq!(
+        search.health.failure_phase,
+        Some(SearchFailurePhase::Preparation)
+    );
+    assert_eq!(search.output_served, Some(true));
+    assert!(search.output_duration.is_some());
+}
+
+#[test]
+fn json_rpc_search_validation_failure_keeps_preparation_and_delivery_facts_without_result() {
+    let (result, _, events) = run_one_response(OutputFailure::None, "search", json!("invalid"));
+
+    assert!(result.is_ok());
+    let (outcome, search) = events.into_iter().next().expect("search terminal event");
+    assert_eq!(outcome, Outcome::Failure);
+    assert_eq!(
+        search.health.failure_phase,
+        Some(SearchFailurePhase::Preparation)
+    );
+    assert_eq!(search.output_served, Some(true));
+    assert!(search.output_duration.is_some());
+}
+
+#[test]
+fn search_write_and_flush_failures_are_unserved_output_failures() {
+    for failure in [OutputFailure::Write, OutputFailure::Flush] {
+        let (result, trace, events) =
+            run_one_response(failure, "search", json!({"query": "needle"}));
+
+        assert!(result.is_err());
+        assert!(!trace.contains(&"local_usage"), "{trace:?}");
+        let (outcome, search) = events.into_iter().next().expect("search terminal event");
+        assert_eq!(outcome, Outcome::Failure);
+        assert_eq!(
+            search.health.failure_phase,
+            Some(SearchFailurePhase::Output)
+        );
+        assert_eq!(search.output_served, Some(false));
+        assert!(search.output_duration.is_some());
+    }
+}
+
+#[test]
+fn search_serialization_failure_is_unserved_with_render_phase() {
+    let mut usage = Some(McpUsage {
+        operation: McpToolKind::Search,
+        facts: ToolUsageFacts::search_preparation(),
+    });
+
+    mark_search_failure(&mut usage, ToolSearchFailurePhase::Render, None);
+
+    let search = usage
+        .unwrap()
+        .facts
+        .search_execution
+        .expect("search terminal facts");
+    assert_eq!(search.failure_phase, Some(ToolSearchFailurePhase::Render));
+    assert_eq!(search.output_served, Some(false));
+    assert_eq!(search.output_duration, None);
 }
 
 #[test]

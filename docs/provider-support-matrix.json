@@ -34,6 +34,13 @@
       "display_name": "Codex",
       "status": "supported",
       "capture_provider": "codex",
+      "configured_root": {
+        "state": "enabled",
+        "expected_path_kind": "directory",
+        "expander": {
+          "kind": "codex_home_v1"
+        }
+      },
       "implemented_paths": [
         {
           "kind": "native_import",
@@ -86,6 +93,15 @@
       "display_name": "DeepSeek Harness",
       "status": "supported",
       "capture_provider": "deepseek_harness",
+      "configured_root": {
+        "state": "enabled",
+        "expected_path_kind": "directory",
+        "expander": {
+          "kind": "exact_source",
+          "source_format": "deepseek_harness_session_jsonl_tree",
+          "route_role": "deepseek-harness-sessions"
+        }
+      },
       "implemented_paths": [
         {
           "kind": "native_import",
@@ -130,6 +146,15 @@
       "display_name": "Grok Build",
       "status": "supported",
       "capture_provider": "grok_build",
+      "configured_root": {
+        "state": "enabled",
+        "expected_path_kind": "directory",
+        "expander": {
+          "kind": "exact_source",
+          "source_format": "grok_build_session_updates_jsonl_tree",
+          "route_role": "grok-build-sessions"
+        }
+      },
       "implemented_paths": [
         {
           "kind": "native_import",
@@ -174,6 +199,15 @@
       "display_name": "Pi",
       "status": "supported",
       "capture_provider": "pi",
+      "configured_root": {
+        "state": "enabled",
+        "expected_path_kind": "directory",
+        "expander": {
+          "kind": "exact_source",
+          "source_format": "pi_session_jsonl",
+          "route_role": "pi-sessions"
+        }
+      },
       "implemented_paths": [
         {
           "kind": "native_import",
@@ -219,6 +253,13 @@
       "display_name": "Claude",
       "status": "supported",
       "capture_provider": "claude",
+      "configured_root": {
+        "state": "enabled",
+        "expected_path_kind": "directory",
+        "expander": {
+          "kind": "claude_home_v1"
+        }
+      },
       "implemented_paths": [
         {
           "kind": "native_import",
@@ -262,6 +303,15 @@
       "display_name": "OpenCode",
       "status": "supported",
       "capture_provider": "opencode",
+      "configured_root": {
+        "state": "enabled",
+        "expected_path_kind": "file",
+        "expander": {
+          "kind": "exact_source",
+          "source_format": "opencode_sqlite",
+          "route_role": "opencode-database"
+        }
+      },
       "implemented_paths": [
         {
           "kind": "native_import",
@@ -305,6 +355,15 @@
       "display_name": "Kilo Code",
       "status": "supported",
       "capture_provider": "kilo",
+      "configured_root": {
+        "state": "enabled",
+        "expected_path_kind": "file",
+        "expander": {
+          "kind": "exact_source",
+          "source_format": "kilo_sqlite",
+          "route_role": "kilo-database"
+        }
+      },
       "implemented_paths": [
         {
           "kind": "native_import",
@@ -350,6 +409,15 @@
       "display_name": "MiMo Code",
       "status": "supported",
       "capture_provider": "mimocode",
+      "configured_root": {
+        "state": "enabled",
+        "expected_path_kind": "file",
+        "expander": {
+          "kind": "exact_source",
+          "source_format": "mimocode_sqlite",
+          "route_role": "mimocode-database"
+        }
+      },
       "implemented_paths": [
         {
           "kind": "native_import",
@@ -394,6 +462,15 @@
       "display_name": "Kiro CLI",
       "status": "supported",
       "capture_provider": "kiro_cli",
+      "configured_root": {
+        "state": "enabled",
+        "expected_path_kind": "file",
+        "expander": {
+          "kind": "exact_source",
+          "source_format": "kiro_cli_sqlite",
+          "route_role": "kiro-cli-database"
+        }
+      },
       "implemented_paths": [
         {
           "kind": "native_import",
@@ -439,6 +516,15 @@
       "display_name": "Crush",
       "status": "supported",
       "capture_provider": "crush",
+      "configured_root": {
+        "state": "enabled",
+        "expected_path_kind": "file",
+        "expander": {
+          "kind": "exact_source",
+          "source_format": "crush_sqlite",
+          "route_role": "crush-project-database"
+        }
+      },
       "implemented_paths": [
         {
           "kind": "native_import",
@@ -483,6 +569,15 @@
       "display_name": "Goose",
       "status": "supported",
       "capture_provider": "goose",
+      "configured_root": {
+        "state": "enabled",
+        "expected_path_kind": "file",
+        "expander": {
+          "kind": "exact_source",
+          "source_format": "goose_sessions_sqlite",
+          "route_role": "goose-sessions-database"
+        }
+      },
       "implemented_paths": [
         {
           "kind": "native_import",
@@ -527,6 +622,15 @@
       "display_name": "Lingma",
       "status": "supported",
       "capture_provider": "lingma",
+      "configured_root": {
+        "state": "enabled",
+        "expected_path_kind": "file",
+        "expander": {
+          "kind": "exact_source",
+          "source_format": "lingma_sqlite",
+          "route_role": "lingma-client-profile-database"
+        }
+      },
       "implemented_paths": [
         {
           "kind": "native_import",
@@ -578,6 +682,15 @@
       "display_name": "Qoder",
       "status": "supported",
       "capture_provider": "qoder",
+      "configured_root": {
+        "state": "enabled",
+        "expected_path_kind": "directory",
+        "expander": {
+          "kind": "exact_source",
+          "source_format": "qoder_transcript_jsonl_tree",
+          "route_role": "qoder-projects"
+        }
+      },
       "implemented_paths": [
         {
           "kind": "native_import",
@@ -591,7 +704,7 @@
         }
       ],
       "history_locations": [
-        "Winner: `~/.qoder/projects/<project>` with bounded transcript and direct session JSONL leaves."
+        "Canonical complete root: `~/.qoder/projects`, which includes bounded per-project transcript and direct session JSONL leaves; selecting one project can include its transcript tree but not its direct session leaves."
       ],
       "imports_existing_history": true,
       "captures_new_runs_passively": false,
@@ -629,6 +742,15 @@
       "display_name": "Warp",
       "status": "supported",
       "capture_provider": "warp",
+      "configured_root": {
+        "state": "enabled",
+        "expected_path_kind": "file",
+        "expander": {
+          "kind": "exact_source",
+          "source_format": "warp_sqlite",
+          "route_role": "warp-surface-database"
+        }
+      },
       "implemented_paths": [
         {
           "kind": "native_import",
@@ -674,6 +796,15 @@
       "display_name": "CodeBuddy",
       "status": "supported",
       "capture_provider": "codebuddy",
+      "configured_root": {
+        "state": "enabled",
+        "expected_path_kind": "directory",
+        "expander": {
+          "kind": "exact_source",
+          "source_format": "codebuddy_history_json",
+          "route_role": "codebuddy-history"
+        }
+      },
       "implemented_paths": [
         {
           "kind": "native_import",
@@ -720,6 +851,13 @@
       "display_name": "OpenClaw",
       "status": "supported",
       "capture_provider": "openclaw",
+      "configured_root": {
+        "state": "enabled",
+        "expected_path_kind": "directory",
+        "expander": {
+          "kind": "openclaw_state_root_v1"
+        }
+      },
       "implemented_paths": [
         {
           "kind": "native_import",
@@ -773,6 +911,15 @@
       "display_name": "Hermes Agent",
       "status": "supported",
       "capture_provider": "hermes",
+      "configured_root": {
+        "state": "enabled",
+        "expected_path_kind": "file",
+        "expander": {
+          "kind": "exact_source",
+          "source_format": "hermes_state_sqlite",
+          "route_role": "hermes-profile-database"
+        }
+      },
       "implemented_paths": [
         {
           "kind": "native_import",
@@ -818,6 +965,9 @@
       "display_name": "NanoClaw",
       "status": "supported",
       "capture_provider": "nanoclaw",
+      "configured_root": {
+        "state": "intentional_automatic_exact"
+      },
       "implemented_paths": [
         {
           "kind": "native_import",
@@ -862,6 +1012,15 @@
       "display_name": "AstrBot",
       "status": "supported",
       "capture_provider": "astrbot",
+      "configured_root": {
+        "state": "enabled",
+        "expected_path_kind": "file",
+        "expander": {
+          "kind": "exact_source",
+          "source_format": "astrbot_data_v4_sqlite",
+          "route_role": "astrbot-instance-database"
+        }
+      },
       "implemented_paths": [
         {
           "kind": "native_import",
@@ -906,6 +1065,9 @@
       "display_name": "Shelley",
       "status": "supported",
       "capture_provider": "shelley",
+      "configured_root": {
+        "state": "intentional_automatic_exact"
+      },
       "implemented_paths": [
         {
           "kind": "native_import",
@@ -951,6 +1113,15 @@
       "display_name": "Continue",
       "status": "supported",
       "capture_provider": "continue",
+      "configured_root": {
+        "state": "enabled",
+        "expected_path_kind": "directory",
+        "expander": {
+          "kind": "exact_source",
+          "source_format": "continue_cli_sessions_json",
+          "route_role": "continue-sessions"
+        }
+      },
       "implemented_paths": [
         {
           "kind": "native_import",
@@ -996,6 +1167,17 @@
       "display_name": "OpenHands",
       "status": "supported",
       "capture_provider": "openhands",
+      "configured_root": {
+        "state": "enabled",
+        "expected_path_kind": "directory",
+        "expander": {
+          "kind": "openhands_kind_v1",
+          "root_kinds": [
+            "current-conversations",
+            "legacy-persistence"
+          ]
+        }
+      },
       "implemented_paths": [
         {
           "kind": "native_import",
@@ -1050,6 +1232,15 @@
       "display_name": "Antigravity",
       "status": "supported",
       "capture_provider": "antigravity",
+      "configured_root": {
+        "state": "enabled",
+        "expected_path_kind": "directory",
+        "expander": {
+          "kind": "exact_source",
+          "source_format": "antigravity_cli_transcript_jsonl_tree",
+          "route_role": "antigravity-brain"
+        }
+      },
       "implemented_paths": [
         {
           "kind": "native_import",
@@ -1095,6 +1286,15 @@
       "display_name": "Gemini",
       "status": "supported",
       "capture_provider": "gemini",
+      "configured_root": {
+        "state": "enabled",
+        "expected_path_kind": "directory",
+        "expander": {
+          "kind": "exact_source",
+          "source_format": "gemini_cli_chat_recording_jsonl",
+          "route_role": "gemini-chats"
+        }
+      },
       "implemented_paths": [
         {
           "kind": "native_import",
@@ -1139,6 +1339,15 @@
       "display_name": "Tabnine",
       "status": "supported",
       "capture_provider": "tabnine",
+      "configured_root": {
+        "state": "enabled",
+        "expected_path_kind": "directory",
+        "expander": {
+          "kind": "exact_source",
+          "source_format": "tabnine_cli_chat_recording_jsonl",
+          "route_role": "tabnine-agent-history"
+        }
+      },
       "implemented_paths": [
         {
           "kind": "native_import",
@@ -1184,6 +1393,15 @@
       "display_name": "Cursor",
       "status": "supported",
       "capture_provider": "cursor",
+      "configured_root": {
+        "state": "enabled",
+        "expected_path_kind": "directory",
+        "expander": {
+          "kind": "exact_source",
+          "source_format": "cursor_agent_transcript_jsonl_tree",
+          "route_role": "cursor-projects"
+        }
+      },
       "implemented_paths": [
         {
           "kind": "native_import",
@@ -1229,6 +1447,15 @@
       "display_name": "Zed",
       "status": "supported",
       "capture_provider": "zed",
+      "configured_root": {
+        "state": "enabled",
+        "expected_path_kind": "file",
+        "expander": {
+          "kind": "exact_source",
+          "source_format": "zed_threads_sqlite",
+          "route_role": "zed-threads-database"
+        }
+      },
       "implemented_paths": [
         {
           "kind": "native_import",
@@ -1274,6 +1501,15 @@
       "display_name": "Copilot CLI",
       "status": "supported",
       "capture_provider": "copilot_cli",
+      "configured_root": {
+        "state": "enabled",
+        "expected_path_kind": "directory",
+        "expander": {
+          "kind": "exact_source",
+          "source_format": "copilot_cli_session_events_jsonl",
+          "route_role": "copilot-session-state"
+        }
+      },
       "implemented_paths": [
         {
           "kind": "native_import",
@@ -1318,6 +1554,15 @@
       "display_name": "Factory AI Droid",
       "status": "supported",
       "capture_provider": "factory_ai_droid",
+      "configured_root": {
+        "state": "enabled",
+        "expected_path_kind": "directory",
+        "expander": {
+          "kind": "exact_source",
+          "source_format": "factory_ai_droid_sessions_jsonl",
+          "route_role": "factory-droid-sessions"
+        }
+      },
       "implemented_paths": [
         {
           "kind": "native_import",
@@ -1361,6 +1606,15 @@
       "display_name": "Qwen Code",
       "status": "supported",
       "capture_provider": "qwen_code",
+      "configured_root": {
+        "state": "enabled",
+        "expected_path_kind": "directory",
+        "expander": {
+          "kind": "exact_source",
+          "source_format": "qwen_code_chat_jsonl_tree",
+          "route_role": "qwen-projects"
+        }
+      },
       "implemented_paths": [
         {
           "kind": "native_import",
@@ -1405,6 +1659,15 @@
       "display_name": "Kimi Code CLI",
       "status": "supported",
       "capture_provider": "kimi_code_cli",
+      "configured_root": {
+        "state": "enabled",
+        "expected_path_kind": "directory",
+        "expander": {
+          "kind": "exact_source",
+          "source_format": "kimi_code_cli_wire_jsonl_tree",
+          "route_role": "kimi-history"
+        }
+      },
       "implemented_paths": [
         {
           "kind": "native_import",
@@ -1449,6 +1712,15 @@
       "display_name": "Auggie",
       "status": "supported",
       "capture_provider": "auggie",
+      "configured_root": {
+        "state": "enabled",
+        "expected_path_kind": "directory",
+        "expander": {
+          "kind": "exact_source",
+          "source_format": "auggie_session_json",
+          "route_role": "auggie-sessions"
+        }
+      },
       "implemented_paths": [
         {
           "kind": "native_import",
@@ -1493,6 +1765,15 @@
       "display_name": "Junie",
       "status": "supported",
       "capture_provider": "junie",
+      "configured_root": {
+        "state": "enabled",
+        "expected_path_kind": "directory",
+        "expander": {
+          "kind": "exact_source",
+          "source_format": "junie_session_events_jsonl_tree",
+          "route_role": "junie-sessions"
+        }
+      },
       "implemented_paths": [
         {
           "kind": "native_import",
@@ -1543,6 +1824,15 @@
       "display_name": "Firebender",
       "status": "supported",
       "capture_provider": "firebender",
+      "configured_root": {
+        "state": "enabled",
+        "expected_path_kind": "file",
+        "expander": {
+          "kind": "exact_source",
+          "source_format": "firebender_chat_history_sqlite",
+          "route_role": "firebender-chat-history-database"
+        }
+      },
       "implemented_paths": [
         {
           "kind": "native_import",
@@ -1595,6 +1885,15 @@
       "display_name": "ForgeCode",
       "status": "supported",
       "capture_provider": "forgecode",
+      "configured_root": {
+        "state": "enabled",
+        "expected_path_kind": "file",
+        "expander": {
+          "kind": "exact_source",
+          "source_format": "forgecode_sqlite",
+          "route_role": "forgecode-database"
+        }
+      },
       "implemented_paths": [
         {
           "kind": "native_import",
@@ -1639,6 +1938,15 @@
       "display_name": "Deep Agents",
       "status": "supported",
       "capture_provider": "deepagents",
+      "configured_root": {
+        "state": "enabled",
+        "expected_path_kind": "file",
+        "expander": {
+          "kind": "exact_source",
+          "source_format": "deepagents_sessions_sqlite",
+          "route_role": "deepagents-sessions-database"
+        }
+      },
       "implemented_paths": [
         {
           "kind": "native_import",
@@ -1683,6 +1991,15 @@
       "display_name": "Mistral Vibe",
       "status": "supported",
       "capture_provider": "mistral_vibe",
+      "configured_root": {
+        "state": "enabled",
+        "expected_path_kind": "directory",
+        "expander": {
+          "kind": "exact_source",
+          "source_format": "mistral_vibe_session_jsonl_tree",
+          "route_role": "mistral-vibe-sessions"
+        }
+      },
       "implemented_paths": [
         {
           "kind": "native_import",
@@ -1727,6 +2044,15 @@
       "display_name": "Mux",
       "status": "supported",
       "capture_provider": "mux",
+      "configured_root": {
+        "state": "enabled",
+        "expected_path_kind": "directory",
+        "expander": {
+          "kind": "exact_source",
+          "source_format": "mux_session_jsonl_tree",
+          "route_role": "mux-sessions"
+        }
+      },
       "implemented_paths": [
         {
           "kind": "native_import",
@@ -1771,6 +2097,15 @@
       "display_name": "Rovo Dev",
       "status": "supported",
       "capture_provider": "rovodev",
+      "configured_root": {
+        "state": "enabled",
+        "expected_path_kind": "directory",
+        "expander": {
+          "kind": "exact_source",
+          "source_format": "rovodev_session_json_tree",
+          "route_role": "rovodev-sessions"
+        }
+      },
       "implemented_paths": [
         {
           "kind": "native_import",
@@ -1815,6 +2150,13 @@
       "display_name": "Cline",
       "status": "supported",
       "capture_provider": "cline",
+      "configured_root": {
+        "state": "enabled",
+        "expected_path_kind": "directory",
+        "expander": {
+          "kind": "cline_common_data_root_v1"
+        }
+      },
       "implemented_paths": [
         {
           "kind": "native_import",
@@ -1868,6 +2210,15 @@
       "display_name": "Roo Code",
       "status": "supported",
       "capture_provider": "roo_code",
+      "configured_root": {
+        "state": "enabled",
+        "expected_path_kind": "directory",
+        "expander": {
+          "kind": "exact_source",
+          "source_format": "roo_task_directory_json",
+          "route_role": "roo-task-store"
+        }
+      },
       "implemented_paths": [
         {
           "kind": "native_import",

@@ -22,7 +22,9 @@ use std::{
 
 use anyhow::{anyhow, bail, Context, Result};
 use ctx_history_capture::{
-    automatic_source_backed_route_identity, build_automatic_source_backed_registry_from_report,
+    automatic_provider_root_coexistence_route_identity,
+    automatic_provider_root_coexistence_source_lineage, automatic_source_backed_route_identity,
+    build_automatic_source_backed_registry_from_report_with_retained_roots,
     discover_provider_sources_with_context_and_work_budget, source_backed_refresh_work_budget,
     source_backed_refresh_writer_options, validate_provider_source_roots_outside_data_root,
     DiscoveryContext, SourceBackedAutomaticRegistryIssue, SourceBackedAutomaticUnavailableReason,
@@ -38,7 +40,8 @@ use ctx_history_capture::{
 #[cfg(test)]
 use ctx_history_capture_model::DiscoveryIssue;
 use ctx_history_capture_model::{
-    DiscoveryIssueKind, DiscoveryReport, ProviderSource, ProviderSourceStatus,
+    DiscoveryIssueKind, DiscoveryReport, ProviderRootSourceIdentity, ProviderSource,
+    ProviderSourceStatus, RetainedProviderRootAuthority,
 };
 use ctx_history_capture_runtime::{CapturePublicationDisposition, ImmutableCaptureSnapshot};
 use ctx_history_core::{CaptureProvider, CertifiedSource, ScannedSourceCounts};
@@ -52,8 +55,8 @@ use catalog_witness::reconcile_published_catalog_witness;
 use observation::{admitted_route_observations, run_after_capture_scan_before_metadata_hook};
 use registry_issues::{
     automatic_registry_admission_failures, automatic_registry_route_less_blockers,
-    selected_registry_route_count, AutomaticRegistryAdmissionFailurePolicy,
-    RouteLessRegistryBlockers,
+    selected_registry_route_count, terminal_registry_route_failures,
+    AutomaticRegistryAdmissionFailurePolicy, RouteLessRegistryBlockers,
 };
 type SourceBackedRefreshOperation = RefreshOperation;
 
@@ -256,10 +259,112 @@ pub fn source_backed_watch_catalog(
     let discovery_duration = discovery_started.elapsed();
     validate_provider_source_roots_outside_data_root(data_root, report.sources.iter())
         .context("validate provider roots before deriving source watch catalog")?;
-    let mut build =
-        build_automatic_source_backed_registry_from_report(&discovery, data_root, report);
+    let index_root = source_backed_index_root(data_root);
+    let retained_generation = match VerifiedIndex::open(&index_root) {
+        Ok(index) => Some(index),
+        Err(IndexError::MissingActiveGenerationPointer) => None,
+        Err(error) => return Err(error.into()),
+    };
+    let retained_provider_roots =
+        configured_retained_provider_roots(&discovery, retained_generation.as_ref())?;
+    let mut build = build_automatic_source_backed_registry_from_report_with_retained_roots(
+        &discovery,
+        data_root,
+        report,
+        &retained_provider_roots,
+    );
     build.discovery_duration = discovery_duration;
     Ok(build.registry.watch_catalog())
+}
+
+fn configured_retained_provider_roots(
+    discovery: &DiscoveryContext,
+    retained_generation: Option<&VerifiedIndex>,
+) -> Result<BTreeMap<String, RetainedProviderRootAuthority>> {
+    let roots = discovery.configured_provider_roots();
+    let mut root_ids = BTreeSet::new();
+    if let Some(duplicate) = roots.iter().find(|root| !root_ids.insert(root.id.as_str())) {
+        bail!(
+            "configured provider root id {:?} is not unique",
+            duplicate.id
+        );
+    }
+    roots
+        .iter()
+        .filter_map(|root| {
+            let retained = retained_generation.and_then(|generation| {
+                generation
+                    .manifest()
+                    .provider_roots()
+                    .iter()
+                    .find(|applied| provider_root_retention_compatible(applied.definition(), root))
+            });
+            retained
+                .map(|applied| applied.retained_authority())
+                .or_else(|| {
+                    retained_generation.and_then(|generation| {
+                        generation
+                            .manifest()
+                            .detached_released_provider_roots()
+                            .iter()
+                            .find(|authority| authority.matches_definition(root))
+                            .map(|authority| Ok(authority.retained_authority()))
+                    })
+                })
+                .map(|authority| authority.map(|authority| (root.id.clone(), authority)))
+        })
+        .collect::<ctx_history_index::Result<BTreeMap<_, _>>>()
+        .map_err(Into::into)
+}
+
+fn provider_root_retention_compatible(
+    retained: &ctx_history_capture::ProviderRootDefinition,
+    current: &ctx_history_capture::ProviderRootDefinition,
+) -> bool {
+    retained.id == current.id
+        && retained.provider == current.provider
+        && retained.kind == current.kind
+}
+
+#[cfg(test)]
+fn incompatible_configured_provider_root_routes(
+    retained: &[ctx_history_index::AppliedProviderRoot],
+    desired: &[ctx_history_capture::ProviderRootDefinition],
+) -> BTreeSet<SourceRouteIdentity> {
+    retained
+        .iter()
+        .filter(|root| {
+            !desired
+                .iter()
+                .any(|current| provider_root_retention_compatible(root.definition(), current))
+        })
+        .flat_map(|root| {
+            root.routes()
+                .iter()
+                .filter(|route| root.exact_source_tokens_for_route(route).is_none())
+                .cloned()
+        })
+        .collect()
+}
+
+fn removed_configured_provider_root_routes(
+    retained: &[ctx_history_index::AppliedProviderRoot],
+    desired: &[ctx_history_capture::ProviderRootDefinition],
+) -> BTreeSet<SourceRouteIdentity> {
+    retained
+        .iter()
+        .filter(|root| {
+            !desired
+                .iter()
+                .any(|current| root.definition().id == current.id)
+        })
+        .flat_map(|root| {
+            root.routes()
+                .iter()
+                .filter(|route| root.exact_source_tokens_for_route(route).is_none())
+                .cloned()
+        })
+        .collect()
 }
 
 #[doc(hidden)]
@@ -482,7 +587,9 @@ pub fn source_backed_admitted_discovery_from_report(
     AdmittedRefresh::new(
         coverage,
         selected_routes,
-        SourceBackedAdmittedDiscovery::new(admitted_report, discovery_duration, watch_catalog),
+        SourceBackedAdmittedDiscovery::new(admitted_report, discovery_duration, watch_catalog)
+            .with_automatic_provider_discovery(discovery.automatic_provider_discovery_enabled())
+            .with_configured_provider_roots(discovery.configured_provider_roots().to_vec()),
     )?
     .with_execution_facts(route_worksets)
 }

@@ -226,7 +226,10 @@ fn checked_in_predecessor_fixture_has_exact_provenance_and_hashes() {
         RETIRED_CORE_FINGERPRINT
     );
     assert_eq!(provenance["generation_id"], GOLDEN_GENERATION_ID);
-    let manifest: GenerationManifest = serde_json::from_slice(
+    // This fixture is intentionally a retired predecessor manifest. Inspect
+    // its frozen provenance as inert JSON rather than asking the current
+    // manifest type to backfill fields introduced after the fixture shipped.
+    let manifest: serde_json::Value = serde_json::from_slice(
         &fs::read(
             root.join("index")
                 .join("ctx-generations")
@@ -236,11 +239,11 @@ fn checked_in_predecessor_fixture_has_exact_provenance_and_hashes() {
     )
     .unwrap();
     assert_eq!(
-        manifest.core_record_contract_fingerprint,
+        manifest["core_record_contract_fingerprint"],
         RETIRED_CORE_FINGERPRINT
     );
     assert_eq!(
-        manifest.policy_schema_hash,
+        manifest["policy_schema_hash"],
         RETIRED_SOURCE_GENERATION_POLICY_HASH
     );
 
@@ -474,7 +477,11 @@ fn metadata_only_republish_keeps_stored_core_replay_explicit() {
         crate::publication::candidate_lineage_verification_activity(),
         (0, 0)
     );
-    assert_eq!(ctx_history_index_query::verified_index_reopen_count(), 1);
+    assert_eq!(
+        ctx_history_index_query::verified_index_reopen_count(),
+        2,
+        "republish verifies the inactive candidate and independently returns the activated generation"
+    );
 
     let (searcher, _) = open_unverified_generation(predecessor.root());
     let explicit_scrub =

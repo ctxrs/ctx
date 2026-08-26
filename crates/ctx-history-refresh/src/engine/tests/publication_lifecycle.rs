@@ -771,6 +771,47 @@ fn failed_terminal_persistence_retries_and_survives_restart_without_recapture() 
 }
 
 #[test]
+fn durable_terminal_coverage_failure_recovers_without_wedging_startup() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    let status_path = daemon_source_backed_refresh_job_path(&data_root);
+    let coordinator = CoreRefreshEngine::new();
+    coordinator.enqueue(None);
+
+    let failed = coordinator
+        .run_next_with(
+            |_, _| {
+                Err(ZeroSourcePublicationBlocked::new(
+                    "path exists but the Cursor transcript probe hit its scan budget",
+                )
+                .into())
+            },
+            || Ok(None),
+            |job| write_daemon_job_status(&status_path, job),
+            |_| Ok(()),
+        )
+        .expect("terminal coverage failure");
+    assert!(failed.failed);
+    assert_eq!(failed.job["request_state"], "failed");
+    assert_eq!(failed.job["failure_type"], TERMINAL_COVERAGE_ERROR_CODE);
+    drop(coordinator);
+
+    let restarted = CoreRefreshEngine::with_executor(Arc::new(
+        |_execution: SourceBackedRefreshExecution<'_>| {
+            panic!("durable failed terminal must not be recaptured")
+        },
+    ));
+    assert!(!restarted
+        .recover_interrupted_publication(&data_root)
+        .expect("terminal coverage failure must not block daemon readiness"));
+    assert!(!restarted.has_pending_request());
+    assert_eq!(
+        read_daemon_job_status(&status_path).unwrap()["request_state"],
+        "failed"
+    );
+}
+
+#[test]
 fn terminal_persist_retry_retains_admissions_without_readmitting_routes() {
     let coordinator = CoreRefreshEngine::new();
     let route = route_identity(0x5a);

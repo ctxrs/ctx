@@ -28,25 +28,47 @@ fn provider_vocabulary_keeps_all_41_recognized_native_providers_importable() {
 fn vocabulary_accepts_primary_storage_and_compatibility_names() {
     for spec in provider_cli_specs() {
         assert_eq!(
-            parse_provider_name(spec.cli_name),
-            Some(HistoryProvider::from(spec.provider)),
+            parse_capture_provider_name(spec.cli_name),
+            Some(spec.provider),
             "{} primary CLI name drifted",
             spec.cli_name
         );
         assert_eq!(
+            parse_provider_name(spec.cli_name),
+            Some(HistoryProvider::from(spec.provider)),
+            "{} primary CLI transport name drifted",
+            spec.cli_name
+        );
+        assert_eq!(
+            parse_capture_provider_name(spec.provider.as_str()),
+            Some(spec.provider),
+            "{} storage name drifted",
+            spec.provider.as_str()
+        );
+        assert_eq!(
             parse_provider_name(spec.provider.as_str()),
             Some(HistoryProvider::from(spec.provider)),
-            "{} storage name drifted",
+            "{} storage transport name drifted",
             spec.provider.as_str()
         );
         for alias in spec.aliases {
             assert_eq!(
+                parse_capture_provider_name(alias),
+                Some(spec.provider),
+                "{alias} compatibility alias drifted"
+            );
+            assert_eq!(
                 parse_provider_name(alias),
                 Some(HistoryProvider::from(spec.provider)),
-                "{alias} compatibility alias drifted"
+                "{alias} compatibility transport alias drifted"
             );
         }
     }
+    assert_eq!(
+        parse_capture_provider_name("custom"),
+        Some(CaptureProvider::Custom),
+        "Custom remains part of the complete public provider vocabulary"
+    );
     assert_eq!(
         parse_native_provider_name("custom"),
         None,
@@ -102,4 +124,21 @@ fn unknown_provider_error_stays_compact() {
         parse_provider("not-a-provider").unwrap_err(),
         compact_provider_error("not-a-provider")
     );
+}
+
+#[test]
+fn invalid_provider_names_are_rejected_by_every_public_parser() {
+    for name in [
+        "",
+        "grokbuild",
+        "Grok-Build",
+        "grok build",
+        "not-a-provider",
+    ] {
+        assert_eq!(parse_capture_provider_name(name), None, "{name:?}");
+        assert_eq!(parse_provider_name(name), None, "{name:?}");
+        assert_eq!(parse_native_provider_name(name), None, "{name:?}");
+        assert!(parse_provider(name).is_err(), "{name:?}");
+        assert!(parse_native_provider(name).is_err(), "{name:?}");
+    }
 }

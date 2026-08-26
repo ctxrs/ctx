@@ -10,8 +10,8 @@ use ctx_history_core::{
     derive_event_id, derive_session_id, ActivityInvocation, ActivityJsonCapture, ActivityResult,
     AgentScope, CaptureProvider, CoreActivity, CoreRecord, CoreRecordError, EventIdentityInput,
     NativeItemKey, NativeSessionKey, ProjectionContractError, ProviderNativeSessionRelationship,
-    ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceKey, StableEntityId, TypedKey,
-    CORE_ACTIVITY_REVISION, MAX_CORE_CONTENT_BYTES,
+    ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceAnchorScope, SourceKey,
+    StableEntityId, TypedKey, CORE_ACTIVITY_REVISION, MAX_CORE_CONTENT_BYTES,
 };
 use rusqlite::{limits::Limit, Connection};
 use sha2::{Digest, Sha256};
@@ -39,12 +39,12 @@ use crate::{
 };
 use ctx_history_source_sqlite::MAX_PROVIDER_SQLITE_VALUE_BYTES;
 
-const WARP_SOURCE_ANCHOR_NAMESPACE: &str = "warp.selected-surface";
+pub(super) const WARP_SOURCE_ANCHOR_NAMESPACE: &str = "warp.selected-surface";
 const WARP_NATIVE_SESSION_NAMESPACE: &str = "warp.conversation";
 const WARP_NATIVE_ITEM_NAMESPACE: &str = "warp.task-message";
 const WARP_LOGICAL_SESSION_KIND: &str = "warp-conversation";
 const WARP_LOGICAL_ITEM_KIND: &str = "warp-task-message";
-const WARP_SOURCE_SCHEMA_VARIANT: &str = "warp-agent-task-protobuf-v1";
+pub(super) const WARP_SOURCE_SCHEMA_VARIANT: &str = "warp-agent-task-protobuf-v1";
 const WARP_SOURCE_BACKED_PARSER_REVISION: &str =
     "warp-source-backed-logical-v7-neutral-activity-agent-scope";
 const WARP_SCHEMA_EVIDENCE: &[u8] = b"agent_conversations+agent_tasks+unique-task-id-v1";
@@ -125,11 +125,12 @@ impl WarpSourceSelectionV0 {
     }
 }
 
-pub(crate) fn project_warp_source_backed_v0<B>(
+pub(crate) fn project_warp_source_backed_v0_scoped<B>(
     selection: WarpSourceSelectionV0,
+    source_scope: SourceAnchorScope,
 ) -> WarpSourceBackedResultV0<WarpReplacementTreeAdapter<B>> {
     Ok(WarpReplacementTreeAdapter {
-        source: warp_source_key(&selection)?,
+        source: warp_source_key_scoped(&selection, source_scope)?,
         selection,
         binding: std::marker::PhantomData,
     })
@@ -858,7 +859,7 @@ fn omit_warp_json_capture_for_size(capture: &mut ActivityJsonCapture) {
     }
 }
 
-fn warp_session_id(
+pub(super) fn warp_session_id(
     source: &SourceKey,
     conversation_id: &str,
 ) -> WarpSourceBackedResultV0<StableEntityId> {
@@ -873,17 +874,26 @@ fn warp_session_id(
     })?)
 }
 
+#[cfg(test)]
 fn warp_source_key(selection: &WarpSourceSelectionV0) -> WarpSourceBackedResultV0<SourceKey> {
+    warp_source_key_scoped(selection, SourceAnchorScope::Unqualified)
+}
+
+pub(super) fn warp_source_key_scoped(
+    selection: &WarpSourceSelectionV0,
+    source_scope: SourceAnchorScope,
+) -> WarpSourceBackedResultV0<SourceKey> {
     let anchor = SourceAnchor::provider_native(
         WARP_SOURCE_ANCHOR_NAMESPACE,
         TypedKey::utf8(selection.surface_key())?,
     )?;
-    Ok(SourceKey::derive(
+    Ok(SourceKey::derive_scoped(
         CaptureProvider::Warp.as_str(),
         WARP_SQLITE_SOURCE_FORMAT,
         WARP_SOURCE_SCHEMA_VARIANT,
         1,
         anchor,
+        source_scope,
     )?)
 }
 

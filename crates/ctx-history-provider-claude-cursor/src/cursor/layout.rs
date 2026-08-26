@@ -1,21 +1,81 @@
 use std::{
-    collections::{BTreeSet, VecDeque},
+    collections::BTreeSet,
     ffi::OsStr,
     path::{Path, PathBuf},
 };
 
 use ctx_history_provider_runtime::source_io::{
     open_provider_source_path, OpenedProviderSourceFile, OpenedProviderSourcePath,
-    ProviderSourceDirectory, ProviderSourceRoot,
+    ProviderSourceDirectory, ProviderSourceRoot, PROVIDER_JSONL_INVENTORY_MAX_DIRECTORIES,
+    PROVIDER_JSONL_INVENTORY_MAX_ELIGIBLE_PATHS, PROVIDER_JSONL_INVENTORY_MAX_METADATA_ENTRIES,
+    PROVIDER_JSONL_INVENTORY_MAX_PATH_BYTES,
 };
 use ctx_history_provider_runtime::CaptureError;
 
-const AGENT_TRANSCRIPTS: &str = "agent-transcripts";
-pub(super) const CURSOR_MAX_DIRECTORY_DEPTH: usize = 128;
-pub(super) const CURSOR_MAX_DIRECTORY_ENTRIES: usize = 1_024;
-pub(super) const CURSOR_MAX_TRAVERSAL_ENTRIES: usize = 4_096;
+#[path = "layout_helpers.rs"]
+mod helpers;
+use helpers::*;
+
+pub(super) const AGENT_TRANSCRIPTS: &str = "agent-transcripts";
+pub(super) const PROJECTS: &str = "projects";
 pub(super) const CURSOR_MAX_DISCOVERY_ISSUE_SAMPLES: usize = 128;
-pub(super) const CURSOR_MAX_TRANSCRIPTS: usize = 128;
+
+fn is_literal_projects_root(path: &Path) -> bool {
+    path.file_name() == Some(OsStr::new(PROJECTS))
+}
+
+fn require_literal_projects_root(
+    candidate: &Path,
+    projects_root: &Path,
+    inventory: &mut CursorRootInventory,
+) -> bool {
+    if is_literal_projects_root(projects_root) {
+        return true;
+    }
+    inventory.reject(
+        candidate.to_path_buf(),
+        CursorDiscoveryIssueKind::InvalidLayout,
+        "Cursor transcript entry points must be beneath a literal projects directory",
+        true,
+    );
+    false
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) struct CursorInventoryLimits {
+    pub(super) max_directories: usize,
+    pub(super) max_transcripts: usize,
+    pub(super) max_metadata_entries: usize,
+    pub(super) max_path_bytes: usize,
+}
+
+impl Default for CursorInventoryLimits {
+    fn default() -> Self {
+        // Cursor's fixed shape needs no recursive depth budget. Reuse the
+        // ordinary source-I/O inventory ceilings for the remaining dimensions
+        // instead of maintaining smaller provider-local corpus ceilings.
+        Self {
+            max_directories: PROVIDER_JSONL_INVENTORY_MAX_DIRECTORIES,
+            max_transcripts: PROVIDER_JSONL_INVENTORY_MAX_ELIGIBLE_PATHS,
+            max_metadata_entries: PROVIDER_JSONL_INVENTORY_MAX_METADATA_ENTRIES,
+            max_path_bytes: PROVIDER_JSONL_INVENTORY_MAX_PATH_BYTES,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CursorScanGoal {
+    CompleteInventory,
+    FirstTranscript,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CursorTranscriptAvailability {
+    Found,
+    NotFound,
+    BudgetExhausted,
+    IoError,
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct CursorTranscriptPath {
@@ -36,6 +96,9 @@ impl CursorTranscriptPath {
         ordinary_file_token: [u8; 32],
         authority: ProviderSourceRoot,
     ) -> Result<Self, &'static str> {
+        if !is_literal_projects_root(projects_root) {
+            return Err("Cursor transcript must be beneath a literal projects directory");
+        }
         let relative = path
             .strip_prefix(projects_root)
             .map_err(|_| "Cursor transcript is outside the selected projects root")?;
@@ -103,7 +166,7 @@ impl PartialEq for CursorTranscriptPath {
 
 impl Eq for CursorTranscriptPath {}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum CursorDiscoveryIssueKind {
     Io,
     InvalidLayout,
@@ -138,6 +201,7 @@ pub struct CursorRootInventory {
     pub(crate) completed: bool,
     pub(crate) stats: CursorDiscoveryStats,
     authority: Option<ProviderSourceRoot>,
+    issue_kinds: BTreeSet<CursorDiscoveryIssueKind>,
 }
 
 impl CursorRootInventory {
@@ -146,7 +210,7 @@ impl CursorRootInventory {
     }
 
     pub fn has_issue_kind(&self, expected: CursorDiscoveryIssueKind) -> bool {
-        self.issues.iter().any(|issue| issue.kind == expected)
+        self.issue_kinds.contains(&expected)
     }
 
     pub fn has_transcripts(&self) -> bool {
@@ -162,6 +226,7 @@ impl CursorRootInventory {
             completed: true,
             stats: CursorDiscoveryStats::default(),
             authority: None,
+            issue_kinds: BTreeSet::new(),
         }
     }
 
@@ -173,6 +238,7 @@ impl CursorRootInventory {
         invalidates_completion: bool,
     ) {
         self.stats.rejected_candidates = self.stats.rejected_candidates.saturating_add(1);
+        self.issue_kinds.insert(kind);
         if self.issues.len() < CURSOR_MAX_DISCOVERY_ISSUE_SAMPLES {
             self.issues.push(CursorDiscoveryIssue {
                 path,
@@ -222,20 +288,59 @@ impl PartialEq for CursorRootInventory {
             && self.issues == other.issues
             && self.completed == other.completed
             && self.stats == other.stats
+            && self.issue_kinds == other.issue_kinds
     }
 }
 
 impl Eq for CursorRootInventory {}
 
+pub fn probe_cursor_transcript_availability(input: &Path) -> CursorTranscriptAvailability {
+    probe_cursor_transcript_availability_with_limits(input, CursorInventoryLimits::default())
+}
+
+pub(super) fn probe_cursor_transcript_availability_with_limits(
+    input: &Path,
+    limits: CursorInventoryLimits,
+) -> CursorTranscriptAvailability {
+    let inventory = scan_cursor_transcripts(input, limits, CursorScanGoal::FirstTranscript);
+    if inventory.has_transcripts() {
+        CursorTranscriptAvailability::Found
+    } else if inventory.has_issue_kind(CursorDiscoveryIssueKind::LimitExceeded) {
+        CursorTranscriptAvailability::BudgetExhausted
+    } else if inventory.has_issue_kind(CursorDiscoveryIssueKind::NotFound) {
+        CursorTranscriptAvailability::NotFound
+    } else if !inventory.completed() {
+        CursorTranscriptAvailability::IoError
+    } else {
+        CursorTranscriptAvailability::NotFound
+    }
+}
+
 pub fn discover_cursor_transcripts(input: &Path) -> CursorRootInventory {
+    discover_cursor_transcripts_with_limits(input, CursorInventoryLimits::default())
+}
+
+pub(super) fn discover_cursor_transcripts_with_limits(
+    input: &Path,
+    limits: CursorInventoryLimits,
+) -> CursorRootInventory {
+    scan_cursor_transcripts(input, limits, CursorScanGoal::CompleteInventory)
+}
+
+fn scan_cursor_transcripts(
+    input: &Path,
+    limits: CursorInventoryLimits,
+    goal: CursorScanGoal,
+) -> CursorRootInventory {
     let mut inventory = CursorRootInventory::new(input);
+    if !admit_metadata_entry(input, limits, &mut inventory) {
+        return inventory;
+    }
     let opened = match open_provider_source_path(input) {
         Ok(opened) => opened,
         Err(error) => {
             let kind = match &error {
-                CaptureError::Io(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    CursorDiscoveryIssueKind::NotFound
-                }
+                error if capture_error_is_not_found(error) => CursorDiscoveryIssueKind::NotFound,
                 CaptureError::InvalidProviderTranscriptPath { .. } => {
                     CursorDiscoveryIssueKind::Symlink
                 }
@@ -247,7 +352,6 @@ pub fn discover_cursor_transcripts(input: &Path) -> CursorRootInventory {
     };
     match opened {
         OpenedProviderSourcePath::File(file) => {
-            inventory.stats.entries_visited = 1;
             inventory.stats.regular_files_visited = 1;
             let (authority, relative_path) = match cursor_explicit_authority(input) {
                 Ok(admitted) => admitted,
@@ -264,25 +368,26 @@ pub fn discover_cursor_transcripts(input: &Path) -> CursorRootInventory {
             inventory.authority = Some(authority.clone());
             inspect_file(
                 input,
-                input,
                 relative_path,
                 file,
                 authority,
                 &mut inventory,
                 true,
+                limits,
             );
         }
         OpenedProviderSourcePath::Directory(directory) => {
-            let authority = directory.authority_root();
-            inventory.authority = Some(authority.clone());
-            let (scan_path, scan_directory) =
-                select_projects_directory(input, directory, &mut inventory);
-            inventory.input = scan_path.clone();
-            visit_directories(&scan_path, scan_directory, authority, &mut inventory);
+            if !admit_directory(input, limits, &mut inventory) {
+                return inventory;
+            }
+            inventory.authority = Some(directory.authority_root());
+            discover_from_directory(input, directory, limits, goal, &mut inventory);
         }
     }
     inventory.finish();
-    if inventory.completed {
+    if inventory.completed
+        || (goal == CursorScanGoal::FirstTranscript && inventory.has_transcripts())
+    {
         if let Err(error) = inventory.revalidate() {
             inventory.reject(
                 inventory.input.clone(),
@@ -290,6 +395,10 @@ pub fn discover_cursor_transcripts(input: &Path) -> CursorRootInventory {
                 error.to_string(),
                 true,
             );
+            if goal == CursorScanGoal::FirstTranscript {
+                inventory.transcripts.clear();
+                inventory.finish();
+            }
         }
     }
     inventory
@@ -313,13 +422,124 @@ fn cursor_explicit_authority(
     Ok((ProviderSourceRoot::open(parent)?, relative_path))
 }
 
-fn select_projects_directory(
+#[derive(Debug)]
+enum CursorDirectoryEntryPoint {
+    Session { projects_root: PathBuf },
+    AgentTranscripts { projects_root: PathBuf },
+    Project { projects_root: PathBuf },
+    Projects,
+    ProviderRoot,
+}
+
+fn cursor_directory_entry_points(input: &Path) -> Vec<CursorDirectoryEntryPoint> {
+    let mut entry_points = Vec::with_capacity(5);
+    if let Some(agent_transcripts) = input
+        .parent()
+        .filter(|parent| parent.file_name() == Some(OsStr::new(AGENT_TRANSCRIPTS)))
+    {
+        if let Some(projects_root) = agent_transcripts
+            .parent()
+            .and_then(Path::parent)
+            .filter(|root| is_literal_projects_root(root))
+        {
+            entry_points.push(CursorDirectoryEntryPoint::Session {
+                projects_root: projects_root.to_path_buf(),
+            });
+        }
+    }
+    if input.file_name() == Some(OsStr::new(AGENT_TRANSCRIPTS)) {
+        if let Some(projects_root) = input
+            .parent()
+            .and_then(Path::parent)
+            .filter(|root| is_literal_projects_root(root))
+        {
+            entry_points.push(CursorDirectoryEntryPoint::AgentTranscripts {
+                projects_root: projects_root.to_path_buf(),
+            });
+        }
+    }
+    if let Some(projects_root) = input.parent().filter(|root| is_literal_projects_root(root)) {
+        entry_points.push(CursorDirectoryEntryPoint::Project {
+            projects_root: projects_root.to_path_buf(),
+        });
+    }
+    if is_literal_projects_root(input) {
+        entry_points.push(CursorDirectoryEntryPoint::Projects);
+    }
+    entry_points.push(CursorDirectoryEntryPoint::ProviderRoot);
+    entry_points
+}
+
+fn discover_from_directory(
     input: &Path,
     directory: ProviderSourceDirectory,
+    limits: CursorInventoryLimits,
+    goal: CursorScanGoal,
     inventory: &mut CursorRootInventory,
-) -> (PathBuf, ProviderSourceDirectory) {
-    let names = match directory.entries(CURSOR_MAX_DIRECTORY_ENTRIES.saturating_add(1)) {
-        Ok(names) => names,
+) {
+    let fingerprint = directory.authority_fingerprint();
+    let baseline = inventory.clone();
+    let mut first_directory = Some(directory);
+    let mut fallback = None;
+    for entry_point in cursor_directory_entry_points(input) {
+        let Some(directory) = first_directory
+            .take()
+            .or_else(|| reopen_cursor_directory(input, fingerprint, limits, inventory))
+        else {
+            return;
+        };
+        let authority = directory.authority_root();
+        inventory.authority = Some(authority.clone());
+        scan_directory_entry_point(
+            input,
+            directory,
+            authority,
+            entry_point,
+            limits,
+            goal,
+            inventory,
+        );
+        if inventory.has_transcripts() {
+            return;
+        }
+        fallback.get_or_insert_with(|| inventory.clone());
+        if inventory.has_issue_kind(CursorDiscoveryIssueKind::LimitExceeded) {
+            return;
+        }
+        let work = inventory.stats.clone();
+        *inventory = baseline.clone();
+        inventory.stats.directories_visited = work.directories_visited;
+        inventory.stats.entries_visited = work.entries_visited;
+        inventory.stats.regular_files_visited = work.regular_files_visited;
+    }
+    if let Some(mut selected) = fallback {
+        selected.stats.directories_visited = inventory.stats.directories_visited;
+        selected.stats.entries_visited = inventory.stats.entries_visited;
+        selected.stats.regular_files_visited = inventory.stats.regular_files_visited;
+        *inventory = selected;
+    }
+}
+
+fn reopen_cursor_directory(
+    input: &Path,
+    expected_fingerprint: [u8; 32],
+    limits: CursorInventoryLimits,
+    inventory: &mut CursorRootInventory,
+) -> Option<ProviderSourceDirectory> {
+    if !admit_metadata_entry(input, limits, inventory) {
+        return None;
+    }
+    let directory = match open_provider_source_path(input) {
+        Ok(OpenedProviderSourcePath::Directory(directory)) => directory,
+        Ok(OpenedProviderSourcePath::File(_)) => {
+            inventory.reject(
+                input.to_path_buf(),
+                CursorDiscoveryIssueKind::Io,
+                "Cursor directory entry point changed into a file during discovery",
+                true,
+            );
+            return None;
+        }
         Err(error) => {
             inventory.reject(
                 input.to_path_buf(),
@@ -327,180 +547,318 @@ fn select_projects_directory(
                 error.to_string(),
                 true,
             );
-            return (input.to_path_buf(), directory);
+            return None;
         }
     };
-    if names.iter().any(|name| name == OsStr::new("projects")) {
-        if let Ok(OpenedProviderSourcePath::Directory(projects)) =
-            directory.open_child(OsStr::new("projects"))
-        {
-            return (input.join("projects"), projects);
-        }
+    if directory.authority_fingerprint() != expected_fingerprint {
+        inventory.reject(
+            input.to_path_buf(),
+            CursorDiscoveryIssueKind::Io,
+            "Cursor directory entry point changed while resolving its fixed-shape layout",
+            true,
+        );
+        return None;
     }
-    (input.to_path_buf(), directory)
+    admit_directory(input, limits, inventory).then_some(directory)
 }
 
-fn visit_directories(
+#[allow(clippy::too_many_arguments)]
+fn scan_directory_entry_point(
     input: &Path,
-    first_directory: ProviderSourceDirectory,
+    directory: ProviderSourceDirectory,
     authority: ProviderSourceRoot,
+    entry_point: CursorDirectoryEntryPoint,
+    limits: CursorInventoryLimits,
+    goal: CursorScanGoal,
     inventory: &mut CursorRootInventory,
 ) {
-    let first_relative = first_directory.relative_path().to_path_buf();
-    let mut pending = VecDeque::from([(input.to_path_buf(), first_relative, 0_usize)]);
-    drop(first_directory);
-    while let Some((directory_path, relative_path, depth)) = pending.pop_front() {
-        if inventory.stats.entries_visited >= CURSOR_MAX_TRAVERSAL_ENTRIES {
-            inventory.reject(
-                directory_path,
-                CursorDiscoveryIssueKind::LimitExceeded,
-                format!(
-                    "Cursor discovery exceeds the {CURSOR_MAX_TRAVERSAL_ENTRIES}-entry traversal limit"
-                ),
-                true,
-            );
-            break;
-        }
-        inventory.stats.directories_visited = inventory.stats.directories_visited.saturating_add(1);
-        let directory = match authority.open_directory(&relative_path) {
-            Ok(directory) => directory,
-            Err(error) => {
+    match entry_point {
+        CursorDirectoryEntryPoint::Session { projects_root } => {
+            let Some(session_id) = input
+                .file_name()
+                .and_then(OsStr::to_str)
+                .filter(|value| !value.trim().is_empty())
+            else {
                 inventory.reject(
-                    directory_path,
-                    CursorDiscoveryIssueKind::Io,
-                    error.to_string(),
+                    input.to_path_buf(),
+                    CursorDiscoveryIssueKind::InvalidLayout,
+                    "Cursor session directory must be nonempty UTF-8",
+                    false,
+                );
+                revalidate_directory(input, &directory, goal, inventory);
+                return;
+            };
+            scan_session(
+                &projects_root,
+                input,
+                session_id,
+                directory,
+                authority,
+                limits,
+                goal,
+                inventory,
+            );
+        }
+        CursorDirectoryEntryPoint::AgentTranscripts { projects_root } => {
+            scan_agent_transcripts(
+                &projects_root,
+                input,
+                directory,
+                authority,
+                limits,
+                goal,
+                inventory,
+            );
+        }
+        CursorDirectoryEntryPoint::Project { projects_root } => scan_project(
+            &projects_root,
+            input,
+            directory,
+            authority,
+            limits,
+            goal,
+            inventory,
+        ),
+        CursorDirectoryEntryPoint::Projects => {
+            scan_projects(input, directory, authority, limits, goal, inventory);
+        }
+        CursorDirectoryEntryPoint::ProviderRoot => match open_direct_child(
+            input,
+            &directory,
+            OsStr::new(PROJECTS),
+            true,
+            true,
+            limits,
+            inventory,
+        ) {
+            DirectChild::Directory(projects) => {
+                let projects_path = input.join(PROJECTS);
+                inventory.input = projects_path.clone();
+                scan_projects(&projects_path, projects, authority, limits, goal, inventory);
+                revalidate_directory(input, &directory, goal, inventory);
+            }
+            DirectChild::Failed => revalidate_directory(input, &directory, goal, inventory),
+            DirectChild::File(_) => {
+                inventory.reject(
+                    input.join(PROJECTS),
+                    CursorDiscoveryIssueKind::InvalidLayout,
+                    "Cursor projects component must be a directory",
                     true,
                 );
-                continue;
+                revalidate_directory(input, &directory, goal, inventory);
             }
-        };
-        let entries = read_directory_entries(&directory_path, &directory, inventory);
-        for name in entries {
-            let path = directory_path.join(&name);
-            match directory.open_child(&name) {
-                Ok(OpenedProviderSourcePath::Directory(child_directory)) => {
-                    if depth >= CURSOR_MAX_DIRECTORY_DEPTH {
-                        inventory.reject(
-                        path,
-                        CursorDiscoveryIssueKind::LimitExceeded,
-                        format!(
-                            "Cursor discovery exceeds the {CURSOR_MAX_DIRECTORY_DEPTH}-level directory depth limit"
-                        ),
-                        true,
-                    );
-                    } else {
-                        pending.push_back((
-                            path,
-                            child_directory.relative_path().to_path_buf(),
-                            depth.saturating_add(1),
-                        ));
-                    }
-                }
-                Ok(OpenedProviderSourcePath::File(file)) => {
-                    inventory.stats.regular_files_visited =
-                        inventory.stats.regular_files_visited.saturating_add(1);
-                    inspect_file(
-                        input,
-                        &path,
-                        relative_path.join(name),
-                        file,
-                        authority.clone(),
-                        inventory,
-                        false,
-                    );
-                }
-                Err(error) => {
-                    // A non-regular entry (Unix-domain socket, FIFO, device
-                    // node) is safely refused by the authority walk. Skip it
-                    // without invalidating completion: its mere presence beside
-                    // valid transcripts must not mark the whole Cursor source
-                    // unreadable, which would otherwise fail the full refresh.
-                    if ctx_history_provider_runtime::source_io::is_non_regular_source_rejection(
-                        &error,
-                    ) {
-                        inventory.reject(
-                            path,
-                            CursorDiscoveryIssueKind::SpecialFile,
-                            error.to_string(),
-                            false,
-                        );
-                    } else {
-                        inventory.reject(
-                            path,
-                            CursorDiscoveryIssueKind::Symlink,
-                            error.to_string(),
-                            true,
-                        );
-                    }
-                }
+            DirectChild::Missing if input.file_name() == Some(OsStr::new(".cursor")) => {
+                revalidate_directory(input, &directory, goal, inventory);
             }
-        }
-        if let Err(error) = directory.revalidate() {
-            inventory.reject(
-                directory_path,
-                CursorDiscoveryIssueKind::Io,
-                error.to_string(),
-                true,
-            );
-        }
+            DirectChild::Missing => {
+                inventory.reject(
+                    input.to_path_buf(),
+                    CursorDiscoveryIssueKind::InvalidLayout,
+                    "Cursor directory entry point must be a provider root containing projects or be beneath a literal projects directory",
+                    true,
+                );
+                revalidate_directory(input, &directory, goal, inventory);
+            }
+        },
     }
 }
 
-fn read_directory_entries(
-    directory_path: &Path,
-    directory: &ProviderSourceDirectory,
+fn scan_projects(
+    projects_root: &Path,
+    projects: ProviderSourceDirectory,
+    authority: ProviderSourceRoot,
+    limits: CursorInventoryLimits,
+    goal: CursorScanGoal,
     inventory: &mut CursorRootInventory,
-) -> Vec<std::ffi::OsString> {
-    let reader = match directory.entries(CURSOR_MAX_DIRECTORY_ENTRIES.saturating_add(1)) {
-        Ok(entries) => entries,
-        Err(error) => {
-            inventory.reject(
-                directory_path.to_path_buf(),
-                CursorDiscoveryIssueKind::Io,
-                error.to_string(),
-                true,
-            );
-            return Vec::new();
-        }
-    };
-    let mut entries = Vec::new();
-    for name in reader {
-        if entries.len() >= CURSOR_MAX_DIRECTORY_ENTRIES {
-            inventory.reject(
-                directory_path.to_path_buf(),
-                CursorDiscoveryIssueKind::LimitExceeded,
-                format!("Cursor directory exceeds the {CURSOR_MAX_DIRECTORY_ENTRIES}-entry limit"),
-                true,
-            );
-            entries.clear();
-            break;
-        }
-        if inventory.stats.entries_visited >= CURSOR_MAX_TRAVERSAL_ENTRIES {
-            inventory.reject(
-                directory_path.to_path_buf(),
-                CursorDiscoveryIssueKind::LimitExceeded,
-                format!(
-                    "Cursor discovery exceeds the {CURSOR_MAX_TRAVERSAL_ENTRIES}-entry traversal limit"
-                ),
-                true,
-            );
-            entries.clear();
-            break;
-        }
-        inventory.stats.entries_visited = inventory.stats.entries_visited.saturating_add(1);
-        entries.push(name);
+) {
+    if !require_literal_projects_root(projects_root, projects_root, inventory) {
+        revalidate_directory(projects_root, &projects, goal, inventory);
+        return;
     }
-    entries
+    let entries = read_directory_entries(projects_root, &projects, limits, inventory);
+    for name in entries {
+        if scan_should_stop(goal, inventory) {
+            break;
+        }
+        let project_path = projects_root.join(&name);
+        match open_enumerated_child(
+            &project_path,
+            &projects,
+            &name,
+            true,
+            false,
+            limits,
+            inventory,
+        ) {
+            Some(OpenedProviderSourcePath::Directory(project)) => scan_project(
+                projects_root,
+                &project_path,
+                project,
+                authority.clone(),
+                limits,
+                goal,
+                inventory,
+            ),
+            Some(OpenedProviderSourcePath::File(_)) | None => {}
+        }
+    }
+    revalidate_directory(projects_root, &projects, goal, inventory);
+}
+
+fn scan_project(
+    projects_root: &Path,
+    project_path: &Path,
+    project: ProviderSourceDirectory,
+    authority: ProviderSourceRoot,
+    limits: CursorInventoryLimits,
+    goal: CursorScanGoal,
+    inventory: &mut CursorRootInventory,
+) {
+    if !require_literal_projects_root(project_path, projects_root, inventory) {
+        revalidate_directory(project_path, &project, goal, inventory);
+        return;
+    }
+    match open_direct_child(
+        project_path,
+        &project,
+        OsStr::new(AGENT_TRANSCRIPTS),
+        true,
+        true,
+        limits,
+        inventory,
+    ) {
+        DirectChild::Directory(agent_transcripts) => scan_agent_transcripts(
+            projects_root,
+            &project_path.join(AGENT_TRANSCRIPTS),
+            agent_transcripts,
+            authority,
+            limits,
+            goal,
+            inventory,
+        ),
+        DirectChild::File(_) => inventory.reject(
+            project_path.join(AGENT_TRANSCRIPTS),
+            CursorDiscoveryIssueKind::InvalidLayout,
+            "Cursor agent-transcripts component must be a directory",
+            true,
+        ),
+        DirectChild::Missing | DirectChild::Failed => {}
+    }
+    revalidate_directory(project_path, &project, goal, inventory);
+}
+
+fn scan_agent_transcripts(
+    projects_root: &Path,
+    agent_transcripts_path: &Path,
+    agent_transcripts: ProviderSourceDirectory,
+    authority: ProviderSourceRoot,
+    limits: CursorInventoryLimits,
+    goal: CursorScanGoal,
+    inventory: &mut CursorRootInventory,
+) {
+    if !require_literal_projects_root(agent_transcripts_path, projects_root, inventory) {
+        revalidate_directory(agent_transcripts_path, &agent_transcripts, goal, inventory);
+        return;
+    }
+    let entries = read_directory_entries(
+        agent_transcripts_path,
+        &agent_transcripts,
+        limits,
+        inventory,
+    );
+    for name in entries {
+        if scan_should_stop(goal, inventory) {
+            break;
+        }
+        let session_path = agent_transcripts_path.join(&name);
+        let Some(session_id) = name.to_str().filter(|value| !value.trim().is_empty()) else {
+            inventory.reject(
+                session_path,
+                CursorDiscoveryIssueKind::InvalidLayout,
+                "Cursor session directory must be nonempty UTF-8",
+                false,
+            );
+            continue;
+        };
+        match open_enumerated_child(
+            &session_path,
+            &agent_transcripts,
+            &name,
+            true,
+            false,
+            limits,
+            inventory,
+        ) {
+            Some(OpenedProviderSourcePath::Directory(session)) => scan_session(
+                projects_root,
+                &session_path,
+                session_id,
+                session,
+                authority.clone(),
+                limits,
+                goal,
+                inventory,
+            ),
+            Some(OpenedProviderSourcePath::File(_)) | None => {}
+        }
+    }
+    revalidate_directory(agent_transcripts_path, &agent_transcripts, goal, inventory);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn scan_session(
+    projects_root: &Path,
+    session_path: &Path,
+    session_id: &str,
+    session: ProviderSourceDirectory,
+    authority: ProviderSourceRoot,
+    limits: CursorInventoryLimits,
+    goal: CursorScanGoal,
+    inventory: &mut CursorRootInventory,
+) {
+    if !require_literal_projects_root(session_path, projects_root, inventory) {
+        revalidate_directory(session_path, &session, goal, inventory);
+        return;
+    }
+    let transcript_name = format!("{session_id}.jsonl");
+    let transcript_path = session_path.join(&transcript_name);
+    match open_direct_child(
+        session_path,
+        &session,
+        OsStr::new(&transcript_name),
+        true,
+        true,
+        limits,
+        inventory,
+    ) {
+        DirectChild::File(file) => inspect_file(
+            &transcript_path,
+            session.relative_path().join(&transcript_name),
+            file,
+            authority,
+            inventory,
+            false,
+            limits,
+        ),
+        DirectChild::Directory(_) => inventory.reject(
+            transcript_path,
+            CursorDiscoveryIssueKind::InvalidLayout,
+            "Cursor transcript leaf must be a regular file",
+            true,
+        ),
+        DirectChild::Missing | DirectChild::Failed => {}
+    }
+    revalidate_directory(session_path, &session, goal, inventory);
 }
 
 fn inspect_file(
-    input: &Path,
     path: &Path,
     authority_relative_path: PathBuf,
     source_file: OpenedProviderSourceFile,
     authority: ProviderSourceRoot,
     inventory: &mut CursorRootInventory,
     explicit_file: bool,
+    limits: CursorInventoryLimits,
 ) {
     if path.extension().and_then(OsStr::to_str) != Some("jsonl") {
         if explicit_file {
@@ -536,6 +894,10 @@ fn inspect_file(
     let Some(projects_root) = project.parent() else {
         return;
     };
+    if !require_literal_projects_root(path, projects_root, inventory) {
+        return;
+    }
+    let selected_root = if explicit_file { path } else { projects_root };
     if ![
         projects_root,
         project,
@@ -543,7 +905,7 @@ fn inspect_file(
         session_directory,
         path,
     ]
-    .contains(&input)
+    .contains(&selected_root)
     {
         inventory.reject(
             path.to_path_buf(),
@@ -577,13 +939,16 @@ fn inspect_file(
         ordinary_file_token,
         authority,
     ) {
-        Ok(source) if inventory.transcripts.len() < CURSOR_MAX_TRANSCRIPTS => {
-            inventory.transcripts.push(source);
+        Ok(source) if inventory.transcripts.len() < limits.max_transcripts => {
+            inventory.transcripts.push(source)
         }
         Ok(_) => inventory.reject(
             path.to_path_buf(),
             CursorDiscoveryIssueKind::LimitExceeded,
-            format!("Cursor discovery exceeds the {CURSOR_MAX_TRANSCRIPTS}-transcript limit"),
+            format!(
+                "Cursor discovery exceeds the {}-transcript inventory limit",
+                limits.max_transcripts
+            ),
             true,
         ),
         Err(reason) => inventory.reject(
@@ -611,63 +976,4 @@ fn cursor_catalog_token(
         reopened.revalidate_leaf()?;
     }
     Ok(token)
-}
-
-#[cfg(all(test, unix))]
-mod tests {
-    use super::*;
-    use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt as _;
-
-    // Creates a non-regular special file (FIFO) at `path`. A FIFO shares the
-    // exact authority-walk rejection path as the reported Cursor `worker.sock`
-    // Unix-domain socket (both classify as NON_REGULAR_PROVIDER_SOURCE_REASON),
-    // and unlike a bound socket it is not constrained by the platform sun_path
-    // length limit under a deep temp directory. The socket-specific errno
-    // mapping is covered separately in the root_handle unix tests.
-    fn make_special_file(path: &Path) {
-        let raw = CString::new(path.as_os_str().as_bytes()).unwrap();
-        let result = unsafe { libc::mkfifo(raw.as_ptr(), 0o600) };
-        assert_eq!(result, 0, "mkfifo {}", path.display());
-    }
-
-    #[test]
-    fn cursor_special_file_beside_transcript_is_skipped_without_failing_discovery() {
-        // Regression: a live special file (for example Cursor's `worker.sock`)
-        // sitting beside valid transcripts must be safely skipped, not treated
-        // as an unreadable source. Previously it invalidated completion, marked
-        // the whole Cursor provider `unknown`, and failed the full refresh so
-        // no lexical index was published for any provider.
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path();
-        let session_directory = root
-            .join("projects")
-            .join("acme")
-            .join(AGENT_TRANSCRIPTS)
-            .join("session-a");
-        std::fs::create_dir_all(&session_directory).unwrap();
-        std::fs::write(session_directory.join("session-a.jsonl"), b"{}\n").unwrap();
-        make_special_file(&session_directory.join("worker.sock"));
-
-        let inventory = discover_cursor_transcripts(root);
-
-        assert!(
-            inventory.completed,
-            "special-file entry must not invalidate completion: {:?}",
-            inventory.issues
-        );
-        assert_eq!(
-            inventory.transcripts.len(),
-            1,
-            "the valid transcript is still discovered alongside the special file"
-        );
-        assert!(
-            inventory
-                .issues
-                .iter()
-                .any(|issue| issue.kind == CursorDiscoveryIssueKind::SpecialFile),
-            "the skipped special file is recorded as a non-fatal issue: {:?}",
-            inventory.issues
-        );
-    }
 }

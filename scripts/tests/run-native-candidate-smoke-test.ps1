@@ -80,7 +80,7 @@ exit /b 99
 '@ | Set-Content -LiteralPath $fake -Encoding Ascii
 
     $fixture = Join-Path $root "fixture.jsonl"
-    '{"record_type":"manifest","schema_version":"ctx-history-jsonl-v1"}' |
+    '{"record_type":"manifest","schema_version":"ctx-history-jsonl-v2"}' |
         Set-Content -LiteralPath $fixture -Encoding Ascii
     $result = Join-Path $root "result.json"
     $expectedVersionFile = Join-Path $root "expected-version"

@@ -29,6 +29,7 @@ fn unsupported_warp(root: &Path) -> ProviderSource {
         catalog_support: ProviderCatalogSupport::None,
         status: ProviderSourceStatus::Unsupported,
         unsupported_reason: Some("fixture has no executable source-backed route"),
+        route_provenance: Default::default(),
     }
 }
 

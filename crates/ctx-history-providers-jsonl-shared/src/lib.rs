@@ -95,8 +95,31 @@ pub mod adapters {
         .map_err(|error| crate::CaptureError::InvalidPayload(error.to_string()))
     }
 
+    pub fn custom_history_with_source_root_lineage<R: JsonlProviderRuntime>(
+        path: PathBuf,
+        catalog_lineage: [u8; 32],
+        source_root_lineage: Option<[u8; 32]>,
+    ) -> Result<Arc<dyn JsonlFamilyAdapter<Runtime = R>>> {
+        provider::custom_history_jsonl::custom_history_jsonl_family_adapter::<R>(
+            provider::custom_history_jsonl::CustomHistorySourceBackedInput::explicit_with_source_root_lineage(
+                path,
+                catalog_lineage,
+                source_root_lineage,
+            ),
+        )
+        .map_err(|error| crate::CaptureError::InvalidPayload(error.to_string()))
+    }
+
     pub fn junie<R: JsonlProviderRuntime>() -> Arc<dyn JsonlFamilyAdapter<Runtime = R>> {
         provider::providers::junie::nativepath::junie_jsonl_adapter::<R>()
+    }
+
+    pub fn junie_with_source_root_lineage<R: JsonlProviderRuntime>(
+        source_root_lineage: Option<[u8; 32]>,
+    ) -> Arc<dyn JsonlFamilyAdapter<Runtime = R>> {
+        provider::providers::junie::nativepath::junie_jsonl_adapter_with_source_root_lineage::<R>(
+            source_root_lineage,
+        )
     }
 
     pub fn kimi<R: JsonlProviderRuntime>() -> Arc<dyn JsonlFamilyAdapter<Runtime = R>> {
@@ -105,8 +128,23 @@ pub mod adapters {
         .into_shared()
     }
 
+    pub fn kimi_with_source_root_lineage<R: JsonlProviderRuntime>(
+        source_root_lineage: Option<[u8; 32]>,
+    ) -> Arc<dyn JsonlFamilyAdapter<Runtime = R>> {
+        provider::providers::kimi::native_path::source_backed::KimiSourceBackedCatalog::shared_with_source_root_lineage::<R>(source_root_lineage)
+            .into_shared()
+    }
+
     pub fn openclaw<R: JsonlProviderRuntime>() -> Arc<dyn JsonlFamilyAdapter<Runtime = R>> {
         provider::providers::openclaw::openclaw_source_backed_adapter_v0::<R>()
+    }
+
+    pub fn openclaw_with_source_root_lineage<R: JsonlProviderRuntime>(
+        source_root_lineage: Option<[u8; 32]>,
+    ) -> Arc<dyn JsonlFamilyAdapter<Runtime = R>> {
+        provider::providers::openclaw::openclaw_source_backed_adapter_v0_with_source_root_lineage::<R>(
+            source_root_lineage,
+        )
     }
 
     pub fn pi<R: JsonlProviderRuntime>(
@@ -124,10 +162,38 @@ pub mod adapters {
         ))
     }
 
+    pub fn pi_with_source_root_lineage<R: JsonlProviderRuntime>(
+        path: PathBuf,
+        automatic: bool,
+        source_root_lineage: Option<[u8; 32]>,
+    ) -> Result<(PathBuf, Arc<dyn JsonlFamilyAdapter<Runtime = R>>)> {
+        let root = if automatic {
+            provider::providers::pi::nativepath::PiSourceBackedRoot::winning(path)?
+        } else {
+            provider::providers::pi::nativepath::PiSourceBackedRoot::explicit(path)
+        };
+        Ok((
+            root.path().to_path_buf(),
+            provider::providers::pi::nativepath::pi_source_backed_adapter_with_source_root_lineage::<
+                R,
+            >(source_root_lineage),
+        ))
+    }
+
     pub fn deepseek_harness<R: JsonlProviderRuntime>(
         source_format: &'static str,
     ) -> Result<Arc<dyn JsonlFamilyAdapter<Runtime = R>>> {
         provider::providers::deepseek_harness::jsonl_adapter::<R>(source_format)
+    }
+
+    pub fn deepseek_harness_with_source_root_lineage<R: JsonlProviderRuntime>(
+        source_format: &'static str,
+        source_root_lineage: Option<[u8; 32]>,
+    ) -> Result<Arc<dyn JsonlFamilyAdapter<Runtime = R>>> {
+        provider::providers::deepseek_harness::jsonl_adapter_with_source_root_lineage::<R>(
+            source_format,
+            source_root_lineage,
+        )
     }
 }
 

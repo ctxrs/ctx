@@ -299,6 +299,7 @@ pub(super) fn capture_single_link_control(path: &Path) -> Result<FileIdentity> {
     Ok(identity)
 }
 
+#[cfg(test)]
 pub(super) fn capture_pointer_bound_single_link_control(
     root: &Path,
     pointer: &ActiveGenerationPointer,

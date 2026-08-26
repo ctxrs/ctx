@@ -1,14 +1,10 @@
 use ctx_history_core::CtxHistoryJsonlSourceRecord;
-use serde_json::{json, Value};
-
-use crate::stable_capture_uuid;
 
 use ctx_history_capture_model::push_provider_import_failure;
 
 use crate::ProviderImportSummary;
 
 pub(crate) const CUSTOM_HISTORY_IDENTIFIER_MAX_BYTES: usize = 512;
-const RELEASED_CUSTOM_HISTORY_SCHEMA_VERSION: &str = "ctx-history-jsonl-v1";
 
 mod nativepath;
 
@@ -20,6 +16,14 @@ pub(crate) fn validate_custom_source_record(
     source: &CtxHistoryJsonlSourceRecord,
 ) {
     validate_custom_history_identifier(summary, line_number, "source_id", &source.source_id);
+    if source.source_id.contains('/') {
+        push_provider_import_failure(
+            summary,
+            line_number,
+            "source_id must not contain '/' because provider_key/source_id is the route selector"
+                .to_owned(),
+        );
+    }
     validate_custom_history_identifier(
         summary,
         line_number,
@@ -53,6 +57,10 @@ pub(crate) fn validate_custom_history_identifier(
 ) {
     let error = if value.trim().is_empty() {
         Some(format!("{field} must not be empty"))
+    } else if value.trim() != value {
+        Some(format!(
+            "{field} must not have leading or trailing whitespace"
+        ))
     } else if value.len() > CUSTOM_HISTORY_IDENTIFIER_MAX_BYTES {
         Some(format!(
             "{field} must be at most {CUSTOM_HISTORY_IDENTIFIER_MAX_BYTES} bytes"
@@ -64,38 +72,5 @@ pub(crate) fn validate_custom_history_identifier(
     };
     if let Some(error) = error {
         push_provider_import_failure(summary, line_number, error);
-    }
-}
-
-pub(crate) fn custom_history_internal_session_id(
-    provider_key: &str,
-    source_id: &str,
-    session_id: &str,
-) -> String {
-    let key = custom_history_key(json!({
-        "schema": RELEASED_CUSTOM_HISTORY_SCHEMA_VERSION,
-        "kind": "session",
-        "provider_key": provider_key,
-        "source_id": source_id,
-        "session_id": session_id,
-    }));
-    let id = stable_capture_uuid(&key, "custom-provider-session-id");
-    format!("ctx-history-jsonl-v1-{id}")
-}
-
-pub(crate) fn custom_history_key(value: Value) -> String {
-    serde_json::to_string(&value).expect("custom history identity key is serializable")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn released_v1_provider_session_identity_is_stable() {
-        assert_eq!(
-            custom_history_internal_session_id("demo-agent", "demo-source", "demo-session"),
-            "ctx-history-jsonl-v1-6227fe54-46fa-715c-a51f-c56eb45e432f"
-        );
     }
 }

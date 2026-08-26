@@ -70,3 +70,8 @@ ctx_rust_test(
     proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
     rustc_env = COMMON_RUSTC_ENV,
 )
+
+test_suite(
+    name = "qualification_tests",
+    tests = ["//crates/ctx-history-source-discovery-qualification:unit_tests"],
+)

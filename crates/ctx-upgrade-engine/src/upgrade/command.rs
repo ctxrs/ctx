@@ -14,8 +14,8 @@ use ctx_history_platform::platform_security::{
 
 use super::download::DownloadedArtifact;
 use super::install::{
-    apply_artifact, capture_install_snapshot, current_install_path, pending_recovery,
-    recover_interrupted_install, remove_terminal_recovery, semantic_install_required, ApplyResult,
+    apply_artifact, capture_install_snapshot, classify_repair_requirements, current_install_path,
+    pending_recovery, recover_interrupted_install, remove_terminal_recovery, ApplyResult,
     InstallRecovery, PendingRecovery, TerminalRecovery,
 };
 #[cfg(unix)]
@@ -27,7 +27,7 @@ use super::metadata::{
     verify_metadata_signature,
 };
 use super::state::{
-    begin_manual_attempt_locked, begin_recovery_attempt_locked, claim_daemon_auto_upgrade,
+    begin_manual_attempt_locked, begin_recovery_attempt_locked, claim_automatic_upgrade,
     reconcile_replacement_terminal_locked, write_state_checked_locked, write_state_error_locked,
     write_state_phase_locked, AutoUpgradeClaim, UpgradeAttempt, UpgradeLock,
 };
@@ -41,8 +41,8 @@ use super::{
 use super::{is_valid_upgrade_attempt_id, ReleaseProcessPort};
 
 mod daemon;
-pub use daemon::PreparedDaemonUpgrade;
-use daemon::{finish_daemon_auto_upgrade, prepare_daemon_auto_upgrade};
+pub use daemon::PreparedAutomaticUpgrade;
+use daemon::{finish_automatic_upgrade, prepare_automatic_upgrade};
 
 const RELEASE_METADATA_MAX_BYTES: usize = 1024 * 1024;
 const RELEASE_METADATA_SIGNATURE_MAX_BYTES: usize = 64 * 1024;
@@ -181,26 +181,64 @@ impl<D: DaemonUpgradePort + ?Sized> UpgradeEngine<'_, D> {
         observer: &O,
         data_root: &Path,
         startup_policy: &P::Snapshot,
-    ) -> Result<Option<PreparedDaemonUpgrade>>
+    ) -> Result<Option<PreparedAutomaticUpgrade>>
     where
         P: AutomaticUpgradePolicyProvider,
         O: UpgradeObserver<P::Snapshot>,
     {
-        prepare_daemon_auto_upgrade(self, policy_provider, observer, data_root, startup_policy)
+        prepare_automatic_upgrade(self, policy_provider, observer, data_root, startup_policy)
     }
 
     pub fn finish_automatic<P, O>(
         &self,
         policy_provider: &P,
         observer: &O,
-        prepared: PreparedDaemonUpgrade,
+        prepared: PreparedAutomaticUpgrade,
         handoff: Option<D::Lease>,
     ) -> Result<()>
     where
         P: AutomaticUpgradePolicyProvider,
         O: UpgradeObserver<P::Snapshot>,
     {
-        finish_daemon_auto_upgrade(self, policy_provider, observer, prepared, handoff)
+        finish_automatic_upgrade(self, policy_provider, observer, prepared, handoff)
+    }
+
+    /// Run one complete automatic attempt from a detached command worker.
+    /// The persistent daemon enters through the same installation scheduler.
+    pub fn run_automatic<P, O>(
+        &self,
+        policy_provider: &P,
+        observer: &O,
+        data_root: &Path,
+        startup_policy: &P::Snapshot,
+    ) -> Result<()>
+    where
+        P: AutomaticUpgradePolicyProvider,
+        O: UpgradeObserver<P::Snapshot>,
+    {
+        let Some(prepared) =
+            self.prepare_automatic(policy_provider, observer, data_root, startup_policy)?
+        else {
+            return Ok(());
+        };
+        let attempt_id = prepared
+            .attempt_id()
+            .ok_or_else(|| anyhow!("automatic upgrade prepared without an attempt identity"))?
+            .to_owned();
+        let owner_root = prepared.data_root().to_path_buf();
+        let handoff = match self.daemon.begin(&owner_root, &attempt_id) {
+            Ok(handoff) => handoff,
+            Err(error) => {
+                let abort_error = prepared.abort(&error).err();
+                return Err(match abort_error {
+                    Some(abort_error) => error.context(format!(
+                        "also failed to terminalize automatic upgrade state: {abort_error:#}"
+                    )),
+                    None => error,
+                });
+            }
+        };
+        self.finish_automatic(policy_provider, observer, prepared, Some(handoff))
     }
 }
 
@@ -517,9 +555,13 @@ fn apply_upgrade<D: DaemonUpgradePort + ?Sized>(
     let attempt = begin_manual_attempt_locked(data_root, &upgrade_lock, "manual_apply")?;
     let result = (|| -> Result<UpgradeOutcome> {
         let plan = build_upgrade_plan(engine, &upgrade_lock, policy, channel_override, true)?;
-        let semantic_repair_required =
-            semantic_install_required(engine.semantic_layout, &plan, data_root)?;
-        if !plan.update_available && !semantic_repair_required {
+        let repairs = classify_repair_requirements(
+            engine.semantic_layout,
+            &plan,
+            data_root,
+            policy.semantic_enabled,
+        )?;
+        if !plan.update_available && !repairs.any() {
             write_state_checked_locked(
                 data_root,
                 &upgrade_lock,
@@ -573,6 +615,11 @@ fn apply_upgrade<D: DaemonUpgradePort + ?Sized>(
                         "ctx {} would upgrade to {}.",
                         plan.current_version, plan.latest_version
                     )
+                } else if repairs.legacy_runtime {
+                    format!(
+                        "ctx {} would repair its signed legacy ONNX Runtime installation.",
+                        plan.current_version
+                    )
                 } else {
                     format!(
                         "ctx {} would provision signed Semantic model and runtime assets.",
@@ -601,7 +648,8 @@ fn apply_upgrade<D: DaemonUpgradePort + ?Sized>(
         } else {
             None
         };
-        let mut runtime_artifact = if plan.update_available && plan.semantic_provisioning.is_none()
+        let mut runtime_artifact = if (plan.update_available || repairs.legacy_runtime)
+            && plan.semantic_provisioning.is_none()
         {
             match (
                 plan.metadata.onnxruntime.as_ref(),
@@ -625,7 +673,7 @@ fn apply_upgrade<D: DaemonUpgradePort + ?Sized>(
             None
         };
         let mut semantic_artifacts = Vec::new();
-        if semantic_repair_required {
+        if repairs.catalog {
             let provisioning = plan
                 .semantic_provisioning
                 .as_ref()
@@ -696,6 +744,9 @@ fn apply_upgrade<D: DaemonUpgradePort + ?Sized>(
                     plan.latest_version,
                     plan.install_path.display()
                 )
+            } else if repairs.legacy_runtime {
+                "scheduled signed legacy ONNX Runtime repair; replacement will finish after this process exits"
+                    .to_owned()
             } else {
                 "scheduled signed Semantic asset repair; replacement will finish after this process exits"
                     .to_owned()
@@ -737,6 +788,11 @@ fn apply_upgrade<D: DaemonUpgradePort + ?Sized>(
                 plan.current_version,
                 plan.latest_version,
                 plan.install_path.display()
+            )
+        } else if repairs.legacy_runtime {
+            format!(
+                "repaired signed legacy ONNX Runtime installation for ctx {}",
+                plan.current_version
             )
         } else {
             format!(

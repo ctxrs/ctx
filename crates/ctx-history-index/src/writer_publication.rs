@@ -57,8 +57,9 @@ struct VerifiedCandidate {
 }
 
 impl GenerationWriter {
-    /// Rebinds opaque owner metadata to an exact reused generation without
-    /// changing its logical or physical index payload.
+    /// Rebinds opaque owner metadata without changing the logical index payload.
+    /// Current-format publications preserve their generation identity; a
+    /// migrated publication first installs its required current manifest anchor.
     pub fn republish_current_publication_metadata(
         self,
         expected_generation_id: &str,
@@ -76,13 +77,14 @@ impl GenerationWriter {
             .ok_or(IndexError::WriterInvariant(
                 "publication metadata republish requires an active generation",
             ))?;
-        let generation_id = self
-            .base_publication
-            .as_ref()
-            .ok_or(IndexError::WriterInvariant(
-                "publication metadata republish requires a base publication",
-            ))?
-            .generation_id();
+        let base_publication =
+            self.base_publication
+                .as_ref()
+                .ok_or(IndexError::WriterInvariant(
+                    "publication metadata republish requires a base publication",
+                ))?;
+        let generation_id = base_publication.generation_id();
+        let requires_current_manifest_anchor = base_publication.requires_current_manifest_anchor();
         if generation_id != expected_generation_id
             || pointer.active().generation_id() != expected_generation_id
         {
@@ -93,6 +95,11 @@ impl GenerationWriter {
                 actual: publication_metadata.len(),
                 maximum: MAX_PUBLICATION_METADATA_BYTES,
             });
+        }
+        if requires_current_manifest_anchor {
+            let published =
+                self.commit_with_publication_metadata(|_| true, move |_| Ok(publication_metadata))?;
+            return Ok(published.into_parts().2);
         }
         let outcome = republish_current_with_publication_metadata(
             &self.root,
@@ -396,6 +403,12 @@ impl GenerationWriter {
             return Ok(reused);
         }
 
+        // A provider-source configuration change can be the only manifest
+        // mutation (for example, disabling automatic discovery while carrying
+        // the previously indexed routes). Materialize a candidate so that
+        // this metadata-only successor is published atomically as well.
+        self.writer_mut()?;
+
         // Build opaque owner metadata from the complete staged manifest before
         // the terminal source fence. The bytes are bound only if every source
         // and inventory revalidation below succeeds, so observations sampled
@@ -412,7 +425,7 @@ impl GenerationWriter {
         let publication_metadata =
             metadata_factory(PublicationMetadataContext::new(&generation_id, &manifest))?;
 
-        self.writer_mut()?;
+        self.apply_route_deletions()?;
         let candidate_path = self.candidate_path()?;
         let previous_generation_id = self
             .base_publication
@@ -580,7 +593,6 @@ impl GenerationWriter {
         if let Some(hook) = self.before_pointer_publication.take() {
             hook(&candidate_path);
         }
-        report_progress(PublicationStage::Activation)?;
         let activation_fence =
             self.candidate_activation_fence
                 .as_ref()
@@ -589,14 +601,29 @@ impl GenerationWriter {
                 ))?;
         let terminal_index = verified.publication.publication().searcher().index();
         let expected_audit = verified.publication.physical_integrity_audit();
-        match publish_active_generation_pointer_validated(&root, &next_pointer, || {
-            #[cfg(windows)]
-            let terminal_guard = ctx_history_index_generation::acquire_terminal_publication_guard(
+        #[cfg(windows)]
+        let mut terminal_guard = Some(
+            ctx_history_index_generation::acquire_terminal_publication_guard(
                 &root,
                 &candidate_path,
                 terminal_index,
                 self.active_pointer.as_ref(),
-            )?;
+            )?,
+        );
+        certify_candidate_physical_integrity(
+            &root,
+            &self.active_pointer_fence,
+            &verified.slot,
+            terminal_index,
+            expected_audit,
+        )?;
+        let reopened_candidate = VerifiedIndex::open_certified_candidate_before_activation(
+            &root,
+            &self.active_pointer_fence,
+            &verified.slot,
+        )?;
+        report_progress(PublicationStage::Activation)?;
+        match publish_active_generation_pointer_validated(&root, &next_pointer, || {
             activation_fence.validate_binding()?;
             prepared_manifest
                 .verify_persisted(&root)
@@ -606,18 +633,23 @@ impl GenerationWriter {
                 &candidate_path,
                 self.active_pointer.as_ref(),
             )?;
-            #[cfg(not(windows))]
-            verify_candidate_physical_fence(
+            ctx_history_index_generation::verify_candidate_physical_integrity_read_only(
+                &root,
+                &self.active_pointer_fence,
+                &verified.slot,
                 terminal_index,
-                &candidate_path,
-                self.active_pointer.as_ref(),
-                expected_audit,
             )?;
             #[cfg(windows)]
-            terminal_guard.verify_physical_fence(expected_audit)?;
+            terminal_guard
+                .as_ref()
+                .ok_or(ctx_history_index_generation::GenerationError::ConcurrentGenerationChange)?
+                .verify_physical_fence(expected_audit)?;
             activation_fence.validate_binding()?;
             #[cfg(windows)]
             {
+                let terminal_guard = terminal_guard.take().ok_or(
+                    ctx_history_index_generation::GenerationError::ConcurrentGenerationChange,
+                )?;
                 terminal_guard.verify_identities()?;
                 Ok(terminal_guard)
             }
@@ -669,27 +701,31 @@ impl GenerationWriter {
                 retention_lease.as_ref(),
             );
         }
-        let _ = publication::certify_activated_generation(
-            &root,
-            &next_pointer,
-            next_pointer.active(),
-            verified.publication.publication().searcher().index(),
-            verified.publication.physical_integrity_audit(),
-        );
-
         let receipt = CommitReceipt::from_verified_manifest(
             opstamp,
             generation_id.clone(),
             std::sync::Arc::clone(verified.publication.publication().shared_manifest()),
         );
-        let verified_index = return_verified_index.then(|| {
-            VerifiedIndex::from_verified_publication(verified.publication.into_publication())
-        });
+        let verified_index = return_verified_index.then_some(reopened_candidate);
         Ok(CommitGenerationOutcome {
             receipt,
             disposition: PublicationDisposition::Published,
             verified_index,
         })
+    }
+
+    fn apply_route_deletions(&mut self) -> Result<()> {
+        let source_key_field = self.fields.source_key;
+        let tokens = self
+            .route_deletions
+            .iter()
+            .map(source_token)
+            .collect::<Vec<_>>();
+        let writer = self.writer_mut()?;
+        for token in tokens {
+            writer.delete_term(Term::from_field_text(source_key_field, &token));
+        }
+        Ok(())
     }
 
     fn ensure_reusable_base_not_invalidated(&self) -> Result<()> {
@@ -876,123 +912,9 @@ impl GenerationWriter {
         sync_directory(&self.root.join(INDEX_GENERATIONS_DIRECTORY))?;
         Ok(())
     }
-
-    fn next_manifest(&self) -> Result<GenerationManifest> {
-        self.validate_source_route_plan_complete()?;
-        if let Some(base) = self.base_publication.as_ref() {
-            if self.source_replacement_manifest_is_route_stable(base.manifest()) {
-                #[cfg(any(test, feature = "test-support"))]
-                SOURCE_REPLACEMENT_MANIFESTS
-                    .with(|visits| visits.set(visits.get().saturating_add(1)));
-                return base.successor_manifest_from_source_replacements(
-                    staging::manifest_source_replacements(self)?,
-                );
-            }
-        }
-        let deleted_sources = self
-            .deletions
-            .keys()
-            .chain(&self.route_deletions)
-            .map(|source| source.identity().digest())
-            .collect::<BTreeSet<_>>();
-        let mut source_upserts = BTreeMap::<[u8; 32], CertifiedSource>::new();
-        for pending in self.pending.values() {
-            let certificate = pending.certificate.as_ref().ok_or_else(|| {
-                IndexError::SourceNotCertified(pending.source.identity().to_string())
-            })?;
-            source_upserts.insert(pending.source.identity().digest(), certificate.clone());
-        }
-        let sources = merge_manifest_sources(
-            self.base_manifest().map_or(&[][..], |base| &base.sources),
-            source_upserts,
-            &deleted_sources,
-        );
-        let record_aggregates = staging::manifest_record_aggregates(self, &sources)?;
-        let mut source_routes = if let Some(routes) = &self.present_source_routes {
-            routes.clone()
-        } else {
-            implicit_source_routes(&sources)?
-        };
-        for route in &mut source_routes {
-            let Some(delta) = self.partial_source_route_deltas.get(route.route_identity()) else {
-                continue;
-            };
-            if route.missing_state().is_some() {
-                return Err(IndexError::InvalidSourceRoutePlan(format!(
-                    "partial route {} cannot carry missing state",
-                    route.route_identity().as_str()
-                )));
-            }
-            *route = SourceRouteSnapshot::present(
-                route.route_identity().clone(),
-                merge_partial_route_members(route.sources(), delta),
-            )?;
-        }
-        source_routes.extend(self.observed_missing_routes.values().cloned());
-        GenerationManifest::from_parts_with_record_aggregates(
-            sources,
-            record_aggregates,
-            source_routes,
-        )
-    }
-
-    fn source_replacement_manifest_is_route_stable(&self, base: &GenerationManifest) -> bool {
-        if self.pending.is_empty()
-            || !self.deletions.is_empty()
-            || !self.route_deletions.is_empty()
-            || !self.observed_missing_routes.is_empty()
-        {
-            return false;
-        }
-        let Some(routes) = self.present_source_routes.as_deref() else {
-            return false;
-        };
-        if routes.len() != base.source_routes().len()
-            || routes
-                .iter()
-                .zip(base.source_routes())
-                .any(|(current, base)| !current.exact_snapshot_eq(base))
-        {
-            return false;
-        }
-        for (route_identity, delta) in &self.partial_source_route_deltas {
-            if !delta.deletions.is_empty() {
-                return false;
-            }
-            let Some(base_route) = base.source_route(route_identity) else {
-                return false;
-            };
-            for (digest, source) in &delta.upserts {
-                let Some(base_source) = base_route
-                    .sources()
-                    .binary_search_by_key(digest, |source| source.identity().digest())
-                    .ok()
-                    .and_then(|index| base_route.sources().get(index))
-                else {
-                    return false;
-                };
-                if !base_source.exact_descriptor_eq(source) {
-                    return false;
-                }
-            }
-        }
-        self.pending.values().all(|pending| {
-            base.sources
-                .binary_search_by_key(&pending.source.identity().digest(), |source| {
-                    source.observation().source().identity().digest()
-                })
-                .ok()
-                .and_then(|index| base.sources.get(index))
-                .is_some_and(|source| {
-                    source
-                        .observation()
-                        .source()
-                        .exact_descriptor_eq(&pending.source)
-                })
-        })
-    }
 }
 
 mod manifest_merge;
+mod manifest_planning;
 
 use manifest_merge::{merge_manifest_sources, merge_partial_route_members};

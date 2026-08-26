@@ -25,6 +25,7 @@ pub(super) fn custom_provider_source(path: PathBuf, exists: bool) -> Result<Prov
             ProviderSourceStatus::Missing
         },
         unsupported_reason: None,
+        route_provenance: Default::default(),
     })
 }
 

@@ -31,7 +31,7 @@ use ctx_history_capture_runtime::{
 use ctx_history_core::{
     derive_event_id, derive_session_id, CaptureProvider, CoreRecord, EventIdentityInput,
     NativeItemKey, NativeSessionKey, ProjectionContractError, ScannedSourceCounts,
-    SessionIdentityInput, SourceKey, SourceObservation, TypedKey,
+    SessionIdentityInput, SourceAnchorScope, SourceKey, SourceObservation, TypedKey,
 };
 pub use ctx_history_openclaw_schema::{
     OPENCLAW_AGENT_SCHEMA_VERSION, OPENCLAW_AGENT_SQLITE_SOURCE_FORMAT,
@@ -143,14 +143,24 @@ pub mod test_support {
 pub struct OpenClawSqliteAdapter<B: ProviderRuntimeBinding> {
     data_root: PathBuf,
     path: PathBuf,
+    source_scope: SourceAnchorScope,
     binding: PhantomData<fn() -> B>,
 }
 
 impl<B: ProviderRuntimeBinding> OpenClawSqliteAdapter<B> {
     pub fn new(data_root: impl Into<PathBuf>, path: impl Into<PathBuf>) -> Self {
+        Self::new_scoped(data_root, path, SourceAnchorScope::Unqualified)
+    }
+
+    pub fn new_scoped(
+        data_root: impl Into<PathBuf>,
+        path: impl Into<PathBuf>,
+        source_scope: SourceAnchorScope,
+    ) -> Self {
         Self {
             data_root: data_root.into(),
             path: path.into(),
+            source_scope,
             binding: PhantomData,
         }
     }
@@ -184,7 +194,7 @@ impl<B: ProviderRuntimeBinding> ReplacementDocumentTree for OpenClawSqliteAdapte
         &self,
     ) -> SourceBackedRouteResult<CompleteDocumentTree<Self::Leaf, Self::TreeAuthority>> {
         let agent_id = path_agent_id(&self.path).map_err(route_error)?;
-        let source = source_key(&agent_id).map_err(route_error)?;
+        let source = source_key_scoped(&agent_id, self.source_scope).map_err(route_error)?;
         let connection = open_database(&self.data_root, &self.path)
             .map_err(|error| route_error(OpenClawSqliteError::Capture(error)))?;
         if let Err(error) = validate_database(&connection, &agent_id) {
@@ -796,14 +806,20 @@ fn open_database(
     open_provider_sqlite_readonly(data_root, path)
 }
 
+#[cfg(test)]
 fn source_key(agent_id: &str) -> Result<SourceKey> {
-    SourceKey::derive_provider_native(
+    source_key_scoped(agent_id, SourceAnchorScope::Unqualified)
+}
+
+fn source_key_scoped(agent_id: &str, source_scope: SourceAnchorScope) -> Result<SourceKey> {
+    SourceKey::derive_provider_native_scoped(
         CaptureProvider::OpenClaw.as_str(),
         OPENCLAW_AGENT_SQLITE_SOURCE_FORMAT,
         SOURCE_SCHEMA_VARIANT,
         1,
         SOURCE_ANCHOR_NAMESPACE,
         TypedKey::utf8(agent_id)?,
+        source_scope,
     )
     .map_err(contract_capture)
 }

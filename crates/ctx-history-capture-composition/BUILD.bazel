@@ -73,6 +73,20 @@ rust_library(
     rustc_env = COMMON_RUSTC_ENV,
 )
 
+rust_library(
+    name = "test_support_lib",
+    testonly = True,
+    srcs = PROD_SRCS + ["src/source_backed/driver/receipts/test_support.rs"],
+    crate_name = "ctx_history_capture_composition",
+    crate_root = "src/lib.rs",
+    edition = crate_edition(),
+    aliases = aliases(normal = True, normal_dev = True, proc_macro_dev = True),
+    deps = all_crate_deps(normal = True, normal_dev = True) + COMPOSITION_TEST_DEPS,
+    proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+    rustc_env = COMMON_RUSTC_ENV,
+    rustc_flags = ['--cfg=feature="test-support"'],
+)
+
 ctx_rust_test(
     name = "unit_tests",
     srcs = RUST_SRCS,
@@ -81,7 +95,11 @@ ctx_rust_test(
     compile_data = ["//:provider_import_policy", "//:provider_support_matrix"],
     edition = crate_edition(),
     aliases = aliases(normal_dev = True, proc_macro_dev = True),
-    data = ["//:provider_support_matrix", ":provider_architecture_sources"],
+    data = [
+        "//:provider_support_matrix",
+        "//:public_test_fixtures",
+        ":provider_architecture_sources",
+    ],
     deps = all_crate_deps(normal = True, normal_dev = True) + COMPOSITION_TEST_DEPS,
     proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
     rustc_env = COMMON_RUSTC_ENV,

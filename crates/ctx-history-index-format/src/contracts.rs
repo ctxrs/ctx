@@ -1,4 +1,8 @@
-use ctx_history_capture_model::{SourceRouteIdentity, SourceRouteIdentityError};
+pub use ctx_history_capture_model::ProviderRootConnectorBinding;
+use ctx_history_capture_model::{
+    provider_source_config_digest, SourceRouteIdentity, SourceRouteIdentityError,
+    MAX_CONFIGURED_PROVIDER_ROOTS,
+};
 use ctx_history_core::{
     CertifiedSource, CoreRecordError, ProjectionContractError, SourceKey, CORE_RECORD_VERSION,
     IDENTITY_VERSION,
@@ -16,12 +20,17 @@ use crate::{
 };
 
 mod digest;
+mod provider_root;
 use digest::{decode_sha256_hex, is_sha256_hex};
+pub use provider_root::{
+    AppliedProviderRoot, AppliedProviderRootSourceMembership, DetachedReleasedProviderRootAuthority,
+};
 
-pub const GENERATION_MANIFEST_VERSION: u32 = 8;
+pub const GENERATION_MANIFEST_VERSION: u32 = 10;
 pub const LEXICAL_SCHEMA_VERSION: u32 = LEXICAL_SCHEMA_REVISION;
 pub const LEXICAL_ANALYZER_VERSION: u32 = LEXICAL_TOKENIZER_REVISION;
 pub const MAX_PUBLICATION_METADATA_BYTES: usize = 48 * 1024;
+pub const MAX_DETACHED_RELEASED_PROVIDER_ROOTS: usize = MAX_CONFIGURED_PROVIDER_ROOTS;
 
 pub const COMMIT_PAYLOAD_VERSION: u32 = 2;
 pub const INDEX_MEMORY_MIN_PER_THREAD: usize = 15_000_000;
@@ -187,6 +196,18 @@ pub enum IndexError {
     SourceNotOwnedByRoute(String),
     #[error("retained source {0} is owned by more than one source route")]
     SourceOwnedByMultipleRoutes(String),
+    #[error("generation provider-root configuration digest is invalid")]
+    InvalidProviderRootConfigDigest,
+    #[error("generation provider roots are invalid or non-canonical: {0}")]
+    InvalidProviderRoots(String),
+    #[error("provider root {root_id} references unknown source route {route_id}")]
+    ProviderRootRouteNotRetained { root_id: String, route_id: String },
+    #[error("source route {route_id} belongs to more than one provider root")]
+    SourceRouteOwnedByMultipleProviderRoots { route_id: String },
+    #[error("unknown provider root selector in the pinned generation")]
+    UnknownProviderRootSelector(String),
+    #[error("unknown provider root group in the pinned generation")]
+    UnknownProviderRootGroup(String),
     #[error(
         "generation manifest totals do not match its source certificates: \
          documents {documents}/{expected_documents}, bytes {bytes}/{expected_bytes}"
@@ -275,6 +296,19 @@ pub enum IndexError {
     InvalidStoredDocumentField(&'static str),
     #[error("one session has conflicting provider-native lineage claims: {0}")]
     ConflictingProviderNativeSessionClaim(&'static str),
+    #[error(
+        "session grouping batch has too many exact coordinates: requested {requested}, maximum {maximum}"
+    )]
+    InvalidSessionGroupingCoordinateCount { requested: usize, maximum: usize },
+    #[error("session grouping batch repeats exact coordinate {0}")]
+    DuplicateSessionGroupingCoordinate(String),
+    #[error("session grouping authority is missing exact coordinate {0}")]
+    MissingSessionGroupingCoordinate(String),
+    #[error("session grouping authority work limit exceeded for {operation}: maximum {maximum}")]
+    SessionGroupingAuthorityWorkLimitExceeded {
+        operation: &'static str,
+        maximum: usize,
+    },
     #[error("lexical index checksum verification failed for one or more active files")]
     ChecksumMismatch,
     #[error("ID prefix must contain 1 to 32 hexadecimal digits, with optional hyphens")]
@@ -786,6 +820,11 @@ pub struct GenerationManifest {
     pub sources: Vec<CertifiedSource>,
     pub core_record_aggregates: Vec<SourceCoreRecordAggregate>,
     source_routes: Vec<SourceRouteSnapshot>,
+    automatic_provider_discovery: bool,
+    provider_root_config_digest: String,
+    provider_roots: Vec<AppliedProviderRoot>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    detached_released_provider_roots: Vec<DetachedReleasedProviderRootAuthority>,
 }
 
 /// Incrementally composable commitment to one source's exact stored Core

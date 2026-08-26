@@ -1,0 +1,34 @@
+load("//crates/ctx-cli-contract-tests:test_targets.bzl", "ctx_cli_contract_test")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files([
+    "BUILD.bazel",
+    "Cargo.toml",
+])
+
+filegroup(
+    name = "cargo_package_data",
+    srcs = glob(["**"], exclude = ["BUILD.bazel"]),
+)
+
+ctx_cli_contract_test(
+    name = "index_tests",
+    src = "tests/index.rs",
+    extra_crates = ["anstream"],
+    test_support = [
+        "base",
+        "fixtures",
+    ],
+)
+
+ctx_cli_contract_test(
+    name = "stats_tests",
+    src = "tests/stats.rs",
+    deps = [
+        "//crates/ctx-history-core:lib",
+        "//crates/ctx-history-index:lib",
+    ],
+    extra_crates = ["rusqlite"],
+    tags = ["cli-contract", "privacy"],
+)

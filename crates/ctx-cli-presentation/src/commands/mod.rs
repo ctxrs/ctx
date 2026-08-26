@@ -15,7 +15,9 @@ mod status_presentation;
 mod status_usage;
 
 pub use doctor::DoctorArgs;
-pub use doctor_presentation::{render_doctor_human, source_epoch_findings};
+pub use doctor_presentation::{
+    render_doctor_human, source_epoch_findings, DoctorRefreshFailure, DoctorSearchAvailability,
+};
 pub use import_diagnostics::render_partial_deprecation;
 pub use index::IndexArgs;
 pub use list::{ListArgs, ListEventsArgs, ListTarget};

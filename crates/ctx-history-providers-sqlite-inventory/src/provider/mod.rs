@@ -51,6 +51,44 @@ pub(crate) mod sqlite {
 pub(crate) mod source_backed {
     pub(crate) use crate::lifecycle::*;
 
+    pub(crate) fn record_sqlite_rejection(
+        rejections: &mut SourceBackedRecordRejectionDrafts,
+        source: &ctx_history_core::SourceKey,
+        provider: ctx_history_core::CaptureProvider,
+        source_path: &std::path::Path,
+        physical_record: u64,
+        class: SourceBackedRecordRejectionClass,
+        detail: impl Into<String>,
+    ) {
+        rejections.record(sqlite_rejection_draft(
+            source,
+            provider,
+            source_path,
+            physical_record,
+            class,
+            detail,
+        ));
+    }
+
+    pub(crate) fn sqlite_rejection_draft(
+        source: &ctx_history_core::SourceKey,
+        provider: ctx_history_core::CaptureProvider,
+        source_path: &std::path::Path,
+        physical_record: u64,
+        class: SourceBackedRecordRejectionClass,
+        detail: impl Into<String>,
+    ) -> SourceBackedRecordRejectionDraft {
+        SourceBackedRecordRejectionDraft {
+            source: source.clone(),
+            provider,
+            source_selector: source_path.to_string_lossy().into_owned(),
+            line_number: physical_record,
+            payload_type: Some("sqlite_row".to_owned()),
+            class,
+            detail: detail.into(),
+        }
+    }
+
     pub(crate) fn route_error(error: impl std::fmt::Display) -> SourceBackedRouteError {
         SourceBackedRouteError::new(SourceBackedRouteErrorKind::InvalidSource, error.to_string())
     }

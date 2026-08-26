@@ -45,15 +45,14 @@ pub(super) fn automatic_route_coverage_binding(
     let requested_kind = route_coverage_path_kind(&requested.path)?;
     let mut matched = None;
     for route in registry.routes().filter(|route| {
-        route.selection == Some(SourceBackedRouteSelection::Automatic)
-            && route.source.provider == requested.provider
+        route.source.provider == requested.provider
             && route.certified_source_format == requested.certified_source_format
     }) {
         let Some(route_identity) = route.route_identity.as_ref() else {
             continue;
         };
         let Some(registration_sources) =
-            registry.automatic_route_registration_sources(route_identity)
+            registry.catalog_coverage_route_registration_sources(route_identity)
         else {
             continue;
         };
@@ -83,7 +82,7 @@ pub(super) fn installed_automatic_route_coverage(
     let mut matched = None;
     for route_identity in catalog.route_ids() {
         let Some(registration_sources) =
-            catalog.automatic_route_registration_sources(route_identity)
+            catalog.catalog_coverage_route_registration_sources(route_identity)
         else {
             continue;
         };

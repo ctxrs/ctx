@@ -361,6 +361,38 @@ fn import_progress_json_goes_to_stderr_without_polluting_stdout() {
 }
 
 #[test]
+fn provider_import_uses_named_root_when_automatic_discovery_is_disabled() {
+    let temp = tempdir();
+    let named_root = temp.path().join("work-codex");
+    copy_dir_all(
+        Path::new(&provider_history_fixture("codex-sessions")),
+        &named_root.join("sessions"),
+    );
+    fs::create_dir_all(data_root(&temp)).unwrap();
+    fs::write(
+        data_root(&temp).join("config.toml"),
+        format!(
+            "[sources]\nautomatic = false\n\n[sources.roots.work]\nprovider = \"codex\"\npath = {:?}\n",
+            named_root.display().to_string(),
+        ),
+    )
+    .unwrap();
+
+    let report = json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "codex",
+        "--format=json",
+        "--progress",
+        "none",
+    ]));
+
+    assert_eq!(report["outcome"], "success", "{report:#}");
+    assert_eq!(report["sources"][0]["status"], "published", "{report:#}");
+    assert_eq!(report["sources"][0]["successful_routes"], 1, "{report:#}");
+}
+
+#[test]
 fn warm_no_op_import_progress_keeps_per_run_bytes_unknown() {
     let temp = tempdir();
     copy_dir_all(
@@ -479,7 +511,7 @@ fn explicit_import_reuses_running_daemon_when_autostart_is_disabled() {
             .args([
                 "import",
                 "--input-format",
-                "ctx-history-jsonl-v1",
+                "ctx-history-jsonl-v2",
                 "--path",
                 fixture.to_str().unwrap(),
                 "--format=json",
@@ -515,7 +547,7 @@ fn manual_indexing_import_uses_a_finite_worker_and_background_search_stays_inert
             .args([
                 "import",
                 "--input-format",
-                "ctx-history-jsonl-v1",
+                "ctx-history-jsonl-v2",
                 "--path",
                 fixture.to_str().unwrap(),
                 "--format=json",
@@ -793,7 +825,7 @@ fn import_custom_history_jsonl_format_is_searchable_and_idempotent() {
     let fixture = temp.path().join("basic.jsonl");
     fs::write(
         &fixture,
-        fs::read(custom_history_fixture("released-v1-basic.jsonl")).unwrap(),
+        fs::read(custom_history_fixture("basic.jsonl")).unwrap(),
     )
     .unwrap();
     let fixture = fixture.to_str().unwrap().to_owned();
@@ -801,7 +833,7 @@ fn import_custom_history_jsonl_format_is_searchable_and_idempotent() {
     let first = json_output(ctx(&temp).args([
         "import",
         "--input-format",
-        "ctx-history-jsonl-v1",
+        "ctx-history-jsonl-v2",
         "--path",
         &fixture,
         "--format=json",
@@ -811,7 +843,7 @@ fn import_custom_history_jsonl_format_is_searchable_and_idempotent() {
     assert_eq!(first["totals"]["current_indexed_documents"], 2);
     assert_eq!(first["totals"]["current_rejected_records"], 0);
     assert_eq!(first["sources"][0]["provider"], "custom");
-    assert_eq!(first["sources"][0]["source_format"], "ctx_history_jsonl_v1");
+    assert_eq!(first["sources"][0]["source_format"], "ctx_history_jsonl_v2");
 
     let search = json_output(ctx(&temp).args([
         "search",
@@ -827,15 +859,12 @@ fn import_custom_history_jsonl_format_is_searchable_and_idempotent() {
         "custom import was not searchable: {search:#}"
     );
     assert_eq!(search["results"][0]["agent_scope"], "primary");
-    assert_eq!(
-        search["results"][0]["provider_session_id"],
-        "ctx-history-jsonl-v1-6227fe54-46fa-715c-a51f-c56eb45e432f"
-    );
+    assert_eq!(search["results"][0]["provider_session_id"], "demo-session");
 
     let second = json_output(ctx(&temp).args([
         "import",
         "--input-format",
-        "ctx-history-jsonl-v1",
+        "ctx-history-jsonl-v2",
         "--path",
         &fixture,
         "--format=json",
@@ -919,7 +948,7 @@ fn one_event_native_and_explicit_imports_publish_core_generations() {
     let records = [
         json!({
             "record_type": "manifest",
-            "schema_version": "ctx-history-jsonl-v1"
+            "schema_version": "ctx-history-jsonl-v2"
         }),
         json!({
             "record_type": "source",
@@ -935,7 +964,7 @@ fn one_event_native_and_explicit_imports_publish_core_generations() {
         json!({
             "record_type": "session",
             "source_id": "one-event-source",
-            "session_id": "one-event-session",
+            "provider_session_id": "one-event-session",
             "started_at": "2026-07-26T12:00:00Z",
             "agent_scope": "primary",
             "status": "completed"
@@ -943,7 +972,7 @@ fn one_event_native_and_explicit_imports_publish_core_generations() {
         json!({
             "record_type": "event",
             "source_id": "one-event-source",
-            "session_id": "one-event-session",
+            "provider_session_id": "one-event-session",
             "event_index": 0,
             "event_id": "one-event",
             "event_type": "message",
@@ -966,7 +995,7 @@ fn one_event_native_and_explicit_imports_publish_core_generations() {
     let explicit_import = json_output(ctx(&explicit).args([
         "import",
         "--input-format",
-        "ctx-history-jsonl-v1",
+        "ctx-history-jsonl-v2",
         "--path",
         fixture.to_str().unwrap(),
         "--no-daemon",
@@ -1015,7 +1044,7 @@ fn import_custom_history_jsonl_format_imports_valid_rows_and_reports_rejections(
     let import = json_output(ctx(&temp).args([
         "import",
         "--input-format",
-        "ctx-history-jsonl-v1",
+        "ctx-history-jsonl-v2",
         "--path",
         &fixture,
         "--format=json",
@@ -1048,12 +1077,18 @@ fn custom_history_structural_manifest_failures_fail_closed_and_recover() {
     let fixture = temp.path().join("structural-manifest.jsonl");
     let fixture_arg = fixture.to_str().unwrap();
 
-    let cases: [(&str, &[u8], &str, &str); 3] = [
+    let cases: [(&str, &[u8], &str, &str); 4] = [
         (
             "missing",
             b"",
-            "missing manifest record for ctx-history-jsonl-v1",
+            "missing manifest record for ctx-history-jsonl-v2",
             "invalid capture payload",
+        ),
+        (
+            "released-v1",
+            b"{\"record_type\":\"manifest\",\"schema_version\":\"ctx-history-jsonl-v1\"}\n",
+            "unsupported custom history schema version `ctx-history-jsonl-v1`",
+            "unsupported provider schema",
         ),
         (
             "unsupported",
@@ -1063,7 +1098,7 @@ fn custom_history_structural_manifest_failures_fail_closed_and_recover() {
         ),
         (
             "duplicate",
-            b"{\"record_type\":\"manifest\",\"schema_version\":\"ctx-history-jsonl-v1\"}\n{\"record_type\":\"manifest\",\"schema_version\":\"ctx-history-jsonl-v1\"}\n",
+            b"{\"record_type\":\"manifest\",\"schema_version\":\"ctx-history-jsonl-v2\"}\n{\"record_type\":\"manifest\",\"schema_version\":\"ctx-history-jsonl-v2\"}\n",
             "duplicate manifest record at line 2",
             "invalid capture payload",
         ),
@@ -1073,7 +1108,7 @@ fn custom_history_structural_manifest_failures_fail_closed_and_recover() {
         let stderr = failure_stderr(ctx(&temp).args([
             "import",
             "--input-format",
-            "ctx-history-jsonl-v1",
+            "ctx-history-jsonl-v2",
             "--path",
             fixture_arg,
             "--no-daemon",
@@ -1108,18 +1143,18 @@ fn custom_history_structural_manifest_failures_fail_closed_and_recover() {
     fs::write(
         &fixture,
         concat!(
-            "{\"record_type\":\"manifest\",\"schema_version\":\"ctx-history-jsonl-v1\"}\n",
+            "{\"record_type\":\"manifest\",\"schema_version\":\"ctx-history-jsonl-v2\"}\n",
             "{\"record_type\":\"source\",\"source_id\":\"recovered-source\",\"provider_key\":\"recovered-agent\",\"source_format\":\"recovered-jsonl\"}\n",
-            "{\"record_type\":\"session\",\"source_id\":\"recovered-source\",\"session_id\":\"recovered-session\",\"started_at\":\"2026-07-31T12:00:00Z\",\"agent_scope\":\"primary\"}\n",
+            "{\"record_type\":\"session\",\"source_id\":\"recovered-source\",\"provider_session_id\":\"recovered-session\",\"started_at\":\"2026-07-31T12:00:00Z\",\"agent_scope\":\"primary\"}\n",
             "{malformed-json}\n",
-            "{\"record_type\":\"event\",\"source_id\":\"recovered-source\",\"session_id\":\"recovered-session\",\"event_index\":0,\"event_type\":\"message\",\"role\":\"user\",\"occurred_at\":\"2026-07-31T12:00:01Z\",\"payload\":{\"text\":\"structural manifest recovery oracle\"}}\n",
+            "{\"record_type\":\"event\",\"source_id\":\"recovered-source\",\"provider_session_id\":\"recovered-session\",\"event_index\":0,\"event_type\":\"message\",\"role\":\"user\",\"occurred_at\":\"2026-07-31T12:00:01Z\",\"payload\":{\"text\":\"structural manifest recovery oracle\"}}\n",
         ),
     )
     .unwrap();
     let recovered = json_output(ctx(&temp).args([
         "import",
         "--input-format",
-        "ctx-history-jsonl-v1",
+        "ctx-history-jsonl-v2",
         "--path",
         fixture_arg,
         "--no-daemon",
@@ -1146,10 +1181,10 @@ fn write_valid_explicit_custom_source(path: &Path, text: &str) {
         path,
         format!(
             concat!(
-                "{{\"record_type\":\"manifest\",\"schema_version\":\"ctx-history-jsonl-v1\"}}\n",
+                "{{\"record_type\":\"manifest\",\"schema_version\":\"ctx-history-jsonl-v2\"}}\n",
                 "{{\"record_type\":\"source\",\"source_id\":\"explicit-receipt-source\",\"provider_key\":\"explicit-receipt-agent\",\"source_format\":\"explicit-receipt-jsonl\"}}\n",
-                "{{\"record_type\":\"session\",\"source_id\":\"explicit-receipt-source\",\"session_id\":\"explicit-receipt-session\",\"started_at\":\"2026-08-01T12:00:00Z\",\"agent_scope\":\"primary\"}}\n",
-                "{{\"record_type\":\"event\",\"source_id\":\"explicit-receipt-source\",\"session_id\":\"explicit-receipt-session\",\"event_index\":0,\"event_type\":\"message\",\"role\":\"user\",\"occurred_at\":\"2026-08-01T12:00:01Z\",\"payload\":{{\"text\":{text:?}}}}}\n",
+                "{{\"record_type\":\"session\",\"source_id\":\"explicit-receipt-source\",\"provider_session_id\":\"explicit-receipt-session\",\"started_at\":\"2026-08-01T12:00:00Z\",\"agent_scope\":\"primary\"}}\n",
+                "{{\"record_type\":\"event\",\"source_id\":\"explicit-receipt-source\",\"provider_session_id\":\"explicit-receipt-session\",\"event_index\":0,\"event_type\":\"message\",\"role\":\"user\",\"occurred_at\":\"2026-08-01T12:00:01Z\",\"payload\":{{\"text\":{text:?}}}}}\n",
             ),
             text = text,
         ),
@@ -1170,7 +1205,7 @@ fn explicit_import_failure_does_not_refresh_an_unrelated_cold_route() {
         .args([
             "import",
             "--input-format",
-            "ctx-history-jsonl-v1",
+            "ctx-history-jsonl-v2",
             "--path",
             fixture.to_str().unwrap(),
             "--no-daemon",

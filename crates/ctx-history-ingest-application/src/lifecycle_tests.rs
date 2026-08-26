@@ -216,6 +216,7 @@ fn provider_source(path: PathBuf, status: ProviderSourceStatus) -> ProviderSourc
         status,
         unsupported_reason: (status == ProviderSourceStatus::Unsupported)
             .then_some("unsupported fixture"),
+        route_provenance: Default::default(),
     }
 }
 

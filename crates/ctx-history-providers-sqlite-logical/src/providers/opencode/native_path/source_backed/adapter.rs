@@ -5,7 +5,7 @@ use std::{
     sync::Mutex,
 };
 
-use ctx_history_core::{CaptureProvider, SourceKey};
+use ctx_history_core::{CaptureProvider, SourceAnchorScope, SourceKey};
 use sha2::{Digest, Sha256};
 
 use super::ordering::{
@@ -13,7 +13,8 @@ use super::ordering::{
     OPENCODE_HYDRATION_SINGLETON_MAX_BYTES,
 };
 use super::{
-    observe_logical_source_with_progress, open_root_authorized_snapshot_retained_with_progress,
+    observe_logical_source_with_progress_scoped,
+    open_root_authorized_snapshot_retained_with_progress,
     opencode_family_source_backed_registrations, scan_pinned_source, OpenCodeAuthorizedSnapshot,
     OpenCodeLogicalObservation, OpenCodeScanOutput, OpenCodeSourceBackedError,
     OpenCodeSourceBackedRegistration, OpenCodeSourceBackedResult,
@@ -40,6 +41,7 @@ pub struct OpenCodeDocumentTreeAdapter<B> {
     data_root: PathBuf,
     registration: OpenCodeSourceBackedRegistration,
     path: PathBuf,
+    source_scope: SourceAnchorScope,
     binding: PhantomData<fn() -> B>,
 }
 
@@ -120,12 +122,17 @@ impl<B: crate::LogicalSqliteRuntimeBinding> ReplacementDocumentTree
     }
 
     fn owns_source(&self, source: &SourceKey) -> bool {
-        self.registration.owns_source(source)
+        self.registration.owns_source(source, self.source_scope)
     }
 
     fn discover_complete(&self) -> SourceBackedRouteResult<OpenCodeDocumentTree> {
-        discover_document_tree(&self.data_root, &self.path, self.registration.dialect)
-            .map_err(route_error)
+        discover_document_tree(
+            &self.data_root,
+            &self.path,
+            self.registration.dialect,
+            self.source_scope,
+        )
+        .map_err(route_error)
     }
 
     fn discover_complete_with_progress(
@@ -139,6 +146,7 @@ impl<B: crate::LogicalSqliteRuntimeBinding> ReplacementDocumentTree
             &self.data_root,
             &self.path,
             self.registration.dialect,
+            self.source_scope,
             report_progress,
         )
         .map_err(route_error)
@@ -271,12 +279,21 @@ pub fn adapter<B: crate::LogicalSqliteRuntimeBinding>(
     source: ProviderSource,
     data_root: &Path,
 ) -> std::result::Result<OpenCodeDocumentTreeAdapter<B>, &'static str> {
+    adapter_scoped(source, data_root, SourceAnchorScope::Unqualified)
+}
+
+pub fn adapter_scoped<B: crate::LogicalSqliteRuntimeBinding>(
+    source: ProviderSource,
+    data_root: &Path,
+    source_scope: SourceAnchorScope,
+) -> std::result::Result<OpenCodeDocumentTreeAdapter<B>, &'static str> {
     let registration = registration_for_provider(source.provider)
         .ok_or("provider is not part of the OpenCode SQLite family")?;
     Ok(OpenCodeDocumentTreeAdapter {
         data_root: data_root.to_path_buf(),
         registration,
         path: source.path.clone(),
+        source_scope,
         binding: PhantomData,
     })
 }
@@ -293,8 +310,9 @@ fn discover_document_tree(
     data_root: &Path,
     path: &std::path::Path,
     dialect: &'static crate::provider::providers::opencode::OpenCodeSqliteDialect,
+    source_scope: SourceAnchorScope,
 ) -> OpenCodeSourceBackedResult<OpenCodeDocumentTree> {
-    discover_document_tree_with_progress(data_root, path, dialect, &mut |_| Ok(()))
+    discover_document_tree_with_progress(data_root, path, dialect, source_scope, &mut |_| Ok(()))
 }
 
 #[cfg(test)]
@@ -303,18 +321,25 @@ pub(super) fn discover_document_tree_for_test(
     path: &Path,
     dialect: &'static crate::provider::providers::opencode::OpenCodeSqliteDialect,
 ) -> OpenCodeSourceBackedResult<()> {
-    discover_document_tree(data_root, path, dialect).map(drop)
+    discover_document_tree(data_root, path, dialect, SourceAnchorScope::Unqualified).map(drop)
 }
 
 fn discover_document_tree_with_progress(
     data_root: &Path,
     path: &std::path::Path,
     dialect: &'static crate::provider::providers::opencode::OpenCodeSqliteDialect,
+    source_scope: SourceAnchorScope,
     report_progress: &mut dyn FnMut(
         SourceBackedCurrentSourceProgress,
     ) -> SourceBackedRouteResult<()>,
 ) -> OpenCodeSourceBackedResult<OpenCodeDocumentTree> {
-    match observe_present_document_tree_with_progress(data_root, path, dialect, report_progress) {
+    match observe_present_document_tree_with_progress(
+        data_root,
+        path,
+        dialect,
+        source_scope,
+        report_progress,
+    ) {
         Ok(tree) => Ok(tree),
         Err(error) if source_missing(&error) => observe_missing_document_tree(path),
         Err(error) => Err(error),
@@ -325,6 +350,7 @@ fn observe_present_document_tree_with_progress(
     data_root: &Path,
     path: &std::path::Path,
     dialect: &'static crate::provider::providers::opencode::OpenCodeSqliteDialect,
+    source_scope: SourceAnchorScope,
     report_progress: &mut dyn FnMut(
         SourceBackedCurrentSourceProgress,
     ) -> SourceBackedRouteResult<()>,
@@ -332,9 +358,10 @@ fn observe_present_document_tree_with_progress(
     let authorized =
         open_root_authorized_snapshot_retained_with_progress(data_root, path, report_progress)?;
     let observation = (|| {
-        observe_logical_source_with_progress(
+        observe_logical_source_with_progress_scoped(
             authorized.sqlite_snapshot.connection()?,
             dialect,
+            source_scope,
             report_progress,
         )
     })();

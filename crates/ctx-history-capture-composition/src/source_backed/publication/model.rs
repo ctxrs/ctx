@@ -3,6 +3,7 @@ use ctx_history_capture_model::SharedAttemptHistoryProgress;
 
 pub(super) struct SourceBackedRefreshPlan {
     pub(super) scope: SourceBackedRefreshScope,
+    pub(super) publication_scope: SourceBackedRefreshScope,
     pub(super) reconciliation_demand: SourceBackedReconciliationDemand,
     pub(super) route_worksets: BTreeMap<SourceRouteIdentity, BTreeSet<PathBuf>>,
     pub(super) attempt_history_progress: SharedAttemptHistoryProgress,
@@ -13,6 +14,7 @@ pub(super) struct SourceBackedRefreshPlan {
 impl SourceBackedRefreshPlan {
     pub(super) fn isolate(scope: SourceBackedRefreshScope) -> Self {
         Self {
+            publication_scope: scope.clone(),
             scope,
             reconciliation_demand: SourceBackedReconciliationDemand::Exhaustive,
             route_worksets: BTreeMap::new(),
@@ -20,6 +22,11 @@ impl SourceBackedRefreshPlan {
             #[cfg(test)]
             resource_limits: None,
         }
+    }
+
+    pub(super) fn with_publication_scope(mut self, scope: SourceBackedRefreshScope) -> Self {
+        self.publication_scope = scope;
+        self
     }
 
     pub(super) fn with_reconciliation_demand(

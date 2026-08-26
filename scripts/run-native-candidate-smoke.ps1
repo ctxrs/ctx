@@ -807,7 +807,7 @@ try {
 
     [void](Invoke-Ctx @("setup", "--catalog-only", "--no-daemon", "--progress", "none"))
     $importArguments = @(
-        "import", "--input-format", "ctx-history-jsonl-v1", "--path", $Fixture,
+        "import", "--input-format", "ctx-history-jsonl-v2", "--path", $Fixture,
         "--no-daemon", "--format=json", "--progress", "none"
     )
     $importResult = Invoke-CtxRaw $importArguments
@@ -823,7 +823,7 @@ try {
         $env:CTX_DAEMON_AUTOSTART_OFF = "0"
         try {
             $import = Invoke-Ctx @(
-                "import", "--input-format", "ctx-history-jsonl-v1", "--path", $Fixture,
+                "import", "--input-format", "ctx-history-jsonl-v2", "--path", $Fixture,
                 "--format=json", "--progress", "none"
             )
         } finally {

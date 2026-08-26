@@ -3,8 +3,9 @@
 History source plugins let local tools export their history into ctx without
 ctx owning those tools' storage schemas. The stable 1.0 route is intentionally
 narrow: a manifest identifies a durable provider-owned
-`ctx-history-jsonl-v1` file, and the CLI registers that file with the normal
-daemon-owned Core refresh path.
+`ctx-history-jsonl-v2` file, and the CLI registers that file with the normal
+daemon-owned Core refresh path. The v1 schema is unsupported and is not
+translated.
 
 ctx does not load plugin code in-process and does not provide a second history
 store for plugins. Import copies policy-selected normalized history into Core;
@@ -41,7 +42,7 @@ Manifest example:
       "id": "default",
       "provider_key": "example-agent",
       "source_id": "default",
-      "source_format": "example-agent-jsonl-v1",
+      "source_format": "example-agent-jsonl-v2",
       "path": "/path/owned/by/example-agent/history.jsonl",
       "lineage_contract": "provider_native_v1",
       "enabled": true,
@@ -53,7 +54,7 @@ Manifest example:
 
 `name`, `id`, `provider_key`, and `source_id` must be stable lowercase ASCII
 identifiers. `path` may be absolute or relative to the manifest directory and
-must identify a regular provider-owned file. Its `ctx-history-jsonl-v1` source
+must identify a regular provider-owned file. Its `ctx-history-jsonl-v2` source
 record must match the declared `provider_key`, `source_id`, and
 `source_format`.
 
@@ -102,10 +103,10 @@ An accepted import has one acquisition and publication path:
 
 1. The CLI validates that the selected manifest identifies a regular
    provider-owned file.
-2. A bounded header check verifies the `ctx-history-jsonl-v1` schema and exact
+2. A bounded header check verifies the `ctx-history-jsonl-v2` schema and exact
    declared source identity without copying the body.
 3. ctx registers that same file as the explicit custom
-   `ctx_history_jsonl_v1` source route.
+   `ctx_history_jsonl_v2` source route.
 4. The normal Core-refresh endpoint publishes a fresh Core generation, or
    returns an authoritative no-op receipt.
 
@@ -137,16 +138,16 @@ import json
 
 print(json.dumps({
     "record_type": "manifest",
-    "schema_version": "ctx-history-jsonl-v1",
+    "schema_version": "ctx-history-jsonl-v2",
 }))
 print(json.dumps({
     "record_type": "source",
     "source_id": "default",
     "provider_key": "example-agent",
-    "source_format": "example-agent-jsonl-v1",
+    "source_format": "example-agent-jsonl-v2",
 }))
 
-# Append stable session, event, file_touch, and edge records to the provider file.
+# Append stable session, event, file_reference, and edge records to the provider file.
 ```
 
 The complete record schema is documented in

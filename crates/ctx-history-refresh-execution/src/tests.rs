@@ -2,11 +2,12 @@ use super::*;
 use std::fs;
 
 use ctx_history_capture::{
-    provider_source_for_path, DiscoveryPlatform, DiscoveryPlatformDirs,
-    SourceBackedSelectorAuthority,
+    provider_source_for_path, DiscoveryPlatform, DiscoveryPlatformDirs, ProviderRouteRole,
+    ProviderSourceRouteProvenance, SourceBackedSelectorAuthority,
 };
 use ctx_history_capture_model::{
-    ProviderCatalogSupport, ProviderImportSupport, ProviderSource, ProviderSourceKind,
+    ProviderCatalogSupport, ProviderImportSupport, ProviderRootKind, ProviderSource,
+    ProviderSourceKind,
 };
 use ctx_history_core::{
     derive_event_id, derive_session_id, CaptureProvider, CoreRecord, EventIdentityInput,
@@ -101,6 +102,159 @@ fn discovery_fixture(root: &Path) -> (PathBuf, PathBuf, DiscoveryContext) {
         DiscoveryPlatformDirs::default(),
     );
     (home, cwd, discovery)
+}
+
+#[test]
+fn configured_provider_root_identity_matching_rejects_duplicate_stable_ids() {
+    let temp = tempfile::tempdir().unwrap();
+    let (_, _, discovery) = discovery_fixture(temp.path());
+    let roots = [CaptureProvider::Claude, CaptureProvider::Hermes]
+        .map(|provider| ctx_history_capture::ProviderRootDefinition {
+            id: "duplicate".to_owned(),
+            provider,
+            path: temp.path().join(provider.as_str()),
+            group: None,
+            kind: None,
+        })
+        .to_vec();
+    let discovery = discovery.with_configured_provider_roots(roots);
+
+    let error = configured_retained_provider_roots(&discovery, None).unwrap_err();
+    assert!(error.to_string().contains("not unique"), "{error:#}");
+}
+
+#[test]
+fn configured_root_transition_partitions_removals_from_incompatible_replacements() {
+    use ctx_history_capture::{ProviderRootDefinition, ProviderRootKind};
+    use ctx_history_index::{AppliedProviderRoot, AppliedProviderRootSourceMembership};
+
+    let route = |byte: &str| SourceRouteIdentity::from_sha256(byte.repeat(64)).unwrap();
+    let replaced_provider_route = route("1");
+    let replaced_kind_route = route("2");
+    let compatible_route = route("3");
+    let exact_shared_route = route("4");
+    let removed_route = route("5");
+    let applied = |definition, route| {
+        AppliedProviderRoot::with_source_identity(
+            definition,
+            ProviderRootSourceIdentity::NamedV1,
+            vec![route],
+        )
+        .unwrap()
+    };
+    let retained = vec![
+        applied(
+            ProviderRootDefinition {
+                id: "provider-replacement".to_owned(),
+                provider: CaptureProvider::Claude,
+                path: "/old/claude".into(),
+                group: None,
+                kind: None,
+            },
+            replaced_provider_route.clone(),
+        ),
+        applied(
+            ProviderRootDefinition {
+                id: "kind-replacement".to_owned(),
+                provider: CaptureProvider::OpenHands,
+                path: "/old/openhands".into(),
+                group: None,
+                kind: Some(ProviderRootKind::OpenHandsCurrentConversations),
+            },
+            replaced_kind_route.clone(),
+        ),
+        applied(
+            ProviderRootDefinition {
+                id: "compatible-move".to_owned(),
+                provider: CaptureProvider::Claude,
+                path: "/old/path".into(),
+                group: Some("old-group".to_owned()),
+                kind: None,
+            },
+            compatible_route,
+        ),
+        applied(
+            ProviderRootDefinition {
+                id: "removed".to_owned(),
+                provider: CaptureProvider::Codex,
+                path: "/old/codex".into(),
+                group: None,
+                kind: None,
+            },
+            removed_route.clone(),
+        ),
+        AppliedProviderRoot::with_source_identity(
+            ProviderRootDefinition {
+                id: "removed-exact-subset".to_owned(),
+                provider: CaptureProvider::Crush,
+                path: "/old/crush.db".into(),
+                group: None,
+                kind: None,
+            },
+            ProviderRootSourceIdentity::Released,
+            vec![exact_shared_route.clone()],
+        )
+        .unwrap()
+        .with_exact_source_memberships(vec![AppliedProviderRootSourceMembership::exact(
+            exact_shared_route,
+            vec!["ab".repeat(32)],
+        )
+        .unwrap()])
+        .unwrap(),
+    ];
+    let desired = vec![
+        ProviderRootDefinition {
+            id: "provider-replacement".to_owned(),
+            provider: CaptureProvider::Codex,
+            path: "/new/codex".into(),
+            group: None,
+            kind: None,
+        },
+        ProviderRootDefinition {
+            id: "kind-replacement".to_owned(),
+            provider: CaptureProvider::OpenHands,
+            path: "/new/openhands".into(),
+            group: None,
+            kind: Some(ProviderRootKind::OpenHandsLegacyPersistence),
+        },
+        ProviderRootDefinition {
+            id: "compatible-move".to_owned(),
+            provider: CaptureProvider::Claude,
+            path: "/new/path".into(),
+            group: Some("new-group".to_owned()),
+            kind: None,
+        },
+    ];
+
+    assert_eq!(
+        incompatible_configured_provider_root_routes(&retained, &desired),
+        BTreeSet::from([
+            replaced_provider_route,
+            replaced_kind_route,
+            removed_route.clone(),
+        ])
+    );
+    assert_eq!(
+        removed_configured_provider_root_routes(&retained, &desired),
+        BTreeSet::from([removed_route])
+    );
+}
+
+fn configured_provider_source_for_path(
+    provider: CaptureProvider,
+    path: PathBuf,
+    root_id: &str,
+    root_path: PathBuf,
+    route_role: &'static str,
+) -> ProviderSource {
+    let mut source = provider_source_for_path(provider, path);
+    source.route_provenance = ProviderSourceRouteProvenance::ConfiguredRoot {
+        root_id: root_id.to_owned(),
+        root_path,
+        route_role: ProviderRouteRole::from_static(route_role),
+        automatic_route_role: None,
+    };
+    source
 }
 
 fn run_report(

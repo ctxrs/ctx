@@ -1,7 +1,13 @@
 //! Explicit executor-path coverage owned by physical refresh execution.
 
+#[path = "execution_path/compound_root_lifecycle.rs"]
+mod compound_root_lifecycle;
+#[path = "execution_path/configured_root_moves.rs"]
+mod configured_root_moves;
+
 use super::*;
 use ctx_history_capture::{SourceBackedRoute, SourceBackedRouteDriver};
+use ctx_history_index::EventSearchFilters;
 use rusqlite::Connection;
 
 #[test]
@@ -524,4 +530,90 @@ fn warm_exact_carries_unselected_routes_while_receipt_stays_selected() {
     let published = VerifiedIndex::open(&index_root).unwrap();
     assert!(published.manifest().source_route(&codex_route).is_some());
     assert!(published.manifest().source_route(&claude_route).is_some());
+}
+
+#[test]
+fn disabling_automatic_discovery_stops_selection_without_deleting_retained_history() {
+    let temp = tempfile::tempdir().unwrap();
+    let fixture = fs::canonicalize(temp.path()).unwrap();
+    let data_root = fixture.join("data");
+    let index_root = source_backed_index_root(&data_root);
+    ctx_history_platform::platform_security::establish_private_data_root(&data_root).unwrap();
+    let (_, _, automatic_discovery) = discovery_fixture(&fixture);
+    let sessions = fixture.join("codex-automatic/sessions");
+    let session = sessions.join("rollout.jsonl");
+    fs::create_dir_all(&sessions).unwrap();
+    fs::write(
+        &session,
+        format!(
+            "{}\n{}\n",
+            json!({
+                "timestamp": "2026-08-17T00:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "019fb700-0000-7000-8000-000000000714",
+                    "timestamp": "2026-08-17T00:00:00Z",
+                    "cwd": "/repo/automatic-disable",
+                    "originator": "codex_cli_rs",
+                    "cli_version": "1.0.0",
+                    "source": "cli",
+                    "model_provider": "openai"
+                }
+            }),
+            json!({
+                "timestamp": "2026-08-17T00:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "retained automatic history"}]
+                }
+            })
+        ),
+    )
+    .unwrap();
+    let source = provider_source_for_path(CaptureProvider::Codex, sessions);
+    let route = automatic_source_backed_route_identity(&source).unwrap();
+    let mut progress = |_: CaptureSourceBackedDetailedRefreshProgress| Ok(());
+    refresh_all_provider_sources(
+        &automatic_discovery,
+        DiscoveryReport {
+            sources: vec![source],
+            issues: Vec::new(),
+        },
+        StdDuration::ZERO,
+        &data_root,
+        &index_root,
+        None,
+        SourceBackedRefreshScope::All,
+        &mut progress,
+    )
+    .unwrap();
+    assert_eq!(
+        VerifiedIndex::open(&index_root)
+            .unwrap()
+            .manifest()
+            .indexed_documents,
+        1
+    );
+
+    let disabled = automatic_discovery.with_automatic_provider_discovery(false);
+    let mut progress = |_: CaptureSourceBackedDetailedRefreshProgress| Ok(());
+    refresh_all_provider_sources(
+        &disabled,
+        DiscoveryReport::default(),
+        StdDuration::ZERO,
+        &data_root,
+        &index_root,
+        None,
+        SourceBackedRefreshScope::All,
+        &mut progress,
+    )
+    .unwrap();
+
+    let published = VerifiedIndex::open(&index_root).unwrap();
+    assert!(!published.manifest().automatic_provider_discovery());
+    assert!(published.manifest().source_route(&route).is_some());
+    assert_eq!(published.manifest().sources.len(), 1);
+    assert_eq!(published.manifest().indexed_documents, 1);
 }

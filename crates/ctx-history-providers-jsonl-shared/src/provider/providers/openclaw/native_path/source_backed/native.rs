@@ -149,30 +149,44 @@ pub(super) struct CompoundAdmission {
     pub(super) native_session_family: OpenClawNativeSessionFamily,
 }
 
-fn openclaw_raw_lineage_is_ambiguous(bytes: &[u8]) -> serde_json::Result<bool> {
+fn openclaw_raw_lineage_is_ambiguous(path: &Path, bytes: &[u8]) -> serde_json::Result<bool> {
     let mut ambiguous = false;
+    let agent_id = super::super::super::openclaw_agent_id(path);
     let mut deserializer = serde_json::Deserializer::from_slice(bytes);
-    OpenClawRawLineageSeed(&mut ambiguous).deserialize(&mut deserializer)?;
+    OpenClawRawLineageSeed {
+        ambiguous: &mut ambiguous,
+        agent_id: agent_id.as_deref(),
+    }
+    .deserialize(&mut deserializer)?;
     deserializer.end()?;
     Ok(ambiguous)
 }
 
-struct OpenClawRawLineageSeed<'a>(&'a mut bool);
+struct OpenClawRawLineageSeed<'state, 'agent> {
+    ambiguous: &'state mut bool,
+    agent_id: Option<&'agent str>,
+}
 
-impl<'de> DeserializeSeed<'de> for OpenClawRawLineageSeed<'_> {
+impl<'de> DeserializeSeed<'de> for OpenClawRawLineageSeed<'_, '_> {
     type Value = ();
 
     fn deserialize<D>(self, deserializer: D) -> std::result::Result<(), D::Error>
     where
         D: Deserializer<'de>,
     {
-        deserializer.deserialize_any(OpenClawRawLineageVisitor(self.0))
+        deserializer.deserialize_any(OpenClawRawLineageVisitor {
+            ambiguous: self.ambiguous,
+            agent_id: self.agent_id,
+        })
     }
 }
 
-struct OpenClawRawLineageVisitor<'a>(&'a mut bool);
+struct OpenClawRawLineageVisitor<'state, 'agent> {
+    ambiguous: &'state mut bool,
+    agent_id: Option<&'agent str>,
+}
 
-impl<'de> Visitor<'de> for OpenClawRawLineageVisitor<'_> {
+impl<'de> Visitor<'de> for OpenClawRawLineageVisitor<'_, '_> {
     type Value = ();
 
     fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -215,7 +229,11 @@ impl<'de> Visitor<'de> for OpenClawRawLineageVisitor<'_> {
     where
         D: Deserializer<'de>,
     {
-        OpenClawRawLineageSeed(self.0).deserialize(deserializer)
+        OpenClawRawLineageSeed {
+            ambiguous: self.ambiguous,
+            agent_id: self.agent_id,
+        }
+        .deserialize(deserializer)
     }
 
     fn visit_seq<S>(self, mut sequence: S) -> std::result::Result<(), S::Error>
@@ -223,7 +241,10 @@ impl<'de> Visitor<'de> for OpenClawRawLineageVisitor<'_> {
         S: SeqAccess<'de>,
     {
         while sequence
-            .next_element_seed(OpenClawRawLineageSeed(self.0))?
+            .next_element_seed(OpenClawRawLineageSeed {
+                ambiguous: &mut *self.ambiguous,
+                agent_id: self.agent_id,
+            })?
             .is_some()
         {}
         Ok(())
@@ -233,31 +254,101 @@ impl<'de> Visitor<'de> for OpenClawRawLineageVisitor<'_> {
     where
         M: MapAccess<'de>,
     {
-        let mut seen = 0_u8;
+        let mut spawned_by = OpenClawRawLineageClaim::default();
+        let mut parent = OpenClawRawLineageClaim::default();
+        let mut root = OpenClawRawLineageClaim::default();
+        let mut session_id = OpenClawRawLineageClaim::default();
+        let mut id = OpenClawRawLineageClaim::default();
         while let Some(key) = map.next_key::<String>()? {
-            if let Some(bit) = openclaw_lineage_key_bit(&key) {
-                if seen & bit != 0 {
-                    *self.0 = true;
-                }
-                seen |= bit;
+            if let Some(kind) = openclaw_lineage_kind(&key) {
+                let value = map.next_value::<Value>()?;
+                let claim = match kind {
+                    OpenClawRawLineageKind::SpawnedBy => &mut spawned_by,
+                    OpenClawRawLineageKind::Parent => &mut parent,
+                    OpenClawRawLineageKind::Root => &mut root,
+                    OpenClawRawLineageKind::SessionId => &mut session_id,
+                    OpenClawRawLineageKind::Id => &mut id,
+                };
+                claim.observe(value, kind, self.agent_id, self.ambiguous);
+            } else {
+                let nested_agent_id = openclaw_index_entry_agent_id(&key).or(self.agent_id);
+                map.next_value_seed(OpenClawRawLineageSeed {
+                    ambiguous: &mut *self.ambiguous,
+                    agent_id: nested_agent_id,
+                })?;
             }
-            map.next_value_seed(OpenClawRawLineageSeed(self.0))?;
         }
         Ok(())
     }
 }
 
-fn openclaw_lineage_key_bit(key: &str) -> Option<u8> {
+#[derive(Debug, Default)]
+struct OpenClawRawLineageClaim {
+    value: Option<String>,
+    saw_null: bool,
+}
+
+impl OpenClawRawLineageClaim {
+    fn observe(
+        &mut self,
+        value: Value,
+        kind: OpenClawRawLineageKind,
+        agent_id: Option<&str>,
+        ambiguous: &mut bool,
+    ) {
+        match value {
+            Value::String(claim) if !claim.trim().is_empty() => {
+                let claim = kind.native_value(agent_id, &claim);
+                if self.saw_null || self.value.as_ref().is_some_and(|current| current != &claim) {
+                    *ambiguous = true;
+                } else if self.value.is_none() {
+                    self.value = Some(claim);
+                }
+            }
+            Value::Null => {
+                if self.saw_null || self.value.is_some() {
+                    *ambiguous = true;
+                }
+                self.saw_null = true;
+            }
+            _ => *ambiguous = true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum OpenClawRawLineageKind {
+    SpawnedBy,
+    Parent,
+    Root,
+    SessionId,
+    Id,
+}
+
+impl OpenClawRawLineageKind {
+    fn native_value(self, agent_id: Option<&str>, value: &str) -> String {
+        match self {
+            Self::Parent | Self::Root => super::super::qualify_session_id(agent_id, value),
+            Self::SpawnedBy | Self::SessionId | Self::Id => value.to_owned(),
+        }
+    }
+}
+
+fn openclaw_lineage_kind(key: &str) -> Option<OpenClawRawLineageKind> {
     Some(match key {
-        "spawnedBy" => 1 << 0,
-        "parentSessionId" => 1 << 1,
-        "parent_session_id" => 1 << 2,
-        "rootSessionId" => 1 << 3,
-        "root_session_id" => 1 << 4,
-        "sessionId" => 1 << 5,
-        "id" => 1 << 6,
+        "spawnedBy" => OpenClawRawLineageKind::SpawnedBy,
+        "parentSessionId" | "parent_session_id" => OpenClawRawLineageKind::Parent,
+        "rootSessionId" | "root_session_id" => OpenClawRawLineageKind::Root,
+        "sessionId" => OpenClawRawLineageKind::SessionId,
+        "id" => OpenClawRawLineageKind::Id,
         _ => return None,
     })
+}
+
+fn openclaw_index_entry_agent_id(key: &str) -> Option<&str> {
+    key.strip_prefix("agent:")
+        .and_then(|route| route.split(':').next())
+        .filter(|agent_id| !agent_id.is_empty())
 }
 
 pub(super) fn admit_compound(
@@ -282,7 +373,7 @@ pub(super) fn admit_compound(
         None => OpenClawNativeSessionFamily::Absent,
         Some(bytes) => match (
             serde_json::from_slice::<Value>(bytes),
-            openclaw_raw_lineage_is_ambiguous(bytes),
+            openclaw_raw_lineage_is_ambiguous(path, bytes),
         ) {
             (Ok(index), Ok(false)) => native_session_family(path, &index),
             (Ok(_), Ok(true)) | (Err(_), _) | (_, Err(_)) => OpenClawNativeSessionFamily::Invalid,
@@ -308,7 +399,7 @@ enum OpenClawSessionLineage {
     Child {
         relationship: Option<ProviderNativeSessionRelationship>,
         parent_native_session_id: String,
-        root_native_session_id: String,
+        root_native_session_id: Option<String>,
     },
     Unknown,
 }
@@ -332,27 +423,25 @@ fn resolve_session_lineage(
     match native_session_family {
         OpenClawNativeSessionFamily::Resolved {
             parent_native_session_id,
-            root_native_session_id,
         } => {
             let contradictory = generic_parent.invalid
                 || generic_root.invalid
                 || parent_native_session_id == native_session_id
-                || root_native_session_id == native_session_id
-                || generic_parent
-                    .value
-                    .as_ref()
-                    .is_some_and(|generic| generic != parent_native_session_id)
                 || generic_root
                     .value
                     .as_ref()
-                    .is_some_and(|generic| generic != root_native_session_id);
+                    .is_some_and(|root| root == native_session_id)
+                || generic_parent
+                    .value
+                    .as_ref()
+                    .is_some_and(|generic| generic != parent_native_session_id);
             if contradictory {
                 OpenClawSessionLineage::Unknown
             } else {
                 OpenClawSessionLineage::Child {
                     relationship: Some(ProviderNativeSessionRelationship::Delegated),
                     parent_native_session_id: parent_native_session_id.clone(),
-                    root_native_session_id: root_native_session_id.clone(),
+                    root_native_session_id: generic_root.value,
                 }
             }
         }
@@ -368,11 +457,11 @@ fn resolve_session_lineage(
                     OpenClawSessionLineage::Unknown
                 };
             };
-            let root_native_session_id = generic_root
-                .value
-                .unwrap_or_else(|| parent_native_session_id.clone());
+            let root_native_session_id = generic_root.value;
             if parent_native_session_id == native_session_id
-                || root_native_session_id == native_session_id
+                || root_native_session_id
+                    .as_ref()
+                    .is_some_and(|root| root == native_session_id)
             {
                 return OpenClawSessionLineage::Unknown;
             }
@@ -405,6 +494,7 @@ impl SessionState {
         native_session_family: &OpenClawNativeSessionFamily,
         imported_at: DateTime<Utc>,
         direct_session_id: StableEntityId,
+        source_anchor_scope: SourceAnchorScope,
     ) -> Result<Self> {
         let agent_id = super::super::super::openclaw_agent_id(path)
             .map(|value| super::super::capped_text(&value));
@@ -426,17 +516,31 @@ impl SessionState {
                     Some(AgentScope::Subagent),
                     relationship,
                     Some(parent_native_session_id),
-                    Some(root_native_session_id),
+                    root_native_session_id,
                 ),
                 OpenClawSessionLineage::Unknown => (None, None, None, None),
             };
         let parent_session_id = parent_provider_session_id
             .as_deref()
-            .map(|related| related_session_identity(related, native_session_id, direct_session_id))
+            .map(|related| {
+                related_session_identity(
+                    related,
+                    native_session_id,
+                    direct_session_id,
+                    source_anchor_scope,
+                )
+            })
             .transpose()?;
         let root_session_id = root_provider_session_id
             .as_deref()
-            .map(|related| related_session_identity(related, native_session_id, direct_session_id))
+            .map(|related| {
+                related_session_identity(
+                    related,
+                    native_session_id,
+                    direct_session_id,
+                    source_anchor_scope,
+                )
+            })
             .transpose()?;
         Ok(Self {
             provider_session_id,

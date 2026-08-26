@@ -1,0 +1,7 @@
+{"record_type":"manifest","schema_version":"ctx-history-jsonl-v2"}
+{"record_type":"source","source_id":"threads","provider_key":"amp","source_format":"amp-export-v2"}
+{"record_type":"source","source_id":"archive","provider_key":"internal-agent","source_format":"internal-export-v2"}
+{"record_type":"session","source_id":"threads","provider_session_id":"shared-provider-session","started_at":"2026-08-24T12:00:00Z","agent_scope":"primary","status":"completed"}
+{"record_type":"session","source_id":"archive","provider_session_id":"shared-provider-session","started_at":"2026-08-24T12:01:00Z","agent_scope":"primary","status":"completed"}
+{"record_type":"event","source_id":"threads","provider_session_id":"shared-provider-session","event_index":0,"event_id":"amp-event","event_type":"message","role":"assistant","occurred_at":"2026-08-24T12:00:01Z","payload":{"text":"multi route collision oracle amp"}}
+{"record_type":"event","source_id":"archive","provider_session_id":"shared-provider-session","event_index":0,"event_id":"internal-event","event_type":"message","role":"assistant","occurred_at":"2026-08-24T12:01:01Z","payload":{"text":"multi route collision oracle internal"}}

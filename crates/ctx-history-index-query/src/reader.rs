@@ -13,8 +13,8 @@ use ctx_history_index_format::{
 };
 use ctx_history_index_generation::{
     load_active_generation_pointer, load_generation_retention_lease, open_slot_index,
-    verify_physical_integrity_read_only, ActiveGenerationPointer, GenerationReadLease,
-    GenerationRetentionLease, GenerationSlot,
+    verify_candidate_physical_integrity_read_only, verify_physical_integrity_read_only,
+    ActiveGenerationPointer, GenerationReadLease, GenerationRetentionLease, GenerationSlot,
 };
 use tantivy::{ReloadPolicy, Searcher};
 
@@ -94,6 +94,50 @@ impl VerifiedIndex {
     /// current generations.
     pub fn open_pinned(root: impl AsRef<Path>) -> Result<Self> {
         Self::open_inner(root.as_ref(), false, false)
+    }
+
+    /// Reopens an exact candidate from durable state before its active-pointer
+    /// replacement. This is intentionally separate from the writer's in-memory
+    /// candidate searcher and accepts an absent authority for initial publish.
+    #[doc(hidden)]
+    pub fn open_certified_candidate_before_activation(
+        root: impl AsRef<Path>,
+        predecessor_fence: &ctx_history_index_generation::ActiveGenerationPointerFence,
+        slot: &GenerationSlot,
+    ) -> Result<Self> {
+        let control_directory =
+            DurableMmapDirectory::open(root).map_err(tantivy::TantivyError::from)?;
+        let root = control_directory.root_path().to_path_buf();
+        predecessor_fence.validate(&root)?;
+        let index = open_slot_index(&root, slot)?;
+        register_body_analyzer(&index);
+        validate_schema(&index.schema())?;
+        let metas = index.load_metas()?;
+        let publication = load_publication_for_metas(&root, &metas)?;
+        let (generation_id, manifest, publication_metadata) = publication.into_parts();
+        if generation_id != slot.generation_id() {
+            return Err(IndexError::ConcurrentGenerationChange);
+        }
+        let reader = index
+            .reader_builder()
+            .reload_policy(ReloadPolicy::Manual)
+            .try_into()?;
+        let searcher = reader.searcher();
+        if searcher_generation(&searcher) != meta_generation(&metas) {
+            return Err(IndexError::ConcurrentGenerationChange);
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        VERIFIED_INDEX_REOPEN_COUNT.with(|count| count.set(count.get().saturating_add(1)));
+        verify_candidate_physical_integrity_read_only(&root, predecessor_fence, slot, &index)?;
+        verify_searcher_structure(&searcher, &manifest)?;
+        predecessor_fence.validate(&root)?;
+        Ok(Self {
+            searcher,
+            manifest,
+            generation_id,
+            publication_metadata,
+            semantic_eligibility_postings: OnceLock::new(),
+        })
     }
 
     /// Opens exactly the requested active or retained previous generation.

@@ -4,12 +4,18 @@ use chrono::{DateTime, Utc};
 use ctx_history_capture_model::normalization::{
     provider_json_text, provider_timestamp_millis, provider_value_text,
 };
-use ctx_history_core::{CertifiedSource, CoreRecord, EventRole, EventType, ScannedSourceCounts};
+use ctx_history_core::{
+    CaptureProvider, CertifiedSource, CoreRecord, EventRole, EventType, ScannedSourceCounts,
+};
 use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::{
+    provider::source_backed::{
+        record_sqlite_rejection, SourceBackedRecordRejectionClass,
+        SourceBackedRecordRejectionDrafts,
+    },
     provider::sqlite::sqlite_schema_fingerprint,
     provider_sources::{SqliteLogicalSnapshot, SqliteSourceReadSnapshot},
     CaptureError, MAX_PROVIDER_SQLITE_VALUE_BYTES,
@@ -28,6 +34,7 @@ use super::super::super::{
 #[cfg(test)]
 use super::discovery::open_root_authorized_snapshot;
 use super::{
+    astrbot_row_projection_error,
     discovery::AstrBotSourceBackedSourceV0,
     identity::{
         conversation_document, logical_values_digest, platform_document, EventFact, SessionFact,
@@ -175,7 +182,8 @@ pub(crate) fn scan_astrbot_source_backed_v0(
     sink: &mut impl AstrBotSourceBackedSinkV0,
 ) -> AstrBotSourceBackedResultV0<CertifiedSource> {
     let (source_root, sqlite_snapshot) = open_root_authorized_snapshot(data_root, &source.path)?;
-    let certificate = scan_astrbot_snapshot_v0(source, sqlite_snapshot, sink)?;
+    let mut rejections = SourceBackedRecordRejectionDrafts::default();
+    let certificate = scan_astrbot_snapshot_v0(source, sqlite_snapshot, sink, &mut rejections)?;
     source_root.revalidate()?;
     Ok(certificate)
 }
@@ -184,6 +192,7 @@ pub(crate) fn scan_astrbot_snapshot_v0(
     source: &AstrBotSourceBackedSourceV0,
     sqlite_snapshot: SqliteSourceReadSnapshot,
     sink: &mut impl AstrBotSourceBackedSinkV0,
+    rejections: &mut SourceBackedRecordRejectionDrafts,
 ) -> AstrBotSourceBackedResultV0<CertifiedSource> {
     let scan = (|| {
         let conn = sqlite_snapshot.connection()?;
@@ -229,6 +238,8 @@ pub(crate) fn scan_astrbot_snapshot_v0(
                         &mut counts,
                         &mut content_chain,
                         &mut native_ordinal,
+                        source,
+                        rejections,
                     )?;
                     let candidate = candidates.get(candidate_index).copied().ok_or(
                         AstrBotSourceBackedErrorV0::Capture(
@@ -251,6 +262,7 @@ pub(crate) fn scan_astrbot_snapshot_v0(
                         &mut counts,
                         &mut content_chain,
                         &mut native_ordinal,
+                        rejections,
                     )
                 },
             )?;
@@ -261,6 +273,8 @@ pub(crate) fn scan_astrbot_snapshot_v0(
                 &mut counts,
                 &mut content_chain,
                 &mut native_ordinal,
+                source,
+                rejections,
             )?;
             if candidate_index != candidates.len() {
                 return Err(CaptureError::SourceChangedDuringCapture.into());
@@ -300,6 +314,8 @@ pub(crate) fn scan_astrbot_snapshot_v0(
                         &mut counts,
                         &mut content_chain,
                         &mut native_ordinal,
+                        source,
+                        rejections,
                     )?;
                     let candidate = candidates.get(candidate_index).copied().ok_or(
                         AstrBotSourceBackedErrorV0::Capture(
@@ -322,6 +338,7 @@ pub(crate) fn scan_astrbot_snapshot_v0(
                         &mut counts,
                         &mut content_chain,
                         &mut native_ordinal,
+                        rejections,
                     )
                 })?;
                 process_oversize_run(
@@ -331,6 +348,8 @@ pub(crate) fn scan_astrbot_snapshot_v0(
                     &mut counts,
                     &mut content_chain,
                     &mut native_ordinal,
+                    source,
+                    rejections,
                 )?;
                 if candidate_index != candidates.len() {
                     return Err(CaptureError::SourceChangedDuringCapture.into());
@@ -386,6 +405,7 @@ fn process_conversation_row(
     counts: &mut ScannedSourceCounts,
     content_chain: &mut [u8; 32],
     native_ordinal: &mut u64,
+    rejections: &mut SourceBackedRecordRejectionDrafts,
 ) -> AstrBotSourceBackedResultV0<()> {
     add_certified_bytes(counts, candidate.observed_bytes()?)?;
     let row_digest = logical_values_digest(&super::super::super::model::conversation_values(
@@ -421,7 +441,7 @@ fn process_conversation_row(
                     .ok_or(AstrBotSourceBackedErrorV0::MissingSelectedContent)?
             };
             let session = conversation_session_fact(&row);
-            let document = conversation_document(
+            let document = match conversation_document(
                 source,
                 candidate.physical_rowid,
                 item_index,
@@ -430,9 +450,28 @@ fn process_conversation_row(
                 &session,
                 &event,
                 &complete_text,
-            )?;
-            emit_bounded(sink, page, document)?;
-            add_retained(counts)?;
+            ) {
+                Ok(document) => Some(document),
+                Err(error) if astrbot_row_projection_error(&error) => {
+                    add_rejected(counts)?;
+                    record_sqlite_rejection(
+                        rejections,
+                        &source.source_key,
+                        CaptureProvider::AstrBot,
+                        &source.path,
+                        u64::try_from(candidate.physical_rowid)
+                            .unwrap_or(native_ordinal.saturating_add(1)),
+                        SourceBackedRecordRejectionClass::UnsupportedRecord,
+                        error.to_string(),
+                    );
+                    None
+                }
+                Err(error) => return Err(error),
+            };
+            if let Some(document) = document {
+                emit_bounded(sink, page, document)?;
+                add_retained(counts)?;
+            }
         } else {
             add_ignored(counts)?;
         }
@@ -509,29 +548,58 @@ fn process_platform_row(
     counts: &mut ScannedSourceCounts,
     content_chain: &mut [u8; 32],
     native_ordinal: &mut u64,
+    rejections: &mut SourceBackedRecordRejectionDrafts,
 ) -> AstrBotSourceBackedResultV0<()> {
     add_certified_bytes(counts, candidate.observed_bytes()?)?;
     add_complete(counts)?;
     let (unit, rejection, row_digest, selected_content) =
         source_backed_platform_unit(&row, *native_ordinal, checkpoint_links)?;
     *content_chain = chain_hash(*content_chain, row_digest);
-    if rejection.is_some() {
+    if let Some(rejection) = rejection {
         add_rejected(counts)?;
+        record_sqlite_rejection(
+            rejections,
+            &source.source_key,
+            CaptureProvider::AstrBot,
+            &source.path,
+            u64::try_from(candidate.physical_rowid).unwrap_or(native_ordinal.saturating_add(1)),
+            SourceBackedRecordRejectionClass::UnsupportedRecord,
+            rejection,
+        );
     } else if let Some(unit) = unit {
         if let Some(event) = unit.event {
             let (complete_text, provider_content) = selected_content
                 .as_ref()
                 .ok_or(AstrBotSourceBackedErrorV0::MissingSelectedContent)?;
-            let document = platform_document(
+            let document = match platform_document(
                 source,
                 candidate.legacy_order.logical_id,
                 &unit.session,
                 &event,
                 complete_text,
                 provider_content,
-            )?;
-            emit_bounded(sink, page, document)?;
-            add_retained(counts)?;
+            ) {
+                Ok(document) => Some(document),
+                Err(error) if astrbot_row_projection_error(&error) => {
+                    add_rejected(counts)?;
+                    record_sqlite_rejection(
+                        rejections,
+                        &source.source_key,
+                        CaptureProvider::AstrBot,
+                        &source.path,
+                        u64::try_from(candidate.physical_rowid)
+                            .unwrap_or(native_ordinal.saturating_add(1)),
+                        SourceBackedRecordRejectionClass::UnsupportedRecord,
+                        error.to_string(),
+                    );
+                    None
+                }
+                Err(error) => return Err(error),
+            };
+            if let Some(document) = document {
+                emit_bounded(sink, page, document)?;
+                add_retained(counts)?;
+            }
         } else {
             add_ignored(counts)?;
         }
@@ -549,6 +617,7 @@ fn candidate_is_oversize(candidate: RowCandidate) -> AstrBotSourceBackedResultV0
         > u64::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES).unwrap_or(u64::MAX))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn process_oversize_run(
     candidates: &[RowCandidate],
     index: &mut usize,
@@ -556,6 +625,8 @@ fn process_oversize_run(
     counts: &mut ScannedSourceCounts,
     content_chain: &mut [u8; 32],
     native_ordinal: &mut u64,
+    source: &AstrBotSourceBackedSourceV0,
+    rejections: &mut SourceBackedRecordRejectionDrafts,
 ) -> AstrBotSourceBackedResultV0<()> {
     while candidates
         .get(*index)
@@ -570,6 +641,8 @@ fn process_oversize_run(
             counts,
             content_chain,
             native_ordinal,
+            source,
+            rejections,
         )?;
         *index += 1;
     }
@@ -582,11 +655,22 @@ fn process_oversize_candidate(
     counts: &mut ScannedSourceCounts,
     content_chain: &mut [u8; 32],
     native_ordinal: &mut u64,
+    source: &AstrBotSourceBackedSourceV0,
+    rejections: &mut SourceBackedRecordRejectionDrafts,
 ) -> AstrBotSourceBackedResultV0<()> {
     add_certified_bytes(counts, candidate.observed_bytes()?)?;
     *content_chain = chain_hash(*content_chain, candidate_hash(hash_domain, candidate));
     add_complete(counts)?;
     add_rejected(counts)?;
+    record_sqlite_rejection(
+        rejections,
+        &source.source_key,
+        CaptureProvider::AstrBot,
+        &source.path,
+        u64::try_from(candidate.physical_rowid).unwrap_or(native_ordinal.saturating_add(1)),
+        SourceBackedRecordRejectionClass::UnsupportedRecord,
+        "AstrBot SQLite row exceeds the supported value-size bound",
+    );
     *native_ordinal = native_ordinal
         .checked_add(1)
         .ok_or(AstrBotSourceBackedErrorV0::CountOverflow)?;

@@ -76,6 +76,37 @@ pub(super) fn capture_parallel_test_generation_with_terminal_revalidation(
     Ok((commit, activity))
 }
 
+pub(super) fn capture_parallel_test_generation_with_resident_and_terminal_revalidation(
+    adapter: &JsonlFamilyAdapterObject,
+    root: &Path,
+    index_root: &Path,
+    workers: usize,
+    resident: &Mutex<FamilyResident>,
+) -> Result<(IndexCaptureCommitReceipt, JsonlFamilyScannerActivity)> {
+    let (writer, ()) = capture_test_generation_with_resident!(
+        resident,
+        adapter,
+        root,
+        index_root,
+        workers,
+        |resident, sink| { capture(adapter, root, resident, sink).unwrap() }
+    );
+    let inventory = resident
+        .lock()
+        .map_err(|_| CaptureError::SystemInvariant("JSONL test resident lock was poisoned"))?
+        .certified_inventory
+        .clone()
+        .ok_or(CaptureError::SystemInvariant(
+            "JSONL test capture did not certify an inventory",
+        ))?;
+    if !revalidate_complete_inventory(adapter, root, resident, &inventory)? {
+        return Err(CaptureError::SourceChangedDuringCapture);
+    }
+    let activity = jsonl_family_scanner_activity();
+    let commit = IndexCaptureCommitReceipt::new(writer.commit(|_| true, |_| true)?);
+    Ok((commit, activity))
+}
+
 pub(super) fn capture_checkpoint_test_generation(
     root: &Path,
     index_root: &Path,

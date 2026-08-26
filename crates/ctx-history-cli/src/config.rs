@@ -1,11 +1,19 @@
-/// The single immutable configuration snapshot supplied for one history
-/// invocation. Host-specific configuration representations never cross this
+/// Immutable command-local configuration projection.
+///
+/// Discovery preflight uses this snapshot. Daemon admission deliberately
+/// reloads and revalidates live persisted configuration before publication, so
+/// a concurrent root change is applied rather than replaced by stale command
+/// state. Host-specific configuration representations never cross this
 /// boundary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistoryCliConfig {
     pub daemon_enabled: bool,
     pub semantic_search_enabled: bool,
     pub local_usage_enabled: bool,
+    /// Provider discovery policy captured from the final host exactly once for
+    /// this command invocation.
+    pub automatic_provider_discovery: bool,
+    pub provider_roots: Vec<ctx_history_capture::ProviderRootDefinition>,
 }
 
 /// The narrow configuration authority needed by history setup adapters.
@@ -56,7 +64,7 @@ pub(crate) struct LocalUsageConfig {
 }
 
 impl AppConfig {
-    pub(crate) const fn from_snapshot(config: HistoryCliConfig) -> Self {
+    pub(crate) fn from_snapshot(config: HistoryCliConfig) -> Self {
         Self {
             daemon: DaemonConfig {
                 enabled: config.daemon_enabled,
@@ -91,7 +99,7 @@ mod tests {
         type Error = ();
 
         fn snapshot(&self) -> HistoryCliConfig {
-            self.snapshot
+            self.snapshot.clone()
         }
 
         fn write_default_config(&mut self) -> Result<(), Self::Error> {
@@ -119,6 +127,8 @@ mod tests {
                 daemon_enabled: true,
                 semantic_search_enabled: false,
                 local_usage_enabled: true,
+                automatic_provider_discovery: true,
+                provider_roots: Vec::new(),
             },
             wrote_default: false,
             semantic_enabled: None,
@@ -137,6 +147,8 @@ mod tests {
             daemon_enabled: false,
             semantic_search_enabled: true,
             local_usage_enabled: false,
+            automatic_provider_discovery: true,
+            provider_roots: Vec::new(),
         });
 
         assert!(!config.daemon.enabled);
@@ -150,6 +162,8 @@ mod tests {
             daemon_enabled: true,
             semantic_search_enabled: false,
             local_usage_enabled: true,
+            automatic_provider_discovery: true,
+            provider_roots: Vec::new(),
         });
 
         assert!(config.daemon.enabled);

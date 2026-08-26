@@ -9,8 +9,8 @@ use ctx_history_capture_model::normalization::{
 };
 use ctx_history_core::{
     derive_event_id, derive_native_session_id, AgentScope, CaptureProvider, CoreRecord,
-    EventIdentityInput, EventType, NativeItemKey, ProviderNativeSessionRelationship, SourceKey,
-    StableEntityId, TypedKey,
+    EventIdentityInput, EventType, NativeItemKey, ProviderNativeSessionRelationship,
+    SourceAnchorScope, SourceKey, StableEntityId, TypedKey,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -29,8 +29,10 @@ use crate::{
     provider::source_backed::family::jsonl::{
         JsonlAppendOccurrenceState, JsonlFamilyAdapter, JsonlFamilyAppendMode,
         JsonlFamilyInventory, JsonlFamilyLeaf, JsonlFamilyProjectionMode, JsonlFamilyProjector,
-        JsonlFamilyTerminalProof, JsonlFamilyWorkerContext, JsonlReader, JsonlRecordRef,
-        JsonlTerminalAuthority, JsonlTerminalObservationRegion,
+        JsonlFamilyTerminalProof, JsonlFamilyWorkerContext, JsonlOversizedRecordPolicy,
+        JsonlReader, JsonlRecordRef, JsonlRecordRejections, JsonlTerminalAuthority,
+        JsonlTerminalObservationRegion, SourceBackedRecordRejectionClass,
+        SourceBackedRecordRejectionDrafts,
     },
     CaptureError, Result, MAX_OPENCLAW_SESSION_INDEX_BYTES, OPENCLAW_SOURCE_FORMAT,
 };
@@ -50,18 +52,32 @@ const FALLBACK_EVENT_ID_DOMAIN: &[u8] = b"ctx-openclaw-fallback-event-id-v1\0";
 const LOGICAL_SESSION_KIND: &str = "openclaw-legacy-session";
 const LOGICAL_EVENT_KIND: &str = "openclaw-legacy-event";
 const SOURCE_SCHEMA_VARIANT: &str = "openclaw-legacy-jsonl-v2";
-const PARSER_REVISION: &str =
-    "openclaw-source-backed-v18-source-wide-call-id-admission-agent-scope-raw-lineage-exact-authored-text";
+const PARSER_REVISION: &str = "openclaw-source-backed-v20-direct-parent-explicit-root";
 const MAX_TERMINAL_CALL_IDS: usize = 4096;
 const MAX_TERMINAL_LINKAGE_IDS: usize = MAX_TERMINAL_CALL_IDS * 2;
 const MAX_SELECTOR_CALL_ID_BYTES: usize = 16 * 1024;
 
-#[derive(Debug, Clone, Copy, Default)]
-struct OpenClawJsonlAdapter<R>(PhantomData<fn() -> R>);
+#[derive(Debug, Clone, Copy)]
+struct OpenClawJsonlAdapter<R> {
+    source_anchor_scope: SourceAnchorScope,
+    runtime: PhantomData<fn() -> R>,
+}
 
 pub(crate) fn openclaw_source_backed_adapter_v0<R: JsonlProviderRuntime>(
 ) -> Arc<dyn JsonlFamilyAdapter<Runtime = R>> {
-    Arc::new(OpenClawJsonlAdapter(PhantomData))
+    openclaw_source_backed_adapter_v0_with_source_root_lineage(None)
+}
+
+pub(crate) fn openclaw_source_backed_adapter_v0_with_source_root_lineage<
+    R: JsonlProviderRuntime,
+>(
+    source_root_lineage: Option<[u8; 32]>,
+) -> Arc<dyn JsonlFamilyAdapter<Runtime = R>> {
+    Arc::new(OpenClawJsonlAdapter {
+        source_anchor_scope: source_root_lineage
+            .map_or(SourceAnchorScope::Unqualified, SourceAnchorScope::Lineage),
+        runtime: PhantomData,
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,10 +93,7 @@ struct Binding {
 #[serde(tag = "status", rename_all = "snake_case")]
 enum OpenClawNativeSessionFamily {
     Absent,
-    Resolved {
-        parent_native_session_id: String,
-        root_native_session_id: String,
-    },
+    Resolved { parent_native_session_id: String },
     Invalid,
 }
 
@@ -105,6 +118,10 @@ impl<R: JsonlProviderRuntime> JsonlFamilyAdapter for OpenClawJsonlAdapter<R> {
 
     fn append_mode(&self) -> JsonlFamilyAppendMode {
         JsonlFamilyAppendMode::ProjectorPreflight(true)
+    }
+
+    fn oversized_record_policy(&self) -> JsonlOversizedRecordPolicy {
+        JsonlOversizedRecordPolicy::RejectRecord
     }
 
     fn discover(&self, root: &Path) -> Result<JsonlFamilyInventory> {
@@ -146,7 +163,7 @@ impl<R: JsonlProviderRuntime> JsonlFamilyAdapter for OpenClawJsonlAdapter<R> {
                     "OpenClaw inventory repeats a native session identity".to_owned(),
                 ));
             }
-            let source = source_key(&native_session_id)?;
+            let source = source_key_scoped(&native_session_id, self.source_anchor_scope)?;
             let transcript = Arc::new(authority.open_file(&transcript_relative_path)?);
             let compound = admit_compound(
                 &authority,
@@ -230,6 +247,7 @@ impl<R: JsonlProviderRuntime> JsonlFamilyAdapter for OpenClawJsonlAdapter<R> {
             &binding.native_session_family,
             imported_at,
             session_id,
+            self.source_anchor_scope,
         )?;
         let replacement_session = session.checkpoint();
         let restored = checkpoint
@@ -253,6 +271,11 @@ impl<R: JsonlProviderRuntime> JsonlFamilyAdapter for OpenClawJsonlAdapter<R> {
                 }
                 _ => FallbackEventIdentityState::<R>::default(),
             },
+            rejections: JsonlRecordRejections::new(
+                leaf.source().clone(),
+                CaptureProvider::OpenClaw,
+                leaf.source_path().display().to_string(),
+            ),
         }))
     }
 }
@@ -267,6 +290,7 @@ struct OpenClawProjector<R: JsonlProviderRuntime> {
     authority: Arc<ProviderSourceRoot>,
     terminal_authority: OpenClawTerminalAuthority,
     fallback_identities: FallbackEventIdentityState<R>,
+    rejections: JsonlRecordRejections,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -277,14 +301,23 @@ struct FallbackEventIdentity {
 
 type FallbackEventIdentityState<R> = JsonlAppendOccurrenceState<[u8; 32], IndexBaseEventLookup<R>>;
 
+#[cfg(test)]
 fn source_key(native_session_id: &str) -> Result<SourceKey> {
-    SourceKey::derive_provider_native(
+    source_key_scoped(native_session_id, SourceAnchorScope::Unqualified)
+}
+
+fn source_key_scoped(
+    native_session_id: &str,
+    source_anchor_scope: SourceAnchorScope,
+) -> Result<SourceKey> {
+    SourceKey::derive_provider_native_scoped(
         CaptureProvider::OpenClaw.as_str(),
         OPENCLAW_SOURCE_FORMAT,
         SOURCE_SCHEMA_VARIANT,
         1,
         SOURCE_ANCHOR_NAMESPACE,
         TypedKey::utf8(native_session_id).map_err(contract)?,
+        source_anchor_scope,
     )
     .map_err(contract)
 }
@@ -303,11 +336,12 @@ fn related_session_identity(
     related: &str,
     direct: &str,
     direct_session_id: StableEntityId,
+    source_anchor_scope: SourceAnchorScope,
 ) -> Result<StableEntityId> {
     if related == direct {
         return Ok(direct_session_id);
     }
-    let source = source_key(related)?;
+    let source = source_key_scoped(related, source_anchor_scope)?;
     session_identity(&source, related)
 }
 
@@ -512,44 +546,18 @@ fn native_session_family(path: &Path, index: &Value) -> OpenClawNativeSessionFam
     {
         return OpenClawNativeSessionFamily::Invalid;
     }
-    let mut current_key = selected_spawned_by;
-    let mut parent = None;
-    let mut root = None;
-    let mut visited = BTreeSet::new();
-    for depth in 0..16 {
-        if !visited.insert(current_key.to_owned()) {
-            return OpenClawNativeSessionFamily::Invalid;
-        }
-        let Some(entry) = entries.get(current_key) else {
-            return OpenClawNativeSessionFamily::Invalid;
-        };
-        let OpenClawLineageClaim::Valid(session_id) = lineage_claim(entry, "sessionId") else {
-            return OpenClawNativeSessionFamily::Invalid;
-        };
-        let agent = current_key
-            .strip_prefix("agent:")
-            .and_then(|value| value.split(':').next());
-        let qualified = super::qualify_session_id(agent, session_id);
-        if depth == 0 {
-            parent = Some(qualified.clone());
-        }
-        root = Some(qualified);
-        let next = match lineage_claim(entry, "spawnedBy") {
-            OpenClawLineageClaim::Absent => break,
-            OpenClawLineageClaim::Valid(claim) => claim,
-            OpenClawLineageClaim::Invalid => return OpenClawNativeSessionFamily::Invalid,
-        };
-        if depth == 15 {
-            return OpenClawNativeSessionFamily::Invalid;
-        }
-        current_key = next;
-    }
-    let Some(parent_native_session_id) = parent else {
+    let Some(parent_entry) = entries.get(selected_spawned_by) else {
         return OpenClawNativeSessionFamily::Invalid;
     };
+    let OpenClawLineageClaim::Valid(parent_session_id) = lineage_claim(parent_entry, "sessionId")
+    else {
+        return OpenClawNativeSessionFamily::Invalid;
+    };
+    let parent_agent = selected_spawned_by
+        .strip_prefix("agent:")
+        .and_then(|value| value.split(':').next());
     OpenClawNativeSessionFamily::Resolved {
-        root_native_session_id: root.unwrap_or_else(|| parent_native_session_id.clone()),
-        parent_native_session_id,
+        parent_native_session_id: super::qualify_session_id(parent_agent, parent_session_id),
     }
 }
 

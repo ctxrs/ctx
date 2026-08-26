@@ -55,6 +55,7 @@ impl GenerationWriter {
             return Err(IndexError::SourceCertificateMismatch);
         }
         self.deletions.remove(source);
+        self.route_deletions.remove(source);
         self.pending.insert(
             token.clone(),
             super::PendingSource {
@@ -323,13 +324,15 @@ fn staged_manifest_matches_base(
         // its terminal witness can reject races.
         return Ok(false);
     }
-    let Some(base) = generation
-        .base_publication
-        .as_ref()
-        .map(PinnedPublication::manifest)
-    else {
+    let Some(base_publication) = generation.base_publication.as_ref() else {
         return Ok(false);
     };
+    // Logical equality cannot reuse a descriptor below the current durable
+    // manifest boundary; candidate publication must install the full anchor.
+    if base_publication.requires_current_manifest_anchor() {
+        return Ok(false);
+    }
+    let base = base_publication.manifest();
     if base.sources.iter().any(|source| {
         !generation
             .pending

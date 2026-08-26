@@ -298,6 +298,7 @@ mod tests {
             catalog_support: ProviderCatalogSupport::None,
             status: ProviderSourceStatus::Available,
             unsupported_reason: None,
+            route_provenance: Default::default(),
         };
         let build = build_automatic_source_backed_registry_from_report(
             &DiscoveryContext::from_process(&data_root),
@@ -357,6 +358,7 @@ mod tests {
             catalog_support: ProviderCatalogSupport::None,
             status: ProviderSourceStatus::Available,
             unsupported_reason: None,
+            route_provenance: Default::default(),
         };
         let route = SourceBackedRoute::automatic(
             source,

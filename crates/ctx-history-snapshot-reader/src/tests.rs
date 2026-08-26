@@ -57,6 +57,25 @@ impl Fixture {
 }
 
 #[test]
+fn concurrent_publication_is_not_reported_as_corruption() {
+    assert!(matches!(
+        map_generation_error(
+            ctx_history_index_generation::GenerationError::ConcurrentGenerationChange,
+            &"a".repeat(64),
+        ),
+        SnapshotError::ConcurrentGenerationChange(_)
+    ));
+    assert!(matches!(
+        map_index_error(
+            ctx_history_index_query::IndexError::ConcurrentGenerationChange,
+            &"b".repeat(64),
+            &SnapshotContract::current().unwrap(),
+        ),
+        SnapshotError::ConcurrentGenerationChange(_)
+    ));
+}
+
+#[test]
 fn durable_exact_target_opens_after_more_than_two_publications() {
     let fixture = Fixture::new();
     let source = source("durable-retained");

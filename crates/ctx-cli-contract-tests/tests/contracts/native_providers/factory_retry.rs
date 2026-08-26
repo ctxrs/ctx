@@ -286,61 +286,48 @@ fn factory_droid_retry_lifecycle_keeps_native_ids_stable() {
 }
 
 #[test]
-fn factory_droid_retry_ambiguity_and_invalid_evidence_fail_closed() {
-    for (name, records) in [
-        (
-            "exact duplicate",
-            vec![
-                factory_header("duplicate"),
-                factory_result("dup", None, &[("Execute_1", "anchor")]),
-                factory_result("dup", Some("dup"), &[("Execute_2", "retry")]),
-                factory_result("dup", Some("dup"), &[("Execute_2", "duplicate retry")]),
-            ],
-        ),
-        (
-            "missing parent evidence",
-            vec![
-                factory_header("missing-parent"),
-                factory_result("dup", None, &[("Execute_1", "anchor")]),
-                factory_result("dup", None, &[("Execute_2", "ambiguous retry")]),
-            ],
-        ),
-        (
-            "contradictory parent evidence",
-            vec![
-                factory_header("wrong-parent"),
-                factory_result("dup", None, &[("Execute_1", "anchor")]),
-                factory_result(
-                    "dup",
-                    Some("different-message"),
-                    &[("Execute_2", "ambiguous retry")],
-                ),
-            ],
-        ),
-    ] {
-        let temp = tempdir();
-        let root = temp.path().join("sessions/project");
-        fs::create_dir_all(&root).unwrap();
-        write_jsonl(&root.join("failure.jsonl"), &records);
-        let path = root.parent().unwrap().display().to_string();
-        let _daemon = start_isolated_provider_daemon(&temp);
-        let stderr = failure_stderr(ctx(&temp).args([
-            "import",
-            "--provider",
-            "factory-ai-droid",
-            "--path",
-            &path,
-            "--no-daemon",
-            "--format=json",
-            "--progress",
-            "none",
-        ]));
-        assert!(
-            stderr.contains("duplicate event identity"),
-            "{name}: {stderr}"
-        );
-    }
+fn factory_droid_duplicate_retry_record_is_rejected_without_aborting_import() {
+    let temp = tempdir();
+    let root = temp.path().join("sessions/project");
+    fs::create_dir_all(&root).unwrap();
+    write_jsonl(
+        &root.join("duplicate.jsonl"),
+        &[
+            factory_header("duplicate"),
+            factory_result("dup", None, &[("Execute_1", "anchor")]),
+            factory_result("dup", Some("dup"), &[("Execute_2", "retry")]),
+            factory_result("dup", Some("dup"), &[("Execute_2", "duplicate retry")]),
+        ],
+    );
+    let path = root.parent().unwrap().display().to_string();
+    let _daemon = start_isolated_provider_daemon(&temp);
+    let imported = import_factory_result(&temp, &path);
+    let source = assert_explicit_source_publication_with_rejections(
+        &imported,
+        "factory_ai_droid",
+        "factory_ai_droid_sessions_jsonl",
+        1,
+    );
+    let diagnostics = source["rejection_diagnostics"].as_array().unwrap();
+    assert_eq!(diagnostics.len(), 1, "{imported:#}");
+    assert_eq!(diagnostics[0]["line"], 4, "{imported:#}");
+    assert_eq!(diagnostics[0]["class"], "malformed_record", "{imported:#}");
+    assert!(
+        diagnostics[0]["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("reused an event identity")),
+        "{imported:#}"
+    );
+    let bodies = provider_core_records(&data_root(&temp), "factory_ai_droid")
+        .into_iter()
+        .filter_map(|record| record.content.normalized_body)
+        .collect::<BTreeSet<_>>();
+    assert!(bodies.contains("retry"), "{imported:#}");
+    assert!(!bodies.contains("duplicate retry"), "{imported:#}");
+}
 
+#[test]
+fn factory_droid_missing_retry_linkage_is_rejected() {
     let temp = tempdir();
     let root = temp.path().join("sessions/project");
     fs::create_dir_all(&root).unwrap();
@@ -413,7 +400,7 @@ fn factory_retry_identity_is_source_scoped() {
 }
 
 #[test]
-fn non_factory_native_jsonl_duplicates_still_fail() {
+fn non_factory_native_jsonl_duplicate_is_rejected_without_aborting_import() {
     let temp = tempdir();
     let root = temp.path().join("projects/workspace/transcript");
     fs::create_dir_all(&root).unwrap();
@@ -442,7 +429,7 @@ fn non_factory_native_jsonl_duplicates_still_fail() {
     );
     let path = temp.path().join("projects").display().to_string();
     let _daemon = start_isolated_provider_daemon(&temp);
-    let stderr = failure_stderr(ctx(&temp).args([
+    let imported = json_output(ctx(&temp).args([
         "import",
         "--provider",
         "qoder",
@@ -453,5 +440,100 @@ fn non_factory_native_jsonl_duplicates_still_fail() {
         "--progress",
         "none",
     ]));
-    assert!(stderr.contains("duplicate event identity"), "{stderr}");
+    assert_explicit_source_publication_with_rejections(
+        &imported,
+        "qoder",
+        "qoder_transcript_jsonl_tree",
+        1,
+    );
+    let records = provider_core_records(&data_root(&temp), "qoder");
+    assert_eq!(records.len(), 2, "{imported:#}");
+    assert!(records
+        .iter()
+        .any(|record| { record.content.normalized_body.as_deref() == Some("first") }));
+    assert!(!records
+        .iter()
+        .any(|record| { record.content.normalized_body.as_deref() == Some("second") }));
+}
+
+/// Minimized, anonymized Factory Droid output from ctxrs/ctx#648. The provider
+/// wrote one message id twice with the same tool-result linkage. The first
+/// physical record wins and the later record is rejected atomically.
+#[test]
+fn factory_droid_repeated_record_ids_from_authentic_fixture() {
+    let temp = tempdir();
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("tests/fixtures/provider/factory_ai_droid_repeated_record_evidence.jsonl");
+    let root = temp
+        .path()
+        .join("native-droid-repeated-evidence/sessions/project");
+    fs::create_dir_all(&root).unwrap();
+    fs::copy(&fixture, root.join("droid-repeated-evidence.jsonl")).unwrap();
+    let path = root.parent().unwrap().display().to_string();
+    let _daemon = start_isolated_provider_daemon(&temp);
+
+    let imported = import_factory_result(&temp, &path);
+    assert_explicit_source_publication_with_rejections(
+        &imported,
+        "factory_ai_droid",
+        "factory_ai_droid_sessions_jsonl",
+        1,
+    );
+    assert_eq!(
+        provider_core_records(&data_root(&temp), "factory_ai_droid").len(),
+        5,
+        "{imported:#}"
+    );
+
+    let no_op = import_factory_result(&temp, &path);
+    assert_explicit_source_publication_with_rejections(
+        &no_op,
+        "factory_ai_droid",
+        "factory_ai_droid_sessions_jsonl",
+        1,
+    );
+    assert_noop_publication(&no_op);
+}
+
+#[test]
+fn factory_droid_appended_duplicate_is_rejected_against_the_published_base() {
+    let temp = tempdir();
+    let root = temp
+        .path()
+        .join("native-droid-duplicate-append/sessions/project");
+    fs::create_dir_all(&root).unwrap();
+    let session_file = root.join("droid-duplicate-append.jsonl");
+    let path = root.parent().unwrap().display().to_string();
+    let first = factory_result("dup", None, &[("Execute_1", "first accepted value")]);
+    write_jsonl(&session_file, &[factory_header("duplicate-append"), first]);
+    let _daemon = start_isolated_provider_daemon(&temp);
+
+    let cold = import_factory(&temp, &path);
+    assert_eq!(cold["totals"]["current_rejected_records"], 0, "{cold:#}");
+
+    let duplicate = factory_result("dup", None, &[("Execute_1", "later duplicate value")]);
+    let mut file = fs::OpenOptions::new()
+        .append(true)
+        .open(&session_file)
+        .unwrap();
+    writeln!(file, "{duplicate}").unwrap();
+    drop(file);
+
+    let appended = import_factory_result(&temp, &path);
+    assert_explicit_source_publication_with_rejections(
+        &appended,
+        "factory_ai_droid",
+        "factory_ai_droid_sessions_jsonl",
+        1,
+    );
+    let bodies = provider_core_records(&data_root(&temp), "factory_ai_droid")
+        .into_iter()
+        .filter_map(|record| record.content.normalized_body)
+        .collect::<BTreeSet<_>>();
+    assert!(bodies.contains("first accepted value"), "{appended:#}");
+    assert!(!bodies.contains("later duplicate value"), "{appended:#}");
 }

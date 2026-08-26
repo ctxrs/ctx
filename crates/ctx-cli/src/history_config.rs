@@ -32,6 +32,8 @@ impl HistoryConfigSnapshotPort for CliHistoryConfigSnapshot<'_> {
             daemon_enabled: self.config.automatic_indexing_enabled(),
             semantic_search_enabled: self.config.semantic_search_enabled(),
             local_usage_enabled: self.config.local_usage.enabled,
+            automatic_provider_discovery: self.config.automatic_source_discovery_enabled(),
+            provider_roots: self.config.provider_root_definitions(),
         }
     }
 }

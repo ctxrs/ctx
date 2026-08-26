@@ -14,11 +14,13 @@ mod query_events;
 mod response;
 mod response_bound;
 mod show;
+mod value_support;
 
 use arguments::{
     optional_bool, optional_content_scope, optional_f32, optional_provider,
-    optional_search_backend, optional_string, optional_transcript_mode, optional_usize,
-    validate_argument_keys, validate_search_filter_arguments, SourceIdentityFilterArgs,
+    optional_search_backend, optional_string, optional_strings, optional_transcript_mode,
+    optional_usize, validate_argument_keys, validate_search_filter_arguments,
+    SourceIdentityFilterArgs,
 };
 pub use input::{read_mcp_input_line, McpInputLine};
 use query_events::query_events_operation;
@@ -29,6 +31,7 @@ use response::{
 };
 use response_bound::{bound_query_events_mcp_response, bound_show_mcp_response};
 use show::{show_event_operation, show_session_operation};
+use value_support::{compact_json, provider_root_selectors};
 
 pub const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
 pub const MCP_SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &[MCP_PROTOCOL_VERSION, "2025-06-18"];
@@ -42,6 +45,8 @@ const MCP_DEFAULT_SESSION_PAGE_LIMIT: usize = 200;
 const MCP_MAX_SESSION_PAGE_LIMIT: usize = 4_096;
 const MCP_MAX_SESSION_CURSOR_BYTES: usize = 4_096;
 const MAX_SEARCH_LIMIT: usize = 200;
+const MAX_PROVIDER_ROOT_SELECTORS: usize = 64;
+const PROVIDER_ROOT_SELECTOR_PATTERN: &str = "^[A-Za-z0-9_-]{1,64}$";
 const MAX_EVENT_WINDOW: usize = 50;
 const MCP_MIN_EVENT_QUERY_LIMIT: u64 = 1;
 const MCP_DEFAULT_EVENT_QUERY_LIMIT: u64 = 10_000;
@@ -103,6 +108,8 @@ const SEARCH_ARGUMENTS: &[&str] = &[
     "provider_key",
     "source_id",
     "source_format",
+    "source_roots",
+    "source_groups",
     "workspace",
     "since",
     "primary_only",
@@ -247,12 +254,6 @@ impl<T> McpHandled<T> {
 pub struct McpUsage {
     pub operation: McpToolKind,
     pub facts: ToolUsageFacts,
-}
-
-#[derive(Debug)]
-pub(super) struct ParsedToolOperation {
-    pub(super) operation: ToolOperation,
-    pub(super) usage: ToolUsageFacts,
 }
 
 pub(crate) struct McpOperationParseError {
@@ -455,7 +456,11 @@ fn handle_tools_call_with_backend<B: ToolBackend>(
     };
     let mut usage = McpUsage {
         operation,
-        facts: ToolUsageFacts::default(),
+        facts: if operation == McpToolKind::Search {
+            ToolUsageFacts::search_preparation()
+        } else {
+            ToolUsageFacts::default()
+        },
     };
     let arguments = params
         .get("arguments")
@@ -475,12 +480,11 @@ fn handle_tools_call_with_backend<B: ToolBackend>(
     if let Err(error) = validate_argument_keys(&arguments, allowed_arguments) {
         return Ok(parse_failure_result(error.into(), usage));
     }
-    let parsed = match parse_operation(operation, &arguments, backend) {
-        Ok(parsed) => parsed,
+    let operation = match parse_operation(operation, &arguments, backend) {
+        Ok(operation) => operation,
         Err(failure) => return Ok(parse_failure_result(failure, usage)),
     };
-    usage.facts.merge(parsed.usage);
-    match backend.execute(parsed.operation) {
+    match backend.execute(operation) {
         Ok(ToolOutcome {
             structured,
             compact,
@@ -494,9 +498,9 @@ fn handle_tools_call_with_backend<B: ToolBackend>(
             })
         }
         Err(failure) => {
-            usage.facts.merge(failure.usage);
+            usage.facts.merge(*failure.usage);
             Ok(McpHandled {
-                value: tool_error_result(failure.error),
+                value: tool_error_result(*failure.error),
                 usage: Some(usage),
             })
         }
@@ -519,7 +523,7 @@ fn parse_operation<B: ToolBackend>(
     operation: McpToolKind,
     arguments: &Value,
     backend: &B,
-) -> Result<ParsedToolOperation, McpOperationParseError> {
+) -> Result<ToolOperation, McpOperationParseError> {
     if operation.is_companion_owned() {
         return Err(invalid_tool_request(format!("unknown tool {}", operation.tool_name())).into());
     }
@@ -536,8 +540,7 @@ fn parse_operation<B: ToolBackend>(
         ))),
     }
     .map_err(McpOperationParseError::from)?;
-    let usage = operation.invocation_usage();
-    Ok(ParsedToolOperation { operation, usage })
+    Ok(operation)
 }
 
 fn search_request<B: ToolBackend>(
@@ -569,6 +572,8 @@ fn search_request<B: ToolBackend>(
     let provider_key = optional_string(arguments, "provider_key")?;
     let source_id = optional_string(arguments, "source_id")?;
     let source_format = optional_string(arguments, "source_format")?;
+    let source_roots = provider_root_selectors(arguments, "source_roots")?;
+    let source_groups = provider_root_selectors(arguments, "source_groups")?;
     let session = optional_string(arguments, "session")?;
     let workspace = optional_string(arguments, "workspace")?;
     let since = optional_string(arguments, "since")?;
@@ -608,6 +613,8 @@ fn search_request<B: ToolBackend>(
         provider_key: source_identity.provider_key,
         source_id: source_identity.source_id,
         source_format: source_identity.source_format,
+        source_roots,
+        source_groups,
         workspace,
         since,
         primary_only,
@@ -620,28 +627,6 @@ fn search_request<B: ToolBackend>(
         backend,
         semantic_weight,
     })
-}
-
-fn compact_json(mut value: Value) -> Value {
-    prune_null_json(&mut value);
-    value
-}
-
-fn prune_null_json(value: &mut Value) {
-    match value {
-        Value::Object(map) => {
-            map.retain(|_, nested| {
-                prune_null_json(nested);
-                !nested.is_null()
-            });
-        }
-        Value::Array(items) => {
-            for item in items {
-                prune_null_json(item);
-            }
-        }
-        _ => {}
-    }
 }
 
 fn tool_definitions(provider_names: Vec<&'static str>) -> Vec<Value> {
@@ -672,6 +657,8 @@ fn tool_definitions(provider_names: Vec<&'static str>) -> Vec<Value> {
                 "provider_key": { "type": "string", "description": "Custom history provider_key." },
                 "source_id": { "type": "string", "description": "Custom history source_id." },
                 "source_format": { "type": "string", "description": "Custom history source_format." },
+                "source_roots": { "type": "array", "maxItems": MAX_PROVIDER_ROOT_SELECTORS, "items": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": PROVIDER_ROOT_SELECTOR_PATTERN }, "description": "Case-sensitive configured provider-root names to union." },
+                "source_groups": { "type": "array", "maxItems": MAX_PROVIDER_ROOT_SELECTORS, "items": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": PROVIDER_ROOT_SELECTOR_PATTERN }, "description": "Case-sensitive configured provider-root groups to union." },
                 "workspace": { "type": "string", "description": "Workspace path or name text." },
                 "since": { "type": "string", "description": "RFC3339 timestamp or day window such as 30d." },
                 "primary_only": { "type": "boolean", "default": false, "description": "Search only primary agent sessions." },
@@ -804,12 +791,13 @@ mod request_id_tests {
     use serde_json::{json, Value};
 
     use super::{
-        encoded_json_string_bytes, handle_protocol_message, request_id_is_accepted,
+        encoded_json_string_bytes, handle_protocol_message, request_id_is_accepted, search_request,
         tool_definitions, McpServerIdentity, McpToolKind, RequestDescriptor,
-        MCP_MAX_ENCODED_REQUEST_ID_BYTES,
+        MCP_MAX_ENCODED_REQUEST_ID_BYTES, PROVIDER_ROOT_SELECTOR_PATTERN,
     };
     use crate::tool_backend::{
         OpaqueMcpProxyError, ToolBackend, ToolExecutionError, ToolOperation, ToolOutcome,
+        ToolSearchBackend,
     };
 
     struct UnusedBackend;
@@ -828,7 +816,7 @@ mod request_id_tests {
         }
 
         fn provider_names(&self) -> Vec<&'static str> {
-            panic!("request-ID validation must run before the backend")
+            Vec::new()
         }
     }
 
@@ -902,5 +890,98 @@ mod request_id_tests {
             !McpToolKind::from_tool_name(tool.get("name").and_then(Value::as_str))
                 .is_companion_owned()
         }));
+    }
+
+    #[test]
+    fn search_root_and_group_arrays_are_typed_and_forwarded_across_backends() {
+        for (backend, expected_backend) in [
+            ("lexical", ToolSearchBackend::Lexical),
+            ("semantic", ToolSearchBackend::Semantic),
+            ("hybrid", ToolSearchBackend::Hybrid),
+        ] {
+            let request = search_request(
+                &json!({
+                    "query": "fixture",
+                    "source_roots": ["personal", "archive"],
+                    "source_groups": ["work"],
+                    "backend": backend,
+                }),
+                &UnusedBackend,
+            )
+            .unwrap();
+            assert_eq!(request.source_roots, ["personal", "archive"]);
+            assert_eq!(request.source_groups, ["work"]);
+            assert_eq!(request.backend, Some(expected_backend));
+        }
+
+        let error = search_request(
+            &json!({"query": "fixture", "source_roots": ["personal", 7]}),
+            &UnusedBackend,
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("source_roots entries must be strings"));
+
+        let definitions = tool_definitions(Vec::new());
+        let search = definitions
+            .iter()
+            .find(|tool| tool["name"] == "search")
+            .unwrap();
+        assert_eq!(
+            search["inputSchema"]["properties"]["source_roots"]["maxItems"],
+            64
+        );
+        assert_eq!(
+            search["inputSchema"]["properties"]["source_groups"]["items"]["maxLength"],
+            64
+        );
+        for key in ["source_roots", "source_groups"] {
+            assert_eq!(
+                search["inputSchema"]["properties"][key]["items"]["pattern"],
+                PROVIDER_ROOT_SELECTOR_PATTERN
+            );
+        }
+    }
+
+    #[test]
+    fn search_root_and_group_schema_matches_the_runtime_token_grammar() {
+        for value in ["a", "A0_-", &"x".repeat(64)] {
+            for key in ["source_roots", "source_groups"] {
+                let mut arguments = json!({"query": "fixture"});
+                arguments[key] = json!([value]);
+                assert!(
+                    search_request(&arguments, &UnusedBackend).is_ok(),
+                    "{key} should accept {value:?}"
+                );
+            }
+        }
+
+        for value in ["", "bad.root", " spaced ", "café", &"x".repeat(65)] {
+            for key in ["source_roots", "source_groups"] {
+                let mut arguments = json!({"query": "fixture"});
+                arguments[key] = json!([value]);
+                let error = search_request(&arguments, &UnusedBackend).unwrap_err();
+                let rendered = error.to_string();
+                assert!(
+                    rendered.contains("ASCII letters, digits"),
+                    "{key} unexpectedly accepted {value:?}: {error}"
+                );
+                if !value.is_empty() {
+                    assert!(
+                        !rendered.contains(value),
+                        "{key} rejection leaked selector content: {rendered}"
+                    );
+                }
+            }
+        }
+
+        let too_many = vec!["root"; 65];
+        for key in ["source_roots", "source_groups"] {
+            let mut arguments = json!({"query": "fixture"});
+            arguments[key] = json!(&too_many);
+            let error = search_request(&arguments, &UnusedBackend).unwrap_err();
+            assert!(error.to_string().contains("maximum of 64 entries"));
+        }
     }
 }

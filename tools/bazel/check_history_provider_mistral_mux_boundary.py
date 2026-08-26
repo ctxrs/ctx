@@ -48,6 +48,7 @@ EXPECTED_SOURCES = {
     "mistral_vibe/native_path.rs",
     "mistral_vibe/native_path/source_backed.rs",
     "mistral_vibe/native_path/source_backed/activity.rs",
+    "mistral_vibe/native_path/source_backed/tests.rs",
     "mistral_vibe/schema.rs",
     "mistral_vibe/source.rs",
     "mux.rs",
@@ -140,7 +141,9 @@ def validate_sources(manifest: Path) -> None:
     source = "\n".join(_read(source_root / path) for path in sorted(paths))
     required = (
         "pub fn mistral_vibe_jsonl_adapter<B>(",
+        "pub fn mistral_vibe_jsonl_adapter_with_source_root_lineage<B>(",
         "pub fn mux_jsonl_adapter<B>()",
+        "pub fn mux_jsonl_adapter_with_source_root_lineage<B>(",
         "ProviderJsonlRuntime<B>",
         "ProviderBaseEventLookup<B>",
         "CaptureProvider::MistralVibe",
@@ -194,15 +197,19 @@ def validate_capture_composition(
         raise BoundaryError("capture still owns Mistral Vibe or Mux provider modules")
     composition = _read(source_backed)
     required_import = (
-        "ctx_history_provider_mistral_mux::{mistral_vibe_jsonl_adapter, "
-        "mux_jsonl_adapter}"
+        "ctx_history_provider_mistral_mux::{\n"
+        "    mistral_vibe_jsonl_adapter_with_source_root_lineage, "
+        "mux_jsonl_adapter_with_source_root_lineage,\n"
+        "}"
     )
     if required_import not in composition:
         raise BoundaryError("capture provider-pack import drifted")
     registration_source = _read(registration)
     required_calls = (
-        "mistral_vibe_jsonl_adapter::<CaptureProviderRuntime>()",
-        "mux_jsonl_adapter::<CaptureProviderRuntime>()",
+        "mistral_vibe_jsonl_adapter_with_source_root_lineage::<CaptureProviderRuntime>(\n"
+        "            source_root_lineage,\n"
+        "        )",
+        "mux_jsonl_adapter_with_source_root_lineage::<CaptureProviderRuntime>(source_root_lineage)",
     )
     missing = [call for call in required_calls if call not in registration_source]
     if missing:

@@ -282,6 +282,25 @@ pub fn revalidate_frozen_prefix<E: JsonlFamilyError>(
         prefix_length,
         expected_prefix_digest,
         new_prefix_hasher(),
+        false,
+    )
+}
+
+pub(crate) fn authenticate_frozen_prefix<E: JsonlFamilyError>(
+    source_path: &Path,
+    source_file: &OpenedProviderSourceFile<E>,
+    frozen: &JsonlFileObservation,
+    prefix_length: u64,
+    expected_prefix_digest: [u8; 32],
+) -> JsonlResult<JsonlFileObservation, E> {
+    revalidate_frozen_prefix_with_hasher(
+        source_path,
+        source_file,
+        frozen,
+        prefix_length,
+        expected_prefix_digest,
+        new_prefix_hasher(),
+        true,
     )
 }
 
@@ -299,6 +318,25 @@ pub(crate) fn revalidate_frozen_prefix_sha256<E: JsonlFamilyError>(
         prefix_length,
         expected_prefix_digest,
         Sha256::default(),
+        false,
+    )
+}
+
+pub(crate) fn authenticate_frozen_prefix_sha256<E: JsonlFamilyError>(
+    source_path: &Path,
+    source_file: &OpenedProviderSourceFile<E>,
+    frozen: &JsonlFileObservation,
+    prefix_length: u64,
+    expected_prefix_digest: [u8; 32],
+) -> JsonlResult<JsonlFileObservation, E> {
+    revalidate_frozen_prefix_with_hasher(
+        source_path,
+        source_file,
+        frozen,
+        prefix_length,
+        expected_prefix_digest,
+        Sha256::default(),
+        true,
     )
 }
 
@@ -309,6 +347,7 @@ fn revalidate_frozen_prefix_with_hasher<E: JsonlFamilyError>(
     prefix_length: u64,
     expected_prefix_digest: [u8; 32],
     prefix_hasher: impl JsonlPrefixHasher,
+    force_authentication: bool,
 ) -> JsonlResult<JsonlFileObservation, E> {
     if prefix_length > frozen.length() {
         return Err(E::source_changed());
@@ -325,7 +364,7 @@ fn revalidate_frozen_prefix_with_hasher<E: JsonlFamilyError>(
 
     // An unchanged strong observation already binds the retained bytes. This
     // keeps an exact no-op metadata-only instead of rehashing the whole corpus.
-    if &before == frozen {
+    if &before == frozen && !force_authentication {
         return Ok(before);
     }
 

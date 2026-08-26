@@ -135,10 +135,18 @@ impl DaemonConfigPort for CliDaemonConfigPort {
         super::model_config::semantic_model_config(data_root)
     }
 
-    fn discovery_context(&self, _data_root: &Path) -> Result<DiscoveryContext> {
-        let home = crate::identity::home_dir()
-            .context("resolve the user home for source-backed provider discovery")?;
-        Ok(DiscoveryContext::from_process(home))
+    fn discovery_context(&self, data_root: &Path) -> Result<DiscoveryContext> {
+        let config = AppConfig::load(data_root)
+            .context("load configured provider roots for source-backed discovery")?;
+        let home = crate::identity::home_dir();
+        let home_available = home.is_some();
+        Ok(
+            DiscoveryContext::from_process(home.as_deref().unwrap_or(data_root))
+                .with_home_directory_available(home_available)
+                .with_data_root(data_root)
+                .with_automatic_provider_discovery(config.automatic_provider_discovery_enabled())
+                .with_configured_provider_roots(config.provider_roots().to_vec()),
+        )
     }
 }
 
@@ -240,10 +248,15 @@ pub(crate) struct CliDaemonObservationPort;
 impl DaemonObservationPort for CliDaemonObservationPort {
     fn provider_refresh_event(
         &self,
+        data_root: &Path,
         job: &serde_json::Value,
         successor_pending: bool,
     ) -> Option<PublicEventV1> {
-        provider_refresh::provider_refresh_event(job, successor_pending)
+        provider_refresh::provider_refresh_event(
+            job,
+            successor_pending,
+            crate::config::persisted_daemon_enabled(data_root).ok(),
+        )
     }
 
     fn deliver(&self, data_root: &Path, events: &[PublicEventV1]) {

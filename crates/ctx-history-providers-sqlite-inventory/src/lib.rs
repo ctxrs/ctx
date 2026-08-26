@@ -43,9 +43,10 @@ const SQLITE_INVENTORY_DISCOVERY_PROBES: ctx_history_source_discovery::StaticPro
         ctx_history_source_discovery::CursorProbeFragment::new(unused_cursor_probe),
     );
 pub use provider::providers::crush::native_path::source_backed::{
-    CrushProjectDatabaseV0, CrushProjectInventoryObservationV0, CrushProjectInventorySourceV0,
-    CrushSourceBackedErrorV0, CrushSourceBackedResultV0,
+    crush_source_key, CrushProjectDatabaseV0, CrushProjectInventoryObservationV0,
+    CrushProjectInventorySourceV0, CrushSourceBackedErrorV0, CrushSourceBackedResultV0,
 };
+pub use provider::providers::lingma::native_path::lingma_source_key;
 pub const ASTRBOT_SQLITE_SOURCE_FORMAT: &str = "astrbot_data_v4_sqlite";
 pub const CRUSH_SQLITE_SOURCE_FORMAT: &str = "crush_sqlite";
 pub const LINGMA_SQLITE_SOURCE_FORMAT: &str = "lingma_sqlite";
@@ -60,9 +61,10 @@ pub mod lifecycle {
         DocumentRecordSpool, DocumentSourceTerminal, ObservedDocumentLeaf, ReplacementDocumentTree,
         SourceBackedCoordinatorError, SourceBackedCoordinatorResult,
         SourceBackedCurrentSourceProgress, SourceBackedCurrentSourceProgressStage,
-        SourceBackedReconciliationDemand, SourceBackedRouteError, SourceBackedRouteErrorKind,
-        SourceBackedRouteResult, SourceBackedRouteSelection, SourceBackedRouteWatchTargets,
-        SourceBackedSelectorAuthority,
+        SourceBackedReconciliationDemand, SourceBackedRecordRejectionClass,
+        SourceBackedRecordRejectionDraft, SourceBackedRecordRejectionDrafts,
+        SourceBackedRouteError, SourceBackedRouteErrorKind, SourceBackedRouteResult,
+        SourceBackedRouteSelection, SourceBackedRouteWatchTargets, SourceBackedSelectorAuthority,
     };
 }
 

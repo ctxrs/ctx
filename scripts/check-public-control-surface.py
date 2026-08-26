@@ -33,6 +33,7 @@ RELEASED_DEFAULT_SCOPES = {
     "upgrade.auto": "official_installer_managed",
     "indexing.mode": "all_cli_installations",
     "search.semantic": "all_cli_installations",
+    "sources.automatic": "all_cli_installations",
 }
 PINNED_STABLE_SNAPSHOTS = {
     "v0.25.0": {
@@ -139,6 +140,11 @@ def extract_empty_config_defaults(config_source: str) -> dict[str, object]:
         ),
         "search.semantic": scalar_value(semantic.group(1), constants),
     }
+    if "SourcesConfig" in default_source:
+        defaults["sources.automatic"] = default_field(
+            r"sources:\s*SourcesConfig\s*\{.*?automatic:\s*([^,}\n]+)",
+            "automatic provider source discovery",
+        )
     indexing_mode = re.search(
         r"indexing:\s*IndexingConfig\s*\{.*?mode:\s*IndexingMode::([A-Za-z]+),",
         default_source,
@@ -332,7 +338,13 @@ def main() -> None:
         fail("controls must be a non-empty list")
     behaviors = [control["behavior"] for control in controls]
     config_keys = [control["config_key"] for control in controls]
-    env_vars = [control["environment_variable"] for control in controls]
+    declared_env_vars = [control.get("environment_variable") for control in controls]
+    if any(
+        value is not None and (not isinstance(value, str) or not value)
+        for value in declared_env_vars
+    ):
+        fail("environment_variable must be a non-empty string or null")
+    env_vars = [value for value in declared_env_vars if value is not None]
     unique(behaviors, "behaviors")
     unique(config_keys, "config keys")
     unique(env_vars, "environment variables")
@@ -369,7 +381,11 @@ def main() -> None:
     if not separator:
         fail("could not locate AppConfig::apply_env")
     implemented_keys = set(
-        re.findall(r'^\s+"([a-z][a-z0-9_.]+)"\s*=>', apply_values, re.MULTILINE)
+        re.findall(
+            r'^\s+"([a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+)"\s*=>',
+            apply_values,
+            re.MULTILINE,
+        )
     )
     # Canonical controls may be owned by a purpose-specific helper called from
     # apply_env. Scan the complete production config module so helper-owned
@@ -509,7 +525,11 @@ def main() -> None:
     }
     for path in tracked_text_files(root, excluded):
         relative = path.relative_to(root)
-        is_test = "tests" in relative.parts or relative.name.endswith("_tests.rs")
+        is_test = (
+            "tests" in relative.parts
+            or relative.name.endswith("_tests.rs")
+            or relative.name.startswith("test-")
+        )
         if is_test:
             continue
         text = path.read_text(encoding="utf-8", errors="replace")

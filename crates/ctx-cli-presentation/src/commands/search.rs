@@ -5,6 +5,8 @@ use clap::{Args, ValueEnum};
 
 use crate::analytics::{
     count_bucket, duration_bucket, text_length_bucket, RefreshMode, RefreshStatus, SearchBackend,
+    SearchConcentrationFacts, SearchCopyClusterAvailability, SearchDiversificationStatus,
+    SearchFailurePhase, SearchHealthFacts, SearchLiteralRootFacts, SearchStopReason,
     SearchTelemetry,
 };
 use crate::local_usage::CliUsage;
@@ -45,6 +47,18 @@ pub struct SearchArgs {
         help = "Filter custom history imports by source_format"
     )]
     pub source_format: Option<String>,
+    #[arg(
+        long = "source-root",
+        value_name = "NAME",
+        help = "Search one configured provider root; repeat to union roots"
+    )]
+    pub source_roots: Vec<String>,
+    #[arg(
+        long = "source-group",
+        value_name = "GROUP",
+        help = "Search configured provider roots in this group; repeat to union groups"
+    )]
+    pub source_groups: Vec<String>,
     #[arg(
         long,
         help = "Filter by stored workspace, cwd, source path, or repo-name text"
@@ -154,18 +168,30 @@ pub fn run_search(
     local_usage: &mut CliUsage,
     ui: &mut Ui,
 ) -> Result<()> {
-    let observation = ctx_history_cli::run_search(
+    telemetry.refresh_mode = Some(match args.refresh {
+        CliRefreshArg::Background => RefreshMode::Background,
+        CliRefreshArg::Off => RefreshMode::Off,
+        CliRefreshArg::Wait => RefreshMode::Wait,
+    });
+    let (query_length, query_term_count) = positional_query_shape(args.query.as_deref());
+    telemetry.query_length = Some(text_length_bucket(query_length));
+    telemetry.query_term_count = Some(count_bucket(
+        u64::try_from(query_term_count).unwrap_or(u64::MAX),
+    ));
+    ctx_history_cli::run_search(
         adapt(args),
         data_root,
         config,
         local_usage,
         ui,
         |observation| apply_search_observation(telemetry, observation),
-    )?;
-    if let Some(render_duration) = observation.render_duration {
-        telemetry.render_duration = Some(duration_bucket(render_duration));
-    }
-    Ok(())
+    )
+}
+
+fn positional_query_shape(query: Option<&str>) -> (usize, usize) {
+    query.map_or((0, 0), |query| {
+        (query.chars().count(), query.split_whitespace().count())
+    })
 }
 
 pub fn adapt(args: SearchArgs) -> ctx_history_cli::SearchArgs {
@@ -183,6 +209,8 @@ pub fn adapt(args: SearchArgs) -> ctx_history_cli::SearchArgs {
         provider_key: args.provider_key,
         source_id: args.source_id,
         source_format: args.source_format,
+        source_roots: args.source_roots,
+        source_groups: args.source_groups,
         workspace: args.workspace,
         since: args.since,
         primary_only: args.primary_only,
@@ -243,39 +271,92 @@ fn apply_search_observation(
     telemetry: &mut SearchTelemetry,
     observation: ctx_history_cli::SearchExecutionObservation,
 ) {
-    telemetry.refresh_mode = Some(match observation.refresh_mode {
-        ctx_history_cli::RefreshMode::Background => RefreshMode::Background,
-        ctx_history_cli::RefreshMode::Off => RefreshMode::Off,
-        ctx_history_cli::RefreshMode::Wait => RefreshMode::Wait,
-    });
-    telemetry.refresh_status = Some(match observation.refresh_status {
-        ctx_history_cli::SearchRefreshStatus::ExistingGeneration => {
-            RefreshStatus::from_safe_summary("existing_generation")
-        }
-        ctx_history_cli::SearchRefreshStatus::DaemonBackground => {
-            RefreshStatus::from_safe_summary("daemon_background")
-        }
-        ctx_history_cli::SearchRefreshStatus::DaemonUnavailable => {
-            RefreshStatus::from_safe_summary("daemon_unavailable")
-        }
-        ctx_history_cli::SearchRefreshStatus::Completed => {
-            RefreshStatus::from_safe_summary("completed")
-        }
-    });
-    telemetry.refresh_source_count = Some(count_bucket(observation.refresh_source_count));
-    telemetry.refresh_duration = Some(duration_bucket(observation.refresh_duration));
-    telemetry.query_duration = Some(duration_bucket(observation.query_duration));
-    if let Some(render_duration) = observation.render_duration {
-        telemetry.render_duration = Some(duration_bucket(render_duration));
+    telemetry.refresh_status = observation.refresh_status.map(search_refresh_status);
+    telemetry.refresh_source_count = observation.refresh_source_count.map(count_bucket);
+    telemetry.refresh_duration = observation.refresh_duration.map(duration_bucket);
+    telemetry.query_duration = observation.query_duration.map(duration_bucket);
+    telemetry.render_duration = observation.render_duration.map(duration_bucket);
+    telemetry.output_duration = observation.output_duration;
+    telemetry.backend_requested = observation.backend_requested.map(search_backend);
+    telemetry.backend_effective = observation.backend_effective.map(search_backend);
+    telemetry.result_count = observation.result_count.map(count_bucket);
+    telemetry.citation_count = observation.citation_count.map(count_bucket);
+    telemetry.zero_result = observation.zero_result;
+    telemetry.has_indexed_content_after = observation.has_indexed_content_after;
+    telemetry.health = Some(search_health_facts(&observation));
+}
+
+fn search_health_facts(
+    observation: &ctx_history_cli::SearchExecutionObservation,
+) -> SearchHealthFacts {
+    SearchHealthFacts {
+        retrieval_rounds: observation.work.retrieval_rounds,
+        query_executions: observation.work.query_executions,
+        candidate_rows: observation.work.candidate_rows,
+        records_decoded: observation.work.records_decoded,
+        encoded_core_bytes_decoded: observation.work.encoded_core_bytes_decoded,
+        final_candidate_pool: observation.final_candidate_pool,
+        candidate_pool_truncated: observation.candidate_pool_truncated,
+        concentration: search_concentration_facts(observation),
+        stop_reason: observation.stop_reason.map(observed_stop_reason),
+        failure_phase: observation.failure_phase.map(observed_failure_phase),
     }
-    telemetry.backend_requested = Some(search_backend(observation.backend_requested));
-    telemetry.backend_effective = Some(search_backend(observation.backend_effective));
-    telemetry.result_count = Some(count_bucket(observation.result_count));
-    telemetry.citation_count = Some(count_bucket(observation.citation_count));
-    telemetry.zero_result = Some(observation.zero_result);
-    telemetry.has_indexed_content_after = Some(observation.has_indexed_content_after);
-    telemetry.query_length = Some(text_length_bucket(observation.query_length as usize));
-    telemetry.query_term_count = Some(count_bucket(observation.query_term_count));
+}
+
+fn search_concentration_facts(
+    observation: &ctx_history_cli::SearchExecutionObservation,
+) -> Option<SearchConcentrationFacts> {
+    let concentration = observation.concentration?;
+    let diversification = observation.diversification?;
+    let literal_roots = match concentration.literal_roots {
+        ctx_history_read_application::SearchLiteralRootConcentration::Observed {
+            distinct_families,
+            candidate_count,
+            largest_family_candidate_count,
+        } => SearchLiteralRootFacts::Observed {
+            candidate_families: distinct_families,
+            candidate_count,
+            largest_family_candidate_count,
+        },
+        ctx_history_read_application::SearchLiteralRootConcentration::NotObservedDense => {
+            SearchLiteralRootFacts::NotObservedDense
+        }
+    };
+    Some(SearchConcentrationFacts {
+        candidate_sessions: concentration.distinct_sessions,
+        largest_session_candidate_count: concentration.largest_session_candidate_count,
+        literal_roots,
+        provider_copy_candidate_count: concentration.provider_copy_candidate_count,
+        copy_cluster_availability: match concentration.copy_clusters {
+            ctx_history_read_application::SearchCopyClusterAvailability::NotConstructedV1 => {
+                SearchCopyClusterAvailability::NotConstructedV1
+            }
+        },
+        diversification_status: match diversification.status {
+            ctx_history_read_application::SearchDiversificationStatus::Applied => {
+                SearchDiversificationStatus::Applied
+            }
+            ctx_history_read_application::SearchDiversificationStatus::NotApplicable => {
+                SearchDiversificationStatus::NotApplicable
+            }
+            ctx_history_read_application::SearchDiversificationStatus::Indeterminate => {
+                SearchDiversificationStatus::Indeterminate
+            }
+        },
+        diversification_changed_final_top_n: diversification.changed_final_top_n,
+    })
+}
+
+const fn search_refresh_status(value: ctx_history_cli::SearchRefreshStatus) -> RefreshStatus {
+    match value {
+        ctx_history_cli::SearchRefreshStatus::ExistingGeneration => {
+            RefreshStatus::ExistingGeneration
+        }
+        ctx_history_cli::SearchRefreshStatus::DaemonBackground => RefreshStatus::DaemonBackground,
+        ctx_history_cli::SearchRefreshStatus::DaemonUnavailable => RefreshStatus::DaemonUnavailable,
+        ctx_history_cli::SearchRefreshStatus::Completed => RefreshStatus::Completed,
+        ctx_history_cli::SearchRefreshStatus::Failed => RefreshStatus::Failed,
+    }
 }
 
 const fn search_backend(value: ctx_history_read_application::SearchBackend) -> SearchBackend {
@@ -283,6 +364,41 @@ const fn search_backend(value: ctx_history_read_application::SearchBackend) -> S
         ctx_history_read_application::SearchBackend::Hybrid => SearchBackend::Hybrid,
         ctx_history_read_application::SearchBackend::Lexical => SearchBackend::Lexical,
         ctx_history_read_application::SearchBackend::Semantic => SearchBackend::Semantic,
+    }
+}
+
+const fn observed_stop_reason(
+    value: ctx_history_read_application::SearchStopReason,
+) -> SearchStopReason {
+    match value {
+        ctx_history_read_application::SearchStopReason::Decisive => SearchStopReason::Decisive,
+        ctx_history_read_application::SearchStopReason::Exhausted => SearchStopReason::Exhausted,
+        ctx_history_read_application::SearchStopReason::CandidateCap => {
+            SearchStopReason::CandidateCap
+        }
+        ctx_history_read_application::SearchStopReason::FixedPool => SearchStopReason::FixedPool,
+    }
+}
+
+const fn observed_failure_phase(value: ctx_history_cli::SearchFailurePhase) -> SearchFailurePhase {
+    match value {
+        ctx_history_cli::SearchFailurePhase::Preparation => SearchFailurePhase::Preparation,
+        ctx_history_cli::SearchFailurePhase::Refresh => SearchFailurePhase::Refresh,
+        ctx_history_cli::SearchFailurePhase::GenerationOpen => SearchFailurePhase::GenerationOpen,
+        ctx_history_cli::SearchFailurePhase::QueryPreparation => {
+            SearchFailurePhase::QueryPreparation
+        }
+        ctx_history_cli::SearchFailurePhase::SemanticRetrieval => {
+            SearchFailurePhase::SemanticRetrieval
+        }
+        ctx_history_cli::SearchFailurePhase::IndexQueryDecode => {
+            SearchFailurePhase::IndexQueryDecode
+        }
+        ctx_history_cli::SearchFailurePhase::ResultProjection => {
+            SearchFailurePhase::ResultProjection
+        }
+        ctx_history_cli::SearchFailurePhase::Render => SearchFailurePhase::Render,
+        ctx_history_cli::SearchFailurePhase::Output => SearchFailurePhase::Output,
     }
 }
 
@@ -328,29 +444,56 @@ mod tests {
             citation_count: None,
             zero_result: None,
             render_duration: None,
+            output_duration: None,
+            output_served: None,
+            health: None,
         }
+    }
+
+    #[test]
+    fn query_shape_preserves_released_positional_query_semantics() {
+        assert_eq!(positional_query_shape(Some("  one two  ")), (11, 2));
+        assert_eq!(positional_query_shape(None), (0, 0));
+
+        let parsed = TestCli::try_parse_from([
+            "test",
+            "positional",
+            "--term",
+            "extra terms are not counted",
+        ])
+        .unwrap();
+        assert_eq!(
+            positional_query_shape(parsed.search.query.as_deref()),
+            (10, 1)
+        );
     }
 
     #[test]
     fn observation_mapping_populates_every_final_analytics_field_once() {
         let mut telemetry = telemetry();
+        telemetry.refresh_mode = Some(RefreshMode::Wait);
+        telemetry.query_length = Some(text_length_bucket(6));
+        telemetry.query_term_count = Some(count_bucket(2));
         apply_search_observation(
             &mut telemetry,
             ctx_history_cli::SearchExecutionObservation {
-                refresh_mode: ctx_history_cli::RefreshMode::Wait,
-                refresh_status: ctx_history_cli::SearchRefreshStatus::Completed,
-                refresh_source_count: 3,
-                refresh_duration: Duration::from_millis(1),
-                query_duration: Duration::from_millis(2),
+                refresh_status: Some(ctx_history_cli::SearchRefreshStatus::Completed),
+                refresh_source_count: Some(3),
+                refresh_duration: Some(Duration::from_millis(1)),
+                query_duration: Some(Duration::from_millis(2)),
                 render_duration: Some(Duration::from_millis(3)),
-                backend_requested: ctx_history_read_application::SearchBackend::Hybrid,
-                backend_effective: ctx_history_read_application::SearchBackend::Lexical,
-                result_count: 4,
-                citation_count: 5,
-                zero_result: false,
-                has_indexed_content_after: true,
-                query_length: 6,
-                query_term_count: 2,
+                output_duration: Some(Duration::from_millis(4)),
+                backend_requested: Some(ctx_history_read_application::SearchBackend::Hybrid),
+                backend_effective: Some(ctx_history_read_application::SearchBackend::Lexical),
+                result_count: Some(4),
+                citation_count: Some(5),
+                zero_result: Some(false),
+                has_indexed_content_after: Some(true),
+                work: ctx_history_read_application::SearchWorkReceipt {
+                    query_executions: Some(1),
+                    ..ctx_history_read_application::SearchWorkReceipt::default()
+                },
+                ..ctx_history_cli::SearchExecutionObservation::default()
             },
         );
 
@@ -364,39 +507,48 @@ mod tests {
         assert!(telemetry.refresh_duration.is_some());
         assert!(telemetry.query_duration.is_some());
         assert!(telemetry.render_duration.is_some());
+        assert_eq!(telemetry.output_duration, Some(Duration::from_millis(4)));
         assert!(telemetry.query_length.is_some());
         assert!(telemetry.query_term_count.is_some());
         assert!(telemetry.result_count.is_some());
         assert!(telemetry.citation_count.is_some());
+        assert_eq!(telemetry.health.unwrap().query_executions, Some(1));
     }
 
     #[test]
-    fn query_observation_populates_analytics_before_render_completes() {
+    fn failed_observation_keeps_partial_work_and_phase() {
         let mut telemetry = telemetry();
         apply_search_observation(
             &mut telemetry,
             ctx_history_cli::SearchExecutionObservation {
-                refresh_mode: ctx_history_cli::RefreshMode::Off,
-                refresh_status: ctx_history_cli::SearchRefreshStatus::ExistingGeneration,
-                refresh_source_count: 1,
-                refresh_duration: Duration::from_millis(1),
-                query_duration: Duration::from_millis(2),
+                refresh_status: Some(ctx_history_cli::SearchRefreshStatus::ExistingGeneration),
+                refresh_source_count: Some(1),
+                refresh_duration: Some(Duration::from_millis(1)),
+                query_duration: Some(Duration::from_millis(2)),
                 render_duration: None,
-                backend_requested: ctx_history_read_application::SearchBackend::Lexical,
-                backend_effective: ctx_history_read_application::SearchBackend::Lexical,
-                result_count: 1,
-                citation_count: 1,
-                zero_result: false,
-                has_indexed_content_after: true,
-                query_length: 6,
-                query_term_count: 1,
+                backend_requested: Some(ctx_history_read_application::SearchBackend::Lexical),
+                backend_effective: None,
+                result_count: None,
+                citation_count: None,
+                zero_result: None,
+                has_indexed_content_after: Some(true),
+                work: ctx_history_read_application::SearchWorkReceipt {
+                    query_executions: Some(1),
+                    ..ctx_history_read_application::SearchWorkReceipt::default()
+                },
+                failure_phase: Some(ctx_history_cli::SearchFailurePhase::Render),
+                ..ctx_history_cli::SearchExecutionObservation::default()
             },
         );
 
         assert!(telemetry.query_duration.is_some());
-        assert!(telemetry.result_count.is_some());
-        assert_eq!(telemetry.backend_effective, Some(SearchBackend::Lexical));
+        assert_eq!(telemetry.result_count, None);
+        assert_eq!(telemetry.backend_effective, None);
         assert_eq!(telemetry.render_duration, None);
+        assert_eq!(
+            telemetry.health.unwrap().failure_phase,
+            Some(SearchFailurePhase::Render)
+        );
     }
 
     #[test]
@@ -424,6 +576,23 @@ mod tests {
         .search;
         assert!(matches!(args.content_scope, Some(ContentScopeArg::Calls)));
         assert!(args.events && args.include_current_session);
+    }
+
+    #[test]
+    fn search_clap_accepts_source_groups_and_rejects_the_unreleased_scope_spelling() {
+        let args = TestCli::try_parse_from([
+            "ctx",
+            "needle",
+            "--source-group",
+            "personal",
+            "--source-group=work",
+        ])
+        .unwrap()
+        .search;
+        assert_eq!(args.source_groups, ["personal", "work"]);
+
+        let error = TestCli::try_parse_from(["ctx", "needle", "--scope", "work"]).unwrap_err();
+        assert!(error.to_string().contains("--scope"));
     }
 
     #[test]

@@ -9,7 +9,9 @@ mod source_backed;
 
 use routes::*;
 
-pub(crate) use source_backed::openclaw_source_backed_adapter_v0;
+pub(crate) use source_backed::{
+    openclaw_source_backed_adapter_v0, openclaw_source_backed_adapter_v0_with_source_root_lineage,
+};
 
 const OPENCLAW_IDENTITY_TEXT_MAX_CHARS: usize = 16_000;
 

@@ -373,8 +373,17 @@ impl CoreRefreshEngine {
                   journal: &dyn RefreshJournal,
                   data_root: &Path,
                   catalog: Option<&ExplicitSourceCatalogAuthority>| {
+                let configured_provider_roots = discovery.configured_provider_roots().to_vec();
+                let automatic_provider_discovery = discovery.automatic_provider_discovery_enabled();
                 admission_fence(discovery, journal, data_root, catalog)
                     .map(admitted_refresh_for_test)
+                    .map(|admitted| {
+                        admitted
+                            .with_configured_provider_roots_for_test(configured_provider_roots)
+                            .with_automatic_provider_discovery_for_test(
+                                automatic_provider_discovery,
+                            )
+                    })
             },
         );
         Self::with_runtime(executor, adapted, journal, runtime)

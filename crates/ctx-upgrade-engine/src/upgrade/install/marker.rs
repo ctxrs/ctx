@@ -284,7 +284,7 @@ fn read_install_marker_bytes(path: &Path) -> Result<Option<Vec<u8>>> {
     )
 }
 
-pub(super) fn install_marker_path(path: &Path) -> PathBuf {
+pub(in crate::upgrade) fn install_marker_path(path: &Path) -> PathBuf {
     let mut file_name = path
         .file_name()
         .unwrap_or_else(|| std::ffi::OsStr::new("ctx"))

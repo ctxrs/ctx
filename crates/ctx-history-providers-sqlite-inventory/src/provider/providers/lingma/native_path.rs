@@ -8,6 +8,7 @@ use crate::{
 
 mod records;
 mod source_backed;
+pub use source_backed::lingma_source_key;
 
 use records::{hash_optional_bytes, hash_optional_i64, hash_optional_u64};
 pub(crate) use source_backed::{

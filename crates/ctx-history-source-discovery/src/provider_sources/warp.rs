@@ -132,6 +132,34 @@ impl WarpInstalledSurfaceKey {
     }
 }
 
+impl WarpInstalledPlatform {
+    pub(crate) const fn role_component(self) -> &'static [u8] {
+        match self {
+            Self::Linux => b"linux",
+            Self::MacOS => b"macos",
+            Self::Windows => b"windows",
+        }
+    }
+}
+
+impl WarpReleaseChannel {
+    pub(crate) const fn role_component(self) -> &'static [u8] {
+        match self {
+            Self::Stable => b"stable",
+            Self::Preview => b"preview",
+        }
+    }
+}
+
+impl WarpTerminalSurface {
+    pub(crate) const fn role_component(self) -> &'static [u8] {
+        match self {
+            Self::Gui => b"gui",
+            Self::Tui => b"tui",
+        }
+    }
+}
+
 impl fmt::Display for WarpInstalledSurfaceKey {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.as_str())
@@ -205,6 +233,21 @@ pub fn resolve_warp_discovery_authority(
     discover_warp_sources_with_authority(probes, context)?
         .into_iter()
         .find(|candidate| candidate.source() == selected_source)
+        .ok_or(WarpDiscoveryUnavailable::SourceNotSelected)
+}
+
+/// Reconstructs the installed-surface selector for a previously certified
+/// automatic path without requiring that immutable identity path to remain
+/// present. The returned path is identity-only; callers must keep filesystem
+/// access bound to their current configured root.
+pub fn resolve_warp_released_identity_authority(
+    probes: &StaticProviderProbeCatalog,
+    context: &DiscoveryContext,
+    identity_path: &std::path::Path,
+) -> Result<DiscoveredWarpSource, WarpDiscoveryUnavailable> {
+    discover_warp_sources_with_authority(probes, context)?
+        .into_iter()
+        .find(|candidate| candidate.source().path == identity_path)
         .ok_or(WarpDiscoveryUnavailable::SourceNotSelected)
 }
 

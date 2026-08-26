@@ -272,7 +272,7 @@ fn assert_source_backed_search_show_oracle(
     expected_results: usize,
     expected_event_type: &str,
 ) {
-    assert_eq!(packet["schema_version"], 1, "{packet:#}");
+    assert_eq!(packet["schema_version"], 2, "{packet:#}");
     assert_eq!(packet["payload_type"], "search_results", "{packet:#}");
     assert_eq!(packet["query"], query, "{packet:#}");
     assert_eq!(packet["filters"]["provider"], provider, "{packet:#}");

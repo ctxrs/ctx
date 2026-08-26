@@ -28,17 +28,26 @@ from check_sqlite_inventory_provider_boundary import (
 def facade_text() -> str:
     return (
         "use ctx_history_providers_sqlite_inventory::registration::{\n"
-        "    astrbot_registration, crush_registration, lingma_registration,\n"
-        "    shelley_registration,\n"
+        "    astrbot_registration_scoped, astrbot_released_registration_scoped,\n"
+        "    crush_registration_scoped, lingma_registration_scoped, shelley_registration,\n"
+        "    SqliteInventoryCoverage,\n"
         "};\n"
+        "pub type SqliteInventoryRouteAuthority = "
+        "(Option<[u8; 32]>, SqliteInventoryCoverage);\n"
         "pub fn register_astrbot_source_backed_route() {\n"
-        "    install_sqlite_inventory_registration(astrbot_registration::<L, S>());\n"
+        "    install_sqlite_inventory_registration(astrbot_registration_scoped::<L, S>());\n"
+        "}\n"
+        "pub fn register_astrbot_released_source_backed_route() {\n"
+        "    install_sqlite_inventory_registration("
+        "astrbot_released_registration_scoped::<L, S>());\n"
         "}\n"
         "pub fn register_crush_source_backed_route() {\n"
-        "    install_sqlite_inventory_registration(crush_registration::<I, L, S>());\n"
+        "    install_sqlite_inventory_registration(crush_registration_scoped::<I, L, S>());\n"
         "}\n"
-        "pub fn register_lingma_source_backed_route() {\n"
-        "    install_sqlite_inventory_registration(lingma_registration::<L, S>());\n"
+        "pub fn register_lingma_source_backed_route(\n"
+        "    route_authority: SqliteInventoryRouteAuthority,\n"
+        ") {\n"
+        "    install_sqlite_inventory_registration(lingma_registration_scoped::<L, S>());\n"
         "}\n"
         "pub fn register_shelley_source_backed_route() {\n"
         "    install_sqlite_inventory_registration(shelley_registration::<L, S>());\n"
@@ -49,10 +58,15 @@ def facade_text() -> str:
 def hermes_facade_text() -> str:
     return (
         "use ctx_history_provider_hermes::registration::{\n"
-        "    hermes_automatic_registration, hermes_explicit_registration,\n"
+        "    hermes_automatic_registration_scoped, hermes_explicit_registration,\n"
+        "    hermes_explicit_registration_scoped, hermes_released_registration_scoped,\n"
         "};\n"
         "pub(super) fn register_hermes_source_backed_route() {\n"
-        "    install_hermes_registration(hermes_automatic_registration::<L, S>());\n"
+        "    install_hermes_registration(hermes_automatic_registration_scoped::<L, S>());\n"
+        "    install_hermes_registration(hermes_explicit_registration_scoped::<L, S>());\n"
+        "}\n"
+        "pub(in crate::source_backed) fn register_hermes_released_source_backed_route() {\n"
+        "    install_hermes_registration(hermes_released_registration_scoped::<L, S>());\n"
         "}\n"
         "pub fn register_hermes_explicit_source_backed_route() {\n"
         "    install_hermes_registration(hermes_explicit_registration::<L, S>());\n"
@@ -248,24 +262,49 @@ class SqliteInventoryProviderBoundaryMutations(unittest.TestCase):
         with self.assertRaisesRegex(BoundaryError, "façade item surface drifted"):
             self.validate()
 
+    def test_missing_composition_facade_function_is_rejected(self) -> None:
+        self.composition_facade.write_text(
+            self.composition_facade.read_text(encoding="utf-8").replace(
+                "pub fn register_astrbot_released_source_backed_route() {\n"
+                "    install_sqlite_inventory_registration("
+                "astrbot_released_registration_scoped::<L, S>());\n"
+                "}\n",
+                "",
+            ),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(BoundaryError, "façade item surface drifted"):
+            self.validate()
+
     def test_digit_bearing_extra_composition_binding_is_rejected(self) -> None:
         self.composition_facade.write_text(
             self.composition_facade.read_text(encoding="utf-8").replace(
-                "    astrbot_registration, crush_registration, lingma_registration,\n",
-                "    astrbot_registration, crush_registration, duplicate2_registration, "
-                "lingma_registration,\n",
+                "    crush_registration_scoped, lingma_registration_scoped, "
+                "shelley_registration,\n",
+                "    crush_registration_scoped, duplicate2_registration_scoped, "
+                "lingma_registration_scoped, shelley_registration,\n",
             ),
             encoding="utf-8",
         )
         with self.assertRaisesRegex(
-            BoundaryError, r"provider bindings drifted:.*duplicate2_registration"
+            BoundaryError, r"provider bindings drifted:.*duplicate2_registration_scoped"
         ):
             self.validate()
 
     def test_missing_composition_provider_binding_is_rejected(self) -> None:
         self.composition_facade.write_text(
             self.composition_facade.read_text(encoding="utf-8").replace(
-                "    astrbot_registration, ", "    ", 1
+                "    astrbot_registration_scoped, ", "    ", 1
+            ),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(BoundaryError, "provider bindings drifted"):
+            self.validate()
+
+    def test_missing_composition_coverage_binding_is_rejected(self) -> None:
+        self.composition_facade.write_text(
+            self.composition_facade.read_text(encoding="utf-8").replace(
+                "    SqliteInventoryCoverage,\n", ""
             ),
             encoding="utf-8",
         )
@@ -275,16 +314,40 @@ class SqliteInventoryProviderBoundaryMutations(unittest.TestCase):
     def test_digit_bearing_extra_composition_call_is_rejected(self) -> None:
         self.composition_facade.write_text(
             self.composition_facade.read_text(encoding="utf-8").replace(
-                "    install_sqlite_inventory_registration(astrbot_registration::<L, S>());\n",
-                "    install_sqlite_inventory_registration(astrbot_registration::<L, S>());\n"
-                "    duplicate2_registration::<L, S>();\n",
+                "    install_sqlite_inventory_registration("
+                "astrbot_registration_scoped::<L, S>());\n",
+                "    install_sqlite_inventory_registration("
+                "astrbot_registration_scoped::<L, S>());\n"
+                "    duplicate2_registration_scoped::<L, S>();\n",
             ),
             encoding="utf-8",
         )
         with self.assertRaisesRegex(
             BoundaryError,
-            r"constructor calls drifted: unexpected=\['duplicate2_registration'\]",
+            r"constructor calls drifted: unexpected=\['duplicate2_registration_scoped'\]",
         ):
+            self.validate()
+
+    def test_route_authority_alias_shape_drift_is_rejected(self) -> None:
+        self.composition_facade.write_text(
+            self.composition_facade.read_text(encoding="utf-8").replace(
+                "(Option<[u8; 32]>, SqliteInventoryCoverage);",
+                "([u8; 32], SqliteInventoryCoverage);",
+            ),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(BoundaryError, "route-authority alias drifted"):
+            self.validate()
+
+    def test_restricted_composition_public_surface_is_rejected(self) -> None:
+        self.composition_facade.write_text(
+            self.composition_facade.read_text(encoding="utf-8").replace(
+                "pub fn register_astrbot_released_source_backed_route()",
+                "pub(crate) fn register_astrbot_released_source_backed_route()",
+            ),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(BoundaryError, "public surface drifted"):
             self.validate()
 
     def test_missing_composition_facade_is_rejected(self) -> None:
@@ -309,6 +372,29 @@ class SqliteInventoryProviderBoundaryMutations(unittest.TestCase):
         with self.assertRaisesRegex(BoundaryError, "Hermes registration authority drifted"):
             self.validate()
 
+    def test_extra_hermes_composition_binding_is_rejected(self) -> None:
+        self.hermes_composition_facade.write_text(
+            self.hermes_composition_facade.read_text(encoding="utf-8").replace(
+                "    hermes_explicit_registration_scoped, "
+                "hermes_released_registration_scoped,\n",
+                "    duplicate_registration_scoped, hermes_explicit_registration_scoped, "
+                "hermes_released_registration_scoped,\n",
+            ),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(BoundaryError, "provider bindings drifted"):
+            self.validate()
+
+    def test_missing_hermes_composition_binding_is_rejected(self) -> None:
+        self.hermes_composition_facade.write_text(
+            self.hermes_composition_facade.read_text(encoding="utf-8").replace(
+                "    hermes_explicit_registration_scoped, ", "    ", 1
+            ),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(BoundaryError, "provider bindings drifted"):
+            self.validate()
+
     def test_hermes_cannot_depend_on_finite_inventory_pack(self) -> None:
         self.hermes_manifest.write_text(
             self.hermes_manifest.read_text(encoding="utf-8").replace(
@@ -324,7 +410,8 @@ class SqliteInventoryProviderBoundaryMutations(unittest.TestCase):
     def test_missing_composition_registration_is_rejected(self) -> None:
         self.composition_facade.write_text(
             self.composition_facade.read_text(encoding="utf-8").replace(
-                "    install_sqlite_inventory_registration(crush_registration::<I, L, S>());\n",
+                "    install_sqlite_inventory_registration("
+                "crush_registration_scoped::<I, L, S>());\n",
                 "",
             ),
             encoding="utf-8",

@@ -5,6 +5,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use ctx_history_capture_model::ProviderRootDefinition;
 use directories::BaseDirs;
 
 /// Process environment keys that discovery may inherit.
@@ -129,12 +130,15 @@ impl DiscoveryPlatformDirs {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiscoveryContext {
     home: PathBuf,
+    home_directory_available: bool,
     cwd: Option<PathBuf>,
     data_root: Option<PathBuf>,
     effective_uid: Option<u32>,
     platform: DiscoveryPlatform,
     platform_dirs: DiscoveryPlatformDirs,
     inherited_env: BTreeMap<&'static str, OsString>,
+    automatic_provider_discovery: bool,
+    configured_provider_roots: Vec<ProviderRootDefinition>,
 }
 
 impl DiscoveryContext {
@@ -145,12 +149,15 @@ impl DiscoveryContext {
             .collect();
         Self {
             home: home.into(),
+            home_directory_available: true,
             cwd: env::current_dir().ok(),
             data_root: None,
             effective_uid: process_effective_uid(),
             platform: DiscoveryPlatform::current(),
             platform_dirs: DiscoveryPlatformDirs::from_process(),
             inherited_env,
+            automatic_provider_discovery: true,
+            configured_provider_roots: Vec::new(),
         }
     }
 
@@ -162,12 +169,15 @@ impl DiscoveryContext {
     ) -> Self {
         Self {
             home: home.into(),
+            home_directory_available: true,
             cwd: Some(cwd.into()),
             data_root: None,
             effective_uid: None,
             platform,
             platform_dirs,
             inherited_env: BTreeMap::new(),
+            automatic_provider_discovery: true,
+            configured_provider_roots: Vec::new(),
         }
     }
 
@@ -178,17 +188,34 @@ impl DiscoveryContext {
     ) -> Self {
         Self {
             home: home.into(),
+            home_directory_available: true,
             cwd: None,
             data_root: None,
             effective_uid: None,
             platform,
             platform_dirs,
             inherited_env: BTreeMap::new(),
+            automatic_provider_discovery: true,
+            configured_provider_roots: Vec::new(),
         }
     }
 
     pub fn home(&self) -> &Path {
         &self.home
+    }
+
+    /// Marks the supplied home path as a non-discoverable placeholder.
+    ///
+    /// Absolute configured provider roots remain usable when the process has
+    /// no resolvable home directory, while home- and environment-derived
+    /// automatic discovery stays conservatively disabled.
+    pub fn with_home_directory_available(mut self, available: bool) -> Self {
+        self.home_directory_available = available;
+        self
+    }
+
+    pub const fn home_directory_available(&self) -> bool {
+        self.home_directory_available
     }
 
     pub fn cwd(&self) -> Option<&Path> {
@@ -248,6 +275,33 @@ impl DiscoveryContext {
         }
         self
     }
+
+    pub fn with_configured_provider_roots(
+        mut self,
+        mut roots: Vec<ProviderRootDefinition>,
+    ) -> Self {
+        roots.retain(ProviderRootDefinition::has_bounded_path);
+        roots.sort_by(|left, right| left.id.cmp(&right.id));
+        self.configured_provider_roots = roots;
+        self
+    }
+
+    pub fn configured_provider_roots(&self) -> &[ProviderRootDefinition] {
+        &self.configured_provider_roots
+    }
+
+    pub fn with_automatic_provider_discovery(mut self, enabled: bool) -> Self {
+        self.automatic_provider_discovery = enabled;
+        self
+    }
+
+    pub const fn automatic_provider_discovery_enabled(&self) -> bool {
+        self.automatic_provider_discovery
+    }
+
+    pub const fn automatic_provider_inference_enabled(&self) -> bool {
+        self.automatic_provider_discovery && self.home_directory_available
+    }
 }
 
 #[cfg(unix)]
@@ -264,6 +318,30 @@ fn process_effective_uid() -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn configured_roots_over_the_shared_path_bound_never_enter_the_context() {
+        let root = ProviderRootDefinition {
+            id: "oversized".to_owned(),
+            provider: ctx_history_core::CaptureProvider::Claude,
+            path: PathBuf::from(
+                "x".repeat(ctx_history_capture_model::MAX_PROVIDER_ROOT_ENCODED_PATH_BYTES + 1),
+            ),
+            group: None,
+            kind: None,
+        };
+        assert!(!root.has_bounded_path());
+
+        let context = DiscoveryContext::new(
+            "/home/test",
+            "/work/test",
+            DiscoveryPlatform::Linux,
+            DiscoveryPlatformDirs::default(),
+        )
+        .with_configured_provider_roots(vec![root]);
+
+        assert!(context.configured_provider_roots().is_empty());
+    }
 
     #[test]
     fn injected_environment_accepts_only_frozen_discovery_keys() {

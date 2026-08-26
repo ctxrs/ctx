@@ -2,8 +2,22 @@ use serde_json::Value;
 
 use crate::ui::{
     evidence_list, fields, hint, outcome, section, Action, Document, Evidence, Field, Hint,
-    Outcome, OutcomeState, RenderContext,
+    Outcome, OutcomeState, RenderContext, Span,
 };
+
+const MAX_REFRESH_ERROR_BYTES: usize = 512;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DoctorSearchAvailability {
+    Available,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct DoctorRefreshFailure<'a> {
+    pub detail: &'a str,
+    pub search: DoctorSearchAvailability,
+}
 
 pub fn source_epoch_findings(report: &Value, semantic_required: bool) -> Vec<String> {
     let mut findings = Vec::new();
@@ -38,8 +52,23 @@ pub fn render_doctor_human(
     automatic_upgrades: &str,
     findings: &[String],
     rejected_records: u64,
+    refresh_failure: Option<DoctorRefreshFailure<'_>>,
 ) -> Document {
-    let title = match findings.len() {
+    let mut human_findings = findings
+        .iter()
+        .filter(|finding| refresh_failure.is_none() || !is_derivative_refresh_finding(finding))
+        .map(|finding| humanize_doctor_finding(finding))
+        .collect::<Vec<_>>();
+    if let Some(failure) = refresh_failure {
+        human_findings.insert(
+            0,
+            HumanDoctorFinding {
+                summary: "History refresh failed".to_owned(),
+                detail: Some(bounded_terminal_detail(failure.detail)),
+            },
+        );
+    }
+    let title = match human_findings.len() {
         0 => "No problems found".to_owned(),
         1 => "ctx found 1 issue".to_owned(),
         count => format!("ctx found {count} issues"),
@@ -47,7 +76,7 @@ pub fn render_doctor_human(
     let mut document = outcome(
         context,
         Outcome {
-            state: if findings.is_empty() {
+            state: if human_findings.is_empty() {
                 OutcomeState::Success
             } else {
                 OutcomeState::Warning
@@ -64,24 +93,32 @@ pub fn render_doctor_human(
             &[Field::new("Automatic upgrades", automatic_upgrades)],
         ),
     ));
-    if rejected_records > 0 {
+    if rejected_records > 0 || refresh_failure.is_some() {
+        let rejected_records = rejected_records.to_string();
+        let mut history_fields = Vec::new();
+        if let Some(failure) = refresh_failure {
+            history_fields.push(Field::new(
+                "Search",
+                match failure.search {
+                    DoctorSearchAvailability::Available => {
+                        "Available — last verified index remains searchable"
+                    }
+                    DoctorSearchAvailability::Unavailable => {
+                        "Unavailable — no verified index is searchable"
+                    }
+                },
+            ));
+        }
+        if rejected_records != "0" {
+            history_fields.push(Field::new("Skipped records", &rejected_records));
+        }
         document.push_blank();
-        document.append(section(
-            "History",
-            fields(
-                context,
-                &[Field::new("Skipped records", &rejected_records.to_string())],
-            ),
-        ));
+        document.append(section("History", fields(context, &history_fields)));
     }
-    if findings.is_empty() {
+    if human_findings.is_empty() {
         return document;
     }
 
-    let human_findings = findings
-        .iter()
-        .map(|finding| humanize_doctor_finding(finding))
-        .collect::<Vec<_>>();
     let references = (1..=human_findings.len())
         .map(|index| index.to_string())
         .collect::<Vec<_>>();
@@ -103,14 +140,18 @@ pub fn render_doctor_human(
     document.append(hint(
         context,
         Hint {
-            text: if refresh_failed {
+            text: if refresh_failure.is_some() {
+                "Fix the refresh error above, then retry."
+            } else if refresh_failed {
                 "Check the history refresh service."
             } else {
                 "Resolve the issues above, then check again."
             },
         },
         Some(Action {
-            command: if refresh_failed {
+            command: if refresh_failure.is_some() {
+                "ctx import --all"
+            } else if refresh_failed {
                 "ctx status"
             } else {
                 "ctx doctor"
@@ -118,6 +159,33 @@ pub fn render_doctor_human(
         }),
     ));
     document
+}
+
+fn is_derivative_refresh_finding(finding: &str) -> bool {
+    [
+        "history_epoch is unavailable (source_refresh_failed)",
+        "history_epoch is unavailable (core_refresh_failed)",
+        "lexical is unavailable (source_refresh_failed)",
+        "lexical is unavailable (core_refresh_failed)",
+        "lexical is unavailable (lexical_generation_unavailable)",
+        "catalog is pending (catalog_publication_pending)",
+        "catalog is pending (core_generation_pending)",
+        "refresh is unavailable (core_refresh_failed)",
+        "semantic is pending (lexical_generation_unavailable)",
+    ]
+    .contains(&finding)
+}
+
+fn bounded_terminal_detail(detail: &str) -> String {
+    let escaped = Span::text(detail).content().to_owned();
+    if escaped.len() <= MAX_REFRESH_ERROR_BYTES {
+        return escaped;
+    }
+    let mut end = MAX_REFRESH_ERROR_BYTES - 3;
+    while !escaped.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...", &escaped[..end])
 }
 
 struct HumanDoctorFinding {
@@ -195,7 +263,7 @@ mod ui_tests {
     #[test]
     fn healthy_doctor_is_concise_and_outcome_first() {
         let context = context(80);
-        let rendered = render_doctor_human(&context, "apply", &[], 0).render_plain();
+        let rendered = render_doctor_human(&context, "apply", &[], 0, None).render_plain();
         assert_eq!(
             rendered,
             "✓ No problems found\n\nConfiguration\nAutomatic upgrades  apply\n"
@@ -204,7 +272,7 @@ mod ui_tests {
 
     #[test]
     fn healthy_doctor_presents_record_rejections_as_skipped_records() {
-        let rendered = render_doctor_human(&context(80), "apply", &[], 2).render_plain();
+        let rendered = render_doctor_human(&context(80), "apply", &[], 2, None).render_plain();
 
         assert!(rendered.starts_with("✓ No problems found\n"), "{rendered}");
         assert!(
@@ -248,7 +316,8 @@ mod ui_tests {
         let finding = "history configuration is unavailable; repair the local configuration, then run `ctx doctor`".to_owned();
         for width in [32, 48, 80, 120] {
             let context = context(width);
-            let document = render_doctor_human(&context, "off", std::slice::from_ref(&finding), 0);
+            let document =
+                render_doctor_human(&context, "off", std::slice::from_ref(&finding), 0, None);
             let rendered = document.render_plain();
             assert!(rendered.starts_with("! ctx found 1 issue\n"));
             assert!(rendered.contains("Issues\n[1]"));
@@ -269,7 +338,7 @@ mod ui_tests {
 
         for width in [32, 48, 80, 120] {
             let context = context(width);
-            let document = render_doctor_human(&context, "apply", &findings, 0);
+            let document = render_doctor_human(&context, "apply", &findings, 0, None);
             let rendered = document.render_plain();
             let flattened = rendered.split_whitespace().collect::<Vec<_>>().join(" ");
             assert!(rendered.starts_with("! ctx found 4 issues\n"));
@@ -300,5 +369,60 @@ mod ui_tests {
             assert!(!rendered.contains("ctx doctor\n"), "{rendered}");
             assert_fits(&document, &context);
         }
+    }
+
+    #[test]
+    fn refresh_failure_is_one_root_issue_with_explicit_search_availability() {
+        let findings = [
+            "history_epoch is unavailable (source_refresh_failed)",
+            "lexical is unavailable (source_refresh_failed)",
+            "catalog is pending (catalog_publication_pending)",
+            "refresh is unavailable (core_refresh_failed)",
+        ]
+        .map(str::to_owned);
+
+        for (search, expected) in [
+            (
+                DoctorSearchAvailability::Available,
+                "Available — last verified index remains searchable",
+            ),
+            (
+                DoctorSearchAvailability::Unavailable,
+                "Unavailable — no verified index is searchable",
+            ),
+        ] {
+            let rendered = render_doctor_human(
+                &context(80),
+                "apply",
+                &findings,
+                0,
+                Some(DoctorRefreshFailure {
+                    detail: "Claude transcript repeats a stable event identity at lines 1 and 2",
+                    search,
+                }),
+            )
+            .render_plain();
+            assert!(rendered.starts_with("! ctx found 1 issue\n"), "{rendered}");
+            assert!(rendered.contains(expected), "{rendered}");
+            assert_eq!(rendered.matches("History refresh failed").count(), 1);
+            assert!(
+                !rendered.contains("Search index is unavailable"),
+                "{rendered}"
+            );
+            assert!(!rendered.contains("source catalog"), "{rendered}");
+            assert!(rendered.contains("ctx import --all"), "{rendered}");
+        }
+    }
+
+    #[test]
+    fn refresh_failure_detail_is_control_escaped_and_byte_bounded() {
+        let detail = format!("start\n\u{1b}[31m{}tail", "é".repeat(400));
+        let bounded = bounded_terminal_detail(&detail);
+        assert!(bounded.len() <= MAX_REFRESH_ERROR_BYTES);
+        assert!(bounded.len() > MAX_REFRESH_ERROR_BYTES - 5);
+        assert!(bounded.starts_with("start\\n\\x1b[31m"), "{bounded:?}");
+        assert!(bounded.ends_with("..."), "{bounded:?}");
+        assert!(!bounded.contains('\n'));
+        assert!(!bounded.contains('\u{1b}'));
     }
 }

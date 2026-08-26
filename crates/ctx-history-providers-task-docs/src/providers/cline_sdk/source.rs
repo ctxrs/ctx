@@ -99,6 +99,7 @@ pub(super) struct SessionLeaf {
     pub(super) provider_session_id: String,
     pub(super) source_key_digest: [u8; 32],
     pub(super) catalog_evidence: [u8; 32],
+    pub(super) catalog_binding_failure: Option<String>,
     pub(super) manifest_relative_path: PathBuf,
     pub(super) manifest: Option<FileEvidence>,
     pub(super) messages: Option<FileEvidence>,
@@ -117,6 +118,10 @@ impl SessionLeaf {
         hash_optional_file(&mut digest, self.manifest.as_ref());
         hash_optional_file(&mut digest, self.messages.as_ref());
         hash_path(&mut digest, &self.messages_relative_path);
+        if let Some(detail) = self.catalog_binding_failure.as_deref() {
+            digest.update(b"ctx.cline.sdk.catalog-binding-failure.v1\0");
+            hash_text(&mut digest, detail);
+        }
         digest.finalize().into()
     }
 }
@@ -444,15 +449,33 @@ fn bind_session_leaf(
         metadata_from_catalog(entry.database_row.as_ref(), true),
     );
     overlay_manifest_metadata(&mut metadata, manifest_value.as_ref());
-    let messages_path = string_field(entry.database_row.as_ref(), "messages_path")
-        .or_else(|| string_field(entry.index_row.as_ref(), "messagesPath"))
+    let catalog_messages_path = string_field(entry.database_row.as_ref(), "messages_path")
+        .or_else(|| string_field(entry.index_row.as_ref(), "messagesPath"));
+    let messages_path = catalog_messages_path
+        .clone()
         .or_else(|| string_field(manifest_value.as_ref(), "messages_path"));
-    let messages_relative_path = normalize_messages_path(
+    let messages_binding = normalize_messages_path(
         authority.named_path(),
         &session_id,
         messages_path.as_deref(),
-    )?;
-    let messages = open_optional_evidence(authority, &messages_relative_path)?;
+    );
+    // The catalog key already established exact source ownership. Isolate only
+    // that row's invalid path binding; manifest fallbacks and artifact I/O keep
+    // their existing route-fatal behavior.
+    let (messages_relative_path, messages, catalog_binding_failure) = match messages_binding {
+        Ok(messages_relative_path) => {
+            let messages = open_optional_evidence(authority, &messages_relative_path)?;
+            (messages_relative_path, messages, None)
+        }
+        Err(ClineSdkError::Invalid(detail)) if catalog_messages_path.is_some() => (
+            canonical_messages_path(&session_id),
+            None,
+            Some(format!(
+                "Cline SDK catalog row {session_id:?} has an invalid messages path: {detail}"
+            )),
+        ),
+        Err(error) => return Err(error),
+    };
 
     let mut catalog_digest = Sha256::new();
     catalog_digest.update(b"ctx.cline.sdk.catalog-evidence.v1\0");
@@ -467,6 +490,7 @@ fn bind_session_leaf(
         provider_session_id: session_id,
         source_key_digest,
         catalog_evidence: catalog_digest.finalize().into(),
+        catalog_binding_failure,
         manifest_relative_path: manifest_relative,
         manifest,
         messages,
@@ -565,13 +589,8 @@ fn manifest_session_matches(value: &Value, session_id: &str) -> bool {
 }
 
 fn normalize_messages_path(root: &Path, session_id: &str, raw: Option<&str>) -> Result<PathBuf> {
-    let canonical = || {
-        PathBuf::from("sessions")
-            .join(session_id)
-            .join(format!("{session_id}.messages.json"))
-    };
     let Some(raw) = raw.filter(|value| !value.is_empty()) else {
-        return Ok(canonical());
+        return Ok(canonical_messages_path(session_id));
     };
     if raw.len() > MAX_PATH_BYTES {
         return Err(ClineSdkError::Invalid("messages_path is too long".into()));
@@ -610,6 +629,12 @@ fn normalize_messages_path(root: &Path, session_id: &str, raw: Option<&str>) -> 
         ));
     }
     Ok(relative)
+}
+
+fn canonical_messages_path(session_id: &str) -> PathBuf {
+    PathBuf::from("sessions")
+        .join(session_id)
+        .join(format!("{session_id}.messages.json"))
 }
 
 pub(super) fn read_bound_leaf_files(

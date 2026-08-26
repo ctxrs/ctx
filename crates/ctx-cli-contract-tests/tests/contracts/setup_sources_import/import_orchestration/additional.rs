@@ -10,7 +10,7 @@ fn explicit_import_reports_warm_carried_route_failure() {
     let first = json_output(ctx(&temp).args([
         "import",
         "--input-format",
-        "ctx-history-jsonl-v1",
+        "ctx-history-jsonl-v2",
         "--path",
         fixture.to_str().unwrap(),
         "--no-daemon",
@@ -26,7 +26,7 @@ fn explicit_import_reports_warm_carried_route_failure() {
     let carried = json_output(ctx(&temp).args([
         "import",
         "--input-format",
-        "ctx-history-jsonl-v1",
+        "ctx-history-jsonl-v2",
         "--path",
         fixture.to_str().unwrap(),
         "--no-daemon",
@@ -67,10 +67,10 @@ fn all_invalid_custom_source_fails_with_unrelated_history_then_refreshes_after_f
     let _daemon = start_full_source_refresh_daemon(&temp);
     let fixture = temp.path().join("custom-retry.jsonl");
     let records = |event_index: &str| {
-        r#"{"record_type":"manifest","schema_version":"ctx-history-jsonl-v1"}
+        r#"{"record_type":"manifest","schema_version":"ctx-history-jsonl-v2"}
 {"record_type":"source","source_id":"retry-source","provider_key":"retry-agent","source_format":"retry-jsonl","cursor":{"after":{"stream":"retry-agent:retry-source","cursor":"1","observed_at":"2026-07-13T12:00:00Z"}}}
-{"record_type":"session","source_id":"retry-source","session_id":"retry-session","started_at":"2026-07-13T12:00:00Z","agent_scope":"primary","status":"completed"}
-{"record_type":"event","source_id":"retry-source","session_id":"retry-session","event_index":EVENT_INDEX,"event_id":"retry-event","event_type":"message","role":"user","occurred_at":"2026-07-13T12:00:01Z","payload":{"text":"retry oracle"},"preview":"retry oracle"}
+{"record_type":"session","source_id":"retry-source","provider_session_id":"retry-session","started_at":"2026-07-13T12:00:00Z","agent_scope":"primary","status":"completed"}
+{"record_type":"event","source_id":"retry-source","provider_session_id":"retry-session","event_index":EVENT_INDEX,"event_id":"retry-event","event_type":"message","role":"user","occurred_at":"2026-07-13T12:00:01Z","payload":{"text":"retry oracle"},"preview":"retry oracle"}
 "#
         .replace("EVENT_INDEX", event_index)
     };
@@ -96,7 +96,7 @@ fn all_invalid_custom_source_fails_with_unrelated_history_then_refreshes_after_f
     let failure = failure_stderr(ctx(&temp).args([
         "import",
         "--input-format",
-        "ctx-history-jsonl-v1",
+        "ctx-history-jsonl-v2",
         "--path",
         fixture.to_str().unwrap(),
         "--no-daemon",
@@ -118,7 +118,7 @@ fn all_invalid_custom_source_fails_with_unrelated_history_then_refreshes_after_f
     let retry = json_output(ctx(&temp).args([
         "import",
         "--input-format",
-        "ctx-history-jsonl-v1",
+        "ctx-history-jsonl-v2",
         "--path",
         fixture.to_str().unwrap(),
         "--no-daemon",
@@ -160,7 +160,7 @@ fn import_custom_history_format_is_not_a_native_provider_importer() {
     let stderr = failure_stderr(ctx(&temp).args([
         "import",
         "--input-format",
-        "ctx-history-jsonl-v1",
+        "ctx-history-jsonl-v2",
         "--path",
         &fixture,
         "--all",
@@ -386,6 +386,120 @@ fn import_all_publishes_valid_routes_and_reports_one_invalid_route() {
     assert_eq!(failed["status"], "failure");
     assert_eq!(failed["source_failure_class"], "unreadable");
     assert_eq!(failed["carried_forward"], false);
+}
+
+#[test]
+fn warm_import_all_advances_with_changed_codex_and_failed_opencode() {
+    let temp = daemon_test_root();
+    let opencode_query = "opencode warm carry forward oracle";
+    let new_codex_query = "codex warm success boundary oracle";
+    write_codex_setup_session(&temp);
+    install_provider_default_fixture(
+        &temp,
+        temp.path(),
+        "open_code",
+        opencode_query,
+        "OpenCode warm carry forward response",
+    );
+
+    let cold =
+        json_output(ctx(&temp).args(["import", "--all", "--format=json", "--progress", "none"]));
+    assert_eq!(cold["outcome"], "success", "{cold:#}");
+    assert_eq!(cold["totals"]["failed_sources"], 0, "{cold:#}");
+    let cold_generation = published_generation(&cold);
+    let cold_opencode_counts = provider_core_counts(&data_root(&temp), "opencode");
+    assert!(cold_opencode_counts.0 > 0, "{cold:#}");
+    assert!(cold_opencode_counts.1 > 0, "{cold:#}");
+    assert!(provider_core_counts(&data_root(&temp), "codex").1 > 0);
+
+    let codex_session = temp
+        .path()
+        .join(".codex/sessions/2026/06/24/codex-session-setup.jsonl");
+    let mut codex = fs::OpenOptions::new()
+        .append(true)
+        .open(codex_session)
+        .unwrap();
+    writeln!(
+        codex,
+        "{}",
+        json!({
+            "timestamp": "2026-06-24T10:00:02.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": new_codex_query}]
+            }
+        })
+    )
+    .unwrap();
+    drop(codex);
+    fs::write(
+        temp.path().join(".local/share/opencode/opencode.db"),
+        b"not sqlite",
+    )
+    .unwrap();
+
+    let warm =
+        json_output(ctx(&temp).args(["import", "--all", "--format=json", "--progress", "none"]));
+    assert_eq!(
+        warm["outcome"], "completed_with_source_failures",
+        "{warm:#}"
+    );
+    assert_eq!(warm["failure_scope"], "source", "{warm:#}");
+    assert_eq!(warm["failure_type"], "source_failure", "{warm:#}");
+    assert_eq!(warm["totals"]["failed_sources"], 1, "{warm:#}");
+
+    let sources = warm["sources"].as_array().unwrap();
+    let failed = sources
+        .iter()
+        .find(|source| source["provider"] == "opencode")
+        .expect("typed OpenCode source failure");
+    assert_eq!(failed["status"], "failure", "{warm:#}");
+    assert_eq!(failed["source_failure_class"], "unreadable", "{warm:#}");
+    assert_eq!(failed["carried_forward"], true, "{warm:#}");
+
+    let publication = sources
+        .iter()
+        .find(|source| source["source_format"] == "provider_authoritative_all")
+        .expect("successful import-all publication");
+    let warm_generation = publication["published_generation"]
+        .as_str()
+        .expect("warm import should publish a generation")
+        .to_owned();
+    assert_ne!(warm_generation, cold_generation, "{warm:#}");
+    wait_for_core_generation(&temp, &warm_generation);
+    assert_eq!(
+        provider_core_counts(&data_root(&temp), "opencode"),
+        cold_opencode_counts
+    );
+
+    for (provider, query) in [("codex", new_codex_query), ("opencode", opencode_query)] {
+        let search = json_output(ctx(&temp).args([
+            "search",
+            query,
+            "--provider",
+            provider,
+            "--refresh",
+            "off",
+            "--format=json",
+        ]));
+        assert_eq!(
+            search["retrieval"]["generation_id"], warm_generation,
+            "{search:#}"
+        );
+        assert!(
+            search["results"].as_array().is_some_and(|results| {
+                results.iter().any(|result| {
+                    result["provider"] == provider
+                        && result["snippet"]
+                            .as_str()
+                            .is_some_and(|snippet| snippet.contains(query))
+                })
+            }),
+            "{search:#}"
+        );
+    }
 }
 
 #[test]

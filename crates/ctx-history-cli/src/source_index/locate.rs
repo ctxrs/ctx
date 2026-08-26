@@ -34,6 +34,8 @@ pub fn run_locate(
                     selector: args.id,
                     provider_session_id: args.provider_session,
                     provider,
+                    provider_key: args.provider_key,
+                    source_id: args.source_id,
                 },
                 json_output,
             )

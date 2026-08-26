@@ -414,7 +414,7 @@ mod tests {
     fn command_only_manifest_is_visible_but_not_a_durable_root() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join(PLUGIN_MANIFEST_FILE);
-        fs::write(&path, r#"{"schema_version":1,"name":"example","history_sources":[{"id":"default","source_format":"ctx_history_jsonl_v1","command":["export"]}]}"#).unwrap();
+        fs::write(&path, r#"{"schema_version":1,"name":"example","history_sources":[{"id":"default","source_format":"example-jsonl","command":["export"]}]}"#).unwrap();
         let sources = read_plugin_manifest(&path).unwrap();
         assert_eq!(sources[0].label(), "example/default");
         assert!(sources[0].source_path.is_none());

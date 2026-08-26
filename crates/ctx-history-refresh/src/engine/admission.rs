@@ -287,6 +287,90 @@ impl CoreRefreshEngine {
         self.complete_claimed_pending_admission(data_root, &claim.request_id, resolution)
     }
 
+    pub(super) fn requeue_stale_provider_root_admission(&self, data_root: &Path) -> Result<bool> {
+        let admitted_config = {
+            let state = self.lock_state();
+            state
+                .active_request_id
+                .as_deref()
+                .and_then(|request_id| find_attempt(&state, request_id))
+                .filter(|attempt| attempt.state == SourceBackedRefreshState::Queued)
+                .and_then(|attempt| attempt.admitted_authority.as_ref())
+                .filter(|authority| {
+                    authority.coverage()
+                        == ctx_history_refresh_execution::AdmittedRefreshCoverage::CompleteCatalog
+                })
+                .map(|authority| {
+                    (
+                        authority
+                            .discovery()
+                            .configured_provider_roots()
+                            .map(<[_]>::to_vec),
+                        authority.discovery().automatic_provider_discovery(),
+                    )
+                })
+        };
+        let Some((admitted_roots, admitted_automatic)) = admitted_config else {
+            return Ok(false);
+        };
+        let current_discovery = self.runtime.discovery_context(data_root)?;
+        let current_roots = current_discovery.configured_provider_roots().to_vec();
+        let current_automatic = current_discovery.automatic_provider_discovery_enabled();
+        let stale_snapshot = admitted_roots
+            .as_deref()
+            .is_some_and(|admitted| admitted != current_roots.as_slice())
+            || admitted_roots.is_none() && !current_roots.is_empty()
+            || admitted_automatic.unwrap_or(true) != current_automatic;
+        if !stale_snapshot {
+            return Ok(false);
+        }
+        let mut state = self.lock_state();
+        let Some(request_id) = state.active_request_id.clone() else {
+            return Ok(false);
+        };
+        let stale = find_attempt(&state, &request_id).is_some_and(|attempt| {
+            attempt.state == SourceBackedRefreshState::Queued
+                && attempt
+                    .admitted_authority
+                    .as_ref()
+                    .filter(|authority| {
+                        authority.coverage()
+                            == ctx_history_refresh_execution::AdmittedRefreshCoverage::CompleteCatalog
+                    })
+                    .map(|authority| authority.discovery())
+                    .is_some_and(|admitted| {
+                        let roots_changed = match admitted.configured_provider_roots() {
+                            Some(admitted) => admitted != current_roots.as_slice(),
+                            None => !current_roots.is_empty(),
+                        };
+                        roots_changed
+                            || admitted.automatic_provider_discovery().unwrap_or(true)
+                                != current_automatic
+                    })
+        });
+        if !stale {
+            return Ok(false);
+        }
+
+        let snapshot = AdmissionResolutionSnapshot::capture(&state);
+        let attempt = find_attempt_mut(&mut state, &request_id)
+            .ok_or_else(|| anyhow!("source refresh request `{request_id}` is unknown"))?;
+        attempt.admitted_authority = None;
+        attempt.state = SourceBackedRefreshState::AdmissionPending;
+        attempt.progress.phase = "admission_pending".to_owned();
+        attempt.last_error = None;
+        let durable_request_id = durable_request_id(&state, &request_id);
+        let job = durable_job_json(&state, durable_request_id)
+            .ok_or_else(|| anyhow!("source refresh request `{durable_request_id}` is unknown"))?;
+        if let Err(error) = self.write_status(data_root, &job) {
+            snapshot.restore(&mut state);
+            return Err(error.context(
+                "persist source refresh re-admission after provider-root config changed",
+            ));
+        }
+        Ok(true)
+    }
+
     fn resolve_pending_admission_claim(
         &self,
         data_root: &Path,

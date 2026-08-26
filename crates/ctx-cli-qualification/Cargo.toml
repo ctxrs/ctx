@@ -1,0 +1,50 @@
+[package]
+name = "ctx-cli-qualification"
+# Stateful, cross-component final-binary scenarios live here. Portable public
+# CLI contracts and the shared harness remain in ctx-cli-contract-tests.
+version.workspace = true
+description = "Final-binary runtime qualification for the ctx CLI"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+publish = false
+autotests = false
+
+[[test]]
+name = "index"
+path = "tests/index.rs"
+
+[[test]]
+name = "stats"
+path = "tests/stats.rs"
+
+[dev-dependencies]
+anstream.workspace = true
+assert_cmd.workspace = true
+base64.workspace = true
+chrono.workspace = true
+ctx-history-core = { path = "../ctx-history-core" }
+ctx-history-index = { path = "../ctx-history-index" }
+flate2 = "1"
+libc.workspace = true
+predicates.workspace = true
+ring.workspace = true
+rusqlite.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+sha2.workspace = true
+tar.workspace = true
+tempfile.workspace = true
+uuid.workspace = true
+
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(ctx_cli_bazel_test)',
+    'cfg(ctx_cli_test_support_fixtures)',
+    'cfg(ctx_cli_test_support_upgrade)',
+] }

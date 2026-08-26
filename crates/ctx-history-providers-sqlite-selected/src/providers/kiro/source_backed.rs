@@ -11,7 +11,8 @@ use chrono::{DateTime, Utc};
 use ctx_history_core::{
     derive_event_id, derive_session_id, AgentScope, CaptureProvider, CertifiedSource, CoreRecord,
     CoreRecordError, EventIdentityInput, NativeItemKey, NativeSessionKey, ProjectionContractError,
-    ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceKey, StableEntityId, TypedKey,
+    ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceAnchorScope, SourceKey,
+    StableEntityId, TypedKey,
 };
 use rusqlite::Connection;
 use serde_json::Value;
@@ -242,17 +243,25 @@ pub(super) fn require_legacy_sqlite_format(
     Ok(())
 }
 
+#[cfg(test)]
 pub(super) fn kiro_source_key() -> KiroSourceBackedResultV0<SourceKey> {
+    kiro_source_key_scoped(SourceAnchorScope::Unqualified)
+}
+
+pub(super) fn kiro_source_key_scoped(
+    source_scope: SourceAnchorScope,
+) -> KiroSourceBackedResultV0<SourceKey> {
     let anchor = SourceAnchor::provider_native(
         KIRO_SOURCE_ANCHOR_NAMESPACE,
         TypedKey::utf8(KIRO_SOURCE_ANCHOR_KEY)?,
     )?;
-    Ok(SourceKey::derive(
+    Ok(SourceKey::derive_scoped(
         CaptureProvider::KiroCli.as_str(),
         KIRO_SQLITE_SOURCE_FORMAT,
         KIRO_SOURCE_SCHEMA_VARIANT,
         1,
         anchor,
+        source_scope,
     )?)
 }
 

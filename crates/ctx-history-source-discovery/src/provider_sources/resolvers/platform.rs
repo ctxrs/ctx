@@ -22,6 +22,7 @@ use super::super::{
     StaticProviderProbeCatalog,
 };
 use super::{
+    automatic_roles::{automatic_route_provenance, AUTOMATIC_ROUTE_ROLE_UNAVAILABLE_REASON},
     dedupe_report, issue, path_presence, push_source_candidate, source_from_parts_with_data_root,
     unsupported_source, PathPresence,
 };
@@ -305,10 +306,15 @@ fn push_warp_source(
     if sources.len() >= MAX_SOURCE_CANDIDATES_PER_PROVIDER || !encoded_path_within_limit(&path) {
         return Err(WarpDiscoveryUnavailable::SourceCandidateRejected { surface_key });
     }
-    sources.push(DiscoveredWarpSource::new(
-        safe_native_source(probes, data_root, spec, path, WARP_FORMAT),
-        surface_key,
-    ));
+    let mut source = safe_native_source(probes, data_root, spec, path, WARP_FORMAT);
+    source.route_provenance = automatic_route_provenance([
+        b"installed-surface".as_slice(),
+        surface_key.platform().role_component(),
+        surface_key.channel().role_component(),
+        surface_key.surface().role_component(),
+    ])
+    .map_err(|_| WarpDiscoveryUnavailable::SourceCandidateRejected { surface_key })?;
+    sources.push(DiscoveredWarpSource::new(source, surface_key));
     Ok(())
 }
 
@@ -341,8 +347,9 @@ fn resolve_codebuddy(
             }
         }
     };
-    push_source_candidate(
-        &mut report.sources,
+    push_automatic_role_source(
+        &mut report,
+        spec,
         safe_native_source(
             probes,
             context.data_root(),
@@ -350,6 +357,7 @@ fn resolve_codebuddy(
             cli_root,
             CODEBUDDY_FORMAT,
         ),
+        [b"surface".as_slice(), b"cli".as_slice()],
     );
 
     let ide = match context.platform() {
@@ -361,9 +369,11 @@ fn resolve_codebuddy(
         DiscoveryPlatform::OtherUnix => return report,
     };
     if path_presence(&ide).suppresses_fallback() {
-        push_source_candidate(
-            &mut report.sources,
+        push_automatic_role_source(
+            &mut report,
+            spec,
             safe_native_source(probes, context.data_root(), spec, ide, CODEBUDDY_FORMAT),
+            [b"surface".as_slice(), b"ide".as_slice()],
         );
     }
     report
@@ -474,14 +484,39 @@ fn resolve_antigravity(context: &DiscoveryContext, spec: &ProviderSourceSpec) ->
         return DiscoveryReport::default();
     }
     let mut report = DiscoveryReport::default();
-    for product in ["antigravity-cli", "antigravity-ide"] {
+    for (product, surface) in [
+        ("antigravity-cli", b"cli".as_slice()),
+        ("antigravity-ide", b"ide".as_slice()),
+    ] {
         let root = context.home().join(".gemini").join(product).join("brain");
-        push_source_candidate(
-            &mut report.sources,
+        push_automatic_role_source(
+            &mut report,
+            spec,
             exact_tree_source(spec, root, ANTIGRAVITY_FORMAT, ExactTree::Antigravity),
+            [b"surface".as_slice(), surface],
         );
     }
     report
+}
+
+fn push_automatic_role_source<const N: usize>(
+    report: &mut DiscoveryReport,
+    spec: &ProviderSourceSpec,
+    mut source: ProviderSource,
+    components: [&[u8]; N],
+) {
+    match automatic_route_provenance(components) {
+        Ok(route_provenance) => {
+            source.route_provenance = route_provenance;
+            push_source_candidate(&mut report.sources, source);
+        }
+        Err(_) => report.issues.push(issue(
+            spec.provider,
+            None,
+            DiscoveryIssueKind::SelectorUnreconstructible,
+            AUTOMATIC_ROUTE_ROLE_UNAVAILABLE_REASON,
+        )),
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -553,6 +588,7 @@ fn exact_tree_source(
         catalog_support: spec.catalog_support,
         status,
         unsupported_reason: reason,
+        route_provenance: Default::default(),
     }
 }
 
@@ -600,6 +636,7 @@ fn safe_native_source(
                 catalog_support: spec.catalog_support,
                 status: ProviderSourceStatus::Unsupported,
                 unsupported_reason: Some(UNSAFE_SOURCE_REASON),
+                route_provenance: Default::default(),
             };
         }
         PathPresence::Unknown(_) => {}
@@ -614,6 +651,7 @@ fn safe_native_source(
         catalog_support: spec.catalog_support,
         status: ProviderSourceStatus::Unknown,
         unsupported_reason: Some(UNSAFE_SOURCE_REASON),
+        route_provenance: Default::default(),
     }
 }
 

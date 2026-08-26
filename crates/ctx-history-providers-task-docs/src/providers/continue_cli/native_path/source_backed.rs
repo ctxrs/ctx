@@ -6,10 +6,11 @@ use ctx_history_core::{
     derive_event_id, derive_session_id, ActivityInvocation, AgentScope, CaptureProvider,
     CoreActivity, CoreRecord, CoreRecordError, EventIdentityInput, EventType, LiteralFactKind,
     NativeItemKey, NativeSessionKey, ProjectionContractError, ProviderDeclaredFact,
-    ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceKey, SourceObservation,
+    ScannedSourceCounts, SessionIdentityInput, SourceAnchorScope, SourceKey, SourceObservation,
     StableEntityId, TypedKey, CORE_ACTIVITY_REVISION,
 };
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::{
@@ -73,13 +74,19 @@ pub(crate) type ContinueSourceBackedResult<T> = Result<T, ContinueSourceBackedEr
 /// Provider state for one canonical replacement-document route.
 pub struct ContinueSourceBackedReader<L, S, C> {
     root: PathBuf,
+    source_anchor_scope: SourceAnchorScope,
     _lifecycle: crate::ProviderLifecycleMarker<L, S, C>,
 }
 
 impl<L, S, C> ContinueSourceBackedReader<L, S, C> {
     pub fn new(root: PathBuf) -> Self {
+        Self::new_scoped(root, SourceAnchorScope::Unqualified)
+    }
+
+    pub fn new_scoped(root: PathBuf, source_anchor_scope: SourceAnchorScope) -> Self {
         Self {
             root,
+            source_anchor_scope,
             _lifecycle: std::marker::PhantomData,
         }
     }
@@ -114,12 +121,20 @@ where
     ) -> SourceBackedRouteResult<CompleteDocumentTree<Self::Leaf, Self::TreeAuthority>> {
         let discovery = discover_continue_root(&self.root).map_err(route_error)?;
         let (leaves, authority) = discovery.into_parts();
-        let tree_fingerprint = authority.tree_fingerprint();
+        let tree_fingerprint = scope_continue_document_fingerprint(
+            authority.tree_fingerprint(),
+            self.source_anchor_scope,
+            b"ctx.continue-document-root-scoped-tree-v1\0",
+        );
         let leaves = leaves
             .into_iter()
             .map(|leaf| {
                 ObservedDocumentLeaf::new(
-                    DocumentLeafFingerprint::new(authority.leaf_fingerprint(&leaf)),
+                    DocumentLeafFingerprint::new(scope_continue_document_fingerprint(
+                        authority.leaf_fingerprint(&leaf),
+                        self.source_anchor_scope,
+                        b"ctx.continue-document-root-scoped-leaf-v1\0",
+                    )),
                     leaf,
                 )
             })
@@ -138,7 +153,7 @@ where
         sink: &mut ChangedDocumentSink<'_, '_, L, S>,
     ) -> SourceBackedRouteResult<DocumentSourceTerminal> {
         let snapshot = authority.open_source(leaf).map_err(route_error)?;
-        scan_continue_document(snapshot, authority, sink)
+        scan_continue_document(snapshot, authority, self.source_anchor_scope, sink)
     }
 
     fn revalidate_complete(
@@ -148,6 +163,13 @@ where
         tree.authority
             .revalidate_fingerprint()
             .map_err(route_error)?
+            .map(|fingerprint| {
+                scope_continue_document_fingerprint(
+                    fingerprint,
+                    self.source_anchor_scope,
+                    b"ctx.continue-document-root-scoped-tree-v1\0",
+                )
+            })
             .ok_or_else(|| {
                 SourceBackedRouteError::new(
                     SourceBackedRouteErrorKind::SourceChanged,
@@ -157,9 +179,25 @@ where
     }
 }
 
+fn scope_continue_document_fingerprint(
+    fingerprint: [u8; 32],
+    source_anchor_scope: SourceAnchorScope,
+    domain: &[u8],
+) -> [u8; 32] {
+    let SourceAnchorScope::Lineage(root_lineage) = source_anchor_scope else {
+        return fingerprint;
+    };
+    let mut digest = Sha256::new();
+    digest.update(domain);
+    digest.update(root_lineage);
+    digest.update(fingerprint);
+    digest.finalize().into()
+}
+
 fn scan_continue_document<L, S>(
     snapshot: super::source::ContinueSourceSnapshot,
     authority: &ContinueTreeAuthority,
+    source_anchor_scope: SourceAnchorScope,
     sink: &mut ChangedDocumentSink<'_, '_, L, S>,
 ) -> SourceBackedRouteResult<DocumentSourceTerminal>
 where
@@ -182,7 +220,8 @@ where
         }
     };
     let mut sink_failure = None;
-    let projected = project_changed_stream(&mut stream, sink, &mut sink_failure);
+    let projected =
+        project_changed_stream(&mut stream, source_anchor_scope, sink, &mut sink_failure);
     if let Some(error) = sink_failure {
         return Err(error);
     }
@@ -191,6 +230,7 @@ where
 
 fn project_changed_stream<L, S>(
     stream: &mut ContinueSourcePageStream,
+    source_anchor_scope: SourceAnchorScope,
     sink: &mut ChangedDocumentSink<'_, '_, L, S>,
     sink_failure: &mut Option<SourceBackedRouteError>,
 ) -> ContinueSourceBackedResult<DocumentSourceTerminal>
@@ -206,7 +246,8 @@ where
         if terminal.is_some() {
             return Err(ContinueSourceBackedError::CountMismatch);
         }
-        terminal = project_changed_page(&mut active, page, sink, sink_failure)?;
+        terminal =
+            project_changed_page(&mut active, page, source_anchor_scope, sink, sink_failure)?;
     }
     if active.is_some() {
         return Err(ContinueSourceBackedError::UnterminatedSource);
@@ -217,6 +258,7 @@ where
 fn project_changed_page<L, S>(
     active: &mut Option<ActiveSource>,
     mut page: ContinuePreparedPage,
+    source_anchor_scope: SourceAnchorScope,
     sink: &mut ChangedDocumentSink<'_, '_, L, S>,
     sink_failure: &mut Option<SourceBackedRouteError>,
 ) -> ContinueSourceBackedResult<Option<DocumentSourceTerminal>>
@@ -228,7 +270,7 @@ where
         if active.is_some() {
             return Err(ContinueSourceBackedError::OverlappingSource);
         }
-        let started = start_source(*prepared)?;
+        let started = start_source(*prepared, source_anchor_scope)?;
         sink.begin_source(started.source.clone()).map_err(|error| {
             let detail = error.to_string();
             *sink_failure = Some(error);
@@ -295,9 +337,12 @@ struct ActiveSource {
     emitted_documents: u64,
 }
 
-fn start_source(prepared: ContinuePreparedSource) -> ContinueSourceBackedResult<ActiveSource> {
+fn start_source(
+    prepared: ContinuePreparedSource,
+    source_anchor_scope: SourceAnchorScope,
+) -> ContinueSourceBackedResult<ActiveSource> {
     let native_session_id = prepared.session.identity.0.as_str();
-    let source = continue_source_key(native_session_id)?;
+    let source = continue_source_key_scoped(native_session_id, source_anchor_scope)?;
     let session_id = continue_session_id(&source, native_session_id)?;
     let source_revision_digest = decode_hex_digest(prepared.observation.session_revision())
         .ok_or(ContinueSourceBackedError::InvalidRevisionEvidence)?;
@@ -516,17 +561,23 @@ fn owns_continue_source(source: &SourceKey) -> bool {
         && source.provider_identity_version() == 1
 }
 
+#[cfg(test)]
 fn continue_source_key(native_session_id: &str) -> ContinueSourceBackedResult<SourceKey> {
-    let anchor = SourceAnchor::provider_native(
-        CONTINUE_SOURCE_ANCHOR_NAMESPACE,
-        TypedKey::utf8(native_session_id)?,
-    )?;
-    Ok(SourceKey::derive(
+    continue_source_key_scoped(native_session_id, SourceAnchorScope::Unqualified)
+}
+
+fn continue_source_key_scoped(
+    native_session_id: &str,
+    source_anchor_scope: SourceAnchorScope,
+) -> ContinueSourceBackedResult<SourceKey> {
+    Ok(SourceKey::derive_provider_native_scoped(
         CaptureProvider::Continue.as_str(),
         CONTINUE_CLI_SOURCE_FORMAT,
         CONTINUE_SOURCE_SCHEMA_VARIANT,
         1,
-        anchor,
+        CONTINUE_SOURCE_ANCHOR_NAMESPACE,
+        TypedKey::utf8(native_session_id)?,
+        source_anchor_scope,
     )?)
 }
 
@@ -565,6 +616,59 @@ fn decode_hex_digest(value: &str) -> Option<[u8; 32]> {
         *slot = u8::from_str_radix(value.get(offset..offset + 2)?, 16).ok()?;
     }
     Some(output)
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+
+    #[test]
+    fn root_scope_distinguishes_native_sessions_and_unqualified_is_unchanged() {
+        let native_session_id = "same-native-session";
+        let legacy = continue_source_key(native_session_id).unwrap();
+        let unqualified =
+            continue_source_key_scoped(native_session_id, SourceAnchorScope::Unqualified).unwrap();
+        let first =
+            continue_source_key_scoped(native_session_id, SourceAnchorScope::Lineage([1; 32]))
+                .unwrap();
+        let second =
+            continue_source_key_scoped(native_session_id, SourceAnchorScope::Lineage([2; 32]))
+                .unwrap();
+
+        assert!(legacy.exact_descriptor_eq(&unqualified));
+        assert_ne!(first.identity(), second.identity());
+        assert_ne!(
+            continue_session_id(&first, native_session_id).unwrap(),
+            continue_session_id(&second, native_session_id).unwrap()
+        );
+    }
+
+    #[test]
+    fn root_scope_partitions_document_replay_without_changing_unqualified_fingerprints() {
+        let fingerprint = [7; 32];
+        let domain = b"ctx.continue-document-root-scoped-test-v1\0";
+
+        assert_eq!(
+            scope_continue_document_fingerprint(
+                fingerprint,
+                SourceAnchorScope::Unqualified,
+                domain,
+            ),
+            fingerprint
+        );
+        assert_ne!(
+            scope_continue_document_fingerprint(
+                fingerprint,
+                SourceAnchorScope::Lineage([1; 32]),
+                domain,
+            ),
+            scope_continue_document_fingerprint(
+                fingerprint,
+                SourceAnchorScope::Lineage([2; 32]),
+                domain,
+            )
+        );
+    }
 }
 
 #[cfg(test)]

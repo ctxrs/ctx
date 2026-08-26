@@ -1,6 +1,8 @@
 use super::super::*;
 
 mod refresh_control_plane;
+#[cfg(any(test, feature = "test-support"))]
+mod test_support;
 
 #[cfg(test)]
 thread_local! {
@@ -72,6 +74,12 @@ pub(in super::super) struct ControlledRouteRetirement {
 }
 
 #[derive(Debug, Clone)]
+pub(in super::super) struct AutomaticSplitCohortBarrier {
+    pub(in super::super) predecessor: SourceRouteIdentity,
+    pub(in super::super) cohort: BTreeSet<SourceRouteIdentity>,
+}
+
+#[derive(Debug, Clone)]
 pub struct SourceBackedRoute {
     pub(in super::super) metadata: SourceBackedRouteMetadata,
     /// Exact bounded discovery inputs from which this executable route was
@@ -83,10 +91,87 @@ pub struct SourceBackedRoute {
     pub(in super::super) retire_after_success: Vec<SourceRouteIdentity>,
     pub(in super::super) automatic_retire_after_success: Vec<SourceRouteIdentity>,
     pub(in super::super) controlled_retire_after_success: Vec<ControlledRouteRetirement>,
+    pub(in super::super) base_route_aliases: BTreeSet<SourceRouteIdentity>,
+    pub(in super::super) automatic_split_bridge_control: Option<Vec<u8>>,
     pub(in super::super) codex_generation_participant: Option<usize>,
 }
 
 impl SourceBackedRoute {
+    pub(in crate::source_backed) fn apply_provider_root_route_identity(
+        &mut self,
+        source_root_lineage: Option<[u8; 32]>,
+        route_role: &ProviderRouteRole,
+    ) -> SourceBackedCoordinatorResult<()> {
+        if self.metadata.selection != Some(SourceBackedRouteSelection::ExplicitManual) {
+            return Err(invalid_route(
+                self.metadata.source.provider,
+                "provider-root identity requires an explicit configured route",
+            ));
+        }
+        self.metadata.route_identity = Some(match source_root_lineage {
+            None => {
+                let mut released_source = self.metadata.source.clone();
+                if let Some(route_role) = released_source
+                    .route_provenance
+                    .automatic_route_role()
+                    .cloned()
+                {
+                    released_source.route_provenance =
+                        ProviderSourceRouteProvenance::Automatic { route_role };
+                }
+                automatic_source_backed_route_identity(&released_source)?
+            }
+            Some(lineage) => provider_root_source_backed_route_identity(
+                &self.metadata.source,
+                self.metadata.certified_source_format,
+                lineage,
+                route_role,
+            )?,
+        });
+        Ok(())
+    }
+
+    pub(in crate::source_backed) fn apply_automatic_coexistence_identity(
+        &mut self,
+        source_root_lineage: [u8; 32],
+    ) -> SourceBackedCoordinatorResult<()> {
+        if self.metadata.selection != Some(SourceBackedRouteSelection::Automatic) {
+            return Err(invalid_route(
+                self.metadata.source.provider,
+                "automatic coexistence identity requires an automatic route",
+            ));
+        }
+        let ordinary = self.metadata.route_identity.as_ref().ok_or_else(|| {
+            invalid_route(
+                self.metadata.source.provider,
+                "automatic coexistence route has no ordinary identity",
+            )
+        })?;
+        self.metadata.route_identity = Some(automatic_provider_root_coexistence_route_identity(
+            ordinary,
+            source_root_lineage,
+        )?);
+        Ok(())
+    }
+
+    pub(in crate::source_backed) fn apply_released_automatic_identity(
+        &mut self,
+        identity_source: &ProviderSource,
+        configured_source: ProviderSource,
+    ) -> SourceBackedCoordinatorResult<()> {
+        if self.metadata.selection != Some(SourceBackedRouteSelection::Automatic) {
+            return Err(invalid_route(
+                self.metadata.source.provider,
+                "released identity requires an automatic route",
+            ));
+        }
+        self.metadata.route_identity =
+            Some(automatic_source_backed_route_identity(identity_source)?);
+        self.metadata.source = configured_source.clone();
+        self.registration_sources = vec![configured_source];
+        Ok(())
+    }
+
     pub fn automatic(
         source: ProviderSource,
         selector_authority: SourceBackedSelectorAuthority,
@@ -114,6 +199,8 @@ impl SourceBackedRoute {
             retire_after_success: Vec::new(),
             automatic_retire_after_success: Vec::new(),
             controlled_retire_after_success: Vec::new(),
+            base_route_aliases: BTreeSet::new(),
+            automatic_split_bridge_control: None,
             codex_generation_participant: None,
         })
     }
@@ -133,6 +220,7 @@ impl SourceBackedRoute {
             known.certified_source_format,
             SourceBackedRouteSelection::ExplicitManual,
             selector_authority,
+            false,
         )?;
         Ok(Self {
             metadata: SourceBackedRouteMetadata {
@@ -150,6 +238,8 @@ impl SourceBackedRoute {
             retire_after_success: Vec::new(),
             automatic_retire_after_success: Vec::new(),
             controlled_retire_after_success: Vec::new(),
+            base_route_aliases: BTreeSet::new(),
+            automatic_split_bridge_control: None,
             codex_generation_participant: None,
         })
     }
@@ -181,6 +271,101 @@ impl SourceBackedRoute {
             retire_after_success: Vec::new(),
             automatic_retire_after_success: Vec::new(),
             controlled_retire_after_success: Vec::new(),
+            base_route_aliases: BTreeSet::new(),
+            automatic_split_bridge_control: None,
+            codex_generation_participant: None,
+        })
+    }
+
+    /// Represents one explicitly configured path that is currently absent.
+    /// The path-derived route identity is the same identity the executable
+    /// route will use when the path appears.
+    pub fn certified_explicit_missing(
+        source: ProviderSource,
+        selector_authority: SourceBackedSelectorAuthority,
+    ) -> SourceBackedCoordinatorResult<Self> {
+        let known = validate_executable_route(
+            &source,
+            SourceBackedRouteSelection::ExplicitManual,
+            selector_authority,
+        )?;
+        let route_identity = source_backed_route_identity(
+            &source,
+            known.certified_source_format,
+            SourceBackedRouteSelection::ExplicitManual,
+            selector_authority,
+            false,
+        )?;
+        let path = source.path.clone();
+        Ok(Self {
+            metadata: SourceBackedRouteMetadata {
+                source: source.clone(),
+                certified_source_format: known.certified_source_format,
+                selection: Some(SourceBackedRouteSelection::ExplicitManual),
+                selector_authority,
+                unsupported_reason: None,
+                route_identity: Some(route_identity),
+                watch_target_kind: known.watch_target_kind,
+            },
+            registration_sources: vec![source],
+            driver: None,
+            certified_missing_paths: vec![path],
+            retire_after_success: Vec::new(),
+            automatic_retire_after_success: Vec::new(),
+            controlled_retire_after_success: Vec::new(),
+            base_route_aliases: BTreeSet::new(),
+            automatic_split_bridge_control: None,
+            codex_generation_participant: None,
+        })
+    }
+
+    /// Represents one configured physical route whose path is absent or could
+    /// not be classified safely during discovery. It retains the same
+    /// path-derived identity as the executable route so a warm refresh can
+    /// carry only this route while healthy peers continue.
+    pub fn unavailable_explicit(
+        source: ProviderSource,
+        reason: impl Into<String>,
+    ) -> SourceBackedCoordinatorResult<Self> {
+        let known =
+            landed_format_route(source.provider, source.source_format).ok_or_else(|| {
+                invalid_route(
+                    source.provider,
+                    "configured unavailable source has no landed route",
+                )
+            })?;
+        if !known.explicit_manual || known.unsupported_reason.is_some() {
+            return Err(invalid_route(
+                source.provider,
+                "configured unavailable source has no explicit route authority",
+            ));
+        }
+        let selector_authority = SourceBackedSelectorAuthority::ExplicitPath;
+        let route_identity = source_backed_route_identity(
+            &source,
+            known.certified_source_format,
+            SourceBackedRouteSelection::ExplicitManual,
+            selector_authority,
+            false,
+        )?;
+        Ok(Self {
+            metadata: SourceBackedRouteMetadata {
+                source: source.clone(),
+                certified_source_format: known.certified_source_format,
+                selection: Some(SourceBackedRouteSelection::ExplicitManual),
+                selector_authority,
+                unsupported_reason: Some(reason.into()),
+                route_identity: Some(route_identity),
+                watch_target_kind: known.watch_target_kind,
+            },
+            registration_sources: vec![source],
+            driver: None,
+            certified_missing_paths: Vec::new(),
+            retire_after_success: Vec::new(),
+            automatic_retire_after_success: Vec::new(),
+            controlled_retire_after_success: Vec::new(),
+            base_route_aliases: BTreeSet::new(),
+            automatic_split_bridge_control: None,
             codex_generation_participant: None,
         })
     }
@@ -204,6 +389,8 @@ impl SourceBackedRoute {
             retire_after_success: Vec::new(),
             automatic_retire_after_success: Vec::new(),
             controlled_retire_after_success: Vec::new(),
+            base_route_aliases: BTreeSet::new(),
+            automatic_split_bridge_control: None,
             codex_generation_participant: None,
         }
     }
@@ -211,6 +398,60 @@ impl SourceBackedRoute {
     pub fn metadata(&self) -> &SourceBackedRouteMetadata {
         &self.metadata
     }
+}
+
+#[doc(hidden)]
+pub fn automatic_provider_root_coexistence_source_lineage(
+    root: &ProviderRootDefinition,
+) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(b"ctx.automatic-provider-root-coexistence-source.v1\0");
+    digest.update(root.provider.as_str().as_bytes());
+    digest.update([0]);
+    digest.update((root.id.len() as u64).to_be_bytes());
+    digest.update(root.id.as_bytes());
+    digest.finalize().into()
+}
+
+#[doc(hidden)]
+pub fn automatic_provider_root_coexistence_route_identity(
+    ordinary: &SourceRouteIdentity,
+    source_root_lineage: [u8; 32],
+) -> SourceBackedCoordinatorResult<SourceRouteIdentity> {
+    let mut digest = Sha256::new();
+    digest.update(b"ctx.automatic-provider-root-coexistence-route.v1\0");
+    digest.update(ordinary.as_str().as_bytes());
+    digest.update([0]);
+    digest.update(source_root_lineage);
+    SourceRouteIdentity::from_sha256(format!("{:x}", digest.finalize())).map_err(|_| {
+        invalid_route(
+            CaptureProvider::Unknown,
+            "automatic coexistence route identity was invalid",
+        )
+    })
+}
+
+fn provider_root_source_backed_route_identity(
+    source: &ProviderSource,
+    certified_source_format: &str,
+    source_root_lineage: [u8; 32],
+    route_role: &ProviderRouteRole,
+) -> SourceBackedCoordinatorResult<SourceRouteIdentity> {
+    let mut digest = Sha256::new();
+    digest.update(b"ctx.provider-root-route-identity.v1\0");
+    digest.update(source.provider.as_str().as_bytes());
+    digest.update([0]);
+    digest.update(certified_source_format.as_bytes());
+    digest.update([0]);
+    digest.update(source_root_lineage);
+    digest.update([0]);
+    digest.update(route_role.as_bytes());
+    SourceRouteIdentity::from_sha256(format!("{:x}", digest.finalize())).map_err(|_| {
+        invalid_route(
+            source.provider,
+            "provider-root route identity derivation was invalid",
+        )
+    })
 }
 
 impl SourceBackedRegistryRoute for SourceBackedRoute {
@@ -250,6 +491,29 @@ impl SourceBackedRegistryRoute for SourceBackedRoute {
 pub struct SourceBackedProviderRegistry {
     pub(in super::super) routes: SourceBackedRouteRegistry<SourceBackedRoute>,
     pub(in super::super) codex_generation: Option<Arc<CodexGenerationNormalizationCoordinatorV0>>,
+    pub(in super::super) applied_provider_roots: Option<(bool, String, Vec<AppliedProviderRoot>)>,
+    pub(in super::super) provider_root_route_retirements: BTreeSet<SourceRouteIdentity>,
+    pub(in super::super) provider_root_route_withdrawals: BTreeSet<SourceRouteIdentity>,
+    pub(in super::super) automatic_split_cohort_barriers: Vec<AutomaticSplitCohortBarrier>,
+}
+
+fn validate_unique_provider_root_ids(
+    roots: &[AppliedProviderRoot],
+) -> SourceBackedCoordinatorResult<()> {
+    let mut ids = HashSet::new();
+    if let Some(duplicate) = roots
+        .iter()
+        .find(|root| !ids.insert(root.definition().id.as_str()))
+    {
+        return Err(invalid_route(
+            CaptureProvider::Unknown,
+            format!(
+                "configured provider root id {:?} is not unique",
+                duplicate.definition().id
+            ),
+        ));
+    }
+    Ok(())
 }
 
 impl SourceBackedProviderRegistry {
@@ -259,6 +523,117 @@ impl SourceBackedProviderRegistry {
 
     pub fn register(&mut self, route: SourceBackedRoute) {
         self.routes.register(route);
+    }
+
+    pub fn set_applied_provider_roots(
+        &mut self,
+        automatic_provider_discovery: bool,
+        config_digest: String,
+        roots: Vec<AppliedProviderRoot>,
+    ) -> SourceBackedCoordinatorResult<()> {
+        if self.applied_provider_roots.is_some() {
+            return Err(SourceBackedCoordinatorError::InvalidRoute {
+                provider: CaptureProvider::Unknown,
+                detail: "applied provider roots were installed more than once".to_owned(),
+            });
+        }
+        self.applied_provider_roots = Some((automatic_provider_discovery, config_digest, roots));
+        Ok(())
+    }
+
+    pub fn applied_provider_roots(&self) -> Option<&(bool, String, Vec<AppliedProviderRoot>)> {
+        self.applied_provider_roots.as_ref()
+    }
+
+    /// Keeps the last generation's route ownership for provider-compatible
+    /// configured roots whose current no-follow discovery could not safely
+    /// reconstruct all still-selected routes. Current route membership is the
+    /// authority for independently removed dynamic children; prior exact-source
+    /// membership is restored only for routes still associated with the root.
+    /// Mutable path and group fields are aliases; desired-state root removal is
+    /// handled by refresh execution.
+    pub fn retain_unavailable_provider_root_routes(
+        &mut self,
+        retained: &[AppliedProviderRoot],
+    ) -> SourceBackedCoordinatorResult<()> {
+        let Some((_, _, current)) = self.applied_provider_roots.as_mut() else {
+            return Ok(());
+        };
+        validate_unique_provider_root_ids(current)?;
+        validate_unique_provider_root_ids(retained)?;
+        for root in current.iter_mut() {
+            let definition = root.definition().clone();
+            let Some(previous) = retained.iter().find(|previous| {
+                let previous_definition = previous.definition();
+                previous_definition.id == definition.id
+                    && previous_definition.provider == definition.provider
+                    && previous_definition.kind == definition.kind
+            }) else {
+                continue;
+            };
+            if previous.routes().is_empty() {
+                continue;
+            }
+            let mut routes = root.routes().to_vec();
+            if routes.is_empty() {
+                routes.extend_from_slice(previous.routes());
+            }
+            let mut exact_source_memberships = root.exact_source_memberships().to_vec();
+            exact_source_memberships.extend(
+                previous
+                    .exact_source_memberships()
+                    .iter()
+                    .filter(|membership| {
+                        routes.binary_search(membership.route_identity()).is_ok()
+                            && root
+                                .exact_source_tokens_for_route(membership.route_identity())
+                                .is_none()
+                    })
+                    .cloned(),
+            );
+            let authority = previous
+                .retained_authority()
+                .map_err(SourceBackedCoordinatorError::Index)?;
+            *root = AppliedProviderRoot::with_retained_authority(definition, authority, routes)
+                .and_then(|root| root.with_exact_source_memberships(exact_source_memberships))
+                .map_err(SourceBackedCoordinatorError::Index)?;
+        }
+        Ok(())
+    }
+
+    pub fn executable_route_identities(&self) -> Vec<SourceRouteIdentity> {
+        self.routes
+            .iter()
+            .filter(|route| route.driver.is_some())
+            .filter_map(|route| route.metadata.route_identity.clone())
+            .collect()
+    }
+
+    /// Records exact routes withdrawn by a validated provider-root config
+    /// transition. Their authenticated history remains retained in Core.
+    pub fn set_root_withdrawals(&mut self, routes: impl IntoIterator<Item = SourceRouteIdentity>) {
+        self.provider_root_route_withdrawals = routes.into_iter().collect();
+    }
+
+    /// Records exact routes retired by an incompatible provider-root
+    /// replacement after the replacement is validated.
+    pub fn set_root_retirements(&mut self, routes: impl IntoIterator<Item = SourceRouteIdentity>) {
+        self.provider_root_route_retirements = routes.into_iter().collect();
+    }
+
+    pub(in crate::source_backed) fn register_automatic_split_cohort_barrier(
+        &mut self,
+        predecessor: SourceRouteIdentity,
+        owner: &SourceRouteIdentity,
+        cohort: BTreeSet<SourceRouteIdentity>,
+    ) -> SourceBackedCoordinatorResult<()> {
+        self.retire_automatic_routes_after_success(owner, [predecessor.clone()])?;
+        self.automatic_split_cohort_barriers
+            .push(AutomaticSplitCohortBarrier {
+                predecessor,
+                cohort,
+            });
+        Ok(())
     }
 
     /// Binds exact carried base routes to an executable replacement route.
@@ -402,17 +777,24 @@ impl SourceBackedProviderRegistry {
         self.routes.routes()
     }
 
-    /// Returns the exact discovery roots declared by one executable automatic
-    /// route. Grouped routes may expose one primary metadata path while
-    /// retaining multiple registration roots; callers must match these roots
-    /// by exact provider/format/path identity rather than path containment.
-    pub fn automatic_route_registration_sources(
+    /// Returns the exact discovery roots declared by one executable route
+    /// eligible to satisfy explicit catalog coverage. Automatic routes and
+    /// configured provider-root routes are eligible; unrelated manual routes
+    /// remain independently owned.
+    pub fn catalog_coverage_route_registration_sources(
         &self,
         route_identity: &SourceRouteIdentity,
     ) -> Option<impl ExactSizeIterator<Item = &ProviderSource>> {
+        let configured = self
+            .applied_provider_roots
+            .iter()
+            .flat_map(|(_, _, roots)| roots)
+            .flat_map(|root| root.routes())
+            .any(|route| route == route_identity);
         let route = self.routes.iter().find(|route| {
             route.metadata.route_identity.as_ref() == Some(route_identity)
-                && route.metadata.selection == Some(SourceBackedRouteSelection::Automatic)
+                && (route.metadata.selection == Some(SourceBackedRouteSelection::Automatic)
+                    || configured)
                 && route.driver.is_some()
                 && !route.registration_sources.is_empty()
         })?;
@@ -467,6 +849,23 @@ impl
 pub fn automatic_source_backed_route_identity(
     source: &ProviderSource,
 ) -> SourceBackedCoordinatorResult<SourceRouteIdentity> {
+    automatic_source_backed_route_identity_with_role(source, true)
+}
+
+/// Derives the released collapsed identity used before automatic route roles
+/// became part of the route hash.  It exists solely for bounded warm
+/// migrations; new registrations must use
+/// [`automatic_source_backed_route_identity`].
+pub fn legacy_automatic_source_backed_route_identity(
+    source: &ProviderSource,
+) -> SourceBackedCoordinatorResult<SourceRouteIdentity> {
+    automatic_source_backed_route_identity_with_role(source, false)
+}
+
+fn automatic_source_backed_route_identity_with_role(
+    source: &ProviderSource,
+    include_role: bool,
+) -> SourceBackedCoordinatorResult<SourceRouteIdentity> {
     let known = landed_format_route(source.provider, source.source_format)
         .filter(|route| route.automatic)
         .ok_or_else(|| {
@@ -483,6 +882,7 @@ pub fn automatic_source_backed_route_identity(
         known.certified_source_format,
         SourceBackedRouteSelection::Automatic,
         known.selector_authority,
+        include_role,
     )
 }
 
@@ -510,6 +910,7 @@ fn source_backed_route_identity(
     certified_source_format: &str,
     selection: SourceBackedRouteSelection,
     selector_authority: SourceBackedSelectorAuthority,
+    include_automatic_role: bool,
 ) -> SourceBackedCoordinatorResult<SourceRouteIdentity> {
     let mut digest = Sha256::new();
     digest.update(b"ctx.source-route-identity-v1\0");
@@ -555,6 +956,13 @@ fn source_backed_route_identity(
             digest.update(profile.as_bytes());
         }
     }
+    if include_automatic_role && selection == SourceBackedRouteSelection::Automatic {
+        if let Some(route_role) = source.route_provenance.automatic_route_role() {
+            digest.update(b"\0provider-route-role\0");
+            digest.update((route_role.as_bytes().len() as u64).to_be_bytes());
+            digest.update(route_role.as_bytes());
+        }
+    }
     index_source_route_identity(SourceRouteIdentity::from_sha256(format!(
         "{:x}",
         digest.finalize()
@@ -563,18 +971,4 @@ fn source_backed_route_identity(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn route_identity_validation_uses_the_canonical_index_conversion() {
-        let error = index_source_route_identity(SourceRouteIdentity::from_sha256("AB".repeat(32)))
-            .map_err(SourceBackedCoordinatorError::from)
-            .unwrap_err();
-
-        assert!(matches!(
-            error,
-            SourceBackedCoordinatorError::Index(IndexError::InvalidSourceRouteIdentity)
-        ));
-    }
-}
+mod tests;

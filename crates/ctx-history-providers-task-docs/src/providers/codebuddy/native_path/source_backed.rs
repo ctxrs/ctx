@@ -2,8 +2,8 @@
 
 use ctx_history_core::{
     derive_event_id, derive_session_id, AgentScope, CoreRecord, EventIdentityInput, NativeItemKey,
-    NativeSessionKey, ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceKey,
-    SourceObservation, TypedKey,
+    NativeSessionKey, ScannedSourceCounts, SessionIdentityInput, SourceAnchorScope, SourceKey,
+    SourceObservation, StableEntityId, TypedKey,
 };
 
 use crate::{
@@ -29,14 +29,24 @@ const EXTENSION_CANONICAL_DOMAIN: &[u8] = b"ctx-codebuddy-structured-source-v1\0
 pub struct CodeBuddyDocumentAdapter<L, S, C> {
     root: PathBuf,
     context: ProviderAdapterContext,
+    source_anchor_scope: SourceAnchorScope,
     _lifecycle: crate::ProviderLifecycleMarker<L, S, C>,
 }
 
 impl<L, S, C> CodeBuddyDocumentAdapter<L, S, C> {
     pub fn new(root: PathBuf, context: ProviderAdapterContext) -> Self {
+        Self::new_scoped(root, context, SourceAnchorScope::Unqualified)
+    }
+
+    pub fn new_scoped(
+        root: PathBuf,
+        context: ProviderAdapterContext,
+        source_anchor_scope: SourceAnchorScope,
+    ) -> Self {
         Self {
             root,
             context,
+            source_anchor_scope,
             _lifecycle: std::marker::PhantomData,
         }
     }
@@ -75,7 +85,8 @@ where
     }
 
     fn discover_complete(&self) -> SourceBackedRouteResult<CodeBuddyDocumentTree> {
-        let inventory = discover_codebuddy_tree(&self.root).map_err(codebuddy_route_error)?;
+        let inventory = discover_codebuddy_tree(&self.root, self.source_anchor_scope)
+            .map_err(codebuddy_route_error)?;
         if inventory.status == CodeBuddyInventoryStatus::Unavailable {
             return Err(SourceBackedRouteError::new(
                 SourceBackedRouteErrorKind::Unavailable,
@@ -97,8 +108,14 @@ where
         sink: &mut ChangedDocumentSink<'_, '_, L, S>,
     ) -> SourceBackedRouteResult<DocumentSourceTerminal> {
         let mut sink_failure = None;
-        let result =
-            scan_changed_codebuddy_source(authority, leaf, &self.context, sink, &mut sink_failure);
+        let result = scan_changed_codebuddy_source(
+            authority,
+            leaf,
+            &self.context,
+            self.source_anchor_scope,
+            sink,
+            &mut sink_failure,
+        );
         if let Some(error) = sink_failure {
             return Err(error);
         }
@@ -117,6 +134,7 @@ fn scan_changed_codebuddy_source<L, S>(
     authority: &CodeBuddyTreeAuthority,
     leaf: &CodeBuddyDocumentLeaf,
     context: &ProviderAdapterContext,
+    source_anchor_scope: SourceAnchorScope,
     sink: &mut ChangedDocumentSink<'_, '_, L, S>,
     sink_failure: &mut Option<SourceBackedRouteError>,
 ) -> Result<DocumentSourceTerminal>
@@ -126,7 +144,7 @@ where
 {
     let source = open_codebuddy_source(authority, leaf)?;
     let mut state = initial_state(&source, context)?;
-    let source_key = codebuddy_source_key(&source, &state.session)?;
+    let source_key = codebuddy_source_key(&source, &state.session, source_anchor_scope)?;
     if !source_key.exact_descriptor_eq(&leaf.source) {
         return Err(CaptureError::SourceChangedDuringCapture);
     }
@@ -212,9 +230,10 @@ where
     })
 }
 
-pub(super) fn codebuddy_source_key_for_path(
+pub(super) fn codebuddy_source_key_for_path_scoped(
     shape: CodeBuddySourceShape,
     path: &Path,
+    source_anchor_scope: SourceAnchorScope,
 ) -> Result<SourceKey> {
     let native_session_id = match shape {
         CodeBuddySourceShape::Cli => path.file_stem(),
@@ -233,52 +252,91 @@ pub(super) fn codebuddy_source_key_for_path(
             .unwrap_or("unknown-project")
             .to_owned(),
     };
-    codebuddy_source_key_for_identity(shape, &project_hash, native_session_id)
+    codebuddy_source_key_for_identity_scoped(
+        shape,
+        &project_hash,
+        native_session_id,
+        source_anchor_scope,
+    )
 }
 
 fn codebuddy_source_key(
     source: &CodeBuddySource,
     session: &CodeBuddySessionState,
+    source_anchor_scope: SourceAnchorScope,
 ) -> Result<SourceKey> {
-    codebuddy_source_key_for_identity(
+    codebuddy_source_key_for_identity_scoped(
         source.shape,
         &session.project_hash,
         &session.native_session_id,
+        source_anchor_scope,
     )
 }
 
+#[cfg(test)]
 fn codebuddy_source_key_for_identity(
     shape: CodeBuddySourceShape,
     project_hash: &str,
     native_session_id: &str,
 ) -> Result<SourceKey> {
+    codebuddy_source_key_for_identity_scoped(
+        shape,
+        project_hash,
+        native_session_id,
+        SourceAnchorScope::Unqualified,
+    )
+}
+
+fn codebuddy_source_key_for_identity_scoped(
+    shape: CodeBuddySourceShape,
+    project_hash: &str,
+    native_session_id: &str,
+    source_anchor_scope: SourceAnchorScope,
+) -> Result<SourceKey> {
     let (shape_key, schema_variant) = match shape {
         CodeBuddySourceShape::Cli => ("cli", CODEBUDDY_CLI_SCHEMA_VARIANT),
         CodeBuddySourceShape::Extension => ("ide", CODEBUDDY_EXTENSION_SCHEMA_VARIANT),
     };
-    let anchor = contract(
-        SourceAnchor::provider_native(
-            SOURCE_ANCHOR_NAMESPACE,
-            contract(
-                TypedKey::composite(vec![
-                    contract(TypedKey::utf8(shape_key), "source shape")?,
-                    contract(TypedKey::utf8(project_hash), "project source key")?,
-                    contract(TypedKey::utf8(native_session_id), "session source key")?,
-                ]),
-                "source anchor key",
-            )?,
-        ),
-        "source anchor",
+    let native_key = contract(
+        TypedKey::composite(vec![
+            contract(TypedKey::utf8(shape_key), "source shape")?,
+            contract(TypedKey::utf8(project_hash), "project source key")?,
+            contract(TypedKey::utf8(native_session_id), "session source key")?,
+        ]),
+        "source anchor key",
     )?;
     contract(
-        SourceKey::derive(
+        SourceKey::derive_provider_native_scoped(
             CaptureProvider::CodeBuddy.as_str(),
             CODEBUDDY_SOURCE_FORMAT,
             schema_variant,
             IDENTITY_VERSION,
-            anchor,
+            SOURCE_ANCHOR_NAMESPACE,
+            native_key,
+            source_anchor_scope,
         ),
         "source key",
+    )
+}
+
+fn codebuddy_session_id(
+    source_key: &SourceKey,
+    provider_session_id: &str,
+) -> Result<StableEntityId> {
+    let session_key = contract(
+        NativeSessionKey::native_id(
+            SESSION_KEY_NAMESPACE,
+            contract(TypedKey::utf8(provider_session_id), "native session key")?,
+        ),
+        "native session key",
+    )?;
+    contract(
+        derive_session_id(SessionIdentityInput {
+            source: source_key,
+            logical_session_kind: "codebuddy-session",
+            native_session_key: &session_key,
+        }),
+        "session identity",
     )
 }
 
@@ -310,21 +368,7 @@ fn codebuddy_core_record(
     core: &CodeBuddyCoreRow,
 ) -> Result<CoreRecord> {
     let provider_session_id = core.session.provider_session_id.clone();
-    let session_key = contract(
-        NativeSessionKey::native_id(
-            SESSION_KEY_NAMESPACE,
-            contract(TypedKey::utf8(&provider_session_id), "native session key")?,
-        ),
-        "native session key",
-    )?;
-    let session_id = contract(
-        derive_session_id(SessionIdentityInput {
-            source: source_key,
-            logical_session_kind: "codebuddy-session",
-            native_session_key: &session_key,
-        }),
-        "session identity",
-    )?;
+    let session_id = codebuddy_session_id(source_key, &provider_session_id)?;
     let native_message_id = core.event.native_message_id.as_str();
     if native_message_id.is_empty() {
         return Err(CaptureError::SystemInvariant(

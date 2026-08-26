@@ -54,7 +54,9 @@ pub(in crate::source_index) fn render_search_document(
         .map(Vec::as_slice)
         .unwrap_or(&[]);
     if results.is_empty() {
-        return render_empty(value, context);
+        let mut document = render_empty(value, context);
+        render_search_footers(&mut document, value, context);
+        return document;
     }
 
     let mut document = Document::new();
@@ -65,18 +67,23 @@ pub(in crate::source_index) fn render_search_document(
         render_result(&mut document, context, position + 1, result, verbose);
     }
 
+    render_search_footers(&mut document, value, context);
+    document
+}
+
+fn render_search_footers(document: &mut Document, value: &Value, context: &RenderContext) {
     if value["truncation"]["candidate_pool_truncated"] == true {
         document.push_blank();
-        push_heading(&mut document, "Warning", Token::Warning);
+        push_heading(document, "Warning", Token::Warning);
         push_wrapped(
-            &mut document,
+            document,
             context,
             2,
-            "Root diversity reached the current candidate bound.",
+            "Search reached a bounded candidate or work limit.",
             Token::Text,
         );
         push_wrapped(
-            &mut document,
+            document,
             context,
             2,
             "Refine the query or add a provider, workspace, file, or session filter.",
@@ -85,9 +92,8 @@ pub(in crate::source_index) fn render_search_document(
     }
     if value["result_window"]["more_available"] == true {
         document.push_blank();
-        push_heading(&mut document, "More results available.", Token::Warning);
+        push_heading(document, "More results available.", Token::Warning);
     }
-    document
 }
 
 fn render_results_heading(
@@ -183,7 +189,7 @@ fn render_result(
         push_wrapped(document, context, CARD_INDENT, line, Token::Text);
     }
 
-    let provider = result["provider"].as_str().unwrap_or("unknown");
+    let provider = result_source_label(result);
     let provider_session = result["provider_session_id"]
         .as_str()
         .filter(|value| !value.is_empty());
@@ -226,8 +232,6 @@ fn render_result(
         );
     }
 
-    render_copied_lineage(document, context, result);
-
     if verbose {
         render_verbose_fields(document, context, result);
     }
@@ -262,96 +266,6 @@ fn render_result(
                     command,
                 );
             }
-        }
-    }
-}
-
-fn render_copied_lineage(document: &mut Document, context: &RenderContext, result: &Value) {
-    let Some((lineage, observed, resolution, selected_depth)) =
-        super::super::copied_lineage::copied_lineage_summary(result)
-    else {
-        return;
-    };
-    if let Some(resolution) = resolution.filter(|state| *state != "resolved" || selected_depth != 0)
-    {
-        push_field(
-            document,
-            context,
-            CARD_INDENT,
-            "Lineage",
-            CARD_LABEL_WIDTH,
-            &format!("{resolution} at depth {selected_depth}"),
-            if resolution == "resolved" {
-                Token::Text
-            } else {
-                Token::Warning
-            },
-        );
-    }
-    if observed == 0 {
-        return;
-    }
-    let truncated = lineage["truncated"].as_bool().unwrap_or(true);
-    let relationship_summary =
-        super::super::copied_lineage::copied_lineage_relationship_summary(lineage);
-    let noun = if observed == 1 { "session" } else { "sessions" };
-    let mut summary = if truncated {
-        format!("at least {observed} {noun}")
-    } else {
-        format!("{observed} {noun}")
-    };
-    if let Some(relationships) = relationship_summary {
-        summary.push_str(&format!(" ({relationships})"));
-    }
-    push_field(
-        document,
-        context,
-        CARD_INDENT,
-        "Copied",
-        CARD_LABEL_WIDTH,
-        &summary,
-        if truncated {
-            Token::Warning
-        } else {
-            Token::Text
-        },
-    );
-
-    let command_prefix = result["suggested_next_commands"]
-        .as_array()
-        .and_then(|commands| commands.first())
-        .and_then(Value::as_str)
-        .and_then(|command| command.split_once(" show ").map(|(prefix, _)| prefix))
-        .unwrap_or("ctx");
-    let occurrences = lineage["occurrences"]
-        .as_array()
-        .map(Vec::as_slice)
-        .unwrap_or(&[]);
-    for occurrence in occurrences.iter().take(3) {
-        let Some(session_id) = occurrence["ctx_session_id"].as_str() else {
-            continue;
-        };
-        let relationship = occurrence["session_relationship"]
-            .as_str()
-            .unwrap_or("unspecified");
-        push_action(
-            document,
-            context,
-            CARD_INDENT.saturating_add(2),
-            relationship,
-            &format!("{command_prefix} show session {session_id}"),
-        );
-    }
-    if !truncated {
-        let returned = lineage["returned"].as_u64().unwrap_or(0);
-        if observed > returned {
-            push_wrapped(
-                document,
-                context,
-                CARD_INDENT.saturating_add(2),
-                &format!("+{} more", observed - returned),
-                Token::Label,
-            );
         }
     }
 }
@@ -421,6 +335,8 @@ fn render_verbose_fields(document: &mut Document, context: &RenderContext, resul
         ("Event", "ctx_event_id", Token::Reference),
         ("Ctx session", "ctx_session_id", Token::Reference),
         ("Provider session", "provider_session_id", Token::Reference),
+        ("Provider key", "provider_key", Token::Text),
+        ("Source ID", "source_id", Token::Text),
         ("Source", "source_format", Token::Text),
     ] {
         if let Some(value) = result[key].as_str().filter(|value| !value.is_empty()) {
@@ -468,6 +384,16 @@ fn render_verbose_fields(document: &mut Document, context: &RenderContext, resul
             &format!("{score:.2}"),
             Token::Text,
         );
+    }
+}
+
+fn result_source_label(result: &Value) -> String {
+    match (
+        result["provider_key"].as_str(),
+        result["source_id"].as_str(),
+    ) {
+        (Some(provider_key), Some(source_id)) => format!("{provider_key}/{source_id}"),
+        _ => result["provider"].as_str().unwrap_or("unknown").to_owned(),
     }
 }
 

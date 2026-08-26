@@ -34,8 +34,8 @@ Show reads complete policy-selected normalized records from the active verified
 Core/Tantivy generation. It does not reopen provider history, scan for
 replacement transcripts, or use a network fallback.
 
-Source repositories and provider homes remain outside ctx ownership. Provider
-files are read as import sources, not modified.
+Source repositories and provider history roots remain outside ctx ownership.
+Provider files are read as import sources, not modified.
 
 
 ## Risks

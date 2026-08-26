@@ -6,8 +6,9 @@ use ctx_history_core::{
     derive_event_id, derive_session_id, ActivityInvocation, ActivityJsonCapture, ActivityResult,
     ActivityTextCapture, AgentScope, CaptureProvider, CoreActivity, CoreRecord, CoreRecordError,
     EventIdentityInput, EventRole, EventType, LiteralFactKind, NativeItemKey, NativeSessionKey,
-    ProjectionContractError, ProviderNativeSessionRelationship, SessionIdentityInput, SourceAnchor,
-    SourceKey, StableEntityId, SubrecordSelector, TypedKey, CORE_ACTIVITY_REVISION,
+    ProjectionContractError, ProviderNativeSessionRelationship, SessionIdentityInput,
+    SourceAnchorScope, SourceKey, StableEntityId, SubrecordSelector, TypedKey,
+    CORE_ACTIVITY_REVISION,
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -51,15 +52,23 @@ pub(super) struct ProjectedDocument {
     pub(super) ignored: u64,
 }
 
+#[cfg(test)]
 pub(super) fn cline_source_key(provider_session_id: &str) -> Result<SourceKey> {
-    let anchor =
-        SourceAnchor::provider_native(SOURCE_NAMESPACE, TypedKey::utf8(provider_session_id)?)?;
-    Ok(SourceKey::derive(
+    cline_source_key_scoped(provider_session_id, SourceAnchorScope::Unqualified)
+}
+
+pub(super) fn cline_source_key_scoped(
+    provider_session_id: &str,
+    source_anchor_scope: SourceAnchorScope,
+) -> Result<SourceKey> {
+    Ok(SourceKey::derive_provider_native_scoped(
         CaptureProvider::Cline.as_str(),
         CLINE_SDK_SOURCE_FORMAT,
         SCHEMA_VARIANT,
         1,
-        anchor,
+        SOURCE_NAMESPACE,
+        TypedKey::utf8(provider_session_id)?,
+        source_anchor_scope,
     )?)
 }
 
@@ -76,8 +85,11 @@ pub(super) fn cline_session_id(
     })?)
 }
 
-fn provider_session_identity(provider_session_id: &str) -> Result<StableEntityId> {
-    let source = cline_source_key(provider_session_id)?;
+fn provider_session_identity(
+    provider_session_id: &str,
+    source_anchor_scope: SourceAnchorScope,
+) -> Result<StableEntityId> {
+    let source = cline_source_key_scoped(provider_session_id, source_anchor_scope)?;
     cline_session_id(&source, provider_session_id)
 }
 
@@ -92,6 +104,7 @@ pub(super) fn project_messages(
     leaf: &SessionLeaf,
     source: &SourceKey,
     session_id: StableEntityId,
+    source_anchor_scope: SourceAnchorScope,
     source_revision: [u8; 32],
     bytes: &[u8],
 ) -> Result<ProjectedDocument> {
@@ -122,7 +135,9 @@ pub(super) fn project_messages(
         .or_else(|| exact_string(document.pointer("/origin/parentThreadId")));
     let parent_session_id = parent_provider_session_id
         .as_deref()
-        .map(provider_session_identity)
+        .map(|provider_session_id| {
+            provider_session_identity(provider_session_id, source_anchor_scope)
+        })
         .transpose()?;
     let agent = document.get("agent").and_then(Value::as_str);
     let agent_scope = explicit_agent_scope(&leaf.metadata, agent);

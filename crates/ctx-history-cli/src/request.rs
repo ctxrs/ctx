@@ -106,7 +106,7 @@ pub enum ListEventsContentProjection {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImportFormat {
-    CtxHistoryJsonlV1,
+    CtxHistoryJsonlV2,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -119,6 +119,8 @@ pub struct SearchRequest {
     pub provider_key: Option<String>,
     pub source_id: Option<String>,
     pub source_format: Option<String>,
+    pub source_roots: Vec<String>,
+    pub source_groups: Vec<String>,
     pub workspace: Option<String>,
     pub since: Option<String>,
     pub primary_only: bool,
@@ -142,6 +144,8 @@ pub enum ShowRequest {
         id: Option<String>,
         provider: Option<HistoryProvider>,
         provider_session: Option<String>,
+        provider_key: Option<String>,
+        source_id: Option<String>,
         mode: TranscriptMode,
         max_events: Option<usize>,
         format: OutputFormat,
@@ -162,6 +166,8 @@ pub enum LocateRequest {
         id: Option<String>,
         provider: Option<HistoryProvider>,
         provider_session: Option<String>,
+        provider_key: Option<String>,
+        source_id: Option<String>,
         format: OutputFormat,
     },
     Event {
@@ -255,6 +261,8 @@ mod tests {
             id: Some("session".to_owned()),
             provider: Some(HistoryProvider::Native(CaptureProvider::Codex)),
             provider_session: None,
+            provider_key: None,
+            source_id: None,
             mode: TranscriptMode::Lite,
             max_events: None,
             format: OutputFormat::Markdown,
@@ -309,6 +317,8 @@ mod tests {
                     provider_key: Some("key".to_owned()),
                     source_id: Some("source".to_owned()),
                     source_format: Some("jsonl".to_owned()),
+                    source_roots: vec!["personal".to_owned()],
+                    source_groups: vec!["work".to_owned()],
                     workspace: Some("workspace".to_owned()),
                     since: Some("2026-01-01".to_owned()),
                     primary_only: true,
@@ -328,6 +338,8 @@ mod tests {
                 let execution = ctx_history_read_application::SearchRequest::from(request);
                 assert_eq!(execution.content_scope, expected_scope);
                 assert_eq!(execution.backend, Some(expected_backend));
+                assert_eq!(execution.source_roots, ["personal"]);
+                assert_eq!(execution.source_groups, ["work"]);
                 assert!(
                     execution.events,
                     "a session selector must retain event-result semantics"

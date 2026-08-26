@@ -11,18 +11,20 @@ use ctx_history_capture_runtime::{
     SourceBackedRouteErrorKind, SourceBackedRouteResult, SourceBackedRouteSelection,
     SourceBackedSelectorAuthority,
 };
-use ctx_history_core::{CaptureProvider, CertifiedSource, ScannedSourceCounts, SourceKey};
+use ctx_history_core::{
+    CaptureProvider, CertifiedSource, ScannedSourceCounts, SourceAnchorScope, SourceKey,
+};
 use thiserror::Error;
 
 use crate::{
     providers::{
         deepagents::native_path::source_backed::DeepAgentsRouteAdapter,
         forgecode::nativepath::source_backed::ForgeCodeRouteAdapter,
-        opencode::native_path::source_backed::source_backed_adapter,
+        opencode::native_path::source_backed::source_backed_adapter_scoped,
         zed::native_path::{
             source_backed::{
                 acquire_snapshot, decode_sha256_hex, scan_zed_native_snapshot,
-                snapshot_revision_digest, source_observation, zed_source_key,
+                snapshot_revision_digest, source_observation, zed_source_key_scoped,
                 ZedSourceBackedSinkV0, ZED_PARSER_REVISION,
             },
             ZedImmutableSqliteSnapshot, ZedNativePathError,
@@ -78,16 +80,30 @@ pub fn logical_sqlite_route_plan<B: LogicalSqliteRuntimeBinding>(
     selection: SourceBackedRouteSelection,
     data_root: &Path,
 ) -> Result<LogicalSqliteRoutePlan<B>, LogicalSqliteRegistrationError> {
+    logical_sqlite_route_plan_scoped(source, selection, data_root, SourceAnchorScope::Unqualified)
+}
+
+pub fn logical_sqlite_route_plan_scoped<B: LogicalSqliteRuntimeBinding>(
+    source: ProviderSource,
+    selection: SourceBackedRouteSelection,
+    data_root: &Path,
+    source_scope: SourceAnchorScope,
+) -> Result<LogicalSqliteRoutePlan<B>, LogicalSqliteRegistrationError> {
     match source.provider {
         CaptureProvider::DeepAgents => {
-            let adapter = DeepAgentsRouteAdapter::new(data_root, source.path.clone());
+            let adapter =
+                DeepAgentsRouteAdapter::new_scoped(data_root, source.path.clone(), source_scope);
             Ok(LogicalSqliteRoutePlan::DeepAgents { source, adapter })
         }
         CaptureProvider::ForgeCode => {
             if selection != SourceBackedRouteSelection::Automatic {
                 return Err(LogicalSqliteRegistrationError::ForgeCodeLineageRequired);
             }
-            let adapter = ForgeCodeRouteAdapter::selected(data_root, source.path.clone());
+            let adapter = ForgeCodeRouteAdapter::selected_scoped(
+                data_root,
+                source.path.clone(),
+                source_scope,
+            );
             Ok(LogicalSqliteRoutePlan::ForgeCode {
                 source,
                 adapter,
@@ -95,12 +111,12 @@ pub fn logical_sqlite_route_plan<B: LogicalSqliteRuntimeBinding>(
             })
         }
         CaptureProvider::OpenCode | CaptureProvider::Kilo | CaptureProvider::MiMoCode => {
-            let adapter = source_backed_adapter(source.clone(), data_root)
+            let adapter = source_backed_adapter_scoped(source.clone(), data_root, source_scope)
                 .map_err(LogicalSqliteRegistrationError::InvalidRoute)?;
             Ok(LogicalSqliteRoutePlan::OpenCodeFamily { source, adapter })
         }
         CaptureProvider::Zed => {
-            let adapter = ZedRouteAdapter::new(data_root, source.path.clone());
+            let adapter = ZedRouteAdapter::new_scoped(data_root, source.path.clone(), source_scope);
             Ok(LogicalSqliteRoutePlan::Zed { source, adapter })
         }
         provider => Err(LogicalSqliteRegistrationError::UnsupportedProvider(
@@ -114,12 +130,31 @@ pub fn explicit_forgecode_route_plan<B: LogicalSqliteRuntimeBinding>(
     data_root: &Path,
     catalog_lineage: [u8; 32],
 ) -> Result<LogicalSqliteRoutePlan<B>, LogicalSqliteRegistrationError> {
+    explicit_forgecode_route_plan_scoped(
+        source,
+        data_root,
+        catalog_lineage,
+        SourceAnchorScope::Unqualified,
+    )
+}
+
+pub fn explicit_forgecode_route_plan_scoped<B: LogicalSqliteRuntimeBinding>(
+    source: ProviderSource,
+    data_root: &Path,
+    catalog_lineage: [u8; 32],
+    source_scope: SourceAnchorScope,
+) -> Result<LogicalSqliteRoutePlan<B>, LogicalSqliteRegistrationError> {
     if source.provider != CaptureProvider::ForgeCode {
         return Err(LogicalSqliteRegistrationError::UnsupportedProvider(
             source.provider.as_str(),
         ));
     }
-    let adapter = ForgeCodeRouteAdapter::explicit(data_root, source.path.clone(), catalog_lineage);
+    let adapter = ForgeCodeRouteAdapter::explicit_scoped(
+        data_root,
+        source.path.clone(),
+        catalog_lineage,
+        source_scope,
+    );
     Ok(LogicalSqliteRoutePlan::ForgeCode {
         source,
         adapter,
@@ -131,14 +166,20 @@ pub fn explicit_forgecode_route_plan<B: LogicalSqliteRuntimeBinding>(
 pub struct ZedRouteAdapter<B> {
     data_root: PathBuf,
     path: PathBuf,
+    source_scope: SourceAnchorScope,
     binding: PhantomData<fn() -> B>,
 }
 
 impl<B> ZedRouteAdapter<B> {
     pub fn new(data_root: &Path, path: PathBuf) -> Self {
+        Self::new_scoped(data_root, path, SourceAnchorScope::Unqualified)
+    }
+
+    pub fn new_scoped(data_root: &Path, path: PathBuf, source_scope: SourceAnchorScope) -> Self {
         Self {
             data_root: data_root.to_path_buf(),
             path,
+            source_scope,
             binding: PhantomData,
         }
     }
@@ -165,6 +206,14 @@ impl<B: LogicalSqliteRuntimeBinding> ReplacementDocumentTree for ZedRouteAdapter
             && source.source_format() == ZED_THREADS_SQLITE_SOURCE_FORMAT
     }
 
+    fn durable_replay_source(
+        &self,
+        _authority: &Self::TreeAuthority,
+        leaf: &Self::Leaf,
+    ) -> SourceBackedRouteResult<Option<SourceKey>> {
+        Ok(Some(leaf.clone()))
+    }
+
     fn discover_complete(
         &self,
     ) -> SourceBackedRouteResult<CompleteDocumentTree<Self::Leaf, Self::TreeAuthority>> {
@@ -172,7 +221,7 @@ impl<B: LogicalSqliteRuntimeBinding> ReplacementDocumentTree for ZedRouteAdapter
         let fingerprint =
             DocumentLeafFingerprint::new(snapshot_revision_digest(&snapshot.snapshot_revision));
         let terminal_revalidate = snapshot.terminal_revalidator().map_err(route_error)?;
-        let source = zed_source_key().map_err(route_error)?;
+        let source = zed_source_key_scoped(self.source_scope).map_err(route_error)?;
         Ok(CompleteDocumentTree::new(
             fingerprint.as_bytes(),
             vec![ObservedDocumentLeaf::new(fingerprint, source)],

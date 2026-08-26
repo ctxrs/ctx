@@ -1,7 +1,9 @@
 use super::*;
 use crate::provider::source_backed::family::document::register_replacement_document_tree_route_with_authority;
+#[cfg(test)]
+use ctx_history_providers_sqlite_logical::logical_sqlite_route_plan;
 use ctx_history_providers_sqlite_logical::{
-    explicit_forgecode_route_plan, logical_sqlite_route_plan, LogicalSqliteRoutePlan,
+    explicit_forgecode_route_plan, logical_sqlite_route_plan_scoped, LogicalSqliteRoutePlan,
     LogicalSqliteRuntimeBinding,
 };
 
@@ -42,10 +44,19 @@ pub(super) fn register_deepagents_route(
     source: ProviderSource,
     selection: SourceBackedRouteSelection,
     data_root: &Path,
+    source_root_lineage: Option<[u8; 32]>,
 ) -> SourceBackedCoordinatorResult<()> {
     let provider = source.provider;
-    let plan = logical_sqlite_route_plan(source, selection, data_root)
-        .map_err(|error| invalid_route(provider, error.to_string()))?;
+    let plan = logical_sqlite_route_plan_scoped(
+        source,
+        selection,
+        data_root,
+        source_root_lineage.map_or(
+            ctx_history_core::SourceAnchorScope::Unqualified,
+            ctx_history_core::SourceAnchorScope::Lineage,
+        ),
+    )
+    .map_err(|error| invalid_route(provider, error.to_string()))?;
     register_logical_plan(registry, selection, plan)
 }
 pub(super) fn register_opencode_family_route(
@@ -53,10 +64,19 @@ pub(super) fn register_opencode_family_route(
     source: ProviderSource,
     selection: SourceBackedRouteSelection,
     data_root: &Path,
+    source_root_lineage: Option<[u8; 32]>,
 ) -> SourceBackedCoordinatorResult<()> {
     let provider = source.provider;
-    let plan = logical_sqlite_route_plan(source, selection, data_root)
-        .map_err(|error| invalid_route(provider, error.to_string()))?;
+    let plan = logical_sqlite_route_plan_scoped(
+        source,
+        selection,
+        data_root,
+        source_root_lineage.map_or(
+            ctx_history_core::SourceAnchorScope::Unqualified,
+            ctx_history_core::SourceAnchorScope::Lineage,
+        ),
+    )
+    .map_err(|error| invalid_route(provider, error.to_string()))?;
     register_logical_plan(registry, selection, plan)
 }
 
@@ -65,10 +85,19 @@ pub(super) fn register_zed_route(
     source: ProviderSource,
     selection: SourceBackedRouteSelection,
     data_root: &Path,
+    source_root_lineage: Option<[u8; 32]>,
 ) -> SourceBackedCoordinatorResult<()> {
     let provider = source.provider;
-    let plan = logical_sqlite_route_plan(source, selection, data_root)
-        .map_err(|error| invalid_route(provider, error.to_string()))?;
+    let plan = logical_sqlite_route_plan_scoped(
+        source,
+        selection,
+        data_root,
+        source_root_lineage.map_or(
+            ctx_history_core::SourceAnchorScope::Unqualified,
+            ctx_history_core::SourceAnchorScope::Lineage,
+        ),
+    )
+    .map_err(|error| invalid_route(provider, error.to_string()))?;
     register_logical_plan(registry, selection, plan)
 }
 pub(super) fn register_forgecode_selected_route(
@@ -76,10 +105,19 @@ pub(super) fn register_forgecode_selected_route(
     source: ProviderSource,
     selection: SourceBackedRouteSelection,
     data_root: &Path,
+    source_root_lineage: Option<[u8; 32]>,
 ) -> SourceBackedCoordinatorResult<()> {
     let provider = source.provider;
-    let plan = logical_sqlite_route_plan(source, selection, data_root)
-        .map_err(|error| invalid_route(provider, error.to_string()))?;
+    let plan = logical_sqlite_route_plan_scoped(
+        source,
+        selection,
+        data_root,
+        source_root_lineage.map_or(
+            ctx_history_core::SourceAnchorScope::Unqualified,
+            ctx_history_core::SourceAnchorScope::Lineage,
+        ),
+    )
+    .map_err(|error| invalid_route(provider, error.to_string()))?;
     register_logical_plan(registry, selection, plan)
 }
 
@@ -168,6 +206,7 @@ mod tests {
             catalog_support: crate::ProviderCatalogSupport::None,
             status: ProviderSourceStatus::Available,
             unsupported_reason: None,
+            route_provenance: Default::default(),
         }
     }
 }

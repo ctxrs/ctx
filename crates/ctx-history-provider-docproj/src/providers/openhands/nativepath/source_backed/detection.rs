@@ -16,6 +16,15 @@ pub(super) struct OpenHandsEventPath {
 pub(super) fn openhands_event_path(
     path: &Path,
 ) -> OpenHandsSourceBackedResultV2<Option<OpenHandsEventPath>> {
+    if let Some(event) = openhands_legacy_event_path(path)? {
+        return Ok(Some(event));
+    }
+    openhands_current_event_path(path)
+}
+
+pub(super) fn openhands_legacy_event_path(
+    path: &Path,
+) -> OpenHandsSourceBackedResultV2<Option<OpenHandsEventPath>> {
     let components = path.components().collect::<Vec<_>>();
     for index in 0..components.len() {
         let legacy = components[index].as_os_str() == "v1_conversations"
@@ -28,6 +37,13 @@ pub(super) fn openhands_event_path(
             }));
         }
     }
+    Ok(None)
+}
+
+pub(super) fn openhands_current_event_path(
+    path: &Path,
+) -> OpenHandsSourceBackedResultV2<Option<OpenHandsEventPath>> {
+    let components = path.components().collect::<Vec<_>>();
     let Some(conversation_index) = components.len().checked_sub(3) else {
         return Ok(None);
     };

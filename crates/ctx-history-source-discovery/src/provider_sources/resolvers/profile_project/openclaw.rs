@@ -5,6 +5,9 @@ use std::{
 
 use serde_json::{Map, Value};
 
+use super::super::automatic_roles::{
+    automatic_route_provenance, AUTOMATIC_ROUTE_ROLE_UNAVAILABLE_REASON,
+};
 use super::{
     absolute_from_cwd, env_text, expand_leading_tilde, issue_limit, issue_manual, issue_selector,
     ordinary_file, path_presence, push_source_candidate, push_unsupported_existing,
@@ -76,15 +79,12 @@ pub(super) fn resolve(
         return report;
     }
 
-    let config_path = ["openclaw.json", "clawdbot.json"]
-        .into_iter()
-        .map(|name| state_root.join(name))
-        .find(|path| path_presence(path).suppresses_fallback());
-    let (agent_ids, truncated) = match config_path {
-        Some(path) => match read_openclaw_agent_ids(&path) {
+    let config_path = selected_openclaw_config_path(&state_root);
+    let (agent_ids, truncated) = match config_path.as_deref() {
+        Some(path) => match read_openclaw_agent_ids(path) {
             Ok(ids) => ids,
             Err(OpenClawConfigError::Limit) => {
-                issue_limit(&mut report, spec.provider, path);
+                issue_limit(&mut report, spec.provider, path.to_path_buf());
                 return report;
             }
             Err(OpenClawConfigError::Invalid) => {
@@ -96,14 +96,31 @@ pub(super) fn resolve(
     };
     if truncated {
         issue_limit(&mut report, spec.provider, state_root.join("openclaw.json"));
+        // A bounded prefix cannot stand in for complete agent membership.
+        // Leave automatic discovery route-less rather than publishing a
+        // selector that would silently omit the remaining configured agents.
+        return report;
     }
 
     for agent_id in agent_ids {
         let agent_root = state_root.join("agents").join(&agent_id);
+        let route_provenance =
+            match automatic_route_provenance([b"agent".as_slice(), agent_id.as_bytes()]) {
+                Ok(route_provenance) => route_provenance,
+                Err(_) => {
+                    report.issues.push(super::issue(
+                        spec.provider,
+                        Some(agent_root),
+                        super::DiscoveryIssueKind::SelectorUnreconstructible,
+                        AUTOMATIC_ROUTE_ROLE_UNAVAILABLE_REASON,
+                    ));
+                    continue;
+                }
+            };
         let sqlite = agent_root.join("agent/openclaw-agent.sqlite");
         let sqlite_probe = has_openclaw_agent_sqlite_v17(context.data_root(), &sqlite);
         if sqlite_probe == BoundedProbe::Found {
-            let source = source_from_parts_with_data_root(
+            let mut source = source_from_parts_with_data_root(
                 probes,
                 context.data_root(),
                 spec,
@@ -111,6 +128,7 @@ pub(super) fn resolve(
                 ctx_history_openclaw_schema::OPENCLAW_AGENT_SQLITE_SOURCE_FORMAT,
                 ProviderSourceKind::NativeHistory,
             );
+            source.route_provenance = route_provenance;
             if !push_source_candidate(&mut report.sources, source) {
                 issue_limit(&mut report, spec.provider, sqlite);
             }
@@ -118,13 +136,14 @@ pub(super) fn resolve(
         }
 
         let sessions = agent_root.join("sessions");
-        let jsonl = source_from_parts(
+        let mut jsonl = source_from_parts(
             probes,
             spec,
             sessions.clone(),
             OPENCLAW_JSONL_SOURCE_FORMAT,
             ProviderSourceKind::NativeHistory,
         );
+        jsonl.route_provenance = route_provenance.clone();
         if jsonl.status == ProviderSourceStatus::Available {
             if !push_source_candidate(&mut report.sources, jsonl) {
                 issue_limit(&mut report, spec.provider, sessions);
@@ -140,6 +159,7 @@ pub(super) fn resolve(
                         spec,
                         sqlite,
                         OPENCLAW_UNSUPPORTED_REASON,
+                        route_provenance,
                     )
                 }
                 BoundedProbe::Found => {}
@@ -150,9 +170,25 @@ pub(super) fn resolve(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OpenClawConfigError {
+pub(in crate::provider_sources) enum OpenClawConfigError {
     Invalid,
     Limit,
+}
+
+pub(in crate::provider_sources) fn openclaw_agent_ids_for_state_root(
+    state_root: &Path,
+) -> Result<(Vec<String>, bool), OpenClawConfigError> {
+    selected_openclaw_config_path(state_root).map_or_else(
+        || Ok((vec!["main".to_owned()], false)),
+        |path| read_openclaw_agent_ids(&path),
+    )
+}
+
+fn selected_openclaw_config_path(state_root: &Path) -> Option<PathBuf> {
+    ["openclaw.json", "clawdbot.json"]
+        .into_iter()
+        .map(|name| state_root.join(name))
+        .find(|path| path_presence(path).suppresses_fallback())
 }
 
 fn read_openclaw_agent_ids(path: &Path) -> Result<(Vec<String>, bool), OpenClawConfigError> {

@@ -36,21 +36,38 @@ EXPECTED_HERMES_REGISTRATIONS = {
 }
 EXPECTED_COMPOSITION_FACADE_FUNCTIONS = {
     "register_astrbot_source_backed_route",
+    "register_astrbot_released_source_backed_route",
     "register_crush_source_backed_route",
     "register_lingma_source_backed_route",
     "register_shelley_source_backed_route",
 }
-EXPECTED_COMPOSITION_FACADE_REGISTRATIONS = EXPECTED_REGISTRATIONS - {
-    "discovered_lingma_registration",
+EXPECTED_COMPOSITION_FACADE_REGISTRATIONS = {
+    "astrbot_registration_scoped",
+    "astrbot_released_registration_scoped",
+    "crush_registration_scoped",
+    "lingma_registration_scoped",
+    "shelley_registration",
 }
+EXPECTED_COMPOSITION_FACADE_PROVIDER_BINDINGS = (
+    EXPECTED_COMPOSITION_FACADE_REGISTRATIONS | {"SqliteInventoryCoverage"}
+)
+EXPECTED_COMPOSITION_FACADE_TYPE_ALIASES = {"SqliteInventoryRouteAuthority"}
 EXPECTED_HERMES_COMPOSITION_FUNCTIONS = {
     "register_hermes_source_backed_route",
     "register_hermes_explicit_source_backed_route",
+    "register_hermes_released_source_backed_route",
+}
+EXPECTED_HERMES_COMPOSITION_REGISTRATIONS = {
+    "hermes_automatic_registration_scoped",
+    "hermes_explicit_registration",
+    "hermes_explicit_registration_scoped",
+    "hermes_released_registration_scoped",
 }
 # Rust identifiers used by this project are ASCII: a letter or underscore,
 # followed by letters, digits, or underscores.
 RUST_IDENTIFIER = r"[A-Za-z_][A-Za-z0-9_]*"
 REGISTRATION_IDENTIFIER = rf"{RUST_IDENTIFIER}_registration"
+COMPOSITION_REGISTRATION_IDENTIFIER = rf"{REGISTRATION_IDENTIFIER}(?:_scoped)?"
 DEPENDENCY_TABLES = ("dependencies", "dev-dependencies", "build-dependencies")
 
 
@@ -432,16 +449,16 @@ def validate_composition_facade(path: Path) -> None:
         source,
         flags=re.DOTALL,
     )
-    imported_registrations = (
-        set(re.findall(rf"\b({REGISTRATION_IDENTIFIER})\b", registration_imports[0]))
+    imported_bindings = (
+        set(re.findall(rf"\b({RUST_IDENTIFIER})\b", registration_imports[0]))
         if len(registration_imports) == 1
         else set()
     )
-    if imported_registrations != EXPECTED_COMPOSITION_FACADE_REGISTRATIONS:
+    if imported_bindings != EXPECTED_COMPOSITION_FACADE_PROVIDER_BINDINGS:
         raise BoundaryError(
             "composition SQLite inventory façade provider bindings drifted: "
-            f"expected={sorted(EXPECTED_COMPOSITION_FACADE_REGISTRATIONS)} "
-            f"actual={sorted(imported_registrations)}"
+            f"expected={sorted(EXPECTED_COMPOSITION_FACADE_PROVIDER_BINDINGS)} "
+            f"actual={sorted(imported_bindings)}"
         )
     items = set(
         re.findall(
@@ -454,6 +471,8 @@ def validate_composition_facade(path: Path) -> None:
     )
     expected_items = {
         ("fn", function) for function in EXPECTED_COMPOSITION_FACADE_FUNCTIONS
+    } | {
+        ("type", alias) for alias in EXPECTED_COMPOSITION_FACADE_TYPE_ALIASES
     }
     if items != expected_items:
         raise BoundaryError(
@@ -489,8 +508,24 @@ def validate_composition_facade(path: Path) -> None:
             f"{sorted(restricted_public_items)}"
         )
 
+    route_authority_alias = re.findall(
+        r"(?m)^\s*pub\s+type\s+SqliteInventoryRouteAuthority\s*=\s*"
+        r"\(\s*Option\s*<\s*\[\s*u8\s*;\s*32\s*\]\s*>\s*,\s*"
+        r"SqliteInventoryCoverage\s*\)\s*;",
+        source,
+    )
+    route_authority_uses = re.findall(
+        r"\broute_authority\s*:\s*SqliteInventoryRouteAuthority\b",
+        source,
+    )
+    if len(route_authority_alias) != 1 or len(route_authority_uses) != 1:
+        raise BoundaryError(
+            "composition SQLite inventory façade route-authority alias drifted: "
+            f"declarations={len(route_authority_alias)} uses={len(route_authority_uses)}"
+        )
+
     registration_calls = re.findall(
-        rf"\b({REGISTRATION_IDENTIFIER})\s*(?:::<|\()", source
+        rf"\b({COMPOSITION_REGISTRATION_IDENTIFIER})\s*(?:::<|\()", source
     )
     registration_calls = [
         registration
@@ -510,7 +545,7 @@ def validate_composition_facade(path: Path) -> None:
             f"counts={duplicate_or_missing_calls}"
         )
     registrations = set(
-        re.findall(rf"\b({REGISTRATION_IDENTIFIER})\b", source)
+        re.findall(rf"\b({COMPOSITION_REGISTRATION_IDENTIFIER})\b", source)
     ) - {"install_sqlite_inventory_registration"}
     if registrations != EXPECTED_COMPOSITION_FACADE_REGISTRATIONS:
         raise BoundaryError(
@@ -536,14 +571,14 @@ def validate_hermes_composition_facade(path: Path) -> None:
         flags=re.DOTALL,
     )
     registrations = (
-        set(re.findall(rf"\b({REGISTRATION_IDENTIFIER})\b", imports[0]))
+        set(re.findall(rf"\b({RUST_IDENTIFIER})\b", imports[0]))
         if len(imports) == 1
         else set()
     )
-    if registrations != EXPECTED_HERMES_REGISTRATIONS:
+    if registrations != EXPECTED_HERMES_COMPOSITION_REGISTRATIONS:
         raise BoundaryError(
             "composition Hermes provider bindings drifted: "
-            f"expected={sorted(EXPECTED_HERMES_REGISTRATIONS)} "
+            f"expected={sorted(EXPECTED_HERMES_COMPOSITION_REGISTRATIONS)} "
             f"actual={sorted(registrations)}"
         )
     functions = set(
@@ -558,14 +593,31 @@ def validate_hermes_composition_facade(path: Path) -> None:
             f"expected={sorted(EXPECTED_HERMES_COMPOSITION_FUNCTIONS)} "
             f"actual={sorted(functions)}"
         )
-    for registration in EXPECTED_HERMES_REGISTRATIONS:
-        if len(re.findall(rf"\b{registration}\s*::", source)) != 1:
-            raise BoundaryError(
-                f"composition Hermes façade must call {registration} exactly once"
-            )
-    if source.count("install_hermes_registration(") != 2:
+    registration_calls = re.findall(
+        rf"\b({COMPOSITION_REGISTRATION_IDENTIFIER})\s*(?:::<|\()", source
+    )
+    registration_calls = [
+        registration
+        for registration in registration_calls
+        if registration != "install_hermes_registration"
+    ]
+    unexpected_calls = (
+        set(registration_calls) - EXPECTED_HERMES_COMPOSITION_REGISTRATIONS
+    )
+    duplicate_or_missing_calls = {
+        registration: registration_calls.count(registration)
+        for registration in EXPECTED_HERMES_COMPOSITION_REGISTRATIONS
+        if registration_calls.count(registration) != 1
+    }
+    if unexpected_calls or duplicate_or_missing_calls:
         raise BoundaryError(
-            "composition Hermes façade must install exactly one registration per route function"
+            "composition Hermes façade constructor calls drifted: "
+            f"unexpected={sorted(unexpected_calls)} "
+            f"counts={duplicate_or_missing_calls}"
+        )
+    if source.count("install_hermes_registration(") != 4:
+        raise BoundaryError(
+            "composition Hermes façade installer call surface drifted"
         )
     if "install_sqlite_inventory_registration" in source:
         raise BoundaryError(

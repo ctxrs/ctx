@@ -68,6 +68,51 @@ fn readers_opened_from_one_retained_source_drain_independently() {
 }
 
 #[test]
+fn unchanged_standard_zstd_source_reuses_its_checkpoint_without_physical_resume() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let source_path = temp.path().join("source.jsonl.zst");
+    let encoded = zstd::stream::encode_all(
+        std::io::Cursor::new(b"{\"message\":\"first\"}\n{\"message\":\"second\"}\n"),
+        1,
+    )
+    .unwrap();
+    fs::write(&source_path, encoded).unwrap();
+    let identity = JsonlSourceIdentity::new(
+        "test",
+        "standard-zstd-unchanged-v1",
+        "standard-zstd-unchanged-policy-v1",
+        [8; 32],
+        source_path.clone(),
+    );
+    let source_file = Arc::new(open_provider_source_file(&source_path).unwrap());
+    let mut first = JsonlReader::open_with_record_framing_and_encoding(
+        identity.clone(),
+        source_file,
+        None,
+        None,
+        JsonlPhysicalEncoding::StandardZstdJsonl,
+        JsonlRecordFraming::ordinary(),
+    )
+    .unwrap();
+    assert_eq!(drain(&mut first).unwrap().len(), 2);
+    let checkpoint = first.outcome().unwrap().checkpoint().clone();
+
+    let source_file = Arc::new(open_provider_source_file(&source_path).unwrap());
+    let mut unchanged = JsonlReader::open_with_record_framing_and_encoding(
+        identity,
+        source_file,
+        Some(&checkpoint),
+        None,
+        JsonlPhysicalEncoding::StandardZstdJsonl,
+        JsonlRecordFraming::ordinary(),
+    )
+    .unwrap();
+    assert_eq!(unchanged.source_change(), JsonlSourceChange::Unchanged);
+    assert!(drain(&mut unchanged).unwrap().is_empty());
+    assert_eq!(unchanged.outcome().unwrap().checkpoint(), &checkpoint);
+}
+
+#[test]
 fn semantic_projection_rejects_same_length_rewrite_after_preflight() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let source_path = temp.path().join("source.jsonl");

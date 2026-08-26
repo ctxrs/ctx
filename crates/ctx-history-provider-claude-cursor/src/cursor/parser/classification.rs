@@ -49,10 +49,10 @@ pub(super) fn classify_cursor_line(
     let mut deserializer = serde_json::Deserializer::from_slice(bytes);
     let classified = CursorClassificationSeed
         .deserialize(&mut deserializer)
-        .map_err(|_| CursorRejectionKind::MalformedJson)?;
+        .map_err(|error| CursorRejectionKind::from_json_error(&error))?;
     deserializer
         .end()
-        .map_err(|_| CursorRejectionKind::MalformedJson)?;
+        .map_err(|error| CursorRejectionKind::from_json_error(&error))?;
     classified.ok_or(CursorRejectionKind::UnsupportedShape)
 }
 

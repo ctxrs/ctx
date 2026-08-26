@@ -30,6 +30,7 @@ fn catalog_route(
             catalog_support: ProviderCatalogSupport::None,
             status: ProviderSourceStatus::Available,
             unsupported_reason: None,
+            route_provenance: Default::default(),
         },
         SourceBackedSelectorAuthority::DiscoveredWinner,
         SourceBackedRouteDriver::new(|_| Ok(()), |_| false, |_| true),

@@ -6,7 +6,10 @@ use std::{
 
 use anyhow::Result;
 use ctx_history_core::CaptureProvider;
-use ctx_history_source_discovery::{DiscoveryReport, ProviderSource, ProviderSourceStatus};
+use ctx_history_source_discovery::{
+    provider_source_belongs_to_configured_root, DiscoveryReport, ProviderRootDefinition,
+    ProviderSource, ProviderSourceStatus,
+};
 
 use crate::{
     discover_history_source_plugins_with_diagnostics, HistorySourcePluginDiscovery,
@@ -17,6 +20,10 @@ use crate::{
 pub struct SourceListingRequest {
     pub provider_filter: Option<CaptureProvider>,
     pub show_all: bool,
+    /// Persisted roots for this request. They are authoritative for normal
+    /// missing-source visibility; the default provider set remains only a
+    /// compatibility policy for automatic missing locations.
+    pub configured_provider_roots: Vec<ProviderRootDefinition>,
     pub default_visible_missing_providers: Vec<CaptureProvider>,
 }
 
@@ -48,7 +55,6 @@ pub fn assemble_source_listing(
         discover_history_source_plugins_with_diagnostics(data_root, &[])?
     };
     let show_all = request.show_all || request.provider_filter.is_some();
-    let configured_identities: BTreeSet<(String, PathBuf, String)> = BTreeSet::new();
     // Exact imports are request overlays and never durable automatic roots.
     let visible_sources = report
         .sources
@@ -57,7 +63,7 @@ pub fn assemble_source_listing(
             source_is_visible(
                 source,
                 show_all,
-                &configured_identities,
+                &request.configured_provider_roots,
                 &request.default_visible_missing_providers,
             )
         })
@@ -142,11 +148,14 @@ pub fn merge_sources(discovered: &mut Vec<ProviderSource>, configured: Vec<Provi
 pub fn source_is_visible(
     source: &ProviderSource,
     show_all_sources: bool,
-    configured_identities: &BTreeSet<(String, PathBuf, String)>,
+    configured_provider_roots: &[ProviderRootDefinition],
     default_visible_missing_providers: &[CaptureProvider],
 ) -> bool {
     show_all_sources
-        || configured_identities.contains(&source_identity(source))
+        || source.route_provenance.configured_root().is_some()
+        || configured_provider_roots
+            .iter()
+            .any(|root| provider_source_belongs_to_configured_root(root, source))
         || source_visible_by_default(source, default_visible_missing_providers)
 }
 fn source_visible_by_default(
@@ -162,8 +171,10 @@ fn source_visible_by_default(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ctx_history_capture_model::ProviderRouteRole;
     use ctx_history_source_discovery::{
         ProviderCatalogSupport, ProviderImportSupport, ProviderSourceKind,
+        ProviderSourceRouteProvenance,
     };
     use std::cell::Cell;
     struct Port {
@@ -199,6 +210,7 @@ mod tests {
             catalog_support: ProviderCatalogSupport::Native,
             status,
             unsupported_reason: None,
+            route_provenance: Default::default(),
         }
     }
     #[test]
@@ -217,6 +229,7 @@ mod tests {
             SourceListingRequest {
                 provider_filter: None,
                 show_all: false,
+                configured_provider_roots: vec![],
                 default_visible_missing_providers: vec![CaptureProvider::Codex],
             },
         )
@@ -233,5 +246,34 @@ mod tests {
             vec![source("same", ProviderSourceStatus::Available), missing],
         );
         assert_eq!(sources.len(), 2);
+    }
+
+    #[test]
+    fn configured_missing_source_is_visible_without_a_provider_allowlist() {
+        let mut missing = source("gone", ProviderSourceStatus::Missing);
+        missing.provider = CaptureProvider::Goose;
+        let root = ProviderRootDefinition {
+            id: "work".to_owned(),
+            provider: CaptureProvider::Goose,
+            path: missing.path.clone(),
+            group: Some("team".to_owned()),
+            kind: None,
+        };
+        missing.route_provenance = ProviderSourceRouteProvenance::ConfiguredRoot {
+            root_id: root.id.clone(),
+            root_path: root.path.clone(),
+            route_role: ProviderRouteRole::from_static("goose-sessions-database"),
+            automatic_route_role: None,
+        };
+
+        assert!(source_is_visible(&missing, false, &[root], &[]));
+    }
+
+    #[test]
+    fn automatic_missing_source_stays_hidden_without_compatibility_policy() {
+        let mut missing = source("gone", ProviderSourceStatus::Missing);
+        missing.provider = CaptureProvider::Goose;
+
+        assert!(!source_is_visible(&missing, false, &[], &[]));
     }
 }

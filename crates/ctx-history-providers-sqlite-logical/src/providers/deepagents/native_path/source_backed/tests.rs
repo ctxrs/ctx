@@ -20,6 +20,40 @@ fn direct_core_projection_is_complete_and_self_contained() {
 }
 
 #[test]
+fn root_scope_separates_identical_deepagents_conversations_and_unqualified_is_released() {
+    use ctx_history_core::{CaptureProvider, SourceAnchor, SourceAnchorScope, SourceKey, TypedKey};
+
+    let released = SourceKey::derive(
+        CaptureProvider::DeepAgents.as_str(),
+        super::DEEPAGENTS_SQLITE_SOURCE_FORMAT,
+        super::DEEPAGENTS_SOURCE_SCHEMA_VARIANT,
+        1,
+        SourceAnchor::provider_native(
+            super::DEEPAGENTS_SOURCE_ANCHOR_NAMESPACE,
+            TypedKey::utf8(super::DEEPAGENTS_SOURCE_ANCHOR_KEY).unwrap(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let unqualified = super::deepagents_source_key_scoped(SourceAnchorScope::Unqualified).unwrap();
+    assert!(released.exact_descriptor_eq(&unqualified));
+    assert_eq!(
+        released.identity().encode_canonical().unwrap(),
+        unqualified.identity().encode_canonical().unwrap()
+    );
+
+    let first =
+        super::deepagents_source_key_scoped(SourceAnchorScope::Lineage([0x11; 32])).unwrap();
+    let second =
+        super::deepagents_source_key_scoped(SourceAnchorScope::Lineage([0x22; 32])).unwrap();
+    assert_ne!(first.identity(), second.identity());
+    assert_ne!(
+        super::deepagents_session_id(&first, "shared-thread").unwrap(),
+        super::deepagents_session_id(&second, "shared-thread").unwrap()
+    );
+}
+
+#[test]
 fn core_projection_keeps_complete_success_failure_unknown_and_large_results_once() {
     use chrono::{TimeZone, Utc};
     use ctx_history_core::{AgentScope, EventRole};

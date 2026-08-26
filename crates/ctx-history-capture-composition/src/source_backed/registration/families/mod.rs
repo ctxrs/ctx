@@ -20,6 +20,7 @@ type DirectRouteRegistration = fn(
     &mut SourceBackedProviderRegistry,
     ProviderSource,
     SourceBackedRouteSelection,
+    Option<[u8; 32]>,
 ) -> SourceBackedCoordinatorResult<()>;
 
 #[derive(Clone, Copy)]
@@ -53,7 +54,7 @@ pub fn register_landed_source_backed_route(
     source: ProviderSource,
     selection: SourceBackedRouteSelection,
 ) -> SourceBackedCoordinatorResult<()> {
-    register_landed_source_backed_route_inner(registry, source, selection, None)
+    register_landed_source_backed_route_inner(registry, source, selection, None, None)
 }
 
 pub fn register_landed_source_backed_route_with_data_root(
@@ -62,7 +63,26 @@ pub fn register_landed_source_backed_route_with_data_root(
     selection: SourceBackedRouteSelection,
     data_root: &Path,
 ) -> SourceBackedCoordinatorResult<()> {
-    register_landed_source_backed_route_inner(registry, source, selection, Some(data_root))
+    register_landed_source_backed_route_inner(registry, source, selection, Some(data_root), None)
+}
+
+/// Registers a landed source with the one configured-root lineage scope that
+/// adapters use for durable provider-native identity. `None` is the released
+/// unqualified contract.
+pub(in crate::source_backed) fn register_landed_source_backed_route_with_data_root_and_lineage(
+    registry: &mut SourceBackedProviderRegistry,
+    source: ProviderSource,
+    selection: SourceBackedRouteSelection,
+    data_root: &Path,
+    source_root_lineage: Option<[u8; 32]>,
+) -> SourceBackedCoordinatorResult<()> {
+    register_landed_source_backed_route_inner(
+        registry,
+        source,
+        selection,
+        Some(data_root),
+        source_root_lineage,
+    )
 }
 
 fn register_landed_source_backed_route_inner(
@@ -70,6 +90,7 @@ fn register_landed_source_backed_route_inner(
     source: ProviderSource,
     selection: SourceBackedRouteSelection,
     data_root: Option<&Path>,
+    source_root_lineage: Option<[u8; 32]>,
 ) -> SourceBackedCoordinatorResult<()> {
     match source.provider {
         CaptureProvider::Codex
@@ -88,9 +109,11 @@ fn register_landed_source_backed_route_inner(
         | CaptureProvider::Junie
         | CaptureProvider::MistralVibe
         | CaptureProvider::Mux
-        | CaptureProvider::Qoder => jsonl::register_route(registry, source, selection),
+        | CaptureProvider::Qoder => {
+            jsonl::register_route(registry, source, selection, source_root_lineage)
+        }
         CaptureProvider::OpenClaw => {
-            openclaw::register_route(registry, source, selection, data_root)
+            openclaw::register_route(registry, source, selection, data_root, source_root_lineage)
         }
         CaptureProvider::Hermes => {
             let data_root = data_root.ok_or_else(|| {
@@ -99,7 +122,13 @@ fn register_landed_source_backed_route_inner(
                     "Hermes registration requires the selected ctx data root",
                 )
             })?;
-            hermes::register_hermes_source_backed_route(registry, source, selection, data_root)
+            hermes::register_hermes_source_backed_route(
+                registry,
+                source,
+                selection,
+                data_root,
+                source_root_lineage,
+            )
         }
         CaptureProvider::OpenCode
         | CaptureProvider::Kilo
@@ -115,7 +144,7 @@ fn register_landed_source_backed_route_inner(
                     "provider SQLite registration requires the selected ctx data root",
                 )
             })?;
-            sqlite::register_route(registry, source, selection, data_root)
+            sqlite::register_route(registry, source, selection, data_root, source_root_lineage)
         }
         CaptureProvider::Auggie
         | CaptureProvider::RovoDev
@@ -123,9 +152,11 @@ fn register_landed_source_backed_route_inner(
         | CaptureProvider::Cline
         | CaptureProvider::RooCode
         | CaptureProvider::CodeBuddy => {
-            document::register_route(registry, source, selection, data_root)
+            document::register_route(registry, source, selection, data_root, source_root_lineage)
         }
-        CaptureProvider::OpenHands => register_openhands_route(registry, source, selection),
+        CaptureProvider::OpenHands => {
+            register_openhands_route(registry, source, selection, source_root_lineage)
+        }
         provider => Err(invalid_route(
             provider,
             "this provider requires its compound-selector registration constructor",

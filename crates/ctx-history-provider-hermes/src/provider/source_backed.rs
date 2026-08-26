@@ -17,8 +17,8 @@ use ctx_history_core::{
     ActivityTextCapture, AgentScope, CaptureProvider, CertifiedSource, CoreActivity, CoreRecord,
     CoreRecordError, EventIdentityInput, LiteralFactKind, NativeItemKey, NativeSessionKey,
     ProjectionContractError, ProviderNativeSessionRelationship, ScannedSourceCounts,
-    SessionIdentityInput, SourceAnchor, SourceKey, SourceObservation, StableEntityId, TypedKey,
-    CORE_ACTIVITY_REVISION,
+    SessionIdentityInput, SourceAnchor, SourceAnchorScope, SourceKey, SourceObservation,
+    StableEntityId, TypedKey, CORE_ACTIVITY_REVISION,
 };
 use sha2::{Digest, Sha256};
 use thiserror::Error;

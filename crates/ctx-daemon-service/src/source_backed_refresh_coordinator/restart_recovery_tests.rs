@@ -31,7 +31,7 @@ fn load_explicit_source_catalog_authority(
         .join("explicit-source.jsonl");
     std::fs::write(
         &path,
-        "{\"record_type\":\"manifest\",\"schema_version\":\"ctx-history-jsonl-v1\"}\n",
+        "{\"record_type\":\"manifest\",\"schema_version\":\"ctx-history-jsonl-v2\"}\n",
     )?;
     let source = ctx_history_refresh::explicit_source_for_path(data_root, &path, None, true)?;
     Ok(ctx_history_refresh::upsert_explicit_source(data_root, &source)?.authority)

@@ -20,9 +20,29 @@ where
     mistral_vibe::native_path::source_backed::mistral_vibe_jsonl_adapter::<B>()
 }
 
+pub fn mistral_vibe_jsonl_adapter_with_source_root_lineage<B>(
+    source_root_lineage: Option<[u8; 32]>,
+) -> Arc<dyn JsonlFamilyAdapter<Runtime = ProviderJsonlRuntime<B>>>
+where
+    B: ProviderRuntimeBinding,
+{
+    mistral_vibe::native_path::source_backed::mistral_vibe_jsonl_adapter_with_source_root_lineage::<B>(
+        source_root_lineage,
+    )
+}
+
 pub fn mux_jsonl_adapter<B>() -> Arc<dyn JsonlFamilyAdapter<Runtime = ProviderJsonlRuntime<B>>>
 where
     B: ProviderRuntimeBinding,
 {
     mux::mux_jsonl_adapter::<B>()
+}
+
+pub fn mux_jsonl_adapter_with_source_root_lineage<B>(
+    source_root_lineage: Option<[u8; 32]>,
+) -> Arc<dyn JsonlFamilyAdapter<Runtime = ProviderJsonlRuntime<B>>>
+where
+    B: ProviderRuntimeBinding,
+{
+    mux::mux_jsonl_adapter_with_source_root_lineage::<B>(source_root_lineage)
 }

@@ -11,8 +11,10 @@ mod record_evidence;
 
 pub use error::{CaptureError, Result};
 pub use providers::{
-    firebender_source_backed_driver, goose_source_backed_driver, kiro_source_backed_driver,
-    warp_source_backed_driver, GooseSourceRoute,
+    firebender_source_backed_driver, firebender_source_backed_driver_scoped,
+    goose_source_backed_driver, goose_source_backed_driver_scoped, kiro_source_backed_driver,
+    kiro_source_backed_driver_scoped, warp_source_backed_driver, warp_source_backed_driver_scoped,
+    GooseSourceRoute,
 };
 
 pub use ctx_history_capture_runtime::{

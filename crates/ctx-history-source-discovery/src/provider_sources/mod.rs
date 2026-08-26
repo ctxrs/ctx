@@ -1,3 +1,4 @@
+mod configured_roots;
 mod context;
 mod discovery;
 mod lingma;
@@ -51,9 +52,14 @@ impl StaticProviderProbeCatalog {
     }
 }
 
+pub use configured_roots::{
+    configured_root_capabilities, configured_root_capability, ConfiguredRootCapability,
+    ConfiguredRootCapabilityState, ConfiguredRootExpander, ConfiguredRootPathKind,
+};
 pub use context::{
     DiscoveryContext, DiscoveryPlatform, DiscoveryPlatformDirs, DISCOVERY_ENV_ALLOWLIST,
 };
+pub use ctx_history_capture_model::ProviderRootDefinition;
 pub(crate) use ctx_history_source_io::open_ordinary_file_without_following;
 pub use ctx_history_source_io::OrdinaryFileObservation;
 #[cfg(test)]
@@ -65,8 +71,8 @@ pub(crate) use ctx_history_source_sqlite::{
     SqliteSourceAccessError, SqliteSourceReadSnapshot, SqliteSourceSnapshotLimits,
 };
 pub use discovery::{
-    discover_provider_sources, discover_provider_sources_for_provider,
-    discover_provider_sources_for_provider_report,
+    discover_canonical_automatic_provider_sources_with_context, discover_provider_sources,
+    discover_provider_sources_for_provider, discover_provider_sources_for_provider_report,
     discover_provider_sources_for_provider_with_context,
     discover_provider_sources_for_provider_with_projects, discover_provider_sources_report,
     discover_provider_sources_with_context, discover_provider_sources_with_context_and_work_budget,
@@ -76,25 +82,30 @@ pub use discovery::{
 };
 pub use lingma::{
     discover_lingma_inventory_with_authority, resolve_lingma_discovery_authority,
-    DiscoveredLingmaDatabase, LingmaDatabaseCatalogLineage, LingmaDiscoveredInventory,
-    LingmaDiscoveryUnavailable, LingmaInventorySelector, LingmaVscodeClient, LingmaVscodeProfile,
+    resolve_lingma_released_identity_authority, DiscoveredLingmaDatabase,
+    LingmaDatabaseCatalogLineage, LingmaDiscoveredInventory, LingmaDiscoveryUnavailable,
+    LingmaInventorySelector, LingmaVscodeClient, LingmaVscodeProfile,
 };
 
 pub use resolvers::PathPresence;
 pub use resolvers::{
-    path_presence, resolve_openhands_conversations_root, CrushDiscoveredProjectInventory,
-    CrushProjectInventorySelector, CrushProjectInventorySelectorError,
+    path_presence, provider_paths_equivalent, provider_source_belongs_to_configured_root,
+    released_provider_home, resolve_crush_released_project_inventories,
+    resolve_crush_released_project_inventory, resolve_openhands_conversations_root,
+    CrushDiscoveredProjectInventory, CrushProjectInventorySelector,
+    CrushProjectInventorySelectorError, CrushReleasedProjectInventory,
 };
 pub use specs::{provider_source_spec, provider_source_specs};
 pub use types::{
     provider_source_status_reason, DiscoveryIssue, DiscoveryIssueKind, DiscoveryReport,
     ProviderCatalogSupport, ProviderDefaultLocation, ProviderImportSupport, ProviderSource,
-    ProviderSourceKind, ProviderSourceSpec, ProviderSourceStatus, ProviderSourceStatusReason,
+    ProviderSourceKind, ProviderSourceRouteProvenance, ProviderSourceSpec, ProviderSourceStatus,
+    ProviderSourceStatusReason,
 };
 pub use warp::{
-    discover_warp_sources_with_authority, resolve_warp_discovery_authority, DiscoveredWarpSource,
-    WarpDiscoveryUnavailable, WarpInstalledPlatform, WarpInstalledSurfaceKey, WarpReleaseChannel,
-    WarpTerminalSurface,
+    discover_warp_sources_with_authority, resolve_warp_discovery_authority,
+    resolve_warp_released_identity_authority, DiscoveredWarpSource, WarpDiscoveryUnavailable,
+    WarpInstalledPlatform, WarpInstalledSurfaceKey, WarpReleaseChannel, WarpTerminalSurface,
 };
 
 #[cfg(test)]

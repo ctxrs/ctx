@@ -268,6 +268,154 @@ fn provider_native_helpers_preserve_every_migrated_jsonl_identity_byte() {
 }
 
 #[test]
+fn unqualified_anchor_scope_preserves_every_legacy_identity_byte() {
+    let native_key = TypedKey::utf8("unqualified-source").unwrap();
+    let anchor = SourceAnchor::provider_native("provider.session", native_key.clone()).unwrap();
+    assert_eq!(
+        SourceAnchorScope::Unqualified
+            .qualify(anchor.clone())
+            .unwrap(),
+        anchor
+    );
+
+    let legacy = SourceKey::derive_provider_native(
+        "provider",
+        "provider_jsonl",
+        "provider-v1",
+        1,
+        "provider.session",
+        native_key.clone(),
+    )
+    .unwrap();
+    let scoped = SourceKey::derive_provider_native_scoped(
+        "provider",
+        "provider_jsonl",
+        "provider-v1",
+        1,
+        "provider.session",
+        native_key.clone(),
+        SourceAnchorScope::Unqualified,
+    )
+    .unwrap();
+    assert!(legacy.exact_descriptor_eq(&scoped));
+    assert_eq!(
+        legacy.identity().encode_canonical().unwrap(),
+        scoped.identity().encode_canonical().unwrap()
+    );
+
+    let legacy_session = derive_native_session_id(
+        &legacy,
+        "provider-session",
+        "provider.session",
+        native_key.clone(),
+    )
+    .unwrap();
+    let scoped_session =
+        derive_native_session_id(&scoped, "provider-session", "provider.session", native_key)
+            .unwrap();
+    assert_eq!(
+        legacy_session.encode_canonical().unwrap(),
+        scoped_session.encode_canonical().unwrap()
+    );
+
+    let event_key = NativeItemKey::native_id(
+        "provider.event",
+        TypedKey::utf8("unqualified-event").unwrap(),
+    )
+    .unwrap();
+    let legacy_event = derive_event_id(EventIdentityInput {
+        source: &legacy,
+        session_id: legacy_session,
+        logical_item_kind: "provider-event",
+        native_item_key: &event_key,
+        subrecord_selector: None,
+    })
+    .unwrap();
+    let scoped_event = derive_event_id(EventIdentityInput {
+        source: &scoped,
+        session_id: scoped_session,
+        logical_item_kind: "provider-event",
+        native_item_key: &event_key,
+        subrecord_selector: None,
+    })
+    .unwrap();
+    assert_eq!(
+        legacy_event.encode_canonical().unwrap(),
+        scoped_event.encode_canonical().unwrap()
+    );
+}
+
+#[test]
+fn provider_native_scope_preserves_namespace_and_qualifies_only_the_key() {
+    let native_key = TypedKey::utf8("shared-native-session").unwrap();
+    let first_root = [1; 32];
+    let second_root = [2; 32];
+    let first = SourceKey::derive_provider_native_scoped(
+        "provider",
+        "provider_jsonl",
+        "provider-v1",
+        1,
+        "provider.session",
+        native_key.clone(),
+        SourceAnchorScope::Lineage(first_root),
+    )
+    .unwrap();
+    let second = SourceKey::derive_provider_native_scoped(
+        "provider",
+        "provider_jsonl",
+        "provider-v1",
+        1,
+        "provider.session",
+        native_key.clone(),
+        SourceAnchorScope::Lineage(second_root),
+    )
+    .unwrap();
+
+    assert_eq!(
+        first.anchor(),
+        &SourceAnchor::ProviderNative {
+            namespace: "provider.session".to_owned(),
+            key: TypedKey::Composite(vec![TypedKey::Bytes(first_root.to_vec()), native_key,]),
+        }
+    );
+    assert_ne!(first.identity(), second.identity());
+}
+
+#[test]
+fn catalog_scope_keeps_siblings_distinct_within_and_across_roots() {
+    let scoped = |root_lineage, local_lineage| {
+        SourceKey::derive_scoped(
+            "catalog-provider",
+            "catalog-format",
+            "catalog-v1",
+            1,
+            SourceAnchor::CatalogLineage(local_lineage),
+            SourceAnchorScope::Lineage(root_lineage),
+        )
+        .unwrap()
+    };
+    let first_root_first_local = scoped([1; 32], [7; 32]);
+    let first_root_second_local = scoped([1; 32], [8; 32]);
+    let second_root_first_local = scoped([2; 32], [7; 32]);
+    let second_root_second_local = scoped([2; 32], [8; 32]);
+    let identities = HashSet::from([
+        first_root_first_local.identity(),
+        first_root_second_local.identity(),
+        second_root_first_local.identity(),
+        second_root_second_local.identity(),
+    ]);
+    assert_eq!(identities.len(), 4);
+    assert_eq!(
+        first_root_first_local.anchor(),
+        &SourceAnchor::CatalogLineage([
+            0x7b, 0xcf, 0x80, 0xba, 0x9f, 0xf7, 0x69, 0x46, 0xe0, 0x8a, 0x05, 0x8b, 0x22, 0x85,
+            0x9a, 0x13, 0xb9, 0x60, 0x6b, 0xf6, 0xa2, 0xee, 0xe7, 0xef, 0x7d, 0x42, 0x4c, 0x46,
+            0x5c, 0x48, 0xf6, 0x55,
+        ])
+    );
+}
+
+#[test]
 fn source_lineage_disambiguates_equal_provider_session_ids() {
     let first = source(1);
     let second = source(2);

@@ -35,6 +35,12 @@ pub fn maybe_autostart_daemon(
         if application.daemon_start_is_fenced() {
             return;
         }
+        if application
+            .active_daemon_matches_current_executable(data_root)
+            .unwrap_or(false)
+        {
+            return;
+        }
         if daemon_autostart_suppression_reason().is_none() {
             match super::super::daemon_supervisor::ensure_daemon_supervisor(application, data_root)
             {

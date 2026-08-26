@@ -20,6 +20,79 @@ fn direct_core_projection_is_complete_and_self_contained() {
 }
 
 #[test]
+fn root_scope_composes_with_forgecode_authority_and_preserves_unqualified_identity() {
+    use ctx_history_core::{SourceAnchor, SourceAnchorScope, SourceKey, TypedKey};
+
+    let data_root = std::path::Path::new("/tmp/forgecode-scope-data");
+    let path = "/tmp/forgecode-scope-data/.forge.db";
+    let released = SourceKey::derive(
+        super::FORGECODE_PROVIDER_ID,
+        super::FORGECODE_SQLITE_SOURCE_FORMAT,
+        super::FORGECODE_SOURCE_SCHEMA_VARIANT,
+        1,
+        SourceAnchor::provider_native(
+            super::FORGECODE_SELECTED_SOURCE_NAMESPACE,
+            TypedKey::utf8(super::FORGECODE_SELECTED_SOURCE_KEY).unwrap(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let unqualified = super::ForgeCodeSourceSelectionV0::selected(data_root, path)
+        .source_key()
+        .unwrap();
+    assert!(released.exact_descriptor_eq(&unqualified));
+    assert_eq!(
+        released.identity().encode_canonical().unwrap(),
+        unqualified.identity().encode_canonical().unwrap()
+    );
+
+    let scoped = |root| {
+        super::ForgeCodeSourceSelectionV0::selected_scoped(
+            data_root,
+            path,
+            SourceAnchorScope::Lineage(root),
+        )
+        .source_key()
+        .unwrap()
+    };
+    let first = scoped([0x11; 32]);
+    let second = scoped([0x22; 32]);
+    assert_ne!(
+        super::forgecode_session_id(&first, "shared-conversation").unwrap(),
+        super::forgecode_session_id(&second, "shared-conversation").unwrap()
+    );
+
+    let explicit_lineage = [0x33; 32];
+    let released_explicit = SourceKey::derive(
+        super::FORGECODE_PROVIDER_ID,
+        super::FORGECODE_SQLITE_SOURCE_FORMAT,
+        super::FORGECODE_SOURCE_SCHEMA_VARIANT,
+        1,
+        SourceAnchor::CatalogLineage(explicit_lineage),
+    )
+    .unwrap();
+    let unqualified_explicit = super::ForgeCodeSourceSelectionV0::explicit_scoped(
+        data_root,
+        path,
+        explicit_lineage,
+        SourceAnchorScope::Unqualified,
+    )
+    .source_key()
+    .unwrap();
+    assert!(released_explicit.exact_descriptor_eq(&unqualified_explicit));
+
+    let sibling = super::ForgeCodeSourceSelectionV0::explicit_scoped(
+        data_root,
+        path,
+        explicit_lineage,
+        SourceAnchorScope::Lineage([0x11; 32]),
+    )
+    .source_key()
+    .unwrap();
+    assert_ne!(first.identity(), sibling.identity());
+}
+
+#[test]
 fn supported_conversations_are_primary_with_exact_native_content() {
     let selection = super::ForgeCodeSourceSelectionV0::selected(
         std::path::Path::new("/tmp/forgecode-test-data"),

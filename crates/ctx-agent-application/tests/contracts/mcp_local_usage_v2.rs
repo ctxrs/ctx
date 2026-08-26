@@ -172,6 +172,20 @@ fn delivered_search_and_prefix_open_record_once_with_exact_transport_and_context
         opened.value["result"]["structuredContent"]["ctx_session_id"],
         full_session_id
     );
+    let opened_session = &opened.value["result"]["structuredContent"];
+    assert_eq!(opened_session["provider_key"], "demo-agent");
+    assert_eq!(opened_session["source_id"], "demo-source");
+    assert_eq!(opened_session["provider_session_id"], "demo-session");
+    assert!(
+        opened_session["events"]
+            .as_array()
+            .is_some_and(|events| events.iter().all(|event| {
+                event["provider_key"] == "demo-agent"
+                    && event["source_id"] == "demo-source"
+                    && event["provider_session_id"] == "demo-session"
+            })),
+        "{opened_session:#}"
+    );
     let status = client.request(tool_call("status", "status", json!({})));
     let delivered_wire_bytes = search.wire_bytes + opened.wire_bytes + status.wire_bytes;
     client.finish();

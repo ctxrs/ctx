@@ -137,7 +137,7 @@ pub use projection::{
     derive_event_id, derive_native_session_id, derive_session_id, CertifiedSource,
     CertifiedSourceAppend, CertifiedSourceDeletion, CertifiedSourceInventory, EventIdentityInput,
     NativeItemKey, NativeSessionKey, PositionStability, ProjectionContractError,
-    ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceFrontier,
+    ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceAnchorScope, SourceFrontier,
     SourceInventoryObservation, SourceKey, SourceObservation, StableEntityId, StableEntityKind,
     SubrecordSelector, TypedKey, IDENTITY_VERSION,
 };

@@ -954,6 +954,39 @@ fn missing_and_corrupt_certification_force_one_rehash_then_reuse() {
 }
 
 #[test]
+fn legacy_pointer_bound_certifications_rehash_once_into_generation_bound_format() {
+    for legacy_version in [3, 4] {
+        let (temp, _, _) =
+            published_fixture(&format!("legacy-v{legacy_version}-certification.jsonl"));
+        let pointer = load_active_generation_pointer(temp.path())
+            .unwrap()
+            .unwrap();
+        let certification = crate::publication::certification_file_for_active(temp.path()).unwrap();
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&certification).unwrap()).unwrap();
+        value["version"] = serde_json::json!(legacy_version);
+        value["pointer"] = serde_json::to_value(&pointer).unwrap();
+        value["pointer_identity"] = value["manifest_identity"].clone();
+        fs::write(&certification, serde_json::to_vec(&value).unwrap()).unwrap();
+
+        crate::publication::reset_verification_activity();
+        drop(VerifiedIndex::open_pinned(temp.path()).unwrap());
+        assert_eq!(crate::publication::verification_activity().0, 1);
+        assert!(crate::publication::hashed_artifact_bytes() > 0);
+
+        let upgraded: serde_json::Value =
+            serde_json::from_slice(&fs::read(&certification).unwrap()).unwrap();
+        assert_eq!(upgraded["version"], 5);
+        assert!(upgraded.get("pointer").is_none());
+        assert!(upgraded.get("pointer_identity").is_none());
+        crate::publication::reset_verification_activity();
+        drop(VerifiedIndex::open_pinned(temp.path()).unwrap());
+        assert_eq!(crate::publication::verification_activity().0, 0);
+        assert_eq!(crate::publication::hashed_artifact_bytes(), 0);
+    }
+}
+
+#[test]
 fn oversized_and_overcount_certifications_fallback_without_unbounded_decode() {
     for overcount in [false, true] {
         let (temp, _, _) = published_fixture(if overcount {
@@ -1003,7 +1036,7 @@ fn oversized_and_overcount_certifications_fallback_without_unbounded_decode() {
 }
 
 #[test]
-fn pointer_manifest_and_artifact_identity_replacement_force_rehash() {
+fn generation_certification_ignores_pointer_inode_but_rehashes_generation_replacements() {
     let replacements = ["pointer", "manifest", "artifact"];
     for replacement in replacements {
         let (temp, _, _) = published_fixture(&format!("{replacement}-replacement.jsonl"));
@@ -1020,9 +1053,37 @@ fn pointer_manifest_and_artifact_identity_replacement_force_rehash() {
 
         crate::publication::reset_verification_activity();
         drop(VerifiedIndex::open_pinned(temp.path()).unwrap());
-        assert_eq!(crate::publication::verification_activity().0, 1);
-        assert!(crate::publication::hashed_artifact_bytes() > 0);
+        if replacement == "pointer" {
+            assert_eq!(crate::publication::verification_activity().0, 0);
+            assert_eq!(crate::publication::hashed_artifact_bytes(), 0);
+        } else {
+            assert_eq!(crate::publication::verification_activity().0, 1);
+            assert!(crate::publication::hashed_artifact_bytes() > 0);
+        }
     }
+}
+
+#[test]
+fn certification_sha_authority_must_recompute_to_the_exact_slot_digest() {
+    let (temp, _, _) = published_fixture("certificate-digest-binding.jsonl");
+    let certification = crate::publication::certification_file_for_active(temp.path()).unwrap();
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&fs::read(&certification).unwrap()).unwrap();
+    let sha = value
+        .get_mut("artifacts")
+        .and_then(serde_json::Value::as_array_mut)
+        .and_then(|artifacts| artifacts.first_mut())
+        .and_then(|artifact| artifact.get_mut("sha256"))
+        .and_then(serde_json::Value::as_array_mut)
+        .unwrap();
+    let first = sha.first_mut().unwrap();
+    *first = serde_json::Value::from(first.as_u64().unwrap() ^ 0x5a);
+    fs::write(&certification, serde_json::to_vec(&value).unwrap()).unwrap();
+
+    crate::publication::reset_verification_activity();
+    drop(VerifiedIndex::open_pinned(temp.path()).unwrap());
+    assert_eq!(crate::publication::verification_activity().0, 1);
+    assert!(crate::publication::hashed_artifact_bytes() > 0);
 }
 
 #[cfg(unix)]

@@ -18,10 +18,52 @@ use crate::{
 use ctx_history_source_discovery::{DiscoveryContext, DiscoveryPlatform, DiscoveryPlatformDirs};
 
 use super::{
-    discovery::{open_root_authorized_snapshot_with_hook, source_key, AstrBotSourceIdentityV0},
+    discovery::{
+        open_root_authorized_snapshot_with_hook, source_key, source_key_scoped,
+        AstrBotSourceIdentityV0,
+    },
     parsing::scan_astrbot_source_backed_v0,
     *,
 };
+
+#[test]
+fn root_scope_composes_with_astrbot_slots_and_preserves_unqualified_identity() {
+    use ctx_history_core::{CaptureProvider, SourceAnchor, SourceAnchorScope, SourceKey};
+
+    let selected = AstrBotSourceIdentityV0::SelectedCore;
+    let released = SourceKey::derive(
+        CaptureProvider::AstrBot.as_str(),
+        crate::ASTRBOT_SQLITE_SOURCE_FORMAT,
+        SOURCE_SCHEMA_VARIANT,
+        SOURCE_IDENTITY_VERSION,
+        SourceAnchor::provider_native(
+            SELECTED_SOURCE_NAMESPACE,
+            TypedKey::utf8("selected-core").unwrap(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let unqualified = source_key_scoped(&selected, SourceAnchorScope::Unqualified).unwrap();
+    assert!(released.exact_descriptor_eq(&unqualified));
+    assert_eq!(
+        released.identity().encode_canonical().unwrap(),
+        unqualified.identity().encode_canonical().unwrap()
+    );
+
+    let first = source_key_scoped(&selected, SourceAnchorScope::Lineage([0x11; 32])).unwrap();
+    let second = source_key_scoped(&selected, SourceAnchorScope::Lineage([0x22; 32])).unwrap();
+    assert_ne!(
+        super::identity::stable_session_id(&first, "shared-conversation").unwrap(),
+        super::identity::stable_session_id(&second, "shared-conversation").unwrap()
+    );
+
+    let sibling = source_key_scoped(
+        &AstrBotSourceIdentityV0::LauncherInstance("shared-launcher-client".to_owned()),
+        SourceAnchorScope::Lineage([0x11; 32]),
+    )
+    .unwrap();
+    assert_ne!(first.identity(), sibling.identity());
+}
 
 fn create_database(path: &Path, session: &str, text: &str) {
     fs::create_dir_all(path.parent().expect("database parent")).expect("create parent");
@@ -134,9 +176,12 @@ fn transferred_snapshot_scan_failure_reports_cleanup_fatal_error() {
     )
     .unwrap();
 
-    let error = scan_astrbot_snapshot_v0(&source, snapshot, &mut |_record| {
-        Err(AstrBotSourceBackedErrorV0::CountOverflow)
-    })
+    let error = scan_astrbot_snapshot_v0(
+        &source,
+        snapshot,
+        &mut |_record| Err(AstrBotSourceBackedErrorV0::CountOverflow),
+        &mut crate::lifecycle::SourceBackedRecordRejectionDrafts::default(),
+    )
     .unwrap_err();
     let AstrBotSourceBackedErrorV0::SnapshotCleanup { primary, cleanup } = error else {
         panic!("expected typed primary-plus-cleanup failure");
@@ -303,6 +348,68 @@ fn cold_scan_is_bounded_deterministic_and_emits_valid_stable_core() {
             decoded_rows: 257,
         }
     );
+}
+
+#[test]
+fn row_local_projection_failure_rejects_only_its_conversation() {
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("data_v4.db");
+    create_database(&path, "bad-session", "bad body");
+    let connection = Connection::open(&path).unwrap();
+    connection
+        .execute(
+            "update conversations set inner_conversation_id = ?1 where id = 1",
+            ["x".repeat(70 * 1024)],
+        )
+        .unwrap();
+    insert_conversation(
+        &connection,
+        2,
+        "healthy-session",
+        "healthy body",
+        "healthy-message",
+    );
+    drop(connection);
+
+    let source = selected_source(&path);
+    let mut records = Vec::new();
+    let certificate = scan_astrbot_source_backed_v0(
+        crate::test_provider_sqlite_data_root(),
+        &source,
+        &mut |record| {
+            records.push(record);
+            Ok(())
+        },
+    )
+    .unwrap();
+
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].content.meaningful_text(), "healthy body");
+    assert_eq!(certificate.counts().complete_records, 2);
+    assert_eq!(certificate.counts().retained_records, 1);
+    assert_eq!(certificate.counts().rejected_records, 1);
+    assert_eq!(certificate.counts().indexed_documents, 1);
+}
+
+#[test]
+fn row_local_projection_filter_preserves_core_invariants() {
+    assert!(astrbot_row_projection_error(
+        &AstrBotSourceBackedErrorV0::Projection(ProjectionContractError::FieldTooLarge {
+            field: "typed_key_utf8",
+            actual: 2,
+            maximum: 1,
+        })
+    ));
+    for error in [
+        AstrBotSourceBackedErrorV0::Projection(ProjectionContractError::SourceChanged),
+        AstrBotSourceBackedErrorV0::Projection(ProjectionContractError::InvalidDerivedIdentity),
+        AstrBotSourceBackedErrorV0::CoreRecord(CoreRecordError::Projection(
+            ProjectionContractError::SourceChanged,
+        )),
+        AstrBotSourceBackedErrorV0::CoreRecord(CoreRecordError::InvalidIdentityRelationship),
+    ] {
+        assert!(!astrbot_row_projection_error(&error), "{error:?}");
+    }
 }
 
 #[test]

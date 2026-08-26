@@ -520,6 +520,8 @@ pub struct SourceBackedAdmittedDiscovery {
     report: DiscoveryReport,
     discovery_duration: StdDuration,
     watch_catalog: SourceBackedWatchCatalog,
+    automatic_provider_discovery: Option<bool>,
+    configured_provider_roots: Option<Vec<ctx_history_capture::ProviderRootDefinition>>,
 }
 
 /// Immutable physical authority produced by refresh admission.
@@ -635,6 +637,23 @@ impl AdmittedRefresh {
         Ok(self)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn with_configured_provider_roots_for_test(
+        mut self,
+        roots: Vec<ctx_history_capture::ProviderRootDefinition>,
+    ) -> Self {
+        self.discovery = self.discovery.with_configured_provider_roots(roots);
+        self
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn with_automatic_provider_discovery_for_test(mut self, enabled: bool) -> Self {
+        self.discovery = self.discovery.with_automatic_provider_discovery(enabled);
+        self
+    }
+
     pub(crate) fn promote_worksets_to_exhaustive(&mut self) {
         self.route_worksets
             .values_mut()
@@ -662,7 +681,22 @@ impl SourceBackedAdmittedDiscovery {
             report,
             discovery_duration,
             watch_catalog,
+            automatic_provider_discovery: None,
+            configured_provider_roots: None,
         }
+    }
+
+    pub fn with_configured_provider_roots(
+        mut self,
+        roots: Vec<ctx_history_capture::ProviderRootDefinition>,
+    ) -> Self {
+        self.configured_provider_roots = Some(roots);
+        self
+    }
+
+    pub fn with_automatic_provider_discovery(mut self, enabled: bool) -> Self {
+        self.automatic_provider_discovery = Some(enabled);
+        self
     }
 
     pub fn report(&self) -> &DiscoveryReport {
@@ -675,6 +709,16 @@ impl SourceBackedAdmittedDiscovery {
 
     pub fn watch_catalog(&self) -> &SourceBackedWatchCatalog {
         &self.watch_catalog
+    }
+
+    pub fn configured_provider_roots(
+        &self,
+    ) -> Option<&[ctx_history_capture::ProviderRootDefinition]> {
+        self.configured_provider_roots.as_deref()
+    }
+
+    pub const fn automatic_provider_discovery(&self) -> Option<bool> {
+        self.automatic_provider_discovery
     }
 }
 

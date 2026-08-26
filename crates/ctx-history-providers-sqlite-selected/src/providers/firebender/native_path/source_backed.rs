@@ -7,7 +7,7 @@ use ctx_history_core::{
     ActivityTextCapture, AgentScope, CaptureProvider, CoreActivity, CoreRecord, CoreRecordError,
     EventIdentityInput, EventType, LiteralFactKind, NativeItemKey, NativeSessionKey,
     PositionStability, ProjectionContractError, ProviderDeclaredFact, SessionIdentityInput,
-    SourceAnchor, SourceKey, StableEntityId, TypedKey, CORE_ACTIVITY_REVISION,
+    SourceAnchor, SourceAnchorScope, SourceKey, StableEntityId, TypedKey, CORE_ACTIVITY_REVISION,
 };
 use thiserror::Error;
 
@@ -20,14 +20,14 @@ mod direct_snapshot;
 
 #[cfg(test)]
 pub(super) use direct::firebender_database_path_and_source;
-pub(crate) use direct::source_backed_driver;
+pub(crate) use direct::source_backed_driver_scoped;
 
 const FIREBENDER_NATIVE_SESSION_NAMESPACE: &str = "firebender.chat-session";
 const FIREBENDER_NATIVE_EVENT_NAMESPACE: &str = "firebender.message";
 const FIREBENDER_POSITION_KIND: &str = "firebender.messages-json-index";
 const FIREBENDER_LOGICAL_SESSION_KIND: &str = "firebender-chat-session";
 const FIREBENDER_LOGICAL_EVENT_KIND: &str = "firebender-message";
-const FIREBENDER_SOURCE_SCHEMA_VARIANT: &str = "firebender-chat-sessions-v1";
+pub(super) const FIREBENDER_SOURCE_SCHEMA_VARIANT: &str = "firebender-chat-sessions-v1";
 
 #[derive(Debug, Error)]
 pub(crate) enum FirebenderSourceBackedError {
@@ -58,13 +58,21 @@ impl From<ctx_history_source_sqlite::SqliteIoError> for FirebenderSourceBackedEr
 pub(crate) type FirebenderSourceBackedResult<T> =
     std::result::Result<T, FirebenderSourceBackedError>;
 
+#[cfg(test)]
 pub(super) fn firebender_source_key() -> FirebenderSourceBackedResult<SourceKey> {
-    Ok(SourceKey::derive(
+    firebender_source_key_scoped(SourceAnchorScope::Unqualified)
+}
+
+pub(super) fn firebender_source_key_scoped(
+    source_scope: SourceAnchorScope,
+) -> FirebenderSourceBackedResult<SourceKey> {
+    Ok(SourceKey::derive_scoped(
         CaptureProvider::Firebender.as_str(),
         FIREBENDER_SQLITE_SOURCE_FORMAT,
         FIREBENDER_SOURCE_SCHEMA_VARIANT,
         super::FIREBENDER_SOURCE_IDENTITY_REVISION,
         SourceAnchor::CatalogLineage(super::FIREBENDER_SELECTED_CATALOG_LINEAGE_V1),
+        source_scope,
     )?)
 }
 

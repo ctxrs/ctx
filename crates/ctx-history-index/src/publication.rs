@@ -14,10 +14,8 @@ pub(crate) use ctx_history_index_generation::manifest_path;
 #[cfg(test)]
 pub(crate) use ctx_history_index_generation::physical_integrity_digest;
 pub(crate) use ctx_history_index_generation::sync_directory;
-#[cfg(not(windows))]
-pub(crate) use ctx_history_index_generation::verify_candidate_physical_fence;
 pub(crate) use ctx_history_index_generation::{
-    certify_activated_generation, reclaim_unreferenced_certifications,
+    certify_candidate_physical_integrity, reclaim_unreferenced_certifications,
     reclaim_unreferenced_manifests,
 };
 pub(crate) use ctx_history_index_generation::{

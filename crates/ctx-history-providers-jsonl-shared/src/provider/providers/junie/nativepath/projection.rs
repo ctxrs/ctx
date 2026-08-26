@@ -84,8 +84,17 @@ impl JunieProjection {
         self.state.cwd.as_deref()
     }
 
+    pub(super) fn rejected_records(&self) -> u64 {
+        self.rejected_records
+    }
+
     pub(super) fn project(&mut self, record: JsonlRecordRef<'_>) -> Result<Vec<EventDraft>> {
         let evidence = record.evidence();
+        if record.oversized() {
+            self.reset_turn(evidence.byte_end_exclusive());
+            self.reject();
+            return Ok(Vec::new());
+        }
         if evidence
             .byte_end_exclusive()
             .saturating_sub(self.turn_start)

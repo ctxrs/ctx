@@ -45,6 +45,49 @@ class ProviderSupportMatrixTest(unittest.TestCase):
         self.assertEqual({provider["status"] for provider in providers}, {"supported"})
         self.assertNotIn("windsurf", {provider["id"] for provider in providers})
 
+    def test_configured_root_capability_is_required_for_every_provider(self) -> None:
+        providers = self.providers()
+        for provider in providers:
+            matrix.validate_configured_root(provider["configured_root"], str(provider["id"]))
+        states = {provider["configured_root"]["state"] for provider in providers}
+        self.assertEqual(states, matrix.ALLOWED_CONFIGURED_ROOT_STATES)
+
+        missing = copy.deepcopy(providers[0])
+        missing.pop("configured_root")
+        with self.assertRaisesRegex(matrix.MatrixError, r"configured_root must be dict"):
+            matrix.validate_provider(missing, 0, set())
+
+    def test_configured_root_capability_rejects_incoherent_shapes(self) -> None:
+        with self.assertRaisesRegex(matrix.MatrixError, r"intentional state.*exactly state"):
+            matrix.validate_configured_root(
+                {
+                    "state": "intentional_automatic_exact",
+                    "expected_path_kind": "directory",
+                },
+                "deferred",
+            )
+        with self.assertRaisesRegex(matrix.MatrixError, r"expander.kind has unsupported value"):
+            matrix.validate_configured_root(
+                {
+                    "state": "enabled",
+                    "expected_path_kind": "directory",
+                    "expander": {"kind": "guessed_home"},
+                },
+                "enabled",
+            )
+        with self.assertRaisesRegex(matrix.MatrixError, r"exact OpenHands root kinds"):
+            matrix.validate_configured_root(
+                {
+                    "state": "enabled",
+                    "expected_path_kind": "directory",
+                    "expander": {
+                        "kind": "openhands_kind_v1",
+                        "root_kinds": ["current-conversations"],
+                    },
+                },
+                "openhands",
+            )
+
     def test_codex_copy_claim_stays_deferred(self) -> None:
         providers = copy.deepcopy(self.providers())
         codex = next(provider for provider in providers if provider["id"] == "codex")

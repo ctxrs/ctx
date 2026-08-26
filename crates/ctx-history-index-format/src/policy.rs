@@ -16,7 +16,7 @@ pub const LEXICAL_TOKENIZER_REVISION: u32 = 2;
 pub const SOURCE_EVENT_PROJECTOR_REVISION: u32 = 8;
 pub const LEXICAL_INDEXED_BODY_LIMIT: LexicalIndexedBodyLimit =
     LexicalIndexedBodyLimit::ProviderValidatedFullText;
-pub const SEMANTIC_ELIGIBILITY_REVISION: u32 = 5;
+pub const SEMANTIC_ELIGIBILITY_REVISION: u32 = 6;
 pub const SEMANTIC_CHUNKING_REVISION: u32 = 1;
 pub const SEMANTIC_CHUNK_TARGET_CHARS: usize = 1_200;
 pub const SEMANTIC_CHUNK_OVERLAP_CHARS: usize = 200;
@@ -78,9 +78,9 @@ impl SemanticGenerationPolicy {
         self.candidate_event_classes.contains(&event_class) && self.candidate_roles.contains(&role)
     }
 
-    pub fn includes_provider_native_event_copy(&self, is_provider_native_copy: bool) -> bool {
+    pub fn includes_provider_native_event_copy(&self, _is_provider_native_copy: bool) -> bool {
         match self.provider_native_event_copy {
-            SemanticEventCopyFilter::ExcludeExactProviderNativeCopiesV1 => !is_provider_native_copy,
+            SemanticEventCopyFilter::IncludeAllOccurrencesDirectCopyNeutralV1 => true,
         }
     }
 }
@@ -158,7 +158,10 @@ pub enum SemanticCoreContentFilter {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SemanticEventCopyFilter {
-    ExcludeExactProviderNativeCopiesV1,
+    /// Include each otherwise eligible occurrence independently. A present
+    /// direct provider-native copy claim does not exclude or cluster the
+    /// occurrence, while absence remains only absence of positive copy evidence.
+    IncludeAllOccurrencesDirectCopyNeutralV1,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -235,7 +238,8 @@ pub fn current_semantic_generation_policy() -> SemanticGenerationPolicy {
         candidate_roles: [SourceEventRole::User],
         core_content_filter:
             SemanticCoreContentFilter::PolicySelectedCompleteContentAndLiteralFactsV2,
-        provider_native_event_copy: SemanticEventCopyFilter::ExcludeExactProviderNativeCopiesV1,
+        provider_native_event_copy:
+            SemanticEventCopyFilter::IncludeAllOccurrencesDirectCopyNeutralV1,
         chunking_revision: SEMANTIC_CHUNKING_REVISION,
         chunk_target_chars: SEMANTIC_CHUNK_TARGET_CHARS as u32,
         chunk_overlap_chars: SEMANTIC_CHUNK_OVERLAP_CHARS as u32,
@@ -329,17 +333,29 @@ mod tests {
     }
 
     #[test]
+    fn semantic_copy_policy_includes_all_occurrences_without_inferring_originality() {
+        let policy = current_semantic_generation_policy();
+
+        assert_eq!(
+            policy.provider_native_event_copy,
+            SemanticEventCopyFilter::IncludeAllOccurrencesDirectCopyNeutralV1
+        );
+        assert!(policy.includes_provider_native_event_copy(true));
+        assert!(policy.includes_provider_native_event_copy(false));
+    }
+
+    #[test]
     fn semantic_policy_persisted_bytes_and_model_authority_are_frozen() {
-        const EXPECTED: &str = "{\"eligibility_revision\":5,\"candidate_event_classes\":[\"message\"],\"candidate_roles\":[\"user\"],\"core_content_filter\":\"policy_selected_complete_content_and_literal_facts_v2\",\"provider_native_event_copy\":\"exclude_exact_provider_native_copies_v1\",\"chunking_revision\":1,\"chunk_target_chars\":1200,\"chunk_overlap_chars\":200,\"source_max_chars\":65536,\"embedding\":{\"contract_revision\":2,\"model\":\"intfloat/multilingual-e5-small\",\"model_revision\":\"614241f622f53c4eeff9890bdc4f31cfecc418b3\",\"dimensions\":384,\"normalization\":\"l2\"}}";
+        const EXPECTED: &str = "{\"eligibility_revision\":6,\"candidate_event_classes\":[\"message\"],\"candidate_roles\":[\"user\"],\"core_content_filter\":\"policy_selected_complete_content_and_literal_facts_v2\",\"provider_native_event_copy\":\"include_all_occurrences_direct_copy_neutral_v1\",\"chunking_revision\":1,\"chunk_target_chars\":1200,\"chunk_overlap_chars\":200,\"source_max_chars\":65536,\"embedding\":{\"contract_revision\":2,\"model\":\"intfloat/multilingual-e5-small\",\"model_revision\":\"614241f622f53c4eeff9890bdc4f31cfecc418b3\",\"dimensions\":384,\"normalization\":\"l2\"}}";
         let policy = current_semantic_generation_policy();
         let contract = ctx_semantic_model::semantic_model_contract();
         let persisted = serde_json::to_string(&policy).unwrap();
-        assert_eq!(EXPECTED.len(), 514);
-        assert_eq!(persisted.len(), 514);
+        assert_eq!(EXPECTED.len(), 521);
+        assert_eq!(persisted.len(), 521);
         assert_eq!(persisted, EXPECTED);
         assert_eq!(
             policy.canonical_sha256().unwrap(),
-            "7344423c77612cd733fd09226c07df21d4d9e8ba0440ea0058f04c05eb07a628"
+            "232500997e228abd69adaa91ef31dc0518726518b38408f9b289ae2530726f7c"
         );
         assert_eq!(
             policy.embedding.contract_revision,

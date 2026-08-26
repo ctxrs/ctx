@@ -91,6 +91,7 @@ fn provider_source_for_path_with_optional_data_root(
                     }
                 },
                 unsupported_reason: None,
+                route_provenance: Default::default(),
             };
         }
     }
@@ -238,6 +239,7 @@ fn provider_source_for_path_with_optional_data_root(
         } else {
             spec.unsupported_reason
         },
+        route_provenance: Default::default(),
     }
 }
 

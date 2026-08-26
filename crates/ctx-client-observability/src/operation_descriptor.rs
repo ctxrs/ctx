@@ -190,6 +190,7 @@ impl McpOperation {
                 result_truncated: None,
                 events_truncated: None,
                 response_bound: None,
+                search: None,
             },
         }
     }

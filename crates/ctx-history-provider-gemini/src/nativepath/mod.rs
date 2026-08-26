@@ -9,7 +9,11 @@ pub(crate) use dto::{
     GeminiEventIdentity, GeminiFileObservation, GeminiRetainedEvent, GeminiScanError,
     GeminiSession, GeminiTranscriptSource,
 };
-pub use source_backed::gemini_jsonl_adapter;
+pub use source_backed::{gemini_jsonl_adapter, gemini_jsonl_adapter_with_source_root_lineage};
+#[cfg(any(test, feature = "test-support"))]
+pub use source_backed::{
+    gemini_legacy_v1_jsonl_adapter_for_test, install_after_gemini_recording_discovery_hook,
+};
 
 #[cfg(test)]
 mod tests;

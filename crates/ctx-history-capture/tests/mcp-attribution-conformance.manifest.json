@@ -1633,8 +1633,8 @@
         {
           "class": "stable_ids",
           "kind": "rust_test",
-          "suite": "mcp_attribution_capture_provider_units",
-          "test": "source_backed::tests::codex_child_independence::lifecycle::codex_mcp_activity_append_replay_preserves_stable_ids_and_exact_content",
+          "suite": "mcp_attribution_capture_provider_lifecycle",
+          "test": "codex_child_independence::lifecycle::codex_mcp_activity_append_replay_preserves_stable_ids_and_exact_content",
           "scope": "tuple"
         }
       ],
@@ -2830,7 +2830,7 @@
           "class": "exact_boundary",
           "kind": "rust_test",
           "suite": "mcp_attribution_capture_provider_units",
-          "test": "source_backed::tests::copilot::copilot_route_enforces_independent_exact_identity_component_boundaries",
+          "test": "copilot::copilot_route_enforces_independent_exact_identity_component_boundaries",
           "scope": "tuple"
         },
         {
@@ -2872,7 +2872,7 @@
           "class": "stable_ids",
           "kind": "rust_test",
           "suite": "mcp_attribution_capture_provider_units",
-          "test": "source_backed::tests::copilot::copilot_activity_append_replay_preserves_stable_event_ids",
+          "test": "copilot::copilot_activity_append_replay_preserves_stable_event_ids",
           "scope": "tuple"
         }
       ],

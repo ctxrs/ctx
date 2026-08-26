@@ -1,3 +1,5 @@
+use std::{fs, path::Path};
+
 use chrono::DateTime;
 use ctx_history_core::{AgentScope, EventRole, EventType, ProviderNativeSessionRelationship};
 use serde_json::{json, Value};
@@ -32,6 +34,54 @@ fn direct_core_projection_is_complete_and_self_contained() {
     );
 }
 
+fn write_inventory_session(path: &Path, session_id: &str) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(
+        path,
+        serde_json::to_vec(&json!({
+            "sessionId": session_id,
+            "created": "2026-07-04T20:00:00.000Z",
+            "modified": "2026-07-04T20:00:00.000Z",
+            "chatHistory": []
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+}
+
+fn discovered_leaf_count(path: &Path) -> usize {
+    let inventory =
+        discover_auggie_source_backed_unfenced(&AuggieSourceBackedRoot::explicit(path)).unwrap();
+    assert_eq!(
+        inventory.status,
+        AuggieSourceBackedInventoryStatus::Complete
+    );
+    inventory.into_complete_tree().unwrap().leaves.len()
+}
+
+#[test]
+fn adapter_inventory_accepts_both_flat_directory_selections() {
+    let direct = tempfile::tempdir().unwrap();
+    write_inventory_session(&direct.path().join("direct.json"), "direct-session");
+    assert_eq!(discovered_leaf_count(direct.path()), 1);
+
+    let parent = tempfile::tempdir().unwrap();
+    write_inventory_session(&parent.path().join("sessions/child.json"), "sessions-child");
+    assert_eq!(discovered_leaf_count(parent.path()), 1);
+}
+
+#[test]
+fn adapter_inventory_ignores_nested_decoys_and_prefers_a_direct_sessions_child() {
+    let nested = tempfile::tempdir().unwrap();
+    write_inventory_session(&nested.path().join("nested/decoy.json"), "nested-decoy");
+    assert_eq!(discovered_leaf_count(nested.path()), 0);
+
+    let shadowed = tempfile::tempdir().unwrap();
+    write_inventory_session(&shadowed.path().join("ignored.json"), "shadowed-direct");
+    fs::create_dir(shadowed.path().join("sessions")).unwrap();
+    assert_eq!(discovered_leaf_count(shadowed.path()), 0);
+}
+
 fn scope_record_with_claims(
     parent_session_claim: AuggieLineageClaim,
     root_session_claim: AuggieLineageClaim,
@@ -56,7 +106,53 @@ fn scope_record_with_claims(
         message_kind: "request",
         native_event_id: Some("auggie-scope-event".to_owned()),
     };
-    auggie_core_record(&source, session_id, &session, [7; 32], event).unwrap()
+    auggie_core_record(
+        &source,
+        session_id,
+        SourceAnchorScope::Unqualified,
+        &session,
+        [7; 32],
+        event,
+    )
+    .unwrap()
+}
+
+#[test]
+fn root_scope_distinguishes_native_sessions_and_unqualified_is_unchanged() {
+    let native_session_id = "same-native-session";
+    let legacy = auggie_source_key(native_session_id).unwrap();
+    let unqualified =
+        auggie_source_key_scoped(native_session_id, SourceAnchorScope::Unqualified).unwrap();
+    let first =
+        auggie_source_key_scoped(native_session_id, SourceAnchorScope::Lineage([1; 32])).unwrap();
+    let second =
+        auggie_source_key_scoped(native_session_id, SourceAnchorScope::Lineage([2; 32])).unwrap();
+
+    assert!(legacy.exact_descriptor_eq(&unqualified));
+    assert_ne!(first.identity(), second.identity());
+    assert_ne!(
+        auggie_session_id(&first, native_session_id).unwrap(),
+        auggie_session_id(&second, native_session_id).unwrap()
+    );
+    assert_ne!(
+        related_auggie_session_id("same-parent", SourceAnchorScope::Lineage([1; 32])).unwrap(),
+        related_auggie_session_id("same-parent", SourceAnchorScope::Lineage([2; 32])).unwrap()
+    );
+}
+
+#[test]
+fn root_scope_partitions_document_replay_without_changing_unqualified_fingerprints() {
+    let fingerprint = [7; 32];
+    let domain = b"ctx.auggie-document-root-scoped-test-v1\0";
+
+    assert_eq!(
+        scope_auggie_document_fingerprint(fingerprint, SourceAnchorScope::Unqualified, domain,),
+        fingerprint
+    );
+    assert_ne!(
+        scope_auggie_document_fingerprint(fingerprint, SourceAnchorScope::Lineage([1; 32]), domain,),
+        scope_auggie_document_fingerprint(fingerprint, SourceAnchorScope::Lineage([2; 32]), domain,)
+    );
 }
 
 fn lineage_claim(value: Option<&str>) -> AuggieLineageClaim {
@@ -116,11 +212,16 @@ fn durable_parent_lineage_is_subagent_with_native_edges() {
         assert_eq!(record.agent_scope, Some(AgentScope::Subagent));
         assert_eq!(
             record.parent_session_id,
-            Some(related_auggie_session_id("auggie-parent").unwrap())
+            Some(
+                related_auggie_session_id("auggie-parent", SourceAnchorScope::Unqualified,)
+                    .unwrap(),
+            )
         );
         assert_eq!(
             record.root_session_id,
-            root.map(|native_id| related_auggie_session_id(native_id).unwrap())
+            root.map(|native_id| {
+                related_auggie_session_id(native_id, SourceAnchorScope::Unqualified).unwrap()
+            })
         );
         assert_eq!(
             record.session_relationship,

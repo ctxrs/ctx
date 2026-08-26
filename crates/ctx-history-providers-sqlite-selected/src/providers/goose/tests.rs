@@ -13,6 +13,42 @@ use super::{
 };
 
 #[test]
+fn root_scope_separates_identical_goose_sessions_and_unqualified_is_released() {
+    use ctx_history_core::{CaptureProvider, SourceAnchor, SourceAnchorScope, SourceKey};
+
+    let released = SourceKey::derive(
+        CaptureProvider::Goose.as_str(),
+        crate::GOOSE_SESSIONS_SQLITE_SOURCE_FORMAT,
+        super::source_backed::GOOSE_SOURCE_SCHEMA_VARIANT,
+        1,
+        SourceAnchor::provider_native(
+            super::source_backed::GOOSE_SOURCE_ANCHOR_NAMESPACE,
+            TypedKey::utf8(super::source_backed::GOOSE_SOURCE_ANCHOR_KEY).unwrap(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let unqualified =
+        super::source_backed::goose_source_key_scoped(SourceAnchorScope::Unqualified).unwrap();
+    assert!(released.exact_descriptor_eq(&unqualified));
+    assert_eq!(
+        released.identity().encode_canonical().unwrap(),
+        unqualified.identity().encode_canonical().unwrap()
+    );
+
+    let first =
+        super::source_backed::goose_source_key_scoped(SourceAnchorScope::Lineage([0x11; 32]))
+            .unwrap();
+    let second =
+        super::source_backed::goose_source_key_scoped(SourceAnchorScope::Lineage([0x22; 32]))
+            .unwrap();
+    assert_ne!(
+        super::source_backed::goose_session_id(&first, "shared-session").unwrap(),
+        super::source_backed::goose_session_id(&second, "shared-session").unwrap()
+    );
+}
+
+#[test]
 fn goose_result_content_is_unbounded_ordered_and_does_not_search_wrappers() {
     let long = "x".repeat(16_037);
     let content = json!([

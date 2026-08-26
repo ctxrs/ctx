@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 
 use super::{
     bind_source, exact_dependency, optional_bound_stream, projection::MuxProjector, MuxBinding,
-    MuxStreamKind, ProviderSourceRoot, SourceKey, MAX_EVENT_SEQUENCE_ORDINAL,
+    MuxStreamKind, ProviderSourceRoot, SourceAnchorScope, SourceKey, MAX_EVENT_SEQUENCE_ORDINAL,
     PARTIAL_EVENT_SEQUENCE_BASE,
 };
 use crate::mux::source::{
@@ -21,6 +21,24 @@ use crate::mux::source::{
 
 #[derive(Clone)]
 struct EmptyLookup;
+
+#[test]
+fn source_and_related_session_identities_are_root_scoped() {
+    let released = super::source_key("same-session").unwrap();
+    let compatibility =
+        super::source_key_scoped("same-session", SourceAnchorScope::Unqualified).unwrap();
+    let first =
+        super::source_key_scoped("same-session", SourceAnchorScope::Lineage([1; 32])).unwrap();
+    let second =
+        super::source_key_scoped("same-session", SourceAnchorScope::Lineage([2; 32])).unwrap();
+
+    assert!(released.exact_descriptor_eq(&compatibility));
+    assert_ne!(first.identity(), second.identity());
+    assert_ne!(
+        super::related_session_identity("parent", SourceAnchorScope::Lineage([1; 32])).unwrap(),
+        super::related_session_identity("parent", SourceAnchorScope::Lineage([2; 32])).unwrap()
+    );
+}
 
 impl BaseEventLookup for EmptyLookup {
     type Error = std::convert::Infallible;
@@ -68,7 +86,8 @@ fn bind(session_dir: &std::path::Path) -> (Arc<ProviderSourceRoot>, SourceKey, M
         .unwrap()
         .expect("Mux test session must be discoverable");
     let authority = Arc::new(ProviderSourceRoot::open(session_dir).unwrap());
-    let (source, binding) = bind_source(&authority, &native).unwrap();
+    let (source, binding) =
+        bind_source(&authority, &native, SourceAnchorScope::Unqualified).unwrap();
     (authority, source, binding)
 }
 

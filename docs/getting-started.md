@@ -177,7 +177,8 @@ import may perform a one-time provider reimport. That rebuilds search content
 with touched-file metadata and local/private transcript text.
 
 Native provider `--path` imports require `--provider`. Custom JSONL imports use
-`--input-format ctx-history-jsonl-v1 --path <file>` instead.
+`--input-format ctx-history-jsonl-v2 --path <file>` instead. The former v1
+schema is unsupported and is not accepted as an alias or translated.
 
 ## 5. Search
 
@@ -272,7 +273,7 @@ available for human shell use.
 `ctx upgrade` works for official installer-managed binaries. Source builds,
 `cargo install`, package-manager installs, and copied binaries are treated as
 unmanaged and will not self-upgrade. Automatic upgrade is on by default for a
-managed binary while automatic indexing's persistent daemon is enabled; use
-`ctx upgrade disable` for a persistent upgrade-only opt-out or
-`ctx index mode manual` to select manual indexing, which also disables automatic
-upgrade maintenance.
+managed binary. The full automatic-indexing daemon drives checks when present;
+manual and source-refresh-only modes keep automatic upgrades available through
+eligible command-triggered detached checks. Use `ctx upgrade disable` for a
+persistent upgrade-only opt-out.

@@ -75,6 +75,7 @@ fn sources_json_keeps_the_v1_top_level_and_source_fields() {
     assert_eq!(
         object_keys(&packet),
         BTreeSet::from([
+            "automatic_discovery",
             "hidden_missing_sources",
             "issues",
             "issues_truncated",
@@ -94,6 +95,7 @@ fn sources_json_keeps_the_v1_top_level_and_source_fields() {
             "native_import",
             "path",
             "provider",
+            "selection",
             "source_format",
             "status",
             "status_reason",
@@ -271,6 +273,7 @@ fn current_kiro_discovery_is_human_only_and_provider_filtered_import_does_not_di
     assert_eq!(
         object_keys(&json),
         BTreeSet::from([
+            "automatic_discovery",
             "hidden_missing_sources",
             "issues",
             "issues_truncated",

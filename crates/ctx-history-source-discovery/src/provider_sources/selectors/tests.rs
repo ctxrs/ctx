@@ -17,7 +17,10 @@ fn fixed_limits_match_the_reviewed_discovery_contract() {
     assert_eq!(MAX_DIRECT_DIRECTORY_ENTRIES, 1024);
     assert_eq!(MAX_PROJECT_ANCESTORS, 64);
     assert_eq!(MAX_SOURCE_CANDIDATES_PER_PROVIDER, 256);
-    assert_eq!(MAX_ENCODED_PATH_BYTES, 16 * 1024);
+    assert_eq!(
+        ctx_history_capture_model::MAX_PROVIDER_ROOT_ENCODED_PATH_BYTES,
+        16 * 1024
+    );
     assert_eq!(MAX_RENDERED_DIAGNOSTIC_BYTES, 512);
 }
 

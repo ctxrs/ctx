@@ -17,6 +17,7 @@ impl CoreRefreshEngine {
         cold_all: bool,
     ) -> Result<bool> {
         let observed_generation = self.observed_published_generation(data_root)?;
+        let automatic_split_pending = self.automatic_split_pending_for_watch(data_root)?;
         let request_id = {
             let mut state = self.lock_state();
             if durable_queue_entry_count(&state) != 0 {
@@ -51,15 +52,20 @@ impl CoreRefreshEngine {
                         .routes_requiring_exhaustive_reconciliation
                         .contains(route)
             });
-            let refresh_scope =
-                if retry_intent.is_none() && cold_all && observed_generation.is_none() {
-                    // A cold generation has no retained routes to carry. Publish
-                    // the complete startup inventory atomically instead of one
-                    // transient partial generation per initially dirty route.
-                    SourceBackedRefreshScope::All
-                } else {
-                    SourceBackedRefreshScope::Exact(routes)
-                };
+            let refresh_scope = if automatic_split_pending {
+                // A released collapsed identity is still active. Exact watch
+                // work cannot establish the complete role cohort required to
+                // bridge or retire it, so retain the event as the trigger but
+                // admit a single all-route exhaustive migration attempt.
+                SourceBackedRefreshScope::All
+            } else if retry_intent.is_none() && cold_all && observed_generation.is_none() {
+                // A cold generation has no retained routes to carry. Publish
+                // the complete startup inventory atomically instead of one
+                // transient partial generation per initially dirty route.
+                SourceBackedRefreshScope::All
+            } else {
+                SourceBackedRefreshScope::Exact(routes)
+            };
             let mut attempt = new_refresh_attempt(
                 observed_generation,
                 SourceRefreshRuntimeMetadata::periodic(),
@@ -71,7 +77,7 @@ impl CoreRefreshEngine {
             );
             attempt.state = SourceBackedRefreshState::AdmissionPending;
             attempt.progress.phase = "admission_pending".to_owned();
-            if requires_exhaustive_recovery {
+            if requires_exhaustive_recovery || automatic_split_pending {
                 attempt.reconciliation_demand = SourceBackedReconciliationDemand::Exhaustive;
             }
             let request_id = attempt.request_id.clone();
@@ -82,6 +88,21 @@ impl CoreRefreshEngine {
         };
         self.persist_job_status(data_root, &request_id)?;
         Ok(true)
+    }
+
+    fn automatic_split_pending_for_watch(&self, data_root: &Path) -> Result<bool> {
+        let catalog = self.lock_state().watch_catalog.clone();
+        let Some(catalog) = catalog else {
+            return Ok(false);
+        };
+        let Some(index) = open_published_generation(data_root, self.journal.as_ref())? else {
+            return Ok(false);
+        };
+        Ok(index
+            .manifest()
+            .source_routes()
+            .iter()
+            .any(|route| catalog.has_automatic_split_legacy_route(route.route_identity())))
     }
 
     pub(super) fn background_maintenance_wake_response(

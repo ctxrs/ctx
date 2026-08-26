@@ -1,8 +1,8 @@
 //! Coarse host ports for agent-facing workspace, session, and context tools.
 
 use ctx_agent_integrations::tool_backend::{
-    QueryEventsRequest, ShowEventRequest, ShowSessionRequest, ToolBackendError, ToolSearchRequest,
-    ToolSearchUsageFacts,
+    QueryEventsRequest, ShowEventRequest, ShowSessionRequest, ToolBackendError, ToolExecutionError,
+    ToolSearchRequest, ToolSearchTerminalFacts, ToolSearchUsageFacts,
 };
 use serde_json::Value;
 
@@ -19,11 +19,13 @@ pub struct SearchReadOutcome {
     pub structured: Value,
     pub compact: Value,
     pub usage: ToolSearchUsageFacts,
+    pub execution: ToolSearchTerminalFacts,
 }
 
 /// Provider and extension source inventory before wire-response assembly.
 #[derive(Debug)]
 pub struct SourceCatalog {
+    pub automatic_discovery: bool,
     pub sources: Vec<Value>,
     pub issues: Vec<Value>,
     pub issues_truncated: bool,
@@ -52,7 +54,7 @@ pub trait SearchReadinessPort: Send + Sync {
     fn search_ready(
         &self,
         request: ToolSearchRequest,
-    ) -> Result<SearchReadOutcome, ToolBackendError>;
+    ) -> Result<SearchReadOutcome, ToolExecutionError>;
 }
 
 /// One call for the complete source catalog, never one call per source.

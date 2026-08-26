@@ -13,8 +13,10 @@ pub(super) fn validate_binding(
     leaf: &JsonlFamilyLeaf,
     binding: &CursorBinding,
     _source_file: &OpenedProviderSourceFile,
+    source_anchor_scope: SourceAnchorScope,
 ) -> Result<()> {
-    if !source_key(&binding.native_session_id)?.exact_descriptor_eq(leaf.source())
+    if !source_key_scoped(&binding.native_session_id, source_anchor_scope)?
+        .exact_descriptor_eq(leaf.source())
         || cursor_route_sha256(leaf.source_path()) != binding.selected_route_sha256
     {
         return Err(CaptureError::SourceChangedDuringCapture);

@@ -4,7 +4,7 @@ use ctx_history_capture_runtime::{
     CaptureLifecycleSink, DocumentRecordSpool, ReplacementDocumentTree, SourceBackedRouteSelection,
     SourceBackedSelectorAuthority,
 };
-use ctx_history_core::SourceAnchor;
+use ctx_history_core::{SourceAnchor, SourceAnchorScope};
 
 use crate::{CaptureError, ProviderSource, Result};
 
@@ -68,17 +68,83 @@ where
     L::PinnedAppendBase: Clone + Send + Sync + 'static,
     S: DocumentRecordSpool,
 {
+    hermes_automatic_registration_scoped(
+        source,
+        selection,
+        data_root,
+        SourceAnchorScope::Unqualified,
+    )
+}
+
+pub fn hermes_automatic_registration_scoped<L, S>(
+    source: ProviderSource,
+    selection: SourceBackedRouteSelection,
+    data_root: &Path,
+    source_scope: SourceAnchorScope,
+) -> Result<
+    HermesRegistration<
+        impl ReplacementDocumentTree<
+            Lifecycle = L,
+            Spool = S,
+            RouteControl = crate::ProviderRouteControlExpectation,
+        >,
+    >,
+>
+where
+    L: CaptureLifecycleSink + 'static,
+    L::PinnedAppendBase: Clone + Send + Sync + 'static,
+    S: DocumentRecordSpool,
+{
     if selection != SourceBackedRouteSelection::Automatic {
         return Err(CaptureError::InvalidPayload(
             "manual Hermes registration requires persistent explicit catalog lineage".to_owned(),
         ));
     }
-    let candidate =
-        crate::provider::source_backed::HermesSourceCandidate::automatic(data_root, source.clone())
-            .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
+    let candidate = crate::provider::source_backed::HermesSourceCandidate::automatic_scoped(
+        data_root,
+        source.clone(),
+        source_scope,
+    )
+    .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
     Ok(HermesRegistration::new(
         source,
         selection,
+        SourceBackedSelectorAuthority::DiscoveredWinner,
+        crate::provider::source_backed::replacement::HermesDocumentAdapter::new(candidate),
+    ))
+}
+
+/// Reconstructs a Released automatic profile identity while scanning only the
+/// current configured database path.
+pub fn hermes_released_registration_scoped<L, S>(
+    source: ProviderSource,
+    data_root: &Path,
+    identity_path: &Path,
+    source_scope: SourceAnchorScope,
+) -> Result<
+    HermesRegistration<
+        impl ReplacementDocumentTree<
+            Lifecycle = L,
+            Spool = S,
+            RouteControl = crate::ProviderRouteControlExpectation,
+        >,
+    >,
+>
+where
+    L: CaptureLifecycleSink + 'static,
+    L::PinnedAppendBase: Clone + Send + Sync + 'static,
+    S: DocumentRecordSpool,
+{
+    let candidate = crate::provider::source_backed::HermesSourceCandidate::released_scoped(
+        data_root,
+        source.clone(),
+        identity_path,
+        source_scope,
+    )
+    .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
+    Ok(HermesRegistration::new(
+        source,
+        SourceBackedRouteSelection::Automatic,
         SourceBackedSelectorAuthority::DiscoveredWinner,
         crate::provider::source_backed::replacement::HermesDocumentAdapter::new(candidate),
     ))
@@ -102,10 +168,33 @@ where
     L::PinnedAppendBase: Clone + Send + Sync + 'static,
     S: DocumentRecordSpool,
 {
-    let candidate = crate::provider::source_backed::hermes_source_backed_explicit(
+    hermes_explicit_registration_scoped(source, data_root, anchor, SourceAnchorScope::Unqualified)
+}
+
+pub fn hermes_explicit_registration_scoped<L, S>(
+    source: ProviderSource,
+    data_root: &Path,
+    anchor: SourceAnchor,
+    source_scope: SourceAnchorScope,
+) -> Result<
+    HermesRegistration<
+        impl ReplacementDocumentTree<
+            Lifecycle = L,
+            Spool = S,
+            RouteControl = crate::ProviderRouteControlExpectation,
+        >,
+    >,
+>
+where
+    L: CaptureLifecycleSink + 'static,
+    L::PinnedAppendBase: Clone + Send + Sync + 'static,
+    S: DocumentRecordSpool,
+{
+    let candidate = crate::provider::source_backed::hermes_source_backed_explicit_scoped(
         data_root,
         source.path.clone(),
         anchor,
+        source_scope,
     )
     .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
     Ok(HermesRegistration::new(

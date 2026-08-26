@@ -18,9 +18,8 @@ use super::{
 use chrono::{DateTime, Utc};
 use ctx_history_capture_runtime::SourceBackedRouteErrorKind;
 use ctx_history_capture_runtime::{
-    CaptureLifecycleSink, ImmutableCaptureSnapshot, SourceBackedGenerationSink,
-    SourceBackedRecordRejectionDrafts, SourceBackedRevalidationTarget, SourceBackedRouteError,
-    SourceBackedRouteResult,
+    SourceBackedGenerationSink, SourceBackedRecordRejectionDrafts, SourceBackedRevalidationTarget,
+    SourceBackedRouteError, SourceBackedRouteResult,
 };
 use ctx_history_core::{
     CaptureProvider, CertifiedSource, CertifiedSourceDeletion, CertifiedSourceInventory,
@@ -66,13 +65,15 @@ use errors::{
     route_scan,
 };
 mod ownership;
-use ownership::base_sources_for_root;
+use ownership::{
+    base_sources_for_route, quarantined_member_is_route_local, route_local_disposition_counts,
+};
 mod membership;
 pub use membership::{JsonlFamilyAppendTrustContract, JsonlFamilyMembershipObservation};
 mod projector;
-pub use projector::JsonlFamilyProjector;
+pub use projector::{JsonlFamilyProjector, JsonlFamilyProjectorPreflightError};
 mod resident;
-use resident::FamilyResident;
+use resident::{AuthenticatedSourceObservation, FamilyResident};
 mod revalidation;
 #[cfg(any(test, feature = "test-support"))]
 pub use revalidation::set_before_jsonl_terminal_physical_revalidation_hook;
@@ -119,16 +120,6 @@ pub enum JsonlFamilyInventoryMode {
     /// must remain absent, and newly discovered members are deferred to the
     /// next refresh.
     FrozenOpeningAllowAdditions,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum JsonlFamilyBaseScope {
-    /// Compatibility mode for family adapters whose source identity is unique
-    /// across every route for that provider/schema tuple.
-    ProviderFamily,
-    /// Reuse only sources previously committed by this exact route. Adapters
-    /// whose explicit and automatic routes can overlap must select this mode.
-    Route,
 }
 
 /// One exact workset member opened beneath a retained provider root. Shared
@@ -265,10 +256,6 @@ pub trait JsonlFamilyAdapter: Send + Sync {
 
     fn inventory_mode(&self) -> JsonlFamilyInventoryMode {
         JsonlFamilyInventoryMode::Exact
-    }
-
-    fn base_scope(&self) -> JsonlFamilyBaseScope {
-        JsonlFamilyBaseScope::ProviderFamily
     }
 
     fn discover(
@@ -749,6 +736,11 @@ impl<E: JsonlFamilyError> JsonlFamilyLeaf<E> {
         if current == self.observation {
             return Ok((self.clone(), Arc::new(opened)));
         }
+        if self.observation.differs_only_by_change_identity(&current) {
+            let mut leaf = self.clone();
+            leaf.observation = current;
+            return Ok((leaf, Arc::new(opened)));
+        }
         if self.whole_record
             || current.length() <= self.observation.length()
             || !self.observation.admits_frozen_prefix_in(&current)
@@ -848,6 +840,15 @@ impl FamilyCheckpoint {
         }
     }
 
+    fn exact_admitted_eof_sha256(&self) -> Option<[u8; 32]> {
+        self.admitted_eof_sha256
+            .or_else(|| self.physical.admitted_eof_sha256())
+    }
+
+    fn authenticates_admitted_eof(&self) -> bool {
+        self.exact_admitted_eof_sha256().is_some() || self.physical.authenticates_admitted_eof()
+    }
+
     fn valid_for<R: JsonlFamilyRuntime>(
         &self,
         adapter: &dyn JsonlFamilyAdapter<Runtime = R>,
@@ -940,6 +941,8 @@ mod capture;
 use capture::capture;
 use capture::default_base_source_path;
 pub use capture::jsonl_family_driver;
+mod retirement;
+use retirement::retirement_absence_dependency;
 
 #[cfg(test)]
 #[path = "route/tests.rs"]

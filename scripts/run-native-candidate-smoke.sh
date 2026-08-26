@@ -11,7 +11,7 @@ Runs a bounded exact-byte ctx candidate smoke on native Linux, macOS, or
 FreeBSD. The six-argument release form verifies and installs the signed pair in
 the fixed layout, then proves that Core selects that companion. The four-
 argument form remains for bounded Core-only unit fixtures. The history fixture
-must be ctx-history-jsonl-v1. RESULT_PATH is written only after every step passes.
+must be ctx-history-jsonl-v2. RESULT_PATH is written only after every step passes.
 USAGE
 }
 
@@ -352,7 +352,7 @@ run_bounded "${root}/setup.out" "${root}/setup.err" \
 }
 core_manifest_required="${fresh_epoch_required}"
 if ! run_bounded "${root}/import.json" "${root}/import.err" ctx import \
-  --input-format ctx-history-jsonl-v1 \
+  --input-format ctx-history-jsonl-v2 \
   --path "${fixture}" \
   --no-daemon \
   --format json \
@@ -363,7 +363,7 @@ if ! run_bounded "${root}/import.json" "${root}/import.err" ctx import \
   fi
   core_manifest_required=true
   run_bounded "${root}/import.json" "${root}/import.err" ctx_source_refresh import \
-    --input-format ctx-history-jsonl-v1 \
+    --input-format ctx-history-jsonl-v2 \
     --path "${fixture}" \
     --format json \
     --progress none || {

@@ -254,6 +254,54 @@ pub fn resolve_lingma_discovery_authority(
         .ok_or(LingmaDiscoveryUnavailable::SourceNotSelected)
 }
 
+/// Reconstructs the installed-client catalog slot for a previously certified
+/// automatic path even after that identity path has moved. Missing candidates
+/// remain eligible here because the caller opens only its current configured
+/// no-follow path.
+pub fn resolve_lingma_released_identity_authority(
+    probes: &StaticProviderProbeCatalog,
+    context: &DiscoveryContext,
+    identity_path: &Path,
+) -> Result<LingmaDatabaseCatalogLineage, LingmaDiscoveryUnavailable> {
+    if matches!(context.platform(), DiscoveryPlatform::OtherUnix) {
+        return Err(LingmaDiscoveryUnavailable::UnsupportedPlatform {
+            platform: context.platform(),
+        });
+    }
+    let spec = provider_source_spec(CaptureProvider::Lingma)
+        .ok_or(LingmaDiscoveryUnavailable::ProviderSpecUnavailable)?;
+    let (report, discovered) = resolve_lingma_with_authority(probes, context, spec);
+    if !report.issues.is_empty() {
+        return Err(LingmaDiscoveryUnavailable::SelectorUnavailable);
+    }
+    if let Some(database) = discovered
+        .into_iter()
+        .find(|database| database.source.path == identity_path)
+    {
+        return Ok(database.catalog_lineage);
+    }
+
+    // The installed-client resolver intentionally suppresses missing shared
+    // defaults. A Released root needs to recover their immutable catalog slot
+    // after the database itself has moved, while still refusing arbitrary
+    // paths that were never selected by a client.
+    let vscode_default = context
+        .home()
+        .join(".lingma/vscode/sharedClientCache/cache/db/local.db");
+    if identity_path == vscode_default {
+        return Ok(LingmaDatabaseCatalogLineage::VscodeSharedDefault);
+    }
+    let jetbrains_current = context
+        .home()
+        .join(".qoder-cn/shared_client/cache/db/local.db");
+    let jetbrains_legacy = context.home().join(".lingma/cache/db/local.db");
+    if identity_path == jetbrains_current || identity_path == jetbrains_legacy {
+        return Ok(LingmaDatabaseCatalogLineage::JetBrainsSharedDefault);
+    }
+
+    Err(LingmaDiscoveryUnavailable::SourceNotSelected)
+}
+
 #[cfg(test)]
 mod tests {
     use std::{fs, path::Path};

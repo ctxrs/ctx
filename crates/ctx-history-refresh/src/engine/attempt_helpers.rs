@@ -1,20 +1,31 @@
+use super::read_model::SourceBackedRefreshFailureType;
 use super::*;
 
-pub(super) fn source_backed_refresh_failure_type(error: &anyhow::Error) -> Option<&'static str> {
+pub(super) fn source_backed_refresh_failure_type(
+    error: &anyhow::Error,
+) -> Option<SourceBackedRefreshFailureType> {
     if error.chain().any(|cause| {
         cause
             .downcast_ref::<ZeroSourcePublicationBlocked>()
             .is_some()
     }) {
-        return Some(TERMINAL_COVERAGE_ERROR_CODE);
+        return Some(SourceBackedRefreshFailureType::AllProviderTerminalCoverageUnavailable);
     }
     error.chain().find_map(|cause| {
         if let Some(route) = cause.downcast_ref::<SourceBackedRouteError>() {
             return match route.kind {
-                SourceBackedRouteErrorKind::Unsupported => Some("unsupported_schema"),
-                SourceBackedRouteErrorKind::InvalidSource => Some("malformed_source"),
-                SourceBackedRouteErrorKind::Unavailable => Some("source_unavailable"),
-                SourceBackedRouteErrorKind::SourceChanged => Some("source_changed"),
+                SourceBackedRouteErrorKind::Unsupported => {
+                    Some(SourceBackedRefreshFailureType::UnsupportedSchema)
+                }
+                SourceBackedRouteErrorKind::InvalidSource => {
+                    Some(SourceBackedRefreshFailureType::MalformedSource)
+                }
+                SourceBackedRouteErrorKind::Unavailable => {
+                    Some(SourceBackedRefreshFailureType::SourceUnavailable)
+                }
+                SourceBackedRouteErrorKind::SourceChanged => {
+                    Some(SourceBackedRefreshFailureType::SourceChanged)
+                }
                 SourceBackedRouteErrorKind::ResourceUnavailable
                 | SourceBackedRouteErrorKind::Internal => None,
             };
@@ -35,13 +46,21 @@ pub(super) fn source_backed_refresh_failure_type(error: &anyhow::Error) -> Optio
             .filter(|class| failed_routes.class_total(*class) != 0)
             .collect::<Vec<_>>();
         let [first] = present.as_slice() else {
-            return Some("source_failures");
+            return Some(SourceBackedRefreshFailureType::SourceFailures);
         };
         Some(match *first {
-            SourceBackedSourceFailureClass::Unavailable => "source_unavailable",
-            SourceBackedSourceFailureClass::SourceChanged => "source_changed",
-            SourceBackedSourceFailureClass::Unreadable => "malformed_source",
-            SourceBackedSourceFailureClass::Incompatible => "unsupported_schema",
+            SourceBackedSourceFailureClass::Unavailable => {
+                SourceBackedRefreshFailureType::SourceUnavailable
+            }
+            SourceBackedSourceFailureClass::SourceChanged => {
+                SourceBackedRefreshFailureType::SourceChanged
+            }
+            SourceBackedSourceFailureClass::Unreadable => {
+                SourceBackedRefreshFailureType::MalformedSource
+            }
+            SourceBackedSourceFailureClass::Incompatible => {
+                SourceBackedRefreshFailureType::UnsupportedSchema
+            }
         })
     })
 }

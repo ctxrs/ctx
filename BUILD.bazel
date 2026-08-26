@@ -75,6 +75,7 @@ CARGO_WORKSPACE_PACKAGE_DATA = [
     "//crates/ctx-companion-bridge:cargo_package_data",
     "//crates/ctx-cli:cargo_package_data",
     "//crates/ctx-cli-contract-tests:cargo_package_data",
+    "//crates/ctx-cli-qualification:cargo_package_data",
     "//crates/ctx-cli-presentation:cargo_package_data",
     "//crates/ctx-client-observability:cargo_package_data",
     "//crates/ctx-daemon-cli:cargo_package_data",
@@ -83,6 +84,7 @@ CARGO_WORKSPACE_PACKAGE_DATA = [
     "//crates/ctx-daemon-service:cargo_package_data",
     "//crates/ctx-history-capture:cargo_package_data",
     "//crates/ctx-history-capture-composition:cargo_package_data",
+    "//crates/ctx-history-capture-composition-qualification:cargo_package_data",
     "//crates/ctx-history-capture-model:cargo_package_data",
     "//crates/ctx-history-provider-native-jsonl:cargo_package_data",
     "//crates/ctx-history-providers-jsonl-shared:cargo_package_data",
@@ -105,6 +107,7 @@ CARGO_WORKSPACE_PACKAGE_DATA = [
     "//crates/ctx-history-ingest-application:cargo_package_data",
     "//crates/ctx-history-index-format:cargo_package_data",
     "//crates/ctx-history-index:cargo_package_data",
+    "//crates/ctx-history-index-qualification:cargo_package_data",
     "//crates/ctx-history-index-generation:cargo_package_data",
     "//crates/ctx-history-index-query:cargo_package_data",
     "//crates/ctx-history-snapshot-reader:cargo_package_data",
@@ -117,6 +120,7 @@ CARGO_WORKSPACE_PACKAGE_DATA = [
     "//crates/ctx-history-refresh:cargo_package_data",
     "//crates/ctx-history-refresh-execution:cargo_package_data",
     "//crates/ctx-history-source-discovery:cargo_package_data",
+    "//crates/ctx-history-source-discovery-qualification:cargo_package_data",
     "//crates/ctx-history-source-io:cargo_package_data",
     "//crates/ctx-history-source-sqlite:cargo_package_data",
     "//crates/ctx-managed-pair-engine:cargo_package_data",
@@ -248,6 +252,15 @@ filegroup(
 filegroup(
     name = "public_test_fixtures",
     srcs = glob(["tests/fixtures/**"]),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "gemini_resume_test_fixtures",
+    srcs = [
+        "tests/fixtures/provider-history/gemini/v0.52.0-resume/.gemini/tmp/workspace/chats/session-2026-08-24T18-33-65900000.jsonl",
+        "tests/fixtures/provider-history/gemini/v0.52.0-resume/.gemini/tmp/workspace/chats/session-2026-08-24T18-34-65900000.jsonl",
+    ],
     visibility = ["//visibility:public"],
 )
 
@@ -758,8 +771,10 @@ py_test(
         "//crates/ctx-cli-contract-tests:cargo_package_data",
         "//crates/ctx-history-capture:cargo_package_data",
         "//crates/ctx-history-capture-composition:cargo_package_data",
+        "//crates/ctx-history-capture-composition-qualification:cargo_package_data",
         "//crates/ctx-history-read-application:cargo_package_data",
         "//crates/ctx-history-source-discovery:cargo_package_data",
+        "//crates/ctx-history-source-discovery-qualification:cargo_package_data",
     ] + glob(["docs/**"]),
 )
 
@@ -1257,6 +1272,8 @@ non_rust_gate(
         "//crates/ctx-history-capture:provider_architecture_sources",
         "//crates/ctx-history-provider-native-jsonl:BUILD.bazel",
         "//crates/ctx-history-provider-native-jsonl:Cargo.toml",
+        "//crates/ctx-history-source-discovery-qualification:BUILD.bazel",
+        "//crates/ctx-history-source-discovery-qualification:Cargo.toml",
         "//crates/ctx-history-providers-sqlite-selected:BUILD.bazel",
         "//crates/ctx-history-providers-sqlite-selected:Cargo.toml",
     ],

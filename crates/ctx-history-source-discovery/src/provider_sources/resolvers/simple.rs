@@ -117,6 +117,14 @@ fn resolve_codex(
     context: &DiscoveryContext,
     spec: &ProviderSourceSpec,
 ) -> DiscoveryReport {
+    resolve_inferred_codex(probes, context, spec)
+}
+
+fn resolve_inferred_codex(
+    probes: &StaticProviderProbeCatalog,
+    context: &DiscoveryContext,
+    spec: &ProviderSourceSpec,
+) -> DiscoveryReport {
     let root = match context.env("CODEX_HOME").and_then(OsStr::to_str) {
         Some("") | None => match supported_default(context, spec) {
             Ok(()) => context.home().join(".codex"),
@@ -140,21 +148,69 @@ fn resolve_codex(
     };
 
     let mut report = DiscoveryReport::default();
+    add_codex_root_sources(probes, &mut report, spec, &root);
+    report
+}
+
+pub fn released_provider_home(
+    context: &DiscoveryContext,
+    provider: CaptureProvider,
+) -> Option<PathBuf> {
+    match provider {
+        CaptureProvider::Claude => match context.env("CLAUDE_CONFIG_DIR") {
+            Some(value) if !value.is_empty() => {
+                let path = PathBuf::from(value);
+                path.is_absolute().then_some(path)
+            }
+            _ if context.home_directory_available()
+                && context.platform() != DiscoveryPlatform::OtherUnix =>
+            {
+                Some(context.home().join(".claude"))
+            }
+            _ => None,
+        },
+        CaptureProvider::Codex => match context.env("CODEX_HOME").and_then(OsStr::to_str) {
+            Some("") | None
+                if context.home_directory_available()
+                    && context.platform() != DiscoveryPlatform::OtherUnix =>
+            {
+                Some(context.home().join(".codex"))
+            }
+            Some(value) => resolve_from_cwd(context, PathBuf::from(value))
+                .filter(|path| matches!(source_path_kind(path), Ok(SourcePathKind::Directory))),
+            None => None,
+        },
+        _ => None,
+    }
+}
+
+fn add_codex_root_sources(
+    probes: &StaticProviderProbeCatalog,
+    report: &mut DiscoveryReport,
+    spec: &ProviderSourceSpec,
+    root: &Path,
+) {
     for tree in [root.join("sessions"), root.join("archived_sessions")] {
-        add_source(probes, &mut report, spec, tree, "codex_session_jsonl_tree");
+        add_source(probes, report, spec, tree, "codex_session_jsonl_tree");
     }
     add_source(
         probes,
-        &mut report,
+        report,
         spec,
         root.join("history.jsonl"),
         "codex_history_jsonl",
     );
-
-    report
 }
 
 fn resolve_claude(
+    probes: &StaticProviderProbeCatalog,
+    context: &DiscoveryContext,
+    spec: &ProviderSourceSpec,
+) -> DiscoveryReport {
+    resolve_inferred_claude(probes, context, spec)
+}
+
+fn resolve_inferred_claude(
     probes: &StaticProviderProbeCatalog,
     context: &DiscoveryContext,
     spec: &ProviderSourceSpec,

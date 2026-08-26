@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::{BTreeMap, BTreeSet};
 
 impl GenerationManifest {
     #[cfg(any(test, feature = "test-support"))]
@@ -18,9 +19,47 @@ impl GenerationManifest {
     }
 
     pub fn from_parts_with_record_aggregates(
+        sources: Vec<CertifiedSource>,
+        core_record_aggregates: Vec<SourceCoreRecordAggregate>,
+        source_routes: Vec<SourceRouteSnapshot>,
+    ) -> Result<Self> {
+        Self::from_parts_with_record_aggregates_and_provider_roots(
+            sources,
+            core_record_aggregates,
+            source_routes,
+            true,
+            provider_source_config_digest(true, &[]),
+            Vec::new(),
+        )
+    }
+
+    pub fn from_parts_with_record_aggregates_and_provider_roots(
+        sources: Vec<CertifiedSource>,
+        core_record_aggregates: Vec<SourceCoreRecordAggregate>,
+        source_routes: Vec<SourceRouteSnapshot>,
+        automatic_provider_discovery: bool,
+        provider_root_config_digest: String,
+        provider_roots: Vec<AppliedProviderRoot>,
+    ) -> Result<Self> {
+        Self::from_parts_with_record_aggregates_and_provider_roots_and_detached_authorities(
+            sources,
+            core_record_aggregates,
+            source_routes,
+            automatic_provider_discovery,
+            provider_root_config_digest,
+            provider_roots,
+            Vec::new(),
+        )
+    }
+
+    pub fn from_parts_with_record_aggregates_and_provider_roots_and_detached_authorities(
         mut sources: Vec<CertifiedSource>,
         mut core_record_aggregates: Vec<SourceCoreRecordAggregate>,
         mut source_routes: Vec<SourceRouteSnapshot>,
+        automatic_provider_discovery: bool,
+        provider_root_config_digest: String,
+        mut provider_roots: Vec<AppliedProviderRoot>,
+        mut detached_released_provider_roots: Vec<DetachedReleasedProviderRootAuthority>,
     ) -> Result<Self> {
         sources.sort_by(|left, right| {
             source_sort_key(left.observation().source())
@@ -33,6 +72,56 @@ impl GenerationManifest {
             return Err(IndexError::NonCanonicalManifestSources);
         }
         source_routes.sort_by(|left, right| left.route_identity.cmp(&right.route_identity));
+        let retained_routes = source_routes
+            .iter()
+            .map(|route| {
+                (
+                    route.route_identity().clone(),
+                    route
+                        .sources()
+                        .iter()
+                        .map(source_token)
+                        .collect::<BTreeSet<_>>(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        provider_roots = provider_roots
+            .into_iter()
+            .map(|root| {
+                let routes = root
+                    .routes()
+                    .iter()
+                    .filter(|route| retained_routes.contains_key(*route))
+                    .cloned()
+                    .collect();
+                let exact_source_memberships = root
+                    .exact_source_memberships()
+                    .iter()
+                    .filter_map(|membership| {
+                        let route_sources = retained_routes.get(membership.route_identity())?;
+                        let source_tokens = membership
+                            .source_tokens()
+                            .iter()
+                            .filter(|source| route_sources.contains(*source))
+                            .cloned()
+                            .collect();
+                        Some(AppliedProviderRootSourceMembership::exact(
+                            membership.route_identity().clone(),
+                            source_tokens,
+                        ))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                AppliedProviderRoot::with_source_identity_and_connector_binding(
+                    root.definition().clone(),
+                    root.source_identity(),
+                    root.connector_binding().cloned(),
+                    routes,
+                )
+                .and_then(|root| root.with_exact_source_memberships(exact_source_memberships))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        provider_roots.sort_by(|left, right| left.definition.id.cmp(&right.definition.id));
+        detached_released_provider_roots.sort_by(|left, right| left.id().cmp(right.id()));
         core_record_aggregates.sort_by(|left, right| {
             left.source_identity_digest
                 .cmp(&right.source_identity_digest)
@@ -60,6 +149,10 @@ impl GenerationManifest {
             sources,
             core_record_aggregates,
             source_routes,
+            automatic_provider_discovery,
+            provider_root_config_digest,
+            provider_roots,
+            detached_released_provider_roots,
         };
         manifest.validate_contract()?;
         Ok(manifest)
@@ -90,6 +183,10 @@ impl GenerationManifest {
                 .iter()
                 .zip(&other.source_routes)
                 .all(|(left, right)| left.exact_snapshot_eq(right))
+            && self.automatic_provider_discovery == other.automatic_provider_discovery
+            && self.provider_root_config_digest == other.provider_root_config_digest
+            && self.provider_roots == other.provider_roots
+            && self.detached_released_provider_roots == other.detached_released_provider_roots
     }
 
     pub(crate) fn apply_validated_source_replacements(
@@ -155,6 +252,10 @@ impl GenerationManifest {
             sources,
             core_record_aggregates: aggregates,
             source_routes: self.source_routes.clone(),
+            automatic_provider_discovery: self.automatic_provider_discovery,
+            provider_root_config_digest: self.provider_root_config_digest.clone(),
+            provider_roots: self.provider_roots.clone(),
+            detached_released_provider_roots: self.detached_released_provider_roots.clone(),
         })
     }
 
@@ -172,6 +273,75 @@ impl GenerationManifest {
             .and_then(|index| self.source_routes.get(index))
     }
 
+    pub fn provider_root_config_digest(&self) -> &str {
+        &self.provider_root_config_digest
+    }
+
+    pub const fn automatic_provider_discovery(&self) -> bool {
+        self.automatic_provider_discovery
+    }
+
+    pub fn provider_roots(&self) -> &[AppliedProviderRoot] {
+        &self.provider_roots
+    }
+
+    /// Non-selectable released authority retained for a compatible future
+    /// re-add after an active root has been removed.
+    pub fn detached_released_provider_roots(&self) -> &[DetachedReleasedProviderRootAuthority] {
+        &self.detached_released_provider_roots
+    }
+
+    pub fn provider_root(&self, id: &str) -> Option<&AppliedProviderRoot> {
+        self.provider_roots
+            .binary_search_by(|candidate| candidate.definition.id.as_str().cmp(id))
+            .ok()
+            .and_then(|index| self.provider_roots.get(index))
+    }
+
+    /// Resolves user-facing root/group aliases only through this immutable
+    /// generation. Root and group selectors form one union; all other search
+    /// filters remain independent intersections.
+    pub fn provider_root_source_tokens(
+        &self,
+        root_ids: &[String],
+        source_groups: &[String],
+    ) -> Result<Vec<String>> {
+        if let Some(unknown) = root_ids.iter().find(|id| self.provider_root(id).is_none()) {
+            return Err(IndexError::UnknownProviderRootSelector(unknown.clone()));
+        }
+        if let Some(unknown) = source_groups.iter().find(|group| {
+            !self
+                .provider_roots
+                .iter()
+                .any(|root| root.definition.group.as_ref() == Some(*group))
+        }) {
+            return Err(IndexError::UnknownProviderRootGroup(unknown.clone()));
+        }
+        let mut tokens = Vec::new();
+        for root in self.provider_roots.iter().filter(|root| {
+            root_ids.iter().any(|id| id == &root.definition.id)
+                || root
+                    .definition
+                    .group
+                    .as_ref()
+                    .is_some_and(|group| source_groups.contains(group))
+        }) {
+            for route_id in root.routes() {
+                let Some(route) = self.source_route(route_id) else {
+                    continue;
+                };
+                if let Some(exact) = root.exact_source_tokens_for_route(route_id) {
+                    tokens.extend(exact.iter().cloned());
+                } else {
+                    tokens.extend(route.sources().iter().map(source_token));
+                }
+            }
+        }
+        tokens.sort();
+        tokens.dedup();
+        Ok(tokens)
+    }
+
     pub(crate) fn validate_contract(&self) -> Result<()> {
         if self.sources.windows(2).any(|pair| {
             source_sort_key(pair[0].observation().source())
@@ -185,6 +355,106 @@ impl GenerationManifest {
             .any(|pair| pair[0].route_identity() >= pair[1].route_identity())
         {
             return Err(IndexError::NonCanonicalSourceRoutes);
+        }
+        if !is_sha256_hex(&self.provider_root_config_digest) {
+            return Err(IndexError::InvalidProviderRootConfigDigest);
+        }
+        if self.provider_roots.len() > MAX_CONFIGURED_PROVIDER_ROOTS
+            || self
+                .provider_roots
+                .windows(2)
+                .any(|pair| pair[0].definition.id >= pair[1].definition.id)
+        {
+            return Err(IndexError::InvalidProviderRoots(
+                "root definitions are not bounded, strictly sorted, and unique".to_owned(),
+            ));
+        }
+        if self.detached_released_provider_roots.len() > MAX_DETACHED_RELEASED_PROVIDER_ROOTS
+            || self
+                .detached_released_provider_roots
+                .windows(2)
+                .any(|pair| pair[0].id() >= pair[1].id())
+        {
+            return Err(IndexError::InvalidProviderRoots(
+                "detached released root authorities are not bounded, strictly sorted, and unique"
+                    .to_owned(),
+            ));
+        }
+        for authority in &self.detached_released_provider_roots {
+            authority.validate_contract()?;
+            if self.provider_root(authority.id()).is_some() {
+                return Err(IndexError::InvalidProviderRoots(format!(
+                    "detached released root authority {} remains active",
+                    authority.id()
+                )));
+            }
+        }
+        let definitions = self
+            .provider_roots
+            .iter()
+            .map(|root| root.definition.clone())
+            .collect::<Vec<_>>();
+        if let Some((left, right)) = definitions.iter().enumerate().find_map(|(index, left)| {
+            definitions[index + 1..]
+                .iter()
+                .find(|right| left.openhands_selected_histories_overlap(right))
+                .map(|right| (left, right))
+        }) {
+            return Err(IndexError::InvalidProviderRoots(format!(
+                "OpenHands roots {} and {} have overlapping legacy/current paths",
+                left.id, right.id
+            )));
+        }
+        if provider_source_config_digest(self.automatic_provider_discovery, &definitions)
+            != self.provider_root_config_digest
+        {
+            return Err(IndexError::InvalidProviderRootConfigDigest);
+        }
+        let mut provider_owned_routes =
+            BTreeMap::<SourceRouteIdentity, Vec<Option<BTreeSet<String>>>>::new();
+        for root in &self.provider_roots {
+            root.validate_contract()?;
+            for route_id in root.routes() {
+                let Some(route) = self.source_route(route_id) else {
+                    return Err(IndexError::ProviderRootRouteNotRetained {
+                        root_id: root.definition.id.clone(),
+                        route_id: route_id.as_str().to_owned(),
+                    });
+                };
+                let exact = root.exact_source_tokens_for_route(route_id);
+                if let Some(exact) = exact {
+                    let route_sources = route
+                        .sources()
+                        .iter()
+                        .map(source_token)
+                        .collect::<BTreeSet<_>>();
+                    for source in exact {
+                        if !route_sources.contains(source) {
+                            return Err(IndexError::InvalidProviderRoots(format!(
+                                "root {} exact source membership is absent from route {}",
+                                root.definition.id,
+                                route_id.as_str()
+                            )));
+                        }
+                    }
+                }
+                provider_owned_routes
+                    .entry(route_id.clone())
+                    .or_default()
+                    .push(exact.map(|sources| sources.iter().cloned().collect()));
+            }
+        }
+        for (route_id, owners) in provider_owned_routes {
+            for (index, left) in owners.iter().enumerate() {
+                if owners[index + 1..].iter().any(|right| match (left, right) {
+                    (Some(left), Some(right)) => !left.is_disjoint(right),
+                    _ => true,
+                }) {
+                    return Err(IndexError::SourceRouteOwnedByMultipleProviderRoots {
+                        route_id: route_id.as_str().to_owned(),
+                    });
+                }
+            }
         }
         if self
             .core_record_aggregates

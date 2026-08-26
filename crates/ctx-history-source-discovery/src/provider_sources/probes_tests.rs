@@ -482,6 +482,59 @@ fn oversized_directories_exhaust_before_order_can_change_the_result() {
 }
 
 #[test]
+fn auggie_probe_matches_the_adapter_flat_directory_selections() {
+    let direct = tempdir();
+    fs::write(direct.path().join("direct.json"), b"{}\n").unwrap();
+    assert_eq!(has_auggie_session_json(direct.path()), BoundedProbe::Found);
+
+    let parent = tempdir();
+    fs::create_dir(parent.path().join("sessions")).unwrap();
+    fs::write(parent.path().join("sessions/child.json"), b"{}\n").unwrap();
+    assert_eq!(has_auggie_session_json(parent.path()), BoundedProbe::Found);
+
+    let nested = tempdir();
+    fs::create_dir(nested.path().join("nested")).unwrap();
+    fs::write(nested.path().join("nested/decoy.json"), b"{}\n").unwrap();
+    assert_eq!(
+        has_auggie_session_json(nested.path()),
+        BoundedProbe::NotFound
+    );
+
+    let shadowed = tempdir();
+    fs::write(shadowed.path().join("ignored.json"), b"{}\n").unwrap();
+    fs::create_dir(shadowed.path().join("sessions")).unwrap();
+    assert_eq!(
+        has_auggie_session_json(shadowed.path()),
+        BoundedProbe::NotFound
+    );
+}
+
+#[test]
+fn auggie_probe_preserves_the_direct_directory_entry_bound() {
+    let temp = tempdir();
+    for index in 0..=MAX_DIRECT_DIRECTORY_ENTRIES {
+        fs::write(temp.path().join(format!("decoy-{index:04}")), b"").unwrap();
+    }
+    assert_eq!(
+        has_auggie_session_json(temp.path()),
+        BoundedProbe::BudgetExhausted
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn auggie_probe_fails_closed_for_a_link_in_the_selected_flat_directory() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempdir();
+    fs::write(temp.path().join("session.json"), b"{}\n").unwrap();
+    fs::create_dir(temp.path().join("target")).unwrap();
+    symlink(temp.path().join("target"), temp.path().join("linked")).unwrap();
+
+    assert_eq!(has_auggie_session_json(temp.path()), BoundedProbe::IoError);
+}
+
+#[test]
 fn cursor_probe_accepts_every_exact_layout_entry_point() {
     let temp = tempdir();
     let data_root = temp.path().join(".cursor");

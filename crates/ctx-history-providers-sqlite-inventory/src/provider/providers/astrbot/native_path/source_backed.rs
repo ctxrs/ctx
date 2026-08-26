@@ -26,7 +26,7 @@ const INVENTORY_AUTHORITY_KEY: &str = "winner-and-launcher-instances-v0";
 const INVENTORY_REVISION_KIND: &str = "astrbot-bounded-discovery-v0";
 #[cfg(test)]
 const INVENTORY_DISCOVERY_REVISION: &str = "astrbot-winner-launcher-inventory-v0";
-pub(crate) const PARSER_REVISION: &str = "astrbot-source-backed-core-v2-neutral-core";
+pub(crate) const PARSER_REVISION: &str = "astrbot-source-backed-core-v3-record-rejections";
 const SELECTED_SOURCE_NAMESPACE: &str = "astrbot.selected-core";
 const LAUNCHER_SOURCE_NAMESPACE: &str = "astrbot.launcher-instance";
 const SESSION_NAMESPACE: &str = "astrbot.session";
@@ -66,3 +66,18 @@ pub(crate) enum AstrBotSourceBackedErrorV0 {
 }
 
 pub(crate) type AstrBotSourceBackedResultV0<T> = std::result::Result<T, AstrBotSourceBackedErrorV0>;
+
+fn astrbot_row_projection_error(error: &AstrBotSourceBackedErrorV0) -> bool {
+    matches!(
+        error,
+        AstrBotSourceBackedErrorV0::Projection(ProjectionContractError::EmptyField {
+            field: "typed_key_utf8",
+        }) | AstrBotSourceBackedErrorV0::Projection(ProjectionContractError::FieldTooLarge {
+            field: "typed_key_utf8" | "typed_composite_key",
+            ..
+        }) | AstrBotSourceBackedErrorV0::CoreRecord(CoreRecordError::FieldTooLarge {
+            field: "normalized_body" | "structured_content" | "selected_content",
+            ..
+        })
+    )
+}

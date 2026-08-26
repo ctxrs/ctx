@@ -264,10 +264,19 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let executable = temp.path().join("ctx");
         fs::copy("/bin/sleep", &executable).unwrap();
-        let mut child = std::process::Command::new(&executable)
-            .arg("30")
-            .spawn()
-            .unwrap();
+        let spawn_deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        let mut child = loop {
+            match std::process::Command::new(&executable).arg("30").spawn() {
+                Ok(child) => break child,
+                Err(error)
+                    if error.raw_os_error() == Some(libc::ETXTBSY)
+                        && std::time::Instant::now() < spawn_deadline =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(error) => panic!("spawn copied test executable: {error}"),
+            }
+        };
         let lock = json!({
             "pid": child.id(),
             "binary": executable,

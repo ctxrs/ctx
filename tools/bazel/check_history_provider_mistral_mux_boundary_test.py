@@ -47,25 +47,31 @@ BUILD = "\n".join(
 CAPTURE_MANIFEST = "[dependencies]\n"
 CAPTURE_BUILD = ""
 PROVIDER_MODULES = "mod codex;\n"
-SOURCE_BACKED = (
-    "use ctx_history_provider_mistral_mux::{mistral_vibe_jsonl_adapter, "
-    "mux_jsonl_adapter};\n"
-)
+SOURCE_BACKED = """\
+use ctx_history_provider_mistral_mux::{
+    mistral_vibe_jsonl_adapter_with_source_root_lineage, mux_jsonl_adapter_with_source_root_lineage,
+};
+"""
 REGISTRATION = """\
-mistral_vibe_jsonl_adapter::<CaptureProviderRuntime>();
-mux_jsonl_adapter::<CaptureProviderRuntime>();
+mistral_vibe_jsonl_adapter_with_source_root_lineage::<CaptureProviderRuntime>(
+            source_root_lineage,
+        );
+mux_jsonl_adapter_with_source_root_lineage::<CaptureProviderRuntime>(source_root_lineage);
 """
 SOURCE_FIXTURES = {
     "lib.rs": """\
 mod mistral_vibe;
 mod mux;
 pub fn mistral_vibe_jsonl_adapter<B>(value: B) -> ProviderJsonlRuntime<B> { todo!() }
+pub fn mistral_vibe_jsonl_adapter_with_source_root_lineage<B>(value: B) -> ProviderJsonlRuntime<B> { todo!() }
 pub fn mux_jsonl_adapter<B>() -> ProviderJsonlRuntime<B> { todo!() }
+pub fn mux_jsonl_adapter_with_source_root_lineage<B>(value: B) -> ProviderJsonlRuntime<B> { todo!() }
 """,
     "mistral_vibe.rs": "CaptureProvider::MistralVibe\n",
     "mistral_vibe/native_path.rs": "mistral-vibe-content-occurrence-v1\n",
     "mistral_vibe/native_path/source_backed.rs": "ProviderBaseEventLookup<B>\n",
     "mistral_vibe/native_path/source_backed/activity.rs": "",
+    "mistral_vibe/native_path/source_backed/tests.rs": "",
     "mistral_vibe/schema.rs": "",
     "mistral_vibe/source.rs": "",
     "mux.rs": "CaptureProvider::Mux\n",
@@ -145,13 +151,28 @@ class MistralMuxBoundaryMutationTests(unittest.TestCase):
         with self.assertRaisesRegex(BoundaryError, "source ownership drifted"):
             self.validate()
 
+    def test_mistral_source_backed_tests_are_required(self) -> None:
+        source = (
+            self.manifest.parent
+            / "src/mistral_vibe/native_path/source_backed/tests.rs"
+        )
+        source.unlink()
+        with self.assertRaisesRegex(BoundaryError, "source ownership drifted"):
+            self.validate()
+
     def test_capture_cannot_reclaim_mux_module(self) -> None:
         self.provider_modules.write_text("mod mux;\n", encoding="utf-8")
         with self.assertRaisesRegex(BoundaryError, "capture still owns"):
             self.validate()
 
-    def test_capture_registration_must_bind_runtime(self) -> None:
-        self.registration.write_text("mux_jsonl_adapter();\n", encoding="utf-8")
+    def test_capture_registration_must_bind_runtime_and_root_lineage(self) -> None:
+        self.registration.write_text(
+            REGISTRATION.replace(
+                "mux_jsonl_adapter_with_source_root_lineage::<CaptureProviderRuntime>(source_root_lineage)",
+                "mux_jsonl_adapter::<CaptureProviderRuntime>()",
+            ),
+            encoding="utf-8",
+        )
         with self.assertRaisesRegex(BoundaryError, "thin registration drifted"):
             self.validate()
 

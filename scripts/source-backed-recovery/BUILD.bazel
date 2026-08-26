@@ -39,7 +39,7 @@ cc_binary(
 
 SOURCE_BACKED_RECOVERY_FAULT_RUNFILES = [
     ":libctx_source_recovery_fault.so",
-    "//crates/ctx-history-index:source_backed_recovery_tests",
+    "//crates/ctx-history-index-qualification:source_backed_recovery_tests",
 ]
 
 SOURCE_BACKED_RECOVERY_FAULT_TAGS = [
@@ -57,7 +57,7 @@ sh_test(
     name = "inactive_generation_and_atomic_pointer_process_death_matrix",
     srcs = ["run-bazel-linux-fault-test.sh"],
     args = [
-        "$(rootpath //crates/ctx-history-index:source_backed_recovery_tests)",
+        "$(rootpath //crates/ctx-history-index-qualification:source_backed_recovery_tests)",
         "$(rootpath :libctx_source_recovery_fault.so)",
         "inactive_generation_and_atomic_pointer_process_death_matrix",
     ],
@@ -71,7 +71,7 @@ sh_test(
     name = "retry_after_pre_pointer_crash_reclaims_inactive_generation",
     srcs = ["run-bazel-linux-fault-test.sh"],
     args = [
-        "$(rootpath //crates/ctx-history-index:source_backed_recovery_tests)",
+        "$(rootpath //crates/ctx-history-index-qualification:source_backed_recovery_tests)",
         "$(rootpath :libctx_source_recovery_fault.so)",
         "retry_after_pre_pointer_crash_reclaims_inactive_generation",
     ],
@@ -85,7 +85,7 @@ sh_test(
     name = "injected_enospc_and_write_sync_failures_preserve_previous_generation",
     srcs = ["run-bazel-linux-fault-test.sh"],
     args = [
-        "$(rootpath //crates/ctx-history-index:source_backed_recovery_tests)",
+        "$(rootpath //crates/ctx-history-index-qualification:source_backed_recovery_tests)",
         "$(rootpath :libctx_source_recovery_fault.so)",
         "injected_enospc_and_write_sync_failures_preserve_previous_generation",
     ],
@@ -99,9 +99,9 @@ sh_test(
     name = "actual_bounded_filesystem_enospc_preserves_previous_generation",
     srcs = ["run-bounded-enospc-test.sh"],
     args = [
-        "$(rootpath //crates/ctx-history-index:source_backed_recovery_tests)",
+        "$(rootpath //crates/ctx-history-index-qualification:source_backed_recovery_tests)",
     ],
-    data = ["//crates/ctx-history-index:source_backed_recovery_tests"],
+    data = ["//crates/ctx-history-index-qualification:source_backed_recovery_tests"],
     size = "medium",
     tags = [
         "local",
@@ -118,7 +118,7 @@ sh_test(
     name = "writer_reopen_reclaims_abandoned_atomic_write_files",
     srcs = ["run-bazel-linux-fault-test.sh"],
     args = [
-        "$(rootpath //crates/ctx-history-index:source_backed_recovery_tests)",
+        "$(rootpath //crates/ctx-history-index-qualification:source_backed_recovery_tests)",
         "$(rootpath :libctx_source_recovery_fault.so)",
         "writer_reopen_reclaims_abandoned_atomic_write_files",
     ],
@@ -132,7 +132,7 @@ sh_test(
     name = "retry_republishes_a_reclaimed_manifest_before_pointer_publication",
     srcs = ["run-bazel-linux-fault-test.sh"],
     args = [
-        "$(rootpath //crates/ctx-history-index:source_backed_recovery_tests)",
+        "$(rootpath //crates/ctx-history-index-qualification:source_backed_recovery_tests)",
         "$(rootpath :libctx_source_recovery_fault.so)",
         "retry_republishes_a_reclaimed_manifest_before_pointer_publication",
     ],

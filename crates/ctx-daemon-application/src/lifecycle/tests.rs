@@ -138,6 +138,19 @@ fn test_config() -> DaemonConfigSnapshot {
 }
 
 #[test]
+fn active_same_binary_daemon_is_reused_without_supervisor_reconciliation() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let lock = ctx_daemon_runtime::DaemonLock::acquire(temp.path())?
+        .expect("test process should acquire daemon ownership");
+
+    assert!(active_daemon_matches_current_executable(temp.path())?);
+
+    drop(lock);
+    assert!(!active_daemon_matches_current_executable(temp.path())?);
+    Ok(())
+}
+
+#[test]
 fn finite_core_worker_launch_is_forced_internal_and_has_no_persistent_timer() {
     let launch = configured_finite_core_worker_command(
         Path::new("/managed/ctx"),

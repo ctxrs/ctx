@@ -121,13 +121,32 @@ fn protocol_v3_mcp_request_and_response_are_sufficient() {
 
 #[test]
 fn protocol_v3_cli_request_is_typed_and_launches_directly() {
-    let fixture = Fixture::new(b"#!/bin/sh\n[ \"$1\" = paid ] && [ \"$2\" = action ]\n");
+    let prior_endpoint = std::env::var_os("CTX_ANALYTICS_ENDPOINT");
+    std::env::set_var(
+        "CTX_ANALYTICS_ENDPOINT",
+        "https://ambient.example.test/private",
+    );
+    struct Restore(Option<std::ffi::OsString>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            if let Some(value) = &self.0 {
+                std::env::set_var("CTX_ANALYTICS_ENDPOINT", value);
+            } else {
+                std::env::remove_var("CTX_ANALYTICS_ENDPOINT");
+            }
+        }
+    }
+    let _restore = Restore(prior_endpoint);
+
+    let fixture = Fixture::new(
+        b"#!/bin/sh\n[ \"$1\" = paid ] && [ \"$2\" = action ] && [ \"$CTX_ANALYTICS_ENABLED\" = false ] && [ -z \"${CTX_ANALYTICS_ENDPOINT+x}\" ]\n",
+    );
+    let mut request = CliRequest::new(vec!["paid".into(), "action".into()]);
+    request
+        .environment_mut()
+        .set(EnvironmentKey::AnalyticsEnabled, "false");
     let output = CompanionBridge::default()
-        .launch_cli(
-            &fixture.companion(),
-            CliRequest::new(vec!["paid".into(), "action".into()]),
-            &CancellationToken::new(),
-        )
+        .launch_cli(&fixture.companion(), request, &CancellationToken::new())
         .unwrap();
     assert_eq!(output.exit_class(), ExitClass::Success);
     assert_eq!(
@@ -275,7 +294,7 @@ fn relative_and_directory_pro_paths_have_typed_errors() {
 #[test]
 fn typed_environment_allowlist_is_preserved_and_ambient_is_cleared() {
     let fixture = Fixture::new(
-        b"#!/usr/bin/python3\nimport os\nnames=['PATH','LANG','HOME','TERM','COLORTERM','NO_COLOR','CLICOLOR','CLICOLOR_FORCE','CI']\nvalues=[os.getenv(name,'<missing>') for name in names]\nos.write(1, '\\0'.join(values).encode())\n",
+        b"#!/usr/bin/python3\nimport os\nnames=['PATH','LANG','HOME','TERM','COLORTERM','NO_COLOR','CLICOLOR','CLICOLOR_FORCE','CI','CTX_ANALYTICS_ENABLED']\nvalues=[os.getenv(name,'<missing>') for name in names]\nos.write(1, '\\0'.join(values).encode())\n",
     );
     let mut request = McpRequest::new(Vec::new());
     request
@@ -291,7 +310,8 @@ fn typed_environment_allowlist_is_preserved_and_ambient_is_cleared() {
         .set(EnvironmentKey::NoColor, OsStr::new("0"))
         .set(EnvironmentKey::CliColor, OsStr::new("1"))
         .set(EnvironmentKey::CliColorForce, OsStr::new("1"))
-        .set(EnvironmentKey::Ci, OsStr::new("true"));
+        .set(EnvironmentKey::Ci, OsStr::new("true"))
+        .set(EnvironmentKey::AnalyticsEnabled, OsStr::new("false"));
     let output = launch_mcp_with(
         &fixture,
         request,
@@ -312,6 +332,7 @@ fn typed_environment_allowlist_is_preserved_and_ambient_is_cleared() {
             b"1",
             b"1",
             b"true",
+            b"false",
         ]
     );
 }

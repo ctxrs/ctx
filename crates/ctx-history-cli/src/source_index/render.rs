@@ -65,26 +65,13 @@ pub(super) fn search_json(
     refresh_source_count: usize,
     query_duration: Duration,
 ) -> Result<Value> {
-    let copied_lineages = (0..collection.result_window.hits.len())
-        .map(|_| {
-            json!({
-                "schema_version": 1,
-                "observed_count": 0,
-                "returned": 0,
-                "occurrences": [],
-                "relationship_counts": {},
-                "truncated": false,
-            })
-        })
-        .collect::<Vec<_>>();
-    search_json_with_lineages(
+    search_json_document(
         request,
         data_root,
         index,
         collection,
         filters,
         presentations,
-        &copied_lineages,
         RefreshArg::Off,
         refresh_status,
         refresh_source_count,
@@ -93,14 +80,13 @@ pub(super) fn search_json(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn search_json_with_lineages(
+pub(super) fn search_json_document(
     request: &SourceSearchRequest,
     data_root: &Path,
     index: &VerifiedIndex,
     collection: &SearchCollection,
     filters: &EventSearchFilters,
     presentations: &[SearchPresentation],
-    copied_lineages: &[Value],
     refresh_mode: RefreshArg,
     refresh_status: &str,
     refresh_source_count: usize,
@@ -123,7 +109,6 @@ pub(super) fn search_json_with_lineages(
             collection,
             filters,
             presentations,
-            copied_lineages,
             commands: &commands,
             freshness_mode: refresh_mode.as_str(),
             generated_at: &generated_at,
@@ -146,7 +131,11 @@ fn search_result_commands(
     let normalized_query = NormalizedSearchQuery::from_request(request);
     let command_prefix = follow_up_command_prefix(data_root);
     let query_arguments = search_query_command_arguments(&normalized_query);
-    let result_scope = if request.events { "event" } else { "session" };
+    let result_scope = if request.events || request.session.is_some() {
+        "event"
+    } else {
+        "session"
+    };
     collection
         .result_window
         .hits

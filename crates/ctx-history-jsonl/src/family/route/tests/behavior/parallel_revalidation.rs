@@ -1,5 +1,35 @@
 use super::*;
 
+fn retained_observation(receipt: &IndexCaptureCommitReceipt) -> JsonlFileObservation {
+    let checkpoint = FamilyCheckpoint::decode_frontier_key::<CaptureError>(
+        receipt.manifest().sources[0]
+            .frontier()
+            .unwrap()
+            .checkpoint(),
+    )
+    .unwrap();
+    checkpoint.physical.source_observation().clone()
+}
+
+fn churn_hardlink(source_path: &Path, link_path: &Path) {
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    fs::hard_link(source_path, link_path).unwrap();
+    fs::remove_file(link_path).unwrap();
+}
+
+fn assert_change_identity_only(
+    adapter: &JsonlFamilyAdapterObject,
+    root: &Path,
+    retained: &JsonlFileObservation,
+) {
+    let inventory = adapter.discover(root).unwrap();
+    let current = inventory.accepted_leaves().next().unwrap().observation();
+    assert!(
+        retained.differs_only_by_change_identity(current),
+        "hardlink churn must preserve length, mtime, attributes, and stable object identity"
+    );
+}
+
 #[test]
 fn borrowed_jsonl_worker_policy_honors_default_and_requested_counts() {
     assert_eq!(family_scanner_worker_count_policy(0, None), 0);
@@ -105,6 +135,159 @@ fn unchanged_complete_sources_do_not_enter_jsonl_ingestion_tasks() {
     assert_eq!(unchanged.generation_id, cold.generation_id);
     assert_eq!(unchanged.manifest().sources, cold.manifest().sources);
     assert_eq!(unchanged_activity, JsonlFamilyScannerActivity::default());
+}
+
+#[test]
+fn hardlink_churn_authenticates_incomplete_tail_without_reparse_or_publication() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = temp.path().join("sessions");
+    let index = temp.path().join("index");
+    fs::create_dir_all(&root).unwrap();
+    let source_path = root.join("incomplete.jsonl");
+    let mut bytes = TEST_RECORD.to_vec();
+    bytes.extend_from_slice(b"{\"message\":\"incomplete\"");
+    fs::write(&source_path, &bytes).unwrap();
+    let adapter = ParallelTestAdapter;
+    let resident = Mutex::new(FamilyResident::default());
+    let (cold, _) = capture_parallel_test_generation_with_resident_and_terminal_revalidation(
+        &adapter, &root, &index, 1, &resident,
+    )
+    .unwrap();
+    let retained = retained_observation(&cold);
+
+    churn_hardlink(&source_path, &temp.path().join("temporary-link.jsonl"));
+    assert_change_identity_only(&adapter, &root, &retained);
+    let prefix_hash = track_jsonl_prefix_hash_bytes(source_path.clone());
+
+    let (unchanged, activity) =
+        capture_parallel_test_generation_with_resident_and_terminal_revalidation(
+            &adapter, &root, &index, 1, &resident,
+        )
+        .unwrap();
+
+    assert_eq!(unchanged.generation_id, cold.generation_id);
+    assert_eq!(unchanged.manifest().sources, cold.manifest().sources);
+    assert_eq!(activity, JsonlFamilyScannerActivity::default());
+    assert_eq!(prefix_hash.bytes(), 3 * bytes.len() as u64);
+
+    let repeated_hash = track_jsonl_prefix_hash_bytes(source_path);
+    let (repeated, activity) =
+        capture_parallel_test_generation_with_resident_and_terminal_revalidation(
+            &adapter, &root, &index, 1, &resident,
+        )
+        .unwrap();
+    assert_eq!(repeated.generation_id, cold.generation_id);
+    assert_eq!(repeated.manifest().sources, cold.manifest().sources);
+    assert_eq!(activity, JsonlFamilyScannerActivity::default());
+    assert_eq!(repeated_hash.bytes(), 0);
+}
+
+#[test]
+fn terminal_hardlink_churn_is_an_authenticated_noop() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = temp.path().join("sessions");
+    let index = temp.path().join("index");
+    fs::create_dir_all(&root).unwrap();
+    let source_path = root.join("terminal-race.jsonl");
+    fs::write(&source_path, TEST_RECORD).unwrap();
+    let adapter = ParallelTestAdapter;
+    let resident = Mutex::new(FamilyResident::default());
+    let (cold, _) = capture_parallel_test_generation_with_resident_and_terminal_revalidation(
+        &adapter, &root, &index, 1, &resident,
+    )
+    .unwrap();
+    let retained = retained_observation(&cold);
+    let hook_ran = Arc::new(AtomicBool::new(false));
+    let hook_observation = Arc::clone(&hook_ran);
+    let hook_source = source_path.clone();
+    let hook_link = temp.path().join("terminal-link.jsonl");
+    set_before_jsonl_terminal_physical_revalidation_hook(root.clone(), move || {
+        churn_hardlink(&hook_source, &hook_link);
+        hook_observation.store(true, Ordering::SeqCst);
+    });
+    let prefix_hash = track_jsonl_prefix_hash_bytes(source_path.clone());
+
+    let (unchanged, activity) =
+        capture_parallel_test_generation_with_resident_and_terminal_revalidation(
+            &adapter, &root, &index, 1, &resident,
+        )
+        .unwrap();
+
+    assert!(hook_ran.load(Ordering::SeqCst));
+    assert_change_identity_only(&adapter, &root, &retained);
+    assert_eq!(unchanged.generation_id, cold.generation_id);
+    assert_eq!(unchanged.manifest().sources, cold.manifest().sources);
+    assert_eq!(activity, JsonlFamilyScannerActivity::default());
+    assert_eq!(prefix_hash.bytes(), 3 * TEST_RECORD.len() as u64);
+
+    let repeated_hash = track_jsonl_prefix_hash_bytes(source_path);
+    let (repeated, activity) =
+        capture_parallel_test_generation_with_resident_and_terminal_revalidation(
+            &adapter, &root, &index, 1, &resident,
+        )
+        .unwrap();
+    assert_eq!(repeated.generation_id, cold.generation_id);
+    assert_eq!(repeated.manifest().sources, cold.manifest().sources);
+    assert_eq!(activity, JsonlFamilyScannerActivity::default());
+    assert_eq!(repeated_hash.bytes(), 0);
+}
+
+#[cfg(any(unix, target_os = "windows"))]
+#[test]
+fn same_size_rewrite_with_restored_mtime_fails_closed_and_retains_last_good() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = temp.path().join("sessions");
+    let index = temp.path().join("index");
+    fs::create_dir_all(&root).unwrap();
+    let source_path = root.join("restored-mtime.jsonl");
+    fs::write(&source_path, TEST_RECORD).unwrap();
+    let original_modified = fs::metadata(&source_path).unwrap().modified().unwrap();
+    let adapter = ParallelTestAdapter;
+    let resident = Mutex::new(FamilyResident::default());
+    let (cold, _) = capture_parallel_test_generation_with_resident_and_terminal_revalidation(
+        &adapter, &root, &index, 1, &resident,
+    )
+    .unwrap();
+    let retained = retained_observation(&cold);
+
+    churn_hardlink(&source_path, &temp.path().join("memoized-link.jsonl"));
+    let (hardlink_noop, activity) =
+        capture_parallel_test_generation_with_resident_and_terminal_revalidation(
+            &adapter, &root, &index, 1, &resident,
+        )
+        .unwrap();
+    assert_eq!(hardlink_noop.generation_id, cold.generation_id);
+    assert_eq!(hardlink_noop.manifest().sources, cold.manifest().sources);
+    assert_eq!(activity, JsonlFamilyScannerActivity::default());
+
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    let replacement = b"{\"message\":\"after!\"}\n";
+    assert_eq!(replacement.len(), TEST_RECORD.len());
+    fs::write(&source_path, replacement).unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&source_path)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(original_modified))
+        .unwrap();
+    let current = adapter.discover(&root).unwrap();
+    assert!(retained
+        .differs_only_by_change_identity(current.accepted_leaves().next().unwrap().observation()));
+
+    let error = capture_parallel_test_generation_with_resident_and_terminal_revalidation(
+        &adapter, &root, &index, 1, &resident,
+    )
+    .unwrap_err();
+
+    assert!(matches!(error, SourceIoError::SourceChangedDuringCapture));
+    assert_eq!(
+        jsonl_family_scanner_activity(),
+        JsonlFamilyScannerActivity::default()
+    );
+    assert_eq!(
+        test_generations().lock().unwrap().get(&index),
+        Some(cold.manifest())
+    );
 }
 
 #[test]
@@ -285,7 +468,7 @@ fn unchanged_terminal_proof_fails_closed_on_prepublication_source_races() {
             &replacement_adapter as &JsonlFamilyAdapterObject,
         ),
     ] {
-        for race in ["mutation", "replacement", "deletion"] {
+        for race in ["mutation", "named-replacement", "deletion"] {
             let temp = crate::test_support_paths::tempdir().unwrap();
             let root = temp.path().join("sessions");
             let index = temp.path().join("index");
@@ -296,7 +479,7 @@ fn unchanged_terminal_proof_fails_closed_on_prepublication_source_races() {
 
             let displaced = temp.path().join("displaced.jsonl");
             let replacement = temp.path().join("replacement.jsonl");
-            if race == "replacement" {
+            if race == "named-replacement" {
                 fs::write(&replacement, TEST_RECORD).unwrap();
             }
             let hook_ran = Arc::new(AtomicBool::new(false));
@@ -307,7 +490,7 @@ fn unchanged_terminal_proof_fails_closed_on_prepublication_source_races() {
                     "mutation" => {
                         fs::write(&hook_source, b"{\"message\":\"after!\"}\n").unwrap();
                     }
-                    "replacement" => {
+                    "named-replacement" => {
                         fs::rename(&hook_source, displaced).unwrap();
                         fs::rename(replacement, &hook_source).unwrap();
                     }

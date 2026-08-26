@@ -45,7 +45,16 @@ fn read_only_certification_fixture() -> ReadOnlyCertificationFixture {
     fs::create_dir_all(root.join(MANIFEST_DIRECTORY)).unwrap();
     fs::write(manifest_path(root, slot.generation_id()), b"manifest").unwrap();
     crate::publish_active_generation_pointer(root, &pointer).unwrap();
-    let certified = install_certification(root, &pointer, &slot, &index, &audit, false).unwrap();
+    let certified = install_certification(
+        root,
+        Some(&pointer),
+        None,
+        &slot,
+        &index,
+        &audit,
+        CertificationInstallPolicy::ACTIVE_CACHE,
+    )
+    .unwrap();
     let relative_artifact_path = active_index_files(&index)
         .unwrap()
         .into_iter()
@@ -66,6 +75,34 @@ fn read_only_certification_fixture() -> ReadOnlyCertificationFixture {
         relative_artifact_path,
         certified_artifact,
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn candidate_certification_rejects_a_slot_with_a_different_physical_digest() {
+    let fixture = read_only_certification_fixture();
+    let pointer = load_current_pointer(fixture.root()).unwrap();
+    let generation_path = slot_path(fixture.root(), &fixture.slot);
+    let audit = physical_integrity_audit(&fixture.index, &generation_path, Some(&pointer)).unwrap();
+    let mismatched_slot = GenerationSlot::new(
+        fixture.slot.generation_id().to_owned(),
+        fixture.slot.directory().to_owned(),
+        "0".repeat(64),
+    )
+    .unwrap();
+    let predecessor_fence =
+        ActiveGenerationPointerFence::capture(fixture.root(), Some(&pointer)).unwrap();
+
+    assert!(matches!(
+        certify_candidate_physical_integrity(
+            fixture.root(),
+            &predecessor_fence,
+            &mismatched_slot,
+            &fixture.index,
+            &audit,
+        ),
+        Err(IndexError::ChecksumMismatch)
+    ));
 }
 
 #[cfg(unix)]

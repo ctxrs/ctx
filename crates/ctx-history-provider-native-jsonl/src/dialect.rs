@@ -8,7 +8,7 @@ use crate::{CaptureError, Result};
 
 use super::normalization::native_jsonl_header_session_id;
 
-fn provider_jsonl_path_is_native(provider: CaptureProvider, path: &Path) -> bool {
+fn provider_jsonl_path_is_native(provider: CaptureProvider, root: &Path, path: &Path) -> bool {
     match provider {
         CaptureProvider::Antigravity => {
             matches!(
@@ -19,17 +19,7 @@ fn provider_jsonl_path_is_native(provider: CaptureProvider, path: &Path) -> bool
         CaptureProvider::Tabnine => path
             .components()
             .any(|component| component.as_os_str() == "chats"),
-        CaptureProvider::Qoder => {
-            path.extension().and_then(|ext| ext.to_str()) == Some("jsonl")
-                && (path
-                    .components()
-                    .any(|component| component.as_os_str() == "transcript")
-                    || path
-                        .parent()
-                        .and_then(Path::parent)
-                        .and_then(Path::file_name)
-                        == Some(OsStr::new("projects")))
-        }
+        CaptureProvider::Qoder => qoder_jsonl_path_is_native(root, path),
         CaptureProvider::CopilotCli => {
             path.file_name().and_then(|name| name.to_str()) == Some("events.jsonl")
         }
@@ -44,8 +34,54 @@ fn provider_jsonl_path_is_native(provider: CaptureProvider, path: &Path) -> bool
     }
 }
 
+fn qoder_jsonl_path_is_native(root: &Path, path: &Path) -> bool {
+    if path.extension().and_then(|extension| extension.to_str()) != Some("jsonl") {
+        return false;
+    }
+
+    // An explicitly selected Qoder file retains its released path admission.
+    // Directory sources instead name the projects transcript tree itself, so
+    // classify its two native layouts relative to that selected authority.
+    if root == path {
+        return path
+            .components()
+            .any(|component| component.as_os_str() == "transcript")
+            || path
+                .parent()
+                .and_then(Path::parent)
+                .and_then(Path::file_name)
+                == Some(OsStr::new("projects"));
+    }
+
+    let Ok(relative) = path.strip_prefix(root) else {
+        return false;
+    };
+    let mut components = relative.components();
+    match (
+        components.next(),
+        components.next(),
+        components.next(),
+        components.next(),
+    ) {
+        (
+            Some(std::path::Component::Normal(_project)),
+            Some(std::path::Component::Normal(_session)),
+            None,
+            None,
+        ) => true,
+        (
+            Some(std::path::Component::Normal(_project)),
+            Some(std::path::Component::Normal(transcript)),
+            Some(std::path::Component::Normal(_session)),
+            None,
+        ) => transcript == "transcript",
+        _ => false,
+    }
+}
+
 pub(super) fn native_jsonl_file_is_selected(
     provider: CaptureProvider,
+    root: &Path,
     path: &Path,
     antigravity_full_transcript_is_regular: bool,
 ) -> bool {
@@ -56,7 +92,7 @@ pub(super) fn native_jsonl_file_is_selected(
         return super::native_path::qwen_code_file_is_selected(path);
     }
     if path.extension().and_then(|extension| extension.to_str()) != Some("jsonl")
-        || !provider_jsonl_path_is_native(provider, path)
+        || !provider_jsonl_path_is_native(provider, root, path)
     {
         return false;
     }
@@ -70,6 +106,7 @@ pub(super) fn native_jsonl_file_is_selected(
 
 pub(super) fn native_jsonl_file_candidate_is_selected(
     provider: CaptureProvider,
+    root: &Path,
     candidate: BoundedTreeFileCandidate<'_>,
 ) -> bool {
     let path = candidate.path();
@@ -81,7 +118,7 @@ pub(super) fn native_jsonl_file_candidate_is_selected(
                 Ok(OpenedProviderSourcePath::File(_))
             )
         });
-    native_jsonl_file_is_selected(provider, path, full_transcript_is_regular)
+    native_jsonl_file_is_selected(provider, root, path, full_transcript_is_regular)
 }
 
 pub(super) fn native_jsonl_record_starts_session(provider: CaptureProvider, value: &Value) -> bool {

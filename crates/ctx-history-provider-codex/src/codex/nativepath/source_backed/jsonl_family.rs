@@ -6,12 +6,12 @@ use crate::{
     provider::source_backed::{
         family::jsonl::{
             observe_opened_file, observe_opened_file_allow_append, JsonlFamilyAdapter,
-            JsonlFamilyAppendMode, JsonlFamilyBaseScope, JsonlFamilyExecutionIo,
-            JsonlFamilyInventory, JsonlFamilyInventoryMode, JsonlFamilyLeaf,
-            JsonlFamilyMembershipObservation, JsonlFamilyOpenedMember, JsonlFamilyProjectionMode,
-            JsonlFamilyRejectedLeaf, JsonlFamilyRootMissingMode, JsonlFamilySemanticExecutor,
-            JsonlFamilySemanticPage, JsonlFamilySemanticPreflight, JsonlFamilySemanticSummary,
-            JsonlFamilyWorkerContext, JsonlFileObservation, JsonlRecordFraming,
+            JsonlFamilyAppendMode, JsonlFamilyExecutionIo, JsonlFamilyInventory,
+            JsonlFamilyInventoryMode, JsonlFamilyLeaf, JsonlFamilyMembershipObservation,
+            JsonlFamilyOpenedMember, JsonlFamilyProjectionMode, JsonlFamilyRejectedLeaf,
+            JsonlFamilyRootMissingMode, JsonlFamilySemanticExecutor, JsonlFamilySemanticPage,
+            JsonlFamilySemanticPreflight, JsonlFamilySemanticSummary, JsonlFamilyWorkerContext,
+            JsonlFileObservation, JsonlRecordFraming,
         },
         SourceBackedRouteErrorKind,
     },
@@ -94,7 +94,10 @@ fn rejected_owner_leaf_v0(
         "missing or conflicting Codex session owner",
     )?
     .with_logical_source_failure(
-        codex_quarantined_rollout_source_key(&source.catalog_observation)?,
+        codex_quarantined_rollout_source_key(
+            source.source_root_lineage,
+            &source.catalog_observation,
+        )?,
         format!(
             "Codex session ownership is ambiguous or conflicting; quarantined rollout file {}",
             source.source_path.display()
@@ -128,12 +131,17 @@ fn rejected_catalog_leaf_v0(
     ))
 }
 
-fn codex_quarantined_rollout_source_key(observation: &CodexFileObservation) -> Result<SourceKey> {
+fn codex_quarantined_rollout_source_key(
+    source_root_lineage: Option<[u8; 32]>,
+    observation: &CodexFileObservation,
+) -> Result<SourceKey> {
     // This is explicitly a file-observation key, not a claimed Codex session
     // identity. It cannot connect a quarantined file to another rollout.
     let observation = serde_json::to_vec(observation)?;
     let digest = Sha256::digest(observation);
-    SourceKey::derive_provider_native(
+    let scope =
+        source_root_lineage.map_or(SourceAnchorScope::Unqualified, SourceAnchorScope::Lineage);
+    SourceKey::derive_provider_native_scoped(
         CaptureProvider::Codex.as_str(),
         CODEX_SESSION_SOURCE_FORMAT,
         CODEX_SOURCE_SCHEMA_VARIANT,
@@ -141,6 +149,7 @@ fn codex_quarantined_rollout_source_key(observation: &CodexFileObservation) -> R
         "codex.quarantined-rollout-file.v1",
         TypedKey::bytes(digest.to_vec())
             .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?,
+        scope,
     )
     .map_err(|error| CaptureError::InvalidPayload(error.to_string()))
 }
@@ -264,7 +273,10 @@ impl<B: ProviderRuntimeBinding> JsonlFamilySemanticExecutor for CodexSessionSema
             .ownership_quarantined_source()
             .map(|source| {
                 Ok::<(SourceKey, String), CaptureError>((
-                    codex_quarantined_rollout_source_key(&source.catalog_observation)?,
+        codex_quarantined_rollout_source_key(
+            source.source_root_lineage,
+            &source.catalog_observation,
+        )?,
                     format!(
                         "Codex session ownership is ambiguous or conflicting; quarantined rollout file {}",
                         source.source_path.display()
@@ -391,7 +403,10 @@ impl<B: ProviderRuntimeBinding> CodexSessionJsonlFamilyAdapterV0<B> {
                 )
                 .and_then(|rejected| {
                     Ok(rejected.with_logical_source_failure(
-                        codex_quarantined_rollout_source_key(&leaf.observation)?,
+                        codex_quarantined_rollout_source_key(
+                            leaf.source_root_lineage,
+                            &leaf.observation,
+                        )?,
                         format!(
                             "Codex session ownership is ambiguous or conflicting; quarantined rollout file {}",
                             leaf.source_path.display()
@@ -578,10 +593,6 @@ impl<B: ProviderRuntimeBinding> JsonlFamilyAdapter for CodexSessionJsonlFamilyAd
         JsonlFamilyInventoryMode::FrozenOpeningAllowAdditions
     }
 
-    fn base_scope(&self) -> JsonlFamilyBaseScope {
-        JsonlFamilyBaseScope::Route
-    }
-
     fn discover(&self, root: &Path) -> Result<JsonlFamilyInventory> {
         if let Some(roots) = self.generation.session_tree_roots() {
             self.discover_tree_family(root, roots)
@@ -605,7 +616,10 @@ impl<B: ProviderRuntimeBinding> JsonlFamilyAdapter for CodexSessionJsonlFamilyAd
         if !self.generation.is_session_tree() {
             return Ok(None);
         }
-        let plan = match super::catalog::bind_codex_partial_member_v0(member) {
+        let plan = match super::catalog::bind_codex_partial_member_v0(
+            member,
+            self.generation.source_root_lineage(),
+        ) {
             Ok(plan) => plan,
             Err(_) => return Ok(None),
         };
@@ -652,7 +666,11 @@ impl<B: ProviderRuntimeBinding> JsonlFamilyAdapter for CodexSessionJsonlFamilyAd
                         &authority_path,
                     )?
                 {
-                    observation.bind_source_hint(path, codex_source_key(&native_session_id)?);
+                    let source_root_lineage = self.generation.source_root_lineage();
+                    observation.bind_source_hint(
+                        path,
+                        codex_source_key_in_root(source_root_lineage, &native_session_id)?,
+                    );
                 }
             }
             Ok(observation)

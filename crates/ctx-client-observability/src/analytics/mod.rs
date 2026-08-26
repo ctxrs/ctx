@@ -10,6 +10,8 @@ mod provider;
 pub use provider::*;
 mod runtime;
 pub use runtime::*;
+mod search;
+pub use search::*;
 mod contract;
 pub use contract::*;
 mod operation;

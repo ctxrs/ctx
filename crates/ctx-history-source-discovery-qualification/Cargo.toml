@@ -1,0 +1,40 @@
+[package]
+name = "ctx-history-source-discovery-qualification"
+version.workspace = true
+description = "Public-API qualification for ctx history source discovery"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+publish = false
+autotests = false
+
+[[test]]
+name = "configured_roots"
+path = "tests/configured_roots.rs"
+
+[[test]]
+name = "configured_root_matrix"
+path = "tests/configured_root_matrix.rs"
+
+[[test]]
+name = "default_discovery"
+path = "tests/default_discovery.rs"
+
+[[test]]
+name = "env_discovery"
+path = "tests/env_discovery.rs"
+
+[[test]]
+name = "manual_unsupported"
+path = "tests/manual_unsupported.rs"
+
+[dev-dependencies]
+ctx-history-capture-model = { path = "../ctx-history-capture-model" }
+ctx-history-core = { path = "../ctx-history-core" }
+ctx-history-openclaw-schema = { path = "../ctx-history-openclaw-schema", features = ["test-support"] }
+ctx-history-source-discovery = { path = "../ctx-history-source-discovery" }
+rusqlite.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true

@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use ctx_history_core::TypedKey;
+use ctx_history_core::{CaptureProvider, TypedKey};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -157,6 +157,175 @@ impl CrushProjectInventorySelector {
     ) -> Result<CrushDiscoveredProjectInventory, CrushProjectInventorySelectorError> {
         discover_project_inventory(&self.probes, &self.context, spec)
     }
+}
+
+/// Reconstructed automatic inventory authority for a Released Crush root.
+/// Physical database paths are current scan locators; the revision is derived
+/// from the immutable automatic identity paths so a root move cannot rotate
+/// source or control bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CrushReleasedProjectInventory {
+    authority_key: TypedKey,
+    revision: Vec<u8>,
+    released_project_keys: Vec<TypedKey>,
+    databases: Vec<(TypedKey, PathBuf)>,
+}
+
+impl CrushReleasedProjectInventory {
+    pub fn authority_key(&self) -> &TypedKey {
+        &self.authority_key
+    }
+
+    pub fn revision(&self) -> &[u8] {
+        &self.revision
+    }
+
+    pub fn released_project_key(&self) -> &TypedKey {
+        &self.released_project_keys[0]
+    }
+
+    pub fn released_project_keys(&self) -> &[TypedKey] {
+        &self.released_project_keys
+    }
+
+    pub fn databases(&self) -> &[(TypedKey, PathBuf)] {
+        &self.databases
+    }
+}
+
+/// Rebinds one moved configured database into its original automatic project
+/// inventory. The old path is selector identity only and is never opened.
+pub fn resolve_crush_released_project_inventory(
+    probes: &StaticProviderProbeCatalog,
+    context: &DiscoveryContext,
+    identity_path: &Path,
+    scan_path: &Path,
+) -> Result<CrushReleasedProjectInventory, CrushProjectInventorySelectorError> {
+    resolve_crush_released_project_inventories(
+        probes,
+        context,
+        &[(identity_path.to_path_buf(), scan_path.to_path_buf())],
+        true,
+    )
+}
+
+/// Rebinds several released roots into one immutable automatic inventory.
+pub fn resolve_crush_released_project_inventories(
+    probes: &StaticProviderProbeCatalog,
+    context: &DiscoveryContext,
+    rebindings: &[(PathBuf, PathBuf)],
+    include_automatic_peers: bool,
+) -> Result<CrushReleasedProjectInventory, CrushProjectInventorySelectorError> {
+    if rebindings.is_empty() {
+        return Err(CrushProjectInventorySelectorError::MissingProjectKey);
+    }
+    let spec = super::super::super::specs::provider_source_spec(CaptureProvider::Crush)
+        .ok_or(CrushProjectInventorySelectorError::DiscoveryUnavailable)?;
+    let report = resolve(probes, context, spec);
+    if !report.issues.is_empty() {
+        return Err(CrushProjectInventorySelectorError::DiscoveryUnavailable);
+    }
+    let data_config_dir = crush_data_directory(context)
+        .map_err(|_| CrushProjectInventorySelectorError::DiscoveryUnavailable)?;
+    let mut reader = SelectorReader::default();
+    let registered = read_crush_registry(&mut reader, &data_config_dir)
+        .map_err(|_| CrushProjectInventorySelectorError::DiscoveryUnavailable)?;
+    let mut registered_by_database = HashMap::new();
+    for project in registered {
+        let Some(project_path) = project.project_path else {
+            return Err(CrushProjectInventorySelectorError::MissingProjectKey);
+        };
+        let Some(database_path) = project.database_path else {
+            continue;
+        };
+        let selector_key = CrushProjectSelectorKey::RegisteredProject(project_path);
+        match registered_by_database.insert(database_path, selector_key.clone()) {
+            Some(previous) if previous != selector_key => {
+                return Err(CrushProjectInventorySelectorError::AmbiguousDatabaseAuthority);
+            }
+            _ => {}
+        }
+    }
+
+    let released = rebindings
+        .iter()
+        .map(|(identity_path, scan_path)| {
+            let key = if let Some(key) = registered_by_database.get(identity_path) {
+                key.clone()
+            } else if report
+                .sources
+                .iter()
+                .any(|source| source.path == *identity_path)
+            {
+                CrushProjectSelectorKey::ActiveWorkingDirectory(
+                    context
+                        .cwd()
+                        .ok_or(CrushProjectInventorySelectorError::MissingProjectKey)?
+                        .to_path_buf(),
+                )
+            } else {
+                return Err(CrushProjectInventorySelectorError::MissingProjectKey);
+            };
+            Ok((key, scan_path.clone(), identity_path.clone()))
+        })
+        .collect::<Result<Vec<_>, CrushProjectInventorySelectorError>>()?;
+    let released_project_keys = released
+        .iter()
+        .map(|(key, _, _)| key.typed_key())
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut entries = if include_automatic_peers {
+        discover_project_inventory(probes, context, spec)?
+            .databases
+            .into_iter()
+            .filter(|database| {
+                !rebindings.iter().any(|(identity_path, scan_path)| {
+                    database.database_path == *identity_path || database.database_path == *scan_path
+                })
+            })
+            .map(|database| {
+                (
+                    database.selector_key,
+                    database.database_path.clone(),
+                    database.database_path,
+                )
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    entries.extend(released);
+    entries.sort_by_cached_key(|(selector, _, identity)| {
+        let selector = selector.typed_key().ok();
+        (
+            super::super::super::selectors::encoded_path_sort_key(identity),
+            selector.and_then(|key| serde_json::to_vec(&key).ok()),
+        )
+    });
+    if entries.windows(2).any(|pair| pair[0].2 == pair[1].2) {
+        return Err(CrushProjectInventorySelectorError::AmbiguousDatabaseAuthority);
+    }
+    let mut digest = Sha256::new();
+    digest.update(CRUSH_INVENTORY_REVISION_DOMAIN);
+    digest.update((entries.len() as u64).to_be_bytes());
+    let mut databases = Vec::with_capacity(entries.len());
+    for (selector, scan_path, identity_path) in entries {
+        let key = selector.typed_key()?;
+        let encoded_key = serde_json::to_vec(&key)
+            .map_err(|_| CrushProjectInventorySelectorError::InvalidAuthorityKey)?;
+        digest.update((encoded_key.len() as u64).to_be_bytes());
+        digest.update(encoded_key);
+        let encoded_path = identity_path.as_os_str().as_encoded_bytes();
+        digest.update((encoded_path.len() as u64).to_be_bytes());
+        digest.update(encoded_path);
+        databases.push((key, scan_path));
+    }
+    Ok(CrushReleasedProjectInventory {
+        authority_key: TypedKey::utf8(CRUSH_INVENTORY_AUTHORITY_KEY)
+            .map_err(|_| CrushProjectInventorySelectorError::InvalidAuthorityKey)?,
+        revision: digest.finalize().to_vec(),
+        released_project_keys,
+        databases,
+    })
 }
 
 pub(super) fn resolve(

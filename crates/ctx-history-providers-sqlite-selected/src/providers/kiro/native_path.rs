@@ -27,7 +27,7 @@ mod scan;
 #[path = "source_backed.rs"]
 mod source_backed;
 
-pub(crate) use source_backed::registration::source_backed_driver;
+pub(crate) use source_backed::registration::source_backed_driver_scoped;
 
 #[derive(Debug)]
 struct KiroSqliteDatabase {

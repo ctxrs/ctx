@@ -12,6 +12,37 @@ use super::*;
 use crate::record_evidence::RecordDigest;
 
 #[test]
+fn root_scope_separates_identical_zed_threads_and_unqualified_is_released() {
+    use ctx_history_core::{CaptureProvider, SourceAnchor, SourceAnchorScope, SourceKey, TypedKey};
+
+    let released = SourceKey::derive(
+        CaptureProvider::Zed.as_str(),
+        ZED_THREADS_SQLITE_SOURCE_FORMAT,
+        ZED_SOURCE_SCHEMA_VARIANT,
+        1,
+        SourceAnchor::provider_native(
+            ZED_SOURCE_ANCHOR_NAMESPACE,
+            TypedKey::utf8(ZED_SOURCE_ANCHOR_KEY).unwrap(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let unqualified = zed_source_key_scoped(SourceAnchorScope::Unqualified).unwrap();
+    assert!(released.exact_descriptor_eq(&unqualified));
+    assert_eq!(
+        released.identity().encode_canonical().unwrap(),
+        unqualified.identity().encode_canonical().unwrap()
+    );
+
+    let first = zed_source_key_scoped(SourceAnchorScope::Lineage([0x11; 32])).unwrap();
+    let second = zed_source_key_scoped(SourceAnchorScope::Lineage([0x22; 32])).unwrap();
+    assert_ne!(
+        zed_session_identity(&first, "shared-thread").unwrap(),
+        zed_session_identity(&second, "shared-thread").unwrap()
+    );
+}
+
+#[test]
 fn source_backed_zed_two_threads_project_distinct_sessions_with_complete_core() {
     let temp = tempfile::tempdir().unwrap();
     let source_root = temp.path().join("source");

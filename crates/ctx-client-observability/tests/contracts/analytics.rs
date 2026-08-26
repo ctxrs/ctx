@@ -579,11 +579,18 @@ fn analytics_payloads_omit_sensitive_command_data() {
     assert_eq!(search_properties["query_length_bucket"], "101-500");
     assert_eq!(search_properties["query_term_count_bucket"], "6-20");
     assert_eq!(search_properties["search_refresh_mode"], "off");
-    assert_eq!(search_properties["search_refresh_status"], "unknown");
+    assert_eq!(
+        search_properties["search_refresh_status"],
+        "existing_generation"
+    );
     assert_eq!(search_properties["zero_result"], true);
     assert_eq!(search_properties["has_indexed_content_after_search"], false);
     assert!(search_properties.get("query_duration_bucket").is_some());
     assert!(search_properties.get("render_duration_bucket").is_some());
+    assert!(search_properties
+        .get("search_output_duration_bucket")
+        .is_some());
+    assert_eq!(search_properties["search_output_served"], true);
     assert_eq!(events[3]["events"][0]["outcome"], "failure");
 
     for event in &events {
@@ -655,7 +662,7 @@ fn search_analytics_reports_empty_source_backed_generation() {
     assert_operation_event(&events[0], "search", "success");
     let properties = analytics_event_properties(&events[0]);
     assert_eq!(properties["search_refresh_mode"], "off");
-    assert_eq!(properties["search_refresh_status"], "unknown");
+    assert_eq!(properties["search_refresh_status"], "existing_generation");
     assert_eq!(properties["zero_result"], true);
     assert_eq!(properties["has_indexed_content_after_search"], false);
     assert!(data_root.join("search/lexical").is_dir());

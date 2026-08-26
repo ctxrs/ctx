@@ -38,6 +38,7 @@ pub use cli::{
     ContentScopeArg, LocateArgs, LocateEventArgs, LocateSessionArgs, LocateTarget, SearchArgs,
     SearchBackendArg, ShowArgs, ShowEventArgs, ShowSessionArgs, ShowTarget,
 };
+pub use ctx_history_capture::{ProviderRootDefinition, ProviderRootKind};
 pub use import_application::{run_import_application, ImportApplicationPort};
 pub use import_report::{
     import_completion_error, import_error_scope, import_failure_type, import_report_failure_type,
@@ -55,14 +56,17 @@ pub use list_events::{
 };
 pub use provider_args::{
     cli_supported_provider, compact_provider_error, mcp_provider_names, native_provider_cli_specs,
-    parse_native_provider, parse_native_provider_name, parse_provider, parse_provider_name,
-    provider_cli_name, provider_cli_spec, provider_cli_specs, provider_is_importable, ProviderArg,
-    ProviderCliSpec,
+    parse_capture_provider_name, parse_native_provider, parse_native_provider_name, parse_provider,
+    parse_provider_name, provider_cli_name, provider_cli_spec, provider_cli_specs,
+    provider_is_importable, ProviderArg, ProviderCliSpec,
 };
 pub use provider_sources::{
     discovered_plugin_sources_json, discovered_sources_for_provider_report,
-    discovered_sources_for_provider_report_with_data_root, discovered_sources_report,
-    discovered_sources_report_with_data_root, discovery_report_issues_json,
+    discovered_sources_for_provider_report_with_data_root,
+    discovered_sources_for_provider_report_with_data_root_and_provider_roots,
+    discovered_sources_report, discovered_sources_report_with_data_root,
+    discovered_sources_report_with_data_root_and_provider_roots, discovery_report_issues_json,
+    discovery_report_issues_json_with_provider_roots, enrich_sources_json_with_selection,
     filter_cli_supported_report, filter_cli_supported_sources, history_source_plugin_refresh_json,
     history_source_plugin_report, import_support_json, manual_path_guidance,
     plugin_manifest_failures_json, plugin_sources_json, provider_selection_guidance, sources_json,
@@ -73,7 +77,7 @@ pub use source_index::{
     copied_lineage_summary, generation_query_authority_error_json, mcp_search_with_compact,
     mcp_show_event_application, mcp_show_session_application, normalize_mcp_search_request,
     run_locate, run_search, run_show, validate_explicit_semantic_scope, McpSearchError,
-    ShowApplicationError, SourceSearchRequest,
+    McpSearchExecutionFailure, ShowApplicationError, SourceSearchRequest,
 };
 pub use sources::{run_sources, SourcesDiscoveryObservation, SourcesExecutionObservation};
 
@@ -84,7 +88,9 @@ pub use history_source_plugins::{
     PreparedHistorySourcePluginRefresh,
 };
 pub use output::JsonOutputFormat;
-pub use ports::{OutputStream, SearchExecutionObservation, SearchRefreshStatus, TerminalPort};
+pub use ports::{
+    OutputStream, SearchExecutionObservation, SearchFailurePhase, SearchRefreshStatus, TerminalPort,
+};
 pub use progress::{
     format_bytes, format_count, presentation_snapshot, ProgressReporter, ProgressWriterError,
 };

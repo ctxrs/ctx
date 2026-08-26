@@ -7,7 +7,7 @@ use std::{
 use anyhow::{bail, Context, Result};
 
 #[derive(Clone, Copy)]
-pub(super) enum StableFileKind {
+pub(in crate::upgrade) enum StableFileKind {
     Data,
     Executable,
 }
@@ -16,7 +16,7 @@ pub(super) enum StableFileKind {
 ///
 /// `None` means the named file did not exist. Every other unsafe or unreadable
 /// state is an error so callers can distinguish absence from corruption.
-pub(super) fn read_stable_file(
+pub(in crate::upgrade) fn read_stable_file(
     path: &Path,
     label: &str,
     max_bytes: u64,
@@ -28,7 +28,7 @@ pub(super) fn read_stable_file(
     {
         use std::os::unix::fs::OpenOptionsExt as _;
 
-        options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+        options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK);
     }
     #[cfg(windows)]
     {

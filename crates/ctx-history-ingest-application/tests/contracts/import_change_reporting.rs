@@ -498,9 +498,26 @@ fn discovered_codex_session_tree_reports_admitted_source_format() {
         "provider_authoritative_all"
     );
     assert_eq!(tree_report["sources"][0]["certified_source_count"], 1);
-    assert!(tree_report["sources"][0]["published_generation"].is_string());
-    assert_eq!(tree_report["totals"]["change"], "changed");
+    let generation = tree_report["sources"][0]["published_generation"]
+        .as_str()
+        .expect("compressed Codex import should publish or retain a generation")
+        .to_owned();
+    assert!(matches!(
+        tree_report["totals"]["change"].as_str(),
+        Some("changed" | "no_op")
+    ));
     assert!(tree_report["totals"].get("imported_sessions").is_none());
     assert!(tree_report["totals"].get("imported_events").is_none());
     assert_eq!(tree_report["totals"]["current_indexed_documents"], 1);
+
+    let unchanged = import_codex(&tree_temp);
+    assert_eq!(unchanged["outcome"], "success", "{unchanged:#}");
+    assert_eq!(unchanged["totals"]["change"], "no_op", "{unchanged:#}");
+    assert_eq!(
+        unchanged["sources"][0]["source_format"],
+        "provider_authoritative_all"
+    );
+    assert_eq!(unchanged["sources"][0]["certified_source_count"], 1);
+    assert_eq!(unchanged["sources"][0]["published_generation"], generation);
+    assert_eq!(unchanged["totals"]["current_indexed_documents"], 1);
 }

@@ -16,6 +16,44 @@ fn daemon_autostart_trigger(args: &[&str]) -> Option<DaemonTriggerCommandArg> {
     command_daemon_autostart_trigger(&cli.command)
 }
 
+fn automatic_upgrade_trigger(args: &[&str]) -> bool {
+    let cli = Cli::try_parse_from(std::iter::once("ctx").chain(args.iter().copied()))
+        .unwrap_or_else(|error| panic!("failed to parse {args:?}: {error}"));
+    command_automatic_upgrade_trigger(&cli.command).is_some()
+}
+
+#[test]
+fn finite_work_commands_may_trigger_one_shot_automatic_upgrades() {
+    for args in [
+        &["setup", "--no-daemon"][..],
+        &["index", "mode", "manual"][..],
+        &["sources"][..],
+        &["import", "--no-daemon"][..],
+        &["show", "session", "01234567"][..],
+        &["list", "events"][..],
+        &["locate", "event", "01234567"][..],
+        &["search", "upgrade lifecycle"][..],
+        &["integrations", "status", "skills"][..],
+        &["doctor"][..],
+    ] {
+        assert!(automatic_upgrade_trigger(args), "{args:?}");
+    }
+}
+
+#[test]
+fn observers_and_process_owners_never_launch_automatic_workers() {
+    for args in [
+        &["status"][..],
+        &["stats"][..],
+        &["docs", "list"][..],
+        &["mcp", "serve"][..],
+        &["daemon", "status"][..],
+        &["upgrade", "status"][..],
+    ] {
+        assert!(!automatic_upgrade_trigger(args), "{args:?}");
+    }
+}
+
 #[test]
 fn setup_handoff_is_owned_by_setup_and_machine_import_does_not_autostart() {
     for args in [

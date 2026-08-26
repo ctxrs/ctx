@@ -7,7 +7,7 @@ use std::{
 use anyhow::{anyhow, Context, Result};
 use ctx_history_core::utc_now;
 use ctx_semantic_model::SharedSemanticRuntime;
-use ctx_upgrade_engine::{DaemonUpgradeLease, DaemonUpgradePort, PreparedDaemonUpgrade};
+use ctx_upgrade_engine::{DaemonUpgradeLease, DaemonUpgradePort, PreparedAutomaticUpgrade};
 use serde_json::Value;
 
 #[cfg(test)]
@@ -43,12 +43,14 @@ use super::{
     query_service::{DaemonLifecycleState, DaemonQueryService},
 };
 
+mod automatic_upgrade;
 mod config_reload;
 mod lifecycle;
 mod source_watch;
 mod telemetry;
 mod watch_runtime;
 
+use automatic_upgrade::abort_prepared_automatic_upgrade;
 use config_reload::{
     daemon_semantic_runtime_active, reload_daemon_runtime_config, DaemonConfigReloadOutcome,
     DaemonConfigReloadState, DaemonConfigReloadTargets,
@@ -492,9 +494,8 @@ where
         if lifecycle_ready {
             ctx_daemon_runtime::block_daemon_main_after_ready_for_test(data_root)?;
         }
-        // This is the sole automatic scheduler authority. The first tick is
-        // after readiness; later ticks only revisit installation-scoped
-        // cadence/backoff or reconcile a completed helper.
+        // A ready persistent daemon is one automatic-check driver. Detached
+        // invocation workers share the same installation cadence and lock.
         if lifecycle_ready
             && !finite_core_worker
             && daemon_should_schedule_auto_upgrade(
@@ -573,9 +574,14 @@ where
             if runtime.config.daemon.mode.runs_only_source_refresh() {
                 // A live mode change must not carry a previously prepared
                 // automatic upgrade into the source-refresh-only profile.
-                // Dropping it retains any resumable upgrade journal for a
-                // future full-mode daemon without applying it here.
-                prepared_auto_upgrade = None;
+                if let Some(prepared) = prepared_auto_upgrade.take() {
+                    let canceled = anyhow!(
+                        "automatic upgrade canceled after daemon mode changed to source-refresh-only"
+                    );
+                    prepared
+                        .abort(&canceled)
+                        .context("terminalize automatic upgrade after daemon mode change")?;
+                }
             }
             if let (Some(watch_runtime), Some(source_refresh)) = (
                 watch_runtime.as_mut(),
@@ -840,7 +846,7 @@ where
         lifecycle_state.mark_stopping();
         if let Some(attempt_id) = prepared_auto_upgrade
             .as_ref()
-            .and_then(PreparedDaemonUpgrade::attempt_id)
+            .and_then(PreparedAutomaticUpgrade::attempt_id)
         {
             auto_upgrade_handoff = Some(upgrade.daemon.begin_current(
                 data_root,
@@ -886,6 +892,11 @@ where
             publish_daemon_fatal_status_while_owned(&lock, data_root, &args, started_at_ms, &error);
             drop(installation_daemon_lease);
             drop(lock);
+            let error = abort_prepared_automatic_upgrade(
+                prepared_auto_upgrade.take(),
+                auto_upgrade_handoff.take(),
+                error,
+            );
             let events = telemetry.fatal_events(Instant::now());
             send_daemon_events(ports.observation, data_root, &events);
             return Err(error);
@@ -901,7 +912,7 @@ where
                 ctx_upgrade_engine::active_installation_upgrade_attempt_id()?;
             let upgrade_attempt_id = prepared_auto_upgrade
                 .as_ref()
-                .and_then(PreparedDaemonUpgrade::attempt_id)
+                .and_then(PreparedAutomaticUpgrade::attempt_id)
                 .map(str::to_owned)
                 .or(active_installation_attempt);
             if let Some(attempt_id) = upgrade_attempt_id.as_deref() {
@@ -915,11 +926,21 @@ where
     if let Err(error) = owned_shutdown_result {
         publish_daemon_fatal_status_while_owned(&lock, data_root, &args, started_at_ms, &error);
         drop(lock);
-        return Err(error);
+        return Err(abort_prepared_automatic_upgrade(
+            prepared_auto_upgrade.take(),
+            auto_upgrade_handoff.take(),
+            error,
+        ));
     }
     drop(lock);
     if let Some(handoff) = auto_upgrade_handoff.as_ref() {
-        handoff.wait_for_installation_quiescence()?;
+        if let Err(error) = handoff.wait_for_installation_quiescence() {
+            return Err(abort_prepared_automatic_upgrade(
+                prepared_auto_upgrade.take(),
+                auto_upgrade_handoff.take(),
+                error,
+            ));
+        }
     }
     let events = telemetry.stopped_events(failed, Instant::now());
     send_daemon_events(ports.observation, data_root, &events);

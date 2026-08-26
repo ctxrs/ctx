@@ -18,7 +18,7 @@ mod source_backed;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use source_backed::source_backed_driver;
+pub(crate) use source_backed::source_backed_driver_scoped;
 
 const FIREBENDER_NATIVE_PARSER_REVISION: u32 = 3;
 const FIREBENDER_SOURCE_IDENTITY_REVISION: u32 = 2;

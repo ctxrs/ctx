@@ -71,6 +71,18 @@ fn write(path: &Path, body: impl AsRef<[u8]>) {
     fs::write(path, body).unwrap();
 }
 
+fn assert_automatic_role(source: &crate::provider_sources::ProviderSource, components: &[&[u8]]) {
+    let expected =
+        ctx_history_capture_model::ProviderRouteRole::from_dynamic(components.iter().copied())
+            .expect("expected test role should be bounded");
+    assert_eq!(
+        source.route_provenance.automatic_route_role(),
+        Some(&expected),
+        "unexpected route role for {}",
+        source.path.display()
+    );
+}
+
 fn write_openclaw_v17(path: &Path, owner: &str) {
     fs::create_dir_all(path.parent().expect("OpenClaw database parent")).unwrap();
     let connection = rusqlite::Connection::open(path).unwrap();
@@ -701,20 +713,75 @@ fn openclaw_selects_sqlite_per_admitted_agent_and_jsonl_for_foreign_or_corrupt_a
         .all(|source| source.status == ProviderSourceStatus::Available));
     assert_eq!(report.sources[0].status, ProviderSourceStatus::Unsupported);
     for agent in ["broken", "corrupt", "ops", "research"] {
-        assert_eq!(
-            report
-                .sources
-                .iter()
-                .filter(|source| source
+        let matching = report
+            .sources
+            .iter()
+            .filter(|source| {
+                source
                     .path
                     .components()
-                    .any(|part| part.as_os_str() == agent))
-                .count(),
-            1,
-            "one admitted history family for {agent}"
-        );
+                    .any(|part| part.as_os_str() == agent)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(matching.len(), 1, "one admitted history family for {agent}");
+        assert_automatic_role(matching[0], &[b"agent", agent.as_bytes()]);
     }
+    let corrupt_role = report.sources[1]
+        .route_provenance
+        .automatic_route_role()
+        .expect("corrupt JSONL route role");
+    let research_role = report.sources[3]
+        .route_provenance
+        .automatic_route_role()
+        .expect("research JSONL route role");
+    assert_ne!(corrupt_role, research_role);
+    assert_eq!(
+        report.sources,
+        super::resolve_openclaw(
+            &crate::provider_sources::TEST_PROVIDER_PROBES,
+            &context,
+            crate::provider_source_spec(CaptureProvider::OpenClaw).unwrap(),
+        )
+        .sources
+    );
     assert!(report.issues.is_empty());
+}
+
+#[test]
+fn openclaw_automatic_truncated_agent_inventory_is_route_less() {
+    let temp = tempdir();
+    let home = temp.path().join("home");
+    let cwd = temp.path().join("cwd");
+    let state = temp.path().join("selected");
+    fs::create_dir_all(&cwd).unwrap();
+    let agents = (0..129)
+        .map(|index| serde_json::json!({"id": format!("agent-{index:03}")}))
+        .collect::<Vec<_>>();
+    write(
+        &state.join("openclaw.json"),
+        serde_json::to_vec(&serde_json::json!({"agents": {"list": agents}})).unwrap(),
+    );
+    write(
+        &state.join("agents/agent-000/sessions/first.jsonl"),
+        b"{}\n",
+    );
+
+    let report = report(
+        &context(&home, &cwd).with_env("OPENCLAW_STATE_DIR", state.as_os_str().to_owned()),
+        CaptureProvider::OpenClaw,
+    );
+
+    assert!(report.sources.is_empty());
+    assert_eq!(report.issues.len(), 1);
+    assert_eq!(
+        report.issues[0].kind,
+        DiscoveryIssueKind::SelectorUnreconstructible
+    );
+    let config_path = state.join("openclaw.json");
+    assert_eq!(
+        report.issues[0].path.as_deref(),
+        Some(config_path.as_path())
+    );
 }
 
 #[test]
@@ -743,6 +810,7 @@ fn openclaw_uses_conditional_clawdbot_and_falls_back_to_its_agent_jsonl() {
         report.sources[0].source_format,
         "openclaw_session_jsonl_tree"
     );
+    assert_automatic_role(&report.sources[0], &[b"agent", b"main"]);
 }
 
 #[test]

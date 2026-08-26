@@ -24,6 +24,7 @@ fn automatic_execution_replaces_an_incompatible_settings_generation() {
                 catalog_support: ProviderCatalogSupport::None,
                 status: ProviderSourceStatus::Unsupported,
                 unsupported_reason: Some("fixture has no executable source-backed route"),
+                route_provenance: Default::default(),
             },
         ],
         issues: vec![

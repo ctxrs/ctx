@@ -541,7 +541,7 @@ mod unix {
         assert_eq!(state["schema_version"], 1);
         assert_eq!(state["status"], "error");
         assert_eq!(state["attempt_id"], original_attempt_id);
-        assert_eq!(state["attempt_source"], "daemon");
+        assert_eq!(state["attempt_source"], "automatic");
         assert_eq!(state["current_version"], env!("CARGO_PKG_VERSION"));
         assert_eq!(state["latest_version"], FIXTURE_TARGET_VERSION);
         assert_eq!(state["install_path"], binary.display().to_string());
@@ -891,8 +891,12 @@ mod unix {
         assert_source_backed_epoch_remained_fresh(&second_data_root);
     }
 
+    mod invocation_driver {
+        include!("auto_upgrade_acceptance/invocation_driver.rs");
+    }
+
     #[test]
-    fn foreground_command_never_claims_or_applies_an_upgrade() {
+    fn automatic_indexing_foreground_command_defers_to_daemon_driver() {
         let temp = tempdir();
         let release = fake_release(&temp, "9.9.9");
         let binary = managed_candidate(&temp, "ia_foreground_no_authority");
@@ -982,7 +986,7 @@ mod unix {
     }
 
     #[test]
-    fn enabled_daemon_is_the_only_automatic_apply_authority() {
+    fn persistent_daemon_drives_the_shared_automatic_scheduler() {
         let temp = tempdir();
         let mut release = fake_release(&temp, FIXTURE_TARGET_VERSION);
         let binary = managed_hook_candidate(&temp, "ia_daemon_authority");
@@ -1000,7 +1004,7 @@ mod unix {
             serde_json::from_slice(&fs::read(scheduler_state_path(&binary)).unwrap()).unwrap();
         assert_eq!(marker["version"], FIXTURE_TARGET_VERSION);
         assert_eq!(state["status"], "applied");
-        assert_eq!(state["attempt_source"], "daemon");
+        assert_eq!(state["attempt_source"], "automatic");
         assert!(!temp.path().join("upgrade-state.json").exists());
         assert!(!temp.path().join("upgrade.lock").exists());
     }
@@ -1421,7 +1425,7 @@ mod unix {
             let marker: Value =
                 serde_json::from_slice(&fs::read(install_marker_path(&binary)).unwrap()).unwrap();
             assert_eq!(final_state["status"], "applied");
-            assert_eq!(final_state["attempt_source"], "daemon");
+            assert_eq!(final_state["attempt_source"], "automatic");
             assert_eq!(marker["version"], FIXTURE_TARGET_VERSION);
             assert_ne!(fs::read(&binary).unwrap(), binary_before);
             assert!(!first_data_root.join("upgrade-state.json").exists());

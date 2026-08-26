@@ -1,6 +1,10 @@
+use std::time::Duration;
+
 use ctx_history_core::CaptureProvider;
 
-use super::{BytesBucket, CountBucket, DurationBucket, ProgressMode, TextLengthBucket};
+use super::{
+    BytesBucket, CountBucket, DurationBucket, ProgressMode, SearchHealthFacts, TextLengthBucket,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImportSourceMode {
@@ -330,9 +334,11 @@ pub struct LocateTelemetry {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RefreshStatus {
     Disabled,
+    ExistingGeneration,
     Skipped,
     NoSources,
     DaemonBackground,
+    DaemonUnavailable,
     Completed,
     Failed,
     Background,
@@ -343,9 +349,11 @@ impl RefreshStatus {
     pub fn from_safe_summary(value: &str) -> Self {
         match value {
             "disabled" | "off" => Self::Disabled,
+            "existing_generation" => Self::ExistingGeneration,
             "skipped" | "not_needed" => Self::Skipped,
             "no_sources" => Self::NoSources,
             "daemon_background" => Self::DaemonBackground,
+            "daemon_unavailable" => Self::DaemonUnavailable,
             "completed" | "success" => Self::Completed,
             "failed" => Self::Failed,
             "background" | "started" => Self::Background,
@@ -356,9 +364,11 @@ impl RefreshStatus {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Disabled => "disabled",
+            Self::ExistingGeneration => "existing_generation",
             Self::Skipped => "skipped",
             Self::NoSources => "no_sources",
             Self::DaemonBackground => "daemon_background",
+            Self::DaemonUnavailable => "daemon_unavailable",
             Self::Completed => "completed",
             Self::Failed => "failed",
             Self::Background => "background",
@@ -395,6 +405,9 @@ pub struct SearchTelemetry {
     pub citation_count: Option<CountBucket>,
     pub zero_result: Option<bool>,
     pub render_duration: Option<DurationBucket>,
+    pub output_duration: Option<Duration>,
+    pub output_served: Option<bool>,
+    pub health: Option<SearchHealthFacts>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

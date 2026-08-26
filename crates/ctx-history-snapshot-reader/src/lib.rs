@@ -87,6 +87,8 @@ pub enum SnapshotError {
     UnsafePath(String),
     #[error("generation read lease conflicts with reclamation: {0}")]
     LeaseConflict(String),
+    #[error("snapshot changed while a verified reader was opening: {0}")]
+    ConcurrentGenerationChange(String),
     #[error("snapshot schema mismatch")]
     SchemaMismatch {
         expected: SnapshotSchema,
@@ -656,6 +658,9 @@ fn map_generation_error(
         GenerationError::GenerationRetentionLeaseConflict { .. } => {
             SnapshotError::LeaseConflict(generation_id.to_owned())
         }
+        error @ GenerationError::ConcurrentGenerationChange => {
+            SnapshotError::ConcurrentGenerationChange(error.to_string())
+        }
         GenerationError::Io(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
             SnapshotError::UnsafePath("permission denied".to_owned())
         }
@@ -674,6 +679,9 @@ fn map_index_error(
         | IndexError::MissingManifest(_) => SnapshotError::NotFound(generation_id.to_owned()),
         IndexError::GenerationRetentionLeaseConflict { .. } => {
             SnapshotError::LeaseConflict(generation_id.to_owned())
+        }
+        error @ IndexError::ConcurrentGenerationChange => {
+            SnapshotError::ConcurrentGenerationChange(error.to_string())
         }
         IndexError::CoreRecordContractMismatch { actual, .. } => {
             SnapshotError::FingerprintMismatch {

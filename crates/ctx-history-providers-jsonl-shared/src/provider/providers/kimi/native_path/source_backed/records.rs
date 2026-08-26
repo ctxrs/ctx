@@ -47,14 +47,14 @@ pub(super) fn core_record<R: crate::JsonlProviderRuntime>(
         .session
         .parent_provider_session_id
         .as_deref()
-        .map(lineage_session_identity)
+        .map(|parent| lineage_session_identity(parent, compound.source_anchor_scope))
         .transpose()?;
     let root_session_id = compound
         .native
         .session
         .root_provider_session_id
         .as_deref()
-        .map(lineage_session_identity)
+        .map(|root| lineage_session_identity(root, compound.source_anchor_scope))
         .transpose()?;
     let event = value.get("event").unwrap_or(value);
     let activity = kimi_activity(event, event_type, &body, facts)?;

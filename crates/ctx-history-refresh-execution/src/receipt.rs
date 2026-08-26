@@ -91,10 +91,7 @@ impl SourceBackedRefreshReceipt {
                         .is_some_and(|result| {
                             matches!(
                                 result.outcome,
-                                SourceBackedRefreshRouteOutcome::Failed {
-                                    carried_forward: false,
-                                    ..
-                                }
+                                SourceBackedRefreshRouteOutcome::Failed { .. }
                             )
                         })
             })

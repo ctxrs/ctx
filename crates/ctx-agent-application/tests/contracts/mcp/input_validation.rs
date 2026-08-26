@@ -89,6 +89,15 @@ fn mcp_tool_input_validation_returns_stable_invalid_request_and_server_recovers(
             "unknown argument include_subagents",
         ),
         (
+            "unreleased-source-scopes-spelling",
+            "search",
+            json!({
+                "query": "onboarding",
+                "scopes": ["work"]
+            }),
+            "unknown argument scopes",
+        ),
+        (
             "bad-since",
             "search",
             json!({"query": "onboarding", "since": "yesterday"}),

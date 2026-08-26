@@ -25,7 +25,23 @@ impl<B> NanoClawDocumentTreeAdapter<B> {
         catalog_lineage: [u8; 32],
         base_sources: &[CertifiedSource],
     ) -> NanoClawSourceBackedResult<Self> {
-        let source = nanoclaw_source_key(catalog_lineage)?;
+        Self::new_with_base_sources_scoped(
+            data_root,
+            path,
+            catalog_lineage,
+            SourceAnchorScope::Unqualified,
+            base_sources,
+        )
+    }
+
+    pub fn new_with_base_sources_scoped(
+        data_root: &Path,
+        path: PathBuf,
+        catalog_lineage: [u8; 32],
+        source_anchor_scope: SourceAnchorScope,
+        base_sources: &[CertifiedSource],
+    ) -> NanoClawSourceBackedResult<Self> {
+        let source = nanoclaw_source_key_scoped(catalog_lineage, source_anchor_scope)?;
         let certified_checkpoint =
             NanoClawCertifiedReplayCheckpoint::from_base_sources(&source, base_sources)?;
         Ok(Self {

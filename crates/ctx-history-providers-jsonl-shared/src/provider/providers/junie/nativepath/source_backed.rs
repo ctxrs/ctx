@@ -12,8 +12,9 @@ use ctx_history_core::{
     admit_optional_metadata_text, admit_optional_provider_call_id, admit_provider_declared_fact,
     derive_event_id, derive_native_session_id, ActivityInvocation, ActivityJsonCapture,
     ActivityResult, ActivityTextCapture, AgentScope, CaptureProvider, CoreActivity, CoreRecord,
-    EventIdentityInput, EventType, LiteralFactKind, NativeItemKey, ProviderDeclaredFact, SourceKey,
-    StableEntityId, TypedKey, CORE_ACTIVITY_REVISION, MAX_CORE_CONTENT_BYTES,
+    EventIdentityInput, EventType, LiteralFactKind, NativeItemKey, ProviderDeclaredFact,
+    SourceAnchorScope, SourceKey, StableEntityId, TypedKey, CORE_ACTIVITY_REVISION,
+    MAX_CORE_CONTENT_BYTES,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -24,7 +25,8 @@ use crate::{
         family::jsonl::{
             JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyInventory, JsonlFamilyLeaf,
             JsonlFamilyProjectionMode, JsonlFamilyProjector, JsonlFamilyWorkerContext,
-            JsonlRecordRef,
+            JsonlOversizedRecordPolicy, JsonlRecordRef, JsonlRecordRejections,
+            SourceBackedRecordRejectionDrafts,
         },
         FallbackEventIdentityState,
     },
@@ -42,7 +44,8 @@ const NATIVE_SESSION_NAMESPACE: &str = "junie.session";
 const LOGICAL_SESSION_KIND: &str = "junie-session";
 const LOGICAL_EVENT_KIND: &str = "junie-event";
 const SOURCE_SCHEMA_VARIANT: &str = "junie-session-events-v2";
-const PARSER_REVISION: &str = "junie-source-backed-v7-optional-activity-admission";
+const PARSER_REVISION: &str =
+    "junie-source-backed-v8-optional-activity-admission-record-rejections";
 const EVENT_IDENTITY_REVISION: &str = "junie-content-occurrence-v2";
 const FALLBACK_FINGERPRINT_DOMAIN: &[u8] = b"ctx.junie.fallback-event-fingerprint.v1\0";
 
@@ -55,11 +58,24 @@ struct JunieBinding {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct JunieJsonlAdapter<R>(PhantomData<fn() -> R>);
+pub(crate) struct JunieJsonlAdapter<R> {
+    source_anchor_scope: SourceAnchorScope,
+    runtime: PhantomData<fn() -> R>,
+}
 
 pub(crate) fn junie_jsonl_adapter<R: JsonlProviderRuntime>(
 ) -> Arc<dyn JsonlFamilyAdapter<Runtime = R>> {
-    Arc::new(JunieJsonlAdapter(PhantomData))
+    junie_jsonl_adapter_with_source_root_lineage(None)
+}
+
+pub(crate) fn junie_jsonl_adapter_with_source_root_lineage<R: JsonlProviderRuntime>(
+    source_root_lineage: Option<[u8; 32]>,
+) -> Arc<dyn JsonlFamilyAdapter<Runtime = R>> {
+    Arc::new(JunieJsonlAdapter {
+        source_anchor_scope: source_root_lineage
+            .map_or(SourceAnchorScope::Unqualified, SourceAnchorScope::Lineage),
+        runtime: PhantomData,
+    })
 }
 
 impl<R: JsonlProviderRuntime> JsonlFamilyAdapter for JunieJsonlAdapter<R> {
@@ -87,6 +103,10 @@ impl<R: JsonlProviderRuntime> JsonlFamilyAdapter for JunieJsonlAdapter<R> {
 
     fn append_mode(&self) -> JsonlFamilyAppendMode {
         JsonlFamilyAppendMode::Replacement
+    }
+
+    fn oversized_record_policy(&self) -> JsonlOversizedRecordPolicy {
+        JsonlOversizedRecordPolicy::RejectRecord
     }
 
     fn discover(&self, root: &Path) -> Result<JsonlFamilyInventory> {
@@ -120,7 +140,7 @@ impl<R: JsonlProviderRuntime> JsonlFamilyAdapter for JunieJsonlAdapter<R> {
         let mut sources = HashSet::new();
         let visit = visit_junie_session_event_paths(root, &mut |session, _| {
             let provider_session_id = junie_provider_session_id(&session)?;
-            let source = source_key(&provider_session_id)?;
+            let source = source_key_scoped(&provider_session_id, self.source_anchor_scope)?;
             if !sources.insert(source.exact_descriptor_digest()) {
                 return Err(CaptureError::InvalidPayload(format!(
                     "Junie native session {provider_session_id:?} resolves more than once"
@@ -199,6 +219,11 @@ impl<R: JsonlProviderRuntime> JsonlFamilyAdapter for JunieJsonlAdapter<R> {
             workspace,
             projection,
             fallback_identities,
+            rejections: JsonlRecordRejections::new(
+                leaf.source().clone(),
+                CaptureProvider::Junie,
+                leaf.source_path().display().to_string(),
+            ),
         }))
     }
 }
@@ -209,6 +234,7 @@ struct JunieProjector<R: JsonlProviderRuntime> {
     workspace: Option<String>,
     projection: JunieProjection,
     fallback_identities: FallbackEventIdentityState<R>,
+    rejections: JsonlRecordRejections,
 }
 
 impl<R: JsonlProviderRuntime> JsonlFamilyProjector for JunieProjector<R> {
@@ -220,7 +246,19 @@ impl<R: JsonlProviderRuntime> JsonlFamilyProjector for JunieProjector<R> {
         _worker: &mut JsonlFamilyWorkerContext<R>,
         emit: &mut dyn FnMut(CoreRecord) -> Result<()>,
     ) -> Result<()> {
+        let rejected_before = self.projection.rejected_records();
         let rows = self.projection.project(record)?;
+        let rejected_after = self.projection.rejected_records();
+        debug_assert!(
+            rejected_after == rejected_before
+                || rejected_after == rejected_before.saturating_add(1)
+        );
+        if rejected_after > rejected_before {
+            self.rejections.malformed(
+                record,
+                "Junie record could not be projected within its structural bounds",
+            );
+        }
         self.emit_rows(rows, emit)
     }
 
@@ -232,6 +270,14 @@ impl<R: JsonlProviderRuntime> JsonlFamilyProjector for JunieProjector<R> {
         let rows = self.projection.finish()?;
         self.emit_rows(rows, emit)?;
         self.fallback_identities.finish()
+    }
+
+    fn rejected_records(&self) -> u64 {
+        self.rejections.count()
+    }
+
+    fn take_record_rejections(&mut self) -> SourceBackedRecordRejectionDrafts {
+        self.rejections.take_drafts()
     }
 }
 
@@ -264,14 +310,23 @@ impl<R: JsonlProviderRuntime> JunieProjector<R> {
     }
 }
 
+#[cfg(test)]
 fn source_key(provider_session_id: &str) -> Result<SourceKey> {
-    SourceKey::derive_provider_native(
+    source_key_scoped(provider_session_id, SourceAnchorScope::Unqualified)
+}
+
+fn source_key_scoped(
+    provider_session_id: &str,
+    source_anchor_scope: SourceAnchorScope,
+) -> Result<SourceKey> {
+    SourceKey::derive_provider_native_scoped(
         CaptureProvider::Junie.as_str(),
         JUNIE_SESSION_EVENTS_SOURCE_FORMAT,
         SOURCE_SCHEMA_VARIANT,
         1,
         SOURCE_ANCHOR_NAMESPACE,
         TypedKey::utf8(provider_session_id).map_err(contract)?,
+        source_anchor_scope,
     )
     .map_err(contract)
 }
@@ -473,6 +528,23 @@ mod tests {
             body,
             file_change: None,
         }
+    }
+
+    #[test]
+    fn source_and_session_identities_are_root_scoped() {
+        let released = source_key("same-session").unwrap();
+        let compatibility =
+            source_key_scoped("same-session", SourceAnchorScope::Unqualified).unwrap();
+        let first = source_key_scoped("same-session", SourceAnchorScope::Lineage([1; 32])).unwrap();
+        let second =
+            source_key_scoped("same-session", SourceAnchorScope::Lineage([2; 32])).unwrap();
+
+        assert!(released.exact_descriptor_eq(&compatibility));
+        assert_ne!(first.identity(), second.identity());
+        assert_ne!(
+            session_identity(&first, "same-session").unwrap(),
+            session_identity(&second, "same-session").unwrap()
+        );
     }
 
     #[test]

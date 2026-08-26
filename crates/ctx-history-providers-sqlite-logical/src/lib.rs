@@ -8,8 +8,8 @@ pub mod providers;
 pub mod registration;
 
 pub use registration::{
-    explicit_forgecode_route_plan, logical_sqlite_route_plan, LogicalSqliteRegistrationError,
-    LogicalSqliteRoutePlan,
+    explicit_forgecode_route_plan, explicit_forgecode_route_plan_scoped, logical_sqlite_route_plan,
+    logical_sqlite_route_plan_scoped, LogicalSqliteRegistrationError, LogicalSqliteRoutePlan,
 };
 
 pub use ctx_history_capture_model::{

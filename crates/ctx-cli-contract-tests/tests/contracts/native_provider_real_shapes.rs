@@ -97,7 +97,7 @@ fn start_source_refresh_daemon(temp: &TempDir) -> SourceRefreshDaemon {
 }
 
 fn assert_source_backed_search(search: &Value, provider: &str, query: &str) {
-    assert_eq!(search["schema_version"], 1, "{search:#}");
+    assert_eq!(search["schema_version"], 2, "{search:#}");
     assert_eq!(search["query"], query, "{search:#}");
     assert_eq!(search["filters"]["provider"], provider, "{search:#}");
     assert_eq!(search["retrieval"]["index"], "core", "{search:#}");

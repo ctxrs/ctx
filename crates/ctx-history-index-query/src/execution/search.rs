@@ -1,558 +1,886 @@
 use super::*;
+use crate::records::stored_event_record_with_size;
 
-impl VerifiedIndex {
-    /// Searches full policy-selected event text using ordinary analyzed text.
-    ///
-    /// An analyzed token admits a partial match. Full query-term coverage ranks
-    /// ahead of partial coverage, followed by ordinary lexical relevance.
-    /// QueryParser operators and field syntax are intentionally not accepted.
-    pub fn search_event_candidates(
-        &self,
-        natural_text: &str,
-        limit: usize,
-    ) -> Result<Vec<EventSearchCandidate>> {
-        self.search_event_candidates_with_filters(
-            natural_text,
-            &EventSearchFilters::default(),
-            limit,
-        )
+impl EventCandidateQueryReceipt {
+    fn record_query_execution(&mut self) -> Result<()> {
+        self.query_executions = self
+            .query_executions
+            .checked_add(1)
+            .ok_or(IndexError::CountOverflow)?;
+        Ok(())
     }
 
-    /// Searches policy-selected event text with conjunctive metadata filters.
-    ///
-    /// Exact-value fields use their stored spelling. Workspace and file filters
-    /// use case-insensitive substring matching over provider-declared literal
-    /// facts without interpreting those facts as repository authority.
-    pub fn search_event_candidates_with_filters(
-        &self,
-        natural_text: &str,
-        filters: &EventSearchFilters,
-        limit: usize,
-    ) -> Result<Vec<EventSearchCandidate>> {
-        self.search_event_candidates_any_with_filters(&[natural_text], filters, limit)
+    fn record_collector_hits(&mut self, hits: usize) -> Result<()> {
+        let hits = u64::try_from(hits).map_err(|_| IndexError::CountOverflow)?;
+        self.collector_hits = self
+            .collector_hits
+            .checked_add(hits)
+            .ok_or(IndexError::CountOverflow)?;
+        Ok(())
     }
 
-    /// Searches OR-composed natural-text alternatives with shared filters.
-    ///
-    /// Matching any unique analyzed token admits the event. Results rank by
-    /// query-term coverage before ordinary lexical relevance. This is the
-    /// indexed implementation of the CLI's repeated `--term` contract.
-    pub fn search_event_candidates_any_with_filters(
-        &self,
-        natural_texts: &[&str],
-        filters: &EventSearchFilters,
-        limit: usize,
-    ) -> Result<Vec<EventSearchCandidate>> {
-        validate_lexical_result_limit(limit)?;
-        LEXICAL_QUERY_LIMITS.validate_texts(natural_texts.iter().copied())?;
-        filters.validate_content_scope()?;
-        if limit == 0 {
-            return Ok(Vec::new());
-        }
-        let fields = fields_from_schema(self.searcher.schema())?;
-        let ranking_terms = self.body_query_terms(natural_texts, fields)?;
-        if ranking_terms.is_empty() {
-            return Ok(Vec::new());
-        }
-        let mut candidates = Vec::with_capacity(limit);
-        let mut seen = BTreeSet::new();
-        if ranking_terms.len() == 1 {
-            #[cfg(any(test, feature = "test-support"))]
-            record_lexical_query_construction();
-            let body_query =
-                class_weighted_body_query(&ranking_terms, 1, filters.content_scope, fields);
-            let lexical_limit = limit
-                .checked_add(seen.len())
-                .ok_or(IndexError::CountOverflow)?;
-            for candidate in
-                self.collect_event_candidate_addresses(body_query, filters, lexical_limit, fields)?
-            {
-                if seen.insert(candidate.event_id) {
-                    candidates.push(candidate);
-                    if candidates.len() == limit {
-                        break;
-                    }
-                }
-            }
-            return self.materialize_event_candidates(candidates, fields);
-        }
-
-        // Rank by exact query-term coverage without constructing one
-        // `HashMap<DocId, coverage>` entry for every matching document. That
-        // approach made memory and CPU proportional to the corpus frequency of
-        // common terms even when the caller requested only a handful of
-        // results. Tantivy's minimum-should-match query gives us the same
-        // ordering as bounded tiers: all terms first, then N-1, down to one.
-        for minimum_required in (1..=ranking_terms.len()).rev() {
-            #[cfg(any(test, feature = "test-support"))]
-            record_lexical_query_construction();
-            let body_query = class_weighted_body_query(
-                &ranking_terms,
-                minimum_required,
-                filters.content_scope,
-                fields,
-            );
-            // Lower-coverage tiers also contain every prior higher-coverage
-            // hit. Bounded over-collection by exactly the number already seen
-            // guarantees enough unique lookahead without a total-count scan.
-            let tier_limit = limit
-                .checked_add(seen.len())
-                .ok_or(IndexError::CountOverflow)?;
-            for candidate in
-                self.collect_event_candidate_addresses(body_query, filters, tier_limit, fields)?
-            {
-                if seen.insert(candidate.event_id) {
-                    candidates.push(candidate);
-                    if candidates.len() == limit {
-                        return self.materialize_event_candidates(candidates, fields);
-                    }
-                }
-            }
-        }
-        self.materialize_event_candidates(candidates, fields)
+    fn record_decoded(&mut self, encoded_core_bytes: usize) -> Result<()> {
+        let encoded_core_bytes =
+            u64::try_from(encoded_core_bytes).map_err(|_| IndexError::CountOverflow)?;
+        let records_decoded = self
+            .records_decoded
+            .checked_add(1)
+            .ok_or(IndexError::CountOverflow)?;
+        let encoded_core_bytes_decoded = self
+            .encoded_core_bytes_decoded
+            .checked_add(encoded_core_bytes)
+            .ok_or(IndexError::CountOverflow)?;
+        self.records_decoded = records_decoded;
+        self.encoded_core_bytes_decoded = encoded_core_bytes_decoded;
+        Ok(())
     }
+}
 
-    /// Lists filtered metadata records without requiring a lexical term.
-    pub fn list_event_candidates_with_filters(
-        &self,
-        filters: &EventSearchFilters,
-        limit: usize,
-    ) -> Result<Vec<EventSearchCandidate>> {
-        validate_lexical_result_limit(limit)?;
-        filters.validate_content_scope()?;
-        if limit == 0 {
-            return Ok(Vec::new());
-        }
-        let fields = fields_from_schema(self.searcher.schema())?;
-        let candidates =
-            self.collect_event_candidate_addresses(Box::new(AllQuery), filters, limit, fields)?;
-        self.materialize_event_candidates(candidates, fields)
-    }
+use ctx_history_index_format::BODY_ANALYZER;
+use std::sync::Arc;
+use tantivy::{
+    fieldnorm::FieldNormReader,
+    postings::{Postings as _, TermInfo},
+    query::Bm25Weight,
+};
 
-    /// Selects semantic-eligible event IDs with the exact metadata predicate
-    /// used by lexical search, bound to this immutable generation.
-    ///
-    /// Selection reads indexed postings and event-ID fast fields only. It does
-    /// not decode stored Core records or reopen provider sources.
-    pub fn semantic_filter_projection(
-        &self,
-        filters: &EventSearchFilters,
-    ) -> Result<SemanticFilterProjection> {
-        filters.validate_content_scope()?;
-        validate_event_sort_fast_fields(&self.searcher)?;
-        let fields = fields_from_schema(self.searcher.schema())?;
-        let semantic_eligibility = Box::new(BooleanQuery::intersection(vec![
-            Box::new(TermQuery::new(
-                Term::from_field_text(fields.event_type, "message"),
-                IndexRecordOption::Basic,
-            )),
-            Box::new(TermQuery::new(
-                Term::from_field_text(fields.role, "user"),
-                IndexRecordOption::Basic,
-            )),
-        ]));
-        let source_identity_query = self.source_identity_query(filters, fields)?;
-        let query =
-            filtered_event_query(semantic_eligibility, source_identity_query, filters, fields)?;
-        let addresses = self
-            .searcher
-            .search(query.as_ref(), &DocSetCollector)
-            .map_err(IndexError::from)?;
-        let mut event_ids = HashSet::with_capacity(addresses.len());
-        for address in addresses {
-            let (event_id, _, _) = core_event_fast_preflight(&self.searcher, address)?;
-            if !event_ids.insert(event_id) {
-                return Err(IndexError::DuplicateEventIdentity(event_id.to_string()));
-            }
-        }
-        Ok(SemanticFilterProjection {
-            generation_id: self.generation_id.clone(),
-            event_ids,
-        })
-    }
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static MANUAL_INVERTED_INDEX_ACQUISITIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static MANUAL_POSTING_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static MANUAL_LIVE_POSTINGS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static MANUAL_MAXIMUM_LIVE_POSTINGS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
-    fn collect_event_candidate_addresses(
-        &self,
-        body_query: Box<dyn Query>,
-        filters: &EventSearchFilters,
-        limit: usize,
-        fields: Fields,
-    ) -> Result<Vec<LexicalAddressCandidate>> {
-        validate_event_sort_fast_fields(&self.searcher)?;
-        let source_identity_query = self.source_identity_query(filters, fields)?;
-        let query = filtered_event_query(body_query, source_identity_query, filters, fields)?;
-        let collector = TopDocs::with_limit(limit).tweak_score(move |segment_reader| {
-            // These readers were checked above. The fallbacks keep this
-            // infallible collector closure panic-free if Tantivy ever changes
-            // when it resolves a validated fast field.
-            let high = segment_reader
-                .fast_fields()
-                .u64(EVENT_ID_HIGH_FIELD)
-                .ok()
-                .map(|column| column.first_or_default_col(0));
-            let low = segment_reader
-                .fast_fields()
-                .u64(EVENT_ID_LOW_FIELD)
-                .ok()
-                .map(|column| column.first_or_default_col(0));
-            move |doc, score| {
-                let high = high.as_ref().map_or(0, |column| column.get_val(doc));
-                let low = low.as_ref().map_or(0, |column| column.get_val(doc));
-                (score, Reverse((high, low)))
-            }
-        });
-        type ScoredDocAddress = ((Score, Reverse<(u64, u64)>), DocAddress);
+const EVENT_RANGE_ORDER_FAST_FIELD: &str = "event_range_order";
+
+mod executor;
+
+#[derive(Debug, Clone, Copy)]
+enum ManualLexicalMode<'a> {
+    Body(&'a [&'a str]),
+    List,
+}
+
+/// Stable segment identity plus the small body metadata required for exact
+/// corpus-wide BM25 statistics. No cursor or reader is retained here.
+struct PreparedBodySegment {
+    context: LexicalSegmentContext,
+    body_term_infos: Vec<Option<TermInfo>>,
+}
+
+struct PreparedSegment {
+    context: LexicalSegmentContext,
+    body_postings: Vec<Option<SegmentPostings>>,
+    fieldnorms: Option<FieldNormReader>,
+    filters: SegmentFilters,
+    classes: SegmentClasses,
+}
+
+impl PreparedSegment {
+    fn new(
+        context: LexicalSegmentContext,
+        body_postings: Vec<Option<SegmentPostings>>,
+        fieldnorms: Option<FieldNormReader>,
+        filters: SegmentFilters,
+        classes: SegmentClasses,
+    ) -> Self {
         #[cfg(any(test, feature = "test-support"))]
-        record_lexical_query_execution();
-        let hits: Vec<ScoredDocAddress> = self.searcher.search(query.as_ref(), &collector)?;
-        let mut candidates = Vec::with_capacity(hits.len());
-        for ((score, Reverse((event_id_high, event_id_low))), address) in hits {
-            candidates.push(LexicalAddressCandidate {
-                event_id: Uuid::from_u128(
-                    (u128::from(event_id_high) << 64) | u128::from(event_id_low),
-                ),
-                address,
-                score,
-            });
+        record_live_postings_added(
+            body_postings.iter().flatten().count()
+                + filters.posting_count()
+                + classes.posting_count(),
+        );
+        Self {
+            context,
+            body_postings,
+            fieldnorms,
+            filters,
+            classes,
         }
-        Ok(candidates)
     }
 
-    fn materialize_event_candidates(
-        &self,
-        candidates: Vec<LexicalAddressCandidate>,
-        fields: Fields,
-    ) -> Result<Vec<EventSearchCandidate>> {
-        let mut materialized = Vec::with_capacity(candidates.len());
-        for candidate in candidates {
-            let event = self.event_record(candidate.address, fields)?;
-            if event.event_id.as_uuid() != candidate.event_id {
-                return Err(IndexError::InvalidStoredDocumentField("event_id"));
-            }
-            materialized.push(EventSearchCandidate {
-                event,
-                score: candidate.score,
-            });
-        }
-        Ok(materialized)
+    #[cfg(any(test, feature = "test-support"))]
+    fn posting_count(&self) -> usize {
+        self.body_postings.iter().flatten().count()
+            + self.filters.posting_count()
+            + self.classes.posting_count()
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl Drop for PreparedSegment {
+    fn drop(&mut self) {
+        let posting_count = self.posting_count();
+        MANUAL_LIVE_POSTINGS.set(MANUAL_LIVE_POSTINGS.get() - posting_count);
+    }
+}
+
+struct SegmentFilters {
+    required: Vec<Vec<SegmentPostings>>,
+    prohibited: Vec<Vec<SegmentPostings>>,
+    workspace: Option<SegmentBitmap>,
+    file: Option<SegmentBitmap>,
+}
+
+impl SegmentFilters {
+    #[cfg(any(test, feature = "test-support"))]
+    fn posting_count(&self) -> usize {
+        self.required.iter().map(Vec::len).sum::<usize>()
+            + self.prohibited.iter().map(Vec::len).sum::<usize>()
     }
 
-    fn source_identity_query(
-        &self,
-        filters: &EventSearchFilters,
-        fields: Fields,
-    ) -> Result<Option<Box<dyn Query>>> {
-        if !filters.has_source_identity_filter() {
-            return Ok(None);
-        }
-        filters.validate_source_identity_filters()?;
-        let mut clauses: Vec<(Occur, Box<dyn Query>)> = vec![(
-            Occur::Must,
-            Box::new(TermQuery::new(
-                Term::from_field_text(fields.provider, "custom"),
-                IndexRecordOption::Basic,
-            )),
-        )];
-        if let Some(history_source) = filters.history_source.as_deref() {
-            let Some((history_provider_key, history_source_id)) =
-                history_source.trim().split_once('/')
-            else {
-                return Ok(Some(Box::new(EmptyQuery)));
+    fn matches_none(&self) -> bool {
+        self.required.iter().any(Vec::is_empty)
+            || self.workspace.as_ref().is_some_and(|bitmap| !bitmap.any)
+            || self.file.as_ref().is_some_and(|bitmap| !bitmap.any)
+    }
+
+    fn accepts(
+        &mut self,
+        doc: DocId,
+        meter: &mut LexicalWorkMeter,
+        segment: &LexicalSegmentContext,
+    ) -> Result<Option<bool>> {
+        for group in &mut self.required {
+            let Some(matches) = posting_group_contains(group, doc, meter, segment) else {
+                return Ok(None);
             };
-            clauses.push((
-                Occur::Must,
-                Box::new(TermQuery::new(
-                    Term::from_field_text(fields.custom_provider_key, history_provider_key),
-                    IndexRecordOption::Basic,
-                )),
-            ));
-            clauses.push((
-                Occur::Must,
-                Box::new(TermQuery::new(
-                    Term::from_field_text(fields.custom_source_id, history_source_id),
-                    IndexRecordOption::Basic,
-                )),
-            ));
+            if !matches {
+                return Ok(Some(false));
+            }
         }
-        if let Some(provider_key) = filters.provider_key.as_deref().map(str::trim) {
-            clauses.push((
-                Occur::Must,
-                Box::new(TermQuery::new(
-                    Term::from_field_text(fields.custom_provider_key, provider_key),
-                    IndexRecordOption::Basic,
-                )),
-            ));
+        for group in &mut self.prohibited {
+            let Some(matches) = posting_group_contains(group, doc, meter, segment) else {
+                return Ok(None);
+            };
+            if matches {
+                return Ok(Some(false));
+            }
         }
-        if let Some(source_id) = filters.source_id.as_deref().map(str::trim) {
-            clauses.push((
-                Occur::Must,
-                Box::new(TermQuery::new(
-                    Term::from_field_text(fields.custom_source_id, source_id),
-                    IndexRecordOption::Basic,
-                )),
-            ));
+        for bitmap in [self.workspace.as_ref(), self.file.as_ref()] {
+            let Some(bitmap) = bitmap else {
+                continue;
+            };
+            if !meter.charge(
+                LexicalWorkCounter::FilterProbes,
+                1,
+                Some(segment),
+                Some(doc),
+            ) {
+                return Ok(None);
+            }
+            if !bitmap.contains(doc)? {
+                return Ok(Some(false));
+            }
         }
-        Ok(Some(Box::new(BooleanQuery::new(clauses))))
+        Ok(Some(true))
     }
 }
 
-fn class_weighted_body_query(
-    ranking_terms: &[Term],
-    minimum_required: usize,
-    scope: SearchContentScope,
-    fields: Fields,
-) -> Box<dyn Query> {
-    match scope {
-        SearchContentScope::All | SearchContentScope::Transcript => {
-            Box::new(ClassWeightedQuery::new(
-                ordinary_body_query(ranking_terms, minimum_required),
-                fields.event_type,
-                scope,
-            ))
-        }
-        SearchContentScope::Calls | SearchContentScope::Outputs => {
-            ordinary_body_query(ranking_terms, minimum_required)
-        }
+struct SegmentBitmap {
+    words: Vec<u64>,
+    any: bool,
+}
+
+impl SegmentBitmap {
+    fn insert(&mut self, doc: DocId) -> Result<()> {
+        let doc = usize::try_from(doc).map_err(|_| IndexError::CountOverflow)?;
+        let word = self
+            .words
+            .get_mut(doc / u64::BITS as usize)
+            .ok_or(IndexError::InvalidStoredDocumentField("literal_fact"))?;
+        *word |= 1_u64 << (doc % u64::BITS as usize);
+        self.any = true;
+        Ok(())
+    }
+
+    fn contains(&self, doc: DocId) -> Result<bool> {
+        let doc = usize::try_from(doc).map_err(|_| IndexError::CountOverflow)?;
+        let word = self
+            .words
+            .get(doc / u64::BITS as usize)
+            .ok_or(IndexError::InvalidStoredDocumentField("literal_fact"))?;
+        Ok(word & (1_u64 << (doc % u64::BITS as usize)) != 0)
     }
 }
 
-fn ordinary_body_query(ranking_terms: &[Term], minimum_required: usize) -> Box<dyn Query> {
-    if ranking_terms.len() == 1 {
-        return Box::new(TermQuery::new(
-            ranking_terms[0].clone(),
-            IndexRecordOption::WithFreqs,
-        ));
-    }
-    let alternatives = ranking_terms
-        .iter()
-        .cloned()
-        .map(|term| Box::new(TermQuery::new(term, IndexRecordOption::WithFreqs)) as Box<dyn Query>)
-        .collect();
-    Box::new(BooleanQuery::union_with_minimum_required_clauses(
-        alternatives,
-        minimum_required,
-    ))
+enum SegmentClasses {
+    Unweighted,
+    Weighted(Box<WeightedSegmentClasses>),
 }
 
-#[derive(Debug)]
-struct ClassWeightedQuery {
-    inner: Box<dyn Query>,
-    event_type_field: Field,
-    scope: SearchContentScope,
-}
-
-impl ClassWeightedQuery {
-    fn new(inner: Box<dyn Query>, event_type_field: Field, scope: SearchContentScope) -> Self {
-        debug_assert!(matches!(
-            scope,
-            SearchContentScope::All | SearchContentScope::Transcript
-        ));
-        Self {
-            inner,
-            event_type_field,
-            scope,
-        }
-    }
-}
-
-impl Clone for ClassWeightedQuery {
-    fn clone(&self) -> Self {
-        Self {
-            inner: self.inner.box_clone(),
-            event_type_field: self.event_type_field,
-            scope: self.scope,
-        }
-    }
-}
-
-impl Query for ClassWeightedQuery {
-    fn weight(&self, enable_scoring: EnableScoring<'_>) -> tantivy::Result<Box<dyn Weight>> {
-        Ok(Box::new(ClassWeightedWeight {
-            inner: self.inner.weight(enable_scoring)?,
-            event_type_field: self.event_type_field,
-            scope: self.scope,
-        }))
-    }
-
-    fn query_terms<'a>(&'a self, visitor: &mut dyn FnMut(&'a Term, bool)) {
-        self.inner.query_terms(visitor);
-    }
-}
-
-struct ClassWeightedWeight {
-    inner: Box<dyn Weight>,
-    event_type_field: Field,
-    scope: SearchContentScope,
-}
-
-impl ClassWeightedWeight {
-    fn class_postings(&self, reader: &SegmentReader) -> tantivy::Result<ClassPostings> {
-        ClassPostings::open(reader, self.event_type_field, self.scope)
-    }
-}
-
-impl Weight for ClassWeightedWeight {
-    fn scorer(&self, reader: &SegmentReader, boost: Score) -> tantivy::Result<Box<dyn Scorer>> {
-        Ok(Box::new(ClassWeightedScorer {
-            inner: self.inner.scorer(reader, boost)?,
-            classes: self.class_postings(reader)?,
-        }))
-    }
-
-    fn explain(&self, reader: &SegmentReader, doc: DocId) -> tantivy::Result<Explanation> {
-        let inner_explanation = self.inner.explain(reader, doc)?;
-        let mut scorer = self.scorer(reader, 1.0)?;
-        scorer.seek(doc);
-        let mut explanation = Explanation::new("event-content class weight", scorer.score());
-        explanation.add_detail(inner_explanation);
-        Ok(explanation)
-    }
-
-    fn count(&self, reader: &SegmentReader) -> tantivy::Result<u32> {
-        self.inner.count(reader)
-    }
-
-    fn for_each(
-        &self,
-        reader: &SegmentReader,
-        callback: &mut dyn FnMut(DocId, Score),
-    ) -> tantivy::Result<()> {
-        let mut classes = self.class_postings(reader)?;
-        self.inner.for_each(reader, &mut |doc, score| {
-            callback(doc, score * classes.weight(doc))
-        })
-    }
-
-    fn for_each_no_score(
-        &self,
-        reader: &SegmentReader,
-        callback: &mut dyn FnMut(&[DocId]),
-    ) -> tantivy::Result<()> {
-        self.inner.for_each_no_score(reader, callback)
-    }
-
-    fn for_each_pruning(
-        &self,
-        threshold: Score,
-        reader: &SegmentReader,
-        callback: &mut dyn FnMut(DocId, Score) -> Score,
-    ) -> tantivy::Result<()> {
-        let mut classes = self.class_postings(reader)?;
-        let mut weighted_threshold = threshold;
-        // Every class weight is at most 1.0, so an unweighted score at or
-        // below the collector threshold can never become competitive. The
-        // inner query may therefore retain its native Block-WAND pruning.
-        self.inner
-            .for_each_pruning(threshold, reader, &mut |doc, score| {
-                let weighted_score = score * classes.weight(doc);
-                if weighted_score > weighted_threshold {
-                    weighted_threshold = callback(doc, weighted_score);
-                }
-                weighted_threshold
-            })
-    }
-}
-
-struct ClassWeightedScorer {
-    inner: Box<dyn Scorer>,
-    classes: ClassPostings,
-}
-
-impl DocSet for ClassWeightedScorer {
-    fn advance(&mut self) -> DocId {
-        self.inner.advance()
-    }
-
-    fn seek(&mut self, target: DocId) -> DocId {
-        self.inner.seek(target)
-    }
-
-    fn doc(&self) -> DocId {
-        self.inner.doc()
-    }
-
-    fn size_hint(&self) -> u32 {
-        self.inner.size_hint()
-    }
-
-    fn cost(&self) -> u64 {
-        self.inner.cost()
-    }
-}
-
-impl Scorer for ClassWeightedScorer {
-    fn score(&mut self) -> Score {
-        self.inner.score() * self.classes.weight(self.inner.doc())
-    }
-}
-
-struct ClassPostings {
-    message: SegmentPostings,
-    summary: SegmentPostings,
+struct WeightedSegmentClasses {
+    message: Option<SegmentPostings>,
+    summary: Option<SegmentPostings>,
     outputs: Vec<SegmentPostings>,
     scope: SearchContentScope,
 }
 
-impl ClassPostings {
-    fn open(
-        reader: &SegmentReader,
-        event_type_field: Field,
-        scope: SearchContentScope,
-    ) -> tantivy::Result<Self> {
-        let inverted_index = reader.inverted_index(event_type_field)?;
-        let postings = |event_type: &str| {
-            inverted_index
-                .read_postings(
-                    &Term::from_field_text(event_type_field, event_type),
-                    IndexRecordOption::Basic,
-                )
-                .map(|postings| postings.unwrap_or_else(SegmentPostings::empty))
-        };
-        Ok(Self {
-            message: postings("message")?,
-            summary: postings("summary")?,
-            outputs: if scope == SearchContentScope::All {
-                OUTPUT_EVENT_TYPES
-                    .iter()
-                    .map(|event_type| postings(event_type))
-                    .collect::<std::io::Result<Vec<_>>>()?
-            } else {
-                Vec::new()
-            },
-            scope,
-        })
+impl SegmentClasses {
+    #[cfg(any(test, feature = "test-support"))]
+    fn posting_count(&self) -> usize {
+        match self {
+            Self::Unweighted => 0,
+            Self::Weighted(weighted) => {
+                usize::from(weighted.message.is_some())
+                    + usize::from(weighted.summary.is_some())
+                    + weighted.outputs.len()
+            }
+        }
     }
 
-    fn weight(&mut self, doc: DocId) -> Score {
-        if posting_matches(&mut self.message, doc) {
-            return 1.0;
+    fn weight(
+        &mut self,
+        doc: DocId,
+        meter: &mut LexicalWorkMeter,
+        segment: &LexicalSegmentContext,
+    ) -> Option<Score> {
+        let Self::Weighted(weighted) = self else {
+            return Some(1.0);
+        };
+        if posting_option_contains(&mut weighted.message, doc, meter, segment)? {
+            return Some(1.0);
         }
-        if posting_matches(&mut self.summary, doc) {
-            return 0.9;
+        if posting_option_contains(&mut weighted.summary, doc, meter, segment)? {
+            return Some(0.9);
         }
-        if self
-            .outputs
-            .iter_mut()
-            .any(|postings| posting_matches(postings, doc))
-        {
-            return 0.6;
+        if posting_group_contains(&mut weighted.outputs, doc, meter, segment)? {
+            return Some(0.6);
         }
-        match self.scope {
+        Some(match weighted.scope {
             SearchContentScope::All => 0.8,
             SearchContentScope::Transcript => 0.9,
             SearchContentScope::Calls | SearchContentScope::Outputs => unreachable!(),
-        }
+        })
     }
 }
 
-fn posting_matches(postings: &mut SegmentPostings, doc: DocId) -> bool {
-    let posting_doc = postings.doc();
-    (posting_doc == doc) || (posting_doc < doc && postings.seek(doc) == doc)
+enum PostingOpen {
+    Opened { postings: Box<SegmentPostings> },
+    Missing,
+    Exhausted,
 }
 
-#[derive(Debug, Clone, Copy)]
-struct LexicalAddressCandidate {
-    event_id: Uuid,
-    address: DocAddress,
+/// Tantivy's `Bm25Weight` is used only as a pure formula value. Both corpus
+/// inputs come from the explicitly metered manual term-info prepass, and the
+/// executor calls only `score(fieldnorm_id, term_frequency)` afterward. No
+/// `Query`, `Weight`, `Scorer`, `TopDocs`, or `Searcher` execution is hidden in
+/// this helper.
+fn explicit_bm25_weight(
+    doc_frequency: u64,
+    total_num_docs: u64,
+    average_fieldnorm: Score,
+) -> Bm25Weight {
+    Bm25Weight::for_one_term_without_explain(doc_frequency, total_num_docs, average_fieldnorm)
+}
+
+fn manual_inverted_index(reader: &SegmentReader, field: Field) -> Result<Arc<InvertedIndexReader>> {
+    #[cfg(any(test, feature = "test-support"))]
+    MANUAL_INVERTED_INDEX_ACQUISITIONS
+        .set(MANUAL_INVERTED_INDEX_ACQUISITIONS.get().saturating_add(1));
+    Ok(reader.inverted_index(field)?)
+}
+
+fn manual_read_postings(
+    inverted: &InvertedIndexReader,
+    term_info: &TermInfo,
+    option: IndexRecordOption,
+) -> Result<SegmentPostings> {
+    #[cfg(any(test, feature = "test-support"))]
+    MANUAL_POSTING_READS.set(MANUAL_POSTING_READS.get().saturating_add(1));
+    Ok(inverted.read_postings_from_terminfo(term_info, option)?)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn record_live_postings_added(posting_count: usize) {
+    let live = MANUAL_LIVE_POSTINGS.get().saturating_add(posting_count);
+    MANUAL_LIVE_POSTINGS.set(live);
+    MANUAL_MAXIMUM_LIVE_POSTINGS.set(MANUAL_MAXIMUM_LIVE_POSTINGS.get().max(live));
+}
+
+fn open_manual_segment(
+    reader: &SegmentReader,
+    prepared: PreparedBodySegment,
+    filter_plan: &ManualFilterPlan,
+    content_scope: SearchContentScope,
+    fields: Fields,
+    meter: &mut LexicalWorkMeter,
+) -> Result<Option<PreparedSegment>> {
+    let PreparedBodySegment {
+        context,
+        body_term_infos,
+    } = prepared;
+    let Some(body_postings) = open_body_postings(
+        reader,
+        fields.body_search,
+        &body_term_infos,
+        meter,
+        &context,
+    )?
+    else {
+        return Ok(None);
+    };
+    let fieldnorms = if body_term_infos.is_empty() {
+        None
+    } else {
+        Some(reader.get_fieldnorms_reader(fields.body_search)?)
+    };
+    let Some(filters) = open_segment_filters(reader, filter_plan, fields, meter, &context)? else {
+        return Ok(None);
+    };
+    let Some(classes) =
+        open_segment_classes(reader, fields.event_type, content_scope, meter, &context)?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(PreparedSegment::new(
+        context,
+        body_postings,
+        fieldnorms,
+        filters,
+        classes,
+    )))
+}
+
+fn open_body_postings(
+    reader: &SegmentReader,
+    field: Field,
+    term_infos: &[Option<TermInfo>],
+    meter: &mut LexicalWorkMeter,
+    segment: &LexicalSegmentContext,
+) -> Result<Option<Vec<Option<SegmentPostings>>>> {
+    let mut inverted = None;
+    let mut postings = Vec::with_capacity(term_infos.len());
+    for term_info in term_infos {
+        let Some(term_info) = term_info else {
+            postings.push(None);
+            continue;
+        };
+        // Term metadata was gathered in the corpus-statistics prepass. Charge
+        // the posting read before reacquiring the segment's inverted reader.
+        if !meter.charge(LexicalWorkCounter::PostingOpens, 1, Some(segment), None) {
+            return Ok(None);
+        }
+        let inverted = match &inverted {
+            Some(inverted) => inverted,
+            None => inverted.insert(manual_inverted_index(reader, field)?),
+        };
+        postings.push(Some(manual_read_postings(
+            inverted,
+            term_info,
+            IndexRecordOption::WithFreqs,
+        )?));
+    }
+    Ok(Some(postings))
+}
+
+fn open_posting(
+    reader: &SegmentReader,
+    term: &Term,
+    option: IndexRecordOption,
+    meter: &mut LexicalWorkMeter,
+    segment: &LexicalSegmentContext,
+) -> Result<PostingOpen> {
+    // This charge precedes both inverted-reader acquisition and the exact
+    // term-info lookup. A zero dictionary budget therefore performs neither.
+    if !meter.charge(
+        LexicalWorkCounter::DictionaryLookups,
+        1,
+        Some(segment),
+        None,
+    ) {
+        return Ok(PostingOpen::Exhausted);
+    }
+    let inverted = manual_inverted_index(reader, term.field())?;
+    let Some(term_info) = inverted.get_term_info(term)? else {
+        return Ok(PostingOpen::Missing);
+    };
+    if !meter.charge(LexicalWorkCounter::PostingOpens, 1, Some(segment), None) {
+        return Ok(PostingOpen::Exhausted);
+    }
+    Ok(PostingOpen::Opened {
+        postings: Box::new(manual_read_postings(&inverted, &term_info, option)?),
+    })
+}
+
+fn open_segment_filters(
+    reader: &SegmentReader,
+    plan: &ManualFilterPlan,
+    fields: Fields,
+    meter: &mut LexicalWorkMeter,
+    segment: &LexicalSegmentContext,
+) -> Result<Option<SegmentFilters>> {
+    let Some(required) = open_posting_groups(reader, &plan.required, meter, segment)? else {
+        return Ok(None);
+    };
+    let Some(prohibited) = open_posting_groups(reader, &plan.prohibited, meter, segment)? else {
+        return Ok(None);
+    };
+    if required.iter().any(Vec::is_empty) {
+        return Ok(Some(SegmentFilters {
+            required,
+            prohibited,
+            workspace: None,
+            file: None,
+        }));
+    }
+    let workspace = if let Some(needle) = plan.workspace_substring.as_ref() {
+        let workspace_fields = [
+            fields.fact_workspace,
+            fields.fact_session_cwd,
+            fields.fact_tool_workdir,
+            fields.fact_project,
+        ];
+        let Some(bitmap) =
+            open_substring_bitmap(reader, &workspace_fields, needle, meter, segment)?
+        else {
+            return Ok(None);
+        };
+        Some(bitmap)
+    } else {
+        None
+    };
+    let file = if workspace.as_ref().is_some_and(|bitmap| !bitmap.any) {
+        None
+    } else if let Some(needle) = plan.file_substring.as_ref() {
+        let Some(bitmap) =
+            open_substring_bitmap(reader, &[fields.fact_file], needle, meter, segment)?
+        else {
+            return Ok(None);
+        };
+        Some(bitmap)
+    } else {
+        None
+    };
+    Ok(Some(SegmentFilters {
+        required,
+        prohibited,
+        workspace,
+        file,
+    }))
+}
+
+fn open_substring_bitmap(
+    reader: &SegmentReader,
+    fields: &[Field],
+    needle: &AsciiFoldSubstring,
+    meter: &mut LexicalWorkMeter,
+    segment: &LexicalSegmentContext,
+) -> Result<Option<SegmentBitmap>> {
+    let word_count = usize::try_from(reader.max_doc())
+        .map_err(|_| IndexError::CountOverflow)?
+        .div_ceil(u64::BITS as usize);
+    let bitmap_bytes = word_count
+        .checked_mul(size_of::<u64>())
+        .ok_or(IndexError::CountOverflow)?;
+    let bitmap_bytes = u64::try_from(bitmap_bytes).map_err(|_| IndexError::CountOverflow)?;
+    if !meter.charge(
+        LexicalWorkCounter::SubstringBitmapBytes,
+        bitmap_bytes,
+        Some(segment),
+        None,
+    ) {
+        return Ok(None);
+    }
+    let mut bitmap = SegmentBitmap {
+        words: vec![0; word_count],
+        any: false,
+    };
+
+    for field in fields {
+        // The step charge precedes both inverted-index acquisition and the
+        // first dictionary advance. The final unsuccessful advance is also a
+        // real, bounded dictionary operation and is intentionally counted.
+        if !meter.charge(
+            LexicalWorkCounter::SubstringDictionarySteps,
+            1,
+            Some(segment),
+            None,
+        ) {
+            return Ok(None);
+        }
+        let inverted = manual_inverted_index(reader, *field)?;
+        let mut terms = inverted.terms().stream()?;
+        loop {
+            if !terms.advance() {
+                break;
+            }
+            let key = terms.key();
+            let key_bytes = u64::try_from(key.len()).map_err(|_| IndexError::CountOverflow)?;
+            if !meter.charge(
+                LexicalWorkCounter::SubstringDictionaryBytes,
+                key_bytes,
+                Some(segment),
+                None,
+            ) {
+                return Ok(None);
+            }
+            std::str::from_utf8(key)
+                .map_err(|_| IndexError::InvalidStoredDocumentField("literal_fact"))?;
+            if needle.matches(key) {
+                if !meter.charge(LexicalWorkCounter::TermExpansions, 1, Some(segment), None)
+                    || !meter.charge(LexicalWorkCounter::PostingOpens, 1, Some(segment), None)
+                {
+                    return Ok(None);
+                }
+                let mut postings =
+                    manual_read_postings(&inverted, terms.value(), IndexRecordOption::Basic)?;
+                let mut doc = postings.doc();
+                while doc != TERMINATED {
+                    if !meter.charge(
+                        LexicalWorkCounter::SubstringPostingDocs,
+                        1,
+                        Some(segment),
+                        Some(doc),
+                    ) {
+                        return Ok(None);
+                    }
+                    bitmap.insert(doc)?;
+                    doc = postings.advance();
+                }
+            }
+            if !meter.charge(
+                LexicalWorkCounter::SubstringDictionarySteps,
+                1,
+                Some(segment),
+                None,
+            ) {
+                return Ok(None);
+            }
+        }
+    }
+    Ok(Some(bitmap))
+}
+
+fn open_posting_groups(
+    reader: &SegmentReader,
+    groups: &[CanonicalAnyOfTerms],
+    meter: &mut LexicalWorkMeter,
+    segment: &LexicalSegmentContext,
+) -> Result<Option<Vec<Vec<SegmentPostings>>>> {
+    let mut opened_groups = Vec::with_capacity(groups.len());
+    for group in groups {
+        let mut postings = Vec::with_capacity(group.terms.len());
+        for term in &group.terms {
+            match open_posting(reader, term, IndexRecordOption::Basic, meter, segment)? {
+                PostingOpen::Opened {
+                    postings: opened, ..
+                } => postings.push(*opened),
+                PostingOpen::Missing => {}
+                PostingOpen::Exhausted => return Ok(None),
+            }
+        }
+        opened_groups.push(postings);
+    }
+    Ok(Some(opened_groups))
+}
+
+fn open_segment_classes(
+    reader: &SegmentReader,
+    event_type_field: Field,
+    scope: SearchContentScope,
+    meter: &mut LexicalWorkMeter,
+    segment: &LexicalSegmentContext,
+) -> Result<Option<SegmentClasses>> {
+    if matches!(
+        scope,
+        SearchContentScope::Calls | SearchContentScope::Outputs
+    ) {
+        return Ok(Some(SegmentClasses::Unweighted));
+    }
+    let open = |value: &str, meter: &mut LexicalWorkMeter| {
+        open_posting(
+            reader,
+            &Term::from_field_text(event_type_field, value),
+            IndexRecordOption::Basic,
+            meter,
+            segment,
+        )
+    };
+    let message = match open("message", meter)? {
+        PostingOpen::Opened { postings, .. } => Some(*postings),
+        PostingOpen::Missing => None,
+        PostingOpen::Exhausted => return Ok(None),
+    };
+    let summary = match open("summary", meter)? {
+        PostingOpen::Opened { postings, .. } => Some(*postings),
+        PostingOpen::Missing => None,
+        PostingOpen::Exhausted => return Ok(None),
+    };
+    let mut outputs = Vec::new();
+    if scope == SearchContentScope::All {
+        for output_type in OUTPUT_EVENT_TYPES {
+            match open(output_type, meter)? {
+                PostingOpen::Opened { postings, .. } => outputs.push(*postings),
+                PostingOpen::Missing => {}
+                PostingOpen::Exhausted => return Ok(None),
+            }
+        }
+    }
+    Ok(Some(SegmentClasses::Weighted(Box::new(
+        WeightedSegmentClasses {
+            message,
+            summary,
+            outputs,
+            scope,
+        },
+    ))))
+}
+
+fn posting_option_contains(
+    postings: &mut Option<SegmentPostings>,
+    doc: DocId,
+    meter: &mut LexicalWorkMeter,
+    segment: &LexicalSegmentContext,
+) -> Option<bool> {
+    let Some(postings) = postings else {
+        return Some(false);
+    };
+    posting_contains(postings, doc, meter, segment)
+}
+
+fn posting_group_contains(
+    postings: &mut [SegmentPostings],
+    doc: DocId,
+    meter: &mut LexicalWorkMeter,
+    segment: &LexicalSegmentContext,
+) -> Option<bool> {
+    for postings in postings {
+        if posting_contains(postings, doc, meter, segment)? {
+            return Some(true);
+        }
+    }
+    Some(false)
+}
+
+fn posting_contains(
+    postings: &mut SegmentPostings,
+    doc: DocId,
+    meter: &mut LexicalWorkMeter,
+    segment: &LexicalSegmentContext,
+) -> Option<bool> {
+    if !meter.charge(
+        LexicalWorkCounter::FilterProbes,
+        1,
+        Some(segment),
+        Some(doc),
+    ) {
+        return None;
+    }
+    let posting_doc = postings.doc();
+    if posting_doc == doc {
+        return Some(true);
+    }
+    if posting_doc < doc {
+        if !meter.charge(LexicalWorkCounter::FilterSeeks, 1, Some(segment), Some(doc)) {
+            return None;
+        }
+        return Some(postings.seek(doc) == doc);
+    }
+    Some(false)
+}
+
+fn next_body_doc(postings: &[Option<SegmentPostings>]) -> Option<DocId> {
+    postings
+        .iter()
+        .filter_map(|postings| postings.as_ref().map(|postings| postings.doc()))
+        .filter(|doc| *doc != TERMINATED)
+        .min()
+}
+
+fn event_range_order(
+    reader: &SegmentReader,
+    doc: DocId,
+) -> Result<ctx_history_index_format::EventRangeOrderKey> {
+    let column = reader
+        .fast_fields()
+        .bytes(EVENT_RANGE_ORDER_FAST_FIELD)?
+        .ok_or(IndexError::InvalidStoredDocumentField(
+            EVENT_RANGE_ORDER_FAST_FIELD,
+        ))?;
+    let mut term_ords = column.term_ords(doc);
+    let term_ord = term_ords
+        .next()
+        .ok_or(IndexError::InvalidStoredDocumentField(
+            EVENT_RANGE_ORDER_FAST_FIELD,
+        ))?;
+    if term_ords.next().is_some() {
+        return Err(IndexError::InvalidStoredDocumentField(
+            EVENT_RANGE_ORDER_FAST_FIELD,
+        ));
+    }
+    let mut encoded = Vec::with_capacity(ctx_history_index_format::EVENT_RANGE_ORDER_KEY_LEN);
+    if !column.ord_to_bytes(term_ord, &mut encoded)? {
+        return Err(IndexError::InvalidStoredDocumentField(
+            EVENT_RANGE_ORDER_FAST_FIELD,
+        ));
+    }
+    ctx_history_index_format::EventRangeOrderKey::decode(&encoded)
+}
+
+fn validate_materialized_event(
+    order: ctx_history_index_format::EventRangeOrderKey,
+    event: &EventRecord,
+    fast_event_id: Uuid,
+) -> Result<()> {
+    if event.event_id.as_uuid() != fast_event_id
+        || event.event_id.digest() != order.event_identity_digest()
+        || event.event_sequence != order.event_sequence()
+        || event.occurred_at_unix_ms != order.occurred_at_unix_ms()
+    {
+        return Err(IndexError::InvalidStoredDocumentField(
+            EVENT_RANGE_ORDER_FAST_FIELD,
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct RankedAddressCandidate {
+    coverage: u8,
+    query_terms: u8,
     score: Score,
+    order: ctx_history_index_format::EventRangeOrderKey,
+    address: DocAddress,
+    segment: LexicalSegmentContext,
+}
+
+impl PartialEq for RankedAddressCandidate {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+
+impl Eq for RankedAddressCandidate {}
+
+impl PartialOrd for RankedAddressCandidate {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for RankedAddressCandidate {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.coverage
+            .cmp(&other.coverage)
+            .then_with(|| self.score.total_cmp(&other.score))
+            // Smaller full stable identity is better.
+            .then_with(|| {
+                compare_identity_ascending(
+                    self.order.event_identity_digest(),
+                    other.order.event_identity_digest(),
+                )
+            })
+    }
+}
+
+fn compare_identity_ascending(left: [u8; 32], right: [u8; 32]) -> Ordering {
+    // `Ord` reports the better candidate as greater, so reverse this final
+    // comparison while retaining every byte of the stable identity digest.
+    right.cmp(&left)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CandidateExamination {
+    Rejected,
+    Accepted,
+    Exhausted,
+}
+
+fn empty_lexical_batch(candidate_set_exhaustive: bool) -> LexicalSearchBatch {
+    LexicalSearchBatch {
+        candidates: Vec::new(),
+        complete: true,
+        candidate_set_exhaustive,
+        exhaustion: None,
+        counters: LexicalWorkCounters::default(),
+    }
+}
+
+fn finish_lexical_batch(
+    candidates: Vec<LexicalSearchCandidate>,
+    meter: LexicalWorkMeter,
+    retained_truncated: bool,
+) -> LexicalSearchBatch {
+    let (counters, exhaustion) = meter.into_parts();
+    let complete = exhaustion.is_none();
+    LexicalSearchBatch {
+        candidates,
+        complete,
+        candidate_set_exhaustive: complete && !retained_truncated,
+        exhaustion,
+        counters,
+    }
+}
+
+fn complete_compatibility_candidates(
+    batch: LexicalSearchBatch,
+) -> LexicalSearchResult<Vec<EventSearchCandidate>> {
+    let LexicalSearchBatch {
+        candidates,
+        complete,
+        exhaustion,
+        ..
+    } = batch;
+    if !complete {
+        return Err(LexicalSearchError::WorkExhausted(exhaustion.expect(
+            "an incomplete lexical batch always has an exhaustion reason",
+        )));
+    }
+    Ok(candidates.into_iter().map(Into::into).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn direct_bm25_helper_uses_only_explicit_pinned_statistics() {
+        reset_lexical_query_work();
+
+        let doc_frequency = 2_u64;
+        let total_num_docs = 10_u64;
+        let average_fieldnorm = 5.0_f32;
+        let fieldnorm_id = FieldNormReader::fieldnorm_to_id(5);
+        let term_frequency = 3_u32;
+        let score = explicit_bm25_weight(doc_frequency, total_num_docs, average_fieldnorm)
+            .score(fieldnorm_id, term_frequency);
+
+        // Pin Tantivy BM25's k1=1.2, b=0.75 formula independently of the
+        // helper result. This is formula use, not dynamic query execution.
+        let idf = (1.0_f32
+            + ((total_num_docs - doc_frequency) as f32 + 0.5) / (doc_frequency as f32 + 0.5))
+            .ln();
+        let norm = 1.2_f32
+            * (1.0 - 0.75
+                + 0.75 * FieldNormReader::id_to_fieldnorm(fieldnorm_id) as f32 / average_fieldnorm);
+        let expected = idf * (1.0 + 1.2) * term_frequency as f32 / (term_frequency as f32 + norm);
+        assert!((score - expected).abs() < f32::EPSILON * 8.0);
+        assert_eq!(lexical_query_constructions(), 0);
+        assert_eq!(lexical_query_executions(), 0);
+    }
+
+    #[test]
+    fn ranking_identity_tiebreak_uses_bytes_beyond_the_uuid_prefix() {
+        let mut lower_full_identity = [7_u8; 32];
+        let mut higher_full_identity = lower_full_identity;
+        lower_full_identity[31] = 1;
+        higher_full_identity[31] = 2;
+
+        assert_eq!(
+            &lower_full_identity[..16],
+            &higher_full_identity[..16],
+            "the compact UUID material is intentionally identical"
+        );
+        assert_eq!(
+            compare_identity_ascending(lower_full_identity, higher_full_identity),
+            Ordering::Greater,
+            "the lexicographically smaller full identity must rank first"
+        );
+        assert_eq!(
+            compare_identity_ascending(higher_full_identity, lower_full_identity),
+            Ordering::Less
+        );
+    }
 }

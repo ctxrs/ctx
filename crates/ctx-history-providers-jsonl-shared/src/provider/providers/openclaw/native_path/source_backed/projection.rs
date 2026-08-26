@@ -298,13 +298,33 @@ impl<R: crate::JsonlProviderRuntime> JsonlFamilyProjector for OpenClawProjector<
         emit: &mut dyn FnMut(CoreRecord) -> Result<()>,
     ) -> Result<()> {
         let bytes = record.bytes();
+        if record.oversized() {
+            self.rejections.malformed(
+                record,
+                format!(
+                    "OpenClaw record exceeds the {} byte limit",
+                    crate::MAX_PROVIDER_JSONL_LINE_BYTES
+                ),
+            );
+            return Ok(());
+        }
         if bytes.iter().all(u8::is_ascii_whitespace) {
             return Ok(());
         }
-        let Ok(value) = serde_json::from_slice::<Value>(bytes) else {
-            return Ok(());
+        let value = match serde_json::from_slice::<Value>(bytes) {
+            Ok(value) => value,
+            Err(error) => {
+                self.rejections
+                    .malformed(record, format!("malformed OpenClaw JSONL: {error}"));
+                return Ok(());
+            }
         };
         if !value.is_object() {
+            self.rejections.record(
+                record,
+                SourceBackedRecordRejectionClass::UnsupportedRecord,
+                "OpenClaw record has a well-formed but unsupported shape",
+            );
             return Ok(());
         }
         if value.get("type").and_then(Value::as_str) == Some("session") {
@@ -367,6 +387,14 @@ impl<R: crate::JsonlProviderRuntime> JsonlFamilyProjector for OpenClawProjector<
 
     fn provider_checkpoint(&self) -> Result<Option<TypedKey>> {
         encode_projector_checkpoint(self).map(Some)
+    }
+
+    fn rejected_records(&self) -> u64 {
+        self.rejections.count()
+    }
+
+    fn take_record_rejections(&mut self) -> SourceBackedRecordRejectionDrafts {
+        self.rejections.take_drafts()
     }
 }
 

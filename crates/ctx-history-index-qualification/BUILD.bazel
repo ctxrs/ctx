@@ -1,0 +1,36 @@
+load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")
+load("//tools/bazel:ctx_rust.bzl", "ctx_rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files([
+    "BUILD.bazel",
+    "Cargo.toml",
+])
+
+filegroup(
+    name = "cargo_package_data",
+    srcs = glob(["**"], exclude = ["BUILD.bazel"]),
+)
+
+ctx_rust_test(
+    name = "source_backed_recovery_tests",
+    testonly = True,
+    srcs = ["tests/source_backed_recovery.rs"],
+    crate_name = "ctx_history_index_qualification",
+    crate_root = "tests/source_backed_recovery.rs",
+    edition = crate_edition(),
+    aliases = aliases(normal_dev = True, proc_macro_dev = True),
+    deps = all_crate_deps(normal_dev = True) + [
+        "//crates/ctx-history-core:lib",
+        "//crates/ctx-history-index:lib",
+    ],
+    proc_macro_deps = all_crate_deps(proc_macro_dev = True),
+    rustc_env = {"CARGO_MANIFEST_DIR": "crates/ctx-history-index-qualification"},
+    tags = [
+        "linux-only",
+        "safe-presubmit",
+        "source-backed-recovery",
+    ],
+    target_compatible_with = ["@platforms//os:linux"],
+)

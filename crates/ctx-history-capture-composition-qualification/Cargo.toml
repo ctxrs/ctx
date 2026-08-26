@@ -14,9 +14,43 @@ autotests = false
 name = "mistral_vibe_publication"
 path = "tests/mistral_vibe_publication.rs"
 
+[[test]]
+name = "jsonl_publication"
+path = "tests/jsonl_publication.rs"
+
+[[test]]
+name = "claude_failure_boundaries"
+path = "tests/claude_failure_boundaries.rs"
+
+[[test]]
+name = "provider_lifecycle"
+path = "tests/provider_lifecycle.rs"
+
+[[test]]
+name = "openclaw_configured_root_lifecycle"
+path = "tests/openclaw_configured_root_lifecycle.rs"
+
+[[test]]
+name = "custom_history_core_fixture"
+path = "tests/custom_history_core_fixture.rs"
+
 [dev-dependencies]
-ctx-history-capture-composition = { path = "../ctx-history-capture-composition" }
+ctx-history-capture-composition = { path = "../ctx-history-capture-composition", features = ["test-support"] }
+ctx-history-capture-model = { path = "../ctx-history-capture-model" }
+ctx-history-capture-runtime = { path = "../ctx-history-capture-runtime" }
 ctx-history-core = { path = "../ctx-history-core" }
 ctx-history-index = { path = "../ctx-history-index" }
+ctx-history-openclaw-schema = { path = "../ctx-history-openclaw-schema", features = ["test-support"] }
+ctx-history-provider-codex = { path = "../ctx-history-provider-codex", features = ["test-support"] }
+ctx-history-provider-gemini = { path = "../ctx-history-provider-gemini", features = ["test-support"] }
+ctx-history-provider-native-jsonl = { path = "../ctx-history-provider-native-jsonl" }
+ctx-history-provider-openclaw-sqlite = { path = "../ctx-history-provider-openclaw-sqlite", features = ["test-support"] }
+ctx-history-provider-runtime = { path = "../ctx-history-provider-runtime", features = ["test-support"] }
+ctx-history-providers-sqlite-selected = { path = "../ctx-history-providers-sqlite-selected", features = ["test-support"] }
+ctx-history-source-discovery = { path = "../ctx-history-source-discovery" }
+ctx-history-source-io = { path = "../ctx-history-source-io", features = ["test-support"] }
+rusqlite.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tempfile.workspace = true
+zstd.workspace = true

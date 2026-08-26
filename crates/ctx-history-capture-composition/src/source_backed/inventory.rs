@@ -174,7 +174,7 @@ pub const fn source_backed_route_constructor(
 pub const LANDED_SOURCE_BACKED_ROUTES: &[SourceBackedProviderRouteMetadata] = &[
     route!(
         Custom,
-        "ctx_history_jsonl_v1",
+        "ctx_history_jsonl_v2",
         false,
         true,
         CatalogLineage,
@@ -522,7 +522,7 @@ mod oracle_tests {
     use std::path::PathBuf;
 
     const BASELINE_REGISTRY_INVENTORY: &str = "\
-Custom|ctx_history_jsonl_v1|ctx_history_jsonl_v1|false|true|CatalogLineage|none|CatalogLineage
+Custom|ctx_history_jsonl_v2|ctx_history_jsonl_v2|false|true|CatalogLineage|none|CatalogLineage
 Codex|codex_session_jsonl_tree|codex_session_jsonl|true|true|DiscoveredWinner|none|ProviderSource
 Codex|codex_history_jsonl|codex_history_jsonl|true|true|DiscoveredWinner|none|ProviderSource
 Codex|codex_session_jsonl|codex_session_jsonl|false|true|ExplicitPath|none|ProviderSource
@@ -636,6 +636,7 @@ MiMoCode|mimocode_sqlite|mimocode_sqlite|true|true|DiscoveredWinner|none|Provide
             catalog_support: crate::ProviderCatalogSupport::None,
             status: ProviderSourceStatus::Available,
             unsupported_reason: None,
+            route_provenance: Default::default(),
         }
     }
 

@@ -644,6 +644,8 @@ impl VerifiedIndex {
         &self,
         provider_session_id: &str,
         provider: Option<&str>,
+        provider_key: Option<&str>,
+        source_id: Option<&str>,
     ) -> Result<Vec<SessionRecord>> {
         let fields = fields_from_schema(self.searcher.schema())?;
         let provider_session_id =
@@ -665,36 +667,28 @@ impl VerifiedIndex {
                 )),
             ));
         }
+        if let Some(provider_key) = provider_key {
+            let provider_key = validated_filter_text("provider_key", provider_key)?;
+            clauses.push((
+                Occur::Must,
+                Box::new(TermQuery::new(
+                    Term::from_field_text(fields.custom_provider_key, provider_key),
+                    IndexRecordOption::Basic,
+                )),
+            ));
+        }
+        if let Some(source_id) = source_id {
+            let source_id = validated_filter_text("source_id", source_id)?;
+            clauses.push((
+                Occur::Must,
+                Box::new(TermQuery::new(
+                    Term::from_field_text(fields.custom_source_id, source_id),
+                    IndexRecordOption::Basic,
+                )),
+            ));
+        }
         let query = BooleanQuery::new(clauses);
         self.session_records_for_ambiguity_query(&query)
-    }
-
-    /// Returns bounded distinct sessions whose exact stored parent or root
-    /// claim names any supplied session ID.
-    pub fn session_ids_claiming_lineage_to_any(
-        &self,
-        session_ids: &[Uuid],
-        limit: usize,
-    ) -> Result<Vec<Uuid>> {
-        if session_ids.is_empty() || limit == 0 {
-            return Ok(Vec::new());
-        }
-        let fields = fields_from_schema(self.searcher.schema())?;
-        let queries = [fields.parent_session_id, fields.root_session_id]
-            .into_iter()
-            .map(|field| {
-                Box::new(TermSetQuery::new(
-                    session_ids
-                        .iter()
-                        .map(|session_id| Term::from_field_text(field, &session_id.to_string()))
-                        .collect::<Vec<_>>(),
-                )) as Box<dyn Query>
-            })
-            .collect::<Vec<_>>();
-        Ok(self.searcher.search(
-            &BooleanQuery::union(queries),
-            &SessionIdCollector::new(limit),
-        )?)
     }
 
     fn session_records_for_ambiguity_query(&self, query: &dyn Query) -> Result<Vec<SessionRecord>> {

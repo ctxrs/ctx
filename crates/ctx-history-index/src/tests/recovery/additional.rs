@@ -1,6 +1,113 @@
 use super::*;
 
 #[test]
+fn version_eight_manifest_preserves_history_when_automatic_discovery_is_disabled() {
+    let temp = tempdir().unwrap();
+    let source = source("v8-automatic-root.jsonl");
+    let route = SourceRouteIdentity::from_sha256("89".repeat(32)).unwrap();
+    let mut initial = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    initial.begin_source(source.clone()).unwrap();
+    initial
+        .add_core_record(document(&source, 1, "preserved v8 automatic history"))
+        .unwrap();
+    initial.certify_source(certificate(&source, 1, 1)).unwrap();
+    initial
+        .set_present_source_routes(vec![SourceRouteSnapshot::present(
+            route.clone(),
+            vec![source],
+        )
+        .unwrap()])
+        .unwrap();
+    initial.commit(|_| true).unwrap();
+    let current = VerifiedIndex::open(temp.path()).unwrap();
+    let current_manifest = serde_json::to_string(current.manifest()).unwrap();
+    let provider_policy_offset = current_manifest
+        .rfind(",\"automatic_provider_discovery\":")
+        .unwrap();
+    let current_version = format!("\"manifest_version\":{GENERATION_MANIFEST_VERSION}");
+    assert!(current_manifest[..provider_policy_offset].contains(&current_version));
+    let mut version_eight = current_manifest[..provider_policy_offset].replacen(
+        &current_version,
+        "\"manifest_version\":8",
+        1,
+    );
+    version_eight.push('}');
+    let manifest_bytes = version_eight.into_bytes();
+    let generation_id = ctx_history_index_generation::sha256_hex(&manifest_bytes);
+    ctx_history_index_generation::write_manifest_bytes(
+        temp.path(),
+        &generation_id,
+        &manifest_bytes,
+    )
+    .unwrap();
+
+    let pointer = load_active_generation_pointer(temp.path())
+        .unwrap()
+        .unwrap();
+    let generation_path = active_generation_path(temp.path());
+    let directory = DurableMmapDirectory::open(&generation_path).unwrap();
+    let index = Index::open(directory).unwrap();
+    let mut payload_writer = index
+        .writer_with_num_threads::<TantivyDocument>(1, INDEX_MEMORY_MIN_PER_THREAD)
+        .unwrap();
+    payload_writer.set_merge_policy(Box::<NoMergePolicy>::default());
+    let mut prepared = payload_writer.prepare_commit().unwrap();
+    prepared.set_payload(
+        &serde_json::to_string(&CommitPayload {
+            version: COMMIT_PAYLOAD_VERSION,
+            generation_id: generation_id.clone(),
+            publication_metadata: None,
+        })
+        .unwrap(),
+    );
+    prepared.commit().unwrap();
+    payload_writer.wait_merging_threads().unwrap();
+    let integrity = physical_integrity_digest(&index, &generation_path, Some(&pointer)).unwrap();
+    let active = GenerationSlot::new(
+        generation_id,
+        pointer.active().directory().to_owned(),
+        integrity,
+    )
+    .unwrap();
+    publish_active_generation_pointer(
+        temp.path(),
+        &ActiveGenerationPointer::new(active, None).unwrap(),
+    )
+    .unwrap();
+
+    let migrated = VerifiedIndex::open(temp.path()).unwrap();
+    assert_eq!(
+        migrated.manifest().manifest_version,
+        GENERATION_MANIFEST_VERSION
+    );
+    assert!(migrated.manifest().automatic_provider_discovery());
+    assert_eq!(migrated.count_term("preserved").unwrap(), 1);
+
+    let mut replacement = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    assert!(replacement.base_manifest().is_some());
+    replacement
+        .set_applied_provider_roots(false, provider_source_config_digest(false, &[]), Vec::new())
+        .unwrap();
+    replacement
+        .set_source_route_plan(BTreeSet::new(), BTreeSet::from([route.clone()]))
+        .unwrap();
+    replacement.set_present_source_routes(Vec::new()).unwrap();
+    replacement.commit(|_| true).unwrap();
+
+    let published = VerifiedIndex::open(temp.path()).unwrap();
+    assert!(!published.manifest().automatic_provider_discovery());
+    assert!(published.manifest().source_route(&route).is_some());
+    assert_eq!(published.manifest().indexed_documents, 1);
+    assert_eq!(published.count_term("preserved").unwrap(), 1);
+}
+
+#[test]
 fn crash_immediately_after_pointer_switch_reopens_new_and_retains_previous() {
     let temp = tempdir().unwrap();
     let source = source("pointer-switch-crash.jsonl");

@@ -1,10 +1,44 @@
 use std::fs;
 
-use ctx_history_core::{AgentScope, EventType, ProviderNativeSessionRelationship};
+use ctx_history_core::{
+    AgentScope, EventType, ProviderNativeSessionRelationship, SourceAnchorScope,
+};
 use rusqlite::{params, Connection};
 use serde_json::{json, Value};
 
-use super::{source::*, source_backed::*};
+use super::{
+    projection::{cline_session_id, cline_source_key, cline_source_key_scoped},
+    source::*,
+    source_backed::*,
+};
+
+#[test]
+fn root_scope_distinguishes_native_sessions_and_unqualified_is_unchanged() {
+    let native_session_id = "same-native-session";
+    let legacy = cline_source_key(native_session_id).unwrap();
+    let unqualified =
+        cline_source_key_scoped(native_session_id, SourceAnchorScope::Unqualified).unwrap();
+    let first =
+        cline_source_key_scoped(native_session_id, SourceAnchorScope::Lineage([1; 32])).unwrap();
+    let second =
+        cline_source_key_scoped(native_session_id, SourceAnchorScope::Lineage([2; 32])).unwrap();
+
+    assert!(legacy.exact_descriptor_eq(&unqualified));
+    assert_ne!(first.identity(), second.identity());
+    assert_ne!(
+        cline_session_id(&first, native_session_id).unwrap(),
+        cline_session_id(&second, native_session_id).unwrap()
+    );
+
+    let first_parent =
+        cline_source_key_scoped("same-parent", SourceAnchorScope::Lineage([1; 32])).unwrap();
+    let second_parent =
+        cline_source_key_scoped("same-parent", SourceAnchorScope::Lineage([2; 32])).unwrap();
+    assert_ne!(
+        cline_session_id(&first_parent, "same-parent").unwrap(),
+        cline_session_id(&second_parent, "same-parent").unwrap()
+    );
+}
 
 #[test]
 fn file_catalog_projects_system_text_thinking_and_tool_activity() {
@@ -396,6 +430,37 @@ fn another_sessions_catalog_row_does_not_invalidate_an_unchanged_leaf() {
     assert_eq!(test_source_revision(second_a, None, None), first_a_revision);
     assert_ne!(second_b.fingerprint(), first_b_fingerprint);
     assert_ne!(test_source_revision(second_b, None, None), first_b_revision);
+}
+
+#[test]
+fn invalid_catalog_messages_path_marks_only_its_owned_session_leaf() {
+    let fixture = Fixture::new();
+    fixture.write_index(json!({
+        "version": 1,
+        "sessions": {
+            "broken": {"sessionId": "broken", "messagesPath": "../../outside.json"},
+            "healthy": {"sessionId": "healthy"}
+        }
+    }));
+    fixture.write_messages("healthy", &messages_document("healthy", Vec::new()));
+
+    let tree = discover_cline_sdk_tree(&fixture.provider_root, &fixture.ctx_root).unwrap();
+    assert_eq!(tree.leaves.len(), 2);
+    let broken = tree
+        .leaves
+        .iter()
+        .find(|leaf| leaf.provider_session_id == "broken")
+        .unwrap();
+    let healthy = tree
+        .leaves
+        .iter()
+        .find(|leaf| leaf.provider_session_id == "healthy")
+        .unwrap();
+    assert!(broken.catalog_binding_failure.is_some());
+    assert!(broken.messages.is_none());
+    assert!(healthy.catalog_binding_failure.is_none());
+    assert!(healthy.messages.is_some());
+    assert_ne!(broken.fingerprint(), healthy.fingerprint());
 }
 
 #[test]

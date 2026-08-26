@@ -45,6 +45,18 @@ fn write_file(path: &Path, body: &[u8]) {
     fs::write(path, body).unwrap();
 }
 
+fn assert_automatic_role(source: &ProviderSource, components: &[&[u8]]) {
+    let expected =
+        ctx_history_capture_model::ProviderRouteRole::from_dynamic(components.iter().copied())
+            .expect("expected test role should be bounded");
+    assert_eq!(
+        source.route_provenance.automatic_route_role(),
+        Some(&expected),
+        "unexpected route role for {}",
+        source.path.display()
+    );
+}
+
 fn write_lingma_db(path: &Path) {
     fs::create_dir_all(path.parent().expect("database should have a parent")).unwrap();
     let connection = Connection::open(path).unwrap();
@@ -175,6 +187,17 @@ fn warp_uses_one_linux_base_and_only_evidenced_extra_surfaces() {
             .collect::<Vec<_>>(),
         vec![stable, stable_tui, preview]
     );
+    for (source, components) in report.sources.iter().zip([
+        ["installed-surface", "linux", "stable", "gui"],
+        ["installed-surface", "linux", "stable", "tui"],
+        ["installed-surface", "linux", "preview", "gui"],
+    ]) {
+        assert_automatic_role(source, &components.map(str::as_bytes));
+    }
+    assert_eq!(
+        report.sources,
+        provider_report(&context, CaptureProvider::Warp).sources
+    );
 }
 
 #[test]
@@ -188,14 +211,20 @@ fn warp_uses_mac_precedence_windows_known_folder_and_no_other_unix_default() {
     let report = provider_report(&mac, CaptureProvider::Warp);
     assert_eq!(report.sources.len(), 1);
     assert_eq!(report.sources[0].path, fallback);
+    assert_automatic_role(
+        &report.sources[0],
+        &[b"installed-surface", b"macos", b"stable", b"gui"],
+    );
 
     let windows = context(temp.path(), DiscoveryPlatform::Windows);
     let windows_path = temp
         .path()
         .join("platform-local-data/warp/Warp/data/warp.sqlite");
-    assert_eq!(
-        provider_report(&windows, CaptureProvider::Warp).sources[0].path,
-        windows_path
+    let windows_report = provider_report(&windows, CaptureProvider::Warp);
+    assert_eq!(windows_report.sources[0].path, windows_path);
+    assert_automatic_role(
+        &windows_report.sources[0],
+        &[b"installed-surface", b"windows", b"stable", b"gui"],
     );
     assert!(provider_report(
         &context(temp.path(), DiscoveryPlatform::OtherUnix),
@@ -233,6 +262,23 @@ fn codebuddy_cli_override_replaces_default_while_installed_ide_coexists() {
         .sources
         .iter()
         .any(|source| source.path.ends_with(".codebuddy")));
+    assert_automatic_role(&report.sources[0], &[b"surface", b"cli"]);
+    assert_automatic_role(&report.sources[1], &[b"surface", b"ide"]);
+}
+
+#[test]
+fn codebuddy_alias_dedupe_keeps_the_winning_cli_role() {
+    let temp = tempdir();
+    let base = context(temp.path(), DiscoveryPlatform::Linux);
+    let ide = base.home().join(".local/share/CodeBuddyExtension/Data");
+    write_file(&ide.join("projects/p/session.jsonl"), b"{}\n");
+    let context = base.with_env("CODEBUDDY_CONFIG_DIR", ide.as_os_str());
+
+    let report = provider_report(&context, CaptureProvider::CodeBuddy);
+
+    assert_eq!(report.sources.len(), 1);
+    assert_eq!(report.sources[0].path, ide);
+    assert_automatic_role(&report.sources[0], &[b"surface", b"cli"]);
 }
 
 #[test]
@@ -243,6 +289,10 @@ fn codebuddy_relative_override_uses_captured_cwd_and_other_unix_is_gated() {
     assert_eq!(
         provider_report(&linux, CaptureProvider::CodeBuddy).sources[0].path,
         linux.cwd().unwrap().join("relative-root")
+    );
+    assert_automatic_role(
+        &provider_report(&linux, CaptureProvider::CodeBuddy).sources[0],
+        &[b"surface", b"cli"],
     );
     assert!(provider_report(
         &context(temp.path(), DiscoveryPlatform::OtherUnix),
@@ -769,6 +819,8 @@ fn antigravity_accepts_only_official_fixed_transcript_leaves() {
     assert_eq!(report.sources.len(), 2);
     assert_eq!(report.sources[0].status, ProviderSourceStatus::Empty);
     assert_eq!(report.sources[1].status, ProviderSourceStatus::Available);
+    assert_automatic_role(&report.sources[0], &[b"surface", b"cli"]);
+    assert_automatic_role(&report.sources[1], &[b"surface", b"ide"]);
     assert!(!report
         .sources
         .iter()
@@ -793,6 +845,7 @@ fn fixed_leaf_discovery_is_bounded() {
     }
     let report = provider_report(&context, CaptureProvider::Antigravity);
     assert_eq!(report.sources[0].status, ProviderSourceStatus::Unknown);
+    assert_automatic_role(&report.sources[0], &[b"surface", b"cli"]);
 }
 
 #[cfg(unix)]
@@ -812,6 +865,7 @@ fn automatic_sources_do_not_follow_symlink_roots() {
     symlink(&target, &root).unwrap();
     let report = provider_report(&context, CaptureProvider::Antigravity);
     assert_eq!(report.sources[0].status, ProviderSourceStatus::Unsupported);
+    assert_automatic_role(&report.sources[0], &[b"surface", b"cli"]);
 }
 
 #[cfg(unix)]

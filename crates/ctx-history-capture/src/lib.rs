@@ -23,30 +23,39 @@ pub fn provider_regular_file_len(path: &std::path::Path) -> Result<u64> {
     ctx_history_source_io::provider_regular_file_len(path).map_err(Into::into)
 }
 pub use provider_sources::{
+    configured_root_capabilities, configured_root_capability,
+    discover_canonical_automatic_provider_sources_with_context,
     discover_lingma_inventory_with_authority, discover_provider_sources,
     discover_provider_sources_for_provider, discover_provider_sources_for_provider_report,
     discover_provider_sources_for_provider_with_context,
     discover_provider_sources_for_provider_with_projects, discover_provider_sources_report,
     discover_provider_sources_with_context, discover_provider_sources_with_context_and_work_budget,
     discover_provider_sources_with_projects, discover_warp_sources_with_authority,
-    observe_ordinary_file, provider_source_for_path, provider_source_for_path_with_data_root,
-    provider_source_spec, provider_source_specs, provider_source_status_reason,
+    observe_ordinary_file, provider_paths_equivalent, provider_source_belongs_to_configured_root,
+    provider_source_for_path, provider_source_for_path_with_data_root, provider_source_spec,
+    provider_source_specs, provider_source_status_reason, released_provider_home,
     resolve_lingma_discovery_authority, resolve_warp_discovery_authority,
-    validate_provider_source_roots_outside_data_root, DiscoveredLingmaDatabase,
-    DiscoveredWarpSource, DiscoveryContext, DiscoveryIssue, DiscoveryIssueKind, DiscoveryPlatform,
-    DiscoveryPlatformDirs, DiscoveryReport, LingmaDatabaseCatalogLineage,
-    LingmaDiscoveredInventory, LingmaDiscoveryUnavailable, LingmaInventorySelector,
-    LingmaVscodeClient, LingmaVscodeProfile, OrdinaryFileObservation, ProviderCatalogSupport,
-    ProviderDefaultLocation, ProviderImportSupport, ProviderSource, ProviderSourceKind,
-    ProviderSourceRootBoundaryError, ProviderSourceSpec, ProviderSourceStatus,
-    ProviderSourceStatusReason, WarpDiscoveryUnavailable, WarpInstalledPlatform,
-    WarpInstalledSurfaceKey, WarpReleaseChannel, WarpTerminalSurface, DISCOVERY_ENV_ALLOWLIST,
+    validate_provider_source_roots_outside_data_root, ConfiguredRootCapability,
+    ConfiguredRootCapabilityState, ConfiguredRootExpander, ConfiguredRootPathKind,
+    DiscoveredLingmaDatabase, DiscoveredWarpSource, DiscoveryContext, DiscoveryIssue,
+    DiscoveryIssueKind, DiscoveryPlatform, DiscoveryPlatformDirs, DiscoveryReport,
+    LingmaDatabaseCatalogLineage, LingmaDiscoveredInventory, LingmaDiscoveryUnavailable,
+    LingmaInventorySelector, LingmaVscodeClient, LingmaVscodeProfile, OrdinaryFileObservation,
+    ProviderCatalogSupport, ProviderDefaultLocation, ProviderImportSupport, ProviderSource,
+    ProviderSourceKind, ProviderSourceRootBoundaryError, ProviderSourceRouteProvenance,
+    ProviderSourceSpec, ProviderSourceStatus, ProviderSourceStatusReason, WarpDiscoveryUnavailable,
+    WarpInstalledPlatform, WarpInstalledSurfaceKey, WarpReleaseChannel, WarpTerminalSurface,
+    DISCOVERY_ENV_ALLOWLIST,
 };
 
 pub use ctx_history_capture_model::{
+    provider_root_encoded_path_len, provider_root_path_within_limit, provider_source_config_digest,
     stable_capture_uuid, CatalogSummary, OutputObservationKind, OutputOutcome,
     OutputOutcomeMetadata, ProviderImportFailure, ProviderImportSummary, ProviderImportWorkResult,
-    ProviderSourceFailureKind,
+    ProviderRootDefinition, ProviderRootKind, ProviderRootSourceIdentity, ProviderRouteRole,
+    ProviderRouteRoleError, ProviderSourceFailureKind, MAX_CONFIGURED_PROVIDER_ROOTS,
+    MAX_PROVIDER_ROOT_ENCODED_PATH_BYTES, MAX_PROVIDER_ROOT_SELECTOR_BYTES,
+    MAX_PROVIDER_ROUTE_ROLE_BYTES,
 };
 mod error;
 pub use error::{CaptureError, ProviderJsonlInventoryLimit, Result};
@@ -87,9 +96,13 @@ pub fn hermes_route_control_database_identity(control: &[u8]) -> Option<[u8; 32]
 pub use provider::adapter::{CaptureWorkLimit, ProviderAdapterContext, ProviderImportOptions};
 pub use provider::source_backed::register_nanoclaw_source_backed_route_with_base_sources;
 pub use provider::source_backed::{
-    automatic_source_backed_route_identity, build_automatic_source_backed_registry,
-    build_automatic_source_backed_registry_from_report, explicit_source_catalog_lineage,
-    refresh_source_backed_generation, refresh_source_backed_generation_for_routes,
+    automatic_provider_root_coexistence_route_identity,
+    automatic_provider_root_coexistence_source_lineage, automatic_source_backed_route_identity,
+    build_automatic_source_backed_registry, build_automatic_source_backed_registry_from_report,
+    build_automatic_source_backed_registry_from_report_with_retained_roots,
+    explicit_source_catalog_lineage, legacy_automatic_source_backed_route_identity,
+    prepare_automatic_route_splits, refresh_source_backed_generation,
+    refresh_source_backed_generation_for_routes,
     refresh_source_backed_generation_with_detailed_progress,
     refresh_source_backed_generation_with_progress, register_astrbot_source_backed_route,
     register_codex_prompt_history_source_backed_route, register_crush_source_backed_route,
@@ -120,7 +133,7 @@ pub use provider::source_backed::{
     SourceBackedRouteErrorKind, SourceBackedRouteMetadata, SourceBackedRouteResult,
     SourceBackedRouteSelection, SourceBackedSelectorAuthority, SourceBackedSourceFailureClass,
     SourceBackedSourceFailures, SourceBackedSuccessfulRouteOutcome, SourceBackedWatchCatalog,
-    SourceBackedWatchTargetKind, LANDED_SOURCE_BACKED_ROUTES, MAX_RECORDED_SOURCE_BACKED_FAILURES,
-    MAX_SOURCE_BACKED_FAILURE_DETAIL_BYTES, MAX_SOURCE_BACKED_FAILURE_SELECTOR_BYTES,
-    MAX_SOURCE_BACKED_ROUTE_CONTROL_BYTES,
+    SourceBackedWatchTargetKind, SqliteInventoryCoverage, LANDED_SOURCE_BACKED_ROUTES,
+    MAX_RECORDED_SOURCE_BACKED_FAILURES, MAX_SOURCE_BACKED_FAILURE_DETAIL_BYTES,
+    MAX_SOURCE_BACKED_FAILURE_SELECTOR_BYTES, MAX_SOURCE_BACKED_ROUTE_CONTROL_BYTES,
 };

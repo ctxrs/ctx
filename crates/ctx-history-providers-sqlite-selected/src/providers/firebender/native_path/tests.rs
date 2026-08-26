@@ -4,8 +4,9 @@ use serde_json::json;
 use super::{
     source_backed::{
         firebender_core_record, firebender_database_path_and_source, firebender_session_id,
+        firebender_source_key_scoped,
     },
-    FirebenderRow, FIREBENDER_SOURCE_IDENTITY_REVISION,
+    FirebenderRow, FIREBENDER_SELECTED_CATALOG_LINEAGE_V1, FIREBENDER_SOURCE_IDENTITY_REVISION,
 };
 
 #[test]
@@ -30,6 +31,33 @@ fn direct_core_projection_is_complete_and_self_contained() {
     }
     assert!(!production.contains("body.truncate"));
     assert!(!production.contains("body.chars().take"));
+}
+
+#[test]
+fn root_scope_separates_identical_firebender_sessions_and_unqualified_is_released() {
+    use ctx_history_core::{CaptureProvider, SourceAnchorScope, SourceKey};
+
+    let released = SourceKey::derive(
+        CaptureProvider::Firebender.as_str(),
+        crate::FIREBENDER_SQLITE_SOURCE_FORMAT,
+        super::source_backed::FIREBENDER_SOURCE_SCHEMA_VARIANT,
+        FIREBENDER_SOURCE_IDENTITY_REVISION,
+        SourceAnchor::CatalogLineage(FIREBENDER_SELECTED_CATALOG_LINEAGE_V1),
+    )
+    .unwrap();
+    let unqualified = firebender_source_key_scoped(SourceAnchorScope::Unqualified).unwrap();
+    assert!(released.exact_descriptor_eq(&unqualified));
+    assert_eq!(
+        released.identity().encode_canonical().unwrap(),
+        unqualified.identity().encode_canonical().unwrap()
+    );
+
+    let first = firebender_source_key_scoped(SourceAnchorScope::Lineage([0x11; 32])).unwrap();
+    let second = firebender_source_key_scoped(SourceAnchorScope::Lineage([0x22; 32])).unwrap();
+    assert_ne!(
+        firebender_session_id(&first, "shared-session").unwrap(),
+        firebender_session_id(&second, "shared-session").unwrap()
+    );
 }
 
 #[test]

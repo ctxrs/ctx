@@ -37,7 +37,7 @@ fn file_only_search_keeps_an_oversized_grapheme_body_without_requiring_a_body_ma
         value["results"][0]["ctx_event_id"],
         json!(event.event_id.as_uuid())
     );
-    assert_eq!(value["results"][0]["snippet"], "\nsrc/huge.rs");
+    assert_eq!(value["results"][0]["snippet"], "…src/huge.rs");
     assert_eq!(value["results"][0]["snippet_truncated"], true);
 
     let (mcp, _) = mcp_search(source_request, temp.path(), history_snapshot(true, true)).unwrap();
@@ -45,7 +45,7 @@ fn file_only_search_keeps_an_oversized_grapheme_body_without_requiring_a_body_ma
         mcp["results"][0]["ctx_event_id"],
         json!(event.event_id.as_uuid())
     );
-    assert_eq!(mcp["results"][0]["snippet"], "\nsrc/huge.rs");
+    assert_eq!(mcp["results"][0]["snippet"], "…src/huge.rs");
     assert_eq!(mcp["results"][0]["snippet_truncated"], true);
 }
 
@@ -73,6 +73,18 @@ fn search_presentation_hydration_rejects_missing_duplicate_and_misaligned_hits()
     .unwrap();
     assert_eq!(presentations.len(), 1);
     assert_eq!(hit.event, expected_event);
+
+    let excessive_hits = vec![hit.clone(); ctx_history_read_application::MAX_SEARCH_RESULTS + 1];
+    let excessive_error = presentations_for_search_hits_with_budget(
+        &index,
+        &excessive_hits,
+        &query,
+        SEARCH_PRESENTATION_HYDRATION_BUDGET,
+    )
+    .unwrap_err();
+    assert!(excessive_error
+        .to_string()
+        .contains("search presentation cannot hydrate more than 200 hits"));
 
     let duplicate_error = presentations_for_search_hits_with_budget(
         &index,

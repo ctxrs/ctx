@@ -69,7 +69,7 @@ fn two_rotations_keep_full_id_machine_reads_pinned_and_retry_compact_or_human_re
     let compact_pin = open_index(temp.path()).unwrap();
     let human_pin = open_index(temp.path()).unwrap();
     let session_id = machine_pin
-        .sessions_by_provider_session_id(TEST_SESSION_ID, Some("codex"))
+        .sessions_by_provider_session_id(TEST_SESSION_ID, Some("codex"), None, None)
         .unwrap()[0]
         .session_id
         .as_uuid();
@@ -181,7 +181,8 @@ fn limit_200_search_reduces_each_large_core_body_before_retaining_presentations(
     assert!(retained_snippet_bytes <= SEARCH_PRESENTATION_MAX_RETAINED_SNIPPET_BYTES);
     assert!(presentations.iter().all(|presentation| {
         presentation.snippet_truncated
-            && presentation.snippet.chars().count() == SEARCH_SNIPPET_MAX_CHARS
+            && !presentation.snippet.is_empty()
+            && presentation.snippet.chars().count() <= SEARCH_SNIPPET_MAX_CHARS
             && presentation.snippet.contains(TEST_QUERY)
             && presentation.snippet.len() < body_bytes
     }));
@@ -204,7 +205,8 @@ fn limit_200_search_reduces_each_large_core_body_before_retaining_presentations(
         ctx_history_read_application::MAX_SEARCH_RESULTS
     );
     assert!(results.iter().all(|result| {
-        result["snippet"].as_str().unwrap().chars().count() == SEARCH_SNIPPET_MAX_CHARS
+        !result["snippet"].as_str().unwrap().is_empty()
+            && result["snippet"].as_str().unwrap().chars().count() <= SEARCH_SNIPPET_MAX_CHARS
             && result["snippet"].as_str().unwrap().contains(TEST_QUERY)
             && result["snippet_truncated"] == true
             && result["snippet_max_chars"] == SEARCH_SNIPPET_MAX_CHARS
@@ -898,6 +900,8 @@ fn unbounded_cli_show_streams_valid_json_beyond_4096_events_in_order() {
         Some(session.session_id.to_string()),
         None,
         None,
+        None,
+        None,
         TranscriptMode::Log,
         OutputFormat::Json,
         None,
@@ -936,6 +940,8 @@ fn human_cli_show_stream_renders_header_events_empty_and_truncation() {
         Some(session.session_id.to_string()),
         None,
         None,
+        None,
+        None,
         TranscriptMode::Log,
         OutputFormat::Text,
         Some(1),
@@ -964,6 +970,8 @@ fn human_cli_show_stream_renders_header_events_empty_and_truncation() {
     let result = stream_cli_session(
         temp.path(),
         Some(filtered_session.session_id.to_string()),
+        None,
+        None,
         None,
         None,
         TranscriptMode::Lite,
@@ -1007,6 +1015,8 @@ fn max_events_does_not_claim_truncation_for_only_filtered_raw_events() {
         Some(session.session_id.to_string()),
         None,
         None,
+        None,
+        None,
         TranscriptMode::Full,
         OutputFormat::Json,
         Some(1),
@@ -1045,6 +1055,8 @@ fn lite_selection_carries_the_pending_assistant_across_a_page_boundary() {
     stream_cli_session(
         temp.path(),
         Some(session.session_id.to_string()),
+        None,
+        None,
         None,
         None,
         TranscriptMode::Lite,

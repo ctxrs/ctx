@@ -8,8 +8,8 @@ use ctx_history_core::{
     derive_event_id, derive_session_id, AgentScope, CaptureProvider, CertifiedSource, CoreActivity,
     CoreRecord, CoreRecordError, EventIdentityInput, LiteralFactKind, NativeItemKey,
     NativeSessionKey, ProjectionContractError, ProviderDeclaredFact, ScannedSourceCounts,
-    SessionIdentityInput, SourceAnchor, SourceKey, SourceObservation, TypedKey,
-    CORE_ACTIVITY_REVISION,
+    SessionIdentityInput, SourceAnchor, SourceAnchorScope, SourceKey, SourceObservation,
+    StableEntityId, TypedKey, CORE_ACTIVITY_REVISION,
 };
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -125,6 +125,14 @@ where
 
     fn leaf_execution_policy(&self) -> DocumentLeafExecutionPolicy {
         DocumentLeafExecutionPolicy::Serial
+    }
+
+    fn durable_replay_source(
+        &self,
+        _authority: &Self::TreeAuthority,
+        _leaf: &Self::Leaf,
+    ) -> SourceBackedRouteResult<Option<SourceKey>> {
+        Ok(Some(self.source.clone()))
     }
 
     fn discover_complete(&self) -> SourceBackedRouteResult<NanoClawDocumentTree> {
@@ -551,15 +559,24 @@ fn nanoclaw_internal(detail: impl Into<String>) -> SourceBackedRouteError {
     SourceBackedRouteError::new(SourceBackedRouteErrorKind::Internal, detail)
 }
 
+#[cfg(test)]
 pub(crate) fn nanoclaw_source_key(
     catalog_lineage: [u8; 32],
 ) -> NanoClawSourceBackedResult<SourceKey> {
-    Ok(SourceKey::derive(
+    nanoclaw_source_key_scoped(catalog_lineage, SourceAnchorScope::Unqualified)
+}
+
+pub(crate) fn nanoclaw_source_key_scoped(
+    catalog_lineage: [u8; 32],
+    source_anchor_scope: SourceAnchorScope,
+) -> NanoClawSourceBackedResult<SourceKey> {
+    Ok(SourceKey::derive_scoped(
         CaptureProvider::NanoClaw.as_str(),
         NANOCLAW_SOURCE_FORMAT,
         NANOCLAW_SOURCE_SCHEMA_VARIANT,
         1,
         SourceAnchor::CatalogLineage(catalog_lineage),
+        source_anchor_scope,
     )?)
 }
 
@@ -570,18 +587,7 @@ fn nanoclaw_core_record(
     session: &super::super::rows::NanoClawSessionRow,
     message: &super::super::rows::NanoClawMessageRow,
 ) -> NanoClawSourceBackedResult<CoreRecord> {
-    let native_session_key = NativeSessionKey::composite(
-        NANOCLAW_NATIVE_SESSION_NAMESPACE,
-        vec![
-            TypedKey::utf8(&session.agent_group_id)?,
-            TypedKey::utf8(&session.id)?,
-        ],
-    )?;
-    let session_id = derive_session_id(SessionIdentityInput {
-        source,
-        logical_session_kind: NANOCLAW_LOGICAL_SESSION_KIND,
-        native_session_key: &native_session_key,
-    })?;
+    let session_id = nanoclaw_session_id(source, &session.agent_group_id, &session.id)?;
     let native_event_parts = vec![
         TypedKey::utf8(message_source)?,
         TypedKey::utf8(&message.id)?,
@@ -637,6 +643,25 @@ fn nanoclaw_core_record(
     Ok(record)
 }
 
+fn nanoclaw_session_id(
+    source: &SourceKey,
+    agent_group_id: &str,
+    native_session_id: &str,
+) -> NanoClawSourceBackedResult<StableEntityId> {
+    let native_session_key = NativeSessionKey::composite(
+        NANOCLAW_NATIVE_SESSION_NAMESPACE,
+        vec![
+            TypedKey::utf8(agent_group_id)?,
+            TypedKey::utf8(native_session_id)?,
+        ],
+    )?;
+    Ok(derive_session_id(SessionIdentityInput {
+        source,
+        logical_session_kind: NANOCLAW_LOGICAL_SESSION_KIND,
+        native_session_key: &native_session_key,
+    })?)
+}
+
 fn checked_add(value: u64, increment: u64) -> NanoClawSourceBackedResult<u64> {
     value
         .checked_add(increment)
@@ -677,6 +702,27 @@ mod staging_error_tests {
         )
         .unwrap();
         (temp, adapter)
+    }
+
+    #[test]
+    fn root_scope_composes_with_catalog_lineage_and_unqualified_is_unchanged() {
+        let catalog_lineage = [0x42; 32];
+        let legacy = nanoclaw_source_key(catalog_lineage).unwrap();
+        let unqualified =
+            nanoclaw_source_key_scoped(catalog_lineage, SourceAnchorScope::Unqualified).unwrap();
+        let first =
+            nanoclaw_source_key_scoped(catalog_lineage, SourceAnchorScope::Lineage([1; 32]))
+                .unwrap();
+        let second =
+            nanoclaw_source_key_scoped(catalog_lineage, SourceAnchorScope::Lineage([2; 32]))
+                .unwrap();
+
+        assert!(legacy.exact_descriptor_eq(&unqualified));
+        assert_ne!(first.identity(), second.identity());
+        assert_ne!(
+            nanoclaw_session_id(&first, "same-agent-group", "same-session").unwrap(),
+            nanoclaw_session_id(&second, "same-agent-group", "same-session").unwrap()
+        );
     }
 
     fn assert_route_fatal_without_source_carry(

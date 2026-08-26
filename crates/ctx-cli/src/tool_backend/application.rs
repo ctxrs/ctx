@@ -18,8 +18,10 @@ use super::{
     CursorFailureKind, OpaqueMcpProxyError, QueryEventsRequest, ShowEventRequest,
     ShowSessionRequest, StructuredToolError, ToolBackend, ToolBackendError, ToolEventContent,
     ToolEventRangeDirection, ToolEventRangeScope, ToolExecutionError, ToolOperation, ToolOutcome,
-    ToolSearchBackend, ToolSearchContentScope, ToolSearchRequest, ToolSearchUsageFacts,
-    ToolTranscriptMode,
+    ToolSearchBackend, ToolSearchConcentrationFacts, ToolSearchContentScope,
+    ToolSearchCopyClusterAvailability, ToolSearchDiversificationStatus, ToolSearchFailurePhase,
+    ToolSearchLiteralRootFacts, ToolSearchRefreshStatus, ToolSearchRequest, ToolSearchStopReason,
+    ToolSearchTerminalFacts, ToolSearchUsageFacts, ToolTranscriptMode, ToolUsageFacts,
 };
 use crate::{
     commands::list::events::{
@@ -48,6 +50,8 @@ fn adapt_tool_search_request(
         provider_key: request.provider_key,
         source_id: request.source_id,
         source_format: request.source_format,
+        source_roots: request.source_roots,
+        source_groups: request.source_groups,
         workspace: request.workspace,
         since: request.since,
         primary_only: request.primary_only,
@@ -94,22 +98,41 @@ impl LocalToolBackend {
     }
 
     fn sources(&self) -> Result<SourceCatalog, ToolBackendError> {
-        let report = crate::provider_sources::discovered_sources_report(&self.data_root);
+        let config =
+            config::AppConfig::load(&self.data_root).map_err(classify_application_error)?;
+        let automatic_discovery = config.automatic_source_discovery_enabled();
+        let provider_roots = config.provider_root_definitions();
+        let report = ctx_history_cli::discovered_sources_report_with_data_root_and_provider_roots(
+            crate::identity::home_dir().as_deref(),
+            &self.data_root,
+            automatic_discovery,
+            &provider_roots,
+        );
         let mut source_values = crate::sources_json(&report.sources);
+        crate::provider_sources::enrich_sources_json_with_selection(
+            &mut source_values,
+            &report.sources,
+            &provider_roots,
+        );
         source_values.extend(
             crate::discovered_plugin_sources_json(&self.data_root)
                 .map_err(classify_application_error)?,
         );
         let (issues, issues_truncated) =
-            crate::provider_sources::discovery_report_issues_json(&report);
+            crate::provider_sources::discovery_report_issues_json_with_provider_roots(
+                &report,
+                &provider_roots,
+                automatic_discovery,
+            );
         Ok(SourceCatalog {
+            automatic_discovery,
             sources: source_values,
             issues,
             issues_truncated,
         })
     }
 
-    fn search(&self, request: ToolSearchRequest) -> Result<SearchReadOutcome, ToolBackendError> {
+    fn search(&self, request: ToolSearchRequest) -> Result<SearchReadOutcome, ToolExecutionError> {
         let request = adapt_tool_search_request(request);
         crate::commands::source_index::validate_explicit_semantic_scope(&request)
             .map_err(classify_mcp_search_error)?;
@@ -123,20 +146,33 @@ impl LocalToolBackend {
                 let mut request = request;
                 crate::commands::source_index::normalize_mcp_search_request(&mut request)
                     .map_err(classify_mcp_search_error)?;
-                return Err(classify_application_error(error));
+                return Err(classify_application_error(error).into());
             }
         };
-        let (structured, observation, compact) =
-            crate::commands::source_index::mcp_search_with_compact(
+        let (structured, observation, compact, execution) =
+            match crate::commands::source_index::mcp_search_with_compact(
                 request,
                 &self.data_root,
                 ctx_history_cli::HistoryCliConfig {
                     daemon_enabled: config.automatic_indexing_enabled(),
                     semantic_search_enabled: config.semantic_search_enabled(),
                     local_usage_enabled: config.local_usage.enabled,
+                    automatic_provider_discovery: config.automatic_source_discovery_enabled(),
+                    provider_roots: config.provider_root_definitions(),
                 },
-            )
-            .map_err(classify_mcp_search_error)?;
+            ) {
+                Ok(result) => result,
+                Err(failure) => {
+                    let (error, observation) = failure.into_parts();
+                    return Err(ToolExecutionError {
+                        error: Box::new(classify_mcp_search_error(error)),
+                        usage: Box::new(ToolUsageFacts {
+                            search: None,
+                            search_execution: Some(search_terminal_facts(observation)),
+                        }),
+                    });
+                }
+            };
         let search = observation
             .complete_byte_totals()
             .map(|(delivered, matched)| ToolSearchUsageFacts::complete(delivered, matched))
@@ -145,6 +181,7 @@ impl LocalToolBackend {
             structured,
             compact,
             usage: search,
+            execution: search_terminal_facts(execution),
         })
     }
 
@@ -264,6 +301,144 @@ impl LocalToolBackend {
     }
 }
 
+fn search_terminal_facts(
+    observation: ctx_history_cli::SearchExecutionObservation,
+) -> ToolSearchTerminalFacts {
+    ToolSearchTerminalFacts {
+        refresh_duration: observation.refresh_duration,
+        refresh_status: observation.refresh_status.map(search_refresh_status),
+        refresh_source_count: observation.refresh_source_count,
+        query_duration: observation.query_duration,
+        backend_requested: observation.backend_requested.map(search_backend),
+        backend_effective: observation.backend_effective.map(search_backend),
+        retrieval_rounds: observation.work.retrieval_rounds,
+        query_executions: observation.work.query_executions,
+        candidate_rows: observation.work.candidate_rows,
+        records_decoded: observation.work.records_decoded,
+        encoded_core_bytes_decoded: observation.work.encoded_core_bytes_decoded,
+        final_candidate_pool: observation.final_candidate_pool,
+        candidate_pool_truncated: observation.candidate_pool_truncated,
+        concentration: tool_search_concentration_facts(&observation),
+        stop_reason: observation.stop_reason.map(search_stop_reason),
+        failure_phase: observation.failure_phase.map(search_failure_phase),
+        output_duration: None,
+        output_served: None,
+    }
+}
+
+fn tool_search_concentration_facts(
+    observation: &ctx_history_cli::SearchExecutionObservation,
+) -> Option<ToolSearchConcentrationFacts> {
+    let concentration = observation.concentration?;
+    let diversification = observation.diversification?;
+    let literal_roots = match concentration.literal_roots {
+        ctx_history_read_application::SearchLiteralRootConcentration::Observed {
+            distinct_families,
+            candidate_count,
+            largest_family_candidate_count,
+        } => ToolSearchLiteralRootFacts::Observed {
+            candidate_families: distinct_families,
+            candidate_count,
+            largest_family_candidate_count,
+        },
+        ctx_history_read_application::SearchLiteralRootConcentration::NotObservedDense => {
+            ToolSearchLiteralRootFacts::NotObservedDense
+        }
+    };
+    Some(ToolSearchConcentrationFacts {
+        candidate_sessions: concentration.distinct_sessions,
+        largest_session_candidate_count: concentration.largest_session_candidate_count,
+        literal_roots,
+        provider_copy_candidate_count: concentration.provider_copy_candidate_count,
+        copy_cluster_availability: match concentration.copy_clusters {
+            ctx_history_read_application::SearchCopyClusterAvailability::NotConstructedV1 => {
+                ToolSearchCopyClusterAvailability::NotConstructedV1
+            }
+        },
+        diversification_status: match diversification.status {
+            ctx_history_read_application::SearchDiversificationStatus::Applied => {
+                ToolSearchDiversificationStatus::Applied
+            }
+            ctx_history_read_application::SearchDiversificationStatus::NotApplicable => {
+                ToolSearchDiversificationStatus::NotApplicable
+            }
+            ctx_history_read_application::SearchDiversificationStatus::Indeterminate => {
+                ToolSearchDiversificationStatus::Indeterminate
+            }
+        },
+        diversification_changed_final_top_n: diversification.changed_final_top_n,
+    })
+}
+
+const fn search_refresh_status(
+    status: ctx_history_cli::SearchRefreshStatus,
+) -> ToolSearchRefreshStatus {
+    match status {
+        ctx_history_cli::SearchRefreshStatus::ExistingGeneration => {
+            ToolSearchRefreshStatus::ExistingGeneration
+        }
+        ctx_history_cli::SearchRefreshStatus::DaemonBackground => {
+            ToolSearchRefreshStatus::DaemonBackground
+        }
+        ctx_history_cli::SearchRefreshStatus::DaemonUnavailable => {
+            ToolSearchRefreshStatus::DaemonUnavailable
+        }
+        ctx_history_cli::SearchRefreshStatus::Completed => ToolSearchRefreshStatus::Completed,
+        ctx_history_cli::SearchRefreshStatus::Failed => ToolSearchRefreshStatus::Failed,
+    }
+}
+
+const fn search_backend(backend: ctx_history_read_application::SearchBackend) -> ToolSearchBackend {
+    match backend {
+        ctx_history_read_application::SearchBackend::Lexical => ToolSearchBackend::Lexical,
+        ctx_history_read_application::SearchBackend::Semantic => ToolSearchBackend::Semantic,
+        ctx_history_read_application::SearchBackend::Hybrid => ToolSearchBackend::Hybrid,
+    }
+}
+
+const fn search_stop_reason(
+    reason: ctx_history_read_application::SearchStopReason,
+) -> ToolSearchStopReason {
+    match reason {
+        ctx_history_read_application::SearchStopReason::Decisive => ToolSearchStopReason::Decisive,
+        ctx_history_read_application::SearchStopReason::Exhausted => {
+            ToolSearchStopReason::Exhausted
+        }
+        ctx_history_read_application::SearchStopReason::CandidateCap => {
+            ToolSearchStopReason::CandidateCap
+        }
+        ctx_history_read_application::SearchStopReason::FixedPool => {
+            ToolSearchStopReason::FixedPool
+        }
+    }
+}
+
+const fn search_failure_phase(
+    phase: ctx_history_cli::SearchFailurePhase,
+) -> ToolSearchFailurePhase {
+    match phase {
+        ctx_history_cli::SearchFailurePhase::Preparation => ToolSearchFailurePhase::Preparation,
+        ctx_history_cli::SearchFailurePhase::Refresh => ToolSearchFailurePhase::Refresh,
+        ctx_history_cli::SearchFailurePhase::GenerationOpen => {
+            ToolSearchFailurePhase::GenerationOpen
+        }
+        ctx_history_cli::SearchFailurePhase::QueryPreparation => {
+            ToolSearchFailurePhase::QueryPreparation
+        }
+        ctx_history_cli::SearchFailurePhase::SemanticRetrieval => {
+            ToolSearchFailurePhase::SemanticRetrieval
+        }
+        ctx_history_cli::SearchFailurePhase::IndexQueryDecode => {
+            ToolSearchFailurePhase::IndexQueryDecode
+        }
+        ctx_history_cli::SearchFailurePhase::ResultProjection => {
+            ToolSearchFailurePhase::ResultProjection
+        }
+        ctx_history_cli::SearchFailurePhase::Render => ToolSearchFailurePhase::Render,
+        ctx_history_cli::SearchFailurePhase::Output => ToolSearchFailurePhase::Output,
+    }
+}
+
 impl HistoryReadPort for LocalToolBackend {
     fn status(&self) -> Result<Value, ToolBackendError> {
         LocalToolBackend::status(self)
@@ -292,7 +467,7 @@ impl SearchReadinessPort for LocalToolBackend {
     fn search_ready(
         &self,
         request: ToolSearchRequest,
-    ) -> Result<SearchReadOutcome, ToolBackendError> {
+    ) -> Result<SearchReadOutcome, ToolExecutionError> {
         self.search(request)
     }
 }
@@ -368,7 +543,23 @@ fn classify_mcp_search_error(
             })
         }
         crate::commands::source_index::McpSearchError::Application { detail } => {
-            ToolBackendError::internal(detail)
+            if detail.contains("unknown provider root selector in the pinned generation")
+                || detail.contains("unknown provider root selector `")
+                || detail.contains("invalid source root selector `")
+            {
+                ToolBackendError::invalid_request(
+                    "source_roots contains an invalid or unavailable selector",
+                )
+            } else if detail.contains("unknown provider root group in the pinned generation")
+                || detail.contains("unknown provider root group `")
+                || detail.contains("invalid source group selector `")
+            {
+                ToolBackendError::invalid_request(
+                    "source_groups contains an invalid or unavailable selector",
+                )
+            } else {
+                ToolBackendError::internal(detail)
+            }
         }
     }
 }
@@ -446,6 +637,8 @@ mod tests {
             provider_key: None,
             source_id: None,
             source_format: None,
+            source_roots: Vec::new(),
+            source_groups: Vec::new(),
             workspace: None,
             since: None,
             primary_only: false,
@@ -458,6 +651,35 @@ mod tests {
             backend: Some(ToolSearchBackend::Lexical),
             semantic_weight: 0.35,
         }
+    }
+
+    #[test]
+    fn mcp_terminal_adapter_retains_partial_failure_work() {
+        let facts = search_terminal_facts(ctx_history_cli::SearchExecutionObservation {
+            backend_requested: Some(ctx_history_read_application::SearchBackend::Hybrid),
+            work: ctx_history_read_application::SearchWorkReceipt {
+                retrieval_rounds: Some(2),
+                query_executions: Some(3),
+                candidate_rows: Some(8),
+                records_decoded: Some(1),
+                encoded_core_bytes_decoded: Some(144),
+            },
+            failure_phase: Some(ctx_history_cli::SearchFailurePhase::IndexQueryDecode),
+            ..ctx_history_cli::SearchExecutionObservation::default()
+        });
+
+        assert_eq!(facts.backend_requested, Some(ToolSearchBackend::Hybrid));
+        assert_eq!(facts.backend_effective, None);
+        assert_eq!(facts.retrieval_rounds, Some(2));
+        assert_eq!(facts.query_executions, Some(3));
+        assert_eq!(facts.candidate_rows, Some(8));
+        assert_eq!(facts.records_decoded, Some(1));
+        assert_eq!(facts.encoded_core_bytes_decoded, Some(144));
+        assert_eq!(
+            facts.failure_phase,
+            Some(ToolSearchFailurePhase::IndexQueryDecode)
+        );
+        assert_eq!(facts.output_served, None);
     }
 
     #[test]
@@ -505,6 +727,8 @@ mod tests {
             provider_key: None,
             source_id: None,
             source_format: None,
+            source_roots: Vec::new(),
+            source_groups: Vec::new(),
             workspace: Some("/workspace/pinned".to_owned()),
             since: Some("30d".to_owned()),
             primary_only: true,
@@ -544,8 +768,35 @@ mod tests {
         let (result, config_loads) =
             crate::config::count_app_config_loads(|| backend.search(lexical_search_request()));
 
-        assert!(matches!(result, Err(ToolBackendError::SourceUnavailable)));
+        assert!(matches!(
+            result,
+            Err(error) if matches!(*error.error, ToolBackendError::SourceUnavailable)
+        ));
         assert_eq!(config_loads, 1);
+    }
+
+    #[test]
+    fn mcp_selector_errors_are_typed_and_do_not_echo_selector_contents() {
+        let rejected = "Private_Selector_7f98";
+        for (detail, expected) in [
+            (
+                format!("unknown provider root selector `{rejected}` in the pinned generation"),
+                "source_roots contains an invalid or unavailable selector",
+            ),
+            (
+                format!("unknown provider root group `{rejected}` in the pinned generation"),
+                "source_groups contains an invalid or unavailable selector",
+            ),
+        ] {
+            let error = classify_mcp_search_error(
+                crate::commands::source_index::McpSearchError::Application { detail },
+            );
+            assert!(matches!(
+                error,
+                ToolBackendError::InvalidRequest { detail }
+                    if detail == expected && !detail.contains(rejected)
+            ));
+        }
     }
 
     #[test]

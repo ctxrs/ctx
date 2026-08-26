@@ -122,6 +122,18 @@ fn selector_error_detail(error: &ctx_history_read_application::SelectorError) ->
         SelectorError::MissingSessionSelector => {
             "Core session lookup requires a ctx session ID or --provider-session".to_owned()
         }
+        SelectorError::IncompleteCustomSourceSelector => {
+            "--provider-key and --source-id must be passed together".to_owned()
+        }
+        SelectorError::EmptyCustomSourceSelector { field } => {
+            format!("--{} must not be empty", field.replace('_', "-"))
+        }
+        SelectorError::CustomSourceSelectorRequiresProviderSession => {
+            "--provider-key/--source-id requires --provider-session".to_owned()
+        }
+        SelectorError::CustomSourceSelectorRequiresCustomProvider => {
+            "--provider-key/--source-id can only be combined with --provider custom".to_owned()
+        }
         SelectorError::ProviderSessionNotFound {
             provider_session_id,
         } => format!(
@@ -131,9 +143,16 @@ fn selector_error_detail(error: &ctx_history_read_application::SelectorError) ->
             provider_session_id,
             first,
             second,
-        } => format!(
-            "provider session {provider_session_id:?} is ambiguous; first matches are {first} and {second}; pass --provider or a ctx session ID"
-        ),
+            first_route,
+            second_route,
+        } => match (first_route, second_route) {
+            (Some(first_route), Some(second_route)) => format!(
+                "provider session {provider_session_id:?} is ambiguous between custom routes {first_route} ({first}) and {second_route} ({second}); pass --provider-key and --source-id, or a ctx session ID"
+            ),
+            _ => format!(
+                "provider session {provider_session_id:?} is ambiguous; first matches are {first} and {second}; pass --provider, --provider-key/--source-id for custom history, or a ctx session ID"
+            ),
+        },
         SelectorError::ProviderMismatch {
             session_id,
             actual,

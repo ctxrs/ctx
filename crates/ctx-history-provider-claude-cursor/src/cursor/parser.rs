@@ -15,6 +15,25 @@ pub(crate) enum CursorRejectionKind {
     UnsupportedShape,
 }
 
+impl CursorRejectionKind {
+    fn from_json_error(error: &serde_json::Error) -> Self {
+        match error.classify() {
+            serde_json::error::Category::Syntax | serde_json::error::Category::Eof => {
+                Self::MalformedJson
+            }
+            serde_json::error::Category::Data | serde_json::error::Category::Io => {
+                Self::UnsupportedShape
+            }
+        }
+    }
+}
+
+pub(super) enum CursorJsonlRecordOutcome {
+    Events(Vec<super::projection::CursorNativeEvent>),
+    Ignored,
+    Rejected(CursorRejectionKind, String),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum CursorSafePart {
     BodyFree {
@@ -80,12 +99,44 @@ pub(super) fn project_cursor_jsonl_record(
     byte_start: u64,
     byte_end_exclusive: u64,
 ) -> Result<Option<Vec<super::projection::CursorNativeEvent>>> {
+    Ok(
+        match project_cursor_jsonl_record_with_rejection(
+            bytes,
+            semantic_ordinal,
+            physical_ordinal,
+            byte_start,
+            byte_end_exclusive,
+        )? {
+            CursorJsonlRecordOutcome::Events(events) => Some(events),
+            CursorJsonlRecordOutcome::Ignored | CursorJsonlRecordOutcome::Rejected(_, _) => None,
+        },
+    )
+}
+
+pub(super) fn project_cursor_jsonl_record_with_rejection(
+    bytes: &[u8],
+    semantic_ordinal: u64,
+    physical_ordinal: u64,
+    byte_start: u64,
+    byte_end_exclusive: u64,
+) -> Result<CursorJsonlRecordOutcome> {
     if bytes.iter().all(u8::is_ascii_whitespace) {
-        return Ok(None);
+        return Ok(CursorJsonlRecordOutcome::Ignored);
     }
     let classification = match classify_cursor_line(bytes) {
         Ok(classification) => classification,
-        Err(_) => return Ok(None),
+        Err(CursorRejectionKind::UnsupportedShape) => {
+            return Ok(CursorJsonlRecordOutcome::Rejected(
+                CursorRejectionKind::UnsupportedShape,
+                "Cursor record has a well-formed but unsupported shape".to_owned(),
+            ))
+        }
+        Err(CursorRejectionKind::MalformedJson) => {
+            return Ok(CursorJsonlRecordOutcome::Rejected(
+                CursorRejectionKind::MalformedJson,
+                "Cursor record is malformed JSON".to_owned(),
+            ))
+        }
     };
     let sanitized = match decode_sanitized_record(
         bytes,
@@ -96,9 +147,16 @@ pub(super) fn project_cursor_jsonl_record(
         &classification,
     ) {
         Ok(record) => record,
-        Err(_) => return Ok(None),
+        Err(error) => {
+            return Ok(CursorJsonlRecordOutcome::Rejected(
+                CursorRejectionKind::from_json_error(&error),
+                format!("Cursor record could not be decoded safely: {error}"),
+            ))
+        }
     };
-    Ok(Some(super::projection::project_cursor_record(sanitized)?))
+    Ok(CursorJsonlRecordOutcome::Events(
+        super::projection::project_cursor_record(sanitized)?,
+    ))
 }
 
 fn decode_sanitized_record(
@@ -645,7 +703,26 @@ fn cursor_literal_kind_for_key(key: &str) -> Option<ctx_history_core::LiteralFac
 
 #[cfg(test)]
 mod tests {
-    use super::project_cursor_jsonl_record;
+    use super::{
+        project_cursor_jsonl_record, project_cursor_jsonl_record_with_rejection,
+        CursorJsonlRecordOutcome, CursorRejectionKind,
+    };
+
+    #[test]
+    fn cursor_distinguishes_malformed_json_from_unsupported_shapes() {
+        for (record, expected) in [
+            (b"{".as_slice(), CursorRejectionKind::MalformedJson),
+            (b"[]".as_slice(), CursorRejectionKind::UnsupportedShape),
+        ] {
+            let outcome =
+                project_cursor_jsonl_record_with_rejection(record, 0, 0, 0, record.len() as u64)
+                    .unwrap();
+            assert!(matches!(
+                outcome,
+                CursorJsonlRecordOutcome::Rejected(kind, _) if kind == expected
+            ));
+        }
+    }
 
     fn assert_rejected(label: &str, record: &[u8]) {
         assert!(

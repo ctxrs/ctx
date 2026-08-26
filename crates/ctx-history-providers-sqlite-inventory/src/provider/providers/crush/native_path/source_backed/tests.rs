@@ -6,6 +6,43 @@ use serde_json::json;
 
 use super::*;
 
+#[test]
+fn root_scope_composes_with_crush_projects_and_preserves_unqualified_identity() {
+    use ctx_history_core::{CaptureProvider, SourceAnchorScope, SourceKey};
+
+    let project = TypedKey::utf8("shared-project").unwrap();
+    let released = SourceKey::derive(
+        CaptureProvider::Crush.as_str(),
+        crate::CRUSH_SQLITE_SOURCE_FORMAT,
+        CRUSH_SOURCE_SCHEMA_VARIANT,
+        1,
+        SourceAnchor::provider_native(CRUSH_SOURCE_ANCHOR_NAMESPACE, project.clone()).unwrap(),
+    )
+    .unwrap();
+    let unqualified =
+        crush_source_key_scoped(project.clone(), SourceAnchorScope::Unqualified).unwrap();
+    assert!(released.exact_descriptor_eq(&unqualified));
+    assert_eq!(
+        released.identity().encode_canonical().unwrap(),
+        unqualified.identity().encode_canonical().unwrap()
+    );
+
+    let first =
+        crush_source_key_scoped(project.clone(), SourceAnchorScope::Lineage([0x11; 32])).unwrap();
+    let second = crush_source_key_scoped(project, SourceAnchorScope::Lineage([0x22; 32])).unwrap();
+    assert_ne!(
+        crush_session_id(&first, "shared-session").unwrap(),
+        crush_session_id(&second, "shared-session").unwrap()
+    );
+
+    let sibling = crush_source_key_scoped(
+        TypedKey::utf8("sibling-project").unwrap(),
+        SourceAnchorScope::Lineage([0x11; 32]),
+    )
+    .unwrap();
+    assert_ne!(first.identity(), sibling.identity());
+}
+
 #[derive(Clone)]
 struct TestInventory {
     observation: Arc<Mutex<CrushProjectInventoryObservationV0>>,
@@ -232,6 +269,78 @@ fn record_for_only_message(source: &OpenedSource) -> ctx_history_core::CoreRecor
         CrushRecordProjection::Rejection => panic!("expected the test message to project"),
     };
     core_record(source, &row, &session, &projection).unwrap()
+}
+
+#[test]
+fn row_local_projection_failure_becomes_a_record_rejection() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let path = temp.path().join("row-local.db");
+    write_database(&path, "session", "message", "body");
+    Connection::open(&path)
+        .unwrap()
+        .execute(
+            "update messages set id = ?1 where id = 'message'",
+            ["x".repeat(70 * 1024)],
+        )
+        .unwrap();
+    let frozen = bind_inventory(
+        crate::test_provider_sqlite_data_root(),
+        inventory(b"row-local", vec![database("project", &path)]),
+    )
+    .unwrap();
+    let source = open_source(frozen.databases.into_iter().next().unwrap()).unwrap();
+    let candidate = super::super::query::next_candidate(
+        source.connection().unwrap(),
+        &source.schema,
+        &CrushNativeFrontier { after_rowid: None },
+    )
+    .unwrap()
+    .unwrap();
+    let CrushLoadedRow {
+        row,
+        session: Some(session),
+        ..
+    } = super::super::query::load_message_batch(
+        source.connection().unwrap(),
+        &source.schema,
+        &[candidate],
+    )
+    .unwrap()
+    .remove(&candidate.rowid)
+    .unwrap()
+    .unwrap()
+    else {
+        panic!("expected one parented Crush message row");
+    };
+    let CrushRecordProjection::Message(projection) = project_message(&row, Some(&session)).unwrap()
+    else {
+        panic!("expected the oversized identity row to reach Core projection");
+    };
+
+    let error = core_record(&source, &row, &session, &projection).unwrap_err();
+    assert!(crush_row_projection_error(&error));
+    assert!(finish_opened_source(source).unwrap());
+}
+
+#[test]
+fn row_local_projection_filter_preserves_core_invariants() {
+    assert!(crush_row_projection_error(
+        &CrushSourceBackedErrorV0::Projection(ProjectionContractError::FieldTooLarge {
+            field: "typed_key_utf8",
+            actual: 2,
+            maximum: 1,
+        })
+    ));
+    for error in [
+        CrushSourceBackedErrorV0::Projection(ProjectionContractError::SourceChanged),
+        CrushSourceBackedErrorV0::Projection(ProjectionContractError::InvalidDerivedIdentity),
+        CrushSourceBackedErrorV0::CoreRecord(CoreRecordError::Projection(
+            ProjectionContractError::SourceChanged,
+        )),
+        CrushSourceBackedErrorV0::CoreRecord(CoreRecordError::InvalidSessionRelationship),
+    ] {
+        assert!(!crush_row_projection_error(&error), "{error:?}");
+    }
 }
 
 #[test]

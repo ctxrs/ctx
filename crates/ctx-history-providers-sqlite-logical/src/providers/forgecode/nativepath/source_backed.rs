@@ -17,7 +17,7 @@ use ctx_history_core::{
     ActivityTextCapture, AgentScope, CaptureProvider, CertifiedSource, CoreActivity, CoreRecord,
     CoreRecordError, EventIdentityInput, LiteralFactKind, NativeItemKey, NativeSessionKey,
     PositionStability, ProjectionContractError, ScannedSourceCounts, SessionIdentityInput,
-    SourceAnchor, SourceKey, StableEntityId, TypedKey, CORE_ACTIVITY_REVISION,
+    SourceAnchor, SourceAnchorScope, SourceKey, StableEntityId, TypedKey, CORE_ACTIVITY_REVISION,
 };
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -81,6 +81,7 @@ pub(crate) struct ForgeCodeSourceSelectionV0 {
     path: PathBuf,
     data_root: PathBuf,
     authority: ForgeCodeSourceAuthorityV0,
+    source_scope: SourceAnchorScope,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -90,23 +91,35 @@ enum ForgeCodeSourceAuthorityV0 {
 }
 
 impl ForgeCodeSourceSelectionV0 {
+    #[cfg(test)]
     pub(crate) fn selected(data_root: &Path, path: impl Into<PathBuf>) -> Self {
+        Self::selected_scoped(data_root, path, SourceAnchorScope::Unqualified)
+    }
+
+    pub(crate) fn selected_scoped(
+        data_root: &Path,
+        path: impl Into<PathBuf>,
+        source_scope: SourceAnchorScope,
+    ) -> Self {
         Self {
             path: path.into(),
             data_root: data_root.to_path_buf(),
             authority: ForgeCodeSourceAuthorityV0::Selected,
+            source_scope,
         }
     }
 
-    pub(crate) fn explicit(
+    pub(crate) fn explicit_scoped(
         data_root: &Path,
         path: impl Into<PathBuf>,
         catalog_lineage: [u8; 32],
+        source_scope: SourceAnchorScope,
     ) -> Self {
         Self {
             path: path.into(),
             data_root: data_root.to_path_buf(),
             authority: ForgeCodeSourceAuthorityV0::ExplicitCatalogLineage(catalog_lineage),
+            source_scope,
         }
     }
 
@@ -120,12 +133,13 @@ impl ForgeCodeSourceSelectionV0 {
                 SourceAnchor::CatalogLineage(lineage)
             }
         };
-        Ok(SourceKey::derive(
+        Ok(SourceKey::derive_scoped(
             FORGECODE_PROVIDER_ID,
             FORGECODE_SQLITE_SOURCE_FORMAT,
             FORGECODE_SOURCE_SCHEMA_VARIANT,
             1,
             anchor,
+            self.source_scope,
         )?)
     }
 }
@@ -458,15 +472,37 @@ pub struct ForgeCodeRouteAdapter<B> {
 
 impl<B> ForgeCodeRouteAdapter<B> {
     pub fn selected(data_root: &Path, path: impl Into<PathBuf>) -> Self {
+        Self::selected_scoped(data_root, path, SourceAnchorScope::Unqualified)
+    }
+
+    pub fn selected_scoped(
+        data_root: &Path,
+        path: impl Into<PathBuf>,
+        source_scope: SourceAnchorScope,
+    ) -> Self {
         Self {
-            selection: ForgeCodeSourceSelectionV0::selected(data_root, path),
+            selection: ForgeCodeSourceSelectionV0::selected_scoped(data_root, path, source_scope),
             binding: PhantomData,
         }
     }
 
     pub fn explicit(data_root: &Path, path: impl Into<PathBuf>, lineage: [u8; 32]) -> Self {
+        Self::explicit_scoped(data_root, path, lineage, SourceAnchorScope::Unqualified)
+    }
+
+    pub fn explicit_scoped(
+        data_root: &Path,
+        path: impl Into<PathBuf>,
+        lineage: [u8; 32],
+        source_scope: SourceAnchorScope,
+    ) -> Self {
         Self {
-            selection: ForgeCodeSourceSelectionV0::explicit(data_root, path, lineage),
+            selection: ForgeCodeSourceSelectionV0::explicit_scoped(
+                data_root,
+                path,
+                lineage,
+                source_scope,
+            ),
             binding: PhantomData,
         }
     }

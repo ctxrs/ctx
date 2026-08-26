@@ -6,8 +6,8 @@ use ctx_history_core::{
     ActivityTextCapture, AgentScope, CaptureProvider, CoreActivity, CoreRecord, CoreRecordError,
     EventIdentityInput, LiteralFactKind, NativeItemKey, NativeSessionKey, PositionStability,
     ProjectionContractError, ProviderDeclaredFact, ProviderNativeSessionRelationship,
-    SessionIdentityInput, SourceAnchor, SourceObservation, StableEntityId, TypedKey,
-    CORE_ACTIVITY_REVISION,
+    SessionIdentityInput, SourceAnchor, SourceAnchorScope, SourceObservation, StableEntityId,
+    TypedKey, CORE_ACTIVITY_REVISION,
 };
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -169,17 +169,25 @@ impl ZedNativeSink for ZedSourceBackedSinkV0<'_> {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn zed_source_key() -> ZedSourceBackedResultV0<ctx_history_core::SourceKey> {
+    zed_source_key_scoped(SourceAnchorScope::Unqualified)
+}
+
+pub(crate) fn zed_source_key_scoped(
+    source_scope: SourceAnchorScope,
+) -> ZedSourceBackedResultV0<ctx_history_core::SourceKey> {
     let anchor = SourceAnchor::provider_native(
         ZED_SOURCE_ANCHOR_NAMESPACE,
         TypedKey::utf8(ZED_SOURCE_ANCHOR_KEY)?,
     )?;
-    Ok(ctx_history_core::SourceKey::derive(
+    Ok(ctx_history_core::SourceKey::derive_scoped(
         CaptureProvider::Zed.as_str(),
         ZED_THREADS_SQLITE_SOURCE_FORMAT,
         ZED_SOURCE_SCHEMA_VARIANT,
         1,
         anchor,
+        source_scope,
     )?)
 }
 

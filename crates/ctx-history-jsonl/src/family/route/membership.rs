@@ -25,6 +25,8 @@ struct JsonlFamilyMembershipRoute<E: JsonlFamilyError> {
     authority_path: PathBuf,
 }
 
+type UnobservedMembershipRoutes = BTreeMap<PathBuf, BTreeSet<PathBuf>>;
+
 impl<E: JsonlFamilyError> JsonlFamilyMembershipObservation<E> {
     pub fn observe(root: &Path, opening: &JsonlFamilyInventory<E>) -> JsonlResult<Self, E> {
         if opening.root_missing {
@@ -52,9 +54,10 @@ impl<E: JsonlFamilyError> JsonlFamilyMembershipObservation<E> {
 
     pub fn observe_authorities(opening: &JsonlFamilyInventory<E>) -> JsonlResult<Self, E> {
         let mut state = JsonlFamilyMembershipState::default();
+        let unobserved_routes = unobserved_membership_routes(opening)?;
         for authority in &opening.authorities {
             let directory = authority.directory()?;
-            observe_membership_directory(&directory, 0, &mut state)?;
+            observe_membership_directory(&directory, 0, &mut state, &unobserved_routes)?;
             authority.revalidate_same_object()?;
         }
         Self::from_routes(state.routes, opening)
@@ -97,9 +100,16 @@ impl<E: JsonlFamilyError> JsonlFamilyMembershipObservation<E> {
                 "JSONL membership path depth exceeds the provider inventory bound".to_owned(),
             ));
         }
-        let opened = authority.open_file(authority_path)?;
-        opened.revalidate_same_object()?;
         let mut routes = BTreeMap::new();
+        if matches!(
+            member,
+            JsonlFamilyInventoryMember::Quarantined { leaf, .. } if leaf.observation.is_none()
+        ) {
+            observe_unopened_member(&authority, authority_path)?;
+        } else {
+            let opened = authority.open_file(authority_path)?;
+            opened.revalidate_same_object()?;
+        }
         routes.insert(
             source_path.to_path_buf(),
             JsonlFamilyMembershipRoute {
@@ -216,6 +226,7 @@ fn observe_membership_directory<E: JsonlFamilyError>(
     directory: &ProviderSourceDirectory<E>,
     depth: usize,
     state: &mut JsonlFamilyMembershipState<E>,
+    unobserved_routes: &UnobservedMembershipRoutes,
 ) -> JsonlResult<(), E> {
     if depth > PROVIDER_JSONL_INVENTORY_MAX_DEPTH {
         return Err(E::invalid_payload(
@@ -248,6 +259,27 @@ fn observe_membership_directory<E: JsonlFamilyError>(
         let authority = directory.authority_root();
         let source_path = authority.named_path().join(&authority_path);
         check_membership_path::<E>(&source_path)?;
+        if unobserved_routes
+            .get(authority.named_path())
+            .is_some_and(|routes| routes.contains(&authority_path))
+        {
+            if state
+                .routes
+                .insert(
+                    source_path,
+                    JsonlFamilyMembershipRoute {
+                        authority: Arc::new(authority),
+                        authority_path,
+                    },
+                )
+                .is_some()
+            {
+                return Err(E::invalid_payload(
+                    "JSONL membership contains a duplicate authority route".to_owned(),
+                ));
+            }
+            continue;
+        }
         let opened = match directory.open_child(&name) {
             Ok(opened) => opened,
             // Admission never admits a link-like or non-regular route (a
@@ -263,7 +295,12 @@ fn observe_membership_directory<E: JsonlFamilyError>(
         };
         match opened {
             OpenedProviderSourcePath::Directory(child) => {
-                observe_membership_directory(&child, depth.saturating_add(1), state)?;
+                observe_membership_directory(
+                    &child,
+                    depth.saturating_add(1),
+                    state,
+                    unobserved_routes,
+                )?;
             }
             OpenedProviderSourcePath::File(opened)
                 if source_path
@@ -306,6 +343,48 @@ fn observe_membership_directory<E: JsonlFamilyError>(
     if depth > 0 {
         directory.revalidate()?;
     }
+    Ok(())
+}
+
+fn unobserved_membership_routes<E: JsonlFamilyError>(
+    opening: &JsonlFamilyInventory<E>,
+) -> JsonlResult<UnobservedMembershipRoutes, E> {
+    let mut routes = BTreeMap::<PathBuf, BTreeSet<PathBuf>>::new();
+    for member in &opening.members {
+        let JsonlFamilyInventoryMember::Quarantined { leaf, .. } = member else {
+            continue;
+        };
+        if leaf.observation.is_some() {
+            continue;
+        }
+        let authority = exact_member_authority(
+            &opening.authorities,
+            &leaf.source_path,
+            &leaf.authority_path,
+        )?;
+        routes
+            .entry(authority.named_path().to_path_buf())
+            .or_default()
+            .insert(leaf.authority_path.clone());
+    }
+    Ok(routes)
+}
+
+fn observe_unopened_member<E: JsonlFamilyError>(
+    authority: &ProviderSourceRoot<E>,
+    authority_path: &Path,
+) -> JsonlResult<(), E> {
+    let name = authority_path.file_name().ok_or_else(|| {
+        E::invalid_payload("unobserved JSONL membership path has no file name".to_owned())
+    })?;
+    let parent = authority_path.parent().unwrap_or_else(|| Path::new(""));
+    let directory = authority.open_directory(parent)?;
+    let children = directory.entries(PROVIDER_JSONL_INVENTORY_MAX_METADATA_ENTRIES)?;
+    if !children.iter().any(|child| child == name) {
+        return Err(E::source_changed());
+    }
+    directory.revalidate()?;
+    authority.revalidate_same_object()?;
     Ok(())
 }
 

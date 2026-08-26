@@ -444,6 +444,172 @@ fn pause_subprocess(marker: &Path, continue_path: &Path, witness: &str) -> io::R
     Ok(())
 }
 
+fn is_candidate_certification_target(target: &Path) -> bool {
+    target
+        .parent()
+        .and_then(|parent| parent.file_name())
+        .and_then(|name| name.to_str())
+        == Some("integrity-certifications")
+        && target
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.ends_with(".physical-certification.json"))
+}
+
+fn publish_subprocess_successor(
+    root: &Path,
+    report_progress: impl FnMut(PublicationStage) -> Result<()>,
+) -> Result<PublishedGeneration> {
+    let source = source("golden-predecessor.jsonl");
+    let mut writer = GenerationWriter::open(root, WriterOptions::default())?
+        .into_writer()
+        .map_err(|_| IndexError::WriterInvariant("unexpected committed recovery"))?;
+    writer.begin_source(source.clone())?;
+    for sequence in 1..=4 {
+        writer.add_core_record(document(
+            &source,
+            sequence,
+            &format!("certified candidate evidence {sequence}"),
+        ))?;
+    }
+    writer.certify_source(certificate(&source, 2, 4))?;
+    writer.commit_with_complete_inventory_revalidation_and_publication_metadata_and_progress(
+        |_| true,
+        |_| true,
+        |_| Ok(PUBLICATION_METADATA.to_vec()),
+        report_progress,
+    )
+}
+
+#[test]
+fn candidate_certification_publication_subprocess_worker() {
+    let Ok(mode) = env::var(SUBPROCESS_MODE_ENV) else {
+        return;
+    };
+    let root = PathBuf::from(env::var_os(SUBPROCESS_ROOT_ENV).unwrap());
+    let marker = PathBuf::from(env::var_os(SUBPROCESS_MARKER_ENV).unwrap());
+    let continue_path = PathBuf::from(env::var_os(SUBPROCESS_CONTINUE_ENV).unwrap());
+    let result = PathBuf::from(env::var_os(SUBPROCESS_RESULT_ENV).unwrap());
+    let pause_after_certification = mode == "pause-after-candidate-certification";
+    let progress_marker = marker.clone();
+    let progress_continue_path = continue_path.clone();
+    let atomic_guard = if mode == "pause-candidate-certification" {
+        Some(AtomicWriteTestHookGuard::set(move |stage, target| {
+            if stage == AtomicWriteStage::AfterTemporarySyncBeforeReplace
+                && is_candidate_certification_target(target)
+            {
+                pause_subprocess(
+                    &marker,
+                    &continue_path,
+                    "candidate-certification-temp-synced",
+                )?;
+            }
+            Ok(())
+        }))
+    } else if mode == "fail-candidate-certification-write" {
+        Some(AtomicWriteTestHookGuard::set(|stage, target| {
+            if stage == AtomicWriteStage::BeforeTemporaryWrite
+                && is_candidate_certification_target(target)
+            {
+                return Err(io::Error::from_raw_os_error(libc::ENOSPC));
+            }
+            Ok(())
+        }))
+    } else if pause_after_certification {
+        None
+    } else {
+        panic!("unknown candidate certification child mode {mode}");
+    };
+    let detail = match publish_subprocess_successor(&root, move |stage| {
+        if pause_after_certification && stage == PublicationStage::Activation {
+            pause_subprocess(
+                &progress_marker,
+                &progress_continue_path,
+                "candidate-certified-and-reopened",
+            )?;
+        }
+        Ok(())
+    }) {
+        Ok(published) => format!(
+            "PUBLISHED {} {}",
+            published.receipt().generation_id,
+            published.verified_index().generation_id()
+        ),
+        Err(error) => format!("ERROR {error:?}\n{error}"),
+    };
+    fs::write(result, detail).unwrap();
+    drop(atomic_guard);
+}
+
+#[test]
+fn candidate_certification_reader_subprocess_worker() {
+    let Some(root) = env::var_os("CTX_CANDIDATE_CERTIFICATION_READER_ROOT").map(PathBuf::from)
+    else {
+        return;
+    };
+    let detail = match VerifiedIndex::open_pinned(&root) {
+        Ok(index) => format!(
+            "READER {} {}",
+            index.generation_id(),
+            index.document_count()
+        ),
+        Err(error) => format!("ERROR {error:?}\n{error}"),
+    };
+    fs::write(root.join("candidate-certification-reader.result"), detail).unwrap();
+}
+
+#[test]
+fn certified_candidate_reader_subprocess_worker() {
+    let Some(root) = env::var_os("CTX_CERTIFIED_CANDIDATE_READER_ROOT").map(PathBuf::from) else {
+        return;
+    };
+    let result = root.join("certified-candidate-reader.result");
+    let detail = (|| -> Result<String> {
+        let pointer = load_active_generation_pointer(&root)?
+            .ok_or(IndexError::MissingActiveGenerationPointer)?;
+        let predecessor_fence =
+            ctx_history_index_generation::ActiveGenerationPointerFence::capture(
+                &root,
+                Some(&pointer),
+            )?;
+        let certification_directory = root.join("integrity-certifications");
+        let mut candidate_slot = None;
+        for entry in fs::read_dir(certification_directory)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_file() {
+                continue;
+            }
+            let value: serde_json::Value = serde_json::from_slice(&fs::read(entry.path())?)?;
+            let Some(slot) = value.get("slot") else {
+                continue;
+            };
+            let slot: GenerationSlot = serde_json::from_value(slot.clone())?;
+            if slot.generation_id() != pointer.active().generation_id()
+                && candidate_slot.replace(slot).is_some()
+            {
+                return Err(IndexError::WriterInvariant(
+                    "multiple inactive certified candidates",
+                ));
+            }
+        }
+        let slot = candidate_slot.ok_or(IndexError::WriterInvariant(
+            "inactive certified candidate missing",
+        ))?;
+        let index = VerifiedIndex::open_certified_candidate_before_activation(
+            &root,
+            &predecessor_fence,
+            &slot,
+        )?;
+        Ok(format!(
+            "CANDIDATE {} {}",
+            index.generation_id(),
+            index.document_count()
+        ))
+    })()
+    .unwrap_or_else(|error| format!("ERROR {error:?}\n{error}"));
+    fs::write(result, detail).unwrap();
+}
+
 #[test]
 fn predecessor_republish_subprocess_worker() {
     let Ok(mode) = env::var(SUBPROCESS_MODE_ENV) else {
@@ -555,6 +721,74 @@ pub(super) fn spawn_republish_subprocess(root: &Path, mode: &str) -> Child {
         .unwrap()
 }
 
+fn spawn_candidate_certification_subprocess(root: &Path, mode: &str) -> Child {
+    let (marker, continue_path, result) = subprocess_paths(root);
+    for path in [&marker, &continue_path, &result] {
+        let _ = fs::remove_file(path);
+    }
+    Command::new(env::current_exe().unwrap())
+        .arg("--exact")
+        .arg("tests::republish::additional::candidate_certification_publication_subprocess_worker")
+        .arg("--nocapture")
+        .arg("--test-threads=1")
+        .env(SUBPROCESS_MODE_ENV, mode)
+        .env(SUBPROCESS_ROOT_ENV, root)
+        .env(SUBPROCESS_MARKER_ENV, marker)
+        .env(SUBPROCESS_CONTINUE_ENV, continue_path)
+        .env(SUBPROCESS_RESULT_ENV, result)
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .unwrap()
+}
+
+fn fresh_reader_subprocess(root: &Path) -> String {
+    let result = root.join("candidate-certification-reader.result");
+    let _ = fs::remove_file(&result);
+    let mut child = Command::new(env::current_exe().unwrap())
+        .arg("--exact")
+        .arg("tests::republish::additional::candidate_certification_reader_subprocess_worker")
+        .arg("--nocapture")
+        .arg("--test-threads=1")
+        .env("CTX_CANDIDATE_CERTIFICATION_READER_ROOT", root)
+        .spawn()
+        .unwrap();
+    let status = wait_for_subprocess_exit(&mut child);
+    assert!(status.success());
+    fs::read_to_string(result).unwrap()
+}
+
+fn fresh_certified_candidate_subprocess(root: &Path) -> String {
+    let result = root.join("certified-candidate-reader.result");
+    let _ = fs::remove_file(&result);
+    let mut child = Command::new(env::current_exe().unwrap())
+        .arg("--exact")
+        .arg("tests::republish::additional::certified_candidate_reader_subprocess_worker")
+        .arg("--nocapture")
+        .arg("--test-threads=1")
+        .env("CTX_CERTIFIED_CANDIDATE_READER_ROOT", root)
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .unwrap();
+    let status = wait_for_subprocess_exit(&mut child);
+    assert!(status.success());
+    fs::read_to_string(result).unwrap()
+}
+
+fn wait_for_subprocess_exit(child: &mut Child) -> std::process::ExitStatus {
+    let deadline = Instant::now() + SUBPROCESS_TIMEOUT;
+    while Instant::now() < deadline {
+        if let Some(status) = child.try_wait().unwrap() {
+            return status;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    child.kill().unwrap();
+    let status = child.wait().unwrap();
+    panic!("timed out waiting for subprocess exit: {status}");
+}
+
 pub(super) fn wait_for_subprocess_marker(child: &mut Child, marker: &Path) {
     let deadline = Instant::now() + SUBPROCESS_TIMEOUT;
     while Instant::now() < deadline {
@@ -571,7 +805,7 @@ pub(super) fn wait_for_subprocess_marker(child: &mut Child, marker: &Path) {
 
 fn kill_republish_subprocess(child: &mut Child) {
     child.kill().unwrap();
-    assert!(!child.wait().unwrap().success());
+    assert!(!wait_for_subprocess_exit(child).success());
 }
 
 #[test]
@@ -607,11 +841,137 @@ fn subprocess_process_death_around_commit_sync_and_pointer_rename_recovers_corre
 }
 
 #[test]
+fn delayed_candidate_certification_io_keeps_predecessor_visible_to_fresh_process() {
+    let predecessor = GoldenPredecessor::copy();
+    let pointer_before = fs::read(predecessor.root().join("active-generation.json")).unwrap();
+    let (marker, continue_path, _) = subprocess_paths(predecessor.root());
+    let mut child = spawn_candidate_certification_subprocess(
+        predecessor.root(),
+        "pause-candidate-certification",
+    );
+    wait_for_subprocess_marker(&mut child, &marker);
+    assert_eq!(
+        fs::read_to_string(&marker).unwrap(),
+        "candidate-certification-temp-synced"
+    );
+    assert_eq!(
+        fs::read(predecessor.root().join("active-generation.json")).unwrap(),
+        pointer_before
+    );
+    assert_eq!(
+        fresh_reader_subprocess(predecessor.root()),
+        format!("READER {} 3", predecessor.generation_id())
+    );
+
+    fs::write(continue_path, b"release").unwrap();
+    assert!(wait_for_subprocess_exit(&mut child).success());
+}
+
+#[test]
+fn candidate_certification_is_durable_and_reopenable_before_pointer_activation() {
+    let predecessor = GoldenPredecessor::copy();
+    let pointer_before = fs::read(predecessor.root().join("active-generation.json")).unwrap();
+    let (marker, continue_path, result) = subprocess_paths(predecessor.root());
+    let mut child = spawn_candidate_certification_subprocess(
+        predecessor.root(),
+        "pause-after-candidate-certification",
+    );
+    wait_for_subprocess_marker(&mut child, &marker);
+    assert_eq!(
+        fs::read_to_string(&marker).unwrap(),
+        "candidate-certified-and-reopened"
+    );
+    assert_eq!(
+        fs::read(predecessor.root().join("active-generation.json")).unwrap(),
+        pointer_before
+    );
+    let fresh_candidate = fresh_certified_candidate_subprocess(predecessor.root());
+    let mut candidate_fields = fresh_candidate.split_whitespace();
+    assert_eq!(
+        candidate_fields.next(),
+        Some("CANDIDATE"),
+        "{fresh_candidate}"
+    );
+    let candidate_generation_id = candidate_fields.next().unwrap().to_owned();
+    assert_eq!(candidate_fields.next(), Some("4"), "{fresh_candidate}");
+    assert_eq!(candidate_fields.next(), None, "{fresh_candidate}");
+    assert_eq!(
+        fresh_reader_subprocess(predecessor.root()),
+        format!("READER {} 3", predecessor.generation_id())
+    );
+
+    fs::write(continue_path, b"release").unwrap();
+    assert!(wait_for_subprocess_exit(&mut child).success());
+    let published = fs::read_to_string(result).unwrap();
+    let mut fields = published.split_whitespace();
+    assert_eq!(fields.next(), Some("PUBLISHED"), "{published}");
+    let receipt_generation_id = fields.next().unwrap();
+    let reopened_generation_id = fields.next().unwrap();
+    assert_eq!(fields.next(), None, "{published}");
+    assert_eq!(receipt_generation_id, reopened_generation_id);
+    assert_eq!(receipt_generation_id, candidate_generation_id);
+    assert_ne!(receipt_generation_id, predecessor.generation_id());
+    assert_eq!(
+        fresh_reader_subprocess(predecessor.root()),
+        format!("READER {receipt_generation_id} 4")
+    );
+}
+
+#[test]
+fn process_death_after_candidate_certification_preserves_predecessor_authority() {
+    let predecessor = GoldenPredecessor::copy();
+    let pointer_before = fs::read(predecessor.root().join("active-generation.json")).unwrap();
+    let (marker, _, _) = subprocess_paths(predecessor.root());
+    let mut child = spawn_candidate_certification_subprocess(
+        predecessor.root(),
+        "pause-after-candidate-certification",
+    );
+    wait_for_subprocess_marker(&mut child, &marker);
+    assert!(fresh_certified_candidate_subprocess(predecessor.root()).starts_with("CANDIDATE "));
+    kill_republish_subprocess(&mut child);
+    assert_eq!(
+        fs::read(predecessor.root().join("active-generation.json")).unwrap(),
+        pointer_before
+    );
+    assert_eq!(
+        fresh_reader_subprocess(predecessor.root()),
+        format!("READER {} 3", predecessor.generation_id())
+    );
+    drop(
+        GenerationWriter::open(predecessor.root(), WriterOptions::default())
+            .unwrap()
+            .into_writer()
+            .unwrap(),
+    );
+}
+
+#[test]
+fn candidate_certification_write_failure_cannot_publish() {
+    let predecessor = GoldenPredecessor::copy();
+    let pointer_before = fs::read(predecessor.root().join("active-generation.json")).unwrap();
+    let mut child = spawn_candidate_certification_subprocess(
+        predecessor.root(),
+        "fail-candidate-certification-write",
+    );
+    assert!(wait_for_subprocess_exit(&mut child).success());
+    let (_, _, result) = subprocess_paths(predecessor.root());
+    assert!(fs::read_to_string(result).unwrap().starts_with("ERROR"));
+    assert_eq!(
+        fs::read(predecessor.root().join("active-generation.json")).unwrap(),
+        pointer_before
+    );
+    assert_eq!(
+        fresh_reader_subprocess(predecessor.root()),
+        format!("READER {} 3", predecessor.generation_id())
+    );
+}
+
+#[test]
 fn subprocess_pointer_enospc_is_prepublication_failure_and_retry_migrates() {
     let predecessor = GoldenPredecessor::copy();
     let pointer_before = fs::read(predecessor.root().join("active-generation.json")).unwrap();
     let mut child = spawn_republish_subprocess(predecessor.root(), "fail-pointer-write-enospc");
-    assert!(child.wait().unwrap().success());
+    assert!(wait_for_subprocess_exit(&mut child).success());
     let (_, _, result) = subprocess_paths(predecessor.root());
     assert!(fs::read_to_string(result).unwrap().starts_with("ERROR"));
     assert_eq!(
@@ -630,7 +990,7 @@ fn subprocess_pointer_enospc_is_prepublication_failure_and_retry_migrates() {
 fn subprocess_post_rename_fsync_failure_is_committed_and_restart_reads_successor() {
     let predecessor = GoldenPredecessor::copy();
     let mut child = spawn_republish_subprocess(predecessor.root(), "fail-pointer-directory-sync");
-    assert!(child.wait().unwrap().success());
+    assert!(wait_for_subprocess_exit(&mut child).success());
     let (_, _, result) = subprocess_paths(predecessor.root());
     let result = fs::read_to_string(result).unwrap();
     assert!(result.starts_with("COMMITTED "), "{result}");

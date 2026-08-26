@@ -212,6 +212,9 @@ fn gemini_duplicate_record_discriminators_are_rejected_before_classification_or_
     let duplicate_records = [
         br#"{"sessionId":"first","sessionId":"MUST_NOT_EMIT","kind":"main"}"#.as_slice(),
         br#"{"sessionId":"same","sessionId":"same","kind":"main"}"#.as_slice(),
+        br#"{"sessionId":"identity","projectHash":"first","projectHash":"MUST_NOT_EMIT","kind":"main"}"#.as_slice(),
+        br#"{"sessionId":"identity","startTime":"first","startTime":"MUST_NOT_EMIT","kind":"main"}"#.as_slice(),
+        br#"{"sessionId":"identity","kind":"main","kind":"MUST_NOT_EMIT"}"#.as_slice(),
         br#"{"id":"type-conflict","type":"user","type":"gemini","content":"MUST_NOT_EMIT"}"#.as_slice(),
         br#"{"id":"type-identical","type":"gemini","type":"gemini","content":"MUST_NOT_EMIT"}"#.as_slice(),
         br#"{"id":"calls-conflict","type":"gemini","toolCalls":[{"id":"first","name":"tool","args":{}}],"toolCalls":[{"id":"final","name":"tool","args":{"command":"MUST_NOT_EMIT"}}]}"#.as_slice(),

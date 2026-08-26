@@ -1,6 +1,7 @@
 use std::{
-    collections::BTreeSet,
-    fs, io,
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    io::{self, Read},
     marker::PhantomData,
     path::{Path, PathBuf},
     sync::Arc,
@@ -12,14 +13,17 @@ use chrono::{DateTime, Utc};
 use ctx_history_core::{
     ActivityInvocation, ActivityJsonCapture, ActivityResult, ActivityTextCapture, CaptureProvider,
     CoreActivity, CoreRecord, CoreRecordAnnotation, CoreRecordError, LiteralFactKind,
-    ProjectionContractError, ProviderDeclaredFact, SourceKey, StableEntityId, TypedKey,
-    CORE_ACTIVITY_REVISION, MAX_CORE_CONTENT_BYTES,
+    ProjectionContractError, ProviderDeclaredFact, SourceAnchorScope, SourceKey, StableEntityId,
+    TypedKey, CORE_ACTIVITY_REVISION, MAX_CORE_CONTENT_BYTES,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::dto::{GeminiEventBody, GeminiTranscriptLayout};
-use super::parser::{read_gemini_session_header, GeminiBorrowedRecordParser};
+use super::parser::{
+    read_gemini_session_header, GeminiBorrowedRecordParser, GeminiRecordRejectionKind,
+};
 use super::{
     discover_gemini_transcripts, GeminiFileObservation, GeminiScanError, GeminiSession,
     GeminiTranscriptSource,
@@ -27,20 +31,56 @@ use super::{
 use crate::io::{OpenedProviderSourceFile, ProviderSourceRoot};
 use ctx_history_jsonl::{
     JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyInventory, JsonlFamilyLeaf,
-    JsonlFamilyProjector, JsonlFamilyWorkerContext, JsonlReader, JsonlRecordRef,
+    JsonlFamilyProjector, JsonlFamilyTerminalProof, JsonlFamilyWorkerContext,
+    JsonlOversizedRecordPolicy, JsonlReader, JsonlRecordRef, JsonlRecordRejections,
+    SourceBackedRecordRejectionClass, SourceBackedRecordRejectionDrafts,
 };
+use ctx_history_source_io::MAX_PROVIDER_JSONL_LINE_BYTES;
 
 use crate::{GeminiError, GeminiResult, GeminiRuntime, GEMINI_CLI_SOURCE_FORMAT};
-use projection::{gemini_event_id, gemini_session_id, gemini_source_key, project_event};
+#[cfg(any(test, feature = "test-support"))]
+use projection::gemini_legacy_v1_source_key_scoped;
+use projection::{gemini_event_id, gemini_session_id, gemini_source_key_scoped, project_event};
+#[cfg(test)]
+use projection::{gemini_legacy_v1_source_key, gemini_source_key};
 
 const GEMINI_SOURCE_ANCHOR_NAMESPACE: &str = "gemini.session";
+const GEMINI_SOURCE_IDENTITY_VERSION: u32 = 2;
 const GEMINI_NATIVE_SESSION_NAMESPACE: &str = "gemini.session";
 const GEMINI_NATIVE_EVENT_NAMESPACE: &str = "gemini.event";
 const GEMINI_LOGICAL_SESSION_KIND: &str = "gemini-session";
 const GEMINI_LOGICAL_EVENT_KIND: &str = "gemini-event";
 const GEMINI_SOURCE_SCHEMA_VARIANT: &str = "gemini-nativepath-jsonl-v0";
-const GEMINI_SOURCE_BACKED_PARSER_REVISION: &str = "gemini-nativepath-core-activity-v1";
+#[cfg(any(test, feature = "test-support"))]
+const GEMINI_SOURCE_BACKED_PARSER_REVISION_V1: &str = "gemini-nativepath-core-activity-v1";
+const GEMINI_SOURCE_BACKED_PARSER_REVISION: &str =
+    "gemini-nativepath-core-activity-v2-record-rejections";
 const MAX_GEMINI_ACTIVITY_FIELD_BYTES: usize = 64 * 1024;
+
+#[cfg(any(test, feature = "test-support"))]
+std::thread_local! {
+    static AFTER_GEMINI_RECORDING_DISCOVERY_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn install_after_gemini_recording_discovery_hook(hook: impl FnOnce() + 'static) {
+    AFTER_GEMINI_RECORDING_DISCOVERY_HOOK.with(|slot| {
+        assert!(
+            slot.borrow().is_none(),
+            "Gemini recording-discovery hook is already installed"
+        );
+        *slot.borrow_mut() = Some(Box::new(hook));
+    });
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn run_after_gemini_recording_discovery_hook() {
+    let hook = AFTER_GEMINI_RECORDING_DISCOVERY_HOOK.with(|slot| slot.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook();
+    }
+}
 
 #[derive(Debug, Error)]
 pub(crate) enum GeminiSourceBackedError {
@@ -85,11 +125,67 @@ impl GeminiFamilyBinding {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+enum GeminiSourceIdentityRevision {
+    #[cfg(any(test, feature = "test-support"))]
+    LegacyV1,
+    CurrentV2,
+}
+
+impl GeminiSourceIdentityRevision {
+    fn source_key(
+        self,
+        session: &GeminiSession,
+        source_anchor_scope: SourceAnchorScope,
+    ) -> GeminiSourceBackedResult<SourceKey> {
+        match self {
+            #[cfg(any(test, feature = "test-support"))]
+            Self::LegacyV1 => {
+                gemini_legacy_v1_source_key_scoped(&session.native_session_id, source_anchor_scope)
+            }
+            Self::CurrentV2 => gemini_source_key_scoped(session, source_anchor_scope),
+        }
+    }
+
+    fn parser_revision(self) -> &'static str {
+        match self {
+            #[cfg(any(test, feature = "test-support"))]
+            Self::LegacyV1 => GEMINI_SOURCE_BACKED_PARSER_REVISION_V1,
+            Self::CurrentV2 => GEMINI_SOURCE_BACKED_PARSER_REVISION,
+        }
+    }
+}
+
 #[derive(Debug)]
-struct GeminiJsonlAdapter<R>(PhantomData<fn() -> R>);
+struct GeminiJsonlAdapter<R> {
+    source_identity_revision: GeminiSourceIdentityRevision,
+    source_anchor_scope: SourceAnchorScope,
+    _runtime: PhantomData<fn() -> R>,
+}
 
 pub fn gemini_jsonl_adapter<R: GeminiRuntime>() -> Arc<dyn JsonlFamilyAdapter<Runtime = R>> {
-    Arc::new(GeminiJsonlAdapter(PhantomData))
+    gemini_jsonl_adapter_with_source_root_lineage(None)
+}
+
+pub fn gemini_jsonl_adapter_with_source_root_lineage<R: GeminiRuntime>(
+    source_root_lineage: Option<[u8; 32]>,
+) -> Arc<dyn JsonlFamilyAdapter<Runtime = R>> {
+    Arc::new(GeminiJsonlAdapter {
+        source_identity_revision: GeminiSourceIdentityRevision::CurrentV2,
+        source_anchor_scope: source_root_lineage
+            .map_or(SourceAnchorScope::Unqualified, SourceAnchorScope::Lineage),
+        _runtime: PhantomData,
+    })
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn gemini_legacy_v1_jsonl_adapter_for_test<R: GeminiRuntime>(
+) -> Arc<dyn JsonlFamilyAdapter<Runtime = R>> {
+    Arc::new(GeminiJsonlAdapter {
+        source_identity_revision: GeminiSourceIdentityRevision::LegacyV1,
+        source_anchor_scope: SourceAnchorScope::Unqualified,
+        _runtime: PhantomData,
+    })
 }
 
 impl<R: GeminiRuntime> JsonlFamilyAdapter for GeminiJsonlAdapter<R> {
@@ -108,11 +204,15 @@ impl<R: GeminiRuntime> JsonlFamilyAdapter for GeminiJsonlAdapter<R> {
     }
 
     fn parser_revision(&self) -> &'static str {
-        GEMINI_SOURCE_BACKED_PARSER_REVISION
+        self.source_identity_revision.parser_revision()
     }
 
     fn append_mode(&self) -> JsonlFamilyAppendMode {
         JsonlFamilyAppendMode::ProjectorPreflight(false)
+    }
+
+    fn oversized_record_policy(&self) -> JsonlOversizedRecordPolicy {
+        JsonlOversizedRecordPolicy::RejectRecord
     }
 
     fn discover(&self, root: &Path) -> GeminiResult<JsonlFamilyInventory<GeminiError>> {
@@ -130,7 +230,7 @@ impl<R: GeminiRuntime> JsonlFamilyAdapter for GeminiJsonlAdapter<R> {
             ));
         }
         let authority = shared_authority(root, &metadata, &discovery.transcripts)?;
-        let mut leaves = Vec::with_capacity(discovery.transcripts.len());
+        let mut recordings = Vec::with_capacity(discovery.transcripts.len());
         for transcript in discovery.transcripts {
             if transcript.authority.named_path() != authority.named_path()
                 || transcript.authority.authority_fingerprint() != authority.authority_fingerprint()
@@ -138,7 +238,82 @@ impl<R: GeminiRuntime> JsonlFamilyAdapter for GeminiJsonlAdapter<R> {
                 return Err(GeminiError::SourceChangedDuringCapture);
             }
             let session = read_gemini_session_header(&transcript).map_err(capture_scan_error)?;
-            let source = gemini_source_key(&session.native_session_id).map_err(capture_error)?;
+            let source = self
+                .source_identity_revision
+                .source_key(&session, self.source_anchor_scope)
+                .map_err(capture_error)?;
+            recordings.push((transcript, session, source));
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        run_after_gemini_recording_discovery_hook();
+        let mut descriptor_counts = BTreeMap::<[u8; 32], Vec<(SourceKey, usize)>>::new();
+        for (_, _, source) in &recordings {
+            let candidates = descriptor_counts
+                .entry(source.exact_descriptor_digest())
+                .or_default();
+            if let Some((_, count)) = candidates
+                .iter_mut()
+                .find(|(candidate, _)| candidate.exact_descriptor_eq(source))
+            {
+                *count += 1;
+            } else {
+                candidates.push((source.clone(), 1));
+            }
+        }
+        let mut canonical_sources = BTreeMap::<[u8; 32], Vec<(SourceKey, [u8; 32])>>::new();
+        let mut exact_dependencies = Vec::new();
+        let mut distinct_recordings = Vec::with_capacity(recordings.len());
+        for (transcript, session, source) in recordings {
+            let digest = source.exact_descriptor_digest();
+            let alias_count = descriptor_counts
+                .get(&digest)
+                .and_then(|candidates| {
+                    candidates
+                        .iter()
+                        .find(|(candidate, _)| candidate.exact_descriptor_eq(&source))
+                })
+                .map(|(_, count)| *count)
+                .ok_or(GeminiError::SystemInvariant(
+                    "Gemini recording descriptor count is missing",
+                ))?;
+            if alias_count == 1 {
+                distinct_recordings.push((transcript, session, source));
+                continue;
+            }
+
+            let opened = authority.open_file(&transcript.authority_relative_path)?;
+            if opened.ordinary_file_token() != transcript.ordinary_file_token {
+                return Err(GeminiError::SourceChangedDuringCapture);
+            }
+            let content_sha256 = opened_file_sha256(&opened)?;
+            let matching_canonical = canonical_sources.get(&digest).and_then(|candidates| {
+                candidates
+                    .iter()
+                    .find(|(canonical, _)| canonical.exact_descriptor_eq(&source))
+            });
+            if let Some((_, canonical_content_sha256)) = matching_canonical {
+                if canonical_content_sha256 != &content_sha256 {
+                    return Err(GeminiError::InvalidPayload(
+                        "distinct Gemini recordings declared the same recording identity"
+                            .to_owned(),
+                    ));
+                }
+                exact_dependencies.push(JsonlFamilyTerminalProof::exact_opened_path(
+                    transcript.path,
+                    Arc::clone(&authority),
+                    transcript.authority_relative_path,
+                    &opened,
+                )?);
+                continue;
+            }
+            canonical_sources
+                .entry(digest)
+                .or_default()
+                .push((source.clone(), content_sha256));
+            distinct_recordings.push((transcript, session, source));
+        }
+        let mut leaves = Vec::with_capacity(distinct_recordings.len());
+        for (transcript, session, source) in distinct_recordings {
             let binding = GeminiFamilyBinding {
                 relative_path: transcript.relative_path.clone(),
                 layout: transcript.layout.clone(),
@@ -156,6 +331,11 @@ impl<R: GeminiRuntime> JsonlFamilyAdapter for GeminiJsonlAdapter<R> {
             )?);
         }
         JsonlFamilyInventory::present(self.provider(), root, authority, leaves)
+            .map(|inventory| inventory.with_exact_dependencies(exact_dependencies))
+    }
+
+    fn owns(&self, source: &SourceKey) -> bool {
+        owns_gemini_source(source)
     }
 
     fn projector(
@@ -168,23 +348,21 @@ impl<R: GeminiRuntime> JsonlFamilyAdapter for GeminiJsonlAdapter<R> {
         if source_file.ordinary_file_token() != binding.ordinary_file_token {
             return Err(GeminiError::SourceChangedDuringCapture);
         }
-        let expected_source =
-            gemini_source_key(&binding.session.native_session_id).map_err(capture_error)?;
+        let expected_source = self
+            .source_identity_revision
+            .source_key(&binding.session, self.source_anchor_scope)
+            .map_err(capture_error)?;
         if !expected_source.exact_descriptor_eq(leaf.source()) {
             return Err(GeminiError::SourceChangedDuringCapture);
         }
         let session_id = gemini_session_id(leaf.source(), &binding.session.native_session_id)
             .map_err(capture_error)?;
-        let parent_session_id = binding
-            .session
-            .parent_native_session_id
-            .as_deref()
-            .map(|parent_native_session_id| {
-                let parent_source =
-                    gemini_source_key(parent_native_session_id).map_err(capture_error)?;
-                gemini_session_id(&parent_source, parent_native_session_id).map_err(capture_error)
-            })
-            .transpose()?;
+        // The child path carries only a provider-session parent hint. Gemini
+        // recording identity now needs the parent's complete header anchor,
+        // so manufacturing a source from the hint would conflate resumed
+        // parent recordings. Preserve the child scope and abstain from a ctx
+        // parent-session edge until Core has a typed unresolved native claim.
+        let parent_session_id = None;
         let transcript = binding.transcript(leaf);
         Ok(Box::new(GeminiProjector {
             parser: GeminiBorrowedRecordParser::new(transcript.clone(), binding.session.clone()),
@@ -192,13 +370,58 @@ impl<R: GeminiRuntime> JsonlFamilyAdapter for GeminiJsonlAdapter<R> {
             session: binding.session,
             session_id,
             parent_session_id,
+            parser_revision: self.source_identity_revision.parser_revision(),
             source_file,
             authority: Arc::clone(leaf.authority()),
             native_item_ids: GeminiSourceNativeItemIds::default(),
             emitted_event_digests: BTreeSet::new(),
+            rejections: JsonlRecordRejections::new(
+                leaf.source().clone(),
+                CaptureProvider::Gemini,
+                leaf.source_path().display().to_string(),
+            ),
             runtime: PhantomData,
         }))
     }
+}
+
+fn opened_file_sha256(opened: &OpenedProviderSourceFile) -> GeminiResult<[u8; 32]> {
+    let expected_length = opened.len();
+    let mut file = opened.reopen_same_object()?;
+    let mut hasher = Sha256::new();
+    let mut observed_length = 0_u64;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let count = file.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        observed_length = observed_length
+            .checked_add(u64::try_from(count).map_err(|_| {
+                GeminiError::SystemInvariant("Gemini recording read length exceeds u64")
+            })?)
+            .ok_or(GeminiError::SystemInvariant(
+                "Gemini recording length overflowed u64",
+            ))?;
+        hasher.update(&buffer[..count]);
+    }
+    if observed_length != expected_length
+        || opened.current_ordinary_file_token()? != opened.ordinary_file_token()
+    {
+        return Err(GeminiError::SourceChangedDuringCapture);
+    }
+    opened.revalidate_leaf()?;
+    Ok(hasher.finalize().into())
+}
+
+fn owns_gemini_source(source: &SourceKey) -> bool {
+    source.provider() == CaptureProvider::Gemini.as_str()
+        && source.source_format() == GEMINI_CLI_SOURCE_FORMAT
+        && source.schema_variant() == GEMINI_SOURCE_SCHEMA_VARIANT
+        && matches!(
+            source.provider_identity_version(),
+            1 | GEMINI_SOURCE_IDENTITY_VERSION
+        )
 }
 
 struct GeminiProjector<R> {
@@ -207,10 +430,12 @@ struct GeminiProjector<R> {
     session: GeminiSession,
     session_id: StableEntityId,
     parent_session_id: Option<StableEntityId>,
+    parser_revision: &'static str,
     source_file: Arc<OpenedProviderSourceFile>,
     authority: Arc<ProviderSourceRoot>,
     native_item_ids: GeminiSourceNativeItemIds,
     emitted_event_digests: BTreeSet<[u8; 32]>,
+    rejections: JsonlRecordRejections,
     runtime: PhantomData<fn() -> R>,
 }
 
@@ -285,6 +510,13 @@ impl<R: GeminiRuntime> JsonlFamilyProjector for GeminiProjector<R> {
         _worker: &mut JsonlFamilyWorkerContext<R>,
         emit: &mut dyn FnMut(CoreRecord) -> GeminiResult<()>,
     ) -> GeminiResult<()> {
+        if record.oversized() {
+            self.rejections.malformed(
+                record,
+                format!("Gemini record exceeds the {MAX_PROVIDER_JSONL_LINE_BYTES} byte limit"),
+            );
+            return Ok(());
+        }
         let native_item_id = self.native_item_ids.candidate(record.bytes());
         if native_item_id
             .as_deref()
@@ -293,7 +525,7 @@ impl<R: GeminiRuntime> JsonlFamilyProjector for GeminiProjector<R> {
             return Ok(());
         }
         let evidence = record.evidence();
-        let events = self
+        let projection = self
             .parser
             .project(
                 record.bytes(),
@@ -303,6 +535,19 @@ impl<R: GeminiRuntime> JsonlFamilyProjector for GeminiProjector<R> {
                 evidence.record_digest(),
             )
             .map_err(capture_scan_error)?;
+        if let Some((kind, reason)) = projection.rejection {
+            let class = match kind {
+                GeminiRecordRejectionKind::Malformed => {
+                    SourceBackedRecordRejectionClass::MalformedRecord
+                }
+                GeminiRecordRejectionKind::Unsupported => {
+                    SourceBackedRecordRejectionClass::UnsupportedRecord
+                }
+            };
+            self.rejections.record(record, class, reason);
+            return Ok(());
+        }
+        let events = projection.events;
         if !events.is_empty() {
             self.native_item_ids.remember(native_item_id);
         }
@@ -323,6 +568,7 @@ impl<R: GeminiRuntime> JsonlFamilyProjector for GeminiProjector<R> {
                     &self.source,
                     self.session_id,
                     self.parent_session_id,
+                    self.parser_revision,
                     &self.session,
                     event,
                     projection::GeminiProjectedContent { annotation },
@@ -337,6 +583,14 @@ impl<R: GeminiRuntime> JsonlFamilyProjector for GeminiProjector<R> {
         self.parser.finish().map_err(capture_scan_error)?;
         self.source_file.revalidate_leaf()?;
         self.authority.revalidate()
+    }
+
+    fn rejected_records(&self) -> u64 {
+        self.rejections.count()
+    }
+
+    fn take_record_rejections(&mut self) -> SourceBackedRecordRejectionDrafts {
+        self.rejections.take_drafts()
     }
 }
 
@@ -558,16 +812,12 @@ pub(super) fn project_gemini_test_events(
     events: Vec<super::GeminiRetainedEvent>,
 ) -> GeminiSourceBackedResult<Vec<CoreRecord>> {
     let session = read_gemini_session_header(source)?;
-    let source_key = gemini_source_key(&session.native_session_id)?;
+    let source_key = gemini_source_key(&session)?;
     let session_id = gemini_session_id(&source_key, &session.native_session_id)?;
-    let parent_session_id = session
-        .parent_native_session_id
-        .as_deref()
-        .map(|parent_native_session_id| {
-            let parent_source = gemini_source_key(parent_native_session_id)?;
-            gemini_session_id(&parent_source, parent_native_session_id)
-        })
-        .transpose()?;
+    // This single-source helper has no complete inventory with which to prove
+    // one exact parent recording occurrence. Keep the provider hint in the
+    // parsed session and abstain from fabricating a parent source identity.
+    let parent_session_id = None;
     let mut emitted_event_digests = BTreeSet::new();
     let mut records = Vec::new();
     for event in events {
@@ -580,6 +830,7 @@ pub(super) fn project_gemini_test_events(
             &source_key,
             session_id,
             parent_session_id,
+            GEMINI_SOURCE_BACKED_PARSER_REVISION,
             &session,
             event,
             projection::GeminiProjectedContent { annotation },
@@ -627,5 +878,95 @@ mod neutral_preflight_tests {
         assert!(checkpoint.terminal());
         assert_eq!(checkpoint.next_physical_ordinal(), 3);
         assert_eq!(checkpoint.complete_prefix_end(), bytes.len() as u64);
+    }
+}
+
+#[cfg(test)]
+mod recording_identity_tests {
+    use super::*;
+    use ctx_history_core::{AgentScope, SourceAnchor};
+
+    fn session(start_time: Option<&str>, project_hash: Option<&str>) -> GeminiSession {
+        GeminiSession {
+            native_session_id: "shared-provider-session".to_owned(),
+            native_start_time: start_time.map(str::to_owned),
+            project_hash: project_hash.map(str::to_owned),
+            parent_native_session_id: None,
+            agent_scope: AgentScope::Primary,
+            started_at: None,
+            cwd: None,
+            cwd_ambiguous: false,
+            native_kind: Some("main".to_owned()),
+        }
+    }
+
+    #[test]
+    fn recording_anchor_uses_exact_header_identity_not_route_or_content() {
+        let baseline = session(Some("2026-08-23T15:53:00Z"), Some("project-a"));
+        let mut relocated_rewritten = baseline.clone();
+        relocated_rewritten.cwd = Some("/different/route/content".to_owned());
+        relocated_rewritten.parent_native_session_id = Some("unrelated-hint".to_owned());
+        relocated_rewritten.agent_scope = AgentScope::Subagent;
+        let baseline_source = gemini_source_key(&baseline).unwrap();
+        let relocated_source = gemini_source_key(&relocated_rewritten).unwrap();
+
+        assert!(baseline_source.exact_descriptor_eq(&relocated_source));
+        assert_eq!(baseline_source.provider_identity_version(), 2);
+        let SourceAnchor::ProviderNative { namespace, key } = baseline_source.anchor() else {
+            panic!("Gemini recording source must use provider-native evidence");
+        };
+        assert_eq!(namespace, GEMINI_SOURCE_ANCHOR_NAMESPACE);
+        assert_eq!(
+            key,
+            &TypedKey::composite(vec![
+                TypedKey::utf8("shared-provider-session").unwrap(),
+                TypedKey::utf8("2026-08-23T15:53:00Z").unwrap(),
+                TypedKey::utf8("project-a").unwrap(),
+                TypedKey::utf8("main").unwrap(),
+            ])
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn resumed_recordings_share_provider_metadata_but_not_source_identity() {
+        let first = session(Some("2026-08-23T15:53:00Z"), Some("project-a"));
+        let resumed = session(Some("2026-08-23T16:03:00Z"), Some("project-a"));
+
+        assert_eq!(first.native_session_id, resumed.native_session_id);
+        assert_ne!(
+            gemini_source_key(&first).unwrap(),
+            gemini_source_key(&resumed).unwrap()
+        );
+    }
+
+    #[test]
+    fn source_and_session_identities_are_root_scoped() {
+        let session = session(Some("2026-08-23T15:53:00Z"), Some("project-a"));
+        let released = gemini_source_key(&session).unwrap();
+        let compatibility =
+            gemini_source_key_scoped(&session, SourceAnchorScope::Unqualified).unwrap();
+        let first =
+            gemini_source_key_scoped(&session, SourceAnchorScope::Lineage([1; 32])).unwrap();
+        let second =
+            gemini_source_key_scoped(&session, SourceAnchorScope::Lineage([2; 32])).unwrap();
+
+        assert!(released.exact_descriptor_eq(&compatibility));
+        assert_ne!(first.identity(), second.identity());
+        assert_ne!(
+            gemini_session_id(&first, &session.native_session_id).unwrap(),
+            gemini_session_id(&second, &session.native_session_id).unwrap()
+        );
+    }
+
+    #[test]
+    fn identity_migration_owns_legacy_and_current_gemini_sources_only() {
+        let current =
+            gemini_source_key(&session(Some("2026-08-23T15:53:00Z"), Some("project-a"))).unwrap();
+        let legacy = gemini_legacy_v1_source_key("shared-provider-session").unwrap();
+
+        assert_ne!(legacy, current);
+        assert!(owns_gemini_source(&legacy));
+        assert!(owns_gemini_source(&current));
     }
 }

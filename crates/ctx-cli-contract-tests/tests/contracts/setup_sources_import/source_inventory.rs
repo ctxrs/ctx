@@ -14,6 +14,23 @@ fn source_entry<'a>(report: &'a Value, provider: &str, source_format: Option<&st
         .unwrap_or_else(|| panic!("missing {provider} source in {report:#}"))
 }
 
+fn write_maximum_missing_openclaw_roots(temp: &TempDir) -> Vec<String> {
+    fs::create_dir_all(data_root(temp)).unwrap();
+    let mut config = String::new();
+    for index in (0..64).rev() {
+        let name = format!("openclaw-{index:02}");
+        let path = temp.path().join(format!("missing-{name}"));
+        config.push_str(&format!(
+            "[sources.roots.{name}]\nprovider = \"openclaw\"\npath = {}\n\n",
+            json!(path),
+        ));
+    }
+    fs::write(data_root(temp).join("config.toml"), config).unwrap();
+    (0..64)
+        .map(|index| format!("openclaw-{index:02}"))
+        .collect()
+}
+
 #[test]
 fn setup_skips_empty_codex_session_tree() {
     let temp = tempdir();
@@ -56,6 +73,119 @@ fn sources_default_hides_unsupported_missing_locations() {
     assert_eq!(all_sources["hidden_missing_sources"], 0);
     let all = source_entries(&all_sources);
     assert!(all.len() > visible.len());
+}
+
+#[test]
+fn configured_missing_roots_remain_listed_without_exposing_automatic_missing_routes() {
+    let temp = tempdir();
+    let missing_openclaw = temp.path().join("missing-openclaw-state");
+    let missing_goose = temp.path().join("missing-goose-sessions.db");
+    fs::create_dir_all(data_root(&temp)).unwrap();
+    fs::write(
+        data_root(&temp).join("config.toml"),
+        format!(
+            "[sources.roots.personal-openclaw]\nprovider = \"openclaw\"\npath = {:?}\ngroup = \"personal\"\n\n[sources.roots.work-goose]\nprovider = \"goose\"\npath = {:?}\ngroup = \"work\"\n",
+            missing_openclaw.display().to_string(),
+            missing_goose.display().to_string(),
+        ),
+    )
+    .unwrap();
+
+    let default = json_output(ctx(&temp).args(["sources", "--format=json"]));
+    assert_eq!(default["scope"], "default");
+    let goose = source_entries(&default)
+        .iter()
+        .find(|source| source["path"] == missing_goose.to_str().unwrap())
+        .unwrap_or_else(|| panic!("configured Goose source missing from {default:#}"));
+    assert_eq!(goose["provider"], "goose");
+    assert_eq!(goose["status"], "missing");
+    assert_eq!(
+        goose["selection"],
+        json!({"kind": "configured", "root": "work-goose", "group": "work"}),
+    );
+    assert!(source_entries(&default).iter().all(|source| {
+        source["provider"] != "goose" || source["path"] == missing_goose.to_str().unwrap()
+    }));
+    let openclaw = default["issues"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|issue| issue["code"] == "configured_root_missing")
+        .unwrap_or_else(|| panic!("route-less OpenClaw root missing from {default:#}"));
+    assert_eq!(openclaw["provider"], "openclaw");
+    assert_eq!(openclaw["path"], missing_openclaw.to_str().unwrap());
+    assert_eq!(
+        openclaw["configured_root"],
+        json!({
+            "name": "personal-openclaw",
+            "path": missing_openclaw.to_str().unwrap(),
+            "group": "personal",
+        }),
+    );
+
+    let all = json_output(ctx(&temp).args(["sources", "--all", "--format=json"]));
+    assert_eq!(all["scope"], "all");
+    assert!(source_entries(&all)
+        .iter()
+        .any(|source| source["path"] == missing_goose.to_str().unwrap()));
+    assert!(all["issues"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|issue| issue["code"] == "configured_root_missing"
+            && issue["configured_root"]["name"] == "personal-openclaw"));
+
+    let human = success_stdout(ctx(&temp).arg("sources"));
+    assert!(human.contains("personal-openclaw (personal)"), "{human}");
+    assert!(
+        human.contains("configured history root is missing"),
+        "{human}"
+    );
+    assert!(
+        human.contains("--root <replacement-path> --replace"),
+        "{human}"
+    );
+}
+
+#[test]
+fn maximum_missing_roots_precede_automatic_issues_without_exceeding_json_bounds() {
+    let temp = tempdir();
+    let expected_names = write_maximum_missing_openclaw_roots(&temp);
+
+    let sources = json_output(
+        ctx(&temp)
+            .env("CLAUDE_CONFIG_DIR", "relative-account")
+            .args(["sources", "--format=json"]),
+    );
+
+    assert_eq!(sources["issues_truncated"], true, "{sources:#}");
+    let issues = sources["issues"].as_array().unwrap();
+    assert_eq!(issues.len(), 64, "{sources:#}");
+    let actual_names = issues
+        .iter()
+        .map(|issue| {
+            assert_eq!(issue["code"], "configured_root_missing", "{issue:#}");
+            let root = issue
+                .get("configured_root")
+                .and_then(Value::as_object)
+                .unwrap_or_else(|| panic!("missing configured_root object in {issue:#}"));
+            assert!(root["group"].is_null(), "{issue:#}");
+            root["name"].as_str().unwrap().to_owned()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(actual_names, expected_names);
+
+    let human = success_stdout(
+        ctx(&temp)
+            .env("CLAUDE_CONFIG_DIR", "relative-account")
+            .arg("sources"),
+    );
+    assert_eq!(
+        human.matches("configured history root is missing").count(),
+        64,
+        "{human}"
+    );
+    assert_eq!(human.matches("--replace").count(), 64, "{human}");
 }
 
 #[test]
@@ -144,6 +274,52 @@ fn sources_json_reports_typed_discovery_issues_additively() {
         "the selected provider root cannot be reconstructed safely; use an exact --path"
     );
     assert_eq!(issues[0]["message_truncated"], false);
+}
+
+#[test]
+fn sources_json_and_human_output_expose_configured_root_conflict_repairs() {
+    let temp = tempdir();
+    let legacy_root = temp.path().join(".openhands");
+    let configured_root = legacy_root.join("conversations");
+    fs::create_dir_all(configured_root.join("conversation/events")).unwrap();
+    fs::write(
+        configured_root.join("conversation/events/event-00001.json"),
+        "{}",
+    )
+    .unwrap();
+    fs::create_dir_all(legacy_root.join("v1_conversations/legacy")).unwrap();
+    fs::write(legacy_root.join("v1_conversations/legacy/event.json"), "{}").unwrap();
+    fs::create_dir_all(data_root(&temp)).unwrap();
+    fs::write(
+        data_root(&temp).join("config.toml"),
+        format!(
+            "[sources.roots.work]\nprovider = \"openhands\"\npath = {:?}\nkind = \"current-conversations\"\n",
+            configured_root.display().to_string(),
+        ),
+    )
+    .unwrap();
+
+    let sources =
+        json_output(ctx(&temp).args(["sources", "--provider", "openhands", "--format=json"]));
+    let issues = sources["issues"].as_array().unwrap();
+    assert_eq!(issues.len(), 1, "{sources:#}");
+    assert_eq!(issues[0]["provider"], "openhands");
+    assert_eq!(issues[0]["path"], configured_root.to_str().unwrap());
+    assert_eq!(issues[0]["code"], "configured_root_conflict");
+    assert_eq!(issues[0]["conflict_kind"], "automatic_configured");
+    assert_eq!(
+        issues[0]["configured_roots"],
+        json!([{
+            "name": "work",
+            "path": configured_root.to_str().unwrap(),
+        }]),
+    );
+
+    let human = success_stdout(ctx(&temp).args(["sources", "--provider", "openhands"]));
+    assert!(human.contains("automatic/configured"), "{human}");
+    assert!(human.contains("ctx sources remove work"), "{human}");
+    assert!(human.contains("automatic=false"), "{human}");
+    assert!(!human.contains("ctx import"), "{human}");
 }
 
 #[test]

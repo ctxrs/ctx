@@ -612,8 +612,6 @@ fn filtered_search_covers_relationship_and_public_metadata_contracts() {
             &index,
             EventSearchFilters {
                 exclude_session_tree: Some(ExcludedSessionTree {
-                    provider: "codex".to_owned(),
-                    provider_session_id: "root-thread".to_owned(),
                     session_ids: vec![root_session_id.as_uuid(), child_session_id.as_uuid()],
                 }),
                 ..EventSearchFilters::default()
@@ -630,6 +628,91 @@ fn filtered_search_covers_relationship_and_public_metadata_contracts() {
     assert_eq!(child.root_session_id, Some(root_session_id));
     assert_eq!(child.provider_session_id.as_deref(), Some("child-thread"));
     assert_eq!(child.agent_scope, Some(CoreAgentScope::Subagent));
+}
+
+#[test]
+fn exact_session_tree_exclusion_does_not_cross_duplicate_provider_session_roots() {
+    let temp = tempdir().unwrap();
+    let first_root_source = source("exact-tree-first-root.jsonl");
+    let first_child_source = source("exact-tree-first-child.jsonl");
+    let second_root_source = source("exact-tree-second-root.jsonl");
+
+    let first_root = document_for_session(
+        &first_root_source,
+        "duplicate-provider-session",
+        1,
+        "shared needle first root",
+    );
+    let mut first_child = document_for_session(
+        &first_child_source,
+        "first-child",
+        1,
+        "shared needle first child",
+    );
+    first_child.parent_session_id = Some(first_root.session_id);
+    first_child.root_session_id = Some(first_root.session_id);
+    first_child.session_relationship = Some(ProviderNativeSessionRelationship::Delegated);
+    first_child.agent_scope = Some(CoreAgentScope::Subagent);
+    let second_root = document_for_session(
+        &second_root_source,
+        "duplicate-provider-session",
+        1,
+        "shared needle second root",
+    );
+    assert_ne!(first_root.session_id, second_root.session_id);
+
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    for (source, record) in [
+        (first_root_source, first_root.clone()),
+        (first_child_source, first_child.clone()),
+        (second_root_source, second_root.clone()),
+    ] {
+        writer.begin_source(source.clone()).unwrap();
+        writer.add_core_record(record).unwrap();
+        writer.certify_source(certificate(&source, 1, 1)).unwrap();
+    }
+    writer.commit(|_| true).unwrap();
+    let index = VerifiedIndex::open_pinned(temp.path()).unwrap();
+
+    let all_session_ids = sorted_uuids(vec![
+        first_root.session_id.as_uuid(),
+        first_child.session_id.as_uuid(),
+        second_root.session_id.as_uuid(),
+    ]);
+    assert_eq!(
+        filtered_session_ids(
+            &index,
+            EventSearchFilters {
+                exclude_session_tree: Some(ExcludedSessionTree {
+                    session_ids: Vec::new(),
+                }),
+                ..EventSearchFilters::default()
+            },
+        ),
+        all_session_ids
+    );
+
+    let filters = EventSearchFilters {
+        exclude_session_tree: Some(ExcludedSessionTree {
+            session_ids: vec![
+                first_root.session_id.as_uuid(),
+                first_child.session_id.as_uuid(),
+            ],
+        }),
+        ..EventSearchFilters::default()
+    };
+    assert_eq!(
+        filtered_session_ids(&index, filters.clone()),
+        vec![second_root.session_id.as_uuid()]
+    );
+    let semantic = index.semantic_filter_projection(&filters).unwrap();
+    assert_eq!(
+        semantic.event_ids().collect::<Vec<_>>(),
+        vec![second_root.event_id.as_uuid()]
+    );
 }
 
 #[test]
@@ -853,7 +936,36 @@ fn empty_or_invalid_programmatic_queries_are_safe() {
             },
             10,
         ),
-        Err(IndexError::EmptyQueryFilter { field: "provider" })
+        Err(ctx_history_index_query::LexicalSearchError::Index(
+            IndexError::EmptyQueryFilter { field: "provider" }
+        ))
+    ));
+    for (query, limit) in [("", 10), ("body", 0)] {
+        assert!(matches!(
+            index.search_event_candidates_with_filters(
+                query,
+                &EventSearchFilters {
+                    provider: Some("  ".to_owned()),
+                    ..EventSearchFilters::default()
+                },
+                limit,
+            ),
+            Err(ctx_history_index_query::LexicalSearchError::Index(
+                IndexError::EmptyQueryFilter { field: "provider" }
+            ))
+        ));
+    }
+    assert!(matches!(
+        index.list_event_candidates_with_filters(
+            &EventSearchFilters {
+                file: Some("  ".to_owned()),
+                ..EventSearchFilters::default()
+            },
+            0,
+        ),
+        Err(ctx_history_index_query::LexicalSearchError::Index(
+            IndexError::EmptyQueryFilter { field: "file" }
+        ))
     ));
     assert!(matches!(
         index.events_by_id_prefix("not-a-uuid"),
@@ -1191,13 +1303,19 @@ fn exact_event_type_conflicts_with_every_explicit_content_scope_at_the_index_bou
             index
                 .list_event_candidates_with_filters(&filters, 0)
                 .unwrap_err(),
-            index.semantic_filter_projection(&filters).unwrap_err(),
         ] {
             assert!(matches!(
                 error,
-                IndexError::ContentScopeEventTypeConflict { scope: actual }
+                ctx_history_index_query::LexicalSearchError::Index(
+                    IndexError::ContentScopeEventTypeConflict { scope: actual }
+                )
                     if actual == scope.as_str()
             ));
         }
+        assert!(matches!(
+            index.semantic_filter_projection(&filters).unwrap_err(),
+            IndexError::ContentScopeEventTypeConflict { scope: actual }
+                if actual == scope.as_str()
+        ));
     }
 }

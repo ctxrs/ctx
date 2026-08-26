@@ -1,3 +1,4 @@
+use ctx_history_core::SourceAnchorScope;
 use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::OsStr,
@@ -19,6 +20,7 @@ pub(super) fn logical_leaves(
     selection: CatalogSelection,
     routes: &[CatalogRoute],
     index: &DiscoveryIndex,
+    source_anchor_scope: SourceAnchorScope,
 ) -> Result<Vec<ObservedDocumentLeaf<CodeBuddyDocumentLeaf>>> {
     let mut extension_dirs = extension_session_dirs(
         selected_path,
@@ -35,6 +37,7 @@ pub(super) fn logical_leaves(
             ordinal_index.saturating_add(1),
             routes,
             index,
+            source_anchor_scope,
         )?);
     }
 
@@ -59,9 +62,10 @@ pub(super) fn logical_leaves(
             .ok_or(super::CaptureError::SystemInvariant(
                 "CodeBuddy CLI route lost its file observation",
             ))?;
-        let source = source_backed::codebuddy_source_key_for_path(
+        let source = source_backed::codebuddy_source_key_for_path_scoped(
             CodeBuddySourceShape::Cli,
             &selected.display_path,
+            source_anchor_scope,
         )?;
         let fingerprint = cli_fingerprint(&source, &selected);
         let aliases = aliases
@@ -90,6 +94,7 @@ fn extension_leaf(
     session_ordinal: usize,
     routes: &[CatalogRoute],
     index: &DiscoveryIndex,
+    source_anchor_scope: SourceAnchorScope,
 ) -> Result<ObservedDocumentLeaf<CodeBuddyDocumentLeaf>> {
     let indexed_session = index
         .session(&session_relative)
@@ -127,9 +132,10 @@ fn extension_leaf(
         .parent()
         .ok_or_else(|| invalid(&session_index.display_path, "session index has no parent"))?
         .to_path_buf();
-    let source = source_backed::codebuddy_source_key_for_path(
+    let source = source_backed::codebuddy_source_key_for_path_scoped(
         CodeBuddySourceShape::Extension,
         &session_dir,
+        source_anchor_scope,
     )?;
     let fingerprint = extension_fingerprint(&source, indexed_session, routes, index);
     Ok(ObservedDocumentLeaf::new(

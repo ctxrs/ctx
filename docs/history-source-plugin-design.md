@@ -7,7 +7,8 @@ history-source plugins.
 
 Third-party tools can expose local history without ctx learning each native
 storage schema. The plugin or provider owns a durable
-`ctx-history-jsonl-v1` file. ctx owns:
+`ctx-history-jsonl-v2` file. A v1 file fails schema validation and is not
+translated. ctx owns:
 
 - bounded manifest discovery and validation;
 - explicit single-source selection;
@@ -41,7 +42,7 @@ The source contract is:
       "display_name": "Example local history",
       "provider_key": "example-agent",
       "source_id": "default",
-      "source_format": "example-agent-jsonl-v1",
+      "source_format": "example-agent-jsonl-v2",
       "path": "/path/owned/by/example-agent/history.jsonl",
       "lineage_contract": "provider_native_v1",
       "enabled": true,
@@ -64,7 +65,8 @@ declare command runtime options.
 `lineage_contract` is optional and currently accepts only
 `provider_native_v1`. It must match the provider-owned JSONL manifest. The
 custom parser admits copied origin only when that durable source supplies
-unique stable native session/event selectors and a typed ancestor chain.
+unique stable provider session and native event selectors plus a typed ancestor
+chain.
 Command-only sources cannot declare this authority.
 
 Command-only manifests remain parseable so existing installations receive a
@@ -73,9 +75,9 @@ stable compatibility diagnostic. They are reported as `unsupported`,
 
 ## Identity And Publication Contract
 
-The provider-owned file contains exactly one `ctx-history-jsonl-v1` manifest
-record, one or more source/session/event records, and optional file-touch and
-edge records. The selected source record must match the manifest's
+The provider-owned file contains exactly one `ctx-history-jsonl-v2` manifest
+record, one or more source/session/event records, and optional file-reference
+and edge records. The selected source record must match the manifest's
 `provider_key`, `source_id`, and `source_format`.
 
 ```text
@@ -85,7 +87,7 @@ discover + select
 validate provider-owned path + bounded identity header
         |
         v
-upsert explicit custom ctx_history_jsonl_v1 route
+upsert explicit custom ctx_history_jsonl_v2 route
         |
         v
 daemon-owned Core refresh + terminal receipt

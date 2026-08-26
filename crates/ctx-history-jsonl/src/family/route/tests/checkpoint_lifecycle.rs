@@ -128,6 +128,7 @@ fn logical_counts_decode_and_retain_unchanged_committed_checkpoints() {
             begin_source_replacements: 0,
             begin_source_appends: 0,
             retained_sources: LEAVES,
+            deleted_sources: 0,
         }
     );
     assert_eq!(

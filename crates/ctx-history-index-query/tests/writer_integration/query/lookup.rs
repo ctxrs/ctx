@@ -23,7 +23,7 @@ fn pinned_query_api_returns_typed_records_in_deterministic_order() {
     let candidates = index
         .search_event_candidates("atomic:generation", 10)
         .unwrap();
-    let mut expected_search_ids = vec![first.event_id.as_uuid(), second.event_id.as_uuid()];
+    let mut expected_search_ids = vec![second.event_id.as_uuid(), first.event_id.as_uuid()];
     expected_search_ids.sort();
     assert_eq!(
         candidates
@@ -717,7 +717,7 @@ fn candidate_collectors_decode_core_only_for_bounded_selected_results() {
     session_ids.dedup();
     ctx_history_index_query::reset_stored_event_record_materializations();
     let provider_sessions = index
-        .sessions_by_provider_session_id("shared-provider-session", Some("codex"))
+        .sessions_by_provider_session_id("shared-provider-session", Some("codex"), None, None)
         .unwrap();
     assert_eq!(provider_sessions.len(), AMBIGUITY_LIMIT);
     assert_eq!(

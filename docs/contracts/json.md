@@ -5,8 +5,8 @@ arguments, typed result identifiers, and local paths. Treat it as private until
 a user reviews it.
 
 Command result JSON uses `schema_version: 1` except for
-`ctx setup --format json`, `ctx stats --format json`, and
-`ctx import --format json`.
+`ctx setup --format json`, `ctx stats --format json`,
+`ctx import --format json`, and `ctx search --format json`.
 Progress-event JSON is stderr progress output and does not include
 `schema_version`.
 
@@ -341,12 +341,13 @@ Returns:
 
 - `schema_version`;
 - `scope`, either `default` or `all`;
+- `automatic_discovery`, whether inferred provider history roots are enabled;
 - `hidden_missing_sources`;
 - `sources[]`;
 - `issues[]`;
 - `issues_truncated`.
 
-Each source includes:
+Each built-in provider source includes:
 
 - `provider`;
 - `path`;
@@ -356,7 +357,14 @@ Each source includes:
 - `import_support`;
 - `native_import`;
 - `importable`;
-- `unsupported_reason`.
+- `unsupported_reason`;
+- `selection`, with `kind` (`automatic` or `configured`), configured `root`,
+  and configured `group`.
+
+For a configured row, `selection.root` is the exact case-sensitive configured
+name and `selection.group` is its configured group or null. For an automatic
+row, both values are null. History-source plugin rows retain their plugin
+identity fields and do not have configured history root selection metadata.
 
 `status` is `available`, `empty`, `unknown`, `missing`, or `unsupported`.
 `import_support` is `native`, `explicit`, or `unsupported`. `native_import`
@@ -373,10 +381,52 @@ empty, or unknown rows and otherwise null.
 produce a source row. It is additive to `sources[]`, contains at most 64 rows,
 and each row includes `provider`, nullable `path`, stable `code`, `message`,
 and `message_truncated`. Messages are capped at 512 UTF-8 bytes. Stable issue
-codes are `no_disk_history`, `selector_unreconstructible`, and
-`insufficient_official_evidence`. `issues_truncated` is true when additional
+codes are `no_disk_history`, `selector_unreconstructible`,
+`insufficient_official_evidence`, `configured_root_conflict`, and
+`configured_root_missing`.
+A `configured_root_conflict` row additionally contains nullable
+`conflict_kind` (`configured_configured` or `automatic_configured`) and
+`configured_roots`, a possibly empty array of the recoverable configured
+`name` and `path` pairs involved. The existing top-level nullable `path` remains
+the path reported by discovery. `issues_truncated` is true when additional
 issue rows were omitted. Invalid history-source plugin manifests remain
 non-importable rows in `sources[]`; they are not provider discovery issues.
+A `configured_root_missing` row represents a durable configured root that
+cannot safely produce a concrete source route while absent. Its
+`configured_root` member is always present: when the persisted definition is
+recoverable it is an object containing `name`, `path`, and nullable `group`;
+otherwise it is null. The member is absent, rather than null, on every other
+issue code. Recoverable missing-root rows are ordered before automatic issues
+so all 64 valid configured roots remain represented at the issue limit; the
+root remains configured until restored, replaced, or removed.
+
+Named provider history root mutations have a separate schema-version-1 JSON
+result:
+
+```bash
+ctx sources add personal --provider claude --root /path/to/claude --source-group work --format json
+ctx sources add personal --provider claude --root /path/to/moved-claude --replace --format json
+ctx sources add openhands-cli --provider openhands --root /path/to/conversations --kind current-conversations --format json
+ctx sources remove personal --format json
+```
+
+Both successful shapes contain exactly `schema_version`, `operation`,
+`changed`, and `root`. `operation` is `"add"` or `"remove"`; `root` contains
+`name`, `provider`, canonical absolute `path`, and nullable `group`. For an
+OpenHands root only, `root` additionally contains `kind` with the exact value
+`"current-conversations"` or `"legacy-persistence"`; the member is omitted,
+not null, for every other provider. Repeating an add with the same name and
+identical canonical settings is idempotent and returns `changed: false`.
+Reusing the name with different settings fails unless the add includes
+`--replace`. A same-provider replacement atomically writes the new canonical
+path, kind, and complete group state while retaining `operation: "add"`;
+supplying `--source-group` sets the group and omitting it clears the group. It
+does not expose an intermediate removed definition. A provider mismatch under
+the stable name is rejected. With an absent name, `--replace` performs an
+ordinary add. A successful remove returns `changed: true` and the removed root;
+removing an absent name is an error, not a successful no-op. Root names and
+non-null groups use 1 to 64 ASCII letters, digits, hyphens, or underscores and
+remain case-sensitive.
 
 ## Import
 
@@ -515,6 +565,7 @@ Session JSON is one `session_transcript` object containing:
 - `target: "session"`;
 - `payload_type: "session_transcript"`;
 - `ctx_session_id`, `provider`, and `provider_session_id` when known;
+- `provider_key` and `source_id` for custom history-source sessions;
 - `mode` and `format`;
 - `session` for session output;
 - `events[]`.
@@ -565,10 +616,12 @@ normalized repository evidence already in Core. Event type is an open string;
 unknown normalized values are preserved. See
 [`event-queries.md`](../event-queries.md) for selection details and jq examples.
 
-`session` includes the ctx-owned `item_id`, `record_type`, `provider`, and
-`provider_session_id` when known. For Codex, `provider_session_id` is the resume
-UUID. `event` and `events[]` rows include `ctx_event_id`, `record_type`,
-`ctx_session_id`, `provider`, `provider_session_id`, `source_format`,
+`session` includes the ctx-owned `item_id`, `record_type`, `provider`,
+`provider_session_id` when known, and `provider_key` plus `source_id` for a
+custom history source. For Codex, `provider_session_id` is the resume UUID.
+`event` and `events[]` rows include `ctx_event_id`, `record_type`,
+`ctx_session_id`, `provider`, custom-source `provider_key` and `source_id`,
+`provider_session_id`, `source_format`,
 `sequence`, `event_type`, `role`, `occurred_at`, and exact normalized `text`
 or `structured_content` when policy permits. Each rendered event also includes
 `content.complete`, `content.policy_status`, and an optional
@@ -628,6 +681,7 @@ states are distinct from a genuinely missing Core generation.
 ```bash
 ctx locate session <ctx-session-id> --format json
 ctx locate session --provider codex --provider-session <provider-session-id> --format json
+ctx locate session --provider-session <provider-session-id> --provider-key <provider-key> --source-id <source-id> --format json
 ctx locate event <ctx-event-id> --format json
 ```
 
@@ -639,6 +693,7 @@ Session JSON is one `session_location` object containing:
 - `schema_version: 1`, `target: "session"`, and
   `payload_type: "session_location"`;
 - `ctx_session_id`, `provider`, and `provider_session_id` when known;
+- `provider_key` and `source_id` for custom history-source sessions;
 - nullable `parent_ctx_session_id`, `root_ctx_session_id`, and `started_at`;
 - `source` with `ctx_source_id`, `source_format`, `schema_variant`, and
   `provider_identity_version`.
@@ -649,6 +704,7 @@ Event JSON is one `event_location` object containing:
   `payload_type: "event_location"`;
 - `ctx_event_id`, `ctx_session_id`, `provider`, `provider_session_id`, and
   `provider_event_id` when known;
+- `provider_key` and `source_id` for custom history-source events;
 - `sequence`, `event_type`, `role`, and `occurred_at`;
 - the same bounded `source` identity object as session locate.
 
@@ -673,13 +729,14 @@ ctx search <query>|--term <term>|--file <path> --format json
 
 Returns:
 
-- `schema_version`;
+- `schema_version: 2`;
 - `payload_type: "search_results"`;
 - `query`;
 - `filters`;
 - `freshness`;
 - `retrieval`;
 - `generated_at`;
+- `diversification`;
 - `results[]`;
 - `result_window`;
 - `truncation`.
@@ -692,18 +749,58 @@ index generation. `content_scope` and the exact `event_type` filter cannot
 appear in the same successful request because those inputs conflict
 unconditionally.
 
+When supplied, repeatable CLI root selectors are echoed as `source_root` and
+group selectors as `source_groups`, each an array of normalized names. MCP accepts the
+equivalent request arrays `source_roots` and `source_groups`. Both selector families
+resolve against the pinned Core generation. Every root and group value forms
+one OR selection set before that set intersects with independent filters using
+AND semantics. Names are case-sensitive, and unknown selectors are typed
+request errors; they are never ignored or resolved from live config against an
+older generation. Each selector is 1 to 64 ASCII letters, digits, hyphens, or
+underscores, and each MCP array contains at most 64 entries. Selector
+validation diagnostics remain generic and do not echo rejected contents.
+
 `result_window` has exactly `limit`, `returned`, and `more_available`.
 `returned` is at most `limit`. `more_available` is `true` only when the same
 bounded search pass finds one additional fully shaped result: an event for
-event-scoped search, or a distinct session for the default session-scoped
-search. Search does not expose a cursor, run a second count scan, or claim an
-exact omitted-result total. Text output ends with exactly
+event-scoped search, or an additional session champion for the default
+session-scoped search. A false value does not assert exhaustive backend
+availability; readers must inspect `truncation`. Search does not expose a
+cursor, run a second count scan, or claim an exact omitted-result total. Text
+output ends with exactly
 `More results available.` only when `more_available` is `true`.
 
 `truncation` independently describes backend candidate-pool limits with
-`candidate_pool` and `candidate_pool_truncated`. Candidate-pool truncation does
-not by itself make `more_available` true; that flag requires an additional
-shaped result.
+`candidate_pool` and `candidate_pool_truncated`. For lexical participation it
+also includes `lexical.work_complete`, `lexical.candidate_set_exhaustive`, and,
+only after bounded work exhaustion, `lexical.exhaustion` with the operation
+`counter`, `used`, and `limit`. It does not expose segment identifiers,
+document identifiers, query text, content, scores, or candidate identities.
+`candidate_set_exhaustive` is false when a completed retained heap discarded
+lower-relevance matches and whenever bounded work did not complete.
+`candidate_pool_truncated` is true for that lexical non-exhaustiveness or when
+a backend reaches its fixed candidate cap; it does not claim an exact omitted
+count. Backends without an explicit completeness signal remain conservative in
+`diversification.status` even when no known cap was reached.
+Candidate-pool truncation does not by itself make `more_available` true; that
+flag requires an additional shaped result, except that completed dense heap
+truncation at the maximum retained horizon proves one additional event.
+
+`diversification` has `status`, `top_n`, and conditionally
+`changed_final_top_n`. `status` is `applied`, `not_applicable`, or
+`indeterminate`; `top_n` is the requested limit. Dense `--events`, any explicit
+`--session`, and limit zero are `not_applicable` and omit
+`changed_final_top_n`. Default session search selects one champion per exact
+session, orders families by their strongest champion, and emits one remaining
+champion per family per relevance-stable round. Ordinary lexical session search
+is `applied` only when
+bounded lexical work completed and either the candidate set is exhaustive or
+at least `top_n` distinct coalesced families were observed. Work exhaustion or
+insufficient family coverage is `indeterminate`. Semantic and hybrid candidate
+completeness is not yet explicit, so those backends apply the same coalesced
+family policy but remain `indeterminate`. `changed_final_top_n` is present only
+for `applied` and compares the full event-identity sequence before and after
+family shaping.
 
 `query` is the normalized display of the positional query plus repeatable
 `--term` alternatives: surrounding whitespace is removed and nonempty
@@ -725,7 +822,7 @@ Each result can include:
 - `rank`, the one-based position in the final shaped result window;
 - `retrieval_score`, the backend-provided diagnostic score; this score is not an
   ordering contract and need not be monotonic after query-coverage and
-  session-diversity shaping;
+  family shaping;
 - `result_type`, the concrete hit kind such as `event`, `session`,
   `session_result`, or `indexed_item`;
 - `result_scope`, either `session` for a session-level result or `event` for an
@@ -734,52 +831,59 @@ Each result can include:
   alias of the diagnostic `retrieval_score` rather than an ordering contract;
 - `more_matches_in_session` for default session results;
 - `provider`;
+- `provider_key` and `source_id` for custom history-source results;
 - `timestamp`;
 - `cwd`;
-- `why_matched`;
 - `citations[]`;
 - `suggested_next_commands[]`;
-- `copied_lineage`;
 - `visibility`.
 
-`copied_lineage` is the same schema-v2 object on each search result and on an
-event-window envelope. It is an explicit query-time view; its resolution does
-not affect publication. Its current required fields are listed below;
+Ordinary search results do not carry `copied_lineage` and do not run one
+reverse lookup per hit. Their event-local `event_copy`, when present, is the
+selected occurrence's positive direct provider evidence only.
+Search schema v2 removes the schema-v1 per-result `copied_lineage`; explicit
+show-event/event-window reads remain the public direct-lineage surface.
+
+`copied_lineage` is a schema-v2 object on the explicit show-event/event-window
+envelope. It is a bounded, direct one-hop query-time view; its resolution does
+not affect publication, ranking, grouping, recall, or semantic eligibility.
+Its current required fields are listed below;
 schema-v2 readers must ignore additional fields:
 
 - `schema_version: 2`;
-- `resolution`, with `state` equal to `resolved`, `unresolved`, or `cyclic`,
-  the target `ctx_event_id`, and a nullable `ctx_session_id` when the target
-  session is not known;
-- `selected_depth`, the number of forward copied-from edges examined;
+- `resolution`, with `state` equal to `resolved` or `unresolved`, the direct
+  target `ctx_event_id`, and a nullable `ctx_session_id` when the target session
+  is not known;
+- `selected_depth`, zero when the selected event is the anchor and one when its
+  one direct copied-from target is the anchor;
 - `observed_count`, exact when `truncated` is false and otherwise a lower bound;
 - numeric `returned`, the number of retained occurrence rows;
 - `occurrences[]`, each with full `ctx_event_id`, `ctx_session_id`, direct
   `copied_from_ctx_event_id` and `copied_from_ctx_session_id`, parent and
-  child-claimed-root session IDs, `session_relationship`, and BFS `depth`;
+  child-claimed-root session IDs, `session_relationship`, and direct-edge
+  `depth` (currently always one);
 - `relationship_counts`, keyed by relationship kind and subject to the same
   exact-versus-lower-bound rule;
 - `truncated`.
 
-Missing parent/copy targets are unresolved references, and cycles are cyclic
-answers. Reverse lookup can return direct child claims even when the selected
-target event is absent. Neither condition invalidates the immutable generation.
+Missing copy targets are unresolved references. Reverse lookup can return
+direct child claims even when the selected target event is absent. A direct
+self-copy claim is rejected at Core admission, and this surface neither detects
+nor reports transitive cycles. Missing targets do not invalidate the immutable
+generation or hide admitted occurrences.
 
-Search retains at most three occurrences after at most 64 reverse posting
-visits. Show event retains at most 20 after at most 4,096 visits. Both stop at
-depth 1,024. Selected-event, forward-origin, and session-ancestry resolution
+Show event retains at most 20 direct occurrences after at most 4,096 reverse
+posting visits. Selected-event and its one direct copied-from target resolution
 share at most 2,048 exact event-and-session identity posting visits, counting
-live and deleted rows. The query fails with a typed bound error if more work
-would be required. The complete object is limited to 64 KiB. Preview retention
-alone does not make an otherwise complete count truncated. The current writer does
+live and deleted rows. There is no parent, root, copy-component, or transitive
+lineage traversal. The query fails with a typed bound error if more work would
+be required. The complete object is limited to 64 KiB. Preview retention alone
+does not make an otherwise complete count truncated. The current writer does
 not emit `more_available`,
 compact-ID fields, or an exhaustive cursor. CLI JSON and MCP structured content
 always use full UUIDs; compact aliases exist only in the separately rendered
 human/MCP text projection.
 
-`why_matched[]` can include text, metadata, or touched-file reasons. A touched
-file match is backed by normalized touched-file storage and can appear when
-search uses `--file <path>` or when file-path metadata contributes to ranking.
 `citations[]` can cite sessions, events, or files depending on
 which indexed item produced the match.
 
@@ -826,8 +930,8 @@ importer. Off mode sends no maintenance wake.
 - `embedding_model`, nullable/omitted;
 - `coverage`;
 - `worker`, using the same shape as `status.semantic`, nullable/omitted;
-- `diagnostics`, nullable/omitted and present when semantic vector retrieval
-  runs.
+- `semantic_diagnostics`, nullable/omitted and present when semantic vector
+  retrieval runs.
 
 `retrieval.semantic_status` is one of:
 
@@ -871,7 +975,7 @@ part of v1 unless a future CLI JSON shape emits them. Local diagnostic path
 fields such as `vector_path`/`vectorPath` can still appear as additive JSON from
 the local CLI adapter, but they are intentionally not stable SDK fields.
 
-`retrieval.diagnostics` can include `query_embed_ms`, `vector_backend`,
+`retrieval.semantic_diagnostics` can include `query_embed_ms`, `vector_backend`,
 `vector_scan_ms`, `chunks_scanned`, `vector_bytes_read`, `events_scored`, and
 `semantic_candidates`. These fields
 are local performance diagnostics and can reveal corpus size/timing; treat them
@@ -910,6 +1014,9 @@ error, and zero semantic weight performs no vector work. MCP search does not
 itself import provider history and does not automatically exclude the caller's
 session. Direct CLI current-session detection and
 `--include-current-session` do not apply to MCP calls.
+Its optional `source_roots` and `source_groups` arrays use the same generation-pinned
+source-key filter as CLI search. If both arrays are absent, all indexed roots
+are searched.
 
 MCP `show_event`, `show_session`, and full-content `query_events` structured
 event rows reuse the same snake_case `activity` value. Text fallback is
@@ -922,8 +1029,13 @@ dedicated selector or SQL field. Paginated MCP callers filter each returned page
 client-side and continue with the existing opaque cursor; `show_session`
 requires `mode: "log"` for ordinary tool events.
 
-The MCP `sources` tool includes the same bounded `issues` and
-`issues_truncated` fields as `ctx sources --format json`.
+The MCP `sources` tool returns `schema_version`, `automatic_discovery`,
+`sources`, `issues`, `issues_truncated`, and `read_only: true`. Its built-in
+provider rows use the same `selection` objects as CLI JSON, so configured
+`root` values and non-null configured `group` values enumerate candidates for
+MCP search `source_roots` and `source_groups`. Automatic rows have null `root` and
+`group`; plugin rows do not participate in configured history root selection.
+The bounded `issues` and `issues_truncated` fields retain the CLI contract.
 
 Tool-level argument validation failures set `isError: true`, preserve the
 diagnostic `error`, and add stable `error_code: "invalid_request"` in
@@ -1029,6 +1141,7 @@ ctx upgrade status --format json
 
 - `schema_version`;
 - `command: "upgrade_status"`;
+- `auto_upgrade`, including `mode` and `enabled`;
 - `state`;
 - `install`.
 
@@ -1037,11 +1150,13 @@ ctx upgrade status --format json
 binary has a matching official installer sidecar. Unmanaged installs report
 `managed: false` and a `reason`.
 
-Daemon-owned automatic upgrade does not write JSON to foreground stdout. Its
-single scheduler state and replacement journal live beside the managed
-executable. Windows self-upgrade can report `scheduled` with `applied: false`
-while a helper waits for the running `ctx.exe` to exit and then replaces the
-binary and sidecar.
+Automatic upgrade does not write JSON to foreground stdout. Auto indexing with
+the full daemon profile uses the persistent daemon as a check driver; manual
+and source-refresh-only modes use a detached worker after eligible completed
+commands. Both share one scheduler state and replacement journal beside the
+managed executable. Windows self-upgrade can
+report `scheduled` with `applied: false` while a helper waits for the running
+`ctx.exe` to exit and then replaces the binary and sidecar.
 
 ## Citation Fields
 

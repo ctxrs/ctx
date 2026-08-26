@@ -97,6 +97,17 @@
         "value": false,
         "state": "off"
       }
+    },
+    {
+      "behavior": "automatic provider source discovery",
+      "config_key": "sources.automatic",
+      "environment_variable": null,
+      "released_default": {
+        "value": true,
+        "state": "on",
+        "scope": "all_cli_installations"
+      },
+      "introduced_after": "v0.25.0"
     }
   ],
   "compatibility_config_keys": {
@@ -174,6 +185,14 @@
       "controls": [
         "CTX_DAEMON_OFF",
         "CTX_DISABLE_DAEMON",
+        "CTX_UPGRADE_OFF",
+        "CTX_DISABLE_AUTO_UPGRADE"
+      ]
+    },
+    {
+      "path": "scripts/test-windows-legacy-daemon-takeover.ps1",
+      "purpose": "Exercise deprecated upgrade opt-outs while verifying legacy Windows daemon takeover.",
+      "controls": [
         "CTX_UPGRADE_OFF",
         "CTX_DISABLE_AUTO_UPGRADE"
       ]

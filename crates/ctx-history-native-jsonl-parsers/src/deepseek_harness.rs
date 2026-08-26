@@ -6,7 +6,7 @@ use ctx_history_capture_model::{
 };
 use ctx_history_core::{
     derive_native_session_id, AgentScope, CaptureProvider, EventRole, EventType,
-    ProviderDeclaredFact, SourceKey, StableEntityId, TypedKey,
+    ProviderDeclaredFact, SourceAnchorScope, SourceKey, StableEntityId, TypedKey,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -73,13 +73,26 @@ pub fn source_key(
     source_format: &'static str,
     native_session_id: &str,
 ) -> Result<SourceKey, String> {
-    SourceKey::derive_provider_native(
+    source_key_scoped(
+        source_format,
+        native_session_id,
+        SourceAnchorScope::Unqualified,
+    )
+}
+
+pub fn source_key_scoped(
+    source_format: &'static str,
+    native_session_id: &str,
+    source_anchor_scope: SourceAnchorScope,
+) -> Result<SourceKey, String> {
+    SourceKey::derive_provider_native_scoped(
         CaptureProvider::DeepSeekHarness.as_str(),
         source_format,
         SOURCE_SCHEMA_VARIANT,
         1,
         SOURCE_ANCHOR_NAMESPACE,
         TypedKey::utf8(native_session_id).map_err(|error| error.to_string())?,
+        source_anchor_scope,
     )
     .map_err(|error| error.to_string())
 }
@@ -756,6 +769,36 @@ const KNOWN_IGNORED_EVENTS: &[&str] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_and_session_identities_are_root_scoped() {
+        let released = source_key("deepseek_harness_session_jsonl", "same-session").unwrap();
+        let compatibility = source_key_scoped(
+            "deepseek_harness_session_jsonl",
+            "same-session",
+            SourceAnchorScope::Unqualified,
+        )
+        .unwrap();
+        let first = source_key_scoped(
+            "deepseek_harness_session_jsonl",
+            "same-session",
+            SourceAnchorScope::Lineage([1; 32]),
+        )
+        .unwrap();
+        let second = source_key_scoped(
+            "deepseek_harness_session_jsonl",
+            "same-session",
+            SourceAnchorScope::Lineage([2; 32]),
+        )
+        .unwrap();
+
+        assert!(released.exact_descriptor_eq(&compatibility));
+        assert_ne!(first.identity(), second.identity());
+        assert_ne!(
+            session_identity(&first, "same-session").unwrap(),
+            session_identity(&second, "same-session").unwrap()
+        );
+    }
 
     #[test]
     fn parses_completed_semantics_and_preserves_model_and_tool_payloads() {

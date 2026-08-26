@@ -17,6 +17,53 @@ pub enum ProviderRefreshTrigger {
     Daemon,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderRefreshConfiguredIndexingMode {
+    Automatic,
+    Manual,
+}
+
+impl ProviderRefreshConfiguredIndexingMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Automatic => "automatic",
+            Self::Manual => "manual",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderRefreshDaemonTriggerKind {
+    DaemonWatch,
+    StartupCatchUp,
+    PeriodicReconciliation,
+}
+
+impl ProviderRefreshDaemonTriggerKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::DaemonWatch => "daemon_watch",
+            Self::StartupCatchUp => "startup_catch_up",
+            Self::PeriodicReconciliation => "periodic_reconciliation",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderRefreshReconciliationDemand {
+    Incremental,
+    Exhaustive,
+}
+
+impl ProviderRefreshReconciliationDemand {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Incremental => "incremental",
+            Self::Exhaustive => "exhaustive",
+        }
+    }
+}
+
 impl ProviderRefreshTrigger {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -355,12 +402,55 @@ pub struct ForegroundProviderRefreshV1 {
     pub performance: Option<ProviderRefreshPerformanceV1>,
 }
 
+/// Optional bucketed health facts from the daemon's durable terminal job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProviderRefreshTerminalHealthV1 {
+    pub configured_indexing_mode: Option<ProviderRefreshConfiguredIndexingMode>,
+    /// Further classifies the existing `Daemon` trigger without duplicating
+    /// setup, search, or import trigger authority.
+    pub daemon_trigger_kind: Option<ProviderRefreshDaemonTriggerKind>,
+    pub reconciliation_demand: Option<ProviderRefreshReconciliationDemand>,
+    /// Present only for failed terminal jobs. Successful publication is
+    /// already authoritative in the event's changed/no-op result.
+    pub retained_previous_generation: Option<bool>,
+    pub queue_wait_duration: Option<DurationBucket>,
+    pub discovery_duration: Option<DurationBucket>,
+    pub scan_stage_duration: Option<DurationBucket>,
+    pub commit_duration: Option<DurationBucket>,
+    pub coalesced_request_count: Option<CountBucket>,
+    pub successor_pending: bool,
+    pub processed_sessions: Option<CountBucket>,
+    pub processed_messages: Option<CountBucket>,
+    pub processed_tool_calls: Option<CountBucket>,
+    pub processed_bytes: Option<BytesBucket>,
+}
+
+/// Sparse current-generation stock from an exact published refresh receipt.
+///
+/// This is a best-effort, non-retryable sampled observation attached to the
+/// existing terminal event. It is emitted only for a successfully changed
+/// daemon publication, and is neither a generation census nor a delivery or
+/// coverage denominator. Its absence means the terminal outcome/change did
+/// not provide this exact receipt-backed observation; it never means zero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProviderRefreshCorpusStockV1 {
+    /// Logical events currently retained as indexed lexical documents.
+    pub indexed_documents: CountBucket,
+    pub retained_records: CountBucket,
+    pub rejected_records: CountBucket,
+    pub certified_source_bytes: BytesBucket,
+    /// Transition-local removed-source count, not retired logical records.
+    pub removed_source_count: CountBucket,
+}
+
 #[derive(Debug)]
 pub struct ProviderRefreshCompletedV1 {
     pub surface: Surface,
     pub outcome: Outcome,
     pub duration: DurationBucket,
     pub foreground: Option<ForegroundProviderRefreshV1>,
+    pub terminal_health: Option<ProviderRefreshTerminalHealthV1>,
+    pub corpus_stock: Option<ProviderRefreshCorpusStockV1>,
 }
 
 impl ProviderRefreshCompletedV1 {
@@ -371,6 +461,8 @@ impl ProviderRefreshCompletedV1 {
             outcome,
             duration: duration_bucket(duration),
             foreground: None,
+            terminal_health: None,
+            corpus_stock: None,
         }
     }
 
@@ -385,6 +477,8 @@ impl ProviderRefreshCompletedV1 {
             outcome,
             duration: duration_bucket(duration),
             foreground: Some(foreground),
+            terminal_health: None,
+            corpus_stock: None,
         }
     }
 
@@ -407,7 +501,22 @@ impl ProviderRefreshCompletedV1 {
             outcome,
             duration,
             foreground: Some(foreground),
+            terminal_health: None,
+            corpus_stock: None,
         }
+    }
+
+    pub fn with_terminal_health(
+        mut self,
+        terminal_health: ProviderRefreshTerminalHealthV1,
+    ) -> Self {
+        self.terminal_health = Some(terminal_health);
+        self
+    }
+
+    pub fn with_corpus_stock(mut self, corpus_stock: ProviderRefreshCorpusStockV1) -> Self {
+        self.corpus_stock = Some(corpus_stock);
+        self
     }
 }
 
@@ -500,36 +609,55 @@ mod tests {
             "peak_rss_bucket",
             "bytes",
             "observed_process_peak_rss_bytes",
+            "corpus_stock_indexed_documents_bucket",
         ] {
             assert!(!properties.contains_key(forbidden));
         }
     }
 
     #[test]
-    fn daemon_setup_refresh_serializes_sparse_receipt_facts_without_cli_defaults() {
-        let event = PublicEventV1::ProviderRefreshCompleted(ProviderRefreshCompletedV1::bucketed(
-            Surface::Daemon,
-            Outcome::Success,
-            duration_bucket(Duration::from_secs(2)),
-            ForegroundProviderRefreshV1 {
-                provider: Some(CaptureProvider::Codex),
-                trigger: ProviderRefreshTrigger::Setup,
-                source_mode: Some(ProviderRefreshSourceMode::Discovered),
-                change: ProviderRefreshChange::Changed,
-                content_evidence: ProviderRefreshContentEvidence::Unknown,
-                work_kind: Some(ProviderRefreshWorkKind::Fresh),
-                refresh_result: ProviderRefreshResult::Complete,
-                core_result: ProviderCoreResult::Complete,
-                failure_scope: ProviderRefreshFailureScope::None,
-                failure_type: ProviderRefreshFailureType::None,
-                work_remaining: false,
-                retired_records: None,
-                counts: Some(ProviderRefreshCountsV1::from_refresh_receipt(
-                    2, 7, 0, 0, 4096,
-                )),
-                performance: None,
-            },
-        ));
+    fn daemon_setup_refresh_serializes_sparse_receipt_facts_and_present_zero_health() {
+        let event = PublicEventV1::ProviderRefreshCompleted(
+            ProviderRefreshCompletedV1::bucketed(
+                Surface::Daemon,
+                Outcome::Success,
+                duration_bucket(Duration::from_secs(2)),
+                ForegroundProviderRefreshV1 {
+                    provider: Some(CaptureProvider::Codex),
+                    trigger: ProviderRefreshTrigger::Setup,
+                    source_mode: Some(ProviderRefreshSourceMode::Discovered),
+                    change: ProviderRefreshChange::Changed,
+                    content_evidence: ProviderRefreshContentEvidence::Unknown,
+                    work_kind: Some(ProviderRefreshWorkKind::Fresh),
+                    refresh_result: ProviderRefreshResult::Complete,
+                    core_result: ProviderCoreResult::Complete,
+                    failure_scope: ProviderRefreshFailureScope::None,
+                    failure_type: ProviderRefreshFailureType::None,
+                    work_remaining: false,
+                    retired_records: None,
+                    counts: Some(ProviderRefreshCountsV1::from_refresh_receipt(
+                        2, 7, 0, 0, 4096,
+                    )),
+                    performance: None,
+                },
+            )
+            .with_terminal_health(ProviderRefreshTerminalHealthV1 {
+                configured_indexing_mode: Some(ProviderRefreshConfiguredIndexingMode::Automatic),
+                daemon_trigger_kind: None,
+                reconciliation_demand: Some(ProviderRefreshReconciliationDemand::Exhaustive),
+                retained_previous_generation: None,
+                queue_wait_duration: Some(duration_bucket(Duration::ZERO)),
+                discovery_duration: None,
+                scan_stage_duration: Some(duration_bucket(Duration::from_secs(2))),
+                commit_duration: Some(duration_bucket(Duration::from_secs(6))),
+                coalesced_request_count: Some(count_bucket(0)),
+                successor_pending: true,
+                processed_sessions: Some(count_bucket(7)),
+                processed_messages: Some(count_bucket(19)),
+                processed_tool_calls: Some(count_bucket(4)),
+                processed_bytes: Some(bytes_bucket(4096)),
+            }),
+        );
         let occurred_at = chrono::DateTime::parse_from_rfc3339("2026-07-22T12:34:00Z")
             .unwrap()
             .with_timezone(&chrono::Utc);
@@ -539,8 +667,49 @@ mod tests {
         assert_eq!(serialized["properties"]["trigger"], "setup");
         assert_eq!(serialized["properties"]["source_mode"], "discovered");
         assert_eq!(serialized["properties"]["work_kind"], "fresh");
+        assert_eq!(
+            serialized["properties"]["refresh_configured_indexing_mode"],
+            "automatic"
+        );
+        assert_eq!(
+            serialized["properties"]["refresh_reconciliation_demand"],
+            "exhaustive"
+        );
         assert_eq!(serialized["properties"]["sessions_bucket"], "6-20");
         assert_eq!(serialized["properties"]["bytes_bucket"], "lt_100kb");
+        assert_eq!(
+            serialized["properties"]["refresh_queue_wait_duration_bucket"],
+            "lt_100ms"
+        );
+        assert_eq!(
+            serialized["properties"]["refresh_scan_stage_duration_bucket"],
+            "lt_5s"
+        );
+        assert_eq!(
+            serialized["properties"]["refresh_commit_duration_bucket"],
+            "lt_30s"
+        );
+        assert_eq!(
+            serialized["properties"]["refresh_coalesced_request_count_bucket"],
+            "0"
+        );
+        assert_eq!(serialized["properties"]["refresh_successor_pending"], true);
+        assert_eq!(
+            serialized["properties"]["refresh_processed_sessions_bucket"],
+            "6-20"
+        );
+        assert_eq!(
+            serialized["properties"]["refresh_processed_messages_bucket"],
+            "6-20"
+        );
+        assert_eq!(
+            serialized["properties"]["refresh_processed_tool_calls_bucket"],
+            "2-5"
+        );
+        assert_eq!(
+            serialized["properties"]["refresh_processed_bytes_bucket"],
+            "lt_100kb"
+        );
         let properties = serialized["properties"].as_object().unwrap();
         for absent in [
             "source_files_bucket",
@@ -550,8 +719,78 @@ mod tests {
             "retired_records_bucket",
             "cpu_duration_bucket",
             "observed_process_peak_rss_bucket",
+            "refresh_discovery_duration_bucket",
+            "refresh_daemon_trigger_kind",
+            "refresh_retained_previous_generation",
         ] {
             assert!(!properties.contains_key(absent));
+        }
+    }
+
+    #[test]
+    fn best_effort_corpus_stock_serializes_only_bucketed_current_receipt_facts() {
+        let event = PublicEventV1::ProviderRefreshCompleted(
+            ProviderRefreshCompletedV1::bucketed(
+                Surface::Daemon,
+                Outcome::Success,
+                duration_bucket(Duration::from_secs(2)),
+                ForegroundProviderRefreshV1 {
+                    provider: None,
+                    trigger: ProviderRefreshTrigger::Daemon,
+                    source_mode: None,
+                    change: ProviderRefreshChange::Changed,
+                    content_evidence: ProviderRefreshContentEvidence::Unknown,
+                    work_kind: None,
+                    refresh_result: ProviderRefreshResult::Complete,
+                    core_result: ProviderCoreResult::Complete,
+                    failure_scope: ProviderRefreshFailureScope::None,
+                    failure_type: ProviderRefreshFailureType::None,
+                    work_remaining: false,
+                    retired_records: None,
+                    counts: None,
+                    performance: None,
+                },
+            )
+            .with_corpus_stock(ProviderRefreshCorpusStockV1 {
+                indexed_documents: count_bucket(21),
+                retained_records: count_bucket(7),
+                rejected_records: count_bucket(3),
+                certified_source_bytes: bytes_bucket(4096),
+                removed_source_count: count_bucket(1),
+            }),
+        );
+        let occurred_at = chrono::DateTime::parse_from_rfc3339("2026-07-22T12:34:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let serialized = serialize_event(&event, occurred_at, None, None);
+        let properties = serialized["properties"].as_object().unwrap();
+
+        assert_eq!(
+            properties["corpus_stock_indexed_documents_bucket"],
+            "21-100"
+        );
+        assert_eq!(properties["corpus_stock_retained_records_bucket"], "6-20");
+        assert_eq!(properties["corpus_stock_rejected_records_bucket"], "2-5");
+        assert_eq!(
+            properties["corpus_stock_certified_source_bytes_bucket"],
+            "lt_100kb"
+        );
+        assert_eq!(properties["corpus_transition_removed_sources_bucket"], "1");
+        for forbidden in [
+            "generation_id",
+            "session_id",
+            "message_id",
+            "tool_call_id",
+            "relationship",
+            "copy",
+            "logical_added",
+            "logical_changed",
+            "logical_retired",
+            "corpus_stock_indexed_documents",
+            "corpus_stock_certified_source_bytes",
+            "corpus_transition_removed_sources",
+        ] {
+            assert!(!properties.contains_key(forbidden));
         }
     }
 
@@ -591,6 +830,35 @@ mod tests {
 
     #[test]
     fn provider_refresh_decision_enums_are_closed_contracts() {
+        assert_eq!(
+            [
+                ProviderRefreshConfiguredIndexingMode::Automatic,
+                ProviderRefreshConfiguredIndexingMode::Manual,
+            ]
+            .map(ProviderRefreshConfiguredIndexingMode::as_str),
+            ["automatic", "manual"]
+        );
+        assert_eq!(
+            [
+                ProviderRefreshDaemonTriggerKind::DaemonWatch,
+                ProviderRefreshDaemonTriggerKind::StartupCatchUp,
+                ProviderRefreshDaemonTriggerKind::PeriodicReconciliation,
+            ]
+            .map(ProviderRefreshDaemonTriggerKind::as_str),
+            [
+                "daemon_watch",
+                "startup_catch_up",
+                "periodic_reconciliation"
+            ]
+        );
+        assert_eq!(
+            [
+                ProviderRefreshReconciliationDemand::Incremental,
+                ProviderRefreshReconciliationDemand::Exhaustive,
+            ]
+            .map(ProviderRefreshReconciliationDemand::as_str),
+            ["incremental", "exhaustive"]
+        );
         assert_eq!(
             [
                 ProviderRefreshContentEvidence::None,

@@ -18,9 +18,7 @@ use super::source_backed::{
     CUSTOM_EVENT_KEY_NAMESPACE, CUSTOM_LOGICAL_EVENT_KIND, CUSTOM_PAGE_MAX_DOCUMENTS,
     CUSTOM_PAGE_MAX_RETAINED_BYTES, CUSTOM_SOURCE_BACKED_PARSER_REVISION,
 };
-use crate::provider::custom_history_jsonl::{
-    custom_history_internal_session_id, CUSTOM_HISTORY_IDENTIFIER_MAX_BYTES,
-};
+use crate::provider::custom_history_jsonl::CUSTOM_HISTORY_IDENTIFIER_MAX_BYTES;
 use crate::MAX_PROVIDER_JSONL_LINE_BYTES;
 
 pub(super) const CUSTOM_HISTORY_CATALOG_ENTRY_OVERHEAD_BYTES: usize = 128;
@@ -121,7 +119,7 @@ pub(super) fn emit_projection_pages(
             .ok_or(CustomHistorySourceBackedError::CountMismatch)?;
         let session = &projection
             .sessions
-            .get(&(event.source_id.clone(), event.session_id.clone()))
+            .get(&(event.source_id.clone(), event.provider_session_id.clone()))
             .ok_or(CustomHistorySourceBackedError::CountMismatch)?;
         let record = core_record(
             source,
@@ -186,11 +184,11 @@ fn core_record(
         source,
         &source_record.provider_key,
         &event.source_id,
-        &session.session_id,
+        &session.provider_session_id,
     )
     .map_err(core_contract)?;
     let parent_session_id = session
-        .parent_session_id
+        .parent_provider_session_id
         .as_deref()
         .map(|parent| {
             custom_session_identity(
@@ -202,7 +200,7 @@ fn core_record(
         })
         .transpose()?;
     let root_session_id = session
-        .root_session_id
+        .root_provider_session_id
         .as_deref()
         .map(|root| {
             custom_session_identity(source, &source_record.provider_key, &event.source_id, root)
@@ -239,18 +237,14 @@ fn core_record(
     record.parent_session_id = parent_session_id;
     record.root_session_id = root_session_id;
     record.session_relationship = session.session_relationship;
-    record.provider_session_id = Some(custom_history_internal_session_id(
-        &source_record.provider_key,
-        &event.source_id,
-        &session.session_id,
-    ));
+    record.provider_session_id = Some(session.provider_session_id.clone());
     record.native_event_id = Some(native_event_id);
     if let Some(copied_from) = copied_from {
         let ancestor_session_id = custom_session_identity(
             source,
             &source_record.provider_key,
             &event.source_id,
-            &copied_from.ancestor_session_id,
+            &copied_from.ancestor_provider_session_id,
         )?;
         let ancestor_native_item_key = NativeItemKey::native_id(
             CUSTOM_EVENT_KEY_NAMESPACE,
@@ -327,7 +321,7 @@ pub(super) fn write_spooled_event(
 ) -> CustomHistorySourceBackedResult<()> {
     writer.write_all(&[1])?;
     write_spool_string(writer, &event.source_id)?;
-    write_spool_string(writer, &event.session_id)?;
+    write_spool_string(writer, &event.provider_session_id)?;
     writer.write_all(&event.event_index.to_be_bytes())?;
     write_optional_spool_string(writer, event.event_id.as_deref())?;
     write_spool_string(writer, &event.event_type)?;
@@ -357,7 +351,7 @@ pub(super) fn read_spooled_event(
         return Err(CustomHistorySourceBackedError::CountMismatch);
     }
     let source_id = read_spool_string(reader, CUSTOM_HISTORY_IDENTIFIER_MAX_BYTES)?;
-    let session_id = read_spool_string(reader, CUSTOM_HISTORY_IDENTIFIER_MAX_BYTES)?;
+    let provider_session_id = read_spool_string(reader, CUSTOM_HISTORY_IDENTIFIER_MAX_BYTES)?;
     let event_index = read_spool_u64(reader)?;
     let event_id = read_optional_spool_string(reader, MAX_PROVIDER_JSONL_LINE_BYTES)?;
     let event_type = read_spool_string(reader, 128)?;
@@ -370,7 +364,7 @@ pub(super) fn read_spooled_event(
         .transpose()?;
     Ok(Some(SpooledCustomEvent {
         source_id,
-        session_id,
+        provider_session_id,
         event_index,
         event_id,
         event_type,

@@ -1,6 +1,6 @@
 {
   "name": "ctx",
-  "version": "1.0.2",
+  "version": "1.1.1",
   "description": "Fast local search and 'git blame' for agent sessions.",
   "author": {
     "name": "ctx engineering inc",

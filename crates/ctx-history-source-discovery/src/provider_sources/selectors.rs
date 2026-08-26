@@ -9,6 +9,8 @@ use quick_xml::{encoding::Decoder, events::Event, Reader};
 use serde_json::Value;
 use thiserror::Error;
 
+use ctx_history_capture_model::provider_root_path_within_limit;
+
 use ctx_history_source_io::{
     open_provider_source_file, open_provider_source_path, OpenedProviderSourcePath, SourceIoError,
 };
@@ -22,7 +24,6 @@ pub(super) const MAX_FINITE_SELECTOR_ENTRIES: usize = 128;
 pub(super) const MAX_DIRECT_DIRECTORY_ENTRIES: usize = 1024;
 pub(super) const MAX_PROJECT_ANCESTORS: usize = 64;
 pub(super) const MAX_SOURCE_CANDIDATES_PER_PROVIDER: usize = 256;
-pub(super) const MAX_ENCODED_PATH_BYTES: usize = 16 * 1024;
 pub(super) const MAX_RENDERED_DIAGNOSTIC_BYTES: usize = 512;
 
 #[cfg(test)]
@@ -478,7 +479,7 @@ pub(super) fn encoded_path_sort_key(path: &Path) -> Vec<u8> {
 }
 
 pub(super) fn encoded_path_within_limit(path: &Path) -> bool {
-    encoded_path_sort_key(path).len() <= MAX_ENCODED_PATH_BYTES
+    provider_root_path_within_limit(path)
 }
 
 pub(super) fn sort_paths(paths: &mut [PathBuf]) {

@@ -109,6 +109,7 @@ pub(super) struct SqliteInventoryDocumentAdapter<A, L, S> {
     data_root: PathBuf,
     provider: CaptureProvider,
     source_format: &'static str,
+    coverage: SqliteInventoryCoverage,
     provider_adapter: A,
     marker: PhantomData<fn() -> (L, S)>,
 }
@@ -129,9 +130,15 @@ where
             data_root: data_root.to_path_buf(),
             provider,
             source_format,
+            coverage: SqliteInventoryCoverage::Complete,
             provider_adapter,
             marker: PhantomData,
         }
+    }
+
+    pub(super) fn with_coverage(mut self, coverage: SqliteInventoryCoverage) -> Self {
+        self.coverage = coverage;
+        self
     }
 
     fn discover_with_base(
@@ -186,11 +193,21 @@ where
         }
         let tree_fingerprint =
             sqlite_inventory_tree_fingerprint(catalog.authority_fingerprint, &fingerprints);
-        Ok(CompleteDocumentTree::new(
-            tree_fingerprint,
-            observed,
-            SqliteInventoryTreeAuthority::new(catalog.authority_fingerprint, catalog_leaves),
-        ))
+        let authority =
+            SqliteInventoryTreeAuthority::new(catalog.authority_fingerprint, catalog_leaves);
+        if self.coverage == SqliteInventoryCoverage::SelectedSubset && !_base_sources.is_empty() {
+            Ok(CompleteDocumentTree::new_partial(
+                tree_fingerprint,
+                observed,
+                authority,
+            ))
+        } else {
+            Ok(CompleteDocumentTree::new(
+                tree_fingerprint,
+                observed,
+                authority,
+            ))
+        }
     }
 }
 

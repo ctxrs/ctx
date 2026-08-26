@@ -168,6 +168,7 @@ ctx_rust_test(
 daemon_cli_binary_contract(
     name = "auto_upgrade_acceptance_tests",
     src = "tests/contracts/auto_upgrade_acceptance.rs",
+    extra_srcs = ["tests/contracts/auto_upgrade_acceptance/invocation_driver.rs"],
     extra_data = [
         "//crates/ctx-cli:ctx_auto_upgrade_acceptance_fixture",
         "//crates/ctx-upgrade-engine:ctx_v025_upgrade_fixture",

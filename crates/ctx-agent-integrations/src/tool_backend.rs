@@ -1,4 +1,4 @@
-use std::{fmt, path::PathBuf};
+use std::{fmt, path::PathBuf, time::Duration};
 
 use ctx_history_core::CaptureProvider;
 use serde_json::Value;
@@ -15,12 +15,6 @@ pub enum ToolOperation {
     QueryEvents(QueryEventsRequest),
 }
 
-impl ToolOperation {
-    pub fn invocation_usage(&self) -> ToolUsageFacts {
-        ToolUsageFacts::default()
-    }
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct ToolSearchRequest {
     pub query: String,
@@ -30,6 +24,8 @@ pub struct ToolSearchRequest {
     pub provider_key: Option<String>,
     pub source_id: Option<String>,
     pub source_format: Option<String>,
+    pub source_roots: Vec<String>,
+    pub source_groups: Vec<String>,
     pub workspace: Option<String>,
     pub since: Option<String>,
     pub primary_only: bool,
@@ -48,6 +44,92 @@ pub enum ToolSearchBackend {
     Lexical,
     Semantic,
     Hybrid,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolSearchRefreshStatus {
+    ExistingGeneration,
+    DaemonBackground,
+    DaemonUnavailable,
+    Completed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolSearchStopReason {
+    Decisive,
+    Exhausted,
+    CandidateCap,
+    FixedPool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolSearchFailurePhase {
+    Preparation,
+    Refresh,
+    GenerationOpen,
+    QueryPreparation,
+    SemanticRetrieval,
+    IndexQueryDecode,
+    ResultProjection,
+    Render,
+    Output,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolSearchCopyClusterAvailability {
+    NotConstructedV1,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolSearchDiversificationStatus {
+    Applied,
+    NotApplicable,
+    Indeterminate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ToolSearchConcentrationFacts {
+    pub candidate_sessions: u32,
+    pub largest_session_candidate_count: u32,
+    pub literal_roots: ToolSearchLiteralRootFacts,
+    pub provider_copy_candidate_count: u32,
+    pub copy_cluster_availability: ToolSearchCopyClusterAvailability,
+    pub diversification_status: ToolSearchDiversificationStatus,
+    pub diversification_changed_final_top_n: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolSearchLiteralRootFacts {
+    Observed {
+        candidate_families: u32,
+        candidate_count: u32,
+        largest_family_candidate_count: u32,
+    },
+    NotObservedDense,
+}
+
+/// Exact content-free facts crossing the tool/MCP application boundary.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ToolSearchTerminalFacts {
+    pub refresh_duration: Option<Duration>,
+    pub refresh_status: Option<ToolSearchRefreshStatus>,
+    pub refresh_source_count: Option<u64>,
+    pub query_duration: Option<Duration>,
+    pub backend_requested: Option<ToolSearchBackend>,
+    pub backend_effective: Option<ToolSearchBackend>,
+    pub retrieval_rounds: Option<u64>,
+    pub query_executions: Option<u64>,
+    pub candidate_rows: Option<u64>,
+    pub records_decoded: Option<u64>,
+    pub encoded_core_bytes_decoded: Option<u64>,
+    pub final_candidate_pool: Option<u64>,
+    pub candidate_pool_truncated: Option<bool>,
+    pub concentration: Option<ToolSearchConcentrationFacts>,
+    pub stop_reason: Option<ToolSearchStopReason>,
+    pub failure_phase: Option<ToolSearchFailurePhase>,
+    pub output_duration: Option<Duration>,
+    pub output_served: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -165,15 +247,29 @@ impl ToolOutcome {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ToolUsageFacts {
     pub search: Option<ToolSearchUsageFacts>,
+    pub search_execution: Option<ToolSearchTerminalFacts>,
 }
 
 impl ToolUsageFacts {
+    pub fn search_preparation() -> Self {
+        Self {
+            search_execution: Some(ToolSearchTerminalFacts {
+                failure_phase: Some(ToolSearchFailurePhase::Preparation),
+                ..ToolSearchTerminalFacts::default()
+            }),
+            ..Self::default()
+        }
+    }
+
     pub fn merge(&mut self, additional: Self) {
         if additional.search.is_some() {
             self.search = additional.search;
+        }
+        if additional.search_execution.is_some() {
+            self.search_execution = additional.search_execution;
         }
     }
 }
@@ -228,15 +324,15 @@ pub trait ToolBackend: Send + Sync {
 
 #[derive(Debug)]
 pub struct ToolExecutionError {
-    pub error: ToolBackendError,
-    pub usage: ToolUsageFacts,
+    pub error: Box<ToolBackendError>,
+    pub usage: Box<ToolUsageFacts>,
 }
 
 impl From<ToolBackendError> for ToolExecutionError {
     fn from(error: ToolBackendError) -> Self {
         Self {
-            error,
-            usage: ToolUsageFacts::default(),
+            error: Box::new(error),
+            usage: Box::new(ToolUsageFacts::default()),
         }
     }
 }

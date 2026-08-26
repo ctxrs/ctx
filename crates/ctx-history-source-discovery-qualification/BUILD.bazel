@@ -1,0 +1,119 @@
+load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")
+load("//tools/bazel:ctx_rust.bzl", "ctx_rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files([
+    "BUILD.bazel",
+    "Cargo.toml",
+])
+
+filegroup(
+    name = "cargo_package_data",
+    srcs = glob(["**"], exclude = ["BUILD.bazel"]),
+)
+
+COMMON_SRCS = ["tests/support/mod.rs"]
+
+COMMON_COMPILE_DATA = [
+    "//:provider_support_matrix",
+    "//:public_test_fixtures",
+]
+
+QUALIFICATION_DEPS = [
+    "//crates/ctx-history-capture-model:lib",
+    "//crates/ctx-history-core:lib",
+    "//crates/ctx-history-openclaw-schema:test_support_lib",
+    "//crates/ctx-history-source-discovery:lib",
+]
+
+ctx_rust_test(
+    name = "configured_roots_tests",
+    testonly = True,
+    srcs = ["tests/configured_roots.rs"] + COMMON_SRCS,
+    crate_name = "ctx_history_source_discovery_configured_roots_qualification",
+    crate_root = "tests/configured_roots.rs",
+    compile_data = COMMON_COMPILE_DATA,
+    edition = crate_edition(),
+    aliases = aliases(normal_dev = True, proc_macro_dev = True),
+    deps = all_crate_deps(normal_dev = True) + QUALIFICATION_DEPS,
+    proc_macro_deps = all_crate_deps(proc_macro_dev = True),
+    rustc_env = {
+        "CARGO_MANIFEST_DIR": "crates/ctx-history-source-discovery-qualification",
+    },
+)
+
+ctx_rust_test(
+    name = "configured_root_matrix_tests",
+    testonly = True,
+    srcs = ["tests/configured_root_matrix.rs"] + COMMON_SRCS,
+    crate_name = "ctx_history_source_discovery_configured_root_matrix_qualification",
+    crate_root = "tests/configured_root_matrix.rs",
+    compile_data = ["//:provider_support_matrix"],
+    edition = crate_edition(),
+    aliases = aliases(normal_dev = True, proc_macro_dev = True),
+    deps = all_crate_deps(normal_dev = True) + QUALIFICATION_DEPS,
+    proc_macro_deps = all_crate_deps(proc_macro_dev = True),
+    rustc_env = {
+        "CARGO_MANIFEST_DIR": "crates/ctx-history-source-discovery-qualification",
+    },
+)
+
+ctx_rust_test(
+    name = "default_discovery_tests",
+    testonly = True,
+    srcs = ["tests/default_discovery.rs"] + COMMON_SRCS,
+    crate_name = "ctx_history_source_discovery_default_qualification",
+    crate_root = "tests/default_discovery.rs",
+    compile_data = COMMON_COMPILE_DATA,
+    edition = crate_edition(),
+    aliases = aliases(normal_dev = True, proc_macro_dev = True),
+    deps = all_crate_deps(normal_dev = True) + QUALIFICATION_DEPS,
+    proc_macro_deps = all_crate_deps(proc_macro_dev = True),
+    rustc_env = {
+        "CARGO_MANIFEST_DIR": "crates/ctx-history-source-discovery-qualification",
+    },
+)
+
+ctx_rust_test(
+    name = "env_discovery_tests",
+    testonly = True,
+    srcs = ["tests/env_discovery.rs"] + COMMON_SRCS,
+    crate_name = "ctx_history_source_discovery_env_qualification",
+    crate_root = "tests/env_discovery.rs",
+    compile_data = COMMON_COMPILE_DATA,
+    edition = crate_edition(),
+    aliases = aliases(normal_dev = True, proc_macro_dev = True),
+    deps = all_crate_deps(normal_dev = True) + QUALIFICATION_DEPS,
+    proc_macro_deps = all_crate_deps(proc_macro_dev = True),
+    rustc_env = {
+        "CARGO_MANIFEST_DIR": "crates/ctx-history-source-discovery-qualification",
+    },
+)
+
+ctx_rust_test(
+    name = "manual_unsupported_tests",
+    testonly = True,
+    srcs = ["tests/manual_unsupported.rs"] + COMMON_SRCS,
+    crate_name = "ctx_history_source_discovery_manual_unsupported_qualification",
+    crate_root = "tests/manual_unsupported.rs",
+    compile_data = COMMON_COMPILE_DATA,
+    edition = crate_edition(),
+    aliases = aliases(normal_dev = True, proc_macro_dev = True),
+    deps = all_crate_deps(normal_dev = True) + QUALIFICATION_DEPS,
+    proc_macro_deps = all_crate_deps(proc_macro_dev = True),
+    rustc_env = {
+        "CARGO_MANIFEST_DIR": "crates/ctx-history-source-discovery-qualification",
+    },
+)
+
+test_suite(
+    name = "unit_tests",
+    tests = [
+        ":configured_root_matrix_tests",
+        ":configured_roots_tests",
+        ":default_discovery_tests",
+        ":env_discovery_tests",
+        ":manual_unsupported_tests",
+    ],
+)

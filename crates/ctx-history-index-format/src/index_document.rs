@@ -42,8 +42,13 @@ const SESSION_AUTHORITY_FIELD: &str = "session_authority";
 pub struct SessionAuthorityKey([u8; SESSION_AUTHORITY_KEY_LEN]);
 
 impl SessionAuthorityKey {
-    fn new(session_id: StableEntityId, source_owner: StableEntityId) -> Result<Self> {
-        if session_id.entity_kind() != StableEntityKind::Session {
+    /// Constructs the exact query-safe key for one fully qualified session
+    /// coordinate. The private representation prevents partial UUID terms.
+    pub fn exact(session_id: StableEntityId, source_owner: StableEntityId) -> Result<Self> {
+        if session_id.entity_kind() != StableEntityKind::Session
+            || source_owner.entity_kind() != StableEntityKind::Source
+            || session_id.source_digest() != source_owner.digest()
+        {
             return Err(IndexError::InvalidStoredDocumentField(
                 SESSION_AUTHORITY_FIELD,
             ));
@@ -61,12 +66,13 @@ impl SessionAuthorityKey {
             .try_into()
             .map_err(|_| IndexError::InvalidStoredDocumentField(SESSION_AUTHORITY_FIELD))?;
         let key = Self(key);
-        let (session_id, _) = key.identities()?;
+        let (session_id, source_owner) = key.identities()?;
         if key.0[..SESSION_AUTHORITY_UUID_PREFIX_LEN] != *session_id.as_uuid().as_bytes() {
             return Err(IndexError::InvalidStoredDocumentField(
                 SESSION_AUTHORITY_FIELD,
             ));
         }
+        Self::exact(session_id, source_owner)?;
         Ok(key)
     }
 
@@ -97,7 +103,10 @@ impl SessionAuthorityKey {
         )?;
         let source_owner =
             StableEntityId::decode_canonical(&self.0[SESSION_AUTHORITY_SOURCE_OFFSET..])?;
-        if session_id.entity_kind() != StableEntityKind::Session {
+        if session_id.entity_kind() != StableEntityKind::Session
+            || source_owner.entity_kind() != StableEntityKind::Source
+            || session_id.source_digest() != source_owner.digest()
+        {
             return Err(IndexError::InvalidStoredDocumentField(
                 SESSION_AUTHORITY_FIELD,
             ));
@@ -213,6 +222,25 @@ impl EventRangeOrderKey {
                 .expect("fixed event range timestamp layout");
             (u64::from_be_bytes(encoded) ^ (1_u64 << 63)) as i64
         })
+    }
+
+    /// Returns the exact event sequence carried by this authenticated order
+    /// key without loading the stored Core record.
+    pub fn event_sequence(self) -> u64 {
+        u64::from_be_bytes(
+            self.0[EVENT_RANGE_ORDER_SEQUENCE_OFFSET..EVENT_RANGE_ORDER_EVENT_DIGEST_OFFSET]
+                .try_into()
+                .expect("fixed event range sequence layout"),
+        )
+    }
+
+    /// Returns the full stable event-identity digest used as the final global
+    /// ordering authority. All keys are event identities at the same contract
+    /// version, so this is their canonical stable-ID order.
+    pub fn event_identity_digest(self) -> [u8; 32] {
+        self.0[EVENT_RANGE_ORDER_EVENT_DIGEST_OFFSET..EVENT_RANGE_ORDER_ENCODED_BYTES_OFFSET]
+            .try_into()
+            .expect("fixed event range identity layout")
     }
 
     pub fn encoded_core_bytes(self) -> usize {
@@ -760,7 +788,7 @@ impl IndexDocument {
         core_content_bytes: usize,
     ) -> Result<Self> {
         let session_authority =
-            SessionAuthorityKey::new(record.session_id, record.source.identity())?;
+            SessionAuthorityKey::exact(record.session_id, record.source.identity())?;
         let source_token = crate::source_token(&record.source);
         let source = IndexSourceFields::new(&record.source, &source_token);
         let core_record_encoded_bytes = core_record_bytes.len();

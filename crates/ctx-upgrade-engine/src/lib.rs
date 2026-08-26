@@ -14,7 +14,7 @@ pub use install_marker::{
     current_exe_install_marker, current_exe_is_staging_dogfood, ActiveInstallAttribution,
 };
 pub use upgrade::{
-    active_installation_upgrade_attempt_id, current_install_path,
+    active_installation_upgrade_attempt_id, automatic_upgrade_check_due, current_install_path,
     installation_daemon_coordination_paths, installation_daemon_coordination_paths_for,
     installation_executable_path, installation_hosted_uninstall_is_active,
     installation_hosted_uninstall_is_active_for_executable, installation_upgrade_is_active,
@@ -25,7 +25,7 @@ pub use upgrade::{
     upgrade_diagnostics, AutomaticUpgradeObservation, AutomaticUpgradePolicyProvider,
     AutomaticUpgradePolicySnapshot, DaemonRestart, DaemonUpgradeLease, DaemonUpgradePort,
     HostedTransactionAction, HostedTransactionArgs, InstallMarker, ManagedInstallDiagnostic,
-    ManagedInstallMarker, PreparedDaemonUpgrade, ProductBuildIdentity, ReleaseProcessPort,
+    ManagedInstallMarker, PreparedAutomaticUpgrade, ProductBuildIdentity, ReleaseProcessPort,
     ReleaseTransport, SemanticAccelerator, SemanticLayoutPort, SemanticModelContract,
     SemanticModelVariant, UpgradeDiagnostics, UpgradeEngine, UpgradeFailureKind, UpgradeObserver,
     UpgradeOutcome, UpgradePlan, UpgradePolicy, UpgradeTerminalStatus, STATE_SCHEMA_VERSION,

@@ -1,15 +1,14 @@
 use ctx_history_core::{
     derive_event_id, derive_native_session_id, AgentScope, CaptureProvider, CoreRecord,
-    EventIdentityInput, NativeItemKey, ProviderNativeSessionRelationship, SourceKey,
-    StableEntityId, TypedKey, MAX_CORE_CONTENT_BYTES,
+    EventIdentityInput, NativeItemKey, ProviderNativeSessionRelationship, SourceAnchorScope,
+    SourceKey, StableEntityId, TypedKey, MAX_CORE_CONTENT_BYTES,
 };
 use ctx_history_jsonl::{fit_jsonl_activity, selected_content_fits, JsonlActivityObservedBytes};
 
 use super::{
     GeminiSourceBackedError, GeminiSourceBackedResult, GEMINI_LOGICAL_EVENT_KIND,
     GEMINI_LOGICAL_SESSION_KIND, GEMINI_NATIVE_EVENT_NAMESPACE, GEMINI_NATIVE_SESSION_NAMESPACE,
-    GEMINI_SOURCE_ANCHOR_NAMESPACE, GEMINI_SOURCE_BACKED_PARSER_REVISION,
-    GEMINI_SOURCE_SCHEMA_VARIANT,
+    GEMINI_SOURCE_ANCHOR_NAMESPACE, GEMINI_SOURCE_SCHEMA_VARIANT,
 };
 use crate::{GeminiError, GEMINI_CLI_SOURCE_FORMAT};
 
@@ -21,6 +20,7 @@ pub(super) fn project_event(
     source: &SourceKey,
     session_id: StableEntityId,
     parent_session_id: Option<StableEntityId>,
+    parser_revision: &str,
     session: &super::super::GeminiSession,
     event: super::super::GeminiRetainedEvent,
     content: GeminiProjectedContent,
@@ -51,7 +51,7 @@ pub(super) fn project_event(
         source.clone(),
         event_sequence,
         event.event_type.as_str(),
-        GEMINI_SOURCE_BACKED_PARSER_REVISION,
+        parser_revision,
         body,
     )?;
     if let Some(parent_session_id) = parent_session_id {
@@ -144,15 +144,63 @@ fn lexical_body(event: &super::super::GeminiRetainedEvent) -> String {
     }
 }
 
-pub(super) fn gemini_source_key(native_session_id: &str) -> GeminiSourceBackedResult<SourceKey> {
-    Ok(SourceKey::derive_provider_native(
+#[cfg(test)]
+pub(super) fn gemini_source_key(
+    session: &super::super::GeminiSession,
+) -> GeminiSourceBackedResult<SourceKey> {
+    gemini_source_key_scoped(session, SourceAnchorScope::Unqualified)
+}
+
+pub(super) fn gemini_source_key_scoped(
+    session: &super::super::GeminiSession,
+    source_anchor_scope: SourceAnchorScope,
+) -> GeminiSourceBackedResult<SourceKey> {
+    let anchor = TypedKey::composite(vec![
+        TypedKey::utf8(&session.native_session_id)?,
+        exact_optional_text(session.native_start_time.as_deref())?,
+        exact_optional_text(session.project_hash.as_deref())?,
+        exact_optional_text(session.native_kind.as_deref())?,
+    ])?;
+    Ok(SourceKey::derive_provider_native_scoped(
+        CaptureProvider::Gemini.as_str(),
+        GEMINI_CLI_SOURCE_FORMAT,
+        GEMINI_SOURCE_SCHEMA_VARIANT,
+        super::GEMINI_SOURCE_IDENTITY_VERSION,
+        GEMINI_SOURCE_ANCHOR_NAMESPACE,
+        anchor,
+        source_anchor_scope,
+    )?)
+}
+
+#[cfg(test)]
+pub(super) fn gemini_legacy_v1_source_key(
+    native_session_id: &str,
+) -> GeminiSourceBackedResult<SourceKey> {
+    gemini_legacy_v1_source_key_scoped(native_session_id, SourceAnchorScope::Unqualified)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(super) fn gemini_legacy_v1_source_key_scoped(
+    native_session_id: &str,
+    source_anchor_scope: SourceAnchorScope,
+) -> GeminiSourceBackedResult<SourceKey> {
+    Ok(SourceKey::derive_provider_native_scoped(
         CaptureProvider::Gemini.as_str(),
         GEMINI_CLI_SOURCE_FORMAT,
         GEMINI_SOURCE_SCHEMA_VARIANT,
         1,
         GEMINI_SOURCE_ANCHOR_NAMESPACE,
         TypedKey::utf8(native_session_id)?,
+        source_anchor_scope,
     )?)
+}
+
+fn exact_optional_text(value: Option<&str>) -> GeminiSourceBackedResult<TypedKey> {
+    value
+        .map(TypedKey::utf8)
+        .transpose()
+        .map(|value| value.unwrap_or(TypedKey::Null))
+        .map_err(Into::into)
 }
 
 pub(super) fn gemini_session_id(

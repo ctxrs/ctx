@@ -31,15 +31,17 @@ use ctx_history_capture::{
     SourceBackedRouteDriver, SourceBackedSelectorAuthority,
 };
 use ctx_history_capture_model::{
-    ProviderCatalogSupport, ProviderImportSupport, ProviderSource, ProviderSourceKind,
-    ProviderSourceStatus,
+    provider_source_config_digest, ProviderCatalogSupport, ProviderImportSupport,
+    ProviderRootDefinition, ProviderSource, ProviderSourceKind, ProviderSourceStatus,
 };
 use ctx_history_core::{
     derive_event_id, derive_session_id, CaptureProvider, CertifiedSource, CoreRecord,
     EventIdentityInput, NativeItemKey, NativeSessionKey, ScannedSourceCounts, SessionIdentityInput,
     SourceAnchor, SourceKey, SourceObservation, TypedKey,
 };
-use ctx_history_index::{GenerationWriter, SourceRouteSnapshot, WriterOptions};
+use ctx_history_index::{
+    AppliedProviderRoot, GenerationWriter, SourceRouteSnapshot, WriterOptions,
+};
 use ctx_history_refresh::EventWatermark;
 
 #[test]
@@ -125,6 +127,7 @@ fn daemon_watch_test_catalog_for_paths(
                 catalog_support: ProviderCatalogSupport::None,
                 status: ProviderSourceStatus::Available,
                 unsupported_reason: None,
+                route_provenance: Default::default(),
             },
             SourceBackedSelectorAuthority::DiscoveredWinner,
             SourceBackedRouteDriver::new(|_| Ok(()), |_| false, |_| true),
@@ -133,6 +136,195 @@ fn daemon_watch_test_catalog_for_paths(
         registry.register(route);
     }
     registry.watch_catalog()
+}
+
+fn daemon_watch_test_catalog_with_provider_root_group(
+    path: PathBuf,
+    group: &str,
+    automatic_provider_discovery: bool,
+) -> SourceBackedWatchCatalog {
+    let mut registry = SourceBackedProviderRegistry::new();
+    let route = SourceBackedRoute::automatic(
+        ProviderSource {
+            provider: CaptureProvider::Codex,
+            path: path.clone(),
+            exists: true,
+            source_format: "codex_history_jsonl",
+            source_kind: ProviderSourceKind::NativeHistory,
+            import_support: ProviderImportSupport::Native,
+            catalog_support: ProviderCatalogSupport::None,
+            status: ProviderSourceStatus::Available,
+            unsupported_reason: None,
+            route_provenance: Default::default(),
+        },
+        SourceBackedSelectorAuthority::DiscoveredWinner,
+        SourceBackedRouteDriver::new(|_| Ok(()), |_| false, |_| true),
+    )
+    .expect("build watcher provider-root test route");
+    registry.register(route);
+    let route_identity = registry
+        .watch_catalog()
+        .route_ids()
+        .next()
+        .expect("one watcher provider-root test route")
+        .clone();
+    let definition = ProviderRootDefinition {
+        id: "personal".to_owned(),
+        provider: CaptureProvider::Codex,
+        path: path.parent().expect("history path parent").to_path_buf(),
+        group: Some(group.to_owned()),
+        kind: None,
+    };
+    registry
+        .set_applied_provider_roots(
+            automatic_provider_discovery,
+            provider_source_config_digest(
+                automatic_provider_discovery,
+                std::slice::from_ref(&definition),
+            ),
+            vec![AppliedProviderRoot::new(definition, vec![route_identity])
+                .expect("valid watcher provider-root definition")],
+        )
+        .expect("install watcher provider-root definitions");
+    registry.watch_catalog()
+}
+
+#[test]
+fn provider_root_config_reload_enqueues_one_full_refresh_even_when_routes_are_unchanged(
+) -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let data_root = temp.path().join("data");
+    let provider_root = temp.path().join("provider");
+    let provider_file = provider_root.join("history.jsonl");
+    fs::create_dir_all(&data_root)?;
+    fs::create_dir_all(&provider_root)?;
+    fs::write(&provider_file, b"{\"event\":1}\n")?;
+    let personal =
+        daemon_watch_test_catalog_with_provider_root_group(provider_file.clone(), "personal", true);
+    let work =
+        daemon_watch_test_catalog_with_provider_root_group(provider_file.clone(), "work", true);
+    let automatic_disabled =
+        daemon_watch_test_catalog_with_provider_root_group(provider_file, "personal", false);
+    assert_eq!(
+        personal.route_ids().collect::<Vec<_>>(),
+        work.route_ids().collect::<Vec<_>>(),
+        "group-only changes deliberately keep the physical route topology"
+    );
+    assert_ne!(
+        personal.provider_root_config_digest(),
+        work.provider_root_config_digest()
+    );
+    assert_ne!(
+        personal.provider_root_config_digest(),
+        automatic_disabled.provider_root_config_digest()
+    );
+
+    let route = personal
+        .route_ids()
+        .next()
+        .expect("one provider-root route")
+        .clone();
+    let source = observation_fixture_source();
+    write_observation_fixture_generation(
+        &source_backed_index_root(&data_root),
+        &route,
+        &source,
+        &provider_root.join("history.jsonl"),
+        false,
+        Some("personal"),
+    )?;
+
+    let coordinator = CoreRefreshEngine::new();
+    let wakeup = Arc::new(DaemonWakeup::default());
+    let mut watch_runtime =
+        DaemonWatchRuntime::new(Arc::clone(&wakeup), &crate::test_support::CONFIG);
+    watch_runtime.reconcile_catalog_and_route_authority_with(
+        &data_root,
+        Some(&coordinator),
+        WatchCatalogReconcileTrigger::Startup,
+        false,
+        |_| Ok(personal.clone()),
+        DaemonFileWatcher::start,
+    );
+    assert!(!coordinator.has_pending_request());
+
+    watch_runtime.reconcile_catalog_and_route_authority_with(
+        &data_root,
+        Some(&coordinator),
+        WatchCatalogReconcileTrigger::CatalogControl(EventWatermark::new(1, 1)),
+        false,
+        |_| Ok(work.clone()),
+        |_, _, _| -> Result<DaemonFileWatcher> {
+            panic!("a config reload must retain the active watcher owner")
+        },
+    );
+
+    assert!(
+        coordinator.has_pending_request(),
+        "exact watch reconciliation cannot publish changed root aliases or source_groups"
+    );
+    assert!(
+        watch_runtime.provider_root_refresh_pending_for_test(),
+        "enqueue may coalesce into an older running full refresh, so digest demand must stay latched"
+    );
+
+    watch_runtime.reconcile_catalog_and_route_authority_with(
+        &data_root,
+        Some(&coordinator),
+        WatchCatalogReconcileTrigger::CatalogControl(EventWatermark::new(2, 2)),
+        false,
+        |_| Ok(personal.clone()),
+        |_, _, _| -> Result<DaemonFileWatcher> {
+            panic!("A→B→A config churn must retain the active watcher owner")
+        },
+    );
+    assert!(
+        watch_runtime.provider_root_refresh_pending_for_test(),
+        "matching the published A digest cannot consume demand while an admitted B refresh remains pending"
+    );
+
+    watch_runtime.reconcile_catalog_and_route_authority_with(
+        &data_root,
+        Some(&coordinator),
+        WatchCatalogReconcileTrigger::CatalogControl(EventWatermark::new(3, 3)),
+        false,
+        |_| Ok(work.clone()),
+        |_, _, _| -> Result<DaemonFileWatcher> {
+            panic!("a repeated config reconciliation must retain the active watcher owner")
+        },
+    );
+    assert!(
+        watch_runtime.provider_root_refresh_pending_for_test(),
+        "a coalesced old-snapshot request must not consume provider-root publication demand"
+    );
+
+    write_observation_fixture_generation(
+        &source_backed_index_root(&data_root),
+        &route,
+        &source,
+        &provider_root.join("history.jsonl"),
+        false,
+        Some("work"),
+    )?;
+    // The fixture publishes the completed successor directly instead of
+    // running the queued engine request. Observe it with an idle engine to
+    // model the real post-completion state.
+    let completed_coordinator = CoreRefreshEngine::new();
+    watch_runtime.reconcile_catalog_and_route_authority_with(
+        &data_root,
+        Some(&completed_coordinator),
+        WatchCatalogReconcileTrigger::CatalogControl(EventWatermark::new(4, 4)),
+        false,
+        |_| Ok(work.clone()),
+        |_, _, _| -> Result<DaemonFileWatcher> {
+            panic!("a completed successor must retain the active watcher owner")
+        },
+    );
+    assert!(
+        !watch_runtime.provider_root_refresh_pending_for_test(),
+        "publishing the desired config digest must consume the latched refresh demand"
+    );
+    Ok(())
 }
 
 struct ProviderObservationFixture {
@@ -166,6 +358,7 @@ impl ProviderObservationFixture {
             &source,
             &provider_file,
             false,
+            None,
         )?;
 
         let writer_launches = Arc::new(AtomicUsize::new(0));
@@ -183,6 +376,7 @@ impl ProviderObservationFixture {
                     &refresh_source,
                     &refresh_file,
                     true,
+                    None,
                 )?;
                 Ok(SourceBackedRefreshPublication {
                     zero_source_authority: Vec::new(),
@@ -325,11 +519,29 @@ fn write_observation_fixture_generation(
     source: &SourceKey,
     provider_file: &Path,
     route_staged: bool,
+    provider_root_group: Option<&str>,
 ) -> Result<String> {
     let bytes = fs::read(provider_file)?;
     let mut writer = GenerationWriter::open(index_root, WriterOptions::default())?
         .into_writer()
         .map_err(crate::committed_generation_recovery_error)?;
+    if let Some(group) = provider_root_group {
+        let definition = ProviderRootDefinition {
+            id: "personal".to_owned(),
+            provider: CaptureProvider::Codex,
+            path: provider_file
+                .parent()
+                .expect("provider-root fixture file parent")
+                .to_path_buf(),
+            group: Some(group.to_owned()),
+            kind: None,
+        };
+        writer.set_applied_provider_roots(
+            true,
+            provider_source_config_digest(true, std::slice::from_ref(&definition)),
+            vec![AppliedProviderRoot::new(definition, vec![route.clone()])?],
+        )?;
+    }
     if route_staged {
         writer.set_source_route_plan(BTreeSet::from([route.clone()]), BTreeSet::new())?;
         writer.begin_source_route_stage(route.clone())?;

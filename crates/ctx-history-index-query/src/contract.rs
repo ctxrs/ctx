@@ -1,77 +1,7 @@
 use super::*;
 
-/// Fixed admission ceilings for one lexical search request.
-///
-/// Raw admission happens before analyzer lookup or query construction. The
-/// analyzed-token ceiling bounds coverage ranking to at most 32 Tantivy search
-/// tiers and 1,024 body term-query nodes plus bounded event-class postings. Empty alternatives
-/// still count because callers must not turn repeated empty inputs into
-/// unbounded pre-search work.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LexicalQueryLimits {
-    /// Maximum aggregate UTF-8 bytes across all supplied alternatives.
-    pub maximum_aggregate_bytes: usize,
-    /// Maximum number of supplied positional or repeated-term alternatives.
-    pub maximum_alternatives: usize,
-    /// Maximum distinct terms retained after lexical analysis.
-    pub maximum_unique_tokens: usize,
-}
-
-impl LexicalQueryLimits {
-    /// Validates raw alternatives without allocating a normalized copy.
-    pub fn validate_texts<'a, I>(self, texts: I) -> Result<()>
-    where
-        I: IntoIterator<Item = &'a str>,
-    {
-        let mut alternatives = 0_usize;
-        let mut aggregate_bytes = 0_usize;
-        for text in texts {
-            alternatives = alternatives.saturating_add(1);
-            if alternatives > self.maximum_alternatives {
-                return Err(IndexError::LexicalQueryAlternativesTooMany {
-                    observed: alternatives,
-                    maximum: self.maximum_alternatives,
-                });
-            }
-            aggregate_bytes = aggregate_bytes.saturating_add(text.len());
-            if aggregate_bytes > self.maximum_aggregate_bytes {
-                return Err(IndexError::LexicalQueryBytesTooLarge {
-                    actual: aggregate_bytes,
-                    maximum: self.maximum_aggregate_bytes,
-                });
-            }
-        }
-        Ok(())
-    }
-}
-
-/// Generous fixed limits for public and programmatic lexical queries.
-///
-/// The 64 KiB byte ceiling bounds tokenizer input and normalization copies;
-/// the two 32-item ceilings bound repeated-query fanout and the quadratic
-/// coverage-ranking plan while leaving ample room for ordinary user queries.
-pub const LEXICAL_QUERY_LIMITS: LexicalQueryLimits = LexicalQueryLimits {
-    maximum_aggregate_bytes: 64 * 1024,
-    maximum_alternatives: 32,
-    maximum_unique_tokens: 32,
-};
-
-/// Maximum number of metadata candidates retained by one lexical search.
-///
-/// Coverage ranking can temporarily request one additional bounded result set
-/// for already-seen higher-coverage hits, so the internal collector ceiling is
-/// at most twice this public limit.
-pub const MAX_LEXICAL_QUERY_RESULTS: usize = 4_096;
-
-pub(crate) fn validate_lexical_result_limit(limit: usize) -> Result<()> {
-    if limit > MAX_LEXICAL_QUERY_RESULTS {
-        return Err(IndexError::InvalidLexicalResultLimit {
-            requested: limit,
-            maximum: MAX_LEXICAL_QUERY_RESULTS,
-        });
-    }
-    Ok(())
-}
+mod lexical;
+pub use lexical::*;
 
 /// Maximum number of complete semantic event records retained in one page.
 pub const MAX_SEMANTIC_EVENT_PAGE_ITEMS: usize = 64;
@@ -104,10 +34,6 @@ pub const MAX_COPIED_EVENT_LINEAGE_POSTING_VISITS: usize = 4_096;
 /// selected event and its optional direct copied-event target are resolved.
 pub const MAX_COPIED_EVENT_LINEAGE_EVENT_AND_SESSION_IDENTITY_POSTING_VISITS: usize = 2_048;
 
-/// Bounded post-ranking lineage policy for one selected search result.
-pub const SEARCH_COPIED_EVENT_LINEAGE_POLICY: CopiedEventLineagePolicy =
-    CopiedEventLineagePolicy::new(3, 64);
-
 /// Bounded lineage-detail policy for one selected show-event response.
 pub const SHOW_COPIED_EVENT_LINEAGE_POLICY: CopiedEventLineagePolicy =
     CopiedEventLineagePolicy::new(20, 4_096);
@@ -115,8 +41,9 @@ pub const SHOW_COPIED_EVENT_LINEAGE_POLICY: CopiedEventLineagePolicy =
 /// Caller-selected work and preview-retention ceilings for copied-event lineage.
 ///
 /// The direct-edge query always remains generation-pinned and posting-bounded.
-/// Search and show callers should pass their named policies above so
-/// presentation cannot accidentally widen either product surface.
+/// Show callers use the named policy above so presentation cannot accidentally
+/// widen that product surface. Lower-level callers must still select explicit
+/// bounded values.
 /// `maximum_occurrences` never stops counting direct claims; it only caps
 /// retained preview rows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -541,13 +468,14 @@ impl SearchContentScope {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExcludedSessionTree {
-    pub provider: String,
-    pub provider_session_id: String,
     pub session_ids: Vec<Uuid>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EventSearchFilters {
+    /// Exact source-key terms resolved from the pinned generation. `None`
+    /// means unrestricted; `Some([])` deliberately matches no events.
+    pub allowed_source_keys: Option<Vec<String>>,
     pub session_id: Option<Uuid>,
     pub excluded_session_ids: Vec<Uuid>,
     pub parent_session_id: Option<Uuid>,
@@ -624,6 +552,27 @@ pub struct EventRecord {
     pub occurred_at_unix_ms: Option<i64>,
     pub event_type: String,
     pub role: Option<String>,
+}
+
+impl EventRecord {
+    /// Returns the exporter-declared route for a custom JSONL event.
+    ///
+    /// Custom source identity is retained in the native event key so query
+    /// surfaces can display the same route used by exact source filters.
+    pub fn custom_source_identity(&self) -> Option<(&str, &str)> {
+        if self.provider != "custom" {
+            return None;
+        }
+        let Some(TypedKey::Composite(values)) = self.native_event_id.as_ref() else {
+            return None;
+        };
+        let [TypedKey::Utf8(provider_key), TypedKey::Utf8(source_id), TypedKey::Utf8(_)] =
+            values.as_slice()
+        else {
+            return None;
+        };
+        Some((provider_key, source_id))
+    }
 }
 
 /// One direct provider-native event-copy claim targeting the selected event.
@@ -731,6 +680,47 @@ pub struct EventSearchCandidate {
     pub score: f32,
 }
 
+/// Exact, content-free work performed by one low-level candidate query.
+///
+/// `collector_hits` is the number of retained candidate addresses handed to
+/// materialization. Decoded records and bytes are charged only after a stored
+/// Core record has decoded successfully.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EventCandidateQueryReceipt {
+    pub query_executions: u64,
+    pub collector_hits: u64,
+    pub records_decoded: u64,
+    pub encoded_core_bytes_decoded: u64,
+}
+
+/// Candidate rows paired with the exact low-level work that produced them.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ObservedEventSearchCandidates {
+    pub candidates: Vec<EventSearchCandidate>,
+    pub receipt: EventCandidateQueryReceipt,
+}
+
+/// A candidate-query failure retaining exact work completed before the error.
+#[derive(Debug)]
+pub struct EventCandidateQueryFailure {
+    pub error: IndexError,
+    pub receipt: EventCandidateQueryReceipt,
+}
+
+pub type DiagnosedEventCandidateQueryResult =
+    std::result::Result<ObservedEventSearchCandidates, Box<EventCandidateQueryFailure>>;
+
+/// Completeness-aware lexical batch paired with the exact low-level work that
+/// produced it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ObservedLexicalSearchBatch {
+    pub batch: LexicalSearchBatch,
+    pub receipt: EventCandidateQueryReceipt,
+}
+
+pub type DiagnosedLexicalSearchBatchResult =
+    std::result::Result<ObservedLexicalSearchBatch, Box<EventCandidateQueryFailure>>;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionRecord {
     pub session_id: StableEntityId,
@@ -738,11 +728,108 @@ pub struct SessionRecord {
     pub root_session_id: Option<StableEntityId>,
     pub session_relationship: Option<ProviderNativeSessionRelationship>,
     pub provider: String,
+    pub provider_key: Option<String>,
+    pub source_id: Option<String>,
     pub source_format: String,
     pub provider_session_id: Option<String>,
     pub agent_scope: Option<CoreAgentScope>,
     pub first_event_sequence: u64,
     pub first_occurred_at_unix_ms: Option<i64>,
+}
+
+/// Maximum exact session coordinates accepted by one grouping-authority read.
+pub const MAX_SESSION_GROUPING_COORDINATES: usize = 4_096;
+/// Maximum sparse authority witnesses accepted for each exact coordinate.
+pub const MAX_SESSION_GROUPING_WITNESSES_PER_COORDINATE: usize = 4;
+/// Maximum live witnesses retained by one grouping-authority read.
+pub const MAX_SESSION_GROUPING_WITNESSES: usize =
+    MAX_SESSION_GROUPING_COORDINATES * MAX_SESSION_GROUPING_WITNESSES_PER_COORDINATE;
+
+/// Coalesced exact provider claims for one source-owned session.
+///
+/// Every optional field remains absent unless at least one sparse authority
+/// witness contains that direct literal claim. Conflicting positives fail the
+/// complete lookup; this type carries no traversal or inferred topology.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionGroupingClaims {
+    pub session_id: StableEntityId,
+    pub source_owner: StableEntityId,
+    pub parent_session_id: Option<StableEntityId>,
+    pub root_session_id: Option<StableEntityId>,
+    pub relationship: Option<ProviderNativeSessionRelationship>,
+}
+
+/// Why a session received its search-family identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SearchFamilyBasis {
+    /// An exact provider-emitted root claim is the family identity.
+    LiteralProviderRoot,
+    /// Ranking groups an otherwise unclaimed session with itself.
+    /// This is not a provider claim.
+    OwnSessionFallback,
+}
+
+/// Pure ranking key derived from [`SessionGroupingClaims`].
+///
+/// Equality and hashing intentionally use only `session_id`. `basis` records
+/// why that identity was selected; it is not part of family identity. Thus an
+/// unclaimed root session and a child with a literal claim to that root group
+/// together even though their evidence bases differ.
+#[derive(Debug, Clone, Copy)]
+pub struct SearchFamilyKey {
+    pub session_id: StableEntityId,
+    pub basis: SearchFamilyBasis,
+}
+
+impl PartialEq for SearchFamilyKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.session_id == other.session_id
+    }
+}
+
+impl Eq for SearchFamilyKey {}
+
+impl std::hash::Hash for SearchFamilyKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::hash::Hash::hash(&self.session_id, state);
+    }
+}
+
+impl SearchFamilyKey {
+    pub fn from_claims(claims: &SessionGroupingClaims) -> Self {
+        match claims.root_session_id {
+            Some(session_id) => Self {
+                session_id,
+                basis: SearchFamilyBasis::LiteralProviderRoot,
+            },
+            None => Self {
+                session_id: claims.session_id,
+                basis: SearchFamilyBasis::OwnSessionFallback,
+            },
+        }
+    }
+}
+
+impl From<&SessionGroupingClaims> for SearchFamilyKey {
+    fn from(claims: &SessionGroupingClaims) -> Self {
+        Self::from_claims(claims)
+    }
+}
+
+/// Whether search diversification is authoritative for the requested top N.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchDiversificationStatus {
+    Applied,
+    NotApplicable,
+    Indeterminate,
+}
+
+/// One bounded search query's diversification decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SearchDiversificationDecision {
+    pub status: SearchDiversificationStatus,
+    pub top_n: usize,
+    pub changed_final_top_n: Option<bool>,
 }
 
 /// Small body-free session coordinate used to select bounded Core batches.

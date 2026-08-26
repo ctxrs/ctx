@@ -16,7 +16,9 @@ use rusqlite::Connection;
 use uuid::Uuid;
 
 use super::*;
-use crate::provider_sources::SqliteSourceAccessError;
+use crate::provider_sources::{
+    SqliteArtifactKind, SqliteCleanupStatus, SqliteFailurePhase, SqliteSourceAccessError,
+};
 
 #[derive(Clone, Default)]
 pub(crate) struct NoopLookup;
@@ -453,6 +455,7 @@ fn fixture_provider_source(
         catalog_support: ctx_history_capture_model::ProviderCatalogSupport::None,
         status: crate::ProviderSourceStatus::Available,
         unsupported_reason: None,
+        route_provenance: Default::default(),
     }
 }
 
@@ -536,6 +539,60 @@ fn shelley_registration_preserves_resource_unavailable_classification() {
     });
 
     assert_eq!(error.kind, SourceBackedRouteErrorKind::ResourceUnavailable);
+}
+
+#[test]
+fn sqlite_contention_is_logical_but_exhaustion_remains_route_fatal() {
+    for code in [rusqlite::ffi::SQLITE_BUSY, rusqlite::ffi::SQLITE_LOCKED] {
+        let diagnosed = |artifact| {
+            SqliteSourceAccessError::SqliteControl {
+                operation: "querying a contended provider database",
+                code,
+            }
+            .with_diagnostic(
+                SqliteFailurePhase::Projection,
+                artifact,
+                0,
+                0,
+                SqliteCleanupStatus::NotRequired,
+            )
+        };
+        let provider = diagnosed(SqliteArtifactKind::ProviderDatabase);
+        let private = diagnosed(SqliteArtifactKind::PrivateSourceCopy);
+        let raw = rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(code), None);
+
+        assert_eq!(
+            sqlite_source_route_error_kind(&provider),
+            SourceBackedRouteErrorKind::Unavailable
+        );
+        assert!(sqlite_source_route_error_kind(&provider).is_logical_source_failure());
+        assert_eq!(
+            sqlite_source_route_error_kind(&private),
+            SourceBackedRouteErrorKind::Internal
+        );
+        assert_eq!(
+            sqlite_capture_route_error(&CaptureError::Sqlite(raw)),
+            Some(SourceBackedRouteErrorKind::Internal)
+        );
+    }
+
+    for code in [rusqlite::ffi::SQLITE_FULL, rusqlite::ffi::SQLITE_NOMEM] {
+        let source = SqliteSourceAccessError::SqliteControl {
+            operation: "querying an exhausted provider database",
+            code,
+        };
+        let raw = rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(code), None);
+
+        assert_eq!(
+            sqlite_source_route_error_kind(&source),
+            SourceBackedRouteErrorKind::ResourceUnavailable
+        );
+        assert!(!sqlite_source_route_error_kind(&source).is_logical_source_failure());
+        assert_eq!(
+            sqlite_capture_route_error(&CaptureError::Sqlite(raw)),
+            Some(SourceBackedRouteErrorKind::ResourceUnavailable)
+        );
+    }
 }
 
 #[test]

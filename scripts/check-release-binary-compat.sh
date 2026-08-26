@@ -586,6 +586,8 @@ bcryptprimitives.dll
 kernel32.dll
 ntdll.dll
 ole32.dll
+psapi.dll
+rstrtmgr.dll
 shell32.dll
 userenv.dll
 ws2_32.dll"

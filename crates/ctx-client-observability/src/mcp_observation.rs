@@ -114,11 +114,27 @@ impl McpObservation {
         duration: Duration,
         class: McpErrorClassV1,
     ) {
+        self.record_response_failure_with_result(
+            descriptor,
+            duration,
+            class,
+            McpResultMetadataV1::default(),
+        );
+    }
+
+    pub fn record_response_failure_with_result(
+        &mut self,
+        descriptor: McpRequestObservation,
+        duration: Duration,
+        class: McpErrorClassV1,
+        result: McpResultMetadataV1,
+    ) {
         self.lifecycle.count_descriptor(descriptor);
         if matches!(descriptor, McpRequestObservation::ToolCall(_)) {
             let operation = descriptor
                 .operation()
-                .with_error(McpErrorLayerV1::Response, class);
+                .with_error(McpErrorLayerV1::Response, class)
+                .with_result(result);
             self.sender
                 .try_submit(operation_event(operation, Outcome::Failure, duration));
         }
@@ -200,30 +216,35 @@ impl McpLifecycle {
         duration: Duration,
     ) -> Option<PublicEventV1> {
         self.count_descriptor(descriptor);
-        if let Some(class) = response.and_then(|response| response.error_class) {
-            if matches!(
-                descriptor,
-                McpRequestObservation::InitializedNotification
-                    | McpRequestObservation::UnknownNotification
-            ) {
-                self.counts.requests = self.counts.requests.saturating_add(1);
+        if let Some(response) = response {
+            if let Some(class) = response.error_class {
+                if matches!(
+                    descriptor,
+                    McpRequestObservation::InitializedNotification
+                        | McpRequestObservation::UnknownNotification
+                ) {
+                    self.counts.requests = self.counts.requests.saturating_add(1);
+                }
+                self.counts.malformed_requests = self.counts.malformed_requests.saturating_add(1);
+                let layer = if matches!(
+                    descriptor,
+                    McpRequestObservation::InvalidJson
+                        | McpRequestObservation::InvalidUtf8
+                        | McpRequestObservation::LineTooLarge
+                ) {
+                    McpErrorLayerV1::Input
+                } else {
+                    McpErrorLayerV1::JsonRpc
+                };
+                return Some(operation_event(
+                    descriptor
+                        .operation()
+                        .with_error(layer, class)
+                        .with_result(response.result),
+                    Outcome::Failure,
+                    duration,
+                ));
             }
-            self.counts.malformed_requests = self.counts.malformed_requests.saturating_add(1);
-            let layer = if matches!(
-                descriptor,
-                McpRequestObservation::InvalidJson
-                    | McpRequestObservation::InvalidUtf8
-                    | McpRequestObservation::LineTooLarge
-            ) {
-                McpErrorLayerV1::Input
-            } else {
-                McpErrorLayerV1::JsonRpc
-            };
-            return Some(operation_event(
-                descriptor.operation().with_error(layer, class),
-                Outcome::Failure,
-                duration,
-            ));
         }
         if matches!(
             descriptor,

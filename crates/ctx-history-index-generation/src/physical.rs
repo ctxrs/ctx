@@ -526,6 +526,17 @@ fn hash_physical_file(
 }
 
 fn canonical_physical_integrity_digest(entries: &[PhysicalDigestPart]) -> Result<String> {
+    physical_integrity_digest_from_parts(
+        entries
+            .iter()
+            .map(|entry| (entry.path.as_str(), entry.length, entry.sha256)),
+    )
+}
+
+pub(super) fn physical_integrity_digest_from_parts<'a>(
+    entries: impl IntoIterator<Item = (&'a str, u64, [u8; 32])>,
+) -> Result<String> {
+    let entries = entries.into_iter().collect::<Vec<_>>();
     let mut digest = Sha256::new();
     digest.update(PHYSICAL_INTEGRITY_DOMAIN);
     digest.update(
@@ -534,15 +545,15 @@ fn canonical_physical_integrity_digest(entries: &[PhysicalDigestPart]) -> Result
             .to_be_bytes(),
     );
     for entry in entries {
-        let path = entry.path.as_bytes();
+        let path = entry.0.as_bytes();
         digest.update(
             u64::try_from(path.len())
                 .map_err(|_| IndexError::CountOverflow)?
                 .to_be_bytes(),
         );
         digest.update(path);
-        digest.update(entry.length.to_be_bytes());
-        digest.update(entry.sha256);
+        digest.update(entry.1.to_be_bytes());
+        digest.update(entry.2);
     }
     Ok(hex(&digest.finalize()))
 }

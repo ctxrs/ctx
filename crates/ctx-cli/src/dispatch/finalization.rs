@@ -3,7 +3,10 @@ use std::{
     time::Duration,
 };
 
-use crate::local_usage;
+use crate::{
+    analytics::{SearchFailurePhase, SearchHealthFacts, SearchTelemetry},
+    local_usage,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub(super) enum FinalOutputFlushError {
@@ -18,19 +21,53 @@ pub(super) enum FinalOutputFlushError {
     },
 }
 
-pub(super) fn flush_cli_output_then<T>(
+pub(super) fn flush_cli_output(
     stdout: &mut impl Write,
     stderr: &mut impl Write,
-    after_delivery: impl FnOnce() -> T,
-) -> std::result::Result<T, FinalOutputFlushError> {
+) -> std::result::Result<(), FinalOutputFlushError> {
     let stdout_result = stdout.flush();
     let stderr_result = stderr.flush();
     match (stdout_result, stderr_result) {
-        (Ok(()), Ok(())) => Ok(after_delivery()),
+        (Ok(()), Ok(())) => Ok(()),
         (Err(stdout), Ok(())) => Err(FinalOutputFlushError::Stdout(stdout)),
         (Ok(()), Err(stderr)) => Err(FinalOutputFlushError::Stderr(stderr)),
         (Err(stdout), Err(stderr)) => Err(FinalOutputFlushError::Both { stdout, stderr }),
     }
+}
+
+pub(super) fn record_search_final_delivery(
+    telemetry: &mut SearchTelemetry,
+    boundary_succeeded: bool,
+    output_duration: Duration,
+) -> bool {
+    let command_output_succeeded = telemetry
+        .health
+        .as_ref()
+        .and_then(|health| health.failure_phase)
+        != Some(SearchFailurePhase::Output);
+    let served = boundary_succeeded && command_output_succeeded;
+    telemetry.output_duration = Some(
+        telemetry
+            .output_duration
+            .unwrap_or_default()
+            .saturating_add(output_duration),
+    );
+    telemetry.output_served = Some(served);
+    if !served {
+        telemetry
+            .health
+            .get_or_insert_with(SearchHealthFacts::default)
+            .failure_phase = Some(SearchFailurePhase::Output);
+    }
+    served
+}
+
+pub(super) fn send_online_after_output(
+    output_result: anyhow::Result<()>,
+    send: impl FnOnce(),
+) -> anyhow::Result<()> {
+    send();
+    output_result
 }
 
 pub(super) fn complete_local_usage(
@@ -60,13 +97,157 @@ mod tests {
 
     use clap::Parser;
 
-    use super::{complete_local_usage, flush_cli_output_then};
+    use super::{
+        complete_local_usage, flush_cli_output, record_search_final_delivery,
+        send_online_after_output,
+    };
     use crate::{
+        analytics::{
+            ClientOperationDraft, Outcome, PublicEventV1, SearchFailurePhase, SearchHealthFacts,
+            SearchTelemetry,
+        },
         cli::Cli,
-        dispatch::{command_local_usage_draft, render_generic_command_error},
+        dispatch::{
+            command_local_usage_draft, command_operation_descriptor, render_generic_command_error,
+            write_machine_error,
+        },
+        operation_descriptor::{CliOperation, OperationDescriptor},
         output::{MeasuredWriter, OutputMeasurement},
         ui::{ColorMode, RenderContext, StreamKind, TestContext, Ui},
     };
+
+    fn search_telemetry() -> SearchTelemetry {
+        let cli = Cli::try_parse_from(["ctx", "search", "needle"]).unwrap();
+        let OperationDescriptor::Cli(CliOperation::Search(telemetry)) =
+            command_operation_descriptor(&cli.command)
+        else {
+            panic!("search command must have Search telemetry")
+        };
+        telemetry
+    }
+
+    #[test]
+    fn search_final_delivery_records_served_success_and_duration() {
+        let mut telemetry = search_telemetry();
+
+        let served = record_search_final_delivery(&mut telemetry, true, Duration::ZERO);
+
+        assert!(served);
+        assert_eq!(telemetry.output_served, Some(true));
+        assert_eq!(telemetry.output_duration, Some(Duration::ZERO));
+        assert_eq!(telemetry.health, None);
+    }
+
+    #[test]
+    fn online_delivery_precedes_output_failure_return_and_is_unchanged_on_success() {
+        let sends = Cell::new(0);
+        let failure = send_online_after_output(Err(anyhow::anyhow!("output failed")), || {
+            sends.set(sends.get() + 1);
+        });
+        assert!(failure.is_err());
+        assert_eq!(sends.get(), 1);
+
+        send_online_after_output(Ok(()), || sends.set(sends.get() + 1)).unwrap();
+        assert_eq!(sends.get(), 2);
+    }
+
+    #[test]
+    fn search_final_delivery_preserves_served_command_error_phase() {
+        let mut telemetry = search_telemetry();
+        telemetry.health = Some(SearchHealthFacts {
+            failure_phase: Some(SearchFailurePhase::Render),
+            ..SearchHealthFacts::default()
+        });
+
+        let served = record_search_final_delivery(&mut telemetry, true, Duration::from_millis(2));
+
+        assert!(served);
+        assert_eq!(telemetry.output_served, Some(true));
+        assert_eq!(
+            telemetry.health.unwrap().failure_phase,
+            Some(SearchFailurePhase::Render)
+        );
+    }
+
+    #[test]
+    fn search_command_ui_failure_remains_unserved_after_final_flush() {
+        let mut telemetry = search_telemetry();
+        telemetry.health = Some(SearchHealthFacts {
+            failure_phase: Some(SearchFailurePhase::Output),
+            ..SearchHealthFacts::default()
+        });
+
+        let served = record_search_final_delivery(&mut telemetry, true, Duration::from_millis(3));
+
+        assert!(!served);
+        assert_eq!(telemetry.output_served, Some(false));
+        assert_eq!(
+            telemetry.health.unwrap().failure_phase,
+            Some(SearchFailurePhase::Output)
+        );
+    }
+
+    #[test]
+    fn search_owned_output_failure_with_successful_error_delivery_is_sent() {
+        let mut telemetry = search_telemetry();
+        telemetry.health = Some(SearchHealthFacts {
+            failure_phase: Some(SearchFailurePhase::Output),
+            ..SearchHealthFacts::default()
+        });
+
+        // A command-body result write or not-ready diagnostic write failed,
+        // but its generic error and both final stream flushes subsequently
+        // succeeded at the terminal boundary.
+        let served = record_search_final_delivery(&mut telemetry, true, Duration::from_millis(3));
+        let sends = Cell::new(0);
+        send_online_after_output(Ok(()), || sends.set(sends.get() + 1)).unwrap();
+
+        assert!(!served);
+        assert_eq!(telemetry.output_served, Some(false));
+        assert_eq!(
+            telemetry.health.unwrap().failure_phase,
+            Some(SearchFailurePhase::Output)
+        );
+        assert_eq!(sends.get(), 1);
+    }
+
+    #[test]
+    fn search_output_failure_sends_terminal_receipt_before_returning_original_error() {
+        let cli = Cli::try_parse_from(["ctx", "search", "needle"]).unwrap();
+        let mut draft = ClientOperationDraft::from_descriptor(
+            command_operation_descriptor(&cli.command),
+            false,
+        )
+        .unwrap();
+        let served =
+            record_search_final_delivery(draft.search_mut(), false, Duration::from_millis(4));
+        assert!(!served);
+        let event = draft.finish(false, Duration::from_millis(9));
+        let sent = std::cell::RefCell::new(None);
+
+        let error = send_online_after_output(
+            Err(anyhow::anyhow!("flush CLI stdout: broken pipe")),
+            || {
+                sent.replace(Some(event));
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error.to_string(), "flush CLI stdout: broken pipe");
+        let PublicEventV1::OperationCompleted(event) = sent.into_inner().unwrap() else {
+            panic!("Search must emit an operation terminal event")
+        };
+        assert_eq!(event.outcome, Outcome::Failure);
+        let OperationDescriptor::Cli(CliOperation::Search(telemetry)) = event.descriptor else {
+            panic!("terminal event must retain Search telemetry")
+        };
+        assert_eq!(telemetry.output_served, Some(false));
+        assert_eq!(telemetry.output_duration, Some(Duration::from_millis(4)));
+        assert_eq!(
+            telemetry.health.unwrap().failure_phase,
+            Some(SearchFailurePhase::Output)
+        );
+    }
 
     #[derive(Clone, Default)]
     struct SharedBytes(Arc<Mutex<Vec<u8>>>);
@@ -89,6 +270,45 @@ mod tests {
         fn flush(&mut self) -> io::Result<()> {
             Ok(())
         }
+    }
+
+    struct FailingWriter;
+
+    impl Write for FailingWriter {
+        fn write(&mut self, _buffer: &[u8]) -> io::Result<usize> {
+            Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "measured Search error write failed",
+            ))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn search_machine_error_uses_the_ui_writer_and_propagates_failure() {
+        let stderr = SharedBytes::default();
+        let stderr_copy = stderr.clone();
+        let mut ui = Ui::with_writers(
+            io::sink(),
+            RenderContext::for_test(TestContext::pipe(StreamKind::Stdout)),
+            stderr,
+            RenderContext::for_test(TestContext::pipe(StreamKind::Stderr)),
+        );
+
+        write_machine_error(true, &mut ui, "structured search error").unwrap();
+        assert_eq!(stderr_copy.bytes(), b"structured search error\n");
+
+        let mut failing_ui = Ui::with_writers(
+            io::sink(),
+            RenderContext::for_test(TestContext::pipe(StreamKind::Stdout)),
+            FailingWriter,
+            RenderContext::for_test(TestContext::pipe(StreamKind::Stderr)),
+        );
+        let error = write_machine_error(true, &mut failing_ui, "failure").unwrap_err();
+        assert_eq!(error.to_string(), "measured Search error write failed");
     }
 
     fn render_and_assert_final_accounting_fixture(
@@ -226,7 +446,38 @@ mod tests {
     }
 
     #[test]
-    fn local_usage_hook_runs_only_after_both_final_output_flushes_succeed() {
+    fn search_final_stdout_and_stderr_flush_failures_are_unserved() {
+        for (stdout_failure, stderr_failure) in [
+            (Some("stdout"), None),
+            (None, Some("stderr")),
+            (Some("stdout"), Some("stderr")),
+        ] {
+            let mut stdout = FlushWriter {
+                failure: stdout_failure,
+                flushes: Rc::new(Cell::new(0)),
+            };
+            let mut stderr = FlushWriter {
+                failure: stderr_failure,
+                flushes: Rc::new(Cell::new(0)),
+            };
+            let delivered = flush_cli_output(&mut stdout, &mut stderr).is_ok();
+            let mut telemetry = search_telemetry();
+
+            let served =
+                record_search_final_delivery(&mut telemetry, delivered, Duration::from_millis(4));
+
+            assert!(!served);
+            assert_eq!(telemetry.output_served, Some(false));
+            assert_eq!(telemetry.output_duration, Some(Duration::from_millis(4)));
+            assert_eq!(
+                telemetry.health.unwrap().failure_phase,
+                Some(SearchFailurePhase::Output)
+            );
+        }
+    }
+
+    #[test]
+    fn local_usage_gate_opens_only_after_both_final_output_flushes_succeed() {
         for (stdout_failure, stderr_failure, expected_delivery, expected_error) in [
             (None, None, 1, None),
             (Some("stdout"), None, 0, Some("flush CLI stdout: stdout")),
@@ -250,7 +501,8 @@ mod tests {
             };
             let mut deliveries = 0;
 
-            let result = flush_cli_output_then(&mut stdout, &mut stderr, || {
+            let result = flush_cli_output(&mut stdout, &mut stderr);
+            let delivered_at = result.as_ref().ok().map(|()| {
                 deliveries += 1;
                 (stdout_flushes.get(), stderr_flushes.get())
             });
@@ -263,7 +515,10 @@ mod tests {
                     assert!(result.is_err());
                     assert!(result.unwrap_err().to_string().contains(expected));
                 }
-                None => assert_eq!(result.unwrap(), (1, 1)),
+                None => {
+                    result.unwrap();
+                    assert_eq!(delivered_at, Some((1, 1)));
+                }
             }
         }
     }
@@ -295,10 +550,8 @@ mod tests {
             clock_ms: clock_ms.clone(),
             finish_at_ms: 57,
         };
-        let duration = flush_cli_output_then(&mut stdout, &mut stderr, || {
-            Duration::from_millis(clock_ms.get())
-        })
-        .unwrap();
+        flush_cli_output(&mut stdout, &mut stderr).unwrap();
+        let duration = Duration::from_millis(clock_ms.get());
 
         assert_eq!(duration, Duration::from_millis(57));
         let cli = Cli::try_parse_from(["ctx", "doctor"]).unwrap();

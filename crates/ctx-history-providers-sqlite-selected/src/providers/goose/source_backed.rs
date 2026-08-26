@@ -13,8 +13,8 @@ use ctx_history_core::{
     ActivityTextCapture, AgentScope, CaptureProvider, CoreActivity, CoreRecord, CoreRecordError,
     EventIdentityInput, EventType, LiteralFactKind, NativeItemKey, NativeSessionKey,
     ProjectionContractError, ProviderDeclaredFact, ProviderNativeSessionRelationship,
-    ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceKey, StableEntityId, TypedKey,
-    CORE_ACTIVITY_REVISION,
+    ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceAnchorScope, SourceKey,
+    StableEntityId, TypedKey, CORE_ACTIVITY_REVISION,
 };
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
@@ -51,9 +51,9 @@ mod fingerprint;
 
 use fingerprint::GooseLogicalFingerprint;
 
-const GOOSE_SOURCE_ANCHOR_NAMESPACE: &str = "goose.installed-sessions";
-const GOOSE_SOURCE_ANCHOR_KEY: &str = "selected-platform-sessions-db";
-const GOOSE_SOURCE_SCHEMA_VARIANT: &str = "goose-sessions-sqlite-v0";
+pub(super) const GOOSE_SOURCE_ANCHOR_NAMESPACE: &str = "goose.installed-sessions";
+pub(super) const GOOSE_SOURCE_ANCHOR_KEY: &str = "selected-platform-sessions-db";
+pub(super) const GOOSE_SOURCE_SCHEMA_VARIANT: &str = "goose-sessions-sqlite-v0";
 const GOOSE_PARSER_REVISION: &str = "goose-logical-sqlite-v9-closed-facts-agent-scope";
 const GOOSE_NATIVE_SESSION_NAMESPACE: &str = "goose.session";
 const GOOSE_NATIVE_EVENT_NAMESPACE: &str = "goose.message";
@@ -168,9 +168,12 @@ pub(crate) struct GooseSourceBackedAdapterV0<B> {
 }
 
 impl<B> GooseSourceBackedAdapterV0<B> {
-    pub(crate) fn open(selection: GooseSourceBackedSelectionV0) -> GooseSourceBackedResultV0<Self> {
+    pub(crate) fn open_scoped(
+        selection: GooseSourceBackedSelectionV0,
+        source_scope: SourceAnchorScope,
+    ) -> GooseSourceBackedResultV0<Self> {
         Ok(Self {
-            source: goose_source_key()?,
+            source: goose_source_key_scoped(source_scope)?,
             selection,
             binding: std::marker::PhantomData,
         })
@@ -560,21 +563,29 @@ where
     })
 }
 
+#[cfg(test)]
 pub(super) fn goose_source_key() -> GooseSourceBackedResultV0<SourceKey> {
+    goose_source_key_scoped(SourceAnchorScope::Unqualified)
+}
+
+pub(super) fn goose_source_key_scoped(
+    source_scope: SourceAnchorScope,
+) -> GooseSourceBackedResultV0<SourceKey> {
     let anchor = SourceAnchor::provider_native(
         GOOSE_SOURCE_ANCHOR_NAMESPACE,
         TypedKey::utf8(GOOSE_SOURCE_ANCHOR_KEY)?,
     )?;
-    Ok(SourceKey::derive(
+    Ok(SourceKey::derive_scoped(
         CaptureProvider::Goose.as_str(),
         GOOSE_SESSIONS_SQLITE_SOURCE_FORMAT,
         GOOSE_SOURCE_SCHEMA_VARIANT,
         1,
         anchor,
+        source_scope,
     )?)
 }
 
-fn goose_session_id(
+pub(super) fn goose_session_id(
     source: &SourceKey,
     native_session_id: &str,
 ) -> GooseSourceBackedResultV0<StableEntityId> {

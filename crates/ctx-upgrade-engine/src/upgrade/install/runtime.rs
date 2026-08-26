@@ -25,6 +25,9 @@ use super::archive::{extract_runtime_archive, extract_semantic_archive};
 use super::durability::sync_directory;
 use super::durability::sync_parent;
 
+mod legacy;
+pub(in crate::upgrade) use legacy::install_required as legacy_runtime_install_required;
+
 #[derive(Debug)]
 pub(super) struct StagedRuntime {
     pub(super) staged_path: PathBuf,
@@ -153,7 +156,16 @@ fn canonicalize_selected_root(root: &Path) -> Result<PathBuf> {
 fn ensure_private_directory(path: &Path) -> Result<()> {
     match fs::create_dir(path) {
         Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let metadata = fs::symlink_metadata(path)
+                .with_context(|| format!("inspect runtime directory {}", path.display()))?;
+            if !metadata.is_dir() || metadata.file_type().is_symlink() {
+                return Err(anyhow!(
+                    "runtime directory is not a real directory: {}",
+                    path.display()
+                ));
+            }
+        }
         Err(error) => {
             return Err(error)
                 .with_context(|| format!("create runtime directory {}", path.display()));

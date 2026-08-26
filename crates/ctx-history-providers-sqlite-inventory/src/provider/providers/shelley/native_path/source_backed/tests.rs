@@ -12,6 +12,37 @@ use super::super::scanner::{
 };
 use super::*;
 
+#[test]
+fn root_scope_separates_identical_shelley_conversations_and_unqualified_is_released() {
+    use ctx_history_core::{CaptureProvider, SourceAnchorScope};
+
+    let released = SourceKey::derive(
+        CaptureProvider::Shelley.as_str(),
+        SHELLEY_SQLITE_SOURCE_FORMAT,
+        SHELLEY_SOURCE_SCHEMA_VARIANT,
+        1,
+        SourceAnchor::provider_native(
+            SHELLEY_SOURCE_ANCHOR_NAMESPACE,
+            TypedKey::utf8(SHELLEY_SOURCE_ANCHOR_KEY).unwrap(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let unqualified = shelley_source_key_scoped(SourceAnchorScope::Unqualified).unwrap();
+    assert!(released.exact_descriptor_eq(&unqualified));
+    assert_eq!(
+        released.identity().encode_canonical().unwrap(),
+        unqualified.identity().encode_canonical().unwrap()
+    );
+
+    let first = shelley_source_key_scoped(SourceAnchorScope::Lineage([0x11; 32])).unwrap();
+    let second = shelley_source_key_scoped(SourceAnchorScope::Lineage([0x22; 32])).unwrap();
+    assert_ne!(
+        shelley_session_identity(&first, "shared-conversation").unwrap(),
+        shelley_session_identity(&second, "shared-conversation").unwrap()
+    );
+}
+
 fn create_fixture(root: &Path, text: &str) -> PathBuf {
     fs::create_dir_all(root).unwrap();
     let database = root.join("shelley.db");
@@ -145,6 +176,37 @@ fn active_wal_scan_reads_latest_rows_without_persistent_source_writes() {
         .any(|document| body(document).contains("Shelley active WAL sentinel")));
     assert_eq!(sqlite_persistent_bytes(&path), before);
     drop(writer);
+}
+
+#[test]
+fn row_local_core_record_filter_does_not_absorb_capture_or_sqlite_failures() {
+    assert!(shelley_row_projection_error(
+        &ShelleySourceBackedError::CoreRecord(CoreRecordError::FieldTooLarge {
+            field: "normalized_body",
+            actual: 70 * 1024,
+            maximum: 64 * 1024,
+        })
+    ));
+    assert!(!shelley_row_projection_error(
+        &ShelleySourceBackedError::Capture(CaptureError::InvalidPayload(
+            "non-row capture failure".to_owned(),
+        ))
+    ));
+    assert!(!shelley_row_projection_error(
+        &ShelleySourceBackedError::SqliteSource(SqliteSourceAccessError::SourceChanged)
+    ));
+    for error in [
+        ShelleySourceBackedError::Projection(ProjectionContractError::SourceChanged),
+        ShelleySourceBackedError::Projection(ProjectionContractError::InvalidDerivedIdentity),
+        ShelleySourceBackedError::CoreRecord(CoreRecordError::Projection(
+            ProjectionContractError::SourceChanged,
+        )),
+        ShelleySourceBackedError::CoreRecord(CoreRecordError::InvalidIdentityRelationship),
+        ShelleySourceBackedError::CoreRecord(CoreRecordError::InvalidSessionRelationship),
+        ShelleySourceBackedError::CoreRecord(CoreRecordError::InvalidActivity),
+    ] {
+        assert!(!shelley_row_projection_error(&error), "{error:?}");
+    }
 }
 
 fn drain(adapter: &ShelleySourceBackedAdapter) -> (Vec<CoreRecord>, ShelleySourceBackedReceipt) {

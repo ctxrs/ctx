@@ -136,14 +136,14 @@ pub(crate) fn forward_paid_cli_if_selected(arguments: Vec<OsString>) -> Option<E
 
 pub(crate) fn proxy_paid_mcp(
     request_line: &[u8],
-    _data_root: &Path,
+    data_root: &Path,
 ) -> Result<Vec<u8>, CompanionRouteError> {
     if request_line.len() > MCP_PROXY_MAX_BYTES {
         return Err(CompanionRouteError::Unavailable);
     }
     let companion = installed_companion().map_err(CompanionRouteError::from)?;
     let mut request = McpRequest::new(request_line);
-    forward_environment(request.environment_mut());
+    forward_mcp_environment(request.environment_mut(), data_root);
     let output = CompanionBridge::new(mcp_limits()?)
         .launch_mcp(
             &companion,
@@ -206,6 +206,7 @@ fn forward_paid_cli(arguments: Vec<OsString>) -> Result<ExitCode, CompanionLaunc
     if forwards_core_setup {
         forward_supervisor_environment(request.environment_mut());
     }
+    forward_paid_cli_analytics_override(request.environment_mut());
     forward_terminal_environment(request.environment_mut());
     let exit = CompanionBridge::new(BridgeLimits::default())
         .launch_cli(&companion, request, companion_cancellation()?)
@@ -215,6 +216,26 @@ fn forward_paid_cli(arguments: Vec<OsString>) -> Result<ExitCode, CompanionLaunc
 
 fn forward_environment(environment: &mut CompanionEnvironment) {
     forward_selected_environment(environment, FORWARDED_ENVIRONMENT);
+}
+
+fn forward_mcp_environment(environment: &mut CompanionEnvironment, data_root: &Path) {
+    forward_environment(environment);
+    let analytics_enabled = crate::config::AppConfig::load(data_root)
+        .as_ref()
+        .is_ok_and(crate::config::resolved_analytics_consent);
+    environment.set(
+        EnvironmentKey::AnalyticsEnabled,
+        if analytics_enabled { "true" } else { "false" },
+    );
+}
+
+fn forward_paid_cli_analytics_override(environment: &mut CompanionEnvironment) {
+    if let Some(enabled) = crate::config::normalized_analytics_environment_override() {
+        environment.set(
+            EnvironmentKey::AnalyticsEnabled,
+            if enabled { "true" } else { "false" },
+        );
+    }
 }
 
 fn forward_supervisor_environment(environment: &mut CompanionEnvironment) {
@@ -567,433 +588,5 @@ fn cli_launch_error_document(error: &CompanionLaunchError) -> Value {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn paid_gate_forwards_the_original_arguments_without_paid_parsing() {
-        let arguments = [
-            OsString::from("ctx"),
-            OsString::from("--data-root"),
-            OsString::from("opaque-root"),
-            OsString::from("blame"),
-            OsString::from("--private-option"),
-            OsString::from("opaque-value"),
-        ];
-        assert_eq!(
-            paid_family_arguments(&arguments),
-            Some(arguments[1..].to_vec())
-        );
-    }
-
-    #[test]
-    fn core_routes_never_enter_the_companion_gate() {
-        for family in [
-            "setup",
-            "status",
-            "doctor",
-            "upgrade",
-            "uninstall",
-            "search",
-            "show",
-            "mcp",
-        ] {
-            let arguments = [OsString::from("ctx"), OsString::from(family)];
-            assert!(paid_family_arguments(&arguments).is_none(), "{family}");
-        }
-    }
-
-    #[test]
-    fn explicit_pro_selector_routes_setup_and_other_core_families() {
-        for arguments in [
-            vec!["ctx", "--pro", "setup"],
-            vec!["ctx", "setup", "--pro"],
-            vec!["ctx", "--pro", "status"],
-            vec!["ctx", "--pro", "--help"],
-            vec!["ctx", "help", "setup", "--pro"],
-        ] {
-            let arguments = arguments
-                .into_iter()
-                .map(OsString::from)
-                .collect::<Vec<_>>();
-            assert_eq!(
-                paid_family_arguments(&arguments),
-                Some(arguments[1..].to_vec())
-            );
-        }
-        assert!(paid_family_arguments(&[
-            OsString::from("ctx"),
-            OsString::from("setup"),
-            OsString::from("--"),
-            OsString::from("--pro"),
-        ])
-        .is_none());
-    }
-
-    #[test]
-    fn forwarded_environment_is_the_complete_fixed_allowlist() {
-        assert!(
-            FORWARDED_ENVIRONMENT.len() + FORWARDED_TERMINAL_ENVIRONMENT.len()
-                < MAX_ENVIRONMENT_ENTRIES
-        );
-        assert!(FORWARDED_ENVIRONMENT
-            .contains(&(EnvironmentKey::LocalUsageEnabled, "CTX_LOCAL_USAGE_ENABLED")));
-        assert!(FORWARDED_ENVIRONMENT.contains(&(
-            EnvironmentKey::HostedInstallerSetup,
-            "CTX_HOSTED_INSTALLER_SETUP"
-        )));
-        assert!(FORWARDED_ENVIRONMENT.contains(&(EnvironmentKey::Home, "HOME")));
-        assert!(FORWARDED_ENVIRONMENT.contains(&(EnvironmentKey::Path, "PATH")));
-        assert!(FORWARDED_TERMINAL_ENVIRONMENT.contains(&(EnvironmentKey::Term, "TERM")));
-        assert!(FORWARDED_TERMINAL_ENVIRONMENT.contains(&(EnvironmentKey::ColorTerm, "COLORTERM")));
-        assert!(FORWARDED_TERMINAL_ENVIRONMENT.contains(&(EnvironmentKey::NoColor, "NO_COLOR")));
-        assert!(FORWARDED_TERMINAL_ENVIRONMENT.contains(&(EnvironmentKey::CliColor, "CLICOLOR")));
-        assert!(FORWARDED_TERMINAL_ENVIRONMENT
-            .contains(&(EnvironmentKey::CliColorForce, "CLICOLOR_FORCE")));
-        assert!(FORWARDED_TERMINAL_ENVIRONMENT.contains(&(EnvironmentKey::Ci, "CI")));
-        assert!(environment_value_is_forwardable(
-            EnvironmentKey::Home,
-            OsStr::new("/home/tester")
-        ));
-        assert!(!environment_value_is_forwardable(
-            EnvironmentKey::Home,
-            OsStr::new("")
-        ));
-        assert!(environment_value_is_forwardable(
-            EnvironmentKey::HostedInstallerSetup,
-            OsStr::new("1")
-        ));
-        assert!(!environment_value_is_forwardable(
-            EnvironmentKey::HostedInstallerSetup,
-            OsStr::new("0")
-        ));
-    }
-
-    #[test]
-    fn setup_pro_forwards_the_complete_named_supervisor_environment() {
-        static ENVIRONMENT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        struct Restore(Vec<(&'static str, Option<OsString>)>);
-        impl Drop for Restore {
-            fn drop(&mut self) {
-                for (name, value) in self.0.drain(..) {
-                    if let Some(value) = value {
-                        std::env::set_var(name, value);
-                    } else {
-                        std::env::remove_var(name);
-                    }
-                }
-            }
-        }
-
-        let _lock = ENVIRONMENT_LOCK.lock().unwrap();
-        let values = [
-            ("CODEX_HOME", "/tmp/codex-home"),
-            ("CTX_UPGRADE_AUTO", "false"),
-            ("HTTP_PROXY", "http://proxy.example.test:8080"),
-            ("SSL_CERT_FILE", "/tmp/private-ca.pem"),
-        ];
-        let _restore = Restore(
-            values
-                .iter()
-                .map(|(name, _)| (*name, std::env::var_os(name)))
-                .chain(std::iter::once(("HOME", std::env::var_os("HOME"))))
-                .collect(),
-        );
-        for (name, value) in values {
-            std::env::set_var(name, value);
-        }
-        std::env::set_var("HOME", "");
-
-        let mut environment = CompanionEnvironment::new();
-        forward_supervisor_environment(&mut environment);
-        let names = environment
-            .get(SUPERVISOR_ENV_NAMES)
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .split('\n')
-            .collect::<Vec<_>>();
-        assert!(names.windows(2).all(|pair| pair[0] < pair[1]));
-        for (name, value) in values {
-            assert!(names.contains(&name));
-            assert_eq!(environment.get(name), Some(OsStr::new(value)));
-        }
-        assert!(names.contains(&"CTX_SEARCH_SEMANTIC"));
-        assert!(names.contains(&"CTX_UPGRADE_CHANNEL"));
-        assert!(names.contains(&"HOME"));
-        assert_eq!(environment.get("HOME"), None);
-    }
-
-    #[test]
-    fn only_forwarded_setup_arguments_request_the_supervisor_environment() {
-        for arguments in [
-            vec!["--pro", "setup"],
-            vec!["--data-root", "/tmp/setup", "setup", "--pro"],
-            vec!["--", "setup", "--pro"],
-        ] {
-            let arguments = arguments
-                .into_iter()
-                .map(OsString::from)
-                .collect::<Vec<_>>();
-            assert!(forwarded_arguments_select_setup(&arguments));
-        }
-        for arguments in [
-            vec!["--pro", "status"],
-            vec!["--data-root", "setup", "status", "--pro"],
-            vec!["help", "setup", "--pro"],
-        ] {
-            let arguments = arguments
-                .into_iter()
-                .map(OsString::from)
-                .collect::<Vec<_>>();
-            assert!(!forwarded_arguments_select_setup(&arguments));
-        }
-    }
-
-    #[test]
-    fn explicit_override_selects_only_the_protocol_compatible_pro_executable() {
-        let temp = tempfile::tempdir().unwrap();
-        let source_core = temp.path().join("source/target/debug/ctx");
-        let pro = temp.path().join("installed/libexec/ctx-pro");
-        let companion = installed_companion_from_parts(&source_core, Some(pro.clone()))
-            .expect("source override");
-
-        assert_eq!(companion.executable(), pro);
-    }
-
-    #[test]
-    fn installed_core_defaults_to_its_sibling_pro_executable() {
-        let temp = tempfile::tempdir().unwrap();
-        let core =
-            temp.path()
-                .join("installed/bin")
-                .join(if cfg!(windows) { "ctx.exe" } else { "ctx" });
-        let expected = temp
-            .path()
-            .join("installed/libexec")
-            .join(if cfg!(windows) {
-                "ctx-pro.exe"
-            } else {
-                "ctx-pro"
-            });
-        let companion = installed_companion_from_parts(&core, None).unwrap();
-
-        assert_eq!(companion.executable(), expected);
-    }
-
-    #[test]
-    fn missing_pro_is_a_distinct_typed_error() {
-        let temp = tempfile::tempdir().unwrap();
-        let core =
-            temp.path()
-                .join("installed/bin")
-                .join(if cfg!(windows) { "ctx.exe" } else { "ctx" });
-        let companion = installed_companion_from_parts(&core, None).unwrap();
-        let missing_path = companion.executable().to_path_buf();
-        let error = CompanionBridge::default()
-            .launch_mcp(
-                &companion,
-                McpRequest::new(Vec::new()),
-                &CancellationToken::new(),
-            )
-            .unwrap_err();
-        let error = classify_bridge_error(error);
-        assert!(matches!(
-            error,
-            CompanionLaunchError::MissingExecutable { ref path } if path == &missing_path
-        ));
-        assert_eq!(error.code(), "companion_missing_executable");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn protocol_v3_alone_launches_pro_without_any_context_environment() {
-        use std::os::unix::fs::PermissionsExt as _;
-
-        let temp = tempfile::tempdir().unwrap();
-        let core = temp.path().join("installed/bin/ctx");
-        let pro = temp.path().join("installed/libexec/ctx-pro");
-        std::fs::create_dir_all(core.parent().unwrap()).unwrap();
-        std::fs::create_dir_all(pro.parent().unwrap()).unwrap();
-        std::fs::write(
-            &pro,
-            br##"#!/bin/sh
-if [ "$1" = "--ctx-pro-protocol-v3" ] && [ "$2" = "handshake" ]; then
-  printf '{"protocol_version":3}\n'
-  exit 0
-fi
-if [ "$1" != "--ctx-pro-protocol-v3" ] || [ "$2" != "mcp-serve" ]; then
-  exit 91
-fi
-for name in CTX_PRO_PATH CTX_PRO_INSTALL_CONTEXT CTX_DATA_ROOT CTX_PRO_DATA_ROOT CTX_MANAGED_PAIR_CHANNEL CTX_PRO_INSTALLATION_ID CTX_MANAGED_PAIR_INVOCATION_FINGERPRINT CTX_MANAGED_PAIR_CORE_CAPABILITY_FINGERPRINT CTX_RELEASE_BUILD_SOURCE_COMMIT; do
-  eval "value=\${$name-}"
-  [ -z "$value" ] || exit 92
-done
-printf '{"jsonrpc":"2.0"}\n'
-"##,
-        )
-        .unwrap();
-        std::fs::set_permissions(&pro, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let companion = installed_companion_from_parts(&core, None).unwrap();
-        let response = CompanionBridge::default()
-            .launch_mcp(
-                &companion,
-                McpRequest::new(Vec::new()),
-                &CancellationToken::new(),
-            )
-            .unwrap();
-
-        assert_eq!(response.exit_class(), ExitClass::Success);
-        assert_eq!(response.stdout(), b"{\"jsonrpc\":\"2.0\"}\n");
-        assert!(response.stderr().is_empty());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn protocol_mismatch_is_a_distinct_typed_error() {
-        use std::os::unix::fs::PermissionsExt as _;
-
-        let temp = tempfile::tempdir().unwrap();
-        let pro = temp.path().join("ctx-pro");
-        std::fs::write(&pro, b"#!/bin/sh\nprintf '{\"protocol_version\":2}\\n'\n").unwrap();
-        std::fs::set_permissions(&pro, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let error = CompanionBridge::default()
-            .launch_mcp(
-                &InstalledCompanion::new(&pro),
-                McpRequest::new(Vec::new()),
-                &CancellationToken::new(),
-            )
-            .unwrap_err();
-        let error = classify_bridge_error(error);
-        assert!(matches!(
-            error,
-            CompanionLaunchError::ProtocolMismatch {
-                expected,
-                observed,
-            } if expected.get() == 3 && observed.get() == 2
-        ));
-        assert_eq!(error.code(), "companion_protocol_mismatch");
-    }
-
-    #[test]
-    fn pre_handshake_exit_is_retryable_unavailable_not_protocol_mismatch() {
-        let error = classify_bridge_error(BridgeError::HandshakeFailed {
-            exit: ExitClass::Code(70),
-            stderr: b"loader diagnostic".to_vec(),
-            stderr_truncated: false,
-        });
-        assert!(matches!(
-            error,
-            CompanionLaunchError::LaunchFailed {
-                ref stderr,
-                stderr_truncated: false,
-            } if stderr == b"loader diagnostic"
-        ));
-        assert_eq!(error.code(), "companion_unavailable");
-        assert!(error.retryable());
-        let document = cli_launch_error_document(&error);
-        assert_eq!(document["details"]["stderr"], "loader diagnostic");
-        assert_eq!(document["details"]["stderr_truncated"], false);
-        assert!(document["details"]
-            .get("observed_protocol_version")
-            .is_none());
-        assert_eq!(
-            CompanionRouteError::from(error),
-            CompanionRouteError::Unavailable
-        );
-    }
-
-    #[test]
-    fn global_help_and_version_never_enter_the_companion_gate() {
-        for option in ["-h", "--help", "-V", "--version"] {
-            for family in ["pro", "blame", "referral"] {
-                let arguments = [
-                    OsString::from("ctx"),
-                    OsString::from(option),
-                    OsString::from(family),
-                ];
-                assert!(
-                    paid_family_arguments(&arguments).is_none(),
-                    "{option} {family}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn subcommand_help_and_help_alias_route_to_the_companion() {
-        for arguments in [
-            vec!["ctx", "pro", "--help"],
-            vec!["ctx", "blame", "--help"],
-            vec!["ctx", "referral", "--help"],
-            vec!["ctx", "help", "pro"],
-        ] {
-            let arguments = arguments
-                .into_iter()
-                .map(OsString::from)
-                .collect::<Vec<_>>();
-            assert_eq!(
-                paid_family_arguments(&arguments),
-                Some(arguments[1..].to_vec())
-            );
-        }
-    }
-
-    #[test]
-    fn paid_data_root_argument_is_forwarded_without_core_derivation() {
-        let arguments = [
-            OsString::from("ctx"),
-            OsString::from("--data-root=relative-root"),
-            OsString::from("pro"),
-        ];
-        assert_eq!(
-            paid_family_arguments(&arguments),
-            Some(arguments[1..].to_vec())
-        );
-    }
-
-    #[test]
-    fn data_root_options_after_delimiter_remain_opaque_pro_arguments() {
-        for trailing in [
-            vec!["--data-root", "/private/positional"],
-            vec!["--data-root=/private/positional"],
-        ] {
-            let mut arguments = vec![
-                OsString::from("ctx"),
-                OsString::from("pro"),
-                OsString::from("--"),
-            ];
-            arguments.extend(trailing.into_iter().map(OsString::from));
-            assert_eq!(
-                paid_family_arguments(&arguments),
-                Some(arguments[1..].to_vec()),
-                "{arguments:?}"
-            );
-        }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn opaque_paid_arguments_are_preserved_byte_for_byte() {
-        use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
-
-        let opaque = OsString::from_vec(vec![b'v', 0xff, b'x']);
-        let arguments = [
-            OsString::from("ctx"),
-            OsString::from("referral"),
-            opaque.clone(),
-        ];
-        let forwarded = paid_family_arguments(&arguments).unwrap();
-        assert_eq!(
-            forwarded[1].as_os_str().as_bytes(),
-            opaque.as_os_str().as_bytes()
-        );
-    }
-
-    #[test]
-    fn mcp_response_must_be_one_opaque_framed_line() {
-        assert!(is_one_framed_line(b"{\"jsonrpc\":\"2.0\"}\n"));
-        assert!(!is_one_framed_line(b"{}"));
-        assert!(!is_one_framed_line(b"{}\n{}\n"));
-    }
-}
+#[path = "companion/contract_tests.rs"]
+mod tests;

@@ -14,6 +14,7 @@ use super::super::{
     track_jsonl_prefix_hash_bytes, JsonlReader as RuntimeJsonlReader, JsonlRecordRef,
 };
 use super::*;
+use crate::family::JsonlRecordRejections;
 use ctx_history_capture_model::AttemptHistoryProgress;
 use ctx_history_capture_model::SourceRouteIdentity;
 use ctx_history_capture_runtime::{
@@ -21,10 +22,11 @@ use ctx_history_capture_runtime::{
     CaptureLifecycleSink, CapturePublicationContext, CapturePublicationDisposition,
     CaptureRevalidationTarget, CaptureRouteRef, CaptureSourceAggregateRef, CoreMaterialization,
     CorePreparationFailureKind, CorePreparationPort, ImmutableCaptureSnapshot, PresentCaptureRoute,
-    SourceBackedGenerationSink as RuntimeSourceBackedGenerationSink,
+    SourceBackedCertifiedRemoval, SourceBackedGenerationSink as RuntimeSourceBackedGenerationSink,
     SourceBackedLogicalSourceFailures, SourceBackedReconciliationDemand,
+    SourceBackedRecordRejectionClass, SourceBackedRecordRejectionDrafts,
     SourceBackedRecordRejections, SourceBackedRevalidationTarget, SourceBackedRouteResources,
-    VerifiedCapture,
+    SourceOwner, VerifiedCapture,
 };
 use ctx_history_core::{
     derive_event_id, derive_session_id, CertifiedSourceAppend, CertifiedSourceDeletion, CoreRecord,
@@ -43,6 +45,10 @@ const TEST_SCHEMA: &str = "terminal-witness-v1";
 
 fn test_route_identity() -> SourceRouteIdentity {
     SourceRouteIdentity::from_sha256("00".repeat(32)).unwrap()
+}
+
+fn sibling_route_identity() -> SourceRouteIdentity {
+    SourceRouteIdentity::from_sha256("11".repeat(32)).unwrap()
 }
 
 fn test_contract_error(error: impl std::fmt::Display) -> CaptureError {

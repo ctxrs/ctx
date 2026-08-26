@@ -101,9 +101,10 @@ shipped.
 
 - Core setup/import/search are local filesystem operations.
 - Official installer-managed binaries can use signed release metadata for an
-  explicit `ctx upgrade` command and daemon-owned automatic checks while the
-  persistent daemon, automatic indexing, and automatic upgrades are enabled.
-- Manual indexing and finite Core workers do not perform automatic upgrade
-  checks or application.
+  explicit `ctx upgrade` command and automatic checks while automatic upgrades
+  are enabled. Auto indexing with the full daemon profile uses the persistent
+  daemon; manual and source-refresh-only modes use detached workers launched by
+  eligible completed commands.
+- Finite Core workers do not perform automatic upgrade checks or application.
 - Unmanaged installs do not self-upgrade.
 - No provider beyond the support matrix should be described as supported.

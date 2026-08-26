@@ -142,6 +142,12 @@ pub(super) fn serialize_event(
             if let Some(foreground) = event.foreground {
                 insert_provider_refresh_properties(&mut properties, &foreground);
             }
+            if let Some(health) = event.terminal_health {
+                insert_provider_refresh_terminal_health_properties(&mut properties, &health);
+            }
+            if let Some(stock) = event.corpus_stock {
+                insert_provider_refresh_corpus_stock_properties(&mut properties, &stock);
+            }
             (
                 "provider_refresh_completed",
                 event.surface,
@@ -280,6 +286,118 @@ fn insert_provider_refresh_properties(
             "observed_process_peak_rss_bucket",
             performance.observed_process_peak_rss,
         );
+    }
+}
+
+fn insert_provider_refresh_terminal_health_properties(
+    properties: &mut Map<String, Value>,
+    health: &ProviderRefreshTerminalHealthV1,
+) {
+    insert_optional_str(
+        properties,
+        "refresh_configured_indexing_mode",
+        health
+            .configured_indexing_mode
+            .map(ProviderRefreshConfiguredIndexingMode::as_str),
+    );
+    insert_optional_str(
+        properties,
+        "refresh_daemon_trigger_kind",
+        health
+            .daemon_trigger_kind
+            .map(ProviderRefreshDaemonTriggerKind::as_str),
+    );
+    insert_optional_str(
+        properties,
+        "refresh_reconciliation_demand",
+        health
+            .reconciliation_demand
+            .map(ProviderRefreshReconciliationDemand::as_str),
+    );
+    insert_optional_bool(
+        properties,
+        "refresh_retained_previous_generation",
+        health.retained_previous_generation,
+    );
+    insert_optional_duration(
+        properties,
+        "refresh_queue_wait_duration_bucket",
+        health.queue_wait_duration,
+    );
+    insert_optional_duration(
+        properties,
+        "refresh_discovery_duration_bucket",
+        health.discovery_duration,
+    );
+    insert_optional_duration(
+        properties,
+        "refresh_scan_stage_duration_bucket",
+        health.scan_stage_duration,
+    );
+    insert_optional_duration(
+        properties,
+        "refresh_commit_duration_bucket",
+        health.commit_duration,
+    );
+    insert_optional_count(
+        properties,
+        "refresh_coalesced_request_count_bucket",
+        health.coalesced_request_count,
+    );
+    insert_bool(
+        properties,
+        "refresh_successor_pending",
+        health.successor_pending,
+    );
+    insert_optional_count(
+        properties,
+        "refresh_processed_sessions_bucket",
+        health.processed_sessions,
+    );
+    insert_optional_count(
+        properties,
+        "refresh_processed_messages_bucket",
+        health.processed_messages,
+    );
+    insert_optional_count(
+        properties,
+        "refresh_processed_tool_calls_bucket",
+        health.processed_tool_calls,
+    );
+    insert_optional_bytes(
+        properties,
+        "refresh_processed_bytes_bucket",
+        health.processed_bytes,
+    );
+}
+
+fn insert_provider_refresh_corpus_stock_properties(
+    properties: &mut Map<String, Value>,
+    stock: &ProviderRefreshCorpusStockV1,
+) {
+    for (key, value) in [
+        (
+            "corpus_stock_indexed_documents_bucket",
+            stock.indexed_documents.as_str(),
+        ),
+        (
+            "corpus_stock_retained_records_bucket",
+            stock.retained_records.as_str(),
+        ),
+        (
+            "corpus_stock_rejected_records_bucket",
+            stock.rejected_records.as_str(),
+        ),
+        (
+            "corpus_stock_certified_source_bytes_bucket",
+            stock.certified_source_bytes.as_str(),
+        ),
+        (
+            "corpus_transition_removed_sources_bucket",
+            stock.removed_source_count.as_str(),
+        ),
+    ] {
+        insert_str(properties, key, value);
     }
 }
 
@@ -563,6 +681,15 @@ fn insert_search_properties(properties: &mut Map<String, Value>, value: &SearchT
     insert_optional_count(properties, "citation_count_bucket", value.citation_count);
     insert_optional_bool(properties, "zero_result", value.zero_result);
     insert_optional_duration(properties, "render_duration_bucket", value.render_duration);
+    insert_optional_duration(
+        properties,
+        "search_output_duration_bucket",
+        value.output_duration.map(duration_bucket),
+    );
+    insert_optional_bool(properties, "search_output_served", value.output_served);
+    if let Some(health) = value.health {
+        health.insert_properties(properties);
+    }
 }
 
 fn insert_integration_properties(

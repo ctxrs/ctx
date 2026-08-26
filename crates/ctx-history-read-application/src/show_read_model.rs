@@ -81,6 +81,8 @@ pub fn session_transcript_read_model(
         "payload_type": "session_transcript",
         "ctx_session_id": session.session_id.as_uuid(),
         "provider": session.provider,
+        "provider_key": session.provider_key,
+        "source_id": session.source_id,
         "provider_session_id": session.provider_session_id,
         "mode": mode.as_str(),
         "format": format.as_str(),
@@ -90,6 +92,8 @@ pub fn session_transcript_read_model(
             "record_type": "session",
             "ctx_session_id": session.session_id.as_uuid(),
             "provider": session.provider,
+            "provider_key": session.provider_key,
+            "source_id": session.source_id,
             "provider_session_id": session.provider_session_id,
             "source_format": session.source_format,
             "parent_ctx_session_id": session.parent_session_id.map(|id| id.as_uuid()),
@@ -191,12 +195,19 @@ pub fn render_show_event_read_model(event: &CoreEventRecord) -> Value {
         CoreContentPolicyStatus::Redacted { reason } => ("redacted", Some(reason.as_str()), false),
         CoreContentPolicyStatus::Omitted { reason } => ("omitted", Some(reason.as_str()), false),
     };
+    let (provider_key, source_id) = event
+        .custom_source_identity()
+        .map_or((None, None), |(provider_key, source_id)| {
+            (Some(provider_key), Some(source_id))
+        });
     let mut rendered = compact_json(json!({
         "ctx_event_id": event.event_id.as_uuid(),
         "item_id": event.event_id.as_uuid(),
         "record_type": "event",
         "ctx_session_id": event.session_id.as_uuid(),
         "provider": event.provider,
+        "provider_key": provider_key,
+        "source_id": source_id,
         "provider_session_id": event.provider_session_id,
         "source_format": event.source_format,
         "parent_ctx_session_id": event.parent_session_id.map(|id| id.as_uuid()),

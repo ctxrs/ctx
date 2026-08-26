@@ -5,6 +5,7 @@ use std::{
 };
 
 use crate::{CompleteDocumentTree, DocumentLeafFingerprint, ObservedDocumentLeaf};
+use ctx_history_core::SourceAnchorScope;
 
 use super::*;
 
@@ -71,6 +72,7 @@ pub struct CodeBuddyTreeAuthority {
     selection: CatalogSelection,
     routes: Vec<CatalogRoute>,
     index: DiscoveryIndex,
+    source_anchor_scope: SourceAnchorScope,
 }
 
 pub(super) type CodeBuddyDocumentTree =
@@ -93,7 +95,10 @@ impl CodeBuddyInventory {
     }
 }
 
-pub(super) fn discover_codebuddy_tree(selected: &Path) -> Result<CodeBuddyInventory> {
+pub(super) fn discover_codebuddy_tree(
+    selected: &Path,
+    source_anchor_scope: SourceAnchorScope,
+) -> Result<CodeBuddyInventory> {
     let selected_path = absolute_path(selected)?;
     validate_path(&selected_path)?;
     let opened = match open_provider_source_path(&selected_path) {
@@ -133,7 +138,13 @@ pub(super) fn discover_codebuddy_tree(selected: &Path) -> Result<CodeBuddyInvent
             (root, PathBuf::new(), CatalogSelection::Directory, opening)
         }
     };
-    let tree = complete_tree(selected_path, relative_path.clone(), selection, root)?;
+    let tree = complete_tree(
+        selected_path,
+        relative_path.clone(),
+        selection,
+        root,
+        source_anchor_scope,
+    )?;
     let observed = tree
         .authority
         .index
@@ -154,6 +165,7 @@ pub(super) fn revalidate_codebuddy_tree(tree: &CodeBuddyDocumentTree) -> Result<
         tree.authority.selected_relative_path.clone(),
         tree.authority.selection,
         tree.authority.root.clone(),
+        tree.authority.source_anchor_scope,
     )?;
     Ok(current.tree_fingerprint)
 }
@@ -163,6 +175,7 @@ fn complete_tree(
     selected_relative_path: PathBuf,
     selection: CatalogSelection,
     root: ProviderSourceRoot,
+    source_anchor_scope: SourceAnchorScope,
 ) -> Result<CodeBuddyDocumentTree> {
     let routes = catalog_routes(&root, &selected_relative_path, selection)?;
     let index = DiscoveryIndex::new(&routes)?;
@@ -172,6 +185,7 @@ fn complete_tree(
         selection,
         &routes,
         &index,
+        source_anchor_scope,
     )?;
     let tree_fingerprint = tree_fingerprint(selection, &selected_relative_path, &routes, &leaves);
     Ok(CompleteDocumentTree::new(
@@ -184,6 +198,7 @@ fn complete_tree(
             selection,
             routes,
             index,
+            source_anchor_scope,
         },
     ))
 }

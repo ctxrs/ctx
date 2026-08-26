@@ -21,6 +21,9 @@ a hosted research agent.
   is ignored and does not change setup behavior.
 - `ctx sources` reports known local provider history paths, including whether a
   native source is currently importable.
+- `ctx sources add [--replace]` and `ctx sources remove` safely edit named
+  provider history roots in local configuration. Replacement retains provider
+  and stable name while atomically changing path and complete group state.
 - `ctx import` publishes supported local transcript formats and selected local
   history-source plugins as complete normalized Core records. In automatic
   mode it may start the persistent daemon. In manual mode an explicit import

@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     env,
     ffi::{OsStr, OsString},
     process::Command,
@@ -36,6 +37,12 @@ pub(crate) fn sanitize_release_authority_env(command: &mut Command) -> &mut Comm
         command.env_remove(key);
     }
     command
+}
+
+pub(crate) fn sanitized_release_authority_environment() -> BTreeMap<OsString, OsString> {
+    env::vars_os()
+        .filter(|(key, _)| !is_release_authority_env_var(key))
+        .collect()
 }
 
 fn is_release_authority_env_var(key: &OsStr) -> bool {

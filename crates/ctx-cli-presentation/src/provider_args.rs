@@ -11,8 +11,8 @@ pub struct ProviderArg(CaptureProvider);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum ImportFormatArg {
-    #[value(name = "ctx-history-jsonl-v1", alias = "custom-history-jsonl-v1")]
-    CtxHistoryJsonlV1,
+    #[value(name = "ctx-history-jsonl-v2")]
+    CtxHistoryJsonlV2,
 }
 
 impl NativeProviderArg {

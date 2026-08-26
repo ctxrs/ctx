@@ -61,12 +61,13 @@ impl SearchReadinessPort for Ports {
     fn search_ready(
         &self,
         request: ToolSearchRequest,
-    ) -> Result<SearchReadOutcome, ToolBackendError> {
+    ) -> Result<SearchReadOutcome, ctx_agent_integrations::tool_backend::ToolExecutionError> {
         self.called("search");
         Ok(SearchReadOutcome {
             structured: json!({"query": request.query}),
             compact: json!({"compact": "search"}),
             usage: ToolSearchUsageFacts::complete(11, 29),
+            execution: Default::default(),
         })
     }
 }
@@ -75,6 +76,7 @@ impl SourceCatalogPort for Ports {
     fn source_catalog(&self) -> Result<SourceCatalog, ToolBackendError> {
         self.called("sources");
         Ok(SourceCatalog {
+            automatic_discovery: false,
             sources: vec![json!({"provider": "fixture"})],
             issues: Vec::new(),
             issues_truncated: false,
@@ -91,6 +93,8 @@ fn search_request() -> ToolSearchRequest {
         provider_key: None,
         source_id: None,
         source_format: None,
+        source_roots: Vec::new(),
+        source_groups: Vec::new(),
         workspace: Some("/workspace".to_owned()),
         since: None,
         primary_only: false,
@@ -127,6 +131,7 @@ fn coarse_ports_are_called_once_and_results_are_converted_without_round_trips() 
 
     let sources = invoke_mcp_tool_call(ToolOperation::Sources, &ports, &ports, &ports).unwrap();
     assert_eq!(sources.structured["schema_version"], 1);
+    assert_eq!(sources.structured["automatic_discovery"], false);
     assert_eq!(sources.structured["sources"][0]["provider"], "fixture");
     assert_eq!(sources.structured["read_only"], true);
     assert_eq!(

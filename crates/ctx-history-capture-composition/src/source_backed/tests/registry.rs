@@ -261,29 +261,6 @@ fn fail_route_before_scan(
     route
 }
 
-fn empty_route(mut route: SourceBackedRoute) -> SourceBackedRoute {
-    let original = route.driver.take().unwrap();
-    let owns = Arc::clone(&original.owns_source);
-    let revalidate = Arc::clone(&original.revalidate);
-    route.driver = Some(SourceBackedRouteDriver::new_fallible(
-        |_| Ok(()),
-        move |source| owns(source),
-        move |target| revalidate(target),
-    ));
-    route
-}
-
-fn explicit_route_at(mut route: SourceBackedRoute, path: PathBuf) -> SourceBackedRoute {
-    let mut source = route.metadata.source.clone();
-    source.path = path;
-    SourceBackedRoute::explicit_manual(
-        source,
-        SourceBackedSelectorAuthority::ExplicitPath,
-        route.driver.take().unwrap(),
-    )
-    .unwrap()
-}
-
 fn fail_route_at_final_revalidation(mut route: SourceBackedRoute) -> SourceBackedRoute {
     let mut driver = route.driver.take().unwrap();
     driver.revalidate = Arc::new(|_| Ok(false));
@@ -936,5 +913,3 @@ fn cold_refresh_with_only_failed_routes_does_not_publish_ready_data() {
         Err(IndexError::MissingActiveGenerationPointer)
     ));
 }
-
-mod additional;

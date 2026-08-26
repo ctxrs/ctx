@@ -125,6 +125,7 @@ while IFS= read -r manifest; do
 done < <(find "${repo_root}/crates" -mindepth 2 -maxdepth 2 -name Cargo.toml -type f | LC_ALL=C sort) \
   >"${actual_reverse_cargo}"
 printf '%s\n' \
+  'crates/ctx-cli/Cargo.toml' \
   'crates/ctx-daemon-application/Cargo.toml' \
   'crates/ctx-daemon-cli/Cargo.toml' \
   'crates/ctx-daemon-service/Cargo.toml' >"${tmp}/expected-reverse-cargo.txt"

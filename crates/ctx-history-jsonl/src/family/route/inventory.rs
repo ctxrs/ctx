@@ -132,6 +132,7 @@ impl<E: JsonlFamilyError> JsonlFamilyInventory<E> {
         }
         members.sort_by(|left, right| left.source_path().cmp(right.source_path()));
         validate_unique_members(&members)?;
+        validate_unique_accepted_sources(&members)?;
         let observation = inventory_observation(provider, root, false, &authorities, &members)?;
         Ok(Self {
             provider,
@@ -363,6 +364,31 @@ fn validate_unique_members<E: JsonlFamilyError>(
                 "JSONL physical inventory contains duplicate member {}",
                 pair[0].source_path().display()
             )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_unique_accepted_sources<E: JsonlFamilyError>(
+    members: &[JsonlFamilyInventoryMember<E>],
+) -> JsonlResult<(), E> {
+    let mut sources = HashMap::<[u8; 32], SourceKey>::new();
+    for source in members.iter().filter_map(|member| match member {
+        JsonlFamilyInventoryMember::Accepted { leaf, .. } => Some(leaf.source()),
+        JsonlFamilyInventoryMember::Quarantined { .. }
+        | JsonlFamilyInventoryMember::Pending { .. } => None,
+    }) {
+        let digest = source.exact_descriptor_digest();
+        if let Some(previous) = sources.insert(digest, source.clone()) {
+            if previous.exact_descriptor_eq(source) {
+                return Err(E::invalid_payload(format!(
+                    "JSONL physical inventory contains duplicate logical source identity {}",
+                    source.identity()
+                )));
+            }
+            return Err(E::invalid_payload(
+                "JSONL physical inventory contains a source descriptor digest collision".to_owned(),
+            ));
         }
     }
     Ok(())

@@ -102,6 +102,57 @@ pub fn jsonl_family_driver<R: JsonlFamilyRuntime>(
     })
 }
 
+/// Restores an authenticatable ctime/ChangeTime ambiguity to the retained
+/// receipt observation. A certificate-bound resident observation may advance
+/// the task-local terminal proof after one successful content authentication;
+/// otherwise the terminal witness must authenticate the exact admitted EOF.
+fn normalize_authenticated_change_time_hints<R: JsonlFamilyRuntime>(
+    adapter: &dyn JsonlFamilyAdapter<Runtime = R>,
+    opening: &mut JsonlFamilyInventory<JsonlRuntimeError<R>>,
+    bases: &HashMap<[u8; 32], &CertifiedSource>,
+    resident: &Mutex<FamilyResident<JsonlRuntimeError<R>>>,
+) -> JsonlResult<HashMap<[u8; 32], JsonlFileObservation>, JsonlRuntimeError<R>> {
+    let authenticated = resident
+        .lock()
+        .map_err(|_| {
+            JsonlRuntimeError::<R>::invalid_payload(
+                "JSONL resident catalog lock was poisoned".to_owned(),
+            )
+        })?
+        .authenticated_source_observations
+        .clone();
+    let mut reusable = HashMap::new();
+    let mut normalized = false;
+    for member in &mut opening.members {
+        let JsonlFamilyInventoryMember::Accepted { leaf, .. } = member else {
+            continue;
+        };
+        let Some(base) = base_for_leaf(bases, leaf) else {
+            continue;
+        };
+        let Ok(checkpoint) = decode_checkpoint(adapter, leaf, base) else {
+            continue;
+        };
+        let retained = checkpoint.physical.source_observation();
+        if retained.differs_only_by_change_identity(&leaf.observation)
+            && checkpoint.authenticates_admitted_eof()
+        {
+            let digest = leaf.source().exact_descriptor_digest();
+            if authenticated.get(&digest).is_some_and(|authenticated| {
+                authenticated.certificate == *base && authenticated.observation == leaf.observation
+            }) {
+                reusable.insert(digest, leaf.observation.clone());
+            }
+            leaf.observation = retained.clone();
+            normalized = true;
+        }
+    }
+    if normalized {
+        opening.rebuild_observation()?;
+    }
+    Ok(reusable)
+}
+
 pub(super) fn capture<R: JsonlFamilyRuntime>(
     adapter: &dyn JsonlFamilyAdapter<Runtime = R>,
     root: &Path,
@@ -131,14 +182,26 @@ pub(super) fn capture<R: JsonlFamilyRuntime>(
             "provider JSONL root is unavailable",
         ));
     }
-    let bases = base_sources_for_root(adapter, &opening, root, sink)?;
+    let bases = base_sources_for_route(adapter, sink)?;
     bind_prior_disposition_sources(adapter, &mut opening, &bases)?;
+    let bases_by_descriptor = bases_by_descriptor(&bases)?;
+    let authenticated_change_time_hints = normalize_authenticated_change_time_hints(
+        adapter,
+        &mut opening,
+        &bases_by_descriptor,
+        resident,
+    )
+    .map_err(|error| route_scan(adapter, error))?;
     let opening_membership = adapter
         .observe_terminal_membership(root, &opening)
         .map_err(|error| route_discovery(adapter, error))?;
+    let (route_local_quarantined_count, route_local_pending_count) =
+        route_local_disposition_counts::<R>(&opening, sink);
+    // A rejected member with exact quarantine ownership belongs to a
+    // source-local failure even when a peer member owns the one diagnostic.
     let route_fatal_rejected = opening
         .quarantined_leaves()
-        .filter(|leaf| leaf.logical_source_failure.is_none())
+        .filter(|leaf| leaf.logical_source_failure.is_none() && leaf.quarantined_source.is_none())
         .collect::<Vec<_>>();
     if opening.accepted_len() == 0 && !route_fatal_rejected.is_empty() && bases.is_empty() {
         let rejected_records = route_fatal_rejected.iter().try_fold(0_u64, |total, leaf| {
@@ -160,12 +223,18 @@ pub(super) fn capture<R: JsonlFamilyRuntime>(
     }
     for rejected in opening.quarantined_leaves() {
         if let Some((source, detail)) = &rejected.logical_source_failure {
+            if !quarantined_member_is_route_local::<R>(rejected, sink) {
+                continue;
+            }
             let failure =
                 SourceBackedRouteError::new(SourceBackedRouteErrorKind::InvalidSource, detail);
+            let carried_forward = bases
+                .iter()
+                .any(|base| base.observation().source().exact_descriptor_eq(source));
             if adapter.provider() == CaptureProvider::Codex {
                 sink.record_logical_source_quarantine(source.clone(), failure)
             } else {
-                sink.record_logical_source_failure(source.clone(), failure, false)
+                sink.record_logical_source_failure(source.clone(), failure, carried_forward)
             }
             .map_err(route_internal)?;
         }
@@ -173,6 +242,9 @@ pub(super) fn capture<R: JsonlFamilyRuntime>(
     let mut rejected_quarantine_sources = HashMap::new();
     for rejected in opening.quarantined_leaves() {
         if let Some(source) = rejected.source() {
+            if sink.source_owned_by_other_route(source) {
+                continue;
+            }
             if rejected_quarantine_sources
                 .insert(source.exact_descriptor_digest(), source.clone())
                 .is_some_and(|previous: SourceKey| !previous.exact_descriptor_eq(source))
@@ -183,21 +255,18 @@ pub(super) fn capture<R: JsonlFamilyRuntime>(
             }
         }
     }
-    if opening.accepted_len() == 0 && opening.pending_len() != 0 && bases.is_empty() {
+    if opening.accepted_len() == 0 && route_local_pending_count != 0 && bases.is_empty() {
         return Err(SourceBackedRouteError::new(
             SourceBackedRouteErrorKind::SourceChanged,
             format!(
                 "provider JSONL inventory contains {} incomplete sources and no complete source; retry after a pending file changes",
-                opening.pending_len(),
+                route_local_pending_count,
             ),
         ));
     }
     let mut selected_leaves = opening
         .accepted_leaves()
-        .filter(|leaf| {
-            adapter.base_scope() == JsonlFamilyBaseScope::ProviderFamily
-                || !sink.source_owned_by_other_route(leaf.source())
-        })
+        .filter(|leaf| !sink.source_owned_by_other_route(leaf.source()))
         .cloned()
         .collect::<Vec<_>>();
     adapter
@@ -215,7 +284,6 @@ pub(super) fn capture<R: JsonlFamilyRuntime>(
                 .map_err(route_internal)?;
         }
     }
-    let bases_by_descriptor = bases_by_descriptor(&bases)?;
     let base_event_lookup = sink.base_event_lookup();
     let mut scan_selected_leaves = Vec::with_capacity(selected_leaves.len());
     let mut retained_terminal_sources = HashMap::new();
@@ -247,7 +315,7 @@ pub(super) fn capture<R: JsonlFamilyRuntime>(
             scan_selected_leaves.push(leaf.clone());
             continue;
         };
-        if !checkpoint.physical.terminal() {
+        if !checkpoint.physical.terminal() && !checkpoint.authenticates_admitted_eof() {
             scan_selected_leaves.push(leaf.clone());
             continue;
         }
@@ -258,7 +326,15 @@ pub(super) fn capture<R: JsonlFamilyRuntime>(
             scan_selected_leaves.push(leaf.clone());
             continue;
         }
-        let terminal_proof = JsonlFamilyTerminalProof::unchanged(adapter, leaf, base, &checkpoint)
+        let digest = leaf.source().exact_descriptor_digest();
+        let terminal_proof =
+            if let Some(authenticated) = authenticated_change_time_hints.get(&digest) {
+                let mut proof_leaf = leaf.clone();
+                proof_leaf.observation = authenticated.clone();
+                JsonlFamilyTerminalProof::unchanged(adapter, &proof_leaf, base, &checkpoint, true)
+            } else {
+                JsonlFamilyTerminalProof::unchanged(adapter, leaf, base, &checkpoint, false)
+            }
             .map_err(|error| route_scan(adapter, error))?;
         sink.retain_source(base.clone()).map_err(route_internal)?;
         sink.report_completed_bytes_with_exact(
@@ -268,7 +344,7 @@ pub(super) fn capture<R: JsonlFamilyRuntime>(
         )
         .map_err(route_internal)?;
         retained_terminal_sources.insert(
-            leaf.source().exact_descriptor_digest(),
+            digest,
             TerminalSourceEvidence {
                 certificate: base.clone(),
                 terminal_certificate: None,
@@ -300,11 +376,15 @@ pub(super) fn capture<R: JsonlFamilyRuntime>(
         .members()
         .iter()
         .filter_map(|member| match member {
-            JsonlFamilyInventoryMember::Quarantined { leaf, .. } => Some((
-                leaf.source_path.as_path(),
-                leaf.authority_path.as_path(),
-                &leaf.observation,
-            )),
+            JsonlFamilyInventoryMember::Quarantined { leaf, .. } => {
+                leaf.observation.as_ref().map(|observation| {
+                    (
+                        leaf.source_path.as_path(),
+                        leaf.authority_path.as_path(),
+                        observation,
+                    )
+                })
+            }
             JsonlFamilyInventoryMember::Pending { leaf, .. } => Some((
                 leaf.source_path.as_path(),
                 leaf.authority_path.as_path(),
@@ -337,10 +417,19 @@ pub(super) fn capture<R: JsonlFamilyRuntime>(
             SourceBackedRouteErrorKind::InvalidSource,
             &quarantined.detail,
         );
+        let carried_forward = bases.iter().any(|base| {
+            base.observation()
+                .source()
+                .exact_descriptor_eq(&quarantined.failure_source)
+        });
         if adapter.provider() == CaptureProvider::Codex {
             sink.record_logical_source_quarantine(quarantined.failure_source.clone(), failure)
         } else {
-            sink.record_logical_source_failure(quarantined.failure_source.clone(), failure, false)
+            sink.record_logical_source_failure(
+                quarantined.failure_source.clone(),
+                failure,
+                carried_forward,
+            )
         }
         .map_err(route_internal)?;
     }
@@ -388,8 +477,8 @@ pub(super) fn capture<R: JsonlFamilyRuntime>(
         }
     }
 
-    let partial_inventory = opening.quarantined_len() != 0
-        || opening.pending_len() != 0
+    let partial_inventory = route_local_quarantined_count != 0
+        || route_local_pending_count != 0
         || !scan_result.quarantined.is_empty();
     if partial_inventory && !bases.is_empty() {
         for dependency in &disposition_dependencies {
@@ -410,7 +499,7 @@ pub(super) fn capture<R: JsonlFamilyRuntime>(
         resident.ownership_initialized = false;
         resident.owned_sources = owned_sources;
         resident.quarantined_sources = quarantined_source_ownership;
-        resident.terminal_sources = terminal_sources;
+        resident.replace_terminal_sources(terminal_sources);
         resident.absent_sources.clear();
         resident.opening_membership = None;
         resident.certified_inventory = None;
@@ -432,11 +521,22 @@ pub(super) fn capture<R: JsonlFamilyRuntime>(
     let mut absent_sources = Vec::new();
     for base in &bases {
         if !inventory.contains(base.observation().source()) {
-            if let Some(absent) = JsonlFamilyAbsentMember::from_path(
+            let base_path = adapter
+                .base_source_path(base)
+                .map_err(|error| route_scan(adapter, error))?;
+            // An identity/parser migration may retire one descriptor while a
+            // newly certified descriptor owns the same admitted path. Its
+            // terminal source proof and the complete inventory are the fence;
+            // requiring pathname absence would incorrectly reject the atomic
+            // replacement. Truly unrepresented base paths still need an
+            // explicit absence witness.
+            if let Some(absent) = retirement_absence_dependency(
+                adapter,
                 &opening,
-                adapter
-                    .base_source_path(base)
-                    .map_err(|error| route_scan(adapter, error))?,
+                &inventory,
+                &terminal_sources,
+                base.observation().source(),
+                &base_path,
             ) {
                 absent_sources.push(absent);
             }
@@ -455,7 +555,7 @@ pub(super) fn capture<R: JsonlFamilyRuntime>(
     resident.ownership_initialized = true;
     resident.owned_sources = owned_sources;
     resident.quarantined_sources = quarantined_source_ownership;
-    resident.terminal_sources = terminal_sources;
+    resident.replace_terminal_sources(terminal_sources);
     resident.absent_sources = absent_sources;
     resident.opening_membership = Some(opening_membership);
     resident.certified_inventory = Some(inventory);
@@ -467,7 +567,7 @@ pub(super) fn capture<R: JsonlFamilyRuntime>(
 /// classification. A nonempty first record without its framing terminator is
 /// pending/incomplete; zero-byte files and complete malformed records retain
 /// their existing provider semantics.
-fn classify_incomplete_first_records<R: JsonlFamilyRuntime>(
+pub(super) fn classify_incomplete_first_records<R: JsonlFamilyRuntime>(
     adapter: &dyn JsonlFamilyAdapter<Runtime = R>,
     opening: &mut JsonlFamilyInventory<JsonlRuntimeError<R>>,
 ) -> JsonlResult<(), JsonlRuntimeError<R>> {
@@ -503,27 +603,37 @@ fn classify_incomplete_first_records<R: JsonlFamilyRuntime>(
                 });
             }
             JsonlFamilyInventoryMember::Quarantined { identity, leaf } => {
-                let authority = exact_member_authority(
-                    &opening.authorities,
-                    &leaf.source_path,
-                    &leaf.authority_path,
-                )?;
-                if first_record_is_incomplete(
-                    &leaf.source_path,
-                    authority,
-                    &leaf.authority_path,
-                    &leaf.observation,
-                    leaf.physical_encoding,
-                    adapter.record_framing(),
-                    false,
-                )? {
+                // Provider classification wins once a member owns a diagnosed
+                // source failure; a framing probe must not erase that outcome.
+                let incomplete = if leaf.logical_source_failure.is_some() {
+                    false
+                } else if let Some(observation) = &leaf.observation {
+                    let authority = exact_member_authority(
+                        &opening.authorities,
+                        &leaf.source_path,
+                        &leaf.authority_path,
+                    )?;
+                    first_record_is_incomplete(
+                        &leaf.source_path,
+                        authority,
+                        &leaf.authority_path,
+                        observation,
+                        leaf.physical_encoding,
+                        adapter.record_framing(),
+                        false,
+                    )?
+                } else {
+                    false
+                };
+                if incomplete {
                     changed = true;
                     classified.push(JsonlFamilyInventoryMember::Pending {
                         identity,
                         leaf: JsonlFamilyPendingLeaf::bind_observed(
                             leaf.source_path,
                             leaf.authority_path,
-                            leaf.observation,
+                            leaf.observation
+                                .expect("incomplete quarantined leaf has an admitted observation"),
                             leaf.proof,
                             leaf.quarantined_source,
                         ),
@@ -759,7 +869,7 @@ fn capture_partial_members<R: JsonlFamilyRuntime>(
     resident.ownership_initialized = false;
     resident.owned_sources = owned_sources;
     resident.quarantined_sources.clear();
-    resident.terminal_sources = terminal_sources;
+    resident.replace_terminal_sources(terminal_sources);
     resident.absent_sources.clear();
     resident.opening_membership = None;
     resident.certified_inventory = None;

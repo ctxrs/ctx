@@ -29,6 +29,7 @@ EXPECTED_DEPENDENCIES: dict[str, Any] = {
     "serde_json": {"workspace": True},
     "serde_yaml": {"workspace": True},
     "sha2": {"workspace": True},
+    "same-file": "1.0.6",
     "thiserror": {"workspace": True},
     "toml_edit": {"workspace": True},
 }

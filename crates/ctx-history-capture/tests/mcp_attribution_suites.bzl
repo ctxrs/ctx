@@ -27,12 +27,18 @@ MCP_ATTRIBUTION_PUBLIC_SUITES = {
         },
     ),
     "mcp_attribution_capture_provider_units": struct(
-        target = "//crates/ctx-history-capture-composition:unit_tests",
+        target = "//crates/ctx-history-capture-composition-qualification:jsonl_publication_tests",
         selected_inventory = True,
         tests = {
-            "source_backed::tests::codex_child_independence::lifecycle::codex_mcp_activity_append_replay_preserves_stable_ids_and_exact_content": ["stable_ids"],
-            "source_backed::tests::copilot::copilot_activity_append_replay_preserves_stable_event_ids": ["stable_ids"],
-            "source_backed::tests::copilot::copilot_route_enforces_independent_exact_identity_component_boundaries": ["exact_boundary"],
+            "copilot::copilot_activity_append_replay_preserves_stable_event_ids": ["stable_ids"],
+            "copilot::copilot_route_enforces_independent_exact_identity_component_boundaries": ["exact_boundary"],
+        },
+    ),
+    "mcp_attribution_capture_provider_lifecycle": struct(
+        target = "//crates/ctx-history-capture-composition-qualification:provider_lifecycle_tests",
+        selected_inventory = True,
+        tests = {
+            "codex_child_independence::lifecycle::codex_mcp_activity_append_replay_preserves_stable_ids_and_exact_content": ["stable_ids"],
         },
     ),
     "mcp_attribution_codex_provider_units": struct(

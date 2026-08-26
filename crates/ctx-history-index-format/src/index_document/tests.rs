@@ -214,7 +214,7 @@ fn session_authority_attachment_is_canonical_and_one_shot() {
     let fields = fields_from_schema(&schema).unwrap();
     let core_source = source("codex_session_jsonl");
     let record = core_record(&core_source);
-    let expected = SessionAuthorityKey::new(record.session_id, core_source.identity())
+    let expected = SessionAuthorityKey::exact(record.session_id, core_source.identity())
         .unwrap()
         .into_bytes();
     let encoded = record.encode_stored().unwrap();
@@ -230,6 +230,46 @@ fn session_authority_attachment_is_canonical_and_one_shot() {
         .filter_map(|value| value.as_bytes())
         .collect::<Vec<_>>();
     assert_eq!(authorities, vec![expected.as_slice()]);
+}
+
+#[test]
+fn session_authority_exact_key_binds_full_session_and_source_identities() {
+    let core_source = source("codex_session_jsonl");
+    let record = core_record(&core_source);
+    let exact = SessionAuthorityKey::exact(record.session_id, core_source.identity()).unwrap();
+    assert_eq!(exact.as_bytes().len(), crate::SESSION_AUTHORITY_KEY_LEN);
+    assert_eq!(
+        SessionAuthorityKey::decode(exact.as_bytes())
+            .unwrap()
+            .identities()
+            .unwrap(),
+        (record.session_id, core_source.identity())
+    );
+
+    let mut colliding = record.session_id.encode_canonical().unwrap();
+    colliding[20] ^= 1;
+    let colliding = StableEntityId::decode_canonical(&colliding).unwrap();
+    assert_eq!(colliding.as_uuid(), record.session_id.as_uuid());
+    assert_ne!(colliding.digest(), record.session_id.digest());
+    let colliding_key = SessionAuthorityKey::exact(colliding, core_source.identity()).unwrap();
+    assert_ne!(exact, colliding_key);
+
+    let foreign_source = SourceKey::derive(
+        "codex",
+        "codex_session_jsonl",
+        "session",
+        1,
+        SourceAnchor::provider_native(
+            "session-file",
+            TypedKey::utf8("foreign-session-source").unwrap(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(matches!(
+        SessionAuthorityKey::exact(record.session_id, foreign_source.identity()),
+        Err(IndexError::InvalidStoredDocumentField("session_authority"))
+    ));
 }
 
 #[test]

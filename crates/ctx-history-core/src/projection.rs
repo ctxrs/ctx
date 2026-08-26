@@ -20,8 +20,8 @@ pub use identity::{
 };
 pub use native::{NativeItemKey, NativeSessionKey, PositionStability, SubrecordSelector, TypedKey};
 pub use source::{
-    CertifiedSourceDeletion, CertifiedSourceInventory, SourceAnchor, SourceInventoryObservation,
-    SourceKey, SourceObservation,
+    CertifiedSourceDeletion, CertifiedSourceInventory, SourceAnchor, SourceAnchorScope,
+    SourceInventoryObservation, SourceKey, SourceObservation,
 };
 
 #[cfg(test)]

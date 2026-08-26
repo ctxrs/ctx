@@ -12,8 +12,7 @@ use ctx_history_refresh::ExplicitSourceCatalogUpsert;
 use ctx_terminal::Ui;
 
 use crate::{
-    discovered_sources_for_provider_report_with_data_root,
-    discovered_sources_report_with_data_root, provider_selection_guidance, HistoryCliConfig,
+    provider_selection_guidance, CliSourceDiscoveryPort, HistoryCliConfig,
     HistoryConfigSnapshotPort, HistoryProvider, ImportRequest, ProgressMode, ProgressReporter,
 };
 
@@ -49,7 +48,6 @@ pub trait ImportApplicationPort {
     fn refresh(
         &mut self,
         data_root: &Path,
-        config: HistoryCliConfig,
         selection: RefreshSelection,
         no_daemon: bool,
         progress: &mut ProgressReporter<'_>,
@@ -111,22 +109,11 @@ struct HistoryImportHost<'a, P> {
 
 impl<P: ImportApplicationPort> SourceDiscoveryPort for HistoryImportHost<'_, P> {
     fn discover_all(&self) -> Result<DiscoveryReport> {
-        let home = self
-            .home
-            .as_deref()
-            .context("resolve user home for provider-root safety preflight")?;
-        Ok(discovered_sources_report_with_data_root(
-            Some(home),
-            &self.data_root,
-        ))
+        self.discovery().discover_all()
     }
 
     fn discover_provider(&self, provider: CaptureProvider) -> Result<DiscoveryReport> {
-        Ok(discovered_sources_for_provider_report_with_data_root(
-            self.home.as_deref(),
-            &self.data_root,
-            provider,
-        ))
+        self.discovery().discover_provider(provider)
     }
 
     fn provider_selection_guidance(
@@ -227,12 +214,17 @@ impl<P: ImportApplicationPort> IngestRefreshPort for HistoryImportHost<'_, P> {
             .progress
             .as_mut()
             .context("ingest refresh requested before progress initialization")?;
-        self.port
-            .refresh(data_root, self.config, selection, no_daemon, progress)
+        self.port.refresh(data_root, selection, no_daemon, progress)
     }
 }
 
 impl<'a, P> HistoryImportHost<'a, P> {
+    fn discovery(&self) -> CliSourceDiscoveryPort {
+        CliSourceDiscoveryPort::new(self.home.clone(), self.data_root.clone())
+            .with_automatic_provider_discovery(self.config.automatic_provider_discovery)
+            .with_provider_roots(self.config.provider_roots.clone())
+    }
+
     fn progress_mut(&mut self) -> Result<&mut ProgressReporter<'a>> {
         self.progress
             .as_mut()

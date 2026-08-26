@@ -47,10 +47,10 @@ const POST_EXIT_UNINSTALL_INVOCATION: &str = "--ctx-core-managed-pair-uninstall-
 const MAX_FRAME_BYTES: usize = 64 * 1024;
 const MAX_RESPONSE_BYTES: usize = 48 * 1024;
 #[cfg(test)]
-const API_INVENTORY: &str = r#"{"event_frames":{"Refresh":{"current_source_progress_keys":["logical_certified_bytes","logical_rows_scanned","snapshot_bytes_completed","snapshot_bytes_total","snapshot_pages_completed","snapshot_pages_total","stage"],"frame_keys":["event","operation","protocol_version","refresh","schema_version","sequence","type"],"refresh_keys":["completed_bytes","completed_records","completed_sources","current_source","current_source_progress","elapsed_millis","estimated_remaining_millis","logical_phase","maintenance_wake","phase","physical_attempt_id","physical_attempt_state","processed_bytes","processed_messages","processed_sessions","processed_tool_calls","progress_owner_attempt_state","progress_owner_request_id","providers","request_id","request_state","terminal_state","total_sources","total_sources_known","whole_run_stage"],"terminal_state_details_keys":["affected_routes","blocked_routes","class","physical_attempt_id","published_generation","retained_generation","retry_advice","retryable_routes"],"terminal_state_keys":["details","error_code","retryable"]}},"operations":{"CoreDoctor":{"request_keys":[],"response_keys":["facts"]},"CoreSetup":{"request_keys":["catalog_only","defer_fresh_empty_wait","no_daemon","notice_lines","progress","semantic","wait"],"request_values":{"progress":["auto","events","json","none","plain"]},"response_keys":["facts","generation_id"]},"CoreStatus":{"request_keys":["usage"],"response_keys":["facts"]},"LocalUsageSummary":{"request_keys":[],"response_keys":["facts"]},"ManagedPairAbort":{"request_keys":["attempt_id"],"response_keys":["aborted"]},"ManagedPairBegin":{"request_keys":[],"response_keys":["attempt_id","candidate_root"]},"ManagedPairStage":{"request_keys":["attempt_id"],"response_keys":["attempt_id","release_name","rollback_generation","status"]},"ManagedPairStatus":{"request_keys":["attempt_id"],"response_keys":["status"]},"ManagedPairUninstall":{"request_keys":[],"response_keys":["attempt_id","cleanup_mode","status"]},"RefreshAndWait":{"optional_request_keys":["progress"],"request_keys":[],"request_values":{"progress":["events"]},"response_keys":["facts","generation_id"]},"WakeRefresh":{"request_keys":[],"response_keys":["accepted"]}},"protocol":"ctx-core-capability","schema_version":1,"terminal_failure":{"details_keys":["affected_routes","blocked_routes","class","physical_attempt_id","retained_generation","retry_advice","retryable_routes"],"response_keys":["details","error_code","ok","operation","protocol_version","retryable","schema_version"]}}"#;
+const API_INVENTORY: &str = r#"{"event_frames":{"Refresh":{"current_source_progress_keys":["logical_certified_bytes","logical_rows_scanned","snapshot_bytes_completed","snapshot_bytes_total","snapshot_pages_completed","snapshot_pages_total","stage"],"frame_keys":["event","operation","protocol_version","refresh","schema_version","sequence","type"],"refresh_keys":["completed_bytes","completed_records","completed_sources","current_source","current_source_progress","elapsed_millis","estimated_remaining_millis","logical_phase","maintenance_wake","phase","physical_attempt_id","physical_attempt_state","processed_bytes","processed_messages","processed_sessions","processed_tool_calls","progress_owner_attempt_state","progress_owner_request_id","providers","request_id","request_state","terminal_state","total_sources","total_sources_known","whole_run_stage"],"terminal_state_details_keys":["affected_routes","blocked_routes","class","physical_attempt_id","published_generation","retained_generation","retry_advice","retryable_routes"],"terminal_state_keys":["details","error_code","retryable"]}},"operations":{"CoreDoctor":{"request_keys":[],"response_keys":["facts"]},"CoreSetup":{"request_keys":["catalog_only","defer_fresh_empty_wait","no_daemon","notice_lines","progress","semantic","wait"],"request_values":{"progress":["auto","events","json","none","plain"]},"response_keys":["facts","generation_id"]},"CoreStatus":{"request_keys":["usage"],"response_keys":["facts"]},"LocalUsageSummary":{"request_keys":[],"response_keys":["facts"]},"ManagedPairAbort":{"request_keys":["attempt_id"],"response_keys":["aborted"]},"ManagedPairBegin":{"request_keys":[],"response_keys":["attempt_id","candidate_root"]},"ManagedPairStage":{"request_keys":["attempt_id"],"response_keys":["attempt_id","release_name","rollback_generation","status"]},"ManagedPairStatus":{"request_keys":["attempt_id"],"response_keys":["status"]},"ManagedPairUninstall":{"request_keys":[],"response_keys":["attempt_id","cleanup_mode","status"]},"RefreshAndWait":{"optional_request_keys":["progress"],"request_keys":[],"request_values":{"progress":["events"]},"response_keys":["facts","generation_id"]},"WakeRefresh":{"request_keys":[],"response_keys":["accepted","analytics_enabled"]}},"protocol":"ctx-core-capability","schema_version":1,"terminal_failure":{"details_keys":["affected_routes","blocked_routes","class","physical_attempt_id","retained_generation","retry_advice","retryable_routes"],"response_keys":["details","error_code","ok","operation","protocol_version","retryable","schema_version"]}}"#;
 #[cfg(test)]
 pub(crate) const API_FINGERPRINT: &str =
-    "d03afbac7c95df2df850fcb6b81f49c4051265d70c70a6d7519b18845b9909f2";
+    "48a51b5bae898923fa7094704f0d2c81497cc3ef1ca1d16460a8baf0a91fd59a";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Operation {
@@ -301,16 +301,7 @@ fn execute(request: Request, events: &mut dyn CapabilityEventSink) -> Result<Val
         (Operation::RefreshAndWait, Options::Refresh { events: false }) => {
             refresh_and_facts(&request.data_root, &mut IgnoreEvents)?
         }
-        (Operation::WakeRefresh, Options::Empty) => {
-            if let Ok(config) = crate::config::AppConfig::load(&request.data_root) {
-                crate::semantic::maybe_autostart_daemon(
-                    &request.data_root,
-                    &config,
-                    crate::DaemonTriggerCommandArg::Setup,
-                );
-            }
-            json!({"accepted": true})
-        }
+        (Operation::WakeRefresh, Options::Empty) => wake_refresh_facts(&request.data_root),
         (Operation::ManagedPairBegin, Options::Empty) => {
             let verifier = CoreManagedPairVerifier::new()?;
             let attempt = managed_pair_engine()?.begin(&verifier)?;
@@ -358,6 +349,21 @@ fn execute(request: Request, events: &mut dyn CapabilityEventSink) -> Result<Val
         "protocol_version": CORE_PRO_PROTOCOL_VERSION.get(),
         "schema_version": 1,
     }))
+}
+
+fn wake_refresh_facts(data_root: &Path) -> Value {
+    let config = crate::config::AppConfig::load(data_root);
+    let analytics_enabled = config
+        .as_ref()
+        .is_ok_and(crate::config::resolved_analytics_consent);
+    if let Ok(config) = config {
+        crate::semantic::maybe_autostart_daemon(
+            data_root,
+            &config,
+            crate::DaemonTriggerCommandArg::Setup,
+        );
+    }
+    json!({"accepted": true, "analytics_enabled": analytics_enabled})
 }
 
 fn status_facts(data_root: &Path) -> Result<Value> {
@@ -918,5 +924,5 @@ fn reject_duplicate_keys(input: &str) -> Result<()> {
 }
 
 #[cfg(test)]
-#[path = "core_capability/tests.rs"]
+#[path = "core_capability/contract_tests.rs"]
 mod tests;

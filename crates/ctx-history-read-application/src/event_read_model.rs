@@ -354,6 +354,11 @@ pub fn render_event_read_model(
     let activity = (projection == EventContentProjection::Full)
         .then_some(content.activity.as_ref())
         .flatten();
+    let (provider_key, source_id) = event
+        .custom_source_identity()
+        .map_or((None, None), |(provider_key, source_id)| {
+            (Some(provider_key), Some(source_id))
+        });
     let occurred_at = timestamp_json(event.occurred_at_unix_ms);
     let mut rendered = json!({
         "schema_version": EVENT_QUERY_SCHEMA_VERSION,
@@ -369,6 +374,8 @@ pub fn render_event_read_model(
         "occurred_at_ms": event.occurred_at_unix_ms,
         "sequence": event.event_sequence,
         "provider": event.provider,
+        "provider_key": provider_key,
+        "source_id": source_id,
         "source_format": event.source_format,
         "source": event.source,
         "provider_session_id": event.provider_session_id,

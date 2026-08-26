@@ -72,14 +72,18 @@ fn history_config(daemon_enabled: bool, semantic_search_enabled: bool) -> config
         daemon_enabled,
         semantic_search_enabled,
         local_usage_enabled: false,
+        automatic_provider_discovery: true,
+        provider_roots: Vec::new(),
     })
 }
 
-const fn history_snapshot(daemon_enabled: bool, semantic_search_enabled: bool) -> HistoryCliConfig {
+fn history_snapshot(daemon_enabled: bool, semantic_search_enabled: bool) -> HistoryCliConfig {
     HistoryCliConfig {
         daemon_enabled,
         semantic_search_enabled,
         local_usage_enabled: false,
+        automatic_provider_discovery: true,
+        provider_roots: Vec::new(),
     }
 }
 
@@ -305,26 +309,58 @@ fn query_authority_show_locate_and_mcp_show_reject_empty_before_not_found() {
     assert_query_authority_error(&mcp_error, "source_unavailable");
 }
 
-#[test]
-fn search_reports_query_observation_before_output_failure() {
-    struct FailingWriter;
+struct FailingWriter(&'static str);
 
-    impl Write for FailingWriter {
-        fn write(&mut self, _buffer: &[u8]) -> io::Result<usize> {
-            Err(io::Error::other("injected search output failure"))
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
+impl Write for FailingWriter {
+    fn write(&mut self, _buffer: &[u8]) -> io::Result<usize> {
+        Err(io::Error::other(self.0))
     }
 
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn lexical_search_args() -> SearchArgs {
+    SearchArgs {
+        query: Some(TEST_QUERY.to_owned()),
+        term: Vec::new(),
+        limit: 10,
+        provider: Some(crate::ProviderArg(HistoryProvider::Native(
+            CaptureProvider::Codex,
+        ))),
+        history_source: None,
+        provider_key: None,
+        source_id: None,
+        source_format: None,
+        source_roots: Vec::new(),
+        source_groups: Vec::new(),
+        workspace: None,
+        since: None,
+        primary_only: false,
+        content_scope: None,
+        event_type: None,
+        file: None,
+        session: None,
+        exclude_sessions: Vec::new(),
+        events: false,
+        backend: Some(crate::SearchBackendArg::Lexical),
+        semantic_weight: 0.35,
+        refresh: RefreshArg::Off,
+        include_current_session: true,
+        format: JsonOutputFormat::Text,
+        verbose: false,
+    }
+}
+
+#[test]
+fn search_reports_terminal_observation_after_output_failure() {
     let temp = tempdir().unwrap();
     write_test_generation(temp.path());
     let context = RenderContext::for_test(TestContext::pipe(StreamKind::Stdout));
     let stderr_context = RenderContext::for_test(TestContext::pipe(StreamKind::Stderr));
     let mut ui = Ui::with_writers(
-        FailingWriter,
+        FailingWriter("injected search output failure"),
         context,
         SharedWriter::default(),
         stderr_context,
@@ -332,33 +368,7 @@ fn search_reports_query_observation_before_output_failure() {
     let mut local_usage = CliUsage::excluded();
     let mut observed = None;
     let error = run_search(
-        SearchArgs {
-            query: Some(TEST_QUERY.to_owned()),
-            term: Vec::new(),
-            limit: 10,
-            provider: Some(crate::ProviderArg(HistoryProvider::Native(
-                CaptureProvider::Codex,
-            ))),
-            history_source: None,
-            provider_key: None,
-            source_id: None,
-            source_format: None,
-            workspace: None,
-            since: None,
-            primary_only: false,
-            content_scope: None,
-            event_type: None,
-            file: None,
-            session: None,
-            exclude_sessions: Vec::new(),
-            events: false,
-            backend: Some(crate::SearchBackendArg::Lexical),
-            semantic_weight: 0.35,
-            refresh: RefreshArg::Off,
-            include_current_session: true,
-            format: JsonOutputFormat::Text,
-            verbose: false,
-        },
+        lexical_search_args(),
         temp.path().to_path_buf(),
         history_snapshot(false, false),
         &mut local_usage,
@@ -368,13 +378,42 @@ fn search_reports_query_observation_before_output_failure() {
     .unwrap_err();
 
     assert!(error.to_string().contains("injected search output failure"));
-    let observation = observed.expect("query observation must precede fallible output");
+    let observation = observed.expect("search attempt must emit one terminal observation");
     assert_eq!(
         observation.backend_effective,
-        ctx_history_read_application::SearchBackend::Lexical
+        Some(ctx_history_read_application::SearchBackend::Lexical)
     );
-    assert!(observation.result_count > 0);
-    assert_eq!(observation.render_duration, None);
+    assert!(observation.result_count.is_some_and(|count| count > 0));
+    assert!(observation.render_duration.is_some());
+    assert_eq!(
+        observation.failure_phase,
+        Some(crate::SearchFailurePhase::Output)
+    );
+}
+
+#[test]
+fn search_not_ready_diagnostic_write_failure_reports_output_phase() {
+    let mut ui = Ui::with_writers(
+        SharedWriter::default(),
+        RenderContext::for_test(TestContext::pipe(StreamKind::Stdout)),
+        FailingWriter("injected not-ready diagnostic failure"),
+        RenderContext::for_test(TestContext::pipe(StreamKind::Stderr)),
+    );
+    let mut observation = crate::SearchExecutionObservation::default();
+
+    let error =
+        search::render_not_ready_at_search_boundary(&mut ui, Some(&mut observation)).unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("injected not-ready diagnostic failure"),
+        "{error:#}"
+    );
+    assert_eq!(
+        observation.failure_phase,
+        Some(crate::SearchFailurePhase::Output)
+    );
 }
 
 #[test]
@@ -423,6 +462,8 @@ fn omitted_and_explicit_all_resolve_to_identical_weighted_retrieval() {
         provider_key: None,
         source_id: None,
         source_format: None,
+        source_roots: Vec::new(),
+        source_groups: Vec::new(),
         workspace: None,
         since: None,
         primary_only: false,
@@ -515,6 +556,8 @@ fn content_scope_forwards_with_provider_workspace_since_file_agent_and_current_s
         provider_key: None,
         source_id: None,
         source_format: None,
+        source_roots: Vec::new(),
+        source_groups: Vec::new(),
         workspace: Some("/workspace/pinned".to_owned()),
         since: Some("30d".to_owned()),
         primary_only: false,
@@ -633,12 +676,32 @@ fn search_schema_v1_snapshot_reads_snippets_and_citations_from_core() {
         },
         candidate_pool: 1,
         candidate_pool_truncated: false,
+        lexical_diagnostics: None,
+        diversification: ctx_history_read_application::SearchDiversificationDecision {
+            status: ctx_history_read_application::SearchDiversificationStatus::Applied,
+            top_n: 1,
+            changed_final_top_n: Some(false),
+        },
+        concentration: ctx_history_read_application::SearchConcentrationReceipt {
+            distinct_sessions: 1,
+            largest_session_candidate_count: 1,
+            provider_copy_candidate_count: 0,
+            literal_roots: ctx_history_read_application::SearchLiteralRootConcentration::Observed {
+                distinct_families: 0,
+                candidate_count: 0,
+                largest_family_candidate_count: 0,
+            },
+            copy_clusters:
+                ctx_history_read_application::SearchCopyClusterAvailability::NotConstructedV1,
+        },
         requested_backend: SearchBackendArg::Lexical,
         effective_backend: SearchBackendArg::Lexical,
         semantic_weight: 0.0,
         semantic_status: "skipped",
         semantic_fallback: None,
         semantic_diagnostics: None,
+        work: ctx_history_read_application::SearchWorkReceipt::default(),
+        stop_reason: Some(ctx_history_read_application::SearchStopReason::FixedPool),
     };
     let follow_up_root = std::path::Path::new("/tmp/ctx root/owner's history");
     let value = search_json(
@@ -661,6 +724,7 @@ fn search_schema_v1_snapshot_reads_snippets_and_citations_from_core() {
     assert_eq!(
         sorted_json_keys(&value),
         vec![
+            "diversification",
             "filters",
             "freshness",
             "generated_at",
@@ -679,6 +743,15 @@ fn search_schema_v1_snapshot_reads_snippets_and_citations_from_core() {
     assert_eq!(value["filters"]["content_scope"], "all");
     assert!(value["results"][0].get("session_relationship").is_none());
     assert!(value["results"][0].get("event_copy").is_none());
+    assert!(value["results"][0].get("copied_lineage").is_none());
+    assert_eq!(
+        value["diversification"],
+        json!({
+            "status": "applied",
+            "top_n": 1,
+            "changed_final_top_n": false,
+        })
+    );
     assert_eq!(
         sorted_json_keys(&value["result_window"]),
         vec!["limit", "more_available", "returned"]
@@ -726,6 +799,8 @@ fn search_json_rank_tracks_non_monotonic_shaped_result_order() {
     let second = fixture_event(CaptureProvider::Codex, "codex_session_jsonl", 42, 1);
     let first_id = first.event_id.as_uuid();
     let second_id = second.event_id.as_uuid();
+    let first_session_id = first.session_id.as_uuid();
+    let second_session_id = second.session_id.as_uuid();
     let first_core = fixture_core_event(&first, "first shaped result");
     let second_core = fixture_core_event(&second, "second shaped result");
     let mut source_request = request(RefreshArg::Off);
@@ -749,12 +824,32 @@ fn search_json_rank_tracks_non_monotonic_shaped_result_order() {
         },
         candidate_pool: 2,
         candidate_pool_truncated: false,
+        lexical_diagnostics: None,
+        diversification: ctx_history_read_application::SearchDiversificationDecision {
+            status: ctx_history_read_application::SearchDiversificationStatus::Applied,
+            top_n: 2,
+            changed_final_top_n: Some(true),
+        },
+        concentration: ctx_history_read_application::SearchConcentrationReceipt {
+            distinct_sessions: 2,
+            largest_session_candidate_count: 1,
+            provider_copy_candidate_count: 0,
+            literal_roots: ctx_history_read_application::SearchLiteralRootConcentration::Observed {
+                distinct_families: 0,
+                candidate_count: 0,
+                largest_family_candidate_count: 0,
+            },
+            copy_clusters:
+                ctx_history_read_application::SearchCopyClusterAvailability::NotConstructedV1,
+        },
         requested_backend: SearchBackendArg::Lexical,
         effective_backend: SearchBackendArg::Lexical,
         semantic_weight: 0.0,
         semantic_status: "skipped",
         semantic_fallback: None,
         semantic_diagnostics: None,
+        work: ctx_history_read_application::SearchWorkReceipt::default(),
+        stop_reason: Some(ctx_history_read_application::SearchStopReason::FixedPool),
     };
     let mut presentations = [
         fixture_search_presentation(&collection.result_window.hits[0].event, first_core, false),
@@ -780,6 +875,25 @@ fn search_json_rank_tracks_non_monotonic_shaped_result_order() {
     assert_eq!(results[1]["rank"], 2);
     assert_eq!(results[0]["retrieval_score"], 0.25);
     assert_eq!(results[1]["retrieval_score"], 9.5);
+    for (result, event_id, session_id) in [
+        (&results[0], first_id, first_session_id),
+        (&results[1], second_id, second_session_id),
+    ] {
+        assert_eq!(result["item_id"], session_id.to_string());
+        assert_eq!(result["ctx_event_id"], event_id.to_string());
+        assert_eq!(result["ctx_session_id"], session_id.to_string());
+        assert_eq!(result["event_id"], event_id.to_string());
+        assert_eq!(result["session_id"], session_id.to_string());
+        let citation = &result["citations"][0];
+        assert_eq!(citation["item_id"], event_id.to_string());
+        assert_eq!(citation["ctx_event_id"], event_id.to_string());
+        assert_eq!(citation["ctx_session_id"], session_id.to_string());
+        assert_eq!(citation["session_id"], session_id.to_string());
+        assert!(result["suggested_next_commands"][1]
+            .as_str()
+            .unwrap()
+            .ends_with(&format!("show event {event_id} --window 10")));
+    }
 
     presentations.swap(0, 1);
     let error = search_json(
@@ -805,7 +919,7 @@ fn show_schema_v1_reads_complete_normalized_core_content() {
     write_test_generation(temp.path());
     let index = open_index(temp.path()).unwrap();
     let session = index
-        .sessions_by_provider_session_id(TEST_SESSION_ID, Some("codex"))
+        .sessions_by_provider_session_id(TEST_SESSION_ID, Some("codex"), None, None)
         .unwrap()
         .into_iter()
         .next()
@@ -1045,7 +1159,7 @@ fn show_provider_session_resolution_is_ambiguous_until_provider_qualified() {
     let index = open_index(temp.path()).unwrap();
 
     let matches = index
-        .sessions_by_provider_session_id(TEST_SESSION_ID, None)
+        .sessions_by_provider_session_id(TEST_SESSION_ID, None, None, None)
         .unwrap();
     assert_eq!(matches.len(), 2);
     let error = resolve_show_session(&index, None, Some(TEST_SESSION_ID), None).unwrap_err();
@@ -1055,7 +1169,9 @@ fn show_provider_session_resolution_is_ambiguous_until_provider_qualified() {
         assert!(detail.contains(&session.session_id.to_string()), "{detail}");
     }
     assert!(
-        detail.contains("pass --provider or a ctx session ID"),
+        detail.contains(
+            "pass --provider, --provider-key/--source-id for custom history, or a ctx session ID"
+        ),
         "{detail}"
     );
 

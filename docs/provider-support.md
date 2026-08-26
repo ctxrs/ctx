@@ -28,6 +28,12 @@ discovery/import source shapes; stored event metadata may use the corresponding
 per-file adapter format, such as
 `codex_session_jsonl` for files discovered under `codex_session_jsonl_tree`.
 
+Each row's `configured_root` object also records whether persistent named roots
+are enabled and, when enabled, the required file or directory kind and the
+provider's expansion strategy. `intentional_automatic_exact` means the provider
+retains automatic
+discovery plus one-shot exact import but does not accept `ctx sources add`.
+
 Each provider row also has `lineage_support`. `session_relationship` is either
 `exact_relationship` or `unknown`. `event_origin` distinguishes `exact_copy`,
 `certified_prefix`, `explicit_no_copy`, and `unknown`. These values describe

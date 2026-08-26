@@ -24,6 +24,8 @@ use crate::{
 
 #[path = "tests/current_schema.rs"]
 mod current_schema;
+#[path = "tests/projection_contract.rs"]
+mod projection_contract;
 #[path = "tests/sqlite_diagnostics.rs"]
 mod sqlite_diagnostics;
 #[path = "tests/temp_authority.rs"]
@@ -32,6 +34,48 @@ mod temp_authority;
 use current_schema::create_current_fixture;
 
 const OVER_LIMIT_OPTIONAL_METADATA_BYTES: usize = 64 * 1024 + 1;
+
+#[test]
+fn root_scope_separates_identical_opencode_family_sessions_and_unqualified_is_released() {
+    use ctx_history_core::{SourceAnchor, SourceAnchorScope, SourceKey};
+
+    let family = OpenCodeNativeSchemaFamily::SessionMessageSeq;
+    for dialect in [
+        &crate::provider::providers::opencode::OPENCODE_SQLITE_DIALECT,
+        &crate::provider::providers::opencode::KILO_SQLITE_DIALECT,
+        &crate::provider::providers::opencode::MIMOCODE_SQLITE_DIALECT,
+    ] {
+        let anchor = SourceAnchor::provider_native(
+            format!("{}.sqlite-authority", dialect.provider.as_str()),
+            TypedKey::utf8(SOURCE_ANCHOR_KEY).unwrap(),
+        )
+        .unwrap();
+        let released = SourceKey::derive(
+            dialect.provider.as_str(),
+            dialect.source_format,
+            format!("opencode-family-{}-v1", family.label()),
+            SOURCE_IDENTITY_VERSION,
+            anchor,
+        )
+        .unwrap();
+        let unqualified =
+            source_key_scoped(dialect, family, SourceAnchorScope::Unqualified).unwrap();
+        assert!(released.exact_descriptor_eq(&unqualified));
+        assert_eq!(
+            released.identity().encode_canonical().unwrap(),
+            unqualified.identity().encode_canonical().unwrap()
+        );
+
+        let first =
+            source_key_scoped(dialect, family, SourceAnchorScope::Lineage([0x11; 32])).unwrap();
+        let second =
+            source_key_scoped(dialect, family, SourceAnchorScope::Lineage([0x22; 32])).unwrap();
+        assert_ne!(
+            session_id(&first, "shared-session").unwrap(),
+            session_id(&second, "shared-session").unwrap()
+        );
+    }
+}
 
 fn write_current_schema(
     path: &Path,
@@ -1408,56 +1452,4 @@ fn create_agent_switched_fixture(path: &Path) {
              );"#,
         )
         .unwrap();
-}
-
-#[test]
-fn direct_core_projection_uses_neutral_v3_content() {
-    let production = [
-        include_str!("../source_backed.rs"),
-        include_str!("projection.rs"),
-    ]
-    .join("\n");
-    assert!(production.contains("CoreRecord::new_selected"));
-    assert!(production.contains("CoreActivity"));
-    assert!(production.contains("ActivityJsonCapture"));
-    assert!(production.contains("ProviderDeclaredFact"));
-    assert!(production.contains("omit_structured_content_if_aggregate_exceeds_limit"));
-    for forbidden in [
-        concat!("Repository", "Attributor"),
-        concat!("repository_", "bindings"),
-        concat!("repository_", "abstentions"),
-        concat!("result_", "outcome"),
-        concat!("file_", "touches"),
-    ] {
-        assert!(!production.contains(forbidden), "found {forbidden}");
-    }
-}
-
-#[test]
-fn exact_provider_strings_are_not_trimmed_by_helpers() {
-    assert_eq!(
-        nonempty("  /literal/path  ".to_owned()).as_deref(),
-        Some("  /literal/path  ")
-    );
-    assert_eq!(nonempty(String::new()), None);
-}
-
-#[test]
-fn only_payload_content_size_failures_are_record_local() {
-    assert!(record_local_core_projection_failure(
-        &CoreRecordError::FieldTooLarge {
-            field: "selected_content",
-            actual: ctx_history_core::MAX_CORE_CONTENT_BYTES + 1,
-            maximum: ctx_history_core::MAX_CORE_CONTENT_BYTES,
-        }
-    ));
-    assert!(!record_local_core_projection_failure(
-        &CoreRecordError::InvalidIdentityRelationship
-    ));
-    assert!(!record_local_core_projection_failure(
-        &CoreRecordError::InvalidSessionRelationship
-    ));
-    assert!(!record_local_core_projection_failure(
-        &CoreRecordError::InvalidActivity
-    ));
 }

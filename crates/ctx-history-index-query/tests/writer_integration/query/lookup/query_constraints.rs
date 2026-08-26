@@ -51,6 +51,18 @@ fn custom_source_filters_use_the_core_native_event_identity() {
         Some(&native_event_id)
     );
     assert!(filters.matches_source_identity(&hits[0].event));
+    let listed = index
+        .list_event_candidates_with_filters_batch(&filters, 10)
+        .unwrap();
+    assert!(listed.complete);
+    assert!(listed.candidate_set_exhaustive);
+    assert_eq!(listed.candidates.len(), 1);
+    assert_eq!(listed.candidates[0].event.event_id, event_id);
+    let semantic = index.semantic_filter_projection(&filters).unwrap();
+    assert_eq!(
+        semantic.event_ids().collect::<Vec<_>>(),
+        vec![event_id.as_uuid()]
+    );
     assert_eq!(
         ctx_history_index_query::stored_core_event_record_materializations(),
         0,
@@ -68,6 +80,50 @@ fn custom_source_filters_use_the_core_native_event_identity() {
         )
         .unwrap();
     assert!(misses.is_empty());
+}
+
+#[test]
+fn allowed_source_keys_select_exact_physical_sources_in_one_index() {
+    let temp = tempdir().unwrap();
+    let personal = source("personal-root.jsonl");
+    let work = source("work-root.jsonl");
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    for (sequence, source) in [(1, &personal), (2, &work)] {
+        writer.begin_source(source.clone()).unwrap();
+        writer
+            .add_core_record(document(source, sequence, "shared root needle"))
+            .unwrap();
+        writer
+            .certify_source(certificate(source, sequence as u8, 1))
+            .unwrap();
+    }
+    writer.commit(|_| true).unwrap();
+
+    let index = VerifiedIndex::open(temp.path()).unwrap();
+    let personal_only = EventSearchFilters {
+        allowed_source_keys: Some(vec![source_token(&personal)]),
+        ..EventSearchFilters::default()
+    };
+    let hits = index
+        .search_event_candidates_with_filters("needle", &personal_only, 10)
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+    assert!(hits[0].event.source.exact_descriptor_eq(&personal));
+
+    let none = index
+        .search_event_candidates_with_filters(
+            "needle",
+            &EventSearchFilters {
+                allowed_source_keys: Some(Vec::new()),
+                ..EventSearchFilters::default()
+            },
+            10,
+        )
+        .unwrap();
+    assert!(none.is_empty());
 }
 
 #[test]

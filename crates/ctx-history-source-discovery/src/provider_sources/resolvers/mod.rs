@@ -1,12 +1,10 @@
 use std::{
-    collections::HashSet,
+    fs,
     io::ErrorKind,
     path::{Path, PathBuf},
 };
 
-#[cfg(test)]
-use std::fs;
-
+use ctx_history_capture_model::{ProviderRootDefinition, ProviderSource};
 use ctx_history_core::CaptureProvider;
 
 use super::{
@@ -22,8 +20,8 @@ use super::{
     },
     types::{
         DiscoveryIssue, DiscoveryIssueKind, DiscoveryReport, ProviderCatalogSupport,
-        ProviderDefaultLocation, ProviderImportSupport, ProviderSource, ProviderSourceKind,
-        ProviderSourceSpec, ProviderSourceStatus,
+        ProviderDefaultLocation, ProviderImportSupport, ProviderSourceKind, ProviderSourceSpec,
+        ProviderSourceStatus,
     },
     StaticProviderProbeCatalog,
 };
@@ -31,6 +29,7 @@ use super::{
 const UNSUPPORTED_SOURCE_ROOT_REASON: &str =
     "the selected provider path uses an unsupported, non-local, or unsafe source root";
 
+mod automatic_roles;
 mod config_project;
 mod manual_unsupported;
 mod platform;
@@ -38,11 +37,16 @@ mod profile_project;
 mod simple;
 
 pub use config_project::{
+    resolve_crush_released_project_inventories, resolve_crush_released_project_inventory,
     CrushDiscoveredProjectInventory, CrushProjectInventorySelector,
-    CrushProjectInventorySelectorError,
+    CrushProjectInventorySelectorError, CrushReleasedProjectInventory,
 };
 pub(super) use platform::{resolve_lingma_with_authority, resolve_warp_with_authority};
 pub use profile_project::resolve_openhands_conversations_root;
+pub(in crate::provider_sources) use profile_project::{
+    openclaw_agent_ids_for_state_root, OpenClawConfigError,
+};
+pub use simple::released_provider_home;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ResolverGroup {
@@ -80,6 +84,38 @@ pub fn path_presence(path: &Path) -> PathPresence {
         Err(SourcePathError::Unsupported) => PathPresence::Unsupported,
         Err(SourcePathError::Unavailable(kind)) => PathPresence::Unknown(kind),
     }
+}
+
+/// Returns whether two existing provider paths name the same physical object.
+///
+/// Canonical comparison handles symlink and platform namespace aliases. Native
+/// file identity additionally collapses bind-mount and case spellings that
+/// canonical paths alone may not recognize.
+pub fn provider_paths_equivalent(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    if fs::canonicalize(left)
+        .ok()
+        .zip(fs::canonicalize(right).ok())
+        .is_some_and(|(left, right)| left == right)
+    {
+        return true;
+    }
+    same_file::is_same_file(left, right).unwrap_or(false)
+}
+
+pub fn provider_source_belongs_to_configured_root(
+    root: &ProviderRootDefinition,
+    source: &ProviderSource,
+) -> bool {
+    if source.provider != root.provider {
+        return false;
+    }
+    source
+        .route_provenance
+        .configured_root()
+        .is_some_and(|(root_id, root_path)| root_id == root.id && root_path == root.path)
 }
 
 pub(super) fn select_current_or_legacy(current: PathBuf, legacy: PathBuf) -> PathBuf {
@@ -149,6 +185,9 @@ pub(super) fn resolve(
     context: &DiscoveryContext,
     spec: &ProviderSourceSpec,
 ) -> DiscoveryReport {
+    if !context.automatic_provider_inference_enabled() {
+        return DiscoveryReport::default();
+    }
     match resolver_group(spec.provider) {
         Some(ResolverGroup::Simple) => simple::resolve(probes, context, spec),
         Some(ResolverGroup::Platform) => platform::resolve(probes, context, spec),
@@ -312,6 +351,7 @@ pub(super) fn source_from_location(
         catalog_support,
         status,
         unsupported_reason,
+        route_provenance: Default::default(),
     }
 }
 
@@ -334,21 +374,29 @@ pub(super) fn unsupported_source(
         } else {
             "detected provider history uses an unsupported format"
         }),
+        route_provenance: Default::default(),
     }
 }
 
 pub(super) fn dedupe_report(mut report: DiscoveryReport) -> DiscoveryReport {
-    let mut seen = HashSet::new();
-    report.sources.retain(|source| {
-        let path = comparison_path(&source.path).unwrap_or_else(|| source.path.clone());
-        seen.insert((source.provider, path, source.source_format))
-    });
+    let mut deduplicated = Vec::<ProviderSource>::new();
+    for source in report.sources {
+        if let Some(existing) = deduplicated.iter_mut().find(|existing| {
+            existing.provider == source.provider
+                && existing.source_format == source.source_format
+                && provider_paths_equivalent(&existing.path, &source.path)
+        }) {
+            if existing.route_provenance.configured_root().is_none()
+                && source.route_provenance.configured_root().is_some()
+            {
+                *existing = source;
+            }
+        } else {
+            deduplicated.push(source);
+        }
+    }
+    report.sources = deduplicated;
     report
-}
-
-fn comparison_path(path: &Path) -> Option<PathBuf> {
-    source_path_kind(path).ok()?;
-    Some(path.to_path_buf())
 }
 
 #[cfg(test)]

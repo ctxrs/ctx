@@ -379,6 +379,7 @@ impl CodexNativeScanner {
                     let record = codex_core_record(
                         &self.core_source,
                         self.core_session_id,
+                        self.source.source_root_lineage,
                         owner,
                         row,
                         &mut self.event_identity_state,

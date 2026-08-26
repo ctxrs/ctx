@@ -7,6 +7,56 @@ use tempfile::TempDir;
 
 use super::*;
 
+#[test]
+fn root_scope_separates_identical_openclaw_sessions_and_unqualified_is_released() {
+    use ctx_history_core::{SourceAnchorScope, SourceKey};
+
+    let released = SourceKey::derive_provider_native(
+        CaptureProvider::OpenClaw.as_str(),
+        OPENCLAW_AGENT_SQLITE_SOURCE_FORMAT,
+        SOURCE_SCHEMA_VARIANT,
+        1,
+        SOURCE_ANCHOR_NAMESPACE,
+        TypedKey::utf8("shared-agent").unwrap(),
+    )
+    .unwrap();
+    let unqualified = source_key_scoped("shared-agent", SourceAnchorScope::Unqualified).unwrap();
+    assert!(released.exact_descriptor_eq(&unqualified));
+    assert_eq!(
+        released.identity().encode_canonical().unwrap(),
+        unqualified.identity().encode_canonical().unwrap()
+    );
+
+    let first = source_key_scoped("shared-agent", SourceAnchorScope::Lineage([0x11; 32])).unwrap();
+    let second = source_key_scoped("shared-agent", SourceAnchorScope::Lineage([0x22; 32])).unwrap();
+    let first_record = project_event(
+        &first,
+        "shared-session",
+        SessionGeneration::Active,
+        1,
+        "shared-event",
+        &json!({"role": "user", "content": "same body"}),
+        1,
+    )
+    .unwrap();
+    let second_record = project_event(
+        &second,
+        "shared-session",
+        SessionGeneration::Active,
+        1,
+        "shared-event",
+        &json!({"role": "user", "content": "same body"}),
+        1,
+    )
+    .unwrap();
+    assert_ne!(first_record.session_id, second_record.session_id);
+    assert_ne!(first_record.event_id, second_record.event_id);
+
+    let sibling =
+        source_key_scoped("sibling-agent", SourceAnchorScope::Lineage([0x11; 32])).unwrap();
+    assert_ne!(first.identity(), sibling.identity());
+}
+
 struct Fixture {
     root: TempDir,
     path: PathBuf,

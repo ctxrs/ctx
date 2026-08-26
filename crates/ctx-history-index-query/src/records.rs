@@ -5,14 +5,25 @@ pub(crate) fn stored_event_record(
     address: DocAddress,
     fields: Fields,
 ) -> Result<EventRecord> {
+    stored_event_record_with_size(searcher, address, fields).map(|(record, _)| record)
+}
+
+pub(crate) fn stored_event_record_with_size(
+    searcher: &tantivy::Searcher,
+    address: DocAddress,
+    fields: Fields,
+) -> Result<(EventRecord, usize)> {
     #[cfg(any(test, feature = "test-support"))]
     STORED_EVENT_RECORD_MATERIALIZATIONS
         .set(STORED_EVENT_RECORD_MATERIALIZATIONS.get().saturating_add(1));
     let document: TantivyDocument = searcher.doc(address)?;
-    let (core_record, _) =
+    let (core_record, encoded_core_bytes) =
         ctx_history_index_format::decode_core_document(searcher, address, &document, fields)?;
     note_core_record_decode();
-    Ok(event_record_from_owned_core(core_record))
+    Ok((
+        event_record_from_owned_core(core_record),
+        encoded_core_bytes,
+    ))
 }
 
 pub(super) fn stored_core_event_record(
@@ -145,12 +156,19 @@ pub(super) struct SessionEventAddressCandidate {
 
 impl From<&EventRecord> for SessionRecord {
     fn from(event: &EventRecord) -> Self {
+        let (provider_key, source_id) = event
+            .custom_source_identity()
+            .map_or((None, None), |(provider_key, source_id)| {
+                (Some(provider_key.to_owned()), Some(source_id.to_owned()))
+            });
         Self {
             session_id: event.session_id,
             parent_session_id: event.parent_session_id,
             root_session_id: event.root_session_id,
             session_relationship: event.session_relationship,
             provider: event.provider.clone(),
+            provider_key,
+            source_id,
             source_format: event.source_format.clone(),
             provider_session_id: event.provider_session_id.clone(),
             agent_scope: event.agent_scope,

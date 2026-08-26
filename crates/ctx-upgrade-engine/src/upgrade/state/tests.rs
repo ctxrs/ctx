@@ -1,5 +1,151 @@
 use super::*;
 
+fn due_hint_install(temp: &tempfile::TempDir) -> PathBuf {
+    let install = temp.path().join("ctx");
+    fs::write(&install, b"test executable").unwrap();
+    fs::write(
+        crate::upgrade::install::install_marker_path(&install),
+        b"managed marker candidate",
+    )
+    .unwrap();
+    install
+}
+
+#[test]
+fn foreground_due_hint_is_inert_without_a_regular_marker() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let install = temp.path().join("ctx");
+    fs::write(&install, b"test executable")?;
+    assert!(!automatic_upgrade_check_due_for(
+        &install,
+        Duration::from_secs(60)
+    )?);
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(
+            temp.path().join("missing"),
+            crate::upgrade::install::install_marker_path(&install),
+        )?;
+        assert!(!automatic_upgrade_check_due_for(
+            &install,
+            Duration::from_secs(60)
+        )?);
+    }
+    Ok(())
+}
+
+#[test]
+fn foreground_due_hint_uses_bounded_shared_cadence() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let install = due_hint_install(&temp);
+    let interval = Duration::from_secs(60);
+    assert!(automatic_upgrade_check_due_for(&install, interval)?);
+
+    fs::write(
+        state_path(&install),
+        serde_json::to_vec(&json!({
+            "schema_version": STATE_SCHEMA_VERSION,
+            "next_check_unix_s": now_unix_s().saturating_add(60),
+        }))?,
+    )?;
+    assert!(!automatic_upgrade_check_due_for(&install, interval)?);
+
+    fs::write(state_path(&install), b"{malformed")?;
+    assert!(automatic_upgrade_check_due_for(&install, interval)?);
+
+    fs::write(
+        state_path(&install),
+        vec![b'x'; DUE_HINT_STATE_MAX_BYTES as usize + 1],
+    )?;
+    assert!(automatic_upgrade_check_due_for(&install, interval)?);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn foreground_due_hint_does_not_follow_or_block_on_nonregular_state() -> Result<()> {
+    use std::{ffi::CString, os::unix::ffi::OsStrExt as _};
+
+    let temp = tempfile::tempdir()?;
+    let install = due_hint_install(&temp);
+    let state = state_path(&install);
+    std::os::unix::fs::symlink("/dev/zero", &state)?;
+    assert!(automatic_upgrade_check_due_for(
+        &install,
+        Duration::from_secs(60)
+    )?);
+
+    fs::remove_file(&state)?;
+    let state_c = CString::new(state.as_os_str().as_bytes())?;
+    if unsafe { libc::mkfifo(state_c.as_ptr(), 0o600) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    assert!(automatic_upgrade_check_due_for(
+        &install,
+        Duration::from_secs(60)
+    )?);
+    Ok(())
+}
+
+#[test]
+fn foreground_due_hint_suppresses_only_recent_in_progress_attempts() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let install = due_hint_install(&temp);
+    let interval = Duration::from_secs(60);
+
+    fs::write(
+        state_path(&install),
+        serde_json::to_vec(&json!({
+            "schema_version": STATE_SCHEMA_VERSION,
+            "status": "checking",
+            "last_attempt_at": utc_now(),
+        }))?,
+    )?;
+    assert!(!automatic_upgrade_check_due_for(&install, interval)?);
+
+    let stale = utc_now()
+        - chrono::Duration::from_std(DUE_HINT_RECENT_ATTEMPT_GRACE)?
+        - chrono::Duration::seconds(1);
+    fs::write(
+        state_path(&install),
+        serde_json::to_vec(&json!({
+            "schema_version": STATE_SCHEMA_VERSION,
+            "status": "staged",
+            "last_attempt_at": stale,
+        }))?,
+    )?;
+    assert!(automatic_upgrade_check_due_for(&install, interval)?);
+
+    let future = utc_now() + chrono::Duration::hours(24);
+    fs::write(
+        state_path(&install),
+        serde_json::to_vec(&json!({
+            "schema_version": STATE_SCHEMA_VERSION,
+            "status": "checking",
+            "last_attempt_at": future,
+        }))?,
+    )?;
+    assert!(automatic_upgrade_check_due_for(&install, interval)?);
+    Ok(())
+}
+
+#[test]
+fn current_and_legacy_automatic_sources_share_cadence_and_backoff() {
+    for source in ["automatic", "daemon"] {
+        let mut success = UpgradeState::default();
+        let attempt = success.begin(source);
+        success.terminal(&attempt, "up_to_date", Duration::from_secs(60), 100);
+        assert_eq!(success.next_check_unix_s, Some(160), "{source}");
+        assert_eq!(success.consecutive_failures, 0, "{source}");
+
+        let mut failure = UpgradeState::default();
+        let attempt = failure.begin(source);
+        failure.fail(&attempt, "network", 100);
+        assert_eq!(failure.next_retry_unix_s, Some(160), "{source}");
+        assert_eq!(failure.consecutive_failures, 1, "{source}");
+    }
+}
+
 fn test_installation() -> Result<(tempfile::TempDir, PathBuf)> {
     let temp = tempfile::tempdir()?;
     let bin = temp.path().join("bin");
@@ -133,21 +279,21 @@ fn fresh_and_interrupted_state_are_due_without_a_persisted_lease() {
 }
 
 #[test]
-fn successful_check_uses_normal_cadence() {
+fn successful_automatic_check_uses_normal_cadence() {
     let mut state = UpgradeState::default();
-    let attempt = state.begin("daemon");
+    let attempt = state.begin("automatic");
     state.terminal(&attempt, "up_to_date", Duration::from_secs(100), 1_000);
     assert!(!auto_check_due(&state, Duration::from_secs(100), 1_099));
     assert!(auto_check_due(&state, Duration::from_secs(100), 1_100));
 }
 
 #[test]
-fn only_daemon_failures_advance_automatic_backoff() {
-    let mut daemon = UpgradeState::default();
-    let attempt = daemon.begin("daemon");
-    daemon.fail(&attempt, "network", 1_000);
-    assert_eq!(daemon.consecutive_failures, 1);
-    assert_eq!(daemon.next_retry_unix_s, Some(1_060));
+fn only_automatic_failures_advance_automatic_backoff() {
+    let mut automatic = UpgradeState::default();
+    let attempt = automatic.begin("automatic");
+    automatic.fail(&attempt, "network", 1_000);
+    assert_eq!(automatic.consecutive_failures, 1);
+    assert_eq!(automatic.next_retry_unix_s, Some(1_060));
 
     let mut manual = UpgradeState::default();
     let attempt = manual.begin("manual_apply");
@@ -157,7 +303,7 @@ fn only_daemon_failures_advance_automatic_backoff() {
 }
 
 #[test]
-fn manual_success_does_not_change_daemon_cadence_or_backoff() {
+fn manual_success_does_not_change_automatic_cadence_or_backoff() {
     let mut state = UpgradeState {
         schema_version: STATE_SCHEMA_VERSION,
         next_check_unix_s: Some(2_000),

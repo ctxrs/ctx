@@ -79,7 +79,6 @@ impl ctx_history_cli::ImportApplicationPort for CliImportHost {
     fn refresh(
         &mut self,
         data_root: &Path,
-        _config: ctx_history_cli::HistoryCliConfig,
         selection: RefreshSelection,
         no_daemon: bool,
         progress: &mut ProgressReporter<'_>,
@@ -132,6 +131,7 @@ mod tests {
             ["ImportCore", "RefreshRequest"].concat(),
             ["run", "_ingest"].concat(),
             ["Source", "Discovery", "Port"].concat(),
+            ["History", "Cli", "Config"].concat(),
         ] {
             assert!(
                 !source.contains(&forbidden),

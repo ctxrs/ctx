@@ -23,11 +23,11 @@ use ctx_history_core::{
     derive_session_id, AgentScope, CaptureProvider, CertifiedSource, CertifiedSourceAppend,
     CertifiedSourceDeletion, CertifiedSourceInventory, CoreActivity, CoreRecord,
     CtxHistoryJsonlCopiedFromSelector, CtxHistoryJsonlCopyProofKind, CtxHistoryJsonlEventRecord,
-    CtxHistoryJsonlFileReferenceRecord, CtxHistoryJsonlLineageContract, CtxHistoryJsonlRecord,
-    NativeSessionKey, ProjectionContractError, ProviderDeclaredFact, ProviderNativeCopyProof,
+    CtxHistoryJsonlLineageContract, CtxHistoryJsonlRecord, NativeSessionKey,
+    ProjectionContractError, ProviderDeclaredFact, ProviderNativeCopyProof,
     ProviderNativeSessionRelationship, ScannedSourceCounts, SessionIdentityInput, SourceAnchor,
-    SourceFrontier, SourceKey, StableEntityId, TypedKey, MAX_CORE_CONTENT_BYTES,
-    MAX_PROVIDER_DECLARED_FACTS,
+    SourceAnchorScope, SourceFrontier, SourceKey, StableEntityId, TypedKey,
+    CTX_HISTORY_JSONL_SCHEMA_VERSION, MAX_CORE_CONTENT_BYTES, MAX_PROVIDER_DECLARED_FACTS,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -42,11 +42,10 @@ use crate::{
     provider::{
         custom_history_jsonl::{validate_custom_history_identifier, validate_custom_source_record},
         source_backed::family::jsonl::{
-            JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyBaseScope, JsonlFamilyInventory,
-            JsonlFamilyLeaf, JsonlFamilyOptimizedLeafOutcome, JsonlFamilyProjector,
-            JsonlFamilyPublication, JsonlFamilyRootMissingMode, JsonlFamilyTerminalProof,
-            JsonlFamilyWorkerContext, JsonlPhysicalDigest, JsonlPhysicalStream, JsonlRecordFraming,
-            JsonlResumableSha256,
+            JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyInventory, JsonlFamilyLeaf,
+            JsonlFamilyOptimizedLeafOutcome, JsonlFamilyProjector, JsonlFamilyPublication,
+            JsonlFamilyRootMissingMode, JsonlFamilyTerminalProof, JsonlFamilyWorkerContext,
+            JsonlPhysicalDigest, JsonlPhysicalStream, JsonlRecordFraming, JsonlResumableSha256,
         },
     },
     CaptureError, ProviderImportSummary, ProviderSourceFailureKind, MAX_PROVIDER_JSONL_LINE_BYTES,
@@ -60,11 +59,11 @@ use inventory::{custom_history_jsonl_family_inventory, source_observation};
 use parser::parse_projection;
 
 const CUSTOM_SOURCE_IDENTITY_VERSION: u32 = 1;
-const CUSTOM_HISTORY_PUBLIC_SCHEMA_VERSION: &str = "ctx-history-jsonl-v1";
-const CUSTOM_ROUTE_SOURCE_FORMAT: &str = "ctx_history_jsonl_v1";
-const CUSTOM_SOURCE_SCHEMA_VARIANT: &str = "ctx-history-jsonl-v1-source-backed-v1";
+const CUSTOM_HISTORY_PUBLIC_SCHEMA_VERSION: &str = CTX_HISTORY_JSONL_SCHEMA_VERSION;
+const CUSTOM_ROUTE_SOURCE_FORMAT: &str = "ctx_history_jsonl_v2";
+const CUSTOM_SOURCE_SCHEMA_VARIANT: &str = "ctx-history-jsonl-v2-source-backed-v1";
 pub(super) const CUSTOM_SOURCE_BACKED_PARSER_REVISION: &str =
-    "custom-history-jsonl-source-backed-v8-released-v1-compat";
+    "custom-history-jsonl-source-backed-v9-provider-session-identity";
 const CUSTOM_SOURCE_FRONTIER_KIND: &str = "custom-history-jsonl-frontier-v2";
 pub(super) const CUSTOM_SESSION_KEY_NAMESPACE: &str = "custom-history.session";
 pub(super) const CUSTOM_EVENT_KEY_NAMESPACE: &str = "custom-history.event";
@@ -123,9 +122,9 @@ pub(super) fn record_custom_history_work(update: impl FnOnce(&mut CustomHistoryS
 pub(crate) enum CustomHistorySourceBackedBound {
     CatalogRecords,
     CatalogMetadataBytes,
-    NativeSessionIdBytes,
-    ParentSessionIdBytes,
-    RootSessionIdBytes,
+    ProviderSessionIdBytes,
+    ParentProviderSessionIdBytes,
+    RootProviderSessionIdBytes,
     EventIdBytes,
     EdgeIdBytes,
 }
@@ -172,6 +171,7 @@ pub(crate) type CustomHistorySourceBackedResult<T> = Result<T, CustomHistorySour
 pub(crate) struct CustomHistorySourceBackedInput {
     path: PathBuf,
     catalog_lineage: [u8; 32],
+    source_anchor_scope: SourceAnchorScope,
 }
 
 impl CustomHistorySourceBackedInput {
@@ -179,6 +179,20 @@ impl CustomHistorySourceBackedInput {
         Self {
             path: path.into(),
             catalog_lineage,
+            source_anchor_scope: SourceAnchorScope::Unqualified,
+        }
+    }
+
+    pub(crate) fn explicit_with_source_root_lineage(
+        path: impl Into<PathBuf>,
+        catalog_lineage: [u8; 32],
+        source_root_lineage: Option<[u8; 32]>,
+    ) -> Self {
+        Self {
+            path: path.into(),
+            catalog_lineage,
+            source_anchor_scope: source_root_lineage
+                .map_or(SourceAnchorScope::Unqualified, SourceAnchorScope::Lineage),
         }
     }
 
@@ -187,12 +201,13 @@ impl CustomHistorySourceBackedInput {
     }
 
     pub(crate) fn source_key(&self) -> CustomHistorySourceBackedResult<SourceKey> {
-        Ok(SourceKey::derive(
+        Ok(SourceKey::derive_scoped(
             CaptureProvider::Custom.as_str(),
             CUSTOM_ROUTE_SOURCE_FORMAT,
             CUSTOM_SOURCE_SCHEMA_VARIANT,
             CUSTOM_SOURCE_IDENTITY_VERSION,
             SourceAnchor::CatalogLineage(self.catalog_lineage),
+            self.source_anchor_scope,
         )?)
     }
 }
@@ -245,10 +260,6 @@ impl<R: JsonlProviderRuntime> JsonlFamilyAdapter for CustomHistoryJsonlFamilyAda
 
     fn root_missing_mode(&self) -> JsonlFamilyRootMissingMode {
         JsonlFamilyRootMissingMode::AuthoritativeEmpty
-    }
-
-    fn base_scope(&self) -> JsonlFamilyBaseScope {
-        JsonlFamilyBaseScope::Route
     }
 
     fn discover(&self, root: &Path) -> crate::Result<JsonlFamilyInventory> {
@@ -473,11 +484,9 @@ pub(super) struct CustomSourceCatalogEntry {
 #[derive(Debug)]
 pub(super) struct CustomSessionCatalogEntry {
     pub(super) line_number: usize,
-    pub(super) source_id: String,
-    pub(super) session_id: String,
-    pub(super) native_session_id: Option<String>,
-    pub(super) parent_session_id: Option<String>,
-    pub(super) root_session_id: Option<String>,
+    pub(super) provider_session_id: String,
+    pub(super) parent_provider_session_id: Option<String>,
+    pub(super) root_provider_session_id: Option<String>,
     pub(super) session_relationship: Option<ProviderNativeSessionRelationship>,
     pub(super) agent_scope: Option<AgentScope>,
     pub(super) cwd: Option<String>,
@@ -494,7 +503,7 @@ pub(super) struct CustomEventCatalogEntry {
 
 #[derive(Debug, Clone)]
 pub(super) struct ValidatedCopiedFrom {
-    pub(super) ancestor_session_id: String,
+    pub(super) ancestor_provider_session_id: String,
     pub(super) ancestor_event_id: String,
     pub(super) proof: ProviderNativeCopyProof,
 }
@@ -502,7 +511,7 @@ pub(super) struct ValidatedCopiedFrom {
 #[derive(Debug)]
 pub(super) struct SpooledCustomEvent {
     pub(super) source_id: String,
-    pub(super) session_id: String,
+    pub(super) provider_session_id: String,
     pub(super) event_index: u64,
     pub(super) event_id: Option<String>,
     pub(super) event_type: String,
@@ -517,7 +526,7 @@ impl SpooledCustomEvent {
     pub(super) fn key(&self) -> CustomEventKey {
         (
             self.source_id.clone(),
-            self.session_id.clone(),
+            self.provider_session_id.clone(),
             self.event_index,
         )
     }
@@ -754,14 +763,14 @@ pub(super) fn custom_session_identity(
     source: &SourceKey,
     provider_key: &str,
     source_id: &str,
-    session_id: &str,
+    provider_session_id: &str,
 ) -> CustomHistorySourceBackedResult<StableEntityId> {
     let native_session_key = NativeSessionKey::composite(
         CUSTOM_SESSION_KEY_NAMESPACE,
         vec![
             TypedKey::utf8(provider_key)?,
             TypedKey::utf8(source_id)?,
-            TypedKey::utf8(session_id)?,
+            TypedKey::utf8(provider_session_id)?,
         ],
     )?;
     Ok(derive_session_id(SessionIdentityInput {

@@ -128,6 +128,8 @@ fn daemon_cli_config<'a>(config: &'a crate::config::AppConfig) -> DaemonCliConfi
         config.semantic_search_enabled(),
         config.semantic_search_source(),
     )
+    .with_automatic_provider_discovery(config.automatic_source_discovery_enabled())
+    .with_provider_roots(config.provider_root_definitions())
 }
 
 fn owned_daemon_cli_config(config: crate::config::AppConfig) -> DaemonCliConfig<'static> {
@@ -141,6 +143,8 @@ fn owned_daemon_cli_config(config: crate::config::AppConfig) -> DaemonCliConfig<
     };
     let semantic_enabled = config.semantic_search_enabled();
     let semantic_source = config.semantic_search_source();
+    let automatic_provider_discovery = config.automatic_source_discovery_enabled();
+    let provider_roots = config.provider_root_definitions();
     DaemonCliConfig::new(
         analytics_enabled,
         automatic_upgrade_enabled,
@@ -153,6 +157,8 @@ fn owned_daemon_cli_config(config: crate::config::AppConfig) -> DaemonCliConfig<
         semantic_enabled,
         semantic_source,
     )
+    .with_automatic_provider_discovery(automatic_provider_discovery)
+    .with_provider_roots(provider_roots)
 }
 
 fn daemon_trigger(

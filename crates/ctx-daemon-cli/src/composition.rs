@@ -53,6 +53,8 @@ pub struct AppConfig<'a> {
     pub daemon: DaemonConfig,
     semantic_enabled: bool,
     semantic_source: &'static str,
+    automatic_provider_discovery: bool,
+    provider_roots: Vec<ctx_history_capture::ProviderRootDefinition>,
 }
 
 impl<'a> AppConfig<'a> {
@@ -77,7 +79,30 @@ impl<'a> AppConfig<'a> {
             daemon,
             semantic_enabled,
             semantic_source,
+            automatic_provider_discovery: true,
+            provider_roots: Vec::new(),
         }
+    }
+
+    pub fn with_provider_roots(
+        mut self,
+        roots: Vec<ctx_history_capture::ProviderRootDefinition>,
+    ) -> Self {
+        self.provider_roots = roots;
+        self
+    }
+
+    pub fn with_automatic_provider_discovery(mut self, enabled: bool) -> Self {
+        self.automatic_provider_discovery = enabled;
+        self
+    }
+
+    pub fn provider_roots(&self) -> &[ctx_history_capture::ProviderRootDefinition] {
+        &self.provider_roots
+    }
+
+    pub const fn automatic_provider_discovery_enabled(&self) -> bool {
+        self.automatic_provider_discovery
     }
 
     pub fn load(data_root: &Path) -> Result<AppConfig<'static>> {

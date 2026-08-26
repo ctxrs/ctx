@@ -235,6 +235,10 @@ impl<'a> DaemonApplication<'a> {
         lifecycle::daemon_start_is_fenced(self.host)
     }
 
+    pub fn active_daemon_matches_current_executable(&self, data_root: &Path) -> Result<bool> {
+        lifecycle::active_daemon_matches_current_executable(data_root)
+    }
+
     pub fn request_daemon_start(
         &self,
         data_root: &Path,

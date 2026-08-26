@@ -55,6 +55,9 @@ impl CodexFileObservation {
 #[derive(Debug, Clone)]
 pub(crate) struct CodexCatalogSource {
     pub(crate) source_path: PathBuf,
+    /// Stable physical provider-home lineage for session-tree routes. Exact
+    /// one-file imports retain their released path-independent identity.
+    pub(crate) source_root_lineage: Option<[u8; 32]>,
     pub(crate) catalog_observation: CodexFileObservation,
     /// JSONL admission observation gathered by session-tree inventory while
     /// the source was already securely open. Other catalog routes leave this
@@ -139,6 +142,7 @@ fn catalog_source(session: &CatalogSession) -> Result<CodexCatalogSource, &'stat
         .transpose()?;
     Ok(CodexCatalogSource {
         source_path: PathBuf::from(&session.source_path),
+        source_root_lineage: None,
         catalog_observation: CodexFileObservation {
             len: session.file_size_bytes,
             modified_at_ms: session.file_modified_at_ms,

@@ -40,6 +40,7 @@ use crate::{
 };
 const ACTIVE_GENERATION_POINTER_VERSION: u32 = 2;
 const GENERATION_DIRECTORY_PREFIX: &str = "generation-";
+const GENERATION_RECLAIM_REMOVE_ATTEMPTS: usize = 4;
 
 pub fn lexical_index_settings() -> IndexSettings {
     IndexSettings {
@@ -368,8 +369,7 @@ pub fn reclaim_inactive_generation_directories(
             };
             let candidate = RetainedGenerationDirectory::open(entry.path())?;
             reclamation_checkpoint(ReclamationStage::AfterCandidateRetained, candidate.path())?;
-            candidate.validate_binding()?;
-            fs::remove_dir_all(candidate.path())?;
+            remove_reclaimed_generation_directory(&candidate)?;
             removed = true;
         }
     }
@@ -377,6 +377,23 @@ pub fn reclaim_inactive_generation_directories(
         sync_directory(&generations)?;
     }
     Ok(())
+}
+
+fn remove_reclaimed_generation_directory(candidate: &RetainedGenerationDirectory) -> Result<()> {
+    for attempt in 0..GENERATION_RECLAIM_REMOVE_ATTEMPTS {
+        candidate.validate_binding()?;
+        match fs::remove_dir_all(candidate.path()) {
+            Ok(()) => return Ok(()),
+            Err(error)
+                if error.kind() == std::io::ErrorKind::DirectoryNotEmpty
+                    && attempt + 1 < GENERATION_RECLAIM_REMOVE_ATTEMPTS =>
+            {
+                std::thread::yield_now();
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Err(IndexError::ConcurrentGenerationChange)
 }
 
 fn create_private_candidate_directory(path: &Path) -> std::io::Result<()> {

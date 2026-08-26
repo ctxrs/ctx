@@ -151,6 +151,44 @@ if value is not None:
 PY
 }
 
+accepted_notary_log_matches() {
+  local path="$1"
+  local submission_id="$2"
+  python3 - "${path}" "${submission_id}" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as source:
+        value = json.load(source)
+except (OSError, json.JSONDecodeError):
+    raise SystemExit(1)
+if not isinstance(value, dict) or value.get("status") != "Accepted":
+    raise SystemExit(1)
+if value.get("jobId", value.get("id")) != sys.argv[2]:
+    raise SystemExit(1)
+PY
+}
+
+sanitize_notary_stderr() {
+  local path="$1"
+  [[ -f "${path}" ]] || return 0
+  python3 - "${path}" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+path = Path(sys.argv[1])
+value = path.read_text(encoding="utf-8", errors="replace")
+value = re.sub(
+    r"https://notary-artifacts-prod\.s3\.amazonaws\.com/\S+",
+    "[redacted Apple notary log URL]",
+    value,
+)
+path.write_text(value, encoding="utf-8")
+PY
+}
+
 sha256_file() {
   local path="$1"
   if command -v sha256sum >/dev/null 2>&1; then
@@ -423,11 +461,33 @@ else
     >"${log_json}" 2>"${submit_stderr}"
   submit_status=$?
   set -e
+  sanitize_notary_stderr "${submit_stderr}"
   submission_id="$(sed -n 's/.*created submission ID: \([0-9A-Fa-f-][0-9A-Fa-f-]*\).*/\1/p' "${submit_stderr}" | head -n 1)"
   if [[ "${submit_status}" -eq 0 && -n "${submission_id}" ]]; then
     printf '{"id":"%s","status":"Accepted"}\n' "${submission_id}" >"${submit_json}"
     rcodesign notary-log --api-key-file "${notary_api_key}" "${submission_id}" \
       >"${log_json}" 2>"${log_stderr}" || true
+    sanitize_notary_stderr "${log_stderr}"
+  elif [[ -n "${submission_id}" ]]; then
+    for retry_delay in 0 2 5 10; do
+      if [[ "${retry_delay}" -gt 0 ]]; then
+        sleep "${retry_delay}"
+      fi
+      set +e
+      rcodesign notary-log --api-key-file "${notary_api_key}" "${submission_id}" \
+        >"${log_json}" 2>"${log_stderr}"
+      log_status=$?
+      set -e
+      sanitize_notary_stderr "${log_stderr}"
+      if [[ "${log_status}" -eq 0 ]]; then
+        if accepted_notary_log_matches "${log_json}" "${submission_id}"; then
+          printf '{"id":"%s","status":"Accepted"}\n' "${submission_id}" \
+            >"${submit_json}"
+          submit_status=0
+        fi
+        break
+      fi
+    done
   fi
 fi
 chmod 0644 "${submit_json}" "${submit_stderr}" 2>/dev/null || true

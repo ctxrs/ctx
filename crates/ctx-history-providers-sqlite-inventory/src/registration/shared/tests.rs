@@ -22,7 +22,9 @@ use sha2::{Digest, Sha256};
 
 use super::*;
 use crate::{
-    provider_sources::SqliteSourceAccessError,
+    provider_sources::{
+        SqliteArtifactKind, SqliteCleanupStatus, SqliteFailurePhase, SqliteSourceAccessError,
+    },
     registration::{
         astrbot_scan_route_result, lingma_scan_route_result, AstrBotSourceBackedErrorV0,
         LingmaSourceBackedErrorV0,
@@ -65,6 +67,7 @@ struct TestState {
     peak_scans: usize,
     active_scans_by_path: HashMap<PathBuf, usize>,
     max_active_scans_per_path: usize,
+    scan_failures: HashMap<PathBuf, SourceBackedRouteError>,
 }
 
 enum TestAfterSealAction {
@@ -104,6 +107,11 @@ impl TestProvider {
         assert!(replaced.is_none());
     }
 
+    fn fail_scan(&self, path: PathBuf, error: SourceBackedRouteError) {
+        let replaced = self.state.lock().unwrap().scan_failures.insert(path, error);
+        assert!(replaced.is_none());
+    }
+
     fn sorted_outputs(&self) -> Vec<ProjectionOutput> {
         let mut outputs = self.state.lock().unwrap().outputs.clone();
         outputs.sort_by_key(|output| {
@@ -129,6 +137,7 @@ impl TestProvider {
         state.peak_scans = 0;
         state.max_active_scans_per_path = 0;
         state.scan_barrier = None;
+        state.scan_failures.clear();
     }
 }
 
@@ -216,6 +225,16 @@ impl SqliteInventoryProvider<TestLifecycle, TestSpool> for TestProvider {
         let (_activity, barrier) = TestScanActivity::begin(&self.state, &leaf.path);
         if let Some(barrier) = barrier {
             barrier.wait();
+        }
+        let scan_failure = self
+            .state
+            .lock()
+            .unwrap()
+            .scan_failures
+            .get(&leaf.path)
+            .cloned();
+        if let Some(error) = scan_failure {
+            return Err(abort_sqlite_inventory_snapshot(snapshot, error));
         }
         let rows = {
             let connection = snapshot.connection().map_err(sqlite_source_route_error)?;
@@ -796,6 +815,117 @@ fn independent_databases_have_one_vs_four_parity_and_one_snapshot_each() {
     assert_no_snapshot_temp_leak(&serial_data_root);
     assert_no_snapshot_temp_leak(&parallel_data_root);
     drop(writers);
+}
+
+#[test]
+fn warm_busy_source_is_carried_while_changed_exact_sibling_succeeds() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let provider_dir = temp.path().join("provider");
+    let data_root = temp.path().join("data");
+    let busy_path = provider_dir.join("busy.sqlite");
+    let healthy_path = provider_dir.join("healthy.sqlite");
+    let busy_source = test_source("busy.sqlite");
+    let healthy_source = test_source("healthy.sqlite");
+    let busy_writer = active_wal_database(&busy_path, "busy baseline");
+    let healthy_writer = active_wal_database(&healthy_path, "healthy baseline");
+    let provider = TestProvider::with_test_workers(
+        Arc::new(Mutex::new(vec![
+            TestLeaf {
+                source: busy_source.clone(),
+                path: busy_path.clone(),
+            },
+            TestLeaf {
+                source: healthy_source.clone(),
+                path: healthy_path,
+            },
+        ])),
+        1,
+    );
+
+    let cold = run_provider(&data_root, provider.clone(), 4, Vec::new()).unwrap();
+    let cold_sources = cold.lifecycle.sources();
+    let busy_base = cold_sources
+        .iter()
+        .find(|source| {
+            source
+                .observation()
+                .source()
+                .exact_descriptor_eq(&busy_source)
+        })
+        .unwrap()
+        .clone();
+    let healthy_base = cold_sources
+        .iter()
+        .find(|source| {
+            source
+                .observation()
+                .source()
+                .exact_descriptor_eq(&healthy_source)
+        })
+        .unwrap()
+        .clone();
+
+    healthy_writer
+        .execute(
+            "update messages set body = 'healthy replacement' where id = 1",
+            [],
+        )
+        .unwrap();
+    busy_writer
+        .execute(
+            "update messages set body = 'busy replacement' where id = 1",
+            [],
+        )
+        .unwrap();
+    provider.reset_run();
+    provider.fail_scan(
+        busy_path,
+        sqlite_source_route_error(
+            SqliteSourceAccessError::SqliteControl {
+                operation: "querying the busy test provider database",
+                code: rusqlite::ffi::SQLITE_BUSY,
+            }
+            .with_diagnostic(
+                SqliteFailurePhase::Projection,
+                SqliteArtifactKind::ProviderDatabase,
+                0,
+                0,
+                SqliteCleanupStatus::NotRequired,
+            ),
+        ),
+    );
+
+    let warm = run_provider(&data_root, provider, 4, cold_sources).unwrap();
+    assert_eq!(warm.logical_source_failures.total(), 1);
+    let failure = &warm.logical_source_failures.failures()[0];
+    assert!(failure.source.exact_descriptor_eq(&busy_source));
+    assert!(failure.carried_forward);
+    assert_eq!(warm.lifecycle.sources().len(), 2);
+    let warm_busy = warm
+        .lifecycle
+        .sources()
+        .into_iter()
+        .find(|source| {
+            source
+                .observation()
+                .source()
+                .exact_descriptor_eq(&busy_source)
+        })
+        .unwrap();
+    let warm_healthy = warm
+        .lifecycle
+        .sources()
+        .into_iter()
+        .find(|source| {
+            source
+                .observation()
+                .source()
+                .exact_descriptor_eq(&healthy_source)
+        })
+        .unwrap();
+    assert_eq!(warm_busy, busy_base);
+    assert_ne!(warm_healthy.content_digest(), healthy_base.content_digest());
+    drop((busy_writer, healthy_writer));
 }
 
 #[test]

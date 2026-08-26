@@ -82,14 +82,10 @@ const SOURCE_INDEX_MACHINE_ERROR: TestOwner = TestOwner::behavioral(
     &["crates/ctx-history-cli/src/source_index/shared.rs"],
     &["render_show_error", "render_search_error", "from_str"],
 );
-const QUERY_AUTHORITY_DISPATCH_MACHINE_ERROR: TestOwner = TestOwner::behavioral(
-    "src/dispatch/tests.rs::query_authority_error_json_is_scoped_to_machine_search_show_and_locate",
+const SEARCH_DISPATCH_MACHINE_ERROR: TestOwner = TestOwner::behavioral(
+    "src/dispatch/finalization.rs::search_machine_error_uses_the_ui_writer_and_propagates_failure",
     &["src/dispatch.rs"],
-    &[
-        "command_uses_query_authority_error_json",
-        "expected",
-        "assert_eq",
-    ],
+    &["write_machine_error", "stderr_copy", "unwrap_err"],
 );
 const SOURCE_INDEX_STREAM: TestOwner = TestOwner::behavioral(
     "crates/ctx-history-cli/src/source_index/tests/additional.rs::unbounded_cli_show_streams_valid_json_beyond_4096_events_in_order",
@@ -164,12 +160,12 @@ const CLAP_OUTPUT: TestOwner = TestOwner::behavioral(
     &["write_clap_output", "contains", "rendered"],
 );
 const COMPANION_ROUTE: TestOwner = TestOwner::behavioral(
-    "src/companion.rs::subcommand_help_and_help_alias_route_to_the_companion",
+    "src/companion/contract_tests.rs::subcommand_help_and_help_alias_route_to_the_companion",
     &["src/companion.rs"],
     &["paid_family_arguments", "assert_eq"],
 );
 const CORE_CAPABILITY_RESPONSE: TestOwner = TestOwner::behavioral(
-    "src/core_capability/tests.rs::capability_response_is_one_exact_flushed_json_frame",
+    "src/core_capability/contract_tests.rs::capability_response_is_one_exact_flushed_json_frame",
     &[
         "src/core_capability.rs",
         "src/core_capability/hosted_pair_install.rs",
@@ -177,7 +173,7 @@ const CORE_CAPABILITY_RESPONSE: TestOwner = TestOwner::behavioral(
     &["write_response_frame", "assert_eq"],
 );
 const HOSTED_PAIR_INSTALL_ERROR: TestOwner = TestOwner::behavioral(
-    "src/core_capability/tests.rs::only_the_exact_hidden_argv_is_intercepted",
+    "src/core_capability/contract_tests.rs::only_the_exact_hidden_argv_is_intercepted",
     &["src/core_capability.rs"],
     &["intercept", "HOSTED_PAIR_INSTALL_INVOCATION", "is_none"],
 );
@@ -581,6 +577,30 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
     ),
     allow!(
         DISPATCH,
+        "write_machine_error#1@1d0a3152e9359dd8",
+        DirectWrite,
+        MachineProtocol,
+        "Search machine-mode terminal error with observable write failure",
+        SEARCH_DISPATCH_MACHINE_ERROR
+    ),
+    allow!(
+        DISPATCH,
+        "write_machine_error#1@f6527bbd5cb1a91e",
+        UiRawWriter,
+        Infrastructure,
+        "Search machine-mode error uses the selected Ui stderr writer",
+        SEARCH_DISPATCH_MACHINE_ERROR
+    ),
+    allow!(
+        DISPATCH,
+        "write_machine_error#1@6141a6c820169db8",
+        PrintMacro,
+        MachineProtocol,
+        "unchanged generic machine-mode command error",
+        UNIT
+    ),
+    allow!(
+        DISPATCH,
         "run#1@e980ea9ca2d818d3",
         PrintMacro,
         JustifiedPlainHuman,
@@ -601,38 +621,6 @@ pub(super) const ALLOWLIST: &[AllowEntry] = &[
         StderrConstructor,
         Infrastructure,
         "final process stream flush",
-        UNIT
-    ),
-    allow!(
-        DISPATCH,
-        "run_cli#1@2912ee43f3606c5f",
-        PrintMacro,
-        MachineProtocol,
-        JSON_PROTOCOL,
-        QUERY_AUTHORITY_DISPATCH_MACHINE_ERROR
-    ),
-    allow!(
-        DISPATCH,
-        "run_cli#2@64c8afd2f04c16a3",
-        PrintMacro,
-        MachineProtocol,
-        JSON_PROTOCOL,
-        UNIT
-    ),
-    allow!(
-        DISPATCH,
-        "run_cli#3@638b02f9a8248d06",
-        PrintMacro,
-        MachineProtocol,
-        JSON_PROTOCOL,
-        UNIT
-    ),
-    allow!(
-        DISPATCH,
-        "run_cli#4@1f99826fdc74e99b",
-        PrintMacro,
-        MachineProtocol,
-        "generic machine-mode command error",
         UNIT
     ),
     allow!(

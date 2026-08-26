@@ -108,6 +108,7 @@ pub(crate) fn apply_hermetic_env(command: &mut Command, temp: &TempDir) {
         "CTX_DISABLE_DAEMON",
         "CTX_UPGRADE_OFF",
         "CTX_DISABLE_AUTO_UPGRADE",
+        "CTX_AUTOMATIC_UPGRADE_WORKER_RECEIPT_FOR_TESTS",
     ] {
         command.env_remove(name);
     }

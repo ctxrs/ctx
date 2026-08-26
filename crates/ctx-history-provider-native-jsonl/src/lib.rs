@@ -175,7 +175,9 @@ where
 {
     visit_bounded_tree_files(
         root,
-        &mut |candidate| dialect::native_jsonl_file_candidate_is_selected(provider, candidate),
+        &mut |candidate| {
+            dialect::native_jsonl_file_candidate_is_selected(provider, root, candidate)
+        },
         &mut |source_file| visit(source_file.path()),
     )
 }

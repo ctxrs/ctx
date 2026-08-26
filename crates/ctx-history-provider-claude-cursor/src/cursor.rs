@@ -1,12 +1,19 @@
 //! Provider-owned Cursor discovery, parsing, and complete Core projection.
 
 mod layout;
+#[cfg(test)]
+mod layout_tests;
 mod parser;
 mod projection;
 pub(crate) mod source_backed;
 
-pub use layout::{discover_cursor_transcripts, CursorDiscoveryIssueKind};
-pub(crate) use source_backed::cursor_jsonl_adapter;
+pub use layout::{
+    discover_cursor_transcripts, probe_cursor_transcript_availability, CursorDiscoveryIssueKind,
+    CursorTranscriptAvailability,
+};
+pub(crate) use source_backed::{
+    cursor_jsonl_adapter, cursor_jsonl_adapter_with_source_root_lineage,
+};
 
 #[cfg(test)]
 mod tests {

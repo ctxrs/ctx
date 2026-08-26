@@ -83,11 +83,6 @@ impl CommitReceipt {
             manifest,
         )
     }
-
-    #[cfg(test)]
-    pub(crate) fn shared_manifest(&self) -> Arc<GenerationManifest> {
-        Arc::clone(&self.manifest)
-    }
 }
 
 /// Whether a commit call advanced the durable generation pointer or reused the

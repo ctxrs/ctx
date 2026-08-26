@@ -9,8 +9,8 @@ pub use ctx_history_source_discovery::{
     CrushProjectInventorySelector, CrushProjectInventorySelectorError, DiscoveryContext,
     DiscoveryIssue, DiscoveryPlatform, DiscoveryPlatformDirs, DiscoveryReport,
     LingmaInventorySelector, PathPresence, ProviderCatalogSupport, ProviderImportSupport,
-    ProviderSource, ProviderSourceKind, ProviderSourceSpec, ProviderSourceStatus,
-    StaticProviderProbeCatalog, OPENHANDS_CURRENT_CLI_SOURCE_FORMAT,
+    ProviderSource, ProviderSourceKind, ProviderSourceRouteProvenance, ProviderSourceSpec,
+    ProviderSourceStatus, StaticProviderProbeCatalog, OPENHANDS_CURRENT_CLI_SOURCE_FORMAT,
 };
 
 #[cfg(test)]
@@ -31,20 +31,6 @@ pub(crate) fn test_provider_probes() -> StaticProviderProbeCatalog {
         CursorTranscriptProbeOutcome::NotFound
     }
     StaticProviderProbeCatalog::new(CursorProbeFragment::new(cursor))
-}
-
-#[cfg(test)]
-pub(crate) mod provider_sources {
-    use std::path::PathBuf;
-
-    use ctx_history_core::CaptureProvider;
-
-    pub(crate) fn provider_source_for_path(
-        provider: CaptureProvider,
-        path: PathBuf,
-    ) -> crate::ProviderSource {
-        crate::provider_source_for_path(provider, path)
-    }
 }
 
 pub use source_backed::*;

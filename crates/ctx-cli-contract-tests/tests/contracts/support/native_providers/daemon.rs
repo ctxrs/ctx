@@ -105,7 +105,7 @@ pub(super) fn wait_for_imported_core(temp: &TempDir, packet: &Value) {
 }
 
 pub(super) fn assert_source_backed_search(search: &Value, provider: &str, query: &str) {
-    assert_eq!(search["schema_version"], 1, "{search:#}");
+    assert_eq!(search["schema_version"], 2, "{search:#}");
     assert_eq!(search["query"], query, "{search:#}");
     assert_eq!(search["filters"]["provider"], provider, "{search:#}");
     assert_eq!(search["retrieval"]["index"], "core", "{search:#}");

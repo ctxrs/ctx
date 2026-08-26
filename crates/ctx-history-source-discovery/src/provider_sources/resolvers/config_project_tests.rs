@@ -54,6 +54,18 @@ fn write(path: &Path, body: &str) {
     fs::write(path, body).unwrap();
 }
 
+fn assert_automatic_role(source: &crate::provider_sources::ProviderSource, components: &[&[u8]]) {
+    let expected =
+        ctx_history_capture_model::ProviderRouteRole::from_dynamic(components.iter().copied())
+            .expect("expected test role should be bounded");
+    assert_eq!(
+        source.route_provenance.automatic_route_role(),
+        Some(&expected),
+        "unexpected route role for {}",
+        source.path.display()
+    );
+}
+
 fn touch(path: &Path) {
     write(path, "");
 }
@@ -659,6 +671,123 @@ fn roo_code_official_root_policy_uses_jsonc_profiles_and_ignores_ctx_envs() {
     assert!(
         !paths.contains(&home.join(".config/Code/User/globalStorage/RooVeterinaryInc.roo-cline"))
     );
+    let custom_source = report
+        .sources
+        .iter()
+        .find(|source| source.path == custom)
+        .expect("stable base Roo installation");
+    assert_automatic_role(
+        custom_source,
+        &[b"installation", b"vscode", b"stable", b"base", b"stable"],
+    );
+    let profile_source = report
+        .sources
+        .iter()
+        .find(|source| source.path == profile_custom)
+        .expect("stable client named-profile Roo installation");
+    assert_automatic_role(
+        profile_source,
+        &[
+            b"installation",
+            b"vscode",
+            b"stable",
+            b"profile",
+            b"native-id",
+            b"utf8",
+            b"p1",
+            b"nightly",
+        ],
+    );
+    let cli_source = report
+        .sources
+        .iter()
+        .find(|source| source.path == home.join(".vscode-mock/global-storage"))
+        .expect("Roo CLI mock installation");
+    assert_automatic_role(cli_source, &[b"installation", b"cli"]);
+    let insiders_source = report
+        .sources
+        .iter()
+        .find(|source| {
+            source.path
+                == home
+                    .join(".config/Code - Insiders/User/globalStorage/rooveterinaryinc.roo-cline")
+        })
+        .expect("Roo Insiders base installation");
+    assert_automatic_role(
+        insiders_source,
+        &[b"installation", b"vscode", b"insiders", b"base", b"stable"],
+    );
+    assert_ne!(
+        custom_source.route_provenance.automatic_route_role(),
+        insiders_source.route_provenance.automatic_route_role()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn roo_code_invalid_utf8_profile_id_uses_tagged_raw_bytes() {
+    use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+
+    let temp = tempdir();
+    let home = temp.path().join("home");
+    let cwd = temp.path().join("repo");
+    fs::create_dir_all(cwd.join(".git")).unwrap();
+    let profile_id = OsString::from_vec(b"profile-\xff".to_vec());
+    let root = home
+        .join(".config/Code/User/profiles")
+        .join(&profile_id)
+        .join("globalStorage/rooveterinaryinc.roo-cline");
+    write(&root.join("tasks/one/history_item.json"), "{}");
+
+    let report = resolve(&context(&home, &cwd), spec(CaptureProvider::RooCode));
+    let source = report
+        .sources
+        .iter()
+        .find(|source| source.path == root)
+        .expect("invalid UTF-8 Roo profile should be discovered");
+    assert_automatic_role(
+        source,
+        &[
+            b"installation",
+            b"vscode",
+            b"stable",
+            b"profile",
+            b"native-id",
+            b"unix-bytes",
+            b"profile-\xff",
+            b"stable",
+        ],
+    );
+}
+
+#[test]
+fn roo_code_shared_custom_path_dedupes_to_the_first_stable_installation_role() {
+    let temp = tempdir();
+    let home = temp.path().join("home");
+    let cwd = temp.path().join("repo");
+    fs::create_dir_all(cwd.join(".git")).unwrap();
+    let shared = temp.path().join("shared-roo");
+    write(&shared.join("tasks/one/history_item.json"), "{}");
+    write(
+        &home.join(".config/Code/User/settings.json"),
+        &format!(
+            "{{\"roo-cline.customStoragePath\":{0},\"roo-code-nightly.customStoragePath\":{0}}}",
+            serde_json::to_string(shared.to_str().unwrap()).unwrap()
+        ),
+    );
+
+    let report = resolve(&context(&home, &cwd), spec(CaptureProvider::RooCode));
+    let matching = report
+        .sources
+        .iter()
+        .filter(|source| source.path == shared)
+        .collect::<Vec<_>>();
+
+    assert_eq!(matching.len(), 1);
+    assert_automatic_role(
+        matching[0],
+        &[b"installation", b"vscode", b"stable", b"base", b"stable"],
+    );
 }
 
 #[test]
@@ -690,6 +819,10 @@ fn roo_code_macos_uses_application_support_and_ignores_xdg() {
         .find(|source| source.path == selected)
         .expect("macOS Roo root should be discovered");
     assert_eq!(source.status, ProviderSourceStatus::Available);
+    assert_automatic_role(
+        source,
+        &[b"installation", b"vscode", b"stable", b"base", b"stable"],
+    );
     assert!(!source_paths(&report).contains(&ignored_xdg));
 }
 
@@ -709,6 +842,10 @@ fn roo_code_external_workspace_selector_requires_consent_and_suppresses_defaults
         .any(|path| path.ends_with("rooveterinaryinc.roo-cline")));
     assert!(source_paths(&report).contains(&home.join(".vscode-mock/global-storage")));
     assert!(!report.issues.is_empty());
+    assert!(report
+        .sources
+        .iter()
+        .all(|source| source.route_provenance.automatic_route_role().is_some()));
 }
 
 #[test]

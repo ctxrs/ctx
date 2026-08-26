@@ -38,7 +38,7 @@ pub(super) fn mux_bounded_session_metadata_from_bytes(
     bytes: Option<&[u8]>,
 ) -> Result<MuxBoundedSessionMetadata> {
     let mut summary = ProviderImportSummary::default();
-    let raw_lineage = match bytes {
+    let mut raw_lineage = match bytes {
         None => MuxRawLineageAuthority::default(),
         Some(bytes) => match mux_raw_lineage_authority(bytes) {
             Ok(authority) => authority,
@@ -53,6 +53,7 @@ pub(super) fn mux_bounded_session_metadata_from_bytes(
         Some(bytes) => match serde_json::from_slice::<Value>(bytes) {
             Ok(value) if value.is_object() => value,
             Ok(_) => {
+                raw_lineage.invalidate();
                 push_provider_import_failure(
                     &mut summary,
                     0,
@@ -61,6 +62,7 @@ pub(super) fn mux_bounded_session_metadata_from_bytes(
                 Value::Null
             }
             Err(error) => {
+                raw_lineage.invalidate();
                 push_provider_import_failure(
                     &mut summary,
                     0,
@@ -94,34 +96,22 @@ fn mux_bounded_session_metadata_from_value(
         &source.session_dir,
         "workspace id",
     )?;
-    let parent_aliases = mux_lineage_aliases(
-        &metadata,
-        &[
-            "/parentWorkspaceId",
-            "/parentTaskId",
-            "/parentSessionId",
-            "/parent_session_id",
-        ],
-    );
-    let parent_provider_session_id = parent_aliases
+    let parent_provider_session_id = raw_lineage
+        .parent
         .value
         .clone()
         .or_else(|| source.parent_provider_session_id.clone())
         .map(|value| bounded_mux_id(value, &source.session_dir, "parent workspace id"))
         .transpose()?;
-    let root_aliases = mux_lineage_aliases(
-        &metadata,
-        &["/rootWorkspaceId", "/rootTaskId", "/rootSessionId"],
-    );
-    let root_provider_session_id = root_aliases
+    let root_provider_session_id = raw_lineage
+        .root
         .value
         .clone()
-        .or_else(|| parent_provider_session_id.clone())
         .map(|value| bounded_mux_id(value, &source.session_dir, "root workspace id"))
         .transpose()?;
     let path_parent_conflicts = matches!(
         (
-            parent_aliases.value.as_deref(),
+            raw_lineage.parent.value.as_deref(),
             source.parent_provider_session_id.as_deref(),
         ),
         (Some(metadata_parent), Some(path_parent)) if metadata_parent != path_parent
@@ -136,10 +126,8 @@ fn mux_bounded_session_metadata_from_value(
             .as_deref()
             .is_some_and(|root| root == provider_session_id);
     let lineage_ambiguous = raw_lineage.audit_failed
-        || raw_lineage.parent_duplicate
-        || raw_lineage.root_duplicate
-        || parent_aliases.ambiguous
-        || root_aliases.ambiguous
+        || raw_lineage.parent.ambiguous
+        || raw_lineage.root.ambiguous
         || path_parent_conflicts
         || self_parent
         || foreign_parent_with_self_root;
@@ -172,11 +160,53 @@ fn mux_bounded_session_metadata_from_value(
     })
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 struct MuxRawLineageAuthority {
     audit_failed: bool,
-    parent_duplicate: bool,
-    root_duplicate: bool,
+    parent: MuxRawLineageClaim,
+    root: MuxRawLineageClaim,
+}
+
+#[derive(Debug, Clone, Default)]
+struct MuxRawLineageClaim {
+    value: Option<String>,
+    selected_priority: Option<u8>,
+    ambiguous: bool,
+}
+
+impl MuxRawLineageAuthority {
+    fn invalidate(&mut self) {
+        *self = Self {
+            audit_failed: true,
+            ..Self::default()
+        };
+    }
+}
+
+impl MuxRawLineageClaim {
+    fn observe(&mut self, value: Value, priority: u8) {
+        let Some(claim) = value
+            .as_str()
+            .filter(|claim| !claim.trim().is_empty() && claim.len() <= MUX_MAX_ID_BYTES)
+        else {
+            self.ambiguous = true;
+            return;
+        };
+        if self
+            .value
+            .as_deref()
+            .is_some_and(|current| current != claim)
+        {
+            self.ambiguous = true;
+        }
+        if self
+            .selected_priority
+            .is_none_or(|selected| priority < selected)
+        {
+            self.value = Some(claim.to_owned());
+            self.selected_priority = Some(priority);
+        }
+    }
 }
 
 fn mux_raw_lineage_authority(bytes: &[u8]) -> serde_json::Result<MuxRawLineageAuthority> {
@@ -200,69 +230,42 @@ impl<'de> Visitor<'de> for MuxRawLineageVisitor {
         M: MapAccess<'de>,
     {
         let mut authority = MuxRawLineageAuthority::default();
-        let mut seen = 0_u16;
         while let Some(key) = map.next_key::<String>()? {
-            if let Some((bit, parent)) = mux_lineage_alias_bit(&key) {
-                if seen & bit != 0 {
-                    if parent {
-                        authority.parent_duplicate = true;
-                    } else {
-                        authority.root_duplicate = true;
-                    }
+            match mux_lineage_kind(&key) {
+                Some(MuxLineageKind::Parent(priority)) => {
+                    authority
+                        .parent
+                        .observe(map.next_value::<Value>()?, priority);
                 }
-                seen |= bit;
+                Some(MuxLineageKind::Root(priority)) => {
+                    authority.root.observe(map.next_value::<Value>()?, priority);
+                }
+                None => {
+                    map.next_value::<IgnoredAny>()?;
+                }
             }
-            map.next_value::<IgnoredAny>()?;
         }
         Ok(authority)
     }
 }
 
-fn mux_lineage_alias_bit(key: &str) -> Option<(u16, bool)> {
+#[derive(Debug, Clone, Copy)]
+enum MuxLineageKind {
+    Parent(u8),
+    Root(u8),
+}
+
+fn mux_lineage_kind(key: &str) -> Option<MuxLineageKind> {
     Some(match key {
-        "parentWorkspaceId" => (1 << 0, true),
-        "parentTaskId" => (1 << 1, true),
-        "parentSessionId" => (1 << 2, true),
-        "parent_session_id" => (1 << 3, true),
-        "rootWorkspaceId" => (1 << 4, false),
-        "rootTaskId" => (1 << 5, false),
-        "rootSessionId" => (1 << 6, false),
+        "parentWorkspaceId" => MuxLineageKind::Parent(0),
+        "parentTaskId" => MuxLineageKind::Parent(1),
+        "parentSessionId" => MuxLineageKind::Parent(2),
+        "parent_session_id" => MuxLineageKind::Parent(3),
+        "rootWorkspaceId" => MuxLineageKind::Root(0),
+        "rootTaskId" => MuxLineageKind::Root(1),
+        "rootSessionId" => MuxLineageKind::Root(2),
         _ => return None,
     })
-}
-
-struct MuxLineageAliases {
-    value: Option<String>,
-    ambiguous: bool,
-}
-
-fn mux_lineage_aliases(value: &Value, pointers: &[&str]) -> MuxLineageAliases {
-    let mut resolved = MuxLineageAliases {
-        value: None,
-        ambiguous: false,
-    };
-    for pointer in pointers {
-        let Some(value) = value.pointer(pointer) else {
-            continue;
-        };
-        let Some(claim) = value
-            .as_str()
-            .filter(|claim| !claim.trim().is_empty() && claim.len() <= MUX_MAX_ID_BYTES)
-        else {
-            resolved.ambiguous = true;
-            continue;
-        };
-        if resolved
-            .value
-            .as_deref()
-            .is_some_and(|current| current != claim)
-        {
-            resolved.ambiguous = true;
-        } else if resolved.value.is_none() {
-            resolved.value = Some(claim.to_owned());
-        }
-    }
-    resolved
 }
 
 pub(super) fn bounded_mux_id(value: String, path: &Path, label: &'static str) -> Result<String> {
@@ -360,6 +363,56 @@ mod lineage_tests {
     }
 
     #[test]
+    fn equal_positive_duplicate_keys_and_aliases_remain_exact() {
+        let metadata = metadata_bytes(
+            br#"{
+                "workspaceId": "mux-child",
+                "parentSessionId": "mux-parent",
+                "parentSessionId": "mux-parent",
+                "parentWorkspaceId": "mux-parent",
+                "parent_session_id": "mux-parent",
+                "rootSessionId": "mux-root",
+                "rootSessionId": "mux-root",
+                "rootWorkspaceId": "mux-root",
+                "rootTaskId": "mux-root"
+            }"#,
+        );
+
+        assert!(!metadata.lineage_ambiguous);
+        assert_eq!(
+            metadata.parent_provider_session_id.as_deref(),
+            Some("mux-parent")
+        );
+        assert_eq!(
+            metadata.root_provider_session_id.as_deref(),
+            Some("mux-root")
+        );
+    }
+
+    #[test]
+    fn direct_parent_does_not_synthesize_root() {
+        let without_root = metadata(serde_json::json!({
+            "workspaceId": "mux-child",
+            "parentSessionId": "mux-parent"
+        }));
+        assert_eq!(
+            without_root.parent_provider_session_id.as_deref(),
+            Some("mux-parent")
+        );
+        assert_eq!(without_root.root_provider_session_id, None);
+
+        let with_root = metadata(serde_json::json!({
+            "workspaceId": "mux-child",
+            "parentSessionId": "mux-parent",
+            "rootSessionId": "mux-root"
+        }));
+        assert_eq!(
+            with_root.root_provider_session_id.as_deref(),
+            Some("mux-root")
+        );
+    }
+
+    #[test]
     fn self_parent_and_foreign_parent_self_root_are_ambiguous() {
         for value in [
             serde_json::json!({
@@ -377,7 +430,7 @@ mod lineage_tests {
     }
 
     #[test]
-    fn duplicate_lineage_keys_are_ambiguous_without_rejecting_unrelated_duplicates() {
+    fn conflicting_null_or_malformed_lineage_occurrences_are_ambiguous() {
         for raw in [
             br#"{
                 "workspaceId": "mux-child",
@@ -391,10 +444,42 @@ mod lineage_tests {
                 "rootSessionId": "conflicting-root"
             }"#
             .as_slice(),
+            br#"{
+                "workspaceId": "mux-child",
+                "parentSessionId": "mux-parent",
+                "parent_session_id": "conflicting-parent"
+            }"#
+            .as_slice(),
+            br#"{
+                "workspaceId": "mux-child",
+                "parentSessionId": "mux-parent",
+                "parentSessionId": null
+            }"#
+            .as_slice(),
+            br#"{
+                "workspaceId": "mux-child",
+                "rootSessionId": "mux-root",
+                "rootTaskId": null
+            }"#
+            .as_slice(),
+            br#"{
+                "workspaceId": "mux-child",
+                "parentSessionId": "mux-parent",
+                "parentSessionId": 7
+            }"#
+            .as_slice(),
+            br#"{
+                "workspaceId": "mux-child",
+                "rootSessionId": {"unexpected": "object"}
+            }"#
+            .as_slice(),
         ] {
             assert!(metadata_bytes(raw).lineage_ambiguous);
         }
+    }
 
+    #[test]
+    fn unrelated_duplicate_keys_do_not_ambiguate_lineage() {
         assert!(
             !metadata_bytes(
                 br#"{

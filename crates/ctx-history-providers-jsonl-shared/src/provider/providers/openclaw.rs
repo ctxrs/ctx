@@ -14,7 +14,9 @@ mod normalization;
 
 pub(crate) use normalization::event_fact;
 
-pub(crate) use native_path::openclaw_source_backed_adapter_v0;
+pub(crate) use native_path::{
+    openclaw_source_backed_adapter_v0, openclaw_source_backed_adapter_v0_with_source_root_lineage,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct OpenClawFrozenFileMetadata {

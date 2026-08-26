@@ -179,10 +179,17 @@ case "${operation}" in
     ;;
   notary-submit)
     printf '%s\n' 'created submission ID: 00000000-0000-0000-0000-000000000003' >&2
+    if [[ -e "${TMPDIR}/fake-accepted-log-fetch-failure" ]]; then
+      printf '%s\n' 'poll state after 3s: Accepted' >&2
+      printf '%s\n' \
+        'Error: https://notary-artifacts-prod.s3.amazonaws.com/example?secret=notary-url-sentinel' >&2
+      exit 1
+    fi
     printf '%s\n' '{"status":"Accepted"}'
     ;;
   notary-log)
-    printf '%s\n' '{"status":"Accepted","issues":[]}'
+    printf '%s\n' \
+      '{"jobId":"00000000-0000-0000-0000-000000000003","status":"Accepted","issues":[]}'
     ;;
   *) exit 2 ;;
 esac
@@ -784,6 +791,37 @@ if attestation.get("source_commit") != source_commit:
 if attestation.get("identifier") != "ctx-pro":
     raise SystemExit("Linux helper attestation has the wrong identifier")
 PY
+
+linux_recovery_dir="${test_root}/linux-recovery"
+linux_recovery_artifact="$(new_artifact ctx-macos-arm64 "${linux_recovery_dir}")"
+printf '%s\n' Linux >"${TMPDIR}/fake-uname-system"
+touch "${TMPDIR}/fake-accepted-log-fetch-failure"
+"${launcher}" macos-arm64 cli "${linux_recovery_artifact}" \
+  "${linux_recovery_dir}" >"${test_root}/linux-recovery.log" 2>&1
+rm -f "${TMPDIR}/fake-accepted-log-fetch-failure" "${TMPDIR}/fake-uname-system"
+python3 - "${linux_recovery_dir}/ctx-macos-arm64.notary-submit.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as source:
+    value = json.load(source)
+if value != {
+    "id": "00000000-0000-0000-0000-000000000003",
+    "status": "Accepted",
+}:
+    raise SystemExit("accepted notarization recovery wrote the wrong response")
+PY
+grep -Fq '[redacted Apple notary log URL]' \
+  "${linux_recovery_dir}/ctx-macos-arm64.notary-submit.stderr" || \
+  fail "accepted notarization recovery did not sanitize the temporary log URL"
+grep -Fq 'notary-url-sentinel' \
+  "${linux_recovery_dir}/ctx-macos-arm64.notary-submit.stderr" && \
+  fail "accepted notarization recovery retained temporary log credentials"
+"${execution_check}" macos-arm64 "${linux_recovery_artifact}" 0.25.0 \
+  "${linux_recovery_dir}/ctx-macos-arm64.signing.json" >/dev/null
+python3 "${evidence_tool}" verify-artifact \
+  --evidence "${linux_recovery_dir}/ctx-macos-arm64.signing.json" \
+  --platform macos-arm64 --kind cli --artifact "${linux_recovery_artifact}"
 
 failed_execution_dir="${test_root}/failed-execution"
 mkdir -p "${failed_execution_dir}"

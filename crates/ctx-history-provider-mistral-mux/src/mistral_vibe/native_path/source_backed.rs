@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::HashSet,
     fs,
     marker::PhantomData,
     path::{Path, PathBuf},
@@ -12,10 +12,10 @@ use ctx_history_capture_runtime::BaseEventLookup;
 use ctx_history_core::{
     admit_optional_metadata_text, admit_optional_provider_call_id, admit_provider_declared_fact,
     derive_event_id, derive_native_session_id, ActivityInvocation, ActivityJsonCapture,
-    ActivityResult, ActivityTextCapture, AgentScope, CaptureProvider, CoreActivity, CoreRecord,
+    ActivityResult, ActivityTextCapture, CaptureProvider, CoreActivity, CoreRecord,
     EventIdentityInput, EventType, LiteralFactKind, NativeItemKey, PositionStability,
-    ProviderDeclaredFact, ProviderNativeSessionRelationship, SourceKey, StableEntityId,
-    SubrecordSelector, TypedKey, CORE_ACTIVITY_REVISION, MAX_CORE_CONTENT_BYTES,
+    ProviderDeclaredFact, SourceAnchorScope, SourceKey, StableEntityId, SubrecordSelector,
+    TypedKey, CORE_ACTIVITY_REVISION, MAX_CORE_CONTENT_BYTES,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -25,7 +25,8 @@ use super::*;
 use ctx_history_jsonl::{
     fit_jsonl_activity, FallbackEventIdentityState, JsonlActivityObservedBytes, JsonlFamilyAdapter,
     JsonlFamilyAppendMode, JsonlFamilyInventory, JsonlFamilyLeaf, JsonlFamilyProjectionMode,
-    JsonlFamilyProjector, JsonlFamilyWorkerContext, JsonlRecordRef,
+    JsonlFamilyProjector, JsonlFamilyWorkerContext, JsonlOversizedRecordPolicy, JsonlRecordRef,
+    JsonlRecordRejections, SourceBackedRecordRejectionDrafts,
 };
 use ctx_history_provider_runtime::{
     source_io::{OpenedProviderSourceFile, ProviderSourceRoot},
@@ -44,7 +45,7 @@ const NATIVE_EVENT_REUSED_TOOL_CALL_POSITION_KIND: &str =
     "mistral-vibe-duplicate-tool-call-id-ordinal";
 const LOGICAL_SESSION_KIND: &str = "mistral-vibe-session";
 const LOGICAL_EVENT_KIND: &str = "mistral-vibe-event";
-const PARSER_REVISION: &str = "mistral-vibe-source-backed-v14-optional-admission";
+const PARSER_REVISION: &str = "mistral-vibe-source-backed-v17-exact-parent-admission";
 const EVENT_IDENTITY_REVISION: &str = "mistral-vibe-content-occurrence-v1";
 const FALLBACK_FINGERPRINT_DOMAIN: &[u8] = b"ctx.mistral-vibe.fallback-event-fingerprint.v1\0";
 const SOURCE_REVISION_DIGEST_DOMAIN: &[u8] = b"ctx.mistral-vibe.source-revision.v1\0";
@@ -53,14 +54,30 @@ const MAX_RETAINED_NATIVE_IDS: usize = 4_096;
 const MAX_RETAINED_NATIVE_ID_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct MistralVibeJsonlAdapter<B>(PhantomData<fn() -> B>);
+pub(crate) struct MistralVibeJsonlAdapter<B> {
+    source_anchor_scope: SourceAnchorScope,
+    binding: PhantomData<fn() -> B>,
+}
 
 pub(crate) fn mistral_vibe_jsonl_adapter<B>(
 ) -> Arc<dyn JsonlFamilyAdapter<Runtime = ProviderJsonlRuntime<B>>>
 where
     B: ProviderRuntimeBinding,
 {
-    Arc::new(MistralVibeJsonlAdapter(PhantomData))
+    mistral_vibe_jsonl_adapter_with_source_root_lineage(None)
+}
+
+pub(crate) fn mistral_vibe_jsonl_adapter_with_source_root_lineage<B>(
+    source_root_lineage: Option<[u8; 32]>,
+) -> Arc<dyn JsonlFamilyAdapter<Runtime = ProviderJsonlRuntime<B>>>
+where
+    B: ProviderRuntimeBinding,
+{
+    Arc::new(MistralVibeJsonlAdapter {
+        source_anchor_scope: source_root_lineage
+            .map_or(SourceAnchorScope::Unqualified, SourceAnchorScope::Lineage),
+        binding: PhantomData,
+    })
 }
 
 #[derive(Debug)]
@@ -71,6 +88,7 @@ struct Draft {
     metadata_relative_path: PathBuf,
     provider_session_id: String,
     parent_provider_session_id: Option<String>,
+    lineage_ambiguous: bool,
     session_id: StableEntityId,
     started_at_unix_ms: i64,
     cwd: Option<String>,
@@ -85,7 +103,7 @@ struct Binding {
     provider_session_id: String,
     session_id: StableEntityId,
     parent_session_id: Option<StableEntityId>,
-    root_session_id: StableEntityId,
+    lineage_ambiguous: bool,
     started_at_unix_ms: i64,
     cwd: Option<String>,
     branch: Option<String>,
@@ -120,6 +138,10 @@ where
 
     fn append_mode(&self) -> JsonlFamilyAppendMode {
         JsonlFamilyAppendMode::Replacement
+    }
+
+    fn oversized_record_policy(&self) -> JsonlOversizedRecordPolicy {
+        JsonlOversizedRecordPolicy::RejectRecord
     }
 
     fn discover(&self, root: &Path) -> Result<JsonlFamilyInventory<CaptureError>> {
@@ -161,7 +183,7 @@ where
                     "Mistral Vibe inventory repeats a session ID".to_owned(),
                 ));
             }
-            let source = source_key(&session.provider_session_id)?;
+            let source = source_key_scoped(&session.provider_session_id, self.source_anchor_scope)?;
             let session_id = session_identity(&source, &session.provider_session_id)?;
             let revision_digest = admitted.revision_digest(&source)?;
             drafts.push(Draft {
@@ -171,6 +193,7 @@ where
                 metadata_relative_path,
                 provider_session_id: session.provider_session_id,
                 parent_provider_session_id: session.parent_provider_session_id,
+                lineage_ambiguous: session.lineage_ambiguous,
                 session_id,
                 started_at_unix_ms: session.started_at.timestamp_millis(),
                 cwd: session.cwd,
@@ -178,24 +201,19 @@ where
                 revision_digest,
             });
         }
-        let by_session = drafts
-            .iter()
-            .map(|draft| (draft.provider_session_id.as_str(), draft))
-            .collect::<BTreeMap<_, _>>();
         let mut leaves = Vec::with_capacity(drafts.len());
         for draft in &drafts {
             let parent_session_id = draft
                 .parent_provider_session_id
                 .as_deref()
-                .map(provider_session_identity)
+                .map(|parent| provider_session_identity(parent, self.source_anchor_scope))
                 .transpose()?;
-            let root_session_id = root_session_identity(draft, &by_session)?;
             let binding = Binding {
                 metadata_relative_path: draft.metadata_relative_path.clone(),
                 provider_session_id: draft.provider_session_id.clone(),
                 session_id: draft.session_id,
                 parent_session_id,
-                root_session_id,
+                lineage_ambiguous: draft.lineage_ambiguous,
                 started_at_unix_ms: draft.started_at_unix_ms,
                 cwd: draft.cwd.clone(),
                 branch: draft.branch.clone(),
@@ -256,6 +274,11 @@ where
             )?,
             native_identities: MistralNativeIdentityTracker::default(),
             binding,
+            rejections: JsonlRecordRejections::new(
+                leaf.source().clone(),
+                CaptureProvider::MistralVibe,
+                leaf.source_path().display().to_string(),
+            ),
         }))
     }
 }
@@ -265,6 +288,7 @@ struct MistralProjector<B: ProviderRuntimeBinding> {
     binding: Binding,
     fallback_identities: FallbackEventIdentityState<ProviderBaseEventLookup<B>, CaptureError>,
     native_identities: MistralNativeIdentityTracker,
+    rejections: JsonlRecordRejections,
 }
 
 impl<B> JsonlFamilyProjector for MistralProjector<B>
@@ -279,12 +303,34 @@ where
         _worker: &mut JsonlFamilyWorkerContext<Self::Runtime>,
         emit: &mut dyn FnMut(CoreRecord) -> Result<()>,
     ) -> Result<()> {
-        if let Some(document) = core_record(
+        let bytes = record.bytes();
+        if record.oversized() {
+            self.rejections.malformed(
+                record,
+                format!(
+                    "Mistral Vibe record exceeds the {MAX_PROVIDER_JSONL_LINE_BYTES} byte limit"
+                ),
+            );
+            return Ok(());
+        }
+        if bytes.iter().all(u8::is_ascii_whitespace) {
+            return Ok(());
+        }
+        let value = match serde_json::from_slice::<Value>(bytes) {
+            Ok(value) => value,
+            Err(error) => {
+                self.rejections
+                    .malformed(record, format!("malformed Mistral Vibe JSONL: {error}"));
+                return Ok(());
+            }
+        };
+        if let Some(document) = core_record_with_value(
             &self.source,
             &self.binding,
             &mut self.fallback_identities,
             &mut self.native_identities,
             record,
+            value,
         )? {
             emit(document)?;
         }
@@ -294,25 +340,28 @@ where
     fn finish(&mut self) -> Result<()> {
         self.fallback_identities.finish()
     }
+
+    fn rejected_records(&self) -> u64 {
+        self.rejections.count()
+    }
+
+    fn take_record_rejections(&mut self) -> SourceBackedRecordRejectionDrafts {
+        self.rejections.take_drafts()
+    }
 }
 
-fn core_record<L>(
+fn core_record_with_value<L>(
     source: &SourceKey,
     binding: &Binding,
     fallback_identities: &mut FallbackEventIdentityState<L, CaptureError>,
     native_identities: &mut MistralNativeIdentityTracker,
     record: JsonlRecordRef<'_>,
+    value: Value,
 ) -> Result<Option<CoreRecord>>
 where
     L: BaseEventLookup,
 {
     let bytes = record.bytes();
-    if bytes.iter().all(u8::is_ascii_whitespace) {
-        return Ok(None);
-    }
-    let Ok(value) = serde_json::from_slice::<Value>(bytes) else {
-        return Ok(None);
-    };
     let ordinal = record.evidence().physical_ordinal();
     let requires_collision_position = native_identities.requires_collision_position(&value);
     let Ok(role) = valid_mistral_vibe_record_role(&value) else {
@@ -395,15 +444,8 @@ where
         body.clone(),
     )
     .map_err(contract)?;
-    record.agent_scope = Some(if binding.parent_session_id.is_some() {
-        AgentScope::Subagent
-    } else {
-        AgentScope::Primary
-    });
-    if let Some(parent_session_id) = binding.parent_session_id {
-        record.parent_session_id = Some(parent_session_id);
-        record.root_session_id = Some(binding.root_session_id);
-        record.session_relationship = Some(ProviderNativeSessionRelationship::Forked);
+    if !binding.lineage_ambiguous {
+        record.parent_session_id = binding.parent_session_id;
     }
     record.provider_session_id = Some(binding.provider_session_id.clone());
     record.native_event_id = Some(native_event_id);
@@ -432,6 +474,28 @@ where
         .map_err(contract)?;
     record.validate_contract().map_err(contract)?;
     Ok(Some(record))
+}
+
+#[cfg(test)]
+fn core_record<L>(
+    source: &SourceKey,
+    binding: &Binding,
+    fallback_identities: &mut FallbackEventIdentityState<L, CaptureError>,
+    native_identities: &mut MistralNativeIdentityTracker,
+    record: JsonlRecordRef<'_>,
+) -> Result<Option<CoreRecord>>
+where
+    L: BaseEventLookup,
+{
+    let value = serde_json::from_slice::<Value>(record.bytes())?;
+    core_record_with_value(
+        source,
+        binding,
+        fallback_identities,
+        native_identities,
+        record,
+        value,
+    )
 }
 
 fn mistral_vibe_record_timestamp(value: &Value) -> Option<DateTime<Utc>> {
@@ -611,14 +675,23 @@ fn relative_to_authority(authority: &ProviderSourceRoot, path: &Path) -> Result<
         })
 }
 
+#[cfg(test)]
 fn source_key(native_session_id: &str) -> Result<SourceKey> {
-    SourceKey::derive_provider_native(
+    source_key_scoped(native_session_id, SourceAnchorScope::Unqualified)
+}
+
+fn source_key_scoped(
+    native_session_id: &str,
+    source_anchor_scope: SourceAnchorScope,
+) -> Result<SourceKey> {
+    SourceKey::derive_provider_native_scoped(
         CaptureProvider::MistralVibe.as_str(),
         MISTRAL_VIBE_SOURCE_FORMAT,
         SOURCE_SCHEMA_VARIANT,
         1,
         SOURCE_ANCHOR_NAMESPACE,
         TypedKey::utf8(native_session_id).map_err(contract)?,
+        source_anchor_scope,
     )
     .map_err(contract)
 }
@@ -633,33 +706,12 @@ fn session_identity(source: &SourceKey, native_session_id: &str) -> Result<Stabl
     .map_err(contract)
 }
 
-fn provider_session_identity(native_session_id: &str) -> Result<StableEntityId> {
-    let source = source_key(native_session_id)?;
-    session_identity(&source, native_session_id)
-}
-
-fn root_session_identity(
-    lineage: &Draft,
-    lineages: &BTreeMap<&str, &Draft>,
+fn provider_session_identity(
+    native_session_id: &str,
+    source_anchor_scope: SourceAnchorScope,
 ) -> Result<StableEntityId> {
-    let mut current = lineage;
-    let mut root = lineage.session_id;
-    let mut visited = HashSet::new();
-    loop {
-        if !visited.insert(current.provider_session_id.as_str()) {
-            return Err(CaptureError::InvalidPayload(
-                "Mistral Vibe session lineage contains a cycle".to_owned(),
-            ));
-        }
-        let Some(parent_id) = current.parent_provider_session_id.as_deref() else {
-            return Ok(root);
-        };
-        root = provider_session_identity(parent_id)?;
-        let Some(parent) = lineages.get(parent_id) else {
-            return Ok(root);
-        };
-        current = parent;
-    }
+    let source = source_key_scoped(native_session_id, source_anchor_scope)?;
+    session_identity(&source, native_session_id)
 }
 
 fn mistral_vibe_output_text(value: &Value) -> Result<Option<String>> {
@@ -724,7 +776,7 @@ mod tests {
                 provider_session_id: "session".to_owned(),
                 session_id,
                 parent_session_id: None,
-                root_session_id: session_id,
+                lineage_ambiguous: false,
                 started_at_unix_ms: 0,
                 cwd: None,
                 branch: None,
@@ -750,7 +802,7 @@ mod tests {
     }
 
     #[test]
-    fn native_parent_metadata_classifies_child_and_root_scope() {
+    fn native_parent_metadata_emits_only_the_direct_parent_claim() {
         let (source, root_binding) = binding();
         let project = |binding: &Binding| {
             let mut fallback_identities = fallback_identities(&source, binding);
@@ -768,16 +820,21 @@ mod tests {
         };
 
         let root = project(&root_binding);
-        assert_eq!(root.agent_scope, Some(AgentScope::Primary));
+        assert_eq!(root.agent_scope, None);
+        assert_eq!(root.parent_session_id, None);
+        assert_eq!(root.root_session_id, None);
+        assert_eq!(root.session_relationship, None);
 
         let parent_session_id = session_identity(&source, "parent").unwrap();
         let child_binding = Binding {
             parent_session_id: Some(parent_session_id),
-            root_session_id: parent_session_id,
             ..root_binding
         };
         let child = project(&child_binding);
-        assert_eq!(child.agent_scope, Some(AgentScope::Subagent));
+        assert_eq!(child.parent_session_id, Some(parent_session_id));
+        assert_eq!(child.agent_scope, None);
+        assert_eq!(child.root_session_id, None);
+        assert_eq!(child.session_relationship, None);
     }
 
     #[test]

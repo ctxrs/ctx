@@ -20,8 +20,8 @@ use ctx_history_core::{
     derive_event_id, derive_session_id, ActivityInvocation, ActivityJsonCapture, ActivityResult,
     ActivityTextCapture, AgentScope, CaptureProvider, CoreActivity, CoreRecord, CoreRecordError,
     EventIdentityInput, EventRole, EventType, LiteralFactKind, NativeItemKey, NativeSessionKey,
-    ProjectionContractError, ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceKey,
-    SourceObservation, StableEntityId, TypedKey, CORE_ACTIVITY_REVISION,
+    ProjectionContractError, ScannedSourceCounts, SessionIdentityInput, SourceAnchorScope,
+    SourceKey, SourceObservation, StableEntityId, TypedKey, CORE_ACTIVITY_REVISION,
 };
 use serde::de::{DeserializeSeed, MapAccess, SeqAccess, Visitor};
 use sha2::{Digest, Sha256};
@@ -557,8 +557,16 @@ enum RovoDevSourceBackedDisposition {
     Unavailable,
 }
 
+#[cfg(test)]
 fn discover_rovodev_source_backed(
     sessions_root: &Path,
+) -> RovoDevSourceBackedResult<RovoDevSourceBackedDisposition> {
+    discover_rovodev_source_backed_scoped(sessions_root, SourceAnchorScope::Unqualified)
+}
+
+fn discover_rovodev_source_backed_scoped(
+    sessions_root: &Path,
+    source_anchor_scope: SourceAnchorScope,
 ) -> RovoDevSourceBackedResult<RovoDevSourceBackedDisposition> {
     match fs::symlink_metadata(sessions_root) {
         Err(error)
@@ -574,13 +582,14 @@ fn discover_rovodev_source_backed(
     }
     let canonical_root = fs::canonicalize(sessions_root)?;
     let authority = ProviderSourceRoot::open(&canonical_root)?;
-    bind_document_tree(authority)
+    bind_document_tree(authority, source_anchor_scope)
         .map(Box::new)
         .map(RovoDevSourceBackedDisposition::Complete)
 }
 
 fn bind_document_tree(
     authority: ProviderSourceRoot,
+    source_anchor_scope: SourceAnchorScope,
 ) -> RovoDevSourceBackedResult<RovoDevDocumentTree> {
     let discovery = authoritative_discovery(authority.named_path())?;
     let mut sources = Vec::with_capacity(discovery.sources().len());
@@ -632,7 +641,7 @@ fn bind_document_tree(
     let mut observed = Vec::with_capacity(sources.len());
     let mut source_owners = HashSet::with_capacity(sources.len());
     for (source_index, source) in sources.iter().enumerate() {
-        let header = document::probe_document_header(source)?;
+        let header = document::probe_document_header(source, source_anchor_scope)?;
         if !source_owners.insert(header.source_key.identity().digest()) {
             return Err(RovoDevSourceBackedError::DuplicateSession(
                 header.provider_session_id,
@@ -680,17 +689,23 @@ fn relative_to_rovodev_authority(
         .map_err(|_| RovoDevSourceBackedError::NonAuthoritativeRoot)
 }
 
+#[cfg(test)]
 fn rovodev_source_key(provider_session_id: &str) -> RovoDevSourceBackedResult<SourceKey> {
-    let anchor = SourceAnchor::provider_native(
-        SOURCE_ANCHOR_NAMESPACE,
-        TypedKey::utf8(provider_session_id)?,
-    )?;
-    Ok(SourceKey::derive(
+    rovodev_source_key_scoped(provider_session_id, SourceAnchorScope::Unqualified)
+}
+
+fn rovodev_source_key_scoped(
+    provider_session_id: &str,
+    source_anchor_scope: SourceAnchorScope,
+) -> RovoDevSourceBackedResult<SourceKey> {
+    Ok(SourceKey::derive_provider_native_scoped(
         CaptureProvider::RovoDev.as_str(),
         ROVODEV_SOURCE_FORMAT,
         SOURCE_SCHEMA_VARIANT,
         1,
-        anchor,
+        SOURCE_ANCHOR_NAMESPACE,
+        TypedKey::utf8(provider_session_id)?,
+        source_anchor_scope,
     )?)
 }
 
@@ -707,10 +722,18 @@ fn rovodev_session_identity(
     })?)
 }
 
+#[cfg(test)]
 fn provider_thread_session_identity(
     provider_session_id: &str,
 ) -> RovoDevSourceBackedResult<StableEntityId> {
-    let source_key = rovodev_source_key(provider_session_id)?;
+    provider_thread_session_identity_scoped(provider_session_id, SourceAnchorScope::Unqualified)
+}
+
+fn provider_thread_session_identity_scoped(
+    provider_session_id: &str,
+    source_anchor_scope: SourceAnchorScope,
+) -> RovoDevSourceBackedResult<StableEntityId> {
+    let source_key = rovodev_source_key_scoped(provider_session_id, source_anchor_scope)?;
     rovodev_session_identity(&source_key, provider_session_id)
 }
 
@@ -803,14 +826,24 @@ fn unique_message_ids(snapshot: &RovoDevSnapshot) -> HashSet<String> {
 pub struct RovoDevDocumentTreeAdapter<L, S, C> {
     root: PathBuf,
     context: ProviderAdapterContext,
+    source_anchor_scope: SourceAnchorScope,
     _lifecycle: crate::ProviderLifecycleMarker<L, S, C>,
 }
 
 impl<L, S, C> RovoDevDocumentTreeAdapter<L, S, C> {
     pub fn new(root: PathBuf, context: ProviderAdapterContext) -> Self {
+        Self::new_scoped(root, context, SourceAnchorScope::Unqualified)
+    }
+
+    pub fn new_scoped(
+        root: PathBuf,
+        context: ProviderAdapterContext,
+        source_anchor_scope: SourceAnchorScope,
+    ) -> Self {
         Self {
             root,
             context,
+            source_anchor_scope,
             _lifecycle: std::marker::PhantomData,
         }
     }
@@ -850,7 +883,9 @@ where
     }
 
     fn discover_complete(&self) -> SourceBackedRouteResult<RovoDevDocumentTree> {
-        match discover_rovodev_source_backed(&self.root).map_err(rovodev_route_error)? {
+        match discover_rovodev_source_backed_scoped(&self.root, self.source_anchor_scope)
+            .map_err(rovodev_route_error)?
+        {
             RovoDevSourceBackedDisposition::Complete(tree) => Ok(*tree),
             RovoDevSourceBackedDisposition::Unavailable => Err(SourceBackedRouteError::new(
                 SourceBackedRouteErrorKind::Unavailable,
@@ -865,7 +900,13 @@ where
         leaf: &Self::Leaf,
         sink: &mut ChangedDocumentSink<'_, '_, L, S>,
     ) -> SourceBackedRouteResult<DocumentSourceTerminal> {
-        document::scan_rovodev_document(authority, leaf, &self.context, sink)
+        document::scan_rovodev_document(
+            authority,
+            leaf,
+            &self.context,
+            self.source_anchor_scope,
+            sink,
+        )
     }
 
     fn revalidate_complete(&self, tree: &RovoDevDocumentTree) -> SourceBackedRouteResult<[u8; 32]> {

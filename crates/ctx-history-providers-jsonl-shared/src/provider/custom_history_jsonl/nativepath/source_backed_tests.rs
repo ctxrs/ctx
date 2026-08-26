@@ -11,11 +11,44 @@ use serde_json::{json, Value};
 use super::source_backed::*;
 use crate::{test_support_paths::tempdir, CaptureError, ProviderSourceFailureKind};
 
+#[test]
+fn catalog_lineage_source_and_session_identities_are_root_scoped() {
+    let path = Path::new("custom.jsonl");
+    let released = CustomHistorySourceBackedInput::explicit(path, [9; 32])
+        .source_key()
+        .unwrap();
+    let compatibility =
+        CustomHistorySourceBackedInput::explicit_with_source_root_lineage(path, [9; 32], None)
+            .source_key()
+            .unwrap();
+    let first = CustomHistorySourceBackedInput::explicit_with_source_root_lineage(
+        path,
+        [9; 32],
+        Some([1; 32]),
+    )
+    .source_key()
+    .unwrap();
+    let second = CustomHistorySourceBackedInput::explicit_with_source_root_lineage(
+        path,
+        [9; 32],
+        Some([2; 32]),
+    )
+    .source_key()
+    .unwrap();
+
+    assert!(released.exact_descriptor_eq(&compatibility));
+    assert_ne!(first.identity(), second.identity());
+    assert_ne!(
+        custom_session_identity(&first, "provider", "source", "session").unwrap(),
+        custom_session_identity(&second, "provider", "source", "session").unwrap()
+    );
+}
+
 fn manifest(lineage: bool) -> Value {
     let mut record = json!({
         "record_type": "manifest",
-        "schema_version": "ctx-history-jsonl-v1",
-        "producer": "source-backed-v1-test",
+        "schema_version": "ctx-history-jsonl-v2",
+        "producer": "source-backed-v2-test",
     });
     if lineage {
         record["lineage_contract"] = json!("provider_native_v1");
@@ -33,8 +66,7 @@ fn source() -> Value {
 }
 
 fn session(
-    id: &str,
-    native_id: &str,
+    provider_session_id: &str,
     parent: Option<&str>,
     relationship: ProviderNativeSessionRelationship,
     scope: AgentScope,
@@ -42,10 +74,9 @@ fn session(
     json!({
         "record_type": "session",
         "source_id": "source-a",
-        "session_id": id,
-        "native_session_id": native_id,
-        "parent_session_id": parent,
-        "root_session_id": if parent.is_some() { "root" } else { id },
+        "provider_session_id": provider_session_id,
+        "parent_provider_session_id": parent,
+        "root_provider_session_id": if parent.is_some() { "root" } else { provider_session_id },
         "session_relationship": relationship,
         "agent_scope": scope,
         "started_at": "2026-07-28T12:00:00Z",
@@ -53,11 +84,11 @@ fn session(
     })
 }
 
-fn event(index: u64, id: &str, session_id: &str, payload: Value) -> Value {
+fn event(index: u64, id: &str, provider_session_id: &str, payload: Value) -> Value {
     json!({
         "record_type": "event",
         "source_id": "source-a",
-        "session_id": session_id,
+        "provider_session_id": provider_session_id,
         "event_index": index,
         "event_id": id,
         "event_type": "message",
@@ -71,41 +102,11 @@ fn file_reference(index: u64, event_index: u64, value: &str) -> Value {
     json!({
         "record_type": "file_reference",
         "source_id": "source-a",
-        "session_id": "child",
+        "provider_session_id": "child",
         "reference_index": index,
         "event_index": event_index,
         "value": value,
         "occurred_at": "2026-07-28T12:00:02Z",
-    })
-}
-
-fn v1_file_touch(index: u64, event_index: u64, path: &str) -> Value {
-    json!({
-        "record_type": "file_touch",
-        "source_id": "source-a",
-        "session_id": "child",
-        "touch_index": index,
-        "event_index": event_index,
-        "path": path,
-        "change_kind": "modified",
-        "old_path": "tests/old_parser.rs",
-        "line_count_delta": 12,
-        "confidence": "high",
-        "occurred_at": "2026-07-28T12:00:02Z",
-        "metadata": {"origin": "released-v1"},
-    })
-}
-
-fn v1_session(id: &str, agent_type: &str, is_primary: bool) -> Value {
-    json!({
-        "record_type": "session",
-        "source_id": "source-a",
-        "session_id": id,
-        "native_session_id": format!("native-{id}"),
-        "agent_type": agent_type,
-        "is_primary": is_primary,
-        "started_at": "2026-07-28T12:00:00Z",
-        "cwd": "/work/./literal",
     })
 }
 
@@ -193,7 +194,6 @@ fn v2_projects_exact_activity_payload_and_ordered_duplicate_facts() {
             source(),
             session(
                 "child",
-                "native-child",
                 None,
                 ProviderNativeSessionRelationship::Root,
                 AgentScope::Subagent,
@@ -241,17 +241,22 @@ fn v2_projects_exact_activity_payload_and_ordered_duplicate_facts() {
 }
 
 #[test]
-fn v1_file_touch_normalizes_to_neutral_file_reference_fact() {
+fn v2_preserves_declared_provider_session_id_and_file_reference_fact() {
     let temp = tempdir().unwrap();
-    let path = temp.path().join("v1-file-touch.jsonl");
+    let path = temp.path().join("provider-session.jsonl");
     write_records(
         &path,
         &[
             manifest(false),
             source(),
-            v1_session("child", "primary", true),
+            session(
+                "child",
+                None,
+                ProviderNativeSessionRelationship::Root,
+                AgentScope::Primary,
+            ),
             event(0, "event-0", "child", json!({"text": "update parser"})),
-            v1_file_touch(0, 0, "tests/parser.rs"),
+            file_reference(0, 0, "tests/parser.rs"),
         ],
     );
 
@@ -264,10 +269,7 @@ fn v1_file_touch_normalizes_to_neutral_file_reference_fact() {
     assert_eq!(certificate.counts().ignored_records, 4);
     assert_eq!(certificate.counts().indexed_documents, 1);
     assert_eq!(records[0].agent_scope, Some(AgentScope::Primary));
-    assert_eq!(
-        records[0].provider_session_id.as_deref(),
-        Some("ctx-history-jsonl-v1-65ce2567-9c43-7f16-885e-7a1c5fe01c05")
-    );
+    assert_eq!(records[0].provider_session_id.as_deref(), Some("child"));
     assert_eq!(
         records[0].content.activity.as_ref().unwrap().facts,
         vec![
@@ -294,7 +296,6 @@ fn v2_rejects_wrong_activity_revision_at_the_event_line() {
             source(),
             session(
                 "child",
-                "native-child",
                 None,
                 ProviderNativeSessionRelationship::Root,
                 AgentScope::Primary,
@@ -337,7 +338,6 @@ fn v2_rejects_complete_merged_activity_fact_overflow_at_the_event_line() {
             source(),
             session(
                 "child",
-                "native-child",
                 None,
                 ProviderNativeSessionRelationship::Root,
                 AgentScope::Primary,
@@ -376,7 +376,6 @@ fn v2_rejects_an_oversized_activity_fact_as_one_bounded_line() {
             source(),
             session(
                 "child",
-                "native-child",
                 None,
                 ProviderNativeSessionRelationship::Root,
                 AgentScope::Primary,
@@ -410,7 +409,7 @@ fn v2_retains_only_explicit_provider_native_lineage_and_copy_claims() {
     let path = temp.path().join("lineage.jsonl");
     let mut copied = event(1, "child-event", "child", json!({"text": "copied"}));
     copied["copied_from"] = json!({
-        "ancestor_native_session_id": "native-root",
+        "ancestor_provider_session_id": "root",
         "ancestor_event_id": "root-event",
         "proof": "native_copied_from_field",
     });
@@ -421,14 +420,12 @@ fn v2_retains_only_explicit_provider_native_lineage_and_copy_claims() {
             source(),
             session(
                 "root",
-                "native-root",
                 None,
                 ProviderNativeSessionRelationship::Root,
                 AgentScope::Primary,
             ),
             session(
                 "child",
-                "native-child",
                 Some("root"),
                 ProviderNativeSessionRelationship::Delegated,
                 AgentScope::Subagent,
@@ -454,12 +451,62 @@ fn v2_retains_only_explicit_provider_native_lineage_and_copy_claims() {
 }
 
 #[test]
+fn v2_accepts_grandchild_roots_and_target_independent_ancestor_copy_claims() {
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("grandchild-lineage.jsonl");
+    let mut copied = event(0, "grand-event", "grand", json!({"text": "copied"}));
+    copied["copied_from"] = json!({
+        "ancestor_provider_session_id": "root",
+        "ancestor_event_id": "unresolved-root-event",
+        "proof": "native_copied_from_field",
+    });
+    write_records(
+        &path,
+        &[
+            manifest(true),
+            source(),
+            session(
+                "root",
+                None,
+                ProviderNativeSessionRelationship::Root,
+                AgentScope::Primary,
+            ),
+            session(
+                "child",
+                Some("root"),
+                ProviderNativeSessionRelationship::Delegated,
+                AgentScope::Subagent,
+            ),
+            session(
+                "grand",
+                Some("child"),
+                ProviderNativeSessionRelationship::Delegated,
+                AgentScope::Subagent,
+            ),
+            event(0, "root-event", "root", json!({"text": "root"})),
+            event(0, "child-event", "child", json!({"text": "child"})),
+            copied,
+        ],
+    );
+
+    let records = collect(&CustomHistorySourceBackedInput::explicit(&path, [17; 32]));
+    let root = &records[0];
+    let child = &records[1];
+    let grand = &records[2];
+    assert_eq!(grand.parent_session_id, Some(child.session_id));
+    assert_eq!(grand.root_session_id, Some(root.session_id));
+    let copy = grand.event_copy.as_ref().unwrap();
+    assert_eq!(copy.ancestor_session_id, root.session_id);
+    assert_ne!(copy.ancestor_event_id, root.event_id);
+}
+
+#[test]
 fn absent_lineage_contract_omits_relationship_and_copy_claims() {
     let temp = tempdir().unwrap();
     let path = temp.path().join("unclaimed-lineage.jsonl");
     let mut copied = event(1, "child-event", "child", json!({"text": "copied"}));
     copied["copied_from"] = json!({
-        "ancestor_native_session_id": "native-root",
+        "ancestor_provider_session_id": "root",
         "ancestor_event_id": "root-event",
         "proof": "native_copied_from_field",
     });
@@ -470,14 +517,12 @@ fn absent_lineage_contract_omits_relationship_and_copy_claims() {
             source(),
             session(
                 "root",
-                "native-root",
                 None,
                 ProviderNativeSessionRelationship::Root,
                 AgentScope::Primary,
             ),
             session(
                 "child",
-                "native-child",
                 Some("root"),
                 ProviderNativeSessionRelationship::Delegated,
                 AgentScope::Subagent,
@@ -494,19 +539,19 @@ fn absent_lineage_contract_omits_relationship_and_copy_claims() {
 }
 
 #[test]
-fn v2_manifest_is_a_schema_incompatible_source_failure() {
+fn v1_manifest_is_a_schema_incompatible_source_failure() {
     let temp = tempdir().unwrap();
     let path = temp.path().join("legacy.jsonl");
     write_records(
         &path,
         &[json!({
             "record_type": "manifest",
-            "schema_version": "ctx-history-jsonl-v2",
+            "schema_version": "ctx-history-jsonl-v1",
         })],
     );
     let input = CustomHistorySourceBackedInput::explicit(&path, [10; 32]);
     let error = scan_custom_history_source_backed_explicit(&input, None, |_, _| Ok(()))
-        .expect_err("v2 must not be translated");
+        .expect_err("v1 must not be translated");
     let CustomHistorySourceBackedError::Capture(CaptureError::ProviderSource {
         provider,
         kind,
@@ -518,5 +563,82 @@ fn v2_manifest_is_a_schema_incompatible_source_failure() {
     };
     assert_eq!(provider, CaptureProvider::Custom.as_str());
     assert_eq!(kind, ProviderSourceFailureKind::SchemaIncompatible);
-    assert!(detail.contains("ctx-history-jsonl-v2"), "{detail}");
+    assert!(detail.contains("ctx-history-jsonl-v1"), "{detail}");
+}
+
+#[test]
+fn v2_preserves_distinct_routes_with_the_same_provider_session_id() {
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("multiple-routes.jsonl");
+    let mut second_session = session(
+        "shared-session",
+        None,
+        ProviderNativeSessionRelationship::Root,
+        AgentScope::Primary,
+    );
+    second_session["source_id"] = json!("source-b");
+    let mut second_event = event(
+        0,
+        "second-event",
+        "shared-session",
+        json!({"text":"second route"}),
+    );
+    second_event["source_id"] = json!("source-b");
+    write_records(
+        &path,
+        &[
+            manifest(false),
+            source(),
+            json!({
+                "record_type":"source",
+                "source_id":"source-b",
+                "provider_key":"second-agent",
+                "source_format":"second-jsonl",
+            }),
+            session(
+                "shared-session",
+                None,
+                ProviderNativeSessionRelationship::Root,
+                AgentScope::Primary,
+            ),
+            event(
+                0,
+                "first-event",
+                "shared-session",
+                json!({"text":"first route"}),
+            ),
+            second_session,
+            second_event,
+        ],
+    );
+
+    let records = collect(&CustomHistorySourceBackedInput::explicit(&path, [16; 32]));
+    assert_eq!(records.len(), 2);
+    assert_eq!(
+        records
+            .iter()
+            .map(|record| (
+                record.provider_session_id.as_deref(),
+                record.native_event_id.as_ref(),
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                Some("shared-session"),
+                Some(&TypedKey::Composite(vec![
+                    TypedKey::Utf8("demo-agent".to_owned()),
+                    TypedKey::Utf8("source-a".to_owned()),
+                    TypedKey::Utf8("event_id:first-event".to_owned()),
+                ])),
+            ),
+            (
+                Some("shared-session"),
+                Some(&TypedKey::Composite(vec![
+                    TypedKey::Utf8("second-agent".to_owned()),
+                    TypedKey::Utf8("source-b".to_owned()),
+                    TypedKey::Utf8("event_id:second-event".to_owned()),
+                ])),
+            ),
+        ]
+    );
 }

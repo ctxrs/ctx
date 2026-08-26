@@ -1,3 +1,4 @@
+use super::super::read_model::SourceBackedRefreshFailureType;
 use super::*;
 
 impl CoreRefreshEngine {
@@ -542,7 +543,7 @@ fn recover_terminal_attempt(
 fn recover_failure_outcome(
     job: &Value,
     scope: &SourceBackedRefreshScope,
-    legacy_failure_type: Option<&'static str>,
+    legacy_failure_type: Option<SourceBackedRefreshFailureType>,
 ) -> Result<Option<SourceBackedRefreshFailureOutcome>> {
     let Some(value) = job.get("structured_outcome") else {
         return Ok(
@@ -675,22 +676,31 @@ fn required_outcome_text<'a>(
 }
 
 fn legacy_failure_outcome(
-    failure_type: &'static str,
+    failure_type: SourceBackedRefreshFailureType,
     scope: &SourceBackedRefreshScope,
 ) -> SourceBackedRefreshFailureOutcome {
     let (class, retryable, retry_advice) = match failure_type {
-        "source_unavailable" => ("unavailable", true, "retry_affected_routes"),
-        "source_changed" => ("source_changed", true, "retry_affected_routes"),
-        "malformed_source" => ("unreadable", false, "inspect_sources"),
-        "unsupported_schema" => ("incompatible", false, "upgrade_or_reconfigure"),
-        _ => ("mixed", true, "retry_affected_routes"),
+        SourceBackedRefreshFailureType::UnsupportedSchema => {
+            ("incompatible", false, "upgrade_or_reconfigure")
+        }
+        SourceBackedRefreshFailureType::MalformedSource => ("unreadable", false, "inspect_sources"),
+        SourceBackedRefreshFailureType::SourceUnavailable => {
+            ("unavailable", true, "retry_affected_routes")
+        }
+        SourceBackedRefreshFailureType::SourceChanged => {
+            ("source_changed", true, "retry_affected_routes")
+        }
+        SourceBackedRefreshFailureType::SourceFailures => ("mixed", true, "retry_affected_routes"),
+        SourceBackedRefreshFailureType::AllProviderTerminalCoverageUnavailable => {
+            ("coverage", true, "retry_request")
+        }
     };
     let affected_routes = match scope {
         SourceBackedRefreshScope::All => BTreeSet::new(),
         SourceBackedRefreshScope::Exact(routes) => routes.clone(),
     };
     SourceBackedRefreshFailureOutcome::new(
-        failure_type,
+        failure_type.as_str(),
         class,
         retryable,
         affected_routes,
@@ -792,20 +802,13 @@ fn optional_string(job: &Value, field: &str) -> Result<Option<String>> {
     }
 }
 
-fn recover_optional_failure_type(job: &Value) -> Result<Option<&'static str>> {
+fn recover_optional_failure_type(job: &Value) -> Result<Option<SourceBackedRefreshFailureType>> {
     match job.get("failure_type") {
         None | Some(Value::Null) => Ok(None),
-        Some(Value::String(value)) => [
-            "unsupported_schema",
-            "malformed_source",
-            "source_unavailable",
-            "source_changed",
-            "source_failures",
-        ]
-        .into_iter()
-        .find(|accepted| accepted == value)
-        .map(Some)
-        .ok_or_else(|| anyhow!("durable terminal source refresh has invalid failure type")),
+        Some(Value::String(value)) => value
+            .parse::<SourceBackedRefreshFailureType>()
+            .map(Some)
+            .map_err(|_| anyhow!("durable terminal source refresh has invalid failure type")),
         Some(_) => bail!("durable terminal source refresh has invalid failure type"),
     }
 }
@@ -834,6 +837,69 @@ fn recover_timings(job: &Value) -> Result<(Option<SourceBackedRefreshTimings>, u
         }),
         required("publication_probe")?,
     ))
+}
+
+#[cfg(test)]
+mod failure_type_recovery_tests {
+    use super::*;
+
+    #[test]
+    fn recovery_accepts_source_backed_legacy_failure_types() {
+        for (failure_type, expected) in [
+            (
+                "unsupported_schema",
+                SourceBackedRefreshFailureType::UnsupportedSchema,
+            ),
+            (
+                "malformed_source",
+                SourceBackedRefreshFailureType::MalformedSource,
+            ),
+            (
+                "source_unavailable",
+                SourceBackedRefreshFailureType::SourceUnavailable,
+            ),
+            (
+                "source_changed",
+                SourceBackedRefreshFailureType::SourceChanged,
+            ),
+            (
+                "source_failures",
+                SourceBackedRefreshFailureType::SourceFailures,
+            ),
+            (
+                "all_provider_terminal_coverage_unavailable",
+                SourceBackedRefreshFailureType::AllProviderTerminalCoverageUnavailable,
+            ),
+        ] {
+            let job = json!({ "failure_type": failure_type });
+            assert_eq!(
+                recover_optional_failure_type(&job).unwrap(),
+                Some(expected),
+                "{failure_type}",
+            );
+            assert_eq!(expected.as_str(), failure_type);
+        }
+    }
+
+    #[test]
+    fn recovery_rejects_failure_types_outside_source_backed_legacy_vocabulary() {
+        for failure_type in [
+            RefreshOutcomeCode::Completed,
+            RefreshOutcomeCode::CompletedWithRejections,
+            RefreshOutcomeCode::IndexCorruption,
+            RefreshOutcomeCode::SourceRefreshInternal,
+        ] {
+            let job = json!({ "failure_type": failure_type.as_str() });
+            assert!(
+                recover_optional_failure_type(&job).is_err(),
+                "{}",
+                failure_type.as_str(),
+            );
+        }
+
+        let job = json!({ "failure_type": "not_a_code" });
+        assert!(recover_optional_failure_type(&job).is_err());
+    }
 }
 
 #[cfg(test)]

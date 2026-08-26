@@ -129,6 +129,17 @@ class ProviderPackBoundaryMutations(unittest.TestCase):
                     self.root / "tools/bazel/BUILD.bazel",
                 )
 
+    def test_cargo_workspace_package_data_must_match_members(self) -> None:
+        self.replace(
+            self.root / "BUILD.bazel",
+            '    "//crates/ctx-cli-qualification:cargo_package_data",\n',
+            "",
+        )
+        with self.assertRaisesRegex(
+            BoundaryError, "Cargo workspace package-data closure drifted"
+        ):
+            self.validate()
+
     def test_capture_index_and_cross_pack_backedges_are_rejected(self) -> None:
         cases = (
             (

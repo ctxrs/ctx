@@ -115,9 +115,10 @@ Self-upgrade requires an official installer-managed binary and matching
 package-manager installs, and binaries whose SHA-256 no longer matches the
 sidecar are intentionally unmanaged.
 
-Daemon-owned automatic upgrade is on by default for an official
-installer-managed binary in automatic indexing mode. To opt out persistently,
-run:
+Automatic upgrade is on by default for an official installer-managed binary.
+Auto indexing with the full daemon profile uses the persistent daemon for
+checks; manual and source-refresh-only modes use a detached worker after
+eligible completed commands. To opt out persistently, run:
 
 ```bash
 ctx upgrade disable
@@ -129,10 +130,9 @@ or for one process:
 CTX_UPGRADE_AUTO=off ctx search "query"
 ```
 
-The automatic scheduler state is stored beside the managed executable in
-`.ctx.upgrade-state.json`; checks should not write to foreground stdout or
-stderr. With `[indexing] mode = "manual"`, no automatic check occurs. Finite
-Core workers do not perform upgrade maintenance.
+The shared automatic scheduler state is stored beside the managed executable in
+`.ctx.upgrade-state.json`; checks do not write to foreground stdout or stderr.
+Finite Core workers do not perform upgrade maintenance.
 
 ## Semantic Search Is Not Ready
 

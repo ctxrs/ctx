@@ -222,6 +222,20 @@ part of lexical generation identity, so an older active generation is rebuilt
 or passes the narrow same-epoch preservation migration before newly projected
 invocation terms become searchable.
 
+The generation manifest commits the global automatic-discovery policy and, for
+configured provider history roots, the normalized named-root definitions, their
+configuration digest, optional group, and exact source-route membership. Search
+resolves `--source-root` and `--source-group` only through this pinned manifest and
+translates the result to exact indexed source keys. Live config is never mixed
+with an older generation, and all roots remain in one Core/Tantivy index.
+The ordinary inferred history root keeps its released source identities when
+it is given a name. Additional named roots use the provider plus stable root
+name as logical lineage, so matching native session ids in work and personal
+remain independent while moving a named root does not rotate citations. Codex
+`sessions`, `archived_sessions`, and prompt history under one configured root
+share that logical root lineage; active and archived duplicate representations
+coalesce.
+
 Lexical publication keeps the active generation and one previous generation
 for recovery and pinned readers; their manifests and integrity receipts use the
 same two-generation bound. Append-only segments merge after sixteen comparable
@@ -282,8 +296,8 @@ reconstructed.
 
 ## Provider-Owned Data
 
-ctx does not own provider homes. Import reads from configured or discovered
-locations and records enough information to search and cite imported material.
+ctx does not own provider history roots. Import reads from configured or
+discovered locations and records enough information to search and cite imported material.
 Discovery reads only bounded path metadata and allowlisted persistent selector
 files needed to choose the provider's winning root. It does not create provider
 directories, migrate provider data, execute provider commands, or combine a
@@ -308,8 +322,9 @@ local upsert as described above.
 | `ctx index` / `ctx index watch` / `ctx index wait` | indexing mode, lexical/semantic generation metadata, and daemon state | none |
 | `ctx index mode` | `config.toml` when present | none when reading; `auto` or `manual` writes `config.toml` and establishes or removes persistent supervision |
 | `ctx stats` | owner-private aggregate `usage.sqlite` when present | none; does not create pristine usage state or count itself |
-| `ctx sources` | bounded provider path metadata, allowlisted persistent selector files, and local history-source plugin manifests | none |
-| `ctx import` | provider transcript files and path metadata, the explicit custom history JSONL file passed with `--input-format ctx-history-jsonl-v1 --path`, or a durable provider-owned custom history JSONL file declared by an explicit history-source plugin manifest | immutable candidate Core/Tantivy generation and atomic publication, catalog/epoch metadata, and optional persistent or finite-worker daemon files; finite workers do not run semantic work |
+| `ctx sources` | bounded provider path metadata, allowlisted persistent selector files, local history-source plugin manifests, and configured named history roots | none |
+| `ctx sources add [--replace]` / `ctx sources remove` | `config.toml` and named provider history root path metadata used for validation | atomically updates `config.toml`; provider history is never modified |
+| `ctx import` | provider transcript files and path metadata, the explicit custom history JSONL file passed with `--input-format ctx-history-jsonl-v2 --path`, or a durable provider-owned custom history JSONL file declared by an explicit history-source plugin manifest | immutable candidate Core/Tantivy generation and atomic publication, catalog/epoch metadata, and optional persistent or finite-worker daemon files; finite workers do not run semantic work |
 | `ctx show session` / `ctx show event` | complete policy-selected records in the active verified Core/Tantivy generation | selected `--out` path for `show session` when provided |
 | `ctx list events` | complete policy-selected records and existing index terms in one pinned verified Core/Tantivy generation | none; event enumeration is read-only |
 | `ctx search` | active verified Core/Tantivy generation and existing semantic generation; when refresh has authority, bounded provider discovery/path metadata | candidate Core publication and daemon state only when refresh has authority; manual background and `--refresh off` do not start or wake a process |
@@ -404,6 +419,62 @@ enabled, the same daemon-owned query service can embed the query;
 implicit defaults. The config file is for user-managed overrides. Existing
 config files are read and left in place.
 
+Named provider history roots are an optional override for providers whose
+configured-root capability is enabled. The capability defines whether the root
+is a file or directory:
+
+```toml
+[sources.roots.personal]
+provider = "claude"
+path = "/absolute/path/to/claude-personal"
+group = "personal"
+
+[sources.roots.work]
+provider = "codex"
+path = "/absolute/path/to/codex-work"
+group = "work"
+```
+
+The equivalent safe editor is `ctx sources add <name> --provider <provider>
+--root <existing-path> [--source-group <group>]`; remove an entry with `ctx
+sources remove <name>`. Configured entries are additive to the provider's
+ordinary inferred root. If both select the same physical root, the configured
+name and group annotate that one route instead of creating a duplicate. A
+malformed edit is rejected as one config and does not publish a partial source
+change; the previous verified generation remains the query authority. Removing
+a valid entry withdraws its name, group, and future refresh ownership, but does
+not delete history already retained in the verified generation. The removed
+name and group stop matching that history. Exact-path imports and plugin
+manifests remain one-shot authorities and are not promoted into named roots.
+
+For an independently configured history root, `provider` plus the stable root
+name is its logical source namespace. Replacing only `path` therefore preserves
+source, session, route, and citation identity across a move; changing the name
+creates a different logical root. A configured root that is physically the
+ordinary inferred root retains the released automatic namespace for
+compatibility.
+The name is a durable local mount key, not a cosmetic label: removing and later
+reusing it intentionally reuses that logical namespace. Use a new name when
+registering an unrelated root, even if the old definition was removed; matching
+provider-native session ids under a reused name reconcile as the same history.
+Group changes do not change identity.
+Groups and names remain local provenance/query metadata, not upload consent,
+an ACL, a tenant boundary, or a retention rule.
+
+To update an existing definition safely, repeat `sources add` with the same
+name and provider and pass `--replace`. An absent name is added, identical
+canonical settings are a no-op, and a provider mismatch is rejected. During a
+replacement, `--source-group <group>` sets the complete desired group and
+omitting it clears the group. The command holds the shared config lock across
+read, validation, and durable replacement, so daemon refresh cannot observe an
+intermediate removal.
+
+Set `[sources] automatic = false` to stop all future automatic provider history
+root selection while retaining named provider history roots. This policy
+change does not erase already indexed automatic history. Searches remain
+unfiltered by source by default; `--source-root` and `--source-group` are
+explicit per-query filters.
+
 Local usage aggregation is enabled by default and is independent of analytics:
 
 ```toml
@@ -477,9 +548,10 @@ profile. Autostart propagates the effective mode to its detached child. In
 source-refresh-only mode, the source refresh IPC endpoint, all-provider capture
 registry, atomic generation publication, status reporting, disable behavior,
 and persistent process lifecycle remain active. History refresh, semantic
-indexing and serving, canonical maintenance, and automatic upgrades do not run.
-Manual finite workers always enforce the Core-only exclusions independently of
-this persistent-daemon setting.
+indexing and serving, canonical maintenance, and daemon-driven automatic
+upgrades do not run. Eligible completed commands use the detached automatic
+upgrade driver instead. Manual finite workers always enforce the Core-only
+exclusions independently of this persistent-daemon setting.
 
 Local semantic search remains disabled by default and requires automatic
 indexing. Its config opt-in is:
@@ -492,11 +564,14 @@ semantic = true
 See [Retrieval backends](search.md#retrieval-backends) for the setup command and
 readiness behavior.
 
-The persistent daemon in automatic mode is the sole automatic-upgrade authority
-and uses `upgrade.auto = "apply"` by default for official installer-managed
-binaries with a valid install sidecar. In manual mode, no automatic upgrade
-network or filesystem work occurs. `ctx upgrade disable` writes an explicit
-`upgrade.auto = "off"` opt-out. Unmanaged installs do not self-upgrade.
+Automatic upgrade uses `upgrade.auto = "apply"` by default for official
+installer-managed binaries with a valid install sidecar. Automatic indexing
+with the full daemon profile uses the persistent daemon as its check driver.
+Manual and source-refresh-only modes use eligible completed commands to launch
+a detached worker only when a bounded scheduler hint may be due. Both share one
+installation cadence and lock. `ctx upgrade
+disable` writes an explicit `upgrade.auto = "off"` opt-out. Unmanaged installs
+do not self-upgrade.
 
 ## Index Lifecycle
 
@@ -515,7 +590,7 @@ Re-import or update the index:
 ctx import --all
 ctx import --resume
 ctx import --provider codex --path ~/.codex/sessions
-ctx import --input-format ctx-history-jsonl-v1 --path ./history.jsonl
+ctx import --input-format ctx-history-jsonl-v2 --path ./history.jsonl
 ctx import --history-source example-agent/default
 ```
 
@@ -525,7 +600,8 @@ records; human receipts summarize record-local rejections as `Skipped records`
 while JSON preserves rejection diagnostics. Sources with no usable imported content
 fail, as do unreadable or incompatible sources; ctx-owned generation failures
 abort the command. Native provider progress is scoped by provider, source format,
-and an opaque source identity derived from the configured source root.
+and an opaque source identity derived from the released provider namespace or
+the stable logical name of an independently configured provider root.
 
 Refresh builds a private immutable Core/Tantivy candidate containing complete
 normalized stored records from current provider sources, verifies its manifest
@@ -537,7 +613,7 @@ mismatch.
 Custom history JSONL and history-source plugins follow the same import and Core
 publication lifecycle. Failed plugin runs do not advance cursor state.
 Explicit file paths and plugin manifests are not added to `config.toml` or
-treated as fixed provider homes.
+treated as fixed provider history roots.
 
 ## v0.26 epoch transition
 
@@ -563,17 +639,22 @@ refresh or reimport can populate current activity when the qualifying source is
 available. This does not read or migrate the legacy Store/SQL epoch described
 above.
 
-Remove a source from future imports:
+Remove a configured named history root from future refreshes:
 
 ```bash
-$EDITOR ~/.ctx/config.toml
+ctx sources remove work
 ```
 
-The current CLI does not add provider source entries to `config.toml`; default
-provider locations are discovered each time and explicit `--path` imports are
-not remembered as future defaults. Custom history JSONL paths are also
-one-shot explicit imports. To remove already imported data, rebuild the Core
-generation with only the sources you still want.
+You can make the same change in `config.toml`. If the root is the last member
+of a group, that group simply stops matching it. Default provider locations are
+still discovered alongside any remaining named roots, and explicit `--path`,
+custom JSONL, and plugin imports are not remembered as future defaults. The next
+full refresh atomically withdraws the removed root's name, group, and active
+ownership while preserving its already indexed history under the stable source
+identity. To purge that retained history, remove the root, reset local search
+storage as described below, and rebuild; the records can still return if the
+same provider history is selected through another available route. A failed or
+malformed refresh leaves the previous verified generation active.
 
 ## Reset And Inspect Local Search Storage
 
@@ -642,11 +723,12 @@ their own configuration; ctx indexing those transcripts does not repeat that
 behavior.
 
 Official installer-managed binaries can contact the signed release metadata
-endpoint for an explicit `ctx upgrade` command. When automatic indexing and
-automatic upgrades are enabled, the persistent daemon alone performs cadenced
-automatic checks and application. Foreground commands, including
-machine-readable commands and MCP, and finite Core workers never schedule this
-work. Manual indexing, an unmanaged install, or a process-level
+endpoint for an explicit `ctx upgrade` command. With automatic upgrades
+enabled, automatic indexing with the full daemon profile uses the persistent
+daemon for cadenced checks; manual and source-refresh-only modes use a detached
+worker launched after eligible finite commands only when a cheap shared-cadence
+hint may be due. MCP and finite Core workers do not schedule this work. An
+unmanaged install or a process-level
 `CTX_UPGRADE_AUTO=off` opt-out performs no automatic upgrade network or
 filesystem work. Upgrade metadata checks do not send provider
 transcript text, search queries, result snippets, source paths, repository

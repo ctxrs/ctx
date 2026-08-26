@@ -515,7 +515,7 @@ fn mcp_search_returns_structured_json_without_refresh() {
         "wait",
         "--format=json",
     ]));
-    assert_eq!(initial["schema_version"], 1, "{initial:#}");
+    assert_eq!(initial["schema_version"], 2, "{initial:#}");
     assert_eq!(initial["results"].as_array().map(Vec::len), Some(1));
     let killed_pid = daemon.kill_and_wait();
 
@@ -579,7 +579,7 @@ fn mcp_search_returns_structured_json_without_refresh() {
     );
     let recovered = json_output(ctx(&temp).args(["daemon", "status", "--format=json"]));
     let search = &search_responses[1]["result"]["structuredContent"];
-    assert_eq!(search["schema_version"], 1, "{search:#}\n{recovered:#}");
+    assert_eq!(search["schema_version"], 2, "{search:#}\n{recovered:#}");
     assert_eq!(search["payload_type"], "search_results");
     assert_eq!(search["query"], "onboarding");
     assert_eq!(search["freshness"]["mode"], "off");
@@ -746,7 +746,12 @@ fn mcp_search_keeps_a_hit_whose_matching_grapheme_exceeds_the_snippet_cap() {
         Some(1),
         "{first:#}"
     );
-    assert_eq!(first_result["snippet"], "", "{first:#}");
+    assert!(
+        first_result["snippet"]
+            .as_str()
+            .is_some_and(|snippet| snippet.ends_with("/workspace/huge-grapheme")),
+        "{first:#}"
+    );
     assert_eq!(first_result["snippet_truncated"], true, "{first:#}");
     assert!(
         first_result["snippet"].as_str().unwrap().len() <= SNIPPET_MAX_BYTES,
@@ -849,6 +854,12 @@ fn mcp_search_applies_source_backed_identity_filters() {
         assert_eq!(search["retrieval"]["index"], "core", "{search:#}");
         assert_eq!(search["filters"]["provider"], "custom", "{search:#}");
         assert_eq!(search["results"].as_array().map(Vec::len), Some(1));
+        assert_eq!(search["results"][0]["provider_key"], "demo-agent");
+        assert_eq!(search["results"][0]["source_id"], "demo-source");
+        assert_useful_mcp_text(
+            &response["result"],
+            &["provider_key: demo-agent", "source_id: demo-source"],
+        );
     }
     assert_eq!(
         responses[1]["result"]["structuredContent"]["filters"]["history_source"],
@@ -1012,6 +1023,72 @@ fn mcp_invalid_search_session_is_typed_before_source_index_open() {
 }
 
 #[test]
+fn mcp_unknown_source_selector_fails_without_echoing_its_contents() {
+    let temp = tempdir();
+    let fixture = provider_history_fixture("codex-sessions");
+    let (_daemon, _) = import_codex_fixture_through_daemon(&temp, &fixture);
+    let rejected = "Private_Root_Selector_7f98";
+    let responses = mcp_roundtrip(
+        &temp,
+        &[
+            json!({
+                "jsonrpc": "2.0",
+                "id": "init",
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-11-25",
+                    "capabilities": {},
+                    "clientInfo": { "name": "ctx-test", "version": "0" }
+                }
+            }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": "unknown-root",
+                "method": "tools/call",
+                "params": {
+                    "name": "search",
+                    "arguments": {
+                        "query": "selector privacy",
+                        "source_roots": [rejected],
+                        "backend": "lexical"
+                    }
+                }
+            }),
+        ],
+    );
+
+    let result = &responses[1]["result"];
+    assert_eq!(result["isError"], true, "{result:#}");
+    assert_eq!(
+        result["structuredContent"]["error_code"], "invalid_request",
+        "{result:#}"
+    );
+    assert_eq!(
+        result["structuredContent"]["error"],
+        "source_roots contains an invalid or unavailable selector"
+    );
+    assert!(!serde_json::to_string(result).unwrap().contains(rejected));
+}
+
+fn write_maximum_missing_openclaw_roots(temp: &TempDir) -> Vec<String> {
+    let root = data_root(temp);
+    fs::create_dir_all(&root).unwrap();
+    let mut config = String::new();
+    for index in (0..64).rev() {
+        let name = format!("openclaw-{index:02}");
+        let path = temp.path().join(format!("missing-{name}"));
+        config.push_str(&format!(
+            "[sources.roots.{name}]\nprovider = \"openclaw\"\npath = {}\n\n",
+            json!(path),
+        ));
+    }
+    fs::write(root.join("config.toml"), config).unwrap();
+    (0..64)
+        .map(|index| format!("openclaw-{index:02}"))
+        .collect()
+}
+
+#[test]
 fn mcp_sources_matches_cli_discovery_issues() {
     let temp = tempdir();
     let cli = json_output(
@@ -1047,6 +1124,7 @@ fn mcp_sources_matches_cli_discovery_issues() {
     let mcp = &responses[1]["result"]["structuredContent"];
 
     assert_eq!(mcp["schema_version"], cli["schema_version"]);
+    assert_eq!(mcp["automatic_discovery"], cli["automatic_discovery"]);
     assert_eq!(mcp["issues"], cli["issues"]);
     assert_eq!(mcp["issues_truncated"], cli["issues_truncated"]);
     assert_eq!(mcp["read_only"], true);
@@ -1055,6 +1133,130 @@ fn mcp_sources_matches_cli_discovery_issues() {
             && issue["code"] == "selector_unreconstructible"
             && issue["message_truncated"] == false
     }));
+}
+
+#[test]
+fn mcp_sources_preserves_every_maximum_missing_root_under_automatic_issue_pressure() {
+    let temp = tempdir();
+    let expected_names = write_maximum_missing_openclaw_roots(&temp);
+    let cli = json_output(
+        ctx(&temp)
+            .env("CLAUDE_CONFIG_DIR", "relative-account")
+            .args(["sources", "--format=json"]),
+    );
+    let responses = mcp_roundtrip_with_env(
+        &temp,
+        &[
+            json!({
+                "jsonrpc": "2.0",
+                "id": "init",
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-11-25",
+                    "capabilities": {},
+                    "clientInfo": { "name": "ctx-test", "version": "0" }
+                }
+            }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": "sources",
+                "method": "tools/call",
+                "params": {
+                    "name": "sources",
+                    "arguments": {}
+                }
+            }),
+        ],
+        &[("CLAUDE_CONFIG_DIR", "relative-account")],
+    );
+    let mcp = &responses[1]["result"]["structuredContent"];
+
+    assert_eq!(cli["issues_truncated"], true, "{cli:#}");
+    assert_eq!(mcp["issues_truncated"], cli["issues_truncated"]);
+    assert_eq!(mcp["issues"], cli["issues"]);
+    let issues = mcp["issues"].as_array().unwrap();
+    assert_eq!(issues.len(), 64, "{mcp:#}");
+    let actual_names = issues
+        .iter()
+        .map(|issue| {
+            assert_eq!(issue["code"], "configured_root_missing", "{issue:#}");
+            issue
+                .get("configured_root")
+                .and_then(|root| root.get("name"))
+                .and_then(Value::as_str)
+                .unwrap_or_else(|| panic!("missing configured_root object in {issue:#}"))
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(actual_names, expected_names);
+}
+
+#[test]
+fn mcp_sources_matches_cli_configured_selection_and_discovery_policy() {
+    let temp = tempdir();
+    let provider_home = temp.path().join("claude-personal");
+    fs::create_dir_all(provider_home.join("projects")).unwrap();
+    let root = data_root(&temp);
+    fs::create_dir_all(&root).unwrap();
+    let provider_home = fs::canonicalize(provider_home).unwrap();
+    let provider_home_toml = serde_json::to_string(&provider_home.display().to_string()).unwrap();
+    fs::write(
+        root.join("config.toml"),
+        format!(
+            "[sources]\nautomatic = false\n\n[sources.roots.personal]\nprovider = \"claude\"\npath = {provider_home_toml}\ngroup = \"work\"\n"
+        ),
+    )
+    .unwrap();
+
+    let cli = json_output(ctx(&temp).args(["sources", "--format=json"]));
+    let responses = mcp_roundtrip(
+        &temp,
+        &[
+            json!({
+                "jsonrpc": "2.0",
+                "id": "init",
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-11-25",
+                    "capabilities": {},
+                    "clientInfo": { "name": "ctx-test", "version": "0" }
+                }
+            }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": "sources",
+                "method": "tools/call",
+                "params": {
+                    "name": "sources",
+                    "arguments": {}
+                }
+            }),
+        ],
+    );
+    let mcp = &responses[1]["result"]["structuredContent"];
+
+    assert_eq!(cli["automatic_discovery"], false, "{cli:#}");
+    assert_eq!(mcp["automatic_discovery"], cli["automatic_discovery"]);
+    let configured = |payload: &Value| {
+        payload["sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|source| source["selection"]["root"] == "personal")
+            .cloned()
+            .expect("configured source should be listed")
+    };
+    let cli_source = configured(&cli);
+    let mcp_source = configured(mcp);
+    assert_eq!(mcp_source, cli_source);
+    assert_eq!(
+        mcp_source["selection"],
+        json!({
+            "kind": "configured",
+            "root": "personal",
+            "group": "work",
+        })
+    );
 }
 
 #[test]

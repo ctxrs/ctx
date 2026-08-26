@@ -1,6 +1,53 @@
 use ctx_terminal::{Document, RenderContext, StreamKind, Ui};
 use std::{io, time::Duration};
 
+/// Domain-owned terminal facts from one search attempt. Exact work remains in
+/// the read-application receipt; presentation adapters choose how to serialize it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SearchExecutionObservation {
+    pub refresh_duration: Option<Duration>,
+    pub refresh_status: Option<SearchRefreshStatus>,
+    pub refresh_source_count: Option<u64>,
+    pub query_duration: Option<Duration>,
+    pub render_duration: Option<Duration>,
+    pub output_duration: Option<Duration>,
+    pub backend_requested: Option<ctx_history_read_application::SearchBackend>,
+    pub backend_effective: Option<ctx_history_read_application::SearchBackend>,
+    pub result_count: Option<u64>,
+    pub citation_count: Option<u64>,
+    pub zero_result: Option<bool>,
+    pub has_indexed_content_after: Option<bool>,
+    pub work: ctx_history_read_application::SearchWorkReceipt,
+    pub final_candidate_pool: Option<u64>,
+    pub candidate_pool_truncated: Option<bool>,
+    pub concentration: Option<ctx_history_read_application::SearchConcentrationReceipt>,
+    pub diversification: Option<ctx_history_read_application::SearchDiversificationDecision>,
+    pub stop_reason: Option<ctx_history_read_application::SearchStopReason>,
+    pub failure_phase: Option<SearchFailurePhase>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchRefreshStatus {
+    ExistingGeneration,
+    DaemonBackground,
+    DaemonUnavailable,
+    Completed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchFailurePhase {
+    Preparation,
+    Refresh,
+    GenerationOpen,
+    QueryPreparation,
+    SemanticRetrieval,
+    IndexQueryDecode,
+    ResultProjection,
+    Render,
+    Output,
+}
+
 /// The output channel selected by a command body. The final adapter decides
 /// how terminal styling and stream handles are implemented.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -15,6 +62,7 @@ pub trait TerminalPort {
     fn write_document(&mut self, stream: OutputStream, document: &Document) -> io::Result<()>;
 
     fn write(&mut self, stream: OutputStream, bytes: &[u8]) -> io::Result<()>;
+
     fn flush(&mut self) -> io::Result<()>;
 }
 
@@ -46,34 +94,6 @@ impl TerminalPort for Ui {
     fn flush(&mut self) -> io::Result<()> {
         Ui::flush(self)
     }
-}
-
-/// Facts observed after a search query completes. Rendering is still fallible,
-/// so its duration is present only after output succeeds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SearchExecutionObservation {
-    pub refresh_mode: crate::RefreshMode,
-    pub refresh_status: SearchRefreshStatus,
-    pub refresh_source_count: u64,
-    pub refresh_duration: Duration,
-    pub query_duration: Duration,
-    pub render_duration: Option<Duration>,
-    pub backend_requested: ctx_history_read_application::SearchBackend,
-    pub backend_effective: ctx_history_read_application::SearchBackend,
-    pub result_count: u64,
-    pub citation_count: u64,
-    pub zero_result: bool,
-    pub has_indexed_content_after: bool,
-    pub query_length: u64,
-    pub query_term_count: u64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SearchRefreshStatus {
-    ExistingGeneration,
-    DaemonBackground,
-    DaemonUnavailable,
-    Completed,
 }
 
 #[cfg(test)]

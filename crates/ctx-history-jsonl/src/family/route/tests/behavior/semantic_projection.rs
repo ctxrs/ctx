@@ -2,6 +2,71 @@ use super::*;
 use ctx_history_capture_runtime::{CaptureLifecycleOpenOutcome, CaptureLifecycleSink};
 
 #[test]
+fn newline_record_rejections_resume_after_malformed_and_oversized_rows() {
+    for oversized in [false, true] {
+        let temp = crate::test_support_paths::tempdir().unwrap();
+        let root = temp.path().join("sessions");
+        fs::create_dir_all(&root).unwrap();
+        let mut fixture = br#"{"message":"first"}
+"#
+        .to_vec();
+        if oversized {
+            fixture.extend_from_slice(br#"{"message":"#);
+            fixture.extend(std::iter::repeat_n(b'x', MAX_PROVIDER_JSONL_LINE_BYTES));
+            fixture.extend_from_slice(b"\"}\n");
+        } else {
+            fixture.extend_from_slice(b"{\n");
+        }
+        fixture.extend_from_slice(b"{\"message\":\"last\"}\n");
+        fs::write(root.join("boundaries.jsonl"), fixture).unwrap();
+
+        let adapter = RecordRejectionTestAdapter;
+        let inventory = adapter.discover(&root).unwrap();
+        let leaf = inventory.accepted_leaves().next().unwrap();
+        let writer = match TestLifecycle::open(&temp.path().join("index"), ()).unwrap() {
+            CaptureLifecycleOpenOutcome::Ready(writer) => writer,
+            CaptureLifecycleOpenOutcome::RecoveryRequired { .. } => unreachable!(),
+        };
+        let mut emitted = 0;
+        let mut emit = |event| {
+            match event {
+                JsonlLeafOutputEvent::Page { records, .. } => emitted += records.len(),
+                JsonlLeafOutputEvent::Record { .. } => emitted += 1,
+                JsonlLeafOutputEvent::Flush => {}
+            }
+            Ok(())
+        };
+        let mut output = JsonlLeafOutput::new(&mut emit);
+        let mut worker = JsonlFamilyWorkerContext::default();
+        let prepared = prepare_leaf(
+            &adapter,
+            leaf,
+            None,
+            &writer.base_event_identity_lookup(),
+            &mut worker,
+            &mut output,
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(emitted, 2);
+        let counts = prepared.certificate.counts();
+        assert_eq!(counts.complete_records, 3);
+        assert_eq!(counts.retained_records, 2);
+        assert_eq!(counts.rejected_records, 1);
+        assert_eq!(counts.ignored_records, 0);
+        let (rejections, omitted) = prepared.record_rejections.into_parts();
+        assert_eq!(omitted, 0);
+        assert_eq!(rejections.len(), 1);
+        assert_eq!(rejections[0].line_number, 2);
+        assert_eq!(
+            rejections[0].class,
+            SourceBackedRecordRejectionClass::MalformedRecord
+        );
+    }
+}
+
+#[test]
 fn rejected_leaf_exact_proof_rejects_change_since_discovery() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let root = temp.path().join("sessions");
@@ -231,6 +296,7 @@ fn single_leaf_serial_jsonl_page_accounts_sessions_messages_and_tool_calls() {
         complete_inventories: &mut complete_inventories,
         route_index: 0,
         route_identity: test_route_identity(),
+        base_route_aliases: BTreeSet::new(),
         base_route_control: None,
         resources: SourceBackedRouteResources::production(1),
         logical_source_failures: &mut logical_source_failures,
@@ -521,4 +587,65 @@ fn generic_projection_streams_record_and_finish_fanout_before_record_65() {
         assert_eq!(observed_before_65.load(Ordering::SeqCst), 64);
         assert_eq!(prepared.certificate.counts().indexed_documents, 129);
     }
+}
+
+fn scoped_preflight_failure_fixture(
+    behavior: ScopedPreflightTestBehavior,
+) -> (CaptureError, usize) {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = temp.path().join("sessions");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("scoped.jsonl"), TEST_RECORD).unwrap();
+    let adapter = ScopedPreflightTestAdapter { behavior };
+    let inventory = adapter.discover(&root).unwrap();
+    let leaf = inventory.accepted_leaves().next().unwrap();
+    let writer = match TestLifecycle::open(&temp.path().join("index"), ()).unwrap() {
+        CaptureLifecycleOpenOutcome::Ready(writer) => writer,
+        CaptureLifecycleOpenOutcome::RecoveryRequired { .. } => unreachable!(),
+    };
+    let admitted = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&admitted);
+    let mut emit = move |event| {
+        if matches!(event, JsonlLeafOutputEvent::Record { .. }) {
+            observed.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok(())
+    };
+    let mut output = JsonlLeafOutput::new(&mut emit);
+    let mut worker = JsonlFamilyWorkerContext::default();
+    let error = prepare_leaf(
+        &adapter,
+        leaf,
+        None,
+        &writer.base_event_identity_lookup(),
+        &mut worker,
+        &mut output,
+        true,
+    )
+    .err()
+    .expect("scoped preflight fixture must fail");
+    (error, admitted.load(Ordering::SeqCst))
+}
+
+#[test]
+fn preflight_wrong_source_and_generic_internal_claims_remain_fatal() {
+    let (wrong_source, admitted) =
+        scoped_preflight_failure_fixture(ScopedPreflightTestBehavior::WrongSource);
+    assert_eq!(admitted, 0);
+    assert!(wrong_source
+        .to_string()
+        .contains("JSONL projector failed another logical source"));
+
+    let (generic, admitted) =
+        scoped_preflight_failure_fixture(ScopedPreflightTestBehavior::GenericInternal);
+    assert_eq!(admitted, 0);
+    assert!(generic.to_string().contains("generic preflight failure"));
+}
+
+#[test]
+fn failure_after_staging_cannot_be_reclassified_as_source_local() {
+    let (error, admitted) =
+        scoped_preflight_failure_fixture(ScopedPreflightTestBehavior::PostStagingFailure);
+    assert!(admitted > 0, "fixture must cross the staging boundary");
+    assert!(error.to_string().contains("post-staging generic failure"));
 }

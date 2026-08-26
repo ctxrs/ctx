@@ -94,6 +94,28 @@ rust_library(
 )
 
 ctx_cli_contract_test(
+    name = "cli_public_help_docs_tests",
+    src = "tests/contracts/cli_public_help_docs.rs",
+    tags = ["cli-contract"],
+    test_support = [
+        "base",
+        "fixtures",
+    ],
+)
+
+ctx_cli_contract_test(
+    name = "hosted_uninstall_fence_tests",
+    src = "tests/contracts/hosted_uninstall_fence.rs",
+    binary = "//crates/ctx-cli:ctx_hosted_uninstall_test_host",
+    cargo_manifest_dir = "crates/ctx-cli-contract-tests",
+    cargo_toml_env_vars = ":cargo_toml_env_vars",
+    extra_crates = [
+        "fs2",
+        "sha2",
+    ],
+)
+
+ctx_cli_contract_test(
     name = "test_targets_minimal_fixture",
     src = "tests/build_support/minimal.rs",
     extra_crates = ["serde_yaml"],

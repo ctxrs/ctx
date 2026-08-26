@@ -73,6 +73,13 @@ impl GenerationWriter {
                 }
             }
         }
+        let active_pointer_fence =
+            ctx_history_index_generation::ActiveGenerationPointerFence::capture(
+                &root,
+                active_authority
+                    .as_ref()
+                    .map(ActivePublicationAuthority::pointer),
+            )?;
         if !pointer_requires_rebuild {
             let active_pointer_ref = active_authority
                 .as_ref()
@@ -204,6 +211,7 @@ impl GenerationWriter {
                 root,
                 index,
                 active_pointer,
+                active_pointer_fence,
                 candidate_directory_name,
                 candidate_physical_proof,
                 candidate_activation_fence,
@@ -219,6 +227,8 @@ impl GenerationWriter {
                 deletions: HashMap::new(),
                 route_deletions: HashSet::new(),
                 present_source_routes: None,
+                applied_provider_roots: None,
+                authorized_topology_route_retirements: None,
                 observed_missing_routes: HashMap::new(),
                 route_publication_revalidations: Vec::new(),
                 partially_reconciled_routes: BTreeSet::new(),
@@ -228,6 +238,7 @@ impl GenerationWriter {
                 changed_session_registry_memory_bytes,
                 source_route_plan: None,
                 active_source_route_stage: None,
+                active_source_route_cohort_stage: None,
                 reusable_base_rebuild_detail: None,
                 #[cfg(test)]
                 index_writer_constructions: std::sync::Arc::new(
@@ -305,9 +316,32 @@ impl GenerationWriter {
         if self.writer.is_some() || !self.deletions.is_empty() {
             return Ok(None);
         }
+        // Reuse would leave a migrated v8/v9 descriptor as durable authority.
+        // Send this one publication through the atomic candidate path instead.
+        if self
+            .base_publication
+            .as_ref()
+            .is_some_and(PinnedPublication::requires_current_manifest_anchor)
+        {
+            return Ok(None);
+        }
         let Some(base) = self.base_manifest() else {
             return Ok(None);
         };
+        if self
+            .applied_provider_roots
+            .as_ref()
+            .is_some_and(|(automatic, digest, roots)| {
+                *automatic != base.automatic_provider_discovery()
+                    || digest != base.provider_root_config_digest()
+                    || roots != base.provider_roots()
+            })
+        {
+            // Provider-source policy is part of the durable manifest. Even a
+            // route-empty refresh must publish that policy transition instead
+            // of reusing a byte-identical source generation.
+            return Ok(None);
+        }
         if !self.observed_missing_routes.is_empty() || !self.route_deletions.is_empty() {
             return Ok(None);
         }

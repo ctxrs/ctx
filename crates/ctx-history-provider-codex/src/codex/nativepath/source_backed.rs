@@ -6,8 +6,8 @@ use std::{
 
 use ctx_history_core::{
     derive_event_id, derive_native_session_id, CaptureProvider, CertifiedSource, CoreRecord,
-    CoreRecordError, EventIdentityInput, NativeItemKey, ProjectionContractError, SourceKey,
-    StableEntityId, TypedKey,
+    CoreRecordError, EventIdentityInput, NativeItemKey, ProjectionContractError, SourceAnchorScope,
+    SourceKey, StableEntityId, TypedKey,
 };
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -38,6 +38,7 @@ use crate::{
 };
 
 const CODEX_SOURCE_ANCHOR_NAMESPACE: &str = "codex.session";
+const CODEX_SOURCE_ROOT_LINEAGE_DOMAIN: &[u8] = b"ctx-codex-source-root-lineage-v1\0";
 const CODEX_NATIVE_SESSION_NAMESPACE: &str = "codex.session";
 const CODEX_LOGICAL_SESSION_KIND: &str = "codex-session";
 const CODEX_LOGICAL_EVENT_KIND: &str = "codex-event";
@@ -99,6 +100,22 @@ pub use catalog::{
 };
 pub use generation::{CodexGenerationNormalizationCoordinatorV0, CodexGenerationRouteV0};
 pub(in crate::codex::nativepath) use identity::{
-    codex_core_record, codex_session_identity, codex_source_key, CodexEventIdentityStateV0,
+    codex_core_record, codex_session_identity, codex_source_key_in_root, CodexEventIdentityStateV0,
 };
 pub use jsonl_family::CodexSessionJsonlFamilyAdapterV0;
+
+fn codex_session_tree_source_root_lineage(
+    session_root: &Path,
+) -> CodexSourceBackedResultV0<[u8; 32]> {
+    let provider_home = match session_root.file_name().and_then(std::ffi::OsStr::to_str) {
+        Some("sessions" | "archived_sessions") => session_root.parent().unwrap_or(session_root),
+        _ => session_root,
+    };
+    let identity =
+        ctx_history_source_io::provider_path_identity(provider_home).map_err(CaptureError::from)?;
+    let mut digest = Sha256::new();
+    digest.update(CODEX_SOURCE_ROOT_LINEAGE_DOMAIN);
+    digest.update((identity.len() as u64).to_be_bytes());
+    digest.update(identity.as_bytes());
+    Ok(digest.finalize().into())
+}

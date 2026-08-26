@@ -193,16 +193,19 @@ impl RovoDevTreeAuthority {
         &self,
         leaf: &RovoDevDocumentLeaf,
         snapshot: &RovoDevSnapshot,
+        source_anchor_scope: SourceAnchorScope,
     ) -> RovoDevSourceBackedResult<RovoDevBoundDocument> {
         let source = self.source(leaf)?;
-        let header = document_header_from_snapshot(source, snapshot)?;
+        let header = document_header_from_snapshot(source, snapshot, source_anchor_scope)?;
         if header != leaf.header {
             return Err(CaptureError::SourceChangedDuringCapture.into());
         }
         let parent_session_id = header
             .parent_provider_session_id
             .as_deref()
-            .map(provider_thread_session_identity)
+            .map(|provider_session_id| {
+                provider_thread_session_identity_scoped(provider_session_id, source_anchor_scope)
+            })
             .transpose()?;
         Ok(RovoDevBoundDocument {
             source_key: header.source_key,
@@ -217,6 +220,7 @@ impl RovoDevTreeAuthority {
 fn document_header_from_snapshot(
     source: &RovoDevOpenedSource,
     snapshot: &RovoDevSnapshot,
+    source_anchor_scope: SourceAnchorScope,
 ) -> RovoDevSourceBackedResult<RovoDevDocumentHeader> {
     let (provider_session_id, parent_provider_session_id) = snapshot
         .document
@@ -228,14 +232,19 @@ fn document_header_from_snapshot(
             )
         })
         .unwrap_or_else(|_| (source.source.provider_session_id.clone(), None));
-    document_header(provider_session_id, parent_provider_session_id)
+    document_header(
+        provider_session_id,
+        parent_provider_session_id,
+        source_anchor_scope,
+    )
 }
 
 fn document_header(
     provider_session_id: String,
     parent_provider_session_id: Option<String>,
+    source_anchor_scope: SourceAnchorScope,
 ) -> RovoDevSourceBackedResult<RovoDevDocumentHeader> {
-    let source_key = rovodev_source_key(&provider_session_id)?;
+    let source_key = rovodev_source_key_scoped(&provider_session_id, source_anchor_scope)?;
     let session_id = rovodev_session_identity(&source_key, &provider_session_id)?;
     Ok(RovoDevDocumentHeader {
         source_key,
@@ -247,9 +256,16 @@ fn document_header(
 
 pub(super) fn probe_document_header(
     source: &RovoDevOpenedSource,
+    source_anchor_scope: SourceAnchorScope,
 ) -> RovoDevSourceBackedResult<RovoDevDocumentHeader> {
     let files = source.open_files()?;
-    let fallback = || document_header(source.source.provider_session_id.clone(), None);
+    let fallback = || {
+        document_header(
+            source.source.provider_session_id.clone(),
+            None,
+            source_anchor_scope,
+        )
+    };
     if source.opening.context_length() > MAX_PROVIDER_JSONL_LINE_BYTES as u64 {
         files.revalidate()?;
         return fallback();
@@ -320,7 +336,11 @@ pub(super) fn probe_document_header(
         ],
     );
     files.revalidate()?;
-    document_header(provider_session_id, parent_provider_session_id)
+    document_header(
+        provider_session_id,
+        parent_provider_session_id,
+        source_anchor_scope,
+    )
 }
 
 #[derive(Debug)]
@@ -560,6 +580,7 @@ pub(super) fn scan_rovodev_document<L, S>(
     authority: &RovoDevTreeAuthority,
     leaf: &RovoDevDocumentLeaf,
     context: &ProviderAdapterContext,
+    source_anchor_scope: SourceAnchorScope,
     sink: &mut ChangedDocumentSink<'_, '_, L, S>,
 ) -> SourceBackedRouteResult<DocumentSourceTerminal>
 where
@@ -569,7 +590,7 @@ where
     let snapshot = open_leaf(authority, leaf, context).map_err(rovodev_route_error)?;
     let source = authority.source(leaf).map_err(rovodev_route_error)?;
     let bound = authority
-        .bind_document(leaf, &snapshot)
+        .bind_document(leaf, &snapshot, source_anchor_scope)
         .map_err(rovodev_route_error)?;
     let observation = snapshot
         .observation(bound.source_key.clone())

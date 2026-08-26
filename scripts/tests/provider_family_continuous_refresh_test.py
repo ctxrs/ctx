@@ -131,7 +131,7 @@ class ProviderFamilyContinuousRefreshTest(unittest.TestCase):
         daemon_pid: int,
         resources: dict[str, int],
     ) -> tuple[dict[str, object], RefreshSnapshot]:
-        """Drain cold-start watcher work before asserting mutation causality."""
+        """Drain watcher work before asserting mutation causality."""
         deadline = time.monotonic() + COMMAND_TIMEOUT_SECONDS
         stable_signature: tuple[object, ...] | None = None
         stable_since: float | None = None
@@ -300,6 +300,18 @@ class ProviderFamilyContinuousRefreshTest(unittest.TestCase):
                         previous = cold
                         for iteration in range(1, mutation_count + 1):
                             time.sleep(MUTATION_CADENCE_SECONDS)
+                            if corpus.family == SQLITE_WAL_FAMILY:
+                                # A completed SQLite online backup can emit a
+                                # delayed native watcher event after the test
+                                # samples its generation. Drain that work before
+                                # each controlled mutation so the strict direct
+                                # predecessor assertion remains causal.
+                                _, previous = (
+                                    self.wait_for_isolated_continuous_baseline(
+                                        corpus, env, root, daemon.pid, resources
+                                    )
+                                )
+                                self.assert_counts(previous, corpus, mutations)
                             source_before = immutable_tree_snapshot(corpus.source_root)
                             mutation = corpus.continuous_mutation(iteration)
                             mutations.append(mutation)

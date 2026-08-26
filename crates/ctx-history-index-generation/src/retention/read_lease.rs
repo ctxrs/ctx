@@ -220,6 +220,37 @@ pub(crate) fn try_generation_directory_reclaim_authority(
         .map(|guard| guard.map(|guard| GenerationReclaimAuthority { _guard: guard }))
 }
 
+/// Pins a generation directory only when another process-scoped reader
+/// already holds it. This lets publication account for legitimate hard-link
+/// aliases without turning an otherwise unretained directory into authority.
+pub(crate) fn acquire_existing_generation_directory_read_authority(
+    root: &Path,
+    directory: &str,
+) -> Result<Option<ExistingGenerationDirectoryReadAuthority>> {
+    if !GenerationSlot::names_are_valid(&"0".repeat(64), directory) {
+        return Err(IndexError::InvalidActiveGenerationPointer);
+    }
+    let root = GenerationReadRoot::open_index_root(root)?;
+    let coordinator = coordinator(&root, true)?;
+    let keys = directory_keys(directory);
+    if let Some(uncontended) =
+        RangeLeaseGuard::try_exclusive(Arc::clone(&coordinator), keys.clone())?
+    {
+        drop(uncontended);
+        return Ok(None);
+    }
+    let guard = RangeLeaseGuard::try_shared(coordinator, keys)?
+        .ok_or(IndexError::ConcurrentGenerationChange)?;
+    Ok(Some(ExistingGenerationDirectoryReadAuthority {
+        _guard: guard,
+    }))
+}
+
+#[derive(Debug)]
+pub(crate) struct ExistingGenerationDirectoryReadAuthority {
+    _guard: RangeLeaseGuard,
+}
+
 #[derive(Debug)]
 pub(crate) struct GenerationReclaimAuthority {
     _guard: RangeLeaseGuard,

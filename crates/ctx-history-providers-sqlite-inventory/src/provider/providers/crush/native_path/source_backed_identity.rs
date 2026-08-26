@@ -1,13 +1,21 @@
 use super::*;
 
-pub(super) fn crush_source_key(project_key: TypedKey) -> CrushSourceBackedResultV0<SourceKey> {
+pub fn crush_source_key(project_key: TypedKey) -> CrushSourceBackedResultV0<SourceKey> {
+    crush_source_key_scoped(project_key, SourceAnchorScope::Unqualified)
+}
+
+pub(super) fn crush_source_key_scoped(
+    project_key: TypedKey,
+    source_scope: SourceAnchorScope,
+) -> CrushSourceBackedResultV0<SourceKey> {
     let anchor = SourceAnchor::provider_native(CRUSH_SOURCE_ANCHOR_NAMESPACE, project_key)?;
-    Ok(SourceKey::derive(
+    Ok(SourceKey::derive_scoped(
         CaptureProvider::Crush.as_str(),
         CRUSH_SQLITE_SOURCE_FORMAT,
         CRUSH_SOURCE_SCHEMA_VARIANT,
         1,
         anchor,
+        source_scope,
     )?)
 }
 

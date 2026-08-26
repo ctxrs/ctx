@@ -9,7 +9,8 @@ use std::{collections::BTreeSet, path::Path};
 use ctx_history_core::{
     derive_event_id, derive_session_id, CaptureProvider, CertifiedSource, CoreRecord,
     CoreRecordError, EventIdentityInput, NativeItemKey, NativeSessionKey, ProjectionContractError,
-    ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceKey, StableEntityId, TypedKey,
+    ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceAnchorScope, SourceKey,
+    StableEntityId, TypedKey,
 };
 use rusqlite::{limits::Limit, Connection, Row, Statement};
 use sha2::{Digest, Sha256};
@@ -96,7 +97,10 @@ mod ordering;
 mod projection;
 mod value;
 
-pub use adapter::{adapter as source_backed_adapter, OpenCodeDocumentTreeAdapter};
+pub use adapter::{
+    adapter as source_backed_adapter, adapter_scoped as source_backed_adapter_scoped,
+    OpenCodeDocumentTreeAdapter,
+};
 use fingerprint::*;
 use ordering::{
     initialize_ordering_scratch, stream_fallback_ordered_events, stream_ordered_session_identities,
@@ -120,8 +124,8 @@ impl OpenCodeSourceBackedRegistration {
         self.dialect.provider
     }
 
-    fn owns_source(self, source: &SourceKey) -> bool {
-        schema_family_for_source(self.dialect, source).is_some()
+    fn owns_source(self, source: &SourceKey, source_scope: SourceAnchorScope) -> bool {
+        schema_family_for_source(self.dialect, source, source_scope).is_some()
     }
 }
 
@@ -338,9 +342,26 @@ fn observe_logical_source(
     observe_logical_source_with_progress(connection, dialect, &mut |_| Ok(()))
 }
 
+#[cfg(test)]
 fn observe_logical_source_with_progress(
     connection: &Connection,
     dialect: &'static OpenCodeSqliteDialect,
+    report_progress: &mut dyn FnMut(
+        SourceBackedCurrentSourceProgress,
+    ) -> SourceBackedRouteResult<()>,
+) -> OpenCodeSourceBackedResult<OpenCodeLogicalObservation> {
+    observe_logical_source_with_progress_scoped(
+        connection,
+        dialect,
+        SourceAnchorScope::Unqualified,
+        report_progress,
+    )
+}
+
+fn observe_logical_source_with_progress_scoped(
+    connection: &Connection,
+    dialect: &'static OpenCodeSqliteDialect,
+    source_scope: SourceAnchorScope,
     report_progress: &mut dyn FnMut(
         SourceBackedCurrentSourceProgress,
     ) -> SourceBackedRouteResult<()>,
@@ -353,7 +374,7 @@ fn observe_logical_source_with_progress(
     let schema = OpenCodeNativeSchema::probe(connection, dialect)
         .map_err(OpenCodeSourceBackedError::from)
         .map_err(|error| diagnose_provider_query_error(error, SqliteFailurePhase::Schema))?;
-    let source = source_key(dialect, schema.family)?;
+    let source = source_key_scoped(dialect, schema.family, source_scope)?;
     report_progress(opencode_logical_progress(
         SourceBackedCurrentSourceProgressStage::LogicalFingerprint,
         0,
@@ -714,26 +735,29 @@ fn session_id(
     })?)
 }
 
-fn source_key(
+fn source_key_scoped(
     dialect: &OpenCodeSqliteDialect,
     family: OpenCodeNativeSchemaFamily,
+    source_scope: SourceAnchorScope,
 ) -> OpenCodeSourceBackedResult<SourceKey> {
     let anchor = SourceAnchor::provider_native(
         format!("{}.sqlite-authority", dialect.provider.as_str()),
         TypedKey::utf8(SOURCE_ANCHOR_KEY)?,
     )?;
-    Ok(SourceKey::derive(
+    Ok(SourceKey::derive_scoped(
         dialect.provider.as_str(),
         dialect.source_format,
         format!("opencode-family-{}-v1", family.label()),
         SOURCE_IDENTITY_VERSION,
         anchor,
+        source_scope,
     )?)
 }
 
 fn schema_family_for_source(
     dialect: &OpenCodeSqliteDialect,
     source: &SourceKey,
+    source_scope: SourceAnchorScope,
 ) -> Option<OpenCodeNativeSchemaFamily> {
     [
         OpenCodeNativeSchemaFamily::SessionMessageSeq,
@@ -744,7 +768,8 @@ fn schema_family_for_source(
     ]
     .into_iter()
     .find(|family| {
-        source_key(dialect, *family).is_ok_and(|candidate| candidate.exact_descriptor_eq(source))
+        source_key_scoped(dialect, *family, source_scope)
+            .is_ok_and(|candidate| candidate.exact_descriptor_eq(source))
     })
 }
 

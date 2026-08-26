@@ -83,6 +83,57 @@ impl SourceBackedRefreshFailureOutcome {
     }
 }
 
+/// Exact vocabulary of the durable legacy `failure_type` field.
+///
+/// Structured outcomes use the broader `RefreshOutcomeCode`; keeping this
+/// field narrow makes values its writer cannot produce fail closed on recovery.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(super) enum SourceBackedRefreshFailureType {
+    UnsupportedSchema,
+    MalformedSource,
+    SourceUnavailable,
+    SourceChanged,
+    SourceFailures,
+    AllProviderTerminalCoverageUnavailable,
+}
+
+impl SourceBackedRefreshFailureType {
+    const fn outcome_code(self) -> RefreshOutcomeCode {
+        match self {
+            Self::UnsupportedSchema => RefreshOutcomeCode::UnsupportedSchema,
+            Self::MalformedSource => RefreshOutcomeCode::MalformedSource,
+            Self::SourceUnavailable => RefreshOutcomeCode::SourceUnavailable,
+            Self::SourceChanged => RefreshOutcomeCode::SourceChanged,
+            Self::SourceFailures => RefreshOutcomeCode::SourceFailures,
+            Self::AllProviderTerminalCoverageUnavailable => {
+                RefreshOutcomeCode::AllProviderTerminalCoverageUnavailable
+            }
+        }
+    }
+
+    pub(super) const fn as_str(self) -> &'static str {
+        self.outcome_code().as_str()
+    }
+}
+
+impl std::str::FromStr for SourceBackedRefreshFailureType {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value.parse::<RefreshOutcomeCode>()? {
+            RefreshOutcomeCode::UnsupportedSchema => Ok(Self::UnsupportedSchema),
+            RefreshOutcomeCode::MalformedSource => Ok(Self::MalformedSource),
+            RefreshOutcomeCode::SourceUnavailable => Ok(Self::SourceUnavailable),
+            RefreshOutcomeCode::SourceChanged => Ok(Self::SourceChanged),
+            RefreshOutcomeCode::SourceFailures => Ok(Self::SourceFailures),
+            RefreshOutcomeCode::AllProviderTerminalCoverageUnavailable => {
+                Ok(Self::AllProviderTerminalCoverageUnavailable)
+            }
+            _ => bail!("unknown source-backed refresh failure type"),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct SourceBackedRefreshAttempt {
     pub(super) request_id: String,
@@ -129,7 +180,7 @@ pub(super) struct SourceBackedRefreshAttempt {
     pub(super) daemon_mode: String,
     pub(super) trigger: &'static str,
     pub(super) trigger_provenance: &'static str,
-    pub(super) failure_type: Option<&'static str>,
+    pub(super) failure_type: Option<SourceBackedRefreshFailureType>,
     pub(super) failure_outcome: Option<SourceBackedRefreshFailureOutcome>,
     pub(super) last_error: Option<String>,
 }
@@ -362,7 +413,7 @@ impl SourceBackedRefreshAttempt {
             "daemon_mode": self.daemon_mode.as_str(),
             "trigger": self.trigger,
             "trigger_provenance": self.trigger_provenance,
-            "failure_type": self.failure_type,
+            "failure_type": self.failure_type.map(SourceBackedRefreshFailureType::as_str),
             "error_code": self.failure_code(),
             "reason": self.failure_reason(),
             "last_error": self.last_error,
@@ -420,7 +471,7 @@ impl SourceBackedRefreshAttempt {
             "daemon_mode": self.daemon_mode.as_str(),
             "trigger": self.trigger,
             "trigger_provenance": self.trigger_provenance,
-            "failure_type": self.failure_type,
+            "failure_type": self.failure_type.map(SourceBackedRefreshFailureType::as_str),
             "error_code": self.failure_code(),
             "reason": self.failure_reason(),
             "last_error": self.last_error,

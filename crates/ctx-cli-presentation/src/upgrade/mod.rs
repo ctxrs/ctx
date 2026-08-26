@@ -26,11 +26,15 @@ pub struct UpgradeArgs {
     #[arg(long, hide = true)]
     pub replacement_helper: bool,
     #[arg(long, hide = true)]
+    pub automatic_worker: bool,
+    #[arg(long, hide = true)]
     pub install_path: Option<PathBuf>,
     #[arg(long, hide = true)]
     pub attempt_id: Option<String>,
     #[arg(long, hide = true)]
     pub parent_pid: Option<u32>,
+    #[arg(long, hide = true)]
+    pub startup_receipt: Option<String>,
     #[arg(long, value_enum, hide = true)]
     pub hosted_transaction: Option<HostedTransactionActionArg>,
     #[arg(long, hide = true)]
@@ -47,9 +51,9 @@ pub enum UpgradeCommand {
     Check(UpgradeCheckArgs),
     #[command(about = "Show local upgrade state")]
     Status(UpgradeStatusArgs),
-    #[command(about = "Enable daemon-owned automatic upgrades")]
+    #[command(about = "Enable automatic upgrades")]
     Enable,
-    #[command(about = "Disable daemon-owned automatic upgrades")]
+    #[command(about = "Disable automatic upgrades")]
     Disable,
 }
 
@@ -99,6 +103,7 @@ impl UpgradeArgs {
                 Some(UpgradeCommand::Status(args)) if args.format.is_json()
             )
             || self.replacement_helper
+            || self.automatic_worker
             || self.hosted_transaction.is_some()
     }
 

@@ -1,0 +1,22 @@
+[package]
+name = "ctx-history-index-qualification"
+version.workspace = true
+description = "Cross-process and fault qualification for ctx history index publication"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+publish = false
+autotests = false
+
+[[test]]
+name = "source_backed_recovery"
+path = "tests/source_backed_recovery.rs"
+
+[dev-dependencies]
+ctx-history-core = { path = "../ctx-history-core" }
+ctx-history-index = { path = "../ctx-history-index" }
+serde_json.workspace = true
+tantivy.workspace = true
+tempfile.workspace = true

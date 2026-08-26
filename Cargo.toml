@@ -6,6 +6,7 @@ members = [
     "crates/ctx-cli",
     "crates/ctx-cli-contract-tests",
     "crates/ctx-cli-presentation",
+    "crates/ctx-cli-qualification",
     "crates/ctx-client-observability",
     "crates/ctx-daemon-cli",
     "crates/ctx-daemon-application",
@@ -35,6 +36,7 @@ members = [
     "crates/ctx-history-platform",
     "crates/ctx-history-cli",
     "crates/ctx-history-index",
+    "crates/ctx-history-index-qualification",
     "crates/ctx-history-index-format",
     "crates/ctx-history-index-generation",
     "crates/ctx-history-index-query",
@@ -52,6 +54,7 @@ members = [
     "crates/ctx-history-source-io",
     "crates/ctx-history-source-sqlite",
     "crates/ctx-history-source-discovery",
+    "crates/ctx-history-source-discovery-qualification",
     "crates/ctx-semantic-index",
     "crates/ctx-semantic-model",
     "crates/ctx-terminal",
@@ -61,7 +64,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "1.0.2"
+version = "1.1.1"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/ctxrs/ctx"

@@ -15,7 +15,8 @@ pub use locate::run_locate;
 use search::mcp_search;
 pub use search::{
     mcp_search_with_compact, normalize_mcp_search_request, run_search,
-    validate_explicit_semantic_scope, McpSearchError, SourceSearchRequest,
+    validate_explicit_semantic_scope, McpSearchError, McpSearchExecutionFailure,
+    SourceSearchRequest,
 };
 pub use shared::generation_query_authority_error_json;
 pub use show::{

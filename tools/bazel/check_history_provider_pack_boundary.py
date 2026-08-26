@@ -23,6 +23,7 @@ CAPTURE_BUILD_LABEL = "//crates/ctx-history-capture-composition:BUILD.bazel"
 EVALUATED_REVERSE_BAZEL_CONSUMERS = {
     PACK_LABEL: (
         "//crates/ctx-history-capture-composition:lib",
+        "//crates/ctx-history-capture-composition:test_support_lib",
         "//crates/ctx-history-capture-composition:unit_tests",
         "//crates/ctx-history-providers-task-docs:lib",
     ),
@@ -151,6 +152,22 @@ def _workspace_dependencies(workspace_manifest: dict[str, Any]) -> dict[str, Any
     if not isinstance(dependencies, dict):
         raise BoundaryError("root Cargo workspace.dependencies must be a table")
     return dependencies
+
+
+def _workspace_members(workspace_manifest: dict[str, Any]) -> tuple[str, ...]:
+    workspace = workspace_manifest.get("workspace")
+    if not isinstance(workspace, dict):
+        raise BoundaryError("root Cargo manifest must define a workspace table")
+    members = workspace.get("members")
+    if not isinstance(members, list) or not all(
+        isinstance(member, str) and member for member in members
+    ):
+        raise BoundaryError(
+            "root Cargo workspace.members must be a list of non-empty strings"
+        )
+    if len(members) != len(set(members)):
+        raise BoundaryError("root Cargo workspace.members has duplicate entries")
+    return tuple(members)
 
 
 def _canonical_dependency_name(
@@ -698,13 +715,43 @@ def _validate_pack_bazel(build_path: Path) -> None:
         raise BoundaryError(f"{package} Bazel ctx_rust_test must be named unit_tests")
 
 
+def _validate_cargo_workspace_package_data(
+    root_tokens: Sequence[Token], workspace_manifest: dict[str, Any]
+) -> None:
+    package = "root Cargo workspace package data"
+    assignments = _assignments(root_tokens, "CARGO_WORKSPACE_PACKAGE_DATA")
+    if len(assignments) != 1 or assignments[0][0] != "=":
+        raise BoundaryError(
+            "CARGO_WORKSPACE_PACKAGE_DATA must be assigned exactly once"
+        )
+    actual = set(
+        _literal_string_list(
+            assignments[0][1], package, "CARGO_WORKSPACE_PACKAGE_DATA"
+        )
+    )
+    expected = {
+        f"//{member}:cargo_package_data"
+        for member in _workspace_members(workspace_manifest)
+    }
+    if actual != expected:
+        missing = sorted(expected - actual)
+        stale = sorted(actual - expected)
+        raise BoundaryError(
+            "Cargo workspace package-data closure drifted: "
+            f"missing={missing} stale={stale}"
+        )
+
+
 def _validate_live_gate_registration(
-    root_build_path: Path, tools_build_path: Path
+    root_build_path: Path,
+    tools_build_path: Path,
+    workspace_manifest: dict[str, Any],
 ) -> None:
     package = "root provider-pack boundary"
     root_tokens = _tokenize_starlark(
         root_build_path.read_text(encoding="utf-8"), package
     )
+    _validate_cargo_workspace_package_data(root_tokens, workspace_manifest)
     matching: list[dict[str, list[Token]]] = []
     for call in _find_calls(root_tokens, "sh_test", package):
         arguments = _named_arguments(call, package)
@@ -885,11 +932,12 @@ def validate(
     member_builds: Sequence[Path],
 ) -> None:
     repo_root = workspace_manifest_path.parent
+    workspace_manifest = _read_manifest(workspace_manifest_path)
     _validate_live_gate_registration(
         repo_root / "BUILD.bazel",
         repo_root / "tools/bazel/BUILD.bazel",
+        workspace_manifest,
     )
-    workspace_manifest = _read_manifest(workspace_manifest_path)
     _validate_pack_manifest(pack_manifest_path, workspace_manifest)
     _validate_pack_bazel(pack_build_path)
     _validate_reverse_cargo_consumers(workspace_manifest, member_cargos)

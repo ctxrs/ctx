@@ -61,6 +61,36 @@ fn direct_parent_claim_is_conservative_and_does_not_require_a_present_target() {
 }
 
 #[test]
+fn root_scope_distinguishes_native_sessions_and_parent_lineage() {
+    let legacy = rovodev_source_key("same-session").unwrap();
+    let unqualified =
+        rovodev_source_key_scoped("same-session", SourceAnchorScope::Unqualified).unwrap();
+    let first =
+        rovodev_source_key_scoped("same-session", SourceAnchorScope::Lineage([1; 32])).unwrap();
+    let second =
+        rovodev_source_key_scoped("same-session", SourceAnchorScope::Lineage([2; 32])).unwrap();
+
+    assert!(legacy.exact_descriptor_eq(&unqualified));
+    assert_ne!(first.identity(), second.identity());
+    assert_ne!(
+        rovodev_session_identity(&first, "same-session").unwrap(),
+        rovodev_session_identity(&second, "same-session").unwrap()
+    );
+    assert_ne!(
+        provider_thread_session_identity_scoped(
+            "same-parent",
+            SourceAnchorScope::Lineage([1; 32]),
+        )
+        .unwrap(),
+        provider_thread_session_identity_scoped(
+            "same-parent",
+            SourceAnchorScope::Lineage([2; 32]),
+        )
+        .unwrap()
+    );
+}
+
+#[test]
 fn parent_lifecycle_does_not_change_child_leaf_ownership() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let root = temp.path().join("sessions");

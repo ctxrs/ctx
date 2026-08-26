@@ -13,7 +13,8 @@ mod source_backed_tests;
 pub(super) use reader::ClineNativeReader;
 pub(super) use source::{discover_cline_root, discover_roo_root};
 pub use source_backed::{
-    cline_task_json_source_backed_adapter, roo_task_json_source_backed_adapter,
+    cline_task_json_source_backed_adapter, cline_task_json_source_backed_adapter_scoped,
+    roo_task_json_source_backed_adapter, roo_task_json_source_backed_adapter_scoped,
 };
 
 use std::{io, path::PathBuf};

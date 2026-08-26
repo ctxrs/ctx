@@ -156,6 +156,7 @@ pub struct PinnedPublication {
     searcher: Searcher,
     manifest: Arc<GenerationManifest>,
     generation_id: String,
+    requires_current_manifest_anchor: bool,
     publication_metadata: Option<Arc<[u8]>>,
     fields: Fields,
     opstamp: u64,
@@ -176,6 +177,11 @@ impl PinnedPublication {
     #[doc(hidden)]
     pub fn generation_id(&self) -> &str {
         &self.generation_id
+    }
+
+    #[doc(hidden)]
+    pub fn requires_current_manifest_anchor(&self) -> bool {
+        self.requires_current_manifest_anchor
     }
 
     #[doc(hidden)]
@@ -294,12 +300,14 @@ pub fn open_pinned_publication(
     verify_searcher_structure(&searcher, publication.manifest())?;
     let physical_integrity =
         verify_or_certify_physical_integrity(root, authority.pointer(), slot, searcher.index())?;
+    let requires_current_manifest_anchor = publication.requires_current_manifest_anchor();
     let (generation_id, manifest, publication_metadata) = publication.into_parts();
     Ok(OpenedPinnedPublication::Published(PinnedPublication {
         writer_index: Some(index),
         searcher,
         manifest,
         generation_id,
+        requires_current_manifest_anchor,
         publication_metadata,
         fields,
         opstamp: metas.opstamp,

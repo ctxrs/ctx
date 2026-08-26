@@ -1,6 +1,7 @@
 use super::*;
 
 use crate::provider::source_backed::family::document::register_replacement_document_tree_route;
+use ctx_history_core::SourceAnchorScope;
 use ctx_history_providers_task_docs::{
     providers::{
         cline_sdk::ClineSdkDocumentTreeAdapter,
@@ -8,25 +9,27 @@ use ctx_history_providers_task_docs::{
         continue_cli::native_path::ContinueSourceBackedReader,
         rovodev::native_path::RovoDevDocumentTreeAdapter,
         task_json::cline_nativepath::{
-            cline_task_json_source_backed_adapter, roo_task_json_source_backed_adapter,
+            cline_task_json_source_backed_adapter_scoped,
+            roo_task_json_source_backed_adapter_scoped,
         },
     },
     ProviderAdapterContext, CLINE_SDK_SOURCE_FORMAT,
 };
-
-const DIRECT_ROUTES: &[RouteEntry] = &[RouteEntry::new(
-    CaptureProvider::Auggie,
-    crate::provider::providers::auggie::native_path::register_source_backed_route,
-)];
 
 pub(super) fn register_route(
     registry: &mut SourceBackedProviderRegistry,
     source: ProviderSource,
     selection: SourceBackedRouteSelection,
     data_root: Option<&Path>,
+    source_root_lineage: Option<[u8; 32]>,
 ) -> SourceBackedCoordinatorResult<()> {
-    if let Some(register) = direct_route_registration(DIRECT_ROUTES, source.provider) {
-        return register(registry, source, selection);
+    if source.provider == CaptureProvider::Auggie {
+        return crate::provider::providers::auggie::native_path::register_source_backed_route(
+            registry,
+            source,
+            selection,
+            source_root_lineage,
+        );
     }
     match source.provider {
         CaptureProvider::Cline if source.source_format == CLINE_SDK_SOURCE_FORMAT => {
@@ -36,14 +39,20 @@ pub(super) fn register_route(
                     "Cline SDK registration requires the selected ctx data root",
                 )
             })?;
-            register_cline_sdk_route(registry, source, selection, data_root)
+            register_cline_sdk_route(registry, source, selection, data_root, source_root_lineage)
         }
         CaptureProvider::Cline | CaptureProvider::RooCode => {
-            register_task_json_route(registry, source, selection)
+            register_task_json_route(registry, source, selection, source_root_lineage)
         }
-        CaptureProvider::CodeBuddy => register_codebuddy_route(registry, source, selection),
-        CaptureProvider::RovoDev => register_rovodev_route(registry, source, selection),
-        CaptureProvider::Continue => register_continue_route(registry, source, selection),
+        CaptureProvider::CodeBuddy => {
+            register_codebuddy_route(registry, source, selection, source_root_lineage)
+        }
+        CaptureProvider::RovoDev => {
+            register_rovodev_route(registry, source, selection, source_root_lineage)
+        }
+        CaptureProvider::Continue => {
+            register_continue_route(registry, source, selection, source_root_lineage)
+        }
         provider => Err(invalid_route(
             provider,
             "this provider is not registered by the document route family",
@@ -56,8 +65,13 @@ fn register_cline_sdk_route(
     source: ProviderSource,
     selection: SourceBackedRouteSelection,
     data_root: &Path,
+    source_root_lineage: Option<[u8; 32]>,
 ) -> SourceBackedCoordinatorResult<()> {
-    let adapter = ClineSdkDocumentTreeAdapter::new(source.path.clone(), data_root.to_path_buf());
+    let adapter = ClineSdkDocumentTreeAdapter::new_scoped(
+        source.path.clone(),
+        data_root.to_path_buf(),
+        source_root_lineage.map_or(SourceAnchorScope::Unqualified, SourceAnchorScope::Lineage),
+    );
     register_replacement_document_tree_route(registry, source, selection, adapter)
 }
 
@@ -65,12 +79,19 @@ pub(super) fn register_task_json_route(
     registry: &mut SourceBackedProviderRegistry,
     source: ProviderSource,
     selection: SourceBackedRouteSelection,
+    source_root_lineage: Option<[u8; 32]>,
 ) -> SourceBackedCoordinatorResult<()> {
     let selected = vec![source.clone()];
     let provider = source.provider;
     let adapter = match provider {
-        CaptureProvider::Cline => cline_task_json_source_backed_adapter(&selected),
-        CaptureProvider::RooCode => roo_task_json_source_backed_adapter(&selected),
+        CaptureProvider::Cline => cline_task_json_source_backed_adapter_scoped(
+            &selected,
+            source_root_lineage.map_or(SourceAnchorScope::Unqualified, SourceAnchorScope::Lineage),
+        ),
+        CaptureProvider::RooCode => roo_task_json_source_backed_adapter_scoped(
+            &selected,
+            source_root_lineage.map_or(SourceAnchorScope::Unqualified, SourceAnchorScope::Lineage),
+        ),
         _ => {
             return Err(invalid_route(
                 provider,
@@ -85,6 +106,7 @@ pub(super) fn register_codebuddy_route(
     registry: &mut SourceBackedProviderRegistry,
     source: ProviderSource,
     selection: SourceBackedRouteSelection,
+    source_root_lineage: Option<[u8; 32]>,
 ) -> SourceBackedCoordinatorResult<()> {
     let context = ProviderAdapterContext {
         machine_id: "source-backed-codebuddy".to_owned(),
@@ -92,7 +114,11 @@ pub(super) fn register_codebuddy_route(
         source_root: Some(source.path.clone()),
         imported_at: DateTime::<Utc>::UNIX_EPOCH,
     };
-    let adapter = CodeBuddyDocumentAdapter::new(source.path.clone(), context);
+    let adapter = CodeBuddyDocumentAdapter::new_scoped(
+        source.path.clone(),
+        context,
+        source_root_lineage.map_or(SourceAnchorScope::Unqualified, SourceAnchorScope::Lineage),
+    );
     register_replacement_document_tree_route(registry, source, selection, adapter)
 }
 
@@ -158,6 +184,7 @@ pub(super) fn register_rovodev_route(
     registry: &mut SourceBackedProviderRegistry,
     source: ProviderSource,
     selection: SourceBackedRouteSelection,
+    source_root_lineage: Option<[u8; 32]>,
 ) -> SourceBackedCoordinatorResult<()> {
     let context = ProviderAdapterContext {
         machine_id: "source-backed-rovodev".to_owned(),
@@ -165,15 +192,23 @@ pub(super) fn register_rovodev_route(
         source_root: Some(source.path.clone()),
         imported_at: DateTime::<Utc>::UNIX_EPOCH,
     };
-    let adapter = RovoDevDocumentTreeAdapter::new(source.path.clone(), context);
+    let adapter = RovoDevDocumentTreeAdapter::new_scoped(
+        source.path.clone(),
+        context,
+        source_root_lineage.map_or(SourceAnchorScope::Unqualified, SourceAnchorScope::Lineage),
+    );
     register_replacement_document_tree_route(registry, source, selection, adapter)
 }
 pub(super) fn register_continue_route(
     registry: &mut SourceBackedProviderRegistry,
     source: ProviderSource,
     selection: SourceBackedRouteSelection,
+    source_root_lineage: Option<[u8; 32]>,
 ) -> SourceBackedCoordinatorResult<()> {
-    let adapter = ContinueSourceBackedReader::new(source.path.clone());
+    let adapter = ContinueSourceBackedReader::new_scoped(
+        source.path.clone(),
+        source_root_lineage.map_or(SourceAnchorScope::Unqualified, SourceAnchorScope::Lineage),
+    );
     register_replacement_document_tree_route(registry, source, selection, adapter)
 }
 
@@ -455,6 +490,79 @@ mod tests {
     }
 
     #[test]
+    fn cline_sdk_durable_replay_is_bound_to_the_leaf_root_scope() {
+        let temp = crate::test_support_paths::tempdir().unwrap();
+        let provider_root = temp.path().join("cline-data");
+        let ctx_data_root = temp.path().join("ctx-data");
+        let index = temp.path().join("index");
+        fs::create_dir_all(provider_root.join("sessions/session-a")).unwrap();
+        fs::create_dir_all(&ctx_data_root).unwrap();
+        write_cline_sdk_index(&provider_root, true);
+        write_cline_sdk_messages(&provider_root, &["same content"]);
+
+        let scope_a = ctx_history_core::SourceAnchorScope::Lineage([0x11; 32]);
+        let scope_b = ctx_history_core::SourceAnchorScope::Lineage([0x22; 32]);
+        let registry_a = cline_sdk_registry_scoped(&provider_root, &ctx_data_root, scope_a);
+        let cold_a =
+            refresh_source_backed_generation(&index, &registry_a, WriterOptions::default())
+                .unwrap();
+        assert_eq!(cold_a.sources.len(), 1);
+        assert!(cold_a.sources[0].frontier().is_some());
+        let source_a = cold_a.sources[0].observation().source().clone();
+        let session_a = cline_sdk_events(&index, &cold_a)[0].session_id;
+
+        let replay_a =
+            refresh_source_backed_generation(&index, &registry_a, WriterOptions::default())
+                .unwrap();
+        assert_eq!(replay_a.commit.generation_id, cold_a.commit.generation_id);
+        assert_eq!(replay_a.sources, cold_a.sources);
+
+        let registry_b = cline_sdk_registry_scoped(&provider_root, &ctx_data_root, scope_b);
+        let refreshed_b =
+            refresh_source_backed_generation(&index, &registry_b, WriterOptions::default())
+                .unwrap();
+        assert_ne!(
+            refreshed_b.commit.generation_id,
+            cold_a.commit.generation_id
+        );
+        assert_eq!(refreshed_b.sources.len(), 1);
+        let source_b = refreshed_b.sources[0].observation().source();
+        assert!(!source_a.exact_descriptor_eq(source_b));
+        assert_ne!(source_a.identity(), source_b.identity());
+        assert_eq!(
+            cold_a.sources[0].frontier(),
+            refreshed_b.sources[0].frontier()
+        );
+        assert_eq!(
+            cold_a.sources[0].content_digest(),
+            refreshed_b.sources[0].content_digest()
+        );
+
+        let events_b = cline_sdk_events(&index, &refreshed_b);
+        assert_ne!(events_b[0].session_id, session_a);
+        assert!(events_b
+            .iter()
+            .any(|event| { event.core_record.content.meaningful_text() == "same content" }));
+        assert!(matches!(
+            VerifiedIndex::open(&index)
+                .unwrap()
+                .core_source_event_page(&source_a, None, 64),
+            Err(ctx_history_index::IndexError::SourceEventSourceNotRetained(
+                _
+            ))
+        ));
+
+        let replay_b =
+            refresh_source_backed_generation(&index, &registry_b, WriterOptions::default())
+                .unwrap();
+        assert_eq!(
+            replay_b.commit.generation_id,
+            refreshed_b.commit.generation_id
+        );
+        assert_eq!(replay_b.sources, refreshed_b.sources);
+    }
+
+    #[test]
     fn cline_sdk_real_automatic_and_exact_discovery_import_the_common_data_root() {
         let temp = crate::test_support_paths::tempdir().unwrap();
         let home = temp.path().join("home");
@@ -643,8 +751,10 @@ mod tests {
                 catalog_support: ProviderCatalogSupport::None,
                 status: ProviderSourceStatus::Available,
                 unsupported_reason: None,
+                route_provenance: Default::default(),
             },
             SourceBackedRouteSelection::Automatic,
+            None,
         )
         .unwrap();
         registry
@@ -654,22 +764,49 @@ mod tests {
         let mut registry = SourceBackedProviderRegistry::new();
         register_cline_sdk_route(
             &mut registry,
-            ProviderSource {
-                provider: CaptureProvider::Cline,
-                path: path.to_path_buf(),
-                exists: true,
-                source_format: CLINE_SDK_SOURCE_FORMAT,
-                source_kind: ProviderSourceKind::NativeHistory,
-                import_support: ProviderImportSupport::Native,
-                catalog_support: ProviderCatalogSupport::None,
-                status: ProviderSourceStatus::Available,
-                unsupported_reason: None,
-            },
+            cline_sdk_provider_source(path),
             SourceBackedRouteSelection::Automatic,
             data_root,
+            None,
         )
         .unwrap();
         registry
+    }
+
+    fn cline_sdk_registry_scoped(
+        path: &Path,
+        data_root: &Path,
+        source_anchor_scope: ctx_history_core::SourceAnchorScope,
+    ) -> SourceBackedProviderRegistry {
+        let mut registry = SourceBackedProviderRegistry::new();
+        let adapter = ClineSdkDocumentTreeAdapter::new_scoped(
+            path.to_path_buf(),
+            data_root.to_path_buf(),
+            source_anchor_scope,
+        );
+        register_replacement_document_tree_route(
+            &mut registry,
+            cline_sdk_provider_source(path),
+            SourceBackedRouteSelection::Automatic,
+            adapter,
+        )
+        .unwrap();
+        registry
+    }
+
+    fn cline_sdk_provider_source(path: &Path) -> ProviderSource {
+        ProviderSource {
+            provider: CaptureProvider::Cline,
+            path: path.to_path_buf(),
+            exists: true,
+            source_format: CLINE_SDK_SOURCE_FORMAT,
+            source_kind: ProviderSourceKind::NativeHistory,
+            import_support: ProviderImportSupport::Native,
+            catalog_support: ProviderCatalogSupport::None,
+            status: ProviderSourceStatus::Available,
+            unsupported_reason: None,
+            route_provenance: Default::default(),
+        }
     }
 
     fn write_cline_sdk_index(root: &Path, include_session: bool) {

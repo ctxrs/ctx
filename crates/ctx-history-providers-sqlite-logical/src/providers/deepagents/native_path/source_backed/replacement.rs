@@ -18,13 +18,23 @@ pub struct DeepAgentsTreeAuthority {
 #[derive(Debug, Clone)]
 pub struct DeepAgentsRouteAdapter<B> {
     selection: DeepAgentsDatabaseSelectionV0,
+    source_scope: SourceAnchorScope,
     binding: PhantomData<fn() -> B>,
 }
 
 impl<B> DeepAgentsRouteAdapter<B> {
     pub fn new(data_root: &Path, path: impl Into<std::path::PathBuf>) -> Self {
+        Self::new_scoped(data_root, path, SourceAnchorScope::Unqualified)
+    }
+
+    pub fn new_scoped(
+        data_root: &Path,
+        path: impl Into<std::path::PathBuf>,
+        source_scope: SourceAnchorScope,
+    ) -> Self {
         Self {
             selection: DeepAgentsDatabaseSelectionV0::explicit(data_root, path),
+            source_scope,
             binding: PhantomData,
         }
     }
@@ -48,6 +58,14 @@ impl<B: crate::LogicalSqliteRuntimeBinding> ReplacementDocumentTree for DeepAgen
             && source.provider_identity_version() == 1
     }
 
+    fn durable_replay_source(
+        &self,
+        _authority: &Self::TreeAuthority,
+        leaf: &Self::Leaf,
+    ) -> SourceBackedRouteResult<Option<SourceKey>> {
+        Ok(Some(leaf.clone()))
+    }
+
     fn discover_complete(
         &self,
     ) -> SourceBackedRouteResult<CompleteDocumentTree<Self::Leaf, Self::TreeAuthority>> {
@@ -57,9 +75,10 @@ impl<B: crate::LogicalSqliteRuntimeBinding> ReplacementDocumentTree for DeepAgen
                 "selected Deep Agents database is unavailable",
             ));
         }
-        let scanner = DeepAgentsSourceBackedScannerV0::open(
+        let scanner = DeepAgentsSourceBackedScannerV0::open_scoped(
             self.selection.clone(),
             DateTime::<Utc>::UNIX_EPOCH,
+            self.source_scope,
         )
         .map_err(route_error)?;
         let source = scanner.source().clone();
