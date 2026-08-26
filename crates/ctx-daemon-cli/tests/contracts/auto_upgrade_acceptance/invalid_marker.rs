@@ -58,6 +58,46 @@ fn hash_mismatched_marker_keeps_persistent_daemon_automatic_scheduler_dormant() 
 }
 
 #[test]
+fn automatic_recovery_precedes_marker_hash_authority() {
+    let temp = tempdir();
+    let mut release = fake_release(&temp, FIXTURE_TARGET_VERSION);
+    let binary = managed_hook_candidate(&temp, "ia_hash_mismatch_recovery");
+    patch_release_artifact_with_next_ctx(&mut release, &binary, FIXTURE_TARGET_VERSION);
+    configure_automatic_upgrades(&temp, "manual");
+    let journal = installation_sibling(&binary, "upgrade-install-transaction.json");
+    let binary_before = fs::read(&binary).unwrap();
+    let marker_path = install_marker_path(&binary);
+    let marker_before = fs::read(&marker_path).unwrap();
+
+    let interrupted = managed_release_env_for_installation(
+        ctx_from_binary(&temp, &binary).args(["upgrade", "--automatic-worker"]),
+        &release,
+        &binary,
+    )
+    .env("CTX_DAEMON_AUTOSTART_OFF", "1")
+    .env("CTX_UPGRADE_ABORT_AFTER_PUBLISH_FOR_TESTS", "binary")
+    .output()
+    .unwrap();
+    assert!(!interrupted.status.success(), "{interrupted:?}");
+    assert!(journal.exists());
+    let marker: Value = serde_json::from_slice(&fs::read(&marker_path).unwrap()).unwrap();
+    assert_ne!(marker["sha256"], sha256_hex(&fs::read(&binary).unwrap()));
+
+    managed_release_env_for_installation(
+        ctx_from_binary(&temp, &binary).args(["upgrade", "--automatic-worker"]),
+        &release,
+        &binary,
+    )
+    .env("CTX_DAEMON_AUTOSTART_OFF", "1")
+    .assert()
+    .success();
+
+    assert!(!journal.exists());
+    assert_eq!(fs::read(&binary).unwrap(), binary_before);
+    assert_eq!(fs::read(&marker_path).unwrap(), marker_before);
+}
+
+#[test]
 fn corrupt_marker_does_not_spawn_a_detached_automatic_worker() {
     let temp = tempdir();
     let release = fake_release(&temp, "9.9.9");

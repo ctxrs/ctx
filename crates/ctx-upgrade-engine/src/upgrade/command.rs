@@ -13,11 +13,12 @@ use ctx_history_platform::platform_security::{
 };
 
 use super::download::DownloadedArtifact;
+use super::install::managed_install_marker_for_current_exe;
 use super::install::{
     absent_install_marker_error, apply_artifact, capture_install_snapshot,
     classify_repair_requirements, current_exe_is_unmanaged, current_install_path, pending_recovery,
     recover_interrupted_install, remove_terminal_recovery, ApplyResult, InstallRecovery,
-    PendingRecovery, TerminalRecovery,
+    ManagedInstallMarker, PendingRecovery, TerminalRecovery,
 };
 #[cfg(unix)]
 use super::install::{

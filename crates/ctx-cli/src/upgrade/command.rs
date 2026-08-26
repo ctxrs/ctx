@@ -81,7 +81,7 @@ pub fn run(
             return Ok(());
         }
         let current = AppConfig::load(&data_root)?;
-        if !super::effective_auto_upgrade_enabled(&current)
+        if !super::automatic_upgrade_eligible_hint(&current)
             || current.persistent_automatic_upgrade_driver_enabled()
         {
             return Ok(());

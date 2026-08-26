@@ -165,6 +165,16 @@ where
             },
         )));
     }
+    // Interrupted publication is discovered first because replacing the
+    // binary before its marker legitimately creates a temporary hash
+    // mismatch. A new automatic attempt, however, requires full hosted-install
+    // authority before it can claim a lock or write scheduler state.
+    if !matches!(
+        managed_install_marker_for_current_exe(),
+        Ok(ManagedInstallMarker::Valid(_))
+    ) {
+        return Ok(None);
+    }
     let (attempt, lock) = match claim_automatic_upgrade(current.interval())? {
         AutoUpgradeClaim::Claimed { attempt, lock } => (attempt, lock),
         AutoUpgradeClaim::NotDue | AutoUpgradeClaim::Contended => return Ok(None),

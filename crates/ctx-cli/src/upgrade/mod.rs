@@ -23,10 +23,6 @@ pub(crate) fn effective_auto_upgrade_mode(config: &AppConfig) -> AutoUpgradeMode
     }
 }
 
-pub(crate) fn effective_auto_upgrade_enabled(config: &AppConfig) -> bool {
-    effective_auto_upgrade_mode(config).enabled()
-}
-
 /// Cheap foreground eligibility hint. A structurally usable marker is fully
 /// revalidated by the automatic worker or daemon before any upgrade attempt;
 /// this path never hashes the binary.
