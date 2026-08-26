@@ -250,10 +250,11 @@ fn missing_explicit_source_keeps_cli_classification() {
         "--progress",
         "none",
     ]));
-    assert!(
-        stderr.contains("not found") || stderr.contains("No such file"),
-        "{stderr}"
+    assert_eq!(
+        stderr,
+        format!("Import path does not exist: {}\n", missing.display())
     );
+    assert!(!stderr.contains("No such file"), "{stderr}");
 }
 
 #[test]
