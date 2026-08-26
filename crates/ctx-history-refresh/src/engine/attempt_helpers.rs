@@ -378,6 +378,9 @@ pub(super) fn source_backed_refresh_failure_outcome(
             SourceBackedCoordinatorError::Index(error) if index_error_is_corruption(error) => {
                 ("index_corruption", "corruption", false, "rebuild_index")
             }
+            SourceBackedCoordinatorError::UnclaimedBaseSource { .. } => {
+                ("source_unclaimed", "unclaimed", false, "inspect_sources")
+            }
             SourceBackedCoordinatorError::UnavailableRoute { .. } => (
                 "source_unavailable",
                 "unavailable",
@@ -815,6 +818,23 @@ mod tests {
         assert!(outcome.retryable);
         assert_eq!(outcome.blocked_routes.len(), 64);
         assert_eq!(outcome.retryable_routes.len(), 6);
+    }
+
+    #[test]
+    fn unclaimed_base_source_is_terminal_and_not_retryable() {
+        let route = SourceRouteIdentity::from_sha256("aa".repeat(32)).unwrap();
+        let attempted_routes = BTreeSet::from([route]);
+        let error: anyhow::Error = SourceBackedCoordinatorError::UnclaimedBaseSource {
+            source_id: "fixture-source".into(),
+        }
+        .into();
+
+        let outcome = source_backed_refresh_failure_outcome(&error, &attempted_routes);
+
+        assert_eq!(outcome.code, "source_unclaimed");
+        assert_eq!(outcome.class, "unclaimed");
+        assert!(!outcome.retryable);
+        assert_eq!(outcome.retry_advice, Some("inspect_sources"));
     }
 
     #[test]
