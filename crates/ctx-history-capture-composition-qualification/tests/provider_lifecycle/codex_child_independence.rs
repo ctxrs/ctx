@@ -733,3 +733,38 @@ mod continuous_append;
 mod lifecycle;
 #[path = "codex_child_independence/repository.rs"]
 mod repository;
+
+#[test]
+fn codex_adapters_opt_in_to_empty_quarantined_route_via_capability() {
+    // The fully-quarantined empty-generation behavior is a provider capability,
+    // not a provider-name check. Both Codex JSONL family adapters must opt in.
+    use std::sync::Arc;
+
+    use ctx_history_capture_composition::CaptureProviderRuntime;
+    use ctx_history_provider_runtime::JsonlFamilyAdapter;
+    use ctx_history_provider_codex::codex::nativepath::{
+        CodexGenerationNormalizationCoordinatorV0, CodexPromptHistoryJsonlFamilyAdapterV0,
+        CodexPromptHistorySourceBackedInputV0, CodexSessionJsonlFamilyAdapterV0,
+    };
+
+    let prompt_input = CodexPromptHistorySourceBackedInputV0::explicit(
+        std::path::PathBuf::from("/nonexistent/codex-history.jsonl"),
+        [
+            0x2d, 0x2e, 0xb3, 0x41, 0xde, 0xe9, 0x7a, 0xd3, 0x15, 0xec, 0xfa, 0xb3, 0x33, 0x20,
+            0x7c, 0x44, 0x53, 0x18, 0xb9, 0x32, 0x1c, 0xc1, 0x6b, 0xf2, 0x2c, 0xdb, 0x09, 0x68,
+            0xe0, 0xf1, 0xf5, 0x0a,
+        ],
+    );
+    let prompt_adapter =
+        CodexPromptHistoryJsonlFamilyAdapterV0::<CaptureProviderRuntime>::new(prompt_input)
+            .unwrap();
+    assert!(prompt_adapter.allows_empty_quarantined_route());
+
+    let coordinator = Arc::new(CodexGenerationNormalizationCoordinatorV0::default());
+    let session_generation = coordinator
+        .register_session_tree(vec![std::path::PathBuf::from("/nonexistent/sessions")], None)
+        .unwrap();
+    let session_adapter =
+        CodexSessionJsonlFamilyAdapterV0::<CaptureProviderRuntime>::new(session_generation);
+    assert!(session_adapter.allows_empty_quarantined_route());
+}

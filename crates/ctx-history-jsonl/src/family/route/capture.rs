@@ -231,7 +231,7 @@ pub(super) fn capture<R: JsonlFamilyRuntime>(
             let carried_forward = bases
                 .iter()
                 .any(|base| base.observation().source().exact_descriptor_eq(source));
-            if adapter.provider() == CaptureProvider::Codex {
+            if adapter.allows_empty_quarantined_route() {
                 sink.record_logical_source_quarantine(source.clone(), failure)
             } else {
                 sink.record_logical_source_failure(source.clone(), failure, carried_forward)
@@ -422,7 +422,7 @@ pub(super) fn capture<R: JsonlFamilyRuntime>(
                 .source()
                 .exact_descriptor_eq(&quarantined.failure_source)
         });
-        if adapter.provider() == CaptureProvider::Codex {
+        if adapter.allows_empty_quarantined_route() {
             sink.record_logical_source_quarantine(quarantined.failure_source.clone(), failure)
         } else {
             sink.record_logical_source_failure(

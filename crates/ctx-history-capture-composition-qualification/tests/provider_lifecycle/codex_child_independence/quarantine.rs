@@ -377,6 +377,56 @@ fn committed_codex_good_bad_good_retains_prior_source_while_neighbor_advances() 
 }
 
 #[test]
+fn fully_quarantined_codex_session_tree_commits_empty_generation() {
+    let temp = tempdir().unwrap();
+    let sessions = temp.path().join("sessions-fully-quarantined");
+    let index_root = temp.path().join("index-fully-quarantined");
+    fs::create_dir_all(&sessions).unwrap();
+    // Every Codex rollout ends with a malformed late session_meta, so the shared
+    // family quarantines each as a per-source logical failure. With the Codex
+    // opt-in capability the route must still commit an empty generation rather
+    // than failing the whole route.
+    for ordinal in 0..3u32 {
+        let native_session_id = format!("019fb000-0000-7000-8000-0000000000{:02x}", ordinal);
+        let marker = format!("fullyquarantinedmarker{ordinal}");
+        write_session(
+            &sessions,
+            &native_session_id,
+            ProviderNativeSessionRelationship::Root,
+            None,
+            [message(&marker)],
+        );
+        let path = session_path(&sessions, &native_session_id);
+        for prefix in 0..33u32 {
+            append_event(&path, message(&format!("fullyquarantinedprefix{ordinal}-{prefix}")));
+        }
+        let mut malformed = session_meta(&native_session_id, ProviderNativeSessionRelationship::Root, None);
+        malformed["timestamp"] = serde_json::json!("not-a-timestamp");
+        malformed["payload"]["timestamp"] = serde_json::json!("not-a-timestamp");
+        append_event(&path, malformed);
+    }
+
+    let registry = register_tree(&[&sessions]);
+    let receipt =
+        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    // Quarantine (not a hard route failure) and no usable logical sources that
+    // block an empty generation for an opt-in provider.
+    assert!(receipt.failed_routes.is_empty());
+    assert_eq!(receipt.logical_source_failures.total(), 3);
+    let index = VerifiedIndex::open(&index_root).unwrap();
+    assert!(
+        index.manifest().sources.is_empty(),
+        "fully quarantined Codex route must publish an empty generation"
+    );
+    for ordinal in 0..3u32 {
+        assert!(index
+            .search_event_candidates(&format!("fullyquarantinedmarker{ordinal}"), 8)
+            .unwrap()
+            .is_empty());
+    }
+}
+
+#[test]
 fn committed_codex_good_partial_repaired_retains_prior_source_while_neighbor_advances() {
     let temp = tempdir().unwrap();
     let sessions = temp.path().join("sessions-good-partial-repaired");
