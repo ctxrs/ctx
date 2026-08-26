@@ -172,280 +172,110 @@ impl VerifiedIndex {
         MANUAL_EVENT_RANGE_ORDER_DECODES.get()
     }
 
-    /// Compatibility wrapper for a complete manual lexical result.
-    pub fn search_event_candidates(
-        &self,
-        natural_text: &str,
-        limit: usize,
-    ) -> LexicalSearchResult<Vec<EventSearchCandidate>> {
-        complete_compatibility_candidates(self.search_event_candidates_batch(natural_text, limit)?)
-    }
-
-    /// Completeness-aware single-text lexical search.
-    pub fn search_event_candidates_batch(
-        &self,
-        natural_text: &str,
-        limit: usize,
-    ) -> LexicalSearchResult<LexicalSearchBatch> {
-        self.search_event_candidates_with_filters_batch(
-            natural_text,
-            &EventSearchFilters::default(),
-            limit,
-        )
-    }
-
-    /// Compatibility wrapper for complete filtered lexical results.
-    pub fn search_event_candidates_with_filters(
-        &self,
-        natural_text: &str,
-        filters: &EventSearchFilters,
-        limit: usize,
-    ) -> LexicalSearchResult<Vec<EventSearchCandidate>> {
-        complete_compatibility_candidates(self.search_event_candidates_with_filters_batch(
-            natural_text,
-            filters,
-            limit,
-        )?)
-    }
-
-    /// Completeness-aware filtered lexical search.
-    pub fn search_event_candidates_with_filters_batch(
-        &self,
-        natural_text: &str,
-        filters: &EventSearchFilters,
-        limit: usize,
-    ) -> LexicalSearchResult<LexicalSearchBatch> {
-        self.search_event_candidates_any_with_filters_batch(&[natural_text], filters, limit)
-    }
-
-    /// Compatibility wrapper for complete OR-composed lexical results.
-    pub fn search_event_candidates_any_with_filters(
-        &self,
-        natural_texts: &[&str],
-        filters: &EventSearchFilters,
-        limit: usize,
-    ) -> LexicalSearchResult<Vec<EventSearchCandidate>> {
-        complete_compatibility_candidates(self.search_event_candidates_any_with_filters_batch(
-            natural_texts,
-            filters,
-            limit,
-        )?)
-    }
-
-    pub fn search_event_candidates_any_with_filters_diagnosed(
-        &self,
-        natural_texts: &[&str],
-        filters: &EventSearchFilters,
-        limit: usize,
-    ) -> DiagnosedEventCandidateQueryResult {
-        self.search_event_candidates_any_with_filters_batch_diagnosed(natural_texts, filters, limit)
-            .map(|observed| ObservedEventSearchCandidates {
-                candidates: observed
-                    .batch
-                    .candidates
-                    .into_iter()
-                    .map(Into::into)
-                    .collect(),
-                receipt: observed.receipt,
-            })
-    }
-
-    /// Executes one deterministic manual union of analyzed body postings.
+    /// Executes one diagnosed Search or List pass against a caller-compiled
+    /// filter.
     ///
     /// Segments are visited by ascending immutable Tantivy segment ID. Within
     /// each segment, body postings are merged by ascending document ID, so an
     /// incomplete result describes one deterministic fully examined prefix.
-    pub fn search_event_candidates_any_with_filters_batch(
+    pub fn execute_lexical(
         &self,
-        natural_texts: &[&str],
-        filters: &EventSearchFilters,
-        limit: usize,
-    ) -> LexicalSearchResult<LexicalSearchBatch> {
-        self.search_event_candidates_any_with_filters_batch_diagnosed(natural_texts, filters, limit)
-            .map(|observed| observed.batch)
-            .map_err(|failure| LexicalSearchError::Index(failure.error))
-    }
-
-    pub fn search_event_candidates_any_with_filters_batch_diagnosed(
-        &self,
-        natural_texts: &[&str],
-        filters: &EventSearchFilters,
-        limit: usize,
-    ) -> DiagnosedLexicalSearchBatchResult {
-        let compiled = CompiledSearchFilter::compile(filters.clone()).map_err(|error| {
-            Box::new(EventCandidateQueryFailure {
-                error,
-                receipt: EventCandidateQueryReceipt::default(),
-            })
-        })?;
-        self.search_event_candidates_any_with_compiled_filter_batch_diagnosed(
-            natural_texts,
-            &compiled,
-            limit,
-        )
-    }
-
-    pub fn search_event_candidates_any_with_compiled_filter_batch_diagnosed(
-        &self,
-        natural_texts: &[&str],
-        filter: &CompiledSearchFilter,
-        limit: usize,
-    ) -> DiagnosedLexicalSearchBatchResult {
-        self.execute_manual_lexical_diagnosed(
-            ManualLexicalMode::Body(natural_texts),
-            filter,
-            limit,
-            LEXICAL_WORK_BUDGET_V1,
-        )
-    }
-
-    /// Compatibility wrapper for a complete filtered list result.
-    pub fn list_event_candidates_with_filters(
-        &self,
-        filters: &EventSearchFilters,
-        limit: usize,
-    ) -> LexicalSearchResult<Vec<EventSearchCandidate>> {
-        complete_compatibility_candidates(
-            self.list_event_candidates_with_filters_batch(filters, limit)?,
-        )
-    }
-
-    pub fn list_event_candidates_with_filters_diagnosed(
-        &self,
-        filters: &EventSearchFilters,
-        limit: usize,
-    ) -> DiagnosedEventCandidateQueryResult {
-        self.list_event_candidates_with_filters_batch_diagnosed(filters, limit)
-            .map(|observed| ObservedEventSearchCandidates {
-                candidates: observed
-                    .batch
-                    .candidates
-                    .into_iter()
-                    .map(Into::into)
-                    .collect(),
-                receipt: observed.receipt,
-            })
-    }
-
-    /// Completeness-aware list mode using the same exact manual filters, heap,
-    /// ordering, Core validation, and work accounting as lexical search.
-    pub fn list_event_candidates_with_filters_batch(
-        &self,
-        filters: &EventSearchFilters,
-        limit: usize,
-    ) -> LexicalSearchResult<LexicalSearchBatch> {
-        self.list_event_candidates_with_filters_batch_diagnosed(filters, limit)
-            .map(|observed| observed.batch)
-            .map_err(|failure| LexicalSearchError::Index(failure.error))
-    }
-
-    pub fn list_event_candidates_with_filters_batch_diagnosed(
-        &self,
-        filters: &EventSearchFilters,
-        limit: usize,
-    ) -> DiagnosedLexicalSearchBatchResult {
-        let compiled = CompiledSearchFilter::compile(filters.clone()).map_err(|error| {
-            Box::new(EventCandidateQueryFailure {
-                error,
-                receipt: EventCandidateQueryReceipt::default(),
-            })
-        })?;
-        self.list_event_candidates_with_compiled_filter_batch_diagnosed(&compiled, limit)
-    }
-
-    pub fn list_event_candidates_with_compiled_filter_batch_diagnosed(
-        &self,
-        filter: &CompiledSearchFilter,
-        limit: usize,
-    ) -> DiagnosedLexicalSearchBatchResult {
-        self.execute_manual_lexical_diagnosed(
-            ManualLexicalMode::List,
-            filter,
-            limit,
-            LEXICAL_WORK_BUDGET_V1,
-        )
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub fn search_event_candidates_any_with_filters_batch_with_budget_for_test(
-        &self,
-        natural_texts: &[&str],
-        filters: &EventSearchFilters,
-        limit: usize,
-        budget: LexicalWorkBudget,
-    ) -> LexicalSearchResult<LexicalSearchBatch> {
-        let compiled = CompiledSearchFilter::compile(filters.clone())?;
-        self.execute_manual_lexical_diagnosed(
-            ManualLexicalMode::Body(natural_texts),
-            &compiled,
-            limit,
-            budget,
-        )
-        .map(|observed| observed.batch)
-        .map_err(|failure| LexicalSearchError::Index(failure.error))
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub fn search_event_candidates_any_with_filters_with_budget_for_test(
-        &self,
-        natural_texts: &[&str],
-        filters: &EventSearchFilters,
-        limit: usize,
-        budget: LexicalWorkBudget,
-    ) -> LexicalSearchResult<Vec<EventSearchCandidate>> {
-        complete_compatibility_candidates(
-            self.search_event_candidates_any_with_filters_batch_with_budget_for_test(
-                natural_texts,
-                filters,
-                limit,
-                budget,
-            )?,
-        )
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub fn list_event_candidates_with_filters_batch_with_budget_for_test(
-        &self,
-        filters: &EventSearchFilters,
-        limit: usize,
-        budget: LexicalWorkBudget,
-    ) -> LexicalSearchResult<LexicalSearchBatch> {
-        let compiled = CompiledSearchFilter::compile(filters.clone())?;
-        self.execute_manual_lexical_diagnosed(ManualLexicalMode::List, &compiled, limit, budget)
-            .map(|observed| observed.batch)
-            .map_err(|failure| LexicalSearchError::Index(failure.error))
-    }
-
-    fn execute_manual_lexical_diagnosed(
-        &self,
-        mode: ManualLexicalMode<'_>,
-        filter: &CompiledSearchFilter,
-        limit: usize,
-        budget: LexicalWorkBudget,
+        execution: LexicalExecution<'_>,
     ) -> DiagnosedLexicalSearchBatchResult {
         #[cfg(any(test, feature = "test-support"))]
         let _failure_injection_reset = lexical_candidate_materialization_failure_reset();
         let mut receipt = EventCandidateQueryReceipt::default();
-        let result = self.execute_manual_lexical_inner(mode, filter, limit, budget, &mut receipt);
+        let result = self.execute_lexical_inner(execution, &mut receipt);
         match result {
             Ok(batch) => Ok(ObservedLexicalSearchBatch { batch, receipt }),
             Err(error) => Err(Box::new(EventCandidateQueryFailure { error, receipt })),
         }
     }
 
-    fn execute_manual_lexical_inner(
+    /// Test-only compatibility wrapper for a complete manual lexical result.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn search_event_candidates(
         &self,
-        mode: ManualLexicalMode<'_>,
-        compiled_filter: &CompiledSearchFilter,
+        natural_text: &str,
         limit: usize,
-        budget: LexicalWorkBudget,
+    ) -> LexicalSearchResult<Vec<EventSearchCandidate>> {
+        self.search_event_candidates_with_filters(
+            natural_text,
+            &EventSearchFilters::default(),
+            limit,
+        )
+    }
+
+    /// Test-only compatibility wrapper for complete filtered lexical results.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn search_event_candidates_with_filters(
+        &self,
+        natural_text: &str,
+        filters: &EventSearchFilters,
+        limit: usize,
+    ) -> LexicalSearchResult<Vec<EventSearchCandidate>> {
+        self.search_event_candidates_any_with_filters(&[natural_text], filters, limit)
+    }
+
+    /// Test-only compatibility wrapper for complete OR-composed results.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn search_event_candidates_any_with_filters(
+        &self,
+        natural_texts: &[&str],
+        filters: &EventSearchFilters,
+        limit: usize,
+    ) -> LexicalSearchResult<Vec<EventSearchCandidate>> {
+        complete_compatibility_candidates(self.execute_compatibility_lexical(
+            LexicalMode::Search(natural_texts),
+            filters,
+            limit,
+        )?)
+    }
+
+    /// Test-only compatibility wrapper for a complete filtered List result.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn list_event_candidates_with_filters(
+        &self,
+        filters: &EventSearchFilters,
+        limit: usize,
+    ) -> LexicalSearchResult<Vec<EventSearchCandidate>> {
+        complete_compatibility_candidates(self.execute_compatibility_lexical(
+            LexicalMode::List,
+            filters,
+            limit,
+        )?)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    fn execute_compatibility_lexical(
+        &self,
+        mode: LexicalMode<'_>,
+        filters: &EventSearchFilters,
+        limit: usize,
+    ) -> LexicalSearchResult<LexicalSearchBatch> {
+        let filter = CompiledSearchFilter::compile(filters.clone())?;
+        self.execute_lexical(LexicalExecution::new(mode, &filter, limit))
+            .map(|observed| observed.batch)
+            .map_err(|failure| LexicalSearchError::Index(failure.error))
+    }
+
+    fn execute_lexical_inner(
+        &self,
+        execution: LexicalExecution<'_>,
         receipt: &mut EventCandidateQueryReceipt,
     ) -> Result<LexicalSearchBatch> {
+        let LexicalExecution {
+            mode,
+            filter: compiled_filter,
+            limit,
+            budget,
+        } = execution;
         validate_lexical_result_limit(limit)?;
-        if let ManualLexicalMode::Body(natural_texts) = mode {
+        if let LexicalMode::Search(natural_texts) = mode {
             LEXICAL_QUERY_LIMITS.validate_texts(natural_texts.iter().copied())?;
         }
         if limit == 0 {
@@ -454,14 +284,14 @@ impl VerifiedIndex {
 
         let fields = fields_from_schema(self.searcher.schema())?;
         let (body_terms, analyzed_tokens) = match mode {
-            ManualLexicalMode::Body(natural_texts) => {
+            LexicalMode::Search(natural_texts) => {
                 let analyzed = self.analyze_manual_body_terms(natural_texts, fields)?;
                 if analyzed.0.is_empty() {
                     return Ok(empty_lexical_batch(true));
                 }
                 analyzed
             }
-            ManualLexicalMode::List => (Vec::new(), 0),
+            LexicalMode::List => (Vec::new(), 0),
         };
 
         receipt.record_query_execution()?;
@@ -511,7 +341,7 @@ impl VerifiedIndex {
                 continue;
             }
             match mode {
-                ManualLexicalMode::Body(_) => {
+                LexicalMode::Search(_) => {
                     while let Some(doc) = next_body_doc(&prepared.body_postings) {
                         if !meter.charge(
                             LexicalWorkCounter::CandidateDocs,
@@ -571,7 +401,7 @@ impl VerifiedIndex {
                         }
                     }
                 }
-                ManualLexicalMode::List => {
+                LexicalMode::List => {
                     for doc in 0..reader.max_doc() {
                         if !meter.charge(
                             LexicalWorkCounter::CandidateDocs,

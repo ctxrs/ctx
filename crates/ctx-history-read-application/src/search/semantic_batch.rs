@@ -175,11 +175,11 @@ fn finish_prepared_semantic_search(
             tracker.set_phase(SearchFailurePhase::IndexQueryDecode);
             let lexical_batch = record_lexical_batch(
                 tracker,
-                index.search_event_candidates_any_with_compiled_filter_batch_diagnosed(
-                    &queries,
+                index.execute_lexical(LexicalExecution::new(
+                    LexicalMode::Search(&queries),
                     filter,
                     SOURCE_FUSION_CANDIDATES,
-                ),
+                )),
             )?;
             let lexical_diagnostics = lexical_diagnostics(&lexical_batch);
             let lexical_candidates_truncated = !lexical_batch.candidate_set_exhaustive;

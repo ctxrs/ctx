@@ -5,8 +5,9 @@ use ctx_history_core::{
 };
 use ctx_history_index_query::{
     CompiledSearchFilter, EventRecord, EventSearchCandidate, EventSearchFilters, IndexError,
-    LexicalSearchBatch, LexicalSearchError, RankedEventRef, SearchAgentScope, SearchFamilyKey,
-    SearchSessionCoordinate, SessionGroupingClaims, VerifiedIndex, MAX_LEXICAL_QUERY_RESULTS,
+    LexicalExecution, LexicalMode, LexicalSearchBatch, LexicalSearchError, RankedEventRef,
+    SearchAgentScope, SearchFamilyKey, SearchSessionCoordinate, SessionGroupingClaims,
+    VerifiedIndex, MAX_LEXICAL_QUERY_RESULTS,
 };
 #[cfg(test)]
 use ctx_history_index_query::{LexicalSearchResult, SearchContentScope};
@@ -552,18 +553,14 @@ fn collect_lexical_search_hits(
     }
     let candidate_limit = lexical_candidate_horizon(limit, dense);
     tracker.set_phase(SearchFailurePhase::IndexQueryDecode);
+    let mode = if queries.is_empty() {
+        LexicalMode::List
+    } else {
+        LexicalMode::Search(queries)
+    };
     let batch = record_lexical_batch(
         tracker,
-        if queries.is_empty() {
-            index
-                .list_event_candidates_with_compiled_filter_batch_diagnosed(filter, candidate_limit)
-        } else {
-            index.search_event_candidates_any_with_compiled_filter_batch_diagnosed(
-                queries,
-                filter,
-                candidate_limit,
-            )
-        },
+        index.execute_lexical(LexicalExecution::new(mode, filter, candidate_limit)),
     )?;
     tracker.set_phase(SearchFailurePhase::ResultProjection);
     shape_lexical_batch_using(

@@ -236,6 +236,85 @@ fn filtered_session_ids(index: &VerifiedIndex, filters: EventSearchFilters) -> V
     )
 }
 
+fn lexical_search_batch(
+    index: &VerifiedIndex,
+    natural_texts: &[&str],
+    filters: &EventSearchFilters,
+    limit: usize,
+) -> ctx_history_index_query::LexicalSearchResult<ctx_history_index_query::LexicalSearchBatch> {
+    execute_lexical_batch(
+        index,
+        ctx_history_index_query::LexicalMode::Search(natural_texts),
+        filters,
+        limit,
+        None,
+    )
+}
+
+fn lexical_search_batch_with_budget(
+    index: &VerifiedIndex,
+    natural_texts: &[&str],
+    filters: &EventSearchFilters,
+    limit: usize,
+    budget: ctx_history_index_query::LexicalWorkBudget,
+) -> ctx_history_index_query::LexicalSearchResult<ctx_history_index_query::LexicalSearchBatch> {
+    execute_lexical_batch(
+        index,
+        ctx_history_index_query::LexicalMode::Search(natural_texts),
+        filters,
+        limit,
+        Some(budget),
+    )
+}
+
+fn lexical_list_batch(
+    index: &VerifiedIndex,
+    filters: &EventSearchFilters,
+    limit: usize,
+) -> ctx_history_index_query::LexicalSearchResult<ctx_history_index_query::LexicalSearchBatch> {
+    execute_lexical_batch(
+        index,
+        ctx_history_index_query::LexicalMode::List,
+        filters,
+        limit,
+        None,
+    )
+}
+
+fn lexical_list_batch_with_budget(
+    index: &VerifiedIndex,
+    filters: &EventSearchFilters,
+    limit: usize,
+    budget: ctx_history_index_query::LexicalWorkBudget,
+) -> ctx_history_index_query::LexicalSearchResult<ctx_history_index_query::LexicalSearchBatch> {
+    execute_lexical_batch(
+        index,
+        ctx_history_index_query::LexicalMode::List,
+        filters,
+        limit,
+        Some(budget),
+    )
+}
+
+fn execute_lexical_batch(
+    index: &VerifiedIndex,
+    mode: ctx_history_index_query::LexicalMode<'_>,
+    filters: &EventSearchFilters,
+    limit: usize,
+    budget: Option<ctx_history_index_query::LexicalWorkBudget>,
+) -> ctx_history_index_query::LexicalSearchResult<ctx_history_index_query::LexicalSearchBatch> {
+    let filter = CompiledSearchFilter::compile(filters.clone())?;
+    let execution = ctx_history_index_query::LexicalExecution::new(mode, &filter, limit);
+    let execution = match budget {
+        Some(budget) => execution.with_budget_for_test(budget),
+        None => execution,
+    };
+    index
+        .execute_lexical(execution)
+        .map(|observed| observed.batch)
+        .map_err(|failure| ctx_history_index_query::LexicalSearchError::Index(failure.error))
+}
+
 fn sorted_uuids(mut ids: Vec<Uuid>) -> Vec<Uuid> {
     ids.sort();
     ids

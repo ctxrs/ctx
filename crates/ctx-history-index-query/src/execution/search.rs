@@ -40,12 +40,6 @@ const EVENT_RANGE_ORDER_FAST_FIELD: &str = "event_range_order";
 mod executor;
 mod semantic_projection;
 
-#[derive(Debug, Clone, Copy)]
-enum ManualLexicalMode<'a> {
-    Body(&'a [&'a str]),
-    List,
-}
-
 /// Stable segment identity plus the small body metadata required for exact
 /// corpus-wide BM25 statistics. No cursor or reader is retained here.
 struct PreparedBodySegment {
@@ -817,6 +811,7 @@ fn finish_lexical_batch(
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 fn complete_compatibility_candidates(
     batch: LexicalSearchBatch,
 ) -> LexicalSearchResult<Vec<EventSearchCandidate>> {

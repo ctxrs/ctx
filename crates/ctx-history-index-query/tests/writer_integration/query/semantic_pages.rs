@@ -244,9 +244,8 @@ fn semantic_filter_projection_matches_lexical_filter_semantics_without_core_deco
         },
     ];
     for filters in parity_filters {
-        let lexical_batch = index
-            .search_event_candidates_with_filters_batch("shared parity needle", &filters, 10)
-            .unwrap();
+        let lexical_batch =
+            lexical_search_batch(&index, &["shared parity needle"], &filters, 10).unwrap();
         assert!(lexical_batch.complete);
         if filters.workspace.is_some() || filters.file.is_some() {
             assert!(lexical_batch.counters.term_expansions > 0);
@@ -258,9 +257,7 @@ fn semantic_filter_projection_matches_lexical_filter_semantics_without_core_deco
             .into_iter()
             .map(|candidate| candidate.event.event_id)
             .collect::<HashSet<_>>();
-        let listed = index
-            .list_event_candidates_with_filters_batch(&filters, 10)
-            .unwrap();
+        let listed = lexical_list_batch(&index, &filters, 10).unwrap();
         assert!(listed.complete);
         assert_eq!(
             listed

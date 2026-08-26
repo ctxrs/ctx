@@ -765,22 +765,12 @@ pub struct EventCandidateQueryReceipt {
     pub encoded_core_bytes_decoded: u64,
 }
 
-/// Candidate rows paired with the exact low-level work that produced them.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct ObservedEventSearchCandidates {
-    pub candidates: Vec<EventSearchCandidate>,
-    pub receipt: EventCandidateQueryReceipt,
-}
-
 /// A candidate-query failure retaining exact work completed before the error.
 #[derive(Debug)]
 pub struct EventCandidateQueryFailure {
     pub error: IndexError,
     pub receipt: EventCandidateQueryReceipt,
 }
-
-pub type DiagnosedEventCandidateQueryResult =
-    std::result::Result<ObservedEventSearchCandidates, Box<EventCandidateQueryFailure>>;
 
 /// Completeness-aware lexical batch paired with the exact low-level work that
 /// produced it.

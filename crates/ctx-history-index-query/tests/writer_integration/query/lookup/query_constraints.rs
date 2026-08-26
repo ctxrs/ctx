@@ -49,9 +49,7 @@ fn custom_source_filters_use_the_core_native_event_identity() {
     let hydrated = index.event_by_id(event_id.as_uuid()).unwrap().unwrap();
     assert_eq!(hydrated.native_event_id.as_ref(), Some(&native_event_id));
     assert!(filters.matches_source_identity(&hydrated));
-    let listed = index
-        .list_event_candidates_with_filters_batch(&filters, 10)
-        .unwrap();
+    let listed = lexical_list_batch(&index, &filters, 10).unwrap();
     assert!(listed.complete);
     assert!(listed.candidate_set_exhaustive);
     assert_eq!(listed.candidates.len(), 1);

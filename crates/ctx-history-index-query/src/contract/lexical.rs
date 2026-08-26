@@ -1,5 +1,49 @@
-use super::{EventSearchCandidate, RankedEventRef};
+use super::{CompiledSearchFilter, EventSearchCandidate, RankedEventRef};
 use ctx_history_index_format::{IndexError, Result};
+
+/// Typed operation selected for one lexical execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LexicalMode<'a> {
+    /// Search the union of all analyzed alternatives.
+    Search(&'a [&'a str]),
+    /// List filtered events without a body-query predicate.
+    List,
+}
+
+/// Complete input to the single production lexical executor.
+///
+/// The canonical work budget is fixed for production. Test-support callers
+/// may replace it to exercise deterministic partial-work boundaries while
+/// retaining this same execution path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LexicalExecution<'a> {
+    pub(crate) mode: LexicalMode<'a>,
+    pub(crate) filter: &'a CompiledSearchFilter,
+    pub(crate) limit: usize,
+    pub(crate) budget: LexicalWorkBudget,
+}
+
+impl<'a> LexicalExecution<'a> {
+    pub const fn new(
+        mode: LexicalMode<'a>,
+        filter: &'a CompiledSearchFilter,
+        limit: usize,
+    ) -> Self {
+        Self {
+            mode,
+            filter,
+            limit,
+            budget: LEXICAL_WORK_BUDGET_V1,
+        }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub const fn with_budget_for_test(mut self, budget: LexicalWorkBudget) -> Self {
+        self.budget = budget;
+        self
+    }
+}
 
 /// Fixed admission ceilings for one lexical search request.
 ///
