@@ -5,102 +5,9 @@ struct RankedAddressCandidate {
     coverage: u8,
     query_terms: u8,
     score: Score,
-    compact_identity: CompactEventIdentity,
-    occurred_at_unix_ms: Option<i64>,
+    order: ctx_history_index_format::EventRangeOrderKey,
     address: DocAddress,
     segment: LexicalSegmentContext,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct CompactEventIdentity {
-    pub(super) high: u64,
-    pub(super) low: u64,
-}
-
-impl CompactEventIdentity {
-    fn from_digest(digest: [u8; 32]) -> Self {
-        let compact = CompactIdentity { digest }.as_uuid().as_u128();
-        Self {
-            high: (compact >> 64) as u64,
-            low: compact as u64,
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn ranking_identity_tiebreak_uses_bytes_beyond_the_uuid_prefix() {
-        let mut lower_full_identity = [7_u8; 32];
-        let mut higher_full_identity = lower_full_identity;
-        lower_full_identity[31] = 1;
-        higher_full_identity[31] = 2;
-
-        assert_eq!(&lower_full_identity[..16], &higher_full_identity[..16]);
-        assert_eq!(
-            CompactEventIdentity::from_digest(lower_full_identity),
-            CompactEventIdentity::from_digest(higher_full_identity),
-            "the cheap heap deliberately cannot distinguish this collision"
-        );
-        assert_eq!(
-            compare_identity_ascending(lower_full_identity, higher_full_identity),
-            Ordering::Greater,
-            "finalists must return to full stable-identity order"
-        );
-        assert_eq!(
-            compare_identity_ascending(higher_full_identity, lower_full_identity),
-            Ordering::Less
-        );
-    }
-
-    #[test]
-    fn compact_identity_tiebreak_is_ascending_and_uses_both_uuid_halves() {
-        let lower_high = CompactEventIdentity { high: 1, low: 9 };
-        let higher_high = CompactEventIdentity { high: 2, low: 0 };
-        let lower_low = CompactEventIdentity { high: 7, low: 1 };
-        let higher_low = CompactEventIdentity { high: 7, low: 2 };
-
-        assert_eq!(
-            compare_compact_identity_ascending(lower_high, higher_high),
-            Ordering::Greater
-        );
-        assert_eq!(
-            compare_compact_identity_ascending(lower_low, higher_low),
-            Ordering::Greater
-        );
-    }
-
-    #[test]
-    fn compact_identity_tie_uses_the_stable_address_in_the_heap() {
-        let candidate = |stable_segment_index, segment_ord, doc_id| RankedAddressCandidate {
-            coverage: 1,
-            query_terms: 1,
-            score: 1.0,
-            compact_identity: CompactEventIdentity { high: 7, low: 9 },
-            occurred_at_unix_ms: None,
-            address: DocAddress::new(segment_ord, doc_id),
-            segment: LexicalSegmentContext {
-                stable_segment_index,
-                segment_id: format!("segment-{stable_segment_index}"),
-                segment_ord,
-            },
-        };
-        let earlier = candidate(2, 9, 4);
-        let later_segment = candidate(3, 1, 0);
-        let later_doc = candidate(2, 9, 5);
-
-        assert_eq!(earlier.cmp(&later_segment), Ordering::Greater);
-        assert_eq!(earlier.cmp(&later_doc), Ordering::Greater);
-        assert_eq!(later_segment.cmp(&earlier), Ordering::Less);
-    }
-}
-
-#[derive(Debug, Clone)]
-struct FinalAddressCandidate {
-    ranked: RankedAddressCandidate,
-    order: ctx_history_index_format::EventRangeOrderKey,
 }
 
 impl PartialEq for RankedAddressCandidate {
@@ -119,61 +26,115 @@ impl PartialOrd for RankedAddressCandidate {
 
 impl Ord for RankedAddressCandidate {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.coverage
-            .cmp(&other.coverage)
-            .then_with(|| self.score.total_cmp(&other.score))
-            // The scalar UUID fields are the existing compact stable identity.
-            // This avoids resolving a byte fast field in the loop. UUID
-            // normalization fixes six digest bits, so this is an approximation
-            // of full-digest order only for heap-boundary ties.
+        compare_primary_rank(self.coverage, self.score, other)
             .then_with(|| {
-                compare_compact_identity_ascending(self.compact_identity, other.compact_identity)
+                compare_identity_ascending(
+                    self.order.event_identity_digest(),
+                    other.order.event_identity_digest(),
+                )
             })
-            // A compact-UUID tie still has an import-stable heap winner.
-            // Finalists are restored to full-digest order after their
-            // EventRangeOrderKeys are loaded.
+            // Exact event digests are unique in a verified generation. Keep
+            // the stable address as a defensive total-order fallback.
             .then_with(|| compare_stable_address_ascending(self, other))
     }
 }
 
-fn compare_final_candidates(
-    left: &FinalAddressCandidate,
-    right: &FinalAddressCandidate,
-) -> Ordering {
-    left.ranked
-        .coverage
-        .cmp(&right.ranked.coverage)
-        .then_with(|| left.ranked.score.total_cmp(&right.ranked.score))
-        .then_with(|| {
-            compare_identity_ascending(
-                left.order.event_identity_digest(),
-                right.order.event_identity_digest(),
-            )
-        })
-        .then_with(|| compare_stable_address_ascending(&left.ranked, &right.ranked))
-}
-
-fn compare_compact_identity_ascending(
-    left: CompactEventIdentity,
-    right: CompactEventIdentity,
-) -> Ordering {
-    // `Ord` reports the better candidate as greater, so reverse the ascending
-    // stable identity comparison.
-    (right.high, right.low).cmp(&(left.high, left.low))
+fn compare_primary_rank(coverage: u8, score: Score, other: &RankedAddressCandidate) -> Ordering {
+    coverage
+        .cmp(&other.coverage)
+        .then_with(|| score.total_cmp(&other.score))
 }
 
 fn compare_stable_address_ascending(
     left: &RankedAddressCandidate,
     right: &RankedAddressCandidate,
 ) -> Ordering {
-    (right.segment.stable_segment_index, right.address.doc_id)
-        .cmp(&(left.segment.stable_segment_index, left.address.doc_id))
+    compare_stable_address_parts(
+        (left.segment.stable_segment_index, left.address.doc_id),
+        (right.segment.stable_segment_index, right.address.doc_id),
+    )
+}
+
+fn compare_stable_address_parts(left: (usize, DocId), right: (usize, DocId)) -> Ordering {
+    right.cmp(&left)
 }
 
 fn compare_identity_ascending(left: [u8; 32], right: [u8; 32]) -> Ordering {
     // `Ord` reports the better candidate as greater, so reverse this final
     // comparison while retaining every byte of the stable identity digest.
     right.cmp(&left)
+}
+
+fn exact_digest_prefix(digest: [u8; 32]) -> u64 {
+    u64::from_be_bytes([
+        digest[0], digest[1], digest[2], digest[3], digest[4], digest[5], 0, 0,
+    ]) >> 16
+}
+
+fn compare_identity_prefix_ascending(candidate_prefix: u64, worst_digest: [u8; 32]) -> Ordering {
+    exact_digest_prefix(worst_digest).cmp(&candidate_prefix)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exact_identity_tiebreak_uses_bytes_after_the_uuid() {
+        let mut lower = [7_u8; 32];
+        let mut higher = lower;
+        lower[31] = 1;
+        higher[31] = 2;
+
+        assert_eq!(&lower[..16], &higher[..16]);
+        assert_eq!(compare_identity_ascending(lower, higher), Ordering::Greater);
+        assert_eq!(compare_identity_ascending(higher, lower), Ordering::Less);
+    }
+
+    #[test]
+    fn exact_prefix_excludes_uuid_overwrites_and_later_bytes() {
+        let mut first = [7_u8; 32];
+        let mut second = first;
+        first[6] = 0x0f;
+        second[6] = 0xf0;
+        second[31] ^= 1;
+
+        assert_eq!(exact_digest_prefix(first), exact_digest_prefix(second));
+    }
+
+    #[test]
+    fn six_byte_prefix_is_rejection_only() {
+        let worst = [0x40; 32];
+
+        assert_eq!(
+            compare_identity_prefix_ascending(0x50_5050_5050_50, worst),
+            Ordering::Less,
+            "a larger prefix is exactly worse and may be rejected"
+        );
+        assert_eq!(
+            compare_identity_prefix_ascending(0x30_3030_3030_30, worst),
+            Ordering::Greater,
+            "a smaller prefix may win but still needs its exact order key"
+        );
+        assert_eq!(
+            compare_identity_prefix_ascending(0x40_4040_4040_40, worst),
+            Ordering::Equal,
+            "an equal prefix cannot decide the full identity order"
+        );
+    }
+
+    #[test]
+    fn exact_identity_tie_uses_the_stable_address() {
+        assert_eq!(
+            compare_stable_address_parts((2, 4), (3, 0)),
+            Ordering::Greater
+        );
+        assert_eq!(
+            compare_stable_address_parts((2, 4), (2, 5)),
+            Ordering::Greater
+        );
+        assert_eq!(compare_stable_address_parts((3, 0), (2, 4)), Ordering::Less);
+    }
 }
 
 impl VerifiedIndex {
@@ -607,48 +568,25 @@ impl VerifiedIndex {
             }
         }
 
-        let ranked = retained
+        let mut ranked = retained
             .into_iter()
             .map(|Reverse(candidate)| candidate)
             .collect::<Vec<_>>();
-        let mut finalists = Vec::with_capacity(ranked.len());
+        ranked.sort_by(|left, right| right.cmp(left));
+        receipt.record_collector_hits(ranked.len())?;
+        let mut candidates = Vec::with_capacity(ranked.len());
         for candidate in ranked {
-            let reader = self
-                .searcher
-                .segment_readers()
-                .get(candidate.address.segment_ord as usize)
-                .ok_or(IndexError::InvalidStoredDocumentField(
-                    EVENT_RANGE_ORDER_FAST_FIELD,
-                ))?;
-            let order = event_range_order(reader, candidate.address.doc_id)?;
-            if candidate.compact_identity
-                != CompactEventIdentity::from_digest(order.event_identity_digest())
-                || candidate.occurred_at_unix_ms != order.occurred_at_unix_ms()
-            {
-                return Err(IndexError::InvalidStoredDocumentField(
-                    EVENT_RANGE_ORDER_FAST_FIELD,
-                ));
-            }
-            finalists.push(FinalAddressCandidate {
-                ranked: candidate,
-                order,
-            });
-        }
-        finalists.sort_by(|left, right| compare_final_candidates(right, left));
-        receipt.record_collector_hits(finalists.len())?;
-        let mut candidates = Vec::with_capacity(finalists.len());
-        for candidate in finalists {
             let encoded_bytes = u64::try_from(candidate.order.encoded_core_bytes())
                 .map_err(|_| IndexError::CountOverflow)?;
             if !meter.charge_pair(
                 (LexicalWorkCounter::FinalMaterializations, 1),
                 (LexicalWorkCounter::FinalMaterializationBytes, encoded_bytes),
-                Some(&candidate.ranked.segment),
-                Some(candidate.ranked.address.doc_id),
+                Some(&candidate.segment),
+                Some(candidate.address.doc_id),
             ) {
                 break;
             }
-            let fast = core_event_fast_preflight(&self.searcher, candidate.ranked.address)?;
+            let fast = core_event_fast_preflight(&self.searcher, candidate.address)?;
             if fast.1 != candidate.order.encoded_core_bytes()
                 || fast.2 != candidate.order.content_bytes()
             {
@@ -663,15 +601,15 @@ impl VerifiedIndex {
                 ));
             }
             let (event, encoded_core_bytes) =
-                stored_event_record_with_size(&self.searcher, candidate.ranked.address, fields)?;
+                stored_event_record_with_size(&self.searcher, candidate.address, fields)?;
             receipt.record_decoded(encoded_core_bytes)?;
             validate_materialized_event(candidate.order, &event, fast.0)?;
             candidates.push(LexicalSearchCandidate {
                 event,
-                score: candidate.ranked.score,
+                score: candidate.score,
                 coverage: LexicalTermCoverage {
-                    matched_terms: candidate.ranked.coverage,
-                    query_terms: candidate.ranked.query_terms,
+                    matched_terms: candidate.coverage,
+                    query_terms: candidate.query_terms,
                 },
             });
         }
@@ -860,17 +798,30 @@ impl VerifiedIndex {
         score *= class_weight;
 
         let address = DocAddress::new(prepared.context.segment_ord, doc);
-        let compact_identity = prepared.candidate_fields.compact_identity(doc)?;
-        let candidate = RankedAddressCandidate {
-            coverage,
-            query_terms: query_term_count,
-            score,
-            compact_identity,
-            occurred_at_unix_ms,
-            address,
-            segment: prepared.context.clone(),
-        };
-        if retained.len() < limit {
+        let heap_was_full = retained.len() >= limit;
+        let boundary_event_id_high = if heap_was_full {
+            // Whether the new candidate wins or loses, one admissible match is
+            // discarded once the fixed retained heap is full.
+            *retained_truncated = true;
+            let worst = retained.peek().map(|Reverse(worst)| worst).ok_or(
+                IndexError::InvalidStoredDocumentField(EVENT_RANGE_ORDER_FAST_FIELD),
+            )?;
+            match compare_primary_rank(coverage, score, worst) {
+                Ordering::Less => return Ok(CandidateExamination::Accepted),
+                Ordering::Greater => None,
+                Ordering::Equal => {
+                    let event_id_high = prepared.candidate_fields.event_id_high(doc)?;
+                    let candidate_prefix = event_id_high >> 16;
+                    match compare_identity_prefix_ascending(
+                        candidate_prefix,
+                        worst.order.event_identity_digest(),
+                    ) {
+                        Ordering::Less => return Ok(CandidateExamination::Accepted),
+                        Ordering::Equal | Ordering::Greater => Some(event_id_high),
+                    }
+                }
+            }
+        } else {
             if !meter.charge(
                 LexicalWorkCounter::RetainedCandidates,
                 1,
@@ -879,11 +830,32 @@ impl VerifiedIndex {
             ) {
                 return Ok(CandidateExamination::Exhausted);
             }
-            retained.push(Reverse(candidate));
-        } else {
-            // Whether the new candidate wins or loses, one admissible match is
-            // discarded once the fixed retained heap is full.
-            *retained_truncated = true;
+            None
+        };
+
+        let order = prepared.candidate_fields.event_range_order(doc)?;
+        if occurred_at_unix_ms != order.occurred_at_unix_ms()
+            || !prepared
+                .candidate_fields
+                .exact_identity_matches_compact_fields(
+                    doc,
+                    order.event_identity_digest(),
+                    boundary_event_id_high,
+                )?
+        {
+            return Err(IndexError::InvalidStoredDocumentField(
+                EVENT_RANGE_ORDER_FAST_FIELD,
+            ));
+        }
+        let candidate = RankedAddressCandidate {
+            coverage,
+            query_terms: query_term_count,
+            score,
+            order,
+            address,
+            segment: prepared.context.clone(),
+        };
+        if heap_was_full {
             if retained
                 .peek()
                 .is_some_and(|Reverse(worst)| candidate > *worst)
@@ -891,6 +863,8 @@ impl VerifiedIndex {
                 retained.pop();
                 retained.push(Reverse(candidate));
             }
+        } else {
+            retained.push(Reverse(candidate));
         }
         Ok(CandidateExamination::Accepted)
     }

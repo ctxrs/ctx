@@ -56,7 +56,6 @@ thread_local! {
 const EVENT_RANGE_ORDER_FAST_FIELD: &str = "event_range_order";
 
 mod executor;
-use executor::CompactEventIdentity;
 
 #[derive(Debug, Clone, Copy)]
 enum ManualLexicalMode<'a> {
@@ -188,13 +187,13 @@ struct SegmentBitmap {
     any: bool,
 }
 
-/// Existing scalar fast fields sufficient for exact hot-loop filtering and a
-/// deterministic retained heap. The compact event UUID is derived from the
-/// full 256-bit identity digest used by the production final order.
+/// Segment-cached fields for cheap filtering and exact boundary decoding.
 struct ManualCandidateFastFields {
     occurred_at_unix_ms: tantivy::columnar::Column<i64>,
     event_id_high: tantivy::columnar::Column<u64>,
     event_id_low: tantivy::columnar::Column<u64>,
+    event_range_order: tantivy::columnar::BytesColumn,
+    event_range_order_buffer: Vec<u8>,
 }
 
 impl ManualCandidateFastFields {
@@ -203,6 +202,15 @@ impl ManualCandidateFastFields {
             occurred_at_unix_ms: reader.fast_fields().i64(OCCURRED_AT_UNIX_MS_FIELD)?,
             event_id_high: reader.fast_fields().u64(EVENT_ID_HIGH_FIELD)?,
             event_id_low: reader.fast_fields().u64(EVENT_ID_LOW_FIELD)?,
+            event_range_order: reader
+                .fast_fields()
+                .bytes(EVENT_RANGE_ORDER_FAST_FIELD)?
+                .ok_or(IndexError::InvalidStoredDocumentField(
+                    EVENT_RANGE_ORDER_FAST_FIELD,
+                ))?,
+            event_range_order_buffer: Vec::with_capacity(
+                ctx_history_index_format::EVENT_RANGE_ORDER_KEY_LEN,
+            ),
         })
     }
 
@@ -217,11 +225,56 @@ impl ManualCandidateFastFields {
         Ok(value)
     }
 
-    fn compact_identity(&self, doc: DocId) -> Result<CompactEventIdentity> {
-        Ok(CompactEventIdentity {
-            high: unique_manual_fast_u64(&self.event_id_high, doc, EVENT_ID_HIGH_FIELD)?,
-            low: unique_manual_fast_u64(&self.event_id_low, doc, EVENT_ID_LOW_FIELD)?,
-        })
+    fn event_id_high(&self, doc: DocId) -> Result<u64> {
+        unique_manual_fast_u64(&self.event_id_high, doc, EVENT_ID_HIGH_FIELD)
+    }
+
+    fn exact_identity_matches_compact_fields(
+        &self,
+        doc: DocId,
+        digest: [u8; 32],
+        cached_high: Option<u64>,
+    ) -> Result<bool> {
+        let compact = CompactIdentity { digest }.as_uuid().as_u128();
+        let high = match cached_high {
+            Some(high) => high,
+            None => self.event_id_high(doc)?,
+        };
+        let low = unique_manual_fast_u64(&self.event_id_low, doc, EVENT_ID_LOW_FIELD)?;
+        Ok(high == (compact >> 64) as u64 && low == compact as u64)
+    }
+
+    fn event_range_order(
+        &mut self,
+        doc: DocId,
+    ) -> Result<ctx_history_index_format::EventRangeOrderKey> {
+        let term_ord = {
+            let mut term_ords = self.event_range_order.term_ords(doc);
+            let term_ord = term_ords
+                .next()
+                .ok_or(IndexError::InvalidStoredDocumentField(
+                    EVENT_RANGE_ORDER_FAST_FIELD,
+                ))?;
+            if term_ords.next().is_some() {
+                return Err(IndexError::InvalidStoredDocumentField(
+                    EVENT_RANGE_ORDER_FAST_FIELD,
+                ));
+            }
+            term_ord
+        };
+        self.event_range_order_buffer.clear();
+        if !self
+            .event_range_order
+            .ord_to_bytes(term_ord, &mut self.event_range_order_buffer)?
+        {
+            return Err(IndexError::InvalidStoredDocumentField(
+                EVENT_RANGE_ORDER_FAST_FIELD,
+            ));
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        MANUAL_EVENT_RANGE_ORDER_DECODES
+            .set(MANUAL_EVENT_RANGE_ORDER_DECODES.get().saturating_add(1));
+        ctx_history_index_format::EventRangeOrderKey::decode(&self.event_range_order_buffer)
     }
 }
 
@@ -746,38 +799,6 @@ fn next_body_doc(postings: &[Option<SegmentPostings>]) -> Option<DocId> {
         .filter_map(|postings| postings.as_ref().map(|postings| postings.doc()))
         .filter(|doc| *doc != TERMINATED)
         .min()
-}
-
-fn event_range_order(
-    reader: &SegmentReader,
-    doc: DocId,
-) -> Result<ctx_history_index_format::EventRangeOrderKey> {
-    let column = reader
-        .fast_fields()
-        .bytes(EVENT_RANGE_ORDER_FAST_FIELD)?
-        .ok_or(IndexError::InvalidStoredDocumentField(
-            EVENT_RANGE_ORDER_FAST_FIELD,
-        ))?;
-    let mut term_ords = column.term_ords(doc);
-    let term_ord = term_ords
-        .next()
-        .ok_or(IndexError::InvalidStoredDocumentField(
-            EVENT_RANGE_ORDER_FAST_FIELD,
-        ))?;
-    if term_ords.next().is_some() {
-        return Err(IndexError::InvalidStoredDocumentField(
-            EVENT_RANGE_ORDER_FAST_FIELD,
-        ));
-    }
-    let mut encoded = Vec::with_capacity(ctx_history_index_format::EVENT_RANGE_ORDER_KEY_LEN);
-    if !column.ord_to_bytes(term_ord, &mut encoded)? {
-        return Err(IndexError::InvalidStoredDocumentField(
-            EVENT_RANGE_ORDER_FAST_FIELD,
-        ));
-    }
-    #[cfg(any(test, feature = "test-support"))]
-    MANUAL_EVENT_RANGE_ORDER_DECODES.set(MANUAL_EVENT_RANGE_ORDER_DECODES.get().saturating_add(1));
-    ctx_history_index_format::EventRangeOrderKey::decode(&encoded)
 }
 
 fn validate_materialized_event(

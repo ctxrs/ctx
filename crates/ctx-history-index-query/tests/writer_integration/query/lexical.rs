@@ -17,6 +17,61 @@ fn publish_records(temp: &TempDir, source: &SourceKey, records: Vec<CoreRecord>)
     VerifiedIndex::open(temp.path()).unwrap()
 }
 
+fn publish_records_in_one_segment(
+    temp: &TempDir,
+    source: &SourceKey,
+    records: Vec<CoreRecord>,
+) -> VerifiedIndex {
+    let index = publish_records(temp, source, records.clone());
+    drop(index);
+
+    let (searcher, manifest) = open_unverified_generation(temp.path());
+    drop(searcher);
+    let directory = DurableMmapDirectory::open(active_generation_path(temp.path())).unwrap();
+    let tantivy_index = Index::open(directory).unwrap();
+    publish_unchecked_generation(
+        temp.path(),
+        &tantivy_index,
+        manifest,
+        std::slice::from_ref(source),
+        records
+            .into_iter()
+            .enumerate()
+            .map(|(index, record)| {
+                let authority = ctx_history_index_format::SessionAuthorityKey::exact(
+                    record.session_id,
+                    record.source.identity(),
+                )
+                .unwrap();
+                let mut document = indexed_document(record);
+                if index == 0 {
+                    let fields = fields_from_schema(&lexical_schema()).unwrap();
+                    document.add_bytes(fields.session_authority, authority.as_bytes());
+                }
+                document
+            })
+            .collect(),
+    );
+    VerifiedIndex::open(temp.path()).unwrap()
+}
+
+fn with_event_identity_digest(mut record: CoreRecord, digest: [u8; 32]) -> CoreRecord {
+    const IDENTITY_HEADER_BYTES: usize = 3;
+    const UUID_BYTES: usize = 16;
+
+    let mut encoded = record.event_id.encode_canonical().unwrap();
+    encoded[IDENTITY_HEADER_BYTES..IDENTITY_HEADER_BYTES + digest.len()].copy_from_slice(&digest);
+    let mut uuid = [0_u8; UUID_BYTES];
+    uuid.copy_from_slice(&digest[..UUID_BYTES]);
+    uuid[6] = 0x80 | (uuid[6] & 0x0f);
+    uuid[8] = 0x80 | (uuid[8] & 0x3f);
+    let uuid_offset = ctx_history_core::StableEntityId::CANONICAL_LEN - UUID_BYTES;
+    encoded[uuid_offset..].copy_from_slice(&uuid);
+    record.event_id = ctx_history_core::StableEntityId::decode_canonical(&encoded).unwrap();
+    record.validate_contract().unwrap();
+    record
+}
+
 #[test]
 fn script_aware_analysis_indexes_cjk_and_long_technical_identifiers() {
     let temp = tempdir().unwrap();
@@ -353,6 +408,173 @@ fn timestamps_never_break_equal_relevance_ties() {
         .unwrap();
     assert_eq!(listed.candidates[0].event.event_id, expected);
     assert_eq!(listed.candidates[1].event.event_id, newer);
+}
+
+#[test]
+fn exact_boundary_matches_exhaustive_order_and_decodes_only_possible_winners() {
+    let temp = tempdir().unwrap();
+    let source = source("exact-stable-identity-cutoff.jsonl");
+    let initial = with_event_identity_digest(
+        document(&source, 1, "exact identity cutoff needle"),
+        [0x40; 32],
+    );
+    let rejected = with_event_identity_digest(
+        document(&source, 2, "exact identity cutoff needle"),
+        [0x50; 32],
+    );
+    let mut compact_preferred_digest = [0x30; 32];
+    compact_preferred_digest[6] = 0xf0;
+    let compact_preferred = with_event_identity_digest(
+        document(&source, 3, "exact identity cutoff needle"),
+        compact_preferred_digest,
+    );
+    let mut exact_winner_digest = [0x30; 32];
+    exact_winner_digest[6] = 0x0f;
+    let exact_winner = with_event_identity_digest(
+        document(&source, 4, "exact identity cutoff needle"),
+        exact_winner_digest,
+    );
+    assert_eq!(
+        &compact_preferred.event_id.digest()[..6],
+        &exact_winner.event_id.digest()[..6]
+    );
+    assert!(exact_winner.event_id.digest() < compact_preferred.event_id.digest());
+    assert!(
+        compact_preferred.event_id.as_uuid() < exact_winner.event_id.as_uuid(),
+        "the compact UUID alone would select the wrong limit-one winner"
+    );
+    let exact_winner_id = exact_winner.event_id;
+
+    let index = publish_records_in_one_segment(
+        &temp,
+        &source,
+        vec![initial, rejected, compact_preferred, exact_winner],
+    );
+    let exhaustive = index
+        .search_event_candidates_batch("exact identity cutoff needle", 4)
+        .unwrap();
+    let expected = exhaustive.candidates[0].event.event_id;
+    assert_eq!(expected, exact_winner_id);
+    index.reset_manual_lexical_io_observability_for_test();
+    let batch = index
+        .search_event_candidates_batch("exact identity cutoff needle", 1)
+        .unwrap();
+
+    assert!(batch.complete);
+    assert!(!batch.candidate_set_exhaustive);
+    assert_eq!(batch.counters.candidate_docs, 4);
+    assert_eq!(batch.candidates.len(), 1);
+    assert_eq!(batch.candidates[0].event.event_id, expected);
+    assert_eq!(
+        index.manual_event_range_order_decodes_for_test(),
+        3,
+        "the initial fill, smaller-prefix replacement, and equal-prefix challenger decode; the larger prefix rejects without decoding"
+    );
+}
+
+#[test]
+fn better_primary_rank_replacement_decodes_once_and_worse_rank_does_not() {
+    let temp = tempdir().unwrap();
+    let source = source("exact-primary-boundary.jsonl");
+    let initial = document(&source, 1, "primaryalpha");
+    let better = document(&source, 2, "primaryalpha primarybeta");
+    let worse = document(&source, 3, "primaryalpha");
+    let expected = better.event_id;
+    let index = publish_records_in_one_segment(&temp, &source, vec![initial, better, worse]);
+
+    index.reset_manual_lexical_io_observability_for_test();
+    let batch = index
+        .search_event_candidates_batch("primaryalpha primarybeta", 1)
+        .unwrap();
+
+    assert_eq!(batch.counters.candidate_docs, 3);
+    assert_eq!(batch.candidates[0].event.event_id, expected);
+    assert_eq!(
+        index.manual_event_range_order_decodes_for_test(),
+        2,
+        "the initial fill and better replacement decode; the later worse primary rank does not"
+    );
+}
+
+#[test]
+fn logical_verification_rejects_malformed_identity_scalars_and_order() {
+    use tantivy::schema::Document as _;
+
+    #[derive(Clone, Copy)]
+    enum Mutation {
+        EventIdHigh,
+        EventIdLow,
+        EventRangeOrder,
+    }
+
+    for (field_name, mutation) in [
+        ("event_id_high", Mutation::EventIdHigh),
+        ("event_id_low", Mutation::EventIdLow),
+        ("event_range_order", Mutation::EventRangeOrder),
+    ] {
+        let temp = tempdir().unwrap();
+        let source = source(&format!("malformed-{field_name}.jsonl"));
+        let record = document(&source, 1, "malformed exact boundary needle");
+        let event_uuid = record.event_id.as_uuid().as_u128();
+        let authority = ctx_history_index_format::SessionAuthorityKey::exact(
+            record.session_id,
+            record.source.identity(),
+        )
+        .unwrap();
+        let index = publish_records(&temp, &source, vec![record.clone()]);
+        drop(index);
+
+        let (searcher, manifest) = open_unverified_generation(temp.path());
+        let fields = fields_from_schema(searcher.schema()).unwrap();
+        let original = indexed_document(record);
+        let target = match mutation {
+            Mutation::EventIdHigh => fields.event_id_high,
+            Mutation::EventIdLow => fields.event_id_low,
+            Mutation::EventRangeOrder => fields.event_range_order,
+        };
+        let mut forged = TantivyDocument::default();
+        for (field, value) in original.iter_fields_and_values() {
+            if field != target {
+                forged.add_field_value(field, value);
+            }
+        }
+        match mutation {
+            Mutation::EventIdHigh => forged.add_u64(target, ((event_uuid >> 64) as u64) ^ 1),
+            Mutation::EventIdLow => forged.add_u64(target, (event_uuid as u64) ^ 1),
+            Mutation::EventRangeOrder => forged.add_bytes(
+                target,
+                &[0_u8; ctx_history_index_format::EVENT_RANGE_ORDER_KEY_LEN],
+            ),
+        }
+        forged.add_bytes(fields.session_authority, authority.as_bytes());
+        drop(searcher);
+
+        let directory = DurableMmapDirectory::open(active_generation_path(temp.path())).unwrap();
+        let tantivy_index = Index::open(directory).unwrap();
+        publish_unchecked_generation(
+            temp.path(),
+            &tantivy_index,
+            manifest,
+            std::slice::from_ref(&source),
+            vec![forged],
+        );
+
+        let error = match VerifiedIndex::open(temp.path()) {
+            Ok(_) => panic!("{field_name} mutation was accepted"),
+            Err(error) => error,
+        };
+        let expected_error_field = match mutation {
+            Mutation::EventIdHigh | Mutation::EventIdLow => "core_record",
+            Mutation::EventRangeOrder => field_name,
+        };
+        assert!(
+            matches!(
+                error,
+                IndexError::InvalidStoredDocumentField(actual) if actual == expected_error_field
+            ),
+            "{field_name} mutation returned {error:?}"
+        );
+    }
 }
 
 #[test]
@@ -1014,11 +1236,8 @@ fn thirty_two_term_fanout_streams_one_stable_segment_at_a_time() {
     assert!(top_three.complete);
     assert!(!top_three.candidate_set_exhaustive);
     assert_eq!(top_three.counters.candidate_docs, SEGMENTS as u64);
-    assert_eq!(
-        index.manual_event_range_order_decodes_for_test(),
-        3,
-        "the hot loop must not decode discarded candidates' order keys"
-    );
+    let order_decodes = index.manual_event_range_order_decodes_for_test();
+    assert!((3..=SEGMENTS).contains(&order_decodes));
     assert_eq!(
         top_three
             .candidates
