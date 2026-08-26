@@ -155,6 +155,7 @@ pub(super) fn wait_for_installation_daemon_quiescence_for(
 ) -> Result<()> {
     let (lock_path, registration_root) =
         ctx_upgrade_engine::installation_daemon_coordination_paths_for(executable)?;
+    create_installation_daemon_coordination_parent(&lock_path)?;
     wait_for_installation_daemon_quiescence_at(
         &lock_path,
         &registration_root,
@@ -169,7 +170,6 @@ pub(super) fn wait_for_installation_daemon_quiescence_at(
     attempt_id: &str,
     timeout: StdDuration,
 ) -> Result<()> {
-    create_installation_daemon_coordination_parent(lock_path)?;
     ctx_daemon_runtime::wait_for_installation_quiescence(
         lock_path,
         registration_root,

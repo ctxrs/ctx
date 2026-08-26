@@ -838,7 +838,7 @@ fn docs_commands_expose_embedded_docs_and_man_pages() {
     let upgrade = json_output(ctx(&temp).args(["docs", "show", "upgrade", "--format", "json"]));
     let upgrade_body = upgrade["body"].as_str().unwrap();
     assert!(upgrade_body.contains("ctx upgrade status"));
-    assert!(upgrade_body.contains("on by default (`upgrade.auto = \"apply\"`)"));
+    assert!(upgrade_body.contains("managed default is `upgrade.auto = \"apply\"`"));
     assert!(upgrade_body.contains("CTX_UPGRADE_AUTO=off"));
     assert!(upgrade_body.contains("ctx upgrade disable"));
     assert!(upgrade_body.contains("launch a detached automatic-upgrade worker"));

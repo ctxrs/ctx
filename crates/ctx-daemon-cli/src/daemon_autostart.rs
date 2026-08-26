@@ -24,7 +24,6 @@ use crate::{compact_json, config::AppConfig, DaemonTriggerCommandArg};
 #[cfg(test)]
 use super::runtime_limits::{DAEMON_AUTOSTART_OFF_ENV, DAEMON_BACKGROUND_CHILD_ENV};
 use super::{
-    health_search::create_private_dir_all,
     paths_status::{
         daemon_lock_is_active, daemon_lock_is_owned_by, daemon_lock_path, daemon_root_path,
         pid_lock_guard_path, write_private_json_file,
