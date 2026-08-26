@@ -10,6 +10,10 @@ use ctx_history_refresh::{
     RefreshOutcomeClass, RefreshOutcomeCode, RefreshRetryAdvice, RefreshTerminalOutcome,
 };
 
+#[cfg(test)]
+#[path = "contract_tests/failure_contract_tests.rs"]
+mod failure_contract_tests;
+
 #[test]
 fn fingerprint_is_the_sha256_of_the_canonical_inventory() {
     assert_eq!(
@@ -590,6 +594,38 @@ fn retryable_terminal_failure() -> crate::semantic::SourceBackedRefreshTerminalE
         retained_generation: Some("cd".repeat(32)),
         published_generation: None,
         retry_advice: Some(RefreshRetryAdvice::RetryAffectedRoutes),
+        detail: None,
+    })
+}
+
+fn source_unclaimed_terminal_failure(
+    retryable: bool,
+) -> crate::semantic::SourceBackedRefreshTerminalError {
+    let blocked = SourceRouteIdentity::from_sha256("ab".repeat(32)).unwrap();
+    let retryable_route = SourceRouteIdentity::from_sha256("cd".repeat(32)).unwrap();
+    crate::semantic::SourceBackedRefreshTerminalError::from(RefreshTerminalOutcome {
+        code: RefreshOutcomeCode::SourceUnclaimed,
+        class: RefreshOutcomeClass::Coverage,
+        retryable,
+        affected_routes: if retryable {
+            BTreeSet::from([blocked.clone(), retryable_route.clone()])
+        } else {
+            BTreeSet::from([blocked.clone()])
+        },
+        retryable_routes: if retryable {
+            BTreeSet::from([retryable_route])
+        } else {
+            BTreeSet::new()
+        },
+        blocked_routes: BTreeSet::from([blocked]),
+        physical_attempt_id: "00000000-0000-0000-0000-000000000123".to_owned(),
+        retained_generation: Some("cd".repeat(32)),
+        published_generation: None,
+        retry_advice: Some(if retryable {
+            RefreshRetryAdvice::RetryRetryableRoutesAndInspectBlocked
+        } else {
+            RefreshRetryAdvice::InspectSources
+        }),
         detail: None,
     })
 }
@@ -1211,6 +1247,17 @@ fn malformed_typed_failures_remain_silent_and_nonzero() {
                 terminal.retry_advice = Some("inspect_sources".to_owned());
             }),
         ),
+        ("source_unclaimed_without_advice", {
+            let mut terminal = source_unclaimed_terminal_failure(false);
+            terminal.retry_advice = None;
+            terminal
+        }),
+        ("source_unclaimed_without_blocked_culprit", {
+            let mut terminal = source_unclaimed_terminal_failure(true);
+            terminal.blocked_routes.clear();
+            terminal.affected_routes = terminal.retryable_routes.clone();
+            terminal
+        }),
         (
             "malformed_attempt_identity",
             mutated_terminal_failure(|terminal| {
@@ -1230,39 +1277,6 @@ fn malformed_typed_failures_remain_silent_and_nonzero() {
         assert_eq!(status, ExitCode::FAILURE, "{name}");
         assert!(output.is_empty(), "{name}: {output:?}");
     }
-}
-
-#[test]
-fn maximum_valid_failure_frame_writes_and_route_cap_fails_closed() {
-    let (status, output) = run_terminal_failure(terminal_failure_with_blocked_routes(
-        failure::MAX_FAILURE_ROUTES,
-    ));
-    assert_eq!(status, ExitCode::FAILURE);
-    assert_eq!(output.last(), Some(&b'\n'));
-    assert_eq!(output.iter().filter(|byte| **byte == b'\n').count(), 1);
-    let frame = &output[..output.len() - 1];
-    assert!(frame.len() <= MAX_RESPONSE_BYTES);
-    let response: Value = serde_json::from_slice(frame).unwrap();
-    assert_eq!(
-        response["details"]["affected_routes"]
-            .as_array()
-            .unwrap()
-            .len(),
-        failure::MAX_FAILURE_ROUTES
-    );
-    assert_eq!(
-        response["details"]["blocked_routes"]
-            .as_array()
-            .unwrap()
-            .len(),
-        failure::MAX_FAILURE_ROUTES
-    );
-
-    let (status, output) = run_terminal_failure(terminal_failure_with_blocked_routes(
-        failure::MAX_FAILURE_ROUTES + 1,
-    ));
-    assert_eq!(status, ExitCode::FAILURE);
-    assert!(output.is_empty());
 }
 
 #[test]

@@ -222,6 +222,78 @@ fn mixed_route_dispositions_schedule_only_retryable_routes() {
 }
 
 #[test]
+fn unclaimed_source_blocks_only_its_culprit_and_retries_the_peer_route() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    ctx_history_platform::platform_security::establish_private_data_root(&data_root).unwrap();
+    publish_empty_core_generation(&data_root);
+    let culprit = route_identity(0xd1);
+    let peer = route_identity(0xd2);
+    let executor_culprit = culprit.clone();
+    let coordinator = CoreRefreshEngine::with_executor(Arc::new(
+        move |_execution: SourceBackedRefreshExecution<'_>| {
+            Err(SourceBackedCoordinatorError::UnclaimedBaseSource {
+                source_id: "fixture-source".to_owned(),
+                route_identity: executor_culprit.clone(),
+                route_failures: Vec::new(),
+                logical_source_failures: Default::default(),
+            }
+            .into())
+        },
+    ));
+    coordinator.initialize_watch_route_authority(BTreeSet::from([culprit.clone(), peer.clone()]));
+    coordinator.record_watch_routes(
+        [
+            (culprit.clone(), EventWatermark::new(4, 1)),
+            (peer.clone(), EventWatermark::new(4, 1)),
+        ],
+        super::super::source_route_ledger_now_ms().saturating_sub(1_000),
+    );
+    let mut runtime = source_refresh_only_runtime();
+
+    let mut failed = run_source_refresh_cycle(&data_root, &mut runtime, &coordinator);
+
+    assert!(failed.failed);
+    let events = crate::daemon::daemon_iteration_events_without_telemetry(
+        &mut failed,
+        std::time::Duration::from_millis(1),
+    );
+    assert!(matches!(
+        events.as_slice(),
+        [PublicEventV1::ProviderRefreshCompleted(_)]
+    ));
+    assert_eq!(runtime.history_retry.consecutive_failures, 0);
+    let terminal = read_daemon_job_status(&daemon_core_refresh_job_path(&data_root)).unwrap();
+    assert_eq!(terminal["structured_outcome"]["code"], "source_unclaimed");
+    assert_eq!(terminal["structured_outcome"]["class"], "coverage");
+    assert_eq!(terminal["structured_outcome"]["retryable"], true);
+    assert_eq!(
+        terminal["structured_outcome"]["retry_advice"],
+        "retry_retryable_routes_and_inspect_blocked"
+    );
+    assert_eq!(
+        terminal["structured_outcome"]["retryable_routes"],
+        json!([peer.as_str()])
+    );
+    assert_eq!(
+        terminal["structured_outcome"]["blocked_routes"],
+        json!([culprit.as_str()])
+    );
+    assert!(ctx_history_refresh::RefreshStatus::classify_schema_v1(&terminal).is_ok());
+
+    let now = super::super::source_route_ledger_now_ms();
+    let delay = coordinator
+        .next_dirty_route_due_in_ms(now)
+        .expect("unpublished peer remains retryable");
+    assert!(coordinator
+        .enqueue_next_scheduled_refresh(&data_root, now.saturating_add(delay))
+        .unwrap());
+    let queued = read_daemon_job_status(&daemon_core_refresh_job_path(&data_root)).unwrap();
+    assert_eq!(queued["refresh_scope"]["kind"], "exact");
+    assert_eq!(queued["refresh_scope"]["routes"], json!([peer.as_str()]));
+}
+
+#[test]
 fn terminal_admission_fence_failure_releases_root_before_exact_dirty_route_runs() {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("data");

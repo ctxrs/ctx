@@ -780,21 +780,22 @@ impl CoreRefreshEngine {
             .unwrap_or_default();
         let failure_type = source_backed_refresh_failure_type(&error);
         let classified_outcome = source_backed_refresh_failure_outcome(&error, &attempted_routes);
-        let failure_outcome = if classified_outcome.code == "source_refresh_failed"
-            && classified_outcome.class == "internal"
+        let failure_outcome = if classified_outcome.code == RefreshOutcomeCode::SourceRefreshFailed
+            && classified_outcome.class == RefreshOutcomeClass::Internal
         {
             SourceBackedRefreshFailureOutcome::new(
-                "source_refresh_admission_failed",
-                "control_plane",
+                RefreshOutcomeCode::SourceRefreshAdmissionFailed,
+                RefreshOutcomeClass::ControlPlane,
                 true,
                 BTreeSet::new(),
-                Some("retry_admission"),
+                Some(RefreshRetryAdvice::RetryAdmission),
             )
         } else {
             classified_outcome
         };
-        let retry_admission = failure_outcome.code == "source_refresh_admission_failed"
-            && failure_outcome.retry_advice == Some("retry_admission");
+        let retry_admission = failure_outcome.code
+            == RefreshOutcomeCode::SourceRefreshAdmissionFailed
+            && failure_outcome.retry_advice == Some(RefreshRetryAdvice::RetryAdmission);
         let retryable_routes = failure_outcome.retryable_routes.clone();
         let blocked_routes = failure_outcome.blocked_routes.clone();
         let (scope, last_error) = {

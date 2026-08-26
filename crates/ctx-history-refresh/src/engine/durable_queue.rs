@@ -131,8 +131,8 @@ impl CoreRefreshEngine {
             .ok_or_else(|| anyhow!("source refresh request `{request_id}` is unknown"))?;
         let retry_admission = attempt.state == SourceBackedRefreshState::Failed
             && attempt.failure_outcome.as_ref().is_some_and(|outcome| {
-                outcome.code == "source_refresh_admission_failed"
-                    && outcome.retry_advice == Some("retry_admission")
+                outcome.code == RefreshOutcomeCode::SourceRefreshAdmissionFailed
+                    && outcome.retry_advice == Some(RefreshRetryAdvice::RetryAdmission)
             });
         if !retry_admission {
             bail!("source refresh request `{request_id}` has no terminal retry-admission handoff");
