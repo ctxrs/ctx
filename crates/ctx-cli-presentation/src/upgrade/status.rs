@@ -55,12 +55,19 @@ fn render_upgrade_status_human(
     install: &Value,
 ) -> Document {
     let managed = install.get("managed").and_then(Value::as_bool) == Some(true);
+    let marker = install
+        .get("marker")
+        .and_then(Value::as_str)
+        .unwrap_or("unavailable");
+    let inconsistent = !managed && marker != "absent";
     let status = state
         .get("status")
         .and_then(Value::as_str)
         .unwrap_or("unknown");
     let upgrade_error = managed && status == "error";
-    let (outcome_state, title) = if !managed {
+    let (outcome_state, title) = if inconsistent {
+        (OutcomeState::Error, "ctx install marker needs attention")
+    } else if !managed {
         (
             OutcomeState::Warning,
             "ctx is not managed by the hosted installer",
@@ -93,7 +100,9 @@ fn render_upgrade_status_human(
                 Field::new("Version", current_version),
                 Field::new(
                     "State",
-                    if managed {
+                    if inconsistent {
+                        "inconsistent"
+                    } else if managed {
                         human_upgrade_state(status)
                     } else {
                         "unmanaged"
@@ -124,7 +133,7 @@ fn render_upgrade_status_human(
         }
     }
 
-    let action = if upgrade_error {
+    let action = if upgrade_error || inconsistent {
         Some((
             "Inspect the local installation and upgrade state.",
             "ctx doctor",
@@ -256,6 +265,7 @@ mod ui_tests {
                 &json!({"status": "never_checked"}),
                 &json!({
                     "managed": false,
+                    "marker": "absent",
                     "reason": "ctx was not installed by the hosted installer"
                 }),
             );
@@ -263,6 +273,23 @@ mod ui_tests {
             assert!(unmanaged_text.starts_with("! ctx is not managed"));
             assert!(unmanaged_text.contains("hosted installer"));
             assert_fits(&unmanaged, &context);
+
+            let inconsistent = render_upgrade_status_human(
+                &context,
+                "1.0.0",
+                "off",
+                &json!({"status": "never_checked"}),
+                &json!({
+                    "managed": false,
+                    "marker": "corrupt",
+                    "reason": "ctx install marker hash mismatch"
+                }),
+            );
+            let inconsistent_text = inconsistent.render_plain();
+            assert!(inconsistent_text.starts_with("✗ ctx install marker"));
+            assert!(inconsistent_text.contains("inconsistent"));
+            assert!(inconsistent_text.contains("ctx doctor\n"));
+            assert_fits(&inconsistent, &context);
         }
     }
 }

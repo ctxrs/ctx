@@ -9,7 +9,19 @@ use crate::ui::{
 
 use ctx_upgrade_engine::UpgradeOutcome;
 
-pub fn render_auto_mode(enabled: bool, json_output: bool, ui: &mut Ui) -> Result<()> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutoModeInstallAuthority {
+    Hosted,
+    External,
+    Inconsistent,
+}
+
+pub fn render_auto_mode(
+    enabled: bool,
+    authority: AutoModeInstallAuthority,
+    json_output: bool,
+    ui: &mut Ui,
+) -> Result<()> {
     if json_output {
         return print_json(auto_mode_json(enabled));
     }
@@ -22,10 +34,17 @@ pub fn render_auto_mode(enabled: bool, json_output: bool, ui: &mut Ui) -> Result
             } else {
                 "Automatic upgrades disabled"
             },
-            detail: Some(if enabled {
-                "ctx will apply signed updates in the background."
-            } else {
-                "Run `ctx upgrade` whenever you want to update."
+            detail: Some(match (enabled, authority) {
+                (true, _) => "ctx will apply signed updates in the background.",
+                (false, AutoModeInstallAuthority::Hosted) => {
+                    "Run `ctx upgrade` whenever you want to update."
+                }
+                (false, AutoModeInstallAuthority::External) => {
+                    "Use the tool or process that installed ctx when you want to update."
+                }
+                (false, AutoModeInstallAuthority::Inconsistent) => {
+                    "Run `ctx doctor` before changing or updating this installation."
+                }
             }),
         },
     );
@@ -189,21 +208,30 @@ fn render_upgrade_outcome_human(context: &RenderContext, upgrade: &UpgradeOutcom
         ));
     }
 
-    let next = match upgrade.status() {
-        "available" | "dry_run" => Some("ctx upgrade"),
-        _ => None,
-    };
-    if let Some(command) = next {
+    let managed = upgrade.plan().map(|plan| plan.managed()).unwrap_or(true);
+    if let Some((text, command)) = upgrade_next_step(upgrade.status(), managed) {
         document.push_blank();
         document.append(hint(
             context,
-            Hint {
-                text: "Apply the signed update when you are ready.",
-            },
-            Some(Action { command }),
+            Hint { text },
+            command.map(|command| Action { command }),
         ));
     }
     document
+}
+
+fn upgrade_next_step(status: &str, managed: bool) -> Option<(&'static str, Option<&'static str>)> {
+    match (status, managed) {
+        ("available" | "dry_run", true) => Some((
+            "Apply the signed update when you are ready.",
+            Some("ctx upgrade"),
+        )),
+        ("available", false) => Some((
+            "Use the tool or process that installed ctx to apply this update.",
+            None,
+        )),
+        _ => None,
+    }
 }
 
 fn displayed_current_version<'a>(
@@ -361,5 +389,17 @@ mod tests {
                 "enabled": false,
             })
         );
+    }
+
+    #[test]
+    fn external_available_upgrade_uses_owner_neutral_guidance() {
+        assert_eq!(
+            upgrade_next_step("available", false),
+            Some((
+                "Use the tool or process that installed ctx to apply this update.",
+                None,
+            ))
+        );
+        assert_eq!(upgrade_next_step("dry_run", false), None);
     }
 }

@@ -917,6 +917,7 @@ mod unix {
 
     mod invocation_driver {
         include!("auto_upgrade_acceptance/invocation_driver.rs");
+        include!("auto_upgrade_acceptance/invalid_marker.rs");
     }
 
     #[test]

@@ -26,7 +26,7 @@ Use the same tool or manual process that installed ctx to upgrade it.
 Automatic indexing is the default, so `ctx setup` may enable a persistent
 background daemon. Before any package manager, manual installer, or
 source-install command replaces or removes the executable, run the currently
-installed executable:
+installed executable immediately before that operation:
 
 ```bash
 ctx daemon disable --prepare-uninstall --format=json
@@ -55,6 +55,11 @@ JSON receipt reports all of these fields:
   "binary_retained": true
 }
 ```
+
+The receipt proves that the installation is quiescent when the command
+finishes; it is not a persistent block on future ctx launches. Proceed directly
+to the serialized package-manager or installer operation, and do not run ctx
+again until replacement completes.
 
 If handoff fails, keep the installed executable in place so the command can be
 retried. ctx never falls back to a PID-only or process-name kill.

@@ -33,8 +33,8 @@ pub(in crate::upgrade) use marker::installation_is_unmanaged_at;
 pub use marker::is_valid_install_attempt_id;
 pub(super) use marker::InstallFingerprint;
 pub use marker::{
-    current_exe_is_unmanaged, current_install_path, invalid_install_marker_recovery_guidance,
-    unmanaged_install_conversion_guidance, InstallMarker,
+    current_exe_has_managed_install_marker_hint, current_exe_is_unmanaged, current_install_path,
+    invalid_install_marker_recovery_guidance, unmanaged_install_conversion_guidance, InstallMarker,
 };
 pub use marker::{managed_install_marker_for_current_exe, ManagedInstallMarker};
 pub(super) use transaction::ApplyResult;

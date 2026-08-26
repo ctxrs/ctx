@@ -2,7 +2,8 @@ use std::path::PathBuf;
 
 use anyhow::{anyhow, Result};
 use ctx_cli_presentation::upgrade::{
-    render_auto_mode, render_error, render_outcome, UpgradeArgs, UpgradeCommand,
+    render_auto_mode, render_error, render_outcome, AutoModeInstallAuthority, UpgradeArgs,
+    UpgradeCommand,
 };
 use ctx_upgrade_engine::{
     managed_install_marker_for_current_exe, run_hosted_transaction,
@@ -133,12 +134,24 @@ pub fn run(
                 require_managed_install_for_auto_upgrade()?;
                 insert_upgrade_simple_analytics(telemetry, UpgradeStatus::AutoEnabled);
                 set_auto_mode(&data_root, "apply")?;
-                render_auto_mode(true, args.format.is_json(), ui)
+                render_auto_mode(
+                    true,
+                    AutoModeInstallAuthority::Hosted,
+                    args.format.is_json(),
+                    ui,
+                )
             }
             Some(UpgradeCommand::Disable) => {
+                let authority = match managed_install_marker_for_current_exe() {
+                    Ok(ManagedInstallMarker::Valid(_)) => AutoModeInstallAuthority::Hosted,
+                    Ok(ManagedInstallMarker::Absent) => AutoModeInstallAuthority::External,
+                    Ok(ManagedInstallMarker::Invalid { .. }) | Err(_) => {
+                        AutoModeInstallAuthority::Inconsistent
+                    }
+                };
                 insert_upgrade_simple_analytics(telemetry, UpgradeStatus::AutoDisabled);
                 set_auto_mode(&data_root, "off")?;
-                render_auto_mode(false, args.format.is_json(), ui)
+                render_auto_mode(false, authority, args.format.is_json(), ui)
             }
             None => {
                 let outcome =

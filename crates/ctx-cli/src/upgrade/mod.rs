@@ -27,9 +27,10 @@ pub(crate) fn effective_auto_upgrade_enabled(config: &AppConfig) -> bool {
     effective_auto_upgrade_mode(config).enabled()
 }
 
-/// Cheap foreground eligibility hint. A present marker is revalidated by the
-/// automatic worker or daemon before any upgrade attempt; this path only keeps
-/// plainly external installs from spawning work and never hashes the binary.
+/// Cheap foreground eligibility hint. A structurally usable marker is fully
+/// revalidated by the automatic worker or daemon before any upgrade attempt;
+/// this path never hashes the binary.
 pub(crate) fn automatic_upgrade_eligible_hint(config: &AppConfig) -> bool {
-    config.auto_upgrade_enabled() && !ctx_upgrade_engine::current_exe_is_unmanaged()
+    config.auto_upgrade_enabled()
+        && ctx_upgrade_engine::current_exe_has_managed_install_marker_hint()
 }

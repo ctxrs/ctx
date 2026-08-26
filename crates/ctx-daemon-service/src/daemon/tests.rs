@@ -1031,14 +1031,25 @@ fn forced_watcher_recovery_emits_a_route_mutated_during_rearm_overlap() -> Resul
 
 #[test]
 fn only_enabled_long_lived_daemon_uses_upgrade_scheduler() {
-    assert!(daemon_should_schedule_auto_upgrade(true, DaemonMode::Full));
+    assert!(daemon_should_schedule_auto_upgrade(
+        true,
+        DaemonMode::Full,
+        true
+    ));
     assert!(!daemon_should_schedule_auto_upgrade(
         false,
-        DaemonMode::Full
+        DaemonMode::Full,
+        true
     ));
     assert!(!daemon_should_schedule_auto_upgrade(
         true,
-        DaemonMode::SourceRefreshOnly
+        DaemonMode::SourceRefreshOnly,
+        true
+    ));
+    assert!(!daemon_should_schedule_auto_upgrade(
+        true,
+        DaemonMode::Full,
+        false
     ));
 }
 

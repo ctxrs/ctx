@@ -190,6 +190,22 @@ pub fn current_exe_is_unmanaged() -> bool {
         .unwrap_or(false)
 }
 
+/// Cheap foreground hint for automatic-upgrade worker admission. This parses
+/// the small marker and checks its authority/path/platform without hashing the
+/// executable; the worker performs the full digest verification before use.
+pub fn current_exe_has_managed_install_marker_hint() -> bool {
+    let Ok(path) = current_install_path() else {
+        return false;
+    };
+    let Ok(platform) = platform_key() else {
+        return false;
+    };
+    matches!(
+        read_install_marker_at(&path),
+        Ok(Some(marker)) if marker.platform == platform
+    )
+}
+
 #[cfg(windows)]
 pub fn unmanaged_install_conversion_guidance() -> &'static str {
     "to enable managed upgrades, run ctx daemon disable --prepare-uninstall --format=json, then after a successful receipt move or remove this unmanaged executable and rerun irm https://ctx.rs/install.ps1 | iex (or choose a different empty BinDir); see ctx docs show unmanaged-installs"

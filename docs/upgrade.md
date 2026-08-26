@@ -40,8 +40,9 @@ lock, backoff, signed metadata, daemon handoff, and replacement transaction as
 the daemon. Daemon lifecycle and supervisor coordination is unified under the
 canonical `~/.ctx` root.
 
-The foreground hint does not acquire the upgrade lock, parse or hash the
-installed binary, access the network, or change command output. The `status`,
+The foreground hint parses only the bounded install marker; it does not acquire
+the upgrade lock, parse or hash the executable, access the network, or change
+command output. The `status`,
 `stats`, `docs`, MCP, `daemon`, `upgrade`, and companion command families do
 not launch a worker, and finite Core indexing workers never own upgrade
 maintenance. Failed commands and failed output delivery do not launch one.
@@ -87,7 +88,9 @@ ctx daemon disable --prepare-uninstall --format=json
 ```
 
 Continue only after the command succeeds and its JSON receipt reports a
-quiescent installation. Then move or remove the unmanaged executable, or both
+quiescent installation. The receipt is point-in-time rather than a persistent
+launch fence: do not run ctx again, and proceed directly to the serialized
+replacement operation. Then move or remove the unmanaged executable, or both
 members of the inconsistent pair, and rerun the platform-correct hosted
 installer. On Linux or macOS:
 

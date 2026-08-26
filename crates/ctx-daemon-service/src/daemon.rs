@@ -501,6 +501,7 @@ where
             && daemon_should_schedule_auto_upgrade(
                 runtime.config.daemon.enabled,
                 runtime.config.daemon.mode,
+                runtime.config.automatic_upgrade_enabled,
             )
         {
             prepared_auto_upgrade = upgrade
@@ -612,6 +613,7 @@ where
                 && daemon_should_schedule_auto_upgrade(
                     runtime.config.daemon.enabled,
                     runtime.config.daemon.mode,
+                    runtime.config.automatic_upgrade_enabled,
                 )
             {
                 prepared_auto_upgrade = upgrade

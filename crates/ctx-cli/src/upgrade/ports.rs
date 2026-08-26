@@ -280,7 +280,15 @@ impl AutomaticUpgradePolicyProvider for CliAutomaticUpgradePolicy {
     type Snapshot = ctx_daemon_cli::DaemonConfigSnapshot;
 
     fn reload(&self, data_root: &Path) -> Result<Self::Snapshot> {
-        AppConfig::load(data_root).map(|config| crate::semantic::daemon_config_snapshot(&config))
+        AppConfig::load(data_root).map(|config| {
+            let mut snapshot = crate::semantic::daemon_config_snapshot(&config);
+            // Policy reload runs in the daemon or detached worker, so it can
+            // afford the full executable digest check before scheduler state
+            // is claimed. Foreground admission keeps using the cheap marker
+            // hint to avoid hashing the binary on ordinary commands.
+            snapshot.automatic_upgrade_enabled = super::effective_auto_upgrade_enabled(&config);
+            snapshot
+        })
     }
 }
 
