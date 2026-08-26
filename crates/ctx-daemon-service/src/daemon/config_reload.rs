@@ -128,21 +128,20 @@ pub(super) fn reload_daemon_runtime_config(
         refresh_service,
         state: reload,
     } = targets;
-    let mut config = match config_port.load(data_root) {
+    let config = match config_port.load(data_root) {
         Ok(config) => config,
         Err(error) => {
             reload.load_failed(error);
             return DaemonConfigReloadOutcome::Continue;
         }
     };
-    if args.profile == DaemonRunProfile::FiniteCoreWorker {
-        config.daemon.mode = DaemonMode::SourceRefreshOnly;
-        config.semantic_enabled = false;
-    }
     reload.begin_attempt(&config);
     runtime.config = config;
 
-    if !runtime.config.daemon.enabled && !args.force {
+    if !runtime.config.daemon.enabled
+        && !args.force
+        && args.profile != DaemonRunProfile::FiniteCoreWorker
+    {
         drop(query_service.take());
         drop(refresh_service.take());
         let _ = runtime.semantic_runtime.release_if_idle();

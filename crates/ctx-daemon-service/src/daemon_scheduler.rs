@@ -100,7 +100,7 @@ where
         if source_refresh_requested && !runtime.history_retry.ready() {
             return Ok(deferred_pending_core_refresh(data_root, runtime));
         }
-        return Ok(run_pending_core_refresh(
+        if let Some(mut iteration) = run_pending_core_refresh(
             data_root,
             runtime,
             source_refresh,
@@ -109,8 +109,27 @@ where
             false,
             generation_published,
             observation,
-        )?
-        .unwrap_or_else(|| DaemonIteration::new(false, false, DaemonCycleStateV1::unknown())));
+        )? {
+            if daemon_semantic_catch_up_pending(data_root, runtime, semantic_enabled) {
+                iteration.continue_immediately = true;
+            }
+            return Ok(iteration);
+        }
+        if let Some(iteration) = run_pending_core_semantic_catch_up(
+            args,
+            data_root,
+            runtime,
+            deadline,
+            semantic_enabled,
+            semantic,
+        )? {
+            return Ok(iteration);
+        }
+        return Ok(DaemonIteration::new(
+            false,
+            false,
+            DaemonCycleStateV1::unknown(),
+        ));
     }
     if runtime.config.daemon.mode.runs_only_source_refresh() {
         runtime.consumer_retry_deferral.reset();
@@ -790,6 +809,36 @@ fn semantic_page_continuation_pending(data_root: &Path, core_generation_id: &str
             && job.get("source_work_remaining").and_then(Value::as_bool) == Some(true)
             && !daemon_job_should_backoff(&job)
     })
+}
+
+pub(super) fn daemon_semantic_catch_up_pending(
+    data_root: &Path,
+    runtime: &DaemonRuntime,
+    semantic_enabled: bool,
+) -> bool {
+    if !semantic_enabled
+        || !daemon_mode_runs_core_semantic_projection(runtime.config.daemon.mode)
+        || runtime.semantic_blocked_job.is_some()
+    {
+        return false;
+    }
+    let Ok(Some(generation)) = pin_published_generation(data_root) else {
+        return false;
+    };
+    let generation_id = generation.generation_id();
+    if !semantic_generation_needs_catch_up(data_root, generation_id) {
+        return false;
+    }
+    let attempted = runtime
+        .sidecar_drain
+        .semantic_attempted_generation
+        .as_deref()
+        == Some(generation_id);
+    if attempted {
+        return semantic_page_continuation_pending(data_root, generation_id)
+            || (runtime.semantic_retry.consecutive_failures > 0 && runtime.semantic_retry.ready());
+    }
+    runtime.semantic_retry.ready()
 }
 
 fn prepare_semantic_retry_for_generation(

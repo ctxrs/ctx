@@ -9,6 +9,61 @@ pub fn set_daemon_enabled(data_root: &Path, enabled: bool) -> Result<()> {
     set_indexing_mode(data_root, IndexingMode::from_legacy_daemon_enabled(enabled))
 }
 
+pub fn configure_manual_semantic_search(data_root: &Path) -> Result<()> {
+    establish_private_data_root(data_root)?;
+    let path = AppConfig::config_path(data_root);
+    let _mutation_lock = ConfigMutationLock::acquire(&path)?;
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => String::new(),
+        Err(err) => return Err(err).with_context(|| format!("read {}", path.display())),
+    };
+    let parsed = parse_toml_subset(&text).with_context(|| format!("parse {}", path.display()))?;
+    let mut config = AppConfig::default();
+    config
+        .apply_values(&parsed)
+        .with_context(|| format!("load {}", path.display()))?;
+    config
+        .validate_provider_root_data_root(data_root)
+        .with_context(|| format!("load {}", path.display()))?;
+
+    let mut document = text
+        .parse::<toml_edit::DocumentMut>()
+        .with_context(|| format!("parse {}", path.display()))?;
+    if document.as_table().get("indexing").is_none() {
+        document
+            .as_table_mut()
+            .insert("indexing", toml_edit::table());
+    }
+    let indexing = document
+        .as_table_mut()
+        .get_mut("indexing")
+        .and_then(toml_edit::Item::as_table_mut)
+        .ok_or_else(|| anyhow::anyhow!("indexing configuration must be a table"))?;
+    indexing.insert("mode", toml_edit::value(IndexingMode::Manual.as_str()));
+    if let Some(daemon) = document
+        .as_table_mut()
+        .get_mut("daemon")
+        .and_then(toml_edit::Item::as_table_mut)
+    {
+        daemon.remove("enabled");
+    }
+    let updated = set_toml_bool(&document.to_string(), "search", "semantic", true);
+    let parsed =
+        parse_toml_subset(&updated).with_context(|| format!("parse updated {}", path.display()))?;
+    let mut config = AppConfig::default();
+    config
+        .apply_values(&parsed)
+        .with_context(|| format!("load updated {}", path.display()))?;
+    config
+        .validate_provider_root_data_root(data_root)
+        .with_context(|| format!("load updated {}", path.display()))?;
+    if updated != text {
+        write_config_durably(&path, updated.as_bytes())?;
+    }
+    Ok(())
+}
+
 pub fn persisted_daemon_enabled(data_root: &Path) -> Result<bool> {
     Ok(AppConfig::load_persisted(data_root)?
         .indexing

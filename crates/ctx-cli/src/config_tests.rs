@@ -756,6 +756,25 @@ fn set_semantic_search_enabled_is_durable_preserving_and_idempotent() {
 }
 
 #[test]
+fn manual_semantic_setup_persists_disabled_daemon_contract() {
+    let _env_guard = EnvGuard::new(DEFAULT_CONTROL_ENV_KEYS);
+    let temp = tempfile::tempdir().unwrap();
+
+    configure_manual_semantic_search(temp.path()).unwrap();
+
+    let config = AppConfig::load(temp.path()).unwrap();
+    assert_eq!(config.indexing.mode, IndexingMode::Manual);
+    assert!(!config.automatic_indexing_enabled());
+    assert!(config.semantic_search_enabled());
+    assert!(!config.persistent_automatic_upgrade_driver_enabled());
+
+    let text = fs::read_to_string(temp.path().join(CONFIG_FILE)).unwrap();
+    assert!(text.contains("[indexing]\nmode = \"manual\"\n"));
+    assert!(text.contains("[search]\nsemantic = true\n"));
+    assert!(!text.contains("[daemon]\nenabled = true"));
+}
+
+#[test]
 fn default_config_is_not_written_for_implicit_defaults() {
     let temp = tempfile::tempdir().unwrap();
     write_default_config(temp.path()).unwrap();

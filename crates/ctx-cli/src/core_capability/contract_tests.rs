@@ -20,6 +20,31 @@ fn fingerprint_is_the_sha256_of_the_canonical_inventory() {
 }
 
 #[test]
+fn core_setup_semantic_no_daemon_persists_manual_search_configuration() {
+    let root = tempfile::tempdir().unwrap();
+    let facts = core_setup_facts(
+        root.path(),
+        CoreSetupOptions {
+            catalog_only: false,
+            defer_fresh_empty_wait: false,
+            no_daemon: true,
+            notice_lines: Vec::new(),
+            progress: SetupProgressMode::Legacy(crate::progress::ProgressArg::None),
+            semantic: true,
+            wait: false,
+        },
+        &mut IgnoreEvents,
+    )
+    .unwrap();
+
+    let config = crate::config::AppConfig::load(root.path()).unwrap();
+    assert_eq!(config.indexing.mode, crate::config::IndexingMode::Manual);
+    assert!(config.semantic_search_enabled());
+    assert_eq!(facts["daemon_requested"], false);
+    assert_eq!(facts["semantic_enabled"], true);
+}
+
+#[test]
 fn wake_refresh_reports_resolved_analytics_consent_fail_closed() {
     let _lock = crate::config::TEST_LOCAL_USAGE_ENV_LOCK
         .lock()

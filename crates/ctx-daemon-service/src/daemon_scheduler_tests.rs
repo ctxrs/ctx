@@ -512,6 +512,70 @@ fn finite_core_worker_does_not_notify_adjacent_maintenance() {
 }
 
 #[test]
+fn finite_core_worker_drains_semantic_projection_after_core_refresh() {
+    let temp = tempfile::tempdir().unwrap();
+    let coordinator = CoreRefreshEngine::with_executor(Arc::new(
+        move |execution: SourceBackedRefreshExecution<'_>| {
+            Ok(publish_empty_authoritative_generation(&execution))
+        },
+    ));
+    coordinator.enqueue_for_test(None);
+    let mut args = daemon_args();
+    args.profile = crate::DaemonRunProfile::FiniteCoreWorker;
+    let mut runtime = DaemonRuntime {
+        config: AppConfig {
+            daemon: crate::DaemonProductConfig {
+                enabled: false,
+                mode: DaemonMode::Full,
+            },
+            semantic_enabled: true,
+            ..AppConfig::default()
+        },
+        ..DaemonRuntime::default()
+    };
+    let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let _hooks = install_jobs(
+        calls.clone(),
+        Some(json!({
+            "status": "ready",
+            "source_generation_ready": true,
+            "source_work_remaining": false,
+        })),
+    );
+
+    let core = run_daemon_scheduler_cycle_with_activity(
+        &args,
+        temp.path(),
+        &mut runtime,
+        None,
+        true,
+        None,
+        Some(&coordinator),
+    )
+    .unwrap();
+    assert!(core.did_work);
+    assert!(core.continue_immediately);
+    assert!(calls.borrow().is_empty());
+
+    let semantic = run_daemon_scheduler_cycle_with_activity(
+        &args,
+        temp.path(),
+        &mut runtime,
+        None,
+        true,
+        None,
+        Some(&coordinator),
+    )
+    .unwrap();
+    assert!(semantic.continue_immediately);
+    assert_eq!(&*calls.borrow(), &["semantic_index"]);
+    assert_eq!(
+        read_daemon_job_status(&daemon_semantic_job_path(temp.path())).unwrap()["status"],
+        "ready"
+    );
+}
+
+#[test]
 fn healthy_idle_scheduler_performs_zero_source_refresh_scans() {
     let temp = tempfile::tempdir().unwrap();
     let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -832,6 +896,11 @@ fn idle_semantic_catch_up_continues_past_one_page_and_drains_to_terminal() {
         MAX_SEMANTIC_EVENT_PAGE_ITEMS
     );
     assert_eq!(first_status["source_work_remaining"], true);
+    assert!(super::daemon_semantic_catch_up_pending(
+        temp.path(),
+        &runtime,
+        true
+    ));
 
     {
         let _jobs = install_jobs(
@@ -861,6 +930,11 @@ fn idle_semantic_catch_up_continues_past_one_page_and_drains_to_terminal() {
     assert_eq!(terminal_status["core_generation_id"], generation);
     assert_eq!(terminal_status["source_records_decoded"], 1);
     assert_eq!(terminal_status["source_work_remaining"], false);
+    assert!(!super::daemon_semantic_catch_up_pending(
+        temp.path(),
+        &runtime,
+        true
+    ));
     assert_eq!(&*calls.borrow(), &["semantic_index", "semantic_index"]);
 
     let drained = run_daemon_scheduler_cycle_with_activity(

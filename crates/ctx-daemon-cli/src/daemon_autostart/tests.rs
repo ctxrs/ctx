@@ -3,6 +3,28 @@ use crate::config::CONFIG_FILE;
 use ctx_daemon_runtime::DaemonLock;
 use std::sync::{Arc, Barrier};
 
+#[test]
+fn finite_worker_launch_preserves_full_semantic_configuration() {
+    let config = AppConfig::new(
+        false,
+        false,
+        std::borrow::Cow::Borrowed("stable"),
+        StdDuration::from_secs(86_400),
+        crate::DaemonConfig {
+            enabled: false,
+            mode: crate::DaemonMode::Full,
+        },
+        true,
+        "config",
+    );
+
+    let effective = finite_application_config(&config);
+
+    assert!(!effective.enabled);
+    assert_eq!(effective.mode, ctx_daemon_application::DaemonMode::Full);
+    assert!(effective.semantic_enabled);
+}
+
 fn write_installation_registration(
     root: &Path,
     name: &str,

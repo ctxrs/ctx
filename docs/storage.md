@@ -324,7 +324,7 @@ local upsert as described above.
 | `ctx stats` | owner-private aggregate `usage.sqlite` when present | none; does not create pristine usage state or count itself |
 | `ctx sources` | bounded provider path metadata, allowlisted persistent selector files, local history-source plugin manifests, and configured named history roots | none |
 | `ctx sources add [--replace]` / `ctx sources remove` | `config.toml` and named provider history root path metadata used for validation | atomically updates `config.toml`; provider history is never modified |
-| `ctx import` | provider transcript files and path metadata, the explicit custom history JSONL file passed with `--input-format ctx-history-jsonl-v2 --path`, or a durable provider-owned custom history JSONL file declared by an explicit history-source plugin manifest | immutable candidate Core/Tantivy generation and atomic publication, catalog/epoch metadata, and optional persistent or finite-worker daemon files; finite workers do not run semantic work |
+| `ctx import` | provider transcript files and path metadata, the explicit custom history JSONL file passed with `--input-format ctx-history-jsonl-v2 --path`, or a durable provider-owned custom history JSONL file declared by an explicit history-source plugin manifest | immutable candidate Core/Tantivy generation and atomic publication, catalog/epoch metadata, optional semantic catch-up, and optional persistent or finite-worker daemon files |
 | `ctx show session` / `ctx show event` | complete policy-selected records in the active verified Core/Tantivy generation | selected `--out` path for `show session` when provided |
 | `ctx list events` | complete policy-selected records and existing index terms in one pinned verified Core/Tantivy generation | none; event enumeration is read-only |
 | `ctx search` | active verified Core/Tantivy generation and existing semantic generation; when refresh has authority, bounded provider discovery/path metadata | candidate Core publication and daemon state only when refresh has authority; manual background and `--refresh off` do not start or wake a process |
@@ -339,9 +339,10 @@ models or runtime assets; with semantic enabled, installer/runtime acquisition
 and daemon maintenance may acquire the local ONNX Runtime asset and embedding
 model when the installed build supports that path. In automatic indexing mode,
 setup and import may start the persistent ctx-owned daemon regardless of output
-format. In manual mode, setup starts no worker; explicit imports may start only
-a finite Core worker using the same source-refresh endpoint and publication
-engine. Use `ctx setup --no-daemon` or `ctx import --no-daemon` for a one-run
+format. In manual mode, setup starts no worker; explicit imports may start a
+finite worker using the same source-refresh endpoint and publication engine.
+When semantic search is enabled, that worker also drains semantic catch-up
+before it exits. Use `ctx setup --no-daemon` or `ctx import --no-daemon` for a one-run
 opt-out; an explicit provider-source import with that opt-out requires an
 existing endpoint.
 The deprecated `ctx setup --catalog-only` flag is ignored and does not change
@@ -375,9 +376,10 @@ that case. In automatic mode, default `--refresh background` lets persistent
 daemon maintenance own native provider refresh and may autostart the configured
 daemon query service for semantic/hybrid retrieval. In manual mode, background
 refresh serves the last published generation without starting or waking a
-process. Explicit `--refresh wait` may start a finite Core worker, but that
-worker never starts semantic services or catch-up. History-source plugins are
-refreshed only by an explicit selected-plugin import in 1.0.
+process. Explicit `--refresh wait` may start a finite worker; when semantic
+search is enabled, the worker drains semantic catch-up for the published Core
+generation before exiting. History-source plugins are refreshed only by an
+explicit selected-plugin import in 1.0.
 
 When auto mode or `ctx daemon run` starts the persistent coordinator, it stores
 private lock/status files under `daemon/` in the ctx data root. Auto mode owns
@@ -390,11 +392,12 @@ preempts background work.
 
 Manual explicit import and search `--refresh wait` instead start the same Core
 refresh engine in a finite worker. The finite profile does not install native
-or detached supervision and does not run watcher, timer, semantic, scheduled
+or detached supervision and does not run watcher, timer, unrelated scheduled
 reconciliation, or upgrade maintenance. It waits for at least one admitted Core
-request and exits only after all Core requests are terminal and its IPC endpoint
-is quiescent. Post-ack observation recovery may start another finite worker to
-observe or complete the authoritative request.
+request, drains semantic catch-up when enabled, and exits only after admitted
+Core and semantic work is terminal and both IPC endpoints are quiescent.
+Post-ack observation recovery may start another finite worker to observe or
+complete the authoritative request.
 
 A hosted managed install probes systemd-user, the launchd GUI user domain, or
 current-user Task Scheduler before changing native registration state. When
@@ -553,8 +556,9 @@ upgrades do not run. Eligible completed commands use the detached automatic
 upgrade driver instead. Manual finite workers always enforce the Core-only
 exclusions independently of this persistent-daemon setting.
 
-Local semantic search remains disabled by default and requires automatic
-indexing. Its config opt-in is:
+Local semantic search remains disabled by default. It can use automatic
+indexing, or manual indexing with explicit `search --refresh wait` finite
+workers. Its config opt-in is:
 
 ```toml
 [search]

@@ -242,15 +242,27 @@ ctx setup --semantic
 ctx index
 ```
 
-Semantic indexing requires auto mode. Lexical search remains available while
-embeddings build; when semantic coverage is ready, the default hybrid backend
-uses lexical and semantic evidence together automatically.
+For semantic search without a persistent daemon, use:
 
-Search does not download models, initialize semantic storage, or perform
-foreground semantic catch-up. Explicit semantic search reports a typed local
-error when its cached runtime/model or compatible generation is unavailable; it
-never silently changes a semantic-only request into lexical retrieval. Hybrid
-remains lexical-safe in those cases.
+```bash
+ctx setup --semantic --no-daemon
+ctx search "pricing decisions" --backend semantic --refresh wait
+```
+
+The explicit wait starts a finite worker that refreshes Core, drains semantic
+catch-up, and exits before the query is rendered. Lexical search remains
+available while embeddings build; when semantic coverage is ready, the default
+hybrid backend uses lexical and semantic evidence together automatically.
+
+Background and off refreshes do not start a worker, download models, initialize
+semantic storage, or perform foreground semantic catch-up. They may load an
+already-cached compatible model to embed a local query against the published
+semantic generation. In manual mode, explicit
+`--refresh wait` may acquire the configured local model and run semantic
+catch-up in the finite worker. Explicit semantic search reports a typed local
+error when its runtime/model or compatible generation is unavailable; it never
+silently changes a semantic-only request into lexical retrieval. Hybrid remains
+lexical-safe in those cases.
 
 ## Refresh and freshness
 
@@ -258,9 +270,10 @@ remains lexical-safe in those cases.
 and, when needed, wakes or recovers the persistent daemon. In manual mode it
 does not contact, start, or wake a process. Both serve the latest committed
 lexical generation without waiting for optional semantic indexing.
-The daemon owns bounded provider discovery, source refresh, immutable
-candidate-generation construction, publication, and opted-in semantic catch-up.
-The query process never becomes a foreground history writer.
+The persistent daemon, or an explicit finite worker in manual wait mode, owns
+bounded provider discovery, source refresh, immutable candidate-generation
+construction, publication, and opted-in semantic catch-up. The query process
+never becomes a history writer.
 
 On a fresh auto-mode root, background mode asks the daemon to publish the first
 lexical generation. In manual mode, search performs no hidden bootstrap or
@@ -269,11 +282,12 @@ auto-refresh history-source plugins run through the same
 daemon-owned, bounded Core refresh route; explicit-only sources still require
 an explicit import.
 
-`--refresh wait` wakes the persistent daemon in auto mode or starts a
-finite Core worker in manual mode, then waits for the requested source frontier
-and lexical-generation receipt. It fails with a typed source, lag, or system
-error when that receipt cannot publish; it does not fall back to a foreground
-importer or wait for complete semantic coverage.
+`--refresh wait` wakes the persistent daemon in auto mode or starts a finite
+worker in manual mode, then waits for the requested source frontier and
+lexical-generation receipt. When semantic search is enabled, the manual finite
+worker also drains semantic coverage for the new generation before exiting. It
+fails with a typed source, semantic, lag, or system error when the requested
+state cannot publish; it does not fall back to a foreground importer.
 
 `--refresh off` queries the currently published generations without provider
 discovery, plugin execution, refresh scheduling, semantic catch-up, or model

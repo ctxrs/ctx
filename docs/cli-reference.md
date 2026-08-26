@@ -109,7 +109,8 @@ ctx daemon run
   ctx installs or repairs supervision and starts the persistent background
   daemon. Manual mode stops it and removes supervision. In manual mode,
   `ctx import` and `ctx search --refresh wait` can still start finite workers
-  for explicit refreshes.
+  for explicit refreshes. A semantic-enabled wait drains both Core publication
+  and semantic catch-up before the worker exits.
 - `index watch` redraws indexing progress until the default readiness target is
   met; `--format jsonl` emits one snapshot per line. `index wait` blocks until
   the selected lexical, semantic, or combined readiness target is met and
@@ -129,10 +130,10 @@ ctx daemon run
 Automatic indexing is the default. Its canonical configuration is
 `[indexing] mode = "auto"`; the other supported value is `"manual"`.
 Enable local semantic search with `ctx setup --semantic`. Semantic indexing
-requires auto mode, so run `ctx index mode auto` first if the current mode is
-manual. Lexical search remains available while embeddings build, and hybrid
-search uses lexical and semantic evidence automatically when semantic coverage
-is ready.
+uses auto mode by default. For manual, daemon-free operation, run
+`ctx setup --semantic --no-daemon` and invoke searches with `--refresh wait`.
+Lexical search remains available while embeddings build, and hybrid search uses
+lexical and semantic evidence automatically when semantic coverage is ready.
 
 Setup and health checks do not change shell startup files, install repository
 integrations, write into source repositories, call model APIs, or require API
@@ -642,12 +643,14 @@ bootstrap or importer. History-source plugins are searched from the published
 generation after explicit import; search refresh does not execute their
 commands in 1.0.
 Semantic retrieval reads an existing compatible generation under
-`search/semantic`; search does not initialize semantic storage, download
-embedding models, or run semantic indexing. Use `--refresh off` to query the
-published generations without starting or waking a process. Use
-`--refresh wait` to request authoritative Core publication; in manual mode it
-may start a finite worker that exits after admitted Core requests are terminal
-and IPC is quiescent. Results are rendered from Core under every refresh mode.
+`search/semantic`. Background and off refreshes do not initialize semantic
+storage, download embedding models, or run semantic indexing, although they
+may load an already-cached compatible model to embed the local query. Use
+`--refresh off` to query the published generations without starting or waking a process.
+Use `--refresh wait` to request authoritative Core publication; in manual mode
+it may start a finite worker that also drains enabled semantic catch-up, then
+exits after admitted work is terminal and IPC is quiescent. Results are rendered
+from Core under every refresh mode.
 Wait refresh skips isolated malformed records with a
 warning and publishes valid records; source-level and system-level failures
 remain fatal. NanoClaw and supported AstrBot `data_v4.db` locations participate
@@ -751,8 +754,8 @@ MCP searches do not automatically exclude the caller's session.
 `--refresh off` is read-only for ctx-derived storage, but it still serves
 indexed snippets and typed show/locate data from the active Core generation.
 Explicit semantic or hybrid
-requests may read a compatible semantic generation and ask the retained daemon
-query service to embed the query from an already-cached model.
+requests may read a compatible semantic generation and use either the retained
+daemon query service or a local cached model to embed the query.
 
 Results are local hits over indexed history. Event hits include `ctx_event_id`;
 hits with known session context include `ctx_session_id`; provider metadata
@@ -817,8 +820,9 @@ rebuild. Search JSON always reports the resolved selection as
 In auto mode, persistent background maintenance owns provider/plugin refresh,
 immutable candidate construction, atomic lexical publication, source discovery
 state, and semantic catch-up. Manual mode retains explicit finite Core
-publication. `ctx daemon run` is available for advanced foreground maintenance
-and does not change the indexing mode. `ctx status` exposes `history_epoch`,
+publication and semantic catch-up for `search --refresh wait`. `ctx daemon run`
+is available for advanced foreground maintenance and does not change the
+indexing mode. `ctx status` exposes `history_epoch`,
 `lexical`, `refresh`, `semantic`, and `daemon` objects; `ctx doctor` is the
 diagnostic surface for those components.
 

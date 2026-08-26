@@ -30,10 +30,10 @@ use super::{
     daemon_retry::DaemonRetryBackoff,
     daemon_scheduler::{
         daemon_retry_due, daemon_run_start_mode, daemon_scheduled_refresh_due,
-        restore_daemon_consumer_retries, restore_daemon_source_refresh_retry,
-        run_daemon_scheduler_cycle_with_activity, DaemonConsumerRetryDeferral,
-        DaemonSchedulerCycleContext, DaemonSchedulerPorts, DaemonSemanticJobPorts,
-        DaemonSidecarDrain,
+        daemon_semantic_catch_up_pending, restore_daemon_consumer_retries,
+        restore_daemon_source_refresh_retry, run_daemon_scheduler_cycle_with_activity,
+        DaemonConsumerRetryDeferral, DaemonSchedulerCycleContext, DaemonSchedulerPorts,
+        DaemonSemanticJobPorts, DaemonSidecarDrain,
     },
     daemon_wakeup::DaemonWakeup,
     daemon_worker::write_daemon_lifecycle_status_with_runtime,
@@ -273,7 +273,7 @@ fn publish_daemon_fatal_status_while_owned(
 fn run_daemon_inner<I, N, D, AP, UO>(
     args: DaemonRunArgs,
     data_root: &Path,
-    mut config: AppConfig,
+    config: AppConfig,
     ports: &DaemonServicePorts<
         'static,
         dyn DaemonConfigPort,
@@ -292,10 +292,6 @@ where
     UO: ctx_upgrade_engine::UpgradeObserver<AppConfig>,
 {
     let finite_core_worker = args.profile == DaemonRunProfile::FiniteCoreWorker;
-    if finite_core_worker {
-        config.daemon.mode = DaemonMode::SourceRefreshOnly;
-        config.semantic_enabled = false;
-    }
     if !config.daemon.enabled && !args.force && !finite_core_worker {
         return Ok(());
     }
@@ -392,11 +388,11 @@ where
             false,
             &config_reload.to_json(),
         )?;
-        if finite_core_worker {
-            restore_daemon_source_refresh_retry(&mut runtime, data_root);
-        } else if !runtime.config.daemon.mode.runs_only_source_refresh() {
+        if !runtime.config.daemon.mode.runs_only_source_refresh() {
             restore_daemon_source_refresh_retry(&mut runtime, data_root);
             restore_daemon_consumer_retries(&mut runtime, data_root);
+        } else {
+            restore_daemon_source_refresh_retry(&mut runtime, data_root);
         }
         // Recover the durable queue into the exact coordinator that will own
         // IPC before publishing the source-refresh endpoint. Otherwise a
@@ -524,8 +520,8 @@ where
         // so choosing the borrowed scheduler input does not refcount-clone on
         // every iteration.
         let source_refresh_coordinator = runtime.source_refresh_coordinator.clone();
-        let mut finite_core_worker_exit =
-            finite_core_worker.then(|| FiniteCoreWorkerExit::new(refresh_service.as_ref()));
+        let mut finite_core_worker_exit = finite_core_worker
+            .then(|| FiniteCoreWorkerExit::new(query_service.as_ref(), refresh_service.as_ref()));
         loop {
             // Hermetic callers may remove their complete temporary data root
             // during shutdown. Do not recreate the deleted root merely to
@@ -651,7 +647,9 @@ where
             if finite_core_worker_exit.as_mut().is_some_and(|exit| {
                 exit.begin_stopping(
                     source_refresh,
+                    query_service.as_ref(),
                     refresh_service.as_ref(),
+                    daemon_semantic_catch_up_pending(data_root, &runtime, semantic_runtime_active),
                     &lifecycle_state,
                     Instant::now(),
                 )
@@ -702,7 +700,13 @@ where
                 if finite_core_worker_exit.as_mut().is_some_and(|exit| {
                     exit.begin_stopping(
                         source_refresh,
+                        query_service.as_ref(),
                         refresh_service.as_ref(),
+                        daemon_semantic_catch_up_pending(
+                            data_root,
+                            &runtime,
+                            semantic_runtime_active,
+                        ),
                         &lifecycle_state,
                         Instant::now(),
                     )

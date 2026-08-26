@@ -42,6 +42,8 @@ use autostart::configured_daemon_autostart_command;
 #[cfg(test)]
 use autostart::daemon_autostart_allowed;
 #[cfg(test)]
+use autostart::finite_application_config;
+#[cfg(test)]
 use autostart::handoff_mismatched_daemon_owner;
 pub use autostart::{
     autostart_daemon_and_wait, autostart_daemon_for_setup_and_wait,

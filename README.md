@@ -147,7 +147,13 @@ ctx setup --semantic
 ctx index
 ```
 
-Semantic search requires automatic indexing, which is the default. If you use manual indexing, run `ctx index mode auto` first. Lexical search remains available while embeddings build; once they are ready, hybrid search uses lexical and semantic evidence automatically.
+Automatic indexing is the default. For semantic search without a persistent
+daemon, run `ctx setup --semantic --no-daemon`, then use
+`ctx search <query> --refresh wait`; that invocation refreshes lexical and
+semantic data with a finite worker and waits for it to exit. Background and
+off refreshes remain process-free in manual mode. Lexical search remains
+available while embeddings build; once they are ready, hybrid search uses
+lexical and semantic evidence automatically.
 
 ctx does not send your prompts, transcripts, or indexed history to a cloud service, call model APIs, require API keys, or write into your source repositories. Transcript text is preserved rather than automatically redacted, so review copied output before sharing it outside your machine.
 

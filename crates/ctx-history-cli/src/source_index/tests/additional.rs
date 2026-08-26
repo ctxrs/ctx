@@ -663,6 +663,18 @@ fn daemon_disabled_cli_default_and_hybrid_fall_back_but_semantic_is_typed() {
 }
 
 #[test]
+fn daemon_disabled_cli_semantic_is_available_for_every_refresh_mode() {
+    let config = history_config(false, true);
+
+    for refresh in [RefreshArg::Off, RefreshArg::Background, RefreshArg::Wait] {
+        assert_eq!(
+            super::search::source_search_policy_for_refresh(&config, refresh).semantic,
+            ctx_history_read_application::SemanticAvailability::Available
+        );
+    }
+}
+
+#[test]
 fn daemon_disabled_mcp_default_and_hybrid_return_lexical_fallback() {
     let temp = tempdir().unwrap();
     write_test_generation(temp.path());

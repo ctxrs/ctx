@@ -1,4 +1,7 @@
-use std::{path::Path, time::Duration as StdDuration};
+use std::{
+    path::Path,
+    time::{Duration as StdDuration, Instant},
+};
 
 use anyhow::{anyhow, Result};
 use ctx_history_index::{EventSearchCandidate, EventSearchFilters, VerifiedIndex};
@@ -7,7 +10,7 @@ use ctx_history_read_application::{
     SemanticReason,
 };
 use ctx_semantic_index::{SemanticNotReady, SemanticQueryPin};
-use ctx_semantic_model::{semantic_model_key, SEMANTIC_DIMENSIONS};
+use ctx_semantic_model::{semantic_model_key, SharedSemanticRuntime, SEMANTIC_DIMENSIONS};
 use serde_json::{json, Value};
 
 use crate::compact_json;
@@ -17,11 +20,22 @@ use super::query_service::daemon_query_request;
 #[derive(Debug, Clone, Copy)]
 pub struct SemanticQueryAdapter<'data_root> {
     data_root: &'data_root Path,
+    wait_for_ready: bool,
 }
 
 impl<'data_root> SemanticQueryAdapter<'data_root> {
     pub fn new(data_root: &'data_root Path) -> Self {
-        Self { data_root }
+        Self {
+            data_root,
+            wait_for_ready: false,
+        }
+    }
+
+    pub fn for_wait_refresh(data_root: &'data_root Path) -> Self {
+        Self {
+            data_root,
+            wait_for_ready: true,
+        }
     }
 }
 
@@ -35,7 +49,12 @@ impl HistorySemanticPort for SemanticQueryAdapter<'_> {
         &'a self,
         index: &'a VerifiedIndex,
     ) -> std::result::Result<Self::Query<'a>, HistorySemanticError> {
-        SemanticQuerySession::begin(index, self.data_root).map_err(HistorySemanticError::from)
+        if self.wait_for_ready {
+            SemanticQuerySession::begin_waiting(index, self.data_root)
+                .map_err(HistorySemanticError::from)
+        } else {
+            SemanticQuerySession::begin(index, self.data_root).map_err(HistorySemanticError::from)
+        }
     }
 }
 
@@ -46,6 +65,8 @@ pub struct SemanticQuerySession<'a> {
 }
 
 impl SemanticQuerySession<'_> {
+    const WAIT_REFRESH_TIMEOUT: StdDuration = StdDuration::from_secs(30 * 60);
+
     fn begin<'a>(
         index: &'a VerifiedIndex,
         data_root: &'a Path,
@@ -57,6 +78,31 @@ impl SemanticQuerySession<'_> {
             index,
             data_root,
         })
+    }
+
+    fn begin_waiting<'a>(
+        index: &'a VerifiedIndex,
+        data_root: &'a Path,
+    ) -> std::result::Result<SemanticQuerySession<'a>, SemanticQueryError> {
+        let started = Instant::now();
+        loop {
+            match Self::begin(index, data_root) {
+                Ok(session) => return Ok(session),
+                Err(
+                    error @ SemanticQueryError::NotReady {
+                        retryable: true, ..
+                    },
+                ) => {
+                    if started.elapsed() >= Self::WAIT_REFRESH_TIMEOUT
+                        || semantic_worker_finished_without_ready_generation(data_root)
+                    {
+                        return Err(error);
+                    }
+                    std::thread::sleep(StdDuration::from_millis(100));
+                }
+                Err(error) => return Err(error),
+            }
+        }
     }
 
     fn search(
@@ -120,6 +166,15 @@ impl SemanticQuerySession<'_> {
             data_root,
         }
     }
+}
+
+fn semantic_worker_finished_without_ready_generation(data_root: &Path) -> bool {
+    ctx_daemon_runtime::read_daemon_status(data_root).is_some_and(|status| {
+        matches!(
+            status.get("status").and_then(Value::as_str),
+            Some("disabled" | "failed" | "stopped")
+        )
+    })
 }
 
 impl HistorySemanticQuery for SemanticQuerySession<'_> {
@@ -194,7 +249,7 @@ fn daemon_query_embedding(
     data_root: &Path,
     semantic_text: &str,
 ) -> Result<Option<(Vec<f32>, u64)>> {
-    let Some(response) = daemon_query_request(
+    let response = daemon_query_request(
         data_root,
         compact_json(json!({
             "schema_version": 1,
@@ -204,9 +259,9 @@ fn daemon_query_embedding(
         })),
         StdDuration::from_secs(30),
         1024 * 1024,
-    )?
-    else {
-        return Ok(None);
+    )?;
+    let Some(response) = response else {
+        return local_query_embedding(data_root, semantic_text).map(Some);
     };
     if response.get("ok").and_then(Value::as_bool) != Some(true) {
         let message = response
@@ -246,6 +301,17 @@ fn daemon_query_embedding(
         ));
     }
     Ok(Some((embedding, query_embed_ms)))
+}
+
+fn local_query_embedding(data_root: &Path, semantic_text: &str) -> Result<(Vec<f32>, u64)> {
+    let config = super::model_config::semantic_model_config(data_root);
+    let runtime = SharedSemanticRuntime::default();
+    runtime
+        .ensure_loaded_from_cache(&config)?
+        .ok_or_else(|| anyhow!("semantic query model was not loaded from cache"))?;
+    let started = Instant::now();
+    let (embedding, _) = runtime.embed_query(&config, semantic_text.to_owned())?;
+    Ok((embedding, started.elapsed().as_millis() as u64))
 }
 
 #[cfg(test)]

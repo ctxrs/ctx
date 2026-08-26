@@ -53,13 +53,22 @@ impl From<SearchRequest> for SourceSearchRequest {
 }
 
 pub(in crate::source_index) fn source_search_policy(config: &config::AppConfig) -> SearchPolicy {
+    let mut policy = source_search_policy_for_refresh(config, crate::RefreshMode::Off);
+    if !config.daemon.enabled && matches!(policy.semantic, SemanticAvailability::Available) {
+        policy.semantic = SemanticAvailability::Unavailable(SemanticReason::ExecutionUnavailable);
+    }
+    policy
+}
+
+pub(in crate::source_index) fn source_search_policy_for_refresh(
+    config: &config::AppConfig,
+    _refresh: crate::RefreshMode,
+) -> SearchPolicy {
     let semantic_enabled = config.semantic_search_enabled();
     let semantic = if !semantic_enabled {
         SemanticAvailability::Unavailable(SemanticReason::PolicyDisabled)
     } else if !ctx_daemon_cli::semantic_query_service_supported() {
         SemanticAvailability::Unavailable(SemanticReason::PlatformUnsupported)
-    } else if !config.daemon.enabled {
-        SemanticAvailability::Unavailable(SemanticReason::ExecutionUnavailable)
     } else {
         SemanticAvailability::Available
     };

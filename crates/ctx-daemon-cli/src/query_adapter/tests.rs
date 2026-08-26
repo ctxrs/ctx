@@ -137,6 +137,11 @@ fn request_adapter_borrows_the_exact_data_root() {
     let adapter = SemanticQueryAdapter::new(&data_root);
 
     assert!(std::ptr::eq(adapter.data_root, data_root.as_path()));
+    assert!(!adapter.wait_for_ready);
+
+    let waiting = SemanticQueryAdapter::for_wait_refresh(&data_root);
+    assert!(std::ptr::eq(waiting.data_root, data_root.as_path()));
+    assert!(waiting.wait_for_ready);
 }
 
 fn ready_adapter<'a>(

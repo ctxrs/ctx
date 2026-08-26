@@ -14,14 +14,19 @@ pub(super) struct FiniteCoreWorkerExit {
 }
 
 impl FiniteCoreWorkerExit {
-    pub(super) fn new(refresh_service: Option<&DaemonQueryService>) -> Self {
+    pub(super) fn new(
+        query_service: Option<&DaemonQueryService>,
+        refresh_service: Option<&DaemonQueryService>,
+    ) -> Self {
         Self {
             started_at: Instant::now(),
             demand_observed: false,
             idle_since: None,
-            observed_ipc_activity_generation: refresh_service
+            observed_ipc_activity_generation: query_service
+                .into_iter()
+                .chain(refresh_service)
                 .map(|service| service.activity.snapshot().1)
-                .unwrap_or(0),
+                .fold(0, u64::wrapping_add),
             // The engine is process-local and starts at zero. Preserve any
             // request admitted during startup so the first loop observation
             // still recognizes it even if the request already completed.
@@ -32,13 +37,24 @@ impl FiniteCoreWorkerExit {
     pub(super) fn observe(
         &mut self,
         source_refresh: Option<&CoreRefreshEngine>,
+        query_service: Option<&DaemonQueryService>,
         refresh_service: Option<&DaemonQueryService>,
         now: Instant,
     ) -> bool {
         let pending = source_refresh.is_some_and(CoreRefreshEngine::has_pending_request);
-        let (active, ipc_generation) = refresh_service
+        let (active, ipc_generation) = query_service
+            .into_iter()
+            .chain(refresh_service)
             .map(|service| service.activity.snapshot())
-            .unwrap_or((0, self.observed_ipc_activity_generation));
+            .fold(
+                (0usize, 0u64),
+                |(active, generation), (service_active, service_generation)| {
+                    (
+                        active.saturating_add(service_active),
+                        generation.wrapping_add(service_generation),
+                    )
+                },
+            );
         let request_generation = source_refresh
             .map(CoreRefreshEngine::request_activity_generation)
             .unwrap_or(self.observed_request_activity_generation);
@@ -51,13 +67,22 @@ impl FiniteCoreWorkerExit {
     pub(super) fn begin_stopping(
         &mut self,
         source_refresh: Option<&CoreRefreshEngine>,
+        query_service: Option<&DaemonQueryService>,
         refresh_service: Option<&DaemonQueryService>,
+        semantic_catch_up_pending: bool,
         lifecycle: &DaemonLifecycleState,
         now: Instant,
     ) -> bool {
-        if !self.observe(source_refresh, refresh_service, now)
-            || !refresh_service.is_some_and(|service| service.activity.begin_stopping_if_idle())
+        if semantic_catch_up_pending
+            || !self.observe(source_refresh, query_service, refresh_service, now)
         {
+            return false;
+        }
+        let query_idle =
+            query_service.is_none_or(|service| service.activity.begin_stopping_if_idle());
+        let refresh_idle =
+            refresh_service.is_none_or(|service| service.activity.begin_stopping_if_idle());
+        if !query_idle || !refresh_idle {
             return false;
         }
         lifecycle.mark_stopping();

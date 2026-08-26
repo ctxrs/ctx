@@ -53,6 +53,10 @@ pub(super) use hydration::{
 use observation::{
     initial_search_observation, observed_refresh_for_search, search_existing_generation_with_port,
 };
+#[cfg(not(test))]
+use query::source_search_policy_for_refresh;
+#[cfg(test)]
+pub(super) use query::source_search_policy_for_refresh;
 pub(super) use query::NormalizedSearchQuery;
 pub use query::SourceSearchRequest;
 #[cfg(test)]
@@ -311,14 +315,18 @@ pub fn run_search(
     observe_query: impl FnOnce(SearchExecutionObservation),
 ) -> Result<()> {
     let human_output = args.format != JsonOutputFormat::Json;
-    let semantic_port = crate::semantic::SemanticQueryAdapter::new(&data_root);
     let config = config::AppConfig::from_snapshot(config);
     let request = crate::SearchRequest::from(args);
     let refresh_mode = request.refresh;
+    let semantic_port = if refresh_mode == RefreshArg::Wait && !config.daemon.enabled {
+        crate::semantic::SemanticQueryAdapter::for_wait_refresh(&data_root)
+    } else {
+        crate::semantic::SemanticQueryAdapter::new(&data_root)
+    };
     let json_output = request.format == crate::OutputFormat::Json;
     let verbose = request.verbose;
     let request = SourceSearchRequest::from(request);
-    let policy = source_search_policy(&config);
+    let policy = source_search_policy_for_refresh(&config, refresh_mode);
     let mut observation = initial_search_observation();
     let result = run_search_inner(
         request,

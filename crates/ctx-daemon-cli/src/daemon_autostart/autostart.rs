@@ -10,6 +10,14 @@ fn application_config(config: &AppConfig<'_>) -> ctx_daemon_application::DaemonC
     }
 }
 
+pub(super) fn finite_application_config(
+    config: &AppConfig<'_>,
+) -> ctx_daemon_application::DaemonConfigSnapshot {
+    let mut effective = application_config(config);
+    effective.enabled = false;
+    effective
+}
+
 fn application_trigger(trigger: DaemonTriggerCommandArg) -> ctx_daemon_application::DaemonTrigger {
     super::super::daemon_supervisor::daemon_trigger(trigger)
 }
@@ -62,10 +70,7 @@ pub fn start_finite_core_worker_and_wait(
     trigger: DaemonTriggerCommandArg,
 ) -> Result<DaemonHandoff> {
     super::super::daemon_supervisor::with_daemon_application(|application| {
-        let mut effective = application_config(config);
-        effective.enabled = false;
-        effective.mode = ctx_daemon_application::DaemonMode::SourceRefreshOnly;
-        effective.semantic_enabled = false;
+        let effective = finite_application_config(config);
         let handoff = application
             .start_finite_core_worker_and_wait(data_root, &effective, application_trigger(trigger))
             .map_err(|error| match error {
