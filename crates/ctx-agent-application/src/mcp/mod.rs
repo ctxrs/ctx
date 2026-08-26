@@ -285,6 +285,9 @@ where
             };
             let output_started = Instant::now();
             if let Err(error) = stdout.write_all(encoded.as_bytes()) {
+                if let Some(completion) = companion_completion.take() {
+                    completion.finish(OpaqueMcpDeliveryOutcome::OutputFailed);
+                }
                 mark_search_failure(
                     &mut delivered_usage,
                     ToolSearchFailurePhase::Output,
@@ -302,6 +305,9 @@ where
                 });
             }
             if let Err(error) = stdout.flush() {
+                if let Some(completion) = companion_completion.take() {
+                    completion.finish(OpaqueMcpDeliveryOutcome::OutputFailed);
+                }
                 mark_search_failure(
                     &mut delivered_usage,
                     ToolSearchFailurePhase::Output,

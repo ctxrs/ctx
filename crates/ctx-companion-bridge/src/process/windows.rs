@@ -145,20 +145,20 @@ pub(super) fn read_pipe<T: Read + AsRawHandle>(
     }
 }
 
-/// Windows anonymous pipes cannot make the up-to-4 MiB request write pollable.
-/// This is the only helper thread: it owns the one blocking write and is always
+/// Windows anonymous child-stdin pipes are not pollable. This is the sole
+/// helper-thread mechanism for both sequential bounded writes: it is always
 /// cancelled with `CancelSynchronousIo` and joined before its child is reaped.
-pub(super) struct RequestWriter {
+pub(super) struct PipeWriter {
     worker: Option<std::thread::JoinHandle<(std::process::ChildStdin, io::Result<()>)>>,
     cancelled: Arc<AtomicBool>,
 }
 
-impl RequestWriter {
-    pub(super) fn spawn(stdin: std::process::ChildStdin, request: Vec<u8>) -> io::Result<Self> {
+impl PipeWriter {
+    pub(super) fn spawn(stdin: std::process::ChildStdin, frame: Vec<u8>) -> io::Result<Self> {
         let cancelled = Arc::new(AtomicBool::new(false));
         let worker_cancelled = Arc::clone(&cancelled);
         let worker = std::thread::Builder::new()
-            .name("ctx-companion-mcp-request".to_owned())
+            .name("ctx-companion-mcp-pipe-write".to_owned())
             .spawn(move || {
                 let mut stdin = stdin;
                 let mut offset = 0;
@@ -169,10 +169,10 @@ impl RequestWriter {
                             "MCP request write cancelled",
                         ));
                     }
-                    if offset == request.len() {
+                    if offset == frame.len() {
                         break stdin.flush();
                     }
-                    match stdin.write(&request[offset..]) {
+                    match stdin.write(&frame[offset..]) {
                         Ok(0) => {
                             break Err(io::Error::new(
                                 io::ErrorKind::WriteZero,
@@ -232,7 +232,7 @@ impl RequestWriter {
 
 #[cfg(test)]
 mod tests {
-    use super::RequestWriter;
+    use super::PipeWriter;
     use std::{
         process::Stdio,
         thread,
@@ -247,7 +247,7 @@ mod tests {
             .spawn()
             .unwrap();
         let writer =
-            RequestWriter::spawn(child.stdin.take().unwrap(), vec![b'x'; 4 * 1024 * 1024]).unwrap();
+            PipeWriter::spawn(child.stdin.take().unwrap(), vec![b'x'; 4 * 1024 * 1024]).unwrap();
         thread::sleep(Duration::from_millis(25));
         let started = Instant::now();
         writer.cancel_and_join().unwrap();

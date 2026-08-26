@@ -72,7 +72,7 @@ struct LifecycleOwner {
     tree: platform::ProcessTree,
     stdin: Option<ChildStdin>,
     #[cfg(windows)]
-    request_writer: Option<platform::RequestWriter>,
+    pipe_writer: Option<platform::PipeWriter>,
     stdout: Option<ChildStdout>,
     stderr: Option<ChildStderr>,
     request_frame: Vec<u8>,
@@ -132,7 +132,7 @@ impl LifecycleOwner {
             tree,
             stdin: Some(stdin),
             #[cfg(windows)]
-            request_writer: None,
+            pipe_writer: None,
             stdout: Some(stdout),
             stderr: Some(stderr),
             request_frame,
@@ -151,8 +151,8 @@ impl LifecycleOwner {
         #[cfg(windows)]
         {
             let stdin = owner.stdin.take().ok_or(BridgeError::WorkerFailed)?;
-            owner.request_writer = Some(
-                match platform::RequestWriter::spawn(stdin, owner.request_frame.clone()) {
+            owner.pipe_writer = Some(
+                match platform::PipeWriter::spawn(stdin, owner.request_frame.clone()) {
                     Ok(writer) => writer,
                     Err(error) => return Err(BridgeError::Transport(error)),
                 },
@@ -274,14 +274,14 @@ impl LifecycleOwner {
         }
         #[cfg(windows)]
         {
-            let Some(writer) = self.request_writer.as_mut() else {
+            let Some(writer) = self.pipe_writer.as_mut() else {
                 return Ok(());
             };
             let Some(result) = writer.poll() else {
                 return Ok(());
             };
             self.stdin = Some(result.map_err(BridgeError::Transport)?);
-            self.request_writer = None;
+            self.pipe_writer = None;
             self.request_complete = true;
         }
         Ok(())
@@ -293,22 +293,49 @@ impl LifecycleOwner {
         deadline: Instant,
     ) -> Result<(), BridgeError> {
         let frame = outcome.receipt_frame();
-        let mut offset = 0;
-        while offset < frame.len() {
-            if Instant::now() >= deadline {
-                return Err(BridgeError::Transport(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "MCP receipt write timed out",
-                )));
-            }
-            let stdin = self.stdin.as_mut().ok_or(BridgeError::WorkerFailed)?;
-            match stdin.write(&frame[offset..]) {
-                Ok(0) => return Err(write_zero("MCP receipt pipe closed")),
-                Ok(written) => offset += written,
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                    self.sleep_until(deadline)
+        #[cfg(windows)]
+        {
+            let stdin = self.stdin.take().ok_or(BridgeError::WorkerFailed)?;
+            self.pipe_writer =
+                Some(platform::PipeWriter::spawn(stdin, frame).map_err(BridgeError::Transport)?);
+            loop {
+                if let Some(result) = self
+                    .pipe_writer
+                    .as_mut()
+                    .and_then(platform::PipeWriter::poll)
+                {
+                    self.stdin = Some(result.map_err(BridgeError::Transport)?);
+                    self.pipe_writer = None;
+                    return Ok(());
                 }
-                Err(error) => return Err(BridgeError::Transport(error)),
+                if Instant::now() >= deadline {
+                    return Err(BridgeError::Transport(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "MCP receipt write timed out",
+                    )));
+                }
+                self.sleep_until(deadline);
+            }
+        }
+        #[cfg(unix)]
+        {
+            let mut offset = 0;
+            while offset < frame.len() {
+                if Instant::now() >= deadline {
+                    return Err(BridgeError::Transport(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "MCP receipt write timed out",
+                    )));
+                }
+                let stdin = self.stdin.as_mut().ok_or(BridgeError::WorkerFailed)?;
+                match stdin.write(&frame[offset..]) {
+                    Ok(0) => return Err(write_zero("MCP receipt pipe closed")),
+                    Ok(written) => offset += written,
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        self.sleep_until(deadline)
+                    }
+                    Err(error) => return Err(BridgeError::Transport(error)),
+                }
             }
         }
         loop {
@@ -408,7 +435,7 @@ impl LifecycleOwner {
         self.stdout.take();
         self.stderr.take();
         #[cfg(windows)]
-        if let Some(writer) = self.request_writer.take() {
+        if let Some(writer) = self.pipe_writer.take() {
             let _ = writer.cancel_and_join();
         }
         let _ = self.child.wait();
