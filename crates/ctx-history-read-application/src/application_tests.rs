@@ -68,7 +68,7 @@ impl HistorySemanticQuery for UnusedSemanticQuery {
     fn candidates(
         &mut self,
         _query: &str,
-        _filters: &ctx_history_index_query::EventSearchFilters,
+        _filter: &ctx_history_index_query::CompiledSearchFilter,
         _candidate_limit: usize,
     ) -> Result<HistorySemanticBatch, HistorySemanticError> {
         panic!("lexical application query must not request semantic candidates")
@@ -445,7 +445,7 @@ impl HistorySemanticQuery for CountingSemanticQuery {
     fn candidates(
         &mut self,
         _query: &str,
-        _filters: &ctx_history_index_query::EventSearchFilters,
+        _filter: &ctx_history_index_query::CompiledSearchFilter,
         _candidate_limit: usize,
     ) -> Result<HistorySemanticBatch, HistorySemanticError> {
         Ok(HistorySemanticBatch {
@@ -474,7 +474,7 @@ impl HistorySemanticQuery for FixedSemanticQuery<'_> {
     fn candidates(
         &mut self,
         _query: &str,
-        _filters: &ctx_history_index_query::EventSearchFilters,
+        _filter: &ctx_history_index_query::CompiledSearchFilter,
         _candidate_limit: usize,
     ) -> Result<HistorySemanticBatch, HistorySemanticError> {
         Ok(HistorySemanticBatch {
@@ -772,10 +772,12 @@ fn provider_root_and_group_selectors_share_one_source_predicate_across_backends(
                 SemanticAvailability::Available,
                 |_, semantic_filters, _| {
                     assert_eq!(
-                        semantic_filters.allowed_source_keys.as_ref(),
+                        semantic_filters.filters().allowed_source_keys.as_ref(),
                         Some(&expected_sources)
                     );
-                    let projection = index.semantic_filter_projection(semantic_filters).unwrap();
+                    let projection = index
+                        .semantic_filter_projection_compiled(semantic_filters)
+                        .unwrap();
                     assert!(projection.contains(records[1].event_id.as_uuid()));
                     assert!(!projection.contains(records[4].event_id.as_uuid()));
                     Ok(HistorySemanticBatch {

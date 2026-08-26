@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use ctx_history_index_query::{EventSearchFilters, VerifiedIndex};
+use ctx_history_index_query::{CompiledSearchFilter, EventSearchFilters, VerifiedIndex};
 use serde_json::Value;
 
 use crate::generation::PinnedGenerationRead;
@@ -57,10 +57,17 @@ impl<'index> PinnedHistoryQuery<'index> {
                         SearchFailurePhase::QueryPreparation,
                     )
                 })?;
+        let compiled_filter = CompiledSearchFilter::compile(filters.clone()).map_err(|error| {
+            ObservedSearchExecutionError::new(
+                error.into(),
+                SearchWorkReceipt::default(),
+                SearchFailurePhase::QueryPreparation,
+            )
+        })?;
         let collection = collect_search_hits_observed(
             &request,
             self.index,
-            &filters,
+            &compiled_filter,
             policy.semantic,
             semantic_port,
         )?;
@@ -68,6 +75,7 @@ impl<'index> PinnedHistoryQuery<'index> {
             self.index,
             &collection.result_window.hits,
             &NormalizedSearchQuery::from_request(&request),
+            &compiled_filter,
         )
         .map_err(|error| {
             ObservedSearchExecutionError::new(

@@ -3,7 +3,9 @@ use std::{collections::BTreeSet, fmt};
 use anyhow::{anyhow, Result};
 use ctx_history_core::{MAX_CORE_CONTENT_BYTES, MAX_ENCODED_CORE_RECORD_BYTES};
 use ctx_history_index_format::search_projection::project_search_content;
-use ctx_history_index_query::{CoreEventPageBudget, CoreEventRecord, VerifiedIndex};
+use ctx_history_index_query::{
+    CompiledSearchFilter, CoreEventPageBudget, CoreEventRecord, VerifiedIndex,
+};
 use uuid::Uuid;
 
 use super::{
@@ -60,11 +62,13 @@ pub(crate) fn presentations_for_search_hits(
     index: &VerifiedIndex,
     hits: &[SearchHit],
     query: &NormalizedSearchQuery,
+    filter: &CompiledSearchFilter,
 ) -> Result<Vec<SearchPresentation>> {
     presentations_for_search_hits_with_budget(
         index,
         hits,
         query,
+        filter,
         SEARCH_PRESENTATION_HYDRATION_BUDGET,
     )
 }
@@ -73,6 +77,7 @@ pub fn presentations_for_search_hits_with_budget(
     index: &VerifiedIndex,
     hits: &[SearchHit],
     query: &NormalizedSearchQuery,
+    filter: &CompiledSearchFilter,
     budget: SearchPresentationHydrationBudget,
 ) -> Result<Vec<SearchPresentation>> {
     if hits.len() > MAX_SEARCH_RESULTS {
@@ -129,7 +134,7 @@ pub fn presentations_for_search_hits_with_budget(
             .transpose()?
             .ok_or_else(|| anyhow!("pinned Core lookup omitted search event {event_id}"))?;
         let (presentation, snippet_bytes) =
-            search_presentation_projection(record, &hit.event, &query_terms)?;
+            search_presentation_projection(record, &hit.event, &query_terms, filter)?;
         let next_retained_snippet_bytes = retained_snippet_bytes
             .checked_add(snippet_bytes)
             .ok_or_else(|| {
@@ -157,7 +162,14 @@ fn search_presentation_projection(
     record: CoreEventRecord,
     expected_event: &SearchEventMetadata,
     query_terms: &AnalyzedQueryTerms,
+    filter: &CompiledSearchFilter,
 ) -> Result<(SearchPresentation, usize)> {
+    if !filter.matches_core(&record)? {
+        return Err(anyhow!(
+            "pinned Core lookup no longer matches the compiled Search filter for event {}",
+            expected_event.event_id
+        ));
+    }
     let CoreEventRecord { event, core_record } = record;
     if event.event_id != core_record.event_id
         || event.session_id != core_record.session_id

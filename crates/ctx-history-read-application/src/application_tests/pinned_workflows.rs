@@ -60,14 +60,17 @@ impl HistorySemanticQuery for ProjectedSemanticQuery<'_> {
     fn candidates(
         &mut self,
         _query: &str,
-        filters: &ctx_history_index_query::EventSearchFilters,
+        filter: &ctx_history_index_query::CompiledSearchFilter,
         _candidate_limit: usize,
     ) -> Result<HistorySemanticBatch, HistorySemanticError> {
         assert_eq!(
-            filters.allowed_source_keys.as_deref(),
+            filter.filters().allowed_source_keys.as_deref(),
             Some(self.allowed_source_keys)
         );
-        let projection = self.index.semantic_filter_projection(filters).unwrap();
+        let projection = self
+            .index
+            .semantic_filter_projection_compiled(filter)
+            .unwrap();
         Ok(HistorySemanticBatch {
             candidates: self
                 .candidates

@@ -5,7 +5,7 @@ use ctx_history_core::{
     NativeItemKey, NativeSessionKey, ScannedSourceCounts, SessionIdentityInput, SourceAnchor,
     SourceKey, SourceObservation, TypedKey,
 };
-use ctx_history_index::{CoreEventRecord, GenerationWriter, WriterOptions};
+use ctx_history_index::{CoreEventRecord, EventSearchFilters, GenerationWriter, WriterOptions};
 use ctx_semantic_index::{
     source_backed_semantic_vector_path,
     test_support::{pinned_flat_generation, publish_chunk_replacements, semantic_chunk_document},
@@ -15,6 +15,10 @@ use ctx_semantic_index::{
 use uuid::Uuid;
 
 use super::*;
+
+fn default_compiled_filter() -> CompiledSearchFilter {
+    CompiledSearchFilter::compile(EventSearchFilters::default()).unwrap()
+}
 
 fn semantic_index(root: &Path) -> Result<(VerifiedIndex, Uuid)> {
     semantic_index_revision(root, 1, true)
@@ -231,7 +235,7 @@ fn adapter_never_embeds_for_mismatched_or_ready_empty_pins() -> Result<()> {
         )?;
         let mut adapter = SemanticQuerySession::from_pin(&index, temp.path(), pin);
         let calls = Cell::new(0_u8);
-        let result = adapter.search_with("query", &EventSearchFilters::default(), 1, |_, _| {
+        let result = adapter.search_with("query", &default_compiled_filter(), 1, |_, _| {
             calls.set(calls.get() + 1);
             Ok(Some((embedding(), 1)))
         });
@@ -284,7 +288,7 @@ fn adapter_embeds_ready_queries_once_and_reuses_one_pin_filter_cache() -> Result
     let (index, event_id) = semantic_index(temp.path())?;
     let mut adapter = ready_adapter(&index, temp.path(), event_id, &temp.path().join("vectors"))?;
     let calls = Cell::new(0_u8);
-    let filters = EventSearchFilters::default();
+    let filters = default_compiled_filter();
 
     let (first, first_diagnostics) =
         adapter.search_with("first normalized query", &filters, 1, |_, _| {
@@ -319,7 +323,7 @@ fn adapter_preserves_daemon_query_service_unavailable_contract() -> Result<()> {
     let calls = Cell::new(0_u8);
 
     let error = adapter
-        .search_with("query", &EventSearchFilters::default(), 1, |_, _| {
+        .search_with("query", &default_compiled_filter(), 1, |_, _| {
             calls.set(calls.get() + 1);
             Ok(None)
         })
@@ -348,7 +352,7 @@ fn adapter_scores_only_the_active_flat_core_intersection() -> Result<()> {
     )?;
 
     let (candidates, diagnostics) =
-        adapter.search_with("query", &EventSearchFilters::default(), 1, |_, _| {
+        adapter.search_with("query", &default_compiled_filter(), 1, |_, _| {
             Ok(Some((embedding(), 1)))
         })?;
 

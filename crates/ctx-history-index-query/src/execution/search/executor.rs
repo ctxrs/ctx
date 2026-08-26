@@ -1,30 +1,30 @@
 use super::*;
 
 #[derive(Debug, Clone)]
-struct RankedAddressCandidate {
+struct RankedCandidateRef {
     coverage: u8,
     query_terms: u8,
     score: Score,
     order: ctx_history_index_format::EventRangeOrderKey,
     address: DocAddress,
-    segment: LexicalSegmentContext,
+    stable_segment_index: usize,
 }
 
-impl PartialEq for RankedAddressCandidate {
+impl PartialEq for RankedCandidateRef {
     fn eq(&self, other: &Self) -> bool {
         self.cmp(other) == Ordering::Equal
     }
 }
 
-impl Eq for RankedAddressCandidate {}
+impl Eq for RankedCandidateRef {}
 
-impl PartialOrd for RankedAddressCandidate {
+impl PartialOrd for RankedCandidateRef {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl Ord for RankedAddressCandidate {
+impl Ord for RankedCandidateRef {
     fn cmp(&self, other: &Self) -> Ordering {
         compare_primary_rank(self.coverage, self.score, other)
             .then_with(|| {
@@ -39,19 +39,19 @@ impl Ord for RankedAddressCandidate {
     }
 }
 
-fn compare_primary_rank(coverage: u8, score: Score, other: &RankedAddressCandidate) -> Ordering {
+fn compare_primary_rank(coverage: u8, score: Score, other: &RankedCandidateRef) -> Ordering {
     coverage
         .cmp(&other.coverage)
         .then_with(|| score.total_cmp(&other.score))
 }
 
 fn compare_stable_address_ascending(
-    left: &RankedAddressCandidate,
-    right: &RankedAddressCandidate,
+    left: &RankedCandidateRef,
+    right: &RankedCandidateRef,
 ) -> Ordering {
     compare_stable_address_parts(
-        (left.segment.stable_segment_index, left.address.doc_id),
-        (right.segment.stable_segment_index, right.address.doc_id),
+        (left.stable_segment_index, left.address.doc_id),
+        (right.stable_segment_index, right.address.doc_id),
     )
 }
 
@@ -272,9 +272,28 @@ impl VerifiedIndex {
         filters: &EventSearchFilters,
         limit: usize,
     ) -> DiagnosedLexicalSearchBatchResult {
+        let compiled = CompiledSearchFilter::compile(filters.clone()).map_err(|error| {
+            Box::new(EventCandidateQueryFailure {
+                error,
+                receipt: EventCandidateQueryReceipt::default(),
+            })
+        })?;
+        self.search_event_candidates_any_with_compiled_filter_batch_diagnosed(
+            natural_texts,
+            &compiled,
+            limit,
+        )
+    }
+
+    pub fn search_event_candidates_any_with_compiled_filter_batch_diagnosed(
+        &self,
+        natural_texts: &[&str],
+        filter: &CompiledSearchFilter,
+        limit: usize,
+    ) -> DiagnosedLexicalSearchBatchResult {
         self.execute_manual_lexical_diagnosed(
             ManualLexicalMode::Body(natural_texts),
-            filters,
+            filter,
             limit,
             LEXICAL_WORK_BUDGET_V1,
         )
@@ -325,9 +344,23 @@ impl VerifiedIndex {
         filters: &EventSearchFilters,
         limit: usize,
     ) -> DiagnosedLexicalSearchBatchResult {
+        let compiled = CompiledSearchFilter::compile(filters.clone()).map_err(|error| {
+            Box::new(EventCandidateQueryFailure {
+                error,
+                receipt: EventCandidateQueryReceipt::default(),
+            })
+        })?;
+        self.list_event_candidates_with_compiled_filter_batch_diagnosed(&compiled, limit)
+    }
+
+    pub fn list_event_candidates_with_compiled_filter_batch_diagnosed(
+        &self,
+        filter: &CompiledSearchFilter,
+        limit: usize,
+    ) -> DiagnosedLexicalSearchBatchResult {
         self.execute_manual_lexical_diagnosed(
             ManualLexicalMode::List,
-            filters,
+            filter,
             limit,
             LEXICAL_WORK_BUDGET_V1,
         )
@@ -342,9 +375,10 @@ impl VerifiedIndex {
         limit: usize,
         budget: LexicalWorkBudget,
     ) -> LexicalSearchResult<LexicalSearchBatch> {
+        let compiled = CompiledSearchFilter::compile(filters.clone())?;
         self.execute_manual_lexical_diagnosed(
             ManualLexicalMode::Body(natural_texts),
-            filters,
+            &compiled,
             limit,
             budget,
         )
@@ -379,7 +413,8 @@ impl VerifiedIndex {
         limit: usize,
         budget: LexicalWorkBudget,
     ) -> LexicalSearchResult<LexicalSearchBatch> {
-        self.execute_manual_lexical_diagnosed(ManualLexicalMode::List, filters, limit, budget)
+        let compiled = CompiledSearchFilter::compile(filters.clone())?;
+        self.execute_manual_lexical_diagnosed(ManualLexicalMode::List, &compiled, limit, budget)
             .map(|observed| observed.batch)
             .map_err(|failure| LexicalSearchError::Index(failure.error))
     }
@@ -387,14 +422,14 @@ impl VerifiedIndex {
     fn execute_manual_lexical_diagnosed(
         &self,
         mode: ManualLexicalMode<'_>,
-        filters: &EventSearchFilters,
+        filter: &CompiledSearchFilter,
         limit: usize,
         budget: LexicalWorkBudget,
     ) -> DiagnosedLexicalSearchBatchResult {
         #[cfg(any(test, feature = "test-support"))]
         let _failure_injection_reset = lexical_candidate_materialization_failure_reset();
         let mut receipt = EventCandidateQueryReceipt::default();
-        let result = self.execute_manual_lexical_inner(mode, filters, limit, budget, &mut receipt);
+        let result = self.execute_manual_lexical_inner(mode, filter, limit, budget, &mut receipt);
         match result {
             Ok(batch) => Ok(ObservedLexicalSearchBatch { batch, receipt }),
             Err(error) => Err(Box::new(EventCandidateQueryFailure { error, receipt })),
@@ -404,7 +439,7 @@ impl VerifiedIndex {
     fn execute_manual_lexical_inner(
         &self,
         mode: ManualLexicalMode<'_>,
-        filters: &EventSearchFilters,
+        compiled_filter: &CompiledSearchFilter,
         limit: usize,
         budget: LexicalWorkBudget,
         receipt: &mut EventCandidateQueryReceipt,
@@ -413,7 +448,6 @@ impl VerifiedIndex {
         if let ManualLexicalMode::Body(natural_texts) = mode {
             LEXICAL_QUERY_LIMITS.validate_texts(natural_texts.iter().copied())?;
         }
-        validate_manual_filter_inputs(filters)?;
         if limit == 0 {
             return Ok(empty_lexical_batch(false));
         }
@@ -435,7 +469,9 @@ impl VerifiedIndex {
         record_lexical_query_execution();
         let mut meter = LexicalWorkMeter::new(budget);
         meter.record_analyzed_tokens(analyzed_tokens)?;
-        let Some(filter_plan) = compile_manual_filter_plan(filters, fields, &mut meter)? else {
+        let Some(filter_plan) =
+            compile_lexical_filter_adapter(compiled_filter, fields, &mut meter)?
+        else {
             return Ok(finish_lexical_batch(Vec::new(), meter, false));
         };
         if filter_plan.match_none {
@@ -464,7 +500,7 @@ impl VerifiedIndex {
                 reader,
                 body_segment,
                 &filter_plan,
-                filters.content_scope,
+                compiled_filter.filters().content_scope,
                 fields,
                 &mut meter,
             )?
@@ -576,12 +612,24 @@ impl VerifiedIndex {
         receipt.record_collector_hits(ranked.len())?;
         let mut candidates = Vec::with_capacity(ranked.len());
         for candidate in ranked {
+            let reader = self
+                .searcher
+                .segment_readers()
+                .get(candidate.address.segment_ord as usize)
+                .ok_or(IndexError::InvalidStoredDocumentField(
+                    EVENT_RANGE_ORDER_FAST_FIELD,
+                ))?;
+            let segment = LexicalSegmentContext {
+                stable_segment_index: candidate.stable_segment_index,
+                segment_id: reader.segment_id().to_string(),
+                segment_ord: candidate.address.segment_ord,
+            };
             let encoded_bytes = u64::try_from(candidate.order.encoded_core_bytes())
                 .map_err(|_| IndexError::CountOverflow)?;
             if !meter.charge_pair(
                 (LexicalWorkCounter::FinalMaterializations, 1),
                 (LexicalWorkCounter::FinalMaterializationBytes, encoded_bytes),
-                Some(&candidate.segment),
+                Some(&segment),
                 Some(candidate.address.doc_id),
             ) {
                 break;
@@ -750,9 +798,9 @@ impl VerifiedIndex {
         term_frequencies: &[u32],
         body_weights: &[Bm25Weight],
         query_term_count: u8,
-        filter_plan: &ManualFilterPlan,
+        filter_plan: &LexicalFilterAdapter,
         limit: usize,
-        retained: &mut BinaryHeap<Reverse<RankedAddressCandidate>>,
+        retained: &mut BinaryHeap<Reverse<RankedCandidateRef>>,
         retained_truncated: &mut bool,
         meter: &mut LexicalWorkMeter,
     ) -> Result<CandidateExamination> {
@@ -847,13 +895,13 @@ impl VerifiedIndex {
                 EVENT_RANGE_ORDER_FAST_FIELD,
             ));
         }
-        let candidate = RankedAddressCandidate {
+        let candidate = RankedCandidateRef {
             coverage,
             query_terms: query_term_count,
             score,
             order,
             address,
-            segment: prepared.context.clone(),
+            stable_segment_index: prepared.context.stable_segment_index,
         };
         if heap_was_full {
             if retained
@@ -876,7 +924,14 @@ impl VerifiedIndex {
         &self,
         filters: &EventSearchFilters,
     ) -> Result<SemanticFilterProjection> {
-        filters.validate_content_scope()?;
+        let compiled = CompiledSearchFilter::compile(filters.clone())?;
+        self.semantic_filter_projection_compiled(&compiled)
+    }
+
+    pub fn semantic_filter_projection_compiled(
+        &self,
+        filter: &CompiledSearchFilter,
+    ) -> Result<SemanticFilterProjection> {
         validate_event_sort_fast_fields(&self.searcher)?;
         let fields = fields_from_schema(self.searcher.schema())?;
         let semantic_eligibility = Box::new(BooleanQuery::intersection(vec![
@@ -889,9 +944,9 @@ impl VerifiedIndex {
                 IndexRecordOption::Basic,
             )),
         ]));
-        let source_identity_query = self.source_identity_query(filters, fields)?;
+        let source_identity_query = self.source_identity_query(filter.filters(), fields)?;
         let query =
-            filtered_event_query(semantic_eligibility, source_identity_query, filters, fields)?;
+            filtered_event_query(semantic_eligibility, source_identity_query, filter, fields)?;
         let addresses = self
             .searcher
             .search(query.as_ref(), &DocSetCollector)

@@ -171,6 +171,7 @@ fn limit_200_search_reduces_each_large_core_body_before_retaining_presentations(
         &index,
         &collection.result_window.hits,
         &normalized_query,
+        &CompiledSearchFilter::compile(filters.clone()).unwrap(),
         SEARCH_PRESENTATION_HYDRATION_BUDGET,
     )
     .unwrap();
@@ -221,6 +222,7 @@ fn limit_200_search_reduces_each_large_core_body_before_retaining_presentations(
         &index,
         &collection.result_window.hits,
         &normalized_query,
+        &CompiledSearchFilter::compile(filters.clone()).unwrap(),
         SearchPresentationHydrationBudget {
             maximum_retained_snippet_bytes: retained_snippet_bytes - 1,
         },

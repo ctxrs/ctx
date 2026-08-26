@@ -8,7 +8,9 @@ use ctx_history_core::{
     CertifiedSource, ScannedSourceCounts, SourceAnchor, SourceKey, SourceObservation, TypedKey,
 };
 use ctx_history_index::{GenerationWriter, WriterOptions};
-use ctx_history_index_query::{EventSearchFilters, SearchContentScope, VerifiedIndex};
+use ctx_history_index_query::{
+    CompiledSearchFilter, EventSearchFilters, SearchContentScope, VerifiedIndex,
+};
 use serde_json::json;
 
 use super::*;
@@ -76,7 +78,7 @@ impl HistorySemanticQuery for FakeSemanticQuery {
     fn candidates(
         &mut self,
         query: &str,
-        _filters: &EventSearchFilters,
+        _filter: &CompiledSearchFilter,
         candidate_limit: usize,
     ) -> std::result::Result<HistorySemanticBatch, HistorySemanticError> {
         self.calls

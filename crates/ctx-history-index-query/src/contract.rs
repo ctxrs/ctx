@@ -534,6 +534,26 @@ impl EventSearchFilters {
     }
 }
 
+/// One validated logical Search filter shared by every retrieval backend and
+/// final winner hydration. Backend-specific postings and Tantivy queries are
+/// transient adapters compiled from this value; they are not independent
+/// filter authorities.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompiledSearchFilter {
+    filters: EventSearchFilters,
+}
+
+impl CompiledSearchFilter {
+    pub fn compile(filters: EventSearchFilters) -> Result<Self> {
+        validate_manual_filter_inputs(&filters)?;
+        Ok(Self { filters })
+    }
+
+    pub const fn filters(&self) -> &EventSearchFilters {
+        &self.filters
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EventRecord {
     pub event_id: StableEntityId,

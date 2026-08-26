@@ -6,6 +6,7 @@ use ctx_history_core::{
     ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceKey, SourceObservation,
     TypedKey, CORE_ACTIVITY_REVISION,
 };
+use ctx_history_index::EventSearchFilters;
 use ctx_history_index::{GenerationWriter, WriterOptions};
 use ctx_semantic_model::SEMANTIC_DIMENSIONS;
 
@@ -187,6 +188,7 @@ fn semantic_filter_is_applied_before_top_k_across_more_than_4096_candidates() ->
     };
     let projection = index.semantic_filter_projection(&filters)?;
     assert_eq!(projection.len(), 1);
+    let filter = CompiledSearchFilter::compile(filters)?;
 
     let mut pin = semantic_query_pin_from_readiness(
         index.generation_id(),
@@ -194,7 +196,7 @@ fn semantic_filter_is_applied_before_top_k_across_more_than_4096_candidates() ->
     )?;
     let (candidates, diagnostics) = pin.search(
         &index,
-        &filters,
+        &filter,
         &normalized_test_embedding(1.0, 0.0),
         1,
         None,
@@ -321,10 +323,10 @@ fn semantic_query_scores_only_active_flat_events_that_match_core_metadata() -> R
         SourceBackedGenerationPin::Ready(pinned),
     )?;
 
-    let shared = EventSearchFilters {
+    let shared = CompiledSearchFilter::compile(EventSearchFilters {
         workspace: Some("shared".to_owned()),
         ..EventSearchFilters::default()
-    };
+    })?;
     let (candidates, diagnostics) = pin.search(
         &index,
         &shared,
@@ -339,10 +341,10 @@ fn semantic_query_scores_only_active_flat_events_that_match_core_metadata() -> R
     );
     assert_eq!(diagnostics["events_scored"], 1);
 
-    let filtered_only = EventSearchFilters {
+    let filtered_only = CompiledSearchFilter::compile(EventSearchFilters {
         workspace: Some("filtered-only".to_owned()),
         ..EventSearchFilters::default()
-    };
+    })?;
     let (candidates, diagnostics) = pin.search(
         &index,
         &filtered_only,

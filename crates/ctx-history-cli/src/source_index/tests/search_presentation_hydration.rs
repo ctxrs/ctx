@@ -68,6 +68,7 @@ fn search_presentation_hydration_rejects_missing_duplicate_and_misaligned_hits()
         &index,
         std::slice::from_ref(&hit),
         &query,
+        &compiled_search_filter(),
         SEARCH_PRESENTATION_HYDRATION_BUDGET,
     )
     .unwrap();
@@ -79,6 +80,7 @@ fn search_presentation_hydration_rejects_missing_duplicate_and_misaligned_hits()
         &index,
         &excessive_hits,
         &query,
+        &compiled_search_filter(),
         SEARCH_PRESENTATION_HYDRATION_BUDGET,
     )
     .unwrap_err();
@@ -90,6 +92,7 @@ fn search_presentation_hydration_rejects_missing_duplicate_and_misaligned_hits()
         &index,
         &[hit.clone(), hit.clone()],
         &query,
+        &compiled_search_filter(),
         SEARCH_PRESENTATION_HYDRATION_BUDGET,
     )
     .unwrap_err();
@@ -106,6 +109,7 @@ fn search_presentation_hydration_rejects_missing_duplicate_and_misaligned_hits()
             more_matches_in_session: 0,
         }],
         &query,
+        &compiled_search_filter(),
         SEARCH_PRESENTATION_HYDRATION_BUDGET,
     )
     .unwrap_err();
@@ -123,6 +127,7 @@ fn search_presentation_hydration_rejects_missing_duplicate_and_misaligned_hits()
         &index,
         &[misaligned],
         &query,
+        &compiled_search_filter(),
         SEARCH_PRESENTATION_HYDRATION_BUDGET,
     )
     .unwrap_err();

@@ -2,7 +2,7 @@ use std::{path::Path, time::Instant};
 
 use anyhow::{anyhow, Result};
 use ctx_history_index::{
-    EventSearchCandidate, EventSearchFilters, SemanticFilterProjection, VerifiedIndex,
+    CompiledSearchFilter, EventSearchCandidate, SemanticFilterProjection, VerifiedIndex,
 };
 use serde_json::{json, Value};
 use thiserror::Error;
@@ -68,7 +68,7 @@ impl SemanticNotReady {
 pub struct SemanticQueryPin {
     core_generation_id: String,
     pinned: Option<PinnedFlatGeneration>,
-    filter_projection: Option<(EventSearchFilters, SemanticFilterProjection)>,
+    filter_projection: Option<(CompiledSearchFilter, SemanticFilterProjection)>,
 }
 
 impl SemanticQueryPin {
@@ -109,7 +109,7 @@ impl SemanticQueryPin {
     pub fn search(
         &mut self,
         index: &VerifiedIndex,
-        filters: &EventSearchFilters,
+        filter: &CompiledSearchFilter,
         embedding: &[f32],
         candidate_limit: usize,
         query_embed_ms: Option<u64>,
@@ -137,10 +137,12 @@ impl SemanticQueryPin {
         if self
             .filter_projection
             .as_ref()
-            .is_none_or(|(cached_filters, _)| cached_filters != filters)
+            .is_none_or(|(cached_filter, _)| cached_filter != filter)
         {
-            self.filter_projection =
-                Some((filters.clone(), index.semantic_filter_projection(filters)?));
+            self.filter_projection = Some((
+                filter.clone(),
+                index.semantic_filter_projection_compiled(filter)?,
+            ));
         }
         let projection = &self
             .filter_projection

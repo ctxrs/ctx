@@ -16,29 +16,6 @@ pub(super) struct FamilyShapingOutcome {
     pub(super) changed_final_top_n: bool,
 }
 
-pub fn shape_search_result_window<'a>(
-    candidates: impl IntoIterator<Item = &'a EventSearchCandidate>,
-    limit: usize,
-    event_results: bool,
-) -> SearchResultWindow {
-    let candidates = candidates.into_iter().collect::<Vec<_>>();
-    let mut hits = if event_results {
-        dense_hits(candidates.iter().copied())
-    } else {
-        session_champions(candidates.iter().copied())
-            .into_iter()
-            .map(|session| session_champion_hit(&session))
-            .collect()
-    };
-    let more_available = hits.len() > limit;
-    hits.truncate(limit);
-    SearchResultWindow {
-        limit,
-        hits,
-        more_available,
-    }
-}
-
 pub(super) fn dense_result_window(
     candidates: &[EventSearchCandidate],
     limit: usize,

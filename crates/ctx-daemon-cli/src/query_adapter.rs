@@ -1,7 +1,7 @@
 use std::{path::Path, time::Duration as StdDuration};
 
 use anyhow::{anyhow, Result};
-use ctx_history_index::{EventSearchCandidate, EventSearchFilters, VerifiedIndex};
+use ctx_history_index::{CompiledSearchFilter, EventSearchCandidate, VerifiedIndex};
 use ctx_history_read_application::{
     HistorySemanticBatch, HistorySemanticError, HistorySemanticPort, HistorySemanticQuery,
     SemanticReason,
@@ -62,16 +62,16 @@ impl SemanticQuerySession<'_> {
     fn search(
         &mut self,
         query: &str,
-        filters: &EventSearchFilters,
+        filter: &CompiledSearchFilter,
         candidate_limit: usize,
     ) -> std::result::Result<(Vec<EventSearchCandidate>, Value), SemanticQueryError> {
-        self.search_with(query, filters, candidate_limit, daemon_query_embedding)
+        self.search_with(query, filter, candidate_limit, daemon_query_embedding)
     }
 
     fn search_with<EmbedQuery>(
         &mut self,
         query: &str,
-        filters: &EventSearchFilters,
+        filter: &CompiledSearchFilter,
         candidate_limit: usize,
         mut embed_query: EmbedQuery,
     ) -> std::result::Result<(Vec<EventSearchCandidate>, Value), SemanticQueryError>
@@ -85,7 +85,7 @@ impl SemanticQuerySession<'_> {
         {
             return self
                 .pin
-                .search(self.index, filters, &[], candidate_limit, None)
+                .search(self.index, filter, &[], candidate_limit, None)
                 .map_err(SemanticQueryError::from);
         }
         let (embedding, query_embed_ms) = embed_query(self.data_root, query)
@@ -100,7 +100,7 @@ impl SemanticQuerySession<'_> {
         self.pin
             .search(
                 self.index,
-                filters,
+                filter,
                 &embedding,
                 candidate_limit,
                 Some(query_embed_ms),
@@ -126,10 +126,10 @@ impl HistorySemanticQuery for SemanticQuerySession<'_> {
     fn candidates(
         &mut self,
         query: &str,
-        filters: &EventSearchFilters,
+        filter: &CompiledSearchFilter,
         candidate_limit: usize,
     ) -> std::result::Result<HistorySemanticBatch, HistorySemanticError> {
-        self.search(query, filters, candidate_limit)
+        self.search(query, filter, candidate_limit)
             .map(|(candidates, diagnostics)| HistorySemanticBatch {
                 candidates,
                 diagnostics,

@@ -1,4 +1,4 @@
-use ctx_history_index_query::{EventSearchCandidate, EventSearchFilters, VerifiedIndex};
+use ctx_history_index_query::{CompiledSearchFilter, EventSearchCandidate, VerifiedIndex};
 use serde_json::Value;
 use thiserror::Error;
 
@@ -103,7 +103,7 @@ pub trait HistorySemanticQuery {
     fn candidates(
         &mut self,
         query: &str,
-        filters: &EventSearchFilters,
+        filter: &CompiledSearchFilter,
         candidate_limit: usize,
     ) -> Result<HistorySemanticBatch, HistorySemanticError>;
 }

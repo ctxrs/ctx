@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Result};
 use ctx_history_index_query::{
-    DiagnosedLexicalSearchBatchResult, EventCandidateQueryReceipt, EventSearchFilters,
+    CompiledSearchFilter, DiagnosedLexicalSearchBatchResult, EventCandidateQueryReceipt,
     LexicalSearchBatch, VerifiedIndex,
 };
 
@@ -102,7 +102,7 @@ impl ObservedSearchExecutionError {
 pub(crate) fn collect_search_hits_observed<P: HistorySemanticPort>(
     request: &SearchRequest,
     index: &VerifiedIndex,
-    filters: &EventSearchFilters,
+    filter: &CompiledSearchFilter,
     semantic: SemanticAvailability,
     semantic_port: &P,
 ) -> std::result::Result<SearchCollection, ObservedSearchExecutionError> {
@@ -110,7 +110,7 @@ pub(crate) fn collect_search_hits_observed<P: HistorySemanticPort>(
     let collection = collect_search_hits_with_receipt(
         request,
         index,
-        filters,
+        filter,
         semantic,
         semantic_port,
         &mut tracker,

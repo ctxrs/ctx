@@ -950,7 +950,7 @@ where
         &VerifiedIndex,
         &Path,
         &str,
-        &EventSearchFilters,
+        &ctx_history_index::CompiledSearchFilter,
         usize,
     ) -> Result<(Vec<EventSearchCandidate>, Value)>,
 {
@@ -973,6 +973,3 @@ where
     .map_err(SourceSearchFailure::from)
     .map_err(SourceSearchFailure::into_anyhow)
 }
-
-#[cfg(test)]
-pub(super) use ctx_history_read_application::shape_search_result_window;

@@ -412,7 +412,7 @@ fn record_live_postings_added(posting_count: usize) {
 fn open_manual_segment(
     reader: &SegmentReader,
     prepared: PreparedBodySegment,
-    filter_plan: &ManualFilterPlan,
+    filter_plan: &LexicalFilterAdapter,
     content_scope: SearchContentScope,
     fields: Fields,
     meter: &mut LexicalWorkMeter,
@@ -518,7 +518,7 @@ fn open_posting(
 
 fn open_segment_filters(
     reader: &SegmentReader,
-    plan: &ManualFilterPlan,
+    plan: &LexicalFilterAdapter,
     fields: Fields,
     meter: &mut LexicalWorkMeter,
     segment: &LexicalSegmentContext,

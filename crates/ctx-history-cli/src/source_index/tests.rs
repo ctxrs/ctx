@@ -23,8 +23,8 @@ use ctx_history_core::{
     SourceKey, SourceObservation, TypedKey, CORE_ACTIVITY_REVISION, MAX_CORE_CONTENT_BYTES,
 };
 use ctx_history_index::{
-    AgentScope, EventSearchFilters, GenerationWriter, IndexError, SearchContentScope,
-    SessionRecord, WriterOptions, LEXICAL_QUERY_LIMITS,
+    AgentScope, CompiledSearchFilter, EventSearchFilters, GenerationWriter, IndexError,
+    SearchContentScope, SessionRecord, WriterOptions, LEXICAL_QUERY_LIMITS,
 };
 use serde_json::{json, Value};
 use tempfile::tempdir;
@@ -65,6 +65,10 @@ mod recovery;
 
 const TEST_SESSION_ID: &str = "019fa000-0000-7000-8000-0000000000d1";
 const TEST_QUERY: &str = "pinnedgenerationrouting";
+
+fn compiled_search_filter() -> CompiledSearchFilter {
+    CompiledSearchFilter::compile(EventSearchFilters::default()).unwrap()
+}
 const TEST_MCP_OUTPUT_LIMIT: usize = crate::presentation_limit::CLI_PRESENTATION_MAX_OUTPUT_BYTES;
 
 fn history_config(daemon_enabled: bool, semantic_search_enabled: bool) -> config::AppConfig {
@@ -504,7 +508,7 @@ fn omitted_and_explicit_all_resolve_to_identical_weighted_retrieval() {
                 Ok((
                     index.search_event_candidates_any_with_filters(
                         &[query],
-                        filters,
+                        filters.filters(),
                         candidate_limit,
                     )?,
                     json!({"fixture": "weighted"}),
@@ -1059,70 +1063,6 @@ fn show_selector_shapes_validate_before_pristine_root_access() {
         "{provider_identity}"
     );
     assert!(!provider_identity.contains("index is not initialized"));
-}
-
-#[test]
-fn result_window_requires_one_additional_shaped_session() {
-    let candidates = [
-        EventSearchCandidate {
-            event: fixture_event(CaptureProvider::Codex, "codex_session_jsonl", 1, 1),
-            score: 3.0,
-        },
-        EventSearchCandidate {
-            event: fixture_event(CaptureProvider::Codex, "codex_session_jsonl", 1, 2),
-            score: 2.0,
-        },
-        EventSearchCandidate {
-            event: fixture_event(CaptureProvider::Codex, "codex_session_jsonl", 2, 1),
-            score: 1.0,
-        },
-    ];
-
-    let duplicates_only = shape_search_result_window(candidates[..2].iter(), 1, false);
-    assert_eq!(duplicates_only.hits.len(), 1);
-    assert_eq!(duplicates_only.hits[0].more_matches_in_session, 1);
-    assert!(!duplicates_only.more_available);
-
-    let additional_session = shape_search_result_window(candidates.iter(), 1, false);
-    assert_eq!(additional_session.limit, 1);
-    assert_eq!(additional_session.hits.len(), 1);
-    assert_eq!(additional_session.hits[0].more_matches_in_session, 1);
-    assert!(additional_session.more_available);
-}
-
-#[test]
-fn event_result_window_returns_limit_and_records_only_one_extra_hit() {
-    let candidates = (1..=4)
-        .map(|sequence| EventSearchCandidate {
-            event: fixture_event(CaptureProvider::Codex, "codex_session_jsonl", 1, sequence),
-            score: 5.0 - sequence as f32,
-        })
-        .collect::<Vec<_>>();
-
-    let window = shape_search_result_window(candidates.iter(), 2, true);
-    assert_eq!(window.limit, 2);
-    assert_eq!(window.hits.len(), 2);
-    assert!(window.more_available);
-    assert_eq!(window.hits[0].event.event_sequence, 1);
-    assert_eq!(window.hits[1].event.event_sequence, 2);
-}
-
-#[test]
-fn result_window_discards_non_render_event_metadata() {
-    let (event_id, expected, window) = {
-        let mut event = fixture_event(CaptureProvider::Codex, "codex_session_jsonl", 90, 1);
-        event.native_event_id = Some(TypedKey::utf8("x".repeat(60 * 1024)).unwrap());
-        let event_id = event.event_id.as_uuid();
-        let expected = SearchEventMetadata::from(&event);
-        let candidate = EventSearchCandidate { event, score: 1.0 };
-        let window = shape_search_result_window(std::iter::once(&candidate), 1, true);
-        assert_eq!(window.hits[0].event, expected);
-        (event_id, expected, window)
-    };
-
-    assert_eq!(window.hits.len(), 1);
-    assert_eq!(window.hits[0].event, expected);
-    assert_eq!(window.hits[0].event.event_id, event_id);
 }
 
 #[test]
