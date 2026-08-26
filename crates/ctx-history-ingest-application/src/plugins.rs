@@ -214,7 +214,7 @@ fn read_explicit_plugin_manifest(
 }
 
 fn parse_plugin_manifest(path: &Path, raw: &str) -> Result<Vec<HistorySourcePluginSource>> {
-    let manifest: Manifest = serde_json::from_str(&raw)
+    let manifest: Manifest = serde_json::from_str(raw)
         .with_context(|| format!("parse history source plugin manifest {}", path.display()))?;
     validate_plugin_id("plugin name", &manifest.name)?;
     if manifest.schema_version != 1 {
