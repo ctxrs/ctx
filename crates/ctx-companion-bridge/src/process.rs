@@ -9,12 +9,16 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "process/mcp.rs"]
+mod mcp;
 #[cfg(unix)]
 #[path = "process/unix.rs"]
 mod platform;
 #[cfg(windows)]
 #[path = "process/windows.rs"]
 mod platform;
+
+pub(crate) use mcp::launch_mcp;
 
 use crate::{
     limits::LimitConfiguration,

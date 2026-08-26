@@ -2,12 +2,15 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-pub const CORE_PRO_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(3);
-pub(crate) const PROTOCOL_ENTRYPOINT_ARGUMENT: &str = "--ctx-pro-protocol-v3";
+pub const CORE_COMPANION_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(4);
+pub const CORE_PRO_PROTOCOL_VERSION: ProtocolVersion = CORE_COMPANION_PROTOCOL_VERSION;
+pub(crate) const PROTOCOL_ENTRYPOINT_ARGUMENT: &str = "--ctx-pro-protocol-v4";
 pub(crate) const PROTOCOL_HANDSHAKE_COMMAND: &str = "handshake";
 pub(crate) const PROTOCOL_CLI_COMMAND: &str = "cli";
 pub(crate) const PROTOCOL_MCP_COMMAND: &str = "mcp-serve";
 pub(crate) const PROTOCOL_MAINTENANCE_COMMAND: &str = "maintenance";
+pub(crate) const MCP_WRITTEN_AND_FLUSHED_RECEIPT: &[u8] = b"written_and_flushed\n";
+pub(crate) const MCP_OUTPUT_FAILED_RECEIPT: &[u8] = b"output_failed\n";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ProtocolVersion(u16);

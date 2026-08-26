@@ -7,11 +7,12 @@ use std::{
     time::Duration,
 };
 
+use ctx_agent_integrations::tool_backend::{OpaqueMcpDeliveryOutcome, OpaqueMcpProxyResponse};
 use ctx_companion_bridge::{
     BridgeError, BridgeLimits, CancellationToken, CliRequest, CompanionBridge,
     CompanionEnvironment, EnvironmentKey, ExitClass, InstalledCompanion, LimitConfiguration,
-    MaintenanceRequest, ManagedPairExpectations, McpRequest, ProtocolVersion, ReleaseChannel,
-    TerminationReason, MAX_ADMISSION_WAIT, MAX_ARGUMENTS, MAX_CAPTURED_WALL_TIME,
+    MaintenanceRequest, ManagedPairExpectations, McpFinishOutcome, McpRequest, ProtocolVersion,
+    ReleaseChannel, TerminationReason, MAX_ADMISSION_WAIT, MAX_ARGUMENTS, MAX_CAPTURED_WALL_TIME,
     MAX_CONCURRENT_PROCESSES, MAX_CONTROL_BYTES, MAX_ENVIRONMENT_ENTRIES, MAX_STDERR_BYTES,
 };
 use serde_json::{json, Value};
@@ -137,14 +138,14 @@ pub(crate) fn forward_paid_cli_if_selected(arguments: Vec<OsString>) -> Option<E
 pub(crate) fn proxy_paid_mcp(
     request_line: &[u8],
     data_root: &Path,
-) -> Result<Vec<u8>, CompanionRouteError> {
+) -> Result<OpaqueMcpProxyResponse, CompanionRouteError> {
     if request_line.len() > MCP_PROXY_MAX_BYTES {
         return Err(CompanionRouteError::Unavailable);
     }
     let companion = installed_companion().map_err(CompanionRouteError::from)?;
     let mut request = McpRequest::new(request_line);
     forward_mcp_environment(request.environment_mut(), data_root);
-    let output = CompanionBridge::new(mcp_limits()?)
+    let response = CompanionBridge::new(mcp_limits()?)
         .launch_mcp(
             &companion,
             request,
@@ -152,21 +153,18 @@ pub(crate) fn proxy_paid_mcp(
         )
         .map_err(classify_bridge_error)
         .map_err(CompanionRouteError::from)?;
-    write_companion_stderr(output.stderr()).map_err(|_| CompanionRouteError::Unavailable)?;
-    if matches!(
-        output.exit_class(),
-        ExitClass::Terminated(TerminationReason::Cancelled)
-    ) {
-        return Err(CompanionRouteError::Unavailable);
-    }
-    if output.stdout_truncated()
-        || output.stderr_truncated()
-        || output.exit_class() != ExitClass::Success
-        || !is_one_framed_line(output.stdout())
-    {
+    if !is_one_framed_line(response.response_frame()) {
         return Err(CompanionRouteError::Incompatible);
     }
-    Ok(output.stdout().to_vec())
+    let response_frame = response.response_frame().to_vec();
+    OpaqueMcpProxyResponse::new(response_frame, move |outcome| {
+        let outcome = match outcome {
+            OpaqueMcpDeliveryOutcome::WrittenAndFlushed => McpFinishOutcome::WrittenAndFlushed,
+            OpaqueMcpDeliveryOutcome::OutputFailed => McpFinishOutcome::OutputFailed,
+        };
+        let _ = response.finish(outcome);
+    })
+    .ok_or(CompanionRouteError::Incompatible)
 }
 
 pub(crate) fn wake_verified_private_maintenance(
@@ -519,13 +517,14 @@ fn classify_bridge_error(error: BridgeError) -> CompanionLaunchError {
             reason: "detached installation verification failed",
         },
         BridgeError::InvalidProtocolResponse(_) => CompanionLaunchError::InvalidLaunch {
-            reason: "Pro returned an invalid Protocol V3 response",
+            reason: "Pro returned an invalid companion protocol response",
         },
         BridgeError::ExecutableMetadata { .. }
         | BridgeError::Limit(_)
         | BridgeError::InvalidEnvironmentName
         | BridgeError::QueueTimeout
         | BridgeError::CancelledBeforeSpawn
+        | BridgeError::McpExchangeFailed { .. }
         | BridgeError::Spawn(_)
         | BridgeError::Transport(_)
         | BridgeError::WorkerFailed
@@ -543,11 +542,6 @@ fn exit_code(exit: ExitClass) -> ExitCode {
         ExitClass::UnknownFailure | ExitClass::Terminated(_) => 1,
     };
     ExitCode::from(code)
-}
-
-fn write_companion_stderr(bytes: &[u8]) -> std::io::Result<()> {
-    std::io::stderr().write_all(bytes)?;
-    std::io::stderr().flush()
 }
 
 fn write_cli_launch_error(error: &CompanionLaunchError) {

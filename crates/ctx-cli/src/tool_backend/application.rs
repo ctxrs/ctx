@@ -15,12 +15,12 @@ use ctx_history_index::{
 use serde_json::Value;
 
 use super::{
-    CursorFailureKind, OpaqueMcpProxyError, QueryEventsRequest, ShowEventRequest,
-    ShowSessionRequest, StructuredToolError, ToolBackend, ToolBackendError, ToolEventContent,
-    ToolEventRangeDirection, ToolEventRangeScope, ToolExecutionError, ToolOperation, ToolOutcome,
-    ToolSearchBackend, ToolSearchContentScope, ToolSearchFailurePhase, ToolSearchRefreshStatus,
-    ToolSearchRequest, ToolSearchStopReason, ToolSearchTerminalFacts, ToolSearchUsageFacts,
-    ToolTranscriptMode, ToolUsageFacts,
+    CursorFailureKind, OpaqueMcpProxyError, OpaqueMcpProxyResponse, QueryEventsRequest,
+    ShowEventRequest, ShowSessionRequest, StructuredToolError, ToolBackend, ToolBackendError,
+    ToolEventContent, ToolEventRangeDirection, ToolEventRangeScope, ToolExecutionError,
+    ToolOperation, ToolOutcome, ToolSearchBackend, ToolSearchContentScope, ToolSearchFailurePhase,
+    ToolSearchRefreshStatus, ToolSearchRequest, ToolSearchStopReason, ToolSearchTerminalFacts,
+    ToolSearchUsageFacts, ToolTranscriptMode, ToolUsageFacts,
 };
 use crate::{
     commands::list::events::{
@@ -437,7 +437,10 @@ impl ToolBackend for LocalToolBackend {
         invoke_mcp_tool_call(operation, self, self, self)
     }
 
-    fn proxy_companion_mcp(&self, request: &[u8]) -> Result<Vec<u8>, OpaqueMcpProxyError> {
+    fn proxy_companion_mcp(
+        &self,
+        request: &[u8],
+    ) -> Result<OpaqueMcpProxyResponse, OpaqueMcpProxyError> {
         crate::companion::proxy_paid_mcp(request, &self.data_root).map_err(|error| match error {
             crate::companion::CompanionRouteError::Unavailable => {
                 OpaqueMcpProxyError::CompanionUnavailable

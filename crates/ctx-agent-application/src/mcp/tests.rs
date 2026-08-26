@@ -5,8 +5,8 @@ use std::{
 };
 
 use ctx_agent_integrations::tool_backend::{
-    OpaqueMcpProxyError, ToolBackend, ToolExecutionError, ToolOperation, ToolOutcome,
-    ToolUsageFacts,
+    OpaqueMcpDeliveryOutcome, OpaqueMcpProxyError, OpaqueMcpProxyResponse, ToolBackend,
+    ToolExecutionError, ToolOperation, ToolOutcome, ToolUsageFacts,
 };
 use ctx_client_observability::{
     analytics::{Outcome, SearchFailurePhase, SearchTerminalFacts},
@@ -27,6 +27,7 @@ enum OutputFailure {
 struct TracedWriter {
     failure: OutputFailure,
     trace: Arc<Mutex<Vec<&'static str>>>,
+    output: Vec<u8>,
 }
 
 impl Write for TracedWriter {
@@ -36,6 +37,7 @@ impl Write for TracedWriter {
             return Err(Error::new(ErrorKind::BrokenPipe, "test write failure"));
         }
         self.trace.lock().unwrap().push("write");
+        self.output.extend_from_slice(bytes);
         Ok(bytes.len())
     }
 
@@ -56,7 +58,10 @@ impl ToolBackend for TestBackend {
         Ok(ToolOutcome::plain(json!({"payload_type": "status"})))
     }
 
-    fn proxy_companion_mcp(&self, _request: &[u8]) -> Result<Vec<u8>, OpaqueMcpProxyError> {
+    fn proxy_companion_mcp(
+        &self,
+        _request: &[u8],
+    ) -> Result<OpaqueMcpProxyResponse, OpaqueMcpProxyError> {
         panic!("Core status must not use the companion")
     }
 
@@ -108,6 +113,7 @@ fn run_one_response(failure: OutputFailure, tool: &str, arguments: Value) -> Res
     let mut output = TracedWriter {
         failure,
         trace: trace.clone(),
+        output: Vec::new(),
     };
     let delivery_trace = trace.clone();
     let search_events = Arc::new(Mutex::new(Vec::new()));
@@ -288,6 +294,23 @@ fn malformed_input_recovers_with_exact_json_rpc_parse_error() {
 struct RecordingProxyBackend {
     request: Mutex<Vec<u8>>,
     response: Vec<u8>,
+    completions: Arc<Mutex<Vec<OpaqueMcpDeliveryOutcome>>>,
+    trace: Arc<Mutex<Vec<&'static str>>>,
+}
+
+impl RecordingProxyBackend {
+    fn new(response: Vec<u8>) -> Self {
+        Self::with_trace(response, Arc::new(Mutex::new(Vec::new())))
+    }
+
+    fn with_trace(response: Vec<u8>, trace: Arc<Mutex<Vec<&'static str>>>) -> Self {
+        Self {
+            request: Mutex::new(Vec::new()),
+            response,
+            completions: Arc::new(Mutex::new(Vec::new())),
+            trace,
+        }
+    }
 }
 
 impl ToolBackend for RecordingProxyBackend {
@@ -295,9 +318,21 @@ impl ToolBackend for RecordingProxyBackend {
         panic!("companion-owned calls must bypass public tool execution")
     }
 
-    fn proxy_companion_mcp(&self, request: &[u8]) -> Result<Vec<u8>, OpaqueMcpProxyError> {
+    fn proxy_companion_mcp(
+        &self,
+        request: &[u8],
+    ) -> Result<OpaqueMcpProxyResponse, OpaqueMcpProxyError> {
         self.request.lock().unwrap().extend_from_slice(request);
-        Ok(self.response.clone())
+        let completions = Arc::clone(&self.completions);
+        let trace = Arc::clone(&self.trace);
+        OpaqueMcpProxyResponse::new(self.response.clone(), move |outcome| {
+            completions.lock().unwrap().push(outcome);
+            trace.lock().unwrap().push(match outcome {
+                OpaqueMcpDeliveryOutcome::WrittenAndFlushed => "written_and_flushed",
+                OpaqueMcpDeliveryOutcome::OutputFailed => "output_failed",
+            });
+        })
+        .ok_or(OpaqueMcpProxyError::CompanionIncompatible)
     }
 
     fn parse_provider(&self, _value: &str) -> Option<CaptureProvider> {
@@ -314,13 +349,14 @@ fn companion_owned_call_is_proxied_as_exact_opaque_bytes() {
     let request = b" {\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/call\",\"params\":{\"name\":\"blame\",\"arguments\":{\"private\":\"opaque\"}}} \n";
     let initialized = b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n";
     let mut input = Cursor::new([initialized.as_slice(), request.as_slice()].concat());
-    let expected_response =
-        b"{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"opaque\":true}}\n".to_vec();
-    let backend = RecordingProxyBackend {
-        request: Mutex::new(Vec::new()),
-        response: expected_response.clone(),
+    let expected_response = b"opaque\xff\n".to_vec();
+    let trace = Arc::new(Mutex::new(Vec::new()));
+    let backend = RecordingProxyBackend::with_trace(expected_response.clone(), trace.clone());
+    let mut output = TracedWriter {
+        failure: OutputFailure::None,
+        trace: trace.clone(),
+        output: Vec::new(),
     };
-    let mut output = Vec::new();
     let mut usage = TracedUsagePort(Arc::new(Mutex::new(Vec::new())));
 
     serve_stdio(
@@ -338,7 +374,78 @@ fn companion_owned_call_is_proxied_as_exact_opaque_bytes() {
     .unwrap();
 
     assert_eq!(*backend.request.lock().unwrap(), request);
-    assert_eq!(output, expected_response);
+    assert_eq!(output.output, expected_response);
+    assert_eq!(
+        *backend.completions.lock().unwrap(),
+        [OpaqueMcpDeliveryOutcome::WrittenAndFlushed]
+    );
+    let trace = trace.lock().unwrap();
+    let flushed_at = trace.iter().position(|entry| *entry == "flush").unwrap();
+    let completed_at = trace
+        .iter()
+        .position(|entry| *entry == "written_and_flushed")
+        .unwrap();
+    assert!(flushed_at < completed_at, "{trace:?}");
+}
+
+#[test]
+fn companion_owned_write_and_flush_failures_complete_as_output_failed_once() {
+    let request = b"{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/call\",\"params\":{\"name\":\"blame\",\"arguments\":{}}}\n";
+    let initialized = b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n";
+    let expected_response = b"opaque\xff\n".to_vec();
+
+    for (failure, expected_reason, failed_label) in [
+        (
+            OutputFailure::Write,
+            McpStopReasonV1::StdoutWriteError,
+            "write_failed",
+        ),
+        (
+            OutputFailure::Flush,
+            McpStopReasonV1::StdoutFlushError,
+            "flush_failed",
+        ),
+    ] {
+        let mut input = Cursor::new([initialized.as_slice(), request.as_slice()].concat());
+        let trace = Arc::new(Mutex::new(Vec::new()));
+        let backend = RecordingProxyBackend::with_trace(expected_response.clone(), trace.clone());
+        let mut output = TracedWriter {
+            failure,
+            trace: trace.clone(),
+            output: Vec::new(),
+        };
+        let mut usage = TracedUsagePort(Arc::new(Mutex::new(Vec::new())));
+
+        let failure = serve_stdio(
+            &mut input,
+            &mut output,
+            ProductIdentity {
+                name: "ctx",
+                version: "test",
+            },
+            &backend,
+            &render_generic_tool_text,
+            &mut usage,
+            McpTelemetry::start(false, |_| Ok(())),
+        )
+        .unwrap_err();
+
+        assert_eq!(failure.reason, expected_reason);
+        assert_eq!(
+            *backend.completions.lock().unwrap(),
+            [OpaqueMcpDeliveryOutcome::OutputFailed]
+        );
+        let trace = trace.lock().unwrap();
+        let failed_at = trace
+            .iter()
+            .position(|entry| *entry == failed_label)
+            .unwrap();
+        let completed_at = trace
+            .iter()
+            .position(|entry| *entry == "output_failed")
+            .unwrap();
+        assert!(failed_at < completed_at, "{trace:?}");
+    }
 }
 
 fn tools_list_with_backend(backend: &impl ToolBackend) -> Value {
@@ -389,10 +496,7 @@ fn tools_list_appends_private_definitions_without_interpreting_their_fields() {
     }))
     .unwrap();
     companion_response.push(b'\n');
-    let backend = RecordingProxyBackend {
-        request: Mutex::new(Vec::new()),
-        response: companion_response,
-    };
+    let backend = RecordingProxyBackend::new(companion_response);
 
     let response = tools_list_with_backend(&backend);
     let tools = response["result"]["tools"].as_array().unwrap();
@@ -402,6 +506,58 @@ fn tools_list_appends_private_definitions_without_interpreting_their_fields() {
         *backend.request.lock().unwrap(),
         b" {\"jsonrpc\":\"2.0\",\"id\":11,\"method\":\"tools/list\"} \n"
     );
+    assert_eq!(
+        *backend.completions.lock().unwrap(),
+        [OpaqueMcpDeliveryOutcome::WrittenAndFlushed]
+    );
+}
+
+#[test]
+fn tools_list_write_and_flush_failures_complete_as_output_failed_once() {
+    let initialized = b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n";
+    let request = b"{\"jsonrpc\":\"2.0\",\"id\":11,\"method\":\"tools/list\"}\n";
+    let mut companion_response = serde_json::to_vec(&json!({
+        "jsonrpc": "2.0",
+        "id": 11,
+        "result": {"tools": [{"name": "blame"}]},
+    }))
+    .unwrap();
+    companion_response.push(b'\n');
+
+    for (failure, expected_reason) in [
+        (OutputFailure::Write, McpStopReasonV1::StdoutWriteError),
+        (OutputFailure::Flush, McpStopReasonV1::StdoutFlushError),
+    ] {
+        let mut input = Cursor::new([initialized.as_slice(), request.as_slice()].concat());
+        let trace = Arc::new(Mutex::new(Vec::new()));
+        let backend = RecordingProxyBackend::with_trace(companion_response.clone(), trace.clone());
+        let mut output = TracedWriter {
+            failure,
+            trace,
+            output: Vec::new(),
+        };
+        let mut usage = TracedUsagePort(Arc::new(Mutex::new(Vec::new())));
+
+        let failure = serve_stdio(
+            &mut input,
+            &mut output,
+            ProductIdentity {
+                name: "ctx",
+                version: "test",
+            },
+            &backend,
+            &render_generic_tool_text,
+            &mut usage,
+            McpTelemetry::start(false, |_| Ok(())),
+        )
+        .unwrap_err();
+
+        assert_eq!(failure.reason, expected_reason);
+        assert_eq!(
+            *backend.completions.lock().unwrap(),
+            [OpaqueMcpDeliveryOutcome::OutputFailed]
+        );
+    }
 }
 
 #[test]
@@ -432,10 +588,7 @@ fn tools_list_omits_all_private_definitions_when_the_response_fails_closed() {
         vec![b'x'; MCP_MAX_LINE_BYTES + 1],
     ];
     for response in invalid_responses {
-        let backend = RecordingProxyBackend {
-            request: Mutex::new(Vec::new()),
-            response,
-        };
+        let backend = RecordingProxyBackend::new(response);
         let response = tools_list_with_backend(&backend);
         let names = tool_names(&response);
         assert!(!names.contains(&"blame"), "{names:?}");
@@ -462,7 +615,10 @@ impl ToolBackend for FailingProxyBackend {
         panic!("companion-owned calls must bypass public tool execution")
     }
 
-    fn proxy_companion_mcp(&self, _request: &[u8]) -> Result<Vec<u8>, OpaqueMcpProxyError> {
+    fn proxy_companion_mcp(
+        &self,
+        _request: &[u8],
+    ) -> Result<OpaqueMcpProxyResponse, OpaqueMcpProxyError> {
         Err(self.0)
     }
 

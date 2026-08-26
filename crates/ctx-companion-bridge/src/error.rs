@@ -25,14 +25,16 @@ pub enum BridgeError {
         expected: ProtocolVersion,
         observed: ProtocolVersion,
     },
-    #[error("installed companion exited before completing the Protocol V3 handshake")]
+    #[error("installed companion exited before completing the Core companion handshake")]
     HandshakeFailed {
         exit: ExitClass,
         stderr: Vec<u8>,
         stderr_truncated: bool,
     },
-    #[error("installed companion returned an invalid Protocol V3 {0} response")]
+    #[error("installed companion returned an invalid Core companion {0} response")]
     InvalidProtocolResponse(&'static str),
+    #[error("installed companion did not complete the MCP exchange: {exit:?}")]
+    McpExchangeFailed { exit: ExitClass },
     #[error("managed companion request exceeds the {0} limit")]
     Limit(&'static str),
     #[error("managed companion request contains an invalid environment name")]

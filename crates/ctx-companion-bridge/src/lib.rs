@@ -1,8 +1,9 @@
-//! Neutral Protocol V3 launch and bounded byte transport for installed Pro.
+//! Neutral Protocol V4 launch and bounded byte transport for an installed companion.
 //!
-//! Core supplies only the installed Pro executable and a typed operation. The
-//! bridge performs a bounded Protocol V3 handshake against that executable,
-//! clears ambient environment authority, and launches the operation directly.
+//! Core supplies only the installed companion executable and a typed operation. The
+//! bridge clears ambient environment authority and launches the operation
+//! directly. CLI and maintenance perform a bounded Protocol V4 handshake;
+//! MCP's versioned invocation is its own protocol gate.
 //!
 //! The detached signed-envelope API remains available solely to distribution
 //! and installation callers. Launch does not invoke it or consume pair identity.
@@ -18,7 +19,7 @@ mod verifier;
 
 use std::{
     fs, io,
-    sync::{Condvar, Mutex},
+    sync::{Arc, Condvar, Mutex},
     time::{Duration, Instant},
 };
 
@@ -31,7 +32,9 @@ pub use limits::{
     MAX_STDERR_BYTES, MAX_STDOUT_BYTES,
 };
 pub use process::{ExitClass, TerminationReason};
-pub use protocol::{InstalledCompanion, ProtocolVersion, CORE_PRO_PROTOCOL_VERSION};
+pub use protocol::{
+    InstalledCompanion, ProtocolVersion, CORE_COMPANION_PROTOCOL_VERSION, CORE_PRO_PROTOCOL_VERSION,
+};
 pub use request::{CancellationToken, CliRequest, MaintenanceRequest, McpRequest};
 pub use verifier::{
     verify_signed_managed_pair_envelope, ManagedPairExpectations, ReleaseChannel,
@@ -39,7 +42,7 @@ pub use verifier::{
     MANAGED_PAIR_ENVELOPE_FILENAME, MANAGED_PAIR_STATE_FILENAME,
 };
 
-use process::{ProcessExit, ProcessOutput};
+use process::ProcessExit;
 use protocol::parse_handshake_receipt;
 use request::ProcessRequest;
 
@@ -49,13 +52,25 @@ const HANDSHAKE_WALL_TIME: Duration = Duration::from_secs(5);
 const MAINTENANCE_WALL_TIME: Duration = Duration::from_secs(6 * 60 * 60);
 const MAINTENANCE_RECEIPT: &[u8] = b"{\"accepted\":true,\"schema_version\":1}\n";
 
-#[derive(Debug)]
 pub struct McpResponse {
-    exit: ExitClass,
-    stdout: Vec<u8>,
-    stderr: Vec<u8>,
-    stdout_truncated: bool,
-    stderr_truncated: bool,
+    response_frame: Vec<u8>,
+    outcome: Option<std::sync::mpsc::SyncSender<McpFinishOutcome>>,
+    lifecycle_owner: Option<std::thread::JoinHandle<Result<(), BridgeError>>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum McpFinishOutcome {
+    WrittenAndFlushed,
+    OutputFailed,
+}
+
+impl McpFinishOutcome {
+    pub(crate) const fn receipt_frame(self) -> &'static [u8] {
+        match self {
+            Self::WrittenAndFlushed => protocol::MCP_WRITTEN_AND_FLUSHED_RECEIPT,
+            Self::OutputFailed => protocol::MCP_OUTPUT_FAILED_RECEIPT,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -75,24 +90,54 @@ impl CliResponse {
 }
 
 impl McpResponse {
-    pub const fn exit_class(&self) -> ExitClass {
-        self.exit
+    pub fn response_frame(&self) -> &[u8] {
+        &self.response_frame
     }
 
     pub fn stdout(&self) -> &[u8] {
-        &self.stdout
+        self.response_frame()
     }
 
-    pub fn stderr(&self) -> &[u8] {
-        &self.stderr
+    pub fn finish(mut self, outcome: McpFinishOutcome) -> Result<(), BridgeError> {
+        let outcome_sent = self
+            .outcome
+            .take()
+            .ok_or(BridgeError::WorkerFailed)?
+            .send(outcome)
+            .is_ok();
+        let result = self
+            .lifecycle_owner
+            .take()
+            .ok_or(BridgeError::WorkerFailed)?
+            .join()
+            .map_err(|_| BridgeError::WorkerFailed)?;
+        if outcome_sent {
+            result
+        } else {
+            result.and(Err(BridgeError::WorkerFailed))
+        }
     }
+}
 
-    pub const fn stdout_truncated(&self) -> bool {
-        self.stdout_truncated
+impl Drop for McpResponse {
+    fn drop(&mut self) {
+        // Disconnect means the final client outcome is unknown. The owner
+        // terminates and reaps without sending either terminal receipt. A Drop
+        // implementation cannot surface teardown results; explicit `finish`
+        // returns every finalization error to Core.
+        self.outcome.take();
+        if let Some(owner) = self.lifecycle_owner.take() {
+            let _ = owner.join();
+        }
     }
+}
 
-    pub const fn stderr_truncated(&self) -> bool {
-        self.stderr_truncated
+impl std::fmt::Debug for McpResponse {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("McpResponse")
+            .field("response_frame", &self.response_frame)
+            .finish_non_exhaustive()
     }
 }
 
@@ -102,28 +147,16 @@ impl MaintenanceResponse {
     }
 }
 
-impl From<ProcessOutput> for McpResponse {
-    fn from(output: ProcessOutput) -> Self {
-        Self {
-            exit: output.exit,
-            stdout: output.stdout,
-            stderr: output.stderr,
-            stdout_truncated: output.stdout_truncated,
-            stderr_truncated: output.stderr_truncated,
-        }
-    }
-}
-
 pub struct CompanionBridge {
     limits: LimitConfiguration,
-    gate: ConcurrencyGate,
+    gate: Arc<ConcurrencyGate>,
 }
 
 impl CompanionBridge {
     pub fn new(limits: BridgeLimits) -> Self {
         let limits = limits.configuration();
         Self {
-            gate: ConcurrencyGate::new(limits.concurrent_processes),
+            gate: Arc::new(ConcurrencyGate::new(limits.concurrent_processes)),
             limits,
         }
     }
@@ -134,10 +167,22 @@ impl CompanionBridge {
         request: McpRequest,
         cancellation: &CancellationToken,
     ) -> Result<McpResponse, BridgeError> {
+        request.validate(self.limits)?;
         let request = request.into_process();
         request.validate(self.limits)?;
-        let _permit = self.prepare_launch(companion, cancellation)?;
-        process::run_captured(companion, request, cancellation, self.limits).map(McpResponse::from)
+        let permit = self.prepare_mcp_launch(companion, cancellation)?;
+        let output = process::launch_mcp(
+            companion,
+            request,
+            cancellation.clone(),
+            self.limits,
+            permit,
+        )?;
+        Ok(McpResponse {
+            response_frame: output.response_frame,
+            outcome: Some(output.outcome),
+            lifecycle_owner: Some(output.lifecycle_owner),
+        })
     }
 
     pub fn launch_maintenance(
@@ -171,7 +216,7 @@ impl CompanionBridge {
         Ok(MaintenanceResponse { accepted: true })
     }
 
-    /// Launches a Protocol V3 CLI operation with the caller's existing standard
+    /// Launches a Protocol V4 CLI operation with the caller's existing standard
     /// streams inherited directly. Once admitted, the child runs until it exits
     /// or cancellation terminates its process tree.
     pub fn launch_cli(
@@ -187,11 +232,11 @@ impl CompanionBridge {
         Ok(CliResponse { exit })
     }
 
-    fn prepare_launch<'a>(
-        &'a self,
+    fn prepare_launch(
+        &self,
         companion: &InstalledCompanion,
         cancellation: &CancellationToken,
-    ) -> Result<ConcurrencyPermit<'a>, BridgeError> {
+    ) -> Result<ConcurrencyPermit, BridgeError> {
         validate_executable(companion)?;
         let permit = self
             .gate
@@ -203,6 +248,23 @@ impl CompanionBridge {
         if cancellation.is_cancelled() {
             return Err(BridgeError::CancelledBeforeSpawn);
         }
+        Ok(permit)
+    }
+
+    fn prepare_mcp_launch(
+        &self,
+        companion: &InstalledCompanion,
+        cancellation: &CancellationToken,
+    ) -> Result<ConcurrencyPermit, BridgeError> {
+        validate_executable(companion)?;
+        let permit = self
+            .gate
+            .acquire(cancellation, self.limits.admission_wait)?;
+        if cancellation.is_cancelled() {
+            return Err(BridgeError::CancelledBeforeSpawn);
+        }
+        // MCP V4's versioned invocation is its protocol gate. CLI and
+        // maintenance retain their separate captured handshake.
         Ok(permit)
     }
 
@@ -232,9 +294,9 @@ impl CompanionBridge {
         }
         let observed = parse_handshake_receipt(&output.stdout)
             .ok_or(BridgeError::InvalidProtocolResponse("handshake"))?;
-        if observed != CORE_PRO_PROTOCOL_VERSION {
+        if observed != CORE_COMPANION_PROTOCOL_VERSION {
             return Err(BridgeError::ProtocolMismatch {
-                expected: CORE_PRO_PROTOCOL_VERSION,
+                expected: CORE_COMPANION_PROTOCOL_VERSION,
                 observed,
             });
         }
@@ -299,10 +361,10 @@ impl ConcurrencyGate {
     }
 
     fn acquire(
-        &self,
+        self: &Arc<Self>,
         cancellation: &CancellationToken,
         timeout: Duration,
-    ) -> Result<ConcurrencyPermit<'_>, BridgeError> {
+    ) -> Result<ConcurrencyPermit, BridgeError> {
         let started = Instant::now();
         let mut active = self.active.lock().map_err(|_| BridgeError::WorkerFailed)?;
         while *active >= self.maximum {
@@ -321,15 +383,17 @@ impl ConcurrencyGate {
             active = next;
         }
         *active += 1;
-        Ok(ConcurrencyPermit { gate: self })
+        Ok(ConcurrencyPermit {
+            gate: Arc::clone(self),
+        })
     }
 }
 
-struct ConcurrencyPermit<'a> {
-    gate: &'a ConcurrencyGate,
+struct ConcurrencyPermit {
+    gate: Arc<ConcurrencyGate>,
 }
 
-impl Drop for ConcurrencyPermit<'_> {
+impl Drop for ConcurrencyPermit {
     fn drop(&mut self) {
         if let Ok(mut active) = self.gate.active.lock() {
             *active = active.saturating_sub(1);

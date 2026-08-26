@@ -1,7 +1,7 @@
 use std::{
-    io,
-    os::unix::process::CommandExt as _,
-    process::{Child, Command},
+    io::{self, Read},
+    os::unix::{io::AsRawFd as _, process::CommandExt as _},
+    process::{Child, ChildStderr, ChildStdin, ChildStdout, Command},
 };
 
 use crate::BridgeError;
@@ -124,4 +124,34 @@ pub(super) fn spawn(command: &mut Command) -> Result<(Child, ProcessTree), Bridg
         process_group: child.id(),
     };
     Ok((child, tree))
+}
+
+pub(super) enum PipeRead {
+    Data(usize),
+    Pending,
+    Closed,
+}
+
+pub(super) fn prepare_pipes(
+    stdin: &ChildStdin,
+    stdout: &ChildStdout,
+    stderr: &ChildStderr,
+) -> io::Result<()> {
+    for fd in [stdin.as_raw_fd(), stdout.as_raw_fd(), stderr.as_raw_fd()] {
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        if flags == -1 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1
+        {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn read_pipe(pipe: &mut impl Read, buffer: &mut [u8]) -> io::Result<PipeRead> {
+    match pipe.read(buffer) {
+        Ok(0) => Ok(PipeRead::Closed),
+        Ok(read) => Ok(PipeRead::Data(read)),
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(PipeRead::Pending),
+        Err(error) => Err(error),
+    }
 }

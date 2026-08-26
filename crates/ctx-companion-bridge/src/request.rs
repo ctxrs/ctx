@@ -79,6 +79,18 @@ impl McpRequest {
         &mut self.environment
     }
 
+    pub(crate) fn validate(&self, limits: LimitConfiguration) -> Result<(), BridgeError> {
+        if self.input.len() > limits.input_bytes {
+            return Err(BridgeError::Limit("input bytes"));
+        }
+        if self.input.last() != Some(&b'\n')
+            || self.input[..self.input.len().saturating_sub(1)].contains(&b'\n')
+        {
+            return Err(BridgeError::InvalidProtocolResponse("MCP request frame"));
+        }
+        Ok(())
+    }
+
     pub(crate) fn into_process(self) -> CapturedProcessRequest {
         CapturedProcessRequest {
             control: ProcessRequest {

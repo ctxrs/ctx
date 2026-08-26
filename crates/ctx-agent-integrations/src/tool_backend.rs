@@ -274,12 +274,72 @@ pub enum OpaqueMcpProxyError {
     CompanionIncompatible,
 }
 
+/// The closed, product-neutral result of attempting final MCP output delivery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpaqueMcpDeliveryOutcome {
+    WrittenAndFlushed,
+    OutputFailed,
+}
+
+/// One bounded companion response awaiting its final output-delivery result.
+pub struct OpaqueMcpProxyResponse {
+    response: Vec<u8>,
+    completion: Option<Box<dyn FnOnce(OpaqueMcpDeliveryOutcome) + Send>>,
+}
+
+impl OpaqueMcpProxyResponse {
+    pub fn new(
+        response: Vec<u8>,
+        completion: impl FnOnce(OpaqueMcpDeliveryOutcome) + Send + 'static,
+    ) -> Option<Self> {
+        (response.len() <= crate::mcp::MCP_MAX_LINE_BYTES).then(|| Self {
+            response,
+            completion: Some(Box::new(completion)),
+        })
+    }
+
+    pub fn response_bytes(&self) -> &[u8] {
+        &self.response
+    }
+
+    /// Records the explicit client-delivery outcome. The callback is
+    /// intentionally infallible: any companion finalization failure happens
+    /// after the product response was already written and cannot change that
+    /// result. Direct bridge callers use `McpResponse::finish` to observe it.
+    pub fn finish(mut self, outcome: OpaqueMcpDeliveryOutcome) {
+        if let Some(completion) = self.completion.take() {
+            completion(outcome);
+        }
+    }
+}
+
+impl fmt::Debug for OpaqueMcpProxyResponse {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OpaqueMcpProxyResponse")
+            .field("response_bytes", &self.response.len())
+            .field("unfinished", &self.completion.is_some())
+            .finish()
+    }
+}
+
+impl Drop for OpaqueMcpProxyResponse {
+    fn drop(&mut self) {
+        // A dropped proxy response has an unknown client outcome. Only an
+        // explicit `finish(OutputFailed)` may report that terminal receipt.
+        self.completion.take();
+    }
+}
+
 /// Product execution boundary. Implementations remain in the owning application.
 pub trait ToolBackend: Send + Sync {
     fn execute(&self, operation: ToolOperation) -> Result<ToolOutcome, ToolExecutionError>;
 
     /// Proxies one already-framed companion-owned MCP request without parsing its arguments.
-    fn proxy_companion_mcp(&self, request: &[u8]) -> Result<Vec<u8>, OpaqueMcpProxyError>;
+    fn proxy_companion_mcp(
+        &self,
+        request: &[u8],
+    ) -> Result<OpaqueMcpProxyResponse, OpaqueMcpProxyError>;
 
     /// Resolves an MCP provider spelling through the application's provider registry.
     fn parse_provider(&self, value: &str) -> Option<CaptureProvider>;
@@ -388,3 +448,41 @@ impl fmt::Display for ToolBackendError {
 }
 
 impl std::error::Error for ToolBackendError {}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use super::{OpaqueMcpDeliveryOutcome, OpaqueMcpProxyResponse};
+
+    #[test]
+    fn opaque_mcp_completion_is_exactly_once() {
+        let outcomes = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&outcomes);
+        let response = OpaqueMcpProxyResponse::new(b"opaque\n".to_vec(), move |outcome| {
+            recorded.lock().unwrap().push(outcome);
+        })
+        .unwrap();
+
+        response.finish(OpaqueMcpDeliveryOutcome::WrittenAndFlushed);
+
+        assert_eq!(
+            *outcomes.lock().unwrap(),
+            [OpaqueMcpDeliveryOutcome::WrittenAndFlushed]
+        );
+    }
+
+    #[test]
+    fn dropped_opaque_mcp_response_has_no_terminal_completion() {
+        let outcomes = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&outcomes);
+        let response = OpaqueMcpProxyResponse::new(b"opaque\n".to_vec(), move |outcome| {
+            recorded.lock().unwrap().push(outcome);
+        })
+        .unwrap();
+
+        drop(response);
+
+        assert!(outcomes.lock().unwrap().is_empty());
+    }
+}

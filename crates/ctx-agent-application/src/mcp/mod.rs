@@ -13,7 +13,10 @@ use ctx_agent_integrations::{
         McpInputLine, McpServerIdentity, McpToolKind, McpUsage, RequestDescriptor,
         MCP_MAX_LINE_BYTES, MCP_PRESENTATION_MAX_OUTPUT_BYTES,
     },
-    tool_backend::{OpaqueMcpProxyError, ToolBackend, ToolSearchFailurePhase, ToolUsageFacts},
+    tool_backend::{
+        OpaqueMcpDeliveryOutcome, OpaqueMcpProxyError, ToolBackend, ToolSearchFailurePhase,
+        ToolUsageFacts,
+    },
 };
 use ctx_client_observability::analytics::{McpErrorClassV1, McpStopReasonV1, Outcome};
 use serde_json::{json, Value};
@@ -137,6 +140,7 @@ where
             return Ok(());
         };
         let request_started = Instant::now();
+        let mut companion_completion = None;
         let (handled, descriptor) = match input {
             McpInputLine::Line(line) => {
                 let trimmed = line.trim();
@@ -153,28 +157,50 @@ where
                                     if operation.is_companion_owned()
                             )
                         {
-                            let encoded =
-                                match backend.proxy_companion_mcp(line.as_bytes()) {
-                                    Ok(response) => response,
-                                    Err(error) => encode_response_line(
+                            let response = match backend.proxy_companion_mcp(line.as_bytes()) {
+                                Ok(response) => response,
+                                Err(error) => {
+                                    let encoded = encode_response_line(
                                         &companion_proxy_error_response(&message, error),
                                     )
-                                    .map(String::into_bytes)
                                     .map_err(|error| McpServeFailure {
                                         reason: McpStopReasonV1::ResponseSerializeError,
                                         error: error.into(),
-                                    })?,
-                                };
-                            stdout
-                                .write_all(&encoded)
-                                .map_err(|error| McpServeFailure {
+                                    })?;
+                                    stdout.write_all(encoded.as_bytes()).map_err(|error| {
+                                        McpServeFailure {
+                                            reason: McpStopReasonV1::StdoutWriteError,
+                                            error: error.into(),
+                                        }
+                                    })?;
+                                    stdout.flush().map_err(|error| McpServeFailure {
+                                        reason: McpStopReasonV1::StdoutFlushError,
+                                        error: error.into(),
+                                    })?;
+                                    telemetry.record_delivered(
+                                        descriptor,
+                                        None,
+                                        None,
+                                        request_started.elapsed(),
+                                    );
+                                    continue;
+                                }
+                            };
+                            if let Err(error) = stdout.write_all(response.response_bytes()) {
+                                response.finish(OpaqueMcpDeliveryOutcome::OutputFailed);
+                                return Err(McpServeFailure {
                                     reason: McpStopReasonV1::StdoutWriteError,
                                     error: error.into(),
-                                })?;
-                            stdout.flush().map_err(|error| McpServeFailure {
-                                reason: McpStopReasonV1::StdoutFlushError,
-                                error: error.into(),
-                            })?;
+                                });
+                            }
+                            if let Err(error) = stdout.flush() {
+                                response.finish(OpaqueMcpDeliveryOutcome::OutputFailed);
+                                return Err(McpServeFailure {
+                                    reason: McpStopReasonV1::StdoutFlushError,
+                                    error: error.into(),
+                                });
+                            }
+                            response.finish(OpaqueMcpDeliveryOutcome::WrittenAndFlushed);
                             telemetry.record_delivered(
                                 descriptor,
                                 None,
@@ -196,7 +222,7 @@ where
                         );
                         if *initialized && descriptor == RequestDescriptor::ToolsList {
                             if let Some(response) = handled.value.as_mut() {
-                                append_companion_tool_definitions(
+                                companion_completion = append_companion_tool_definitions(
                                     &message,
                                     line.as_bytes(),
                                     response,
@@ -292,6 +318,9 @@ where
                     error: error.into(),
                 });
             }
+            if let Some(completion) = companion_completion.take() {
+                completion.finish(OpaqueMcpDeliveryOutcome::WrittenAndFlushed);
+            }
             mark_search_output_completed(&mut delivered_usage, output_started.elapsed());
             let duration = request_started.elapsed();
             let telemetry_usage = delivered_usage.as_ref().map(|usage| usage.facts);
@@ -344,35 +373,33 @@ fn append_companion_tool_definitions<B: ToolBackend>(
     raw_request: &[u8],
     response: &mut Value,
     backend: &B,
-) {
-    let Some(core_tools) = response.pointer("/result/tools").and_then(Value::as_array) else {
-        return;
-    };
-    let Some(mut merged_tools) = validated_core_tools(core_tools) else {
-        return;
-    };
+) -> Option<ctx_agent_integrations::tool_backend::OpaqueMcpProxyResponse> {
+    let core_tools = response
+        .pointer("/result/tools")
+        .and_then(Value::as_array)?;
+    let mut merged_tools = validated_core_tools(core_tools)?;
     let Ok(companion_response) = backend.proxy_companion_mcp(raw_request) else {
-        return;
+        return None;
     };
-    let Some(companion_tools) =
-        validated_companion_tools(&companion_response, message.get("id"), &merged_tools)
-    else {
-        return;
-    };
+    let companion_tools = validated_companion_tools(
+        companion_response.response_bytes(),
+        message.get("id"),
+        &merged_tools,
+    )?;
     merged_tools.extend(companion_tools);
 
     let mut merged_response = response.clone();
-    let Some(tools) = merged_response
+    let tools = merged_response
         .pointer_mut("/result/tools")
-        .and_then(Value::as_array_mut)
-    else {
-        return;
-    };
+        .and_then(Value::as_array_mut)?;
     *tools = merged_tools;
     let within_bound = serde_json::to_vec(&merged_response)
         .is_ok_and(|encoded| encoded.len().saturating_add(1) <= MCP_PRESENTATION_MAX_OUTPUT_BYTES);
     if within_bound {
         *response = merged_response;
+        Some(companion_response)
+    } else {
+        None
     }
 }
 

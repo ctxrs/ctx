@@ -55,11 +55,12 @@ impl Fixture {
             &pro,
             br##"#!/bin/sh
 printf '%s' "$0" > "${0}.launched"
-if [ "$1" = "--ctx-pro-protocol-v3" ] && [ "$2" = "handshake" ]; then
-  printf '{"protocol_version":3}\n'
+printf '%s\n' "$2" >> "${0}.commands"
+if [ "$1" = "--ctx-pro-protocol-v4" ] && [ "$2" = "handshake" ]; then
+  printf '{"protocol_version":4}\n'
   exit 0
 fi
-if [ "$1" != "--ctx-pro-protocol-v3" ]; then
+if [ "$1" != "--ctx-pro-protocol-v4" ]; then
   exit 90
 fi
 case "$2" in
@@ -104,23 +105,29 @@ fn launch_mcp_with(
 }
 
 #[test]
-fn protocol_v3_mcp_request_and_response_are_sufficient() {
-    let fixture =
-        Fixture::new(b"#!/bin/sh\nIFS= read -r value\nprintf 'compatible:%s' \"$value\"\n");
-    let output = CompanionBridge::default()
+fn protocol_v4_mcp_request_and_response_are_sufficient() {
+    let fixture = Fixture::new(
+        b"#!/usr/bin/python3\nimport os,sys\nrequest=sys.stdin.buffer.readline()\nos.write(1,b'compatible:'+request)\nreceipt=sys.stdin.buffer.readline()\nraise SystemExit(0 if receipt == b'written_and_flushed\\n' else 9)\n",
+    );
+    let response = CompanionBridge::default()
         .launch_mcp(
             &fixture.companion(),
             McpRequest::new(b"ok\n"),
             &CancellationToken::new(),
         )
         .unwrap();
-    assert_eq!(output.exit_class(), ExitClass::Success);
-    assert_eq!(output.stdout(), b"compatible:ok");
-    assert!(output.stderr().is_empty());
+    assert_eq!(response.response_frame(), b"compatible:ok\n");
+    response
+        .finish(McpFinishOutcome::WrittenAndFlushed)
+        .unwrap();
+    assert_eq!(
+        fs::read_to_string(fixture.pro.with_extension("commands")).unwrap(),
+        "mcp-serve\n"
+    );
 }
 
 #[test]
-fn protocol_v3_cli_request_is_typed_and_launches_directly() {
+fn protocol_v4_cli_request_is_typed_and_launches_directly() {
     let prior_endpoint = std::env::var_os("CTX_ANALYTICS_ENDPOINT");
     std::env::set_var(
         "CTX_ANALYTICS_ENDPOINT",
@@ -156,7 +163,7 @@ fn protocol_v3_cli_request_is_typed_and_launches_directly() {
 }
 
 #[test]
-fn protocol_v3_maintenance_response_is_closed_and_typed() {
+fn protocol_v4_maintenance_response_is_closed_and_typed() {
     let fixture = Fixture::new(
         b"#!/bin/sh\n/usr/bin/sleep 0.15\nprintf '{\"accepted\":true,\"schema_version\":1}\\n'\n",
     );
@@ -193,11 +200,7 @@ fn protocol_mismatch_is_typed_and_prevents_operation() {
         .as_bytes(),
     );
     let error = CompanionBridge::default()
-        .launch_mcp(
-            &InstalledCompanion::new(&pro),
-            McpRequest::new(Vec::new()),
-            &CancellationToken::new(),
-        )
+        .handshake(&InstalledCompanion::new(&pro), &CancellationToken::new())
         .unwrap_err();
     assert!(matches!(
         error,
@@ -218,11 +221,7 @@ fn pre_handshake_exit_is_a_launch_failure_with_bounded_stderr() {
         b"#!/bin/sh\nprintf 'loader diagnostic' >&2\nexit 70\n",
     );
     let error = CompanionBridge::default()
-        .launch_mcp(
-            &InstalledCompanion::new(&pro),
-            McpRequest::new(Vec::new()),
-            &CancellationToken::new(),
-        )
+        .handshake(&InstalledCompanion::new(&pro), &CancellationToken::new())
         .unwrap_err();
     assert!(matches!(
         error,
@@ -241,7 +240,7 @@ fn missing_pro_is_distinct_from_protocol_mismatch() {
     let error = CompanionBridge::default()
         .launch_mcp(
             &InstalledCompanion::new(&missing),
-            McpRequest::new(Vec::new()),
+            McpRequest::new(b"\n"),
             &CancellationToken::new(),
         )
         .unwrap_err();
@@ -254,17 +253,19 @@ fn missing_pro_is_distinct_from_protocol_mismatch() {
 #[test]
 fn launch_environment_contains_no_install_context_authority() {
     let fixture = Fixture::new(
-        b"#!/usr/bin/python3\nimport os\nforbidden=['CTX_PRO_PATH','CTX_PRO_INSTALL_CONTEXT','CTX_DATA_ROOT','CTX_PRO_DATA_ROOT','CTX_MANAGED_PAIR_CHANNEL','CTX_PRO_INSTALLATION_ID','CTX_MANAGED_PAIR_INVOCATION_FINGERPRINT','CTX_MANAGED_PAIR_CORE_CAPABILITY_FINGERPRINT','CTX_RELEASE_BUILD_SOURCE_COMMIT']\npresent=[name for name in forbidden if name in os.environ]\nos.write(1, '\\n'.join(present).encode())\n",
+        b"#!/usr/bin/python3\nimport os,sys\nsys.stdin.buffer.readline()\nforbidden=['CTX_PRO_PATH','CTX_PRO_INSTALL_CONTEXT','CTX_DATA_ROOT','CTX_PRO_DATA_ROOT','CTX_MANAGED_PAIR_CHANNEL','CTX_PRO_INSTALLATION_ID','CTX_MANAGED_PAIR_INVOCATION_FINGERPRINT','CTX_MANAGED_PAIR_CORE_CAPABILITY_FINGERPRINT','CTX_RELEASE_BUILD_SOURCE_COMMIT']\npresent=[name for name in forbidden if name in os.environ]\nos.write(1, ('ok' if not present else ','.join(present)).encode()+b'\\n')\nreceipt=sys.stdin.buffer.readline()\nraise SystemExit(0 if receipt == b'written_and_flushed\\n' else 9)\n",
     );
-    let output = CompanionBridge::default()
+    let response = CompanionBridge::default()
         .launch_mcp(
             &fixture.companion(),
-            McpRequest::new(Vec::new()),
+            McpRequest::new(b"request\n"),
             &CancellationToken::new(),
         )
         .unwrap();
-    assert_eq!(output.exit_class(), ExitClass::Success);
-    assert!(output.stdout().is_empty());
+    assert_eq!(response.response_frame(), b"ok\n");
+    response
+        .finish(McpFinishOutcome::WrittenAndFlushed)
+        .unwrap();
 }
 
 #[test]
@@ -273,7 +274,7 @@ fn relative_and_directory_pro_paths_have_typed_errors() {
     assert!(matches!(
         CompanionBridge::default().launch_mcp(
             &relative,
-            McpRequest::new(Vec::new()),
+            McpRequest::new(b"request\n"),
             &CancellationToken::new(),
         ),
         Err(BridgeError::InvalidExecutablePath)
@@ -284,7 +285,7 @@ fn relative_and_directory_pro_paths_have_typed_errors() {
     assert!(matches!(
         CompanionBridge::default().launch_mcp(
             &directory,
-            McpRequest::new(Vec::new()),
+            McpRequest::new(b"request\n"),
             &CancellationToken::new(),
         ),
         Err(BridgeError::ExecutableNotFile { .. })
@@ -294,9 +295,9 @@ fn relative_and_directory_pro_paths_have_typed_errors() {
 #[test]
 fn typed_environment_allowlist_is_preserved_and_ambient_is_cleared() {
     let fixture = Fixture::new(
-        b"#!/usr/bin/python3\nimport os\nnames=['PATH','LANG','HOME','TERM','COLORTERM','NO_COLOR','CLICOLOR','CLICOLOR_FORCE','CI','CTX_ANALYTICS_ENABLED']\nvalues=[os.getenv(name,'<missing>') for name in names]\nos.write(1, '\\0'.join(values).encode())\n",
+        b"#!/usr/bin/python3\nimport os,sys\nsys.stdin.buffer.readline()\nnames=['PATH','LANG','HOME','TERM','COLORTERM','NO_COLOR','CLICOLOR','CLICOLOR_FORCE','CI','CTX_ANALYTICS_ENABLED']\nvalues=[os.getenv(name,'<missing>') for name in names]\nos.write(1, '\\0'.join(values).encode()+b'\\n')\nreceipt=sys.stdin.buffer.readline()\nraise SystemExit(0 if receipt == b'written_and_flushed\\n' else 9)\n",
     );
-    let mut request = McpRequest::new(Vec::new());
+    let mut request = McpRequest::new(b"request\n");
     request
         .environment_mut()
         .set(EnvironmentKey::Home, OsStr::new("/home/tester"))
@@ -312,14 +313,15 @@ fn typed_environment_allowlist_is_preserved_and_ambient_is_cleared() {
         .set(EnvironmentKey::CliColorForce, OsStr::new("1"))
         .set(EnvironmentKey::Ci, OsStr::new("true"))
         .set(EnvironmentKey::AnalyticsEnabled, OsStr::new("false"));
-    let output = launch_mcp_with(
+    let response = launch_mcp_with(
         &fixture,
         request,
         LimitConfiguration::default(),
         &CancellationToken::new(),
     )
     .unwrap();
-    let fields: Vec<_> = output.stdout().split(|byte| *byte == 0).collect();
+    let frame = response.response_frame().strip_suffix(b"\n").unwrap();
+    let fields: Vec<_> = frame.split(|byte| *byte == 0).collect();
     assert_eq!(
         fields,
         [
@@ -335,25 +337,27 @@ fn typed_environment_allowlist_is_preserved_and_ambient_is_cleared() {
             b"false",
         ]
     );
+    response
+        .finish(McpFinishOutcome::WrittenAndFlushed)
+        .unwrap();
 }
 
 #[test]
-fn exit_class_and_binary_output_are_preserved() {
+fn output_failed_sends_the_exact_closed_receipt() {
     let fixture = Fixture::new(
-        b"#!/usr/bin/python3\nimport os\nos.write(1,b'out\\xff')\nos.write(2,b'err\\xfe')\nraise SystemExit(17)\n",
+        b"#!/usr/bin/python3\nimport os,pathlib,sys\nsys.stdin.buffer.readline()\nos.write(1,b'opaque\\n')\nreceipt=sys.stdin.buffer.readline()\npathlib.Path(sys.argv[0]).with_suffix('.receipt').write_bytes(receipt)\nraise SystemExit(0 if receipt == b'output_failed\\n' else 17)\n",
     );
-    let output = launch_mcp_with(
+    let receipt = fixture.pro.with_extension("receipt");
+    let response = launch_mcp_with(
         &fixture,
-        McpRequest::new(Vec::new()),
+        McpRequest::new(b"request\n"),
         LimitConfiguration::default(),
         &CancellationToken::new(),
     )
     .unwrap();
-    assert_eq!(output.exit_class(), ExitClass::Code(17));
-    assert_eq!(output.stdout(), b"out\xff");
-    assert_eq!(output.stderr(), b"err\xfe");
-    assert!(!output.stdout_truncated());
-    assert!(!output.stderr_truncated());
+    assert_eq!(response.response_frame(), b"opaque\n");
+    response.finish(McpFinishOutcome::OutputFailed).unwrap();
+    assert_eq!(fs::read(receipt).unwrap(), b"output_failed\n");
 }
 
 #[test]
@@ -377,7 +381,7 @@ fn control_input_and_output_bounds_fail_closed() {
         Err(BridgeError::Limit("input bytes"))
     ));
 
-    let mut oversized_control = McpRequest::new(Vec::new());
+    let mut oversized_control = McpRequest::new(b"\n");
     oversized_control
         .environment_mut()
         .set(EnvironmentKey::Home, "x".repeat(512));
@@ -391,7 +395,7 @@ fn control_input_and_output_bounds_fail_closed() {
         Err(BridgeError::Limit("control bytes"))
     ));
 
-    let mut invalid_environment_name = McpRequest::new(Vec::new());
+    let mut invalid_environment_name = McpRequest::new(b"\n");
     invalid_environment_name
         .environment_mut()
         .set_named("INVALID=NAME", "value");
@@ -405,19 +409,67 @@ fn control_input_and_output_bounds_fail_closed() {
         Err(BridgeError::InvalidEnvironmentName)
     ));
 
-    let output = launch_mcp_with(
+    let error = launch_mcp_with(
         &fixture,
-        McpRequest::new(Vec::new()),
+        McpRequest::new(b"ok\n"),
         small,
         &CancellationToken::new(),
     )
-    .unwrap();
-    assert_eq!(
-        output.exit_class(),
-        ExitClass::Terminated(TerminationReason::StdoutLimit)
+    .unwrap_err();
+    assert!(matches!(error, BridgeError::Limit("stdout bytes")));
+
+    assert!(matches!(
+        launch_mcp_with(
+            &fixture,
+            McpRequest::new(b"bad"),
+            small,
+            &CancellationToken::new(),
+        ),
+        Err(BridgeError::InvalidProtocolResponse("MCP request frame"))
+    ));
+}
+
+#[test]
+fn missing_extra_and_stderr_output_fail_closed() {
+    let eof = Fixture::new(b"#!/bin/sh\nIFS= read -r _\nexit 0\n");
+    assert!(matches!(
+        launch_mcp_with(
+            &eof,
+            McpRequest::new(b"request\n"),
+            LimitConfiguration::default(),
+            &CancellationToken::new(),
+        ),
+        Err(BridgeError::InvalidProtocolResponse("MCP response frame"))
+            | Err(BridgeError::McpExchangeFailed {
+                exit: ExitClass::Success
+            })
+    ));
+
+    let extra = Fixture::new(
+        b"#!/usr/bin/python3\nimport os,sys\nsys.stdin.buffer.readline()\nos.write(1,b'first\\nsecond\\n')\nsys.stdin.buffer.readline()\n",
     );
-    assert_eq!(output.stdout(), vec![b'x'; 32]);
-    assert!(output.stdout_truncated());
+    assert!(matches!(
+        launch_mcp_with(
+            &extra,
+            McpRequest::new(b"request\n"),
+            LimitConfiguration::default(),
+            &CancellationToken::new(),
+        ),
+        Err(BridgeError::InvalidProtocolResponse("MCP response frame"))
+    ));
+
+    let stderr = Fixture::new(
+        b"#!/bin/sh\nIFS= read -r _\nprintf diagnostic >&2\nprintf 'response\\n'\nIFS= read -r _\n",
+    );
+    assert!(matches!(
+        launch_mcp_with(
+            &stderr,
+            McpRequest::new(b"request\n"),
+            LimitConfiguration::default(),
+            &CancellationToken::new(),
+        ),
+        Err(BridgeError::InvalidProtocolResponse("MCP stderr"))
+    ));
 }
 
 #[test]
@@ -482,43 +534,42 @@ fn streaming_child_lifetime_is_independent_of_captured_wall_time() {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn timeout_terminates_the_descendant_process_group() {
-    let fixture = Fixture::new(b"#!/bin/sh\n/usr/bin/sleep 60 &\nprintf '%s\\n' \"$!\"\nwait\n");
-    let output = launch_mcp_with(
+fn known_outcome_after_wall_deadline_writes_ack_before_teardown() {
+    let fixture = Fixture::new(
+        b"#!/bin/sh\nIFS= read -r _\n/usr/bin/sleep 60 &\nprintf '%s\\n' \"$!\"\nIFS= read -r receipt\nprintf '%s\\n' \"$receipt\" > \"${0}.receipt\"\n/usr/bin/sleep 0.15\nexit 0\n",
+    );
+    let receipt = fixture.pro.with_extension("operation.receipt");
+    let response = launch_mcp_with(
         &fixture,
-        McpRequest::new(Vec::new()),
+        McpRequest::new(b"request\n"),
         LimitConfiguration {
-            captured_wall_time: Duration::from_millis(150),
+            captured_wall_time: Duration::from_millis(100),
             ..LimitConfiguration::default()
         },
         &CancellationToken::new(),
     )
     .unwrap();
-    assert_eq!(
-        output.exit_class(),
-        ExitClass::Terminated(TerminationReason::WallTime)
-    );
-    let pid = String::from_utf8(output.stdout().to_vec())
-        .unwrap()
-        .trim()
-        .parse()
+    let pid = response_pid(&response);
+    let started = Instant::now();
+    response
+        .finish(McpFinishOutcome::WrittenAndFlushed)
         .unwrap();
+    assert!(started.elapsed() >= Duration::from_millis(100));
+    assert_eq!(fs::read(receipt).unwrap(), b"written_and_flushed\n");
     assert_process_stopped(pid);
 }
 
 #[cfg(target_os = "linux")]
 #[test]
-fn cancellation_terminates_the_descendant_process_group() {
-    let fixture = Fixture::new(b"#!/bin/sh\n/usr/bin/sleep 60 &\nprintf '%s\\n' \"$!\"\nwait\n");
+fn queued_outcome_wins_over_cancellation_and_writes_nack() {
+    let fixture = Fixture::new(
+        b"#!/bin/sh\nIFS= read -r _\n/usr/bin/sleep 60 &\nprintf '%s\\n' \"$!\"\nIFS= read -r receipt\nprintf '%s\\n' \"$receipt\" > \"${0}.receipt\"\nexit 0\n",
+    );
+    let receipt = fixture.pro.with_extension("operation.receipt");
     let cancellation = CancellationToken::new();
-    let trigger = cancellation.clone();
-    let canceller = thread::spawn(move || {
-        thread::sleep(Duration::from_millis(100));
-        trigger.cancel();
-    });
-    let output = launch_mcp_with(
+    let response = launch_mcp_with(
         &fixture,
-        McpRequest::new(Vec::new()),
+        McpRequest::new(b"request\n"),
         LimitConfiguration {
             captured_wall_time: Duration::from_secs(2),
             ..LimitConfiguration::default()
@@ -526,17 +577,102 @@ fn cancellation_terminates_the_descendant_process_group() {
         &cancellation,
     )
     .unwrap();
-    canceller.join().unwrap();
-    assert_eq!(
-        output.exit_class(),
-        ExitClass::Terminated(TerminationReason::Cancelled)
+    let pid = response_pid(&response);
+    cancellation.cancel();
+    response.finish(McpFinishOutcome::OutputFailed).unwrap();
+    assert_eq!(fs::read(receipt).unwrap(), b"output_failed\n");
+    assert_process_stopped(pid);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn dropping_pending_response_is_unknown_and_sends_no_terminal_receipt() {
+    let fixture = Fixture::new(
+        b"#!/bin/sh\nIFS= read -r _\n/usr/bin/sleep 60 &\nprintf '%s\\n' \"$!\"\nif IFS= read -r receipt; then printf '%s\\n' \"$receipt\" > \"${0}.receipt\"; fi\nwait\n",
     );
-    let pid = String::from_utf8(output.stdout().to_vec())
+    let response = launch_mcp_with(
+        &fixture,
+        McpRequest::new(b"request\n"),
+        LimitConfiguration::default(),
+        &CancellationToken::new(),
+    )
+    .unwrap();
+    let operation = fixture.pro.with_extension("operation");
+    let pid = response_pid(&response);
+    let started = Instant::now();
+    drop(response);
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert!(!PathBuf::from(format!("{}.receipt", operation.display())).exists());
+    assert_process_stopped(pid);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn dropping_with_an_escaped_pipe_descendant_is_bounded_and_releases_the_permit() {
+    let fixture = Fixture::new(
+        b"#!/usr/bin/python3\nimport os,pathlib,subprocess,sys\nsys.stdin.buffer.readline()\nchild=subprocess.Popen(['/usr/bin/sleep','60'],start_new_session=True)\nos.write(1,f'{child.pid}\\n'.encode())\nreceipt=sys.stdin.buffer.readline()\npathlib.Path(sys.argv[0]).with_suffix('.receipt').write_bytes(receipt)\n",
+    );
+    let bridge = CompanionBridge::new(
+        BridgeLimits::new(LimitConfiguration {
+            concurrent_processes: 1,
+            admission_wait: Duration::from_millis(100),
+            ..LimitConfiguration::default()
+        })
+        .unwrap(),
+    );
+    let response = bridge
+        .launch_mcp(
+            &fixture.companion(),
+            McpRequest::new(b"request\n"),
+            &CancellationToken::new(),
+        )
+        .unwrap();
+    let escaped_pid = response_pid(&response);
+    let receipt = fixture.pro.with_extension("receipt");
+    let started = Instant::now();
+    drop(response);
+    assert!(started.elapsed() < Duration::from_secs(1));
+
+    let permit = bridge
+        .gate
+        .acquire(&CancellationToken::new(), Duration::from_millis(100))
+        .unwrap();
+    drop(permit);
+
+    assert!(!receipt.exists());
+    unsafe {
+        libc::kill(escaped_pid as libc::pid_t, libc::SIGKILL);
+    }
+    assert_process_stopped(escaped_pid);
+}
+
+#[test]
+fn receipt_write_failure_is_typed_and_still_reaps_the_child() {
+    let fixture = Fixture::new(
+        b"#!/usr/bin/python3\nimport os,sys,time\nsys.stdin.buffer.readline()\nos.write(1,b'response\\n')\nos.close(0)\ntime.sleep(60)\n",
+    );
+    let response = launch_mcp_with(
+        &fixture,
+        McpRequest::new(b"request\n"),
+        LimitConfiguration::default(),
+        &CancellationToken::new(),
+    )
+    .unwrap();
+    let started = Instant::now();
+    let error = response
+        .finish(McpFinishOutcome::WrittenAndFlushed)
+        .unwrap_err();
+    assert!(matches!(error, BridgeError::Transport(_)));
+    assert!(started.elapsed() < Duration::from_secs(1));
+}
+
+#[cfg(target_os = "linux")]
+fn response_pid(response: &McpResponse) -> u32 {
+    String::from_utf8(response.response_frame().to_vec())
         .unwrap()
         .trim()
         .parse()
-        .unwrap();
-    assert_process_stopped(pid);
+        .unwrap()
 }
 
 #[cfg(target_os = "linux")]
@@ -555,7 +691,7 @@ fn assert_process_stopped(pid: u32) {
 
 #[test]
 fn admission_queue_wait_remains_bounded() {
-    let gate = ConcurrencyGate::new(1);
+    let gate = Arc::new(ConcurrencyGate::new(1));
     let cancellation = CancellationToken::new();
     let _permit = gate.acquire(&cancellation, Duration::from_secs(1)).unwrap();
     let started = Instant::now();
@@ -571,7 +707,7 @@ fn admission_queue_wait_remains_bounded() {
 #[test]
 fn configured_concurrency_is_a_real_gate() {
     let fixture = Arc::new(Fixture::new(
-        b"#!/bin/sh\n/usr/bin/sleep 0.2\nprintf done\n",
+        b"#!/bin/sh\nIFS= read -r _\n/usr/bin/sleep 0.2\nprintf 'done\\n'\nIFS= read -r receipt\n[ \"$receipt\" = written_and_flushed ]\n",
     ));
     let bridge = Arc::new(CompanionBridge::new(
         BridgeLimits::new(LimitConfiguration {
@@ -587,17 +723,22 @@ fn configured_concurrency_is_a_real_gate() {
         let fixture = Arc::clone(&fixture);
         let bridge = Arc::clone(&bridge);
         workers.push(thread::spawn(move || {
-            bridge
+            let response = bridge
                 .launch_mcp(
                     &fixture.companion(),
-                    McpRequest::new(Vec::new()),
+                    McpRequest::new(b"request\n"),
                     &CancellationToken::new(),
                 )
-                .unwrap()
+                .unwrap();
+            let frame = response.response_frame().to_vec();
+            response
+                .finish(McpFinishOutcome::WrittenAndFlushed)
+                .unwrap();
+            frame
         }));
     }
     for worker in workers {
-        assert_eq!(worker.join().unwrap().stdout(), b"done");
+        assert_eq!(worker.join().unwrap(), b"done\n");
     }
     assert!(started.elapsed() >= Duration::from_millis(350));
 }

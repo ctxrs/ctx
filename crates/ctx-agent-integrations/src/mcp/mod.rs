@@ -796,8 +796,8 @@ mod request_id_tests {
         MCP_MAX_ENCODED_REQUEST_ID_BYTES, PROVIDER_ROOT_SELECTOR_PATTERN,
     };
     use crate::tool_backend::{
-        OpaqueMcpProxyError, ToolBackend, ToolExecutionError, ToolOperation, ToolOutcome,
-        ToolSearchBackend,
+        OpaqueMcpProxyError, OpaqueMcpProxyResponse, ToolBackend, ToolExecutionError,
+        ToolOperation, ToolOutcome, ToolSearchBackend,
     };
 
     struct UnusedBackend;
@@ -807,7 +807,10 @@ mod request_id_tests {
             panic!("request-ID validation must run before the backend")
         }
 
-        fn proxy_companion_mcp(&self, _request: &[u8]) -> Result<Vec<u8>, OpaqueMcpProxyError> {
+        fn proxy_companion_mcp(
+            &self,
+            _request: &[u8],
+        ) -> Result<OpaqueMcpProxyResponse, OpaqueMcpProxyError> {
             panic!("request-ID validation must run before the backend")
         }
 

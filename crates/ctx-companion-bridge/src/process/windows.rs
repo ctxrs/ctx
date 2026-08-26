@@ -1,14 +1,19 @@
 use std::{
     ffi::OsString,
-    io,
+    io::{self, Read, Write},
     mem::size_of,
     os::windows::{
         ffi::OsStringExt as _,
         io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle},
         process::CommandExt as _,
+        thread::JoinHandleExt as _,
     },
     process::{Child, Command},
     ptr,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
 };
 
 use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
@@ -84,6 +89,171 @@ pub(super) fn spawn(command: &mut Command) -> Result<(Child, ProcessTree), Bridg
             let _ = child.wait();
             Err(BridgeError::Spawn(error))
         }
+    }
+}
+
+pub(super) enum PipeRead {
+    Data(usize),
+    Pending,
+    Closed,
+}
+
+pub(super) fn prepare_pipes(
+    _stdin: &std::process::ChildStdin,
+    _stdout: &std::process::ChildStdout,
+    _stderr: &std::process::ChildStderr,
+) -> io::Result<()> {
+    Ok(())
+}
+
+pub(super) fn read_pipe<T: Read + AsRawHandle>(
+    pipe: &mut T,
+    buffer: &mut [u8],
+) -> io::Result<PipeRead> {
+    use windows_sys::Win32::{
+        Foundation::{GetLastError, ERROR_BROKEN_PIPE, ERROR_NO_DATA, ERROR_PIPE_NOT_CONNECTED},
+        System::Pipes::PeekNamedPipe,
+    };
+
+    let mut available = 0u32;
+    if unsafe {
+        PeekNamedPipe(
+            pipe.as_raw_handle(),
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null_mut(),
+            &mut available,
+            std::ptr::null_mut(),
+        )
+    } == 0
+    {
+        let error = unsafe { GetLastError() };
+        if matches!(
+            error,
+            ERROR_BROKEN_PIPE | ERROR_NO_DATA | ERROR_PIPE_NOT_CONNECTED
+        ) {
+            return Ok(PipeRead::Closed);
+        }
+        return Err(io::Error::from_raw_os_error(error as i32));
+    }
+    if available == 0 {
+        return Ok(PipeRead::Pending);
+    }
+    match pipe.read(&mut buffer[..buffer.len().min(available as usize)])? {
+        0 => Ok(PipeRead::Closed),
+        read => Ok(PipeRead::Data(read)),
+    }
+}
+
+/// Windows anonymous pipes cannot make the up-to-4 MiB request write pollable.
+/// This is the only helper thread: it owns the one blocking write and is always
+/// cancelled with `CancelSynchronousIo` and joined before its child is reaped.
+pub(super) struct RequestWriter {
+    worker: Option<std::thread::JoinHandle<(std::process::ChildStdin, io::Result<()>)>>,
+    cancelled: Arc<AtomicBool>,
+}
+
+impl RequestWriter {
+    pub(super) fn spawn(stdin: std::process::ChildStdin, request: Vec<u8>) -> io::Result<Self> {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let worker_cancelled = Arc::clone(&cancelled);
+        let worker = std::thread::Builder::new()
+            .name("ctx-companion-mcp-request".to_owned())
+            .spawn(move || {
+                let mut stdin = stdin;
+                let mut offset = 0;
+                let result = loop {
+                    if worker_cancelled.load(Ordering::Acquire) {
+                        break Err(io::Error::new(
+                            io::ErrorKind::Interrupted,
+                            "MCP request write cancelled",
+                        ));
+                    }
+                    if offset == request.len() {
+                        break stdin.flush();
+                    }
+                    match stdin.write(&request[offset..]) {
+                        Ok(0) => {
+                            break Err(io::Error::new(
+                                io::ErrorKind::WriteZero,
+                                "MCP request pipe closed",
+                            ));
+                        }
+                        Ok(written) => offset += written,
+                        Err(error) => break Err(error),
+                    }
+                };
+                (stdin, result)
+            })?;
+        Ok(Self {
+            worker: Some(worker),
+            cancelled,
+        })
+    }
+
+    pub(super) fn poll(&mut self) -> Option<io::Result<std::process::ChildStdin>> {
+        if !self.worker.as_ref()?.is_finished() {
+            return None;
+        }
+        let worker = self.worker.take()?;
+        Some(match worker.join() {
+            Ok((stdin, result)) => result.map(|()| stdin),
+            Err(_) => Err(io::Error::other("MCP request writer panicked")),
+        })
+    }
+
+    pub(super) fn cancel_and_join(mut self) -> io::Result<()> {
+        use windows_sys::Win32::Foundation::{GetLastError, ERROR_NOT_FOUND};
+        use windows_sys::Win32::System::Threading::CancelSynchronousIo;
+
+        let Some(worker) = self.worker.take() else {
+            return Ok(());
+        };
+        // Set the flag before native cancellation. If the writer is between
+        // writes (`ERROR_NOT_FOUND`), it cannot begin another blocking write;
+        // if it is in one, CancelSynchronousIo completes it with cancellation.
+        self.cancelled.store(true, Ordering::Release);
+        let cancellation_error = if unsafe { CancelSynchronousIo(worker.as_raw_handle()) } == 0 {
+            let error = unsafe { GetLastError() };
+            if error != ERROR_NOT_FOUND {
+                Some(io::Error::from_raw_os_error(error as i32))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        match worker.join() {
+            Ok(_) => cancellation_error.map_or(Ok(()), Err),
+            Err(_) => Err(io::Error::other("MCP request writer panicked")),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RequestWriter;
+    use std::{
+        process::Stdio,
+        thread,
+        time::{Duration, Instant},
+    };
+
+    #[test]
+    fn cancelled_request_writer_joins_without_leaking() {
+        let mut child = std::process::Command::new("cmd")
+            .args(["/C", "timeout /T 60 /NOBREAK >NUL"])
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let writer =
+            RequestWriter::spawn(child.stdin.take().unwrap(), vec![b'x'; 4 * 1024 * 1024]).unwrap();
+        thread::sleep(Duration::from_millis(25));
+        let started = Instant::now();
+        writer.cancel_and_join().unwrap();
+        assert!(started.elapsed() < Duration::from_secs(2));
+        let _ = child.kill();
+        let _ = child.wait();
     }
 }
 

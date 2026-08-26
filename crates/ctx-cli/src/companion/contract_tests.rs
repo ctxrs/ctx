@@ -461,7 +461,7 @@ fn missing_pro_is_a_distinct_typed_error() {
     let error = CompanionBridge::default()
         .launch_mcp(
             &companion,
-            McpRequest::new(Vec::new()),
+            McpRequest::new(b"{}\n"),
             &CancellationToken::new(),
         )
         .unwrap_err();
@@ -475,7 +475,7 @@ fn missing_pro_is_a_distinct_typed_error() {
 
 #[cfg(unix)]
 #[test]
-fn protocol_v3_alone_launches_pro_without_any_context_environment() {
+fn protocol_v4_alone_launches_pro_without_any_context_environment() {
     use std::os::unix::fs::PermissionsExt as _;
 
     let temp = tempfile::tempdir().unwrap();
@@ -486,18 +486,22 @@ fn protocol_v3_alone_launches_pro_without_any_context_environment() {
     std::fs::write(
         &pro,
         br##"#!/bin/sh
-if [ "$1" = "--ctx-pro-protocol-v3" ] && [ "$2" = "handshake" ]; then
-  printf '{"protocol_version":3}\n'
+if [ "$1" = "--ctx-pro-protocol-v4" ] && [ "$2" = "handshake" ]; then
+  printf '{"protocol_version":4}\n'
   exit 0
 fi
-if [ "$1" != "--ctx-pro-protocol-v3" ] || [ "$2" != "mcp-serve" ]; then
+if [ "$1" != "--ctx-pro-protocol-v4" ] || [ "$2" != "mcp-serve" ]; then
   exit 91
 fi
 for name in CTX_PRO_PATH CTX_PRO_INSTALL_CONTEXT CTX_DATA_ROOT CTX_PRO_DATA_ROOT CTX_MANAGED_PAIR_CHANNEL CTX_PRO_INSTALLATION_ID CTX_MANAGED_PAIR_INVOCATION_FINGERPRINT CTX_MANAGED_PAIR_CORE_CAPABILITY_FINGERPRINT CTX_RELEASE_BUILD_SOURCE_COMMIT; do
   eval "value=\${$name-}"
   [ -z "$value" ] || exit 92
 done
+IFS= read -r request || exit 93
+[ "$request" = '{}' ] || exit 94
 printf '{"jsonrpc":"2.0"}\n'
+IFS= read -r receipt || exit 95
+[ "$receipt" = 'written_and_flushed' ] || exit 96
 "##,
     )
     .unwrap();
@@ -506,14 +510,15 @@ printf '{"jsonrpc":"2.0"}\n'
     let response = CompanionBridge::default()
         .launch_mcp(
             &companion,
-            McpRequest::new(Vec::new()),
+            McpRequest::new(b"{}\n"),
             &CancellationToken::new(),
         )
         .unwrap();
 
-    assert_eq!(response.exit_class(), ExitClass::Success);
-    assert_eq!(response.stdout(), b"{\"jsonrpc\":\"2.0\"}\n");
-    assert!(response.stderr().is_empty());
+    assert_eq!(response.response_frame(), b"{\"jsonrpc\":\"2.0\"}\n");
+    response
+        .finish(McpFinishOutcome::WrittenAndFlushed)
+        .unwrap();
 }
 
 #[cfg(unix)]
@@ -528,7 +533,7 @@ fn protocol_mismatch_is_a_distinct_typed_error() {
     let error = CompanionBridge::default()
         .launch_mcp(
             &InstalledCompanion::new(&pro),
-            McpRequest::new(Vec::new()),
+            McpRequest::new(b"{}\n"),
             &CancellationToken::new(),
         )
         .unwrap_err();
@@ -538,7 +543,7 @@ fn protocol_mismatch_is_a_distinct_typed_error() {
         CompanionLaunchError::ProtocolMismatch {
             expected,
             observed,
-        } if expected.get() == 3 && observed.get() == 2
+        } if expected.get() == 4 && observed.get() == 2
     ));
     assert_eq!(error.code(), "companion_protocol_mismatch");
 }
