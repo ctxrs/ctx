@@ -603,7 +603,6 @@ fn canonical_inventory_preserves_unrelated_source_when_deduplicating() {
         .collect();
     assert!(accepted_paths.contains(&third_path.as_path()));
     assert!(accepted_paths.contains(&first_path.as_path()));
-
 }
 
 #[test]
