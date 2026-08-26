@@ -126,7 +126,9 @@ fn running_status_is_outcome_first_and_omits_internal_details() {
         "Sources  1,248 certified sources\n",
         "\n",
         "Semantic\n",
-        "Status  active\n",
+        "Status   active\n",
+        "Backend  cuda\n",
+        "Compute  accelerated\n",
     );
     assert_exact_cross_width(
         |context| render_status(context, &running_report()),
@@ -145,7 +147,9 @@ fn running_status_is_outcome_first_and_omits_internal_details() {
                     "         sources\n",
                     "\n",
                     "Semantic\n",
-                    "Status  active\n",
+                    "Status   active\n",
+                    "Backend  cuda\n",
+                    "Compute  accelerated\n",
                 ),
             ),
             (48, wide),
@@ -163,7 +167,9 @@ fn running_status_is_outcome_first_and_omits_internal_details() {
             "\u{1b}[2mSources\u{1b}[0m  1,248 certified sources\n",
             "\n",
             "\u{1b}[1mSemantic\u{1b}[0m\n",
-            "\u{1b}[2mStatus\u{1b}[0m  \u{1b}[32mactive\u{1b}[0m\n",
+            "\u{1b}[2mStatus\u{1b}[0m   \u{1b}[32mactive\u{1b}[0m\n",
+            "\u{1b}[2mBackend\u{1b}[0m  cuda\n",
+            "\u{1b}[2mCompute\u{1b}[0m  accelerated\n",
         ),
     );
 
@@ -174,8 +180,6 @@ fn running_status_is_outcome_first_and_omits_internal_details() {
         "internal-lock-owner",
         "internal-endpoint",
         "daemon_scheduler",
-        "cuda",
-        "accelerated",
     ] {
         assert!(
             !rendered.contains(omitted),

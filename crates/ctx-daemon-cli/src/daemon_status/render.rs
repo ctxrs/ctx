@@ -293,22 +293,22 @@ pub(crate) fn render_daemon_status_human(
             semantic_state(semantic, runtime_active, semantic_fallback);
         let mut semantic_fields = vec![state_field("Status", semantic_state, semantic_token)];
         let mut semantic_details = Vec::new();
+        let runtime = semantic.and_then(|job| job.get("embedding_runtime"));
+        if let Some(backend) = runtime
+            .and_then(|runtime| runtime.get("backend"))
+            .and_then(Value::as_str)
+            .filter(|backend| !backend.is_empty())
+        {
+            semantic_details.push(("Backend", humanize_code(backend)));
+        }
+        if let Some(compute) = runtime
+            .and_then(|runtime| runtime.get("compute_mode"))
+            .and_then(Value::as_str)
+            .filter(|compute| !compute.is_empty())
+        {
+            semantic_details.push(("Compute", humanize_code(compute)));
+        }
         if let Some(fallback) = semantic_fallback {
-            let runtime = semantic.and_then(|job| job.get("embedding_runtime"));
-            if let Some(backend) = runtime
-                .and_then(|runtime| runtime.get("backend"))
-                .and_then(Value::as_str)
-                .filter(|backend| !backend.is_empty())
-            {
-                semantic_details.push(("Backend", humanize_code(backend)));
-            }
-            if let Some(compute) = runtime
-                .and_then(|runtime| runtime.get("compute_mode"))
-                .and_then(Value::as_str)
-                .filter(|compute| !compute.is_empty())
-            {
-                semantic_details.push(("Compute", humanize_code(compute)));
-            }
             semantic_details.push(("Fallback", humanize_code(fallback)));
         }
         if let Some(reason) = semantic
