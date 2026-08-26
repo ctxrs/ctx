@@ -3,8 +3,8 @@ use std::path::Path;
 use serde_json::Value;
 
 use ctx_terminal::{
-    fields, format_bytes, hint, outcome, section, Action, Document, Field, Hint, Outcome,
-    OutcomeState, RenderContext, Token,
+    fields, format_bytes, format_count, hint, outcome, section, Action, Document, Field, Hint,
+    Outcome, OutcomeState, RenderContext, Token,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -884,17 +884,5 @@ fn humanize_code(value: &str) -> String {
 
 fn counted(count: u64, singular: &str, plural: &str) -> String {
     let noun = if count == 1 { singular } else { plural };
-    format!("{} {noun}", grouped_count(count))
-}
-
-fn grouped_count(count: u64) -> String {
-    let digits = count.to_string();
-    let mut reversed = String::with_capacity(digits.len().saturating_add(digits.len() / 3));
-    for (index, character) in digits.chars().rev().enumerate() {
-        if index > 0 && index % 3 == 0 {
-            reversed.push(',');
-        }
-        reversed.push(character);
-    }
-    reversed.chars().rev().collect()
+    format!("{} {noun}", format_count(count))
 }
