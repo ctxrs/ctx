@@ -500,7 +500,7 @@ fn unobserved_membership_uses_parent_enumeration_without_opening_the_leaf() {
 }
 
 #[test]
-fn canonical_inventory_quarantines_duplicate_logical_sources_without_aborting_route() {
+fn canonical_inventory_collapses_byte_identical_logical_source_aliases() {
     let temp = tempfile::tempdir().unwrap();
     let first_path = temp.path().join("first.jsonl");
     let second_path = temp.path().join("second.jsonl");
@@ -529,9 +529,11 @@ fn canonical_inventory_quarantines_duplicate_logical_sources_without_aborting_ro
     )
     .unwrap();
 
-    // One leaf is retained as accepted, the colliding duplicate is quarantined.
+    // One leaf is retained and the physical alias is fenced without turning a
+    // healthy logical source into a quarantined or failed source.
     assert_eq!(inventory.accepted_len(), 1);
-    assert_eq!(inventory.quarantined_len(), 1);
+    assert_eq!(inventory.quarantined_len(), 0);
+    assert_eq!(inventory.exact_dependencies.len(), 1);
 
     // The retained leaf is determined by stable physical ordering: the smallest
     // source path wins, independent of file length or modification time.
@@ -542,12 +544,13 @@ fn canonical_inventory_quarantines_duplicate_logical_sources_without_aborting_ro
         discovered.accepted_leaves().next().unwrap().source()
     );
 
-    let quarantined = inventory.quarantined_leaves().next().unwrap();
-    assert_eq!(quarantined.source_path(), second_path);
-    assert_eq!(
-        quarantined.logical_source_failure.as_ref().unwrap().0,
-        retained.source().clone()
-    );
+    inventory.exact_dependencies[0]
+        .revalidate_dependency()
+        .unwrap();
+    fs::write(&second_path, b"changed\n").unwrap();
+    assert!(inventory.exact_dependencies[0]
+        .revalidate_dependency()
+        .is_err());
 }
 
 #[test]
@@ -590,7 +593,8 @@ fn canonical_inventory_preserves_unrelated_source_when_deduplicating() {
     .unwrap();
 
     assert_eq!(inventory.accepted_len(), 2);
-    assert_eq!(inventory.quarantined_len(), 1);
+    assert_eq!(inventory.quarantined_len(), 0);
+    assert_eq!(inventory.exact_dependencies.len(), 1);
 
     // The unrelated source is untouched and still published.
     let accepted_paths: Vec<&Path> = inventory
@@ -600,12 +604,10 @@ fn canonical_inventory_preserves_unrelated_source_when_deduplicating() {
     assert!(accepted_paths.contains(&third_path.as_path()));
     assert!(accepted_paths.contains(&first_path.as_path()));
 
-    let quarantined = inventory.quarantined_leaves().next().unwrap();
-    assert_eq!(quarantined.source_path(), second_path);
 }
 
 #[test]
-fn canonical_inventory_withholds_divergent_duplicates_and_preserves_unrelated_source() {
+fn canonical_inventory_requires_provider_resolution_for_divergent_duplicates() {
     let temp = tempfile::tempdir().unwrap();
     let first_path = temp.path().join("first.jsonl");
     let second_path = temp.path().join("second.jsonl");
@@ -619,9 +621,8 @@ fn canonical_inventory_withholds_divergent_duplicates_and_preserves_unrelated_so
         .find(|leaf| leaf.source_path() == first_path)
         .unwrap()
         .clone();
-    let source = first.source().clone();
     let second = JsonlFamilyLeaf::observe(
-        source.clone(),
+        first.source().clone(),
         second_path.clone(),
         Arc::clone(first.authority()),
         PathBuf::from("second.jsonl"),
@@ -634,33 +635,17 @@ fn canonical_inventory_withholds_divergent_duplicates_and_preserves_unrelated_so
         .unwrap()
         .clone();
 
-    let inventory = JsonlFamilyInventory::present(
+    let error = JsonlFamilyInventory::present(
         CaptureProvider::Pi,
         temp.path(),
         Arc::clone(first.authority()),
         vec![first, second, third],
     )
-    .unwrap();
+    .unwrap_err();
 
-    assert_eq!(inventory.accepted_len(), 1);
-    assert_eq!(inventory.quarantined_len(), 2);
-    assert_eq!(
-        inventory.accepted_leaves().next().unwrap().source_path(),
-        third_path
-    );
-    let quarantined = inventory.quarantined_leaves().collect::<Vec<_>>();
-    assert_eq!(
-        quarantined
-            .iter()
-            .filter(|leaf| leaf.logical_source_failure.is_some())
-            .count(),
-        1
-    );
-    assert!(quarantined.iter().all(|leaf| leaf
-        .source()
-        .is_some_and(|claimed| claimed.exact_descriptor_eq(&source))));
-    assert_eq!(quarantined[0].source_path(), first_path);
-    assert_eq!(quarantined[1].source_path(), second_path);
+    assert!(error
+        .to_string()
+        .contains("provider must resolve divergent copies semantically"));
 }
 
 #[test]
@@ -704,14 +689,11 @@ fn canonical_inventory_deduplication_is_deterministic_regardless_of_leaf_order()
 
     for inventory in [&forward, &reversed] {
         assert_eq!(inventory.accepted_len(), 1);
-        assert_eq!(inventory.quarantined_len(), 1);
+        assert_eq!(inventory.quarantined_len(), 0);
+        assert_eq!(inventory.exact_dependencies.len(), 1);
         assert_eq!(
             inventory.accepted_leaves().next().unwrap().source_path(),
             first_path
-        );
-        assert_eq!(
-            inventory.quarantined_leaves().next().unwrap().source_path(),
-            second_path
         );
     }
 }
