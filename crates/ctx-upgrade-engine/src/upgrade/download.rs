@@ -52,17 +52,12 @@ impl DownloadedArtifact {
             sha256: expected_sha256.to_ascii_lowercase(),
             remove_on_drop: true,
         };
-        artifact.byte_len = transport.download_artifact_verified(
-            endpoint,
-            artifact.file_mut()?,
-            max_bytes,
-            expected_sha256,
-            timeout,
-        )?;
+        artifact.byte_len =
+            transport.download_artifact(endpoint, artifact.file_mut()?, max_bytes, timeout)?;
         artifact
             .file_ref()?
             .sync_all()
-            .with_context(|| format!("sync verified artifact {}", artifact.path.display()))?;
+            .with_context(|| format!("sync downloaded artifact {}", artifact.path.display()))?;
         artifact.verify_unchanged()?;
         Ok(artifact)
     }
@@ -577,7 +572,9 @@ pub(super) fn copy_file_verified(
     }
     let actual = format!("{:x}", hasher.finalize());
     if !actual.eq_ignore_ascii_case(expected_sha256) {
-        return Err(anyhow!("{label} checksum does not match signed metadata"));
+        return Err(anyhow!(
+            "artifact checksum mismatch: expected {expected_sha256}, got {actual}"
+        ));
     }
     file.seek(SeekFrom::Start(0))?;
     Ok(total)
