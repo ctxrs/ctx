@@ -551,6 +551,31 @@ impl<'a> ProgressReporter<'a> {
         })
     }
 
+    /// Emits a terminal failure before source-refresh snapshots are available.
+    pub fn failure(
+        &mut self,
+        phase: &'static str,
+        message: impl Into<String>,
+    ) -> Result<(), ProgressWriterError> {
+        if !self.is_enabled() {
+            return Ok(());
+        }
+        self.presentation_agent_histories = None;
+        let message = bounded_progress_text(&message.into(), MAX_PROGRESS_MESSAGE_BYTES);
+        self.emit_status(ProgressLine {
+            phase: bounded_progress_text(phase, MAX_PROGRESS_PHASE_BYTES),
+            message,
+            completed_bytes: 0,
+            total_bytes: self.total_bytes,
+            completed_files: None,
+            total_files: None,
+            imported_events: None,
+            done: true,
+            refresh: None,
+            callout: None,
+        })
+    }
+
     /// Compatibility transport for the legacy Core setup progress modes.
     /// New structured-event consumers should compose a typed callout instead.
     pub fn notice(

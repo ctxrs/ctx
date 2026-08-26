@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
-use ctx_history_ingest_application::IngestReport;
+use ctx_history_ingest_application::{ImportPathNotFound, IngestReport};
 
 use crate::analytics::{
     bytes_bucket, count_bucket, ImportFailureScope as AnalyticsImportFailureScope,
@@ -25,7 +25,8 @@ pub(crate) fn run_import(
     ui: &mut Ui,
 ) -> Result<()> {
     let json = args.format.is_json();
-    if args.partial && !json {
+    let machine_output = json || args.progress == crate::progress::ProgressArg::Json;
+    if args.partial && !machine_output {
         let document =
             ctx_cli_presentation::commands::render_partial_deprecation(ui.stderr_context());
         ui.write_stderr(&document)?;
@@ -48,6 +49,38 @@ pub(crate) fn run_import(
         Err(err) => {
             insert_import_error_analytics(telemetry, &err);
             record_terminal_import_failure(provider_refreshes, &err);
+            if let Some(diagnostic) = err.downcast_ref::<ImportPathNotFound>() {
+                if args.progress == crate::progress::ProgressArg::Json {
+                    let rendered =
+                        ctx_cli_presentation::commands::render_import_path_not_found_plain(
+                            diagnostic.path(),
+                        );
+                    let message = rendered
+                        .strip_suffix('\n')
+                        .expect("import path diagnostic ends with one newline");
+                    ctx_history_cli::ProgressReporter::new(
+                        ui,
+                        ctx_history_cli::ProgressMode::Json,
+                        json,
+                        "import",
+                        0,
+                    )
+                    .failure("failed", message)?;
+                } else if json {
+                    let rendered =
+                        ctx_cli_presentation::commands::render_import_path_not_found_plain(
+                            diagnostic.path(),
+                        );
+                    ui.write_stderr_bytes(rendered.as_bytes())?;
+                } else {
+                    let document = ctx_cli_presentation::commands::render_import_path_not_found(
+                        ui.stderr_context(),
+                        diagnostic.path(),
+                    );
+                    ui.write_stderr(&document)?;
+                }
+                return Err(ctx_cli_presentation::rendered_cli_error());
+            }
             return Err(err);
         }
     };

@@ -10,6 +10,10 @@ use ctx_history_refresh::{
     SourceBackedRefreshSourceFailure,
 };
 
+use crate::diagnostics::{
+    classify_import_path_admission_error, classify_import_path_refresh_error,
+    classify_owned_import_path_admission_error,
+};
 use crate::routing::validate_selected_provider;
 use crate::{
     automatic_source_preflight, select_history_source_plugin, source_stats,
@@ -169,22 +173,33 @@ where
         .path
         .as_deref()
         .context("explicit source catalog import requires --path")?;
-    let source = host.explicit_source(data_root, path, request.provider, request.custom_jsonl)?;
+    let source = host
+        .explicit_source(data_root, path, request.provider, request.custom_jsonl)
+        .map_err(|source| classify_import_path_admission_error(path, source))?;
     if source.status == ProviderSourceStatus::Unsupported {
         return unsupported_source_report(request.resume, &source, host);
     }
     let stats = source_stats(&source.path)
+        .map_err(|source_error| {
+            classify_owned_import_path_admission_error(path, &source.path, source_error)
+        })
         .with_context(|| format!("inspect explicit source {}", source.path.display()))?;
     host.begin(stats.bytes)?;
     host.catalog_exact(&source, stats)?;
 
     let started = Instant::now();
-    let upsert = host.admit_exact(data_root, &source, request.relocate_from.as_deref())?;
-    let publication = host.refresh(
-        data_root,
-        RefreshSelection::ExactSource(upsert.authority.clone()),
-        request.no_daemon,
-    )?;
+    let upsert = host
+        .admit_exact(data_root, &source, request.relocate_from.as_deref())
+        .map_err(|source_error| {
+            classify_owned_import_path_admission_error(path, &source.path, source_error)
+        })?;
+    let publication = host
+        .refresh(
+            data_root,
+            RefreshSelection::ExactSource(upsert.authority.clone()),
+            request.no_daemon,
+        )
+        .map_err(|source| classify_import_path_refresh_error(path, source))?;
     let duration = started.elapsed();
     let (publication, receipt) = verified_publication(
         publication,

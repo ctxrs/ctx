@@ -5,6 +5,7 @@
 //! source admission, refresh execution, command rendering, and telemetry
 //! delivery remain behind coarse borrowed ports in their owning layers.
 
+mod diagnostics;
 mod inventory;
 mod lifecycle;
 #[cfg(test)]
@@ -16,6 +17,7 @@ mod routing;
 mod totals;
 
 pub use ctx_history_refresh::RefreshSelection;
+pub use diagnostics::{ImportPathMissingDuringRefresh, ImportPathNotFound};
 pub use inventory::{source_stats, SourceStats};
 pub use lifecycle::run_ingest;
 pub use listing::{

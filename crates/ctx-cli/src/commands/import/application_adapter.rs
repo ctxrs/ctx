@@ -4,7 +4,7 @@ use anyhow::Result;
 use ctx_history_capture::{source_backed_source_failure_identity, ProviderSource};
 use ctx_history_core::CaptureProvider;
 use ctx_history_ingest_application::{
-    HistorySourcePluginSource, IngestPublication, RefreshSelection,
+    HistorySourcePluginSource, ImportPathMissingDuringRefresh, IngestPublication, RefreshSelection,
 };
 use ctx_history_platform::platform_security::establish_private_data_root;
 use ctx_history_refresh::ExplicitSourceCatalogUpsert;
@@ -86,7 +86,17 @@ impl ctx_history_cli::ImportApplicationPort for CliImportHost {
         let exact_route_lineages = selection
             .explicit_source_authority()
             .map(|authority| authority.route_lineages());
-        let refresh = wait_for_import_core_refresh(data_root, no_daemon, selection, progress)?;
+        let refresh = wait_for_import_core_refresh(data_root, no_daemon, selection, progress)
+            .map_err(|error| {
+                if error
+                    .downcast_ref::<crate::semantic::SourceBackedRefreshTerminalError>()
+                    .is_some_and(|terminal| terminal.code == "explicit_source_path_missing")
+                {
+                    error.context(ImportPathMissingDuringRefresh)
+                } else {
+                    error
+                }
+            })?;
         let pinned_generation = refresh.pin.generation_id().to_owned();
         let policy_schema_hash = exact_route_lineages.is_none().then(|| {
             refresh

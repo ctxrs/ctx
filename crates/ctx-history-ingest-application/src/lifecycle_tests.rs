@@ -4,23 +4,24 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use ctx_history_capture_model::{
     DiscoveryReport, ProviderCatalogSupport, ProviderImportSupport, ProviderSource,
     ProviderSourceKind, ProviderSourceStatus,
 };
 use ctx_history_core::CaptureProvider;
 use ctx_history_refresh::{
-    explicit_source_catalog_authority_for_test, ExplicitSourceCatalogRouteBinding,
-    ExplicitSourceCatalogUpsert, RefreshSelection, SourceBackedRefreshCurrent,
-    SourceBackedRefreshReceipt, SourceBackedRefreshRecordRejection, SourceBackedRefreshRouteResult,
+    explicit_source_catalog_authority_for_test, explicit_source_path_symlink_metadata,
+    ExplicitSourceCatalogRouteBinding, ExplicitSourceCatalogUpsert, ExplicitSourcePathMissing,
+    RefreshSelection, SourceBackedRefreshCurrent, SourceBackedRefreshReceipt,
+    SourceBackedRefreshRecordRejection, SourceBackedRefreshRouteResult,
     SourceBackedRefreshSourceFailure,
 };
 
 use crate::{
-    run_ingest, CaptureAdmissionPort, HistorySourcePluginSource, IngestProgressPort,
-    IngestPublication, IngestRefreshPort, IngestRequest, IngestSourceOutcome,
-    ProviderSelectionGuidance, SourceDiscoveryPort, SourceStats,
+    run_ingest, CaptureAdmissionPort, HistorySourcePluginSource, ImportPathMissingDuringRefresh,
+    ImportPathNotFound, IngestProgressPort, IngestPublication, IngestRefreshPort, IngestRequest,
+    IngestSourceOutcome, ProviderSelectionGuidance, SourceDiscoveryPort, SourceStats,
 };
 
 const ROUTE: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -33,8 +34,10 @@ struct FakeHost {
     exact_source: ProviderSource,
     publication: Option<IngestPublication>,
     refresh_error: Option<&'static str>,
+    refresh_path_missing: bool,
     progress_error: Option<&'static str>,
     admission_error: Option<&'static str>,
+    remove_source_during_admission: bool,
     lineage: [u8; 32],
     refresh_calls: Cell<usize>,
     admission_calls: Cell<usize>,
@@ -54,8 +57,10 @@ impl FakeHost {
             exact_source: provider_source(source_path, ProviderSourceStatus::Available),
             publication: Some(publication),
             refresh_error: None,
+            refresh_path_missing: false,
             progress_error: None,
             admission_error: None,
+            remove_source_during_admission: false,
             lineage: [7; 32],
             refresh_calls: Cell::new(0),
             admission_calls: Cell::new(0),
@@ -143,6 +148,13 @@ impl CaptureAdmissionPort for FakeHost {
         if let Some(error) = self.admission_error {
             return Err(anyhow!(error));
         }
+        if self.remove_source_during_admission {
+            fs::remove_file(&source.path).unwrap();
+            let error = explicit_source_path_symlink_metadata(&source.path)
+                .with_context(|| format!("check explicit source path {}", source.path.display()))
+                .unwrap_err();
+            return Err(error);
+        }
         Ok(ExplicitSourceCatalogUpsert {
             authority: explicit_source_catalog_authority_for_test(1),
             provider: source.provider,
@@ -195,6 +207,9 @@ impl IngestRefreshPort for FakeHost {
         self.push(event);
         self.refresh_selections.borrow_mut().push(selection);
         self.refresh_calls.set(self.refresh_calls.get() + 1);
+        if self.refresh_path_missing {
+            return Err(anyhow!("daemon terminal detail").context(ImportPathMissingDuringRefresh));
+        }
         if let Some(error) = self.refresh_error {
             return Err(anyhow!(error));
         }
@@ -307,6 +322,78 @@ fn unsupported_exact_source_never_initializes_progress_or_refreshes() {
         host.events.borrow().as_slice(),
         ["explicit_source", "source_failure_identity"]
     );
+}
+
+#[test]
+fn exact_source_disappearance_during_source_stats_uses_the_typed_path_diagnostic() {
+    let temp = tempfile::tempdir().unwrap();
+    let requested_path = temp.path().join("requested-history.jsonl");
+    let owned_path = temp.path().join("canonical-history.jsonl");
+    let mut host = FakeHost::new(
+        owned_path.clone(),
+        publication(receipt(
+            None,
+            SourceBackedRefreshRouteResult::succeeded(ROUTE.into(), true),
+        )),
+    );
+
+    let error = run_ingest(
+        &exact_request(requested_path.clone()),
+        temp.path(),
+        &mut host,
+    )
+    .unwrap_err();
+    let diagnostic = error.downcast_ref::<ImportPathNotFound>().unwrap();
+    let missing = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<ExplicitSourcePathMissing>())
+        .unwrap();
+
+    assert_eq!(diagnostic.path(), requested_path);
+    assert_eq!(missing.path(), owned_path);
+    assert_eq!(missing.source_error().kind(), std::io::ErrorKind::NotFound);
+    assert!(error.chain().any(|cause| {
+        cause.to_string() == format!("stat import source {}", owned_path.display())
+    }));
+    assert_eq!(host.events.borrow().as_slice(), ["explicit_source"]);
+    assert_eq!(host.admission_calls.get(), 0);
+    assert_eq!(host.refresh_calls.get(), 0);
+}
+
+#[test]
+fn exact_source_disappearance_during_catalog_admission_maps_owned_to_requested_path() {
+    let temp = tempfile::tempdir().unwrap();
+    let requested_path = temp.path().join("requested-history.jsonl");
+    let owned_path = write_source(&temp);
+    let mut host = FakeHost::new(
+        owned_path.clone(),
+        publication(receipt(
+            None,
+            SourceBackedRefreshRouteResult::succeeded(ROUTE.into(), true),
+        )),
+    );
+    host.remove_source_during_admission = true;
+
+    let error = run_ingest(
+        &exact_request(requested_path.clone()),
+        temp.path(),
+        &mut host,
+    )
+    .unwrap_err();
+    let diagnostic = error.downcast_ref::<ImportPathNotFound>().unwrap();
+    let missing = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<ExplicitSourcePathMissing>())
+        .unwrap();
+
+    assert_eq!(diagnostic.path(), requested_path);
+    assert_eq!(missing.path(), owned_path);
+    assert_eq!(missing.source_error().kind(), std::io::ErrorKind::NotFound);
+    assert!(error.chain().any(|cause| {
+        cause.to_string() == format!("check explicit source path {}", owned_path.display())
+    }));
+    assert_eq!(host.admission_calls.get(), 1);
+    assert_eq!(host.refresh_calls.get(), 0);
 }
 
 #[test]
@@ -679,6 +766,30 @@ fn refresh_cancellation_propagates_without_retry() {
 
     assert_eq!(error.to_string(), "cancelled by caller");
     assert_eq!(host.refresh_calls.get(), 1);
+}
+
+#[test]
+fn exact_refresh_disappearance_reports_the_original_requested_path() {
+    let temp = tempfile::tempdir().unwrap();
+    let owned = write_source(&temp);
+    let requested = temp.path().join("relative-request.jsonl");
+    let mut host = FakeHost::new(
+        owned,
+        publication(receipt(
+            None,
+            SourceBackedRefreshRouteResult::succeeded(ROUTE.into(), true),
+        )),
+    );
+    host.refresh_path_missing = true;
+
+    let error = run_ingest(&exact_request(requested.clone()), temp.path(), &mut host).unwrap_err();
+    let diagnostic = error.downcast_ref::<ImportPathNotFound>().unwrap();
+
+    assert_eq!(diagnostic.path(), requested);
+    assert_eq!(host.refresh_calls.get(), 1);
+    assert!(error.chain().any(|cause| {
+        cause.to_string() == "explicit import path disappeared during refresh admission"
+    }));
 }
 
 #[test]

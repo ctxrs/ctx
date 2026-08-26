@@ -35,6 +35,10 @@ impl<'a> Field<'a> {
         self.value_token = token;
         self
     }
+
+    const fn value_is_copyable(&self) -> bool {
+        matches!(self.value_token, Token::Command | Token::Reference)
+    }
 }
 
 pub fn fields(context: &RenderContext, values: &[Field<'_>]) -> Document {
@@ -76,10 +80,13 @@ pub(super) fn fields_with_label_width(
             .max(1);
         width <= label_width.saturating_add(FIELD_GAP).saturating_add(12)
             || values.iter().any(|field| {
-                field
-                    .value
-                    .split_whitespace()
-                    .any(|word| is_copyable_atom(word) && display_width(word) > aligned_value_width)
+                if field.value_is_copyable() {
+                    display_width(field.value) > aligned_value_width
+                } else {
+                    field.value.split_whitespace().any(|word| {
+                        is_copyable_atom(word) && display_width(word) > aligned_value_width
+                    })
+                }
             })
     });
 
@@ -100,7 +107,7 @@ fn aligned_fields(context: &RenderContext, values: &[Field<'_>], label_width: us
     let mut document = Document::new();
 
     for field in values {
-        let wrapped = wrap_text(field.value, value_width);
+        let wrapped = field_value_lines(field, value_width);
         for (index, value) in wrapped.into_iter().enumerate() {
             let mut line = Line::new();
             if index == 0 {
@@ -131,7 +138,7 @@ fn stacked_fields(context: &RenderContext, values: &[Field<'_>]) -> Document {
         if !field.continuation {
             document.push_line(Line::styled(field.label, Token::Label));
         }
-        for value in wrap_text(field.value, value_width) {
+        for value in field_value_lines(field, value_width) {
             document.push_line(
                 Line::new()
                     .with(Span::text(" ".repeat(FIELD_GAP)))
@@ -140,6 +147,14 @@ fn stacked_fields(context: &RenderContext, values: &[Field<'_>]) -> Document {
         }
     }
     document
+}
+
+fn field_value_lines(field: &Field<'_>, width: Option<usize>) -> Vec<String> {
+    if field.value_is_copyable() {
+        vec![crate::ui::document::neutralize_controls(field.value)]
+    } else {
+        wrap_text(field.value, width)
+    }
 }
 
 #[cfg(test)]
@@ -251,6 +266,44 @@ mod tests {
         assert_eq!(
             fields_with_label_width(&context, &[Field::new("Sessions", "1")], 19).render_plain(),
             "Sessions             1\n"
+        );
+    }
+
+    #[test]
+    fn semantic_values_are_indivisible_in_aligned_and_stacked_layouts() {
+        let value = "  路径  two\tthree\rfour\u{0001}\u{001b}\u{007f}\u{0085}\u{009f}  ";
+        let visible = "  路径  two\\tthree\\rfour\\u{0001}\\x1b\\u{007f}\\u{0085}\\u{009f}  ";
+
+        for (width, expected) in [
+            (16, format!("Path\n  {visible}\n")),
+            (80, format!("Path  {visible}\n")),
+        ] {
+            for token in [Token::Reference, Token::Command] {
+                let rendered = fields(
+                    &context(width),
+                    &[Field::new("Path", value).with_value_token(token)],
+                )
+                .render_plain();
+
+                assert_eq!(rendered, expected, "width {width}");
+            }
+        }
+    }
+
+    #[test]
+    fn ordinary_prose_fields_keep_existing_whitespace_collapsing_and_wrapping() {
+        let rendered = fields(
+            &context(32),
+            &[Field::new(
+                "Detail",
+                "  leading   repeated spaces wrap as ordinary prose  ",
+            )],
+        )
+        .render_plain();
+
+        assert_eq!(
+            rendered,
+            "Detail  leading repeated spaces\n        wrap as ordinary prose\n"
         );
     }
 }

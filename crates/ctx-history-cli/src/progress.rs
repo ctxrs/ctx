@@ -76,6 +76,14 @@ impl<'a> ProgressReporter<'a> {
         self.0.message(phase, message)
     }
 
+    pub fn failure(
+        &mut self,
+        phase: &'static str,
+        message: impl Into<String>,
+    ) -> Result<(), ProgressWriterError> {
+        self.0.failure(phase, message)
+    }
+
     pub fn notice(
         &mut self,
         phase: &'static str,

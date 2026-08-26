@@ -5,6 +5,7 @@ use std::{
 };
 
 use anyhow::{anyhow, Context, Result};
+use ctx_history_refresh::explicit_source_path_symlink_metadata;
 use ctx_history_source_io::{
     inventory_provider_regular_paths, observe_ordinary_file, provider_regular_file_len,
     OrdinaryFileObservation, ProviderJsonlInventoryLimits,
@@ -28,7 +29,7 @@ fn source_stats_with_inventory_limits(
     path: &Path,
     limits: ProviderJsonlInventoryLimits,
 ) -> Result<SourceStats> {
-    let metadata = fs::symlink_metadata(path)
+    let metadata = explicit_source_path_symlink_metadata(path)
         .with_context(|| format!("stat import source {}", path.display()))?;
     let mut stats = SourceStats::default();
     let mut entries = Vec::new();

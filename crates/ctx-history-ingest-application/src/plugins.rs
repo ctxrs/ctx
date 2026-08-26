@@ -1,13 +1,18 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    env, fs,
+    env, fs, io,
     io::Read,
     path::{Path, PathBuf},
 };
 
 use anyhow::{anyhow, Context, Result};
 use ctx_history_core::CtxHistoryJsonlLineageContract;
+use ctx_history_refresh::explicit_source_path_metadata;
 use serde::Deserialize;
+
+use crate::diagnostics::{
+    classify_exact_import_path_operation_error, classify_import_path_admission_error,
+};
 
 const PLUGIN_MANIFEST_FILE: &str = "ctx-history-plugin.json";
 const MAX_PLUGIN_MANIFEST_BYTES: usize = 1024 * 1024;
@@ -115,8 +120,21 @@ pub fn discover_history_source_plugins_with_diagnostics(
     data_root: &Path,
     extra_manifests: &[PathBuf],
 ) -> Result<HistorySourcePluginDiscovery> {
+    Ok(discover_history_source_plugin_snapshot(data_root, extra_manifests)?.discovery)
+}
+
+struct HistorySourcePluginSnapshot {
+    discovery: HistorySourcePluginDiscovery,
+    explicit_sources: Vec<HistorySourcePluginSource>,
+}
+
+fn discover_history_source_plugin_snapshot(
+    data_root: &Path,
+    extra_manifests: &[PathBuf],
+) -> Result<HistorySourcePluginSnapshot> {
     let mut sources = Vec::new();
     let mut failures = Vec::new();
+    let mut explicit_sources = Vec::new();
     for path in plugin_manifest_paths(data_root) {
         match read_plugin_manifest(&path) {
             Ok(mut found) => sources.append(&mut found),
@@ -126,9 +144,20 @@ pub fn discover_history_source_plugins_with_diagnostics(
             }),
         }
     }
-    for path in explicit_plugin_manifest_paths(extra_manifests)? {
-        sources.append(&mut read_plugin_manifest(&path)?);
+    for candidate in explicit_plugin_manifest_paths(extra_manifests)? {
+        let mut found = read_explicit_plugin_manifest(&candidate)?;
+        explicit_sources.extend(found.iter().cloned());
+        sources.append(&mut found);
     }
+    sort_and_dedup_plugin_sources(&mut sources);
+    sort_and_dedup_plugin_sources(&mut explicit_sources);
+    Ok(HistorySourcePluginSnapshot {
+        discovery: HistorySourcePluginDiscovery { sources, failures },
+        explicit_sources,
+    })
+}
+
+fn sort_and_dedup_plugin_sources(sources: &mut Vec<HistorySourcePluginSource>) {
     sources.sort_by(|left, right| {
         left.label()
             .cmp(&right.label())
@@ -139,7 +168,6 @@ pub fn discover_history_source_plugins_with_diagnostics(
             && left.plugin_name == right.plugin_name
             && left.id == right.id
     });
-    Ok(HistorySourcePluginDiscovery { sources, failures })
 }
 
 pub fn select_history_source_plugin(
@@ -147,14 +175,23 @@ pub fn select_history_source_plugin(
     extra_manifests: &[PathBuf],
     selector: Option<&str>,
 ) -> Result<HistorySourcePluginSource> {
-    let sources = discover_history_source_plugins(data_root, extra_manifests)?;
+    let snapshot = discover_history_source_plugin_snapshot(data_root, extra_manifests)?;
+    select_history_source_plugin_from_snapshot(snapshot, selector)
+}
+
+fn select_history_source_plugin_from_snapshot(
+    snapshot: HistorySourcePluginSnapshot,
+    selector: Option<&str>,
+) -> Result<HistorySourcePluginSource> {
+    let sources = match selector {
+        Some(_) => snapshot.discovery.sources,
+        None => snapshot.explicit_sources,
+    };
     let matches = sources
         .into_iter()
         .filter(|source| match selector {
             Some(selector) => source.matches_selector(selector),
-            None => extra_manifests
-                .iter()
-                .any(|path| manifest_arg_matches_source(path, &source.manifest_path)),
+            None => true,
         })
         .collect::<Vec<_>>();
     match matches.as_slice() {
@@ -166,6 +203,17 @@ pub fn select_history_source_plugin(
 
 fn read_plugin_manifest(path: &Path) -> Result<Vec<HistorySourcePluginSource>> {
     let raw = read_plugin_manifest_text(path)?;
+    parse_plugin_manifest(path, &raw)
+}
+
+fn read_explicit_plugin_manifest(
+    candidate: &ExplicitPluginManifestCandidate,
+) -> Result<Vec<HistorySourcePluginSource>> {
+    let raw = read_explicit_plugin_manifest_text(candidate)?;
+    parse_plugin_manifest(&candidate.manifest_path, &raw)
+}
+
+fn parse_plugin_manifest(path: &Path, raw: &str) -> Result<Vec<HistorySourcePluginSource>> {
     let manifest: Manifest = serde_json::from_str(&raw)
         .with_context(|| format!("parse history source plugin manifest {}", path.display()))?;
     validate_plugin_id("plugin name", &manifest.name)?;
@@ -273,6 +321,33 @@ fn read_plugin_manifest(path: &Path) -> Result<Vec<HistorySourcePluginSource>> {
 fn read_plugin_manifest_text(path: &Path) -> Result<String> {
     let file = fs::File::open(path)
         .with_context(|| format!("read history source plugin manifest {}", path.display()))?;
+    read_plugin_manifest_text_from_file(path, file)
+}
+
+fn read_explicit_plugin_manifest_text(
+    candidate: &ExplicitPluginManifestCandidate,
+) -> Result<String> {
+    let file = match fs::File::open(&candidate.manifest_path) {
+        Ok(file) => file,
+        Err(error) => {
+            let not_found = error.kind() == io::ErrorKind::NotFound;
+            let source = anyhow::Error::new(error).context(format!(
+                "read history source plugin manifest {}",
+                candidate.manifest_path.display()
+            ));
+            if not_found && candidate.requested_path == candidate.manifest_path {
+                return Err(classify_exact_import_path_operation_error(
+                    &candidate.requested_path,
+                    source,
+                ));
+            }
+            return Err(source);
+        }
+    };
+    read_plugin_manifest_text_from_file(&candidate.manifest_path, file)
+}
+
+fn read_plugin_manifest_text_from_file(path: &Path, file: fs::File) -> Result<String> {
     let mut bytes = Vec::new();
     file.take((MAX_PLUGIN_MANIFEST_BYTES as u64).saturating_add(1))
         .read_to_end(&mut bytes)
@@ -301,27 +376,113 @@ fn plugin_manifest_paths(data_root: &Path) -> Vec<PathBuf> {
     }
     candidates.into_iter().collect()
 }
-fn explicit_plugin_manifest_paths(extra: &[PathBuf]) -> Result<Vec<PathBuf>> {
+#[derive(Debug)]
+struct ExplicitPluginManifestCandidate {
+    requested_path: PathBuf,
+    manifest_path: PathBuf,
+}
+
+fn explicit_plugin_manifest_paths(
+    extra: &[PathBuf],
+) -> Result<Vec<ExplicitPluginManifestCandidate>> {
     let mut candidates = BTreeSet::new();
-    for path in extra {
-        if !path
-            .try_exists()
-            .with_context(|| format!("check import path {}", path.display()))?
-        {
-            return Err(anyhow!("import path does not exist: {}", path.display()));
-        }
-        let before = candidates.len();
-        collect_manifest_path_candidates(path, &mut candidates);
-        if candidates.len() == before {
+    for requested_path in extra {
+        let found = collect_explicit_manifest_path_candidates(requested_path)?;
+        if found.is_empty() {
             return Err(anyhow!(
                 "history source plugin manifest path {} did not contain {}",
-                path.display(),
+                requested_path.display(),
                 PLUGIN_MANIFEST_FILE
             ));
         }
+        for manifest_path in found {
+            candidates.insert((requested_path.clone(), manifest_path));
+        }
     }
-    Ok(candidates.into_iter().collect())
+    Ok(candidates
+        .into_iter()
+        .map(
+            |(requested_path, manifest_path)| ExplicitPluginManifestCandidate {
+                requested_path,
+                manifest_path,
+            },
+        )
+        .collect())
 }
+
+fn collect_explicit_manifest_path_candidates(path: &Path) -> Result<BTreeSet<PathBuf>> {
+    let metadata = explicit_source_path_metadata(path)
+        .with_context(|| {
+            format!(
+                "inspect explicit history source plugin path {}",
+                path.display()
+            )
+        })
+        .map_err(|source| classify_import_path_admission_error(path, source))?;
+    let mut candidates = BTreeSet::new();
+    if metadata.file_type().is_file() {
+        candidates.insert(path.to_path_buf());
+        return Ok(candidates);
+    }
+    if !metadata.file_type().is_dir() {
+        return Ok(candidates);
+    }
+
+    let direct_manifest = path.join(PLUGIN_MANIFEST_FILE);
+    insert_explicit_manifest_candidate(&direct_manifest, &mut candidates)?;
+    let entries = read_explicit_manifest_directory(path)?;
+    for entry in entries {
+        let entry =
+            entry.with_context(|| format!("read history source plugin path {}", path.display()))?;
+        let child = entry.path();
+        let metadata = fs::metadata(&child)
+            .with_context(|| format!("inspect history source plugin path {}", child.display()))?;
+        if metadata.file_type().is_file()
+            && child
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name == PLUGIN_MANIFEST_FILE)
+        {
+            candidates.insert(child);
+        } else if metadata.file_type().is_dir() {
+            let child_manifest = child.join(PLUGIN_MANIFEST_FILE);
+            insert_explicit_manifest_candidate(&child_manifest, &mut candidates)?;
+        }
+    }
+    Ok(candidates)
+}
+
+fn read_explicit_manifest_directory(path: &Path) -> Result<fs::ReadDir> {
+    fs::read_dir(path).map_err(|error| {
+        let source = anyhow::Error::new(error).context(format!(
+            "read history source plugin path {}",
+            path.display()
+        ));
+        classify_exact_import_path_operation_error(path, source)
+    })
+}
+
+fn insert_explicit_manifest_candidate(
+    path: &Path,
+    candidates: &mut BTreeSet<PathBuf>,
+) -> Result<()> {
+    if optional_explicit_candidate_metadata(path)?
+        .is_some_and(|metadata| metadata.file_type().is_file())
+    {
+        candidates.insert(path.to_path_buf());
+    }
+    Ok(())
+}
+
+fn optional_explicit_candidate_metadata(path: &Path) -> Result<Option<fs::Metadata>> {
+    match fs::metadata(path) {
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(source) => Err(source)
+            .with_context(|| format!("inspect history source plugin path {}", path.display())),
+    }
+}
+
 fn collect_manifest_path_candidates(path: &Path, candidates: &mut BTreeSet<PathBuf>) {
     if path.is_file() {
         candidates.insert(path.to_path_buf());
@@ -353,20 +514,6 @@ fn collect_manifest_path_candidates(path: &Path, candidates: &mut BTreeSet<PathB
             }
         }
     }
-}
-fn manifest_arg_matches_source(arg: &Path, manifest: &Path) -> bool {
-    if arg.is_file() {
-        return same_pathish(arg, manifest);
-    }
-    if arg.is_dir() {
-        return manifest.starts_with(arg);
-    }
-    same_pathish(arg, manifest)
-}
-fn same_pathish(left: &Path, right: &Path) -> bool {
-    left == right
-        || fs::canonicalize(left).unwrap_or_else(|_| left.to_path_buf())
-            == fs::canonicalize(right).unwrap_or_else(|_| right.to_path_buf())
 }
 fn validate_plugin_env(key: &str, value: &str) -> Result<()> {
     if key.is_empty()
@@ -409,6 +556,8 @@ fn validate_plugin_id(label: &str, value: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use crate::ImportPathNotFound;
+
     use super::*;
     #[test]
     fn command_only_manifest_is_visible_but_not_a_durable_root() {
@@ -425,5 +574,207 @@ mod tests {
         let path = temp.path().join(PLUGIN_MANIFEST_FILE);
         fs::write(&path, r#"{"schema_version":1,"name":"example","history_sources":[{"id":"one","source_format":"x","command":["export"]},{"id":"two","source_format":"x","command":["export"]}]}"#).unwrap();
         assert!(select_history_source_plugin(temp.path(), &[path], None).is_err());
+    }
+
+    #[test]
+    fn explicit_selection_is_bound_to_the_successful_discovery_snapshot() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("manifest.json");
+        let renamed = temp.path().join("renamed.json");
+        fs::write(&path, r#"{"schema_version":1,"name":"example","history_sources":[{"id":"default","source_format":"x","command":["export"]}]}"#).unwrap();
+        let snapshot =
+            discover_history_source_plugin_snapshot(temp.path(), std::slice::from_ref(&path))
+                .unwrap();
+
+        fs::rename(&path, &renamed).unwrap();
+        let source = select_history_source_plugin_from_snapshot(snapshot, None).unwrap();
+
+        assert_eq!(source.label(), "example/default");
+        assert_eq!(source.manifest_path, path);
+    }
+
+    #[test]
+    fn missing_requested_manifest_directory_keeps_the_read_dir_source() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("removed-plugin-root");
+
+        let error = read_explicit_manifest_directory(&path).unwrap_err();
+        let diagnostic = error.downcast_ref::<ImportPathNotFound>().unwrap();
+
+        assert_eq!(diagnostic.path(), path);
+        assert!(error.chain().any(|cause| {
+            cause.to_string() == format!("read history source plugin path {}", path.display())
+        }));
+        assert!(error.chain().any(|cause| {
+            cause
+                .downcast_ref::<io::Error>()
+                .is_some_and(|source| source.kind() == io::ErrorKind::NotFound)
+        }));
+    }
+
+    #[test]
+    fn selected_manifest_file_disappearance_keeps_the_open_source() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("manifest.json");
+        fs::write(&path, r#"{"schema_version":1,"name":"example","history_sources":[{"id":"default","source_format":"x","command":["export"]}]}"#).unwrap();
+        let candidate = explicit_plugin_manifest_paths(std::slice::from_ref(&path))
+            .unwrap()
+            .pop()
+            .unwrap();
+        fs::remove_file(&path).unwrap();
+
+        let error = read_explicit_plugin_manifest(&candidate).unwrap_err();
+        let diagnostic = error.downcast_ref::<ImportPathNotFound>().unwrap();
+
+        assert_eq!(diagnostic.path(), path);
+        assert!(error.chain().any(|cause| {
+            cause.to_string() == format!("read history source plugin manifest {}", path.display())
+        }));
+    }
+
+    #[test]
+    fn disappeared_child_manifest_is_not_reclassified_while_requested_root_remains() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("plugin-root");
+        let path = root.join(PLUGIN_MANIFEST_FILE);
+        fs::create_dir(&root).unwrap();
+        fs::write(&path, r#"{"schema_version":1,"name":"example","history_sources":[{"id":"default","source_format":"x","command":["export"]}]}"#).unwrap();
+        let candidate = explicit_plugin_manifest_paths(std::slice::from_ref(&root))
+            .unwrap()
+            .pop()
+            .unwrap();
+        fs::remove_file(&path).unwrap();
+
+        let error = read_explicit_plugin_manifest(&candidate).unwrap_err();
+
+        assert!(!error.is::<ImportPathNotFound>());
+        assert_eq!(
+            error.to_string(),
+            format!("read history source plugin manifest {}", path.display())
+        );
+        assert!(root.is_dir());
+    }
+
+    #[test]
+    fn disappeared_requested_root_keeps_the_original_child_open_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("plugin-root");
+        let path = root.join(PLUGIN_MANIFEST_FILE);
+        fs::create_dir(&root).unwrap();
+        fs::write(&path, r#"{"schema_version":1,"name":"example","history_sources":[{"id":"default","source_format":"x","command":["export"]}]}"#).unwrap();
+        let candidate = explicit_plugin_manifest_paths(std::slice::from_ref(&root))
+            .unwrap()
+            .pop()
+            .unwrap();
+        fs::remove_dir_all(&root).unwrap();
+
+        let error = read_explicit_plugin_manifest(&candidate).unwrap_err();
+
+        assert!(!error.is::<ImportPathNotFound>());
+        assert_eq!(
+            error.to_string(),
+            format!("read history source plugin manifest {}", path.display())
+        );
+        assert!(error.chain().any(|cause| {
+            cause
+                .downcast_ref::<io::Error>()
+                .is_some_and(|source| source.kind() == io::ErrorKind::NotFound)
+        }));
+    }
+
+    #[test]
+    fn missing_explicit_manifest_path_uses_the_typed_import_diagnostic() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("missing-manifest.json");
+
+        let error = select_history_source_plugin(temp.path(), std::slice::from_ref(&path), None)
+            .unwrap_err();
+        let diagnostic = error.downcast_ref::<ImportPathNotFound>().unwrap();
+
+        assert_eq!(diagnostic.path(), path.as_path());
+        assert!(error.chain().any(|cause| {
+            cause
+                .downcast_ref::<io::Error>()
+                .is_some_and(|source| source.kind() == io::ErrorKind::NotFound)
+        }));
+    }
+
+    fn assert_live_manifest_symlink_and_dangling_missing(
+        data_root: &Path,
+        live_link: &Path,
+        dangling_link: &Path,
+    ) {
+        let live_args = [live_link.to_path_buf()];
+        let source = select_history_source_plugin(data_root, &live_args, None).unwrap();
+        assert_eq!(source.label(), "example/default");
+
+        let dangling_args = [dangling_link.to_path_buf()];
+        let error = select_history_source_plugin(data_root, &dangling_args, None).unwrap_err();
+        let diagnostic = error.downcast_ref::<ImportPathNotFound>().unwrap();
+        assert_eq!(diagnostic.path(), dangling_link);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn explicit_manifest_preserves_live_and_dangling_symlink_behavior_on_unix() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let manifest = temp.path().join("manifest.json");
+        let missing = temp.path().join("missing.json");
+        let live_link = temp.path().join("live-link.json");
+        let dangling_link = temp.path().join("dangling-link.json");
+        fs::write(&manifest, r#"{"schema_version":1,"name":"example","history_sources":[{"id":"default","source_format":"x","command":["export"]}]}"#).unwrap();
+        symlink(&manifest, &live_link).unwrap();
+        symlink(&missing, &dangling_link).unwrap();
+
+        assert_live_manifest_symlink_and_dangling_missing(temp.path(), &live_link, &dangling_link);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn explicit_manifest_preserves_live_and_dangling_symlink_behavior_on_windows() {
+        use std::{io::ErrorKind, os::windows::fs::symlink_file};
+
+        fn symlink_unavailable(error: &std::io::Error) -> bool {
+            error.kind() == ErrorKind::PermissionDenied || error.raw_os_error() == Some(1314)
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let manifest = temp.path().join("manifest.json");
+        let missing = temp.path().join("missing.json");
+        let live_link = temp.path().join("live-link.json");
+        let dangling_link = temp.path().join("dangling-link.json");
+        fs::write(&manifest, r#"{"schema_version":1,"name":"example","history_sources":[{"id":"default","source_format":"x","command":["export"]}]}"#).unwrap();
+        for (target, link) in [(&manifest, &live_link), (&missing, &dangling_link)] {
+            if let Err(error) = symlink_file(target, link) {
+                if symlink_unavailable(&error) {
+                    return;
+                }
+                panic!("failed to create Windows manifest symlink: {error}");
+            }
+        }
+
+        assert_live_manifest_symlink_and_dangling_missing(temp.path(), &live_link, &dangling_link);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn explicit_manifest_non_missing_io_keeps_its_path_and_os_detail() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("loop.json");
+        symlink(&path, &path).unwrap();
+
+        let error = select_history_source_plugin(temp.path(), std::slice::from_ref(&path), None)
+            .unwrap_err();
+
+        assert!(!error.is::<ImportPathNotFound>());
+        assert!(error.to_string().contains(&path.display().to_string()));
+        assert_ne!(
+            error.downcast_ref::<io::Error>().unwrap().kind(),
+            io::ErrorKind::NotFound
+        );
     }
 }

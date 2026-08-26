@@ -37,7 +37,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-use crate::SourceBackedRefreshWorkset;
+use crate::{
+    canonicalize_explicit_source_path,
+    explicit_source_path::explicit_source_path_is_symlink_or_reparse_point,
+    explicit_source_path_symlink_metadata, SourceBackedRefreshWorkset,
+};
 
 use route_coverage::*;
 use source_helpers::{custom_provider_source, goose_platform_root};
@@ -106,7 +110,7 @@ impl ExplicitSourceCatalogAuthority {
             .iter()
             .filter(|entry| entry.enabled)
             .map(|entry| {
-                let mut source = source_from_catalog_entry(data_root, entry, true)?;
+                let mut source = source_from_catalog_entry(data_root, entry)?;
                 // This report carries request authority, not automatic
                 // discovery provenance. An independently discovered source
                 // with the same route coverage may supersede it during
@@ -350,21 +354,10 @@ pub fn explicit_source_for_path(
     provider: Option<CaptureProvider>,
     custom_history_jsonl: bool,
 ) -> Result<ProviderSource> {
-    if !path
-        .try_exists()
-        .with_context(|| format!("check explicit source path {}", path.display()))?
-    {
-        return Err(anyhow!("import path does not exist: {}", path.display()));
-    }
-    let metadata = fs::symlink_metadata(path)
+    let metadata = explicit_source_path_symlink_metadata(path)
         .with_context(|| format!("approve explicit source path {}", path.display()))?;
-    if metadata.file_type().is_symlink() {
-        bail!(
-            "symlinked explicit provider source roots are rejected: {}",
-            path.display()
-        );
-    }
-    let canonical = fs::canonicalize(path)
+    reject_symlinked_explicit_source_root(path, &metadata)?;
+    let canonical = canonicalize_explicit_source_path(path)
         .with_context(|| format!("approve explicit source path {}", path.display()))?;
     validate_approved_path(&canonical)?;
     ctx_history_platform::platform_security::validate_provider_source_outside_data_root(
@@ -379,6 +372,9 @@ pub fn explicit_source_for_path(
             .context("ctx import --path requires --provider for native provider history")?;
         provider_source_for_path_with_data_root(provider, canonical, data_root)
     };
+    let metadata = explicit_source_path_symlink_metadata(path)
+        .with_context(|| format!("revalidate explicit source path {}", path.display()))?;
+    reject_symlinked_explicit_source_root(path, &metadata)?;
     // Return unsupported sources to reporting callers without making them
     // catalogable. Every catalog mutation validates the source again below.
     if source.status == ProviderSourceStatus::Unsupported {
@@ -513,7 +509,7 @@ fn validate_explicit_source_catalog_snapshot_roots(
     snapshot: &ExplicitSourceCatalogSnapshot,
 ) -> Result<()> {
     for entry in snapshot.entries.iter().filter(|entry| entry.enabled) {
-        let source = source_from_catalog_entry(data_root, entry, true)?;
+        let source = source_from_catalog_entry(data_root, entry)?;
         validate_explicit_source_root(data_root, &source)?;
     }
     Ok(())
@@ -567,7 +563,7 @@ fn register_explicit_source_catalog_snapshot_routes(
             .routes()
             .filter_map(|route| route.route_identity.clone())
             .collect::<BTreeSet<_>>();
-        let source = source_from_catalog_entry(data_root, entry, true)?;
+        let source = source_from_catalog_entry(data_root, entry)?;
         validate_explicit_source_root(data_root, &source)?;
         let automatic_route_retirement = if matches!(
             source.provider,
@@ -811,16 +807,9 @@ fn validate_catalog_registration_support(source: &ProviderSource) -> Result<()> 
 
 fn validate_enabled_source(source: &ProviderSource) -> Result<()> {
     validate_approved_path(&source.path)?;
-    if !source
-        .path
-        .try_exists()
-        .with_context(|| format!("check explicit source path {}", source.path.display()))?
-    {
-        bail!(
-            "explicit source path {} is unavailable; missing paths are not deletion authority",
-            source.path.display()
-        );
-    }
+    let metadata = explicit_source_path_symlink_metadata(&source.path)
+        .with_context(|| format!("check explicit source path {}", source.path.display()))?;
+    reject_symlinked_explicit_source_root(&source.path, &metadata)?;
     if source.status != ProviderSourceStatus::Available
         || !source.import_support.is_importable()
         || source.source_kind == ProviderSourceKind::DetectionOnly
@@ -833,6 +822,16 @@ fn validate_enabled_source(source: &ProviderSource) -> Result<()> {
             "{} explicit source {} is not importable: {reason}",
             source.provider.as_str(),
             source.path.display()
+        );
+    }
+    Ok(())
+}
+
+fn reject_symlinked_explicit_source_root(path: &Path, metadata: &fs::Metadata) -> Result<()> {
+    if explicit_source_path_is_symlink_or_reparse_point(metadata) {
+        bail!(
+            "symlinked explicit provider source roots are rejected: {} (Windows reparse points are treated as symlinks)",
+            path.display(),
         );
     }
     Ok(())
@@ -863,11 +862,7 @@ fn route_metadata(
         })
 }
 
-fn source_from_catalog_entry(
-    data_root: &Path,
-    entry: &CatalogEntry,
-    require_available: bool,
-) -> Result<ProviderSource> {
+fn source_from_catalog_entry(data_root: &Path, entry: &CatalogEntry) -> Result<ProviderSource> {
     let provider = entry.provider()?;
     if provider == CaptureProvider::Custom && entry.source_format == RETIRED_CUSTOM_V1_SOURCE_FORMAT
     {
@@ -875,47 +870,28 @@ fn source_from_catalog_entry(
             "custom history catalog entry uses retired ctx-history-jsonl-v1; rewrite the source as ctx-history-jsonl-v2 and import it again"
         );
     }
-    let metadata = entry.route_metadata()?;
-    let exists = entry
-        .path
-        .try_exists()
+    let route_metadata = entry.route_metadata()?;
+    let path_metadata = explicit_source_path_symlink_metadata(&entry.path)
         .with_context(|| format!("check catalog source path {}", entry.path.display()))?;
-    if require_available && !exists {
+    reject_symlinked_explicit_source_root(&entry.path, &path_metadata)?;
+    if provider == CaptureProvider::Custom {
+        return custom_provider_source(entry.path.clone(), true);
+    }
+    let observed = provider_source_for_path_with_data_root(provider, entry.path.clone(), data_root);
+    if observed.source_format != route_metadata.source_format {
         bail!(
-            "enabled explicit catalog source {} is unavailable; missing paths are not deletion authority",
-            entry.path.display()
+            "explicit catalog source {} changed format from `{}` to `{}`",
+            entry.path.display(),
+            route_metadata.source_format,
+            observed.source_format
         );
     }
-    if provider == CaptureProvider::Custom {
-        return custom_provider_source(entry.path.clone(), exists);
-    }
-    if exists {
-        let observed =
-            provider_source_for_path_with_data_root(provider, entry.path.clone(), data_root);
-        if observed.source_format != metadata.source_format {
-            bail!(
-                "explicit catalog source {} changed format from `{}` to `{}`",
-                entry.path.display(),
-                metadata.source_format,
-                observed.source_format
-            );
-        }
-        validate_enabled_source(&observed)?;
-        return Ok(observed);
-    }
-    Ok(ProviderSource {
-        provider,
-        path: entry.path.clone(),
-        exists: false,
-        source_format: metadata.source_format,
-        source_kind: ProviderSourceKind::NativeHistory,
-        import_support: ProviderImportSupport::Native,
-        catalog_support: ProviderCatalogSupport::None,
-        status: ProviderSourceStatus::Missing,
-        unsupported_reason: None,
-        route_provenance: Default::default(),
-    })
+    validate_enabled_source(&observed)?;
+    Ok(observed)
 }
+
+#[cfg(test)]
+mod explicit_source_path_tests;
 
 #[cfg(test)]
 include!("explicit_source_catalog/tests.rs");

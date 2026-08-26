@@ -2,6 +2,7 @@ mod catalog_witness;
 mod current_state;
 mod execution;
 mod explicit_source_catalog;
+mod explicit_source_path;
 mod metadata;
 mod observation;
 mod receipt;
@@ -77,6 +78,10 @@ pub use explicit_source_catalog::{
     validate_explicit_relocation_source, ExplicitSourceCatalogAuthority,
     ExplicitSourceCatalogRouteBinding, ExplicitSourceCatalogUpsert,
     ExplicitSourceRelocationAuthority,
+};
+use explicit_source_path::canonicalize_explicit_source_path;
+pub use explicit_source_path::{
+    explicit_source_path_metadata, explicit_source_path_symlink_metadata, ExplicitSourcePathMissing,
 };
 pub use metadata::{
     verify_generation_query_readiness, GenerationQueryReadiness, SourceBackedPublicationMetadata,

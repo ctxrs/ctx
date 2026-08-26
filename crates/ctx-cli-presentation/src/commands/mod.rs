@@ -19,7 +19,9 @@ pub use doctor::DoctorArgs;
 pub use doctor_presentation::{
     render_doctor_human, source_epoch_findings, DoctorRefreshFailure, DoctorSearchAvailability,
 };
-pub use import_diagnostics::render_partial_deprecation;
+pub use import_diagnostics::{
+    render_import_path_not_found, render_import_path_not_found_plain, render_partial_deprecation,
+};
 pub use index::IndexArgs;
 pub use list::{ListArgs, ListEventsArgs, ListTarget};
 pub use locate::{LocateArgs, LocateTarget};

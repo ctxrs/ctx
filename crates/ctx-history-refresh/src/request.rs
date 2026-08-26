@@ -37,6 +37,7 @@ string_enum!(RefreshOutcomeCode, "code", {
     CompletedWithSourceFailures => "completed_with_source_failures",
     CompletedWithRejectionsAndSourceFailures => "completed_with_rejections_and_source_failures",
     SourceUnavailable => "source_unavailable",
+    ExplicitSourcePathMissing => "explicit_source_path_missing",
     SourceChanged => "source_changed",
     MalformedSource => "malformed_source",
     UnsupportedSchema => "unsupported_schema",
@@ -77,6 +78,7 @@ impl RefreshOutcomeCode {
                 RefreshTerminalFailureType::MalformedSource,
             )),
             Self::SourceUnavailable
+            | Self::ExplicitSourcePathMissing
             | Self::SourceChanged
             | Self::SourceFailures
             | Self::LogicalSourceFailures => Some((

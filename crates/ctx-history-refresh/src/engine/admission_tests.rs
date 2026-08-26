@@ -553,6 +553,52 @@ fn explicit_catalog_admission_uses_only_its_exact_path_authority() {
 }
 
 #[test]
+fn explicit_catalog_path_disappearance_has_a_typed_terminal_outcome() {
+    let (temp, data_root) = private_data_root();
+    let runtime = scoped_runtime(temp.path());
+    let source_path = temp.path().join("requested-history.jsonl");
+    fs::write(&source_path, "{}\n").unwrap();
+    let source = crate::explicit_source_for_path(&data_root, &source_path, None, true).unwrap();
+    let authority = crate::upsert_explicit_source(&data_root, &source)
+        .unwrap()
+        .authority;
+    let coordinator = CoreRefreshEngine::with_admission_fence_for_test(
+        Arc::new(TestRefreshJournal::default()),
+        runtime,
+        Arc::new(|_, _, _, _| panic!("explicit path invoked all-provider discovery")),
+    );
+    let request_id = "019fcaaa-0000-7000-8000-000000000506";
+    let admission = coordinator
+        .submit(
+            &data_root,
+            RefreshRequest::selected_import(
+                request_id.to_owned(),
+                RefreshSelection::ExactSource(authority),
+            ),
+        )
+        .unwrap();
+    fs::remove_file(&source_path).unwrap();
+    release_pending_admission(&coordinator, admission);
+
+    assert!(coordinator
+        .prepare_next_pending_admission(&data_root)
+        .unwrap());
+    let status = status_value(&coordinator, request_id);
+    assert_eq!(status["request_state"], "failed");
+    assert_eq!(status["error_code"], "explicit_source_path_missing");
+    assert_eq!(status["reason"], "unavailable");
+    assert_eq!(status["failure_type"], "source_unavailable");
+    assert_eq!(status["structured_outcome"]["retryable"], true);
+    assert_eq!(
+        status["structured_outcome"]["retry_advice"],
+        "inspect_sources"
+    );
+    assert!(status["last_error"]
+        .as_str()
+        .is_some_and(|detail| detail.contains(source_path.to_string_lossy().as_ref())));
+}
+
+#[test]
 fn explicit_catalog_admission_does_not_inherit_running_all_route_work() {
     let (temp, data_root) = private_data_root();
     let runtime = scoped_runtime(temp.path());

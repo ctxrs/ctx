@@ -308,6 +308,31 @@ fn structured_terminal_error_preserves_engine_route_dispositions() {
 }
 
 #[test]
+fn explicit_path_disappearance_code_survives_the_daemon_boundary() {
+    let mut response = typed_terminal_status();
+    let affected = response["structured_outcome"]["affected_routes"].clone();
+    response["structured_outcome"]["code"] = json!("explicit_source_path_missing");
+    response["structured_outcome"]["class"] = json!("unavailable");
+    response["structured_outcome"]["retryable_routes"] = affected;
+    response["structured_outcome"]["blocked_routes"] = json!([]);
+    response["structured_outcome"]["retry_advice"] = json!("inspect_sources");
+
+    let protocol = source_refresh_protocol_status(&response).unwrap();
+    let error = match failed_refresh_response(&response, protocol.into_terminal_outcome()) {
+        Ok(_) => panic!("failed status must return a terminal error"),
+        Err(error) => error,
+    };
+    let terminal = error
+        .downcast_ref::<SourceBackedRefreshTerminalError>()
+        .expect("typed terminal error");
+
+    assert_eq!(terminal.code, "explicit_source_path_missing");
+    assert_eq!(terminal.class, "unavailable");
+    assert!(terminal.retryable);
+    assert_eq!(terminal.retry_advice.as_deref(), Some("inspect_sources"));
+}
+
+#[test]
 fn present_structured_fields_are_strictly_validated() {
     let mut unknown = typed_terminal_status();
     unknown["structured_outcome"]["code"] = json!("invented_code");

@@ -4,6 +4,12 @@ use super::*;
 pub(super) fn source_backed_refresh_failure_type(
     error: &anyhow::Error,
 ) -> Option<SourceBackedRefreshFailureType> {
+    if error
+        .chain()
+        .any(|cause| cause.downcast_ref::<ExplicitSourcePathMissing>().is_some())
+    {
+        return Some(SourceBackedRefreshFailureType::SourceUnavailable);
+    }
     if error.chain().any(|cause| {
         cause
             .downcast_ref::<ZeroSourcePublicationBlocked>()
@@ -84,6 +90,18 @@ pub(super) fn source_backed_refresh_failure_outcome(
     error: &anyhow::Error,
     attempted_routes: &BTreeSet<SourceRouteIdentity>,
 ) -> SourceBackedRefreshFailureOutcome {
+    if error
+        .chain()
+        .any(|cause| cause.downcast_ref::<ExplicitSourcePathMissing>().is_some())
+    {
+        return SourceBackedRefreshFailureOutcome::new(
+            "explicit_source_path_missing",
+            "unavailable",
+            true,
+            attempted_routes.clone(),
+            Some("inspect_sources"),
+        );
+    }
     if let Some(registration_failures) = error
         .chain()
         .find_map(|cause| cause.downcast_ref::<SourceBackedAdmissionRouteFailures>())
