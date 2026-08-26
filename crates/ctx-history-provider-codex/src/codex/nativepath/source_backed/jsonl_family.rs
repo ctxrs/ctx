@@ -582,10 +582,6 @@ impl<B: ProviderRuntimeBinding> JsonlFamilyAdapter for CodexSessionJsonlFamilyAd
         self.generation.is_session_tree()
     }
 
-    fn allows_empty_quarantined_route(&self) -> bool {
-        true
-    }
-
     fn accepts_direct_append_checkpoint(&self, checkpoint: &TypedKey) -> bool {
         super::super::checkpoint::CodexSemanticCheckpoint::decode_key(checkpoint)
             .is_ok_and(|checkpoint| checkpoint.direct_append_safe())

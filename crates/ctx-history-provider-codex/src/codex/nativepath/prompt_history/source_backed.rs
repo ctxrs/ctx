@@ -133,10 +133,6 @@ impl<B: ProviderRuntimeBinding> JsonlFamilyAdapter for CodexPromptHistoryJsonlFa
         JsonlOversizedRecordPolicy::RejectRecord
     }
 
-    fn allows_empty_quarantined_route(&self) -> bool {
-        true
-    }
-
     fn root_missing_mode(&self) -> JsonlFamilyRootMissingMode {
         JsonlFamilyRootMissingMode::AuthoritativeEmpty
     }

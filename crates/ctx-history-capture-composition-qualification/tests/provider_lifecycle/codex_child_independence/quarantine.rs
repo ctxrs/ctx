@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn catalog_owner_rejection_is_retryable_without_a_valid_sibling() {
+fn catalog_owner_rejection_fails_cold_and_repairs() {
     let temp = tempdir().unwrap();
     let sessions = temp.path().join("sessions-catalog-owner-rejection");
     let index_root = temp.path().join("index-catalog-owner-rejection");
@@ -10,10 +10,13 @@ fn catalog_owner_rejection_is_retryable_without_a_valid_sibling() {
     fs::write(&path, jsonl_bytes([message("catalogownermissingmarker")])).unwrap();
     let registry = register_tree(&[&sessions]);
 
-    let quarantined =
-        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
-    assert!(quarantined.failed_routes.is_empty());
-    assert_eq!(quarantined.logical_source_failures.total(), 1);
+    let error = refresh_source_backed_generation(&index_root, &registry, writer_options())
+        .expect_err("a rejected cold route has no usable logical source");
+    let SourceBackedCoordinatorError::NoUsableLogicalSources { failed_sources } = error else {
+        panic!("unexpected cold rejection error: {error:?}");
+    };
+    assert_eq!(failed_sources.total(), 1);
+    assert!(VerifiedIndex::open(&index_root).is_err());
 
     let repaired_id = "019fb000-0000-7000-8000-000000000063";
     fs::write(
@@ -24,7 +27,8 @@ fn catalog_owner_rejection_is_retryable_without_a_valid_sibling() {
         ]),
     )
     .unwrap();
-    let (repaired, _) = incremental_refresh(&index_root, &registry, &quarantined);
+    let repaired =
+        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
     assert!(repaired.failed_routes.is_empty());
     assert!(repaired.logical_source_failures.is_empty());
     assert_eq!(
@@ -137,6 +141,7 @@ fn codex_prefix_ownership_quarantine_retains_prior_source_and_repairs() {
     assert!(quarantined.failed_routes.is_empty());
     assert_eq!(quarantined.logical_source_failures.total(), 1);
     let index = VerifiedIndex::open(&index_root).unwrap();
+    assert_eq!(index.manifest().sources, initial.sources);
     assert!(index.manifest().sources.iter().any(|certificate| {
         source_native_session_id(certificate.observation().source()) == Some(native_session_id)
     }));
@@ -237,7 +242,7 @@ fn malformed_late_session_meta_quarantines_only_its_rollout() {
 }
 
 #[test]
-fn selector_ambiguous_session_meta_quarantines_its_rollout() {
+fn selector_ambiguous_session_meta_fails_without_a_usable_rollout() {
     let temp = tempdir().unwrap();
     let sessions = temp.path().join("sessions-selector-ambiguous-meta");
     let index_root = temp.path().join("index-selector-ambiguous-meta");
@@ -267,16 +272,13 @@ fn selector_ambiguous_session_meta_quarantines_its_rollout() {
         .unwrap();
 
     let registry = register_tree(&[&sessions]);
-    let receipt =
-        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
-    assert!(receipt.failed_routes.is_empty());
-    assert_eq!(receipt.logical_source_failures.total(), 1);
-    assert!(search_event_candidates(
-        &VerifiedIndex::open(&index_root).unwrap(),
-        "selectorambiguousquarantinedmarker",
-        8,
-    )
-    .is_empty());
+    let error = refresh_source_backed_generation(&index_root, &registry, writer_options())
+        .expect_err("an ambiguous cold route has no usable logical source");
+    let SourceBackedCoordinatorError::NoUsableLogicalSources { failed_sources } = error else {
+        panic!("unexpected ambiguous-source error: {error:?}");
+    };
+    assert_eq!(failed_sources.total(), 1);
+    assert!(VerifiedIndex::open(&index_root).is_err());
 }
 
 #[test]
@@ -373,15 +375,14 @@ fn committed_codex_good_bad_good_retains_prior_source_while_neighbor_advances() 
 }
 
 #[test]
-fn fully_quarantined_codex_session_tree_commits_empty_generation() {
+fn fully_quarantined_codex_session_tree_fails_instead_of_publishing_empty() {
     let temp = tempdir().unwrap();
     let sessions = temp.path().join("sessions-fully-quarantined");
     let index_root = temp.path().join("index-fully-quarantined");
     fs::create_dir_all(&sessions).unwrap();
     // Every Codex rollout ends with a malformed late session_meta, so the shared
-    // family quarantines each as a per-source logical failure. With the Codex
-    // opt-in capability the route must still commit an empty generation rather
-    // than failing the whole route.
+    // family quarantines each as a per-source logical failure. The inventory is
+    // not genuinely empty: it contains three unusable members.
     for ordinal in 0..3u32 {
         let native_session_id = format!("019fb000-0000-7000-8000-0000000000{:02x}", ordinal);
         let marker = format!("fullyquarantinedmarker{ordinal}");
@@ -394,32 +395,33 @@ fn fully_quarantined_codex_session_tree_commits_empty_generation() {
         );
         let path = session_path(&sessions, &native_session_id);
         for prefix in 0..33u32 {
-            append_event(&path, message(&format!("fullyquarantinedprefix{ordinal}-{prefix}")));
+            append_event(
+                &path,
+                message(&format!("fullyquarantinedprefix{ordinal}-{prefix}")),
+            );
         }
-        let mut malformed = session_meta(&native_session_id, ProviderNativeSessionRelationship::Root, None);
+        let mut malformed = session_meta(
+            &native_session_id,
+            ProviderNativeSessionRelationship::Root,
+            None,
+        );
         malformed["timestamp"] = serde_json::json!("not-a-timestamp");
         malformed["payload"]["timestamp"] = serde_json::json!("not-a-timestamp");
         append_event(&path, malformed);
     }
 
     let registry = register_tree(&[&sessions]);
-    let receipt =
-        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
-    // Quarantine (not a hard route failure) and no usable logical sources that
-    // block an empty generation for an opt-in provider.
-    assert!(receipt.failed_routes.is_empty());
-    assert_eq!(receipt.logical_source_failures.total(), 3);
-    let index = VerifiedIndex::open(&index_root).unwrap();
-    assert!(
-        index.manifest().sources.is_empty(),
-        "fully quarantined Codex route must publish an empty generation"
-    );
-    for ordinal in 0..3u32 {
-        assert!(index
-            .search_event_candidates(&format!("fullyquarantinedmarker{ordinal}"), 8)
-            .unwrap()
-            .is_empty());
-    }
+    let error = refresh_source_backed_generation(&index_root, &registry, writer_options())
+        .expect_err("a fully quarantined route has no usable logical source");
+    let SourceBackedCoordinatorError::NoUsableLogicalSources { failed_sources } = error else {
+        panic!("unexpected fully-quarantined error: {error:?}");
+    };
+    assert_eq!(failed_sources.total(), 3);
+    assert!(failed_sources
+        .failures()
+        .iter()
+        .all(|failure| !failure.carried_forward));
+    assert!(VerifiedIndex::open(&index_root).is_err());
 }
 
 #[test]

@@ -538,14 +538,6 @@ fn canonical_inventory_rejects_duplicate_logical_sources_before_staging() {
 }
 
 #[test]
-fn default_adapter_capability_does_not_allow_empty_quarantined_route() {
-    // The empty-quarantined-generation opt-in is a provider capability, not a
-    // provider-name check. The default adapter must stay opt-out so a fully
-    // quarantined non-Codex route fails via NoUsableLogicalSources.
-    assert!(!TestAdapter.allows_empty_quarantined_route());
-}
-
-#[test]
 fn nonzero_incomplete_first_record_is_pending_before_provider_projection() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("sessions");

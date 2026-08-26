@@ -300,9 +300,8 @@ fn malformed_claude_record_is_reported_without_losing_valid_records() {
 
 #[test]
 fn fully_quarantined_claude_route_returns_no_usable_logical_sources() {
-    // Claude does not opt in to the empty-quarantined-generation capability, so
-    // a route whose every source is quarantined must fail the whole route with
-    // NoUsableLogicalSources rather than committing an empty generation.
+    // A route whose every source is quarantined is not genuinely empty. It
+    // must fail with NoUsableLogicalSources rather than publishing emptiness.
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("projects");
     let index = temp.path().join("index");
@@ -332,7 +331,7 @@ fn fully_quarantined_claude_route_returns_no_usable_logical_sources() {
             memory_bytes: 15_000_000,
         },
     );
-    let error = result.expect_err("a fully quarantined non-opt-in route must fail");
+    let error = result.expect_err("a fully quarantined route must fail");
     assert!(
         matches!(
             error,
