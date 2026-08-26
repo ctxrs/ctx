@@ -65,14 +65,21 @@ where
     })
 }
 
-/// Visits a tree while containing admission/read failures for selected child
-/// files. Root and directory-enumeration failures remain fatal because no
-/// independent source boundary has been established for them.
+/// Visits a tree while containing admission/read failures for child entries.
+///
+/// A child that cannot be opened is named and handed to `child_error`, which
+/// decides whether the caller can carry on without it. That covers rejected
+/// path components, which make a subtree unreachable by policy no matter how
+/// the traversal proceeds, so failing the whole scan over one of them discards
+/// every healthy sibling for nothing.
+///
+/// Root and directory-enumeration failures stay fatal. Neither names a child to
+/// contain, and an enumeration that stops early would drop files silently.
 pub fn visit_bounded_tree_files_isolating_selected<E, Selected>(
     root: &Path,
     selected: &mut Selected,
     visit: &mut dyn FnMut(BoundedTreeSourceFile) -> std::result::Result<(), E>,
-    selected_file_error: &mut dyn FnMut(&Path, E) -> std::result::Result<(), E>,
+    child_error: &mut dyn FnMut(&Path, E) -> std::result::Result<(), E>,
 ) -> std::result::Result<usize, E>
 where
     E: From<SourceIoError>,
@@ -98,7 +105,7 @@ where
                     Ok(1)
                 }
                 Err(error) => {
-                    selected_file_error(root, error)?;
+                    child_error(root, error)?;
                     Ok(0)
                 }
             }
@@ -110,7 +117,7 @@ where
                 directory,
                 selected,
                 visit,
-                selected_file_error,
+                child_error,
                 0,
             )?;
             authority.revalidate().map_err(E::from)?;
@@ -125,7 +132,7 @@ fn visit_bounded_tree_files_at_depth<E, Selected>(
     directory: ProviderSourceDirectory,
     selected: &mut Selected,
     visit: &mut dyn FnMut(BoundedTreeSourceFile) -> std::result::Result<(), E>,
-    selected_file_error: &mut dyn FnMut(&Path, E) -> std::result::Result<(), E>,
+    child_error: &mut dyn FnMut(&Path, E) -> std::result::Result<(), E>,
     depth: usize,
 ) -> std::result::Result<usize, E>
 where
@@ -149,11 +156,10 @@ where
         });
         let opened = match directory.open_child(&name) {
             Ok(opened) => opened,
-            Err(error) if is_selected => {
-                selected_file_error(&child_path, error.into())?;
+            Err(error) => {
+                child_error(&child_path, error.into())?;
                 return Ok(());
             }
-            Err(error) => return Err(error.into()),
         };
         if let OpenedProviderSourcePath::Directory(child_directory) = opened {
             visited = visited.saturating_add(visit_bounded_tree_files_at_depth(
@@ -161,7 +167,7 @@ where
                 child_directory,
                 selected,
                 visit,
-                selected_file_error,
+                child_error,
                 depth.saturating_add(1),
             )?);
         } else if is_selected {
@@ -179,7 +185,7 @@ where
                 visit(file.clone()).and_then(|()| file.opened.revalidate().map_err(E::from));
             match outcome {
                 Ok(()) => visited = visited.saturating_add(1),
-                Err(error) => selected_file_error(&child_path, error)?,
+                Err(error) => child_error(&child_path, error)?,
             }
         }
         Ok(())
@@ -829,6 +835,44 @@ mod tests {
         assert_eq!(count, 1);
         assert_eq!(visited, [OsString::from("a-healthy.jsonl")]);
         assert_eq!(failures, [OsString::from("b-rejected.jsonl")]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn rejected_child_directory_is_isolated_from_healthy_siblings() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("tree");
+        let reachable = root.join("a-reachable");
+        fs::create_dir_all(&reachable).unwrap();
+        fs::write(reachable.join("kept.jsonl"), b"{}\n").unwrap();
+        // A symlinked directory carries no `.jsonl` extension, so selection
+        // never claims it and the traversal used to fail the entire scan here.
+        symlink(&reachable, root.join("b-linked-dir")).unwrap();
+        fs::write(root.join("c-kept.jsonl"), b"{}\n").unwrap();
+
+        let mut visited = Vec::new();
+        let mut failures = Vec::new();
+        let count = visit_bounded_tree_files_isolating_selected(
+            &root,
+            &mut |candidate| candidate.path().extension() == Some(OsStr::new("jsonl")),
+            &mut |source_file| {
+                visited.push(source_file.path().file_name().unwrap().to_owned());
+                Ok::<(), SourceIoError>(())
+            },
+            &mut |path, _error| {
+                failures.push(path.file_name().unwrap().to_owned());
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(count, 2);
+        visited.sort();
+        assert_eq!(
+            visited,
+            [OsString::from("c-kept.jsonl"), OsString::from("kept.jsonl")]
+        );
+        assert_eq!(failures, [OsString::from("b-linked-dir")]);
     }
 
     #[test]
