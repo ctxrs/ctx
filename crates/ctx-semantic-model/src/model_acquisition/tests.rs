@@ -67,19 +67,6 @@ fn production_descriptor_is_hash_pinned_and_cache_probe_is_offline() {
 }
 
 #[test]
-fn cached_bundle_compatibility_is_pinned_to_the_exact_known_manifest() {
-    let descriptor = compatibility_descriptor();
-    assert_eq!(
-        descriptor.manifest_sha256,
-        CACHED_COREML_COMPATIBILITY_MANIFEST_SHA256
-    );
-    assert_eq!(
-        descriptor.schema_version,
-        COREML_BUNDLE_CONTRACT.schema_version
-    );
-}
-
-#[test]
 fn cache_only_probe_never_reads_artifact_url() {
     let temp = tempfile::tempdir().unwrap();
     let missing = temp

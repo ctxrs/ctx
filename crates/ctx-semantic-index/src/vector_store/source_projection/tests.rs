@@ -634,8 +634,8 @@ fn mixed_core_roles_build_and_pin_only_the_semantic_candidate() -> Result<()> {
 fn page_embedding_batches_multiple_documents_in_one_embedder_call() -> Result<()> {
     let fixture = Fixture::new(1)?;
     let first = fixture.record_with_role(0, 1, "first eligible user question", EventRole::User)?;
-    let second =
-        fixture.record_with_role(0, 2, "second eligible user question", EventRole::User)?;
+    let second_body = "second eligible user question ".repeat(50);
+    let second = fixture.record_with_role(0, 2, &second_body, EventRole::User)?;
     let root = fixture.data_root.join("index-page-embedding-batch");
     let fixture_source = &fixture.sources[0];
     let mut writer = GenerationWriter::open(&root, WriterOptions::default())?
@@ -672,7 +672,7 @@ fn page_embedding_batches_multiple_documents_in_one_embedder_call() -> Result<()
     assert_eq!(outcome.records_embedded, 2);
     assert_eq!(outcome.records_reused, 0);
     assert_eq!(embedder.calls, 1);
-    assert_eq!(embedder.chunks, 2);
+    assert_eq!(embedder.chunks, 3);
     assert_eq!(
         builder.calls,
         vec![first.event_id.as_uuid(), second.event_id.as_uuid()]

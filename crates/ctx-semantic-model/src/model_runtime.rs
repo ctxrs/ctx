@@ -181,51 +181,6 @@ impl SharedSemanticRuntime {
     }
 
     #[cfg(ctx_semantic_fastembed)]
-    pub fn embed_documents(
-        &self,
-        config: &SemanticModelConfig,
-        texts: Vec<String>,
-        deadline: Option<Instant>,
-    ) -> Result<(Vec<Vec<f32>>, SemanticQuietPolicy)> {
-        let mut embedder = self.lock()?;
-        let started = Instant::now();
-        let first = embedder
-            .as_mut()
-            .ok_or_else(|| anyhow!("semantic embedder was not initialized"))?
-            .embed_documents(texts.clone());
-        let embeddings = match first {
-            Ok(embeddings) => embeddings,
-            Err(first_error) => {
-                let runtime = embedder
-                    .as_ref()
-                    .ok_or_else(|| {
-                        anyhow!("semantic embedder disappeared after inference failure")
-                    })?
-                    .runtime_info();
-                *embedder = None;
-                let mut replacement = reacquire_semantic_embedder(config, &runtime)
-                    .context("reinitialize semantic embedder after document inference failure")?;
-                let retry = replacement.embed_documents(texts).with_context(|| {
-                    format!(
-                        "semantic document inference failed twice; first failure: {first_error:#}"
-                    )
-                })?;
-                *embedder = Some(replacement);
-                retry
-            }
-        };
-        let quiet_policy = embedder
-            .as_ref()
-            .ok_or_else(|| anyhow!("semantic embedder was not initialized"))?
-            .quiet_policy(config);
-        drop(embedder);
-        let active = started.elapsed();
-        let remaining = deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
-        throttle_semantic_batch(active, quiet_policy, remaining);
-        Ok((embeddings, quiet_policy))
-    }
-
-    #[cfg(ctx_semantic_fastembed)]
     pub fn embed_query(
         &self,
         config: &SemanticModelConfig,
@@ -633,15 +588,11 @@ impl SemanticEmbedder {
         }
     }
 
-    pub(super) fn quiet_policy(&self, config: &SemanticModelConfig) -> SemanticQuietPolicy {
-        let mut policy = semantic_quiet_policy(
+    pub(super) fn quiet_policy(&self) -> SemanticQuietPolicy {
+        semantic_quiet_policy(
             SemanticSystemResources::current(),
             self.backend.compute_class(),
-        );
-        if let Some(active_percent) = config.active_percent_override() {
-            policy.active_percent = active_percent;
-        }
-        policy
+        )
     }
 }
 
@@ -929,6 +880,8 @@ fn reacquire_semantic_embedder(
 }
 
 mod cpu;
+#[cfg(ctx_semantic_fastembed)]
+mod document_batches;
 #[cfg(all(test, ctx_semantic_fastembed))]
 pub(super) use cpu::acquire_cpu_backend;
 #[cfg(all(ctx_semantic_fastembed, not(target_os = "macos")))]
