@@ -276,7 +276,7 @@ fn exact_noop_work_is_zero_for_n_and_2n_retained_documents() {
 }
 
 #[test]
-fn one_record_append_verification_work_is_independent_of_retained_corpus_size() {
+fn one_record_append_verification_work_tracks_live_segment_topology() {
     let (n, n_base_segments) = measure_one_record_append(RETAINED_N);
     let (two_n, two_n_base_segments) = measure_one_record_append(RETAINED_2N);
 
@@ -294,16 +294,25 @@ fn one_record_append_verification_work_is_independent_of_retained_corpus_size() 
     assert_eq!(n.lineage_spills, 0);
     assert_eq!(n.complete_session_id_traversals, 0);
     assert_eq!(n.writer_constructions, 1);
-    assert_eq!(
-        n.authority_lookup.segment_range_probes, n_base_segments,
-        "the append must probe each live base segment exactly once"
-    );
-    assert_eq!(
-        two_n.authority_lookup.segment_range_probes, two_n_base_segments,
-        "the append must probe each live base segment exactly once"
-    );
-    assert!(n.authority_lookup.segment_range_probes <= MAX_SESSION_WITNESS_SEGMENT_PROBES);
-    assert_eq!(n.authority_lookup.dictionary_terms, 1);
+    for (lookup, base_segments) in [
+        (n.authority_lookup, n_base_segments),
+        (two_n.authority_lookup, two_n_base_segments),
+    ] {
+        assert_eq!(
+            lookup.segment_range_probes, base_segments,
+            "the append must probe each live base segment exactly once"
+        );
+        assert!(lookup.segment_range_probes <= MAX_SESSION_WITNESS_SEGMENT_PROBES);
+        assert_eq!(
+            (
+                lookup.dictionary_terms,
+                lookup.postings,
+                lookup.core_decodes
+            ),
+            (1, 1, 1),
+            "retained corpus size must not increase sparse witness work"
+        );
+    }
     assert_eq!(two_n.identity_terms, n.identity_terms);
     assert_eq!(two_n.identity_documents, n.identity_documents);
     assert_eq!(two_n.projection_documents, n.projection_documents);
@@ -314,7 +323,6 @@ fn one_record_append_verification_work_is_independent_of_retained_corpus_size() 
         n.complete_session_id_traversals
     );
     assert_eq!(two_n.writer_constructions, n.writer_constructions);
-    assert_eq!(two_n.authority_lookup, n.authority_lookup);
 }
 
 #[test]
