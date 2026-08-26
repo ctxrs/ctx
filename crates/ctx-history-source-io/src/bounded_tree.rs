@@ -10,8 +10,9 @@ use std::{
 use tempfile::TempDir;
 
 use crate::{
-    open_provider_source_path, OpenedProviderSourceFile, OpenedProviderSourcePath,
-    ProviderSourceDirectory, SourceIoError, PROVIDER_JSONL_INVENTORY_MAX_METADATA_ENTRIES,
+    is_non_regular_source_rejection, is_symlink_source_rejection, open_provider_source_path,
+    OpenedProviderSourceFile, OpenedProviderSourcePath, ProviderSourceDirectory, SourceIoError,
+    PROVIDER_JSONL_INVENTORY_MAX_METADATA_ENTRIES,
 };
 
 const BOUNDED_TREE_MAX_DIRECTORY_DEPTH: usize = 128;
@@ -65,21 +66,20 @@ where
     })
 }
 
-/// Visits a tree while containing admission/read failures for child entries.
+/// Visits a tree while containing admission/read failures for selected files.
 ///
-/// A child that cannot be opened is named and handed to `child_error`, which
-/// decides whether the caller can carry on without it. That covers rejected
-/// path components, which make a subtree unreachable by policy no matter how
-/// the traversal proceeds, so failing the whole scan over one of them discards
-/// every healthy sibling for nothing.
+/// Unselected symlink, reparse, and non-regular children are never followed and
+/// are skipped. Other unselected open failures stay fatal because they may hide
+/// a genuine directory subtree.
 ///
-/// Root and directory-enumeration failures stay fatal. Neither names a child to
-/// contain, and an enumeration that stops early would drop files silently.
+/// Root-open and directory-enumeration failures stay fatal. Neither names a
+/// selected child to contain, and an enumeration that stops early would drop
+/// files silently.
 pub fn visit_bounded_tree_files_isolating_selected<E, Selected>(
     root: &Path,
     selected: &mut Selected,
     visit: &mut dyn FnMut(BoundedTreeSourceFile) -> std::result::Result<(), E>,
-    child_error: &mut dyn FnMut(&Path, E) -> std::result::Result<(), E>,
+    selected_file_error: &mut dyn FnMut(&Path, E) -> std::result::Result<(), E>,
 ) -> std::result::Result<usize, E>
 where
     E: From<SourceIoError>,
@@ -105,7 +105,7 @@ where
                     Ok(1)
                 }
                 Err(error) => {
-                    child_error(root, error)?;
+                    selected_file_error(root, error)?;
                     Ok(0)
                 }
             }
@@ -117,7 +117,7 @@ where
                 directory,
                 selected,
                 visit,
-                child_error,
+                selected_file_error,
                 0,
             )?;
             authority.revalidate().map_err(E::from)?;
@@ -132,7 +132,7 @@ fn visit_bounded_tree_files_at_depth<E, Selected>(
     directory: ProviderSourceDirectory,
     selected: &mut Selected,
     visit: &mut dyn FnMut(BoundedTreeSourceFile) -> std::result::Result<(), E>,
-    child_error: &mut dyn FnMut(&Path, E) -> std::result::Result<(), E>,
+    selected_file_error: &mut dyn FnMut(&Path, E) -> std::result::Result<(), E>,
     depth: usize,
 ) -> std::result::Result<usize, E>
 where
@@ -156,10 +156,17 @@ where
         });
         let opened = match directory.open_child(&name) {
             Ok(opened) => opened,
-            Err(error) => {
-                child_error(&child_path, error.into())?;
+            Err(error) if is_selected => {
+                selected_file_error(&child_path, error.into())?;
                 return Ok(());
             }
+            Err(error)
+                if is_symlink_source_rejection(&error)
+                    || is_non_regular_source_rejection(&error) =>
+            {
+                return Ok(());
+            }
+            Err(error) => return Err(error.into()),
         };
         if let OpenedProviderSourcePath::Directory(child_directory) = opened {
             visited = visited.saturating_add(visit_bounded_tree_files_at_depth(
@@ -167,7 +174,7 @@ where
                 child_directory,
                 selected,
                 visit,
-                child_error,
+                selected_file_error,
                 depth.saturating_add(1),
             )?);
         } else if is_selected {
@@ -185,7 +192,7 @@ where
                 visit(file.clone()).and_then(|()| file.opened.revalidate().map_err(E::from));
             match outcome {
                 Ok(()) => visited = visited.saturating_add(1),
-                Err(error) => child_error(&child_path, error)?,
+                Err(error) => selected_file_error(&child_path, error)?,
             }
         }
         Ok(())
@@ -851,7 +858,7 @@ mod tests {
         fs::write(root.join("c-kept.jsonl"), b"{}\n").unwrap();
 
         let mut visited = Vec::new();
-        let mut failures = Vec::new();
+        let mut isolated = 0;
         let count = visit_bounded_tree_files_isolating_selected(
             &root,
             &mut |candidate| candidate.path().extension() == Some(OsStr::new("jsonl")),
@@ -859,8 +866,8 @@ mod tests {
                 visited.push(source_file.path().file_name().unwrap().to_owned());
                 Ok::<(), SourceIoError>(())
             },
-            &mut |path, _error| {
-                failures.push(path.file_name().unwrap().to_owned());
+            &mut |_path, _error| {
+                isolated += 1;
                 Ok(())
             },
         )
@@ -872,7 +879,37 @@ mod tests {
             visited,
             [OsString::from("c-kept.jsonl"), OsString::from("kept.jsonl")]
         );
-        assert_eq!(failures, [OsString::from("b-linked-dir")]);
+        assert_eq!(isolated, 0);
+    }
+
+    #[test]
+    fn ordinary_unselected_child_open_failure_is_fatal() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("tree");
+        let raced = root.join("raced-away");
+        fs::create_dir_all(&raced).unwrap();
+        let mut isolated = 0;
+
+        let error = visit_bounded_tree_files_isolating_selected(
+            &root,
+            &mut |candidate| {
+                if candidate.path() == raced {
+                    fs::remove_dir(&raced).unwrap();
+                }
+                false
+            },
+            &mut |_| Ok::<(), SourceIoError>(()),
+            &mut |_path, _error| {
+                isolated += 1;
+                Ok(())
+            },
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(error, SourceIoError::Io(error) if error.kind() == io::ErrorKind::NotFound)
+        );
+        assert_eq!(isolated, 0);
     }
 
     #[test]
