@@ -605,6 +605,65 @@ fn canonical_inventory_preserves_unrelated_source_when_deduplicating() {
 }
 
 #[test]
+fn canonical_inventory_withholds_divergent_duplicates_and_preserves_unrelated_source() {
+    let temp = tempfile::tempdir().unwrap();
+    let first_path = temp.path().join("first.jsonl");
+    let second_path = temp.path().join("second.jsonl");
+    let third_path = temp.path().join("third.jsonl");
+    fs::write(&first_path, TEST_RECORD).unwrap();
+    fs::write(&second_path, b"{\"message\":\"different\"}\n").unwrap();
+    fs::write(&third_path, TEST_RECORD).unwrap();
+    let discovered = TestAdapter.discover(temp.path()).unwrap();
+    let first = discovered
+        .accepted_leaves()
+        .find(|leaf| leaf.source_path() == first_path)
+        .unwrap()
+        .clone();
+    let source = first.source().clone();
+    let second = JsonlFamilyLeaf::observe(
+        source.clone(),
+        second_path.clone(),
+        Arc::clone(first.authority()),
+        PathBuf::from("second.jsonl"),
+        TypedKey::utf8("second-binding").unwrap(),
+    )
+    .unwrap();
+    let third = discovered
+        .accepted_leaves()
+        .find(|leaf| leaf.source_path() == third_path)
+        .unwrap()
+        .clone();
+
+    let inventory = JsonlFamilyInventory::present(
+        CaptureProvider::Pi,
+        temp.path(),
+        Arc::clone(first.authority()),
+        vec![first, second, third],
+    )
+    .unwrap();
+
+    assert_eq!(inventory.accepted_len(), 1);
+    assert_eq!(inventory.quarantined_len(), 2);
+    assert_eq!(
+        inventory.accepted_leaves().next().unwrap().source_path(),
+        third_path
+    );
+    let quarantined = inventory.quarantined_leaves().collect::<Vec<_>>();
+    assert_eq!(
+        quarantined
+            .iter()
+            .filter(|leaf| leaf.logical_source_failure.is_some())
+            .count(),
+        1
+    );
+    assert!(quarantined.iter().all(|leaf| leaf
+        .source()
+        .is_some_and(|claimed| claimed.exact_descriptor_eq(&source))));
+    assert_eq!(quarantined[0].source_path(), first_path);
+    assert_eq!(quarantined[1].source_path(), second_path);
+}
+
+#[test]
 fn canonical_inventory_deduplication_is_deterministic_regardless_of_leaf_order() {
     let temp = tempfile::tempdir().unwrap();
     let first_path = temp.path().join("first.jsonl");

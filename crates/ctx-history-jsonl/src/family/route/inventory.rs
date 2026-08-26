@@ -395,29 +395,23 @@ fn validate_unique_accepted_sources<E: JsonlFamilyError>(
     Ok(())
 }
 
-/// Reconciles accepted physical leaves that resolve to the same logical source
-/// identity without aborting the whole provider route.
+#[derive(Debug, Clone, Copy)]
+enum DuplicateDisposition {
+    IdenticalAlias,
+    Unsafe { report_failure: bool },
+}
+
+/// Reconciles physical leaves that claim one logical source without guessing
+/// which divergent transcript is authoritative.
 ///
-/// When several accepted leaves claim one logical source (for example two
-/// transcript files an adapter emitted with a colliding `SourceKey`), the
-/// inventory deterministically retains one leaf and quarantines the remaining
-/// duplicates. Retention is chosen by stable physical ordering -- the
-/// lexicographically smallest source path -- so the outcome never depends on
-/// volatile file metadata such as length or modification time, which would make
-/// the choice non-deterministic across separate discovery passes.
-///
-/// A genuine descriptor digest collision (distinct descriptors hashing to the
-/// same digest) remains an error because no member can be chosen safely.
-///
-/// Quarantined duplicates are recorded with a logical-source diagnostic but are
-/// deliberately *not* marked with `quarantined_source`. That marker would enter
-/// `rejected_quarantine_sources` and cause `capture` to filter the retained
-/// accepted leaf out of publication, defeating the purpose of the dedup.
+/// Byte-identical leaves are safe aliases: the lowest path remains accepted and
+/// the other physical copies are reported as quarantined aliases. If any copy
+/// differs, every copy is withheld and one deterministic logical-source
+/// failure is reported. Providers that can prove a stronger semantic equality
+/// may collapse their aliases before constructing this generic inventory.
 fn reconcile_duplicate_accepted_sources<E: JsonlFamilyError>(
     members: &mut Vec<JsonlFamilyInventoryMember<E>>,
 ) -> JsonlResult<(), E> {
-    use std::collections::HashMap;
-
     let mut groups: HashMap<[u8; 32], Vec<usize>> = HashMap::new();
     for (index, member) in members.iter().enumerate() {
         if let JsonlFamilyInventoryMember::Accepted { leaf, .. } = member {
@@ -428,7 +422,7 @@ fn reconcile_duplicate_accepted_sources<E: JsonlFamilyError>(
         }
     }
 
-    let mut duplicates: Vec<usize> = Vec::new();
+    let mut dispositions = HashMap::<usize, DuplicateDisposition>::new();
     for indices in groups.values() {
         if indices.len() < 2 {
             continue;
@@ -448,46 +442,73 @@ fn reconcile_duplicate_accepted_sources<E: JsonlFamilyError>(
                 "JSONL physical inventory contains a source descriptor digest collision".to_owned(),
             ));
         }
-        let mut keeper = indices[0];
-        for &index in &indices[1..] {
-            if members[index].source_path() < members[keeper].source_path() {
-                keeper = index;
+        let mut content_digest = None;
+        let mut identical = true;
+        for &index in indices {
+            let leaf = match &members[index] {
+                JsonlFamilyInventoryMember::Accepted { leaf, .. } => leaf,
+                _ => unreachable!("duplicate group references an accepted member"),
+            };
+            let observed = authenticated_leaf_content_digest(leaf)?;
+            match content_digest {
+                Some(expected) if expected != observed => identical = false,
+                Some(_) => {}
+                None => content_digest = Some(observed),
             }
         }
-        for &index in indices {
-            if index != keeper {
-                duplicates.push(index);
+        if identical {
+            for &index in &indices[1..] {
+                dispositions.insert(index, DuplicateDisposition::IdenticalAlias);
+            }
+        } else {
+            for (position, &index) in indices.iter().enumerate() {
+                dispositions.insert(
+                    index,
+                    DuplicateDisposition::Unsafe {
+                        report_failure: position == 0,
+                    },
+                );
             }
         }
     }
 
-    if duplicates.is_empty() {
+    if dispositions.is_empty() {
         return Ok(());
     }
 
-    let mut taken = vec![false; members.len()];
-    for index in duplicates {
-        taken[index] = true;
-    }
     let original = std::mem::take(members);
     let mut rebuilt = Vec::with_capacity(original.len());
     for (index, member) in original.into_iter().enumerate() {
-        if taken[index] {
+        if let Some(disposition) = dispositions.get(&index).copied() {
             let (identity, leaf) = match member {
                 JsonlFamilyInventoryMember::Accepted { identity, leaf } => (identity, leaf),
                 _ => unreachable!("duplicate index references an accepted member"),
             };
-            let rejected = JsonlFamilyRejectedLeaf::bind_observed(
+            let source = leaf.source().clone();
+            let mut rejected = JsonlFamilyRejectedLeaf::bind_observed(
                 leaf.source_path().to_path_buf(),
                 leaf.authority_path().to_path_buf(),
                 leaf.observation().clone(),
                 leaf.binding().clone(),
                 0,
-            )
-            .with_logical_source_failure(
-                leaf.source().clone(),
-                "duplicate physical leaf resolved to an already-present logical source identity; quarantined",
             );
+            match disposition {
+                DuplicateDisposition::IdenticalAlias => {
+                    rejected = rejected.with_logical_source_failure(
+                        source,
+                        "byte-identical physical leaf repeats an already-present logical source identity; quarantined alias",
+                    );
+                }
+                DuplicateDisposition::Unsafe { report_failure } => {
+                    rejected = rejected.with_quarantined_source(source.clone());
+                    if report_failure {
+                        rejected = rejected.with_logical_source_failure(
+                            source,
+                            "physical leaves claim one logical source identity but their contents differ; all copies quarantined",
+                        );
+                    }
+                }
+            }
             rebuilt.push(JsonlFamilyInventoryMember::Quarantined {
                 identity,
                 leaf: rejected,
@@ -498,4 +519,19 @@ fn reconcile_duplicate_accepted_sources<E: JsonlFamilyError>(
     }
     *members = rebuilt;
     Ok(())
+}
+
+fn authenticated_leaf_content_digest<E: JsonlFamilyError>(
+    leaf: &JsonlFamilyLeaf<E>,
+) -> JsonlResult<[u8; 32], E> {
+    let opened = leaf.authority().open_file(leaf.authority_path())?;
+    let before = observe_opened_file(leaf.source_path(), &opened)?;
+    if &before != leaf.observation() {
+        return Err(E::source_changed());
+    }
+    let digest = opened_file_prefix_sha256(opened.file(), before.length())?;
+    if observe_opened_file(leaf.source_path(), &opened)? != before {
+        return Err(E::source_changed());
+    }
+    Ok(digest)
 }
