@@ -64,7 +64,7 @@ pub fn explicit_source_path_symlink_metadata(path: &Path) -> Result<fs::Metadata
 
 /// Returns whether no-follow metadata identifies an explicit source root as a
 /// symlink or, on Windows, any reparse point.
-pub(crate) fn explicit_source_path_is_symlink_or_reparse_point(metadata: &fs::Metadata) -> bool {
+pub fn explicit_source_path_is_symlink_or_reparse_point(metadata: &fs::Metadata) -> bool {
     if metadata.file_type().is_symlink() {
         return true;
     }

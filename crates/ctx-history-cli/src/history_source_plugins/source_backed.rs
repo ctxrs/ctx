@@ -1,5 +1,5 @@
 use std::{
-    fs::{self, File},
+    fs::File,
     io::{BufRead, BufReader},
     path::Path,
 };
@@ -10,6 +10,9 @@ use ctx_history_capture::{
     ProviderSourceStatus,
 };
 use ctx_history_core::{CaptureProvider, CtxHistoryJsonlRecord, CTX_HISTORY_JSONL_SCHEMA_VERSION};
+use ctx_history_refresh::{
+    explicit_source_path_is_symlink_or_reparse_point, explicit_source_path_symlink_metadata,
+};
 
 use super::HistorySourcePluginSource;
 
@@ -75,13 +78,15 @@ fn validate_provider_owned_source(
     source: &HistorySourcePluginSource,
     source_path: &Path,
 ) -> Result<()> {
-    let metadata = fs::symlink_metadata(source_path).with_context(|| {
+    let metadata = explicit_source_path_symlink_metadata(source_path).with_context(|| {
         format!(
             "inspect durable history source plugin path {}",
             source_path.display()
         )
     })?;
-    if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+    if explicit_source_path_is_symlink_or_reparse_point(&metadata)
+        || !metadata.file_type().is_file()
+    {
         bail!(
             "history source plugin {} durable path {} must be a regular non-symlink file",
             source.label(),
@@ -215,6 +220,20 @@ mod tests {
             ROUTE_SOURCE_FORMAT
         );
         assert!(!temp.path().join("history-source-plugin-sources").exists());
+    }
+
+    #[test]
+    fn missing_durable_source_retains_the_typed_explicit_path_marker() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("missing-history.jsonl");
+
+        let error = prepare_source_backed_history_source(source(path.clone()), false).unwrap_err();
+        let missing = error
+            .downcast_ref::<ctx_history_refresh::ExplicitSourcePathMissing>()
+            .unwrap();
+
+        assert_eq!(missing.path(), path);
+        assert_eq!(missing.source_error().kind(), std::io::ErrorKind::NotFound);
     }
 
     #[test]

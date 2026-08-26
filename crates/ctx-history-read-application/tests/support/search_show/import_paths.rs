@@ -131,6 +131,120 @@ fn assert_clean_missing_import_path_progress(
     assert_no_leaked_import_path_details(stderr, contract);
 }
 
+fn write_manifest_with_durable_source(temp: &TempDir, present: bool) -> (PathBuf, PathBuf) {
+    let plugin_dir = temp.path().join("missing-durable-source-plugin");
+    let manifest = plugin_dir.join("ctx-history-plugin.json");
+    let missing = plugin_dir.join("missing-history-路径.jsonl");
+    fs::create_dir(&plugin_dir).unwrap();
+    fs::write(
+        &manifest,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "name": "missing-source-plugin",
+            "history_sources": [{
+                "id": "default",
+                "provider_key": "missing-source-provider",
+                "source_id": "default",
+                "source_format": "missing-source-v1",
+                "path": &missing
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    if present {
+        fs::write(
+            &missing,
+            concat!(
+                "{\"record_type\":\"manifest\",\"schema_version\":\"ctx-history-jsonl-v2\"}\n",
+                "{\"record_type\":\"source\",\"provider_key\":\"missing-source-provider\",\"source_id\":\"default\",\"source_format\":\"missing-source-v1\"}\n"
+            ),
+        )
+        .unwrap();
+    }
+    (manifest, missing)
+}
+
+fn assert_clean_missing_path_progress_stream(
+    output: &std::process::Output,
+    missing: &Path,
+    contract: &str,
+) {
+    assert!(output.stdout.is_empty(), "{contract}: {output:#?}");
+    let stderr = std::str::from_utf8(&output.stderr)
+        .unwrap_or_else(|error| panic!("{contract} emitted non-UTF-8 stderr: {error}"));
+    let events = stderr
+        .lines()
+        .map(|line| {
+            serde_json::from_str::<Value>(line).unwrap_or_else(|error| {
+                panic!("{contract} emitted a non-JSON progress line ({error}): {line:?}")
+            })
+        })
+        .collect::<Vec<_>>();
+    let terminal = events
+        .iter()
+        .filter(|event| event["done"] == true)
+        .collect::<Vec<_>>();
+
+    assert_eq!(terminal.len(), 1, "{contract}: {stderr}");
+    assert_eq!(terminal[0]["type"], "ctx_progress", "{contract}");
+    assert_eq!(terminal[0]["operation"], "import", "{contract}");
+    assert_eq!(terminal[0]["phase"], "failed", "{contract}");
+    assert_eq!(
+        terminal[0]["message"],
+        format!("Import path does not exist: {}", missing.display()),
+        "{contract}"
+    );
+    assert_no_leaked_import_path_details(stderr, contract);
+}
+
+fn output_after_path_disappears_at_refresh_gate(
+    temp: &TempDir,
+    source: &Path,
+    configure: impl FnOnce(&mut StdCommand),
+) -> std::process::Output {
+    fs::create_dir_all(data_root(temp)).unwrap();
+    let gate = data_root(temp).join(".block-source-refresh-after-availability-for-test");
+    let blocked = data_root(temp).join(".source-refresh-blocked-after-availability-for-test");
+    fs::write(&gate, b"block\n").unwrap();
+
+    let prepared = ctx(temp);
+    let mut command = StdCommand::new(prepared.get_program());
+    for (name, value) in prepared.get_envs() {
+        match value {
+            Some(value) => {
+                command.env(name, value);
+            }
+            None => {
+                command.env_remove(name);
+            }
+        }
+    }
+    command.current_dir(temp.path());
+    configure(&mut command);
+    command
+        .args(["--color=always", "--progress=json"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().expect("start blocked exact import");
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !blocked.exists() {
+        if let Some(status) = child.try_wait().unwrap() {
+            panic!("exact import exited before its availability gate: {status}");
+        }
+        assert!(
+            Instant::now() < deadline,
+            "exact import did not reach its post-availability gate"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    fs::remove_file(source).unwrap();
+    fs::remove_file(&gate).unwrap();
+
+    child.wait_with_output().unwrap()
+}
+
 #[test]
 fn pi_cli_imports_directory_tree_path() {
     let temp = tempdir();
@@ -298,6 +412,88 @@ fn missing_import_paths_have_one_terminal_event_in_progress_json_mode() {
         let contract = format!("{} --progress=json", surface.name());
 
         assert_clean_missing_import_path_progress(&output, path.to_str().unwrap(), &contract);
+    }
+}
+
+#[test]
+fn missing_manifest_durable_source_has_one_clean_terminal_progress_event() {
+    for installed in [false, true] {
+        let temp = tempdir();
+        let (manifest, missing) = write_manifest_with_durable_source(&temp, false);
+        let mut command = ctx(&temp);
+        if installed {
+            command
+                .env("CTX_HISTORY_PLUGIN_PATH", manifest.parent().unwrap())
+                .args([
+                    "import",
+                    "--history-source",
+                    "missing-source-plugin/default",
+                ]);
+        } else {
+            command.args(["import", "--history-source-manifest"]);
+            command.arg(&manifest);
+        }
+        let output = command
+            .args(["--color=always", "--progress=json"])
+            .assert()
+            .failure()
+            .get_output()
+            .clone();
+        let contract = if installed {
+            "installed history source with missing durable path"
+        } else {
+            "explicit manifest with missing durable path"
+        };
+
+        assert_clean_missing_path_progress_stream(&output, &missing, contract);
+    }
+}
+
+#[test]
+fn late_explicit_path_disappearance_has_one_clean_terminal_progress_event() {
+    let temp = tempdir();
+    let source = temp.path().join("late-missing-history-路径.jsonl");
+    fs::write(&source, b"{}\n").unwrap();
+    let output = output_after_path_disappears_at_refresh_gate(&temp, &source, |command| {
+        command
+            .args(["import", "--input-format", "ctx-history-jsonl-v2", "--path"])
+            .arg(&source);
+    });
+    assert!(!output.status.success(), "{output:#?}");
+    assert_clean_missing_path_progress_stream(
+        &output,
+        &source,
+        "late explicit source disappearance",
+    );
+}
+
+#[test]
+fn late_manifest_durable_source_disappearance_has_one_clean_terminal_progress_event() {
+    for installed in [false, true] {
+        let temp = tempdir();
+        let (manifest, source) = write_manifest_with_durable_source(&temp, true);
+        let output = output_after_path_disappears_at_refresh_gate(&temp, &source, |command| {
+            if installed {
+                command
+                    .env("CTX_HISTORY_PLUGIN_PATH", manifest.parent().unwrap())
+                    .args([
+                        "import",
+                        "--history-source",
+                        "missing-source-plugin/default",
+                    ]);
+            } else {
+                command.args(["import", "--history-source-manifest"]);
+                command.arg(&manifest);
+            }
+        });
+        let contract = if installed {
+            "installed history source late durable-path disappearance"
+        } else {
+            "explicit manifest late durable-path disappearance"
+        };
+
+        assert!(!output.status.success(), "{output:#?}");
+        assert_clean_missing_path_progress_stream(&output, &source, contract);
     }
 }
 

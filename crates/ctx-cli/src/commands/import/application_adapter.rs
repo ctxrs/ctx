@@ -14,7 +14,7 @@ use crate::{
 };
 
 use super::{
-    core_refresh::wait_for_import_core_refresh,
+    core_refresh::{is_terminal_missing_import_path, wait_for_import_core_refresh},
     explicit_source_catalog::{
         explicit_source_for_admission, relocate_explicit_source, relocation_authority_for_import,
         upsert_explicit_source,
@@ -88,10 +88,7 @@ impl ctx_history_cli::ImportApplicationPort for CliImportHost {
             .map(|authority| authority.route_lineages());
         let refresh = wait_for_import_core_refresh(data_root, no_daemon, selection, progress)
             .map_err(|error| {
-                if error
-                    .downcast_ref::<crate::semantic::SourceBackedRefreshTerminalError>()
-                    .is_some_and(|terminal| terminal.code == "explicit_source_path_missing")
-                {
+                if is_terminal_missing_import_path(&error) {
                     error.context(ImportPathMissingDuringRefresh)
                 } else {
                     error

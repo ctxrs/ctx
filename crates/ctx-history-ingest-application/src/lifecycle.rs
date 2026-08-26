@@ -359,7 +359,15 @@ where
     let started = Instant::now();
     host.protect_data_root(data_root)
         .context("protect ctx data root before history-source registration")?;
-    let route_source = host.prepare_plugin(&plugin_source, request.reset_cursor)?;
+    let route_source = host
+        .prepare_plugin(&plugin_source, request.reset_cursor)
+        .map_err(|source| {
+            if let Some(path) = plugin_source.source_path.as_deref() {
+                classify_import_path_admission_error(path, source)
+            } else {
+                source
+            }
+        })?;
     let stats = source_stats(&route_source.path).with_context(|| {
         format!(
             "inspect provider-owned history source plugin path {}",
@@ -367,11 +375,13 @@ where
         )
     })?;
     let upsert = host.admit_exact(data_root, &route_source, None)?;
-    let publication = host.refresh(
-        data_root,
-        RefreshSelection::ExactSource(upsert.authority.clone()),
-        request.no_daemon,
-    )?;
+    let publication = host
+        .refresh(
+            data_root,
+            RefreshSelection::ExactSource(upsert.authority.clone()),
+            request.no_daemon,
+        )
+        .map_err(|source| classify_import_path_refresh_error(&route_source.path, source))?;
     let duration = started.elapsed();
     let (publication, receipt) = verified_publication(
         publication,

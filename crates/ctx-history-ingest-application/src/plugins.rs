@@ -435,8 +435,11 @@ fn collect_explicit_manifest_path_candidates(path: &Path) -> Result<BTreeSet<Pat
         let entry =
             entry.with_context(|| format!("read history source plugin path {}", path.display()))?;
         let child = entry.path();
-        let metadata = fs::metadata(&child)
-            .with_context(|| format!("inspect history source plugin path {}", child.display()))?;
+        let Ok(metadata) = fs::metadata(&child) else {
+            // Discovery does not own unrelated children. A selected manifest
+            // is opened strictly after this bounded candidate scan.
+            continue;
+        };
         if metadata.file_type().is_file()
             && child
                 .file_name()
@@ -610,6 +613,29 @@ mod tests {
                 .downcast_ref::<io::Error>()
                 .is_some_and(|source| source.kind() == io::ErrorKind::NotFound)
         }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn explicit_manifest_root_ignores_an_unrelated_dangling_child_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("plugin-root");
+        let manifest = root.join(PLUGIN_MANIFEST_FILE);
+        fs::create_dir(&root).unwrap();
+        fs::write(&manifest, r#"{"schema_version":1,"name":"example","history_sources":[{"id":"default","source_format":"x","command":["export"]}]}"#).unwrap();
+        symlink(
+            root.join("missing-unrelated-child"),
+            root.join("dangling-child"),
+        )
+        .unwrap();
+
+        let source =
+            select_history_source_plugin(temp.path(), std::slice::from_ref(&root), None).unwrap();
+
+        assert_eq!(source.label(), "example/default");
+        assert_eq!(source.manifest_path, manifest);
     }
 
     #[test]

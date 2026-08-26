@@ -81,7 +81,8 @@ pub use explicit_source_catalog::{
 };
 use explicit_source_path::canonicalize_explicit_source_path;
 pub use explicit_source_path::{
-    explicit_source_path_metadata, explicit_source_path_symlink_metadata, ExplicitSourcePathMissing,
+    explicit_source_path_is_symlink_or_reparse_point, explicit_source_path_metadata,
+    explicit_source_path_symlink_metadata, ExplicitSourcePathMissing,
 };
 pub use metadata::{
     verify_generation_query_readiness, GenerationQueryReadiness, SourceBackedPublicationMetadata,

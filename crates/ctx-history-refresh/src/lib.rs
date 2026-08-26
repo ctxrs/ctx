@@ -62,8 +62,9 @@ pub use ctx_history_capture::SourceBackedRefreshScope as RefreshScope;
 pub use ctx_history_refresh_execution::explicit_source_catalog_authority_for_test;
 pub use ctx_history_refresh_execution::source_backed_watch_catalog;
 pub use ctx_history_refresh_execution::{
-    explicit_source_for_path, explicit_source_path_metadata, explicit_source_path_symlink_metadata,
-    nonzero_duration_micros, optional_generation, published_refresh_receipt_for_index,
+    explicit_source_for_path, explicit_source_path_is_symlink_or_reparse_point,
+    explicit_source_path_metadata, explicit_source_path_symlink_metadata, nonzero_duration_micros,
+    optional_generation, published_refresh_receipt_for_index,
     published_refresh_receipt_for_recovery, relocate_explicit_source, source_backed_index_root,
     upsert_explicit_source, validate_explicit_relocation_source, ExplicitSourceCatalogAuthority,
     ExplicitSourceCatalogRouteBinding, ExplicitSourceCatalogUpsert, ExplicitSourcePathMissing,
