@@ -715,6 +715,9 @@ fn verify_query_fast_fields(
         }};
     }
 
+    let event_uuid = record.core_record.event_id.as_uuid().as_u128();
+    verify_u64!("event_id_high", (event_uuid >> 64) as u64);
+    verify_u64!("event_id_low", event_uuid as u64);
     verify_u64!("event_sequence", record.core_record.event_sequence);
     verify_optional_i64!(
         "occurred_at_unix_ms",

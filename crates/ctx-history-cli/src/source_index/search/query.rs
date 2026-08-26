@@ -1,7 +1,5 @@
 #[cfg(test)]
 use anyhow::Result;
-#[cfg(test)]
-use ctx_history_index::{EventSearchFilters, VerifiedIndex};
 
 use crate::{config, SearchBackend as HistorySearchBackend, SearchContentScope, SearchRequest};
 
@@ -80,12 +78,4 @@ pub(in crate::source_index) fn resolve_source_search_backend(
 ) -> Result<SearchBackend> {
     ctx_history_read_application::resolve_search_backend(request, source_search_policy(config))
         .map_err(semantic_error_into_anyhow)
-}
-
-#[cfg(test)]
-pub(in crate::source_index) fn index_search_filters(
-    request: &SourceSearchRequest,
-    index: &VerifiedIndex,
-) -> Result<EventSearchFilters> {
-    ctx_history_read_application::search_filters(request, index, None)
 }

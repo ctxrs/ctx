@@ -28,11 +28,12 @@ fn catalog_owner_rejection_is_retryable_without_a_valid_sibling() {
     assert!(repaired.failed_routes.is_empty());
     assert!(repaired.logical_source_failures.is_empty());
     assert_eq!(
-        VerifiedIndex::open(&index_root)
-            .unwrap()
-            .search_event_candidates("catalogownerrepairedmarker", 8)
-            .unwrap()
-            .len(),
+        search_event_candidates(
+            &VerifiedIndex::open(&index_root).unwrap(),
+            "catalogownerrepairedmarker",
+            8,
+        )
+        .len(),
         1
     );
 }
@@ -144,10 +145,7 @@ fn codex_prefix_ownership_quarantine_retains_prior_source_and_repairs() {
         native_session_id,
         "prefixownerinitialmarker"
     ));
-    assert!(index
-        .search_event_candidates("prefixownerquarantinedmarker", 8)
-        .unwrap()
-        .is_empty());
+    assert!(search_event_candidates(&index, "prefixownerquarantinedmarker", 8).is_empty());
     drop(index);
 
     write_session(
@@ -230,15 +228,12 @@ fn malformed_late_session_meta_quarantines_only_its_rollout() {
     assert_eq!(receipt.logical_source_failures.total(), 1);
     let index = VerifiedIndex::open(&index_root).unwrap();
     for marker in ["malformedmetabeforemarker", "malformedmetaaftermarker"] {
-        assert_eq!(index.search_event_candidates(marker, 8).unwrap().len(), 1);
+        assert_eq!(search_event_candidates(&index, marker, 8).len(), 1);
     }
     assert!(index.manifest().sources.iter().all(|certificate| {
         source_native_session_id(certificate.observation().source()) != Some(malformed_id)
     }));
-    assert!(index
-        .search_event_candidates("malformedmetaquarantinedmarker", 8)
-        .unwrap()
-        .is_empty());
+    assert!(search_event_candidates(&index, "malformedmetaquarantinedmarker", 8).is_empty());
 }
 
 #[test]
@@ -276,11 +271,12 @@ fn selector_ambiguous_session_meta_quarantines_its_rollout() {
         refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
     assert!(receipt.failed_routes.is_empty());
     assert_eq!(receipt.logical_source_failures.total(), 1);
-    assert!(VerifiedIndex::open(&index_root)
-        .unwrap()
-        .search_event_candidates("selectorambiguousquarantinedmarker", 8)
-        .unwrap()
-        .is_empty());
+    assert!(search_event_candidates(
+        &VerifiedIndex::open(&index_root).unwrap(),
+        "selectorambiguousquarantinedmarker",
+        8,
+    )
+    .is_empty());
 }
 
 #[test]

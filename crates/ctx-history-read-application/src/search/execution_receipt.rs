@@ -1,12 +1,12 @@
 use anyhow::{anyhow, Result};
 use ctx_history_index_query::{
-    DiagnosedLexicalSearchBatchResult, EventCandidateQueryReceipt, EventSearchFilters,
+    CompiledSearchFilter, DiagnosedLexicalSearchBatchResult, EventCandidateQueryReceipt,
     LexicalSearchBatch, VerifiedIndex,
 };
 
 use super::{
-    collect_search_hits_with_receipt, HistorySemanticPort, SearchCollection, SearchExecutionError,
-    SearchExecutionResult, SearchRequest, SemanticAvailability,
+    collect_search_hits_with_receipt, HistorySemanticPort, RankedSearchCollection,
+    SearchExecutionError, SearchExecutionResult, SearchRequest, SemanticAvailability,
 };
 
 /// Exact low-level work used to diagnose retrieval amplification.
@@ -102,15 +102,15 @@ impl ObservedSearchExecutionError {
 pub(crate) fn collect_search_hits_observed<P: HistorySemanticPort>(
     request: &SearchRequest,
     index: &VerifiedIndex,
-    filters: &EventSearchFilters,
+    filter: &CompiledSearchFilter,
     semantic: SemanticAvailability,
     semantic_port: &P,
-) -> std::result::Result<SearchCollection, ObservedSearchExecutionError> {
+) -> std::result::Result<RankedSearchCollection, ObservedSearchExecutionError> {
     let mut tracker = SearchWorkTracker::new();
     let collection = collect_search_hits_with_receipt(
         request,
         index,
-        filters,
+        filter,
         semantic,
         semantic_port,
         &mut tracker,

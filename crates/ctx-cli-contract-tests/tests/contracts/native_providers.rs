@@ -149,6 +149,24 @@ fn qwen_kimi_mistral_mux_and_qoder_default_sources_import_search_and_reimport() 
             second["totals"]["current_rejected_records"], 1,
             "{second:#}"
         );
+        if stored_provider == "qwen_code" {
+            let diagnostic = second["sources"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|source| source["status"] == "rejection")
+                .unwrap_or_else(|| {
+                    panic!("missing replayed Qwen rejection diagnostic in {second:#}")
+                });
+            assert_eq!(diagnostic["provider"], "qwen_code", "{second:#}");
+            assert_eq!(diagnostic["line"], 3, "{second:#}");
+            assert!(
+                diagnostic["detail"]
+                    .as_str()
+                    .is_some_and(|detail| detail.contains("invalid shape")),
+                "{second:#}"
+            );
+        }
     }
 }
 

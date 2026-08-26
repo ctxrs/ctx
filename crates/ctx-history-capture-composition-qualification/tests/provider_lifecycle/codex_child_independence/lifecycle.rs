@@ -278,11 +278,12 @@ fn overlapping_automatic_and_explicit_routes_keep_selected_generation_ownership(
     assert!(cold.failed_routes.is_empty());
     assert_eq!(cold.sources.len(), 1);
     assert_eq!(
-        VerifiedIndex::open(&index_root)
-            .unwrap()
-            .search_event_candidates("automatic-explicit-cold-marker", 8)
-            .unwrap()
-            .len(),
+        search_event_candidates(
+            &VerifiedIndex::open(&index_root).unwrap(),
+            "automatic-explicit-cold-marker",
+            8,
+        )
+        .len(),
         1
     );
 

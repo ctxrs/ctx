@@ -188,7 +188,7 @@ fn scan_leaf_serial<R: JsonlFamilyRuntime>(
             retained.is_some(),
         )
         .map_err(route_internal)?;
-        sink.record_rejections(record_rejections);
+        sink.record_failed_attempt_rejections(record_rejections);
         sink.report_completed_bytes_with_exact(
             certificate.counts().certified_bytes,
             leaf.frozen_scan_observation()
@@ -204,6 +204,7 @@ fn scan_leaf_serial<R: JsonlFamilyRuntime>(
                 .frozen_scan_observation()
                 .map(|observation| observation.length()),
             record_rejections: SourceBackedRecordRejectionDrafts::default(),
+            record_rejections_committed: false,
         }));
     }
     sink.record_rejections(record_rejections);
@@ -238,6 +239,7 @@ fn scan_leaf_serial<R: JsonlFamilyRuntime>(
                     .frozen_scan_observation()
                     .map(|observation| observation.length()),
                 record_rejections: SourceBackedRecordRejectionDrafts::default(),
+                record_rejections_committed: true,
             }))
         }
         None => {
@@ -267,6 +269,7 @@ fn scan_leaf_serial<R: JsonlFamilyRuntime>(
                     .frozen_scan_observation()
                     .map(|observation| observation.length()),
                 record_rejections: SourceBackedRecordRejectionDrafts::default(),
+                record_rejections_committed: true,
             }))
         }
     }
@@ -473,6 +476,7 @@ fn run_parallel_leaf_job_batch<R: JsonlFamilyRuntime>(
                             .frozen_scan_observation()
                             .map(|observation| observation.length()),
                         record_rejections: SourceBackedRecordRejectionDrafts::default(),
+                        record_rejections_committed: false,
                     });
                 emitter
                     .complete(ParallelLeafScanComplete::source_failure_with_rejections(
@@ -511,6 +515,7 @@ fn run_parallel_leaf_job_batch<R: JsonlFamilyRuntime>(
                                     .frozen_scan_observation()
                                     .map(|observation| observation.length()),
                                 record_rejections,
+                                record_rejections_committed: true,
                             }),
                         ))
                         .map_err(ParallelLeafScanWorkerError::from)?;
@@ -535,6 +540,7 @@ fn run_parallel_leaf_job_batch<R: JsonlFamilyRuntime>(
                             .frozen_scan_observation()
                             .map(|observation| observation.length()),
                         record_rejections,
+                        record_rejections_committed: true,
                     };
                     emitter
                         .complete(ParallelLeafScanComplete::replace(
@@ -555,7 +561,11 @@ fn run_parallel_leaf_job_batch<R: JsonlFamilyRuntime>(
     for outcome in &outcomes {
         match outcome {
             LeafScanOutcome::Certified(evidence) => {
-                sink.record_rejections(evidence.record_rejections.clone());
+                if evidence.record_rejections_committed {
+                    sink.record_rejections(evidence.record_rejections.clone());
+                } else {
+                    sink.record_failed_attempt_rejections(evidence.record_rejections.clone());
+                }
                 sink.report_completed_bytes_with_exact(
                     terminal_byte_remainder(
                         evidence.observed_certificate(),

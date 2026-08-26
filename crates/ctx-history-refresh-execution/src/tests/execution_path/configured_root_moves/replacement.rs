@@ -74,20 +74,20 @@ fn moving_named_qoder_transcript_tree_preserves_supported_layouts_and_identity()
     let first = VerifiedIndex::open(&index_root).unwrap();
     assert_eq!(
         first
-            .search_event_candidates(DIRECT_MARKER, 8)
+            .complete_lexical_search(DIRECT_MARKER, 8)
             .unwrap()
             .len(),
         1
     );
     assert_eq!(
         first
-            .search_event_candidates(LEGACY_MARKER, 8)
+            .complete_lexical_search(LEGACY_MARKER, 8)
             .unwrap()
             .len(),
         1
     );
     assert!(first
-        .search_event_candidates(NESTED_MARKER, 8)
+        .complete_lexical_search(NESTED_MARKER, 8)
         .unwrap()
         .is_empty());
     let first_root_manifest = first.manifest().provider_root(ROOT_ID).unwrap();
@@ -152,20 +152,20 @@ fn moving_named_qoder_transcript_tree_preserves_supported_layouts_and_identity()
     assert_eq!(moved_sources, first_sources);
     assert_eq!(
         moved
-            .search_event_candidates(DIRECT_MARKER, 8)
+            .complete_lexical_search(DIRECT_MARKER, 8)
             .unwrap()
             .len(),
         1
     );
     assert_eq!(
         moved
-            .search_event_candidates(LEGACY_MARKER, 8)
+            .complete_lexical_search(LEGACY_MARKER, 8)
             .unwrap()
             .len(),
         1
     );
     assert!(moved
-        .search_event_candidates(NESTED_MARKER, 8)
+        .complete_lexical_search(NESTED_MARKER, 8)
         .unwrap()
         .is_empty());
 }
@@ -299,14 +299,14 @@ fn failed_same_name_incompatible_replacement_keeps_predecessor_until_success() {
     let failed_index = VerifiedIndex::open(&index_root).unwrap();
     assert_eq!(
         failed_index
-            .search_event_candidates("atomicpredecessorhistory", 8)
+            .complete_lexical_search("atomicpredecessorhistory", 8)
             .unwrap()
             .len(),
         1
     );
     assert_eq!(
         failed_index
-            .search_event_candidates("atomichealthypeer", 8)
+            .complete_lexical_search("atomichealthypeer", 8)
             .unwrap()
             .len(),
         1
@@ -327,7 +327,7 @@ fn failed_same_name_incompatible_replacement_keeps_predecessor_until_success() {
     assert_eq!(work_tokens, predecessor_tokens);
     assert_eq!(
         failed_index
-            .search_event_candidates_with_filters(
+            .complete_filtered_lexical_search(
                 "atomicpredecessorhistory",
                 &EventSearchFilters {
                     allowed_source_keys: Some(work_tokens),
@@ -382,7 +382,7 @@ fn failed_same_name_incompatible_replacement_keeps_predecessor_until_success() {
         succeeded.manifest().provider_root("work")
     );
     assert!(succeeded
-        .search_event_candidates("atomicpredecessorhistory", 8)
+        .complete_lexical_search("atomicpredecessorhistory", 8)
         .unwrap()
         .is_empty());
     assert!(succeeded_publication
@@ -404,7 +404,7 @@ fn failed_same_name_incompatible_replacement_keeps_predecessor_until_success() {
         .unwrap();
     assert_eq!(
         succeeded
-            .search_event_candidates_with_filters(
+            .complete_filtered_lexical_search(
                 "atomicpredecessorhistory",
                 &EventSearchFilters {
                     allowed_source_keys: Some(work_tokens),
@@ -466,7 +466,7 @@ fn failed_same_provider_kind_replacement_keeps_predecessor_until_success() {
         .clone();
     assert_eq!(
         predecessor
-            .search_event_candidates("atomicopenhandslegacy", 8)
+            .complete_lexical_search("atomicopenhandslegacy", 8)
             .unwrap()
             .len(),
         1
@@ -512,7 +512,7 @@ fn failed_same_provider_kind_replacement_keeps_predecessor_until_success() {
     );
     assert_eq!(
         failed
-            .search_event_candidates("atomicopenhandslegacy", 8)
+            .complete_lexical_search("atomicopenhandslegacy", 8)
             .unwrap()
             .len(),
         1
@@ -544,12 +544,12 @@ fn failed_same_provider_kind_replacement_keeps_predecessor_until_success() {
         .source_route(&predecessor_route)
         .is_none());
     assert!(succeeded
-        .search_event_candidates("atomicopenhandslegacy", 8)
+        .complete_lexical_search("atomicopenhandslegacy", 8)
         .unwrap()
         .is_empty());
     assert_eq!(
         succeeded
-            .search_event_candidates("atomicopenhandscurrent", 8)
+            .complete_lexical_search("atomicopenhandscurrent", 8)
             .unwrap()
             .len(),
         1
@@ -624,14 +624,14 @@ fn compound_same_name_replacement_waits_for_every_successor_in_either_route_orde
             .unwrap();
         assert_eq!(
             initial_index
-                .search_event_candidates("compoundnamedpredecessor", 8)
+                .complete_lexical_search("compoundnamedpredecessor", 8)
                 .unwrap()
                 .len(),
             1
         );
         assert_eq!(
             initial_index
-                .search_event_candidates_with_filters(
+                .complete_filtered_lexical_search(
                     "compoundnamedpredecessor",
                     &EventSearchFilters {
                         allowed_source_keys: Some(predecessor_tokens.clone()),
@@ -737,7 +737,7 @@ fn compound_same_name_replacement_waits_for_every_successor_in_either_route_orde
         assert_eq!(failed_tokens, predecessor_tokens);
         assert_eq!(
             failed_index
-                .search_event_candidates_with_filters(
+                .complete_filtered_lexical_search(
                     "compoundnamedpredecessor",
                     &EventSearchFilters {
                         allowed_source_keys: Some(failed_tokens),
@@ -751,17 +751,17 @@ fn compound_same_name_replacement_waits_for_every_successor_in_either_route_orde
         );
         assert_eq!(
             failed_index
-                .search_event_candidates("compoundpeeradvanced", 8)
+                .complete_lexical_search("compoundpeeradvanced", 8)
                 .unwrap()
                 .len(),
             1
         );
         assert!(failed_index
-            .search_event_candidates("compoundsessionsuccess", 8)
+            .complete_lexical_search("compoundsessionsuccess", 8)
             .unwrap()
             .is_empty());
         assert!(failed_index
-            .search_event_candidates("compoundhistorysuccess", 8)
+            .complete_lexical_search("compoundhistorysuccess", 8)
             .unwrap()
             .is_empty());
         drop(failed_index);
@@ -785,7 +785,7 @@ fn compound_same_name_replacement_waits_for_every_successor_in_either_route_orde
             .unwrap();
             let reverted = VerifiedIndex::open(&index_root).unwrap();
             assert!(reverted
-                .search_event_candidates("compoundsessionsuccess", 8)
+                .complete_lexical_search("compoundsessionsuccess", 8)
                 .unwrap()
                 .is_empty());
             let reverted_tokens = reverted
@@ -794,7 +794,7 @@ fn compound_same_name_replacement_waits_for_every_successor_in_either_route_orde
                 .unwrap();
             assert_eq!(reverted_tokens, predecessor_tokens);
             assert!(reverted
-                .search_event_candidates_with_filters(
+                .complete_filtered_lexical_search(
                     "compoundsessionsuccess",
                     &EventSearchFilters {
                         allowed_source_keys: Some(reverted_tokens),
@@ -806,7 +806,7 @@ fn compound_same_name_replacement_waits_for_every_successor_in_either_route_orde
                 .is_empty());
             assert_eq!(
                 reverted
-                    .search_event_candidates("compoundnamedpredecessor", 8)
+                    .complete_lexical_search("compoundnamedpredecessor", 8)
                     .unwrap()
                     .len(),
                 1
@@ -854,19 +854,19 @@ fn compound_same_name_replacement_waits_for_every_successor_in_either_route_orde
             .iter()
             .all(|route| !succeeded_root.routes().contains(route)));
         assert!(succeeded_index
-            .search_event_candidates("compoundnamedpredecessor", 8)
+            .complete_lexical_search("compoundnamedpredecessor", 8)
             .unwrap()
             .is_empty());
         assert_eq!(
             succeeded_index
-                .search_event_candidates("compoundsessionsuccess", 8)
+                .complete_lexical_search("compoundsessionsuccess", 8)
                 .unwrap()
                 .len(),
             1
         );
         assert_eq!(
             succeeded_index
-                .search_event_candidates("compoundhistorysuccess", 8)
+                .complete_lexical_search("compoundhistorysuccess", 8)
                 .unwrap()
                 .len(),
             1
@@ -1229,12 +1229,12 @@ fn same_id_provider_replacement_retires_old_routes_and_publishes_the_new_root() 
 
     let replaced = VerifiedIndex::open(&index_root).unwrap();
     assert!(replaced
-        .search_event_candidates("retiredproviderfixture", 10)
+        .complete_lexical_search("retiredproviderfixture", 10)
         .unwrap()
         .is_empty());
     assert_eq!(
         replaced
-            .search_event_candidates("replacementproviderfixture", 10)
+            .complete_lexical_search("replacementproviderfixture", 10)
             .unwrap()
             .len(),
         1

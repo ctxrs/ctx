@@ -58,7 +58,10 @@ ctx_rust_test(
 ctx_rust_test(
     name = "claude_failure_boundary_tests",
     testonly = True,
-    srcs = ["tests/claude_failure_boundaries.rs"],
+    srcs = [
+        "tests/claude_failure_boundaries.rs",
+        "tests/support/lexical.rs",
+    ],
     crate_name = "ctx_history_capture_composition_qualification_claude",
     crate_root = "tests/claude_failure_boundaries.rs",
     edition = crate_edition(),
@@ -74,7 +77,10 @@ ctx_rust_test(
 ctx_rust_test(
     name = "provider_lifecycle_tests",
     testonly = True,
-    srcs = ["tests/provider_lifecycle.rs"] + glob(["tests/provider_lifecycle/**/*.rs"]),
+    srcs = [
+        "tests/provider_lifecycle.rs",
+        "tests/support/lexical.rs",
+    ] + glob(["tests/provider_lifecycle/**/*.rs"]),
     crate_name = "ctx_history_capture_composition_provider_lifecycle_qualification",
     crate_root = "tests/provider_lifecycle.rs",
     data = ["//:public_test_fixtures"],
@@ -99,7 +105,10 @@ ctx_rust_test(
 ctx_rust_test(
     name = "openclaw_configured_root_lifecycle_tests",
     testonly = True,
-    srcs = ["tests/openclaw_configured_root_lifecycle.rs"],
+    srcs = [
+        "tests/openclaw_configured_root_lifecycle.rs",
+        "tests/support/lexical.rs",
+    ],
     crate_name = "ctx_history_capture_composition_openclaw_root_lifecycle_qualification",
     crate_root = "tests/openclaw_configured_root_lifecycle.rs",
     edition = crate_edition(),

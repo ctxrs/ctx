@@ -13,7 +13,7 @@ pub const SOURCE_ROUTE_SNAPSHOT_REVISION: u32 = 1;
 pub const AUTOMATIC_ROUTE_DELETION_GRACE_OBSERVATIONS: u32 = 3;
 pub const LEXICAL_SCHEMA_REVISION: u32 = 22;
 pub const LEXICAL_TOKENIZER_REVISION: u32 = 2;
-pub const SOURCE_EVENT_PROJECTOR_REVISION: u32 = 8;
+pub const SOURCE_EVENT_PROJECTOR_REVISION: u32 = 9;
 pub const LEXICAL_INDEXED_BODY_LIMIT: LexicalIndexedBodyLimit =
     LexicalIndexedBodyLimit::ProviderValidatedFullText;
 pub const SEMANTIC_ELIGIBILITY_REVISION: u32 = 6;
@@ -287,12 +287,12 @@ mod tests {
         assert!(lexical.contains_key("core_relationship_contract_revision"));
         assert!(!lexical.keys().any(|key| key.contains("repository")));
         assert_eq!(first.policy_version, 13);
-        assert_eq!(first.lexical.event_projector_revision, 8);
+        assert_eq!(first.lexical.event_projector_revision, 9);
         assert_eq!(first.lexical.schema_revision, 22);
         assert_eq!(first.lexical.tokenizer_revision, 2);
         assert_eq!(
             first.canonical_sha256().unwrap(),
-            "98a522ab684f09534a71628117e182f3559d7094880609a74e81041d00361475"
+            "84d58ff1dbcfbf524845eea78162e013e76cc000b275393711b6617764da3ae9"
         );
     }
 

@@ -1,9 +1,9 @@
 use std::collections::{HashMap, VecDeque};
 
 use ctx_history_core::StableEntityId;
-use ctx_history_index_query::{EventSearchCandidate, SearchFamilyKey};
+use ctx_history_index_query::{EventSearchCandidate, RankedEventRef, SearchFamilyKey};
 
-use super::{SearchEventMetadata, SearchHit, SearchResultWindow};
+use super::{SearchHit, SearchResultWindow};
 
 pub(super) struct SessionChampion<'candidate> {
     pub(super) candidate: &'candidate EventSearchCandidate,
@@ -11,38 +11,15 @@ pub(super) struct SessionChampion<'candidate> {
 }
 
 pub(super) struct FamilyShapingOutcome {
-    pub(super) result_window: SearchResultWindow,
+    pub(super) result_window: SearchResultWindow<RankedEventRef>,
     pub(super) distinct_families: usize,
     pub(super) changed_final_top_n: bool,
-}
-
-pub fn shape_search_result_window<'a>(
-    candidates: impl IntoIterator<Item = &'a EventSearchCandidate>,
-    limit: usize,
-    event_results: bool,
-) -> SearchResultWindow {
-    let candidates = candidates.into_iter().collect::<Vec<_>>();
-    let mut hits = if event_results {
-        dense_hits(candidates.iter().copied())
-    } else {
-        session_champions(candidates.iter().copied())
-            .into_iter()
-            .map(|session| session_champion_hit(&session))
-            .collect()
-    };
-    let more_available = hits.len() > limit;
-    hits.truncate(limit);
-    SearchResultWindow {
-        limit,
-        hits,
-        more_available,
-    }
 }
 
 pub(super) fn dense_result_window(
     candidates: &[EventSearchCandidate],
     limit: usize,
-) -> SearchResultWindow {
+) -> SearchResultWindow<RankedEventRef> {
     let mut hits = dense_hits(candidates.iter());
     let more_available = hits.len() > limit;
     hits.truncate(limit);
@@ -55,28 +32,34 @@ pub(super) fn dense_result_window(
 
 fn dense_hits<'candidate>(
     candidates: impl IntoIterator<Item = &'candidate EventSearchCandidate>,
-) -> Vec<SearchHit> {
+) -> Vec<SearchHit<RankedEventRef>> {
     candidates
         .into_iter()
         .map(|candidate| SearchHit {
-            event: SearchEventMetadata::from(&candidate.event),
+            event: candidate.event.clone(),
             score: candidate.score,
             more_matches_in_session: 0,
         })
         .collect()
 }
 
-pub(super) fn session_champions<'candidate>(
+pub(super) fn session_champions_by<'candidate, Key, SessionKey>(
     candidates: impl IntoIterator<Item = &'candidate EventSearchCandidate>,
-) -> Vec<SessionChampion<'candidate>> {
-    let mut session_positions = HashMap::<StableEntityId, usize>::new();
+    mut session_key: SessionKey,
+) -> Vec<SessionChampion<'candidate>>
+where
+    Key: Copy + Eq + std::hash::Hash,
+    SessionKey: FnMut(&EventSearchCandidate) -> Key,
+{
+    let mut session_positions = HashMap::<Key, usize>::new();
     let mut champions = Vec::<SessionChampion<'_>>::new();
     for candidate in candidates {
-        if let Some(position) = session_positions.get(&candidate.event.session_id).copied() {
+        let session_key = session_key(candidate);
+        if let Some(position) = session_positions.get(&session_key).copied() {
             champions[position].match_count = champions[position].match_count.saturating_add(1);
             continue;
         }
-        session_positions.insert(candidate.event.session_id, champions.len());
+        session_positions.insert(session_key, champions.len());
         champions.push(SessionChampion {
             candidate,
             match_count: 1,
@@ -124,11 +107,11 @@ pub(super) fn shape_family_result_window(
     let changed_final_top_n = champions
         .iter()
         .take(limit)
-        .map(|champion| champion.candidate.event.event_id)
+        .map(|champion| champion.candidate.event.event_identity_digest)
         .ne(shaped_positions
             .iter()
             .take(limit)
-            .map(|position| champions[*position].candidate.event.event_id));
+            .map(|position| champions[*position].candidate.event.event_identity_digest));
     let more_available = shaped_positions.len() > limit;
     let hits = shaped_positions
         .into_iter()
@@ -146,9 +129,9 @@ pub(super) fn shape_family_result_window(
     }
 }
 
-fn session_champion_hit(session: &SessionChampion<'_>) -> SearchHit {
+fn session_champion_hit(session: &SessionChampion<'_>) -> SearchHit<RankedEventRef> {
     SearchHit {
-        event: SearchEventMetadata::from(&session.candidate.event),
+        event: session.candidate.event.clone(),
         score: session.candidate.score,
         more_matches_in_session: session.match_count.saturating_sub(1),
     }

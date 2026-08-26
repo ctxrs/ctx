@@ -125,7 +125,9 @@ where
                         "independent document source outcome no longer matches its plan",
                     ));
                 }
-                sink.record_rejections(std::mem::take(&mut failure.record_rejections));
+                sink.record_failed_attempt_rejections(std::mem::take(
+                    &mut failure.record_rejections,
+                ));
                 if let Some(retained) = failure.retained {
                     certificates.push(retained);
                 }

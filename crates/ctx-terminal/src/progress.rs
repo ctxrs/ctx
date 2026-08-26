@@ -952,7 +952,7 @@ fn scaled_bytes(bytes: u64) -> (f64, &'static str) {
 
 const BYTE_UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
 
-pub fn format_count(value: usize) -> String {
+pub fn format_count(value: u64) -> String {
     let digits = value.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     let first_group_len = digits.len() % 3;

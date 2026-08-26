@@ -17,6 +17,61 @@ fn publish_records(temp: &TempDir, source: &SourceKey, records: Vec<CoreRecord>)
     VerifiedIndex::open(temp.path()).unwrap()
 }
 
+fn publish_records_in_one_segment(
+    temp: &TempDir,
+    source: &SourceKey,
+    records: Vec<CoreRecord>,
+) -> VerifiedIndex {
+    let index = publish_records(temp, source, records.clone());
+    drop(index);
+
+    let (searcher, manifest) = open_unverified_generation(temp.path());
+    drop(searcher);
+    let directory = DurableMmapDirectory::open(active_generation_path(temp.path())).unwrap();
+    let tantivy_index = Index::open(directory).unwrap();
+    publish_unchecked_generation(
+        temp.path(),
+        &tantivy_index,
+        manifest,
+        std::slice::from_ref(source),
+        records
+            .into_iter()
+            .enumerate()
+            .map(|(index, record)| {
+                let authority = ctx_history_index_format::SessionAuthorityKey::exact(
+                    record.session_id,
+                    record.source.identity(),
+                )
+                .unwrap();
+                let mut document = indexed_document(record);
+                if index == 0 {
+                    let fields = fields_from_schema(&lexical_schema()).unwrap();
+                    document.add_bytes(fields.session_authority, authority.as_bytes());
+                }
+                document
+            })
+            .collect(),
+    );
+    VerifiedIndex::open(temp.path()).unwrap()
+}
+
+fn with_event_identity_digest(mut record: CoreRecord, digest: [u8; 32]) -> CoreRecord {
+    const IDENTITY_HEADER_BYTES: usize = 3;
+    const UUID_BYTES: usize = 16;
+
+    let mut encoded = record.event_id.encode_canonical().unwrap();
+    encoded[IDENTITY_HEADER_BYTES..IDENTITY_HEADER_BYTES + digest.len()].copy_from_slice(&digest);
+    let mut uuid = [0_u8; UUID_BYTES];
+    uuid.copy_from_slice(&digest[..UUID_BYTES]);
+    uuid[6] = 0x80 | (uuid[6] & 0x0f);
+    uuid[8] = 0x80 | (uuid[8] & 0x3f);
+    let uuid_offset = ctx_history_core::StableEntityId::CANONICAL_LEN - UUID_BYTES;
+    encoded[uuid_offset..].copy_from_slice(&uuid);
+    record.event_id = ctx_history_core::StableEntityId::decode_canonical(&encoded).unwrap();
+    record.validate_contract().unwrap();
+    record
+}
+
 #[test]
 fn script_aware_analysis_indexes_cjk_and_long_technical_identifiers() {
     let temp = tempdir().unwrap();
@@ -48,7 +103,7 @@ fn script_aware_analysis_indexes_cjk_and_long_technical_identifiers() {
             .into_iter()
             .map(|candidate| candidate.event.event_id)
             .collect::<Vec<_>>(),
-        vec![cjk.event_id]
+        vec![cjk.event_id.as_uuid()]
     );
     assert_eq!(
         index
@@ -57,7 +112,7 @@ fn script_aware_analysis_indexes_cjk_and_long_technical_identifiers() {
             .into_iter()
             .map(|candidate| candidate.event.event_id)
             .collect::<Vec<_>>(),
-        vec![identifier.event_id]
+        vec![identifier.event_id.as_uuid()]
     );
 }
 
@@ -88,11 +143,15 @@ fn multi_term_search_ranks_full_coverage_before_one_term_partial_matches() {
             .iter()
             .map(|candidate| candidate.event.event_id)
             .collect::<Vec<_>>(),
-        vec![exact.event_id, partial.event_id]
+        vec![exact.event_id.as_uuid(), partial.event_id.as_uuid()]
     );
-    let batch = index
-        .search_event_candidates_batch("coveragealpha coveragebeta", 10)
-        .unwrap();
+    let batch = lexical_search_batch(
+        &index,
+        &["coveragealpha coveragebeta"],
+        &EventSearchFilters::default(),
+        10,
+    )
+    .unwrap();
     assert!(batch.complete);
     assert_eq!(batch.exhaustion, None);
     assert_eq!(
@@ -118,12 +177,12 @@ fn multi_term_search_ranks_full_coverage_before_one_term_partial_matches() {
             .unwrap()[0]
             .event
             .event_id,
-        exact.event_id
+        exact.event_id.as_uuid()
     );
 }
 
 #[test]
-fn coverage_ranking_executes_once_and_materializes_each_ranked_candidate_once() {
+fn coverage_ranking_executes_once_and_projects_each_ranked_candidate_without_core() {
     let temp = tempdir().unwrap();
     let source = source("coverage-decode-count.jsonl");
     let full = document(&source, 1, "decodealpha decodebeta decodegamma");
@@ -133,16 +192,16 @@ fn coverage_ranking_executes_once_and_materializes_each_ranked_candidate_once() 
         &format!("{} {}", "decodealpha ".repeat(32), "decodebeta ".repeat(32)),
     );
     let one_term = document(&source, 3, &"decodealpha ".repeat(96));
-    let expected = vec![full.event_id, two_terms.event_id, one_term.event_id];
-    let expected_encoded_core_bytes = [&full, &two_terms, &one_term]
-        .into_iter()
-        .map(|record| u64::try_from(record.encode_stored().unwrap().len()).unwrap())
-        .sum::<u64>();
+    let expected = vec![
+        full.event_id.as_uuid(),
+        two_terms.event_id.as_uuid(),
+        one_term.event_id.as_uuid(),
+    ];
     let index = publish_records(&temp, &source, vec![one_term, two_terms, full]);
 
     ctx_history_index_query::reset_stored_event_record_materializations();
     let observed = observed_candidates(&index, "decodealpha decodebeta decodegamma", 3).unwrap();
-    let candidates = observed.candidates;
+    let candidates = observed.batch.candidates;
 
     assert_eq!(
         candidates
@@ -153,16 +212,13 @@ fn coverage_ranking_executes_once_and_materializes_each_ranked_candidate_once() 
     );
     assert_eq!(
         ctx_history_index_query::stored_event_record_materializations(),
-        candidates.len(),
-        "the manual pass decodes each retained Core record exactly once"
+        0,
+        "the manual pass must retain thin references without decoding Core"
     );
     assert_eq!(observed.receipt.query_executions, 1);
     assert_eq!(observed.receipt.collector_hits, 3);
-    assert_eq!(observed.receipt.records_decoded, 3);
-    assert_eq!(
-        observed.receipt.encoded_core_bytes_decoded,
-        expected_encoded_core_bytes
-    );
+    assert_eq!(observed.receipt.records_decoded, 0);
+    assert_eq!(observed.receipt.encoded_core_bytes_decoded, 0);
 }
 
 #[test]
@@ -190,23 +246,13 @@ fn candidate_query_receipt_needs_no_drop() {
 }
 
 #[test]
-fn candidate_decode_failure_preserves_completed_low_level_work() {
+fn candidate_reference_failure_preserves_completed_low_level_work() {
     let temp = tempdir().unwrap();
     let source = source("partial-failure-receipt.jsonl");
     let first = document(&source, 1, "partialfailurereceiptneedle first");
     let second = document(&source, 2, "partialfailurereceiptneedle second");
-    let encoded_sizes = [&first, &second]
-        .into_iter()
-        .map(|record| {
-            (
-                record.event_id,
-                u64::try_from(record.encode_stored().unwrap().len()).unwrap(),
-            )
-        })
-        .collect::<std::collections::HashMap<_, _>>();
     let index = publish_records(&temp, &source, vec![first, second]);
-    let successful = observed_candidates(&index, "partialfailurereceiptneedle", 2).unwrap();
-    let first_decoded_bytes = encoded_sizes[&successful.candidates[0].event.event_id];
+    observed_candidates(&index, "partialfailurereceiptneedle", 2).unwrap();
 
     ctx_history_index_query::fail_lexical_candidate_materialization_after(1);
     let failure = observed_candidates(&index, "partialfailurereceiptneedle", 2).unwrap_err();
@@ -217,15 +263,12 @@ fn candidate_decode_failure_preserves_completed_low_level_work() {
     ));
     assert_eq!(failure.receipt.query_executions, 1);
     assert_eq!(failure.receipt.collector_hits, 2);
-    assert_eq!(failure.receipt.records_decoded, 1);
-    assert_eq!(
-        failure.receipt.encoded_core_bytes_decoded,
-        first_decoded_bytes
-    );
+    assert_eq!(failure.receipt.records_decoded, 0);
+    assert_eq!(failure.receipt.encoded_core_bytes_decoded, 0);
 }
 
 #[test]
-fn candidate_decode_failure_injection_is_cleared_after_each_query() {
+fn candidate_reference_failure_injection_is_cleared_after_each_query() {
     let temp = tempdir().unwrap();
     let source = source("failure-injection-reset.jsonl");
     let index = publish_records(
@@ -248,12 +291,14 @@ fn observed_candidates(
     index: &VerifiedIndex,
     query: &str,
     limit: usize,
-) -> ctx_history_index_query::DiagnosedEventCandidateQueryResult {
-    index.search_event_candidates_any_with_filters_diagnosed(
-        &[query],
-        &EventSearchFilters::default(),
+) -> ctx_history_index_query::DiagnosedLexicalSearchBatchResult {
+    let queries = [query];
+    let filter = CompiledSearchFilter::compile(EventSearchFilters::default()).unwrap();
+    index.execute_lexical(ctx_history_index_query::LexicalExecution::new(
+        ctx_history_index_query::LexicalMode::Search(&queries),
+        &filter,
         limit,
-    )
+    ))
 }
 
 fn lexical_query_limit_fixture() -> (TempDir, VerifiedIndex) {
@@ -336,23 +381,305 @@ fn timestamps_never_break_equal_relevance_ties() {
     }
     let index = publish_records(&temp, &source, vec![first, second]);
 
-    let lexical = index
-        .search_event_candidates_batch("stable tie needle", 10)
-        .unwrap();
-    assert_eq!(lexical.candidates[0].event.event_id, expected);
-    assert_eq!(lexical.candidates[1].event.event_id, newer);
+    let lexical = lexical_search_batch(
+        &index,
+        &["stable tie needle"],
+        &EventSearchFilters::default(),
+        10,
+    )
+    .unwrap();
+    assert_eq!(lexical.candidates[0].event.event_id, expected.as_uuid());
+    assert_eq!(lexical.candidates[1].event.event_id, newer.as_uuid());
 
-    let listed = index
-        .list_event_candidates_with_filters_batch(
-            &EventSearchFilters {
-                file: Some("stable-tie.rs".to_owned()),
-                ..EventSearchFilters::default()
-            },
-            10,
+    let listed = lexical_list_batch(
+        &index,
+        &EventSearchFilters {
+            file: Some("stable-tie.rs".to_owned()),
+            ..EventSearchFilters::default()
+        },
+        10,
+    )
+    .unwrap();
+    assert_eq!(listed.candidates[0].event.event_id, expected.as_uuid());
+    assert_eq!(listed.candidates[1].event.event_id, newer.as_uuid());
+}
+
+#[test]
+fn exact_boundary_matches_exhaustive_order_and_decodes_only_possible_winners() {
+    let temp = tempdir().unwrap();
+    let source = source("exact-stable-identity-cutoff.jsonl");
+    let initial = with_event_identity_digest(
+        document(&source, 1, "exact identity cutoff needle"),
+        [0x40; 32],
+    );
+    let rejected = with_event_identity_digest(
+        document(&source, 2, "exact identity cutoff needle"),
+        [0x50; 32],
+    );
+    let mut compact_preferred_digest = [0x30; 32];
+    compact_preferred_digest[6] = 0xf0;
+    let compact_preferred = with_event_identity_digest(
+        document(&source, 3, "exact identity cutoff needle"),
+        compact_preferred_digest,
+    );
+    let mut exact_winner_digest = [0x30; 32];
+    exact_winner_digest[6] = 0x0f;
+    let exact_winner = with_event_identity_digest(
+        document(&source, 4, "exact identity cutoff needle"),
+        exact_winner_digest,
+    );
+    assert_eq!(
+        &compact_preferred.event_id.digest()[..6],
+        &exact_winner.event_id.digest()[..6]
+    );
+    assert!(exact_winner.event_id.digest() < compact_preferred.event_id.digest());
+    assert!(
+        compact_preferred.event_id.as_uuid() < exact_winner.event_id.as_uuid(),
+        "the compact UUID alone would select the wrong limit-one winner"
+    );
+    let exact_winner_id = exact_winner.event_id.as_uuid();
+
+    let index = publish_records_in_one_segment(
+        &temp,
+        &source,
+        vec![initial, rejected, compact_preferred, exact_winner],
+    );
+    let exhaustive = lexical_search_batch(
+        &index,
+        &["exact identity cutoff needle"],
+        &EventSearchFilters::default(),
+        4,
+    )
+    .unwrap();
+    let expected = exhaustive.candidates[0].event.event_id;
+    assert_eq!(expected, exact_winner_id);
+    index.reset_manual_lexical_io_observability_for_test();
+    let batch = lexical_search_batch(
+        &index,
+        &["exact identity cutoff needle"],
+        &EventSearchFilters::default(),
+        1,
+    )
+    .unwrap();
+
+    assert!(batch.complete);
+    assert!(!batch.candidate_set_exhaustive);
+    assert_eq!(batch.counters.candidate_docs, 4);
+    assert_eq!(batch.candidates.len(), 1);
+    assert_eq!(batch.candidates[0].event.event_id, expected);
+    assert_eq!(
+        index.manual_event_range_order_decodes_for_test(),
+        3,
+        "the initial fill, smaller-prefix replacement, and equal-prefix challenger decode; the larger prefix rejects without decoding"
+    );
+}
+
+#[test]
+fn bounded_top_k_is_the_exact_exhaustive_prefix_across_ties_and_filters() {
+    let temp = tempdir().unwrap();
+    let source = source("exact-filtered-top-k-oracle.jsonl");
+    let mut records = Vec::new();
+    let mut session_ids = Vec::new();
+    for index in 0_u8..12 {
+        let mut record = document_for_session(
+            &source,
+            &format!("top-k-session-{index}"),
+            u64::from(index) + 1,
+            "exact filtered top k oracle needle",
+        );
+        let mut digest = [0x30; 32];
+        digest[0] = 11 - index;
+        digest[31] = index;
+        record = with_event_identity_digest(record, digest);
+        record.occurred_at_unix_ms = Some(10_000 + i64::from(index));
+        if index % 2 == 0 {
+            add_literal_fact(
+                &mut record,
+                LiteralFactKind::File,
+                format!("src/oracle-{index}.rs"),
+            );
+        }
+        session_ids.push(record.session_id.as_uuid());
+        records.push(record);
+    }
+    records.reverse();
+    let index = publish_records(&temp, &source, records);
+    let filters = [
+        EventSearchFilters::default(),
+        EventSearchFilters {
+            file: Some("oracle-".to_owned()),
+            ..EventSearchFilters::default()
+        },
+        EventSearchFilters {
+            since_unix_ms: Some(10_006),
+            ..EventSearchFilters::default()
+        },
+        EventSearchFilters {
+            excluded_session_ids: vec![session_ids[1], session_ids[4], session_ids[9]],
+            ..EventSearchFilters::default()
+        },
+        EventSearchFilters {
+            file: Some("oracle-".to_owned()),
+            since_unix_ms: Some(10_004),
+            excluded_session_ids: vec![session_ids[6]],
+            ..EventSearchFilters::default()
+        },
+        EventSearchFilters {
+            provider: Some("custom".to_owned()),
+            ..EventSearchFilters::default()
+        },
+    ];
+
+    for filter in filters {
+        let exhaustive =
+            lexical_search_batch(&index, &["exact filtered top k oracle needle"], &filter, 12)
+                .unwrap();
+        assert!(exhaustive.complete);
+        assert!(exhaustive.candidate_set_exhaustive);
+        let exact_order = exhaustive
+            .candidates
+            .iter()
+            .map(|candidate| {
+                (
+                    candidate.event.event_identity_digest,
+                    candidate.score.to_bits(),
+                    candidate.coverage,
+                )
+            })
+            .collect::<Vec<_>>();
+        for limit in 1..=12 {
+            let bounded = lexical_search_batch(
+                &index,
+                &["exact filtered top k oracle needle"],
+                &filter,
+                limit,
+            )
+            .unwrap();
+            assert!(bounded.complete);
+            let observed = bounded
+                .candidates
+                .iter()
+                .map(|candidate| {
+                    (
+                        candidate.event.event_identity_digest,
+                        candidate.score.to_bits(),
+                        candidate.coverage,
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(observed, exact_order[..exact_order.len().min(limit)]);
+            assert_eq!(bounded.candidate_set_exhaustive, exact_order.len() <= limit);
+        }
+    }
+}
+
+#[test]
+fn better_primary_rank_replacement_decodes_once_and_worse_rank_does_not() {
+    let temp = tempdir().unwrap();
+    let source = source("exact-primary-boundary.jsonl");
+    let initial = document(&source, 1, "primaryalpha");
+    let better = document(&source, 2, "primaryalpha primarybeta");
+    let worse = document(&source, 3, "primaryalpha");
+    let expected = better.event_id.as_uuid();
+    let index = publish_records_in_one_segment(&temp, &source, vec![initial, better, worse]);
+
+    index.reset_manual_lexical_io_observability_for_test();
+    let batch = lexical_search_batch(
+        &index,
+        &["primaryalpha primarybeta"],
+        &EventSearchFilters::default(),
+        1,
+    )
+    .unwrap();
+
+    assert_eq!(batch.counters.candidate_docs, 3);
+    assert_eq!(batch.candidates[0].event.event_id, expected);
+    assert_eq!(
+        index.manual_event_range_order_decodes_for_test(),
+        2,
+        "the initial fill and better replacement decode; the later worse primary rank does not"
+    );
+}
+
+#[test]
+fn logical_verification_rejects_malformed_identity_scalars_and_order() {
+    use tantivy::schema::Document as _;
+
+    #[derive(Clone, Copy)]
+    enum Mutation {
+        IdHigh,
+        IdLow,
+        RangeOrder,
+    }
+
+    for (field_name, mutation) in [
+        ("event_id_high", Mutation::IdHigh),
+        ("event_id_low", Mutation::IdLow),
+        ("event_range_order", Mutation::RangeOrder),
+    ] {
+        let temp = tempdir().unwrap();
+        let source = source(&format!("malformed-{field_name}.jsonl"));
+        let record = document(&source, 1, "malformed exact boundary needle");
+        let event_uuid = record.event_id.as_uuid().as_u128();
+        let authority = ctx_history_index_format::SessionAuthorityKey::exact(
+            record.session_id,
+            record.source.identity(),
         )
         .unwrap();
-    assert_eq!(listed.candidates[0].event.event_id, expected);
-    assert_eq!(listed.candidates[1].event.event_id, newer);
+        let index = publish_records(&temp, &source, vec![record.clone()]);
+        drop(index);
+
+        let (searcher, manifest) = open_unverified_generation(temp.path());
+        let fields = fields_from_schema(searcher.schema()).unwrap();
+        let original = indexed_document(record);
+        let target = match mutation {
+            Mutation::IdHigh => fields.event_id_high,
+            Mutation::IdLow => fields.event_id_low,
+            Mutation::RangeOrder => fields.event_range_order,
+        };
+        let mut forged = TantivyDocument::default();
+        for (field, value) in original.iter_fields_and_values() {
+            if field != target {
+                forged.add_field_value(field, value);
+            }
+        }
+        match mutation {
+            Mutation::IdHigh => forged.add_u64(target, ((event_uuid >> 64) as u64) ^ 1),
+            Mutation::IdLow => forged.add_u64(target, (event_uuid as u64) ^ 1),
+            Mutation::RangeOrder => forged.add_bytes(
+                target,
+                &[0_u8; ctx_history_index_format::EVENT_RANGE_ORDER_KEY_LEN],
+            ),
+        }
+        forged.add_bytes(fields.session_authority, authority.as_bytes());
+        drop(searcher);
+
+        let directory = DurableMmapDirectory::open(active_generation_path(temp.path())).unwrap();
+        let tantivy_index = Index::open(directory).unwrap();
+        publish_unchecked_generation(
+            temp.path(),
+            &tantivy_index,
+            manifest,
+            std::slice::from_ref(&source),
+            vec![forged],
+        );
+
+        let error = match VerifiedIndex::open(temp.path()) {
+            Ok(_) => panic!("{field_name} mutation was accepted"),
+            Err(error) => error,
+        };
+        let expected_error_field = match mutation {
+            Mutation::IdHigh | Mutation::IdLow => "core_record",
+            Mutation::RangeOrder => field_name,
+        };
+        assert!(
+            matches!(
+                error,
+                IndexError::InvalidStoredDocumentField(actual) if actual == expected_error_field
+            ),
+            "{field_name} mutation returned {error:?}"
+        );
+    }
 }
 
 #[test]
@@ -540,13 +867,13 @@ fn alternatives_execute_one_manual_pass_and_report_deduplicated_coverage() {
     let (_temp, index, first_id, second_id) = manual_budget_fixture();
     ctx_history_index_query::reset_lexical_query_work();
 
-    let batch = index
-        .search_event_candidates_any_with_filters_batch(
-            &["manualbudgetneedle", "decoyterm", "manualbudgetneedle"],
-            &EventSearchFilters::default(),
-            10,
-        )
-        .unwrap();
+    let batch = lexical_search_batch(
+        &index,
+        &["manualbudgetneedle", "decoyterm", "manualbudgetneedle"],
+        &EventSearchFilters::default(),
+        10,
+    )
+    .unwrap();
 
     assert!(batch.complete);
     assert!(batch.candidate_set_exhaustive);
@@ -557,7 +884,7 @@ fn alternatives_execute_one_manual_pass_and_report_deduplicated_coverage() {
     assert_eq!(batch.counters.candidate_docs, 3);
     assert_eq!(batch.counters.body_posting_advances, 4);
     assert_eq!(batch.counters.term_expansions, 0);
-    assert_eq!(batch.candidates[0].event.event_id, second_id);
+    assert_eq!(batch.candidates[0].event.event_id, second_id.as_uuid());
     assert_eq!(
         batch.candidates[0].coverage,
         ctx_history_index_query::LexicalTermCoverage {
@@ -568,7 +895,7 @@ fn alternatives_execute_one_manual_pass_and_report_deduplicated_coverage() {
     let first = batch
         .candidates
         .iter()
-        .find(|candidate| candidate.event.event_id == first_id)
+        .find(|candidate| candidate.event.event_id == first_id.as_uuid())
         .unwrap();
     assert_eq!(
         first.coverage,
@@ -586,13 +913,7 @@ fn manual_executor_charges_each_material_budget_before_work() {
     let (_temp, index, _, _) = manual_budget_fixture();
     let filters = EventSearchFilters::default();
     let run = |budget| {
-        index
-            .search_event_candidates_any_with_filters_batch_with_budget_for_test(
-                &["manualbudgetneedle"],
-                &filters,
-                10,
-                budget,
-            )
+        lexical_search_batch_with_budget(&index, &["manualbudgetneedle"], &filters, 10, budget)
             .unwrap()
     };
 
@@ -608,14 +929,14 @@ fn manual_executor_charges_each_material_budget_before_work() {
     };
     let mut budget = ctx_history_index_query::LEXICAL_WORK_BUDGET_V1;
     budget.maximum_filter_input_bytes = 4;
-    let batch = index
-        .search_event_candidates_any_with_filters_batch_with_budget_for_test(
-            &["manualbudgetneedle"],
-            &provider_filters,
-            10,
-            budget,
-        )
-        .unwrap();
+    let batch = lexical_search_batch_with_budget(
+        &index,
+        &["manualbudgetneedle"],
+        &provider_filters,
+        10,
+        budget,
+    )
+    .unwrap();
     assert_exhausted_at(&batch, LexicalWorkCounter::FilterInputBytes, 0, 4);
     assert_eq!(batch.counters.segments, 0);
 
@@ -639,9 +960,7 @@ fn manual_executor_charges_each_material_budget_before_work() {
     );
 
     index.reset_manual_lexical_io_observability_for_test();
-    let batch = index
-        .list_event_candidates_with_filters_batch_with_budget_for_test(&filters, 10, budget)
-        .unwrap();
+    let batch = lexical_list_batch_with_budget(&index, &filters, 10, budget).unwrap();
     assert_exhausted_at(&batch, LexicalWorkCounter::DictionaryLookups, 0, 0);
     assert_eq!(
         index.manual_inverted_index_acquisitions_for_test(),
@@ -723,17 +1042,19 @@ fn substring_filters_use_bounded_literal_fact_bitmaps_without_core_confirmation(
     use ctx_history_index_query::LexicalWorkCounter;
 
     let (_temp, index, _, _) = manual_budget_fixture();
-    let plain = index
-        .search_event_candidates_batch("manualbudgetneedle", 10)
-        .unwrap();
+    let plain = lexical_search_batch(
+        &index,
+        &["manualbudgetneedle"],
+        &EventSearchFilters::default(),
+        10,
+    )
+    .unwrap();
     let filters = EventSearchFilters {
         workspace: Some("manualBUDGET".to_owned()),
         file: Some("MANUALbudget.RS".to_owned()),
         ..EventSearchFilters::default()
     };
-    let filtered = index
-        .search_event_candidates_with_filters_batch("manualbudgetneedle", &filters, 10)
-        .unwrap();
+    let filtered = lexical_search_batch(&index, &["manualbudgetneedle"], &filters, 10).unwrap();
     assert!(filtered.complete);
     assert_eq!(filtered.candidates.len(), 2);
     assert_eq!(filtered.counters.substring_dictionary_steps, 7);
@@ -750,14 +1071,9 @@ fn substring_filters_use_bounded_literal_fact_bitmaps_without_core_confirmation(
     let mut budget = ctx_history_index_query::LEXICAL_WORK_BUDGET_V1;
     budget.maximum_substring_bitmap_bytes = 0;
     ctx_history_index_query::reset_core_record_decodes();
-    let batch = index
-        .search_event_candidates_any_with_filters_batch_with_budget_for_test(
-            &["manualbudgetneedle"],
-            &filters,
-            10,
-            budget,
-        )
-        .unwrap();
+    let batch =
+        lexical_search_batch_with_budget(&index, &["manualbudgetneedle"], &filters, 10, budget)
+            .unwrap();
     assert_exhausted_at(&batch, LexicalWorkCounter::SubstringBitmapBytes, 0, 0);
     assert_eq!(batch.counters.substring_dictionary_steps, 0);
     assert_eq!(ctx_history_index_query::core_record_decodes(), 0);
@@ -765,14 +1081,9 @@ fn substring_filters_use_bounded_literal_fact_bitmaps_without_core_confirmation(
     let mut budget = ctx_history_index_query::LEXICAL_WORK_BUDGET_V1;
     budget.maximum_substring_dictionary_steps = 0;
     ctx_history_index_query::reset_core_record_decodes();
-    let batch = index
-        .search_event_candidates_any_with_filters_batch_with_budget_for_test(
-            &["manualbudgetneedle"],
-            &filters,
-            10,
-            budget,
-        )
-        .unwrap();
+    let batch =
+        lexical_search_batch_with_budget(&index, &["manualbudgetneedle"], &filters, 10, budget)
+            .unwrap();
     assert_exhausted_at(&batch, LexicalWorkCounter::SubstringDictionarySteps, 0, 0);
     assert_eq!(batch.counters.term_expansions, 0);
     assert_eq!(ctx_history_index_query::core_record_decodes(), 0);
@@ -780,14 +1091,9 @@ fn substring_filters_use_bounded_literal_fact_bitmaps_without_core_confirmation(
     let mut budget = ctx_history_index_query::LEXICAL_WORK_BUDGET_V1;
     budget.maximum_substring_dictionary_bytes = 0;
     ctx_history_index_query::reset_core_record_decodes();
-    let batch = index
-        .search_event_candidates_any_with_filters_batch_with_budget_for_test(
-            &["manualbudgetneedle"],
-            &filters,
-            10,
-            budget,
-        )
-        .unwrap();
+    let batch =
+        lexical_search_batch_with_budget(&index, &["manualbudgetneedle"], &filters, 10, budget)
+            .unwrap();
     assert_eq!(
         batch.exhaustion.as_ref().unwrap().counter,
         LexicalWorkCounter::SubstringDictionaryBytes
@@ -798,27 +1104,17 @@ fn substring_filters_use_bounded_literal_fact_bitmaps_without_core_confirmation(
 
     let mut budget = ctx_history_index_query::LEXICAL_WORK_BUDGET_V1;
     budget.maximum_term_expansions = 0;
-    let batch = index
-        .search_event_candidates_any_with_filters_batch_with_budget_for_test(
-            &["manualbudgetneedle"],
-            &filters,
-            10,
-            budget,
-        )
-        .unwrap();
+    let batch =
+        lexical_search_batch_with_budget(&index, &["manualbudgetneedle"], &filters, 10, budget)
+            .unwrap();
     assert_exhausted_at(&batch, LexicalWorkCounter::TermExpansions, 0, 0);
     assert_eq!(batch.counters.substring_posting_docs, 0);
 
     let mut budget = ctx_history_index_query::LEXICAL_WORK_BUDGET_V1;
     budget.maximum_substring_posting_docs = 0;
-    let batch = index
-        .search_event_candidates_any_with_filters_batch_with_budget_for_test(
-            &["manualbudgetneedle"],
-            &filters,
-            10,
-            budget,
-        )
-        .unwrap();
+    let batch =
+        lexical_search_batch_with_budget(&index, &["manualbudgetneedle"], &filters, 10, budget)
+            .unwrap();
     assert_exhausted_at(&batch, LexicalWorkCounter::SubstringPostingDocs, 0, 0);
     assert_eq!(batch.counters.term_expansions, 1);
 }
@@ -828,47 +1124,48 @@ fn heap_truncation_and_work_exhaustion_have_distinct_complete_signals() {
     use ctx_history_index_query::LexicalWorkCounter;
 
     let (_temp, index, _, _) = manual_budget_fixture();
-    let complete = index
-        .search_event_candidates_batch("manualbudgetneedle", 10)
-        .unwrap();
+    let run = |limit| {
+        lexical_search_batch(
+            &index,
+            &["manualbudgetneedle"],
+            &EventSearchFilters::default(),
+            limit,
+        )
+        .unwrap()
+    };
+    let complete = run(10);
     assert_eq!(complete.candidates.len(), 2);
     assert!(complete.complete);
     assert!(complete.candidate_set_exhaustive);
 
-    let exactly_retained = index
-        .search_event_candidates_batch("manualbudgetneedle", 2)
-        .unwrap();
+    let exactly_retained = run(2);
     assert!(exactly_retained.complete);
     assert!(
         exactly_retained.candidate_set_exhaustive,
         "filling the heap is exhaustive when no admissible match is discarded"
     );
-    let relevance_truncated = index
-        .search_event_candidates_batch("manualbudgetneedle", 1)
-        .unwrap();
+    let relevance_truncated = run(1);
     assert!(relevance_truncated.complete);
     assert!(!relevance_truncated.candidate_set_exhaustive);
     assert_eq!(relevance_truncated.exhaustion, None);
     assert_eq!(relevance_truncated.candidates.len(), 1);
-    let zero_limit = index
-        .search_event_candidates_batch("manualbudgetneedle", 0)
-        .unwrap();
+    let zero_limit = run(0);
     assert!(zero_limit.complete);
     assert!(!zero_limit.candidate_set_exhaustive);
-    let no_terms = index.search_event_candidates_batch("", 10).unwrap();
+    let no_terms = lexical_search_batch(&index, &[""], &EventSearchFilters::default(), 10).unwrap();
     assert!(no_terms.complete);
     assert!(no_terms.candidate_set_exhaustive);
 
     let mut budget = ctx_history_index_query::LEXICAL_WORK_BUDGET_V1;
     budget.maximum_final_materializations = 1;
-    let partial = index
-        .search_event_candidates_any_with_filters_batch_with_budget_for_test(
-            &["manualbudgetneedle"],
-            &EventSearchFilters::default(),
-            10,
-            budget,
-        )
-        .unwrap();
+    let partial = lexical_search_batch_with_budget(
+        &index,
+        &["manualbudgetneedle"],
+        &EventSearchFilters::default(),
+        10,
+        budget,
+    )
+    .unwrap();
     assert_exhausted_at(&partial, LexicalWorkCounter::FinalMaterializations, 1, 1);
     assert_eq!(partial.candidates.len(), 1);
     assert_eq!(
@@ -878,7 +1175,7 @@ fn heap_truncation_and_work_exhaustion_have_distinct_complete_signals() {
 
     let leading_encoded_bytes = u64::try_from(
         index
-            .core_record_by_id(complete.candidates[0].event.event_id.as_uuid())
+            .core_record_by_id(complete.candidates[0].event.event_id)
             .unwrap()
             .unwrap()
             .encode_stored()
@@ -888,14 +1185,14 @@ fn heap_truncation_and_work_exhaustion_have_distinct_complete_signals() {
     .unwrap();
     let mut budget = ctx_history_index_query::LEXICAL_WORK_BUDGET_V1;
     budget.maximum_final_materialization_bytes = leading_encoded_bytes;
-    let byte_partial = index
-        .search_event_candidates_any_with_filters_batch_with_budget_for_test(
-            &["manualbudgetneedle"],
-            &EventSearchFilters::default(),
-            10,
-            budget,
-        )
-        .unwrap();
+    let byte_partial = lexical_search_batch_with_budget(
+        &index,
+        &["manualbudgetneedle"],
+        &EventSearchFilters::default(),
+        10,
+        budget,
+    )
+    .unwrap();
     assert_exhausted_at(
         &byte_partial,
         LexicalWorkCounter::FinalMaterializationBytes,
@@ -911,37 +1208,22 @@ fn heap_truncation_and_work_exhaustion_have_distinct_complete_signals() {
 
     let mut budget = ctx_history_index_query::LEXICAL_WORK_BUDGET_V1;
     budget.maximum_candidate_docs = 0;
-    let work_exhausted = index
-        .search_event_candidates_any_with_filters_batch_with_budget_for_test(
-            &["manualbudgetneedle"],
-            &EventSearchFilters::default(),
-            10,
-            budget,
-        )
-        .unwrap();
+    let work_exhausted = lexical_search_batch_with_budget(
+        &index,
+        &["manualbudgetneedle"],
+        &EventSearchFilters::default(),
+        10,
+        budget,
+    )
+    .unwrap();
     assert!(!work_exhausted.complete);
     assert!(!work_exhausted.candidate_set_exhaustive);
-    assert_eq!(
-        work_exhausted.exhaustion.as_ref().unwrap().counter,
-        LexicalWorkCounter::CandidateDocs
-    );
-    let error = index
-        .search_event_candidates_any_with_filters_with_budget_for_test(
-            &["manualbudgetneedle"],
-            &EventSearchFilters::default(),
-            10,
-            budget,
-        )
-        .unwrap_err();
-    assert!(matches!(
-        error,
-        ctx_history_index_query::LexicalSearchError::WorkExhausted(exhaustion)
-            if exhaustion.counter == LexicalWorkCounter::CandidateDocs
-                && exhaustion.used == 0
-                && exhaustion.limit == 0
-                && exhaustion.segment.is_some()
-                && exhaustion.next_doc.is_some()
-    ));
+    let exhaustion = work_exhausted.exhaustion.as_ref().unwrap();
+    assert_eq!(exhaustion.counter, LexicalWorkCounter::CandidateDocs);
+    assert_eq!(exhaustion.used, 0);
+    assert_eq!(exhaustion.limit, 0);
+    assert!(exhaustion.segment.is_some());
+    assert!(exhaustion.next_doc.is_some());
 }
 
 #[test]
@@ -953,27 +1235,34 @@ fn thirty_two_term_fanout_streams_one_stable_segment_at_a_time() {
         .collect::<Vec<_>>();
     let query = terms.join(" ");
     let mut expected = Vec::with_capacity(SEGMENTS);
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
-        .unwrap()
-        .into_writer()
-        .unwrap();
-    writer.test_disable_merges().unwrap();
     for segment_index in 0..SEGMENTS {
         let source = source(&format!("fanout-segment-{segment_index}.jsonl"));
         let record = document(&source, 1, &query);
         expected.push(record.event_id);
+        // Publish each source independently so the fixture proves the
+        // cross-segment streaming bound without depending on the indexer's
+        // asynchronous flush grouping within one publication.
+        let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+            .unwrap()
+            .into_writer()
+            .unwrap();
+        writer.test_disable_merges().unwrap();
         writer.begin_source(source.clone()).unwrap();
         writer.add_core_record(record).unwrap();
         writer.certify_source(certificate(&source, 1, 1)).unwrap();
+        writer.commit(|_| true).unwrap();
     }
-    writer.commit(|_| true).unwrap();
     expected.sort_by_key(|event_id| event_id.digest());
 
     let index = VerifiedIndex::open(temp.path()).unwrap();
     index.reset_manual_lexical_io_observability_for_test();
-    let batch = index
-        .search_event_candidates_batch(&query, SEGMENTS)
-        .unwrap();
+    let batch = lexical_search_batch(
+        &index,
+        &[query.as_str()],
+        &EventSearchFilters::default(),
+        SEGMENTS,
+    )
+    .unwrap();
 
     assert!(batch.complete);
     assert!(batch.candidate_set_exhaustive);
@@ -987,10 +1276,18 @@ fn thirty_two_term_fanout_streams_one_stable_segment_at_a_time() {
         batch
             .candidates
             .iter()
-            .map(|candidate| candidate.event.event_id)
+            .map(|candidate| candidate.event.event_identity_digest)
             .collect::<Vec<_>>(),
-        expected,
+        expected
+            .iter()
+            .map(|event_id| event_id.digest())
+            .collect::<Vec<_>>(),
         "full rank ties must use the stable identity key, not segment order"
+    );
+    assert_eq!(
+        index.manual_event_range_order_decodes_for_test(),
+        SEGMENTS,
+        "an exhaustive result decodes one order key per retained finalist"
     );
     let simultaneous = index.maximum_simultaneous_manual_postings_for_test();
     assert_eq!(
@@ -1004,30 +1301,38 @@ fn thirty_two_term_fanout_streams_one_stable_segment_at_a_time() {
         "cumulative opens prove the working-set observation spans every segment"
     );
 
-    let top_three = index.search_event_candidates_batch(&query, 3).unwrap();
+    index.reset_manual_lexical_io_observability_for_test();
+    let top_three =
+        lexical_search_batch(&index, &[query.as_str()], &EventSearchFilters::default(), 3).unwrap();
     assert!(top_three.complete);
     assert!(!top_three.candidate_set_exhaustive);
+    assert_eq!(top_three.counters.candidate_docs, SEGMENTS as u64);
+    let order_decodes = index.manual_event_range_order_decodes_for_test();
+    assert!((3..=SEGMENTS).contains(&order_decodes));
     assert_eq!(
         top_three
             .candidates
             .iter()
-            .map(|candidate| candidate.event.event_id)
+            .map(|candidate| candidate.event.event_identity_digest)
             .collect::<Vec<_>>(),
-        expected[..3],
+        expected[..3]
+            .iter()
+            .map(|event_id| event_id.digest())
+            .collect::<Vec<_>>(),
         "the global fixed heap must retain the best ties across all segments"
     );
 
     let mut budget = ctx_history_index_query::LEXICAL_WORK_BUDGET_V1;
     budget.maximum_candidate_docs = 1;
     index.reset_manual_lexical_io_observability_for_test();
-    let exhausted = index
-        .search_event_candidates_any_with_filters_batch_with_budget_for_test(
-            &[query.as_str()],
-            &EventSearchFilters::default(),
-            SEGMENTS,
-            budget,
-        )
-        .unwrap();
+    let exhausted = lexical_search_batch_with_budget(
+        &index,
+        &[query.as_str()],
+        &EventSearchFilters::default(),
+        SEGMENTS,
+        budget,
+    )
+    .unwrap();
     assert_exhausted_at(
         &exhausted,
         ctx_history_index_query::LexicalWorkCounter::CandidateDocs,
@@ -1073,20 +1378,24 @@ fn lexical_result_ceiling_distinguishes_4096_from_4097_matches() {
     writer.commit(|_| true).unwrap();
 
     let index = VerifiedIndex::open(temp.path()).unwrap();
-    let exactly_full = index
-        .search_event_candidates_batch("boundarycommon", MAX_LEXICAL_QUERY_RESULTS)
-        .unwrap();
+    let exactly_full = lexical_search_batch(
+        &index,
+        &["boundarycommon"],
+        &EventSearchFilters::default(),
+        MAX_LEXICAL_QUERY_RESULTS,
+    )
+    .unwrap();
     assert!(exactly_full.complete);
     assert!(exactly_full.candidate_set_exhaustive);
     assert_eq!(exactly_full.candidates.len(), MAX_LEXICAL_QUERY_RESULTS);
 
-    let overflow = index
-        .search_event_candidates_any_with_filters_batch(
-            &["boundarycommon", "boundaryoverflow"],
-            &EventSearchFilters::default(),
-            MAX_LEXICAL_QUERY_RESULTS,
-        )
-        .unwrap();
+    let overflow = lexical_search_batch(
+        &index,
+        &["boundarycommon", "boundaryoverflow"],
+        &EventSearchFilters::default(),
+        MAX_LEXICAL_QUERY_RESULTS,
+    )
+    .unwrap();
     assert!(overflow.complete);
     assert!(!overflow.candidate_set_exhaustive);
     assert_eq!(overflow.candidates.len(), MAX_LEXICAL_QUERY_RESULTS);
@@ -1120,18 +1429,26 @@ fn manual_body_and_list_execution_ignore_deleted_source_revisions() {
     replacing.commit(|_| true).unwrap();
 
     let index = VerifiedIndex::open(temp.path()).unwrap();
-    let body = index
-        .search_event_candidates_batch("manualdeletionneedle", 10)
-        .unwrap();
+    let body = lexical_search_batch(
+        &index,
+        &["manualdeletionneedle"],
+        &EventSearchFilters::default(),
+        10,
+    )
+    .unwrap();
     assert!(body.complete);
     assert!(body.candidates.is_empty());
     assert_eq!(body.counters.term_expansions, 0);
 
-    let listed = index
-        .list_event_candidates_with_filters_batch(&EventSearchFilters::default(), 10)
-        .unwrap();
+    let listed = lexical_list_batch(&index, &EventSearchFilters::default(), 10).unwrap();
     assert!(listed.complete);
     assert_eq!(listed.candidates.len(), 1);
-    assert_eq!(listed.candidates[0].event.event_id, replacement.event_id);
-    assert_ne!(listed.candidates[0].event.event_id, deleted.event_id);
+    assert_eq!(
+        listed.candidates[0].event.event_id,
+        replacement.event_id.as_uuid()
+    );
+    assert_ne!(
+        listed.candidates[0].event.event_id,
+        deleted.event_id.as_uuid()
+    );
 }

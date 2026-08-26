@@ -10,7 +10,6 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
-serde_json.workspace = true
 ctx-history-capture-model = { path = "../ctx-history-capture-model" }
 ctx-history-capture-composition = { path = "../ctx-history-capture-composition" }
 ctx-history-core = { path = "../ctx-history-core" }
