@@ -11,16 +11,18 @@ import tempfile
 import unittest
 
 _TEST_DIRECTORY = str(Path(__file__).resolve().parent)
-sys.path.insert(0, _TEST_DIRECTORY)
+_SCRIPT_DIRECTORY = str(Path(__file__).resolve().parents[1])
+sys.path[:0] = [_TEST_DIRECTORY, _SCRIPT_DIRECTORY]
 try:
+    from release_sbom.dependency_materials import WORKSPACE_RELEASE_PACKAGES
     from release_sbom_test_lock import (
         SYNTHETIC_WORKSPACE_VERSION,
         package,
         synthetic_lock_text,
     )
 finally:
-    del sys.path[0]
-del _TEST_DIRECTORY
+    del sys.path[:2]
+del _SCRIPT_DIRECTORY, _TEST_DIRECTORY
 
 SCRIPT = Path(__file__).resolve().parents[1] / "release-sbom.py"
 SEALER = Path(__file__).resolve().parents[1] / "release" / "seal-linux-factory-candidate.py"
@@ -42,66 +44,28 @@ TANTIVY_FEATURES = (
     "zstd",
     "zstd-compression",
 )
-WORKSPACE_PACKAGES = (
-    ("ctx", "crates/ctx-cli"),
-    ("ctx-agent-application", "crates/ctx-agent-application"),
-    ("ctx-agent-integrations", "crates/ctx-agent-integrations"),
-    ("ctx-companion-bridge", "crates/ctx-companion-bridge"),
-    ("ctx-cli-presentation", "crates/ctx-cli-presentation"),
-    ("ctx-client-observability", "crates/ctx-client-observability"),
-    ("ctx-daemon-application", "crates/ctx-daemon-application"),
-    ("ctx-daemon-cli", "crates/ctx-daemon-cli"),
-    ("ctx-daemon-runtime", "crates/ctx-daemon-runtime"),
-    ("ctx-daemon-service", "crates/ctx-daemon-service"),
-    ("ctx-history-capture", "crates/ctx-history-capture"),
-    ("ctx-history-capture-composition", "crates/ctx-history-capture-composition"),
-    ("ctx-history-capture-model", "crates/ctx-history-capture-model"),
-    ("ctx-history-cli", "crates/ctx-history-cli"),
-    ("ctx-history-capture-runtime", "crates/ctx-history-capture-runtime"),
-    ("ctx-history-core", "crates/ctx-history-core"),
-    ("ctx-history-index-format", "crates/ctx-history-index-format"),
-    ("ctx-history-index", "crates/ctx-history-index"),
-    ("ctx-history-index-query", "crates/ctx-history-index-query"),
-    ("ctx-history-jsonl", "crates/ctx-history-jsonl"),
-    ("ctx-history-platform", "crates/ctx-history-platform"),
-    ("ctx-history-provider-claude-cursor", "crates/ctx-history-provider-claude-cursor"),
-    ("ctx-history-provider-docproj", "crates/ctx-history-provider-docproj"),
-    ("ctx-history-provider-gemini", "crates/ctx-history-provider-gemini"),
-    ("ctx-history-provider-hermes", "crates/ctx-history-provider-hermes"),
-    ("ctx-history-provider-mistral-mux", "crates/ctx-history-provider-mistral-mux"),
-    ("ctx-history-provider-native-jsonl", "crates/ctx-history-provider-native-jsonl"),
-    ("ctx-history-openclaw-schema", "crates/ctx-history-openclaw-schema"),
-    ("ctx-history-provider-openclaw-sqlite", "crates/ctx-history-provider-openclaw-sqlite"),
-    ("ctx-history-provider-runtime", "crates/ctx-history-provider-runtime"),
-    ("ctx-history-provider-codex", "crates/ctx-history-provider-codex"),
+WORKSPACE_PACKAGES = tuple(
     (
-        "ctx-history-providers-sqlite-selected",
-        "crates/ctx-history-providers-sqlite-selected",
-    ),
-    (
-        "ctx-history-providers-sqlite-inventory",
-        "crates/ctx-history-providers-sqlite-inventory",
-    ),
-    (
-        "ctx-history-providers-sqlite-logical",
-        "crates/ctx-history-providers-sqlite-logical",
-    ),
-    (
-        "ctx-history-providers-task-docs",
-        "crates/ctx-history-providers-task-docs",
-    ),
-    ("ctx-history-source-io", "crates/ctx-history-source-io"),
-    ("ctx-history-source-discovery", "crates/ctx-history-source-discovery"),
-    ("ctx-history-source-sqlite", "crates/ctx-history-source-sqlite"),
-    ("ctx-history-refresh", "crates/ctx-history-refresh"),
-    ("ctx-history-providers-jsonl-shared", "crates/ctx-history-providers-jsonl-shared"),
-    ("ctx-history-refresh-execution", "crates/ctx-history-refresh-execution"),
-    ("ctx-history-read-application", "crates/ctx-history-read-application"),
-    ("ctx-managed-pair-engine", "crates/ctx-managed-pair-engine"),
-    ("ctx-semantic-index", "crates/ctx-semantic-index"),
-    ("ctx-semantic-model", "crates/ctx-semantic-model"),
-    ("ctx-terminal", "crates/ctx-terminal"),
-    ("ctx-upgrade-engine", "crates/ctx-upgrade-engine"),
+        name,
+        "crates/ctx-cli" if name == "ctx" else f"crates/{name}",
+    )
+    for name in sorted(
+        WORKSPACE_RELEASE_PACKAGES
+        | {
+            "ctx",
+            "ctx-history-capture-runtime",
+            "ctx-history-cli",
+            "ctx-history-platform",
+            "ctx-history-refresh",
+            "ctx-history-source-discovery",
+            "ctx-history-source-io",
+            "ctx-history-source-sqlite",
+            "ctx-managed-pair-engine",
+            "ctx-semantic-model",
+            "ctx-terminal",
+            "ctx-upgrade-engine",
+        }
+    )
 )
 EXTERNAL_PACKAGES = (
     ("base64", "0.22.0"),
@@ -221,57 +185,14 @@ class ReleaseSbomTest(unittest.TestCase):
         )
 
         self.workspace_manifest = self.main_runfiles / "Cargo.toml"
+        workspace_members = "\n".join(
+            f'  "{directory}",' for _, directory in WORKSPACE_PACKAGES
+        )
         self.workspace_manifest.write_text(
             """\
 [workspace]
 members = [
-  "crates/ctx-cli",
-  "crates/ctx-agent-application",
-  "crates/ctx-agent-integrations",
-  "crates/ctx-companion-bridge",
-  "crates/ctx-cli-presentation",
-  "crates/ctx-client-observability",
-  "crates/ctx-daemon-application",
-  "crates/ctx-daemon-cli",
-  "crates/ctx-daemon-runtime",
-  "crates/ctx-daemon-service",
-  "crates/ctx-history-capture",
-  "crates/ctx-history-capture-composition",
-  "crates/ctx-history-capture-model",
-  "crates/ctx-history-cli",
-  "crates/ctx-history-capture-runtime",
-  "crates/ctx-history-core",
-  "crates/ctx-history-index-format",
-  "crates/ctx-history-index",
-  "crates/ctx-history-index-query",
-  "crates/ctx-history-jsonl",
-  "crates/ctx-history-platform",
-  "crates/ctx-history-provider-claude-cursor",
-  "crates/ctx-history-provider-docproj",
-  "crates/ctx-history-provider-gemini",
-  "crates/ctx-history-provider-hermes",
-  "crates/ctx-history-provider-mistral-mux",
-  "crates/ctx-history-provider-native-jsonl",
-  "crates/ctx-history-openclaw-schema",
-  "crates/ctx-history-provider-openclaw-sqlite",
-  "crates/ctx-history-provider-runtime",
-  "crates/ctx-history-provider-codex",
-  "crates/ctx-history-providers-sqlite-selected",
-  "crates/ctx-history-providers-sqlite-inventory",
-  "crates/ctx-history-providers-sqlite-logical",
-  "crates/ctx-history-providers-task-docs",
-  "crates/ctx-history-source-io",
-  "crates/ctx-history-source-discovery",
-  "crates/ctx-history-source-sqlite",
-  "crates/ctx-history-refresh",
-  "crates/ctx-history-providers-jsonl-shared",
-  "crates/ctx-history-refresh-execution",
-  "crates/ctx-history-read-application",
-  "crates/ctx-managed-pair-engine",
-  "crates/ctx-semantic-index",
-  "crates/ctx-semantic-model",
-  "crates/ctx-terminal",
-  "crates/ctx-upgrade-engine",
+__WORKSPACE_MEMBERS__
 ]
 
 [workspace.package]
@@ -293,7 +214,7 @@ tantivy = { version = "0.26.1", default-features = false, features = ["mmap", "l
 thiserror = "1.0.0"
 uuid = "1.0.0"
 zstd = "0.13"
-""",
+""".replace("__WORKSPACE_MEMBERS__", workspace_members),
             encoding="utf-8",
         )
         (self.main_runfiles / "LICENSE").write_text(
@@ -302,346 +223,15 @@ zstd = "0.13"
         for name, directory in WORKSPACE_PACKAGES:
             manifest = self.main_runfiles / directory / "Cargo.toml"
             manifest.parent.mkdir(parents=True)
-            dependencies = {
-                "ctx": (
-                    "ctx-agent-application = { path = \"../ctx-agent-application\" }\n"
-                    "ctx-agent-integrations = { path = \"../ctx-agent-integrations\" }\n"
-                    "ctx-companion-bridge = { path = \"../ctx-companion-bridge\" }\n"
-                    "ctx-cli-presentation = { path = \"../ctx-cli-presentation\" }\n"
-                    "ctx-client-observability = { path = \"../ctx-client-observability\" }\n"
-                    "ctx-daemon-cli = { path = \"../ctx-daemon-cli\" }\n"
-                    "ctx-history-capture = { path = \"../ctx-history-capture\" }\n"
-                    "ctx-history-capture-model = { path = \"../ctx-history-capture-model\" }\n"
-                    "ctx-history-cli = { path = \"../ctx-history-cli\" }\n"
-                    "ctx-history-jsonl = { path = \"../ctx-history-jsonl\" }\n"
-                    "ctx-history-provider-codex = { path = \"../ctx-history-provider-codex\" }\n"
-                    "ctx-history-refresh = { path = \"../ctx-history-refresh\" }\n"
-                    "ctx-history-provider-docproj = { path = \"../ctx-history-provider-docproj\" }\n"
-                    "ctx-history-provider-gemini = { path = \"../ctx-history-provider-gemini\" }\n"
-                    "ctx-history-provider-native-jsonl = { path = \"../ctx-history-provider-native-jsonl\" }\n"
-                    "ctx-history-provider-runtime = { path = \"../ctx-history-provider-runtime\" }\n"
-                    "ctx-history-providers-sqlite-selected = { path = \"../ctx-history-providers-sqlite-selected\" }\n"
-                    "ctx-history-providers-sqlite-inventory = { path = \"../ctx-history-providers-sqlite-inventory\" }\n"
-                    "ctx-history-providers-sqlite-logical = { path = \"../ctx-history-providers-sqlite-logical\" }\n"
-                    "ctx-history-providers-jsonl-shared = { path = \"../ctx-history-providers-jsonl-shared\" }\n"
-                    "ctx-history-providers-task-docs = { path = \"../ctx-history-providers-task-docs\" }\n"
-                    "ctx-history-provider-mistral-mux = { path = \"../ctx-history-provider-mistral-mux\" }\n"
-                    "ctx-history-source-io = { path = \"../ctx-history-source-io\" }\n"
-                    "ctx-history-refresh-execution = { path = \"../ctx-history-refresh-execution\" }\n"
-                    "ctx-history-read-application = { path = \"../ctx-history-read-application\" }\n"
-                    "ctx-terminal = { path = \"../ctx-terminal\" }\n"
-                    "ctx-upgrade-engine = { path = \"../ctx-upgrade-engine\" }"
-                ),
-                "ctx-agent-integrations": (
-                    "ctx-history-core = { path = \"../ctx-history-core\" }"
-                ),
-                "ctx-companion-bridge": (
-                    "ctx-history-platform = { path = \"../ctx-history-platform\" }"
-                ),
-                "ctx-agent-application": (
-                    "ctx-agent-integrations = { path = \"../ctx-agent-integrations\" }\n"
-                    "ctx-client-observability = { path = \"../ctx-client-observability\" }"
-                ),
-                "ctx-cli-presentation": (
-                    "ctx-agent-application = { path = \"../ctx-agent-application\" }\n"
-                    "ctx-agent-integrations = { path = \"../ctx-agent-integrations\" }\n"
-                    "ctx-client-observability = { path = \"../ctx-client-observability\" }\n"
-                    "ctx-history-cli = { path = \"../ctx-history-cli\" }\n"
-                    "ctx-history-core = { path = \"../ctx-history-core\" }\n"
-                    "ctx-history-read-application = { path = \"../ctx-history-read-application\" }\n"
-                    "ctx-history-refresh = { path = \"../ctx-history-refresh\" }\n"
-                    "ctx-terminal = { path = \"../ctx-terminal\" }\n"
-                    "ctx-upgrade-engine = { path = \"../ctx-upgrade-engine\" }"
-                ),
-                "ctx-client-observability": (
-                    "ctx-history-core = { path = \"../ctx-history-core\" }"
-                ),
-                "ctx-daemon-application": (
-                    "ctx-client-observability = { path = \"../ctx-client-observability\" }\n"
-                    "ctx-daemon-runtime = { path = \"../ctx-daemon-runtime\" }\n"
-                    "ctx-daemon-service = { path = \"../ctx-daemon-service\" }\n"
-                    "ctx-history-core = { path = \"../ctx-history-core\" }"
-                ),
-                "ctx-daemon-cli": (
-                    "ctx-client-observability = { path = \"../ctx-client-observability\" }\n"
-                    "ctx-daemon-application = { path = \"../ctx-daemon-application\" }\n"
-                    "ctx-daemon-runtime = { path = \"../ctx-daemon-runtime\" }\n"
-                    "ctx-daemon-service = { path = \"../ctx-daemon-service\" }\n"
-                    "ctx-history-core = { path = \"../ctx-history-core\" }\n"
-                    "ctx-history-index = { path = \"../ctx-history-index\" }\n"
-                    "ctx-history-read-application = { path = \"../ctx-history-read-application\" }\n"
-                    "ctx-semantic-index = { path = \"../ctx-semantic-index\" }\n"
-                    "ctx-semantic-model = { path = \"../ctx-semantic-model\" }\n"
-                    "ctx-terminal = { path = \"../ctx-terminal\" }\n"
-                    "ctx-upgrade-engine = { path = \"../ctx-upgrade-engine\" }"
-                ),
-                "ctx-daemon-runtime": (
-                    "ctx-history-core = { path = \"../ctx-history-core\" }"
-                ),
-                "ctx-history-capture": (
-                    "ctx-history-capture-composition = { path = \"../ctx-history-capture-composition\" }\n"
-                    "ctx-history-capture-model = { path = \"../ctx-history-capture-model\" }\n"
-                    "ctx-history-capture-runtime = { path = \"../ctx-history-capture-runtime\" }\n"
-                    "ctx-history-core = { path = \"../ctx-history-core\" }\n"
-                    "ctx-history-jsonl = { path = \"../ctx-history-jsonl\" }\n"
-                    "ctx-history-provider-claude-cursor = { path = \"../ctx-history-provider-claude-cursor\" }\n"
-                    "ctx-history-provider-runtime = { path = \"../ctx-history-provider-runtime\" }"
-                ),
-                "ctx-history-capture-composition": (
-                    "chrono.workspace = true\n"
-                    "ctx-history-capture-model = { path = \"../ctx-history-capture-model\" }\n"
-                    "ctx-history-capture-runtime = { path = \"../ctx-history-capture-runtime\" }\n"
-                    "ctx-history-core = { path = \"../ctx-history-core\" }\n"
-                    "ctx-history-index = { path = \"../ctx-history-index\" }\n"
-                    "ctx-history-jsonl = { path = \"../ctx-history-jsonl\" }\n"
-                    "ctx-history-provider-claude-cursor = { path = \"../ctx-history-provider-claude-cursor\" }\n"
-                    "ctx-history-provider-codex = { path = \"../ctx-history-provider-codex\" }\n"
-                    "ctx-history-provider-docproj = { path = \"../ctx-history-provider-docproj\" }\n"
-                    "ctx-history-provider-gemini = { path = \"../ctx-history-provider-gemini\" }\n"
-                    "ctx-history-provider-hermes = { path = \"../ctx-history-provider-hermes\" }\n"
-                    "ctx-history-provider-mistral-mux = { path = \"../ctx-history-provider-mistral-mux\" }\n"
-                    "ctx-history-provider-native-jsonl = { path = \"../ctx-history-provider-native-jsonl\" }\n"
-                    "ctx-history-provider-openclaw-sqlite = { path = \"../ctx-history-provider-openclaw-sqlite\" }\n"
-                    "ctx-history-provider-runtime = { path = \"../ctx-history-provider-runtime\" }\n"
-                    "ctx-history-providers-jsonl-shared = { path = \"../ctx-history-providers-jsonl-shared\" }\n"
-                    "ctx-history-providers-sqlite-inventory = { path = \"../ctx-history-providers-sqlite-inventory\" }\n"
-                    "ctx-history-providers-sqlite-logical = { path = \"../ctx-history-providers-sqlite-logical\" }\n"
-                    "ctx-history-providers-sqlite-selected = { path = \"../ctx-history-providers-sqlite-selected\" }\n"
-                    "ctx-history-providers-task-docs = { path = \"../ctx-history-providers-task-docs\" }\n"
-                    "ctx-history-source-discovery = { path = \"../ctx-history-source-discovery\" }\n"
-                    "ctx-history-source-io = { path = \"../ctx-history-source-io\" }\n"
-                    "serde_json.workspace = true\n"
-                    "sha2.workspace = true\n"
-                    "tempfile.workspace = true\n"
-                    "thiserror.workspace = true\n"
-                    "uuid.workspace = true"
-                ),
-                "ctx-history-index": (
-                    "ctx-history-index-format = { path = \"../ctx-history-index-format\" }\n"
-                    "ctx-history-index-query = { path = \"../ctx-history-index-query\" }\n"
-                    "ctx-semantic-model = { path = \"../ctx-semantic-model\" }\n"
-                    "tantivy.workspace = true"
-                ),
-                "ctx-history-index-format": "tantivy.workspace = true",
-                "ctx-history-index-query": (
-                    "ctx-history-index-format = { path = \"../ctx-history-index-format\" }\n"
-                    "tantivy.workspace = true"
-                ),
-                "ctx-history-jsonl": (
-                    "ctx-history-capture-model = { path = \"../ctx-history-capture-model\" }\n"
-                    "ctx-history-capture-runtime = { path = \"../ctx-history-capture-runtime\" }\n"
-                    "ctx-history-core = { path = \"../ctx-history-core\" }\n"
-                    "serde_json.workspace = true"
-                ),
-                "ctx-history-provider-claude-cursor": (
-                    "ctx-history-capture-model = { path = \"../ctx-history-capture-model\" }\n"
-                    "ctx-history-capture-runtime = { path = \"../ctx-history-capture-runtime\" }\n"
-                    "ctx-history-core = { path = \"../ctx-history-core\" }\n"
-                    "ctx-history-jsonl = { path = \"../ctx-history-jsonl\" }\n"
-                    "ctx-history-provider-runtime = { path = \"../ctx-history-provider-runtime\" }"
-                ),
-                "ctx-history-provider-gemini": (
-                    "ctx-history-capture-model = { path = \"../ctx-history-capture-model\" }\n"
-                    "ctx-history-core = { path = \"../ctx-history-core\" }\n"
-                    "ctx-history-jsonl = { path = \"../ctx-history-jsonl\" }\n"
-                    "ctx-history-source-io = { path = \"../ctx-history-source-io\" }\n"
-                    "chrono.workspace = true\n"
-                    "serde.workspace = true\n"
-                    "serde_json.workspace = true\n"
-                    "sha2.workspace = true\n"
-                    "thiserror.workspace = true"
-                ),
-                "ctx-history-provider-hermes": (
-                    "ctx-history-capture-model = { path = \"../ctx-history-capture-model\" }\n"
-                    "ctx-history-capture-runtime = { path = \"../ctx-history-capture-runtime\" }\n"
-                    "ctx-history-core = { path = \"../ctx-history-core\" }\n"
-                    "ctx-history-provider-runtime = { path = \"../ctx-history-provider-runtime\" }\n"
-                    "ctx-history-source-io = { path = \"../ctx-history-source-io\" }\n"
-                    "ctx-history-source-sqlite = { path = \"../ctx-history-source-sqlite\" }\n"
-                    "chrono.workspace = true\nrusqlite.workspace = true\n"
-                    "serde.workspace = true\nserde_json.workspace = true\n"
-                    "sha2.workspace = true\ntempfile.workspace = true\n"
-                    "thiserror.workspace = true"
-                ),
-                "ctx-history-provider-docproj": (
-                    "ctx-history-capture-model = { path = \"../ctx-history-capture-model\" }\n"
-                    "ctx-history-capture-runtime = { path = \"../ctx-history-capture-runtime\" }\n"
-                    "ctx-history-core = { path = \"../ctx-history-core\" }\n"
-                    "ctx-history-provider-runtime = { path = \"../ctx-history-provider-runtime\" }\n"
-                    "ctx-history-source-discovery = { path = \"../ctx-history-source-discovery\" }\n"
-                    "ctx-history-source-io = { path = \"../ctx-history-source-io\" }\n"
-                    "ctx-history-source-sqlite = { path = \"../ctx-history-source-sqlite\" }\n"
-                    "chrono.workspace = true\n"
-                    "rusqlite.workspace = true\n"
-                    "serde.workspace = true\n"
-                    "serde_json.workspace = true\n"
-                    "sha2.workspace = true\n"
-                    "thiserror.workspace = true"
-                ),
-                "ctx-history-provider-runtime": (
-                    "ctx-history-capture-model = { path = \"../ctx-history-capture-model\" }\n"
-                    "ctx-history-capture-runtime = { path = \"../ctx-history-capture-runtime\" }\n"
-                    "ctx-history-core = { path = \"../ctx-history-core\" }\n"
-                    "ctx-history-jsonl = { path = \"../ctx-history-jsonl\" }"
-                ),
-                "ctx-history-provider-native-jsonl": (
-                    "ctx-history-capture-model = { path = \"../ctx-history-capture-model\" }\n"
-                    "ctx-history-capture-runtime = { path = \"../ctx-history-capture-runtime\" }\n"
-                    "ctx-history-core = { path = \"../ctx-history-core\" }\n"
-                    "ctx-history-jsonl = { path = \"../ctx-history-jsonl\" }\n"
-                    "ctx-history-native-jsonl-parsers = { path = \"../ctx-history-native-jsonl-parsers\" }\n"
-                    "ctx-history-source-io = { path = \"../ctx-history-source-io\" }\n"
-                    "chrono.workspace = true\n"
-                    "serde.workspace = true\n"
-                    "serde_json.workspace = true\n"
-                    "sha2.workspace = true\n"
-                    "thiserror.workspace = true"
-                ),
-                "ctx-history-provider-openclaw-sqlite": (
-                    "chrono.workspace = true\n"
-                    "ctx-history-capture-model = { path = \"../ctx-history-capture-model\" }\n"
-                    "ctx-history-capture-runtime = { path = \"../ctx-history-capture-runtime\" }\n"
-                    "ctx-history-core = { path = \"../ctx-history-core\" }\n"
-                    "ctx-history-openclaw-schema = { path = \"../ctx-history-openclaw-schema\" }\n"
-                    "ctx-history-provider-runtime = { path = \"../ctx-history-provider-runtime\" }\n"
-                    "ctx-history-providers-jsonl-shared = { path = \"../ctx-history-providers-jsonl-shared\" }\n"
-                    "rusqlite.workspace = true\n"
-                    "serde_json.workspace = true\n"
-                    "sha2.workspace = true\n"
-                    "tempfile.workspace = true\n"
-                    "thiserror.workspace = true\n"
-                    "zstd.workspace = true"
-                ),
-                "ctx-history-openclaw-schema": (
-                    "rusqlite.workspace = true\n"
-                    "thiserror.workspace = true"
-                ),
-                "ctx-history-provider-codex": (
-                    "ctx-history-capture-model = { path = \"../ctx-history-capture-model\" }\n"
-                    "ctx-history-capture-runtime = { path = \"../ctx-history-capture-runtime\" }\n"
-                    "ctx-history-core = { path = \"../ctx-history-core\" }\n"
-                    "ctx-history-source-io = { path = \"../ctx-history-source-io\" }\n"
-                    "chrono.workspace = true\n"
-                    "serde.workspace = true\n"
-                    "serde_json.workspace = true\n"
-                    "sha2.workspace = true\n"
-                    "tempfile.workspace = true\n"
-                    "thiserror.workspace = true\n"
-                    "uuid.workspace = true"
-                ),
-                "ctx-history-providers-task-docs": (
-                    "base64.workspace = true\n"
-                    "chrono.workspace = true\n"
-                    "libc.workspace = true\n"
-                    "regex.workspace = true\n"
-                    "serde.workspace = true\n"
-                    "serde_json.workspace = true\n"
-                    "sha2.workspace = true\n"
-                    "thiserror.workspace = true\n"
-                    "uuid.workspace = true\n"
-                    "ctx-history-capture-model = { path = \"../ctx-history-capture-model\" }\n"
-                    "ctx-history-capture-runtime = { path = \"../ctx-history-capture-runtime\" }\n"
-                    "ctx-history-core = { path = \"../ctx-history-core\" }\n"
-                    "ctx-history-source-io = { path = \"../ctx-history-source-io\" }"
-                ),
-                "ctx-history-source-io": "",
-                "ctx-history-source-discovery": (
-                    "ctx-history-openclaw-schema = { path = \"../ctx-history-openclaw-schema\" }"
-                ),
-                "ctx-history-source-sqlite": "",
-                "ctx-history-providers-jsonl-shared": (
-                    "ctx-history-capture-model = { path = \"../ctx-history-capture-model\" }\n"
-                    "ctx-history-capture-runtime = { path = \"../ctx-history-capture-runtime\" }\n"
-                    "ctx-history-core = { path = \"../ctx-history-core\" }\n"
-                    "ctx-history-jsonl = { path = \"../ctx-history-jsonl\" }\n"
-                    "ctx-history-provider-runtime = { path = \"../ctx-history-provider-runtime\" }"
-                ),
-                "ctx-history-provider-mistral-mux": (
-                    "ctx-history-capture-model = { path = \"../ctx-history-capture-model\" }\n"
-                    "ctx-history-capture-runtime = { path = \"../ctx-history-capture-runtime\" }\n"
-                    "ctx-history-core = { path = \"../ctx-history-core\" }\n"
-                    "ctx-history-jsonl = { path = \"../ctx-history-jsonl\" }\n"
-                    "ctx-history-provider-runtime = { path = \"../ctx-history-provider-runtime\" }\n"
-                    "ctx-history-source-io = { path = \"../ctx-history-source-io\" }\n"
-                    "chrono.workspace = true\n"
-                    "serde.workspace = true\n"
-                    "serde_json.workspace = true\n"
-                    "sha2.workspace = true\n"
-                    "tempfile.workspace = true\n"
-                    "uuid.workspace = true"
-                ),
-                "ctx-history-providers-sqlite-selected": (
-                    "ctx-history-capture-model = { path = \"../ctx-history-capture-model\" }\n"
-                    "ctx-history-capture-runtime = { path = \"../ctx-history-capture-runtime\" }\n"
-                    "ctx-history-core = { path = \"../ctx-history-core\" }\n"
-                    "ctx-history-source-io = { path = \"../ctx-history-source-io\" }\n"
-                    "ctx-history-source-sqlite = { path = \"../ctx-history-source-sqlite\" }"
-                ),
-                "ctx-history-providers-sqlite-inventory": (
-                    "ctx-history-capture-model = { path = \"../ctx-history-capture-model\" }\n"
-                    "ctx-history-capture-runtime = { path = \"../ctx-history-capture-runtime\" }\n"
-                    "ctx-history-core = { path = \"../ctx-history-core\" }\n"
-                    "ctx-history-provider-runtime = { path = \"../ctx-history-provider-runtime\" }\n"
-                    "ctx-history-source-io = { path = \"../ctx-history-source-io\" }\n"
-                    "ctx-history-source-sqlite = { path = \"../ctx-history-source-sqlite\" }"
-                ),
-                "ctx-history-providers-sqlite-logical": (
-                    "ctx-history-capture-model = { path = \"../ctx-history-capture-model\" }\n"
-                    "ctx-history-capture-runtime = { path = \"../ctx-history-capture-runtime\" }\n"
-                    "ctx-history-core = { path = \"../ctx-history-core\" }\n"
-                    "ctx-history-source-io = { path = \"../ctx-history-source-io\" }\n"
-                    "ctx-history-source-sqlite = { path = \"../ctx-history-source-sqlite\" }\n"
-                    "rmpv.workspace = true\n"
-                    "serde_json.workspace = true"
-                ),
-                "ctx-history-capture-model": (
-                    "ctx-history-core = { path = \"../ctx-history-core\" }\n"
-                    "serde_json.workspace = true"
-                ),
-                "ctx-history-cli": (
-                    "ctx-client-observability = { path = \"../ctx-client-observability\" }\n"
-                    "ctx-daemon-cli = { path = \"../ctx-daemon-cli\" }\n"
-                    "ctx-history-core = { path = \"../ctx-history-core\" }\n"
-                    "ctx-history-index = { path = \"../ctx-history-index\" }\n"
-                    "ctx-history-read-application = { path = \"../ctx-history-read-application\" }\n"
-                    "ctx-history-refresh = { path = \"../ctx-history-refresh\" }\n"
-                    "ctx-terminal = { path = \"../ctx-terminal\" }"
-                ),
-                "ctx-history-refresh": (
-                    "ctx-history-core = { path = \"../ctx-history-core\" }\n"
-                    "ctx-history-index = { path = \"../ctx-history-index\" }\n"
-                    "ctx-history-refresh-execution = { path = \"../ctx-history-refresh-execution\" }"
-                ),
-                "ctx-history-capture-runtime": (
-                    "ctx-history-capture-model = { path = \"../ctx-history-capture-model\" }\n"
-                    "ctx-history-core = { path = \"../ctx-history-core\" }\n"
-                    "uuid.workspace = true"
-                ),
-                "ctx-daemon-service": (
-                    "ctx-client-observability = { path = \"../ctx-client-observability\" }\n"
-                    "ctx-daemon-runtime = { path = \"../ctx-daemon-runtime\" }\n"
-                    "ctx-history-core = { path = \"../ctx-history-core\" }\n"
-                    "ctx-history-index = { path = \"../ctx-history-index\" }\n"
-                    "ctx-semantic-index = { path = \"../ctx-semantic-index\" }\n"
-                    "ctx-semantic-model = { path = \"../ctx-semantic-model\" }\n"
-                    "ctx-upgrade-engine = { path = \"../ctx-upgrade-engine\" }"
-                ),
-                "ctx-history-read-application": (
-                    "ctx-history-core = { path = \"../ctx-history-core\" }\n"
-                    "ctx-history-index-format = { path = \"../ctx-history-index-format\" }\n"
-                    "ctx-history-index-query = { path = \"../ctx-history-index-query\" }"
-                ),
-                "ctx-semantic-model": (
-                    "ctx-history-core = { path = \"../ctx-history-core\" }"
-                ),
-                "ctx-managed-pair-engine": (
-                    "ctx-history-platform = { path = \"../ctx-history-platform\" }"
-                ),
-                "ctx-upgrade-engine": (
-                    "ctx-history-core = { path = \"../ctx-history-core\" }\n"
-                    "ctx-managed-pair-engine = { path = \"../ctx-managed-pair-engine\" }"
-                ),
-            }.get(name)
+            dependencies = (
+                "tantivy.workspace = true"
+                if name in {
+                    "ctx-history-index",
+                    "ctx-history-index-format",
+                    "ctx-history-index-query",
+                }
+                else ""
+            )
             dependencies = (
                 f"\n[dependencies]\n{dependencies}\n" if dependencies else ""
             )
@@ -695,53 +285,8 @@ repository = "https://example.invalid/{name}"
                 f"Synthetic license text for {name}.\n", encoding="utf-8"
             )
         inventory_labels = [
-            "@@//crates/ctx-cli:ctx",
-            "@@//crates/ctx-agent-application:ctx_agent_application",
-            "@@//crates/ctx-agent-integrations:ctx_agent_integrations",
-            "@@//crates/ctx-companion-bridge:ctx_companion_bridge",
-            "@@//crates/ctx-cli-presentation:ctx_cli_presentation",
-            "@@//crates/ctx-client-observability:ctx_client_observability",
-            "@@//crates/ctx-daemon-application:ctx_daemon_application",
-            "@@//crates/ctx-daemon-cli:ctx_daemon_cli",
-            "@@//crates/ctx-daemon-runtime:ctx_daemon_runtime",
-            "@@//crates/ctx-daemon-service:ctx_daemon_service",
-            "@@//crates/ctx-history-capture:ctx_history_capture",
-            "@@//crates/ctx-history-capture-composition:ctx_history_capture_composition",
-            "@@//crates/ctx-history-capture-model:ctx_history_capture_model",
-            "@@//crates/ctx-history-cli:ctx_history_cli",
-            "@@//crates/ctx-history-capture-runtime:ctx_history_capture_runtime",
-            "@@//crates/ctx-history-core:ctx_history_core",
-            "@@//crates/ctx-history-index-format:ctx_history_index_format",
-            "@@//crates/ctx-history-index:ctx_history_index",
-            "@@//crates/ctx-history-index-query:ctx_history_index_query",
-            "@@//crates/ctx-history-jsonl:ctx_history_jsonl",
-            "@@//crates/ctx-history-platform:ctx_history_platform",
-            "@@//crates/ctx-history-provider-claude-cursor:ctx_history_provider_claude_cursor",
-            "@@//crates/ctx-history-provider-docproj:ctx_history_provider_docproj",
-            "@@//crates/ctx-history-provider-gemini:ctx_history_provider_gemini",
-            "@@//crates/ctx-history-provider-hermes:ctx_history_provider_hermes",
-            "@@//crates/ctx-history-provider-mistral-mux:ctx_history_provider_mistral_mux",
-            "@@//crates/ctx-history-provider-native-jsonl:ctx_history_provider_native_jsonl",
-            "@@//crates/ctx-history-openclaw-schema:ctx_history_openclaw_schema",
-            "@@//crates/ctx-history-provider-openclaw-sqlite:ctx_history_provider_openclaw_sqlite",
-            "@@//crates/ctx-history-provider-runtime:ctx_history_provider_runtime",
-            "@@//crates/ctx-history-provider-codex:ctx_history_provider_codex",
-            "@@//crates/ctx-history-providers-sqlite-selected:ctx_history_providers_sqlite_selected",
-            "@@//crates/ctx-history-providers-sqlite-inventory:ctx_history_providers_sqlite_inventory",
-            "@@//crates/ctx-history-providers-sqlite-logical:ctx_history_providers_sqlite_logical",
-            "@@//crates/ctx-history-providers-task-docs:ctx_history_providers_task_docs",
-            "@@//crates/ctx-history-source-io:ctx_history_source_io",
-            "@@//crates/ctx-history-source-discovery:ctx_history_source_discovery",
-            "@@//crates/ctx-history-source-sqlite:ctx_history_source_sqlite",
-            "@@//crates/ctx-history-refresh:ctx_history_refresh",
-            "@@//crates/ctx-history-providers-jsonl-shared:ctx_history_providers_jsonl_shared",
-            "@@//crates/ctx-history-refresh-execution:ctx_history_refresh_execution",
-            "@@//crates/ctx-history-read-application:ctx_history_read_application",
-            "@@//crates/ctx-managed-pair-engine:ctx_managed_pair_engine",
-            "@@//crates/ctx-semantic-index:ctx_semantic_index",
-            "@@//crates/ctx-semantic-model:ctx_semantic_model",
-            "@@//crates/ctx-terminal:ctx_terminal",
-            "@@//crates/ctx-upgrade-engine:ctx_upgrade_engine",
+            f"@@//{directory}:{'ctx' if name == 'ctx' else name.replace('-', '_')}"
+            for name, directory in WORKSPACE_PACKAGES
         ]
         inventory_labels.extend(
             f"@@{CRATE_REPOSITORY_PREFIX}crates__{name}-{version}//:{name}"
@@ -1281,53 +826,29 @@ repository = "https://example.invalid/{name}"
         }
         self.assertNotIn("target-only", names)
 
-    def test_task_document_pack_omission_is_rejected(self) -> None:
-        pack_label = "@@//crates/ctx-history-providers-task-docs:ctx_history_providers_task_docs"
-        labels = self.target_inventory.read_text(encoding="utf-8").splitlines()
-        self.assertIn(pack_label, labels)
-        self.target_inventory.write_text(
-            "\n".join(label for label in labels if label != pack_label) + "\n",
-            encoding="utf-8",
-        )
-        rejected = self.run_command("generate", check=False)
-        self.assertNotEqual(rejected.returncode, 0)
-        self.assertIn(
-            "target dependency inventory omits release workspace packages: "
+    def test_release_package_omission_table(self) -> None:
+        cases = (
             "ctx-history-providers-task-docs",
-            rejected.stderr,
-        )
-
-    def test_document_projection_release_package_omission_is_rejected(self) -> None:
-        omitted = "@@//crates/ctx-history-provider-docproj:ctx_history_provider_docproj"
-        labels = self.target_inventory.read_text(encoding="utf-8").splitlines()
-        self.assertIn(omitted, labels)
-        self.target_inventory.write_text(
-            "\n".join(label for label in labels if label != omitted) + "\n",
-            encoding="utf-8",
-        )
-        rejected = self.run_command("generate", check=False)
-        self.assertNotEqual(rejected.returncode, 0)
-        self.assertIn(
-            "target dependency inventory omits release workspace packages: "
             "ctx-history-provider-docproj",
-            rejected.stderr,
-        )
-
-    def test_companion_bridge_release_package_omission_is_rejected(self) -> None:
-        omitted = "@@//crates/ctx-companion-bridge:ctx_companion_bridge"
-        labels = self.target_inventory.read_text(encoding="utf-8").splitlines()
-        self.assertIn(omitted, labels)
-        self.target_inventory.write_text(
-            "\n".join(label for label in labels if label != omitted) + "\n",
-            encoding="utf-8",
-        )
-        rejected = self.run_command("generate", check=False)
-        self.assertNotEqual(rejected.returncode, 0)
-        self.assertIn(
-            "target dependency inventory omits release workspace packages: "
             "ctx-companion-bridge",
-            rejected.stderr,
         )
+        labels = self.target_inventory.read_text(encoding="utf-8").splitlines()
+        for package_name in cases:
+            label = next(
+                item for item in labels if f"//crates/{package_name}:" in item
+            )
+            with self.subTest(package=package_name):
+                self.target_inventory.write_text(
+                    "\n".join(item for item in labels if item != label) + "\n",
+                    encoding="utf-8",
+                )
+                rejected = self.run_command("generate", check=False)
+                self.assertNotEqual(rejected.returncode, 0)
+                self.assertIn(
+                    "target dependency inventory omits release workspace packages: "
+                    + package_name,
+                    rejected.stderr,
+                )
 
     def test_missing_license_expression_is_rejected(self) -> None:
         manifest = (
@@ -1390,96 +911,103 @@ repository = "https://example.invalid/{name}"
         self.assertFalse(any("runtime" in path.name for path in self.handoff.iterdir()))
         self.assertEqual(self.run_command("verify-release").stdout.strip(),
                          self.expected_handoff_digest)
-    def test_expected_handoff_digest_is_independent_authority(self) -> None:
+    def test_core_handoff_mutation_table(self) -> None:
         self.prepare_core_handoff()
-        expected = self.expected_handoff_digest
-
-        document = json.loads((self.handoff / HANDOFF_DOCUMENT).read_bytes())
-        document["source_commit"] = "f" * 40
-        replacement = self.canonical_json(document)
-        (self.handoff / HANDOFF_DOCUMENT).write_bytes(replacement)
-        (self.handoff / f"{HANDOFF_DOCUMENT}.sha256").write_text(
-            hashlib.sha256(replacement).hexdigest() + "\n", encoding="ascii")
-        self.expected_handoff_digest = expected
-        self.assert_release_rejected("independently supplied expected handoff digest")
-    def test_handoff_document_must_be_canonical_and_bind_every_record(self) -> None:
-        self.prepare_core_handoff()
-        document = json.loads((self.handoff / HANDOFF_DOCUMENT).read_bytes())
-        pretty = (json.dumps(document, indent=2) + "\n").encode()
-        (self.handoff / HANDOFF_DOCUMENT).write_bytes(pretty)
-        self.expected_handoff_digest = hashlib.sha256(pretty).hexdigest()
-        (self.handoff / f"{HANDOFF_DOCUMENT}.sha256").write_text(
-            self.expected_handoff_digest + "\n", encoding="ascii")
-        self.assert_release_rejected("not canonical JSON")
-    def test_all_five_candidate_digests_and_identities_are_verified(self) -> None:
-        self.prepare_core_handoff()
-        for name in CORE_CANDIDATE_MANIFESTS:
-            sidecar = self.handoff / f"{name}.sha256"
-            original = sidecar.read_bytes()
-            with self.subTest(sidecar=name):
-                sidecar.write_text("f" * 64 + "\n", encoding="ascii")
-                self.assert_release_rejected("candidate digest sidecar")
-            sidecar.write_bytes(original)
-
-        name = "ctx-linux-aarch64.candidate.json"
-        candidate = json.loads((self.handoff / name).read_bytes())
-        candidate["target"]["id"] = "linux-x64"
-        payload = self.canonical_json(candidate)
-        (self.handoff / name).write_bytes(payload)
-        (self.handoff / f"{name}.sha256").write_text(
-            hashlib.sha256(payload).hexdigest() + "\n", encoding="ascii")
-        self.reauthorize_handoff()
-        self.assert_release_rejected("candidate identity is malformed")
-
-    def test_core_sums_require_exact_order_and_factory_bindings(self) -> None:
-        self.prepare_core_handoff()
-        sums = self.handoff / "SHA256SUMS"
-        original = sums.read_bytes()
-
-        sums.write_text(
-            "\n".join(reversed(original.decode("ascii").splitlines())) + "\n",
-            encoding="ascii",
+        baseline = {
+            path.name: path.read_bytes() for path in self.handoff.iterdir()
+        }
+        baseline_digest = self.expected_handoff_digest
+        self.assertIsNotNone(baseline_digest)
+        cases = [
+            ("authority-digest", HANDOFF_DOCUMENT,
+             "independently supplied expected handoff digest"),
+            ("canonicalization", HANDOFF_DOCUMENT, "not canonical JSON"),
+            ("candidate-identity", "ctx-linux-aarch64.candidate.json",
+             "candidate identity is malformed"),
+            ("ordering", "SHA256SUMS",
+             "exact canonical 15-entry inventory and order"),
+            ("factory-digest", "SHA256SUMS",
+             "does not bind ctx-linux-x64 to the factory bytes"),
+            ("completion-digest", FACTORY_COMPLETION,
+             "factory and completion bindings disagree"),
+            ("inventory-name", "ctx.exe", "exact production inventory"),
+        ]
+        cases.extend(
+            ("candidate-digest", name, "candidate digest sidecar")
+            for name in CORE_CANDIDATE_MANIFESTS
         )
-        self.reauthorize_handoff()
-        self.assert_release_rejected("exact canonical 15-entry inventory and order")
+        cases.extend(
+            ("artifact-substitution", name, "does not retain exact factory bytes")
+            for name in WINDOWS_HANDOFF_LEAVES
+        )
 
-        lines = original.decode("ascii").splitlines()
-        lines[0] = "f" * 64 + lines[0][64:]
-        sums.write_text("\n".join(lines) + "\n", encoding="ascii")
-        self.reauthorize_handoff()
-        self.assert_release_rejected("does not bind ctx-linux-x64 to the factory bytes")
+        for mutation, name, message in cases:
+            with self.subTest(mutation=mutation, leaf=name):
+                for path in self.handoff.iterdir():
+                    path.unlink()
+                for leaf, payload in baseline.items():
+                    (self.handoff / leaf).write_bytes(payload)
+                self.expected_handoff_digest = baseline_digest
+                path = self.handoff / name
 
-    def test_factory_and_completion_are_canonical_and_mutually_bound(self) -> None:
+                if mutation == "authority-digest":
+                    value = json.loads(path.read_bytes())
+                    value["source_commit"] = "f" * 40
+                    payload = self.canonical_json(value)
+                    path.write_bytes(payload)
+                    (self.handoff / f"{name}.sha256").write_text(
+                        hashlib.sha256(payload).hexdigest() + "\n", encoding="ascii"
+                    )
+                elif mutation == "canonicalization":
+                    payload = (
+                        json.dumps(json.loads(path.read_bytes()), indent=2) + "\n"
+                    ).encode()
+                    path.write_bytes(payload)
+                    self.expected_handoff_digest = hashlib.sha256(payload).hexdigest()
+                    (self.handoff / f"{name}.sha256").write_text(
+                        self.expected_handoff_digest + "\n", encoding="ascii"
+                    )
+                elif mutation == "candidate-identity":
+                    value = json.loads(path.read_bytes())
+                    value["target"]["id"] = "linux-x64"
+                    payload = self.canonical_json(value)
+                    path.write_bytes(payload)
+                    (self.handoff / f"{name}.sha256").write_text(
+                        hashlib.sha256(payload).hexdigest() + "\n", encoding="ascii"
+                    )
+                    self.reauthorize_handoff()
+                elif mutation == "ordering":
+                    lines = path.read_text(encoding="ascii").splitlines()
+                    path.write_text(
+                        "\n".join(reversed(lines)) + "\n", encoding="ascii"
+                    )
+                    self.reauthorize_handoff()
+                elif mutation == "factory-digest":
+                    lines = path.read_text(encoding="ascii").splitlines()
+                    lines[0] = "f" * 64 + lines[0][64:]
+                    path.write_text("\n".join(lines) + "\n", encoding="ascii")
+                    self.reauthorize_handoff()
+                elif mutation == "completion-digest":
+                    value = json.loads(path.read_bytes())
+                    record = next(
+                        item for item in value["files"]
+                        if item["name"] == "ctx.candidate.json"
+                    )
+                    record["sha256"] = "f" * 64
+                    path.write_bytes(self.canonical_json(value))
+                    self.reauthorize_handoff()
+                elif mutation == "inventory-name":
+                    path.rename(self.handoff / "ctx-windows-x64.exe")
+                elif mutation == "candidate-digest":
+                    (self.handoff / f"{name}.sha256").write_text(
+                        "f" * 64 + "\n", encoding="ascii"
+                    )
+                else:
+                    path.write_bytes(path.read_bytes() + b"substitution\n")
+                self.assert_release_rejected(message)
+
+    def test_verify_release_accepts_only_handoff_inputs(self) -> None:
         self.prepare_core_handoff()
-        completion_path = self.handoff / FACTORY_COMPLETION
-        completion = json.loads(completion_path.read_bytes())
-        record = next(item for item in completion["files"]
-                      if item["name"] == "ctx.candidate.json")
-        record["sha256"] = "f" * 64
-        completion_path.write_bytes(self.canonical_json(completion))
-        self.reauthorize_handoff()
-        self.assert_release_rejected("factory and completion bindings disagree")
-
-    def test_windows_artifact_and_all_evidence_bytes_are_exact(self) -> None:
-        self.prepare_core_handoff()
-        for name in WINDOWS_HANDOFF_LEAVES:
-            path = self.handoff / name
-            original = path.read_bytes()
-            with self.subTest(leaf=name):
-                path.write_bytes(original + b"substitution\n")
-                self.assert_release_rejected("does not retain exact factory bytes")
-            path.write_bytes(original)
-
-    def test_verify_release_requires_exact_names_and_only_handoff_inputs(self) -> None:
-        self.prepare_core_handoff()
-        self.assertTrue((self.handoff / "ctx.exe").is_file())
-        self.assertFalse((self.handoff / "ctx-windows-x64.exe").exists())
-        self.assertIn("  ctx-windows-x64.exe\n",
-                      (self.handoff / "SHA256SUMS").read_text(encoding="ascii"))
-        (self.handoff / "ctx.exe").rename(self.handoff / "ctx-windows-x64.exe")
-        self.assert_release_rejected("exact production inventory")
-
-        (self.handoff / "ctx-windows-x64.exe").rename(self.handoff / "ctx.exe")
         command = self.command("verify-release")
         command.extend(("--artifact", str(self.artifact)))
         rejected = subprocess.run(command, capture_output=True, text=True, check=False)
