@@ -279,7 +279,8 @@ available for human shell use.
 `ctx upgrade` works for official installer-managed binaries. Source builds,
 `cargo install`, package-manager installs, and copied binaries are treated as
 unmanaged and will not self-upgrade. Automatic upgrade is on by default for a
-managed binary. The full automatic-indexing daemon drives checks when present;
-manual and source-refresh-only modes keep automatic upgrades available through
-eligible command-triggered detached checks. Use `ctx upgrade disable` for a
-persistent upgrade-only opt-out.
+managed binary. Only the enabled full automatic-indexing daemon drives
+automatic checks; ordinary foreground commands, manual indexing, and the
+source-refresh-only daemon profile do not. Explicit `ctx upgrade` remains
+available in those modes. Use `ctx upgrade disable` for a persistent
+upgrade-only opt-out.

@@ -32,10 +32,10 @@ pub use install::{
     InstallMarker, ManagedInstallMarker,
 };
 pub use state::{
-    active_installation_upgrade_attempt_id, automatic_upgrade_check_due,
-    installation_daemon_coordination_paths, installation_daemon_coordination_paths_for,
-    installation_executable_path, installation_upgrade_is_active, is_valid_upgrade_attempt_id,
-    read_state_json, terminal_installation_upgrade_attempt_id, STATE_SCHEMA_VERSION,
+    active_installation_upgrade_attempt_id, installation_daemon_coordination_paths,
+    installation_daemon_coordination_paths_for, installation_executable_path,
+    installation_upgrade_is_active, is_valid_upgrade_attempt_id, read_state_json,
+    terminal_installation_upgrade_attempt_id, STATE_SCHEMA_VERSION,
 };
 
 /// Product identity supplied by the ctx composition root.

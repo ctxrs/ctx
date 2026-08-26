@@ -841,8 +841,8 @@ fn docs_commands_expose_embedded_docs_and_man_pages() {
     assert!(upgrade_body.contains("on by default (`upgrade.auto = \"apply\"`)"));
     assert!(upgrade_body.contains("CTX_UPGRADE_AUTO=off"));
     assert!(upgrade_body.contains("ctx upgrade disable"));
-    assert!(upgrade_body.contains("launch a detached automatic-upgrade worker"));
-    assert!(upgrade_body.contains("The `status`,\n`stats`, `docs`, MCP, `daemon`, `upgrade`"));
+    assert!(upgrade_body.contains("enabled persistent daemon is the sole"));
+    assert!(upgrade_body.contains("Ordinary\nforeground commands and MCP never claim or spawn"));
 
     let unmanaged =
         json_output(ctx(&temp).args(["docs", "show", "unmanaged-installs", "--format", "json"]));

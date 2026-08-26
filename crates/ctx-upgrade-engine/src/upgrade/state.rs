@@ -23,8 +23,6 @@ const DAEMON_QUIESCENCE_LOCK_FILE: &str = "daemon-quiescence.lock";
 const DAEMON_QUIESCENCE_ACK_DIR: &str = "daemon-quiescence-acks";
 const INITIAL_FAILURE_BACKOFF: Duration = Duration::from_secs(60);
 const MAX_FAILURE_BACKOFF: Duration = Duration::from_secs(6 * 60 * 60);
-const DUE_HINT_STATE_MAX_BYTES: u64 = 64 * 1024;
-const DUE_HINT_RECENT_ATTEMPT_GRACE: Duration = Duration::from_secs(30 * 60);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct UpgradeAttempt {
@@ -190,31 +188,6 @@ pub(super) fn claim_automatic_upgrade(interval: Duration) -> Result<AutoUpgradeC
     let attempt = state.begin("automatic");
     write_state_object_locked(&lock, state)?;
     Ok(AutoUpgradeClaim::Claimed { attempt, lock })
-}
-
-/// Cheap, non-authoritative foreground hint for whether an automatic worker
-/// may need to run. This deliberately avoids the installation lock, marker
-/// parsing, and executable hashing; the detached worker repeats the cadence
-/// decision while holding the installation lock.
-pub fn automatic_upgrade_check_due(interval: Duration) -> Result<bool> {
-    let install_path = super::install::current_install_path()?;
-    automatic_upgrade_check_due_for(&install_path, interval)
-}
-
-fn automatic_upgrade_check_due_for(install_path: &Path, interval: Duration) -> Result<bool> {
-    let marker = super::install::install_marker_path(install_path);
-    match fs::symlink_metadata(marker) {
-        Ok(metadata) if metadata.file_type().is_file() => {}
-        Ok(_) => return Ok(false),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(error.into()),
-    }
-    let state = read_state_object_bounded(install_path).unwrap_or_default();
-    let now = now_unix_s();
-    if recent_in_progress_attempt(&state, now) {
-        return Ok(false);
-    }
-    Ok(auto_check_due(&state, interval, now))
 }
 
 pub fn installation_upgrade_is_active() -> Result<bool> {
@@ -523,17 +496,6 @@ fn is_automatic_attempt_source(source: &str) -> bool {
     matches!(source, "automatic" | "daemon")
 }
 
-fn recent_in_progress_attempt(state: &UpgradeState, now: u64) -> bool {
-    let in_progress = state.status == "checking" || is_active_upgrade_status(&state.status);
-    in_progress
-        && state
-            .last_attempt_at
-            .and_then(|started| u64::try_from(started.timestamp()).ok())
-            .is_some_and(|started| {
-                started <= now && now - started < DUE_HINT_RECENT_ATTEMPT_GRACE.as_secs()
-            })
-}
-
 fn failure_backoff(consecutive_failures: u64) -> Duration {
     let exponent = consecutive_failures.saturating_sub(1).min(16) as u32;
     let seconds = INITIAL_FAILURE_BACKOFF
@@ -557,19 +519,6 @@ fn read_state_object(install_path: &Path) -> UpgradeState {
         .and_then(|bytes| serde_json::from_slice::<UpgradeState>(&bytes).ok())
         .map(UpgradeState::valid_or_default)
         .unwrap_or_default()
-}
-
-fn read_state_object_bounded(install_path: &Path) -> Option<UpgradeState> {
-    let bytes = super::install::read_stable_file(
-        &state_path(install_path),
-        "ctx automatic-upgrade scheduler state",
-        DUE_HINT_STATE_MAX_BYTES,
-        super::install::StableFileKind::Data,
-    )
-    .ok()??;
-    serde_json::from_slice::<UpgradeState>(&bytes)
-        .ok()
-        .map(UpgradeState::valid_or_default)
 }
 
 pub fn read_state_json() -> Option<Value> {

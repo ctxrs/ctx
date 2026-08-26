@@ -1151,10 +1151,11 @@ binary has a matching official installer sidecar. Unmanaged installs report
 `managed: false` and a `reason`.
 
 Automatic upgrade does not write JSON to foreground stdout. Auto indexing with
-the full daemon profile uses the persistent daemon as a check driver; manual
-and source-refresh-only modes use a detached worker after eligible completed
-commands. Both share one scheduler state and replacement journal beside the
-managed executable. Windows self-upgrade can
+the full daemon profile uses the enabled persistent daemon as the sole automatic
+check and apply driver. Manual indexing, source-refresh-only mode, ordinary
+foreground commands, MCP, and finite workers perform no automatic upgrade work.
+Daemon and explicit upgrades share one scheduler state and replacement journal
+beside the managed executable. Windows self-upgrade can
 report `scheduled` with `applied: false` while a helper waits for the running
 `ctx.exe` to exit and then replaces the binary and sidecar.
 

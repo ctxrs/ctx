@@ -351,10 +351,6 @@ impl AppConfig {
         self.indexing.mode.is_automatic()
     }
 
-    pub const fn persistent_automatic_upgrade_driver_enabled(&self) -> bool {
-        self.indexing.mode.is_automatic() && matches!(self.daemon.mode, DaemonMode::Full)
-    }
-
     pub fn auto_upgrade_mode(&self) -> AutoUpgradeMode {
         if self.upgrade.auto.eq_ignore_ascii_case("apply") {
             AutoUpgradeMode::Apply

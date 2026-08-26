@@ -24,10 +24,8 @@ pub use hosted_transaction::{
 pub use hosted_transaction::{
     run as run_hosted_transaction, HostedTransactionAction, HostedTransactionArgs,
 };
-pub(in crate::upgrade) use lock_fs::{read_stable_file, StableFileKind};
 #[cfg(any(unix, test))]
 pub(in crate::upgrade) use marker::classify_install_marker_at;
-pub(in crate::upgrade) use marker::install_marker_path;
 pub use marker::is_valid_install_attempt_id;
 pub(super) use marker::InstallFingerprint;
 pub use marker::{

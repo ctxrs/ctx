@@ -117,8 +117,9 @@ sidecar are intentionally unmanaged.
 
 Automatic upgrade is on by default for an official installer-managed binary.
 Auto indexing with the full daemon profile uses the persistent daemon for
-checks; manual and source-refresh-only modes use a detached worker after
-eligible completed commands. To opt out persistently, run:
+checks. Manual indexing, source-refresh-only mode, ordinary foreground commands,
+MCP, and finite workers perform no automatic upgrade work. Explicit
+`ctx upgrade` remains available. To opt out persistently, run:
 
 ```bash
 ctx upgrade disable
