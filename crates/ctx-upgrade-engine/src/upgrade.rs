@@ -51,12 +51,11 @@ pub struct ProductBuildIdentity {
 pub trait ReleaseTransport: Send + Sync {
     fn get_bytes_limited(&self, endpoint: &str, max_bytes: usize) -> Result<Vec<u8>>;
 
-    fn download_artifact_verified(
+    fn download_artifact(
         &self,
         endpoint: &str,
         destination: &mut File,
         max_bytes: u64,
-        expected_sha256: &str,
         timeout: Duration,
     ) -> Result<u64>;
 }

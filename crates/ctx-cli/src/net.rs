@@ -8,7 +8,6 @@ use std::{
 };
 
 use anyhow::{anyhow, Context, Result};
-use sha2::{Digest, Sha256};
 use url::{Host, Url};
 
 pub(crate) const TELEMETRY_HTTP_TIMEOUT: Duration = Duration::from_millis(250);
@@ -57,28 +56,17 @@ pub fn get_bytes_limited(endpoint: &str, max_bytes: usize) -> Result<Vec<u8>> {
     )
 }
 
-pub(crate) fn download_artifact_verified(
+pub(crate) fn download_artifact(
     endpoint: &str,
     output: &mut fs::File,
     max_bytes: u64,
-    expected_sha256: &str,
     timeout: Duration,
 ) -> Result<u64> {
     if max_bytes == 0 {
         return Err(anyhow!("artifact max bytes must be greater than zero"));
     }
-    if expected_sha256.len() != 64
-        || !expected_sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
-        || expected_sha256.bytes().all(|byte| byte == b'0')
-    {
-        return Err(anyhow!(
-            "expected artifact checksum is not a usable SHA-256 digest"
-        ));
-    }
     if output.metadata()?.len() != 0 || output.stream_position()? != 0 {
-        return Err(anyhow!(
-            "verified artifact destination must be a new empty file"
-        ));
+        return Err(anyhow!("artifact destination must be a new empty file"));
     }
     let started = Instant::now();
     if let Some(path) = file_url_path(endpoint)? {
@@ -89,11 +77,10 @@ pub(crate) fn download_artifact_verified(
             max_bytes,
             &format!("artifact {}", path.display()),
         )?;
-        return stream_artifact_verified(
+        return copy_artifact_limited(
             input,
             output,
             max_bytes,
-            expected_sha256,
             timeout,
             started,
             &format!("artifact {}", path.display()),
@@ -107,11 +94,10 @@ pub(crate) fn download_artifact_verified(
             .map_err(|_| anyhow!("artifact response has an invalid Content-Length"))?;
         reject_oversized_length(length, max_bytes, "artifact response")?;
     }
-    stream_artifact_verified(
+    copy_artifact_limited(
         response.into_reader(),
         output,
         max_bytes,
-        expected_sha256,
         timeout,
         started,
         "artifact response",
@@ -237,57 +223,17 @@ fn reject_oversized_length(length: u64, max_bytes: u64, label: &str) -> Result<(
     Ok(())
 }
 
-fn stream_artifact_verified(
+fn copy_artifact_limited(
     input: impl Read,
     output: &mut fs::File,
     max_bytes: u64,
-    expected_sha256: &str,
     timeout: Duration,
     started: Instant,
     label: &str,
 ) -> Result<u64> {
-    let mut writer = Sha256Writer::new(output);
-    let total = copy_limited(input, &mut writer, max_bytes, timeout, started, label)?;
-    writer
-        .flush()
-        .with_context(|| format!("flush verified {label}"))?;
-    let actual = writer.finish();
-    if !actual.eq_ignore_ascii_case(expected_sha256) {
-        return Err(anyhow!(
-            "artifact checksum mismatch: expected {expected_sha256}, got {actual}"
-        ));
-    }
+    let total = copy_limited(input, output, max_bytes, timeout, started, label)?;
+    output.flush().with_context(|| format!("flush {label}"))?;
     Ok(total)
-}
-
-struct Sha256Writer<'a> {
-    output: &'a mut fs::File,
-    hasher: Sha256,
-}
-
-impl<'a> Sha256Writer<'a> {
-    fn new(output: &'a mut fs::File) -> Self {
-        Self {
-            output,
-            hasher: Sha256::new(),
-        }
-    }
-
-    fn finish(self) -> String {
-        format!("{:x}", self.hasher.finalize())
-    }
-}
-
-impl Write for Sha256Writer<'_> {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        let written = self.output.write(bytes)?;
-        self.hasher.update(&bytes[..written]);
-        Ok(written)
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.output.flush()
-    }
 }
 
 fn remaining_timeout(timeout: Duration, started: Instant, label: &str) -> Result<Duration> {
@@ -597,13 +543,12 @@ mod tests {
     }
 
     #[test]
-    fn verified_artifact_stream_checks_hash_and_preserves_bytes() {
+    fn artifact_stream_copies_bounded_bytes() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("source.bin");
         let destination = temp.path().join("destination.bin");
-        let bytes = b"bounded verified artifact";
+        let bytes = b"bounded artifact";
         fs::write(&source, bytes).unwrap();
-        let expected_sha256 = format!("{:x}", Sha256::digest(bytes));
         let mut output = fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -611,11 +556,10 @@ mod tests {
             .open(&destination)
             .unwrap();
 
-        let written = download_artifact_verified(
+        let written = download_artifact(
             &format!("file://{}", source.display()),
             &mut output,
             bytes.len() as u64,
-            &expected_sha256,
             Duration::from_secs(1),
         )
         .unwrap();
@@ -625,7 +569,7 @@ mod tests {
     }
 
     #[test]
-    fn verified_artifact_stream_rejects_nonempty_destination() {
+    fn artifact_stream_rejects_nonempty_destination() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("source.bin");
         let destination = temp.path().join("destination.bin");
@@ -636,16 +580,40 @@ mod tests {
             .write(true)
             .open(&destination)
             .unwrap();
-        let error = download_artifact_verified(
+        let error = download_artifact(
             &format!("file://{}", source.display()),
             &mut output,
             1024,
-            &format!("{:x}", Sha256::digest(b"artifact")),
             Duration::from_secs(1),
         )
         .unwrap_err();
 
         assert!(error.to_string().contains("new empty file"));
         assert_eq!(fs::read(destination).unwrap(), b"existing");
+    }
+
+    #[test]
+    fn artifact_stream_rejects_oversized_source_without_writing() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.bin");
+        let destination = temp.path().join("destination.bin");
+        fs::write(&source, b"oversized").unwrap();
+        let mut output = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&destination)
+            .unwrap();
+
+        let error = download_artifact(
+            &format!("file://{}", source.display()),
+            &mut output,
+            4,
+            Duration::from_secs(1),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("exceeds max bytes (4)"));
+        assert!(fs::read(destination).unwrap().is_empty());
     }
 }

@@ -19,22 +19,16 @@ impl ReleaseTransport for CountingReleaseTransport<'_> {
         self.inner.get_bytes_limited(endpoint, max_bytes)
     }
 
-    fn download_artifact_verified(
+    fn download_artifact(
         &self,
         endpoint: &str,
         destination: &mut fs::File,
         max_bytes: u64,
-        expected_sha256: &str,
         timeout: Duration,
     ) -> Result<u64> {
         self.download_calls.fetch_add(1, Ordering::SeqCst);
-        self.inner.download_artifact_verified(
-            endpoint,
-            destination,
-            max_bytes,
-            expected_sha256,
-            timeout,
-        )
+        self.inner
+            .download_artifact(endpoint, destination, max_bytes, timeout)
     }
 }
 
@@ -50,19 +44,17 @@ impl ReleaseTransport for FileReleaseTransport {
         Ok(bytes)
     }
 
-    fn download_artifact_verified(
+    fn download_artifact(
         &self,
         endpoint: &str,
         destination: &mut fs::File,
         max_bytes: u64,
-        expected_sha256: &str,
         _timeout: Duration,
     ) -> Result<u64> {
         let path = endpoint
             .strip_prefix("file://")
             .ok_or_else(|| anyhow!("test release endpoint is not a file URL"))?;
         let mut source = fs::File::open(path)?;
-        let mut hasher = Sha256::new();
         let mut total = 0u64;
         let mut buffer = [0u8; 8 * 1024];
         loop {
@@ -76,12 +68,7 @@ impl ReleaseTransport for FileReleaseTransport {
             if total > max_bytes {
                 return Err(anyhow!("artifact download exceeds max bytes ({max_bytes})"));
             }
-            hasher.update(&buffer[..read]);
             destination.write_all(&buffer[..read])?;
-        }
-        let actual = format!("{:x}", hasher.finalize());
-        if !actual.eq_ignore_ascii_case(expected_sha256) {
-            return Err(anyhow!("artifact checksum mismatch"));
         }
         Ok(total)
     }
@@ -122,6 +109,24 @@ fn verified_download_is_bounded_reusable_and_ephemeral() {
     assert_eq!(fs::read(stable).unwrap(), bytes);
     drop(artifact);
     assert!(!temporary_path.exists());
+}
+
+#[test]
+fn invalid_checksums_are_rejected_before_download_state() {
+    let root = private_tempdir();
+    for checksum in ["g".repeat(64), "0".repeat(64)] {
+        let error = DownloadedArtifact::download_verified(
+            &FILE_RELEASE_TRANSPORT,
+            root.path(),
+            "transport-must-not-run",
+            &checksum,
+            1024,
+            Duration::from_secs(1),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("expected artifact checksum"));
+        assert!(!root.path().join(DOWNLOAD_DIRECTORY).exists());
+    }
 }
 
 #[test]
@@ -291,7 +296,7 @@ fn publisher_held_runtime_cache_falls_back_to_a_separately_verified_download() {
 }
 
 #[test]
-fn failed_verification_does_not_leave_a_partial_download() {
+fn engine_hash_failure_does_not_leave_a_partial_download() {
     let root = private_tempdir();
     let source = root.path().join("source.bin");
     fs::write(&source, b"wrong bytes").unwrap();
@@ -304,7 +309,7 @@ fn failed_verification_does_not_leave_a_partial_download() {
         Duration::from_secs(1),
     )
     .unwrap_err();
-    assert!(format!("{error:#}").contains("checksum mismatch"));
+    assert!(format!("{error:#}").contains("artifact checksum mismatch"));
     assert_eq!(
         fs::read_dir(root.path().join(DOWNLOAD_DIRECTORY))
             .unwrap()
