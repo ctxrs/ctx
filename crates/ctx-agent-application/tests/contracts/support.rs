@@ -128,60 +128,6 @@ pub(crate) fn expected_device_path(_home: &Path, _state: &Path) -> PathBuf {
     }
 }
 
-pub(crate) struct HistorySourcePluginFixture {
-    pub(crate) manifest_dir: PathBuf,
-    pub(crate) run_marker: PathBuf,
-}
-
-pub(crate) fn write_history_source_plugin_with_refresh(
-    temp: &TempDir,
-    provider: &str,
-    enabled: bool,
-    refresh: Option<&str>,
-    _cursor_log: Option<&Path>,
-) -> HistorySourcePluginFixture {
-    let manifest_dir = temp.path().join("history-plugins").join(provider);
-    fs::create_dir_all(&manifest_dir).unwrap();
-    let script = manifest_dir.join("export.py");
-    let run_marker = manifest_dir.join("ran");
-    fs::write(
-        &script,
-        format!(
-            "from pathlib import Path\nPath({:?}).write_text('ran\\n')\n",
-            run_marker.display().to_string()
-        ),
-    )
-    .unwrap();
-    let mut source = json!({
-        "id": "default",
-        "provider_key": provider,
-        "source_id": "default",
-        "source_format": format!("{provider}-history-v1"),
-        "enabled": enabled,
-        "command": ["python3", script.display().to_string(), provider],
-        "timeout_seconds": 10,
-    });
-    if let Some(refresh) = refresh {
-        source["refresh"] = json!(refresh);
-    }
-    let manifest = json!({
-        "schema_version": 1,
-        "name": provider,
-        "display_name": format!("{provider} history"),
-        "version": "0.1.0",
-        "history_sources": [source],
-    });
-    fs::write(
-        manifest_dir.join("ctx-history-plugin.json"),
-        serde_json::to_vec_pretty(&manifest).unwrap(),
-    )
-    .unwrap();
-    HistorySourcePluginFixture {
-        manifest_dir,
-        run_marker,
-    }
-}
-
 fn ctx_binary() -> PathBuf {
     let program = PathBuf::from(Command::cargo_bin("ctx").unwrap().get_program());
     if program.is_absolute() {
@@ -675,42 +621,6 @@ pub(crate) fn initialize_authoritative_empty_core(data_root: &Path) -> String {
         )
         .unwrap();
     generation_id
-}
-
-#[cfg(ctx_agent_application_contract_fixtures)]
-pub(crate) fn write_codex_message_fixture(root: &Path, session_id: &str, message: &str) -> PathBuf {
-    fs::create_dir_all(root).unwrap();
-    let path = root.join(format!("rollout-{session_id}.jsonl"));
-    let records = [
-        json!({
-            "timestamp": "2026-08-02T12:00:00Z",
-            "type": "session_meta",
-            "payload": {
-                "id": session_id,
-                "timestamp": "2026-08-02T12:00:00Z",
-                "cwd": "/workspace/huge-grapheme",
-                "originator": "codex_cli_rs",
-                "cli_version": "0.1.0",
-                "source": "cli",
-                "model_provider": "openai"
-            }
-        }),
-        json!({
-            "timestamp": "2026-08-02T12:00:01Z",
-            "type": "response_item",
-            "payload": {
-                "type": "message",
-                "role": "user",
-                "content": [{"type": "input_text", "text": message}]
-            }
-        }),
-    ];
-    let encoded = records
-        .iter()
-        .map(|record| format!("{}\n", serde_json::to_string(record).unwrap()))
-        .collect::<String>();
-    fs::write(&path, encoded).unwrap();
-    path
 }
 
 #[cfg(ctx_agent_application_contract_fixtures)]
