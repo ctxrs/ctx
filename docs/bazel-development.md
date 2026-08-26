@@ -136,21 +136,6 @@ or an explicitly empty governor path fails with status 125. A governed host
 defaults Bazel jobs and local CPU resources to 16 while preserving explicit
 resource overrides.
 
-## Optional remote execution
-
-The repository defines one opt-in REAPI profile: `--config=ctx-reapi`. It sends
-every remotely eligible spawn action to the configured executor and disables
-local fallback. Connection and authentication settings remain external to the
-repository and must be supplied by the Bazel invocation or machine
-configuration.
-
-After those external settings are available, use the profile with an ordinary
-wrapper command:
-
-```bash
-scripts/bazelw test //crates/ctx-cli:unit_tests --config=ctx-reapi
-```
-
 ## Focused, affected, and complete checks
 
 ```bash

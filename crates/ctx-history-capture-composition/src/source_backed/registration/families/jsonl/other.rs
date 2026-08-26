@@ -1,4 +1,5 @@
 use super::*;
+use ctx_history_provider_runtime::ProviderRouteRegistrar;
 
 macro_rules! register_shared_jsonl_route {
     ($registry:expr, $source:expr, $selection:expr, $adapter:expr) => {{
@@ -190,18 +191,10 @@ pub fn register_custom_history_source_backed_route(
     source: ProviderSource,
     catalog_lineage: [u8; 32],
 ) -> SourceBackedCoordinatorResult<()> {
-    let adapter = ctx_history_providers_jsonl_shared::adapters::custom_history::<
-        crate::provider::source_backed::family::jsonl::JsonlFamilyRuntime,
-    >(source.path.clone(), catalog_lineage)
-    .map_err(|error| invalid_route(source.provider, error.to_string()))?;
-    let driver = crate::provider::source_backed::family::jsonl::jsonl_family_driver(
-        adapter,
-        source.path.clone(),
-    );
-    registry.register(SourceBackedRoute::explicit_manual(
-        source,
-        SourceBackedSelectorAuthority::CatalogLineage,
-        driver,
-    )?);
-    Ok(())
+    let provider = source.provider;
+    let registration = ctx_history_providers_jsonl_shared::custom_history_explicit_route::<
+        CaptureProviderRuntime,
+    >(source, catalog_lineage)
+    .map_err(|error| invalid_route(provider, error.to_string()))?;
+    registry.register_provider_route(registration)
 }

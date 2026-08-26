@@ -163,15 +163,6 @@ selected_cache="$(ctx_bazel_cache_root)"
 [[ "${selected_cache}" == "${XDG_CACHE_HOME}/ctx/bazel" ]] \
   || fail 'low-inode spacious root did not fall back before invoking Bazel'
 
-grep -Fqx 'build:ctx-reapi --spawn_strategy=remote' "${repo_root}/.bazelrc" \
-  || fail 'ctx-reapi must force eligible spawn actions to remote execution'
-grep -Fqx 'build:ctx-reapi --remote_local_fallback=false' "${repo_root}/.bazelrc" \
-  || fail 'ctx-reapi must disable local fallback'
-grep -Fqx 'test:ctx-reapi --test_strategy=remote' "${repo_root}/.bazelrc" \
-  || fail 'ctx-reapi must force test actions to remote execution'
-[[ "$(grep -cE '^[^#[:space:]][^:[:space:]]*:ctx-reapi[[:space:]]' "${repo_root}/.bazelrc")" == "9" ]] \
-  || fail 'ctx-reapi repository policy has an unexpected directive count'
-
 # An explicitly activated generic host governor wraps build-capable commands,
 # raises healthy single-build defaults, and leaves query/read commands light.
 export XDG_CONFIG_HOME="${test_root}/governor-config"

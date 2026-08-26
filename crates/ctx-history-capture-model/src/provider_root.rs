@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    ops::Deref,
+    path::{Path, PathBuf},
+};
 
 use ctx_history_core::CaptureProvider;
 use serde::{Deserialize, Serialize};
@@ -7,6 +10,64 @@ use sha2::{Digest, Sha256};
 pub const MAX_CONFIGURED_PROVIDER_ROOTS: usize = 64;
 pub const MAX_PROVIDER_ROOT_SELECTOR_BYTES: usize = 64;
 pub const MAX_PROVIDER_ROOT_ENCODED_PATH_BYTES: usize = 16 * 1024;
+
+/// Bounded, deterministic provider-root input for discovery and persistence.
+///
+/// This type owns only resource bounds and ordering. Provider support,
+/// filesystem kind, physical equivalence, and overlap policy require the
+/// caller's current configuration or filesystem authority and remain outside
+/// this value object.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProviderRootSet(Vec<ProviderRootDefinition>);
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ProviderRootSetError {
+    #[error("configured provider roots exceed the maximum of {MAX_CONFIGURED_PROVIDER_ROOTS}")]
+    TooMany,
+    #[error(
+        "configured provider root `{root_id}` exceeds the {MAX_PROVIDER_ROOT_ENCODED_PATH_BYTES}-byte encoded path limit"
+    )]
+    PathTooLong { root_id: String },
+}
+
+impl ProviderRootSet {
+    /// Validates every supplied root instead of silently dropping input.
+    pub fn try_new(mut roots: Vec<ProviderRootDefinition>) -> Result<Self, ProviderRootSetError> {
+        if roots.len() > MAX_CONFIGURED_PROVIDER_ROOTS {
+            return Err(ProviderRootSetError::TooMany);
+        }
+        if let Some(root) = roots.iter().find(|root| !root.has_bounded_path()) {
+            return Err(ProviderRootSetError::PathTooLong {
+                root_id: root.id.clone(),
+            });
+        }
+        roots.sort_by(|left, right| left.id.cmp(&right.id));
+        Ok(Self(roots))
+    }
+
+    /// Compatibility boundary for public discovery contexts built from
+    /// untrusted definitions. Invalid paths are omitted and excess roots are
+    /// deterministically truncated, preserving the historical non-failing
+    /// builder while enforcing the shared discovery work bound.
+    pub fn from_untrusted_lossy(mut roots: Vec<ProviderRootDefinition>) -> Self {
+        roots.retain(ProviderRootDefinition::has_bounded_path);
+        roots.sort_by(|left, right| left.id.cmp(&right.id));
+        roots.truncate(MAX_CONFIGURED_PROVIDER_ROOTS);
+        Self(roots)
+    }
+
+    pub fn as_slice(&self) -> &[ProviderRootDefinition] {
+        &self.0
+    }
+}
+
+impl Deref for ProviderRootSet {
+    type Target = [ProviderRootDefinition];
+
+    fn deref(&self) -> &Self::Target {
+        self.as_slice()
+    }
+}
 
 /// Platform-native encoded length used by configured-root resource bounds.
 pub fn provider_root_encoded_path_len(path: &Path) -> usize {
@@ -343,12 +404,69 @@ pub fn provider_source_config_digest(
     format!("{:x}", digest.finalize())
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use std::{ffi::OsString, os::unix::ffi::OsStringExt};
 
     use super::*;
 
+    fn claude_root(id: impl Into<String>, path: impl Into<PathBuf>) -> ProviderRootDefinition {
+        ProviderRootDefinition {
+            id: id.into(),
+            provider: CaptureProvider::Claude,
+            path: path.into(),
+            group: None,
+            kind: None,
+        }
+    }
+
+    #[test]
+    fn provider_root_set_rejects_unbounded_input_and_orders_valid_roots() {
+        let roots = ProviderRootSet::try_new(vec![
+            claude_root("work", "/history/work"),
+            claude_root("personal", "/history/personal"),
+        ])
+        .unwrap();
+        assert_eq!(
+            roots
+                .iter()
+                .map(|root| root.id.as_str())
+                .collect::<Vec<_>>(),
+            ["personal", "work"]
+        );
+
+        let overlong = PathBuf::from("x".repeat(MAX_PROVIDER_ROOT_ENCODED_PATH_BYTES + 1));
+        assert_eq!(
+            ProviderRootSet::try_new(vec![claude_root("oversized", overlong)]),
+            Err(ProviderRootSetError::PathTooLong {
+                root_id: "oversized".to_owned(),
+            })
+        );
+
+        let excess = (0..=MAX_CONFIGURED_PROVIDER_ROOTS)
+            .map(|index| claude_root(format!("root-{index:03}"), format!("/history/{index}")))
+            .collect();
+        assert_eq!(
+            ProviderRootSet::try_new(excess),
+            Err(ProviderRootSetError::TooMany)
+        );
+    }
+
+    #[test]
+    fn lossy_provider_root_set_enforces_the_same_work_bound_deterministically() {
+        let roots = (0..=MAX_CONFIGURED_PROVIDER_ROOTS)
+            .rev()
+            .map(|index| claude_root(format!("root-{index:03}"), format!("/history/{index}")))
+            .collect();
+        let roots = ProviderRootSet::from_untrusted_lossy(roots);
+
+        assert_eq!(roots.len(), MAX_CONFIGURED_PROVIDER_ROOTS);
+        assert_eq!(roots.first().unwrap().id, "root-000");
+        assert_eq!(roots.last().unwrap().id, "root-063");
+    }
+
+    #[cfg(unix)]
     #[test]
     fn digest_is_total_and_distinct_for_non_unicode_public_api_paths() {
         let root = |byte| ProviderRootDefinition {

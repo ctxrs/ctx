@@ -60,7 +60,7 @@ use parser::parse_projection;
 
 const CUSTOM_SOURCE_IDENTITY_VERSION: u32 = 1;
 const CUSTOM_HISTORY_PUBLIC_SCHEMA_VERSION: &str = CTX_HISTORY_JSONL_SCHEMA_VERSION;
-const CUSTOM_ROUTE_SOURCE_FORMAT: &str = "ctx_history_jsonl_v2";
+const CUSTOM_ROUTE_SOURCE_FORMAT: &str = crate::CUSTOM_HISTORY_SOURCE_FORMAT;
 const CUSTOM_SOURCE_SCHEMA_VARIANT: &str = "ctx-history-jsonl-v2-source-backed-v1";
 pub(super) const CUSTOM_SOURCE_BACKED_PARSER_REVISION: &str =
     "custom-history-jsonl-source-backed-v9-provider-session-identity";
@@ -183,6 +183,7 @@ impl CustomHistorySourceBackedInput {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn explicit_with_source_root_lineage(
         path: impl Into<PathBuf>,
         catalog_lineage: [u8; 32],

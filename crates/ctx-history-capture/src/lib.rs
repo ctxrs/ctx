@@ -52,10 +52,10 @@ pub use ctx_history_capture_model::{
     provider_root_encoded_path_len, provider_root_path_within_limit, provider_source_config_digest,
     stable_capture_uuid, CatalogSummary, OutputObservationKind, OutputOutcome,
     OutputOutcomeMetadata, ProviderImportFailure, ProviderImportSummary, ProviderImportWorkResult,
-    ProviderRootDefinition, ProviderRootKind, ProviderRootSourceIdentity, ProviderRouteRole,
-    ProviderRouteRoleError, ProviderSourceFailureKind, MAX_CONFIGURED_PROVIDER_ROOTS,
-    MAX_PROVIDER_ROOT_ENCODED_PATH_BYTES, MAX_PROVIDER_ROOT_SELECTOR_BYTES,
-    MAX_PROVIDER_ROUTE_ROLE_BYTES,
+    ProviderRootDefinition, ProviderRootKind, ProviderRootSet, ProviderRootSetError,
+    ProviderRootSourceIdentity, ProviderRouteRole, ProviderRouteRoleError,
+    ProviderSourceFailureKind, MAX_CONFIGURED_PROVIDER_ROOTS, MAX_PROVIDER_ROOT_ENCODED_PATH_BYTES,
+    MAX_PROVIDER_ROOT_SELECTOR_BYTES, MAX_PROVIDER_ROUTE_ROLE_BYTES,
 };
 mod error;
 pub use error::{CaptureError, ProviderJsonlInventoryLimit, Result};

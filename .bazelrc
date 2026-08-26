@@ -11,17 +11,6 @@ build --java_runtime_version=remotejdk_21
 test --cache_test_results=auto
 test --test_output=errors
 
-# Optional REAPI execution keeps every eligible spawn action remote-only.
-build:ctx-reapi --spawn_strategy=remote
-build:ctx-reapi --genrule_strategy=remote
-build:ctx-reapi --remote_local_fallback=false
-build:ctx-reapi --incompatible_legacy_local_fallback=false
-build:ctx-reapi --remote_download_outputs=toplevel
-build:ctx-reapi --remote_timeout=60s
-build:ctx-reapi --remote_retries=2
-test:ctx-reapi --test_strategy=remote
-test:ctx-reapi --test_output=errors
-
 # Fast local Linux iteration: stable fastbuild key, no Rust debug info, and the
 # content-pinned mold input declared in MODULE.bazel.
 build:dev-linux --compilation_mode=fastbuild

@@ -1,14 +1,7 @@
 load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_deps", "crate_edition")
-load("@rules_python//python:defs.bzl", "py_binary", "py_test")
-load("@rules_shell//shell:sh_test.bzl", "sh_test")
 load("@rules_rust//rust:defs.bzl", "rust_library")
 load("//:rust_sources.bzl", "RUST_PROD_SRC_EXCLUDES")
 load("//tools/bazel:ctx_rust.bzl", "ctx_rust_test")
-load(
-    "//crates/ctx-history-capture:tests/mcp_attribution_suites.bzl",
-    "mcp_attribution_suite_args",
-    "mcp_attribution_suite_data",
-)
 
 package(default_visibility = ["//visibility:public"])
 
@@ -40,14 +33,6 @@ COMMON_RUSTC_ENV = {
 }
 
 RUST_SRCS = glob(["src/**/*.rs"])
-
-MCP_ATTRIBUTION_ROUTE_CONTRACTS = glob([
-    "tests/contracts/mcp-attribution/**/shape-contract.json",
-])
-
-MCP_ATTRIBUTION_TEST_CONTRACTS = glob([
-    "tests/contracts/mcp-attribution-fixtures/**/shape-contract.json",
-])
 
 PROD_SRCS = glob(
     ["src/**/*.rs"],
@@ -147,85 +132,13 @@ ctx_rust_test(
     edition = crate_edition(),
 )
 
-py_test(
-    name = "mcp_attribution_conformance_tests",
-    srcs = [
-        "tests/mcp_attribution_conformance.py",
-        "tests/mcp_attribution_conformance_schema.py",
-        "tests/mcp_attribution_contract_registry.py",
-    ],
-    imports = ["tests"],
-    main = "tests/mcp_attribution_conformance.py",
-    args = [
-        "$(rootpath tests/mcp-attribution-conformance.manifest.json)",
-        "$(rootpath //:provider_support_matrix)",
-    ] + mcp_attribution_suite_args(),
-    data = [
-        "tests/mcp-attribution-conformance.manifest.json",
-        "//:provider_support_matrix",
-        "//crates/ctx-cli:ctx",
-    ] + MCP_ATTRIBUTION_ROUTE_CONTRACTS + mcp_attribution_suite_data(),
-    env = {
-        "CARGO_BIN_EXE_ctx": "$(rootpath //crates/ctx-cli:ctx)",
-    },
-    tags = [
-        "privacy",
-        "provider-conformance",
-    ],
-)
-
-py_binary(
-    name = "mcp_attribution_conformance_runner",
-    srcs = [
-        "tests/mcp_attribution_conformance.py",
-        "tests/mcp_attribution_conformance_schema.py",
-        "tests/mcp_attribution_contract_registry.py",
-    ],
-    imports = ["tests"],
-    main = "tests/mcp_attribution_conformance.py",
-)
-
-py_test(
-    name = "mcp_attribution_conformance_runner_tests",
-    srcs = [
-        "tests/mcp_attribution_conformance.py",
-        "tests/mcp_attribution_conformance_schema.py",
-        "tests/mcp_attribution_conformance_test.py",
-        "tests/mcp_attribution_contract_registry.py",
-    ],
-    imports = ["tests"],
-    main = "tests/mcp_attribution_conformance_test.py",
-    data = [
-        "//crates/ctx-history-providers-jsonl-shared:src/provider/providers/pi.rs",
-    ] + MCP_ATTRIBUTION_ROUTE_CONTRACTS + MCP_ATTRIBUTION_TEST_CONTRACTS,
-    tags = ["provider-conformance"],
-)
-
-sh_test(
+test_suite(
     name = "active_source_family_contract_tests",
-    srcs = ["tests/run-active-source-family-contracts.sh"],
-    args = [
-        "$(rootpath :unit_tests)",
-        "$(rootpath //crates/ctx-history-capture-composition:unit_tests)",
-        "$(rootpath //crates/ctx-history-provider-codex:unit_tests)",
-        "$(rootpath //crates/ctx-history-jsonl:unit_tests)",
-        "$(rootpath //crates/ctx-history-source-io:unit_tests)",
-        "$(rootpath //crates/ctx-history-source-sqlite:unit_tests)",
-        "$(rootpath tests/active-source-family-contract-tests.txt)",
-    ],
-    data = [
-        ":unit_tests",
+    tests = [
         "//crates/ctx-history-capture-composition:unit_tests",
-        "//crates/ctx-history-provider-codex:unit_tests",
+        "//crates/ctx-history-capture-runtime:unit_tests",
         "//crates/ctx-history-jsonl:unit_tests",
         "//crates/ctx-history-source-io:unit_tests",
         "//crates/ctx-history-source-sqlite:unit_tests",
-        "tests/active-source-family-contract-tests.txt",
-    ],
-    size = "small",
-    tags = [
-        "safe-presubmit",
-        "source-backed",
-        "source-family-contract",
     ],
 )

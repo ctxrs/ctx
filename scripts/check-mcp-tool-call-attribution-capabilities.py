@@ -29,8 +29,7 @@ def main() -> int:
         f"lane_statuses={result['lane_statuses']} "
         f"provider_statuses={result['provider_statuses']} "
         f"exact_suites={result['exact_suites']} exact_tests={result['exact_tests']} "
-        f"exact_links={result['exact_links']} "
-        f"conformance_authority={result['conformance_authority']}"
+        f"exact_links={result['exact_links']}"
     )
     return 0
 

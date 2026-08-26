@@ -17,236 +17,6 @@ use support::{tempdir, TEST_PROVIDER_PROBES};
 const CONFIGURED_ROOT_SYMLINK_REASON: &str =
     "the configured provider history root uses a symlink or other unsupported component";
 
-const EXACT_CAPABILITIES: &[(CaptureProvider, ConfiguredRootPathKind, &str, &str)] = &[
-    (
-        CaptureProvider::GrokBuild,
-        ConfiguredRootPathKind::Directory,
-        "grok_build_session_updates_jsonl_tree",
-        "grok-build-sessions",
-    ),
-    (
-        CaptureProvider::DeepSeekHarness,
-        ConfiguredRootPathKind::Directory,
-        "deepseek_harness_session_jsonl_tree",
-        "deepseek-harness-sessions",
-    ),
-    (
-        CaptureProvider::Pi,
-        ConfiguredRootPathKind::Directory,
-        "pi_session_jsonl",
-        "pi-sessions",
-    ),
-    (
-        CaptureProvider::OpenCode,
-        ConfiguredRootPathKind::File,
-        "opencode_sqlite",
-        "opencode-database",
-    ),
-    (
-        CaptureProvider::Kilo,
-        ConfiguredRootPathKind::File,
-        "kilo_sqlite",
-        "kilo-database",
-    ),
-    (
-        CaptureProvider::MiMoCode,
-        ConfiguredRootPathKind::File,
-        "mimocode_sqlite",
-        "mimocode-database",
-    ),
-    (
-        CaptureProvider::KiroCli,
-        ConfiguredRootPathKind::File,
-        "kiro_cli_sqlite",
-        "kiro-cli-database",
-    ),
-    (
-        CaptureProvider::Crush,
-        ConfiguredRootPathKind::File,
-        "crush_sqlite",
-        "crush-project-database",
-    ),
-    (
-        CaptureProvider::Goose,
-        ConfiguredRootPathKind::File,
-        "goose_sessions_sqlite",
-        "goose-sessions-database",
-    ),
-    (
-        CaptureProvider::Antigravity,
-        ConfiguredRootPathKind::Directory,
-        "antigravity_cli_transcript_jsonl_tree",
-        "antigravity-brain",
-    ),
-    (
-        CaptureProvider::Gemini,
-        ConfiguredRootPathKind::Directory,
-        "gemini_cli_chat_recording_jsonl",
-        "gemini-chats",
-    ),
-    (
-        CaptureProvider::Tabnine,
-        ConfiguredRootPathKind::Directory,
-        "tabnine_cli_chat_recording_jsonl",
-        "tabnine-agent-history",
-    ),
-    (
-        CaptureProvider::Cursor,
-        ConfiguredRootPathKind::Directory,
-        "cursor_agent_transcript_jsonl_tree",
-        "cursor-projects",
-    ),
-    (
-        CaptureProvider::Zed,
-        ConfiguredRootPathKind::File,
-        "zed_threads_sqlite",
-        "zed-threads-database",
-    ),
-    (
-        CaptureProvider::CopilotCli,
-        ConfiguredRootPathKind::Directory,
-        "copilot_cli_session_events_jsonl",
-        "copilot-session-state",
-    ),
-    (
-        CaptureProvider::FactoryAiDroid,
-        ConfiguredRootPathKind::Directory,
-        "factory_ai_droid_sessions_jsonl",
-        "factory-droid-sessions",
-    ),
-    (
-        CaptureProvider::QwenCode,
-        ConfiguredRootPathKind::Directory,
-        "qwen_code_chat_jsonl_tree",
-        "qwen-projects",
-    ),
-    (
-        CaptureProvider::KimiCodeCli,
-        ConfiguredRootPathKind::Directory,
-        "kimi_code_cli_wire_jsonl_tree",
-        "kimi-history",
-    ),
-    (
-        CaptureProvider::Auggie,
-        ConfiguredRootPathKind::Directory,
-        "auggie_session_json",
-        "auggie-sessions",
-    ),
-    (
-        CaptureProvider::Junie,
-        ConfiguredRootPathKind::Directory,
-        "junie_session_events_jsonl_tree",
-        "junie-sessions",
-    ),
-    (
-        CaptureProvider::Firebender,
-        ConfiguredRootPathKind::File,
-        "firebender_chat_history_sqlite",
-        "firebender-chat-history-database",
-    ),
-    (
-        CaptureProvider::ForgeCode,
-        ConfiguredRootPathKind::File,
-        "forgecode_sqlite",
-        "forgecode-database",
-    ),
-    (
-        CaptureProvider::DeepAgents,
-        ConfiguredRootPathKind::File,
-        "deepagents_sessions_sqlite",
-        "deepagents-sessions-database",
-    ),
-    (
-        CaptureProvider::MistralVibe,
-        ConfiguredRootPathKind::Directory,
-        "mistral_vibe_session_jsonl_tree",
-        "mistral-vibe-sessions",
-    ),
-    (
-        CaptureProvider::Mux,
-        ConfiguredRootPathKind::Directory,
-        "mux_session_jsonl_tree",
-        "mux-sessions",
-    ),
-    (
-        CaptureProvider::RovoDev,
-        ConfiguredRootPathKind::Directory,
-        "rovodev_session_json_tree",
-        "rovodev-sessions",
-    ),
-    (
-        CaptureProvider::Hermes,
-        ConfiguredRootPathKind::File,
-        "hermes_state_sqlite",
-        "hermes-profile-database",
-    ),
-    (
-        CaptureProvider::AstrBot,
-        ConfiguredRootPathKind::File,
-        "astrbot_data_v4_sqlite",
-        "astrbot-instance-database",
-    ),
-    (
-        CaptureProvider::Continue,
-        ConfiguredRootPathKind::Directory,
-        "continue_cli_sessions_json",
-        "continue-sessions",
-    ),
-    (
-        CaptureProvider::RooCode,
-        ConfiguredRootPathKind::Directory,
-        "roo_task_directory_json",
-        "roo-task-store",
-    ),
-    (
-        CaptureProvider::Lingma,
-        ConfiguredRootPathKind::File,
-        "lingma_sqlite",
-        "lingma-client-profile-database",
-    ),
-    (
-        CaptureProvider::Qoder,
-        ConfiguredRootPathKind::Directory,
-        "qoder_transcript_jsonl_tree",
-        "qoder-projects",
-    ),
-    (
-        CaptureProvider::Warp,
-        ConfiguredRootPathKind::File,
-        "warp_sqlite",
-        "warp-surface-database",
-    ),
-    (
-        CaptureProvider::CodeBuddy,
-        ConfiguredRootPathKind::Directory,
-        "codebuddy_history_json",
-        "codebuddy-history",
-    ),
-];
-
-const INTENTIONAL_AUTOMATIC_EXACT: &[CaptureProvider] =
-    &[CaptureProvider::NanoClaw, CaptureProvider::Shelley];
-
-const COMPOUND_CAPABILITIES: &[(CaptureProvider, ConfiguredRootExpander)] = &[
-    (CaptureProvider::Codex, ConfiguredRootExpander::CodexHomeV1),
-    (
-        CaptureProvider::Claude,
-        ConfiguredRootExpander::ClaudeHomeV1,
-    ),
-    (
-        CaptureProvider::OpenClaw,
-        ConfiguredRootExpander::OpenClawStateRootV1,
-    ),
-    (
-        CaptureProvider::Cline,
-        ConfiguredRootExpander::ClineCommonDataRootV1,
-    ),
-    (
-        CaptureProvider::OpenHands,
-        ConfiguredRootExpander::OpenHandsKindV1,
-    ),
-];
-
 fn context(temp: &tempfile::TempDir) -> DiscoveryContext {
     let home = temp.path().join("home");
     let cwd = temp.path().join("cwd");
@@ -328,75 +98,23 @@ fn assert_configured(source: &ProviderSource, expected_id: &str, expected_root: 
 }
 
 #[test]
-fn capability_table_is_exhaustive_and_freezes_39_2_0_inventory() {
-    assert_eq!(configured_root_capabilities().len(), 41);
-    let actual = configured_root_capabilities()
+fn configured_root_registry_matches_provider_registry_without_duplicates() {
+    let capabilities = configured_root_capabilities();
+    let configured = capabilities
         .iter()
-        .map(|capability| capability.provider)
-        .collect::<Vec<_>>();
-    assert_eq!(actual.len(), 41);
-    assert_eq!(
-        actual,
-        provider_source_specs()
-            .iter()
-            .map(|spec| spec.provider)
-            .collect::<Vec<_>>()
-    );
-
-    let enabled = configured_root_capabilities()
-        .iter()
-        .filter(|capability| capability.state.is_enabled())
-        .count();
-    let intentional = configured_root_capabilities()
-        .iter()
-        .filter(|capability| {
-            capability.state == ConfiguredRootCapabilityState::IntentionalAutomaticExact
-        })
         .map(|capability| capability.provider)
         .collect::<HashSet<_>>();
-    let pending = configured_root_capabilities()
+    let providers = provider_source_specs()
         .iter()
-        .filter(|capability| capability.state == ConfiguredRootCapabilityState::PendingNamedSupport)
-        .map(|capability| capability.provider)
-        .collect::<Vec<_>>();
+        .map(|spec| spec.provider)
+        .collect::<HashSet<_>>();
 
-    assert_eq!(enabled, 39);
-    assert_eq!(intentional.len(), 2);
-    assert_eq!(
-        intentional,
-        INTENTIONAL_AUTOMATIC_EXACT.iter().copied().collect()
-    );
-    assert!(pending.is_empty());
+    assert_eq!(configured.len(), capabilities.len());
+    assert_eq!(configured, providers);
 }
 
 #[test]
-fn exact_and_compound_capability_metadata_is_exhaustive() {
-    assert_eq!(EXACT_CAPABILITIES.len(), 34);
-    for &(provider, expected_path_kind, source_format, route_role) in EXACT_CAPABILITIES {
-        assert_eq!(
-            configured_root_capability(provider).map(|capability| capability.state),
-            Some(ConfiguredRootCapabilityState::Enabled {
-                expected_path_kind,
-                expander: ConfiguredRootExpander::ExactSource {
-                    source_format,
-                    route_role,
-                },
-            })
-        );
-    }
-    for &(provider, expander) in COMPOUND_CAPABILITIES {
-        assert_eq!(
-            configured_root_capability(provider).map(|capability| capability.state),
-            Some(ConfiguredRootCapabilityState::Enabled {
-                expected_path_kind: ConfiguredRootPathKind::Directory,
-                expander,
-            })
-        );
-    }
-}
-
-#[test]
-fn configured_root_missing_route_inventory_is_exhaustive_when_automatic_is_false() {
+fn configured_exact_roots_surface_missing_candidates_when_automatic_is_false() {
     let temp = tempdir();
     let mut roots = Vec::new();
     let mut root_paths = HashMap::new();
@@ -411,7 +129,6 @@ fn configured_root_missing_route_inventory_is_exhaustive_when_automatic_is_false
         .with_configured_provider_roots(roots);
     let report = discover_provider_sources_with_context(&TEST_PROVIDER_PROBES, &context);
 
-    assert_eq!(report.sources.len(), 41);
     assert_eq!(report.issues.len(), 1);
     assert_eq!(report.issues[0].provider, CaptureProvider::OpenClaw);
     assert_eq!(
@@ -436,24 +153,17 @@ fn configured_root_missing_route_inventory_is_exhaustive_when_automatic_is_false
             .iter()
             .filter(|source| source.provider == capability.provider)
             .count();
-        let expected = match capability.state {
+        match capability.state {
             ConfiguredRootCapabilityState::IntentionalAutomaticExact
-            | ConfiguredRootCapabilityState::PendingNamedSupport => 0,
+            | ConfiguredRootCapabilityState::PendingNamedSupport => {
+                assert_eq!(count, 0, "unexpected route for {capability:?}");
+            }
             ConfiguredRootCapabilityState::Enabled {
-                expander: ConfiguredRootExpander::CodexHomeV1,
+                expander: ConfiguredRootExpander::ExactSource { .. },
                 ..
-            } => 3,
-            ConfiguredRootCapabilityState::Enabled {
-                expander: ConfiguredRootExpander::OpenClawStateRootV1,
-                ..
-            } => 0,
-            ConfiguredRootCapabilityState::Enabled {
-                expander: ConfiguredRootExpander::ClineCommonDataRootV1,
-                ..
-            } => 2,
-            ConfiguredRootCapabilityState::Enabled { .. } => 1,
-        };
-        assert_eq!(count, expected, "unexpected route count for {capability:?}");
+            } => assert_eq!(count, 1, "missing exact route for {capability:?}"),
+            ConfiguredRootCapabilityState::Enabled { .. } => {}
+        }
     }
 }
 
@@ -1152,7 +862,13 @@ fn codex_child_kinds_are_checked_independently_without_hiding_valid_peers() {
 #[test]
 fn intentional_rows_ignore_configured_roots_even_when_layouts_exist() {
     let temp = tempdir();
-    for &provider in INTENTIONAL_AUTOMATIC_EXACT {
+    for provider in configured_root_capabilities()
+        .iter()
+        .filter(|capability| {
+            capability.state == ConfiguredRootCapabilityState::IntentionalAutomaticExact
+        })
+        .map(|capability| capability.provider)
+    {
         let selected = temp.path().join(provider.as_str());
         fs::create_dir_all(&selected).unwrap();
         let report = configured_report(

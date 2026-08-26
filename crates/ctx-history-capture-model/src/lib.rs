@@ -40,10 +40,10 @@ pub use progress::{
 };
 pub use provider_root::{
     provider_root_encoded_path_len, provider_root_path_within_limit, provider_source_config_digest,
-    ProviderRootConnectorBinding, ProviderRootDefinition, ProviderRootKind,
-    ProviderRootSourceIdentity, ReleasedProviderRootAutomaticRole, RetainedProviderRootAuthority,
-    MAX_CONFIGURED_PROVIDER_ROOTS, MAX_PROVIDER_ROOT_ENCODED_PATH_BYTES,
-    MAX_PROVIDER_ROOT_SELECTOR_BYTES,
+    ProviderRootConnectorBinding, ProviderRootDefinition, ProviderRootKind, ProviderRootSet,
+    ProviderRootSetError, ProviderRootSourceIdentity, ReleasedProviderRootAutomaticRole,
+    RetainedProviderRootAuthority, MAX_CONFIGURED_PROVIDER_ROOTS,
+    MAX_PROVIDER_ROOT_ENCODED_PATH_BYTES, MAX_PROVIDER_ROOT_SELECTOR_BYTES,
 };
 pub use record::RecordDigest;
 pub use route::{

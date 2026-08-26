@@ -17,32 +17,27 @@ boundary:
    result activity without FIFO, order, or timing inference.
 3. The producer, route, source format, schema, and version/generation boundary
    are explicit. Unknown generations remain `not-qualified`.
-4. Current executable tests cover the nine public evidence classes: exact
-   activity, terminal outcomes, malformed and duplicate/ambiguous abstention,
-   exact boundaries and max-plus-one rejection, result preservation, stable
-   identities across lifecycle replay, and privacy sinks.
+4. Current executable provider tests cover exact call/result preservation,
+   malformed and duplicate/ambiguous abstention, exact field boundaries, and
+   result preservation. Provider-neutral and cross-layer tests separately own
+   Core bounds, stable lifecycle identities, and privacy sinks.
 
 Configuration, current server lists, record order, punctuation splitting, and
 time proximity are never identity evidence. Malformed, partial, oversized,
 duplicate, or ambiguous identity evidence must not become a qualifying
 `activity.invocation`.
 
-The machine authority is
-`crates/ctx-history-capture/tests/mcp-attribution-conformance.manifest.json`.
-Its executable suite registry is
-`crates/ctx-history-capture/tests/mcp_attribution_suites.bzl`. Manifest
-capability revision 8 freezes 41 providers, 46 base routes, 45 imported schema
-generations, and 49 capability lanes: three `supported`, 45 `not_qualified`,
-and one `excluded`. Every supported row requires
-`ambiguity_duplicate_linkage`, `canonical_terminal_outcomes`, `exact_boundary`,
-`exact_positive_pair`, `malformed_identity`, `max_plus_one`, `privacy_sinks`,
-`result_preservation`, and `stable_ids`. The max-plus-one and privacy checks are
-provider-neutral closed classes; the other seven are tuple-specific provider
-evidence.
+The machine-readable authority is
+[`mcp-tool-call-attribution-capabilities.json`](mcp-tool-call-attribution-capabilities.json).
+Its 49 capability lanes contain three `exact`, 45 `not-qualified`, and one
+`excluded` row. Each exact row names its current implementation and parser
+revision plus the owning Cargo/Bazel suite and live Rust tests. The checker
+resolves those references against the repository; the owning targets execute
+the behavioral tests through normal CI.
 
-For Codex's session-tree route, only unversioned generation 1 is supported.
+For Codex's session-tree route, only unversioned generation 1 is exact.
 Producer versions 0.200.0, 0.201.0, and 0.202.0 are distinct
-`not_qualified` lanes, and the prompt-history route remains `not_qualified`.
+`not-qualified` lanes, and the prompt-history route remains `not-qualified`.
 
 ## Typed failure reasons
 
@@ -80,9 +75,9 @@ unrelated metadata.
    implication.
 2. Record public evidence, observed pins, and fail-closed treatment of unknown
    generations.
-3. For `exact`, bind current parser revision plus one executable provider test
-   for each required evidence role. For `not-qualified`, choose one primary
-   typed reason and explain secondary defects in `detail`.
+3. For `exact`, bind the current parser revision and the owning runtime tests.
+   For `not-qualified`, choose one primary typed reason and explain secondary
+   defects in `detail`.
 4. Run `python3 scripts/check-mcp-tool-call-attribution-capabilities.py`, its
    mutation tests, the three focused provider suites, and the normal docs
    check.

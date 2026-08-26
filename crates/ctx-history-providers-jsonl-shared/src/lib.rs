@@ -5,6 +5,8 @@
 
 mod error;
 pub use error::{CaptureError, ProviderJsonlInventoryLimit, Result};
+mod registration;
+pub use registration::custom_history_explicit_route;
 
 pub use ctx_history_capture_model::{
     fnv1a64, stable_capture_uuid, CatalogSummary, ProviderImportFailure, ProviderImportSummary,
@@ -13,6 +15,7 @@ pub use ctx_history_capture_model::{
 
 pub const MAX_PROVIDER_JSONL_LINE_BYTES: usize =
     ctx_history_source_io::MAX_PROVIDER_JSONL_LINE_BYTES;
+pub(crate) const CUSTOM_HISTORY_SOURCE_FORMAT: &str = "ctx_history_jsonl_v2";
 pub const MAX_OPENCLAW_SESSION_INDEX_BYTES: usize = 1024 * 1024;
 pub const JUNIE_SESSION_EVENTS_SOURCE_FORMAT: &str = "junie_session_events_jsonl_tree";
 pub const OPENCLAW_SOURCE_FORMAT: &str = "openclaw_session_jsonl_tree";
@@ -80,34 +83,6 @@ pub mod adapters {
             occurred_at: fact.occurred_at,
             lexical_text: fact.lexical_text,
         }
-    }
-
-    pub fn custom_history<R: JsonlProviderRuntime>(
-        path: PathBuf,
-        catalog_lineage: [u8; 32],
-    ) -> Result<Arc<dyn JsonlFamilyAdapter<Runtime = R>>> {
-        provider::custom_history_jsonl::custom_history_jsonl_family_adapter::<R>(
-            provider::custom_history_jsonl::CustomHistorySourceBackedInput::explicit(
-                path,
-                catalog_lineage,
-            ),
-        )
-        .map_err(|error| crate::CaptureError::InvalidPayload(error.to_string()))
-    }
-
-    pub fn custom_history_with_source_root_lineage<R: JsonlProviderRuntime>(
-        path: PathBuf,
-        catalog_lineage: [u8; 32],
-        source_root_lineage: Option<[u8; 32]>,
-    ) -> Result<Arc<dyn JsonlFamilyAdapter<Runtime = R>>> {
-        provider::custom_history_jsonl::custom_history_jsonl_family_adapter::<R>(
-            provider::custom_history_jsonl::CustomHistorySourceBackedInput::explicit_with_source_root_lineage(
-                path,
-                catalog_lineage,
-                source_root_lineage,
-            ),
-        )
-        .map_err(|error| crate::CaptureError::InvalidPayload(error.to_string()))
     }
 
     pub fn junie<R: JsonlProviderRuntime>() -> Arc<dyn JsonlFamilyAdapter<Runtime = R>> {
