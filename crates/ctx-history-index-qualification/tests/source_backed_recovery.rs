@@ -625,6 +625,8 @@ fn actual_bounded_filesystem_enospc_preserves_previous_generation() {
         "actual ENOSPC test must run only inside the bounded-filesystem harness"
     );
     let fixture = RecoveryFixture::new();
+    let pointer_path = fixture.root.join("active-generation.json");
+    let pointer_before = fs::read(&pointer_path).unwrap();
     let fill_path = fixture.temp.path().join("actual-enospc-fill");
     let mut fill = File::create(&fill_path).unwrap();
     let block = vec![0_u8; 1024 * 1024];
@@ -646,8 +648,20 @@ fn actual_bounded_filesystem_enospc_preserves_previous_generation() {
         .and_then(|writer| writer.commit(|_| true).map(|_| ()))
         .expect_err("generation publication unexpectedly succeeded on a full filesystem");
     assert!(
-        index_error_has_enospc(&failure),
-        "generation failure did not retain actual ENOSPC: {failure:?}\n{failure}"
+        index_error_has_enospc(&failure)
+            || matches!(
+                &failure,
+                IndexError::CurrentRepublishInsufficientHeadroom {
+                    required,
+                    available
+                } if required > available
+            ),
+        "generation failure was neither actual ENOSPC nor bounded headroom exhaustion: {failure:?}\n{failure}"
+    );
+    assert_eq!(
+        fs::read(&pointer_path).unwrap(),
+        pointer_before,
+        "storage exhaustion changed the active generation pointer"
     );
 
     fs::remove_file(fill_path).unwrap();

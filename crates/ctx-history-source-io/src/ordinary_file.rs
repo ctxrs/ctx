@@ -17,56 +17,6 @@ pub(crate) const ORDINARY_FILE_V2_TOKEN_DOMAIN: &[u8] = b"ctx-ordinary-file-obse
 const ORDINARY_FILE_V2_FULL_FINGERPRINT_MAX_BYTES: u64 = 64 * 1024;
 const ORDINARY_FILE_V2_SPARSE_SAMPLE_BYTES: u64 = 8 * 1024;
 
-#[cfg(any(test, feature = "test-support"))]
-use std::{
-    path::PathBuf,
-    sync::{LazyLock, Mutex},
-};
-
-#[cfg(any(test, feature = "test-support"))]
-static FORBIDDEN_CONTENT_OPENS: LazyLock<Mutex<BTreeSet<PathBuf>>> =
-    LazyLock::new(|| Mutex::new(BTreeSet::new()));
-
-#[cfg(any(test, feature = "test-support"))]
-pub struct ForbiddenOrdinaryFileContentOpen {
-    path: PathBuf,
-}
-
-#[cfg(any(test, feature = "test-support"))]
-impl Drop for ForbiddenOrdinaryFileContentOpen {
-    fn drop(&mut self) {
-        let mut paths = FORBIDDEN_CONTENT_OPENS
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        paths.remove(&self.path);
-    }
-}
-
-#[cfg(any(test, feature = "test-support"))]
-pub fn forbid_ordinary_file_content_open(path: &Path) -> ForbiddenOrdinaryFileContentOpen {
-    let path = path.to_path_buf();
-    let mut paths = FORBIDDEN_CONTENT_OPENS
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    paths.insert(path.clone());
-    ForbiddenOrdinaryFileContentOpen { path }
-}
-
-#[cfg(any(test, feature = "test-support"))]
-fn reject_forbidden_content_open(path: &Path) -> Result<()> {
-    let paths = FORBIDDEN_CONTENT_OPENS
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if paths.contains(path) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            "test forbids opening this provider transcript",
-        )
-        .into());
-    }
-    Ok(())
-}
-
 /// A bounded observation of an ordinary provider file.
 ///
 /// Length and mtime retain the inexpensive append/no-op checks used by callers.
@@ -297,8 +247,6 @@ fn observe_ordinary_file_inner(
     before_open: impl FnOnce(),
 ) -> Result<OrdinaryFileObservation> {
     before_open();
-    #[cfg(any(test, feature = "test-support"))]
-    reject_forbidden_content_open(path)?;
     let opened = open_provider_source_file(path)?;
     observe_opened_ordinary_file(path, &opened)
 }
@@ -318,8 +266,6 @@ pub fn observe_opened_ordinary_file(
 }
 
 pub fn open_ordinary_file_without_following(path: &Path) -> Result<File> {
-    #[cfg(any(test, feature = "test-support"))]
-    reject_forbidden_content_open(path)?;
     open_provider_source_file(path)?
         .file()
         .try_clone()
