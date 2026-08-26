@@ -294,6 +294,11 @@ pub enum IndexError {
     },
     #[error("stored lexical document field {0} is missing, malformed, or inconsistent")]
     InvalidStoredDocumentField(&'static str),
+    #[error("session authority lookup work limit exceeded for {operation}: maximum {maximum}")]
+    SessionAuthorityWorkLimitExceeded {
+        operation: &'static str,
+        maximum: usize,
+    },
     #[error("one session has conflicting provider-native lineage claims: {0}")]
     ConflictingProviderNativeSessionClaim(&'static str),
     #[error(

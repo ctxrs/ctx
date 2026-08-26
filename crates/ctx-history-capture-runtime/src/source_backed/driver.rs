@@ -682,7 +682,11 @@ impl<L: CaptureLifecycleSink> SourceBackedGenerationSink<'_, L> {
         Ok(())
     }
 
-    pub fn record_rejection(&mut self, rejection: SourceBackedRecordRejectionDraft) {
+    fn record_rejection_with_provenance(
+        &mut self,
+        rejection: SourceBackedRecordRejectionDraft,
+        committed: bool,
+    ) {
         self.record_rejections.record(SourceBackedRecordRejection {
             route_index: self.route_index,
             route_identity: self.route_identity.clone(),
@@ -704,13 +708,29 @@ impl<L: CaptureLifecycleSink> SourceBackedGenerationSink<'_, L> {
                 &rejection.detail,
                 MAX_SOURCE_BACKED_FAILURE_DETAIL_BYTES,
             ),
+            committed,
         });
     }
 
     pub fn record_rejections(&mut self, rejections: SourceBackedRecordRejectionDrafts) {
+        self.record_rejections_with_provenance(rejections, true);
+    }
+
+    pub fn record_failed_attempt_rejections(
+        &mut self,
+        rejections: SourceBackedRecordRejectionDrafts,
+    ) {
+        self.record_rejections_with_provenance(rejections, false);
+    }
+
+    fn record_rejections_with_provenance(
+        &mut self,
+        rejections: SourceBackedRecordRejectionDrafts,
+        committed: bool,
+    ) {
         let (rejections, omitted) = rejections.into_parts();
         for rejection in rejections {
-            self.record_rejection(rejection);
+            self.record_rejection_with_provenance(rejection, committed);
         }
         self.record_omitted_rejections(omitted);
     }

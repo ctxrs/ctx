@@ -1,13 +1,21 @@
+mod session_event_order;
+
+#[cfg(test)]
+use session_event_order::SESSION_EVENT_ORDER_SESSION_PREFIX_LEN;
+pub use session_event_order::{SessionEventOrderKey, SESSION_EVENT_ORDER_KEY_LEN};
+
 use std::{iter::Empty, slice, sync::Arc};
 
 use tantivy::schema::{
     document::{ReferenceValue, ReferenceValueLeaf},
     Document, Field, Value,
 };
+use uuid::Uuid;
 
 use ctx_history_core::{
-    CoreContent, CoreRecord, ProviderNativeCopyProof, SourceKey, StableEntityId, StableEntityKind,
-    TypedKey, MAX_CORE_CONTENT_BYTES, MAX_ENCODED_CORE_RECORD_BYTES,
+    CoreContent, CoreRecord, ProviderNativeCopyProof, ProviderNativeSessionRelationship, SourceKey,
+    StableEntityId, StableEntityKind, TypedKey, MAX_CORE_CONTENT_BYTES,
+    MAX_ENCODED_CORE_RECORD_BYTES,
 };
 
 use crate::{Fields, IndexError, Result};
@@ -21,22 +29,33 @@ const SOURCE_EVENT_ORDER_CONTENT_BYTES_OFFSET: usize = SOURCE_EVENT_ORDER_ENCODE
 pub const SOURCE_EVENT_ORDER_SIZE_SUFFIX_LEN: usize = 8;
 const SOURCE_EVENT_ORDER_FIELD: &str = "source_event_order";
 
-pub const SESSION_EVENT_ORDER_SESSION_PREFIX_LEN: usize = StableEntityId::CANONICAL_LEN;
-pub const SESSION_EVENT_ORDER_KEY_LEN: usize = SESSION_EVENT_ORDER_SESSION_PREFIX_LEN + 8 + 9 + 16;
-const SESSION_EVENT_ORDER_SEQUENCE_OFFSET: usize = SESSION_EVENT_ORDER_SESSION_PREFIX_LEN;
-const SESSION_EVENT_ORDER_OCCURRED_AT_OFFSET: usize = SESSION_EVENT_ORDER_SEQUENCE_OFFSET + 8;
-const SESSION_EVENT_ORDER_EVENT_ID_OFFSET: usize = SESSION_EVENT_ORDER_OCCURRED_AT_OFFSET + 9;
-const SESSION_EVENT_ORDER_FIELD: &str = "session_event_order";
-
 /// Sparse session witness key. The UUID prefix bounds dictionary traversal;
 /// the two canonical identities make compact collisions fail closed.
 pub const SESSION_AUTHORITY_UUID_PREFIX_LEN: usize = 16;
 const SESSION_AUTHORITY_SESSION_OFFSET: usize = SESSION_AUTHORITY_UUID_PREFIX_LEN;
 const SESSION_AUTHORITY_SOURCE_OFFSET: usize =
     SESSION_AUTHORITY_SESSION_OFFSET + StableEntityId::CANONICAL_LEN;
-pub const SESSION_AUTHORITY_KEY_LEN: usize =
+const SESSION_AUTHORITY_PARENT_PRESENT_OFFSET: usize =
     SESSION_AUTHORITY_SOURCE_OFFSET + StableEntityId::CANONICAL_LEN;
+const SESSION_AUTHORITY_PARENT_OFFSET: usize = SESSION_AUTHORITY_PARENT_PRESENT_OFFSET + 1;
+const SESSION_AUTHORITY_ROOT_PRESENT_OFFSET: usize =
+    SESSION_AUTHORITY_PARENT_OFFSET + StableEntityId::CANONICAL_LEN;
+const SESSION_AUTHORITY_ROOT_OFFSET: usize = SESSION_AUTHORITY_ROOT_PRESENT_OFFSET + 1;
+const SESSION_AUTHORITY_RELATIONSHIP_OFFSET: usize =
+    SESSION_AUTHORITY_ROOT_OFFSET + StableEntityId::CANONICAL_LEN;
+pub const SESSION_AUTHORITY_KEY_LEN: usize = SESSION_AUTHORITY_RELATIONSHIP_OFFSET + 1;
 const SESSION_AUTHORITY_FIELD: &str = "session_authority";
+
+/// Direct provider claims carried by one sparse session-authority witness.
+///
+/// These are literal record facts only. They contain no traversal, inferred
+/// topology, or fallback family identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionAuthorityClaims {
+    pub parent_session_id: Option<StableEntityId>,
+    pub root_session_id: Option<StableEntityId>,
+    pub relationship: Option<ProviderNativeSessionRelationship>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct SessionAuthorityKey([u8; SESSION_AUTHORITY_KEY_LEN]);
@@ -45,6 +64,37 @@ impl SessionAuthorityKey {
     /// Constructs the exact query-safe key for one fully qualified session
     /// coordinate. The private representation prevents partial UUID terms.
     pub fn exact(session_id: StableEntityId, source_owner: StableEntityId) -> Result<Self> {
+        Self::with_claims(
+            session_id,
+            source_owner,
+            SessionAuthorityClaims {
+                parent_session_id: None,
+                root_session_id: None,
+                relationship: None,
+            },
+        )
+    }
+
+    /// Binds the exact source-owned session coordinate to one record's direct
+    /// literal relationship claims. Query-time grouping coalesces only these
+    /// sparse verified witnesses and never loads the stored Core body.
+    pub fn for_core_record(record: &CoreRecord) -> Result<Self> {
+        Self::with_claims(
+            record.session_id,
+            record.source.identity(),
+            SessionAuthorityClaims {
+                parent_session_id: record.parent_session_id,
+                root_session_id: record.root_session_id,
+                relationship: record.session_relationship,
+            },
+        )
+    }
+
+    fn with_claims(
+        session_id: StableEntityId,
+        source_owner: StableEntityId,
+        claims: SessionAuthorityClaims,
+    ) -> Result<Self> {
         if session_id.entity_kind() != StableEntityKind::Session
             || source_owner.entity_kind() != StableEntityKind::Source
             || session_id.source_digest() != source_owner.digest()
@@ -57,7 +107,21 @@ impl SessionAuthorityKey {
         key[..SESSION_AUTHORITY_UUID_PREFIX_LEN].copy_from_slice(session_id.as_uuid().as_bytes());
         key[SESSION_AUTHORITY_SESSION_OFFSET..SESSION_AUTHORITY_SOURCE_OFFSET]
             .copy_from_slice(&session_id.encode_canonical()?);
-        key[SESSION_AUTHORITY_SOURCE_OFFSET..].copy_from_slice(&source_owner.encode_canonical()?);
+        key[SESSION_AUTHORITY_SOURCE_OFFSET..SESSION_AUTHORITY_PARENT_PRESENT_OFFSET]
+            .copy_from_slice(&source_owner.encode_canonical()?);
+        encode_optional_session_claim(
+            &mut key,
+            SESSION_AUTHORITY_PARENT_PRESENT_OFFSET,
+            SESSION_AUTHORITY_PARENT_OFFSET,
+            claims.parent_session_id,
+        )?;
+        encode_optional_session_claim(
+            &mut key,
+            SESSION_AUTHORITY_ROOT_PRESENT_OFFSET,
+            SESSION_AUTHORITY_ROOT_OFFSET,
+            claims.root_session_id,
+        )?;
+        key[SESSION_AUTHORITY_RELATIONSHIP_OFFSET] = relationship_tag(claims.relationship);
         Ok(Self(key))
     }
 
@@ -72,7 +136,7 @@ impl SessionAuthorityKey {
                 SESSION_AUTHORITY_FIELD,
             ));
         }
-        Self::exact(session_id, source_owner)?;
+        Self::with_claims(session_id, source_owner, key.direct_claims()?)?;
         Ok(key)
     }
 
@@ -84,25 +148,39 @@ impl SessionAuthorityKey {
                 SESSION_AUTHORITY_FIELD,
             ));
         }
-        Ok(*session_id.as_uuid().as_bytes())
+        Ok(Self::uuid_prefix_from_uuid(session_id.as_uuid()))
     }
 
     pub fn uuid_range_end(session_id: StableEntityId) -> Result<Vec<u8>> {
+        if session_id.entity_kind() != StableEntityKind::Session {
+            return Err(IndexError::InvalidStoredDocumentField(
+                SESSION_AUTHORITY_FIELD,
+            ));
+        }
+        Ok(Self::uuid_range_end_from_uuid(session_id.as_uuid()))
+    }
+
+    pub fn uuid_prefix_from_uuid(session_id: Uuid) -> [u8; SESSION_AUTHORITY_UUID_PREFIX_LEN] {
+        *session_id.as_bytes()
+    }
+
+    pub fn uuid_range_end_from_uuid(session_id: Uuid) -> Vec<u8> {
         let mut end = Vec::with_capacity(SESSION_AUTHORITY_KEY_LEN + 1);
-        end.extend_from_slice(&Self::uuid_prefix(session_id)?);
+        end.extend_from_slice(&Self::uuid_prefix_from_uuid(session_id));
         end.extend(std::iter::repeat_n(
             u8::MAX,
             SESSION_AUTHORITY_KEY_LEN - SESSION_AUTHORITY_UUID_PREFIX_LEN + 1,
         ));
-        Ok(end)
+        end
     }
 
     pub fn identities(self) -> Result<(StableEntityId, StableEntityId)> {
         let session_id = StableEntityId::decode_canonical(
             &self.0[SESSION_AUTHORITY_SESSION_OFFSET..SESSION_AUTHORITY_SOURCE_OFFSET],
         )?;
-        let source_owner =
-            StableEntityId::decode_canonical(&self.0[SESSION_AUTHORITY_SOURCE_OFFSET..])?;
+        let source_owner = StableEntityId::decode_canonical(
+            &self.0[SESSION_AUTHORITY_SOURCE_OFFSET..SESSION_AUTHORITY_PARENT_PRESENT_OFFSET],
+        )?;
         if session_id.entity_kind() != StableEntityKind::Session
             || source_owner.entity_kind() != StableEntityKind::Source
             || session_id.source_digest() != source_owner.digest()
@@ -114,12 +192,97 @@ impl SessionAuthorityKey {
         Ok((session_id, source_owner))
     }
 
+    pub fn direct_claims(self) -> Result<SessionAuthorityClaims> {
+        Ok(SessionAuthorityClaims {
+            parent_session_id: decode_optional_session_claim(
+                &self.0,
+                SESSION_AUTHORITY_PARENT_PRESENT_OFFSET,
+                SESSION_AUTHORITY_PARENT_OFFSET,
+            )?,
+            root_session_id: decode_optional_session_claim(
+                &self.0,
+                SESSION_AUTHORITY_ROOT_PRESENT_OFFSET,
+                SESSION_AUTHORITY_ROOT_OFFSET,
+            )?,
+            relationship: relationship_from_tag(self.0[SESSION_AUTHORITY_RELATIONSHIP_OFFSET])?,
+        })
+    }
+
     pub fn as_bytes(&self) -> &[u8; SESSION_AUTHORITY_KEY_LEN] {
         &self.0
     }
     pub fn into_bytes(self) -> [u8; SESSION_AUTHORITY_KEY_LEN] {
         self.0
     }
+}
+
+fn encode_optional_session_claim(
+    target: &mut [u8; SESSION_AUTHORITY_KEY_LEN],
+    present_offset: usize,
+    value_offset: usize,
+    value: Option<StableEntityId>,
+) -> Result<()> {
+    if let Some(value) = value {
+        if value.entity_kind() != StableEntityKind::Session {
+            return Err(IndexError::InvalidStoredDocumentField(
+                SESSION_AUTHORITY_FIELD,
+            ));
+        }
+        target[present_offset] = 1;
+        target[value_offset..value_offset + StableEntityId::CANONICAL_LEN]
+            .copy_from_slice(&value.encode_canonical()?);
+    }
+    Ok(())
+}
+
+fn decode_optional_session_claim(
+    encoded: &[u8; SESSION_AUTHORITY_KEY_LEN],
+    present_offset: usize,
+    value_offset: usize,
+) -> Result<Option<StableEntityId>> {
+    let bytes = &encoded[value_offset..value_offset + StableEntityId::CANONICAL_LEN];
+    match encoded[present_offset] {
+        0 if bytes.iter().all(|byte| *byte == 0) => Ok(None),
+        1 => {
+            let value = StableEntityId::decode_canonical(bytes)?;
+            if value.entity_kind() != StableEntityKind::Session {
+                return Err(IndexError::InvalidStoredDocumentField(
+                    SESSION_AUTHORITY_FIELD,
+                ));
+            }
+            Ok(Some(value))
+        }
+        _ => Err(IndexError::InvalidStoredDocumentField(
+            SESSION_AUTHORITY_FIELD,
+        )),
+    }
+}
+
+fn relationship_tag(value: Option<ProviderNativeSessionRelationship>) -> u8 {
+    match value {
+        None => 0,
+        Some(ProviderNativeSessionRelationship::Root) => 1,
+        Some(ProviderNativeSessionRelationship::Delegated) => 2,
+        Some(ProviderNativeSessionRelationship::Forked) => 3,
+        Some(ProviderNativeSessionRelationship::ResumedFrom) => 4,
+        Some(ProviderNativeSessionRelationship::WorkflowChild) => 5,
+    }
+}
+
+fn relationship_from_tag(value: u8) -> Result<Option<ProviderNativeSessionRelationship>> {
+    Ok(match value {
+        0 => None,
+        1 => Some(ProviderNativeSessionRelationship::Root),
+        2 => Some(ProviderNativeSessionRelationship::Delegated),
+        3 => Some(ProviderNativeSessionRelationship::Forked),
+        4 => Some(ProviderNativeSessionRelationship::ResumedFrom),
+        5 => Some(ProviderNativeSessionRelationship::WorkflowChild),
+        _ => {
+            return Err(IndexError::InvalidStoredDocumentField(
+                SESSION_AUTHORITY_FIELD,
+            ))
+        }
+    })
 }
 
 pub const SEMANTIC_EVENT_ORDER_KEY_LEN: usize = 32;
@@ -303,133 +466,6 @@ impl SemanticEventOrderKey {
     }
 
     pub fn into_bytes(self) -> [u8; SEMANTIC_EVENT_ORDER_KEY_LEN] {
-        self.0
-    }
-}
-
-/// Exact session-coordinate term used for bounded forward traversal.
-///
-/// Big-endian encoding preserves the existing deterministic session order:
-/// sequence, `None` before `Some(timestamp)`, signed timestamp, then compact
-/// event UUID. The full canonical session identity is the range prefix, so a
-/// compact UUID collision can never mix session ranges.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct SessionEventOrderKey([u8; SESSION_EVENT_ORDER_KEY_LEN]);
-
-impl SessionEventOrderKey {
-    pub fn for_core_record(record: &CoreRecord) -> Result<Self> {
-        Self::from_parts(
-            record.session_id,
-            record.event_sequence,
-            record.occurred_at_unix_ms,
-            record.event_id.as_uuid(),
-        )
-    }
-
-    fn from_parts(
-        session_id: StableEntityId,
-        event_sequence: u64,
-        occurred_at_unix_ms: Option<i64>,
-        event_id: uuid::Uuid,
-    ) -> Result<Self> {
-        if session_id.entity_kind() != StableEntityKind::Session {
-            return Err(IndexError::WriterInvariant(
-                "session event order requires a session identity",
-            ));
-        }
-        let mut key = [0_u8; SESSION_EVENT_ORDER_KEY_LEN];
-        key[..SESSION_EVENT_ORDER_SESSION_PREFIX_LEN]
-            .copy_from_slice(&session_id.encode_canonical()?);
-        key[SESSION_EVENT_ORDER_SEQUENCE_OFFSET..SESSION_EVENT_ORDER_OCCURRED_AT_OFFSET]
-            .copy_from_slice(&event_sequence.to_be_bytes());
-        if let Some(occurred_at_unix_ms) = occurred_at_unix_ms {
-            key[SESSION_EVENT_ORDER_OCCURRED_AT_OFFSET] = 1;
-            let sortable = (occurred_at_unix_ms as u64) ^ (1_u64 << 63);
-            key[SESSION_EVENT_ORDER_OCCURRED_AT_OFFSET + 1..SESSION_EVENT_ORDER_EVENT_ID_OFFSET]
-                .copy_from_slice(&sortable.to_be_bytes());
-        }
-        key[SESSION_EVENT_ORDER_EVENT_ID_OFFSET..].copy_from_slice(event_id.as_bytes());
-        Ok(Self(key))
-    }
-
-    pub fn decode_for_session(session_id: StableEntityId, encoded: &[u8]) -> Result<Self> {
-        let key: [u8; SESSION_EVENT_ORDER_KEY_LEN] = encoded
-            .try_into()
-            .map_err(|_| IndexError::InvalidStoredDocumentField(SESSION_EVENT_ORDER_FIELD))?;
-        let expected_prefix = Self::session_prefix(session_id)?;
-        if key[..SESSION_EVENT_ORDER_SESSION_PREFIX_LEN] != expected_prefix {
-            return Err(IndexError::InvalidStoredDocumentField(
-                SESSION_EVENT_ORDER_FIELD,
-            ));
-        }
-        if key[SESSION_EVENT_ORDER_OCCURRED_AT_OFFSET] > 1
-            || (key[SESSION_EVENT_ORDER_OCCURRED_AT_OFFSET] == 0
-                && key[SESSION_EVENT_ORDER_OCCURRED_AT_OFFSET + 1
-                    ..SESSION_EVENT_ORDER_EVENT_ID_OFFSET]
-                    .iter()
-                    .any(|byte| *byte != 0))
-        {
-            return Err(IndexError::InvalidStoredDocumentField(
-                SESSION_EVENT_ORDER_FIELD,
-            ));
-        }
-        Ok(Self(key))
-    }
-
-    pub fn session_prefix(
-        session_id: StableEntityId,
-    ) -> Result<[u8; SESSION_EVENT_ORDER_SESSION_PREFIX_LEN]> {
-        if session_id.entity_kind() != StableEntityKind::Session {
-            return Err(IndexError::InvalidStoredDocumentField(
-                SESSION_EVENT_ORDER_FIELD,
-            ));
-        }
-        Ok(session_id.encode_canonical()?)
-    }
-
-    pub fn session_range_end(session_id: StableEntityId) -> Result<Vec<u8>> {
-        let mut bound = Vec::with_capacity(SESSION_EVENT_ORDER_KEY_LEN + 1);
-        bound.extend_from_slice(&Self::session_prefix(session_id)?);
-        bound.extend(std::iter::repeat_n(
-            u8::MAX,
-            SESSION_EVENT_ORDER_KEY_LEN - SESSION_EVENT_ORDER_SESSION_PREFIX_LEN + 1,
-        ));
-        Ok(bound)
-    }
-
-    pub fn event_sequence(self) -> u64 {
-        u64::from_be_bytes(
-            self.0[SESSION_EVENT_ORDER_SEQUENCE_OFFSET..SESSION_EVENT_ORDER_OCCURRED_AT_OFFSET]
-                .try_into()
-                .expect("fixed session event order sequence layout"),
-        )
-    }
-
-    pub fn occurred_at_unix_ms(self) -> Option<i64> {
-        (self.0[SESSION_EVENT_ORDER_OCCURRED_AT_OFFSET] == 1).then(|| {
-            let sortable = u64::from_be_bytes(
-                self.0[SESSION_EVENT_ORDER_OCCURRED_AT_OFFSET + 1
-                    ..SESSION_EVENT_ORDER_EVENT_ID_OFFSET]
-                    .try_into()
-                    .expect("fixed session event order timestamp layout"),
-            );
-            (sortable ^ (1_u64 << 63)) as i64
-        })
-    }
-
-    pub fn event_id(self) -> uuid::Uuid {
-        uuid::Uuid::from_bytes(
-            self.0[SESSION_EVENT_ORDER_EVENT_ID_OFFSET..]
-                .try_into()
-                .expect("fixed session event order UUID layout"),
-        )
-    }
-
-    pub fn as_bytes(&self) -> &[u8; SESSION_EVENT_ORDER_KEY_LEN] {
-        &self.0
-    }
-
-    pub fn into_bytes(self) -> [u8; SESSION_EVENT_ORDER_KEY_LEN] {
         self.0
     }
 }
@@ -787,8 +823,7 @@ impl IndexDocument {
         core_record_bytes: Vec<u8>,
         core_content_bytes: usize,
     ) -> Result<Self> {
-        let session_authority =
-            SessionAuthorityKey::exact(record.session_id, record.source.identity())?;
+        let session_authority = SessionAuthorityKey::for_core_record(&record)?;
         let source_token = crate::source_token(&record.source);
         let source = IndexSourceFields::new(&record.source, &source_token);
         let core_record_encoded_bytes = core_record_bytes.len();

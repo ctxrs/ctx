@@ -214,7 +214,7 @@ fn publish(path: &Path, registry: &SourceBackedProviderRegistry) -> VerifiedInde
 }
 
 fn source_bytes(index: &VerifiedIndex, marker: &str) -> StableSourceBytes {
-    let hits = index.search_event_candidates(marker, 8).unwrap();
+    let hits = search_event_candidates(index, marker, 8);
     assert_eq!(hits.len(), 1, "{marker}");
     let source = &hits[0].event.source;
     let route = index
@@ -250,9 +250,7 @@ fn source_bytes(index: &VerifiedIndex, marker: &str) -> StableSourceBytes {
 }
 
 fn assert_filters(index: &VerifiedIndex, root_count: usize, expected_sources: usize) {
-    let hits = index
-        .search_event_candidates("compoundownership", 16)
-        .unwrap();
+    let hits = search_event_candidates(index, "compoundownership", 16);
     assert_eq!(hits.len(), expected_sources);
     assert_eq!(
         index.manifest().source_routes()[0].sources().len(),
@@ -264,16 +262,15 @@ fn assert_filters(index: &VerifiedIndex, root_count: usize, expected_sources: us
             .provider_root_source_tokens(&[root.definition().id.clone()], &[])
             .unwrap();
         assert_eq!(allowed.len(), 1);
-        let filtered = index
-            .search_event_candidates_with_filters(
-                "compoundownership",
-                &EventSearchFilters {
-                    allowed_source_keys: Some(allowed.clone()),
-                    ..EventSearchFilters::default()
-                },
-                16,
-            )
-            .unwrap();
+        let filtered = search_event_candidates_with_filters(
+            index,
+            &["compoundownership"],
+            &EventSearchFilters {
+                allowed_source_keys: Some(allowed.clone()),
+                ..EventSearchFilters::default()
+            },
+            16,
+        );
         assert_eq!(filtered.len(), 1, "{}", root.definition().id);
         assert_eq!(source_token(&filtered[0].event.source), allowed[0]);
     }

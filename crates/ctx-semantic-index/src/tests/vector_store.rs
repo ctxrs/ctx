@@ -15,9 +15,27 @@ fn exact_search(
     let pinned = store
         .flat_pin_generation()?
         .expect("fixture must publish a flat generation");
+    let query_embeddings = vec![query_embedding.to_vec()];
     scan_exact_generation(
         &pinned,
-        query_embedding,
+        &query_embeddings,
+        limit,
+        None,
+        std::time::Instant::now(),
+    )
+}
+
+fn exact_search_multi(
+    store: &SemanticVectorStore,
+    query_embeddings: &[Vec<f32>],
+    limit: usize,
+) -> Result<SemanticVectorSearch> {
+    let pinned = store
+        .flat_pin_generation()?
+        .expect("fixture must publish a flat generation");
+    scan_exact_generation(
+        &pinned,
+        query_embeddings,
         limit,
         None,
         std::time::Instant::now(),
@@ -113,6 +131,68 @@ fn flat_search_is_unique_deterministic_bounded_and_exact() -> Result<()> {
     assert_eq!(
         semantic_vector_failure_kind(&error),
         Some(SemanticVectorFailureKind::Unavailable)
+    );
+    Ok(())
+}
+
+#[test]
+fn thirty_two_query_vectors_touch_each_flat_chunk_once() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut store = SemanticVectorStore::open(&source_backed_semantic_vector_path(temp.path()))?;
+    let first = Uuid::new_v4();
+    let second = Uuid::new_v4();
+    store.publish_chunk_replacements(
+        &[
+            (
+                test_chunk_at(first, 1, "first", 0, 2),
+                test_embedding(1.0, 0.0),
+            ),
+            (
+                test_chunk_at(first, 1, "first", 1, 2),
+                test_embedding(0.8, 0.6),
+            ),
+            (test_chunk(second, 2, "second"), test_embedding(0.0, 1.0)),
+        ],
+        &[],
+    )?;
+    let queries = (0..32)
+        .map(|index| {
+            if index % 2 == 0 {
+                test_embedding(1.0, 0.0)
+            } else {
+                test_embedding(0.0, 1.0)
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let search = exact_search_multi(&store, &queries, 2)?;
+
+    assert_eq!(search.stats.query_vectors, 32);
+    assert_eq!(search.stats.vector_passes, 1);
+    assert_eq!(search.stats.chunks_scanned, 3);
+    assert_eq!(search.stats.events_scored, 2);
+    assert_eq!(search.stats.dot_products, 96);
+    assert_eq!(
+        search.stats.vector_bytes_read,
+        3 * SEMANTIC_DIMENSIONS * std::mem::size_of::<f32>()
+    );
+    assert_eq!(
+        search
+            .hits
+            .iter()
+            .find(|hit| hit.event_id == first)
+            .expect("first event")
+            .query_ordinal,
+        0
+    );
+    assert_eq!(
+        search
+            .hits
+            .iter()
+            .find(|hit| hit.event_id == second)
+            .expect("second event")
+            .query_ordinal,
+        1
     );
     Ok(())
 }

@@ -11,6 +11,10 @@ use ctx_history_core::{CaptureProvider, CoreRecord, LiteralFactKind, SourceAncho
 use ctx_history_index::{AppliedProviderRoot, VerifiedIndex};
 use tempfile::tempdir;
 
+#[path = "support/lexical.rs"]
+mod lexical_test_support;
+use lexical_test_support::{search_event_candidates, search_event_candidates_with_filters};
+
 #[path = "provider_lifecycle/codex_child_independence.rs"]
 mod codex_child_independence;
 #[path = "provider_lifecycle/compound_root_ownership.rs"]

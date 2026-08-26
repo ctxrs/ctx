@@ -70,34 +70,21 @@ where
         },
     )?;
     let discovery_report = listing.discovery;
-    let mut sources = listing.visible_sources;
-    sources.retain(|source| source_is_visible_for_output(source, show_all_sources, request.format));
-    let sources = &sources;
+    let sources = listing.visible_sources;
+    let output_sources = sources
+        .iter()
+        .filter(|source| source_is_visible_for_output(source, show_all_sources, request.format))
+        .cloned()
+        .collect::<Vec<_>>();
     let plugin_sources = listing.plugins.sources;
     let plugin_failures = listing.plugins.failures;
-    let existing = sources.iter().filter(|source| source.exists).count();
-    let existing_plugin_sources = plugin_sources
-        .iter()
-        .filter(|source| history_source_plugin_report(source).is_importable())
-        .count();
-    let importable = sources
-        .iter()
-        .filter(|source| {
-            source.exists
-                && source.import_support.is_importable()
-                && source.status == ProviderSourceStatus::Available
-        })
-        .count();
-    on_discovery(SourcesDiscoveryObservation {
-        providers_detected: sources
-            .len()
-            .saturating_add(plugin_sources.len())
-            .saturating_add(plugin_failures.len()) as u64,
-        providers_existing: existing.saturating_add(existing_plugin_sources) as u64,
-        providers_importable: importable.saturating_add(existing_plugin_sources) as u64,
-    });
+    on_discovery(sources_discovery_observation(
+        &sources,
+        &plugin_sources,
+        &plugin_failures,
+    ));
     let hidden_missing_sources = listing.hidden_missing_sources;
-    let mut canonical_entries = sources_json_with_selection(sources, &provider_roots);
+    let mut canonical_entries = sources_json_with_selection(&output_sources, &provider_roots);
     canonical_entries.extend(plugin_sources_json(&plugin_sources));
     canonical_entries.extend(plugin_manifest_failures_json(&plugin_failures));
     let result_count = canonical_entries.len();
@@ -124,7 +111,7 @@ where
         output_bytes
     } else {
         let render_input = SourcesHumanRenderInput {
-            sources,
+            sources: &output_sources,
             issues: &discovery_report.issues,
             plugin_sources: &plugin_sources,
             plugin_failures: &plugin_failures,
@@ -146,12 +133,43 @@ where
     })
 }
 
+fn sources_discovery_observation(
+    sources: &[SourceInfo],
+    plugin_sources: &[HistorySourcePluginSource],
+    plugin_failures: &[HistorySourcePluginManifestFailure],
+) -> SourcesDiscoveryObservation {
+    let existing = sources.iter().filter(|source| source.exists).count();
+    let existing_plugin_sources = plugin_sources
+        .iter()
+        .filter(|source| history_source_plugin_report(source).is_importable())
+        .count();
+    let importable = sources
+        .iter()
+        .filter(|source| {
+            source.exists
+                && source.import_support.is_importable()
+                && source.status == ProviderSourceStatus::Available
+        })
+        .count();
+    SourcesDiscoveryObservation {
+        providers_detected: sources
+            .len()
+            .saturating_add(plugin_sources.len())
+            .saturating_add(plugin_failures.len()) as u64,
+        providers_existing: existing.saturating_add(existing_plugin_sources) as u64,
+        providers_importable: importable.saturating_add(existing_plugin_sources) as u64,
+    }
+}
+
 fn source_is_visible_for_output(
     source: &SourceInfo,
     show_all_sources: bool,
     format: OutputFormat,
 ) -> bool {
-    format == OutputFormat::Json || show_all_sources || source.status != ProviderSourceStatus::Empty
+    format == OutputFormat::Json
+        || show_all_sources
+        || source.status != ProviderSourceStatus::Empty
+        || source.route_provenance.configured_root().is_some()
 }
 
 #[cfg(test)]

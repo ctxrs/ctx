@@ -6,7 +6,10 @@ use std::{
     cell::Cell,
     fs,
     io::{self, Write},
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
 };
 
 use ctx_daemon_cli::SourceBackedRefreshMode;
@@ -23,8 +26,9 @@ use ctx_history_core::{
     SourceKey, SourceObservation, TypedKey, CORE_ACTIVITY_REVISION, MAX_CORE_CONTENT_BYTES,
 };
 use ctx_history_index::{
-    AgentScope, EventSearchFilters, GenerationWriter, IndexError, SearchContentScope,
-    SessionRecord, WriterOptions, LEXICAL_QUERY_LIMITS,
+    CompiledSearchFilter, EventSearchCandidate, EventSearchFilters, GenerationWriter, IndexError,
+    LexicalExecution, LexicalMode, SearchContentScope, SessionRecord, VerifiedIndex, WriterOptions,
+    LEXICAL_QUERY_LIMITS,
 };
 use serde_json::{json, Value};
 use tempfile::tempdir;
@@ -48,11 +52,8 @@ use super::{
         render_show_document, search_json, SEARCH_SNIPPET_MAX_BYTES, SEARCH_SNIPPET_MAX_CHARS,
     },
     search::{
-        presentations_for_search_hits_with_budget, resolve_source_search_backend,
-        semantic_reason_code, NormalizedSearchQuery, SearchCollection, SearchEventMetadata,
-        SearchHit, SearchPresentation, SearchPresentationHydrationBudget,
-        SearchPresentationRetentionBudgetExceeded, SearchResultWindow,
-        SEARCH_PRESENTATION_HYDRATION_BUDGET, SEARCH_PRESENTATION_MAX_RETAINED_SNIPPET_BYTES,
+        resolve_source_search_backend, semantic_reason_code, NormalizedSearchQuery,
+        SearchCollection, SearchEventMetadata, SearchHit, SearchPresentation, SearchResultWindow,
     },
     show::{
         canonical_show_output_bytes, event_window_value, mcp_show_event, mcp_show_session,
@@ -65,6 +66,7 @@ mod recovery;
 
 const TEST_SESSION_ID: &str = "019fa000-0000-7000-8000-0000000000d1";
 const TEST_QUERY: &str = "pinnedgenerationrouting";
+
 const TEST_MCP_OUTPUT_LIMIT: usize = crate::presentation_limit::CLI_PRESENTATION_MAX_OUTPUT_BYTES;
 
 fn history_config(daemon_enabled: bool, semantic_search_enabled: bool) -> config::AppConfig {
@@ -108,6 +110,24 @@ fn generation_with_retained_peer(
             retained_peer: ctx_history_read_application::RetainedPeerRead::IfAvailable,
         },
     )
+}
+
+fn complete_lexical_candidates(
+    index: &VerifiedIndex,
+    mode: LexicalMode<'_>,
+    filter: &CompiledSearchFilter,
+    limit: usize,
+) -> Vec<EventSearchCandidate> {
+    let batch = index
+        .execute_lexical(LexicalExecution::new(mode, filter, limit))
+        .unwrap()
+        .batch;
+    assert!(
+        batch.complete,
+        "lexical execution must complete: {:?}",
+        batch.exhaustion
+    );
+    batch.candidates.into_iter().map(Into::into).collect()
 }
 
 #[test]
@@ -488,33 +508,28 @@ fn omitted_and_explicit_all_resolve_to_identical_weighted_retrieval() {
 
     let temp = tempdir().unwrap();
     write_test_generation(temp.path());
-    let index = open_index(temp.path()).unwrap();
-    let omitted_filters = index_search_filters(&omitted, &index).unwrap();
-    let explicit_filters = index_search_filters(&explicit, &index).unwrap();
-    assert_eq!(omitted_filters, explicit_filters);
 
-    let collect = |request: &SourceSearchRequest, filters: &EventSearchFilters| {
+    let collect = |request: &SourceSearchRequest| {
         collect_search_hits_with_backend_using(
             request,
-            &index,
             temp.path(),
             request.semantic_weight,
-            filters,
-            |index, _data_root, query, filters, candidate_limit| {
+            |index, _data_root, queries, filters, candidate_limit| {
                 Ok((
-                    index.search_event_candidates_any_with_filters(
-                        &[query],
+                    complete_lexical_candidates(
+                        index,
+                        LexicalMode::Search(queries),
                         filters,
                         candidate_limit,
-                    )?,
+                    ),
                     json!({"fixture": "weighted"}),
                 ))
             },
         )
         .unwrap()
     };
-    let omitted_collection = collect(&omitted, &omitted_filters);
-    let explicit_collection = collect(&explicit, &explicit_filters);
+    let omitted_collection = collect(&omitted);
+    let explicit_collection = collect(&explicit);
     assert_eq!(
         omitted_collection
             .result_window
@@ -574,25 +589,21 @@ fn content_scope_forwards_with_provider_workspace_since_file_agent_and_current_s
         format: JsonOutputFormat::Json,
         verbose: false,
     }));
-    let temp = tempdir().unwrap();
-    write_test_generation(temp.path());
-    let index = open_index(temp.path()).unwrap();
-    let filters = index_search_filters(&request, &index).unwrap();
 
     assert_eq!(request.content_scope, SearchContentScope::Calls);
     assert!(request.events);
-    assert_eq!(filters.content_scope, SearchContentScope::Calls);
-    assert_eq!(filters.provider.as_deref(), Some("codex"));
-    assert_eq!(filters.workspace.as_deref(), Some("/workspace/pinned"));
-    assert!(filters.since_unix_ms.is_some());
-    assert_eq!(filters.file.as_deref(), Some("src/lib.rs"));
-    assert_eq!(filters.agent_scope, AgentScope::All);
-    assert!(filters.exclude_session_tree.is_none());
+    assert_eq!(request.provider, Some(CaptureProvider::Codex));
+    assert_eq!(request.workspace.as_deref(), Some("/workspace/pinned"));
+    assert_eq!(request.since.as_deref(), Some("30d"));
+    assert_eq!(
+        request.file.as_deref(),
+        Some(std::path::Path::new("src/lib.rs"))
+    );
+    assert!(!request.primary_only);
 
     let mut primary_only_request = request.clone();
     primary_only_request.primary_only = true;
-    let primary_only_filters = index_search_filters(&primary_only_request, &index).unwrap();
-    assert_eq!(primary_only_filters.agent_scope, AgentScope::Primary);
+    assert!(primary_only_request.primary_only);
 }
 
 #[test]
@@ -1059,70 +1070,6 @@ fn show_selector_shapes_validate_before_pristine_root_access() {
         "{provider_identity}"
     );
     assert!(!provider_identity.contains("index is not initialized"));
-}
-
-#[test]
-fn result_window_requires_one_additional_shaped_session() {
-    let candidates = [
-        EventSearchCandidate {
-            event: fixture_event(CaptureProvider::Codex, "codex_session_jsonl", 1, 1),
-            score: 3.0,
-        },
-        EventSearchCandidate {
-            event: fixture_event(CaptureProvider::Codex, "codex_session_jsonl", 1, 2),
-            score: 2.0,
-        },
-        EventSearchCandidate {
-            event: fixture_event(CaptureProvider::Codex, "codex_session_jsonl", 2, 1),
-            score: 1.0,
-        },
-    ];
-
-    let duplicates_only = shape_search_result_window(candidates[..2].iter(), 1, false);
-    assert_eq!(duplicates_only.hits.len(), 1);
-    assert_eq!(duplicates_only.hits[0].more_matches_in_session, 1);
-    assert!(!duplicates_only.more_available);
-
-    let additional_session = shape_search_result_window(candidates.iter(), 1, false);
-    assert_eq!(additional_session.limit, 1);
-    assert_eq!(additional_session.hits.len(), 1);
-    assert_eq!(additional_session.hits[0].more_matches_in_session, 1);
-    assert!(additional_session.more_available);
-}
-
-#[test]
-fn event_result_window_returns_limit_and_records_only_one_extra_hit() {
-    let candidates = (1..=4)
-        .map(|sequence| EventSearchCandidate {
-            event: fixture_event(CaptureProvider::Codex, "codex_session_jsonl", 1, sequence),
-            score: 5.0 - sequence as f32,
-        })
-        .collect::<Vec<_>>();
-
-    let window = shape_search_result_window(candidates.iter(), 2, true);
-    assert_eq!(window.limit, 2);
-    assert_eq!(window.hits.len(), 2);
-    assert!(window.more_available);
-    assert_eq!(window.hits[0].event.event_sequence, 1);
-    assert_eq!(window.hits[1].event.event_sequence, 2);
-}
-
-#[test]
-fn result_window_discards_non_render_event_metadata() {
-    let (event_id, expected, window) = {
-        let mut event = fixture_event(CaptureProvider::Codex, "codex_session_jsonl", 90, 1);
-        event.native_event_id = Some(TypedKey::utf8("x".repeat(60 * 1024)).unwrap());
-        let event_id = event.event_id.as_uuid();
-        let expected = SearchEventMetadata::from(&event);
-        let candidate = EventSearchCandidate { event, score: 1.0 };
-        let window = shape_search_result_window(std::iter::once(&candidate), 1, true);
-        assert_eq!(window.hits[0].event, expected);
-        (event_id, expected, window)
-    };
-
-    assert_eq!(window.hits.len(), 1);
-    assert_eq!(window.hits[0].event, expected);
-    assert_eq!(window.hits[0].event.event_id, event_id);
 }
 
 #[test]

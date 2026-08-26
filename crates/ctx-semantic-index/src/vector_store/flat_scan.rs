@@ -140,6 +140,7 @@ pub(crate) struct FlatScanResult {
 pub(crate) struct FlatScanHit {
     pub(crate) event_id: Uuid,
     pub(crate) chunk_ordinal: u32,
+    pub(crate) query_ordinal: usize,
     pub(crate) similarity: f32,
     pub(crate) location: Option<FlatScanLocation>,
 }
@@ -150,6 +151,7 @@ impl PartialEq for FlatScanHit {
         // resolution guarantees one source record for an event chunk.
         self.event_id == other.event_id
             && self.chunk_ordinal == other.chunk_ordinal
+            && self.query_ordinal == other.query_ordinal
             && self.similarity.total_cmp(&other.similarity) == Ordering::Equal
     }
 }
@@ -169,6 +171,7 @@ impl Ord for FlatScanHit {
         self.similarity
             .total_cmp(&other.similarity)
             .then_with(|| other.event_id.cmp(&self.event_id))
+            .then_with(|| other.query_ordinal.cmp(&self.query_ordinal))
             .then_with(|| other.chunk_ordinal.cmp(&self.chunk_ordinal))
     }
 }
@@ -182,6 +185,7 @@ pub(crate) enum FlatScanInput {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum FlatScanError {
     ZeroDimensions,
+    NoQueries,
     DimensionByteSizeOverflow {
         dimensions: usize,
     },
@@ -226,6 +230,7 @@ impl fmt::Display for FlatScanError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ZeroDimensions => formatter.write_str("flat F32 dimensions must be non-zero"),
+            Self::NoQueries => formatter.write_str("flat F32 scan requires at least one query"),
             Self::DimensionByteSizeOverflow { dimensions } => write!(
                 formatter,
                 "flat F32 byte size overflows for {dimensions} dimensions"
@@ -316,12 +321,12 @@ fn chunk_suffix(chunk_ordinal: Option<u32>) -> String {
 
 /// Streaming exact scanner over active, event-grouped chunks.
 ///
-/// The borrowed F32 query constructor performs no allocation. The little-endian
-/// byte constructor owns exactly one `dimensions * 4` decoded query buffer.
-/// During scanning, retained state is one event candidate plus at most `top_k`
-/// heap entries.
+/// The borrowed F32 query constructor retains one small query-reference vector.
+/// The little-endian byte constructor owns exactly one `dimensions * 4` decoded
+/// query buffer. During scanning, retained state is the ordered query vectors,
+/// one event candidate, and at most `top_k` heap entries.
 pub(crate) struct ExactFlatF32Scan<'query> {
-    query: Cow<'query, [f32]>,
+    queries: Vec<Cow<'query, [f32]>>,
     config: FlatScanConfig,
     vector_bytes: usize,
     dot_product_kernel: ExactDotProductKernel,
@@ -332,31 +337,51 @@ pub(crate) struct ExactFlatF32Scan<'query> {
 }
 
 impl<'query> ExactFlatF32Scan<'query> {
+    #[cfg(test)]
     pub(crate) fn new(query: &'query [f32], config: FlatScanConfig) -> Result<Self, FlatScanError> {
-        Self::from_query(Cow::Borrowed(query), config)
+        Self::from_queries(vec![Cow::Borrowed(query)], config)
     }
 
-    fn from_query(
-        query: Cow<'query, [f32]>,
+    pub(crate) fn new_multi(
+        queries: &[&'query [f32]],
+        config: FlatScanConfig,
+    ) -> Result<Self, FlatScanError> {
+        // One heap over each event's maximum query score is rank-equivalent to
+        // unioning every query's top-k and then strict-max deduping: if an event
+        // were absent from the top-k for a query attaining its maximum, that
+        // query already has k events that also outrank it globally.
+        Self::from_queries(
+            queries.iter().map(|query| Cow::Borrowed(*query)).collect(),
+            config,
+        )
+    }
+
+    fn from_queries(
+        queries: Vec<Cow<'query, [f32]>>,
         config: FlatScanConfig,
     ) -> Result<Self, FlatScanError> {
         let vector_bytes = validate_config(config)?;
-        if query.len() != config.dimensions {
-            return Err(FlatScanError::DimensionMismatch {
-                input: FlatScanInput::Query,
-                expected: config.dimensions,
-                actual: query.len(),
-                chunk_ordinal: None,
-            });
+        if queries.is_empty() {
+            return Err(FlatScanError::NoQueries);
         }
-        validate_normalized_f32(
-            &query,
-            FlatScanInput::Query,
-            None,
-            config.normalization_tolerance,
-        )?;
+        for query in &queries {
+            if query.len() != config.dimensions {
+                return Err(FlatScanError::DimensionMismatch {
+                    input: FlatScanInput::Query,
+                    expected: config.dimensions,
+                    actual: query.len(),
+                    chunk_ordinal: None,
+                });
+            }
+            validate_normalized_f32(
+                query,
+                FlatScanInput::Query,
+                None,
+                config.normalization_tolerance,
+            )?;
+        }
         Ok(Self {
-            query,
+            queries,
             config,
             vector_bytes,
             dot_product_kernel: ExactDotProductKernel::detect(),
@@ -499,13 +524,8 @@ impl<'query> ExactFlatF32Scan<'query> {
             Some(metadata.chunk_ordinal),
             self.config.normalization_tolerance,
         )?;
-        let similarity = self.dot_product_kernel.dot(&self.query, vector);
-        if !similarity.is_finite() {
-            return Err(FlatScanError::NonFiniteDotProduct {
-                chunk_ordinal: Some(metadata.chunk_ordinal),
-            });
-        }
-        self.record_scored_chunk(metadata, similarity);
+        let (query_ordinal, similarity) = self.best_query_similarity(metadata, vector)?;
+        self.record_scored_chunk(metadata, query_ordinal, similarity);
         Ok(())
     }
 
@@ -527,13 +547,8 @@ impl<'query> ExactFlatF32Scan<'query> {
             .counters
             .vector_bytes_read
             .saturating_add(self.vector_bytes);
-        let similarity = self.dot_product_kernel.dot(&self.query, vector);
-        if !similarity.is_finite() {
-            return Err(FlatScanError::NonFiniteDotProduct {
-                chunk_ordinal: Some(metadata.chunk_ordinal),
-            });
-        }
-        self.record_scored_chunk(metadata, similarity);
+        let (query_ordinal, similarity) = self.best_query_similarity(metadata, vector)?;
+        self.record_scored_chunk(metadata, query_ordinal, similarity);
         Ok(())
     }
 
@@ -556,14 +571,44 @@ impl<'query> ExactFlatF32Scan<'query> {
             .counters
             .vector_bytes_read
             .saturating_add(self.vector_bytes);
+        let query = self
+            .queries
+            .first()
+            .expect("flat scan construction requires at least one query");
         let similarity = validate_and_dot_le_bytes(
-            &self.query,
+            query,
             vector,
             Some(metadata.chunk_ordinal),
             self.config.normalization_tolerance,
         )?;
-        self.record_scored_chunk(metadata, similarity);
+        self.counters.dot_products = self.counters.dot_products.saturating_add(1);
+        self.record_scored_chunk(metadata, 0, similarity);
         Ok(())
+    }
+
+    fn best_query_similarity(
+        &mut self,
+        metadata: ActiveChunk,
+        vector: &[f32],
+    ) -> Result<(usize, f32), FlatScanError> {
+        let mut best = None::<(usize, f32)>;
+        for (query_ordinal, query) in self.queries.iter().enumerate() {
+            let similarity = self.dot_product_kernel.dot(query, vector);
+            self.counters.dot_products = self.counters.dot_products.saturating_add(1);
+            if !similarity.is_finite() {
+                return Err(FlatScanError::NonFiniteDotProduct {
+                    chunk_ordinal: Some(metadata.chunk_ordinal),
+                });
+            }
+            // Strict replacement preserves the first ordered alternative on
+            // equal score, matching the former application-level max dedupe.
+            if best.is_none_or(|(_, best_similarity)| {
+                similarity.total_cmp(&best_similarity) == Ordering::Greater
+            }) {
+                best = Some((query_ordinal, similarity));
+            }
+        }
+        best.ok_or(FlatScanError::NoQueries)
     }
 
     fn ensure_usable(&self) -> Result<(), FlatScanError> {
@@ -585,21 +630,28 @@ impl<'query> ExactFlatF32Scan<'query> {
         }
     }
 
-    fn record_scored_chunk(&mut self, metadata: ActiveChunk, similarity: f32) {
+    fn record_scored_chunk(
+        &mut self,
+        metadata: ActiveChunk,
+        query_ordinal: usize,
+        similarity: f32,
+    ) {
         self.counters.chunks_scanned = self.counters.chunks_scanned.saturating_add(1);
-        self.counters.dot_products = self.counters.dot_products.saturating_add(1);
         let candidate = FlatScanHit {
             event_id: metadata.event_id,
             chunk_ordinal: metadata.chunk_ordinal,
+            query_ordinal,
             similarity,
             location: metadata.location,
         };
         match &mut self.pending_event {
             Some(pending) if pending.event_id == candidate.event_id => {
-                let better_chunk = candidate.similarity.total_cmp(&pending.similarity)
-                    == Ordering::Greater
-                    || (candidate.similarity.total_cmp(&pending.similarity) == Ordering::Equal
-                        && candidate.chunk_ordinal < pending.chunk_ordinal);
+                let score_order = candidate.similarity.total_cmp(&pending.similarity);
+                let better_chunk = score_order == Ordering::Greater
+                    || (score_order == Ordering::Equal
+                        && (candidate.query_ordinal < pending.query_ordinal
+                            || (candidate.query_ordinal == pending.query_ordinal
+                                && candidate.chunk_ordinal < pending.chunk_ordinal)));
                 if better_chunk {
                     *pending = candidate;
                 }
@@ -662,7 +714,7 @@ impl ExactFlatF32Scan<'static> {
         for bytes in query.chunks_exact(std::mem::size_of::<f32>()) {
             decoded.push(f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]));
         }
-        Self::from_query(Cow::Owned(decoded), config)
+        Self::from_queries(vec![Cow::Owned(decoded)], config)
     }
 }
 

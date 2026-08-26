@@ -30,10 +30,10 @@ duplicate, or ambiguous identity evidence must not become a qualifying
 The machine-readable authority is
 [`mcp-tool-call-attribution-capabilities.json`](mcp-tool-call-attribution-capabilities.json).
 Its 49 capability lanes contain three `exact`, 45 `not-qualified`, and one
-`excluded` row. Each exact row names its current implementation and parser
-revision plus the owning Cargo/Bazel suite and live Rust tests. The checker
-resolves those references against the repository; the owning targets execute
-the behavioral tests through normal CI.
+`excluded` row. Each exact row names its current implementation plus the owning
+Cargo/Bazel suite and live Rust tests. The checker resolves those references
+against the repository; the owning targets execute the behavioral tests through
+normal CI.
 
 For Codex's session-tree route, only unversioned generation 1 is exact.
 Producer versions 0.200.0, 0.201.0, and 0.202.0 are distinct
@@ -75,9 +75,8 @@ unrelated metadata.
    implication.
 2. Record public evidence, observed pins, and fail-closed treatment of unknown
    generations.
-3. For `exact`, bind the current parser revision and the owning runtime tests.
-   For `not-qualified`, choose one primary typed reason and explain secondary
-   defects in `detail`.
+3. For `exact`, bind the owning runtime tests. For `not-qualified`, choose one
+   primary typed reason and explain secondary defects in `detail`.
 4. Run `python3 scripts/check-mcp-tool-call-attribution-capabilities.py`, its
    mutation tests, the three focused provider suites, and the normal docs
    check.

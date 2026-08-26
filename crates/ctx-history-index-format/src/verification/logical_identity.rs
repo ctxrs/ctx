@@ -18,10 +18,8 @@ pub(super) fn verify_session_witness_key(record: &VerificationRecord) -> Result<
     let Some(key) = record.session_authority else {
         return Ok(false);
     };
-    let (session_id, source_owner) = SessionAuthorityKey::decode(&key)?.identities()?;
-    if session_id != record.core_record.session_id
-        || source_owner != record.core_record.source.identity()
-    {
+    let key = SessionAuthorityKey::decode(&key)?;
+    if key != SessionAuthorityKey::for_core_record(&record.core_record)? {
         return Err(IndexError::InvalidStoredDocumentField("session_authority"));
     }
     Ok(true)
@@ -302,7 +300,7 @@ pub(super) fn canonical_uuid_term(term: &[u8], field: &'static str) -> Result<Uu
 mod tests {
     use ctx_history_core::{
         derive_event_id, derive_session_id, CoreRecord, EventIdentityInput, NativeItemKey,
-        NativeSessionKey, SessionIdentityInput, SourceAnchor, SourceKey, StableEntityId, TypedKey,
+        NativeSessionKey, SessionIdentityInput, SourceAnchor, SourceKey, TypedKey,
     };
     use tantivy::{indexer::NoMergePolicy, schema::TantivyDocument};
 
@@ -454,15 +452,7 @@ mod tests {
         let source = source();
         let record = core_record(&source, "session", 1);
         let witness_record = core_record(&source, "other-session", 2);
-        let mut authority = [0; crate::SESSION_AUTHORITY_KEY_LEN];
-        let uuid_prefix_len = witness_record.session_id.as_uuid().as_bytes().len();
-        authority[..uuid_prefix_len]
-            .copy_from_slice(witness_record.session_id.as_uuid().as_bytes());
-        authority[uuid_prefix_len..uuid_prefix_len + StableEntityId::CANONICAL_LEN]
-            .copy_from_slice(&witness_record.session_id.encode_canonical().unwrap());
-        authority[uuid_prefix_len + StableEntityId::CANONICAL_LEN..]
-            .copy_from_slice(&source.identity().encode_canonical().unwrap());
-        let authority = SessionAuthorityKey::decode(&authority)
+        let authority = SessionAuthorityKey::for_core_record(&witness_record)
             .unwrap()
             .into_bytes();
         let stored = VerificationRecord {

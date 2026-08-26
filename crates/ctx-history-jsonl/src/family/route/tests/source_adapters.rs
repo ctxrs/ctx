@@ -725,6 +725,7 @@ pub(super) fn expected_state(
                     emitted_bytes: 0,
                     exact_scan_bytes: None,
                     record_rejections: SourceBackedRecordRejectionDrafts::default(),
+                    record_rejections_committed: true,
                 },
             )
         })

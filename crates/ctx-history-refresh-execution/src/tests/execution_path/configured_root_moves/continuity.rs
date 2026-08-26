@@ -365,38 +365,34 @@ fn released_overlap_root_move_remove_and_readd_preserves_exact_identity() {
         };
         assert_eq!(
             published
-                .search_event_candidates_with_filters("releasedfirstcanary", &work_filter, 10)
+                .complete_filtered_lexical_search("releasedfirstcanary", &work_filter, 10)
                 .unwrap()
                 .len(),
             1
         );
         assert_eq!(
             published
-                .search_event_candidates_with_filters("releasedsecondcanary", &work_filter, 10)
+                .complete_filtered_lexical_search("releasedsecondcanary", &work_filter, 10)
                 .unwrap()
                 .len(),
             1
         );
         assert!(published
-            .search_event_candidates_with_filters("oldautomaticcanary", &work_filter, 10)
+            .complete_filtered_lexical_search("oldautomaticcanary", &work_filter, 10)
             .unwrap()
             .is_empty());
         assert_eq!(
             published
-                .search_event_candidates("oldautomaticcanary", 10)
+                .complete_lexical_search("oldautomaticcanary", 10)
                 .unwrap()
                 .len(),
             1
         );
         let published_identity = ["releasedfirstcanary", "releasedsecondcanary"].map(|marker| {
-            let hits = published.search_event_candidates(marker, 10).unwrap();
+            let hits = published.complete_lexical_search(marker, 10).unwrap();
             assert_eq!(hits.len(), 1, "{marker}");
-            serde_json::to_vec(&(
-                hits[0].event.source.clone(),
-                hits[0].event.session_id,
-                hits[0].event.event_id,
-            ))
-            .unwrap()
+            let event = exact_event(&published, &hits[0]);
+            serde_json::to_vec(&(event.source, event.session_id, event.event_id)).unwrap()
         });
         drop(published);
 
@@ -425,13 +421,13 @@ fn released_overlap_root_move_remove_and_readd_preserves_exact_identity() {
         assert_eq!(removed.manifest().source_routes().len(), 1);
         assert_eq!(
             removed
-                .search_event_candidates("oldautomaticcanary", 10)
+                .complete_lexical_search("oldautomaticcanary", 10)
                 .unwrap()
                 .len(),
             1
         );
         assert!(removed
-            .search_event_candidates("releasedfirstcanary", 10)
+            .complete_lexical_search("releasedfirstcanary", 10)
             .unwrap()
             .is_empty());
         drop(removed);
@@ -483,18 +479,18 @@ fn released_overlap_root_move_remove_and_readd_preserves_exact_identity() {
         };
         assert_eq!(
             rejoined
-                .search_event_candidates_with_filters("releasedfirstcanary", &work_filter, 10)
+                .complete_filtered_lexical_search("releasedfirstcanary", &work_filter, 10)
                 .unwrap()
                 .len(),
             1
         );
         assert!(rejoined
-            .search_event_candidates_with_filters("oldautomaticcanary", &work_filter, 10)
+            .complete_filtered_lexical_search("oldautomaticcanary", &work_filter, 10)
             .unwrap()
             .is_empty());
         assert_eq!(
             rejoined
-                .search_event_candidates("oldautomaticcanary", 10)
+                .complete_lexical_search("oldautomaticcanary", 10)
                 .unwrap()
                 .len(),
             1
@@ -503,15 +499,11 @@ fn released_overlap_root_move_remove_and_readd_preserves_exact_identity() {
             .into_iter()
             .zip(published_identity)
         {
-            let hits = rejoined.search_event_candidates(marker, 10).unwrap();
+            let hits = rejoined.complete_lexical_search(marker, 10).unwrap();
             assert_eq!(hits.len(), 1, "{marker}");
+            let event = exact_event(&rejoined, &hits[0]);
             assert_eq!(
-                serde_json::to_vec(&(
-                    hits[0].event.source.clone(),
-                    hits[0].event.session_id,
-                    hits[0].event.event_id,
-                ))
-                .unwrap(),
+                serde_json::to_vec(&(event.source, event.session_id, event.event_id)).unwrap(),
                 expected,
                 "{marker} source/session/event identity"
             );
@@ -672,14 +664,14 @@ fn naming_a_failing_automatic_home_carries_it_while_named_peer_advances() {
     assert!(automatic_root.routes().is_empty());
     assert_eq!(
         published
-            .search_event_candidates("retainedautomaticfixture", 10)
+            .complete_lexical_search("retainedautomaticfixture", 10)
             .unwrap()
             .len(),
         1
     );
     assert_eq!(
         published
-            .search_event_candidates("advancedpeerfixture", 10)
+            .complete_lexical_search("advancedpeerfixture", 10)
             .unwrap()
             .len(),
         1
@@ -819,14 +811,14 @@ fn unchanged_symlinked_configured_root_retains_history_while_peer_advances() {
     assert_eq!(retained_root.routes(), retained_routes);
     assert_eq!(
         published
-            .search_event_candidates("retainedsymlinkfixture", 10)
+            .complete_lexical_search("retainedsymlinkfixture", 10)
             .unwrap()
             .len(),
         1
     );
     assert_eq!(
         published
-            .search_event_candidates("advancedsymlinkpeerfixture", 10)
+            .complete_lexical_search("advancedsymlinkpeerfixture", 10)
             .unwrap()
             .len(),
         1

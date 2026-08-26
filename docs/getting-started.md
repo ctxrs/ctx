@@ -141,13 +141,13 @@ ctx sources --format json
 ```
 
 `sources` checks known provider locations on the current machine. Its concise
-default hides empty providers; `ctx sources --all` retains empty and missing
-locations for diagnostics. Today it
+default hides empty automatic locations while keeping configured roots visible;
+`ctx sources --all` retains the full empty and missing inventory for diagnostics. Today it
 reports supported Codex, Pi, Antigravity, Claude, OpenCode, Kilo Code, Gemini,
 Cursor, Zed, Copilot CLI, Factory AI Droid, Warp, and other supported local
 history paths. JSON rows include
-`status` and `importable`; `status: "empty"` means the default location exists
-but no provider-specific transcript files were found there, and
+`status` and `importable`; `status: "empty"` means the automatic location or
+configured root exists but no provider-specific transcript files were found there, and
 `status: "unknown"` means the bounded transcript probe hit its scan budget.
 
 ## 4. Re-Run Or Target Imports

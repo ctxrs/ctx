@@ -1,5 +1,26 @@
 use super::{ctx, support::*};
 
+fn strip_ansi_output(bytes: &[u8]) -> String {
+    let mut stripped = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == 0x1b && bytes.get(index + 1) == Some(&b'[') {
+            index += 2;
+            while index < bytes.len() {
+                let byte = bytes[index];
+                index += 1;
+                if (0x40..=0x7e).contains(&byte) {
+                    break;
+                }
+            }
+        } else {
+            stripped.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(stripped).unwrap()
+}
+
 fn source_entries(report: &Value) -> &[Value] {
     report["sources"].as_array().unwrap()
 }
@@ -145,6 +166,96 @@ fn configured_missing_roots_remain_listed_without_exposing_automatic_missing_rou
         human.contains("--root <replacement-path> --replace"),
         "{human}"
     );
+}
+
+#[test]
+fn configured_empty_root_is_complete_and_format_independent() {
+    let temp = tempdir();
+    let root = temp.path().join("work-gemini");
+    let state = temp.path().join("state");
+    let text_events = temp.path().join("sources-text-analytics.jsonl");
+    let json_events = temp.path().join("sources-json-analytics.jsonl");
+    fs::create_dir_all(&root).unwrap();
+    fs::create_dir_all(data_root(&temp)).unwrap();
+    fs::write(
+        data_root(&temp).join("config.toml"),
+        format!(
+            "[sources]\nautomatic = false\n\n[sources.roots.work]\nprovider = \"gemini\"\npath = {:?}\ngroup = \"team\"\n",
+            root.display().to_string(),
+        ),
+    )
+    .unwrap();
+
+    let plain = ctx(&temp)
+        .args(["--color=never", "sources"])
+        .env("XDG_STATE_HOME", &state)
+        .env("LOCALAPPDATA", &state)
+        .env("CTX_ANALYTICS_ENABLED", "1")
+        .env("CTX_ANALYTICS_ENDPOINT", file_url(&text_events))
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let plain_stdout = String::from_utf8(plain.stdout).unwrap();
+    assert!(plain_stdout.contains("gemini"), "{plain_stdout}");
+    assert!(plain_stdout.contains("empty"), "{plain_stdout}");
+    assert!(plain_stdout.contains("work (team)"), "{plain_stdout}");
+    let concise_root = Path::new("~").join("work-gemini");
+    assert!(
+        plain_stdout.contains(concise_root.to_str().unwrap()),
+        "{plain_stdout}"
+    );
+    assert!(
+        !plain_stdout.contains("no named roots are available"),
+        "{plain_stdout}"
+    );
+
+    let styled = ctx(&temp)
+        .args(["--color=always", "sources"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    assert_eq!(strip_ansi_output(&styled.stdout), plain_stdout);
+
+    let json = ctx(&temp)
+        .args(["--color=always", "sources", "--format=json"])
+        .env("XDG_STATE_HOME", &state)
+        .env("LOCALAPPDATA", &state)
+        .env("CTX_ANALYTICS_ENABLED", "1")
+        .env("CTX_ANALYTICS_ENDPOINT", file_url(&json_events))
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let report: Value = serde_json::from_slice(&json.stdout).unwrap();
+    let source = source_entry(&report, "gemini", Some("gemini_cli_chat_recording_jsonl"));
+    assert_eq!(source["status"], "empty", "{report:#}");
+    assert_eq!(source["importable"], false, "{report:#}");
+    assert_eq!(
+        source["selection"],
+        json!({"kind": "configured", "root": "work", "group": "team"}),
+        "{report:#}"
+    );
+
+    let all = json_output(ctx(&temp).args(["--color=always", "sources", "--all", "--format=json"]));
+    let all_source = source_entry(&all, "gemini", Some("gemini_cli_chat_recording_jsonl"));
+    assert_eq!(all_source["status"], "empty", "{all:#}");
+
+    let text_event = read_analytics_events(&text_events).remove(0);
+    let json_event = read_analytics_events(&json_events).remove(0);
+    assert_operation_event(&text_event, "sources", "success");
+    assert_operation_event(&json_event, "sources", "success");
+    let text_properties = analytics_event_properties(&text_event);
+    let json_properties = analytics_event_properties(&json_event);
+    for (property, expected) in [
+        ("providers_detected_bucket", "1"),
+        ("providers_existing_bucket", "1"),
+        ("providers_importable_bucket", "0"),
+    ] {
+        assert_eq!(text_properties[property], expected, "{text_properties:#?}");
+        assert_eq!(json_properties[property], expected, "{json_properties:#?}");
+    }
 }
 
 #[test]

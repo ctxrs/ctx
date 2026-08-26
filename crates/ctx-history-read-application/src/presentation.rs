@@ -15,11 +15,13 @@ use unicode_segmentation::{GraphemeCursor, UnicodeSegmentation as _};
 
 mod hydration;
 
-pub(crate) use hydration::presentations_for_search_hits;
+pub(crate) use hydration::hydrate_ranked_search_collection;
+#[cfg(test)]
+pub(crate) use hydration::hydrate_ranked_search_collection_with_budget;
 pub use hydration::{
-    presentations_for_search_hits_with_budget, SearchPresentation,
-    SearchPresentationHydrationBudget, SearchPresentationRetentionBudgetExceeded,
-    SEARCH_PRESENTATION_HYDRATION_BUDGET, SEARCH_PRESENTATION_MAX_RETAINED_SNIPPET_BYTES,
+    SearchPresentation, SearchPresentationHydrationBudget,
+    SearchPresentationRetentionBudgetExceeded, SEARCH_PRESENTATION_HYDRATION_BUDGET,
+    SEARCH_PRESENTATION_MAX_RETAINED_SNIPPET_BYTES,
 };
 
 pub const MAX_SEARCH_RESULTS: usize = 200;

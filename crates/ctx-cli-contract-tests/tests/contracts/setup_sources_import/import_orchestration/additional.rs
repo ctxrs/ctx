@@ -339,6 +339,8 @@ fn import_all_skips_empty_gemini_source() {
     assert_eq!(gemini["status"], "empty");
     assert_eq!(gemini["native_import"], true);
     assert_eq!(gemini["importable"], false);
+    let concise = success_stdout(ctx(&temp).arg("sources"));
+    assert!(!concise.contains("~/.gemini"), "{concise}");
 
     let imported =
         json_output(ctx(&temp).args(["import", "--all", "--format=json", "--progress", "none"]));

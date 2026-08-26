@@ -6,7 +6,8 @@ a user reviews it.
 
 Command result JSON uses `schema_version: 1` except for
 `ctx setup --format json`, `ctx stats --format json`,
-`ctx import --format json`, and `ctx search --format json`.
+`ctx import --format json`, `ctx search --format json`,
+`ctx status --format json`, `ctx daemon status`, and MCP `status`.
 Progress-event JSON is stderr progress output and does not include
 `schema_version`.
 
@@ -80,7 +81,7 @@ ctx status --format json
 
 Reads local storage state and returns:
 
-- `schema_version`;
+- `schema_version: 2`;
 - `initialized`;
 - `data_root`;
 - `config_path`;

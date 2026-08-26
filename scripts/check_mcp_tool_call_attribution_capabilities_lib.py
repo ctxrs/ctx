@@ -109,7 +109,7 @@ ROW_FIELDS = set(
 )
 CHECK_FIELDS = set(
     "provider_id route source_format source_schema producer_bound implementation_source "
-    "parser_revision suite_id tests".split()
+    "suite_id tests".split()
 )
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 VERSION_RE = re.compile(r"^\d+(?:\.\d+){1,3}(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?$")
@@ -749,11 +749,8 @@ def validate_exact_checks(
             check.get("implementation_source"), f"{label}.implementation_source"
         )
         implementation_text = implementation.read_text(encoding="utf-8")
-        parser_revision = require_string(check.get("parser_revision"), f"{label}.parser_revision")
         if f'"{schema}"' not in implementation_text:
             fail(f"{label}.source_schema is absent from its implementation source")
-        if f'"{parser_revision}"' not in implementation_text:
-            fail(f"{label}.parser_revision is stale or absent from its implementation source")
         suite_id = require_string(check.get("suite_id"), f"{label}.suite_id")
         binding, package_dir, target, _manifest = resolve_suite(suite_id)
         suites.add(suite_id)
@@ -817,9 +814,6 @@ def validate_public_docs(
     required = (
         "Codex `codex_session_jsonl_tree` / `codex-nativepath-jsonl-v0`",
         "49 capability lanes: three `exact`, 45 `not-qualified`, and one `excluded`",
-        "`codex-nativepath-core-activity-v9-record-coverage`",
-        "`warp-source-backed-logical-v7-neutral-activity-agent-scope`",
-        "`copilot-cli-direct-native-jsonl-v8-optional-activity-admission`",
         "`activity.invocation`",
         "`provider_call_id`",
         "`protocol` equal to `mcp`",
@@ -856,8 +850,8 @@ def validate_contract(
 ) -> dict[str, Any]:
     if support.get("schema_version") != 2:
         fail("provider support matrix schema_version must be 2")
-    if capability.get("schema_version") != 4 or capability.get("capability_revision") != 4:
-        fail("capability schema_version and capability_revision must be 4")
+    if capability.get("schema_version") != 5 or capability.get("capability_revision") != 4:
+        fail("capability schema_version must be 5 and capability_revision must be 4")
     if capability.get("capability") != "exact_mcp_tool_call_attribution":
         fail("unexpected capability name")
     if capability.get("key_fields") != [

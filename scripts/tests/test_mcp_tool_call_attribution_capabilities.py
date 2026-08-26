@@ -273,12 +273,6 @@ class CapabilityMutationTests(unittest.TestCase):
         self.exact_row("codex")["evidence"] = ["https://github.com/openai/codex"]
         self.assert_invalid("not a pinned GitHub blob/tree URL")
 
-    def test_stale_parser_revision_is_rejected(self) -> None:
-        self.capability["exact_checks"][1]["parser_revision"] = (
-            "warp-source-backed-logical-v3"
-        )
-        self.assert_invalid("parser_revision is stale")
-
     def test_contradictory_provider_docs_are_rejected(self) -> None:
         fixed = (
             "Capability revision 4 exact providers are Codex, Warp, and Copilot CLI."

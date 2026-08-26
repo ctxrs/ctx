@@ -1,5 +1,5 @@
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "capability": "exact_mcp_tool_call_attribution",
   "capability_revision": 4,
   "scope": "Exact event-local MCP dispatch server alias and advertised tool identity only; general provider import support is defined separately.",
@@ -432,7 +432,6 @@
       "provider_id": "codex", "route": "native_import", "source_format": "codex_session_jsonl_tree", "source_schema": "codex-nativepath-jsonl-v0",
       "producer_bound": {"kind": "unversioned", "generation": 1, "unknown_generations": "not-qualified"},
       "implementation_source": "crates/ctx-history-provider-codex/src/codex/nativepath/source_backed.rs",
-      "parser_revision": "codex-nativepath-core-activity-v9-record-coverage",
       "suite_id": "ctx-history-provider-codex::native_unit",
       "tests": [
         {"id": "codex::nativepath::rows::tests::mcp_terminal_activity_preserves_exact_server_tool_and_linkage", "source": "crates/ctx-history-provider-codex/src/codex/nativepath/rows/tests.rs"},
@@ -444,7 +443,6 @@
       "provider_id": "warp", "route": "native_import", "source_format": "warp_sqlite", "source_schema": "warp-agent-task-protobuf-v1",
       "producer_bound": {"kind": "unversioned", "generation": 1, "unknown_generations": "not-qualified"},
       "implementation_source": "crates/ctx-history-providers-sqlite-selected/src/providers/warp/source_backed.rs",
-      "parser_revision": "warp-source-backed-logical-v7-neutral-activity-agent-scope",
       "suite_id": "ctx-history-providers-sqlite-selected::native_unit",
       "tests": [
         {"id": "providers::warp::nativepath::decode::tests::qualified_mcp_success_error_cancellation_and_nontext_results_link_exactly", "source": "crates/ctx-history-providers-sqlite-selected/src/providers/warp/nativepath/decode/tests.rs"},
@@ -456,7 +454,6 @@
       "provider_id": "copilot_cli", "route": "native_import", "source_format": "copilot_cli_session_events_jsonl", "source_schema": "copilot-cli-direct-native-jsonl-v1",
       "producer_bound": {"kind": "unversioned", "generation": 1, "unknown_generations": "not-qualified"},
       "implementation_source": "crates/ctx-history-provider-native-jsonl/src/native_path/copilot.rs",
-      "parser_revision": "copilot-cli-direct-native-jsonl-v8-optional-activity-admission",
       "suite_id": "ctx-history-provider-native-jsonl::native_unit",
       "tests": [
         {"id": "native_path::source_backed::copilot_tests::invocation_preserves_exact_native_identity_and_arguments", "source": "crates/ctx-history-provider-native-jsonl/src/native_path/source_backed_copilot_tests.rs"},

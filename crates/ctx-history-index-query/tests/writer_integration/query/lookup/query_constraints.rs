@@ -44,21 +44,17 @@ fn custom_source_filters_use_the_core_native_event_identity() {
         hits.iter()
             .map(|candidate| candidate.event.event_id)
             .collect::<Vec<_>>(),
-        vec![event_id]
+        vec![event_id.as_uuid()]
     );
-    assert_eq!(
-        hits[0].event.native_event_id.as_ref(),
-        Some(&native_event_id)
-    );
-    assert!(filters.matches_source_identity(&hits[0].event));
-    let listed = index
-        .list_event_candidates_with_filters_batch(&filters, 10)
-        .unwrap();
+    let hydrated = index.event_by_id(event_id.as_uuid()).unwrap().unwrap();
+    assert_eq!(hydrated.native_event_id.as_ref(), Some(&native_event_id));
+    assert!(filters.matches_source_identity(&hydrated));
+    let listed = lexical_list_batch(&index, &filters, 10).unwrap();
     assert!(listed.complete);
     assert!(listed.candidate_set_exhaustive);
     assert_eq!(listed.candidates.len(), 1);
-    assert_eq!(listed.candidates[0].event.event_id, event_id);
-    let semantic = index.semantic_filter_projection(&filters).unwrap();
+    assert_eq!(listed.candidates[0].event.event_id, event_id.as_uuid());
+    let semantic = semantic_projection(&index, &filters).unwrap();
     assert_eq!(
         semantic.event_ids().collect::<Vec<_>>(),
         vec![event_id.as_uuid()]
@@ -111,7 +107,10 @@ fn allowed_source_keys_select_exact_physical_sources_in_one_index() {
         .search_event_candidates_with_filters("needle", &personal_only, 10)
         .unwrap();
     assert_eq!(hits.len(), 1);
-    assert!(hits[0].event.source.exact_descriptor_eq(&personal));
+    assert_eq!(
+        hits[0].event.source_owner_digest,
+        personal.identity().digest()
+    );
 
     let none = index
         .search_event_candidates_with_filters(

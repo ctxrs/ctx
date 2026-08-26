@@ -5,7 +5,7 @@ use ctx_history_core::{
 };
 use ctx_history_index_query::{
     LexicalSearchCandidate, LexicalTermCoverage, LexicalWorkCounter, LexicalWorkCounters,
-    LexicalWorkExhaustion,
+    LexicalWorkExhaustion, RankedEventRef,
 };
 use std::{cell::Cell, collections::BTreeMap};
 
@@ -37,6 +37,13 @@ fn candidate_session_id(source: &SourceKey, session: u64) -> StableEntityId {
         native_session_key: &native_session_key,
     })
     .unwrap()
+}
+
+fn candidate_session_coordinate(source: &SourceKey, session: u64) -> SearchSessionCoordinate {
+    SearchSessionCoordinate {
+        session_id: candidate_session_id(source, session).as_uuid(),
+        source_owner_digest: source.identity().digest(),
+    }
 }
 
 fn candidate(
@@ -89,30 +96,31 @@ fn candidate_from_source(
         subrecord_selector: None,
     })
     .unwrap();
+    let event = EventRecord {
+        event_id,
+        session_id,
+        parent_session_id: parent.map(|parent| candidate_session_id(source, parent)),
+        root_session_id: root.map(|root| candidate_session_id(source, root)),
+        session_relationship: None,
+        event_copy: None,
+        source: source.clone(),
+        provider: source.provider().to_owned(),
+        source_format: source.source_format().to_owned(),
+        provider_session_id: Some(format!("session-{session}")),
+        native_event_id: None,
+        agent_scope,
+        event_sequence,
+        occurred_at_unix_ms: Some(i64::try_from(event_sequence).unwrap()),
+        event_type: "message".to_owned(),
+        role: Some("assistant".to_owned()),
+    };
     EventSearchCandidate {
         score,
-        event: EventRecord {
-            event_id,
-            session_id,
-            parent_session_id: parent.map(|parent| candidate_session_id(source, parent)),
-            root_session_id: root.map(|root| candidate_session_id(source, root)),
-            session_relationship: None,
-            event_copy: None,
-            source: source.clone(),
-            provider: source.provider().to_owned(),
-            source_format: source.source_format().to_owned(),
-            provider_session_id: Some(format!("session-{session}")),
-            native_event_id: None,
-            agent_scope,
-            event_sequence,
-            occurred_at_unix_ms: Some(i64::try_from(event_sequence).unwrap()),
-            event_type: "message".to_owned(),
-            role: Some("assistant".to_owned()),
-        },
+        event: RankedEventRef::from(&event),
     }
 }
 
-fn result_scores(window: &SearchResultWindow) -> Vec<f32> {
+fn result_scores<Event>(window: &SearchResultWindow<Event>) -> Vec<f32> {
     window.hits.iter().map(|hit| hit.score).collect()
 }
 
@@ -309,23 +317,30 @@ fn all_agents_are_default_and_primary_only_is_the_sole_narrower_scope() {
 }
 
 fn same_source_grouping_claims(
-    coordinates: &[(StableEntityId, StableEntityId)],
+    coordinates: &[SearchSessionCoordinate],
     roots: &[(u64, Option<u64>)],
 ) -> ctx_history_index_query::Result<Vec<SessionGroupingClaims>> {
     let source = candidate_source();
     Ok(coordinates
         .iter()
-        .map(|&(session_id, source_owner)| {
+        .map(|coordinate| {
+            assert_eq!(coordinate.source_owner_digest, source.identity().digest());
+            let session = roots
+                .iter()
+                .map(|&(session, _)| session)
+                .find(|&session| {
+                    candidate_session_id(&source, session).as_uuid() == coordinate.session_id
+                })
+                .unwrap();
+            let session_id = candidate_session_id(&source, session);
             let root_session_id = roots
                 .iter()
-                .find_map(|&(session, root)| {
-                    (candidate_session_id(&source, session) == session_id).then_some(root)
-                })
+                .find_map(|&(candidate, root)| (candidate == session).then_some(root))
                 .flatten()
                 .map(|root| candidate_session_id(&source, root));
             SessionGroupingClaims {
                 session_id,
-                source_owner,
+                source_owner: source.identity(),
                 parent_session_id: None,
                 root_session_id,
                 relationship: None,
@@ -339,7 +354,10 @@ fn shape_same_source_with_roots(
     roots: &[(u64, Option<u64>)],
     limit: usize,
     completeness: DiversificationCompleteness,
-) -> (SearchResultWindow, SearchDiversificationDecision) {
+) -> (
+    SearchResultWindow<RankedEventRef>,
+    SearchDiversificationDecision,
+) {
     let (window, decision) =
         shape_search_candidates_using(candidates, limit, false, completeness, |coordinates| {
             same_source_grouping_claims(coordinates, roots)
@@ -349,7 +367,7 @@ fn shape_same_source_with_roots(
 }
 
 #[test]
-fn family_rounds_never_promote_primary_sessions() {
+fn family_rounds_follow_literal_families_without_candidate_scope_metadata() {
     let candidates = [
         candidate(100.0, 1, None, Some(AgentScope::Subagent), 1),
         candidate(99.0, 2, None, Some(AgentScope::Primary), 1),
@@ -369,7 +387,10 @@ fn family_rounds_never_promote_primary_sessions() {
     );
 
     assert_eq!(result_scores(&window), [100.0, 98.0, 99.0, 97.0]);
-    assert_eq!(window.hits[0].event.agent_scope, Some(AgentScope::Subagent));
+    assert_eq!(
+        window.hits[0].event.session_id,
+        candidate_session_id(&candidate_source(), 1).as_uuid()
+    );
     assert_eq!(decision.status, SearchDiversificationStatus::Applied);
     assert_eq!(decision.changed_final_top_n, Some(true));
 }
@@ -450,10 +471,13 @@ fn coalesced_claims_override_winning_event_root_and_candidate_disagreement() {
                 .map(|hit| hit.event.session_id)
                 .collect::<Vec<_>>(),
             vec![
-                candidate_session_id(&candidate_source(), 1).as_uuid(),
-                candidate_session_id(&candidate_source(), 3).as_uuid(),
-                candidate_session_id(&candidate_source(), 2).as_uuid(),
+                candidate_session_id(&candidate_source(), 1),
+                candidate_session_id(&candidate_source(), 3),
+                candidate_session_id(&candidate_source(), 2),
             ]
+            .into_iter()
+            .map(StableEntityId::as_uuid)
+            .collect::<Vec<_>>()
         );
     }
 }
@@ -782,13 +806,26 @@ fn source_filter_precedes_source_owned_grouping_and_preserves_the_selected_event
         candidate_from_source(&personal, 97.0, 1, None, Some(9), None, 1),
         candidate_from_source(&claude, 96.0, 1, None, Some(9), None, 1),
     ];
-    assert!([&candidates[1], &candidates[4], &candidates[5]]
-        .iter()
-        .all(|candidate| candidate.event.provider_session_id.as_deref() == Some("session-1")));
+    assert_eq!(
+        candidates[1].event.session_id,
+        candidate_session_id(&work, 1).as_uuid()
+    );
+    assert_eq!(
+        candidates[4].event.session_id,
+        candidate_session_id(&personal, 1).as_uuid()
+    );
+    assert_eq!(
+        candidates[5].event.session_id,
+        candidate_session_id(&claude, 1).as_uuid()
+    );
     assert_ne!(candidates[1].event.event_id, candidates[4].event.event_id);
     assert_ne!(candidates[1].event.event_id, candidates[5].event.event_id);
     let selected = candidates[1].event.clone();
-    let allowed_sources = [work.identity(), personal.identity(), claude.identity()];
+    let allowed_sources = [
+        work.identity().digest(),
+        personal.identity().digest(),
+        claude.identity().digest(),
+    ];
     let filter_applied = Cell::new(false);
 
     let collection = collect_lexical_search_hits_using(
@@ -800,7 +837,7 @@ fn source_filter_precedes_source_owned_grouping_and_preserves_the_selected_event
                 candidates
                     .iter()
                     .filter(|candidate| {
-                        allowed_sources.contains(&candidate.event.source.identity())
+                        allowed_sources.contains(&candidate.event.source_owner_digest)
                     })
                     .cloned()
                     .collect(),
@@ -813,25 +850,30 @@ fn source_filter_precedes_source_owned_grouping_and_preserves_the_selected_event
             assert_eq!(
                 coordinates,
                 &[
-                    (candidate_session_id(&work, 1), work.identity()),
-                    (candidate_session_id(&work, 2), work.identity()),
-                    (candidate_session_id(&personal, 1), personal.identity()),
-                    (candidate_session_id(&claude, 1), claude.identity()),
+                    candidate_session_coordinate(&work, 1),
+                    candidate_session_coordinate(&work, 2),
+                    candidate_session_coordinate(&personal, 1),
+                    candidate_session_coordinate(&claude, 1),
                 ]
             );
             assert!(coordinates
                 .iter()
-                .all(|coordinate| coordinate.1 != excluded.identity()));
+                .all(|coordinate| coordinate.source_owner_digest != excluded.identity().digest()));
             Ok(coordinates
                 .iter()
-                .map(|&(session_id, source_owner)| {
+                .map(|coordinate| {
                     let source = [&work, &personal, &claude]
                         .into_iter()
-                        .find(|source| source.identity() == source_owner)
+                        .find(|source| source.identity().digest() == coordinate.source_owner_digest)
+                        .unwrap();
+                    let session_id = [1_u64, 2]
+                        .into_iter()
+                        .map(|session| candidate_session_id(source, session))
+                        .find(|session| session.as_uuid() == coordinate.session_id)
                         .unwrap();
                     SessionGroupingClaims {
                         session_id,
-                        source_owner,
+                        source_owner: source.identity(),
                         parent_session_id: None,
                         root_session_id: Some(candidate_session_id(source, 9)),
                         relationship: None,
@@ -844,7 +886,7 @@ fn source_filter_precedes_source_owned_grouping_and_preserves_the_selected_event
 
     let window = collection.result_window;
     assert_eq!(result_scores(&window), [100.0, 97.0, 96.0, 98.0]);
-    assert_eq!(window.hits[0].event, SearchEventMetadata::from(&selected));
+    assert_eq!(window.hits[0].event, selected);
     assert_eq!(window.hits[0].more_matches_in_session, 1);
     assert_eq!(
         collection.diversification.status,
@@ -1123,17 +1165,20 @@ fn hybrid_fusion_ignores_raw_score_scales() {
 fn hybrid_fusion_keeps_full_ids_that_share_a_compact_uuid_and_ties_deterministically() {
     let first = candidate(10.0, 1, None, None, 1);
     let mut colliding = candidate(20.0, 2, None, None, 1);
-    let mut encoded = first.event.event_id.encode_canonical().unwrap();
-    encoded[20] ^= 1;
-    colliding.event.event_id = StableEntityId::decode_canonical(&encoded).unwrap();
-    assert_eq!(
-        first.event.event_id.as_uuid(),
-        colliding.event.event_id.as_uuid()
+    colliding.event.event_id = first.event.event_id;
+    colliding.event.event_identity_digest = first.event.event_identity_digest;
+    colliding.event.event_identity_digest[20] ^= 1;
+    assert_eq!(first.event.event_id, colliding.event.event_id);
+    assert_ne!(
+        first.event.event_identity_digest,
+        colliding.event.event_identity_digest
     );
-    assert_ne!(first.event.event_id, colliding.event.event_id);
 
-    let mut expected = vec![first.event.event_id, colliding.event.event_id];
-    expected.sort_by_key(|event_id| event_id.digest());
+    let mut expected = vec![
+        first.event.event_identity_digest,
+        colliding.event.event_identity_digest,
+    ];
+    expected.sort();
     for fused in [
         fuse_source_candidates(vec![first.clone()], vec![colliding.clone()], 0.5),
         fuse_source_candidates(vec![colliding], vec![first], 0.5),
@@ -1141,7 +1186,7 @@ fn hybrid_fusion_keeps_full_ids_that_share_a_compact_uuid_and_ties_deterministic
         assert_eq!(
             fused
                 .into_iter()
-                .map(|candidate| candidate.event.event_id)
+                .map(|candidate| candidate.event.event_identity_digest)
                 .collect::<Vec<_>>(),
             expected
         );

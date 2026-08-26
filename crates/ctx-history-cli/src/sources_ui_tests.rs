@@ -292,10 +292,25 @@ fn sources_empty_state_is_actionable() {
 }
 
 #[test]
-fn concise_sources_hide_empty_provider_while_json_and_all_retain_it() {
+fn concise_sources_hide_automatic_empty_provider_but_preserve_configured_empty_roots() {
     let mut empty = source(ProviderSourceStatus::Empty, "/tmp/gemini");
     empty.provider = CaptureProvider::Gemini;
     empty.source_format = "gemini_session_json_tree";
+    let mut configured_empty = empty.clone();
+    configured_empty.path = PathBuf::from("/tmp/work-gemini");
+    configured_empty.route_provenance = ProviderSourceRouteProvenance::ConfiguredRoot {
+        root_id: "work".to_owned(),
+        root_path: configured_empty.path.clone(),
+        route_role: ProviderRouteRole::from_static("gemini-sessions"),
+        automatic_route_role: None,
+    };
+    let configured_root = ctx_history_capture::ProviderRootDefinition {
+        id: "work".to_owned(),
+        provider: CaptureProvider::Gemini,
+        path: configured_empty.path.clone(),
+        group: Some("team".to_owned()),
+        kind: None,
+    };
     let default_sources = std::slice::from_ref(&empty)
         .iter()
         .filter(|source| source_is_visible_for_output(source, false, OutputFormat::Text))
@@ -311,10 +326,15 @@ fn concise_sources_hide_empty_provider_while_json_and_all_retain_it() {
         .filter(|source| source_is_visible_for_output(source, false, OutputFormat::Json))
         .cloned()
         .collect::<Vec<_>>();
-    let context = context(80, ColorMode::Never);
+    let configured_sources = std::slice::from_ref(&configured_empty)
+        .iter()
+        .filter(|source| source_is_visible_for_output(source, false, OutputFormat::Text))
+        .cloned()
+        .collect::<Vec<_>>();
+    let plain_context = context(80, ColorMode::Never);
 
     let default = render_sources_human(
-        &context,
+        &plain_context,
         SourcesHumanRenderInput::from_sources(&default_sources),
     )
     .render_plain();
@@ -326,8 +346,36 @@ fn concise_sources_hide_empty_provider_while_json_and_all_retain_it() {
     assert_eq!(json_sources.len(), 1);
     assert_eq!(json_sources[0].status, ProviderSourceStatus::Empty);
 
+    assert_eq!(configured_sources.len(), 1);
+    assert_eq!(
+        sources_discovery_observation(std::slice::from_ref(&empty), &[], &[]),
+        SourcesDiscoveryObservation {
+            providers_detected: 1,
+            providers_existing: 1,
+            providers_importable: 0,
+        }
+    );
+    let configured_input = SourcesHumanRenderInput::from_sources(&configured_sources)
+        .with_automatic_provider_discovery(false)
+        .with_provider_roots(std::slice::from_ref(&configured_root));
+    let configured = render_sources_human(&plain_context, configured_input).render_plain();
+    assert!(configured.contains("gemini"), "{configured}");
+    assert!(configured.contains("empty"), "{configured}");
+    assert!(configured.contains("work (team)"), "{configured}");
+    assert!(
+        !configured.contains("no named roots are available"),
+        "{configured}"
+    );
+
+    let styled = context(80, ColorMode::Always);
+    let styled_document = render_sources_human(&styled, configured_input);
+    assert_eq!(
+        strip_ansi(&styled_document.render(&styled)),
+        styled_document.render_plain()
+    );
+
     let all = render_sources_human(
-        &context,
+        &plain_context,
         SourcesHumanRenderInput::from_sources(&all_sources),
     )
     .render_plain();

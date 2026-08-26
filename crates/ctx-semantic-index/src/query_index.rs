@@ -2,7 +2,7 @@ use std::{path::Path, time::Instant};
 
 use anyhow::{anyhow, Result};
 use ctx_history_index::{
-    EventSearchCandidate, EventSearchFilters, SemanticFilterProjection, VerifiedIndex,
+    CompiledSearchFilter, EventSearchCandidate, SemanticFilterProjection, VerifiedIndex,
 };
 use serde_json::{json, Value};
 use thiserror::Error;
@@ -17,7 +17,7 @@ use super::{
     vector_store_search::{scan_exact_generation, SEMANTIC_EXACT_TOP_K_MAX},
 };
 
-const MAX_SEMANTIC_CORE_BATCH_BYTES: usize = 64 * 1024 * 1024;
+const MAX_SEMANTIC_QUERY_VECTORS: usize = 32;
 
 #[derive(Debug, Error)]
 #[error("source-backed semantic search is not ready ({code}): {detail}")]
@@ -68,7 +68,7 @@ impl SemanticNotReady {
 pub struct SemanticQueryPin {
     core_generation_id: String,
     pinned: Option<PinnedFlatGeneration>,
-    filter_projection: Option<(EventSearchFilters, SemanticFilterProjection)>,
+    filter_projection: Option<(CompiledSearchFilter, SemanticFilterProjection)>,
 }
 
 impl SemanticQueryPin {
@@ -109,11 +109,11 @@ impl SemanticQueryPin {
     pub fn search(
         &mut self,
         index: &VerifiedIndex,
-        filters: &EventSearchFilters,
-        embedding: &[f32],
+        filter: &CompiledSearchFilter,
+        embeddings: &[Vec<f32>],
         candidate_limit: usize,
-        query_embed_ms: Option<u64>,
     ) -> Result<(Vec<EventSearchCandidate>, Value)> {
+        validate_semantic_query_vector_count(embeddings.len())?;
         validate_semantic_query_generation(index.generation_id(), self)?;
         let Some(pinned) = self.pinned.as_ref() else {
             return Ok((
@@ -130,31 +130,23 @@ impl SemanticQueryPin {
                     0,
                     0,
                     0,
-                    None,
                 ),
             ));
         };
         if self
             .filter_projection
             .as_ref()
-            .is_none_or(|(cached_filters, _)| cached_filters != filters)
+            .is_none_or(|(cached_filter, _)| cached_filter != filter)
         {
             self.filter_projection =
-                Some((filters.clone(), index.semantic_filter_projection(filters)?));
+                Some((filter.clone(), index.semantic_filter_projection(filter)?));
         }
         let projection = &self
             .filter_projection
             .as_ref()
             .ok_or_else(|| anyhow!("semantic filter projection is unavailable"))?
             .1;
-        semantic_candidates_with_embedding(
-            index,
-            pinned,
-            projection,
-            candidate_limit,
-            embedding,
-            query_embed_ms,
-        )
+        semantic_candidates_with_embedding(index, pinned, projection, candidate_limit, embeddings)
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -173,13 +165,21 @@ impl SemanticQueryPin {
     }
 }
 
+fn validate_semantic_query_vector_count(count: usize) -> Result<()> {
+    if count > MAX_SEMANTIC_QUERY_VECTORS {
+        return Err(anyhow!(
+            "source-backed semantic query vector count must be at most {MAX_SEMANTIC_QUERY_VECTORS}"
+        ));
+    }
+    Ok(())
+}
+
 fn semantic_candidates_with_embedding(
     index: &VerifiedIndex,
     pinned: &PinnedFlatGeneration,
     projection: &SemanticFilterProjection,
     candidate_limit: usize,
-    embedding: &[f32],
-    query_embed_ms: Option<u64>,
+    embeddings: &[Vec<f32>],
 ) -> Result<(Vec<EventSearchCandidate>, Value)> {
     if candidate_limit == 0 || candidate_limit > SEMANTIC_EXACT_TOP_K_MAX {
         return Err(anyhow!(
@@ -202,7 +202,7 @@ fn semantic_candidates_with_embedding(
     let event_is_eligible = |event_id| projection.contains(event_id);
     let search = scan_exact_generation(
         pinned,
-        embedding,
+        embeddings,
         requested_k,
         Some(&event_is_eligible),
         Instant::now(),
@@ -223,11 +223,7 @@ fn semantic_candidates_with_embedding(
         .map(|hit| hit.event_id)
         .collect::<Vec<_>>();
     let records = index
-        .core_events_by_ids_if_bounded(
-            &event_ids,
-            SEMANTIC_EXACT_TOP_K_MAX,
-            MAX_SEMANTIC_CORE_BATCH_BYTES,
-        )?
+        .ranked_event_refs_by_ids_if_bounded(&event_ids, SEMANTIC_EXACT_TOP_K_MAX)?
         .ok_or_else(|| {
             semantic_not_ready(
                 "semantic_projection_event_mismatch",
@@ -239,11 +235,7 @@ fn semantic_candidates_with_embedding(
         })?;
     let mut candidates = Vec::with_capacity(records.len());
     for (hit, record) in positive_hits.into_iter().zip(records) {
-        if record.event_id.as_uuid() != hit.event_id
-            || record.event_type != "message"
-            || record.role.as_deref() != Some("user")
-            || !projection.contains(hit.event_id)
-        {
+        if record.event_id != hit.event_id || !projection.contains(hit.event_id) {
             return Err(semantic_not_ready(
                 "semantic_projection_event_mismatch",
                 format!(
@@ -254,7 +246,7 @@ fn semantic_candidates_with_embedding(
             ));
         }
         candidates.push(EventSearchCandidate {
-            event: record.event,
+            event: record,
             score: hit.similarity,
         });
     }
@@ -271,7 +263,6 @@ fn semantic_candidates_with_embedding(
         active_events.saturating_sub(stats.events_scored),
         non_positive,
         stats.events_scored,
-        query_embed_ms,
     );
     Ok((candidates, diagnostics))
 }
@@ -289,19 +280,19 @@ fn semantic_diagnostics(
     filtered_candidates: usize,
     non_positive_candidates: usize,
     eligible_event_count: usize,
-    query_embed_ms: impl Into<Option<u64>>,
 ) -> Value {
-    let query_embed_ms = query_embed_ms.into();
     compact_json(json!({
         "vector_backend": "flat_f32",
         "core_generation_id": index.generation_id(),
         "flat_generation": pinned.map(PinnedFlatGeneration::generation),
         "flat_generation_hash": pinned.map(PinnedFlatGeneration::generation_hash),
-        "query_embed_ms": query_embed_ms,
         "vector_scan_ms": stats.map(|stats| stats.scan_ms),
+        "query_vectors": stats.map(|stats| stats.query_vectors),
+        "vector_passes": stats.map_or(0, |stats| stats.vector_passes),
         "chunks_scanned": stats.map(|stats| stats.chunks_scanned),
         "vector_bytes_read": stats.map(|stats| stats.vector_bytes_read),
         "events_scored": stats.map(|stats| stats.events_scored),
+        "dot_products": stats.map(|stats| stats.dot_products),
         "initial_k": initial_k,
         "final_k": final_k,
         "iterations": iterations,
@@ -309,6 +300,8 @@ fn semantic_diagnostics(
         "eligible_candidates": eligible_candidates,
         "filtered_candidates": filtered_candidates,
         "non_positive_candidates": non_positive_candidates,
+        "metadata_records_loaded": eligible_candidates,
+        "core_records_decoded": 0,
         "exhausted": final_k >= eligible_event_count,
         "cap_reached": final_k >= SEMANTIC_EXACT_TOP_K_MAX
             && final_k < eligible_event_count,

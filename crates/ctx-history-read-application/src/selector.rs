@@ -162,8 +162,8 @@ impl<'index> CompactRefResolver<'index> {
         for index in std::iter::once(self.current).chain(self.retained_peer) {
             match namespace {
                 CompactRefNamespace::Event => {
-                    for event in index.events_by_id_prefix(prefix)? {
-                        push_distinct_match(&mut matches, event.event_id.as_uuid());
+                    for event_id in index.event_ids_by_id_prefix(prefix)? {
+                        push_distinct_match(&mut matches, event_id);
                         if matches.len() == 2 {
                             matches.sort_unstable();
                             return Ok(matches);
@@ -171,8 +171,8 @@ impl<'index> CompactRefResolver<'index> {
                     }
                 }
                 CompactRefNamespace::Session => {
-                    for session in index.sessions_by_id_prefix(prefix)? {
-                        push_distinct_match(&mut matches, session.session_id.as_uuid());
+                    for session_id in index.session_ids_by_id_prefix(prefix)? {
+                        push_distinct_match(&mut matches, session_id);
                         if matches.len() == 2 {
                             matches.sort_unstable();
                             return Ok(matches);

@@ -598,3 +598,10 @@ fn progress_text_is_control_safe_utf8_and_bounded() {
     assert!(!bounded.contains('\n'));
     assert!(bounded.ends_with("..."));
 }
+
+#[test]
+fn count_formatting_groups_the_full_u64_domain() {
+    assert_eq!(format_count(999), "999");
+    assert_eq!(format_count(1_000), "1,000");
+    assert_eq!(format_count(u64::MAX), "18,446,744,073,709,551,615");
+}

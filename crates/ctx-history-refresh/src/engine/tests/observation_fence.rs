@@ -127,11 +127,13 @@ fn post_scan_jsonl_append_is_not_certified_clean_across_restart() {
     assert!(!initial.failed, "{:#}", initial.job);
     assert_eq!(initial.job["request_id"], request_id);
     assert!(
-        open_verified_index(&index_root)
-            .unwrap()
-            .search_event_candidates("postscanappendmarker", 10)
-            .unwrap()
-            .is_empty(),
+        complete_lexical_candidates(
+            &open_verified_index(&index_root).unwrap(),
+            "postscanappendmarker",
+            10,
+        )
+        .unwrap()
+        .is_empty(),
         "the post-scan append must not be present in the first generation"
     );
     drop(coordinator);
@@ -162,11 +164,13 @@ fn post_scan_jsonl_append_is_not_certified_clean_across_restart() {
     let follow_up = restarted.run_next(&data_root).expect("restart refresh");
     assert!(!follow_up.failed, "{:#}", follow_up.job);
     assert_eq!(
-        open_verified_index(&index_root)
-            .unwrap()
-            .search_event_candidates("postscanappendmarker", 10)
-            .unwrap()
-            .len(),
+        complete_lexical_candidates(
+            &open_verified_index(&index_root).unwrap(),
+            "postscanappendmarker",
+            10,
+        )
+        .unwrap()
+        .len(),
         1
     );
 }

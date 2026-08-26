@@ -75,18 +75,18 @@ pub(crate) use ctx_history_index_generation::sha256_hex;
 pub(crate) use ctx_history_index_generation::{hex, is_generation_id, MANIFEST_DIRECTORY};
 pub use ctx_history_index_query::VerifiedIndex;
 pub use ctx_history_index_query::{
-    AgentScope, CopiedEventLineage, CopiedEventLineageOccurrence, CopiedEventLineagePolicy,
-    CopiedEventLineageRelationshipCount, CopiedEventLineageResolution, CoreEventBatch,
-    CoreEventPageBudget, CoreEventRangeCursor, CoreEventRangeDirection, CoreEventRangeDomain,
-    CoreEventRangeError, CoreEventRangeFilters, CoreEventRangePage, CoreEventRangeScope,
-    CoreEventRangeSelection, CoreEventRecord, CoreSemanticEventPage, CoreSessionEventPage,
-    CoreSourceEventPage, CoreSourceEventPagePlan, EventRecord, EventSearchCandidate,
-    EventSearchFilters, ExcludedSessionTree, LexicalQueryLimits, SearchContentScope,
-    SemanticEligibility, SemanticEventCursor, SemanticEventPage, SemanticFilterProjection,
-    SessionEventCoordinate, SessionEventCursor, SessionRecord, SourceEventCursor, SourceEventPage,
-    StoredCoreEventRecord, StoredCoreRecordJson, StoredCoreSourceEventPage,
-    DEFAULT_CORE_EVENT_PAGE_BUDGET, LEXICAL_QUERY_LIMITS,
-    MAX_COPIED_EVENT_LINEAGE_EVENT_AND_SESSION_IDENTITY_POSTING_VISITS,
+    AgentScope, CompiledSearchFilter, CopiedEventLineage, CopiedEventLineageOccurrence,
+    CopiedEventLineagePolicy, CopiedEventLineageRelationshipCount, CopiedEventLineageResolution,
+    CoreEventBatch, CoreEventPageBudget, CoreEventRangeCursor, CoreEventRangeDirection,
+    CoreEventRangeDomain, CoreEventRangeError, CoreEventRangeFilters, CoreEventRangePage,
+    CoreEventRangeScope, CoreEventRangeSelection, CoreEventRecord, CoreSemanticEventPage,
+    CoreSessionEventPage, CoreSourceEventPage, CoreSourceEventPagePlan, EventRecord,
+    EventSearchCandidate, EventSearchFilters, ExcludedSessionTree, LexicalExecution, LexicalMode,
+    LexicalQueryLimits, RankedEventRef, SearchContentScope, SemanticEligibility,
+    SemanticEventCursor, SemanticEventPage, SemanticFilterProjection, SessionEventCoordinate,
+    SessionEventCursor, SessionRecord, SourceEventCursor, SourceEventPage, StoredCoreEventRecord,
+    StoredCoreRecordJson, StoredCoreSourceEventPage, DEFAULT_CORE_EVENT_PAGE_BUDGET,
+    LEXICAL_QUERY_LIMITS, MAX_COPIED_EVENT_LINEAGE_EVENT_AND_SESSION_IDENTITY_POSTING_VISITS,
     MAX_COPIED_EVENT_LINEAGE_OCCURRENCES, MAX_COPIED_EVENT_LINEAGE_POSTING_VISITS,
     MAX_CORE_EVENT_RANGE_PAGE_ITEMS, MAX_LEXICAL_QUERY_RESULTS, MAX_SEMANTIC_EVENT_PAGE_ITEMS,
     MAX_SESSION_EVENT_COORDINATE_PREFIX_ITEMS, MAX_SESSION_EVENT_COORDINATE_WINDOW_ITEMS,
@@ -324,6 +324,14 @@ fn classify_active_integrity_failure(
         generation_id: active.generation_id().to_owned(),
         detail,
     }
+}
+
+fn prior_session_identity_lookup_failure_is_passthrough(error: &IndexError) -> bool {
+    matches!(
+        error,
+        IndexError::CompactIdentityCollision { .. }
+            | IndexError::SessionAuthorityWorkLimitExceeded { .. }
+    )
 }
 
 #[cfg(test)]
@@ -675,7 +683,7 @@ impl GenerationWriter {
                         match lookup {
                             Ok(prior) => prior,
                             Err(error)
-                                if matches!(error, IndexError::CompactIdentityCollision { .. }) =>
+                                if prior_session_identity_lookup_failure_is_passthrough(&error) =>
                             {
                                 return Err(error);
                             }

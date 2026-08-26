@@ -127,12 +127,18 @@ pub struct SourceBackedRecordRejection {
     pub payload_type: Option<String>,
     pub class: SourceBackedRecordRejectionClass,
     pub detail: String,
+    /// Whether this diagnostic belongs to a logical source certified by the
+    /// current attempt. Failed-attempt diagnostics remain available for
+    /// completion classification, but must not be published as committed
+    /// rejection evidence.
+    pub(crate) committed: bool,
 }
 
-/// Bounded record-level diagnostics from routes that still certified and
-/// published their valid records. Entries are kept in canonical route/scan
-/// order. `omitted` counts additional committed-route rejections beyond the
-/// diagnostic bound; diagnostics staged by a rolled-back route are removed.
+/// Bounded record-level diagnostics observed during the refresh attempt.
+/// Entries are kept in canonical route/scan order. `omitted` counts additional
+/// observations beyond the diagnostic bound; diagnostics staged by a
+/// rolled-back route are removed. Publication selects only entries whose
+/// logical source was certified by the current attempt.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SourceBackedRecordRejections {
     rejections: Vec<SourceBackedRecordRejection>,
@@ -175,6 +181,12 @@ impl SourceBackedRecordRejections {
     pub fn truncate(&mut self, retained: usize, omitted: usize) {
         self.rejections.truncate(retained);
         self.omitted = omitted;
+    }
+}
+
+impl SourceBackedRecordRejection {
+    pub fn is_committed(&self) -> bool {
+        self.committed
     }
 }
 
