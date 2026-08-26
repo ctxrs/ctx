@@ -235,6 +235,14 @@ pub trait JsonlFamilyAdapter: Send + Sync {
         }
     }
 
+    /// Opts this adapter into committing a fully quarantined route as an empty
+    /// generation instead of failing the whole route. This is a provider
+    /// capability, not a provider-name check; only providers that explicitly
+    /// tolerate an empty generation override the default.
+    fn allows_empty_quarantined_route(&self) -> bool {
+        false
+    }
+
     fn accepts_direct_append_checkpoint(&self, _checkpoint: &TypedKey) -> bool {
         false
     }

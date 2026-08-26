@@ -5,8 +5,8 @@ use std::{fs, os::unix::fs::PermissionsExt, path::Path};
 use ctx_history_capture_composition::{
     refresh_source_backed_generation, register_landed_source_backed_route, ProviderCatalogSupport,
     ProviderImportSupport, ProviderSource, ProviderSourceKind, ProviderSourceStatus,
-    SourceBackedProviderRegistry, SourceBackedRecordRejectionClass, SourceBackedRouteSelection,
-    SourceBackedSourceFailureClass,
+    SourceBackedCoordinatorError, SourceBackedProviderRegistry, SourceBackedRecordRejectionClass,
+    SourceBackedRouteSelection, SourceBackedSourceFailureClass,
 };
 use ctx_history_core::CaptureProvider;
 use ctx_history_index::{VerifiedIndex, WriterOptions};
@@ -296,4 +296,48 @@ fn malformed_claude_record_is_reported_without_losing_valid_records() {
     );
     assert_eq!(rejection.line_number, 1);
     assert_eq!(marker_count(&index, "mixedvalidmarker"), 1);
+}
+
+#[test]
+fn fully_quarantined_claude_route_returns_no_usable_logical_sources() {
+    // Claude does not opt in to the empty-quarantined-generation capability, so
+    // a route whose every source is quarantined must fail the whole route with
+    // NoUsableLogicalSources rather than committing an empty generation.
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("projects");
+    let index = temp.path().join("index");
+    // Two files share one native session identity with no healthy peer: the
+    // shared family quarantines the duplicate and leaves the route with no
+    // usable logical source.
+    write_project_session(
+        &root,
+        "project-a",
+        "duplicate",
+        "duplicate-a",
+        "duplicateamarker",
+    );
+    write_project_session(
+        &root,
+        "project-b",
+        "duplicate",
+        "duplicate-b",
+        "duplicatebmarker",
+    );
+
+    let result = refresh_source_backed_generation(
+        &index,
+        &registry(&root),
+        WriterOptions {
+            indexer_threads: 1,
+            memory_bytes: 15_000_000,
+        },
+    );
+    let error = result.expect_err("a fully quarantined non-opt-in route must fail");
+    assert!(
+        matches!(
+            error,
+            SourceBackedCoordinatorError::NoUsableLogicalSources { .. }
+        ),
+        "unexpected error: {error:?}"
+    );
 }
