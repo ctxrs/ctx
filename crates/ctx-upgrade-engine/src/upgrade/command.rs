@@ -29,12 +29,13 @@ use super::metadata::{
     verify_metadata_signature,
 };
 use super::state::{
-    begin_manual_attempt_locked, begin_recovery_attempt_locked, claim_automatic_upgrade,
-    reconcile_replacement_terminal_locked, write_state_checked_locked, write_state_error_locked,
-    write_state_phase_locked, AutoUpgradeClaim, UpgradeAttempt, UpgradeLock,
+    begin_automatic_attempt_locked, begin_manual_attempt_locked, begin_recovery_attempt_locked,
+    reconcile_replacement_terminal_locked, try_acquire_automatic_upgrade,
+    write_state_checked_locked, write_state_error_locked, write_state_phase_locked,
+    AutomaticUpgradeLease, UpgradeAttempt, UpgradeLock,
 };
 use super::{
-    env_flag, platform_key, version_gt, AutomaticUpgradeObservation,
+    automatic_upgrade_check_due, env_flag, platform_key, version_gt, AutomaticUpgradeObservation,
     AutomaticUpgradePolicyProvider, AutomaticUpgradePolicySnapshot, DaemonUpgradeLease,
     DaemonUpgradePort, SemanticAccelerator, SemanticLayoutPort, UpgradeEngine, UpgradeFailureKind,
     UpgradeObserver, UpgradePlan, UpgradePolicy, UpgradeTerminalStatus,

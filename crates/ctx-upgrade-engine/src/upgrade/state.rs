@@ -51,11 +51,8 @@ pub fn is_valid_upgrade_attempt_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
 }
 
-pub(super) enum AutoUpgradeClaim {
-    Claimed {
-        attempt: UpgradeAttempt,
-        lock: UpgradeLock,
-    },
+pub(super) enum AutomaticUpgradeLease {
+    Acquired(UpgradeLock),
     NotDue,
     Contended,
 }
@@ -184,29 +181,40 @@ impl UpgradeState {
     }
 }
 
-pub(super) fn claim_automatic_upgrade(interval: Duration) -> Result<AutoUpgradeClaim> {
+pub(super) fn try_acquire_automatic_upgrade(interval: Duration) -> Result<AutomaticUpgradeLease> {
     // Unmanaged installations never self-upgrade; the automatic scheduler
     // stays dormant without touching their executable directory.
     if super::install::current_exe_is_unmanaged() {
-        return Ok(AutoUpgradeClaim::NotDue);
+        return Ok(AutomaticUpgradeLease::NotDue);
     }
     let Some(lock) = UpgradeLock::try_acquire()? else {
-        return Ok(AutoUpgradeClaim::Contended);
+        return Ok(AutomaticUpgradeLease::Contended);
     };
-    let mut state = read_state_object(&lock.install_path);
+    let state = read_state_object(&lock.install_path);
     let now = now_unix_s();
     if !auto_check_due(&state, interval, now) {
-        return Ok(AutoUpgradeClaim::NotDue);
+        return Ok(AutomaticUpgradeLease::NotDue);
+    }
+    Ok(AutomaticUpgradeLease::Acquired(lock))
+}
+
+pub(super) fn begin_automatic_attempt_locked(
+    lock: &UpgradeLock,
+    interval: Duration,
+) -> Result<Option<UpgradeAttempt>> {
+    let mut state = read_state_object(&lock.install_path);
+    if !auto_check_due(&state, interval, now_unix_s()) {
+        return Ok(None);
     }
     let attempt = state.begin("automatic");
-    write_state_object_locked(&lock, state)?;
-    Ok(AutoUpgradeClaim::Claimed { attempt, lock })
+    write_state_object_locked(lock, state)?;
+    Ok(Some(attempt))
 }
 
 /// Cheap, non-authoritative foreground hint for whether an automatic worker
 /// may need to run. This deliberately avoids the installation lock, marker
-/// parsing, and executable hashing; the detached worker repeats the cadence
-/// decision while holding the installation lock.
+/// parsing, and executable hashing; the scheduler repeats the cadence decision
+/// while holding the installation lock.
 pub fn automatic_upgrade_check_due(interval: Duration) -> Result<bool> {
     let install_path = super::install::current_install_path()?;
     automatic_upgrade_check_due_for(&install_path, interval)

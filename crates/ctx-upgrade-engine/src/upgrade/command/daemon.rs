@@ -102,82 +102,98 @@ where
     if !startup_policy.automatic_upgrade_enabled() || !current.automatic_upgrade_enabled() {
         return Ok(None);
     }
-    if let Some(recovery) = pending_recovery(data_root, engine.semantic_layout)? {
-        if let Some(terminal) = recovery.terminal.as_ref() {
-            let Some(lock) =
-                UpgradeLock::try_acquire_terminal_recovery(&recovery, engine.semantic_layout)?
+    let (attempt, lock) = loop {
+        if let Some(recovery) = pending_recovery(data_root, engine.semantic_layout)? {
+            if let Some(terminal) = recovery.terminal.as_ref() {
+                let Some(lock) =
+                    UpgradeLock::try_acquire_terminal_recovery(&recovery, engine.semantic_layout)?
+                else {
+                    return Ok(None);
+                };
+                let current = policy_provider.reload(data_root)?;
+                let (applied, detail) = match terminal {
+                    TerminalRecovery::Applied { warning } => (true, warning.as_deref()),
+                    TerminalRecovery::Failed { error } => (false, Some(error.as_str())),
+                };
+                let automatic = reconcile_replacement_terminal_locked(
+                    &lock,
+                    &recovery.attempt_id,
+                    applied,
+                    detail,
+                    current.interval(),
+                )?;
+                remove_terminal_recovery(&recovery, lock.installation(), engine.semantic_layout)?;
+                drop(lock);
+                if automatic {
+                    send_daemon_upgrade_terminal(
+                        observer,
+                        data_root,
+                        &current,
+                        None,
+                        &recovery.attempt_id,
+                        if applied {
+                            UpgradeTerminalStatus::Applied
+                        } else {
+                            UpgradeTerminalStatus::Failed
+                        },
+                        applied,
+                        if applied {
+                            None
+                        } else {
+                            Some(UpgradeFailureKind::ApplyFailed)
+                        },
+                        started.elapsed(),
+                    );
+                }
+                return Ok(None);
+            }
+            let Some(lock) = UpgradeLock::try_acquire_recovery(&recovery, engine.semantic_layout)?
             else {
                 return Ok(None);
             };
             let current = policy_provider.reload(data_root)?;
-            let (applied, detail) = match terminal {
-                TerminalRecovery::Applied { warning } => (true, warning.as_deref()),
-                TerminalRecovery::Failed { error } => (false, Some(error.as_str())),
-            };
-            let automatic = reconcile_replacement_terminal_locked(
-                &lock,
-                &recovery.attempt_id,
-                applied,
-                detail,
-                current.interval(),
-            )?;
-            remove_terminal_recovery(&recovery, lock.installation(), engine.semantic_layout)?;
-            drop(lock);
-            if automatic {
-                send_daemon_upgrade_terminal(
-                    observer,
-                    data_root,
-                    &current,
-                    None,
-                    &recovery.attempt_id,
-                    if applied {
-                        UpgradeTerminalStatus::Applied
-                    } else {
-                        UpgradeTerminalStatus::Failed
-                    },
-                    applied,
-                    if applied {
-                        None
-                    } else {
-                        Some(UpgradeFailureKind::ApplyFailed)
-                    },
-                    started.elapsed(),
-                );
+            if !current.automatic_upgrade_enabled() {
+                return Ok(None);
             }
+            let attempt = begin_recovery_attempt_locked(&lock, &recovery.attempt_id, "automatic")?;
+            return Ok(Some(PreparedAutomaticUpgrade(
+                PreparedAutomaticUpgradeKind::Recover {
+                    recovery,
+                    interval: current.interval(),
+                    started,
+                    lock,
+                    attempt,
+                },
+            )));
+        }
+        // Recovery is always discovered first. Healthy installations then use
+        // the bounded, lock-free cadence hint so ordinary daemon wakes do not
+        // hash the executable when no check is due.
+        if !automatic_upgrade_check_due(current.interval())? {
             return Ok(None);
         }
-        let Some(lock) = UpgradeLock::try_acquire_recovery(&recovery, engine.semantic_layout)?
-        else {
+        let lock = match try_acquire_automatic_upgrade(current.interval())? {
+            AutomaticUpgradeLease::Acquired(lock) => lock,
+            AutomaticUpgradeLease::NotDue | AutomaticUpgradeLease::Contended => return Ok(None),
+        };
+        // Close the probe/lock race before writing a new scheduler attempt. A
+        // transaction that appeared while the lock was contended must be
+        // recovered, and a brand-new attempt requires full hosted authority
+        // while that same installation lock is held.
+        if pending_recovery(data_root, engine.semantic_layout)?.is_some() {
+            drop(lock);
+            continue;
+        }
+        if !matches!(
+            managed_install_marker_for_current_exe(),
+            Ok(ManagedInstallMarker::Valid(_))
+        ) {
+            return Ok(None);
+        }
+        let Some(attempt) = begin_automatic_attempt_locked(&lock, current.interval())? else {
             return Ok(None);
         };
-        let current = policy_provider.reload(data_root)?;
-        if !current.automatic_upgrade_enabled() {
-            return Ok(None);
-        }
-        let attempt = begin_recovery_attempt_locked(&lock, &recovery.attempt_id, "automatic")?;
-        return Ok(Some(PreparedAutomaticUpgrade(
-            PreparedAutomaticUpgradeKind::Recover {
-                recovery,
-                interval: current.interval(),
-                started,
-                lock,
-                attempt,
-            },
-        )));
-    }
-    // Interrupted publication is discovered first because replacing the
-    // binary before its marker legitimately creates a temporary hash
-    // mismatch. A new automatic attempt, however, requires full hosted-install
-    // authority before it can claim a lock or write scheduler state.
-    if !matches!(
-        managed_install_marker_for_current_exe(),
-        Ok(ManagedInstallMarker::Valid(_))
-    ) {
-        return Ok(None);
-    }
-    let (attempt, lock) = match claim_automatic_upgrade(current.interval())? {
-        AutoUpgradeClaim::Claimed { attempt, lock } => (attempt, lock),
-        AutoUpgradeClaim::NotDue | AutoUpgradeClaim::Contended => return Ok(None),
+        break (attempt, lock);
     };
     let mut attempt = Some(attempt);
     let mut lock = Some(lock);
