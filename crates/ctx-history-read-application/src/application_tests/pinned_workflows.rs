@@ -70,10 +70,7 @@ impl HistorySemanticQuery for ProjectedSemanticQuery<'_> {
             filter.filters().allowed_source_keys.as_deref(),
             Some(self.allowed_source_keys)
         );
-        let projection = self
-            .index
-            .semantic_filter_projection_compiled(filter)
-            .unwrap();
+        let projection = self.index.semantic_filter_projection(filter).unwrap();
         Ok(HistorySemanticBatch {
             candidates: self
                 .candidates

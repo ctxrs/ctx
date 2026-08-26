@@ -1,6 +1,7 @@
 use crate::HistorySemanticQuery;
 
 use super::*;
+use crate::HistorySemanticBatch;
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn collect_prepared_semantic_query<Query>(
@@ -60,52 +61,6 @@ where
         &queries,
         batch,
         semantic_query_diagnostics,
-        tracker,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(super) fn collect_prepared_semantic_search_using<SemanticSearch>(
-    request: &SearchRequest,
-    index: &VerifiedIndex,
-    filter: &CompiledSearchFilter,
-    requested_backend: SearchBackend,
-    normalized_query: NormalizedSearchQuery,
-    mut semantic_search: SemanticSearch,
-    tracker: &mut SearchWorkTracker,
-) -> SearchExecutionResult<RankedSearchCollection>
-where
-    SemanticSearch: FnMut(
-        &[&str],
-        &CompiledSearchFilter,
-        usize,
-    ) -> std::result::Result<HistorySemanticBatch, HistorySemanticError>,
-{
-    tracker.set_phase(SearchFailurePhase::SemanticRetrieval);
-    let queries = normalized_query.texts();
-    tracker.record_retrieval_round()?;
-    let batch = match semantic_search(&queries, filter, SOURCE_FUSION_CANDIDATES) {
-        Ok(batch) => batch,
-        Err(error) => {
-            return semantic_retrieval_failure(
-                request,
-                index,
-                filter,
-                requested_backend,
-                error,
-                Vec::new(),
-                tracker,
-            )
-        }
-    };
-    finish_prepared_semantic_search(
-        request,
-        index,
-        filter,
-        requested_backend,
-        &queries,
-        batch,
-        Vec::new(),
         tracker,
     )
 }

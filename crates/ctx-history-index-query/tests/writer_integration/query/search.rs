@@ -86,9 +86,7 @@ fn copied_events_remain_searchable_and_preserve_exact_copy_claims() {
         expected_digests
     );
 
-    let semantic = index
-        .semantic_filter_projection(&EventSearchFilters::default())
-        .unwrap();
+    let semantic = semantic_projection(&index, &EventSearchFilters::default()).unwrap();
     assert_eq!(
         semantic.event_ids().collect::<HashSet<_>>(),
         expected
@@ -159,7 +157,7 @@ fn multiple_exact_session_exclusions_filter_lexical_and_semantic_candidates() {
             .collect::<Vec<_>>(),
         vec![retained.session_id.as_uuid()]
     );
-    let semantic = index.semantic_filter_projection(&filters).unwrap();
+    let semantic = semantic_projection(&index, &filters).unwrap();
     assert_eq!(
         semantic.event_ids().collect::<Vec<_>>(),
         vec![retained.event_id.as_uuid()]
@@ -250,7 +248,7 @@ fn agent_scope_filter_uses_only_explicit_core_agent_scope() {
         expected_primary_digests
     );
 
-    let semantic = index.semantic_filter_projection(&primary_scope).unwrap();
+    let semantic = semantic_projection(&index, &primary_scope).unwrap();
     assert_eq!(
         semantic.event_ids().collect::<HashSet<_>>(),
         expected_primary
@@ -722,7 +720,7 @@ fn exact_session_tree_exclusion_does_not_cross_duplicate_provider_session_roots(
         filtered_session_ids(&index, filters.clone()),
         vec![second_root.session_id.as_uuid()]
     );
-    let semantic = index.semantic_filter_projection(&filters).unwrap();
+    let semantic = semantic_projection(&index, &filters).unwrap();
     assert_eq!(
         semantic.event_ids().collect::<Vec<_>>(),
         vec![second_root.event_id.as_uuid()]
@@ -1206,7 +1204,7 @@ fn explicit_scopes_filter_search_list_and_semantic_projection_with_ordinary_io_w
             expected_ids
         );
 
-        let semantic = index.semantic_filter_projection(&filters).unwrap();
+        let semantic = semantic_projection(&index, &filters).unwrap();
         match scope {
             SearchContentScope::Transcript => {
                 assert_eq!(
@@ -1252,9 +1250,7 @@ fn explicit_scopes_filter_search_list_and_semantic_projection_with_ordinary_io_w
         0.6,
     );
 
-    let semantic_all = index
-        .semantic_filter_projection(&EventSearchFilters::default())
-        .unwrap();
+    let semantic_all = semantic_projection(&index, &EventSearchFilters::default()).unwrap();
     assert_eq!(
         semantic_all.event_ids().collect::<Vec<_>>(),
         vec![message_id.as_uuid()]
@@ -1333,7 +1329,7 @@ fn exact_event_type_conflicts_with_every_explicit_content_scope_at_the_index_bou
             ));
         }
         assert!(matches!(
-            index.semantic_filter_projection(&filters).unwrap_err(),
+            semantic_projection(&index, &filters).unwrap_err(),
             IndexError::ContentScopeEventTypeConflict { scope: actual }
                 if actual == scope.as_str()
         ));

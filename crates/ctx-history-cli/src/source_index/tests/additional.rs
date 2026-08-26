@@ -257,24 +257,17 @@ fn search_context_bytes_use_core_snippets_and_indexed_complete_session_sizes_not
 fn generation_only_semantic_is_typed_and_hybrid_falls_back_without_exact_projection() {
     let temp = tempdir().unwrap();
     write_test_generation(temp.path());
-    let index = open_index(temp.path()).unwrap();
     assert!(!temp.path().join("work.sqlite").exists());
 
     let mut lexical_request = request(RefreshArg::Off);
     lexical_request.backend = Some(SearchBackendArg::Lexical);
-    let filters = index_search_filters(&lexical_request, &index).unwrap();
-    let lexical =
-        collect_search_hits_with_backend(&lexical_request, &index, temp.path(), 0.35, &filters)
-            .unwrap();
+    let lexical = collect_search_hits_with_backend(&lexical_request, temp.path(), 0.35).unwrap();
     assert_eq!(lexical.effective_backend, SearchBackendArg::Lexical);
     assert_eq!(lexical.result_window.hits.len(), 1);
 
     let mut hybrid_request = request(RefreshArg::Off);
     hybrid_request.backend = Some(SearchBackendArg::Hybrid);
-    let filters = index_search_filters(&hybrid_request, &index).unwrap();
-    let fallback =
-        collect_search_hits_with_backend(&hybrid_request, &index, temp.path(), 0.35, &filters)
-            .unwrap();
+    let fallback = collect_search_hits_with_backend(&hybrid_request, temp.path(), 0.35).unwrap();
     assert_eq!(fallback.requested_backend, SearchBackendArg::Hybrid);
     assert_eq!(fallback.effective_backend, SearchBackendArg::Lexical);
     assert_eq!(fallback.semantic_weight, 0.35);
@@ -290,10 +283,8 @@ fn generation_only_semantic_is_typed_and_hybrid_falls_back_without_exact_project
 
     let mut semantic_request = request(RefreshArg::Off);
     semantic_request.backend = Some(SearchBackendArg::Semantic);
-    let filters = index_search_filters(&semantic_request, &index).unwrap();
     let missing =
-        collect_search_hits_with_backend(&semantic_request, &index, temp.path(), 0.35, &filters)
-            .unwrap_err();
+        collect_search_hits_with_backend(&semantic_request, temp.path(), 0.35).unwrap_err();
     let not_ready = missing
         .downcast_ref::<SemanticNotReady>()
         .expect("semantic-only errors remain typed");
@@ -310,17 +301,13 @@ fn generation_only_semantic_is_typed_and_hybrid_falls_back_without_exact_project
 fn zero_weight_hybrid_performs_no_semantic_callback_or_store_work() {
     let temp = tempdir().unwrap();
     write_test_generation(temp.path());
-    let index = open_index(temp.path()).unwrap();
     let mut hybrid_request = request(RefreshArg::Off);
     hybrid_request.backend = Some(SearchBackendArg::Hybrid);
-    let filters = index_search_filters(&hybrid_request, &index).unwrap();
 
     let collection = collect_search_hits_with_backend_using(
         &hybrid_request,
-        &index,
         temp.path(),
         0.0,
-        &filters,
         |_index, _data_root, _query, _filters, _candidate_limit| {
             panic!("zero-weight hybrid must not pin vectors, embed, or use IPC")
         },
@@ -341,7 +328,6 @@ fn zero_weight_hybrid_performs_no_semantic_callback_or_store_work() {
 fn zero_weight_hybrid_skips_semantic_fallback_for_lexical_only_filters() {
     let temp = tempdir().unwrap();
     write_test_generation(temp.path());
-    let index = open_index(temp.path()).unwrap();
 
     for (content_scope, event_type) in [
         (SearchContentScope::Calls, None),
@@ -353,14 +339,10 @@ fn zero_weight_hybrid_skips_semantic_fallback_for_lexical_only_filters() {
         request.semantic_weight = 0.0;
         request.content_scope = content_scope;
         request.event_type = event_type;
-        let filters = index_search_filters(&request, &index).unwrap();
-
         let collection = collect_search_hits_with_backend_using(
             &request,
-            &index,
             temp.path(),
             0.0,
-            &filters,
             |_index, _data_root, _query, _filters, _candidate_limit| {
                 panic!("zero-weight hybrid must not enter semantic retrieval")
             },
@@ -380,28 +362,27 @@ fn zero_weight_hybrid_skips_semantic_fallback_for_lexical_only_filters() {
 fn all_and_transcript_preserve_the_hybrid_semantic_lane() {
     let temp = tempdir().unwrap();
     write_test_generation(temp.path());
-    let index = open_index(temp.path()).unwrap();
 
     for content_scope in [SearchContentScope::All, SearchContentScope::Transcript] {
         let mut hybrid_request = request(RefreshArg::Off);
         hybrid_request.backend = Some(SearchBackendArg::Hybrid);
         hybrid_request.content_scope = content_scope;
-        let filters = index_search_filters(&hybrid_request, &index).unwrap();
-        let semantic_called = Cell::new(false);
+        let semantic_called = AtomicBool::new(false);
         let collection = collect_search_hits_with_backend_using(
             &hybrid_request,
-            &index,
             temp.path(),
             hybrid_request.semantic_weight,
-            &filters,
             |_index, _data_root, _query, _filters, _candidate_limit| {
-                semantic_called.set(true);
+                semantic_called.store(true, Ordering::Relaxed);
                 Ok((Vec::new(), json!({"fixture": "semantic-lane"})))
             },
         )
         .unwrap();
 
-        assert!(semantic_called.get(), "scope {content_scope:?}");
+        assert!(
+            semantic_called.load(Ordering::Relaxed),
+            "scope {content_scope:?}"
+        );
         assert_eq!(collection.requested_backend, SearchBackendArg::Hybrid);
         assert_eq!(collection.effective_backend, SearchBackendArg::Hybrid);
         assert_eq!(collection.semantic_status, "ready");
@@ -413,7 +394,6 @@ fn all_and_transcript_preserve_the_hybrid_semantic_lane() {
 fn calls_and_outputs_make_hybrid_lexical_with_truthful_json_metadata() {
     let temp = tempdir().unwrap();
     write_test_generation(temp.path());
-    let index = open_index(temp.path()).unwrap();
 
     for (content_scope, expected_name) in [
         (SearchContentScope::Calls, "calls"),
@@ -422,13 +402,10 @@ fn calls_and_outputs_make_hybrid_lexical_with_truthful_json_metadata() {
         let mut hybrid_request = request(RefreshArg::Off);
         hybrid_request.backend = Some(SearchBackendArg::Hybrid);
         hybrid_request.content_scope = content_scope;
-        let filters = index_search_filters(&hybrid_request, &index).unwrap();
         let collection = collect_search_hits_with_backend_using(
             &hybrid_request,
-            &index,
             temp.path(),
             hybrid_request.semantic_weight,
-            &filters,
             |_index, _data_root, _query, _filters, _candidate_limit| {
                 panic!("lexical-only content scopes must not enter semantic retrieval")
             },
@@ -448,16 +425,10 @@ fn calls_and_outputs_make_hybrid_lexical_with_truthful_json_metadata() {
         );
         assert!(collection.result_window.hits.is_empty());
 
-        let value = search_json(
-            &hybrid_request,
+        let (value, _) = mcp_search(
+            hybrid_request.clone(),
             temp.path(),
-            &index,
-            &collection,
-            &filters,
-            &[],
-            "existing_generation",
-            1,
-            std::time::Duration::ZERO,
+            history_snapshot(true, true),
         )
         .unwrap();
         assert_eq!(value["filters"]["content_scope"], expected_name);
@@ -499,18 +470,14 @@ fn semantic_only_rejects_lexical_only_scopes_before_search() {
 fn exact_non_message_event_type_uses_the_same_semantic_boundary() {
     let temp = tempdir().unwrap();
     write_test_generation(temp.path());
-    let index = open_index(temp.path()).unwrap();
     let config = history_config(true, true);
     let mut request = request(RefreshArg::Off);
     request.event_type = Some("tool_call".to_owned());
     request.backend = Some(SearchBackendArg::Hybrid);
-    let filters = index_search_filters(&request, &index).unwrap();
     let collection = collect_search_hits_with_backend_using(
         &request,
-        &index,
         temp.path(),
         request.semantic_weight,
-        &filters,
         |_index, _data_root, _query, _filters, _candidate_limit| {
             panic!("exact non-message event types must not enter semantic retrieval")
         },
@@ -577,7 +544,6 @@ fn daemon_disabled_cli_default_and_hybrid_fall_back_but_semantic_is_typed() {
     let temp = tempdir().unwrap();
     write_test_generation(temp.path());
     let config = history_config(false, true);
-    let index = open_index(temp.path()).unwrap();
 
     for backend in [None, Some(SearchBackendArg::Hybrid)] {
         let mut source_request = request(RefreshArg::Off);
@@ -586,17 +552,12 @@ fn daemon_disabled_cli_default_and_hybrid_fall_back_but_semantic_is_typed() {
             super::search::resolve_source_search_backend(&source_request, &config).unwrap();
         assert_eq!(resolved, SearchBackendArg::Hybrid);
         source_request.backend = Some(resolved);
-        let filters = index_search_filters(&source_request, &index).unwrap();
-        let collection = ctx_history_read_application::collect_search_hits_using(
+        let collection = collect_search_hits_with_semantic_availability(
             &source_request,
-            &index,
-            &filters,
+            temp.path(),
             ctx_history_read_application::SemanticAvailability::Unavailable(
                 ctx_history_read_application::SemanticReason::ExecutionUnavailable,
             ),
-            |_query, _filters, _candidate_limit| {
-                panic!("daemon-disabled hybrid must fall back before semantic work")
-            },
         )
         .unwrap();
         assert_eq!(collection.requested_backend, SearchBackendArg::Hybrid);

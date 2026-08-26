@@ -196,9 +196,9 @@ fn semantic_filter_is_applied_before_top_k_across_more_than_4096_candidates() ->
         workspace: Some("ONLY-target".to_owned()),
         ..EventSearchFilters::default()
     };
-    let projection = index.semantic_filter_projection(&filters)?;
-    assert_eq!(projection.len(), 1);
     let filter = CompiledSearchFilter::compile(filters)?;
+    let projection = index.semantic_filter_projection(&filter)?;
+    assert_eq!(projection.len(), 1);
 
     let mut pin = semantic_query_pin_from_readiness(
         index.generation_id(),

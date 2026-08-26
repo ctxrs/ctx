@@ -1,17 +1,9 @@
 use super::*;
 
 impl VerifiedIndex {
-    /// Selects the semantic corpus with one adapter derived from the same
-    /// compiled filter authority used by lexical retrieval and hydration.
+    /// Selects the semantic corpus from the same compiled filter authority
+    /// used by lexical retrieval and final hydration.
     pub fn semantic_filter_projection(
-        &self,
-        filters: &EventSearchFilters,
-    ) -> Result<SemanticFilterProjection> {
-        let compiled = CompiledSearchFilter::compile(filters.clone())?;
-        self.semantic_filter_projection_compiled(&compiled)
-    }
-
-    pub fn semantic_filter_projection_compiled(
         &self,
         filter: &CompiledSearchFilter,
     ) -> Result<SemanticFilterProjection> {

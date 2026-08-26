@@ -28,8 +28,8 @@ mod show_read_model;
 mod application_tests;
 
 pub use application::{
-    execute_search, execute_search_observed, plan_search, ObservedSearchApplicationError,
-    PinnedHistoryQuery, PlannedSearch, SearchApplicationError, SearchApplicationReadModelInput,
+    execute_search_observed, plan_search, ObservedSearchApplicationError, PinnedHistoryQuery,
+    PlannedSearch, SearchApplicationError, SearchApplicationReadModelInput,
     SearchApplicationRequest, SearchApplicationResult, SearchQueryResult,
 };
 pub use compact_presentation::{
@@ -79,8 +79,7 @@ pub use presentation::{
     SEARCH_SNIPPET_MAX_BYTES, SEARCH_SNIPPET_MAX_CHARS,
 };
 pub use search::{
-    collect_search_hits, collect_search_hits_using, normalize_search_request,
-    resolve_search_backend, search_filters, search_filters_with_refs, unsupported_semantic_scope,
+    normalize_search_request, resolve_search_backend, unsupported_semantic_scope,
     validate_search_request, ActiveSessionExclusion, NormalizedSearchQuery, SearchBackend,
     SearchCollection, SearchDiversificationDecision, SearchDiversificationStatus,
     SearchEventMetadata, SearchExecutionError, SearchExecutionResult, SearchFailurePhase,

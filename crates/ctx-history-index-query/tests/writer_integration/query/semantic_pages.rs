@@ -269,7 +269,7 @@ fn semantic_filter_projection_matches_lexical_filter_semantics_without_core_deco
             "manual body and list candidates must share exact filter semantics"
         );
         ctx_history_index_query::reset_core_record_decodes();
-        let semantic = index.semantic_filter_projection(&filters).unwrap();
+        let semantic = semantic_projection(&index, &filters).unwrap();
         assert_eq!(semantic.generation_id(), index.generation_id());
         assert_eq!(semantic.event_ids().collect::<HashSet<_>>(), lexical);
         assert_eq!(
@@ -284,7 +284,7 @@ fn semantic_filter_projection_matches_lexical_filter_semantics_without_core_deco
         ..EventSearchFilters::default()
     };
     assert!(matches!(
-        index.semantic_filter_projection(&invalid),
+        semantic_projection(&index, &invalid),
         Err(IndexError::EmptyQueryFilter { field: "provider" })
     ));
 }
@@ -324,9 +324,7 @@ fn retrieval_derived_user_message_is_not_a_semantic_candidate() {
     assert_eq!(core_page.items.len(), 1);
     assert_eq!(core_page.items[0].event_id, ordinary.event_id);
 
-    let projection = index
-        .semantic_filter_projection(&EventSearchFilters::default())
-        .unwrap();
+    let projection = semantic_projection(&index, &EventSearchFilters::default()).unwrap();
     assert_eq!(
         projection.event_ids().collect::<Vec<_>>(),
         vec![ordinary.event_id.as_uuid()]

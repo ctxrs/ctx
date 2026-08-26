@@ -8,15 +8,13 @@ use ctx_history_core::{
     CertifiedSource, ScannedSourceCounts, SourceAnchor, SourceKey, SourceObservation, TypedKey,
 };
 use ctx_history_index::{GenerationWriter, WriterOptions};
-use ctx_history_index_query::{
-    CompiledSearchFilter, EventSearchFilters, SearchContentScope, VerifiedIndex,
-};
+use ctx_history_index_query::{CompiledSearchFilter, SearchContentScope, VerifiedIndex};
 use serde_json::json;
 
 use super::*;
 use crate::{
-    collect_search_hits, resolve_search_backend, SearchBackend, SearchExecutionError, SearchPolicy,
-    SearchRequest,
+    plan_search, resolve_search_backend, PinnedHistoryQuery, SearchBackend, SearchCollection,
+    SearchExecutionError, SearchPolicy, SearchRequest,
 };
 
 #[derive(Clone, Default)]
@@ -179,6 +177,22 @@ fn semantic_request(backend: SearchBackend) -> SearchRequest {
     }
 }
 
+fn execute_semantic_search<P: HistorySemanticPort>(
+    request: &SearchRequest,
+    index: &VerifiedIndex,
+    semantic_port: &P,
+) -> std::result::Result<SearchCollection, SearchExecutionError> {
+    let policy = SearchPolicy {
+        default_backend: request.backend.unwrap_or(SearchBackend::Lexical),
+        semantic: SemanticAvailability::Available,
+    };
+    let plan = plan_search(request.clone(), policy)?;
+    PinnedHistoryQuery::new(index, None)
+        .search(plan, None, semantic_port)
+        .map(|query| query.collection)
+        .map_err(|failure| *failure.error)
+}
+
 #[test]
 fn fake_port_begins_once_before_ordered_query_calls() -> Result<()> {
     let temp = tempfile::tempdir()?;
@@ -187,13 +201,7 @@ fn fake_port_begins_once_before_ordered_query_calls() -> Result<()> {
     let port = FakeSemanticPort::ready(calls.clone());
     let request = semantic_request(SearchBackend::Hybrid);
 
-    let collection = collect_search_hits(
-        &request,
-        &index,
-        &EventSearchFilters::default(),
-        SemanticAvailability::Available,
-        &port,
-    )?;
+    let collection = execute_semantic_search(&request, &index, &port)?;
 
     assert_eq!(collection.semantic_status, "ready");
     assert_eq!(collection.work.retrieval_rounds, Some(2));
@@ -232,13 +240,7 @@ fn ordered_prepare_failure_preserves_prefix_and_never_starts_vector_scan() -> Re
     );
     let request = semantic_request(SearchBackend::Hybrid);
 
-    let collection = collect_search_hits(
-        &request,
-        &index,
-        &EventSearchFilters::default(),
-        SemanticAvailability::Available,
-        &port,
-    )?;
+    let collection = execute_semantic_search(&request, &index, &port)?;
 
     assert_eq!(collection.effective_backend, SearchBackend::Lexical);
     assert_eq!(collection.semantic_status, "unavailable");
@@ -287,14 +289,7 @@ fn semantic_only_preserves_the_typed_port_error() -> Result<()> {
     );
     let request = semantic_request(SearchBackend::Semantic);
 
-    let error = collect_search_hits(
-        &request,
-        &index,
-        &EventSearchFilters::default(),
-        SemanticAvailability::Available,
-        &port,
-    )
-    .unwrap_err();
+    let error = execute_semantic_search(&request, &index, &port).unwrap_err();
     let SearchExecutionError::Semantic(typed) = error else {
         panic!("semantic-only search must preserve the typed port failure");
     };
@@ -319,13 +314,7 @@ fn hybrid_maps_typed_port_failure_to_lexical_fallback() -> Result<()> {
     );
     let request = semantic_request(SearchBackend::Hybrid);
 
-    let collection = collect_search_hits(
-        &request,
-        &index,
-        &EventSearchFilters::default(),
-        SemanticAvailability::Available,
-        &port,
-    )?;
+    let collection = execute_semantic_search(&request, &index, &port)?;
 
     assert_eq!(collection.effective_backend, SearchBackend::Lexical);
     assert_eq!(collection.semantic_status, "unavailable");
@@ -345,13 +334,7 @@ fn zero_weight_hybrid_never_opens_the_semantic_port() -> Result<()> {
     let mut request = semantic_request(SearchBackend::Hybrid);
     request.semantic_weight = 0.0;
 
-    let collection = collect_search_hits(
-        &request,
-        &index,
-        &EventSearchFilters::default(),
-        SemanticAvailability::Available,
-        &port,
-    )?;
+    let collection = execute_semantic_search(&request, &index, &port)?;
 
     assert_eq!(collection.semantic_status, "skipped");
     assert!(calls.values().is_empty());

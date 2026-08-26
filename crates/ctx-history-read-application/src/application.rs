@@ -6,16 +6,17 @@ use serde_json::Value;
 
 use crate::generation::PinnedGenerationRead;
 use crate::presentation::hydrate_ranked_search_collection;
-use crate::search::{collect_search_hits_observed, ObservedSearchExecutionError};
+use crate::search::{
+    collect_search_hits_observed, search_filters_with_refs, ObservedSearchExecutionError,
+};
 use crate::{
     normalize_search_request, reference_needs_retained_peer, render_search_json,
-    resolve_search_backend, search_filters_with_refs, validate_search_request,
-    ActiveSessionExclusion, CompactPresentationProjection, CompactRefResolver, GenerationReadError,
-    GenerationReadPort, GenerationReadReceipt, GenerationReadRequest, GenerationReadTarget,
-    HistorySemanticPort, NormalizedSearchQuery, RetainedPeerRead, SearchCollection,
-    SearchExecutionError, SearchExecutionResult, SearchFailurePhase, SearchJsonInput, SearchPolicy,
-    SearchPresentation, SearchRenderMetrics, SearchRequest, SearchResultCommands,
-    SearchWorkReceipt,
+    resolve_search_backend, validate_search_request, ActiveSessionExclusion,
+    CompactPresentationProjection, CompactRefResolver, GenerationReadError, GenerationReadPort,
+    GenerationReadReceipt, GenerationReadRequest, GenerationReadTarget, HistorySemanticPort,
+    NormalizedSearchQuery, RetainedPeerRead, SearchCollection, SearchExecutionError,
+    SearchExecutionResult, SearchFailurePhase, SearchJsonInput, SearchPolicy, SearchPresentation,
+    SearchRenderMetrics, SearchRequest, SearchResultCommands, SearchWorkReceipt,
 };
 
 /// Query implementation contract for one caller-supplied, already-verified
@@ -245,19 +246,6 @@ pub struct SearchApplicationReadModelInput<'input> {
     pub semantic_fallback_code: Option<&'input str>,
     pub semantic_fallback_detail: Option<&'input str>,
     pub metrics: SearchRenderMetrics<'input>,
-}
-
-pub fn execute_search<Generation, Semantic>(
-    request: SearchApplicationRequest,
-    generation_port: &mut Generation,
-    semantic_port: &Semantic,
-) -> std::result::Result<SearchApplicationResult, SearchApplicationError<Generation::Error>>
-where
-    Generation: GenerationReadPort,
-    Semantic: HistorySemanticPort,
-{
-    execute_search_observed(request, generation_port, semantic_port)
-        .map_err(ObservedSearchApplicationError::into_error)
 }
 
 pub fn execute_search_observed<Generation, Semantic>(

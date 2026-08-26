@@ -54,7 +54,7 @@ fn custom_source_filters_use_the_core_native_event_identity() {
     assert!(listed.candidate_set_exhaustive);
     assert_eq!(listed.candidates.len(), 1);
     assert_eq!(listed.candidates[0].event.event_id, event_id.as_uuid());
-    let semantic = index.semantic_filter_projection(&filters).unwrap();
+    let semantic = semantic_projection(&index, &filters).unwrap();
     assert_eq!(
         semantic.event_ids().collect::<Vec<_>>(),
         vec![event_id.as_uuid()]

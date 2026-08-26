@@ -39,6 +39,14 @@ fn load_active_generation_pointer(root: &Path) -> Result<Option<ActiveGeneration
     Ok(load_generation_pointer(root)?)
 }
 
+fn semantic_projection(
+    index: &VerifiedIndex,
+    filters: &EventSearchFilters,
+) -> Result<SemanticFilterProjection> {
+    let filter = CompiledSearchFilter::compile(filters.clone())?;
+    index.semantic_filter_projection(&filter)
+}
+
 fn source(name: &str) -> SourceKey {
     source_for_provider("codex", "codex_session_jsonl", name)
 }

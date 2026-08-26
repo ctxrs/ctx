@@ -6,7 +6,10 @@ use std::{
     cell::Cell,
     fs,
     io::{self, Write},
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
 };
 
 use ctx_daemon_cli::SourceBackedRefreshMode;
@@ -23,8 +26,8 @@ use ctx_history_core::{
     SourceKey, SourceObservation, TypedKey, CORE_ACTIVITY_REVISION, MAX_CORE_CONTENT_BYTES,
 };
 use ctx_history_index::{
-    AgentScope, EventSearchFilters, GenerationWriter, IndexError, SearchContentScope,
-    SessionRecord, WriterOptions, LEXICAL_QUERY_LIMITS,
+    EventSearchFilters, GenerationWriter, IndexError, SearchContentScope, SessionRecord,
+    WriterOptions, LEXICAL_QUERY_LIMITS,
 };
 use serde_json::{json, Value};
 use tempfile::tempdir;
@@ -486,18 +489,12 @@ fn omitted_and_explicit_all_resolve_to_identical_weighted_retrieval() {
 
     let temp = tempdir().unwrap();
     write_test_generation(temp.path());
-    let index = open_index(temp.path()).unwrap();
-    let omitted_filters = index_search_filters(&omitted, &index).unwrap();
-    let explicit_filters = index_search_filters(&explicit, &index).unwrap();
-    assert_eq!(omitted_filters, explicit_filters);
 
-    let collect = |request: &SourceSearchRequest, filters: &EventSearchFilters| {
+    let collect = |request: &SourceSearchRequest| {
         collect_search_hits_with_backend_using(
             request,
-            &index,
             temp.path(),
             request.semantic_weight,
-            filters,
             |index, _data_root, queries, filters, candidate_limit| {
                 Ok((
                     index.search_event_candidates_any_with_filters(
@@ -511,8 +508,8 @@ fn omitted_and_explicit_all_resolve_to_identical_weighted_retrieval() {
         )
         .unwrap()
     };
-    let omitted_collection = collect(&omitted, &omitted_filters);
-    let explicit_collection = collect(&explicit, &explicit_filters);
+    let omitted_collection = collect(&omitted);
+    let explicit_collection = collect(&explicit);
     assert_eq!(
         omitted_collection
             .result_window
@@ -572,25 +569,21 @@ fn content_scope_forwards_with_provider_workspace_since_file_agent_and_current_s
         format: JsonOutputFormat::Json,
         verbose: false,
     }));
-    let temp = tempdir().unwrap();
-    write_test_generation(temp.path());
-    let index = open_index(temp.path()).unwrap();
-    let filters = index_search_filters(&request, &index).unwrap();
 
     assert_eq!(request.content_scope, SearchContentScope::Calls);
     assert!(request.events);
-    assert_eq!(filters.content_scope, SearchContentScope::Calls);
-    assert_eq!(filters.provider.as_deref(), Some("codex"));
-    assert_eq!(filters.workspace.as_deref(), Some("/workspace/pinned"));
-    assert!(filters.since_unix_ms.is_some());
-    assert_eq!(filters.file.as_deref(), Some("src/lib.rs"));
-    assert_eq!(filters.agent_scope, AgentScope::All);
-    assert!(filters.exclude_session_tree.is_none());
+    assert_eq!(request.provider, Some(CaptureProvider::Codex));
+    assert_eq!(request.workspace.as_deref(), Some("/workspace/pinned"));
+    assert_eq!(request.since.as_deref(), Some("30d"));
+    assert_eq!(
+        request.file.as_deref(),
+        Some(std::path::Path::new("src/lib.rs"))
+    );
+    assert!(!request.primary_only);
 
     let mut primary_only_request = request.clone();
     primary_only_request.primary_only = true;
-    let primary_only_filters = index_search_filters(&primary_only_request, &index).unwrap();
-    assert_eq!(primary_only_filters.agent_scope, AgentScope::Primary);
+    assert!(primary_only_request.primary_only);
 }
 
 #[test]

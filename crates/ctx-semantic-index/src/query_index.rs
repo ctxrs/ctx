@@ -138,10 +138,8 @@ impl SemanticQueryPin {
             .as_ref()
             .is_none_or(|(cached_filter, _)| cached_filter != filter)
         {
-            self.filter_projection = Some((
-                filter.clone(),
-                index.semantic_filter_projection_compiled(filter)?,
-            ));
+            self.filter_projection =
+                Some((filter.clone(), index.semantic_filter_projection(filter)?));
         }
         let projection = &self
             .filter_projection

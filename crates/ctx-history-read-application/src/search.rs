@@ -17,8 +17,8 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
-    parse_since_filter, resolve_session_with_refs, CompactRefResolver, HistorySemanticBatch,
-    HistorySemanticError, HistorySemanticPort, SemanticAvailability, SemanticReason,
+    parse_since_filter, resolve_session_with_refs, CompactRefResolver, HistorySemanticError,
+    HistorySemanticPort, SemanticAvailability, SemanticReason,
 };
 
 mod active_session;
@@ -48,10 +48,7 @@ pub use request::{
     SearchPolicy, SearchRequest,
 };
 use request::{normalized_request_source_identity_filters, unavailable_semantic_error};
-use semantic_batch::{
-    collect_prepared_semantic_query, collect_prepared_semantic_search_using,
-    semantic_retrieval_failure,
-};
+use semantic_batch::{collect_prepared_semantic_query, semantic_retrieval_failure};
 use shaping::{
     dense_result_window, session_champions_by, shape_family_result_window, FamilyShapingOutcome,
 };
@@ -60,16 +57,7 @@ use shaping::{
 const LEXICAL_SESSION_CANDIDATE_HORIZON: usize = 256;
 const SOURCE_FUSION_CANDIDATES: usize = 1_600;
 
-pub fn search_filters(
-    request: &SearchRequest,
-    index: &VerifiedIndex,
-    active_session: Option<&ActiveSessionExclusion>,
-) -> Result<EventSearchFilters> {
-    let references = CompactRefResolver::new(index, None);
-    search_filters_with_refs(request, index, &references, active_session)
-}
-
-pub fn search_filters_with_refs(
+pub(crate) fn search_filters_with_refs(
     request: &SearchRequest,
     index: &VerifiedIndex,
     references: &CompactRefResolver<'_>,
@@ -273,26 +261,6 @@ impl From<&EventRecord> for SearchEventMetadata {
     }
 }
 
-pub fn collect_search_hits<P: HistorySemanticPort>(
-    request: &SearchRequest,
-    index: &VerifiedIndex,
-    filters: &EventSearchFilters,
-    semantic: SemanticAvailability,
-    semantic_port: &P,
-) -> SearchExecutionResult<SearchCollection> {
-    let compiled = CompiledSearchFilter::compile(filters.clone())?;
-    let ranked = collect_search_hits_observed(request, index, &compiled, semantic, semantic_port)
-        .map_err(|failure| *failure.error)?;
-    crate::presentation::hydrate_ranked_search_collection(
-        index,
-        ranked,
-        &NormalizedSearchQuery::from_request(request),
-        &compiled,
-    )
-    .map(|(collection, _)| collection)
-    .map_err(Into::into)
-}
-
 fn collect_search_hits_with_receipt<P: HistorySemanticPort>(
     request: &SearchRequest,
     index: &VerifiedIndex,
@@ -330,58 +298,6 @@ fn collect_search_hits_with_receipt<P: HistorySemanticPort>(
             tracker,
         ),
     }
-}
-
-pub fn collect_search_hits_using<SemanticSearch>(
-    request: &SearchRequest,
-    index: &VerifiedIndex,
-    filters: &EventSearchFilters,
-    semantic: SemanticAvailability,
-    semantic_search: SemanticSearch,
-) -> SearchExecutionResult<SearchCollection>
-where
-    SemanticSearch: FnMut(
-        &[&str],
-        &CompiledSearchFilter,
-        usize,
-    ) -> std::result::Result<HistorySemanticBatch, HistorySemanticError>,
-{
-    let mut tracker = SearchWorkTracker::new();
-    let filter = CompiledSearchFilter::compile(filters.clone())?;
-    let prepared = prepare_semantic_search(request, index, &filter, semantic, &mut tracker)?;
-    let (requested_backend, normalized_query) = match prepared {
-        PreparedSemanticSearch::Complete(collection) => {
-            return crate::presentation::hydrate_ranked_search_collection(
-                index,
-                collection,
-                &NormalizedSearchQuery::from_request(request),
-                &filter,
-            )
-            .map(|(collection, _)| collection)
-            .map_err(Into::into)
-        }
-        PreparedSemanticSearch::Query {
-            requested_backend,
-            normalized_query,
-        } => (requested_backend, normalized_query),
-    };
-    let ranked = collect_prepared_semantic_search_using(
-        request,
-        index,
-        &filter,
-        requested_backend,
-        normalized_query,
-        semantic_search,
-        &mut tracker,
-    )?;
-    crate::presentation::hydrate_ranked_search_collection(
-        index,
-        ranked,
-        &NormalizedSearchQuery::from_request(request),
-        &filter,
-    )
-    .map(|(collection, _)| collection)
-    .map_err(Into::into)
 }
 
 // Keeping the already-complete bounded result inline avoids a heap allocation
