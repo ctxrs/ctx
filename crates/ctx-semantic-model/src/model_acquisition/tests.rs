@@ -67,6 +67,13 @@ fn production_descriptor_is_hash_pinned_and_cache_probe_is_offline() {
 }
 
 #[test]
+fn cached_bundle_compatibility_requires_the_exact_explicit_manifest_override() {
+    assert!(compatibility_descriptor(Some(CACHED_COREML_COMPATIBILITY_MANIFEST_SHA256,)).is_some());
+    assert!(compatibility_descriptor(Some("576c".repeat(16).as_str())).is_none());
+    assert!(compatibility_descriptor(None).is_none());
+}
+
+#[test]
 fn cache_only_probe_never_reads_artifact_url() {
     let temp = tempfile::tempdir().unwrap();
     let missing = temp

@@ -25,6 +25,9 @@ use crate::{ArtifactFetchRequest, ArtifactFetcher};
 const MAX_ARCHIVE_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_EXPANDED_ARCHIVE_BYTES: u64 = MAX_BUNDLE_BYTES + 64 * 1024 * 1024;
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const CACHED_COREML_COMPATIBILITY_ENV: &str = "CTX_SEMANTIC_COREML_CACHED_MANIFEST_SHA256";
+const CACHED_COREML_COMPATIBILITY_MANIFEST_SHA256: &str =
+    "576c68756563333fdf442e6859f2392ca0065b09a2cb5d73983e30de75df1ad6";
 
 static ACQUISITION_NONCE: AtomicU64 = AtomicU64::new(0);
 
@@ -82,11 +85,23 @@ pub(crate) fn coreml_descriptor_provisioned() -> bool {
 }
 
 pub(crate) fn coreml_bundle_cache_available(cache_root: &Path) -> bool {
-    descriptor_cache_complete(cache_root, &COREML_BUNDLE_CONTRACT)
+    let descriptor = compatibility_descriptor(
+        std::env::var(CACHED_COREML_COMPATIBILITY_ENV)
+            .ok()
+            .as_deref(),
+    )
+    .unwrap_or(COREML_BUNDLE_CONTRACT);
+    descriptor_cache_complete(cache_root, &descriptor)
 }
 
 pub(crate) fn cached_coreml_bundle(cache_root: &Path) -> Result<Option<VerifiedModelBundle>> {
-    cached_coreml_bundle_for(cache_root, &COREML_BUNDLE_CONTRACT)
+    let descriptor = compatibility_descriptor(
+        std::env::var(CACHED_COREML_COMPATIBILITY_ENV)
+            .ok()
+            .as_deref(),
+    )
+    .unwrap_or(COREML_BUNDLE_CONTRACT);
+    cached_coreml_bundle_for(cache_root, &descriptor)
 }
 
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -159,6 +174,16 @@ fn acquire_coreml_bundle_for(
     descriptor: &CoreMlBundleContract<'_>,
     artifact_fetcher: &dyn ArtifactFetcher,
 ) -> Result<AcquiredCoreMlBundle> {
+    if descriptor.archive_sha256 == COREML_BUNDLE_CONTRACT.archive_sha256
+        && descriptor.manifest_sha256 == COREML_BUNDLE_CONTRACT.manifest_sha256
+    {
+        if let Some(bundle) = cached_coreml_bundle(cache_root)? {
+            return Ok(AcquiredCoreMlBundle {
+                bundle,
+                source: CoreMlAcquisitionSource::Cache,
+            });
+        }
+    }
     validate_descriptor(descriptor)?;
     ensure_macos_version_supported(descriptor.minimum_macos)?;
     let artifacts = prepare_signed_bundle_cache(cache_root)?;
@@ -221,6 +246,13 @@ fn acquire_coreml_bundle_for(
     let _ = fs::remove_file(&archive_path);
     remove_signed_bundle_staging_directory(&staging_path);
     result
+}
+
+fn compatibility_descriptor(value: Option<&str>) -> Option<CoreMlBundleContract<'static>> {
+    (value == Some(CACHED_COREML_COMPATIBILITY_MANIFEST_SHA256)).then(|| CoreMlBundleContract {
+        manifest_sha256: CACHED_COREML_COMPATIBILITY_MANIFEST_SHA256,
+        ..COREML_BUNDLE_CONTRACT
+    })
 }
 
 mod archive;
