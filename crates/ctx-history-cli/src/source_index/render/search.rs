@@ -8,12 +8,11 @@ use crate::{
 };
 
 use super::human::{
-    compact_or_legacy_short_id, display_width, push_action, push_field, push_heading,
-    push_prefixed, push_wrapped,
+    display_width, push_action, push_field, push_heading, push_prefixed, push_wrapped,
 };
 
 const CARD_INDENT: usize = 3;
-const CARD_LABEL_WIDTH: usize = 7;
+const CARD_LABEL_WIDTH: usize = 8;
 const VERBOSE_LABEL_WIDTH: usize = 16;
 
 pub(in crate::source_index) fn render_search_not_ready_document(
@@ -189,26 +188,38 @@ fn render_result(
         push_wrapped(document, context, CARD_INDENT, line, Token::Text);
     }
 
-    let provider = result_source_label(result);
-    let provider_session = result["provider_session_id"]
-        .as_str()
-        .filter(|value| !value.is_empty());
-    let ctx_session = result["ctx_session_id"].as_str().unwrap_or("unknown");
-    let separator = if context.unicode() { " · " } else { " | " };
-    let session = provider_session.map_or_else(
-        || format!("{provider}{separator}session {ctx_session}"),
-        |provider_session| format!("{provider}{separator}{provider_session}"),
+    let provider = result_provider_label(result);
+    push_field(
+        document,
+        context,
+        CARD_INDENT,
+        "Provider",
+        CARD_LABEL_WIDTH,
+        &provider,
+        Token::Text,
     );
+    if let Some(source) = result_source_identity(result) {
+        push_field(
+            document,
+            context,
+            CARD_INDENT,
+            "Source",
+            CARD_LABEL_WIDTH,
+            &source,
+            Token::Text,
+        );
+    }
+    let ctx_session = result["ctx_session_id"].as_str().unwrap_or("unknown");
     push_field(
         document,
         context,
         CARD_INDENT,
         "Session",
         CARD_LABEL_WIDTH,
-        &session,
-        Token::Text,
+        ctx_session,
+        Token::Reference,
     );
-    render_agent_field(document, context, result);
+    render_direct_lineage_fields(document, context, result);
 
     let event_id = result["ctx_event_id"].as_str().unwrap_or("unknown");
     render_event_summary(document, context, event_id, result["timestamp"].as_str());
@@ -276,7 +287,6 @@ fn render_event_summary(
     event_id: &str,
     timestamp: Option<&str>,
 ) {
-    let event_id = compact_or_legacy_short_id(event_id);
     let (time, time_token) = timestamp
         .filter(|timestamp| !timestamp.is_empty())
         .map_or(("time unavailable", Token::Label), |timestamp| {
@@ -287,7 +297,7 @@ fn render_event_summary(
         .saturating_add(CARD_LABEL_WIDTH)
         .saturating_add(2);
     let combined_width = prefix_width
-        .saturating_add(display_width(&event_id))
+        .saturating_add(display_width(event_id))
         .saturating_add(display_width(separator))
         .saturating_add(display_width(time));
 
@@ -314,7 +324,7 @@ fn render_event_summary(
             CARD_INDENT,
             "Event",
             CARD_LABEL_WIDTH,
-            &event_id,
+            event_id,
             Token::Reference,
         );
         push_field(
@@ -332,12 +342,10 @@ fn render_event_summary(
 fn render_verbose_fields(document: &mut Document, context: &RenderContext, result: &Value) {
     for (label, key, token) in [
         ("Type", "title", Token::Text),
-        ("Event", "ctx_event_id", Token::Reference),
-        ("Ctx session", "ctx_session_id", Token::Reference),
         ("Provider session", "provider_session_id", Token::Reference),
         ("Provider key", "provider_key", Token::Text),
         ("Source ID", "source_id", Token::Text),
-        ("Source", "source_format", Token::Text),
+        ("Source format", "source_format", Token::Text),
     ] {
         if let Some(value) = result[key].as_str().filter(|value| !value.is_empty()) {
             push_field(
@@ -362,7 +370,6 @@ fn render_verbose_fields(document: &mut Document, context: &RenderContext, resul
             Token::Text,
         );
     }
-    render_lineage_fields(document, context, result);
     if let Some(rank) = result["rank"].as_u64() {
         push_field(
             document,
@@ -387,175 +394,56 @@ fn render_verbose_fields(document: &mut Document, context: &RenderContext, resul
     }
 }
 
-fn result_source_label(result: &Value) -> String {
-    match (
-        result["provider_key"].as_str(),
-        result["source_id"].as_str(),
-    ) {
-        (Some(provider_key), Some(source_id)) => format!("{provider_key}/{source_id}"),
-        _ => result["provider"].as_str().unwrap_or("unknown").to_owned(),
-    }
+fn result_provider_label(result: &Value) -> String {
+    crate::provider_display_name(result["provider"].as_str().unwrap_or("unknown"))
 }
 
-fn render_agent_field(document: &mut Document, context: &RenderContext, result: &Value) {
-    let agent = result["agent_scope"]
+fn result_source_identity(result: &Value) -> Option<String> {
+    let provider = result["provider"]
         .as_str()
         .filter(|value| !value.is_empty())
         .unwrap_or("unknown");
-    let mut chunks = vec![agent_chunk(agent, Token::Text)];
-    if agent == "subagent" {
-        let parent = result["parent_ctx_session_id"]
-            .as_str()
-            .filter(|value| !value.is_empty());
-        let root = result["root_ctx_session_id"]
-            .as_str()
-            .filter(|value| !value.is_empty());
-        match (parent, root) {
-            (Some(parent), Some(root)) if parent == root => {
-                chunks.push(agent_reference_chunk("parent/root", parent));
-            }
-            (parent, root) => {
-                if let Some(parent) = parent {
-                    chunks.push(agent_reference_chunk("parent", parent));
-                }
-                if let Some(root) = root {
-                    chunks.push(agent_reference_chunk("root", root));
-                }
-            }
+    let provider_key = result["provider_key"]
+        .as_str()
+        .filter(|value| !value.is_empty());
+    let source_id = result["source_id"]
+        .as_str()
+        .filter(|value| !value.is_empty());
+    let identity = match (provider_key, source_id) {
+        (Some(provider_key), Some(source_id)) if provider_key == source_id => {
+            provider_key.to_owned()
         }
-    }
-    push_agent_chunks(document, context, chunks);
-}
-
-type AgentChunk = Vec<(String, Token)>;
-
-fn agent_chunk(text: &str, token: Token) -> AgentChunk {
-    let span = Span::new(text, token);
-    vec![(span.content().to_owned(), token)]
-}
-
-fn agent_reference_chunk(label: &str, reference: &str) -> AgentChunk {
-    let mut chunk = agent_chunk(&format!("{label} "), Token::Text);
-    // The application projection has already chosen the shortest prefix that
-    // is unambiguous in the pinned generation. Preserve that reference exactly;
-    // optional provider claims that cannot be resolved remain full UUIDs.
-    chunk.extend(agent_chunk(reference, Token::Reference));
-    chunk
-}
-
-fn push_agent_chunks(document: &mut Document, context: &RenderContext, chunks: Vec<AgentChunk>) {
-    let label = Span::new("Agent", Token::Label).content().to_owned();
-    let label_width = CARD_LABEL_WIDTH.max(display_width(&label));
-    let aligned_prefix_width = CARD_INDENT.saturating_add(label_width).saturating_add(2);
-    let aligned = context
-        .content_width()
-        .is_none_or(|width| width >= aligned_prefix_width.saturating_add(8));
-    let value_indent = if aligned {
-        aligned_prefix_width
-    } else {
-        document.push_line(
-            Line::new()
-                .with(Span::text(" ".repeat(CARD_INDENT)))
-                .with(Span::new(&label, Token::Label)),
-        );
-        CARD_INDENT.saturating_add(2)
+        (Some(provider_key), Some(source_id)) => format!("{provider_key}/{source_id}"),
+        (Some(provider_key), None) => provider_key.to_owned(),
+        (None, Some(source_id)) => source_id.to_owned(),
+        (None, None) => return None,
     };
-    let value_width = context
-        .content_width()
-        .map(|width| width.saturating_sub(value_indent).max(1));
-    let separator = if context.unicode() { " · " } else { " | " };
-    let separator = Span::new(separator, Token::Label).content().to_owned();
-    let separator_width = display_width(&separator);
-
-    let mut rows = Vec::<AgentChunk>::new();
-    let mut row = AgentChunk::new();
-    let mut row_width = 0usize;
-    for chunk in chunks {
-        let chunk_width = chunk.iter().fold(0usize, |width, (text, _)| {
-            width.saturating_add(display_width(text))
-        });
-        let next_separator_width = if row.is_empty() { 0 } else { separator_width };
-        let next_width = row_width
-            .saturating_add(next_separator_width)
-            .saturating_add(chunk_width);
-        if !row.is_empty() && value_width.is_some_and(|available| next_width > available) {
-            rows.push(std::mem::take(&mut row));
-            row_width = 0;
-        }
-        if !row.is_empty() {
-            row.push((separator.clone(), Token::Label));
-            row_width = row_width.saturating_add(separator_width);
-        }
-        row.extend(chunk);
-        row_width = row_width.saturating_add(chunk_width);
-    }
-    if !row.is_empty() {
-        rows.push(row);
-    }
-
-    for (index, row) in rows.into_iter().enumerate() {
-        let mut line = Line::new().with(Span::text(" ".repeat(CARD_INDENT)));
-        if aligned {
-            if index == 0 {
-                line.push(Span::new(&label, Token::Label));
-                line.push(Span::text(
-                    " ".repeat(label_width.saturating_sub(display_width(&label))),
-                ));
-            } else {
-                line.push(Span::text(" ".repeat(label_width)));
-            }
-            line.push(Span::text("  "));
-        } else {
-            line.push(Span::text("  "));
-        }
-        for (text, token) in row {
-            line.push(Span::new(text, token));
-        }
-        document.push_line(line);
+    let display_provider = crate::provider_display_name(provider);
+    if identity == provider || identity == display_provider {
+        None
+    } else {
+        Some(identity)
     }
 }
 
-fn render_lineage_fields(document: &mut Document, context: &RenderContext, result: &Value) {
-    let direct = result["ctx_session_id"].as_str();
-    let parent = result["parent_ctx_session_id"]
-        .as_str()
-        .filter(|parent| Some(*parent) != direct);
-    let root = result["root_ctx_session_id"]
-        .as_str()
-        .filter(|root| Some(*root) != direct);
-    match (parent, root) {
-        (Some(parent), Some(root)) if parent == root => push_field(
-            document,
-            context,
-            CARD_INDENT,
-            "Parent / root",
-            VERBOSE_LABEL_WIDTH,
-            parent,
-            Token::Reference,
-        ),
-        (parent, root) => {
-            if let Some(parent) = parent {
-                push_field(
-                    document,
-                    context,
-                    CARD_INDENT,
-                    "Parent",
-                    VERBOSE_LABEL_WIDTH,
-                    parent,
-                    Token::Reference,
-                );
-            }
-            if let Some(root) = root {
-                push_field(
-                    document,
-                    context,
-                    CARD_INDENT,
-                    "Root",
-                    VERBOSE_LABEL_WIDTH,
-                    root,
-                    Token::Reference,
-                );
-            }
+fn render_direct_lineage_fields(document: &mut Document, context: &RenderContext, result: &Value) {
+    for (label, key) in [
+        ("Parent", "parent_ctx_session_id"),
+        ("Root", "root_ctx_session_id"),
+    ] {
+        if let Some(reference) = result[key].as_str().filter(|value| !value.is_empty()) {
+            // The compact application projection has already chosen the
+            // shortest unambiguous prefix. Optional unresolved claims stay
+            // full, and verbose rendering receives the unprojected full IDs.
+            push_field(
+                document,
+                context,
+                CARD_INDENT,
+                label,
+                CARD_LABEL_WIDTH,
+                reference,
+                Token::Reference,
+            );
         }
     }
 }

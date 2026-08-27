@@ -323,7 +323,7 @@ mod tests {
             let rendered = document.render_plain();
             let normalized = rendered.split_whitespace().collect::<Vec<_>>().join(" ");
             assert!(rendered.starts_with("✓ ctx is healthy\n\nHistory\n"));
-            assert!(normalized.contains("Agent histories Claude, Codex"));
+            assert!(normalized.contains("Agent histories Claude Code, Codex"));
             assert!(normalized.contains("Roots 3 included roots"));
             assert!(!rendered.contains("747"));
             assert!(normalized.contains("Sessions 2"));

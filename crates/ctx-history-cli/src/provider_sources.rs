@@ -96,7 +96,7 @@ pub fn provider_selection_guidance(
     provider: CaptureProvider,
 ) -> ctx_history_ingest_application::ProviderSelectionGuidance {
     ctx_history_ingest_application::ProviderSelectionGuidance {
-        display_name: provider_cli_name(provider).to_owned(),
+        display_name: provider.display_name().to_owned(),
         manual_path_command: manual_path_guidance(provider),
     }
 }
@@ -703,10 +703,28 @@ mod tests {
     #[test]
     fn hermes_has_importable_application_guidance() {
         let guidance = provider_selection_guidance(CaptureProvider::Hermes);
-        assert_eq!(guidance.display_name, "hermes");
+        assert_eq!(guidance.display_name, "Hermes Agent");
         assert_eq!(
             guidance.manual_path_command,
             "ctx import --provider hermes --path <path>"
         );
+    }
+
+    #[test]
+    fn provider_guidance_separates_human_labels_from_cli_selectors() {
+        for (provider, display_name, selector) in [
+            (CaptureProvider::Claude, "Claude Code", "claude"),
+            (CaptureProvider::Gemini, "Gemini", "gemini"),
+            (CaptureProvider::CopilotCli, "GitHub Copilot", "copilot-cli"),
+            (CaptureProvider::KiroCli, "Kiro", "kiro-cli"),
+            (CaptureProvider::KimiCodeCli, "Kimi Code", "kimi-code-cli"),
+        ] {
+            let guidance = provider_selection_guidance(provider);
+            assert_eq!(guidance.display_name, display_name);
+            assert_eq!(
+                guidance.manual_path_command,
+                format!("ctx import --provider {selector} --path <path>")
+            );
+        }
     }
 }

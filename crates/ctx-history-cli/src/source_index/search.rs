@@ -364,6 +364,7 @@ fn run_search_inner<P: HistorySemanticPort>(
     semantic_port: &P,
     observation: &mut SearchExecutionObservation,
 ) -> SourceSearchResult<()> {
+    let compact_projection = compact_search_projection(json_output, verbose);
     let plan = ctx_history_read_application::plan_search(request, policy)?;
     let request = plan.request();
     let requested_backend = request.backend.unwrap_or(policy.default_backend);
@@ -386,7 +387,7 @@ fn run_search_inner<P: HistorySemanticPort>(
         &data_root,
         refresh_mode,
         refresh,
-        !json_output,
+        compact_projection,
         semantic_port,
         super::detected_active_session(),
         observation,
@@ -426,7 +427,7 @@ fn run_search_inner<P: HistorySemanticPort>(
 
     observation.failure_phase = Some(SearchFailurePhase::ResultProjection);
     let render_started = Instant::now();
-    let compact_value = match (!json_output)
+    let compact_value = match compact_projection
         .then(|| application.project_read_model(&value))
         .transpose()
     {
@@ -488,6 +489,10 @@ fn run_search_inner<P: HistorySemanticPort>(
     local_usage.set_search_context_observation(search_context);
     local_usage.set_measured_output_bytes(output_bytes);
     Ok(())
+}
+
+pub(super) const fn compact_search_projection(json_output: bool, verbose: bool) -> bool {
+    !json_output && !verbose
 }
 
 #[cfg(test)]

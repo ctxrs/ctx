@@ -155,7 +155,6 @@ pub struct ProviderDefaultLocation {
 #[derive(Debug, Clone, Copy)]
 pub struct ProviderSourceSpec {
     pub provider: CaptureProvider,
-    pub display_name: &'static str,
     pub default_locations: &'static [ProviderDefaultLocation],
     pub import_support: ProviderImportSupport,
     pub catalog_support: ProviderCatalogSupport,

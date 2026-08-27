@@ -58,7 +58,6 @@ fn provider_source_for_path_with_optional_data_root(
 ) -> ProviderSource {
     let unknown_spec = ProviderSourceSpec {
         provider,
-        display_name: "unknown",
         default_locations: &[],
         import_support: ProviderImportSupport::Unsupported,
         catalog_support: ProviderCatalogSupport::None,
