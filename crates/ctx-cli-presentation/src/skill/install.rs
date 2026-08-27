@@ -67,7 +67,7 @@ pub(super) fn run_status(
     telemetry: &mut IntegrationTelemetry,
     ui: &mut Ui,
 ) -> Result<()> {
-    let selection = status_agent_selection(&args, context);
+    let selection = status_agent_selection(&args, context)?;
     let outcome = application::status(selection, args.project, context, identity)?;
     crate::integrations::apply_workflow_telemetry(outcome.telemetry, telemetry);
     let recovery_command = outcome.recovery_command;

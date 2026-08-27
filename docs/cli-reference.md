@@ -170,9 +170,12 @@ ctx integrations status skills --agent codex --format json
 With no target flags in an interactive
 terminal, it opens a small agent picker with the universal `~/.agents/skills`
 location selected plus detected agent-specific folders for tools that need
-them. In non-interactive runs, it installs to the universal folder and also
-writes detected agent-specific folders, such as Claude Code, only when ctx sees
-evidence that the agent is installed. `--agent` targets native global skill
+them. Safe existing `ctx` or managed `ctx-agent-history-search` copies in
+recognized agent folders are also preselected. In non-interactive runs, it
+maintains those safe existing copies alongside the universal folder and any
+detected agent-specific folders, such as Claude Code, that are needed. Once a
+picker selection is submitted, or when `--agent` or `--all-agents` is used,
+only the selected folders are managed. `--agent` targets native global skill
 folders for supported agents such as Claude Code, Codex, Cursor, OpenCode,
 MiMo Code, Gemini CLI, Antigravity, GitHub Copilot, Pi, and Goose.
 `--all-agents` writes all supported target folders. `--project` switches from
@@ -182,7 +185,8 @@ global paths to the current project's skill folders.
 `stale`, `modified`, or `missing`. `integrations install skills` refreshes
 stale bundled copies automatically, but it refuses to overwrite locally
 modified skill files unless you pass `--force`. The command only manages the
-bundled ctx skill and does not fetch arbitrary remote skills.
+bundled ctx skill and does not fetch arbitrary remote skills. Without target
+flags, status uses the same default maintenance set as install.
 
 The 1.0 installer performs a one-way migration from a managed
 `ctx-agent-history-search` directory to `ctx`. It preserves a locally edited

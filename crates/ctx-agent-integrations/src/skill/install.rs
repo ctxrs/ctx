@@ -126,7 +126,7 @@ pub fn execute_install(
     request: SkillInstallRequest,
     context: &super::PathContext,
 ) -> Result<SkillInstallReceipt> {
-    let selection = include_legacy_targets(request.selection, request.project, context)?;
+    let selection = include_installed_targets(request.selection, request.project, context)?;
     let targets = resolve_targets_for_agents(&selection.agents, request.project, context)?;
     let preserve_is_fatal = !matches!(
         selection.source,
@@ -158,7 +158,7 @@ pub fn execute_status(
     request: SkillStatusRequest,
     context: &super::PathContext,
 ) -> Result<SkillStatusReceipt> {
-    let selection = include_legacy_targets(request.selection, request.project, context)?;
+    let selection = include_installed_targets(request.selection, request.project, context)?;
     let targets = resolve_targets_for_agents(&selection.agents, request.project, context)?;
     let results = targets
         .iter()
@@ -176,11 +176,26 @@ pub fn execute_status(
     })
 }
 
-fn include_legacy_targets(
+pub fn default_maintenance_selection(
+    project: bool,
+    context: &super::PathContext,
+) -> Result<SkillAgentSelection> {
+    include_installed_targets(super::default_agent_selection(context), project, context)
+}
+
+/// Extends default maintenance to every recognized location that already has
+/// a current or legacy skill. Explicit and picker selections remain exact.
+fn include_installed_targets(
     mut selection: SkillAgentSelection,
     project: bool,
     context: &super::PathContext,
 ) -> Result<SkillAgentSelection> {
+    if !matches!(
+        selection.source,
+        SkillSelectionSource::Detected | SkillSelectionSource::Fallback
+    ) {
+        return Ok(selection);
+    }
     let mut selected_skill_dirs = resolve_targets_for_agents(&selection.agents, project, context)?
         .into_iter()
         .map(|target| target.skill_dir)
@@ -190,20 +205,84 @@ fn include_legacy_targets(
         if selected_skill_dirs.contains(&target.skill_dir) {
             continue;
         }
-        let legacy_file = legacy_skill_dir(&target)?.join("SKILL.md");
-        match fs::symlink_metadata(&legacy_file) {
-            Ok(_) => {
-                selection.agents.push(agent);
-                selected_skill_dirs.push(target.skill_dir);
+        if !has_installed_skill(&target)? {
+            continue;
+        }
+        selection.agents.push(agent);
+        selected_skill_dirs.push(target.skill_dir);
+    }
+    Ok(selection)
+}
+
+fn has_installed_skill(target: &SkillTarget) -> Result<bool> {
+    let legacy_dir = legacy_skill_dir(target)?;
+    let current = inspect_discovered_skill_path(&target.authority_root, &target.skill_dir)?;
+    let legacy = inspect_discovered_skill_path(&target.authority_root, &legacy_dir)?;
+    Ok(!matches!(
+        (current, legacy),
+        (DiscoveredSkillPath::Unsafe, _) | (_, DiscoveredSkillPath::Unsafe)
+    ) && matches!(
+        (current, legacy),
+        (DiscoveredSkillPath::Present, _) | (_, DiscoveredSkillPath::Present)
+    ))
+}
+
+#[derive(Clone, Copy)]
+enum DiscoveredSkillPath {
+    Present,
+    Missing,
+    Unsafe,
+}
+
+fn inspect_discovered_skill_path(
+    authority_root: &Path,
+    skill_dir: &Path,
+) -> Result<DiscoveredSkillPath> {
+    ensure_path_inside(authority_root, skill_dir)?;
+    let relative = skill_dir
+        .strip_prefix(authority_root)
+        .map_err(|_| anyhow!("skill path escapes authority root"))?;
+    let mut current = authority_root.to_path_buf();
+    for component in relative.components() {
+        current.push(component);
+        match fs::symlink_metadata(&current) {
+            Ok(metadata)
+                if metadata.file_type().is_symlink() || is_windows_reparse_point(&metadata) =>
+            {
+                return Ok(DiscoveredSkillPath::Unsafe)
             }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Ok(metadata) if metadata.is_dir() => {}
+            Ok(_) => return Ok(DiscoveredSkillPath::Unsafe),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(DiscoveredSkillPath::Missing)
+            }
             Err(error) => {
-                return Err(error)
-                    .with_context(|| format!("inspect legacy skill {}", legacy_file.display()))
+                return Err(error).with_context(|| format!("inspect {}", current.display()))
             }
         }
     }
-    Ok(selection)
+    let skill_file = skill_dir.join("SKILL.md");
+    match fs::symlink_metadata(&skill_file) {
+        Ok(metadata) if metadata.file_type().is_file() && !is_windows_reparse_point(&metadata) => {
+            Ok(DiscoveredSkillPath::Present)
+        }
+        Ok(_) => Ok(DiscoveredSkillPath::Unsafe),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(DiscoveredSkillPath::Missing),
+        Err(error) => Err(error).with_context(|| format!("inspect skill {}", skill_file.display())),
+    }
+}
+
+#[cfg(windows)]
+fn is_windows_reparse_point(metadata: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt as _;
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn is_windows_reparse_point(_metadata: &fs::Metadata) -> bool {
+    false
 }
 
 pub fn install_target(
@@ -305,9 +384,10 @@ pub fn install_target(
 
 pub fn status_target(target: &SkillTarget) -> Result<StatusResult> {
     ensure_path_inside(&target.base_dir, &target.skill_dir)?;
-    reject_symlink_directory(&target.skill_dir)?;
+    validate_directory_path(&target.authority_root, &target.skill_dir)?;
     let (current_status, metadata, installed_hash) = inspect_current_skill(&target.skill_dir)?;
     let legacy_dir = legacy_skill_dir(target)?;
+    validate_directory_path(&target.authority_root, &legacy_dir)?;
     let legacy = inspect_legacy_skill(&legacy_dir)?;
     let legacy_status = legacy.as_ref().map(|legacy| legacy.status);
     let status = if current_status == SkillInstallStatus::Modified
@@ -352,7 +432,6 @@ fn inspect_current_skill(
 }
 
 fn inspect_legacy_skill(skill_dir: &Path) -> Result<Option<LegacySkillSnapshot>> {
-    reject_symlink_directory(skill_dir)?;
     let Some(body) = read_optional_regular_file(&skill_dir.join("SKILL.md"))? else {
         return Ok(None);
     };
@@ -378,34 +457,47 @@ fn inspect_legacy_skill(skill_dir: &Path) -> Result<Option<LegacySkillSnapshot>>
 }
 
 fn read_skill_hash(skill_file: &Path) -> Result<Option<String>> {
-    match fs::read(skill_file) {
-        Ok(body) => Ok(Some(sha256_hex(&body))),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error).with_context(|| format!("read {}", skill_file.display())),
-    }
+    Ok(read_optional_regular_file(skill_file)?.map(|body| sha256_hex(&body)))
 }
 
 fn ensure_safe_skill_directory(target: &SkillTarget) -> Result<()> {
     ensure_path_inside(&target.base_dir, &target.skill_dir)?;
-    reject_symlink_directory(&target.skill_dir)?;
+    validate_directory_path(&target.authority_root, &target.skill_dir)?;
     fs::create_dir_all(&target.skill_dir)
         .with_context(|| format!("create {}", target.skill_dir.display()))
 }
 
-fn reject_symlink_directory(path: &Path) -> Result<()> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => Err(anyhow!(
-            "refusing to install through symlink {}",
-            path.display()
-        )),
-        Ok(metadata) if !metadata.is_dir() => Err(anyhow!(
-            "skill target is not a directory: {}",
-            path.display()
-        )),
-        Ok(_) => Ok(()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error).with_context(|| format!("inspect {}", path.display())),
+fn validate_directory_path(authority_root: &Path, path: &Path) -> Result<()> {
+    ensure_path_inside(authority_root, path)?;
+    let relative = path
+        .strip_prefix(authority_root)
+        .map_err(|_| anyhow!("skill path escapes authority root"))?;
+    let mut current = authority_root.to_path_buf();
+    for component in relative.components() {
+        current.push(component);
+        match fs::symlink_metadata(&current) {
+            Ok(metadata)
+                if metadata.file_type().is_symlink() || is_windows_reparse_point(&metadata) =>
+            {
+                return Err(anyhow!(
+                    "skill path traverses a symlink or reparse point: {}",
+                    current.display()
+                ));
+            }
+            Ok(metadata) if metadata.is_dir() => {}
+            Ok(_) => {
+                return Err(anyhow!(
+                    "skill path component is not a directory: {}",
+                    current.display()
+                ));
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(error).with_context(|| format!("inspect {}", current.display()))
+            }
+        }
     }
+    Ok(())
 }
 
 fn legacy_skill_dir(target: &SkillTarget) -> Result<PathBuf> {
@@ -416,7 +508,7 @@ fn legacy_skill_dir(target: &SkillTarget) -> Result<PathBuf> {
 
 fn remove_legacy_skill_files(target: &SkillTarget, legacy: &LegacySkillSnapshot) -> Result<()> {
     let legacy_dir = legacy_skill_dir(target)?;
-    reject_symlink_directory(&legacy_dir)?;
+    validate_directory_path(&target.authority_root, &legacy_dir)?;
     atomic_remove_if_unchanged(&legacy_dir.join("SKILL.md"), &legacy.body)
         .with_context(|| format!("remove {}", legacy_dir.join("SKILL.md").display()))?;
     if let Some(metadata_body) = &legacy.managed_metadata_body {
@@ -429,9 +521,11 @@ fn remove_legacy_skill_files(target: &SkillTarget, legacy: &LegacySkillSnapshot)
 
 fn read_optional_regular_file(path: &Path) -> Result<Option<Vec<u8>>> {
     match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_file() => fs::read(path)
-            .map(Some)
-            .with_context(|| format!("read {}", path.display())),
+        Ok(metadata) if metadata.file_type().is_file() && !is_windows_reparse_point(&metadata) => {
+            fs::read(path)
+                .map(Some)
+                .with_context(|| format!("read {}", path.display()))
+        }
         Ok(_) => Err(anyhow!("target is not a regular file: {}", path.display())),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error).with_context(|| format!("inspect {}", path.display())),
@@ -473,7 +567,9 @@ fn write_metadata(target: &SkillTarget, product_version: &str) -> Result<()> {
 }
 
 fn read_metadata(skill_dir: &Path) -> Option<SkillMetadata> {
-    let body = fs::read(skill_dir.join(METADATA_FILE)).ok()?;
+    let body = read_optional_regular_file(&skill_dir.join(METADATA_FILE))
+        .ok()
+        .flatten()?;
     serde_json::from_slice(&body).ok()
 }
 
@@ -506,6 +602,24 @@ mod tests {
     use super::*;
 
     const RELEASED_LEGACY_SKILL_V0_17_0: &[u8] = include_bytes!("testdata/legacy_skill_v0_17_0.md");
+
+    #[cfg(unix)]
+    fn link_directory(target: &Path, link: &Path) -> bool {
+        std::os::unix::fs::symlink(target, link).unwrap();
+        true
+    }
+
+    #[cfg(windows)]
+    fn link_directory(target: &Path, link: &Path) -> bool {
+        let status = std::process::Command::new("cmd.exe")
+            .args(["/D", "/C", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .status()
+            .expect("create Windows directory junction");
+        assert!(status.success(), "failed to create Windows junction");
+        true
+    }
 
     fn write_managed_legacy_skill(target: &SkillTarget, body: &[u8]) -> PathBuf {
         let legacy_dir = target.base_dir.join(LEGACY_BUNDLED_SKILL_NAME);
@@ -563,6 +677,159 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn default_maintenance_does_not_select_an_unowned_fifo_skill_file() {
+        use std::{ffi::CString, os::unix::ffi::OsStrExt as _};
+
+        let root = tempfile::tempdir().unwrap();
+        let context = super::super::PathContext::for_tests(
+            root.path().join("home"),
+            root.path().join("repo"),
+        );
+        let cursor =
+            super::super::single_target(super::super::SkillAgentArg::Cursor, false, &context)
+                .unwrap();
+        fs::create_dir_all(&cursor.skill_dir).unwrap();
+        let fifo = cursor.skill_dir.join("SKILL.md");
+        let raw = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(raw.as_ptr(), 0o600) }, 0);
+
+        let selection = include_installed_targets(
+            super::super::default_agent_selection(&context),
+            false,
+            &context,
+        )
+        .unwrap();
+
+        assert!(!selection
+            .agents
+            .contains(&super::super::SkillAgentArg::Cursor));
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn automatic_discovery_skips_a_safe_copy_with_an_unsafe_legacy_sibling() {
+        let root = tempfile::tempdir().unwrap();
+        let context = super::super::PathContext::for_tests(
+            root.path().join("home"),
+            root.path().join("repo"),
+        );
+        let cursor =
+            super::super::single_target(super::super::SkillAgentArg::Cursor, false, &context)
+                .unwrap();
+        fs::create_dir_all(&cursor.skill_dir).unwrap();
+        fs::write(cursor.skill_dir.join("SKILL.md"), BUNDLED_SKILL_BODY).unwrap();
+        let outside = root.path().join("outside-legacy");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("SKILL.md"), BUNDLED_SKILL_BODY).unwrap();
+        let legacy_dir = cursor.base_dir.join(LEGACY_BUNDLED_SKILL_NAME);
+        if !link_directory(&outside, &legacy_dir) {
+            return;
+        }
+
+        let selection = include_installed_targets(
+            super::super::default_agent_selection(&context),
+            false,
+            &context,
+        )
+        .unwrap();
+
+        assert!(!selection
+            .agents
+            .contains(&super::super::SkillAgentArg::Cursor));
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn every_selected_project_source_rejects_a_linked_ancestor() {
+        for source in [
+            SkillSelectionSource::Fallback,
+            SkillSelectionSource::Explicit,
+            SkillSelectionSource::Picker,
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let repo = root.path().join("repo");
+            let outside = root.path().join("outside-agents");
+            fs::create_dir_all(&repo).unwrap();
+            fs::create_dir_all(&outside).unwrap();
+            if !link_directory(&outside, &repo.join(".agents")) {
+                return;
+            }
+            let context = super::super::PathContext::for_tests(root.path().join("home"), repo);
+            let selection = SkillAgentSelection {
+                agents: vec![super::super::SkillAgentArg::Universal],
+                source,
+            };
+
+            let status_error = execute_status(
+                SkillStatusRequest {
+                    selection: selection.clone(),
+                    project: true,
+                },
+                &context,
+            )
+            .unwrap_err();
+            let install_error = execute_install(
+                SkillInstallRequest {
+                    selection,
+                    project: true,
+                    force: false,
+                    product_version: "1.0.0".to_owned(),
+                },
+                &context,
+            )
+            .unwrap_err();
+
+            assert!(
+                format!("{status_error:#}").contains("symlink or reparse point"),
+                "{status_error:#}"
+            );
+            assert!(
+                format!("{install_error:#}").contains("symlink or reparse point"),
+                "{install_error:#}"
+            );
+            assert!(!outside.join("skills/ctx/SKILL.md").exists());
+        }
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn unrelated_override_cannot_authorize_another_agents_linked_root() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let cursor_root = home.join(".cursor");
+        let outside = root.path().join("outside-cursor");
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        if !link_directory(&outside, &cursor_root) {
+            return;
+        }
+        let context = super::super::PathContext::for_tests(home, root.path().join("repo"))
+            .with_env_override("CODEX_HOME", cursor_root);
+        let selection = SkillAgentSelection {
+            agents: vec![super::super::SkillAgentArg::Cursor],
+            source: SkillSelectionSource::Explicit,
+        };
+
+        let error = execute_install(
+            SkillInstallRequest {
+                selection,
+                project: false,
+                force: false,
+                product_version: "1.0.0".to_owned(),
+            },
+            &context,
+        )
+        .unwrap_err();
+
+        assert!(
+            format!("{error:#}").contains("symlink or reparse point"),
+            "{error:#}"
+        );
+        assert!(!outside.join("skills/ctx/SKILL.md").exists());
+    }
+
     #[test]
     fn metadata_free_released_legacy_skill_is_migrated() {
         let root = tempfile::tempdir().unwrap();
@@ -597,6 +864,32 @@ mod tests {
             BUNDLED_SKILL_BODY.as_bytes()
         );
         assert!(target.skill_dir.join(METADATA_FILE).is_file());
+    }
+
+    #[test]
+    fn current_and_managed_legacy_copies_coexist_until_one_way_cleanup() {
+        let root = tempfile::tempdir().unwrap();
+        let context = super::super::PathContext::for_tests(
+            root.path().join("home"),
+            root.path().join("repo"),
+        );
+        let target =
+            super::super::single_target(super::super::SkillAgentArg::Universal, false, &context)
+                .unwrap();
+        install_target(&target, false, true, "1.0.0").unwrap();
+        let legacy_dir = write_managed_legacy_skill(&target, b"managed legacy\n");
+        let before = status_target(&target).unwrap();
+        assert_eq!(before.status, SkillInstallStatus::Stale);
+        assert_eq!(before.legacy_status, Some(SkillInstallStatus::Stale));
+        let result = install_target(&target, false, true, "1.0.0").unwrap();
+        assert!(result.success);
+        assert!(result.migrated);
+        assert!(result.updated);
+        assert!(!legacy_dir.join("SKILL.md").exists());
+        assert_eq!(
+            fs::read(target.skill_dir.join("SKILL.md")).unwrap(),
+            BUNDLED_SKILL_BODY.as_bytes()
+        );
     }
 
     #[cfg(unix)]

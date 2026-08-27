@@ -24,6 +24,7 @@ pub(super) fn install_agent_selection(
             agents: &args.agent,
             all_agents: args.all_agents,
             allow_picker: !args.format.is_json() && can_prompt(),
+            project: args.project,
         },
         context,
     )? {
@@ -40,8 +41,8 @@ pub(super) fn install_agent_selection(
 pub(super) fn status_agent_selection(
     args: &SkillStatusArgs,
     context: &PathContext,
-) -> SkillAgentSelection {
-    status_selection(&args.agent, args.all_agents, context)
+) -> Result<SkillAgentSelection> {
+    status_selection(&args.agent, args.all_agents, args.project, context)
 }
 
 fn can_prompt() -> bool {
@@ -183,6 +184,7 @@ mod prompt_tests {
                 agents: &[],
                 all_agents: false,
                 allow_picker: true,
+                project: false,
             },
             &context,
         )

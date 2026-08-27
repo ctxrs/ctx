@@ -131,6 +131,7 @@ fn default_selection_includes_universal_and_detected_agent_specific_dirs() {
             agents: &[],
             all_agents: false,
             allow_picker: false,
+            project: false,
         },
         &context,
     )
@@ -154,6 +155,7 @@ fn picker_defaults_to_universal_when_nothing_detected() {
             agents: &[],
             all_agents: false,
             allow_picker: true,
+            project: false,
         },
         &context,
     )
@@ -176,6 +178,38 @@ fn picker_defaults_to_universal_when_nothing_detected() {
             SkillSelectionSource::Fallback
         )
     );
+}
+
+#[test]
+fn picker_visibly_preselects_an_existing_native_copy() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let cursor_skill = home.join(".cursor").join("skills").join("ctx");
+    fs::create_dir_all(&cursor_skill).unwrap();
+    fs::write(cursor_skill.join("SKILL.md"), "existing skill\n").unwrap();
+    let context = PathContext::for_tests(home, temp.path().join("repo"))
+        .with_env_override("CODEX_HOME", temp.path().join("missing-codex"));
+
+    let SkillInstallSelectionPlan::Prompt(prompt) = plan_install_selection(
+        SkillSelectionRequest {
+            agents: &[],
+            all_agents: false,
+            allow_picker: true,
+            project: false,
+        },
+        &context,
+    )
+    .unwrap() else {
+        panic!("interactive selection should prompt");
+    };
+
+    let cursor = prompt
+        .options
+        .iter()
+        .find(|option| option.agent == SkillAgentArg::Cursor)
+        .unwrap();
+    assert!(cursor.selected_by_default);
+    assert_eq!(cursor.target.skill_dir, cursor_skill);
 }
 
 #[test]
@@ -261,6 +295,7 @@ fn workflow_facts_are_closed_and_path_free() {
             agents: &[SkillAgentArg::Codex, SkillAgentArg::ClaudeCode],
             all_agents: false,
             allow_picker: false,
+            project: false,
         },
         &context,
     )

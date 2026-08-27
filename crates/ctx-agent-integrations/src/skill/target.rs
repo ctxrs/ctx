@@ -12,6 +12,7 @@ use super::{
 pub struct SkillTarget {
     pub agent: SkillAgentArg,
     pub scope: SkillScope,
+    pub authority_root: PathBuf,
     pub base_dir: PathBuf,
     pub skill_dir: PathBuf,
 }
@@ -37,13 +38,16 @@ pub fn single_target(
     context: &PathContext,
 ) -> Result<SkillTarget> {
     let skill_name = sanitize_skill_name(BUNDLED_SKILL_NAME)?;
-    let (scope, base_dir) = if project {
+    let (scope, authority_root, base_dir) = if project {
         (
             SkillScope::Project,
+            context.cwd.clone(),
             context.cwd.join(agent.project_skills_dir()),
         )
     } else {
-        (SkillScope::Global, agent.global_skills_dir(context))
+        let base_dir = agent.global_skills_dir(context);
+        let authority_root = agent.global_skills_authority_root(context);
+        (SkillScope::Global, authority_root, base_dir)
     };
     let skill_dir = base_dir.join(&skill_name);
     ensure_path_inside(&base_dir, &skill_dir)
@@ -51,6 +55,7 @@ pub fn single_target(
     Ok(SkillTarget {
         agent,
         scope,
+        authority_root,
         base_dir,
         skill_dir,
     })

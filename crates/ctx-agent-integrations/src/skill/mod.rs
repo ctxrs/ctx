@@ -6,8 +6,8 @@ mod target;
 
 pub use agents::{agent_from_name, parse_skill_agent, picker_agents, SkillAgentArg};
 pub use install::{
-    execute_install, execute_status, install_target, status_target, InstallResult,
-    SkillInstallReceipt, SkillInstallRequest, SkillInstallStatus, SkillMetadata,
+    default_maintenance_selection, execute_install, execute_status, install_target, status_target,
+    InstallResult, SkillInstallReceipt, SkillInstallRequest, SkillInstallStatus, SkillMetadata,
     SkillStatusReceipt, SkillStatusRequest, StatusResult,
 };
 pub use paths::{bundled_hash, ensure_path_inside, sanitize_skill_name, sha256_hex, PathContext};

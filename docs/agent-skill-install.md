@@ -25,9 +25,12 @@ ctx integrations install skills
 
 By default this opens a small picker in an interactive terminal, with the
 universal `~/.agents/skills/ctx` location selected plus detected
-agent-specific folders for clients that need them. In non-interactive runs,
-ctx installs to the universal folder and writes detected agent-specific folders
-only when needed.
+agent-specific folders for clients that need them. Safe existing `ctx` or
+managed `ctx-agent-history-search` copies in recognized agent folders are also
+preselected. In non-interactive runs, ctx maintains those safe existing copies
+alongside the universal folder and any detected agent-specific folders that are
+needed. Once a picker selection is submitted, or when `--agent` or
+`--all-agents` is used, only the selected folders are managed.
 
 Install into explicit global agent skill folders with:
 
@@ -66,7 +69,8 @@ ctx integrations status skills --agent grok-build
 
 `status` reports `current`, `stale`, `modified`, or `missing`. The installer
 writes `.ctx-skill.json` beside `SKILL.md` so ctx can distinguish managed copies
-from local edits.
+from local edits. Without target flags, status uses the same default maintenance
+set as install, including safe existing copies in recognized folders.
 
 The 1.0 installer performs a one-way migration from the former
 `ctx-agent-history-search` directory. It removes a recognized managed copy and

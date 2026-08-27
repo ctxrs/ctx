@@ -128,6 +128,40 @@ impl SkillAgentArg {
         }
     }
 
+    pub fn global_skills_authority_root(self, context: &PathContext) -> PathBuf {
+        match self {
+            Self::Codex => context
+                .env_overrides
+                .get("CODEX_HOME")
+                .cloned()
+                .unwrap_or_else(|| context.home.clone()),
+            Self::GrokBuild => context
+                .env_overrides
+                .get("GROK_HOME")
+                .cloned()
+                .unwrap_or_else(|| context.home.clone()),
+            Self::ClaudeCode => context
+                .env_overrides
+                .get("CLAUDE_CONFIG_DIR")
+                .cloned()
+                .unwrap_or_else(|| context.home.clone()),
+            Self::OpenCode | Self::Amp | Self::Goose => context.xdg_config_home.clone(),
+            Self::MiMoCode => context
+                .env_overrides
+                .get("MIMOCODE_CONFIG_DIR")
+                .or_else(|| context.env_overrides.get("MIMOCODE_HOME"))
+                .cloned()
+                .unwrap_or_else(|| context.xdg_config_home.clone()),
+            Self::Universal
+            | Self::Cursor
+            | Self::GeminiCli
+            | Self::Antigravity
+            | Self::AntigravityCli
+            | Self::GitHubCopilot
+            | Self::Pi => context.home.clone(),
+        }
+    }
+
     pub fn needs_agent_specific_default(self) -> bool {
         self != Self::GrokBuild && self.project_skills_dir() != ".agents/skills"
     }

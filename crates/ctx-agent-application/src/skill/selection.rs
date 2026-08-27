@@ -1,13 +1,15 @@
 use anyhow::Result;
 use ctx_agent_integrations::skill::{
-    default_agent_selection, detected_agents, explicit_agent_selection, picker_agent_selection,
-    single_target, PathContext, SkillAgentArg, SkillAgentSelection, BUNDLED_SKILL_NAME,
+    default_maintenance_selection, detected_agents, explicit_agent_selection,
+    picker_agent_selection, single_target, PathContext, SkillAgentArg, SkillAgentSelection,
+    BUNDLED_SKILL_NAME,
 };
 
 pub struct SkillSelectionRequest<'a> {
     pub agents: &'a [SkillAgentArg],
     pub all_agents: bool,
     pub allow_picker: bool,
+    pub project: bool,
 }
 
 #[derive(Debug)]
@@ -37,23 +39,21 @@ pub fn plan_install_selection(
     if let Some(selection) = explicit_agent_selection(request.agents, request.all_agents) {
         return Ok(SkillInstallSelectionPlan::Selected(selection));
     }
+    let defaults = default_maintenance_selection(request.project, context)?;
     if !request.allow_picker {
-        return Ok(SkillInstallSelectionPlan::Selected(
-            default_agent_selection(context),
-        ));
+        return Ok(SkillInstallSelectionPlan::Selected(defaults));
     }
 
     let detected = detected_agents(context);
-    let defaults = default_agent_selection(context).agents;
     let options = ctx_agent_integrations::skill::picker_agents()
         .iter()
         .copied()
         .map(|agent| {
             Ok(SkillPickerOption {
                 agent,
-                selected_by_default: defaults.contains(&agent),
+                selected_by_default: defaults.agents.contains(&agent),
                 detected: detected.contains(&agent),
-                target: single_target(agent, false, context)?,
+                target: single_target(agent, request.project, context)?,
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -70,7 +70,11 @@ pub fn complete_picker_selection(agents: Vec<SkillAgentArg>) -> SkillAgentSelect
 pub fn status_selection(
     agents: &[SkillAgentArg],
     all_agents: bool,
+    project: bool,
     context: &PathContext,
-) -> SkillAgentSelection {
-    explicit_agent_selection(agents, all_agents).unwrap_or_else(|| default_agent_selection(context))
+) -> Result<SkillAgentSelection> {
+    match explicit_agent_selection(agents, all_agents) {
+        Some(selection) => Ok(selection),
+        None => default_maintenance_selection(project, context),
+    }
 }
