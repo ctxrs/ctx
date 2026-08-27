@@ -3,7 +3,7 @@ use std::{path::Path, time::Duration};
 use anyhow::Result;
 use ctx_client_observability::analytics::PublicEventV1;
 use ctx_history_capture::DiscoveryContext;
-use ctx_semantic_model::SemanticModelConfig;
+use ctx_semantic_model::{SemanticIndexingIntensity, SemanticModelConfig};
 use serde_json::Value;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -99,6 +99,7 @@ pub enum DaemonSupervisor {
 pub struct DaemonConfigSnapshot {
     pub daemon: DaemonProductConfig,
     pub semantic_enabled: bool,
+    pub semantic_indexing_intensity: SemanticIndexingIntensity,
     pub automatic_upgrade_enabled: bool,
     pub automatic_upgrade_interval: Duration,
     pub upgrade_channel: String,
@@ -113,6 +114,10 @@ pub struct DaemonProductConfig {
 impl DaemonConfigSnapshot {
     pub const fn semantic_search_enabled(&self) -> bool {
         self.semantic_enabled
+    }
+
+    pub const fn semantic_indexing_intensity(&self) -> SemanticIndexingIntensity {
+        self.semantic_indexing_intensity
     }
 }
 
@@ -412,6 +417,7 @@ mod tests {
                 mode: DaemonMode::Full,
             },
             semantic_enabled: true,
+            semantic_indexing_intensity: SemanticIndexingIntensity::Full,
             automatic_upgrade_enabled: true,
             automatic_upgrade_interval: Duration::from_secs(3_600),
             upgrade_channel: "stable".to_owned(),
@@ -420,6 +426,10 @@ mod tests {
         assert!(snapshot.daemon.enabled);
         assert!(snapshot.daemon_maintenance_enabled());
         assert!(snapshot.semantic_enabled());
+        assert_eq!(
+            snapshot.semantic_indexing_intensity(),
+            SemanticIndexingIntensity::Full
+        );
         assert!(snapshot.automatic_upgrade_enabled());
         assert_eq!(snapshot.interval(), Duration::from_secs(3_600));
         assert_eq!(snapshot.channel(), "stable");

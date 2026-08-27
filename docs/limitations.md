@@ -83,6 +83,22 @@ shipped.
   `ctx semantic enable` still records the opt-in in manual mode. Lexical search
   remains available while embeddings build, and hybrid uses both backends when
   coverage is ready.
+- Semantic indexing intensity supports only `quiet` and `full`; quiet is the
+  background-friendly default. Full removes deliberate inter-batch pacing for
+  semantic document index construction, but remains subject to safety,
+  resource, and admission limits. Exact speedups and stable CPU percentages are
+  not guaranteed.
+- Intensity covers initial backfill, incremental refresh, rebuild/recovery,
+  daemon reconciliation, and finite foreground reconciliation. It does not
+  affect interactive query embedding, lexical indexing, or embedding
+  identity/readiness, and it does not change automatic/manual indexing mode.
+- There is no persistent CLI intensity setter in this version. Edit
+  `indexing_intensity = "full"` under `[semantic]` in `config.toml` for
+  persistent full behavior. `ctx semantic enable --wait --intensity full` is
+  temporary: it does not rewrite the configured intensity and expires with the
+  wait, a waiting process crash, or a daemon restart.
+- Semantic embedding is local. External and bring-your-own embedding services
+  are not supported.
 - The ctx macOS CLI targets macOS 13, but ONNX Runtime 1.27 follows its upstream
   macOS 14 minimum. On macOS 13, daemon-backed lexical search remains available
   while semantic search is unavailable.

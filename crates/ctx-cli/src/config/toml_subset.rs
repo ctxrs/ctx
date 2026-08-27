@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use anyhow::{bail, Context, Result};
 
-use super::{AutoUpgradeMode, DaemonMode, IndexingMode};
+use super::{AutoUpgradeMode, DaemonMode, IndexingMode, SemanticIndexingIntensity};
 
 #[derive(Debug, Clone)]
 pub(super) struct ConfigValue {
@@ -145,6 +145,20 @@ pub(super) fn parse_indexing_mode(value: &ConfigValue) -> Result<IndexingMode> {
         "manual" => Ok(IndexingMode::Manual),
         _ => bail!(
             "indexing.mode at line {} must be either \"auto\" or \"manual\"",
+            value.line
+        ),
+    }
+}
+
+pub(super) fn parse_semantic_indexing_intensity(
+    value: &ConfigValue,
+) -> Result<SemanticIndexingIntensity> {
+    let intensity = parse_non_empty_string("semantic.indexing_intensity", value)?;
+    match intensity.as_str() {
+        "quiet" => Ok(SemanticIndexingIntensity::Quiet),
+        "full" => Ok(SemanticIndexingIntensity::Full),
+        _ => bail!(
+            "semantic.indexing_intensity at line {} must be either \"quiet\" or \"full\"",
             value.line
         ),
     }

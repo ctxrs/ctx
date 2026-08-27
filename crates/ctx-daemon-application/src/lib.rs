@@ -15,6 +15,8 @@ use ctx_client_observability::analytics::PublicEventV1;
 use ctx_daemon_runtime::{DaemonHandoffRestartDeferral, NormalizedLaunch};
 use serde_json::Value;
 
+pub use ctx_daemon_service::SemanticIndexingIntensity;
+
 mod control;
 mod host;
 mod lifecycle;
@@ -94,6 +96,7 @@ pub struct DaemonConfigSnapshot {
     pub enabled: bool,
     pub mode: DaemonMode,
     pub semantic_enabled: bool,
+    pub semantic_indexing_intensity: SemanticIndexingIntensity,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -362,6 +365,7 @@ impl DaemonApplicationHost for TestHost {
             enabled: true,
             mode: DaemonMode::Full,
             semantic_enabled: true,
+            semantic_indexing_intensity: SemanticIndexingIntensity::Quiet,
         })
     }
 

@@ -16,6 +16,7 @@ use crate::compact_json;
 use crate::{
     daemon_wakeup::DaemonWakeup,
     paths_status::{daemon_source_backed_refresh_job_path, read_daemon_job_status},
+    semantic_intensity::{handle_semantic_intensity_lease_request, SemanticIntensityLeaseRegistry},
     source_backed_refresh_adapter::wire,
     source_backed_refresh_coordinator::CoreRefreshEngine,
     DaemonConfigPort,
@@ -214,6 +215,7 @@ pub(crate) struct CtxAuthenticatedRequestHandler {
     wakeup: Arc<DaemonWakeup>,
     config: &'static dyn DaemonConfigPort,
     lifecycle: Arc<DaemonLifecycleState>,
+    semantic_intensity_leases: Arc<SemanticIntensityLeaseRegistry>,
 }
 
 #[cfg(test)]
@@ -231,6 +233,7 @@ pub(crate) fn ctx_authenticated_request_handler(
         wakeup,
         config,
         Arc::new(DaemonLifecycleState::starting()),
+        Arc::new(SemanticIntensityLeaseRegistry::default()),
     )
 }
 
@@ -241,6 +244,7 @@ pub(crate) fn ctx_authenticated_request_handler_with_lifecycle(
     wakeup: Arc<DaemonWakeup>,
     config: &'static dyn DaemonConfigPort,
     lifecycle: Arc<DaemonLifecycleState>,
+    semantic_intensity_leases: Arc<SemanticIntensityLeaseRegistry>,
 ) -> Arc<CtxAuthenticatedRequestHandler> {
     Arc::new(CtxAuthenticatedRequestHandler {
         data_root: data_root.to_path_buf(),
@@ -249,6 +253,7 @@ pub(crate) fn ctx_authenticated_request_handler_with_lifecycle(
         wakeup,
         config,
         lifecycle,
+        semantic_intensity_leases,
     })
 }
 
@@ -270,12 +275,17 @@ impl AuthenticatedRequestHandler for CtxAuthenticatedRequestHandler {
                         CtxPostWriteAction::source_refresh(response_barrier, self),
                     )
                 }
-                Ok(SourceRefreshResponse::Value(response)) => {
-                    HandlerOutcome::with_post_write_action(
-                        Ok(response),
-                        CtxPostWriteAction::source_refresh(None, self),
-                    )
-                }
+                Ok(SourceRefreshResponse::Value {
+                    response,
+                    wake_daemon,
+                }) => HandlerOutcome::with_post_write_action(
+                    Ok(response),
+                    if wake_daemon {
+                        CtxPostWriteAction::wake_daemon(self)
+                    } else {
+                        CtxPostWriteAction::source_refresh(None, self)
+                    },
+                ),
                 Err(error) => HandlerOutcome::with_post_write_action(
                     Err(error),
                     CtxPostWriteAction::source_refresh(None, self),
@@ -305,6 +315,9 @@ enum CtxPostWriteActionKind<'a> {
         response_barrier: Option<ctx_history_refresh::AdmissionResponseBarrier>,
         handler: &'a CtxAuthenticatedRequestHandler,
     },
+    WakeDaemon {
+        handler: &'a CtxAuthenticatedRequestHandler,
+    },
 }
 
 impl Default for CtxPostWriteAction<'_> {
@@ -327,25 +340,36 @@ impl<'a> CtxPostWriteAction<'a> {
             },
         }
     }
+
+    fn wake_daemon(handler: &'a CtxAuthenticatedRequestHandler) -> Self {
+        Self {
+            kind: CtxPostWriteActionKind::WakeDaemon { handler },
+        }
+    }
 }
 
 impl PostWriteAction for CtxPostWriteAction<'_> {
     fn run(self) {
-        if let CtxPostWriteActionKind::SourceRefresh {
-            response_barrier,
-            handler,
-        } = self.kind
-        {
-            wire::finish_source_refresh_response(response_barrier, &handler.source_refresh, || {
-                handler.wakeup.signal_ipc()
-            });
+        match self.kind {
+            CtxPostWriteActionKind::None => {}
+            CtxPostWriteActionKind::SourceRefresh {
+                response_barrier,
+                handler,
+            } => {
+                wire::finish_source_refresh_response(
+                    response_barrier,
+                    &handler.source_refresh,
+                    || handler.wakeup.signal_ipc(),
+                );
+            }
+            CtxPostWriteActionKind::WakeDaemon { handler } => handler.wakeup.signal_ipc(),
         }
     }
 }
 
 enum SourceRefreshResponse {
     Wire(wire::WireResponse),
-    Value(Value),
+    Value { response: Value, wake_daemon: bool },
 }
 
 impl CtxAuthenticatedRequestHandler {
@@ -358,7 +382,10 @@ impl CtxAuthenticatedRequestHandler {
             "pid": std::process::id(),
         });
         response[key] = value.into();
-        SourceRefreshResponse::Value(response)
+        SourceRefreshResponse::Value {
+            response,
+            wake_daemon: false,
+        }
     }
 
     fn handle_source_refresh(&self, request: &Value) -> Result<SourceRefreshResponse> {
@@ -368,6 +395,20 @@ impl CtxAuthenticatedRequestHandler {
             return Ok(SourceRefreshResponse::Wire(response));
         }
         let op = request.get("op").and_then(Value::as_str).unwrap_or("");
+        if matches!(
+            op,
+            "semantic_intensity_acquire"
+                | "semantic_intensity_renew"
+                | "semantic_intensity_release"
+        ) {
+            let response =
+                handle_semantic_intensity_lease_request(&self.semantic_intensity_leases, request)?
+                    .expect("matched semantic intensity operation must be handled");
+            return Ok(SourceRefreshResponse::Value {
+                response: response.value,
+                wake_daemon: response.wake_daemon,
+            });
+        }
         if op == "lifecycle_ping" {
             return Ok(self.lifecycle_response("readiness", self.lifecycle.readiness()));
         }
@@ -399,14 +440,17 @@ impl CtxAuthenticatedRequestHandler {
                             .and_then(Value::as_str)
                             .map(str::to_owned)
                     });
-            return Ok(SourceRefreshResponse::Value(compact_json(json!({
+            return Ok(SourceRefreshResponse::Value {
+                response: compact_json(json!({
                 "ok": true,
                 "schema_version": 1,
                 "owner": "daemon",
                 "service": "source_refresh",
                 "pid": std::process::id(),
                 "published_generation": published_generation,
-            }))));
+                })),
+                wake_daemon: false,
+            });
         }
         Err(anyhow!("unknown daemon source refresh operation `{op}`"))
     }

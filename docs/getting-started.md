@@ -124,6 +124,39 @@ ctx semantic enable
 ctx semantic status
 ```
 
+The default configuration is sparse: it need not contain a `[semantic]`
+section. Absent settings mean semantic search is disabled and semantic indexing
+intensity is `"quiet"`. The canonical opt-in is:
+
+```toml
+[semantic]
+enabled = true
+```
+
+For persistent full semantic document indexing, edit `config.toml`:
+
+```toml
+[semantic]
+enabled = true
+indexing_intensity = "full"
+```
+
+Only `quiet` and `full` are supported. Quiet is the background-friendly
+default. Full removes deliberate inter-batch pacing but still obeys safety,
+resource, and admission limits, so its exact speedup and CPU use are not fixed.
+There is no persistent CLI intensity setter in this version.
+
+With automatic indexing, use temporary full intensity while waiting for the
+current projection with:
+
+```bash
+ctx semantic enable --wait --intensity full
+```
+
+This does not rewrite persistent intensity. It expires when the wait ends, the
+command crashes, or the daemon restarts. `ctx semantic status` reports the
+configured and effective intensity.
+
 Automatic indexing is the default, so enablement starts or recovers the daemon
 that acquires the local model and builds the semantic projection. Add `--wait`
 to wait for readiness. If you selected manual indexing, plain enablement records
@@ -132,6 +165,13 @@ catch-up or use an explicit semantic search with `--refresh wait`. Lexical
 search remains available while embeddings build; hybrid search uses lexical and
 semantic evidence automatically when coverage is ready. `ctx semantic disable`
 turns the feature off without deleting downloaded assets.
+
+Released `[search] semantic = true|false` remains accepted as a legacy alias
+only when `semantic.enabled` is absent. Canonical settings win, and durable
+`ctx semantic enable|disable` changes migrate to canonical sparse config. The
+existing `CTX_SEARCH_SEMANTIC` compatibility override remains supported.
+Semantic embedding stays local; external and bring-your-own embedding services
+are not part of this feature.
 
 ctx has no hosted-history client or `ctx cloud` subcommand. Official
 installer-managed binaries can separately run signed CLI
@@ -240,12 +280,14 @@ Automatic background refresh may start the configured persistent daemon for
 local history freshness. Semantic and hybrid search read existing local sidecar
 coverage; when semantic is enabled, the daemon-owned query service can embed the
 query. Manual background refresh and `--refresh off` skip process startup.
-Search does not run semantic catch-up or download embedding models. Hybrid uses
-semantic evidence only after coverage is complete and dirty work is drained;
-until then it falls back to lexical search with a structured reason. Explicit
-semantic search can query partial coverage for diagnostics, but reports a local
-error when the model cache is missing or the semantic worker is actively
-indexing.
+Those background/off paths do not run semantic catch-up or download embedding
+models. Hybrid uses semantic evidence only after coverage is complete and dirty
+work is drained; until then it falls back to lexical search with a structured
+reason. In manual mode, an explicit semantic or nonzero-weight hybrid
+`--refresh wait` may acquire the local model and reconcile semantic document
+coverage for the pinned Core generation. Explicit semantic search can query
+partial coverage for diagnostics, but reports a local error when the model
+cache is missing or the semantic worker is actively indexing.
 
 ## 6. Use JSON For Scripts
 

@@ -3,17 +3,57 @@ use std::time::Instant;
 use anyhow::{anyhow, Context, Result};
 
 use super::{
-    reacquire_semantic_embedder, throttle_semantic_batch, SemanticModelConfig, SemanticQuietPolicy,
-    SharedSemanticRuntime,
+    reacquire_semantic_embedder, throttle_semantic_batch, SemanticIndexingExecutionPolicy,
+    SemanticIndexingIntensity, SemanticModelConfig, SemanticQuietPolicy, SharedSemanticRuntime,
 };
 
 impl SharedSemanticRuntime {
+    /// Embeds documents using the default quiet indexing intensity.
+    ///
+    /// New indexing callers that expose an intensity control should use
+    /// [`Self::embed_documents_with_intensity`].
     pub fn embed_documents(
         &self,
         config: &SemanticModelConfig,
         texts: Vec<String>,
         deadline: Option<Instant>,
     ) -> Result<(Vec<Vec<f32>>, SemanticQuietPolicy)> {
+        let (embeddings, execution_policy) = self.embed_documents_with_intensity(
+            config,
+            texts,
+            SemanticIndexingIntensity::default(),
+            deadline,
+        )?;
+        Ok((embeddings, execution_policy.quiet_policy()))
+    }
+
+    /// Embeds documents under an explicit document-indexing intensity.
+    ///
+    /// Intensity changes only inter-batch duty-cycle rest. Model selection,
+    /// resource sizing, batch semantics, admission checks, and deadlines are
+    /// shared with the quiet path.
+    pub fn embed_documents_with_intensity(
+        &self,
+        config: &SemanticModelConfig,
+        texts: Vec<String>,
+        intensity: SemanticIndexingIntensity,
+        deadline: Option<Instant>,
+    ) -> Result<(Vec<Vec<f32>>, SemanticIndexingExecutionPolicy)> {
+        self.embed_documents_with_intensity_resolver(config, texts, || intensity, deadline)
+    }
+
+    /// Embeds documents while resolving indexing intensity before every
+    /// inference batch.
+    ///
+    /// Daemon callers use this form so a released or expired temporary lease
+    /// restores quiet pacing without waiting for the current page to finish.
+    pub fn embed_documents_with_intensity_resolver(
+        &self,
+        config: &SemanticModelConfig,
+        texts: Vec<String>,
+        mut resolve_intensity: impl FnMut() -> SemanticIndexingIntensity,
+        deadline: Option<Instant>,
+    ) -> Result<(Vec<Vec<f32>>, SemanticIndexingExecutionPolicy)> {
         let mut pending = texts.into_iter();
         if pending.len() == 0 {
             let embedder = self.lock()?;
@@ -21,11 +61,14 @@ impl SharedSemanticRuntime {
                 .as_ref()
                 .ok_or_else(|| anyhow!("semantic embedder was not initialized"))?
                 .quiet_policy();
-            return Ok((Vec::new(), quiet_policy));
+            return Ok((
+                Vec::new(),
+                resolve_batch_execution_policy(&mut resolve_intensity, quiet_policy),
+            ));
         }
 
         let mut embeddings = Vec::with_capacity(pending.len());
-        let mut final_quiet_policy = None;
+        let mut final_execution_policy = None;
         while pending.len() != 0 {
             let mut embedder = self.lock()?;
             let batch_size = embedder
@@ -65,21 +108,30 @@ impl SharedSemanticRuntime {
                 .as_ref()
                 .ok_or_else(|| anyhow!("semantic embedder was not initialized"))?
                 .quiet_policy();
+            let execution_policy =
+                resolve_batch_execution_policy(&mut resolve_intensity, quiet_policy);
             drop(embedder);
 
             embeddings.extend(batch_embeddings);
-            final_quiet_policy = Some(quiet_policy);
+            final_execution_policy = Some(execution_policy);
             let active = started.elapsed();
             let remaining =
                 deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
-            throttle_semantic_batch(active, quiet_policy, remaining);
+            throttle_semantic_batch(active, execution_policy, remaining);
         }
 
         Ok((
             embeddings,
-            final_quiet_policy.expect("non-empty semantic input must execute a batch"),
+            final_execution_policy.expect("non-empty semantic input must execute a batch"),
         ))
     }
+}
+
+fn resolve_batch_execution_policy(
+    resolve_intensity: &mut impl FnMut() -> SemanticIndexingIntensity,
+    quiet_policy: SemanticQuietPolicy,
+) -> SemanticIndexingExecutionPolicy {
+    SemanticIndexingExecutionPolicy::new(resolve_intensity(), quiet_policy)
 }
 
 fn next_document_batch(
@@ -92,6 +144,39 @@ fn next_document_batch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    type CompatibilityDocumentOperation = fn(
+        &SharedSemanticRuntime,
+        &SemanticModelConfig,
+        Vec<String>,
+        Option<Instant>,
+    ) -> Result<(Vec<Vec<f32>>, SemanticQuietPolicy)>;
+    type ExplicitDocumentOperation = fn(
+        &SharedSemanticRuntime,
+        &SemanticModelConfig,
+        Vec<String>,
+        SemanticIndexingIntensity,
+        Option<Instant>,
+    )
+        -> Result<(Vec<Vec<f32>>, SemanticIndexingExecutionPolicy)>;
+    type QueryOperation = fn(
+        &SharedSemanticRuntime,
+        &SemanticModelConfig,
+        String,
+    ) -> Result<(Vec<f32>, crate::SemanticEmbeddingRuntimeInfo)>;
+
+    #[test]
+    fn document_embedding_apis_keep_quiet_compatibility_and_explicit_intensity() {
+        let _compatibility_operation: CompatibilityDocumentOperation =
+            SharedSemanticRuntime::embed_documents;
+        let _explicit_operation: ExplicitDocumentOperation =
+            SharedSemanticRuntime::embed_documents_with_intensity;
+    }
+
+    #[test]
+    fn query_embedding_api_remains_intensity_independent() {
+        let _query_operation: QueryOperation = SharedSemanticRuntime::embed_query;
+    }
 
     fn collect_batches(count: usize, batch_size: usize) -> Vec<Vec<String>> {
         let mut pending = (0..count).map(|index| index.to_string());
@@ -116,6 +201,31 @@ mod tests {
         assert_eq!(
             collect_batches(7, 3),
             [vec!["0", "1", "2"], vec!["3", "4", "5"], vec!["6"]]
+        );
+    }
+
+    #[test]
+    fn each_batch_rechecks_dynamic_intensity_authority() {
+        let quiet_policy = SemanticQuietPolicy {
+            threads: 1,
+            batch_size: 4,
+            memory_budget_bytes: 1024,
+            active_percent: 25,
+        };
+        let mut intensities = [
+            SemanticIndexingIntensity::Full,
+            SemanticIndexingIntensity::Quiet,
+        ]
+        .into_iter();
+        let mut resolve = || intensities.next().expect("one intensity per batch");
+
+        assert_eq!(
+            resolve_batch_execution_policy(&mut resolve, quiet_policy).intensity(),
+            SemanticIndexingIntensity::Full
+        );
+        assert_eq!(
+            resolve_batch_execution_policy(&mut resolve, quiet_policy).intensity(),
+            SemanticIndexingIntensity::Quiet
         );
     }
 }

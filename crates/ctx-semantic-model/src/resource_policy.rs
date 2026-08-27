@@ -1,4 +1,4 @@
-use std::time::Duration as StdDuration;
+use std::{fmt, str::FromStr, time::Duration as StdDuration};
 
 #[cfg(any(target_os = "linux", test))]
 use std::{fs, path::PathBuf};
@@ -46,6 +46,132 @@ pub struct SemanticQuietPolicy {
     // Heuristic sizing target for batch selection, not an OS-enforced memory limit.
     pub(super) memory_budget_bytes: u64,
     pub(super) active_percent: u8,
+}
+
+impl SemanticQuietPolicy {
+    pub const fn threads(self) -> usize {
+        self.threads
+    }
+
+    pub const fn batch_size(self) -> usize {
+        self.batch_size
+    }
+
+    pub const fn memory_budget_bytes(self) -> u64 {
+        self.memory_budget_bytes
+    }
+
+    pub const fn active_percent(self) -> u8 {
+        self.active_percent
+    }
+}
+
+/// The duty-cycle intensity for semantic document construction.
+///
+/// This policy is intentionally separate from model identity and query
+/// embedding. Both variants use the same admitted model and resource sizing;
+/// only document-indexing rest between inference batches changes.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum SemanticIndexingIntensity {
+    #[default]
+    Quiet,
+    Full,
+}
+
+impl SemanticIndexingIntensity {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Quiet => "quiet",
+            Self::Full => "full",
+        }
+    }
+}
+
+impl fmt::Display for SemanticIndexingIntensity {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl FromStr for SemanticIndexingIntensity {
+    type Err = ParseSemanticIndexingIntensityError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "quiet" => Ok(Self::Quiet),
+            "full" => Ok(Self::Full),
+            _ => Err(ParseSemanticIndexingIntensityError {
+                value: value.to_owned(),
+            }),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ParseSemanticIndexingIntensityError {
+    value: String,
+}
+
+impl fmt::Display for ParseSemanticIndexingIntensityError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "unknown semantic indexing intensity {:?}; expected quiet or full",
+            self.value
+        )
+    }
+}
+
+impl std::error::Error for ParseSemanticIndexingIntensityError {}
+
+/// Effective resource and duty-cycle policy for one document embedding run.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SemanticIndexingExecutionPolicy {
+    intensity: SemanticIndexingIntensity,
+    quiet_policy: SemanticQuietPolicy,
+}
+
+impl SemanticIndexingExecutionPolicy {
+    pub(super) const fn new(
+        intensity: SemanticIndexingIntensity,
+        quiet_policy: SemanticQuietPolicy,
+    ) -> Self {
+        Self {
+            intensity,
+            quiet_policy,
+        }
+    }
+
+    pub const fn intensity(self) -> SemanticIndexingIntensity {
+        self.intensity
+    }
+
+    pub const fn quiet_policy(self) -> SemanticQuietPolicy {
+        self.quiet_policy
+    }
+
+    pub const fn threads(self) -> usize {
+        self.quiet_policy.threads()
+    }
+
+    pub const fn batch_size(self) -> usize {
+        self.quiet_policy.batch_size()
+    }
+
+    pub const fn memory_budget_bytes(self) -> u64 {
+        self.quiet_policy.memory_budget_bytes()
+    }
+
+    pub const fn active_percent(self) -> u8 {
+        match self.intensity {
+            SemanticIndexingIntensity::Quiet => self.quiet_policy.active_percent(),
+            SemanticIndexingIntensity::Full => 100,
+        }
+    }
+
+    fn batch_rest(self, active: StdDuration, remaining: Option<StdDuration>) -> StdDuration {
+        semantic_limited_batch_rest(active, self.active_percent(), remaining)
+    }
 }
 
 pub(super) const SEMANTIC_CPU_MODEL_LOAD_MIN_AVAILABLE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
@@ -181,10 +307,10 @@ pub(super) fn semantic_limited_batch_rest(
 
 pub(super) fn throttle_semantic_batch(
     active: StdDuration,
-    policy: SemanticQuietPolicy,
+    policy: SemanticIndexingExecutionPolicy,
     remaining: Option<StdDuration>,
 ) {
-    let rest = semantic_limited_batch_rest(active, policy.active_percent, remaining);
+    let rest = policy.batch_rest(active, remaining);
     if !rest.is_zero() {
         std::thread::sleep(rest);
     }
@@ -448,6 +574,68 @@ pub(super) fn semantic_system_memory() -> (Option<u64>, Option<u64>) {
 #[cfg(test)]
 mod semantic_resource_policy_tests {
     use super::*;
+
+    fn representative_quiet_policy() -> SemanticQuietPolicy {
+        SemanticQuietPolicy {
+            threads: 4,
+            batch_size: 16,
+            memory_budget_bytes: 2 * 1024 * 1024 * 1024,
+            active_percent: 25,
+        }
+    }
+
+    #[test]
+    fn indexing_intensity_defaults_and_parses_strictly() {
+        assert_eq!(
+            SemanticIndexingIntensity::default(),
+            SemanticIndexingIntensity::Quiet
+        );
+        assert_eq!(SemanticIndexingIntensity::Quiet.as_str(), "quiet");
+        assert_eq!(SemanticIndexingIntensity::Full.as_str(), "full");
+        assert_eq!(
+            "quiet".parse::<SemanticIndexingIntensity>(),
+            Ok(SemanticIndexingIntensity::Quiet)
+        );
+        assert_eq!(
+            "full".parse::<SemanticIndexingIntensity>(),
+            Ok(SemanticIndexingIntensity::Full)
+        );
+        assert!("Quiet".parse::<SemanticIndexingIntensity>().is_err());
+        assert!(" quiet".parse::<SemanticIndexingIntensity>().is_err());
+        assert!("unlimited".parse::<SemanticIndexingIntensity>().is_err());
+    }
+
+    #[test]
+    fn quiet_indexing_computes_representative_nonzero_rest() {
+        let policy = SemanticIndexingExecutionPolicy::new(
+            SemanticIndexingIntensity::Quiet,
+            representative_quiet_policy(),
+        );
+        assert_eq!(policy.active_percent(), 25);
+        assert_eq!(
+            policy.batch_rest(StdDuration::from_millis(100), None),
+            StdDuration::from_millis(300)
+        );
+    }
+
+    #[test]
+    fn full_indexing_removes_rest_without_changing_resource_sizing() {
+        let quiet_policy = representative_quiet_policy();
+        let full_policy =
+            SemanticIndexingExecutionPolicy::new(SemanticIndexingIntensity::Full, quiet_policy);
+        assert_eq!(full_policy.active_percent(), 100);
+        assert_eq!(
+            full_policy.batch_rest(StdDuration::from_millis(100), None),
+            StdDuration::ZERO
+        );
+        assert_eq!(full_policy.threads(), quiet_policy.threads());
+        assert_eq!(full_policy.batch_size(), quiet_policy.batch_size());
+        assert_eq!(
+            full_policy.memory_budget_bytes(),
+            quiet_policy.memory_budget_bytes()
+        );
+        assert_eq!(full_policy.quiet_policy(), quiet_policy);
+    }
 
     #[test]
     fn quiet_cpu_policy_caps_threads_batch_and_memory_target() {

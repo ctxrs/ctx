@@ -19,7 +19,10 @@ use ctx_history_platform::platform_security::{
 mod durable_write;
 mod mutation;
 mod provider_roots;
+mod semantic;
 mod toml_subset;
+
+pub use semantic::SemanticIndexingIntensity;
 
 #[cfg(test)]
 pub(crate) use mutation::add_claude_root;
@@ -34,6 +37,7 @@ use provider_roots::{
     validate_provider_root_existing_kind, validate_provider_root_kind, validate_provider_root_path,
     validate_provider_root_support, validate_root_selector,
 };
+use semantic::{SemanticEnabledSource, SemanticIndexingIntensitySource};
 use toml_subset::*;
 
 pub const CONFIG_FILE: &str = "config.toml";
@@ -144,7 +148,7 @@ pub struct AppConfig {
     pub upgrade: UpgradeConfig,
     pub indexing: IndexingConfig,
     pub daemon: DaemonConfig,
-    pub search: SearchConfig,
+    pub semantic: SemanticConfig,
     pub sources: SourcesConfig,
     pub provider_roots: BTreeMap<String, ProviderRootDefinition>,
 }
@@ -306,26 +310,11 @@ pub struct DaemonConfig {
 }
 
 #[derive(Debug, Clone)]
-pub struct SearchConfig {
-    pub semantic: Option<bool>,
-    semantic_source: SemanticSearchSource,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SemanticSearchSource {
-    Default,
-    Config,
-    Environment,
-}
-
-impl SemanticSearchSource {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Default => "default",
-            Self::Config => "config",
-            Self::Environment => "environment",
-        }
-    }
+pub struct SemanticConfig {
+    pub enabled: Option<bool>,
+    enabled_source: SemanticEnabledSource,
+    pub indexing_intensity: SemanticIndexingIntensity,
+    indexing_intensity_source: SemanticIndexingIntensitySource,
 }
 
 #[derive(Debug, Clone)]
@@ -357,9 +346,11 @@ impl Default for AppConfig {
             daemon: DaemonConfig {
                 mode: DaemonMode::Full,
             },
-            search: SearchConfig {
-                semantic: None,
-                semantic_source: SemanticSearchSource::Default,
+            semantic: SemanticConfig {
+                enabled: None,
+                enabled_source: SemanticEnabledSource::Default,
+                indexing_intensity: SemanticIndexingIntensity::Quiet,
+                indexing_intensity_source: SemanticIndexingIntensitySource::Default,
             },
             sources: SourcesConfig { automatic: true },
             provider_roots: BTreeMap::new(),
@@ -385,19 +376,31 @@ impl AppConfig {
     }
 
     pub fn semantic_search_enabled(&self) -> bool {
-        self.search
-            .semantic
+        self.semantic
+            .enabled
             .unwrap_or(SEMANTIC_SEARCH_DEFAULT_ENABLED)
     }
 
     pub fn semantic_search_source(&self) -> &'static str {
-        self.search.semantic_source.as_str()
+        self.semantic.enabled_source.as_str()
+    }
+
+    pub const fn semantic_indexing_intensity(&self) -> SemanticIndexingIntensity {
+        self.semantic.indexing_intensity
+    }
+
+    pub const fn semantic_indexing_intensity_source(&self) -> &'static str {
+        self.semantic.indexing_intensity_source.as_str()
     }
 
     pub(crate) fn apply_persisted_semantic_search_enabled(&mut self, enabled: bool) {
-        if self.search.semantic_source != SemanticSearchSource::Environment {
-            self.search.semantic = Some(enabled);
-            self.search.semantic_source = SemanticSearchSource::Config;
+        if self.semantic.enabled_source != SemanticEnabledSource::Environment {
+            self.semantic.enabled = enabled.then_some(true);
+            self.semantic.enabled_source = if enabled {
+                SemanticEnabledSource::Config
+            } else {
+                SemanticEnabledSource::Default
+            };
         }
     }
 
@@ -446,6 +449,8 @@ impl AppConfig {
     fn apply_values(&mut self, values: &BTreeMap<String, ConfigValue>) -> Result<()> {
         let mut legacy_daemon_enabled = None;
         let mut indexing_mode = None;
+        let mut legacy_semantic_enabled = None;
+        let mut semantic_enabled = None;
         let mut provider_roots = BTreeMap::<
             String,
             (
@@ -531,8 +536,15 @@ impl AppConfig {
                     indexing_mode = Some(parse_indexing_mode(value)?);
                 }
                 "search.semantic" => {
-                    self.search.semantic = Some(parse_config_bool(key, value)?);
-                    self.search.semantic_source = SemanticSearchSource::Config;
+                    legacy_semantic_enabled = Some(parse_config_bool(key, value)?);
+                }
+                "semantic.enabled" => {
+                    semantic_enabled = Some(parse_config_bool(key, value)?);
+                }
+                "semantic.indexing_intensity" => {
+                    self.semantic.indexing_intensity = parse_semantic_indexing_intensity(value)?;
+                    self.semantic.indexing_intensity_source =
+                        SemanticIndexingIntensitySource::Config;
                 }
                 "sources.automatic" => {
                     self.sources.automatic = parse_config_bool(key, value)?;
@@ -546,6 +558,10 @@ impl AppConfig {
                 .map(IndexingMode::from_legacy_daemon_enabled)
                 .unwrap_or(self.indexing.mode)
         });
+        if let Some(enabled) = semantic_enabled.or(legacy_semantic_enabled) {
+            self.semantic.enabled = Some(enabled);
+            self.semantic.enabled_source = SemanticEnabledSource::Config;
+        }
         if provider_roots.len() > MAX_CONFIGURED_PROVIDER_ROOTS {
             bail!(
                 "configured provider roots exceed the maximum of {MAX_CONFIGURED_PROVIDER_ROOTS}"
@@ -677,8 +693,8 @@ impl AppConfig {
         }
         if let Ok(value) = env::var("CTX_SEARCH_SEMANTIC") {
             if let Some(enabled) = parse_bool_value(&value) {
-                self.search.semantic = Some(enabled);
-                self.search.semantic_source = SemanticSearchSource::Environment;
+                self.semantic.enabled = Some(enabled);
+                self.semantic.enabled_source = SemanticEnabledSource::Environment;
             }
         }
         Ok(())

@@ -32,6 +32,8 @@ The duplicate `upgrade.interval_seconds` config key is also removed. Use
 The canonical persisted indexing control is `[indexing] mode = "auto"` or
 `"manual"`. Auto is the default. Use `ctx index mode` to read the effective
 mode and `ctx index mode auto` or `ctx index mode manual` to persist a change.
+`CTX_SEARCH_SEMANTIC` remains a supported process-level compatibility override
+for canonical semantic enablement.
 
 ctx stores immutable Core/Tantivy search generations, optional semantic data,
 and content-free local usage aggregates locally. Treat the ctx data root like
@@ -332,8 +334,8 @@ local upsert as described above.
 | Command | Reads | Writes |
 | --- | --- | --- |
 | `ctx setup` | provider transcript files and bounded path metadata for source discovery | data root, source catalog/epoch metadata, `search/lexical`, and optional persistent daemon lock/status/job files in automatic mode; old Store artifacts are neither opened nor deleted |
-| `ctx semantic status` | semantic policy, generation and local asset metadata, indexing mode, and daemon state | none |
-| `ctx semantic enable` / `ctx semantic disable` | semantic policy, generation and local asset metadata, indexing mode, and daemon state | atomically updates `config.toml`; automatic-mode enable may start the daemon and acquire the local runtime and model, while disable lets daemon maintenance quiesce semantic work and retains downloaded assets |
+| `ctx semantic status` | semantic policy, configured/effective indexing intensity, generation and local asset metadata, indexing mode, and daemon state | none |
+| `ctx semantic enable` / `ctx semantic disable` | semantic policy, configured/effective indexing intensity, generation and local asset metadata, indexing mode, and daemon state | atomically updates canonical sparse `config.toml`; automatic-mode enable may start the daemon and acquire the local runtime and model, while disable lets daemon maintenance quiesce semantic work and retains downloaded assets; lifecycle mutations remove the legacy `[search] semantic` key |
 | `ctx status` | data root metadata, source epoch, lexical/semantic generation metadata, daemon state, and compact local usage health | none; does not mutate provider history, Core generations, or usage aggregates |
 | `ctx index` / `ctx index watch` / `ctx index wait` | indexing mode, lexical/semantic generation metadata, and daemon state | none |
 | `ctx index mode` | `config.toml` when present | none when reading; `auto` or `manual` writes `config.toml` and establishes or removes persistent supervision |
@@ -570,15 +572,47 @@ upgrades do not run. Ordinary foreground commands do not substitute for the
 disabled maintenance paths. Manual finite workers always enforce the Core-only
 exclusions independently of this persistent-daemon setting.
 
-Local semantic search remains disabled by default and requires automatic
-indexing. Its config opt-in is:
+Local semantic search remains disabled by default. Semantic configuration is
+sparse, so a default installation need not write a `[semantic]` section. The
+absent effective defaults are `enabled = false` and
+`indexing_intensity = "quiet"`. Its canonical opt-in is:
 
 ```toml
-[search]
-semantic = true
+[semantic]
+enabled = true
 ```
 
-See [Retrieval backends](search.md#retrieval-backends) for the setup command and
+For persistent full semantic document indexing, edit `config.toml`:
+
+```toml
+[semantic]
+enabled = true
+indexing_intensity = "full"
+```
+
+Only `quiet` and `full` are accepted. Quiet is the background-friendly default.
+Full removes deliberate inter-batch pacing for semantic document indexing but
+still obeys safety, resource, and admission limits; exact speedups and stable
+CPU percentages are not part of the contract. Intensity applies to initial
+backfill, incremental refresh, rebuild/recovery, daemon reconciliation, and
+finite foreground reconciliation. It does not apply to interactive query
+embedding, lexical indexing, or embedding identity/readiness. It is separate
+from `[indexing] mode`, which selects automatic or manual ownership.
+
+This version has no persistent CLI setter for intensity. Edit `config.toml` for
+persistent full behavior, or, in auto mode, use
+`ctx semantic enable --wait --intensity full` for temporary full intensity
+during one wait. The temporary value does not rewrite persistent intensity and
+expires when the wait ends, the waiting command crashes, or the daemon
+restarts. `ctx semantic status` reports configured and effective intensity.
+
+Released `[search] semantic = true|false` remains accepted as a legacy alias
+only when `semantic.enabled` is absent. Canonical settings win. Durable
+`ctx semantic enable|disable` mutations migrate enablement to canonical sparse
+config and remove the legacy key. `CTX_SEARCH_SEMANTIC` remains supported for
+process-level compatibility.
+
+See [Retrieval backends](search.md#retrieval-backends) for lifecycle and
 readiness behavior.
 
 Automatic upgrade uses `upgrade.auto = "apply"` by default for official
@@ -734,7 +768,8 @@ Recommended handling:
 ## Network Behavior
 
 Core indexing work uses the local filesystem and Tantivy; optional semantic
-indexing uses local flat-vector operations. The tools that
+indexing uses local flat-vector operations and local embedding. External and
+bring-your-own embedding services are not part of this feature. The tools that
 originally produced provider transcripts may have used the network according to
 their own configuration; ctx indexing those transcripts does not repeat that
 behavior.

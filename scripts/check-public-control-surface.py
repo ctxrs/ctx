@@ -32,7 +32,8 @@ RELEASED_DEFAULT_SCOPES = {
     "local_usage.enabled": "all_cli_installations",
     "upgrade.auto": "official_installer_managed",
     "indexing.mode": "all_cli_installations",
-    "search.semantic": "all_cli_installations",
+    "semantic.enabled": "all_cli_installations",
+    "semantic.indexing_intensity": "all_cli_installations",
     "sources.automatic": "all_cli_installations",
 }
 PINNED_STABLE_SNAPSHOTS = {
@@ -129,6 +130,9 @@ def extract_empty_config_defaults(config_source: str) -> dict[str, object]:
     )
     if not semantic:
         fail("could not locate empty-config semantic search default")
+    semantic_key = (
+        "semantic.enabled" if "SemanticConfig" in default_source else "search.semantic"
+    )
     defaults = {
         "analytics.enabled": default_field(
             r"analytics:\s*AnalyticsConfig\s*\{.*?enabled:\s*([^,\n]+),",
@@ -138,7 +142,7 @@ def extract_empty_config_defaults(config_source: str) -> dict[str, object]:
             r"upgrade:\s*UpgradeConfig\s*\{.*?auto:\s*([^,\n]+),",
             "automatic upgrade",
         ),
-        "search.semantic": scalar_value(semantic.group(1), constants),
+        semantic_key: scalar_value(semantic.group(1), constants),
     }
     if "SourcesConfig" in default_source:
         defaults["sources.automatic"] = default_field(
@@ -164,6 +168,15 @@ def extract_empty_config_defaults(config_source: str) -> dict[str, object]:
             r"daemon:\s*DaemonConfig\s*\{.*?enabled:\s*([^,\n]+),",
             "daemon",
         )
+    if "SemanticConfig" in default_source:
+        semantic_intensity = re.search(
+            r"semantic:\s*SemanticConfig\s*\{.*?indexing_intensity:\s*SemanticIndexingIntensity::([A-Za-z]+),",
+            default_source,
+            re.DOTALL,
+        )
+        if not semantic_intensity:
+            fail("could not locate empty-config semantic indexing intensity default")
+        defaults["semantic.indexing_intensity"] = semantic_intensity.group(1).lower()
     if "LocalUsageConfig" in default_source:
         defaults["local_usage.enabled"] = default_field(
             r"local_usage:\s*LocalUsageConfig\s*\{.*?enabled:\s*([^,\n]+),",
@@ -173,6 +186,8 @@ def extract_empty_config_defaults(config_source: str) -> dict[str, object]:
 
 
 def default_state(value: object) -> str:
+    if value in {"quiet", "full"}:
+        return str(value)
     return "on" if value is True or value in {"apply", "auto", "automatic"} else "off"
 
 
@@ -360,6 +375,28 @@ def main() -> None:
     if overlap:
         fail("rejected config keys overlap canonical controls: " + ", ".join(overlap))
 
+    compatibility_config_keys = contract.get("compatibility_config_keys")
+    if (
+        not isinstance(compatibility_config_keys, dict)
+        or any(
+            not isinstance(key, str)
+            or not isinstance(target, str)
+            or target not in config_keys
+            or key in config_keys
+            for key, target in compatibility_config_keys.items()
+        )
+    ):
+        fail("compatibility_config_keys must map legacy keys to canonical controls")
+    for control in controls:
+        previous_key = control.get("previous_stable_config_key")
+        if (
+            previous_key is not None
+            and compatibility_config_keys.get(previous_key) != control["config_key"]
+        ):
+            fail(
+                f"{control['behavior']} previous_stable_config_key must name a compatibility alias"
+            )
+
     config_source = config_path.read_text(encoding="utf-8")
     runtime_defaults = extract_empty_config_defaults(config_source)
     stable_defaults = previous_stable_defaults(
@@ -369,8 +406,9 @@ def main() -> None:
         contract.get("previous_stable_snapshot", ""),
     )
     stable_defaults["indexing.mode"] = (
-        "automatic" if stable_defaults.pop("daemon.enabled") else "manual"
+        "auto" if stable_defaults.pop("daemon.enabled") else "manual"
     )
+    stable_defaults["semantic.enabled"] = stable_defaults.pop("search.semantic")
     validate_released_defaults(
         controls, runtime_defaults, stable_defaults, previous_tag
     )
@@ -391,18 +429,6 @@ def main() -> None:
     # apply_env. Scan the complete production config module so helper-owned
     # variables are inventoried while any undocumented literal still fails.
     implemented_env = set(re.findall(r'"(CTX_[A-Z0-9_]+)"', config_source))
-    compatibility_config_keys = contract.get("compatibility_config_keys")
-    if (
-        not isinstance(compatibility_config_keys, dict)
-        or any(
-            not isinstance(key, str)
-            or not isinstance(target, str)
-            or target not in config_keys
-            or key in config_keys
-            for key, target in compatibility_config_keys.items()
-        )
-    ):
-        fail("compatibility_config_keys must map legacy keys to canonical controls")
     contract_keys = (
         set(config_keys)
         .union(rejected_config_keys)

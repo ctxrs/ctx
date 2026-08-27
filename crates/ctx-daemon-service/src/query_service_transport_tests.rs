@@ -787,6 +787,129 @@ fn query_service_ping_stays_healthy_while_embedder_is_busy() -> Result<()> {
 
 #[cfg(any(unix, windows))]
 #[test]
+fn authenticated_semantic_intensity_leases_wake_without_changing_query_or_fingerprints(
+) -> Result<()> {
+    use super::semantic_intensity::SemanticIntensityLeaseRegistry;
+
+    const REQUEST_ID: &str = "019fcaaa-0000-7000-8000-000000000403";
+
+    let temp = tempfile::tempdir()?;
+    let wakeup = Arc::new(super::daemon_wakeup::DaemonWakeup::default());
+    let registry = Arc::new(SemanticIntensityLeaseRegistry::default());
+    let handler = ctx_authenticated_request_handler_with_lifecycle(
+        temp.path(),
+        SharedSemanticRuntime::default(),
+        Arc::new(super::source_backed_refresh_adapter::refresh_engine(
+            &crate::test_support::CONFIG,
+        )),
+        Arc::clone(&wakeup),
+        &crate::test_support::CONFIG,
+        Arc::new(DaemonLifecycleState::starting()),
+        Arc::clone(&registry),
+    );
+    let query_service = start_daemon_query_service_with_request_timeout(
+        temp.path(),
+        Arc::clone(&handler),
+        TEST_QUERY_REQUEST_READ_TIMEOUT,
+    )?;
+    let refresh_service = start_daemon_source_refresh_service_with_request_timeout(
+        temp.path(),
+        handler,
+        TEST_QUERY_REQUEST_READ_TIMEOUT,
+    )?;
+    let query_ping = || {
+        daemon_query_request(
+            temp.path(),
+            compact_json(json!({"schema_version": 1, "op": "ping"})),
+            StdDuration::from_secs(1),
+            64 * 1024,
+        )
+    };
+    let before_query = query_ping()?.expect("query ping before lease");
+    let fingerprint_before = crate::test_support::semantic_contract_fingerprint()?;
+
+    let acquired = daemon_semantic_intensity_lease_request(
+        temp.path(),
+        SemanticIntensityLeaseOperation::Acquire,
+        REQUEST_ID,
+        Some(StdDuration::from_secs(5)),
+        StdDuration::from_secs(1),
+        64 * 1024,
+    )?
+    .expect("semantic intensity acquire response");
+    assert_eq!(acquired["schema_version"], 1, "{acquired}");
+    assert_eq!(acquired["lease_status"], "active");
+    assert_eq!(acquired["configured_indexing_intensity"], "quiet");
+    assert_eq!(acquired["effective_indexing_intensity"], "full");
+    assert_eq!(acquired["active_full_intensity_leases"], 1);
+    assert_eq!(wakeup.snapshot()["ipc_signals"], 1);
+    assert_eq!(
+        registry
+            .snapshot(SemanticIndexingIntensity::Quiet)
+            .effective,
+        SemanticIndexingIntensity::Full
+    );
+
+    let renewed = daemon_semantic_intensity_lease_request(
+        temp.path(),
+        SemanticIntensityLeaseOperation::Renew,
+        REQUEST_ID,
+        Some(StdDuration::from_secs(10)),
+        StdDuration::from_secs(1),
+        64 * 1024,
+    )?
+    .expect("semantic intensity renew response");
+    assert_eq!(renewed["ttl_ms"], 10_000);
+    assert_eq!(wakeup.snapshot()["ipc_signals"], 2);
+
+    let released = daemon_semantic_intensity_lease_request(
+        temp.path(),
+        SemanticIntensityLeaseOperation::Release,
+        REQUEST_ID,
+        None,
+        StdDuration::from_secs(1),
+        64 * 1024,
+    )?
+    .expect("semantic intensity release response");
+    assert_eq!(released["lease_status"], "released");
+    assert_eq!(released["effective_indexing_intensity"], "quiet");
+    assert_eq!(released["active_full_intensity_leases"], 0);
+    assert_eq!(wakeup.snapshot()["ipc_signals"], 3);
+    assert!(!daemon_semantic_job_path(temp.path()).exists());
+    assert!(!daemon_core_refresh_job_path(temp.path()).exists());
+
+    let after_query = query_ping()?.expect("query ping after lease");
+    assert_eq!(before_query["model_key"], after_query["model_key"]);
+    assert_eq!(
+        fingerprint_before,
+        crate::test_support::semantic_contract_fingerprint()?
+    );
+
+    let malformed = daemon_source_refresh_request(
+        temp.path(),
+        json!({
+            "schema_version": 1,
+            "op": "semantic_intensity_acquire",
+            "request_id": REQUEST_ID,
+            "ttl_ms": 5_000,
+            "persist": true,
+        }),
+        StdDuration::from_secs(1),
+        64 * 1024,
+    )?
+    .expect("authenticated error response");
+    assert_eq!(malformed["ok"], false);
+    assert!(malformed["error"]
+        .as_str()
+        .is_some_and(|error| error.contains("unknown semantic intensity lease request field")));
+
+    drop(query_service);
+    drop(refresh_service);
+    Ok(())
+}
+
+#[cfg(any(unix, windows))]
+#[test]
 fn query_service_coalesces_source_refresh_requests_on_one_daemon_ticket() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let (service, source_refresh) = start_test_source_refresh_service(temp.path())?;

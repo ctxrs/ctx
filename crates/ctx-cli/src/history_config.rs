@@ -82,7 +82,7 @@ mod tests {
 
         assert_eq!(
             fs::read_to_string(temp.path().join(config::CONFIG_FILE)).unwrap(),
-            "[search]\nsemantic = true\n"
+            "[semantic]\nenabled = true\n"
         );
         assert_eq!(load_count, 0);
         assert!(snapshot.semantic_search_enabled);

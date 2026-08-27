@@ -51,6 +51,7 @@ ctx index watch
 ctx index wait
 ctx semantic enable
 ctx semantic enable --wait
+ctx semantic enable --wait --intensity full
 ctx semantic status
 ctx semantic disable
 ctx daemon run
@@ -122,10 +123,14 @@ ctx daemon run
   supports one final `--format json` result.
 - `semantic enable` persists the explicit semantic-search opt-in. In auto mode
   it starts or recovers daemon-owned model acquisition and semantic catch-up;
-  `--wait` waits for the current projection. `semantic status` is read-only.
-  `semantic disable` opts out without deleting downloaded model/runtime assets
-  or derived semantic indexes. Plain enablement in manual mode does not change
-  indexing mode.
+  `--wait` waits for the current projection. Adding `--intensity full` removes
+  deliberate inter-batch pacing from semantic document indexing only while
+  that wait is running. It does not rewrite the configured intensity, and the
+  temporary intensity expires when the wait ends, the waiting command crashes,
+  or the daemon restarts. `semantic status` is read-only and reports configured
+  and effective intensity. `semantic disable` opts out without deleting
+  downloaded model/runtime assets or derived semantic indexes. Plain
+  enablement in manual mode does not change indexing mode.
 - `daemon run` is an advanced command that runs persistent local maintenance in
   the foreground and blocks until stopped. It does not change the configured
   indexing mode. In manual mode, pass `--force` to run it explicitly. Each pass
@@ -138,6 +143,40 @@ ctx daemon run
 
 Automatic indexing is the default. Its canonical configuration is
 `[indexing] mode = "auto"`; the other supported value is `"manual"`.
+This controls persistent versus finite indexing ownership; it is distinct from
+semantic indexing intensity.
+
+Semantic configuration is sparse. A default installation need not contain a
+`[semantic]` section; the absent effective defaults are `enabled = false` and
+`indexing_intensity = "quiet"`. The canonical opt-in is:
+
+```toml
+[semantic]
+enabled = true
+```
+
+For persistent full semantic document indexing, edit `config.toml`:
+
+```toml
+[semantic]
+enabled = true
+indexing_intensity = "full"
+```
+
+`quiet` and `full` are the only intensity values. Quiet is the
+background-friendly default. Full removes deliberate inter-batch pacing for
+semantic document indexing, but still obeys safety, resource, and admission
+limits; it does not promise an exact speedup or stable CPU percentage.
+Intensity applies to initial backfill, incremental refresh, rebuild/recovery,
+daemon reconciliation, and finite foreground reconciliation. It does not apply
+to interactive query embedding, lexical indexing, or embedding
+identity/readiness. This version has no persistent CLI setter for intensity.
+
+Released `[search] semantic = true|false` configuration remains accepted as a
+legacy alias only when `semantic.enabled` is absent. Canonical settings win.
+Durable `ctx semantic enable|disable` mutations migrate enablement to canonical
+sparse configuration and remove the legacy key. The existing
+`CTX_SEARCH_SEMANTIC` process-level compatibility override remains supported.
 Lexical search remains available while embeddings build, and hybrid search uses
 lexical and semantic evidence automatically when semantic coverage is ready.
 

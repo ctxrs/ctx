@@ -112,6 +112,7 @@ where
         )?
         .unwrap_or_else(|| DaemonIteration::new(false, false, DaemonCycleStateV1::unknown())));
     }
+    refresh_semantic_intensity_observation(data_root, runtime)?;
     if runtime.config.daemon.mode.runs_only_source_refresh() {
         runtime.consumer_retry_deferral.reset();
         if let Some(activity) = query_activity {
@@ -191,7 +192,6 @@ where
         }
     }
     if let Some(iteration) = run_pending_core_semantic_catch_up(
-        args,
         data_root,
         runtime,
         deadline,
@@ -230,13 +230,37 @@ where
     )
 }
 
+fn refresh_semantic_intensity_observation(data_root: &Path, runtime: &DaemonRuntime) -> Result<()> {
+    let path = daemon_semantic_job_path(data_root);
+    let Some(mut job) = read_daemon_job_status(&path) else {
+        return Ok(());
+    };
+    let intensity = runtime
+        .semantic_intensity_leases
+        .snapshot(runtime.config.semantic_indexing_intensity());
+    let configured = intensity.configured.as_str();
+    let effective = intensity.effective.as_str();
+    if job
+        .get("configured_indexing_intensity")
+        .and_then(Value::as_str)
+        == Some(configured)
+        && job
+            .get("effective_indexing_intensity")
+            .and_then(Value::as_str)
+            == Some(effective)
+    {
+        return Ok(());
+    }
+    annotate_current_semantic_indexing_intensity(&mut job, intensity);
+    write_daemon_job_status(&path, &job)
+}
+
 fn deferred_pending_core_refresh(data_root: &Path, runtime: &DaemonRuntime) -> DaemonIteration {
     let job = core_refresh_retry_backoff_job(data_root, &runtime.history_retry);
     DaemonIteration::new(false, false, daemon_core_cycle_state(&job))
 }
 
 fn run_pending_core_semantic_catch_up(
-    args: &DaemonRunArgs,
     data_root: &Path,
     runtime: &mut DaemonRuntime,
     deadline: Option<Instant>,
@@ -277,7 +301,6 @@ fn run_pending_core_semantic_catch_up(
         return Ok(None);
     }
     let job = run_daemon_semantic_job_with_retry(
-        args,
         data_root,
         runtime,
         deadline,
@@ -722,7 +745,6 @@ pub(super) fn preserve_daemon_retry_state(job: &mut Value, backoff: &DaemonRetry
 }
 
 fn run_daemon_semantic_job_with_retry(
-    args: &DaemonRunArgs,
     data_root: &Path,
     runtime: &mut DaemonRuntime,
     deadline: Option<Instant>,
@@ -730,15 +752,20 @@ fn run_daemon_semantic_job_with_retry(
     core_generation_id: Option<&str>,
     ports: DaemonSemanticJobPorts<'_>,
 ) -> Value {
+    let intensity = runtime
+        .semantic_intensity_leases
+        .snapshot(runtime.config.semantic_indexing_intensity());
     if let Some(job) = runtime.semantic_blocked_job.as_ref() {
-        return job.clone();
+        return annotate_semantic_indexing_intensity(job.clone(), intensity);
     }
     if !runtime.semantic_retry.ready() {
         let job = daemon_semantic_retry_backoff_job(data_root, &runtime.semantic_retry);
-        return bind_semantic_generation(job, core_generation_id);
+        return annotate_semantic_indexing_intensity(
+            bind_semantic_generation(job, core_generation_id),
+            intensity,
+        );
     }
     let job = run_daemon_semantic_job(
-        args,
         data_root,
         runtime,
         deadline,
@@ -748,6 +775,10 @@ fn run_daemon_semantic_job_with_retry(
     )
     .unwrap_or_else(|error| daemon_semantic_failed_job(data_root, error));
     let job = bind_semantic_generation(job, core_generation_id);
+    let current_intensity = runtime
+        .semantic_intensity_leases
+        .snapshot(runtime.config.semantic_indexing_intensity());
+    let job = annotate_semantic_indexing_intensity(job, current_intensity);
     let job = record_daemon_job_retry(&mut runtime.semantic_retry, job);
     if semantic_failure_class_from_job(&job).is_some_and(SemanticFailureClass::blocks_until_restart)
     {
@@ -935,6 +966,7 @@ use super::{
     daemon::{DaemonIteration, DaemonRuntime},
     daemon_retry::{semantic_failure_class_from_job, DaemonRetryBackoff, SemanticFailureClass},
     daemon_worker::{
+        annotate_current_semantic_indexing_intensity, annotate_semantic_indexing_intensity,
         daemon_semantic_failed_job, daemon_semantic_retry_backoff_job, run_daemon_semantic_job,
     },
     paths_status::{

@@ -1,4 +1,4 @@
-use clap::{Args, Subcommand};
+use clap::{Args, Subcommand, ValueEnum};
 use serde_json::Value;
 
 use crate::output::JsonOutputFormat;
@@ -38,8 +38,28 @@ pub struct SemanticEnableArgs {
         help = "Wait until semantic search is ready for the current index"
     )]
     pub wait: bool,
+    #[arg(
+        long,
+        value_enum,
+        requires = "wait",
+        help = "Temporarily use full semantic indexing intensity while waiting"
+    )]
+    pub intensity: Option<SemanticEnableIntensityArg>,
     #[arg(long, value_enum, default_value_t = JsonOutputFormat::Text)]
     pub format: JsonOutputFormat,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum SemanticEnableIntensityArg {
+    Full,
+}
+
+impl SemanticEnableIntensityArg {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+        }
+    }
 }
 
 #[derive(Debug, Args)]
@@ -104,6 +124,12 @@ pub fn render_semantic_status(context: &crate::ui::RenderContext, report: &Value
         },
     );
     let daemon_status = str_at(report, "/daemon/status", "unavailable");
+    let configured_intensity = str_at(report, "/indexing_intensity/configured", "quiet");
+    let effective_intensity = str_at(
+        report,
+        "/indexing_intensity/effective",
+        configured_intensity,
+    );
     let reason = report
         .pointer("/reason")
         .and_then(Value::as_str)
@@ -111,8 +137,12 @@ pub fn render_semantic_status(context: &crate::ui::RenderContext, report: &Value
     let mut values = vec![
         Field::new("Status", status),
         Field::new("Indexing", indexing_mode),
+        Field::new("Intensity", effective_intensity),
         Field::new("Background", daemon_status),
     ];
+    if configured_intensity != effective_intensity {
+        values.push(Field::new("Configured", configured_intensity));
+    }
     if let Some(reason) = reason {
         values.push(Field::new("Reason", reason));
     }
@@ -243,6 +273,29 @@ mod tests {
             "{rendered}"
         );
         assert!(rendered.contains("ctx index mode auto"), "{rendered}");
+        assert!(rendered.contains("Intensity   quiet"), "{rendered}");
+    }
+
+    #[test]
+    fn status_distinguishes_temporary_effective_intensity() {
+        let rendered = render_semantic_status(
+            &context(),
+            &json!({
+                "enabled": true,
+                "status": "pending",
+                "indexing": {"mode": "auto"},
+                "indexing_intensity": {
+                    "configured": "quiet",
+                    "effective": "full",
+                    "config_source": "default",
+                },
+                "daemon": {"status": "running"},
+            }),
+        )
+        .render_plain();
+
+        assert!(rendered.contains("Intensity   full"), "{rendered}");
+        assert!(rendered.contains("Configured  quiet"), "{rendered}");
     }
 
     #[test]

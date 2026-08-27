@@ -9,8 +9,8 @@ use ctx_semantic_index::{
 };
 use ctx_semantic_model::{
     semantic_model_acquisition_integrity_error, semantic_model_key, ArtifactFetcher,
-    SemanticDaemonCpuFallbackRequired, SemanticDaemonModelAcquisition, SemanticModelConfig,
-    SemanticModelLoadDeferred, SharedSemanticRuntime,
+    SemanticDaemonCpuFallbackRequired, SemanticDaemonModelAcquisition, SemanticIndexingIntensity,
+    SemanticModelConfig, SemanticModelLoadDeferred, SharedSemanticRuntime,
 };
 use serde_json::{json, Value};
 
@@ -29,6 +29,7 @@ use super::{
         DAEMON_MIN_REMAINING_FOR_JOB_SECS, DAEMON_SEMANTIC_RESERVE_GRACE_SECS,
         SEMANTIC_MODEL_INIT_MIN_REMAINING_SECS,
     },
+    semantic_intensity::{SemanticIntensityLeaseRegistry, SemanticIntensitySnapshot},
     source_backed_refresh_coordinator::{pin_published_generation, PinnedSourceBackedGeneration},
 };
 
@@ -150,7 +151,6 @@ where
 }
 
 pub(super) fn run_daemon_semantic_job(
-    _args: &DaemonRunArgs,
     data_root: &Path,
     runtime: &mut DaemonRuntime,
     deadline: Option<Instant>,
@@ -270,12 +270,13 @@ pub(super) fn run_daemon_semantic_job(
         }
     }
     let (outcome, indexed_chunks) = reconcile_source_backed_semantic_page(
-        data_root,
         source_generation,
         &mut vector_store,
         &runtime.semantic_runtime,
         &model_config,
         deadline,
+        &runtime.semantic_intensity_leases,
+        runtime.config.semantic_indexing_intensity(),
     )?;
     let (status, reason, last_error) = if outcome.ready() {
         ("ready", None, None)
@@ -294,12 +295,13 @@ pub(super) fn run_daemon_semantic_job(
 }
 
 fn reconcile_source_backed_semantic_page(
-    _data_root: &Path,
     generation: PinnedSourceBackedGeneration,
     vector_store: &mut SemanticVectorStore,
     runtime: &SharedSemanticRuntime,
     model_config: &SemanticModelConfig,
     deadline: Option<Instant>,
+    intensity_leases: &SemanticIntensityLeaseRegistry,
+    configured_intensity: SemanticIndexingIntensity,
 ) -> Result<(SourceBackedSemanticOutcome, usize)> {
     let index = generation.into_index();
     let mut builder = SourceBackedSemanticDocumentBuilder::new(&index);
@@ -307,6 +309,8 @@ fn reconcile_source_backed_semantic_page(
         runtime,
         model_config,
         deadline,
+        intensity_leases,
+        configured_intensity,
         indexed_chunks: 0,
     };
     let outcome =
@@ -333,6 +337,8 @@ struct RuntimeSourceSemanticEmbedder<'a> {
     model_config: &'a SemanticModelConfig,
     deadline: Option<Instant>,
     indexed_chunks: usize,
+    intensity_leases: &'a SemanticIntensityLeaseRegistry,
+    configured_intensity: SemanticIndexingIntensity,
 }
 
 impl SemanticBatchEmbedder for RuntimeSourceSemanticEmbedder<'_> {
@@ -341,12 +347,58 @@ impl SemanticBatchEmbedder for RuntimeSourceSemanticEmbedder<'_> {
             .iter()
             .map(|chunk| chunk.text().to_owned())
             .collect::<Vec<_>>();
-        let (embeddings, _) =
-            self.runtime
-                .embed_documents(self.model_config, texts, self.deadline)?;
+        let embeddings = embed_runtime_documents(
+            self.runtime,
+            self.model_config,
+            texts,
+            self.deadline,
+            self.intensity_leases,
+            self.configured_intensity,
+        )?;
         self.indexed_chunks = self.indexed_chunks.saturating_add(embeddings.len());
         Ok(embeddings)
     }
+}
+
+fn embed_runtime_documents(
+    runtime: &SharedSemanticRuntime,
+    model_config: &SemanticModelConfig,
+    texts: Vec<String>,
+    deadline: Option<Instant>,
+    intensity_leases: &SemanticIntensityLeaseRegistry,
+    configured_intensity: SemanticIndexingIntensity,
+) -> Result<Vec<Vec<f32>>> {
+    runtime
+        .embed_documents_with_intensity_resolver(
+            model_config,
+            texts,
+            || intensity_leases.snapshot(configured_intensity).effective,
+            deadline,
+        )
+        .map(|(embeddings, _)| embeddings)
+}
+
+pub(super) fn annotate_semantic_indexing_intensity(
+    mut job: Value,
+    intensity: SemanticIntensitySnapshot,
+) -> Value {
+    annotate_current_semantic_indexing_intensity(&mut job, intensity);
+    if job
+        .get("indexed_chunks")
+        .and_then(Value::as_u64)
+        .is_some_and(|chunks| chunks > 0)
+    {
+        job["last_run_intensity"] = Value::String(intensity.effective.as_str().to_owned());
+    }
+    job
+}
+
+pub(super) fn annotate_current_semantic_indexing_intensity(
+    job: &mut Value,
+    intensity: SemanticIntensitySnapshot,
+) {
+    job["configured_indexing_intensity"] = Value::String(intensity.configured.as_str().to_owned());
+    job["effective_indexing_intensity"] = Value::String(intensity.effective.as_str().to_owned());
 }
 
 pub(super) fn daemon_semantic_skipped_job(
@@ -414,6 +466,8 @@ pub(super) fn daemon_semantic_job_json(
         "last_run_at_ms": last_run_at_ms,
         "last_error": last_error,
         "indexed_chunks": indexed_chunks,
+        "configured_indexing_intensity": SemanticIndexingIntensity::Quiet.as_str(),
+        "effective_indexing_intensity": SemanticIndexingIntensity::Quiet.as_str(),
     }))
 }
 

@@ -72,7 +72,175 @@ pub fn set_indexing_mode(data_root: &Path, mode: IndexingMode) -> Result<()> {
 }
 
 pub fn set_semantic_search_enabled(data_root: &Path, enabled: bool) -> Result<()> {
-    set_config_bool(data_root, "search", "semantic", enabled)
+    establish_private_data_root(data_root)?;
+    let path = AppConfig::config_path(data_root);
+    let _mutation_lock = ConfigMutationLock::acquire(&path)?;
+    let text = read_config_text(&path)?;
+    let current = validated_persisted_config(&path, &text)?;
+    let updated =
+        canonical_semantic_config_text(&text, enabled, current.semantic_indexing_intensity());
+    validated_persisted_config(&path, &updated)
+        .with_context(|| format!("validate updated {}", path.display()))?;
+    if updated != text {
+        write_config_durably(&path, updated.as_bytes())?;
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+struct ConfigSection {
+    name: String,
+    header: usize,
+    end: usize,
+}
+
+fn canonical_semantic_config_text(
+    text: &str,
+    enabled: bool,
+    indexing_intensity: SemanticIndexingIntensity,
+) -> String {
+    let original = text.lines().map(str::to_owned).collect::<Vec<_>>();
+    let sections = config_sections(&original);
+    let mut lines = original.iter().cloned().map(Some).collect::<Vec<_>>();
+    let mut section = String::new();
+    let mut canonical_enabled_written = false;
+
+    for (index, raw_line) in original.iter().enumerate() {
+        let line = strip_comment(raw_line).trim();
+        if line.starts_with('[') && line.ends_with(']') {
+            section = line[1..line.len() - 1].trim().to_owned();
+            continue;
+        }
+        let Some((key, _)) = line.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        let full_key = if section.is_empty() {
+            key.to_owned()
+        } else {
+            format!("{section}.{key}")
+        };
+        match full_key.as_str() {
+            "search.semantic" => {
+                lines[index] = preserved_inline_comment(raw_line);
+            }
+            "semantic.enabled" if enabled && section == "semantic" && key == "enabled" => {
+                lines[index] = Some(replace_assignment(raw_line, "enabled = true"));
+                canonical_enabled_written = true;
+            }
+            "semantic.enabled" => {
+                lines[index] = preserved_inline_comment(raw_line);
+            }
+            "semantic.indexing_intensity"
+                if indexing_intensity == SemanticIndexingIntensity::Quiet =>
+            {
+                lines[index] = preserved_inline_comment(raw_line);
+            }
+            _ => {}
+        }
+    }
+
+    let semantic_section = sections.iter().find(|section| section.name == "semantic");
+    let insertion = if enabled && !canonical_enabled_written {
+        semantic_section.map(|section| (section.end, "enabled = true".to_owned()))
+    } else {
+        None
+    };
+
+    for candidate in sections
+        .iter()
+        .filter(|section| matches!(section.name.as_str(), "search" | "semantic"))
+    {
+        let has_inserted_value = insertion
+            .as_ref()
+            .is_some_and(|(index, _)| *index == candidate.end && candidate.name == "semantic");
+        if has_inserted_value || section_has_content_or_comments(candidate, &lines, &original) {
+            continue;
+        }
+        for line in &mut lines[candidate.header..candidate.end] {
+            *line = None;
+        }
+    }
+
+    let mut rendered = Vec::new();
+    for index in 0..=lines.len() {
+        if let Some((at, line)) = &insertion {
+            if *at == index {
+                rendered.push(line.clone());
+            }
+        }
+        if let Some(Some(line)) = lines.get(index) {
+            rendered.push(line.clone());
+        }
+    }
+    if enabled && semantic_section.is_none() {
+        while rendered.last().is_some_and(|line| line.trim().is_empty()) {
+            rendered.pop();
+        }
+        if !rendered.is_empty() {
+            rendered.push(String::new());
+        }
+        rendered.push("[semantic]".to_owned());
+        rendered.push("enabled = true".to_owned());
+    }
+    let updated = rendered.join("\n");
+    if updated.is_empty() {
+        updated
+    } else {
+        ensure_trailing_newline(updated)
+    }
+}
+
+fn config_sections(lines: &[String]) -> Vec<ConfigSection> {
+    let mut sections = Vec::<ConfigSection>::new();
+    for (index, raw_line) in lines.iter().enumerate() {
+        let line = strip_comment(raw_line).trim();
+        if !line.starts_with('[') || !line.ends_with(']') {
+            continue;
+        }
+        if let Some(previous) = sections.last_mut() {
+            previous.end = index;
+        }
+        sections.push(ConfigSection {
+            name: line[1..line.len() - 1].trim().to_owned(),
+            header: index,
+            end: lines.len(),
+        });
+    }
+    sections
+}
+
+fn section_has_content_or_comments(
+    section: &ConfigSection,
+    lines: &[Option<String>],
+    original: &[String],
+) -> bool {
+    let header = &original[section.header];
+    if strip_comment(header).len() != header.len() {
+        return true;
+    }
+    lines[section.header + 1..section.end]
+        .iter()
+        .flatten()
+        .any(|line| !line.trim().is_empty())
+}
+
+fn replace_assignment(raw_line: &str, rendered: &str) -> String {
+    let code = strip_comment(raw_line);
+    let indentation = &raw_line[..raw_line.len() - raw_line.trim_start().len()];
+    let trailing_whitespace = &code[code.trim_end().len()..];
+    let comment = &raw_line[code.len()..];
+    format!("{indentation}{rendered}{trailing_whitespace}{comment}")
+}
+
+fn preserved_inline_comment(raw_line: &str) -> Option<String> {
+    let code = strip_comment(raw_line);
+    let comment = raw_line[code.len()..].trim_start();
+    if !comment.starts_with('#') {
+        return None;
+    }
+    let indentation = &raw_line[..raw_line.len() - raw_line.trim_start().len()];
+    Some(format!("{indentation}{comment}"))
 }
 
 pub(super) fn set_config_bool(

@@ -24,8 +24,6 @@ use crate::{
     DaemonServicePorts, DaemonStartModeArg, DaemonTriggerCommandArg, DaemonUpgradePorts,
 };
 
-use super::source_backed_refresh_coordinator::CoreRefreshEngine;
-
 use super::{
     daemon_retry::DaemonRetryBackoff,
     daemon_scheduler::{
@@ -41,8 +39,9 @@ use super::{
         daemon_core_refresh_job_path, read_daemon_job_status, read_daemon_status, DaemonLock,
     },
     query_service::{DaemonLifecycleState, DaemonQueryService},
+    semantic_intensity::SemanticIntensityLeaseRegistry,
+    source_backed_refresh_coordinator::CoreRefreshEngine,
 };
-
 mod automatic_upgrade;
 mod config_reload;
 mod lifecycle;
@@ -105,6 +104,7 @@ impl DaemonIteration {
 #[derive(Default)]
 pub(super) struct DaemonRuntime {
     pub(super) semantic_runtime: SharedSemanticRuntime,
+    pub(super) semantic_intensity_leases: Arc<SemanticIntensityLeaseRegistry>,
     pub(super) source_refresh_coordinator: Option<Arc<CoreRefreshEngine>>,
     pub(super) history_retry: DaemonRetryBackoff,
     pub(super) semantic_retry: DaemonRetryBackoff,

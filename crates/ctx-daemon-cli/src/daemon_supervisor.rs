@@ -66,6 +66,7 @@ impl ctx_daemon_application::DaemonApplicationHost for CliDaemonApplicationHost<
             enabled: config.daemon.enabled,
             mode: daemon_mode(config.daemon.mode),
             semantic_enabled: config.semantic_search_enabled(),
+            semantic_indexing_intensity: config.semantic_indexing_intensity(),
         })
     }
 

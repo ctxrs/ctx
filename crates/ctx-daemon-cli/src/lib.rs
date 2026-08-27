@@ -12,7 +12,9 @@ fn committed_generation_recovery_error(
 mod composition;
 pub use composition::{install_host, AppConfig, DaemonCliHost, DaemonConfig, DaemonMode};
 pub use ctx_daemon_application::DaemonHostRunRequest;
-pub use ctx_daemon_service::{CoreGenerationPublished, DaemonConfigSnapshot, DaemonUpgradePorts};
+pub use ctx_daemon_service::{
+    CoreGenerationPublished, DaemonConfigSnapshot, DaemonUpgradePorts, SemanticIndexingIntensity,
+};
 
 pub fn supervisor_environment_allowlist_names() -> Vec<&'static str> {
     ctx_daemon_application::supervisor_environment_allowlist_names()
@@ -162,6 +164,8 @@ mod query_adapter;
 pub use query_adapter::SemanticQueryAdapter;
 mod query_service;
 pub use query_service::wait_for_daemon_query_service;
+mod semantic_intensity_lease;
+pub use semantic_intensity_lease::SemanticIndexingIntensityLease;
 mod daemon;
 mod paths_status;
 pub use daemon::{run_daemon_command, update_indexing_mode};

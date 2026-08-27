@@ -16,12 +16,18 @@ pub(crate) mod dashboard_fixture;
 
 pub(crate) use ctx_cli_presentation::commands::index::IndexArgs;
 
-struct CliIndexReadiness;
+#[derive(Default)]
+struct CliIndexReadiness<'a> {
+    semantic_intensity_lease: Option<&'a mut ctx_daemon_cli::SemanticIndexingIntensityLease>,
+}
 
 struct CliIndexMode;
 
-impl ctx_cli_presentation::commands::index::IndexReadinessPort for CliIndexReadiness {
+impl ctx_cli_presentation::commands::index::IndexReadinessPort for CliIndexReadiness<'_> {
     fn snapshot(&mut self, data_root: &Path) -> Result<Value> {
+        if let Some(lease) = self.semantic_intensity_lease.as_mut() {
+            lease.renew()?;
+        }
         index_readiness_snapshot(data_root)
     }
 }
@@ -61,12 +67,35 @@ pub(crate) fn run_index(
     telemetry: &mut IndexTelemetry,
     ui: &mut Ui,
 ) -> Result<()> {
+    let mut readiness = CliIndexReadiness::default();
     ctx_cli_presentation::commands::index::run_index(
         args,
         data_root,
         quiet,
         telemetry,
-        &mut CliIndexReadiness,
+        &mut readiness,
+        &mut CliIndexMode,
+        ui,
+    )
+}
+
+pub(crate) fn run_semantic_index_wait(
+    format: crate::output::JsonOutputFormat,
+    data_root: PathBuf,
+    quiet: bool,
+    telemetry: &mut IndexTelemetry,
+    semantic_intensity_lease: Option<&mut ctx_daemon_cli::SemanticIndexingIntensityLease>,
+    ui: &mut Ui,
+) -> Result<()> {
+    let mut readiness = CliIndexReadiness {
+        semantic_intensity_lease,
+    };
+    ctx_cli_presentation::commands::index::run_index(
+        IndexArgs::semantic_wait(format),
+        data_root,
+        quiet,
+        telemetry,
+        &mut readiness,
         &mut CliIndexMode,
         ui,
     )
@@ -148,6 +177,7 @@ fn index_readiness_snapshot(data_root: &Path) -> Result<Value> {
             "status": source_semantic.get("status"),
             "reason": source_semantic.get("reason"),
             "enabled": source_semantic.get("enabled"),
+            "indexing_intensity": source_semantic.get("indexing_intensity"),
             "coverage": semantic_coverage(semantic_flat),
         },
         "daemon": {

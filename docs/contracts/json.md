@@ -128,16 +128,27 @@ ctx semantic disable --format json
 
 These commands return `schema_version: 1`, `operation` (`enable`, `status`, or
 `disable`), the effective `enabled`, `status`, `reason`, and `config_source`,
-`indexing.mode`, optional `projection` and `catch_up` diagnostics, reduced
-`daemon` state, `local_only: true`, and `read_only`. Status is read-only;
-enable and disable persist policy and report `read_only: false`. Disablement
-retains downloaded model/runtime assets and derived semantic indexes.
+`indexing_intensity.{configured,effective,config_source}`, `indexing.mode`,
+optional `projection` and `catch_up` diagnostics, reduced `daemon` state,
+`local_only: true`, and `read_only`. Status is read-only; enable and disable
+persist policy and report `read_only: false`. Disablement retains downloaded
+model/runtime assets and derived semantic indexes.
 
 In auto mode, enablement starts or recovers the persistent daemon and returns
 after semantic work is accepted. `ctx semantic enable --wait --format json`
 uses the Index Readiness wait result below and waits for the current Core
 generation's semantic projection. Plain enablement in manual mode records the
-opt-in without changing mode; wait requires auto mode.
+opt-in without changing mode; wait requires auto mode. The accelerated form is:
+
+```bash
+ctx semantic enable --wait --intensity full --format json
+```
+
+`--intensity full` makes the effective semantic document-indexing intensity
+full only for that wait. It does not rewrite the configured intensity and
+expires when the wait ends, the waiting process crashes, or the daemon
+restarts. Its output is the Index Readiness wait result, including the final
+readiness snapshot with configured and effective intensity.
 
 ## Index Readiness
 
@@ -175,10 +186,11 @@ Wait returns one object with `schema_version`, `status` (`ready`, `blocked`, or
 including daemon and supervisor diagnostics.
 
 Index snapshots expose the reduced
-`semantic.{status,reason,enabled,coverage.{candidate_items,searchable_items,embedded_items,filtered_items,embedded_chunks}}`
-shape and `daemon.{status,running,jobs.semantic_index}`. The complete semantic
-and daemon fields below describe `ctx status --format json`, not index
-snapshots.
+`semantic.{status,reason,enabled,indexing_intensity,coverage.{candidate_items,searchable_items,embedded_items,filtered_items,embedded_chunks}}`
+shape and `daemon.{status,running,jobs.semantic_index}`. The intensity object
+reports configured and effective `quiet|full` values plus its configuration
+source. The complete semantic and daemon fields below describe
+`ctx status --format json`, not index snapshots.
 
 `semantic.status` is `disabled`, `pending`, `ready`, or `unavailable`.
 `semantic.flat_f32` reports the source-backed projection and can include its

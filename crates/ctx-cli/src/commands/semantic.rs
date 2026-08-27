@@ -27,10 +27,32 @@ pub(crate) fn run_semantic(
             render_report(report, args.format.is_json(), quiet, ui)
         }
         SemanticCommand::Enable(args) => {
+            if args.intensity.is_some() && !args.wait {
+                bail!("semantic --intensity requires --wait");
+            }
             if args.wait && !config.automatic_indexing_enabled() {
                 bail!(
                     "semantic --wait requires automatic indexing; run `ctx index mode auto` or omit --wait and use an explicit semantic search with --refresh wait"
                 );
+            }
+            let temporary_full = matches!(
+                args.intensity,
+                Some(ctx_cli_presentation::commands::semantic::SemanticEnableIntensityArg::Full)
+            );
+            let process_override_blocks_enable = config.semantic_search_source() == "environment"
+                && !config.semantic_search_enabled();
+            let mut intensity_lease = None;
+            if temporary_full && !process_override_blocks_enable {
+                // Bring up the authenticated control service while a first-time
+                // opt-in is still disabled, then establish full authority before
+                // semantic work can be scheduled.
+                crate::semantic::autostart_daemon_and_wait(
+                    &data_root,
+                    config,
+                    crate::DaemonTriggerCommandArg::Semantic,
+                )?;
+                intensity_lease =
+                    Some(ctx_daemon_cli::SemanticIndexingIntensityLease::acquire_full(&data_root)?);
             }
             set_semantic_policy(&data_root, config, true)?;
             if config.automatic_indexing_enabled() {
@@ -43,11 +65,12 @@ pub(crate) fn run_semantic(
 
             if args.wait {
                 let mut telemetry = crate::analytics::IndexTelemetry::default();
-                return super::index::run_index(
-                    ctx_cli_presentation::commands::index::IndexArgs::semantic_wait(args.format),
+                return super::index::run_semantic_index_wait(
+                    args.format,
                     data_root,
                     quiet,
                     &mut telemetry,
+                    intensity_lease.as_mut(),
                     ui,
                 );
             }
@@ -109,6 +132,16 @@ fn semantic_report(
     let daemon_semantic = daemon
         .get("jobs")
         .and_then(|jobs| jobs.get("semantic_index"));
+    let configured_intensity = config.semantic_indexing_intensity().as_str();
+    let effective_intensity = daemon_semantic
+        .and_then(|job| job.get("effective_indexing_intensity"))
+        .and_then(Value::as_str)
+        .or_else(|| {
+            semantic
+                .pointer("/indexing_intensity/effective")
+                .and_then(Value::as_str)
+        })
+        .unwrap_or(configured_intensity);
     let (status, reason) = semantic_lifecycle_state(semantic, daemon, daemon_semantic, config);
     Ok(compact_json(json!({
         "schema_version": 1,
@@ -117,6 +150,11 @@ fn semantic_report(
         "status": status,
         "reason": reason,
         "config_source": config.semantic_search_source(),
+        "indexing_intensity": {
+            "configured": configured_intensity,
+            "effective": effective_intensity,
+            "config_source": config.semantic_indexing_intensity_source(),
+        },
         "indexing": {
             "mode": config.indexing.mode.as_str(),
         },
@@ -216,7 +254,7 @@ mod tests {
             once
         );
         assert!(once.contains("# user setting"), "{once}");
-        assert!(once.contains("[search]\nsemantic = true\n"), "{once}");
+        assert!(once.contains("[semantic]\nenabled = true\n"), "{once}");
     }
 
     #[test]
@@ -240,7 +278,7 @@ mod tests {
     #[test]
     fn lifecycle_surfaces_daemon_semantic_failure_reason() {
         let mut config = config::AppConfig::default();
-        config.search.semantic = Some(true);
+        config.semantic.enabled = Some(true);
         let semantic = json!({"enabled": true, "status": "pending"});
         let daemon = json!({"running": true});
         let job = json!({"status": "failed", "reason": "model_checksum_mismatch"});

@@ -216,7 +216,7 @@ impl DaemonWakeup {
         self.inner.record_scheduled_refresh_wakeup();
     }
 
-    fn snapshot(&self) -> Value {
+    pub(super) fn snapshot(&self) -> Value {
         serde_json::to_value(self.inner.snapshot()).unwrap_or_else(|_| json!({}))
     }
 }

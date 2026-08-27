@@ -8,7 +8,10 @@ use ctx_daemon_runtime::{
 use ctx_daemon_service::{daemon_core_refresh_job_path, daemon_wakeup_report};
 use serde_json::{json, Value};
 
-use crate::{compact_json, supervisor, DaemonApplicationHost, DaemonConfigSnapshot, DaemonMode};
+use crate::{
+    compact_json, supervisor, DaemonApplicationHost, DaemonConfigSnapshot, DaemonMode,
+    SemanticIndexingIntensity,
+};
 
 pub struct DaemonStatusPreparation<'a> {
     host: &'a dyn DaemonApplicationHost,
@@ -41,8 +44,10 @@ pub struct DaemonConfigReloadContext<'a> {
     pub out_of_sync: bool,
     pub requested_daemon_enabled: Option<bool>,
     pub requested_semantic_enabled: Option<bool>,
+    pub requested_semantic_indexing_intensity: Option<SemanticIndexingIntensity>,
     pub applied_daemon_enabled: Option<bool>,
     pub applied_semantic_enabled: Option<bool>,
+    pub applied_semantic_indexing_intensity: Option<SemanticIndexingIntensity>,
     pub last_error: Option<&'a str>,
 }
 
@@ -205,12 +210,18 @@ impl DaemonStatusPreparation<'_> {
                 requested_semantic_enabled: reload
                     .pointer("/requested/semantic_enabled")
                     .and_then(Value::as_bool),
+                requested_semantic_indexing_intensity: reload
+                    .pointer("/requested/semantic_indexing_intensity")
+                    .and_then(parse_semantic_indexing_intensity),
                 applied_daemon_enabled: reload
                     .pointer("/applied/daemon_enabled")
                     .and_then(Value::as_bool),
                 applied_semantic_enabled: reload
                     .pointer("/applied/semantic_enabled")
                     .and_then(Value::as_bool),
+                applied_semantic_indexing_intensity: reload
+                    .pointer("/applied/semantic_indexing_intensity")
+                    .and_then(parse_semantic_indexing_intensity),
                 last_error: reload.get("last_error").and_then(Value::as_str),
             },
         }
@@ -361,25 +372,31 @@ fn daemon_config_reload_report(
         .and_then(|value| value.get("config_reload"))
         .cloned()
         .unwrap_or_else(|| json!({}));
-    let applied_daemon_enabled = persisted
-        .get("applied")
+    let applied = persisted.get("applied");
+    let applied_daemon_enabled = applied
         .and_then(|value| value.get("daemon_enabled"))
         .and_then(Value::as_bool);
-    let applied_daemon_mode = persisted
-        .get("applied")
+    let applied_daemon_mode = applied
         .and_then(|value| value.get("daemon_mode"))
         .and_then(Value::as_str);
-    let applied_semantic_enabled = persisted
-        .get("applied")
+    let applied_semantic_enabled = applied
         .and_then(|value| value.get("semantic_enabled"))
         .and_then(Value::as_bool);
+    let applied_semantic_indexing_intensity =
+        applied.and_then(|value| match value.get("semantic_indexing_intensity") {
+            Some(value) => parse_semantic_indexing_intensity(value),
+            None => Some(SemanticIndexingIntensity::Quiet),
+        });
     let requested_daemon_enabled = current_config.map(|config| config.enabled);
     let requested_daemon_mode = current_config.map(|config| config.mode.as_str());
     let requested_semantic_enabled = current_config.map(|config| config.semantic_enabled);
+    let requested_semantic_indexing_intensity =
+        current_config.map(|config| config.semantic_indexing_intensity);
     let out_of_sync = running
         && (requested_daemon_enabled != applied_daemon_enabled
             || requested_daemon_mode != applied_daemon_mode
-            || requested_semantic_enabled != applied_semantic_enabled);
+            || requested_semantic_enabled != applied_semantic_enabled
+            || requested_semantic_indexing_intensity != applied_semantic_indexing_intensity);
     let persisted_status = persisted
         .get("status")
         .and_then(Value::as_str)
@@ -405,14 +422,26 @@ fn daemon_config_reload_report(
             "daemon_enabled": requested_daemon_enabled,
             "daemon_mode": requested_daemon_mode,
             "semantic_enabled": requested_semantic_enabled,
+            "semantic_indexing_intensity": requested_semantic_indexing_intensity
+                .map(SemanticIndexingIntensity::as_str),
         },
         "applied": {
             "daemon_enabled": applied_daemon_enabled,
             "daemon_mode": applied_daemon_mode,
             "semantic_enabled": applied_semantic_enabled,
+            "semantic_indexing_intensity": applied_semantic_indexing_intensity
+                .map(SemanticIndexingIntensity::as_str),
         },
         "last_error": persisted.get("last_error").cloned(),
     }))
+}
+
+fn parse_semantic_indexing_intensity(value: &Value) -> Option<SemanticIndexingIntensity> {
+    match value.as_str()? {
+        "quiet" => Some(SemanticIndexingIntensity::Quiet),
+        "full" => Some(SemanticIndexingIntensity::Full),
+        _ => None,
+    }
 }
 
 fn json_string(value: &Value, key: &str) -> Option<String> {
@@ -429,6 +458,10 @@ fn json_u32(value: &Value, key: &str) -> Option<u32> {
         .and_then(Value::as_u64)
         .and_then(|value| u32::try_from(value).ok())
 }
+
+#[cfg(test)]
+#[path = "status/intensity_tests.rs"]
+mod intensity_tests;
 
 #[cfg(test)]
 mod tests {
@@ -533,6 +566,7 @@ mod tests {
             enabled: false,
             mode: DaemonMode::Full,
             semantic_enabled: false,
+            semantic_indexing_intensity: SemanticIndexingIntensity::Quiet,
         };
 
         let disabled = report(temp.path(), true, Some(&config));
@@ -572,6 +606,7 @@ mod tests {
             enabled: false,
             mode: DaemonMode::SourceRefreshOnly,
             semantic_enabled: true,
+            semantic_indexing_intensity: SemanticIndexingIntensity::Quiet,
         };
         let host = TestHost;
         let application = DaemonApplication::new(&host);
@@ -585,8 +620,16 @@ mod tests {
         assert_eq!(context.config_reload.status, "applied");
         assert_eq!(context.config_reload.requested_daemon_enabled, Some(false));
         assert_eq!(context.config_reload.requested_semantic_enabled, Some(true));
+        assert_eq!(
+            context.config_reload.requested_semantic_indexing_intensity,
+            Some(SemanticIndexingIntensity::Quiet)
+        );
         assert_eq!(context.config_reload.applied_daemon_enabled, Some(true));
         assert_eq!(context.config_reload.applied_semantic_enabled, Some(false));
+        assert_eq!(
+            context.config_reload.applied_semantic_indexing_intensity,
+            Some(SemanticIndexingIntensity::Quiet)
+        );
 
         let daemon = preparation.finish().into_json();
         assert_eq!(daemon["enabled"], false);
@@ -595,6 +638,14 @@ mod tests {
         assert_eq!(daemon["config_reload"]["out_of_sync"], false);
         assert_eq!(daemon["config_reload"]["last_attempt_at_ms"], 101);
         assert_eq!(daemon["config_reload"]["last_applied_at_ms"], 102);
+        assert_eq!(
+            daemon["config_reload"]["requested"]["semantic_indexing_intensity"],
+            "quiet"
+        );
+        assert_eq!(
+            daemon["config_reload"]["applied"]["semantic_indexing_intensity"],
+            "quiet"
+        );
         Ok(())
     }
 
@@ -624,6 +675,7 @@ mod tests {
             enabled: true,
             mode: DaemonMode::Full,
             semantic_enabled: true,
+            semantic_indexing_intensity: SemanticIndexingIntensity::Quiet,
         };
         let host = TestHost;
         let application = DaemonApplication::new(&host);
@@ -691,6 +743,7 @@ mod tests {
             enabled: true,
             mode: DaemonMode::Full,
             semantic_enabled: true,
+            semantic_indexing_intensity: SemanticIndexingIntensity::Quiet,
         };
         let host = TestHost;
         let application = DaemonApplication::new(&host);
@@ -870,6 +923,7 @@ mod tests {
             enabled: true,
             mode: DaemonMode::SourceRefreshOnly,
             semantic_enabled: false,
+            semantic_indexing_intensity: SemanticIndexingIntensity::Quiet,
         };
 
         let report = application

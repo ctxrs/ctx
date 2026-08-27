@@ -35,12 +35,12 @@ cp "${repo_root}/scripts/test-windows-legacy-daemon-takeover.ps1" "${fixture}/sc
 cp "${repo_root}/docs/storage.md" "${fixture}/docs/"
 
 python3 "${checker}" "${fixture}" > "${tmp}/pass.out"
-grep -Fq '6 empty-config released defaults' "${tmp}/pass.out"
+grep -Fq '7 empty-config released defaults' "${tmp}/pass.out"
 
 mkdir "${tmp}/no-git-bin"
 ln -s "$(command -v python3)" "${tmp}/no-git-bin/python3"
 PATH="${tmp}/no-git-bin" python3 "${checker}" "${fixture}" > "${tmp}/no-git.out"
-grep -Fq '6 empty-config released defaults' "${tmp}/no-git.out"
+grep -Fq '7 empty-config released defaults' "${tmp}/no-git.out"
 
 expect_fail() {
   local name="$1"
@@ -154,6 +154,21 @@ add_undocumented_helper_env() {
     "$1/crates/ctx-cli/src/config.rs"
 }
 
+misroute_released_semantic_alias() {
+  python3 - "$1/contracts/public-control-surface-v1.json" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+contract = json.loads(path.read_text())
+contract["compatibility_config_keys"]["search.semantic"] = (
+    "semantic.indexing_intensity"
+)
+path.write_text(json.dumps(contract, indent=2) + "\n")
+PY
+}
+
 add_uncontained_retired_control() {
   python3 - "$1/scripts/uncontained.rs" <<'PY'
 import pathlib
@@ -186,6 +201,9 @@ expect_fail rewritten-pinned-history \
 expect_fail undocumented-helper-env \
   'config environment variables differ from contract' \
   add_undocumented_helper_env
+expect_fail misrouted-semantic-alias \
+  'semantic search previous_stable_config_key must name a compatibility alias' \
+  misroute_released_semantic_alias
 expect_fail uncontained-retired-control \
   'retired controls remain' \
   add_uncontained_retired_control

@@ -61,6 +61,7 @@ fn config_snapshot_with_channel(
             },
         },
         semantic_enabled: config.semantic_search_enabled(),
+        semantic_indexing_intensity: config.semantic_indexing_intensity(),
         automatic_upgrade_enabled: config.auto_upgrade_enabled(),
         automatic_upgrade_interval: config.upgrade.interval,
         upgrade_channel,
@@ -302,5 +303,24 @@ fn cli_trigger(trigger: DaemonTrigger) -> DaemonTriggerCommandArg {
         DaemonTrigger::Import => DaemonTriggerCommandArg::Import,
         DaemonTrigger::Search => DaemonTriggerCommandArg::Search,
         DaemonTrigger::Semantic => DaemonTriggerCommandArg::Semantic,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::SemanticIndexingIntensity;
+
+    #[test]
+    fn configured_full_intensity_is_projected_into_daemon_service_snapshot() {
+        let config = AppConfig::default()
+            .with_semantic_indexing_intensity(SemanticIndexingIntensity::Full, "config");
+
+        let snapshot = config_snapshot(&config);
+
+        assert_eq!(
+            snapshot.semantic_indexing_intensity(),
+            SemanticIndexingIntensity::Full
+        );
     }
 }

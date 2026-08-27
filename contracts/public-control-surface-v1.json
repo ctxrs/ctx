@@ -86,7 +86,7 @@
     },
     {
       "behavior": "semantic search",
-      "config_key": "search.semantic",
+      "config_key": "semantic.enabled",
       "environment_variable": "CTX_SEARCH_SEMANTIC",
       "released_default": {
         "value": false,
@@ -96,7 +96,19 @@
       "previous_stable_default": {
         "value": false,
         "state": "off"
-      }
+      },
+      "previous_stable_config_key": "search.semantic"
+    },
+    {
+      "behavior": "semantic indexing intensity",
+      "config_key": "semantic.indexing_intensity",
+      "environment_variable": null,
+      "released_default": {
+        "value": "quiet",
+        "state": "quiet",
+        "scope": "all_cli_installations"
+      },
+      "introduced_after": "v0.25.0"
     },
     {
       "behavior": "automatic provider source discovery",
@@ -111,7 +123,8 @@
     }
   ],
   "compatibility_config_keys": {
-    "daemon.enabled": "indexing.mode"
+    "daemon.enabled": "indexing.mode",
+    "search.semantic": "semantic.enabled"
   },
   "rejected_config_keys": [
     "cloud.mode"

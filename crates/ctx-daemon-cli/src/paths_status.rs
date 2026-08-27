@@ -24,6 +24,7 @@ fn application_config(config: &AppConfig<'_>) -> ctx_daemon_application::DaemonC
         enabled: config.daemon.enabled,
         mode: super::daemon_supervisor::daemon_mode(config.daemon.mode),
         semantic_enabled: config.semantic_search_enabled(),
+        semantic_indexing_intensity: config.semantic_indexing_intensity(),
     }
 }
 
@@ -122,6 +123,28 @@ fn daemon_semantic_job_report(
     let reload_pending = context.daemon_running && reload.status == "pending" && reload.out_of_sync;
     let disabled = !enabled && disabled_overrides_lifecycle && !context.semantic_runtime_active;
     let status_value = read_daemon_job_status(&daemon_semantic_job_path(data_root));
+    let live_status_value = if context.daemon_running {
+        status_value.as_ref()
+    } else {
+        None
+    };
+    let configured_indexing_intensity = live_status_value
+        .and_then(|value| json_indexing_intensity(value, "configured_indexing_intensity"))
+        .or_else(|| current_config.map(AppConfig::semantic_indexing_intensity))
+        .or(reload.requested_semantic_indexing_intensity)
+        .or(reload.applied_semantic_indexing_intensity)
+        .unwrap_or_default();
+    let effective_indexing_intensity = live_status_value
+        .and_then(|value| json_indexing_intensity(value, "effective_indexing_intensity"))
+        .or(if context.daemon_running {
+            reload.applied_semantic_indexing_intensity
+        } else {
+            None
+        })
+        .unwrap_or(configured_indexing_intensity);
+    let last_run_intensity = status_value
+        .as_ref()
+        .and_then(|value| json_indexing_intensity(value, "last_run_intensity"));
     let last_run_status = status_value
         .as_ref()
         .and_then(|value| json_string(value, "status"));
@@ -167,6 +190,9 @@ fn daemon_semantic_job_report(
         "semantic_enabled": semantic_enabled,
         "daemon_configured": reload.applied_daemon_enabled,
         "semantic_configured": reload.applied_semantic_enabled,
+        "configured_indexing_intensity": configured_indexing_intensity.as_str(),
+        "effective_indexing_intensity": effective_indexing_intensity.as_str(),
+        "last_run_intensity": last_run_intensity.map(crate::SemanticIndexingIntensity::as_str),
         "runtime_active": context.semantic_runtime_active,
         "config_reload_status": reload.status,
         "configuration_pending": reload_pending,
@@ -198,6 +224,14 @@ fn daemon_semantic_job_report(
         "embedding_runtime": embedding_runtime,
         "daemon_mode": context.daemon_mode.as_str(),
     }))
+}
+
+fn json_indexing_intensity(value: &Value, key: &str) -> Option<crate::SemanticIndexingIntensity> {
+    match value.get(key).and_then(Value::as_str)? {
+        "quiet" => Some(crate::SemanticIndexingIntensity::Quiet),
+        "full" => Some(crate::SemanticIndexingIntensity::Full),
+        _ => None,
+    }
 }
 
 #[cfg(test)]

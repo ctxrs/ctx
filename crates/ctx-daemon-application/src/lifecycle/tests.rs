@@ -134,6 +134,7 @@ fn test_config() -> DaemonConfigSnapshot {
         enabled: true,
         mode: DaemonMode::Full,
         semantic_enabled: true,
+        semantic_indexing_intensity: SemanticIndexingIntensity::Quiet,
     }
 }
 
@@ -350,11 +351,38 @@ fn status_owner_start_time_and_exact_config_are_required_before_probe() {
         ("daemon_enabled", json!(!expected.enabled)),
         ("daemon_mode", json!(DaemonMode::SourceRefreshOnly.as_str())),
         ("semantic_enabled", json!(!expected.semantic_enabled)),
+        ("semantic_indexing_intensity", json!("full")),
     ] {
         let mut wrong_config = status.clone();
         wrong_config["config_reload"]["applied"][field] = value;
         invalid_statuses.push(wrong_config);
     }
+
+    let mut full_expected = expected.clone();
+    full_expected.semantic_indexing_intensity = SemanticIndexingIntensity::Full;
+    assert_eq!(
+        daemon_handoff_status_observation_from(
+            Some(&status),
+            Some(&owner),
+            Some(owner.pid),
+            &full_expected,
+            50_000,
+        ),
+        DaemonHandoffObservation::Pending,
+        "released status without intensity must mean quiet, not configured full",
+    );
+    let mut full_status = status.clone();
+    full_status["config_reload"]["applied"]["semantic_indexing_intensity"] = json!("full");
+    assert!(matches!(
+        daemon_handoff_status_observation_from(
+            Some(&full_status),
+            Some(&owner),
+            Some(owner.pid),
+            &full_expected,
+            50_000,
+        ),
+        DaemonHandoffObservation::Running(_)
+    ));
 
     for invalid in invalid_statuses {
         let observation = daemon_handoff_status_observation_from(

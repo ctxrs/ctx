@@ -8,7 +8,7 @@ use std::{
 
 use anyhow::{anyhow, Result};
 use ctx_client_observability::analytics::PublicEventV1;
-use ctx_daemon_service::CoreGenerationPublished;
+use ctx_daemon_service::{CoreGenerationPublished, SemanticIndexingIntensity};
 
 pub const CONFIG_FILE: &str = "config.toml";
 pub const DAEMON_DEFAULT_ENABLED: bool = true;
@@ -53,6 +53,8 @@ pub struct AppConfig<'a> {
     pub daemon: DaemonConfig,
     semantic_enabled: bool,
     semantic_source: &'static str,
+    semantic_indexing_intensity: SemanticIndexingIntensity,
+    semantic_indexing_intensity_source: &'static str,
     automatic_provider_discovery: bool,
     provider_roots: Vec<ctx_history_capture::ProviderRootDefinition>,
 }
@@ -79,6 +81,8 @@ impl<'a> AppConfig<'a> {
             daemon,
             semantic_enabled,
             semantic_source,
+            semantic_indexing_intensity: SemanticIndexingIntensity::default(),
+            semantic_indexing_intensity_source: "default",
             automatic_provider_discovery: true,
             provider_roots: Vec::new(),
         }
@@ -94,6 +98,16 @@ impl<'a> AppConfig<'a> {
 
     pub fn with_automatic_provider_discovery(mut self, enabled: bool) -> Self {
         self.automatic_provider_discovery = enabled;
+        self
+    }
+
+    pub fn with_semantic_indexing_intensity(
+        mut self,
+        intensity: SemanticIndexingIntensity,
+        source: &'static str,
+    ) -> Self {
+        self.semantic_indexing_intensity = intensity;
+        self.semantic_indexing_intensity_source = source;
         self
     }
 
@@ -123,6 +137,14 @@ impl<'a> AppConfig<'a> {
 
     pub const fn semantic_search_source(&self) -> &'static str {
         self.semantic_source
+    }
+
+    pub const fn semantic_indexing_intensity(&self) -> SemanticIndexingIntensity {
+        self.semantic_indexing_intensity
+    }
+
+    pub const fn semantic_indexing_intensity_source(&self) -> &'static str {
+        self.semantic_indexing_intensity_source
     }
 }
 
@@ -279,6 +301,19 @@ impl DaemonCliHost for TestHost {
             config.semantic_enabled = enabled;
             config.semantic_source = "config";
         }
+        if let Some(enabled) =
+            Self::config_item(&document, "semantic", "enabled").and_then(toml_edit::Item::as_bool)
+        {
+            config.semantic_enabled = enabled;
+            config.semantic_source = "config";
+        }
+        if let Some(intensity) = Self::config_item(&document, "semantic", "indexing_intensity") {
+            let intensity = intensity
+                .as_str()
+                .ok_or_else(|| anyhow!("semantic.indexing_intensity must be quiet or full"))?;
+            config.semantic_indexing_intensity = intensity.parse()?;
+            config.semantic_indexing_intensity_source = "config";
+        }
         Ok(config)
     }
 
@@ -337,5 +372,70 @@ impl DaemonCliHost for TestHost {
         _writer: &mut dyn Write,
     ) -> Result<u64> {
         Err(anyhow!("test artifact fetcher is unavailable"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn semantic_indexing_intensity_defaults_to_quiet() {
+        let config = AppConfig::default();
+
+        assert_eq!(
+            config.semantic_indexing_intensity(),
+            SemanticIndexingIntensity::Quiet
+        );
+        assert_eq!(config.semantic_indexing_intensity_source(), "default");
+    }
+
+    #[test]
+    fn canonical_semantic_config_composes_full_intensity_and_overrides_legacy_enablement(
+    ) -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        std::fs::write(
+            temp.path().join(CONFIG_FILE),
+            "[search]\nsemantic = true\n\n[semantic]\nenabled = false\nindexing_intensity = \"full\"\n",
+        )?;
+
+        let config = AppConfig::load(temp.path())?;
+
+        assert!(!config.semantic_search_enabled());
+        assert_eq!(config.semantic_search_source(), "config");
+        assert_eq!(
+            config.semantic_indexing_intensity(),
+            SemanticIndexingIntensity::Full
+        );
+        assert_eq!(config.semantic_indexing_intensity_source(), "config");
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_search_semantic_remains_accepted_and_intensity_is_strict() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        std::fs::write(temp.path().join(CONFIG_FILE), "[search]\nsemantic = true\n")?;
+        let legacy = AppConfig::load(temp.path())?;
+        assert!(legacy.semantic_search_enabled());
+        assert_eq!(legacy.semantic_search_source(), "config");
+        assert_eq!(
+            legacy.semantic_indexing_intensity(),
+            SemanticIndexingIntensity::Quiet
+        );
+
+        std::fs::write(
+            temp.path().join(CONFIG_FILE),
+            "[semantic]\nenabled = true\nindexing_intensity = \"maximum\"\n",
+        )?;
+        let error = AppConfig::load(temp.path()).expect_err("unknown intensity must fail");
+        assert!(error.to_string().contains("expected quiet or full"));
+
+        std::fs::write(
+            temp.path().join(CONFIG_FILE),
+            "[semantic]\nenabled = true\nindexing_intensity = true\n",
+        )?;
+        let error = AppConfig::load(temp.path()).expect_err("non-string intensity must fail");
+        assert!(error.to_string().contains("must be quiet or full"));
+        Ok(())
     }
 }

@@ -2,7 +2,7 @@ use std::{path::Path, sync::Arc};
 
 use anyhow::anyhow;
 use ctx_history_core::utc_now;
-use ctx_semantic_model::semantic_query_service_supported;
+use ctx_semantic_model::{semantic_query_service_supported, SemanticIndexingIntensity};
 use serde_json::{json, Value};
 
 use crate::{
@@ -31,9 +31,11 @@ pub(super) struct DaemonConfigReloadState {
     requested_daemon_enabled: bool,
     requested_daemon_mode: DaemonMode,
     requested_semantic_enabled: bool,
+    requested_semantic_indexing_intensity: SemanticIndexingIntensity,
     applied_daemon_enabled: Option<bool>,
     applied_daemon_mode: Option<DaemonMode>,
     applied_semantic_enabled: Option<bool>,
+    applied_semantic_indexing_intensity: Option<SemanticIndexingIntensity>,
     pub(super) last_error: Option<String>,
 }
 
@@ -46,9 +48,11 @@ impl DaemonConfigReloadState {
             requested_daemon_enabled: config.daemon.enabled,
             requested_daemon_mode: config.daemon.mode,
             requested_semantic_enabled: config.semantic_search_enabled(),
+            requested_semantic_indexing_intensity: config.semantic_indexing_intensity(),
             applied_daemon_enabled: None,
             applied_daemon_mode: None,
             applied_semantic_enabled: None,
+            applied_semantic_indexing_intensity: None,
             last_error: None,
         }
     }
@@ -58,6 +62,7 @@ impl DaemonConfigReloadState {
         self.requested_daemon_enabled = config.daemon.enabled;
         self.requested_daemon_mode = config.daemon.mode;
         self.requested_semantic_enabled = config.semantic_search_enabled();
+        self.requested_semantic_indexing_intensity = config.semantic_indexing_intensity();
         self.last_error = None;
     }
 
@@ -67,6 +72,7 @@ impl DaemonConfigReloadState {
         self.applied_daemon_enabled = Some(self.requested_daemon_enabled);
         self.applied_daemon_mode = Some(self.requested_daemon_mode);
         self.applied_semantic_enabled = Some(self.requested_semantic_enabled);
+        self.applied_semantic_indexing_intensity = Some(self.requested_semantic_indexing_intensity);
         self.last_error = None;
     }
 
@@ -91,11 +97,15 @@ impl DaemonConfigReloadState {
                 "daemon_enabled": self.requested_daemon_enabled,
                 "daemon_mode": self.requested_daemon_mode.as_str(),
                 "semantic_enabled": self.requested_semantic_enabled,
+                "semantic_indexing_intensity": self.requested_semantic_indexing_intensity.as_str(),
             },
             "applied": {
                 "daemon_enabled": self.applied_daemon_enabled,
                 "daemon_mode": self.applied_daemon_mode.map(DaemonMode::as_str),
                 "semantic_enabled": self.applied_semantic_enabled,
+                "semantic_indexing_intensity": self
+                    .applied_semantic_indexing_intensity
+                    .map(SemanticIndexingIntensity::as_str),
             },
             "last_error": self.last_error,
         })
@@ -141,6 +151,9 @@ pub(super) fn reload_daemon_runtime_config(
     }
     reload.begin_attempt(&config);
     runtime.config = config;
+    runtime
+        .semantic_intensity_leases
+        .set_configured(runtime.config.semantic_indexing_intensity());
 
     if !runtime.config.daemon.enabled && !args.force {
         drop(query_service.take());
@@ -168,6 +181,7 @@ pub(super) fn reload_daemon_runtime_config(
             Arc::clone(wakeup),
             config_port,
             Arc::clone(lifecycle),
+            Arc::clone(&runtime.semantic_intensity_leases),
         );
         let started = start_daemon_source_refresh_service(data_root, handler, Arc::clone(wakeup));
         match started {
@@ -192,11 +206,13 @@ pub(super) fn reload_daemon_runtime_config(
             Arc::clone(wakeup),
             config_port,
             Arc::clone(lifecycle),
+            Arc::clone(&runtime.semantic_intensity_leases),
         );
         match start_daemon_query_service(data_root, handler, Arc::clone(wakeup)) {
             Ok(service) => {
                 *query_service = Some(service);
-                // The query service thread keeps normal interactive priority.
+                // Full intensity changes only semantic inter-batch pacing. Keep
+                // the daemon worker below the interactive query-service thread.
                 lower_semantic_worker_priority();
             }
             Err(error) => {
@@ -229,4 +245,48 @@ pub(super) fn daemon_semantic_runtime_active(
     query_service.is_some()
         && runtime.config.semantic_search_enabled()
         && semantic_query_service_supported()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::semantic_intensity::semantic_indexing_intensity_from_json;
+
+    #[test]
+    fn reload_json_reports_quiet_default_and_applied_full_intensity() {
+        let quiet = AppConfig::default();
+        let quiet_reload = DaemonConfigReloadState::pending(&quiet).to_json();
+        assert_eq!(
+            quiet_reload["requested"]["semantic_indexing_intensity"],
+            "quiet"
+        );
+        assert!(quiet_reload["applied"]["semantic_indexing_intensity"].is_null());
+
+        let mut full = quiet;
+        full.semantic_indexing_intensity = SemanticIndexingIntensity::Full;
+        let mut full_reload = DaemonConfigReloadState::pending(&full);
+        full_reload.applied();
+        let full_reload = full_reload.to_json();
+        assert_eq!(
+            full_reload["requested"]["semantic_indexing_intensity"],
+            "full"
+        );
+        assert_eq!(
+            full_reload["applied"]["semantic_indexing_intensity"],
+            "full"
+        );
+    }
+
+    #[test]
+    fn missing_old_reload_intensity_compares_as_quiet() {
+        let old_applied = json!({
+            "daemon_enabled": true,
+            "daemon_mode": "full",
+            "semantic_enabled": true,
+        });
+        assert_eq!(
+            semantic_indexing_intensity_from_json(old_applied.get("semantic_indexing_intensity")),
+            SemanticIndexingIntensity::Quiet
+        );
+    }
 }

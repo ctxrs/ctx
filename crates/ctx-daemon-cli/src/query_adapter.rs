@@ -15,7 +15,7 @@ use ctx_semantic_model::{
 };
 use serde_json::{json, Value};
 
-use crate::compact_json;
+use crate::{compact_json, config::AppConfig, SemanticIndexingIntensity};
 
 use super::query_service::daemon_query_request;
 
@@ -76,8 +76,17 @@ impl HistorySemanticPort for SemanticQueryAdapter<'_> {
             ) {
                 Ok(session) => Ok(session),
                 Err(SemanticQueryError::NotReady { .. }) => {
-                    reconcile_foreground_semantic(index, self.data_root, runtime, model_config)
-                        .map_err(SemanticQueryError::from)?;
+                    let intensity =
+                        configured_foreground_semantic_indexing_intensity(self.data_root)
+                            .map_err(SemanticQueryError::from)?;
+                    reconcile_foreground_semantic(
+                        index,
+                        self.data_root,
+                        runtime,
+                        model_config,
+                        intensity,
+                    )
+                    .map_err(SemanticQueryError::from)?;
                     SemanticQuerySession::begin_foreground(
                         index,
                         self.data_root,
@@ -95,6 +104,7 @@ impl HistorySemanticPort for SemanticQueryAdapter<'_> {
 struct ForegroundSemanticEmbedder<'a> {
     runtime: &'a SharedSemanticRuntime,
     model_config: &'a SemanticModelConfig,
+    intensity: SemanticIndexingIntensity,
 }
 
 impl SemanticBatchEmbedder for ForegroundSemanticEmbedder<'_> {
@@ -105,7 +115,7 @@ impl SemanticBatchEmbedder for ForegroundSemanticEmbedder<'_> {
             .map(|chunk| chunk.text().to_owned())
             .collect::<Vec<_>>();
         self.runtime
-            .embed_documents(self.model_config, texts, None)
+            .embed_documents_with_intensity(self.model_config, texts, self.intensity, None)
             .map(|(embeddings, _)| embeddings)
     }
 }
@@ -115,6 +125,7 @@ fn reconcile_foreground_semantic(
     data_root: &Path,
     runtime: &SharedSemanticRuntime,
     model_config: &SemanticModelConfig,
+    intensity: SemanticIndexingIntensity,
 ) -> Result<()> {
     if index.semantic_eligible_event_count()? > 0 {
         ensure_foreground_runtime(runtime, model_config)?;
@@ -124,6 +135,7 @@ fn reconcile_foreground_semantic(
     let mut embedder = ForegroundSemanticEmbedder {
         runtime,
         model_config,
+        intensity,
     };
     loop {
         let outcome = store.reconcile_source_backed_index(index, &mut builder, &mut embedder)?;
@@ -136,6 +148,12 @@ fn reconcile_foreground_semantic(
             ));
         }
     }
+}
+
+fn configured_foreground_semantic_indexing_intensity(
+    data_root: &Path,
+) -> Result<SemanticIndexingIntensity> {
+    AppConfig::load(data_root).map(|config| config.semantic_indexing_intensity())
 }
 
 pub struct SemanticQuerySession<'a> {

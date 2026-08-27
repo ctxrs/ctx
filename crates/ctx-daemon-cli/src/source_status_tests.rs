@@ -315,6 +315,70 @@ fn semantic_status_reports_ready_only_with_exact_projected_and_filtered_counts()
     assert_eq!(semantic["flat_f32"]["projected_documents"], 1);
     assert_eq!(semantic["flat_f32"]["filtered_documents"], 2);
     assert_eq!(semantic["flat_f32"]["active_events"], 1);
+    assert_eq!(semantic["indexing_intensity"]["configured"], "quiet");
+    assert_eq!(semantic["indexing_intensity"]["effective"], "quiet");
+    assert_eq!(semantic["indexing_intensity"]["config_source"], "default");
+}
+
+#[test]
+fn status_ignores_stale_temporary_full_intensity_after_daemon_exit() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    fs::create_dir_all(&data_root).unwrap();
+    fs::write(
+        data_root.join(crate::config::CONFIG_FILE),
+        "[semantic]\nenabled = true\nindexing_intensity = \"quiet\"\n",
+    )
+    .unwrap();
+    super::super::paths_status::write_daemon_job_status(
+        &daemon_semantic_job_path(&data_root),
+        &json!({
+            "status": "running",
+            "effective_indexing_intensity": "full",
+            "last_run_intensity": "quiet",
+        }),
+    )
+    .unwrap();
+
+    let config = AppConfig::load(&data_root).unwrap();
+    let status = source_epoch_status_report(&data_root, &config).unwrap();
+
+    assert_eq!(
+        status.report["semantic"]["indexing_intensity"],
+        json!({
+            "configured": "quiet",
+            "effective": "quiet",
+            "config_source": "config",
+        })
+    );
+    let job = &status.report["daemon"]["jobs"]["semantic_index"];
+    assert_eq!(job["configured_indexing_intensity"], "quiet");
+    assert_eq!(job["effective_indexing_intensity"], "quiet");
+    assert_eq!(job["last_run_intensity"], "quiet");
+}
+
+#[test]
+fn status_reports_temporary_full_intensity_only_for_a_live_daemon() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    fs::create_dir_all(&data_root).unwrap();
+    fs::write(
+        data_root.join(crate::config::CONFIG_FILE),
+        "[semantic]\nenabled = true\nindexing_intensity = \"quiet\"\n",
+    )
+    .unwrap();
+    let config = AppConfig::load(&data_root).unwrap();
+    let daemon = json!({
+        "running": true,
+        "jobs": {
+            "semantic_index": {"effective_indexing_intensity": "full"}
+        }
+    });
+
+    assert_eq!(
+        semantic_indexing_intensity_report(&config, &daemon)["effective"],
+        "full"
+    );
 }
 
 #[test]
@@ -402,6 +466,8 @@ fn source_daemon_report_preserves_semantic_terminal_job_facts() {
             "status": "skipped",
             "reason": "model_cache_missing",
             "last_run_at_ms": 1,
+            "effective_indexing_intensity": "full",
+            "last_run_intensity": "quiet",
         }),
     )
     .unwrap();
@@ -419,6 +485,18 @@ fn source_daemon_report_preserves_semantic_terminal_job_facts() {
     assert_eq!(
         daemon["jobs"]["semantic_index"]["last_run_reason"],
         "model_cache_missing"
+    );
+    assert_eq!(
+        daemon["jobs"]["semantic_index"]["configured_indexing_intensity"],
+        "quiet"
+    );
+    assert_eq!(
+        daemon["jobs"]["semantic_index"]["effective_indexing_intensity"],
+        "quiet"
+    );
+    assert_eq!(
+        daemon["jobs"]["semantic_index"]["last_run_intensity"],
+        "quiet"
     );
     if super::super::semantic_query_service_supported() {
         assert_eq!(daemon["jobs"]["semantic_index"]["status"], "skipped");

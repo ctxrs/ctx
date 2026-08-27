@@ -23,6 +23,44 @@ When auto remains effective, ctx installs or repairs supervision and starts the
 daemon; manual mode stops it and removes supervision.
 The canonical config is `[indexing] mode = "auto"|"manual"`.
 
+Semantic configuration is independently sparse. A default installation need
+not write a `[semantic]` section. When its fields are absent, the effective
+defaults are `semantic.enabled = false` and
+`semantic.indexing_intensity = "quiet"`. The canonical opt-in writes only what
+differs:
+
+```toml
+[semantic]
+enabled = true
+```
+
+Persistent full semantic document indexing is:
+
+```toml
+[semantic]
+enabled = true
+indexing_intensity = "full"
+```
+
+The only intensity values are `quiet` and `full`. Quiet is the
+background-friendly default. Full removes deliberate inter-batch pacing for
+semantic document indexing while retaining every safety, resource, and
+admission limit. Neither value promises an exact speedup or stable CPU
+percentage.
+
+Indexing mode and semantic indexing intensity are separate controls. Mode
+selects persistent background ownership versus finite explicit work. Intensity
+selects pacing inside semantic document index construction everywhere: initial
+backfill, incremental refresh, rebuild/recovery, persistent-daemon
+reconciliation, and finite foreground reconciliation. Intensity does not apply
+to interactive query embedding, lexical indexing, or embedding
+identity/readiness.
+
+Released `[search] semantic = true|false` remains a legacy enablement alias only
+when `semantic.enabled` is absent; canonical settings win. Durable semantic
+lifecycle mutations migrate enablement to canonical sparse config. The
+existing `CTX_SEARCH_SEMANTIC` process-level compatibility override remains.
+
 Search is an interactive read path and never becomes a duplicate importer.
 Automatic background search may start or signal the persistent daemon. Manual
 background search reads the current indexes without contacting a process;
@@ -85,6 +123,12 @@ or recovers daemon-owned model acquisition and indexing; `--wait` waits for the
 current projection. A user who wants automatic catch-up from manual mode runs
 `ctx index mode auto` first. Lexical search remains available while embeddings
 build; hybrid retrieval uses both indexes when coverage is ready.
+
+`ctx semantic enable --wait --intensity full` is the one-run acceleration UX.
+The full intensity is effective only while that wait owns it. It does not
+rewrite persistent intensity and expires when the wait ends, the waiting
+process crashes, or the daemon restarts. This version has no persistent CLI
+setter for intensity; users edit `config.toml` for persistent full behavior.
 
 Default human output should include a strong foreground signal:
 
@@ -235,6 +279,11 @@ background startup; there is no separate public daemon start command.
   reconciliation occurs afterward in the explicit waiting query process, not
   in that Core worker.
 - No LLM-generated semantic documents.
+- No external or bring-your-own embedding service. Semantic document and query
+  embedding remain local.
+- Semantic indexing intensity affects document construction only and never
+  changes retrieval embedding, lexical indexing, model identity, generation
+  identity, or readiness rules.
 - Prefer one persisted semantic-document projection over reconstructing the
   corpus from raw events for every worker pass.
 - Keep exact lexical search first-class inside `hybrid`; it is not a crutch.

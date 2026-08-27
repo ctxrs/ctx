@@ -25,6 +25,7 @@ use serde_json::{json, Value};
 use crate::{
     config::{AppConfig, DaemonMode},
     daemon::{install_daemon_test_job_hooks, DaemonTestJobHooks},
+    semantic_intensity::handle_semantic_intensity_lease_request,
     source_backed_refresh_coordinator::EventWatermark,
     source_backed_refresh_coordinator::{
         coordinate_source_backed_refresh, publish_authoritative_empty_generation_for_test,
@@ -44,9 +45,10 @@ use crate::{
 use super::{
     daemon_core_refresh_job_path, daemon_job_should_backoff,
     daemon_mode_runs_core_semantic_projection, daemon_semantic_job_path, read_daemon_job_status,
-    record_daemon_job_retry, record_source_refresh_retry, restore_daemon_consumer_retries,
-    run_pending_core_refresh, write_daemon_job_status, DaemonRetryBackoff, DaemonRuntime,
-    DaemonSchedulerCycleContext, DaemonSchedulerPorts, DaemonSemanticJobPorts,
+    record_daemon_job_retry, record_source_refresh_retry, refresh_semantic_intensity_observation,
+    restore_daemon_consumer_retries, run_pending_core_refresh, write_daemon_job_status,
+    DaemonRetryBackoff, DaemonRuntime, DaemonSchedulerCycleContext, DaemonSchedulerPorts,
+    DaemonSemanticJobPorts,
 };
 
 const READINESS_QUERY: &str = "readiness-boundary-regression";
@@ -623,6 +625,59 @@ fn install_jobs(
         calls,
         semantic_index,
     })
+}
+
+#[test]
+fn semantic_intensity_status_refresh_persists_observation_without_lease_authority() {
+    const REQUEST_ID: &str = "019fcaaa-0000-7000-8000-000000000404";
+
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = DaemonRuntime::default();
+    write_daemon_job_status(
+        &daemon_semantic_job_path(temp.path()),
+        &json!({
+            "schema_version": 1,
+            "status": "ready",
+            "configured_indexing_intensity": "quiet",
+            "effective_indexing_intensity": "quiet",
+            "last_run_intensity": "quiet",
+        }),
+    )
+    .unwrap();
+
+    handle_semantic_intensity_lease_request(
+        &runtime.semantic_intensity_leases,
+        &json!({
+            "schema_version": 1,
+            "op": "semantic_intensity_acquire",
+            "request_id": REQUEST_ID,
+            "ttl_ms": 5_000,
+        }),
+    )
+    .unwrap()
+    .expect("lease request handled");
+    refresh_semantic_intensity_observation(temp.path(), &runtime).unwrap();
+    let full = read_daemon_job_status(&daemon_semantic_job_path(temp.path())).unwrap();
+    assert_eq!(full["effective_indexing_intensity"], "full");
+    assert_eq!(full["last_run_intensity"], "quiet");
+    assert!(full.get("request_id").is_none());
+    assert!(full.get("active_full_intensity_leases").is_none());
+    assert!(full.get("expires_at_ms").is_none());
+
+    handle_semantic_intensity_lease_request(
+        &runtime.semantic_intensity_leases,
+        &json!({
+            "schema_version": 1,
+            "op": "semantic_intensity_release",
+            "request_id": REQUEST_ID,
+        }),
+    )
+    .unwrap()
+    .expect("lease request handled");
+    refresh_semantic_intensity_observation(temp.path(), &runtime).unwrap();
+    let quiet = read_daemon_job_status(&daemon_semantic_job_path(temp.path())).unwrap();
+    assert_eq!(quiet["effective_indexing_intensity"], "quiet");
+    assert_eq!(quiet["last_run_intensity"], "quiet");
 }
 
 #[test]

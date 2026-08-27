@@ -7,6 +7,7 @@ fn application_config(config: &AppConfig<'_>) -> ctx_daemon_application::DaemonC
         enabled: config.daemon.enabled,
         mode: super::super::daemon_supervisor::daemon_mode(config.daemon.mode),
         semantic_enabled: config.semantic_search_enabled(),
+        semantic_indexing_intensity: config.semantic_indexing_intensity(),
     }
 }
 

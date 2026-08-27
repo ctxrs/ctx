@@ -1,6 +1,9 @@
 use super::*;
 use std::{ffi::OsString, sync::MutexGuard};
 
+#[path = "config_tests/semantic.rs"]
+mod semantic;
+
 const DEFAULT_CONTROL_ENV_KEYS: &[&str] = &[
     "CTX_ANALYTICS_ENABLED",
     "CTX_LOCAL_USAGE_ENABLED",
@@ -94,7 +97,7 @@ mode = "source-refresh-only"
     assert_eq!(config.upgrade.auto, AUTO_UPGRADE_DEFAULT_MODE);
     assert_eq!(config.auto_upgrade_mode(), AutoUpgradeMode::Apply);
     assert!(config.auto_upgrade_enabled());
-    assert_eq!(config.search.semantic, None);
+    assert_eq!(config.semantic.enabled, None);
     config.apply_values(&values).unwrap();
     assert!(!config.analytics.enabled);
     assert!(!config.local_usage.enabled);
@@ -103,37 +106,12 @@ mode = "source-refresh-only"
     assert_eq!(config.upgrade.interval, Duration::from_secs(60 * 60));
     assert_eq!(config.indexing.mode, IndexingMode::Manual);
     assert_eq!(config.daemon.mode, DaemonMode::SourceRefreshOnly);
-    assert_eq!(config.search.semantic, None);
-}
-
-#[test]
-fn search_semantic_is_unset_when_absent() {
-    let values = parse_toml_subset("[upgrade]\nauto = \"off\"\n").unwrap();
-    let mut config = AppConfig::default();
-
-    config.apply_values(&values).unwrap();
-
-    assert_eq!(config.search.semantic, None);
-}
-
-#[test]
-fn parses_search_semantic_true() {
-    let values = parse_toml_subset("[search]\nsemantic = true\n").unwrap();
-    let mut config = AppConfig::default();
-
-    config.apply_values(&values).unwrap();
-
-    assert_eq!(config.search.semantic, Some(true));
-}
-
-#[test]
-fn parses_search_semantic_false() {
-    let values = parse_toml_subset("[search]\nsemantic = false\n").unwrap();
-    let mut config = AppConfig::default();
-
-    config.apply_values(&values).unwrap();
-
-    assert_eq!(config.search.semantic, Some(false));
+    assert_eq!(config.semantic.enabled, None);
+    assert_eq!(
+        config.semantic_indexing_intensity(),
+        SemanticIndexingIntensity::Quiet
+    );
+    assert_eq!(config.semantic_indexing_intensity_source(), "default");
 }
 
 #[test]
@@ -152,8 +130,14 @@ fn load_without_config_file_uses_defaults() {
     assert_eq!(config.upgrade.interval, Duration::from_secs(24 * 60 * 60));
     assert_eq!(config.indexing.mode, IndexingMode::Automatic);
     assert_eq!(config.daemon.mode, DaemonMode::Full);
-    assert_eq!(config.search.semantic, None);
+    assert_eq!(config.semantic.enabled, None);
     assert!(!config.semantic_search_enabled());
+    assert_eq!(config.semantic_search_source(), "default");
+    assert_eq!(
+        config.semantic_indexing_intensity(),
+        SemanticIndexingIntensity::Quiet
+    );
+    assert_eq!(config.semantic_indexing_intensity_source(), "default");
     assert!(config.automatic_source_discovery_enabled());
 }
 
@@ -193,8 +177,16 @@ fn empty_config_runtime_defaults_match_public_control_inventory() {
         serde_json::json!(config.indexing.mode.as_str())
     );
     assert_eq!(
-        released("search.semantic"),
+        released("semantic.enabled"),
         serde_json::json!(config.semantic_search_enabled())
+    );
+    assert_eq!(
+        released("semantic.indexing_intensity"),
+        serde_json::json!(config.semantic_indexing_intensity().as_str())
+    );
+    assert_eq!(
+        contract["compatibility_config_keys"]["search.semantic"],
+        serde_json::json!("semantic.enabled")
     );
 }
 
@@ -723,26 +715,6 @@ fn daemon_enablement_updates_write_canonical_indexing_mode_and_remove_legacy_key
 }
 
 #[test]
-fn set_semantic_search_enabled_is_durable_preserving_and_idempotent() {
-    let _env_guard = EnvGuard::new(&["CTX_SEARCH_SEMANTIC"]);
-    let temp = tempfile::tempdir().unwrap();
-    let path = temp.path().join(CONFIG_FILE);
-    let original =
-        "# retained comment\n[analytics]\nenabled = false\n\n[search]\nsemantic = false\n";
-    fs::write(&path, original).unwrap();
-
-    set_semantic_search_enabled(temp.path(), true).unwrap();
-    let enabled = AppConfig::load(temp.path()).unwrap();
-    assert!(enabled.semantic_search_enabled());
-    let once = fs::read_to_string(&path).unwrap();
-    assert!(once.starts_with("# retained comment\n[analytics]\nenabled = false\n"));
-    assert!(once.contains("[search]\nsemantic = true\n"));
-
-    set_semantic_search_enabled(temp.path(), true).unwrap();
-    assert_eq!(fs::read_to_string(&path).unwrap(), once);
-}
-
-#[test]
 fn default_config_is_not_written_for_implicit_defaults() {
     let temp = tempfile::tempdir().unwrap();
     write_default_config(temp.path()).unwrap();
@@ -759,9 +731,19 @@ fn invalid_scalar_values_and_unknown_keys_report_the_owned_field() {
             ["analytics.enabled", "boolean"],
         ),
         (
-            "semantic boolean",
+            "legacy semantic boolean",
             "[search]\nsemantic = maybe\n",
             ["search.semantic", "boolean"],
+        ),
+        (
+            "canonical semantic boolean",
+            "[semantic]\nenabled = maybe\n",
+            ["semantic.enabled", "boolean"],
+        ),
+        (
+            "unquoted semantic intensity",
+            "[semantic]\nindexing_intensity = full\n",
+            ["semantic.indexing_intensity", "quoted string"],
         ),
         (
             "upgrade mode",
@@ -794,28 +776,6 @@ fn invalid_scalar_values_and_unknown_keys_report_the_owned_field() {
             assert!(error.contains(fragment), "{name}: {error}");
         }
     }
-}
-
-#[test]
-fn env_overrides_search_semantic_config() {
-    let env_guard = EnvGuard::new(&["CTX_SEARCH_SEMANTIC"]);
-    let temp = tempfile::tempdir().unwrap();
-
-    fs::write(
-        temp.path().join(CONFIG_FILE),
-        "[search]\nsemantic = false\n",
-    )
-    .unwrap();
-    env_guard.set("CTX_SEARCH_SEMANTIC", "true");
-    let config = AppConfig::load(temp.path()).unwrap();
-    assert_eq!(config.search.semantic, Some(true));
-    assert_eq!(config.semantic_search_source(), "environment");
-
-    fs::write(temp.path().join(CONFIG_FILE), "[search]\nsemantic = true\n").unwrap();
-    env_guard.set("CTX_SEARCH_SEMANTIC", "false");
-    let config = AppConfig::load(temp.path()).unwrap();
-    assert_eq!(config.search.semantic, Some(false));
-    assert_eq!(config.semantic_search_source(), "environment");
 }
 
 #[test]

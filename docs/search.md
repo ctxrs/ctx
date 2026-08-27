@@ -231,7 +231,8 @@ The production embedding model is
 E5 `query: ` input contract and document chunks use `passage: `. The model,
 chunking, source projector, and lexical generation policies participate in
 generation identity, so incompatible derived data is rebuilt rather than
-silently reused.
+silently reused. Both document and query embedding stay local; external and
+bring-your-own embedding services are not part of semantic search.
 
 Enable local semantic search with:
 
@@ -239,6 +240,37 @@ Enable local semantic search with:
 ctx semantic enable
 ctx semantic status
 ```
+
+Configuration is sparse. With no `[semantic]` section, semantic search is
+disabled and indexing intensity is `"quiet"`. The canonical opt-in is:
+
+```toml
+[semantic]
+enabled = true
+```
+
+Semantic document indexing supports only `quiet` and `full`. Quiet is the
+background-friendly default. For persistent full behavior, add
+`indexing_intensity = "full"` under `[semantic]` in `config.toml`; this version
+has no persistent CLI setter. Full removes deliberate inter-batch pacing but
+continues to obey safety, resource, and admission limits.
+
+Intensity applies to semantic document construction during initial backfill,
+incremental refresh, rebuild/recovery, daemon reconciliation, and finite
+foreground reconciliation. It does not affect interactive query embedding,
+lexical indexing, or embedding identity/readiness. It is distinct from
+`[indexing] mode`, which selects automatic or manual indexing ownership.
+
+In automatic indexing mode, use full intensity only while waiting for the
+current projection:
+
+```bash
+ctx semantic enable --wait --intensity full
+```
+
+The temporary intensity does not rewrite `config.toml` and expires when the
+wait ends, the waiting command crashes, or the daemon restarts. Inspect both
+configured and effective intensity with `ctx semantic status`.
 
 Semantic opt-in is independent of indexing mode. In auto mode, the daemon keeps
 the semantic projection caught up. For explicit manual synchronization, use the

@@ -41,11 +41,14 @@ a hosted research agent.
   maintenance. In manual mode, default and explicit background refresh read
   only the last published generation and never start or wake a worker.
   Explicit `--refresh wait` may start a finite Core worker; `--refresh off`
-  never starts or wakes one. Semantic and hybrid search read existing local
-  sidecar coverage only; search does not run vector backfill or download
-  embedding models. Hybrid uses semantic evidence only after sidecar coverage
-  is complete and dirty work is drained; explicit semantic search may query
-  partial coverage for diagnostics.
+  never starts or wakes one. Background and refresh-off semantic/hybrid search
+  read existing local sidecar coverage only; they do not run vector backfill or
+  download embedding models. In manual mode, an explicit opted-in semantic or
+  nonzero-weight hybrid `--refresh wait` may acquire the local model and
+  reconcile semantic document coverage for the exact pinned Core generation.
+  Hybrid uses semantic evidence only after sidecar coverage is complete and
+  dirty work is drained; explicit semantic search may query partial coverage
+  for diagnostics.
 - `ctx show session` and `ctx show event` resolve ctx-owned identities and read complete
   policy-selected normalized records from the active Core/Tantivy generation.
 - `ctx list events` provides
@@ -75,9 +78,16 @@ a hosted research agent.
   native provider-history refresh and local semantic indexing/freshness work.
 - `ctx semantic enable|status|disable` owns the local semantic-search lifecycle.
   Enablement is the explicit opt-in and starts daemon-owned model acquisition
-  and catch-up in auto mode; status is read-only; disablement retains downloaded
-  assets. Lexical search remains available while embeddings build; hybrid
-  search uses lexical and semantic evidence when semantic coverage is ready.
+  and catch-up in auto mode; status is read-only and reports configured and
+  effective semantic indexing intensity; disablement retains downloaded
+  assets. Sparse config defaults to disabled with quiet intensity. Quiet and
+  full are the only intensity values. Full removes deliberate inter-batch
+  pacing from semantic document index construction while retaining safety,
+  resource, and admission limits. Intensity applies to every semantic document
+  construction path, not interactive query embedding, lexical indexing, or
+  embedding identity/readiness. Lexical search remains available while
+  embeddings build; hybrid search uses lexical and semantic evidence when
+  semantic coverage is ready.
 - `ctx stats` reports bounded local usage/value aggregates from the separate
   owner-private `usage.sqlite` sidecar. This default-on product state is
   independent of remote event reporting, has no network path or identity, keeps
@@ -94,8 +104,9 @@ a hosted research agent.
 
 ## Out Of Scope
 
-- hosted model inference, hidden LLM calls, or API-key-dependent inference by
-  ctx; local semantic embedding is allowed only as documented search behavior;
+- hosted, external, or bring-your-own embedding/model inference, hidden LLM
+  calls, or API-key-dependent inference by ctx; semantic embedding remains
+  local as documented search behavior;
 - team and enterprise seats, invitations, SSO, SCIM, or organization
   administration;
 - annual plans, device caps, and device-management UI;

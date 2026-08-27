@@ -22,7 +22,8 @@ use super::{
         SEMANTIC_REQUIRED_MODEL_FILES,
     },
     resource_policy::{
-        semantic_quiet_policy, throttle_semantic_batch, SemanticComputeClass, SemanticQuietPolicy,
+        semantic_quiet_policy, throttle_semantic_batch, SemanticComputeClass,
+        SemanticIndexingExecutionPolicy, SemanticIndexingIntensity, SemanticQuietPolicy,
         SemanticSystemResources,
     },
 };

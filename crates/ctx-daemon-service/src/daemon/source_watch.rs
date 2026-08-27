@@ -54,6 +54,9 @@ pub(crate) fn daemon_wait_duration(
 ) -> StdDuration {
     let pending_source_refresh = source_refresh.is_some_and(CoreRefreshEngine::has_pending_request);
     let mut wait_for = next_safety_reconcile.saturating_duration_since(now);
+    if let Some(lease_expiry) = runtime.semantic_intensity_leases.next_expiry_in(now) {
+        wait_for = wait_for.min(lease_expiry);
+    }
     if pending_source_refresh {
         if runtime.history_retry.ready() {
             return StdDuration::ZERO;

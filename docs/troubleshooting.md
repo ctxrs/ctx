@@ -147,7 +147,30 @@ ctx semantic status
 ```
 
 Lexical search remains available while embeddings build. Hybrid search begins
-using both lexical and semantic evidence when coverage is ready.
+using both lexical and semantic evidence when coverage is ready. Status reports
+the configured and currently effective semantic indexing intensity.
+
+For temporary full intensity while waiting for this projection, run:
+
+```bash
+ctx semantic enable --wait --intensity full
+```
+
+This removes deliberate inter-batch pacing for semantic document indexing but
+still obeys safety, resource, and admission limits. It does not rewrite the
+persistent intensity and expires when the wait ends, the command crashes, or
+the daemon restarts. For persistent full behavior, edit `config.toml`:
+
+```toml
+[semantic]
+enabled = true
+indexing_intensity = "full"
+```
+
+Only `quiet` and `full` are accepted; quiet is the background-friendly default.
+This version has no persistent CLI setter for intensity. Indexing intensity is
+separate from `ctx index mode auto|manual` and does not affect query embedding
+or lexical indexing.
 
 In manual mode, there is no background semantic maintenance. After enabling
 semantic search, run an explicit semantic or nonzero-weight hybrid search with

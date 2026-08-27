@@ -883,6 +883,19 @@ fn daemon_applied_config_matches(status: &Value, expected: &DaemonConfigSnapshot
         && applied.get("daemon_mode").and_then(Value::as_str) == Some(expected.mode.as_str())
         && applied.get("semantic_enabled").and_then(Value::as_bool)
             == Some(expected.semantic_enabled)
+        && applied_semantic_indexing_intensity(applied)
+            == Some(expected.semantic_indexing_intensity)
+}
+
+fn applied_semantic_indexing_intensity(applied: &Value) -> Option<SemanticIndexingIntensity> {
+    match applied.get("semantic_indexing_intensity") {
+        None => Some(SemanticIndexingIntensity::Quiet),
+        Some(value) => match value.as_str() {
+            Some("quiet") => Some(SemanticIndexingIntensity::Quiet),
+            Some("full") => Some(SemanticIndexingIntensity::Full),
+            Some(_) | None => None,
+        },
+    }
 }
 
 fn wait_for_daemon_handoff_with(

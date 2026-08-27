@@ -32,6 +32,7 @@ mod ports;
 mod query_service;
 mod resource_policy;
 mod runtime_limits;
+mod semantic_intensity;
 mod source_backed_refresh_adapter;
 mod source_backed_refresh_coordinator;
 #[cfg(test)]
@@ -64,6 +65,7 @@ use source_backed_refresh_coordinator::SourceBackedRefreshPublication;
 #[cfg(test)]
 mod query_service_transport_tests;
 
+pub use ctx_semantic_model::SemanticIndexingIntensity;
 pub use daemon::run_daemon;
 pub use daemon_wakeup::daemon_wakeup_report;
 pub use paths_status::{
@@ -79,6 +81,10 @@ pub use query_service::{
     DaemonQueryServiceUnavailable, DaemonSourceRefreshServiceUnavailable,
 };
 pub use runtime_limits::SEMANTIC_WORKER_BATCH_MAX;
+pub use semantic_intensity::{
+    daemon_semantic_intensity_lease_request, SemanticIntensityLeaseOperation,
+    SEMANTIC_INTENSITY_LEASE_MAX_TTL_MS, SEMANTIC_INTENSITY_LEASE_MIN_TTL_MS,
+};
 pub use source_backed_refresh_coordinator::{
     coordinate_import_source_backed_refresh_with_progress,
     coordinate_setup_source_backed_refresh_with_progress, coordinate_source_backed_refresh,

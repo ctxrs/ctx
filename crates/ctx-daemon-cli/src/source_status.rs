@@ -92,7 +92,7 @@ pub fn source_epoch_status_report(
     let admitted_generation_id = admitted_index.map(|index| index.generation_id().to_owned());
     let daemon = source_daemon_report(data_root, config);
     let catalog = catalog_report(admitted_generation_id.as_deref(), admitted_index);
-    let mut semantic = semantic_report(data_root, config, admitted_index);
+    let mut semantic = semantic_report(data_root, config, admitted_index, &daemon);
     attach_catch_up_status(
         &mut semantic,
         read_daemon_job_status(&daemon_semantic_job_path(data_root)),
@@ -486,8 +486,10 @@ fn semantic_report(
     data_root: &Path,
     config: &AppConfig<'_>,
     index: Option<&VerifiedIndex>,
+    daemon: &Value,
 ) -> Value {
     let enabled = config.semantic_search_enabled();
+    let indexing_intensity = semantic_indexing_intensity_report(config, daemon);
     let path = source_backed_semantic_vector_path(data_root);
     let Some(index) = index else {
         return compact_json(json!({
@@ -499,6 +501,7 @@ fn semantic_report(
             },
             "enabled": enabled,
             "config_source": config.semantic_search_source(),
+            "indexing_intensity": indexing_intensity,
             "flat_f32": {
                 "status": "unavailable",
                 "reason": "lexical_generation_unavailable",
@@ -516,6 +519,7 @@ fn semantic_report(
             },
             "enabled": enabled,
             "config_source": config.semantic_search_source(),
+            "indexing_intensity": indexing_intensity,
             "flat_f32": {
                 "status": if enabled { "pending" } else { "disabled" },
                 "reason": if enabled {
@@ -634,8 +638,33 @@ fn semantic_report(
         },
         "enabled": enabled,
         "config_source": config.semantic_search_source(),
+        "indexing_intensity": indexing_intensity,
         "flat_f32": flat_f32,
     }))
+}
+
+fn semantic_indexing_intensity_report(config: &AppConfig<'_>, daemon: &Value) -> Value {
+    let configured = config.semantic_indexing_intensity();
+    let observed_effective = if daemon.get("running").and_then(Value::as_bool) == Some(true) {
+        daemon
+            .pointer("/jobs/semantic_index/effective_indexing_intensity")
+            .and_then(Value::as_str)
+            .filter(|value| matches!(*value, "quiet" | "full"))
+            .or_else(|| {
+                daemon
+                    .pointer("/config_reload/applied/semantic_indexing_intensity")
+                    .and_then(Value::as_str)
+                    .filter(|value| matches!(*value, "quiet" | "full"))
+            })
+    } else {
+        None
+    };
+    let effective = observed_effective.unwrap_or_else(|| configured.as_str());
+    json!({
+        "configured": configured.as_str(),
+        "effective": effective,
+        "config_source": config.semantic_indexing_intensity_source(),
+    })
 }
 
 #[cfg(test)]

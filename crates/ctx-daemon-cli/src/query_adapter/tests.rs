@@ -165,6 +165,25 @@ fn foreground_adapter_is_lazy_and_borrows_the_exact_data_root() {
 }
 
 #[test]
+fn foreground_reconciliation_loads_the_composed_document_indexing_intensity() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    assert_eq!(
+        configured_foreground_semantic_indexing_intensity(temp.path())?,
+        SemanticIndexingIntensity::Quiet
+    );
+
+    fs::write(
+        temp.path().join(crate::config::CONFIG_FILE),
+        "[semantic]\nenabled = true\nindexing_intensity = \"full\"\n",
+    )?;
+    assert_eq!(
+        configured_foreground_semantic_indexing_intensity(temp.path())?,
+        SemanticIndexingIntensity::Full
+    );
+    Ok(())
+}
+
+#[test]
 fn foreground_empty_generation_converges_without_loading_a_model() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let (index, _) = semantic_index_revision(temp.path(), 1, false)?;

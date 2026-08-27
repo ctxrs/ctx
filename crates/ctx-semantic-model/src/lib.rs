@@ -49,7 +49,9 @@ pub use model_runtime::{
     SharedSemanticRuntime,
 };
 pub use resource_policy::{
-    semantic_model_load_resource_facts, SemanticModelLoadResourceFacts, SemanticQuietPolicy,
+    semantic_model_load_resource_facts, ParseSemanticIndexingIntensityError,
+    SemanticIndexingExecutionPolicy, SemanticIndexingIntensity, SemanticModelLoadResourceFacts,
+    SemanticQuietPolicy,
 };
 
 #[cfg(all(feature = "test-support", ctx_semantic_fastembed))]
