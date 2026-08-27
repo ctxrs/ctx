@@ -19,7 +19,7 @@ impl VerifiedIndex {
                 IndexRecordOption::Basic,
             )),
         ]));
-        let source_identity_query = self.source_identity_query(filter.filters(), fields)?;
+        let source_identity_query = self.source_identity_query(filter, fields)?;
         let query =
             filtered_event_query(semantic_eligibility, source_identity_query, filter, fields)?;
         let addresses = self
@@ -41,13 +41,13 @@ impl VerifiedIndex {
 
     fn source_identity_query(
         &self,
-        filters: &EventSearchFilters,
+        filter: &CompiledSearchFilter,
         fields: Fields,
     ) -> Result<Option<Box<dyn Query>>> {
+        let filters = filter.filters();
         if !filters.has_source_identity_filter() {
             return Ok(None);
         }
-        filters.validate_source_identity_filters()?;
         let mut clauses: Vec<(Occur, Box<dyn Query>)> = vec![(
             Occur::Must,
             Box::new(TermQuery::new(

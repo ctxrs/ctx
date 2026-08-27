@@ -811,24 +811,6 @@ fn finish_lexical_batch(
     }
 }
 
-#[cfg(any(test, feature = "test-support"))]
-fn complete_compatibility_candidates(
-    batch: LexicalSearchBatch,
-) -> LexicalSearchResult<Vec<EventSearchCandidate>> {
-    let LexicalSearchBatch {
-        candidates,
-        complete,
-        exhaustion,
-        ..
-    } = batch;
-    if !complete {
-        return Err(LexicalSearchError::WorkExhausted(exhaustion.expect(
-            "an incomplete lexical batch always has an exhaustion reason",
-        )));
-    }
-    Ok(candidates.into_iter().map(Into::into).collect())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

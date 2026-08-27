@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "lexical_segment_boundaries.rs"]
+mod segment_boundaries;
+
 fn publish_records(temp: &TempDir, source: &SourceKey, records: Vec<CoreRecord>) -> VerifiedIndex {
     let document_count = u64::try_from(records.len()).unwrap();
     let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
@@ -97,21 +100,26 @@ fn script_aware_analysis_indexes_cjk_and_long_technical_identifiers() {
 
     let index = VerifiedIndex::open(temp.path()).unwrap();
     assert_eq!(
-        index
-            .search_event_candidates("数据库迁移", 10)
+        lexical_search_batch(&index, &["数据库迁移"], &EventSearchFilters::default(), 10,)
             .unwrap()
+            .candidates
             .into_iter()
             .map(|candidate| candidate.event.event_id)
             .collect::<Vec<_>>(),
         vec![cjk.event_id.as_uuid()]
     );
     assert_eq!(
-        index
-            .search_event_candidates(&long_component, 10)
-            .unwrap()
-            .into_iter()
-            .map(|candidate| candidate.event.event_id)
-            .collect::<Vec<_>>(),
+        lexical_search_batch(
+            &index,
+            &[&long_component],
+            &EventSearchFilters::default(),
+            10,
+        )
+        .unwrap()
+        .candidates
+        .into_iter()
+        .map(|candidate| candidate.event.event_id)
+        .collect::<Vec<_>>(),
         vec![identifier.event_id.as_uuid()]
     );
 }
@@ -135,9 +143,14 @@ fn multi_term_search_ranks_full_coverage_before_one_term_partial_matches() {
     writer.commit(|_| true).unwrap();
 
     let index = VerifiedIndex::open(temp.path()).unwrap();
-    let candidates = index
-        .search_event_candidates("coveragealpha coveragebeta", 10)
-        .unwrap();
+    let candidates = lexical_search_batch(
+        &index,
+        &["coveragealpha coveragebeta"],
+        &EventSearchFilters::default(),
+        10,
+    )
+    .unwrap()
+    .candidates;
     assert_eq!(
         candidates
             .iter()
@@ -172,9 +185,14 @@ fn multi_term_search_ranks_full_coverage_before_one_term_partial_matches() {
         ]
     );
     assert_eq!(
-        index
-            .search_event_candidates("coveragealpha coveragebeta", 1)
-            .unwrap()[0]
+        lexical_search_batch(
+            &index,
+            &["coveragealpha coveragebeta"],
+            &EventSearchFilters::default(),
+            1,
+        )
+        .unwrap()
+        .candidates[0]
             .event
             .event_id,
         exact.event_id.as_uuid()
@@ -328,31 +346,32 @@ fn lexical_result_limits_reject_oversized_and_usize_max_before_query_work() {
     let (_temp, index) = lexical_query_limit_fixture();
     for requested in [MAX_LEXICAL_QUERY_RESULTS + 1, usize::MAX] {
         ctx_history_index_query::reset_lexical_query_work();
-        let error = index
-            .search_event_candidates("bounded", requested)
-            .unwrap_err();
+        let error = lexical_search_batch(
+            &index,
+            &["bounded"],
+            &EventSearchFilters::default(),
+            requested,
+        )
+        .unwrap_err();
         assert!(matches!(
             error,
-            ctx_history_index_query::LexicalSearchError::Index(
-                IndexError::InvalidLexicalResultLimit {
+            IndexError::InvalidLexicalResultLimit {
                 requested: actual,
                 maximum
-            })
+            }
                 if actual == requested && maximum == MAX_LEXICAL_QUERY_RESULTS
         ));
         assert_no_lexical_query_was_constructed_or_executed();
 
         ctx_history_index_query::reset_lexical_query_work();
-        let error = index
-            .list_event_candidates_with_filters(&EventSearchFilters::default(), requested)
-            .unwrap_err();
+        let error =
+            lexical_list_batch(&index, &EventSearchFilters::default(), requested).unwrap_err();
         assert!(matches!(
             error,
-            ctx_history_index_query::LexicalSearchError::Index(
-                IndexError::InvalidLexicalResultLimit {
+            IndexError::InvalidLexicalResultLimit {
                 requested: actual,
                 maximum
-            })
+            }
                 if actual == requested && maximum == MAX_LEXICAL_QUERY_RESULTS
         ));
         assert_no_lexical_query_was_constructed_or_executed();
@@ -688,14 +707,15 @@ fn oversized_single_query_is_rejected_before_query_construction() {
     let oversized = "x".repeat(LEXICAL_QUERY_LIMITS.maximum_aggregate_bytes + 1);
     ctx_history_index_query::reset_lexical_query_work();
 
-    let error = index.search_event_candidates(&oversized, 10).unwrap_err();
+    let error = lexical_search_batch(&index, &[&oversized], &EventSearchFilters::default(), 10)
+        .unwrap_err();
 
     assert!(matches!(
         error,
-        ctx_history_index_query::LexicalSearchError::Index(IndexError::LexicalQueryBytesTooLarge {
+        IndexError::LexicalQueryBytesTooLarge {
             actual,
             maximum,
-        }) if actual == LEXICAL_QUERY_LIMITS.maximum_aggregate_bytes + 1
+        } if actual == LEXICAL_QUERY_LIMITS.maximum_aggregate_bytes + 1
             && maximum == LEXICAL_QUERY_LIMITS.maximum_aggregate_bytes
     ));
     assert_no_lexical_query_was_constructed_or_executed();
@@ -707,16 +727,15 @@ fn repeated_terms_are_rejected_before_query_construction() {
     let alternatives = vec!["bounded"; LEXICAL_QUERY_LIMITS.maximum_alternatives + 1];
     ctx_history_index_query::reset_lexical_query_work();
 
-    let error = index
-        .search_event_candidates_any_with_filters(&alternatives, &EventSearchFilters::default(), 10)
+    let error = lexical_search_batch(&index, &alternatives, &EventSearchFilters::default(), 10)
         .unwrap_err();
 
     assert!(matches!(
         error,
-        ctx_history_index_query::LexicalSearchError::Index(IndexError::LexicalQueryAlternativesTooMany {
+        IndexError::LexicalQueryAlternativesTooMany {
             observed,
             maximum
-        })
+        }
             if observed == LEXICAL_QUERY_LIMITS.maximum_alternatives + 1
                 && maximum == LEXICAL_QUERY_LIMITS.maximum_alternatives
     ));
@@ -732,14 +751,15 @@ fn analyzed_tokens_are_rejected_before_deduplication_or_query_construction() {
         .join(" ");
     ctx_history_index_query::reset_lexical_query_work();
 
-    let error = index.search_event_candidates(&query, 10).unwrap_err();
+    let error =
+        lexical_search_batch(&index, &[&query], &EventSearchFilters::default(), 10).unwrap_err();
 
     assert!(matches!(
         error,
-        ctx_history_index_query::LexicalSearchError::Index(IndexError::LexicalQueryTokensTooMany {
+        IndexError::LexicalQueryTokensTooMany {
             observed,
             maximum
-        })
+        }
             if observed == LEXICAL_QUERY_LIMITS.maximum_unique_tokens + 1
                 && maximum == LEXICAL_QUERY_LIMITS.maximum_unique_tokens
     ));
@@ -748,12 +768,12 @@ fn analyzed_tokens_are_rejected_before_deduplication_or_query_construction() {
     let repeated = std::iter::repeat_n("bounded", LEXICAL_QUERY_LIMITS.maximum_unique_tokens + 1)
         .collect::<Vec<_>>()
         .join(" ");
-    let error = index.search_event_candidates(&repeated, 10).unwrap_err();
+    let error =
+        lexical_search_batch(&index, &[&repeated], &EventSearchFilters::default(), 10).unwrap_err();
     assert!(matches!(
         error,
-        ctx_history_index_query::LexicalSearchError::Index(
-            IndexError::LexicalQueryTokensTooMany { observed, maximum }
-        ) if observed == LEXICAL_QUERY_LIMITS.maximum_unique_tokens + 1
+        IndexError::LexicalQueryTokensTooMany { observed, maximum }
+            if observed == LEXICAL_QUERY_LIMITS.maximum_unique_tokens + 1
             && maximum == LEXICAL_QUERY_LIMITS.maximum_unique_tokens
     ));
     assert_no_lexical_query_was_constructed_or_executed();

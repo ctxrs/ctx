@@ -637,32 +637,6 @@ pub(super) fn custom_source_identity(event: &EventRecord) -> Option<(&str, &str)
     event.custom_source_identity()
 }
 
-pub(super) fn source_identity_values_match(
-    filters: &EventSearchFilters,
-    provider_key: &str,
-    source_id: &str,
-) -> bool {
-    if filters.history_source.as_deref().is_some_and(|selector| {
-        selector
-            .trim()
-            .split_once('/')
-            .is_none_or(|(provider, source)| provider != provider_key || source != source_id)
-    }) {
-        return false;
-    }
-    if filters
-        .provider_key
-        .as_deref()
-        .is_some_and(|expected| expected.trim() != provider_key)
-    {
-        return false;
-    }
-    filters
-        .source_id
-        .as_deref()
-        .is_none_or(|expected| expected.trim() == source_id)
-}
-
 pub(super) fn add_optional_text_filter(
     clauses: &mut Vec<(Occur, Box<dyn Query>)>,
     field: tantivy::schema::Field,

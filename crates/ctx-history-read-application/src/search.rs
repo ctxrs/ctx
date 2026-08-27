@@ -3,14 +3,14 @@ use ctx_history_core::{
     AgentScope, CaptureProvider, EventType, ProviderNativeEventCopy,
     ProviderNativeSessionRelationship,
 };
+#[cfg(test)]
+use ctx_history_index_query::SearchContentScope;
 use ctx_history_index_query::{
     CompiledSearchFilter, EventRecord, EventSearchCandidate, EventSearchFilters, IndexError,
-    LexicalExecution, LexicalMode, LexicalSearchBatch, LexicalSearchError, RankedEventRef,
-    SearchAgentScope, SearchFamilyKey, SearchSessionCoordinate, SessionGroupingClaims,
-    VerifiedIndex, MAX_LEXICAL_QUERY_RESULTS,
+    LexicalExecution, LexicalMode, LexicalSearchBatch, RankedEventRef, SearchAgentScope,
+    SearchFamilyKey, SearchSessionCoordinate, SessionGroupingClaims, VerifiedIndex,
+    MAX_LEXICAL_QUERY_RESULTS,
 };
-#[cfg(test)]
-use ctx_history_index_query::{LexicalSearchResult, SearchContentScope};
 pub use ctx_history_index_query::{SearchDiversificationDecision, SearchDiversificationStatus};
 use serde_json::{json, Value};
 use thiserror::Error;
@@ -151,8 +151,6 @@ pub enum SearchExecutionError {
     Semantic(#[from] HistorySemanticError),
     #[error(transparent)]
     Index(#[from] IndexError),
-    #[error(transparent)]
-    Lexical(#[from] LexicalSearchError),
     #[error(transparent)]
     Application(#[from] anyhow::Error),
 }
@@ -496,7 +494,7 @@ fn collect_lexical_search_hits_using<LexicalSearch, GroupingClaims>(
     grouping_claims: GroupingClaims,
 ) -> SearchExecutionResult<RankedSearchCollection>
 where
-    LexicalSearch: FnOnce(usize) -> LexicalSearchResult<LexicalSearchBatch>,
+    LexicalSearch: FnOnce(usize) -> ctx_history_index_query::Result<LexicalSearchBatch>,
     GroupingClaims: FnOnce(
         &[SearchSessionCoordinate],
     ) -> ctx_history_index_query::Result<Vec<SessionGroupingClaims>>,

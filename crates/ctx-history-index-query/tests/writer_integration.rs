@@ -235,9 +235,9 @@ fn add_literal_fact(record: &mut CoreRecord, kind: LiteralFactKind, value: impl 
 
 fn filtered_session_ids(index: &VerifiedIndex, filters: EventSearchFilters) -> Vec<Uuid> {
     sorted_uuids(
-        index
-            .search_event_candidates_with_filters("shared needle", &filters, 10)
+        lexical_search_batch(index, &["shared needle"], &filters, 10)
             .unwrap()
+            .candidates
             .into_iter()
             .map(|candidate| candidate.event.session_id)
             .collect(),
@@ -249,7 +249,7 @@ fn lexical_search_batch(
     natural_texts: &[&str],
     filters: &EventSearchFilters,
     limit: usize,
-) -> ctx_history_index_query::LexicalSearchResult<ctx_history_index_query::LexicalSearchBatch> {
+) -> ctx_history_index_query::Result<ctx_history_index_query::LexicalSearchBatch> {
     execute_lexical_batch(
         index,
         ctx_history_index_query::LexicalMode::Search(natural_texts),
@@ -265,7 +265,7 @@ fn lexical_search_batch_with_budget(
     filters: &EventSearchFilters,
     limit: usize,
     budget: ctx_history_index_query::LexicalWorkBudget,
-) -> ctx_history_index_query::LexicalSearchResult<ctx_history_index_query::LexicalSearchBatch> {
+) -> ctx_history_index_query::Result<ctx_history_index_query::LexicalSearchBatch> {
     execute_lexical_batch(
         index,
         ctx_history_index_query::LexicalMode::Search(natural_texts),
@@ -279,7 +279,7 @@ fn lexical_list_batch(
     index: &VerifiedIndex,
     filters: &EventSearchFilters,
     limit: usize,
-) -> ctx_history_index_query::LexicalSearchResult<ctx_history_index_query::LexicalSearchBatch> {
+) -> ctx_history_index_query::Result<ctx_history_index_query::LexicalSearchBatch> {
     execute_lexical_batch(
         index,
         ctx_history_index_query::LexicalMode::List,
@@ -294,7 +294,7 @@ fn lexical_list_batch_with_budget(
     filters: &EventSearchFilters,
     limit: usize,
     budget: ctx_history_index_query::LexicalWorkBudget,
-) -> ctx_history_index_query::LexicalSearchResult<ctx_history_index_query::LexicalSearchBatch> {
+) -> ctx_history_index_query::Result<ctx_history_index_query::LexicalSearchBatch> {
     execute_lexical_batch(
         index,
         ctx_history_index_query::LexicalMode::List,
@@ -310,7 +310,7 @@ fn execute_lexical_batch(
     filters: &EventSearchFilters,
     limit: usize,
     budget: Option<ctx_history_index_query::LexicalWorkBudget>,
-) -> ctx_history_index_query::LexicalSearchResult<ctx_history_index_query::LexicalSearchBatch> {
+) -> ctx_history_index_query::Result<ctx_history_index_query::LexicalSearchBatch> {
     let filter = CompiledSearchFilter::compile(filters.clone())?;
     let execution = ctx_history_index_query::LexicalExecution::new(mode, &filter, limit);
     let execution = match budget {
@@ -320,7 +320,7 @@ fn execute_lexical_batch(
     index
         .execute_lexical(execution)
         .map(|observed| observed.batch)
-        .map_err(|failure| ctx_history_index_query::LexicalSearchError::Index(failure.error))
+        .map_err(|failure| failure.error)
 }
 
 fn sorted_uuids(mut ids: Vec<Uuid>) -> Vec<Uuid> {

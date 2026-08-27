@@ -507,15 +507,6 @@ impl EventSearchFilters {
         Ok(())
     }
 
-    pub fn matches_source_identity(&self, event: &EventRecord) -> bool {
-        if !self.has_source_identity_filter() {
-            return true;
-        }
-        custom_source_identity(event).is_some_and(|(provider_key, source_id)| {
-            source_identity_values_match(self, provider_key, source_id)
-        })
-    }
-
     pub(super) fn has_source_identity_filter(&self) -> bool {
         self.history_source.is_some() || self.provider_key.is_some() || self.source_id.is_some()
     }
@@ -551,6 +542,30 @@ impl CompiledSearchFilter {
 
     pub const fn filters(&self) -> &EventSearchFilters {
         &self.filters
+    }
+
+    pub(super) fn matches_source_identity(&self, event: &EventRecord) -> bool {
+        if !self.filters.has_source_identity_filter() {
+            return true;
+        }
+        custom_source_identity(event).is_some_and(|(provider_key, source_id)| {
+            let filters = &self.filters;
+            !filters.history_source.as_deref().is_some_and(|selector| {
+                selector
+                    .trim()
+                    .split_once('/')
+                    .is_none_or(|(provider, source)| {
+                        provider != provider_key || source != source_id
+                    })
+            }) && filters
+                .provider_key
+                .as_deref()
+                .is_none_or(|expected| expected.trim() == provider_key)
+                && filters
+                    .source_id
+                    .as_deref()
+                    .is_none_or(|expected| expected.trim() == source_id)
+        })
     }
 }
 
