@@ -74,11 +74,11 @@ support matrix is:
 | Grok Build | Supported | `grok_build_session_updates_jsonl_tree` |
 | DeepSeek Harness | Supported | `deepseek_harness_session_jsonl_tree` |
 | Pi | Supported | `pi_session_jsonl` |
-| Claude | Supported | `claude_projects_jsonl_tree` |
+| Claude Code | Supported | `claude_projects_jsonl_tree` |
 | OpenCode | Supported | `opencode_sqlite` |
 | Kilo Code | Supported | `kilo_sqlite` |
 | MiMo Code | Supported | `mimocode_sqlite` |
-| Kiro CLI | Supported | `kiro_cli_sqlite` |
+| Kiro | Supported | `kiro_cli_sqlite` |
 | Crush | Supported | `crush_sqlite` |
 | Goose | Supported | `goose_sessions_sqlite` |
 | Lingma | Supported | `lingma_sqlite` |
@@ -97,10 +97,10 @@ support matrix is:
 | Tabnine | Supported | `tabnine_cli_chat_recording_jsonl` |
 | Cursor | Supported | `cursor_agent_transcript_jsonl_tree` |
 | Zed | Supported | `zed_threads_sqlite` |
-| Copilot CLI | Supported | `copilot_cli_session_events_jsonl` |
+| GitHub Copilot | Supported | `copilot_cli_session_events_jsonl` |
 | Factory AI Droid | Supported | `factory_ai_droid_sessions_jsonl` |
 | Qwen Code | Supported | `qwen_code_chat_jsonl_tree` |
-| Kimi Code CLI | Supported | `kimi_code_cli_wire_jsonl_tree` |
+| Kimi Code | Supported | `kimi_code_cli_wire_jsonl_tree` |
 | Auggie | Supported | `auggie_session_json` |
 | Junie | Supported | `junie_session_events_jsonl_tree` |
 | Firebender | Supported | `firebender_chat_history_sqlite` |

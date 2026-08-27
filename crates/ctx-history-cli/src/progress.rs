@@ -1,6 +1,5 @@
 //! Neutral refresh-progress conversion and terminal reporting.
 
-use ctx_history_capture::provider_source_spec;
 use ctx_history_core::CaptureProvider;
 use ctx_history_refresh::{
     RefreshLogicalPhase as EngineLogicalPhase, RefreshRequestState as EngineRequestState,
@@ -216,14 +215,10 @@ fn presentation_whole_run_stage(value: EngineWholeRunStage) -> RefreshWholeRunSt
 }
 
 pub fn provider_display_name(provider: &str) -> String {
-    provider
-        .parse::<CaptureProvider>()
-        .ok()
-        .and_then(provider_source_spec)
-        .map_or_else(
-            || provider.replace('_', " "),
-            |spec| spec.display_name.to_owned(),
-        )
+    provider.parse::<CaptureProvider>().map_or_else(
+        |_| provider.replace('_', " "),
+        |provider| provider.display_name().to_owned(),
+    )
 }
 
 fn presentation_request_state(value: EngineRequestState) -> RefreshRequestState {
@@ -340,6 +335,20 @@ mod tests {
         );
         assert!(!snapshot.is_terminal());
         assert_eq!(snapshot.phase(), "committed");
+    }
+
+    #[test]
+    fn provider_names_use_products_and_preserve_unknown_fallbacks() {
+        for (provider, expected) in [
+            ("claude", "Claude Code"),
+            ("gemini", "Gemini"),
+            ("copilot_cli", "GitHub Copilot"),
+            ("kiro_cli", "Kiro"),
+            ("kimi_code_cli", "Kimi Code"),
+            ("custom_provider", "custom provider"),
+        ] {
+            assert_eq!(provider_display_name(provider), expected);
+        }
     }
 
     #[test]

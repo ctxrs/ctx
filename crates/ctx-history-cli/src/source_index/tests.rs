@@ -69,6 +69,14 @@ const TEST_QUERY: &str = "pinnedgenerationrouting";
 
 const TEST_MCP_OUTPUT_LIMIT: usize = crate::presentation_limit::CLI_PRESENTATION_MAX_OUTPUT_BYTES;
 
+#[test]
+fn search_projection_keeps_machine_and_verbose_ids_full() {
+    assert!(super::search::compact_search_projection(false, false));
+    assert!(!super::search::compact_search_projection(false, true));
+    assert!(!super::search::compact_search_projection(true, false));
+    assert!(!super::search::compact_search_projection(true, true));
+}
+
 fn history_config(daemon_enabled: bool, semantic_search_enabled: bool) -> config::AppConfig {
     config::AppConfig::from_snapshot(HistoryCliConfig {
         daemon_enabled,

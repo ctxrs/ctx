@@ -298,7 +298,9 @@ pub const fn provider_support_matrix_schema_version() -> u32 {
 mod tests {
     use std::{collections::BTreeSet, fs, path::PathBuf};
 
-    use super::{ProviderId, ProviderSupportMatrixDocument, ProviderSupportStatus};
+    use super::{
+        CaptureProvider, ProviderId, ProviderSupportMatrixDocument, ProviderSupportStatus,
+    };
 
     fn workspace_file(path: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -393,6 +395,30 @@ mod tests {
             assert_eq!(entry.status, status, "{id:?} support status changed");
             assert_eq!(entry.display_name, env_name);
         }
+    }
+
+    #[test]
+    fn provider_support_matrix_uses_capture_provider_display_names() {
+        let matrix = fs::read_to_string(workspace_file("docs/provider-support-matrix.json"))
+            .expect("provider support matrix scaffold should exist");
+        let parsed: ProviderSupportMatrixDocument =
+            serde_json::from_str(&matrix).expect("matrix scaffold should parse");
+
+        for entry in parsed.providers {
+            let Some(provider) = entry.capture_provider else {
+                continue;
+            };
+            assert_eq!(
+                entry.display_name,
+                provider.display_name(),
+                "{:?} must mirror CaptureProvider::{provider:?}",
+                entry.id,
+            );
+        }
+
+        assert_eq!(CaptureProvider::Claude.display_name(), "Claude Code");
+        assert_eq!(CaptureProvider::Gemini.display_name(), "Gemini");
+        assert_eq!(CaptureProvider::CopilotCli.display_name(), "GitHub Copilot");
     }
 
     #[test]

@@ -264,10 +264,14 @@ fn fresh_home_search_mvp_flow() {
         "{human_search}"
     );
     assert!(human_search.contains("1. "));
-    assert!(human_search.contains("Session  codex · "), "{human_search}");
+    assert!(human_search.contains("Provider  Codex"), "{human_search}");
+    assert!(
+        human_search.contains(&format!("Session   {session_prefix}")),
+        "{human_search}"
+    );
     assert!(
         human_search.contains(&format!(
-            "Event    {} · 2026-06-23T15:00:02.000Z",
+            "Event     {} · 2026-06-23T15:00:02.000Z",
             &ctx_event_id[..8]
         )),
         "{human_search}"
@@ -291,7 +295,10 @@ fn fresh_home_search_mvp_flow() {
         .clone();
     let verbose_search = String::from_utf8(verbose_search).unwrap();
     assert!(verbose_search.contains("Event"));
-    assert!(verbose_search.contains("Ctx session"));
+    assert!(
+        verbose_search.contains(&format!("Session   {ctx_session_id}")),
+        "{verbose_search}"
+    );
     assert!(verbose_search.contains("Provider session"));
     assert!(verbose_search.contains("Rank"));
     assert!(verbose_search.contains("Retrieval score"));
