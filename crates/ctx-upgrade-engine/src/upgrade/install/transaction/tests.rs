@@ -1,4 +1,3 @@
-#[cfg(unix)]
 use std::fs;
 
 #[cfg(unix)]
@@ -8,6 +7,8 @@ use super::journal::{
     self, InstallTransactionJournal, JournalPath, JournalPathIdentity, JournalPathKind,
     JournalPathState, JournalPhase,
 };
+#[cfg(windows)]
+use super::journal::{WindowsHelperJournal, WindowsTerminalJournal};
 #[cfg(unix)]
 use super::RecoveryOutcome;
 use crate::upgrade::SemanticLayoutPort as _;
@@ -91,6 +92,66 @@ fn coreml_semantic_journal(root: &std::path::Path) -> InstallTransactionJournal 
     );
     journal.semantic_cache_root = Some(cache_root);
     journal
+}
+
+fn legacy_runtime_only_journal(root: &std::path::Path) -> InstallTransactionJournal {
+    let attempt_id = "runtime-only-repair";
+    ctx_history_platform::platform_security::restrict_private_directory(root).unwrap();
+    let root = fs::canonicalize(root).unwrap();
+    let runtime_root = root.join("runtime");
+    ctx_history_platform::platform_security::create_private_directory_all(&runtime_root).unwrap();
+    let platform = super::super::super::platform_key().unwrap();
+    let target = runtime_root
+        .join("onnxruntime")
+        .join("1.27.0")
+        .join(platform);
+    let install_path = root.join("ctx");
+    #[cfg(windows)]
+    let windows_helper = Some(WindowsHelperJournal {
+        parent_pid: 1,
+        helper_pid: None,
+        helper_path: root.join(format!(".ctx.ctx-upgrade-{attempt_id}.helper.exe")),
+        expected_binary_sha256: "a".repeat(64),
+        expected_marker_sha256: "b".repeat(64),
+        daemon_restart: None,
+        failure: None,
+        terminal: None::<WindowsTerminalJournal>,
+    });
+    #[cfg(not(windows))]
+    let windows_helper = None;
+    InstallTransactionJournal::new(
+        attempt_id.to_owned(),
+        root,
+        runtime_root,
+        install_path,
+        vec![semantic_journal_path(
+            attempt_id,
+            "ONNX Runtime sidecar",
+            target,
+            "runtime",
+            JournalPathKind::Directory,
+        )],
+        windows_helper,
+    )
+}
+
+#[test]
+fn same_version_legacy_runtime_repair_is_a_complete_publication_transaction() {
+    let temp = tempfile::tempdir().unwrap();
+    let journal = legacy_runtime_only_journal(temp.path());
+
+    journal::validate_for_publication(&journal, &crate::upgrade::TEST_SEMANTIC_LAYOUT).unwrap();
+}
+
+#[test]
+fn empty_publication_transaction_remains_invalid() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut journal = legacy_runtime_only_journal(temp.path());
+    journal.paths.clear();
+
+    assert!(
+        journal::validate_for_publication(&journal, &crate::upgrade::TEST_SEMANTIC_LAYOUT).is_err()
+    );
 }
 
 #[test]

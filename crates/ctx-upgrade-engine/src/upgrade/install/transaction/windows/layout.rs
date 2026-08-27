@@ -116,7 +116,7 @@ fn path_record(
 }
 
 pub(super) fn revalidate_fingerprint(transaction: &InstallTransactionJournal) -> Result<()> {
-    if publication_started(transaction)? {
+    if binary_publication_started(transaction)? {
         return Ok(());
     }
     let helper = transaction
@@ -134,24 +134,38 @@ pub(super) fn revalidate_fingerprint(transaction: &InstallTransactionJournal) ->
     Ok(())
 }
 
+fn binary_publication_started(transaction: &InstallTransactionJournal) -> Result<bool> {
+    let Some(binary) = transaction
+        .paths
+        .iter()
+        .find(|path| path.label == "ctx binary")
+    else {
+        return Ok(false);
+    };
+    path_publication_started(binary)
+}
+
 fn publication_started(transaction: &InstallTransactionJournal) -> Result<bool> {
     for path in &transaction.paths {
-        let staged = path.staged.try_exists()?;
-        let target = path.target.try_exists()?;
-        let backup = path.backup.try_exists()?;
-        let binary_only_backed_up = path.label == "ctx binary"
-            && path.state == JournalPathState::BackedUp
-            && staged
-            && target;
-        if (!binary_only_backed_up && path.state != JournalPathState::Staged)
-            || (path.label != "ctx binary" && backup)
-            || !staged
-            || (path.target_preexisted && !target)
-        {
+        if path_publication_started(path)? {
             return Ok(true);
         }
     }
     Ok(false)
+}
+
+fn path_publication_started(path: &JournalPath) -> Result<bool> {
+    let staged = path.staged.try_exists()?;
+    let target = path.target.try_exists()?;
+    let backup = path.backup.try_exists()?;
+    let binary_only_backed_up =
+        path.label == "ctx binary" && path.state == JournalPathState::BackedUp && staged && target;
+    Ok(
+        (!binary_only_backed_up && path.state != JournalPathState::Staged)
+            || (path.label != "ctx binary" && backup)
+            || !staged
+            || (path.target_preexisted && !target),
+    )
 }
 
 pub(super) fn publish_paths(transaction: &mut InstallTransactionJournal) -> Result<()> {

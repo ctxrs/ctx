@@ -108,6 +108,7 @@ pub(super) fn publish_install(
             .context("canonicalize selected Semantic cache root")?,
         );
     }
+    journal::validate_for_publication(&transaction, semantic_layout)?;
     journal::write(&transaction)?;
     before_publish()?;
     let helper_pid = helper::spawn(

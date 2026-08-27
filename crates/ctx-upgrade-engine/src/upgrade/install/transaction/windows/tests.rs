@@ -163,6 +163,63 @@ fn terminal_journal_has_no_scheduler_or_telemetry_receipt() {
 }
 
 #[test]
+fn runtime_only_publication_does_not_exempt_install_fingerprint_revalidation() {
+    let temp = tempfile::tempdir().unwrap();
+    let target = temp.path().join("ctx");
+    let marker = super::super::super::marker::install_marker_path(&target);
+    fs::write(&target, b"original executable").unwrap();
+    fs::write(&marker, b"original marker").unwrap();
+    let fingerprint = super::super::super::marker::install_fingerprint(&target).unwrap();
+
+    let staged = temp.path().join("runtime.staged");
+    let runtime = temp.path().join("runtime");
+    let backup = temp.path().join("runtime.backup");
+    fs::write(&staged, b"new runtime").unwrap();
+    fs::write(&runtime, b"old runtime").unwrap();
+    fs::write(&backup, b"old runtime").unwrap();
+    let runtime_path = path_record(
+        "ONNX Runtime sidecar",
+        &staged,
+        &runtime,
+        &backup,
+        JournalPathState::BackedUp,
+    );
+    let mut transaction = transaction(temp.path(), vec![runtime_path]);
+    transaction.install_path = target.clone();
+    let helper = transaction.windows_helper.as_mut().unwrap();
+    helper.expected_binary_sha256 = fingerprint.binary_sha256;
+    helper.expected_marker_sha256 = fingerprint.marker_sha256;
+
+    layout::revalidate_fingerprint(&transaction).unwrap();
+    fs::write(&target, b"replacement executable").unwrap();
+    assert!(layout::revalidate_fingerprint(&transaction).is_err());
+    fs::write(&target, b"original executable").unwrap();
+    fs::write(&marker, b"replacement marker").unwrap();
+    assert!(layout::revalidate_fingerprint(&transaction).is_err());
+}
+
+#[test]
+fn binary_publication_retains_the_fingerprint_revalidation_exemption() {
+    let temp = tempfile::tempdir().unwrap();
+    let target = temp.path().join("ctx");
+    let staged = temp.path().join("ctx.new");
+    let backup = temp.path().join("ctx.backup");
+    fs::write(&target, b"published executable").unwrap();
+    fs::write(&backup, b"original executable").unwrap();
+    let binary_path = path_record(
+        "ctx binary",
+        &staged,
+        &target,
+        &backup,
+        JournalPathState::Published,
+    );
+    let mut transaction = transaction(temp.path(), vec![binary_path]);
+    transaction.install_path = target;
+
+    layout::revalidate_fingerprint(&transaction).unwrap();
+}
+
+#[test]
 fn failed_replace_repairs_missing_executable_before_any_wait() {
     let temp = tempfile::tempdir().unwrap();
     let target = temp.path().join("ctx");
