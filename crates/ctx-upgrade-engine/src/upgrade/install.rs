@@ -6,6 +6,7 @@ mod lock_fs;
 #[cfg(test)]
 mod lock_tests;
 mod marker;
+mod path_identity;
 mod runtime;
 mod transaction;
 
@@ -37,6 +38,7 @@ pub use marker::{
     invalid_install_marker_recovery_guidance, unmanaged_install_conversion_guidance, InstallMarker,
 };
 pub use marker::{managed_install_marker_for_current_exe, ManagedInstallMarker};
+pub use path_identity::managed_install_path_identity_matches;
 pub(super) use transaction::ApplyResult;
 #[cfg(windows)]
 pub(in crate::upgrade) use transaction::HelperOutcome;

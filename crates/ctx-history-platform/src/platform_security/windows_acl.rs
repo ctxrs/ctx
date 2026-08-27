@@ -642,7 +642,7 @@ impl AlignedBuffer {
 fn invalid_acl() -> io::Error {
     io::Error::new(
         io::ErrorKind::PermissionDenied,
-        "private state ACL is not owner-only",
+        "private state ACL must be protected and allow only the current user and SYSTEM",
     )
 }
 
@@ -662,6 +662,14 @@ fn win32_error(code: u32) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_acl_diagnostic_names_the_current_user_and_system_policy() {
+        assert_eq!(
+            invalid_acl().to_string(),
+            "private state ACL must be protected and allow only the current user and SYSTEM"
+        );
+    }
 
     fn set_permissive_null_dacl(handle: &File) -> io::Result<()> {
         // SAFETY: the file owns a live handle with WRITE_DAC. A null DACL is an

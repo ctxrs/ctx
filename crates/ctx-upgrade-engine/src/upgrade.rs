@@ -28,9 +28,9 @@ pub use install::{
     installation_hosted_uninstall_is_active,
     installation_hosted_uninstall_is_active_for_executable,
     invalid_install_marker_recovery_guidance, is_valid_install_attempt_id,
-    managed_install_marker_for_current_exe, run_hosted_transaction,
-    unmanaged_install_conversion_guidance, HostedTransactionAction, HostedTransactionArgs,
-    InstallMarker, ManagedInstallMarker,
+    managed_install_marker_for_current_exe, managed_install_path_identity_matches,
+    run_hosted_transaction, unmanaged_install_conversion_guidance, HostedTransactionAction,
+    HostedTransactionArgs, InstallMarker, ManagedInstallMarker,
 };
 use state::automatic_upgrade_check_due;
 pub use state::{

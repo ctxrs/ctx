@@ -10,6 +10,9 @@ use std::ffi::OsStr;
 
 use anyhow::{anyhow, bail, Context, Result};
 
+#[cfg(windows)]
+use super::path_identity::windows_disk_path_identity;
+
 /// A process-owned lock for mutations of one installed executable.
 ///
 /// The lock file is intentionally persistent. Ownership is represented only by
@@ -199,34 +202,6 @@ pub(super) fn canonical_recovery_executable(path: &Path) -> Result<PathBuf> {
         }
     }
     Ok(candidate)
-}
-
-/// Returns an exact disk-path identity with only the Windows verbatim namespace
-/// removed. This intentionally does not fold case, separators, short names, or
-/// any other path spelling, and it rejects UNC and device namespaces.
-#[cfg(windows)]
-pub(super) fn windows_disk_path_identity(path: &Path) -> Option<Vec<u16>> {
-    use std::{os::windows::ffi::OsStrExt as _, path::Prefix};
-
-    let Component::Prefix(prefix) = path.components().next()? else {
-        return None;
-    };
-    let verbatim = match prefix.kind() {
-        Prefix::Disk(_) => false,
-        Prefix::VerbatimDisk(_) => true,
-        Prefix::UNC(_, _)
-        | Prefix::VerbatimUNC(_, _)
-        | Prefix::DeviceNS(_)
-        | Prefix::Verbatim(_) => return None,
-    };
-    let identity: Vec<_> = path.as_os_str().encode_wide().collect();
-    if !verbatim {
-        return Some(identity);
-    }
-    const VERBATIM_NAMESPACE: &[u16] = &[b'\\' as u16, b'\\' as u16, b'?' as u16, b'\\' as u16];
-    identity
-        .strip_prefix(VERBATIM_NAMESPACE)
-        .map(<[u16]>::to_vec)
 }
 
 /// Rejects Windows leaf spellings that Win32 can normalize to another name or

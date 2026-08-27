@@ -6,9 +6,12 @@ use std::{
 
 use anyhow::{anyhow, Context as _, Result};
 use ctx_companion_bridge::{verify_signed_managed_pair_envelope, SignedManagedPairIdentity};
+#[cfg(windows)]
+use ctx_upgrade_engine::current_install_path;
 use ctx_upgrade_engine::{
-    managed_install_marker_for_current_exe, ManagedInstallMarker, VerifiedManagedPairIdentity,
-    MANAGED_PAIR_ENVELOPE_RELATIVE_PATH, MANAGED_PAIR_STATE_RELATIVE_PATH,
+    managed_install_marker_for_current_exe, managed_install_path_identity_matches,
+    ManagedInstallMarker, VerifiedManagedPairIdentity, MANAGED_PAIR_ENVELOPE_RELATIVE_PATH,
+    MANAGED_PAIR_STATE_RELATIVE_PATH,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -29,7 +32,19 @@ pub(super) fn run(arguments: &[std::ffi::OsString]) -> Result<()> {
     let candidate_core = hosted_source_path(&arguments[3], "Core artifact")?;
     let candidate_companion = hosted_source_path(&arguments[4], "companion artifact")?;
     let candidate_marker = hosted_source_path(&arguments[5], "install marker")?;
-    let core = std::env::current_exe().context("resolve installed Core executable")?;
+    let invoked_core = std::env::current_exe().context("resolve installed Core executable")?;
+    #[cfg(windows)]
+    let core = {
+        let certified = current_install_path().context("certify installed Core executable")?;
+        if !managed_install_path_identity_matches(&certified, &invoked_core) {
+            return Err(anyhow!(
+                "installed Core executable uses an unsupported or aliased path"
+            ));
+        }
+        certified
+    };
+    #[cfg(not(windows))]
+    let core = invoked_core;
     let expected_core_name = if cfg!(windows) { "ctx.exe" } else { "ctx" };
     let bin = core
         .parent()
@@ -204,8 +219,8 @@ fn read_hosted_marker(path: &Path, label: &str) -> Result<HostedInstallMarker> {
     Ok(marker)
 }
 
-fn validate_hosted_marker_path(marker: &HostedInstallMarker, core: &Path) -> Result<()> {
-    if Path::new(&marker.install_path) != core {
+pub(super) fn validate_hosted_marker_path(marker: &HostedInstallMarker, core: &Path) -> Result<()> {
+    if !managed_install_path_identity_matches(core, Path::new(&marker.install_path)) {
         return Err(anyhow!("hosted install marker does not own this Core path"));
     }
     Ok(())

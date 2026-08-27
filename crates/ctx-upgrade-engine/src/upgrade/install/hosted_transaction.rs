@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::marker::{install_marker_path, is_valid_install_attempt_id};
+use super::path_identity::managed_install_path_identity_matches;
 use crate::upgrade::{platform_key, sha256_hex};
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -720,7 +721,9 @@ fn read_recorded_ownership(
         (None, None) => Ok(None),
         (Some(Value::String(path)), Some(Value::String(digest))) => {
             let expected_path = ownership_path(install_path);
-            if Some(path.as_str()) != expected_path.to_str() || !is_normalized_sha256(digest) {
+            if !managed_install_path_identity_matches(&expected_path, Path::new(path))
+                || !is_normalized_sha256(digest)
+            {
                 bail!("managed marker has invalid integration ownership identity");
             }
             let body = read_bounded(
@@ -798,9 +801,13 @@ fn validate_marker_body(
     ownership: Option<(&Path, &str)>,
 ) -> Result<()> {
     let value: Value = serde_json::from_str(body).context("parse hosted install marker")?;
+    let install_path_matches = value
+        .get("install_path")
+        .and_then(Value::as_str)
+        .is_some_and(|path| managed_install_path_identity_matches(install_path, Path::new(path)));
     if value.get("schema_version").and_then(Value::as_u64) != Some(1)
         || value.get("manager").and_then(Value::as_str) != Some("ctx-hosted-installer")
-        || value.get("install_path").and_then(Value::as_str) != install_path.to_str()
+        || !install_path_matches
         || !value
             .get("sha256")
             .and_then(Value::as_str)
@@ -810,7 +817,10 @@ fn validate_marker_body(
         bail!("hosted install marker does not bind the signed executable and target");
     }
     if let Some((path, digest)) = ownership {
-        if value.get("integrations_path").and_then(Value::as_str) != path.to_str()
+        if !value
+            .get("integrations_path")
+            .and_then(Value::as_str)
+            .is_some_and(|claim| managed_install_path_identity_matches(path, Path::new(claim)))
             || value.get("integrations_sha256").and_then(Value::as_str) != Some(digest)
         {
             bail!("hosted install marker does not bind integration ownership");
@@ -872,7 +882,8 @@ fn validate_journal(journal: &Journal, install_path: &Path, kind: TransactionKin
             Some(digest),
             Some(Value::String(marker_path)),
             Some(Value::String(marker_digest)),
-        ) if Some(marker_path.as_str()) == path.to_str() && marker_digest == digest => {}
+        ) if managed_install_path_identity_matches(path, Path::new(marker_path))
+            && marker_digest == digest => {}
         _ => bail!("hosted transaction marker and integration ownership do not match"),
     }
     validate_marker_body(
@@ -941,3 +952,6 @@ fn journal_binding(journal: &Journal) -> String {
 
 #[cfg(all(test, unix))]
 mod tests;
+
+#[cfg(all(test, windows))]
+mod windows_path_tests;

@@ -17,6 +17,7 @@ use super::lock::canonical_executable;
 #[cfg(windows)]
 use super::lock::canonical_recovery_executable;
 use super::lock_fs::{read_stable_file, StableFileKind};
+use super::path_identity::managed_install_path_identity_matches;
 
 const MIN_INSTALL_ATTEMPT_ID_BODY_BYTES: usize = 8;
 const MAX_INSTALL_ATTEMPT_ID_BODY_BYTES: usize = 128;
@@ -122,9 +123,11 @@ fn read_install_marker_at(path: &Path) -> Result<Option<InstallMarker>> {
         .and_then(Value::as_str)
         .map(PathBuf::from)
         .ok_or_else(|| anyhow!("ctx install marker missing install_path"))?;
-    let canonical_install_path =
-        canonical_executable(&install_path).context("canonicalize ctx install marker path")?;
-    if canonical_install_path != path {
+    let certified_path =
+        canonical_executable(path).context("certify managed ctx executable path")?;
+    if !managed_install_path_identity_matches(&certified_path, path)
+        || !managed_install_path_identity_matches(&certified_path, &install_path)
+    {
         return Err(anyhow!(
             "ctx install marker path mismatch: marker {}, running {}",
             install_path.display(),
@@ -132,7 +135,7 @@ fn read_install_marker_at(path: &Path) -> Result<Option<InstallMarker>> {
         ));
     }
     Ok(Some(InstallMarker {
-        install_path: canonical_install_path,
+        install_path: certified_path,
         platform: string_field(&value, "platform")?,
         channel: string_field(&value, "channel")?,
         version: string_field(&value, "version")?,

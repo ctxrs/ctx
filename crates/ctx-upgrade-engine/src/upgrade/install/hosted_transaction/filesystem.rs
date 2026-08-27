@@ -9,7 +9,9 @@ use uuid::Uuid;
 
 use super::{Journal, JOURNAL_SUFFIX, MAX_BINARY_BYTES};
 #[cfg(windows)]
-use crate::upgrade::install::lock::{validate_windows_path_leaf, windows_disk_path_identity};
+use crate::upgrade::install::{
+    lock::validate_windows_path_leaf, path_identity::windows_disk_path_identity,
+};
 use crate::upgrade::sha256_hex;
 
 pub(super) fn validate_install_path(path: &Path) -> Result<PathBuf> {
