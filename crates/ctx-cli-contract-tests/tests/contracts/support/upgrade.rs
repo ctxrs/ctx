@@ -89,6 +89,271 @@ pub(crate) fn sign_test_release_metadata(bytes: &[u8]) -> String {
     BASE64.encode(signature)
 }
 
+#[cfg(windows)]
+#[derive(Debug)]
+pub(crate) struct WindowsRuntimeRepairRelease {
+    pub(crate) target: PathBuf,
+    pub(crate) metadata: PathBuf,
+    pub(crate) signature: PathBuf,
+    pub(crate) runtime_target: PathBuf,
+    pub(crate) runtime_artifact_sha: String,
+    pub(crate) runtime_version: String,
+}
+
+#[cfg(windows)]
+fn windows_file_url(path: &Path) -> String {
+    let rendered = path.display().to_string();
+    let local = rendered.strip_prefix("\\\\?\\").unwrap_or(&rendered);
+    assert!(
+        !local.chars().any(|value| matches!(value, '%' | '?' | '#')),
+        "Windows runtime repair fixture path requires URL escaping: {local}"
+    );
+    format!("file:///{}", local.replace('\\', "/"))
+}
+
+/// Builds the exact Windows ONNX Runtime ZIP shape consumed by the production
+/// PowerShell extractor without adding a second archive implementation as a
+/// test dependency. The entries are stored (rather than compressed), but carry
+/// the Unix type bits which the extractor validates before publication.
+#[cfg(windows)]
+fn write_windows_runtime_zip(path: &Path, version: &str) {
+    const DIRECTORY_MODE: u32 = 0o040755;
+    const FILE_MODE: u32 = 0o100644;
+
+    let entries = vec![
+        ("LICENSE".to_owned(), b"test license\n".to_vec(), FILE_MODE),
+        (
+            "MICROSOFT_VC_RUNTIME_LICENSE.rtf".to_owned(),
+            b"test Microsoft VC runtime license\n".to_vec(),
+            FILE_MODE,
+        ),
+        (
+            "ThirdPartyNotices.txt".to_owned(),
+            b"test notices\n".to_vec(),
+            FILE_MODE,
+        ),
+        (
+            "VERSION_NUMBER".to_owned(),
+            format!("{version}\n").into_bytes(),
+            FILE_MODE,
+        ),
+        (
+            "GIT_COMMIT_ID".to_owned(),
+            b"test-runtime-commit\n".to_vec(),
+            FILE_MODE,
+        ),
+        ("lib/".to_owned(), Vec::new(), DIRECTORY_MODE),
+        (
+            "lib/onnxruntime.dll".to_owned(),
+            b"fake onnxruntime DLL\n".to_vec(),
+            FILE_MODE,
+        ),
+        (
+            "lib/msvcp140.dll".to_owned(),
+            b"fake msvcp140 DLL\n".to_vec(),
+            FILE_MODE,
+        ),
+        (
+            "lib/msvcp140_1.dll".to_owned(),
+            b"fake msvcp140_1 DLL\n".to_vec(),
+            FILE_MODE,
+        ),
+        (
+            "lib/vcruntime140.dll".to_owned(),
+            b"fake vcruntime140 DLL\n".to_vec(),
+            FILE_MODE,
+        ),
+        (
+            "lib/vcruntime140_1.dll".to_owned(),
+            b"fake vcruntime140_1 DLL\n".to_vec(),
+            FILE_MODE,
+        ),
+    ];
+
+    let mut archive = Vec::new();
+    let mut central_directory = Vec::new();
+    let entry_count = u16::try_from(entries.len()).unwrap();
+    for (name, contents, mode) in entries {
+        let local_offset = u32::try_from(archive.len()).unwrap();
+        let name = name.as_bytes();
+        let crc32 = zip_crc32(&contents);
+        let size = u32::try_from(contents.len()).unwrap();
+        let name_length = u16::try_from(name.len()).unwrap();
+
+        zip_u32(&mut archive, 0x0403_4b50);
+        zip_u16(&mut archive, 20);
+        zip_u16(&mut archive, 0);
+        zip_u16(&mut archive, 0);
+        zip_u16(&mut archive, 0);
+        zip_u16(&mut archive, 0);
+        zip_u32(&mut archive, crc32);
+        zip_u32(&mut archive, size);
+        zip_u32(&mut archive, size);
+        zip_u16(&mut archive, name_length);
+        zip_u16(&mut archive, 0);
+        archive.extend_from_slice(name);
+        archive.extend_from_slice(&contents);
+
+        zip_u32(&mut central_directory, 0x0201_4b50);
+        zip_u16(&mut central_directory, 0x0314);
+        zip_u16(&mut central_directory, 20);
+        zip_u16(&mut central_directory, 0);
+        zip_u16(&mut central_directory, 0);
+        zip_u16(&mut central_directory, 0);
+        zip_u16(&mut central_directory, 0);
+        zip_u32(&mut central_directory, crc32);
+        zip_u32(&mut central_directory, size);
+        zip_u32(&mut central_directory, size);
+        zip_u16(&mut central_directory, name_length);
+        zip_u16(&mut central_directory, 0);
+        zip_u16(&mut central_directory, 0);
+        zip_u16(&mut central_directory, 0);
+        zip_u16(&mut central_directory, 0);
+        zip_u32(&mut central_directory, mode << 16);
+        zip_u32(&mut central_directory, local_offset);
+        central_directory.extend_from_slice(name);
+    }
+
+    let central_offset = u32::try_from(archive.len()).unwrap();
+    let central_size = u32::try_from(central_directory.len()).unwrap();
+    archive.extend_from_slice(&central_directory);
+    zip_u32(&mut archive, 0x0605_4b50);
+    zip_u16(&mut archive, 0);
+    zip_u16(&mut archive, 0);
+    zip_u16(&mut archive, entry_count);
+    zip_u16(&mut archive, entry_count);
+    zip_u32(&mut archive, central_size);
+    zip_u32(&mut archive, central_offset);
+    zip_u16(&mut archive, 0);
+
+    fs::write(path, archive).unwrap();
+}
+
+#[cfg(windows)]
+fn zip_u16(out: &mut Vec<u8>, value: u16) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+#[cfg(windows)]
+fn zip_u32(out: &mut Vec<u8>, value: u32) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+#[cfg(windows)]
+fn zip_crc32(bytes: &[u8]) -> u32 {
+    let mut crc = !0_u32;
+    for byte in bytes {
+        crc ^= u32::from(*byte);
+        for _ in 0..8 {
+            crc = if crc & 1 == 0 {
+                crc >> 1
+            } else {
+                (crc >> 1) ^ 0xedb8_8320
+            };
+        }
+    }
+    !crc
+}
+
+#[cfg(windows)]
+pub(crate) fn windows_runtime_repair_release(
+    temp: &TempDir,
+    target: &Path,
+) -> WindowsRuntimeRepairRelease {
+    let target = fs::canonicalize(target).unwrap();
+    let release_dir = temp.path().join("windows-runtime-repair-release");
+    fs::create_dir(&release_dir).unwrap();
+
+    let release_binary = release_dir.join("ctx.exe");
+    fs::copy(&target, &release_binary).unwrap();
+    let release_binary_sha = sha256_hex(&fs::read(&release_binary).unwrap());
+    let runtime_version = "1.27.0";
+    let runtime_artifact = release_dir.join("ctx-onnxruntime-windows-x64.zip");
+    write_windows_runtime_zip(&runtime_artifact, runtime_version);
+    let runtime_artifact_sha = sha256_hex(&fs::read(&runtime_artifact).unwrap());
+
+    let mut metadata_body = format!(
+        "CTX_RELEASE_SCHEMA_VERSION=1\n\
+CTX_RELEASE_CHANNEL=stable\n\
+CTX_RELEASE_VERSION={}\n\
+CTX_RELEASE_BASE_URL={}\n\
+CTX_RELEASE_ARTIFACT_windows_x64=ctx.exe\n\
+CTX_RELEASE_SHA256_windows_x64={release_binary_sha}\n\
+CTX_RELEASE_SELF_UPGRADE_ALLOWED=true\n\
+CTX_RELEASE_AUTO_UPGRADE_ALLOWED=true\n\
+CTX_RELEASE_ONNXRUNTIME_VERSION={runtime_version}\n",
+        env!("CARGO_PKG_VERSION"),
+        windows_file_url(&release_dir),
+    );
+    for key in [
+        "linux_x64",
+        "linux_aarch64",
+        "macos_arm64",
+        "macos_x64",
+        "windows_x64",
+        "freebsd_x64",
+    ] {
+        let platform = key.replace('_', "-");
+        let extension = if key == "windows_x64" {
+            "zip"
+        } else {
+            "tar.gz"
+        };
+        metadata_body.push_str(&format!(
+            "CTX_RELEASE_ONNXRUNTIME_ARTIFACT_{key}=ctx-onnxruntime-{platform}.{extension}\n\
+CTX_RELEASE_ONNXRUNTIME_SHA256_{key}={runtime_artifact_sha}\n"
+        ));
+    }
+    let metadata = release_dir.join("ctx-release-metadata.env");
+    let signature = release_dir.join("ctx-release-metadata.env.sig");
+    fs::write(&metadata, &metadata_body).unwrap();
+    fs::write(
+        &signature,
+        format!("{}\n", sign_test_release_metadata(metadata_body.as_bytes())),
+    )
+    .unwrap();
+
+    WindowsRuntimeRepairRelease {
+        target,
+        metadata,
+        signature,
+        runtime_target: data_root(temp)
+            .join("runtime")
+            .join("onnxruntime")
+            .join(runtime_version)
+            .join("windows-x64"),
+        runtime_artifact_sha,
+        runtime_version: runtime_version.to_owned(),
+    }
+}
+
+#[cfg(windows)]
+pub(crate) fn windows_runtime_repair_release_env<'a>(
+    command: &'a mut Command,
+    release: &WindowsRuntimeRepairRelease,
+) -> &'a mut Command {
+    command
+        .env("CTX_UPGRADE_TEST_TARGET", &release.target)
+        .env(
+            "CTX_RELEASE_METADATA_URL",
+            windows_file_url(&release.metadata),
+        )
+        .env(
+            "CTX_RELEASE_METADATA_SIGNATURE_URL",
+            windows_file_url(&release.signature),
+        )
+        .env(
+            "CTX_RELEASE_METADATA_PUBLIC_KEY_PEM",
+            TEST_RELEASE_PUBLIC_KEY_PEM,
+        )
+}
+
+#[cfg(windows)]
+pub(crate) fn windows_install_transaction_path(target: &Path) -> PathBuf {
+    let file_name = target.file_name().unwrap().to_string_lossy();
+    target.with_file_name(format!(".{file_name}.upgrade-install-transaction.json"))
+}
+
 #[cfg(unix)]
 #[derive(Debug)]
 pub(crate) struct FakeRelease {

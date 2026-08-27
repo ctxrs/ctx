@@ -157,6 +157,7 @@ ctx_binary_contract_test(
         "//crates/ctx-cli-contract-tests:upgrade_runtime_support_srcs",
         "tests/contracts/upgrade/release_validation.rs",
         "tests/contracts/upgrade/unmanaged.rs",
+        "tests/contracts/upgrade/windows_semantic_runtime.rs",
     ],
     rustc_env_files = ["//crates/ctx-cli:cargo_toml_env_vars"],
 )

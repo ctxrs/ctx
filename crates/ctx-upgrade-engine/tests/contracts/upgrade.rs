@@ -12,6 +12,10 @@ mod release_validation;
 #[path = "upgrade/unmanaged.rs"]
 mod unmanaged;
 
+#[cfg(windows)]
+#[path = "upgrade/windows_semantic_runtime.rs"]
+mod windows_semantic_runtime;
+
 fn assert_safe_platform_install_action(action: &str) {
     assert!(
         action.contains("ctx daemon disable --prepare-uninstall --format=json"),
