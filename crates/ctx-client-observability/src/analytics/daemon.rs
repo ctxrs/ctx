@@ -108,16 +108,12 @@ impl DaemonHistoryFreshnessV1 {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DaemonBacklogV1 {
-    #[cfg(any(test, feature = "test-support"))]
-    Bucket(CountBucket),
     Unknown,
 }
 
 impl DaemonBacklogV1 {
     fn as_str(self) -> &'static str {
         match self {
-            #[cfg(any(test, feature = "test-support"))]
-            Self::Bucket(bucket) => bucket.as_str(),
             Self::Unknown => "unknown",
         }
     }
@@ -125,20 +121,12 @@ impl DaemonBacklogV1 {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DaemonCoverageV1 {
-    #[cfg(any(test, feature = "test-support"))]
-    Complete,
-    #[cfg(any(test, feature = "test-support"))]
-    Dirty,
     Unknown,
 }
 
 impl DaemonCoverageV1 {
     fn as_str(self) -> &'static str {
         match self {
-            #[cfg(any(test, feature = "test-support"))]
-            Self::Complete => "complete",
-            #[cfg(any(test, feature = "test-support"))]
-            Self::Dirty => "dirty",
             Self::Unknown => "unknown",
         }
     }
@@ -276,7 +264,6 @@ impl DaemonRuntimeKindV1 {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DaemonRuntimePayloadV1 {
-    Bare(DaemonRuntimeKindV1),
     Ready(DaemonRunFactsV1),
     Stopped(DaemonRuntimeSnapshotV1),
     Recovered(DaemonRuntimeSnapshotV1),
@@ -288,17 +275,7 @@ enum DaemonRuntimePayloadV1 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DaemonRuntimeObservationV1(DaemonRuntimePayloadV1);
 
-#[allow(dead_code, non_upper_case_globals)]
 impl DaemonRuntimeObservationV1 {
-    // Empty typed constants retain the original public fixture seams. Runtime
-    // producers use the constructors below so daemon facts remain fixed and closed.
-    pub const Ready: Self = Self(DaemonRuntimePayloadV1::Bare(DaemonRuntimeKindV1::Ready));
-    pub const Stopped: Self = Self(DaemonRuntimePayloadV1::Bare(DaemonRuntimeKindV1::Stopped));
-    pub const Recovered: Self = Self(DaemonRuntimePayloadV1::Bare(DaemonRuntimeKindV1::Recovered));
-    pub const Failed: Self = Self(DaemonRuntimePayloadV1::Bare(DaemonRuntimeKindV1::Failed));
-    pub const Cycle: Self = Self(DaemonRuntimePayloadV1::Bare(DaemonRuntimeKindV1::Cycle));
-    pub const Liveness: Self = Self(DaemonRuntimePayloadV1::Bare(DaemonRuntimeKindV1::Liveness));
-
     pub fn ready(run: DaemonRunFactsV1) -> Self {
         Self(DaemonRuntimePayloadV1::Ready(run))
     }
@@ -325,7 +302,6 @@ impl DaemonRuntimeObservationV1 {
 
     pub fn name(self) -> &'static str {
         match self.0 {
-            DaemonRuntimePayloadV1::Bare(kind) => kind.as_str(),
             DaemonRuntimePayloadV1::Ready(_) => DaemonRuntimeKindV1::Ready.as_str(),
             DaemonRuntimePayloadV1::Stopped(_) => DaemonRuntimeKindV1::Stopped.as_str(),
             DaemonRuntimePayloadV1::Recovered(_) => DaemonRuntimeKindV1::Recovered.as_str(),
@@ -337,7 +313,6 @@ impl DaemonRuntimeObservationV1 {
 
     pub fn insert_properties(self, properties: &mut Map<String, Value>) {
         match self.0 {
-            DaemonRuntimePayloadV1::Bare(_) => {}
             DaemonRuntimePayloadV1::Ready(run) => insert_run_properties(properties, run),
             DaemonRuntimePayloadV1::Stopped(snapshot)
             | DaemonRuntimePayloadV1::Recovered(snapshot)
@@ -428,8 +403,8 @@ mod tests {
     fn daemon_cycle_properties_are_aggregate_and_bucketed() {
         let state = DaemonCycleStateV1::new(
             DaemonHistoryFreshnessV1::Backoff,
-            DaemonBacklogV1::Bucket(CountBucket::TwentyOneToOneHundred),
-            DaemonCoverageV1::Dirty,
+            DaemonBacklogV1::Unknown,
+            DaemonCoverageV1::Unknown,
             DaemonBackoffV1::History,
         );
         let cycle = DaemonRuntimeObservationV1::cycle(DaemonCycleFactsV1::new(
@@ -444,17 +419,9 @@ mod tests {
         assert_eq!(properties["cycle_result"], "no_work");
         assert_eq!(properties["coalesced_cycles_bucket"], "6-20");
         assert_eq!(properties["history_freshness"], "backoff");
-        assert_eq!(properties["semantic_backlog_bucket"], "21-100");
-        assert_eq!(properties["semantic_coverage"], "dirty");
+        assert_eq!(properties["semantic_backlog_bucket"], "unknown");
+        assert_eq!(properties["semantic_coverage"], "unknown");
         assert_eq!(properties["retry_backoff"], "history");
         assert_eq!(properties.len(), 9);
-    }
-
-    #[test]
-    fn empty_fixture_constants_retain_the_original_wire_shape() {
-        let mut properties = Map::new();
-        DaemonRuntimeObservationV1::Liveness.insert_properties(&mut properties);
-        assert_eq!(DaemonRuntimeObservationV1::Liveness.name(), "liveness");
-        assert!(properties.is_empty());
     }
 }

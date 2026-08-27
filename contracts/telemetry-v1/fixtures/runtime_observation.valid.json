@@ -12,8 +12,8 @@
     "supervisor": "cli_autostart",
     "trigger_command": "search",
     "history_freshness": "current",
-    "semantic_backlog_bucket": "0",
-    "semantic_coverage": "complete",
+    "semantic_backlog_bucket": "unknown",
+    "semantic_coverage": "unknown",
     "retry_backoff": "none"
   }
 }

@@ -65,7 +65,11 @@ fn public_surfaces_are_exhaustive_and_stable() {
 #[test]
 fn runtime_observation_has_typed_constructor_seams() {
     let daemon = PublicEventV1::RuntimeObservation(RuntimeObservationV1::daemon(
-        DaemonRuntimeObservationV1::Cycle,
+        DaemonRuntimeObservationV1::ready(DaemonRunFactsV1::new(
+            DaemonStartModeV1::Manual,
+            DaemonSupervisorV1::User,
+            None,
+        )),
         Outcome::Success,
         Duration::from_secs(1),
     ));
@@ -81,7 +85,7 @@ fn runtime_observation_has_typed_constructor_seams() {
     let mcp = serialize_event(&mcp, occurred_at, None, None);
     assert_eq!(daemon["event_name"], "runtime_observation");
     assert_eq!(daemon["surface"], "daemon");
-    assert_eq!(daemon["operation"], "cycle");
+    assert_eq!(daemon["operation"], "ready");
     assert_eq!(mcp["surface"], "mcp");
     assert_eq!(mcp["operation"], "stopped");
 }
@@ -214,8 +218,8 @@ fn durable_family_serialization_matches_public_goldens() {
                     ),
                     DaemonCycleStateV1::new(
                         DaemonHistoryFreshnessV1::Current,
-                        DaemonBacklogV1::Bucket(CountBucket::Zero),
-                        DaemonCoverageV1::Complete,
+                        DaemonBacklogV1::Unknown,
+                        DaemonCoverageV1::Unknown,
                         DaemonBackoffV1::None,
                     ),
                 )),
