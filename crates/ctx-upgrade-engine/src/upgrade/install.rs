@@ -468,9 +468,14 @@ try {
   if ($versionText -cne ($ExpectedVersion + [char]10)) {
     throw "runtime VERSION_NUMBER is not exactly $ExpectedVersion"
   }
-  New-Item -ItemType Directory -Path (Join-Path $Destination 'lib') -Force | Out-Null
+  [void][System.IO.Directory]::CreateDirectory(
+    [System.IO.Path]::Combine($Destination, 'lib')
+  )
   foreach ($name in $expectedFiles) {
-    $target = Join-Path $Destination ($name.Replace('/', '\'))
+    $target = [System.IO.Path]::Combine(
+      $Destination,
+      $name.Replace('/', [System.IO.Path]::DirectorySeparatorChar)
+    )
     $sourceStream = $entries[$name].Open()
     try {
       $targetStream = [System.IO.File]::Open($target, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)

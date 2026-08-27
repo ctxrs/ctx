@@ -174,11 +174,11 @@ Secondary traits are noted only to guide tests and hardening work.
 | Grok Build | `grok_build_session_updates_jsonl_tree` | JSONL transcript stream/tree | Session directories contain authoritative `updates.jsonl`; exact leaves use `grok_build_session_updates_jsonl`. Derived sidecars are excluded. |
 | DeepSeek Harness | `deepseek_harness_session_jsonl_tree` | JSONL transcript stream/tree | Supported for local format version 0 only. Nested leaves use default `session.jsonl.zstd` or configured raw `session.jsonl`; exact leaves use `deepseek_harness_session_jsonl`. Hosted/cloud history is excluded. |
 | Pi | `pi_session_jsonl` | JSONL transcript stream/tree | Single-provider JSONL sessions, including OMP-compatible paths. |
-| Claude | `claude_projects_jsonl_tree` | JSONL transcript stream/tree | Project tree of JSONL transcripts. |
+| Claude Code | `claude_projects_jsonl_tree` | JSONL transcript stream/tree | Project tree of JSONL transcripts. |
 | OpenCode | `opencode_sqlite` | SQLite message store | Current schemas may split messages and parts. |
 | Kilo Code | `kilo_sqlite` | SQLite message store | Current schemas may split messages and parts. |
 | MiMo Code | `mimocode_sqlite` | SQLite message store | OpenCode-family sessions with messages and parts. |
-| Kiro CLI | `kiro_cli_sqlite` | SQLite message store | SQLite conversation key/value rows containing message JSON. |
+| Kiro | `kiro_cli_sqlite` | SQLite message store | SQLite conversation key/value rows containing message JSON. |
 | Crush | `crush_sqlite` | SQLite message store | SQLite sessions with message parts and tool metadata. |
 | Goose | `goose_sessions_sqlite` | SQLite message store | SQLite sessions/messages with structured content JSON. |
 | Lingma | `lingma_sqlite` | SQLite message store | SQLite chat rows with prompt/assistant fields. |
@@ -198,10 +198,10 @@ Secondary traits are noted only to guide tests and hardening work.
 | Tabnine | `tabnine_cli_chat_recording_jsonl` | JSONL transcript stream/tree | Chat recording JSONL. |
 | Cursor | `cursor_agent_transcript_jsonl_tree` | JSONL transcript stream/tree | Agent transcript tree. |
 | Zed | `zed_threads_sqlite` | SQLite encoded/blob store | SQLite thread rows with decoded JSON payloads. |
-| Copilot CLI | `copilot_cli_session_events_jsonl` | JSONL transcript stream/tree | Session event JSONL. |
+| GitHub Copilot | `copilot_cli_session_events_jsonl` | JSONL transcript stream/tree | Session event JSONL. |
 | Factory AI Droid | `factory_ai_droid_sessions_jsonl` | JSONL transcript stream/tree | Session JSONL. |
 | Qwen Code | `qwen_code_chat_jsonl_tree` | JSONL transcript stream/tree | Chat JSONL tree. |
-| Kimi Code CLI | `kimi_code_cli_wire_jsonl_tree` | JSONL transcript stream/tree | Wire-event JSONL tree. |
+| Kimi Code | `kimi_code_cli_wire_jsonl_tree` | JSONL transcript stream/tree | Wire-event JSONL tree. |
 | Auggie | `auggie_session_json` | JSON session/task document | Single-session JSON. |
 | Junie | `junie_session_events_jsonl_tree` | JSONL transcript stream/tree | Session event tree. |
 | Firebender | `firebender_chat_history_sqlite` | SQLite message store | SQLite chat history. |

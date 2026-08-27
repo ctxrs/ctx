@@ -250,7 +250,7 @@
     },
     {
       "id": "claude_code",
-      "display_name": "Claude",
+      "display_name": "Claude Code",
       "status": "supported",
       "capture_provider": "claude",
       "configured_root": {
@@ -459,7 +459,7 @@
     },
     {
       "id": "kiro_cli",
-      "display_name": "Kiro CLI",
+      "display_name": "Kiro",
       "status": "supported",
       "capture_provider": "kiro_cli",
       "configured_root": {
@@ -1498,7 +1498,7 @@
     },
     {
       "id": "copilot_cli",
-      "display_name": "Copilot CLI",
+      "display_name": "GitHub Copilot",
       "status": "supported",
       "capture_provider": "copilot_cli",
       "configured_root": {
@@ -1656,7 +1656,7 @@
     },
     {
       "id": "kimi_code_cli",
-      "display_name": "Kimi Code CLI",
+      "display_name": "Kimi Code",
       "status": "supported",
       "capture_provider": "kimi_code_cli",
       "configured_root": {

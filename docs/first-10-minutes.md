@@ -51,8 +51,9 @@ ctx sources --format json
 ```
 
 Expect rows for supported local import providers such as Codex, Pi,
-Antigravity, Claude, OpenCode, Kilo Code, OpenClaw, Hermes Agent, Gemini, Cursor,
-Zed, Copilot CLI, Factory AI Droid, and Warp Terminal restoration SQLite.
+Antigravity, Claude Code, OpenCode, Kilo Code, OpenClaw, Hermes Agent, Gemini,
+Cursor, Zed, GitHub Copilot, Factory AI Droid, and Warp Terminal restoration
+SQLite.
 NanoClaw is supported from an exact project CWD or official launchd/systemd
 service registration; AstrBot appears as supported when a bounded `data_v4.db`
 source exists. Warp is supported from documented local `warp.sqlite` paths. A

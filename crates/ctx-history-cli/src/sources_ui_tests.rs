@@ -4,6 +4,7 @@ use ctx_history_capture::{
     ProviderCatalogSupport, ProviderImportSupport, ProviderRouteRole, ProviderSource,
     ProviderSourceKind, ProviderSourceRouteProvenance,
 };
+use ctx_history_core::CaptureProvider;
 use unicode_width::UnicodeWidthStr as _;
 
 use super::*;
@@ -186,7 +187,7 @@ fn sources_success_is_outcome_first_and_responsive() {
             "{width}: {rendered}"
         );
         assert!(rendered.contains("ctx sources --all"));
-        for atom in ["codex", "available"] {
+        for atom in ["Codex", "available"] {
             assert_eq!(
                 rendered
                     .split_whitespace()
@@ -200,7 +201,7 @@ fn sources_success_is_outcome_first_and_responsive() {
         assert!(!rendered.contains("jsonl"), "{width}: {rendered}");
         if width < 100 {
             assert!(
-                rendered.contains("Source\n  codex\nStatus\n  available\n"),
+                rendered.contains("Source\n  Codex\nStatus\n  available\n"),
                 "{width}: {rendered}"
             );
         } else {
@@ -255,7 +256,7 @@ fn sources_stack_when_fixed_columns_do_not_fit_and_keep_atoms_whole() {
             SourcesHumanRenderInput::from_sources(&sources).with_home(Some(&home)),
         );
         let rendered = document.render_plain();
-        for atom in ["factory-ai-droid", "available", "cursor"] {
+        for atom in ["Factory", "AI", "Droid", "available", "Cursor"] {
             assert!(
                 rendered.split_whitespace().any(|token| token == atom),
                 "{atom:?} did not remain intact at {width} columns: {rendered}"
@@ -269,7 +270,7 @@ fn sources_stack_when_fixed_columns_do_not_fit_and_keep_atoms_whole() {
         assert!(!rendered.contains("jsonl"), "{width}: {rendered}");
         if width < 120 {
             assert!(
-                rendered.contains("Source\n  factory-ai-droid\nStatus\n  available\n"),
+                rendered.contains("Source\n  Factory AI Droid\nStatus\n  available\n"),
                 "{rendered}"
             );
         } else {
@@ -342,7 +343,7 @@ fn concise_sources_hide_automatic_empty_provider_but_preserve_configured_empty_r
         default.starts_with("No history sources found\n"),
         "{default}"
     );
-    assert!(!default.contains("gemini"), "{default}");
+    assert!(!default.contains("Gemini"), "{default}");
     assert_eq!(json_sources.len(), 1);
     assert_eq!(json_sources[0].status, ProviderSourceStatus::Empty);
 
@@ -359,7 +360,7 @@ fn concise_sources_hide_automatic_empty_provider_but_preserve_configured_empty_r
         .with_automatic_provider_discovery(false)
         .with_provider_roots(std::slice::from_ref(&configured_root));
     let configured = render_sources_human(&plain_context, configured_input).render_plain();
-    assert!(configured.contains("gemini"), "{configured}");
+    assert!(configured.contains("Gemini"), "{configured}");
     assert!(configured.contains("empty"), "{configured}");
     assert!(configured.contains("work (team)"), "{configured}");
     assert!(
@@ -379,7 +380,7 @@ fn concise_sources_hide_automatic_empty_provider_but_preserve_configured_empty_r
         SourcesHumanRenderInput::from_sources(&all_sources),
     )
     .render_plain();
-    assert!(all.contains("gemini"), "{all}");
+    assert!(all.contains("Gemini"), "{all}");
     assert!(all.contains("empty"), "{all}");
     assert!(all.contains("/tmp/gemini"), "{all}");
 }

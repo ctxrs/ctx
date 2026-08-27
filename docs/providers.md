@@ -11,7 +11,7 @@ shared incremental, read-only architecture.
 
 The public CLI supports these local-history harnesses:
 
-Codex, Grok Build, DeepSeek Harness, Pi, Claude, OpenCode, Kilo Code, Kiro CLI, Crush, Goose, Lingma, Qoder, Warp, CodeBuddy, OpenClaw, Hermes Agent, NanoClaw, AstrBot, Shelley, Continue, OpenHands, Antigravity, Gemini, Tabnine, Cursor, Zed, Copilot CLI, Factory AI Droid, Qwen Code, Kimi Code CLI, Auggie, Junie, Firebender, ForgeCode, Deep Agents, Mistral Vibe, Mux, Rovo Dev, Cline, Roo Code, MiMo Code, fx.
+Codex, Grok Build, DeepSeek Harness, Pi, Claude Code, OpenCode, Kilo Code, Kiro, Crush, Goose, Lingma, Qoder, Warp, CodeBuddy, OpenClaw, Hermes Agent, NanoClaw, AstrBot, Shelley, Continue, OpenHands, Antigravity, Gemini, Tabnine, Cursor, Zed, GitHub Copilot, Factory AI Droid, Qwen Code, Kimi Code, Auggie, Junie, Firebender, ForgeCode, Deep Agents, Mistral Vibe, Mux, Rovo Dev, Cline, Roo Code, MiMo Code, fx.
 
 Use `ctx sources` for the truth on the current machine:
 

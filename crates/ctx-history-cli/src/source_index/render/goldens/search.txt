@@ -1,10 +1,11 @@
 1 result · relevance order · all agent sessions
 
 1. Fix the Unicode cache key regression in the parser.
-   Session  codex · demo-unicode-session
-   Agent    primary
-   Event    01900001 · 2026-07-30T12:00:00.123Z
-   More     2 results from this session
+   Provider  Codex
+   Session   01900000
+   Root      01900000
+   Event     01900001 · 2026-07-30T12:00:00.123Z
+   More      2 results from this session
 
    Inspect
-     ctx show event 01900001-0000-7000-8000-000000000002 --window 10
+     ctx show event 01900001 --window 10

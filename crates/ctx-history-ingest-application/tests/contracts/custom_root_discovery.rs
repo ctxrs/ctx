@@ -208,7 +208,7 @@ fn provider_filtered_human_sources_and_import_errors_are_actionable() {
         "--format=json",
     ]));
     assert!(
-        stderr.contains("no importable firebender history source was discovered"),
+        stderr.contains("no importable Firebender history source was discovered"),
         "{stderr}"
     );
     assert!(
@@ -236,7 +236,7 @@ fn provider_filtered_human_sources_and_import_errors_are_actionable() {
         "--format=json",
     ]));
     assert!(
-        stderr.contains("no importable firebender history source was discovered"),
+        stderr.contains("no importable Firebender history source was discovered"),
         "{stderr}"
     );
     assert!(

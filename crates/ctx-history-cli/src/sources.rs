@@ -4,7 +4,6 @@ use anyhow::Result;
 use serde_json::json;
 
 use ctx_history_capture::{DiscoveryIssue, DiscoveryIssueKind, ProviderSourceStatus};
-use ctx_history_core::CaptureProvider;
 
 use crate::provider_sources::{
     configured_root_conflict_details, configured_root_for_issue, configured_root_for_source,
@@ -322,7 +321,7 @@ fn render_sources_human(context: &RenderContext, input: SourcesHumanRenderInput<
                 },
             );
             locations.push_row([
-                source_provider_cli_name(source.provider).to_owned(),
+                source.provider.display_name().to_owned(),
                 source.status.as_str().to_owned(),
                 human_path(&source.path, home),
                 selection,
@@ -350,7 +349,7 @@ fn render_sources_human(context: &RenderContext, input: SourcesHumanRenderInput<
         .iter()
         .filter(|source| source.status == ProviderSourceStatus::Unsupported)
     {
-        let provider = source_provider_cli_name(source.provider);
+        let provider = source.provider.display_name();
         let summary = format!("{provider} history cannot be imported automatically");
         let location = human_path(&source.path, home);
         let reason = source
@@ -492,7 +491,8 @@ fn render_discovery_issue(
     provider_roots: &[ctx_history_capture::ProviderRootDefinition],
     automatic_provider_discovery: bool,
 ) -> Document {
-    let provider = source_provider_cli_name(issue.provider);
+    let provider = issue.provider.display_name();
+    let provider_selector = provider_cli_name(issue.provider);
     if issue.kind == DiscoveryIssueKind::ConfiguredRootConflict {
         let details =
             configured_root_conflict_details(issue, provider_roots, automatic_provider_discovery);
@@ -534,14 +534,14 @@ fn render_discovery_issue(
                 "Remove one named root, or move `{}` persistently with `ctx sources add {} --provider {} --root <different-path> --replace`.",
                 root.id,
                 root.id,
-                provider,
+                provider_selector,
             ),
             (Some(ConfiguredRootConflictKind::AutomaticConfigured), Some(root)) => format!(
                 "Remove or move `{}`; if named roots should replace automatic discovery, set `[sources] automatic=false`.",
                 root.id,
             ),
             _ => format!(
-                "Repair the persisted roots with `ctx sources remove <name>` or `ctx sources add <name> --provider {provider} --root <different-path> --replace`; use `[sources] automatic=false` when automatic discovery should be disabled."
+                "Repair the persisted roots with `ctx sources remove <name>` or `ctx sources add <name> --provider {provider_selector} --root <different-path> --replace`; use `[sources] automatic=false` when automatic discovery should be disabled."
             ),
         };
         let action_command = repair_root.map(|root| format!("ctx sources remove {}", root.id));
@@ -573,7 +573,7 @@ fn render_discovery_issue(
         }
         fields.push(Field::new("Reason", issue.reason));
         let detail = format!(
-            "The named root remains configured, but its provider-owned state is absent. Restore it, replace its persisted path with `ctx sources add <name> --provider {provider} --root <replacement-path> --replace`, or remove `{root_name}` when it is no longer needed."
+            "The named root remains configured, but its provider-owned state is absent. Restore it, replace its persisted path with `ctx sources add <name> --provider {provider_selector} --root <replacement-path> --replace`, or remove `{root_name}` when it is no longer needed."
         );
         let action_command = root.map(|root| format!("ctx sources remove {}", root.id));
         return diagnostic(
@@ -614,10 +614,6 @@ fn render_discovery_issue(
             action: Some(Action { command: &command }),
         },
     )
-}
-
-pub(crate) fn source_provider_cli_name(provider: CaptureProvider) -> &'static str {
-    provider_cli_name(provider)
 }
 
 #[cfg(test)]

@@ -575,7 +575,7 @@ param(
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
-$contract = Get-Content -LiteralPath $ContractPath -Raw | ConvertFrom-Json
+$contract = [System.IO.File]::ReadAllText($ContractPath) | ConvertFrom-Json
 $expectedArchive = @{}
 $directories = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
 foreach ($file in $contract.files) {
@@ -636,9 +636,12 @@ try {
     }
     $record = $expectedArchive[$name]
     if ([long]$entry.Length -ne [long]$record.size) { throw "Semantic zip file size mismatch: '$raw'" }
-    $target = Join-Path $Destination ([string]$record.path).Replace('/', '\')
-    $parent = Split-Path -Parent $target
-    New-Item -ItemType Directory -Path $parent -Force | Out-Null
+    $target = [System.IO.Path]::Combine(
+      $Destination,
+      ([string]$record.path).Replace('/', [System.IO.Path]::DirectorySeparatorChar)
+    )
+    $parent = [System.IO.Path]::GetDirectoryName($target)
+    [void][System.IO.Directory]::CreateDirectory($parent)
     $source = $entry.Open()
     try {
       $output = [System.IO.File]::Open($target, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
@@ -686,8 +689,41 @@ try {
 "#;
 
 #[cfg(test)]
-mod semantic_zip_script_tests {
+mod windows_extract_script_tests {
     use super::WINDOWS_SEMANTIC_ZIP_EXTRACT_SCRIPT;
+
+    fn embedded_runtime_extract_script() -> &'static str {
+        include_str!("../install.rs")
+            .split_once("const EXTRACT_SCRIPT: &str = r#\"\n")
+            .unwrap()
+            .1
+            .split_once("\n\"#;")
+            .unwrap()
+            .0
+    }
+
+    #[test]
+    fn runtime_script_uses_dotnet_filesystem_apis() {
+        let script = embedded_runtime_extract_script();
+
+        assert!(script.contains("[System.IO.Path]::Combine"));
+        assert!(script.contains("[System.IO.Directory]::CreateDirectory"));
+        assert!(!script.contains("Join-Path"));
+        assert!(!script.contains("New-Item"));
+    }
+
+    #[test]
+    fn semantic_script_uses_dotnet_filesystem_apis() {
+        assert!(WINDOWS_SEMANTIC_ZIP_EXTRACT_SCRIPT.contains("[System.IO.File]::ReadAllText"));
+        assert!(WINDOWS_SEMANTIC_ZIP_EXTRACT_SCRIPT.contains("[System.IO.Path]::Combine"));
+        assert!(WINDOWS_SEMANTIC_ZIP_EXTRACT_SCRIPT.contains("[System.IO.Path]::GetDirectoryName"));
+        assert!(
+            WINDOWS_SEMANTIC_ZIP_EXTRACT_SCRIPT.contains("[System.IO.Directory]::CreateDirectory")
+        );
+        for provider in ["Get-Content", "Join-Path", "Split-Path", "New-Item"] {
+            assert!(!WINDOWS_SEMANTIC_ZIP_EXTRACT_SCRIPT.contains(provider));
+        }
+    }
 
     #[test]
     fn streamed_zip_bytes_are_bounded_before_each_write() {
