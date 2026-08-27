@@ -107,7 +107,17 @@ fn companion_blame_records_only_core_observed_delivery_facts() {
             },
         )
         .unwrap();
-    assert_eq!(row, (3, "success".to_owned(), "not_applicable".to_owned(), 1, 0, response.wire_bytes as i64));
+    assert_eq!(
+        row,
+        (
+            3,
+            "success".to_owned(),
+            "not_applicable".to_owned(),
+            1,
+            0,
+            response.wire_bytes as i64
+        )
+    );
     drop(connection);
 
     let persisted = fs::read(usage_path).unwrap();

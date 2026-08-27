@@ -23,14 +23,27 @@ pub(super) fn query_report(
     let mut estimate_facts = EstimateFacts::default();
     for definition_version in versions {
         let definition = query_definition(&transaction, definition_version, detailed)?;
-        if definition_version == DEFINITION_VERSION {
+        // Definition 3 adds Blame without changing the Search context facts
+        // used by this estimate. Preserve value already measured under v2 and
+        // combine it with compatible v3 Search facts.
+        if matches!(definition_version, 2 | DEFINITION_VERSION) {
             estimate_facts = EstimateFacts {
-                complete_calls: definition.summary.complete_context_eligible_calls,
-                unavailable_calls: definition.summary.unavailable_context_eligible_calls,
-                delivered_context_bytes: definition.summary.delivered_context_bytes,
-                matched_normalized_session_bytes: definition
-                    .summary
-                    .matched_normalized_session_bytes,
+                complete_calls: estimate_facts
+                    .complete_calls
+                    .checked_add(definition.summary.complete_context_eligible_calls)
+                    .ok_or(UsageStoreError::Integrity)?,
+                unavailable_calls: estimate_facts
+                    .unavailable_calls
+                    .checked_add(definition.summary.unavailable_context_eligible_calls)
+                    .ok_or(UsageStoreError::Integrity)?,
+                delivered_context_bytes: estimate_facts
+                    .delivered_context_bytes
+                    .checked_add(definition.summary.delivered_context_bytes)
+                    .ok_or(UsageStoreError::Integrity)?,
+                matched_normalized_session_bytes: estimate_facts
+                    .matched_normalized_session_bytes
+                    .checked_add(definition.summary.matched_normalized_session_bytes)
+                    .ok_or(UsageStoreError::Integrity)?,
             };
         }
         definitions.push(definition);

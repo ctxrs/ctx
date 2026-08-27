@@ -85,6 +85,22 @@ fn every_released_predecessor_write_migration_preserves_neutral_counts_and_is_id
             serde_json::to_value(&second).unwrap()
         );
 
+        if schema_version == store::LEGACY_SCHEMA_VERSION {
+            assert!(first.estimates.is_none());
+        } else {
+            let estimates = first.estimates.as_ref().unwrap();
+            assert_eq!(
+                estimates.approximate_context_tokens.delivered_context_bytes,
+                120
+            );
+            assert_eq!(
+                estimates
+                    .estimated_context_reduction
+                    .comparison_baseline_bytes,
+                300
+            );
+        }
+
         let definitions = first.definitions.unwrap();
         assert_eq!(definitions.len(), 2);
         if schema_version == store::LEGACY_SCHEMA_VERSION {
