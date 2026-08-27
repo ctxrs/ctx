@@ -137,16 +137,22 @@ Finite Core workers do not perform upgrade maintenance.
 
 ## Semantic Search Is Not Ready
 
-Semantic indexing requires auto mode. Enable it and inspect current health with:
+Continuous semantic indexing requires auto mode. Enable it and inspect current
+health with:
 
 ```bash
 ctx index mode auto
-ctx setup --semantic
-ctx index
+ctx semantic enable --wait
+ctx semantic status
 ```
 
 Lexical search remains available while embeddings build. Hybrid search begins
 using both lexical and semantic evidence when coverage is ready.
+
+In manual mode, there is no background semantic maintenance. After enabling
+semantic search, run an explicit semantic or nonzero-weight hybrid search with
+`--refresh wait` to acquire the local model when needed and reconcile the
+semantic projection for that request's pinned Core generation.
 
 ## Store Problems
 

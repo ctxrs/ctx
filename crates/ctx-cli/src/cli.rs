@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use anstyle::{AnsiColor, Color, Style};
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use ctx_cli_presentation::commands::{DoctorArgs, SetupArgs, StatusArgs};
+use ctx_cli_presentation::commands::{DoctorArgs, SemanticArgs, SetupArgs, StatusArgs};
 
 use crate::{
     commands,
@@ -129,6 +129,8 @@ pub(crate) enum CommandRoot {
     Referral,
     #[command(about = "Create local ctx storage and index discovered history")]
     Setup(SetupArgs),
+    #[command(about = "Manage local semantic search")]
+    Semantic(SemanticArgs),
     #[command(about = "Show local ctx index and health status")]
     Status(StatusArgs),
     #[command(about = "Show local history retrieval and value statistics")]
@@ -301,6 +303,7 @@ pub(crate) enum DaemonTriggerCommandArg {
     Setup,
     Import,
     Search,
+    Semantic,
 }
 
 fn parse_semantic_worker_batch(value: &str) -> Result<usize, String> {

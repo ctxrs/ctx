@@ -167,6 +167,9 @@ fn daemon_trigger(
         crate::DaemonTriggerCommandArg::Setup => ctx_daemon_cli::DaemonTriggerCommandArg::Setup,
         crate::DaemonTriggerCommandArg::Import => ctx_daemon_cli::DaemonTriggerCommandArg::Import,
         crate::DaemonTriggerCommandArg::Search => ctx_daemon_cli::DaemonTriggerCommandArg::Search,
+        crate::DaemonTriggerCommandArg::Semantic => {
+            ctx_daemon_cli::DaemonTriggerCommandArg::Semantic
+        }
     }
 }
 

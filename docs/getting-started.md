@@ -120,14 +120,18 @@ installed platform.
 Enable local semantic search with:
 
 ```bash
-ctx setup --semantic
-ctx index
+ctx semantic enable
+ctx semantic status
 ```
 
-Semantic indexing requires auto mode. If you selected manual indexing, run
-`ctx index mode auto` before `ctx setup --semantic`. Lexical search remains
-available while embeddings build; hybrid search uses lexical and semantic
-evidence automatically when coverage is ready.
+Automatic indexing is the default, so enablement starts or recovers the daemon
+that acquires the local model and builds the semantic projection. Add `--wait`
+to wait for readiness. If you selected manual indexing, plain enablement records
+the opt-in without changing modes; run `ctx index mode auto` for automatic
+catch-up or use an explicit semantic search with `--refresh wait`. Lexical
+search remains available while embeddings build; hybrid search uses lexical and
+semantic evidence automatically when coverage is ready. `ctx semantic disable`
+turns the feature off without deleting downloaded assets.
 
 ctx has no hosted-history client or `ctx cloud` subcommand. Official
 installer-managed binaries can separately run signed CLI

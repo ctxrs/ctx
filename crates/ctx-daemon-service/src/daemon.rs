@@ -204,6 +204,7 @@ fn daemon_run_facts(args: &DaemonRunArgs) -> DaemonRunFactsV1 {
         DaemonTriggerCommandArg::Setup => DaemonTriggerV1::Setup,
         DaemonTriggerCommandArg::Import => DaemonTriggerV1::Import,
         DaemonTriggerCommandArg::Search => DaemonTriggerV1::Search,
+        DaemonTriggerCommandArg::Semantic => DaemonTriggerV1::Semantic,
     });
     DaemonRunFactsV1::new(start_mode, supervisor, trigger)
 }

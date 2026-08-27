@@ -1,6 +1,7 @@
 use super::{
     assert_daemon_process_running, assert_daemon_process_running_with_status,
-    assert_no_daemon_autostart_mutation, ctx, support, support::*, write_codex_setup_session,
+    assert_no_daemon_autostart_mutation, ctx, support, support::*, wait_for_daemon_status,
+    write_codex_setup_session,
 };
 
 #[path = "../support/setup_sources_import/lifecycle_helpers.rs"]
@@ -373,6 +374,191 @@ fn setup_semantic_clean_cache_queues_daemon_without_foreground_download() {
         !semantic_cache.exists(),
         "foreground setup must leave clean semantic cache acquisition to the daemon"
     );
+}
+
+#[test]
+fn semantic_namespace_is_explicit_readable_and_retains_downloaded_assets() {
+    let temp = tempdir();
+
+    let initial = json_output(ctx(&temp).args(["semantic", "status", "--format=json"]));
+    assert_eq!(initial["operation"], "status", "{initial:#}");
+    assert_eq!(initial["enabled"], false, "{initial:#}");
+    assert_eq!(initial["status"], "disabled", "{initial:#}");
+    assert_eq!(initial["read_only"], true, "{initial:#}");
+    assert!(!data_root(&temp).exists());
+
+    fs::create_dir_all(data_root(&temp).join("semantic-model-cache")).unwrap();
+    fs::write(
+        data_root(&temp).join("config.toml"),
+        "# retained setting\n[indexing]\nmode = \"manual\"\n",
+    )
+    .unwrap();
+    let retained_asset = data_root(&temp)
+        .join("semantic-model-cache")
+        .join("retained-model.bin");
+    fs::write(&retained_asset, b"retained").unwrap();
+
+    let enabled = json_output(ctx(&temp).args(["semantic", "enable", "--format=json"]));
+    assert_eq!(enabled["operation"], "enable", "{enabled:#}");
+    assert_eq!(enabled["enabled"], true, "{enabled:#}");
+    assert_eq!(enabled["indexing"]["mode"], "manual", "{enabled:#}");
+    assert_eq!(enabled["read_only"], false, "{enabled:#}");
+    let configured = fs::read_to_string(data_root(&temp).join("config.toml")).unwrap();
+    assert!(configured.contains("# retained setting"), "{configured}");
+    assert!(
+        configured.contains("[search]\nsemantic = true\n"),
+        "{configured}"
+    );
+
+    let status = json_output(ctx(&temp).args(["semantic", "status", "--format=json"]));
+    assert_eq!(status["enabled"], true, "{status:#}");
+    assert_eq!(status["read_only"], true, "{status:#}");
+
+    let disabled = json_output(ctx(&temp).args(["semantic", "disable", "--format=json"]));
+    assert_eq!(disabled["operation"], "disable", "{disabled:#}");
+    assert_eq!(disabled["enabled"], false, "{disabled:#}");
+    assert_eq!(disabled["status"], "disabled", "{disabled:#}");
+    assert_eq!(disabled["read_only"], false, "{disabled:#}");
+    assert_eq!(fs::read(&retained_asset).unwrap(), b"retained");
+}
+
+#[test]
+fn semantic_wait_rejects_manual_mode_before_persisting_opt_in() {
+    let temp = tempdir();
+    fs::create_dir_all(data_root(&temp)).unwrap();
+    fs::write(
+        data_root(&temp).join("config.toml"),
+        "[indexing]\nmode = \"manual\"\n",
+    )
+    .unwrap();
+
+    ctx(&temp)
+        .args(["semantic", "enable", "--wait"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("ctx index mode auto"));
+
+    let configured = fs::read_to_string(data_root(&temp).join("config.toml")).unwrap();
+    assert!(!configured.contains("semantic"), "{configured}");
+}
+
+#[test]
+fn semantic_disable_does_not_claim_success_under_an_enabling_process_override() {
+    let temp = tempdir();
+    fs::create_dir_all(data_root(&temp)).unwrap();
+    fs::write(
+        data_root(&temp).join("config.toml"),
+        "[indexing]\nmode = \"manual\"\n\n[search]\nsemantic = true\n",
+    )
+    .unwrap();
+
+    ctx(&temp)
+        .args(["semantic", "disable"])
+        .env("CTX_SEARCH_SEMANTIC", "true")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("active process override"));
+
+    let configured = fs::read_to_string(data_root(&temp).join("config.toml")).unwrap();
+    assert!(
+        configured.contains("[search]\nsemantic = false\n"),
+        "{configured}"
+    );
+}
+
+#[test]
+fn semantic_enable_persists_opt_in_but_reports_a_disabling_process_override() {
+    let temp = tempdir();
+    fs::create_dir_all(data_root(&temp)).unwrap();
+    fs::write(
+        data_root(&temp).join("config.toml"),
+        "[indexing]\nmode = \"manual\"\n",
+    )
+    .unwrap();
+
+    ctx(&temp)
+        .args(["semantic", "enable"])
+        .env("CTX_SEARCH_SEMANTIC", "false")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("active process override"));
+
+    let configured = fs::read_to_string(data_root(&temp).join("config.toml")).unwrap();
+    assert!(
+        configured.contains("[search]\nsemantic = true\n"),
+        "{configured}"
+    );
+    let status = json_output(
+        ctx(&temp)
+            .args(["semantic", "status", "--format=json"])
+            .env("CTX_SEARCH_SEMANTIC", "false"),
+    );
+    assert_eq!(status["enabled"], false, "{status:#}");
+    assert_eq!(status["config_source"], "environment", "{status:#}");
+    assert_no_daemon_autostart_mutation(&temp);
+}
+
+#[test]
+fn setup_semantic_alias_uses_the_same_process_override_validation() {
+    let temp = tempdir();
+
+    ctx(&temp)
+        .args(["setup", "--semantic", "--progress", "none"])
+        .env("CTX_SEARCH_SEMANTIC", "false")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("active process override"));
+
+    let configured = fs::read_to_string(data_root(&temp).join("config.toml")).unwrap();
+    assert!(
+        configured.contains("[search]\nsemantic = true\n"),
+        "{configured}"
+    );
+    assert!(!data_root(&temp).join("search").exists());
+    assert!(!data_root(&temp).join("relational.sqlite").exists());
+    assert!(!data_root(&temp).join("catalogs").exists());
+    assert_no_daemon_autostart_mutation(&temp);
+}
+
+#[test]
+fn semantic_enable_auto_starts_the_existing_daemon_acquisition_path() {
+    let temp = daemon_test_root();
+
+    let enabled = json_output(ctx(&temp).args(["semantic", "enable", "--format=json"]));
+    assert_eq!(enabled["operation"], "enable", "{enabled:#}");
+    assert_eq!(enabled["enabled"], true, "{enabled:#}");
+    assert_eq!(enabled["indexing"]["mode"], "auto", "{enabled:#}");
+
+    let status = wait_for_daemon_status(&temp, "running", true, "semantic");
+    assert_eq!(
+        status["daemon"]["jobs"]["semantic_index"]["semantic_enabled"], true,
+        "{status:#}"
+    );
+    assert!(fs::read_to_string(data_root(&temp).join("config.toml"))
+        .unwrap()
+        .contains("[search]\nsemantic = true\n"));
+
+    let waited = json_output(ctx(&temp).args(["semantic", "enable", "--wait", "--format=json"]));
+    assert_eq!(waited["status"], "ready", "{waited:#}");
+    assert_eq!(waited["selection"]["semantic"], true, "{waited:#}");
+    assert_eq!(waited["read_only"], false, "{waited:#}");
+
+    let disabled = json_output(ctx(&temp).args(["semantic", "disable", "--format=json"]));
+    assert_eq!(disabled["enabled"], false, "{disabled:#}");
+    assert_eq!(disabled["status"], "disabling", "{disabled:#}");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let status = json_output(ctx(&temp).args(["daemon", "status", "--format=json"]));
+        let semantic = &status["daemon"]["jobs"]["semantic_index"];
+        if semantic["semantic_enabled"] == false && semantic["runtime_active"] == false {
+            assert_eq!(status["daemon"]["running"], true, "{status:#}");
+            break;
+        }
+        assert!(Instant::now() < deadline, "{status:#}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let disabled = json_output(ctx(&temp).args(["semantic", "status", "--format=json"]));
+    assert_eq!(disabled["status"], "disabled", "{disabled:#}");
 }
 
 #[test]

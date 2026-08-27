@@ -118,6 +118,27 @@ available. `daemon` reports process and relevant job state. These diagnostic
 objects can contain local paths and should not be persisted or forwarded outside
 local diagnostics.
 
+## Semantic Lifecycle
+
+```bash
+ctx semantic enable --format json
+ctx semantic status --format json
+ctx semantic disable --format json
+```
+
+These commands return `schema_version: 1`, `operation` (`enable`, `status`, or
+`disable`), the effective `enabled`, `status`, `reason`, and `config_source`,
+`indexing.mode`, optional `projection` and `catch_up` diagnostics, reduced
+`daemon` state, `local_only: true`, and `read_only`. Status is read-only;
+enable and disable persist policy and report `read_only: false`. Disablement
+retains downloaded model/runtime assets and derived semantic indexes.
+
+In auto mode, enablement starts or recovers the persistent daemon and returns
+after semantic work is accepted. `ctx semantic enable --wait --format json`
+uses the Index Readiness wait result below and waits for the current Core
+generation's semantic projection. Plain enablement in manual mode records the
+opt-in without changing mode; wait requires auto mode.
+
 ## Index Readiness
 
 ```bash
@@ -188,10 +209,10 @@ nullable may be omitted when unavailable:
 - `pid`, nullable/omitted;
 - `started_at_ms`, `heartbeat_at_ms`, and `finished_at_ms`, nullable/omitted;
 - `last_error`, nullable/omitted;
-- `start_mode`, nullable/omitted, currently `auto` for setup/import/search
+- `start_mode`, nullable/omitted, currently `auto` for setup/import/search/semantic
   process starts or `manual` for explicit daemon runs;
-- `trigger_command`, nullable/omitted, currently `setup`, `import`, or `search`
-  for automatic or finite starts;
+- `trigger_command`, nullable/omitted, currently `setup`, `import`, `search`, or
+  `semantic` for automatic or finite starts;
 - `semantic_runtime_active`, true only while the running daemon owns its
   semantic query service;
 - `config_reload`, with `status`, `out_of_sync`, `requested`, `applied`,

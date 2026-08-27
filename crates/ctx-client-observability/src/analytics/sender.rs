@@ -316,6 +316,9 @@ fn insert_client_operation_properties(
             );
             insert_import_result_properties(properties, &value.import);
         }
+        CliOperation::SemanticEnable
+        | CliOperation::SemanticStatus
+        | CliOperation::SemanticDisable => {}
         CliOperation::Status(value) => {
             insert_optional_bool(properties, "initialized", value.initialized);
             insert_optional_count(properties, "indexed_items_bucket", value.indexed_items);

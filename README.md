@@ -143,11 +143,11 @@ Search uses BM25 lexical matching by default. Give it likely terms—an error, f
 Semantic search helps when related ideas use different wording. ctx computes embeddings locally and searches them directly, without a vector database to run. Enable it with:
 
 ```bash
-ctx setup --semantic
-ctx index
+ctx semantic enable
+ctx semantic status
 ```
 
-Semantic search requires automatic indexing, which is the default. If you use manual indexing, run `ctx index mode auto` first. Lexical search remains available while embeddings build; once they are ready, hybrid search uses lexical and semantic evidence automatically.
+Automatic indexing is the default, so enablement starts or recovers the daemon that acquires the local model and builds the semantic projection. Add `--wait` to wait for readiness. If you selected manual indexing, plain enablement records the opt-in without changing modes; run `ctx index mode auto` for automatic catch-up or use an explicit semantic search with `--refresh wait`. Lexical search remains available while embeddings build; hybrid search uses lexical and semantic evidence automatically when coverage is ready. `ctx semantic disable` turns the feature off without deleting downloaded assets.
 
 ctx does not send your prompts, transcripts, or indexed history to a cloud service, call model APIs, require API keys, or write into your source repositories. Transcript text is preserved rather than automatically redacted, so review copied output before sharing it outside your machine.
 

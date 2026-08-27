@@ -63,6 +63,18 @@ fn public_surfaces_are_exhaustive_and_stable() {
 }
 
 #[test]
+fn semantic_lifecycle_operations_emit_closed_client_analytics_names() {
+    for (operation, expected) in [
+        (CliOperation::SemanticEnable, "semantic_enable"),
+        (CliOperation::SemanticStatus, "semantic_status"),
+        (CliOperation::SemanticDisable, "semantic_disable"),
+    ] {
+        assert!(operation.emits_client_analytics());
+        assert_eq!(operation.analytics_name(), expected);
+    }
+}
+
+#[test]
 fn runtime_observation_has_typed_constructor_seams() {
     let daemon = PublicEventV1::RuntimeObservation(RuntimeObservationV1::daemon(
         DaemonRuntimeObservationV1::ready(DaemonRunFactsV1::new(

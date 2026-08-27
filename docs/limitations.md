@@ -78,10 +78,11 @@ shipped.
   validated local runtime remain lexical-safe: `hybrid` falls back to lexical
   and explicit `semantic` reports a local unavailable/runtime error instead of
   linking an unsupported backend.
-- Semantic indexing requires auto mode. Use `ctx index mode auto` before
-  `ctx setup --semantic` when manual mode is configured. Lexical search remains
-  available while embeddings build, and hybrid uses both backends when coverage
-  is ready.
+- Automatic semantic indexing requires auto mode. Use `ctx index mode auto`
+  before `ctx semantic enable --wait` when manual mode is configured. A plain
+  `ctx semantic enable` still records the opt-in in manual mode. Lexical search
+  remains available while embeddings build, and hybrid uses both backends when
+  coverage is ready.
 - The ctx macOS CLI targets macOS 13, but ONNX Runtime 1.27 follows its upstream
   macOS 14 minimum. On macOS 13, daemon-backed lexical search remains available
   while semantic search is unavailable.

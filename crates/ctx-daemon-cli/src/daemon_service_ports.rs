@@ -103,6 +103,7 @@ where
             ctx_daemon_application::DaemonTrigger::Setup => DaemonTrigger::Setup,
             ctx_daemon_application::DaemonTrigger::Import => DaemonTrigger::Import,
             ctx_daemon_application::DaemonTrigger::Search => DaemonTrigger::Search,
+            ctx_daemon_application::DaemonTrigger::Semantic => DaemonTrigger::Semantic,
         }),
         supervisor: if matches!(
             request.start_mode,
@@ -300,5 +301,6 @@ fn cli_trigger(trigger: DaemonTrigger) -> DaemonTriggerCommandArg {
         DaemonTrigger::Setup => DaemonTriggerCommandArg::Setup,
         DaemonTrigger::Import => DaemonTriggerCommandArg::Import,
         DaemonTrigger::Search => DaemonTriggerCommandArg::Search,
+        DaemonTrigger::Semantic => DaemonTriggerCommandArg::Semantic,
     }
 }

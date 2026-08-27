@@ -27,8 +27,11 @@ Search is an interactive read path and never becomes a duplicate importer.
 Automatic background search may start or signal the persistent daemon. Manual
 background search reads the current indexes without contacting a process;
 explicit `--refresh wait` may start the same Core engine as a finite worker.
-Neither search path performs inline history refresh, lexical publication,
-semantic document projection, or embedding in the query process.
+Neither search path performs inline history refresh or lexical publication in
+the query process. After the finite worker publishes Core in manual mode, an
+opted-in semantic or nonzero-weight hybrid `--refresh wait` may reconcile the
+semantic document projection for that exact generation and embed the query in
+the waiting foreground process.
 
 The public retrieval modes are:
 
@@ -77,10 +80,11 @@ history, start persistent daemon maintenance in automatic mode, and return
 promptly. Manual setup starts no worker. Setup should not block for full
 semantic completion by default.
 
-`ctx setup --semantic` enables semantic search and requires auto mode. A user in
-manual mode runs `ctx index mode auto` first. Lexical search remains available
-while embeddings build; hybrid retrieval uses both indexes when coverage is
-ready.
+`ctx semantic enable` records the semantic-search opt-in. In auto mode it starts
+or recovers daemon-owned model acquisition and indexing; `--wait` waits for the
+current projection. A user who wants automatic catch-up from manual mode runs
+`ctx index mode auto` first. Lexical search remains available while embeddings
+build; hybrid retrieval uses both indexes when coverage is ready.
 
 Default human output should include a strong foreground signal:
 
@@ -214,15 +218,22 @@ background startup; there is no separate public daemon start command.
 
 - No public `auto` retrieval mode.
 - No lexical-then-semantic fallback as the default strategy.
-- No foreground semantic embedding from `ctx search`.
-- No model download from foreground setup, import, search, status, doctor, MCP,
-  or index-observer commands. Only the opted-in daemon may acquire or repair the
-  pinned model, and unverified bytes must fail closed before cache publication.
+- No foreground semantic embedding from implicit/background or `--refresh off`
+  search. An opted-in manual-mode semantic or nonzero-weight hybrid
+  `--refresh wait` is the sole query-process exception: after finite Core
+  publication it may acquire the pinned local model, reconcile semantic
+  coverage for that exact generation, and embed the query.
+- No model download from foreground setup, import, status, doctor, MCP, or
+  index-observer commands. Acquisition belongs to the opted-in daemon in auto
+  mode and the explicit manual `--refresh wait` exception above; unverified
+  bytes must fail closed before cache publication.
 - No duplicate inline importer. Persistent and finite publication both use the
   same daemon/Core refresh engine.
 - A finite Core worker installs no supervision, runs no watcher/timer/semantic/
   upgrade maintenance, admits at least one request before idle exit, and exits
-  only when Core work is terminal and IPC is quiescent.
+  only when Core work is terminal and IPC is quiescent. Manual semantic
+  reconciliation occurs afterward in the explicit waiting query process, not
+  in that Core worker.
 - No LLM-generated semantic documents.
 - Prefer one persisted semantic-document projection over reconstructing the
   corpus from raw events for every worker pass.

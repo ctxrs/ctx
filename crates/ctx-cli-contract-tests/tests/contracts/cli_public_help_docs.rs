@@ -151,6 +151,7 @@ fn help_exposes_session_retrieval_commands() {
         "blame",
         "referral",
         "setup",
+        "semantic",
         "status",
         "stats",
         "index",
@@ -435,9 +436,17 @@ fn public_subcommand_help_is_golden_enough_for_session_retrieval() {
                 "Usage: ctx setup",
                 "--catalog-only",
                 "Deprecated and ignored; setup follows its normal refresh lifecycle",
-                "--semantic",
-                "Enable local semantic search in config",
                 "--format <FORMAT>",
+            ],
+        ),
+        (
+            "semantic",
+            vec![
+                "Usage: ctx semantic [OPTIONS] <COMMAND>",
+                "enable",
+                "status",
+                "disable",
+                "Manage local semantic search",
             ],
         ),
         ("status", vec!["Usage: ctx status", "--format <FORMAT>"]),
@@ -580,6 +589,9 @@ fn public_subcommand_help_is_golden_enough_for_session_retrieval() {
                 "{command} help leaked {forbidden} in\n{help}"
             );
         }
+        if command == "setup" {
+            assert!(!help.contains("--semantic"), "{help}");
+        }
     }
 }
 
@@ -588,6 +600,9 @@ fn machine_readable_output_uses_format_without_a_json_alias() {
     let temp = tempdir();
     for args in [
         &["setup", "--help"][..],
+        &["semantic", "enable", "--help"],
+        &["semantic", "status", "--help"],
+        &["semantic", "disable", "--help"],
         &["status", "--help"],
         &["stats", "--help"],
         &["index", "--help"],

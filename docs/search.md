@@ -236,8 +236,8 @@ silently reused.
 Enable local semantic search with:
 
 ```bash
-ctx setup --semantic
-ctx index
+ctx semantic enable
+ctx semantic status
 ```
 
 Semantic opt-in is independent of indexing mode. In auto mode, the daemon keeps

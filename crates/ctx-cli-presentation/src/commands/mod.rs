@@ -26,6 +26,9 @@ pub use index::IndexArgs;
 pub use list::{ListArgs, ListEventsArgs, ListTarget};
 pub use locate::{LocateArgs, LocateTarget};
 pub use search::{CliRefreshArg, ContentScopeArg, SearchArgs, SearchBackendArg};
+pub use semantic::{
+    render_semantic_disabled, render_semantic_status, SemanticArgs, SemanticCommand,
+};
 pub use setup::{render_setup_human, SetupArgs, SetupDaemonState};
 pub use show::{ShowArgs, ShowEventArgs, ShowSessionArgs, ShowTarget};
 pub use sources::SourcesArgs;
@@ -37,4 +40,5 @@ pub use status_usage::{
     render_malformed_status_config_failure, render_removed_cloud_config_failure,
     render_usage_action_human, render_usage_failure, usage_action_error_json, usage_action_json,
 };
+pub mod semantic;
 pub mod setup;

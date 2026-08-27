@@ -252,7 +252,7 @@ fn failed_refresh_is_terminal_only_when_refresh_convergence_is_selected() {
 #[test]
 fn wait_json_names_the_readiness_payload() {
     let status = readiness("ready", 12, true);
-    let output = index_wait_json(status, IndexSelection::all(), "ready");
+    let output = index_wait_json(status, IndexSelection::all(), "ready", true);
     assert!(output.get("readiness").is_some());
     assert!(output.get("index").is_none());
 }

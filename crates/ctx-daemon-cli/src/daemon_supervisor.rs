@@ -198,6 +198,7 @@ pub(super) const fn daemon_trigger_arg(
         ctx_daemon_application::DaemonTrigger::Setup => crate::DaemonTriggerCommandArg::Setup,
         ctx_daemon_application::DaemonTrigger::Import => crate::DaemonTriggerCommandArg::Import,
         ctx_daemon_application::DaemonTrigger::Search => crate::DaemonTriggerCommandArg::Search,
+        ctx_daemon_application::DaemonTrigger::Semantic => crate::DaemonTriggerCommandArg::Semantic,
     }
 }
 
@@ -208,6 +209,7 @@ pub(super) const fn daemon_trigger(
         crate::DaemonTriggerCommandArg::Setup => ctx_daemon_application::DaemonTrigger::Setup,
         crate::DaemonTriggerCommandArg::Import => ctx_daemon_application::DaemonTrigger::Import,
         crate::DaemonTriggerCommandArg::Search => ctx_daemon_application::DaemonTrigger::Search,
+        crate::DaemonTriggerCommandArg::Semantic => ctx_daemon_application::DaemonTrigger::Semantic,
     }
 }
 

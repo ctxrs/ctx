@@ -57,7 +57,7 @@ impl HistoryConfigPort for CliHistoryConfigAdapter<'_> {
 
     fn set_semantic_search_enabled(&mut self, enabled: bool) -> Result<(), Self::Error> {
         config::set_semantic_search_enabled(self.data_root, enabled)?;
-        self.config.search.semantic = Some(enabled);
+        self.config.apply_persisted_semantic_search_enabled(enabled);
         Ok(())
     }
 }

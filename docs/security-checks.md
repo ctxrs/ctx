@@ -19,8 +19,11 @@ the local retrieval product.
   a bounded daemon-owned refresh of discovered native provider history before
   querying the active Core generation. Manual background search and
   `--refresh off` must not start or wake a process. The query process does not
-  write Core generations or projections. Without semantic opt-in, default
-  search must not download embedding models or start semantic indexing.
+  write Core generations. In manual mode, an opted-in semantic or nonzero-weight
+  hybrid `--refresh wait` may acquire the pinned model and write semantic
+  projection data only after finite Core publication for the exact pinned
+  generation. Without semantic opt-in, default search must not download
+  embedding models or start semantic indexing.
 - `ctx show` writes nothing in local-only security mode, except
   `ctx show session --out` writes only the explicit path when one is provided.
 - `ctx status` does not mutate canonical history: missing stores stay missing,
@@ -70,7 +73,7 @@ the local retrieval product.
   only bounded native local provider-history refresh and bounded semantic
   catch-up. It must not run history-source plugins.
   Network model acquisition is allowed only for the local embedding model when
-  semantic search is explicitly enabled with `ctx setup --semantic` in auto
+  semantic search is explicitly enabled with `ctx semantic enable` in auto
   mode. `ctx daemon run` blocks in the foreground and does not mutate indexing
   mode.
 - A finite Core worker may start only for explicit import or search

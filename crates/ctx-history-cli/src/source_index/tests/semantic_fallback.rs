@@ -16,7 +16,7 @@ fn semantic_fallback_warning_is_structured_and_actionable_without_backend_codes(
         let styled = rendered.render(&context);
         assert!(plain.contains("Semantic search is unavailable"));
         assert!(plain.contains("Keyword search was used"));
-        assert!(plain.contains("ctx setup --semantic"));
+        assert!(plain.contains("ctx semantic enable"));
         assert!(!plain.contains("semantic_disabled"));
         assert!(!plain.contains("backend_error"));
         assert!(!plain.contains("/private/model/cache"));

@@ -791,7 +791,7 @@ fn human_wait_semantic_disabled_renders_a_truthful_blocked_snapshot() {
     assert_single_human_diagnosis(
         &output,
         "Semantic indexing is blocked",
-        "ctx setup --semantic",
+        "ctx semantic enable",
     );
     let stderr = String::from_utf8(output.stderr).unwrap();
 
@@ -803,7 +803,7 @@ fn human_wait_semantic_disabled_renders_a_truthful_blocked_snapshot() {
     assert!(stderr.contains("Keyword search remains available."));
     assert!(stderr.contains("\nKeyword search\n"));
     assert!(stderr.contains("\nSemantic search\nStatus  Off\n"));
-    assert!(stderr.ends_with("\nNext\n  ctx setup --semantic\n"));
+    assert!(stderr.ends_with("\nNext\n  ctx semantic enable\n"));
     assert!(!stderr.contains("Your history is searchable"));
     assert!(!stderr.contains("ctx doctor"));
 }

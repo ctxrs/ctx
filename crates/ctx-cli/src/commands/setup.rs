@@ -32,7 +32,7 @@ pub(crate) fn run_setup(
 ) -> Result<()> {
     let suppression_reason = daemon_autostart_suppression_reason();
     if args.semantic {
-        CliHistoryConfigAdapter::new(&data_root, config).set_semantic_search_enabled(true)?;
+        super::semantic::set_semantic_policy(&data_root, config, true)?;
     }
     CliHistoryConfigAdapter::new(&data_root, config).write_default_config()?;
 

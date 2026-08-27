@@ -128,6 +128,7 @@ pub enum DaemonTrigger {
     Setup,
     Import,
     Search,
+    Semantic,
 }
 
 impl DaemonTrigger {
@@ -136,6 +137,7 @@ impl DaemonTrigger {
             Self::Setup => "setup",
             Self::Import => "import",
             Self::Search => "search",
+            Self::Semantic => "semantic",
         }
     }
 
@@ -144,6 +146,7 @@ impl DaemonTrigger {
             "setup" => Some(Self::Setup),
             "import" => Some(Self::Import),
             "search" => Some(Self::Search),
+            "semantic" => Some(Self::Semantic),
             _ => None,
         }
     }
@@ -481,6 +484,7 @@ mod dto_tests {
             (DaemonTrigger::Setup, "setup"),
             (DaemonTrigger::Import, "import"),
             (DaemonTrigger::Search, "search"),
+            (DaemonTrigger::Semantic, "semantic"),
         ] {
             assert_eq!(trigger.as_str(), name);
             assert_eq!(DaemonTrigger::parse_persisted(name), Some(trigger));

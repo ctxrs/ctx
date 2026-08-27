@@ -332,6 +332,8 @@ local upsert as described above.
 | Command | Reads | Writes |
 | --- | --- | --- |
 | `ctx setup` | provider transcript files and bounded path metadata for source discovery | data root, source catalog/epoch metadata, `search/lexical`, and optional persistent daemon lock/status/job files in automatic mode; old Store artifacts are neither opened nor deleted |
+| `ctx semantic status` | semantic policy, generation and local asset metadata, indexing mode, and daemon state | none |
+| `ctx semantic enable` / `ctx semantic disable` | semantic policy, generation and local asset metadata, indexing mode, and daemon state | atomically updates `config.toml`; automatic-mode enable may start the daemon and acquire the local runtime and model, while disable lets daemon maintenance quiesce semantic work and retains downloaded assets |
 | `ctx status` | data root metadata, source epoch, lexical/semantic generation metadata, daemon state, and compact local usage health | none; does not mutate provider history, Core generations, or usage aggregates |
 | `ctx index` / `ctx index watch` / `ctx index wait` | indexing mode, lexical/semantic generation metadata, and daemon state | none |
 | `ctx index mode` | `config.toml` when present | none when reading; `auto` or `manual` writes `config.toml` and establishes or removes persistent supervision |
@@ -365,10 +367,10 @@ daemon maintenance, start semantic workers, schedule semantic indexing, or
 write any derived generation. It serves results from the active Core
 generation. Default `--backend hybrid --refresh off`
 uses semantic evidence only when semantic coverage is complete and dirty work is
-drained, and otherwise falls back to lexical. Explicit semantic searches may ask
-the daemon query service to embed the query from an already-cached local model
-and read partial existing semantic generation coverage, but they do not
-download a model or write semantic catch-up work during search.
+drained, and otherwise falls back to lexical. Explicit semantic searches with
+`--refresh off` may ask the daemon query service to embed the query from an
+already-cached local model and read partial existing semantic generation
+coverage, but they do not download a model or write semantic catch-up work.
 Semantic coverage is exact across the content-filter boundary. Persisted
 flat-F32 source receipts account for every pre-filter Core candidate as either
 an active projected event or an intentionally filtered event. Query metadata
@@ -383,15 +385,16 @@ rebuild. Manual indexing remains passive and performs no scheduled migration.
 Explicit imports may best-effort mark recent semantic-eligible items dirty in
 the semantic generation when it already exists; this does not create semantic
 storage, initialize the model, or embed text.
-Explicit semantic search also refuses to initialize or download the embedding
-model when the required local cache is missing; hybrid falls back to lexical in
-that case. In automatic mode, default `--refresh background` lets persistent
-daemon maintenance own native provider refresh and may autostart the configured
-daemon query service for semantic/hybrid retrieval. In manual mode, background
-refresh serves the last published generation without starting or waking a
-process. Explicit `--refresh wait` may start a finite Core worker, but that
-worker never starts semantic services or catch-up. History-source plugins are
-refreshed only by an explicit selected-plugin import in 1.0.
+When the required local cache is missing, `--refresh off` refuses to initialize
+or download the embedding model; hybrid falls back to lexical in that case. In
+automatic mode, default `--refresh background` lets persistent daemon
+maintenance own native provider refresh and may autostart the configured daemon
+query service for semantic/hybrid retrieval. In manual mode, background refresh
+serves the last published generation without starting or waking a process. An
+explicit semantic or nonzero-weight hybrid `--refresh wait` may start a finite
+Core worker and, after Core publication, acquire the opted-in local model and
+reconcile semantic coverage for that exact pinned generation. History-source
+plugins are refreshed only by an explicit selected-plugin import in 1.0.
 
 When auto mode or `ctx daemon run` starts the persistent coordinator, it stores
 private lock/status files under `daemon/` in the ctx data root. Auto mode owns

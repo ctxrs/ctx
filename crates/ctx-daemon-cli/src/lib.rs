@@ -78,6 +78,7 @@ pub enum DaemonTriggerCommandArg {
     Setup,
     Import,
     Search,
+    Semantic,
 }
 
 impl DaemonTriggerCommandArg {
@@ -86,6 +87,7 @@ impl DaemonTriggerCommandArg {
             Self::Setup => "setup",
             Self::Import => "import",
             Self::Search => "search",
+            Self::Semantic => "semantic",
         }
     }
 }

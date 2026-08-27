@@ -73,9 +73,11 @@ a hosted research agent.
 - `ctx daemon run` is an advanced foreground, blocking maintenance command. It
   does not change the configured indexing mode. The daemon performs bounded
   native provider-history refresh and local semantic indexing/freshness work.
-- `ctx setup --semantic` enables local semantic search and requires auto mode.
-  Lexical search remains available while embeddings build; hybrid search uses
-  lexical and semantic evidence when semantic coverage is ready.
+- `ctx semantic enable|status|disable` owns the local semantic-search lifecycle.
+  Enablement is the explicit opt-in and starts daemon-owned model acquisition
+  and catch-up in auto mode; status is read-only; disablement retains downloaded
+  assets. Lexical search remains available while embeddings build; hybrid
+  search uses lexical and semantic evidence when semantic coverage is ready.
 - `ctx stats` reports bounded local usage/value aggregates from the separate
   owner-private `usage.sqlite` sidecar. This default-on product state is
   independent of remote event reporting, has no network path or identity, keeps

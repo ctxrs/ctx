@@ -217,6 +217,7 @@ impl DaemonUpgradePort for CliDaemonUpgrade {
             "setup" => crate::DaemonTriggerCommandArg::Setup,
             "import" => crate::DaemonTriggerCommandArg::Import,
             "search" => crate::DaemonTriggerCommandArg::Search,
+            "semantic" => crate::DaemonTriggerCommandArg::Semantic,
             other => return Err(anyhow!("invalid daemon upgrade restart trigger {other}")),
         };
         Ok(CliDaemonUpgradeLease(

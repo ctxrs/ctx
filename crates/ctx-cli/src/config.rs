@@ -308,6 +308,24 @@ pub struct DaemonConfig {
 #[derive(Debug, Clone)]
 pub struct SearchConfig {
     pub semantic: Option<bool>,
+    semantic_source: SemanticSearchSource,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SemanticSearchSource {
+    Default,
+    Config,
+    Environment,
+}
+
+impl SemanticSearchSource {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Config => "config",
+            Self::Environment => "environment",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -339,7 +357,10 @@ impl Default for AppConfig {
             daemon: DaemonConfig {
                 mode: DaemonMode::Full,
             },
-            search: SearchConfig { semantic: None },
+            search: SearchConfig {
+                semantic: None,
+                semantic_source: SemanticSearchSource::Default,
+            },
             sources: SourcesConfig { automatic: true },
             provider_roots: BTreeMap::new(),
         }
@@ -370,10 +391,13 @@ impl AppConfig {
     }
 
     pub fn semantic_search_source(&self) -> &'static str {
-        if self.search.semantic.is_some() {
-            "config"
-        } else {
-            "default"
+        self.search.semantic_source.as_str()
+    }
+
+    pub(crate) fn apply_persisted_semantic_search_enabled(&mut self, enabled: bool) {
+        if self.search.semantic_source != SemanticSearchSource::Environment {
+            self.search.semantic = Some(enabled);
+            self.search.semantic_source = SemanticSearchSource::Config;
         }
     }
 
@@ -508,6 +532,7 @@ impl AppConfig {
                 }
                 "search.semantic" => {
                     self.search.semantic = Some(parse_config_bool(key, value)?);
+                    self.search.semantic_source = SemanticSearchSource::Config;
                 }
                 "sources.automatic" => {
                     self.sources.automatic = parse_config_bool(key, value)?;
@@ -653,6 +678,7 @@ impl AppConfig {
         if let Ok(value) = env::var("CTX_SEARCH_SEMANTIC") {
             if let Some(enabled) = parse_bool_value(&value) {
                 self.search.semantic = Some(enabled);
+                self.search.semantic_source = SemanticSearchSource::Environment;
             }
         }
         Ok(())

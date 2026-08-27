@@ -49,6 +49,10 @@ ctx index mode auto
 ctx index mode manual
 ctx index watch
 ctx index wait
+ctx semantic enable
+ctx semantic enable --wait
+ctx semantic status
+ctx semantic disable
 ctx daemon run
 ```
 
@@ -116,6 +120,12 @@ ctx daemon run
   met; `--format jsonl` emits one snapshot per line. `index wait` blocks until
   the selected lexical, semantic, or combined readiness target is met and
   supports one final `--format json` result.
+- `semantic enable` persists the explicit semantic-search opt-in. In auto mode
+  it starts or recovers daemon-owned model acquisition and semantic catch-up;
+  `--wait` waits for the current projection. `semantic status` is read-only.
+  `semantic disable` opts out without deleting downloaded model/runtime assets
+  or derived semantic indexes. Plain enablement in manual mode does not change
+  indexing mode.
 - `daemon run` is an advanced command that runs persistent local maintenance in
   the foreground and blocks until stopped. It does not change the configured
   indexing mode. In manual mode, pass `--force` to run it explicitly. Each pass
@@ -124,17 +134,12 @@ ctx daemon run
   model for semantic indexing. A looping daemon keeps the embedding model
   resident after cold start, reloads daemon/semantic configuration between
   cycles, and performs recent-work freshness checks before settling into idle
-  loops. Enabling
-  `[search] semantic = true` and rerunning setup activates the existing daemon;
-  no unrelated restart is required.
+  loops.
 
 Automatic indexing is the default. Its canonical configuration is
 `[indexing] mode = "auto"`; the other supported value is `"manual"`.
-Enable local semantic search with `ctx setup --semantic`. Semantic indexing
-requires auto mode, so run `ctx index mode auto` first if the current mode is
-manual. Lexical search remains available while embeddings build, and hybrid
-search uses lexical and semantic evidence automatically when semantic coverage
-is ready.
+Lexical search remains available while embeddings build, and hybrid search uses
+lexical and semantic evidence automatically when semantic coverage is ready.
 
 Setup and health checks do not change shell startup files, install repository
 integrations, write into source repositories, call model APIs, or require API

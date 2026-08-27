@@ -20,10 +20,7 @@ pub struct SetupArgs {
         help = "Deprecated and ignored; setup follows its normal refresh lifecycle"
     )]
     pub catalog_only: bool,
-    #[arg(
-        long,
-        help = "Enable local semantic search in config (requires daemon maintenance)"
-    )]
+    #[arg(long, hide = true, help = "Deprecated; use `ctx semantic enable`")]
     pub semantic: bool,
     #[arg(long, help = "Do not start daemon maintenance after setup")]
     pub no_daemon: bool,

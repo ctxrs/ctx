@@ -5,6 +5,7 @@ pub(crate) mod index;
 pub(crate) mod list;
 pub(crate) mod locate;
 pub(crate) mod search;
+pub(crate) mod semantic;
 pub(crate) mod setup;
 pub(crate) mod show;
 /// Final-host compatibility names for MCP/cross-product adapters. Command

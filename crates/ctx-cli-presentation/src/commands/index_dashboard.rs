@@ -93,7 +93,7 @@ pub(super) fn render_semantic_disabled_wait(
             fields(context, &[Field::new("Status", "Off")]),
         ),
     );
-    append_action(&mut document, "ctx setup --semantic");
+    append_action(&mut document, "ctx semantic enable");
     document
 }
 

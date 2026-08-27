@@ -580,7 +580,7 @@ pub(super) fn render_semantic_fallback_warning(
         Some(SemanticReason::PolicyDisabled) => (
             "Semantic search is unavailable",
             "Keyword search was used because semantic search is disabled.",
-            "ctx setup --semantic",
+            "ctx semantic enable",
         ),
         Some(SemanticReason::ContentScopeUnsupported | SemanticReason::EventTypeUnsupported) => (
             "Semantic search does not support this filter",

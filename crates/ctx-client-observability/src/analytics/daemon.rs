@@ -37,6 +37,7 @@ pub enum DaemonTriggerV1 {
     Setup,
     Import,
     Search,
+    Semantic,
 }
 
 impl DaemonTriggerV1 {
@@ -45,6 +46,7 @@ impl DaemonTriggerV1 {
             Self::Setup => "setup",
             Self::Import => "import",
             Self::Search => "search",
+            Self::Semantic => "semantic",
         }
     }
 }

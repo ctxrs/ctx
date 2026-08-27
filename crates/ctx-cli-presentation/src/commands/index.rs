@@ -21,6 +21,8 @@ pub struct IndexArgs {
     format: JsonOutputFormat,
     #[command(subcommand)]
     command: Option<IndexCommand>,
+    #[arg(skip)]
+    wait_read_only: Option<bool>,
 }
 
 impl IndexArgs {
@@ -32,6 +34,21 @@ impl IndexArgs {
                 Some(IndexCommand::Watch(args)) => args.format == IndexWatchFormat::Jsonl,
                 Some(IndexCommand::Wait(args)) => args.format.is_json(),
             }
+    }
+
+    pub fn semantic_wait(format: JsonOutputFormat) -> Self {
+        Self {
+            format,
+            wait_read_only: Some(false),
+            command: Some(IndexCommand::Wait(IndexWaitArgs {
+                format,
+                lexical: false,
+                semantic: true,
+                all: false,
+                timeout_seconds: None,
+                interval_seconds: 2,
+            })),
+        }
     }
 }
 
@@ -121,6 +138,7 @@ pub fn run_index(
     ui: &mut Ui,
 ) -> Result<()> {
     let parent_json = args.format.is_json();
+    let wait_read_only = args.wait_read_only.unwrap_or(true);
     match args.command {
         None => {
             telemetry.operation = Some(IndexOperation::Status);
@@ -161,7 +179,15 @@ pub fn run_index(
             if parent_json {
                 args.format = JsonOutputFormat::Json;
             }
-            run_index_wait(args, &data_root, quiet, telemetry, readiness, ui)
+            run_index_wait(
+                args,
+                &data_root,
+                quiet,
+                wait_read_only,
+                telemetry,
+                readiness,
+                ui,
+            )
         }
     }
 }
@@ -373,6 +399,7 @@ fn run_index_wait(
     args: IndexWaitArgs,
     data_root: &Path,
     quiet: bool,
+    read_only: bool,
     telemetry: &mut IndexTelemetry,
     readiness: &mut dyn IndexReadinessPort,
     ui: &mut Ui,
@@ -390,7 +417,7 @@ fn run_index_wait(
         if let Some(message) = index_terminal_error(&status, selection) {
             telemetry.wait_outcome = Some(WaitOutcome::Blocked);
             if args.format.is_json() {
-                print_json(index_wait_json(status, selection, "blocked"))?;
+                print_json(index_wait_json(status, selection, "blocked", read_only))?;
             } else if !quiet {
                 if selection.semantic
                     && !bool_at(&status, &["semantic", "enabled"])
@@ -411,7 +438,7 @@ fn run_index_wait(
         if index_ready(&status, selection) {
             telemetry.wait_outcome = Some(WaitOutcome::Ready);
             if args.format.is_json() {
-                print_json(index_wait_json(status, selection, "ready"))?;
+                print_json(index_wait_json(status, selection, "ready", read_only))?;
             } else if !quiet {
                 human_output.print(ui, &status, selection)?;
             }
@@ -423,7 +450,7 @@ fn run_index_wait(
         {
             telemetry.wait_outcome = Some(WaitOutcome::Timeout);
             if args.format.is_json() {
-                print_json(index_wait_json(status, selection, "timeout"))?;
+                print_json(index_wait_json(status, selection, "timeout", read_only))?;
             } else if !quiet {
                 human_output.print_final(ui, &status, selection)?;
             }
@@ -609,7 +636,12 @@ fn forward_index_terminal_error(message: String, human_output_rendered: bool) ->
     }
 }
 
-fn index_wait_json(status: Value, selection: IndexSelection, wait_status: &str) -> Value {
+fn index_wait_json(
+    status: Value,
+    selection: IndexSelection,
+    wait_status: &str,
+    read_only: bool,
+) -> Value {
     let local_only = status["local_only"].as_bool().unwrap_or(true);
     compact_json(json!({
         "schema_version": 1,
@@ -620,7 +652,7 @@ fn index_wait_json(status: Value, selection: IndexSelection, wait_status: &str) 
         },
         "readiness": status,
         "local_only": local_only,
-        "read_only": true,
+        "read_only": read_only,
     }))
 }
 

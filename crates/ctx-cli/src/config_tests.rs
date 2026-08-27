@@ -809,11 +809,13 @@ fn env_overrides_search_semantic_config() {
     env_guard.set("CTX_SEARCH_SEMANTIC", "true");
     let config = AppConfig::load(temp.path()).unwrap();
     assert_eq!(config.search.semantic, Some(true));
+    assert_eq!(config.semantic_search_source(), "environment");
 
     fs::write(temp.path().join(CONFIG_FILE), "[search]\nsemantic = true\n").unwrap();
     env_guard.set("CTX_SEARCH_SEMANTIC", "false");
     let config = AppConfig::load(temp.path()).unwrap();
     assert_eq!(config.search.semantic, Some(false));
+    assert_eq!(config.semantic_search_source(), "environment");
 }
 
 #[test]

@@ -19,6 +19,7 @@ use crate::{
         list::run_list,
         locate::run_locate,
         search::run_search,
+        semantic::run_semantic,
         setup::run_setup,
         show::{run_show, ShowArgs, ShowTarget},
         sources::run_sources,
@@ -283,6 +284,9 @@ pub(crate) fn run_cli() -> Result<()> {
             &mut config,
             &mut ui,
         ),
+        CommandRoot::Semantic(args) => {
+            run_semantic(args, data_root.clone(), quiet, &mut config, &mut ui)
+        }
         CommandRoot::Status(args) => run_status(
             args,
             &data_root,
@@ -646,6 +650,7 @@ fn command_json_output(command: &CommandRoot) -> bool {
     match command {
         CommandRoot::Pro | CommandRoot::Blame | CommandRoot::Referral => false,
         CommandRoot::Setup(args) => args.format.is_json(),
+        CommandRoot::Semantic(args) => args.json_output(),
         CommandRoot::Status(args) => args.format.is_json(),
         CommandRoot::Stats(args) => args.format.is_json(),
         CommandRoot::Index(args) => args.json_output(),
@@ -762,6 +767,17 @@ pub(crate) fn command_operation_descriptor(command: &CommandRoot) -> OperationDe
                 args.no_daemon,
             ),
         }),
+        CommandRoot::Semantic(args) => match &args.command {
+            ctx_cli_presentation::commands::SemanticCommand::Enable(_) => {
+                CliOperation::SemanticEnable
+            }
+            ctx_cli_presentation::commands::SemanticCommand::Status(_) => {
+                CliOperation::SemanticStatus
+            }
+            ctx_cli_presentation::commands::SemanticCommand::Disable(_) => {
+                CliOperation::SemanticDisable
+            }
+        },
         CommandRoot::Status(_) => CliOperation::Status(StatusTelemetry::default()),
         CommandRoot::Stats(_) => CliOperation::Stats,
         CommandRoot::Index(_) => CliOperation::Index(IndexTelemetry::default()),
