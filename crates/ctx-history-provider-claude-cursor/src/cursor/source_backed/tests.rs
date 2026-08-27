@@ -1,5 +1,224 @@
+use super::super::layout::CursorTranscriptPath;
 use super::*;
 use ctx_history_core::EventRole;
+use std::collections::BTreeSet;
+
+fn cursor_record(timestamp: &str, text: &str) -> String {
+    format!(
+        concat!(
+            r#"{{"timestamp":"{}","role":"user","#,
+            r#""message":{{"content":[{{"type":"text","text":"{}"}}]}}}}"#,
+            "\n"
+        ),
+        timestamp, text
+    )
+}
+
+fn duplicate_cursor_routes(
+    copies: &[(&str, Vec<String>)],
+) -> (tempfile::TempDir, Vec<CursorTranscriptPath>) {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("projects");
+    for (project, records) in copies {
+        let session = root
+            .join(project)
+            .join("agent-transcripts")
+            .join("duplicate-session");
+        fs::create_dir_all(&session).unwrap();
+        fs::write(session.join("duplicate-session.jsonl"), records.concat()).unwrap();
+    }
+    let inventory = discover_cursor_transcripts(&root);
+    assert!(inventory.completed, "{:#?}", inventory.issues);
+    (temp, inventory.transcripts)
+}
+
+fn selected_project(
+    routes: &[CursorTranscriptPath],
+    selection: CursorTranscriptSelection,
+) -> String {
+    routes[selection.selected_index]
+        .path()
+        .strip_prefix(routes[selection.selected_index].authority().named_path())
+        .unwrap()
+        .components()
+        .next()
+        .unwrap()
+        .as_os_str()
+        .to_string_lossy()
+        .into_owned()
+}
+
+#[test]
+fn cursor_duplicate_selection_collapses_equal_semantics_and_prefers_strict_extension() {
+    let (_equal_temp, equal) = duplicate_cursor_routes(&[
+        (
+            "a-project",
+            vec![cursor_record("2026-06-24T12:00:00Z", "same")],
+        ),
+        (
+            "z-project",
+            vec![cursor_record("2026-06-24T12:00:00Z", "same")],
+        ),
+    ]);
+    let equal_selection = select_cursor_transcript(&equal).unwrap();
+    assert!(equal_selection.divergent_indices.is_empty());
+    assert_eq!(selected_project(&equal, equal_selection), "a-project");
+
+    let (_malformed_temp, malformed) = duplicate_cursor_routes(&[
+        (
+            "a-project",
+            vec![
+                cursor_record("2026-06-24T12:00:00Z", "same"),
+                "not json\n".to_owned(),
+            ],
+        ),
+        (
+            "z-project",
+            vec![cursor_record("2026-06-24T12:00:00Z", "same")],
+        ),
+    ]);
+    let malformed_selection = select_cursor_transcript(&malformed).unwrap();
+    assert!(malformed_selection.divergent_indices.is_empty());
+    assert_eq!(
+        selected_project(&malformed, malformed_selection),
+        "a-project"
+    );
+
+    let first = cursor_record("2026-06-24T12:00:00Z", "first");
+    let (_extension_temp, extension) = duplicate_cursor_routes(&[
+        ("a-project", vec![first.clone()]),
+        (
+            "z-project",
+            vec![
+                first,
+                cursor_record("2026-06-24T12:01:00Z", "strict extension"),
+            ],
+        ),
+    ]);
+    let extension_selection = select_cursor_transcript(&extension).unwrap();
+    assert!(extension_selection.divergent_indices.is_empty());
+    assert_eq!(
+        selected_project(&extension, extension_selection),
+        "z-project"
+    );
+}
+
+#[test]
+fn cursor_duplicate_selection_authenticates_the_selected_file_observation() {
+    let (_temp, routes) = duplicate_cursor_routes(&[
+        (
+            "a-project",
+            vec![cursor_record("2026-06-24T12:00:00Z", "selected")],
+        ),
+        (
+            "z-project",
+            vec![cursor_record("2026-06-24T12:00:00Z", "other")],
+        ),
+    ]);
+    let selection = select_cursor_transcript(&routes).unwrap();
+    let selected = &routes[selection.selected_index];
+    let source =
+        source_key_scoped(selected.native_session_id(), SourceAnchorScope::Unqualified).unwrap();
+    let binding = CursorBinding {
+        native_session_id: selected.native_session_id().to_owned(),
+        logical_transcript_sha256: Some(selection.selected_signature),
+        selected_route_sha256: cursor_route_sha256(selected.path()),
+        alias_route_sha256: routes
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| *index != selection.selected_index)
+            .map(|(_, route)| cursor_route_sha256(route.path()))
+            .collect(),
+    };
+
+    fs::write(
+        selected.path(),
+        [
+            cursor_record("2026-06-24T12:00:00Z", "selected"),
+            cursor_record("2026-06-24T12:01:00Z", "changed after selection"),
+        ]
+        .concat(),
+    )
+    .unwrap();
+    let leaf = ProviderJsonlLeaf::observe(
+        source,
+        selected.path().to_path_buf(),
+        Arc::new(selected.authority().clone()),
+        selected.authority_relative_path().to_path_buf(),
+        TypedKey::bytes(serde_json::to_vec(&binding).unwrap()).unwrap(),
+    )
+    .unwrap();
+
+    assert!(matches!(
+        authenticate_selected_cursor_leaf(leaf, Some(&selection.selected_observation)),
+        Err(CaptureError::SourceChangedDuringCapture)
+    ));
+}
+
+#[test]
+fn cursor_duplicate_selection_bounds_oversized_rejected_records() {
+    let valid = cursor_record("2026-06-24T12:00:00Z", "same valid event");
+    let oversized = format!("{}\n", "x".repeat(MAX_PROVIDER_JSONL_LINE_BYTES + 1));
+    let (_temp, routes) = duplicate_cursor_routes(&[
+        ("a-project", vec![oversized, valid.clone()]),
+        ("z-project", vec![valid]),
+    ]);
+
+    let selection = select_cursor_transcript(&routes).unwrap();
+    assert!(selection.divergent_indices.is_empty());
+    assert_eq!(selected_project(&routes, selection), "a-project");
+}
+
+#[test]
+fn cursor_divergent_selection_ranks_valid_events_then_timestamp_then_path() {
+    let (_count_temp, count_ranked) = duplicate_cursor_routes(&[
+        (
+            "a-project",
+            vec![cursor_record("2026-06-24T12:05:00Z", "one newer event")],
+        ),
+        (
+            "z-project",
+            vec![
+                cursor_record("2026-06-24T12:00:00Z", "first divergent event"),
+                cursor_record("2026-06-24T12:01:00Z", "second divergent event"),
+            ],
+        ),
+    ]);
+    let count_selection = select_cursor_transcript(&count_ranked).unwrap();
+    assert_eq!(count_selection.divergent_indices, BTreeSet::from([0]));
+    assert_eq!(
+        selected_project(&count_ranked, count_selection),
+        "z-project"
+    );
+
+    let (_time_temp, time_ranked) = duplicate_cursor_routes(&[
+        (
+            "a-project",
+            vec![cursor_record("2026-06-24T12:00:00Z", "older copy")],
+        ),
+        (
+            "z-project",
+            vec![cursor_record("2026-06-24T12:01:00Z", "newer copy")],
+        ),
+    ]);
+    let time_selection = select_cursor_transcript(&time_ranked).unwrap();
+    assert_eq!(time_selection.divergent_indices, BTreeSet::from([0]));
+    assert_eq!(selected_project(&time_ranked, time_selection), "z-project");
+
+    let (_path_temp, path_ranked) = duplicate_cursor_routes(&[
+        (
+            "a-project",
+            vec![cursor_record("2026-06-24T12:00:00Z", "copy a")],
+        ),
+        (
+            "z-project",
+            vec![cursor_record("2026-06-24T12:00:00Z", "copy z")],
+        ),
+    ]);
+    let path_selection = select_cursor_transcript(&path_ranked).unwrap();
+    assert_eq!(path_selection.divergent_indices, BTreeSet::from([1]));
+    assert_eq!(selected_project(&path_ranked, path_selection), "a-project");
+}
 
 #[test]
 fn source_and_session_identities_are_root_scoped() {

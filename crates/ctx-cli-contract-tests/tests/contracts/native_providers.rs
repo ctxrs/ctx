@@ -716,6 +716,154 @@ fn native_provider_cli_flow_imports_supported_provider_paths() {
 }
 
 #[test]
+fn cursor_divergent_transcript_copies_retain_history_and_repair_to_strict_extension() {
+    let temp = tempdir();
+    let query = "cursor-conflicting-copies-oracle";
+    let path = write_native_cursor_fixture(&temp, query);
+    // Model three physical project routes that claim one native session while
+    // keeping unrelated history in the same provider root.
+    let conflicted = "conflicted-session";
+    let mut conflicted_paths = Vec::new();
+    for (slug, text) in [
+        ("workspace-one", "first copy"),
+        ("workspace-two", "second"),
+        ("workspace-three", "first copy"),
+    ] {
+        let session = Path::new(&path)
+            .join(slug)
+            .join("agent-transcripts")
+            .join(conflicted);
+        fs::create_dir_all(&session).unwrap();
+        let transcript = session.join(format!("{conflicted}.jsonl"));
+        fs::write(
+            &transcript,
+            format!(
+                concat!(
+                    r#"{{"timestamp":"2026-06-24T12:00:00Z","role":"user","#,
+                    r#""message":{{"content":[{{"type":"text","text":"{}"}}]}}}}"#,
+                    "\n"
+                ),
+                text
+            ),
+        )
+        .unwrap();
+        conflicted_paths.push(transcript);
+    }
+    let _daemon = start_isolated_provider_daemon(&temp);
+
+    let receipt = json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "cursor",
+        "--path",
+        &path,
+        "--no-daemon",
+        "--format=json",
+    ]));
+    wait_for_imported_core(&temp, &receipt);
+
+    assert_eq!(
+        receipt["sources"][0]["source_failure_total"], 1,
+        "only the genuinely divergent copy must remain visible as a source diagnostic: {receipt:#}"
+    );
+    assert_eq!(
+        receipt["sources"][0]["carried_forward"], false,
+        "the diagnostic belongs to the discarded physical copy, not the imported winner: {receipt:#}"
+    );
+
+    // The selected conflicted session and its healthy sibling both publish.
+    let (sessions, events) = provider_core_counts(&data_root(&temp), "cursor");
+    assert!(sessions >= 2, "{receipt:#}");
+    assert!(events >= 2, "{receipt:#}");
+    let selected = json_output(ctx(&temp).args([
+        "search",
+        "first copy",
+        "--provider",
+        "cursor",
+        "--refresh",
+        "off",
+        "--limit",
+        "1",
+        "--format=json",
+    ]));
+    assert_search_provider_oracle(&selected, "cursor", "first copy", 1, "message");
+    let search = json_output(ctx(&temp).args([
+        "search",
+        query,
+        "--provider",
+        "cursor",
+        "--refresh",
+        "off",
+        "--limit",
+        "1",
+        "--format=json",
+    ]));
+    assert_search_provider_oracle(&search, "cursor", query, 1, "message");
+
+    // An unchanged warm refresh remains a no-op while preserving the physical
+    // copy diagnostic. It must never claim that the accepted winner failed or
+    // was carried forward.
+    let replay = json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "cursor",
+        "--path",
+        &path,
+        "--no-daemon",
+        "--format=json",
+    ]));
+    wait_for_imported_core(&temp, &replay);
+    assert_eq!(
+        replay["sources"][0]["source_failure_total"], 1,
+        "{replay:#}"
+    );
+    assert_eq!(replay["sources"][0]["carried_forward"], false, "{replay:#}");
+    assert_eq!(
+        replay["sources"][0]["generation_changed"], false,
+        "{replay:#}"
+    );
+
+    // The second copy converges into a strict extension. The longer history
+    // wins, the divergence diagnostic clears, and the added event is visible.
+    fs::write(
+        &conflicted_paths[1],
+        concat!(
+            r#"{"timestamp":"2026-06-24T12:00:00Z","role":"user","message":{"content":[{"type":"text","text":"first copy"}]}}"#,
+            "\n",
+            r#"{"timestamp":"2026-06-24T12:01:00Z","role":"assistant","message":{"content":[{"type":"text","text":"strict extension"}]}}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+    let repaired = json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "cursor",
+        "--path",
+        &path,
+        "--no-daemon",
+        "--format=json",
+    ]));
+    wait_for_imported_core(&temp, &repaired);
+    assert_eq!(
+        repaired["sources"][0]["source_failure_total"], 0,
+        "a unique strict extension must repair the divergence: {repaired:#}"
+    );
+    let extension = json_output(ctx(&temp).args([
+        "search",
+        "strict extension",
+        "--provider",
+        "cursor",
+        "--refresh",
+        "off",
+        "--limit",
+        "1",
+        "--format=json",
+    ]));
+    assert_search_provider_oracle(&extension, "cursor", "strict extension", 1, "message");
+}
+
+#[test]
 fn discovery_only_sqlite_explicit_paths_are_rejected_without_fallback() {
     let temp = tempdir();
     let path = write_native_astrbot_fixture(&temp, "astrbot-explicit-unsupported-oracle");
