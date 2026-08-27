@@ -485,41 +485,37 @@ fn primary_renderers_match_reference_goldens_at_80_columns() {
 }
 
 #[test]
-fn search_heading_discloses_relevance_order_and_truthful_agent_scope() {
-    for unicode in [true, false] {
-        let separator = if unicode { " · " } else { " | " };
-        let all_agents =
-            render_search_document(&search_value(), false, &context_with_unicode(80, unicode))
-                .render_plain();
-        assert!(
-            all_agents.starts_with(&format!(
-                "1 result{separator}relevance order{separator}all agent sessions\n"
-            )),
-            "{all_agents}"
-        );
+fn search_heading_only_reports_result_count() {
+    let singular = search_value();
+    let mut plural = search_value();
+    let second = plural["results"][0].clone();
+    plural["results"]
+        .as_array_mut()
+        .expect("search fixture results are an array")
+        .push(second);
+    plural["result_window"]["returned"] = json!(2);
 
-        let mut primary_only = search_value();
-        primary_only["filters"]["primary_only"] = json!(true);
-        let primary_only =
-            render_search_document(&primary_only, false, &context_with_unicode(80, unicode))
-                .render_plain();
-        assert!(primary_only.starts_with(&format!(
-            "1 result{separator}relevance order{separator}primary sessions\n"
-        )));
-        assert!(!primary_only.contains("all agent sessions"));
-    }
-
-    let narrow = render_search_document(&search_value(), false, &context_with_unicode(32, true))
-        .render_plain();
-    assert!(narrow.starts_with("1 result\n  relevance order\n  all agent sessions\n"));
-
-    for width in [32, 48, 80, 120] {
-        let context = context(width, ColorMode::Never);
-        let first = render_search_document(&search_value(), false, &context);
-        let second = render_search_document(&search_value(), false, &context);
-        assert_eq!(first.render_plain(), second.render_plain());
-        assert!(first.render_plain().contains("all agent sessions"));
-        assert_fits(&first, &context);
+    for (value, expected_heading) in [(&singular, "1 result"), (&plural, "2 results")] {
+        for primary_only in [false, true] {
+            let mut filtered = value.clone();
+            filtered["filters"]["primary_only"] = json!(primary_only);
+            for unicode in [true, false] {
+                for width in [32, 48, 80, 120] {
+                    let context = context_with_unicode(width, unicode);
+                    let document = render_search_document(&filtered, false, &context);
+                    let rendered = document.render_plain();
+                    assert_eq!(
+                        rendered.lines().next(),
+                        Some(expected_heading),
+                        "{rendered}"
+                    );
+                    for removed in ["relevance order", "all agent sessions", "primary sessions"] {
+                        assert!(!rendered.contains(removed), "{rendered}");
+                    }
+                    assert_fits(&document, &context);
+                }
+            }
+        }
     }
 }
 
@@ -720,38 +716,66 @@ fn normal_search_uses_compact_refs_and_verbose_uses_full_ctx_ids() {
 }
 
 #[test]
-fn search_event_row_uses_exact_milliseconds_and_quiet_missing_time() {
-    let document = render_search_document(
-        &compact_search_value(),
-        false,
-        &context(80, ColorMode::Never),
-    );
-    let rendered = document.render_plain();
-    assert!(rendered.contains("Event     01900001 · 2026-07-30T12:00:00.123Z"));
-    assert!(!rendered.contains("Match"));
-    assert!(document
-        .lines()
-        .iter()
-        .flat_map(|line| line.spans())
-        .any(|span| span.content() == "01900001" && span.token() == Token::Reference));
-    assert!(document
-        .lines()
-        .iter()
-        .flat_map(|line| line.spans())
-        .any(|span| {
-            span.content() == "2026-07-30T12:00:00.123Z" && span.token() == Token::Text
-        }));
+fn search_event_and_time_are_separate_fields_with_exact_milliseconds() {
+    for unicode in [true, false] {
+        for width in [32, 48, 80, 120] {
+            let context = context_with_unicode(width, unicode);
+            let document = render_search_document(&compact_search_value(), false, &context);
+            let rendered = document.render_plain();
+            assert!(!rendered.contains("Match"));
 
-    let ascii = render_search_document(
-        &compact_search_value(),
-        false,
-        &context_with_unicode(80, false),
-    )
-    .render_plain();
-    assert!(
-        ascii.contains("Event     01900001 | 2026-07-30T12:00:00.123Z"),
-        "{ascii}"
-    );
+            let event_line = document
+                .lines()
+                .iter()
+                .position(|line| {
+                    line.spans()
+                        .iter()
+                        .any(|span| span.content() == "Event" && span.token() == Token::Label)
+                })
+                .expect("event field is rendered");
+            let time_line = document
+                .lines()
+                .iter()
+                .position(|line| {
+                    line.spans()
+                        .iter()
+                        .any(|span| span.content() == "Time" && span.token() == Token::Label)
+                })
+                .expect("time field is rendered");
+            assert_ne!(event_line, time_line, "{rendered}");
+            assert!(
+                document.lines()[event_line]
+                    .spans()
+                    .iter()
+                    .any(|span| span.content() == "01900001" && span.token() == Token::Reference),
+                "{rendered}"
+            );
+            let time_end = document
+                .lines()
+                .iter()
+                .enumerate()
+                .skip(time_line + 1)
+                .find_map(|(index, line)| {
+                    line.spans()
+                        .iter()
+                        .any(|span| span.content() == "More" && span.token() == Token::Label)
+                        .then_some(index)
+                })
+                .unwrap_or(document.lines().len());
+            let time_value: String = document.lines()[time_line..time_end]
+                .iter()
+                .flat_map(|line| line.spans())
+                .filter(|span| span.token() == Token::Text)
+                .flat_map(|span| span.content().chars())
+                .filter(|character| !character.is_whitespace())
+                .collect();
+            assert!(
+                time_value.contains("2026-07-30T12:00:00.123Z"),
+                "{rendered}"
+            );
+            assert_fits(&document, &context);
+        }
+    }
 
     let mut missing = compact_search_value();
     missing["results"][0]["timestamp"] = Value::Null;

@@ -1,10 +1,11 @@
-1 result · relevance order · all agent sessions
+1 result
 
 1. Fix the Unicode cache key regression in the parser.
    Provider  Codex
    Session   01900000
    Root      01900000
-   Event     01900001 · 2026-07-30T12:00:00.123Z
+   Event     01900001
+   Time      2026-07-30T12:00:00.123Z
    More      2 results from this session
 
    Inspect

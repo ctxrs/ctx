@@ -707,9 +707,9 @@ search uses a non-default data root. Each result's `rank` is its one-based
 position in the final shaped window. `retrieval_score` preserves the backend's
 diagnostic score, which can be non-monotonic after query-coverage and family
 shaping.
-Human output states `relevance order` and the selected agent scope in the
-result heading. Its compact `Event` row pairs the dynamic event reference with
-the exact matched-event UTC RFC 3339 millisecond time;
+Human output uses only the pluralized rendered-result count in the heading.
+Separate `Event` and `Time` rows show the dynamic event reference and the exact
+matched-event UTC RFC 3339 millisecond time;
 timestamps never re-sort results. `--verbose` additionally renders the stored
 event sequence and available workspace/working-directory, branch, agent, and
 parent/root lineage without repeating equal values.

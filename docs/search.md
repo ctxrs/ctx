@@ -24,12 +24,11 @@ Ordinary results include primary and subagent sessions. When history carries an
 exact root-session claim, ctx groups sessions by that claim and returns one best
 result per root task before repeating a root; a session without that claim is
 its own group. Agent scope is result metadata or an explicit filter; it does
-not silently rerank relevance. Human output labels the result window as
-relevance ordered and identifies the selected agent scope. Each result's
-`Event` row shows the short ctx event ID and the
-matched event's exact
-UTC RFC 3339 millisecond timestamp; an indexed event without a timestamp says
-`time unavailable`. These timestamps do not change result ordering.
+not silently rerank relevance. Human output uses only the pluralized result
+count in the heading. Each result has separate `Event` and `Time` rows showing
+the short ctx event ID and the matched event's exact UTC RFC 3339 millisecond
+timestamp; an indexed event without a timestamp says `time unavailable`. These
+timestamps do not change result ordering.
 
 ## Search examples
 

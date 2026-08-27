@@ -259,10 +259,7 @@ fn fresh_home_search_mvp_flow() {
         .stdout
         .clone();
     let human_search = String::from_utf8(human_search).unwrap();
-    assert!(
-        human_search.starts_with("1 result · relevance order · all agent sessions\n\n"),
-        "{human_search}"
-    );
+    assert!(human_search.starts_with("1 result\n\n"), "{human_search}");
     assert!(human_search.contains("1. "));
     assert!(human_search.contains("Provider  Codex"), "{human_search}");
     assert!(
@@ -270,10 +267,11 @@ fn fresh_home_search_mvp_flow() {
         "{human_search}"
     );
     assert!(
-        human_search.contains(&format!(
-            "Event     {} · 2026-06-23T15:00:02.000Z",
-            &ctx_event_id[..8]
-        )),
+        human_search.contains(&format!("Event     {}", &ctx_event_id[..8])),
+        "{human_search}"
+    );
+    assert!(
+        human_search.contains("Time      2026-06-23T15:00:02.000Z"),
         "{human_search}"
     );
     assert!(

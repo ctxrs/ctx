@@ -7,9 +7,7 @@ use crate::{
     },
 };
 
-use super::human::{
-    display_width, push_action, push_field, push_heading, push_prefixed, push_wrapped,
-};
+use super::human::{push_action, push_field, push_heading, push_prefixed, push_wrapped};
 
 const CARD_INDENT: usize = 3;
 const CARD_LABEL_WIDTH: usize = 8;
@@ -59,7 +57,7 @@ pub(in crate::source_index) fn render_search_document(
     }
 
     let mut document = Document::new();
-    render_results_heading(&mut document, value, results.len(), context);
+    render_results_heading(&mut document, results.len());
 
     for (position, result) in results.iter().enumerate() {
         document.push_blank();
@@ -95,12 +93,7 @@ fn render_search_footers(document: &mut Document, value: &Value, context: &Rende
     }
 }
 
-fn render_results_heading(
-    document: &mut Document,
-    value: &Value,
-    result_count: usize,
-    context: &RenderContext,
-) {
+fn render_results_heading(document: &mut Document, result_count: usize) {
     let outcome = format!(
         "{result_count} {}",
         if result_count == 1 {
@@ -109,35 +102,7 @@ fn render_results_heading(
             "results"
         }
     );
-    let order = "relevance order";
-    let scope = if value["filters"]["primary_only"] == true {
-        "primary sessions"
-    } else {
-        "all agent sessions"
-    };
-    let separator = if context.unicode() { " · " } else { " | " };
-    let width = display_width(&outcome)
-        .saturating_add(display_width(separator).saturating_mul(2))
-        .saturating_add(display_width(order))
-        .saturating_add(display_width(scope));
-
-    if context
-        .content_width()
-        .is_none_or(|available| width <= available)
-    {
-        document.push_line(
-            Line::new()
-                .with(Span::new(outcome, Token::Heading))
-                .with(Span::new(separator, Token::Label))
-                .with(Span::new(order, Token::Label))
-                .with(Span::new(separator, Token::Label))
-                .with(Span::new(scope, Token::Label)),
-        );
-    } else {
-        push_heading(document, &outcome, Token::Heading);
-        push_wrapped(document, context, 2, order, Token::Label);
-        push_wrapped(document, context, 2, scope, Token::Label);
-    }
+    push_heading(document, &outcome, Token::Heading);
 }
 
 fn render_empty(value: &Value, context: &RenderContext) -> Document {
@@ -292,51 +257,24 @@ fn render_event_summary(
         .map_or(("time unavailable", Token::Label), |timestamp| {
             (timestamp, Token::Text)
         });
-    let separator = if context.unicode() { " · " } else { " | " };
-    let prefix_width = CARD_INDENT
-        .saturating_add(CARD_LABEL_WIDTH)
-        .saturating_add(2);
-    let combined_width = prefix_width
-        .saturating_add(display_width(event_id))
-        .saturating_add(display_width(separator))
-        .saturating_add(display_width(time));
-
-    if context
-        .content_width()
-        .is_none_or(|available| combined_width <= available)
-    {
-        document.push_line(
-            Line::new()
-                .with(Span::text(" ".repeat(CARD_INDENT)))
-                .with(Span::new("Event", Token::Label))
-                .with(Span::text(" ".repeat(
-                    CARD_LABEL_WIDTH.saturating_sub(display_width("Event")),
-                )))
-                .with(Span::text("  "))
-                .with(Span::new(event_id, Token::Reference))
-                .with(Span::new(separator, Token::Label))
-                .with(Span::new(time, time_token)),
-        );
-    } else {
-        push_field(
-            document,
-            context,
-            CARD_INDENT,
-            "Event",
-            CARD_LABEL_WIDTH,
-            event_id,
-            Token::Reference,
-        );
-        push_field(
-            document,
-            context,
-            CARD_INDENT,
-            "Time",
-            CARD_LABEL_WIDTH,
-            time,
-            time_token,
-        );
-    }
+    push_field(
+        document,
+        context,
+        CARD_INDENT,
+        "Event",
+        CARD_LABEL_WIDTH,
+        event_id,
+        Token::Reference,
+    );
+    push_field(
+        document,
+        context,
+        CARD_INDENT,
+        "Time",
+        CARD_LABEL_WIDTH,
+        time,
+        time_token,
+    );
 }
 
 fn render_verbose_fields(document: &mut Document, context: &RenderContext, result: &Value) {
