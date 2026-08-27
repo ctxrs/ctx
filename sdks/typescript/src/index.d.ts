@@ -57,9 +57,25 @@ export interface LocalAgentHistoryClientOptions extends LocalCliAdapterOptions {
   adapter?: LocalCliAdapter;
 }
 
+/**
+ * @deprecated Hosted SDK placeholders are deprecated and will be removed in
+ * the next breaking SDK revision; hosted operations remain unsupported.
+ */
 export interface HostedAgentHistoryClientOptions {
+  /**
+   * @deprecated Hosted SDK placeholders are deprecated and will be removed in
+   * the next breaking SDK revision; hosted operations remain unsupported.
+   */
   hosted?: boolean;
+  /**
+   * @deprecated Hosted SDK placeholders are deprecated and will be removed in
+   * the next breaking SDK revision; hosted operations remain unsupported.
+   */
   baseUrl?: string;
+  /**
+   * @deprecated Hosted SDK placeholders are deprecated and will be removed in
+   * the next breaking SDK revision; hosted operations remain unsupported.
+   */
   apiKey?: string;
 }
 
@@ -502,10 +518,18 @@ export declare class LocalAgentHistoryClient {
   version(): Promise<VersionInfo>;
 }
 
+/**
+ * @deprecated Hosted SDK placeholders are deprecated and will be removed in
+ * the next breaking SDK revision; hosted operations remain unsupported.
+ */
 export declare class HostedAgentHistoryClient {
   kind: "hosted";
   baseUrl?: string;
   apiKey?: string;
+  /**
+   * @deprecated Hosted SDK placeholders are deprecated and will be removed in
+   * the next breaking SDK revision; hosted operations remain unsupported.
+   */
   constructor(options?: HostedAgentHistoryClientOptions);
   status(): Promise<never>;
   init(): Promise<never>;
@@ -519,6 +543,10 @@ export declare class HostedAgentHistoryClient {
 }
 
 export declare function createLocalAgentHistoryClient(options?: LocalAgentHistoryClientOptions): LocalAgentHistoryClient;
+/**
+ * @deprecated Hosted SDK placeholders are deprecated and will be removed in
+ * the next breaking SDK revision; hosted operations remain unsupported.
+ */
 export declare function createHostedAgentHistoryClient(options?: HostedAgentHistoryClientOptions): HostedAgentHistoryClient;
 export declare function createAgentHistoryClient(
   options?: LocalAgentHistoryClientOptions | HostedAgentHistoryClientOptions,

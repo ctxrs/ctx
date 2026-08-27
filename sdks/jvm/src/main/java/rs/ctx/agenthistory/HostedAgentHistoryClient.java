@@ -3,7 +3,14 @@ package rs.ctx.agenthistory;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
-/** Explicit hosted placeholder. It never performs network calls. */
+/**
+ * Explicit hosted placeholder. It never performs network calls.
+ *
+ * @deprecated Hosted SDK placeholders are deprecated and will be removed in the next breaking SDK
+ *     revision; hosted operations remain unsupported.
+ */
+@Deprecated(forRemoval = true)
+@SuppressWarnings("removal")
 public final class HostedAgentHistoryClient extends AgentHistoryClient {
     private final HostedConfig config;
 

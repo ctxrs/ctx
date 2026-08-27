@@ -3,7 +3,7 @@ import Foundation
 public struct AgentHistoryClient: Sendable {
     private enum Backend: Sendable {
         case local(LocalCLIAdapter)
-        case hosted(HostedConfig)
+        case hosted(baseURL: URL?, apiKey: String?)
     }
 
     private var backend: Backend
@@ -34,8 +34,15 @@ public struct AgentHistoryClient: Sendable {
         )
     }
 
+    @available(
+        *,
+        deprecated,
+        message: "Hosted SDK placeholders are deprecated and will be removed in the next breaking SDK revision; hosted operations remain unsupported."
+    )
     public static func hosted(_ config: HostedConfig = HostedConfig()) -> AgentHistoryClient {
-        AgentHistoryClient(backend: .hosted(config))
+        AgentHistoryClient(
+            backend: .hosted(baseURL: config.baseURL, apiKey: config.apiKey)
+        )
     }
 
     public func status() throws -> StatusResponse {
@@ -155,8 +162,8 @@ public struct AgentHistoryClient: Sendable {
         switch backend {
         case let .local(adapter):
             backendValue = adapter.backend
-        case let .hosted(config):
-            backendValue = AgentHistoryBackend(kind: "hosted", baseURL: config.baseURL?.absoluteString)
+        case let .hosted(baseURL, _):
+            backendValue = AgentHistoryBackend(kind: "hosted", baseURL: baseURL?.absoluteString)
         }
         return AgentHistoryEnvelope(operation: operation, backend: backendValue, error: error.contractError)
     }

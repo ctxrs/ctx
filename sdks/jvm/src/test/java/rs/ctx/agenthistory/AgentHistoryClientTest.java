@@ -990,7 +990,19 @@ public final class AgentHistoryClientTest {
         }
     }
 
-    private static void hostedIsExplicitlyUnsupported() {
+    @SuppressWarnings("removal")
+    private static void hostedIsExplicitlyUnsupported() throws NoSuchMethodException {
+        assertDeprecatedForRemoval(
+                HostedConfig.class.getAnnotation(Deprecated.class), "HostedConfig");
+        assertDeprecatedForRemoval(
+                HostedAgentHistoryClient.class.getAnnotation(Deprecated.class),
+                "HostedAgentHistoryClient");
+        assertDeprecatedForRemoval(
+                AgentHistoryClient.class
+                        .getMethod("hosted", HostedConfig.class)
+                        .getAnnotation(Deprecated.class),
+                "AgentHistoryClient.hosted");
+
         AgentHistoryClient client = AgentHistoryClient.hosted(HostedConfig.builder().baseUrl("https://ctx.example.invalid").build());
         try {
             client.status();
@@ -999,6 +1011,12 @@ public final class AgentHistoryClientTest {
             assertEquals("not_supported", error.code());
             assertEquals("hosted", error.details().get("backend"));
             assertEquals("https://ctx.example.invalid", error.details().get("baseUrl"));
+        }
+    }
+
+    private static void assertDeprecatedForRemoval(Deprecated annotation, String name) {
+        if (annotation == null || !annotation.forRemoval()) {
+            throw new AssertionError("expected " + name + " to be @Deprecated(forRemoval=true)");
         }
     }
 

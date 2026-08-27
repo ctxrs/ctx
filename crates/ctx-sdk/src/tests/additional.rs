@@ -472,6 +472,7 @@ fn status_normalization_rejects_counters_outside_the_exact_json_domain() {
 }
 
 #[test]
+#[allow(deprecated)]
 fn hosted_backend_returns_structured_error() {
     let client = AgentHistoryClient::hosted(HostedBackendConfig {
         base_url: "https://ctx.example.invalid".to_owned(),

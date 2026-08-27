@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Reflection;
 using System.Text;
 using System.Text.Json.Nodes;
 using Ctx.AgentHistory;
@@ -1113,8 +1114,18 @@ internal static class Program
         Equal(CtxAgentHistoryVersions.SdkVersion, versioning.SdkVersion);
     }
 
+#pragma warning disable CS0618 // Direct hosted-placeholder coverage intentionally verifies obsolete APIs.
     private static Task HostedPlaceholderError()
     {
+        AssertHostedObsolete(typeof(HostedAgentHistoryConfig));
+        AssertHostedObsolete(typeof(HostedAdapter));
+        AssertHostedObsolete(typeof(HostedTransportNotImplementedException));
+        var hostedFactory = typeof(AgentHistoryClient).GetMethod(
+            nameof(AgentHistoryClient.Hosted),
+            [typeof(HostedAgentHistoryConfig)]);
+        True(hostedFactory is not null, "AgentHistoryClient.Hosted is missing");
+        AssertHostedObsolete(hostedFactory!);
+
         var client = AgentHistoryClient.Hosted(new HostedAgentHistoryConfig("https://ctx.example.invalid"));
         return ThrowsAsync<HostedTransportNotImplementedException>(async () =>
         {
@@ -1130,6 +1141,16 @@ internal static class Program
                 throw;
             }
         });
+    }
+#pragma warning restore CS0618
+
+    private static void AssertHostedObsolete(MemberInfo member)
+    {
+        const string expected = "Hosted SDK placeholders are deprecated and will be removed in the next breaking SDK revision; hosted operations remain unsupported.";
+        var obsolete = member.GetCustomAttribute<ObsoleteAttribute>();
+        True(obsolete is not null, $"{member.Name} is missing ObsoleteAttribute");
+        Equal(expected, obsolete!.Message ?? "");
+        Equal(false, obsolete.IsError);
     }
 
     private static Task UsesAgentHistoryV1ErrorCodes()

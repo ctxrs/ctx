@@ -123,7 +123,11 @@ class CtxAgentHistoryTimeoutError(CtxAgentHistoryError):
 
 
 class HostedTransportNotImplementedError(CtxAgentHistoryError):
-    """Raised by the hosted placeholder transport."""
+    """Raised by the deprecated hosted placeholder transport.
+
+    Hosted SDK placeholders are deprecated and will be removed in the next
+    breaking SDK revision; hosted operations remain unsupported.
+    """
 
     def __init__(self, method: str) -> None:
         super().__init__(

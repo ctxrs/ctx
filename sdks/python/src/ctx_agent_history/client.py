@@ -65,10 +65,21 @@ class AgentHistoryClient:
 
     @classmethod
     def hosted(cls, config: HostedConfig) -> "AgentHistoryClient":
+        """Create a deprecated hosted placeholder client.
+
+        Hosted SDK placeholders are deprecated and will be removed in the next
+        breaking SDK revision; hosted operations remain unsupported.
+        """
         return cls(HostedAdapter(config))
 
     @classmethod
     def from_config(cls, config: Union[LocalConfig, HostedConfig]) -> "AgentHistoryClient":
+        """Create a client from local configuration or a deprecated hosted placeholder.
+
+        Passing ``HostedConfig`` is deprecated. Hosted SDK placeholders are
+        deprecated and will be removed in the next breaking SDK revision;
+        hosted operations remain unsupported.
+        """
         if isinstance(config, LocalConfig):
             return cls(LocalCliAdapter(config))
         if isinstance(config, HostedConfig):

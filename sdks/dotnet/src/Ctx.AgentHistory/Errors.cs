@@ -92,6 +92,8 @@ public sealed class CtxAgentHistoryValidationException : CtxAgentHistoryExceptio
     }
 }
 
+#pragma warning disable CS0618 // This obsolete exception retains the obsolete hosted configuration contract.
+[Obsolete("Hosted SDK placeholders are deprecated and will be removed in the next breaking SDK revision; hosted operations remain unsupported.", error: false)]
 public sealed class HostedTransportNotImplementedException : CtxAgentHistoryException
 {
     public HostedTransportNotImplementedException(string method, HostedAgentHistoryConfig config)
@@ -120,3 +122,4 @@ public sealed class HostedTransportNotImplementedException : CtxAgentHistoryExce
         return details;
     }
 }
+#pragma warning restore CS0618

@@ -88,9 +88,10 @@ systems fail closed with a structured `not_supported` error; injected fake
 For tests, inject a `CommandRunner` through `LocalCLIAdapter` so no real ctx
 binary is required.
 
-## Hosted Placeholder
+## Hosted Placeholder (Deprecated)
 
-Hosted configuration is reserved for a future ctx service:
+Hosted SDK placeholders are deprecated and will be removed in the next breaking
+SDK revision; hosted operations remain unsupported.
 
 ```swift
 let client = AgentHistoryClient.hosted(

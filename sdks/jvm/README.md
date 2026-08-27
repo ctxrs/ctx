@@ -42,8 +42,10 @@ Linux and macOS installations). It fails closed on Windows and on POSIX systems
 without either containment launcher. Fake transports and typed response parsing
 remain platform independent.
 
-Hosted configuration is present as `AgentHistoryClient.hosted(HostedConfig)` and
-returns a structured `not_supported` error until a hosted ctx service exists.
+`AgentHistoryClient.hosted(HostedConfig)` is a hosted SDK placeholder. Hosted SDK
+placeholders are deprecated and will be removed in the next breaking SDK revision;
+hosted operations remain unsupported. Calls continue to return a structured
+`not_supported` error without making network calls.
 
 ## Example
 

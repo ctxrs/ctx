@@ -81,5 +81,6 @@ failure classes.
 ## Hosted Placeholder
 
 `HostedConfig` and `NewHostedClient` reserve the hosted transport API. The
-hosted transport is not implemented yet; operations return
+Hosted SDK placeholders are deprecated and will be removed in the next breaking
+SDK revision; hosted operations remain unsupported. Calls continue to return
 `ErrorKindHostedNotImplemented` without making network calls.

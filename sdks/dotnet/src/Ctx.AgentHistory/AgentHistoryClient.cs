@@ -19,10 +19,13 @@ public sealed class AgentHistoryClient
         return new AgentHistoryClient(new LocalCliAdapter(config));
     }
 
+#pragma warning disable CS0618 // The obsolete factory intentionally composes obsolete hosted API types.
+    [Obsolete("Hosted SDK placeholders are deprecated and will be removed in the next breaking SDK revision; hosted operations remain unsupported.", error: false)]
     public static AgentHistoryClient Hosted(HostedAgentHistoryConfig config)
     {
         return new AgentHistoryClient(new HostedAdapter(config));
     }
+#pragma warning restore CS0618
 
     public async Task<StatusResponse> StatusAsync(CancellationToken cancellationToken = default)
     {

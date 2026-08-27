@@ -59,6 +59,10 @@ impl AgentHistoryError {
 #[derive(Debug, Clone)]
 pub enum AgentHistoryBackend {
     Local(LocalBackendConfig),
+    #[allow(deprecated)]
+    #[deprecated(
+        note = "Hosted SDK placeholders are deprecated and will be removed in the next breaking SDK revision; hosted operations remain unsupported."
+    )]
     Hosted(HostedBackendConfig),
 }
 
@@ -82,6 +86,9 @@ impl Default for LocalBackendConfig {
 }
 
 #[derive(Debug, Clone)]
+#[deprecated(
+    note = "Hosted SDK placeholders are deprecated and will be removed in the next breaking SDK revision; hosted operations remain unsupported."
+)]
 pub struct HostedBackendConfig {
     pub base_url: String,
     pub timeout: Duration,
@@ -239,6 +246,10 @@ impl AgentHistoryClient {
         }
     }
 
+    #[allow(deprecated)]
+    #[deprecated(
+        note = "Hosted SDK placeholders are deprecated and will be removed in the next breaking SDK revision; hosted operations remain unsupported."
+    )]
     pub fn hosted(config: HostedBackendConfig) -> Self {
         Self {
             backend: AgentHistoryBackend::Hosted(config),
@@ -253,6 +264,7 @@ impl AgentHistoryClient {
                     .as_ref()
                     .map(|path| path.to_string_lossy().into_owned()),
             ),
+            #[allow(deprecated)]
             AgentHistoryBackend::Hosted(config) => {
                 BackendInfo::hosted(Some(config.base_url.clone()))
             }
@@ -404,6 +416,7 @@ impl AgentHistoryClient {
     fn local_backend_config(&self) -> Result<&LocalBackendConfig, AgentHistoryError> {
         match &self.backend {
             AgentHistoryBackend::Local(config) => Ok(config),
+            #[allow(deprecated)]
             AgentHistoryBackend::Hosted(config) => {
                 let mut details = JsonObject::new();
                 details.insert("backend".to_owned(), json!("hosted"));
