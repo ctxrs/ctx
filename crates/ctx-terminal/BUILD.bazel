@@ -48,7 +48,7 @@ ctx_rust_test(
 
 ctx_rust_test(
     name = "raw_output_policy_tests",
-    srcs = glob(["tests/**/*.rs"]),
+    srcs = ["tests/raw_output_policy.rs"],
     crate_name = "raw_output_policy_tests",
     crate_root = "tests/raw_output_policy.rs",
     data = glob(["src/**/*.rs"]) + [
@@ -57,7 +57,6 @@ ctx_rust_test(
         "//crates/ctx-history-cli:cargo_package_data",
         "//crates/ctx-agent-application:cargo_package_data",
         "//crates/ctx-agent-integrations:cargo_package_data",
-        "//crates/ctx-client-observability:cargo_package_data",
         "//crates/ctx-daemon-runtime:cargo_package_data",
         "//crates/ctx-managed-pair-engine:cargo_package_data",
         "//crates/ctx-semantic-model:build.rs",
