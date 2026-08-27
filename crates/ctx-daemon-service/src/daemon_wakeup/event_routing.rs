@@ -76,12 +76,6 @@ pub(super) fn record_watch_event(
         .state
         .read()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if catalog_state.uncertain_through.is_some() {
-        drop(catalog_state);
-        drop(authority_snapshot);
-        record_relevant_watch_event(counters, event.paths.first().cloned());
-        return fence_catalog_uncertainty(authority, watermark);
-    }
     let mut batch = SourceWatchBatch::default();
     let mut relevant_path = None;
     let mut matched_path = false;
@@ -157,14 +151,9 @@ fn record_relevant_watch_event(counters: &Mutex<WatchCounters>, path: Option<std
 }
 
 fn fence_catalog_uncertainty(
-    authority: &RwLock<WatchAuthority>,
+    _authority: &RwLock<WatchAuthority>,
     watermark: EventWatermark,
 ) -> SourceWatchBatch {
-    authority
-        .read()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .catalog
-        .fence_uncertainty(watermark);
     SourceWatchBatch::uncertainty(watermark)
 }
 

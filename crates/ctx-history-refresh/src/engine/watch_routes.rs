@@ -30,6 +30,15 @@ impl CoreRefreshEngine {
     pub fn install_watch_catalog(&self, catalog: SourceBackedWatchCatalog) {
         let routes = catalog.route_ids().cloned().collect::<BTreeSet<_>>();
         let mut state = self.lock_state();
+        let newly_uncertain = state.watch_uncertain_through.map(|watermark| {
+            (
+                routes
+                    .difference(&state.known_route_ids)
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                watermark,
+            )
+        });
         state.dirty_routes.retain_exact_routes(&routes);
         state
             .hermes_routes_requiring_exhaustive_recovery
@@ -44,6 +53,21 @@ impl CoreRefreshEngine {
         state.known_route_ids = routes;
         state.watch_catalog = Some(catalog);
         state.watch_routes_initialized = true;
+        if let Some((new_routes, watermark)) = newly_uncertain {
+            state
+                .routes_requiring_exhaustive_reconciliation
+                .extend(new_routes.iter().cloned());
+            for route in &new_routes {
+                state
+                    .route_event_watermarks
+                    .insert(route.clone(), watermark);
+            }
+            state.dirty_routes.seed_exact_routes(
+                new_routes,
+                watermark,
+                source_route_ledger_now_ms(),
+            );
+        }
     }
 
     #[cfg(any(test, feature = "test-support"))]

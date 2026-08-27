@@ -703,7 +703,7 @@ fn safety_reconciliation_recovers_a_failed_startup_catalog_without_empty_authori
         coordinator.install_watch_catalog(catalog.clone());
         assert!(!coordinator.has_scheduled_route_work());
         let uncertain = EventWatermark::new(41, 7);
-        watch_runtime.catalog.fence_uncertainty(uncertain);
+        coordinator.fence_watch_uncertainty(uncertain, source_route_ledger_now_ms());
         let reconcile = |runtime: &mut DaemonWatchRuntime| {
             runtime.reconcile_catalog_and_route_authority_with(
                 &data_root,
@@ -718,12 +718,9 @@ fn safety_reconciliation_recovers_a_failed_startup_catalog_without_empty_authori
         fs::set_permissions(&provider_root, fs::Permissions::from_mode(0o0))?;
         reconcile(&mut watch_runtime);
         fs::set_permissions(&provider_root, permissions)?;
-        assert_eq!(
-            watch_runtime.catalog.uncertainty_watermark(),
-            Some(uncertain)
-        );
+        assert_eq!(coordinator.watch_uncertainty_watermark(), Some(uncertain));
         reconcile(&mut watch_runtime);
-        assert!(watch_runtime.catalog.uncertainty_watermark().is_none());
+        assert!(coordinator.watch_uncertainty_watermark().is_none());
         assert!(coordinator.scheduled_route_ids_for_test().contains(&route));
     }
     Ok(())

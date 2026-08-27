@@ -166,7 +166,9 @@ type ReconciliationFactory<P> = Arc<dyn Fn(WatchWatermark) -> P + Send + Sync>;
 type IgnoreEvent = Arc<dyn Fn(&NativeWatchEvent) -> bool + Send + Sync>;
 type ObservePayload<P> = Arc<dyn Fn(&P) + Send + Sync>;
 type SignalPayload<P> = Arc<dyn Fn(P) + Send + Sync>;
+type OverflowFence = Arc<dyn Fn(WatchWatermark) + Send + Sync>;
 type RearmOverlapHook = Box<dyn FnMut(&Path)>;
+type RegistrationAttemptHook = Box<dyn FnMut(&Path) -> Result<()>>;
 
 #[derive(Debug, Default)]
 struct RawWatchIngress {
@@ -239,8 +241,10 @@ pub struct NativeFileWatcher {
     watcher_epoch: u64,
     callback_sequence: Arc<AtomicU64>,
     ignore_event: IgnoreEvent,
+    overflow_fence: OverflowFence,
     rearm_pending: bool,
     rearm_overlap_hook: Option<RearmOverlapHook>,
+    registration_attempt_hook: Option<RegistrationAttemptHook>,
 }
 
 impl NativeFileWatcher {
@@ -258,6 +262,11 @@ impl NativeFileWatcher {
         let accepting_events = Arc::new(AtomicBool::new(true));
         let watcher_epoch = NEXT_WATCHER_EPOCH.fetch_add(1, Ordering::Relaxed);
         let callback_sequence = Arc::new(AtomicU64::new(0));
+        let callback_reconciliation = Arc::clone(&reconciliation);
+        let callback_observe = Arc::clone(&observe_payload);
+        let overflow_fence: OverflowFence = Arc::new(move |watermark| {
+            callback_observe(&callback_reconciliation(watermark));
+        });
         let watcher = native_file_watcher(
             &sender,
             &ingress,
@@ -265,6 +274,7 @@ impl NativeFileWatcher {
             watcher_epoch,
             &callback_sequence,
             &ignore_event,
+            &overflow_fence,
         )?;
         let thread_counters = Arc::clone(&counters);
         let thread_ingress = Arc::clone(&ingress);
@@ -296,8 +306,10 @@ impl NativeFileWatcher {
             watcher_epoch,
             callback_sequence,
             ignore_event,
+            overflow_fence,
             rearm_pending: false,
             rearm_overlap_hook: None,
+            registration_attempt_hook: None,
         })
     }
 
@@ -353,12 +365,22 @@ impl NativeFileWatcher {
                 self.watcher_epoch,
                 &self.callback_sequence,
                 &self.ignore_event,
+                &self.overflow_fence,
             ) {
                 Ok(mut replacement) => {
                     let mut replacement_ready = true;
                     for (path, recursive) in &desired {
                         registration_attempts = registration_attempts.saturating_add(1);
-                        if let Err(error) = replacement.watch(path, recursive_mode(*recursive)) {
+                        let registration = self
+                            .registration_attempt_hook
+                            .as_mut()
+                            .map_or(Ok(()), |hook| hook(path))
+                            .and_then(|()| {
+                                replacement
+                                    .watch(path, recursive_mode(*recursive))
+                                    .map_err(Into::into)
+                            });
+                        if let Err(error) = registration {
                             replacement_ready = false;
                             last_error = Some(anyhow::anyhow!("watch {}: {error}", path.display()));
                         }
@@ -401,7 +423,16 @@ impl NativeFileWatcher {
                     self.watched.remove(path);
                 }
                 registration_attempts = registration_attempts.saturating_add(1);
-                match self.watcher.watch(path, recursive_mode(*recursive)) {
+                let registration = self
+                    .registration_attempt_hook
+                    .as_mut()
+                    .map_or(Ok(()), |hook| hook(path))
+                    .and_then(|()| {
+                        self.watcher
+                            .watch(path, recursive_mode(*recursive))
+                            .map_err(Into::into)
+                    });
+                match registration {
                     Ok(()) => {
                         self.watched.insert(path.clone(), *recursive);
                     }
@@ -450,6 +481,14 @@ impl NativeFileWatcher {
         self.rearm_overlap_hook = Some(Box::new(hook));
     }
 
+    #[doc(hidden)]
+    pub fn install_registration_attempt_hook(
+        &mut self,
+        hook: impl FnMut(&Path) -> Result<()> + 'static,
+    ) {
+        self.registration_attempt_hook = Some(Box::new(hook));
+    }
+
     pub fn stop(&mut self) {
         if self.accepting_events.swap(false, Ordering::AcqRel) {
             let _ = self.sender.send(WatchMessage::Stop);
@@ -487,12 +526,14 @@ fn native_file_watcher(
     watcher_epoch: u64,
     callback_sequence: &Arc<AtomicU64>,
     ignore_event: &IgnoreEvent,
+    overflow_fence: &OverflowFence,
 ) -> Result<RecommendedWatcher> {
     let sender = sender.clone();
     let ingress = Arc::clone(ingress);
     let accepting_events = Arc::clone(accepting_events);
     let sequence = Arc::clone(callback_sequence);
     let ignore_event = Arc::clone(ignore_event);
+    let overflow_fence = Arc::clone(overflow_fence);
     RecommendedWatcher::new(
         move |event: notify::Result<Event>| {
             forward_native_watch_event(
@@ -502,6 +543,7 @@ fn native_file_watcher(
                 watcher_epoch,
                 &sequence,
                 &ignore_event,
+                &overflow_fence,
                 normalize_native_watch_event(event),
             );
         },
@@ -518,6 +560,7 @@ fn forward_native_watch_event(
     watcher_epoch: u64,
     sequence: &AtomicU64,
     ignore_event: &IgnoreEvent,
+    overflow_fence: &OverflowFence,
     event: NativeWatchResult,
 ) {
     if !accepting_events.load(Ordering::Acquire)
@@ -537,18 +580,21 @@ fn forward_native_watch_event(
     match sender.try_send(WatchMessage::Event { event, watermark }) {
         Ok(()) => {}
         Err(mpsc::TrySendError::Full(WatchMessage::Event { event, watermark })) => {
+            overflow_fence(watermark);
             if !ingress.merge_nonblocking(event, watermark) {
                 ingress.overflows.fetch_add(1, Ordering::Relaxed);
             }
             match sender.try_send(WatchMessage::DrainIngress) {
                 Ok(()) | Err(mpsc::TrySendError::Full(_)) => {}
                 Err(mpsc::TrySendError::Disconnected(_)) => {
+                    overflow_fence(watermark);
                     ingress.disconnects.fetch_add(1, Ordering::Relaxed);
                 }
             }
         }
         Err(mpsc::TrySendError::Full(_)) => unreachable!("callback sends only raw events"),
         Err(mpsc::TrySendError::Disconnected(_)) => {
+            overflow_fence(watermark);
             ingress.disconnects.fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -806,6 +852,56 @@ mod tests {
     }
 
     #[test]
+    fn full_and_disconnected_callback_channels_fence_synchronously() {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        sender.send(WatchMessage::DrainIngress).unwrap();
+        let ingress = RawWatchIngress::default();
+        let accepting = AtomicBool::new(true);
+        let sequence = AtomicU64::new(0);
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let fence_observed = Arc::clone(&observed);
+        let fence: OverflowFence = Arc::new(move |watermark| {
+            fence_observed.lock().unwrap().push(watermark);
+        });
+        let ignore: IgnoreEvent = Arc::new(|_| false);
+
+        forward_native_watch_event(
+            &sender,
+            &ingress,
+            &accepting,
+            17,
+            &sequence,
+            &ignore,
+            &fence,
+            Ok(NativeWatchEvent::ordinary(vec![PathBuf::from("/tmp/full")])),
+        );
+        assert_eq!(
+            observed.lock().unwrap().as_slice(),
+            &[WatchWatermark::new(17, 1)]
+        );
+        assert!(ingress.take_nonblocking(17).is_some());
+
+        drop(receiver);
+        forward_native_watch_event(
+            &sender,
+            &ingress,
+            &accepting,
+            17,
+            &sequence,
+            &ignore,
+            &fence,
+            Ok(NativeWatchEvent::ordinary(vec![PathBuf::from(
+                "/tmp/disconnected",
+            )])),
+        );
+        assert_eq!(
+            observed.lock().unwrap().as_slice(),
+            &[WatchWatermark::new(17, 1), WatchWatermark::new(17, 2)]
+        );
+        assert_eq!(ingress.disconnects.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
     fn worker_observes_payloads_before_debounce_and_empty_events_extend_activity() {
         let (classified_tx, classified_rx) = mpsc::channel();
         let (observed_tx, observed_rx) = mpsc::channel();
@@ -834,6 +930,7 @@ mod tests {
                 watcher.watcher_epoch,
                 &watcher.callback_sequence,
                 &watcher.ignore_event,
+                &watcher.overflow_fence,
                 Ok(NativeWatchEvent::ordinary(vec![PathBuf::from(path)])),
             )
         };

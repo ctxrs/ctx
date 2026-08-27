@@ -654,6 +654,9 @@ impl CoreRefreshEngine {
 
     fn claim_active_pending_admission(&self) -> Option<PendingAdmissionClaim> {
         let mut state = self.lock_state();
+        if state.watch_uncertain_through.is_some() {
+            return None;
+        }
         let request_id = state.active_request_id.clone()?;
         let attempt = find_attempt(&state, &request_id)?;
         if attempt.state != SourceBackedRefreshState::AdmissionPending
@@ -710,6 +713,9 @@ impl CoreRefreshEngine {
     ) -> Result<Option<SourceBackedRefreshRun>> {
         let mut state = self.lock_state();
         state.admission_resolutions_in_flight.remove(request_id);
+        if state.watch_uncertain_through.is_some() {
+            return Ok(None);
+        }
         if find_attempt(&state, request_id)
             .is_none_or(|attempt| attempt.state != SourceBackedRefreshState::AdmissionPending)
         {

@@ -180,7 +180,10 @@ impl DaemonWakeup {
     }
 
     #[cfg(test)]
-    fn install_before_source_watch_sink_dispatch_hook(&self, hook: Arc<dyn Fn() + Send + Sync>) {
+    pub(super) fn install_before_source_watch_sink_dispatch_hook(
+        &self,
+        hook: Arc<dyn Fn() + Send + Sync>,
+    ) {
         let previous = self
             .before_source_watch_sink_dispatch
             .lock()
@@ -249,7 +252,6 @@ pub(super) struct DaemonWatchCatalog {
 #[derive(Debug, Default)]
 struct WatchCatalogState {
     snapshot: Option<SourceBackedWatchCatalog>,
-    uncertain_through: Option<EventWatermark>,
 }
 
 impl DaemonWatchCatalog {
@@ -266,41 +268,6 @@ impl DaemonWatchCatalog {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .snapshot
             .clone()
-    }
-
-    pub(super) fn fence_uncertainty(&self, watermark: EventWatermark) {
-        let mut state = self
-            .state
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state.uncertain_through = Some(
-            state
-                .uncertain_through
-                .map_or(watermark, |current| current.max(watermark)),
-        );
-    }
-
-    pub(super) fn uncertainty_watermark(&self) -> Option<EventWatermark> {
-        self.state
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .uncertain_through
-    }
-
-    pub(super) fn clear_uncertainty_if_covered(&self, covered_through: EventWatermark) -> bool {
-        let mut state = self
-            .state
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if state
-            .uncertain_through
-            .is_some_and(|current| current <= covered_through)
-        {
-            state.uncertain_through = None;
-            true
-        } else {
-            false
-        }
     }
 }
 
@@ -360,7 +327,6 @@ impl DaemonFileWatcher {
                 )
             },
         );
-        let reconciliation_authority = Arc::clone(&authority);
         let ignored_data_root = data_root.to_path_buf();
         let ignored_counters = Arc::clone(&counters);
         let ignore_event = Arc::new(move |event: &NativeWatchEvent| {
@@ -380,13 +346,10 @@ impl DaemonFileWatcher {
             ignore_event,
             classify_event,
             Arc::new(move |watermark: ctx_daemon_runtime::WatchWatermark| {
-                let watermark = EventWatermark::new(watermark.epoch, watermark.sequence);
-                reconciliation_authority
-                    .read()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .catalog
-                    .fence_uncertainty(watermark);
-                SourceWatchBatch::uncertainty(watermark)
+                SourceWatchBatch::uncertainty(EventWatermark::new(
+                    watermark.epoch,
+                    watermark.sequence,
+                ))
             }),
             Arc::new(move |batch| observed_wakeup.observe_source_watch(batch)),
             Arc::new(move |batch| signal_wakeup.signal_source_watch(batch)),
@@ -418,10 +381,9 @@ impl DaemonFileWatcher {
         let catalog = authority.catalog.snapshot();
         let desired_paths = authority.target_paths();
         let desired = ctx_daemon_runtime::watch_roots(desired_paths.iter().map(PathBuf::as_path));
-        let force_rearm = force_rearm || authority.catalog.uncertainty_watermark().is_some();
         let replace_native_watcher = self.runtime.replacement_required(force_rearm);
         let registration_needed = self.runtime.needs_registration(&desired, force_rearm);
-        let affected = if registration_needed && !replace_native_watcher {
+        let mut affected = if registration_needed && !replace_native_watcher {
             catalog
                 .as_ref()
                 .map(|catalog| {
@@ -443,6 +405,14 @@ impl DaemonFileWatcher {
             .is_none()
             .then(|| "watch catalog authority is unavailable".to_owned());
         let registration = self.runtime.reconcile_paths(desired, force_rearm);
+        if registration.is_err() && registration_needed && affected.routes.is_empty() {
+            if let Some(catalog) = catalog.as_ref() {
+                let watermark = self.next_watermark();
+                affected
+                    .routes
+                    .extend(catalog.route_ids().cloned().map(|route| (route, watermark)));
+            }
+        }
         if let Err(error) = registration.as_ref() {
             self.last_error = Some(error.to_string());
         }
@@ -451,28 +421,7 @@ impl DaemonFileWatcher {
         } else {
             "active"
         });
-        let affected = if registration.is_ok() {
-            affected
-        } else {
-            SourceWatchBatch::default()
-        };
         (affected, registration.and(receipt))
-    }
-
-    pub(super) fn uncertainty_watermark(&self) -> Option<EventWatermark> {
-        self.authority
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .catalog
-            .uncertainty_watermark()
-    }
-
-    pub(super) fn clear_uncertainty_if_covered(&self, covered_through: EventWatermark) -> bool {
-        self.authority
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .catalog
-            .clear_uncertainty_if_covered(covered_through)
     }
 
     pub(super) fn worker_failed(&self) -> bool {
@@ -487,6 +436,19 @@ impl DaemonFileWatcher {
     #[cfg(all(test, target_os = "linux"))]
     pub(super) fn install_rearm_overlap_hook(&mut self, hook: impl FnMut(&Path) + 'static) {
         self.runtime.install_rearm_overlap_hook(hook);
+    }
+
+    #[cfg(all(test, target_os = "linux"))]
+    pub(super) fn install_registration_attempt_hook(
+        &mut self,
+        hook: impl FnMut(&Path) -> Result<()> + 'static,
+    ) {
+        self.runtime.install_registration_attempt_hook(hook);
+    }
+
+    #[cfg(all(test, target_os = "linux"))]
+    pub(super) fn runtime_snapshot(&self) -> ctx_daemon_runtime::NativeWatcherSnapshot {
+        self.runtime.snapshot()
     }
 
     pub(super) fn write_receipt(&self, status: &str) -> Result<()> {

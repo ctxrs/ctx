@@ -506,6 +506,253 @@ fn clean_forced_rearm_emits_no_catalog_routes() {
 
 #[cfg(target_os = "linux")]
 #[test]
+fn partial_registration_failure_polls_until_coverage_is_restored() {
+    let temp = tempfile::tempdir().expect("create watcher fixture");
+    let data_root = temp.path().join("data");
+    let first_root = temp.path().join("first");
+    let second_root = temp.path().join("second");
+    let first_file = first_root.join("history.jsonl");
+    let second_file = second_root.join("history.jsonl");
+    fs::create_dir_all(&data_root).unwrap();
+    fs::create_dir_all(&first_root).unwrap();
+    fs::create_dir_all(&second_root).unwrap();
+    fs::write(&first_file, b"one\n").unwrap();
+    fs::write(&second_file, b"one\n").unwrap();
+    let initial = watch_catalog([catalog_route(
+        CaptureProvider::Codex,
+        first_file.clone(),
+        "codex_history_jsonl",
+    )]);
+    let expanded = watch_catalog([
+        catalog_route(CaptureProvider::Codex, first_file, "codex_history_jsonl"),
+        catalog_route(
+            CaptureProvider::Claude,
+            second_file,
+            "claude_projects_jsonl_tree",
+        ),
+    ]);
+    let expected_routes = expanded.route_ids().cloned().collect::<BTreeSet<_>>();
+    let owner = catalog_owner(initial);
+    let wakeup = Arc::new(DaemonWakeup::default());
+    let mut watcher =
+        DaemonFileWatcher::start(&data_root, wakeup, owner.clone()).expect("start watcher");
+    owner.publish(expanded);
+
+    let fail_registration = Arc::new(AtomicBool::new(true));
+    let hook_failure = Arc::clone(&fail_registration);
+    watcher.install_registration_attempt_hook(move |path| {
+        if path == second_root && hook_failure.load(Ordering::SeqCst) {
+            anyhow::bail!("injected dynamic registration failure");
+        }
+        Ok(())
+    });
+
+    for _ in 0..2 {
+        let (affected, registration) = watcher.reconcile_roots(false);
+        assert!(registration.is_err());
+        assert_eq!(
+            affected.routes.keys().cloned().collect::<BTreeSet<_>>(),
+            expected_routes,
+            "every degraded safety pass must poll the complete current catalog"
+        );
+    }
+
+    fail_registration.store(false, Ordering::SeqCst);
+    let (catch_up, registration) = watcher.reconcile_roots(false);
+    registration.expect("restore dynamic registration coverage");
+    assert_eq!(
+        catch_up.routes.keys().cloned().collect::<BTreeSet<_>>(),
+        expected_routes
+    );
+    let (healthy, registration) = watcher.reconcile_roots(false);
+    registration.expect("healthy safety pass");
+    assert!(healthy.routes.is_empty());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn callback_channel_overflow_holds_active_wait_until_rearmed_recovery() -> Result<()> {
+    use std::{
+        collections::BTreeMap,
+        sync::{atomic::AtomicUsize, Barrier},
+        time::Instant,
+    };
+
+    use crate::source_backed_refresh_coordinator::{
+        publish_authoritative_empty_generation_with_route_results_for_test, CoreRefreshEngine,
+        SourceBackedRefreshExecution, SourceBackedRefreshExecutor, SourceBackedRefreshRouteResult,
+    };
+
+    let temp = tempfile::tempdir()?;
+    let data_root = temp.path().join("data");
+    let provider_root = temp.path().join("provider");
+    let provider_file = provider_root.join("history.jsonl");
+    fs::create_dir_all(&data_root)?;
+    fs::create_dir_all(&provider_root)?;
+    fs::write(&provider_file, b"before\n")?;
+    let catalog = watch_catalog([catalog_route(
+        CaptureProvider::Codex,
+        provider_file.clone(),
+        "codex_history_jsonl",
+    )]);
+    let route = catalog.route_ids().next().expect("one route").clone();
+    let execution_published = Arc::new(Barrier::new(2));
+    let execution_release = Arc::new(Barrier::new(2));
+    let block_once = Arc::new(AtomicBool::new(true));
+    let launches = Arc::new(AtomicUsize::new(0));
+    let refresh_route = route.clone();
+    let entered = Arc::clone(&execution_published);
+    let release = Arc::clone(&execution_release);
+    let first = Arc::clone(&block_once);
+    let launched = Arc::clone(&launches);
+    let executor: Arc<dyn SourceBackedRefreshExecutor> =
+        Arc::new(move |execution: SourceBackedRefreshExecution<'_>| {
+            launched.fetch_add(1, Ordering::SeqCst);
+            let publication = publish_authoritative_empty_generation_with_route_results_for_test(
+                execution.index_root,
+                execution.request_id,
+                execution.operation,
+                execution.admitted_refresh().publication_scope().clone(),
+                execution.explicit_source_catalog.cloned(),
+                Some(vec![SourceBackedRefreshRouteResult::succeeded(
+                    refresh_route.as_str().to_owned(),
+                    true,
+                )]),
+            )?;
+            if first.swap(false, Ordering::SeqCst) {
+                entered.wait();
+                release.wait();
+            }
+            Ok(publication)
+        });
+    let admitted_route = route.clone();
+    let coordinator = Arc::new(CoreRefreshEngine::with_runtime_for_test(
+        executor,
+        Arc::new(move |_, _| {
+            Ok(BTreeMap::from([(
+                admitted_route.clone(),
+                Some("ab".repeat(32)),
+            )]))
+        }),
+        Arc::new(|_, _| Ok(())),
+    ));
+    coordinator.install_watch_catalog(catalog.clone());
+
+    let wakeup = Arc::new(DaemonWakeup::default());
+    let sink_coordinator = Arc::clone(&coordinator);
+    wakeup.install_source_watch_sink(Arc::new(move |batch| {
+        if let Some(watermark) = batch.reconcile {
+            sink_coordinator.fence_watch_uncertainty(watermark, 0);
+        } else {
+            sink_coordinator.record_watch_routes_with_members(
+                batch
+                    .routes
+                    .iter()
+                    .map(|(route, watermark)| (route.clone(), *watermark)),
+                batch.members.clone(),
+                0,
+            );
+        }
+    }));
+    let mut watcher = DaemonFileWatcher::start(
+        &data_root,
+        Arc::clone(&wakeup),
+        catalog_owner(catalog.clone()),
+    )?;
+    let worker_entered = Arc::new(Barrier::new(2));
+    let worker_release = Arc::new(Barrier::new(2));
+    let hook_entered = Arc::clone(&worker_entered);
+    let hook_release = Arc::clone(&worker_release);
+    wakeup.install_before_source_watch_sink_dispatch_hook(Arc::new(move || {
+        hook_entered.wait();
+        hook_release.wait();
+    }));
+
+    let request_id = "019fcaaa-0000-7000-8000-000000000690";
+    let admitted = coordinator
+        .handle_ipc_request(
+            &data_root,
+            &serde_json::json!({
+                "schema_version": 1,
+                "op": "source_refresh_request",
+                "request_id": request_id,
+                "mode": "wait",
+                "operation": "refresh",
+                "fresh_after_admitted_snapshot": true,
+            }),
+        )?
+        .expect("wait admission");
+    assert_eq!(admitted["request_state"], "admission_pending");
+    let runner = Arc::clone(&coordinator);
+    let run_root = data_root.clone();
+    let run = thread::spawn(move || runner.run_next(&run_root).expect("active wait run"));
+    execution_published.wait();
+
+    fs::write(&provider_file, b"changed during active refresh\n")?;
+    worker_entered.wait();
+    for index in 0..1_024 {
+        fs::write(
+            provider_root.join(format!("overflow-{index}.jsonl")),
+            b"event\n",
+        )?;
+    }
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while watcher.runtime_snapshot().ingress_overflows == 0 && Instant::now() < deadline {
+        thread::yield_now();
+    }
+    let overflowed = watcher.runtime_snapshot().ingress_overflows > 0;
+    let first_boundary = coordinator.watch_uncertainty_watermark();
+    execution_release.wait();
+    let stale = run.join().expect("join active wait");
+    worker_release.wait();
+    assert!(overflowed, "real callback channel did not overflow");
+    let first_boundary = first_boundary.expect("overflow must synchronously fence Core");
+    assert_eq!(stale.job["request_state"], "running");
+    assert_eq!(stale.job["progress"]["phase"], "watch_recovery");
+
+    let newer_boundary = EventWatermark::new(
+        first_boundary.watcher_epoch,
+        first_boundary.sequence.saturating_add(1),
+    );
+    coordinator.fence_watch_uncertainty(newer_boundary, 0);
+    watcher.reconcile_roots(true).1?;
+    assert!(!coordinator.complete_watch_uncertainty_recovery(
+        &data_root,
+        catalog.clone(),
+        first_boundary,
+        0,
+    )?);
+    let mut recovered_coverage = false;
+    for _ in 0..8 {
+        let boundary = coordinator
+            .watch_uncertainty_watermark()
+            .expect("uncertainty remains fenced until recovery");
+        watcher.reconcile_roots(true).1?;
+        if coordinator.complete_watch_uncertainty_recovery(
+            &data_root,
+            catalog.clone(),
+            boundary,
+            0,
+        )? {
+            recovered_coverage = true;
+            break;
+        }
+        let _ = wakeup.wait(Duration::from_millis(50));
+    }
+    assert!(recovered_coverage, "callback pressure never quiesced");
+    assert_eq!(
+        coordinator.status(request_id).unwrap()["request_state"],
+        "admission_pending"
+    );
+    let recovered = coordinator.run_next(&data_root).expect("recovered rerun");
+    assert!(!recovered.failed, "{:#}", recovered.job);
+    assert_eq!(recovered.job["request_state"], "published");
+    assert_eq!(launches.load(Ordering::SeqCst), 2);
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn forced_rearm_emits_only_the_route_mutated_during_registration_overlap() {
     let temp = tempfile::tempdir().expect("create watcher fixture");
     let data_root = temp.path().join("data");
@@ -596,7 +843,7 @@ fn rescan_and_backend_errors_require_catalog_reconciliation_and_rearm() {
     );
     assert_eq!(pathless.reconcile, Some(EventWatermark::new(3, 0)));
     assert!(pathless.rearm);
-    let fenced_exact = record_watch_event(
+    let later_exact = record_watch_event(
         &authority,
         &counters,
         data_root,
@@ -604,8 +851,8 @@ fn rescan_and_backend_errors_require_catalog_reconciliation_and_rearm() {
         Ok(NativeWatchEvent::ordinary(vec![provider_file])),
         EventWatermark::new(3, 1),
     );
-    assert!(fenced_exact.routes.is_empty());
-    assert_eq!(fenced_exact.reconcile, Some(EventWatermark::new(3, 1)));
+    assert_eq!(later_exact.routes.len(), 1);
+    assert!(later_exact.reconcile.is_none());
     let rescan = NativeWatchEvent::rescan(vec![
         data_root.join("catalogs/explicit-sources/catalog.lock")
     ]);
