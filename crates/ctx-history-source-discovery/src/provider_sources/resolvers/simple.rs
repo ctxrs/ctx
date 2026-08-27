@@ -54,6 +54,7 @@ pub(super) fn resolve(
         CaptureProvider::Junie => resolve_junie(probes, context, spec),
         CaptureProvider::FactoryAiDroid => resolve_factory(probes, context, spec),
         CaptureProvider::ForgeCode => resolve_forgecode(probes, context, spec),
+        CaptureProvider::Fx => resolve_fx(probes, context, spec),
         _ => DiscoveryReport::default(),
     }
 }
@@ -533,6 +534,22 @@ fn resolve_factory(
         spec,
         context.home().join(".factory").join("sessions"),
         "factory_ai_droid_sessions_jsonl",
+    )
+}
+
+fn resolve_fx(
+    probes: &StaticProviderProbeCatalog,
+    context: &DiscoveryContext,
+    spec: &ProviderSourceSpec,
+) -> DiscoveryReport {
+    if let Err(report) = supported_default(context, spec) {
+        return report;
+    }
+    one_source(
+        probes,
+        spec,
+        context.home().join(".fx").join("sessions"),
+        "fx_sessions_tree",
     )
 }
 

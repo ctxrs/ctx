@@ -34,6 +34,28 @@ pub(super) fn register_deepseek_harness_route(
         >(source.source_format, source_root_lineage)
     )
 }
+
+pub(super) fn register_fx_source_backed_route(
+    registry: &mut SourceBackedProviderRegistry,
+    source: ProviderSource,
+    selection: SourceBackedRouteSelection,
+    source_root_lineage: Option<[u8; 32]>,
+) -> SourceBackedCoordinatorResult<()> {
+    let driver = crate::provider::source_backed::family::jsonl::jsonl_family_driver(
+        ctx_history_provider_fx::fx_sessions_tree_adapter::<CaptureProviderRuntime>(
+            source_root_lineage,
+        ),
+        source.path.clone(),
+    );
+    registry.register(executable_route(
+        source,
+        selection,
+        SourceBackedSelectorAuthority::CatalogLineage,
+        driver,
+    )?);
+    Ok(())
+}
+
 /// Registers Cursor's thin adapter over the shared certified-append JSONL
 /// lifecycle.
 pub fn register_cursor_source_backed_route(

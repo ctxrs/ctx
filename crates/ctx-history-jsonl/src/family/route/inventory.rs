@@ -435,6 +435,23 @@ fn reconcile_duplicate_accepted_sources<E: JsonlFamilyError>(
                 "JSONL physical inventory contains a source descriptor digest collision".to_owned(),
             ));
         }
+        let representative_logical_eof = match &members[indices[0]] {
+            JsonlFamilyInventoryMember::Accepted { leaf, .. } => leaf.logical_eof(),
+            _ => unreachable!("duplicate group references an accepted member"),
+        };
+        let has_unsafe_leaf_semantics = indices.iter().any(|&index| match &members[index] {
+            JsonlFamilyInventoryMember::Accepted { leaf, .. } => {
+                leaf.logical_eof() != representative_logical_eof
+                    || !leaf.terminal_dependencies.is_empty()
+            }
+            _ => unreachable!("duplicate group references an accepted member"),
+        });
+        if has_unsafe_leaf_semantics {
+            return Err(E::invalid_payload(format!(
+                "JSONL physical leaves claim logical source identity {} but carry terminal dependencies or disagree on logical EOF; the provider must resolve boundary-bearing copies semantically",
+                representative.identity(),
+            )));
+        }
         let mut content_digest = None;
         let mut observed = Vec::with_capacity(indices.len());
         for &index in indices {

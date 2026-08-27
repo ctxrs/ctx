@@ -122,6 +122,8 @@ pub struct JsonlCheckpoint {
     version: u32,
     identity: JsonlSourceIdentity,
     source_observation: JsonlFileObservation,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    logical_eof: Option<u64>,
     complete_prefix_end: u64,
     complete_prefix_sha256: [u8; 32],
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -147,6 +149,7 @@ impl JsonlCheckpoint {
             version: Self::VERSION,
             identity,
             source_observation,
+            logical_eof: None,
             complete_prefix_end,
             complete_prefix_sha256,
             complete_prefix_sha256_state: None,
@@ -165,10 +168,34 @@ impl JsonlCheckpoint {
         next_physical_ordinal: u64,
         terminal: bool,
     ) -> Self {
+        Self::new_with_prefix_state_and_logical_eof(
+            identity,
+            source_observation,
+            None,
+            complete_prefix_end,
+            complete_prefix_hasher,
+            admitted_eof_hasher,
+            next_physical_ordinal,
+            terminal,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_with_prefix_state_and_logical_eof(
+        identity: JsonlSourceIdentity,
+        source_observation: JsonlFileObservation,
+        logical_eof: Option<u64>,
+        complete_prefix_end: u64,
+        complete_prefix_hasher: &JsonlResumableSha256,
+        admitted_eof_hasher: Option<&JsonlResumableSha256>,
+        next_physical_ordinal: u64,
+        terminal: bool,
+    ) -> Self {
         Self {
             version: Self::VERSION,
             identity,
             source_observation,
+            logical_eof,
             complete_prefix_end,
             complete_prefix_sha256: complete_prefix_hasher.digest(),
             complete_prefix_sha256_state: Some(complete_prefix_hasher.snapshot()),
@@ -184,6 +211,16 @@ impl JsonlCheckpoint {
 
     pub fn source_observation(&self) -> &JsonlFileObservation {
         &self.source_observation
+    }
+
+    /// Provider-authoritative committed boundary when it is narrower than, or
+    /// independently advances within, the retained physical observation.
+    pub fn logical_eof(&self) -> Option<u64> {
+        self.logical_eof
+    }
+
+    pub fn admitted_length(&self) -> u64 {
+        self.logical_eof.unwrap_or(self.source_observation.length)
     }
 
     pub fn complete_prefix_end(&self) -> u64 {
@@ -204,7 +241,7 @@ impl JsonlCheckpoint {
 
     pub fn restore_admitted_eof_hasher(&self) -> Option<JsonlResumableSha256> {
         let hasher = JsonlResumableSha256::restore(self.admitted_eof_sha256_state.as_ref()?)?;
-        (hasher.bytes_hashed() == self.source_observation.length).then_some(hasher)
+        (hasher.bytes_hashed() == self.admitted_length()).then_some(hasher)
     }
 
     pub fn admitted_eof_sha256(&self) -> Option<[u8; 32]> {
@@ -213,8 +250,7 @@ impl JsonlCheckpoint {
     }
 
     pub fn authenticates_admitted_eof(&self) -> bool {
-        self.admitted_eof_sha256().is_some()
-            || self.complete_prefix_end == self.source_observation.length
+        self.admitted_eof_sha256().is_some() || self.complete_prefix_end == self.admitted_length()
     }
 
     pub fn next_physical_ordinal(&self) -> u64 {
@@ -239,13 +275,15 @@ impl JsonlCheckpoint {
             && (compressed_physical_ordinals
                 || self.next_physical_ordinal <= self.complete_prefix_end);
         self.version == Self::VERSION
+            && self.admitted_length() <= self.source_observation.length
             && self.complete_prefix_end <= self.source_observation.length
+            && self.complete_prefix_end <= self.admitted_length()
             && if empty_prefix {
                 empty_prefix_is_exact
             } else {
                 nonempty_prefix_is_possible
             }
-            && (!self.terminal || self.complete_prefix_end == self.source_observation.length)
+            && (!self.terminal || self.complete_prefix_end == self.admitted_length())
             && self
                 .complete_prefix_sha256_state
                 .as_ref()

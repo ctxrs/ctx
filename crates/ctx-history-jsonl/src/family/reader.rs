@@ -1,222 +1,8 @@
 use super::*;
 
+mod open;
+
 impl<E: JsonlFamilyError> JsonlReader<E> {
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn open(
-        identity: JsonlSourceIdentity,
-        source_file: Arc<OpenedProviderSourceFile<E>>,
-        previous: Option<&JsonlCheckpoint>,
-        probe: Option<JsonlProbe>,
-    ) -> JsonlResult<Self, E> {
-        Self::open_with_record_framing(
-            identity,
-            source_file,
-            previous,
-            probe,
-            JsonlRecordFraming::ordinary(),
-        )
-    }
-
-    pub fn open_with_record_framing(
-        identity: JsonlSourceIdentity,
-        source_file: Arc<OpenedProviderSourceFile<E>>,
-        previous: Option<&JsonlCheckpoint>,
-        probe: Option<JsonlProbe>,
-        record_framing: JsonlRecordFraming,
-    ) -> JsonlResult<Self, E> {
-        Self::open_with_record_framing_and_encoding(
-            identity,
-            source_file,
-            previous,
-            probe,
-            JsonlPhysicalEncoding::RawJsonl,
-            record_framing,
-        )
-    }
-
-    pub fn open_with_record_framing_and_encoding(
-        identity: JsonlSourceIdentity,
-        source_file: Arc<OpenedProviderSourceFile<E>>,
-        previous: Option<&JsonlCheckpoint>,
-        probe: Option<JsonlProbe>,
-        physical_encoding: JsonlPhysicalEncoding,
-        record_framing: JsonlRecordFraming,
-    ) -> JsonlResult<Self, E> {
-        Self::open_with_framing(
-            identity,
-            source_file,
-            previous,
-            probe,
-            JsonlReaderFramingOptions {
-                physical_encoding,
-                record_framing,
-                whole_record: false,
-                bind_admitted_eof: false,
-                deferred_append_eof_sha256: None,
-                frozen_observation: None,
-                direct_append: false,
-                route_resources: None,
-            },
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn open_with_record_framing_and_encoding_and_resources(
-        identity: JsonlSourceIdentity,
-        source_file: Arc<OpenedProviderSourceFile<E>>,
-        previous: Option<&JsonlCheckpoint>,
-        probe: Option<JsonlProbe>,
-        physical_encoding: JsonlPhysicalEncoding,
-        record_framing: JsonlRecordFraming,
-        route_resources: &ctx_history_capture_runtime::SourceBackedRouteResources,
-    ) -> JsonlResult<Self, E> {
-        Self::open_with_framing(
-            identity,
-            source_file,
-            previous,
-            probe,
-            JsonlReaderFramingOptions {
-                physical_encoding,
-                record_framing,
-                whole_record: false,
-                bind_admitted_eof: false,
-                deferred_append_eof_sha256: None,
-                frozen_observation: None,
-                direct_append: false,
-                route_resources: Some(route_resources),
-            },
-        )
-    }
-
-    pub fn open_semantic_with_record_framing(
-        identity: JsonlSourceIdentity,
-        source_file: Arc<OpenedProviderSourceFile<E>>,
-        previous: Option<&JsonlCheckpoint>,
-        mode: JsonlSemanticPreflightMode,
-        probe: Option<JsonlProbe>,
-        record_framing: JsonlRecordFraming,
-        frozen_observation: Option<&JsonlFileObservation>,
-    ) -> JsonlResult<Self, E> {
-        Self::open_semantic_with_record_framing_and_encoding(
-            identity,
-            source_file,
-            previous,
-            mode,
-            probe,
-            JsonlPhysicalEncoding::RawJsonl,
-            record_framing,
-            frozen_observation,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn open_semantic_with_record_framing_and_encoding(
-        identity: JsonlSourceIdentity,
-        source_file: Arc<OpenedProviderSourceFile<E>>,
-        previous: Option<&JsonlCheckpoint>,
-        mode: JsonlSemanticPreflightMode,
-        probe: Option<JsonlProbe>,
-        physical_encoding: JsonlPhysicalEncoding,
-        record_framing: JsonlRecordFraming,
-        frozen_observation: Option<&JsonlFileObservation>,
-    ) -> JsonlResult<Self, E> {
-        Self::open_semantic_with_record_framing_and_encoding_direct(
-            identity,
-            source_file,
-            previous,
-            mode,
-            probe,
-            physical_encoding,
-            record_framing,
-            frozen_observation,
-            false,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn open_semantic_with_record_framing_and_encoding_direct(
-        identity: JsonlSourceIdentity,
-        source_file: Arc<OpenedProviderSourceFile<E>>,
-        previous: Option<&JsonlCheckpoint>,
-        mode: JsonlSemanticPreflightMode,
-        probe: Option<JsonlProbe>,
-        physical_encoding: JsonlPhysicalEncoding,
-        record_framing: JsonlRecordFraming,
-        frozen_observation: Option<&JsonlFileObservation>,
-        direct_append: bool,
-    ) -> JsonlResult<Self, E> {
-        Self::open_semantic_with_record_framing_and_encoding_direct_and_resources(
-            identity,
-            source_file,
-            previous,
-            mode,
-            probe,
-            physical_encoding,
-            record_framing,
-            frozen_observation,
-            direct_append,
-            None,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn open_semantic_with_record_framing_and_encoding_direct_and_resources(
-        identity: JsonlSourceIdentity,
-        source_file: Arc<OpenedProviderSourceFile<E>>,
-        previous: Option<&JsonlCheckpoint>,
-        mode: JsonlSemanticPreflightMode,
-        probe: Option<JsonlProbe>,
-        physical_encoding: JsonlPhysicalEncoding,
-        record_framing: JsonlRecordFraming,
-        frozen_observation: Option<&JsonlFileObservation>,
-        direct_append: bool,
-        route_resources: Option<&ctx_history_capture_runtime::SourceBackedRouteResources>,
-    ) -> JsonlResult<Self, E> {
-        let (bind_admitted_eof, deferred_append_eof_sha256) = match mode {
-            JsonlSemanticPreflightMode::AdmittedEof(previous) => (true, previous.map(Some)),
-            JsonlSemanticPreflightMode::CompletePrefix => (false, Some(None)),
-        };
-        Self::open_with_framing(
-            identity,
-            source_file,
-            previous,
-            probe,
-            JsonlReaderFramingOptions {
-                physical_encoding,
-                record_framing,
-                whole_record: false,
-                bind_admitted_eof,
-                deferred_append_eof_sha256,
-                frozen_observation,
-                direct_append,
-                route_resources,
-            },
-        )
-    }
-
-    pub fn open_whole_record(
-        identity: JsonlSourceIdentity,
-        source_file: Arc<OpenedProviderSourceFile<E>>,
-        previous: Option<&JsonlCheckpoint>,
-    ) -> JsonlResult<Self, E> {
-        Self::open_with_framing(
-            identity,
-            source_file,
-            previous,
-            None,
-            JsonlReaderFramingOptions {
-                physical_encoding: JsonlPhysicalEncoding::RawJsonl,
-                record_framing: JsonlRecordFraming::ordinary(),
-                whole_record: true,
-                bind_admitted_eof: false,
-                deferred_append_eof_sha256: None,
-                frozen_observation: None,
-                direct_append: false,
-                route_resources: None,
-            },
-        )
-    }
-
     fn open_with_framing(
         identity: JsonlSourceIdentity,
         source_file: Arc<OpenedProviderSourceFile<E>>,
@@ -229,6 +15,7 @@ impl<E: JsonlFamilyError> JsonlReader<E> {
             record_framing,
             whole_record,
             bind_admitted_eof,
+            logical_eof,
             deferred_append_eof_sha256,
             frozen_observation,
             direct_append,
@@ -252,6 +39,12 @@ impl<E: JsonlFamilyError> JsonlReader<E> {
             Some(_) => return Err(E::source_changed()),
             None => current_observation,
         };
+        let admitted_length = logical_eof.unwrap_or(observation.length());
+        if admitted_length > observation.length() || (whole_record && logical_eof.is_some()) {
+            return Err(E::invalid_payload(
+                "JSONL logical EOF is outside its retained physical observation".to_owned(),
+            ));
+        }
 
         let mut prefix_hasher = new_prefix_hasher();
         let mut complete_prefix_end = 0_u64;
@@ -270,9 +63,13 @@ impl<E: JsonlFamilyError> JsonlReader<E> {
         if let Some(previous) = previous.filter(|checkpoint| checkpoint.supports(&identity)) {
             let previous_observation = previous.source_observation();
             let same_file = previous_observation.same_stable_file(&observation);
+            let same_boundary_mode = previous.logical_eof().is_some() == logical_eof.is_some();
+            let same_admitted_length = previous.admitted_length() == admitted_length;
             if same_file
                 && previous_observation.supports_exact_revalidation()
                 && previous_observation == &observation
+                && same_boundary_mode
+                && same_admitted_length
             {
                 // Exact physical equality also proves an unfinished tail is
                 // unchanged. Its complete prefix remains the certified
@@ -283,21 +80,24 @@ impl<E: JsonlFamilyError> JsonlReader<E> {
                 source_change = JsonlSourceChange::Unchanged;
                 skip_scan = true;
                 unchanged_checkpoint = Some(previous.clone());
-            } else if previous_observation.differs_only_by_change_identity(&observation) {
+            } else if same_boundary_mode
+                && same_admitted_length
+                && previous_observation.differs_only_by_change_identity(&observation)
+            {
                 if let Some(admitted_eof_sha256) = previous.admitted_eof_sha256() {
                     super::authenticate_frozen_prefix_sha256(
                         identity.source_path(),
                         source_file.as_ref(),
                         &observation,
-                        observation.length(),
+                        admitted_length,
                         admitted_eof_sha256,
                     )?;
-                } else if previous.complete_prefix_end() == previous_observation.length() {
+                } else if previous.complete_prefix_end() == previous.admitted_length() {
                     super::authenticate_frozen_prefix(
                         identity.source_path(),
                         source_file.as_ref(),
                         &observation,
-                        observation.length(),
+                        admitted_length,
                         *previous.complete_prefix_sha256(),
                     )?;
                 } else {
@@ -309,13 +109,45 @@ impl<E: JsonlFamilyError> JsonlReader<E> {
                 skip_scan = true;
                 unchanged_checkpoint = Some(previous.clone());
             } else if physical_suffix_resume
+                && logical_eof.is_some()
+                && same_boundary_mode
+                && same_admitted_length
                 && same_file
-                && observation.length() >= previous.complete_prefix_end()
+                && admitted_length <= observation.length()
+            {
+                if let Some(admitted_eof_sha256) = previous.admitted_eof_sha256() {
+                    super::authenticate_frozen_prefix_sha256(
+                        identity.source_path(),
+                        source_file.as_ref(),
+                        &observation,
+                        admitted_length,
+                        admitted_eof_sha256,
+                    )?;
+                } else if previous.complete_prefix_end() == admitted_length {
+                    super::authenticate_frozen_prefix(
+                        identity.source_path(),
+                        source_file.as_ref(),
+                        &observation,
+                        admitted_length,
+                        *previous.complete_prefix_sha256(),
+                    )?;
+                } else {
+                    return Err(E::source_changed());
+                }
+                complete_prefix_end = previous.complete_prefix_end();
+                next_physical_ordinal = previous.next_physical_ordinal();
+                source_change = JsonlSourceChange::Unchanged;
+                skip_scan = true;
+                unchanged_checkpoint = Some(previous.clone());
+            } else if physical_suffix_resume
+                && same_boundary_mode
+                && same_file
+                && admitted_length >= previous.complete_prefix_end()
             {
                 if direct_append
                     && previous.terminal()
-                    && observation.length() > previous.source_observation().length()
-                    && previous.source_observation().length() == previous.complete_prefix_end()
+                    && admitted_length > previous.admitted_length()
+                    && previous.admitted_length() == previous.complete_prefix_end()
                     && (!bind_admitted_eof
                         || deferred_append_eof_sha256
                             .flatten()
@@ -364,8 +196,7 @@ impl<E: JsonlFamilyError> JsonlReader<E> {
                         prefix_hasher = observed_prefix;
                         complete_prefix_end = previous.complete_prefix_end();
                         next_physical_ordinal = previous.next_physical_ordinal();
-                        if previous.terminal()
-                            && observation.length() == previous.complete_prefix_end()
+                        if previous.terminal() && admitted_length == previous.complete_prefix_end()
                         {
                             source_change = JsonlSourceChange::Unchanged;
                             skip_scan = true;
@@ -424,7 +255,7 @@ impl<E: JsonlFamilyError> JsonlReader<E> {
             let restored = (source_change == JsonlSourceChange::Append)
                 .then_some(previous)
                 .flatten()
-                .filter(|previous| previous.source_observation().length() == complete_prefix_end)
+                .filter(|previous| previous.admitted_length() == complete_prefix_end)
                 .and_then(JsonlCheckpoint::restore_admitted_eof_hasher);
             Some(match restored {
                 Some(restored) => restored,
@@ -446,7 +277,7 @@ impl<E: JsonlFamilyError> JsonlReader<E> {
                 None,
                 Some(JsonlPhysicalStream::open_with_encoding_and_resources(
                     file,
-                    observation.length(),
+                    admitted_length,
                     complete_prefix_end,
                     next_physical_ordinal,
                     physical_encoding,
@@ -457,7 +288,7 @@ impl<E: JsonlFamilyError> JsonlReader<E> {
                                 full,
                                 prefix_hasher.clone(),
                                 Sha256::new(),
-                                resume.previous.source_observation().length(),
+                                resume.previous.admitted_length(),
                             )
                         }
                         (Some(full), _) => {
@@ -488,6 +319,7 @@ impl<E: JsonlFamilyError> JsonlReader<E> {
             whole_record,
             append_log: !whole_record,
             bind_admitted_eof,
+            logical_eof,
             complete_prefix_ends_with_terminal_nul_padding: false,
             semantic_append_resume,
             direct_append_resume: used_direct_append,
@@ -502,6 +334,10 @@ impl<E: JsonlFamilyError> JsonlReader<E> {
 
     pub fn source_change(&self) -> JsonlSourceChange {
         self.source_change
+    }
+
+    fn admitted_length(&self) -> u64 {
+        self.logical_eof.unwrap_or(self.observation.length())
     }
 
     pub fn outcome(&self) -> Option<&JsonlScanOutcome> {
@@ -686,10 +522,7 @@ impl<E: JsonlFamilyError> JsonlReader<E> {
             .physical
             .as_ref()
             .ok_or_else(|| E::system_invariant("semantic JSONL input lost its physical stream"))?;
-        if !self.finished
-            || self.outcome.is_none()
-            || physical.offset() != self.observation.length()
-        {
+        if !self.finished || self.outcome.is_none() || physical.offset() != self.admitted_length() {
             return Err(E::system_invariant(
                 "semantic JSONL pass was sealed before its admitted EOF",
             ));
@@ -875,9 +708,10 @@ impl<E: JsonlFamilyError> JsonlReader<E> {
                     self.next_physical_ordinal,
                 ),
             };
-        JsonlCheckpoint::new_with_prefix_state(
+        JsonlCheckpoint::new_with_prefix_state_and_logical_eof(
             self.identity.clone(),
             self.observation.clone(),
+            self.logical_eof,
             complete_prefix_end,
             complete_prefix_hasher,
             self.physical
@@ -931,15 +765,15 @@ impl<E: JsonlFamilyError> JsonlReader<E> {
                         self.identity.source_path(),
                         self.source_file.as_ref(),
                         &current,
-                        current.length(),
+                        checkpoint.admitted_length(),
                         admitted_eof_sha256,
                     )?;
-                } else if checkpoint.complete_prefix_end() == self.observation.length() {
+                } else if checkpoint.complete_prefix_end() == checkpoint.admitted_length() {
                     super::authenticate_frozen_prefix(
                         self.identity.source_path(),
                         self.source_file.as_ref(),
                         &current,
-                        current.length(),
+                        checkpoint.admitted_length(),
                         *checkpoint.complete_prefix_sha256(),
                     )?;
                 } else {

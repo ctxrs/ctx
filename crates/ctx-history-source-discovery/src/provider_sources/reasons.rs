@@ -105,6 +105,9 @@ pub(super) fn empty_source_reason(provider: CaptureProvider) -> Option<&'static 
         CaptureProvider::CodeBuddy => {
             Some("path exists but no CodeBuddy extension sessions or CLI project JSONL files were found")
         }
+        CaptureProvider::Fx => {
+            Some("path exists but no fx schema-v1/v2 snapshots or committed schema-v3 transactional event logs were found")
+        }
         _ => None,
     }
 }
@@ -178,6 +181,9 @@ pub(super) fn unknown_source_reason(provider: CaptureProvider) -> Option<&'stati
         }
         CaptureProvider::CodeBuddy => {
             Some("path exists but the CodeBuddy history probe hit its scan budget")
+        }
+        CaptureProvider::Fx => {
+            Some("path exists but the fx session-tree probe hit its scan budget")
         }
         CaptureProvider::DeepAgents => {
             Some("path exists but the Deep Agents database could not be fully probed")
@@ -298,6 +304,9 @@ pub(super) fn probe_io_error_reason(provider: CaptureProvider) -> Option<&'stati
         }
         CaptureProvider::CodeBuddy => Some(
             "path exists but CodeBuddy history JSON files could not be read; check permissions",
+        ),
+        CaptureProvider::Fx => Some(
+            "path exists but fx session history could not be read; check permissions",
         ),
         _ => None,
     }

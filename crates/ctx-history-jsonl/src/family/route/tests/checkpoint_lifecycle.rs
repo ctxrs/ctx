@@ -20,6 +20,7 @@ fn logical_count_checkpoint(
         provider_parser_revision: adapter.parser_revision().to_owned(),
         event_identity_revision: adapter.event_identity_revision().to_owned(),
         binding_digest: binding_digest(leaf).unwrap(),
+        exact_terminal_binding_digest: exact_terminal_binding_digest(leaf).unwrap(),
         physical,
         admitted_eof_sha256: None,
         complete_prefix_ends_with_terminal_nul_padding: false,

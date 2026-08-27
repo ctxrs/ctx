@@ -33,7 +33,19 @@ pub(super) fn terminal_proof_for_checkpoint<R: JsonlFamilyRuntime>(
 ) -> JsonlResult<JsonlFamilyTerminalProof<JsonlRuntimeError<R>>, JsonlRuntimeError<R>> {
     let retained = checkpoint.physical.source_observation();
     let force_authentication = retained.differs_only_by_change_identity(leaf.observation());
-    if force_authentication {
+    if leaf.logical_eof().is_some() {
+        let admitted_eof_sha256 = checkpoint
+            .exact_admitted_eof_sha256()
+            .ok_or_else(JsonlRuntimeError::<R>::source_changed)?;
+        JsonlFamilyTerminalProof::forced_frozen_prefix_with_hash(
+            adapter,
+            leaf,
+            certificate,
+            checkpoint.physical.admitted_length(),
+            admitted_eof_sha256,
+            super::super::terminal::JsonlFamilyTerminalPrefixHash::Sha256,
+        )
+    } else if force_authentication {
         if let Some(admitted_eof_sha256) = checkpoint.exact_admitted_eof_sha256() {
             JsonlFamilyTerminalProof::forced_frozen_prefix_with_hash(
                 adapter,
@@ -110,7 +122,9 @@ pub(super) fn certify<R: JsonlFamilyRuntime>(
     leaf: &JsonlFamilyLeaf<JsonlRuntimeError<R>>,
     checkpoint: FamilyCheckpoint,
 ) -> SourceBackedRouteResult<CertifiedSource> {
-    if !checkpoint.valid_for(adapter, leaf) {
+    if !checkpoint.valid_for(adapter, leaf)
+        || checkpoint.physical.logical_eof() != leaf.logical_eof()
+    {
         return Err(route_invalid("JSONL checkpoint is internally inconsistent"));
     }
     let complete_records = checkpoint.logical_complete_records;

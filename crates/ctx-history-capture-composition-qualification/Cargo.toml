@@ -34,7 +34,12 @@ path = "tests/openclaw_configured_root_lifecycle.rs"
 name = "custom_history_core_fixture"
 path = "tests/custom_history_core_fixture.rs"
 
+[[test]]
+name = "fx_publication"
+path = "tests/fx_publication.rs"
+
 [dev-dependencies]
+base64.workspace = true
 ctx-history-capture-composition = { path = "../ctx-history-capture-composition", features = ["test-support"] }
 ctx-history-capture-model = { path = "../ctx-history-capture-model" }
 ctx-history-capture-runtime = { path = "../ctx-history-capture-runtime" }
@@ -42,6 +47,7 @@ ctx-history-core = { path = "../ctx-history-core" }
 ctx-history-index = { path = "../ctx-history-index" }
 ctx-history-openclaw-schema = { path = "../ctx-history-openclaw-schema", features = ["test-support"] }
 ctx-history-provider-codex = { path = "../ctx-history-provider-codex", features = ["test-support"] }
+ctx-history-provider-fx = { path = "../ctx-history-provider-fx" }
 ctx-history-provider-gemini = { path = "../ctx-history-provider-gemini", features = ["test-support"] }
 ctx-history-provider-native-jsonl = { path = "../ctx-history-provider-native-jsonl" }
 ctx-history-provider-openclaw-sqlite = { path = "../ctx-history-provider-openclaw-sqlite", features = ["test-support"] }

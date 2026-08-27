@@ -23,6 +23,7 @@ members = [
     "crates/ctx-history-capture-model",
     "crates/ctx-history-capture-runtime",
     "crates/ctx-history-provider-docproj",
+    "crates/ctx-history-provider-fx",
     "crates/ctx-history-provider-runtime",
     "crates/ctx-history-provider-claude-cursor",
     "crates/ctx-history-provider-codex",

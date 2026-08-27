@@ -1,6 +1,8 @@
 use super::*;
 
+mod fx;
 mod platform_roots;
+use fx::register_configured_fx_route;
 pub(super) use platform_roots::goose_platform_root;
 
 pub(super) fn build_automatic_source_backed_registry_from_parts_with_probes(
@@ -333,6 +335,17 @@ pub(super) fn build_automatic_source_backed_registry_from_parts_with_probes(
             let source_root_lineage =
                 configured_source_identity.and_then(|identity| identity.lineage(configured_root));
             let registration = match (source.provider, source.source_format) {
+                (CaptureProvider::Fx, "fx_sessions_tree") => register_configured_fx_route(
+                    &mut registry,
+                    source.clone(),
+                    data_root,
+                    format_route.certified_source_format,
+                    configured_root,
+                    configured_source_identity,
+                    &provider_root_registrations,
+                    source_root_lineage,
+                    route_role,
+                ),
                 (CaptureProvider::Claude, "claude_projects_jsonl_tree") => {
                     register_configured_claude_source_backed_route(
                         &mut registry,
@@ -788,6 +801,22 @@ fn register_discovered_automatic_route_scoped(
                 data_root,
                 lineage,
                 &[],
+            )
+        }
+        (SourceBackedRouteConstructor::CatalogLineage, CaptureProvider::Fx) => {
+            let lineage = source_root_lineage.unwrap_or_else(|| {
+                explicit_source_catalog_lineage(
+                    source.provider,
+                    format_route.certified_source_format,
+                    &source.path,
+                )
+            });
+            register_landed_source_backed_route_with_data_root_and_lineage(
+                registry,
+                source,
+                SourceBackedRouteSelection::Automatic,
+                data_root,
+                Some(lineage),
             )
         }
         (SourceBackedRouteConstructor::ExactCwd, CaptureProvider::Shelley) => {

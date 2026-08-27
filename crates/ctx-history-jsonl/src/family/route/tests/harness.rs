@@ -1,5 +1,28 @@
 use super::*;
 
+pub(super) fn revalidate_test_sources(
+    root: &Path,
+    resident: &Mutex<FamilyResident>,
+) -> Result<bool> {
+    let sources = resident
+        .lock()
+        .map_err(|_| CaptureError::SystemInvariant("JSONL test resident lock was poisoned"))?
+        .terminal_sources
+        .values()
+        .map(|evidence| evidence.certificate.clone())
+        .collect::<Vec<_>>();
+    for source in &sources {
+        if !revalidate_target_fallible(
+            resident,
+            SourceBackedRevalidationTarget::Source(source),
+            Some(root),
+        )? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 pub(super) fn capture_parallel_test_generation(
     adapter: &JsonlFamilyAdapterObject,
     root: &Path,
@@ -37,7 +60,9 @@ pub(super) fn capture_parallel_test_generation_exhaustive_with_terminal_revalida
         .ok_or(CaptureError::SystemInvariant(
             "JSONL test capture did not certify an inventory",
         ))?;
-    if !revalidate_complete_inventory(adapter, root, &resident, &inventory)? {
+    if !revalidate_test_sources(root, &resident)?
+        || !revalidate_complete_inventory(adapter, root, &resident, &inventory)?
+    {
         return Err(CaptureError::SourceChangedDuringCapture);
     }
     let activity = jsonl_family_scanner_activity();
@@ -63,7 +88,13 @@ pub(super) fn capture_parallel_test_generation_with_terminal_revalidation(
         .ok_or(CaptureError::SystemInvariant(
             "JSONL test capture did not certify an inventory",
         ))?;
-    let valid = match revalidate_complete_inventory(adapter, root, &resident, &inventory) {
+    let valid = match revalidate_test_sources(root, &resident).and_then(|valid| {
+        if valid {
+            revalidate_complete_inventory(adapter, root, &resident, &inventory)
+        } else {
+            Ok(false)
+        }
+    }) {
         Ok(valid) => valid,
         Err(error) if error.is_not_found() || error.is_source_changed() => false,
         Err(error) => return Err(error),
@@ -99,7 +130,9 @@ pub(super) fn capture_parallel_test_generation_with_resident_and_terminal_revali
         .ok_or(CaptureError::SystemInvariant(
             "JSONL test capture did not certify an inventory",
         ))?;
-    if !revalidate_complete_inventory(adapter, root, resident, &inventory)? {
+    if !revalidate_test_sources(root, resident)?
+        || !revalidate_complete_inventory(adapter, root, resident, &inventory)?
+    {
         return Err(CaptureError::SourceChangedDuringCapture);
     }
     let activity = jsonl_family_scanner_activity();

@@ -188,6 +188,7 @@ pub use route::{
     JsonlFamilyPublication, JsonlFamilyRejectedLeaf, JsonlFamilyRootMissingMode,
     JsonlFamilySemanticExecutor, JsonlFamilySemanticPage, JsonlFamilySemanticPreflight,
     JsonlFamilySemanticSummary, JsonlFamilyTerminalProof, JsonlFamilyWorkerContext,
+    JSONL_FAMILY_MAX_LEAF_TERMINAL_DEPENDENCIES, JSONL_FAMILY_MAX_LEAF_TERMINAL_PRESENT_BYTES,
 };
 pub use single_file::jsonl_single_file_inventory;
 const PAGE_MAX_RECORDS: usize = 64;
@@ -229,6 +230,7 @@ pub struct JsonlReader<E: JsonlFamilyError> {
     whole_record: bool,
     append_log: bool,
     bind_admitted_eof: bool,
+    logical_eof: Option<u64>,
     complete_prefix_ends_with_terminal_nul_padding: bool,
     semantic_append_resume: Option<JsonlSemanticAppendResume>,
     direct_append_resume: bool,
@@ -247,6 +249,7 @@ struct JsonlReaderFramingOptions<'a> {
     record_framing: JsonlRecordFraming,
     whole_record: bool,
     bind_admitted_eof: bool,
+    logical_eof: Option<u64>,
     deferred_append_eof_sha256: Option<Option<[u8; 32]>>,
     frozen_observation: Option<&'a JsonlFileObservation>,
     direct_append: bool,

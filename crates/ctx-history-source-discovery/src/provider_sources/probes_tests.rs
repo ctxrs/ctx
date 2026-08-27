@@ -706,3 +706,200 @@ fn cursor_probe_maps_symlink_rejection_to_io_error() {
 
     assert_eq!(has_cursor_agent_transcript(&linked), BoundedProbe::IoError);
 }
+
+#[test]
+fn fx_legacy_summary_probe_rejects_duplicate_required_fields() {
+    let cases = [
+        (
+            "schema-version",
+            r#"{"schema_version":1,"schema_version":2,"id":"duplicate","created_at_ms":1,"updated_at_ms":2,"conversation_language":"en","history_len":0,"history":[]}"#,
+        ),
+        (
+            "id",
+            r#"{"schema_version":1,"id":"duplicate","id":"duplicate","created_at_ms":1,"updated_at_ms":2,"conversation_language":"en","history_len":0,"history":[]}"#,
+        ),
+        (
+            "language",
+            r#"{"schema_version":1,"id":"duplicate","created_at_ms":1,"updated_at_ms":2,"conversation_language":"en","conversation_language":"ja","history_len":0,"history":[]}"#,
+        ),
+    ];
+
+    for (name, json) in cases {
+        let temp = tempdir();
+        let session = temp.path().join("duplicate");
+        fs::create_dir(&session).unwrap();
+        let candidate = session.join("session.json");
+        fs::write(&candidate, json).unwrap();
+        assert!(!is_fx_session_candidate(&candidate), "{name}");
+    }
+}
+
+fn write_fx_legacy_session(session: &Path, id: &str) {
+    fs::create_dir_all(session).unwrap();
+    fs::write(
+        session.join("session.json"),
+        format!(
+            r#"{{"schema_version":2,"id":"{id}","created_at_ms":1,"updated_at_ms":2,"workspace_root":null,"conversation_language":"en","history_len":0,"history":[]}}"#,
+        ),
+    )
+    .unwrap();
+}
+
+#[test]
+fn fx_probe_discovers_first_event_larger_than_64_kib() {
+    const PREVIOUS_FIRST_EVENT_LIMIT_BYTES: usize = 64 * 1024;
+    const GENERATION: &str = "00000000000000000000000000000002";
+    const EVENT_ID: &str = "00000000000000000000000000000003";
+
+    let temp = tempdir();
+    let sessions = temp.path().join("sessions");
+    let session = sessions.join("large-first-event");
+    fs::create_dir_all(&session).unwrap();
+    fs::write(
+        session.join("authority.json"),
+        r#"{"schema_version":1,"session_id":"large-first-event","authority_id":"00000000000000000000000000000001","storage_format":"event_log_v1","source":"native_create"}"#,
+    )
+    .unwrap();
+
+    let padding = "x".repeat(PREVIOUS_FIRST_EVENT_LIMIT_BYTES);
+    let events = format!(
+        r#"{{"schema_version":1,"log_generation":"{GENERATION}","seq":1,"event_id":"{EVENT_ID}","timestamp_ms":1,"kind":"session_started","payload":{{"padding":"{padding}"}}}}
+"#,
+    );
+    assert!(events.len() > PREVIOUS_FIRST_EVENT_LIMIT_BYTES);
+    assert!(events.len() <= MAX_PROVIDER_JSONL_LINE_BYTES);
+    fs::write(session.join("events.jsonl"), &events).unwrap();
+    fs::write(
+        session.join(format!("commit.{GENERATION}.json")),
+        format!(
+            r#"{{"schema_version":1,"session_id":"large-first-event","log_generation":"{GENERATION}","through_seq":1,"through_event_id":"{EVENT_ID}","through_event_log_bytes":{}}}"#,
+            events.len(),
+        ),
+    )
+    .unwrap();
+
+    assert_eq!(
+        has_fx_session_under_immediate_child(&sessions, 10_000),
+        BoundedProbe::Found
+    );
+}
+
+#[test]
+fn fx_probe_only_admits_immediate_child_session_directories() {
+    let temp = tempdir();
+    let sessions = temp.path().join("sessions");
+    write_fx_legacy_session(&sessions.join("nested/session"), "session");
+    write_fx_legacy_session(&sessions.join("mismatched"), "different-id");
+
+    assert_eq!(
+        has_fx_session_under_immediate_child(&sessions, 10_000),
+        BoundedProbe::NotFound
+    );
+
+    write_fx_legacy_session(&sessions.join("direct"), "direct");
+    assert_eq!(
+        has_fx_session_under_immediate_child(&sessions, 10_000),
+        BoundedProbe::Found
+    );
+}
+
+#[test]
+fn fx_immediate_child_probe_preserves_the_aggregate_entry_budget() {
+    let temp = tempdir();
+    let sessions = temp.path().join("sessions");
+    write_fx_legacy_session(&sessions.join("bounded"), "bounded");
+
+    assert_eq!(
+        has_fx_session_under_immediate_child(&sessions, 1),
+        BoundedProbe::BudgetExhausted
+    );
+    assert_eq!(
+        has_fx_session_under_immediate_child(&sessions, 2),
+        BoundedProbe::Found
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn fx_immediate_child_probe_rejects_symlinked_session_directories() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempdir();
+    let sessions = temp.path().join("sessions");
+    let real_session = temp.path().join("real-session");
+    write_fx_legacy_session(&real_session, "linked");
+    fs::create_dir(&sessions).unwrap();
+    symlink(&real_session, sessions.join("linked")).unwrap();
+
+    assert_eq!(
+        has_fx_session_under_immediate_child(&sessions, 10_000),
+        BoundedProbe::NotFound
+    );
+}
+
+#[test]
+fn fx_legacy_summary_probe_bounds_key_value_and_depth_amplification() {
+    let oversized = "x".repeat(FX_LEGACY_SUMMARY_PREFIX_MAX_BYTES as usize * 2);
+    let cases = [
+        (
+            "key",
+            format!(
+                r#"{{"{oversized}":null,"schema_version":1,"id":"amplification","created_at_ms":1,"updated_at_ms":2,"conversation_language":"en","history_len":0,"history":[]}}"#
+            ),
+        ),
+        (
+            "id",
+            format!(
+                r#"{{"schema_version":1,"id":"{oversized}","created_at_ms":1,"updated_at_ms":2,"conversation_language":"en","history_len":0,"history":[]}}"#
+            ),
+        ),
+        (
+            "language",
+            format!(
+                r#"{{"schema_version":1,"id":"amplification","created_at_ms":1,"updated_at_ms":2,"conversation_language":"{oversized}","history_len":0,"history":[]}}"#
+            ),
+        ),
+        (
+            "depth",
+            format!(
+                r#"{{"unknown":{}0{},"schema_version":1,"id":"amplification","created_at_ms":1,"updated_at_ms":2,"conversation_language":"en","history_len":0,"history":[]}}"#,
+                "[".repeat(140),
+                "]".repeat(140),
+            ),
+        ),
+    ];
+
+    for (name, json) in cases {
+        let temp = tempdir();
+        let session = temp.path().join("amplification");
+        fs::create_dir(&session).unwrap();
+        let candidate = session.join("session.json");
+        fs::write(&candidate, json).unwrap();
+        assert!(!is_fx_session_candidate(&candidate), "{name}");
+    }
+}
+
+#[test]
+fn fx_legacy_summary_probe_matches_the_whole_record_size_boundary() {
+    for (name, length, expected) in [
+        ("exact", MAX_PROVIDER_JSONL_LINE_BYTES as u64, true),
+        ("over", MAX_PROVIDER_JSONL_LINE_BYTES as u64 + 1, false),
+    ] {
+        let temp = tempdir();
+        let session = temp.path().join("size-boundary");
+        fs::create_dir(&session).unwrap();
+        let candidate = session.join("session.json");
+        fs::write(
+            &candidate,
+            r#"{"schema_version":1,"id":"size-boundary","created_at_ms":1,"updated_at_ms":2,"conversation_language":"en","history_len":0,"history":[]}"#,
+        )
+        .unwrap();
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&candidate)
+            .unwrap()
+            .set_len(length)
+            .unwrap();
+        assert_eq!(is_fx_session_candidate(&candidate), expected, "{name}");
+    }
+}

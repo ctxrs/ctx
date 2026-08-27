@@ -1,5 +1,139 @@
 use super::*;
 
+fn write_terminal_logical_fixture(root: &Path, name: &str, physical: &[u8], logical_eof: u64) {
+    fs::create_dir_all(root).unwrap();
+    fs::write(root.join(format!("{name}.jsonl")), physical).unwrap();
+    fs::write(
+        root.join(format!("{name}.jsonl.eof")),
+        format!("{logical_eof}\n"),
+    )
+    .unwrap();
+}
+
+#[test]
+fn exact_present_dependency_rehash_rejects_metadata_equivalent_content_change() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = temp.path().join("sessions");
+    let record = b"{\"message\":\"one\"}\n";
+    write_terminal_logical_fixture(&root, "events", record, record.len() as u64);
+    let adapter = LogicalEofTestAdapter::default();
+    let inventory = adapter.discover(&root).unwrap();
+    let mut leaf = inventory.accepted_leaves().next().unwrap().clone();
+    let control_path = root.join("events.jsonl.eof");
+    let original_modified = fs::metadata(&control_path).unwrap().modified().unwrap();
+    let original = fs::read(&control_path).unwrap();
+    let mut changed = original.clone();
+    changed[0] = if changed[0] == b'1' { b'2' } else { b'1' };
+    fs::write(&control_path, &changed).unwrap();
+    OpenOptions::new()
+        .write(true)
+        .open(&control_path)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(original_modified))
+        .unwrap();
+
+    // Simulate a platform where the same-object metadata observation is
+    // indistinguishable after restoration. Exact content evidence must still
+    // reject the dependency.
+    let opened = leaf
+        .authority()
+        .open_file(Path::new("events.jsonl.eof"))
+        .unwrap();
+    leaf.terminal_dependencies.present[0].observation =
+        observe_opened_file(&control_path, &opened).unwrap();
+    let error = leaf.terminal_dependencies.present[0]
+        .revalidate()
+        .expect_err("exact dependency content mutation must fail");
+    assert!(error.is_source_changed());
+}
+
+#[test]
+fn leaf_terminal_sandwich_rejects_control_change_and_absence_creation() {
+    for race in ["control", "absence"] {
+        let temp = crate::test_support_paths::tempdir().unwrap();
+        let root = temp.path().join("sessions");
+        let index = temp.path().join("index");
+        let record = b"{\"message\":\"one\"}\n";
+        write_terminal_logical_fixture(&root, "events", record, record.len() as u64);
+        let adapter = LogicalEofTestAdapter::default();
+        let control = root.join("events.jsonl.eof");
+        let absent = root.join("events.jsonl.next");
+        let hook_ran = Arc::new(AtomicBool::new(false));
+        let hook_observation = Arc::clone(&hook_ran);
+        set_before_jsonl_terminal_physical_revalidation_hook(root.clone(), move || {
+            match race {
+                "control" => {
+                    let mut changed = fs::read(&control).unwrap();
+                    changed[0] = if changed[0] == b'1' { b'2' } else { b'1' };
+                    fs::write(&control, changed).unwrap();
+                }
+                "absence" => fs::write(&absent, b"appeared").unwrap(),
+                _ => unreachable!(),
+            }
+            hook_observation.store(true, Ordering::SeqCst);
+        });
+
+        let error =
+            capture_parallel_test_generation_with_terminal_revalidation(&adapter, &root, &index, 1)
+                .unwrap_err();
+        assert!(hook_ran.load(Ordering::SeqCst), "{race}");
+        assert!(error.is_source_changed(), "{race}: {error:?}");
+    }
+}
+
+#[test]
+fn leaf_terminal_dependencies_do_not_invalidate_unrelated_leaves() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let root = temp.path().join("sessions");
+    let index = temp.path().join("index");
+    let record = b"{\"message\":\"one\"}\n";
+    write_terminal_logical_fixture(&root, "alpha", record, record.len() as u64);
+    write_terminal_logical_fixture(&root, "beta", record, record.len() as u64);
+    let adapter = LogicalEofTestAdapter::default();
+    let (_writer, resident, ()) =
+        capture_test_generation!(&adapter, &root, &index, 1, |resident, sink| {
+            capture(&adapter, &root, resident, sink).unwrap()
+        });
+    let (alpha, beta, inventory) = {
+        let resident = resident.lock().unwrap();
+        let opening = resident.opening_inventory.as_ref().unwrap();
+        let source_for = |name: &str| {
+            let leaf = opening
+                .accepted_leaves()
+                .find(|leaf| leaf.source_path().ends_with(name))
+                .unwrap();
+            resident
+                .terminal_sources
+                .get(&leaf.source().exact_descriptor_digest())
+                .unwrap()
+                .certificate
+                .clone()
+        };
+        (
+            source_for("alpha.jsonl"),
+            source_for("beta.jsonl"),
+            resident.certified_inventory.clone().unwrap(),
+        )
+    };
+    let alpha_control = root.join("alpha.jsonl.eof");
+    let mut changed = fs::read(&alpha_control).unwrap();
+    changed[0] = if changed[0] == b'1' { b'2' } else { b'1' };
+    fs::write(alpha_control, changed).unwrap();
+
+    assert!(revalidate_target(
+        &resident,
+        SourceBackedRevalidationTarget::Source(&beta),
+    ));
+    assert!(!revalidate_target(
+        &resident,
+        SourceBackedRevalidationTarget::Source(&alpha),
+    ));
+    assert!(
+        revalidate_complete_inventory(&adapter, &root, &resident, &inventory).unwrap(),
+        "one leaf's control mismatch must not become a route-wide dependency failure"
+    );
+}
+
 fn seed_sibling_route(index_root: &Path, source: CertifiedSource) {
     let route_source = source.observation().source().clone();
     test_generations().lock().unwrap().insert(
@@ -338,7 +472,7 @@ fn active_source_family_contract_jsonl_terminal_inventory_observes_live_tree() {
     fs::write(&first, b"{\"message\":\"before\"}\n").unwrap();
     let adapter = TestAdapter;
 
-    let (resident, inventory) = expected_state(&adapter, &root);
+    let (resident, _inventory) = expected_state(&adapter, &root);
     let source = expected_source(&resident);
     let resident = Mutex::new(resident);
     assert!(revalidate_target(
@@ -347,7 +481,8 @@ fn active_source_family_contract_jsonl_terminal_inventory_observes_live_tree() {
     ));
     fs::write(&first, b"{\"message\":\"changed between callbacks\"}\n").unwrap();
     assert!(
-        !revalidate_complete_inventory(&adapter, &root, &resident, &inventory).unwrap_or(false)
+        !revalidate_target(&resident, SourceBackedRevalidationTarget::Source(&source),),
+        "the leaf-scoped publication callback must reject the changed source"
     );
 
     let (resident, inventory) = expected_state(&adapter, &root);
@@ -382,6 +517,7 @@ fn active_source_family_contract_jsonl_terminal_inventory_rejects_admitted_leaf_
     let (resident, inventory) = expected_state(&adapter, &root);
     let resident = Mutex::new(resident);
     adapter.enabled.store(true, Ordering::SeqCst);
+    assert!(revalidate_test_sources(&root, &resident).unwrap());
 
     assert!(
         !revalidate_complete_inventory(&adapter, &root, &resident, &inventory).unwrap(),
@@ -603,16 +739,17 @@ fn active_source_family_contract_jsonl_frozen_multi_root_defers_new_leaves() {
     let (resident, inventory) = expected_state(&adapter, &selection_root);
     let resident = Mutex::new(resident);
     fs::write(second_root.join("late.jsonl"), TEST_RECORD).unwrap();
+    assert!(revalidate_test_sources(&selection_root, &resident).unwrap());
     assert!(
         revalidate_complete_inventory(&adapter, &selection_root, &resident, &inventory,).unwrap()
     );
 
-    let (resident, inventory) = expected_state(&adapter, &selection_root);
+    let (resident, _inventory) = expected_state(&adapter, &selection_root);
     let resident = Mutex::new(resident);
     fs::remove_file(retained).unwrap();
     assert!(
-        !revalidate_complete_inventory(&adapter, &selection_root, &resident, &inventory,)
-            .unwrap_or(false)
+        !revalidate_test_sources(&selection_root, &resident).unwrap_or(false),
+        "a deleted leaf must fail its own terminal callback"
     );
 }
 
@@ -694,8 +831,11 @@ fn active_source_family_contract_jsonl_frozen_root_replacement_fails_closed() {
     fs::rename(&root, &moved).unwrap();
     fs::create_dir_all(&root).unwrap();
     fs::write(root.join("first.jsonl"), TEST_RECORD).unwrap();
+    let sources_revalidated = revalidate_test_sources(&selection_root, &resident);
     assert!(
-        revalidate_complete_inventory(&adapter, &selection_root, &resident, &inventory,).is_err()
+        sources_revalidated.is_err()
+            || revalidate_complete_inventory(&adapter, &selection_root, &resident, &inventory,)
+                .is_err()
     );
 }
 
@@ -714,6 +854,7 @@ fn active_source_family_contract_jsonl_terminal_noop_is_metadata_only_without_re
     let resident = Mutex::new(resident);
 
     reset_jsonl_prefix_hash_bytes();
+    assert!(revalidate_test_sources(&selection_root, &resident).unwrap());
     assert!(
         revalidate_complete_inventory(&adapter, &selection_root, &resident, &inventory).unwrap()
     );
@@ -732,7 +873,7 @@ fn active_source_family_contract_jsonl_frozen_rejects_root_swap_without_recatalo
         discoveries: AtomicUsize::new(0),
     };
     let selection_root = temp.path().join("codex-selection");
-    let (resident, inventory) = expected_state(&adapter, &selection_root);
+    let (resident, _inventory) = expected_state(&adapter, &selection_root);
     let resident = Mutex::new(resident);
 
     fs::OpenOptions::new()
@@ -757,9 +898,7 @@ fn active_source_family_contract_jsonl_frozen_rejects_root_swap_without_recatalo
         barrier.wait();
     });
 
-    assert!(
-        revalidate_complete_inventory(&adapter, &selection_root, &resident, &inventory,).is_err()
-    );
+    assert!(revalidate_test_sources(&selection_root, &resident).is_err());
     worker.join().unwrap();
     assert_eq!(adapter.discoveries.load(Ordering::SeqCst), 1);
 }

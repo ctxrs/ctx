@@ -1,0 +1,22 @@
+[package]
+name = "ctx-history-provider-fx"
+version.workspace = true
+description = "Pure fx history protocol replay and Core projection"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+base64.workspace = true
+chrono.workspace = true
+ctx-history-core = { path = "../ctx-history-core" }
+ctx-history-jsonl = { path = "../ctx-history-jsonl" }
+ctx-history-provider-runtime = { path = "../ctx-history-provider-runtime" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true

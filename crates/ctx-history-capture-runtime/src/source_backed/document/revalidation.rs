@@ -6,7 +6,10 @@ use std::{
 use ctx_history_core::{CertifiedSource, CertifiedSourceInventory, SourceKey};
 
 use super::super::SourceBackedRevalidationTarget;
-use super::{CompleteDocumentTree, ReplacementDocumentTree};
+use super::{
+    document_internal, CompleteDocumentTree, ReplacementDocumentTree, SourceBackedRouteErrorKind,
+    SourceBackedRouteResult,
+};
 
 pub(super) struct CurrentDocumentSources {
     ordered: Vec<SourceKey>,
@@ -190,28 +193,31 @@ pub(super) fn revalidate_document_inventory<A>(
     adapter: &A,
     state: &Mutex<DocumentCommitState<A::Leaf, A::TreeAuthority>>,
     inventory: &CertifiedSourceInventory,
-) -> bool
+) -> SourceBackedRouteResult<bool>
 where
     A: ReplacementDocumentTree,
 {
-    let Ok(state) = state.lock() else {
-        return false;
-    };
+    let state = state
+        .lock()
+        .map_err(|_| document_internal("document commit state lock was poisoned"))?;
     let Some(expected) = state.expected.as_ref() else {
-        return false;
+        return Ok(false);
     };
     if expected.inventory != *inventory {
-        return false;
+        return Ok(false);
     }
 
     // Source and deletion callbacks only bind writer targets to this expected
     // route. The final inventory callback owns the one live terminal tree
     // observation, so changes between callbacks cannot inherit an earlier
     // successful result.
-    adapter
-        .revalidate_complete(&expected.tree)
-        .is_ok_and(|terminal| terminal == expected.tree.tree_fingerprint)
-        && revalidate_durable_replay_sources(adapter, &expected.tree)
+    let terminal = match adapter.revalidate_complete(&expected.tree) {
+        Ok(terminal) => terminal,
+        Err(error) if error.kind == SourceBackedRouteErrorKind::SourceChanged => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    Ok(terminal == expected.tree.tree_fingerprint
+        && revalidate_durable_replay_sources(adapter, &expected.tree))
 }
 
 pub(super) fn revalidate_durable_replay_sources<A>(

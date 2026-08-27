@@ -39,6 +39,236 @@ fn provider_source_for_path(provider: CaptureProvider, path: std::path::PathBuf)
     ctx_history_source_discovery::provider_source_for_path(&TEST_PROVIDER_PROBES, provider, path)
 }
 
+fn fx_legacy_session(version: u64, id: &str) -> String {
+    format!(
+        r#"{{"schema_version":{version},"id":"{id}","created_at_ms":1,"updated_at_ms":2,"workspace_root":null,"conversation_language":"en","history_len":0,"history":[]}}"#
+    )
+}
+
+fn write_committed_fx_v3_session(session: &std::path::Path, id: &str) {
+    const GENERATION: &str = "00000000000000000000000000000002";
+    const EVENT_ID: &str = "00000000000000000000000000000003";
+    std::fs::create_dir_all(session).unwrap();
+    std::fs::write(
+        session.join("authority.json"),
+        format!(
+            r#"{{"schema_version":1,"session_id":"{id}","authority_id":"00000000000000000000000000000001","storage_format":"event_log_v1","source":"native_create"}}"#,
+        ),
+    )
+    .unwrap();
+    let events = format!(
+        r#"{{"schema_version":1,"log_generation":"{GENERATION}","seq":1,"event_id":"{EVENT_ID}","timestamp_ms":1,"kind":"session_started","payload":{{"id":"{id}","created_at_ms":1,"origin_workspace_root":"/workspace","workspace_root":"/workspace","conversation_language":"en","preferences":{{"model":"test/model","effort":"auto","fast_mode":false}}}}}}
+"#,
+    );
+    std::fs::write(session.join("events.jsonl"), &events).unwrap();
+    std::fs::write(
+        session.join(format!("commit.{GENERATION}.json")),
+        format!(
+            r#"{{"schema_version":1,"session_id":"{id}","log_generation":"{GENERATION}","through_seq":1,"through_event_id":"{EVENT_ID}","through_event_log_bytes":{}}}"#,
+            events.len(),
+        ),
+    )
+    .unwrap();
+}
+
+#[test]
+fn fx_does_not_treat_a_markerless_schema_v3_projection_as_legacy_authority() {
+    let temp = tempdir();
+    let sessions = temp.path().join(".fx/sessions");
+    let session = sessions.join("session-v3");
+    std::fs::create_dir_all(&session).unwrap();
+    std::fs::write(
+        session.join("session.json"),
+        fx_legacy_session(3, "session-v3"),
+    )
+    .unwrap();
+
+    let source = discover_provider_sources_for_provider(temp.path(), CaptureProvider::Fx)
+        .into_iter()
+        .find(|source| source.path == sessions)
+        .expect("fx default source");
+    assert_eq!(source.status, ProviderSourceStatus::Empty);
+    assert!(source
+        .unsupported_reason
+        .expect("empty fx reason")
+        .contains("schema-v1/v2 snapshots or committed schema-v3 transactional event logs"));
+
+    let exact = provider_source_for_path(CaptureProvider::Fx, sessions);
+    assert_eq!(exact.status, ProviderSourceStatus::Empty);
+}
+
+#[test]
+fn fx_discovers_markerless_legacy_schema_v1_and_v2_snapshots() {
+    for version in [1, 2] {
+        let temp = tempdir();
+        let sessions = temp.path().join(".fx/sessions");
+        let id = format!("session-v{version}");
+        let session = sessions.join(&id);
+        std::fs::create_dir_all(&session).unwrap();
+        std::fs::write(
+            session.join("session.json"),
+            fx_legacy_session(version, &id),
+        )
+        .unwrap();
+
+        let source = discover_provider_sources_for_provider(temp.path(), CaptureProvider::Fx)
+            .into_iter()
+            .find(|source| source.path == sessions)
+            .expect("fx default source");
+        assert_eq!(source.status, ProviderSourceStatus::Available, "v{version}");
+        assert_eq!(source.source_format, "fx_sessions_tree");
+        assert_eq!(source.unsupported_reason, None);
+    }
+}
+
+#[test]
+fn fx_discovers_current_schema_v3_event_log_authority() {
+    let temp = tempdir();
+    let sessions = temp.path().join(".fx/sessions");
+    let session = sessions.join("session-v3");
+    write_committed_fx_v3_session(&session, "session-v3");
+    let source = discover_provider_sources_for_provider(temp.path(), CaptureProvider::Fx)
+        .into_iter()
+        .find(|source| source.path == sessions)
+        .expect("fx default source");
+    assert_eq!(source.status, ProviderSourceStatus::Available);
+    assert_eq!(source.source_format, "fx_sessions_tree");
+    assert_eq!(source.unsupported_reason, None);
+
+    let exact = provider_source_for_path(CaptureProvider::Fx, sessions.clone());
+    assert_eq!(exact.path, sessions);
+    assert_eq!(exact.status, ProviderSourceStatus::Available);
+    assert_eq!(exact.source_format, "fx_sessions_tree");
+}
+
+#[test]
+fn fx_ignores_a_complete_v3_session_nested_below_an_immediate_child() {
+    let temp = tempdir();
+    let sessions = temp.path().join(".fx/sessions");
+    write_committed_fx_v3_session(&sessions.join("decoy/session-v3"), "session-v3");
+
+    let source = discover_provider_sources_for_provider(temp.path(), CaptureProvider::Fx)
+        .into_iter()
+        .find(|source| source.path == sessions)
+        .expect("fx default source");
+    assert_eq!(source.status, ProviderSourceStatus::Empty);
+
+    let exact = provider_source_for_path(CaptureProvider::Fx, sessions);
+    assert_eq!(exact.status, ProviderSourceStatus::Empty);
+}
+
+#[test]
+fn exact_fx_roots_preserve_missing_and_budget_statuses() {
+    let temp = tempdir();
+    let missing = temp.path().join("missing-fx-sessions");
+    let source = provider_source_for_path(CaptureProvider::Fx, missing);
+    assert_eq!(source.status, ProviderSourceStatus::Missing);
+    assert_eq!(source.source_format, "fx_sessions_tree");
+
+    let oversized = temp.path().join("oversized-fx-sessions");
+    std::fs::create_dir(&oversized).unwrap();
+    for index in 0..=10_000 {
+        std::fs::write(oversized.join(format!("decoy-{index:05}")), b"").unwrap();
+    }
+    let source = provider_source_for_path(CaptureProvider::Fx, oversized);
+    assert_eq!(source.status, ProviderSourceStatus::Unknown);
+    assert_eq!(source.source_format, "fx_sessions_tree");
+}
+
+#[cfg(unix)]
+#[test]
+fn exact_fx_roots_map_io_to_unknown_and_links_to_unsupported() {
+    use std::os::unix::{fs::symlink, fs::PermissionsExt};
+
+    let temp = tempdir();
+    let sessions = temp.path().join("fx-sessions");
+    let unreadable = sessions.join("unreadable-session");
+    std::fs::create_dir_all(&unreadable).unwrap();
+    std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let source = provider_source_for_path(CaptureProvider::Fx, sessions);
+    std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(source.status, ProviderSourceStatus::Unknown);
+
+    let real = temp.path().join("real-fx-sessions");
+    std::fs::create_dir(&real).unwrap();
+    let linked = temp.path().join("linked-fx-sessions");
+    symlink(real, &linked).unwrap();
+    let source = provider_source_for_path(CaptureProvider::Fx, linked);
+    assert_eq!(source.status, ProviderSourceStatus::Unsupported);
+    assert_eq!(source.source_format, "fx_sessions_tree");
+}
+
+#[test]
+fn fx_v3_requires_a_commit_watermark() {
+    let temp = tempdir();
+    let sessions = temp.path().join(".fx/sessions");
+    let session = sessions.join("missing-commit");
+    write_committed_fx_v3_session(&session, "missing-commit");
+    std::fs::remove_file(session.join("commit.00000000000000000000000000000002.json")).unwrap();
+
+    let source = discover_provider_sources_for_provider(temp.path(), CaptureProvider::Fx)
+        .into_iter()
+        .find(|source| source.path == sessions)
+        .expect("fx default source");
+    assert_eq!(source.status, ProviderSourceStatus::Empty);
+    assert_eq!(
+        provider_source_for_path(CaptureProvider::Fx, session.parent().unwrap().to_path_buf())
+            .status,
+        ProviderSourceStatus::Empty
+    );
+}
+
+#[test]
+fn fx_v3_rejects_a_pending_commit() {
+    let temp = tempdir();
+    let sessions = temp.path().join(".fx/sessions");
+    let session = sessions.join("pending-commit");
+    write_committed_fx_v3_session(&session, "pending-commit");
+    std::fs::write(session.join("commit.pending.json"), b"{}\n").unwrap();
+
+    let source = discover_provider_sources_for_provider(temp.path(), CaptureProvider::Fx)
+        .into_iter()
+        .find(|source| source.path == sessions)
+        .expect("fx default source");
+    assert_eq!(source.status, ProviderSourceStatus::Empty);
+    assert_eq!(
+        provider_source_for_path(CaptureProvider::Fx, session.parent().unwrap().to_path_buf())
+            .status,
+        ProviderSourceStatus::Empty
+    );
+}
+
+#[test]
+fn fx_v3_rejects_a_stale_commit_generation() {
+    const CURRENT: &str = "00000000000000000000000000000002";
+    const STALE: &str = "00000000000000000000000000000004";
+    let temp = tempdir();
+    let sessions = temp.path().join(".fx/sessions");
+    let session = sessions.join("stale-generation");
+    write_committed_fx_v3_session(&session, "stale-generation");
+    let current_path = session.join(format!("commit.{CURRENT}.json"));
+    let stale_watermark = std::fs::read_to_string(&current_path)
+        .unwrap()
+        .replace(CURRENT, STALE);
+    std::fs::remove_file(current_path).unwrap();
+    std::fs::write(
+        session.join(format!("commit.{STALE}.json")),
+        stale_watermark,
+    )
+    .unwrap();
+
+    let source = discover_provider_sources_for_provider(temp.path(), CaptureProvider::Fx)
+        .into_iter()
+        .find(|source| source.path == sessions)
+        .expect("fx default source");
+    assert_eq!(source.status, ProviderSourceStatus::Empty);
+    assert_eq!(
+        provider_source_for_path(CaptureProvider::Fx, session.parent().unwrap().to_path_buf())
+            .status,
+        ProviderSourceStatus::Empty
+    );
+}
+
 #[cfg(target_os = "windows")]
 #[test]
 fn windows_candidate_list_accepts_ordinary_absolute_codex_file() {

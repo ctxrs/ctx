@@ -68,9 +68,7 @@ pub(super) fn quarantine_leaf<E: JsonlFamilyError>(
         failure_source,
         detail,
         certified_bytes: certificate.counts().certified_bytes,
-        exact_scan_bytes: leaf
-            .frozen_scan_observation()
-            .map(|observation| observation.length()),
+        exact_scan_bytes: leaf.exact_scan_bytes(),
     })
 }
 

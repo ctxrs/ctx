@@ -1,10 +1,13 @@
+use super::super::JsonlFamilyLeafTerminalDependencies;
 use super::*;
+use crate::family::JsonlFileObservation;
 
 #[derive(Debug)]
 pub(crate) struct TerminalSourceEvidence<E: JsonlFamilyError> {
     pub(crate) certificate: CertifiedSource,
     pub(crate) terminal_certificate: Option<CertifiedSource>,
     pub(crate) terminal_proof: JsonlFamilyTerminalProof<E>,
+    pub(crate) terminal_dependencies: JsonlFamilyLeafTerminalDependencies<E>,
     pub(crate) emitted_bytes: u64,
     pub(crate) exact_scan_bytes: Option<u64>,
     pub(crate) record_rejections: SourceBackedRecordRejectionDrafts,
@@ -17,6 +20,7 @@ impl<E: JsonlFamilyError> Clone for TerminalSourceEvidence<E> {
             certificate: self.certificate.clone(),
             terminal_certificate: self.terminal_certificate.clone(),
             terminal_proof: self.terminal_proof.clone(),
+            terminal_dependencies: self.terminal_dependencies.clone(),
             emitted_bytes: self.emitted_bytes,
             exact_scan_bytes: self.exact_scan_bytes,
             record_rejections: self.record_rejections.clone(),
@@ -30,6 +34,27 @@ impl<E: JsonlFamilyError> TerminalSourceEvidence<E> {
         self.terminal_certificate
             .as_ref()
             .unwrap_or(&self.certificate)
+    }
+
+    /// Revalidates one leaf's terminal bundle in the required order. Control
+    /// and absence dependencies are checked on both sides of the primary
+    /// physical witness so no dependency mutation can be interleaved with a
+    /// successful leaf publication proof.
+    pub(crate) fn revalidate_terminal_bundle(
+        &self,
+        before_physical: impl FnOnce(),
+    ) -> JsonlResult<Option<JsonlFileObservation>, E> {
+        if !self.terminal_dependencies.revalidate()? {
+            return Ok(None);
+        }
+        before_physical();
+        let observation = self
+            .terminal_proof
+            .revalidate_for(self.observed_certificate())?;
+        if !self.terminal_dependencies.revalidate()? {
+            return Ok(None);
+        }
+        Ok(Some(observation))
     }
 }
 

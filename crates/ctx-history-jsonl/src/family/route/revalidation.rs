@@ -60,32 +60,81 @@ pub(super) fn reset_terminal<E: JsonlFamilyError>(
     Ok(())
 }
 
+#[cfg(test)]
 pub(super) fn revalidate_target<E: JsonlFamilyError>(
     resident: &Mutex<FamilyResident<E>>,
     target: SourceBackedRevalidationTarget<'_>,
 ) -> bool {
-    let Ok(resident) = resident.lock() else {
-        return false;
-    };
+    revalidate_target_fallible(resident, target, None).unwrap_or(false)
+}
+
+pub(super) fn revalidate_target_fallible<E: JsonlFamilyError>(
+    resident: &Mutex<FamilyResident<E>>,
+    target: SourceBackedRevalidationTarget<'_>,
+    _terminal_root: Option<&Path>,
+) -> JsonlResult<bool, E> {
     match target {
         SourceBackedRevalidationTarget::Source(expected) => {
-            let Some(evidence) = resident
-                .terminal_sources
-                .get(&expected.observation().source().exact_descriptor_digest())
-            else {
-                return false;
+            let digest = expected.observation().source().exact_descriptor_digest();
+            let evidence = {
+                let resident = resident.lock().map_err(|_| {
+                    E::invalid_payload("JSONL resident catalog lock was poisoned".to_owned())
+                })?;
+                let Some(evidence) = resident.terminal_sources.get(&digest) else {
+                    return Ok(false);
+                };
+                if evidence.certificate != *expected {
+                    return Ok(false);
+                }
+                evidence.clone()
             };
-            evidence.certificate == *expected
+            let authenticated = evidence.revalidate_terminal_bundle(|| {
+                #[cfg(any(test, feature = "test-support"))]
+                if let Some(root) = _terminal_root {
+                    run_before_jsonl_terminal_physical_revalidation_hook(root);
+                }
+            })?;
+            let Some(observation) = authenticated else {
+                return Ok(false);
+            };
+            let mut resident = resident.lock().map_err(|_| {
+                E::invalid_payload("JSONL resident catalog lock was poisoned".to_owned())
+            })?;
+            if !resident
+                .terminal_sources
+                .get(&digest)
+                .is_some_and(|current| {
+                    current.certificate == evidence.certificate
+                        && current.observed_certificate() == evidence.observed_certificate()
+                })
+            {
+                return Ok(false);
+            }
+            if evidence.terminal_certificate.is_none() {
+                resident.authenticated_source_observations.insert(
+                    digest,
+                    AuthenticatedSourceObservation {
+                        certificate: evidence.certificate,
+                        observation,
+                    },
+                );
+            }
+            Ok(true)
         }
-        SourceBackedRevalidationTarget::Deletion(deletion) => resident
-            .certified_inventory
-            .as_ref()
-            .is_some_and(|inventory| {
-                deletion.verifies(inventory)
-                    && !resident
-                        .terminal_sources
-                        .contains_key(&deletion.source().exact_descriptor_digest())
-            }),
+        SourceBackedRevalidationTarget::Deletion(deletion) => {
+            let resident = resident.lock().map_err(|_| {
+                E::invalid_payload("JSONL resident catalog lock was poisoned".to_owned())
+            })?;
+            Ok(resident
+                .certified_inventory
+                .as_ref()
+                .is_some_and(|inventory| {
+                    deletion.verifies(inventory)
+                        && !resident
+                            .terminal_sources
+                            .contains_key(&deletion.source().exact_descriptor_digest())
+                }))
+        }
     }
 }
 
@@ -138,27 +187,6 @@ pub(super) fn revalidate_complete_inventory<R: JsonlFamilyRuntime>(
         return Ok(false);
     }
 
-    // This is the single terminal filesystem witness for the route. It observes
-    // only retained membership routes and their physical proofs; provider
-    // discovery, identity probing, parsing, and content cataloging are admission
-    // work and are never repeated here.
-    #[cfg(any(test, feature = "test-support"))]
-    run_before_jsonl_terminal_physical_revalidation_hook(root);
-    let mut authenticated_source_observations = Vec::new();
-    for (digest, evidence) in &expected_sources {
-        let observation = evidence
-            .terminal_proof
-            .revalidate_for(evidence.observed_certificate())?;
-        if evidence.terminal_certificate.is_none() {
-            authenticated_source_observations.push((
-                *digest,
-                AuthenticatedSourceObservation {
-                    certificate: evidence.certificate.clone(),
-                    observation,
-                },
-            ));
-        }
-    }
     for dependency in &opening_inventory.exact_dependencies {
         dependency.revalidate_dependency()?;
     }
@@ -168,27 +196,13 @@ pub(super) fn revalidate_complete_inventory<R: JsonlFamilyRuntime>(
         }
     }
     opening_inventory.revalidate_terminal_root(root, adapter.inventory_mode())?;
-    let mut resident = resident.lock().map_err(|_| {
+    let resident = resident.lock().map_err(|_| {
         JsonlRuntimeError::<R>::invalid_payload(
             "JSONL resident catalog lock was poisoned".to_owned(),
         )
     })?;
     if resident.certified_inventory.as_ref() != Some(expected_inventory) {
         return Ok(false);
-    }
-    for (digest, authenticated) in authenticated_source_observations {
-        if resident
-            .terminal_sources
-            .get(&digest)
-            .is_some_and(|evidence| {
-                evidence.terminal_certificate.is_none()
-                    && evidence.certificate == authenticated.certificate
-            })
-        {
-            resident
-                .authenticated_source_observations
-                .insert(digest, authenticated);
-        }
     }
     Ok(true)
 }
@@ -315,5 +329,82 @@ pub(super) fn inventory_observation<E: JsonlFamilyError>(
 pub(super) fn binding_digest<E: JsonlFamilyError>(
     leaf: &JsonlFamilyLeaf<E>,
 ) -> JsonlResult<[u8; 32], E> {
-    Ok(Sha256::digest(serde_json::to_vec(leaf.binding())?).into())
+    let binding = serde_json::to_vec(leaf.binding())?;
+    if leaf.logical_eof.is_none() && leaf.terminal_dependencies.is_empty() {
+        return Ok(Sha256::digest(binding).into());
+    }
+    let mut digest = Sha256::new();
+    digest.update(b"ctx-jsonl-exact-leaf-boundary-bundle-v1\0");
+    digest.update((binding.len() as u64).to_be_bytes());
+    digest.update(binding);
+    match leaf.logical_eof {
+        Some(logical_eof) => {
+            digest.update([1]);
+            digest.update(logical_eof.to_be_bytes());
+        }
+        None => digest.update([0]),
+    }
+    digest.update((leaf.terminal_dependencies.present.len() as u64).to_be_bytes());
+    for dependency in &leaf.terminal_dependencies.present {
+        digest.update([1]);
+        let source_path = dependency.source_path.as_os_str().as_encoded_bytes();
+        digest.update((source_path.len() as u64).to_be_bytes());
+        digest.update(source_path);
+        let path = dependency.authority_path.as_os_str().as_encoded_bytes();
+        digest.update((path.len() as u64).to_be_bytes());
+        digest.update(path);
+        digest.update(dependency.authority.authority_fingerprint());
+        let observation = serde_json::to_vec(&dependency.observation)?;
+        digest.update((observation.len() as u64).to_be_bytes());
+        digest.update(observation);
+        digest.update(dependency.content_length.to_be_bytes());
+        digest.update(dependency.content_sha256);
+    }
+    digest.update((leaf.terminal_dependencies.absent.len() as u64).to_be_bytes());
+    for dependency in &leaf.terminal_dependencies.absent {
+        digest.update([0]);
+        let source_path = dependency.source_path.as_os_str().as_encoded_bytes();
+        digest.update((source_path.len() as u64).to_be_bytes());
+        digest.update(source_path);
+        let path = dependency.authority_path.as_os_str().as_encoded_bytes();
+        digest.update((path.len() as u64).to_be_bytes());
+        digest.update(path);
+        digest.update(dependency.authority.authority_fingerprint());
+    }
+    Ok(digest.finalize().into())
+}
+
+/// Stable continuation contract. The exact terminal bundle has its own digest
+/// above; continuation intentionally omits the advancing EOF value and current
+/// control contents so an already-observed physical tail can become committed
+/// through a certified append.
+pub(super) fn continuation_binding_digest<E: JsonlFamilyError>(
+    leaf: &JsonlFamilyLeaf<E>,
+) -> JsonlResult<[u8; 32], E> {
+    let binding = serde_json::to_vec(leaf.binding())?;
+    if leaf.logical_eof.is_none() && leaf.terminal_dependencies.is_empty() {
+        return Ok(Sha256::digest(binding).into());
+    }
+    let mut digest = Sha256::new();
+    digest.update(b"ctx-jsonl-leaf-continuation-contract-v1\0");
+    digest.update((binding.len() as u64).to_be_bytes());
+    digest.update(binding);
+    digest.update([u8::from(leaf.logical_eof.is_some())]);
+    digest.update((leaf.terminal_dependencies.present.len() as u64).to_be_bytes());
+    for dependency in &leaf.terminal_dependencies.present {
+        digest.update([1]);
+        let path = dependency.authority_path.as_os_str().as_encoded_bytes();
+        digest.update((path.len() as u64).to_be_bytes());
+        digest.update(path);
+        digest.update(dependency.authority.authority_fingerprint());
+    }
+    digest.update((leaf.terminal_dependencies.absent.len() as u64).to_be_bytes());
+    for dependency in &leaf.terminal_dependencies.absent {
+        digest.update([0]);
+        let path = dependency.authority_path.as_os_str().as_encoded_bytes();
+        digest.update((path.len() as u64).to_be_bytes());
+        digest.update(path);
+        digest.update(dependency.authority.authority_fingerprint());
+    }
+    Ok(digest.finalize().into())
 }

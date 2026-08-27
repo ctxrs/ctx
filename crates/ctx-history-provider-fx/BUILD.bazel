@@ -1,0 +1,64 @@
+load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")
+load("@rules_rust//rust:defs.bzl", "rust_library")
+load("//tools/bazel:ctx_rust.bzl", "ctx_rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+filegroup(
+    name = "cargo_package_data",
+    srcs = glob(["**"], exclude = ["BUILD.bazel"]),
+)
+
+COMMON_RUSTC_ENV = {"CARGO_MANIFEST_DIR": "crates/ctx-history-provider-fx"}
+PROD_SRCS = glob(["src/**/*.rs"], exclude = ["src/tests.rs"])
+TEST_SRCS = glob(["src/**/*.rs"])
+
+FX_DEPS = [
+    "//crates/ctx-history-core:lib",
+    "//crates/ctx-history-jsonl:lib",
+    "//crates/ctx-history-provider-runtime:lib",
+]
+
+FX_TEST_DEPS = [
+    "//crates/ctx-history-core:lib",
+    "//crates/ctx-history-jsonl:test_support_lib",
+    "//crates/ctx-history-provider-runtime:test_support_lib",
+]
+
+rust_library(
+    name = "lib",
+    srcs = PROD_SRCS,
+    crate_name = "ctx_history_provider_fx",
+    crate_root = "src/lib.rs",
+    edition = crate_edition(),
+    aliases = aliases(),
+    deps = all_crate_deps(normal = True) + FX_DEPS,
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    rustc_env = COMMON_RUSTC_ENV,
+)
+
+rust_library(
+    name = "test_support_lib",
+    testonly = True,
+    srcs = PROD_SRCS,
+    crate_name = "ctx_history_provider_fx",
+    crate_root = "src/lib.rs",
+    edition = crate_edition(),
+    aliases = aliases(normal = True, normal_dev = True, proc_macro_dev = True),
+    deps = all_crate_deps(normal = True, normal_dev = True) + FX_TEST_DEPS,
+    proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+    rustc_env = COMMON_RUSTC_ENV,
+)
+
+ctx_rust_test(
+    name = "unit_tests",
+    srcs = TEST_SRCS,
+    crate_name = "ctx_history_provider_fx",
+    crate_root = "src/lib.rs",
+    data = ["//:fx_history_test_fixtures"],
+    edition = crate_edition(),
+    aliases = aliases(normal_dev = True, proc_macro_dev = True),
+    deps = all_crate_deps(normal = True, normal_dev = True) + FX_TEST_DEPS,
+    proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+    rustc_env = COMMON_RUSTC_ENV,
+)

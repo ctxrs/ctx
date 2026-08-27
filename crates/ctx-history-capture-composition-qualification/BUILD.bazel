@@ -124,6 +124,30 @@ ctx_rust_test(
     rustc_env = {"CARGO_MANIFEST_DIR": "crates/ctx-history-capture-composition-qualification"},
 )
 
+ctx_rust_test(
+    name = "fx_publication_tests",
+    testonly = True,
+    srcs = [
+        "tests/fx_publication.rs",
+        "tests/support/lexical.rs",
+    ],
+    crate_name = "ctx_history_capture_composition_fx_publication_qualification",
+    crate_root = "tests/fx_publication.rs",
+    data = ["//:fx_history_test_fixtures"],
+    edition = crate_edition(),
+    aliases = aliases(normal_dev = True, proc_macro_dev = True),
+    deps = all_crate_deps(normal_dev = True) + [
+        "//crates/ctx-history-capture-composition:test_support_lib",
+        "//crates/ctx-history-capture-model:lib",
+        "//crates/ctx-history-core:lib",
+        "//crates/ctx-history-index:lib",
+        "//crates/ctx-history-provider-fx:lib",
+        "//crates/ctx-history-source-discovery:lib",
+    ],
+    proc_macro_deps = all_crate_deps(proc_macro_dev = True),
+    rustc_env = {"CARGO_MANIFEST_DIR": "crates/ctx-history-capture-composition-qualification"},
+)
+
 CUSTOM_HISTORY_CORE_FIXTURE_DEPS = [
     "//crates/ctx-history-capture-composition:lib",
     "//crates/ctx-history-core:lib",

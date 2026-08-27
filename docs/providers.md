@@ -11,7 +11,7 @@ shared incremental, read-only architecture.
 
 The public CLI supports these local-history harnesses:
 
-Codex, Grok Build, DeepSeek Harness, Pi, Claude, OpenCode, Kilo Code, Kiro CLI, Crush, Goose, Lingma, Qoder, Warp, CodeBuddy, OpenClaw, Hermes Agent, NanoClaw, AstrBot, Shelley, Continue, OpenHands, Antigravity, Gemini, Tabnine, Cursor, Zed, Copilot CLI, Factory AI Droid, Qwen Code, Kimi Code CLI, Auggie, Junie, Firebender, ForgeCode, Deep Agents, Mistral Vibe, Mux, Rovo Dev, Cline, Roo Code, MiMo Code.
+Codex, Grok Build, DeepSeek Harness, Pi, Claude, OpenCode, Kilo Code, Kiro CLI, Crush, Goose, Lingma, Qoder, Warp, CodeBuddy, OpenClaw, Hermes Agent, NanoClaw, AstrBot, Shelley, Continue, OpenHands, Antigravity, Gemini, Tabnine, Cursor, Zed, Copilot CLI, Factory AI Droid, Qwen Code, Kimi Code CLI, Auggie, Junie, Firebender, ForgeCode, Deep Agents, Mistral Vibe, Mux, Rovo Dev, Cline, Roo Code, MiMo Code, fx.
 
 Use `ctx sources` for the truth on the current machine:
 
@@ -24,7 +24,7 @@ ctx sources --all
 Default `ctx sources` output keeps the common missing-location list compact. Use `--all` to inspect every recognized provider location. The CLI recognizes these provider names; recognition does not imply that every detected schema is importable:
 
 ```text
-codex, grok-build, deepseek-harness, claude, cursor, pi, opencode, github-copilot, copilot-cli, antigravity, gemini, kilo, kiro-cli, crush, goose, tabnine, zed, factory-ai-droid, qwen-code, kimi-code-cli, auggie, junie, firebender, forgecode, deepagents, mistral-vibe, mux, rovodev, openclaw, hermes, nanoclaw, astrbot, shelley, continue, openhands, cline, roo, lingma, qoder, warp, codebuddy, mimocode
+codex, grok-build, deepseek-harness, claude, cursor, pi, opencode, github-copilot, copilot-cli, antigravity, gemini, kilo, kiro-cli, crush, goose, tabnine, zed, factory-ai-droid, qwen-code, kimi-code-cli, auggie, junie, firebender, forgecode, deepagents, mistral-vibe, mux, rovodev, openclaw, hermes, nanoclaw, astrbot, shelley, continue, openhands, cline, roo, lingma, qoder, warp, codebuddy, mimocode, fx
 ```
 
 Aliases are accepted for common naming differences, for example `grok`, `dsh`, `deepseek_harness`, `claude-code`, `gemini-cli`, `github-copilot`, `droid`, `augment`, `qoder-cn`, and `roo-code`. The shorter name `deepseek` is not a DeepSeek Harness alias.
@@ -40,7 +40,7 @@ lineage/origin unknown.
 
 Exact MCP server/tool attribution is a separate, narrower event capability.
 Supported provider import does not automatically qualify it. The complete
-41-provider importable route/format partition is documented in
+42-provider importable route/format partition is documented in
 [`mcp-tool-call-attribution.md`](mcp-tool-call-attribution.md) and its
 machine-readable
 [`capability contract`](mcp-tool-call-attribution-capabilities.json).
@@ -139,6 +139,23 @@ history support does not claim exact MCP server/tool attribution for this
 provider. Unknown required events and future versions fail the source.
 Delegated sessions remain independent imports; the immediate parent header
 does not prove the transitive root identity required for typed lineage edges.
+
+fx is supported for legacy marker-less schema-v1/v2 `session.json` snapshots
+accepted by current fx v0.0.6 and current schema-v3 transactional session
+event logs. The automatic root is
+`~/.fx/sessions`; a named or exact directory must use the same sessions-tree
+layout. For schema v3,
+`authority.json` establishes event-log authority, `events.jsonl` is canonical
+history, and a matching `commit.<generation>.json` watermark establishes the
+committed boundary; `session.json` is only a projection. Pending commits and
+uncommitted tails are excluded. Legacy snapshots are limited to 16 MiB. A
+supported marker-less snapshot and the schema-v3 session created by its upstream
+migration remain one logical fx session, so migration alone does not duplicate
+history or rotate stable ctx identities. Marker-less schema-v3 snapshots,
+future schemas, hosted history, and exact MCP server/tool attribution are not
+supported. Current fidelity claims cover searchable user and assistant turn
+content only, not normalized tool, command, file-touch, per-turn model, or
+per-turn token fidelity.
 
 Hermes Agent is supported through the native `hermes_state_sqlite` route. On
 Linux, a non-root ctx process with the certified read-only live-WAL path makes

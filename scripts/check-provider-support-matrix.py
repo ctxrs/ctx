@@ -18,7 +18,7 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MATRIX_PATH = REPO_ROOT / "docs/provider-support-matrix.json"
 ALLOWED_STATUSES = {"supported"}
-EXPECTED_SUPPORTED_PROVIDER_COUNT = 41
+EXPECTED_SUPPORTED_PROVIDER_COUNT = 42
 ALLOWED_PATH_KINDS = {"native_import"}
 ALLOWED_FIDELITY = {
     "imported",

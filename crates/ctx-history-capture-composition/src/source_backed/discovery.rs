@@ -797,6 +797,24 @@ fn register_configured_landed_source_backed_route(
     apply_configured_route_identity(registry, &source, source_root_lineage, route_role)
 }
 
+fn register_configured_fx_source_backed_route(
+    registry: &mut SourceBackedProviderRegistry,
+    source: ProviderSource,
+    data_root: &Path,
+    adapter_lineage: [u8; 32],
+    route_identity_lineage: Option<[u8; 32]>,
+    route_role: &ProviderRouteRole,
+) -> SourceBackedCoordinatorResult<()> {
+    register_landed_source_backed_route_with_data_root_and_lineage(
+        registry,
+        source.clone(),
+        SourceBackedRouteSelection::ExplicitManual,
+        data_root,
+        Some(adapter_lineage),
+    )?;
+    apply_configured_route_identity(registry, &source, route_identity_lineage, route_role)
+}
+
 fn apply_configured_route_identity(
     registry: &mut SourceBackedProviderRegistry,
     source: &ProviderSource,

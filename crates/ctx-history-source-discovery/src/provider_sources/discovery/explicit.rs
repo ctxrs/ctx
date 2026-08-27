@@ -206,6 +206,7 @@ fn provider_source_for_path_with_optional_data_root(
         CaptureProvider::Qoder => "qoder_transcript_jsonl",
         CaptureProvider::Warp => "warp_sqlite",
         CaptureProvider::CodeBuddy => "codebuddy_history_json",
+        CaptureProvider::Fx => "fx_sessions_tree",
         _ => "unsupported",
     };
     let explicit_import_support = spec.import_support;
@@ -213,6 +214,26 @@ fn provider_source_for_path_with_optional_data_root(
         ProviderSourceKind::NativeHistory
     } else {
         ProviderSourceKind::DetectionOnly
+    };
+    let exact_fx_status = if provider == CaptureProvider::Fx && observed.is_ok() {
+        let location = ProviderDefaultLocation {
+            path_components: &[],
+            source_format,
+            source_kind,
+        };
+        Some(
+            match super::super::probes::default_location_import_probe(
+                probes, data_root, provider, &location, &path,
+            ) {
+                BoundedProbe::Found => ProviderSourceStatus::Available,
+                BoundedProbe::NotFound => ProviderSourceStatus::Empty,
+                BoundedProbe::BudgetExhausted | BoundedProbe::IoError => {
+                    ProviderSourceStatus::Unknown
+                }
+            },
+        )
+    } else {
+        None
     };
 
     ProviderSource {
@@ -227,6 +248,8 @@ fn provider_source_for_path_with_optional_data_root(
             || matches!(observed, Err(SourcePathError::Unsupported))
         {
             ProviderSourceStatus::Unsupported
+        } else if let Some(status) = exact_fx_status {
+            status
         } else if observed.is_ok() {
             ProviderSourceStatus::Available
         } else if matches!(observed, Err(SourcePathError::Missing)) {

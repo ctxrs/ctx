@@ -53,8 +53,8 @@ event-local Core capability has its own provider + route + source format +
 format version authority in
 [`mcp-tool-call-attribution-capabilities.json`](mcp-tool-call-attribution-capabilities.json).
 Capability revision 4 exact providers are Codex, Warp, and Copilot CLI. The
-complete evidence matrix contains 46 base routes and 49 capability lanes:
-three exact, 45 not-qualified, and one excluded. The Deep Agents hosted trace
+complete evidence matrix contains 47 base routes and 51 capability lanes:
+three exact, 47 not-qualified, and one excluded. The Deep Agents hosted trace
 is excluded from the local-only boundary, while its local SQLite history import
 remains Supported but not qualified for exact attribution. See
 [`mcp-tool-call-attribution.md`](mcp-tool-call-attribution.md) for absence,
@@ -111,6 +111,7 @@ support matrix is:
 | Rovo Dev | Supported | `rovodev_session_json_tree` |
 | Cline | Supported | `cline_sdk_session_store`, `cline_task_directory_json` |
 | Roo Code | Supported | `roo_task_directory_json` |
+| fx | Supported | `fx_sessions_tree` |
 
 Codex session-tree discovery and exact `--path` import accept both ordinary
 `.jsonl` rollouts and official standard-Zstandard `.jsonl.zst` rollouts. Both
@@ -149,6 +150,23 @@ of scope, and this import does not qualify exact MCP server/tool attribution.
 Unknown required events and future format versions fail the source. Delegated
 sessions remain independently searchable, but their immediate parent header
 does not prove the transitive root identity required for typed lineage edges.
+
+fx is Supported for legacy marker-less schema-v1/v2 `session.json` snapshots
+accepted by current fx v0.0.6 and current schema-v3 transactional session
+event logs. Discovery selects
+`~/.fx/sessions`; named roots and exact imports accept a directory with the
+same sessions-tree layout. For schema v3,
+`authority.json` establishes event-log authority, `events.jsonl` is canonical
+history, and a matching `commit.<generation>.json` watermark establishes the
+committed boundary; `session.json` is only a projection. Pending commits and
+uncommitted tails are excluded. Legacy snapshots are limited to 16 MiB. A
+supported marker-less snapshot and the schema-v3 session created by its upstream
+migration remain one logical fx session, so migration alone does not duplicate
+history or rotate stable ctx identities. Marker-less schema-v3 snapshots,
+future schemas, hosted history, and exact MCP server/tool attribution are not
+supported. Current fidelity claims cover searchable user and assistant turn
+content only; they do not claim normalized tool, command, file-touch, per-turn
+model, or per-turn token fidelity.
 
 `ctx sources --format json` reports each known provider source with `import_support`
 and `importable` fields. A source is importable only when provider-specific

@@ -23,6 +23,7 @@ ctx-history-jsonl = { path = "../ctx-history-jsonl" }
 ctx-history-provider-claude-cursor = { path = "../ctx-history-provider-claude-cursor" }
 ctx-history-provider-codex = { path = "../ctx-history-provider-codex" }
 ctx-history-provider-docproj = { path = "../ctx-history-provider-docproj" }
+ctx-history-provider-fx = { path = "../ctx-history-provider-fx" }
 ctx-history-provider-gemini = { path = "../ctx-history-provider-gemini" }
 ctx-history-provider-hermes = { path = "../ctx-history-provider-hermes" }
 ctx-history-provider-mistral-mux = { path = "../ctx-history-provider-mistral-mux" }

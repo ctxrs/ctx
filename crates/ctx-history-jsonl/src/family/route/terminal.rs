@@ -508,6 +508,20 @@ impl<E: JsonlFamilyError> JsonlFamilyTerminalProof<E> {
             ));
         }
         let force_authentication = change_time_hint && !authenticated_change_time_hint;
+        if leaf.logical_eof().is_some() {
+            let admitted_eof_sha256 = checkpoint
+                .exact_admitted_eof_sha256()
+                .ok_or_else(E::source_changed)?;
+            return Self::bind_admitted_frozen_prefix(
+                adapter,
+                leaf,
+                certificate,
+                checkpoint.physical.admitted_length(),
+                admitted_eof_sha256,
+                JsonlFamilyTerminalPrefixHash::Sha256,
+                true,
+            );
+        }
         if force_authentication {
             if let Some(admitted_eof_sha256) = checkpoint.exact_admitted_eof_sha256() {
                 return Self::bind_admitted_frozen_prefix(
