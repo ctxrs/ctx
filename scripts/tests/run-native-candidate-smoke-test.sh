@@ -200,8 +200,8 @@ case "${1:-}" in
     "enabled": true
   },
   "upgrade": {
-    "auto": "apply",
-    "auto_enabled": true
+    "auto": "off",
+    "auto_enabled": false
   },
   "semantic": {
     "config_source": "default",
