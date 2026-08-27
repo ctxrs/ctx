@@ -1,8 +1,20 @@
-use std::sync::Arc;
+use std::{
+    borrow::Cow,
+    sync::{Arc, OnceLock},
+};
+
+use jiff::{tz::TimeZone, Timestamp};
 
 pub const DEFAULT_TERMINAL_WIDTH: usize = 80;
 
 type WidthProbe = Arc<dyn Fn() -> Option<usize> + Send + Sync>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TimeZoneMode {
+    System,
+    Utc,
+    Named(&'static str),
+}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ColorMode {
@@ -46,6 +58,7 @@ pub struct RenderContext {
     live_output_capable: bool,
     terminal_width: Option<usize>,
     unicode: bool,
+    time_zone: TimeZoneMode,
 }
 
 impl RenderContext {
@@ -61,6 +74,7 @@ impl RenderContext {
             live_output_capable: false,
             terminal_width: None,
             unicode: true,
+            time_zone: TimeZoneMode::Utc,
         }
     }
 
@@ -68,7 +82,7 @@ impl RenderContext {
         let auto_color_enabled = test
             .auto_color_enabled
             .unwrap_or(test.is_terminal && !test.no_color && !test.term_dumb);
-        Self::from_capabilities(
+        let mut context = Self::from_capabilities(
             test.stream,
             test.color_mode,
             test.is_terminal,
@@ -76,7 +90,9 @@ impl RenderContext {
             test.unicode,
             auto_color_enabled,
             test.term_dumb,
-        )
+        );
+        context.time_zone = test.time_zone;
+        context
     }
 
     pub fn detected(
@@ -123,6 +139,7 @@ impl RenderContext {
             live_output_capable: is_terminal && !term_dumb,
             terminal_width,
             unicode,
+            time_zone: TimeZoneMode::System,
         }
     }
 
@@ -172,6 +189,32 @@ impl RenderContext {
     pub const fn unicode(self) -> bool {
         self.unicode
     }
+
+    /// Formats one stored UTC timestamp for ordinary human terminal display.
+    /// Invalid timestamps retain their original displayed value.
+    pub fn human_timestamp<'a>(self, value: &'a str) -> Cow<'a, str> {
+        let Ok(timestamp) = value.parse::<Timestamp>() else {
+            return Cow::Borrowed(value);
+        };
+        let time_zone = match self.time_zone {
+            TimeZoneMode::System => system_time_zone(),
+            TimeZoneMode::Utc => TimeZone::UTC,
+            TimeZoneMode::Named(name) => TimeZone::get(name).unwrap_or(TimeZone::UTC),
+        };
+        Cow::Owned(
+            timestamp
+                .to_zoned(time_zone)
+                .strftime("%Y-%m-%d %H:%M:%S %Z")
+                .to_string(),
+        )
+    }
+}
+
+fn system_time_zone() -> TimeZone {
+    static SYSTEM_TIME_ZONE: OnceLock<TimeZone> = OnceLock::new();
+    SYSTEM_TIME_ZONE
+        .get_or_init(|| TimeZone::try_system().unwrap_or(TimeZone::UTC))
+        .clone()
 }
 
 fn resolved_terminal_width(terminal_width: Option<usize>) -> usize {
@@ -229,6 +272,7 @@ pub struct TestContext {
     no_color: bool,
     term_dumb: bool,
     auto_color_enabled: Option<bool>,
+    time_zone: TimeZoneMode,
 }
 
 impl TestContext {
@@ -242,6 +286,7 @@ impl TestContext {
             no_color: false,
             term_dumb: false,
             auto_color_enabled: None,
+            time_zone: TimeZoneMode::Utc,
         }
     }
 
@@ -255,6 +300,7 @@ impl TestContext {
             no_color: false,
             term_dumb: false,
             auto_color_enabled: None,
+            time_zone: TimeZoneMode::Utc,
         }
     }
 
@@ -285,6 +331,13 @@ impl TestContext {
 
     pub const fn unknown_width(mut self) -> Self {
         self.terminal_width = None;
+        self
+    }
+
+    /// Selects an IANA zone without mutating the process environment.
+    /// An unavailable zone falls back to UTC.
+    pub const fn time_zone(mut self, name: &'static str) -> Self {
+        self.time_zone = TimeZoneMode::Named(name);
         self
     }
 }

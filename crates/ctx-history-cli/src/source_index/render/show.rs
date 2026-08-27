@@ -403,11 +403,14 @@ fn render_event(document: &mut Document, context: &RenderContext, position: usiz
         &title,
         Token::Heading,
     );
-    let (time, time_token) = event["occurred_at"]
+    let time = event["occurred_at"]
         .as_str()
         .filter(|value| !value.is_empty())
-        .map_or(("time unavailable", Token::Label), |value| {
-            (value, Token::Text)
+        .map(|value| context.human_timestamp(value));
+    let (time, time_token) = time
+        .as_deref()
+        .map_or(("time unavailable", Token::Label), |time| {
+            (time, Token::Text)
         });
     push_field(
         document,

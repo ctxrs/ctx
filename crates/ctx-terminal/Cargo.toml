@@ -13,6 +13,7 @@ publish = false
 anstream.workspace = true
 anstyle.workspace = true
 anyhow.workspace = true
+jiff.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 supports-unicode.workspace = true

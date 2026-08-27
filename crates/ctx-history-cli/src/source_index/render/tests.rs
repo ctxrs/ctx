@@ -197,6 +197,10 @@ fn context_with_unicode(width: usize, unicode: bool) -> RenderContext {
     RenderContext::for_test(TestContext::tty(StreamKind::Stdout, width).unicode(unicode))
 }
 
+fn context_with_time_zone(width: usize, time_zone: &'static str) -> RenderContext {
+    RenderContext::for_test(TestContext::tty(StreamKind::Stdout, width).time_zone(time_zone))
+}
+
 fn search_value() -> Value {
     json!({
         "query": "Unicode cache key",
@@ -716,7 +720,7 @@ fn normal_search_uses_compact_refs_and_verbose_uses_full_ctx_ids() {
 }
 
 #[test]
-fn search_event_and_time_are_separate_fields_with_exact_milliseconds() {
+fn search_event_and_time_are_separate_fields_with_human_utc_time() {
     for unicode in [true, false] {
         for width in [32, 48, 80, 120] {
             let context = context_with_unicode(width, unicode);
@@ -769,10 +773,8 @@ fn search_event_and_time_are_separate_fields_with_exact_milliseconds() {
                 .flat_map(|span| span.content().chars())
                 .filter(|character| !character.is_whitespace())
                 .collect();
-            assert!(
-                time_value.contains("2026-07-30T12:00:00.123Z"),
-                "{rendered}"
-            );
+            assert!(time_value.contains("2026-07-3012:00:00UTC"), "{rendered}");
+            assert!(!time_value.contains(".123"), "{rendered}");
             assert_fits(&document, &context);
         }
     }
@@ -840,6 +842,7 @@ fn verbose_search_exposes_context_without_redundant_values_or_citation() {
 fn show_and_locate_render_exact_chronology_and_missing_time() {
     let shown = render_show_document(&show_value(), &context(80, ColorMode::Never)).render_plain();
     assert!(shown.contains("Event  01900001-0000-7000-8000-000000000002 · seq 17"));
+    assert!(shown.contains("Time   2026-07-30 12:00:00 UTC"));
     let shown_ascii =
         render_show_document(&show_value(), &context_with_unicode(80, false)).render_plain();
     assert!(shown_ascii.contains("Event  01900001-0000-7000-8000-000000000002 | seq 17"));
@@ -853,14 +856,14 @@ fn show_and_locate_render_exact_chronology_and_missing_time() {
     let located = render_locate_document(&locate_event_value(), &context(80, ColorMode::Never))
         .render_plain();
     assert!(located.contains(&format!("Session           {SESSION_ID}")));
-    assert!(located.contains("Time              2026-07-30T12:00:00.123Z"));
+    assert!(located.contains("Time              2026-07-30 12:00:00 UTC"));
     assert!(located.contains("Sequence          17"));
     assert!(!located.contains("Role"));
     assert!(!located.contains("Type"));
 
     let session = render_locate_document(&locate_session_value(), &context(80, ColorMode::Never))
         .render_plain();
-    assert!(session.contains("First event       2026-07-30T12:00:00.123Z"));
+    assert!(session.contains("First event       2026-07-30 12:00:00 UTC"));
     assert!(!session.contains("Started"));
 
     let mut missing_locate = locate_event_value();
@@ -881,6 +884,77 @@ fn show_and_locate_render_exact_chronology_and_missing_time() {
         render_locate_document(&missing_session, &context(80, ColorMode::Never)).render_plain();
     assert!(missing_session.contains("First event       time unavailable"));
     assert!(!missing_session.contains("Started"));
+}
+
+#[test]
+fn human_time_renderers_share_local_time_and_export_renderers_stay_utc() {
+    let context = context_with_time_zone(120, "America/New_York");
+    let expected = "2026-07-30 08:00:00 EDT";
+
+    let search = render_search_document(&compact_search_value(), false, &context).render_plain();
+    assert!(
+        search.contains(&format!("Time      {expected}")),
+        "{search}"
+    );
+
+    let shown = render_show_document(&event_show_value(None, SESSION_ID), &context).render_plain();
+    assert!(shown.contains(&format!("Time   {expected}")), "{shown}");
+
+    let located_event = render_locate_document(&locate_event_value(), &context).render_plain();
+    assert!(
+        located_event.contains(&format!("Time              {expected}")),
+        "{located_event}"
+    );
+
+    let located_session = render_locate_document(&locate_session_value(), &context).render_plain();
+    assert!(
+        located_session.contains(&format!("First event       {expected}")),
+        "{located_session}"
+    );
+
+    let transcript = render_show_document(&show_value(), &context).render_plain();
+    assert!(
+        transcript.contains(&format!("Time   {expected}")),
+        "{transcript}"
+    );
+
+    let exported_text = render_show_text(&show_value());
+    assert!(
+        exported_text.contains("[2026-07-30T12:00:00.000Z]"),
+        "{exported_text}"
+    );
+    let exported_markdown = render_show_markdown(&show_value());
+    assert!(
+        exported_markdown.contains("2026-07-30T12:00:00.000Z"),
+        "{exported_markdown}"
+    );
+}
+
+#[test]
+fn malformed_human_timestamps_retain_the_original_display_value() {
+    const MALFORMED: &str = "not-a-timestamp";
+    let context = context_with_time_zone(120, "America/New_York");
+
+    let mut search = compact_search_value();
+    search["results"][0]["timestamp"] = json!(MALFORMED);
+    let search = render_search_document(&search, false, &context).render_plain();
+    assert!(
+        search.contains(&format!("Time      {MALFORMED}")),
+        "{search}"
+    );
+
+    let mut show = event_show_value(None, SESSION_ID);
+    show["events"][0]["occurred_at"] = json!(MALFORMED);
+    let show = render_show_document(&show, &context).render_plain();
+    assert!(show.contains(&format!("Time   {MALFORMED}")), "{show}");
+
+    let mut locate = locate_event_value();
+    locate["occurred_at"] = json!(MALFORMED);
+    let locate = render_locate_document(&locate, &context).render_plain();
+    assert!(
+        locate.contains(&format!("Time              {MALFORMED}")),
+        "{locate}"
+    );
 }
 
 #[test]
@@ -1010,8 +1084,8 @@ fn human_search_ranks_non_monotonic_scores_by_shaped_result_order() {
     let first_position = rendered.find("1. First shaped result").unwrap();
     let second_position = rendered.find("2. Second shaped result").unwrap();
     assert!(first_position < second_position, "{rendered}");
-    assert!(rendered.contains("2025-01-01T00:00:00.000Z"));
-    assert!(rendered.contains("2026-01-01T00:00:00.000Z"));
+    assert!(rendered.contains("2025-01-01 00:00:00 UTC"));
+    assert!(rendered.contains("2026-01-01 00:00:00 UTC"));
     assert!(!rendered.contains("0.25") && !rendered.contains("9.50"));
 }
 

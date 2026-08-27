@@ -26,9 +26,11 @@ result per root task before repeating a root; a session without that claim is
 its own group. Agent scope is result metadata or an explicit filter; it does
 not silently rerank relevance. Human output uses only the pluralized result
 count in the heading. Each result has separate `Event` and `Time` rows showing
-the short ctx event ID and the matched event's exact UTC RFC 3339 millisecond
-timestamp; an indexed event without a timestamp says `time unavailable`. These
-timestamps do not change result ordering.
+the short ctx event ID and the matched event time in the executing OS local
+time zone as `YYYY-MM-DD HH:MM:SS ZONE`. Local display honors the standard
+`TZ` override, follows historical daylight-saving rules, and omits
+milliseconds; an indexed event without a timestamp says `time unavailable`.
+These timestamps do not change result ordering.
 
 ## Search examples
 
@@ -352,6 +354,10 @@ the same result metadata and citations plus:
 - `generated_at`, the RFC 3339 UTC render time;
 - `result_window`, with `limit`, `returned`, and `more_available`;
 - independent candidate-pool truncation metadata.
+
+Human localization is presentation-only. JSON result timestamps and
+`generated_at` remain the exact UTC RFC 3339 millisecond values used by the
+machine contract, filters, storage, and indexing.
 
 `more_available` is true only when the bounded search pass finds one additional
 fully shaped result beyond the requested limit: a distinct session by default,

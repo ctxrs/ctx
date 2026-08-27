@@ -111,6 +111,61 @@ fn canonical_human_measurement_is_plain_unbounded_and_deterministic() {
 }
 
 #[test]
+fn human_timestamps_default_to_deterministic_utc_in_test_contexts() {
+    let context = RenderContext::for_test(TestContext::pipe(StreamKind::Stdout));
+    assert_eq!(
+        context.human_timestamp("2026-07-30T12:00:00.123Z"),
+        "2026-07-30 12:00:00 UTC"
+    );
+}
+
+#[test]
+fn human_timestamps_follow_named_historical_dst_without_global_state() {
+    let context = RenderContext::for_test(
+        TestContext::pipe(StreamKind::Stdout).time_zone("America/New_York"),
+    );
+    assert_eq!(
+        context.human_timestamp("2026-07-30T12:00:00.123Z"),
+        "2026-07-30 08:00:00 EDT"
+    );
+    assert_eq!(
+        context.human_timestamp("2026-01-30T12:00:00.123Z"),
+        "2026-01-30 07:00:00 EST"
+    );
+    assert_eq!(
+        context.human_timestamp("2026-03-08T06:59:59Z"),
+        "2026-03-08 01:59:59 EST"
+    );
+    assert_eq!(
+        context.human_timestamp("2026-03-08T07:00:00Z"),
+        "2026-03-08 03:00:00 EDT"
+    );
+    assert_eq!(
+        context.human_timestamp("2026-11-01T05:30:00Z"),
+        "2026-11-01 01:30:00 EDT"
+    );
+    assert_eq!(
+        context.human_timestamp("2026-11-01T06:30:00Z"),
+        "2026-11-01 01:30:00 EST"
+    );
+}
+
+#[test]
+fn human_timestamps_preserve_malformed_input_and_fall_back_to_utc() {
+    let missing_zone = RenderContext::for_test(
+        TestContext::pipe(StreamKind::Stdout).time_zone("Etc/Definitely-Missing"),
+    );
+    assert_eq!(
+        missing_zone.human_timestamp("2026-07-30T12:00:00.123Z"),
+        "2026-07-30 12:00:00 UTC"
+    );
+    assert_eq!(
+        missing_zone.human_timestamp("not-a-timestamp"),
+        "not-a-timestamp"
+    );
+}
+
+#[test]
 fn bootstrap_scans_only_supported_global_color_spellings() {
     let args = |values: &[&str]| values.iter().map(OsString::from).collect::<Vec<_>>();
 

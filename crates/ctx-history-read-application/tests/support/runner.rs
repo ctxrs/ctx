@@ -96,6 +96,8 @@ pub(crate) fn apply_hermetic_env(command: &mut Command, temp: &TempDir) {
         .is_file();
     command.env("CTX_DATA_ROOT", data_root(temp));
     command.env("HOME", temp.path());
+    // Human timestamp output must not inherit the developer or CI host zone.
+    command.env("TZ", "UTC");
     command.env("CTX_ANALYTICS_ENABLED", "false");
     // Existing integration tests do not exercise local usage unless they opt in
     // explicitly. This keeps their temporary roots and output expectations stable.

@@ -146,10 +146,7 @@ fn fresh_home_search_mvp_flow() {
         .clone();
     let located_session_human = String::from_utf8(located_session_human).unwrap();
     assert!(
-        located_session_human.contains(&format!(
-            "First event       {}",
-            located_by_provider_id["started_at"].as_str().unwrap()
-        )),
+        located_session_human.contains("First event       2026-06-23 15:00:01 UTC"),
         "{located_session_human}"
     );
     assert!(!located_session_human.contains("Started"));
@@ -171,10 +168,7 @@ fn fresh_home_search_mvp_flow() {
         "{located_event_human}"
     );
     assert!(
-        located_event_human.contains(&format!(
-            "Time              {}",
-            located_event["occurred_at"].as_str().unwrap()
-        )),
+        located_event_human.contains("Time              2026-06-23 15:00:02 UTC"),
         "{located_event_human}"
     );
     assert!(
@@ -271,7 +265,7 @@ fn fresh_home_search_mvp_flow() {
         "{human_search}"
     );
     assert!(
-        human_search.contains("Time      2026-06-23T15:00:02.000Z"),
+        human_search.contains("Time      2026-06-23 15:00:02 UTC"),
         "{human_search}"
     );
     assert!(

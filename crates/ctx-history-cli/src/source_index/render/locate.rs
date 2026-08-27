@@ -126,8 +126,11 @@ fn push_time_field(
     label: &str,
     value: Option<&str>,
 ) {
-    let (value, token) = value
+    let value = value
         .filter(|value| !value.is_empty())
+        .map(|value| context.human_timestamp(value));
+    let (value, token) = value
+        .as_deref()
         .map_or(("time unavailable", Token::Label), |value| {
             (value, Token::Text)
         });

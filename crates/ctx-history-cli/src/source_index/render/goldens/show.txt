@@ -5,14 +5,14 @@ Provider session  demo-unicode-session
 Mode              lite
 
 1. user message
-   Time   2026-07-30T12:00:00.000Z
+   Time   2026-07-30 12:00:00 UTC
    Event  01900001-0000-7000-8000-000000000002 · seq 17
 
    Fix the Unicode cache key regression.
    Keep source bytes exact.
 
 2. assistant message
-   Time   2026-07-30T12:01:00.000Z
+   Time   2026-07-30 12:01:00 UTC
    Event  01900002-0000-7000-8000-000000000003 · seq 18
 
    Done.

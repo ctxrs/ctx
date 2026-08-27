@@ -11,6 +11,12 @@ Command result JSON uses `schema_version: 1` except for
 Progress-event JSON is stderr progress output and does not include
 `schema_version`.
 
+All machine timestamp fields remain exact UTC RFC 3339 values with their
+contracted millisecond precision. The OS-local, no-millisecond presentation
+used by selected ordinary human `search`, `show`, and `locate` fields
+does not apply to JSON, JSONL, MCP structured content, filters, storage,
+other durable processing, or text/Markdown transcript artifacts.
+
 ## Setup
 
 ```bash

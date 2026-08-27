@@ -5,7 +5,7 @@
    Session   01900000
    Root      01900000
    Event     01900001
-   Time      2026-07-30T12:00:00.123Z
+   Time      2026-07-30 12:00:00 UTC
    More      2 results from this session
 
    Inspect

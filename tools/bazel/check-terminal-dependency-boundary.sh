@@ -12,7 +12,7 @@ if [[ ! -f "$manifest" ]]; then
   echo "ctx-terminal manifest is absent: $manifest" >&2
   exit 1
 fi
-allowed='anstream|anstyle|anyhow|serde|serde_json|supports-unicode|terminal_size|unicode-segmentation|unicode-width|uuid'
+allowed='anstream|anstyle|anyhow|jiff|serde|serde_json|supports-unicode|terminal_size|unicode-segmentation|unicode-width|uuid'
 actual="$(awk '/^\[dependencies\]/{found=1; next} found && /^\[/{exit} found {print}' "$manifest" | awk -F '[.=]' 'NF {print $1}' | LC_ALL=C sort | paste -sd'|' -)"
 if [[ "$actual" != "$allowed" ]]; then
   echo "ctx-terminal dependency inventory differs: $actual" >&2

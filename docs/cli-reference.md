@@ -541,6 +541,12 @@ the bounded presentation limit require `--max-events`; the value is capped at
 `show event` renders one ctx-owned event hit. `--before` and `--after` include
 neighboring events in the same session; `--window N` is shorthand for
 `--before N --after N`. It accepts the same output formats as `show session`.
+In ordinary human output, event-window `Time` rows use the
+executing OS local time zone and the exact
+`YYYY-MM-DD HH:MM:SS ZONE` shape, without milliseconds. The same local format
+applies to ordinary `show session` output. Explicit text/Markdown
+transcript artifacts and the separate Markdown renderer retain the stored UTC
+RFC 3339 millisecond timestamps, as do JSON and JSONL.
 
 Full JSON/JSONL event output can include content-governed `activity`, with
 exact typed provider call identity, invocation and/or result channels, and
@@ -614,7 +620,9 @@ Human event output also identifies the owning ctx session, exact event time,
 and stored event sequence. Human session output labels its timestamp `First
 event`: this is the first stored event in the indexed session, not a claimed
 provider-session start. A missing supported timestamp is shown as `time
-unavailable`.
+unavailable`. Both human time fields use the executing OS local time zone as
+`YYYY-MM-DD HH:MM:SS ZONE`, honor `TZ`, and omit milliseconds. Locate JSON
+retains the exact stored UTC RFC 3339 millisecond values.
 
 ## Search
 
@@ -713,11 +721,15 @@ position in the final shaped window. `retrieval_score` preserves the backend's
 diagnostic score, which can be non-monotonic after query-coverage and family
 shaping.
 Human output uses only the pluralized rendered-result count in the heading.
-Separate `Event` and `Time` rows show the dynamic event reference and the exact
-matched-event UTC RFC 3339 millisecond time;
+Separate `Event` and `Time` rows show the dynamic event reference and the
+matched event in the executing OS local time zone as
+`YYYY-MM-DD HH:MM:SS ZONE`, without milliseconds;
 timestamps never re-sort results. `--verbose` additionally renders the stored
 event sequence and available workspace/working-directory, branch, agent, and
 parent/root lineage without repeating equal values.
+Search JSON keeps the exact UTC RFC 3339 millisecond result timestamps and
+`generated_at`; localization never changes filters, storage, other durable
+processing, or machine output.
 Ordinary search does not run a reverse-lineage lookup for each hit. A selected
 event can still expose its own positive direct `event_copy` claim, but that
 claim does not affect recall, ranking, grouping, or semantic eligibility.

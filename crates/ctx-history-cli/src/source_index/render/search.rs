@@ -252,10 +252,13 @@ fn render_event_summary(
     event_id: &str,
     timestamp: Option<&str>,
 ) {
-    let (time, time_token) = timestamp
+    let time = timestamp
         .filter(|timestamp| !timestamp.is_empty())
-        .map_or(("time unavailable", Token::Label), |timestamp| {
-            (timestamp, Token::Text)
+        .map(|timestamp| context.human_timestamp(timestamp));
+    let (time, time_token) = time
+        .as_deref()
+        .map_or(("time unavailable", Token::Label), |time| {
+            (time, Token::Text)
         });
     push_field(
         document,
