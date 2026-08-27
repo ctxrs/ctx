@@ -68,11 +68,25 @@ impl HistorySemanticPort for SemanticQueryAdapter<'_> {
             SemanticQueryExecution::Foreground {
                 runtime,
                 model_config,
-            } => {
-                reconcile_foreground_semantic(index, self.data_root, runtime, model_config)
-                    .map_err(SemanticQueryError::from)?;
-                SemanticQuerySession::begin_foreground(index, self.data_root, runtime, model_config)
-            }
+            } => match SemanticQuerySession::begin_foreground(
+                index,
+                self.data_root,
+                runtime,
+                model_config,
+            ) {
+                Ok(session) => Ok(session),
+                Err(SemanticQueryError::NotReady { .. }) => {
+                    reconcile_foreground_semantic(index, self.data_root, runtime, model_config)
+                        .map_err(SemanticQueryError::from)?;
+                    SemanticQuerySession::begin_foreground(
+                        index,
+                        self.data_root,
+                        runtime,
+                        model_config,
+                    )
+                }
+                Err(error) => Err(error),
+            },
         }
         .map_err(HistorySemanticError::from)
     }
