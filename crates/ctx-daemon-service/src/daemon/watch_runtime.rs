@@ -138,6 +138,21 @@ impl DaemonWatchRuntime {
         C: FnMut(&Path) -> Result<SourceBackedWatchCatalog>,
         W: FnMut(&Path, Arc<DaemonWakeup>, DaemonWatchCatalog) -> Result<DaemonFileWatcher>,
     {
+        if self
+            .file_watcher
+            .as_ref()
+            .is_some_and(DaemonFileWatcher::worker_failed)
+        {
+            self.file_watcher.take();
+            self.catalog_refresh_pending = true;
+        }
+        let recovery_boundary =
+            source_refresh.and_then(|refresh| refresh.watch_uncertainty_watermark());
+        let recovering_uncertainty = recovery_boundary.is_some();
+        let force_rearm = force_rearm || recovering_uncertainty;
+        if recovering_uncertainty {
+            self.catalog_refresh_pending = true;
+        }
         if trigger.requests_catalog_refresh() {
             self.catalog_refresh_pending = true;
         }
@@ -184,7 +199,9 @@ impl DaemonWatchRuntime {
                         self.provider_root_refresh_pending = true;
                     }
                     self.catalog.publish(catalog);
-                    self.catalog_refresh_pending = false;
+                    if !recovering_uncertainty {
+                        self.catalog_refresh_pending = false;
+                    }
                     catalog_published = true;
                 }
                 Err(error) => {
@@ -226,7 +243,10 @@ impl DaemonWatchRuntime {
         }
 
         let mut watcher_recreated = false;
-        if self.file_watcher.is_none() && trigger.ensures_watcher() {
+        if self.file_watcher.is_none()
+            && trigger.ensures_watcher()
+            && (!recovering_uncertainty || catalog_published)
+        {
             match start_watcher(data_root, Arc::clone(&self.wakeup), self.catalog.clone()) {
                 Ok(watcher) => {
                     self.file_watcher = Some(watcher);
@@ -243,12 +263,19 @@ impl DaemonWatchRuntime {
         }
 
         let mut affected = SourceWatchBatch::default();
-        if !watcher_recreated && (catalog_published || trigger.reconciles_roots()) {
+        let mut roots_registered = watcher_recreated;
+        if !watcher_recreated
+            && (catalog_published || trigger.reconciles_roots())
+            && (!recovering_uncertainty || catalog_published)
+        {
             if let Some(watcher) = self.file_watcher.as_mut() {
                 let (batch, receipt) = watcher.reconcile_roots(force_rearm);
                 affected = batch;
-                if let Err(error) = receipt {
-                    let _ = write_degraded_wakeup_receipt(data_root, &error);
+                match receipt {
+                    Ok(()) => roots_registered = true,
+                    Err(error) => {
+                        let _ = write_degraded_wakeup_receipt(data_root, &error);
+                    }
                 }
             }
         }
@@ -257,21 +284,23 @@ impl DaemonWatchRuntime {
         let coordinator_needs_authority =
             source_refresh.is_some_and(|refresh| !refresh.watch_routes_initialized());
         let must_poll_without_watcher = watcher_unavailable && trigger.reconciles_roots();
-        let must_initialize_authority = catalog_published
-            || watcher_recreated
-            || coordinator_needs_authority
-            || must_poll_without_watcher;
+        let recovery_ready = !recovering_uncertainty || (catalog_published && roots_registered);
+        let must_initialize_authority = recovery_ready
+            && (catalog_published
+                || watcher_recreated
+                || coordinator_needs_authority
+                || must_poll_without_watcher);
         let mut pending_missing_schedules = 0_usize;
         if must_initialize_authority {
             if let (Some(catalog), Some(source_refresh)) = (self.catalog.snapshot(), source_refresh)
             {
-                source_refresh.install_watch_catalog(catalog.clone());
                 let watermark = self
                     .file_watcher
                     .as_ref()
                     .map(DaemonFileWatcher::startup_watermark)
                     .unwrap_or_else(|| EventWatermark::new(0, 0));
                 if watcher_unavailable {
+                    source_refresh.install_watch_catalog(catalog.clone());
                     // Without a watcher no provider-neutral observation can
                     // close the event race. Poll every exact catalog route
                     // through the ordinary fail-closed refresh path on each
@@ -281,7 +310,22 @@ impl DaemonWatchRuntime {
                         watermark,
                         source_route_ledger_now_ms(),
                     );
+                } else if recovering_uncertainty && catalog_published && roots_registered {
+                    let covered_through = recovery_boundary.expect("uncertainty boundary");
+                    match source_refresh.complete_watch_uncertainty_recovery(
+                        data_root,
+                        catalog,
+                        covered_through,
+                        source_route_ledger_now_ms(),
+                    ) {
+                        Ok(true) => self.catalog_refresh_pending = false,
+                        Ok(false) => {}
+                        Err(error) => {
+                            let _ = write_degraded_wakeup_receipt(data_root, &error);
+                        }
+                    }
                 } else if coordinator_needs_authority || watcher_recreated {
+                    source_refresh.install_watch_catalog(catalog.clone());
                     // Startup and watcher replacement are exhaustive safety
                     // boundaries. Live watcher events may trust append-only
                     // growth, but these boundaries must authenticate existing
@@ -292,6 +336,8 @@ impl DaemonWatchRuntime {
                         watermark,
                         source_route_ledger_now_ms(),
                     );
+                } else {
+                    source_refresh.install_watch_catalog(catalog);
                 }
                 self.schedule_pending_missing_routes(data_root, source_refresh);
                 pending_missing_schedules = pending_missing_schedules.saturating_add(1);
@@ -299,13 +345,15 @@ impl DaemonWatchRuntime {
         }
         if !coordinator_needs_authority {
             if let Some(source_refresh) = source_refresh {
-                if let (Some(catalog), Some(watermark)) =
-                    (self.catalog.snapshot(), trigger.watermark())
-                {
-                    source_refresh.record_watch_routes_requiring_exhaustive_reconciliation(
-                        catalog.route_ids().cloned().map(|route| (route, watermark)),
-                        source_route_ledger_now_ms(),
-                    );
+                if !recovering_uncertainty {
+                    if let (Some(catalog), Some(watermark)) =
+                        (self.catalog.snapshot(), trigger.watermark())
+                    {
+                        source_refresh.record_watch_routes_requiring_exhaustive_reconciliation(
+                            catalog.route_ids().cloned().map(|route| (route, watermark)),
+                            source_route_ledger_now_ms(),
+                        );
+                    }
                 }
                 source_refresh.record_watch_routes_requiring_exhaustive_reconciliation(
                     affected.routes,

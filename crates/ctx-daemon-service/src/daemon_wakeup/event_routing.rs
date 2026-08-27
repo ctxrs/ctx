@@ -46,7 +46,8 @@ pub(super) fn record_watch_event(
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             counters.backend_errors = counters.backend_errors.saturating_add(1);
-            return SourceWatchBatch::catalog_reconciliation(watermark);
+            drop(counters);
+            return SourceWatchBatch::uncertainty(watermark);
         }
     };
     if event.needs_rescan() {
@@ -56,45 +57,71 @@ pub(super) fn record_watch_event(
         counters.raw_events = counters.raw_events.saturating_add(1);
         counters.rescan_notifications = counters.rescan_notifications.saturating_add(1);
         counters.last_relevant_path = event.paths.first().cloned();
-        return SourceWatchBatch::catalog_reconciliation(watermark);
+        drop(counters);
+        return SourceWatchBatch::uncertainty(watermark);
     }
     if let Some(kind) = ignored_watch_event(data_root, &event) {
         record_ignored_watch_event(counters, &event, kind);
         return SourceWatchBatch::default();
     }
-    let authority = authority
+    if event.paths.is_empty() {
+        record_relevant_watch_event(counters, None);
+        return SourceWatchBatch::uncertainty(watermark);
+    }
+    let authority_snapshot = authority
         .read()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let catalog = authority.catalog.snapshot();
+    let catalog = authority_snapshot.catalog.snapshot();
     let mut batch = SourceWatchBatch::default();
     let mut relevant_path = None;
+    let mut matched_path = false;
+    let mut unmatched_path = false;
+    let mut data_root_invalidated = false;
     for event_path in &event.paths {
-        if event_path.as_path() == data_root || event_path.starts_with(daemon_root) {
+        if event_path.as_path() == data_root {
+            data_root_invalidated |= event.requires_rearm();
             continue;
         }
-        if authority
+        if event_path.starts_with(daemon_root) {
+            unmatched_path |= event.requires_rearm();
+            continue;
+        }
+        let mut path_matched = false;
+        let control_matched = authority_snapshot
             .controls
             .iter()
-            .any(|target| declared_control_paths_overlap(target, event_path))
-        {
+            .any(|target| declared_control_paths_overlap(target, event_path));
+        if control_matched {
             batch.reconcile = Some(watermark);
+            path_matched = true;
             relevant_path.get_or_insert_with(|| event_path.clone());
+        }
+        if event_path.starts_with(data_root) && !control_matched {
+            unmatched_path |= event.requires_rearm();
+            continue;
         }
         if let Some(catalog) = catalog.as_ref() {
             for route in catalog.routes_overlapping_path(event_path) {
+                path_matched = true;
                 let member = catalog.exact_member_for_event(&route, event_path);
                 batch.record_route(route, watermark, member);
                 relevant_path.get_or_insert_with(|| event_path.clone());
             }
         }
+        matched_path |= path_matched;
+        unmatched_path |= !path_matched;
     }
-    if event.paths.is_empty() {
-        batch.reconcile = Some(watermark);
-        batch.rearm = true;
-    } else if !batch.is_empty() && event.requires_rearm() {
+    let uncertain =
+        data_root_invalidated || (event.requires_rearm() && matched_path && unmatched_path);
+    if uncertain {
+        drop(authority_snapshot);
+        record_relevant_watch_event(counters, event.paths.first().cloned());
+        return SourceWatchBatch::uncertainty(watermark);
+    }
+    if !batch.is_empty() && event.requires_rearm() {
         batch.rearm = true;
     }
-    drop(authority);
+    drop(authority_snapshot);
     if !batch.is_empty() {
         let mut counters = counters
             .lock()
@@ -108,6 +135,14 @@ pub(super) fn record_watch_event(
         counters.ignored_other_events = counters.ignored_other_events.saturating_add(1);
     }
     batch
+}
+
+fn record_relevant_watch_event(counters: &Mutex<WatchCounters>, path: Option<std::path::PathBuf>) {
+    let mut counters = counters
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    counters.raw_events = counters.raw_events.saturating_add(1);
+    counters.last_relevant_path = path;
 }
 
 #[derive(Clone, Copy)]
@@ -132,9 +167,11 @@ pub(super) fn record_ignored_watch_event(
     event: &NativeWatchEvent,
     kind: IgnoredWatchEvent,
 ) {
-    let mut counters = counters
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut counters = match counters.try_lock() {
+        Ok(counters) => counters,
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => return,
+    };
     match kind {
         IgnoredWatchEvent::Access => {
             counters.ignored_access_events = counters.ignored_access_events.saturating_add(1);

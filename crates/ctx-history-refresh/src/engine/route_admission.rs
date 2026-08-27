@@ -219,7 +219,8 @@ impl CoreRefreshEngine {
             });
         let mut certified_routes = BTreeMap::new();
         for admission in admissions {
-            let terminal_failed = !publication_ready
+            let terminal_failed = state.watch_uncertain_through.is_some()
+                || !publication_ready
                 || attempt
                     .as_ref()
                     .is_none_or(|attempt| attempt.state != SourceBackedRefreshState::Published);

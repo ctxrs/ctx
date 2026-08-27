@@ -44,6 +44,20 @@ impl SourceWatchBatch {
     }
 
     fn merge(&mut self, other: Self) {
+        if let Some(watermark) = other.reconcile {
+            self.routes.clear();
+            self.members.clear();
+            self.reconcile = Some(
+                self.reconcile
+                    .map_or(watermark, |current| current.max(watermark)),
+            );
+            self.rearm |= other.rearm;
+            return;
+        }
+        if self.reconcile.is_some() {
+            self.rearm |= other.rearm;
+            return;
+        }
         let mut other_members = other.members;
         for (route, watermark) in other.routes {
             let already_recorded = self.routes.contains_key(&route);
@@ -69,12 +83,6 @@ impl SourceWatchBatch {
                 (true, None, _) => {}
             }
         }
-        if let Some(watermark) = other.reconcile {
-            self.reconcile = Some(
-                self.reconcile
-                    .map_or(watermark, |current| current.max(watermark)),
-            );
-        }
         self.rearm |= other.rearm;
     }
 
@@ -92,7 +100,7 @@ impl SourceWatchBatch {
         self.merge(batch);
     }
 
-    fn catalog_reconciliation(watermark: EventWatermark) -> Self {
+    fn uncertainty(watermark: EventWatermark) -> Self {
         Self {
             reconcile: Some(watermark),
             rearm: true,
@@ -112,6 +120,7 @@ impl ctx_daemon_runtime::CoalescingWakePayload for SourceWatchBatch {
 }
 
 pub(super) type SourceWatchSink = Arc<dyn Fn(&SourceWatchBatch) + Send + Sync>;
+type SourceWatchPressureSink = Arc<dyn Fn(EventWatermark) + Send + Sync>;
 
 #[derive(Debug, Clone, Default)]
 pub(super) struct DaemonWake {
@@ -124,6 +133,7 @@ pub(super) struct DaemonWake {
 #[derive(Default)]
 pub(super) struct DaemonWakeup {
     inner: ctx_daemon_runtime::Wakeup<SourceWatchBatch>,
+    source_watch_pressure_sink: RwLock<Option<SourceWatchPressureSink>>,
     #[cfg(test)]
     before_source_watch_sink_dispatch: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
@@ -163,6 +173,24 @@ impl DaemonWakeup {
         self.inner.signal_payload(batch);
     }
 
+    fn fence_source_watch_pressure(&self, watermark: EventWatermark) {
+        let sink = self
+            .source_watch_pressure_sink
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(sink) = sink {
+            sink(watermark);
+        }
+    }
+
+    pub(super) fn install_source_watch_pressure_sink(&self, sink: SourceWatchPressureSink) {
+        *self
+            .source_watch_pressure_sink
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(sink);
+    }
+
     pub(super) fn install_source_watch_sink(&self, sink: SourceWatchSink) {
         self.inner.install_payload_sink(sink);
     }
@@ -172,7 +200,10 @@ impl DaemonWakeup {
     }
 
     #[cfg(test)]
-    fn install_before_source_watch_sink_dispatch_hook(&self, hook: Arc<dyn Fn() + Send + Sync>) {
+    pub(super) fn install_before_source_watch_sink_dispatch_hook(
+        &self,
+        hook: Arc<dyn Fn() + Send + Sync>,
+    ) {
         let previous = self
             .before_source_watch_sink_dispatch
             .lock()
@@ -282,7 +313,7 @@ pub(super) struct DaemonFileWatcher {
     wakeup: Arc<DaemonWakeup>,
     authority: Arc<RwLock<WatchAuthority>>,
     counters: Arc<Mutex<WatchCounters>>,
-    runtime: ctx_daemon_runtime::NativeFileWatcher<SourceWatchBatch>,
+    runtime: ctx_daemon_runtime::NativeFileWatcher,
     last_error: Option<String>,
 }
 
@@ -324,12 +355,19 @@ impl DaemonFileWatcher {
         });
         let observed_wakeup = Arc::clone(&wakeup);
         let signal_wakeup = Arc::clone(&wakeup);
+        let pressure_wakeup = Arc::clone(&wakeup);
         let runtime = ctx_daemon_runtime::NativeFileWatcher::start(
             "ctx-daemon-watch",
             ignore_event,
             classify_event,
-            Arc::new(|watermark: ctx_daemon_runtime::WatchWatermark| {
-                SourceWatchBatch::catalog_reconciliation(EventWatermark::new(
+            Arc::new(move |watermark: ctx_daemon_runtime::WatchWatermark| {
+                pressure_wakeup.fence_source_watch_pressure(EventWatermark::new(
+                    watermark.epoch,
+                    watermark.sequence,
+                ));
+            }),
+            Arc::new(move |watermark: ctx_daemon_runtime::WatchWatermark| {
+                SourceWatchBatch::uncertainty(EventWatermark::new(
                     watermark.epoch,
                     watermark.sequence,
                 ))
@@ -366,7 +404,7 @@ impl DaemonFileWatcher {
         let desired = ctx_daemon_runtime::watch_roots(desired_paths.iter().map(PathBuf::as_path));
         let replace_native_watcher = self.runtime.replacement_required(force_rearm);
         let registration_needed = self.runtime.needs_registration(&desired, force_rearm);
-        let affected = if registration_needed && !replace_native_watcher {
+        let mut affected = if registration_needed && !replace_native_watcher {
             catalog
                 .as_ref()
                 .map(|catalog| {
@@ -387,7 +425,16 @@ impl DaemonFileWatcher {
         self.last_error = catalog
             .is_none()
             .then(|| "watch catalog authority is unavailable".to_owned());
-        if let Err(error) = self.runtime.reconcile_paths(desired, force_rearm) {
+        let registration = self.runtime.reconcile_paths(desired, force_rearm);
+        if registration.is_err() && registration_needed && affected.routes.is_empty() {
+            if let Some(catalog) = catalog.as_ref() {
+                let watermark = self.next_watermark();
+                affected
+                    .routes
+                    .extend(catalog.route_ids().cloned().map(|route| (route, watermark)));
+            }
+        }
+        if let Err(error) = registration.as_ref() {
             self.last_error = Some(error.to_string());
         }
         let receipt = self.write_receipt(if self.last_error.is_some() {
@@ -395,7 +442,11 @@ impl DaemonFileWatcher {
         } else {
             "active"
         });
-        (affected, receipt)
+        (affected, registration.and(receipt))
+    }
+
+    pub(super) fn worker_failed(&self) -> bool {
+        self.runtime.worker_failed()
     }
 
     fn next_watermark(&self) -> EventWatermark {
@@ -406,6 +457,19 @@ impl DaemonFileWatcher {
     #[cfg(all(test, target_os = "linux"))]
     pub(super) fn install_rearm_overlap_hook(&mut self, hook: impl FnMut(&Path) + 'static) {
         self.runtime.install_rearm_overlap_hook(hook);
+    }
+
+    #[cfg(all(test, target_os = "linux"))]
+    pub(super) fn install_registration_attempt_hook(
+        &mut self,
+        hook: impl FnMut(&Path) -> Result<()> + 'static,
+    ) {
+        self.runtime.install_registration_attempt_hook(hook);
+    }
+
+    #[cfg(all(test, target_os = "linux"))]
+    pub(super) fn runtime_snapshot(&self) -> ctx_daemon_runtime::NativeWatcherSnapshot {
+        self.runtime.snapshot()
     }
 
     pub(super) fn write_receipt(&self, status: &str) -> Result<()> {

@@ -12,6 +12,8 @@ use std::{
 };
 
 #[cfg(target_os = "linux")]
+use std::os::unix::fs::PermissionsExt;
+#[cfg(target_os = "linux")]
 use std::sync::atomic::AtomicBool;
 
 use super::*;
@@ -695,6 +697,32 @@ fn safety_reconciliation_recovers_a_failed_startup_catalog_without_empty_authori
         super::super::daemon_wakeup::daemon_wakeup_report(&data_root)["status"],
         "active"
     );
+    #[cfg(target_os = "linux")]
+    {
+        coordinator.initialize_watch_route_authority([]);
+        coordinator.install_watch_catalog(catalog.clone());
+        assert!(!coordinator.has_scheduled_route_work());
+        let uncertain = EventWatermark::new(41, 7);
+        coordinator.fence_watch_uncertainty(uncertain);
+        let reconcile = |runtime: &mut DaemonWatchRuntime| {
+            runtime.reconcile_catalog_and_route_authority_with(
+                &data_root,
+                Some(&coordinator),
+                WatchCatalogReconcileTrigger::SafetyTimeout,
+                false,
+                |_| Ok(catalog.clone()),
+                DaemonFileWatcher::start,
+            );
+        };
+        let permissions = fs::metadata(&provider_root)?.permissions();
+        fs::set_permissions(&provider_root, fs::Permissions::from_mode(0o0))?;
+        reconcile(&mut watch_runtime);
+        fs::set_permissions(&provider_root, permissions)?;
+        assert_eq!(coordinator.watch_uncertainty_watermark(), Some(uncertain));
+        reconcile(&mut watch_runtime);
+        assert!(coordinator.watch_uncertainty_watermark().is_none());
+        assert!(coordinator.scheduled_route_ids_for_test().contains(&route));
+    }
     Ok(())
 }
 

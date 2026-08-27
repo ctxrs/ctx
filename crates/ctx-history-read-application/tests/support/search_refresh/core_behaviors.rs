@@ -436,17 +436,21 @@ fn persistent_daemon_passively_publishes_appended_source_without_foreground_comm
     // command is run between the append and the new verified generation.
     let job_path = search_refresh_data_root(&temp).join("daemon/jobs/core-refresh.json");
     let deadline = Instant::now() + Duration::from_secs(10);
-    let passive_generation = loop {
+    let passive_publication = loop {
         let job = fs::read(&job_path)
             .ok()
             .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
-        if let Some(generation) = job.as_ref().and_then(|job| {
+        if let Some((generation, job)) = job.as_ref().and_then(|job| {
             (job["request_state"] == "published")
-                .then(|| job["published_generation"].as_str().map(str::to_owned))
+                .then(|| {
+                    job["published_generation"]
+                        .as_str()
+                        .map(|generation| (generation.to_owned(), job.clone()))
+                })
                 .flatten()
-                .filter(|generation| generation != &initial_generation)
+                .filter(|(generation, _)| generation != &initial_generation)
         }) {
-            break generation;
+            break (generation, job);
         }
         assert!(
             Instant::now() < deadline,
@@ -457,6 +461,12 @@ fn persistent_daemon_passively_publishes_appended_source_without_foreground_comm
         );
         std::thread::sleep(Duration::from_millis(25));
     };
+    let (passive_generation, passive_job) = passive_publication;
+    assert_eq!(
+        passive_job["receipt"]["selected_route_total"], 1,
+        "{passive_job:#}"
+    );
+    assert_eq!(passive_job["scanned_routes"], 1, "{passive_job:#}");
 
     let search = json_output(ctx(&temp).args([
         "search",

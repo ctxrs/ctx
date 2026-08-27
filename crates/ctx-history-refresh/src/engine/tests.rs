@@ -341,6 +341,98 @@ fn runtime_hook_follows_execution_drop_and_precedes_terminal_status() {
     );
 }
 
+#[test]
+fn pressure_fence_only_advances_global_uncertainty_authority() {
+    let coordinator = CoreRefreshEngine::new();
+    let routes = (0x20..0x40).map(route_identity).collect::<BTreeSet<_>>();
+    let retained = routes.iter().next().unwrap().clone();
+    coordinator.initialize_watch_route_authority(routes);
+    coordinator.record_watch_routes(
+        [(retained.clone(), EventWatermark::new(4, 1))],
+        ledger_now_ms(),
+    );
+
+    coordinator.fence_watch_uncertainty(EventWatermark::new(4, 7));
+    coordinator.fence_watch_uncertainty(EventWatermark::new(4, 5));
+
+    assert_eq!(
+        coordinator.watch_uncertainty_watermark(),
+        Some(EventWatermark::new(4, 7))
+    );
+    assert_eq!(
+        coordinator.scheduled_route_ids_for_test(),
+        BTreeSet::from([retained]),
+        "callback fencing must not enumerate or seed the catalog"
+    );
+}
+
+#[test]
+fn uncertainty_between_preterminal_binding_and_state_transition_keeps_wait_active() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    let coordinator = Arc::new(CoreRefreshEngine::new());
+    let queued = coordinator.enqueue(Some("previous".to_owned()));
+    let request_id = request_id(&queued);
+    let preterminal = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let runner_preterminal = Arc::clone(&preterminal);
+    let runner_release = Arc::clone(&release);
+    let runner = Arc::clone(&coordinator);
+    let run = std::thread::spawn(move || {
+        runner
+            .run_next_with_terminal_success(
+                |_, _| Ok(test_publication("stale")),
+                || Ok(Some("stale".to_owned())),
+                move |receipt| {
+                    runner_preterminal.wait();
+                    runner_release.wait();
+                    Ok(CoreRefreshTerminalSuccess::state_only(receipt))
+                },
+                |_| panic!("fenced refresh must not persist terminal success"),
+                |_| Ok(()),
+            )
+            .expect("active wait run")
+    });
+
+    preterminal.wait();
+    let boundary = EventWatermark::new(8, 13);
+    coordinator.fence_watch_uncertainty(boundary);
+    assert_eq!(
+        coordinator.status(&request_id).unwrap()["request_state"],
+        "running"
+    );
+    release.wait();
+
+    let fenced = run.join().unwrap();
+    assert_eq!(fenced.job["request_state"], "running");
+    assert_eq!(fenced.job["progress"]["phase"], "watch_recovery");
+    assert!(coordinator
+        .complete_watch_uncertainty_recovery(
+            &data_root,
+            SourceBackedWatchCatalog::default(),
+            boundary,
+            ledger_now_ms(),
+        )
+        .unwrap());
+    let pending = coordinator.status(&request_id).unwrap();
+    assert_eq!(pending["request_state"], "admission_pending");
+    assert_eq!(pending["reconciliation_demand"], "exhaustive");
+    assert!(coordinator
+        .prepare_next_pending_admission(&data_root)
+        .unwrap());
+
+    let recovered = coordinator
+        .run_next_with(
+            |_, _| Ok(test_publication("recovered")),
+            || Ok(Some("recovered".to_owned())),
+            |_| Ok(()),
+            |_| Ok(()),
+        )
+        .expect("exhaustive successor");
+    assert_eq!(recovered.job["request_id"], request_id);
+    assert_eq!(recovered.job["request_state"], "published");
+}
+
 fn empty_test_publication(generation_id: impl Into<String>) -> SourceBackedRefreshPublication {
     let mut publication = test_publication(generation_id);
     publication.certified_source_count = 0;
@@ -742,6 +834,97 @@ fn warm_dirty_route_burst_uses_one_bounded_refresh_and_publication() {
     assert!(!coordinator
         .enqueue_next_dirty_route(&data_root, u64::MAX)
         .unwrap());
+}
+
+#[test]
+fn restart_requeues_durable_watch_recovery_after_pointer_advance() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    let committed = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let executor_committed = Arc::clone(&committed);
+    let executor_release = Arc::clone(&release);
+    let first = Arc::new(CoreRefreshEngine::with_executor(Arc::new(
+        move |execution: SourceBackedRefreshExecution<'_>| {
+            let publication =
+                publication_lifecycle_tests::publish_empty_generation_with_request_metadata(
+                    &execution, 0x99,
+                )?;
+            executor_committed.wait();
+            executor_release.wait();
+            Ok(publication)
+        },
+    )));
+    let request_id = "019fcaaa-0000-7000-8000-000000000691".to_owned();
+    let admitted = first
+        .handle_ipc_request(
+            &data_root,
+            &json!({
+                "schema_version": 1,
+                "op": SOURCE_REFRESH_REQUEST_OP,
+                "request_id": request_id,
+                "mode": "wait",
+                "operation": "refresh",
+                "fresh_after_admitted_snapshot": true,
+            }),
+        )
+        .unwrap()
+        .expect("active wait admission");
+    assert_eq!(admitted["request_state"], "admission_pending");
+    let runner = Arc::clone(&first);
+    let run_root = data_root.clone();
+    let run = std::thread::spawn(move || runner.run_next(&run_root).expect("active wait"));
+
+    committed.wait();
+    first.fence_watch_uncertainty(EventWatermark::new(19, 1));
+    release.wait();
+    let interrupted = run.join().unwrap();
+    assert_eq!(interrupted.job["request_state"], "running");
+    assert_eq!(interrupted.job["progress"]["phase"], "watch_recovery");
+    let generation = pin_published_generation(&data_root)
+        .unwrap()
+        .expect("physical generation advanced")
+        .generation_id()
+        .to_owned();
+    assert_ne!(
+        interrupted.job["previous_generation"].as_str(),
+        Some(generation.as_str())
+    );
+    drop(first);
+
+    let executions = Arc::new(AtomicUsize::new(0));
+    let observed_executions = Arc::clone(&executions);
+    let restarted =
+        CoreRefreshEngine::with_executor(Arc::new(move |_: SourceBackedRefreshExecution<'_>| {
+            observed_executions.fetch_add(1, Ordering::SeqCst);
+            Err(anyhow!("restart recovery must remain nonterminal"))
+        }));
+    assert!(restarted
+        .recover_interrupted_publication(&data_root)
+        .unwrap());
+    let recovered = restarted
+        .status(&request_id)
+        .expect("recovered active wait");
+    assert_eq!(recovered["request_state"], "admission_pending");
+    assert_eq!(recovered["reconciliation_demand"], "exhaustive");
+    assert_eq!(executions.load(Ordering::SeqCst), 0);
+
+    let reconnect = restarted
+        .handle_ipc_request(
+            &data_root,
+            &json!({
+                "schema_version": 1,
+                "op": SOURCE_REFRESH_REQUEST_OP,
+                "request_id": request_id,
+                "mode": "wait",
+                "operation": "refresh",
+                "fresh_after_admitted_snapshot": true,
+            }),
+        )
+        .unwrap()
+        .expect("reconnected active wait");
+    assert_eq!(reconnect["request_id"], request_id);
+    assert_eq!(reconnect["request_state"], "admission_pending");
 }
 
 mod additional;

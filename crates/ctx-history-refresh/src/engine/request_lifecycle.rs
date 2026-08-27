@@ -4,6 +4,102 @@ mod recovery;
 mod resolution;
 
 impl CoreRefreshEngine {
+    /// Fences admission after unbounded callback loss. Callback pressure only
+    /// advances this constant-size authority boundary; the watcher worker owns
+    /// catalog reconstruction and exhaustive route seeding.
+    pub fn fence_watch_uncertainty(&self, watermark: EventWatermark) {
+        let mut state = self.lock_state();
+        state.watch_uncertain_through = Some(
+            state
+                .watch_uncertain_through
+                .map_or(watermark, |current| current.max(watermark)),
+        );
+    }
+
+    pub fn watch_uncertainty_pending(&self) -> bool {
+        self.watch_uncertainty_watermark().is_some()
+    }
+
+    pub fn watch_uncertainty_watermark(&self) -> Option<EventWatermark> {
+        self.lock_state().watch_uncertain_through
+    }
+
+    /// Restores the one watch catalog only after fresh construction and a
+    /// successful physical rearm. A running pre-fence capture must first
+    /// reach the nonterminal `watch_recovery` handoff.
+    pub fn complete_watch_uncertainty_recovery(
+        &self,
+        data_root: &Path,
+        catalog: SourceBackedWatchCatalog,
+        covered_through: EventWatermark,
+        observed_at_ms: u64,
+    ) -> Result<bool> {
+        let routes = catalog.route_ids().cloned().collect::<BTreeSet<_>>();
+        let mut state = self.lock_state();
+        let Some(current_uncertainty) = state.watch_uncertain_through else {
+            return Ok(false);
+        };
+        let active_request_id = state.active_request_id.clone();
+
+        state.dirty_routes.retain_exact_routes(&routes);
+        state
+            .hermes_routes_requiring_exhaustive_recovery
+            .retain(|route| routes.contains(route));
+        state
+            .routes_requiring_exhaustive_reconciliation
+            .retain(|route| routes.contains(route));
+        state
+            .route_event_watermarks
+            .retain(|route, _| routes.contains(route));
+        state.route_worksets.clear();
+        state.known_route_ids = routes.clone();
+        state.watch_catalog = Some(catalog);
+        state.watch_routes_initialized = true;
+        if current_uncertainty > covered_through {
+            state
+                .routes_requiring_exhaustive_reconciliation
+                .extend(routes.iter().cloned());
+            state
+                .dirty_routes
+                .seed_exact_routes(routes, current_uncertainty, observed_at_ms);
+            return Ok(false);
+        }
+        state
+            .routes_requiring_exhaustive_reconciliation
+            .extend(routes.iter().cloned());
+        for route in &routes {
+            state
+                .route_event_watermarks
+                .entry(route.clone())
+                .and_modify(|current| *current = (*current).max(covered_through))
+                .or_insert(covered_through);
+        }
+        state
+            .dirty_routes
+            .seed_exact_routes(routes, covered_through, observed_at_ms);
+        state.watch_uncertain_through = None;
+        if let Some(attempt) = active_request_id
+            .as_deref()
+            .and_then(|request_id| find_attempt_mut(&mut state, request_id))
+            .filter(|attempt| {
+                attempt.state == SourceBackedRefreshState::Running
+                    && attempt.progress.phase == "watch_recovery"
+            })
+        {
+            attempt.admitted_authority = None;
+            attempt.reconciliation_demand = SourceBackedReconciliationDemand::Exhaustive;
+            attempt.state = SourceBackedRefreshState::AdmissionPending;
+            attempt.progress.phase = "admission_pending".to_owned();
+            attempt.last_error = None;
+        }
+        if let Some(request_id) = active_request_id {
+            let job = durable_job_json(&state, &request_id)
+                .ok_or_else(|| anyhow!("source refresh request `{request_id}` disappeared"))?;
+            self.write_status(data_root, &job)?;
+        }
+        Ok(true)
+    }
+
     pub fn enqueue_periodic(&self, data_root: &Path) -> Result<Value> {
         let observed_generation = self.observed_published_generation(data_root)?;
         self.enqueue_intent(
@@ -235,7 +331,7 @@ impl CoreRefreshEngine {
             .ok_or_else(|| anyhow!("new source refresh request disappeared"))
     }
 
-    fn run_next_with_terminal_success<Execute, Probe, Terminal, Published, Failed>(
+    pub(super) fn run_next_with_terminal_success<Execute, Probe, Terminal, Published, Failed>(
         &self,
         execute: Execute,
         probe: Probe,
@@ -473,17 +569,16 @@ impl CoreRefreshEngine {
                         &publication,
                     )
                     .map_err(|error| format!("validate terminal Core publication: {error:#}"))
-                    .and_then(|request_receipt| {
-                        terminal(request_receipt.clone())
-                            .map(|terminal| (observed, publication, request_receipt, terminal))
-                            .map_err(|error| {
-                                format!("finalize verified Core publication: {error:#}")
-                            })
-                    })
+                    .map(|request_receipt| (observed, publication, request_receipt))
                 }
             }
             Err(error) => Err(error),
         };
+        let verified = verified.and_then(|(observed, publication, request_receipt)| {
+            terminal(request_receipt.clone())
+                .map(|terminal| (observed, publication, request_receipt, terminal))
+                .map_err(|error| format!("finalize verified Core publication: {error:#}"))
+        });
         let verified = match verified {
             Ok(verified) => Ok(verified),
             Err(error) => match failed(&error) {
@@ -494,6 +589,35 @@ impl CoreRefreshEngine {
             },
         };
         let mut state = self.lock_state();
+        // The uncertainty decision and Published transition share this lock.
+        // A callback fence therefore orders wholly before the nonterminal
+        // recovery handoff or wholly after the successful terminal boundary.
+        if verified.is_ok() && state.watch_uncertain_through.is_some() {
+            let attempt = find_attempt_mut(&mut state, &request_id)?;
+            attempt.snapshot_attempt_history_progress();
+            attempt.attempt_history_progress = None;
+            attempt.finished_at_ms = None;
+            attempt.progress.current_source = None;
+            attempt.progress.completed_records = None;
+            attempt.progress.completed_bytes = None;
+            attempt.progress.current_source_progress = None;
+            attempt.whole_run_eta.clear();
+            attempt.state = SourceBackedRefreshState::Running;
+            attempt.progress.phase = "watch_recovery".to_owned();
+            attempt.failure_type = None;
+            attempt.failure_outcome = None;
+            attempt.last_error = None;
+            let job = attempt.job_json();
+            drop(state);
+            return Some(SourceBackedRefreshRun {
+                job,
+                did_work: false,
+                failed: false,
+                terminal_persistence_pending: false,
+                scope: refresh_scope,
+                coverage_certificate: None,
+            });
+        }
         // Publication receipts and terminal progress are authoritative. Do
         // not project transient producer facts once this attempt exits.
         if let Some(attempt) = find_attempt_mut(&mut state, &request_id) {

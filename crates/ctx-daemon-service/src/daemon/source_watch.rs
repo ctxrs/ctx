@@ -27,14 +27,23 @@ pub(super) fn install_source_watch_ingress(
     let Some(source_refresh) = source_refresh.cloned() else {
         return;
     };
+    let pressure_refresh = Arc::clone(&source_refresh);
+    wakeup.install_source_watch_pressure_sink(Arc::new(move |watermark| {
+        pressure_refresh.fence_watch_uncertainty(watermark);
+    }));
     wakeup.install_source_watch_sink(Arc::new(move |batch: &SourceWatchBatch| {
+        if let Some(watermark) = batch.reconcile {
+            source_refresh.fence_watch_uncertainty(watermark);
+            return;
+        }
+        let observed_at_ms = source_route_ledger_now_ms();
         source_refresh.record_watch_routes_with_members(
             batch
                 .routes
                 .iter()
                 .map(|(route, watermark)| (route.clone(), *watermark)),
             batch.members.clone(),
-            source_route_ledger_now_ms(),
+            observed_at_ms,
         );
     }));
 }
@@ -55,7 +64,9 @@ pub(crate) fn daemon_wait_duration(
     let pending_source_refresh = source_refresh.is_some_and(CoreRefreshEngine::has_pending_request);
     let mut wait_for = next_safety_reconcile.saturating_duration_since(now);
     if pending_source_refresh {
-        if runtime.history_retry.ready() {
+        if runtime.history_retry.ready()
+            && source_refresh.is_none_or(|refresh| !refresh.watch_uncertainty_pending())
+        {
             return StdDuration::ZERO;
         }
         // A retained Core request owns the scheduler while its control-plane
