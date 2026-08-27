@@ -275,65 +275,95 @@ fn lone_failed_terminal_recovers_exact_status_without_reenqueue() {
 }
 
 #[test]
-fn pointer_crash_recovers_active_receipt_and_preserves_fresh_successor() {
+fn pointer_crash_requeues_active_exhaustive_and_preserves_fresh_successor() {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("data");
     ctx_history_platform::platform_security::establish_private_data_root(&data_root).unwrap();
-    let first = CoreRefreshEngine::new();
-    let active = first.enqueue(None);
-    let active_request_id = request_id(&active);
+    let first = Arc::new(CoreRefreshEngine::new());
+    let active_request_id = "019fcaaa-0000-7000-8000-000000000693".to_owned();
+    let active = first
+        .handle_ipc_request(
+            &data_root,
+            &json!({
+                "schema_version": 1,
+                "op": SOURCE_REFRESH_REQUEST_OP,
+                "request_id": active_request_id,
+                "mode": "wait",
+                "operation": "refresh",
+                "fresh_after_admitted_snapshot": true,
+            }),
+        )
+        .unwrap()
+        .expect("active wait admission");
+    assert_eq!(active["request_state"], "admission_pending");
+    assert!(first.prepare_next_pending_admission(&data_root).unwrap());
+
     let successor_request_id = Arc::new(Mutex::new(None::<String>));
-    let recorded_successor = Arc::clone(&successor_request_id);
+    let committed = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let runner = Arc::clone(&first);
     let execution_root = data_root.clone();
+    let recorded_successor = Arc::clone(&successor_request_id);
+    let execution_committed = Arc::clone(&committed);
+    let execution_release = Arc::clone(&release);
+    let crash = std::thread::spawn(move || {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = runner.run_next_with(
+                |active_id, coordinator| {
+                    let successor =
+                        enqueue_synthetic_manual_all_request(coordinator, &execution_root, 1);
+                    *recorded_successor.lock().unwrap() = Some(request_id(&successor));
 
-    let crash = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _ = first.run_next_with(
-            |active_id, coordinator| {
-                let successor =
-                    enqueue_synthetic_manual_all_request(coordinator, &execution_root, 1);
-                *recorded_successor.lock().unwrap() = Some(request_id(&successor));
+                    let metadata_request_id = active_id.to_owned();
+                    let published = ctx_history_index::GenerationWriter::open(
+                        source_backed_index_root(&execution_root),
+                        WriterOptions::default(),
+                    )?
+                    .into_writer()
+                    .map_err(crate::committed_generation_recovery_error)?
+                    .commit_with_publication_metadata(
+                        |_| true,
+                        |context| {
+                            let mut publication = empty_test_publication(context.generation_id());
+                            add_complete_empty_authority(&mut publication, route_identity(0x97));
+                            let receipt = SourceBackedRefreshReceipt::from_verified_publication(
+                                None,
+                                context.generation_id().to_owned(),
+                                &publication,
+                            )
+                            .map_err(|error| {
+                                IndexError::PublicationMetadata(format!("{error:#}"))
+                            })?;
+                            SourceBackedPublicationMetadata {
+                                version: SOURCE_REFRESH_PUBLICATION_METADATA_VERSION,
+                                request_id: metadata_request_id.clone(),
+                                operation: SourceBackedRefreshOperation::Refresh,
+                                refresh_scope: SourceBackedRefreshScope::All,
+                                receipt: receipt.to_json(),
+                                route_observations: BTreeMap::new(),
+                                route_controls: BTreeMap::new(),
+                            }
+                            .encode()
+                        },
+                    )?;
+                    execution_committed.wait();
+                    execution_release.wait();
+                    panic!(
+                        "injected crash after pointer publication {}",
+                        published.receipt().generation_id
+                    );
+                },
+                || panic!("crash must precede publication probe"),
+                |_| panic!("crash must precede terminal persistence"),
+                |_| panic!("crash must precede failure persistence"),
+            );
+        }))
+    });
 
-                let metadata_request_id = active_id.to_owned();
-                let published = ctx_history_index::GenerationWriter::open(
-                    source_backed_index_root(&execution_root),
-                    WriterOptions::default(),
-                )?
-                .into_writer()
-                .map_err(crate::committed_generation_recovery_error)?
-                .commit_with_publication_metadata(
-                    |_| true,
-                    |context| {
-                        let mut publication = empty_test_publication(context.generation_id());
-                        add_complete_empty_authority(&mut publication, route_identity(0x97));
-                        let receipt = SourceBackedRefreshReceipt::from_verified_publication(
-                            None,
-                            context.generation_id().to_owned(),
-                            &publication,
-                        )
-                        .map_err(|error| IndexError::PublicationMetadata(format!("{error:#}")))?;
-                        SourceBackedPublicationMetadata {
-                            version: SOURCE_REFRESH_PUBLICATION_METADATA_VERSION,
-                            request_id: metadata_request_id.clone(),
-                            operation: SourceBackedRefreshOperation::Refresh,
-                            refresh_scope: SourceBackedRefreshScope::All,
-                            receipt: receipt.to_json(),
-                            route_observations: BTreeMap::new(),
-                            route_controls: BTreeMap::new(),
-                        }
-                        .encode()
-                    },
-                )?;
-                panic!(
-                    "injected crash after pointer publication {}",
-                    published.receipt().generation_id
-                );
-            },
-            || panic!("crash must precede publication probe"),
-            |_| panic!("crash must precede terminal persistence"),
-            |_| panic!("crash must precede failure persistence"),
-        );
-    }));
-    assert!(crash.is_err());
+    committed.wait();
+    first.fence_watch_uncertainty(EventWatermark::new(29, 1));
+    release.wait();
+    assert!(crash.join().unwrap().is_err());
     let successor_request_id = successor_request_id
         .lock()
         .unwrap()
@@ -342,54 +372,62 @@ fn pointer_crash_recovers_active_receipt_and_preserves_fresh_successor() {
     let interrupted = read_daemon_job_status(&daemon_source_backed_refresh_job_path(&data_root))
         .expect("interrupted durable queue");
     assert_eq!(interrupted["request_id"], active_request_id);
+    assert_eq!(interrupted["request_state"], "running");
+    assert_ne!(interrupted["progress"]["phase"], "watch_recovery");
     assert_eq!(
         interrupted["queued_successors"][0]["request_id"],
         successor_request_id
     );
-    let committed = pin_published_generation(&data_root)
-        .unwrap()
-        .expect("committed Core generation")
-        .generation_id()
-        .to_owned();
     drop(first);
 
     let executions = Arc::new(AtomicUsize::new(0));
     let observed_executions = Arc::clone(&executions);
     let restarted = CoreRefreshEngine::with_executor(Arc::new(
-        move |_execution: SourceBackedRefreshExecution<'_>| {
+        move |execution: SourceBackedRefreshExecution<'_>| {
             observed_executions.fetch_add(1, Ordering::SeqCst);
-            Err(anyhow!("recovery must not recapture committed Core work"))
+            super::publication_lifecycle_tests::publish_empty_generation_with_request_metadata(
+                &execution, 0x9a,
+            )
         },
     ));
     assert!(restarted
         .recover_interrupted_publication(&data_root)
         .unwrap());
     assert_eq!(executions.load(Ordering::SeqCst), 0);
-    assert_eq!(
-        restarted.status(&active_request_id).unwrap()["request_state"],
-        "published"
-    );
+    let recovered = restarted.status(&active_request_id).unwrap();
+    assert_eq!(recovered["request_state"], "admission_pending");
+    assert_eq!(recovered["reconciliation_demand"], "exhaustive");
     assert_eq!(
         restarted.status(&successor_request_id).unwrap()["request_state"],
         "admission_pending"
     );
-    assert_eq!(
-        restarted
-            .pinned_core_publication()
-            .expect("recovered exact publication pin")
-            .receipt()
-            .published_generation,
-        committed
-    );
-    assert!(restarted.has_pending_request());
-    let recovered = read_daemon_job_status(&daemon_source_backed_refresh_job_path(&data_root))
-        .expect("predecessor-rooted recovered job");
-    assert_eq!(recovered["request_id"], active_request_id);
-    assert_eq!(recovered["request_state"], "published");
-    assert_eq!(
-        recovered["queued_successors"][0]["request_id"],
-        successor_request_id
-    );
+
+    let reconnect = restarted
+        .handle_ipc_request(
+            &data_root,
+            &json!({
+                "schema_version": 1,
+                "op": SOURCE_REFRESH_REQUEST_OP,
+                "request_id": active_request_id,
+                "mode": "wait",
+                "operation": "refresh",
+                "fresh_after_admitted_snapshot": true,
+            }),
+        )
+        .unwrap()
+        .expect("reconnected active wait");
+    assert_eq!(reconnect["request_id"], active_request_id);
+    assert_eq!(reconnect["request_state"], "admission_pending");
+
+    assert!(restarted
+        .prepare_next_pending_admission(&data_root)
+        .unwrap());
+    let successor = restarted
+        .run_next(&data_root)
+        .expect("exhaustive successor");
+    assert_eq!(successor.job["request_id"], active_request_id);
+    assert_eq!(successor.job["request_state"], "published");
+    assert_eq!(executions.load(Ordering::SeqCst), 1);
 }
 
 #[test]

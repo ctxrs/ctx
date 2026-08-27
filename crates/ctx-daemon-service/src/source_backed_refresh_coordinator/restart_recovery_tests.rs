@@ -452,7 +452,7 @@ fn legacy_terminal_publication_recovers_successor_without_pointer_change() {
 }
 
 #[test]
-fn metadata_free_publication_does_not_discard_a_running_refresh() {
+fn metadata_free_publication_requeues_a_running_refresh_exhaustively() {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("data");
     ctx_history_platform::platform_security::establish_private_data_root(&data_root).unwrap();
@@ -485,12 +485,13 @@ fn metadata_free_publication_does_not_discard_a_running_refresh() {
     )
     .unwrap();
 
-    let error = CoreRefreshEngine::new()
+    let coordinator = CoreRefreshEngine::new();
+    assert!(coordinator
         .recover_interrupted_publication(&data_root)
-        .unwrap_err();
-    assert!(error
-        .to_string()
-        .contains("recover exact terminal refresh receipt"));
+        .unwrap());
+    let recovered = coordinator.status("still-running").unwrap();
+    assert_eq!(recovered["request_state"], "admission_pending");
+    assert_eq!(recovered["reconciliation_demand"], "exhaustive");
 }
 
 #[test]

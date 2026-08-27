@@ -27,6 +27,10 @@ pub(super) fn install_source_watch_ingress(
     let Some(source_refresh) = source_refresh.cloned() else {
         return;
     };
+    let pressure_refresh = Arc::clone(&source_refresh);
+    wakeup.install_source_watch_pressure_sink(Arc::new(move |watermark| {
+        pressure_refresh.fence_watch_uncertainty(watermark);
+    }));
     wakeup.install_source_watch_sink(Arc::new(move |batch: &SourceWatchBatch| {
         if let Some(watermark) = batch.reconcile {
             source_refresh.fence_watch_uncertainty(watermark);

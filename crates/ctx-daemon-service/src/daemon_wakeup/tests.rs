@@ -234,6 +234,61 @@ fn source_watch_sink_receives_pending_and_live_routes_before_daemon_wait() {
 }
 
 #[test]
+fn compact_pressure_fence_bypasses_large_staged_route_payload() {
+    use crate::source_backed_refresh_coordinator::CoreRefreshEngine;
+
+    let wakeup = DaemonWakeup::default();
+    let coordinator = Arc::new(CoreRefreshEngine::new());
+    let pressure_coordinator = Arc::clone(&coordinator);
+    wakeup.install_source_watch_pressure_sink(Arc::new(move |watermark| {
+        pressure_coordinator.fence_watch_uncertainty(watermark);
+    }));
+
+    let mut staged = SourceWatchBatch::default();
+    for index in 1..=4_096_u64 {
+        let route = SourceRouteIdentity::from_sha256(format!("{index:064x}")).unwrap();
+        staged
+            .routes
+            .insert(route.clone(), EventWatermark::new(23, index));
+        staged
+            .members
+            .insert(route, BTreeSet::from([PathBuf::from(format!("/{index}"))]));
+    }
+    wakeup.observe_source_watch(&staged);
+
+    let pressure = EventWatermark::new(23, 5_000);
+    wakeup.fence_source_watch_pressure(pressure);
+    assert_eq!(coordinator.watch_uncertainty_watermark(), Some(pressure));
+
+    let flushed = Arc::new(Mutex::new(None));
+    let flushed_sink = Arc::clone(&flushed);
+    let worker_coordinator = Arc::clone(&coordinator);
+    wakeup.install_source_watch_sink(Arc::new(move |batch| {
+        if let Some(watermark) = batch.reconcile {
+            worker_coordinator.fence_watch_uncertainty(watermark);
+        } else {
+            *flushed_sink.lock().unwrap() = Some(batch.clone());
+        }
+    }));
+    let flushed = flushed.lock().unwrap().take().expect("staged route batch");
+    assert_eq!(flushed.routes, staged.routes);
+    assert_eq!(flushed.members, staged.members);
+
+    let worker_boundary = EventWatermark::new(23, 5_001);
+    let recovery = SourceWatchBatch::uncertainty(worker_boundary);
+    wakeup.observe_source_watch(&recovery);
+    wakeup.signal_source_watch(recovery);
+    assert_eq!(
+        coordinator.watch_uncertainty_watermark(),
+        Some(worker_boundary)
+    );
+    assert_eq!(
+        wakeup.wait(Duration::ZERO).source_watch.reconcile,
+        Some(worker_boundary)
+    );
+}
+
+#[test]
 fn source_watch_install_cannot_miss_signal_paused_after_pending_merge() {
     let catalog = watch_catalog([catalog_route(
         CaptureProvider::Codex,
@@ -506,7 +561,7 @@ fn clean_forced_rearm_emits_no_catalog_routes() {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn partial_registration_failure_polls_until_coverage_is_restored() {
+fn partial_incremental_and_replacement_registration_failures_poll_until_restored() {
     let temp = tempfile::tempdir().expect("create watcher fixture");
     let data_root = temp.path().join("data");
     let first_root = temp.path().join("first");
@@ -566,6 +621,32 @@ fn partial_registration_failure_polls_until_coverage_is_restored() {
     );
     let (healthy, registration) = watcher.reconcile_roots(false);
     registration.expect("healthy safety pass");
+    assert!(healthy.routes.is_empty());
+
+    let watched_before = watcher.runtime_snapshot().watched_roots;
+    fail_registration.store(true, Ordering::SeqCst);
+    for force_rearm in [true, false] {
+        let (affected, registration) = watcher.reconcile_roots(force_rearm);
+        assert!(registration.is_err());
+        assert_eq!(
+            affected.routes.keys().cloned().collect::<BTreeSet<_>>(),
+            expected_routes,
+            "partial replacement failure must poll every current route"
+        );
+        assert_eq!(
+            watcher.runtime_snapshot().watched_roots,
+            watched_before,
+            "partial replacement must retain the complete old watcher"
+        );
+    }
+
+    fail_registration.store(false, Ordering::SeqCst);
+    let (replacement, registration) = watcher.reconcile_roots(false);
+    registration.expect("retry complete replacement registration");
+    assert!(replacement.routes.is_empty());
+    assert_eq!(watcher.runtime_snapshot().watched_roots, watched_before);
+    let (healthy, registration) = watcher.reconcile_roots(false);
+    registration.expect("quiet pass after replacement recovery");
     assert!(healthy.routes.is_empty());
 }
 
@@ -639,6 +720,10 @@ fn callback_channel_overflow_holds_active_wait_until_rearmed_recovery() -> Resul
     coordinator.install_watch_catalog(catalog.clone());
 
     let wakeup = Arc::new(DaemonWakeup::default());
+    let pressure_coordinator = Arc::clone(&coordinator);
+    wakeup.install_source_watch_pressure_sink(Arc::new(move |watermark| {
+        pressure_coordinator.fence_watch_uncertainty(watermark);
+    }));
     let sink_coordinator = Arc::clone(&coordinator);
     wakeup.install_source_watch_sink(Arc::new(move |batch| {
         if let Some(watermark) = batch.reconcile {

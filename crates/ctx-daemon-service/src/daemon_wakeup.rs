@@ -120,6 +120,7 @@ impl ctx_daemon_runtime::CoalescingWakePayload for SourceWatchBatch {
 }
 
 pub(super) type SourceWatchSink = Arc<dyn Fn(&SourceWatchBatch) + Send + Sync>;
+type SourceWatchPressureSink = Arc<dyn Fn(EventWatermark) + Send + Sync>;
 
 #[derive(Debug, Clone, Default)]
 pub(super) struct DaemonWake {
@@ -132,6 +133,7 @@ pub(super) struct DaemonWake {
 #[derive(Default)]
 pub(super) struct DaemonWakeup {
     inner: ctx_daemon_runtime::Wakeup<SourceWatchBatch>,
+    source_watch_pressure_sink: RwLock<Option<SourceWatchPressureSink>>,
     #[cfg(test)]
     before_source_watch_sink_dispatch: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
@@ -169,6 +171,24 @@ impl DaemonWakeup {
 
     fn signal_source_watch(&self, batch: SourceWatchBatch) {
         self.inner.signal_payload(batch);
+    }
+
+    fn fence_source_watch_pressure(&self, watermark: EventWatermark) {
+        let sink = self
+            .source_watch_pressure_sink
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(sink) = sink {
+            sink(watermark);
+        }
+    }
+
+    pub(super) fn install_source_watch_pressure_sink(&self, sink: SourceWatchPressureSink) {
+        *self
+            .source_watch_pressure_sink
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(sink);
     }
 
     pub(super) fn install_source_watch_sink(&self, sink: SourceWatchSink) {
@@ -335,10 +355,17 @@ impl DaemonFileWatcher {
         });
         let observed_wakeup = Arc::clone(&wakeup);
         let signal_wakeup = Arc::clone(&wakeup);
+        let pressure_wakeup = Arc::clone(&wakeup);
         let runtime = ctx_daemon_runtime::NativeFileWatcher::start(
             "ctx-daemon-watch",
             ignore_event,
             classify_event,
+            Arc::new(move |watermark: ctx_daemon_runtime::WatchWatermark| {
+                pressure_wakeup.fence_source_watch_pressure(EventWatermark::new(
+                    watermark.epoch,
+                    watermark.sequence,
+                ));
+            }),
             Arc::new(move |watermark: ctx_daemon_runtime::WatchWatermark| {
                 SourceWatchBatch::uncertainty(EventWatermark::new(
                     watermark.epoch,

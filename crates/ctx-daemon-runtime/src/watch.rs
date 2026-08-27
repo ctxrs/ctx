@@ -209,6 +209,7 @@ impl NativeFileWatcher {
         thread_name: &str,
         ignore_event: IgnoreEvent,
         classify_event: EventClassifier<P>,
+        overflow_fence: Arc<dyn Fn(WatchWatermark) + Send + Sync>,
         reconciliation: ReconciliationFactory<P>,
         observe_payload: ObservePayload<P>,
         signal_payload: SignalPayload<P>,
@@ -219,11 +220,6 @@ impl NativeFileWatcher {
         let accepting_events = Arc::new(AtomicBool::new(true));
         let watcher_epoch = NEXT_WATCHER_EPOCH.fetch_add(1, Ordering::Relaxed);
         let callback_sequence = Arc::new(AtomicU64::new(0));
-        let callback_reconciliation = Arc::clone(&reconciliation);
-        let callback_observe = Arc::clone(&observe_payload);
-        let overflow_fence: OverflowFence = Arc::new(move |watermark| {
-            callback_observe(&callback_reconciliation(watermark));
-        });
         let watcher = native_file_watcher(
             &sender,
             &ingress,
@@ -930,6 +926,7 @@ mod tests {
                         .then_some(watermark),
                 )
             }),
+            Arc::new(|_| {}),
             Arc::new(|watermark| TestPayload(Some(watermark))),
             Arc::new(move |payload| observed_tx.send(payload.clone()).unwrap()),
             Arc::new(move |payload| signal_tx.send(payload).unwrap()),
@@ -983,6 +980,7 @@ mod tests {
             "ctx-watch-worker-death-test",
             Arc::new(|_| false),
             Arc::new(|_, _| TestPayload::default()),
+            Arc::new(|_| {}),
             Arc::new(|watermark| TestPayload(Some(watermark))),
             Arc::new(|_| {}),
             Arc::new(|_| {}),
