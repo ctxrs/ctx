@@ -4,6 +4,24 @@ fn event_id(value: u128) -> Uuid {
     Uuid::from_u128(value)
 }
 
+fn event_id_for_digest(digest: [u8; 32]) -> Uuid {
+    let mut bytes = [0; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = 0x80 | (bytes[6] & 0x0f);
+    bytes[8] = 0x80 | (bytes[8] & 0x3f);
+    Uuid::from_bytes(bytes)
+}
+
+fn event_identity_digest(value: u128) -> [u8; 32] {
+    let mut digest = [0; 32];
+    digest[16..].copy_from_slice(&value.to_be_bytes());
+    digest
+}
+
+fn active_chunk(event: u128, chunk_ordinal: u32) -> ActiveChunk {
+    ActiveChunk::new(event_id(event), event_identity_digest(event), chunk_ordinal)
+}
+
 fn normalized(mut values: Vec<f32>) -> Vec<f32> {
     let norm = values
         .iter()
@@ -103,6 +121,7 @@ fn exact_slice_and_byte_scans_match_the_f32_oracle() {
         .map(|(event, chunks)| {
             let mut best = FlatScanHit {
                 event_id: event_id(event as u128 + 1),
+                event_identity_digest: event_identity_digest(event as u128 + 1),
                 chunk_ordinal: 0,
                 query_ordinal: 0,
                 similarity: oracle_dot(&query, &chunks[0]),
@@ -111,6 +130,7 @@ fn exact_slice_and_byte_scans_match_the_f32_oracle() {
             for (chunk, vector) in chunks.iter().enumerate().skip(1) {
                 let candidate = FlatScanHit {
                     event_id: best.event_id,
+                    event_identity_digest: best.event_identity_digest,
                     chunk_ordinal: chunk as u32,
                     query_ordinal: 0,
                     similarity: oracle_dot(&query, vector),
@@ -132,7 +152,7 @@ fn exact_slice_and_byte_scans_match_the_f32_oracle() {
         .scan_f32(vectors.iter().enumerate().flat_map(|(event, chunks)| {
             chunks.iter().enumerate().map(move |(chunk, vector)| {
                 (
-                    ActiveChunk::new(event_id(event as u128 + 1), chunk as u32),
+                    active_chunk(event as u128 + 1, chunk as u32),
                     vector.as_slice(),
                 )
             })
@@ -154,7 +174,7 @@ fn exact_slice_and_byte_scans_match_the_f32_oracle() {
         .scan_le_bytes(encoded.iter().enumerate().flat_map(|(event, chunks)| {
             chunks.iter().enumerate().map(move |(chunk, vector)| {
                 (
-                    ActiveChunk::new(event_id(event as u128 + 1), chunk as u32),
+                    active_chunk(event as u128 + 1, chunk as u32),
                     vector.as_slice(),
                 )
             })
@@ -215,7 +235,7 @@ fn multivector_scan_matches_scalar_top_k_union_and_max_dedupe() {
         vectors.iter().enumerate().flat_map(|(event, chunks)| {
             chunks.iter().enumerate().map(move |(chunk, vector)| {
                 (
-                    ActiveChunk::new(event_id(event as u128 + 1), chunk as u32),
+                    active_chunk(event as u128 + 1, chunk as u32),
                     vector.as_slice(),
                 )
             })
@@ -268,9 +288,9 @@ fn multivector_equal_scores_keep_first_query_before_lower_chunk() {
     let second_query = [0.0, 1.0];
     let queries = [first_query.as_slice(), second_query.as_slice()];
     let records = [
-        (ActiveChunk::new(event_id(1), 0), second_query.as_slice()),
-        (ActiveChunk::new(event_id(1), 5), first_query.as_slice()),
-        (ActiveChunk::new(event_id(2), 0), first_query.as_slice()),
+        (active_chunk(1, 0), second_query.as_slice()),
+        (active_chunk(1, 5), first_query.as_slice()),
+        (active_chunk(2, 0), first_query.as_slice()),
     ];
     let mut scan = ExactFlatF32Scan::new_multi(&queries, FlatScanConfig::new(2, 2)).unwrap();
     scan.scan_f32(records).unwrap();
@@ -293,7 +313,7 @@ fn prevalidated_mmap_path_matches_the_checked_path() {
     let records = || {
         vectors.iter().enumerate().map(|(index, vector)| {
             (
-                ActiveChunk::new(event_id(index as u128 + 1), index as u32),
+                active_chunk(index as u128 + 1, index as u32),
                 vector.as_slice(),
             )
         })
@@ -312,13 +332,13 @@ fn prevalidated_mmap_path_matches_the_checked_path() {
 }
 
 #[test]
-fn ties_use_uuid_then_lower_chunk_ordinal() {
+fn ties_use_full_identity_then_lower_chunk_ordinal() {
     let query = [1.0, 0.0];
     let same = [1.0, 0.0];
     let records = [
-        (ActiveChunk::new(event_id(2), 9), same.as_slice()),
-        (ActiveChunk::new(event_id(2), 4), same.as_slice()),
-        (ActiveChunk::new(event_id(1), 7), same.as_slice()),
+        (active_chunk(2, 9), same.as_slice()),
+        (active_chunk(2, 4), same.as_slice()),
+        (active_chunk(1, 7), same.as_slice()),
     ];
     let mut scan = ExactFlatF32Scan::new(&query, FlatScanConfig::new(2, 2)).unwrap();
     scan.scan_f32(records).unwrap();
@@ -332,6 +352,44 @@ fn ties_use_uuid_then_lower_chunk_ordinal() {
 }
 
 #[test]
+fn top_k_one_admission_uses_full_identity_when_uuid_order_opposes() {
+    let query = [1.0, 0.0];
+    let same = [1.0, 0.0];
+    let mut compact_preferred_digest = [0x30; 32];
+    compact_preferred_digest[6] = 0xf0;
+    let mut exact_winner_digest = [0x30; 32];
+    exact_winner_digest[6] = 0x0f;
+    let compact_preferred = ActiveChunk::new(
+        event_id_for_digest(compact_preferred_digest),
+        compact_preferred_digest,
+        0,
+    );
+    let exact_winner = ActiveChunk::new(
+        event_id_for_digest(exact_winner_digest),
+        exact_winner_digest,
+        0,
+    );
+    assert!(compact_preferred.event_id < exact_winner.event_id);
+    assert!(exact_winner.event_identity_digest < compact_preferred.event_identity_digest);
+
+    let mut scan = ExactFlatF32Scan::new(&query, FlatScanConfig::new(2, 1)).unwrap();
+    scan.scan_f32([
+        (compact_preferred, same.as_slice()),
+        (exact_winner, same.as_slice()),
+    ])
+    .unwrap();
+    let result = scan.finish().unwrap();
+
+    assert_eq!(result.hits.len(), 1);
+    assert_eq!(result.hits[0].event_id, exact_winner.event_id);
+    assert_eq!(
+        result.hits[0].event_identity_digest,
+        exact_winner.event_identity_digest
+    );
+    assert_eq!(result.counters.heap_replacements, 1);
+}
+
+#[test]
 fn best_chunk_is_retained_before_top_k_admission() {
     let query = [1.0, 0.0];
     let weak = normalized(vec![1.0, 3.0]);
@@ -341,6 +399,7 @@ fn best_chunk_is_retained_before_top_k_admission() {
         (
             ActiveChunk::at_location(
                 event_id(20),
+                event_identity_digest(20),
                 0,
                 FlatScanLocation {
                     segment_index: 2,
@@ -352,6 +411,7 @@ fn best_chunk_is_retained_before_top_k_admission() {
         (
             ActiveChunk::at_location(
                 event_id(20),
+                event_identity_digest(20),
                 1,
                 FlatScanLocation {
                     segment_index: 2,
@@ -363,6 +423,7 @@ fn best_chunk_is_retained_before_top_k_admission() {
         (
             ActiveChunk::at_location(
                 event_id(10),
+                event_identity_digest(10),
                 0,
                 FlatScanLocation {
                     segment_index: 1,
@@ -397,9 +458,9 @@ fn heap_and_skip_counters_stay_bounded_and_attributable() {
     let best = [1.0, 0.0];
     let mut scan = ExactFlatF32Scan::new(&query, FlatScanConfig::new(2, 1)).unwrap();
     scan.scan_f32([
-        (ActiveChunk::new(event_id(1), 0), orthogonal.as_slice()),
-        (ActiveChunk::new(event_id(2), 0), best.as_slice()),
-        (ActiveChunk::new(event_id(2), 1), best.as_slice()),
+        (active_chunk(1, 0), orthogonal.as_slice()),
+        (active_chunk(2, 0), best.as_slice()),
+        (active_chunk(2, 1), best.as_slice()),
     ])
     .unwrap();
     scan.skip_event(2, FlatScanSkipReason::Filtered).unwrap();
@@ -440,12 +501,12 @@ fn heap_never_retains_more_than_top_k() {
         vectors.push(normalized(vec![index as f32 + 1.0, 100.0]));
     }
     let mut scan = ExactFlatF32Scan::new(&query, FlatScanConfig::new(2, 7)).unwrap();
-    scan.scan_f32(vectors.iter().enumerate().map(|(index, vector)| {
-        (
-            ActiveChunk::new(event_id(index as u128 + 1), 0),
-            vector.as_slice(),
-        )
-    }))
+    scan.scan_f32(
+        vectors
+            .iter()
+            .enumerate()
+            .map(|(index, vector)| (active_chunk(index as u128 + 1, 0), vector.as_slice())),
+    )
     .unwrap();
     let result = scan.finish().unwrap();
 
@@ -514,7 +575,7 @@ fn vector_validation_rejects_slices_and_bytes_and_poisoned_scan() {
     let mut scan = ExactFlatF32Scan::new(&query, FlatScanConfig::new(2, 1)).unwrap();
     let short = [1.0];
     assert!(matches!(
-        scan.scan_f32([(ActiveChunk::new(event_id(1), 0), short.as_slice())]),
+        scan.scan_f32([(active_chunk(1, 0), short.as_slice())]),
         Err(FlatScanError::DimensionMismatch {
             input: FlatScanInput::Vector,
             ..
@@ -532,7 +593,7 @@ fn vector_validation_rejects_slices_and_bytes_and_poisoned_scan() {
     let mut non_finite = ExactFlatF32Scan::new(&query, FlatScanConfig::new(2, 1)).unwrap();
     let bad = [f32::INFINITY, 0.0];
     assert!(matches!(
-        non_finite.scan_f32([(ActiveChunk::new(event_id(1), 4), bad.as_slice())]),
+        non_finite.scan_f32([(active_chunk(1, 4), bad.as_slice())]),
         Err(FlatScanError::NonFinite {
             input: FlatScanInput::Vector,
             chunk_ordinal: Some(4),
@@ -543,7 +604,7 @@ fn vector_validation_rejects_slices_and_bytes_and_poisoned_scan() {
     let mut not_normalized = ExactFlatF32Scan::new(&query, FlatScanConfig::new(2, 1)).unwrap();
     let bad = [0.5, 0.0];
     assert!(matches!(
-        not_normalized.scan_f32([(ActiveChunk::new(event_id(1), 5), bad.as_slice())]),
+        not_normalized.scan_f32([(active_chunk(1, 5), bad.as_slice())]),
         Err(FlatScanError::NotNormalized {
             input: FlatScanInput::Vector,
             chunk_ordinal: Some(5),
@@ -553,7 +614,7 @@ fn vector_validation_rejects_slices_and_bytes_and_poisoned_scan() {
 
     let mut bytes = ExactFlatF32Scan::new(&query, FlatScanConfig::new(2, 1)).unwrap();
     assert!(matches!(
-        bytes.scan_le_bytes([(ActiveChunk::new(event_id(1), 6), [0_u8; 7].as_slice())]),
+        bytes.scan_le_bytes([(active_chunk(1, 6), [0_u8; 7].as_slice())]),
         Err(FlatScanError::ByteLengthMismatch {
             input: FlatScanInput::Vector,
             chunk_ordinal: Some(6),
@@ -567,7 +628,7 @@ fn zero_top_k_scores_without_retaining_hits() {
     let query = [1.0, 0.0];
     let vector = [1.0, 0.0];
     let mut scan = ExactFlatF32Scan::new(&query, FlatScanConfig::new(2, 0)).unwrap();
-    scan.scan_f32([(ActiveChunk::new(event_id(1), 0), vector.as_slice())])
+    scan.scan_f32([(active_chunk(1, 0), vector.as_slice())])
         .unwrap();
     let result = scan.finish().unwrap();
 

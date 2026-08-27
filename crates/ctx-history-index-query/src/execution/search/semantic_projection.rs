@@ -19,35 +19,39 @@ impl VerifiedIndex {
                 IndexRecordOption::Basic,
             )),
         ]));
-        let source_identity_query = self.source_identity_query(filter.filters(), fields)?;
+        let source_identity_query = self.source_identity_query(filter, fields)?;
         let query =
             filtered_event_query(semantic_eligibility, source_identity_query, filter, fields)?;
         let addresses = self
             .searcher
             .search(query.as_ref(), &DocSetCollector)
             .map_err(IndexError::from)?;
-        let mut event_ids = HashSet::with_capacity(addresses.len());
+        let mut event_identities = HashMap::with_capacity(addresses.len());
         for address in addresses {
-            let (event_id, _, _) = core_event_fast_preflight(&self.searcher, address)?;
-            if !event_ids.insert(event_id) {
+            let (event_id, event_identity_digest) =
+                core_event_identity_fast_preflight(&self.searcher, address)?;
+            if event_identities
+                .insert(event_id, event_identity_digest)
+                .is_some()
+            {
                 return Err(IndexError::DuplicateEventIdentity(event_id.to_string()));
             }
         }
         Ok(SemanticFilterProjection {
             generation_id: self.generation_id.clone(),
-            event_ids,
+            event_identities,
         })
     }
 
     fn source_identity_query(
         &self,
-        filters: &EventSearchFilters,
+        filter: &CompiledSearchFilter,
         fields: Fields,
     ) -> Result<Option<Box<dyn Query>>> {
+        let filters = filter.filters();
         if !filters.has_source_identity_filter() {
             return Ok(None);
         }
-        filters.validate_source_identity_filters()?;
         let mut clauses: Vec<(Occur, Box<dyn Query>)> = vec![(
             Occur::Must,
             Box::new(TermQuery::new(

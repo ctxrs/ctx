@@ -37,9 +37,9 @@ fn custom_source_filters_use_the_core_native_event_identity() {
         ..EventSearchFilters::default()
     };
     ctx_history_index_query::reset_stored_core_event_record_materializations();
-    let hits = index
-        .search_event_candidates_with_filters("identity", &filters, 10)
-        .unwrap();
+    let hits = lexical_search_batch(&index, &["identity"], &filters, 10)
+        .unwrap()
+        .candidates;
     assert_eq!(
         hits.iter()
             .map(|candidate| candidate.event.event_id)
@@ -48,7 +48,6 @@ fn custom_source_filters_use_the_core_native_event_identity() {
     );
     let hydrated = index.event_by_id(event_id.as_uuid()).unwrap().unwrap();
     assert_eq!(hydrated.native_event_id.as_ref(), Some(&native_event_id));
-    assert!(filters.matches_source_identity(&hydrated));
     let listed = lexical_list_batch(&index, &filters, 10).unwrap();
     assert!(listed.complete);
     assert!(listed.candidate_set_exhaustive);
@@ -65,16 +64,17 @@ fn custom_source_filters_use_the_core_native_event_identity() {
         "custom source filtering must use bounded indexed identity metadata"
     );
 
-    let misses = index
-        .search_event_candidates_with_filters(
-            "identity",
-            &EventSearchFilters {
-                source_id: Some("another-source".to_owned()),
-                ..EventSearchFilters::default()
-            },
-            10,
-        )
-        .unwrap();
+    let misses = lexical_search_batch(
+        &index,
+        &["identity"],
+        &EventSearchFilters {
+            source_id: Some("another-source".to_owned()),
+            ..EventSearchFilters::default()
+        },
+        10,
+    )
+    .unwrap()
+    .candidates;
     assert!(misses.is_empty());
 }
 
@@ -103,25 +103,26 @@ fn allowed_source_keys_select_exact_physical_sources_in_one_index() {
         allowed_source_keys: Some(vec![source_token(&personal)]),
         ..EventSearchFilters::default()
     };
-    let hits = index
-        .search_event_candidates_with_filters("needle", &personal_only, 10)
-        .unwrap();
+    let hits = lexical_search_batch(&index, &["needle"], &personal_only, 10)
+        .unwrap()
+        .candidates;
     assert_eq!(hits.len(), 1);
     assert_eq!(
         hits[0].event.source_owner_digest,
         personal.identity().digest()
     );
 
-    let none = index
-        .search_event_candidates_with_filters(
-            "needle",
-            &EventSearchFilters {
-                allowed_source_keys: Some(Vec::new()),
-                ..EventSearchFilters::default()
-            },
-            10,
-        )
-        .unwrap();
+    let none = lexical_search_batch(
+        &index,
+        &["needle"],
+        &EventSearchFilters {
+            allowed_source_keys: Some(Vec::new()),
+            ..EventSearchFilters::default()
+        },
+        10,
+    )
+    .unwrap()
+    .candidates;
     assert!(none.is_empty());
 }
 

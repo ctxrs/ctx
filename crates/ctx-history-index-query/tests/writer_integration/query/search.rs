@@ -69,17 +69,22 @@ fn copied_events_remain_searchable_and_preserve_exact_copy_claims() {
         .iter()
         .map(|event_id| event_id.digest())
         .collect::<HashSet<_>>();
-    let lexical = index
-        .search_event_candidates("lineagewindowneedle", 4)
-        .unwrap();
+    let lexical = lexical_search_batch(
+        &index,
+        &["lineagewindowneedle"],
+        &EventSearchFilters::default(),
+        4,
+    )
+    .unwrap()
+    .candidates;
     assert_eq!(lexical.len(), 4);
     assert_eq!(
         candidate_ids(&lexical).into_iter().collect::<HashSet<_>>(),
         expected_digests
     );
-    let listed = index
-        .list_event_candidates_with_filters(&EventSearchFilters::default(), 4)
-        .unwrap();
+    let listed = lexical_list_batch(&index, &EventSearchFilters::default(), 4)
+        .unwrap()
+        .candidates;
     assert_eq!(listed.len(), 4);
     assert_eq!(
         candidate_ids(&listed).into_iter().collect::<HashSet<_>>(),
@@ -137,9 +142,9 @@ fn multiple_exact_session_exclusions_filter_lexical_and_semantic_candidates() {
         ..EventSearchFilters::default()
     };
 
-    let lexical = index
-        .search_event_candidates_with_filters("multiple exclusion needle", &filters, 10)
-        .unwrap();
+    let lexical = lexical_search_batch(&index, &["multiple exclusion needle"], &filters, 10)
+        .unwrap()
+        .candidates;
     assert_eq!(
         lexical
             .iter()
@@ -147,9 +152,7 @@ fn multiple_exact_session_exclusions_filter_lexical_and_semantic_candidates() {
             .collect::<Vec<_>>(),
         vec![retained.session_id.as_uuid()]
     );
-    let listed = index
-        .list_event_candidates_with_filters(&filters, 10)
-        .unwrap();
+    let listed = lexical_list_batch(&index, &filters, 10).unwrap().candidates;
     assert_eq!(
         listed
             .iter()
@@ -234,9 +237,9 @@ fn agent_scope_filter_uses_only_explicit_core_agent_scope() {
         ..EventSearchFilters::default()
     };
 
-    let lexical = index
-        .search_event_candidates_with_filters("primaryauthorityneedle", &primary_scope, 3)
-        .unwrap();
+    let lexical = lexical_search_batch(&index, &["primaryauthorityneedle"], &primary_scope, 3)
+        .unwrap()
+        .candidates;
     let expected_primary = HashSet::from([primary.event_id, delegated.event_id, workflow.event_id]);
     let expected_primary_digests = expected_primary
         .iter()
@@ -257,33 +260,35 @@ fn agent_scope_filter_uses_only_explicit_core_agent_scope() {
             .collect()
     );
 
-    let explicit_subagent = index
-        .search_event_candidates_with_filters(
-            "primaryauthorityneedle",
-            &EventSearchFilters {
-                agent_scope: AgentScope::Subagent,
-                ..EventSearchFilters::default()
-            },
-            2,
-        )
-        .unwrap();
+    let explicit_subagent = lexical_search_batch(
+        &index,
+        &["primaryauthorityneedle"],
+        &EventSearchFilters {
+            agent_scope: AgentScope::Subagent,
+            ..EventSearchFilters::default()
+        },
+        2,
+    )
+    .unwrap()
+    .candidates;
     assert_eq!(
         candidate_ids(&explicit_subagent),
         vec![forked.event_id.digest()]
     );
 
     for expected in [&delegated, &workflow] {
-        let explicit_session = index
-            .search_event_candidates_with_filters(
-                "nonprimaryexplicitneedle",
-                &EventSearchFilters {
-                    session_id: Some(expected.session_id.as_uuid()),
-                    agent_scope: AgentScope::Primary,
-                    ..EventSearchFilters::default()
-                },
-                1,
-            )
-            .unwrap();
+        let explicit_session = lexical_search_batch(
+            &index,
+            &["nonprimaryexplicitneedle"],
+            &EventSearchFilters {
+                session_id: Some(expected.session_id.as_uuid()),
+                agent_scope: AgentScope::Primary,
+                ..EventSearchFilters::default()
+            },
+            1,
+        )
+        .unwrap()
+        .candidates;
         assert_eq!(
             candidate_ids(&explicit_session),
             vec![expected.event_id.digest()]
@@ -296,18 +301,19 @@ fn agent_scope_filter_uses_only_explicit_core_agent_scope() {
         assert_eq!(direct.session_relationship, expected.session_relationship);
         assert_eq!(direct.agent_scope, Some(CoreAgentScope::Primary));
     }
-    assert!(index
-        .search_event_candidates_with_filters(
-            "primaryauthorityneedle",
-            &EventSearchFilters {
-                session_id: Some(resumed.session_id.as_uuid()),
-                agent_scope: AgentScope::Primary,
-                ..EventSearchFilters::default()
-            },
-            1,
-        )
-        .unwrap()
-        .is_empty());
+    assert!(lexical_search_batch(
+        &index,
+        &["primaryauthorityneedle"],
+        &EventSearchFilters {
+            session_id: Some(resumed.session_id.as_uuid()),
+            agent_scope: AgentScope::Primary,
+            ..EventSearchFilters::default()
+        },
+        1,
+    )
+    .unwrap()
+    .candidates
+    .is_empty());
 }
 
 #[test]
@@ -355,9 +361,14 @@ fn copied_bodies_contribute_ordinary_search_postings() {
     let expected_copy = duplicated[2].clone();
     let (duplicated_temp, duplicated_index) = publish_class_aware_records(duplicated);
 
-    let duplicated_hits = duplicated_index
-        .search_event_candidates(NEEDLE, COPIES as usize + 2)
-        .unwrap();
+    let duplicated_hits = lexical_search_batch(
+        &duplicated_index,
+        &[NEEDLE],
+        &EventSearchFilters::default(),
+        COPIES as usize + 2,
+    )
+    .unwrap()
+    .candidates;
     assert_eq!(duplicated_hits.len(), COPIES as usize + 2);
     assert!(duplicated_hits
         .iter()
@@ -430,12 +441,22 @@ fn many_retrieval_derived_bodies_add_no_postings_or_score_order_changes() {
     let (duplicated_temp, duplicated_index) = publish_class_aware_records(duplicated);
     let (_control_temp, control_index) = publish_class_aware_records(control);
 
-    let duplicated_hits = duplicated_index
-        .search_event_candidates(NEEDLE, EXCLUDED as usize + 2)
-        .unwrap();
-    let control_hits = control_index
-        .search_event_candidates(NEEDLE, EXCLUDED as usize + 2)
-        .unwrap();
+    let duplicated_hits = lexical_search_batch(
+        &duplicated_index,
+        &[NEEDLE],
+        &EventSearchFilters::default(),
+        EXCLUDED as usize + 2,
+    )
+    .unwrap()
+    .candidates;
+    let control_hits = lexical_search_batch(
+        &control_index,
+        &[NEEDLE],
+        &EventSearchFilters::default(),
+        EXCLUDED as usize + 2,
+    )
+    .unwrap()
+    .candidates;
     assert_eq!(duplicated_hits.len(), 2);
     assert_eq!(
         candidate_ids(&duplicated_hits),
@@ -781,7 +802,14 @@ fn complete_core_body_beyond_16k_round_trips_reopens_and_has_no_stored_preview()
         );
     }
     assert_eq!(
-        index.search_event_candidates("tailonlyneedle", 10).unwrap()[0]
+        lexical_search_batch(
+            &index,
+            &["tailonlyneedle"],
+            &EventSearchFilters::default(),
+            10,
+        )
+        .unwrap()
+        .candidates[0]
             .event
             .event_id,
         expected.event_id.as_uuid()
@@ -855,39 +883,47 @@ fn retrieval_derived_records_are_absent_from_discovery_but_present_in_core_enume
     writer.commit(|_| true).unwrap();
     let index = VerifiedIndex::open_pinned(temp.path()).unwrap();
 
-    assert!(index
-        .search_event_candidates("retrievalderivedcanary", 10)
-        .unwrap()
-        .is_empty());
+    assert!(lexical_search_batch(
+        &index,
+        &["retrievalderivedcanary"],
+        &EventSearchFilters::default(),
+        10,
+    )
+    .unwrap()
+    .candidates
+    .is_empty());
     for scope in [SearchContentScope::Calls, SearchContentScope::Outputs] {
         let filters = EventSearchFilters {
             content_scope: scope,
             ..EventSearchFilters::default()
         };
-        assert!(index
-            .search_event_candidates_with_filters("retrievalderivedcanary", &filters, 10)
+        assert!(
+            lexical_search_batch(&index, &["retrievalderivedcanary"], &filters, 10)
+                .unwrap()
+                .candidates
+                .is_empty()
+        );
+        assert!(lexical_list_batch(&index, &filters, 10)
             .unwrap()
-            .is_empty());
-        assert!(index
-            .list_event_candidates_with_filters(&filters, 10)
-            .unwrap()
+            .candidates
             .is_empty());
     }
-    assert!(index
-        .list_event_candidates_with_filters(
-            &EventSearchFilters {
-                file: Some("retrievalderivedcanary.rs".to_owned()),
-                ..EventSearchFilters::default()
-            },
-            10,
-        )
-        .unwrap()
-        .is_empty());
+    assert!(lexical_list_batch(
+        &index,
+        &EventSearchFilters {
+            file: Some("retrievalderivedcanary.rs".to_owned()),
+            ..EventSearchFilters::default()
+        },
+        10,
+    )
+    .unwrap()
+    .candidates
+    .is_empty());
     assert_eq!(
         candidate_ids(
-            &index
-                .list_event_candidates_with_filters(&EventSearchFilters::default(), 10)
+            &lexical_list_batch(&index, &EventSearchFilters::default(), 10)
                 .unwrap()
+                .candidates
         ),
         vec![ordinary.event_id.digest()]
     );
@@ -937,47 +973,54 @@ fn empty_or_invalid_programmatic_queries_are_safe() {
     writer.commit(|_| true).unwrap();
     let index = VerifiedIndex::open(temp.path()).unwrap();
 
-    assert!(index.search_event_candidates("", 10).unwrap().is_empty());
-    assert!(index.search_event_candidates("body", 0).unwrap().is_empty());
+    assert!(
+        lexical_search_batch(&index, &[""], &EventSearchFilters::default(), 10)
+            .unwrap()
+            .candidates
+            .is_empty()
+    );
+    assert!(
+        lexical_search_batch(&index, &["body"], &EventSearchFilters::default(), 0)
+            .unwrap()
+            .candidates
+            .is_empty()
+    );
     assert!(matches!(
-        index.search_event_candidates_with_filters(
-            "body",
+        lexical_search_batch(
+            &index,
+            &["body"],
             &EventSearchFilters {
                 provider: Some("  ".to_owned()),
                 ..EventSearchFilters::default()
             },
             10,
         ),
-        Err(ctx_history_index_query::LexicalSearchError::Index(
-            IndexError::EmptyQueryFilter { field: "provider" }
-        ))
+        Err(IndexError::EmptyQueryFilter { field: "provider" })
     ));
     for (query, limit) in [("", 10), ("body", 0)] {
         assert!(matches!(
-            index.search_event_candidates_with_filters(
-                query,
+            lexical_search_batch(
+                &index,
+                &[query],
                 &EventSearchFilters {
                     provider: Some("  ".to_owned()),
                     ..EventSearchFilters::default()
                 },
                 limit,
             ),
-            Err(ctx_history_index_query::LexicalSearchError::Index(
-                IndexError::EmptyQueryFilter { field: "provider" }
-            ))
+            Err(IndexError::EmptyQueryFilter { field: "provider" })
         ));
     }
     assert!(matches!(
-        index.list_event_candidates_with_filters(
+        lexical_list_batch(
+            &index,
             &EventSearchFilters {
                 file: Some("  ".to_owned()),
                 ..EventSearchFilters::default()
             },
             0,
         ),
-        Err(ctx_history_index_query::LexicalSearchError::Index(
-            IndexError::EmptyQueryFilter { field: "file" }
-        ))
+        Err(IndexError::EmptyQueryFilter { field: "file" })
     ));
     assert!(matches!(
         index.events_by_id_prefix("not-a-uuid"),
@@ -1021,14 +1064,17 @@ fn class_aware_record(
     record
 }
 
-fn candidate_ids(candidates: &[EventSearchCandidate]) -> Vec<[u8; 32]> {
+fn candidate_ids(candidates: &[ctx_history_index_query::LexicalSearchCandidate]) -> Vec<[u8; 32]> {
     candidates
         .iter()
         .map(|candidate| candidate.event.event_identity_digest)
         .collect()
 }
 
-fn candidate_score(candidates: &[EventSearchCandidate], event_id: StableEntityId) -> Score {
+fn candidate_score(
+    candidates: &[ctx_history_index_query::LexicalSearchCandidate],
+    event_id: StableEntityId,
+) -> Score {
     candidates
         .iter()
         .find(|candidate| candidate.event.event_identity_digest == event_id.digest())
@@ -1076,19 +1122,25 @@ fn all_scope_applies_class_weights_and_retains_unknown_types_with_stable_ties() 
         .collect::<std::collections::HashMap<_, _>>();
     let (_temp, index) = publish_class_aware_records(records);
 
-    let omitted = index
-        .search_event_candidates("classweightneedle", 20)
-        .unwrap();
-    let explicit_all = index
-        .search_event_candidates_with_filters(
-            "classweightneedle",
-            &EventSearchFilters {
-                content_scope: SearchContentScope::All,
-                ..EventSearchFilters::default()
-            },
-            20,
-        )
-        .unwrap();
+    let omitted = lexical_search_batch(
+        &index,
+        &["classweightneedle"],
+        &EventSearchFilters::default(),
+        20,
+    )
+    .unwrap()
+    .candidates;
+    let explicit_all = lexical_search_batch(
+        &index,
+        &["classweightneedle"],
+        &EventSearchFilters {
+            content_scope: SearchContentScope::All,
+            ..EventSearchFilters::default()
+        },
+        20,
+    )
+    .unwrap()
+    .candidates;
     assert_eq!(omitted, explicit_all, "omitted and explicit all must agree");
     assert_eq!(omitted.len(), event_types.len());
 
@@ -1165,7 +1217,9 @@ fn explicit_scopes_filter_search_list_and_semantic_projection_with_ordinary_io_w
         .collect::<Vec<_>>();
     let (_temp, index) = publish_class_aware_records(records);
 
-    let all = index.search_event_candidates("scopeneedle", 20).unwrap();
+    let all = lexical_search_batch(&index, &["scopeneedle"], &EventSearchFilters::default(), 20)
+        .unwrap()
+        .candidates;
     for (scope, expected_types) in [
         (
             SearchContentScope::Transcript,
@@ -1184,12 +1238,10 @@ fn explicit_scopes_filter_search_list_and_semantic_projection_with_ordinary_io_w
             content_scope: scope,
             ..EventSearchFilters::default()
         };
-        let searched = index
-            .search_event_candidates_with_filters("scopeneedle", &filters, 20)
-            .unwrap();
-        let listed = index
-            .list_event_candidates_with_filters(&filters, 20)
-            .unwrap();
+        let searched = lexical_search_batch(&index, &["scopeneedle"], &filters, 20)
+            .unwrap()
+            .candidates;
+        let listed = lexical_list_batch(&index, &filters, 20).unwrap().candidates;
         let expected_ids = record_ids_by_type
             .iter()
             .filter(|(event_type, _)| expected_types.contains(event_type.as_str()))
@@ -1219,26 +1271,28 @@ fn explicit_scopes_filter_search_list_and_semantic_projection_with_ordinary_io_w
         }
     }
 
-    let calls = index
-        .search_event_candidates_with_filters(
-            "scopeneedle",
-            &EventSearchFilters {
-                content_scope: SearchContentScope::Calls,
-                ..EventSearchFilters::default()
-            },
-            20,
-        )
-        .unwrap();
-    let outputs = index
-        .search_event_candidates_with_filters(
-            "scopeneedle",
-            &EventSearchFilters {
-                content_scope: SearchContentScope::Outputs,
-                ..EventSearchFilters::default()
-            },
-            20,
-        )
-        .unwrap();
+    let calls = lexical_search_batch(
+        &index,
+        &["scopeneedle"],
+        &EventSearchFilters {
+            content_scope: SearchContentScope::Calls,
+            ..EventSearchFilters::default()
+        },
+        20,
+    )
+    .unwrap()
+    .candidates;
+    let outputs = lexical_search_batch(
+        &index,
+        &["scopeneedle"],
+        &EventSearchFilters {
+            content_scope: SearchContentScope::Outputs,
+            ..EventSearchFilters::default()
+        },
+        20,
+    )
+    .unwrap()
+    .candidates;
     assert_score_ratio(
         candidate_score(&all, call_id),
         candidate_score(&calls, call_id),
@@ -1290,9 +1344,14 @@ fn output_heavy_candidates_do_not_starve_the_stronger_transcript_before_top_docs
         "the fixture must put an output first without class weighting"
     );
 
-    let weighted = index
-        .search_event_candidates("saturationneedle", 1)
-        .unwrap();
+    let weighted = lexical_search_batch(
+        &index,
+        &["saturationneedle"],
+        &EventSearchFilters::default(),
+        1,
+    )
+    .unwrap()
+    .candidates;
     assert_eq!(weighted[0].event.event_id, transcript_id.as_uuid());
 }
 
@@ -1313,18 +1372,12 @@ fn exact_event_type_conflicts_with_every_explicit_content_scope_at_the_index_bou
             ..EventSearchFilters::default()
         };
         for error in [
-            index
-                .search_event_candidates_with_filters("conflictneedle", &filters, 0)
-                .unwrap_err(),
-            index
-                .list_event_candidates_with_filters(&filters, 0)
-                .unwrap_err(),
+            lexical_search_batch(&index, &["conflictneedle"], &filters, 0).unwrap_err(),
+            lexical_list_batch(&index, &filters, 0).unwrap_err(),
         ] {
             assert!(matches!(
                 error,
-                ctx_history_index_query::LexicalSearchError::Index(
-                    IndexError::ContentScopeEventTypeConflict { scope: actual }
-                )
+                IndexError::ContentScopeEventTypeConflict { scope: actual }
                     if actual == scope.as_str()
             ));
         }

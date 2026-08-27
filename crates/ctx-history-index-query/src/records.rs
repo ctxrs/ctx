@@ -254,6 +254,28 @@ pub(super) fn core_event_fast_preflight(
     ))
 }
 
+/// Returns the compact event address and exact full identity digest without
+/// loading a stored document.
+pub(super) fn core_event_identity_fast_preflight(
+    searcher: &tantivy::Searcher,
+    address: DocAddress,
+) -> Result<(Uuid, [u8; 32])> {
+    let (event_id, _, _) = core_event_fast_preflight(searcher, address)?;
+    let event_identity_digest =
+        event_range_order_at_address(searcher, address)?.event_identity_digest();
+    if (ctx_history_index_format::CompactIdentity {
+        digest: event_identity_digest,
+    })
+    .as_uuid()
+        != event_id
+    {
+        return Err(IndexError::InvalidStoredDocumentField(
+            SEARCH_REF_EVENT_RANGE_ORDER_FIELD,
+        ));
+    }
+    Ok((event_id, event_identity_digest))
+}
+
 pub(super) fn stored_core_event_record_with_source_json(
     searcher: &tantivy::Searcher,
     address: DocAddress,

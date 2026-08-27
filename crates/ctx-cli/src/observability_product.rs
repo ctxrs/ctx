@@ -4,10 +4,7 @@ use ctx_client_observability::{
     analytics::{
         ImportSourceMode, ImportTelemetry, ProgressMode, RenderFormat, TranscriptModeKind,
     },
-    local_usage::{
-        McpCompletionFacts, McpContextTarget, McpCorrelationFact, McpToolUsageFacts,
-        SearchContextObservation,
-    },
+    local_usage::{McpCompletionFacts, McpToolUsageFacts, SearchContextObservation},
 };
 use serde_json::Value;
 
@@ -146,65 +143,9 @@ pub(crate) fn mcp_completion_facts(
             .and_then(Value::as_array)
             .map(Vec::len)
     });
-    let mut correlation = Vec::new();
-    if !failed {
-        match operation {
-            crate::operation_descriptor::ObservedMcpProductOperation::Search => {
-                if let Some(results) = structured
-                    .and_then(|value| value.get("results"))
-                    .and_then(Value::as_array)
-                {
-                    for result in results {
-                        let target = match (
-                            result.get("result_scope").and_then(Value::as_str),
-                            result.get("result_type").and_then(Value::as_str),
-                        ) {
-                            (Some("session"), Some("session_result")) => result
-                                .get("ctx_session_id")
-                                .and_then(Value::as_str)
-                                .and_then(|id| uuid::Uuid::parse_str(id).ok())
-                                .map(McpContextTarget::Session),
-                            (Some("event"), Some("event")) => result
-                                .get("ctx_event_id")
-                                .and_then(Value::as_str)
-                                .and_then(|id| uuid::Uuid::parse_str(id).ok())
-                                .map(McpContextTarget::Event),
-                            _ => None,
-                        };
-                        if let Some(target) = target {
-                            correlation.push(McpCorrelationFact::Found(target));
-                        }
-                    }
-                }
-            }
-            crate::operation_descriptor::ObservedMcpProductOperation::ShowSession => {
-                if let Some(target) = structured
-                    .and_then(|value| value.get("ctx_session_id"))
-                    .and_then(Value::as_str)
-                    .and_then(|id| uuid::Uuid::parse_str(id).ok())
-                    .map(McpContextTarget::Session)
-                {
-                    correlation.push(McpCorrelationFact::Opened(target));
-                }
-            }
-            crate::operation_descriptor::ObservedMcpProductOperation::ShowEvent
-            | crate::operation_descriptor::ObservedMcpProductOperation::QueryEvents => {
-                if let Some(target) = structured
-                    .and_then(|value| value.get("ctx_event_id"))
-                    .and_then(Value::as_str)
-                    .and_then(|id| uuid::Uuid::parse_str(id).ok())
-                    .map(McpContextTarget::Event)
-                {
-                    correlation.push(McpCorrelationFact::Opened(target));
-                }
-            }
-            _ => {}
-        }
-    }
     McpCompletionFacts {
         failed,
         result_count,
         delivered_output_bytes,
-        correlation,
     }
 }

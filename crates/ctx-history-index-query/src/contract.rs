@@ -374,7 +374,7 @@ impl SemanticEventPage {
 #[derive(Debug, Clone)]
 pub struct SemanticFilterProjection {
     pub(super) generation_id: String,
-    pub(super) event_ids: HashSet<Uuid>,
+    pub(super) event_identities: HashMap<Uuid, [u8; 32]>,
 }
 
 impl SemanticFilterProjection {
@@ -383,19 +383,23 @@ impl SemanticFilterProjection {
     }
 
     pub fn len(&self) -> usize {
-        self.event_ids.len()
+        self.event_identities.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.event_ids.is_empty()
+        self.event_identities.is_empty()
     }
 
     pub fn contains(&self, event_id: Uuid) -> bool {
-        self.event_ids.contains(&event_id)
+        self.event_identities.contains_key(&event_id)
+    }
+
+    pub fn event_identity_digest(&self, event_id: Uuid) -> Option<[u8; 32]> {
+        self.event_identities.get(&event_id).copied()
     }
 
     pub fn event_ids(&self) -> impl Iterator<Item = Uuid> + '_ {
-        self.event_ids.iter().copied()
+        self.event_identities.keys().copied()
     }
 }
 
@@ -507,15 +511,6 @@ impl EventSearchFilters {
         Ok(())
     }
 
-    pub fn matches_source_identity(&self, event: &EventRecord) -> bool {
-        if !self.has_source_identity_filter() {
-            return true;
-        }
-        custom_source_identity(event).is_some_and(|(provider_key, source_id)| {
-            source_identity_values_match(self, provider_key, source_id)
-        })
-    }
-
     pub(super) fn has_source_identity_filter(&self) -> bool {
         self.history_source.is_some() || self.provider_key.is_some() || self.source_id.is_some()
     }
@@ -551,6 +546,30 @@ impl CompiledSearchFilter {
 
     pub const fn filters(&self) -> &EventSearchFilters {
         &self.filters
+    }
+
+    pub(super) fn matches_source_identity(&self, event: &EventRecord) -> bool {
+        if !self.filters.has_source_identity_filter() {
+            return true;
+        }
+        custom_source_identity(event).is_some_and(|(provider_key, source_id)| {
+            let filters = &self.filters;
+            !filters.history_source.as_deref().is_some_and(|selector| {
+                selector
+                    .trim()
+                    .split_once('/')
+                    .is_none_or(|(provider, source)| {
+                        provider != provider_key || source != source_id
+                    })
+            }) && filters
+                .provider_key
+                .as_deref()
+                .is_none_or(|expected| expected.trim() == provider_key)
+                && filters
+                    .source_id
+                    .as_deref()
+                    .is_none_or(|expected| expected.trim() == source_id)
+        })
     }
 }
 

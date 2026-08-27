@@ -5,7 +5,7 @@ use ctx_history_platform::platform_security::restrict_private_directory;
 use super::{
     read_report, record_best_effort, CliUsage, CompletedOperation, ContextCoverage,
     LocalUsageStorageAuthority, McpCompletionFacts, McpInvocation, ResultObservationAction,
-    SearchContextObservation, UsageControlSnapshot, ValueClass,
+    SearchContextObservation, Surface, UsageControlSnapshot, ValueClass, DEFINITION_VERSION,
 };
 use crate::operation_descriptor::{LocalUsageOperation, ObservedMcpProductOperation};
 
@@ -100,6 +100,23 @@ fn cli_and_mcp_use_identical_duration_bucket_boundaries() {
         assert_eq!(cli.duration_bucket_for_test(), expected);
         assert_eq!(mcp.duration_bucket_for_test(), expected);
     }
+}
+
+#[test]
+fn blame_completion_retains_only_core_observed_transport_facts() {
+    let completed = CompletedOperation::blame(Surface::Mcp, true, 512, Duration::from_millis(51));
+    assert_eq!(completed.definition_version_for_test(), DEFINITION_VERSION);
+    assert_eq!(
+        completed.result_metadata_for_test(),
+        (ValueClass::NotApplicable, 0)
+    );
+    assert_eq!(completed.duration_bucket_for_test(), "50_to_249_ms");
+
+    let failed = CompletedOperation::blame(Surface::Cli, false, 0, Duration::ZERO);
+    assert_eq!(
+        failed.result_metadata_for_test(),
+        (ValueClass::NotApplicable, 0)
+    );
 }
 
 #[test]

@@ -277,17 +277,6 @@ impl std::fmt::Display for LexicalWorkExhaustion {
 
 impl std::error::Error for LexicalWorkExhaustion {}
 
-/// Errors from compatibility lexical APIs that cannot represent partial work.
-#[derive(Debug, thiserror::Error)]
-pub enum LexicalSearchError {
-    #[error(transparent)]
-    Index(#[from] IndexError),
-    #[error("lexical search work exhausted: {0}")]
-    WorkExhausted(#[from] LexicalWorkExhaustion),
-}
-
-pub type LexicalSearchResult<T> = std::result::Result<T, LexicalSearchError>;
-
 /// Explicit term coverage retained with every manual lexical candidate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LexicalTermCoverage {

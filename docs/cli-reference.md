@@ -86,9 +86,11 @@ ctx daemon run
   and one-copy semantic/context byte channels separate; transport bytes never
   drive context-token or savings estimates. Byte-derived token values include
   coverage and remain unavailable for unmeasured legacy rows rather than
-  becoming false zeros. `stats --detail` adds CLI/MCP operation and latency
-  breakdowns. Reporting is uncounted and does not create `usage.sqlite` on a
-  pristine root.
+  becoming false zeros. Completed companion-backed Blame appears with calls,
+  technical success/failure, and duration; Core does not classify private
+  results, and CLI Blame output is shown as unavailable. `stats --detail` adds
+  CLI/MCP operation and latency breakdowns. Reporting is uncounted and does not
+  create `usage.sqlite` on a pristine root.
 - `status --usage disable` and `enable` write the canonical `[local_usage]
   enabled` override; `status --usage reset` atomically clears the usage
   aggregates. These controls are not counted and remain action-focused so they

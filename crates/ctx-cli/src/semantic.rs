@@ -21,13 +21,12 @@ pub(crate) use ctx_daemon_cli::{
     semantic_managed_model_snapshot_dir, semantic_native_accelerator_target,
     semantic_provisioning_coreml_asset_matches, semantic_provisioning_model_contract_matches,
     semantic_provisioning_model_path_count, semantic_provisioning_model_path_matches,
-    semantic_query_service_supported, semantic_required_model_file_count,
-    semantic_required_model_file_matches, semantic_runtime_cache_dir, semantic_worker_cache_dir,
-    DaemonHandoff, DaemonSetupHandoff, DaemonUpgradeHandoff, RefreshStatus,
-    SemanticNativeAcceleratorTarget, SemanticNotReady, SemanticOrtModelVariant,
-    SourceBackedRefreshDaemonUnavailable, SourceBackedRefreshMode, SourceBackedRefreshObservation,
-    SourceBackedRefreshPendingPublication, SourceBackedRefreshTerminalError,
-    SEMANTIC_WORKER_BATCH_MAX,
+    semantic_required_model_file_count, semantic_required_model_file_matches,
+    semantic_runtime_cache_dir, semantic_worker_cache_dir, DaemonHandoff, DaemonSetupHandoff,
+    DaemonUpgradeHandoff, RefreshStatus, SemanticNativeAcceleratorTarget, SemanticNotReady,
+    SemanticOrtModelVariant, SourceBackedRefreshDaemonUnavailable, SourceBackedRefreshMode,
+    SourceBackedRefreshObservation, SourceBackedRefreshPendingPublication,
+    SourceBackedRefreshTerminalError, SEMANTIC_WORKER_BATCH_MAX,
 };
 
 struct CtxDaemonCliHost;

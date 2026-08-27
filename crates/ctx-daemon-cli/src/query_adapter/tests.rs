@@ -1,4 +1,8 @@
-use std::cell::Cell;
+use std::{
+    cell::Cell,
+    fs::{self, OpenOptions},
+    time::{Duration, Instant},
+};
 
 use ctx_history_core::{
     derive_event_id, derive_session_id, CertifiedSource, CoreRecord, EventIdentityInput,
@@ -11,7 +15,9 @@ use ctx_semantic_index::{
     test_support::{pinned_flat_generation, publish_chunk_replacements, semantic_chunk_document},
     SemanticBatchEmbedder, SemanticChunkDocument, SemanticDocumentBuilder, SemanticEventDocument,
     SemanticQueryPin, SemanticVectorStore, SourceBackedGenerationPin,
+    SourceBackedSemanticDocumentBuilder,
 };
+use fs2::FileExt as _;
 use uuid::Uuid;
 
 use super::*;
@@ -141,6 +147,99 @@ fn request_adapter_borrows_the_exact_data_root() {
     let adapter = SemanticQueryAdapter::new(&data_root);
 
     assert!(std::ptr::eq(adapter.data_root, data_root.as_path()));
+}
+
+#[test]
+fn foreground_adapter_is_lazy_and_borrows_the_exact_data_root() {
+    let data_root = std::path::PathBuf::from("foreground-query-root");
+    let adapter = SemanticQueryAdapter::foreground(&data_root);
+
+    assert!(std::ptr::eq(adapter.data_root, data_root.as_path()));
+    let SemanticQueryExecution::Foreground { runtime, .. } = &adapter.execution else {
+        panic!("manual wait must select foreground semantic execution");
+    };
+    assert!(
+        !runtime.is_loaded(),
+        "constructing the adapter must not load the model before semantic retrieval begins"
+    );
+}
+
+#[test]
+fn foreground_empty_generation_converges_without_loading_a_model() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let (index, _) = semantic_index_revision(temp.path(), 1, false)?;
+    let adapter = SemanticQueryAdapter::foreground(temp.path());
+
+    let mut session = adapter
+        .begin_query(&index)
+        .map_err(|error| anyhow!(error.to_string()))?;
+    assert_eq!(
+        session.prepare_alternative("empty generation")?,
+        compact_json(json!({"query_embed_ms": null}))
+    );
+    let SemanticQueryExecution::Foreground { runtime, .. } = &adapter.execution else {
+        unreachable!("foreground constructor selected daemon execution")
+    };
+    assert!(!runtime.is_loaded());
+    Ok(())
+}
+
+struct FixtureSemanticEmbedder;
+
+impl SemanticBatchEmbedder for FixtureSemanticEmbedder {
+    fn embed_chunks(&mut self, chunks: &[SemanticChunkDocument]) -> Result<Vec<Vec<f32>>> {
+        Ok(chunks.iter().map(|_| embedding()).collect())
+    }
+}
+
+fn reconcile_ready_nonempty_generation(index: &VerifiedIndex, data_root: &Path) -> Result<()> {
+    let mut store = SemanticVectorStore::open(&source_backed_semantic_vector_path(data_root))?;
+    let mut builder = SourceBackedSemanticDocumentBuilder::new(index);
+    let mut embedder = FixtureSemanticEmbedder;
+    for _ in 0..32 {
+        if store
+            .reconcile_source_backed_index(index, &mut builder, &mut embedder)?
+            .ready()
+        {
+            return Ok(());
+        }
+    }
+    Err(anyhow!("nonempty semantic fixture did not converge"))
+}
+
+#[test]
+fn foreground_ready_nonempty_generation_skips_model_and_writable_reconciliation() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let (index, _) = semantic_index(temp.path())?;
+    reconcile_ready_nonempty_generation(&index, temp.path())?;
+    let semantic_path = source_backed_semantic_vector_path(temp.path());
+    let transaction_lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(semantic_path.join("flat_transaction.lock"))?;
+    transaction_lock.lock_exclusive()?;
+    let state_path = semantic_path.join("state.sqlite");
+    let mut state_permissions = fs::metadata(&state_path)?.permissions();
+    state_permissions.set_readonly(true);
+    fs::set_permissions(&state_path, state_permissions)?;
+
+    let adapter = SemanticQueryAdapter::foreground(temp.path());
+    let started = Instant::now();
+    let _session = adapter
+        .begin_query(&index)
+        .map_err(|error| anyhow!(error.to_string()))?;
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "a ready foreground query must not wait on the Flat write transaction lock"
+    );
+    let SemanticQueryExecution::Foreground { runtime, .. } = &adapter.execution else {
+        unreachable!("foreground constructor selected daemon execution")
+    };
+    assert!(
+        !runtime.is_loaded(),
+        "a ready foreground query must not acquire or load the semantic model"
+    );
+    Ok(())
 }
 
 fn ready_adapter<'a>(

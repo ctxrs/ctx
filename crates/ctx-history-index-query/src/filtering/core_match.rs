@@ -71,7 +71,7 @@ impl CompiledSearchFilter {
                 SearchAgentScope::Primary => event.agent_scope != Some(CoreAgentScope::Primary),
                 SearchAgentScope::Subagent => event.agent_scope != Some(CoreAgentScope::Subagent),
             }
-            || !filters.matches_source_identity(event)
+            || !self.matches_source_identity(event)
         {
             return Ok(false);
         }

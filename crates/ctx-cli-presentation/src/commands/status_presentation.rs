@@ -255,7 +255,7 @@ mod tests {
             enabled: true,
             state: "ready",
             retention_days: 400,
-            definition_version: 2,
+            definition_version: 3,
             definitions: None,
             estimates: None,
             error: None,

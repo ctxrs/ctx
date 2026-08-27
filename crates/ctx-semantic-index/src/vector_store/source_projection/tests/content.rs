@@ -41,8 +41,19 @@ fn control_filter_and_full_tail_remain_generation_exact() -> Result<()> {
     };
     let mut query = vec![0.0; SEMANTIC_DIMENSIONS];
     query[0] = 1.0;
-    let search =
-        scan_exact_generation(&pin, std::slice::from_ref(&query), 1, None, Instant::now())?;
+    let event_identity_digest = |event_id: Uuid| {
+        let mut digest = [0; 32];
+        digest[..16].copy_from_slice(event_id.as_bytes());
+        digest[16..].copy_from_slice(event_id.as_bytes());
+        Some(digest)
+    };
+    let search = scan_exact_generation(
+        &pin,
+        std::slice::from_ref(&query),
+        1,
+        &event_identity_digest,
+        Instant::now(),
+    )?;
     assert_eq!(search.hits[0].event_id, tail_event);
     for directory in [
         fixture.semantic_path.clone(),

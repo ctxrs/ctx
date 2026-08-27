@@ -65,7 +65,6 @@ pub(super) fn search_candidate_order(
                 .cmp(&left.event.occurred_at_unix_ms)
         })
         .then_with(|| right.event.event_sequence.cmp(&left.event.event_sequence))
-        .then_with(|| left.event.event_id.cmp(&right.event.event_id))
         .then_with(|| {
             left.event
                 .event_identity_digest

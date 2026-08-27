@@ -195,6 +195,13 @@ MCP output as private local history: it may include absolute paths, source
 metadata, snippets, transcript text, MCP arguments, and response payloads, and
 the MCP host may log or forward tool output.
 
+When an installed companion supplies `blame`, Core records one local usage
+completion only after the exact proxied response is written and flushed. It
+uses the standard JSON-RPC `error`/`result.isError` envelope only for technical
+success or failure, records the response byte count and duration, and does not
+inspect or infer private result semantics. Local recording is fail-open and
+cannot change the response.
+
 
 Like CLI JSON status, MCP `status` can include local source, semantic, daemon,
 and upgrade diagnostic path fields in `structuredContent`. They are local

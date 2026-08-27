@@ -432,17 +432,9 @@ fn core_setup_facts(
         wait,
     } = options;
     let mut config = crate::config::AppConfig::load(data_root)?;
-    if semantic && (!config.automatic_indexing_enabled() || no_daemon) {
-        return Err(anyhow!("semantic setup requires automatic indexing"));
-    }
     if semantic {
         crate::config::set_semantic_search_enabled(data_root, true)?;
         config = crate::config::AppConfig::load(data_root)?;
-    }
-    if config.semantic_search_enabled() && (!config.automatic_indexing_enabled() || no_daemon) {
-        return Err(anyhow!(
-            "configured semantic search requires automatic indexing"
-        ));
     }
     crate::history_config::CliHistoryConfigAdapter::new(data_root, &mut config)
         .write_default_config()?;

@@ -106,8 +106,6 @@ impl McpUsagePort for LocalUsagePort {
             let operation = observed_mcp_product_operation(operation)?;
             let mut invocation = McpInvocation::from_operation(operation);
             invocation.bind_tool_usage(crate::observability_product::mcp_tool_usage(usage));
-            // Usage-v2 owns bounded, process-local search-to-show correlation
-            // inside this delivery boundary; target IDs remain process-local.
             let completion = crate::observability_product::mcp_completion_facts(
                 operation,
                 response,
@@ -115,6 +113,16 @@ impl McpUsagePort for LocalUsagePort {
             );
             Some((invocation, completion))
         });
+    }
+
+    fn record_companion_blame_delivered(
+        &mut self,
+        failed: bool,
+        encoded_response_bytes: usize,
+        duration: std::time::Duration,
+    ) {
+        self.recorder
+            .record_companion_blame_delivered(failed, encoded_response_bytes, duration);
     }
 }
 

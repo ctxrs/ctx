@@ -18,8 +18,9 @@ pub use reader::{
 };
 pub(crate) use records::stored_event_record;
 use records::{
-    core_event_fast_preflight, stored_core_event_record, stored_core_event_record_with_size,
-    stored_core_event_record_with_source_json, EventAddressCandidate, SessionEventAddressCandidate,
+    core_event_fast_preflight, core_event_identity_fast_preflight, stored_core_event_record,
+    stored_core_event_record_with_size, stored_core_event_record_with_source_json,
+    EventAddressCandidate, SessionEventAddressCandidate,
 };
 use records::{ranked_event_ref_at_address, ranked_event_ref_at_address_with_order};
 
@@ -27,7 +28,7 @@ use records::{ranked_event_ref_at_address, ranked_event_ref_at_address_with_orde
 use std::cell::{Cell, RefCell};
 use std::{
     cmp::{Ordering, Reverse},
-    collections::{BTreeMap, BTreeSet, BinaryHeap, HashSet},
+    collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap},
     ops::Bound,
 };
 

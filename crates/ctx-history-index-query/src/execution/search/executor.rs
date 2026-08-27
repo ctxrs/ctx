@@ -130,77 +130,6 @@ impl VerifiedIndex {
         }
     }
 
-    /// Test-only compatibility wrapper for a complete manual lexical result.
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub fn search_event_candidates(
-        &self,
-        natural_text: &str,
-        limit: usize,
-    ) -> LexicalSearchResult<Vec<EventSearchCandidate>> {
-        self.search_event_candidates_with_filters(
-            natural_text,
-            &EventSearchFilters::default(),
-            limit,
-        )
-    }
-
-    /// Test-only compatibility wrapper for complete filtered lexical results.
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub fn search_event_candidates_with_filters(
-        &self,
-        natural_text: &str,
-        filters: &EventSearchFilters,
-        limit: usize,
-    ) -> LexicalSearchResult<Vec<EventSearchCandidate>> {
-        self.search_event_candidates_any_with_filters(&[natural_text], filters, limit)
-    }
-
-    /// Test-only compatibility wrapper for complete OR-composed results.
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub fn search_event_candidates_any_with_filters(
-        &self,
-        natural_texts: &[&str],
-        filters: &EventSearchFilters,
-        limit: usize,
-    ) -> LexicalSearchResult<Vec<EventSearchCandidate>> {
-        complete_compatibility_candidates(self.execute_compatibility_lexical(
-            LexicalMode::Search(natural_texts),
-            filters,
-            limit,
-        )?)
-    }
-
-    /// Test-only compatibility wrapper for a complete filtered List result.
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub fn list_event_candidates_with_filters(
-        &self,
-        filters: &EventSearchFilters,
-        limit: usize,
-    ) -> LexicalSearchResult<Vec<EventSearchCandidate>> {
-        complete_compatibility_candidates(self.execute_compatibility_lexical(
-            LexicalMode::List,
-            filters,
-            limit,
-        )?)
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    fn execute_compatibility_lexical(
-        &self,
-        mode: LexicalMode<'_>,
-        filters: &EventSearchFilters,
-        limit: usize,
-    ) -> LexicalSearchResult<LexicalSearchBatch> {
-        let filter = CompiledSearchFilter::compile(filters.clone())?;
-        self.execute_lexical(LexicalExecution::new(mode, &filter, limit))
-            .map(|observed| observed.batch)
-            .map_err(|failure| LexicalSearchError::Index(failure.error))
-    }
-
     fn execute_lexical_inner(
         &self,
         execution: LexicalExecution<'_>,
@@ -402,33 +331,18 @@ impl VerifiedIndex {
             ) {
                 break;
             }
-            let fast = core_event_fast_preflight(&self.searcher, candidate.address)?;
-            if fast.1 != candidate.order.encoded_core_bytes()
-                || fast.2 != candidate.order.content_bytes()
-            {
-                return Err(IndexError::InvalidStoredDocumentField(
-                    EVENT_RANGE_ORDER_FAST_FIELD,
-                ));
-            }
             #[cfg(any(test, feature = "test-support"))]
             if lexical_candidate_materialization_should_fail() {
                 return Err(IndexError::InvalidStoredDocumentField(
                     "test_lexical_candidate_materialization_failure",
                 ));
             }
-            let (event, encoded_core_bytes) = ranked_event_ref_at_address_with_order(
+            let (event, _) = ranked_event_ref_at_address_with_order(
                 &self.searcher,
                 candidate.address,
                 fields,
                 candidate.order,
             )?;
-            if encoded_core_bytes != candidate.order.encoded_core_bytes()
-                || event.event_id != fast.0
-            {
-                return Err(IndexError::InvalidStoredDocumentField(
-                    EVENT_RANGE_ORDER_FAST_FIELD,
-                ));
-            }
             candidates.push(LexicalSearchCandidate {
                 event,
                 score: candidate.score,

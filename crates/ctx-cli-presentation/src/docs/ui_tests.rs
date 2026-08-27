@@ -181,7 +181,7 @@ fn event_queries_is_embedded_with_stable_search_tags() {
 }
 
 #[test]
-fn stats_json_docs_track_schema_three_and_core_sqlite_four() {
+fn stats_json_docs_track_schema_three_and_core_sqlite_five() {
     let topic = TOPICS
         .iter()
         .find(|topic| topic.id == "json-contracts")
@@ -196,7 +196,7 @@ fn stats_json_docs_track_schema_three_and_core_sqlite_four() {
         .0;
 
     assert!(stats.contains("`schema_version` is 3."));
-    assert!(stats.contains("current SQLite\nschema version is 4"));
+    assert!(stats.contains("current SQLite\nschema version is 5"));
     assert!(stats.contains("`summary` contains exactly"));
     assert!(stats.contains("Each `by_operation` row contains exactly"));
     for field in [

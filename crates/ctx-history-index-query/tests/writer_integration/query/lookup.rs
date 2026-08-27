@@ -20,9 +20,14 @@ fn pinned_query_api_returns_typed_records_in_deterministic_order() {
     assert_eq!(index.session_count().unwrap(), 1);
     assert_eq!(index.event_type_count("message").unwrap(), 2);
     assert_eq!(index.event_type_count("tool_call").unwrap(), 0);
-    let candidates = index
-        .search_event_candidates("atomic:generation", 10)
-        .unwrap();
+    let candidates = lexical_search_batch(
+        &index,
+        &["atomic:generation"],
+        &EventSearchFilters::default(),
+        10,
+    )
+    .unwrap()
+    .candidates;
     let mut expected_search_ids = vec![second.event_id.as_uuid(), first.event_id.as_uuid()];
     expected_search_ids.sort();
     assert_eq!(
@@ -201,16 +206,17 @@ fn decoded_core_event_preserves_searchable_literal_files_in_provider_order() {
         ["src/lib.rs", "src/lib.rs", "src/new.rs", "src/old.rs"]
     );
     for file in ["SRC/LIB.RS", "src/new.rs", "src/old.rs"] {
-        let matches = index
-            .search_event_candidates_with_filters(
-                "repository:file:activity",
-                &EventSearchFilters {
-                    file: Some(file.to_owned()),
-                    ..EventSearchFilters::default()
-                },
-                10,
-            )
-            .unwrap();
+        let matches = lexical_search_batch(
+            &index,
+            &["repository:file:activity"],
+            &EventSearchFilters {
+                file: Some(file.to_owned()),
+                ..EventSearchFilters::default()
+            },
+            10,
+        )
+        .unwrap()
+        .candidates;
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].event.event_id, expected.event_id.as_uuid());
     }
@@ -235,26 +241,32 @@ fn literal_file_fact_is_searchable_without_repository_attribution() {
     let index = VerifiedIndex::open(temp.path()).unwrap();
 
     assert_eq!(
-        index
-            .search_event_candidates("unknownoriginsearchneedle", 10)
-            .unwrap()
-            .len(),
+        lexical_search_batch(
+            &index,
+            &["unknownoriginsearchneedle"],
+            &EventSearchFilters::default(),
+            10,
+        )
+        .unwrap()
+        .candidates
+        .len(),
         1
     );
     assert_eq!(
-        index
-            .search_event_candidates_with_filters(
-                "unknownoriginsearchneedle",
-                &EventSearchFilters {
-                    file: Some("SRC/UNKNOWN.RS".to_owned()),
-                    ..EventSearchFilters::default()
-                },
-                10,
-            )
-            .unwrap()
-            .into_iter()
-            .map(|candidate| candidate.event.event_id)
-            .collect::<Vec<_>>(),
+        lexical_search_batch(
+            &index,
+            &["unknownoriginsearchneedle"],
+            &EventSearchFilters {
+                file: Some("SRC/UNKNOWN.RS".to_owned()),
+                ..EventSearchFilters::default()
+            },
+            10,
+        )
+        .unwrap()
+        .candidates
+        .into_iter()
+        .map(|candidate| candidate.event.event_id)
+        .collect::<Vec<_>>(),
         vec![unknown.event_id.as_uuid()]
     );
 }
@@ -817,7 +829,10 @@ fn lexical_candidates_remain_thin_while_other_collectors_decode_only_selected_re
     );
 
     ctx_history_index_query::reset_stored_event_record_materializations();
-    let candidates = index.search_event_candidates("ambiguity", 5).unwrap();
+    let candidates =
+        lexical_search_batch(&index, &["ambiguity"], &EventSearchFilters::default(), 5)
+            .unwrap()
+            .candidates;
     assert_eq!(candidates.len(), 5);
     assert_eq!(
         ctx_history_index_query::stored_event_record_materializations(),
