@@ -52,34 +52,6 @@ fn windows_powershell_path() -> Result<std::path::PathBuf> {
         .join("powershell.exe"))
 }
 
-/// Convert a path into the form Windows PowerShell can accept as a parameter.
-///
-/// Paths inside ctx are frequently canonicalised, which on Windows yields the
-/// verbatim `\\?\` form. The provider cmdlets the extraction helper relies on
-/// (`Join-Path`, `New-Item`) cannot resolve a drive for a verbatim path and fail
-/// with a null `drive` binding, so the ordinary Win32 form is passed instead.
-#[cfg(windows)]
-fn powershell_path_argument(path: &Path) -> std::ffi::OsString {
-    use std::ffi::OsString;
-
-    let Some(text) = path.to_str() else {
-        return path.as_os_str().to_owned();
-    };
-    let Some(rest) = text.strip_prefix(r"\\?\") else {
-        return path.as_os_str().to_owned();
-    };
-    if let Some(share) = rest.strip_prefix(r"UNC\") {
-        return OsString::from(format!(r"\\{share}"));
-    }
-    let mut characters = rest.chars();
-    let drive = characters.next();
-    let colon = characters.next();
-    if drive.is_some_and(|drive| drive.is_ascii_alphabetic()) && colon == Some(':') {
-        return OsString::from(rest.to_owned());
-    }
-    path.as_os_str().to_owned()
-}
-
 #[cfg(unix)]
 pub(super) fn extract_runtime_archive(
     _process: &dyn ReleaseProcessPort,
@@ -246,9 +218,9 @@ pub(super) fn extract_runtime_archive(
         .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
         .arg(&script_path)
         .arg("-ArchivePath")
-        .arg(powershell_path_argument(archive_path))
+        .arg(archive_path)
         .arg("-Destination")
-        .arg(powershell_path_argument(destination))
+        .arg(destination)
         .arg("-ExpectedVersion")
         .arg(version)
         .arg("-MaxExpandedBytes")
@@ -603,7 +575,7 @@ param(
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
-$contract = Get-Content -LiteralPath $ContractPath -Raw | ConvertFrom-Json
+$contract = [System.IO.File]::ReadAllText($ContractPath) | ConvertFrom-Json
 $expectedArchive = @{}
 $directories = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
 foreach ($file in $contract.files) {
@@ -664,9 +636,12 @@ try {
     }
     $record = $expectedArchive[$name]
     if ([long]$entry.Length -ne [long]$record.size) { throw "Semantic zip file size mismatch: '$raw'" }
-    $target = Join-Path $Destination ([string]$record.path).Replace('/', '\')
-    $parent = Split-Path -Parent $target
-    New-Item -ItemType Directory -Path $parent -Force | Out-Null
+    $target = [System.IO.Path]::Combine(
+      $Destination,
+      ([string]$record.path).Replace('/', [System.IO.Path]::DirectorySeparatorChar)
+    )
+    $parent = [System.IO.Path]::GetDirectoryName($target)
+    [void][System.IO.Directory]::CreateDirectory($parent)
     $source = $entry.Open()
     try {
       $output = [System.IO.File]::Open($target, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
@@ -713,51 +688,42 @@ try {
 }
 "#;
 
-#[cfg(all(test, windows))]
-mod powershell_path_argument_tests {
-    use std::path::Path;
+#[cfg(test)]
+mod windows_extract_script_tests {
+    use super::WINDOWS_SEMANTIC_ZIP_EXTRACT_SCRIPT;
 
-    use super::powershell_path_argument;
-
-    #[test]
-    fn verbatim_drive_paths_lose_the_prefix() {
-        assert_eq!(
-            powershell_path_argument(Path::new(r"\\?\C:\Users\me\.ctx\runtime")),
-            r"C:\Users\me\.ctx\runtime"
-        );
+    fn embedded_runtime_extract_script() -> &'static str {
+        include_str!("../install.rs")
+            .split_once("const EXTRACT_SCRIPT: &str = r#\"\n")
+            .unwrap()
+            .1
+            .split_once("\n\"#;")
+            .unwrap()
+            .0
     }
 
     #[test]
-    fn verbatim_unc_paths_become_ordinary_unc_paths() {
-        assert_eq!(
-            powershell_path_argument(Path::new(r"\\?\UNC\server\share\runtime")),
-            r"\\server\share\runtime"
-        );
+    fn runtime_script_uses_dotnet_filesystem_apis() {
+        let script = embedded_runtime_extract_script();
+
+        assert!(script.contains("[System.IO.Path]::Combine"));
+        assert!(script.contains("[System.IO.Directory]::CreateDirectory"));
+        assert!(!script.contains("Join-Path"));
+        assert!(!script.contains("New-Item"));
     }
 
     #[test]
-    fn ordinary_paths_are_unchanged() {
-        for path in [
-            r"C:\Users\me\.ctx\runtime",
-            r"\\server\share\runtime",
-            r"relative\runtime",
-        ] {
-            assert_eq!(powershell_path_argument(Path::new(path)), path);
+    fn semantic_script_uses_dotnet_filesystem_apis() {
+        assert!(WINDOWS_SEMANTIC_ZIP_EXTRACT_SCRIPT.contains("[System.IO.File]::ReadAllText"));
+        assert!(WINDOWS_SEMANTIC_ZIP_EXTRACT_SCRIPT.contains("[System.IO.Path]::Combine"));
+        assert!(WINDOWS_SEMANTIC_ZIP_EXTRACT_SCRIPT.contains("[System.IO.Path]::GetDirectoryName"));
+        assert!(
+            WINDOWS_SEMANTIC_ZIP_EXTRACT_SCRIPT.contains("[System.IO.Directory]::CreateDirectory")
+        );
+        for provider in ["Get-Content", "Join-Path", "Split-Path", "New-Item"] {
+            assert!(!WINDOWS_SEMANTIC_ZIP_EXTRACT_SCRIPT.contains(provider));
         }
     }
-
-    #[test]
-    fn device_paths_that_are_not_drives_are_left_alone() {
-        assert_eq!(
-            powershell_path_argument(Path::new(r"\\?\Volume{00000000-0000-0000-0000-000000000000}\x")),
-            r"\\?\Volume{00000000-0000-0000-0000-000000000000}\x"
-        );
-    }
-}
-
-#[cfg(test)]
-mod semantic_zip_script_tests {
-    use super::WINDOWS_SEMANTIC_ZIP_EXTRACT_SCRIPT;
 
     #[test]
     fn streamed_zip_bytes_are_bounded_before_each_write() {

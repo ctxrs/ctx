@@ -37,6 +37,22 @@ function Get-EmbeddedScript {
     return $scriptMatches[0].Groups["script"].Value
 }
 
+function ConvertTo-VerbatimPath {
+    param([string]$Path)
+
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+    if ($fullPath.StartsWith("\\?\", [System.StringComparison]::Ordinal)) {
+        return $fullPath
+    }
+    if ($fullPath.StartsWith("\\", [System.StringComparison]::Ordinal)) {
+        return "\\?\UNC\" + $fullPath.Substring(2)
+    }
+    if ($fullPath -notmatch '^[A-Za-z]:\\') {
+        throw "Cannot create a verbatim path for '$Path'"
+    }
+    return "\\?\" + $fullPath
+}
+
 function Invoke-EmbeddedExtractorProcess {
     param(
         [string]$PowerShellPath,
@@ -201,6 +217,16 @@ $installerSource = Join-Path $PSScriptRoot "..\crates\ctx-upgrade-engine\src\upg
 $archiveSource = Join-Path $PSScriptRoot "..\crates\ctx-upgrade-engine\src\upgrade\install\archive.rs"
 $runtimeScript = Get-EmbeddedScript $installerSource "EXTRACT_SCRIPT"
 $semanticScript = Get-EmbeddedScript $archiveSource "WINDOWS_SEMANTIC_ZIP_EXTRACT_SCRIPT"
+foreach ($providerCommand in @("Join-Path", "New-Item")) {
+    if ($runtimeScript.Contains($providerCommand)) {
+        throw "Embedded Windows runtime extractor retained provider command $providerCommand"
+    }
+}
+foreach ($providerCommand in @("Get-Content", "Join-Path", "Split-Path", "New-Item")) {
+    if ($semanticScript.Contains($providerCommand)) {
+        throw "Embedded Windows Semantic extractor retained provider command $providerCommand"
+    }
+}
 $windowsPowerShell = Join-Path $PSHOME "powershell.exe"
 $expectedFiles = @(
     "GIT_COMMIT_ID",
@@ -218,14 +244,18 @@ $expectedFiles = @(
 $root = Join-Path ([System.IO.Path]::GetTempPath()) ("ctx-upgrade-extractor-" + [Guid]::NewGuid().ToString("n"))
 $archivePath = Join-Path $root "runtime.zip"
 $runtimeDestination = Join-Path $root "runtime"
+$runtimeVersionFailureDestination = Join-Path $root "runtime-version-failure"
+$runtimeLimitFailureDestination = Join-Path $root "runtime-limit-failure"
 $semanticDestination = Join-Path $root "semantic"
 $hashFailureDestination = Join-Path $root "semantic-hash-failure"
 $fileSetFailureDestination = Join-Path $root "semantic-file-set-failure"
+$expandedSizeFailureDestination = Join-Path $root "semantic-expanded-size-failure"
 $runtimeExtractor = Join-Path $root "runtime-extract.ps1"
 $semanticExtractor = Join-Path $root "semantic-extract.ps1"
 $semanticContractPath = Join-Path $root "semantic-contract.json"
 $hashFailureContractPath = Join-Path $root "semantic-hash-failure.json"
 $fileSetFailureContractPath = Join-Path $root "semantic-file-set-failure.json"
+$expandedSizeFailureContractPath = Join-Path $root "semantic-expanded-size-failure.json"
 $parentArchive = $null
 
 New-Item -ItemType Directory -Path $root -Force | Out-Null
@@ -260,15 +290,32 @@ try {
 
     $fileSetFailureRecords = @($signedRecords | Select-Object -First ($signedRecords.Count - 1))
     Write-SemanticContract $fileSetFailureContractPath $fileSetFailureRecords $maxExpandedBytes
+    Write-SemanticContract $expandedSizeFailureContractPath $signedRecords 1
 
     foreach ($destination in @(
         $runtimeDestination,
+        $runtimeVersionFailureDestination,
+        $runtimeLimitFailureDestination,
         $semanticDestination,
         $hashFailureDestination,
-        $fileSetFailureDestination
+        $fileSetFailureDestination,
+        $expandedSizeFailureDestination
     )) {
         New-Item -ItemType Directory -Path $destination -Force | Out-Null
     }
+
+    $verbatimArchivePath = ConvertTo-VerbatimPath $archivePath
+    $verbatimRuntimeDestination = ConvertTo-VerbatimPath $runtimeDestination
+    $verbatimRuntimeVersionFailureDestination = ConvertTo-VerbatimPath $runtimeVersionFailureDestination
+    $verbatimRuntimeLimitFailureDestination = ConvertTo-VerbatimPath $runtimeLimitFailureDestination
+    $verbatimSemanticDestination = ConvertTo-VerbatimPath $semanticDestination
+    $verbatimHashFailureDestination = ConvertTo-VerbatimPath $hashFailureDestination
+    $verbatimFileSetFailureDestination = ConvertTo-VerbatimPath $fileSetFailureDestination
+    $verbatimExpandedSizeFailureDestination = ConvertTo-VerbatimPath $expandedSizeFailureDestination
+    $verbatimSemanticContractPath = ConvertTo-VerbatimPath $semanticContractPath
+    $verbatimHashFailureContractPath = ConvertTo-VerbatimPath $hashFailureContractPath
+    $verbatimFileSetFailureContractPath = ConvertTo-VerbatimPath $fileSetFailureContractPath
+    $verbatimExpandedSizeFailureContractPath = ConvertTo-VerbatimPath $expandedSizeFailureContractPath
 
     # Exercise the publisher/identity-pin sharing contract with read/write
     # access and read sharing, deliberately excluding write and delete
@@ -284,55 +331,94 @@ try {
             $windowsPowerShell `
             $runtimeExtractor `
             @(
-                "-ArchivePath", $archivePath,
-                "-Destination", $runtimeDestination,
+                "-ArchivePath", $verbatimArchivePath,
+                "-Destination", $verbatimRuntimeDestination,
                 "-ExpectedVersion", "1.27.0",
                 "-MaxExpandedBytes", "1073741824"
             ) `
-            "Embedded Windows runtime extractor"
+            "Embedded Windows runtime extractor with verbatim paths"
         Assert-SignedTree $runtimeDestination $signedRecords "Runtime extractor"
+
+        Assert-EmbeddedExtractorFailure `
+            $windowsPowerShell `
+            $runtimeExtractor `
+            @(
+                "-ArchivePath", $verbatimArchivePath,
+                "-Destination", $verbatimRuntimeVersionFailureDestination,
+                "-ExpectedVersion", "0.0.0",
+                "-MaxExpandedBytes", "1073741824"
+            ) `
+            "runtime VERSION_NUMBER is not exactly 0.0.0" `
+            "Runtime version mismatch with verbatim paths"
+        Remove-Item -LiteralPath $runtimeVersionFailureDestination -Recurse -Force -ErrorAction Stop
+
+        Assert-EmbeddedExtractorFailure `
+            $windowsPowerShell `
+            $runtimeExtractor `
+            @(
+                "-ArchivePath", $verbatimArchivePath,
+                "-Destination", $verbatimRuntimeLimitFailureDestination,
+                "-ExpectedVersion", "1.27.0",
+                "-MaxExpandedBytes", "1"
+            ) `
+            "runtime archive expands beyond the 1 GiB safety limit" `
+            "Runtime expanded-size safety limit with verbatim paths"
+        Remove-Item -LiteralPath $runtimeLimitFailureDestination -Recurse -Force -ErrorAction Stop
 
         Assert-EmbeddedExtractorSuccess `
             $windowsPowerShell `
             $semanticExtractor `
             @(
-                "-ArchivePath", $archivePath,
-                "-Destination", $semanticDestination,
-                "-ContractPath", $semanticContractPath
+                "-ArchivePath", $verbatimArchivePath,
+                "-Destination", $verbatimSemanticDestination,
+                "-ContractPath", $verbatimSemanticContractPath
             ) `
-            "Embedded Windows Semantic zip extractor"
+            "Embedded Windows Semantic zip extractor with verbatim paths"
         Assert-SignedTree $semanticDestination $signedRecords "Semantic extractor"
 
         Assert-EmbeddedExtractorFailure `
             $windowsPowerShell `
             $semanticExtractor `
             @(
-                "-ArchivePath", $archivePath,
-                "-Destination", $hashFailureDestination,
-                "-ContractPath", $hashFailureContractPath
+                "-ArchivePath", $verbatimArchivePath,
+                "-Destination", $verbatimHashFailureDestination,
+                "-ContractPath", $verbatimHashFailureContractPath
             ) `
             "Semantic zip file verification failed" `
-            "Semantic hash contract"
+            "Semantic hash contract with verbatim paths"
         Remove-Item -LiteralPath $hashFailureDestination -Recurse -Force -ErrorAction Stop
 
         Assert-EmbeddedExtractorFailure `
             $windowsPowerShell `
             $semanticExtractor `
             @(
-                "-ArchivePath", $archivePath,
-                "-Destination", $fileSetFailureDestination,
-                "-ContractPath", $fileSetFailureContractPath
+                "-ArchivePath", $verbatimArchivePath,
+                "-Destination", $verbatimFileSetFailureDestination,
+                "-ContractPath", $verbatimFileSetFailureContractPath
             ) `
             "unexpected or non-regular Semantic zip file" `
-            "Semantic file-set contract"
+            "Semantic file-set contract with verbatim paths"
         Remove-Item -LiteralPath $fileSetFailureDestination -Recurse -Force -ErrorAction Stop
+
+        Assert-EmbeddedExtractorFailure `
+            $windowsPowerShell `
+            $semanticExtractor `
+            @(
+                "-ArchivePath", $verbatimArchivePath,
+                "-Destination", $verbatimExpandedSizeFailureDestination,
+                "-ContractPath", $verbatimExpandedSizeFailureContractPath
+            ) `
+            "Semantic zip exceeds signed expanded-size limit" `
+            "Semantic expanded-size contract with verbatim paths"
+        Remove-Item -LiteralPath $expandedSizeFailureDestination -Recurse -Force -ErrorAction Stop
 
         foreach ($temporaryHelper in @(
             $runtimeExtractor,
             $semanticExtractor,
             $semanticContractPath,
             $hashFailureContractPath,
-            $fileSetFailureContractPath
+            $fileSetFailureContractPath,
+            $expandedSizeFailureContractPath
         )) {
             Remove-Item -LiteralPath $temporaryHelper -Force -ErrorAction Stop
             if (Test-Path -LiteralPath $temporaryHelper) {
