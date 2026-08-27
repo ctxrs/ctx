@@ -83,9 +83,14 @@ the CLI root exits first.
 
 ## Hosted Placeholder
 
-`createHostedAgentHistoryClient()` and `createAgentHistoryClient({ hosted: true })` reserve
-the future hosted transport shape. Any data method rejects with
-`CtxUnsupportedError` until ctx exposes a hosted agent-history-v1 service.
+Hosted SDK placeholders are deprecated and will be removed in the next breaking
+SDK revision; hosted operations remain unsupported.
+
+`HostedAgentHistoryClientOptions`, `HostedAgentHistoryClient`,
+`createHostedAgentHistoryClient()`, and hosted calls through
+`createAgentHistoryClient()` remain available during the deprecation window.
+Use `createLocalAgentHistoryClient()` with the local CLI adapter instead. Hosted
+data methods continue to reject with `CtxUnsupportedError`.
 
 ## Errors
 

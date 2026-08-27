@@ -3,9 +3,10 @@
 Experimental Python SDK for the local ctx `agent-history-v1` API.
 
 The SDK is intentionally small and network-free by default. It wraps local
-`ctx` CLI JSON and normalizes it into the shared `agent-history-v1` contract. Hosted
-configuration types are present so application code can be written against one
-client shape, but hosted transport is not implemented yet.
+`ctx` CLI JSON and normalizes it into the shared `agent-history-v1` contract.
+Hosted configuration types remain as compatibility placeholders. Hosted SDK
+placeholders are deprecated and will be removed in the next breaking SDK
+revision; hosted operations remain unsupported.
 
 ## Install For Local Development
 
@@ -81,12 +82,19 @@ All SDK errors inherit from `CtxAgentHistoryError` and expose:
 CLI failures raise `CtxAgentHistoryCliError` with `exit_code`, `stderr`, and the
 command argv. Invalid or missing JSON raises `CtxAgentHistoryProtocolError`.
 
-## Hosted Placeholder
+## Deprecated Hosted Placeholder
+
+`HostedConfig`, `ctx_agent_history.transport.HostedAdapter`,
+`HostedTransportNotImplementedError`, `AgentHistoryClient.hosted()`, and the
+`HostedConfig` arm of `AgentHistoryClient.from_config()` are deprecated. Hosted
+SDK placeholders are deprecated and will be removed in the next breaking SDK
+revision; hosted operations remain unsupported.
 
 ```python
 from ctx_agent_history import HostedConfig, AgentHistoryClient
 
-client = AgentHistoryClient.hosted(HostedConfig(base_url="https://example.invalid"))
+config = HostedConfig(base_url="https://example.invalid")  # emits DeprecationWarning
+client = AgentHistoryClient.hosted(config)
 client.status()  # raises HostedTransportNotImplementedError
 ```
 

@@ -22,6 +22,14 @@ public class AgentHistoryClient {
         return new AgentHistoryClient(new LocalCliAdapter(config));
     }
 
+    /**
+     * Creates the explicit hosted placeholder client.
+     *
+     * @deprecated Hosted SDK placeholders are deprecated and will be removed in the next breaking SDK
+     *     revision; hosted operations remain unsupported.
+     */
+    @Deprecated(forRemoval = true)
+    @SuppressWarnings("removal")
     public static HostedAgentHistoryClient hosted(HostedConfig config) {
         return new HostedAgentHistoryClient(config);
     }

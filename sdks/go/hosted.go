@@ -3,6 +3,9 @@ package ctxagenthistory
 import "context"
 
 // HostedConfig reserves the hosted agent-history-v1 configuration surface.
+//
+// Deprecated: Hosted SDK placeholders are deprecated and will be removed in
+// the next breaking SDK revision; hosted operations remain unsupported.
 type HostedConfig struct {
 	BaseURL string
 	APIKey  string
@@ -10,6 +13,9 @@ type HostedConfig struct {
 
 // NewHostedClient creates a placeholder hosted client. Operations return
 // ErrorKindHostedNotImplemented without making network calls.
+//
+// Deprecated: Hosted SDK placeholders are deprecated and will be removed in
+// the next breaking SDK revision; hosted operations remain unsupported.
 func NewHostedClient(config HostedConfig) *Client {
 	return NewClient(WithTransport(hostedTransport{config: config}))
 }

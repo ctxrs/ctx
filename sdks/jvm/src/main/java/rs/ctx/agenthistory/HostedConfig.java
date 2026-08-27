@@ -1,6 +1,13 @@
 package rs.ctx.agenthistory;
 
-/** Placeholder configuration for a future hosted agent-history-v1 backend. */
+/**
+ * Placeholder configuration for a future hosted agent-history-v1 backend.
+ *
+ * @deprecated Hosted SDK placeholders are deprecated and will be removed in the next breaking SDK
+ *     revision; hosted operations remain unsupported.
+ */
+@Deprecated(forRemoval = true)
+@SuppressWarnings("removal")
 public final class HostedConfig {
     private final String baseUrl;
     private final String apiKey;
@@ -41,4 +48,3 @@ public final class HostedConfig {
         }
     }
 }
-

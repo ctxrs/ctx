@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import stat
@@ -7,9 +8,9 @@ import subprocess
 import sys
 import tempfile
 import textwrap
-import unittest
-import inspect
 import typing
+import unittest
+import warnings
 from unittest import mock
 from pathlib import Path
 
@@ -26,7 +27,7 @@ from ctx_agent_history import (
 from ctx_agent_history.errors import CtxAgentHistoryCliError, CtxAgentHistoryProtocolError
 from ctx_agent_history.errors import CtxAgentHistoryTimeoutError, CtxAgentHistoryValidationError
 from ctx_agent_history.agent_history_v1 import normalize_event, normalize_import, normalize_sources, normalize_status
-from ctx_agent_history.transport import LocalCliAdapter
+from ctx_agent_history.transport import HostedAdapter, LocalCliAdapter
 from ctx_agent_history.types import (
     AgentHistoryErrorCode,
     Event,
@@ -637,8 +638,31 @@ class LocalCliAdapterTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "timeout")
         self.assertTrue(raised.exception.retryable)
 
-    def test_hosted_config_is_placeholder(self) -> None:
-        client = AgentHistoryClient.hosted(HostedConfig(base_url="https://example.invalid"))
+    def test_hosted_config_is_deprecated_placeholder(self) -> None:
+        deprecation_message = (
+            "Hosted SDK placeholders are deprecated and will be removed in the next "
+            "breaking SDK revision; hosted operations remain unsupported."
+        )
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", DeprecationWarning)
+            client = AgentHistoryClient.hosted(
+                HostedConfig(base_url="https://example.invalid")
+            )
+
+        self.assertEqual(len(caught), 1)
+        self.assertIs(caught[0].category, DeprecationWarning)
+        self.assertEqual(str(caught[0].message), deprecation_message)
+        self.assertEqual(Path(caught[0].filename), Path(__file__))
+        for deprecated_api in (
+            HostedConfig,
+            HostedAdapter,
+            HostedTransportNotImplementedError,
+            AgentHistoryClient.hosted,
+            AgentHistoryClient.from_config,
+        ):
+            doc = " ".join((deprecated_api.__doc__ or "").split())
+            self.assertIn(deprecation_message, doc)
 
         with self.assertRaises(HostedTransportNotImplementedError) as raised:
             client.status()

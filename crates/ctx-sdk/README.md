@@ -24,8 +24,9 @@ let results = client.search(SearchOptions {
 
 - Local backend: shells out to `ctx` JSON commands and never performs network
   calls or provider API calls.
-- Hosted backend: accepted for future compatibility but currently returns a
-  structured `not_supported` error.
+- Hosted backend: Hosted SDK placeholders are deprecated and will be removed in
+  the next breaking SDK revision; hosted operations remain unsupported. Valid
+  operations continue to return a structured `not_supported` error.
 
 ## Public Operations
 

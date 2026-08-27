@@ -115,6 +115,11 @@ public struct ShowSessionOptions: Sendable {
     }
 }
 
+@available(
+    *,
+    deprecated,
+    message: "Hosted SDK placeholders are deprecated and will be removed in the next breaking SDK revision; hosted operations remain unsupported."
+)
 public struct HostedConfig: Sendable {
     public var baseURL: URL?
     public var apiKey: String?

@@ -378,7 +378,15 @@ function validateNoDuplicateJSONMembers(json) {
   if (index !== json.length) fail("trailing data");
 }
 
+/**
+ * @deprecated Hosted SDK placeholders are deprecated and will be removed in
+ * the next breaking SDK revision; hosted operations remain unsupported.
+ */
 export class HostedAgentHistoryClient {
+  /**
+   * @deprecated Hosted SDK placeholders are deprecated and will be removed in
+   * the next breaking SDK revision; hosted operations remain unsupported.
+   */
   constructor(options = {}) {
     this.kind = "hosted";
     this.baseUrl = options.baseUrl;
@@ -432,6 +440,10 @@ export function createLocalAgentHistoryClient(options = {}) {
   return new LocalAgentHistoryClient(options);
 }
 
+/**
+ * @deprecated Hosted SDK placeholders are deprecated and will be removed in
+ * the next breaking SDK revision; hosted operations remain unsupported.
+ */
 export function createHostedAgentHistoryClient(options = {}) {
   return new HostedAgentHistoryClient(options);
 }

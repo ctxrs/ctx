@@ -686,6 +686,11 @@ final class CtxAgentHistoryTests: XCTestCase {
         XCTAssertEqual(normalized["acquisition"]?["cursor"], .string("opaque-checkpoint"))
     }
 
+    @available(
+        *,
+        deprecated,
+        message: "Hosted SDK placeholders are deprecated and will be removed in the next breaking SDK revision; hosted operations remain unsupported."
+    )
     func testHostedClientIsExplicitPlaceholder() throws {
         let client = AgentHistoryClient.hosted(
             HostedConfig(baseURL: URL(string: "https://ctx.example.invalid"))

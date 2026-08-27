@@ -5,8 +5,10 @@ default: it shells out to the `ctx` CLI, reads JSON from stdout, and wraps the
 result in agent-history-v1 envelopes. Local mode does not make network calls or upload
 transcripts.
 
-The hosted configuration surface is present as a placeholder for a future ctx
-service. Hosted operations currently throw a structured `not_supported` error.
+`AgentHistoryClient.Hosted(HostedAgentHistoryConfig)` is a hosted SDK placeholder.
+Hosted SDK placeholders are deprecated and will be removed in the next breaking SDK
+revision; hosted operations remain unsupported. Calls continue to throw a structured
+`not_supported` error without making network calls.
 
 ## Projects
 

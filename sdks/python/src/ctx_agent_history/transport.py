@@ -413,7 +413,11 @@ class LocalCliAdapter:
 
 
 class HostedAdapter:
-    """Hosted agent-history-v1 placeholder that performs no network I/O."""
+    """Deprecated hosted placeholder that performs no network I/O.
+
+    Hosted SDK placeholders are deprecated and will be removed in the next
+    breaking SDK revision; hosted operations remain unsupported.
+    """
 
     name = "hosted"
 
