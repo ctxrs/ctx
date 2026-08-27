@@ -47,9 +47,10 @@ use observation::{
 };
 #[cfg(test)]
 pub(super) use query::resolve_source_search_backend;
+pub(super) use query::source_search_policy;
+use query::unsupported_semantic_scope;
 pub(super) use query::NormalizedSearchQuery;
 pub use query::SourceSearchRequest;
-use query::{source_search_policy, unsupported_semantic_scope};
 pub(crate) use semantic_port::{
     HistorySemanticError, HistorySemanticPort, SemanticAvailability, SemanticReason,
 };
@@ -308,14 +309,19 @@ pub fn run_search(
     observe_query: impl FnOnce(SearchExecutionObservation),
 ) -> Result<()> {
     let human_output = args.format != JsonOutputFormat::Json;
-    let semantic_port = crate::semantic::SemanticQueryAdapter::new(&data_root);
     let config = config::AppConfig::from_snapshot(config);
     let request = crate::SearchRequest::from(args);
     let refresh_mode = request.refresh;
+    let foreground_semantic = refresh_mode == RefreshArg::Wait && !config.daemon.enabled;
+    let semantic_port = if foreground_semantic {
+        crate::semantic::SemanticQueryAdapter::foreground(&data_root)
+    } else {
+        crate::semantic::SemanticQueryAdapter::new(&data_root)
+    };
     let json_output = request.format == crate::OutputFormat::Json;
     let verbose = request.verbose;
     let request = SourceSearchRequest::from(request);
-    let policy = source_search_policy(&config);
+    let policy = source_search_policy(&config, foreground_semantic);
     let mut observation = initial_search_observation();
     let result = run_search_inner(
         request,
@@ -623,7 +629,7 @@ pub fn mcp_search_with_compact(
 > {
     let config = config::AppConfig::from_snapshot(config);
     let semantic_port = crate::semantic::SemanticQueryAdapter::new(data_root);
-    let policy = source_search_policy(&config);
+    let policy = source_search_policy(&config, false);
     let mut observation = initial_search_observation();
     match mcp_search_inner(
         request,

@@ -131,6 +131,40 @@ impl SharedSemanticRuntime {
         }
     }
 
+    /// Loads a compatible cached model or acquires the opted-in local model
+    /// before loading it. This is the foreground counterpart to daemon model
+    /// startup and preserves the same accelerator-to-CPU fallback contract.
+    pub fn ensure_loaded_with_acquisition(
+        &self,
+        config: &SemanticModelConfig,
+        artifact_fetcher: &dyn ArtifactFetcher,
+    ) -> Result<Option<u64>> {
+        if self.is_loaded() {
+            return Ok(None);
+        }
+        let mut acquisition = self.acquire_for_daemon(config, artifact_fetcher)?;
+        let mut cpu_fallback_available = true;
+        loop {
+            match self.ensure_loaded_after_daemon_acquisition(config, acquisition) {
+                Ok(load_ms) => return Ok(load_ms),
+                Err(error)
+                    if cpu_fallback_available
+                        && error
+                            .downcast_ref::<SemanticDaemonCpuFallbackRequired>()
+                            .is_some() =>
+                {
+                    let fallback = error
+                        .downcast_ref::<SemanticDaemonCpuFallbackRequired>()
+                        .expect("matched semantic CPU fallback");
+                    acquisition =
+                        self.acquire_cpu_fallback_for_daemon(config, fallback.reason())?;
+                    cpu_fallback_available = false;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
     pub fn ensure_loaded_after_daemon_acquisition(
         &self,
         config: &SemanticModelConfig,

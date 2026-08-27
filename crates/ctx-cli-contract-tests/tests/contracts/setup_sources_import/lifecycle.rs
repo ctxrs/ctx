@@ -292,29 +292,39 @@ fn setup_semantic_persists_opt_in_when_autostart_is_explicitly_disabled() {
 }
 
 #[test]
-fn setup_semantic_rejects_disabled_daemon_without_mutating_source_epoch() {
+fn setup_semantic_allows_manual_indexing_without_starting_a_daemon() {
     let temp = tempdir();
     let config_path = data_root(&temp).join("config.toml");
     fs::create_dir_all(data_root(&temp)).unwrap();
     let original = "[indexing]\nmode = \"manual\"\n";
     fs::write(&config_path, original).unwrap();
 
-    let stderr = failure_stderr(ctx(&temp).args([
+    let setup = json_output(ctx(&temp).args([
         "setup",
         "--semantic",
         "--format=json",
         "--progress",
         "none",
     ]));
-    assert!(stderr.contains("requires automatic indexing"), "{stderr}");
-    assert_eq!(fs::read_to_string(config_path).unwrap(), original);
+    assert_eq!(setup["semantic"]["enabled"], true, "{setup:#}");
+    assert_eq!(setup["daemon_autostart"]["requested"], false, "{setup:#}");
+    assert_eq!(
+        setup["daemon_autostart"]["reason"], "daemon_disabled",
+        "{setup:#}"
+    );
+    let configured = fs::read_to_string(config_path).unwrap();
+    assert!(configured.contains(original), "{configured}");
+    assert!(
+        configured.contains("[search]\nsemantic = true\n"),
+        "{configured}"
+    );
     assert!(!data_root(&temp).join("search").exists());
     assert!(!data_root(&temp).join("relational.sqlite").exists());
     assert!(!data_root(&temp).join("catalogs").exists());
     assert_no_daemon_autostart_mutation(&temp);
 
     let explicit_opt_out = tempdir();
-    let stderr = failure_stderr(ctx(&explicit_opt_out).args([
+    let setup = json_output(ctx(&explicit_opt_out).args([
         "setup",
         "--semantic",
         "--no-daemon",
@@ -322,8 +332,20 @@ fn setup_semantic_rejects_disabled_daemon_without_mutating_source_epoch() {
         "--progress",
         "none",
     ]));
-    assert!(stderr.contains("requires automatic indexing"), "{stderr}");
-    assert!(!data_root(&explicit_opt_out).join("config.toml").exists());
+    assert_eq!(setup["semantic"]["enabled"], true, "{setup:#}");
+    assert_eq!(setup["daemon_autostart"]["requested"], false, "{setup:#}");
+    assert_eq!(
+        setup["daemon_autostart"]["reason"], "explicit_opt_out",
+        "{setup:#}"
+    );
+    let configured = fs::read_to_string(data_root(&explicit_opt_out).join("config.toml")).unwrap();
+    assert!(
+        configured.contains("[search]\nsemantic = true\n"),
+        "{configured}"
+    );
+    let status = json_output(ctx(&explicit_opt_out).args(["status", "--format=json"]));
+    assert_eq!(status["daemon"]["enabled"], true, "{status:#}");
+    assert_eq!(status["semantic"]["enabled"], true, "{status:#}");
     assert!(!data_root(&explicit_opt_out).join("search").exists());
     assert!(!data_root(&explicit_opt_out)
         .join("relational.sqlite")

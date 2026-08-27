@@ -1275,6 +1275,7 @@ fn setup_analytics_emits_one_failure_event() {
     let state = temp.path().join("state");
     let events_path = temp.path().join("analytics.jsonl");
     fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(data_root.join(".config.mutation.lock")).unwrap();
 
     ctx(&temp)
         .args(["setup", "--semantic", "--no-daemon", "--progress", "none"])
