@@ -223,7 +223,6 @@ pub(crate) fn run_cli() -> Result<()> {
         );
     }
     let daemon_autostart_trigger = command_daemon_autostart_trigger(&cli.command);
-    let automatic_upgrade_trigger = command_automatic_upgrade_trigger(&cli.command);
     let operation_descriptor = command_operation_descriptor(&cli.command);
     let mut analytics_draft =
         ClientOperationDraft::from_descriptor(operation_descriptor, json_output);
@@ -451,7 +450,7 @@ pub(crate) fn run_cli() -> Result<()> {
     } else {
         // Preserve the released non-Search ordering: buffered UI failure
         // returns here; final process-stream failure is returned after the
-        // analytics and post-command hooks below.
+        // analytics and the daemon post-command hook below.
         ui.flush().context("flush structured terminal output")?;
         flush_cli_output(&mut stdout, &mut stderr).map_err(Into::into)
     };
@@ -497,11 +496,6 @@ pub(crate) fn run_cli() -> Result<()> {
     if result.is_ok() {
         if let Some(trigger) = daemon_autostart_trigger {
             semantic::maybe_autostart_daemon(&data_root, &config, trigger);
-        }
-        if output_result.is_ok() {
-            if let Some(trigger) = automatic_upgrade_trigger {
-                upgrade::maybe_spawn_automatic(&data_root, &config, trigger.reload_config);
-            }
         }
     }
     output_result?;
@@ -733,34 +727,6 @@ fn command_daemon_autostart_trigger(command: &CommandRoot) -> Option<DaemonTrigg
         }
         _ => None,
     }
-}
-
-#[derive(Clone, Copy)]
-struct AutomaticUpgradeTrigger {
-    reload_config: bool,
-}
-
-fn command_automatic_upgrade_trigger(command: &CommandRoot) -> Option<AutomaticUpgradeTrigger> {
-    if matches!(command, CommandRoot::Index(_)) {
-        return Some(AutomaticUpgradeTrigger {
-            reload_config: true,
-        });
-    }
-    matches!(
-        command,
-        CommandRoot::Setup(_)
-            | CommandRoot::Sources(_)
-            | CommandRoot::Import(_)
-            | CommandRoot::Show(_)
-            | CommandRoot::List(_)
-            | CommandRoot::Locate(_)
-            | CommandRoot::Search(_)
-            | CommandRoot::Integrations(_)
-            | CommandRoot::Doctor(_)
-    )
-    .then_some(AutomaticUpgradeTrigger {
-        reload_config: false,
-    })
 }
 
 fn command_can_report_malformed_config(command: &CommandRoot) -> bool {

@@ -63,39 +63,6 @@ pub fn run(
             args.parent_pid.unwrap_or(0),
         );
     }
-    if args.automatic_worker {
-        telemetry.suppress_event = true;
-        super::wait_for_invoking_parent(args.parent_pid, args.startup_receipt.as_deref())?;
-        #[cfg(ctx_release_qualification)]
-        if let Some(receipt) = std::env::var_os("CTX_AUTOMATIC_UPGRADE_WORKER_RECEIPT_FOR_TESTS") {
-            if std::env::vars_os().any(|(key, _)| {
-                key.to_string_lossy()
-                    .to_ascii_uppercase()
-                    .starts_with("CTX_RELEASE_")
-            }) {
-                return Err(anyhow!(
-                    "automatic worker inherited release-authority environment"
-                ));
-            }
-            std::fs::write(receipt, b"started\n")?;
-            return Ok(());
-        }
-        let current = AppConfig::load(&data_root)?;
-        if !super::automatic_upgrade_eligible_hint(&current)
-            || current.persistent_automatic_upgrade_driver_enabled()
-        {
-            return Ok(());
-        }
-        let engine = ports::engine();
-        engine.prepare_data_root(&data_root)?;
-        let startup_policy = crate::semantic::daemon_config_snapshot(&current);
-        return engine.run_automatic(
-            &ports::AUTOMATIC_POLICY,
-            &ports::UPGRADE_OBSERVER,
-            &data_root,
-            &startup_policy,
-        );
-    }
     let engine = ports::engine();
     if let Err(error) = engine.prepare_data_root(&data_root) {
         // Analytics identity creation writes beneath the data root and would
@@ -185,12 +152,7 @@ fn validate_hidden_upgrade_protocol(args: &UpgradeArgs) -> Result<()> {
         || args.format != JsonOutputFormat::Text;
 
     if args.hosted_transaction.is_some() {
-        if normal_options
-            || args.replacement_helper
-            || args.automatic_worker
-            || args.parent_pid.is_some()
-            || args.startup_receipt.is_some()
-        {
+        if normal_options || args.replacement_helper || args.parent_pid.is_some() {
             return Err(anyhow!(
                 "hosted transaction cannot be combined with upgrade options"
             ));
@@ -209,8 +171,6 @@ fn validate_hidden_upgrade_protocol(args: &UpgradeArgs) -> Result<()> {
                 && args.parent_pid.is_some_and(|pid| pid != 0);
             if normal_options
                 || !valid_identity
-                || args.automatic_worker
-                || args.startup_receipt.is_some()
                 || args.marker_source.is_some()
                 || args.ownership_source.is_some()
                 || args.binary_sha256.is_some()
@@ -221,33 +181,9 @@ fn validate_hidden_upgrade_protocol(args: &UpgradeArgs) -> Result<()> {
         }
     }
 
-    if args.automatic_worker {
-        if normal_options
-            || args.install_path.is_some()
-            || args.attempt_id.is_some()
-            || args.marker_source.is_some()
-            || args.ownership_source.is_some()
-            || args.binary_sha256.is_some()
-        {
-            return Err(anyhow!("invalid automatic-worker process protocol"));
-        }
-        #[cfg(windows)]
-        if !args.parent_pid.is_some_and(|pid| pid != 0)
-            || args.startup_receipt.as_deref().is_none_or(str::is_empty)
-        {
-            return Err(anyhow!("invalid automatic-worker process protocol"));
-        }
-        #[cfg(not(windows))]
-        if args.parent_pid.is_some() || args.startup_receipt.is_some() {
-            return Err(anyhow!("invalid automatic-worker process protocol"));
-        }
-        return Ok(());
-    }
-
     if args.install_path.is_some()
         || args.attempt_id.is_some()
         || args.parent_pid.is_some()
-        || args.startup_receipt.is_some()
         || args.marker_source.is_some()
         || args.ownership_source.is_some()
         || args.binary_sha256.is_some()
@@ -347,17 +283,7 @@ mod tests {
 
     #[cfg(not(windows))]
     #[test]
-    fn unix_rejects_windows_worker_protocol_fields_and_replacement_role() {
-        let worker = parse_upgrade(&[
-            "upgrade",
-            "--automatic-worker",
-            "--parent-pid",
-            "42",
-            "--startup-receipt",
-            "receipt",
-        ]);
-        assert!(validate_hidden_upgrade_protocol(&worker).is_err());
-
+    fn unix_rejects_windows_replacement_role() {
         let replacement = parse_upgrade(&[
             "upgrade",
             "--replacement-helper",
@@ -369,22 +295,5 @@ mod tests {
             "42",
         ]);
         assert!(validate_hidden_upgrade_protocol(&replacement).is_err());
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn windows_worker_requires_a_complete_parent_receipt_protocol() {
-        let incomplete = parse_upgrade(&["upgrade", "--automatic-worker"]);
-        assert!(validate_hidden_upgrade_protocol(&incomplete).is_err());
-
-        let complete = parse_upgrade(&[
-            "upgrade",
-            "--automatic-worker",
-            "--parent-pid",
-            "42",
-            "--startup-receipt",
-            "receipt",
-        ]);
-        assert!(validate_hidden_upgrade_protocol(&complete).is_ok());
     }
 }

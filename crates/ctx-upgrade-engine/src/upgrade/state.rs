@@ -18,7 +18,10 @@ use serde_json::{json, Map, Value};
 use uuid::Uuid;
 
 use super::{
-    install::{validate_recovery_observation, InstallationLock, PendingRecovery},
+    install::{
+        interrupted_recovery_admission_matches, validate_recovery_observation, InstallationLock,
+        PendingRecovery,
+    },
     SemanticLayoutPort, UpgradePlan,
 };
 
@@ -211,11 +214,10 @@ pub(super) fn begin_automatic_attempt_locked(
     Ok(Some(attempt))
 }
 
-/// Cheap, non-authoritative foreground hint for whether an automatic worker
-/// may need to run. This deliberately avoids the installation lock, marker
-/// parsing, and executable hashing; the scheduler repeats the cadence decision
-/// while holding the installation lock.
-pub fn automatic_upgrade_check_due(interval: Duration) -> Result<bool> {
+/// Cheap, non-authoritative daemon cadence hint. This deliberately avoids the
+/// installation lock, marker parsing, and executable hashing; the daemon
+/// repeats the cadence decision while holding the installation lock.
+pub(super) fn automatic_upgrade_check_due(interval: Duration) -> Result<bool> {
     let install_path = super::install::current_install_path()?;
     automatic_upgrade_check_due_for(&install_path, interval)
 }
@@ -239,6 +241,37 @@ fn automatic_upgrade_check_due_for(install_path: &Path, interval: Duration) -> R
 pub fn installation_upgrade_is_active() -> Result<bool> {
     let install_path = super::install::current_install_path()?;
     installation_upgrade_is_active_for(&install_path)
+}
+
+/// Whether an interrupted daemon-owned automatic attempt has enough matching,
+/// owner-safe evidence to admit its sole recovery owner. This is only an
+/// admission hint: recovery fully revalidates the journal after reclaiming the
+/// installation lock before any mutation.
+pub fn installation_interrupted_automatic_upgrade_is_recoverable() -> Result<bool> {
+    let install_path = super::install::current_install_path()?;
+    installation_interrupted_automatic_upgrade_is_recoverable_for(&install_path)
+}
+
+fn installation_interrupted_automatic_upgrade_is_recoverable_for(
+    install_path: &Path,
+) -> Result<bool> {
+    let Some(state) = read_state_object_bounded(install_path) else {
+        return Ok(false);
+    };
+    let Some(attempt_id) = state.attempt_id.as_deref().filter(|attempt_id| {
+        is_active_upgrade_status(&state.status)
+            && is_valid_upgrade_attempt_id(attempt_id)
+            && state
+                .attempt_source
+                .as_deref()
+                .is_some_and(is_automatic_attempt_source)
+    }) else {
+        return Ok(false);
+    };
+    let Some(_lock) = InstallationLock::try_acquire_for_recovery(install_path)? else {
+        return Ok(false);
+    };
+    Ok(interrupted_recovery_admission_matches(install_path, attempt_id).unwrap_or(false))
 }
 
 fn installation_upgrade_is_active_for(install_path: &Path) -> Result<bool> {
@@ -412,6 +445,30 @@ pub(super) fn begin_recovery_attempt_locked(
     let attempt = state.begin_recovery(attempt_id, source);
     write_state_object_locked(lock, state)?;
     Ok(attempt)
+}
+
+pub(super) fn automatic_recovery_channel_locked(
+    lock: &UpgradeLock,
+    attempt_id: &str,
+) -> Result<String> {
+    let state = read_state_object(&lock.install_path);
+    if state.attempt_id.as_deref() != Some(attempt_id)
+        || !state
+            .attempt_source
+            .as_deref()
+            .is_some_and(is_automatic_attempt_source)
+    {
+        return Err(anyhow!(
+            "interrupted automatic upgrade does not match its scheduler state"
+        ));
+    }
+    state
+        .plan
+        .get("channel")
+        .and_then(Value::as_str)
+        .filter(|channel| !channel.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| anyhow!("interrupted automatic upgrade has no selected channel"))
 }
 
 pub(super) fn write_state_phase_locked(

@@ -14,11 +14,12 @@ pub use install_marker::{
     current_exe_install_marker, current_exe_is_staging_dogfood, ActiveInstallAttribution,
 };
 pub use upgrade::{
-    active_installation_upgrade_attempt_id, automatic_upgrade_check_due,
-    current_exe_has_managed_install_marker_hint, current_exe_is_unmanaged, current_install_path,
-    installation_daemon_coordination_paths, installation_daemon_coordination_paths_for,
-    installation_executable_path, installation_hosted_uninstall_is_active,
-    installation_hosted_uninstall_is_active_for_executable, installation_upgrade_is_active,
+    active_installation_upgrade_attempt_id, current_exe_has_managed_install_marker_hint,
+    current_exe_is_unmanaged, current_install_path, installation_daemon_coordination_paths,
+    installation_daemon_coordination_paths_for, installation_executable_path,
+    installation_hosted_uninstall_is_active,
+    installation_hosted_uninstall_is_active_for_executable,
+    installation_interrupted_automatic_upgrade_is_recoverable, installation_upgrade_is_active,
     invalid_install_marker_recovery_guidance, is_valid_install_attempt_id,
     is_valid_upgrade_attempt_id, managed_install_executable,
     managed_install_marker_for_current_exe, read_state_json, run_hosted_transaction,

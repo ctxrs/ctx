@@ -32,11 +32,13 @@ pub use install::{
     unmanaged_install_conversion_guidance, HostedTransactionAction, HostedTransactionArgs,
     InstallMarker, ManagedInstallMarker,
 };
+use state::automatic_upgrade_check_due;
 pub use state::{
-    active_installation_upgrade_attempt_id, automatic_upgrade_check_due,
-    installation_daemon_coordination_paths, installation_daemon_coordination_paths_for,
-    installation_executable_path, installation_upgrade_is_active, is_valid_upgrade_attempt_id,
-    read_state_json, terminal_installation_upgrade_attempt_id, STATE_SCHEMA_VERSION,
+    active_installation_upgrade_attempt_id, installation_daemon_coordination_paths,
+    installation_daemon_coordination_paths_for, installation_executable_path,
+    installation_interrupted_automatic_upgrade_is_recoverable, installation_upgrade_is_active,
+    is_valid_upgrade_attempt_id, read_state_json, terminal_installation_upgrade_attempt_id,
+    STATE_SCHEMA_VERSION,
 };
 
 /// Product identity supplied by the ctx composition root.
@@ -182,6 +184,7 @@ pub trait DaemonUpgradePort: Send + Sync {
 }
 
 pub trait AutomaticUpgradePolicySnapshot {
+    fn daemon_maintenance_enabled(&self) -> bool;
     fn automatic_upgrade_enabled(&self) -> bool;
     fn interval(&self) -> Duration;
     fn channel(&self) -> &str;

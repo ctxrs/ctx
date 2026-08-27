@@ -915,27 +915,14 @@ mod unix {
         assert_source_backed_epoch_remained_fresh(&second_data_root);
     }
 
-    mod invocation_driver {
-        include!("auto_upgrade_acceptance/invocation_driver.rs");
+    mod invalid_marker {
+        use super::*;
+
         include!("auto_upgrade_acceptance/invalid_marker.rs");
     }
-    #[test]
-    fn automatic_indexing_foreground_command_defers_to_daemon_driver() {
-        let temp = tempdir();
-        let release = fake_release(&temp, "9.9.9");
-        let binary = managed_candidate(&temp, "ia_foreground_no_authority");
-        let before = fs::read(&binary).unwrap();
 
-        managed_release_env_for_installation(
-            ctx_from_binary(&temp, &binary).arg("sources"),
-            &release,
-            &binary,
-        )
-        .assert()
-        .success();
-
-        assert_eq!(fs::read(&binary).unwrap(), before);
-        assert!(!scheduler_state_path(&binary).exists());
+    mod foreground_authority {
+        include!("auto_upgrade_acceptance/foreground_authority.rs");
     }
 
     #[test]

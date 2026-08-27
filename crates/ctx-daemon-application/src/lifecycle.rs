@@ -339,7 +339,13 @@ fn request_daemon_autostart(
     if profile == DaemonLaunchProfile::Persistent && !daemon_autostart_allowed(data_root, config) {
         return Ok(DaemonAutostartRequest::Suppressed("not_allowed"));
     }
-    if host.installation_upgrade_active().unwrap_or(false) {
+    let automatic_recovery_allowed = profile == DaemonLaunchProfile::Persistent
+        && config.enabled
+        && config.mode == DaemonMode::Full
+        && host
+            .automatic_upgrade_recovery_allowed(data_root)
+            .unwrap_or(false);
+    if host.installation_upgrade_active().unwrap_or(false) && !automatic_recovery_allowed {
         return Ok(DaemonAutostartRequest::Suppressed(
             "installation_upgrade_active",
         ));

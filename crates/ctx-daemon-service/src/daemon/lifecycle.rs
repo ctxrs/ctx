@@ -113,6 +113,18 @@ pub(super) fn daemon_should_schedule_auto_upgrade(
     daemon_enabled && daemon_mode == DaemonMode::Full && automatic_upgrade_enabled
 }
 
+pub(super) fn daemon_automatic_recovery_allowed(
+    config: &AppConfig,
+    finite_core_worker: bool,
+) -> bool {
+    !finite_core_worker
+        && daemon_should_schedule_auto_upgrade(
+            config.daemon.enabled,
+            config.daemon.mode,
+            config.automatic_upgrade_enabled,
+        )
+}
+
 #[cfg(any(test, feature = "test-support"))]
 pub(super) fn fail_daemon_before_ready_for_test(data_root: &Path) -> Result<()> {
     if data_root

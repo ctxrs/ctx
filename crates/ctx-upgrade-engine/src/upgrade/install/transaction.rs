@@ -332,6 +332,13 @@ pub(in crate::upgrade) fn pending_recovery(
     Ok(None)
 }
 
+pub(super) fn interrupted_recovery_admission_matches(
+    install_path: &Path,
+    attempt_id: &str,
+) -> Result<bool> {
+    journal::interrupted_recovery_admission_matches(install_path, attempt_id)
+}
+
 pub(in crate::upgrade) fn remove_terminal_recovery(
     expected: &PendingRecovery,
     _installation_lock: &super::InstallationLock,

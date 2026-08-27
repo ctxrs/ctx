@@ -103,8 +103,10 @@ shipped.
 - Official installer-managed binaries can use signed release metadata for an
   explicit `ctx upgrade` command and automatic checks while automatic upgrades
   are enabled. Auto indexing with the full daemon profile uses the persistent
-  daemon; manual and source-refresh-only modes use detached workers launched by
-  eligible completed commands.
+  daemon as the sole automatic-upgrade authority; manual and
+  source-refresh-only modes perform no automatic upgrade work.
+- Ordinary foreground commands and MCP do not claim or spawn automatic
+  upgrades.
 - Finite Core workers do not perform automatic upgrade checks or application.
 - Unmanaged installs do not self-upgrade.
 - No provider beyond the support matrix should be described as supported.

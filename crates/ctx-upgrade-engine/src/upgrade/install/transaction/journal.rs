@@ -24,6 +24,7 @@ use std::path::Component;
 mod semantic;
 
 const INSTALL_TRANSACTION_FILE: &str = "upgrade-install-transaction.json";
+const INSTALL_TRANSACTION_MAX_BYTES: u64 = 256 * 1024;
 pub(super) const INSTALL_TRANSACTION_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -204,6 +205,27 @@ pub(super) fn read(install_path: &Path) -> Result<Option<InstallTransactionJourn
     let journal = serde_json::from_slice(&bytes)
         .with_context(|| format!("parse interrupted install transaction {}", path.display()))?;
     Ok(Some(journal))
+}
+
+pub(super) fn interrupted_recovery_admission_matches(
+    install_path: &Path,
+    attempt_id: &str,
+) -> Result<bool> {
+    let path = install_transaction_path(install_path);
+    let Some(bytes) = super::super::read_stable_file(
+        &path,
+        "ctx interrupted install transaction",
+        INSTALL_TRANSACTION_MAX_BYTES,
+        super::super::StableFileKind::Data,
+    )?
+    else {
+        return Ok(false);
+    };
+    let journal: InstallTransactionJournal = serde_json::from_slice(&bytes)
+        .with_context(|| format!("parse interrupted install transaction {}", path.display()))?;
+    validate_identity(&journal)?;
+    validate_phase_state(&journal)?;
+    Ok(journal.attempt_id == attempt_id && journal.install_path == install_path)
 }
 
 pub(super) fn write(journal: &InstallTransactionJournal) -> Result<()> {

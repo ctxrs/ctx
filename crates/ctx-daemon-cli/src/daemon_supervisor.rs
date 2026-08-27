@@ -49,6 +49,14 @@ impl ctx_daemon_application::DaemonApplicationHost for CliDaemonApplicationHost<
         ctx_upgrade_engine::installation_upgrade_is_active()
     }
 
+    fn automatic_upgrade_recovery_allowed(&self, data_root: &Path) -> Result<bool> {
+        let config = crate::config::AppConfig::load(data_root)?;
+        Ok(config.daemon.enabled
+            && config.daemon.mode == crate::config::DaemonMode::Full
+            && config.auto_upgrade_enabled()
+            && ctx_upgrade_engine::installation_interrupted_automatic_upgrade_is_recoverable()?)
+    }
+
     fn daemon_config(
         &self,
         data_root: &Path,

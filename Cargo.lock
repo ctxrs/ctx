@@ -544,7 +544,6 @@ dependencies = [
  "ctx-client-observability",
  "ctx-companion-bridge",
  "ctx-daemon-cli",
- "ctx-daemon-runtime",
  "ctx-history-capture",
  "ctx-history-cli",
  "ctx-history-core",

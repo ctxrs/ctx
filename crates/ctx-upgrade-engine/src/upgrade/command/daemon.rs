@@ -83,8 +83,19 @@ enum PreparedAutomaticUpgradeKind {
     },
 }
 
-/// Claim and stage one automatic attempt. Persistent daemons and detached
-/// invocation workers both enter through this installation-scoped scheduler.
+fn automatic_maintenance_allowed<S: AutomaticUpgradePolicySnapshot>(policy: &S) -> bool {
+    policy.daemon_maintenance_enabled() && policy.automatic_upgrade_enabled()
+}
+
+fn automatic_channel_is_current<S: AutomaticUpgradePolicySnapshot>(
+    policy: &S,
+    selected_channel: &str,
+) -> bool {
+    policy.channel() == selected_channel
+}
+
+/// Claim and stage one automatic attempt for the persistent daemon's
+/// installation-scoped scheduler.
 pub(crate) fn prepare_automatic_upgrade<D, P, O>(
     engine: &UpgradeEngine<'_, D>,
     policy_provider: &P,
@@ -99,7 +110,7 @@ where
 {
     let started = Instant::now();
     let current = policy_provider.reload(data_root)?;
-    if !startup_policy.automatic_upgrade_enabled() || !current.automatic_upgrade_enabled() {
+    if !automatic_maintenance_allowed(startup_policy) || !automatic_maintenance_allowed(&current) {
         return Ok(None);
     }
     let (attempt, lock) = loop {
@@ -151,8 +162,11 @@ where
             else {
                 return Ok(None);
             };
+            let channel = automatic_recovery_channel_locked(&lock, &recovery.attempt_id)?;
             let current = policy_provider.reload(data_root)?;
-            if !current.automatic_upgrade_enabled() {
+            if !automatic_maintenance_allowed(&current)
+                || !automatic_channel_is_current(&current, &channel)
+            {
                 return Ok(None);
             }
             let attempt = begin_recovery_attempt_locked(&lock, &recovery.attempt_id, "automatic")?;
@@ -418,6 +432,19 @@ where
                 lock,
                 attempt,
             } => {
+                let channel = match automatic_recovery_channel_locked(&lock, &recovery.attempt_id) {
+                    Ok(channel) => channel,
+                    Err(error) => {
+                        return fail_automatic_before_apply(
+                            &recovery.data_root,
+                            lock,
+                            attempt,
+                            handoff,
+                            &recovery.install_path,
+                            error,
+                        );
+                    }
+                };
                 let current = match policy_provider.reload(&recovery.data_root) {
                     Ok(current) => current,
                     Err(error) => {
@@ -431,12 +458,19 @@ where
                         );
                     }
                 };
-                if !current.automatic_upgrade_enabled() {
+                if !automatic_maintenance_allowed(&current)
+                    || !automatic_channel_is_current(&current, &channel)
+                {
+                    let detail = if automatic_maintenance_allowed(&current) {
+                        "automatic interrupted-install recovery channel changed"
+                    } else {
+                        "automatic interrupted-install recovery was disabled"
+                    };
                     if let Err(error) = reconcile_replacement_terminal_locked(
                         &lock,
                         &recovery.attempt_id,
                         false,
-                        Some("automatic interrupted-install recovery was disabled"),
+                        Some(detail),
                         interval,
                     ) {
                         return fail_automatic_before_apply(
@@ -581,7 +615,9 @@ where
             );
         }
     };
-    if !current.automatic_upgrade_enabled() {
+    if !automatic_maintenance_allowed(&current)
+        || !automatic_channel_is_current(&current, plan.channel())
+    {
         if let Err(error) =
             write_state_checked_locked(&data_root, &lock, &attempt, &plan, "disabled", interval)
         {

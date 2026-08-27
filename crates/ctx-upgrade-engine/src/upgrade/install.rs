@@ -241,6 +241,13 @@ pub(in crate::upgrade) fn pending_recovery(
     transaction::pending_recovery(data_root, semantic_layout)
 }
 
+pub(in crate::upgrade) fn interrupted_recovery_admission_matches(
+    install_path: &Path,
+    attempt_id: &str,
+) -> Result<bool> {
+    transaction::interrupted_recovery_admission_matches(install_path, attempt_id)
+}
+
 pub(in crate::upgrade) fn remove_terminal_recovery(
     expected: &PendingRecovery,
     installation_lock: &InstallationLock,

@@ -29,10 +29,10 @@ use super::metadata::{
     verify_metadata_signature,
 };
 use super::state::{
-    begin_automatic_attempt_locked, begin_manual_attempt_locked, begin_recovery_attempt_locked,
-    reconcile_replacement_terminal_locked, try_acquire_automatic_upgrade,
-    write_state_checked_locked, write_state_error_locked, write_state_phase_locked,
-    AutomaticUpgradeLease, UpgradeAttempt, UpgradeLock,
+    automatic_recovery_channel_locked, begin_automatic_attempt_locked, begin_manual_attempt_locked,
+    begin_recovery_attempt_locked, reconcile_replacement_terminal_locked,
+    try_acquire_automatic_upgrade, write_state_checked_locked, write_state_error_locked,
+    write_state_phase_locked, AutomaticUpgradeLease, UpgradeAttempt, UpgradeLock,
 };
 use super::{
     automatic_upgrade_check_due, env_flag, platform_key, version_gt, AutomaticUpgradeObservation,
@@ -204,44 +204,6 @@ impl<D: DaemonUpgradePort + ?Sized> UpgradeEngine<'_, D> {
         O: UpgradeObserver<P::Snapshot>,
     {
         finish_automatic_upgrade(self, policy_provider, observer, prepared, handoff)
-    }
-
-    /// Run one complete automatic attempt from a detached command worker.
-    /// The persistent daemon enters through the same installation scheduler.
-    pub fn run_automatic<P, O>(
-        &self,
-        policy_provider: &P,
-        observer: &O,
-        data_root: &Path,
-        startup_policy: &P::Snapshot,
-    ) -> Result<()>
-    where
-        P: AutomaticUpgradePolicyProvider,
-        O: UpgradeObserver<P::Snapshot>,
-    {
-        let Some(prepared) =
-            self.prepare_automatic(policy_provider, observer, data_root, startup_policy)?
-        else {
-            return Ok(());
-        };
-        let attempt_id = prepared
-            .attempt_id()
-            .ok_or_else(|| anyhow!("automatic upgrade prepared without an attempt identity"))?
-            .to_owned();
-        let owner_root = prepared.data_root().to_path_buf();
-        let handoff = match self.daemon.begin(&owner_root, &attempt_id) {
-            Ok(handoff) => handoff,
-            Err(error) => {
-                let abort_error = prepared.abort(&error).err();
-                return Err(match abort_error {
-                    Some(abort_error) => error.context(format!(
-                        "also failed to terminalize automatic upgrade state: {abort_error:#}"
-                    )),
-                    None => error,
-                });
-            }
-        };
-        self.finish_automatic(policy_provider, observer, prepared, Some(handoff))
     }
 }
 

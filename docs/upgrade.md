@@ -29,29 +29,20 @@ the effective mode is `off` even when config or process environment requests
 `apply`. This derived result is not persisted, so converting an unmanaged
 install does not leave a sticky opt-out. Signed release metadata must also
 allow automatic application. With automatic indexing and the full daemon
-profile, the persistent daemon drives automatic checks. When that full driver
-is absent—manual indexing or
-`daemon.mode = "source-refresh-only"`—successful commands in the `setup`,
-`index`, `sources`, `import`, `show`, `list`, `locate`, `search`,
-`integrations`, and `doctor` families perform a cheap post-output cadence hint
-and, only when a check may be due, launch a detached automatic-upgrade worker.
-The worker reloads policy and uses the same managed-install scheduler state,
-lock, backoff, signed metadata, daemon handoff, and replacement transaction as
-the daemon. Daemon lifecycle and supervisor coordination is unified under the
-canonical `~/.ctx` root.
-
-The foreground hint parses only the bounded install marker; it does not acquire
-the upgrade lock, parse or hash the executable, access the network, or change
-command output. The `status`,
-`stats`, `docs`, MCP, `daemon`, `upgrade`, and companion command families do
-not launch a worker, and finite Core indexing workers never own upgrade
-maintenance. Failed commands and failed output delivery do not launch one.
-Output format does not change these rules.
+profile, the enabled persistent daemon is the sole
+automatic-upgrade authority. It owns cadence and backoff, signed metadata and
+artifact requests, staging, daemon handoff, and replacement. Ordinary
+foreground commands and MCP never claim or spawn automatic upgrade work, and
+finite Core indexing workers do not perform it. Manual indexing and
+`daemon.mode = "source-refresh-only"` therefore perform no automatic checks.
+Output format does not change these rules. Explicit `ctx upgrade` remains
+available independently of daemon and automatic-upgrade settings.
 
 Use `ctx index mode` to inspect the indexing mode. `ctx index mode auto`
 restores automatic indexing and its persistent daemon when no process-level
 override disables it; `ctx index mode manual` stops the daemon and removes its
-supervision without disabling managed automatic upgrades.
+supervision without changing `upgrade.auto`. Automatic checks resume only after
+the full persistent daemon is restored.
 
 Use `CTX_UPGRADE_AUTO=off` for a process-level opt-out. For a persistent opt-out,
 run `ctx upgrade disable`; it writes `upgrade.auto = "off"` in `config.toml`.

@@ -277,19 +277,6 @@ fn canonical_indexing_mode_wins_over_legacy_daemon_enabled() {
 }
 
 #[test]
-fn persistent_upgrade_driver_requires_automatic_indexing_and_full_daemon_mode() {
-    let mut config = AppConfig::default();
-    assert!(config.persistent_automatic_upgrade_driver_enabled());
-
-    config.daemon.mode = DaemonMode::SourceRefreshOnly;
-    assert!(!config.persistent_automatic_upgrade_driver_enabled());
-
-    config.daemon.mode = DaemonMode::Full;
-    config.indexing.mode = IndexingMode::Manual;
-    assert!(!config.persistent_automatic_upgrade_driver_enabled());
-}
-
-#[test]
 fn indexing_mode_accepts_canonical_and_automatic_alias() {
     for (spelling, expected, canonical) in [
         ("auto", IndexingMode::Automatic, "auto"),

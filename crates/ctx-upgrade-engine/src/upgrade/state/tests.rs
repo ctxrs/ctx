@@ -1,6 +1,6 @@
 use super::*;
 
-fn due_hint_install(temp: &tempfile::TempDir) -> PathBuf {
+fn daemon_due_hint_install(temp: &tempfile::TempDir) -> PathBuf {
     let install = temp.path().join("ctx");
     fs::write(&install, b"test executable").unwrap();
     fs::write(
@@ -12,7 +12,7 @@ fn due_hint_install(temp: &tempfile::TempDir) -> PathBuf {
 }
 
 #[test]
-fn foreground_due_hint_is_inert_without_a_regular_marker() -> Result<()> {
+fn daemon_due_hint_is_inert_without_a_regular_marker() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let install = temp.path().join("ctx");
     fs::write(&install, b"test executable")?;
@@ -35,9 +35,9 @@ fn foreground_due_hint_is_inert_without_a_regular_marker() -> Result<()> {
 }
 
 #[test]
-fn foreground_due_hint_uses_bounded_shared_cadence() -> Result<()> {
+fn daemon_due_hint_uses_bounded_shared_cadence() -> Result<()> {
     let temp = tempfile::tempdir()?;
-    let install = due_hint_install(&temp);
+    let install = daemon_due_hint_install(&temp);
     let interval = Duration::from_secs(60);
     assert!(automatic_upgrade_check_due_for(&install, interval)?);
 
@@ -63,11 +63,11 @@ fn foreground_due_hint_uses_bounded_shared_cadence() -> Result<()> {
 
 #[cfg(unix)]
 #[test]
-fn foreground_due_hint_does_not_follow_or_block_on_nonregular_state() -> Result<()> {
+fn daemon_due_hint_does_not_follow_or_block_on_nonregular_state() -> Result<()> {
     use std::{ffi::CString, os::unix::ffi::OsStrExt as _};
 
     let temp = tempfile::tempdir()?;
-    let install = due_hint_install(&temp);
+    let install = daemon_due_hint_install(&temp);
     let state = state_path(&install);
     std::os::unix::fs::symlink("/dev/zero", &state)?;
     assert!(automatic_upgrade_check_due_for(
@@ -88,9 +88,9 @@ fn foreground_due_hint_does_not_follow_or_block_on_nonregular_state() -> Result<
 }
 
 #[test]
-fn foreground_due_hint_suppresses_only_recent_in_progress_attempts() -> Result<()> {
+fn daemon_due_hint_suppresses_only_recent_in_progress_attempts() -> Result<()> {
     let temp = tempfile::tempdir()?;
-    let install = due_hint_install(&temp);
+    let install = daemon_due_hint_install(&temp);
     let interval = Duration::from_secs(60);
 
     fs::write(
@@ -190,6 +190,68 @@ fn active_current_state_remains_fenced_while_installation_is_locked() -> Result<
     )?;
 
     assert!(installation_upgrade_is_active_for(&install_path)?);
+    Ok(())
+}
+
+#[test]
+fn only_trusted_automatic_active_state_admits_the_recovery_daemon() -> Result<()> {
+    let (temp, install_path) = test_installation()?;
+    let attempt_id = "ua_recovery_admission_test";
+    let journal_path = install_path.with_file_name(".ctx.upgrade-install-transaction.json");
+    let data_root = temp.path().join("data-root");
+    ctx_history_platform::platform_security::create_private_directory_all(&data_root)?;
+    atomic_write_json(
+        &journal_path,
+        &json!({
+            "schema_version": 2,
+            "attempt_id": attempt_id,
+            "data_root": data_root,
+            "runtime_root": data_root.join("runtime"),
+            "phase": "publishing",
+            "install_path": install_path,
+            "paths": [],
+        }),
+    )?;
+    assert!(interrupted_recovery_admission_matches(
+        &install_path,
+        attempt_id
+    )?);
+    for (source, expected) in [("automatic", true), ("daemon", true), ("manual", false)] {
+        atomic_write_json(
+            &state_path(&install_path),
+            &json!({
+                "schema_version": STATE_SCHEMA_VERSION,
+                "status": "applying",
+                "attempt_id": attempt_id,
+                "attempt_source": source,
+            }),
+        )?;
+        assert_eq!(
+            installation_interrupted_automatic_upgrade_is_recoverable_for(&install_path)?,
+            expected,
+            "{source}"
+        );
+    }
+
+    atomic_write_json(
+        &state_path(&install_path),
+        &json!({
+            "schema_version": STATE_SCHEMA_VERSION,
+            "status": "applying",
+            "attempt_id": attempt_id,
+            "attempt_source": "automatic",
+        }),
+    )?;
+    let _live_upgrade = InstallationLock::try_acquire(&install_path)?
+        .ok_or_else(|| anyhow!("test installation lock held"))?;
+    assert!(!installation_interrupted_automatic_upgrade_is_recoverable_for(&install_path)?);
+    drop(_live_upgrade);
+
+    fs::write(&journal_path, b"{not valid transaction journal")?;
+    assert!(!installation_interrupted_automatic_upgrade_is_recoverable_for(&install_path)?);
+
+    fs::write(state_path(&install_path), b"{not valid upgrade state")?;
+    assert!(!installation_interrupted_automatic_upgrade_is_recoverable_for(&install_path)?);
     Ok(())
 }
 
