@@ -17,25 +17,32 @@ ctx upgrade enable
 The installer writes a sidecar marker next to the binary, such as
 `~/.local/bin/ctx.install.json`, recording the managed install path, platform,
 version, channel, binary SHA-256, metadata URL, and artifact URL. Source builds,
-`cargo install`, package-manager installs, copied binaries, and mismatched
-sidecars are treated as unmanaged and will not self-upgrade.
+`cargo install`, package-manager installs, and copied binaries without that
+marker are unmanaged and will not self-upgrade. A present but invalid marker
+is an inconsistent managed installation and also fails closed.
 `ctx upgrade status --format json` also lists every `ctx` binary found on `PATH` and
 warns when another binary shadows the managed install.
 
-Managed automatic upgrades are on by default (`upgrade.auto = "apply"`).
-Signed release metadata must also allow automatic application. With automatic
-indexing and the full daemon profile, the persistent daemon drives automatic
-checks. When that full driver is absent—manual indexing or
+Automatic upgrades are available only for a valid managed installation. The
+managed default is `upgrade.auto = "apply"`; without a valid installer marker,
+the effective mode is `off` even when config or process environment requests
+`apply`. This derived result is not persisted, so converting an unmanaged
+install does not leave a sticky opt-out. Signed release metadata must also
+allow automatic application. With automatic indexing and the full daemon
+profile, the persistent daemon drives automatic checks. When that full driver
+is absent—manual indexing or
 `daemon.mode = "source-refresh-only"`—successful commands in the `setup`,
 `index`, `sources`, `import`, `show`, `list`, `locate`, `search`,
 `integrations`, and `doctor` families perform a cheap post-output cadence hint
 and, only when a check may be due, launch a detached automatic-upgrade worker.
-The worker reloads policy and uses the same executable-scoped scheduler state,
+The worker reloads policy and uses the same managed-install scheduler state,
 lock, backoff, signed metadata, daemon handoff, and replacement transaction as
-the daemon.
+the daemon. Daemon lifecycle and supervisor coordination is unified under the
+canonical `~/.ctx` root.
 
-The foreground hint does not acquire the upgrade lock, parse or hash the
-installed binary, access the network, or change command output. The `status`,
+The foreground hint parses only the bounded install marker; it does not acquire
+the upgrade lock, parse or hash the executable, access the network, or change
+command output. The `status`,
 `stats`, `docs`, MCP, `daemon`, `upgrade`, and companion command families do
 not launch a worker, and finite Core indexing workers never own upgrade
 maintenance. Failed commands and failed output delivery do not launch one.
@@ -48,8 +55,11 @@ supervision without disabling managed automatic upgrades.
 
 Use `CTX_UPGRADE_AUTO=off` for a process-level opt-out. For a persistent opt-out,
 run `ctx upgrade disable`; it writes `upgrade.auto = "off"` in `config.toml`.
-Run `ctx upgrade enable` to restore `upgrade.auto = "apply"`. `ctx status` and
-`ctx doctor` report the effective mode after config and process overrides.
+On a managed install, run `ctx upgrade enable` to restore
+`upgrade.auto = "apply"`. On an unmanaged or inconsistent install, enable
+fails with conversion/recovery guidance before writing config. `ctx upgrade
+status`, `ctx status`, and `ctx doctor` report the effective mode after install
+authority, config, and process overrides.
 
 ## Fix upgrade diagnostics
 
@@ -60,9 +70,14 @@ order; in PowerShell, use `Get-Command ctx -All`.
 
 An absent install marker is normal for a source build or package-manager
 install and leaves ctx unmanaged. The hosted installer will not silently adopt
-that executable. A marker that is malformed, unsupported, path-mismatched, or
-does not match the binary hash leaves the executable and marker as an
-inconsistent pair; do not edit or overwrite the sidecar in place.
+that executable. Unmanaged installations never write upgrade locks or state
+beside the executable, so read-only package-manager directories (for example
+Nix) keep working. Daemon coordination remains unified under `~/.ctx`, `ctx
+upgrade check` stays lock-free and stateless, and `ctx upgrade` or `ctx upgrade
+enable` reports the unmanaged guidance instead of a directory-permission error.
+A marker that is malformed, unsupported, path-mismatched, or does not match the
+binary hash leaves the executable and marker as an inconsistent pair; do not
+edit or overwrite the sidecar in place.
 
 Before moving or removing either an unmanaged executable or an inconsistent
 executable/marker pair, run the lifecycle handoff with the currently installed
@@ -73,7 +88,9 @@ ctx daemon disable --prepare-uninstall --format=json
 ```
 
 Continue only after the command succeeds and its JSON receipt reports a
-quiescent installation. Then move or remove the unmanaged executable, or both
+quiescent installation. The receipt is point-in-time rather than a persistent
+launch fence: do not run ctx again, and proceed directly to the serialized
+replacement operation. Then move or remove the unmanaged executable, or both
 members of the inconsistent pair, and rerun the platform-correct hosted
 installer. On Linux or macOS:
 
@@ -132,6 +149,8 @@ running `ctx.exe` exits; JSON reports `status: "scheduled"` and
 One scheduler state, `.ctx.upgrade-state.json`, and one replacement transaction
 journal live beside the managed executable. The executable-adjacent
 `.ctx.install.lock` coordinates all data roots sharing that installation.
-`ctx upgrade status` reads the scheduler state and shows failed-check details.
+Daemon lifecycle and supervisor coordination is separate and unified under the
+canonical `~/.ctx` root. `ctx upgrade status` reads the scheduler state and
+shows failed-check details.
 Upgrade metadata checks do not send provider transcript text, search queries,
 result snippets, source paths, repository names, or command output.

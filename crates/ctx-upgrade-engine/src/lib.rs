@@ -14,7 +14,8 @@ pub use install_marker::{
     current_exe_install_marker, current_exe_is_staging_dogfood, ActiveInstallAttribution,
 };
 pub use upgrade::{
-    active_installation_upgrade_attempt_id, automatic_upgrade_check_due, current_install_path,
+    active_installation_upgrade_attempt_id, automatic_upgrade_check_due,
+    current_exe_has_managed_install_marker_hint, current_exe_is_unmanaged, current_install_path,
     installation_daemon_coordination_paths, installation_daemon_coordination_paths_for,
     installation_executable_path, installation_hosted_uninstall_is_active,
     installation_hosted_uninstall_is_active_for_executable, installation_upgrade_is_active,

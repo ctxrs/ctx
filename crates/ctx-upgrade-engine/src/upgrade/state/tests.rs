@@ -208,20 +208,98 @@ fn untrusted_state_remains_fail_closed_while_installation_is_locked() -> Result<
     Ok(())
 }
 
+#[cfg(unix)]
 #[test]
-fn scheduler_state_path_is_installation_scoped() {
+fn unmanaged_read_only_installation_is_never_active_without_a_lock() -> Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let (temp, install_path) = test_installation()?;
+    // No install marker: an unmanaged, third-party packaged installation.
+    // Make the executable directory read-only to prove no installation lock
+    // or coordination file is required to observe it.
+    let bin = install_path.parent().unwrap();
+    fs::set_permissions(bin, fs::Permissions::from_mode(0o555))?;
+
+    assert!(!installation_upgrade_is_active_for(&install_path)?);
+
+    fs::set_permissions(bin, fs::Permissions::from_mode(0o755))?;
+    drop(temp);
+    Ok(())
+}
+
+#[test]
+fn unmanaged_installation_with_active_state_remains_fenced() -> Result<()> {
+    let (_temp, install_path) = test_installation()?;
+    // No install marker, but a leftover active scheduler record must still
+    // fence: the unmanaged shortcut never bypasses active-state observation.
+    atomic_write_json(
+        &state_path(&install_path),
+        &json!({
+            "schema_version": STATE_SCHEMA_VERSION,
+            "status": "applying",
+            "attempt_id": "ua_unmanaged_active_test",
+        }),
+    )?;
+
+    assert!(installation_upgrade_is_active_for(&install_path)?);
+    Ok(())
+}
+
+#[test]
+fn scheduler_state_path_remains_installation_scoped() {
     let install = Path::new("/opt/ctx/bin/ctx");
     assert_eq!(
         state_path(install),
         Path::new("/opt/ctx/bin/.ctx.upgrade-state.json")
     );
+}
+
+#[test]
+fn daemon_coordination_is_user_scoped_by_canonical_executable() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let user_state = temp.path().join("user-state");
+    let first_bin = temp.path().join("first").join("bin");
+    let second_bin = temp.path().join("second").join("bin");
+    fs::create_dir_all(&first_bin)?;
+    fs::create_dir_all(&second_bin)?;
+    let first = first_bin.join("ctx");
+    let second = second_bin.join("ctx");
+    fs::write(&first, b"first ctx executable")?;
+    fs::write(&second, b"second ctx executable")?;
+
+    let first_paths = installation_daemon_coordination_paths_in(&user_state, &first)?;
+    let aliased_first = first_bin.join("..").join("bin").join("ctx");
     assert_eq!(
-        installation_daemon_coordination_paths_for(install),
-        (
-            PathBuf::from("/opt/ctx/bin/.ctx.daemon-quiescence.lock"),
-            PathBuf::from("/opt/ctx/bin/.ctx.daemon-quiescence-acks"),
-        )
+        installation_daemon_coordination_paths_in(&user_state, &aliased_first)?,
+        first_paths,
+        "path aliases for one executable must share coordination"
     );
+    assert_eq!(
+        first_paths.0.file_name().and_then(|name| name.to_str()),
+        Some(DAEMON_QUIESCENCE_LOCK_FILE)
+    );
+    assert_eq!(
+        first_paths.1.file_name().and_then(|name| name.to_str()),
+        Some(DAEMON_QUIESCENCE_ACK_DIR)
+    );
+    let expected_coordination_root = user_state.join(DAEMON_INSTALLATION_STATE_DIR);
+    assert_eq!(
+        first_paths.0.parent().and_then(Path::parent),
+        Some(expected_coordination_root.as_path())
+    );
+
+    let second_paths = installation_daemon_coordination_paths_in(&user_state, &second)?;
+    assert_ne!(
+        first_paths.0.parent(),
+        second_paths.0.parent(),
+        "distinct executable paths must not share coordination"
+    );
+    assert_eq!(
+        state_path(&first),
+        first.with_file_name(".ctx.upgrade-state.json"),
+        "daemon coordination must not move scheduler state"
+    );
+    Ok(())
 }
 
 #[test]

@@ -108,8 +108,9 @@ impl FiniteCoreWorkerExit {
 pub(super) fn daemon_should_schedule_auto_upgrade(
     daemon_enabled: bool,
     daemon_mode: DaemonMode,
+    automatic_upgrade_enabled: bool,
 ) -> bool {
-    daemon_enabled && daemon_mode == DaemonMode::Full
+    daemon_enabled && daemon_mode == DaemonMode::Full && automatic_upgrade_enabled
 }
 
 #[cfg(any(test, feature = "test-support"))]

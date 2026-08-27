@@ -20,7 +20,9 @@ pub(crate) fn maybe_spawn_automatic(
     } else {
         startup_config
     };
-    if !config.auto_upgrade_enabled() || config.persistent_automatic_upgrade_driver_enabled() {
+    if !super::automatic_upgrade_eligible_hint(config)
+        || config.persistent_automatic_upgrade_driver_enabled()
+    {
         return;
     }
     if !ctx_upgrade_engine::automatic_upgrade_check_due(config.upgrade.interval).unwrap_or(false) {

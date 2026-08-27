@@ -5,6 +5,11 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt as _;
+#[cfg(windows)]
+use std::os::windows::ffi::OsStrExt as _;
+
 use anyhow::{anyhow, Context, Result};
 use ctx_history_core::utc_now;
 use ctx_history_platform::platform_security::restrict_private_file_handle;
@@ -21,6 +26,7 @@ pub const STATE_FILE: &str = "upgrade-state.json";
 pub const STATE_SCHEMA_VERSION: u64 = 1;
 const DAEMON_QUIESCENCE_LOCK_FILE: &str = "daemon-quiescence.lock";
 const DAEMON_QUIESCENCE_ACK_DIR: &str = "daemon-quiescence-acks";
+const DAEMON_INSTALLATION_STATE_DIR: &str = "daemon-installations";
 const INITIAL_FAILURE_BACKOFF: Duration = Duration::from_secs(60);
 const MAX_FAILURE_BACKOFF: Duration = Duration::from_secs(6 * 60 * 60);
 const DUE_HINT_STATE_MAX_BYTES: u64 = 64 * 1024;
@@ -45,11 +51,8 @@ pub fn is_valid_upgrade_attempt_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
 }
 
-pub(super) enum AutoUpgradeClaim {
-    Claimed {
-        attempt: UpgradeAttempt,
-        lock: UpgradeLock,
-    },
+pub(super) enum AutomaticUpgradeLease {
+    Acquired(UpgradeLock),
     NotDue,
     Contended,
 }
@@ -178,24 +181,40 @@ impl UpgradeState {
     }
 }
 
-pub(super) fn claim_automatic_upgrade(interval: Duration) -> Result<AutoUpgradeClaim> {
+pub(super) fn try_acquire_automatic_upgrade(interval: Duration) -> Result<AutomaticUpgradeLease> {
+    // Unmanaged installations never self-upgrade; the automatic scheduler
+    // stays dormant without touching their executable directory.
+    if super::install::current_exe_is_unmanaged() {
+        return Ok(AutomaticUpgradeLease::NotDue);
+    }
     let Some(lock) = UpgradeLock::try_acquire()? else {
-        return Ok(AutoUpgradeClaim::Contended);
+        return Ok(AutomaticUpgradeLease::Contended);
     };
-    let mut state = read_state_object(&lock.install_path);
+    let state = read_state_object(&lock.install_path);
     let now = now_unix_s();
     if !auto_check_due(&state, interval, now) {
-        return Ok(AutoUpgradeClaim::NotDue);
+        return Ok(AutomaticUpgradeLease::NotDue);
+    }
+    Ok(AutomaticUpgradeLease::Acquired(lock))
+}
+
+pub(super) fn begin_automatic_attempt_locked(
+    lock: &UpgradeLock,
+    interval: Duration,
+) -> Result<Option<UpgradeAttempt>> {
+    let mut state = read_state_object(&lock.install_path);
+    if !auto_check_due(&state, interval, now_unix_s()) {
+        return Ok(None);
     }
     let attempt = state.begin("automatic");
-    write_state_object_locked(&lock, state)?;
-    Ok(AutoUpgradeClaim::Claimed { attempt, lock })
+    write_state_object_locked(lock, state)?;
+    Ok(Some(attempt))
 }
 
 /// Cheap, non-authoritative foreground hint for whether an automatic worker
 /// may need to run. This deliberately avoids the installation lock, marker
-/// parsing, and executable hashing; the detached worker repeats the cadence
-/// decision while holding the installation lock.
+/// parsing, and executable hashing; the scheduler repeats the cadence decision
+/// while holding the installation lock.
 pub fn automatic_upgrade_check_due(interval: Duration) -> Result<bool> {
     let install_path = super::install::current_install_path()?;
     automatic_upgrade_check_due_for(&install_path, interval)
@@ -223,8 +242,18 @@ pub fn installation_upgrade_is_active() -> Result<bool> {
 }
 
 fn installation_upgrade_is_active_for(install_path: &Path) -> Result<bool> {
-    if observe_installation_upgrade(install_path) == InstallationUpgradeObservation::Active {
+    let observation = observe_installation_upgrade(install_path);
+    if observation == InstallationUpgradeObservation::Active {
         return Ok(true);
+    }
+    // An unmanaged installation never mutates through the hosted installer,
+    // so it has no installation-lock protocol to observe and its executable
+    // directory may not even be writable. Corrupt or unknown state records
+    // still fail closed through the lock protocol below.
+    if observation != InstallationUpgradeObservation::Untrusted
+        && super::install::installation_is_unmanaged_at(install_path)
+    {
+        return Ok(false);
     }
     if InstallationLock::try_acquire(install_path)?.is_some() {
         return Ok(false);
@@ -275,6 +304,11 @@ pub fn active_installation_upgrade_attempt_id() -> Result<Option<String>> {
     if active_attempt.is_some() {
         return Ok(active_attempt);
     }
+    // An unmanaged installation never owns an upgrade attempt and has no
+    // installation lock to consult.
+    if super::install::installation_is_unmanaged_at(&install_path) {
+        return Ok(None);
+    }
     if InstallationLock::try_acquire(&install_path)?.is_none() {
         return Err(anyhow!(
             "ctx installation is locked without readable active upgrade state"
@@ -304,22 +338,55 @@ pub fn terminal_installation_upgrade_attempt_id() -> Result<Option<String>> {
 
 pub fn installation_daemon_coordination_paths() -> Result<(PathBuf, PathBuf)> {
     let install_path = super::install::current_install_path()?;
-    Ok(installation_daemon_coordination_paths_for(&install_path))
+    installation_daemon_coordination_paths_for(&install_path)
 }
 
 pub fn installation_executable_path() -> Result<PathBuf> {
     super::install::current_install_path()
 }
 
-pub fn installation_daemon_coordination_paths_for(install_path: &Path) -> (PathBuf, PathBuf) {
-    let name = install_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("ctx");
-    (
-        install_path.with_file_name(format!(".{name}.{DAEMON_QUIESCENCE_LOCK_FILE}")),
-        install_path.with_file_name(format!(".{name}.{DAEMON_QUIESCENCE_ACK_DIR}")),
-    )
+pub fn installation_daemon_coordination_paths_for(
+    install_path: &Path,
+) -> Result<(PathBuf, PathBuf)> {
+    let user_state_root = ctx_history_platform::managed_data_root()
+        .context("resolve environment-independent ctx user state")?;
+    installation_daemon_coordination_paths_in(&user_state_root, install_path)
+}
+
+fn installation_daemon_coordination_paths_in(
+    user_state_root: &Path,
+    install_path: &Path,
+) -> Result<(PathBuf, PathBuf)> {
+    let canonical = fs::canonicalize(install_path)
+        .with_context(|| format!("canonicalize ctx executable {}", install_path.display()))?;
+    let namespace = executable_path_namespace(&canonical);
+    let installation_root = user_state_root
+        .join(DAEMON_INSTALLATION_STATE_DIR)
+        .join(namespace);
+    Ok((
+        installation_root.join(DAEMON_QUIESCENCE_LOCK_FILE),
+        installation_root.join(DAEMON_QUIESCENCE_ACK_DIR),
+    ))
+}
+
+#[cfg(unix)]
+fn executable_path_namespace(path: &Path) -> String {
+    super::sha256_hex(path.as_os_str().as_bytes())
+}
+
+#[cfg(windows)]
+fn executable_path_namespace(path: &Path) -> String {
+    let bytes = path
+        .as_os_str()
+        .encode_wide()
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>();
+    super::sha256_hex(&bytes)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn executable_path_namespace(path: &Path) -> String {
+    super::sha256_hex(path.to_string_lossy().as_bytes())
 }
 
 pub(super) fn begin_manual_attempt_locked(

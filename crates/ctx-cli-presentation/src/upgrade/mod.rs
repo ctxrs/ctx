@@ -10,7 +10,7 @@ mod human;
 mod status;
 
 pub use diagnostics::{present_upgrade_diagnostics, UpgradeDiagnostics};
-pub use human::{render_auto_mode, render_error, render_outcome};
+pub use human::{render_auto_mode, render_error, render_outcome, AutoModeInstallAuthority};
 pub use status::{reconcile_scheduled_state, render_status, UpgradeStatusView};
 
 #[derive(Debug, Args)]

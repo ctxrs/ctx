@@ -5,9 +5,9 @@ use serde_json::json;
 use tempfile::tempdir;
 
 use super::{
-    absent_install_marker_error, classify_install_marker_at, install_marker_path,
-    invalid_install_marker_recovery_guidance, is_valid_install_attempt_id,
-    unmanaged_install_conversion_guidance, ManagedInstallMarker,
+    absent_install_marker_error, classify_install_marker_at, install_fingerprint,
+    install_marker_path, installation_is_unmanaged_at, invalid_install_marker_recovery_guidance,
+    is_valid_install_attempt_id, unmanaged_install_conversion_guidance, ManagedInstallMarker,
 };
 use crate::upgrade::sha256_hex;
 
@@ -93,6 +93,37 @@ fn absent_and_corrupt_managed_markers_have_distinct_classifications() -> Result<
         }
         other => panic!("expected invalid marker, got {other:?}"),
     }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn unmanaged_classification_requires_a_plainly_absent_marker() -> Result<()> {
+    let fixture = tempdir()?;
+    let executable = executable_copy(fixture.path(), b"temporary ctx executable copy")?;
+
+    assert!(installation_is_unmanaged_at(&executable));
+    fs::write(install_marker_path(&executable), b"{not-json")?;
+    assert!(
+        !installation_is_unmanaged_at(&executable),
+        "a present but corrupt marker is not an unmanaged installation"
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn unmanaged_installation_fingerprint_digests_an_absent_marker() -> Result<()> {
+    let fixture = tempdir()?;
+    let executable = executable_copy(fixture.path(), b"temporary ctx executable copy")?;
+
+    let fingerprint = install_fingerprint(&executable)?;
+
+    assert_eq!(
+        fingerprint.binary_sha256,
+        sha256_hex(b"temporary ctx executable copy")
+    );
+    assert_eq!(fingerprint.marker_sha256, sha256_hex(b""));
     Ok(())
 }
 

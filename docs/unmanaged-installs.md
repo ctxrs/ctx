@@ -16,15 +16,17 @@ ctx setup
 ```
 
 Unmanaged installs do not write the official installer marker. `ctx upgrade`
-and background self-upgrade will not apply; use the same tool or manual process
-that installed ctx to upgrade it.
+and background self-upgrade will not apply; their effective automatic-upgrade
+mode is `off` without writing an opt-out to `config.toml`. `ctx upgrade check`
+can still report available releases without upgrade locks or scheduler state.
+Use the same tool or manual process that installed ctx to upgrade it.
 
 ## Binary Lifecycle Handoff
 
 Automatic indexing is the default, so `ctx setup` may enable a persistent
 background daemon. Before any package manager, manual installer, or
 source-install command replaces or removes the executable, run the currently
-installed executable:
+installed executable immediately before that operation:
 
 ```bash
 ctx daemon disable --prepare-uninstall --format=json
@@ -33,13 +35,13 @@ ctx daemon disable --prepare-uninstall --format=json
 This hidden compatibility command is reserved for the installation-wide
 uninstall handoff; it is not the public indexing-mode control. Use
 `ctx index mode auto` or `ctx index mode manual` for normal indexing
-configuration. The handoff
-applies even when `CTX_DATA_ROOT` or
-`--data-root` selects a custom root. It disables and quiesces every registered
-daemon root, removes the singleton native supervisor from the canonical root,
-releases owner locks and endpoints, and retains the executable and history
-data. Do not replace or remove the executable unless the command exits
-successfully and its JSON receipt reports all of these fields:
+configuration. Daemon lifecycle and supervisor coordination is unified under
+the canonical `~/.ctx` root. The handoff applies even when `CTX_DATA_ROOT` or
+`--data-root` selects a custom history root. It disables and quiesces every
+registered daemon root, removes the singleton native supervisor, releases
+owner locks and endpoints, and retains the executable and history data. Do not
+replace or remove the executable unless the command exits successfully and its
+JSON receipt reports all of these fields:
 
 ```json
 {
@@ -53,6 +55,11 @@ successfully and its JSON receipt reports all of these fields:
   "binary_retained": true
 }
 ```
+
+The receipt proves that the installation is quiescent when the command
+finishes; it is not a persistent block on future ctx launches. Proceed directly
+to the serialized package-manager or installer operation, and do not run ctx
+again until replacement completes.
 
 If handoff fails, keep the installed executable in place so the command can be
 retried. ctx never falls back to a PID-only or process-name kill.
@@ -73,8 +80,9 @@ you deliberately remove the selected data roots.
 The hosted installer will not silently adopt a binary installed by a package
 manager, copied from a release, or built from source. A ctx executable without
 the hosted-install marker remains owned by the tool or process that installed
-it, and the hosted installer stops if that executable occupies its selected
-binary directory.
+it. `ctx upgrade enable` rejects that install before writing config and points
+to this conversion procedure. The hosted installer stops if the executable
+occupies its selected binary directory.
 
 To convert safely:
 

@@ -648,8 +648,10 @@ fn durable_daemon_disable_wins_over_handoff_restart() -> Result<()> {
         DaemonTriggerCommandArg::Setup,
         "ua_01890f3e-2c80-7000-8000-000000000005",
     )?;
+    let replacement = temp.path().join("replacement-ctx");
+    fs::write(&replacement, b"replacement ctx image")?;
     begin_daemon_upgrade_handoff(temp.path(), "ua_01890f3e-2c80-7000-8000-000000000005")?
-        .resume_with(Path::new("definitely-not-a-real-ctx-executable"))?;
+        .resume_with(&replacement)?;
     assert_eq!(
         read_daemon_upgrade_handoff(temp.path())
             .and_then(|value| value["phase"].as_str().map(ToOwned::to_owned))

@@ -9,6 +9,9 @@ mod runtime_publication;
 #[path = "upgrade/release_validation.rs"]
 mod release_validation;
 
+#[path = "upgrade/unmanaged.rs"]
+mod unmanaged;
+
 fn assert_safe_platform_install_action(action: &str) {
     assert!(
         action.contains("ctx daemon disable --prepare-uninstall --format=json"),
@@ -41,6 +44,7 @@ fn assert_safe_platform_install_action(action: &str) {
 #[cfg(unix)]
 use std::{
     net::TcpListener,
+    os::unix::fs::PermissionsExt as _,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
@@ -270,11 +274,15 @@ fn upgrade_status_requires_safe_handoff_for_absent_and_invalid_markers() {
 
     let absent = json_output(ctx(&temp).args(["upgrade", "status", "--format=json"]));
     assert_eq!(absent["install"]["marker"], "absent");
+    assert_eq!(absent["auto_upgrade"]["mode"], "off");
+    assert_eq!(absent["auto_upgrade"]["enabled"], false);
     assert_safe_platform_install_action(absent["install"]["action"].as_str().unwrap());
 
     fs::write(hosted_install_marker_path(&binary), b"{not-json").unwrap();
     let invalid = json_output(ctx(&temp).args(["upgrade", "status", "--format=json"]));
     assert_eq!(invalid["install"]["marker"], "corrupt");
+    assert_eq!(invalid["auto_upgrade"]["mode"], "off");
+    assert_eq!(invalid["auto_upgrade"]["enabled"], false);
     let reason = invalid["install"]["reason"].as_str().unwrap();
     assert!(reason.contains("parse ctx install marker"), "{reason}");
     assert_safe_platform_install_action(reason);
@@ -297,6 +305,8 @@ fn upgrade_status_requires_safe_handoff_for_absent_and_invalid_markers() {
 fn upgrade_enable_and_disable_persist_private_config_with_analytics_disabled() {
     for (command_name, expected_mode) in [("enable", "apply"), ("disable", "off")] {
         let temp = tempdir();
+        let binary = bind_test_ctx_binary(&temp);
+        unmanaged::install_managed_contract_marker(&binary);
         let first = temp.path().join(format!("{command_name}-state"));
         let second = first.join("nested");
         let data_root = second.join("ctx");
@@ -328,6 +338,8 @@ fn upgrade_enable_and_disable_repair_legacy_config_permissions() {
     for (command_name, expected_mode) in [("enable", "apply"), ("disable", "off")] {
         for legacy_permissions in [0o400, 0o444, 0o644, 0o664] {
             let temp = tempdir();
+            let binary = bind_test_ctx_binary(&temp);
+            unmanaged::install_managed_contract_marker(&binary);
             let data_root = temp
                 .path()
                 .join(format!("{command_name}-{legacy_permissions:o}-state"));
@@ -361,6 +373,8 @@ fn upgrade_enable_and_disable_reject_symlinked_config_without_changing_target() 
 
     for command_name in ["enable", "disable"] {
         let temp = tempdir();
+        let binary = bind_test_ctx_binary(&temp);
+        unmanaged::install_managed_contract_marker(&binary);
         let data_root = temp.path().join(format!("{command_name}-state"));
         let target = temp.path().join(format!("{command_name}-outside.toml"));
         let config = data_root.join("config.toml");
@@ -393,6 +407,8 @@ fn upgrade_enable_creates_protected_nested_root_and_config_on_windows() {
     use ctx_history_platform::platform_security::{verify_private_directory, verify_private_file};
 
     let temp = tempdir();
+    let binary = bind_test_ctx_binary(&temp);
+    unmanaged::install_managed_contract_marker(&binary);
     let first = temp.path().join("upgrade-state");
     let nested = first.join("nested");
     let data_root = nested.join("ctx");
@@ -1352,34 +1368,6 @@ fn upgrade_lock_rejects_a_live_os_lock_owner() {
     assert_eq!(
         unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(&lock), libc::LOCK_UN) },
         0
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn upgrade_rejects_unmanaged_install_before_network() {
-    let temp = tempdir();
-    let binary = managed_candidate(&temp, "ia_removed_unmanaged_marker");
-    fs::remove_file(install_marker_path(&binary)).unwrap();
-    let stderr = failure_stderr(
-        ctx_from_binary(&temp, &binary)
-            .args(["upgrade", "--dry-run"])
-            .env(
-                "CTX_RELEASE_METADATA_URL",
-                "file:///definitely/not/a/real/ctx-release-metadata.env",
-            )
-            .env(
-                "CTX_RELEASE_METADATA_SIGNATURE_URL",
-                "file:///definitely/not/a/real/ctx-release-metadata.env.sig",
-            ),
-    );
-    assert!(
-        stderr.contains("ctx is not installed by the hosted installer"),
-        "{stderr}"
-    );
-    assert!(
-        !stderr.contains("download release metadata"),
-        "unmanaged installs should fail before metadata fetch: {stderr}"
     );
 }
 

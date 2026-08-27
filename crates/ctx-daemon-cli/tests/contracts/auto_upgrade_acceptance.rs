@@ -4,7 +4,7 @@ mod support;
 mod unix {
     use std::{
         fs,
-        os::unix::fs::PermissionsExt as _,
+        os::unix::{ffi::OsStrExt as _, fs::PermissionsExt as _},
         path::{Path, PathBuf},
         process::{Child, Command as StdCommand, Stdio},
         time::{Duration, Instant},
@@ -27,6 +27,30 @@ mod unix {
 
     fn scheduler_state_path(binary: &Path) -> PathBuf {
         installation_sibling(binary, "upgrade-state.json")
+    }
+
+    fn installation_home(binary: &Path) -> &Path {
+        binary
+            .parent()
+            .expect("managed test binary has an installation directory")
+    }
+
+    fn installation_registration_root(binary: &Path) -> PathBuf {
+        let canonical = fs::canonicalize(binary).unwrap();
+        let namespace = sha256_hex(canonical.as_os_str().as_bytes());
+        installation_home(binary)
+            .join(".ctx")
+            .join("daemon-installations")
+            .join(namespace)
+            .join("daemon-quiescence-acks")
+    }
+
+    fn managed_release_env_for_installation<'a>(
+        command: &'a mut assert_cmd::Command,
+        release: &FakeRelease,
+        binary: &Path,
+    ) -> &'a mut assert_cmd::Command {
+        managed_release_env(command, release, binary).env("HOME", installation_home(binary))
     }
 
     fn configured_hook_fixture() -> PathBuf {
@@ -298,7 +322,7 @@ mod unix {
         loop_interval_seconds: u64,
     ) -> assert_cmd::Command {
         let mut command = ctx_from_binary(temp, binary);
-        managed_release_env(&mut command, release, binary);
+        managed_release_env_for_installation(&mut command, release, binary);
         command
             .args(["daemon", "run"])
             .arg("--loop-interval-seconds")
@@ -373,7 +397,7 @@ mod unix {
         binary: &Path,
     ) {
         let mut command = ctx(temp);
-        managed_release_env(&mut command, release, binary);
+        managed_release_env_for_installation(&mut command, release, binary);
         let output = command
             .env("CTX_DAEMON_AUTOSTART_LOOP_INTERVAL_SECONDS", "1")
             .args(["daemon", "enable", "--format=json"])
@@ -411,7 +435,7 @@ mod unix {
         data_root: &Path,
         attempt_id: &str,
     ) -> Option<Value> {
-        let root = installation_sibling(binary, "daemon-quiescence-acks");
+        let root = installation_registration_root(binary);
         fs::read_dir(root).ok()?.find_map(|entry| {
             let value: Value = serde_json::from_slice(&fs::read(entry.ok()?.path()).ok()?).ok()?;
             (value["status"] == "acknowledged"
@@ -491,7 +515,7 @@ mod unix {
     }
 
     fn acknowledgement_snapshot(binary: &Path) -> Vec<(PathBuf, Vec<u8>)> {
-        let root = installation_sibling(binary, "daemon-quiescence-acks");
+        let root = installation_registration_root(binary);
         let Ok(entries) = fs::read_dir(root) else {
             return Vec::new();
         };
@@ -618,7 +642,7 @@ mod unix {
                     }
                     RecoveryOwner::Explicit => {
                         let mut command = ctx_from_binary(&owner, &binary);
-                        managed_release_env(&mut command, &release, &binary);
+                        managed_release_env_for_installation(&mut command, &release, &binary);
                         command.args(["upgrade", "--format=json"]);
                         command
                     }
@@ -774,7 +798,7 @@ mod unix {
                     }
                     RecoveryOwner::Explicit => {
                         let mut command = ctx_from_binary(&owner, &binary);
-                        managed_release_env(&mut command, &release, &binary);
+                        managed_release_env_for_installation(&mut command, &release, &binary);
                         command.args(["upgrade", "--format=json"]);
                         command
                     }
@@ -816,7 +840,7 @@ mod unix {
                 });
             assert_eq!(second_ack["pid"], second_pid);
             let mut contender = ctx_from_binary(&owner, &binary);
-            managed_release_env(&mut contender, &release, &binary);
+            managed_release_env_for_installation(&mut contender, &release, &binary);
             let contended = contender
                 .args(["upgrade", "check", "--format=json"])
                 .output()
@@ -893,8 +917,8 @@ mod unix {
 
     mod invocation_driver {
         include!("auto_upgrade_acceptance/invocation_driver.rs");
+        include!("auto_upgrade_acceptance/invalid_marker.rs");
     }
-
     #[test]
     fn automatic_indexing_foreground_command_defers_to_daemon_driver() {
         let temp = tempdir();
@@ -902,7 +926,7 @@ mod unix {
         let binary = managed_candidate(&temp, "ia_foreground_no_authority");
         let before = fs::read(&binary).unwrap();
 
-        managed_release_env(
+        managed_release_env_for_installation(
             ctx_from_binary(&temp, &binary).arg("sources"),
             &release,
             &binary,
@@ -935,7 +959,7 @@ mod unix {
         let temp = tempdir();
         let release = fake_release(&temp, "9.9.9");
         let binary = managed_hook_candidate(&temp, "ia_disabled_recovery");
-        let interrupted = managed_release_env(
+        let interrupted = managed_release_env_for_installation(
             ctx_from_binary(&temp, &binary).args(["upgrade", "--format=json"]),
             &release,
             &binary,
@@ -1459,7 +1483,7 @@ mod unix {
         let binary = managed_hook_candidate(&temp, "ia_manual_disabled");
         patch_release_artifact_with_next_ctx(&mut release, &binary, FIXTURE_TARGET_VERSION);
 
-        managed_release_env(
+        managed_release_env_for_installation(
             ctx_from_binary(&temp, &binary).args(["upgrade", "--format=json"]),
             &release,
             &binary,

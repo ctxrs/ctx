@@ -771,6 +771,7 @@ mod native {
     #[cfg(target_os = "linux")]
     fn hold_non_upgrade_installation_lock(harness: &Harness) -> fs::File {
         use std::os::fd::AsRawFd as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
 
         let binary_name = harness
             .binary
@@ -783,6 +784,9 @@ mod native {
         let lock = fs::OpenOptions::new()
             .read(true)
             .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
             .open(&lock_path)
             .unwrap_or_else(|error| {
                 panic!(

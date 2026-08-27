@@ -42,7 +42,13 @@ impl InstallationDaemonLease {
             return Ok(None);
         }
         let (_, registration_root) = ctx_upgrade_engine::installation_daemon_coordination_paths()?;
-        create_private_dir_all(&registration_root)?;
+        ctx_history_platform::platform_security::create_private_directory_all(&registration_root)
+            .with_context(|| {
+            format!(
+                "create private ctx installation daemon registrations {}",
+                registration_root.display()
+            )
+        })?;
         let registration_id = Uuid::now_v7().to_string();
         let registration_path = registration_root.join(format!("{registration_id}.json"));
         let mut lease = Self {
@@ -111,13 +117,32 @@ impl Drop for InstallationDaemonLease {
 
 fn open_installation_daemon_quiescence_lock() -> Result<fs::File> {
     let (path, _) = ctx_upgrade_engine::installation_daemon_coordination_paths()?;
+    create_installation_daemon_coordination_parent(&path)?;
     open_installation_daemon_quiescence_lock_at(&path)
 }
 
 pub(super) fn try_acquire_installation_daemon_quiescence(
 ) -> Result<Option<InstallationDaemonQuiescence>> {
     let (path, _) = ctx_upgrade_engine::installation_daemon_coordination_paths()?;
+    create_installation_daemon_coordination_parent(&path)?;
     ctx_daemon_runtime::try_acquire_installation_quiescence(&path)
+}
+
+fn create_installation_daemon_coordination_parent(path: &Path) -> Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        anyhow!(
+            "ctx installation daemon coordination has no parent: {}",
+            path.display()
+        )
+    })?;
+    ctx_history_platform::platform_security::create_private_directory_all(parent).with_context(
+        || {
+            format!(
+                "create private ctx installation daemon coordination {}",
+                parent.display()
+            )
+        },
+    )
 }
 
 pub(super) fn open_installation_daemon_quiescence_lock_at(path: &Path) -> Result<fs::File> {
@@ -129,7 +154,8 @@ pub(super) fn wait_for_installation_daemon_quiescence_for(
     attempt_id: &str,
 ) -> Result<()> {
     let (lock_path, registration_root) =
-        ctx_upgrade_engine::installation_daemon_coordination_paths_for(executable);
+        ctx_upgrade_engine::installation_daemon_coordination_paths_for(executable)?;
+    create_installation_daemon_coordination_parent(&lock_path)?;
     wait_for_installation_daemon_quiescence_at(
         &lock_path,
         &registration_root,
@@ -158,7 +184,7 @@ pub(super) fn read_installation_daemon_restarts(
     executable: &Path,
     attempt_id: &str,
 ) -> Result<Vec<InstallationDaemonRestart>> {
-    let (_, root) = ctx_upgrade_engine::installation_daemon_coordination_paths_for(executable);
+    let (_, root) = ctx_upgrade_engine::installation_daemon_coordination_paths_for(executable)?;
     read_installation_daemon_restarts_from(&root, attempt_id, false)
 }
 

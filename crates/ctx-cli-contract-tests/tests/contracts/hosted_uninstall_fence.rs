@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use sha2::{Digest as _, Sha256};
 use std::{
     fs::{self, OpenOptions},
-    os::unix::fs::PermissionsExt as _,
+    os::unix::{ffi::OsStrExt as _, fs::PermissionsExt as _},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     thread,
@@ -28,6 +28,15 @@ fn platform_key() -> &'static str {
 
 fn sha256(path: &Path) -> String {
     format!("{:x}", Sha256::digest(fs::read(path).unwrap()))
+}
+
+fn installation_registration_root(home: &Path, binary: &Path) -> PathBuf {
+    let canonical = fs::canonicalize(binary).unwrap();
+    let namespace = format!("{:x}", Sha256::digest(canonical.as_os_str().as_bytes()));
+    home.join(".ctx")
+        .join("daemon-installations")
+        .join(namespace)
+        .join("daemon-quiescence-acks")
 }
 
 fn isolated_command(binary: &Path, root: &Path) -> Command {
@@ -107,12 +116,9 @@ fn assert_fresh_daemon_is_fenced(binary: &Path, environment_root: &Path, data_ro
         "60",
         "--format=json",
     ]);
-    let registration_root = binary.with_file_name(format!(
-        ".{}.daemon-quiescence-acks",
-        binary.file_name().unwrap().to_string_lossy()
-    ));
+    let registration_root = installation_registration_root(environment_root, binary);
     let mut fresh = fresh.spawn().expect("attempt fresh custom-root daemon");
-    wait_for_fenced_exit(&mut fresh, &registration_root, Duration::from_secs(15));
+    wait_for_fenced_exit(&mut fresh, &registration_root, Duration::from_secs(30));
     assert_eq!(
         registration_count(&registration_root),
         0,
@@ -463,10 +469,7 @@ fn prepare_uninstall_discovers_and_quiesces_a_finite_custom_root_worker() {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut finite = finite.spawn().expect("start finite custom-root worker");
-    let registration_root = install.with_file_name(format!(
-        ".{}.daemon-quiescence-acks",
-        install.file_name().unwrap().to_string_lossy()
-    ));
+    let registration_root = installation_registration_root(temp.path(), &install);
     let registration_deadline = Instant::now() + Duration::from_secs(15);
     let (registration_path, registration) = loop {
         if let Ok(entries) = fs::read_dir(&registration_root) {
