@@ -237,20 +237,29 @@ silently reused.
 Enable local semantic search with:
 
 ```bash
-ctx index mode auto
 ctx setup --semantic
 ctx index
 ```
 
-Semantic indexing requires auto mode. Lexical search remains available while
-embeddings build; when semantic coverage is ready, the default hybrid backend
-uses lexical and semantic evidence together automatically.
+Semantic opt-in is independent of indexing mode. In auto mode, the daemon keeps
+the semantic projection caught up. For explicit manual synchronization, use the
+existing mode control and wait refresh:
 
-Search does not download models, initialize semantic storage, or perform
+```bash
+ctx index mode manual
+ctx search "pricing decisions" --backend semantic --refresh wait
+```
+
+Lexical search remains available while embeddings build. When semantic coverage
+is ready, the default hybrid backend uses lexical and semantic evidence together
+automatically.
+
+Only a manual CLI `--refresh wait` that actually needs semantic evidence may
+acquire the opted-in local model, initialize semantic storage, and perform
 foreground semantic catch-up. Explicit semantic search reports a typed local
-error when its cached runtime/model or compatible generation is unavailable; it
-never silently changes a semantic-only request into lexical retrieval. Hybrid
-remains lexical-safe in those cases.
+error when model, runtime, or generation convergence fails; it never silently
+changes a semantic-only request into lexical retrieval. Hybrid remains
+lexical-safe in those cases.
 
 ## Refresh and freshness
 
@@ -259,8 +268,10 @@ and, when needed, wakes or recovers the persistent daemon. In manual mode it
 does not contact, start, or wake a process. Both serve the latest committed
 lexical generation without waiting for optional semantic indexing.
 The daemon owns bounded provider discovery, source refresh, immutable
-candidate-generation construction, publication, and opted-in semantic catch-up.
-The query process never becomes a foreground history writer.
+candidate-generation construction, publication, and ordinary opted-in semantic
+catch-up. Manual wait is the sole query-process exception: after finite Core
+publication it may reconcile only the semantic projection for that exact pinned
+generation.
 
 On a fresh auto-mode root, background mode asks the daemon to publish the first
 lexical generation. In manual mode, search performs no hidden bootstrap or
@@ -273,7 +284,10 @@ an explicit import.
 finite Core worker in manual mode, then waits for the requested source frontier
 and lexical-generation receipt. It fails with a typed source, lag, or system
 error when that receipt cannot publish; it does not fall back to a foreground
-importer or wait for complete semantic coverage.
+importer. In manual mode, a semantic or nonzero-weight hybrid request then fully
+reconciles semantic coverage for that same pinned Core generation and uses the
+same foreground model runtime to embed the query. Lexical, zero-weight hybrid,
+and unsupported semantic scopes do no semantic model or projection work.
 
 `--refresh off` queries the currently published generations without provider
 discovery, plugin execution, refresh scheduling, semantic catch-up, or model

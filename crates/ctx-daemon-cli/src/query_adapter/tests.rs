@@ -143,6 +143,41 @@ fn request_adapter_borrows_the_exact_data_root() {
     assert!(std::ptr::eq(adapter.data_root, data_root.as_path()));
 }
 
+#[test]
+fn foreground_adapter_is_lazy_and_borrows_the_exact_data_root() {
+    let data_root = std::path::PathBuf::from("foreground-query-root");
+    let adapter = SemanticQueryAdapter::foreground(&data_root);
+
+    assert!(std::ptr::eq(adapter.data_root, data_root.as_path()));
+    let SemanticQueryExecution::Foreground { runtime, .. } = &adapter.execution else {
+        panic!("manual wait must select foreground semantic execution");
+    };
+    assert!(
+        !runtime.is_loaded(),
+        "constructing the adapter must not load the model before semantic retrieval begins"
+    );
+}
+
+#[test]
+fn foreground_empty_generation_converges_without_loading_a_model() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let (index, _) = semantic_index_revision(temp.path(), 1, false)?;
+    let adapter = SemanticQueryAdapter::foreground(temp.path());
+
+    let mut session = adapter
+        .begin_query(&index)
+        .map_err(|error| anyhow!(error.to_string()))?;
+    assert_eq!(
+        session.prepare_alternative("empty generation")?,
+        compact_json(json!({"query_embed_ms": null}))
+    );
+    let SemanticQueryExecution::Foreground { runtime, .. } = &adapter.execution else {
+        unreachable!("foreground constructor selected daemon execution")
+    };
+    assert!(!runtime.is_loaded());
+    Ok(())
+}
+
 fn ready_adapter<'a>(
     index: &'a VerifiedIndex,
     data_root: &'a Path,

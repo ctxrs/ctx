@@ -1,10 +1,14 @@
+use anyhow::{anyhow, Result};
 use ctx_history_core::{
-    derive_event_id, derive_session_id, AgentScope, CertifiedSource, CoreRecord,
-    EventIdentityInput, NativeItemKey, NativeSessionKey, ScannedSourceCounts, SessionIdentityInput,
-    SourceAnchor, SourceKey, SourceObservation, TypedKey,
+    derive_event_id, derive_session_id, AgentScope, CaptureProvider, CertifiedSource, CoreRecord,
+    EventIdentityInput, EventRole, EventType, NativeItemKey, NativeSessionKey, ScannedSourceCounts,
+    SessionIdentityInput, SourceAnchor, SourceKey, SourceObservation, TypedKey,
 };
-use ctx_history_index::{GenerationWriter, WriterOptions};
-use ctx_semantic_index::source_backed_semantic_vector_path;
+use ctx_history_index::{CoreEventPageBudget, GenerationWriter, VerifiedIndex, WriterOptions};
+use ctx_semantic_index::{
+    source_backed_semantic_vector_path, SemanticDocumentBuilder,
+    SourceBackedSemanticDocumentBuilder,
+};
 
 #[cfg(any(
     all(
@@ -334,7 +338,7 @@ fn core_builder_combines_complete_lite_turn_with_provider_source_absent() {
         .into_iter()
         .find(|record| record.event_sequence == 1)
         .unwrap();
-    let mut builder = CoreSemanticDocumentBuilder::new(&index);
+    let mut builder = SourceBackedSemanticDocumentBuilder::new(&index);
 
     let document = builder.build_document(&anchor).unwrap().unwrap();
 
@@ -356,7 +360,7 @@ fn core_builder_preserves_semantic_tail_beyond_sixteen_kib() {
     let index = fixture.index(vec![fixture.record(1, EventRole::User, body.clone())]);
     let page = index.core_semantic_event_page(None, 1).unwrap();
     let record = page.items.first().unwrap();
-    let mut builder = CoreSemanticDocumentBuilder::new(&index);
+    let mut builder = SourceBackedSemanticDocumentBuilder::new(&index);
 
     let document = builder.build_document(record).unwrap().unwrap();
 
@@ -380,7 +384,7 @@ fn core_builder_pairs_multiple_lite_turns_with_bounded_forward_queries() {
         .into_iter()
         .filter(|record| record.role.as_deref() == Some(EventRole::User.as_str()))
         .collect::<Vec<_>>();
-    let mut builder = CoreSemanticDocumentBuilder::new(&index);
+    let mut builder = SourceBackedSemanticDocumentBuilder::new(&index);
 
     let first = builder.build_document(&anchors[0]).unwrap().unwrap();
     let second = builder.build_document(&anchors[1]).unwrap().unwrap();
@@ -409,11 +413,11 @@ fn core_builder_streams_multiple_pairing_pages_to_the_final_assistant() {
         .into_iter()
         .find(|record| record.event_sequence == 1)
         .unwrap();
-    let mut builder = CoreSemanticDocumentBuilder {
-        index: &index,
-        pairing_page_records: 1,
-        pairing_budget: LITE_TURN_PAIRING_BUDGET,
-    };
+    let mut builder = SourceBackedSemanticDocumentBuilder::with_pairing_limits_for_test(
+        &index,
+        1,
+        CoreEventPageBudget::new(64 * 1024 * 1024, 16 * 1024 * 1024),
+    );
 
     let document = builder.build_document(&anchor).unwrap().unwrap();
 
@@ -446,7 +450,7 @@ fn core_builder_pairs_many_sessions_without_retaining_a_session_cache() {
     let index = fixture.index(records);
     let anchors = index.core_semantic_event_page(None, 64).unwrap().items;
     assert_eq!(anchors.len(), 12);
-    let mut builder = CoreSemanticDocumentBuilder::new(&index);
+    let mut builder = SourceBackedSemanticDocumentBuilder::new(&index);
 
     for anchor in &anchors {
         let session = (anchor.event_sequence - 1) / 2;
@@ -471,14 +475,11 @@ fn core_builder_returns_user_only_when_pairing_byte_budget_is_exhausted() {
         .unwrap()
         .items
         .remove(0);
-    let mut builder = CoreSemanticDocumentBuilder {
-        index: &index,
-        pairing_page_records: MAX_LITE_TURN_PAIRING_PAGE_RECORDS,
-        pairing_budget: CoreEventPageBudget::new(
-            ctx_history_core::MAX_ENCODED_CORE_RECORD_BYTES,
-            1,
-        ),
-    };
+    let mut builder = SourceBackedSemanticDocumentBuilder::with_pairing_limits_for_test(
+        &index,
+        64,
+        CoreEventPageBudget::new(ctx_history_core::MAX_ENCODED_CORE_RECORD_BYTES, 1),
+    );
 
     let document = builder.build_document(&anchor).unwrap().unwrap();
 
@@ -509,7 +510,7 @@ fn core_builder_preserves_assistant_after_more_than_sixty_four_tool_events() {
         .into_iter()
         .find(|record| record.event_sequence == 1)
         .unwrap();
-    let mut builder = CoreSemanticDocumentBuilder::new(&index);
+    let mut builder = SourceBackedSemanticDocumentBuilder::new(&index);
 
     let document = builder.build_document(&anchor).unwrap().unwrap();
 

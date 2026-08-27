@@ -584,6 +584,28 @@ fn daemon_disabled_cli_default_and_hybrid_fall_back_but_semantic_is_typed() {
 }
 
 #[test]
+fn manual_wait_makes_semantic_execution_available_only_for_that_cli_search() {
+    let config = history_config(false, true);
+    let passive = super::search::source_search_policy(&config, false);
+    assert_eq!(
+        passive.semantic,
+        ctx_history_read_application::SemanticAvailability::Unavailable(
+            ctx_history_read_application::SemanticReason::ExecutionUnavailable,
+        )
+    );
+
+    let foreground = super::search::source_search_policy(&config, true);
+    let expected = if ctx_daemon_cli::semantic_query_service_supported() {
+        ctx_history_read_application::SemanticAvailability::Available
+    } else {
+        ctx_history_read_application::SemanticAvailability::Unavailable(
+            ctx_history_read_application::SemanticReason::PlatformUnsupported,
+        )
+    };
+    assert_eq!(foreground.semantic, expected);
+}
+
+#[test]
 fn daemon_disabled_mcp_default_and_hybrid_return_lexical_fallback() {
     let temp = tempdir().unwrap();
     write_test_generation(temp.path());

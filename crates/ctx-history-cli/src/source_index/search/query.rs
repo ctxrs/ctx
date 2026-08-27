@@ -50,13 +50,16 @@ impl From<SearchRequest> for SourceSearchRequest {
     }
 }
 
-pub(in crate::source_index) fn source_search_policy(config: &config::AppConfig) -> SearchPolicy {
+pub(in crate::source_index) fn source_search_policy(
+    config: &config::AppConfig,
+    foreground_semantic: bool,
+) -> SearchPolicy {
     let semantic_enabled = config.semantic_search_enabled();
     let semantic = if !semantic_enabled {
         SemanticAvailability::Unavailable(SemanticReason::PolicyDisabled)
     } else if !ctx_daemon_cli::semantic_query_service_supported() {
         SemanticAvailability::Unavailable(SemanticReason::PlatformUnsupported)
-    } else if !config.daemon.enabled {
+    } else if !config.daemon.enabled && !foreground_semantic {
         SemanticAvailability::Unavailable(SemanticReason::ExecutionUnavailable)
     } else {
         SemanticAvailability::Available
@@ -76,6 +79,9 @@ pub(in crate::source_index) fn resolve_source_search_backend(
     request: &SourceSearchRequest,
     config: &config::AppConfig,
 ) -> Result<SearchBackend> {
-    ctx_history_read_application::resolve_search_backend(request, source_search_policy(config))
-        .map_err(semantic_error_into_anyhow)
+    ctx_history_read_application::resolve_search_backend(
+        request,
+        source_search_policy(config, false),
+    )
+    .map_err(semantic_error_into_anyhow)
 }

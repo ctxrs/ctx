@@ -9,6 +9,7 @@ mod indexing;
 mod json;
 mod private_fs;
 mod query_index;
+mod source_document;
 mod vector_store;
 mod vector_store_schema;
 mod vector_store_search;
@@ -16,6 +17,7 @@ mod vector_store_state;
 
 pub use document::SemanticEventDocument;
 pub use query_index::{SemanticNotReady, SemanticQueryPin};
+pub use source_document::SourceBackedSemanticDocumentBuilder;
 pub use vector_store::{
     semantic_core_content_is_control, source_backed_semantic_contract_fingerprint,
     source_backed_semantic_vector_path, PinnedFlatGeneration, SemanticBatchEmbedder,

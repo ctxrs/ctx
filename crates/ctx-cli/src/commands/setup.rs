@@ -10,8 +10,8 @@ use crate::progress::{ProgressReporter, ProgressWriterError};
 use crate::semantic::{
     autostart_daemon_for_setup_and_wait, coordinate_setup_source_backed_refresh_with_progress,
     daemon_autostart_suppression_reason, observe_daemon_for_setup_and_wait,
-    semantic_query_service_supported, source_epoch_status_report, DaemonSetupHandoff,
-    SourceBackedRefreshMode, SourceBackedRefreshPendingPublication,
+    source_epoch_status_report, DaemonSetupHandoff, SourceBackedRefreshMode,
+    SourceBackedRefreshPendingPublication,
 };
 use crate::ui::Ui;
 use crate::{config, SetupArgs};
@@ -30,26 +30,10 @@ pub(crate) fn run_setup(
     config: &mut config::AppConfig,
     ui: &mut Ui,
 ) -> Result<()> {
-    let semantic_supported = semantic_query_service_supported();
     let suppression_reason = daemon_autostart_suppression_reason();
-    if args.semantic && (!config.automatic_indexing_enabled() || args.no_daemon) {
-        bail!(
-            "`ctx setup --semantic` requires automatic indexing. Run `ctx index mode auto` and retry without --no-daemon"
-        );
-    }
     if args.semantic {
         CliHistoryConfigAdapter::new(&data_root, config).set_semantic_search_enabled(true)?;
     }
-    let semantic_enabled = config.semantic_search_enabled();
-    if semantic_enabled
-        && semantic_supported
-        && (!config.automatic_indexing_enabled() || args.no_daemon)
-    {
-        bail!(
-            "local semantic search requires automatic indexing. Run `ctx index mode auto`, remove --no-daemon, or set [search] semantic = false"
-        );
-    }
-
     CliHistoryConfigAdapter::new(&data_root, config).write_default_config()?;
 
     let json_output = args.format.is_json();

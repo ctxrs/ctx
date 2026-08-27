@@ -1,12 +1,11 @@
 use std::{path::Path, process, time::Instant};
 
-use anyhow::{anyhow, Result};
-use ctx_history_core::{utc_now, CaptureProvider, EventRole, EventType};
-use ctx_history_index::{CoreEventPageBudget, CoreEventRecord, VerifiedIndex};
+use anyhow::Result;
+use ctx_history_core::utc_now;
 use ctx_semantic_index::{
-    semantic_core_content_is_control, source_backed_semantic_vector_path, SemanticBatchEmbedder,
-    SemanticChunkDocument, SemanticDocumentBuilder, SemanticEventDocument, SemanticVectorStore,
-    SourceBackedGenerationPin, SourceBackedSemanticOutcome,
+    source_backed_semantic_vector_path, SemanticBatchEmbedder, SemanticChunkDocument,
+    SemanticVectorStore, SourceBackedGenerationPin, SourceBackedSemanticDocumentBuilder,
+    SourceBackedSemanticOutcome,
 };
 use ctx_semantic_model::{
     semantic_model_acquisition_integrity_error, semantic_model_key, ArtifactFetcher,
@@ -37,10 +36,6 @@ use super::{
 use super::daemon::daemon_test_job;
 
 use crate::compact_json;
-
-const MAX_LITE_TURN_PAIRING_PAGE_RECORDS: usize = 64;
-const LITE_TURN_PAIRING_BUDGET: CoreEventPageBudget =
-    CoreEventPageBudget::new(64 * 1024 * 1024, 16 * 1024 * 1024);
 
 #[derive(Debug)]
 pub(super) enum DaemonSemanticModelStartup {
@@ -307,7 +302,7 @@ fn reconcile_source_backed_semantic_page(
     deadline: Option<Instant>,
 ) -> Result<(SourceBackedSemanticOutcome, usize)> {
     let index = generation.into_index();
-    let mut builder = CoreSemanticDocumentBuilder::new(&index);
+    let mut builder = SourceBackedSemanticDocumentBuilder::new(&index);
     let mut embedder = RuntimeSourceSemanticEmbedder {
         runtime,
         model_config,
@@ -317,74 +312,6 @@ fn reconcile_source_backed_semantic_page(
     let outcome =
         vector_store.reconcile_source_backed_index(&index, &mut builder, &mut embedder)?;
     Ok((outcome, embedder.indexed_chunks))
-}
-
-struct CoreSemanticDocumentBuilder<'a> {
-    index: &'a VerifiedIndex,
-    pairing_page_records: usize,
-    pairing_budget: CoreEventPageBudget,
-}
-
-impl SemanticDocumentBuilder for CoreSemanticDocumentBuilder<'_> {
-    fn build_document(
-        &mut self,
-        record: &CoreEventRecord,
-    ) -> Result<Option<SemanticEventDocument>> {
-        let user_text = record.core_record.content.meaningful_text();
-        if user_text.trim().is_empty() {
-            return Ok(None);
-        }
-        let mut sections = vec![format!("user:\n{}", user_text.trim())];
-        let mut occurred_at_ms = record.occurred_at_unix_ms.unwrap_or_default();
-        if !semantic_core_content_is_control(&sections[0]) {
-            if let Some((assistant_text, assistant_at_ms)) = self.paired_assistant(record)? {
-                sections.push(format!("assistant:\n{}", assistant_text.trim()));
-                occurred_at_ms = occurred_at_ms.max(assistant_at_ms);
-            }
-        }
-        let literal_facts = record
-            .core_record
-            .content
-            .activity
-            .as_ref()
-            .map_or_else(Vec::new, |activity| activity.facts.clone());
-        Ok(Some(SemanticEventDocument::new(
-            record.event_id.as_uuid(),
-            Some(record.session_id.as_uuid()),
-            record.event_sequence,
-            occurred_at_ms,
-            parse_core_event_type(&record.event_type)?,
-            record
-                .role
-                .as_deref()
-                .map(parse_core_event_role)
-                .transpose()?,
-            "lite_turn".to_owned(),
-            Some(parse_core_provider(&record.provider)?),
-            Some(record.source_format.clone()),
-            record.core_record.agent_scope,
-            literal_facts,
-            sections.join("\n\n"),
-        )))
-    }
-}
-
-impl CoreSemanticDocumentBuilder<'_> {
-    fn new(index: &VerifiedIndex) -> CoreSemanticDocumentBuilder<'_> {
-        CoreSemanticDocumentBuilder {
-            index,
-            pairing_page_records: MAX_LITE_TURN_PAIRING_PAGE_RECORDS,
-            pairing_budget: LITE_TURN_PAIRING_BUDGET,
-        }
-    }
-
-    fn paired_assistant(&self, anchor: &CoreEventRecord) -> Result<Option<(String, i64)>> {
-        Ok(self.index.semantic_lite_turn_assistant(
-            anchor,
-            self.pairing_page_records,
-            self.pairing_budget,
-        )?)
-    }
 }
 
 fn annotate_source_backed_semantic_progress(
@@ -420,24 +347,6 @@ impl SemanticBatchEmbedder for RuntimeSourceSemanticEmbedder<'_> {
         self.indexed_chunks = self.indexed_chunks.saturating_add(embeddings.len());
         Ok(embeddings)
     }
-}
-
-fn parse_core_event_type(value: &str) -> Result<EventType> {
-    value
-        .parse()
-        .map_err(|error| anyhow!("invalid Core event type {value:?}: {error}"))
-}
-
-fn parse_core_event_role(value: &str) -> Result<EventRole> {
-    value
-        .parse()
-        .map_err(|error| anyhow!("invalid Core event role {value:?}: {error}"))
-}
-
-fn parse_core_provider(value: &str) -> Result<CaptureProvider> {
-    value
-        .parse()
-        .map_err(|error| anyhow!("invalid Core provider {value:?}: {error}"))
 }
 
 pub(super) fn daemon_semantic_skipped_job(
