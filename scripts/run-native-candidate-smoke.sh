@@ -458,9 +458,13 @@ if ! status_top_level_bool daemon enabled true "${root}/status.json"; then
   exit 1
 fi
 status_compact="$(tr '\r\n' '  ' < "${root}/status.json")"
+# Both validation layouts deliberately omit the hosted-install marker. The
+# control inventory above proves the released `apply` default; this runtime
+# probe proves an isolated, unmanaged candidate fails safe instead of trying to
+# self-upgrade.
 if ! printf '%s\n' "${status_compact}" \
-  | grep -Eq '"upgrade"[[:space:]]*:[[:space:]]*\{[^}]*"auto"[[:space:]]*:[[:space:]]*"apply"[^}]*"auto_enabled"[[:space:]]*:[[:space:]]*true'; then
-  printf 'candidate does not report managed auto-upgrade apply as the default\n' >&2
+  | grep -Eq '"upgrade"[[:space:]]*:[[:space:]]*\{[^}]*"auto"[[:space:]]*:[[:space:]]*"off"[^}]*"auto_enabled"[[:space:]]*:[[:space:]]*false'; then
+  printf 'candidate does not disable auto-upgrade in the unmanaged validation layout\n' >&2
   exit 1
 fi
 if [ ! -s "${analytics_default_events}" ]; then
