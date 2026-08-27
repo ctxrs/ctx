@@ -272,6 +272,7 @@ pub enum LocalUsageOperation {
     DaemonDisable,
     Upgrade,
     Doctor,
+    Blame,
 }
 
 impl LocalUsageOperation {
@@ -293,6 +294,7 @@ impl LocalUsageOperation {
             Self::DaemonDisable => "daemon_disable",
             Self::Upgrade => "upgrade",
             Self::Doctor => "doctor",
+            Self::Blame => "blame",
         }
     }
 }

@@ -30,6 +30,7 @@ pub(in crate::local_usage) fn validate_rows_for_schema(
         store::PREVIOUS_SCHEMA_VERSION | store::RELEASED_SCHEMA_VERSION => {
             validate_old_rows(conn, false)
         }
+        store::PRIOR_SCHEMA_VERSION => validate_current_rows(conn, false),
         store::SCHEMA_VERSION => validate_rows(conn),
         version => Err(UsageStoreError::SchemaVersion(version)),
     }
@@ -58,8 +59,13 @@ fn validate_old_rows(conn: &Connection, first_version: bool) -> Result<(), Usage
         let row = row?;
         // Older public schemas included additional operation families. They are
         // intentionally omitted during migration; neutral rows remain strict.
-        if valid_operation(row.definition_version, &row.surface, &row.operation, true)
-            && !row_is_valid(&row, true)
+        if valid_operation(
+            row.definition_version,
+            &row.surface,
+            &row.operation,
+            true,
+            false,
+        ) && !row_is_valid(&row, true, false)
         {
             return Err(UsageStoreError::Integrity);
         }
@@ -68,6 +74,13 @@ fn validate_old_rows(conn: &Connection, first_version: bool) -> Result<(), Usage
 }
 
 pub(in crate::local_usage) fn validate_rows(conn: &Connection) -> Result<(), UsageStoreError> {
+    validate_current_rows(conn, true)
+}
+
+fn validate_current_rows(
+    conn: &Connection,
+    accepts_definition_three: bool,
+) -> Result<(), UsageStoreError> {
     let mut statement = conn.prepare(
         r#"
         SELECT day_utc, definition_version, ctx_version, surface, operation,
@@ -79,7 +92,7 @@ pub(in crate::local_usage) fn validate_rows(conn: &Connection) -> Result<(), Usa
     )?;
     let rows = statement.query_map([], stored_row)?;
     for row in rows {
-        if !row_is_valid(&row?, false) {
+        if !row_is_valid(&row?, false, accepts_definition_three) {
             return Err(UsageStoreError::Integrity);
         }
     }
@@ -105,7 +118,11 @@ fn stored_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredRow> {
     })
 }
 
-fn row_is_valid(row: &StoredRow, accepts_retired_sql: bool) -> bool {
+fn row_is_valid(
+    row: &StoredRow,
+    accepts_retired_sql: bool,
+    accepts_definition_three: bool,
+) -> bool {
     let failure_valid = if row.outcome == "failure" {
         row.value_class == "not_applicable" && row.result_count == 0
     } else {
@@ -117,7 +134,7 @@ fn row_is_valid(row: &StoredRow, accepts_retired_sql: bool) -> bool {
     let classification = if row.outcome == "failure" {
         row.value_class == "not_applicable"
     } else if row.surface == "cli" {
-        if row.definition_version == 2 && row.operation == "search" {
+        if matches!(row.definition_version, 2 | 3) && row.operation == "search" {
             matches!(row.value_class.as_str(), "result_bearing" | "empty")
         } else {
             row.value_class == "not_applicable"
@@ -132,14 +149,14 @@ fn row_is_valid(row: &StoredRow, accepts_retired_sql: bool) -> bool {
         row.value_class == "not_applicable"
     };
     let complete = row.context_coverage == "complete"
-        && row.definition_version == 2
+        && matches!(row.definition_version, 2 | 3)
         && row.operation == "search"
         && row.outcome == "success"
         && row.value_class == "result_bearing"
         && row.delivered_context_bytes > 0
         && row.matched_normalized_session_bytes >= row.delivered_context_bytes;
     let unavailable = row.context_coverage == "unavailable"
-        && row.definition_version == 2
+        && matches!(row.definition_version, 2 | 3)
         && row.operation == "search"
         && row.outcome == "success"
         && row.value_class == "result_bearing"
@@ -159,17 +176,30 @@ fn row_is_valid(row: &StoredRow, accepts_retired_sql: bool) -> bool {
                     && row.outcome == "failure"
                     && row.delivered_output_bytes == 0)
         }
+        3 if accepts_definition_three => {
+            if row.operation == "blame" {
+                (row.surface == "cli" && row.delivered_output_bytes == 0)
+                    || (row.surface == "mcp" && row.delivered_output_bytes > 0)
+            } else {
+                row.delivered_output_bytes > 0
+                    || (row.surface == "cli"
+                        && row.outcome == "failure"
+                        && row.delivered_output_bytes == 0)
+            }
+        }
         _ => false,
     };
 
     NaiveDate::parse_from_str(&row.day, "%Y-%m-%d").is_ok()
-        && matches!(row.definition_version, 1 | 2)
+        && (matches!(row.definition_version, 1 | 2)
+            || (accepts_definition_three && row.definition_version == 3))
         && valid_ctx_version(&row.ctx_version)
         && valid_operation(
             row.definition_version,
             &row.surface,
             &row.operation,
             accepts_retired_sql,
+            accepts_definition_three,
         )
         && matches!(
             row.duration_bucket.as_str(),
@@ -206,7 +236,36 @@ fn valid_operation(
     surface: &str,
     operation: &str,
     accepts_retired_sql: bool,
+    accepts_definition_three: bool,
 ) -> bool {
+    if accepts_definition_three && definition_version == 3 {
+        return match surface {
+            "cli" => matches!(
+                operation,
+                "setup"
+                    | "index"
+                    | "sources"
+                    | "import"
+                    | "show_session"
+                    | "show_event"
+                    | "locate"
+                    | "search"
+                    | "blame"
+                    | "docs"
+                    | "integrations"
+                    | "daemon_status"
+                    | "daemon_enable"
+                    | "daemon_disable"
+                    | "upgrade"
+                    | "doctor"
+            ),
+            "mcp" => matches!(
+                operation,
+                "status" | "sources" | "search" | "show_session" | "show_event" | "blame"
+            ),
+            _ => false,
+        };
+    }
     match surface {
         "cli" => {
             matches!(

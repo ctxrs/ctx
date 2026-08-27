@@ -4,9 +4,10 @@ use std::{
     path::{Path, PathBuf},
     process::ExitCode,
     sync::OnceLock,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
+use ctx_client_observability::local_usage::{self, CompletedOperation, Surface};
 use ctx_companion_bridge::{
     BridgeError, BridgeLimits, CancellationToken, CliRequest, CompanionBridge,
     CompanionEnvironment, EnvironmentKey, ExitClass, InstalledCompanion, LimitConfiguration,
@@ -124,9 +125,16 @@ impl From<CompanionRouteError> for CompanionLaunchError {
 
 pub(crate) fn forward_paid_cli_if_selected(arguments: Vec<OsString>) -> Option<ExitCode> {
     let forwarded = paid_family_arguments(&arguments)?;
+    let blame_data_root = paid_blame_data_root(&forwarded);
+    let started = blame_data_root.as_ref().map(|_| Instant::now());
     let result = forward_paid_cli(forwarded);
     Some(match result {
-        Ok(exit) => exit,
+        Ok(exit) => {
+            if let (Some(data_root), Some(started)) = (blame_data_root, started) {
+                record_paid_blame_best_effort(&data_root, exit.success, started.elapsed());
+            }
+            exit.code
+        }
         Err(error) => {
             write_cli_launch_error(&error);
             ExitCode::FAILURE
@@ -198,7 +206,12 @@ pub(crate) fn wake_verified_private_maintenance(
     Ok(())
 }
 
-fn forward_paid_cli(arguments: Vec<OsString>) -> Result<ExitCode, CompanionLaunchError> {
+struct PaidCliExit {
+    code: ExitCode,
+    success: bool,
+}
+
+fn forward_paid_cli(arguments: Vec<OsString>) -> Result<PaidCliExit, CompanionLaunchError> {
     let companion = installed_companion()?;
     let forwards_core_setup = forwarded_arguments_select_setup(&arguments);
     let mut request = CliRequest::new(arguments);
@@ -211,7 +224,25 @@ fn forward_paid_cli(arguments: Vec<OsString>) -> Result<ExitCode, CompanionLaunc
     let exit = CompanionBridge::new(BridgeLimits::default())
         .launch_cli(&companion, request, companion_cancellation()?)
         .map_err(classify_bridge_error)?;
-    Ok(exit_code(exit.exit_class()))
+    let class = exit.exit_class();
+    Ok(PaidCliExit {
+        code: exit_code(class),
+        success: class == ExitClass::Success,
+    })
+}
+
+fn record_paid_blame_best_effort(data_root: &Path, success: bool, duration: Duration) {
+    let storage = crate::observability_composition::local_usage_storage_authority(data_root);
+    let mut control =
+        crate::observability_composition::LocalUsageControlAuthority::new(data_root.to_path_buf());
+    local_usage::record_best_effort(&storage, &control.snapshot(), || {
+        Some(CompletedOperation::blame(
+            Surface::Cli,
+            success,
+            0,
+            duration,
+        ))
+    });
 }
 
 fn forward_environment(environment: &mut CompanionEnvironment) {
@@ -445,6 +476,86 @@ fn paid_family_arguments(arguments: &[OsString]) -> Option<Vec<OsString>> {
     })
 }
 
+/// Resolves only the public wrapper facts needed to persist a completed Blame
+/// invocation. Private options and target semantics remain opaque.
+fn paid_blame_data_root(arguments: &[OsString]) -> Option<PathBuf> {
+    let mut selected = false;
+    let mut data_root = None;
+    let mut index = 0;
+    while let Some(argument) = arguments.get(index) {
+        if argument == "--" {
+            if !selected {
+                selected = arguments
+                    .get(index + 1)
+                    .is_some_and(|value| value == "blame");
+            }
+            break;
+        }
+        if is_global_help_or_version(argument) {
+            return None;
+        }
+        if let Some(value) = argument.as_encoded_bytes().strip_prefix(b"--data-root=") {
+            if value.is_empty() {
+                return None;
+            }
+            // SAFETY: `value` is a suffix of this `OsStr` split immediately
+            // after an ASCII prefix, which is a valid encoded-byte boundary.
+            let value = unsafe { OsString::from_encoded_bytes_unchecked(value.to_vec()) };
+            if data_root.replace(PathBuf::from(value)).is_some() {
+                return None;
+            }
+            index += 1;
+            continue;
+        }
+        if argument == "--data-root" {
+            if data_root.is_some() {
+                return None;
+            }
+            index += 1;
+            data_root = Some(PathBuf::from(arguments.get(index)?));
+        } else if argument == "--color" {
+            index = index.saturating_add(1);
+            arguments.get(index)?;
+        } else if !selected
+            && (argument == "--quiet"
+                || argument == "--pro"
+                || has_attached_color_value(argument)
+                || starts_with_dash(argument))
+        {
+            index += 1;
+            continue;
+        } else if !selected {
+            if argument != "blame" {
+                return None;
+            }
+            selected = true;
+        }
+        index += 1;
+    }
+    if !selected {
+        return None;
+    }
+    absolute_local_usage_data_root(match data_root {
+        Some(data_root) => data_root,
+        None => ctx_history_platform::managed_data_root().ok()?,
+    })
+}
+
+fn absolute_local_usage_data_root(root: PathBuf) -> Option<PathBuf> {
+    if !root.is_absolute() {
+        return None;
+    }
+    // The local-usage storage authority owns creation, no-follow handling,
+    // privacy checks, ownership checks, and fail-open rejection. Duplicating
+    // those filesystem decisions in the companion router would make this path
+    // disagree with every other local-usage writer.
+    Some(root)
+}
+
+fn has_attached_color_value(value: &OsStr) -> bool {
+    value.as_encoded_bytes().starts_with(b"--color=")
+}
+
 fn has_explicit_pro_selector(arguments: &[OsString]) -> bool {
     arguments
         .iter()
@@ -459,7 +570,7 @@ fn is_global_help_or_version(value: &OsStr) -> bool {
 
 fn has_attached_global_value(value: &OsStr) -> bool {
     let bytes = value.as_encoded_bytes();
-    bytes.starts_with(b"--data-root=") || bytes.starts_with(b"--color=")
+    bytes.starts_with(b"--data-root=") || has_attached_color_value(value)
 }
 
 fn starts_with_dash(value: &OsStr) -> bool {

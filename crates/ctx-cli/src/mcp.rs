@@ -116,6 +116,16 @@ impl McpUsagePort for LocalUsagePort {
             Some((invocation, completion))
         });
     }
+
+    fn record_companion_blame_delivered(
+        &mut self,
+        failed: bool,
+        encoded_response_bytes: usize,
+        duration: std::time::Duration,
+    ) {
+        self.recorder
+            .record_companion_blame_delivered(failed, encoded_response_bytes, duration);
+    }
 }
 
 fn product_telemetry(data_root: PathBuf) -> McpTelemetry {

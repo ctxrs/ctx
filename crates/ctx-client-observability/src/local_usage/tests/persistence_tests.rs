@@ -1,7 +1,9 @@
 use std::{fs, time::Duration};
 
 use super::{operation, private_tempdir};
-use crate::local_usage::{read_report, reset, store, ContextCoverage};
+use crate::local_usage::{
+    read_report, reset, store, CompletedOperation, ContextCoverage, Surface, DEFINITION_VERSION,
+};
 
 #[test]
 fn repeated_completions_upsert_aggregate_without_per_call_rows() {
@@ -13,6 +15,48 @@ fn repeated_completions_upsert_aggregate_without_per_call_rows() {
     assert_eq!(definition.summary.calls, 2);
     assert_eq!(definition.by_operation.len(), 1);
     assert_eq!(definition.by_operation[0].calls, 2);
+}
+
+#[test]
+fn core_and_blame_completions_share_definition_three_without_extra_schema() {
+    let root = private_tempdir();
+    store::record(root.path(), operation("doctor")).unwrap();
+    store::record(
+        root.path(),
+        CompletedOperation::blame(Surface::Cli, true, 0, Duration::from_millis(60)),
+    )
+    .unwrap();
+    store::record(
+        root.path(),
+        CompletedOperation::blame(Surface::Mcp, true, 101, Duration::from_millis(4)),
+    )
+    .unwrap();
+    store::record(
+        root.path(),
+        CompletedOperation::blame(Surface::Mcp, false, 79, Duration::from_secs(1)),
+    )
+    .unwrap();
+
+    let report = read_report(root.path(), true, true);
+    let definitions = report.definitions.unwrap();
+    assert_eq!(definitions.len(), 1);
+    let definition = &definitions[0];
+    assert_eq!(definition.definition_version, DEFINITION_VERSION);
+    assert_eq!(definition.summary.calls, 4);
+    assert_eq!(definition.summary.result_bearing_calls, 0);
+    assert_eq!(definition.summary.empty_calls, 0);
+    assert_eq!(definition.summary.not_applicable_calls, 4);
+    assert_eq!(definition.summary.result_count, 0);
+    assert_eq!(definition.summary.delivered_output_bytes, 181);
+    assert_eq!(definition.by_operation.len(), 3);
+    assert!(definition
+        .by_operation
+        .iter()
+        .any(|row| row.surface == "cli" && row.operation == "blame" && row.result_count == 0));
+    assert!(definition
+        .by_operation
+        .iter()
+        .any(|row| row.surface == "mcp" && row.operation == "blame" && row.calls == 2));
 }
 
 #[test]

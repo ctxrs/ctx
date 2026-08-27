@@ -167,7 +167,7 @@ fn render_stats_human(context: &RenderContext, report: &UsageReport, detailed: b
                 Field::new("Classified result sets", &result_sets),
                 Field::new("No result-set classification", &unclassified),
                 Field::new("Results", &results),
-                Field::new("Delivered output", &output),
+                Field::new("Measured delivered output", &output),
                 Field::new("Covered context", &covered_context),
                 Field::new("Matched history", &matched_history),
                 Field::new("Search coverage", &coverage),
@@ -179,6 +179,11 @@ fn render_stats_human(context: &RenderContext, report: &UsageReport, detailed: b
                 let mut operations =
                     Table::new(["Operation", "Version", "Calls", "Result sets", "Context"]);
                 for operation in &definition.by_operation {
+                    let output = measured_operation_output(
+                        &operation.surface,
+                        &operation.operation,
+                        operation.delivered_output_bytes,
+                    );
                     operations.push_row([
                         format!("{}/{}", operation.surface, operation.operation),
                         operation.ctx_version.clone(),
@@ -193,8 +198,8 @@ fn render_stats_human(context: &RenderContext, report: &UsageReport, detailed: b
                             operation.not_applicable_calls
                         ),
                         format!(
-                            "{} output · {} covered · {} complete · {} unavailable",
-                            operation.delivered_output_bytes,
+                            "{} · {} covered · {} complete · {} unavailable",
+                            output,
                             operation.delivered_context_bytes,
                             operation.complete_context_eligible_calls,
                             operation.unavailable_context_eligible_calls
@@ -273,6 +278,14 @@ fn render_stats_human(context: &RenderContext, report: &UsageReport, detailed: b
     document
 }
 
+fn measured_operation_output(surface: &str, operation: &str, bytes: u64) -> String {
+    if surface == "cli" && operation == "blame" {
+        "output n/a".to_owned()
+    } else {
+        format!("{bytes} output")
+    }
+}
+
 #[cfg(test)]
 mod ui_tests {
     use std::{
@@ -297,7 +310,7 @@ mod ui_tests {
             enabled,
             state,
             retention_days: 400,
-            definition_version: 2,
+            definition_version: 3,
             definitions: None,
             estimates: None,
             error: None,
@@ -354,7 +367,7 @@ mod ui_tests {
         let context = context(120, ColorMode::Never);
         let rendered =
             render_stats_human(&context, &UsageReport::ui_test_ready(), false).render_plain();
-        assert!(rendered.contains("Measured local facts · definition 2"));
+        assert!(rendered.contains("Measured local facts · definition 3"));
         assert!(rendered.contains("1 active UTC day"));
         assert!(rendered.contains("Classified result sets"));
         assert!(rendered.contains("1 nonempty, 2 empty"));
@@ -363,6 +376,13 @@ mod ui_tests {
         assert!(rendered.contains("Results"));
         assert!(!rendered.contains("1 UTC days"));
         assert!(!rendered.contains("unclassified"));
+    }
+
+    #[test]
+    fn stats_marks_only_unmeasured_cli_blame_output_as_unavailable() {
+        assert_eq!(measured_operation_output("cli", "blame", 0), "output n/a");
+        assert_eq!(measured_operation_output("mcp", "blame", 0), "0 output");
+        assert_eq!(measured_operation_output("cli", "search", 0), "0 output");
     }
 
     #[test]

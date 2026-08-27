@@ -621,6 +621,165 @@ fn paid_data_root_argument_is_forwarded_without_core_derivation() {
 }
 
 #[test]
+fn blame_usage_root_tracks_only_completed_command_invocations() {
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path().to_path_buf();
+    let missing = root.join("missing");
+    for arguments in [
+        vec![
+            OsString::from("--data-root"),
+            root.clone().into_os_string(),
+            OsString::from("blame"),
+            OsString::from("opaque-target"),
+        ],
+        vec![
+            OsString::from("--pro"),
+            OsString::from("blame"),
+            OsString::from("--data-root"),
+            root.clone().into_os_string(),
+            OsString::from("opaque-target"),
+        ],
+        vec![
+            OsString::from("--data-root"),
+            root.clone().into_os_string(),
+            OsString::from("--"),
+            OsString::from("blame"),
+            OsString::from("opaque-target"),
+        ],
+    ] {
+        assert_eq!(paid_blame_data_root(&arguments), Some(root.clone()));
+    }
+    assert_eq!(
+        paid_blame_data_root(&[
+            OsString::from("--data-root"),
+            missing.clone().into_os_string(),
+            OsString::from("blame"),
+        ]),
+        Some(missing)
+    );
+
+    for arguments in [
+        vec![
+            OsString::from("--data-root"),
+            root.clone().into_os_string(),
+            OsString::from("pro"),
+        ],
+        vec![
+            OsString::from("blame"),
+            OsString::from("--help"),
+            OsString::from("--data-root"),
+            root.clone().into_os_string(),
+        ],
+        vec![
+            OsString::from("--data-root"),
+            OsString::from("relative"),
+            OsString::from("blame"),
+        ],
+    ] {
+        assert_eq!(paid_blame_data_root(&arguments), None);
+    }
+}
+
+#[test]
+fn attached_blame_usage_root_is_resolved_without_parsing_private_arguments() {
+    let root = tempfile::tempdir().unwrap();
+    let mut attached = OsString::from("--data-root=");
+    attached.push(root.path());
+    let arguments = [
+        OsString::from("blame"),
+        OsString::from("opaque-target"),
+        attached,
+        OsString::from("--private-option"),
+    ];
+
+    assert_eq!(
+        paid_blame_data_root(&arguments),
+        Some(root.path().to_path_buf())
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn blame_usage_root_preserves_non_utf8_native_paths() {
+    use std::os::unix::ffi::OsStringExt as _;
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp
+        .path()
+        .join(OsString::from_vec(vec![b'n', b'o', b'n', 0xff]));
+    let mut attached = OsString::from("--data-root=");
+    attached.push(&root);
+
+    assert_eq!(
+        paid_blame_data_root(&[attached, OsString::from("blame")]),
+        Some(root)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn paid_blame_wrapper_records_after_companion_exit_and_remains_controlled() {
+    use std::os::unix::fs::PermissionsExt as _;
+    use std::process::Command;
+
+    let temp = tempfile::tempdir().unwrap();
+    let pro = temp.path().join("ctx-pro");
+    std::fs::write(
+        &pro,
+        b"#!/bin/sh\nif [ \"$1\" = \"--ctx-pro-protocol-v3\" ] && [ \"$2\" = \"handshake\" ]; then\n  printf '{\"protocol_version\":3}\\n'\n  exit 0\nfi\n[ \"$1\" = \"--ctx-pro-protocol-v3\" ] && [ \"$2\" = \"cli\" ] && exit 0\nexit 91\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&pro, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    let enabled = temp.path().join("enabled");
+    std::fs::create_dir(&enabled).unwrap();
+    ctx_history_platform::platform_security::restrict_private_directory(&enabled).unwrap();
+
+    let status = Command::new(env!("CARGO_BIN_EXE_ctx"))
+        .arg("--data-root")
+        .arg(&enabled)
+        .arg("blame")
+        .arg("opaque-target")
+        .env("CTX_PRO_PATH", &pro)
+        .env_remove("CTX_LOCAL_USAGE_ENABLED")
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let authority = ctx_client_observability::local_usage::LocalUsageStorageAuthority::new(
+        enabled.join("usage.sqlite"),
+        "1.0.0",
+    );
+    let report = ctx_client_observability::local_usage::read_report_authorized(
+        &authority,
+        &ctx_client_observability::local_usage::UsageControlSnapshot::unversioned(true),
+        true,
+    );
+    let definition = &report.definitions.unwrap()[0];
+    assert_eq!(definition.definition_version, 3);
+    assert_eq!(definition.summary.calls, 1);
+    assert_eq!(definition.summary.successful_calls, 1);
+    assert_eq!(definition.summary.not_applicable_calls, 1);
+    assert_eq!(definition.summary.result_count, 0);
+    assert_eq!(definition.summary.delivered_output_bytes, 0);
+
+    let disabled = temp.path().join("disabled");
+    std::fs::create_dir(&disabled).unwrap();
+    ctx_history_platform::platform_security::restrict_private_directory(&disabled).unwrap();
+    let status = Command::new(env!("CARGO_BIN_EXE_ctx"))
+        .arg("--data-root")
+        .arg(&disabled)
+        .arg("blame")
+        .arg("opaque-target")
+        .env("CTX_PRO_PATH", &pro)
+        .env("CTX_LOCAL_USAGE_ENABLED", "false")
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert!(!disabled.join("usage.sqlite").exists());
+}
+
+#[test]
 fn data_root_options_after_delimiter_remain_opaque_pro_arguments() {
     for trailing in [
         vec!["--data-root", "/private/positional"],

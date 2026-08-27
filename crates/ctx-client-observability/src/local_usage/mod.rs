@@ -25,7 +25,7 @@ pub use report::{read_report_authorized, UsageReport};
 pub use store::reset;
 pub use store::{reset_authorized, UsageStoreError};
 
-pub const DEFINITION_VERSION: i64 = 2;
+pub const DEFINITION_VERSION: i64 = 3;
 pub const RETENTION_DAYS: i64 = 400;
 pub const USAGE_REPORT_SCHEMA_VERSION: i64 = 3;
 
@@ -185,6 +185,7 @@ impl DurationBucket {
 
 #[derive(Debug, Clone, Copy)]
 pub struct CompletedOperation {
+    definition_version: i64,
     surface: Surface,
     operation: LocalUsageOperation,
     outcome: Outcome,
@@ -200,6 +201,7 @@ pub struct CompletedOperation {
 impl CompletedOperation {
     pub fn cli(operation: LocalUsageOperation, success: bool, duration: Duration) -> Self {
         Self {
+            definition_version: DEFINITION_VERSION,
             surface: Surface::Cli,
             operation,
             outcome: if success {
@@ -217,6 +219,34 @@ impl CompletedOperation {
         }
     }
 
+    /// Builds the aggregate-only completion observed by Core's existing
+    /// companion wrapper. Core does not inspect private result semantics, so
+    /// Blame result classification and count remain not applicable.
+    pub fn blame(
+        surface: Surface,
+        success: bool,
+        delivered_output_bytes: usize,
+        duration: Duration,
+    ) -> Self {
+        Self {
+            definition_version: DEFINITION_VERSION,
+            surface,
+            operation: LocalUsageOperation::Blame,
+            outcome: if success {
+                Outcome::Success
+            } else {
+                Outcome::Failure
+            },
+            value_class: ValueClass::NotApplicable,
+            duration: DurationBucket::from_duration(duration),
+            context_coverage: ContextCoverage::NotApplicable,
+            result_count: 0,
+            delivered_output_bytes: u64::try_from(delivered_output_bytes).unwrap_or(u64::MAX),
+            delivered_context_bytes: 0,
+            matched_normalized_session_bytes: 0,
+        }
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     pub fn with_value(mut self, value_class: ValueClass) -> Self {
         self.value_class = value_class;
@@ -226,6 +256,11 @@ impl CompletedOperation {
     #[cfg(any(test, feature = "test-support"))]
     pub const fn result_metadata_for_test(self) -> (ValueClass, u64) {
         (self.value_class, self.result_count)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub const fn definition_version_for_test(self) -> i64 {
+        self.definition_version
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -290,7 +325,7 @@ impl CliUsage {
 
     /// Accepts only bounded numeric observations from the canonical result.
     ///
-    /// `content_bytes` is intentionally ignored by definition 2. Historical
+    /// `content_bytes` is intentionally ignored by definitions 2 and 3. Historical
     /// adapters supplied JSON framing or non-search payload bytes here; only
     /// the dedicated complete-search observation can populate context facts.
     pub fn set_result_observation(
@@ -397,6 +432,13 @@ impl McpInvocation {
         }
     }
 
+    pub fn blame() -> Self {
+        Self {
+            operation: LocalUsageOperation::Blame,
+            search_context: None,
+        }
+    }
+
     pub fn bind_search_context(&mut self, observation: SearchContextObservation) {
         if self.operation == LocalUsageOperation::Search {
             self.search_context = Some(observation);
@@ -412,6 +454,7 @@ impl McpInvocation {
     pub fn completed(&self, facts: &McpCompletionFacts, duration: Duration) -> CompletedOperation {
         let failed = facts.failed;
         let mut operation = CompletedOperation {
+            definition_version: DEFINITION_VERSION,
             surface: Surface::Mcp,
             operation: self.operation,
             outcome: if failed {

@@ -112,6 +112,24 @@ impl McpUsageRecorder {
         }
     }
 
+    pub fn record_companion_blame_delivered(
+        &mut self,
+        failed: bool,
+        delivered_output_bytes: usize,
+        duration: Duration,
+    ) {
+        self.record_delivered(duration, || {
+            Some((
+                McpInvocation::blame(),
+                McpCompletionFacts {
+                    failed,
+                    delivered_output_bytes,
+                    ..McpCompletionFacts::default()
+                },
+            ))
+        });
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     pub fn set_test_trace(&mut self, trace: std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>) {
         self.trace = Some(trace);

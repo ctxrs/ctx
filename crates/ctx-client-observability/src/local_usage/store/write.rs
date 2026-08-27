@@ -5,7 +5,7 @@ use std::{
 
 use rusqlite::{params, OptionalExtension, TransactionBehavior};
 
-use super::super::{CompletedOperation, DEFINITION_VERSION};
+use super::super::CompletedOperation;
 use super::{
     open_writable, preflight_existing_family, protect_sqlite_files, reject_future_daily_dates,
     retention_cutoff, utc_day, verify_schema, UsageStoreError, WritableStore,
@@ -75,7 +75,7 @@ pub(super) fn record_at(
         "#,
         params![
             day,
-            DEFINITION_VERSION,
+            operation.definition_version,
             ctx_version,
             operation.surface.as_str(),
             operation.operation.as_str(),

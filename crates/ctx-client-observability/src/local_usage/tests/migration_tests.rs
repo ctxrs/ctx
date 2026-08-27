@@ -56,7 +56,7 @@ fn assert_neutral_fixture_report(root: &std::path::Path, schema_version: i64) {
 
 #[test]
 fn every_released_predecessor_detached_migration_is_deterministic_and_source_read_only() {
-    for schema_version in 1..=3 {
+    for schema_version in 1..=4 {
         let root = private_tempdir();
         store::create_released_fixture_for_test(root.path(), schema_version).unwrap();
         let path = store::usage_path(root.path());
@@ -72,7 +72,7 @@ fn every_released_predecessor_detached_migration_is_deterministic_and_source_rea
 
 #[test]
 fn every_released_predecessor_write_migration_preserves_neutral_counts_and_is_idempotent() {
-    for schema_version in 1..=3 {
+    for schema_version in 1..=4 {
         let root = private_tempdir();
         store::create_released_fixture_for_test(root.path(), schema_version).unwrap();
 
@@ -86,28 +86,27 @@ fn every_released_predecessor_write_migration_preserves_neutral_counts_and_is_id
         );
 
         let definitions = first.definitions.unwrap();
+        assert_eq!(definitions.len(), 2);
         if schema_version == store::LEGACY_SCHEMA_VERSION {
-            assert_eq!(definitions.len(), 2);
             assert_eq!(definitions[0].definition_version, 1);
             assert_eq!(definitions[0].summary.calls, 7);
             assert_eq!(definitions[0].summary.delivered_output_bytes, 1_300);
-            assert_eq!(definitions[1].definition_version, 2);
-            assert_eq!(definitions[1].summary.calls, 1);
-            assert_eq!(definitions[1].summary.delivered_output_bytes, 1);
         } else {
-            assert_eq!(definitions.len(), 1);
             assert_eq!(definitions[0].definition_version, 2);
-            assert_eq!(definitions[0].summary.calls, 8);
-            assert_eq!(definitions[0].summary.delivered_output_bytes, 1_324);
+            assert_eq!(definitions[0].summary.calls, 7);
+            assert_eq!(definitions[0].summary.delivered_output_bytes, 1_323);
             assert_eq!(definitions[0].summary.delivered_context_bytes, 120);
             assert_eq!(definitions[0].summary.matched_normalized_session_bytes, 300);
         }
+        assert_eq!(definitions[1].definition_version, 3);
+        assert_eq!(definitions[1].summary.calls, 1);
+        assert_eq!(definitions[1].summary.delivered_output_bytes, 1);
     }
 }
 
 #[test]
 fn every_released_predecessor_migration_recovers_after_precommit_failure() {
-    for schema_version in 1..=3 {
+    for schema_version in 1..=4 {
         let root = private_tempdir();
         store::create_released_fixture_for_test(root.path(), schema_version).unwrap();
 

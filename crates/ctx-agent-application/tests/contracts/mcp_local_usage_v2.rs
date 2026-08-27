@@ -24,7 +24,11 @@ struct McpClient {
 
 impl McpClient {
     fn start(temp: &tempfile::TempDir) -> Self {
-        let mut child = mcp_command(temp)
+        Self::start_command(mcp_command(temp))
+    }
+
+    fn start_command(mut command: StdCommand) -> Self {
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -54,6 +58,62 @@ impl McpClient {
         let status = self.child.wait().unwrap();
         assert!(status.success(), "MCP server exited {status}: {stderr}");
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn companion_blame_records_only_core_observed_delivery_facts() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let temp = tempdir();
+    let pro = temp.path().join("ctx-pro");
+    fs::write(
+        &pro,
+        b"#!/bin/sh\nif [ \"$1\" = \"--ctx-pro-protocol-v3\" ] && [ \"$2\" = \"handshake\" ]; then\n  printf '{\"protocol_version\":3}\\n'\n  exit 0\nfi\nif [ \"$1\" = \"--ctx-pro-protocol-v3\" ] && [ \"$2\" = \"mcp-serve\" ]; then\n  IFS= read -r request || exit 92\n  printf '{\"jsonrpc\":\"2.0\",\"id\":\"blame\",\"result\":{\"opaque\":true}}\\n'\n  exit 0\nfi\nexit 91\n",
+    )
+    .unwrap();
+    fs::set_permissions(&pro, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let mut command = mcp_command(&temp);
+    command.env("CTX_PRO_PATH", &pro);
+    let mut client = McpClient::start_command(command);
+    client.request(initialize());
+    let marker = "PRIVATE_BLAME_TARGET_MUST_NOT_PERSIST_51f2";
+    let response = client.request(tool_call(
+        "blame",
+        "blame",
+        json!({"private_target": marker}),
+    ));
+    assert_eq!(response.value["result"]["opaque"], true);
+    client.finish();
+
+    let usage_path = usage_db_path(&temp);
+    let connection = Connection::open(&usage_path).unwrap();
+    let row: (i64, String, String, i64, i64, i64) = connection
+        .query_row(
+            "SELECT definition_version, outcome, value_class, calls, result_count, \
+                    delivered_output_bytes FROM daily_usage \
+             WHERE surface = 'mcp' AND operation = 'blame'",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(row, (3, "success".to_owned(), "not_applicable".to_owned(), 1, 0, response.wire_bytes as i64));
+    drop(connection);
+
+    let persisted = fs::read(usage_path).unwrap();
+    assert!(!persisted
+        .windows(marker.len())
+        .any(|window| window == marker.as_bytes()));
 }
 
 fn mcp_command(temp: &tempfile::TempDir) -> StdCommand {

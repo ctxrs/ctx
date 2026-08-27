@@ -4,7 +4,8 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 
 use super::{
     utc_day, UsageStoreError, APPLICATION_ID, LEGACY_SCHEMA_VERSION, MAX_DATABASE_BYTES,
-    PAGE_SIZE_BYTES, PREVIOUS_SCHEMA_VERSION, RELEASED_SCHEMA_VERSION, SCHEMA_VERSION,
+    PAGE_SIZE_BYTES, PREVIOUS_SCHEMA_VERSION, PRIOR_SCHEMA_VERSION, RELEASED_SCHEMA_VERSION,
+    SCHEMA_VERSION,
 };
 
 pub(super) const DAILY_USAGE_SCHEMA_V1: &str = r#"
@@ -397,7 +398,7 @@ fn daily_usage_schema_v3() -> String {
     )
 }
 
-pub(super) const DAILY_USAGE_SCHEMA: &str = r#"
+pub(super) const DAILY_USAGE_SCHEMA_V4: &str = r#"
 CREATE TABLE daily_usage (
     day_utc TEXT NOT NULL
         CHECK (
@@ -535,6 +536,8 @@ CREATE TABLE daily_usage (
 ) WITHOUT ROWID, STRICT;
 "#;
 
+pub(super) const DAILY_USAGE_SCHEMA: &str = include_str!("schema_v5.sql");
+
 pub(super) const LEGACY_MAINTENANCE_SCHEMA: &str = r#"
 CREATE TABLE maintenance (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
@@ -609,6 +612,7 @@ pub(super) fn released_daily_usage_schema(version: i64) -> Result<String, UsageS
         LEGACY_SCHEMA_VERSION => Ok(DAILY_USAGE_SCHEMA_V1.to_owned()),
         PREVIOUS_SCHEMA_VERSION => Ok(DAILY_USAGE_SCHEMA_V2.to_owned()),
         RELEASED_SCHEMA_VERSION => Ok(daily_usage_schema_v3()),
+        PRIOR_SCHEMA_VERSION => Ok(DAILY_USAGE_SCHEMA_V4.to_owned()),
         _ => Err(UsageStoreError::SchemaVersion(version)),
     }
 }
@@ -741,6 +745,9 @@ pub(in crate::local_usage) fn verify_supported_schema(
         RELEASED_SCHEMA_VERSION => {
             let released_schema = daily_usage_schema_v3();
             verify_daily_schema(conn, &released_schema, EXPECTED_PREDECESSOR_DAILY_COLUMNS)?;
+        }
+        PRIOR_SCHEMA_VERSION => {
+            verify_daily_schema(conn, DAILY_USAGE_SCHEMA_V4, EXPECTED_CURRENT_DAILY_COLUMNS)?
         }
         SCHEMA_VERSION => {
             verify_daily_schema(conn, DAILY_USAGE_SCHEMA, EXPECTED_CURRENT_DAILY_COLUMNS)?
