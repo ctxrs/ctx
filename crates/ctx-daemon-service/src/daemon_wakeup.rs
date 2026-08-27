@@ -246,27 +246,21 @@ struct WatchCounters {
 
 #[derive(Debug, Clone, Default)]
 pub(super) struct DaemonWatchCatalog {
-    state: Arc<RwLock<WatchCatalogState>>,
-}
-
-#[derive(Debug, Default)]
-struct WatchCatalogState {
-    snapshot: Option<SourceBackedWatchCatalog>,
+    snapshot: Arc<RwLock<Option<SourceBackedWatchCatalog>>>,
 }
 
 impl DaemonWatchCatalog {
     pub(super) fn publish(&self, catalog: SourceBackedWatchCatalog) {
-        self.state
+        *self
+            .snapshot
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .snapshot = Some(catalog);
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(catalog);
     }
 
     pub(super) fn snapshot(&self) -> Option<SourceBackedWatchCatalog> {
-        self.state
+        self.snapshot
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .snapshot
             .clone()
     }
 }

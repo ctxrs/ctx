@@ -47,7 +47,7 @@ pub(super) fn record_watch_event(
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             counters.backend_errors = counters.backend_errors.saturating_add(1);
             drop(counters);
-            return fence_catalog_uncertainty(authority, watermark);
+            return SourceWatchBatch::uncertainty(watermark);
         }
     };
     if event.needs_rescan() {
@@ -58,7 +58,7 @@ pub(super) fn record_watch_event(
         counters.rescan_notifications = counters.rescan_notifications.saturating_add(1);
         counters.last_relevant_path = event.paths.first().cloned();
         drop(counters);
-        return fence_catalog_uncertainty(authority, watermark);
+        return SourceWatchBatch::uncertainty(watermark);
     }
     if let Some(kind) = ignored_watch_event(data_root, &event) {
         record_ignored_watch_event(counters, &event, kind);
@@ -66,16 +66,12 @@ pub(super) fn record_watch_event(
     }
     if event.paths.is_empty() {
         record_relevant_watch_event(counters, None);
-        return fence_catalog_uncertainty(authority, watermark);
+        return SourceWatchBatch::uncertainty(watermark);
     }
     let authority_snapshot = authority
         .read()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let catalog_state = authority_snapshot
-        .catalog
-        .state
-        .read()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let catalog = authority_snapshot.catalog.snapshot();
     let mut batch = SourceWatchBatch::default();
     let mut relevant_path = None;
     let mut matched_path = false;
@@ -104,7 +100,7 @@ pub(super) fn record_watch_event(
             unmatched_path |= event.requires_rearm();
             continue;
         }
-        if let Some(catalog) = catalog_state.snapshot.as_ref() {
+        if let Some(catalog) = catalog.as_ref() {
             for route in catalog.routes_overlapping_path(event_path) {
                 path_matched = true;
                 let member = catalog.exact_member_for_event(&route, event_path);
@@ -117,11 +113,10 @@ pub(super) fn record_watch_event(
     }
     let uncertain =
         data_root_invalidated || (event.requires_rearm() && matched_path && unmatched_path);
-    drop(catalog_state);
     if uncertain {
         drop(authority_snapshot);
         record_relevant_watch_event(counters, event.paths.first().cloned());
-        return fence_catalog_uncertainty(authority, watermark);
+        return SourceWatchBatch::uncertainty(watermark);
     }
     if !batch.is_empty() && event.requires_rearm() {
         batch.rearm = true;
@@ -148,13 +143,6 @@ fn record_relevant_watch_event(counters: &Mutex<WatchCounters>, path: Option<std
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     counters.raw_events = counters.raw_events.saturating_add(1);
     counters.last_relevant_path = path;
-}
-
-fn fence_catalog_uncertainty(
-    _authority: &RwLock<WatchAuthority>,
-    watermark: EventWatermark,
-) -> SourceWatchBatch {
-    SourceWatchBatch::uncertainty(watermark)
 }
 
 #[derive(Clone, Copy)]

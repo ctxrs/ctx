@@ -114,10 +114,16 @@ impl CoreRefreshEngine {
         let job_request_id = required_nonempty_string(&job, "request_id", "source refresh job")?;
         let previous_generation = job.get("previous_generation").and_then(Value::as_str);
         let pointer_advanced = active_generation.as_deref() != previous_generation;
+        let durable_watch_recovery = request_state == "running"
+            && job
+                .get("progress")
+                .and_then(|progress| progress.get("phase"))
+                .and_then(Value::as_str)
+                == Some("watch_recovery");
         // A terminal job must always recover or reject its exact publication,
         // even when its persisted previous-generation pointer already equals
         // the active generation.
-        if pointer_advanced || request_state == "published" {
+        if (pointer_advanced && !durable_watch_recovery) || request_state == "published" {
             let active_generation = active_generation.ok_or_else(|| {
                 anyhow!("interrupted source refresh advanced Core without an active generation")
             })?;
@@ -217,6 +223,9 @@ impl CoreRefreshEngine {
 
         let recovered_previous_generation = active_generation.clone();
         let mut root = recover_queued_root(&job, recovered_previous_generation)?;
+        if durable_watch_recovery {
+            root.reconciliation_demand = SourceBackedReconciliationDemand::Exhaustive;
+        }
         require_scoped_rehydration(&mut root)?;
         let request_id = root.request_id.clone();
         {

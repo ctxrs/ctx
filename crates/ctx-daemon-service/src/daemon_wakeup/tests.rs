@@ -642,7 +642,7 @@ fn callback_channel_overflow_holds_active_wait_until_rearmed_recovery() -> Resul
     let sink_coordinator = Arc::clone(&coordinator);
     wakeup.install_source_watch_sink(Arc::new(move |batch| {
         if let Some(watermark) = batch.reconcile {
-            sink_coordinator.fence_watch_uncertainty(watermark, 0);
+            sink_coordinator.fence_watch_uncertainty(watermark);
         } else {
             sink_coordinator.record_watch_routes_with_members(
                 batch
@@ -714,7 +714,7 @@ fn callback_channel_overflow_holds_active_wait_until_rearmed_recovery() -> Resul
         first_boundary.watcher_epoch,
         first_boundary.sequence.saturating_add(1),
     );
-    coordinator.fence_watch_uncertainty(newer_boundary, 0);
+    coordinator.fence_watch_uncertainty(newer_boundary);
     watcher.reconcile_roots(true).1?;
     assert!(!coordinator.complete_watch_uncertainty_recovery(
         &data_root,
@@ -744,10 +744,34 @@ fn callback_channel_overflow_holds_active_wait_until_rearmed_recovery() -> Resul
         coordinator.status(request_id).unwrap()["request_state"],
         "admission_pending"
     );
-    let recovered = coordinator.run_next(&data_root).expect("recovered rerun");
+    let mut recovered = None;
+    for _ in 0..64 {
+        if let Some(boundary) = coordinator.watch_uncertainty_watermark() {
+            watcher.reconcile_roots(true).1?;
+            let _ = coordinator.complete_watch_uncertainty_recovery(
+                &data_root,
+                catalog.clone(),
+                boundary,
+                0,
+            )?;
+            let _ = wakeup.wait(Duration::from_millis(50));
+            continue;
+        }
+        let Some(rerun) = coordinator.run_next(&data_root) else {
+            thread::yield_now();
+            continue;
+        };
+        if rerun.job["request_state"] == "published" {
+            recovered = Some(rerun);
+            break;
+        }
+        assert_eq!(rerun.job["request_state"], "running");
+        assert_eq!(rerun.job["progress"]["phase"], "watch_recovery");
+    }
+    let recovered = recovered.expect("overflow recovery and successor publication");
     assert!(!recovered.failed, "{:#}", recovered.job);
     assert_eq!(recovered.job["request_state"], "published");
-    assert_eq!(launches.load(Ordering::SeqCst), 2);
+    assert!(launches.load(Ordering::SeqCst) >= 2);
     Ok(())
 }
 

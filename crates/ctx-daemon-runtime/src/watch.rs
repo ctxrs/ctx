@@ -20,17 +20,15 @@ use crate::CoalescingWakePayload;
 pub const WATCH_EVENT_QUEUE_CAPACITY: usize = 256;
 pub const WATCH_DEBOUNCE_QUIET: Duration = Duration::from_millis(250);
 pub const WATCH_DEBOUNCE_MAX: Duration = Duration::from_secs(2);
-const WATCH_EVENT_OVERFLOW_CAPACITY: usize = WATCH_EVENT_QUEUE_CAPACITY / 2;
-
 static NEXT_WATCHER_EPOCH: AtomicU64 = AtomicU64::new(1);
 
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NativeWatchIgnore {
     Access,
     AccessTime,
 }
 
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NativeWatchEvent {
     pub paths: Vec<PathBuf>,
     needs_rescan: bool,
@@ -84,7 +82,7 @@ impl NativeWatchEvent {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct NativeWatchError;
 
 pub type NativeWatchResult = std::result::Result<NativeWatchEvent, NativeWatchError>;
@@ -172,62 +170,21 @@ type RegistrationAttemptHook = Box<dyn FnMut(&Path) -> Result<()>>;
 
 #[derive(Debug, Default)]
 struct RawWatchIngress {
-    pending: Mutex<BTreeMap<NativeWatchResult, WatchWatermark>>,
     lost_sequence: AtomicU64,
     overflows: AtomicU64,
     disconnects: AtomicU64,
 }
 
 impl RawWatchIngress {
-    fn merge_nonblocking(&self, event: NativeWatchResult, watermark: WatchWatermark) -> bool {
-        let merged = match self.pending.try_lock() {
-            Ok(mut pending) => merge_raw_event(&mut pending, event, watermark),
-            Err(std::sync::TryLockError::Poisoned(poisoned)) => {
-                merge_raw_event(&mut poisoned.into_inner(), event, watermark)
-            }
-            Err(std::sync::TryLockError::WouldBlock) => false,
-        };
-        if !merged {
-            self.lost_sequence
-                .fetch_max(watermark.sequence, Ordering::AcqRel);
-        }
-        merged
+    fn record_loss(&self, loss: WatchWatermark) {
+        self.lost_sequence
+            .fetch_max(loss.sequence, Ordering::AcqRel);
     }
 
-    fn take_nonblocking(
-        &self,
-        epoch: u64,
-    ) -> Option<(
-        BTreeMap<NativeWatchResult, WatchWatermark>,
-        Option<WatchWatermark>,
-    )> {
-        let mut pending = match self.pending.try_lock() {
-            Ok(pending) => pending,
-            Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
-            Err(std::sync::TryLockError::WouldBlock) => return None,
-        };
-        let events = std::mem::take(&mut *pending);
+    fn take_loss(&self, epoch: u64) -> Option<WatchWatermark> {
         let sequence = self.lost_sequence.swap(0, Ordering::AcqRel);
-        Some((
-            events,
-            (sequence != 0).then(|| WatchWatermark::new(epoch, sequence)),
-        ))
+        (sequence != 0).then(|| WatchWatermark::new(epoch, sequence))
     }
-}
-
-fn merge_raw_event(
-    pending: &mut BTreeMap<NativeWatchResult, WatchWatermark>,
-    event: NativeWatchResult,
-    watermark: WatchWatermark,
-) -> bool {
-    if pending.len() >= WATCH_EVENT_OVERFLOW_CAPACITY && !pending.contains_key(&event) {
-        return false;
-    }
-    pending
-        .entry(event)
-        .and_modify(|current| *current = (*current).max(watermark))
-        .or_insert(watermark);
-    true
 }
 
 pub struct NativeFileWatcher {
@@ -256,7 +213,7 @@ impl NativeFileWatcher {
         observe_payload: ObservePayload<P>,
         signal_payload: SignalPayload<P>,
     ) -> Result<Self> {
-        let (sender, receiver) = mpsc::sync_channel(WATCH_EVENT_OVERFLOW_CAPACITY);
+        let (sender, receiver) = mpsc::sync_channel(WATCH_EVENT_QUEUE_CAPACITY);
         let counters = Arc::new(Mutex::new(NativeWatcherCounters::default()));
         let ingress = Arc::new(RawWatchIngress::default());
         let accepting_events = Arc::new(AtomicBool::new(true));
@@ -579,15 +536,13 @@ fn forward_native_watch_event(
     );
     match sender.try_send(WatchMessage::Event { event, watermark }) {
         Ok(()) => {}
-        Err(mpsc::TrySendError::Full(WatchMessage::Event { event, watermark })) => {
+        Err(mpsc::TrySendError::Full(WatchMessage::Event { watermark, .. })) => {
             overflow_fence(watermark);
-            if !ingress.merge_nonblocking(event, watermark) {
-                ingress.overflows.fetch_add(1, Ordering::Relaxed);
-            }
+            ingress.record_loss(watermark);
+            ingress.overflows.fetch_add(1, Ordering::Relaxed);
             match sender.try_send(WatchMessage::DrainIngress) {
                 Ok(()) | Err(mpsc::TrySendError::Full(_)) => {}
                 Err(mpsc::TrySendError::Disconnected(_)) => {
-                    overflow_fence(watermark);
                     ingress.disconnects.fetch_add(1, Ordering::Relaxed);
                 }
             }
@@ -595,6 +550,7 @@ fn forward_native_watch_event(
         Err(mpsc::TrySendError::Full(_)) => unreachable!("callback sends only raw events"),
         Err(mpsc::TrySendError::Disconnected(_)) => {
             overflow_fence(watermark);
+            ingress.record_loss(watermark);
             ingress.disconnects.fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -611,29 +567,36 @@ fn observe_pending_raw_events<P: CoalescingWakePayload>(
     observe_payload: &ObservePayload<P>,
     relevant: &mut P,
 ) -> bool {
-    let mut events = first.into_iter().collect::<Vec<_>>();
     let mut stop = false;
-    for message in receiver.try_iter() {
-        match message {
-            WatchMessage::Event { event, watermark } => events.push((event, watermark)),
-            WatchMessage::DrainIngress => {}
-            WatchMessage::Stop => stop = true,
-        }
-    }
-    let Some((overflow, loss)) = ingress.take_nonblocking(watcher_epoch) else {
-        return stop;
-    };
-    events.extend(overflow);
-    events.sort_by_key(|(_, watermark)| *watermark);
-    if let Some(watermark) = loss {
-        let payload = reconciliation(watermark);
+    let mut drained = 0_usize;
+    let mut observe_event = |event, watermark| {
+        let payload = classify_event(event, watermark);
         if !payload.is_empty() {
             observe_payload(&payload);
             relevant.merge(payload);
         }
+    };
+    if let Some((event, watermark)) = first {
+        observe_event(event, watermark);
+        drained = 1;
     }
-    for (event, watermark) in events {
-        let payload = classify_event(event, watermark);
+    while drained < WATCH_EVENT_QUEUE_CAPACITY {
+        let message = match receiver.try_recv() {
+            Ok(message) => message,
+            Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => break,
+        };
+        drained = drained.saturating_add(1);
+        match message {
+            WatchMessage::Event { event, watermark } => observe_event(event, watermark),
+            WatchMessage::DrainIngress => {}
+            WatchMessage::Stop => {
+                stop = true;
+                break;
+            }
+        }
+    }
+    if let Some(watermark) = ingress.take_loss(watcher_epoch) {
+        let payload = reconciliation(watermark);
         if !payload.is_empty() {
             observe_payload(&payload);
             relevant.merge(payload);
@@ -810,45 +773,95 @@ mod tests {
     }
 
     #[test]
-    fn raw_ingress_coalesces_identity_and_fences_capacity_loss() {
+    fn pressure_retains_only_the_maximum_lost_watermark() {
         let ingress = RawWatchIngress::default();
-        for sequence in 1..=WATCH_EVENT_QUEUE_CAPACITY as u64 {
-            assert!(ingress.merge_nonblocking(
-                Ok(NativeWatchEvent::ordinary(vec![PathBuf::from(
-                    "/tmp/config.toml",
-                )])),
-                WatchWatermark::new(9, sequence),
-            ));
-        }
-        let (events, loss) = ingress.take_nonblocking(9).unwrap();
-        assert!(loss.is_none());
-        assert_eq!(events.len(), 1);
-        assert_eq!(
-            events.values().next(),
-            Some(&WatchWatermark::new(9, WATCH_EVENT_QUEUE_CAPACITY as u64))
-        );
+        ingress.record_loss(WatchWatermark::new(9, 4));
+        ingress.record_loss(WatchWatermark::new(9, 2));
+        ingress.record_loss(WatchWatermark::new(9, 7));
+        assert_eq!(ingress.take_loss(9), Some(WatchWatermark::new(9, 7)));
+        assert_eq!(ingress.take_loss(9), None);
+    }
 
-        for ordinal in 1..=WATCH_EVENT_OVERFLOW_CAPACITY {
-            assert!(ingress.merge_nonblocking(
-                Ok(NativeWatchEvent::ordinary(vec![PathBuf::from(format!(
-                    "/tmp/{ordinal}.jsonl"
-                ))])),
-                WatchWatermark::new(11, ordinal as u64),
-            ));
+    #[test]
+    fn worker_drain_is_count_bounded_when_input_never_reaches_empty() {
+        let (sender, receiver) = mpsc::channel();
+        for sequence in 1..=WATCH_EVENT_QUEUE_CAPACITY as u64 + 2 {
+            sender
+                .send(WatchMessage::Event {
+                    event: Ok(NativeWatchEvent::ordinary(vec![PathBuf::from(format!(
+                        "/tmp/{sequence}.jsonl"
+                    ))])),
+                    watermark: WatchWatermark::new(11, sequence),
+                })
+                .unwrap();
         }
-        assert!(!ingress.merge_nonblocking(
-            Err(NativeWatchError),
-            WatchWatermark::new(11, WATCH_EVENT_OVERFLOW_CAPACITY as u64 + 1),
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let classified = Arc::clone(&seen);
+        let classify_event: EventClassifier<TestPayload> = Arc::new(move |_, watermark| {
+            classified.lock().unwrap().push(watermark.sequence);
+            TestPayload::default()
+        });
+        let reconciliation: ReconciliationFactory<TestPayload> =
+            Arc::new(|watermark| TestPayload(Some(watermark)));
+        let observe_payload: ObservePayload<TestPayload> = Arc::new(|_| {});
+        let mut relevant = TestPayload::default();
+        assert!(!observe_pending_raw_events(
+            None,
+            &receiver,
+            &RawWatchIngress::default(),
+            11,
+            &classify_event,
+            &reconciliation,
+            &observe_payload,
+            &mut relevant,
         ));
-        let (events, loss) = ingress.take_nonblocking(11).unwrap();
-        assert_eq!(events.len(), WATCH_EVENT_OVERFLOW_CAPACITY);
+        assert_eq!(seen.lock().unwrap().len(), WATCH_EVENT_QUEUE_CAPACITY);
+        let WatchMessage::Event { watermark, .. } = receiver.try_recv().unwrap() else {
+            panic!("bounded drain left a non-event message");
+        };
         assert_eq!(
-            loss,
-            Some(WatchWatermark::new(
-                11,
-                WATCH_EVENT_OVERFLOW_CAPACITY as u64 + 1
-            ))
+            watermark,
+            WatchWatermark::new(11, WATCH_EVENT_QUEUE_CAPACITY as u64 + 1)
         );
+    }
+
+    #[test]
+    fn pressure_marker_never_discards_already_dequeued_events() {
+        let (sender, receiver) = mpsc::channel();
+        for sequence in 1..=3 {
+            sender
+                .send(WatchMessage::Event {
+                    event: Ok(NativeWatchEvent::ordinary(vec![PathBuf::from(
+                        "/tmp/event",
+                    )])),
+                    watermark: WatchWatermark::new(12, sequence),
+                })
+                .unwrap();
+        }
+        let ingress = RawWatchIngress::default();
+        ingress.record_loss(WatchWatermark::new(12, 9));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let classified = Arc::clone(&seen);
+        let classify_event: EventClassifier<TestPayload> = Arc::new(move |_, watermark| {
+            classified.lock().unwrap().push(watermark.sequence);
+            TestPayload(Some(watermark))
+        });
+        let reconciliation: ReconciliationFactory<TestPayload> =
+            Arc::new(|watermark| TestPayload(Some(watermark)));
+        let observe_payload: ObservePayload<TestPayload> = Arc::new(|_| {});
+        let mut relevant = TestPayload::default();
+        assert!(!observe_pending_raw_events(
+            None,
+            &receiver,
+            &ingress,
+            12,
+            &classify_event,
+            &reconciliation,
+            &observe_payload,
+            &mut relevant,
+        ));
+        assert_eq!(seen.lock().unwrap().as_slice(), &[1, 2, 3]);
+        assert_eq!(relevant.0, Some(WatchWatermark::new(12, 9)));
     }
 
     #[test]
@@ -879,7 +892,7 @@ mod tests {
             observed.lock().unwrap().as_slice(),
             &[WatchWatermark::new(17, 1)]
         );
-        assert!(ingress.take_nonblocking(17).is_some());
+        assert_eq!(ingress.take_loss(17), Some(WatchWatermark::new(17, 1)));
 
         drop(receiver);
         forward_native_watch_event(

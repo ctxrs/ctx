@@ -4,46 +4,16 @@ mod recovery;
 mod resolution;
 
 impl CoreRefreshEngine {
-    /// Fences admission after unbounded callback loss. The first transition
-    /// retains exhaustive successor work; later pressure only advances the
-    /// compare-and-clear boundary.
-    pub fn fence_watch_uncertainty(&self, watermark: EventWatermark, observed_at_ms: u64) {
+    /// Fences admission after unbounded callback loss. Callback pressure only
+    /// advances this constant-size authority boundary; the watcher worker owns
+    /// catalog reconstruction and exhaustive route seeding.
+    pub fn fence_watch_uncertainty(&self, watermark: EventWatermark) {
         let mut state = self.lock_state();
-        let first_transition = state.watch_uncertain_through.is_none();
         state.watch_uncertain_through = Some(
             state
                 .watch_uncertain_through
                 .map_or(watermark, |current| current.max(watermark)),
         );
-        if !first_transition {
-            return;
-        }
-        let routes = state.known_route_ids.iter().cloned().collect::<Vec<_>>();
-        state
-            .routes_requiring_exhaustive_reconciliation
-            .extend(routes.iter().cloned());
-        state.route_worksets.clear();
-        for route in &routes {
-            state
-                .route_event_watermarks
-                .entry(route.clone())
-                .and_modify(|current| *current = (*current).max(watermark))
-                .or_insert(watermark);
-        }
-        state
-            .dirty_routes
-            .seed_exact_routes(routes, watermark, observed_at_ms);
-        let active_request_id = state.active_request_id.clone();
-        if let Some(attempt) = active_request_id
-            .as_deref()
-            .and_then(|request_id| find_attempt_mut(&mut state, request_id))
-            .filter(|attempt| attempt.state == SourceBackedRefreshState::Queued)
-        {
-            attempt.admitted_authority = None;
-            attempt.state = SourceBackedRefreshState::AdmissionPending;
-            attempt.progress.phase = "admission_pending".to_owned();
-            attempt.last_error = None;
-        }
     }
 
     pub fn watch_uncertainty_pending(&self) -> bool {
@@ -361,7 +331,7 @@ impl CoreRefreshEngine {
             .ok_or_else(|| anyhow!("new source refresh request disappeared"))
     }
 
-    fn run_next_with_terminal_success<Execute, Probe, Terminal, Published, Failed>(
+    pub(super) fn run_next_with_terminal_success<Execute, Probe, Terminal, Published, Failed>(
         &self,
         execute: Execute,
         probe: Probe,
@@ -604,8 +574,25 @@ impl CoreRefreshEngine {
             }
             Err(error) => Err(error),
         };
-        if verified.is_ok() && self.watch_uncertainty_pending() {
-            let mut state = self.lock_state();
+        let verified = verified.and_then(|(observed, publication, request_receipt)| {
+            terminal(request_receipt.clone())
+                .map(|terminal| (observed, publication, request_receipt, terminal))
+                .map_err(|error| format!("finalize verified Core publication: {error:#}"))
+        });
+        let verified = match verified {
+            Ok(verified) => Ok(verified),
+            Err(error) => match failed(&error) {
+                Ok(()) => Err(error),
+                Err(record_error) => Err(format!(
+                    "{error}; recording the resumable rebuild failure also failed: {record_error:#}"
+                )),
+            },
+        };
+        let mut state = self.lock_state();
+        // The uncertainty decision and Published transition share this lock.
+        // A callback fence therefore orders wholly before the nonterminal
+        // recovery handoff or wholly after the successful terminal boundary.
+        if verified.is_ok() && state.watch_uncertain_through.is_some() {
             let attempt = find_attempt_mut(&mut state, &request_id)?;
             attempt.snapshot_attempt_history_progress();
             attempt.attempt_history_progress = None;
@@ -631,21 +618,6 @@ impl CoreRefreshEngine {
                 coverage_certificate: None,
             });
         }
-        let verified = verified.and_then(|(observed, publication, request_receipt)| {
-            terminal(request_receipt.clone())
-                .map(|terminal| (observed, publication, request_receipt, terminal))
-                .map_err(|error| format!("finalize verified Core publication: {error:#}"))
-        });
-        let verified = match verified {
-            Ok(verified) => Ok(verified),
-            Err(error) => match failed(&error) {
-                Ok(()) => Err(error),
-                Err(record_error) => Err(format!(
-                    "{error}; recording the resumable rebuild failure also failed: {record_error:#}"
-                )),
-            },
-        };
-        let mut state = self.lock_state();
         // Publication receipts and terminal progress are authoritative. Do
         // not project transient producer facts once this attempt exits.
         if let Some(attempt) = find_attempt_mut(&mut state, &request_id) {

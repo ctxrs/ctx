@@ -28,11 +28,11 @@ pub(super) fn install_source_watch_ingress(
         return;
     };
     wakeup.install_source_watch_sink(Arc::new(move |batch: &SourceWatchBatch| {
-        let observed_at_ms = source_route_ledger_now_ms();
         if let Some(watermark) = batch.reconcile {
-            source_refresh.fence_watch_uncertainty(watermark, observed_at_ms);
+            source_refresh.fence_watch_uncertainty(watermark);
             return;
         }
+        let observed_at_ms = source_route_ledger_now_ms();
         source_refresh.record_watch_routes_with_members(
             batch
                 .routes

@@ -1014,38 +1014,23 @@ fn restart_discards_incomplete_candidate_and_publishes_from_last_good() {
     );
 }
 
-#[test]
-fn restart_after_pointer_publication_recovers_exact_receipt_without_recapture() {
-    let temp = tempfile::tempdir().unwrap();
-    let data_root = temp.path().join("data");
-    let first = CoreRefreshEngine::with_executor(Arc::new(
-        move |execution: SourceBackedRefreshExecution<'_>| {
-            let request_id = execution.request_id.to_owned();
-            let operation = execution.operation;
-            let scope = execution.admitted_refresh().publication_scope().clone();
-            let published = ctx_history_index::GenerationWriter::open(
-                execution.index_root,
-                WriterOptions::default(),
-            )?
+pub(super) fn publish_empty_generation_with_request_metadata(
+    execution: &SourceBackedRefreshExecution<'_>,
+    route_byte: u8,
+) -> Result<SourceBackedRefreshPublication> {
+    let request_id = execution.request_id.to_owned();
+    let operation = execution.operation;
+    let scope = execution.admitted_refresh().publication_scope().clone();
+    let published =
+        ctx_history_index::GenerationWriter::open(execution.index_root, WriterOptions::default())?
             .into_writer()
             .map_err(crate::committed_generation_recovery_error)?
             .commit_with_publication_metadata(
                 |_| true,
                 |context| {
-                    let mut publication = SourceBackedRefreshPublication {
-                        generation_id: context.generation_id().to_owned(),
-                        published_explicit_source_catalog: None,
-                        unsupported_routes: 0,
-                        certified_source_count: 0,
-                        certified_source_bytes: 0,
-                        current: SourceBackedRefreshCurrent::default(),
-                        timings: SourceBackedRefreshTimings::default(),
-                        route_results: Vec::new(),
-                        zero_source_authority: Vec::new(),
-                        catalog_route_bindings: Vec::new(),
-                        verified_index: None,
-                    };
-                    add_complete_empty_authority(&mut publication, route_identity(0x98));
+                    let mut publication =
+                        empty_test_publication(context.generation_id().to_owned());
+                    add_complete_empty_authority(&mut publication, route_identity(route_byte));
                     let receipt = SourceBackedRefreshReceipt::from_verified_publication(
                         None,
                         context.generation_id().to_owned(),
@@ -1064,9 +1049,24 @@ fn restart_after_pointer_publication_recovers_exact_receipt_without_recapture() 
                     .encode()
                 },
             )?;
+    let generation_id = published.receipt().generation_id.clone();
+    let (_, _, verified_index) = published.into_parts();
+    let mut publication = empty_test_publication(generation_id);
+    add_complete_empty_authority(&mut publication, route_identity(route_byte));
+    publication.verified_index = Some(Arc::new(verified_index));
+    Ok(publication)
+}
+
+#[test]
+fn restart_after_pointer_publication_recovers_exact_receipt_without_recapture() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    let first = CoreRefreshEngine::with_executor(Arc::new(
+        move |execution: SourceBackedRefreshExecution<'_>| {
+            let published = publish_empty_generation_with_request_metadata(&execution, 0x98)?;
             Err(anyhow!(
                 "injected cancellation after commit {}",
-                published.receipt().generation_id
+                published.generation_id
             ))
         },
     ));

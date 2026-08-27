@@ -703,7 +703,7 @@ fn safety_reconciliation_recovers_a_failed_startup_catalog_without_empty_authori
         coordinator.install_watch_catalog(catalog.clone());
         assert!(!coordinator.has_scheduled_route_work());
         let uncertain = EventWatermark::new(41, 7);
-        coordinator.fence_watch_uncertainty(uncertain, source_route_ledger_now_ms());
+        coordinator.fence_watch_uncertainty(uncertain);
         let reconcile = |runtime: &mut DaemonWatchRuntime| {
             runtime.reconcile_catalog_and_route_authority_with(
                 &data_root,
