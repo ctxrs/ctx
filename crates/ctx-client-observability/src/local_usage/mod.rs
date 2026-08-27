@@ -2,7 +2,6 @@ use crate::operation_descriptor::{
     LocalUsageOperation, ObservedMcpProductOperation, OperationDescriptor,
 };
 use std::time::Duration;
-use uuid::Uuid;
 
 pub use crate::operation_descriptor::ResultObservationAction;
 
@@ -134,15 +133,6 @@ impl SearchContextObservation {
             )),
             ContextCoverage::Unavailable | ContextCoverage::NotApplicable => None,
         }
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    pub const fn metadata_for_test(self) -> (ContextCoverage, u64, u64) {
-        (
-            self.coverage,
-            self.delivered_context_bytes,
-            self.matched_normalized_session_bytes,
-        )
     }
 }
 
@@ -288,7 +278,6 @@ pub struct CliUsage {
     operation: Option<LocalUsageOperation>,
     result_count: usize,
     output_bytes: usize,
-    output_bytes_measured: bool,
     search_context: Option<SearchContextObservation>,
     value_class: ValueClass,
 }
@@ -306,7 +295,6 @@ impl CliUsage {
             operation,
             result_count: 0,
             output_bytes: 0,
-            output_bytes_measured: false,
             search_context: None,
             value_class: ValueClass::NotApplicable,
         }
@@ -317,7 +305,6 @@ impl CliUsage {
             operation: None,
             result_count: 0,
             output_bytes: 0,
-            output_bytes_measured: false,
             search_context: None,
             value_class: ValueClass::NotApplicable,
         }
@@ -344,7 +331,6 @@ impl CliUsage {
 
     pub fn set_measured_output_bytes(&mut self, output_bytes: usize) {
         self.output_bytes = output_bytes;
-        self.output_bytes_measured = true;
     }
 
     pub fn set_search_context_observation(&mut self, observation: SearchContextObservation) {
@@ -354,11 +340,7 @@ impl CliUsage {
     pub fn completed(self, success: bool, duration: Duration) -> Option<CompletedOperation> {
         let operation = self.operation?;
         let mut completed = CompletedOperation::cli(operation, success, duration);
-        completed.delivered_output_bytes = if self.output_bytes_measured {
-            u64::try_from(self.output_bytes).unwrap_or(u64::MAX)
-        } else {
-            0
-        };
+        completed.delivered_output_bytes = u64::try_from(self.output_bytes).unwrap_or(u64::MAX);
         if !success {
             return Some(completed);
         }
@@ -393,24 +375,11 @@ pub fn record_best_effort(
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum McpContextTarget {
-    Session(Uuid),
-    Event(Uuid),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum McpCorrelationFact {
-    Found(McpContextTarget),
-    Opened(McpContextTarget),
-}
-
 #[derive(Debug, Clone, Default)]
 pub struct McpCompletionFacts {
     pub failed: bool,
     pub result_count: Option<usize>,
     pub delivered_output_bytes: usize,
-    pub correlation: Vec<McpCorrelationFact>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]

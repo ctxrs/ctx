@@ -106,8 +106,6 @@ impl McpUsagePort for LocalUsagePort {
             let operation = observed_mcp_product_operation(operation)?;
             let mut invocation = McpInvocation::from_operation(operation);
             invocation.bind_tool_usage(crate::observability_product::mcp_tool_usage(usage));
-            // Usage-v2 owns bounded, process-local search-to-show correlation
-            // inside this delivery boundary; target IDs remain process-local.
             let completion = crate::observability_product::mcp_completion_facts(
                 operation,
                 response,

@@ -1,13 +1,10 @@
 use std::{cell::Cell, time::Duration};
 
-use uuid::Uuid;
-
 use super::private_tempdir;
 use crate::{
     local_usage::{
-        ContextCoverage, LocalUsageStorageAuthority, McpCompletionFacts, McpContextTarget,
-        McpCorrelationFact, McpInvocation, McpUsageRecorder, SearchContextObservation,
-        UsageControlSnapshot, ValueClass,
+        ContextCoverage, LocalUsageStorageAuthority, McpCompletionFacts, McpInvocation,
+        McpUsageRecorder, SearchContextObservation, UsageControlSnapshot, ValueClass,
     },
     operation_descriptor::ObservedMcpProductOperation,
 };
@@ -37,27 +34,6 @@ fn mcp_search_records_transport_bytes_and_adapter_supplied_canonical_context() {
         (ContextCoverage::Complete, 12, 40)
     );
     assert_eq!(completed.delivered_output_bytes, 777);
-}
-
-#[test]
-fn bounded_uuid_correlation_never_stores_raw_selectors() {
-    let root = private_tempdir();
-    let authority = LocalUsageStorageAuthority::new(root.path().join("usage.sqlite"), "1.0.0");
-    let mut recorder =
-        McpUsageRecorder::start(authority, || UsageControlSnapshot::unversioned(true));
-    let target =
-        McpContextTarget::Session(Uuid::parse_str("11111111-2222-3333-4444-555555555555").unwrap());
-    let found = McpCompletionFacts {
-        correlation: vec![McpCorrelationFact::Found(target)],
-        ..McpCompletionFacts::default()
-    };
-    assert!(!recorder.correlate_delivered_for_test(&found));
-    let opened = McpCompletionFacts {
-        correlation: vec![McpCorrelationFact::Opened(target)],
-        ..McpCompletionFacts::default()
-    };
-    assert!(recorder.correlate_delivered_for_test(&opened));
-    assert!(!recorder.correlate_delivered_for_test(&opened));
 }
 
 #[test]
