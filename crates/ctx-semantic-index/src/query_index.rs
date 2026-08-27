@@ -199,12 +199,12 @@ fn semantic_candidates_with_embedding(
     let active_events = pinned.stats().active_events;
     let metadata_matches = projection.len();
     let requested_k = candidate_limit.min(metadata_matches.max(1));
-    let event_is_eligible = |event_id| projection.contains(event_id);
+    let event_identity_digest = |event_id| projection.event_identity_digest(event_id);
     let search = scan_exact_generation(
         pinned,
         embeddings,
         requested_k,
-        Some(&event_is_eligible),
+        &event_identity_digest,
         Instant::now(),
     )?;
     let stats = search.stats.clone();
@@ -235,7 +235,10 @@ fn semantic_candidates_with_embedding(
         })?;
     let mut candidates = Vec::with_capacity(records.len());
     for (hit, record) in positive_hits.into_iter().zip(records) {
-        if record.event_id != hit.event_id || !projection.contains(hit.event_id) {
+        if record.event_id != hit.event_id
+            || record.event_identity_digest != hit.event_identity_digest
+            || !projection.contains(hit.event_id)
+        {
             return Err(semantic_not_ready(
                 "semantic_projection_event_mismatch",
                 format!(

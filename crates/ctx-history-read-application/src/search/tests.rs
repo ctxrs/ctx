@@ -1194,6 +1194,42 @@ fn hybrid_fusion_keeps_full_ids_that_share_a_compact_uuid_and_ties_deterministic
 }
 
 #[test]
+fn hybrid_k_one_tie_uses_full_identity_when_uuid_order_opposes() {
+    let mut compact_preferred_digest = [0x30; 32];
+    compact_preferred_digest[6] = 0xf0;
+    let mut exact_winner_digest = [0x30; 32];
+    exact_winner_digest[6] = 0x0f;
+    let mut compact_preferred = candidate(10.0, 1, None, None, 1);
+    compact_preferred.event.event_id = ctx_history_index_format::CompactIdentity {
+        digest: compact_preferred_digest,
+    }
+    .as_uuid();
+    compact_preferred.event.event_identity_digest = compact_preferred_digest;
+    let mut exact_winner = candidate(10.0, 2, None, None, 1);
+    exact_winner.event.event_id = ctx_history_index_format::CompactIdentity {
+        digest: exact_winner_digest,
+    }
+    .as_uuid();
+    exact_winner.event.event_identity_digest = exact_winner_digest;
+    assert!(compact_preferred.event.event_id < exact_winner.event.event_id);
+    assert!(
+        exact_winner.event.event_identity_digest < compact_preferred.event.event_identity_digest
+    );
+
+    let fused = fuse_source_candidates(vec![compact_preferred], vec![exact_winner.clone()], 0.5)
+        .into_iter()
+        .take(1)
+        .collect::<Vec<_>>();
+
+    assert_eq!(fused.len(), 1);
+    assert_eq!(fused[0].event.event_id, exact_winner.event.event_id);
+    assert_eq!(
+        fused[0].event.event_identity_digest,
+        exact_winner.event.event_identity_digest
+    );
+}
+
+#[test]
 fn hybrid_semantic_endpoint_drops_the_lexical_only_zero_score_tail() {
     let lexical_only = candidate(f32::MAX, 1, None, None, 1);
     let shared = candidate(1.0, 2, None, None, 1);

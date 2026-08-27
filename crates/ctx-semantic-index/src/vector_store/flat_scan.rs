@@ -69,15 +69,21 @@ pub(crate) struct FlatScanLocation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ActiveChunk {
     pub(crate) event_id: Uuid,
+    pub(crate) event_identity_digest: [u8; 32],
     pub(crate) chunk_ordinal: u32,
     location: Option<FlatScanLocation>,
 }
 
 impl ActiveChunk {
     #[cfg(test)]
-    pub(crate) const fn new(event_id: Uuid, chunk_ordinal: u32) -> Self {
+    pub(crate) const fn new(
+        event_id: Uuid,
+        event_identity_digest: [u8; 32],
+        chunk_ordinal: u32,
+    ) -> Self {
         Self {
             event_id,
+            event_identity_digest,
             chunk_ordinal,
             location: None,
         }
@@ -85,11 +91,13 @@ impl ActiveChunk {
 
     pub(crate) const fn at_location(
         event_id: Uuid,
+        event_identity_digest: [u8; 32],
         chunk_ordinal: u32,
         location: FlatScanLocation,
     ) -> Self {
         Self {
             event_id,
+            event_identity_digest,
             chunk_ordinal,
             location: Some(location),
         }
@@ -131,7 +139,7 @@ pub(crate) struct FlatScanCounters {
 
 #[derive(Debug, Clone)]
 pub(crate) struct FlatScanResult {
-    /// Similarity descending, then event UUID ascending.
+    /// Similarity descending, then full event identity digest ascending.
     pub(crate) hits: Vec<FlatScanHit>,
     pub(crate) counters: FlatScanCounters,
 }
@@ -139,6 +147,7 @@ pub(crate) struct FlatScanResult {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct FlatScanHit {
     pub(crate) event_id: Uuid,
+    pub(crate) event_identity_digest: [u8; 32],
     pub(crate) chunk_ordinal: u32,
     pub(crate) query_ordinal: usize,
     pub(crate) similarity: f32,
@@ -149,7 +158,7 @@ impl PartialEq for FlatScanHit {
     fn eq(&self, other: &Self) -> bool {
         // Location is provenance, not rank identity. Active-generation
         // resolution guarantees one source record for an event chunk.
-        self.event_id == other.event_id
+        self.event_identity_digest == other.event_identity_digest
             && self.chunk_ordinal == other.chunk_ordinal
             && self.query_ordinal == other.query_ordinal
             && self.similarity.total_cmp(&other.similarity) == Ordering::Equal
@@ -170,7 +179,7 @@ impl Ord for FlatScanHit {
         // the worst retained result at the BinaryHeap root.
         self.similarity
             .total_cmp(&other.similarity)
-            .then_with(|| other.event_id.cmp(&self.event_id))
+            .then_with(|| other.event_identity_digest.cmp(&self.event_identity_digest))
             .then_with(|| other.query_ordinal.cmp(&self.query_ordinal))
             .then_with(|| other.chunk_ordinal.cmp(&self.chunk_ordinal))
     }
@@ -639,6 +648,7 @@ impl<'query> ExactFlatF32Scan<'query> {
         self.counters.chunks_scanned = self.counters.chunks_scanned.saturating_add(1);
         let candidate = FlatScanHit {
             event_id: metadata.event_id,
+            event_identity_digest: metadata.event_identity_digest,
             chunk_ordinal: metadata.chunk_ordinal,
             query_ordinal,
             similarity,

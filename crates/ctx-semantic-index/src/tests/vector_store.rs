@@ -7,6 +7,13 @@ use super::super::{
 };
 use super::*;
 
+fn test_event_identity_digest(event_id: Uuid) -> Option<[u8; 32]> {
+    let mut digest = [0; 32];
+    digest[..16].copy_from_slice(event_id.as_bytes());
+    digest[16..].copy_from_slice(event_id.as_bytes());
+    Some(digest)
+}
+
 fn exact_search(
     store: &SemanticVectorStore,
     query_embedding: &[f32],
@@ -20,7 +27,7 @@ fn exact_search(
         &pinned,
         &query_embeddings,
         limit,
-        None,
+        &test_event_identity_digest,
         std::time::Instant::now(),
     )
 }
@@ -37,7 +44,7 @@ fn exact_search_multi(
         &pinned,
         query_embeddings,
         limit,
-        None,
+        &test_event_identity_digest,
         std::time::Instant::now(),
     )
 }

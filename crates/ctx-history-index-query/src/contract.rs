@@ -374,7 +374,7 @@ impl SemanticEventPage {
 #[derive(Debug, Clone)]
 pub struct SemanticFilterProjection {
     pub(super) generation_id: String,
-    pub(super) event_ids: HashSet<Uuid>,
+    pub(super) event_identities: HashMap<Uuid, [u8; 32]>,
 }
 
 impl SemanticFilterProjection {
@@ -383,19 +383,23 @@ impl SemanticFilterProjection {
     }
 
     pub fn len(&self) -> usize {
-        self.event_ids.len()
+        self.event_identities.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.event_ids.is_empty()
+        self.event_identities.is_empty()
     }
 
     pub fn contains(&self, event_id: Uuid) -> bool {
-        self.event_ids.contains(&event_id)
+        self.event_identities.contains_key(&event_id)
+    }
+
+    pub fn event_identity_digest(&self, event_id: Uuid) -> Option<[u8; 32]> {
+        self.event_identities.get(&event_id).copied()
     }
 
     pub fn event_ids(&self) -> impl Iterator<Item = Uuid> + '_ {
-        self.event_ids.iter().copied()
+        self.event_identities.keys().copied()
     }
 }
 
