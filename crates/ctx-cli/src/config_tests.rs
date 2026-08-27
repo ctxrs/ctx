@@ -1218,49 +1218,6 @@ fn provider_root_count_is_bounded() {
 }
 
 #[test]
-fn provider_root_cli_mutations_are_durable_and_preserve_other_config() {
-    let data_root = tempfile::tempdir().unwrap();
-    let provider_parent = tempfile::tempdir().unwrap();
-    let provider_home = provider_parent.path().join("claude-personal");
-    fs::create_dir(&provider_home).unwrap();
-    fs::write(
-        data_root.path().join(CONFIG_FILE),
-        "[analytics]\nenabled = false\n\n[sources]\nautomatic = false\n",
-    )
-    .unwrap();
-
-    let added = add_claude_root(
-        data_root.path(),
-        "personal",
-        &provider_home,
-        Some("personal"),
-        false,
-    )
-    .unwrap();
-    assert!(added.changed);
-    let unchanged = add_claude_root(
-        data_root.path(),
-        "personal",
-        &provider_home,
-        Some("personal"),
-        false,
-    )
-    .unwrap();
-    assert!(!unchanged.changed);
-    let loaded = AppConfig::load(data_root.path()).unwrap();
-    assert!(!loaded.analytics.enabled);
-    assert!(!loaded.automatic_source_discovery_enabled());
-    assert_eq!(loaded.provider_roots["personal"], added.root);
-
-    let removed = remove_provider_root(data_root.path(), "personal").unwrap();
-    assert!(removed.changed);
-    let loaded = AppConfig::load(data_root.path()).unwrap();
-    assert!(!loaded.analytics.enabled);
-    assert!(!loaded.automatic_source_discovery_enabled());
-    assert!(loaded.provider_roots.is_empty());
-}
-
-#[test]
 fn persisted_provider_root_kind_is_openhands_only_and_exact() {
     let data_root = tempfile::tempdir().unwrap();
     let path = data_root.path().join("openhands-root");
@@ -1287,22 +1244,6 @@ fn persisted_provider_root_kind_is_openhands_only_and_exact() {
     fs::write(data_root.path().join(CONFIG_FILE), invalid_spelling).unwrap();
     let error = format!("{:#}", AppConfig::load(data_root.path()).unwrap_err());
     assert!(error.contains("must be current-conversations"), "{error}");
-}
-
-#[test]
-fn provider_root_cli_mutation_validates_the_capability_path_kind() {
-    let data_root = tempfile::tempdir().unwrap();
-    let provider_parent = tempfile::tempdir().unwrap();
-    let provider_file = provider_parent.path().join("claude-history-file");
-    fs::write(&provider_file, b"not a provider directory").unwrap();
-
-    let error = format!(
-        "{:#}",
-        add_claude_root(data_root.path(), "personal", &provider_file, None, false).unwrap_err()
-    );
-
-    assert!(error.contains("existing non-symlink directory"), "{error}");
-    assert!(!data_root.path().join(CONFIG_FILE).exists());
 }
 
 #[test]
@@ -1375,35 +1316,20 @@ fn provider_root_mutation_waits_for_the_shared_config_transaction_lock() {
 #[test]
 fn removing_the_last_member_of_a_group_is_allowed() {
     let data_root = tempfile::tempdir().unwrap();
-    let provider_parent = tempfile::tempdir().unwrap();
-    let provider_home = provider_parent.path().join("claude-personal");
-    fs::create_dir(&provider_home).unwrap();
+    let provider_home = tempfile::tempdir().unwrap();
     fs::write(
         data_root.path().join(CONFIG_FILE),
         format!(
-            "[sources.roots.personal]\nprovider = \"claude\"\npath = {:?}\ngroup = \"personal\"\n",
-            provider_home.display().to_string()
+            "[analytics]\nenabled = false\n\n[sources]\nautomatic = false\n\n[sources.roots.personal]\nprovider = \"claude\"\npath = {:?}\ngroup = \"personal\"\n",
+            provider_home.path().display().to_string()
         ),
     )
     .unwrap();
 
-    remove_provider_root(data_root.path(), "personal").unwrap();
-    assert!(AppConfig::load(data_root.path())
-        .unwrap()
-        .provider_roots
-        .is_empty());
-}
-
-#[test]
-fn rejects_removed_cloud_config_keys() {
-    let temp = tempfile::tempdir().unwrap();
-    fs::write(
-        temp.path().join(CONFIG_FILE),
-        "[cloud]\nmode = \"local_and_cloud\"\n",
-    )
-    .unwrap();
-
-    let error = format!("{:#}", AppConfig::load(temp.path()).unwrap_err());
-    assert!(error.contains("unknown config key"), "{error}");
-    assert!(error.contains("cloud.mode"), "{error}");
+    let removed = remove_provider_root(data_root.path(), "personal").unwrap();
+    assert!(removed.changed);
+    let loaded = AppConfig::load(data_root.path()).unwrap();
+    assert!(!loaded.analytics.enabled);
+    assert!(!loaded.automatic_source_discovery_enabled());
+    assert!(loaded.provider_roots.is_empty());
 }

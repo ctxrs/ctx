@@ -10,7 +10,7 @@ fn provider_root_replace_atomically_changes_path_and_complete_group_state() {
     fs::create_dir(&replacement).unwrap();
     fs::write(
         data_root.path().join(CONFIG_FILE),
-        "[analytics]\nenabled = false\n",
+        "[analytics]\nenabled = false\n\n[sources]\nautomatic = false\n",
     )
     .unwrap();
 
@@ -53,6 +53,7 @@ fn provider_root_replace_atomically_changes_path_and_complete_group_state() {
     assert_eq!(replaced.root.path, fs::canonicalize(&replacement).unwrap());
     let loaded = AppConfig::load(data_root.path()).unwrap();
     assert!(!loaded.analytics.enabled);
+    assert!(!loaded.automatic_source_discovery_enabled());
     assert_eq!(loaded.provider_roots["work"], replaced.root);
 
     let cleared = add_claude_root(data_root.path(), "work", &original, None, true).unwrap();
@@ -63,7 +64,7 @@ fn provider_root_replace_atomically_changes_path_and_complete_group_state() {
     assert!(!cleared_text.contains("group ="), "{cleared_text}");
 
     let before_noop = fs::read(&config_path).unwrap();
-    let unchanged = add_claude_root(data_root.path(), "work", &original, None, true).unwrap();
+    let unchanged = add_claude_root(data_root.path(), "work", &original, None, false).unwrap();
     assert!(!unchanged.changed);
     assert!(!unchanged.replaced);
     assert_eq!(fs::read(&config_path).unwrap(), before_noop);

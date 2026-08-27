@@ -46,7 +46,9 @@ fn removed_cloud_config_is_rejected_without_initializing_storage() {
         .args(["status", "--format=json"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("cloud.mode"));
+        .stderr(predicate::str::contains(
+            "\"code\":\"removed_config_key\",\"config_key\":\"cloud.mode\"",
+        ));
 
     assert_eq!(fs::read_to_string(config_path).unwrap(), stale_config);
     assert!(!data_root.join("search").exists());
