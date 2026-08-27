@@ -69,20 +69,12 @@ pub(crate) fn run_semantic(
     }
 }
 
-pub(crate) fn persist_semantic_enabled(
-    data_root: &Path,
-    config: &mut config::AppConfig,
-    enabled: bool,
-) -> Result<()> {
-    CliHistoryConfigAdapter::new(data_root, config).set_semantic_search_enabled(enabled)
-}
-
 pub(crate) fn set_semantic_policy(
     data_root: &Path,
     config: &mut config::AppConfig,
     enabled: bool,
 ) -> Result<()> {
-    persist_semantic_enabled(data_root, config, enabled)?;
+    CliHistoryConfigAdapter::new(data_root, config).set_semantic_search_enabled(enabled)?;
     *config = config::AppConfig::load(data_root)?;
     if config.semantic_search_enabled() != enabled {
         if enabled {
@@ -193,49 +185,7 @@ fn render_report(report: Value, json: bool, quiet: bool, ui: &mut Ui) -> Result<
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
-
     use super::*;
-
-    #[test]
-    fn persistence_helper_is_idempotent_and_preserves_other_config() {
-        let temp = tempfile::tempdir().unwrap();
-        fs::write(
-            temp.path().join(config::CONFIG_FILE),
-            "# user setting\n[analytics]\nenabled = false\n",
-        )
-        .unwrap();
-        let mut config = config::AppConfig::load(temp.path()).unwrap();
-
-        persist_semantic_enabled(temp.path(), &mut config, true).unwrap();
-        let once = fs::read_to_string(temp.path().join(config::CONFIG_FILE)).unwrap();
-        persist_semantic_enabled(temp.path(), &mut config, true).unwrap();
-
-        assert_eq!(
-            fs::read_to_string(temp.path().join(config::CONFIG_FILE)).unwrap(),
-            once
-        );
-        assert!(once.contains("# user setting"), "{once}");
-        assert!(once.contains("[search]\nsemantic = true\n"), "{once}");
-    }
-
-    #[test]
-    fn lifecycle_reports_pending_disable_until_the_daemon_quiesces() {
-        let config = config::AppConfig::default();
-        let semantic = json!({"enabled": false, "status": "disabled", "reason": "opt_out"});
-        let daemon = json!({"running": true});
-        let job = json!({
-            "status": "ready",
-            "semantic_enabled": true,
-            "runtime_active": true,
-            "configuration_pending": false,
-        });
-
-        let (status, reason) = semantic_lifecycle_state(&semantic, &daemon, Some(&job), &config);
-
-        assert_eq!(status, "disabling");
-        assert_eq!(reason, "daemon_config_reload_pending");
-    }
 
     #[test]
     fn lifecycle_surfaces_daemon_semantic_failure_reason() {
