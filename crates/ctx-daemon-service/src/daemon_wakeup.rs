@@ -44,6 +44,20 @@ impl SourceWatchBatch {
     }
 
     fn merge(&mut self, other: Self) {
+        if let Some(watermark) = other.reconcile {
+            self.routes.clear();
+            self.members.clear();
+            self.reconcile = Some(
+                self.reconcile
+                    .map_or(watermark, |current| current.max(watermark)),
+            );
+            self.rearm |= other.rearm;
+            return;
+        }
+        if self.reconcile.is_some() {
+            self.rearm |= other.rearm;
+            return;
+        }
         let mut other_members = other.members;
         for (route, watermark) in other.routes {
             let already_recorded = self.routes.contains_key(&route);
@@ -69,12 +83,6 @@ impl SourceWatchBatch {
                 (true, None, _) => {}
             }
         }
-        if let Some(watermark) = other.reconcile {
-            self.reconcile = Some(
-                self.reconcile
-                    .map_or(watermark, |current| current.max(watermark)),
-            );
-        }
         self.rearm |= other.rearm;
     }
 
@@ -92,7 +100,7 @@ impl SourceWatchBatch {
         self.merge(batch);
     }
 
-    fn catalog_reconciliation(watermark: EventWatermark) -> Self {
+    fn uncertainty(watermark: EventWatermark) -> Self {
         Self {
             reconcile: Some(watermark),
             rearm: true,
@@ -235,22 +243,64 @@ struct WatchCounters {
 
 #[derive(Debug, Clone, Default)]
 pub(super) struct DaemonWatchCatalog {
-    snapshot: Arc<RwLock<Option<SourceBackedWatchCatalog>>>,
+    state: Arc<RwLock<WatchCatalogState>>,
+}
+
+#[derive(Debug, Default)]
+struct WatchCatalogState {
+    snapshot: Option<SourceBackedWatchCatalog>,
+    uncertain_through: Option<EventWatermark>,
 }
 
 impl DaemonWatchCatalog {
     pub(super) fn publish(&self, catalog: SourceBackedWatchCatalog) {
-        *self
-            .snapshot
+        self.state
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(catalog);
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .snapshot = Some(catalog);
     }
 
     pub(super) fn snapshot(&self) -> Option<SourceBackedWatchCatalog> {
-        self.snapshot
+        self.state
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .snapshot
             .clone()
+    }
+
+    pub(super) fn fence_uncertainty(&self, watermark: EventWatermark) {
+        let mut state = self
+            .state
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.uncertain_through = Some(
+            state
+                .uncertain_through
+                .map_or(watermark, |current| current.max(watermark)),
+        );
+    }
+
+    pub(super) fn uncertainty_watermark(&self) -> Option<EventWatermark> {
+        self.state
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .uncertain_through
+    }
+
+    pub(super) fn clear_uncertainty_if_covered(&self, covered_through: EventWatermark) -> bool {
+        let mut state = self
+            .state
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state
+            .uncertain_through
+            .is_some_and(|current| current <= covered_through)
+        {
+            state.uncertain_through = None;
+            true
+        } else {
+            false
+        }
     }
 }
 
@@ -282,7 +332,7 @@ pub(super) struct DaemonFileWatcher {
     wakeup: Arc<DaemonWakeup>,
     authority: Arc<RwLock<WatchAuthority>>,
     counters: Arc<Mutex<WatchCounters>>,
-    runtime: ctx_daemon_runtime::NativeFileWatcher<SourceWatchBatch>,
+    runtime: ctx_daemon_runtime::NativeFileWatcher,
     last_error: Option<String>,
 }
 
@@ -310,6 +360,7 @@ impl DaemonFileWatcher {
                 )
             },
         );
+        let reconciliation_authority = Arc::clone(&authority);
         let ignored_data_root = data_root.to_path_buf();
         let ignored_counters = Arc::clone(&counters);
         let ignore_event = Arc::new(move |event: &NativeWatchEvent| {
@@ -328,11 +379,14 @@ impl DaemonFileWatcher {
             "ctx-daemon-watch",
             ignore_event,
             classify_event,
-            Arc::new(|watermark: ctx_daemon_runtime::WatchWatermark| {
-                SourceWatchBatch::catalog_reconciliation(EventWatermark::new(
-                    watermark.epoch,
-                    watermark.sequence,
-                ))
+            Arc::new(move |watermark: ctx_daemon_runtime::WatchWatermark| {
+                let watermark = EventWatermark::new(watermark.epoch, watermark.sequence);
+                reconciliation_authority
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .catalog
+                    .fence_uncertainty(watermark);
+                SourceWatchBatch::uncertainty(watermark)
             }),
             Arc::new(move |batch| observed_wakeup.observe_source_watch(batch)),
             Arc::new(move |batch| signal_wakeup.signal_source_watch(batch)),
@@ -364,6 +418,7 @@ impl DaemonFileWatcher {
         let catalog = authority.catalog.snapshot();
         let desired_paths = authority.target_paths();
         let desired = ctx_daemon_runtime::watch_roots(desired_paths.iter().map(PathBuf::as_path));
+        let force_rearm = force_rearm || authority.catalog.uncertainty_watermark().is_some();
         let replace_native_watcher = self.runtime.replacement_required(force_rearm);
         let registration_needed = self.runtime.needs_registration(&desired, force_rearm);
         let affected = if registration_needed && !replace_native_watcher {
@@ -387,7 +442,8 @@ impl DaemonFileWatcher {
         self.last_error = catalog
             .is_none()
             .then(|| "watch catalog authority is unavailable".to_owned());
-        if let Err(error) = self.runtime.reconcile_paths(desired, force_rearm) {
+        let registration = self.runtime.reconcile_paths(desired, force_rearm);
+        if let Err(error) = registration.as_ref() {
             self.last_error = Some(error.to_string());
         }
         let receipt = self.write_receipt(if self.last_error.is_some() {
@@ -395,7 +451,32 @@ impl DaemonFileWatcher {
         } else {
             "active"
         });
-        (affected, receipt)
+        let affected = if registration.is_ok() {
+            affected
+        } else {
+            SourceWatchBatch::default()
+        };
+        (affected, registration.and(receipt))
+    }
+
+    pub(super) fn uncertainty_watermark(&self) -> Option<EventWatermark> {
+        self.authority
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .catalog
+            .uncertainty_watermark()
+    }
+
+    pub(super) fn clear_uncertainty_if_covered(&self, covered_through: EventWatermark) -> bool {
+        self.authority
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .catalog
+            .clear_uncertainty_if_covered(covered_through)
+    }
+
+    pub(super) fn worker_failed(&self) -> bool {
+        self.runtime.worker_failed()
     }
 
     fn next_watermark(&self) -> EventWatermark {

@@ -141,7 +141,7 @@ fn wakeup_blocks_until_signaled_and_coalesces_reasons() {
 }
 
 #[test]
-fn source_watch_batches_coalesce_to_catalog_cardinality() {
+fn catalog_uncertainty_atomically_fences_pending_exact_routes() {
     let catalog = watch_catalog([catalog_route(
         CaptureProvider::Codex,
         PathBuf::from("/tmp/provider/session.jsonl"),
@@ -162,14 +162,8 @@ fn source_watch_batches_coalesce_to_catalog_cardinality() {
     }
 
     let pending = wakeup.pending_source_watch();
-    assert_eq!(pending.routes.len(), 1);
-    assert_eq!(
-        pending.routes.get(&route),
-        Some(&EventWatermark::new(
-            7,
-            WATCH_EVENT_QUEUE_CAPACITY as u64 * 4
-        ))
-    );
+    assert!(pending.routes.is_empty());
+    assert!(pending.members.is_empty());
     assert_eq!(
         pending.reconcile,
         Some(EventWatermark::new(
@@ -180,7 +174,7 @@ fn source_watch_batches_coalesce_to_catalog_cardinality() {
     assert!(pending.rearm);
 
     let wake = wakeup.wait(Duration::ZERO);
-    assert_eq!(wake.source_watch.routes.len(), 1);
+    assert!(wake.source_watch.routes.is_empty());
     assert!(wakeup.pending_source_watch().is_empty());
 }
 
@@ -572,7 +566,11 @@ fn forced_rearm_emits_only_the_route_mutated_during_registration_overlap() {
     assert!(affected.routes.is_empty());
     let observed = wakeup.wait(Duration::from_secs(3));
     assert!(observed.filesystem, "overlap mutation did not wake watcher");
-    assert!(observed.source_watch.routes.contains_key(&route));
+    assert!(
+        observed.source_watch.routes.contains_key(&route),
+        "{:#?}",
+        observed.source_watch
+    );
     assert!(!observed.source_watch.routes.contains_key(&healthy_route));
 }
 
@@ -580,8 +578,34 @@ fn forced_rearm_emits_only_the_route_mutated_during_registration_overlap() {
 fn rescan_and_backend_errors_require_catalog_reconciliation_and_rearm() {
     let data_root = Path::new("/tmp/ctx-data");
     let daemon_root = data_root.join("daemon");
-    let authority = RwLock::new(watch_authority(data_root, watch_catalog([])));
+    let provider_file = PathBuf::from("/tmp/provider/session.jsonl");
+    let catalog = watch_catalog([catalog_route(
+        CaptureProvider::Codex,
+        provider_file.clone(),
+        "codex_history_jsonl",
+    )]);
+    let authority = RwLock::new(watch_authority(data_root, catalog));
     let counters = Mutex::new(WatchCounters::default());
+    let pathless = record_watch_event(
+        &authority,
+        &counters,
+        data_root,
+        &daemon_root,
+        Ok(NativeWatchEvent::ordinary(Vec::new())),
+        EventWatermark::new(3, 0),
+    );
+    assert_eq!(pathless.reconcile, Some(EventWatermark::new(3, 0)));
+    assert!(pathless.rearm);
+    let fenced_exact = record_watch_event(
+        &authority,
+        &counters,
+        data_root,
+        &daemon_root,
+        Ok(NativeWatchEvent::ordinary(vec![provider_file])),
+        EventWatermark::new(3, 1),
+    );
+    assert!(fenced_exact.routes.is_empty());
+    assert_eq!(fenced_exact.reconcile, Some(EventWatermark::new(3, 1)));
     let rescan = NativeWatchEvent::rescan(vec![
         data_root.join("catalogs/explicit-sources/catalog.lock")
     ]);
@@ -592,9 +616,9 @@ fn rescan_and_backend_errors_require_catalog_reconciliation_and_rearm() {
         data_root,
         &daemon_root,
         Ok(rescan),
-        EventWatermark::new(3, 1),
+        EventWatermark::new(3, 2),
     );
-    assert_eq!(rescan_batch.reconcile, Some(EventWatermark::new(3, 1)));
+    assert_eq!(rescan_batch.reconcile, Some(EventWatermark::new(3, 2)));
     assert!(rescan_batch.rearm);
 
     let error_batch = record_watch_event(
@@ -603,9 +627,9 @@ fn rescan_and_backend_errors_require_catalog_reconciliation_and_rearm() {
         data_root,
         &daemon_root,
         Err(NativeWatchError),
-        EventWatermark::new(3, 2),
+        EventWatermark::new(3, 3),
     );
-    assert_eq!(error_batch.reconcile, Some(EventWatermark::new(3, 2)));
+    assert_eq!(error_batch.reconcile, Some(EventWatermark::new(3, 3)));
     assert!(error_batch.rearm);
     let counters = counters.lock().unwrap();
     assert_eq!(counters.rescan_notifications, 1);
@@ -692,15 +716,6 @@ fn core_owned_writes_do_not_retrigger_provider_refresh_or_increment_work_counter
         EventWatermark::new(1, 1),
     )
     .is_empty());
-    assert!(record_watch_event(
-        &targets,
-        &counters,
-        data_root,
-        &daemon_root,
-        Ok(event(data_root)),
-        EventWatermark::new(1, 2),
-    )
-    .is_empty());
     let access = NativeWatchEvent::ignored(
         vec![data_root.join("config.toml")],
         NativeWatchIgnore::Access,
@@ -763,6 +778,16 @@ fn core_owned_writes_do_not_retrigger_provider_refresh_or_increment_work_counter
     )
     .is_empty());
     assert_eq!(counters.lock().unwrap().raw_events, 2);
+    let invalidated = record_watch_event(
+        &targets,
+        &counters,
+        data_root,
+        &daemon_root,
+        Ok(event(data_root)),
+        EventWatermark::new(1, 8),
+    );
+    assert_eq!(invalidated.reconcile, Some(EventWatermark::new(1, 8)));
+    assert!(invalidated.rearm);
 }
 
 #[test]
@@ -804,9 +829,6 @@ fn authoritative_changes_and_dynamic_discovery_remain_relevant() {
         .is_empty()
     };
 
-    assert!(relevant(NativeWatchEvent::ordinary(vec![
-        data_root.join("config.toml")
-    ]),));
     assert!(!relevant(NativeWatchEvent::ordinary(vec![
         catalog_root.join("catalog-00000000000000000002.json"),
     ]),));
@@ -814,15 +836,27 @@ fn authoritative_changes_and_dynamic_discovery_remain_relevant() {
         provider_file.clone()
     ]),));
     assert!(relevant(NativeWatchEvent::requiring_rearm(vec![
-        PathBuf::from("/tmp/provider/session.tmp"),
-        provider_file.clone(),
-    ]),));
-    assert!(relevant(NativeWatchEvent::requiring_rearm(vec![
         PathBuf::from("/tmp/home/.codex")
     ]),));
     assert!(relevant(NativeWatchEvent::ordinary(vec![PathBuf::from(
         "/tmp/provider/history.sqlite-wal",
     )]),));
+    assert!(relevant(NativeWatchEvent::ordinary(vec![
+        data_root.join("config.toml")
+    ]),));
+    let mixed = record_watch_event(
+        &targets,
+        &counters,
+        data_root,
+        &daemon_root,
+        Ok(NativeWatchEvent::requiring_rearm(vec![
+            PathBuf::from("/tmp/provider/session.tmp"),
+            provider_file,
+        ])),
+        EventWatermark::new(1, 98),
+    );
+    assert_eq!(mixed.reconcile, Some(EventWatermark::new(1, 98)));
+    assert!(mixed.rearm);
     assert!(!record_watch_event(
         &targets,
         &counters,
