@@ -10,8 +10,8 @@ use anyhow::Error;
 use ctx_agent_integrations::{
     mcp::{
         encode_response_line, error_response, handle_protocol_message, read_mcp_input_line,
-        McpInputLine, McpServerIdentity, McpToolKind, McpUsage, RequestDescriptor,
-        MCP_MAX_LINE_BYTES, MCP_PRESENTATION_MAX_OUTPUT_BYTES,
+        validated_companion_tool_request, McpInputLine, McpServerIdentity, McpToolKind, McpUsage,
+        RequestDescriptor, MCP_MAX_LINE_BYTES, MCP_PRESENTATION_MAX_OUTPUT_BYTES,
     },
     tool_backend::{OpaqueMcpProxyError, ToolBackend, ToolSearchFailurePhase, ToolUsageFacts},
 };
@@ -54,6 +54,13 @@ pub trait McpUsagePort {
         operation: McpToolKind,
         usage: ToolUsageFacts,
         response: &Value,
+        encoded_response_bytes: usize,
+        duration: Duration,
+    );
+
+    fn record_companion_blame_delivered(
+        &mut self,
+        failed: bool,
         encoded_response_bytes: usize,
         duration: Duration,
     );
@@ -146,24 +153,28 @@ where
                 match serde_json::from_str::<Value>(trimmed) {
                     Ok(message) => {
                         let descriptor = RequestDescriptor::from_message(&message);
-                        if *initialized
-                            && matches!(
-                                descriptor,
-                                RequestDescriptor::ToolCall { operation }
-                                    if operation.is_companion_owned()
-                            )
-                        {
-                            let encoded =
+                        let companion_operation =
+                            validated_companion_tool_request(&message, descriptor, *initialized);
+                        if let Some(operation) = companion_operation {
+                            let (encoded, failed) =
                                 match backend.proxy_companion_mcp(line.as_bytes()) {
-                                    Ok(response) => response,
-                                    Err(error) => encode_response_line(
-                                        &companion_proxy_error_response(&message, error),
-                                    )
-                                    .map(String::into_bytes)
-                                    .map_err(|error| McpServeFailure {
-                                        reason: McpStopReasonV1::ResponseSerializeError,
-                                        error: error.into(),
-                                    })?,
+                                    Ok(response) => {
+                                        let failed = companion_tool_failed(&response, &message);
+                                        (response, failed)
+                                    }
+                                    Err(error) => {
+                                        (
+                                            encode_response_line(&companion_proxy_error_response(
+                                                &message, error,
+                                            ))
+                                            .map(String::into_bytes)
+                                            .map_err(|error| McpServeFailure {
+                                                reason: McpStopReasonV1::ResponseSerializeError,
+                                                error: error.into(),
+                                            })?,
+                                            true,
+                                        )
+                                    }
                                 };
                             stdout
                                 .write_all(&encoded)
@@ -175,12 +186,15 @@ where
                                 reason: McpStopReasonV1::StdoutFlushError,
                                 error: error.into(),
                             })?;
-                            telemetry.record_delivered(
-                                descriptor,
-                                None,
-                                None,
-                                request_started.elapsed(),
-                            );
+                            let duration = request_started.elapsed();
+                            if operation == McpToolKind::Blame {
+                                usage_port.record_companion_blame_delivered(
+                                    failed,
+                                    encoded.len(),
+                                    duration,
+                                );
+                            }
+                            telemetry.record_delivered(descriptor, None, None, duration);
                             continue;
                         }
                         let mut handled = handle_protocol_message(
@@ -307,6 +321,29 @@ where
         } else {
             telemetry.record_delivered(descriptor, None, None, request_started.elapsed());
         }
+    }
+}
+
+fn companion_tool_failed(response: &[u8], request: &Value) -> bool {
+    let Ok(response) = serde_json::from_slice::<Value>(response) else {
+        return true;
+    };
+    let Some(response) = response.as_object() else {
+        return true;
+    };
+    if response.get("jsonrpc").and_then(Value::as_str) != Some("2.0")
+        || response.get("id") != request.get("id")
+    {
+        return true;
+    }
+    match (response.get("result"), response.get("error")) {
+        (None, Some(_)) => true,
+        (Some(Value::Object(result)), None) => match result.get("isError") {
+            None => false,
+            Some(Value::Bool(failed)) => *failed,
+            Some(_) => true,
+        },
+        _ => true,
     }
 }
 

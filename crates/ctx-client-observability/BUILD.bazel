@@ -20,6 +20,7 @@ filegroup(
 COMMON_RUSTC_ENV = {"CARGO_MANIFEST_DIR": "crates/ctx-client-observability"}
 RUST_SRCS = glob(["src/**/*.rs"])
 PROD_SRCS = glob(["src/**/*.rs"], exclude = RUST_PROD_SRC_EXCLUDES)
+SCHEMA_SRCS = glob(["src/**/*.sql"])
 CTX_CLIENT_OBSERVABILITY_DEPS = [
     "//crates/ctx-history-core:lib",
     "//crates/ctx-history-platform:lib",
@@ -33,6 +34,7 @@ CTX_CLIENT_OBSERVABILITY_RUSTC_FLAGS = [
 rust_library(
     name = "lib",
     srcs = PROD_SRCS,
+    compile_data = SCHEMA_SRCS,
     crate_name = "ctx_client_observability",
     crate_root = "src/lib.rs",
     edition = crate_edition(),
@@ -47,6 +49,7 @@ rust_library(
     name = "test_support_lib",
     testonly = True,
     srcs = PROD_SRCS,
+    compile_data = SCHEMA_SRCS,
     crate_name = "ctx_client_observability",
     crate_root = "src/lib.rs",
     edition = crate_edition(),
@@ -62,7 +65,7 @@ ctx_rust_test(
     srcs = RUST_SRCS,
     crate_name = "ctx_client_observability",
     crate_root = "src/lib.rs",
-    compile_data = ["//:telemetry_contract_fixtures"],
+    compile_data = SCHEMA_SRCS + ["//:telemetry_contract_fixtures"],
     edition = crate_edition(),
     aliases = aliases(normal_dev = True, proc_macro_dev = True),
     deps = all_crate_deps(normal = True, normal_dev = True) + CTX_CLIENT_OBSERVABILITY_DEPS,

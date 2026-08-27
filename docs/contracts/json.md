@@ -297,18 +297,22 @@ Each `by_operation` row contains exactly `ctx_version`, `surface`, `operation`,
 `duration_bucket` and `calls`.
 
 The report reads the Core-owned `usage.sqlite` sidecar. Its current SQLite
-schema version is 4, whose daily aggregate rows contain only `day_utc`,
+schema version is 5, whose daily aggregate rows contain only `day_utc`,
 `definition_version`, `ctx_version`, `surface`, `operation`, `outcome`,
 `value_class`, `duration_bucket`, `context_coverage`, `calls`, `result_count`,
 `delivered_output_bytes`, `delivered_context_bytes`, and
-`matched_normalized_session_bytes`. SQLite schema versions 1 through 3 are
-accepted only as migration inputs; new stores and current writes use version 4.
+`matched_normalized_session_bytes`. SQLite schema versions 1 through 4 are
+accepted only as migration inputs; new stores and current writes use version 5.
 The SQLite schema version and JSON report schema version are independent.
 
 CLI `delivered_output_bytes` counts the actual final stdout and stderr bytes
 accepted for delivery, including the selected terminal wrapping and ANSI mode.
 MCP output bytes count the serialized response transport. These are delivery
-measurements, not context measurements.
+measurements, not context measurements. CLI Blame is the exception: its public
+companion wrapper does not intercept output, so its zero byte aggregate means
+unavailable and human detail renders N/A. Blame rows report technical outcome
+and duration with `not_applicable` value classification and zero results; Core
+does not infer a private result collection.
 
 When complete search-context measurements are available, `estimates` contains
 `approximate_context_tokens` with `coefficient_version`,

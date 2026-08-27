@@ -34,7 +34,7 @@ fn definition(report: &Value, version: i64) -> &Value {
 }
 
 #[test]
-fn default_on_usage_is_independent_of_remote_telemetry_and_reports_definition_two() {
+fn default_on_usage_is_independent_of_remote_telemetry_and_reports_current_definition() {
     let temp = tempdir();
     let output = enabled(ctx(&temp).args(["doctor"]))
         .env("CTX_ANALYTICS_ENABLED", "false")
@@ -61,7 +61,7 @@ fn default_on_usage_is_independent_of_remote_telemetry_and_reports_definition_tw
     assert!(report.get("definition_version").is_none());
     assert!(report.get("summary").is_none());
 
-    let current = definition(&report, 2);
+    let current = definition(&report, 3);
     assert_eq!(current["summary"]["calls"], 1);
     assert_eq!(current["summary"]["successful_calls"], 1);
     assert_eq!(current["summary"]["failed_calls"], 0);
@@ -220,7 +220,7 @@ fn stats_are_literal_read_only_and_do_not_count_themselves() {
         ])));
     }
     let report = json_output(enabled(ctx(&temp).args(["stats", "--format=json"])));
-    assert_eq!(definition(&report, 2)["summary"]["calls"], 1);
+    assert_eq!(definition(&report, 3)["summary"]["calls"], 1);
     assert_eq!(fs::read(&usage_path).unwrap(), before_bytes);
     assert_eq!(
         fs::metadata(&usage_path).unwrap().modified().unwrap(),
@@ -243,7 +243,7 @@ fn parsed_cli_failure_records_once_and_recording_failure_is_best_effort() {
         "--format=json",
     ])));
     assert_eq!(report["state"], "ready", "{report:#}");
-    let current = definition(&report, 2);
+    let current = definition(&report, 3);
     assert_eq!(current["summary"]["calls"], 1);
     assert_eq!(current["summary"]["failed_calls"], 1);
     assert_eq!(current["by_operation"][0]["operation"], "docs");

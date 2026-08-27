@@ -9,6 +9,7 @@ use crate::tool_backend::{
 };
 
 mod arguments;
+mod companion;
 mod input;
 mod query_events;
 mod response;
@@ -22,6 +23,7 @@ use arguments::{
     optional_usize, validate_argument_keys, validate_search_filter_arguments,
     SourceIdentityFilterArgs,
 };
+pub use companion::validated_companion_tool_request;
 pub use input::{read_mcp_input_line, McpInputLine};
 use query_events::query_events_operation;
 pub use response::error_response;

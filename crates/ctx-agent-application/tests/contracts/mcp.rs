@@ -68,7 +68,7 @@ fn mcp_status_exactly_matches_cli_json_for_pristine_unavailable_state() {
             "schema_version": 3,
             "enabled": false,
             "state": "disabled",
-            "definition_version": 2,
+            "definition_version": 3,
             "retention_days": 400,
             "error": null,
         }),

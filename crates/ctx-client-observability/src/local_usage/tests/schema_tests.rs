@@ -17,7 +17,7 @@ fn assert_schema_identity_rejected(schema_version: i64, mutation: &str, schema: 
 
 #[test]
 fn released_predecessor_ddl_identities_are_exact_for_every_version() {
-    for schema_version in 1..=3 {
+    for schema_version in 1..=4 {
         let schema = store::released_schema_for_test(schema_version).unwrap();
         assert_eq!(
             store::verify_released_schema_text_for_test(schema_version, &schema).unwrap(),
@@ -99,7 +99,7 @@ fn schema_has_only_spec_26_aggregate_fields_and_content_free_maintenance() {
 }
 
 #[test]
-fn active_v4_admits_locate_and_rejects_retired_sql_in_schema_and_reports() {
+fn active_v5_admits_current_core_and_blame_but_rejects_retired_sql() {
     let root = private_tempdir();
     store::record(root.path(), operation("doctor")).unwrap();
     let mcp_status = McpInvocation::from_operation(ObservedMcpProductOperation::Status).completed(
@@ -185,7 +185,7 @@ fn schema_rejects_invalid_context_classification() {
 }
 
 #[test]
-fn schema_requires_positive_definition_two_success_and_mcp_output() {
+fn schema_requires_positive_definition_three_core_success_and_mcp_output() {
     let root = private_tempdir();
     store::record(root.path(), operation("doctor")).unwrap();
     store::record(
@@ -211,21 +211,21 @@ fn schema_requires_positive_definition_two_success_and_mcp_output() {
     assert!(conn
         .execute(
             "UPDATE daily_usage SET delivered_output_bytes = 0 \
-             WHERE definition_version = 2 AND surface = 'cli' AND outcome = 'success'",
+             WHERE definition_version = 3 AND surface = 'cli' AND outcome = 'success'",
             [],
         )
         .is_err());
     assert!(conn
         .execute(
             "UPDATE daily_usage SET delivered_output_bytes = 0 \
-             WHERE definition_version = 2 AND surface = 'mcp'",
+             WHERE definition_version = 3 AND surface = 'mcp'",
             [],
         )
         .is_err());
     assert_eq!(
         conn.query_row(
             "SELECT delivered_output_bytes FROM daily_usage \
-             WHERE definition_version = 2 AND surface = 'cli' AND outcome = 'failure'",
+             WHERE definition_version = 3 AND surface = 'cli' AND outcome = 'failure'",
             [],
             |row| row.get::<_, i64>(0),
         )
@@ -259,7 +259,7 @@ fn report_validation_rejects_constraint_bypassed_zero_output_rows() {
         assert_eq!(
             conn.execute(
                 "UPDATE daily_usage SET delivered_output_bytes = 0 \
-                 WHERE definition_version = 2 AND surface = ?1 AND outcome = ?2",
+                 WHERE definition_version = 3 AND surface = ?1 AND outcome = ?2",
                 [surface, outcome],
             )
             .unwrap(),

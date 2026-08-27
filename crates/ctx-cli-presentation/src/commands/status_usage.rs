@@ -319,7 +319,7 @@ mod tests {
                     "schema_version": 3,
                     "enabled": false,
                     "state": "error",
-                    "definition_version": 2,
+                    "definition_version": 3,
                     "retention_days": 400,
                     "error": {
                         "code": "local_usage_config_unavailable",

@@ -75,26 +75,40 @@ root. It is separate from provider history and Core/Tantivy and semantic search
 data. Local usage is product state, not telemetry: it has no network path or
 analytics identity and remains available when analytics are disabled.
 
-Version 1 stores daily UTC aggregate rows only. Its closed dimensions are UTC
+The store contains daily UTC aggregate rows only. Its closed dimensions are UTC
 day, usage-definition version, ctx binary/client version, surface (`cli` or
 `mcp`), logical operation, technical outcome, result class, and duration
-bucket. Aggregate counters cover calls, content-free result/citation totals
-when a handler already has them, and serialized MCP response bytes. MCP
-response bytes are factual JSON-RPC transport bytes, including the delivered
-newline; they are not tokens, token savings, cost savings, or model context.
+bucket. Aggregate counters cover calls, canonical result counts where the
+public handler already has a stable result collection, delivered bytes, and
+search context coverage. MCP response bytes are factual JSON-RPC transport
+bytes, including the delivered newline; they are not tokens, token savings,
+cost savings, or model context.
 
 The sidecar never stores a query, path, repository, selector, argument, prompt,
 session/event/citation ID, exact timestamp, transcript-derived data, output
 body, machine identity, or analytics identity. Result class is explicitly
 `result_bearing`, `empty`, or `not_applicable`; unclassified operations are
-not reported as empty. Failures always use N/A with zero result and citation
-totals. CLI status report/control operations are excluded from both recording
-and the persisted operation vocabulary.
+not reported as empty. Failures always use N/A with zero results. CLI status
+report/control operations are excluded from both recording and the persisted
+operation vocabulary.
+
+Current usage definition 3 keeps the full prior Core operation vocabulary and
+adds CLI/MCP `blame` when an installed companion supplies that route. Core
+records only the completed wrapper facts: calls, technical outcome, duration,
+and exact flushed MCP response bytes. Core does not inspect Blame output or
+private result semantics, so Blame always has `not_applicable` result class and
+zero `result_count`. CLI Blame output bytes are unavailable and render as N/A;
+Core-only distributions simply have no Blame rows.
 
 Only one completed foreground CLI command or recognized MCP `tools/call` is
 counted. MCP records after the complete response has serialized, written, and
 flushed. Initialization, ping, tool listing, notifications, unknown tools,
 automatic daemon cycles, and liveness checks are excluded.
+
+The active SQLite format is schema version 5. Existing schema versions 1
+through 4 migrate transactionally into the same aggregate-only table; existing
+definition-1 and definition-2 rows retain their original definition instead of
+being relabeled.
 
 The sidecar uses WAL, `synchronous=NORMAL`, a short busy timeout, atomic
 upserts, a fixed application ID/schema version, and owner-only file behavior

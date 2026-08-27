@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 
 use super::*;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum OutputFailure {
     None,
     Write,
@@ -87,6 +87,19 @@ impl McpUsagePort for TracedUsagePort {
         _duration: Duration,
     ) {
         self.0.lock().unwrap().push("local_usage");
+    }
+
+    fn record_companion_blame_delivered(
+        &mut self,
+        failed: bool,
+        _encoded_response_bytes: usize,
+        _duration: Duration,
+    ) {
+        self.0.lock().unwrap().push(if failed {
+            "companion_local_usage_failure"
+        } else {
+            "companion_local_usage_success"
+        });
     }
 }
 
@@ -321,7 +334,8 @@ fn companion_owned_call_is_proxied_as_exact_opaque_bytes() {
         response: expected_response.clone(),
     };
     let mut output = Vec::new();
-    let mut usage = TracedUsagePort(Arc::new(Mutex::new(Vec::new())));
+    let usage_trace = Arc::new(Mutex::new(Vec::new()));
+    let mut usage = TracedUsagePort(usage_trace.clone());
 
     serve_stdio(
         &mut input,
@@ -339,6 +353,125 @@ fn companion_owned_call_is_proxied_as_exact_opaque_bytes() {
 
     assert_eq!(*backend.request.lock().unwrap(), request);
     assert_eq!(output, expected_response);
+    assert_eq!(
+        *usage_trace.lock().unwrap(),
+        vec!["companion_local_usage_success"]
+    );
+}
+
+#[test]
+fn companion_blame_outcome_uses_only_the_json_rpc_error_envelope() {
+    let request = json!({"jsonrpc": "2.0", "id": 7});
+    for (response, failed) in [
+        (
+            json!({"jsonrpc": "2.0", "id": 7, "result": {"opaque": true}}),
+            false,
+        ),
+        (
+            json!({"jsonrpc": "2.0", "id": 7, "result": {"isError": false}}),
+            false,
+        ),
+        (
+            json!({"jsonrpc": "2.0", "id": 7, "result": {"isError": true}}),
+            true,
+        ),
+        (
+            json!({"jsonrpc": "2.0", "id": 7, "error": {"code": -1}}),
+            true,
+        ),
+        (json!({"jsonrpc": "2.0", "id": 7}), true),
+        (json!({"jsonrpc": "1.0", "id": 7, "result": {}}), true),
+        (json!({"jsonrpc": "2.0", "id": 8, "result": {}}), true),
+        (
+            json!({"jsonrpc": "2.0", "id": 7, "result": {}, "error": {}}),
+            true,
+        ),
+    ] {
+        let mut encoded = serde_json::to_vec(&response).unwrap();
+        encoded.push(b'\n');
+        assert_eq!(
+            companion_tool_failed(&encoded, &request),
+            failed,
+            "{response}"
+        );
+    }
+    assert!(companion_tool_failed(b"not-json\n", &request));
+}
+
+#[test]
+fn companion_request_requires_the_generic_json_rpc_gate() {
+    let valid = json!({
+        "jsonrpc": "2.0",
+        "id": 7,
+        "method": "tools/call",
+        "params": {"name": "blame", "arguments": {}}
+    });
+    let descriptor = RequestDescriptor::from_message(&valid);
+    assert_eq!(
+        validated_companion_tool_request(&valid, descriptor, true),
+        Some(McpToolKind::Blame)
+    );
+    assert_eq!(
+        validated_companion_tool_request(&valid, descriptor, false),
+        None
+    );
+
+    for invalid in [
+        json!({"id": 7, "method": "tools/call", "params": {"name": "blame"}}),
+        json!({"jsonrpc": "2.0", "id": true, "method": "tools/call", "params": {"name": "blame"}}),
+        json!({"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": "invalid"}),
+    ] {
+        let descriptor = RequestDescriptor::from_message(&invalid);
+        assert_eq!(
+            validated_companion_tool_request(&invalid, descriptor, true),
+            None,
+            "{invalid}"
+        );
+    }
+}
+
+#[test]
+fn companion_blame_usage_is_not_recorded_before_a_successful_flush() {
+    let request = b"{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/call\",\"params\":{\"name\":\"blame\",\"arguments\":{}}}\n";
+    let initialized = b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n";
+    let response = b"{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{}}\n".to_vec();
+
+    for failure in [OutputFailure::Write, OutputFailure::Flush] {
+        let backend = RecordingProxyBackend {
+            request: Mutex::new(Vec::new()),
+            response: response.clone(),
+        };
+        let trace = Arc::new(Mutex::new(Vec::new()));
+        let mut output = TracedWriter {
+            failure,
+            trace: trace.clone(),
+        };
+        let mut input = Cursor::new([initialized.as_slice(), request.as_slice()].concat());
+        let mut usage = TracedUsagePort(trace.clone());
+
+        let result = serve_stdio(
+            &mut input,
+            &mut output,
+            ProductIdentity {
+                name: "ctx",
+                version: "test",
+            },
+            &backend,
+            &render_generic_tool_text,
+            &mut usage,
+            McpTelemetry::start(false, |_| Ok(())),
+        );
+
+        assert!(result.is_err());
+        assert!(
+            !trace
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|event| event.starts_with("companion_local_usage")),
+            "{failure:?}"
+        );
+    }
 }
 
 fn tools_list_with_backend(backend: &impl ToolBackend) -> Value {

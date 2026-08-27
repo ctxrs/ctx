@@ -21,11 +21,13 @@ use super::{CompletedOperation, LocalUsageStorageAuthority, RETENTION_DAYS};
 const TEST_PRODUCT_VERSION: &str = "1.0.0";
 
 mod connection;
+mod error;
 mod file_family;
 mod migration;
 mod write;
 
 use connection::{configure_persistent, configure_report_connection, configure_transient};
+pub use error::UsageStoreError;
 #[cfg(all(test, windows))]
 pub(super) use file_family::{assert_single_link_for_test, verify_same_file_for_test};
 use file_family::{
@@ -49,7 +51,8 @@ const APPLICATION_ID: i64 = 0x4354_5855;
 pub(super) const LEGACY_SCHEMA_VERSION: i64 = 1;
 pub(super) const PREVIOUS_SCHEMA_VERSION: i64 = 2;
 pub(super) const RELEASED_SCHEMA_VERSION: i64 = 3;
-pub(super) const SCHEMA_VERSION: i64 = 4;
+pub(super) const PRIOR_SCHEMA_VERSION: i64 = 4;
+pub(super) const SCHEMA_VERSION: i64 = 5;
 const BUSY_TIMEOUT: Duration = Duration::from_millis(25);
 const PAGE_SIZE_BYTES: i64 = 4 * 1024;
 const MAX_DATABASE_BYTES: i64 = 6 * 1024 * 1024;
@@ -58,44 +61,6 @@ const WAL_AUTOCHECKPOINT_PAGES: i64 = 64;
 const JOURNAL_SIZE_LIMIT_BYTES: i64 = 1024 * 1024;
 const STALE_INIT_AGE: Duration = Duration::from_secs(60 * 60);
 const INIT_SLOT_COUNT: usize = 8;
-
-#[derive(Debug, thiserror::Error)]
-pub enum UsageStoreError {
-    #[error("usage store I/O error: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("usage store SQLite error: {0}")]
-    Sql(#[from] rusqlite::Error),
-    #[error("usage store has an unsupported application ID")]
-    ApplicationId,
-    #[error("usage store has unsupported schema version {0}")]
-    SchemaVersion(i64),
-    #[error("usage store schema does not match its declared version")]
-    SchemaIdentity,
-    #[error("usage store exceeds its size limit")]
-    GrowthLimit,
-    #[error("usage store contains inconsistent aggregates")]
-    Integrity,
-    #[error("usage store date is ahead of the current UTC day")]
-    FutureDate,
-    #[error("usage store cannot be reported without changing its SQLite file family")]
-    UnsafeReadState,
-}
-
-impl UsageStoreError {
-    pub const fn public_message(&self) -> &'static str {
-        match self {
-            Self::ApplicationId
-            | Self::SchemaVersion(_)
-            | Self::SchemaIdentity
-            | Self::Integrity => "local usage store format is not supported",
-            Self::FutureDate => "local usage store date is ahead of the current UTC day",
-            Self::GrowthLimit => "local usage store exceeds its size limit",
-            Self::Io(_) | Self::Sql(_) | Self::UnsafeReadState => {
-                "local usage store could not be read"
-            }
-        }
-    }
-}
 
 #[cfg(test)]
 pub fn usage_path(data_root: &Path) -> PathBuf {
@@ -353,6 +318,26 @@ pub(super) fn create_released_fixture_for_test(
                 ],
             )?;
         }
+    } else if schema_version == PRIOR_SCHEMA_VERSION {
+        transaction.execute(
+            r#"
+            INSERT INTO daily_usage (
+                day_utc, definition_version, ctx_version, surface, operation,
+                outcome, value_class, duration_bucket, context_coverage,
+                calls, result_count, delivered_output_bytes,
+                delivered_context_bytes, matched_normalized_session_bytes
+            ) VALUES
+                (?1, 2, '0.26.0-released-v4', 'cli', 'doctor', 'success',
+                    'not_applicable', 'under_10_ms', 'not_applicable', 2, 0, 23, 0, 0),
+                (?1, 2, '0.26.0-released-v4', 'mcp', 'search', 'success',
+                    'result_bearing', '50_to_249_ms', 'complete', 3, 6, 900, 120, 300),
+                (?1, 2, '0.26.0-released-v4', 'mcp', 'show_session', 'success',
+                    'result_bearing', '10_to_49_ms', 'not_applicable', 1, 2, 300, 0, 0),
+                (?1, 2, '0.26.0-released-v4', 'mcp', 'search', 'failure',
+                    'not_applicable', '10_to_49_ms', 'not_applicable', 1, 0, 100, 0, 0)
+            "#,
+            [day.as_str()],
+        )?;
     } else {
         let insert = r#"
             INSERT INTO daily_usage (
@@ -552,22 +537,24 @@ pub(super) fn create_released_fixture_for_test(
             )?;
         }
     }
-    let removed_dimensions = transaction.query_row(
-        "SELECT SUM(calls), SUM(citation_count), COUNT(DISTINCT target_type), \
-            COUNT(DISTINCT pro_outcome) FROM daily_usage \
-            WHERE operation IN ('blame', 'pro_status')",
-        [],
-        |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, i64>(2)?,
-                row.get::<_, i64>(3)?,
-            ))
-        },
-    )?;
-    if removed_dimensions != (14, 3, 4, 4) {
-        return Err(UsageStoreError::Integrity);
+    if schema_version != PRIOR_SCHEMA_VERSION {
+        let removed_dimensions = transaction.query_row(
+            "SELECT SUM(calls), SUM(citation_count), COUNT(DISTINCT target_type), \
+                COUNT(DISTINCT pro_outcome) FROM daily_usage \
+                WHERE operation IN ('blame', 'pro_status')",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )?;
+        if removed_dimensions != (14, 3, 4, 4) {
+            return Err(UsageStoreError::Integrity);
+        }
     }
     transaction.execute(
         "INSERT INTO maintenance(singleton, last_retention_day) VALUES (1, ?1)",

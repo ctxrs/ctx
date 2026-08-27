@@ -80,10 +80,12 @@ a hosted research agent.
   owner-private `usage.sqlite` sidecar. This default-on product state is
   independent of remote event reporting, has no network path or identity, keeps
   only daily UTC content-free aggregates for approximately 400 days, and fails
-  open at foreground recording boundaries. The stats report is read-only,
-  uncounted, and separates measured facts from versioned estimates. Detail is
-  an option on `ctx stats`; enable, disable, and logical reset remain under
-  `ctx status --usage`.
+  open at foreground recording boundaries. Completed companion-backed Blame is
+  represented only by Core-observed calls, technical outcomes, durations, and
+  exact MCP response bytes; no private result semantics enter the store. The
+  stats report is read-only, uncounted, and separates measured facts from
+  versioned estimates. Detail is an option on `ctx stats`; enable, disable, and
+  logical reset remain under `ctx status --usage`.
 - Output format does not grant or remove refresh authority. Implicit/background
   operations remain inert in manual mode; explicit import and search
   `--refresh wait` may use a finite worker in either human or JSON output.
