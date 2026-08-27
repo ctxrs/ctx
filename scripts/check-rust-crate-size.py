@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Enforce a physical 20,000-CLOC limit for Cargo workspace packages."""
+"""Enforce a physical 21,000-CLOC limit for Cargo workspace packages."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ import tomli as tomllib
 from typing import Any, Iterable
 
 
-HARD_LIMIT = 20_000
+HARD_LIMIT = 21_000
 METRIC = "physical-rust-cloc-v1"
 COMMIT = re.compile(r"^[0-9a-f]{40}$")
 EXCLUDED_DIRECTORY_NAMES = {

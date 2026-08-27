@@ -261,27 +261,27 @@ let lifetime: &'static str = "ok";
 
 class LimitTests(unittest.TestCase):
     def test_hard_limit_is_the_only_admission_threshold(self) -> None:
-        self.assertEqual(gate.measurement_failures([measurement(20_000)]), [])
+        self.assertEqual(gate.measurement_failures([measurement(21_000)]), [])
         self.assertEqual(
             gate.measurement_failures(
-                [measurement(20_001, "new", "crates/new")]
+                [measurement(21_001, "new", "crates/new")]
             ),
-            ["package=new count=20001 limit=20000"],
+            ["package=new count=21001 limit=21000"],
         )
 
     def test_all_over_limit_packages_are_reported_without_state(self) -> None:
         failures = gate.measurement_failures(
             [
-                measurement(20_002, "zeta", "crates/zeta"),
-                measurement(19_999, "small", "crates/small"),
-                measurement(20_001, "alpha", "crates/alpha"),
+                measurement(21_002, "zeta", "crates/zeta"),
+                measurement(20_999, "small", "crates/small"),
+                measurement(21_001, "alpha", "crates/alpha"),
             ]
         )
         self.assertEqual(
             failures,
             [
-                "package=alpha count=20001 limit=20000",
-                "package=zeta count=20002 limit=20000",
+                "package=alpha count=21001 limit=21000",
+                "package=zeta count=21002 limit=21000",
             ],
         )
         message = gate.format_failures(failures)
