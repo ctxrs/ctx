@@ -17,6 +17,7 @@ impl GenerationWriter {
         root: impl AsRef<Path>,
         options: WriterOptions,
     ) -> Result<GenerationWriterOpenOutcome> {
+        ctx_history_platform::raise_open_file_soft_limit();
         let indexer_threads = options.indexer_threads.clamp(1, 8);
         let minimum = INDEX_MEMORY_MIN_PER_THREAD.saturating_mul(indexer_threads);
         if options.memory_bytes < minimum {
@@ -459,5 +460,93 @@ impl GenerationWriter {
             });
         }
         Ok(Some(ExactReplayInventoryWitness { base }))
+    }
+}
+
+#[cfg(all(test, unix))]
+mod process_resource_tests {
+    use std::{env, fs::File, process::Command};
+
+    use tempfile::tempdir;
+
+    use super::*;
+
+    const CHILD_ENV: &str = "CTX_TEST_GENERATION_WRITER_OPEN_FILE_LIMIT_CHILD";
+    const LOW_SOFT_LIMIT: libc::rlim_t = 64;
+    const EXPECTED_SOFT_LIMIT_TARGET: libc::rlim_t = 4_096;
+
+    #[test]
+    fn generation_writer_open_raises_child_open_file_limit_before_staging() {
+        if env::var_os(CHILD_ENV).is_some() {
+            run_open_file_limit_child();
+            return;
+        }
+
+        let parent_limits_before = open_file_limits();
+        assert!(
+            parent_limits_before.1 > LOW_SOFT_LIMIT,
+            "regression requires a hard open-file limit above {LOW_SOFT_LIMIT}"
+        );
+        let status = Command::new(env::current_exe().unwrap())
+            .arg("--exact")
+            .arg(
+                "writer_open::process_resource_tests::generation_writer_open_raises_child_open_file_limit_before_staging",
+            )
+            .arg("--nocapture")
+            .env(CHILD_ENV, "1")
+            .status()
+            .unwrap();
+        assert!(status.success(), "open-file limit child failed: {status}");
+        assert_eq!(open_file_limits(), parent_limits_before);
+    }
+
+    fn run_open_file_limit_child() {
+        let root = tempdir().unwrap();
+        let inherited = open_file_limits();
+        assert!(inherited.1 > LOW_SOFT_LIMIT);
+        let lowered = libc::rlimit {
+            rlim_cur: LOW_SOFT_LIMIT,
+            rlim_max: inherited.1,
+        };
+        assert_eq!(
+            unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raw const lowered) },
+            0,
+            "failed to lower only the child open-file soft limit: {}",
+            std::io::Error::last_os_error()
+        );
+        assert_eq!(open_file_limits(), (LOW_SOFT_LIMIT, inherited.1));
+
+        let mut retained_files = Vec::new();
+        loop {
+            match File::open("/dev/null") {
+                Ok(file) => retained_files.push(file),
+                Err(error) => {
+                    assert_eq!(error.raw_os_error(), Some(libc::EMFILE));
+                    break;
+                }
+            }
+        }
+
+        let outcome =
+            GenerationWriter::open(root.path().join("index"), WriterOptions::default()).unwrap();
+        let raised = open_file_limits();
+        assert_eq!(raised.1, inherited.1);
+        assert_eq!(raised.0, inherited.1.min(EXPECTED_SOFT_LIMIT_TARGET));
+        drop(outcome);
+        drop(retained_files);
+    }
+
+    fn open_file_limits() -> (libc::rlim_t, libc::rlim_t) {
+        let mut limits = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        assert_eq!(
+            unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut limits) },
+            0,
+            "failed to read the open-file limit: {}",
+            std::io::Error::last_os_error()
+        );
+        (limits.rlim_cur, limits.rlim_max)
     }
 }

@@ -501,7 +501,7 @@ where
         move |source| owns_adapter.owns_source(source),
         move |target| revalidate_document_target(&source_state, target),
     )
-    .with_complete_inventory_revalidation(move |inventory| {
+    .with_fallible_complete_inventory_revalidation(move |inventory| {
         revalidate_document_inventory(inventory_adapter.as_ref(), &inventory_state, inventory)
     })
     .with_publication_revalidation(move || {
