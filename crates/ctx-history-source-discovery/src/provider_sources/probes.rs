@@ -22,6 +22,9 @@ use ctx_history_source_io::{
 };
 
 #[cfg(test)]
+use ctx_history_source_io::MAX_PROVIDER_JSONL_LINE_BYTES;
+
+#[cfg(test)]
 use super::SqliteSourceDirectoryAuthority;
 use super::{
     open_ordinary_file_without_following, open_root_handle_sqlite_source_snapshot_with_limits,
@@ -31,6 +34,12 @@ use super::{
     CursorTranscriptProbeOutcome, SqliteSourceAccessError, SqliteSourceReadSnapshot,
     SqliteSourceSnapshotLimits, StaticProviderProbeCatalog,
 };
+
+mod fx;
+
+use fx::has_fx_session_under_immediate_child;
+#[cfg(test)]
+use fx::{is_fx_session_candidate, FX_LEGACY_SUMMARY_PREFIX_MAX_BYTES};
 
 const SQLITE_PROBE_MAX_TOTAL_BYTES: u64 = 1024 * 1024 * 1024;
 const SQLITE_PROBE_DEADLINE: Duration = Duration::from_millis(500);
@@ -147,6 +156,7 @@ pub(super) fn default_location_import_probe(
         CaptureProvider::Lingma => has_lingma_chat_record_table(data_root, path),
         CaptureProvider::Warp => path_is_file_probe(path),
         CaptureProvider::CodeBuddy => has_codebuddy_history_json(path, 10_000),
+        CaptureProvider::Fx => has_fx_session_under_immediate_child(path, 10_000),
         CaptureProvider::Shell
         | CaptureProvider::Git
         | CaptureProvider::Jj

@@ -11,6 +11,7 @@ use super::{
     contract_error, route_internal, JsonlFamilyAdapter, JsonlFamilyLeaf, JsonlFamilyTerminalProof,
     FAMILY_POLICY_REVISION, FAMILY_SOURCE_REVISION_KIND,
 };
+use crate::family::{PAGE_MAX_BYTES, PAGE_MAX_RECORDS};
 use ctx_history_capture_runtime::{
     ParallelLeafScanEmitError, ParallelLeafScanError, SourceBackedCoordinatorError,
     SourceBackedRecordRejectionDrafts, SourceBackedRouteError,
@@ -203,8 +204,127 @@ impl JsonlFamilySemanticPage {
         Self { records }
     }
 
-    pub(super) fn into_records(self) -> Vec<CoreRecord> {
-        self.records
+    /// Splits projected records into publication pages without changing their
+    /// order. A single record that exceeds the byte cap remains invalid: it
+    /// cannot be represented by any bounded semantic page.
+    pub fn split_bounded<E: JsonlFamilyError>(
+        records: Vec<CoreRecord>,
+    ) -> JsonlResult<Vec<Self>, E> {
+        let encoded_lengths = semantic_record_encoded_lengths::<E>(&records)?;
+        let ranges = bounded_semantic_page_ranges::<E>(&encoded_lengths)?;
+        let mut records = records.into_iter();
+        Ok(ranges
+            .into_iter()
+            .map(|range| Self::new(records.by_ref().take(range.len()).collect()))
+            .collect())
+    }
+
+    pub fn records(&self) -> &[CoreRecord] {
+        &self.records
+    }
+
+    pub(super) fn into_bounded_records<E: JsonlFamilyError>(
+        self,
+    ) -> JsonlResult<Vec<CoreRecord>, E> {
+        if self.records.len() > PAGE_MAX_RECORDS {
+            return Err(E::invalid_payload(format!(
+                "JSONL semantic page exceeds the {PAGE_MAX_RECORDS} record limit"
+            )));
+        }
+        let encoded_bytes = checked_semantic_page_byte_total::<E>(
+            semantic_record_encoded_lengths::<E>(&self.records)?,
+        )?;
+        if encoded_bytes > PAGE_MAX_BYTES {
+            return Err(E::invalid_payload(format!(
+                "JSONL semantic page exceeds the {PAGE_MAX_BYTES} byte limit"
+            )));
+        }
+        Ok(self.records)
+    }
+}
+
+fn semantic_record_encoded_lengths<E: JsonlFamilyError>(
+    records: &[CoreRecord],
+) -> JsonlResult<Vec<usize>, E> {
+    records
+        .iter()
+        .map(|record| {
+            record
+                .encode_stored()
+                .map(|encoded| encoded.len())
+                .map_err(|error| E::invalid_payload(error.to_string()))
+        })
+        .collect()
+}
+
+fn bounded_semantic_page_ranges<E: JsonlFamilyError>(
+    encoded_lengths: &[usize],
+) -> JsonlResult<Vec<std::ops::Range<usize>>, E> {
+    let mut ranges = Vec::new();
+    let mut page_start = 0_usize;
+    let mut page_bytes = 0_usize;
+    for (index, &encoded_length) in encoded_lengths.iter().enumerate() {
+        if encoded_length > PAGE_MAX_BYTES {
+            return Err(E::invalid_payload(format!(
+                "JSONL semantic page exceeds the {PAGE_MAX_BYTES} byte limit"
+            )));
+        }
+        let page_records = index.saturating_sub(page_start);
+        let next_page_bytes = page_bytes.checked_add(encoded_length).ok_or_else(|| {
+            E::invalid_payload("JSONL semantic page byte count overflowed".to_owned())
+        })?;
+        if page_records == PAGE_MAX_RECORDS || next_page_bytes > PAGE_MAX_BYTES {
+            ranges.push(page_start..index);
+            page_start = index;
+            page_bytes = encoded_length;
+        } else {
+            page_bytes = next_page_bytes;
+        }
+    }
+    ranges.push(page_start..encoded_lengths.len());
+    Ok(ranges)
+}
+
+fn checked_semantic_page_byte_total<E: JsonlFamilyError>(
+    lengths: impl IntoIterator<Item = usize>,
+) -> JsonlResult<usize, E> {
+    lengths.into_iter().try_fold(0_usize, |total, length| {
+        total.checked_add(length).ok_or_else(|| {
+            E::invalid_payload("JSONL semantic page byte count overflowed".to_owned())
+        })
+    })
+}
+
+#[cfg(test)]
+mod semantic_page_bound_tests {
+    use super::*;
+    use ctx_history_source_io::SourceIoError;
+
+    #[test]
+    fn semantic_page_byte_total_rejects_checked_sum_overflow() {
+        let error = checked_semantic_page_byte_total::<SourceIoError>([usize::MAX, 1])
+            .expect_err("semantic page byte sum overflow must fail closed");
+        assert!(error.to_string().contains("byte count overflowed"));
+    }
+
+    #[test]
+    fn semantic_page_ranges_split_record_and_exact_byte_bounds_in_order() {
+        assert_eq!(
+            bounded_semantic_page_ranges::<SourceIoError>(&[1; PAGE_MAX_RECORDS + 1]).unwrap(),
+            [0..PAGE_MAX_RECORDS, PAGE_MAX_RECORDS..PAGE_MAX_RECORDS + 1]
+        );
+        assert_eq!(
+            bounded_semantic_page_ranges::<SourceIoError>(&[
+                PAGE_MAX_BYTES / 2 + 1,
+                PAGE_MAX_BYTES / 2,
+            ])
+            .unwrap(),
+            [0..1, 1..2]
+        );
+        assert!(bounded_semantic_page_ranges::<SourceIoError>(&[PAGE_MAX_BYTES + 1]).is_err());
+        let empty = bounded_semantic_page_ranges::<SourceIoError>(&[]).unwrap();
+        assert_eq!(empty.len(), 1);
+        assert_eq!(empty[0], 0..0);
     }
 }
 

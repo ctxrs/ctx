@@ -52,17 +52,17 @@
     "exact_requires_source_commits": false
   },
   "expected_counts": {
-    "providers": 41,
-    "base_routes": 46,
-    "capability_lanes": 49,
+    "providers": 42,
+    "base_routes": 47,
+    "capability_lanes": 51,
     "lane_statuses": {
       "exact": 3,
-      "not-qualified": 45,
+      "not-qualified": 47,
       "excluded": 1
     },
     "provider_statuses": {
       "exact": 3,
-      "not-qualified": 38,
+      "not-qualified": 39,
       "excluded": 0
     }
   },
@@ -425,6 +425,20 @@
       "status": "not-qualified", "reason": "no_unique_terminal_link",
       "detail": "The exact request pair is durable, but execution ID is webview-only and response grouping is order-based; the durable no-response text is also ambiguous.",
       "evidence": ["https://github.com/RooCodeInc/Roo-Code/tree/b867ec9145750d0ae1ff7f02d35406e9bf2a0b16"]
+    },
+    {
+      "provider_id": "fx", "route": "native_import", "source_format": "fx_sessions_tree", "source_schema": "fx-legacy-session-json-schema-v1-v2",
+      "producer_bound": {"kind": "unversioned", "generation": 1, "unknown_generations": "not-qualified"},
+      "status": "not-qualified", "reason": "no_server_field",
+      "detail": "Legacy schema-v1/v2 snapshots accepted by current fx v0.0.6 contain no authoritative MCP server alias; ctx does not infer one from tool names or configuration.",
+      "evidence": ["https://github.com/vercel-labs/fx/blob/79666393e5f613c85f2f0b4b65475f1addd55379/src/core/session/session_json.zig"]
+    },
+    {
+      "provider_id": "fx", "route": "native_import", "source_format": "fx_sessions_tree", "source_schema": "fx-transactional-event-log-schema-v3",
+      "producer_bound": {"kind": "versions", "versions": ["0.0.6"], "ranges": [], "source_commits": ["79666393e5f613c85f2f0b4b65475f1addd55379"], "unknown_generations": "not-qualified"},
+      "status": "not-qualified", "reason": "no_server_field",
+      "detail": "Current fx v0.0.6 schema-v3 durable call records contain no authoritative MCP server alias; ctx does not infer one from tool names or configuration.",
+      "evidence": ["https://github.com/vercel-labs/fx/blob/79666393e5f613c85f2f0b4b65475f1addd55379/src/core/session/session_codec.zig"]
     }
   ],
   "exact_checks": [

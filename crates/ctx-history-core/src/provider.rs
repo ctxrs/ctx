@@ -97,10 +97,11 @@ pub enum ProviderId {
     SweAgent,
     #[serde(rename = "mimocode", alias = "mimo-code", alias = "mimo_code")]
     MiMoCode,
+    Fx,
 }
 
 impl ProviderId {
-    pub const ALL: [Self; 51] = [
+    pub const ALL: [Self; 52] = [
         Self::Codex,
         Self::GrokBuild,
         Self::DeepSeekHarness,
@@ -152,6 +153,7 @@ impl ProviderId {
         Self::Kilo,
         Self::SweAgent,
         Self::MiMoCode,
+        Self::Fx,
     ];
 }
 
@@ -344,6 +346,7 @@ mod tests {
             ProviderId::KimiCodeCli,
             ProviderId::Lingma,
             ProviderId::MiMoCode,
+            ProviderId::Fx,
             ProviderId::Qoder,
             ProviderId::Warp,
             ProviderId::Junie,
@@ -380,6 +383,7 @@ mod tests {
                 "Hermes Agent",
             ),
             (ProviderId::Pi, ProviderSupportStatus::Supported, "Pi"),
+            (ProviderId::Fx, ProviderSupportStatus::Supported, "fx"),
         ] {
             let entry = parsed
                 .providers

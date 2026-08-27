@@ -51,7 +51,7 @@ pub(super) fn prepare_semantic_leaf<R: JsonlFamilyRuntime>(
                 )
             })?;
         reported_prefix_end = complete_prefix_end;
-        let records = page.into_records();
+        let records = page.into_bounded_records::<JsonlRuntimeError<R>>()?;
         if records
             .iter()
             .any(|record| !record.source.exact_descriptor_eq(leaf.source()))
@@ -168,7 +168,8 @@ pub(super) fn prepare_semantic_leaf<R: JsonlFamilyRuntime>(
         version: FamilyCheckpoint::VERSION,
         provider_parser_revision: adapter.parser_revision().to_owned(),
         event_identity_revision: adapter.event_identity_revision().to_owned(),
-        binding_digest: binding_digest(leaf)?,
+        binding_digest: continuation_binding_digest(leaf)?,
+        exact_terminal_binding_digest: exact_terminal_binding_digest(leaf)?,
         physical: terminal_checkpoint.clone(),
         admitted_eof_sha256,
         complete_prefix_ends_with_terminal_nul_padding,

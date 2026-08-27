@@ -93,6 +93,7 @@ CARGO_WORKSPACE_PACKAGE_DATA = [
     "//crates/ctx-history-cli:cargo_package_data",
     "//crates/ctx-history-capture-runtime:cargo_package_data",
     "//crates/ctx-history-provider-docproj:cargo_package_data",
+    "//crates/ctx-history-provider-fx:cargo_package_data",
     "//crates/ctx-history-provider-hermes:cargo_package_data",
     "//crates/ctx-history-provider-runtime:cargo_package_data",
     "//crates/ctx-history-provider-claude-cursor:cargo_package_data",
@@ -251,6 +252,21 @@ filegroup(
 filegroup(
     name = "public_test_fixtures",
     srcs = glob(["tests/fixtures/**"]),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "fx_history_test_fixtures",
+    srcs = [
+        "tests/fixtures/provider-history/fx/v0.0.6/native-v3-read-file/.fx/sessions/1700000000002-1700000000000000002-0000000000000002/authority.json",
+        "tests/fixtures/provider-history/fx/v0.0.6/native-v3-read-file/.fx/sessions/1700000000002-1700000000000000002-0000000000000002/commit.9e802c6cbfa70c6fe90430a1b335398e.json",
+        "tests/fixtures/provider-history/fx/v0.0.6/native-v3-read-file/.fx/sessions/1700000000002-1700000000000000002-0000000000000002/events.jsonl",
+        "tests/fixtures/provider-history/fx/v0.0.6/native-v3-tool-free/.fx/sessions/1700000000001-1700000000000000001-0000000000000001/authority.json",
+        "tests/fixtures/provider-history/fx/v0.0.6/native-v3-tool-free/.fx/sessions/1700000000001-1700000000000000001-0000000000000001/commit.b82f00a357b44301d54300d2856e934b.json",
+        "tests/fixtures/provider-history/fx/v0.0.6/native-v3-tool-free/.fx/sessions/1700000000001-1700000000000000001-0000000000000001/events.jsonl",
+        "tests/fixtures/provider-history/fx/upstream-v0.3.73-test-source/schema-v1/.fx/sessions/legacy-v1/session.json",
+        "tests/fixtures/provider-history/fx/upstream-v0.3.73-test-source/schema-v2/.fx/sessions/legacy-v2/session.json",
+    ],
     visibility = ["//visibility:public"],
 )
 

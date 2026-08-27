@@ -357,6 +357,119 @@ pub(super) struct CheckpointTestAdapter {
     pub(super) fixed_checkpoint_bytes: Option<usize>,
 }
 
+#[derive(Default)]
+pub(super) struct LogicalEofTestAdapter {
+    pub(super) projection_modes: Mutex<Vec<JsonlFamilyProjectionMode>>,
+}
+
+impl JsonlFamilyAdapter for LogicalEofTestAdapter {
+    type Runtime = TestJsonlRuntime;
+
+    fn provider(&self) -> CaptureProvider {
+        CaptureProvider::Pi
+    }
+
+    fn source_format(&self) -> &'static str {
+        TEST_SOURCE_FORMAT
+    }
+
+    fn schema_variant(&self) -> &'static str {
+        TEST_SCHEMA
+    }
+
+    fn parser_revision(&self) -> &'static str {
+        "logical-eof-test-parser-v1"
+    }
+
+    fn append_mode(&self) -> JsonlFamilyAppendMode {
+        JsonlFamilyAppendMode::CertifiedSuffix
+    }
+
+    fn discover(&self, root: &Path) -> Result<JsonlFamilyInventory> {
+        let discovered = TestAdapter.discover(root)?;
+        if discovered.root_missing() {
+            return JsonlFamilyInventory::missing(self.provider(), root);
+        }
+        let authority =
+            discovered
+                .authorities
+                .first()
+                .cloned()
+                .ok_or(CaptureError::SystemInvariant(
+                    "logical EOF test inventory has no authority",
+                ))?;
+        let mut leaves = Vec::new();
+        for leaf in discovered.accepted_leaves() {
+            let file_name = leaf
+                .source_path()
+                .file_name()
+                .ok_or(CaptureError::SystemInvariant(
+                    "logical EOF test leaf has no filename",
+                ))?
+                .to_string_lossy();
+            let control_path = PathBuf::from(format!("{file_name}.eof"));
+            let absent_path = PathBuf::from(format!("{file_name}.next"));
+            let control = authority.open_file(&control_path)?;
+            let bytes = control.read_all_bounded(1024)?;
+            let logical_eof = std::str::from_utf8(&bytes)
+                .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?
+                .trim()
+                .parse::<u64>()
+                .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
+            leaves.push(
+                leaf.clone()
+                    .with_logical_eof(logical_eof)?
+                    .with_exact_present_dependency(control_path, &control)?
+                    .with_exact_absent_dependency(absent_path)?,
+            );
+        }
+        JsonlFamilyInventory::present(self.provider(), root, authority, leaves)
+    }
+
+    fn projector(
+        &self,
+        _leaf: &JsonlFamilyLeaf,
+        _source_file: Arc<OpenedProviderSourceFile>,
+        _imported_at: DateTime<Utc>,
+    ) -> Result<Box<JsonlFamilyProjectorObject>> {
+        Ok(Box::new(CheckpointTestProjector {
+            projected_records: 0,
+            resumed: false,
+            fixed_checkpoint_bytes: None,
+        }))
+    }
+
+    fn projector_with_provider_checkpoint(
+        &self,
+        leaf: &JsonlFamilyLeaf,
+        source_file: Arc<OpenedProviderSourceFile>,
+        imported_at: DateTime<Utc>,
+        checkpoint: Option<&TypedKey>,
+        base_event_lookup: Option<IndexBaseEventLookup>,
+        mode: JsonlFamilyProjectionMode,
+    ) -> Result<Box<JsonlFamilyProjectorObject>> {
+        self.projection_modes.lock().unwrap().push(mode);
+        let Some(checkpoint) = checkpoint else {
+            return self.projector(leaf, source_file, imported_at);
+        };
+        if mode != JsonlFamilyProjectionMode::CertifiedAppend || base_event_lookup.is_none() {
+            return Err(CaptureError::InvalidPayload(
+                "logical EOF checkpoint did not resume as an append".to_owned(),
+            ));
+        }
+        let TypedKey::U64(projected_records) = checkpoint else {
+            return Err(CaptureError::InvalidPayload(
+                "logical EOF checkpoint state is malformed".to_owned(),
+            ));
+        };
+        Ok(Box::new(CheckpointTestProjector {
+            projected_records: *projected_records,
+            resumed: true,
+            fixed_checkpoint_bytes: None,
+        }))
+    }
+}
+
 pub(super) struct OptimizedLeafTestAdapter {
     pub(super) scans: AtomicUsize,
     pub(super) emit_wrong_source: bool,

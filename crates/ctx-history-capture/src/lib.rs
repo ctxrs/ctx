@@ -80,6 +80,7 @@ pub use provider::source_backed::{
     register_forgecode_explicit_source_backed_route, register_gemini_source_backed_route,
     register_goose_source_backed_route, register_hermes_explicit_source_backed_route,
     register_landed_source_backed_route, register_landed_source_backed_route_with_data_root,
+    register_landed_source_backed_route_with_data_root_and_lineage,
     register_lingma_source_backed_route, register_nanoclaw_source_backed_route,
     register_shelley_source_backed_route, register_warp_source_backed_route,
     source_backed_refresh_work_budget, source_backed_refresh_writer_options,

@@ -25,6 +25,7 @@ EXPECTED_DEPENDENCIES: dict[str, Any] = {
     "libc": {"workspace": True},
     "quick-xml": {"workspace": True},
     "rusqlite": {"workspace": True},
+    "serde": {"workspace": True},
     "serde_json": {"workspace": True},
     "serde_yaml": {"workspace": True},
     "sha2": {"workspace": True},

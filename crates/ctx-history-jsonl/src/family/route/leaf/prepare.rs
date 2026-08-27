@@ -77,6 +77,9 @@ pub(in super::super) fn prepare_leaf_with_resources<R: JsonlFamilyRuntime>(
         ));
     }
     let previous = base.and_then(|base| decode_checkpoint(adapter, &leaf, base).ok());
+    let exact_terminal_binding_matches = previous
+        .as_ref()
+        .is_some_and(|checkpoint| checkpoint.exact_terminal_binding_matches(&leaf));
     // A nonterminal checkpoint still certifies every complete record before
     // its unfinished tail. Reuse it for an exact no-op, or let append-capable
     // adapters resume at that complete frontier so the unfinished bytes are
@@ -102,6 +105,15 @@ pub(in super::super) fn prepare_leaf_with_resources<R: JsonlFamilyRuntime>(
         )
     };
     let mut reader = open_reader(previous_physical)?;
+
+    // Continuation compatibility deliberately permits a commit sidecar to
+    // advance while the event file grows (or while an already-written tail
+    // becomes committed). It must not authorize the physical unchanged
+    // fast path: a same-EOF control-file rewrite still needs provider replay
+    // so semantic fields such as terminal sequence and event id are checked.
+    if reader.source_change() == JsonlSourceChange::Unchanged && !exact_terminal_binding_matches {
+        reader = open_reader(None)?;
+    }
 
     if reader.source_change() == JsonlSourceChange::Unchanged {
         let base = base.ok_or_else(|| {
@@ -435,7 +447,8 @@ pub(in super::super) fn prepare_leaf_with_resources<R: JsonlFamilyRuntime>(
         version: FamilyCheckpoint::VERSION,
         provider_parser_revision: adapter.parser_revision().to_owned(),
         event_identity_revision: adapter.event_identity_revision().to_owned(),
-        binding_digest: binding_digest(&leaf)?,
+        binding_digest: continuation_binding_digest(&leaf)?,
+        exact_terminal_binding_digest: exact_terminal_binding_digest(&leaf)?,
         physical: outcome.checkpoint().clone(),
         admitted_eof_sha256,
         complete_prefix_ends_with_terminal_nul_padding,

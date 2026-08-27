@@ -128,16 +128,41 @@ class CapabilityMutationTests(unittest.TestCase):
         self.assertEqual(
             self.validate(),
             {
-                "providers": 41,
-                "base_routes": 46,
-                "capability_lanes": 49,
-                "lane_statuses": {"exact": 3, "not-qualified": 45, "excluded": 1},
-                "provider_statuses": {"exact": 3, "not-qualified": 38, "excluded": 0},
+                "providers": 42,
+                "base_routes": 47,
+                "capability_lanes": 51,
+                "lane_statuses": {"exact": 3, "not-qualified": 47, "excluded": 1},
+                "provider_statuses": {"exact": 3, "not-qualified": 39, "excluded": 0},
                 "exact_suites": 3,
                 "exact_tests": 9,
                 "exact_links": 4,
             },
         )
+
+    def test_fx_lanes_separate_legacy_from_current_producer_claims(self) -> None:
+        rows = [
+            row
+            for row in self.capability["routes"]
+            if row["provider_id"] == "fx"
+        ]
+        self.assertEqual(len(rows), 2)
+        legacy = next(row for row in rows if "legacy" in row["source_schema"])
+        current = next(row for row in rows if "schema-v3" in row["source_schema"])
+        self.assertEqual(
+            legacy["producer_bound"],
+            {
+                "kind": "unversioned",
+                "generation": 1,
+                "unknown_generations": "not-qualified",
+            },
+        )
+        self.assertIn("accepted by current fx v0.0.6", legacy["detail"])
+        self.assertEqual(current["producer_bound"]["versions"], ["0.0.6"])
+        for row in rows:
+            self.assertEqual(row["source_format"], "fx_sessions_tree")
+            self.assertEqual(row["status"], "not-qualified")
+            self.assertEqual(row["reason"], "no_server_field")
+            self.assertIn("no authoritative MCP server alias", row["detail"])
 
     def test_opaque_bound_kind_is_rejected(self) -> None:
         self.capability["routes"][0]["producer_bound"] = {

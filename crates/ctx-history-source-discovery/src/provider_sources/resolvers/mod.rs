@@ -145,7 +145,8 @@ pub(super) fn resolver_group(provider: CaptureProvider) -> Option<ResolverGroup>
         | CaptureProvider::KimiCodeCli
         | CaptureProvider::Junie
         | CaptureProvider::FactoryAiDroid
-        | CaptureProvider::ForgeCode => Some(ResolverGroup::Simple),
+        | CaptureProvider::ForgeCode
+        | CaptureProvider::Fx => Some(ResolverGroup::Simple),
         CaptureProvider::KiroCli
         | CaptureProvider::Warp
         | CaptureProvider::CodeBuddy
@@ -576,12 +577,12 @@ mod tests {
     #[test]
     fn every_registered_provider_has_exactly_one_grouped_dispatch_lane() {
         let specs = provider_source_specs();
-        assert_eq!(specs.len(), 41);
+        assert_eq!(specs.len(), 42);
         assert!(specs
             .iter()
             .all(|spec| resolver_group(spec.provider).is_some()));
         for (group, expected) in [
-            (ResolverGroup::Simple, 16),
+            (ResolverGroup::Simple, 17),
             (ResolverGroup::Platform, 7),
             (ResolverGroup::ConfigProject, 6),
             (ResolverGroup::ProfileProject, 6),

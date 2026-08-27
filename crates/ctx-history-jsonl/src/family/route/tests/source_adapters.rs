@@ -648,6 +648,60 @@ fn canonical_inventory_requires_provider_resolution_for_divergent_duplicates() {
 }
 
 #[test]
+fn canonical_inventory_rejects_duplicates_with_distinct_leaf_semantics() {
+    let temp = tempfile::tempdir().unwrap();
+    let first_path = temp.path().join("first.jsonl");
+    let second_path = temp.path().join("second.jsonl");
+    fs::write(&first_path, TEST_RECORD).unwrap();
+    fs::write(&second_path, TEST_RECORD).unwrap();
+    let discovered = TestAdapter.discover(temp.path()).unwrap();
+    let first = discovered
+        .accepted_leaves()
+        .find(|leaf| leaf.source_path() == first_path)
+        .unwrap()
+        .clone();
+    let second = JsonlFamilyLeaf::observe(
+        first.source().clone(),
+        second_path,
+        Arc::clone(first.authority()),
+        PathBuf::from("second.jsonl"),
+        TypedKey::utf8("second-binding").unwrap(),
+    )
+    .unwrap();
+
+    let dependency_error = JsonlFamilyInventory::present(
+        CaptureProvider::Pi,
+        temp.path(),
+        Arc::clone(first.authority()),
+        vec![
+            first.clone(),
+            second
+                .clone()
+                .with_exact_absent_dependency(PathBuf::from("alias.pending"))
+                .unwrap(),
+        ],
+    )
+    .unwrap_err();
+    assert!(dependency_error
+        .to_string()
+        .contains("provider must resolve boundary-bearing copies semantically"));
+
+    let boundary_error = JsonlFamilyInventory::present(
+        CaptureProvider::Pi,
+        temp.path(),
+        Arc::clone(first.authority()),
+        vec![
+            first.with_logical_eof(0).unwrap(),
+            second.with_logical_eof(TEST_RECORD.len() as u64).unwrap(),
+        ],
+    )
+    .unwrap_err();
+    assert!(boundary_error
+        .to_string()
+        .contains("provider must resolve boundary-bearing copies semantically"));
+}
+
+#[test]
 fn canonical_inventory_deduplication_is_deterministic_regardless_of_leaf_order() {
     let temp = tempfile::tempdir().unwrap();
     let first_path = temp.path().join("first.jsonl");
@@ -935,6 +989,7 @@ pub(super) fn expected_state(
                     certificate,
                     terminal_certificate: None,
                     terminal_proof,
+                    terminal_dependencies: leaf.terminal_dependencies.clone(),
                     emitted_bytes: 0,
                     exact_scan_bytes: None,
                     record_rejections: SourceBackedRecordRejectionDrafts::default(),

@@ -958,7 +958,7 @@ fn forgecode_official_root_preserves_raw_cwd_semantics_and_exists_winner() {
 }
 
 #[test]
-fn simple_lane_has_sixteen_reviewed_winner_only_policies() {
+fn simple_lane_has_seventeen_reviewed_winner_only_policies() {
     let temp = tempdir();
     let context = context(&temp, DiscoveryPlatform::Linux);
     let providers = [
@@ -978,8 +978,9 @@ fn simple_lane_has_sixteen_reviewed_winner_only_policies() {
         CaptureProvider::Junie,
         CaptureProvider::FactoryAiDroid,
         CaptureProvider::ForgeCode,
+        CaptureProvider::Fx,
     ];
-    assert_eq!(providers.len(), 16);
+    assert_eq!(providers.len(), 17);
     for provider in providers {
         let report = resolve_provider(&context, provider);
         let expected = if provider == CaptureProvider::Codex {

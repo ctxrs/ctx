@@ -265,6 +265,12 @@ const ADAPTER_CASES: &[ProviderCase] = &[
         user_text: "Add a Roo Code task JSON import smoke test",
         assistant_text: "I will add a focused smoke fixture",
     },
+    ProviderCase {
+        matrix_id: "fx",
+        provider: "fx",
+        user_text: "fxuseroracle",
+        assistant_text: "fxassistantoracle",
+    },
 ];
 
 #[derive(Debug, PartialEq)]
@@ -284,7 +290,7 @@ fn supported_provider_defaults_conform_to_the_public_matrix() {
         .collect::<Vec<_>>();
     assert_eq!(
         provider_cases.len(),
-        41,
+        42,
         "support conformance must not be vacuous"
     );
     let temp = tempdir();
@@ -396,8 +402,8 @@ fn assert_closed_world_case_ids() -> BTreeSet<String> {
     );
     assert_eq!(
         supported_ids.len(),
-        41,
-        "support conformance must execute 41 rows"
+        42,
+        "support conformance must execute 42 rows"
     );
     supported_ids
 }

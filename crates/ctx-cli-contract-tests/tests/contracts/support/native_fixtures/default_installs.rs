@@ -47,7 +47,7 @@ pub(crate) fn install_provider_default_fixture(
         "kilo" => install_kilo(temp, user_text),
         "mimocode" => install_mimocode(temp, user_text),
         "kiro_cli" => install_default_kiro_fixture(temp, user_text),
-        "crush" => install_fixture_file("crush/v1/crush.db", &temp.path().join(".crush/crush.db")),
+        "crush" => install_fixture_file("crush/v1/crush.db", &workspace.join(".crush/crush.db")),
         "goose" => install_fixture_file(
             "goose/v15/sessions.db",
             &temp.path().join(".local/share/goose/sessions/sessions.db"),
@@ -94,6 +94,7 @@ pub(crate) fn install_provider_default_fixture(
             "roo/storage",
             &temp.path().join(".vscode-mock/global-storage"),
         ),
+        "fx" => install_fx(temp, user_text, assistant_text),
         other => panic!("missing default fixture installer for matrix provider {other}"),
     }
 }
@@ -315,6 +316,44 @@ fn install_kimi(temp: &TempDir, assistant_text: &str) {
 fn install_firebender(temp: &TempDir, workspace: &Path, user_text: &str) {
     let source = PathBuf::from(write_native_firebender_fixture(temp, user_text));
     copy_dir_all(&source.join(".idea"), &workspace.join(".idea"));
+}
+
+fn install_fx(temp: &TempDir, user_text: &str, assistant_text: &str) {
+    const SESSION_ID: &str = "1700000000001-1700000000000000001-0000000000000001";
+    const LOG_GENERATION: &str = "b82f00a357b44301d54300d2856e934b";
+
+    // Preserve the public v3 capture's immediate-child tree and event shapes;
+    // only replace the conformance oracles and advance its byte watermark.
+    let sessions = temp.path().join(".fx/sessions");
+    install_fixture_tree("fx/v0.0.6/native-v3-tool-free/.fx/sessions", &sessions);
+    let session = sessions.join(SESSION_ID);
+    let events_path = session.join("events.jsonl");
+    let mut events = Vec::new();
+    for line in fs::read_to_string(&events_path).unwrap().lines() {
+        let mut event: serde_json::Value = serde_json::from_str(line).unwrap();
+        match event["kind"].as_str() {
+            Some("recovery_checkpoint_set") => {
+                *event.pointer_mut("/payload/checkpoint/user/text").unwrap() = json!(user_text);
+                *event
+                    .pointer_mut("/payload/checkpoint/assistant_source")
+                    .unwrap() = json!(assistant_text);
+            }
+            Some("history_turn_committed") => {
+                *event.pointer_mut("/payload/turn/user/text").unwrap() = json!(user_text);
+                *event.pointer_mut("/payload/turn/assistant").unwrap() = json!(assistant_text);
+            }
+            _ => {}
+        }
+        serde_json::to_writer(&mut events, &event).unwrap();
+        events.push(b'\n');
+    }
+    fs::write(&events_path, &events).unwrap();
+
+    let commit_path = session.join(format!("commit.{LOG_GENERATION}.json"));
+    let mut commit: serde_json::Value =
+        serde_json::from_slice(&fs::read(&commit_path).unwrap()).unwrap();
+    commit["through_event_log_bytes"] = json!(u64::try_from(events.len()).unwrap());
+    fs::write(commit_path, serde_json::to_vec(&commit).unwrap()).unwrap();
 }
 
 fn install_fixture_tree(name: &str, target: &Path) {

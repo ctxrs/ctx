@@ -486,6 +486,14 @@ pub const LANDED_SOURCE_BACKED_ROUTES: &[SourceBackedProviderRouteMetadata] = &[
         DiscoveredWinner
     ),
     sqlite_route!(MiMoCode, "mimocode_sqlite", true, true, DiscoveredWinner),
+    route!(
+        Fx,
+        "fx_sessions_tree",
+        true,
+        true,
+        CatalogLineage,
+        CatalogLineage
+    ),
 ];
 
 pub fn source_backed_route_inventory() -> &'static [SourceBackedProviderRouteMetadata] {
@@ -578,6 +586,7 @@ Qoder|qoder_transcript_jsonl|qoder_transcript_jsonl|false|true|ExplicitPath|none
 Warp|warp_sqlite|warp_sqlite|true|true|NamedSurface|none|NamedSurface
 CodeBuddy|codebuddy_history_json|codebuddy_history_json|true|true|DiscoveredWinner|none|ProviderSource
 MiMoCode|mimocode_sqlite|mimocode_sqlite|true|true|DiscoveredWinner|none|ProviderSource
+Fx|fx_sessions_tree|fx_sessions_tree|true|true|CatalogLineage|none|CatalogLineage
 ";
 
     #[test]

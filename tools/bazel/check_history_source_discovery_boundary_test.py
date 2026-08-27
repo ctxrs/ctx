@@ -30,6 +30,7 @@ libc.workspace = true
 quick-xml.workspace = true
 rusqlite.workspace = true
 same-file = "1.0.6"
+serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
 sha2.workspace = true

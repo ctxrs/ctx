@@ -190,10 +190,11 @@ fn regular_file_allocated_bytes(root: &Path) -> u64 {
             path.display()
         );
         if metadata.is_file() {
-            return inodes
-                .insert((metadata.dev(), metadata.ino()))
-                .then_some(metadata.blocks().saturating_mul(512))
-                .unwrap_or_default();
+            return if inodes.insert((metadata.dev(), metadata.ino())) {
+                metadata.blocks().saturating_mul(512)
+            } else {
+                0
+            };
         }
         assert!(
             metadata.is_dir(),

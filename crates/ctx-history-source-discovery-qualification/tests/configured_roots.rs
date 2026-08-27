@@ -228,6 +228,77 @@ fn corrected_exact_session_and_gemini_roots_probe_the_configured_path_itself() {
 }
 
 #[test]
+fn configured_fx_root_admits_legacy_and_current_session_authority() {
+    for layout in ["legacy-v2", "current-v3"] {
+        let temp = tempdir();
+        let selected = temp.path().join("fx-sessions");
+        if layout == "legacy-v2" {
+            write(
+                &selected.join("legacy-v2/session.json"),
+                br#"{"schema_version":2,"id":"legacy-v2","created_at_ms":1,"updated_at_ms":2,"workspace_root":null,"conversation_language":"en","history_len":0,"history":[]}"#,
+            );
+        } else {
+            write(
+                &selected.join("current-v3/authority.json"),
+                br#"{"schema_version":1,"session_id":"current-v3","authority_id":"00000000000000000000000000000002","storage_format":"event_log_v1","source":"native_create"}"#,
+            );
+            let events = concat!(
+                r#"{"schema_version":1,"log_generation":"00000000000000000000000000000003","seq":1,"event_id":"00000000000000000000000000000004","timestamp_ms":1,"kind":"session_started","payload":{"id":"current-v3","created_at_ms":1,"origin_workspace_root":"/workspace","workspace_root":"/workspace","conversation_language":"en","preferences":{"model":"test/model","effort":"auto","fast_mode":false}}}"#,
+                "\n",
+            );
+            write(&selected.join("current-v3/events.jsonl"), events.as_bytes());
+            write(
+                &selected.join(
+                    "current-v3/commit.00000000000000000000000000000003.json",
+                ),
+                format!(
+                    r#"{{"schema_version":1,"session_id":"current-v3","log_generation":"00000000000000000000000000000003","through_seq":1,"through_event_id":"00000000000000000000000000000004","through_event_log_bytes":{}}}"#,
+                    events.len(),
+                )
+                .as_bytes(),
+            );
+        }
+
+        let report = configured_report(
+            context(&temp),
+            vec![root("fx-work", CaptureProvider::Fx, selected.clone())],
+            CaptureProvider::Fx,
+        );
+        assert!(report.issues.is_empty(), "{layout}: {:?}", report.issues);
+        assert_eq!(report.sources.len(), 1, "{layout}");
+        let source = &report.sources[0];
+        assert_eq!(source.path, selected, "{layout}");
+        assert_eq!(source.status, ProviderSourceStatus::Available, "{layout}");
+        assert_eq!(source.source_format, "fx_sessions_tree", "{layout}");
+        assert_eq!(route_role(source), b"fx-sessions", "{layout}");
+        assert_configured(source, "fx-work", &source.path);
+    }
+}
+
+#[test]
+fn configured_fx_root_ignores_sessions_below_immediate_children() {
+    let temp = tempdir();
+    let selected = temp.path().join("fx-sessions");
+    write(
+        &selected.join("decoy/legacy-v2/session.json"),
+        br#"{"schema_version":2,"id":"legacy-v2","created_at_ms":1,"updated_at_ms":2,"workspace_root":null,"conversation_language":"en","history_len":0,"history":[]}"#,
+    );
+
+    let report = configured_report(
+        context(&temp),
+        vec![root("fx-work", CaptureProvider::Fx, selected.clone())],
+        CaptureProvider::Fx,
+    );
+    assert!(report.issues.is_empty(), "{:?}", report.issues);
+    assert_eq!(report.sources.len(), 1);
+    let source = &report.sources[0];
+    assert_eq!(source.path, selected);
+    assert_eq!(source.status, ProviderSourceStatus::Empty);
+    assert_eq!(source.source_format, "fx_sessions_tree");
+    assert_configured(source, "fx-work", &source.path);
+}
+
+#[test]
 fn configured_auggie_roots_report_only_adapter_visible_session_json() {
     for (id, leaf, expected_status) in [
         ("direct", "session.json", ProviderSourceStatus::Available),

@@ -2257,6 +2257,63 @@
         "ctx-only ROO env probes are removed. External workspace roots require consent; portable/launch/remote/fork roots require exact `--path`; ephemeral data is absent."
       ],
       "public_docs": "docs/providers.md"
+    },
+    {
+      "id": "fx",
+      "display_name": "fx",
+      "status": "supported",
+      "capture_provider": "fx",
+      "configured_root": {
+        "state": "enabled",
+        "expected_path_kind": "directory",
+        "expander": {
+          "kind": "exact_source",
+          "source_format": "fx_sessions_tree",
+          "route_role": "fx-sessions"
+        }
+      },
+      "implemented_paths": [
+        {
+          "kind": "native_import",
+          "source_format": "fx_sessions_tree",
+          "fidelity": "imported",
+          "notes": [
+            "Reads legacy marker-less schema-v1/v2 session.json snapshots accepted by current fx v0.0.6, plus current schema-v3 transactional event logs, from a sessions tree rooted at ~/.fx/sessions or an exact directory with that layout.",
+            "For schema v3, authority.json establishes event-log authority, events.jsonl is canonical history, a matching commit.<generation>.json watermark establishes the committed boundary, and session.json is only a projection.",
+            "Replays only the committed schema-v3 event-log boundary, including state replacements produced by compaction.",
+            "A supported marker-less snapshot and the schema-v3 session created by its upstream migration retain one logical fx session, so migration alone does not duplicate history or rotate stable ctx identities."
+          ]
+        }
+      ],
+      "history_locations": [
+        "Default: `~/.fx/sessions`; configured and exact imports accept a directory with the same sessions-tree layout."
+      ],
+      "imports_existing_history": true,
+      "captures_new_runs_passively": false,
+      "child_sessions_supported": false,
+      "lineage_support": {
+        "session_relationship": "unknown",
+        "event_origin": "unknown"
+      },
+      "fidelity": {
+        "user_prompts": true,
+        "assistant_messages": true,
+        "tool_calls": false,
+        "tool_output": false,
+        "command_output": false,
+        "files_touched": false,
+        "artifacts": false,
+        "model_identity": false,
+        "costs": false,
+        "token_usage": false,
+        "parent_child_session_edges": false
+      },
+      "limitations": [
+        "Support is limited to legacy marker-less schema-v1/v2 snapshots accepted by current fx v0.0.6 and current schema-v3 transactional event logs. Marker-less schema-v3 snapshots, future schemas, hosted history, and exact MCP server/tool attribution are not supported.",
+        "`authority.json` and a matching `commit.<generation>.json` watermark with no pending commit are required for schema-v3 admission; a schema-v3 `session.json` is not history authority and uncommitted event-log tails are excluded. Legacy snapshots larger than 16 MiB are rejected.",
+        "Current fidelity claims cover searchable user and assistant turn content only; tool, command, file-touch, per-turn model, and per-turn token fidelity are not claimed."
+      ],
+      "public_docs": "docs/providers.md"
     }
   ]
 }

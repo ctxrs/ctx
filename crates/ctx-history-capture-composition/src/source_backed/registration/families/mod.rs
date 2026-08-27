@@ -69,7 +69,7 @@ pub fn register_landed_source_backed_route_with_data_root(
 /// Registers a landed source with the one configured-root lineage scope that
 /// adapters use for durable provider-native identity. `None` is the released
 /// unqualified contract.
-pub(in crate::source_backed) fn register_landed_source_backed_route_with_data_root_and_lineage(
+pub fn register_landed_source_backed_route_with_data_root_and_lineage(
     registry: &mut SourceBackedProviderRegistry,
     source: ProviderSource,
     selection: SourceBackedRouteSelection,
@@ -109,7 +109,8 @@ fn register_landed_source_backed_route_inner(
         | CaptureProvider::Junie
         | CaptureProvider::MistralVibe
         | CaptureProvider::Mux
-        | CaptureProvider::Qoder => {
+        | CaptureProvider::Qoder
+        | CaptureProvider::Fx => {
             jsonl::register_route(registry, source, selection, source_root_lineage)
         }
         CaptureProvider::OpenClaw => {

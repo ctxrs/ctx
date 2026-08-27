@@ -59,6 +59,7 @@ WORKSPACE_RELEASE_PACKAGES = {
     "ctx-history-index-query",
     "ctx-history-jsonl",
     "ctx-history-provider-docproj",
+    "ctx-history-provider-fx",
     "ctx-history-provider-hermes",
     "ctx-history-provider-gemini",
     "ctx-history-provider-native-jsonl",

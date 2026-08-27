@@ -31,6 +31,10 @@ pub(super) fn register_route(
             source.provider,
             "unknown Codex source format",
         )),
+        CaptureProvider::Fx if source.source_format == "fx_sessions_tree" => {
+            other::register_fx_source_backed_route(registry, source, selection, source_root_lineage)
+        }
+        CaptureProvider::Fx => Err(invalid_route(source.provider, "unknown fx source format")),
         CaptureProvider::Cursor => other::register_cursor_source_backed_route(
             registry,
             source,

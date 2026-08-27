@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     io::{Read, Seek, SeekFrom},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     sync::{Arc, Mutex},
 };
 
@@ -41,6 +41,8 @@ const FAMILY_INVENTORY_AUTHORITY: &str = "borrowed-jsonl-provider-root-v1";
 const FAMILY_INVENTORY_REVISION: &str = "borrowed-jsonl-inventory-v1";
 const FAMILY_DISCOVERY_REVISION: &str = "borrowed-jsonl-discovery-v1";
 const FAMILY_INVENTORY_DOMAIN: &[u8] = b"ctx-borrowed-jsonl-inventory-v1\0";
+pub const JSONL_FAMILY_MAX_LEAF_TERMINAL_DEPENDENCIES: usize = 8;
+pub const JSONL_FAMILY_MAX_LEAF_TERMINAL_PRESENT_BYTES: usize = 1024 * 1024;
 type JsonlSemanticExecutorResult<R> =
     JsonlResult<Option<Box<dyn JsonlFamilySemanticExecutor<Runtime = R>>>, JsonlRuntimeError<R>>;
 type JsonlOptimizedLeafResult<R> = JsonlResult<
@@ -75,11 +77,13 @@ pub use projector::{JsonlFamilyProjector, JsonlFamilyProjectorPreflightError};
 mod resident;
 use resident::{AuthenticatedSourceObservation, FamilyResident};
 mod revalidation;
+#[cfg(test)]
+use revalidation::revalidate_target;
 #[cfg(any(test, feature = "test-support"))]
 pub use revalidation::set_before_jsonl_terminal_physical_revalidation_hook;
 use revalidation::{
-    binding_digest, inventory_observation, reset_terminal, revalidate_complete_inventory,
-    revalidate_target,
+    binding_digest, continuation_binding_digest, inventory_observation, reset_terminal,
+    revalidate_complete_inventory, revalidate_target_fallible,
 };
 mod scanner;
 #[cfg(test)]
@@ -501,274 +505,175 @@ pub trait JsonlFamilyAdapter: Send + Sync {
 }
 
 #[derive(Debug)]
+struct JsonlFamilyExactPresentDependency<E: JsonlFamilyError> {
+    source_path: PathBuf,
+    authority_path: PathBuf,
+    authority: Arc<ProviderSourceRoot<E>>,
+    observation: JsonlFileObservation,
+    content_length: u64,
+    content_sha256: [u8; 32],
+}
+
+impl<E: JsonlFamilyError> Clone for JsonlFamilyExactPresentDependency<E> {
+    fn clone(&self) -> Self {
+        Self {
+            source_path: self.source_path.clone(),
+            authority_path: self.authority_path.clone(),
+            authority: Arc::clone(&self.authority),
+            observation: self.observation.clone(),
+            content_length: self.content_length,
+            content_sha256: self.content_sha256,
+        }
+    }
+}
+
+impl<E: JsonlFamilyError> JsonlFamilyExactPresentDependency<E> {
+    fn revalidate(&self) -> JsonlResult<(), E> {
+        let opened = self.authority.open_file(&self.authority_path)?;
+        if observe_opened_file(&self.source_path, &opened)? != self.observation {
+            return Err(E::source_changed());
+        }
+        let content_length = usize::try_from(self.content_length).map_err(|_| {
+            E::invalid_payload("JSONL exact dependency length exceeds usize".to_owned())
+        })?;
+        let content = opened.read_exact_range(
+            0,
+            content_length,
+            JSONL_FAMILY_MAX_LEAF_TERMINAL_PRESENT_BYTES,
+        )?;
+        if u64::try_from(content.len()).ok() != Some(self.content_length)
+            || <[u8; 32]>::from(Sha256::digest(content)) != self.content_sha256
+        {
+            return Err(E::source_changed());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct JsonlFamilyExactAbsentDependency<E: JsonlFamilyError> {
+    source_path: PathBuf,
+    authority_path: PathBuf,
+    authority: Arc<ProviderSourceRoot<E>>,
+}
+
+impl<E: JsonlFamilyError> Clone for JsonlFamilyExactAbsentDependency<E> {
+    fn clone(&self) -> Self {
+        Self {
+            source_path: self.source_path.clone(),
+            authority_path: self.authority_path.clone(),
+            authority: Arc::clone(&self.authority),
+        }
+    }
+}
+
+impl<E: JsonlFamilyError> JsonlFamilyExactAbsentDependency<E> {
+    fn remains_absent(&self) -> JsonlResult<bool, E> {
+        match self.authority.open_path(&self.authority_path) {
+            Ok(_) => Ok(false),
+            Err(error) if error.is_not_found() => Ok(true),
+            Err(error) => Err(error),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct JsonlFamilyLeafTerminalDependencies<E: JsonlFamilyError> {
+    present: Vec<JsonlFamilyExactPresentDependency<E>>,
+    absent: Vec<JsonlFamilyExactAbsentDependency<E>>,
+}
+
+impl<E: JsonlFamilyError> Default for JsonlFamilyLeafTerminalDependencies<E> {
+    fn default() -> Self {
+        Self {
+            present: Vec::new(),
+            absent: Vec::new(),
+        }
+    }
+}
+
+impl<E: JsonlFamilyError> Clone for JsonlFamilyLeafTerminalDependencies<E> {
+    fn clone(&self) -> Self {
+        Self {
+            present: self.present.clone(),
+            absent: self.absent.clone(),
+        }
+    }
+}
+
+impl<E: JsonlFamilyError> JsonlFamilyLeafTerminalDependencies<E> {
+    fn revalidate(&self) -> JsonlResult<bool, E> {
+        for dependency in &self.present {
+            dependency.revalidate()?;
+        }
+        for dependency in &self.absent {
+            if !dependency.remains_absent()? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.present.is_empty() && self.absent.is_empty()
+    }
+
+    fn contains_path(&self, authority_path: &Path) -> bool {
+        self.present
+            .iter()
+            .any(|dependency| dependency.authority_path == authority_path)
+            || self
+                .absent
+                .iter()
+                .any(|dependency| dependency.authority_path == authority_path)
+    }
+
+    fn ensure_additional_capacity(&self) -> JsonlResult<(), E> {
+        let count = self
+            .present
+            .len()
+            .checked_add(self.absent.len())
+            .and_then(|count| count.checked_add(1))
+            .ok_or_else(|| {
+                E::invalid_payload("JSONL leaf terminal dependency count overflowed".to_owned())
+            })?;
+        if count > JSONL_FAMILY_MAX_LEAF_TERMINAL_DEPENDENCIES {
+            return Err(E::invalid_payload(format!(
+                "JSONL leaf exceeds the {JSONL_FAMILY_MAX_LEAF_TERMINAL_DEPENDENCIES} terminal dependency limit"
+            )));
+        }
+        Ok(())
+    }
+
+    fn present_content_bytes(&self) -> JsonlResult<usize, E> {
+        self.present.iter().try_fold(0_usize, |total, dependency| {
+            let length = usize::try_from(dependency.content_length).map_err(|_| {
+                E::invalid_payload("JSONL exact dependency length exceeds usize".to_owned())
+            })?;
+            total.checked_add(length).ok_or_else(|| {
+                E::invalid_payload("JSONL exact dependency byte count overflowed".to_owned())
+            })
+        })
+    }
+}
+
+#[derive(Debug)]
 pub struct JsonlFamilyLeaf<E: JsonlFamilyError> {
     source: SourceKey,
     source_path: PathBuf,
     authority_path: PathBuf,
     authority: Arc<ProviderSourceRoot<E>>,
     observation: JsonlFileObservation,
+    logical_eof: Option<u64>,
     binding: TypedKey,
+    terminal_dependencies: JsonlFamilyLeafTerminalDependencies<E>,
     identity_probe: Option<JsonlProbe>,
     identity_probe_rejected_records: u64,
     whole_record: bool,
     freeze_observation_at_scan: bool,
 }
 
-impl<E: JsonlFamilyError> Clone for JsonlFamilyLeaf<E> {
-    fn clone(&self) -> Self {
-        Self {
-            source: self.source.clone(),
-            source_path: self.source_path.clone(),
-            authority_path: self.authority_path.clone(),
-            authority: Arc::clone(&self.authority),
-            observation: self.observation.clone(),
-            binding: self.binding.clone(),
-            identity_probe: self.identity_probe.clone(),
-            identity_probe_rejected_records: self.identity_probe_rejected_records,
-            whole_record: self.whole_record,
-            freeze_observation_at_scan: self.freeze_observation_at_scan,
-        }
-    }
-}
-
-impl<E: JsonlFamilyError> JsonlFamilyLeaf<E> {
-    /// Binds admission to a descriptor already retained by an optimized
-    /// adapter. The adapter may keep the same descriptor for its scan, avoiding
-    /// a pathname reopen between shared leaf admission and provider parsing.
-    pub fn bind_opened(
-        source: SourceKey,
-        source_path: PathBuf,
-        authority: Arc<ProviderSourceRoot<E>>,
-        authority_path: PathBuf,
-        binding: TypedKey,
-        opened: &OpenedProviderSourceFile<E>,
-    ) -> JsonlResult<Self, E> {
-        let observation = observe_opened_file(&source_path, opened)?;
-        Ok(Self::bind_observed(
-            source,
-            source_path,
-            authority,
-            authority_path,
-            binding,
-            observation,
-        ))
-    }
-
-    pub fn bind_observed(
-        source: SourceKey,
-        source_path: PathBuf,
-        authority: Arc<ProviderSourceRoot<E>>,
-        authority_path: PathBuf,
-        binding: TypedKey,
-        observation: JsonlFileObservation,
-    ) -> Self {
-        Self {
-            source,
-            source_path,
-            authority_path,
-            authority,
-            observation,
-            binding,
-            identity_probe: None,
-            identity_probe_rejected_records: 0,
-            whole_record: false,
-            freeze_observation_at_scan: false,
-        }
-    }
-
-    pub fn bind_frozen_observed(
-        source: SourceKey,
-        source_path: PathBuf,
-        authority: Arc<ProviderSourceRoot<E>>,
-        authority_path: PathBuf,
-        binding: TypedKey,
-        observation: JsonlFileObservation,
-    ) -> Self {
-        Self {
-            source,
-            source_path,
-            authority_path,
-            authority,
-            observation,
-            binding,
-            identity_probe: None,
-            identity_probe_rejected_records: 0,
-            whole_record: false,
-            freeze_observation_at_scan: true,
-        }
-    }
-
-    pub fn observe(
-        source: SourceKey,
-        source_path: PathBuf,
-        authority: Arc<ProviderSourceRoot<E>>,
-        authority_path: PathBuf,
-        binding: TypedKey,
-    ) -> JsonlResult<Self, E> {
-        Self::observe_with_framing(
-            source,
-            source_path,
-            authority,
-            authority_path,
-            binding,
-            false,
-        )
-    }
-
-    pub fn observe_whole_record(
-        source: SourceKey,
-        source_path: PathBuf,
-        authority: Arc<ProviderSourceRoot<E>>,
-        authority_path: PathBuf,
-        binding: TypedKey,
-    ) -> JsonlResult<Self, E> {
-        Self::observe_with_framing(
-            source,
-            source_path,
-            authority,
-            authority_path,
-            binding,
-            true,
-        )
-    }
-
-    pub fn observe_after_identity_probe(
-        source: SourceKey,
-        source_path: PathBuf,
-        authority: Arc<ProviderSourceRoot<E>>,
-        authority_path: PathBuf,
-        binding: TypedKey,
-        mut identity_probe: JsonlProbe,
-        identity_probe_rejected_records: u64,
-    ) -> JsonlResult<Self, E> {
-        let opened = authority.open_file(&authority_path)?;
-        let observation = observe_opened_file(&source_path, &opened)?;
-        if observation != identity_probe.observation {
-            revalidate_frozen_prefix(
-                &source_path,
-                &opened,
-                &identity_probe.observation,
-                identity_probe.complete_prefix_end,
-                super::prefix_digest(&identity_probe.prefix_hasher),
-            )?;
-            identity_probe.observation = observation.clone();
-        }
-        drop(opened);
-        Ok(Self {
-            source,
-            source_path,
-            authority_path,
-            authority,
-            observation,
-            binding,
-            identity_probe: Some(identity_probe),
-            identity_probe_rejected_records,
-            whole_record: false,
-            freeze_observation_at_scan: false,
-        })
-    }
-
-    fn observe_with_framing(
-        source: SourceKey,
-        source_path: PathBuf,
-        authority: Arc<ProviderSourceRoot<E>>,
-        authority_path: PathBuf,
-        binding: TypedKey,
-        whole_record: bool,
-    ) -> JsonlResult<Self, E> {
-        let opened = authority.open_file(&authority_path)?;
-        let observation = observe_opened_file(&source_path, &opened)?;
-        drop(opened);
-        Ok(Self {
-            source,
-            source_path,
-            authority_path,
-            authority,
-            observation,
-            binding,
-            identity_probe: None,
-            identity_probe_rejected_records: 0,
-            whole_record,
-            freeze_observation_at_scan: false,
-        })
-    }
-
-    pub fn source(&self) -> &SourceKey {
-        &self.source
-    }
-
-    pub fn source_path(&self) -> &Path {
-        &self.source_path
-    }
-
-    pub fn authority_path(&self) -> &Path {
-        &self.authority_path
-    }
-
-    pub fn authority(&self) -> &Arc<ProviderSourceRoot<E>> {
-        &self.authority
-    }
-
-    pub fn observation(&self) -> &JsonlFileObservation {
-        &self.observation
-    }
-
-    pub(super) fn frozen_scan_observation(&self) -> Option<&JsonlFileObservation> {
-        self.freeze_observation_at_scan.then_some(&self.observation)
-    }
-
-    pub(super) fn estimated_scan_bytes(&self) -> u64 {
-        self.observation.length()
-    }
-
-    pub fn binding(&self) -> &TypedKey {
-        &self.binding
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn open_verified(&self) -> JsonlResult<Arc<OpenedProviderSourceFile<E>>, E> {
-        let opened = self.authority.open_file(&self.authority_path)?;
-        if observe_opened_file(&self.source_path, &opened)? != self.observation {
-            return Err(E::source_changed());
-        }
-        Ok(Arc::new(opened))
-    }
-
-    fn open_for_scan(&self) -> JsonlResult<(Self, Arc<OpenedProviderSourceFile<E>>), E> {
-        let opened = self.authority.open_file(&self.authority_path)?;
-        let current = observe_opened_file(&self.source_path, &opened)?;
-        if current == self.observation {
-            return Ok((self.clone(), Arc::new(opened)));
-        }
-        if self.observation.differs_only_by_change_identity(&current) {
-            let mut leaf = self.clone();
-            leaf.observation = current;
-            return Ok((leaf, Arc::new(opened)));
-        }
-        if self.whole_record
-            || current.length() <= self.observation.length()
-            || !self.observation.admits_frozen_prefix_in(&current)
-        {
-            return Err(E::source_changed());
-        }
-        if self.freeze_observation_at_scan {
-            return Ok((self.clone(), Arc::new(opened)));
-        }
-        let mut leaf = self.clone();
-        leaf.observation = current.clone();
-        if let Some(probe) = leaf.identity_probe.as_mut() {
-            revalidate_frozen_prefix(
-                &leaf.source_path,
-                &opened,
-                &probe.observation,
-                probe.complete_prefix_end,
-                super::prefix_digest(&probe.prefix_hasher),
-            )?;
-            probe.observation = current;
-        }
-        Ok((leaf, Arc::new(opened)))
-    }
-}
+mod leaf_model;
 
 mod inventory;
 use inventory::exact_member_authority;
@@ -786,6 +691,8 @@ struct FamilyCheckpoint {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     event_identity_revision: String,
     binding_digest: [u8; 32],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    exact_terminal_binding_digest: Option<[u8; 32]>,
     physical: JsonlCheckpoint,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     admitted_eof_sha256: Option<[u8; 32]>,
@@ -853,6 +760,14 @@ impl FamilyCheckpoint {
         self.exact_admitted_eof_sha256().is_some() || self.physical.authenticates_admitted_eof()
     }
 
+    fn exact_terminal_binding_matches<E: JsonlFamilyError>(
+        &self,
+        leaf: &JsonlFamilyLeaf<E>,
+    ) -> bool {
+        exact_terminal_binding_digest(leaf)
+            .is_ok_and(|digest| self.exact_terminal_binding_digest == digest)
+    }
+
     fn valid_for<R: JsonlFamilyRuntime>(
         &self,
         adapter: &dyn JsonlFamilyAdapter<Runtime = R>,
@@ -861,10 +776,17 @@ impl FamilyCheckpoint {
         self.version == Self::VERSION
             && self.provider_parser_revision == adapter.parser_revision()
             && self.event_identity_revision == adapter.event_identity_revision()
-            && binding_digest(leaf).is_ok_and(|digest| self.binding_digest == digest)
+            && continuation_binding_digest(leaf).is_ok_and(|digest| self.binding_digest == digest)
             && self.physical.is_internally_consistent()
             && self.physical.identity() == &physical_identity(adapter, leaf)
-            && (self.admitted_eof_sha256.is_some() == adapter.bind_admitted_eof())
+            // A provider-declared logical EOF is authoritative only when the
+            // shared framer reached that exact byte after a complete record.
+            // The retained physical observation may still extend beyond it.
+            && self.physical.logical_eof().is_none_or(|logical_eof| {
+                self.physical.complete_prefix_end() == logical_eof
+            })
+            && (self.admitted_eof_sha256.is_some()
+                == (adapter.bind_admitted_eof() || leaf.logical_eof.is_some()))
             && self
                 .provider_checkpoint
                 .as_ref()
@@ -878,6 +800,15 @@ impl FamilyCheckpoint {
                 .checked_add(self.rejected_logical_records)
                 .is_some_and(|classified| classified <= self.logical_complete_records)
     }
+}
+
+fn exact_terminal_binding_digest<E: JsonlFamilyError>(
+    leaf: &JsonlFamilyLeaf<E>,
+) -> JsonlResult<Option<[u8; 32]>, E> {
+    if leaf.logical_eof.is_none() && leaf.terminal_dependencies.is_empty() {
+        return Ok(None);
+    }
+    binding_digest(leaf).map(Some)
 }
 
 #[derive(Debug)]

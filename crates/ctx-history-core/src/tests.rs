@@ -67,4 +67,8 @@ fn enum_string_roundtrips_and_defaults() {
         serde_json::from_str::<CaptureProvider>("\"mimocode\"").unwrap(),
         CaptureProvider::MiMoCode
     );
+    assert_eq!(
+        serde_json::from_str::<CaptureProvider>("\"fx\"").unwrap(),
+        CaptureProvider::Fx
+    );
 }

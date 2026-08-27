@@ -212,6 +212,7 @@ Secondary traits are noted only to guide tests and hardening work.
 | Rovo Dev | `rovodev_session_json_tree` | JSON session/task document | Session JSON tree. |
 | Cline | `cline_sdk_session_store`, `cline_task_directory_json` | JSON session/task document | Current compound session catalog plus manifest/message artifacts; legacy task directory JSON remains separate. |
 | Roo Code | `roo_task_directory_json` | JSON session/task document | Task directory JSON. |
+| fx | `fx_sessions_tree` | Compound session tree | Legacy marker-less schema-v1/v2 snapshots accepted by current fx v0.0.6, plus current schema-v3 transactional sessions. Legacy snapshots are limited to 16 MiB. For v3, `authority.json` establishes event-log authority, `events.jsonl` is canonical history, a matching `commit.<generation>.json` watermark establishes the committed boundary, and `session.json` is only a projection; pending commits and uncommitted tails are excluded. |
 
 Hermes `hermes_state_sqlite` is a supported SQLite message-store route with a
 bounded consistency window. On Linux, a non-root ctx process with the certified

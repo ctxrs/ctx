@@ -45,6 +45,46 @@ class ProviderSupportMatrixTest(unittest.TestCase):
         self.assertEqual({provider["status"] for provider in providers}, {"supported"})
         self.assertNotIn("windsurf", {provider["id"] for provider in providers})
 
+    def test_fx_public_contract_covers_legacy_and_v3_without_overclaiming(self) -> None:
+        fx = next(provider for provider in self.providers() if provider["id"] == "fx")
+        self.assertEqual(fx["capture_provider"], "fx")
+        self.assertEqual(
+            fx["implemented_paths"][0]["source_format"],
+            "fx_sessions_tree",
+        )
+        self.assertEqual(
+            fx["configured_root"]["expander"],
+            {
+                "kind": "exact_source",
+                "source_format": "fx_sessions_tree",
+                "route_role": "fx-sessions",
+            },
+        )
+        public_text = " ".join(
+            fx["history_locations"]
+            + fx["limitations"]
+            + fx["implemented_paths"][0]["notes"]
+        )
+        self.assertIn("v0.0.6", public_text)
+        self.assertIn("accepted by current fx v0.0.6", public_text)
+        self.assertIn("schema-v1/v2", public_text)
+        self.assertIn("schema-v3", public_text)
+        self.assertIn("events.jsonl is canonical history", public_text)
+        self.assertIn("session.json is only a projection", public_text)
+        self.assertIn("commit.<generation>.json", public_text)
+        self.assertIn("16 MiB", public_text)
+        self.assertIn("Marker-less schema-v3 snapshots", public_text)
+        self.assertIn("migration alone does not duplicate history", public_text)
+        for field in (
+            "tool_calls",
+            "tool_output",
+            "command_output",
+            "files_touched",
+            "model_identity",
+            "token_usage",
+        ):
+            self.assertFalse(fx["fidelity"][field], field)
+
     def test_configured_root_capability_is_required_for_every_provider(self) -> None:
         providers = self.providers()
         for provider in providers:

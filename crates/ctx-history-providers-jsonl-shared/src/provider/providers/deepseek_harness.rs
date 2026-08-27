@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, VecDeque},
     fs, io,
     marker::PhantomData,
     path::{Path, PathBuf},
@@ -229,6 +229,7 @@ struct DeepSeekHarnessSemanticExecutor<R> {
     logical_complete_rows: u64,
     rejected_rows: u64,
     record_rejections: SourceBackedRecordRejectionDrafts,
+    pending_pages: VecDeque<JsonlFamilySemanticPage>,
     runtime: PhantomData<fn() -> R>,
 }
 
@@ -264,6 +265,7 @@ impl<R> DeepSeekHarnessSemanticExecutor<R> {
             logical_complete_rows: 0,
             rejected_rows: 0,
             record_rejections: Default::default(),
+            pending_pages: VecDeque::new(),
             runtime: PhantomData,
         })
     }
@@ -456,6 +458,52 @@ impl<R> DeepSeekHarnessSemanticExecutor<R> {
         record.validate_contract().map_err(contract)?;
         Ok(Some(record))
     }
+
+    fn queue_projection(&mut self, projection: FrameProjection) -> Result<()> {
+        if !self.pending_pages.is_empty() {
+            return Err(CaptureError::SystemInvariant(
+                "DeepSeek Harness replaced pending semantic pages",
+            ));
+        }
+        let pages = JsonlFamilySemanticPage::split_bounded::<CaptureError>(projection.records)?;
+        let represented_frames = if projection.represented
+            || self.encoding == JsonlPhysicalEncoding::ChecksummedZstdFrames
+        {
+            self.represented_frames
+                .checked_add(1)
+                .ok_or(CaptureError::SystemInvariant(
+                    "DeepSeek Harness represented-frame count overflowed",
+                ))?
+        } else {
+            self.represented_frames
+        };
+        let rejected_physical_frames = if projection.represented
+            || self.encoding == JsonlPhysicalEncoding::ChecksummedZstdFrames
+        {
+            self.rejected_physical_frames
+        } else {
+            self.rejected_physical_frames
+                .checked_add(1)
+                .ok_or(CaptureError::SystemInvariant(
+                    "DeepSeek Harness rejected-frame count overflowed",
+                ))?
+        };
+        let logical_complete_rows =
+            checked_add_rows(self.logical_complete_rows, projection.logical_complete_rows)?;
+        let rejected_rows = self
+            .rejected_rows
+            .checked_add(projection.rejected_rows)
+            .ok_or(CaptureError::SystemInvariant(
+                "DeepSeek Harness rejected-row count overflowed",
+            ))?;
+
+        self.represented_frames = represented_frames;
+        self.rejected_physical_frames = rejected_physical_frames;
+        self.logical_complete_rows = logical_complete_rows;
+        self.rejected_rows = rejected_rows;
+        self.pending_pages.extend(pages);
+        Ok(())
+    }
 }
 
 impl<R: JsonlProviderRuntime> JsonlFamilySemanticExecutor for DeepSeekHarnessSemanticExecutor<R> {
@@ -489,6 +537,9 @@ impl<R: JsonlProviderRuntime> JsonlFamilySemanticExecutor for DeepSeekHarnessSem
         input: &mut JsonlFamilyExecutionIo<R>,
         _worker: &mut JsonlFamilyWorkerContext<R>,
     ) -> Result<Option<JsonlFamilySemanticPage>> {
+        if let Some(page) = self.pending_pages.pop_front() {
+            return Ok(Some(page));
+        }
         let Some(frame) = input.next_record()? else {
             return Ok(None);
         };
@@ -497,27 +548,13 @@ impl<R: JsonlProviderRuntime> JsonlFamilySemanticExecutor for DeepSeekHarnessSem
         }
         let projection =
             self.validate_frame(input.record_bytes(frame)?, frame.physical_ordinal(), true)?;
-        if projection.represented || self.encoding == JsonlPhysicalEncoding::ChecksummedZstdFrames {
-            self.represented_frames =
-                self.represented_frames
-                    .checked_add(1)
-                    .ok_or(CaptureError::SystemInvariant(
-                        "DeepSeek Harness represented-frame count overflowed",
-                    ))?;
-        } else {
-            self.rejected_physical_frames = self.rejected_physical_frames.checked_add(1).ok_or(
-                CaptureError::SystemInvariant("DeepSeek Harness rejected-frame count overflowed"),
-            )?;
-        }
-        self.logical_complete_rows =
-            checked_add_rows(self.logical_complete_rows, projection.logical_complete_rows)?;
-        self.rejected_rows = self
-            .rejected_rows
-            .checked_add(projection.rejected_rows)
+        self.queue_projection(projection)?;
+        self.pending_pages
+            .pop_front()
+            .map(Some)
             .ok_or(CaptureError::SystemInvariant(
-                "DeepSeek Harness rejected-row count overflowed",
-            ))?;
-        Ok(Some(JsonlFamilySemanticPage::new(projection.records)))
+                "DeepSeek Harness frame produced no semantic page",
+            ))
     }
 
     fn finish(self: Box<Self>) -> Result<JsonlFamilySemanticSummary> {
@@ -740,6 +777,123 @@ mod tests {
             panic!("test event row did not parse as a semantic event");
         };
         event
+    }
+
+    fn semantic_frame(start_sequence: u64, bodies: impl IntoIterator<Item = String>) -> Vec<u8> {
+        let mut frame = Vec::new();
+        for (offset, body) in bodies.into_iter().enumerate() {
+            let sequence = start_sequence + u64::try_from(offset).unwrap();
+            serde_json::to_writer(
+                &mut frame,
+                &serde_json::json!({
+                    "type": "user/message",
+                    "seq": sequence,
+                    "time": 2 + sequence,
+                    "data": {
+                        "content": [{"type": "text", "text": body}],
+                        "source": {"kind": "user"},
+                        "role": "user",
+                        "id": format!("{PARENT_NATIVE_ID}-{sequence}"),
+                    },
+                }),
+            )
+            .unwrap();
+            frame.push(b'\n');
+        }
+        frame
+    }
+
+    fn framed_executor(expected_sequence: u64) -> DeepSeekHarnessSemanticExecutor<()> {
+        let source = source_key_scoped(
+            EXPLICIT_SOURCE_FORMAT,
+            PARENT_NATIVE_ID,
+            SourceAnchorScope::Unqualified,
+        )
+        .unwrap();
+        DeepSeekHarnessSemanticExecutor::new(
+            source,
+            SourceAnchorScope::Unqualified,
+            PathBuf::from("session.jsonl.zstd"),
+            session_header(PARENT_NATIVE_ID, None),
+            JsonlPhysicalEncoding::ChecksummedZstdFrames,
+            expected_sequence,
+        )
+        .unwrap()
+    }
+
+    fn assert_pending_pages(
+        executor: &DeepSeekHarnessSemanticExecutor<()>,
+        expected_sequences: std::ops::Range<u64>,
+    ) {
+        const PAGE_MAX_RECORDS: usize = 64;
+        const PAGE_MAX_BYTES: usize = 8 * 1024 * 1024;
+
+        let mut sequences = Vec::new();
+        for page in &executor.pending_pages {
+            assert!(page.records().len() <= PAGE_MAX_RECORDS);
+            let encoded_bytes = page
+                .records()
+                .iter()
+                .map(|record| record.encode_stored().unwrap().len())
+                .sum::<usize>();
+            assert!(encoded_bytes <= PAGE_MAX_BYTES, "{encoded_bytes}");
+            sequences.extend(page.records().iter().map(|record| record.event_sequence));
+        }
+        assert_eq!(sequences, expected_sequences.collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn accepted_frame_over_record_cap_splits_without_recounting_or_reordering() {
+        let mut executor = framed_executor(0);
+        let frame = semantic_frame(0, (0..65).map(|sequence| format!("small-{sequence}")));
+        let projection = executor.validate_frame(&frame, 1, true).unwrap();
+        assert_eq!(projection.records.len(), 65);
+        executor.queue_projection(projection).unwrap();
+
+        assert_eq!(executor.pending_pages.len(), 2);
+        assert_pending_pages(&executor, 0..65);
+        assert_eq!(executor.expected_sequence, 65);
+        assert_eq!(executor.represented_frames, 1);
+        assert_eq!(executor.rejected_physical_frames, 0);
+        assert_eq!(executor.logical_complete_rows, 65);
+        assert_eq!(executor.rejected_rows, 0);
+
+        let mut resumed = framed_executor(executor.expected_sequence);
+        let resumed_frame = semantic_frame(65, ["resumed".to_owned()]);
+        let resumed_projection = resumed.validate_frame(&resumed_frame, 2, true).unwrap();
+        resumed.queue_projection(resumed_projection).unwrap();
+        assert_pending_pages(&resumed, 65..66);
+        assert_eq!(resumed.expected_sequence, 66);
+        assert_eq!(resumed.represented_frames, 1);
+        assert_eq!(resumed.logical_complete_rows, 1);
+    }
+
+    #[test]
+    fn accepted_frame_over_encoded_byte_cap_splits_into_exact_bounded_pages() {
+        let mut executor = framed_executor(0);
+        let body = "large-frame-body".repeat(100_000);
+        let frame = semantic_frame(0, [body.clone(), body.clone(), body]);
+        let projection = executor.validate_frame(&frame, 1, true).unwrap();
+        let total_encoded_bytes = projection
+            .records
+            .iter()
+            .map(|record| record.encode_stored().unwrap().len())
+            .sum::<usize>();
+        assert!(
+            total_encoded_bytes > 8 * 1024 * 1024,
+            "{total_encoded_bytes}"
+        );
+        assert!(projection
+            .records
+            .iter()
+            .all(|record| { record.encode_stored().unwrap().len() <= 8 * 1024 * 1024 }));
+        executor.queue_projection(projection).unwrap();
+
+        assert!(executor.pending_pages.len() > 1);
+        assert_pending_pages(&executor, 0..3);
+        assert_eq!(executor.expected_sequence, 3);
+        assert_eq!(executor.represented_frames, 1);
+        assert_eq!(executor.logical_complete_rows, 3);
     }
 
     fn project_session(

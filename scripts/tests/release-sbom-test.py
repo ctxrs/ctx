@@ -830,6 +830,7 @@ repository = "https://example.invalid/{name}"
         cases = (
             "ctx-history-providers-task-docs",
             "ctx-history-provider-docproj",
+            "ctx-history-provider-fx",
             "ctx-companion-bridge",
         )
         labels = self.target_inventory.read_text(encoding="utf-8").splitlines()

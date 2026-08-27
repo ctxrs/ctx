@@ -1,5 +1,7 @@
 use super::*;
 
+mod paths;
+
 pub(super) fn default_base_source_path<R: JsonlFamilyRuntime>(
     _adapter: &(impl JsonlFamilyAdapter<Runtime = R> + ?Sized),
     certificate: &CertifiedSource,
@@ -59,14 +61,16 @@ pub fn jsonl_family_driver<R: JsonlFamilyRuntime>(
     let owns_adapter = Arc::clone(&adapter);
     let owns_resident = Arc::clone(&resident);
     let revalidation_resident = Arc::clone(&resident);
+    let revalidation_adapter = Arc::clone(&adapter);
+    let revalidation_root = root.clone();
     let terminal_adapter = adapter;
     let terminal_root = root;
     let inventory_resident = Arc::clone(&resident);
 
-    super::super::JsonlRuntimeDriver::<R>::new(
+    super::super::JsonlRuntimeDriver::<R>::new_fallible(
         move |sink| capture(&*scan_adapter, &scan_root, &scan_resident, sink),
         move |source| {
-            owns_adapter.owns(source)
+            Ok(owns_adapter.owns(source)
                 && owns_resident.lock().is_ok_and(|resident| {
                     !resident.ownership_initialized
                         || resident
@@ -77,9 +81,23 @@ pub fn jsonl_family_driver<R: JsonlFamilyRuntime>(
                             .quarantined_sources
                             .get(&source.exact_descriptor_digest())
                             .is_some_and(|owned| owned.exact_descriptor_eq(source))
-                })
+                }))
         },
-        move |target| revalidate_target(&revalidation_resident, target),
+        move |target| match revalidate_target_fallible(
+            &revalidation_resident,
+            target,
+            Some(&revalidation_root),
+        ) {
+            Ok(revalidated) => Ok(revalidated),
+            Err(error)
+                if normalized_jsonl_error_kind(&error)
+                    .unwrap_or_else(|| revalidation_adapter.scan_error_kind(&error))
+                    == SourceBackedRouteErrorKind::SourceChanged =>
+            {
+                Ok(false)
+            }
+            Err(error) => Err(route_scan(revalidation_adapter.as_ref(), error)),
+        },
     )
     .with_parallel_leaf_workers()
     .with_fallible_complete_inventory_revalidation(move |expected| {
@@ -184,7 +202,7 @@ pub(super) fn capture<R: JsonlFamilyRuntime>(
     }
     let bases = base_sources_for_route(adapter, sink)?;
     bind_prior_disposition_sources(adapter, &mut opening, &bases)?;
-    let bases_by_descriptor = bases_by_descriptor(&bases)?;
+    let bases_by_descriptor = paths::bases_by_descriptor(&bases)?;
     let authenticated_change_time_hints = normalize_authenticated_change_time_hints(
         adapter,
         &mut opening,
@@ -269,7 +287,7 @@ pub(super) fn capture<R: JsonlFamilyRuntime>(
         .order_leaf_scans(&mut selected_leaves)
         .map_err(|error| route_scan(adapter, error))?;
     let exact_scan_total_bytes = selected_leaves.iter().try_fold(0_u64, |total, leaf| {
-        total.checked_add(leaf.frozen_scan_observation()?.length())
+        total.checked_add(leaf.exact_scan_bytes()?)
     });
     // Only leaves whose existing capture contract already freezes the opening
     // observation opt in. Overflow or any other family shape simply abstains.
@@ -311,6 +329,17 @@ pub(super) fn capture<R: JsonlFamilyRuntime>(
             scan_selected_leaves.push(leaf.clone());
             continue;
         };
+        if checkpoint.physical.logical_eof() != leaf.logical_eof() {
+            scan_selected_leaves.push(leaf.clone());
+            continue;
+        }
+        // Physical file metadata cannot witness provider control files. A
+        // same-EOF terminal dependency rewrite must enter the scanner so the
+        // semantic adapter can validate the new authority/commit contents.
+        if !checkpoint.exact_terminal_binding_matches(leaf) {
+            scan_selected_leaves.push(leaf.clone());
+            continue;
+        }
         if !checkpoint.physical.terminal() && !checkpoint.authenticates_admitted_eof() {
             scan_selected_leaves.push(leaf.clone());
             continue;
@@ -335,8 +364,7 @@ pub(super) fn capture<R: JsonlFamilyRuntime>(
         sink.retain_source(base.clone()).map_err(route_internal)?;
         sink.report_completed_bytes_with_exact(
             base.counts().certified_bytes,
-            leaf.frozen_scan_observation()
-                .map(|observation| observation.length()),
+            leaf.exact_scan_bytes(),
         )
         .map_err(route_internal)?;
         retained_terminal_sources.insert(
@@ -345,10 +373,9 @@ pub(super) fn capture<R: JsonlFamilyRuntime>(
                 certificate: base.clone(),
                 terminal_certificate: None,
                 terminal_proof,
+                terminal_dependencies: leaf.terminal_dependencies.clone(),
                 emitted_bytes: 0,
-                exact_scan_bytes: leaf
-                    .frozen_scan_observation()
-                    .map(|observation| observation.length()),
+                exact_scan_bytes: leaf.exact_scan_bytes(),
                 record_rejections: SourceBackedRecordRejectionDrafts::default(),
                 record_rejections_committed: true,
             },
@@ -578,9 +605,12 @@ pub(super) fn classify_incomplete_first_records<R: JsonlFamilyRuntime>(
                         &leaf.authority,
                         &leaf.authority_path,
                         &leaf.observation,
-                        adapter.physical_encoding(&leaf),
-                        adapter.record_framing(),
-                        leaf.frozen_scan_observation().is_some(),
+                        FirstRecordProbe {
+                            encoding: adapter.physical_encoding(&leaf),
+                            framing: adapter.record_framing(),
+                            freeze_observation_at_scan: leaf.frozen_scan_observation().is_some(),
+                            admitted_length: leaf.admitted_length(),
+                        },
                     )? =>
             {
                 changed = true;
@@ -611,9 +641,12 @@ pub(super) fn classify_incomplete_first_records<R: JsonlFamilyRuntime>(
                         authority,
                         &leaf.authority_path,
                         observation,
-                        leaf.physical_encoding,
-                        adapter.record_framing(),
-                        false,
+                        FirstRecordProbe {
+                            encoding: leaf.physical_encoding,
+                            framing: adapter.record_framing(),
+                            freeze_observation_at_scan: false,
+                            admitted_length: observation.length(),
+                        },
                     )?
                 } else {
                     false
@@ -645,15 +678,26 @@ pub(super) fn classify_incomplete_first_records<R: JsonlFamilyRuntime>(
     Ok(())
 }
 
+struct FirstRecordProbe {
+    encoding: JsonlPhysicalEncoding,
+    framing: JsonlRecordFraming,
+    freeze_observation_at_scan: bool,
+    admitted_length: u64,
+}
+
 fn first_record_is_incomplete<E: JsonlFamilyError>(
     source_path: &Path,
     authority: &Arc<ProviderSourceRoot<E>>,
     authority_path: &Path,
     expected: &JsonlFileObservation,
-    encoding: JsonlPhysicalEncoding,
-    framing: JsonlRecordFraming,
-    freeze_observation_at_scan: bool,
+    probe: FirstRecordProbe,
 ) -> JsonlResult<bool, E> {
+    let FirstRecordProbe {
+        encoding,
+        framing,
+        freeze_observation_at_scan,
+        admitted_length,
+    } = probe;
     let opened = authority.open_file(authority_path)?;
     let current = if freeze_observation_at_scan {
         observe_opened_file_allow_append(source_path, &opened)?
@@ -670,12 +714,15 @@ fn first_record_is_incomplete<E: JsonlFamilyError>(
         return Err(E::source_changed());
     }
     let observation = expected;
-    if observation.length() == 0 {
+    if admitted_length > observation.length() {
+        return Err(E::source_changed());
+    }
+    if admitted_length == 0 {
         opened.revalidate_same_object()?;
         return Ok(false);
     }
     let mut file = opened.reopen_same_object()?;
-    if encoding == JsonlPhysicalEncoding::RawJsonl && observation.length() >= 4 {
+    if encoding == JsonlPhysicalEncoding::RawJsonl && admitted_length >= 4 {
         let mut magic = [0_u8; 4];
         file.read_exact(&mut magic)?;
         file.seek(SeekFrom::Start(0))?;
@@ -689,7 +736,7 @@ fn first_record_is_incomplete<E: JsonlFamilyError>(
     }
     let mut stream = JsonlPhysicalStream::open_with_encoding(
         file,
-        observation.length(),
+        admitted_length,
         0,
         0,
         encoding,
@@ -824,7 +871,7 @@ fn capture_partial_members<R: JsonlFamilyRuntime>(
         bases.push(base);
     }
     reset_terminal(resident)?;
-    let bases_by_descriptor = bases_by_descriptor(&bases)?;
+    let bases_by_descriptor = paths::bases_by_descriptor(&bases)?;
     let base_event_lookup = sink.base_event_lookup();
     let terminal_sources = scan_leaves(
         adapter,
@@ -883,15 +930,15 @@ fn open_partial_members<R: JsonlFamilyRuntime>(
     }
     let mut authorities = Vec::with_capacity(root_paths.len());
     for root_path in root_paths {
-        authorities.push(Arc::new(ProviderSourceRoot::open(&lexical_absolute::<
-            JsonlRuntimeError<R>,
-        >(&root_path)?)?));
+        authorities.push(Arc::new(ProviderSourceRoot::open(
+            &paths::lexical_absolute::<JsonlRuntimeError<R>>(&root_path)?,
+        )?));
     }
 
     let mut normalized_members = BTreeSet::new();
     let mut leaves = Vec::with_capacity(members.len());
     for requested in members {
-        let source_path = lexical_absolute::<JsonlRuntimeError<R>>(requested)?;
+        let source_path = paths::lexical_absolute::<JsonlRuntimeError<R>>(requested)?;
         if !normalized_members.insert(source_path.clone())
             || source_path.as_os_str().as_encoded_bytes().len()
                 > PROVIDER_JSONL_INVENTORY_MAX_PATH_BYTES
@@ -944,46 +991,4 @@ fn open_partial_members<R: JsonlFamilyRuntime>(
         authority.revalidate_same_object()?;
     }
     Ok(Some(leaves))
-}
-
-fn lexical_absolute<E: JsonlFamilyError>(path: &Path) -> JsonlResult<PathBuf, E> {
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()?.join(path)
-    };
-    let mut normalized = PathBuf::new();
-    for component in absolute.components() {
-        match component {
-            std::path::Component::CurDir => {}
-            std::path::Component::ParentDir => {
-                if !normalized.pop() {
-                    return Err(E::invalid_payload(
-                        "partial JSONL member escapes its filesystem root".to_owned(),
-                    ));
-                }
-            }
-            _ => normalized.push(component.as_os_str()),
-        }
-    }
-    Ok(normalized)
-}
-
-fn bases_by_descriptor(
-    bases: &[CertifiedSource],
-) -> SourceBackedRouteResult<HashMap<[u8; 32], &CertifiedSource>> {
-    let mut by_descriptor = HashMap::with_capacity(bases.len());
-    for base in bases {
-        let source = base.observation().source();
-        let digest = source.exact_descriptor_digest();
-        if let Some(previous) = by_descriptor.insert(digest, base) {
-            if !previous.observation().source().exact_descriptor_eq(source) {
-                return Err(route_invalid(
-                    "JSONL base source descriptor digest collision",
-                ));
-            }
-            return Err(route_invalid("duplicate JSONL base source descriptor"));
-        }
-    }
-    Ok(by_descriptor)
 }

@@ -18,14 +18,16 @@ use ctx_history_capture::{
     provider_source_for_path_with_data_root, register_custom_history_source_backed_route,
     register_forgecode_explicit_source_backed_route, register_goose_source_backed_route,
     register_hermes_explicit_source_backed_route,
-    register_landed_source_backed_route_with_data_root, register_lingma_source_backed_route,
-    register_nanoclaw_source_backed_route_with_base_sources, register_shelley_source_backed_route,
-    register_warp_source_backed_route, source_backed_route_constructor,
-    source_backed_route_inventory, validate_provider_source_roots_outside_data_root,
-    SourceBackedAutomaticRegistryBuild, SourceBackedProviderRegistry,
-    SourceBackedProviderRouteMetadata, SourceBackedRouteConstructor, SourceBackedRouteError,
-    SourceBackedRouteErrorKind, SourceBackedRouteSelection, SourceBackedSelectorAuthority,
-    SourceBackedWatchCatalog, SourceBackedWatchTargetKind, SqliteInventoryCoverage,
+    register_landed_source_backed_route_with_data_root,
+    register_landed_source_backed_route_with_data_root_and_lineage,
+    register_lingma_source_backed_route, register_nanoclaw_source_backed_route_with_base_sources,
+    register_shelley_source_backed_route, register_warp_source_backed_route,
+    source_backed_route_constructor, source_backed_route_inventory,
+    validate_provider_source_roots_outside_data_root, SourceBackedAutomaticRegistryBuild,
+    SourceBackedProviderRegistry, SourceBackedProviderRouteMetadata, SourceBackedRouteConstructor,
+    SourceBackedRouteError, SourceBackedRouteErrorKind, SourceBackedRouteSelection,
+    SourceBackedSelectorAuthority, SourceBackedWatchCatalog, SourceBackedWatchTargetKind,
+    SqliteInventoryCoverage,
 };
 use ctx_history_capture_model::{
     DiscoveryReport, ProviderCatalogSupport, ProviderImportSupport, ProviderSource,
@@ -665,6 +667,13 @@ fn register_enabled_catalog_route(
                     base_certificates,
                 )?
             }
+            CaptureProvider::Fx => register_landed_source_backed_route_with_data_root_and_lineage(
+                registry,
+                source,
+                SourceBackedRouteSelection::ExplicitManual,
+                data_root,
+                Some(lineage),
+            )?,
             provider => bail!(
                 "{} has an unknown catalog-lineage registration",
                 provider.as_str()

@@ -347,6 +347,12 @@ const CODEBUDDY_DEFAULTS: &[ProviderDefaultLocation] = &[
     },
 ];
 
+const FX_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
+    path_components: &[".fx", "sessions"],
+    source_format: "fx_sessions_tree",
+    source_kind: ProviderSourceKind::NativeHistory,
+}];
+
 pub(super) const PROVIDER_SPECS: &[ProviderSourceSpec] = &[
     ProviderSourceSpec {
         provider: CaptureProvider::Codex,
@@ -672,6 +678,14 @@ pub(super) const PROVIDER_SPECS: &[ProviderSourceSpec] = &[
         provider: CaptureProvider::CodeBuddy,
         display_name: "CodeBuddy",
         default_locations: CODEBUDDY_DEFAULTS,
+        import_support: ProviderImportSupport::Native,
+        catalog_support: ProviderCatalogSupport::None,
+        unsupported_reason: None,
+    },
+    ProviderSourceSpec {
+        provider: CaptureProvider::Fx,
+        display_name: "fx",
+        default_locations: FX_DEFAULTS,
         import_support: ProviderImportSupport::Native,
         catalog_support: ProviderCatalogSupport::None,
         unsupported_reason: None,

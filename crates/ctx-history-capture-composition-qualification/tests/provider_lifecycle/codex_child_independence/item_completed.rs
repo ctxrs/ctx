@@ -4,6 +4,16 @@ use super::*;
 
 const NATIVE_SESSION_ID: &str = "019fb000-0000-7000-8000-0000000000a1";
 const FIXTURE: &str = "tests/fixtures/provider-history/codex-paginated-item-completed.jsonl";
+type RecordIdentity = (
+    String,
+    String,
+    u64,
+    Option<i64>,
+    String,
+    Option<String>,
+    String,
+    String,
+);
 
 fn fixture_bytes() -> Vec<u8> {
     fs::read(crate::test_support_paths::capture_repo_root().join(FIXTURE)).unwrap()
@@ -16,18 +26,7 @@ fn fixture_lines() -> Vec<Vec<u8>> {
         .collect()
 }
 
-fn records_identity(
-    index: &VerifiedIndex,
-) -> Vec<(
-    String,
-    String,
-    u64,
-    Option<i64>,
-    String,
-    Option<String>,
-    String,
-    String,
-)> {
+fn records_identity(index: &VerifiedIndex) -> Vec<RecordIdentity> {
     let mut records = records_for(index, NATIVE_SESSION_ID)
         .into_iter()
         .map(|record| {
