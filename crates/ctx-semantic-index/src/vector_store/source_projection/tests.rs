@@ -17,6 +17,7 @@ use ctx_history_index::{
     current_semantic_generation_policy, CoreEventRecord, GenerationWriter, SourceEventRole,
     VerifiedIndex, WriterOptions,
 };
+use ctx_semantic_model::semantic_model_contract;
 use tempfile::TempDir;
 
 use super::*;
@@ -32,6 +33,10 @@ mod recovery;
 
 const TAIL_TOKEN: &str = "semantic-tail-token-7f0d";
 const EMPTY_DOCUMENT_TOKEN: &str = "semantic-empty-document-fixture-7f0d";
+
+fn open_store(path: &Path) -> Result<SemanticVectorStore> {
+    SemanticVectorStore::open(path, semantic_model_contract())
+}
 
 #[derive(Default)]
 struct CoreBuilder {
@@ -93,7 +98,7 @@ impl SemanticBatchEmbedder for MarkerEmbedder {
         Ok(chunks
             .iter()
             .map(|chunk| {
-                let mut embedding = vec![0.0; SEMANTIC_DIMENSIONS];
+                let mut embedding = vec![0.0; semantic_model_contract().dimensions()];
                 embedding[usize::from(!chunk.text.contains(TAIL_TOKEN))] = 1.0;
                 embedding
             })
@@ -319,7 +324,8 @@ impl Fixture {
     }
 
     fn source_digest(&self, index: &VerifiedIndex, source_index: usize) -> Result<String> {
-        let generation = SourceBackedSemanticGeneration::from_verified_index(index)?;
+        let generation =
+            SourceBackedSemanticGeneration::from_verified_index(index, semantic_model_contract())?;
         generation
             .sources
             .iter()
@@ -366,7 +372,7 @@ fn reconcile_generation(
     index: &VerifiedIndex,
     generation: &SourceBackedSemanticGeneration,
     builder: &mut CoreBuilder,
-    embedder: &mut MarkerEmbedder,
+    embedder: &mut dyn SemanticBatchEmbedder,
 ) -> Result<SourceBackedSemanticOutcome> {
     let mut total = SourceBackedSemanticOutcome::default();
     for _ in 0..128 {
@@ -391,12 +397,12 @@ fn reconcile_all(
     store: &mut SemanticVectorStore,
     index: &VerifiedIndex,
     builder: &mut CoreBuilder,
-    embedder: &mut MarkerEmbedder,
+    embedder: &mut dyn SemanticBatchEmbedder,
 ) -> Result<SourceBackedSemanticOutcome> {
     reconcile_generation(
         store,
         index,
-        &SourceBackedSemanticGeneration::from_verified_index(index)?,
+        &SourceBackedSemanticGeneration::from_verified_index(index, semantic_model_contract())?,
         builder,
         embedder,
     )
@@ -500,7 +506,8 @@ fn semantic_generation_uses_exact_per_source_core_aggregates_without_candidate_t
         "aggregate",
         &[(0, bodies("stable", 3)), (1, bodies("changed", 2))],
     )?;
-    let generation = SourceBackedSemanticGeneration::from_verified_index(&index)?;
+    let generation =
+        SourceBackedSemanticGeneration::from_verified_index(&index, semantic_model_contract())?;
     assert_eq!(SOURCE_CONTRACT_VERSION, 13);
     assert_eq!(SOURCE_INPUT_LEXICAL_SCHEMA_VERSION, 22);
     assert_eq!(index.semantic_eligible_event_count()?, 5);
@@ -561,7 +568,7 @@ fn retrieval_excluded_events_never_enter_the_source_backed_semantic_projection()
     assert!(semantic.terminal);
     assert!(semantic.items.is_empty());
 
-    let mut store = SemanticVectorStore::open(&fixture.semantic_path)?;
+    let mut store = SemanticVectorStore::open(&fixture.semantic_path, semantic_model_contract())?;
     let mut builder = CoreBuilder::default();
     let mut embedder = MarkerEmbedder::default();
     let outcome = reconcile_all(&mut store, &index, &mut builder, &mut embedder)?;
@@ -622,7 +629,7 @@ fn mixed_core_roles_build_and_pin_only_the_semantic_candidate() -> Result<()> {
     assert_eq!(semantic_page.items.len(), 1);
     assert_eq!(semantic_page.items[0].event_id, user.event_id);
 
-    let mut store = SemanticVectorStore::open(&fixture.semantic_path)?;
+    let mut store = SemanticVectorStore::open(&fixture.semantic_path, semantic_model_contract())?;
     let mut builder = CoreBuilder::default();
     let mut embedder = MarkerEmbedder::default();
     let outcome = reconcile_all(&mut store, &index, &mut builder, &mut embedder)?;
@@ -680,7 +687,7 @@ fn page_embedding_batches_multiple_documents_in_one_embedder_call() -> Result<()
     writer.commit(|_| true)?;
     let index = VerifiedIndex::open(root)?;
 
-    let mut store = SemanticVectorStore::open(&fixture.semantic_path)?;
+    let mut store = SemanticVectorStore::open(&fixture.semantic_path, semantic_model_contract())?;
     let mut builder = CoreBuilder::default();
     let mut embedder = MarkerEmbedder::default();
     let outcome = reconcile_all(&mut store, &index, &mut builder, &mut embedder)?;
@@ -736,7 +743,7 @@ fn role_policy_transition_rebuilds_semantic_state_without_reingesting_core() -> 
     let index = VerifiedIndex::open(&root)?;
     let core_generation_id = index.generation_id().to_owned();
 
-    let mut store = SemanticVectorStore::open(&fixture.semantic_path)?;
+    let mut store = SemanticVectorStore::open(&fixture.semantic_path, semantic_model_contract())?;
     let mut builder = CoreBuilder::default();
     let mut embedder = MarkerEmbedder::default();
     reconcile_all(&mut store, &index, &mut builder, &mut embedder)?;
@@ -744,8 +751,11 @@ fn role_policy_transition_rebuilds_semantic_state_without_reingesting_core() -> 
 
     let mut assistant_policy = current_semantic_generation_policy();
     assistant_policy.candidate_roles = [SourceEventRole::Assistant];
-    let revised =
-        SourceBackedSemanticGeneration::from_verified_index_with_policy(&index, assistant_policy)?;
+    let revised = SourceBackedSemanticGeneration::from_verified_index_with_policy(
+        &index,
+        assistant_policy,
+        semantic_model_contract(),
+    )?;
     builder.calls.clear();
     let rebuilt = reconcile_generation(&mut store, &index, &revised, &mut builder, &mut embedder)?;
     assert_eq!(rebuilt.records_decoded, 2);
@@ -779,7 +789,7 @@ fn role_policy_transition_rebuilds_semantic_state_without_reingesting_core() -> 
 fn exact_generation_pin_distinguishes_not_ready_empty_and_pinned() -> Result<()> {
     let fixture = Fixture::new(1)?;
     let empty = fixture.publish("pin-empty", &[(0, Vec::new())])?;
-    let mut store = SemanticVectorStore::open(&fixture.semantic_path)?;
+    let mut store = SemanticVectorStore::open(&fixture.semantic_path, semantic_model_contract())?;
     assert!(matches!(
         store.source_backed_generation_pin_exact(empty.generation_id(), 0)?,
         SourceBackedGenerationPin::NotReady
@@ -830,7 +840,7 @@ fn four_event_source_work_is_independent_of_740k_equivalent_corpus() -> Result<(
         &[(0, stable_large.clone()), (1, stable_small)],
     )?;
     let target = fixture.publish("complexity-b", &[(0, stable_large), (1, appended_small)])?;
-    let mut store = SemanticVectorStore::open(&fixture.semantic_path)?;
+    let mut store = SemanticVectorStore::open(&fixture.semantic_path, semantic_model_contract())?;
     let mut builder = CoreBuilder::default();
     let mut embedder = MarkerEmbedder::default();
     assert_eq!(
@@ -864,7 +874,10 @@ fn four_event_source_work_is_independent_of_740k_equivalent_corpus() -> Result<(
     assert_eq!(outcome.records_decoded, 4);
     assert_eq!(builder.calls.len(), 4);
     assert_eq!(outcome.vectors_touched, 1);
-    assert_eq!(outcome.vector_bytes_touched, SEMANTIC_DIMENSIONS as u64 * 4);
+    assert_eq!(
+        outcome.vector_bytes_touched,
+        semantic_model_contract().dimensions() as u64 * 4
+    );
     assert!(outcome.metadata_records_touched < 64);
     // The untouched source contributes zero records, vectors, and bytes to the
     // measured refresh. The same bound therefore applies at the production
@@ -900,7 +913,7 @@ fn sequence_only_core_change_updates_authority_without_embedding() -> Result<()>
         "sequence-b",
         &[(0, vec![(91, "same semantic body".to_owned())])],
     )?;
-    let mut store = SemanticVectorStore::open(&fixture.semantic_path)?;
+    let mut store = SemanticVectorStore::open(&fixture.semantic_path, semantic_model_contract())?;
     let mut builder = CoreBuilder::default();
     let mut embedder = MarkerEmbedder::default();
     reconcile_all(&mut store, &initial, &mut builder, &mut embedder)?;
@@ -940,7 +953,7 @@ fn multi_page_reconciliation_constructs_one_flat_view() -> Result<()> {
     let record_count = MAX_SOURCE_EVENT_PAGE_ITEMS + 4;
     let initial = fixture.publish("view-a", &[(0, bodies("initial", record_count))])?;
     let target = fixture.publish("view-b", &[(0, bodies("rewritten", record_count))])?;
-    let mut store = SemanticVectorStore::open(&fixture.semantic_path)?;
+    let mut store = SemanticVectorStore::open(&fixture.semantic_path, semantic_model_contract())?;
     let mut builder = CoreBuilder::default();
     let mut embedder = MarkerEmbedder::default();
     reconcile_all(&mut store, &initial, &mut builder, &mut embedder)?;
@@ -993,7 +1006,7 @@ fn multipage_source_scales_independently_of_hundreds_of_global_descriptors() -> 
     ));
     let initial = fixture.publish("scaled-global-a", &initial_specs)?;
     let target = fixture.publish("scaled-global-b", &target_specs)?;
-    let mut store = SemanticVectorStore::open(&fixture.semantic_path)?;
+    let mut store = SemanticVectorStore::open(&fixture.semantic_path, semantic_model_contract())?;
     reconcile_all(
         &mut store,
         &initial,
@@ -1034,7 +1047,7 @@ fn multi_page_restart_reconstructs_one_view_for_remaining_pages() -> Result<()> 
     let fixture = Fixture::new(1)?;
     let record_count = MAX_SOURCE_EVENT_PAGE_ITEMS + 4;
     let index = fixture.publish("view-restart", &[(0, bodies("restart", record_count))])?;
-    let mut clean = SemanticVectorStore::open(&fixture.data_root.join("semantic-clean-page"))?;
+    let mut clean = open_store(&fixture.data_root.join("semantic-clean-page"))?;
     reconcile_all(
         &mut clean,
         &index,
@@ -1048,7 +1061,7 @@ fn multi_page_restart_reconstructs_one_view_for_remaining_pages() -> Result<()> 
     };
     let mut embedder = MarkerEmbedder::default();
     {
-        let mut store = SemanticVectorStore::open(&fixture.semantic_path)?;
+        let mut store = open_store(&fixture.semantic_path)?;
         let error = store
             .reconcile_source_backed_index(&index, &mut builder, &mut embedder)
             .unwrap_err();
@@ -1060,7 +1073,7 @@ fn multi_page_restart_reconstructs_one_view_for_remaining_pages() -> Result<()> 
 
     builder.fail_after = None;
     builder.calls.clear();
-    let mut restarted = SemanticVectorStore::open(&fixture.semantic_path)?;
+    let mut restarted = open_store(&fixture.semantic_path)?;
     assert!(restarted.flat_pin_generation()?.is_none());
     restarted.reset_flat_active_event_snapshot_count();
     let resumed = reconcile_all(&mut restarted, &index, &mut builder, &mut embedder)?;
@@ -1069,7 +1082,7 @@ fn multi_page_restart_reconstructs_one_view_for_remaining_pages() -> Result<()> 
     assert_eq!(resumed.vectors_touched, 4);
     assert_eq!(
         resumed.vector_bytes_touched,
-        4 * SEMANTIC_DIMENSIONS as u64 * 4
+        4 * semantic_model_contract().dimensions() as u64 * 4
     );
     assert_eq!(active_events(&restarted)?, record_count);
     assert_eq!(
@@ -1100,7 +1113,7 @@ fn restart_after_source_receipt_finalization_is_exact() -> Result<()> {
     let fixture = Fixture::new(1)?;
     let initial = fixture.publish("receipt-fault-a", &[(0, bodies("before", 3))])?;
     let target = fixture.publish("receipt-fault-b", &[(0, bodies("after", 4))])?;
-    let mut clean = SemanticVectorStore::open(&fixture.data_root.join("semantic-clean-receipt"))?;
+    let mut clean = open_store(&fixture.data_root.join("semantic-clean-receipt"))?;
     reconcile_all(
         &mut clean,
         &initial,
@@ -1115,7 +1128,7 @@ fn restart_after_source_receipt_finalization_is_exact() -> Result<()> {
     )?;
     let expected = projection_snapshot(&clean)?;
 
-    let mut store = SemanticVectorStore::open(&fixture.semantic_path)?;
+    let mut store = SemanticVectorStore::open(&fixture.semantic_path, semantic_model_contract())?;
     let mut builder = CoreBuilder::default();
     let mut embedder = MarkerEmbedder::default();
     reconcile_all(&mut store, &initial, &mut builder, &mut embedder)?;
@@ -1128,7 +1141,7 @@ fn restart_after_source_receipt_finalization_is_exact() -> Result<()> {
         .contains("injected failure after semantic source finalization"));
     drop(store);
 
-    let mut restarted = SemanticVectorStore::open(&fixture.semantic_path)?;
+    let mut restarted = open_store(&fixture.semantic_path)?;
     reconcile_all(&mut restarted, &target, &mut builder, &mut embedder)?;
     assert_eq!(projection_snapshot(&restarted)?, expected);
     Ok(())
@@ -1142,7 +1155,7 @@ fn restart_after_removed_source_finalization_is_exact() -> Result<()> {
         &[(0, bodies("retained", 2)), (1, bodies("removed", 3))],
     )?;
     let target = fixture.publish("remove-fault-b", &[(0, bodies("retained", 2))])?;
-    let mut clean = SemanticVectorStore::open(&fixture.data_root.join("semantic-clean-removal"))?;
+    let mut clean = open_store(&fixture.data_root.join("semantic-clean-removal"))?;
     reconcile_all(
         &mut clean,
         &initial,
@@ -1157,7 +1170,7 @@ fn restart_after_removed_source_finalization_is_exact() -> Result<()> {
     )?;
     let expected = projection_snapshot(&clean)?;
 
-    let mut store = SemanticVectorStore::open(&fixture.semantic_path)?;
+    let mut store = SemanticVectorStore::open(&fixture.semantic_path, semantic_model_contract())?;
     let mut builder = CoreBuilder::default();
     let mut embedder = MarkerEmbedder::default();
     reconcile_all(&mut store, &initial, &mut builder, &mut embedder)?;
@@ -1170,7 +1183,7 @@ fn restart_after_removed_source_finalization_is_exact() -> Result<()> {
         .contains("injected failure after semantic source finalization"));
     drop(store);
 
-    let mut restarted = SemanticVectorStore::open(&fixture.semantic_path)?;
+    let mut restarted = open_store(&fixture.semantic_path)?;
     reconcile_all(&mut restarted, &target, &mut builder, &mut embedder)?;
     assert_eq!(projection_snapshot(&restarted)?, expected);
     Ok(())
@@ -1180,7 +1193,7 @@ fn restart_after_removed_source_finalization_is_exact() -> Result<()> {
 fn restart_after_final_acknowledgement_is_exact() -> Result<()> {
     let fixture = Fixture::new(1)?;
     let index = fixture.publish("ack-fault", &[(0, bodies("ack", 3))])?;
-    let mut clean = SemanticVectorStore::open(&fixture.data_root.join("semantic-clean-ack"))?;
+    let mut clean = open_store(&fixture.data_root.join("semantic-clean-ack"))?;
     reconcile_all(
         &mut clean,
         &index,
@@ -1189,7 +1202,7 @@ fn restart_after_final_acknowledgement_is_exact() -> Result<()> {
     )?;
     let expected = projection_snapshot(&clean)?;
 
-    let mut store = SemanticVectorStore::open(&fixture.semantic_path)?;
+    let mut store = SemanticVectorStore::open(&fixture.semantic_path, semantic_model_contract())?;
     store.flat.fail_after_source_acknowledgement_once();
     let error = store
         .reconcile_source_backed_index(
@@ -1203,7 +1216,7 @@ fn restart_after_final_acknowledgement_is_exact() -> Result<()> {
         .contains("injected failure after semantic source acknowledgement"));
     drop(store);
 
-    let mut restarted = SemanticVectorStore::open(&fixture.semantic_path)?;
+    let mut restarted = open_store(&fixture.semantic_path)?;
     reconcile_all(
         &mut restarted,
         &index,
@@ -1222,7 +1235,7 @@ fn threshold_compaction_rewrites_only_the_changed_source() -> Result<()> {
         "threshold-0",
         &[(0, stable.clone()), (1, bodies("mutable-threshold-0", 2))],
     )?;
-    let mut store = SemanticVectorStore::open(&fixture.semantic_path)?;
+    let mut store = SemanticVectorStore::open(&fixture.semantic_path, semantic_model_contract())?;
     let mut builder = CoreBuilder::default();
     let mut embedder = MarkerEmbedder::default();
     reconcile_all(&mut store, &initial, &mut builder, &mut embedder)?;
@@ -1248,7 +1261,7 @@ fn threshold_compaction_rewrites_only_the_changed_source() -> Result<()> {
     );
     assert_eq!(
         threshold.vector_bytes_touched,
-        4 * SEMANTIC_DIMENSIONS as u64 * 4
+        4 * semantic_model_contract().dimensions() as u64 * 4
     );
     assert_eq!(source_rows(&store, &stable_digest)?, stable_rows);
     assert_eq!(
@@ -1285,7 +1298,7 @@ fn append_rewrite_and_removal_touch_only_owned_source() -> Result<()> {
         ],
     )?;
     let removed = fixture.publish("lifecycle-d", &[(0, bodies("retained", 5))])?;
-    let mut store = SemanticVectorStore::open(&fixture.semantic_path)?;
+    let mut store = SemanticVectorStore::open(&fixture.semantic_path, semantic_model_contract())?;
     let mut builder = CoreBuilder::default();
     let mut embedder = MarkerEmbedder::default();
     reconcile_all(&mut store, &initial, &mut builder, &mut embedder)?;
@@ -1341,7 +1354,7 @@ fn large_multipage_lifecycle_replays_each_source_catalog_once() -> Result<()> {
         ],
     )?;
     let removed = fixture.publish("large-linear-d", &[(0, retained)])?;
-    let mut store = SemanticVectorStore::open(&fixture.semantic_path)?;
+    let mut store = SemanticVectorStore::open(&fixture.semantic_path, semantic_model_contract())?;
     let mut builder = CoreBuilder::default();
     let mut embedder = MarkerEmbedder::default();
     reconcile_all(&mut store, &initial, &mut builder, &mut embedder)?;
@@ -1399,7 +1412,7 @@ fn frontier_commit_manifest_rollback_replays_sequence_and_same_id_rewrite() -> R
     let mut builder = CoreBuilder::default();
     let mut embedder = MarkerEmbedder::default();
 
-    let mut store = SemanticVectorStore::open(&fixture.semantic_path)?;
+    let mut store = SemanticVectorStore::open(&fixture.semantic_path, semantic_model_contract())?;
     reconcile_all(&mut store, &initial, &mut builder, &mut embedder)?;
     let embedded_initial = embedder.chunks;
     store.flat.fail_after_source_frontier_commit_once();
@@ -1417,7 +1430,7 @@ fn frontier_commit_manifest_rollback_replays_sequence_and_same_id_rewrite() -> R
     assert_eq!(store.flat.rollback_active_manifest()?, committed);
     drop(store);
 
-    let mut store = SemanticVectorStore::open(&fixture.semantic_path)?;
+    let mut store = SemanticVectorStore::open(&fixture.semantic_path, semantic_model_contract())?;
     let replayed = reconcile_all(&mut store, &sequence_only, &mut builder, &mut embedder)?;
     assert_eq!(replayed.records_decoded, 1);
     assert_eq!(replayed.records_reused, 0);
@@ -1459,7 +1472,7 @@ fn frontier_commit_manifest_rollback_replays_sequence_and_same_id_rewrite() -> R
     assert_eq!(store.flat.rollback_active_manifest()?, committed);
     drop(store);
 
-    let mut store = SemanticVectorStore::open(&fixture.semantic_path)?;
+    let mut store = SemanticVectorStore::open(&fixture.semantic_path, semantic_model_contract())?;
     let replayed = reconcile_all(&mut store, &rewrite, &mut builder, &mut embedder)?;
     assert_eq!(replayed.records_decoded, 1);
     assert_eq!(replayed.records_embedded, 1);

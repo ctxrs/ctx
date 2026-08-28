@@ -27,7 +27,7 @@ fn control_filter_and_full_tail_remain_generation_exact() -> Result<()> {
         .ok_or_else(|| anyhow!("missing complete tail content"))?
         .event_id
         .as_uuid();
-    let mut store = SemanticVectorStore::open(&fixture.semantic_path)?;
+    let mut store = SemanticVectorStore::open(&fixture.semantic_path, semantic_model_contract())?;
     let mut builder = CoreBuilder::default();
     let mut embedder = MarkerEmbedder::default();
     let outcome = reconcile_all(&mut store, &index, &mut builder, &mut embedder)?;
@@ -39,7 +39,7 @@ fn control_filter_and_full_tail_remain_generation_exact() -> Result<()> {
             return Err(anyhow!("nonempty reconciled generation was not pinned"));
         }
     };
-    let mut query = vec![0.0; SEMANTIC_DIMENSIONS];
+    let mut query = vec![0.0; semantic_model_contract().dimensions()];
     query[0] = 1.0;
     let event_identity_digest = |event_id: Uuid| {
         let mut digest = [0; 32];

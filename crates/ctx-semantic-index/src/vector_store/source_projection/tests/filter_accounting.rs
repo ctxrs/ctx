@@ -15,7 +15,7 @@ fn mixed_controls_and_empty_content_publish_exact_filter_accounting() -> Result<
             ],
         )],
     )?;
-    let mut store = SemanticVectorStore::open(&fixture.semantic_path)?;
+    let mut store = SemanticVectorStore::open(&fixture.semantic_path, semantic_model_contract())?;
     let outcome = reconcile_all(
         &mut store,
         &index,
@@ -107,7 +107,7 @@ fn all_filtered_generation_is_ready_empty_with_exact_accounting() -> Result<()> 
             ],
         )],
     )?;
-    let mut store = SemanticVectorStore::open(&fixture.semantic_path)?;
+    let mut store = SemanticVectorStore::open(&fixture.semantic_path, semantic_model_contract())?;
     let outcome = reconcile_all(
         &mut store,
         &index,
@@ -144,7 +144,7 @@ fn unaccounted_source_drop_cannot_publish_a_receipt() -> Result<()> {
             ],
         )],
     )?;
-    let mut store = SemanticVectorStore::open(&fixture.semantic_path)?;
+    let mut store = SemanticVectorStore::open(&fixture.semantic_path, semantic_model_contract())?;
     store.flat.fail_after_source_frontier_commit_once();
     let error = store
         .reconcile_source_backed_index(
@@ -191,7 +191,7 @@ fn corrupted_filter_acknowledgement_is_not_query_ready() -> Result<()> {
             ],
         )],
     )?;
-    let mut store = SemanticVectorStore::open(&fixture.semantic_path)?;
+    let mut store = SemanticVectorStore::open(&fixture.semantic_path, semantic_model_contract())?;
     reconcile_all(
         &mut store,
         &index,
@@ -236,7 +236,7 @@ fn vector_reuse_preserves_intentional_filter_accounting() -> Result<()> {
     ];
     let initial = fixture.publish_with_event_sequences("reuse-filter-a", &[(0, records)])?;
     let target = fixture.publish_with_event_sequences("reuse-filter-b", &[(0, resequenced)])?;
-    let mut store = SemanticVectorStore::open(&fixture.semantic_path)?;
+    let mut store = SemanticVectorStore::open(&fixture.semantic_path, semantic_model_contract())?;
     reconcile_all(
         &mut store,
         &initial,

@@ -83,7 +83,7 @@ fn provider_native_copies_enter_semantic_projection_without_target_resolution() 
         copied_with_missing_target.event_copy
     );
 
-    let mut store = SemanticVectorStore::open(&fixture.semantic_path)?;
+    let mut store = SemanticVectorStore::open(&fixture.semantic_path, semantic_model_contract())?;
     let mut builder = CoreBuilder::default();
     let mut embedder = MarkerEmbedder::default();
     let outcome = reconcile_all(&mut store, &index, &mut builder, &mut embedder)?;

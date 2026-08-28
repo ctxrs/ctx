@@ -6,7 +6,8 @@ use ctx_history_index::{
 };
 use ctx_history_read_application::{history_health_report, HistoryHealthReport};
 use ctx_semantic_index::{
-    source_backed_semantic_vector_path, SemanticVectorStore, SourceBackedGenerationPin,
+    semantic_model_contract, source_backed_semantic_vector_path, SemanticVectorStore,
+    SourceBackedGenerationPin,
 };
 use serde_json::{json, Value};
 
@@ -558,7 +559,7 @@ fn semantic_report(
         }));
     }
 
-    let flat_f32 = match SemanticVectorStore::open_read_only(&path) {
+    let flat_f32 = match SemanticVectorStore::open_read_only(&path, semantic_model_contract()) {
         Ok(Some(store)) => match index.semantic_eligible_event_count() {
             Ok(semantic_documents) => {
                 match validate_public_semantic_counter("semantic_documents", semantic_documents) {

@@ -136,9 +136,20 @@ fn acknowledge_empty_generation(
 }
 
 fn embedding() -> Vec<f32> {
-    let mut embedding = vec![0.0; SEMANTIC_DIMENSIONS];
+    let mut embedding = vec![0.0; semantic_model_contract().dimensions()];
     embedding[0] = 1.0;
     embedding
+}
+
+fn daemon_embedding_response(contract: &SemanticModelContract, embedding: Value) -> Value {
+    compact_json(json!({
+        "ok": true,
+        "schema_version": 1,
+        "model_key": contract.model_key(),
+        "model_contract_fingerprint": contract.fingerprint(),
+        "query_embed_ms": 17,
+        "embedding": embedding,
+    }))
 }
 
 #[test]
@@ -150,16 +161,159 @@ fn request_adapter_borrows_the_exact_data_root() {
 }
 
 #[test]
+fn daemon_query_embedding_request_preserves_schema_v1_and_binds_the_model_contract() {
+    let contract = semantic_model_contract();
+
+    assert_eq!(
+        daemon_query_embedding_request(contract, "query text"),
+        compact_json(json!({
+            "schema_version": 1,
+            "op": "embed_query",
+            "model_key": contract.model_key(),
+            "model_contract_fingerprint": contract.fingerprint(),
+            "text": "query text",
+        }))
+    );
+}
+
+#[test]
+fn daemon_query_embedding_response_accepts_the_exact_model_contract() -> Result<()> {
+    let contract = semantic_model_contract();
+    let expected = embedding();
+    let response = daemon_embedding_response(contract, json!(expected));
+
+    let (actual, query_embed_ms) = parse_daemon_query_embedding_response(&response, contract)?;
+
+    assert_eq!(actual, expected);
+    assert_eq!(query_embed_ms, 17);
+    Ok(())
+}
+
+#[test]
+fn daemon_query_embedding_response_accepts_the_frozen_legacy_v1_contract() -> Result<()> {
+    let contract = semantic_model_contract();
+    let expected = embedding();
+    let mut response = daemon_embedding_response(contract, json!(expected));
+    let response_object = response.as_object_mut().expect("object");
+    response_object.remove("model_contract_fingerprint");
+    response_object.remove("schema_version");
+
+    let (actual, query_embed_ms) = parse_daemon_query_embedding_response(&response, contract)?;
+
+    assert_eq!(actual, expected);
+    assert_eq!(query_embed_ms, 17);
+    Ok(())
+}
+
+#[test]
+fn daemon_query_embedding_response_rejects_incompatible_protocol_identity() {
+    let contract = semantic_model_contract();
+    let valid = daemon_embedding_response(contract, json!(embedding()));
+    let mut invalid = Vec::new();
+
+    let mut missing_ok = valid.clone();
+    missing_ok.as_object_mut().expect("object").remove("ok");
+    invalid.push(("missing ok".to_owned(), missing_ok, "daemon query failed"));
+
+    let mut negative_ok = valid.clone();
+    negative_ok["ok"] = Value::Bool(false);
+    negative_ok["error"] = json!("daemon rejected response");
+    invalid.push((
+        "negative ok".to_owned(),
+        negative_ok,
+        "daemon rejected response",
+    ));
+
+    for (case, field, mismatch, expected) in [
+        (
+            "schema",
+            "schema_version",
+            json!(2),
+            "daemon query response schema_version mismatch",
+        ),
+        (
+            "model key",
+            "model_key",
+            json!("different-model"),
+            "daemon query response model key mismatch",
+        ),
+        (
+            "model contract fingerprint",
+            "model_contract_fingerprint",
+            json!("sha256:mismatched"),
+            "daemon query response model contract fingerprint mismatch",
+        ),
+    ] {
+        if field != "model_contract_fingerprint" {
+            let mut missing = valid.clone();
+            missing.as_object_mut().expect("object").remove(field);
+            invalid.push((format!("missing {case}"), missing, expected));
+        }
+
+        let mut mismatched = valid.clone();
+        mismatched[field] = mismatch;
+        invalid.push((format!("mismatched {case}"), mismatched, expected));
+    }
+
+    for (case, response, expected) in invalid {
+        let error = parse_daemon_query_embedding_response(&response, contract)
+            .expect_err("an incompatible daemon response must fail closed");
+
+        assert_eq!(error.to_string(), expected, "{case}");
+    }
+}
+
+#[test]
+fn daemon_query_embedding_response_rejects_malformed_vectors() {
+    let contract = semantic_model_contract();
+    let malformed = [
+        (
+            "dimensions",
+            json!(vec![0.0; contract.dimensions() - 1]),
+            "dimensions, expected",
+        ),
+        (
+            "finiteness",
+            {
+                let mut vector = embedding().into_iter().map(Value::from).collect::<Vec<_>>();
+                vector[0] = json!(f64::MAX);
+                Value::Array(vector)
+            },
+            "contains a non-finite value",
+        ),
+        (
+            "normalization",
+            {
+                let mut vector = embedding();
+                vector[0] = 2.0;
+                json!(vector)
+            },
+            "is not L2-normalized",
+        ),
+    ];
+
+    for (case, vector, expected) in malformed {
+        let response = daemon_embedding_response(contract, vector);
+        let error = parse_daemon_query_embedding_response(&response, contract)
+            .expect_err("a malformed daemon vector must fail closed");
+        assert!(
+            error.to_string().contains(expected),
+            "{case} error was {error:#}"
+        );
+    }
+}
+
+#[test]
 fn foreground_adapter_is_lazy_and_borrows_the_exact_data_root() {
     let data_root = std::path::PathBuf::from("foreground-query-root");
     let adapter = SemanticQueryAdapter::foreground(&data_root);
 
     assert!(std::ptr::eq(adapter.data_root, data_root.as_path()));
-    let SemanticQueryExecution::Foreground { runtime, .. } = &adapter.execution else {
+    let SemanticQueryExecution::Foreground { executor } = &adapter.execution else {
         panic!("manual wait must select foreground semantic execution");
     };
     assert!(
-        !runtime.is_loaded(),
+        !executor.shared_runtime().is_loaded(),
         "constructing the adapter must not load the model before semantic retrieval begins"
     );
 }
@@ -177,10 +331,10 @@ fn foreground_empty_generation_converges_without_loading_a_model() -> Result<()>
         session.prepare_alternative("empty generation")?,
         compact_json(json!({"query_embed_ms": null}))
     );
-    let SemanticQueryExecution::Foreground { runtime, .. } = &adapter.execution else {
+    let SemanticQueryExecution::Foreground { executor } = &adapter.execution else {
         unreachable!("foreground constructor selected daemon execution")
     };
-    assert!(!runtime.is_loaded());
+    assert!(!executor.shared_runtime().is_loaded());
     Ok(())
 }
 
@@ -193,7 +347,9 @@ impl SemanticBatchEmbedder for FixtureSemanticEmbedder {
 }
 
 fn reconcile_ready_nonempty_generation(index: &VerifiedIndex, data_root: &Path) -> Result<()> {
-    let mut store = SemanticVectorStore::open(&source_backed_semantic_vector_path(data_root))?;
+    let contract = semantic_model_contract();
+    let mut store =
+        SemanticVectorStore::open(&source_backed_semantic_vector_path(data_root), contract)?;
     let mut builder = SourceBackedSemanticDocumentBuilder::new(index);
     let mut embedder = FixtureSemanticEmbedder;
     for _ in 0..32 {
@@ -232,11 +388,11 @@ fn foreground_ready_nonempty_generation_skips_model_and_writable_reconciliation(
         started.elapsed() < Duration::from_secs(1),
         "a ready foreground query must not wait on the Flat write transaction lock"
     );
-    let SemanticQueryExecution::Foreground { runtime, .. } = &adapter.execution else {
+    let SemanticQueryExecution::Foreground { executor } = &adapter.execution else {
         unreachable!("foreground constructor selected daemon execution")
     };
     assert!(
-        !runtime.is_loaded(),
+        !executor.shared_runtime().is_loaded(),
         "a ready foreground query must not acquire or load the semantic model"
     );
     Ok(())
@@ -248,7 +404,8 @@ fn ready_adapter<'a>(
     event_id: Uuid,
     vector_root: &Path,
 ) -> Result<SemanticQuerySession<'a>> {
-    let mut store = SemanticVectorStore::open(vector_root)?;
+    let contract = semantic_model_contract();
+    let mut store = SemanticVectorStore::open(vector_root, contract)?;
     publish_chunk_replacements(
         &mut store,
         &[(
@@ -274,7 +431,8 @@ fn adapter_never_embeds_before_missing_or_unacknowledged_store_preflight() -> Re
         let temp = tempfile::tempdir()?;
         let (index, _) = semantic_index(temp.path())?;
         if unacknowledged_store {
-            SemanticVectorStore::open(&source_backed_semantic_vector_path(temp.path()))?;
+            let contract = semantic_model_contract();
+            SemanticVectorStore::open(&source_backed_semantic_vector_path(temp.path()), contract)?;
         }
         let error = SemanticQuerySession::begin(&index, temp.path())
             .err()
@@ -300,7 +458,8 @@ fn adapter_never_embeds_before_acknowledged_stale_generation_preflight() -> Resu
     let temp = tempfile::tempdir()?;
     let (stale_index, _) = semantic_index_revision(temp.path(), 1, false)?;
     let semantic_path = source_backed_semantic_vector_path(temp.path());
-    let mut store = SemanticVectorStore::open(&semantic_path)?;
+    let contract = semantic_model_contract();
+    let mut store = SemanticVectorStore::open(&semantic_path, contract)?;
     acknowledge_empty_generation(&mut store, &stale_index)?;
     assert!(matches!(
         store.source_backed_generation_pin_exact(stale_index.generation_id(), 0)?,
@@ -334,7 +493,7 @@ fn adapter_never_embeds_for_mismatched_or_ready_empty_pins() -> Result<()> {
         )?;
         let mut adapter = SemanticQuerySession::from_pin(&index, temp.path(), pin);
         let calls = Cell::new(0_u8);
-        let result = adapter.prepare_alternative_with("query", |_, _| {
+        let result = adapter.prepare_alternative_with("query", |_, _, _| {
             calls.set(calls.get() + 1);
             Ok(Some((embedding(), 1)))
         });
@@ -395,13 +554,13 @@ fn adapter_embeds_ordered_queries_then_runs_one_scan_with_one_filter_projection(
     let filters = default_compiled_filter();
 
     let first_diagnostics =
-        adapter.prepare_alternative_with("first normalized query", |_, _| {
+        adapter.prepare_alternative_with("first normalized query", |_, _, _| {
             calls.set(calls.get() + 1);
             Ok(Some((embedding(), 17)))
         })?;
     assert_eq!(first_diagnostics["query_embed_ms"], 17);
     let second_diagnostics =
-        adapter.prepare_alternative_with("second normalized query", |_, _| {
+        adapter.prepare_alternative_with("second normalized query", |_, _, _| {
             calls.set(calls.get() + 1);
             Ok(Some((embedding(), 17)))
         })?;
@@ -424,7 +583,7 @@ fn adapter_preserves_daemon_query_service_unavailable_contract() -> Result<()> {
     let calls = Cell::new(0_u8);
 
     let error = adapter
-        .prepare_alternative_with("query", |_, _| {
+        .prepare_alternative_with("query", |_, _, _| {
             calls.set(calls.get() + 1);
             Ok(None)
         })
@@ -452,7 +611,7 @@ fn adapter_scores_only_the_active_flat_core_intersection() -> Result<()> {
         &temp.path().join("vectors"),
     )?;
 
-    adapter.prepare_alternative_with("query", |_, _| Ok(Some((embedding(), 1))))?;
+    adapter.prepare_alternative_with("query", |_, _, _| Ok(Some((embedding(), 1))))?;
     let (candidates, diagnostics) = adapter.search(&default_compiled_filter(), 1)?;
 
     assert!(candidates.is_empty());
@@ -476,6 +635,22 @@ fn adapter_downcasts_engine_not_ready_without_parsing_display_text() {
             detail,
             retryable: true,
         } if detail == "typed engine detail"
+    ));
+}
+
+#[test]
+fn adapter_classifies_stale_daemon_endpoint_as_retryable_not_ready() {
+    let classified = SemanticQueryError::from(anyhow::Error::new(
+        ctx_daemon_service::DaemonQueryServiceUnavailable,
+    ));
+
+    assert!(matches!(
+        classified,
+        SemanticQueryError::NotReady {
+            code: "semantic_query_service_unavailable",
+            retryable: true,
+            ..
+        }
     ));
 }
 

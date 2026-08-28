@@ -9,8 +9,8 @@ use ctx_semantic_index::{
 };
 use ctx_semantic_model::{
     semantic_model_acquisition_integrity_error, semantic_model_key, ArtifactFetcher,
-    SemanticDaemonCpuFallbackRequired, SemanticDaemonModelAcquisition, SemanticModelConfig,
-    SemanticModelLoadDeferred, SharedSemanticRuntime,
+    BuiltinSemanticEmbeddingExecutor, SemanticDaemonCpuFallbackRequired,
+    SemanticDaemonModelAcquisition, SemanticEmbeddingExecutor, SemanticModelLoadDeferred,
 };
 use serde_json::{json, Value};
 
@@ -193,14 +193,27 @@ pub(super) fn run_daemon_semantic_job(
         ));
     }
 
-    let admission_operation = if runtime.semantic_runtime.is_loaded() {
+    let executor = BuiltinSemanticEmbeddingExecutor::new(
+        runtime.semantic_runtime.clone(),
+        config.semantic_model_config(data_root),
+    );
+    // Bazel may materialize the model crate separately across this dependency
+    // boundary, so bridge compatibility by fingerprint before opening the
+    // index with its own contract type.
+    let index_contract = ctx_semantic_index::semantic_model_contract();
+    if executor.contract().fingerprint() != index_contract.fingerprint() {
+        return Err(anyhow::anyhow!(
+            "semantic executor model contract does not match the semantic index contract"
+        ));
+    }
+    let admission_operation = if executor.shared_runtime().is_loaded() {
         SemanticBackgroundOperation::IndexBatch
     } else {
         SemanticBackgroundOperation::ModelLoad
     };
     if let Some(deferred) = semantic_background_resource_deferred(data_root, admission_operation) {
         if semantic_resource_deferral_releases_runtime(deferred.reason()) {
-            let _ = runtime.semantic_runtime.release_if_idle();
+            let _ = executor.shared_runtime().release_if_idle();
         }
         return Ok(daemon_semantic_resource_deferred_job(
             last_run_at_ms,
@@ -209,7 +222,7 @@ pub(super) fn run_daemon_semantic_job(
     }
 
     let vector_path = source_backed_semantic_vector_path(data_root);
-    let mut vector_store = SemanticVectorStore::open(&vector_path)?;
+    let mut vector_store = SemanticVectorStore::open(&vector_path, index_contract)?;
     let source_eligible_events = source_generation.semantic_eligible_event_count()?;
     let source_pending = matches!(
         vector_store.source_backed_generation_pin_exact(
@@ -227,7 +240,7 @@ pub(super) fn run_daemon_semantic_job(
             None,
         ));
     }
-    let min_remaining_secs = if runtime.semantic_runtime.is_loaded() {
+    let min_remaining_secs = if executor.shared_runtime().is_loaded() {
         DAEMON_MIN_REMAINING_FOR_JOB_SECS
     } else {
         SEMANTIC_MODEL_INIT_MIN_REMAINING_SECS
@@ -243,25 +256,24 @@ pub(super) fn run_daemon_semantic_job(
         ));
     }
     let source_model_load_needed =
-        source_eligible_events > 0 && !runtime.semantic_runtime.is_loaded();
-    let model_config = config.semantic_model_config(data_root);
+        source_eligible_events > 0 && !executor.shared_runtime().is_loaded();
     if source_model_load_needed {
         match run_daemon_semantic_model_startup_with(
             last_run_at_ms,
             || {
-                runtime
-                    .semantic_runtime
-                    .acquire_for_daemon(&model_config, artifact_fetcher)
+                executor
+                    .shared_runtime()
+                    .acquire_for_daemon(executor.config(), artifact_fetcher)
             },
             |fallback| {
-                runtime
-                    .semantic_runtime
-                    .acquire_cpu_fallback_for_daemon(&model_config, fallback)
+                executor
+                    .shared_runtime()
+                    .acquire_cpu_fallback_for_daemon(executor.config(), fallback)
             },
             |acquisition| {
-                runtime
-                    .semantic_runtime
-                    .ensure_loaded_after_daemon_acquisition(&model_config, acquisition)?;
+                executor
+                    .shared_runtime()
+                    .ensure_loaded_after_daemon_acquisition(executor.config(), acquisition)?;
                 Ok(())
             },
         )? {
@@ -273,8 +285,7 @@ pub(super) fn run_daemon_semantic_job(
         data_root,
         source_generation,
         &mut vector_store,
-        &runtime.semantic_runtime,
-        &model_config,
+        &executor,
         deadline,
     )?;
     let (status, reason, last_error) = if outcome.ready() {
@@ -297,15 +308,13 @@ fn reconcile_source_backed_semantic_page(
     _data_root: &Path,
     generation: PinnedSourceBackedGeneration,
     vector_store: &mut SemanticVectorStore,
-    runtime: &SharedSemanticRuntime,
-    model_config: &SemanticModelConfig,
+    executor: &dyn SemanticEmbeddingExecutor,
     deadline: Option<Instant>,
 ) -> Result<(SourceBackedSemanticOutcome, usize)> {
     let index = generation.into_index();
     let mut builder = SourceBackedSemanticDocumentBuilder::new(&index);
     let mut embedder = RuntimeSourceSemanticEmbedder {
-        runtime,
-        model_config,
+        executor,
         deadline,
         indexed_chunks: 0,
     };
@@ -329,8 +338,7 @@ fn annotate_source_backed_semantic_progress(
 }
 
 struct RuntimeSourceSemanticEmbedder<'a> {
-    runtime: &'a SharedSemanticRuntime,
-    model_config: &'a SemanticModelConfig,
+    executor: &'a dyn SemanticEmbeddingExecutor,
     deadline: Option<Instant>,
     indexed_chunks: usize,
 }
@@ -341,12 +349,18 @@ impl SemanticBatchEmbedder for RuntimeSourceSemanticEmbedder<'_> {
             .iter()
             .map(|chunk| chunk.text().to_owned())
             .collect::<Vec<_>>();
-        let (embeddings, _) =
-            self.runtime
-                .embed_documents(self.model_config, texts, self.deadline)?;
+        let embeddings = execute_document_embeddings(self.executor, texts, self.deadline)?;
         self.indexed_chunks = self.indexed_chunks.saturating_add(embeddings.len());
         Ok(embeddings)
     }
+}
+
+fn execute_document_embeddings(
+    executor: &dyn SemanticEmbeddingExecutor,
+    texts: Vec<String>,
+    deadline: Option<Instant>,
+) -> Result<Vec<Vec<f32>>> {
+    executor.embed_documents(executor.contract().prepare_documents(texts), deadline)
 }
 
 pub(super) fn daemon_semantic_skipped_job(

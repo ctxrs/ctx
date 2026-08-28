@@ -1,7 +1,6 @@
 use std::collections::{BTreeMap, HashSet};
 
 use anyhow::Result;
-use ctx_semantic_model::SEMANTIC_DIMENSIONS;
 use uuid::Uuid;
 
 use super::{
@@ -27,16 +26,16 @@ impl SemanticVectorStore {
         items: &[(SemanticChunkDocument, Vec<f32>)],
         event_ids: &[Uuid],
     ) -> Result<usize> {
+        let dimensions = self.contract().dimensions();
         semantic_owned_sidecar_result((|| {
             if items.is_empty() && event_ids.is_empty() {
                 return Ok(0);
             }
             if items.iter().any(|(_, embedding)| {
-                embedding.len() != SEMANTIC_DIMENSIONS
-                    || embedding.iter().any(|value| !value.is_finite())
+                embedding.len() != dimensions || embedding.iter().any(|value| !value.is_finite())
             }) {
                 return Err(SemanticVectorStoreError::unavailable(format!(
-                    "semantic embeddings must be finite f32[{SEMANTIC_DIMENSIONS}]"
+                    "semantic embeddings must be finite f32[{dimensions}]"
                 ))
                 .into());
             }
@@ -80,13 +79,13 @@ impl SemanticVectorStore {
         event_ids: &[Uuid],
         existing: &FlatActiveEventLookup,
     ) -> Result<FlatSourcePageOutcome> {
+        let dimensions = self.contract().dimensions();
         semantic_owned_sidecar_result((|| {
             if items.iter().any(|(_, embedding)| {
-                embedding.len() != SEMANTIC_DIMENSIONS
-                    || embedding.iter().any(|value| !value.is_finite())
+                embedding.len() != dimensions || embedding.iter().any(|value| !value.is_finite())
             }) {
                 return Err(SemanticVectorStoreError::unavailable(format!(
-                    "semantic embeddings must be finite f32[{SEMANTIC_DIMENSIONS}]"
+                    "semantic embeddings must be finite f32[{dimensions}]"
                 ))
                 .into());
             }

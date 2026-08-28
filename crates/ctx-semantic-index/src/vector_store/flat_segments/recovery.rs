@@ -1,6 +1,38 @@
 use super::*;
 
 impl FlatSegmentStore {
+    pub(crate) fn model_contract_reset_pending(&self) -> FlatResult<bool> {
+        let path = self.root.join(MODEL_CONTRACT_RESET_PENDING_FILE);
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+                Err(FlatStoreError::Corrupt(format!(
+                    "{} is not a regular model-contract reset marker",
+                    path.display()
+                )))
+            }
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(source) => Err(io_error(
+                "inspect model-contract reset marker",
+                &path,
+                source,
+            )),
+        }
+    }
+
+    pub(crate) fn acknowledge_model_contract_reset(&self) -> FlatResult<()> {
+        let path = self.root.join(MODEL_CONTRACT_RESET_PENDING_FILE);
+        match fs::remove_file(&path) {
+            Ok(()) => sync_directory(&self.root),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(source) => Err(io_error(
+                "remove model-contract reset marker",
+                &path,
+                source,
+            )),
+        }
+    }
+
     pub(crate) fn compact(&self) -> FlatResult<FlatPublishOutcome> {
         self.require_writable()?;
         let _transaction = self.lock_transaction()?;
@@ -165,6 +197,7 @@ impl FlatSegmentStore {
         let selected = match select_manifest_any(&self.root) {
             Ok(selected) => selected,
             Err(FlatStoreError::LegacySchema(_)) => {
+                record_model_contract_reset_pending(&self.root)?;
                 reset_legacy_store(&self.root, &self.contract, &mut report)?;
                 self.clear_pinned()?;
                 report.model_contract_reset = true;
@@ -186,6 +219,7 @@ impl FlatSegmentStore {
                     &mut report,
                     cleanup_obsolete_locked(&self.root, &selected)?,
                 );
+                record_model_contract_reset_pending(&self.root)?;
                 let generation = next_generation(Some(&selected))?;
                 let staged = write_empty_base_segment(&self.root, &self.contract, generation)?;
                 sync_directory(&segments_directory(&self.root))?;
@@ -205,6 +239,23 @@ impl FlatSegmentStore {
         }
         Ok(report)
     }
+}
+
+fn record_model_contract_reset_pending(root: &Path) -> FlatResult<()> {
+    let path = root.join(MODEL_CONTRACT_RESET_PENDING_FILE);
+    if path.exists() {
+        let _ = symlink_metadata_file(&path)?;
+        return Ok(());
+    }
+    let temporary = unique_temporary_path(root, "model-contract-reset");
+    let mut file = create_new_file(&temporary)?;
+    file.write_all(b"pending\n")
+        .map_err(|source| io_error("write model-contract reset marker", &temporary, source))?;
+    file.sync_all()
+        .map_err(|source| io_error("sync model-contract reset marker", &temporary, source))?;
+    drop(file);
+    commit_unique_file(&temporary, &path)?;
+    sync_directory(root)
 }
 
 fn reset_legacy_store(

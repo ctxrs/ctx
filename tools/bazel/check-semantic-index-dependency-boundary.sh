@@ -142,16 +142,8 @@ done
 
 expected_model_imports="${tmp}/expected-model-imports.txt"
 printf '%s\n' \
-  'SEMANTIC_DIMENSIONS' \
-  'SEMANTIC_MODEL_CONTRACT_VERSION' \
-  'SEMANTIC_MODEL_ID' \
-  'SEMANTIC_MODEL_REVISION' \
-  'SEMANTIC_NORMALIZATION' \
-  'SEMANTIC_POOLING' \
-  'semantic_e5_passage_text' \
-  'semantic_model_contract' \
-  'semantic_model_contract_descriptor' \
-  'semantic_tokenizer_fingerprint' | LC_ALL=C sort >"${expected_model_imports}"
+  'SemanticModelContract' \
+  'semantic_model_contract' | LC_ALL=C sort >"${expected_model_imports}"
 
 actual_model_imports="${tmp}/actual-model-imports.txt"
 fully_qualified_model_uses="${tmp}/fully-qualified-model-uses.txt"

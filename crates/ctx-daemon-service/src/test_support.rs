@@ -5,7 +5,7 @@ use ctx_client_observability::analytics::{
     Outcome, ProviderRefreshCompletedV1, PublicEventV1, Surface,
 };
 use ctx_history_capture::DiscoveryContext;
-use ctx_semantic_index::{SemanticVectorStore, SourceBackedGenerationPin};
+use ctx_semantic_index::{semantic_model_contract, SemanticVectorStore, SourceBackedGenerationPin};
 use ctx_semantic_model::{
     ArtifactFetchRequest, ArtifactFetcher, SemanticModelConfig, SemanticModelPaths,
     SemanticOnnxRuntimePaths,
@@ -26,7 +26,7 @@ pub(crate) static ARTIFACT: TestArtifact = TestArtifact;
 pub(crate) static OBSERVATION: TestObservation = TestObservation;
 
 pub(crate) fn semantic_contract_fingerprint() -> Result<String> {
-    ctx_semantic_index::source_backed_semantic_contract_fingerprint()
+    ctx_semantic_index::source_backed_semantic_contract_fingerprint(semantic_model_contract())
 }
 
 pub(crate) fn semantic_vector_path(data_root: &Path) -> std::path::PathBuf {
@@ -34,7 +34,10 @@ pub(crate) fn semantic_vector_path(data_root: &Path) -> std::path::PathBuf {
 }
 
 pub(crate) fn seed_filter_unaware_semantic_state(path: &Path) -> Result<()> {
-    ctx_semantic_index::test_support::seed_filter_unaware_derived_state(path)
+    ctx_semantic_index::test_support::seed_filter_unaware_derived_state(
+        path,
+        semantic_model_contract(),
+    )
 }
 
 pub(crate) fn current_semantic_vector_schema_version() -> i64 {
@@ -42,7 +45,7 @@ pub(crate) fn current_semantic_vector_schema_version() -> i64 {
 }
 
 pub(crate) fn semantic_generation_is_ready_empty(path: &Path, generation: &str) -> Result<bool> {
-    let Some(store) = SemanticVectorStore::open_read_only(path)? else {
+    let Some(store) = SemanticVectorStore::open_read_only(path, semantic_model_contract())? else {
         return Ok(false);
     };
     Ok(matches!(

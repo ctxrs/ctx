@@ -10,7 +10,7 @@ use ctx_history_index::{
     SourceCoreRecordAggregate, SourceEventCursor, VerifiedIndex, LEXICAL_SCHEMA_VERSION,
     MAX_SOURCE_EVENT_PAGE_ITEMS,
 };
-use ctx_semantic_model::{semantic_model_contract_descriptor, SEMANTIC_DIMENSIONS};
+use ctx_semantic_model::SemanticModelContract;
 use sha2::{Digest, Sha256};
 #[cfg(test)]
 use uuid::Uuid;
@@ -39,20 +39,22 @@ use manifest::{
 };
 use state::{
     clear_active_source, commit_frontier_after_flat, source_projection_states,
-    source_receipt_matches, SourceProjectionStates,
+    source_receipt_allows_vector_reuse, source_receipt_matches, SourceProjectionStates,
 };
 
 const SEARCH_DIRECTORY: &str = "search";
 const SEMANTIC_DIRECTORY: &str = "semantic";
-
 pub fn source_backed_semantic_vector_path(data_root: &Path) -> PathBuf {
     data_root.join(SEARCH_DIRECTORY).join(SEMANTIC_DIRECTORY)
 }
 
-pub fn source_backed_semantic_contract_fingerprint() -> Result<String> {
-    source_contract_fingerprint()
+/// Returns persisted projection identity for one vector space, excluding
+/// executor, runtime, accelerator, and artifact identity.
+pub fn source_backed_semantic_contract_fingerprint(
+    model_contract: &SemanticModelContract,
+) -> Result<String> {
+    source_contract_fingerprint(model_contract)
 }
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SourceBackedSemanticSource {
     source: SourceKey,
@@ -64,6 +66,7 @@ pub(super) struct SourceBackedSemanticGeneration {
     pub(super) core_generation_id: String,
     pub(super) semantic_policy_fingerprint: String,
     contract_fingerprint: String,
+    trusted_legacy_contract_fingerprint: Option<String>,
     model_descriptor: String,
     semantic_policy: SemanticGenerationPolicy,
     sources: Vec<SourceBackedSemanticSource>,
@@ -72,18 +75,14 @@ pub(super) struct SourceBackedSemanticGeneration {
 impl SourceBackedSemanticGeneration {
     /// Binds semantic catch-up to one verified current-schema Core manifest and
     /// mirrors its exact per-source Core commitments.
-    pub(super) fn from_verified_index(index: &VerifiedIndex) -> Result<Self> {
-        Self::from_verified_index_with_policy(index, current_semantic_generation_policy())
-    }
-
-    fn from_verified_index_with_policy(
+    pub(super) fn from_verified_index(
         index: &VerifiedIndex,
-        semantic_policy: SemanticGenerationPolicy,
+        model_contract: &SemanticModelContract,
     ) -> Result<Self> {
-        Self::from_verified_index_with_authority(
+        Self::from_verified_index_with_policy(
             index,
-            semantic_policy,
-            semantic_model_contract_descriptor(),
+            current_semantic_generation_policy(),
+            model_contract,
         )
     }
 
@@ -133,6 +132,7 @@ impl SourceBackedSemanticGeneration {
             core_generation_id,
             semantic_policy_fingerprint,
             contract_fingerprint,
+            trusted_legacy_contract_fingerprint: None,
             model_descriptor,
             semantic_policy,
             sources,
@@ -307,7 +307,8 @@ impl SemanticVectorStore {
     ) -> Result<SourceBackedSemanticOutcome> {
         semantic_owned_sidecar_result((|| {
             let work_before = self.flat.work_stats();
-            let generation = SourceBackedSemanticGeneration::from_verified_index(index)?;
+            let generation =
+                SourceBackedSemanticGeneration::from_verified_index(index, self.contract())?;
             let mut outcome =
                 self.reconcile_source_backed_generation(index, &generation, builder, embedder)?;
             let work = self.flat.work_since(work_before);
@@ -474,10 +475,8 @@ impl SemanticVectorStore {
         {
             let source_identity_digest = source.aggregate.source_identity_digest();
             let receipt = states.get(source_identity_digest).and_then(Option::as_ref);
-            let vector_reuse_allowed = receipt.is_some_and(|receipt| {
-                receipt.contract_fingerprint == generation.contract_fingerprint
-                    && receipt.semantic_policy_fingerprint == generation.semantic_policy_fingerprint
-            });
+            let vector_reuse_allowed = receipt
+                .is_some_and(|receipt| source_receipt_allows_vector_reuse(receipt, generation));
             if receipt.is_none_or(|receipt| {
                 !source_receipt_matches(
                     receipt,
@@ -551,6 +550,7 @@ impl SemanticVectorStore {
         builder: &mut dyn SemanticDocumentBuilder,
         embedder: &mut dyn SemanticBatchEmbedder,
     ) -> Result<SourceBackedSemanticOutcome> {
+        let model_contract = self.contract().clone();
         let after = frontier
             .after_identity
             .as_deref()
@@ -704,6 +704,7 @@ impl SemanticVectorStore {
                 continue;
             }
             let source_text_sha256 = semantic_document_hash(
+                &model_contract,
                 &document,
                 &source_text,
                 &frontier.semantic_policy_fingerprint,
@@ -783,7 +784,7 @@ impl SemanticVectorStore {
             if embeddings.len() != pending_chunks.len()
                 || embeddings
                     .iter()
-                    .any(|embedding| embedding.len() != SEMANTIC_DIMENSIONS)
+                    .any(|embedding| embedding.len() != model_contract.dimensions())
             {
                 return Err(SemanticVectorStoreError::unavailable(
                     "source-backed semantic embedder returned an invalid batch",

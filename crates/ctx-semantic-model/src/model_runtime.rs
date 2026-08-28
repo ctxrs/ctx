@@ -15,7 +15,7 @@ use super::{
     configuration::{SemanticBackendPreference, SemanticModelConfig},
     health_search::semantic_embed_policy_for,
     model_contract::{
-        semantic_e5_passage_text, semantic_e5_query_text, semantic_model_key, SemanticBackendKind,
+        semantic_model_key, PreparedSemanticQuery, SemanticBackendKind,
         SemanticCpuModelCacheMissing, SemanticCpuModelIntegrityError, SemanticModelFile,
         SemanticOrtModelVariant, SEMANTIC_BACKEND, SEMANTIC_DIMENSIONS,
         SEMANTIC_MODEL_CONTRACT_VERSION, SEMANTIC_MODEL_ID, SEMANTIC_MODEL_REVISION,
@@ -215,16 +215,17 @@ impl SharedSemanticRuntime {
     }
 
     #[cfg(ctx_semantic_fastembed)]
-    pub fn embed_query(
+    pub(crate) fn embed_query(
         &self,
         config: &SemanticModelConfig,
-        query: String,
+        query: PreparedSemanticQuery,
     ) -> Result<(Vec<f32>, SemanticEmbeddingRuntimeInfo)> {
+        let query = query.into_text();
         let mut embedder = self.lock()?;
         let first = embedder
             .as_mut()
             .ok_or_else(|| anyhow!("semantic embedder was not initialized"))?
-            .embed_query(query.clone());
+            .embed_prepared_query(query.clone());
         let embedding = match first {
             Ok(embedding) => embedding,
             Err(first_error) => {
@@ -237,7 +238,7 @@ impl SharedSemanticRuntime {
                 *embedder = None;
                 let mut replacement = reacquire_semantic_embedder(config, &runtime)
                     .context("reinitialize semantic embedder after query inference failure")?;
-                let retry = replacement.embed_query(query).with_context(|| {
+                let retry = replacement.embed_prepared_query(query).with_context(|| {
                     format!("semantic query inference failed twice; first failure: {first_error:#}")
                 })?;
                 *embedder = Some(replacement);
@@ -482,8 +483,7 @@ enum SemanticEmbeddingBackend {
 
 #[cfg(ctx_semantic_fastembed)]
 impl SemanticEmbeddingBackend {
-    pub(super) fn embed_query(&mut self, query: String) -> Result<Vec<f32>> {
-        let query = semantic_e5_query_text(&query);
+    pub(super) fn embed_prepared_query(&mut self, query: String) -> Result<Vec<f32>> {
         let raw = match self {
             Self::Ort { model, .. } => model
                 .embed(vec![query], Some(1))
@@ -497,7 +497,7 @@ impl SemanticEmbeddingBackend {
             .ok_or_else(|| anyhow!("semantic query embedding was empty"))
     }
 
-    pub(super) fn embed_documents(
+    pub(super) fn embed_prepared_documents(
         &mut self,
         documents: Vec<String>,
         batch_size: usize,
@@ -506,10 +506,6 @@ impl SemanticEmbeddingBackend {
         if expected == 0 {
             return Ok(Vec::new());
         }
-        let documents = documents
-            .into_iter()
-            .map(|text| semantic_e5_passage_text(&text))
-            .collect::<Vec<_>>();
         let raw = match self {
             Self::Ort { model, .. } => {
                 model.embed(documents, Some(batch_size)).with_context(|| {
@@ -596,12 +592,16 @@ pub(super) struct SemanticEmbedder {
 
 #[cfg(ctx_semantic_fastembed)]
 impl SemanticEmbedder {
-    pub(super) fn embed_query(&mut self, query: String) -> Result<Vec<f32>> {
-        self.backend.embed_query(query)
+    pub(super) fn embed_prepared_query(&mut self, query: String) -> Result<Vec<f32>> {
+        self.backend.embed_prepared_query(query)
     }
 
-    pub(super) fn embed_documents(&mut self, documents: Vec<String>) -> Result<Vec<Vec<f32>>> {
-        self.backend.embed_documents(documents, self.batch_size)
+    pub(super) fn embed_prepared_documents(
+        &mut self,
+        documents: Vec<String>,
+    ) -> Result<Vec<Vec<f32>>> {
+        self.backend
+            .embed_prepared_documents(documents, self.batch_size)
     }
 
     pub(super) fn runtime_info(&self) -> SemanticEmbeddingRuntimeInfo {

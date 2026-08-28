@@ -8,8 +8,8 @@ use ctx_history_core::{
 };
 use ctx_history_index::{CoreEventRecord, GenerationWriter, WriterOptions};
 use ctx_semantic_index::{
-    SemanticBatchEmbedder, SemanticChunkDocument, SemanticDocumentBuilder, SemanticEventDocument,
-    SemanticVectorStore,
+    semantic_model_contract, SemanticBatchEmbedder, SemanticChunkDocument, SemanticDocumentBuilder,
+    SemanticEventDocument, SemanticVectorStore,
 };
 use ctx_semantic_model::SEMANTIC_DIMENSIONS;
 
@@ -292,8 +292,11 @@ fn semantic_status_reports_ready_only_with_exact_projected_and_filtered_counts()
         .unwrap();
     writer.commit(|_| true).unwrap();
     let index = VerifiedIndex::open(data_root.join("search/lexical")).unwrap();
-    let mut store =
-        SemanticVectorStore::open(&source_backed_semantic_vector_path(&data_root)).unwrap();
+    let mut store = SemanticVectorStore::open(
+        &source_backed_semantic_vector_path(&data_root),
+        semantic_model_contract(),
+    )
+    .unwrap();
     for _ in 0..16 {
         let outcome = store
             .reconcile_source_backed_index(

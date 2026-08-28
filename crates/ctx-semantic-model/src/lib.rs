@@ -1,6 +1,7 @@
 mod artifact_fetch;
 mod cache_paths;
 mod configuration;
+mod embedding_executor;
 mod health_search;
 mod json;
 #[cfg(any(target_os = "macos", test, feature = "test-support"))]
@@ -25,19 +26,22 @@ pub use configuration::{
     SemanticBackendPreference, SemanticCoreMlComputeMode, SemanticModelConfig, SemanticModelPaths,
     SemanticOnnxRuntimePaths,
 };
+pub use embedding_executor::{BuiltinSemanticEmbeddingExecutor, SemanticEmbeddingExecutor};
 pub use health_search::{
     semantic_model_acquisition_integrity_error, semantic_model_cache_available,
 };
 pub use model_contract::{
     semantic_e5_passage_text, semantic_model_contract, semantic_model_contract_descriptor,
-    semantic_model_key, semantic_provisioning_coreml_asset_matches,
-    semantic_provisioning_model_contract_matches, semantic_provisioning_model_path_count,
-    semantic_provisioning_model_path_matches, semantic_required_model_file_count,
-    semantic_required_model_file_matches, semantic_tokenizer_fingerprint, SemanticModelContract,
+    semantic_model_contract_fingerprint, semantic_model_key,
+    semantic_provisioning_coreml_asset_matches, semantic_provisioning_model_contract_matches,
+    semantic_provisioning_model_path_count, semantic_provisioning_model_path_matches,
+    semantic_required_model_file_count, semantic_required_model_file_matches,
+    semantic_tokenizer_behavior_fingerprint, semantic_tokenizer_fingerprint,
+    PreparedSemanticDocuments, PreparedSemanticQuery, SemanticModelContract,
     SemanticModelLoadDeferred, SemanticOrtModelVariant, SEMANTIC_BACKEND, SEMANTIC_DIMENSIONS,
-    SEMANTIC_MODEL_CONTRACT_VERSION, SEMANTIC_MODEL_ID, SEMANTIC_MODEL_KEY,
-    SEMANTIC_MODEL_REVISION, SEMANTIC_NORMALIZATION, SEMANTIC_PASSAGE_PREFIX, SEMANTIC_POOLING,
-    SEMANTIC_QUERY_PREFIX,
+    SEMANTIC_LANGUAGE_SCOPE, SEMANTIC_MODEL_CONTRACT_VERSION, SEMANTIC_MODEL_ID,
+    SEMANTIC_MODEL_KEY, SEMANTIC_MODEL_REVISION, SEMANTIC_NORMALIZATION, SEMANTIC_PASSAGE_PREFIX,
+    SEMANTIC_POOLING, SEMANTIC_QUERY_PREFIX,
 };
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]

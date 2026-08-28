@@ -51,7 +51,15 @@ impl SemanticChunkDocument {
 pub struct SemanticVectorStore {
     pub(super) conn: Connection,
     pub(super) flat: flat_segments::FlatSegmentStore,
+    pub(super) contract: SemanticModelContract,
 }
+
+impl SemanticVectorStore {
+    pub fn contract(&self) -> &SemanticModelContract {
+        &self.contract
+    }
+}
+use ctx_semantic_model::SemanticModelContract;
 use rusqlite::Connection;
 use uuid::Uuid;
 
@@ -67,15 +75,16 @@ pub(super) mod flat_scan;
 pub(super) mod flat_segments;
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn seed_filter_unaware_derived_state(path: &std::path::Path) -> anyhow::Result<()> {
+pub(crate) fn seed_filter_unaware_derived_state(
+    path: &std::path::Path,
+    contract: &SemanticModelContract,
+) -> anyhow::Result<()> {
     const FILTER_UNAWARE_CONTROL_SCHEMA_VERSION: i64 = 5;
 
+    let flat_contract =
+        crate::vector_store_schema::flat_model_contract(contract).map_err(anyhow::Error::new)?;
     let connection = Connection::open(path.join(control::CONTROL_FILE))?;
     connection.pragma_update(None, "user_version", FILTER_UNAWARE_CONTROL_SCHEMA_VERSION)?;
     drop(connection);
-    flat_segments::seed_filter_unaware_manifest(
-        path,
-        crate::vector_store_schema::active_model_contract(),
-    )
-    .map_err(anyhow::Error::new)
+    flat_segments::seed_filter_unaware_manifest(path, flat_contract).map_err(anyhow::Error::new)
 }

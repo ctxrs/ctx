@@ -4,7 +4,7 @@ fn two_lost_candidate_publications_rebuild_from_flat_authority() -> Result<()> {
     let initial = fixture.publish("two-loss-a", &[(0, bodies("initial", 3))])?;
     let middle = fixture.publish("two-loss-b", &[(0, bodies("middle", 3))])?;
     let target = fixture.publish("two-loss-c", &[(0, bodies("target", 4))])?;
-    let mut store = SemanticVectorStore::open(&fixture.semantic_path)?;
+    let mut store = SemanticVectorStore::open(&fixture.semantic_path, semantic_model_contract())?;
     let mut builder = CoreBuilder::default();
     let mut embedder = MarkerEmbedder::default();
     reconcile_all(&mut store, &initial, &mut builder, &mut embedder)?;
@@ -17,7 +17,8 @@ fn two_lost_candidate_publications_rebuild_from_flat_authority() -> Result<()> {
     drop(store);
 
     builder.calls.clear();
-    let mut restarted = SemanticVectorStore::open(&fixture.semantic_path)?;
+    let mut restarted =
+        SemanticVectorStore::open(&fixture.semantic_path, semantic_model_contract())?;
     reconcile_all(&mut restarted, &target, &mut builder, &mut embedder)?;
     assert!(
         !builder.calls.is_empty(),
@@ -31,7 +32,7 @@ fn two_lost_candidate_publications_rebuild_from_flat_authority() -> Result<()> {
 fn same_generation_wrong_hash_fails_closed() -> Result<()> {
     let fixture = Fixture::new(1)?;
     let index = fixture.publish("wrong-hash", &[(0, bodies("hash", 2))])?;
-    let mut store = SemanticVectorStore::open(&fixture.semantic_path)?;
+    let mut store = SemanticVectorStore::open(&fixture.semantic_path, semantic_model_contract())?;
     store.flat.fail_after_source_frontier_commit_once();
     let error = store
         .reconcile_source_backed_index(
@@ -50,7 +51,8 @@ fn same_generation_wrong_hash_fails_closed() -> Result<()> {
     store.store_source_frontier(&frontier)?;
     drop(store);
 
-    let mut restarted = SemanticVectorStore::open(&fixture.semantic_path)?;
+    let mut restarted =
+        SemanticVectorStore::open(&fixture.semantic_path, semantic_model_contract())?;
     let error = restarted
         .reconcile_source_backed_index(
             &index,
@@ -66,7 +68,7 @@ fn same_generation_wrong_hash_fails_closed() -> Result<()> {
 fn disagreeing_retained_candidate_fails_closed() -> Result<()> {
     let fixture = Fixture::new(1)?;
     let index = fixture.publish("candidate-hash", &[(0, bodies("candidate", 2))])?;
-    let mut store = SemanticVectorStore::open(&fixture.semantic_path)?;
+    let mut store = SemanticVectorStore::open(&fixture.semantic_path, semantic_model_contract())?;
     store.flat.fail_after_source_finalization_once();
     let error = store
         .reconcile_source_backed_index(
@@ -84,7 +86,8 @@ fn disagreeing_retained_candidate_fails_closed() -> Result<()> {
         .map_err(anyhow::Error::new)?;
     drop(store);
 
-    let mut restarted = SemanticVectorStore::open(&fixture.semantic_path)?;
+    let mut restarted =
+        SemanticVectorStore::open(&fixture.semantic_path, semantic_model_contract())?;
     let error = restarted
         .reconcile_source_backed_index(
             &index,
@@ -121,7 +124,7 @@ fn full_compaction_preserves_receipts_and_readiness_exactly() -> Result<()> {
             ),
         ],
     )?;
-    let mut store = SemanticVectorStore::open(&fixture.semantic_path)?;
+    let mut store = SemanticVectorStore::open(&fixture.semantic_path, semantic_model_contract())?;
     reconcile_all(
         &mut store,
         &index,
@@ -169,7 +172,7 @@ fn core_advance_mid_catch_up_never_pins_mixed_generation() -> Result<()> {
             (1, vec!["version a".to_owned()]),
         ],
     )?;
-    let mut store = SemanticVectorStore::open(&fixture.semantic_path)?;
+    let mut store = SemanticVectorStore::open(&fixture.semantic_path, semantic_model_contract())?;
     let mut builder = CoreBuilder::default();
     let mut embedder = MarkerEmbedder::default();
     reconcile_all(&mut store, &initial, &mut builder, &mut embedder)?;

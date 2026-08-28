@@ -4,7 +4,6 @@ use std::{
 };
 
 use anyhow::Result;
-use ctx_semantic_model::SEMANTIC_DIMENSIONS;
 use uuid::Uuid;
 
 use super::{
@@ -36,10 +35,11 @@ pub(super) fn scan_exact_generation(
         )
         .into());
     }
+    let dimensions = usize::try_from(reader.model_contract().dimensions)?;
     for (query_ordinal, query_embedding) in query_embeddings.iter().enumerate() {
-        if query_embedding.len() != SEMANTIC_DIMENSIONS {
+        if query_embedding.len() != dimensions {
             return Err(SemanticVectorStoreError::unavailable(format!(
-                "semantic query alternative {query_ordinal} has {} dimensions, expected {SEMANTIC_DIMENSIONS}",
+                "semantic query alternative {query_ordinal} has {} dimensions, expected {dimensions}",
                 query_embedding.len()
             ))
             .into());
@@ -55,7 +55,6 @@ pub(super) fn scan_exact_generation(
         return Ok(SemanticVectorSearch::default());
     }
     let _permit = EXACT_QUERY_LIMITER.acquire();
-    let dimensions = usize::try_from(reader.model_contract().dimensions)?;
     let query_vectors = query_embeddings
         .iter()
         .map(Vec::as_slice)
@@ -183,16 +182,77 @@ impl Drop for ExactQueryPermit<'_> {
 mod tests {
     use std::{sync::mpsc, time::Duration};
 
+    use ctx_semantic_model::semantic_model_contract;
+
     use super::*;
-    use crate::vector_store::{SemanticChunkDocument, SemanticVectorStore};
+    use crate::vector_store::{
+        flat_segments::{
+            FlatChunk, FlatEventReplacement, FlatModelContract, FlatSegmentStore, FlatSourceHash,
+        },
+        SemanticChunkDocument, SemanticVectorStore,
+    };
+
+    #[test]
+    fn direct_exact_generation_scan_validates_pinned_contract_dimensions() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let store = FlatSegmentStore::open(
+            temp.path(),
+            FlatModelContract {
+                contract_version: 2,
+                model_id: "test/non-builtin-dimensions".to_owned(),
+                model_revision: "revision-1".to_owned(),
+                tokenizer: "tokenizer-sha256".to_owned(),
+                pooling: "attention-mask-mean".to_owned(),
+                dimensions: 4,
+                normalization: "l2".to_owned(),
+            },
+        )?;
+        let event_id = Uuid::new_v4();
+        let event_identity_digest = [7; 32];
+        store.publish_replacement_event_chunks(
+            &[FlatEventReplacement {
+                event_id,
+                seq: 1,
+                source_text_hash: FlatSourceHash::from_bytes([8; 32]),
+                chunks: vec![FlatChunk {
+                    chunk_index: 0,
+                    start_char: 0,
+                    end_char: 1,
+                    vector: vec![1.0, 0.0, 0.0, 0.0],
+                }],
+            }],
+            &[],
+        )?;
+        let pinned = store
+            .pin_generation()?
+            .expect("fixture must publish a flat generation");
+
+        let error = scan_exact_generation(
+            &pinned,
+            &[vec![1.0, 0.0, 0.0]],
+            1,
+            &|candidate| (candidate == event_id).then_some(event_identity_digest),
+            Instant::now(),
+        )
+        .err()
+        .expect("the query must match the pinned flat generation dimensions");
+
+        assert_eq!(
+            error.to_string(),
+            "semantic query alternative 0 has 3 dimensions, expected 4"
+        );
+        Ok(())
+    }
 
     #[test]
     fn direct_exact_generation_scan_waits_for_bounded_admission() -> Result<()> {
         let temp = tempfile::tempdir()?;
-        let mut store = SemanticVectorStore::open(&temp.path().join("search").join("semantic"))?;
+        let contract = semantic_model_contract();
+        let mut store =
+            SemanticVectorStore::open(&temp.path().join("search").join("semantic"), contract)?;
         let event_id = Uuid::new_v4();
         let event_identity_digest = [7; 32];
-        let mut embedding = vec![0.0; SEMANTIC_DIMENSIONS];
+        let mut embedding = vec![0.0; contract.dimensions()];
         embedding[0] = 1.0;
         store.publish_chunk_replacements(
             &[(

@@ -6,15 +6,16 @@ use super::{
     reacquire_semantic_embedder, throttle_semantic_batch, SemanticModelConfig, SemanticQuietPolicy,
     SharedSemanticRuntime,
 };
+use crate::PreparedSemanticDocuments;
 
 impl SharedSemanticRuntime {
-    pub fn embed_documents(
+    pub(crate) fn embed_documents(
         &self,
         config: &SemanticModelConfig,
-        texts: Vec<String>,
-        deadline: Option<Instant>,
+        texts: PreparedSemanticDocuments,
+        pacing_deadline: Option<Instant>,
     ) -> Result<(Vec<Vec<f32>>, SemanticQuietPolicy)> {
-        let mut pending = texts.into_iter();
+        let mut pending = texts.into_texts().into_iter();
         if pending.len() == 0 {
             let embedder = self.lock()?;
             let quiet_policy = embedder
@@ -38,7 +39,7 @@ impl SharedSemanticRuntime {
             let first = embedder
                 .as_mut()
                 .ok_or_else(|| anyhow!("semantic embedder was not initialized"))?
-                .embed_documents(batch.clone());
+                .embed_prepared_documents(batch.clone());
             let batch_embeddings = match first {
                 Ok(embeddings) => embeddings,
                 Err(first_error) => {
@@ -52,7 +53,9 @@ impl SharedSemanticRuntime {
                     let mut replacement = reacquire_semantic_embedder(config, &runtime).context(
                         "reinitialize semantic embedder after document inference failure",
                     )?;
-                    let retry = replacement.embed_documents(batch).with_context(|| {
+                    let retry = replacement
+                        .embed_prepared_documents(batch)
+                        .with_context(|| {
                         format!(
                             "semantic document inference failed twice; first failure: {first_error:#}"
                         )
@@ -70,8 +73,12 @@ impl SharedSemanticRuntime {
             embeddings.extend(batch_embeddings);
             final_quiet_policy = Some(quiet_policy);
             let active = started.elapsed();
+            // A source page is one atomic reconciliation unit, so this is not
+            // a cancellation deadline. It only caps cooperative quiet time
+            // after each inference batch; all vectors for the page still
+            // complete together before publication.
             let remaining =
-                deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
+                pacing_deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
             throttle_semantic_batch(active, quiet_policy, remaining);
         }
 

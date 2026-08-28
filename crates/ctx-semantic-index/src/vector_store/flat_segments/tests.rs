@@ -58,6 +58,60 @@ fn visible_chunks(pinned: &PinnedFlatGeneration) -> Vec<(Uuid, u64, u32, Vec<f32
 }
 
 #[test]
+fn explicit_non_default_dimensions_drive_flat_vector_validation() -> FlatResult<()> {
+    let temporary = tempfile::tempdir()
+        .map_err(|source| io_error("create test directory", Path::new("."), source))?;
+    let mut contract = contract();
+    contract.dimensions = 3;
+    let store = FlatSegmentStore::open(temporary.path(), contract.clone())?;
+    let event = Uuid::from_u128(1);
+
+    store.publish_replacement_event_chunks(
+        &[replacement(
+            event,
+            1,
+            1,
+            vec![FlatChunk {
+                chunk_index: 0,
+                start_char: 0,
+                end_char: 1,
+                vector: vec![1.0, 0.0, 0.0],
+            }],
+        )],
+        &[],
+    )?;
+    let wrong_dimensions = replacement(event, 2, 2, vec![chunk(0, [1.0, 0.0, 0.0, 0.0])]);
+    assert!(matches!(
+        store.publish_replacement_event_chunks(&[wrong_dimensions], &[]),
+        Err(FlatStoreError::InvalidInput(_))
+    ));
+    assert_eq!(
+        store
+            .pin_generation()?
+            .ok_or_else(|| FlatStoreError::Corrupt("expected generation".to_owned()))?
+            .model_contract(),
+        &contract
+    );
+    Ok(())
+}
+
+#[test]
+fn invalid_flat_contract_fails_before_creating_writable_state() -> FlatResult<()> {
+    let temporary = tempfile::tempdir()
+        .map_err(|source| io_error("create test directory", Path::new("."), source))?;
+    let root = temporary.path().join("invalid-contract");
+    let mut invalid = contract();
+    invalid.normalization = "L2".to_owned();
+
+    assert!(matches!(
+        FlatSegmentStore::open(&root, invalid),
+        Err(FlatStoreError::InvalidInput(_))
+    ));
+    assert!(!root.exists());
+    Ok(())
+}
+
+#[test]
 fn filter_unaware_manifest_schema_is_rebuilt_as_empty_derived_state() -> FlatResult<()> {
     let temporary = tempfile::tempdir()
         .map_err(|source| io_error("create test directory", Path::new("."), source))?;

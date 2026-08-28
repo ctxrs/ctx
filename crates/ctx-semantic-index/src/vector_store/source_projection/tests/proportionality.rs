@@ -47,7 +47,8 @@ fn changed_logical_source_replay_work_is_measured_for_jsonl_and_sqlite() -> Resu
             &[(0, replacement_bodies.clone())],
         )?;
         let removed = fixture.publish("proportional-removed", &[])?;
-        let mut store = SemanticVectorStore::open(&fixture.semantic_path)?;
+        let mut store =
+            SemanticVectorStore::open(&fixture.semantic_path, semantic_model_contract())?;
         let mut builder = CoreBuilder::default();
         let mut embedder = MarkerEmbedder::default();
         reconcile_all(&mut store, &initial, &mut builder, &mut embedder)?;
@@ -72,7 +73,8 @@ fn changed_logical_source_replay_work_is_measured_for_jsonl_and_sqlite() -> Resu
         );
 
         drop(store);
-        let mut store = SemanticVectorStore::open(&fixture.semantic_path)?;
+        let mut store =
+            SemanticVectorStore::open(&fixture.semantic_path, semantic_model_contract())?;
         let restarted = reconcile_all(&mut store, &appended, &mut builder, &mut embedder)?;
         assert_eq!(restarted.records_decoded, 0);
         assert_eq!(restarted.record_bytes_decoded, 0);
@@ -125,7 +127,8 @@ fn interrupted_restart_redecodes_the_uncommitted_page_for_jsonl_and_sqlite() -> 
         };
         let mut embedder = MarkerEmbedder::default();
         {
-            let mut store = SemanticVectorStore::open(&fixture.semantic_path)?;
+            let mut store =
+                SemanticVectorStore::open(&fixture.semantic_path, semantic_model_contract())?;
             let error = store
                 .reconcile_source_backed_index(&index, &mut builder, &mut embedder)
                 .unwrap_err();
@@ -136,7 +139,8 @@ fn interrupted_restart_redecodes_the_uncommitted_page_for_jsonl_and_sqlite() -> 
 
         builder.fail_after = None;
         builder.calls.clear();
-        let mut restarted = SemanticVectorStore::open(&fixture.semantic_path)?;
+        let mut restarted =
+            SemanticVectorStore::open(&fixture.semantic_path, semantic_model_contract())?;
         let resumed = reconcile_all(&mut restarted, &index, &mut builder, &mut embedder)?;
         let resumed_bytes = encoded_record_bytes(&fixture, 0, &bodies, 0)?;
         assert_eq!(resumed.records_decoded, LONG_SOURCE_RECORDS);
