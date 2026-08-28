@@ -29,6 +29,7 @@ pub(super) struct DownloadedArtifact {
 }
 
 impl DownloadedArtifact {
+    #[cfg(test)]
     pub(super) fn download_verified(
         transport: &dyn ReleaseTransport,
         managed_root: &Path,
@@ -90,6 +91,7 @@ impl DownloadedArtifact {
     /// Reuses an owner-private cached artifact only after rehashing it against
     /// current signed metadata. A cache miss downloads into a bounded
     /// temporary file and publishes a verified copy for later releases.
+    #[cfg(test)]
     pub(super) fn download_or_reuse_verified(
         transport: &dyn ReleaseTransport,
         managed_root: &Path,
