@@ -24,6 +24,7 @@ use crate::vector_store_search::scan_exact_generation;
 
 mod content;
 mod filter_accounting;
+mod generation_identity;
 mod policy_rebuild;
 mod proportionality;
 mod provider_native;
@@ -236,7 +237,7 @@ impl Fixture {
         name: &str,
         specs: &[(usize, Vec<String>)],
     ) -> Result<VerifiedIndex> {
-        let mut writer = GenerationWriter::open(&root, WriterOptions::default())?
+        let mut writer = GenerationWriter::open(root, WriterOptions::default())?
             .into_writer()
             .map_err(crate::committed_generation_recovery_error)?;
         for (source_index, records) in specs {
@@ -513,19 +514,6 @@ fn semantic_generation_uses_exact_per_source_core_aggregates_without_candidate_t
             .sum::<u64>(),
         5
     );
-    Ok(())
-}
-
-#[test]
-fn semantic_generation_uses_verified_delta_manifest_identity() -> Result<()> {
-    let fixture = Fixture::new(1)?;
-    let root = fixture.data_root.join("index-delta-manifest-identity");
-    drop(fixture.publish_to_root(&root, "delta-base", &[(0, bodies("base", 1))])?);
-    let index = fixture.publish_to_root(&root, "delta-next", &[(0, bodies("next", 2))])?;
-
-    assert_ne!(index.manifest().generation_id()?, index.generation_id());
-    let generation = SourceBackedSemanticGeneration::from_verified_index(&index)?;
-    assert_eq!(generation.core_generation_id, index.generation_id());
     Ok(())
 }
 

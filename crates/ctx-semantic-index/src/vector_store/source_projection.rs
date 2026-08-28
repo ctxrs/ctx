@@ -111,6 +111,9 @@ impl SourceBackedSemanticGeneration {
                 "source-backed semantic manifest has mismatched source aggregates"
             ));
         }
+        // `VerifiedIndex` owns the authenticated publication identity. A compact
+        // delta descriptor materializes into a full logical manifest whose
+        // reserialized digest intentionally differs from that identity.
         let core_generation_id = index.generation_id().to_owned();
         let sources = manifest
             .sources
