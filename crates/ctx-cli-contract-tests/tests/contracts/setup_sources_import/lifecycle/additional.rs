@@ -1,6 +1,53 @@
 use super::*;
 
 #[test]
+fn setup_wait_survives_more_than_five_seconds_of_authenticated_daemon_starting() {
+    let temp = daemon_test_root();
+    let root = data_root(&temp);
+    fs::create_dir_all(&root).unwrap();
+    let block = root.join(".block-daemon-main-before-ready-for-test");
+    let blocked = root.join(".daemon-main-blocked-before-ready-for-test");
+    fs::write(&block, b"block\n").unwrap();
+    let blocked_for_release = blocked.clone();
+    let release = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !blocked_for_release.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "daemon did not reach the pre-readiness fence"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        std::thread::sleep(Duration::from_millis(5_500));
+        fs::remove_file(block).unwrap();
+    });
+
+    let started = Instant::now();
+    let output = ctx(&temp)
+        .args(["setup", "--wait", "--format=json", "--progress", "none"])
+        .output()
+        .unwrap();
+    release.join().unwrap();
+    let elapsed = started.elapsed();
+    assert!(
+        output.status.success(),
+        "setup failed after {elapsed:?}: {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    assert!(elapsed > Duration::from_secs(5), "elapsed={elapsed:?}");
+    assert!(!blocked.exists(), "daemon did not clear its test fence");
+
+    let setup: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(setup["mode"], "ready", "{setup:#}");
+    assert_eq!(setup["refresh_request"]["mode"], "wait", "{setup:#}");
+    assert_eq!(
+        setup["refresh_request"]["published_generation"], setup["lexical"]["generation_id"],
+        "{setup:#}"
+    );
+    assert_eq!(setup["daemon"]["running"], true, "{setup:#}");
+}
+
+#[test]
 fn installer_style_setup_succeeds_with_a_genuinely_empty_source_catalog() {
     let temp = daemon_test_root();
 

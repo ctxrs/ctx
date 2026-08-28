@@ -461,6 +461,7 @@ where
             daemon_semantic_runtime_active(&runtime, query_service.as_ref()),
             &config_reload.to_json(),
         )?;
+        ctx_daemon_runtime::block_daemon_main_before_ready_for_test(data_root)?;
         let mut watch_runtime = (!finite_core_worker)
             .then(|| DaemonWatchRuntime::new(Arc::clone(&wakeup), ports.config));
         if let Some(watch_runtime) = watch_runtime.as_mut() {
@@ -485,8 +486,7 @@ where
                 )?;
             }
         }
-        // Linearize the final handoff check, Ready publication, and restart
-        // acknowledgement with every writer of durable handoff intent.
+        // Linearize final handoff, Ready publication, and restart acknowledgement with durable intent.
         let lifecycle_ready = !stop_disabled
             && publish_lifecycle_ready(
                 data_root,

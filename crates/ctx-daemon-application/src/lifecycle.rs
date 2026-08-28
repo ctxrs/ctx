@@ -1,4 +1,5 @@
 use std::{
+    cell::Cell,
     collections::BTreeMap,
     env,
     ffi::{OsStr, OsString},
@@ -35,8 +36,8 @@ pub use launch::{
 const DAEMON_AUTOSTART_OFF_ENV: &str = "CTX_DAEMON_AUTOSTART_OFF";
 const DAEMON_BACKGROUND_CHILD_ENV: &str = "CTX_DAEMON_BACKGROUND_CHILD";
 const DAEMON_UPGRADE_POLL_INTERVAL: Duration = Duration::from_millis(50);
-const DAEMON_SETUP_HANDOFF_POLL_ATTEMPTS: usize = 6_001;
-const DAEMON_SETUP_HANDOFF_TIMEOUT: Duration = Duration::from_secs(300);
+const DAEMON_SETUP_HANDOFF_STALL_POLL_ATTEMPTS: usize = 101;
+const DAEMON_SETUP_HANDOFF_STALL_TIMEOUT: Duration = Duration::from_secs(5);
 const DAEMON_SETUP_HANDOFF_MAX_HEARTBEAT_AGE_MS: i64 = 30_000;
 const DAEMON_SETUP_HANDOFF_MAX_FUTURE_HEARTBEAT_MS: i64 = 5_000;
 const DAEMON_HEALTH_TIMEOUT: Duration = Duration::from_millis(500);
@@ -63,8 +64,16 @@ pub enum DaemonStartError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum DaemonHandoffObservation {
     Pending,
+    Starting,
     Running(DaemonHandoff),
     Failed(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DaemonLifecycleEndpointObservation {
+    Unavailable,
+    Starting,
+    Ready,
 }
 
 #[derive(Debug)]
@@ -223,7 +232,7 @@ fn read_daemon_owner_identity(data_root: &Path) -> Result<Option<DaemonOwnerIden
 }
 
 fn wait_for_daemon_owner_identity(data_root: &Path) -> Result<Option<DaemonOwnerIdentity>> {
-    let deadline = Instant::now() + DAEMON_SETUP_HANDOFF_TIMEOUT;
+    let deadline = Instant::now() + DAEMON_SETUP_HANDOFF_STALL_TIMEOUT;
     loop {
         if let Some(owner) = read_daemon_owner_identity(data_root)? {
             return Ok(Some(owner));
@@ -244,12 +253,12 @@ fn recover_unusable_daemon_owner(
     let terminated = recover_unusable_daemon_owner_with(
         observed_owner,
         || {
-            Ok(daemon_lifecycle_endpoint_is_ready(
+            Ok(daemon_lifecycle_endpoint_observation(
                 host,
                 data_root,
                 observed_owner.pid,
                 DAEMON_HEALTH_TIMEOUT,
-            ))
+            ) != DaemonLifecycleEndpointObservation::Unavailable)
         },
         || read_daemon_owner_identity(data_root),
         |owner_id| {
@@ -480,9 +489,9 @@ fn start_daemon_profile_and_wait(
             }
         };
         let expected_failure_pid = child.as_ref().map(Child::id);
-        let deadline = Instant::now() + DAEMON_SETUP_HANDOFF_TIMEOUT;
+        let deadline = Cell::new(Instant::now() + DAEMON_SETUP_HANDOFF_STALL_TIMEOUT);
         let handoff = wait_for_daemon_handoff_with(
-            DAEMON_SETUP_HANDOFF_POLL_ATTEMPTS,
+            DAEMON_SETUP_HANDOFF_STALL_POLL_ATTEMPTS,
             || {
                 if pending_restart_request
                     .as_ref()
@@ -496,6 +505,7 @@ fn start_daemon_profile_and_wait(
                         expected_failure_pid,
                         config,
                         deadline
+                            .get()
                             .saturating_duration_since(Instant::now())
                             .min(DAEMON_HEALTH_TIMEOUT),
                     )
@@ -532,10 +542,11 @@ fn start_daemon_profile_and_wait(
                     .unwrap_or_else(|| format!("daemon process exited with {exit}"));
                 Ok(Some(detail))
             },
+            || deadline.set(Instant::now() + DAEMON_SETUP_HANDOFF_STALL_TIMEOUT),
             || {
                 std::thread::sleep(
                     DAEMON_UPGRADE_POLL_INTERVAL
-                        .min(deadline.saturating_duration_since(Instant::now())),
+                        .min(deadline.get().saturating_duration_since(Instant::now())),
                 )
             },
         );
@@ -569,9 +580,9 @@ pub fn observe_daemon_and_wait(
     data_root: &Path,
     config: &DaemonConfigSnapshot,
 ) -> Result<DaemonHandoff> {
-    let deadline = Instant::now() + DAEMON_SETUP_HANDOFF_TIMEOUT;
+    let deadline = Cell::new(Instant::now() + DAEMON_SETUP_HANDOFF_STALL_TIMEOUT);
     wait_for_observed_daemon_handoff_with(
-        DAEMON_SETUP_HANDOFF_POLL_ATTEMPTS,
+        DAEMON_SETUP_HANDOFF_STALL_POLL_ATTEMPTS,
         || {
             daemon_handoff_observation(
                 host,
@@ -579,14 +590,16 @@ pub fn observe_daemon_and_wait(
                 None,
                 config,
                 deadline
+                    .get()
                     .saturating_duration_since(Instant::now())
                     .min(DAEMON_HEALTH_TIMEOUT),
             )
         },
+        || deadline.set(Instant::now() + DAEMON_SETUP_HANDOFF_STALL_TIMEOUT),
         || {
             std::thread::sleep(
                 DAEMON_UPGRADE_POLL_INTERVAL
-                    .min(deadline.saturating_duration_since(Instant::now())),
+                    .min(deadline.get().saturating_duration_since(Instant::now())),
             )
         },
     )
@@ -713,22 +726,21 @@ fn daemon_handoff_observation(
     let Some(owner_before_probe) = owner_before_probe.as_ref() else {
         return DaemonHandoffObservation::Pending;
     };
-    if health_timeout.is_zero()
-        || !daemon_lifecycle_endpoint_is_ready(
-            host,
-            data_root,
-            owner_before_probe.pid,
-            health_timeout,
-        )
-    {
+    if health_timeout.is_zero() {
         return DaemonHandoffObservation::Pending;
     }
+    let endpoint = daemon_lifecycle_endpoint_observation(
+        host,
+        data_root,
+        owner_before_probe.pid,
+        health_timeout,
+    );
     let owner_after_probe = read_daemon_owner_identity(data_root).ok().flatten();
     complete_daemon_handoff_observation(
         observation,
         Some(owner_before_probe),
         owner_after_probe.as_ref(),
-        true,
+        endpoint,
     )
 }
 
@@ -736,17 +748,19 @@ fn complete_daemon_handoff_observation(
     observation: DaemonHandoffObservation,
     owner_before_probe: Option<&DaemonOwnerIdentity>,
     owner_after_probe: Option<&DaemonOwnerIdentity>,
-    endpoint_ready: bool,
+    endpoint: DaemonLifecycleEndpointObservation,
 ) -> DaemonHandoffObservation {
     match observation {
-        DaemonHandoffObservation::Running(handoff)
-            if endpoint_ready
-                && owner_before_probe.is_some()
-                && owner_before_probe == owner_after_probe =>
+        DaemonHandoffObservation::Running(_)
+            if owner_before_probe.is_none() || owner_before_probe != owner_after_probe =>
         {
-            DaemonHandoffObservation::Running(handoff)
+            DaemonHandoffObservation::Pending
         }
-        DaemonHandoffObservation::Running(_) => DaemonHandoffObservation::Pending,
+        DaemonHandoffObservation::Running(handoff) => match endpoint {
+            DaemonLifecycleEndpointObservation::Unavailable => DaemonHandoffObservation::Pending,
+            DaemonLifecycleEndpointObservation::Starting => DaemonHandoffObservation::Starting,
+            DaemonLifecycleEndpointObservation::Ready => DaemonHandoffObservation::Running(handoff),
+        },
         observation => observation,
     }
 }
@@ -839,12 +853,12 @@ fn daemon_handoff_status_observation_from(
     })
 }
 
-fn daemon_lifecycle_endpoint_is_ready(
+fn daemon_lifecycle_endpoint_observation(
     host: &dyn DaemonApplicationHost,
     data_root: &Path,
     expected_pid: u32,
     timeout: Duration,
-) -> bool {
+) -> DaemonLifecycleEndpointObservation {
     host.request_lifecycle_wakeup(
         data_root,
         compact_json(json!({
@@ -856,11 +870,17 @@ fn daemon_lifecycle_endpoint_is_ready(
     )
     .ok()
     .flatten()
-    .is_some_and(|response| daemon_lifecycle_ready_response_matches(&response, expected_pid))
+    .map_or(
+        DaemonLifecycleEndpointObservation::Unavailable,
+        |response| daemon_lifecycle_response_observation(&response, expected_pid),
+    )
 }
 
-fn daemon_lifecycle_ready_response_matches(response: &Value, expected_pid: u32) -> bool {
-    response.get("schema_version").and_then(Value::as_u64) == Some(1)
+fn daemon_lifecycle_response_observation(
+    response: &Value,
+    expected_pid: u32,
+) -> DaemonLifecycleEndpointObservation {
+    let identity_matches = response.get("schema_version").and_then(Value::as_u64) == Some(1)
         && response.get("ok").and_then(Value::as_bool) == Some(true)
         && response.get("owner").and_then(Value::as_str) == Some("daemon")
         && response.get("service").and_then(Value::as_str) == Some("lifecycle")
@@ -868,8 +888,15 @@ fn daemon_lifecycle_ready_response_matches(response: &Value, expected_pid: u32) 
             .get("pid")
             .and_then(Value::as_u64)
             .and_then(|pid| u32::try_from(pid).ok())
-            == Some(expected_pid)
-        && response.get("readiness").and_then(Value::as_str) == Some("ready")
+            == Some(expected_pid);
+    if !identity_matches {
+        return DaemonLifecycleEndpointObservation::Unavailable;
+    }
+    match response.get("readiness").and_then(Value::as_str) {
+        Some("starting") => DaemonLifecycleEndpointObservation::Starting,
+        Some("ready") => DaemonLifecycleEndpointObservation::Ready,
+        _ => DaemonLifecycleEndpointObservation::Unavailable,
+    }
 }
 
 fn daemon_applied_config_matches(status: &Value, expected: &DaemonConfigSnapshot) -> bool {
@@ -889,30 +916,46 @@ fn wait_for_daemon_handoff_with(
     attempts: usize,
     mut observe: impl FnMut() -> DaemonHandoffObservation,
     mut child_failure: impl FnMut() -> Result<Option<String>>,
+    mut renew_starting_progress: impl FnMut(),
     mut pause: impl FnMut(),
 ) -> Result<DaemonHandoff> {
-    for attempt in 0..attempts {
+    if attempts == 0 {
+        return Err(DaemonHandoffTimeout.into());
+    }
+    let mut stalled_attempts = 0;
+    loop {
         match observe() {
             DaemonHandoffObservation::Running(handoff) => return Ok(handoff),
             DaemonHandoffObservation::Failed(error) => return Err(anyhow!(error)),
-            DaemonHandoffObservation::Pending => {}
+            DaemonHandoffObservation::Starting => {
+                stalled_attempts = 0;
+                renew_starting_progress();
+            }
+            DaemonHandoffObservation::Pending => stalled_attempts += 1,
         }
         if let Some(error) = child_failure()? {
             return Err(anyhow!(error));
         }
-        if attempt + 1 < attempts {
-            pause();
+        if stalled_attempts >= attempts {
+            return Err(DaemonHandoffTimeout.into());
         }
+        pause();
     }
-    Err(DaemonHandoffTimeout.into())
 }
 
 fn wait_for_observed_daemon_handoff_with(
     attempts: usize,
     observe: impl FnMut() -> DaemonHandoffObservation,
+    renew_starting_progress: impl FnMut(),
     pause: impl FnMut(),
 ) -> Result<DaemonHandoff> {
-    wait_for_daemon_handoff_with(attempts, observe, || Ok(None), pause)
+    wait_for_daemon_handoff_with(
+        attempts,
+        observe,
+        || Ok(None),
+        renew_starting_progress,
+        pause,
+    )
 }
 
 pub fn daemon_restart_allowed(host: &dyn DaemonApplicationHost, data_root: &Path) -> Result<bool> {

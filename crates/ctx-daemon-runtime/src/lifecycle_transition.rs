@@ -196,14 +196,24 @@ impl DaemonLifecycleState {
 }
 
 pub fn block_daemon_main_after_ready_for_test(data_root: &Path) -> Result<()> {
+    block_daemon_main_for_test(data_root, "after-ready")
+}
+
+/// Deterministically pauses an identity-owned daemon after its lifecycle IPC
+/// endpoint is responsive but before it publishes Ready. Debug builds only.
+pub fn block_daemon_main_before_ready_for_test(data_root: &Path) -> Result<()> {
+    block_daemon_main_for_test(data_root, "before-ready")
+}
+
+fn block_daemon_main_for_test(data_root: &Path, phase: &str) -> Result<()> {
     if !cfg!(debug_assertions) {
         return Ok(());
     }
-    let block = data_root.join(".block-daemon-main-after-ready-for-test");
+    let block = data_root.join(format!(".block-daemon-main-{phase}-for-test"));
     if !block.exists() {
         return Ok(());
     }
-    let blocked = data_root.join(".daemon-main-blocked-after-ready-for-test");
+    let blocked = data_root.join(format!(".daemon-main-blocked-{phase}-for-test"));
     fs::write(&blocked, b"blocked\n")
         .with_context(|| format!("publish daemon test block marker {}", blocked.display()))?;
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -211,7 +221,7 @@ pub fn block_daemon_main_after_ready_for_test(data_root: &Path) -> Result<()> {
         std::thread::sleep(Duration::from_millis(10));
     }
     if block.exists() {
-        anyhow::bail!("timed out in daemon post-readiness test block");
+        anyhow::bail!("timed out in daemon {phase} test block");
     }
     match fs::remove_file(&blocked) {
         Ok(()) => Ok(()),
