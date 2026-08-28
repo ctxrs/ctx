@@ -284,7 +284,7 @@ fn unsupported_detected_format_stays_typed_and_never_executes() {
     assert_eq!(receipt.unsupported_routes.len(), 1);
     assert!(receipt.sources.is_empty());
     assert!(receipt.removals.is_empty());
-    assert!(VerifiedIndex::open(temp.path())
+    assert!(VerifiedIndex::open_pinned(temp.path())
         .unwrap()
         .manifest()
         .sources

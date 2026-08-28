@@ -109,7 +109,7 @@ fn assert_partial_receipt(receipt: &SourceBackedRefreshReceipt, expected_sources
 }
 
 fn records(index: &Path) -> Vec<CoreRecord> {
-    let verified = VerifiedIndex::open(index).unwrap();
+    let verified = VerifiedIndex::open_pinned(index).unwrap();
     let mut records = verified
         .manifest()
         .sources
@@ -140,7 +140,7 @@ fn records_for(index: &Path, native_session_id: &str) -> Vec<CoreRecord> {
 }
 
 fn source_for(index: &Path, native_session_id: &str) -> SourceKey {
-    VerifiedIndex::open(index)
+    VerifiedIndex::open_pinned(index)
         .unwrap()
         .manifest()
         .sources
@@ -169,7 +169,7 @@ fn source_native_session_id(source: &SourceKey) -> Option<&str> {
 }
 
 fn assert_search_hit(index: &Path, query: &str, native_session_id: &str) {
-    let verified = VerifiedIndex::open(index).unwrap();
+    let verified = VerifiedIndex::open_pinned(index).unwrap();
     assert!(
         search_event_candidates(&verified, query, 16)
             .iter()
@@ -361,7 +361,10 @@ fn authentic_v006_sessions_publish_searchable_content_and_noop_with_stable_ident
 
     let cold = refresh(&index, &registry);
     assert_clean_receipt(&cold, 2);
-    assert_eq!(VerifiedIndex::open(&index).unwrap().document_count(), 4);
+    assert_eq!(
+        VerifiedIndex::open_pinned(&index).unwrap().document_count(),
+        4
+    );
     let cold_records = records(&index);
     assert_eq!(cold_records.len(), 4);
     let tool_free = records_for(&index, TOOL_FREE_ID);
@@ -593,7 +596,7 @@ fn uncommitted_tail_is_excluded_then_committed_append_preserves_old_ids() {
     assert_clean_receipt(&dirty, 1);
     assert_eq!(records_for(&index, TOOL_FREE_ID), cold_records);
     assert!(search_event_candidates(
-        &VerifiedIndex::open(&index).unwrap(),
+        &VerifiedIndex::open_pinned(&index).unwrap(),
         "zzfxuncommittedassistanttoken7q9",
         16
     )

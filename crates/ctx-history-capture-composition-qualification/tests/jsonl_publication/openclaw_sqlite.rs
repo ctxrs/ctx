@@ -160,7 +160,7 @@ fn registered_registry(data_root: &Path, database: &Path) -> SourceBackedProvide
 }
 
 fn records(index_root: &Path) -> Vec<CoreRecord> {
-    let index = VerifiedIndex::open(index_root).unwrap();
+    let index = VerifiedIndex::open_pinned(index_root).unwrap();
     let mut records = index
         .manifest()
         .sources
@@ -286,7 +286,9 @@ fn registered_adapter_terminal_revalidation_rejects_concurrent_change_and_retry_
         SourceBackedSourceFailureClass::SourceChanged
     );
     assert_eq!(
-        VerifiedIndex::open(&index_root).unwrap().generation_id(),
+        VerifiedIndex::open_pinned(&index_root)
+            .unwrap()
+            .generation_id(),
         cold.commit.generation_id
     );
     assert_eq!(

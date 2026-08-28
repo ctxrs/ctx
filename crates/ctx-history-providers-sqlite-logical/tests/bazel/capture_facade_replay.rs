@@ -496,7 +496,9 @@ fn assert_opencode_family_changed_wal_capture_then_exact_replay(provider: Captur
         }) if detail == "injected logical SQLite replay progress failure"
     ));
     assert_eq!(
-        VerifiedIndex::open(&index_root).unwrap().generation_id(),
+        VerifiedIndex::open_pinned(&index_root)
+            .unwrap()
+            .generation_id(),
         changed_generation
     );
 }

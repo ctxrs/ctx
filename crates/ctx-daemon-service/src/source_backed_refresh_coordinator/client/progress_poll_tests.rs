@@ -46,7 +46,7 @@ fn verified_source_count_routes(route_bytes: &[u8]) -> (tempfile::TempDir, Verif
     }
     writer.set_present_source_routes(routes).unwrap();
     writer.commit(|_| true).unwrap();
-    let verified = VerifiedIndex::open(temp.path()).unwrap();
+    let verified = VerifiedIndex::open_pinned(temp.path()).unwrap();
     (temp, verified)
 }
 

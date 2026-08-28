@@ -152,7 +152,7 @@ fn seed_attributed_core(data_root: &Path) -> uuid::Uuid {
         .unwrap();
     writer.commit(|_| true).unwrap();
 
-    let stored = VerifiedIndex::open(&index_root)
+    let stored = VerifiedIndex::open_pinned(&index_root)
         .unwrap()
         .core_record_by_id(event_id.as_uuid())
         .unwrap()
@@ -198,7 +198,7 @@ fn mcp_activity_is_searchable_but_stays_out_of_analytics_usage_and_diagnostics()
     let state = temp.path().join("state");
     let analytics_path = temp.path().join("analytics.jsonl");
     let attributed_event_id = seed_attributed_core(&data_root);
-    let verified = VerifiedIndex::open(data_root.join("search/lexical")).unwrap();
+    let verified = VerifiedIndex::open_pinned(data_root.join("search/lexical")).unwrap();
     let filter = CompiledSearchFilter::compile(Default::default()).unwrap();
     for term in [BODY_ORACLE, SERVER_CANARY, TOOL_CANARY] {
         let queries = [term];
@@ -364,7 +364,7 @@ fn mcp_activity_is_searchable_but_stays_out_of_analytics_usage_and_diagnostics()
         }
     }
 
-    let stored = VerifiedIndex::open(data_root.join("search/lexical"))
+    let stored = VerifiedIndex::open_pinned(data_root.join("search/lexical"))
         .unwrap()
         .core_record_by_id(attributed_event_id)
         .unwrap()

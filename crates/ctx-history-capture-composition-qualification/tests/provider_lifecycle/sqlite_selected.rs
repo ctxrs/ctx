@@ -67,7 +67,7 @@ fn goose_v15_active_wal_append_preserves_identities_and_replays_exactly() {
     let cold = refresh_source_backed_generation(&index, &registry, writer_options()).unwrap();
     assert_clean_refresh(&cold);
 
-    let verified = VerifiedIndex::open(&index).unwrap();
+    let verified = VerifiedIndex::open_pinned(&index).unwrap();
     let source = verified
         .manifest()
         .sources
@@ -328,7 +328,7 @@ fn replace_once(bytes: &mut [u8], original: &[u8], replacement: &[u8]) {
 }
 
 fn only_indexed_record(index_root: &Path, provider: CaptureProvider, marker: &str) -> CoreRecord {
-    let index = VerifiedIndex::open(index_root).unwrap();
+    let index = VerifiedIndex::open_pinned(index_root).unwrap();
     let records = super::lexical_test_support::search_event_candidates(&index, marker, 16)
         .into_iter()
         .filter_map(|candidate| {

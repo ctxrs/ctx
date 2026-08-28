@@ -69,7 +69,10 @@ fn equal_automatic_legacy_and_configured_current_roots_publish_each_event_once()
         bodies.iter().filter(|body| *body == "current body").count(),
         1
     );
-    assert_eq!(VerifiedIndex::open(&index).unwrap().document_count(), 2);
+    assert_eq!(
+        VerifiedIndex::open_pinned(&index).unwrap().document_count(),
+        2
+    );
 }
 
 #[test]
@@ -145,7 +148,10 @@ fn current_cli_automatic_discovery_covers_append_rewrite_and_conversation_deleti
     assert_eq!(current_route.source.path, conversations);
     assert_eq!(current_route.source.status, ProviderSourceStatus::Empty);
     refresh_source_backed_generation(&index, &deleted_registry, WriterOptions::default()).unwrap();
-    assert_eq!(VerifiedIndex::open(&index).unwrap().document_count(), 0);
+    assert_eq!(
+        VerifiedIndex::open_pinned(&index).unwrap().document_count(),
+        0
+    );
 }
 
 #[test]

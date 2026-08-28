@@ -94,7 +94,7 @@ fn revert_rollouts_use_embedded_owner_for_raw_and_compressed_tree_and_explicit_r
     assert!(receipt.failed_routes.is_empty());
     assert!(receipt.logical_source_failures.is_empty());
     assert_eq!(receipt.sources.len(), 2);
-    let index = VerifiedIndex::open(&tree_index).unwrap();
+    let index = VerifiedIndex::open_pinned(&tree_index).unwrap();
     for (native_session_id, _, _, marker) in cases {
         assert_eq!(records_for(&index, native_session_id).len(), 1);
         assert_eq!(search_event_candidates(&index, marker, 8).len(), 1);
@@ -130,7 +130,7 @@ fn revert_rollouts_use_embedded_owner_for_raw_and_compressed_tree_and_explicit_r
     assert!(receipt.failed_routes.is_empty());
     assert!(receipt.logical_source_failures.is_empty());
     assert_eq!(receipt.sources.len(), 2);
-    let index = VerifiedIndex::open(&explicit_index).unwrap();
+    let index = VerifiedIndex::open_pinned(&explicit_index).unwrap();
     for (native_session_id, _, _, marker) in explicit_cases {
         assert_eq!(records_for(&index, native_session_id).len(), 1);
         assert_eq!(search_event_candidates(&index, marker, 8).len(), 1);
@@ -167,8 +167,8 @@ fn exact_compressed_and_raw_rollouts_have_identical_logical_identity() {
             .unwrap();
     assert!(compressed_receipt.failed_routes.is_empty());
 
-    let raw = VerifiedIndex::open(&raw_index).unwrap();
-    let compressed = VerifiedIndex::open(&compressed_index).unwrap();
+    let raw = VerifiedIndex::open_pinned(&raw_index).unwrap();
+    let compressed = VerifiedIndex::open_pinned(&compressed_index).unwrap();
     let raw_records = records_for(&raw, native_session_id);
     let compressed_records = records_for(&compressed, native_session_id);
     assert_eq!(raw_records.len(), 1);
@@ -206,7 +206,7 @@ fn exact_noncanonical_compressed_rollout_uses_embedded_session_identity() {
     assert!(receipt.failed_routes.is_empty());
     assert!(receipt.logical_source_failures.is_empty());
     assert_eq!(receipt.sources.len(), 1);
-    let index = VerifiedIndex::open(&index_root).unwrap();
+    let index = VerifiedIndex::open_pinned(&index_root).unwrap();
     let records = records_for(&index, native_session_id);
     assert_eq!(records.len(), 1);
     assert_eq!(search_event_candidates(&index, marker, 8).len(), 1);
@@ -240,7 +240,7 @@ fn mixed_raw_and_compressed_tree_imports_each_native_session() {
     assert!(receipt.failed_routes.is_empty());
     assert!(receipt.logical_source_failures.is_empty());
     assert_eq!(receipt.sources.len(), 2);
-    let index = VerifiedIndex::open(&index_root).unwrap();
+    let index = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert_eq!(records_for(&index, raw_id).len(), 1);
     assert_eq!(records_for(&index, compressed_id).len(), 1);
     assert_eq!(
@@ -264,7 +264,7 @@ fn raw_to_compressed_representation_transition_replaces_physical_state_only() {
     let registry = register_tree(&[&sessions]);
 
     refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
-    let before = VerifiedIndex::open(&index_root).unwrap();
+    let before = VerifiedIndex::open_pinned(&index_root).unwrap();
     let before_records = records_for(&before, native_session_id);
     let before_identity = logical_identity(&before_records);
     drop(before);
@@ -277,7 +277,7 @@ fn raw_to_compressed_representation_transition_replaces_physical_state_only() {
     assert!(transitioned.logical_source_failures.is_empty());
     assert_eq!(transitioned.sources.len(), 1);
 
-    let after = VerifiedIndex::open(&index_root).unwrap();
+    let after = VerifiedIndex::open_pinned(&index_root).unwrap();
     let after_records = records_for(&after, native_session_id);
     assert_eq!(logical_identity(&after_records), before_identity);
     assert_eq!(after_records.len(), 1);
@@ -310,7 +310,7 @@ fn overlapping_raw_and_compressed_representations_coalesce_raw_first_and_keep_id
     assert!(cold.failed_routes.is_empty());
     assert!(cold.logical_source_failures.is_empty());
     assert_eq!(cold.sources.len(), 1);
-    let cold_index = VerifiedIndex::open(&index_root).unwrap();
+    let cold_index = VerifiedIndex::open_pinned(&index_root).unwrap();
     let identity = logical_identity(&records_for(&cold_index, native_session_id));
     assert_eq!(
         certificate_for(&cold_index, native_session_id)
@@ -327,7 +327,7 @@ fn overlapping_raw_and_compressed_representations_coalesce_raw_first_and_keep_id
         refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
     assert!(compressed_only.failed_routes.is_empty());
     assert_eq!(compressed_only.sources.len(), 1);
-    let compressed_index = VerifiedIndex::open(&index_root).unwrap();
+    let compressed_index = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert_eq!(
         logical_identity(&records_for(&compressed_index, native_session_id)),
         identity
@@ -346,7 +346,7 @@ fn overlapping_raw_and_compressed_representations_coalesce_raw_first_and_keep_id
         refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
     assert!(overlapping_again.failed_routes.is_empty());
     assert_eq!(overlapping_again.sources.len(), 1);
-    let overlapping_index = VerifiedIndex::open(&index_root).unwrap();
+    let overlapping_index = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert_eq!(
         logical_identity(&records_for(&overlapping_index, native_session_id)),
         identity
@@ -364,7 +364,7 @@ fn overlapping_raw_and_compressed_representations_coalesce_raw_first_and_keep_id
     let raw_only =
         refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
     assert!(raw_only.failed_routes.is_empty());
-    let raw_index = VerifiedIndex::open(&index_root).unwrap();
+    let raw_index = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert_eq!(
         logical_identity(&records_for(&raw_index, native_session_id)),
         identity
@@ -456,7 +456,7 @@ fn automatic_compressed_route_fails_without_a_usable_frame_owner() {
         panic!("unexpected compressed ownership error: {error:?}");
     };
     assert_eq!(failed_sources.total(), 1);
-    assert!(VerifiedIndex::open(&index_root).is_err());
+    assert!(VerifiedIndex::open_pinned(&index_root).is_err());
 }
 
 #[test]
@@ -487,7 +487,7 @@ fn repeated_consistent_compressed_metadata_across_frames_remains_admissible() {
         refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
     assert!(receipt.failed_routes.is_empty());
     assert!(receipt.logical_source_failures.is_empty());
-    let index = VerifiedIndex::open(&index_root).unwrap();
+    let index = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert_eq!(records_for(&index, native_session_id).len(), 1);
     assert_eq!(search_event_candidates(&index, marker, 8).len(), 1);
 }

@@ -114,7 +114,7 @@ fn active_source_family_contract_prompt_history_rejects_same_content_pathname_re
         SourceBackedSourceFailureClass::SourceChanged
     );
     assert!(refreshed.failed_routes[0].carried_forward);
-    let retained = VerifiedIndex::open(&index_root).unwrap();
+    let retained = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert_eq!(retained.generation_id(), initial.commit.generation_id);
     assert_eq!(retained.document_count(), 1);
 }
@@ -186,7 +186,7 @@ fn active_source_family_contract_prompt_history_rejects_scanner_leaf_open_same_l
         SourceBackedSourceFailureClass::SourceChanged
     );
     assert!(failed.failed_routes[0].carried_forward);
-    let retained = VerifiedIndex::open(&index_root).unwrap();
+    let retained = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert_eq!(retained.document_count(), 1);
     assert_eq!(
         complete_lexical_events(&retained, "retained seed", Default::default(), 8).len(),
@@ -249,7 +249,9 @@ fn active_source_family_contract_prompt_history_rejects_inflight_disappearance_t
     );
     assert!(failed.failed_routes[0].carried_forward);
     assert_eq!(
-        VerifiedIndex::open(&index_root).unwrap().document_count(),
+        VerifiedIndex::open_pinned(&index_root)
+            .unwrap()
+            .document_count(),
         1
     );
 
@@ -262,7 +264,9 @@ fn active_source_family_contract_prompt_history_rejects_inflight_disappearance_t
     );
     assert_ne!(deleted.commit.generation_id, initial.commit.generation_id);
     assert_eq!(
-        VerifiedIndex::open(&index_root).unwrap().document_count(),
+        VerifiedIndex::open_pinned(&index_root)
+            .unwrap()
+            .document_count(),
         0
     );
 }
@@ -329,7 +333,9 @@ fn active_source_family_contract_prompt_history_defers_live_suffix_exactly_once(
     );
     assert_eq!(deferred.commit.generation_id, cold.commit.generation_id);
     assert_eq!(
-        VerifiedIndex::open(&index_root).unwrap().document_count(),
+        VerifiedIndex::open_pinned(&index_root)
+            .unwrap()
+            .document_count(),
         1
     );
 
@@ -337,7 +343,9 @@ fn active_source_family_contract_prompt_history_defers_live_suffix_exactly_once(
         refresh_source_backed_generation(&index_root, &registry, WriterOptions::default()).unwrap();
     assert!(caught_up.failed_routes.is_empty());
     assert_eq!(
-        VerifiedIndex::open(&index_root).unwrap().document_count(),
+        VerifiedIndex::open_pinned(&index_root)
+            .unwrap()
+            .document_count(),
         2
     );
 
@@ -345,7 +353,9 @@ fn active_source_family_contract_prompt_history_defers_live_suffix_exactly_once(
         refresh_source_backed_generation(&index_root, &registry, WriterOptions::default()).unwrap();
     assert_eq!(no_op.commit.generation_id, caught_up.commit.generation_id);
     assert_eq!(
-        VerifiedIndex::open(&index_root).unwrap().document_count(),
+        VerifiedIndex::open_pinned(&index_root)
+            .unwrap()
+            .document_count(),
         2
     );
 }
@@ -437,7 +447,7 @@ fn active_source_family_contract_prompt_history_preserves_append_noop_rewrite_an
     let cold =
         refresh_source_backed_generation(&index_root, &registry, WriterOptions::default()).unwrap();
     let cold_id = cold.commit.generation_id;
-    let index = VerifiedIndex::open(&index_root).unwrap();
+    let index = VerifiedIndex::open_pinned(&index_root).unwrap();
     let one = complete_lexical_events(&index, "one", Default::default(), 8);
     assert_eq!(one.len(), 1);
     let first_event_id = one[0].event.event_id;
@@ -447,7 +457,7 @@ fn active_source_family_contract_prompt_history_preserves_append_noop_rewrite_an
         refresh_source_backed_generation(&index_root, &registry, WriterOptions::default()).unwrap();
     assert_ne!(appended.commit.generation_id, cold_id);
     let appended_id = appended.commit.generation_id;
-    let index = VerifiedIndex::open(&index_root).unwrap();
+    let index = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert_eq!(index.document_count(), 2);
     assert_eq!(
         complete_lexical_events(&index, "two", Default::default(), 8).len(),
@@ -466,7 +476,7 @@ fn active_source_family_contract_prompt_history_preserves_append_noop_rewrite_an
         ],
     );
     refresh_source_backed_generation(&index_root, &registry, WriterOptions::default()).unwrap();
-    let index = VerifiedIndex::open(&index_root).unwrap();
+    let index = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert_eq!(index.document_count(), 2);
     let rewritten = complete_lexical_events(&index, "rewritten", Default::default(), 8);
     assert_eq!(rewritten.len(), 1);
@@ -477,7 +487,7 @@ fn active_source_family_contract_prompt_history_preserves_append_noop_rewrite_an
     append(&history, &tail);
     refresh_source_backed_generation(&index_root, &registry, WriterOptions::default()).unwrap();
     assert!(complete_lexical_events(
-        &VerifiedIndex::open(&index_root).unwrap(),
+        &VerifiedIndex::open_pinned(&index_root).unwrap(),
         "deferred",
         Default::default(),
         8,
@@ -485,7 +495,7 @@ fn active_source_family_contract_prompt_history_preserves_append_noop_rewrite_an
     .is_empty());
     append(&history, b"\n");
     refresh_source_backed_generation(&index_root, &registry, WriterOptions::default()).unwrap();
-    let index = VerifiedIndex::open(&index_root).unwrap();
+    let index = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert_eq!(index.document_count(), 3);
     assert_eq!(
         complete_lexical_events(&index, "deferred", Default::default(), 8).len(),

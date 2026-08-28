@@ -122,7 +122,7 @@ fn automatic_codex_root_replacement_retires_archived_only_sources() {
         .contains(&replacement_tree_route));
     assert_eq!(replacement_receipt.removals.len(), 1);
 
-    let index = VerifiedIndex::open(&index_root).unwrap();
+    let index = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert_eq!(
         index
             .manifest()
@@ -236,7 +236,7 @@ fn automatic_codex_root_replacement_partial_inventory_carries_archived_members()
             "{disposition} replacement route was incorrectly complete"
         );
         assert!(receipt.removals.is_empty(), "{disposition}");
-        let index = VerifiedIndex::open(&index_root).unwrap();
+        let index = VerifiedIndex::open_pinned(&index_root).unwrap();
         assert_eq!(
             index
                 .manifest()
@@ -279,7 +279,7 @@ fn overlapping_automatic_and_explicit_routes_keep_selected_generation_ownership(
     assert_eq!(cold.sources.len(), 1);
     assert_eq!(
         search_event_candidates(
-            &VerifiedIndex::open(&index_root).unwrap(),
+            &VerifiedIndex::open_pinned(&index_root).unwrap(),
             "automatic-explicit-cold-marker",
             8,
         )
@@ -307,7 +307,7 @@ fn overlapping_automatic_and_explicit_routes_keep_selected_generation_ownership(
     )
     .unwrap();
     assert!(automatic.failed_routes.is_empty());
-    let index = VerifiedIndex::open(&index_root).unwrap();
+    let index = VerifiedIndex::open_pinned(&index_root).unwrap();
     let records = records_for(&index, native_session_id);
     for marker in [
         "automatic-explicit-cold-marker",
@@ -350,7 +350,7 @@ fn codex_mcp_activity_append_replay_preserves_stable_ids_and_exact_content() {
     let registry = register_tree(&[&sessions]);
 
     refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
-    let initial = VerifiedIndex::open(&index_root).unwrap();
+    let initial = VerifiedIndex::open_pinned(&index_root).unwrap();
     let initial_record = records_for(&initial, native_session_id)
         .into_iter()
         .find(|record| {
@@ -383,7 +383,7 @@ fn codex_mcp_activity_append_replay_preserves_stable_ids_and_exact_content() {
     assert!(appended.logical_source_failures.is_empty());
     let appended_generation = appended.commit.generation_id.clone();
 
-    let appended_index = VerifiedIndex::open(&index_root).unwrap();
+    let appended_index = VerifiedIndex::open_pinned(&index_root).unwrap();
     let records = records_for(&appended_index, native_session_id);
     let first = records
         .iter()
@@ -431,7 +431,7 @@ fn codex_mcp_activity_append_replay_preserves_stable_ids_and_exact_content() {
     assert_eq!(replay.commit.generation_id, appended_generation);
 
     refresh_source_backed_generation(&cold_root, &registry, writer_options()).unwrap();
-    let cold = VerifiedIndex::open(&cold_root).unwrap();
+    let cold = VerifiedIndex::open_pinned(&cold_root).unwrap();
     assert_eq!(
         source_snapshot(&cold, native_session_id, "second activity result"),
         appended_snapshot

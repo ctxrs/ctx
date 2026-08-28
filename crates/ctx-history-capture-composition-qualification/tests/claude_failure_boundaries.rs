@@ -91,8 +91,12 @@ fn refresh(
 }
 
 fn marker_count(index: &Path, marker: &str) -> usize {
-    lexical_test_support::search_event_candidates(&VerifiedIndex::open(index).unwrap(), marker, 16)
-        .len()
+    lexical_test_support::search_event_candidates(
+        &VerifiedIndex::open_pinned(index).unwrap(),
+        marker,
+        16,
+    )
+    .len()
 }
 
 fn set_mode(path: &Path, mode: u32) {

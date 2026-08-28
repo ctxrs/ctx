@@ -22,7 +22,7 @@ fn destructive_precommit_truncate_and_replacement_preserve_last_good_generation_
         );
         let registry = register_tree(&[&sessions]);
         refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
-        let before = VerifiedIndex::open(&index_root).unwrap();
+        let before = VerifiedIndex::open_pinned(&index_root).unwrap();
         let generation = before.generation_id().to_owned();
         let snapshot = source_snapshot(&before, native_session_id, "lastgooduniquetoken");
         drop(before);
@@ -60,7 +60,7 @@ fn destructive_precommit_truncate_and_replacement_preserve_last_good_generation_
             }
             Err(error) => panic!("unexpected {mutation} failure: {error:?}"),
         }
-        let retained = VerifiedIndex::open(&index_root).unwrap();
+        let retained = VerifiedIndex::open_pinned(&index_root).unwrap();
         assert_eq!(retained.generation_id(), generation, "{mutation}");
         assert_eq!(
             source_snapshot(&retained, native_session_id, "lastgooduniquetoken"),
@@ -101,7 +101,7 @@ fn current_authority_reappearance_before_publication_carries_last_good_generatio
     let initial =
         refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
     assert!(initial.failed_routes.is_empty());
-    let before = VerifiedIndex::open(&index_root).unwrap();
+    let before = VerifiedIndex::open_pinned(&index_root).unwrap();
     let generation = before.generation_id().to_owned();
     let retained_snapshot = source_snapshot(&before, retained_session, retained_marker);
     let deleted_snapshot = source_snapshot(&before, deleted_session, deleted_marker);
@@ -129,7 +129,7 @@ fn current_authority_reappearance_before_publication_carries_last_good_generatio
                 && failure.carried_forward
     ));
     assert!(failed.removals.is_empty());
-    let retained = VerifiedIndex::open(&index_root).unwrap();
+    let retained = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert_eq!(retained.generation_id(), generation);
     assert_eq!(
         source_snapshot(&retained, retained_session, retained_marker),

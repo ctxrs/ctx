@@ -55,7 +55,7 @@ fn automatic_execution_replaces_an_incompatible_settings_generation() {
     meta["index_settings"]["docstore_blocksize"] = Value::from(64 * 1024);
     std::fs::write(&meta_path, serde_json::to_vec(&meta).unwrap()).unwrap();
     assert!(matches!(
-        VerifiedIndex::open(&index_root),
+        VerifiedIndex::open_pinned(&index_root),
         Err(IndexError::IndexSettingsMismatch(_))
     ));
 
@@ -65,7 +65,9 @@ fn automatic_execution_replaces_an_incompatible_settings_generation() {
     assert_ne!(std::fs::read(&pointer_path).unwrap(), pointer_before);
     assert!(!old_generation_path.exists());
     assert_eq!(
-        VerifiedIndex::open(&index_root).unwrap().generation_id(),
+        VerifiedIndex::open_pinned(&index_root)
+            .unwrap()
+            .generation_id(),
         baseline.generation_id
     );
 }

@@ -147,7 +147,7 @@ fn fixture_registry(data_root: &Path, database: &Path) -> SourceBackedProviderRe
 }
 
 fn unique_search_record(index_root: &Path, needle: &str) -> CoreRecord {
-    let index = VerifiedIndex::open(index_root).unwrap();
+    let index = VerifiedIndex::open_pinned(index_root).unwrap();
     let candidates = complete_lexical_events(&index, needle, Default::default(), 8);
     candidates
         .iter()
@@ -250,7 +250,9 @@ fn incremental_cursor_advances_only_with_successful_core_publication() {
             );
     assert!(failed.is_err());
     assert_eq!(
-        VerifiedIndex::open(&index_root).unwrap().generation_id(),
+        VerifiedIndex::open_pinned(&index_root)
+            .unwrap()
+            .generation_id(),
         cold.commit.generation_id
     );
 
@@ -299,7 +301,9 @@ fn failed_exhaustive_publication_retains_due_control_and_retry_converges() {
             );
     assert!(failed.is_err());
     assert_eq!(
-        VerifiedIndex::open(&index_root).unwrap().generation_id(),
+        VerifiedIndex::open_pinned(&index_root)
+            .unwrap()
+            .generation_id(),
         cold.commit.generation_id
     );
     let due = overdue_controls.values().next().unwrap();
@@ -347,7 +351,9 @@ fn hermes_mutation_before_and_after_snapshot_seal_retains_published_generation_a
     )
     .unwrap();
     assert_eq!(
-        VerifiedIndex::open(&index_root).unwrap().generation_id(),
+        VerifiedIndex::open_pinned(&index_root)
+            .unwrap()
+            .generation_id(),
         cold.commit.generation_id
     );
     assert_eq!(before.failed_routes.len(), 1);
@@ -380,7 +386,9 @@ fn hermes_mutation_before_and_after_snapshot_seal_retains_published_generation_a
     )
     .unwrap();
     assert_eq!(
-        VerifiedIndex::open(&index_root).unwrap().generation_id(),
+        VerifiedIndex::open_pinned(&index_root)
+            .unwrap()
+            .generation_id(),
         after_before.commit.generation_id
     );
     assert_eq!(after.failed_routes.len(), 1);

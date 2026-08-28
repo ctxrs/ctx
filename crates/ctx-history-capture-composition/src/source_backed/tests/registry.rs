@@ -366,7 +366,9 @@ fn cold_second_route_failure_after_output_publishes_first_without_partial_record
     assert!(receipt.commit.manifest().source_route(&second_id).is_none());
     assert_eq!(receipt.commit.indexed_documents, 1);
     assert_eq!(
-        VerifiedIndex::open(temp.path()).unwrap().document_count(),
+        VerifiedIndex::open_pinned(temp.path())
+            .unwrap()
+            .document_count(),
         1
     );
     assert_eq!(
@@ -580,7 +582,7 @@ fn internal_route_failure_aborts_the_whole_cold_refresh() {
         })
     ));
     assert!(matches!(
-        VerifiedIndex::open(temp.path()),
+        VerifiedIndex::open_pinned(temp.path()),
         Err(IndexError::MissingActiveGenerationPointer)
     ));
     assert_eq!(
@@ -684,7 +686,7 @@ fn real_shared_resource_exhaustion_aborts_warm_refresh_and_retains_complete_prio
         }
     ));
 
-    let retained = VerifiedIndex::open(temp.path()).unwrap();
+    let retained = VerifiedIndex::open_pinned(temp.path()).unwrap();
     assert_eq!(retained.generation_id(), initial_generation);
     assert_eq!(retained.document_count(), 2);
     assert_eq!(retained.manifest().sources, initial_sources);
@@ -909,7 +911,7 @@ fn cold_refresh_with_only_failed_routes_does_not_publish_ready_data() {
                 && failed_routes[0].class == SourceBackedSourceFailureClass::Unavailable
     ));
     assert!(matches!(
-        VerifiedIndex::open(temp.path()),
+        VerifiedIndex::open_pinned(temp.path()),
         Err(IndexError::MissingActiveGenerationPointer)
     ));
 }

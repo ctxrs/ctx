@@ -60,7 +60,7 @@ fn provider_native_copies_enter_semantic_projection_without_target_resolution() 
         )?)?;
     }
     writer.commit(|_| true)?;
-    let index = VerifiedIndex::open(root)?;
+    let index = VerifiedIndex::open_pinned(root)?;
 
     assert_eq!(index.manifest().indexed_documents, 3);
     assert!(index

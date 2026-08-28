@@ -24,7 +24,7 @@ fn incremental_delta_reopens_catches_up_and_acknowledges_verified_generation() -
     );
     drop(published);
 
-    let reopened = VerifiedIndex::open(&root)?;
+    let reopened = VerifiedIndex::open_pinned(&root)?;
     assert_eq!(reopened.generation_id(), published_generation_id);
     assert_ne!(
         reopened.manifest().generation_id()?,

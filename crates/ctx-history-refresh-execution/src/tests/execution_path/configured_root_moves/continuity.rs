@@ -49,11 +49,13 @@ fn configured_claude_home_is_additive_and_naming_the_automatic_home_deduplicates
                 &mut progress,
             )
             .unwrap();
-            let automatic_source_key = VerifiedIndex::open(&index_root).unwrap().manifest().sources
-                [0]
-            .observation()
-            .source()
-            .clone();
+            let automatic_source_key = VerifiedIndex::open_pinned(&index_root)
+                .unwrap()
+                .manifest()
+                .sources[0]
+                .observation()
+                .source()
+                .clone();
 
             let configured_home = if same_home {
                 automatic_home.clone()
@@ -117,7 +119,7 @@ fn configured_claude_home_is_additive_and_naming_the_automatic_home_deduplicates
             )
             .unwrap();
 
-            let published = VerifiedIndex::open(&index_root).unwrap();
+            let published = VerifiedIndex::open_pinned(&index_root).unwrap();
             // Disabling inference changes future selection; it does not use a
             // config toggle as deletion authority for already indexed history.
             let expected_route_count = if same_home { 1 } else { 2 };
@@ -214,7 +216,7 @@ fn watch_catalog_preserves_released_identity_across_path_and_group_replacement()
         &mut progress,
     )
     .unwrap();
-    let published = VerifiedIndex::open(&index_root).unwrap();
+    let published = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert_eq!(
         published.manifest().provider_roots()[0].source_identity(),
         ProviderRootSourceIdentity::Released
@@ -349,7 +351,7 @@ fn released_overlap_root_move_remove_and_readd_preserves_exact_identity() {
         )
         .unwrap();
 
-        let published = VerifiedIndex::open(&index_root).unwrap();
+        let published = VerifiedIndex::open_pinned(&index_root).unwrap();
         assert_eq!(published.manifest().sources.len(), 3);
         assert_eq!(published.manifest().source_routes().len(), 2);
         assert_eq!(published.manifest().provider_roots().len(), 1);
@@ -419,7 +421,7 @@ fn released_overlap_root_move_remove_and_readd_preserves_exact_identity() {
             &mut progress,
         )
         .unwrap();
-        let removed = VerifiedIndex::open(&index_root).unwrap();
+        let removed = VerifiedIndex::open_pinned(&index_root).unwrap();
         assert!(removed.manifest().provider_roots().is_empty());
         assert_eq!(removed.manifest().source_routes().len(), 1);
         assert_eq!(
@@ -465,7 +467,7 @@ fn released_overlap_root_move_remove_and_readd_preserves_exact_identity() {
             &mut progress,
         )
         .unwrap();
-        let rejoined = VerifiedIndex::open(&index_root).unwrap();
+        let rejoined = VerifiedIndex::open_pinned(&index_root).unwrap();
         assert_eq!(rejoined.manifest().source_routes().len(), 2);
         assert_eq!(rejoined.manifest().provider_roots().len(), 1);
         assert_eq!(
@@ -653,7 +655,7 @@ fn naming_a_failing_automatic_home_carries_it_while_named_peer_advances() {
     .unwrap();
 
     assert!(!publication.route_results.is_empty());
-    let published = VerifiedIndex::open(&index_root).unwrap();
+    let published = VerifiedIndex::open_pinned(&index_root).unwrap();
     let automatic_root = published
         .manifest()
         .provider_roots()
@@ -755,7 +757,7 @@ fn unchanged_symlinked_configured_root_retains_history_while_peer_advances() {
         &mut progress,
     )
     .unwrap();
-    let first = VerifiedIndex::open(&index_root).unwrap();
+    let first = VerifiedIndex::open_pinned(&index_root).unwrap();
     let retained_routes = first
         .manifest()
         .provider_roots()
@@ -804,7 +806,7 @@ fn unchanged_symlinked_configured_root_retains_history_while_peer_advances() {
     )
     .unwrap();
 
-    let published = VerifiedIndex::open(&index_root).unwrap();
+    let published = VerifiedIndex::open_pinned(&index_root).unwrap();
     let retained_root = published
         .manifest()
         .provider_roots()
@@ -887,7 +889,10 @@ fn removing_last_configured_claude_home_returns_to_one_automatic_route() {
         &mut progress,
     )
     .unwrap();
-    let configured_source_key = VerifiedIndex::open(&index_root).unwrap().manifest().sources[0]
+    let configured_source_key = VerifiedIndex::open_pinned(&index_root)
+        .unwrap()
+        .manifest()
+        .sources[0]
         .observation()
         .source()
         .clone();
@@ -908,7 +913,7 @@ fn removing_last_configured_claude_home_returns_to_one_automatic_route() {
     )
     .unwrap();
 
-    let published = VerifiedIndex::open(&index_root).unwrap();
+    let published = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert_eq!(published.manifest().source_routes().len(), 1);
     assert!(published
         .manifest()

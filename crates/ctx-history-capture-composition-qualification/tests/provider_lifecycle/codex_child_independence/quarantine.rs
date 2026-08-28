@@ -16,7 +16,7 @@ fn catalog_owner_rejection_fails_cold_and_repairs() {
         panic!("unexpected cold rejection error: {error:?}");
     };
     assert_eq!(failed_sources.total(), 1);
-    assert!(VerifiedIndex::open(&index_root).is_err());
+    assert!(VerifiedIndex::open_pinned(&index_root).is_err());
 
     let repaired_id = "019fb000-0000-7000-8000-000000000063";
     fs::write(
@@ -33,7 +33,7 @@ fn catalog_owner_rejection_fails_cold_and_repairs() {
     assert!(repaired.logical_source_failures.is_empty());
     assert_eq!(
         search_event_candidates(
-            &VerifiedIndex::open(&index_root).unwrap(),
+            &VerifiedIndex::open_pinned(&index_root).unwrap(),
             "catalogownerrepairedmarker",
             8,
         )
@@ -86,7 +86,7 @@ fn malformed_codex_record_retains_valid_peers_and_reports_local_line() {
         rejection.detail,
         "Codex record is not valid projectable JSON"
     );
-    let index = VerifiedIndex::open(&index_root).unwrap();
+    let index = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert!(source_records_contain(
         &index,
         native_session_id,
@@ -140,7 +140,7 @@ fn codex_prefix_ownership_quarantine_retains_prior_source_and_repairs() {
     let (quarantined, _) = incremental_refresh(&index_root, &registry, &initial);
     assert!(quarantined.failed_routes.is_empty());
     assert_eq!(quarantined.logical_source_failures.total(), 1);
-    let index = VerifiedIndex::open(&index_root).unwrap();
+    let index = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert_eq!(index.manifest().sources, initial.sources);
     assert!(index.manifest().sources.iter().any(|certificate| {
         source_native_session_id(certificate.observation().source()) == Some(native_session_id)
@@ -169,7 +169,7 @@ fn codex_prefix_ownership_quarantine_retains_prior_source_and_repairs() {
     );
     assert!(repaired.failed_routes.is_empty());
     assert!(repaired.logical_source_failures.is_empty());
-    let repaired_index = VerifiedIndex::open(&index_root).unwrap();
+    let repaired_index = VerifiedIndex::open_pinned(&index_root).unwrap();
     let repaired_records = records_for(&repaired_index, native_session_id);
     assert_eq!(repaired_records.len(), 1);
     assert!(
@@ -231,7 +231,7 @@ fn malformed_late_session_meta_quarantines_only_its_rollout() {
         refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
     assert!(receipt.failed_routes.is_empty());
     assert_eq!(receipt.logical_source_failures.total(), 1);
-    let index = VerifiedIndex::open(&index_root).unwrap();
+    let index = VerifiedIndex::open_pinned(&index_root).unwrap();
     for marker in ["malformedmetabeforemarker", "malformedmetaaftermarker"] {
         assert_eq!(search_event_candidates(&index, marker, 8).len(), 1);
     }
@@ -278,7 +278,7 @@ fn selector_ambiguous_session_meta_fails_without_a_usable_rollout() {
         panic!("unexpected ambiguous-source error: {error:?}");
     };
     assert_eq!(failed_sources.total(), 1);
-    assert!(VerifiedIndex::open(&index_root).is_err());
+    assert!(VerifiedIndex::open_pinned(&index_root).is_err());
 }
 
 #[test]
@@ -327,7 +327,7 @@ fn committed_codex_good_bad_good_retains_prior_source_while_neighbor_advances() 
 
     let (middle, _) = incremental_refresh(&index_root, &registry, &cold);
     assert!(middle.failed_routes.is_empty());
-    let middle_index = VerifiedIndex::open(&index_root).unwrap();
+    let middle_index = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert_eq!(records_for(&middle_index, repairable_id).len(), 1);
     assert!(source_records_contain(
         &middle_index,
@@ -356,7 +356,7 @@ fn committed_codex_good_bad_good_retains_prior_source_while_neighbor_advances() 
     .unwrap();
     let (repaired, _) = incremental_refresh(&index_root, &registry, &middle);
     assert!(repaired.failed_routes.is_empty());
-    let repaired_index = VerifiedIndex::open(&index_root).unwrap();
+    let repaired_index = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert!(!source_records_contain(
         &repaired_index,
         repairable_id,
@@ -421,7 +421,7 @@ fn fully_quarantined_codex_session_tree_fails_instead_of_publishing_empty() {
         .failures()
         .iter()
         .all(|failure| !failure.carried_forward));
-    assert!(VerifiedIndex::open(&index_root).is_err());
+    assert!(VerifiedIndex::open_pinned(&index_root).is_err());
 }
 
 #[test]
@@ -463,7 +463,7 @@ fn committed_codex_good_partial_repaired_retains_prior_source_while_neighbor_adv
     assert!(middle.failed_routes.is_empty());
     assert!(middle.logical_source_failures.is_empty());
     assert!(middle.record_rejections.is_empty());
-    let middle_index = VerifiedIndex::open(&index_root).unwrap();
+    let middle_index = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert_eq!(records_for(&middle_index, repairable_id).len(), 1);
     assert!(source_records_contain(
         &middle_index,
@@ -487,7 +487,7 @@ fn committed_codex_good_partial_repaired_retains_prior_source_while_neighbor_adv
     .unwrap();
     let (repaired, _) = incremental_refresh(&index_root, &registry, &middle);
     assert!(repaired.failed_routes.is_empty());
-    let repaired_index = VerifiedIndex::open(&index_root).unwrap();
+    let repaired_index = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert!(!source_records_contain(
         &repaired_index,
         repairable_id,

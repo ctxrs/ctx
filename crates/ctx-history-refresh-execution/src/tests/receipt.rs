@@ -5,7 +5,7 @@ use super::*;
 fn terminal_receipt_fixture() -> (tempfile::TempDir, Value, VerifiedIndex) {
     let temp = tempfile::tempdir().unwrap();
     let generation = publish_pin_source(temp.path(), publication_pin_source_with_anchor(0x91));
-    let verified = VerifiedIndex::open(temp.path()).unwrap();
+    let verified = VerifiedIndex::open_pinned(temp.path()).unwrap();
     let mut publication = test_publication(generation.clone());
     publication.current =
         SourceBackedRefreshCurrent::from_sources(&verified.manifest().sources, 0).unwrap();
@@ -167,7 +167,7 @@ fn receipt_source_count_intersects_request_routes_with_certified_generation_rout
         ])
         .unwrap();
     let generation = writer.commit(|_| true).unwrap().generation_id;
-    let verified = VerifiedIndex::open(temp.path()).unwrap();
+    let verified = VerifiedIndex::open_pinned(temp.path()).unwrap();
     let receipt = SourceBackedRefreshReceipt {
         zero_source_authority: Vec::new(),
         previous_generation: None,

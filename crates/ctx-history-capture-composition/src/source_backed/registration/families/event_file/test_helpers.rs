@@ -4,7 +4,7 @@ use ctx_history_index::VerifiedIndex;
 use std::path::Path;
 
 pub(super) fn indexed_bodies(index: &Path, receipt: &SourceBackedRefreshReceipt) -> Vec<String> {
-    let verified = VerifiedIndex::open(index).unwrap();
+    let verified = VerifiedIndex::open_pinned(index).unwrap();
     let mut bodies = receipt
         .sources
         .iter()
@@ -26,7 +26,7 @@ pub(super) fn indexed_events(
     index: &Path,
     receipt: &SourceBackedRefreshReceipt,
 ) -> Vec<CoreRecord> {
-    let verified = VerifiedIndex::open(index).unwrap();
+    let verified = VerifiedIndex::open_pinned(index).unwrap();
     let mut events = receipt
         .sources
         .iter()

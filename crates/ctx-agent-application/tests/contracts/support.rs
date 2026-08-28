@@ -570,7 +570,7 @@ pub(crate) fn initialize_authoritative_empty_core(data_root: &Path) -> String {
     .into_writer()
     .unwrap();
     let core_receipt = writer.commit(|_| true).unwrap();
-    let verified = VerifiedIndex::open(&index_root).unwrap();
+    let verified = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert_eq!(verified.generation_id(), core_receipt.generation_id);
     let generation_id = core_receipt.generation_id;
     let route_identity = "ab".repeat(32);

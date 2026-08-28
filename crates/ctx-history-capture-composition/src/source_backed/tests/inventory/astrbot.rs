@@ -110,7 +110,7 @@ fn released_astrbot_root_scans_only_its_inventory_and_cannot_absorb_named_peer()
         WriterOptions::default(),
     )
     .unwrap();
-    let published = VerifiedIndex::open(temp.path().join("index")).unwrap();
+    let published = VerifiedIndex::open_pinned(temp.path().join("index")).unwrap();
     for (root, own, peer) in [
         ("first", "astrbotrootalpha", "astrbotrootbeta"),
         ("second", "astrbotrootbeta", "astrbotrootalpha"),

@@ -53,7 +53,7 @@ fn codex_cold_appends_during_bounded_capture_catch_up_once() {
     );
     assert!(cold.logical_source_failures.is_empty());
 
-    let initial = VerifiedIndex::open(&index_root).unwrap();
+    let initial = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert!(source_records_contain(
         &initial,
         native_session_id,
@@ -76,7 +76,7 @@ fn codex_cold_appends_during_bounded_capture_catch_up_once() {
         refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
     assert!(caught_up.failed_routes.is_empty());
     assert!(caught_up.logical_source_failures.is_empty());
-    let current = VerifiedIndex::open(&index_root).unwrap();
+    let current = VerifiedIndex::open_pinned(&index_root).unwrap();
     let caught_up_generation = current.generation_id().to_owned();
     assert_eq!(records_for(&current, native_session_id).len(), 5);
     for marker in [
@@ -99,7 +99,7 @@ fn codex_cold_appends_during_bounded_capture_catch_up_once() {
     let no_op = refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
     assert!(no_op.failed_routes.is_empty());
     assert!(no_op.logical_source_failures.is_empty());
-    let terminal = VerifiedIndex::open(&index_root).unwrap();
+    let terminal = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert_eq!(terminal.generation_id(), caught_up_generation);
     assert_eq!(records_for(&terminal, native_session_id).len(), 5);
 }

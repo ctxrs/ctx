@@ -291,7 +291,7 @@ fn semantic_status_reports_ready_only_with_exact_projected_and_filtered_counts()
         )
         .unwrap();
     writer.commit(|_| true).unwrap();
-    let index = VerifiedIndex::open(data_root.join("search/lexical")).unwrap();
+    let index = VerifiedIndex::open_pinned(data_root.join("search/lexical")).unwrap();
     let mut store = SemanticVectorStore::open(
         &source_backed_semantic_vector_path(&data_root),
         semantic_model_contract(),
@@ -689,7 +689,7 @@ fn authoritative_empty_stays_query_ready_when_the_latest_refresh_failed() {
 fn legacy_zero_source_publication_is_not_projected_as_ready() {
     let (_temp, data_root, generation_id) = core_publication_fixture();
     let index_root = data_root.join("search/lexical");
-    let current = VerifiedIndex::open(&index_root).unwrap();
+    let current = VerifiedIndex::open_pinned(&index_root).unwrap();
     let mut metadata: Value =
         serde_json::from_slice(current.publication_metadata().unwrap()).unwrap();
     metadata["version"] = json!(1);
@@ -896,7 +896,7 @@ fn catalog_status_reports_automatic_roots_and_request_scoped_explicit_overlays()
     .commit(|_| true)
     .unwrap()
     .generation_id;
-    let index = VerifiedIndex::open(&index_root).unwrap();
+    let index = VerifiedIndex::open_pinned(&index_root).unwrap();
     let ready = catalog_report(Some(&generation_id), Some(&index));
     assert_eq!(ready["status"], "ready");
     assert_eq!(ready["authority"], "automatic_provider_registry");

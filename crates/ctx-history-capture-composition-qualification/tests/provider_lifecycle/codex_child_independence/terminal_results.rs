@@ -28,7 +28,7 @@ fn codex_cold_duplicate_direct_and_mcp_terminals_fail_open() {
     let receipt =
         refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
     assert!(receipt.failed_routes.is_empty());
-    let index = VerifiedIndex::open(&index_root).unwrap();
+    let index = VerifiedIndex::open_pinned(&index_root).unwrap();
     let records = records_for(&index, native_session_id);
     assert_eq!(records.len(), 5);
     let invocation = records
@@ -105,7 +105,7 @@ fn codex_appended_duplicate_direct_and_mcp_terminals_retract_exclusion_with_stab
 
     let cold = refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
     assert!(cold.failed_routes.is_empty());
-    let cold_index = VerifiedIndex::open(&index_root).unwrap();
+    let cold_index = VerifiedIndex::open_pinned(&index_root).unwrap();
     let cold_direct = records_for(&cold_index, direct_session_id);
     let cold_mcp = records_for(&cold_index, mcp_session_id);
     assert_eq!(cold_direct.len(), 2);
@@ -128,7 +128,7 @@ fn codex_appended_duplicate_direct_and_mcp_terminals_retract_exclusion_with_stab
     );
     let (appended, _) = incremental_refresh(&index_root, &registry, &cold);
     assert!(appended.failed_routes.is_empty());
-    let appended_index = VerifiedIndex::open(&index_root).unwrap();
+    let appended_index = VerifiedIndex::open_pinned(&index_root).unwrap();
     let direct = records_for(&appended_index, direct_session_id);
     let mcp = records_for(&appended_index, mcp_session_id);
     assert_eq!(direct.len(), 3);
@@ -183,7 +183,7 @@ fn codex_incremental_unique_terminal_append_and_restart_stay_suffix_bounded() {
     let registry = register_tree(&[&sessions]);
     let cold = refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
     assert!(cold.failed_routes.is_empty());
-    let cold_index = VerifiedIndex::open(&index_root).unwrap();
+    let cold_index = VerifiedIndex::open_pinned(&index_root).unwrap();
     let cold_records = records_for(&cold_index, native_session_id);
     let first_event_id = result_record_for_call(&cold_records, first_call_id).event_id;
     assert_eq!(
@@ -201,7 +201,7 @@ fn codex_incremental_unique_terminal_append_and_restart_stay_suffix_bounded() {
     let (appended, completed_records) = incremental_refresh(&index_root, &registry, &cold);
     assert!(appended.failed_routes.is_empty());
     assert_eq!(completed_records, 1);
-    let appended_index = VerifiedIndex::open(&index_root).unwrap();
+    let appended_index = VerifiedIndex::open_pinned(&index_root).unwrap();
     let appended_records = records_for(&appended_index, native_session_id);
     assert_eq!(
         result_record_for_call(&appended_records, first_call_id).event_id,
@@ -231,7 +231,7 @@ fn codex_incremental_unique_terminal_append_and_restart_stay_suffix_bounded() {
         incremental_refresh(&index_root, &restarted_registry, &appended);
     assert!(restarted.failed_routes.is_empty());
     assert_eq!(restart_completed_records, 2);
-    let restarted_index = VerifiedIndex::open(&index_root).unwrap();
+    let restarted_index = VerifiedIndex::open_pinned(&index_root).unwrap();
     let restarted_records = records_for(&restarted_index, native_session_id);
     assert_eq!(
         result_record_for_call(&restarted_records, first_call_id).event_id,
@@ -293,7 +293,7 @@ fn inferred_codex_member_refresh_keeps_released_identity_and_stays_bounded() {
         "a member workset should not fall back to whole-tree discovery"
     );
     assert!(source_records_contain(
-        &VerifiedIndex::open(&index_root).unwrap(),
+        &VerifiedIndex::open_pinned(&index_root).unwrap(),
         selected_session_id,
         "inferred bounded appended"
     ));
@@ -337,7 +337,7 @@ fn codex_incremental_4097th_terminal_saturates_and_replaces_fail_open() {
     let registry = register_tree(&[&sessions]);
     let cold = refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
     assert!(cold.failed_routes.is_empty());
-    let cold_index = VerifiedIndex::open(&index_root).unwrap();
+    let cold_index = VerifiedIndex::open_pinned(&index_root).unwrap();
     let cold_records = records_for(&cold_index, native_session_id);
     let first = result_record_for_call(&cold_records, first_call_id);
     let first_event_id = first.event_id;
@@ -355,7 +355,7 @@ fn codex_incremental_4097th_terminal_saturates_and_replaces_fail_open() {
     );
     let (saturated, completed_records) = incremental_refresh(&index_root, &registry, &cold);
     assert!(saturated.failed_routes.is_empty());
-    let saturated_index = VerifiedIndex::open(&index_root).unwrap();
+    let saturated_index = VerifiedIndex::open_pinned(&index_root).unwrap();
     let saturated_records = records_for(&saturated_index, native_session_id);
     assert!(completed_records > 1);
     assert_eq!(completed_records, saturated_records.len() as u64);

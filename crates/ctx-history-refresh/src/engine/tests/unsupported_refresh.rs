@@ -54,7 +54,7 @@ pub(super) fn run_report(
 }
 
 fn replace_metadata_version(index_root: &Path, version: u64) -> VerifiedIndex {
-    let current = VerifiedIndex::open(index_root).unwrap();
+    let current = VerifiedIndex::open_pinned(index_root).unwrap();
     let generation_id = current.generation_id().to_owned();
     let mut metadata: Value =
         serde_json::from_slice(current.publication_metadata().unwrap()).unwrap();
@@ -108,12 +108,12 @@ fn present_unsupported_only_refresh_fails_cold_and_reports_against_a_warm_genera
         "{cold_detail}"
     );
     assert!(matches!(
-        VerifiedIndex::open(&index_root),
+        VerifiedIndex::open_pinned(&index_root),
         Err(IndexError::MissingActiveGenerationPointer)
     ));
 
     let retained_generation = publish_pin_source(&index_root, publication_pin_source());
-    let legacy_nonempty = VerifiedIndex::open(&index_root).unwrap();
+    let legacy_nonempty = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert!(legacy_nonempty.publication_metadata().is_none());
     assert_eq!(
         verify_generation_query_readiness(&legacy_nonempty).unwrap(),
@@ -129,7 +129,7 @@ fn present_unsupported_only_refresh_fails_cold_and_reports_against_a_warm_genera
     };
     assert_eq!(failed_route.outcome.failure_class(), Some("incompatible"));
     assert!(!failed_route.outcome.is_success());
-    let retained = VerifiedIndex::open(&index_root).unwrap();
+    let retained = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert_eq!(retained.generation_id(), retained_generation);
     assert_eq!(retained.manifest().sources.len(), 1);
 }
@@ -162,7 +162,7 @@ fn executable_empty_inventory_publishes_v2_authority_and_survives_restart() {
     );
     assert_eq!(authority.generation_id, publication.generation_id);
 
-    let restarted = VerifiedIndex::open(&index_root).unwrap();
+    let restarted = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert_eq!(
         verify_generation_query_readiness(&restarted).unwrap(),
         GenerationQueryReadiness::Ready
@@ -193,7 +193,7 @@ fn executable_empty_inventory_publishes_v2_authority_and_survives_restart() {
     drop(legacy);
     let recertified = run_report(&discovery, report, &data_root, &index_root).unwrap();
     assert_eq!(recertified.generation_id, publication.generation_id);
-    let recertified = VerifiedIndex::open(&index_root).unwrap();
+    let recertified = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert!(verified_generation_is_query_ready(&recertified).unwrap());
     assert!(pin_retained_generation(&data_root, &publication.generation_id).is_ok());
     assert_eq!(
@@ -248,7 +248,7 @@ fn genuinely_empty_catalog_publishes_a_verified_noop_generation() {
     assert!(publication.route_results.is_empty());
     assert!(publication.zero_source_authority.is_empty());
 
-    let restarted = VerifiedIndex::open(&index_root).unwrap();
+    let restarted = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert!(verified_generation_is_query_ready(&restarted).unwrap());
     let metadata = SourceBackedPublicationMetadata::decode(&restarted).unwrap();
     assert_eq!(metadata.refresh_scope, SourceBackedRefreshScope::All);
@@ -308,7 +308,9 @@ fn confirmed_deletion_can_publish_empty_but_mixed_unavailable_cannot() {
     .unwrap_err();
     assert!(format!("{mixed_error:#}").contains(TERMINAL_COVERAGE_ERROR_CODE));
     assert_eq!(
-        VerifiedIndex::open(&index_root).unwrap().generation_id(),
+        VerifiedIndex::open_pinned(&index_root)
+            .unwrap()
+            .generation_id(),
         deletion_generation
     );
 }

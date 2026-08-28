@@ -163,7 +163,7 @@ fn publish(root: &Path, index: &Path) -> Vec<CoreRecord> {
 
 fn published_session(index: &Path, provider_session_id: &str) -> Vec<CoreRecord> {
     let source = source_key(provider_session_id);
-    let mut records = VerifiedIndex::open(index)
+    let mut records = VerifiedIndex::open_pinned(index)
         .unwrap()
         .core_source_event_page(&source, None, 64)
         .unwrap()
@@ -198,7 +198,7 @@ fn unchanged_v15_lineage_certificate_is_replaced_by_v17_direct_only_projection()
         .unwrap();
 
     let source = source_key(SESSION_ID);
-    let current = VerifiedIndex::open(&index).unwrap();
+    let current = VerifiedIndex::open_pinned(&index).unwrap();
     let current_certificate = current
         .manifest()
         .sources
@@ -266,7 +266,7 @@ fn unchanged_v15_lineage_certificate_is_replaced_by_v17_direct_only_projection()
         replaced[0].content.meaningful_text(),
         "unchanged direct parent migration fixture"
     );
-    let replaced_index = VerifiedIndex::open(&index).unwrap();
+    let replaced_index = VerifiedIndex::open_pinned(&index).unwrap();
     assert_eq!(
         replaced_index
             .manifest()

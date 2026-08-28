@@ -181,7 +181,7 @@ fn partial_released_codex_overlap_move_remove_readd_preserves_exact_identity() {
         &mut progress,
     )
     .unwrap();
-    let automatic = VerifiedIndex::open(&index_root).unwrap();
+    let automatic = VerifiedIndex::open_pinned(&index_root).unwrap();
     let baseline = exact_history_bytes(&automatic, marker);
     assert_eq!(automatic.manifest().sources.len(), 1);
     drop(automatic);
@@ -197,7 +197,7 @@ fn partial_released_codex_overlap_move_remove_readd_preserves_exact_identity() {
         .clone()
         .with_configured_provider_roots(vec![definition(first_home.clone())]);
     refresh_discovered_codex(&overlapping_discovery, &data_root, &index_root);
-    let overlapping = VerifiedIndex::open(&index_root).unwrap();
+    let overlapping = VerifiedIndex::open_pinned(&index_root).unwrap();
     exact_history_bytes(&overlapping, marker).assert_core_history_eq(&baseline);
     assert_eq!(overlapping.manifest().sources.len(), 1);
     let overlapping_routes = overlapping
@@ -225,7 +225,7 @@ fn partial_released_codex_overlap_move_remove_readd_preserves_exact_identity() {
         .with_env("CODEX_HOME", first_home.as_os_str())
         .with_configured_provider_roots(vec![definition(moved_home.clone())]);
     refresh_discovered_codex(&moved_discovery, &data_root, &index_root);
-    let moved = VerifiedIndex::open(&index_root).unwrap();
+    let moved = VerifiedIndex::open_pinned(&index_root).unwrap();
     exact_history_bytes(&moved, marker).assert_core_history_eq(&baseline);
     assert_eq!(moved.manifest().sources.len(), 1);
     let moved_routes = moved
@@ -253,7 +253,7 @@ fn partial_released_codex_overlap_move_remove_readd_preserves_exact_identity() {
         .clone()
         .with_env("CODEX_HOME", first_home.as_os_str());
     refresh_discovered_codex(&removed_discovery, &data_root, &index_root);
-    let removed = VerifiedIndex::open(&index_root).unwrap();
+    let removed = VerifiedIndex::open_pinned(&index_root).unwrap();
     exact_history_bytes(&removed, marker).assert_core_history_eq(&baseline);
     assert!(removed.manifest().provider_roots().is_empty());
     assert_eq!(
@@ -276,7 +276,7 @@ fn partial_released_codex_overlap_move_remove_readd_preserves_exact_identity() {
         .with_env("CODEX_HOME", first_home.as_os_str())
         .with_configured_provider_roots(vec![definition(moved_home)]);
     refresh_discovered_codex(&readded_discovery, &data_root, &index_root);
-    let readded = VerifiedIndex::open(&index_root).unwrap();
+    let readded = VerifiedIndex::open_pinned(&index_root).unwrap();
     exact_history_bytes(&readded, marker).assert_core_history_eq(&baseline);
     assert_eq!(readded.manifest().sources.len(), 1);
     assert!(readded
@@ -425,7 +425,7 @@ fn removed_standalone_named_codex_root_retains_exact_history_until_readded() {
         &mut progress,
     )
     .unwrap();
-    let initial = VerifiedIndex::open(&index_root).unwrap();
+    let initial = VerifiedIndex::open_pinned(&index_root).unwrap();
     let initial_exact = exact_history_bytes(&initial, "standaloneremovalretention");
     let route = initial.manifest().provider_root("work").unwrap().routes()[0].clone();
     let peer_route = initial
@@ -464,7 +464,7 @@ fn removed_standalone_named_codex_root_retains_exact_history_until_readded() {
         &mut progress,
     )
     .unwrap();
-    let moved = VerifiedIndex::open(&index_root).unwrap();
+    let moved = VerifiedIndex::open_pinned(&index_root).unwrap();
     let moved_exact = exact_history_bytes(&moved, "standaloneremovalretention");
     moved_exact.assert_core_history_eq(&initial_exact);
     assert_eq!(
@@ -495,7 +495,7 @@ fn removed_standalone_named_codex_root_retains_exact_history_until_readded() {
         &mut progress,
     )
     .unwrap();
-    let removed = VerifiedIndex::open(&index_root).unwrap();
+    let removed = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert_eq!(removed.manifest().provider_roots().len(), 1);
     assert_eq!(
         removed.manifest().provider_roots()[0].definition().id,
@@ -561,7 +561,7 @@ fn removed_standalone_named_codex_root_retains_exact_history_until_readded() {
         &mut progress,
     )
     .unwrap();
-    let restarted = VerifiedIndex::open(&index_root).unwrap();
+    let restarted = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert_eq!(restarted.generation_id(), removed_generation);
     assert_eq!(
         exact_history_bytes(&restarted, "standaloneremovalretention"),
@@ -601,7 +601,7 @@ fn removed_standalone_named_codex_root_retains_exact_history_until_readded() {
         &mut progress,
     )
     .unwrap();
-    let readded = VerifiedIndex::open(&index_root).unwrap();
+    let readded = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert_eq!(readded.manifest().sources.len(), 2);
     assert_eq!(readded.manifest().source_routes().len(), 2);
     let readded_exact = exact_history_bytes(&readded, "standaloneremovalretention");

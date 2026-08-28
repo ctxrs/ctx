@@ -132,7 +132,7 @@ fn gemini_provider_source(root: &Path) -> ProviderSource {
 }
 
 fn indexed_records(index: &Path) -> Vec<CoreRecord> {
-    let verified = VerifiedIndex::open(index).unwrap();
+    let verified = VerifiedIndex::open_pinned(index).unwrap();
     let source = verified
         .manifest()
         .sources
@@ -154,7 +154,7 @@ fn indexed_records(index: &Path) -> Vec<CoreRecord> {
 }
 
 fn gemini_sources(index: &Path) -> Vec<SourceKey> {
-    VerifiedIndex::open(index)
+    VerifiedIndex::open_pinned(index)
         .unwrap()
         .manifest()
         .sources
@@ -167,7 +167,7 @@ fn gemini_sources(index: &Path) -> Vec<SourceKey> {
 }
 
 fn all_gemini_records(index: &Path) -> Vec<CoreRecord> {
-    let verified = VerifiedIndex::open(index).unwrap();
+    let verified = VerifiedIndex::open_pinned(index).unwrap();
     let sources = verified
         .manifest()
         .sources
@@ -192,7 +192,7 @@ fn all_gemini_records(index: &Path) -> Vec<CoreRecord> {
 }
 
 fn certified_prefix_bytes(index: &Path) -> u64 {
-    let verified = VerifiedIndex::open(index).unwrap();
+    let verified = VerifiedIndex::open_pinned(index).unwrap();
     verified
         .manifest()
         .sources

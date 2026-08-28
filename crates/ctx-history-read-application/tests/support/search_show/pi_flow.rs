@@ -2,7 +2,8 @@ const PI_V9_PARSER_REVISION: &str = "pi-shared-jsonl-v9-omp-title-slot";
 const PI_V10_PARSER_REVISION: &str = "pi-shared-jsonl-v10-child-local-lineage";
 
 fn pi_parser_revision(data_root: &Path) -> String {
-    let index = ctx_history_index::VerifiedIndex::open(data_root.join("search/lexical")).unwrap();
+    let index =
+        ctx_history_index::VerifiedIndex::open_pinned(data_root.join("search/lexical")).unwrap();
     index
         .manifest()
         .sources
@@ -16,7 +17,7 @@ fn pi_parser_revision(data_root: &Path) -> String {
 fn publish_pi_v9_predecessor(data_root: &Path) -> String {
     let index_root = data_root.join("search/lexical");
     let (source, routes, mut certificate) = {
-        let index = ctx_history_index::VerifiedIndex::open(&index_root).unwrap();
+        let index = ctx_history_index::VerifiedIndex::open_pinned(&index_root).unwrap();
         let current = index
             .manifest()
             .sources
@@ -60,7 +61,7 @@ fn publish_pi_v9_predecessor(data_root: &Path) -> String {
     writer.certify_source(legacy_certificate).unwrap();
     let legacy_generation = writer.commit(|_| true).unwrap().generation_id;
 
-    let legacy = ctx_history_index::VerifiedIndex::open(&index_root).unwrap();
+    let legacy = ctx_history_index::VerifiedIndex::open_pinned(&index_root).unwrap();
     assert_eq!(legacy.generation_id(), legacy_generation);
     assert!(legacy.publication_metadata().is_none());
     assert_eq!(pi_parser_revision(data_root), PI_V9_PARSER_REVISION);

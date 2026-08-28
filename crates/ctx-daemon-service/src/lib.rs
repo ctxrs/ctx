@@ -23,6 +23,7 @@ use ctx_semantic_model::SharedSemanticRuntime;
 use serde_json::{json, Value};
 
 mod daemon;
+mod daemon_process_signal;
 mod daemon_retry;
 mod daemon_scheduler;
 mod daemon_wakeup;

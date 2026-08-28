@@ -29,7 +29,7 @@ fn partial_codex_home_adopts_released_identity_without_duplicate_records() {
     refresh_source_backed_generation(&automatic_index, &automatic.registry, writer_options())
         .unwrap();
     let automatic_records = serde_json::to_vec(&records_for(
-        &VerifiedIndex::open(&automatic_index).unwrap(),
+        &VerifiedIndex::open_pinned(&automatic_index).unwrap(),
         native_session_id,
     ))
     .unwrap();
@@ -58,7 +58,7 @@ fn partial_codex_home_adopts_released_identity_without_duplicate_records() {
         let index_root = fixture.join(format!("configured-index-{automatic_enabled}"));
         refresh_source_backed_generation(&index_root, &configured.registry, writer_options())
             .unwrap();
-        let index = VerifiedIndex::open(&index_root).unwrap();
+        let index = VerifiedIndex::open_pinned(&index_root).unwrap();
         assert_eq!(index.manifest().sources.len(), 1);
         assert_eq!(
             serde_json::to_vec(&records_for(&index, native_session_id)).unwrap(),
@@ -184,7 +184,7 @@ fn configured_codex_homes_with_the_same_native_session_publish_independent_sourc
         archive_refresh.failed_routes
     );
 
-    let index = VerifiedIndex::open(&index_root).unwrap();
+    let index = VerifiedIndex::open_pinned(&index_root).unwrap();
     let codex_sources = index
         .manifest()
         .sources
@@ -322,7 +322,7 @@ fn unavailable_configured_codex_home_carries_only_itself_while_peer_refreshes() 
         2,
         "the healthy peer retains typed absence for its optional routes"
     );
-    let retained = VerifiedIndex::open(&index_root).unwrap();
+    let retained = VerifiedIndex::open_pinned(&index_root).unwrap();
     current
         .registry
         .retain_unavailable_provider_root_routes(retained.manifest().provider_roots())
@@ -339,7 +339,7 @@ fn unavailable_configured_codex_home_carries_only_itself_while_peer_refreshes() 
     assert!(receipt.failed_routes.iter().all(|failure| {
         failure.class == SourceBackedSourceFailureClass::Unavailable && !failure.carried_forward
     }));
-    let index = VerifiedIndex::open(&index_root).unwrap();
+    let index = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert!(source_records_contain(
         &index,
         personal_session_id,
@@ -441,7 +441,7 @@ fn cold_unavailable_configured_codex_home_does_not_block_healthy_peer() {
         3,
         "the inferred missing defaults and healthy named home remain independent"
     );
-    let index = VerifiedIndex::open(&index_root).unwrap();
+    let index = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert!(source_records_contain(
         &index,
         personal_session_id,
@@ -494,7 +494,7 @@ fn codex_subagent_preserves_provider_root_session_in_core_records() {
         refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
     assert!(receipt.failed_routes.is_empty());
     assert!(receipt.logical_source_failures.is_empty());
-    let index = VerifiedIndex::open(&index_root).unwrap();
+    let index = VerifiedIndex::open_pinned(&index_root).unwrap();
     let records = records_for(&index, child_native_session_id);
     assert_eq!(records.len(), 1);
     let record = &records[0];
