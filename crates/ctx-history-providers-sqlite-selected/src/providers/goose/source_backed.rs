@@ -36,9 +36,10 @@ use super::{
 use crate::{
     common::io::{OpenedProviderSourcePath, ProviderSourceDirectory, ProviderSourceRoot},
     provider::source_backed::{
-        route_error, ChangedDocumentSink, CompleteDocumentTree, DocumentLeafFingerprint,
-        DocumentRecordSpool, DocumentSourceTerminal, ObservedDocumentLeaf, ReplacementDocumentTree,
-        SourceBackedRouteError, SourceBackedRouteErrorKind, SourceBackedRouteResult,
+        route_error, sqlite_source_route_error, ChangedDocumentSink, CompleteDocumentTree,
+        DocumentLeafFingerprint, DocumentRecordSpool, DocumentSourceTerminal, ObservedDocumentLeaf,
+        ReplacementDocumentTree, SourceBackedRouteError, SourceBackedRouteErrorKind,
+        SourceBackedRouteResult,
     },
     provider_sources::{
         open_root_handle_sqlite_source_snapshot, retain_sqlite_source_directory_authority,
@@ -183,7 +184,6 @@ impl<B> GooseSourceBackedAdapterV0<B> {
 pub(crate) struct GoosePresentAuthority {
     retained: RetainedGooseDirectory,
     snapshot: Mutex<Option<SqliteSourceReadSnapshot>>,
-    terminal_revalidate: Box<dyn Fn() -> bool + Send + Sync>,
 }
 
 pub(crate) enum GooseTreeAuthority {
@@ -225,7 +225,6 @@ impl<B: SelectedSqliteCaptureBinding> ReplacementDocumentTree for GooseSourceBac
         let fingerprint =
             observe_goose_logical_fingerprint(snapshot.connection().map_err(route_error)?)
                 .map_err(route_error)?;
-        let terminal_revalidate = snapshot.terminal_revalidator();
         Ok(CompleteDocumentTree::new(
             fingerprint,
             vec![ObservedDocumentLeaf::new(
@@ -235,7 +234,6 @@ impl<B: SelectedSqliteCaptureBinding> ReplacementDocumentTree for GooseSourceBac
             GooseTreeAuthority::Present(Box::new(GoosePresentAuthority {
                 retained,
                 snapshot: Mutex::new(Some(snapshot)),
-                terminal_revalidate: Box::new(move || terminal_revalidate().is_ok()),
             })),
         ))
     }
@@ -321,14 +319,11 @@ fn finish_present_authority(
     authority: &GoosePresentAuthority,
     snapshot: SqliteSourceReadSnapshot,
 ) -> SourceBackedRouteResult<()> {
-    snapshot.finish().map_err(route_error)?;
+    let terminal_fence = snapshot.seal().map_err(sqlite_source_route_error)?;
     authority.retained.revalidate()?;
-    if !(authority.terminal_revalidate)() {
-        return Err(source_changed(
-            "Goose retained terminal fence changed before publication",
-        ));
-    }
-    Ok(())
+    terminal_fence
+        .revalidate()
+        .map_err(sqlite_source_route_error)
 }
 
 pub(crate) struct RetainedGooseDirectory {

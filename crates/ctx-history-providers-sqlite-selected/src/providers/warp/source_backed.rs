@@ -27,9 +27,10 @@ use super::{
 use crate::{
     common::io::{OpenedProviderSourcePath, ProviderSourceDirectory, ProviderSourceRoot},
     provider::source_backed::{
-        route_error, ChangedDocumentSink, CompleteDocumentTree, DocumentLeafFingerprint,
-        DocumentRecordSpool, DocumentSourceTerminal, ObservedDocumentLeaf, ReplacementDocumentTree,
-        SourceBackedRouteError, SourceBackedRouteErrorKind, SourceBackedRouteResult,
+        route_error, sqlite_source_route_error, ChangedDocumentSink, CompleteDocumentTree,
+        DocumentLeafFingerprint, DocumentRecordSpool, DocumentSourceTerminal, ObservedDocumentLeaf,
+        ReplacementDocumentTree, SourceBackedRouteError, SourceBackedRouteErrorKind,
+        SourceBackedRouteResult,
     },
     provider_sources::{
         open_root_handle_sqlite_source_snapshot, retain_sqlite_source_directory_authority,
@@ -145,7 +146,6 @@ pub(crate) struct WarpReplacementTreeAdapter<B> {
 pub(crate) struct WarpPresentAuthority {
     retained: RetainedWarpDirectory,
     snapshot: Mutex<Option<SqliteSourceReadSnapshot>>,
-    terminal_revalidate: Box<dyn Fn() -> bool + Send + Sync>,
 }
 
 pub(crate) enum WarpTreeAuthority {
@@ -187,7 +187,6 @@ impl<B: SelectedSqliteCaptureBinding> ReplacementDocumentTree for WarpReplacemen
             &self.source,
         )
         .map_err(route_error)?;
-        let terminal_revalidate = snapshot.terminal_revalidator();
         Ok(CompleteDocumentTree::new(
             fingerprint,
             vec![ObservedDocumentLeaf::new(
@@ -197,7 +196,6 @@ impl<B: SelectedSqliteCaptureBinding> ReplacementDocumentTree for WarpReplacemen
             WarpTreeAuthority::Present(Box::new(WarpPresentAuthority {
                 retained,
                 snapshot: Mutex::new(Some(snapshot)),
-                terminal_revalidate: Box::new(move || terminal_revalidate().is_ok()),
             })),
         ))
     }
@@ -285,14 +283,11 @@ fn finish_warp_authority(
     authority: &WarpPresentAuthority,
     snapshot: SqliteSourceReadSnapshot,
 ) -> SourceBackedRouteResult<()> {
-    snapshot.finish().map_err(route_error)?;
+    let terminal_fence = snapshot.seal().map_err(sqlite_source_route_error)?;
     authority.retained.revalidate()?;
-    if !(authority.terminal_revalidate)() {
-        return Err(source_changed(
-            "Warp retained terminal fence changed before publication",
-        ));
-    }
-    Ok(())
+    terminal_fence
+        .revalidate()
+        .map_err(sqlite_source_route_error)
 }
 
 pub(crate) struct RetainedWarpDirectory {
