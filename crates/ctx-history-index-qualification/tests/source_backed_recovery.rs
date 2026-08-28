@@ -84,7 +84,7 @@ fn subprocess_generation_worker() {
 #[test]
 fn process_death_before_commit_preserves_and_can_advance_the_previous_generation() {
     let fixture = RecoveryFixture::new();
-    let old_reader = VerifiedIndex::open(&fixture.root).unwrap();
+    let old_reader = VerifiedIndex::open_pinned(&fixture.root).unwrap();
     let mut child = fixture.spawn_stopped_child("pause_before_commit", None);
     fixture.kill_at_marker(&mut child);
 
@@ -108,7 +108,7 @@ fn process_death_before_commit_preserves_and_can_advance_the_previous_generation
 #[test]
 fn process_death_after_commit_keeps_new_visibility_and_old_reader_pinning() {
     let fixture = RecoveryFixture::new();
-    let old_reader = VerifiedIndex::open(&fixture.root).unwrap();
+    let old_reader = VerifiedIndex::open_pinned(&fixture.root).unwrap();
     let mut child = fixture.spawn_stopped_child("pause_after_commit", None);
     fixture.kill_at_marker(&mut child);
 
@@ -139,7 +139,7 @@ fn version_one_pointer_refresh_rebuilds_atomically_without_compatibility_reading
     fs::write(&pointer_path, &version_one_pointer).unwrap();
 
     assert!(matches!(
-        VerifiedIndex::open(&fixture.root),
+        VerifiedIndex::open_pinned(&fixture.root),
         Err(IndexError::UnsupportedActiveGenerationPointer(1))
     ));
 
@@ -156,7 +156,7 @@ fn version_one_pointer_refresh_rebuilds_atomically_without_compatibility_reading
         .unwrap()
         .is_empty());
     assert!(matches!(
-        VerifiedIndex::open(&fixture.root),
+        VerifiedIndex::open_pinned(&fixture.root),
         Err(IndexError::UnsupportedActiveGenerationPointer(1))
     ));
 
@@ -296,7 +296,7 @@ fn torn_manifest_and_meta_fail_closed_without_damaging_the_previous_root() {
         .join(format!("{}.json", fixture.baseline.generation_id));
     fs::write(manifest_path, b"{\"manifest_version\":1").unwrap();
     assert!(
-        VerifiedIndex::open(&manifest_copy).is_err(),
+        VerifiedIndex::open_pinned(&manifest_copy).is_err(),
         "torn manifest was accepted"
     );
 
@@ -306,7 +306,7 @@ fn torn_manifest_and_meta_fail_closed_without_damaging_the_previous_root() {
     )
     .unwrap();
     assert!(
-        VerifiedIndex::open(&meta_copy).is_err(),
+        VerifiedIndex::open_pinned(&meta_copy).is_err(),
         "torn meta.json was accepted"
     );
 
@@ -325,14 +325,14 @@ fn active_segment_corruption_is_detected_and_rebuild_is_deterministic() {
     let rebuild_root = fixture.temp.path().join("rebuild");
     copy_tree(&fixture.root, &corrupt_copy);
 
-    assert!(VerifiedIndex::open(&corrupt_copy)
+    assert!(VerifiedIndex::open_pinned(&corrupt_copy)
         .unwrap()
         .validate_checksums()
         .unwrap()
         .is_empty());
     let damaged_path = corrupt_active_store(&corrupt_copy);
     assert!(
-        VerifiedIndex::open(&corrupt_copy).is_err(),
+        VerifiedIndex::open_pinned(&corrupt_copy).is_err(),
         "verified open admitted a malformed active document"
     );
     let damaged = Index::open_in_dir(active_generation_path(&corrupt_copy))
@@ -377,7 +377,7 @@ fn incompatible_zstd_generation_rebuilds_from_sources_without_cloning_the_slot()
     meta["index_settings"]["docstore_blocksize"] = serde_json::Value::from(64 * 1024);
     fs::write(&meta_path, serde_json::to_vec(&meta).unwrap()).unwrap();
     assert!(matches!(
-        VerifiedIndex::open(&fixture.root),
+        VerifiedIndex::open_pinned(&fixture.root),
         Err(IndexError::IndexSettingsMismatch(_))
     ));
 
@@ -496,7 +496,7 @@ fn inactive_generation_and_atomic_pointer_process_death_matrix() {
 fn retry_after_pre_pointer_crash_reclaims_inactive_generation() {
     let shim = required_fault_shim();
     let fixture = RecoveryFixture::new();
-    let pinned_reader = VerifiedIndex::open(&fixture.root).unwrap();
+    let pinned_reader = VerifiedIndex::open_pinned(&fixture.root).unwrap();
     let case = FaultCase::stop(
         "rename",
         "pointer_final",
@@ -938,7 +938,7 @@ fn run_stopped_fault_case(shim: &Path, case: FaultCase) {
         "fault case {case:?}; baseline generation {}",
         fixture.baseline.generation_id
     );
-    let old_reader = VerifiedIndex::open(&fixture.root).unwrap();
+    let old_reader = VerifiedIndex::open_pinned(&fixture.root).unwrap();
     let mut child = fixture.spawn_stopped_child("commit", Some((shim, case)));
     fixture.kill_at_marker(&mut child);
 
@@ -950,7 +950,7 @@ fn run_stopped_fault_case(shim: &Path, case: FaultCase) {
             "candidate",
         ),
         Visibility::New => {
-            let current = VerifiedIndex::open(&fixture.root).unwrap();
+            let current = VerifiedIndex::open_pinned(&fixture.root).unwrap();
             assert_ne!(current.generation_id(), fixture.baseline.generation_id);
             assert_reader_terms(&current, "candidate", "previous");
         }
@@ -1251,7 +1251,7 @@ fn document(source: &SourceKey, body: &str) -> CoreRecord {
 }
 
 fn assert_generation(root: &Path, generation_id: &str, present: &str, absent: &str) {
-    let index = VerifiedIndex::open(root).unwrap();
+    let index = VerifiedIndex::open_pinned(root).unwrap();
     assert_eq!(index.generation_id(), generation_id);
     assert_reader_terms(&index, present, absent);
 }

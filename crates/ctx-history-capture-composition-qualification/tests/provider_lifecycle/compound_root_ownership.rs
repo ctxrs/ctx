@@ -210,7 +210,7 @@ fn publish(path: &Path, registry: &SourceBackedProviderRegistry) -> VerifiedInde
         "{:?}",
         receipt.failed_routes
     );
-    VerifiedIndex::open(path).unwrap()
+    VerifiedIndex::open_pinned(path).unwrap()
 }
 
 fn source_bytes(index: &VerifiedIndex, marker: &str) -> StableSourceBytes {

@@ -43,9 +43,10 @@ fn explicit_custom_relocation_preserves_route_source_session_and_event_identity(
         .as_str()
         .expect("automatic import generation");
     assert_ne!(automatic_generation, first_generation);
-    let retained =
-        ctx_history_index::VerifiedIndex::open(data_root(&temp).join("search").join("lexical"))
-            .unwrap();
+    let retained = ctx_history_index::VerifiedIndex::open_pinned(
+        data_root(&temp).join("search").join("lexical"),
+    )
+    .unwrap();
     assert!(retained
         .manifest()
         .source_routes()
@@ -130,9 +131,10 @@ fn failed_explicit_replacement_preserves_retained_relocation_witness() {
     assert_eq!(failed["sources"][0]["carried_forward"], false, "{failed:#}");
     assert_eq!(published_generation(&failed), first_generation);
 
-    let retained =
-        ctx_history_index::VerifiedIndex::open(data_root(&temp).join("search").join("lexical"))
-            .unwrap();
+    let retained = ctx_history_index::VerifiedIndex::open_pinned(
+        data_root(&temp).join("search").join("lexical"),
+    )
+    .unwrap();
     assert!(retained
         .manifest()
         .source_routes()
@@ -194,9 +196,10 @@ fn replaced_explicit_custom_route_cannot_reuse_a_stale_relocation_witness() {
     assert_eq!(replacement["outcome"], "success", "{replacement:#}");
     let replacement_generation = published_generation(&replacement);
     let replacement_route = replacement["sources"][0]["route_identity"].clone();
-    let replaced =
-        ctx_history_index::VerifiedIndex::open(data_root(&temp).join("search").join("lexical"))
-            .unwrap();
+    let replaced = ctx_history_index::VerifiedIndex::open_pinned(
+        data_root(&temp).join("search").join("lexical"),
+    )
+    .unwrap();
     assert!(!replaced
         .manifest()
         .source_routes()

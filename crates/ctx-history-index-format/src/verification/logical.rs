@@ -881,8 +881,8 @@ fn verify_manifest_aggregates(
 
 mod logical_identity;
 use logical_identity::{
-    canonical_uuid_term, for_each_live_posting, relationship_kind_tag, verify_event_identities,
-    verify_session_identities, verify_session_witness_key,
+    relationship_kind_tag, verify_event_identities, verify_session_identities,
+    verify_session_witness_key,
 };
 
 #[cfg(test)]

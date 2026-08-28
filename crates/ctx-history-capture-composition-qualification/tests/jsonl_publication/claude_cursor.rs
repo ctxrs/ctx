@@ -102,7 +102,7 @@ fn indexed_records(
     provider: CaptureProvider,
     native_session_id: &str,
 ) -> Vec<CoreRecord> {
-    let verified = VerifiedIndex::open(index).unwrap();
+    let verified = VerifiedIndex::open_pinned(index).unwrap();
     let mut records = verified
         .manifest()
         .sources
@@ -138,7 +138,7 @@ fn lexical_match_count(index: &VerifiedIndex, text: &str) -> usize {
 }
 
 fn certified_prefix_bytes(index: &Path, provider: CaptureProvider) -> u64 {
-    let verified = VerifiedIndex::open(index).unwrap();
+    let verified = VerifiedIndex::open_pinned(index).unwrap();
     verified
         .manifest()
         .sources
@@ -348,7 +348,7 @@ fn cursor_malformed_nested_role_rejects_only_that_record() {
         &indexed_records(&index, CaptureProvider::Cursor, native_session_id),
         &["cursorisolationbeforemarker", "cursorisolationaftermarker"],
     );
-    let published = VerifiedIndex::open(&index).unwrap();
+    let published = VerifiedIndex::open_pinned(&index).unwrap();
     for marker in ["cursorisolationbeforemarker", "cursorisolationaftermarker"] {
         assert_eq!(
             lexical_match_count(&published, marker),
@@ -381,7 +381,7 @@ fn cursor_top_level_role_revision_reparses_unchanged_prior_rejection_state() {
     let registry = registry(CaptureProvider::Cursor, CURSOR_SOURCE_FORMAT, &root);
     refresh_source_backed_generation(&index, &registry, writer_options()).unwrap();
 
-    let current = VerifiedIndex::open(&index).unwrap();
+    let current = VerifiedIndex::open_pinned(&index).unwrap();
     let current_certificate = current
         .manifest()
         .sources
@@ -421,7 +421,7 @@ fn cursor_top_level_role_revision_reparses_unchanged_prior_rejection_state() {
     writer.set_present_source_routes(source_routes).unwrap();
     let prior_generation = writer.commit(|_| true).unwrap().generation_id;
 
-    let prior = VerifiedIndex::open(&index).unwrap();
+    let prior = VerifiedIndex::open_pinned(&index).unwrap();
     let prior_source = prior
         .manifest()
         .sources
@@ -468,7 +468,7 @@ fn cursor_top_level_role_revision_reparses_unchanged_prior_rejection_state() {
         &[marker],
     );
     assert_eq!(
-        lexical_match_count(&VerifiedIndex::open(&index).unwrap(), marker),
+        lexical_match_count(&VerifiedIndex::open_pinned(&index).unwrap(), marker),
         1
     );
 }
@@ -622,7 +622,7 @@ fn automatic_claude_root_replacement_retires_sources_absent_from_strict_subset()
     assert_eq!(receipt.complete_inventory_route_ids.len(), 1);
     assert_eq!(receipt.removals.len(), 1);
 
-    let verified = VerifiedIndex::open(&index).unwrap();
+    let verified = VerifiedIndex::open_pinned(&index).unwrap();
     assert_eq!(
         verified
             .manifest()
@@ -734,7 +734,7 @@ fn claude_roots_with_the_same_relative_session_path_publish_independent_sources(
     );
     assert_eq!(result.successful_route_ids.len(), 2);
 
-    let verified = VerifiedIndex::open(&index).unwrap();
+    let verified = VerifiedIndex::open_pinned(&index).unwrap();
     let claude_sources = verified
         .manifest()
         .sources
@@ -864,7 +864,7 @@ fn unavailable_configured_claude_home_carries_only_itself_while_peer_refreshes()
     );
     let work_records = indexed_records(&index, CaptureProvider::Claude, "work-session");
     assert_literal_bodies(&work_records, &["work retained marker"]);
-    let published = VerifiedIndex::open(&index).unwrap();
+    let published = VerifiedIndex::open_pinned(&index).unwrap();
     assert_eq!(published.manifest().provider_roots().len(), 2);
     assert!(published
         .manifest()
@@ -951,7 +951,7 @@ fn cold_unavailable_configured_claude_home_does_not_block_healthy_peer() {
         &indexed_records(&index, CaptureProvider::Claude, "personal-session"),
         &["personal cold marker"],
     );
-    let published = VerifiedIndex::open(&index).unwrap();
+    let published = VerifiedIndex::open_pinned(&index).unwrap();
     let personal_root = published
         .manifest()
         .provider_roots()
@@ -1055,7 +1055,7 @@ fn claude_incompatible_duplicate_kind_quarantines_only_its_source_and_repairs() 
 
     let initial = refresh_source_backed_generation(&index, &registry, writer_options()).unwrap();
     assert!(initial.failed_routes.is_empty());
-    let initial_generation = VerifiedIndex::open(&index)
+    let initial_generation = VerifiedIndex::open_pinned(&index)
         .unwrap()
         .generation_id()
         .to_owned();
@@ -1094,7 +1094,7 @@ fn claude_incompatible_duplicate_kind_quarantines_only_its_source_and_repairs() 
         .detail
         .contains("repeats a stable event identity with incompatible event kinds"));
     assert_ne!(
-        VerifiedIndex::open(&index).unwrap().generation_id(),
+        VerifiedIndex::open_pinned(&index).unwrap().generation_id(),
         initial_generation
     );
     assert_eq!(

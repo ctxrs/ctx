@@ -236,7 +236,7 @@ fn copilot_route_discards_physical_line_above_shared_ceiling_and_publishes_neigh
         }
     );
 
-    let records = core_records(&VerifiedIndex::open(&index_path).unwrap());
+    let records = core_records(&VerifiedIndex::open_pinned(&index_path).unwrap());
     assert_eq!(records.len(), 5);
     for expected in [
         "before-start",
@@ -317,7 +317,7 @@ fn copilot_route_enforces_independent_exact_identity_component_boundaries() {
     assert!(receipt.record_rejections.is_empty());
     assert_eq!(receipt.sources.len(), 4);
 
-    let records = core_records(&VerifiedIndex::open(&index_path).unwrap());
+    let records = core_records(&VerifiedIndex::open_pinned(&index_path).unwrap());
     assert_eq!(records.len(), 12);
     assert_eq!(
         invocation_identity(record_by_native_id(&records, "server-exact-start")),
@@ -370,7 +370,7 @@ fn copilot_activity_append_replay_preserves_stable_event_ids() {
     let registry = copilot_registry(&root, temp.path());
 
     refresh_source_backed_generation(&index_path, &registry, WriterOptions::default()).unwrap();
-    let initial = core_records(&VerifiedIndex::open(&index_path).unwrap());
+    let initial = core_records(&VerifiedIndex::open_pinned(&index_path).unwrap());
     let initial_start = record_by_native_id(&initial, "first-start");
     let initial_complete = record_by_native_id(&initial, "first-complete");
     let initial_start_id = initial_start.event_id;
@@ -404,7 +404,7 @@ fn copilot_activity_append_replay_preserves_stable_event_ids() {
     assert!(appended.failed_routes.is_empty());
     assert!(appended.logical_source_failures.is_empty());
     let appended_generation = appended.commit.generation_id.clone();
-    let appended_records = core_records(&VerifiedIndex::open(&index_path).unwrap());
+    let appended_records = core_records(&VerifiedIndex::open_pinned(&index_path).unwrap());
     let first_start = record_by_native_id(&appended_records, "first-start");
     let first_complete = record_by_native_id(&appended_records, "first-complete");
     assert_eq!(first_start.event_id, initial_start_id);
@@ -431,7 +431,7 @@ fn copilot_activity_append_replay_preserves_stable_event_ids() {
     assert_eq!(replay.commit.generation_id, appended_generation);
 
     refresh_source_backed_generation(&cold_path, &registry, WriterOptions::default()).unwrap();
-    let cold_records = core_records(&VerifiedIndex::open(&cold_path).unwrap());
+    let cold_records = core_records(&VerifiedIndex::open_pinned(&cold_path).unwrap());
     assert_eq!(
         cold_records
             .iter()

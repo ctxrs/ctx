@@ -276,7 +276,7 @@ impl Fixture {
             )?)?;
         }
         writer.commit(|_| true)?;
-        Ok(VerifiedIndex::open(root)?)
+        Ok(VerifiedIndex::open_pinned(root)?)
     }
 
     fn publish_with_event_sequences(
@@ -320,7 +320,7 @@ impl Fixture {
             )?)?;
         }
         writer.commit(|_| true)?;
-        Ok(VerifiedIndex::open(root)?)
+        Ok(VerifiedIndex::open_pinned(root)?)
     }
 
     fn source_digest(&self, index: &VerifiedIndex, source_index: usize) -> Result<String> {
@@ -557,7 +557,7 @@ fn retrieval_excluded_events_never_enter_the_source_backed_semantic_projection()
         },
     )?)?;
     writer.commit(|_| true)?;
-    let index = VerifiedIndex::open(root)?;
+    let index = VerifiedIndex::open_pinned(root)?;
     let source_digest = index.manifest().core_record_aggregates[0]
         .source_identity_digest()
         .to_owned();
@@ -614,7 +614,7 @@ fn mixed_core_roles_build_and_pin_only_the_semantic_candidate() -> Result<()> {
         },
     )?)?;
     writer.commit(|_| true)?;
-    let index = VerifiedIndex::open(root)?;
+    let index = VerifiedIndex::open_pinned(root)?;
 
     assert_eq!(index.manifest().indexed_documents, 2);
     let source_aggregate = &index.manifest().core_record_aggregates[0];
@@ -685,7 +685,7 @@ fn page_embedding_batches_multiple_documents_in_one_embedder_call() -> Result<()
         },
     )?)?;
     writer.commit(|_| true)?;
-    let index = VerifiedIndex::open(root)?;
+    let index = VerifiedIndex::open_pinned(root)?;
 
     let mut store = SemanticVectorStore::open(&fixture.semantic_path, semantic_model_contract())?;
     let mut builder = CoreBuilder::default();
@@ -740,7 +740,7 @@ fn role_policy_transition_rebuilds_semantic_state_without_reingesting_core() -> 
         },
     )?)?;
     writer.commit(|_| true)?;
-    let index = VerifiedIndex::open(&root)?;
+    let index = VerifiedIndex::open_pinned(&root)?;
     let core_generation_id = index.generation_id().to_owned();
 
     let mut store = SemanticVectorStore::open(&fixture.semantic_path, semantic_model_contract())?;
@@ -779,7 +779,7 @@ fn role_policy_transition_rebuilds_semantic_state_without_reingesting_core() -> 
     );
     assert_eq!(index.generation_id(), core_generation_id);
     assert_eq!(
-        VerifiedIndex::open(root)?.generation_id(),
+        VerifiedIndex::open_pinned(root)?.generation_id(),
         core_generation_id
     );
     Ok(())

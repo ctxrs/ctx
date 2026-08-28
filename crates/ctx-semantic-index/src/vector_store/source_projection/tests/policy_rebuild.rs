@@ -100,7 +100,7 @@ fn descriptor_only_model_change_rebuilds_every_vector_from_unchanged_core() -> R
     );
     assert_eq!(index.generation_id(), core_generation_id);
     assert_eq!(
-        VerifiedIndex::open(fixture.data_root.join("index-revision"))?.generation_id(),
+        VerifiedIndex::open_pinned(fixture.data_root.join("index-revision"))?.generation_id(),
         core_generation_id,
         "a semantic-model-only rebuild must leave committed Core active"
     );

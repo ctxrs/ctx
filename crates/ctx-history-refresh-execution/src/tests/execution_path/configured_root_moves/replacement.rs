@@ -71,7 +71,7 @@ fn moving_named_qoder_transcript_tree_preserves_supported_layouts_and_identity()
     ));
     run_report(&first_discovery, first_report, &data_root, &index_root).unwrap();
 
-    let first = VerifiedIndex::open(&index_root).unwrap();
+    let first = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert_eq!(
         first
             .complete_lexical_search(DIRECT_MARKER, 8)
@@ -129,7 +129,7 @@ fn moving_named_qoder_transcript_tree_preserves_supported_layouts_and_identity()
     );
     run_report(&moved_discovery, moved_report, &data_root, &index_root).unwrap();
 
-    let moved = VerifiedIndex::open(&index_root).unwrap();
+    let moved = VerifiedIndex::open_pinned(&index_root).unwrap();
     let moved_root_manifest = moved.manifest().provider_root(ROOT_ID).unwrap();
     assert_eq!(moved_root_manifest.routes(), first_routes);
     assert_eq!(moved_root_manifest.definition().path, moved_root);
@@ -236,7 +236,7 @@ fn failed_same_name_incompatible_replacement_keeps_predecessor_until_success() {
         &mut progress,
     )
     .unwrap();
-    let initial_index = VerifiedIndex::open(&index_root).unwrap();
+    let initial_index = VerifiedIndex::open_pinned(&index_root).unwrap();
     let predecessor_root = initial_index.manifest().provider_root("work").unwrap();
     let predecessor_routes = predecessor_root.routes().to_vec();
     let predecessor_tokens = initial_index
@@ -296,7 +296,7 @@ fn failed_same_name_incompatible_replacement_keeps_predecessor_until_success() {
         .route_results
         .iter()
         .any(|result| result.outcome.failure_class().is_some()));
-    let failed_index = VerifiedIndex::open(&index_root).unwrap();
+    let failed_index = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert_eq!(
         failed_index
             .complete_lexical_search("atomicpredecessorhistory", 8)
@@ -366,7 +366,7 @@ fn failed_same_name_incompatible_replacement_keeps_predecessor_until_success() {
         &mut progress,
     )
     .unwrap();
-    let succeeded = VerifiedIndex::open(&index_root).unwrap();
+    let succeeded = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert!(
         predecessor_routes
             .iter()
@@ -457,7 +457,7 @@ fn failed_same_provider_kind_replacement_keeps_predecessor_until_success() {
         &mut progress,
     )
     .unwrap();
-    let predecessor = VerifiedIndex::open(&index_root).unwrap();
+    let predecessor = VerifiedIndex::open_pinned(&index_root).unwrap();
     let predecessor_route = predecessor
         .manifest()
         .provider_root("work")
@@ -500,7 +500,7 @@ fn failed_same_provider_kind_replacement_keeps_predecessor_until_success() {
         &mut progress,
     )
     .unwrap();
-    let failed = VerifiedIndex::open(&index_root).unwrap();
+    let failed = VerifiedIndex::open_pinned(&index_root).unwrap();
     let failed_root = failed.manifest().provider_root("work").unwrap();
     assert_eq!(
         failed_root.definition().kind,
@@ -533,7 +533,7 @@ fn failed_same_provider_kind_replacement_keeps_predecessor_until_success() {
         &mut progress,
     )
     .unwrap();
-    let succeeded = VerifiedIndex::open(&index_root).unwrap();
+    let succeeded = VerifiedIndex::open_pinned(&index_root).unwrap();
     let succeeded_root = succeeded.manifest().provider_root("work").unwrap();
     assert_eq!(
         succeeded_root.definition().kind,
@@ -610,7 +610,7 @@ fn compound_same_name_replacement_waits_for_every_successor_in_either_route_orde
             "unexpected initial rejections: {:#?}",
             initial_receipt.route_results
         );
-        let initial_index = VerifiedIndex::open(&index_root).unwrap();
+        let initial_index = VerifiedIndex::open_pinned(&index_root).unwrap();
         let predecessor_root = initial_index.manifest().provider_root("work").unwrap();
         assert_eq!(
             predecessor_root.source_identity(),
@@ -720,7 +720,7 @@ fn compound_same_name_replacement_waits_for_every_successor_in_either_route_orde
             .route_results
             .iter()
             .any(|result| result.outcome.failure_class().is_some()));
-        let failed_index = VerifiedIndex::open(&index_root).unwrap();
+        let failed_index = VerifiedIndex::open_pinned(&index_root).unwrap();
         let failed_root = failed_index.manifest().provider_root("work").unwrap();
         assert_eq!(failed_root.definition().provider, CaptureProvider::Claude);
         assert_eq!(
@@ -783,7 +783,7 @@ fn compound_same_name_replacement_waits_for_every_successor_in_either_route_orde
                 &mut progress,
             )
             .unwrap();
-            let reverted = VerifiedIndex::open(&index_root).unwrap();
+            let reverted = VerifiedIndex::open_pinned(&index_root).unwrap();
             assert!(reverted
                 .complete_lexical_search("compoundsessionsuccess", 8)
                 .unwrap()
@@ -846,7 +846,7 @@ fn compound_same_name_replacement_waits_for_every_successor_in_either_route_orde
             "unexpected successor outcomes: {:#?}",
             succeeded.route_results
         );
-        let succeeded_index = VerifiedIndex::open(&index_root).unwrap();
+        let succeeded_index = VerifiedIndex::open_pinned(&index_root).unwrap();
         let succeeded_root = succeeded_index.manifest().provider_root("work").unwrap();
         assert_eq!(succeeded_root.definition().provider, CaptureProvider::Codex);
         assert!(succeeded_root.exact_source_memberships().is_empty());
@@ -931,7 +931,7 @@ fn moving_a_named_claude_home_preserves_route_and_source_identity() {
         &mut progress,
     )
     .unwrap();
-    let first = VerifiedIndex::open(&index_root).unwrap();
+    let first = VerifiedIndex::open_pinned(&index_root).unwrap();
     let first_route = first.manifest().provider_roots()[0].routes()[0].clone();
     let first_source = first.manifest().sources[0].observation().source().clone();
     drop(first);
@@ -964,7 +964,7 @@ fn moving_a_named_claude_home_preserves_route_and_source_identity() {
     )
     .unwrap();
 
-    let moved = VerifiedIndex::open(&index_root).unwrap();
+    let moved = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert_eq!(moved.manifest().source_routes().len(), 1);
     assert_eq!(
         moved.manifest().provider_roots()[0].routes(),
@@ -1057,7 +1057,7 @@ fn moving_a_named_codex_home_preserves_route_and_source_identity() {
         &mut progress,
     )
     .unwrap();
-    let first = VerifiedIndex::open(&index_root).unwrap();
+    let first = VerifiedIndex::open_pinned(&index_root).unwrap();
     let first_route = first.manifest().provider_roots()[0].routes()[0].clone();
     let first_source = first.manifest().sources[0].observation().source().clone();
     drop(first);
@@ -1090,7 +1090,7 @@ fn moving_a_named_codex_home_preserves_route_and_source_identity() {
     )
     .unwrap();
 
-    let moved = VerifiedIndex::open(&index_root).unwrap();
+    let moved = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert_eq!(moved.manifest().source_routes().len(), 1);
     assert_eq!(
         moved.manifest().provider_roots()[0].routes(),
@@ -1227,7 +1227,7 @@ fn same_id_provider_replacement_retires_old_routes_and_publishes_the_new_root() 
     )
     .unwrap();
 
-    let replaced = VerifiedIndex::open(&index_root).unwrap();
+    let replaced = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert!(replaced
         .complete_lexical_search("retiredproviderfixture", 10)
         .unwrap()

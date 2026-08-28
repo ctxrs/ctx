@@ -308,7 +308,7 @@ fn publication_bytes(
         receipt.failed_routes
     );
     assert!(!receipt.sources.is_empty());
-    let index = VerifiedIndex::open(index_root).unwrap();
+    let index = VerifiedIndex::open_pinned(index_root).unwrap();
     let manifest = index.manifest();
     let mut sources = manifest
         .sources
@@ -364,10 +364,10 @@ fn assert_publication_bytes_eq(
 }
 
 fn records_matching(index_root: &Path, marker: &str) -> Vec<CoreRecord> {
-    search_event_candidates(&VerifiedIndex::open(index_root).unwrap(), marker, 32)
+    search_event_candidates(&VerifiedIndex::open_pinned(index_root).unwrap(), marker, 32)
         .into_iter()
         .map(|candidate| {
-            VerifiedIndex::open(index_root)
+            VerifiedIndex::open_pinned(index_root)
                 .unwrap()
                 .core_record_by_id(candidate.event.event_id.as_uuid())
                 .unwrap()
@@ -384,7 +384,7 @@ fn only_record_matching(index_root: &Path, marker: &str) -> CoreRecord {
 }
 
 fn auggie_record_owned_by_root(index_root: &Path, root_id: &str, marker: &str) -> CoreRecord {
-    let index = VerifiedIndex::open(index_root).unwrap();
+    let index = VerifiedIndex::open_pinned(index_root).unwrap();
     let allowed = index
         .manifest()
         .provider_root_source_tokens(&[root_id.to_owned()], &[])
@@ -849,7 +849,7 @@ fn moved_openhands_current_root_retains_released_authority_through_full_lifecycl
                 serde_json::to_vec(&only_record_matching(&index_root, MOVED_MARKER)).unwrap(),
                 serde_json::to_vec(&automatic_record).unwrap()
             );
-            let missing_index = VerifiedIndex::open(&index_root).unwrap();
+            let missing_index = VerifiedIndex::open_pinned(&index_root).unwrap();
             assert!(missing_index
                 .manifest()
                 .source_route(&automatic_route)
@@ -932,7 +932,9 @@ fn moved_openhands_current_root_retains_released_authority_through_full_lifecycl
             usize::from(automatic_enabled)
         );
         assert_eq!(
-            VerifiedIndex::open(&index_root).unwrap().document_count(),
+            VerifiedIndex::open_pinned(&index_root)
+                .unwrap()
+                .document_count(),
             expected_route_count as u64
         );
     }

@@ -513,7 +513,7 @@ fn indexed_bodies(index: &Path, receipt: &SourceBackedRefreshReceipt) -> Vec<Str
 }
 
 fn indexed_events(index: &Path, receipt: &SourceBackedRefreshReceipt) -> Vec<CoreRecord> {
-    let verified = VerifiedIndex::open(index).unwrap();
+    let verified = VerifiedIndex::open_pinned(index).unwrap();
     let mut events = receipt
         .sources
         .iter()

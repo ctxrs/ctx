@@ -184,7 +184,7 @@ mod tests {
                 },
             )
             .unwrap();
-        VerifiedIndex::open(root).unwrap()
+        VerifiedIndex::open_pinned(root).unwrap()
     }
 
     fn empty_hermes_route_index(
@@ -249,7 +249,7 @@ mod tests {
                 },
             )
             .unwrap();
-        VerifiedIndex::open(root).unwrap()
+        VerifiedIndex::open_pinned(root).unwrap()
     }
 
     #[test]

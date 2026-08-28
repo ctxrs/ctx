@@ -1,61 +1,75 @@
-// Explicit scrub and legacy test-support helpers remain available even when
-// the production candidate path no longer calls their incremental replay code.
+// Qualification-only deep verification retains a few focused helper paths
+// that are intentionally not part of the production publication verifier.
 #![allow(dead_code)]
 
+use std::{collections::HashSet, path::Path, sync::Arc};
+
+#[cfg(any(test, feature = "test-support"))]
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
-    path::Path,
+    collections::{BTreeMap, HashMap},
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc, Barrier,
+        Barrier,
     },
 };
 
 use ctx_history_index_generation::{
     lexical_index_settings, load_active_generation_pointer, DurableMmapDirectory,
 };
-use sha2::{Digest, Sha256};
 use tantivy::{
-    postings::Postings,
-    schema::{Field, IndexRecordOption},
-    termdict::TermMerger,
-    tokenizer::TokenStream,
-    DocAddress, DocSet, Executor, Index, InvertedIndexReader, ReloadPolicy, Searcher, Term,
-    TERMINATED,
+    schema::Field, termdict::TermMerger, DocAddress, Index, InvertedIndexReader, ReloadPolicy,
+    Searcher,
 };
 use uuid::Uuid;
 
 #[cfg(any(test, feature = "test-support"))]
+use sha2::{Digest, Sha256};
+#[cfg(any(test, feature = "test-support"))]
 use std::cell::Cell;
+#[cfg(any(test, feature = "test-support"))]
+use tantivy::{
+    postings::Postings, schema::IndexRecordOption, tokenizer::TokenStream, DocSet, Executor, Term,
+    TERMINATED,
+};
 
+#[cfg(any(test, feature = "test-support"))]
 use crate::{
-    accumulate_core_record, core_record_accumulator_leaf, fields_from_schema, hex,
-    load_publication_for_metas, meta_generation, open_slot_index, searcher_generation,
-    stored_verification_record, validate_schema, validate_verification_projection,
-    verify_certified_physical_integrity, verify_or_certify_physical_integrity,
-    ActiveGenerationPointer, CandidatePhysicalProof, CertifiedPhysicalIntegrity, CompactIdentity,
-    Fields, GenerationManifest, GenerationSlot, IdentityFieldRole, IndexError, LoadedPublication,
-    PhysicalIntegrityAudit, Result, SessionAuthorityKey, SourceCoreRecordAggregate,
+    accumulate_core_record, core_record_accumulator_leaf, hex, stored_verification_record,
+    validate_verification_projection, CompactIdentity, IdentityFieldRole, SessionAuthorityKey,
     VerificationRecord,
+};
+use crate::{
+    fields_from_schema, load_publication_for_metas, meta_generation, open_slot_index,
+    searcher_generation, validate_schema, verify_certified_physical_integrity,
+    verify_or_certify_physical_integrity, ActiveGenerationPointer, CandidatePhysicalProof,
+    CertifiedPhysicalIntegrity, Fields, GenerationManifest, GenerationSlot, IndexError,
+    LoadedPublication, PhysicalIntegrityAudit, Result, SourceCoreRecordAggregate,
 };
 use ctx_history_core::CertifiedSource;
 
-use super::{physical_integrity_audit_with_candidate_proof, verify_physical_integrity};
+use super::physical_integrity_audit_with_candidate_proof;
 
+mod postings;
+mod scratch;
+#[cfg(any(test, feature = "test-support"))]
 mod spill;
 
+use postings::{canonical_uuid_term, for_each_live_posting};
+use scratch::{reserve_verification_scratch, with_verification_scratch_budget, ScratchReservation};
+#[cfg(any(test, feature = "test-support"))]
 use spill::{
-    reserve_verification_scratch, with_verification_scratch_budget, ProjectionAccumulator,
-    ProjectionDeltas, ScratchReservation, SpillVerificationIdentities, VerificationSpill,
+    ProjectionAccumulator, ProjectionDeltas, SpillVerificationIdentities, VerificationSpill,
     VERIFICATION_SPILL_BUFFER_BYTES, VERIFICATION_SPILL_RECORD_BYTES,
 };
 
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Default)]
 struct SourceAggregate {
     count: u64,
     accumulator: [u8; 32],
 }
 
+#[cfg(any(test, feature = "test-support"))]
 struct SegmentVerification {
     document_count: u64,
     document_decodes: usize,
@@ -66,6 +80,7 @@ struct SegmentVerification {
     root_session_documents: u64,
 }
 
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Clone, Copy)]
 struct SegmentVerificationTask {
     segment_ord: usize,
@@ -73,16 +88,19 @@ struct SegmentVerificationTask {
     end_doc_id: u32,
 }
 
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Default)]
 struct VerificationCounters {
     active_workers: AtomicUsize,
     max_active_workers: AtomicUsize,
 }
 
+#[cfg(any(test, feature = "test-support"))]
 struct ActiveVerificationWorker<'a> {
     counters: Option<&'a VerificationCounters>,
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl<'a> ActiveVerificationWorker<'a> {
     fn enter(counters: Option<&'a VerificationCounters>) -> Self {
         if let Some(counters) = counters {
@@ -95,6 +113,7 @@ impl<'a> ActiveVerificationWorker<'a> {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl Drop for ActiveVerificationWorker<'_> {
     fn drop(&mut self) {
         if let Some(counters) = self.counters {
@@ -103,6 +122,7 @@ impl Drop for ActiveVerificationWorker<'_> {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Default)]
 struct VerificationRunMetrics {
     #[cfg(any(test, feature = "test-support"))]
@@ -143,6 +163,7 @@ pub fn verify_searcher_structure(searcher: &Searcher, manifest: &GenerationManif
     Ok(())
 }
 
+#[cfg(any(test, feature = "test-support"))]
 pub fn verify_searcher(searcher: &Searcher, manifest: &GenerationManifest) -> Result<()> {
     let worker_budget = verification_worker_budget(searcher.num_docs());
     verify_searcher_with_options(searcher, manifest, worker_budget, false, false).map(|_| ())
@@ -571,23 +592,7 @@ pub fn verify_and_bind_reusable_publication(
     })
 }
 
-/// Verifies the complete publication authority carried by one immutable searcher.
-pub fn verify_complete_searcher(
-    searcher: &Searcher,
-    manifest: &GenerationManifest,
-    generation_path: &Path,
-    topology_authority: Option<&ActiveGenerationPointer>,
-    expected_physical_integrity_digest: &str,
-) -> Result<()> {
-    verify_physical_integrity(
-        searcher.index(),
-        generation_path,
-        topology_authority,
-        expected_physical_integrity_digest,
-    )?;
-    verify_searcher(searcher, manifest)
-}
-
+#[cfg(any(test, feature = "test-support"))]
 const MAX_VERIFICATION_WORKERS: usize = 24;
 
 /// Verifies the compact logical invariants required to publish a writer candidate.
@@ -598,7 +603,8 @@ const MAX_VERIFICATION_WORKERS: usize = 24;
 /// segments to reject a duplicate retained identity. Retained segments are
 /// trusted through the separately revalidated base authority. This path never
 /// decodes stored Core or replays query, source, session, or lineage projections;
-/// [`verify_searcher`] retains that exhaustive behavior for explicit scrubbing.
+/// Test and qualification builds retain exhaustive stored-Core verification as
+/// a separate oracle; it is not compiled into production libraries.
 pub fn verify_publication_candidate(
     searcher: &Searcher,
     manifest: &GenerationManifest,
@@ -840,6 +846,7 @@ pub fn note_candidate_lineage_spill() {
 #[cfg(not(any(test, feature = "test-support")))]
 pub fn note_candidate_lineage_spill() {}
 
+#[cfg(any(test, feature = "test-support"))]
 fn verification_worker_budget(document_count: u64) -> usize {
     let available = std::thread::available_parallelism()
         .map(usize::from)
@@ -874,6 +881,7 @@ fn verification_tasks_split_large_segments_into_contiguous_bounded_ranges() {
 #[cfg(test)]
 mod candidate_identity_tests;
 
+#[cfg(any(test, feature = "test-support"))]
 include!("verification/logical.rs");
 
 #[cfg(any(test, feature = "test-support"))]

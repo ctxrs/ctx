@@ -532,7 +532,7 @@ fn failed_witnessed_cohort_keeps_the_bridge_generation_active() {
             .refresh(&index_root, |_| Ok(()))
             .is_err()
     );
-    let retained = ctx_history_index::VerifiedIndex::open(&index_root).unwrap();
+    let retained = ctx_history_index::VerifiedIndex::open_pinned(&index_root).unwrap();
     assert_eq!(retained.generation_id(), bridge.commit.generation_id);
     assert!(retained.manifest().source_route(&legacy).is_some());
 }

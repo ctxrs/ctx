@@ -116,7 +116,8 @@ fn automatic_and_explicit_empty_routes_preserve_generation_bound_authority() {
         .iter()
         .all(|authority| authority.generation_id == publication.generation_id));
     assert!(
-        verified_generation_is_query_ready(&VerifiedIndex::open(&index_root).unwrap()).unwrap()
+        verified_generation_is_query_ready(&VerifiedIndex::open_pinned(&index_root).unwrap())
+            .unwrap()
     );
 }
 
@@ -170,7 +171,7 @@ fn successful_codex_route_derives_rejected_records_from_committed_core_sources()
     assert_eq!(publication.current.rejected_records, 1);
     assert_eq!(
         complete_lexical_candidates(
-            &VerifiedIndex::open(&index_root).unwrap(),
+            &VerifiedIndex::open_pinned(&index_root).unwrap(),
             "validpeerrecordmarker",
             10,
         )
@@ -328,7 +329,7 @@ fn codex_nested_root_advisory_is_admitted_from_each_childs_own_bytes() {
     assert_eq!(publication.current.source_count, 4);
     assert_eq!(publication.certified_source_count, 4);
     assert_eq!(publication.current.rejected_records, 0);
-    let verified = VerifiedIndex::open(&index_root).unwrap();
+    let verified = VerifiedIndex::open_pinned(&index_root).unwrap();
     let records = codex_core_records(&verified);
     assert_eq!(records.len(), 4);
     for marker in [
@@ -460,7 +461,7 @@ fn codex_deep_root_advisory_chain_has_exact_linear_cardinality() {
     assert_eq!(publication.current.source_count, SOURCES);
     assert_eq!(publication.certified_source_count, SOURCES);
     assert_eq!(publication.current.rejected_records, 0);
-    let verified = VerifiedIndex::open(&index_root).unwrap();
+    let verified = VerifiedIndex::open_pinned(&index_root).unwrap();
     let records = codex_core_records(&verified);
     assert_eq!(records.len(), SOURCES);
     assert_eq!(
@@ -577,7 +578,7 @@ fn registered_codex_parent_and_exact_subdir_share_route_scoped_ownership() {
         parent_publication.route_results[0].route_identity
     );
     assert!(first.route_results[0].outcome.is_success());
-    let verified = VerifiedIndex::open(&index_root).unwrap();
+    let verified = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert!(!verified.manifest().sources.is_empty());
     assert_eq!(
         complete_lexical_candidates(&verified, "automaticrootmarker", 10)
@@ -625,7 +626,7 @@ fn registered_codex_parent_and_exact_subdir_share_route_scoped_ownership() {
     );
     assert_eq!(
         complete_lexical_candidates(
-            &VerifiedIndex::open(&index_root).unwrap(),
+            &VerifiedIndex::open_pinned(&index_root).unwrap(),
             "explicitappendafterimportmarker",
             10,
         )
@@ -702,7 +703,7 @@ fn automatic_parent_and_explicit_directory_child_normalize_in_one_generation() {
         .all(|result| result.outcome.is_success()));
     assert_eq!(publication.certified_source_count, 2);
     assert_codex_parent_child_records(
-        &VerifiedIndex::open(&index_root).unwrap(),
+        &VerifiedIndex::open_pinned(&index_root).unwrap(),
         "automaticparentdirectorymarker",
         "explicitdirectorychildmarker",
     );
@@ -771,7 +772,7 @@ fn automatic_parent_and_explicit_file_child_normalize_in_one_generation() {
         .all(|result| result.outcome.is_success()));
     assert_eq!(publication.certified_source_count, 2);
     assert_codex_parent_child_records(
-        &VerifiedIndex::open(&index_root).unwrap(),
+        &VerifiedIndex::open_pinned(&index_root).unwrap(),
         "automaticparentfilemarker",
         "explicitfilechildmarker",
     );
@@ -863,7 +864,7 @@ fn explicit_child_without_selected_parent_publishes_unresolved_and_never_reroots
         .route_results
         .iter()
         .all(|result| result.outcome.is_success()));
-    let records = codex_core_records(&VerifiedIndex::open(&index_root).unwrap());
+    let records = codex_core_records(&VerifiedIndex::open_pinned(&index_root).unwrap());
     assert_eq!(records.len(), 2);
     let selected = records
         .iter()

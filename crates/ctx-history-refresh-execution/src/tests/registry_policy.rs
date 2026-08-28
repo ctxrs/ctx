@@ -426,7 +426,7 @@ fn distinct_nanoclaw_registry_failures_match_retained_automatic_routes() {
     }
     writer.set_present_source_routes(retained_routes).unwrap();
     writer.commit(|_| true).unwrap();
-    let retained = VerifiedIndex::open(&index_root).unwrap();
+    let retained = VerifiedIndex::open_pinned(&index_root).unwrap();
 
     let issues = sources.map(|source| SourceBackedAutomaticRegistryIssue::Unavailable {
         source,
@@ -498,7 +498,7 @@ fn mixed_codex_and_unsupported_warp_routes_continue_with_typed_evidence() {
     );
     assert!(is_sha256_identity(&failure.route_identity));
     assert!(is_sha256_identity(&failure.source_identity));
-    let verified = VerifiedIndex::open(&index_root).unwrap();
+    let verified = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert_eq!(verified.manifest().sources.len(), 1);
     assert_eq!(
         verified
@@ -592,7 +592,7 @@ fn all_route_execution_preserves_a_healthy_peer_during_source_local_registration
     assert_eq!(failures[0].provider, "shelley");
     assert_eq!(failures[0].class, "unreadable");
     assert!(failures[0].detail.contains("not a database"));
-    let verified = VerifiedIndex::open(&index_root).unwrap();
+    let verified = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert_eq!(verified.manifest().sources.len(), 1);
     assert_eq!(
         verified
@@ -670,7 +670,7 @@ fn unsupported_warp_preserves_same_epoch_last_good_route_as_stale() {
         failure.detail,
         "fixture Warp route is intentionally unsupported"
     );
-    let retained = VerifiedIndex::open(&index_root).unwrap();
+    let retained = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert_eq!(retained.generation_id(), retained_generation);
     assert!(retained.manifest().source_route(&route_identity).is_some());
     assert_eq!(retained.manifest().sources.len(), 1);

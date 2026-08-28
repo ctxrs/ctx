@@ -32,7 +32,7 @@ fn writer_options() -> WriterOptions {
 }
 
 fn all_indexed_records(index: &Path) -> Vec<CoreRecord> {
-    let verified = VerifiedIndex::open(index).unwrap();
+    let verified = VerifiedIndex::open_pinned(index).unwrap();
     let mut records = verified
         .manifest()
         .sources
@@ -348,7 +348,9 @@ fn custom_history_registered_route_preserves_lifecycle_and_core_publication() {
     assert!(deleted.sources.is_empty());
     assert_eq!(deleted.removals.len(), 1);
     assert_eq!(
-        VerifiedIndex::open(&index_root).unwrap().document_count(),
+        VerifiedIndex::open_pinned(&index_root)
+            .unwrap()
+            .document_count(),
         0
     );
 }
@@ -378,7 +380,9 @@ fn custom_history_registered_route_replaces_when_forward_reference_closes() {
     assert_eq!(cold.commit.indexed_documents, 0);
     assert_eq!(cold.sources.len(), 1);
     assert_eq!(
-        VerifiedIndex::open(&index_root).unwrap().document_count(),
+        VerifiedIndex::open_pinned(&index_root)
+            .unwrap()
+            .document_count(),
         0
     );
 
@@ -468,7 +472,7 @@ fn custom_history_structural_manifest_failures_retain_generation_and_restore() {
         &initial_generation,
         SourceBackedSourceFailureClass::Unreadable,
     );
-    let retained = VerifiedIndex::open(&index_root).unwrap();
+    let retained = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert_eq!(retained.generation_id(), initial_generation);
     assert_eq!(retained.document_count(), 1);
     assert_eq!(retained.manifest().sources, initial.sources);
@@ -479,7 +483,7 @@ fn custom_history_structural_manifest_failures_retain_generation_and_restore() {
     assert_eq!(restored.commit.indexed_documents, 1);
     assert_eq!(restored.sources.len(), 1);
     assert_ne!(restored.commit.generation_id, initial_generation);
-    let recovered = VerifiedIndex::open(&index_root).unwrap();
+    let recovered = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert_eq!(recovered.generation_id(), restored.commit.generation_id);
     assert_eq!(recovered.document_count(), 1);
 }
@@ -793,7 +797,7 @@ fn openclaw_unsupported_sqlite_root_failure_is_carried_and_restored() {
         &initial_generation,
         SourceBackedSourceFailureClass::Unreadable,
     );
-    let retained = VerifiedIndex::open(&index).unwrap();
+    let retained = VerifiedIndex::open_pinned(&index).unwrap();
     assert_eq!(retained.generation_id(), initial_generation);
     assert_eq!(retained.document_count(), 1);
     assert_eq!(retained.manifest().sources, initial.sources);
@@ -812,7 +816,10 @@ fn openclaw_unsupported_sqlite_root_failure_is_carried_and_restored() {
     assert_eq!(restored.commit.indexed_documents, 1);
     assert_eq!(restored.sources.len(), 1);
     assert_ne!(restored.commit.generation_id, initial_generation);
-    assert_eq!(VerifiedIndex::open(&index).unwrap().document_count(), 1);
+    assert_eq!(
+        VerifiedIndex::open_pinned(&index).unwrap().document_count(),
+        1
+    );
 }
 
 #[test]

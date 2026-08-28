@@ -417,9 +417,10 @@ fn task_json_cli_imports_cline_and_roo_and_searches() {
         (1, 5),
         "Roo route publication must carry the prior Cline source unchanged"
     );
-    let retained =
-        ctx_history_index::VerifiedIndex::open(data_root(&temp).join("search").join("lexical"))
-            .unwrap();
+    let retained = ctx_history_index::VerifiedIndex::open_pinned(
+        data_root(&temp).join("search").join("lexical"),
+    )
+    .unwrap();
     let retained_cline_route = retained
         .manifest()
         .source_routes()

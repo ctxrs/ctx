@@ -92,11 +92,11 @@ pub use stored_document::{
 pub use verification::{
     load_active_publication_authority, open_pinned_publication, open_publication_candidate,
     verify_and_bind_publication_candidate, verify_and_bind_publication_candidate_with_progress,
-    verify_and_bind_reusable_publication, verify_complete_searcher,
-    verify_pinned_publication_authority, verify_publication_candidate, verify_searcher,
-    verify_searcher_structure, ActivePublicationAuthority, CandidatePublicationVerificationError,
-    EmptyPublicationIndex, OpenedPinnedPublication, OpenedPublicationCandidate, PinnedPublication,
-    ReusablePublicationError, VerifiedCandidatePublication, VerifiedPublication,
+    verify_and_bind_reusable_publication, verify_pinned_publication_authority,
+    verify_publication_candidate, verify_searcher_structure, ActivePublicationAuthority,
+    CandidatePublicationVerificationError, EmptyPublicationIndex, OpenedPinnedPublication,
+    OpenedPublicationCandidate, PinnedPublication, ReusablePublicationError,
+    VerifiedCandidatePublication, VerifiedPublication,
 };
 #[doc(hidden)]
 pub use verification_record::{
@@ -118,5 +118,6 @@ pub use ctx_history_index_generation::{
 pub use verification::{
     candidate_identity_verification_activity, candidate_lineage_verification_activity,
     candidate_projection_verification_activity, complete_session_id_traversals,
-    reset_verification_activity, verification_activity, verify_searcher_with_metrics,
+    reset_verification_activity, verification_activity, verify_searcher,
+    verify_searcher_with_metrics,
 };

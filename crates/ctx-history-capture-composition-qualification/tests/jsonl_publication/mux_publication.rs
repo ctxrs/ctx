@@ -76,7 +76,7 @@ fn append_jsonl(path: &Path, record: &Value) {
 }
 
 fn mux_records(index: &Path) -> Vec<CoreRecord> {
-    let verified = VerifiedIndex::open(index).unwrap();
+    let verified = VerifiedIndex::open_pinned(index).unwrap();
     let mut records = verified
         .manifest()
         .sources
@@ -223,7 +223,10 @@ fn mux_compound_route_cold_noop_companion_replacement_and_deletion() {
     assert!(deleted.failed_routes.is_empty());
     assert!(deleted.sources.is_empty());
     assert_eq!(deleted.removals.len(), 1);
-    assert_eq!(VerifiedIndex::open(&index).unwrap().document_count(), 0);
+    assert_eq!(
+        VerifiedIndex::open_pinned(&index).unwrap().document_count(),
+        0
+    );
 }
 
 #[test]

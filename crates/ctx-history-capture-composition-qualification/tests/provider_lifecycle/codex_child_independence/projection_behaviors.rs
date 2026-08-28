@@ -38,7 +38,7 @@ fn codex_inline_image_over_page_limit_does_not_fail_route() {
     assert!(receipt.failed_routes.is_empty());
     assert!(receipt.logical_source_failures.is_empty());
     assert!(receipt.record_rejections.is_empty());
-    let index = VerifiedIndex::open(&index_root).unwrap();
+    let index = VerifiedIndex::open_pinned(&index_root).unwrap();
     let records = records_for(&index, native_session_id);
     assert_eq!(records.len(), 4);
     let oversized = records
@@ -89,7 +89,7 @@ fn codex_inline_image_over_page_limit_does_not_fail_route() {
     assert!(replayed.failed_routes.is_empty());
     assert!(replayed.logical_source_failures.is_empty());
     assert!(replayed.record_rejections.is_empty());
-    let replayed_index = VerifiedIndex::open(&index_root).unwrap();
+    let replayed_index = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert_eq!(
         replayed_index
             .core_record_by_id(oversized_record.event_id.as_uuid())
@@ -145,7 +145,7 @@ fn codex_valid_custom_tool_result_over_16_mib_is_retained() {
         "unexpected rejections: {:?}",
         receipt.record_rejections
     );
-    let index = VerifiedIndex::open(&index_root).unwrap();
+    let index = VerifiedIndex::open_pinned(&index_root).unwrap();
     let records = records_for(&index, native_session_id);
     assert_eq!(records.len(), 1);
     assert!(matches!(
@@ -215,7 +215,7 @@ fn codex_core_envelope_rejection_preserves_siblings_and_their_ids() {
         diagnostic.detail,
         "Codex retained record exceeds the Core selected-content envelope"
     );
-    let rejected_index = VerifiedIndex::open(&index_root).unwrap();
+    let rejected_index = VerifiedIndex::open_pinned(&index_root).unwrap();
     let sibling_ids = [before_marker, after_marker].map(|marker| {
         search_event_candidates(&rejected_index, marker, 8)
             .into_iter()
@@ -245,7 +245,7 @@ fn codex_core_envelope_rejection_preserves_siblings_and_their_ids() {
     assert!(repaired.failed_routes.is_empty());
     assert!(repaired.logical_source_failures.is_empty());
     assert!(repaired.record_rejections.is_empty());
-    let repaired_index = VerifiedIndex::open(&index_root).unwrap();
+    let repaired_index = VerifiedIndex::open_pinned(&index_root).unwrap();
     for (marker, event_id) in [before_marker, after_marker]
         .into_iter()
         .zip(sibling_ids.iter().copied())
@@ -259,7 +259,7 @@ fn codex_core_envelope_rejection_preserves_siblings_and_their_ids() {
     let (replayed, _) = incremental_refresh(&index_root, &registry, &repaired);
     assert_eq!(replayed.commit.generation_id, repaired.commit.generation_id);
     assert!(replayed.record_rejections.is_empty());
-    let replayed_index = VerifiedIndex::open(&index_root).unwrap();
+    let replayed_index = VerifiedIndex::open_pinned(&index_root).unwrap();
     for (marker, event_id) in [before_marker, after_marker]
         .into_iter()
         .zip(sibling_ids.iter().copied())
@@ -341,7 +341,7 @@ fn inherited_codex_session_metadata_is_admitted_in_both_provider_orders() {
     assert!(receipt.logical_source_failures.is_empty());
     assert_eq!(receipt.sources.len(), 3);
 
-    let index = VerifiedIndex::open(&index_root).unwrap();
+    let index = VerifiedIndex::open_pinned(&index_root).unwrap();
     for (native_session_id, marker) in [
         (owner_first_id, "ownerfirstinheritedmetadatamarker"),
         (ancestor_first_id, "ancestorfirstinheritedmetadatamarker"),
@@ -401,7 +401,7 @@ fn codex_rollout_ownership_quarantine_retries_after_file_repair() {
         refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
     assert!(initial.failed_routes.is_empty());
     assert!(initial.logical_source_failures.is_empty());
-    let initial_index = VerifiedIndex::open(&index_root).unwrap();
+    let initial_index = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert_eq!(records_for(&initial_index, repairable_session_id).len(), 1);
     drop(initial_index);
 
@@ -457,7 +457,7 @@ fn codex_rollout_ownership_quarantine_retries_after_file_repair() {
     );
     assert_eq!(failure.source.provider(), CaptureProvider::Codex.as_str());
 
-    let index = VerifiedIndex::open(&index_root).unwrap();
+    let index = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert!(search_event_candidates(&index, neighbor_marker, 32)
         .into_iter()
         .any(|candidate| candidate.event.provider_session_id.as_deref() == Some(valid_session_id)));
@@ -497,7 +497,7 @@ fn codex_rollout_ownership_quarantine_retries_after_file_repair() {
     );
     assert!(repaired.failed_routes.is_empty());
     assert!(repaired.logical_source_failures.is_empty());
-    let repaired_index = VerifiedIndex::open(&index_root).unwrap();
+    let repaired_index = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert_eq!(records_for(&repaired_index, repairable_session_id).len(), 1);
     assert!(!source_records_contain(
         &repaired_index,
@@ -537,7 +537,7 @@ fn codex_retrieval_exclusion_survives_raw_append_hydration_and_keeps_ids_stable(
 
     let cold = refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
     assert!(cold.failed_routes.is_empty());
-    let cold_index = VerifiedIndex::open(&index_root).unwrap();
+    let cold_index = VerifiedIndex::open_pinned(&index_root).unwrap();
     let cold_records = records_for(&cold_index, native_session_id);
     assert_eq!(cold_records.len(), 1);
     assert_eq!(
@@ -560,7 +560,7 @@ fn codex_retrieval_exclusion_survives_raw_append_hydration_and_keeps_ids_stable(
     );
     let (appended, _) = incremental_refresh(&index_root, &registry, &cold);
     assert!(appended.failed_routes.is_empty());
-    let appended_index = VerifiedIndex::open(&index_root).unwrap();
+    let appended_index = VerifiedIndex::open_pinned(&index_root).unwrap();
     let appended_records = records_for(&appended_index, native_session_id);
     assert_eq!(appended_records.len(), 2);
     assert_eq!(appended_records[0].event_id, retrieval_invocation_id);
@@ -587,7 +587,7 @@ fn codex_retrieval_exclusion_survives_raw_append_hydration_and_keeps_ids_stable(
     let controlled =
         refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
     assert!(controlled.failed_routes.is_empty());
-    let controlled_index = VerifiedIndex::open(&index_root).unwrap();
+    let controlled_index = VerifiedIndex::open_pinned(&index_root).unwrap();
     let controlled_records = records_for(&controlled_index, native_session_id);
     assert_eq!(controlled_records.len(), 4);
     assert_eq!(controlled_records[0].event_id, retrieval_invocation_id);

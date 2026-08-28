@@ -10,7 +10,7 @@ rust-version.workspace = true
 publish = false
 
 [features]
-test-support = []
+test-support = ["ctx-history-index-format/test-support"]
 
 [dependencies]
 ctx-history-core = { path = "../ctx-history-core" }

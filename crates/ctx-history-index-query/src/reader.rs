@@ -7,10 +7,12 @@ use std::{
 use crate::{IndexError, Result};
 use ctx_history_index_format::{
     is_generation_id, load_publication_for_metas, meta_generation, payload_generation_id,
-    register_body_analyzer, scrub_and_certify_physical_integrity, searcher_generation,
-    validate_schema, verify_or_certify_physical_integrity, verify_searcher,
-    verify_searcher_structure, DurableMmapDirectory, GenerationManifest, VerifiedPublication,
+    register_body_analyzer, searcher_generation, validate_schema,
+    verify_or_certify_physical_integrity, verify_searcher_structure, DurableMmapDirectory,
+    GenerationManifest, VerifiedPublication,
 };
+#[cfg(any(test, feature = "test-support"))]
+use ctx_history_index_format::{scrub_and_certify_physical_integrity, verify_searcher};
 use ctx_history_index_generation::{
     load_active_generation_pointer, load_generation_retention_lease, open_slot_index,
     verify_candidate_physical_integrity_read_only, verify_physical_integrity_read_only,
@@ -44,6 +46,14 @@ pub struct VerifiedIndex {
     pub(crate) semantic_eligibility_postings: OnceLock<crate::SemanticEligibilityPostings>,
 }
 
+#[derive(Clone, Copy)]
+enum ReopenPhysicalVerification {
+    VerifyOrCertify,
+    ReadOnly,
+    #[cfg(any(test, feature = "test-support"))]
+    ScrubAndCertify,
+}
+
 impl VerifiedIndex {
     /// Returns the generation named by the validated active pointer, commit
     /// payload, and current Core manifest contract.
@@ -71,17 +81,25 @@ impl VerifiedIndex {
         Ok(Some(publication.generation_id().to_owned()))
     }
 
-    /// Opens a generation, validates its durable physical identity
-    /// certification (rehashing if it is unavailable or stale), and audits
-    /// every stored Core record plus its source and identity aggregates.
+    /// Test and qualification oracle that performs the bounded production open
+    /// and then audits every stored Core record and logical projection.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
     pub fn open(root: impl AsRef<Path>) -> Result<Self> {
-        Self::open_inner(root.as_ref(), true, false)
+        let verified = Self::open_pinned(root)?;
+        verify_searcher(&verified.searcher, &verified.manifest)?;
+        Ok(verified)
     }
 
-    /// Forces a complete physical SHA-256/CRC scrub and exhaustive stored-Core
-    /// audit, then refreshes the durable identity certification.
+    /// Test and qualification oracle that forces a complete physical scrub and
+    /// exhaustive logical audit.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
     pub fn scrub(root: impl AsRef<Path>) -> Result<Self> {
-        Self::open_inner(root.as_ref(), true, true)
+        let verified =
+            Self::open_inner(root.as_ref(), ReopenPhysicalVerification::ScrubAndCertify)?;
+        verify_searcher(&verified.searcher, &verified.manifest)?;
+        Ok(verified)
     }
 
     /// Opens a previously audited immutable generation for querying.
@@ -93,7 +111,7 @@ impl VerifiedIndex {
     /// publication-time O(document-count) identity audit is not repeated for
     /// current generations.
     pub fn open_pinned(root: impl AsRef<Path>) -> Result<Self> {
-        Self::open_inner(root.as_ref(), false, false)
+        Self::open_inner(root.as_ref(), ReopenPhysicalVerification::VerifyOrCertify)
     }
 
     /// Reopens an exact candidate from durable state before its active-pointer
@@ -184,9 +202,7 @@ impl VerifiedIndex {
             &root,
             &first_pointer,
             lease.target(),
-            false,
-            false,
-            true,
+            ReopenPhysicalVerification::ReadOnly,
             |actual_generation_id| IndexError::PinnedGenerationMismatch {
                 expected_generation_id: lease.generation_id().to_owned(),
                 actual_generation_id,
@@ -202,9 +218,7 @@ impl VerifiedIndex {
             &root,
             &observed_pointer,
             lease.target(),
-            false,
-            false,
-            true,
+            ReopenPhysicalVerification::ReadOnly,
             |actual_generation_id| IndexError::PinnedGenerationMismatch {
                 expected_generation_id: lease.generation_id().to_owned(),
                 actual_generation_id,
@@ -376,9 +390,7 @@ impl VerifiedIndex {
             root,
             pointer,
             peer,
-            false,
-            false,
-            false,
+            ReopenPhysicalVerification::VerifyOrCertify,
             |actual_generation_id| IndexError::PinnedGenerationMismatch {
                 expected_generation_id: expected_peer_generation_id,
                 actual_generation_id,
@@ -419,9 +431,7 @@ impl VerifiedIndex {
             root,
             pointer,
             slot,
-            false,
-            false,
-            false,
+            ReopenPhysicalVerification::VerifyOrCertify,
             |actual_generation_id| IndexError::PinnedGenerationMismatch {
                 expected_generation_id: expected_generation_id.to_owned(),
                 actual_generation_id,
@@ -429,11 +439,7 @@ impl VerifiedIndex {
         )
     }
 
-    fn open_inner(
-        root: &Path,
-        audit_stored_core: bool,
-        force_physical_scrub: bool,
-    ) -> Result<Self> {
+    fn open_inner(root: &Path, physical_verification: ReopenPhysicalVerification) -> Result<Self> {
         if !root.is_dir() {
             return Err(IndexError::MissingActiveGenerationPointer);
         }
@@ -446,9 +452,7 @@ impl VerifiedIndex {
             &root,
             &pointer,
             pointer.active(),
-            audit_stored_core,
-            force_physical_scrub,
-            false,
+            physical_verification,
             |_| IndexError::InvalidActiveGenerationPointer,
         )
     }
@@ -457,9 +461,7 @@ impl VerifiedIndex {
         root: &Path,
         pointer: &ActiveGenerationPointer,
         slot: &GenerationSlot,
-        audit_stored_core: bool,
-        force_physical_scrub: bool,
-        read_only_physical_verification: bool,
+        physical_verification: ReopenPhysicalVerification,
         generation_mismatch: F,
     ) -> Result<Self>
     where
@@ -484,18 +486,19 @@ impl VerifiedIndex {
         if searcher_generation(&searcher) != meta_generation(&metas) {
             return Err(IndexError::ConcurrentGenerationChange);
         }
-        if force_physical_scrub {
-            scrub_and_certify_physical_integrity(root, pointer, slot, &index)?;
-        } else if read_only_physical_verification {
-            verify_physical_integrity_read_only(root, slot, &index)?;
-        } else {
-            verify_or_certify_physical_integrity(root, pointer, slot, &index)?;
+        match physical_verification {
+            ReopenPhysicalVerification::VerifyOrCertify => {
+                verify_or_certify_physical_integrity(root, pointer, slot, &index)?;
+            }
+            ReopenPhysicalVerification::ReadOnly => {
+                verify_physical_integrity_read_only(root, slot, &index)?;
+            }
+            #[cfg(any(test, feature = "test-support"))]
+            ReopenPhysicalVerification::ScrubAndCertify => {
+                scrub_and_certify_physical_integrity(root, pointer, slot, &index)?;
+            }
         }
-        if audit_stored_core {
-            verify_searcher(&searcher, &manifest)?;
-        } else {
-            verify_searcher_structure(&searcher, &manifest)?;
-        }
+        verify_searcher_structure(&searcher, &manifest)?;
         Ok(Self {
             searcher,
             manifest,

@@ -90,7 +90,7 @@ fn paginated_item_completed_fixture_keeps_raw_messages_once_and_projects_turn_qu
         3
     );
 
-    let index = VerifiedIndex::open(&index_root).unwrap();
+    let index = VerifiedIndex::open_pinned(&index_root).unwrap();
     let records = records_for(&index, NATIVE_SESSION_ID);
     assert_eq!(records.len(), 6, "four raw messages and two Plans");
     for marker in [
@@ -195,8 +195,8 @@ fn paginated_item_completed_append_noop_and_cold_replay_are_equivalent() {
         .collect::<Vec<_>>();
     assert_eq!(appended_rejections, cold_rejections);
 
-    let appended_index = VerifiedIndex::open(&prefix_index).unwrap();
-    let cold_index = VerifiedIndex::open(&cold_index).unwrap();
+    let appended_index = VerifiedIndex::open_pinned(&prefix_index).unwrap();
+    let cold_index = VerifiedIndex::open_pinned(&cold_index).unwrap();
     assert_eq!(
         records_identity(&appended_index),
         records_identity(&cold_index)
@@ -260,8 +260,8 @@ fn paginated_item_completed_raw_and_zstd_rollouts_have_identical_semantics() {
         .collect::<Vec<_>>();
     assert_eq!(raw_rejections, zstd_rejections);
 
-    let raw_index = VerifiedIndex::open(&raw_index).unwrap();
-    let zstd_index = VerifiedIndex::open(&zstd_index).unwrap();
+    let raw_index = VerifiedIndex::open_pinned(&raw_index).unwrap();
+    let zstd_index = VerifiedIndex::open_pinned(&zstd_index).unwrap();
     assert_eq!(records_identity(&raw_index), records_identity(&zstd_index));
 }
 

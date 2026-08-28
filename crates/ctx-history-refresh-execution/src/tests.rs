@@ -28,7 +28,7 @@ impl PublishedSourceBackedStatePort for TestPublishedState {
                 route_controls: BTreeMap::new(),
             });
         }
-        let verified_index = match VerifiedIndex::open(&index_root) {
+        let verified_index = match VerifiedIndex::open_pinned(&index_root) {
             Ok(index) => Some(index),
             Err(IndexError::MissingActiveGenerationPointer) => None,
             Err(error)
@@ -358,6 +358,21 @@ fn publish_pin_source(index_root: &Path, source: SourceKey) -> String {
     writer.commit(|_| true).unwrap().generation_id
 }
 
+#[test]
+fn watch_catalog_reconstruction_uses_bounded_open_and_no_deep_logical_pass() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    let index_root = source_backed_index_root(&data_root);
+    publish_pin_source(&index_root, publication_pin_source_with_anchor(0x99));
+    let (_, _, discovery) = discovery_fixture(&temp.path().join("discovery"));
+
+    // This unit target intentionally depends on the production index library,
+    // where the exhaustive `VerifiedIndex::open` oracle does not exist. The
+    // watch-catalog path therefore cannot compile if it becomes reachable from
+    // a deep logical open again.
+    source_backed_watch_catalog(&data_root, &discovery).unwrap();
+}
+
 fn test_publication(generation_id: impl Into<String>) -> SourceBackedRefreshPublication {
     SourceBackedRefreshPublication {
         route_results: Vec::new(),
@@ -385,7 +400,7 @@ fn test_publication(generation_id: impl Into<String>) -> SourceBackedRefreshPubl
 fn query_readiness_accepts_nonempty_generation_without_metadata() {
     let temp = tempfile::tempdir().unwrap();
     let generation_id = publish_pin_source(temp.path(), publication_pin_source_with_anchor(0x95));
-    let verified = VerifiedIndex::open(temp.path()).unwrap();
+    let verified = VerifiedIndex::open_pinned(temp.path()).unwrap();
 
     assert_eq!(verified.generation_id(), generation_id);
     assert!(verified.publication_metadata().is_none());

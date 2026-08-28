@@ -381,7 +381,7 @@ impl CoreFixture {
             )
             .unwrap();
         writer.commit(|_| true).unwrap();
-        VerifiedIndex::open(self.temp.path().join("index")).unwrap()
+        VerifiedIndex::open_pinned(self.temp.path().join("index")).unwrap()
     }
 }
 

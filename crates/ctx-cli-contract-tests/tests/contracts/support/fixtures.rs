@@ -83,7 +83,7 @@ pub(crate) fn initialize_generation_only_core(data_root: &Path) -> String {
     .into_writer()
     .unwrap();
     let core_receipt = writer.commit(|_| true).unwrap();
-    let verified = VerifiedIndex::open(index_root).unwrap();
+    let verified = VerifiedIndex::open_pinned(index_root).unwrap();
     assert_eq!(verified.generation_id(), core_receipt.generation_id);
     core_receipt.generation_id
 }
@@ -189,7 +189,7 @@ pub(crate) fn write_codex_message_fixture(root: &Path, session_id: &str, message
 }
 
 pub(crate) fn provider_core_records(data_root: &Path, provider: &str) -> Vec<CoreRecord> {
-    let index = VerifiedIndex::open(data_root.join("search/lexical")).unwrap();
+    let index = VerifiedIndex::open_pinned(data_root.join("search/lexical")).unwrap();
     let sources = index
         .manifest()
         .sources

@@ -841,7 +841,7 @@ fn private_reasoning_and_image_only_messages_are_retained_but_not_searchable() {
     assert_not_searchable(&harness, reasoning_marker);
 
     let lexical = harness.data_root.join("search/lexical");
-    let index = VerifiedIndex::open(&lexical).expect("open verified lexical generation");
+    let index = VerifiedIndex::open_pinned(&lexical).expect("open verified lexical generation");
     let parent_search = harness.search(PARENT_ORACLE);
     let parent_result = one_matching_result(&parent_search, PARENT_ORACLE);
     let parent_session_id = Uuid::parse_str(
@@ -1135,7 +1135,7 @@ fn complete_tail_body_is_searchable_and_tantivy_stores_only_core_record() {
     one_matching_result(&harness.search(tail), tail);
 
     let lexical = harness.data_root.join("search/lexical");
-    let index = VerifiedIndex::open(&lexical).expect("open verified lexical generation");
+    let index = VerifiedIndex::open_pinned(&lexical).expect("open verified lexical generation");
     let hits = complete_lexical_candidates(&index, tail, 10);
     assert_eq!(hits.len(), 1);
     let expected_event_id = hits[0].event.event_id;

@@ -402,7 +402,7 @@ fn terminal_failure_on_either_side_of_success_keeps_replacement_atomic() {
             .is_some());
         assert!(failed.commit.manifest().source_route(&first_id).is_none());
         assert!(failed.commit.manifest().source_route(&second_id).is_none());
-        let failed_index = ctx_history_index::VerifiedIndex::open(temp.path()).unwrap();
+        let failed_index = ctx_history_index::VerifiedIndex::open_pinned(temp.path()).unwrap();
         assert!(search_event_candidates(&failed_index, "atomicterminalfirst", 8).is_empty());
         assert!(search_event_candidates(&failed_index, "atomicterminalsecond", 8).is_empty());
         drop(failed_index);
@@ -745,7 +745,7 @@ fn logical_all_publication_withdraws_removed_root_without_deleting_history() {
     refresh_source_backed_generation(temp.path(), &initial_registry, WriterOptions::default())
         .unwrap();
     assert_eq!(
-        VerifiedIndex::open(temp.path())
+        VerifiedIndex::open_pinned(temp.path())
             .unwrap()
             .manifest()
             .sources
@@ -778,7 +778,7 @@ fn logical_all_publication_withdraws_removed_root_without_deleting_history() {
         .unwrap();
     assert!(receipt.route_controls.is_empty());
 
-    let published = VerifiedIndex::open(temp.path()).unwrap();
+    let published = VerifiedIndex::open_pinned(temp.path()).unwrap();
     assert_eq!(published.manifest().sources.len(), 2);
     assert!(published.manifest().source_route(&work_id).is_some());
     assert!(published.manifest().source_route(&personal_id).is_some());
@@ -916,7 +916,9 @@ fn empty_replacement_cannot_hide_a_cold_route_failure_behind_retired_content() {
             if failed_routes.len() == 1 && failed_routes[0].route_identity == failed_id
     ));
     assert_eq!(
-        VerifiedIndex::open(temp.path()).unwrap().generation_id(),
+        VerifiedIndex::open_pinned(temp.path())
+            .unwrap()
+            .generation_id(),
         initial.commit.generation_id
     );
 }
@@ -1060,7 +1062,7 @@ fn automatic_whole_route_missing_grace_resets_and_unknown_aborts_atomically() {
         );
     }
 
-    let retained_generation = VerifiedIndex::open(temp.path())
+    let retained_generation = VerifiedIndex::open_pinned(temp.path())
         .unwrap()
         .generation_id()
         .to_owned();
@@ -1077,7 +1079,9 @@ fn automatic_whole_route_missing_grace_resets_and_unknown_aborts_atomically() {
         Err(SourceBackedCoordinatorError::UnavailableRoute { .. })
     ));
     assert_eq!(
-        VerifiedIndex::open(temp.path()).unwrap().generation_id(),
+        VerifiedIndex::open_pinned(temp.path())
+            .unwrap()
+            .generation_id(),
         retained_generation
     );
 
@@ -1120,7 +1124,9 @@ fn automatic_whole_route_missing_grace_resets_and_unknown_aborts_atomically() {
     assert!(deleted.sources.is_empty());
     assert!(deleted.commit.manifest().source_routes().is_empty());
     assert_eq!(
-        VerifiedIndex::open(temp.path()).unwrap().document_count(),
+        VerifiedIndex::open_pinned(temp.path())
+            .unwrap()
+            .document_count(),
         0
     );
 }
@@ -1165,7 +1171,7 @@ fn cold_certified_missing_route_reappearance_at_precommit_cannot_publish_empty()
             if invalidated == route_identity.as_str()
     ));
     assert!(matches!(
-        VerifiedIndex::open(temp.path()),
+        VerifiedIndex::open_pinned(temp.path()),
         Err(IndexError::MissingActiveGenerationPointer)
     ));
 }
@@ -1202,7 +1208,7 @@ fn previously_empty_certified_missing_route_reappearance_at_precommit_retains_ba
         SourceBackedCoordinatorError::Index(IndexError::SourceInvalidated(ref invalidated))
             if invalidated == route_identity.as_str()
     ));
-    let retained = VerifiedIndex::open(temp.path()).unwrap();
+    let retained = VerifiedIndex::open_pinned(temp.path()).unwrap();
     assert_eq!(retained.generation_id(), initial.commit.generation_id);
     let retained_route = retained.manifest().source_route(&route_identity).unwrap();
     assert!(retained_route.sources().is_empty());
@@ -1253,7 +1259,7 @@ fn certified_missing_route_reappearance_at_precommit_cannot_delete_the_route() {
         )
         .unwrap();
     }
-    let retained_generation = VerifiedIndex::open(temp.path())
+    let retained_generation = VerifiedIndex::open_pinned(temp.path())
         .unwrap()
         .generation_id()
         .to_owned();
@@ -1275,7 +1281,7 @@ fn certified_missing_route_reappearance_at_precommit_cannot_delete_the_route() {
             if invalidated == route_id.as_str()
     ));
 
-    let retained = VerifiedIndex::open(temp.path()).unwrap();
+    let retained = VerifiedIndex::open_pinned(temp.path()).unwrap();
     assert_eq!(retained.generation_id(), retained_generation);
     assert!(retained.manifest().source_route(&route_id).is_some());
     assert_eq!(retained.document_count(), 1);
@@ -1332,7 +1338,7 @@ fn relocated_route_rechecks_old_path_absence_at_terminal_publication() {
         SourceBackedCoordinatorError::Index(IndexError::SourceInvalidated(ref invalidated))
             if invalidated == preserved.as_str()
     ));
-    let retained = VerifiedIndex::open(temp.path()).unwrap();
+    let retained = VerifiedIndex::open_pinned(temp.path()).unwrap();
     assert_eq!(retained.generation_id(), initial.commit.generation_id);
     assert!(retained.manifest().source_route(&preserved).is_some());
     assert_eq!(retained.document_count(), 1);
@@ -1382,7 +1388,7 @@ fn mutating_refresh_rejects_an_unclaimed_base_source_from_the_same_family() {
         } if source_id == &initial_source.identity().to_string()
             && route_identity == &incomplete_route
     ));
-    let retained = VerifiedIndex::open(temp.path()).unwrap();
+    let retained = VerifiedIndex::open_pinned(temp.path()).unwrap();
     assert_eq!(retained.generation_id(), initial_generation);
     assert_eq!(retained.manifest().sources, initial.sources);
 }
@@ -1477,7 +1483,7 @@ fn refresh_receipt_stays_bound_to_commit_when_current_generation_advances() {
     assert!(g1.removals.is_empty());
     assert!(g2.removals.is_empty());
     assert_eq!(
-        VerifiedIndex::open(root).unwrap().generation_id(),
+        VerifiedIndex::open_pinned(root).unwrap().generation_id(),
         g2.commit.generation_id
     );
 }

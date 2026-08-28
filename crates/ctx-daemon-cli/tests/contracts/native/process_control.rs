@@ -57,14 +57,30 @@ pub(super) fn process_is_running(pid: u32) -> bool {
 }
 
 #[cfg(unix)]
-pub(super) fn request_graceful_shutdown(pid: u32) -> std::io::Result<()> {
+#[derive(Clone, Copy, Debug)]
+pub(super) enum ShutdownSignal {
+    Interrupt,
+    Terminate,
+}
+
+#[cfg(unix)]
+pub(super) fn request_shutdown(pid: u32, signal: ShutdownSignal) -> std::io::Result<()> {
     let pid = libc::pid_t::try_from(pid)
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "pid exceeds pid_t"))?;
-    if unsafe { libc::kill(pid, libc::SIGTERM) } == 0 {
+    let signal = match signal {
+        ShutdownSignal::Interrupt => libc::SIGINT,
+        ShutdownSignal::Terminate => libc::SIGTERM,
+    };
+    if unsafe { libc::kill(pid, signal) } == 0 {
         Ok(())
     } else {
         Err(std::io::Error::last_os_error())
     }
+}
+
+#[cfg(unix)]
+pub(super) fn request_graceful_shutdown(pid: u32) -> std::io::Result<()> {
+    request_shutdown(pid, ShutdownSignal::Terminate)
 }
 
 #[cfg(unix)]

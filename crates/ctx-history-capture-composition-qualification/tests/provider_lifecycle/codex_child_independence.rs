@@ -453,7 +453,7 @@ fn install_single_source_certificate(
     native_session_id: &str,
     provider_checkpoint: TypedKey,
 ) -> String {
-    let current = VerifiedIndex::open(index_root).unwrap();
+    let current = VerifiedIndex::open_pinned(index_root).unwrap();
     let routes = current.manifest().source_routes().to_vec();
     let replacement =
         certificate_with_provider_checkpoint(&current, native_session_id, provider_checkpoint);
@@ -600,7 +600,7 @@ fn assert_legacy_provider_checkpoint_is_inert(
         native_session_id,
         provider_checkpoint(native_session_id),
     );
-    let injected = VerifiedIndex::open(&index_root).unwrap();
+    let injected = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert_eq!(injected.generation_id(), injected_generation);
     assert_eq!(
         certificate_for(&injected, native_session_id).parser_revision(),
@@ -613,7 +613,7 @@ fn assert_legacy_provider_checkpoint_is_inert(
     let unchanged =
         refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
     assert_eq!(unchanged.commit.generation_id, injected_generation);
-    let unchanged_index = VerifiedIndex::open(&index_root).unwrap();
+    let unchanged_index = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert_eq!(
         serde_json::to_vec(&certificate_for(&unchanged_index, native_session_id)).unwrap(),
         injected_certificate_bytes
@@ -625,7 +625,7 @@ fn assert_legacy_provider_checkpoint_is_inert(
     assert!(appended.failed_routes.is_empty());
     assert!(appended.logical_source_failures.is_empty());
 
-    let rebuilt = VerifiedIndex::open(&index_root).unwrap();
+    let rebuilt = VerifiedIndex::open_pinned(&index_root).unwrap();
     let rebuilt_snapshot = source_snapshot(&rebuilt, native_session_id, &marker);
     let (_, _, _, rebuilt_checkpoint) = provider_checkpoint_envelope(&rebuilt, native_session_id);
     assert_current_provider_checkpoint(&rebuilt_checkpoint);
@@ -644,7 +644,7 @@ fn assert_legacy_provider_checkpoint_is_inert(
         cold.commit.certified_source_bytes,
         appended.commit.certified_source_bytes
     );
-    let cold = VerifiedIndex::open(&cold_root).unwrap();
+    let cold = VerifiedIndex::open_pinned(&cold_root).unwrap();
     assert_eq!(
         source_snapshot(&cold, native_session_id, &marker),
         rebuilt_snapshot

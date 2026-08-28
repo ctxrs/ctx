@@ -27,6 +27,7 @@ use crate::{
 use super::source_backed_refresh_coordinator::CoreRefreshEngine;
 
 use super::{
+    daemon_process_signal::install_daemon_process_signal_handler,
     daemon_retry::DaemonRetryBackoff,
     daemon_scheduler::{
         daemon_retry_due, daemon_run_start_mode, daemon_scheduled_refresh_due,
@@ -231,20 +232,6 @@ where
     UO: ctx_upgrade_engine::UpgradeObserver<AppConfig>,
 {
     run_daemon_inner(args, data_root, config, ports, upgrade)
-}
-
-fn install_daemon_process_signal_handler(
-    wakeup: Arc<DaemonWakeup>,
-    lifecycle_state: Arc<DaemonLifecycleState>,
-) -> Result<()> {
-    // A daemon launched as a shell background job can inherit SIGINT as
-    // ignored across exec. This process owns its signal lifecycle, so replace
-    // inherited dispositions instead of rejecting an otherwise valid launch.
-    ctrlc::set_handler(move || {
-        lifecycle_state.mark_stopping();
-        wakeup.signal_shutdown();
-    })
-    .context("install ctx daemon process signal handler")
 }
 
 fn publish_daemon_fatal_status_while_owned(
@@ -649,6 +636,9 @@ where
             let source_refresh = refresh_service
                 .as_ref()
                 .and(daemon_scheduler_source_refresh(&source_refresh_coordinator));
+            if source_refresh.is_some_and(CoreRefreshEngine::has_pending_request) {
+                ctx_daemon_runtime::block_daemon_main_after_ready_for_test(data_root)?;
+            }
             if finite_core_worker_exit.as_mut().is_some_and(|exit| {
                 exit.begin_stopping(
                     source_refresh,

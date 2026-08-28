@@ -423,7 +423,7 @@ fn configured_codex_root_keeps_unsafe_static_child_membership_while_peer_advance
         &data_root,
         &index_root,
     );
-    let initial = VerifiedIndex::open(&index_root).unwrap();
+    let initial = VerifiedIndex::open_pinned(&index_root).unwrap();
     let retained_history = stable_source_bytes(&initial, HISTORY_MARKER);
     assert_root_marker(&initial, ROOT_ID, HISTORY_MARKER, 1);
     drop(initial);
@@ -445,7 +445,7 @@ fn configured_codex_root_keeps_unsafe_static_child_membership_while_peer_advance
         &data_root,
         &index_root,
     );
-    let unavailable = VerifiedIndex::open(&index_root).unwrap();
+    let unavailable = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert_eq!(
         unavailable
             .complete_lexical_search(SESSION_ADVANCED, 8)
@@ -470,7 +470,7 @@ fn configured_codex_root_keeps_unsafe_static_child_membership_while_peer_advance
         &data_root,
         &index_root,
     );
-    let restarted = VerifiedIndex::open(&index_root).unwrap();
+    let restarted = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert_eq!(
         stable_source_bytes(&restarted, HISTORY_MARKER),
         retained_history
@@ -488,7 +488,7 @@ fn configured_codex_root_keeps_unsafe_static_child_membership_while_peer_advance
         &data_root,
         &index_root,
     );
-    let restored = VerifiedIndex::open(&index_root).unwrap();
+    let restored = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert_eq!(
         stable_source_bytes(&restored, HISTORY_MARKER),
         retained_history
@@ -516,7 +516,7 @@ fn unavailable_only_released_member_is_carried_while_automatic_peer_advances() {
         let roots = &roots[..1];
 
         refresh(&base, provider, roots, true, &data_root, &index_root);
-        let initial = VerifiedIndex::open(&index_root).unwrap();
+        let initial = VerifiedIndex::open_pinned(&index_root).unwrap();
         assert_eq!(initial.manifest().source_routes()[0].sources().len(), 2);
         let alpha = stable_source_bytes(&initial, "lifecycleinitial0");
         let route = initial.manifest().provider_roots()[0].routes()[0].clone();
@@ -532,7 +532,7 @@ fn unavailable_only_released_member_is_carried_while_automatic_peer_advances() {
         }
 
         refresh(&base, provider, roots, true, &data_root, &index_root);
-        let missing = VerifiedIndex::open(&index_root).unwrap();
+        let missing = VerifiedIndex::open_pinned(&index_root).unwrap();
         assert_eq!(
             missing
                 .complete_lexical_search("automaticpeeradvanced", 8)
@@ -571,7 +571,7 @@ fn removing_final_released_alias_preserves_shared_route_history_without_refreshi
         let roots = &roots[..1];
 
         refresh(&base, provider, roots, true, &data_root, &index_root);
-        let initial = VerifiedIndex::open(&index_root).unwrap();
+        let initial = VerifiedIndex::open_pinned(&index_root).unwrap();
         assert_eq!(initial.manifest().source_routes()[0].sources().len(), 2);
         let alpha = stable_source_bytes(&initial, "lifecycleinitial0");
         let automatic = stable_source_bytes(&initial, "lifecycleinitial1");
@@ -591,7 +591,7 @@ fn removing_final_released_alias_preserves_shared_route_history_without_refreshi
         }
 
         refresh(&base, provider, &[], false, &data_root, &index_root);
-        let removed = VerifiedIndex::open(&index_root).unwrap();
+        let removed = VerifiedIndex::open_pinned(&index_root).unwrap();
         assert!(removed.manifest().provider_roots().is_empty());
         assert_eq!(removed.manifest().source_routes()[0].sources().len(), 2);
         assert!(matches!(
@@ -620,7 +620,7 @@ fn removing_final_released_alias_preserves_shared_route_history_without_refreshi
         drop(removed);
 
         refresh(&base, provider, &[], true, &data_root, &index_root);
-        let resumed = VerifiedIndex::open(&index_root).unwrap();
+        let resumed = VerifiedIndex::open_pinned(&index_root).unwrap();
         assert!(resumed.manifest().provider_roots().is_empty());
         assert!(matches!(
             resumed
@@ -667,7 +667,7 @@ fn shared_compound_route_survives_warm_policy_moves_absence_and_alias_removal() 
         let (base, mut roots, paths) = fixture(&fixture_root, provider);
 
         refresh(&base, provider, &roots, true, &data_root, &index_root);
-        let initial = VerifiedIndex::open(&index_root).unwrap();
+        let initial = VerifiedIndex::open_pinned(&index_root).unwrap();
         assert_eq!(initial_count(&initial), 3);
         let initial_alpha = stable_record_bytes(&initial, "lifecycleinitial0");
         let initial_automatic = stable_record_bytes(&initial, "lifecycleinitial2");
@@ -687,7 +687,7 @@ fn shared_compound_route_survives_warm_policy_moves_absence_and_alias_removal() 
             _ => unreachable!(),
         }
         refresh(&base, provider, &roots, false, &data_root, &index_root);
-        let automatic_off = VerifiedIndex::open(&index_root).unwrap();
+        let automatic_off = VerifiedIndex::open_pinned(&index_root).unwrap();
         assert_eq!(initial_count(&automatic_off), 3);
         assert_eq!(
             automatic_off
@@ -710,7 +710,7 @@ fn shared_compound_route_survives_warm_policy_moves_absence_and_alias_removal() 
         );
         drop(automatic_off);
         refresh(&base, provider, &roots, false, &data_root, &index_root);
-        assert!(VerifiedIndex::open(&index_root)
+        assert!(VerifiedIndex::open_pinned(&index_root)
             .unwrap()
             .complete_lexical_search("automaticnewrecord", 8)
             .unwrap()
@@ -718,7 +718,7 @@ fn shared_compound_route_survives_warm_policy_moves_absence_and_alias_removal() 
 
         refresh(&base, provider, &roots, true, &data_root, &index_root);
         assert_eq!(
-            VerifiedIndex::open(&index_root)
+            VerifiedIndex::open_pinned(&index_root)
                 .unwrap()
                 .complete_lexical_search("automaticnewrecord", 8)
                 .unwrap()
@@ -732,7 +732,7 @@ fn shared_compound_route_survives_warm_policy_moves_absence_and_alias_removal() 
             fs::rename(&roots[0].path, &moved).unwrap();
             roots[0].path = moved;
             refresh(&base, provider, &roots, true, &data_root, &index_root);
-            let moved_index = VerifiedIndex::open(&index_root).unwrap();
+            let moved_index = VerifiedIndex::open_pinned(&index_root).unwrap();
             assert_eq!(
                 moved_index.manifest().provider_roots()[0].routes(),
                 std::slice::from_ref(&route)
@@ -754,7 +754,7 @@ fn shared_compound_route_survives_warm_policy_moves_absence_and_alias_removal() 
             _ => unreachable!(),
         }
         refresh(&base, provider, &roots, true, &data_root, &index_root);
-        let missing = VerifiedIndex::open(&index_root).unwrap();
+        let missing = VerifiedIndex::open_pinned(&index_root).unwrap();
         assert_eq!(
             missing
                 .complete_lexical_search("remainingpeeradvanced", 8)
@@ -783,7 +783,7 @@ fn shared_compound_route_survives_warm_policy_moves_absence_and_alias_removal() 
 
         fs::rename(&absent, &roots[0].path).unwrap();
         refresh(&base, provider, &roots, true, &data_root, &index_root);
-        let reappeared = VerifiedIndex::open(&index_root).unwrap();
+        let reappeared = VerifiedIndex::open_pinned(&index_root).unwrap();
         assert_eq!(
             stable_record_bytes(&reappeared, "lifecycleinitial0"),
             initial_alpha
@@ -803,7 +803,7 @@ fn shared_compound_route_survives_warm_policy_moves_absence_and_alias_removal() 
             _ => unreachable!(),
         }
         refresh(&base, provider, &roots[1..], false, &data_root, &index_root);
-        let removed = VerifiedIndex::open(&index_root).unwrap();
+        let removed = VerifiedIndex::open_pinned(&index_root).unwrap();
         assert_eq!(removed.manifest().provider_roots().len(), 1);
         assert!(matches!(
             removed

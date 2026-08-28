@@ -299,7 +299,10 @@ mod tests {
         let deleted =
             refresh_source_backed_generation(&index, &registry, WriterOptions::default()).unwrap();
         assert_eq!(deleted.commit.indexed_documents, 0);
-        assert_eq!(VerifiedIndex::open(&index).unwrap().document_count(), 0);
+        assert_eq!(
+            VerifiedIndex::open_pinned(&index).unwrap().document_count(),
+            0
+        );
         let deleted_replay =
             refresh_source_backed_generation(&index, &registry, WriterOptions::default()).unwrap();
         assert_eq!(
@@ -478,7 +481,10 @@ mod tests {
         let malformed =
             refresh_source_backed_generation(&index, &registry, WriterOptions::default()).unwrap();
         assert_eq!(malformed.commit.generation_id, rewrite.commit.generation_id);
-        assert_eq!(VerifiedIndex::open(&index).unwrap().document_count(), 3);
+        assert_eq!(
+            VerifiedIndex::open_pinned(&index).unwrap().document_count(),
+            3
+        );
 
         write_cline_sdk_messages(&provider_root, &["repaired"]);
         refresh_source_backed_generation(&index, &registry, WriterOptions::default()).unwrap();
@@ -486,7 +492,10 @@ mod tests {
         let deleted =
             refresh_source_backed_generation(&index, &registry, WriterOptions::default()).unwrap();
         assert_eq!(deleted.commit.indexed_documents, 0);
-        assert_eq!(VerifiedIndex::open(&index).unwrap().document_count(), 0);
+        assert_eq!(
+            VerifiedIndex::open_pinned(&index).unwrap().document_count(),
+            0
+        );
     }
 
     #[test]
@@ -544,7 +553,7 @@ mod tests {
             .iter()
             .any(|event| { event.core_record.content.meaningful_text() == "same content" }));
         assert!(matches!(
-            VerifiedIndex::open(&index)
+            VerifiedIndex::open_pinned(&index)
                 .unwrap()
                 .core_source_event_page(&source_a, None, 64),
             Err(ctx_history_index::IndexError::SourceEventSourceNotRetained(
@@ -655,7 +664,7 @@ mod tests {
         ctx_history_core::StableEntityId,
         ctx_history_core::StableEntityId,
     ) {
-        let verified = VerifiedIndex::open(index).unwrap();
+        let verified = VerifiedIndex::open_pinned(index).unwrap();
         let events = receipt
             .sources
             .iter()
@@ -674,7 +683,7 @@ mod tests {
     }
 
     fn rovodev_events(index: &Path, receipt: &SourceBackedRefreshReceipt) -> Vec<CoreEventRecord> {
-        let verified = VerifiedIndex::open(index).unwrap();
+        let verified = VerifiedIndex::open_pinned(index).unwrap();
         let mut events = receipt
             .sources
             .iter()
@@ -859,7 +868,7 @@ mod tests {
         index: &Path,
         receipt: &SourceBackedRefreshReceipt,
     ) -> Vec<CoreEventRecord> {
-        let verified = VerifiedIndex::open(index).unwrap();
+        let verified = VerifiedIndex::open_pinned(index).unwrap();
         receipt
             .sources
             .iter()

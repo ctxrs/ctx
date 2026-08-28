@@ -74,7 +74,9 @@ fn committed_progress_failure_does_not_hide_visible_publication() {
 
     assert_eq!(receipt.sources, vec![certificate]);
     assert_eq!(
-        VerifiedIndex::open(temp.path()).unwrap().generation_id(),
+        VerifiedIndex::open_pinned(temp.path())
+            .unwrap()
+            .generation_id(),
         receipt.commit.generation_id
     );
 }
@@ -146,7 +148,7 @@ fn committing_progress_failure_prevents_publication() {
         SourceBackedCoordinatorError::Progress(SourceBackedRouteError { detail, .. })
             if detail == "injected committing status failure"
     ));
-    assert!(VerifiedIndex::open(temp.path()).is_err());
+    assert!(VerifiedIndex::open_pinned(temp.path()).is_err());
 }
 
 #[test]
@@ -245,5 +247,5 @@ fn accepted_record_progress_failure_stays_typed_and_prevents_publication() {
         SourceBackedCoordinatorError::Progress(SourceBackedRouteError { detail, .. })
             if detail == "injected source-record progress failure"
     ));
-    assert!(VerifiedIndex::open(temp.path()).is_err());
+    assert!(VerifiedIndex::open_pinned(temp.path()).is_err());
 }
