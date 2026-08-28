@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::{
-    analytics::{AnalyticsDeliveryAuthority, PublicEventV1},
+    analytics::{AnalyticsDeliveryAuthority, AnalyticsDeliveryFailureClass, PublicEventV1},
     config::{AppConfig, LocalUsageConfigResolver, LocalUsageConfigState},
     local_usage::{UsageControlRevision, UsageControlSnapshot},
 };
@@ -19,16 +19,21 @@ pub(crate) fn local_usage_storage_authority(
 
 const CAPABILITY_CLAIM_FILE: &str = "execution-capabilities-v1.claim";
 const CAPABILITY_REPORTED_FILE: &str = "execution-capabilities-v1.reported";
+const ANALYTICS_OUTBOX_FILE: &str = "analytics-outbox-v1.json";
 
 pub(crate) fn deliver_analytics_batch(
     data_root: &Path,
     config: &AppConfig,
     events: &[PublicEventV1],
 ) -> anyhow::Result<()> {
-    if events.is_empty()
-        || !config.analytics.enabled
-        || std::env::var_os("CTX_ANALYTICS_DRY_RUN").is_some()
-    {
+    if std::env::var_os("CTX_ANALYTICS_DRY_RUN").is_some() {
+        return Ok(());
+    }
+    let outbox_path = crate::identity::device_state_path(ANALYTICS_OUTBOX_FILE, data_root)?;
+    if !config.analytics.enabled {
+        return crate::analytics_outbox::AnalyticsOutbox::purge(&outbox_path);
+    }
+    if events.is_empty() {
         return Ok(());
     }
     let client_profile_id = crate::identity::device_id(data_root)?;
@@ -54,9 +59,53 @@ pub(crate) fn deliver_analytics_batch(
             .map(|marker| marker.install_attempt_id.as_str()),
         capability_snapshot,
     };
-    ctx_client_observability::analytics::deliver_batch(&mut authority, events, |body| {
+    let mut outbox = crate::analytics_outbox::AnalyticsOutbox::open(outbox_path)?;
+    let flush = outbox.flush(&config.analytics.endpoint, |body| {
         crate::net::post_telemetry_json(&config.analytics.endpoint, body)
-    })
+            .map_err(|error| error.class())
+    })?;
+    let mut blocked = match flush {
+        crate::analytics_outbox::FlushStatus::Available => None,
+        crate::analytics_outbox::FlushStatus::Blocked(class) => Some(class),
+    };
+    {
+        let mut post_or_queue = |body: &[u8]| -> anyhow::Result<()> {
+            if blocked.is_none() {
+                match crate::net::post_telemetry_json(&config.analytics.endpoint, body) {
+                    Ok(()) => return Ok(()),
+                    Err(error) => blocked = Some(error.class()),
+                }
+            }
+            let class = blocked.unwrap_or(AnalyticsDeliveryFailureClass::Unknown);
+            outbox.enqueue(&config.analytics.endpoint, body, class)
+        };
+        ctx_client_observability::analytics::deliver_batch(
+            &mut authority,
+            events,
+            &mut post_or_queue,
+        )?;
+    }
+    if let Some(observation) = outbox.observation() {
+        {
+            let mut post_or_queue = |body: &[u8]| -> anyhow::Result<()> {
+                if blocked.is_none() {
+                    match crate::net::post_telemetry_json(&config.analytics.endpoint, body) {
+                        Ok(()) => return Ok(()),
+                        Err(error) => blocked = Some(error.class()),
+                    }
+                }
+                let class = blocked.unwrap_or(AnalyticsDeliveryFailureClass::Unknown);
+                outbox.enqueue(&config.analytics.endpoint, body, class)
+            };
+            ctx_client_observability::analytics::deliver_delivery_observation(
+                &authority,
+                observation.event,
+                &mut post_or_queue,
+            )?;
+        }
+        outbox.acknowledge(&observation)?;
+    }
+    Ok(())
 }
 
 pub(crate) const fn usage_control_snapshot(enabled: bool) -> UsageControlSnapshot {

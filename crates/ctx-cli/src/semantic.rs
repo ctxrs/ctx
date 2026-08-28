@@ -313,7 +313,11 @@ pub(crate) fn run_daemon_command(
 
 impl ctx_daemon_cli::DaemonCliHost for CtxDaemonCliHost {
     fn load_config(&self, data_root: &Path) -> Result<DaemonCliConfig<'static>> {
-        crate::config::AppConfig::load(data_root).map(owned_daemon_cli_config)
+        let config = crate::config::AppConfig::load(data_root)?;
+        if !config.analytics.enabled {
+            crate::analytics::send_batch(data_root, &config, &[]);
+        }
+        Ok(owned_daemon_cli_config(config))
     }
 
     fn persisted_daemon_enabled(&self, data_root: &Path) -> Result<bool> {
@@ -357,9 +361,7 @@ impl ctx_daemon_cli::DaemonCliHost for CtxDaemonCliHost {
         let Ok(config) = crate::config::AppConfig::load(data_root) else {
             return;
         };
-        if config.analytics.enabled {
-            crate::analytics::send_batch(data_root, &config, events);
-        }
+        crate::analytics::send_batch(data_root, &config, events);
     }
 
     fn fetch_to_writer(

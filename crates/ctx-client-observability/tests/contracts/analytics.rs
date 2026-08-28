@@ -61,7 +61,7 @@ fn capability_snapshot_is_sent_once_after_successful_delivery() {
 }
 
 #[test]
-fn capability_snapshot_failure_keeps_claim_and_suppresses_replay() {
+fn capability_snapshot_durable_queue_handoff_marks_once_and_replays() {
     let temp = tempdir();
     let delivery_dir = temp.path().join("missing-delivery-dir");
     let events_path = delivery_dir.join("analytics.jsonl");
@@ -86,12 +86,12 @@ fn capability_snapshot_failure_keeps_claim_and_suppresses_replay() {
     let claim_path = expected_capability_claim_path(&home, &state);
     assert!(!events_path.exists());
     assert!(
-        !marker_path.exists(),
-        "failed delivery must not look successfully reported"
+        marker_path.exists(),
+        "durable queue handoff counts as accepted delivery"
     );
     assert!(
-        claim_path.exists(),
-        "uncertain delivery must retain the claim"
+        !claim_path.exists(),
+        "accepted delivery must clear the capability claim"
     );
 
     fs::create_dir_all(&delivery_dir).unwrap();
@@ -108,15 +108,31 @@ fn capability_snapshot_failure_keeps_claim_and_suppresses_replay() {
         .success();
 
     let events = read_analytics_events(&events_path);
-    assert_eq!(events.len(), 1);
-    assert_eq!(events[0]["events"].as_array().unwrap().len(), 1);
-    let properties = analytics_event_properties(&events[0]);
+    assert_eq!(
+        events.len(),
+        4,
+        "the queued event and failure observation should replay before the current event and recovery observation"
+    );
+    let replayed_properties = analytics_event_properties(&events[0]);
+    assert_capability_snapshot_is_coarse(replayed_properties);
+    assert_analytics_properties_are_allowlisted(replayed_properties);
+
+    assert_eq!(
+        events[1]["events"][0]["event_name"],
+        "analytics_delivery_observation"
+    );
+
+    let current_properties = analytics_event_properties(&events[2]);
     for key in CAPABILITY_PROPERTY_KEYS {
-        assert!(!properties.contains_key(key));
+        assert!(!current_properties.contains_key(key));
     }
-    assert_analytics_properties_are_allowlisted(properties);
-    assert!(!marker_path.exists());
-    assert!(claim_path.exists());
+    assert_analytics_properties_are_allowlisted(current_properties);
+    assert_eq!(
+        events[3]["events"][0]["event_name"],
+        "analytics_delivery_observation"
+    );
+    assert!(marker_path.exists());
+    assert!(!claim_path.exists());
 }
 
 #[test]

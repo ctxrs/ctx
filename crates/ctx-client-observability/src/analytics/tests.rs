@@ -212,6 +212,8 @@ fn durable_family_serialization_matches_public_goldens() {
                     core_result: ProviderCoreResult::Complete,
                     failure_scope: ProviderRefreshFailureScope::None,
                     failure_type: ProviderRefreshFailureType::None,
+                    failure_code: ProviderRefreshFailureCode::None,
+                    retryable: false,
                     work_remaining: false,
                     counts: Some(ProviderRefreshCountsV1::new(8, 2048)),
                 },

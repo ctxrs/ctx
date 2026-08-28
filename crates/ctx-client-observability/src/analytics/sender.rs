@@ -71,6 +71,22 @@ pub fn deliver_batch(
     )
 }
 
+pub fn deliver_delivery_observation(
+    authority: &AnalyticsDeliveryAuthority<'_>,
+    observation: AnalyticsDeliveryObservationV1,
+    mut post: impl FnMut(&[u8]) -> Result<()>,
+) -> Result<()> {
+    let occurred_at = minute_rounded_now();
+    let event = serialize_delivery_observation(observation, occurred_at);
+    let body = serialize_batch_body(
+        authority.app_version,
+        authority.client_profile_id,
+        authority.data_root_id,
+        &[event],
+    )?;
+    post(&body)
+}
+
 fn serialize_batch_body(
     app_version: &str,
     client_profile_id: &str,
@@ -108,6 +124,29 @@ fn minute_rounded_now() -> chrono::DateTime<chrono::Utc> {
         .with_second(0)
         .and_then(|value| value.with_nanosecond(0))
         .expect("rounding a valid UTC timestamp to a minute must succeed")
+}
+
+fn serialize_delivery_observation(
+    observation: AnalyticsDeliveryObservationV1,
+    occurred_at: chrono::DateTime<chrono::Utc>,
+) -> Value {
+    json!({
+        "event_id": Uuid::new_v4().to_string(),
+        "event_name": "analytics_delivery_observation",
+        "event_version": 1,
+        "occurred_at": occurred_at,
+        "surface": "cli",
+        "operation": "outbox",
+        "outcome": observation.outcome().as_str(),
+        "duration_bucket": "unknown",
+        "properties": {
+            "queued_count_bucket": observation.queued.as_str(),
+            "retry_attempt_count_bucket": observation.retry_attempts.as_str(),
+            "dropped_count_bucket": observation.dropped.as_str(),
+            "oldest_queued_age_bucket": observation.oldest_queued_age.as_str(),
+            "failure_class": observation.failure_class.as_str(),
+        },
+    })
 }
 
 pub(super) fn serialize_event(
@@ -240,6 +279,8 @@ fn insert_provider_refresh_properties(
     insert_str(properties, "core_result", refresh.core_result.as_str());
     insert_str(properties, "failure_scope", refresh.failure_scope.as_str());
     insert_str(properties, "failure_type", refresh.failure_type.as_str());
+    insert_str(properties, "failure_code", refresh.failure_code.as_str());
+    insert_bool(properties, "retryable", refresh.retryable);
     insert_bool(properties, "work_remaining", refresh.work_remaining);
     if let Some(counts) = refresh.counts {
         insert_optional_count(properties, "records_bucket", counts.records);
@@ -768,6 +809,34 @@ mod tests {
 
     fn numbered_events(count: usize) -> Vec<Value> {
         (0..count).map(|index| json!({ "index": index })).collect()
+    }
+
+    #[test]
+    fn delivery_observation_is_closed_bucketed_and_content_free() {
+        let occurred_at = chrono::DateTime::parse_from_rfc3339("2026-07-22T12:34:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let event = serialize_delivery_observation(
+            AnalyticsDeliveryObservationV1::new(
+                3,
+                4,
+                1,
+                std::time::Duration::from_secs(7 * 60),
+                AnalyticsDeliveryFailureClass::Transport,
+            ),
+            occurred_at,
+        );
+        let mut expected: Value = serde_json::from_str(include_str!(
+            "../../../../contracts/telemetry-v1/fixtures/analytics_delivery_observation.valid.json"
+        ))
+        .unwrap();
+        expected["event_id"] = event["event_id"].clone();
+
+        assert_eq!(event, expected);
+        let encoded = event.to_string();
+        for forbidden in ["endpoint", "response", "error_message", "path", "command"] {
+            assert!(!encoded.contains(forbidden));
+        }
     }
 
     #[test]
