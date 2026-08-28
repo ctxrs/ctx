@@ -194,13 +194,42 @@ pub use single_file::jsonl_single_file_inventory;
 const PAGE_MAX_RECORDS: usize = 64;
 const PAGE_MAX_BYTES: usize = 8 * 1024 * 1024;
 
-/// Whether one complete Core record can be represented by a shared JSONL
-/// semantic page. Providers may use this exact publication boundary to apply
-/// an explicit content policy before the shared publisher's fail-closed check.
-pub fn jsonl_semantic_record_fits_page(
-    record: &ctx_history_core::CoreRecord,
-) -> ctx_history_core::CoreRecordResult<bool> {
-    Ok(record.encoded_json_len()? <= PAGE_MAX_BYTES)
+/// Stable, provider-neutral content policy applied when a projected record
+/// cannot fit in one JSONL semantic publication page.
+pub(crate) const JSONL_SEMANTIC_PAGE_CONTENT_OMISSION_REASON: &str =
+    "ctx-jsonl-semantic-page-content-omitted-v1";
+
+/// Makes one projected Core record representable by a shared JSONL semantic
+/// page without changing its identity or provider-neutral metadata.
+///
+/// The exact encoded size is measured without materializing a duplicate JSON
+/// payload. A record that remains too large after all selected content is
+/// removed has no safe bounded representation and is rejected by the caller.
+pub(crate) fn fit_jsonl_semantic_page_record(
+    record: &mut ctx_history_core::CoreRecord,
+) -> ctx_history_core::CoreRecordResult<()> {
+    if record.encoded_json_len()? <= PAGE_MAX_BYTES {
+        return Ok(());
+    }
+
+    record.content.policy_status = ctx_history_core::CoreContentPolicyStatus::Omitted {
+        reason: JSONL_SEMANTIC_PAGE_CONTENT_OMISSION_REASON.to_owned(),
+    };
+    record.content.normalized_body = None;
+    record.content.structured_content = None;
+    record.content.discovery_exclusion = None;
+    record.content.activity = None;
+    record.validate_contract()?;
+
+    let encoded_bytes = record.encoded_json_len()?;
+    if encoded_bytes > PAGE_MAX_BYTES {
+        return Err(ctx_history_core::CoreRecordError::FieldTooLarge {
+            field: "jsonl_semantic_page_identity_skeleton",
+            actual: encoded_bytes,
+            maximum: PAGE_MAX_BYTES,
+        });
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone)]

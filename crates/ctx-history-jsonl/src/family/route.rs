@@ -34,7 +34,7 @@ use ctx_history_source_io::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-const FAMILY_POLICY_REVISION: &str = "borrowed-jsonl-certified-append-v1";
+const FAMILY_POLICY_REVISION: &str = "borrowed-jsonl-certified-append-v2-semantic-page-fit";
 const FAMILY_FRONTIER_KIND: &str = "borrowed-jsonl-family-checkpoint-v1";
 const FAMILY_SOURCE_REVISION_KIND: &str = "borrowed-jsonl-file-observation-v1";
 const FAMILY_INVENTORY_AUTHORITY: &str = "borrowed-jsonl-provider-root-v1";

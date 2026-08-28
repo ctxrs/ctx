@@ -47,7 +47,7 @@ fn codex_inline_image_over_page_limit_does_not_fail_route() {
             matches!(
                 &record.content.policy_status,
                 ctx_history_core::CoreContentPolicyStatus::Omitted { reason }
-                    if reason == "Codex provider record exceeds the JSONL semantic page limit"
+                    if reason == "ctx-jsonl-semantic-page-content-omitted-v1"
             )
         })
         .expect("the oversized tool result must remain as an omitted Core record");
@@ -96,7 +96,7 @@ fn codex_inline_image_over_page_limit_does_not_fail_route() {
         .any(|record| matches!(
             &record.content.policy_status,
             ctx_history_core::CoreContentPolicyStatus::Omitted { reason }
-                if reason == "Codex provider record exceeds the JSONL semantic page limit"
+                if reason == "ctx-jsonl-semantic-page-content-omitted-v1"
         )));
 }
 
