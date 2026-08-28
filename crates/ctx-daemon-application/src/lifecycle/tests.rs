@@ -634,12 +634,12 @@ fn recovery_preserves_a_daemon_with_a_live_ready_endpoint() -> Result<()> {
 }
 
 #[test]
-fn enabled_daemon_handoff_is_bounded_to_five_seconds() {
+fn enabled_daemon_handoff_is_bounded_to_five_minutes() {
     let pauses = DAEMON_SETUP_HANDOFF_POLL_ATTEMPTS.saturating_sub(1);
     let maximum_wait = DAEMON_UPGRADE_POLL_INTERVAL
         .checked_mul(u32::try_from(pauses).expect("bounded test attempt count"))
         .expect("bounded handoff duration");
-    assert_eq!(maximum_wait, Duration::from_secs(5));
+    assert_eq!(maximum_wait, Duration::from_secs(300));
     assert_eq!(DAEMON_SETUP_HANDOFF_TIMEOUT, maximum_wait);
     assert!(DAEMON_HEALTH_TIMEOUT < DAEMON_SETUP_HANDOFF_TIMEOUT);
 }
