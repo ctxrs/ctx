@@ -12,10 +12,12 @@ use std::{
 use anyhow::{Context, Result};
 use notify::{
     event::{AccessKind, AccessMode, CreateKind, MetadataKind, ModifyKind, RemoveKind},
-    Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
+    Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
 };
 
 use crate::CoalescingWakePayload;
+
+mod native_subscription;
 
 pub const WATCH_EVENT_QUEUE_CAPACITY: usize = 256;
 pub const WATCH_DEBOUNCE_QUIET: Duration = Duration::from_millis(250);
@@ -500,7 +502,7 @@ fn native_file_watcher(
                 normalize_native_watch_event(event),
             );
         },
-        Config::default(),
+        native_subscription::config(),
     )
     .context("start native filesystem watcher")
 }
