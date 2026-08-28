@@ -266,7 +266,7 @@ pub fn source_backed_watch_catalog(
     validate_provider_source_roots_outside_data_root(data_root, report.sources.iter())
         .context("validate provider roots before deriving source watch catalog")?;
     let index_root = source_backed_index_root(data_root);
-    let retained_generation = match VerifiedIndex::open(&index_root) {
+    let retained_generation = match VerifiedIndex::open_pinned(&index_root) {
         Ok(index) => Some(index),
         Err(IndexError::MissingActiveGenerationPointer) => None,
         Err(error) => return Err(error.into()),
