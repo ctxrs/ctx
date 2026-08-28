@@ -31,6 +31,7 @@ RELEASED_DEFAULT_SCOPES = {
     "analytics.enabled": "all_cli_installations",
     "local_usage.enabled": "all_cli_installations",
     "upgrade.auto": "official_installer_managed",
+    "upgrade.allow_rfc2544_fake_ip": "official_installer_managed",
     "indexing.mode": "all_cli_installations",
     "search.semantic": "all_cli_installations",
     "sources.automatic": "all_cli_installations",
@@ -140,6 +141,11 @@ def extract_empty_config_defaults(config_source: str) -> dict[str, object]:
         ),
         "search.semantic": scalar_value(semantic.group(1), constants),
     }
+    if "allow_rfc2544_fake_ip" in default_source:
+        defaults["upgrade.allow_rfc2544_fake_ip"] = default_field(
+            r"upgrade:\s*UpgradeConfig\s*\{.*?allow_rfc2544_fake_ip:\s*([^,\n]+),",
+            "RFC 2544 artifact opt-in",
+        )
     if "SourcesConfig" in default_source:
         defaults["sources.automatic"] = default_field(
             r"sources:\s*SourcesConfig\s*\{.*?automatic:\s*([^,}\n]+)",

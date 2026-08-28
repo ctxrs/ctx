@@ -38,6 +38,7 @@ use toml_subset::*;
 
 pub const CONFIG_FILE: &str = "config.toml";
 pub const AUTO_UPGRADE_DEFAULT_MODE: &str = "apply";
+pub const UPGRADE_ALLOW_RFC2544_FAKE_IP_DEFAULT: bool = false;
 pub const DAEMON_MODE_ENV: &str = "CTX_DAEMON_MODE";
 pub const LOCAL_USAGE_DEFAULT_ENABLED: bool = true;
 pub const SEMANTIC_SEARCH_DEFAULT_ENABLED: bool = false;
@@ -291,6 +292,7 @@ impl LocalUsageResolution {
 #[derive(Debug, Clone)]
 pub struct UpgradeConfig {
     pub auto: String,
+    pub allow_rfc2544_fake_ip: bool,
     pub channel: String,
     pub interval: Duration,
 }
@@ -348,6 +350,9 @@ impl Default for AppConfig {
             upgrade: UpgradeConfig {
                 // Managed installs check and apply in the background unless explicitly disabled.
                 auto: AUTO_UPGRADE_DEFAULT_MODE.to_owned(),
+                // RFC 2544 benchmark addresses remain rejected unless a controlled
+                // official-artifact test environment explicitly enables them.
+                allow_rfc2544_fake_ip: UPGRADE_ALLOW_RFC2544_FAKE_IP_DEFAULT,
                 channel: "stable".to_owned(),
                 interval: Duration::from_secs(24 * 60 * 60),
             },
@@ -513,6 +518,9 @@ impl AppConfig {
                 }
                 "upgrade.auto" => {
                     self.upgrade.auto = parse_upgrade_auto(value)?;
+                }
+                "upgrade.allow_rfc2544_fake_ip" => {
+                    self.upgrade.allow_rfc2544_fake_ip = parse_config_bool(key, value)?;
                 }
                 "upgrade.channel" => {
                     self.upgrade.channel = parse_non_empty_string(key, value)?;

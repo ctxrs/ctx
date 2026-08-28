@@ -8,10 +8,13 @@ use std::{
 };
 
 use anyhow::{anyhow, Context, Result};
+use ctx_upgrade_engine::ArtifactAddressPolicy;
 use url::{Host, Url};
 
 pub(crate) const TELEMETRY_HTTP_TIMEOUT: Duration = Duration::from_millis(250);
 const MAX_ARTIFACT_REDIRECTS: usize = 5;
+const PRODUCTION_ARTIFACT_HOST: &str = "cli.ctx.rs";
+const PRODUCTION_ARTIFACT_PATH_PREFIX: &str = "/storage/v1/object/public/releases/artifacts/";
 
 pub(crate) fn post_telemetry_json(endpoint: &str, body: &[u8]) -> Result<()> {
     post_json_with_timeout(endpoint, body, TELEMETRY_HTTP_TIMEOUT)
@@ -62,6 +65,22 @@ pub(crate) fn download_artifact(
     max_bytes: u64,
     timeout: Duration,
 ) -> Result<u64> {
+    download_artifact_with_address_policy(
+        endpoint,
+        output,
+        max_bytes,
+        timeout,
+        ArtifactAddressPolicy::PublicOnly,
+    )
+}
+
+pub(crate) fn download_artifact_with_address_policy(
+    endpoint: &str,
+    output: &mut fs::File,
+    max_bytes: u64,
+    timeout: Duration,
+    address_policy: ArtifactAddressPolicy,
+) -> Result<u64> {
     if max_bytes == 0 {
         return Err(anyhow!("artifact max bytes must be greater than zero"));
     }
@@ -87,7 +106,7 @@ pub(crate) fn download_artifact(
         );
     }
 
-    let response = get_artifact_response(endpoint, timeout, started)?;
+    let response = get_artifact_response(endpoint, timeout, started, address_policy)?;
     if let Some(length) = response.header("content-length") {
         let length = length
             .parse::<u64>()
@@ -183,15 +202,16 @@ fn get_artifact_response(
     endpoint: &str,
     timeout: Duration,
     started: Instant,
+    address_policy: ArtifactAddressPolicy,
 ) -> Result<ureq::Response> {
-    let mut current = Url::parse(endpoint).map_err(|_| anyhow!("invalid artifact URL"))?;
-    validate_artifact_target(&current)?;
-    let agent = artifact_agent(timeout);
-
+    let mut hop = ArtifactRequestHop::new(endpoint, address_policy)?;
     for redirects in 0..=MAX_ARTIFACT_REDIRECTS {
         let remaining = remaining_timeout(timeout, started, "GET artifact")?;
+        // Re-evaluate the exception on every request hop. A redirect never
+        // inherits it when it leaves the compiled production authority.
+        let agent = artifact_agent(remaining, hop.allow_rfc2544());
         let response = agent
-            .get(current.as_str())
+            .get(hop.url.as_str())
             .set("accept-encoding", "identity")
             .timeout(remaining)
             .call()
@@ -207,13 +227,42 @@ fn get_artifact_response(
         let location = response
             .header("location")
             .ok_or_else(|| anyhow!("artifact redirect omitted Location"))?;
-        let next = current
-            .join(location)
-            .map_err(|_| anyhow!("artifact redirect has an invalid Location"))?;
-        validate_artifact_redirect(&current, &next)?;
-        current = next;
+        hop = hop.redirect(location)?;
     }
     unreachable!("bounded artifact redirect loop")
+}
+
+#[derive(Debug)]
+struct ArtifactRequestHop {
+    url: Url,
+    address_policy: ArtifactAddressPolicy,
+}
+
+impl ArtifactRequestHop {
+    fn new(endpoint: &str, address_policy: ArtifactAddressPolicy) -> Result<Self> {
+        let url = Url::parse(endpoint).map_err(|_| anyhow!("invalid artifact URL"))?;
+        validate_artifact_target(&url)?;
+        Ok(Self {
+            url,
+            address_policy,
+        })
+    }
+
+    fn allow_rfc2544(&self) -> bool {
+        rfc2544_allowed_for_artifact_hop(&self.url, self.address_policy)
+    }
+
+    fn redirect(&self, location: &str) -> Result<Self> {
+        let url = self
+            .url
+            .join(location)
+            .map_err(|_| anyhow!("artifact redirect has an invalid Location"))?;
+        validate_artifact_redirect(&self.url, &url)?;
+        Ok(Self {
+            url,
+            address_policy: self.address_policy,
+        })
+    }
 }
 
 fn reject_oversized_length(length: u64, max_bytes: u64, label: &str) -> Result<()> {
@@ -243,30 +292,77 @@ fn remaining_timeout(timeout: Duration, started: Instant, label: &str) -> Result
         .ok_or_else(|| anyhow!("{label} exceeded time limit"))
 }
 
-fn artifact_agent(timeout: Duration) -> ureq::Agent {
+fn artifact_agent(timeout: Duration, allow_rfc2544: bool) -> ureq::Agent {
     ureq::AgentBuilder::new()
         .redirects(0)
         .try_proxy_from_env(false)
         .timeout(timeout)
-        .resolver(public_only_resolver)
+        .resolver(ArtifactResolver { allow_rfc2544 })
         .build()
 }
 
-fn public_only_resolver(netloc: &str) -> io::Result<Vec<SocketAddr>> {
+#[derive(Debug)]
+struct ArtifactResolver {
+    allow_rfc2544: bool,
+}
+
+impl ureq::Resolver for ArtifactResolver {
+    fn resolve(&self, netloc: &str) -> io::Result<Vec<SocketAddr>> {
+        public_only_resolver(netloc, self.allow_rfc2544)
+    }
+}
+
+fn public_only_resolver(netloc: &str, allow_rfc2544: bool) -> io::Result<Vec<SocketAddr>> {
     let addresses = netloc.to_socket_addrs()?.collect::<Vec<_>>();
+    validate_artifact_addresses(addresses, allow_rfc2544)
+}
+
+fn validate_artifact_addresses(
+    addresses: Vec<SocketAddr>,
+    allow_rfc2544: bool,
+) -> io::Result<Vec<SocketAddr>> {
     if addresses.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
             "artifact host resolved to no addresses",
         ));
     }
-    if addresses.iter().any(|address| !is_public_ip(address.ip())) {
+    if addresses
+        .iter()
+        .any(|address| !is_artifact_ip_allowed(address.ip(), allow_rfc2544))
+    {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "artifact host resolved to a private or local address",
         ));
     }
     Ok(addresses)
+}
+
+fn is_production_artifact_authority(url: &Url) -> bool {
+    url.scheme() == "https"
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.port_or_known_default() == Some(443)
+        && url
+            .host_str()
+            .is_some_and(|host| host.eq_ignore_ascii_case(PRODUCTION_ARTIFACT_HOST))
+        && url.path().starts_with(PRODUCTION_ARTIFACT_PATH_PREFIX)
+        && url.query().is_none()
+        && url.fragment().is_none()
+}
+
+fn rfc2544_allowed_for_artifact_hop(url: &Url, address_policy: ArtifactAddressPolicy) -> bool {
+    address_policy == ArtifactAddressPolicy::AllowRfc2544ForProductionAuthority
+        && is_production_artifact_authority(url)
+}
+
+fn is_artifact_ip_allowed(address: IpAddr, allow_rfc2544: bool) -> bool {
+    is_public_ip(address) || (allow_rfc2544 && is_rfc2544_ipv4(address))
+}
+
+fn is_rfc2544_ipv4(address: IpAddr) -> bool {
+    matches!(address, IpAddr::V4(address) if matches!(address.octets(), [198, 18..=19, _, _]))
 }
 
 fn validate_artifact_redirect(current: &Url, next: &Url) -> Result<()> {
@@ -487,6 +583,140 @@ mod tests {
             &Url::parse("http://releases.example.com/file").unwrap(),
         )
         .is_err());
+    }
+
+    #[test]
+    fn rfc2544_artifact_addresses_are_default_denied_and_narrowly_opted_in() {
+        for address in ["198.18.0.0:443", "198.19.255.255:443"] {
+            let address = address.parse().unwrap();
+            assert!(validate_artifact_addresses(vec![address], false).is_err());
+            assert_eq!(
+                validate_artifact_addresses(vec![address], true).unwrap(),
+                vec![address]
+            );
+        }
+
+        for address in [
+            "10.0.0.1:443",
+            "127.0.0.1:443",
+            "203.0.113.1:443",
+            "[::1]:443",
+            "[::ffff:198.18.0.23]:443",
+        ] {
+            assert!(
+                validate_artifact_addresses(vec![address.parse().unwrap()], true).is_err(),
+                "{address} should remain denied"
+            );
+        }
+        for address in ["198.17.255.255:443", "198.20.0.1:443"] {
+            let address = address.parse().unwrap();
+            assert_eq!(
+                validate_artifact_addresses(vec![address], false).unwrap(),
+                vec![address],
+                "{address} must remain public rather than becoming part of the exception"
+            );
+        }
+        assert!(validate_artifact_addresses(
+            vec![
+                "198.18.0.23:443".parse().unwrap(),
+                "8.8.8.8:443".parse().unwrap(),
+            ],
+            false,
+        )
+        .is_err());
+        assert!(validate_artifact_addresses(
+            vec![
+                "198.18.0.23:443".parse().unwrap(),
+                "[::1]:443".parse().unwrap(),
+            ],
+            true,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn rfc2544_opt_in_is_scoped_to_each_compiled_artifact_authority_hop() {
+        let production = Url::parse(
+            "https://cli.ctx.rs/storage/v1/object/public/releases/artifacts/1.2.1/ctx-linux-x64",
+        )
+        .unwrap();
+        let same_authority_redirect = Url::parse(
+            "https://cli.ctx.rs/storage/v1/object/public/releases/artifacts/1.2.1/ctx-linux-x64.gz",
+        )
+        .unwrap();
+        let other_authority = Url::parse(
+            "https://example.test/storage/v1/object/public/releases/artifacts/1.2.1/ctx-linux-x64",
+        )
+        .unwrap();
+        let wrong_path = Url::parse(
+            "https://cli.ctx.rs/storage/v1/object/public/releases/artifacts-redirect/ctx-linux-x64",
+        )
+        .unwrap();
+        let wrong_port = Url::parse(
+            "https://cli.ctx.rs:444/storage/v1/object/public/releases/artifacts/1.2.1/ctx-linux-x64",
+        )
+        .unwrap();
+        let credentials = Url::parse(
+            "https://user@cli.ctx.rs/storage/v1/object/public/releases/artifacts/1.2.1/ctx-linux-x64",
+        )
+        .unwrap();
+        let insecure = Url::parse(
+            "http://cli.ctx.rs/storage/v1/object/public/releases/artifacts/1.2.1/ctx-linux-x64",
+        )
+        .unwrap();
+        let policy = ArtifactAddressPolicy::AllowRfc2544ForProductionAuthority;
+
+        assert!(is_production_artifact_authority(&production));
+        assert!(is_production_artifact_authority(&same_authority_redirect));
+        assert!(!is_production_artifact_authority(&other_authority));
+        assert!(!is_production_artifact_authority(&wrong_path));
+        assert!(!is_production_artifact_authority(&wrong_port));
+        assert!(!is_production_artifact_authority(&credentials));
+        assert!(!is_production_artifact_authority(&insecure));
+        assert!(rfc2544_allowed_for_artifact_hop(&production, policy));
+        assert!(rfc2544_allowed_for_artifact_hop(
+            &same_authority_redirect,
+            policy
+        ));
+        for redirect in [
+            &other_authority,
+            &wrong_path,
+            &wrong_port,
+            &credentials,
+            &insecure,
+        ] {
+            assert!(!rfc2544_allowed_for_artifact_hop(redirect, policy));
+            assert!(validate_artifact_addresses(
+                vec!["198.18.0.23:443".parse().unwrap()],
+                rfc2544_allowed_for_artifact_hop(redirect, policy),
+            )
+            .is_err());
+        }
+        assert!(validate_artifact_redirect(&production, &other_authority).is_ok());
+    }
+
+    #[test]
+    fn artifact_redirect_hops_recompute_rfc2544_admission() {
+        let policy = ArtifactAddressPolicy::AllowRfc2544ForProductionAuthority;
+        let initial = ArtifactRequestHop::new(
+            "https://cli.ctx.rs/storage/v1/object/public/releases/artifacts/1.2.1/ctx-linux-x64",
+            policy,
+        )
+        .unwrap();
+        let fake_ip = "198.18.0.23:443".parse().unwrap();
+
+        assert!(initial.allow_rfc2544());
+        assert!(validate_artifact_addresses(vec![fake_ip], initial.allow_rfc2544()).is_ok());
+
+        let same_authority = initial.redirect("ctx-linux-x64.redirected").unwrap();
+        assert!(same_authority.allow_rfc2544());
+        assert!(validate_artifact_addresses(vec![fake_ip], same_authority.allow_rfc2544()).is_ok());
+
+        let off_authority = initial
+            .redirect("https://downloads.example.test/ctx-linux-x64")
+            .unwrap();
+        assert!(!off_authority.allow_rfc2544());
+        assert!(validate_artifact_addresses(vec![fake_ip], off_authority.allow_rfc2544()).is_err());
     }
 
     #[test]

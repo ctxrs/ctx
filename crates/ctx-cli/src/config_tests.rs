@@ -76,6 +76,7 @@ enabled = false
 
 [upgrade]
 auto = "off"
+allow_rfc2544_fake_ip = true
 channel = "beta"
 interval_hours = 1
 
@@ -92,6 +93,7 @@ mode = "source-refresh-only"
     );
     assert!(config.analytics.enabled);
     assert_eq!(config.upgrade.auto, AUTO_UPGRADE_DEFAULT_MODE);
+    assert!(!config.upgrade.allow_rfc2544_fake_ip);
     assert_eq!(config.auto_upgrade_mode(), AutoUpgradeMode::Apply);
     assert!(config.auto_upgrade_enabled());
     assert_eq!(config.search.semantic, None);
@@ -99,6 +101,7 @@ mode = "source-refresh-only"
     assert!(!config.analytics.enabled);
     assert!(!config.local_usage.enabled);
     assert_eq!(config.upgrade.auto, "off");
+    assert!(config.upgrade.allow_rfc2544_fake_ip);
     assert_eq!(config.upgrade.channel, "beta");
     assert_eq!(config.upgrade.interval, Duration::from_secs(60 * 60));
     assert_eq!(config.indexing.mode, IndexingMode::Manual);
@@ -114,6 +117,16 @@ fn search_semantic_is_unset_when_absent() {
     config.apply_values(&values).unwrap();
 
     assert_eq!(config.search.semantic, None);
+}
+
+#[test]
+fn rfc2544_fake_ip_opt_in_defaults_off_and_accepts_explicit_false() {
+    let values = parse_toml_subset("[upgrade]\nallow_rfc2544_fake_ip = false\n").unwrap();
+    let mut config = AppConfig::default();
+
+    assert!(!config.upgrade.allow_rfc2544_fake_ip);
+    config.apply_values(&values).unwrap();
+    assert!(!config.upgrade.allow_rfc2544_fake_ip);
 }
 
 #[test]
@@ -146,6 +159,7 @@ fn load_without_config_file_uses_defaults() {
     assert!(config.analytics.enabled);
     assert!(config.local_usage.enabled);
     assert_eq!(config.upgrade.auto, AUTO_UPGRADE_DEFAULT_MODE);
+    assert!(!config.upgrade.allow_rfc2544_fake_ip);
     assert_eq!(config.auto_upgrade_mode(), AutoUpgradeMode::Apply);
     assert!(config.auto_upgrade_enabled());
     assert_eq!(config.upgrade.channel, "stable");
@@ -189,6 +203,10 @@ fn empty_config_runtime_defaults_match_public_control_inventory() {
         serde_json::json!(config.auto_upgrade_mode().as_str())
     );
     assert_eq!(
+        released("upgrade.allow_rfc2544_fake_ip"),
+        serde_json::json!(config.upgrade.allow_rfc2544_fake_ip)
+    );
+    assert_eq!(
         released("indexing.mode"),
         serde_json::json!(config.indexing.mode.as_str())
     );
@@ -214,6 +232,7 @@ fn legacy_config_without_runtime_control_keys_adopts_public_defaults() {
     assert!(config.local_usage.enabled);
     assert_eq!(config.auto_upgrade_mode(), AutoUpgradeMode::Apply);
     assert!(config.auto_upgrade_enabled());
+    assert!(!config.upgrade.allow_rfc2544_fake_ip);
     assert_eq!(config.indexing.mode, IndexingMode::Automatic);
     assert!(!config.semantic_search_enabled());
 }
@@ -657,6 +676,7 @@ endpoint = "file:///tmp/ctx-analytics.jsonl"
 
 [upgrade]
 auto = "off"
+allow_rfc2544_fake_ip = true
 channel = "beta"
 interval_hours = 2
 
@@ -671,6 +691,7 @@ enabled = false
     assert!(!config.analytics.enabled);
     assert_eq!(config.analytics.endpoint, "file:///tmp/ctx-analytics.jsonl");
     assert_eq!(config.upgrade.auto, "off");
+    assert!(config.upgrade.allow_rfc2544_fake_ip);
     assert_eq!(config.upgrade.channel, "beta");
     assert_eq!(config.upgrade.interval, Duration::from_secs(2 * 60 * 60));
     assert_eq!(config.indexing.mode, IndexingMode::Manual);
@@ -777,6 +798,11 @@ fn invalid_scalar_values_and_unknown_keys_report_the_owned_field() {
             "upgrade interval",
             "[upgrade]\ninterval_hours = nope\n",
             ["upgrade.interval_hours", "unsigned integer"],
+        ),
+        (
+            "upgrade RFC 2544 opt-in",
+            "[upgrade]\nallow_rfc2544_fake_ip = maybe\n",
+            ["upgrade.allow_rfc2544_fake_ip", "boolean"],
         ),
         (
             "analytics key",

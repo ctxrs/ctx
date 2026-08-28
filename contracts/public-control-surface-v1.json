@@ -49,6 +49,17 @@
       }
     },
     {
+      "behavior": "RFC 2544 official artifact download opt-in",
+      "config_key": "upgrade.allow_rfc2544_fake_ip",
+      "environment_variable": null,
+      "released_default": {
+        "value": false,
+        "state": "off",
+        "scope": "official_installer_managed"
+      },
+      "introduced_after": "v0.25.0"
+    },
+    {
       "behavior": "upgrade channel",
       "config_key": "upgrade.channel",
       "environment_variable": "CTX_UPGRADE_CHANNEL"
