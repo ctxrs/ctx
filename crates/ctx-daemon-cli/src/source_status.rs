@@ -203,19 +203,31 @@ fn refresh_report(job: Option<&Value>, generation_id: Option<&str>, daemon: &Val
         .and_then(Value::as_bool)
         .or_else(|| job.get("retryable").and_then(Value::as_bool))
         .unwrap_or(false);
-    let (status, reason) = match request_state {
-        Some("published") if generation_matches && (has_source_failures || retryable) => (
-            "partial",
-            Some(outcome.unwrap_or("refresh_completed_partially")),
-        ),
-        Some("published") if generation_matches => ("ready", None),
-        Some("admission_pending" | "queued" | "running") => {
-            ("pending", Some("core_refresh_pending"))
+    let automatic_retry_state = job
+        .get("automatic_retry")
+        .and_then(|automatic_retry| automatic_retry.get("state"))
+        .and_then(Value::as_str);
+    let (status, reason) = match automatic_retry_state {
+        Some("confirming") => ("pending", Some("automatic_retry_confirming")),
+        Some("paused") if current_internal_failure_is_fully_paused(job) => {
+            ("paused", Some("automatic_retry_paused"))
         }
-        Some("failed") => ("unavailable", Some("core_refresh_failed")),
-        Some("published") => ("stale", Some("published_generation_mismatch")),
-        Some(_) => ("unavailable", Some("refresh_state_unrecognized")),
-        None => ("unavailable", Some("refresh_state_missing")),
+        Some("paused") => ("partial", Some("automatic_retry_partially_paused")),
+        Some("mixed") => ("partial", Some("automatic_retry_partially_paused")),
+        _ => match request_state {
+            Some("published") if generation_matches && (has_source_failures || retryable) => (
+                "partial",
+                Some(outcome.unwrap_or("refresh_completed_partially")),
+            ),
+            Some("published") if generation_matches => ("ready", None),
+            Some("admission_pending" | "queued" | "running") => {
+                ("pending", Some("core_refresh_pending"))
+            }
+            Some("failed") => ("unavailable", Some("core_refresh_failed")),
+            Some("published") => ("stale", Some("published_generation_mismatch")),
+            Some(_) => ("unavailable", Some("refresh_state_unrecognized")),
+            None => ("unavailable", Some("refresh_state_missing")),
+        },
     };
     compact_json(json!({
         "status": status,
@@ -229,6 +241,7 @@ fn refresh_report(job: Option<&Value>, generation_id: Option<&str>, daemon: &Val
         "progress_owner_request_id": job.get("progress_owner_request_id"),
         "progress_owner_attempt_state": job.get("progress_owner_attempt_state"),
         "structured_outcome": job.get("structured_outcome"),
+        "automatic_retry": job.get("automatic_retry"),
         "published_generation": published_generation,
         "generation_id": generation_id,
         "generation_matches": generation_matches,
@@ -250,6 +263,22 @@ fn refresh_report(job: Option<&Value>, generation_id: Option<&str>, daemon: &Val
             .and_then(|receipt| receipt.get("rejected_record_total")),
         "diagnostics": refresh_diagnostics_report(request_outcome),
     }))
+}
+
+fn current_internal_failure_is_fully_paused(job: &Value) -> bool {
+    job.get("request_state").and_then(Value::as_str) == Some("failed")
+        && job
+            .pointer("/structured_outcome/code")
+            .and_then(Value::as_str)
+            == Some("source_refresh_failed")
+        && job
+            .pointer("/structured_outcome/class")
+            .and_then(Value::as_str)
+            == Some("internal")
+        && job
+            .pointer("/structured_outcome/retryable")
+            .and_then(Value::as_bool)
+            == Some(false)
 }
 
 fn refresh_diagnostics_report(receipt: Option<&Value>) -> Option<Value> {

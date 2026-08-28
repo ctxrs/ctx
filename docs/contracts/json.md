@@ -118,6 +118,40 @@ record rejections but zero source failures has `refresh.status: "ready"`; its
 `current.current_rejected_records` remains present for diagnostics. Source
 failures, retryable failures, and publication/generation mismatches do not
 become ready merely because an older verified generation remains searchable.
+When automatic refresh is confirming whether an internal failure repeats,
+`refresh.status` is `pending` with reason `automatic_retry_confirming`. When
+the current terminal internal failure has no retryable route left after the
+same failure occurs twice, status is `paused` with reason
+`automatic_retry_paused`. A mix of confirming and paused routes, or a paused
+route alongside other active refresh work, is `partial` with reason
+`automatic_retry_partially_paused`; it does not claim that all refresh work
+has stopped.
+
+The refresh object preserves the terminal `structured_outcome`, including its
+closed `code`, `class`, and `retryable` fields, and may add:
+
+```json
+"automatic_retry": {
+  "state": "confirming | paused | mixed",
+  "reason": "internal_failure_confirmation | repeated_internal_failure",
+  "confirmation_limit": 2,
+  "routes": {
+    "<route sha256>": {
+      "state": "confirming | paused",
+      "matching_failures": 1,
+      "source_observation": "<sha256>",
+      "failure_fingerprint": "<sha256>",
+      "build_version": "<version>"
+    }
+  },
+  "resume_on": ["source_change", "ctx_upgrade", "manual_import"]
+}
+```
+
+`matching_failures` is `1` while confirming and `2` when paused. Route keys,
+source observations, and failure fingerprints are SHA-256 identities, not
+source paths or raw debug chains. `manual_import` means an explicit
+`ctx import --all` retry after fixing the source or updating ctx.
 `semantic` reports the current source-backed semantic
 projection, including exact `flat_f32` document/event/chunk coverage when it is
 available. `daemon` reports process and relevant job state. These diagnostic
@@ -162,7 +196,9 @@ line uses the same read-only shape: `schema_version`, `initialized`, `indexing`,
 `indexing.mode` is `auto` or `manual`. Lexical counts and certified source bytes
 describe the currently verified generation. Refresh progress contains only
 values reported by the active refresh job; no synthetic work units, failure
-counts, rates, or remaining time are added.
+counts, rates, or remaining time are added. The one-shot and watch snapshots
+preserve `refresh.structured_outcome` and `refresh.automatic_retry` with the
+same shapes and status meanings as `ctx status --format json`.
 
 `ctx index mode --format json` returns `schema_version`, `indexing.mode`,
 `config_path`, `local_only`, and `read_only: true`. Supplying `auto` or `manual`
@@ -226,6 +262,11 @@ nullable may be omitted when unavailable:
 - `lock_path`;
 - `status_path`;
 - `jobs`.
+
+`daemon.jobs.core_refresh` preserves `structured_outcome` and
+`automatic_retry` from the daemon-owned refresh job. A running daemon can
+therefore report history refresh as confirming, paused, or partially paused
+without reporting the daemon process itself as stopped.
 
 `config_reload.status` is `applied`, `pending`, `failed`,
 `activation_failed`, or `unknown`. `requested` reflects the current effective

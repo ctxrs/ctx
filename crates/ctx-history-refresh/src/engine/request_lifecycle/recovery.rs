@@ -1,5 +1,12 @@
-use super::super::read_model::SourceBackedRefreshFailureType;
+use super::super::read_model::{
+    SourceBackedAutomaticRetryCheckpoint, SourceBackedAutomaticRetryState,
+    SourceBackedRefreshFailureType,
+};
 use super::*;
+
+mod automatic_retry;
+use automatic_retry::durable_build_rearmed_automatic_retry_routes;
+pub(in crate::engine) use automatic_retry::recover_automatic_retry_checkpoints;
 
 impl CoreRefreshEngine {
     pub fn recover(&self, data_root: &Path) -> Result<bool> {
@@ -13,6 +20,7 @@ impl CoreRefreshEngine {
         let Some(job) = self.journal.load(data_root)? else {
             return Ok(false);
         };
+        let build_rearmed_routes = durable_build_rearmed_automatic_retry_routes(&job)?;
         let published_open =
             open_published_generation_for_recovery(data_root, self.journal.as_ref())?;
         let rebuild_required = matches!(&published_open, PublishedGenerationOpen::RebuildRequired);
@@ -62,11 +70,21 @@ impl CoreRefreshEngine {
                         validate_terminal_receipt_fields(&job, &request_receipt)?;
                     }
                     let _ = recover_terminal_attempt(&job, SourceBackedRefreshState::Published)?;
-                    return self.recover_published_rebuild(data_root, &job, queued_successors);
+                    return self.recover_published_rebuild(
+                        data_root,
+                        &job,
+                        queued_successors,
+                        &build_rearmed_routes,
+                    );
                 }
                 "queued" | "running" => {
                     require_active_state(&job, request_state)?;
-                    return self.recover_published_rebuild(data_root, &job, queued_successors);
+                    return self.recover_published_rebuild(
+                        data_root,
+                        &job,
+                        queued_successors,
+                        &build_rearmed_routes,
+                    );
                 }
                 _ => {}
             }
@@ -102,6 +120,7 @@ impl CoreRefreshEngine {
                             terminal,
                             queued_successors,
                             active_generation,
+                            &build_rearmed_routes,
                         )?;
                         let _ = self.finish_route_admissions(&request_id, true, None);
                         self.persist_job_status(data_root, &request_id)?;
@@ -159,6 +178,7 @@ impl CoreRefreshEngine {
                 terminal,
                 queued_successors,
                 Some(active_generation),
+                &build_rearmed_routes,
             )?;
             let _ = self.finish_route_admissions(job_request_id, true, None);
             self.persist_job_status(data_root, job_request_id)?;
@@ -171,6 +191,22 @@ impl CoreRefreshEngine {
                 .and_then(Value::as_object)
                 .is_some_and(|progress| progress.contains_key("current_source_progress"));
             let failed = recover_failed_attempt(&job)?;
+            let durable_blocked_routes = job
+                .get("structured_outcome")
+                .and_then(Value::as_object)
+                .map(|fields| recover_outcome_routes(fields, "blocked_routes"))
+                .transpose()?
+                .unwrap_or_default();
+            let recovery_rearmed_routes = failed
+                .failure_outcome
+                .as_ref()
+                .map(|outcome| {
+                    durable_blocked_routes
+                        .difference(&outcome.blocked_routes)
+                        .cloned()
+                        .collect::<BTreeSet<_>>()
+                })
+                .unwrap_or_default();
             let failed_request_id = failed.request_id.clone();
             let failed_intent = failed.intent.clone();
             let failure_route_dispositions = failed.failure_outcome.as_ref().map(|outcome| {
@@ -181,6 +217,7 @@ impl CoreRefreshEngine {
             });
             {
                 let mut state = self.lock_state();
+                state.automatic_retry_checkpoints = failed.automatic_retry_checkpoints.clone();
                 state.attempts.push_back(failed);
                 install_recovered_successors(&mut state, queued_successors)?;
                 state.current_published_generation = active_generation;
@@ -194,6 +231,7 @@ impl CoreRefreshEngine {
                         Some(&failed_intent),
                     );
                 }
+                Self::seed_rearmed_automatic_retry_routes_locked(&mut state, &build_rearmed_routes);
                 trim_terminal_attempt_history(&mut state);
             }
             let finish = self.finish_route_admissions(&failed_request_id, false, None);
@@ -204,6 +242,7 @@ impl CoreRefreshEngine {
             if finish.durable_request_id != failed_request_id
                 || has_successors
                 || terminal_progress_needs_normalization
+                || !recovery_rearmed_routes.is_empty()
             {
                 self.persist_job_status(data_root, &finish.durable_request_id)?;
             }
@@ -225,15 +264,18 @@ impl CoreRefreshEngine {
         }
         require_scoped_rehydration(&mut root)?;
         let request_id = root.request_id.clone();
+        let automatic_retry_checkpoints = root.automatic_retry_checkpoints.clone();
         {
             let mut state = self.lock_state();
             if state.active_request_id.is_some() || !state.pending_request_ids.is_empty() {
                 bail!("interrupted source refresh recovery conflicts with an active queue");
             }
             state.active_request_id = Some(request_id.clone());
+            state.automatic_retry_checkpoints = automatic_retry_checkpoints;
             state.attempts.push_back(root);
             install_recovered_successors(&mut state, queued_successors)?;
             state.current_published_generation = active_generation;
+            Self::seed_rearmed_automatic_retry_routes_locked(&mut state, &build_rearmed_routes);
         }
         self.persist_job_status(data_root, &request_id)?;
         Ok(true)
@@ -245,6 +287,7 @@ impl CoreRefreshEngine {
         terminal: CoreRefreshTerminalSuccess,
         queued_successors: Vec<SourceBackedRefreshAttempt>,
         active_generation: Option<String>,
+        build_rearmed_routes: &BTreeSet<SourceRouteIdentity>,
     ) -> Result<()> {
         let route_dispositions = attempt
             .receipt
@@ -254,6 +297,7 @@ impl CoreRefreshEngine {
         let retry_intent = attempt.intent.clone();
         let mut state = self.lock_state();
         terminal.install(&mut state);
+        state.automatic_retry_checkpoints = attempt.automatic_retry_checkpoints.clone();
         state.attempts.push_back(attempt);
         install_recovered_successors(&mut state, queued_successors)?;
         state.current_published_generation = active_generation;
@@ -263,6 +307,7 @@ impl CoreRefreshEngine {
             &route_dispositions.1,
             Some(&retry_intent),
         );
+        Self::seed_rearmed_automatic_retry_routes_locked(&mut state, build_rearmed_routes);
         trim_terminal_attempt_history(&mut state);
         Ok(())
     }
@@ -272,6 +317,7 @@ impl CoreRefreshEngine {
         data_root: &Path,
         job: &Value,
         queued_successors: Vec<SourceBackedRefreshAttempt>,
+        build_rearmed_routes: &BTreeSet<SourceRouteIdentity>,
     ) -> Result<bool> {
         let mut rebuild_job = job.clone();
         let object = rebuild_job
@@ -300,14 +346,17 @@ impl CoreRefreshEngine {
         let mut root = recover_queued_root(&rebuild_job, None)?;
         require_scoped_rehydration(&mut root)?;
         let request_id = root.request_id.clone();
+        let automatic_retry_checkpoints = root.automatic_retry_checkpoints.clone();
         let mut state = self.lock_state();
         if state.active_request_id.is_some() || !state.pending_request_ids.is_empty() {
             bail!("interrupted source refresh recovery conflicts with an active queue");
         }
         state.active_request_id = Some(request_id.clone());
+        state.automatic_retry_checkpoints = automatic_retry_checkpoints;
         state.attempts.push_back(root);
         install_recovered_successors(&mut state, queued_successors)?;
         state.current_published_generation = None;
+        Self::seed_rearmed_automatic_retry_routes_locked(&mut state, build_rearmed_routes);
         drop(state);
         self.persist_job_status(data_root, &request_id)?;
         Ok(true)
@@ -540,6 +589,48 @@ fn recover_terminal_attempt(
         None
     };
     attempt.last_error = optional_string(job, "last_error")?;
+    attempt.automatic_retry_checkpoints = recover_automatic_retry_checkpoints(job)?;
+    if let Some(outcome) = attempt
+        .failure_outcome
+        .as_ref()
+        .filter(|outcome| outcome.is_automatic_retry_eligible())
+    {
+        for (route, checkpoint) in &attempt.automatic_retry_checkpoints {
+            if !outcome.affected_routes.contains(route) {
+                continue;
+            }
+            let disposition_matches = if checkpoint.is_paused() {
+                outcome.blocked_routes.contains(route)
+            } else {
+                outcome.retryable_routes.contains(route)
+            };
+            if !disposition_matches {
+                bail!("durable source refresh automatic retry disposition is inconsistent");
+            }
+        }
+    }
+    let checkpointless_pauses = attempt
+        .failure_outcome
+        .as_ref()
+        .filter(|outcome| outcome.is_automatic_retry_eligible())
+        .map(|outcome| {
+            outcome
+                .blocked_routes
+                .iter()
+                .filter(|route| {
+                    !attempt
+                        .automatic_retry_checkpoints
+                        .get(*route)
+                        .is_some_and(SourceBackedAutomaticRetryCheckpoint::is_paused)
+                })
+                .cloned()
+                .collect::<BTreeSet<_>>()
+        })
+        .unwrap_or_default();
+    if let Some(outcome) = attempt.failure_outcome.as_mut() {
+        outcome.rearm_automatic_retry_routes(&checkpointless_pauses);
+    }
+    rearm_build_changed_automatic_retry_checkpoints(&mut attempt);
     // Estimator state is deliberately non-durable. Recovery never revives a
     // deadline from a prior process or physical attempt.
     attempt.whole_run_eta.clear();

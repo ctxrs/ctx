@@ -46,17 +46,21 @@ fn unclaimed_base_source_is_terminal_and_not_retryable() {
     }
     .into();
 
-    let outcome = source_backed_refresh_failure_outcome(&error, &attempted_routes);
+    let mut outcome = source_backed_refresh_failure_outcome(&error, &attempted_routes);
 
     assert_eq!(outcome.code, RefreshOutcomeCode::SourceUnclaimed);
     assert_eq!(outcome.class, RefreshOutcomeClass::Coverage);
     assert!(!outcome.retryable);
-    assert_eq!(outcome.blocked_routes, BTreeSet::from([route]));
+    assert_eq!(outcome.blocked_routes, BTreeSet::from([route.clone()]));
     assert!(outcome.retryable_routes.is_empty());
     assert_eq!(
         outcome.retry_advice,
         Some(RefreshRetryAdvice::InspectSources)
     );
+
+    let original = outcome.clone();
+    outcome.pause_automatic_retry_routes(&BTreeSet::from([route]));
+    assert_eq!(outcome, original);
 }
 
 #[test]

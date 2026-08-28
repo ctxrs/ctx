@@ -390,6 +390,189 @@ fn catching_up_status_keeps_record_and_byte_progress_visible() {
 }
 
 #[test]
+fn automatic_retry_pause_keeps_daemon_running_and_offers_one_explicit_retry() {
+    for (retry_state, expected_title, expected_status, expected_detail) in [
+        (
+            "paused",
+            "Daemon is running; history refresh is paused",
+            "paused",
+            "The last verified history generation was retained.",
+        ),
+        (
+            "mixed",
+            "Daemon is running; some history refresh routes are paused",
+            "partially paused",
+            "Unpaused history routes can continue refreshing.",
+        ),
+    ] {
+        let mut report = running_report();
+        let paused_route = "aa".repeat(32);
+        let mut automatic_retry = json!({
+            "state": retry_state,
+            "reason": "repeated_internal_failure",
+            "confirmation_limit": 2,
+            "routes": {
+                (paused_route): {
+                    "state": "paused",
+                    "matching_failures": 2,
+                    "source_observation": "cc".repeat(32),
+                    "failure_fingerprint": "dd".repeat(32),
+                    "build_version": "0.0.0-test",
+                }
+            },
+            "resume_on": ["source_change", "ctx_upgrade", "manual_import"],
+        });
+        if retry_state == "mixed" {
+            let confirming_route = "bb".repeat(32);
+            automatic_retry["routes"][confirming_route.as_str()] = json!({
+                "state": "confirming",
+                "matching_failures": 1,
+                "source_observation": "ee".repeat(32),
+                "failure_fingerprint": "ff".repeat(32),
+                "build_version": "0.0.0-test",
+            });
+        }
+        report["jobs"]["core_refresh"] = json!({
+            "status": "failed",
+            "request_state": "failed",
+            "last_error": "internal refresh error at /tmp/private/source",
+            "structured_outcome": {
+                "code": "source_refresh_failed",
+                "class": "internal",
+                "retryable": retry_state != "paused",
+            },
+            "published_generation": "generation-1",
+            "automatic_retry": automatic_retry,
+        });
+
+        for width in [32, 48, 80, 120] {
+            let plain_context = context(width);
+            let document = render_status(&plain_context, &report);
+            let rendered = document.render_plain();
+            let normalized = rendered.split_whitespace().collect::<Vec<_>>().join(" ");
+
+            assert!(
+                normalized.starts_with(&format!("! {expected_title}")),
+                "{rendered}"
+            );
+            assert!(normalized.contains("Service Status running"), "{rendered}");
+            assert!(normalized.contains(expected_detail), "{rendered}");
+            assert!(
+                normalized.contains(&format!("History refresh Status {expected_status}")),
+                "{rendered}"
+            );
+            assert!(
+                normalized.contains("Issue The same internal refresh failure happened twice."),
+                "{rendered}"
+            );
+            assert!(
+                normalized.contains("Hint: Retry after fixing the source or updating ctx."),
+                "{rendered}"
+            );
+            assert_eq!(
+                rendered.matches("ctx import --all").count(),
+                1,
+                "{rendered}"
+            );
+            assert!(!rendered.contains("--no-daemon"), "{rendered}");
+            assert!(!rendered.contains("/tmp/private/source"), "{rendered}");
+            assert!(!rendered.contains(&"dd".repeat(32)), "{rendered}");
+            assert_eq!(
+                strip_ansi(&document.render(&styled_context(width))),
+                rendered
+            );
+            assert_fits(&document, &plain_context);
+        }
+    }
+}
+
+#[test]
+fn paused_route_does_not_claim_an_unrelated_running_refresh_is_fully_paused() {
+    let mut report = running_report();
+    let route = "aa".repeat(32);
+    report["jobs"]["core_refresh"] = json!({
+        "status": "running",
+        "request_state": "running",
+        "automatic_retry": {
+            "state": "paused",
+            "reason": "repeated_internal_failure",
+            "confirmation_limit": 2,
+            "routes": {
+                (route): {
+                    "state": "paused",
+                    "matching_failures": 2,
+                    "source_observation": "bb".repeat(32),
+                    "failure_fingerprint": "cc".repeat(32),
+                    "build_version": "0.0.0-test",
+                }
+            },
+            "resume_on": ["source_change", "ctx_upgrade", "manual_import"],
+        },
+    });
+
+    let rendered = render_status(&context(80), &report).render_plain();
+
+    assert!(rendered.starts_with("! Daemon is running; some history refresh routes are paused\n"));
+    assert!(
+        rendered.contains("Status  partially paused\n"),
+        "{rendered}"
+    );
+    assert!(
+        !rendered.contains("history refresh is paused\n"),
+        "{rendered}"
+    );
+}
+
+#[test]
+fn automatic_retry_confirmation_is_visible_without_claiming_refresh_is_paused() {
+    let mut report = running_report();
+    let route = "aa".repeat(32);
+    report["jobs"]["core_refresh"] = json!({
+        "status": "failed",
+        "request_state": "failed",
+        "last_error": "internal refresh failure",
+        "automatic_retry": {
+            "state": "confirming",
+            "reason": "internal_failure_confirmation",
+            "confirmation_limit": 2,
+            "routes": {
+                (route): {
+                    "state": "confirming",
+                    "matching_failures": 1,
+                    "source_observation": "bb".repeat(32),
+                    "failure_fingerprint": "cc".repeat(32),
+                    "build_version": "0.0.0-test",
+                }
+            },
+            "resume_on": ["source_change", "ctx_upgrade", "manual_import"],
+        },
+    });
+
+    let rendered = render_status(&context(80), &report).render_plain();
+    let normalized = rendered.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    assert!(rendered.starts_with("! Daemon is running; history refresh is confirming a failure\n"));
+    assert!(
+        normalized.contains("No verified history generation has been retained yet."),
+        "{rendered}"
+    );
+    assert!(
+        normalized.contains("History refresh Status confirming"),
+        "{rendered}"
+    );
+    assert!(
+        normalized.contains("An automatic retry will check whether the internal failure repeats."),
+        "{rendered}"
+    );
+    assert!(rendered.contains("ctx index watch"), "{rendered}");
+    assert!(!rendered.contains("ctx import --all"), "{rendered}");
+    assert!(
+        !rendered.contains("history refresh is paused"),
+        "{rendered}"
+    );
+}
+
+#[test]
 fn recoverable_failure_surfaces_error_and_one_restart_action() {
     let report = json!({
         "enabled": true,

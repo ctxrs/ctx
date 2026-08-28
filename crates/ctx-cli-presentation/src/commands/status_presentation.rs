@@ -8,8 +8,8 @@ use serde_json::Value;
 use serde_json::json;
 
 use crate::ui::{
-    fields, outcome, section, Document, Field, Line, Outcome, OutcomeState, RenderContext, Span,
-    Token,
+    fields, hint, outcome, section, Action, Document, Field, Hint, Line, Outcome, OutcomeState,
+    RenderContext, Span, Token,
 };
 
 use super::history_health::{counted, history_health_fields, history_partial_cause};
@@ -40,8 +40,48 @@ pub fn render_status_human(
         .filter(|(_, component)| component_status(component) == "pending")
         .count();
     let lexical_status = component_status(&report["lexical"]);
+    let automatic_retry_state = automatic_retry_state(report);
+    let automatic_retry_pause = automatic_retry_pause(report);
+    let last_verified_searchable = matches!(lexical_status, "ready" | "stale");
     let (state, title, detail) = match health {
         StatusHealth::Healthy => (OutcomeState::Success, "ctx is healthy", None),
+        _ if automatic_retry_pause == Some("paused") => (
+            if last_verified_searchable {
+                OutcomeState::Warning
+            } else {
+                OutcomeState::Error
+            },
+            "ctx needs attention",
+            Some(if last_verified_searchable {
+                "Automatic history refresh is paused. The last verified history remains searchable."
+                    .to_owned()
+            } else {
+                "Automatic history refresh is paused. No verified history is searchable yet."
+                    .to_owned()
+            }),
+        ),
+        _ if automatic_retry_pause == Some("mixed") => (
+            OutcomeState::Warning,
+            "ctx needs attention",
+            Some(if last_verified_searchable {
+                "Automatic history refresh is paused for some sources. The last verified history remains searchable."
+                    .to_owned()
+            } else {
+                "Automatic history refresh is paused for some sources. No verified history is searchable yet."
+                    .to_owned()
+            }),
+        ),
+        StatusHealth::Partial if automatic_retry_state == Some("confirming") => (
+            OutcomeState::Warning,
+            "ctx is partially ready",
+            Some(if last_verified_searchable {
+                "Automatic history refresh will retry to confirm an internal failure. The last verified history remains searchable."
+                    .to_owned()
+            } else {
+                "Automatic history refresh will retry to confirm an internal failure. No verified history is searchable yet."
+                    .to_owned()
+            }),
+        ),
         StatusHealth::Partial if coverage_cause.is_some() => (
             OutcomeState::Warning,
             "ctx needs attention",
@@ -123,6 +163,17 @@ pub fn render_status_human(
             ));
         }
     }
+    if automatic_retry_pause.is_some() {
+        history_values.push((
+            "Issue",
+            "The same internal refresh failure happened twice.".to_owned(),
+        ));
+    } else if automatic_retry_state == Some("confirming") {
+        history_values.push((
+            "Issue",
+            "An automatic retry will check whether the internal failure repeats.".to_owned(),
+        ));
+    }
     let history_fields = history_values
         .iter()
         .map(|(label, value)| Field::new(label, value.as_str()))
@@ -177,6 +228,17 @@ pub fn render_status_human(
     }
 
     if let Some(command) = status_next_command(report, health, pending, unhealthy.len()) {
+        if automatic_retry_pause.is_some() {
+            document.push_blank();
+            document.append(hint(
+                context,
+                Hint {
+                    text: "Retry after fixing the source or updating ctx.",
+                },
+                Some(Action { command }),
+            ));
+            return document;
+        }
         let mut actions = Document::from_line(
             Line::new()
                 .with(Span::text("  "))
@@ -534,6 +596,141 @@ mod tests {
         assert!(normalized.contains("Processed 1,234 records"));
         assert!(normalized.contains("Progress data 4.0 MiB processed"));
         assert!(!rendered.contains("records /"));
+    }
+
+    #[test]
+    fn paused_and_mixed_automatic_retry_keep_last_good_searchable_and_offer_one_explicit_retry() {
+        for (retry_state, refresh_status, expected_detail) in [
+            (
+                "paused",
+                "paused",
+                "Automatic history refresh is paused. The last verified history remains searchable.",
+            ),
+            (
+                "mixed",
+                "partial",
+                "Automatic history refresh is paused for some sources. The last verified history remains searchable.",
+            ),
+            (
+                "paused",
+                "partial",
+                "Automatic history refresh is paused for some sources. The last verified history remains searchable.",
+            ),
+        ] {
+            let mut report = status_report(true, "ready", refresh_status);
+            let paused_route = "aa".repeat(32);
+            let mut automatic_retry = json!({
+                "state": retry_state,
+                "reason": "repeated_internal_failure",
+                "confirmation_limit": 2,
+                "routes": {
+                    (paused_route): {
+                        "state": "paused",
+                        "matching_failures": 2,
+                        "source_observation": "cc".repeat(32),
+                        "failure_fingerprint": "dd".repeat(32),
+                        "build_version": "0.0.0-test",
+                    }
+                },
+                "resume_on": ["source_change", "ctx_upgrade", "manual_import"],
+            });
+            if retry_state == "mixed" {
+                let confirming_route = "bb".repeat(32);
+                automatic_retry["routes"][confirming_route.as_str()] = json!({
+                    "state": "confirming",
+                    "matching_failures": 1,
+                    "source_observation": "ee".repeat(32),
+                    "failure_fingerprint": "ff".repeat(32),
+                    "build_version": "0.0.0-test",
+                });
+            }
+            report["refresh"] = json!({
+                "status": refresh_status,
+                "reason": if refresh_status == "paused" {
+                    "automatic_retry_paused"
+                } else {
+                    "automatic_retry_partially_paused"
+                },
+                "last_error": "internal refresh error at /tmp/private/source",
+                "automatic_retry": automatic_retry,
+            });
+
+            for width in [32, 48, 80, 120] {
+                let plain_context = context(width, ColorMode::Never);
+                let document = render_report(&plain_context, &report);
+                let rendered = document.render_plain();
+                let normalized = rendered.split_whitespace().collect::<Vec<_>>().join(" ");
+
+                assert!(rendered.starts_with("! ctx needs attention\n"), "{rendered}");
+                assert!(normalized.contains(expected_detail), "{rendered}");
+                assert!(normalized.contains("Refresh"), "{rendered}");
+                assert!(normalized.contains(refresh_status), "{rendered}");
+                assert!(
+                    normalized.contains("Issue The same internal refresh failure happened twice."),
+                    "{rendered}"
+                );
+                assert!(
+                    normalized.contains("Hint: Retry after fixing the source or updating ctx."),
+                    "{rendered}"
+                );
+                assert_eq!(rendered.matches("ctx import --all").count(), 1, "{rendered}");
+                assert!(!rendered.contains("--no-daemon"), "{rendered}");
+                assert!(!rendered.contains("/tmp/private/source"), "{rendered}");
+                assert!(!rendered.contains(&"dd".repeat(32)), "{rendered}");
+                assert_eq!(
+                    strip_ansi(&document.render(&context(width, ColorMode::Always))),
+                    rendered
+                );
+                assert_fits(&document, &plain_context);
+            }
+        }
+    }
+
+    #[test]
+    fn confirming_automatic_retry_is_pending_without_claiming_refresh_is_paused() {
+        let mut report = status_report(true, "ready", "pending");
+        report["refresh"]["reason"] = json!("automatic_retry_confirming");
+        let route = "aa".repeat(32);
+        report["refresh"]["automatic_retry"] = json!({
+            "state": "confirming",
+            "reason": "internal_failure_confirmation",
+            "confirmation_limit": 2,
+            "routes": {
+                (route): {
+                    "state": "confirming",
+                    "matching_failures": 1,
+                    "source_observation": "bb".repeat(32),
+                    "failure_fingerprint": "cc".repeat(32),
+                    "build_version": "0.0.0-test",
+                }
+            },
+            "resume_on": ["source_change", "ctx_upgrade", "manual_import"],
+        });
+
+        let rendered = render_report(&context(80, ColorMode::Never), &report).render_plain();
+        let normalized = rendered.split_whitespace().collect::<Vec<_>>().join(" ");
+
+        assert!(
+            rendered.starts_with("! ctx is partially ready\n"),
+            "{rendered}"
+        );
+        assert!(
+            normalized
+                .contains("Automatic history refresh will retry to confirm an internal failure."),
+            "{rendered}"
+        );
+        assert!(normalized.contains("Refresh pending"), "{rendered}");
+        assert!(
+            normalized
+                .contains("An automatic retry will check whether the internal failure repeats."),
+            "{rendered}"
+        );
+        assert!(rendered.contains("ctx index watch"), "{rendered}");
+        assert!(!rendered.contains("ctx import --all"), "{rendered}");
+        assert!(
+            !rendered.contains("history refresh is paused"),
+            "{rendered}"
+        );
     }
 
     #[test]

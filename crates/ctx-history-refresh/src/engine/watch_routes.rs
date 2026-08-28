@@ -20,6 +20,9 @@ impl CoreRefreshEngine {
         state
             .route_worksets
             .retain(|route, _| routes.contains(route));
+        state
+            .automatic_retry_checkpoints
+            .retain(|route, _| routes.contains(route));
         state.known_route_ids = routes;
         state.watch_routes_initialized = true;
     }
@@ -50,8 +53,12 @@ impl CoreRefreshEngine {
             .route_event_watermarks
             .retain(|route, _| routes.contains(route));
         state.route_worksets.clear();
+        state
+            .automatic_retry_checkpoints
+            .retain(|route, _| routes.contains(route));
         state.known_route_ids = routes;
         state.watch_catalog = Some(catalog);
+        state.watch_catalog_revision = state.watch_catalog_revision.saturating_add(1);
         state.watch_routes_initialized = true;
         if let Some((new_routes, watermark)) = newly_uncertain {
             state

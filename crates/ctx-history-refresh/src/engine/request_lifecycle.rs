@@ -2,6 +2,7 @@ use super::*;
 mod admission_scope;
 mod recovery;
 mod resolution;
+pub(in crate::engine) use recovery::recover_automatic_retry_checkpoints;
 
 impl CoreRefreshEngine {
     /// Fences admission after unbounded callback loss. Callback pressure only
@@ -52,8 +53,12 @@ impl CoreRefreshEngine {
             .route_event_watermarks
             .retain(|route, _| routes.contains(route));
         state.route_worksets.clear();
+        state
+            .automatic_retry_checkpoints
+            .retain(|route, _| routes.contains(route));
         state.known_route_ids = routes.clone();
         state.watch_catalog = Some(catalog);
+        state.watch_catalog_revision = state.watch_catalog_revision.saturating_add(1);
         state.watch_routes_initialized = true;
         if current_uncertainty > covered_through {
             state
@@ -102,14 +107,58 @@ impl CoreRefreshEngine {
 
     pub fn enqueue_periodic(&self, data_root: &Path) -> Result<Value> {
         let observed_generation = self.observed_published_generation(data_root)?;
-        self.enqueue_intent(
+        let mut state = self.lock_state();
+        let paused_routes = state
+            .automatic_retry_checkpoints
+            .iter()
+            .filter(|(_, checkpoint)| checkpoint.is_paused())
+            .map(|(route, _)| route.clone())
+            .collect::<BTreeSet<_>>();
+        let refresh_scope = if paused_routes.is_empty() {
+            SourceBackedRefreshScope::All
+        } else {
+            let healthy_routes = state
+                .known_route_ids
+                .difference(&paused_routes)
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            if healthy_routes.is_empty() {
+                let request_id = state
+                    .attempts
+                    .back()
+                    .map(|attempt| attempt.request_id.as_str())
+                    .ok_or_else(|| anyhow!("paused automatic refresh has no durable status"))?;
+                return projected_status_json(&state, request_id)
+                    .ok_or_else(|| anyhow!("paused automatic refresh status disappeared"));
+            }
+            SourceBackedRefreshScope::Exact(healthy_routes)
+        };
+        let response = Self::enqueue_intent_locked(
+            &mut state,
             observed_generation,
             SourceRefreshRuntimeMetadata::periodic(),
             RefreshIntent::AutomaticMaintenance,
-            SourceBackedRefreshScope::All,
+            refresh_scope.clone(),
             None,
             None,
-        )
+        )?;
+        if let SourceBackedRefreshScope::Exact(routes) = refresh_scope {
+            let watermark = state.dirty_routes.seed_watermark();
+            for route in &routes {
+                state
+                    .route_event_watermarks
+                    .entry(route.clone())
+                    .and_modify(|current| *current = (*current).max(watermark))
+                    .or_insert(watermark);
+            }
+            state.dirty_routes.seed_exact_routes(
+                routes,
+                watermark,
+                source_route_ledger_now_ms().saturating_sub(1_000),
+            );
+        }
+        trim_terminal_attempt_history(&mut state);
+        Ok(response)
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -312,6 +361,7 @@ impl CoreRefreshEngine {
         }
         attempt.request_fingerprint = request_fingerprint;
         attempt.reconciliation_demand = reconciliation_demand;
+        attempt.automatic_retry_checkpoints = state.automatic_retry_checkpoints.clone();
         let request_id = attempt.request_id.clone();
         let terminal_persistence_owns_root = state.pending_terminal_persistence.is_some();
         let active_attempt_owns_root = state
@@ -657,6 +707,7 @@ impl CoreRefreshEngine {
                     attempt.last_error = None;
                     attempt.published_generation != previous_generation
                 };
+                update_automatic_retry_after_publication(&mut state, &request_id);
                 let terminal_job = durable_job_json(&state, &request_id)?;
                 if let Err(error) = published(&terminal_job) {
                     let attempt = find_attempt_mut(&mut state, &request_id)?;
@@ -702,6 +753,7 @@ impl CoreRefreshEngine {
                         }));
                     attempt.last_error = Some(error);
                 }
+                update_automatic_retry_after_failure(&mut state, &request_id);
                 let failure_job = durable_job_json(&state, &request_id)?;
                 if let Err(persist_error) = published(&failure_job) {
                     let attempt = find_attempt_mut(&mut state, &request_id)?;
@@ -778,6 +830,103 @@ impl CoreRefreshEngine {
         }
         Some(run)
     }
+}
+
+fn update_automatic_retry_after_publication(state: &mut CoreRefreshEngineState, request_id: &str) {
+    let completed_routes = find_attempt(state, request_id)
+        .and_then(|attempt| attempt.receipt.as_ref())
+        .map(|receipt| {
+            receipt
+                .route_results
+                .iter()
+                .filter(|result| {
+                    result.outcome.is_success()
+                        && source_backed_route_retry_disposition(result).is_none()
+                })
+                .filter_map(|result| {
+                    SourceRouteIdentity::from_sha256(result.route_identity.clone()).ok()
+                })
+                .collect::<BTreeSet<_>>()
+        })
+        .unwrap_or_default();
+    for route in completed_routes {
+        state.automatic_retry_checkpoints.remove(&route);
+    }
+    let checkpoints = state.automatic_retry_checkpoints.clone();
+    if let Some(attempt) = find_attempt_mut(state, request_id) {
+        attempt.automatic_retry_checkpoints = checkpoints;
+    }
+}
+
+fn update_automatic_retry_after_failure(state: &mut CoreRefreshEngineState, request_id: &str) {
+    let Some((outcome, observations, terminal_error)) =
+        find_attempt(state, request_id).and_then(|attempt| {
+            let outcome = attempt.failure_outcome.as_ref()?;
+            Some((
+                outcome.clone(),
+                attempt.route_observations.clone(),
+                attempt.last_error.clone().unwrap_or_default(),
+            ))
+        })
+    else {
+        return;
+    };
+
+    let mut newly_paused = BTreeSet::new();
+    if outcome.is_automatic_retry_eligible() {
+        for route in &outcome.retryable_routes {
+            let Some(observation) = observations.get(route) else {
+                continue;
+            };
+            let candidate = SourceBackedAutomaticRetryCheckpoint::confirming(
+                &outcome,
+                route,
+                observation,
+                &terminal_error,
+            );
+            let can_insert = state.automatic_retry_checkpoints.contains_key(route)
+                || state.automatic_retry_checkpoints.len() < SOURCE_REFRESH_TERMINAL_ROUTE_LIMIT;
+            match state.automatic_retry_checkpoints.get_mut(route) {
+                Some(checkpoint) if checkpoint.matches(&candidate) => {
+                    checkpoint.pause();
+                    newly_paused.insert(route.clone());
+                }
+                Some(checkpoint) => *checkpoint = candidate,
+                None if can_insert => {
+                    state
+                        .automatic_retry_checkpoints
+                        .insert(route.clone(), candidate);
+                }
+                None => {}
+            }
+        }
+    }
+
+    let checkpoints = state.automatic_retry_checkpoints.clone();
+    if let Some(attempt) = find_attempt_mut(state, request_id) {
+        if let Some(outcome) = attempt.failure_outcome.as_mut() {
+            outcome.pause_automatic_retry_routes(&newly_paused);
+        }
+        attempt.automatic_retry_checkpoints = checkpoints;
+    }
+}
+
+pub(in crate::engine) fn rearm_build_changed_automatic_retry_checkpoints(
+    attempt: &mut SourceBackedRefreshAttempt,
+) -> BTreeSet<SourceRouteIdentity> {
+    let rearmed = attempt
+        .automatic_retry_checkpoints
+        .iter()
+        .filter(|(_, checkpoint)| checkpoint.build_version != SOURCE_REFRESH_BUILD_VERSION)
+        .map(|(route, _)| route.clone())
+        .collect::<BTreeSet<_>>();
+    for route in &rearmed {
+        attempt.automatic_retry_checkpoints.remove(route);
+    }
+    if let Some(outcome) = attempt.failure_outcome.as_mut() {
+        outcome.rearm_automatic_retry_routes(&rearmed);
+    }
+    rearmed
 }
 
 fn publication_authority_receipt(

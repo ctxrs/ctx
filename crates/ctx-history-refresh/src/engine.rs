@@ -39,8 +39,8 @@ pub use generation_authority::PinnedCorePublication;
 use progress_model::{status_progress_total_sources_known, SourceBackedRefreshState};
 pub use progress_model::{SourceBackedRefreshProgress, SourceBackedRefreshStage};
 use read_model::{
-    projected_job_json, projected_status_json, SourceBackedRefreshAttempt,
-    SourceBackedRefreshFailureOutcome,
+    projected_job_json, projected_status_json, SourceBackedAutomaticRetryCheckpoint,
+    SourceBackedRefreshAttempt, SourceBackedRefreshFailureOutcome,
 };
 use runtime_metadata::{canonical_daemon_mode, SourceRefreshRuntimeMetadata};
 pub use runtime_metadata::{RefreshRuntime, RefreshRuntimeMetadata};
@@ -125,6 +125,7 @@ pub(super) struct CoreRefreshEngineState {
     dirty_routes: DirtySourceRoutes,
     known_route_ids: BTreeSet<SourceRouteIdentity>,
     watch_catalog: Option<SourceBackedWatchCatalog>,
+    watch_catalog_revision: u64,
     watch_uncertain_through: Option<EventWatermark>,
     hermes_routes_requiring_exhaustive_recovery: BTreeSet<SourceRouteIdentity>,
     routes_requiring_exhaustive_reconciliation: BTreeSet<SourceRouteIdentity>,
@@ -133,6 +134,8 @@ pub(super) struct CoreRefreshEngineState {
     route_retry_intents: BTreeMap<SourceRouteIdentity, Arc<RefreshIntent>>,
     route_admissions: BTreeMap<String, Vec<DirtySourceRouteAdmission>>,
     route_admission_watermarks: BTreeMap<String, BTreeMap<SourceRouteIdentity, EventWatermark>>,
+    automatic_retry_checkpoints:
+        BTreeMap<SourceRouteIdentity, SourceBackedAutomaticRetryCheckpoint>,
     pending_terminal_persistence: Option<PendingTerminalPersistence>,
     pending_scheduler_retry_root_id: Option<String>,
     unacknowledged_admissions: BTreeMap<String, usize>,
@@ -330,6 +333,7 @@ impl CoreRefreshEngine {
                 dirty_routes: DirtySourceRoutes::default(),
                 known_route_ids: BTreeSet::new(),
                 watch_catalog: None,
+                watch_catalog_revision: 0,
                 watch_uncertain_through: None,
                 hermes_routes_requiring_exhaustive_recovery: BTreeSet::new(),
                 routes_requiring_exhaustive_reconciliation: BTreeSet::new(),
@@ -338,6 +342,7 @@ impl CoreRefreshEngine {
                 route_retry_intents: BTreeMap::new(),
                 route_admissions: BTreeMap::new(),
                 route_admission_watermarks: BTreeMap::new(),
+                automatic_retry_checkpoints: BTreeMap::new(),
                 pending_terminal_persistence: None,
                 pending_scheduler_retry_root_id: None,
                 unacknowledged_admissions: BTreeMap::new(),
