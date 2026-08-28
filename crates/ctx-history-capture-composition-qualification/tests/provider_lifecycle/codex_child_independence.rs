@@ -241,6 +241,10 @@ fn successful_result(call_id: &str, output: String) -> serde_json::Value {
 }
 
 fn custom_tool_result(call_id: &str, output: String) -> serde_json::Value {
+    custom_tool_result_value(call_id, serde_json::Value::String(output))
+}
+
+fn custom_tool_result_value(call_id: &str, output: serde_json::Value) -> serde_json::Value {
     serde_json::json!({
         "timestamp": "2026-08-09T12:00:04Z",
         "type": "response_item",

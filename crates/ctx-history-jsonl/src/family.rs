@@ -192,7 +192,8 @@ pub use route::{
 };
 pub use single_file::jsonl_single_file_inventory;
 const PAGE_MAX_RECORDS: usize = 64;
-const PAGE_MAX_BYTES: usize = 8 * 1024 * 1024;
+pub const JSONL_FAMILY_SEMANTIC_PAGE_MAX_BYTES: usize = 8 * 1024 * 1024;
+const PAGE_MAX_BYTES: usize = JSONL_FAMILY_SEMANTIC_PAGE_MAX_BYTES;
 
 #[derive(Debug, Clone)]
 pub struct JsonlProbe {
