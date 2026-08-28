@@ -30,6 +30,10 @@ CTX_HISTORY_REFRESH_EXECUTION_DEPS = [
     "//crates/ctx-history-platform:lib",
 ]
 
+CTX_HISTORY_REFRESH_EXECUTION_TEST_DEPS = CTX_HISTORY_REFRESH_EXECUTION_DEPS + [
+    "//crates/ctx-history-index-format:test_support_lib",
+]
+
 rust_library(
     name = "lib",
     srcs = PROD_SRCS,
@@ -63,7 +67,7 @@ ctx_rust_test(
     crate_root = "src/lib.rs",
     edition = crate_edition(),
     aliases = aliases(normal_dev = True, proc_macro_dev = True),
-    deps = all_crate_deps(normal = True, normal_dev = True) + CTX_HISTORY_REFRESH_EXECUTION_DEPS,
+    deps = all_crate_deps(normal = True, normal_dev = True) + CTX_HISTORY_REFRESH_EXECUTION_TEST_DEPS,
     proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
     rustc_env = COMMON_RUSTC_ENV,
 )

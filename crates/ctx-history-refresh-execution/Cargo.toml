@@ -26,5 +26,6 @@ ctx-history-index = { path = "../ctx-history-index" }
 ctx-history-platform = { path = "../ctx-history-platform" }
 
 [dev-dependencies]
+ctx-history-index-format = { path = "../ctx-history-index-format", features = ["test-support"] }
 rusqlite.workspace = true
 tempfile.workspace = true

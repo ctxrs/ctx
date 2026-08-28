@@ -1434,6 +1434,7 @@ dependencies = [
  "ctx-history-capture-runtime",
  "ctx-history-core",
  "ctx-history-index",
+ "ctx-history-index-format",
  "ctx-history-platform",
  "rusqlite",
  "serde",

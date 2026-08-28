@@ -226,8 +226,11 @@ fn watch_catalog_preserves_released_identity_across_path_and_group_replacement()
     fs::rename(&released_home, &moved_home).unwrap();
     let moved_discovery = initial_discovery
         .with_configured_provider_roots(vec![definition(moved_home, "renamed-group")]);
+    ctx_history_index_format::reset_verification_activity();
     let catalog = source_backed_watch_catalog(&data_root, &moved_discovery).unwrap();
+    let (_, logical_passes) = ctx_history_index_format::verification_activity();
 
+    assert_eq!(logical_passes, 0);
     assert_eq!(
         catalog.route_ids().cloned().collect::<BTreeSet<_>>(),
         BTreeSet::from([published_route])
