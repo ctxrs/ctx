@@ -201,15 +201,19 @@ fn running_status(
     })
 }
 
-fn ready_response(pid: u32) -> Value {
+fn lifecycle_response(pid: u32, readiness: &str) -> Value {
     json!({
         "schema_version": 1,
         "ok": true,
         "owner": "daemon",
         "service": "lifecycle",
         "pid": pid,
-        "readiness": "ready",
+        "readiness": readiness,
     })
+}
+
+fn ready_response(pid: u32) -> Value {
+    lifecycle_response(pid, "ready")
 }
 
 #[test]
@@ -243,7 +247,12 @@ fn blocked_or_fresh_catch_up_without_lifecycle_endpoint_is_pending() {
 
         assert!(matches!(candidate, DaemonHandoffObservation::Running(_)));
         assert_eq!(
-            complete_daemon_handoff_observation(candidate, Some(&owner), Some(&owner), false,),
+            complete_daemon_handoff_observation(
+                candidate,
+                Some(&owner),
+                Some(&owner),
+                DaemonLifecycleEndpointObservation::Unavailable,
+            ),
             DaemonHandoffObservation::Pending,
             "{label} catch-up state must not replace a live lifecycle response",
         );
@@ -270,7 +279,7 @@ fn live_ready_endpoint_with_stale_heartbeat_can_succeed() {
             candidate,
             Some(&owner),
             Some(&owner),
-            daemon_lifecycle_ready_response_matches(&ready_response(owner.pid), owner.pid),
+            DaemonLifecycleEndpointObservation::Ready,
         ),
         DaemonHandoffObservation::Running(DaemonHandoff {
             pid: owner.pid,
@@ -280,9 +289,16 @@ fn live_ready_endpoint_with_stale_heartbeat_can_succeed() {
 }
 
 #[test]
-fn lifecycle_readiness_response_requires_every_strict_field() {
+fn lifecycle_response_requires_every_strict_field_and_known_active_state() {
     let valid = ready_response(43);
-    assert!(daemon_lifecycle_ready_response_matches(&valid, 43));
+    assert_eq!(
+        daemon_lifecycle_response_observation(&valid, 43),
+        DaemonLifecycleEndpointObservation::Ready,
+    );
+    assert_eq!(
+        daemon_lifecycle_response_observation(&lifecycle_response(43, "starting"), 43),
+        DaemonLifecycleEndpointObservation::Starting,
+    );
 
     let mut invalid_responses = Vec::new();
     for (field, value) in [
@@ -291,7 +307,6 @@ fn lifecycle_readiness_response_requires_every_strict_field() {
         ("owner", json!("cli")),
         ("service", json!("source_refresh")),
         ("pid", json!(44)),
-        ("readiness", json!("starting")),
         ("readiness", json!("stopping")),
     ] {
         let mut response = valid.clone();
@@ -315,9 +330,10 @@ fn lifecycle_readiness_response_requires_every_strict_field() {
     }
 
     for response in invalid_responses {
-        assert!(
-            !daemon_lifecycle_ready_response_matches(&response, 43),
-            "malformed lifecycle readiness gained authority: {response}",
+        assert_eq!(
+            daemon_lifecycle_response_observation(&response, 43),
+            DaemonLifecycleEndpointObservation::Unavailable,
+            "malformed lifecycle response gained authority: {response}",
         );
     }
 }
@@ -365,7 +381,12 @@ fn status_owner_start_time_and_exact_config_are_required_before_probe() {
             50_000,
         );
         assert_eq!(
-            complete_daemon_handoff_observation(observation, Some(&owner), Some(&owner), true,),
+            complete_daemon_handoff_observation(
+                observation,
+                Some(&owner),
+                Some(&owner),
+                DaemonLifecycleEndpointObservation::Ready,
+            ),
             DaemonHandoffObservation::Pending,
             "invalid status/config gained readiness authority: {invalid}",
         );
@@ -409,17 +430,46 @@ fn owner_replacement_during_probe_rejects_readiness() {
     replacements.push(changed_digest);
 
     for replacement in replacements {
-        assert_eq!(
-            complete_daemon_handoff_observation(
-                candidate.clone(),
-                Some(&owner),
-                Some(&replacement),
-                true,
-            ),
-            DaemonHandoffObservation::Pending,
-            "changed owner tuple gained readiness: {replacement:?}",
-        );
+        for endpoint in [
+            DaemonLifecycleEndpointObservation::Starting,
+            DaemonLifecycleEndpointObservation::Ready,
+        ] {
+            assert_eq!(
+                complete_daemon_handoff_observation(
+                    candidate.clone(),
+                    Some(&owner),
+                    Some(&replacement),
+                    endpoint,
+                ),
+                DaemonHandoffObservation::Pending,
+                "changed owner tuple gained lifecycle authority: {replacement:?}",
+            );
+        }
     }
+}
+
+#[test]
+fn identity_stable_starting_endpoint_reports_progress_without_readiness() {
+    let owner = test_daemon_owner("starting-owner", 46);
+    let expected = test_config();
+    let status = running_status(&owner, &expected, 61_000);
+    let candidate = daemon_handoff_status_observation_from(
+        Some(&status),
+        Some(&owner),
+        Some(owner.pid),
+        &expected,
+        61_000,
+    );
+
+    assert_eq!(
+        complete_daemon_handoff_observation(
+            candidate,
+            Some(&owner),
+            Some(&owner),
+            DaemonLifecycleEndpointObservation::Starting,
+        ),
+        DaemonHandoffObservation::Starting,
+    );
 }
 
 #[test]
@@ -442,6 +492,7 @@ fn observation_only_handoff_waits_through_owner_turnover() -> Result<()> {
             observation_count += 1;
             observations.next().expect("bounded turnover observation")
         },
+        || {},
         || pause_count += 1,
     )?;
 
@@ -449,6 +500,113 @@ fn observation_only_handoff_waits_through_owner_turnover() -> Result<()> {
     assert_eq!(observation_count, 2);
     assert_eq!(pause_count, 1);
     Ok(())
+}
+
+#[test]
+fn authenticated_starting_progress_renews_the_handoff_stall_budget() -> Result<()> {
+    let ready = DaemonHandoff {
+        pid: 47,
+        heartbeat_at_ms: 62_000,
+    };
+    let mut observations = [
+        DaemonHandoffObservation::Pending,
+        DaemonHandoffObservation::Starting,
+        DaemonHandoffObservation::Pending,
+        DaemonHandoffObservation::Starting,
+        DaemonHandoffObservation::Pending,
+        DaemonHandoffObservation::Running(ready),
+    ]
+    .into_iter();
+    let mut renewals = 0;
+    let mut pauses = 0;
+
+    let observed = wait_for_observed_daemon_handoff_with(
+        2,
+        || {
+            observations
+                .next()
+                .expect("progress sequence must terminate")
+        },
+        || renewals += 1,
+        || pauses += 1,
+    )?;
+
+    assert_eq!(observed, ready);
+    assert_eq!(renewals, 2);
+    assert_eq!(pauses, 5);
+    Ok(())
+}
+
+#[test]
+fn terminal_failure_wins_immediately_after_starting_progress() {
+    let mut observations = [
+        DaemonHandoffObservation::Starting,
+        DaemonHandoffObservation::Failed("startup reconciliation failed".to_owned()),
+    ]
+    .into_iter();
+    let mut renewals = 0;
+    let mut pauses = 0;
+
+    let error = wait_for_observed_daemon_handoff_with(
+        1,
+        || {
+            observations
+                .next()
+                .expect("failure sequence must terminate")
+        },
+        || renewals += 1,
+        || pauses += 1,
+    )
+    .expect_err("terminal startup failure must fail the handoff");
+
+    assert_eq!(error.to_string(), "startup reconciliation failed");
+    assert_eq!(renewals, 1);
+    assert_eq!(pauses, 1);
+}
+
+#[test]
+fn child_exit_wins_immediately_during_starting_progress() {
+    let mut renewals = 0;
+    let mut child_checks = 0;
+    let mut pauses = 0;
+
+    let error = wait_for_daemon_handoff_with(
+        1,
+        || DaemonHandoffObservation::Starting,
+        || {
+            child_checks += 1;
+            Ok(Some("daemon child exited".to_owned()))
+        },
+        || renewals += 1,
+        || pauses += 1,
+    )
+    .expect_err("child exit must fail an authenticated starting handoff");
+
+    assert_eq!(error.to_string(), "daemon child exited");
+    assert_eq!(renewals, 1);
+    assert_eq!(child_checks, 1);
+    assert_eq!(pauses, 0);
+}
+
+#[test]
+fn pending_handoff_exhausts_the_exact_stall_budget() {
+    let mut observations = 0;
+    let mut pauses = 0;
+
+    let error = wait_for_observed_daemon_handoff_with(
+        3,
+        || {
+            observations += 1;
+            DaemonHandoffObservation::Pending
+        },
+        || panic!("pending is not authenticated progress"),
+        || pauses += 1,
+    )
+    .expect_err("unresponsive handoff must remain bounded");
+
+    assert!(error.is::<DaemonHandoffTimeout>());
+    assert_eq!(observations, 3);
+    assert_eq!(pauses, 2);
 }
 
 #[test]
@@ -608,8 +766,8 @@ fn recovery_never_terminates_an_owner_replaced_during_the_probe() -> Result<()> 
 }
 
 #[test]
-fn recovery_preserves_a_daemon_with_a_live_ready_endpoint() -> Result<()> {
-    let owner = test_daemon_owner("ready-owner", 49);
+fn recovery_preserves_a_daemon_with_a_live_usable_endpoint() -> Result<()> {
+    let owner = test_daemon_owner("usable-owner", 49);
     let events = RefCell::new(Vec::new());
 
     let terminated = recover_unusable_daemon_owner_with(
@@ -634,12 +792,12 @@ fn recovery_preserves_a_daemon_with_a_live_ready_endpoint() -> Result<()> {
 }
 
 #[test]
-fn enabled_daemon_handoff_is_bounded_to_five_seconds() {
-    let pauses = DAEMON_SETUP_HANDOFF_POLL_ATTEMPTS.saturating_sub(1);
+fn daemon_handoff_stall_without_authenticated_progress_is_bounded_to_five_seconds() {
+    let pauses = DAEMON_SETUP_HANDOFF_STALL_POLL_ATTEMPTS.saturating_sub(1);
     let maximum_wait = DAEMON_UPGRADE_POLL_INTERVAL
         .checked_mul(u32::try_from(pauses).expect("bounded test attempt count"))
         .expect("bounded handoff duration");
     assert_eq!(maximum_wait, Duration::from_secs(5));
-    assert_eq!(DAEMON_SETUP_HANDOFF_TIMEOUT, maximum_wait);
-    assert!(DAEMON_HEALTH_TIMEOUT < DAEMON_SETUP_HANDOFF_TIMEOUT);
+    assert_eq!(DAEMON_SETUP_HANDOFF_STALL_TIMEOUT, maximum_wait);
+    assert!(DAEMON_HEALTH_TIMEOUT < DAEMON_SETUP_HANDOFF_STALL_TIMEOUT);
 }
