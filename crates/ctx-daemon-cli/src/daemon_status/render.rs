@@ -62,6 +62,13 @@ pub(crate) fn render_daemon_status_human(
     let history_failed = job_failed(core_refresh);
     let semantic_failed = job_failed(semantic);
     let history_catching_up = job_catching_up(core_refresh);
+    let automatic_retry_state = job_automatic_retry_state(core_refresh);
+    let history_confirming = automatic_retry_state == Some("confirming");
+    let history_paused = automatic_retry_state == Some("paused")
+        && job_current_internal_failure_is_fully_paused(core_refresh);
+    let history_partially_paused = automatic_retry_state == Some("mixed")
+        || (automatic_retry_state == Some("paused") && !history_paused);
+    let verified_history_retained = job_retains_verified_generation(core_refresh);
     let semantic_fallback = semantic_fallback(semantic);
     let config_issue = config_reload_issue(daemon);
     let supervisor_issue = daemon
@@ -87,6 +94,9 @@ pub(crate) fn render_daemon_status_human(
         && (history_failed
             || semantic_failed
             || history_catching_up
+            || history_confirming
+            || history_paused
+            || history_partially_paused
             || source_failures > 0
             || semantic_fallback.is_some()
             || service_issue)
@@ -100,6 +110,29 @@ pub(crate) fn render_daemon_status_human(
 
     let (outcome_state, title, detail) = match presentation {
         DaemonPresentation::Healthy => (OutcomeState::Success, "Daemon is healthy", None),
+        DaemonPresentation::Partial if history_paused => (
+            OutcomeState::Warning,
+            "Daemon is running; history refresh is paused",
+            Some(if verified_history_retained {
+                "The last verified history generation was retained."
+            } else {
+                "No verified history generation has been retained yet."
+            }),
+        ),
+        DaemonPresentation::Partial if history_partially_paused => (
+            OutcomeState::Warning,
+            "Daemon is running; some history refresh routes are paused",
+            Some("Unpaused history routes can continue refreshing."),
+        ),
+        DaemonPresentation::Partial if history_confirming => (
+            OutcomeState::Warning,
+            "Daemon is running; history refresh is confirming a failure",
+            Some(if verified_history_retained {
+                "The last verified history generation was retained."
+            } else {
+                "No verified history generation has been retained yet."
+            }),
+        ),
         DaemonPresentation::Partial if history_catching_up => (
             OutcomeState::Warning,
             "Daemon is running; history is catching up",
@@ -269,7 +302,17 @@ pub(crate) fn render_daemon_status_human(
         if rejected_records > 0 {
             history_details.push(("Skipped records", rejected_records.to_string()));
         }
-        if history_failed {
+        if history_paused || history_partially_paused {
+            history_details.push((
+                "Issue",
+                "The same internal refresh failure happened twice.".to_owned(),
+            ));
+        } else if history_confirming {
+            history_details.push((
+                "Issue",
+                "An automatic retry will check whether the internal failure repeats.".to_owned(),
+            ));
+        } else if history_failed {
             history_details.push((
                 "Issue",
                 "One or more history sources could not be refreshed.".to_owned(),
@@ -341,6 +384,9 @@ pub(crate) fn render_daemon_status_human(
             source_failures,
             semantic_failed,
             history_catching_up,
+            history_confirming,
+            history_paused,
+            history_partially_paused,
             service_issue,
         },
     ) {
@@ -626,6 +672,15 @@ fn core_refresh_state(
     if !enabled {
         return ("disabled", Token::Text);
     }
+    match job_automatic_retry_state(core_refresh) {
+        Some("confirming") => return ("confirming", Token::Warning),
+        Some("paused") if job_current_internal_failure_is_fully_paused(core_refresh) => {
+            return ("paused", Token::Warning);
+        }
+        Some("paused") => return ("partially paused", Token::Warning),
+        Some("mixed") => return ("partially paused", Token::Warning),
+        _ => {}
+    }
     if job_failed(core_refresh) {
         return ("failed", Token::Error);
     }
@@ -703,6 +758,9 @@ struct RecoverySignals {
     source_failures: usize,
     semantic_failed: bool,
     history_catching_up: bool,
+    history_confirming: bool,
+    history_paused: bool,
+    history_partially_paused: bool,
     service_issue: bool,
 }
 
@@ -716,6 +774,9 @@ fn recovery_action(
         source_failures,
         semantic_failed,
         history_catching_up,
+        history_confirming,
+        history_paused,
+        history_partially_paused,
         service_issue,
     } = signals;
     if presentation == DaemonPresentation::Disabled {
@@ -732,6 +793,15 @@ fn recovery_action(
             "Restart the daemon and check its health.",
             "ctx index mode auto",
         ));
+    }
+    if history_paused || history_partially_paused {
+        return Some((
+            "Retry after fixing the source or updating ctx.",
+            "ctx import --all",
+        ));
+    }
+    if history_confirming {
+        return Some(("Watch the automatic confirmation retry.", "ctx index watch"));
     }
     if history_failed || source_failures > 0 {
         return Some((
@@ -755,6 +825,42 @@ fn job_status(job: Option<&Value>) -> &str {
     job.and_then(|job| job.get("status"))
         .and_then(Value::as_str)
         .unwrap_or("unknown")
+}
+
+fn job_automatic_retry_state(job: Option<&Value>) -> Option<&str> {
+    job.and_then(|job| job.pointer("/automatic_retry/state"))
+        .and_then(Value::as_str)
+        .filter(|state| matches!(*state, "confirming" | "paused" | "mixed"))
+}
+
+fn job_current_internal_failure_is_fully_paused(job: Option<&Value>) -> bool {
+    job.is_some_and(|job| {
+        job.get("request_state").and_then(Value::as_str) == Some("failed")
+            && job
+                .pointer("/structured_outcome/code")
+                .and_then(Value::as_str)
+                == Some("source_refresh_failed")
+            && job
+                .pointer("/structured_outcome/class")
+                .and_then(Value::as_str)
+                == Some("internal")
+            && job
+                .pointer("/structured_outcome/retryable")
+                .and_then(Value::as_bool)
+                == Some(false)
+    })
+}
+
+fn job_retains_verified_generation(job: Option<&Value>) -> bool {
+    job.and_then(|job| {
+        job.get("published_generation")
+            .and_then(Value::as_str)
+            .or_else(|| {
+                job.pointer("/structured_outcome/retained_generation")
+                    .and_then(Value::as_str)
+            })
+    })
+    .is_some_and(|generation| !generation.is_empty())
 }
 
 fn job_failed(job: Option<&Value>) -> bool {

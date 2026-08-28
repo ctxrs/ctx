@@ -137,6 +137,7 @@ fn index_readiness_snapshot(data_root: &Path) -> Result<Value> {
             "progress_owner_request_id": source.report["refresh"].get("progress_owner_request_id"),
             "progress_owner_attempt_state": source.report["refresh"].get("progress_owner_attempt_state"),
             "structured_outcome": source.report["refresh"].get("structured_outcome"),
+            "automatic_retry": source.report["refresh"].get("automatic_retry"),
             "published_generation": source.report["refresh"].get("published_generation"),
             "generation_id": source.report["refresh"].get("generation_id"),
             "generation_matches": source.report["refresh"].get("generation_matches"),
@@ -212,6 +213,22 @@ mod tests {
             "blocked_routes": [],
             "physical_attempt_id": "physical-attempt",
         });
+        let route = "aa".repeat(32);
+        let automatic_retry = json!({
+            "state": "paused",
+            "reason": "repeated_internal_failure",
+            "confirmation_limit": 2,
+            "routes": {
+                (route): {
+                    "state": "paused",
+                    "matching_failures": 2,
+                    "source_observation": "bb".repeat(32),
+                    "failure_fingerprint": "cc".repeat(32),
+                    "build_version": "0.0.0-test",
+                }
+            },
+            "resume_on": ["source_change", "ctx_upgrade", "manual_import"],
+        });
         fs::write(
             &status_path,
             serde_json::to_vec(&json!({
@@ -224,6 +241,7 @@ mod tests {
                 "progress_owner_request_id": "progress-owner",
                 "progress_owner_attempt_state": "failed",
                 "structured_outcome": structured_outcome,
+                "automatic_retry": automatic_retry,
                 "progress": {
                     "phase": "committed",
                     "completed_sources": 0,
@@ -255,5 +273,6 @@ mod tests {
             snapshot["refresh"]["structured_outcome"],
             structured_outcome
         );
+        assert_eq!(snapshot["refresh"]["automatic_retry"], automatic_retry);
     }
 }

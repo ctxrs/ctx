@@ -471,6 +471,9 @@ fn recover_pending_attempt(
         SourceBackedRefreshState::Queued
     };
     attempt.request_fingerprint = optional_sha256(job, "request_fingerprint")?;
+    attempt.automatic_retry_checkpoints =
+        request_lifecycle::recover_automatic_retry_checkpoints(job)?;
+    request_lifecycle::rearm_build_changed_automatic_retry_checkpoints(&mut attempt);
     attempt.admission_durability_indeterminate =
         recover_admission_durability(job, &format!("durable source refresh {role}"))?;
     let _legacy_coalesced_into_request_id = job

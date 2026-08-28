@@ -87,6 +87,15 @@ impl CoreRefreshEngine {
         }
         let should_seed = matches!(intent, RefreshIntent::SelectedImport(_))
             || matches!(scope, SourceBackedRefreshScope::All);
+        if matches!(intent, RefreshIntent::SelectedImport(_)) {
+            state
+                .automatic_retry_checkpoints
+                .retain(|route, _| !exact_routes.contains(route));
+            let automatic_retry_checkpoints = state.automatic_retry_checkpoints.clone();
+            if let Some(attempt) = find_attempt_mut(&mut state, request_id) {
+                attempt.automatic_retry_checkpoints = automatic_retry_checkpoints;
+            }
+        }
         if should_seed {
             let watermark = state.dirty_routes.seed_watermark();
             for route in &exact_routes {

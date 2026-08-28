@@ -387,6 +387,113 @@ fn refresh_report_preserves_optional_active_source_record_and_byte_progress() {
 }
 
 #[test]
+fn refresh_report_preserves_automatic_retry_and_projects_its_attention_state() {
+    let paused_route = "aa".repeat(32);
+    let confirming_route = "bb".repeat(32);
+    for (state, expected_status, expected_reason) in [
+        ("confirming", "pending", "automatic_retry_confirming"),
+        ("paused", "paused", "automatic_retry_paused"),
+        ("mixed", "partial", "automatic_retry_partially_paused"),
+    ] {
+        let retryable_routes = if state == "paused" {
+            Vec::new()
+        } else if state == "confirming" {
+            vec![paused_route.clone()]
+        } else {
+            vec![confirming_route.clone()]
+        };
+        let blocked_routes = if state == "confirming" {
+            Vec::new()
+        } else {
+            vec![paused_route.clone()]
+        };
+        let affected_routes = retryable_routes
+            .iter()
+            .chain(blocked_routes.iter())
+            .cloned()
+            .collect::<Vec<_>>();
+        let structured_outcome = json!({
+            "code": "source_refresh_failed",
+            "class": "internal",
+            "retryable": !retryable_routes.is_empty(),
+            "affected_routes": affected_routes,
+            "retryable_routes": retryable_routes,
+            "blocked_routes": blocked_routes,
+        });
+        let mut automatic_retry = json!({
+            "state": state,
+            "reason": if state == "confirming" {
+                "internal_failure_confirmation"
+            } else {
+                "repeated_internal_failure"
+            },
+            "confirmation_limit": 2,
+            "routes": {
+                (paused_route.clone()): {
+                    "state": if state == "confirming" { "confirming" } else { "paused" },
+                    "matching_failures": if state == "confirming" { 1 } else { 2 },
+                    "source_observation": "cc".repeat(32),
+                    "failure_fingerprint": "dd".repeat(32),
+                    "build_version": "0.0.0-test",
+                }
+            },
+            "resume_on": ["source_change", "ctx_upgrade", "manual_import"],
+        });
+        if state == "mixed" {
+            automatic_retry["routes"][confirming_route.as_str()] = json!({
+                "state": "confirming",
+                "matching_failures": 1,
+                "source_observation": "ee".repeat(32),
+                "failure_fingerprint": "ff".repeat(32),
+                "build_version": "0.0.0-test",
+            });
+        }
+        let job = json!({
+            "request_state": "failed",
+            "structured_outcome": structured_outcome,
+            "automatic_retry": automatic_retry,
+        });
+
+        let report = refresh_report(Some(&job), Some("generation-1"), &json!({"running": true}));
+
+        assert_eq!(report["status"], expected_status, "state={state}");
+        assert_eq!(report["reason"], expected_reason, "state={state}");
+        assert_eq!(report["structured_outcome"], structured_outcome);
+        assert_eq!(report["automatic_retry"], automatic_retry);
+    }
+}
+
+#[test]
+fn paused_route_does_not_claim_an_unrelated_active_refresh_is_fully_paused() {
+    let route = "aa".repeat(32);
+    let automatic_retry = json!({
+        "state": "paused",
+        "reason": "repeated_internal_failure",
+        "confirmation_limit": 2,
+        "routes": {
+            (route): {
+                "state": "paused",
+                "matching_failures": 2,
+                "source_observation": "bb".repeat(32),
+                "failure_fingerprint": "cc".repeat(32),
+                "build_version": "0.0.0-test",
+            }
+        },
+        "resume_on": ["source_change", "ctx_upgrade", "manual_import"],
+    });
+    let job = json!({
+        "request_state": "running",
+        "automatic_retry": automatic_retry,
+    });
+
+    let report = refresh_report(Some(&job), Some("generation-1"), &json!({"running": true}));
+
+    assert_eq!(report["status"], "partial");
+    assert_eq!(report["reason"], "automatic_retry_partially_paused");
+    assert_eq!(report["automatic_retry"], automatic_retry);
+}
+
+#[test]
 fn source_daemon_report_preserves_semantic_terminal_job_facts() {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("data");

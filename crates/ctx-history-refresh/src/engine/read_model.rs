@@ -1,4 +1,146 @@
 use super::*;
+use sha2::{Digest as _, Sha256};
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(super) enum SourceBackedAutomaticRetryState {
+    Confirming,
+    Paused,
+}
+
+impl SourceBackedAutomaticRetryState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Confirming => "confirming",
+            Self::Paused => "paused",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(super) struct SourceBackedAutomaticRetryCheckpoint {
+    pub(super) state: SourceBackedAutomaticRetryState,
+    pub(super) matching_failures: u8,
+    pub(super) source_observation: String,
+    pub(super) failure_fingerprint: String,
+    pub(super) build_version: String,
+}
+
+impl SourceBackedAutomaticRetryCheckpoint {
+    pub(super) fn confirming(
+        outcome: &SourceBackedRefreshFailureOutcome,
+        route: &SourceRouteIdentity,
+        source_observation: &str,
+        terminal_error: &str,
+    ) -> Self {
+        Self {
+            state: SourceBackedAutomaticRetryState::Confirming,
+            matching_failures: 1,
+            source_observation: source_observation.to_owned(),
+            failure_fingerprint: automatic_retry_failure_fingerprint(
+                outcome,
+                route,
+                source_observation,
+                SOURCE_REFRESH_BUILD_VERSION,
+                terminal_error,
+            ),
+            build_version: SOURCE_REFRESH_BUILD_VERSION.to_owned(),
+        }
+    }
+
+    pub(super) fn matches(&self, candidate: &Self) -> bool {
+        self.source_observation == candidate.source_observation
+            && self.failure_fingerprint == candidate.failure_fingerprint
+            && self.build_version == candidate.build_version
+    }
+
+    pub(super) fn pause(&mut self) {
+        self.state = SourceBackedAutomaticRetryState::Paused;
+        self.matching_failures = SOURCE_REFRESH_AUTOMATIC_RETRY_CONFIRMATION_LIMIT;
+    }
+
+    pub(super) fn is_paused(&self) -> bool {
+        self.state == SourceBackedAutomaticRetryState::Paused
+    }
+
+    fn to_json(&self) -> Value {
+        json!({
+            "state": self.state.as_str(),
+            "matching_failures": self.matching_failures,
+            "source_observation": self.source_observation,
+            "failure_fingerprint": self.failure_fingerprint,
+            "build_version": self.build_version,
+        })
+    }
+}
+
+fn automatic_retry_failure_fingerprint(
+    outcome: &SourceBackedRefreshFailureOutcome,
+    route: &SourceRouteIdentity,
+    source_observation: &str,
+    build_version: &str,
+    terminal_error: &str,
+) -> String {
+    let mut digest = Sha256::new();
+    for (label, value) in [
+        ("code", outcome.code.as_str().as_bytes()),
+        ("class", outcome.class.as_str().as_bytes()),
+        ("route", route.as_str().as_bytes()),
+        ("source_observation", source_observation.as_bytes()),
+        ("build_version", build_version.as_bytes()),
+    ] {
+        digest.update(label.as_bytes());
+        digest.update([0]);
+        digest.update((value.len() as u64).to_le_bytes());
+        digest.update(value);
+    }
+    let summary = terminal_error
+        .as_bytes()
+        .get(
+            ..terminal_error
+                .len()
+                .min(SOURCE_REFRESH_AUTOMATIC_RETRY_ERROR_SUMMARY_BYTES),
+        )
+        .unwrap_or_default();
+    digest.update(b"terminal_error\0");
+    digest.update((summary.len() as u64).to_le_bytes());
+    digest.update(summary);
+    format!("{:x}", digest.finalize())
+}
+
+fn automatic_retry_json(
+    checkpoints: &BTreeMap<SourceRouteIdentity, SourceBackedAutomaticRetryCheckpoint>,
+) -> Option<Value> {
+    if checkpoints.is_empty() {
+        return None;
+    }
+    let confirming = checkpoints
+        .values()
+        .any(|checkpoint| checkpoint.state == SourceBackedAutomaticRetryState::Confirming);
+    let paused = checkpoints
+        .values()
+        .any(|checkpoint| checkpoint.state == SourceBackedAutomaticRetryState::Paused);
+    let state = match (confirming, paused) {
+        (true, true) => "mixed",
+        (true, false) => "confirming",
+        (false, true) => "paused",
+        (false, false) => return None,
+    };
+    let routes = checkpoints
+        .iter()
+        .map(|(route, checkpoint)| (route.as_str().to_owned(), checkpoint.to_json()))
+        .collect::<serde_json::Map<_, _>>();
+    Some(json!({
+        "state": state,
+        "reason": if paused {
+            "repeated_internal_failure"
+        } else {
+            "internal_failure_confirmation"
+        },
+        "confirmation_limit": SOURCE_REFRESH_AUTOMATIC_RETRY_CONFIRMATION_LIMIT,
+        "routes": routes,
+        "resume_on": ["source_change", "ctx_upgrade", "manual_import"],
+    }))
+}
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(super) struct SourceBackedRefreshFailureOutcome {
     pub(super) code: RefreshOutcomeCode,
@@ -11,6 +153,52 @@ pub(super) struct SourceBackedRefreshFailureOutcome {
 }
 
 impl SourceBackedRefreshFailureOutcome {
+    pub(super) fn is_automatic_retry_eligible(&self) -> bool {
+        self.code == RefreshOutcomeCode::SourceRefreshFailed
+            && self.class == RefreshOutcomeClass::Internal
+    }
+
+    pub(super) fn pause_automatic_retry_routes(&mut self, routes: &BTreeSet<SourceRouteIdentity>) {
+        if !self.is_automatic_retry_eligible() {
+            return;
+        }
+        let mut changed = false;
+        for route in routes {
+            if self.retryable_routes.remove(route) {
+                self.blocked_routes.insert(route.clone());
+                changed = true;
+            }
+        }
+        if changed {
+            self.refresh_automatic_retry_disposition();
+        }
+    }
+
+    pub(super) fn rearm_automatic_retry_routes(&mut self, routes: &BTreeSet<SourceRouteIdentity>) {
+        if !self.is_automatic_retry_eligible() {
+            return;
+        }
+        let mut changed = false;
+        for route in routes {
+            if self.blocked_routes.remove(route) {
+                self.retryable_routes.insert(route.clone());
+                changed = true;
+            }
+        }
+        if changed {
+            self.refresh_automatic_retry_disposition();
+        }
+    }
+
+    fn refresh_automatic_retry_disposition(&mut self) {
+        self.retryable = !self.retryable_routes.is_empty();
+        self.retry_advice = Some(if self.retryable {
+            RefreshRetryAdvice::RetryAffectedRoutes
+        } else {
+            RefreshRetryAdvice::InspectSources
+        });
+    }
+
     pub(super) fn new(
         code: RefreshOutcomeCode,
         class: RefreshOutcomeClass,
@@ -175,6 +363,8 @@ pub(super) struct SourceBackedRefreshAttempt {
     /// The sole publication receipt, decoded from Core CommitPayload metadata.
     pub(super) publication_receipt: Option<SourceBackedRefreshReceipt>,
     pub(super) route_observations: BTreeMap<SourceRouteIdentity, String>,
+    pub(super) automatic_retry_checkpoints:
+        BTreeMap<SourceRouteIdentity, SourceBackedAutomaticRetryCheckpoint>,
     pub(super) timings: Option<SourceBackedRefreshTimings>,
     pub(super) publication_probe_us: u64,
     pub(super) daemon_mode: String,
@@ -371,6 +561,9 @@ impl SourceBackedRefreshAttempt {
         fields.insert("refresh_intent".to_owned(), self.intent.to_json());
         if let Some(outcome) = self.structured_outcome_json() {
             fields.insert("structured_outcome".to_owned(), outcome);
+        }
+        if let Some(automatic_retry) = automatic_retry_json(&self.automatic_retry_checkpoints) {
+            fields.insert("automatic_retry".to_owned(), automatic_retry);
         }
         value
     }

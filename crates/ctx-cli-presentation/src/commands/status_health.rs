@@ -71,6 +71,9 @@ pub(super) fn status_next_command(
     pending: usize,
     unhealthy: usize,
 ) -> Option<&'static str> {
+    if automatic_retry_pause(report).is_some() {
+        return Some("ctx import --all");
+    }
     match health {
         StatusHealth::Healthy => None,
         StatusHealth::Partial if unhealthy > 0 && pending == unhealthy => Some("ctx index watch"),
@@ -82,6 +85,21 @@ pub(super) fn status_next_command(
             Some("ctx setup")
         }
         StatusHealth::Failed => Some("ctx doctor"),
+    }
+}
+
+pub(super) fn automatic_retry_state(report: &Value) -> Option<&str> {
+    report["refresh"]
+        .pointer("/automatic_retry/state")
+        .and_then(Value::as_str)
+        .filter(|state| matches!(*state, "confirming" | "paused" | "mixed"))
+}
+
+pub(super) fn automatic_retry_pause(report: &Value) -> Option<&str> {
+    match automatic_retry_state(report) {
+        Some("paused") if component_status(&report["refresh"]) == "paused" => Some("paused"),
+        Some("paused" | "mixed") => Some("mixed"),
+        _ => None,
     }
 }
 

@@ -699,6 +699,7 @@ pub(super) fn new_refresh_attempt(
         receipt: None,
         publication_receipt: None,
         route_observations: BTreeMap::new(),
+        automatic_retry_checkpoints: BTreeMap::new(),
         timings: None,
         publication_probe_us: 0,
         daemon_mode: metadata.daemon_mode,

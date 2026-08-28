@@ -18,14 +18,57 @@ impl CoreRefreshEngine {
     ) -> Result<bool> {
         let observed_generation = self.observed_published_generation(data_root)?;
         let automatic_split_pending = self.automatic_split_pending_for_watch(data_root)?;
-        let request_id = {
-            let mut state = self.lock_state();
+        let all_scope_widening_possible =
+            automatic_split_pending || (cold_all && observed_generation.is_none());
+        let (sampled_routes, observation_routes, catalog, catalog_revision) = {
+            let state = self.lock_state();
             if durable_queue_entry_count(&state) != 0 {
                 return Ok(false);
             }
-            let routes = state
+            let sampled_routes = state
                 .dirty_routes
                 .due_routes(now_ms, SOURCE_REFRESH_TERMINAL_ROUTE_LIMIT);
+            let mut observation_routes = sampled_routes.clone();
+            if all_scope_widening_possible {
+                observation_routes.extend(state.automatic_retry_checkpoints.keys().cloned());
+            }
+            (
+                sampled_routes,
+                observation_routes,
+                state.watch_catalog.clone(),
+                state.watch_catalog_revision,
+            )
+        };
+        if sampled_routes.is_empty() {
+            return Ok(false);
+        }
+        // Route certification may touch provider files. Keep it outside the
+        // engine-state mutex, then reject the sample if catalog authority moved.
+        let sampled_observations = catalog.as_ref().map(|catalog| {
+            source_backed_requested_route_observations(catalog, &observation_routes)
+        });
+        let request_id = {
+            let mut state = self.lock_state();
+            if durable_queue_entry_count(&state) != 0
+                || state.watch_catalog_revision != catalog_revision
+            {
+                return Ok(false);
+            }
+            let currently_due = state
+                .dirty_routes
+                .due_routes(now_ms, SOURCE_REFRESH_TERMINAL_ROUTE_LIMIT);
+            let mut routes = sampled_routes
+                .intersection(&currently_due)
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            if routes.is_empty() {
+                return Ok(false);
+            }
+            let paused_routes_present = reconcile_due_automatic_retry_routes(
+                &mut state,
+                &mut routes,
+                sampled_observations.as_ref(),
+            );
             if routes.is_empty() {
                 return Ok(false);
             }
@@ -52,18 +95,25 @@ impl CoreRefreshEngine {
                         .routes_requiring_exhaustive_reconciliation
                         .contains(route)
             });
-            let refresh_scope = if automatic_split_pending {
+            let refresh_scope = if automatic_split_pending && !paused_routes_present {
                 // A released collapsed identity is still active. Exact watch
                 // work cannot establish the complete role cohort required to
                 // bridge or retire it, so retain the event as the trigger but
                 // admit a single all-route exhaustive migration attempt.
                 SourceBackedRefreshScope::All
-            } else if retry_intent.is_none() && cold_all && observed_generation.is_none() {
+            } else if retry_intent.is_none()
+                && cold_all
+                && observed_generation.is_none()
+                && !paused_routes_present
+            {
                 // A cold generation has no retained routes to carry. Publish
                 // the complete startup inventory atomically instead of one
                 // transient partial generation per initially dirty route.
                 SourceBackedRefreshScope::All
             } else {
+                // A paused route must never be pulled back in by an all-route
+                // migration or cold-start scan. Healthy exact-route work can
+                // still proceed while the migration waits for rearming.
                 SourceBackedRefreshScope::Exact(routes)
             };
             let mut attempt = new_refresh_attempt(
@@ -80,6 +130,7 @@ impl CoreRefreshEngine {
             if requires_exhaustive_recovery || automatic_split_pending {
                 attempt.reconciliation_demand = SourceBackedReconciliationDemand::Exhaustive;
             }
+            attempt.automatic_retry_checkpoints = state.automatic_retry_checkpoints.clone();
             let request_id = attempt.request_id.clone();
             state.active_request_id = Some(request_id.clone());
             state.attempts.push_back(attempt);
@@ -218,6 +269,7 @@ impl CoreRefreshEngine {
                     .collect::<BTreeMap<_, _>>()
             });
         let mut certified_routes = BTreeMap::new();
+        let mut stale_automatic_pauses = BTreeSet::new();
         for admission in admissions {
             let terminal_failed = state.watch_uncertain_through.is_some()
                 || !publication_ready
@@ -231,7 +283,18 @@ impl CoreRefreshEngine {
                     .is_some_and(|outcome| outcome.blocked_routes.contains(admission.route()));
                 if blocked {
                     state.route_retry_intents.remove(admission.route());
-                    state.dirty_routes.permanent_failure(&admission);
+                    let actually_paused = state.dirty_routes.permanent_failure(&admission);
+                    let automatic_pause = attempt.as_ref().is_some_and(|attempt| {
+                        attempt.failure_outcome.as_ref().is_some_and(
+                            SourceBackedRefreshFailureOutcome::is_automatic_retry_eligible,
+                        ) && attempt
+                            .automatic_retry_checkpoints
+                            .get(admission.route())
+                            .is_some_and(SourceBackedAutomaticRetryCheckpoint::is_paused)
+                    });
+                    if automatic_pause && !actually_paused {
+                        stale_automatic_pauses.insert(admission.route().clone());
+                    }
                 } else {
                     if let Some(intent) = selected_retry_intent.as_ref() {
                         state
@@ -338,6 +401,18 @@ impl CoreRefreshEngine {
                     .insert(admission.route().clone());
             }
         }
+        if !stale_automatic_pauses.is_empty() {
+            for route in &stale_automatic_pauses {
+                state.automatic_retry_checkpoints.remove(route);
+            }
+            let checkpoints = state.automatic_retry_checkpoints.clone();
+            if let Some(attempt) = find_attempt_mut(state, request_id) {
+                if let Some(outcome) = attempt.failure_outcome.as_mut() {
+                    outcome.rearm_automatic_retry_routes(&stale_automatic_pauses);
+                }
+                attempt.automatic_retry_checkpoints = checkpoints;
+            }
+        }
         if attempt
             .as_ref()
             .is_some_and(|attempt| attempt.state == SourceBackedRefreshState::Failed)
@@ -410,4 +485,70 @@ impl CoreRefreshEngine {
             state.route_retry_intents.remove(route);
         }
     }
+
+    pub(super) fn seed_rearmed_automatic_retry_routes_locked(
+        state: &mut CoreRefreshEngineState,
+        routes: &BTreeSet<SourceRouteIdentity>,
+    ) {
+        if routes.is_empty() {
+            return;
+        }
+        let watermark = state.dirty_routes.seed_watermark();
+        for route in routes {
+            state
+                .route_event_watermarks
+                .entry(route.clone())
+                .and_modify(|current| *current = (*current).max(watermark))
+                .or_insert(watermark);
+        }
+        state.dirty_routes.seed_exact_routes(
+            routes.iter().cloned(),
+            watermark,
+            source_route_ledger_now_ms().saturating_sub(1_000),
+        );
+    }
+}
+
+fn reconcile_due_automatic_retry_routes(
+    state: &mut CoreRefreshEngineState,
+    routes: &mut BTreeSet<SourceRouteIdentity>,
+    observations: Option<&BTreeMap<SourceRouteIdentity, Option<String>>>,
+) -> bool {
+    let mut rearmed = Vec::new();
+    let mut still_paused = Vec::new();
+    let checkpoint_routes = state
+        .automatic_retry_checkpoints
+        .keys()
+        .filter(|route| {
+            routes.contains(*route)
+                || observations.is_some_and(|observations| observations.contains_key(*route))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    for route in &checkpoint_routes {
+        let checkpoint = state
+            .automatic_retry_checkpoints
+            .get(route)
+            .expect("automatic retry checkpoint route");
+        let build_changed = checkpoint.build_version != SOURCE_REFRESH_BUILD_VERSION;
+        let current_observation = observations
+            .and_then(|observations| observations.get(route))
+            .and_then(Option::as_deref);
+        let changed_observation =
+            current_observation != Some(checkpoint.source_observation.as_str());
+        if build_changed || changed_observation {
+            rearmed.push(route.clone());
+        } else if checkpoint.is_paused() {
+            still_paused.push(route.clone());
+        }
+    }
+    for route in rearmed {
+        state.automatic_retry_checkpoints.remove(&route);
+    }
+    let paused_routes_skipped = !still_paused.is_empty();
+    state.dirty_routes.block_exact_routes(still_paused.iter());
+    for route in still_paused {
+        routes.remove(&route);
+    }
+    paused_routes_skipped
 }

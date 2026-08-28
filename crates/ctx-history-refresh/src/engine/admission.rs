@@ -1,11 +1,47 @@
 use super::*;
 use sha2::{Digest as _, Sha256};
 
+mod state_helpers;
+use state_helpers::*;
+
 #[derive(Clone)]
 struct PendingAdmissionClaim {
     request_id: String,
     intent: RefreshIntent,
     persisted_scope: SourceBackedRefreshScope,
+    watch_catalog_revision: u64,
+    route_event_watermarks: BTreeMap<SourceRouteIdentity, EventWatermark>,
+}
+
+pub(super) struct AdmissionObservationFence {
+    watch_catalog_revision: u64,
+    route_event_watermarks: BTreeMap<SourceRouteIdentity, Option<EventWatermark>>,
+    route_observations: BTreeMap<SourceRouteIdentity, String>,
+}
+
+impl AdmissionObservationFence {
+    pub(super) fn still_matches(&self, state: &CoreRefreshEngineState) -> bool {
+        self.watch_catalog_revision == state.watch_catalog_revision
+            && self.route_event_watermarks.iter().all(|(route, expected)| {
+                state.route_event_watermarks.get(route).copied() == *expected
+            })
+    }
+}
+
+pub(super) fn admission_failure_fence_matches(
+    state: &CoreRefreshEngineState,
+    scope: &SourceBackedRefreshScope,
+    claimed_route_event_watermarks: &BTreeMap<SourceRouteIdentity, EventWatermark>,
+) -> bool {
+    match scope {
+        SourceBackedRefreshScope::Exact(routes) => routes.iter().all(|route| {
+            state.route_event_watermarks.get(route).copied()
+                == claimed_route_event_watermarks.get(route).copied()
+        }),
+        SourceBackedRefreshScope::All => {
+            state.route_event_watermarks == *claimed_route_event_watermarks
+        }
+    }
 }
 
 fn request_fingerprint(request: &RefreshRequest) -> Result<String> {
@@ -270,7 +306,7 @@ impl CoreRefreshEngine {
         // Corpus-scale discovery must run without a coordinator or admission
         // lock so status, ping, and additional bounded admissions stay live.
         let resolution = self.resolve_pending_admission_claim(data_root, &claim);
-        self.complete_claimed_pending_admission(data_root, &claim.request_id, resolution)?;
+        self.complete_claimed_pending_admission(data_root, &claim, resolution)?;
         Ok(true)
     }
 
@@ -284,7 +320,7 @@ impl CoreRefreshEngine {
         // Corpus-scale discovery must run without a coordinator or admission
         // lock so status, ping, and additional bounded admissions stay live.
         let resolution = self.resolve_pending_admission_claim(data_root, &claim);
-        self.complete_claimed_pending_admission(data_root, &claim.request_id, resolution)
+        self.complete_claimed_pending_admission(data_root, &claim, resolution)
     }
 
     pub(super) fn requeue_stale_provider_root_admission(&self, data_root: &Path) -> Result<bool> {
@@ -486,11 +522,6 @@ impl CoreRefreshEngine {
                 persisted.clone()
             }
         };
-        let route_observations = source_backed_requested_route_observations(
-            resolved.discovery().watch_catalog(),
-            &selected_routes,
-        );
-        validate_admission_observations(route_observations.clone())?;
         let admitted = match &claim.persisted_scope {
             SourceBackedRefreshScope::All => resolved,
             SourceBackedRefreshScope::Exact(_) => resolved.narrow_to(selected_routes)?,
@@ -609,11 +640,6 @@ impl CoreRefreshEngine {
         if selected_routes.len() > SOURCE_REFRESH_TERMINAL_ROUTE_LIMIT {
             bail!("scoped source refresh admission exceeds its bounded route capacity");
         }
-        let route_observations = source_backed_requested_route_observations(
-            admitted_refresh.discovery().watch_catalog(),
-            &selected_routes,
-        );
-        validate_admission_observations(route_observations.clone())?;
         let admitted = admitted_refresh.narrow_to(selected_routes)?;
         Ok(admitted)
     }
@@ -669,6 +695,8 @@ impl CoreRefreshEngine {
             request_id: request_id.clone(),
             intent: attempt.intent.clone(),
             persisted_scope: attempt.refresh_scope.clone(),
+            watch_catalog_revision: state.watch_catalog_revision,
+            route_event_watermarks: state.route_event_watermarks.clone(),
         };
         state
             .admission_resolutions_in_flight
@@ -698,6 +726,8 @@ impl CoreRefreshEngine {
             request_id: request_id.clone(),
             intent: attempt.intent.clone(),
             persisted_scope: attempt.refresh_scope.clone(),
+            watch_catalog_revision: state.watch_catalog_revision,
+            route_event_watermarks: state.route_event_watermarks.clone(),
         };
         state
             .admission_resolutions_in_flight
@@ -708,26 +738,90 @@ impl CoreRefreshEngine {
     fn complete_claimed_pending_admission(
         &self,
         data_root: &Path,
-        request_id: &str,
+        claim: &PendingAdmissionClaim,
         resolution: Result<ctx_history_refresh_execution::AdmittedRefresh>,
     ) -> Result<Option<SourceBackedRefreshRun>> {
+        let resolution = resolution.and_then(|authority| {
+            let observation_fence = self.sample_admission_observations(
+                &authority,
+                claim.watch_catalog_revision,
+                &claim.route_event_watermarks,
+            )?;
+            Ok((authority, observation_fence))
+        });
         let mut state = self.lock_state();
-        state.admission_resolutions_in_flight.remove(request_id);
+        state
+            .admission_resolutions_in_flight
+            .remove(&claim.request_id);
         if state.watch_uncertain_through.is_some() {
             return Ok(None);
         }
-        if find_attempt(&state, request_id)
+        if find_attempt(&state, &claim.request_id)
             .is_none_or(|attempt| attempt.state != SourceBackedRefreshState::AdmissionPending)
         {
             return Ok(None);
         }
+        if state.watch_catalog_revision != claim.watch_catalog_revision {
+            return Ok(None);
+        }
+        if resolution.is_err()
+            && !admission_failure_fence_matches(
+                &state,
+                &claim.persisted_scope,
+                &claim.route_event_watermarks,
+            )
+        {
+            return Ok(None);
+        }
         match resolution {
-            Ok(resolution) => {
-                self.persist_resolved_admission(data_root, &mut state, request_id, resolution)?;
+            Ok((resolution, observation_fence)) => {
+                if !observation_fence.still_matches(&state) {
+                    return Ok(None);
+                }
+                self.persist_resolved_admission(
+                    data_root,
+                    &mut state,
+                    &claim.request_id,
+                    resolution,
+                    observation_fence.route_observations,
+                )?;
                 Ok(None)
             }
-            Err(error) => self.persist_failed_admission(data_root, &mut state, request_id, error),
+            Err(error) => {
+                self.persist_failed_admission(data_root, &mut state, &claim.request_id, error)
+            }
         }
+    }
+
+    pub(super) fn sample_admission_observations(
+        &self,
+        authority: &ctx_history_refresh_execution::AdmittedRefresh,
+        watch_catalog_revision: u64,
+        claimed_route_event_watermarks: &BTreeMap<SourceRouteIdentity, EventWatermark>,
+    ) -> Result<AdmissionObservationFence> {
+        let routes = authority.exact_routes();
+        let route_event_watermarks = routes
+            .iter()
+            .map(|route| {
+                (
+                    route.clone(),
+                    claimed_route_event_watermarks.get(route).copied(),
+                )
+            })
+            .collect();
+        let route_observations =
+            validate_admission_observations(source_backed_requested_route_observations(
+                authority.discovery().watch_catalog(),
+                routes,
+            ))?
+            .into_iter()
+            .filter_map(|(route, observation)| observation.map(|value| (route, value)))
+            .collect();
+        Ok(AdmissionObservationFence {
+            watch_catalog_revision,
+            route_event_watermarks,
+            route_observations,
+        })
     }
 
     fn persist_resolved_admission(
@@ -736,8 +830,10 @@ impl CoreRefreshEngine {
         state: &mut CoreRefreshEngineState,
         request_id: &str,
         authority: ctx_history_refresh_execution::AdmittedRefresh,
+        route_observations: BTreeMap<SourceRouteIdentity, String>,
     ) -> Result<()> {
         let snapshot = AdmissionResolutionSnapshot::capture(state);
+        let automatic_retry_checkpoints = state.automatic_retry_checkpoints.clone();
         let attempt = find_attempt_mut(state, request_id)
             .ok_or_else(|| anyhow!("source refresh request `{request_id}` is unknown"))?;
         let authority_scope = match authority.coverage() {
@@ -755,6 +851,8 @@ impl CoreRefreshEngine {
         }
         attempt.refresh_scope = authority_scope;
         attempt.admitted_authority = Some(authority);
+        attempt.route_observations = route_observations;
+        attempt.automatic_retry_checkpoints = automatic_retry_checkpoints;
         let attempt = find_attempt_mut(state, request_id)
             .ok_or_else(|| anyhow!("source refresh request `{request_id}` is unknown"))?;
         attempt.state = SourceBackedRefreshState::Queued;
@@ -865,95 +963,25 @@ impl CoreRefreshEngine {
             SourceBackedRefreshScope::Exact(routes) => Some(routes.clone()),
         };
         if let Some(routes) = exact_routes.as_ref() {
-            observations.extend(routes.iter().cloned().map(|route| (route, None)));
+            for route in routes {
+                observations.entry(route.clone()).or_insert(None);
+            }
         }
+        let route_observations = validate_admission_observations(observations.clone())?
+            .into_iter()
+            .filter_map(|(route, observation)| observation.map(|value| (route, value)))
+            .collect();
         let admitted = admitted_refresh_for_test(observations);
         let admitted = match exact_routes {
             Some(routes) => admitted.narrow_to(routes)?,
             None => admitted,
         };
-        self.persist_resolved_admission(data_root, &mut state, request_id, admitted)
-    }
-}
-
-fn validate_admission_observations(
-    observations: BTreeMap<SourceRouteIdentity, Option<String>>,
-) -> Result<BTreeMap<SourceRouteIdentity, Option<String>>> {
-    if observations.len() > SOURCE_REFRESH_TERMINAL_ROUTE_LIMIT {
-        bail!("source refresh admission fence exceeds its bounded route capacity");
-    }
-    if observations
-        .values()
-        .flatten()
-        .any(|observation| !is_sha256_identity(observation))
-    {
-        bail!("source refresh admission fence returned an invalid route observation");
-    }
-    Ok(observations)
-}
-
-fn increment_response_barrier(state: &mut CoreRefreshEngineState, request_id: &str) {
-    state
-        .unacknowledged_admissions
-        .entry(request_id.to_owned())
-        .and_modify(|count| *count = count.saturating_add(1))
-        .or_insert(1);
-}
-
-fn durable_request_id<'a>(state: &'a CoreRefreshEngineState, request_id: &'a str) -> &'a str {
-    if find_attempt(state, request_id).is_some_and(|attempt| !attempt.state.is_active()) {
-        return request_id;
-    }
-    state
-        .pending_scheduler_retry_root_id
-        .as_deref()
-        .or_else(|| {
-            state
-                .pending_terminal_persistence
-                .as_ref()
-                .map(|pending| pending.request_id.as_str())
-        })
-        .or(state.active_request_id.as_deref())
-        .unwrap_or(request_id)
-}
-
-struct AdmissionReservationSnapshot {
-    active_request_id: Option<String>,
-    pending_request_ids: VecDeque<String>,
-    attempts: VecDeque<SourceBackedRefreshAttempt>,
-    response_barriers: BTreeMap<String, usize>,
-}
-
-impl AdmissionReservationSnapshot {
-    fn capture(state: &CoreRefreshEngineState) -> Self {
-        Self {
-            active_request_id: state.active_request_id.clone(),
-            pending_request_ids: state.pending_request_ids.clone(),
-            attempts: state.attempts.clone(),
-            response_barriers: state.unacknowledged_admissions.clone(),
-        }
-    }
-
-    fn restore(self, state: &mut CoreRefreshEngineState) {
-        state.active_request_id = self.active_request_id;
-        state.pending_request_ids = self.pending_request_ids;
-        state.attempts = self.attempts;
-        state.unacknowledged_admissions = self.response_barriers;
-    }
-}
-
-struct AdmissionResolutionSnapshot {
-    attempts: VecDeque<SourceBackedRefreshAttempt>,
-}
-
-impl AdmissionResolutionSnapshot {
-    fn capture(state: &CoreRefreshEngineState) -> Self {
-        Self {
-            attempts: state.attempts.clone(),
-        }
-    }
-
-    fn restore(self, state: &mut CoreRefreshEngineState) {
-        state.attempts = self.attempts;
+        self.persist_resolved_admission(
+            data_root,
+            &mut state,
+            request_id,
+            admitted,
+            route_observations,
+        )
     }
 }

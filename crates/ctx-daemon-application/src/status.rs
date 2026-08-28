@@ -329,6 +329,8 @@ fn daemon_core_refresh_job_report(
         "certified_source_count": job.and_then(|value| value.get("certified_source_count").cloned()),
         "certified_source_bytes": job.and_then(|value| value.get("certified_source_bytes").cloned()),
         "timings_us": job.and_then(|value| value.get("timings_us").cloned()),
+        "structured_outcome": job.and_then(|value| value.get("structured_outcome").cloned()),
+        "automatic_retry": job.and_then(|value| value.get("automatic_retry").cloned()),
         "retryable": job.and_then(|value| value.get("retryable").cloned()),
         "retry_after_ms": job.and_then(|value| value.get("retry_after_ms").cloned()),
         "consecutive_failures": job.and_then(|value| value.get("consecutive_failures").cloned()),
@@ -776,6 +778,26 @@ mod tests {
                 "certified_source_count": 6,
                 "certified_source_bytes": 8192,
                 "timings_us": {"scan": 12},
+                "structured_outcome": {
+                    "code": "source_refresh_failed",
+                    "class": "internal",
+                    "retryable": false,
+                },
+                "automatic_retry": {
+                    "state": "paused",
+                    "reason": "repeated_internal_failure",
+                    "confirmation_limit": 2,
+                    "routes": {
+                        ("aa".repeat(32)): {
+                            "state": "paused",
+                            "matching_failures": 2,
+                            "source_observation": "bb".repeat(32),
+                            "failure_fingerprint": "cc".repeat(32),
+                            "build_version": "0.0.0-test",
+                        }
+                    },
+                    "resume_on": ["source_change", "ctx_upgrade", "manual_import"],
+                },
                 "retryable": true,
                 "retry_after_ms": 500,
                 "consecutive_failures": 2,
@@ -796,6 +818,15 @@ mod tests {
         assert_eq!(job["scanned_routes"], json!(["codex"]));
         assert_eq!(job["certified_source_bytes"], 8192);
         assert_eq!(job["timings_us"]["scan"], 12);
+        assert_eq!(job["structured_outcome"]["code"], "source_refresh_failed");
+        assert_eq!(job["structured_outcome"]["class"], "internal");
+        assert_eq!(job["structured_outcome"]["retryable"], false);
+        assert_eq!(job["automatic_retry"]["state"], "paused");
+        assert_eq!(job["automatic_retry"]["confirmation_limit"], 2);
+        assert_eq!(
+            job["automatic_retry"]["resume_on"],
+            json!(["source_change", "ctx_upgrade", "manual_import"])
+        );
         assert_eq!(job["retryable"], true);
         assert_eq!(job["retry_after_ms"], 500);
         assert_eq!(job["consecutive_failures"], 2);

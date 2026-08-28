@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         mpsc, Arc, Barrier,
     },
 };
@@ -406,6 +406,7 @@ fn uncertainty_between_preterminal_binding_and_state_transition_keeps_wait_activ
     let fenced = run.join().unwrap();
     assert_eq!(fenced.job["request_state"], "running");
     assert_eq!(fenced.job["progress"]["phase"], "watch_recovery");
+    let catalog_revision = coordinator.lock_state().watch_catalog_revision;
     assert!(coordinator
         .complete_watch_uncertainty_recovery(
             &data_root,
@@ -414,6 +415,11 @@ fn uncertainty_between_preterminal_binding_and_state_transition_keeps_wait_activ
             ledger_now_ms(),
         )
         .unwrap());
+    assert_eq!(
+        coordinator.lock_state().watch_catalog_revision,
+        catalog_revision.saturating_add(1),
+        "watch recovery must invalidate out-of-lock catalog observations"
+    );
     let pending = coordinator.status(&request_id).unwrap();
     assert_eq!(pending["request_state"], "admission_pending");
     assert_eq!(pending["reconciliation_demand"], "exhaustive");
