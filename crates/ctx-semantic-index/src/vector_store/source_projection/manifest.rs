@@ -1,7 +1,9 @@
 use anyhow::{anyhow, Result};
 use ctx_history_core::{core_record_contract_fingerprint, StableEntityKind, IDENTITY_VERSION};
 use ctx_history_index::{current_semantic_generation_policy_hash, CoreEventRecord};
-use ctx_semantic_model::semantic_model_contract_descriptor;
+#[cfg(test)]
+use ctx_semantic_model::semantic_model_contract;
+use ctx_semantic_model::SemanticModelContract;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -206,11 +208,25 @@ pub(super) fn semantic_policy_fingerprint() -> Result<String> {
     Ok(current_semantic_generation_policy_hash()?)
 }
 
-pub(super) fn source_contract_fingerprint() -> Result<String> {
+pub(super) fn source_contract_fingerprint(
+    model_contract: &SemanticModelContract,
+) -> Result<String> {
     source_contract_fingerprint_with_authority(
         &semantic_policy_fingerprint()?,
-        &semantic_model_contract_descriptor(),
+        model_contract.descriptor(),
     )
+}
+
+pub(super) fn trusted_legacy_source_contract_fingerprint(
+    model_contract: &SemanticModelContract,
+    semantic_policy_fingerprint: &str,
+) -> Result<Option<String>> {
+    model_contract
+        .legacy_builtin_descriptor_alias()
+        .map(|descriptor| {
+            source_contract_fingerprint_with_authority(semantic_policy_fingerprint, descriptor)
+        })
+        .transpose()
 }
 
 pub(super) fn source_contract_fingerprint_with_authority(
@@ -252,6 +268,23 @@ fn hex(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
 
+    fn revise_descriptor_component(descriptor: &str, revised_index: usize) -> String {
+        descriptor
+            .split('|')
+            .enumerate()
+            .map(|(index, component)| {
+                if index != revised_index {
+                    return component.to_owned();
+                }
+                component.split_once('=').map_or_else(
+                    || format!("{component}-test-only-revision"),
+                    |(field, _)| format!("{field}=test-only-revision"),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("|")
+    }
+
     #[test]
     fn source_input_revision_exactly_mirrors_core_schema() {
         assert_eq!(
@@ -262,15 +295,25 @@ mod tests {
 
     #[test]
     fn complete_model_descriptor_participates_in_semantic_contract_identity() {
-        let descriptor = semantic_model_contract_descriptor();
+        let model_contract = semantic_model_contract();
+        let descriptor = model_contract.descriptor();
         let policy = semantic_policy_fingerprint().unwrap();
-        let baseline = source_contract_fingerprint_with_authority(&policy, &descriptor).unwrap();
-        let revised = source_contract_fingerprint_with_authority(
-            &policy,
-            &format!("{descriptor}|test-only-sequence-length-change"),
-        )
-        .unwrap();
-        assert_ne!(baseline, revised);
-        assert_eq!(baseline, source_contract_fingerprint().unwrap());
+        let baseline = source_contract_fingerprint_with_authority(&policy, descriptor).unwrap();
+        for (index, component) in descriptor.split('|').enumerate() {
+            let field = component
+                .split_once('=')
+                .map_or("contract_version", |(field, _)| field);
+            let revised = revise_descriptor_component(descriptor, index);
+            assert_ne!(descriptor, revised, "fixture did not revise {field}");
+            assert_ne!(
+                baseline,
+                source_contract_fingerprint_with_authority(&policy, &revised).unwrap(),
+                "{field} did not rotate source projection identity"
+            );
+        }
+        assert_eq!(
+            baseline,
+            source_contract_fingerprint(model_contract).unwrap()
+        );
     }
 }

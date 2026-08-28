@@ -6,7 +6,8 @@ use std::{
 
 use anyhow::{anyhow, Result};
 use ctx_semantic_model::{
-    semantic_model_cache_available, semantic_model_key, SharedSemanticRuntime,
+    semantic_model_cache_available, semantic_model_contract, BuiltinSemanticEmbeddingExecutor,
+    SemanticEmbeddingExecutor, SemanticModelContract, SharedSemanticRuntime,
 };
 use serde_json::{json, Value};
 
@@ -283,7 +284,7 @@ impl AuthenticatedRequestHandler for CtxAuthenticatedRequestHandler {
             };
         }
         if service.as_str() == SEMANTIC_QUERY_SERVICE_ID {
-            return HandlerOutcome::response(self.handle_semantic_query(&request));
+            return HandlerOutcome::response(Ok(self.semantic_query_response(&request)));
         }
         HandlerOutcome::response(Err(anyhow!(
             "unknown authenticated IPC service `{}`",
@@ -349,6 +350,19 @@ enum SourceRefreshResponse {
 }
 
 impl CtxAuthenticatedRequestHandler {
+    fn semantic_query_response(&self, request: &Value) -> Value {
+        self.handle_semantic_query(request).unwrap_or_else(|error| {
+            let contract = semantic_model_contract();
+            compact_json(json!({
+                "ok": false,
+                "schema_version": 1,
+                "model_key": contract.model_key(),
+                "model_contract_fingerprint": contract.fingerprint(),
+                "error": format!("{error:#}"),
+            }))
+        })
+    }
+
     fn lifecycle_response(&self, key: &str, value: impl Into<Value>) -> SourceRefreshResponse {
         let mut response = json!({
             "schema_version": 1,
@@ -413,25 +427,39 @@ impl CtxAuthenticatedRequestHandler {
 
     fn handle_semantic_query(&self, request: &Value) -> Result<Value> {
         let op = request.get("op").and_then(Value::as_str).unwrap_or("");
+        if !matches!(op, "ping" | "embed_query") {
+            return Err(anyhow!("unknown daemon query operation `{op}`"));
+        }
+        if request.get("schema_version").and_then(Value::as_u64) != Some(1) {
+            return Err(anyhow!("daemon query request schema_version must be 1"));
+        }
+        let contract = semantic_model_contract();
         if op == "ping" {
             let (embedding_runtime, busy) = self.runtime.try_runtime_status_json()?;
             return Ok(compact_json(json!({
                 "ok": true,
                 "schema_version": 1,
-                "model_key": semantic_model_key(),
+                "model_key": contract.model_key(),
+                "model_contract_fingerprint": contract.fingerprint(),
                 "embedding_runtime": embedding_runtime,
                 "busy": busy,
             })));
-        }
-        if op != "embed_query" {
-            return Err(anyhow!("unknown daemon query operation `{op}`"));
         }
         let model_key = request
             .get("model_key")
             .and_then(Value::as_str)
             .unwrap_or("");
-        if model_key != semantic_model_key() {
+        if model_key != contract.model_key() {
             return Err(anyhow!("daemon query model key mismatch"));
+        }
+        let request_contract_fingerprint = request
+            .get("model_contract_fingerprint")
+            .and_then(Value::as_str);
+        if !match request_contract_fingerprint {
+            Some(fingerprint) => fingerprint == contract.fingerprint(),
+            None => contract.supports_frozen_legacy_v1(),
+        } {
+            return Err(anyhow!("daemon query model contract fingerprint mismatch"));
         }
         let text = request
             .get("text")
@@ -442,24 +470,111 @@ impl CtxAuthenticatedRequestHandler {
             return Err(anyhow!("daemon query text is empty"));
         }
         let started = Instant::now();
-        let model_config = self.config.semantic_model_config(&self.data_root);
-        if !self.runtime.is_loaded()
-            && !semantic_model_cache_available(model_config.paths().model_cache_dir())
+        let executor = BuiltinSemanticEmbeddingExecutor::new(
+            self.runtime.clone(),
+            self.config.semantic_model_config(&self.data_root),
+        );
+        if !executor.shared_runtime().is_loaded()
+            && !semantic_model_cache_available(executor.config().paths().model_cache_dir())
         {
             return Err(anyhow!(
                 "semantic model cache is not available to daemon query service"
             ));
         }
-        self.runtime.ensure_loaded_from_cache(&model_config)?;
-        let (embedding, embedding_runtime) =
-            self.runtime.embed_query(&model_config, text.to_owned())?;
+        executor
+            .shared_runtime()
+            .ensure_loaded_from_cache(executor.config())?;
+        let semantic_executor: &dyn SemanticEmbeddingExecutor = &executor;
+        let embedding = semantic_executor
+            .embed_query(semantic_executor.contract().prepare_query(text.to_owned()))?;
         let query_embed_ms = started.elapsed().as_millis() as u64;
-        Ok(compact_json(json!({
-            "ok": true,
-            "model_key": semantic_model_key(),
-            "embedding_runtime": embedding_runtime.to_json(),
-            "query_embed_ms": query_embed_ms,
-            "embedding": embedding,
-        })))
+        successful_semantic_query_response(
+            executor.shared_runtime(),
+            semantic_executor.contract(),
+            embedding,
+            query_embed_ms,
+        )
+    }
+}
+
+fn successful_semantic_query_response(
+    runtime: &SharedSemanticRuntime,
+    contract: &SemanticModelContract,
+    embedding: Vec<f32>,
+    query_embed_ms: u64,
+) -> Result<Value> {
+    let (embedding_runtime, busy) = runtime.try_runtime_status_json()?;
+    Ok(compact_json(json!({
+        "ok": true,
+        "schema_version": 1,
+        "model_key": contract.model_key(),
+        "model_contract_fingerprint": contract.fingerprint(),
+        "embedding_runtime": embedding_runtime,
+        "busy": busy,
+        "query_embed_ms": query_embed_ms,
+        "embedding": embedding,
+    })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn successful_embedding_keeps_busy_runtime_diagnostics_non_fatal() -> Result<()> {
+        let runtime = SharedSemanticRuntime::default();
+        let _busy = runtime.lock_for_test()?;
+        let contract = semantic_model_contract();
+        let mut embedding = vec![0.0; contract.dimensions()];
+        embedding[0] = 1.0;
+        let response =
+            successful_semantic_query_response(&runtime, contract, embedding.clone(), 17)?;
+
+        assert_eq!(response["ok"], true);
+        assert_eq!(response["schema_version"], 1);
+        assert_eq!(response["model_key"], contract.model_key());
+        assert_eq!(
+            response["model_contract_fingerprint"],
+            contract.fingerprint()
+        );
+        assert!(response["embedding_runtime"].is_null());
+        assert_eq!(response["busy"], true);
+        assert_eq!(response["query_embed_ms"], 17);
+        assert_eq!(response["embedding"], json!(embedding));
+        Ok(())
+    }
+
+    #[test]
+    fn semantic_errors_keep_the_current_protocol_identity() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let wakeup = Arc::new(DaemonWakeup::default());
+        let source_refresh = Arc::new(crate::source_backed_refresh_adapter::refresh_engine(
+            &crate::test_support::CONFIG,
+        ));
+        let handler = ctx_authenticated_request_handler(
+            temp.path(),
+            SharedSemanticRuntime::default(),
+            source_refresh,
+            wakeup,
+            &crate::test_support::CONFIG,
+        );
+        let response = handler.semantic_query_response(&compact_json(json!({
+            "schema_version": 1,
+            "op": "embed_query",
+            "model_key": "wrong-model",
+            "text": "query",
+        })));
+        let contract = semantic_model_contract();
+
+        assert_eq!(response["ok"], false);
+        assert_eq!(response["schema_version"], 1);
+        assert_eq!(response["model_key"], contract.model_key());
+        assert_eq!(
+            response["model_contract_fingerprint"],
+            contract.fingerprint()
+        );
+        assert!(response["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("model key mismatch")));
     }
 }

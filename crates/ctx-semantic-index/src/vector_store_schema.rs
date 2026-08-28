@@ -1,10 +1,7 @@
 use std::{fmt, path::Path};
 
 use anyhow::Result;
-use ctx_semantic_model::{
-    semantic_tokenizer_fingerprint, SEMANTIC_DIMENSIONS, SEMANTIC_MODEL_CONTRACT_VERSION,
-    SEMANTIC_MODEL_ID, SEMANTIC_MODEL_REVISION, SEMANTIC_NORMALIZATION, SEMANTIC_POOLING,
-};
+use ctx_semantic_model::SemanticModelContract;
 
 use super::vector_store::{
     control,
@@ -78,34 +75,71 @@ pub fn semantic_vector_failure_kind(error: &anyhow::Error) -> Option<SemanticVec
 }
 
 impl SemanticVectorStore {
-    pub fn open(path: &Path) -> Result<Self> {
+    pub fn open(path: &Path, contract: &SemanticModelContract) -> Result<Self> {
+        let flat_contract = flat_model_contract(contract).map_err(semantic_flat_store_error)?;
         let conn = control::open_writable(path)?;
-        let flat = FlatSegmentStore::open(path, active_model_contract())
-            .map_err(semantic_flat_store_error)?;
-        Ok(Self { conn, flat })
+        let flat =
+            FlatSegmentStore::open(path, flat_contract).map_err(semantic_flat_store_error)?;
+        let store = Self {
+            conn,
+            flat,
+            contract: contract.clone(),
+        };
+        if store
+            .flat
+            .model_contract_reset_pending()
+            .map_err(semantic_flat_store_error)?
+        {
+            store.record_flat_model_contract_reset()?;
+            store
+                .flat
+                .acknowledge_model_contract_reset()
+                .map_err(semantic_flat_store_error)?;
+        }
+        Ok(store)
     }
 
-    pub fn open_read_only(path: &Path) -> Result<Option<Self>> {
+    pub fn open_read_only(path: &Path, contract: &SemanticModelContract) -> Result<Option<Self>> {
+        let flat_contract = flat_model_contract(contract).map_err(semantic_flat_store_error)?;
         let Some(conn) = control::open_read_only(path)? else {
             return Ok(None);
         };
-        let flat = FlatSegmentStore::open_read_only(path, active_model_contract())
+        let flat = FlatSegmentStore::open_read_only(path, flat_contract)
             .map_err(semantic_flat_store_error)?;
-        Ok(Some(Self { conn, flat }))
+        if flat
+            .model_contract_reset_pending()
+            .map_err(semantic_flat_store_error)?
+        {
+            return Ok(None);
+        }
+        Ok(Some(Self {
+            conn,
+            flat,
+            contract: contract.clone(),
+        }))
     }
 }
 
-pub(super) fn active_model_contract() -> FlatModelContract {
-    let tokenizer = semantic_tokenizer_fingerprint();
-    FlatModelContract {
-        contract_version: SEMANTIC_MODEL_CONTRACT_VERSION,
-        model_id: SEMANTIC_MODEL_ID.to_owned(),
-        model_revision: SEMANTIC_MODEL_REVISION.to_owned(),
-        tokenizer,
-        pooling: SEMANTIC_POOLING.to_owned(),
-        dimensions: SEMANTIC_DIMENSIONS as u32,
-        normalization: SEMANTIC_NORMALIZATION.to_owned(),
-    }
+pub(super) fn flat_model_contract(
+    contract: &SemanticModelContract,
+) -> std::result::Result<FlatModelContract, FlatStoreError> {
+    let dimensions = u32::try_from(contract.dimensions()).map_err(|_| {
+        FlatStoreError::InvalidInput(format!(
+            "model contract dimensions {} exceed the flat F32 format",
+            contract.dimensions()
+        ))
+    })?;
+    let flat = FlatModelContract {
+        contract_version: contract.contract_version(),
+        model_id: contract.model_id().to_owned(),
+        model_revision: contract.model_revision().to_owned(),
+        tokenizer: contract.tokenizer_fingerprint().to_owned(),
+        pooling: contract.pooling().to_owned(),
+        dimensions,
+        normalization: contract.normalization().to_owned(),
+    };
+    flat.validate()?;
+    Ok(flat)
 }
 
 pub(super) fn semantic_owned_sidecar_result<T>(result: Result<T>) -> Result<T> {

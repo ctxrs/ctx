@@ -4,6 +4,7 @@ use anyhow::{anyhow, Result};
 use ctx_history_index::{
     CompiledSearchFilter, EventSearchCandidate, SemanticFilterProjection, VerifiedIndex,
 };
+use ctx_semantic_model::SemanticModelContract;
 use serde_json::{json, Value};
 use thiserror::Error;
 
@@ -72,9 +73,13 @@ pub struct SemanticQueryPin {
 }
 
 impl SemanticQueryPin {
-    pub fn preflight(index: &VerifiedIndex, data_root: &Path) -> Result<Self> {
+    pub fn preflight(
+        index: &VerifiedIndex,
+        data_root: &Path,
+        contract: &SemanticModelContract,
+    ) -> Result<Self> {
         let vector_root = source_backed_semantic_vector_path(data_root);
-        let vector_store = SemanticVectorStore::open_read_only(&vector_root)
+        let vector_store = SemanticVectorStore::open_read_only(&vector_root, contract)
             .map_err(|error| {
                 semantic_not_ready("semantic_store_unavailable", format!("{error:#}"))
             })?

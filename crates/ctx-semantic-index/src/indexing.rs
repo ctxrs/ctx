@@ -1,4 +1,4 @@
-use ctx_semantic_model::semantic_e5_passage_text;
+use ctx_semantic_model::SemanticModelContract;
 use sha2::{Digest, Sha256};
 
 use super::{vector_store::SemanticChunkDocument, SemanticEventDocument};
@@ -26,7 +26,7 @@ pub(super) fn semantic_chunks_for_document(
                 seq: doc.seq,
                 chunk_index,
                 source_text_hash: source_text_hash.to_owned(),
-                text: semantic_embedded_chunk_text(doc, &text),
+                text: semantic_document_input_text(doc, &text),
                 start_char,
                 end_char,
             },
@@ -35,6 +35,7 @@ pub(super) fn semantic_chunks_for_document(
 }
 
 pub(super) fn semantic_document_hash(
+    model_contract: &SemanticModelContract,
     doc: &SemanticEventDocument,
     source_text: &str,
     semantic_policy_fingerprint: &str,
@@ -44,22 +45,33 @@ pub(super) fn semantic_document_hash(
     // without invalidating otherwise identical vectors.
     semantic_text_hash(&format!(
         "semantic_policy: {semantic_policy_fingerprint}\n\n{}",
-        semantic_embedded_document_text(doc, source_text)
+        semantic_embedded_document_text(model_contract, doc, source_text)
     ))
 }
 
-pub(super) fn semantic_embedded_document_text(doc: &SemanticEventDocument, body: &str) -> String {
-    semantic_embedded_chunk_text(doc, body)
+pub(super) fn semantic_embedded_document_text(
+    model_contract: &SemanticModelContract,
+    doc: &SemanticEventDocument,
+    body: &str,
+) -> String {
+    semantic_embedded_chunk_text(model_contract, doc, body)
 }
 
-pub(super) fn semantic_embedded_chunk_text(doc: &SemanticEventDocument, body: &str) -> String {
+pub(super) fn semantic_embedded_chunk_text(
+    model_contract: &SemanticModelContract,
+    doc: &SemanticEventDocument,
+    body: &str,
+) -> String {
+    model_contract.document_text(&semantic_document_input_text(doc, body))
+}
+
+fn semantic_document_input_text(doc: &SemanticEventDocument, body: &str) -> String {
     let header = semantic_document_header(doc);
-    let text = if header.is_empty() {
+    if header.is_empty() {
         body.to_owned()
     } else {
         format!("{header}\n\n{body}")
-    };
-    semantic_e5_passage_text(&text)
+    }
 }
 
 pub(super) fn semantic_document_header(doc: &SemanticEventDocument) -> String {
@@ -155,12 +167,13 @@ pub(super) fn semantic_text_hash(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use ctx_history_core::{EventRole, EventType};
+    use ctx_semantic_model::semantic_model_contract;
     use uuid::Uuid;
 
     use super::*;
 
     #[test]
-    fn document_hash_keeps_one_e5_passage_prefix() {
+    fn document_hash_uses_the_contract_document_prefix_exactly_once() {
         let document = SemanticEventDocument {
             event_id: Uuid::nil(),
             session_id: None,
@@ -175,15 +188,29 @@ mod tests {
             literal_facts: Vec::new(),
             text: "daemon failed to restart".to_owned(),
         };
-        let embedded = semantic_embedded_document_text(&document, &document.text);
+        let model_contract = semantic_model_contract();
+        let embedded = semantic_embedded_document_text(model_contract, &document, &document.text);
+        let chunks = semantic_chunks_for_document(&document, &document.text, &"0".repeat(64));
 
         assert_eq!(
             embedded,
             "passage: semantic_document: v3\nevent_type: message\nrole: user\n\ndaemon failed to restart"
         );
         assert_eq!(embedded.matches("passage: ").count(), 1);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].text.matches("passage: ").count(), 0);
         assert_eq!(
-            semantic_document_hash(&document, &document.text, "semantic-policy-fixture"),
+            model_contract.document_text(&chunks[0].text),
+            embedded,
+            "the executor must perform the sole preparation step"
+        );
+        assert_eq!(
+            semantic_document_hash(
+                model_contract,
+                &document,
+                &document.text,
+                "semantic-policy-fixture",
+            ),
             "759a8ad7af9c74ee56fe04157b610ad76537e48c83d224bc794f95e9f14f83bc"
         );
     }

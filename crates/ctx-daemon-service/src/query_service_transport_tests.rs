@@ -25,13 +25,21 @@ fn short_test_query_socket_path() -> Result<(tempfile::TempDir, PathBuf)> {
 
 #[cfg(any(unix, windows))]
 fn start_test_query_service(data_root: &Path) -> Result<DaemonQueryService> {
+    start_test_query_service_with_runtime(data_root, SharedSemanticRuntime::default())
+}
+
+#[cfg(any(unix, windows))]
+fn start_test_query_service_with_runtime(
+    data_root: &Path,
+    runtime: SharedSemanticRuntime,
+) -> Result<DaemonQueryService> {
     let wakeup = Arc::new(super::daemon_wakeup::DaemonWakeup::default());
     let source_refresh = Arc::new(super::source_backed_refresh_adapter::refresh_engine(
         &crate::test_support::CONFIG,
     ));
     let handler = ctx_authenticated_request_handler(
         data_root,
-        SharedSemanticRuntime::default(),
+        runtime,
         source_refresh,
         wakeup,
         &crate::test_support::CONFIG,
@@ -778,9 +786,146 @@ fn query_service_ping_stays_healthy_while_embedder_is_busy() -> Result<()> {
     .expect("query response");
 
     assert_eq!(response.get("ok").and_then(Value::as_bool), Some(true));
+    assert_eq!(response["schema_version"], 1);
+    assert!(response["model_key"]
+        .as_str()
+        .is_some_and(|model_key| !model_key.is_empty()));
+    assert!(response["model_contract_fingerprint"]
+        .as_str()
+        .is_some_and(|fingerprint| fingerprint.starts_with("sha256:")));
     assert_eq!(response.get("busy").and_then(Value::as_bool), Some(true));
     assert!(response["embedding_runtime"].is_null());
     assert!(started.elapsed() < StdDuration::from_millis(500));
+    drop(service);
+    Ok(())
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn semantic_query_protocol_rejects_incompatible_requests_before_model_access() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let runtime = SharedSemanticRuntime::default();
+    let service = start_test_query_service_with_runtime(temp.path(), runtime.clone())?;
+    let negotiated = daemon_query_request(
+        temp.path(),
+        compact_json(json!({"schema_version": 1, "op": "ping"})),
+        StdDuration::from_secs(1),
+        64 * 1024,
+    )?
+    .expect("query response");
+    assert_eq!(negotiated["ok"], true);
+    assert_eq!(negotiated["schema_version"], 1);
+    let model_key = negotiated["model_key"]
+        .as_str()
+        .ok_or_else(|| anyhow!("ping response omitted model key"))?
+        .to_owned();
+    let contract_fingerprint = negotiated["model_contract_fingerprint"]
+        .as_str()
+        .ok_or_else(|| anyhow!("ping response omitted model contract fingerprint"))?
+        .to_owned();
+    let exact_embed = compact_json(json!({
+        "schema_version": 1,
+        "op": "embed_query",
+        "model_key": model_key,
+        "model_contract_fingerprint": contract_fingerprint,
+        "text": "query text",
+    }));
+    let mut invalid = Vec::new();
+
+    for schema in [None, Some(2)] {
+        let mut ping = compact_json(json!({"op": "ping"}));
+        let mut embed = exact_embed.clone();
+        embed
+            .as_object_mut()
+            .expect("object")
+            .remove("schema_version");
+        if let Some(schema) = schema {
+            ping["schema_version"] = json!(schema);
+            embed["schema_version"] = json!(schema);
+        }
+        invalid.push((
+            "ping schema",
+            ping,
+            "daemon query request schema_version must be 1",
+        ));
+        invalid.push((
+            "embed schema",
+            embed,
+            "daemon query request schema_version must be 1",
+        ));
+    }
+
+    let mut mismatched_fingerprint = exact_embed.clone();
+    mismatched_fingerprint["model_contract_fingerprint"] = json!("sha256:mismatched");
+    invalid.push((
+        "mismatched embed fingerprint",
+        mismatched_fingerprint,
+        "daemon query model contract fingerprint mismatch",
+    ));
+
+    let runtime_guard = runtime.lock_for_test()?;
+    for (case, request, expected_error) in invalid {
+        let response =
+            daemon_query_request(temp.path(), request, StdDuration::from_secs(1), 64 * 1024)?
+                .expect("query response");
+        assert_eq!(response["ok"], false, "{case}: {response}");
+        assert_eq!(response["error"], expected_error, "{case}: {response}");
+    }
+    drop(runtime_guard);
+    assert!(!runtime.is_loaded());
+
+    let mut legacy_embed = exact_embed.clone();
+    legacy_embed
+        .as_object_mut()
+        .expect("object")
+        .remove("model_contract_fingerprint");
+    let legacy_response = daemon_query_request(
+        temp.path(),
+        legacy_embed,
+        StdDuration::from_secs(1),
+        64 * 1024,
+    )?
+    .expect("legacy query response");
+    assert_eq!(legacy_response["ok"], false);
+    assert_eq!(legacy_response["schema_version"], 1);
+    assert_eq!(legacy_response["model_key"], model_key);
+    assert_eq!(
+        legacy_response["model_contract_fingerprint"],
+        contract_fingerprint
+    );
+    assert_eq!(
+        legacy_response["error"],
+        "semantic model cache is not available to daemon query service"
+    );
+
+    let exact_ping = daemon_query_request(
+        temp.path(),
+        compact_json(json!({"schema_version": 1, "op": "ping"})),
+        StdDuration::from_secs(1),
+        64 * 1024,
+    )?
+    .expect("query response");
+    assert_eq!(exact_ping["ok"], true);
+    assert_eq!(exact_ping["schema_version"], 1);
+    assert_eq!(exact_ping["model_key"], model_key);
+    assert_eq!(
+        exact_ping["model_contract_fingerprint"],
+        contract_fingerprint
+    );
+
+    let exact_embed = daemon_query_request(
+        temp.path(),
+        exact_embed,
+        StdDuration::from_secs(1),
+        64 * 1024,
+    )?
+    .expect("query response");
+    assert_eq!(exact_embed["ok"], false);
+    assert_eq!(
+        exact_embed["error"],
+        "semantic model cache is not available to daemon query service"
+    );
+    assert!(!runtime.is_loaded());
     drop(service);
     Ok(())
 }

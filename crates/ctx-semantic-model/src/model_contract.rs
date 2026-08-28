@@ -1,4 +1,6 @@
-use std::fmt;
+use std::{fmt, sync::OnceLock};
+
+use sha2::{Digest, Sha256};
 
 pub const SEMANTIC_BACKEND: &str = "multilingual-e5";
 pub const SEMANTIC_MODEL_KEY: &str = "e5-small-v1:mean-pool:l2:query-passage";
@@ -53,49 +55,268 @@ pub const SEMANTIC_POOLING: &str = "attention-mask-mean";
 pub const SEMANTIC_NORMALIZATION: &str = "l2";
 pub const SEMANTIC_PASSAGE_PREFIX: &str = "passage: ";
 pub const SEMANTIC_QUERY_PREFIX: &str = "query: ";
+pub const SEMANTIC_LANGUAGE_SCOPE: &str = "unicode-global";
 pub(super) const SEMANTIC_CONTRACT_CANARY_TEXT: &str = "búsqueda semántica 世界";
+pub(super) const SEMANTIC_TOKENIZER_BEHAVIOR_PATHS: &[&str] = &[
+    "tokenizer.json",
+    "config.json",
+    "special_tokens_map.json",
+    "tokenizer_config.json",
+];
+const LEGACY_BUILTIN_DESCRIPTOR_FINGERPRINT: &str =
+    "sha256:c812eb325bc5e90e7278b2b8da3933206340c5b5a46fd678be40016e06a89fc3";
+const LEGACY_COMPATIBLE_VECTOR_CONTRACT_FINGERPRINT: &str =
+    "sha256:611f11c9b715543137d1b6be8d87497a2b6ef4945d425f3c0b973d2cb0c6036d";
 #[allow(dead_code)] // Signed provisioning consumes this seam in a separate integration lane.
 const SEMANTIC_RELEASE_POOLING: &str = "attention_mask_mean";
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Query text prepared according to one semantic vector-space contract.
+#[derive(Clone, Eq, PartialEq)]
+pub struct PreparedSemanticQuery {
+    contract_fingerprint: String,
+    text: String,
+}
+
+impl PreparedSemanticQuery {
+    pub fn contract_fingerprint(&self) -> &str {
+        &self.contract_fingerprint
+    }
+
+    pub fn into_text(self) -> String {
+        self.text
+    }
+}
+
+/// Document texts prepared according to one semantic vector-space contract.
+#[derive(Clone, Eq, PartialEq)]
+pub struct PreparedSemanticDocuments {
+    contract_fingerprint: String,
+    texts: Vec<String>,
+}
+
+impl PreparedSemanticDocuments {
+    pub fn contract_fingerprint(&self) -> &str {
+        &self.contract_fingerprint
+    }
+
+    pub fn into_texts(self) -> Vec<String> {
+        self.texts
+    }
+}
+
+/// The complete compatibility identity of one semantic vector space.
+///
+/// This value intentionally excludes executor, runtime, accelerator, and
+/// artifact-publication identity. Those details describe how ctx produces a
+/// vector, not whether that vector is compatible with an existing index.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SemanticModelContract {
-    model_id: &'static str,
-    model_revision: &'static str,
-    contract_revision: u32,
+    model_key: String,
+    model_id: String,
+    model_revision: String,
+    contract_version: u32,
+    tokenizer_fingerprint: String,
+    tokenizer_behavior_fingerprint: String,
     dimensions: usize,
-    normalization: &'static str,
+    max_sequence_length: usize,
+    pooling: String,
+    normalization: String,
+    query_prefix: String,
+    document_prefix: String,
+    language_scope: String,
+    descriptor: String,
+    fingerprint: String,
 }
 
 impl SemanticModelContract {
-    pub const fn model_id(self) -> &'static str {
-        self.model_id
+    pub fn model_key(&self) -> &str {
+        &self.model_key
     }
 
-    pub const fn model_revision(self) -> &'static str {
-        self.model_revision
+    pub fn model_id(&self) -> &str {
+        &self.model_id
     }
 
-    pub const fn contract_revision(self) -> u32 {
-        self.contract_revision
+    pub fn model_revision(&self) -> &str {
+        &self.model_revision
     }
 
-    pub const fn dimensions(self) -> usize {
+    pub const fn contract_version(&self) -> u32 {
+        self.contract_version
+    }
+
+    pub const fn contract_revision(&self) -> u32 {
+        self.contract_version()
+    }
+
+    pub fn tokenizer_fingerprint(&self) -> &str {
+        &self.tokenizer_fingerprint
+    }
+
+    /// Identifies every pinned file that can alter fastembed tokenization.
+    ///
+    /// `tokenizer_fingerprint` intentionally remains the historical
+    /// tokenizer.json-only Flat-format field. New vector-space compatibility
+    /// must use this complete behavior fingerprint through `descriptor`.
+    pub fn tokenizer_behavior_fingerprint(&self) -> &str {
+        &self.tokenizer_behavior_fingerprint
+    }
+
+    pub const fn dimensions(&self) -> usize {
         self.dimensions
     }
 
-    pub const fn normalization(self) -> &'static str {
-        self.normalization
+    pub const fn max_sequence_length(&self) -> usize {
+        self.max_sequence_length
+    }
+
+    pub fn pooling(&self) -> &str {
+        &self.pooling
+    }
+
+    pub fn normalization(&self) -> &str {
+        &self.normalization
+    }
+
+    pub fn query_prefix(&self) -> &str {
+        &self.query_prefix
+    }
+
+    pub fn document_prefix(&self) -> &str {
+        &self.document_prefix
+    }
+
+    pub fn language_scope(&self) -> &str {
+        &self.language_scope
+    }
+
+    /// Prepares query input for this vector space exactly once.
+    pub fn prepare_query(&self, text: String) -> PreparedSemanticQuery {
+        PreparedSemanticQuery {
+            contract_fingerprint: self.fingerprint().to_owned(),
+            text: semantic_prefixed_text(self.query_prefix(), text),
+        }
+    }
+
+    /// Prepares document inputs for this vector space exactly once.
+    pub fn prepare_documents(&self, texts: Vec<String>) -> PreparedSemanticDocuments {
+        PreparedSemanticDocuments {
+            contract_fingerprint: self.fingerprint().to_owned(),
+            texts: texts
+                .into_iter()
+                .map(|text| semantic_prefixed_text(self.document_prefix(), text))
+                .collect(),
+        }
+    }
+
+    /// Returns query text prepared for this vector space.
+    pub fn query_text(&self, text: &str) -> String {
+        self.prepare_query(text.to_owned()).into_text()
+    }
+
+    /// Returns document text prepared for this vector space.
+    pub fn document_text(&self, text: &str) -> String {
+        semantic_prefixed_text(self.document_prefix(), text.to_owned())
+    }
+
+    /// Returns the canonical compatibility descriptor for this vector space.
+    pub fn descriptor(&self) -> &str {
+        &self.descriptor
+    }
+
+    fn rebuild_identity(&mut self) {
+        self.descriptor = format!(
+            "ctx-semantic-vector-space-v{}|model_key={}|model_id={}|model_revision={}|tokenizer_fingerprint={}|tokenizer_behavior_fingerprint={}|dimensions={}|max_sequence_length={}|pooling={}|normalization={}|query_prefix={}|document_prefix={}|language_scope={}",
+            self.contract_version,
+            self.model_key,
+            self.model_id,
+            self.model_revision,
+            self.tokenizer_fingerprint,
+            self.tokenizer_behavior_fingerprint,
+            self.dimensions,
+            self.max_sequence_length,
+            self.pooling,
+            self.normalization,
+            self.query_prefix,
+            self.document_prefix,
+            self.language_scope,
+        );
+        self.fingerprint = sha256_fingerprint(&self.descriptor);
+    }
+
+    /// Returns the canonical SHA-256 identity of this vector space.
+    pub fn fingerprint(&self) -> &str {
+        &self.fingerprint
+    }
+
+    /// Reports whether frozen fingerprint-less daemon V1 compatibility is safe.
+    pub fn supports_frozen_legacy_v1(&self) -> bool {
+        let builtin = builtin_semantic_model_contract();
+        self.fingerprint() == LEGACY_COMPATIBLE_VECTOR_CONTRACT_FINGERPRINT
+            && (std::ptr::eq(self, builtin) || self == builtin)
+    }
+
+    /// Returns the exact pre-refactor built-in descriptor for index migration.
+    ///
+    /// The alias is available only for the exact built-in vector contract and
+    /// only while reconstruction still matches the descriptor digest shipped
+    /// before executor identity was separated from vector-space identity.
+    pub fn legacy_builtin_descriptor_alias(&self) -> Option<&'static str> {
+        if !self.supports_frozen_legacy_v1() {
+            return None;
+        }
+        static ALIAS: OnceLock<Option<String>> = OnceLock::new();
+        ALIAS
+            .get_or_init(|| {
+                let descriptor = legacy_builtin_semantic_model_descriptor();
+                (sha256_fingerprint(&descriptor) == LEGACY_BUILTIN_DESCRIPTOR_FINGERPRINT)
+                    .then_some(descriptor)
+            })
+            .as_deref()
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_test_tokenizer_behavior_fingerprint(mut self, fingerprint: &str) -> Self {
+        self.tokenizer_behavior_fingerprint = fingerprint.to_owned();
+        self.rebuild_identity();
+        self
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_test_language_scope(mut self, language_scope: &str) -> Self {
+        self.language_scope = language_scope.to_owned();
+        self.rebuild_identity();
+        self
     }
 }
 
-pub const fn semantic_model_contract() -> SemanticModelContract {
-    SemanticModelContract {
-        model_id: SEMANTIC_MODEL_ID,
-        model_revision: SEMANTIC_MODEL_REVISION,
-        contract_revision: SEMANTIC_MODEL_CONTRACT_VERSION,
-        dimensions: SEMANTIC_DIMENSIONS,
-        normalization: SEMANTIC_NORMALIZATION,
-    }
+pub fn semantic_model_contract() -> &'static SemanticModelContract {
+    builtin_semantic_model_contract()
+}
+
+fn builtin_semantic_model_contract() -> &'static SemanticModelContract {
+    static CONTRACT: OnceLock<SemanticModelContract> = OnceLock::new();
+    CONTRACT.get_or_init(|| {
+        let mut contract = SemanticModelContract {
+            model_key: SEMANTIC_MODEL_KEY.to_owned(),
+            model_id: SEMANTIC_MODEL_ID.to_owned(),
+            model_revision: SEMANTIC_MODEL_REVISION.to_owned(),
+            contract_version: SEMANTIC_MODEL_CONTRACT_VERSION,
+            tokenizer_fingerprint: semantic_tokenizer_fingerprint(),
+            tokenizer_behavior_fingerprint: semantic_tokenizer_behavior_fingerprint(),
+            dimensions: SEMANTIC_DIMENSIONS,
+            max_sequence_length: SEMANTIC_MAX_SEQUENCE_LENGTH,
+            pooling: SEMANTIC_POOLING.to_owned(),
+            normalization: SEMANTIC_NORMALIZATION.to_owned(),
+            query_prefix: SEMANTIC_QUERY_PREFIX.to_owned(),
+            document_prefix: SEMANTIC_PASSAGE_PREFIX.to_owned(),
+            language_scope: SEMANTIC_LANGUAGE_SCOPE.to_owned(),
+            descriptor: String::new(),
+            fingerprint: String::new(),
+        };
+        contract.rebuild_identity();
+        contract
+    })
 }
 
 const UNPROVISIONED_SHA256: &str =
@@ -400,25 +621,35 @@ impl fmt::Display for SemanticProvisioningRequired {
 impl std::error::Error for SemanticProvisioningRequired {}
 
 pub fn semantic_model_contract_descriptor() -> String {
+    builtin_semantic_model_contract().descriptor().to_owned()
+}
+
+pub fn semantic_model_contract_fingerprint() -> String {
+    builtin_semantic_model_contract().fingerprint().to_owned()
+}
+
+fn legacy_builtin_semantic_model_descriptor() -> String {
     let mut descriptor = format!(
         "ctx-semantic-e5-v{}|backend={SEMANTIC_BACKEND}|model_key={SEMANTIC_MODEL_KEY}|model={SEMANTIC_MODEL_ID}|revision={SEMANTIC_MODEL_REVISION}|dimensions={SEMANTIC_DIMENSIONS}|max_sequence_length={SEMANTIC_MAX_SEQUENCE_LENGTH}|pooling={SEMANTIC_POOLING}|normalization={SEMANTIC_NORMALIZATION}|query_prefix={SEMANTIC_QUERY_PREFIX}|passage_prefix={SEMANTIC_PASSAGE_PREFIX}|language=unicode-global",
         SEMANTIC_MODEL_CONTRACT_VERSION,
     );
+    append_builtin_semantic_executor_identity(&mut descriptor);
+    descriptor
+}
+
+fn append_builtin_semantic_executor_identity(descriptor: &mut String) {
     for variant in [
         SemanticOrtModelVariant::CpuFp32,
         SemanticOrtModelVariant::AcceleratorO4Fp16,
     ] {
         for file in variant.required_files() {
-            use std::fmt::Write as _;
-            write!(
-                descriptor,
+            descriptor.push_str(&format!(
                 "|variant={}|file={}:{}:{}",
                 variant.as_str(),
                 file.path,
                 file.size,
                 file.sha256
-            )
-            .expect("writing to String cannot fail");
+            ));
         }
     }
     for backend in [
@@ -427,20 +658,15 @@ pub fn semantic_model_contract_descriptor() -> String {
         SemanticBackendKind::OrtCuda,
         SemanticBackendKind::WindowsMl,
     ] {
-        use std::fmt::Write as _;
-        write!(
-            descriptor,
+        descriptor.push_str(&format!(
             "|backend_variant={}:{}:{}",
             backend.as_str(),
             backend.execution_provider(),
             backend.contract_id(),
-        )
-        .expect("writing to String cannot fail");
+        ));
     }
     let coreml = COREML_BUNDLE_CONTRACT;
-    use std::fmt::Write as _;
-    write!(
-        descriptor,
+    descriptor.push_str(&format!(
         "|coreml_artifact_url={}|coreml_artifact_name={}|coreml_archive_sha256={}|coreml_manifest_sha256={}|coreml_bundle_id={}|coreml_bundle_version={}|coreml_schema_version={}|coreml_model_id={}|coreml_source_revision={}|coreml_embedding_space_id={}|coreml_precision={}|coreml_minimum_macos={}|coreml_inputs={}:{};{}:{};{}:{}|coreml_output={}:{}|coreml_document_batch_size={}|coreml_query_batch_size={:?}|coreml_max_sequence_length={}|coreml_dimensions={}|coreml_document_prefix={}|coreml_query_prefix={}|coreml_pooling={}|coreml_normalization={}|coreml_tokenizer_artifact={}|coreml_document_model_artifact={}|coreml_query_model_artifact={}",
         coreml.artifact_url,
         coreml.artifact_name,
@@ -473,9 +699,11 @@ pub fn semantic_model_contract_descriptor() -> String {
         coreml.tokenizer_artifact,
         coreml.document_model_artifact,
         coreml.query_model_artifact,
-    )
-    .expect("writing to String cannot fail");
-    descriptor
+    ));
+}
+
+fn sha256_fingerprint(descriptor: &str) -> String {
+    format!("sha256:{:x}", Sha256::digest(descriptor.as_bytes()))
 }
 
 pub fn semantic_model_key() -> &'static str {
@@ -490,7 +718,25 @@ pub fn semantic_tokenizer_fingerprint() -> String {
         .unwrap_or_else(|| "missing-tokenizer-contract".to_owned())
 }
 
-fn semantic_e5_prefixed_text(prefix: &str, text: &str) -> String {
+pub fn semantic_tokenizer_behavior_fingerprint() -> String {
+    semantic_tokenizer_behavior_fingerprint_for(SEMANTIC_REQUIRED_MODEL_FILES)
+}
+
+pub(super) fn semantic_tokenizer_behavior_fingerprint_for(files: &[SemanticModelFile]) -> String {
+    let mut descriptor = "ctx-semantic-tokenizer-behavior-v1".to_owned();
+    for path in SEMANTIC_TOKENIZER_BEHAVIOR_PATHS {
+        match files.iter().find(|file| file.path == *path) {
+            Some(file) => descriptor.push_str(&format!(
+                "|file={}:{}:{}",
+                file.path, file.size, file.sha256
+            )),
+            None => descriptor.push_str(&format!("|missing={path}")),
+        }
+    }
+    sha256_fingerprint(&descriptor)
+}
+
+fn semantic_prefixed_text(prefix: &str, text: String) -> String {
     let text = text.trim_start();
     if text.starts_with(prefix) {
         text.to_owned()
@@ -500,9 +746,9 @@ fn semantic_e5_prefixed_text(prefix: &str, text: &str) -> String {
 }
 
 pub fn semantic_e5_passage_text(text: &str) -> String {
-    semantic_e5_prefixed_text(SEMANTIC_PASSAGE_PREFIX, text)
+    builtin_semantic_model_contract().document_text(text)
 }
 
 pub(super) fn semantic_e5_query_text(text: &str) -> String {
-    semantic_e5_prefixed_text(SEMANTIC_QUERY_PREFIX, text)
+    builtin_semantic_model_contract().query_text(text)
 }

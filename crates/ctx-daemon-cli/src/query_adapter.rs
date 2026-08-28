@@ -1,17 +1,19 @@
 use std::{path::Path, time::Duration as StdDuration, time::Instant};
 
 use anyhow::{anyhow, Result};
+use ctx_daemon_service::DaemonQueryServiceUnavailable;
 use ctx_history_index::{CompiledSearchFilter, EventSearchCandidate, VerifiedIndex};
 use ctx_history_read_application::{
     HistorySemanticBatch, HistorySemanticError, HistorySemanticPort, HistorySemanticQuery,
     SemanticReason,
 };
 use ctx_semantic_index::{
-    source_backed_semantic_vector_path, SemanticBatchEmbedder, SemanticChunkDocument,
-    SemanticNotReady, SemanticQueryPin, SemanticVectorStore, SourceBackedSemanticDocumentBuilder,
+    semantic_model_contract, source_backed_semantic_vector_path, SemanticBatchEmbedder,
+    SemanticChunkDocument, SemanticModelContract, SemanticNotReady, SemanticQueryPin,
+    SemanticVectorStore, SourceBackedSemanticDocumentBuilder,
 };
 use ctx_semantic_model::{
-    semantic_model_key, SemanticModelConfig, SharedSemanticRuntime, SEMANTIC_DIMENSIONS,
+    BuiltinSemanticEmbeddingExecutor, SemanticEmbeddingExecutor, SharedSemanticRuntime,
 };
 use serde_json::{json, Value};
 
@@ -27,8 +29,7 @@ pub struct SemanticQueryAdapter<'data_root> {
 enum SemanticQueryExecution {
     Daemon,
     Foreground {
-        runtime: SharedSemanticRuntime,
-        model_config: Box<SemanticModelConfig>,
+        executor: Box<BuiltinSemanticEmbeddingExecutor>,
     },
 }
 
@@ -40,14 +41,17 @@ impl<'data_root> SemanticQueryAdapter<'data_root> {
         }
     }
 
-    /// Uses one foreground runtime for semantic reconciliation and the query
-    /// embedding. Intended for explicit manual `--refresh wait`.
+    /// Uses one foreground built-in executor for semantic reconciliation and
+    /// the query embedding. Intended for explicit manual `--refresh wait`.
     pub fn foreground(data_root: &'data_root Path) -> Self {
+        let executor = BuiltinSemanticEmbeddingExecutor::new(
+            SharedSemanticRuntime::default(),
+            crate::model_config::semantic_model_config(data_root),
+        );
         Self {
             data_root,
             execution: SemanticQueryExecution::Foreground {
-                runtime: SharedSemanticRuntime::default(),
-                model_config: Box::new(crate::model_config::semantic_model_config(data_root)),
+                executor: Box::new(executor),
             },
         }
     }
@@ -65,66 +69,51 @@ impl HistorySemanticPort for SemanticQueryAdapter<'_> {
     ) -> std::result::Result<Self::Query<'a>, HistorySemanticError> {
         match &self.execution {
             SemanticQueryExecution::Daemon => SemanticQuerySession::begin(index, self.data_root),
-            SemanticQueryExecution::Foreground {
-                runtime,
-                model_config,
-            } => match SemanticQuerySession::begin_foreground(
-                index,
-                self.data_root,
-                runtime,
-                model_config,
-            ) {
-                Ok(session) => Ok(session),
-                Err(SemanticQueryError::NotReady { .. }) => {
-                    reconcile_foreground_semantic(index, self.data_root, runtime, model_config)
-                        .map_err(SemanticQueryError::from)?;
-                    SemanticQuerySession::begin_foreground(
-                        index,
-                        self.data_root,
-                        runtime,
-                        model_config,
-                    )
+            SemanticQueryExecution::Foreground { executor } => {
+                match SemanticQuerySession::begin_foreground(index, self.data_root, executor) {
+                    Ok(session) => Ok(session),
+                    Err(SemanticQueryError::NotReady { .. }) => {
+                        reconcile_foreground_semantic(index, self.data_root, executor)
+                            .map_err(SemanticQueryError::from)?;
+                        SemanticQuerySession::begin_foreground(index, self.data_root, executor)
+                    }
+                    Err(error) => Err(error),
                 }
-                Err(error) => Err(error),
-            },
+            }
         }
         .map_err(HistorySemanticError::from)
     }
 }
 
 struct ForegroundSemanticEmbedder<'a> {
-    runtime: &'a SharedSemanticRuntime,
-    model_config: &'a SemanticModelConfig,
+    executor: &'a BuiltinSemanticEmbeddingExecutor,
 }
 
 impl SemanticBatchEmbedder for ForegroundSemanticEmbedder<'_> {
     fn embed_chunks(&mut self, chunks: &[SemanticChunkDocument]) -> Result<Vec<Vec<f32>>> {
-        ensure_foreground_runtime(self.runtime, self.model_config)?;
+        ensure_foreground_executor(self.executor)?;
         let texts = chunks
             .iter()
             .map(|chunk| chunk.text().to_owned())
             .collect::<Vec<_>>();
-        self.runtime
-            .embed_documents(self.model_config, texts, None)
-            .map(|(embeddings, _)| embeddings)
+        let executor: &dyn SemanticEmbeddingExecutor = self.executor;
+        executor.embed_documents(executor.contract().prepare_documents(texts), None)
     }
 }
 
 fn reconcile_foreground_semantic(
     index: &VerifiedIndex,
     data_root: &Path,
-    runtime: &SharedSemanticRuntime,
-    model_config: &SemanticModelConfig,
+    executor: &BuiltinSemanticEmbeddingExecutor,
 ) -> Result<()> {
     if index.semantic_eligible_event_count()? > 0 {
-        ensure_foreground_runtime(runtime, model_config)?;
+        ensure_foreground_executor(executor)?;
     }
-    let mut store = SemanticVectorStore::open(&source_backed_semantic_vector_path(data_root))?;
+    let contract = semantic_index_contract(executor)?;
+    let mut store =
+        SemanticVectorStore::open(&source_backed_semantic_vector_path(data_root), &contract)?;
     let mut builder = SourceBackedSemanticDocumentBuilder::new(index);
-    let mut embedder = ForegroundSemanticEmbedder {
-        runtime,
-        model_config,
-    };
+    let mut embedder = ForegroundSemanticEmbedder { executor };
     loop {
         let outcome = store.reconcile_source_backed_index(index, &mut builder, &mut embedder)?;
         if outcome.ready() {
@@ -142,6 +131,7 @@ pub struct SemanticQuerySession<'a> {
     pin: SemanticQueryPin,
     index: &'a VerifiedIndex,
     data_root: &'a Path,
+    contract: SemanticModelContract,
     embedding_source: SemanticQueryEmbeddingSource<'a>,
     embeddings: Vec<Vec<f32>>,
 }
@@ -150,8 +140,7 @@ pub struct SemanticQuerySession<'a> {
 enum SemanticQueryEmbeddingSource<'a> {
     Daemon,
     Foreground {
-        runtime: &'a SharedSemanticRuntime,
-        model_config: &'a SemanticModelConfig,
+        executor: &'a BuiltinSemanticEmbeddingExecutor,
     },
 }
 
@@ -160,12 +149,14 @@ impl SemanticQuerySession<'_> {
         index: &'a VerifiedIndex,
         data_root: &'a Path,
     ) -> std::result::Result<SemanticQuerySession<'a>, SemanticQueryError> {
-        let pin =
-            SemanticQueryPin::preflight(index, data_root).map_err(SemanticQueryError::from)?;
+        let contract = semantic_model_contract();
+        let pin = SemanticQueryPin::preflight(index, data_root, contract)
+            .map_err(SemanticQueryError::from)?;
         Ok(SemanticQuerySession {
             pin,
             index,
             data_root,
+            contract: contract.clone(),
             embedding_source: SemanticQueryEmbeddingSource::Daemon,
             embeddings: Vec::new(),
         })
@@ -174,15 +165,19 @@ impl SemanticQuerySession<'_> {
     fn begin_foreground<'a>(
         index: &'a VerifiedIndex,
         data_root: &'a Path,
-        runtime: &'a SharedSemanticRuntime,
-        model_config: &'a SemanticModelConfig,
+        executor: &'a BuiltinSemanticEmbeddingExecutor,
     ) -> std::result::Result<SemanticQuerySession<'a>, SemanticQueryError> {
-        let mut session = Self::begin(index, data_root)?;
-        session.embedding_source = SemanticQueryEmbeddingSource::Foreground {
-            runtime,
-            model_config,
-        };
-        Ok(session)
+        let contract = semantic_index_contract(executor).map_err(SemanticQueryError::from)?;
+        let pin = SemanticQueryPin::preflight(index, data_root, &contract)
+            .map_err(SemanticQueryError::from)?;
+        Ok(SemanticQuerySession {
+            pin,
+            index,
+            data_root,
+            contract,
+            embedding_source: SemanticQueryEmbeddingSource::Foreground { executor },
+            embeddings: Vec::new(),
+        })
     }
 
     fn prepare_alternative(
@@ -193,12 +188,10 @@ impl SemanticQuerySession<'_> {
             SemanticQueryEmbeddingSource::Daemon => {
                 self.prepare_alternative_with(query, daemon_query_embedding)
             }
-            SemanticQueryEmbeddingSource::Foreground {
-                runtime,
-                model_config,
-            } => self.prepare_alternative_with(query, |_, query| {
-                foreground_query_embedding(runtime, model_config, query).map(Some)
-            }),
+            SemanticQueryEmbeddingSource::Foreground { executor } => self
+                .prepare_alternative_with(query, |_, _, query| {
+                    foreground_query_embedding(executor, query).map(Some)
+                }),
         }
     }
 
@@ -208,7 +201,7 @@ impl SemanticQuerySession<'_> {
         mut embed_query: EmbedQuery,
     ) -> std::result::Result<Value, SemanticQueryError>
     where
-        EmbedQuery: FnMut(&Path, &str) -> Result<Option<(Vec<f32>, u64)>>,
+        EmbedQuery: FnMut(&Path, &SemanticModelContract, &str) -> Result<Option<(Vec<f32>, u64)>>,
     {
         if !self
             .pin
@@ -219,7 +212,7 @@ impl SemanticQuerySession<'_> {
                 "query_embed_ms": null,
             })));
         }
-        let (embedding, query_embed_ms) = embed_query(self.data_root, query)
+        let (embedding, query_embed_ms) = embed_query(self.data_root, &self.contract, query)
             .map_err(SemanticQueryError::from)?
             .ok_or_else(|| {
                 SemanticQueryError::not_ready(
@@ -254,29 +247,43 @@ impl SemanticQuerySession<'_> {
             pin,
             index,
             data_root,
+            contract: semantic_model_contract().clone(),
             embedding_source: SemanticQueryEmbeddingSource::Daemon,
             embeddings: Vec::new(),
         }
     }
 }
 
+fn semantic_index_contract(
+    executor: &BuiltinSemanticEmbeddingExecutor,
+) -> Result<SemanticModelContract> {
+    // Bazel may materialize the model crate separately across this dependency
+    // boundary. Compare the portable fingerprint, then return the index
+    // crate's own contract type.
+    let contract = semantic_model_contract();
+    if executor.contract().fingerprint() != contract.fingerprint() {
+        return Err(anyhow!(
+            "semantic executor model contract does not match the semantic index contract"
+        ));
+    }
+    Ok(contract.clone())
+}
+
 fn foreground_query_embedding(
-    runtime: &SharedSemanticRuntime,
-    model_config: &SemanticModelConfig,
+    executor: &BuiltinSemanticEmbeddingExecutor,
     semantic_text: &str,
 ) -> Result<(Vec<f32>, u64)> {
-    ensure_foreground_runtime(runtime, model_config)?;
+    ensure_foreground_executor(executor)?;
     let started = Instant::now();
-    let (embedding, _) = runtime.embed_query(model_config, semantic_text.to_owned())?;
+    let executor: &dyn SemanticEmbeddingExecutor = executor;
+    let embedding =
+        executor.embed_query(executor.contract().prepare_query(semantic_text.to_owned()))?;
     Ok((embedding, started.elapsed().as_millis() as u64))
 }
 
-fn ensure_foreground_runtime(
-    runtime: &SharedSemanticRuntime,
-    model_config: &SemanticModelConfig,
-) -> Result<()> {
-    runtime.ensure_loaded_with_acquisition(
-        model_config,
+fn ensure_foreground_executor(executor: &BuiltinSemanticEmbeddingExecutor) -> Result<()> {
+    executor.shared_runtime().ensure_loaded_with_acquisition(
+        executor.config(),
         &crate::daemon_service_ports::ARTIFACT_FETCHER,
     )?;
     Ok(())
@@ -339,7 +346,14 @@ impl From<anyhow::Error> for SemanticQueryError {
             Ok(not_ready) => {
                 Self::not_ready(not_ready.code(), not_ready.detail(), not_ready.retryable())
             }
-            Err(error) => Self::failed(format!("{error:#}")),
+            Err(error) => match error.downcast::<DaemonQueryServiceUnavailable>() {
+                Ok(error) => Self::not_ready(
+                    "semantic_query_service_unavailable",
+                    error.to_string(),
+                    true,
+                ),
+                Err(error) => Self::failed(format!("{error:#}")),
+            },
         }
     }
 }
@@ -359,35 +373,74 @@ impl From<SemanticQueryError> for HistorySemanticError {
 
 fn daemon_query_embedding(
     data_root: &Path,
+    contract: &SemanticModelContract,
     semantic_text: &str,
 ) -> Result<Option<(Vec<f32>, u64)>> {
     let Some(response) = daemon_query_request(
         data_root,
-        compact_json(json!({
-            "schema_version": 1,
-            "op": "embed_query",
-            "model_key": semantic_model_key(),
-            "text": semantic_text,
-        })),
+        daemon_query_embedding_request(contract, semantic_text),
         StdDuration::from_secs(30),
         1024 * 1024,
     )?
     else {
         return Ok(None);
     };
-    if response.get("ok").and_then(Value::as_bool) != Some(true) {
+    parse_daemon_query_embedding_response(&response, contract).map(Some)
+}
+
+fn daemon_query_embedding_request(contract: &SemanticModelContract, semantic_text: &str) -> Value {
+    compact_json(json!({
+        "schema_version": 1,
+        "op": "embed_query",
+        "model_key": contract.model_key(),
+        "model_contract_fingerprint": contract.fingerprint(),
+        "text": semantic_text,
+    }))
+}
+
+fn parse_daemon_query_embedding_response(
+    response: &Value,
+    contract: &SemanticModelContract,
+) -> Result<(Vec<f32>, u64)> {
+    let ok = response.get("ok").and_then(Value::as_bool);
+    let legacy_v1 = contract.supports_frozen_legacy_v1()
+        && response.get("model_contract_fingerprint").is_none();
+    if !legacy_v1 {
+        if response.get("schema_version").and_then(Value::as_u64) != Some(1) {
+            return Err(anyhow!("daemon query response schema_version mismatch"));
+        }
+        let model_key = response
+            .get("model_key")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if model_key != contract.model_key() {
+            return Err(anyhow!("daemon query response model key mismatch"));
+        }
+        let model_contract_fingerprint = response
+            .get("model_contract_fingerprint")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if model_contract_fingerprint != contract.fingerprint() {
+            return Err(anyhow!(
+                "daemon query response model contract fingerprint mismatch"
+            ));
+        }
+    } else if ok == Some(true)
+        && (response
+            .get("schema_version")
+            .is_some_and(|value| value.as_u64() != Some(1))
+            || response.get("model_key").and_then(Value::as_str) != Some(contract.model_key()))
+    {
+        return Err(anyhow!(
+            "legacy daemon query response protocol identity mismatch"
+        ));
+    }
+    if ok != Some(true) {
         let message = response
             .get("error")
             .and_then(Value::as_str)
             .unwrap_or("daemon query failed");
         return Err(anyhow!("{message}"));
-    }
-    let model_key = response
-        .get("model_key")
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    if model_key != semantic_model_key() {
-        return Err(anyhow!("daemon query response model key mismatch"));
     }
     let query_embed_ms = response
         .get("query_embed_ms")
@@ -405,14 +458,28 @@ fn daemon_query_embedding(
                 .ok_or_else(|| anyhow!("daemon query embedding contains a non-number"))
         })
         .collect::<Result<Vec<_>>>()?;
-    if embedding.len() != SEMANTIC_DIMENSIONS {
+    if embedding.len() != contract.dimensions() {
         return Err(anyhow!(
             "daemon query embedding returned {} dimensions, expected {}",
             embedding.len(),
-            SEMANTIC_DIMENSIONS
+            contract.dimensions()
         ));
     }
-    Ok(Some((embedding, query_embed_ms)))
+    if embedding.iter().any(|value| !value.is_finite()) {
+        return Err(anyhow!(
+            "daemon query embedding contains a non-finite value"
+        ));
+    }
+    let norm_squared = embedding.iter().fold(0.0_f64, |norm_squared, value| {
+        f64::from(*value).mul_add(f64::from(*value), norm_squared)
+    });
+    const NORMALIZED_NORM_SQUARED_TOLERANCE: f64 = 1.0e-3;
+    if !norm_squared.is_finite() || (norm_squared - 1.0).abs() > NORMALIZED_NORM_SQUARED_TOLERANCE {
+        return Err(anyhow!(
+            "daemon query embedding is not L2-normalized (norm squared {norm_squared})"
+        ));
+    }
+    Ok((embedding, query_embed_ms))
 }
 
 #[cfg(test)]

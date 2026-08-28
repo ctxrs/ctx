@@ -1,7 +1,7 @@
 use std::fs;
 
 use anyhow::Result;
-use ctx_semantic_model::SEMANTIC_DIMENSIONS;
+use ctx_semantic_model::{semantic_model_contract, SemanticModelContract};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -10,8 +10,12 @@ use crate::{
     SemanticVectorStore,
 };
 
-fn test_embedding(first: f32, second: f32) -> Vec<f32> {
-    let mut embedding = vec![0.0; SEMANTIC_DIMENSIONS];
+fn test_contract() -> SemanticModelContract {
+    semantic_model_contract().clone()
+}
+
+fn test_embedding(contract: &SemanticModelContract, first: f32, second: f32) -> Vec<f32> {
+    let mut embedding = vec![0.0; contract.dimensions()];
     let norm = first.mul_add(first, second * second).sqrt();
     if norm > 0.0 {
         embedding[0] = first / norm;

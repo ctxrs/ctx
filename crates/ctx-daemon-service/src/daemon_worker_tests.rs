@@ -9,6 +9,10 @@ use ctx_semantic_index::{
     source_backed_semantic_vector_path, SemanticDocumentBuilder,
     SourceBackedSemanticDocumentBuilder,
 };
+use ctx_semantic_model::{
+    semantic_model_contract, PreparedSemanticDocuments, PreparedSemanticQuery,
+    SemanticModelContract,
+};
 
 #[cfg(any(
     all(
@@ -35,6 +39,69 @@ use super::*;
 use crate::{
     daemon_retry::DaemonRetryBackoff, daemon_scheduler::record_daemon_job_retry, CONFIG_FILE,
 };
+
+struct RecordingSemanticExecutor {
+    contract: SemanticModelContract,
+    documents: std::sync::Mutex<Vec<(Vec<String>, Option<Instant>)>>,
+}
+
+impl SemanticEmbeddingExecutor for RecordingSemanticExecutor {
+    fn contract(&self) -> &SemanticModelContract {
+        &self.contract
+    }
+
+    fn embed_query(&self, _query: PreparedSemanticQuery) -> Result<Vec<f32>> {
+        unreachable!("document execution test must not invoke query inference")
+    }
+
+    fn embed_documents(
+        &self,
+        documents: PreparedSemanticDocuments,
+        deadline: Option<Instant>,
+    ) -> Result<Vec<Vec<f32>>> {
+        let documents = documents.into_texts();
+        self.documents
+            .lock()
+            .expect("record semantic documents")
+            .push((documents.clone(), deadline));
+        Ok(documents
+            .iter()
+            .map(|_| {
+                let mut embedding = vec![0.0; self.contract.dimensions()];
+                embedding[0] = 1.0;
+                embedding
+            })
+            .collect())
+    }
+}
+
+#[test]
+fn daemon_document_execution_uses_the_pluggable_prepared_input_seam() -> Result<()> {
+    let executor = RecordingSemanticExecutor {
+        contract: semantic_model_contract().clone(),
+        documents: std::sync::Mutex::new(Vec::new()),
+    };
+    let deadline = Instant::now() + std::time::Duration::from_secs(1);
+
+    let embeddings = execute_document_embeddings(
+        &executor,
+        vec!["raw document".to_owned(), "passage: prepared".to_owned()],
+        Some(deadline),
+    )?;
+
+    assert_eq!(embeddings.len(), 2);
+    assert_eq!(
+        *executor.documents.lock().expect("recorded documents"),
+        [(
+            vec![
+                "passage: raw document".to_owned(),
+                "passage: prepared".to_owned(),
+            ],
+            Some(deadline),
+        )]
+    );
+    Ok(())
+}
 
 #[test]
 fn daemon_job_json_keeps_outcomes_without_live_worker_snapshots() {

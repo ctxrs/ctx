@@ -8,7 +8,7 @@ fn incremental_delta_reopens_catches_up_and_acknowledges_verified_generation() -
     let initial_generation_id = initial.generation_id().to_owned();
     assert_eq!(initial.manifest().generation_id()?, initial_generation_id);
 
-    let mut store = SemanticVectorStore::open(&fixture.semantic_path)?;
+    let mut store = SemanticVectorStore::open(&fixture.semantic_path, semantic_model_contract())?;
     let mut builder = CoreBuilder::default();
     let mut embedder = MarkerEmbedder::default();
     assert!(reconcile_all(&mut store, &initial, &mut builder, &mut embedder)?.ready);
@@ -30,7 +30,8 @@ fn incremental_delta_reopens_catches_up_and_acknowledges_verified_generation() -
         reopened.manifest().generation_id()?,
         reopened.generation_id()
     );
-    let generation = SourceBackedSemanticGeneration::from_verified_index(&reopened)?;
+    let generation =
+        SourceBackedSemanticGeneration::from_verified_index(&reopened, semantic_model_contract())?;
     assert_eq!(generation.core_generation_id, reopened.generation_id());
 
     let mut stale = generation.clone();

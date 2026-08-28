@@ -10,7 +10,6 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use ctx_semantic_model::semantic_model_contract;
 use memmap2::{Mmap, MmapOptions};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -49,6 +48,7 @@ pub(crate) type FlatResult<T> = std::result::Result<T, FlatStoreError>;
 
 const COMPACT_SEGMENT_THRESHOLD: usize = 16;
 const FLAT_SOURCE_RECEIPT_DOMAIN: &[u8] = b"ctx-flat-source-receipt-v1\0";
+pub(crate) const MODEL_CONTRACT_RESET_PENDING_FILE: &str = "flat-model-contract-reset-pending-v1";
 
 #[derive(Debug, Error)]
 pub(crate) enum FlatStoreError {
@@ -85,6 +85,12 @@ pub(crate) struct FlatModelContract {
     pub(crate) pooling: String,
     pub(crate) dimensions: u32,
     pub(crate) normalization: String,
+}
+
+impl FlatModelContract {
+    pub(crate) fn validate(&self) -> FlatResult<()> {
+        validate_model_contract(self)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]

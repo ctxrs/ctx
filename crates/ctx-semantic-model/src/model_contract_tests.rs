@@ -6,9 +6,25 @@ use crate::model_contract::*;
 fn semantic_model_identity_and_descriptor_bytes_are_frozen() {
     let contract = semantic_model_contract();
     assert_eq!(contract.contract_revision(), 2);
+    assert_eq!(contract.contract_version(), 2);
+    assert_eq!(contract.model_key(), SEMANTIC_MODEL_KEY);
     assert_eq!(contract.model_id(), "intfloat/multilingual-e5-small");
+    assert_eq!(contract.model_revision(), SEMANTIC_MODEL_REVISION);
+    assert_eq!(
+        contract.tokenizer_fingerprint(),
+        "sha256:0b44a9d7b51c3c62626640cda0e2c2f70fdacdc25bbbd68038369d14ebdf4c39"
+    );
+    assert_eq!(
+        contract.tokenizer_behavior_fingerprint(),
+        "sha256:c61e5e2d53de677ea9023debfa95e4c618b601c63e2de6c43c0c64850560c2c0"
+    );
     assert_eq!(contract.dimensions(), 384);
+    assert_eq!(contract.max_sequence_length(), 512);
+    assert_eq!(contract.pooling(), "attention-mask-mean");
     assert_eq!(contract.normalization(), "l2");
+    assert_eq!(contract.query_prefix(), "query: ");
+    assert_eq!(contract.document_prefix(), "passage: ");
+    assert_eq!(contract.language_scope(), "unicode-global");
     assert_eq!(SEMANTIC_MODEL_KEY, "e5-small-v1:mean-pool:l2:query-passage");
     assert_eq!(
         SEMANTIC_MODEL_REVISION,
@@ -69,9 +85,95 @@ fn semantic_model_identity_and_descriptor_bytes_are_frozen() {
     );
     let descriptor = semantic_model_contract_descriptor();
     let descriptor_sha256 = format!("{:x}", Sha256::digest(descriptor.as_bytes()));
+    assert_eq!(descriptor, contract.descriptor());
+    assert_eq!(
+        semantic_model_contract_fingerprint(),
+        contract.fingerprint()
+    );
+    assert_eq!(
+        semantic_model_contract_fingerprint(),
+        format!("sha256:{descriptor_sha256}")
+    );
     assert_eq!(
         descriptor_sha256,
-        "c812eb325bc5e90e7278b2b8da3933206340c5b5a46fd678be40016e06a89fc3"
+        "611f11c9b715543137d1b6be8d87497a2b6ef4945d425f3c0b973d2cb0c6036d"
+    );
+
+    assert!(std::ptr::eq(contract, semantic_model_contract()));
+}
+
+#[test]
+fn tokenizer_behavior_identity_covers_every_fastembed_behavior_file_only() {
+    assert_eq!(
+        SEMANTIC_TOKENIZER_BEHAVIOR_PATHS,
+        [
+            "tokenizer.json",
+            "config.json",
+            "special_tokens_map.json",
+            "tokenizer_config.json",
+        ]
+    );
+    let baseline = semantic_tokenizer_behavior_fingerprint();
+    for path in SEMANTIC_TOKENIZER_BEHAVIOR_PATHS {
+        let mut changed = SEMANTIC_REQUIRED_MODEL_FILES.to_vec();
+        let file = changed
+            .iter_mut()
+            .find(|file| file.path == *path)
+            .expect("behavior file must be pinned");
+        *file = SemanticModelFile::new(
+            file.path,
+            file.size,
+            "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        );
+        assert_ne!(
+            semantic_tokenizer_behavior_fingerprint_for(&changed),
+            baseline,
+            "{path} did not participate in tokenizer behavior identity"
+        );
+    }
+
+    let mut changed_model_only = SEMANTIC_REQUIRED_MODEL_FILES.to_vec();
+    changed_model_only[0] = SemanticModelFile::new(
+        "onnx/model.onnx",
+        470_268_510,
+        "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    );
+    assert_eq!(
+        semantic_tokenizer_behavior_fingerprint_for(&changed_model_only),
+        baseline,
+        "execution artifact identity leaked into tokenizer behavior identity"
+    );
+    assert_eq!(
+        semantic_tokenizer_fingerprint(),
+        "sha256:0b44a9d7b51c3c62626640cda0e2c2f70fdacdc25bbbd68038369d14ebdf4c39",
+        "the Flat-format tokenizer.json identity must remain unchanged"
+    );
+}
+
+#[test]
+fn exact_builtin_contract_exposes_only_the_frozen_pre_refactor_alias() {
+    let contract = semantic_model_contract();
+    let descriptor = contract
+        .legacy_builtin_descriptor_alias()
+        .expect("exact built-in contract must expose its migration alias");
+    assert_eq!(
+        format!("sha256:{:x}", Sha256::digest(descriptor.as_bytes())),
+        "sha256:c812eb325bc5e90e7278b2b8da3933206340c5b5a46fd678be40016e06a89fc3"
+    );
+    assert!(descriptor.starts_with("ctx-semantic-e5-v2|backend=multilingual-e5|"));
+    assert!(descriptor.contains("|backend_variant=cpu:CPUExecutionProvider:"));
+    assert!(descriptor.contains("|coreml_manifest_sha256="));
+
+    let non_builtin = contract
+        .clone()
+        .with_test_tokenizer_behavior_fingerprint("sha256:test-only");
+    assert_eq!(non_builtin.legacy_builtin_descriptor_alias(), None);
+    let revised_language_scope = contract
+        .clone()
+        .with_test_language_scope("test-only-language-scope");
+    assert_eq!(
+        revised_language_scope.legacy_builtin_descriptor_alias(),
+        None
     );
 }
 
@@ -123,76 +225,81 @@ fn provisioning_inventory_keeps_both_pinned_e5_variants_exact() {
 }
 
 #[test]
-fn semantic_generation_descriptor_covers_every_runtime_and_artifact_authority() {
-    let descriptor = semantic_model_contract_descriptor();
+fn semantic_descriptor_excludes_executor_and_publication_identity() {
+    let contract_descriptor = semantic_model_contract_descriptor();
     for required in [
+        format!("model_key={SEMANTIC_MODEL_KEY}"),
+        format!("model_id={SEMANTIC_MODEL_ID}"),
+        format!("model_revision={SEMANTIC_MODEL_REVISION}"),
+        format!("tokenizer_fingerprint={}", semantic_tokenizer_fingerprint()),
+        format!(
+            "tokenizer_behavior_fingerprint={}",
+            semantic_tokenizer_behavior_fingerprint()
+        ),
+        format!("dimensions={SEMANTIC_DIMENSIONS}"),
         format!("max_sequence_length={SEMANTIC_MAX_SEQUENCE_LENGTH}"),
         format!("pooling={SEMANTIC_POOLING}"),
+        format!("normalization={SEMANTIC_NORMALIZATION}"),
         format!("query_prefix={SEMANTIC_QUERY_PREFIX}"),
-        format!("passage_prefix={SEMANTIC_PASSAGE_PREFIX}"),
-        format!(
-            "coreml_manifest_sha256={}",
-            COREML_BUNDLE_CONTRACT.manifest_sha256
-        ),
-        format!(
-            "coreml_inputs={}:{}",
-            COREML_BUNDLE_CONTRACT.inputs[0].0, COREML_BUNDLE_CONTRACT.inputs[0].1
-        ),
-        format!(
-            "coreml_output={}:{}",
-            COREML_BUNDLE_CONTRACT.output_name, COREML_BUNDLE_CONTRACT.output_dtype
-        ),
+        format!("document_prefix={SEMANTIC_PASSAGE_PREFIX}"),
+        format!("language_scope={SEMANTIC_LANGUAGE_SCOPE}"),
     ] {
         assert!(
-            descriptor.contains(&required),
-            "missing descriptor authority: {required}"
+            contract_descriptor.contains(&required),
+            "missing vector-space authority: {required}"
         );
     }
-    for variant in [
-        SemanticOrtModelVariant::CpuFp32,
-        SemanticOrtModelVariant::AcceleratorO4Fp16,
+    for executor_only in [
+        "model_contract=",
+        "variant=",
+        "file=",
+        "backend_variant=",
+        "execution_provider",
+        "coreml_",
+        "artifact_url=",
+        "archive_sha256=",
+        "runtime=",
     ] {
-        for file in variant.required_files() {
-            assert!(descriptor.contains(&format!(
-                "variant={}|file={}:{}:{}",
-                variant.as_str(),
-                file.path,
-                file.size,
-                file.sha256
-            )));
-        }
-    }
-    for backend in [
-        SemanticBackendKind::Cpu,
-        SemanticBackendKind::CoreMl,
-        SemanticBackendKind::OrtCuda,
-        SemanticBackendKind::WindowsMl,
-    ] {
-        assert!(descriptor.contains(&format!(
-            "backend_variant={}:{}:{}",
-            backend.as_str(),
-            backend.execution_provider(),
-            backend.contract_id()
-        )));
+        assert!(
+            !contract_descriptor.contains(executor_only),
+            "executor identity leaked into vector contract: {executor_only}"
+        );
     }
 }
 
 #[test]
 fn e5_query_and_passage_policy_applies_each_role_prefix_exactly_once() {
+    let contract = semantic_model_contract();
+    assert_eq!(
+        contract.query_text("find a daemon failure"),
+        "query: find a daemon failure"
+    );
+    assert_eq!(
+        contract.query_text("  query: find a daemon failure"),
+        "query: find a daemon failure"
+    );
+    assert_eq!(
+        contract.document_text("daemon failed to restart"),
+        "passage: daemon failed to restart"
+    );
+    assert_eq!(
+        contract.document_text("  passage: daemon failed to restart"),
+        "passage: daemon failed to restart"
+    );
     assert_eq!(
         semantic_e5_query_text("find a daemon failure"),
-        "query: find a daemon failure"
+        contract.query_text("find a daemon failure")
     );
     assert_eq!(
         semantic_e5_query_text("  query: find a daemon failure"),
-        "query: find a daemon failure"
+        contract.query_text("  query: find a daemon failure")
     );
     assert_eq!(
         semantic_e5_passage_text("daemon failed to restart"),
-        "passage: daemon failed to restart"
+        contract.document_text("daemon failed to restart")
     );
     assert_eq!(
         semantic_e5_passage_text("  passage: daemon failed to restart"),
-        "passage: daemon failed to restart"
+        contract.document_text("  passage: daemon failed to restart")
     );
 }

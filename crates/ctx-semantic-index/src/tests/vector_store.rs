@@ -60,9 +60,11 @@ fn active_counts(store: &SemanticVectorStore) -> Result<(usize, usize)> {
 fn flat_store_control_catalog_has_no_vectors_or_plaintext() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let root = source_backed_semantic_vector_path(temp.path());
+    let contract = test_contract();
     assert_eq!(root, temp.path().join("search").join("semantic"));
-    let store = SemanticVectorStore::open(&root)?;
+    let store = SemanticVectorStore::open(&root, &contract)?;
 
+    assert_eq!(store.contract(), &contract);
     assert!(root.is_dir());
     assert!(root.join("state.sqlite").is_file());
     assert_eq!(
@@ -82,30 +84,38 @@ fn flat_store_control_catalog_has_no_vectors_or_plaintext() -> Result<()> {
     assert!(!schema.contains("event_embedding"));
     assert!(!schema.contains("chunk_text"));
     assert!(!schema.contains("USING vec"));
+    let read_only = SemanticVectorStore::open_read_only(&root, &contract)?
+        .expect("created semantic store must reopen read-only");
+    assert_eq!(read_only.contract(), &contract);
     Ok(())
 }
 
 #[test]
 fn flat_search_is_unique_deterministic_bounded_and_exact() -> Result<()> {
     let temp = tempfile::tempdir()?;
-    let mut store = SemanticVectorStore::open(&source_backed_semantic_vector_path(temp.path()))?;
+    let contract = test_contract();
+    let mut store =
+        SemanticVectorStore::open(&source_backed_semantic_vector_path(temp.path()), &contract)?;
     let first = Uuid::new_v4();
     let second = Uuid::new_v4();
     let first_chunk = test_chunk_at(first, 2, "first", 0, 2);
     let first_hash = first_chunk.source_text_hash.clone();
     store.publish_chunk_replacements(
         &[
-            (first_chunk, test_embedding(1.0, 0.0)),
+            (first_chunk, test_embedding(&contract, 1.0, 0.0)),
             (
                 test_chunk_at(first, 2, "first", 1, 2),
-                test_embedding(0.8, 0.6),
+                test_embedding(&contract, 0.8, 0.6),
             ),
-            (test_chunk(second, 1, "second"), test_embedding(1.0, 0.0)),
+            (
+                test_chunk(second, 1, "second"),
+                test_embedding(&contract, 1.0, 0.0),
+            ),
         ],
         &[],
     )?;
 
-    let search = exact_search(&store, &test_embedding(1.0, 0.0), 2)?;
+    let search = exact_search(&store, &test_embedding(&contract, 1.0, 0.0), 2)?;
     let mut expected = vec![first, second];
     expected.sort();
     assert_eq!(
@@ -130,7 +140,7 @@ fn flat_search_is_unique_deterministic_bounded_and_exact() -> Result<()> {
     );
     let error = exact_search(
         &store,
-        &test_embedding(1.0, 0.0),
+        &test_embedding(&contract, 1.0, 0.0),
         SEMANTIC_EXACT_TOP_K_MAX + 1,
     )
     .err()
@@ -145,29 +155,34 @@ fn flat_search_is_unique_deterministic_bounded_and_exact() -> Result<()> {
 #[test]
 fn thirty_two_query_vectors_touch_each_flat_chunk_once() -> Result<()> {
     let temp = tempfile::tempdir()?;
-    let mut store = SemanticVectorStore::open(&source_backed_semantic_vector_path(temp.path()))?;
+    let contract = test_contract();
+    let mut store =
+        SemanticVectorStore::open(&source_backed_semantic_vector_path(temp.path()), &contract)?;
     let first = Uuid::new_v4();
     let second = Uuid::new_v4();
     store.publish_chunk_replacements(
         &[
             (
                 test_chunk_at(first, 1, "first", 0, 2),
-                test_embedding(1.0, 0.0),
+                test_embedding(&contract, 1.0, 0.0),
             ),
             (
                 test_chunk_at(first, 1, "first", 1, 2),
-                test_embedding(0.8, 0.6),
+                test_embedding(&contract, 0.8, 0.6),
             ),
-            (test_chunk(second, 2, "second"), test_embedding(0.0, 1.0)),
+            (
+                test_chunk(second, 2, "second"),
+                test_embedding(&contract, 0.0, 1.0),
+            ),
         ],
         &[],
     )?;
     let queries = (0..32)
         .map(|index| {
             if index % 2 == 0 {
-                test_embedding(1.0, 0.0)
+                test_embedding(&contract, 1.0, 0.0)
             } else {
-                test_embedding(0.0, 1.0)
+                test_embedding(&contract, 0.0, 1.0)
             }
         })
         .collect::<Vec<_>>();
@@ -181,7 +196,7 @@ fn thirty_two_query_vectors_touch_each_flat_chunk_once() -> Result<()> {
     assert_eq!(search.stats.dot_products, 96);
     assert_eq!(
         search.stats.vector_bytes_read,
-        3 * SEMANTIC_DIMENSIONS * std::mem::size_of::<f32>()
+        3 * contract.dimensions() * std::mem::size_of::<f32>()
     );
     assert_eq!(
         search
@@ -208,32 +223,36 @@ fn thirty_two_query_vectors_touch_each_flat_chunk_once() -> Result<()> {
 fn flat_rewrite_truncation_delete_and_restart_do_not_resurrect_chunks() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let root = source_backed_semantic_vector_path(temp.path());
+    let contract = test_contract();
     let rewritten = Uuid::new_v4();
     let deleted = Uuid::new_v4();
     let rewritten_chunk = test_chunk(rewritten, 4, "rewrite-new");
     let rewritten_hash = rewritten_chunk.source_text_hash.clone();
     {
-        let mut store = SemanticVectorStore::open(&root)?;
+        let mut store = SemanticVectorStore::open(&root, &contract)?;
         store.publish_chunk_replacements(
             &[
                 (
                     test_chunk_at(rewritten, 4, "rewrite-old", 0, 2),
-                    test_embedding(1.0, 0.0),
+                    test_embedding(&contract, 1.0, 0.0),
                 ),
                 (
                     test_chunk_at(rewritten, 4, "rewrite-old", 1, 2),
-                    test_embedding(1.0, 0.0),
+                    test_embedding(&contract, 1.0, 0.0),
                 ),
                 (
                     test_chunk(deleted, 5, "delete-me"),
-                    test_embedding(0.0, 1.0),
+                    test_embedding(&contract, 0.0, 1.0),
                 ),
             ],
             &[],
         )?;
-        store.publish_chunk_replacements(&[(rewritten_chunk, test_embedding(0.0, 1.0))], &[])?;
+        store.publish_chunk_replacements(
+            &[(rewritten_chunk, test_embedding(&contract, 0.0, 1.0))],
+            &[],
+        )?;
         assert_eq!(active_counts(&store)?, (2, 2));
-        let rewritten_hit = exact_search(&store, &test_embedding(1.0, 0.0), 2)?
+        let rewritten_hit = exact_search(&store, &test_embedding(&contract, 1.0, 0.0), 2)?
             .hits
             .into_iter()
             .find(|hit| hit.event_id == rewritten)
@@ -243,9 +262,9 @@ fn flat_rewrite_truncation_delete_and_restart_do_not_resurrect_chunks() -> Resul
         assert_eq!(store.delete_events(&[deleted])?, 1);
     }
 
-    let store = SemanticVectorStore::open(&root)?;
+    let store = SemanticVectorStore::open(&root, &contract)?;
     assert_eq!(active_counts(&store)?, (1, 1));
-    let hits = exact_search(&store, &test_embedding(1.0, 0.0), 10)?.hits;
+    let hits = exact_search(&store, &test_embedding(&contract, 1.0, 0.0), 10)?.hits;
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].event_id, rewritten);
     assert_eq!(hits[0].similarity, 0.0);
@@ -257,11 +276,12 @@ fn flat_rewrite_truncation_delete_and_restart_do_not_resurrect_chunks() -> Resul
 fn future_control_schema_prevents_writable_flat_recovery_mutation() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let root = source_backed_semantic_vector_path(temp.path());
-    let mut store = SemanticVectorStore::open(&root)?;
+    let contract = test_contract();
+    let mut store = SemanticVectorStore::open(&root, &contract)?;
     store.publish_chunk_replacements(
         &[(
             test_chunk(Uuid::new_v4(), 1, "future-schema"),
-            test_embedding(1.0, 0.0),
+            test_embedding(&contract, 1.0, 0.0),
         )],
         &[],
     )?;
@@ -275,7 +295,7 @@ fn future_control_schema_prevents_writable_flat_recovery_mutation() -> Result<()
     control.pragma_update(None, "user_version", SEMANTIC_VECTOR_SCHEMA_VERSION + 1)?;
     drop(control);
 
-    let error = SemanticVectorStore::open(&root)
+    let error = SemanticVectorStore::open(&root, &contract)
         .err()
         .expect("a future control schema must reject writable open");
     assert_eq!(

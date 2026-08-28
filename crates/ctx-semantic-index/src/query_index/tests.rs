@@ -8,7 +8,7 @@ use ctx_history_core::{
 };
 use ctx_history_index::EventSearchFilters;
 use ctx_history_index::{GenerationWriter, WriterOptions};
-use ctx_semantic_model::SEMANTIC_DIMENSIONS;
+use ctx_semantic_model::semantic_model_contract;
 
 #[test]
 fn semantic_query_boundary_rejects_more_than_32_vectors() {
@@ -87,6 +87,8 @@ fn semantic_filter_is_applied_before_top_k_across_more_than_4096_candidates() ->
     const UNRELATED_EVENTS: u64 = 4_096;
 
     let temp = tempfile::tempdir()?;
+    let contract = semantic_model_contract();
+    let dimensions = contract.dimensions();
     let source = SourceKey::derive(
         "codex",
         "codex_session_jsonl",
@@ -153,9 +155,9 @@ fn semantic_filter_is_applied_before_top_k_across_more_than_4096_candidates() ->
         writer.add_core_record(record)?;
 
         let embedding = if is_target {
-            normalized_test_embedding(0.5, 0.75_f32.sqrt())
+            normalized_test_embedding(dimensions, 0.5, 0.75_f32.sqrt())
         } else {
-            normalized_test_embedding(1.0, 0.0)
+            normalized_test_embedding(dimensions, 1.0, 0.0)
         };
         vector_items.push((
             super::super::vector_store::SemanticChunkDocument {
@@ -187,7 +189,7 @@ fn semantic_filter_is_applied_before_top_k_across_more_than_4096_candidates() ->
     writer.commit(|_| true)?;
     let index = VerifiedIndex::open_pinned(&index_root)?;
 
-    let mut store = SemanticVectorStore::open(&temp.path().join("vectors"))?;
+    let mut store = SemanticVectorStore::open(&temp.path().join("vectors"), contract)?;
     store.publish_chunk_replacements(&vector_items, &[])?;
     let pinned = store
         .flat_pin_generation()?
@@ -208,8 +210,8 @@ fn semantic_filter_is_applied_before_top_k_across_more_than_4096_candidates() ->
         &index,
         &filter,
         &[
-            normalized_test_embedding(0.0, 1.0),
-            normalized_test_embedding(1.0, 0.0),
+            normalized_test_embedding(dimensions, 0.0, 1.0),
+            normalized_test_embedding(dimensions, 1.0, 0.0),
         ],
         1,
     )?;
@@ -236,6 +238,8 @@ fn semantic_filter_is_applied_before_top_k_across_more_than_4096_candidates() ->
 #[test]
 fn semantic_query_scores_only_active_flat_events_that_match_core_metadata() -> Result<()> {
     let temp = tempfile::tempdir()?;
+    let contract = semantic_model_contract();
+    let dimensions = contract.dimensions();
     let source = SourceKey::derive(
         "codex",
         "codex_session_jsonl",
@@ -309,7 +313,7 @@ fn semantic_query_scores_only_active_flat_events_that_match_core_metadata() -> R
                     start_char: 0,
                     end_char: 1,
                 },
-                normalized_test_embedding(1.0, 0.0),
+                normalized_test_embedding(dimensions, 1.0, 0.0),
             ));
         }
     }
@@ -330,7 +334,7 @@ fn semantic_query_scores_only_active_flat_events_that_match_core_metadata() -> R
     writer.commit(|_| true)?;
     let index = VerifiedIndex::open_pinned(&index_root)?;
 
-    let mut store = SemanticVectorStore::open(&temp.path().join("vectors"))?;
+    let mut store = SemanticVectorStore::open(&temp.path().join("vectors"), contract)?;
     store.publish_chunk_replacements(&vector_items, &[])?;
     let pinned = store
         .flat_pin_generation()?
@@ -344,8 +348,12 @@ fn semantic_query_scores_only_active_flat_events_that_match_core_metadata() -> R
         workspace: Some("shared".to_owned()),
         ..EventSearchFilters::default()
     })?;
-    let (candidates, diagnostics) =
-        pin.search(&index, &shared, &[normalized_test_embedding(1.0, 0.0)], 3)?;
+    let (candidates, diagnostics) = pin.search(
+        &index,
+        &shared,
+        &[normalized_test_embedding(dimensions, 1.0, 0.0)],
+        3,
+    )?;
     assert_eq!(candidates.len(), 1);
     assert_eq!(
         candidates[0].event.event_id,
@@ -360,7 +368,7 @@ fn semantic_query_scores_only_active_flat_events_that_match_core_metadata() -> R
     let (candidates, diagnostics) = pin.search(
         &index,
         &filtered_only,
-        &[normalized_test_embedding(1.0, 0.0)],
+        &[normalized_test_embedding(dimensions, 1.0, 0.0)],
         3,
     )?;
     assert!(candidates.is_empty());
@@ -368,8 +376,8 @@ fn semantic_query_scores_only_active_flat_events_that_match_core_metadata() -> R
     Ok(())
 }
 
-fn normalized_test_embedding(first: f32, second: f32) -> Vec<f32> {
-    let mut embedding = vec![0.0; SEMANTIC_DIMENSIONS];
+fn normalized_test_embedding(dimensions: usize, first: f32, second: f32) -> Vec<f32> {
+    let mut embedding = vec![0.0; dimensions];
     let norm = first.mul_add(first, second * second).sqrt();
     embedding[0] = first / norm;
     embedding[1] = second / norm;

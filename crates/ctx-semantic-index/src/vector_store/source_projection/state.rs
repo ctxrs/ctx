@@ -1,16 +1,18 @@
 use std::collections::BTreeMap;
 
 use anyhow::Result;
-use ctx_history_index::SourceCoreRecordAggregate;
+use ctx_history_index::{SemanticGenerationPolicy, SourceCoreRecordAggregate, VerifiedIndex};
+use ctx_semantic_model::SemanticModelContract;
 use rusqlite::{params, OptionalExtension, Transaction};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 use super::manifest::{
     semantic_policy_fingerprint, source_consumer_build_id, source_contract_fingerprint,
-    validate_generation_id, AcknowledgedSourceProjection, SourceProjectionAcknowledgement,
-    SourceProjectionFrontier, SourceTraversalPhase, SOURCE_ACKNOWLEDGEMENT_STATE,
-    SOURCE_CONTRACT_VERSION, SOURCE_FRONTIER_STATE,
+    trusted_legacy_source_contract_fingerprint, validate_generation_id,
+    AcknowledgedSourceProjection, SourceProjectionAcknowledgement, SourceProjectionFrontier,
+    SourceTraversalPhase, SOURCE_ACKNOWLEDGEMENT_STATE, SOURCE_CONTRACT_VERSION,
+    SOURCE_FRONTIER_STATE,
 };
 use super::{
     SemanticVectorStore, SourceBackedGenerationPin, SourceBackedSemanticGeneration,
@@ -54,7 +56,52 @@ pub(super) fn source_receipt_matches(
             == Some(receipt.semantic_eligible_documents)
 }
 
+pub(super) fn source_receipt_allows_vector_reuse(
+    receipt: &FlatSourceReceipt,
+    generation: &SourceBackedSemanticGeneration,
+) -> bool {
+    receipt.semantic_policy_fingerprint == generation.semantic_policy_fingerprint
+        && (receipt.contract_fingerprint == generation.contract_fingerprint
+            || generation.trusted_legacy_contract_fingerprint.as_deref()
+                == Some(receipt.contract_fingerprint.as_str()))
+}
+
+impl SourceBackedSemanticGeneration {
+    pub(super) fn from_verified_index_with_policy(
+        index: &VerifiedIndex,
+        semantic_policy: SemanticGenerationPolicy,
+        model_contract: &SemanticModelContract,
+    ) -> Result<Self> {
+        let mut generation = Self::from_verified_index_with_authority(
+            index,
+            semantic_policy,
+            model_contract.descriptor().to_owned(),
+        )?;
+        generation.trusted_legacy_contract_fingerprint =
+            trusted_legacy_source_contract_fingerprint(
+                model_contract,
+                &generation.semantic_policy_fingerprint,
+            )?;
+        Ok(generation)
+    }
+}
+
 impl SemanticVectorStore {
+    pub(crate) fn record_flat_model_contract_reset(&self) -> Result<()> {
+        let transaction = self.conn.unchecked_transaction()?;
+        transaction.execute(
+            "INSERT INTO semantic_maintenance_state(key, value) VALUES (?1, 'true')
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [FULL_REBUILD_STATE],
+        )?;
+        transaction.execute(
+            "DELETE FROM semantic_maintenance_state WHERE key IN (?1, ?2)",
+            [SOURCE_FRONTIER_STATE, SOURCE_ACKNOWLEDGEMENT_STATE],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub(super) fn source_frontier(&self) -> Result<Option<SourceProjectionFrontier>> {
         self.maintenance_json(SOURCE_FRONTIER_STATE)
     }
@@ -410,10 +457,10 @@ impl SemanticVectorStore {
         if self.source_frontier()?.is_some() {
             return Ok(None);
         }
-        let fingerprint = expected_contract_fingerprint
-            .map(str::to_owned)
-            .map(Ok)
-            .unwrap_or_else(source_contract_fingerprint)?;
+        let fingerprint = match expected_contract_fingerprint {
+            Some(fingerprint) => fingerprint.to_owned(),
+            None => source_contract_fingerprint(self.contract())?,
+        };
         if acknowledgement.contract_version != SOURCE_CONTRACT_VERSION
             || acknowledgement.contract_fingerprint != fingerprint
             || acknowledgement.core_generation_id != core_generation_id

@@ -15,6 +15,7 @@ mod vector_store_schema;
 mod vector_store_search;
 mod vector_store_state;
 
+pub use ctx_semantic_model::{semantic_model_contract, SemanticModelContract};
 pub use document::SemanticEventDocument;
 pub use query_index::{SemanticNotReady, SemanticQueryPin};
 pub use source_document::SourceBackedSemanticDocumentBuilder;
@@ -35,7 +36,7 @@ pub mod test_support {
         query_index::SemanticQueryPin,
         vector_store::{flat_segments::PinnedFlatGeneration, SemanticChunkDocument},
         vector_store_schema::SemanticVectorStoreError,
-        SemanticVectorStore, SourceBackedGenerationPin,
+        SemanticModelContract, SemanticVectorStore, SourceBackedGenerationPin,
     };
 
     #[allow(clippy::too_many_arguments)]
@@ -100,8 +101,11 @@ pub mod test_support {
         super::vector_store_schema::SEMANTIC_VECTOR_SCHEMA_VERSION
     }
 
-    pub fn seed_filter_unaware_derived_state(root: &std::path::Path) -> Result<()> {
-        super::vector_store::seed_filter_unaware_derived_state(root)
+    pub fn seed_filter_unaware_derived_state(
+        root: &std::path::Path,
+        contract: &SemanticModelContract,
+    ) -> Result<()> {
+        super::vector_store::seed_filter_unaware_derived_state(root, contract)
     }
 }
 

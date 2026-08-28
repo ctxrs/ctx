@@ -454,11 +454,11 @@ pub(super) trait SemanticContractCanaryExecutor {
 #[cfg(ctx_semantic_fastembed)]
 impl SemanticContractCanaryExecutor for SemanticEmbedder {
     fn embed_canary_query(&mut self, text: &str) -> Result<Vec<f32>> {
-        self.embed_query(text.to_owned())
+        self.embed_prepared_query(semantic_e5_query_text(text))
     }
 
     fn embed_canary_passage(&mut self, text: &str) -> Result<Vec<f32>> {
-        self.embed_documents(vec![text.to_owned()])?
+        self.embed_prepared_documents(vec![semantic_e5_passage_text(text)])?
             .pop()
             .ok_or_else(|| anyhow!("semantic canary document embedding is missing"))
     }
@@ -484,10 +484,7 @@ pub(super) fn run_semantic_contract_canary(
 }
 
 fn model_fingerprint() -> String {
-    format!(
-        "sha256:{:x}",
-        Sha256::digest(semantic_model_contract_descriptor().as_bytes())
-    )
+    semantic_model_contract_fingerprint()
 }
 
 fn backend_fingerprint(
@@ -556,9 +553,9 @@ use crate::{
     configuration::{SemanticBackendPreference, SemanticModelConfig},
     health_search::{semantic_embed_policy_for, SemanticEmbedPolicy},
     model_contract::{
-        semantic_model_contract_descriptor, SemanticBackendKind, SemanticOrtModelVariant,
-        SemanticProvisioningRequired, SEMANTIC_CONTRACT_CANARY_TEXT, SEMANTIC_MAX_SEQUENCE_LENGTH,
-        SEMANTIC_MODEL_ID,
+        semantic_e5_passage_text, semantic_e5_query_text, semantic_model_contract_fingerprint,
+        SemanticBackendKind, SemanticOrtModelVariant, SemanticProvisioningRequired,
+        SEMANTIC_CONTRACT_CANARY_TEXT, SEMANTIC_MAX_SEQUENCE_LENGTH, SEMANTIC_MODEL_ID,
     },
     resource_policy::{semantic_cpu_model_load_deferred, SemanticComputeClass},
 };
