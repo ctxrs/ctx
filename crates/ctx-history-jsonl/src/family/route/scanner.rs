@@ -205,12 +205,11 @@ impl JsonlFamilySemanticPage {
     }
 
     /// Splits projected records into publication pages without changing their
-    /// order, fitting an oversized individual record to the shared
-    /// identity-preserving omission policy before calculating page bounds.
+    /// order. The byte limit is an aggregate rollover target: one valid Core
+    /// record may exceed it, but that record is published alone.
     pub fn split_bounded<E: JsonlFamilyError>(
-        mut records: Vec<CoreRecord>,
+        records: Vec<CoreRecord>,
     ) -> JsonlResult<Vec<Self>, E> {
-        fit_semantic_page_records::<E>(&mut records)?;
         let encoded_lengths = semantic_record_encoded_lengths::<E>(&records)?;
         let ranges = bounded_semantic_page_ranges::<E>(&encoded_lengths)?;
         let mut records = records.into_iter();
@@ -239,23 +238,13 @@ impl JsonlFamilySemanticPage {
         let encoded_bytes = checked_semantic_page_byte_total::<E>(
             semantic_record_encoded_lengths::<E>(&self.records)?,
         )?;
-        if encoded_bytes > PAGE_MAX_BYTES {
+        if encoded_bytes > PAGE_MAX_BYTES && self.records.len() != 1 {
             return Err(E::invalid_payload(format!(
-                "JSONL semantic page exceeds the {PAGE_MAX_BYTES} byte limit"
+                "JSONL aggregate semantic page exceeds the {PAGE_MAX_BYTES} byte target"
             )));
         }
         Ok(self.records)
     }
-}
-
-fn fit_semantic_page_records<E: JsonlFamilyError>(
-    records: &mut [CoreRecord],
-) -> JsonlResult<(), E> {
-    for record in records {
-        crate::fit_jsonl_semantic_page_record(record)
-            .map_err(|error| E::invalid_payload(error.to_string()))?;
-    }
-    Ok(())
 }
 
 fn semantic_record_encoded_lengths<E: JsonlFamilyError>(
@@ -278,12 +267,11 @@ fn bounded_semantic_page_ranges<E: JsonlFamilyError>(
     let mut page_start = 0_usize;
     let mut page_bytes = 0_usize;
     for (index, &encoded_length) in encoded_lengths.iter().enumerate() {
-        if encoded_length > PAGE_MAX_BYTES {
-            return Err(E::invalid_payload(format!(
-                "JSONL semantic record exceeds the {PAGE_MAX_BYTES} byte limit after fitting"
-            )));
-        }
         let page_records = index.saturating_sub(page_start);
+        if page_records == 0 {
+            page_bytes = encoded_length;
+            continue;
+        }
         let next_page_bytes = page_bytes.checked_add(encoded_length).ok_or_else(|| {
             E::invalid_payload("JSONL semantic page byte count overflowed".to_owned())
         })?;
@@ -396,17 +384,24 @@ mod semantic_page_bound_tests {
             .unwrap(),
             [0..1, 1..2]
         );
-        assert!(bounded_semantic_page_ranges::<SourceIoError>(&[PAGE_MAX_BYTES + 1]).is_err());
+        let oversized_singleton =
+            bounded_semantic_page_ranges::<SourceIoError>(&[PAGE_MAX_BYTES + 1]).unwrap();
+        assert_eq!(oversized_singleton.len(), 1);
+        assert_eq!(oversized_singleton[0], 0..1);
+        assert_eq!(
+            bounded_semantic_page_ranges::<SourceIoError>(&[1, PAGE_MAX_BYTES + 1, 1]).unwrap(),
+            [0..1, 1..2, 2..3]
+        );
         let empty = bounded_semantic_page_ranges::<SourceIoError>(&[]).unwrap();
         assert_eq!(empty.len(), 1);
         assert_eq!(empty[0], 0..0);
     }
 
     #[test]
-    fn exact_cap_record_is_selected_but_cap_plus_one_is_identity_preserving_omitted() {
+    fn exact_cap_and_larger_records_remain_selected() {
         let source = source();
-        let mut exact = record_at_exact_encoded_size(&source, 1, PAGE_MAX_BYTES);
-        let mut oversized = record_at_exact_encoded_size(&source, 2, PAGE_MAX_BYTES + 1);
+        let exact = record_at_exact_encoded_size(&source, 1, PAGE_MAX_BYTES);
+        let oversized = record_at_exact_encoded_size(&source, 2, PAGE_MAX_BYTES + 1);
         let expected_identity = (
             oversized.event_id,
             oversized.session_id,
@@ -415,11 +410,17 @@ mod semantic_page_bound_tests {
             oversized.event_type.clone(),
             oversized.parser_revision.clone(),
         );
+        let pages = JsonlFamilySemanticPage::split_bounded::<SourceIoError>(vec![
+            exact.clone(),
+            oversized.clone(),
+        ])
+        .unwrap();
 
-        crate::fit_jsonl_semantic_page_record(&mut exact).unwrap();
-        crate::fit_jsonl_semantic_page_record(&mut oversized).unwrap();
-
+        assert_eq!(pages.len(), 2);
+        assert_eq!(pages[0].records(), std::slice::from_ref(&exact));
+        assert_eq!(pages[1].records(), std::slice::from_ref(&oversized));
         assert_eq!(exact.encoded_json_len().unwrap(), PAGE_MAX_BYTES);
+        assert_eq!(oversized.encoded_json_len().unwrap(), PAGE_MAX_BYTES + 1);
         assert!(matches!(
             exact.content.policy_status,
             ctx_history_core::CoreContentPolicyStatus::Selected
@@ -436,19 +437,13 @@ mod semantic_page_bound_tests {
             expected_identity
         );
         assert!(matches!(
-            &oversized.content.policy_status,
-            ctx_history_core::CoreContentPolicyStatus::Omitted { reason }
-                if reason == crate::JSONL_SEMANTIC_PAGE_CONTENT_OMISSION_REASON
+            oversized.content.policy_status,
+            ctx_history_core::CoreContentPolicyStatus::Selected
         ));
-        assert!(oversized.content.normalized_body.is_none());
-        assert!(oversized.content.structured_content.is_none());
-        assert!(oversized.content.discovery_exclusion.is_none());
-        assert!(oversized.content.activity.is_none());
-        assert!(oversized.encoded_json_len().unwrap() <= PAGE_MAX_BYTES);
     }
 
     #[test]
-    fn fitting_preserves_valid_siblings_and_is_deterministic() {
+    fn oversized_singleton_preserves_siblings_and_is_deterministic() {
         let source = source();
         let before = record(&source, 1, "before".to_owned());
         let oversized = record_at_exact_encoded_size(&source, 2, PAGE_MAX_BYTES + 1);
@@ -481,17 +476,23 @@ mod semantic_page_bound_tests {
             expected_ids
         );
         assert_eq!(first_records, replay_records);
+        assert_eq!(first.len(), 3);
         assert_eq!(
             first_records[0].content.normalized_body.as_deref(),
             Some("before")
         );
         assert_eq!(
+            first_records[1].encoded_json_len().unwrap(),
+            PAGE_MAX_BYTES + 1
+        );
+        assert!(matches!(
+            first_records[1].content.policy_status,
+            ctx_history_core::CoreContentPolicyStatus::Selected
+        ));
+        assert_eq!(
             first_records[2].content.normalized_body.as_deref(),
             Some("after")
         );
-        let mut fitted_twice = first_records[1].clone();
-        crate::fit_jsonl_semantic_page_record(&mut fitted_twice).unwrap();
-        assert_eq!(fitted_twice, *first_records[1]);
     }
 
     #[test]

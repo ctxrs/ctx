@@ -17,7 +17,7 @@ use ctx_history_core::{
 };
 use ctx_history_index::{GenerationWriter, RevalidationTarget, WriterOptions};
 
-const CURRENT_PARSER_REVISION: &str = "codex-nativepath-core-activity-v11-jsonl-page-omission";
+const CURRENT_PARSER_REVISION: &str = "codex-nativepath-core-activity-v10-item-completed-plan";
 
 #[path = "codex_child_independence/quarantine.rs"]
 mod quarantine;

@@ -53,9 +53,6 @@ impl<'emit, E: JsonlFamilyError> JsonlLeafOutput<'emit, E> {
     }
 
     pub(crate) fn emit_record(&mut self, append: bool, record: CoreRecord) -> JsonlResult<(), E> {
-        let mut record = record;
-        crate::fit_jsonl_semantic_page_record(&mut record)
-            .map_err(|error| E::invalid_payload(error.to_string()))?;
         (self.emit)(JsonlLeafOutputEvent::Record { append, record })
     }
 
@@ -172,5 +169,38 @@ mod tests {
                 .sum::<usize>(),
             65
         );
+    }
+
+    #[test]
+    fn ordinary_record_is_not_subject_to_the_semantic_page_limit() {
+        let mut emissions = Vec::new();
+        let mut emit = |event| {
+            emissions.push(event);
+            Ok(())
+        };
+        let mut output = JsonlLeafOutput::<SourceIoError>::new(&mut emit);
+        let base = record(0);
+        let oversized = CoreRecord::new_selected(
+            base.event_id,
+            base.session_id,
+            base.source,
+            0,
+            "event",
+            "jsonl-ordinary-record-output-test-v1",
+            "x".repeat(crate::family::PAGE_MAX_BYTES + 1),
+        )
+        .unwrap();
+        assert!(oversized.encoded_json_len().unwrap() > crate::family::PAGE_MAX_BYTES);
+
+        output.emit_record(false, oversized.clone()).unwrap();
+
+        let [JsonlLeafOutputEvent::Record { record, .. }] = emissions.as_slice() else {
+            panic!("ordinary publication must emit one record event")
+        };
+        assert_eq!(record, &oversized);
+        assert!(matches!(
+            record.content.policy_status,
+            ctx_history_core::CoreContentPolicyStatus::Selected
+        ));
     }
 }

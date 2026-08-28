@@ -10,7 +10,7 @@ fn codex_inline_image_over_page_limit_does_not_fail_route() {
     let call_id = "inline-image-result";
     let before_marker = "inline-image-sibling-before";
     let after_marker = "inline-image-sibling-after";
-    let omitted_marker = "inline-image-content-omitted";
+    let content_marker = "inline-image-content-retained";
     let image_url = format!("data:image/png;base64,{}", "A".repeat(9 * 1024 * 1024));
     write_session(
         &sessions,
@@ -23,7 +23,7 @@ fn codex_inline_image_over_page_limit_does_not_fail_route() {
             custom_tool_result_value(
                 call_id,
                 serde_json::json!([
-                    {"type": "input_text", "text": omitted_marker},
+                    {"type": "input_text", "text": content_marker},
                     {"type": "input_image", "image_url": image_url}
                 ]),
             ),
@@ -41,31 +41,37 @@ fn codex_inline_image_over_page_limit_does_not_fail_route() {
     let index = VerifiedIndex::open(&index_root).unwrap();
     let records = records_for(&index, native_session_id);
     assert_eq!(records.len(), 4);
-    let omitted = records
+    let oversized = records
         .iter()
         .find(|record| {
-            matches!(
-                &record.content.policy_status,
-                ctx_history_core::CoreContentPolicyStatus::Omitted { reason }
-                    if reason == "ctx-jsonl-semantic-page-content-omitted-v1"
-            )
+            record
+                .content
+                .normalized_body
+                .as_deref()
+                .is_some_and(|body| body.contains(content_marker))
         })
-        .expect("the oversized tool result must remain as an omitted Core record");
+        .expect("the oversized tool result must remain a complete Core record");
     assert_eq!(
-        omitted.provider_session_id.as_deref(),
+        oversized.provider_session_id.as_deref(),
         Some(native_session_id)
     );
-    assert_eq!(omitted.parser_revision, CURRENT_PARSER_REVISION);
-    assert!(omitted.native_event_id.is_some());
-    assert!(omitted.content.normalized_body.is_none());
-    assert!(omitted.content.structured_content.is_none());
-    assert!(omitted.content.discovery_exclusion.is_none());
-    assert!(omitted.content.activity.is_none());
-    let omitted_record = omitted.clone();
-    assert!(!source_records_contain(
+    assert_eq!(oversized.parser_revision, CURRENT_PARSER_REVISION);
+    assert!(oversized.native_event_id.is_some());
+    assert!(matches!(
+        oversized.content.policy_status,
+        ctx_history_core::CoreContentPolicyStatus::Selected
+    ));
+    assert!(oversized
+        .content
+        .normalized_body
+        .as_ref()
+        .is_some_and(|body| body.len() > 9 * 1024 * 1024));
+    assert!(oversized.encoded_json_len().unwrap() > 8 * 1024 * 1024);
+    let oversized_record = oversized.clone();
+    assert!(source_records_contain(
         &index,
         native_session_id,
-        omitted_marker
+        content_marker
     ));
     for marker in [before_marker, after_marker] {
         assert!(
@@ -86,18 +92,16 @@ fn codex_inline_image_over_page_limit_does_not_fail_route() {
     let replayed_index = VerifiedIndex::open(&index_root).unwrap();
     assert_eq!(
         replayed_index
-            .core_record_by_id(omitted_record.event_id.as_uuid())
+            .core_record_by_id(oversized_record.event_id.as_uuid())
             .unwrap()
             .as_ref(),
-        Some(&omitted_record)
+        Some(&oversized_record)
     );
-    assert!(records_for(&replayed_index, native_session_id)
-        .iter()
-        .any(|record| matches!(
-            &record.content.policy_status,
-            ctx_history_core::CoreContentPolicyStatus::Omitted { reason }
-                if reason == "ctx-jsonl-semantic-page-content-omitted-v1"
-        )));
+    assert!(source_records_contain(
+        &replayed_index,
+        native_session_id,
+        content_marker
+    ));
 }
 
 #[test]
