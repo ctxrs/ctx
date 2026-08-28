@@ -13,7 +13,10 @@ use thiserror::Error;
 
 use super::super::{firebender_event_parts, firebender_message_time, firebender_result_content};
 use super::FirebenderRow;
-use crate::{native_source::NativeSqliteValue, CaptureError, FIREBENDER_SQLITE_SOURCE_FORMAT};
+use crate::{
+    native_source::NativeSqliteValue, provider_sources::SqliteSourceAccessError, CaptureError,
+    FIREBENDER_SQLITE_SOURCE_FORMAT,
+};
 
 mod direct;
 mod direct_snapshot;
@@ -33,6 +36,8 @@ pub(super) const FIREBENDER_SOURCE_SCHEMA_VARIANT: &str = "firebender-chat-sessi
 pub(crate) enum FirebenderSourceBackedError {
     #[error(transparent)]
     Capture(#[from] CaptureError),
+    #[error(transparent)]
+    SqliteSource(#[from] SqliteSourceAccessError),
     #[error(transparent)]
     Projection(#[from] ProjectionContractError),
     #[error(transparent)]

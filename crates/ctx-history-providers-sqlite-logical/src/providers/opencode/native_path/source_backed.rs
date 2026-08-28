@@ -37,7 +37,7 @@ use crate::{
         retain_sqlite_source_directory_authority, sqlite_retry_decision, SqliteArtifactKind,
         SqliteCleanupStatus, SqliteFailurePhase, SqliteLogicalSnapshot, SqliteRetryDecision,
         SqliteSourceAccessError, SqliteSourceDirectoryAuthority, SqliteSourceErrorComposition,
-        SqliteSourceProgressError, SqliteSourceReadSnapshot,
+        SqliteSourceProgressError, SqliteSourceReadSnapshot, SqliteSourceTerminalFence,
     },
     CaptureError, MAX_PROVIDER_SQLITE_VALUE_BYTES,
 };
@@ -154,6 +154,8 @@ pub(crate) const fn opencode_family_source_backed_registrations(
 pub(crate) struct OpenCodeSourceBackedScan {
     pub(crate) source: SourceKey,
     pub(crate) certificate: CertifiedSource,
+    terminal_fence: SqliteSourceTerminalFence,
+    #[cfg_attr(not(test), allow(dead_code))]
     bounds: OpenCodeScanBounds,
 }
 
@@ -216,7 +218,9 @@ struct OpenCodeLogicalObservation {
 
 #[derive(Debug)]
 struct OpenCodeAuthorizedSnapshot {
+    #[cfg_attr(not(test), allow(dead_code))]
     source_root: ProviderSourceRoot,
+    #[cfg_attr(not(test), allow(dead_code))]
     sqlite_authority: SqliteSourceDirectoryAuthority,
     sqlite_snapshot: SqliteSourceReadSnapshot,
 }
@@ -325,11 +329,12 @@ fn scan_pinned_source_with_scratch_limit(
         Ok(working) => working,
         Err(error) => return Err(adapter::abort_opencode_snapshot(sqlite_snapshot, error)),
     };
-    sqlite_snapshot.finish()?;
+    let terminal_fence = sqlite_snapshot.seal()?;
     let certificate = working.logical_snapshot.certify(working.source.clone())?;
     Ok(OpenCodeSourceBackedScan {
         source: working.source,
         certificate,
+        terminal_fence,
         bounds: working.bounds,
     })
 }

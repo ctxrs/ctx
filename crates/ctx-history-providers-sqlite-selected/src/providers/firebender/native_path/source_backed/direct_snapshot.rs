@@ -12,6 +12,7 @@ use crate::{
     provider_sources::{
         open_root_handle_sqlite_source_snapshot, retain_sqlite_source_directory_authority,
         SqliteSourceDirectoryAuthority, SqliteSourceEvidence, SqliteSourceReadSnapshot,
+        SqliteSourceTerminalFence,
     },
     CaptureError,
 };
@@ -96,7 +97,7 @@ impl OpenedSnapshot {
                 CaptureError::SystemInvariant("Firebender SQLite snapshot is inactive"),
             ))?
             .connection()
-            .map_err(|error| CaptureError::InvalidPayload(error.to_string()).into())
+            .map_err(Into::into)
     }
 
     pub(super) fn evidence(&self) -> FirebenderSourceBackedResult<&SqliteSourceEvidence> {
@@ -109,25 +110,6 @@ impl OpenedSnapshot {
             .evidence())
     }
 
-    pub(super) fn terminal_revalidator(
-        &self,
-    ) -> FirebenderSourceBackedResult<
-        Box<
-            dyn Fn() -> Result<(), crate::provider_sources::SqliteSourceAccessError>
-                + Send
-                + Sync
-                + 'static,
-        >,
-    > {
-        Ok(self
-            .snapshot
-            .as_ref()
-            .ok_or(FirebenderSourceBackedError::Capture(
-                CaptureError::SystemInvariant("Firebender SQLite snapshot is inactive"),
-            ))?
-            .terminal_revalidator())
-    }
-
     pub(super) fn sqlite_authority(&self) -> SqliteSourceDirectoryAuthority {
         self.authority.clone()
     }
@@ -138,26 +120,26 @@ impl OpenedSnapshot {
             .ok_or(FirebenderSourceBackedError::Capture(
                 CaptureError::SystemInvariant("Firebender SQLite snapshot is inactive"),
             ))?
-            .revalidate()
-            .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
+            .revalidate()?;
         self.directory.revalidate()?;
         self.root.revalidate()?;
         Ok(())
     }
 
-    pub(super) fn finish(mut self) -> FirebenderSourceBackedResult<SqliteSourceEvidence> {
+    pub(super) fn seal(
+        mut self,
+    ) -> FirebenderSourceBackedResult<(SqliteSourceTerminalFence, SqliteSourceEvidence)> {
         let snapshot = self
             .snapshot
             .take()
             .ok_or(FirebenderSourceBackedError::Capture(
                 CaptureError::SystemInvariant("Firebender SQLite snapshot is inactive"),
             ))?;
-        let evidence = snapshot
-            .finish()
-            .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
+        let terminal_fence = snapshot.seal()?;
+        let evidence = terminal_fence.evidence().clone();
         self.directory.revalidate()?;
         self.root.revalidate()?;
-        Ok(evidence)
+        Ok((terminal_fence, evidence))
     }
 }
 
@@ -171,13 +153,9 @@ fn open_snapshot_from_authority(
     let handle = directory
         .try_clone_authority_handle()
         .map_err(CaptureError::Io)?;
-    let authority = retain_sqlite_source_directory_authority(data_root, &handle, parent)
-        .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
-    let snapshot = open_root_handle_sqlite_source_snapshot(&authority, leaf)
-        .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
-    snapshot
-        .revalidate()
-        .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
+    let authority = retain_sqlite_source_directory_authority(data_root, &handle, parent)?;
+    let snapshot = open_root_handle_sqlite_source_snapshot(&authority, leaf)?;
+    snapshot.revalidate()?;
     directory.revalidate()?;
     root.revalidate()?;
     Ok(OpenedSnapshot {

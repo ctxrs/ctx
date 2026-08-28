@@ -8,10 +8,6 @@ use std::{
 use ctx_history_core::{CaptureProvider, SourceAnchorScope, SourceKey};
 use sha2::{Digest, Sha256};
 
-use super::ordering::{
-    OPENCODE_HYDRATION_BATCH_BYTES, OPENCODE_HYDRATION_BATCH_ROWS,
-    OPENCODE_HYDRATION_SINGLETON_MAX_BYTES,
-};
 use super::{
     observe_logical_source_with_progress_scoped,
     open_root_authorized_snapshot_retained_with_progress,
@@ -30,8 +26,8 @@ use crate::{
         SourceBackedRouteError, SourceBackedRouteErrorKind, SourceBackedRouteResult,
     },
     provider_sources::{
-        SqliteSourceAccessError, SqliteSourceDirectoryAuthority, SqliteSourceEvidence,
-        SqliteSourceReadSnapshot,
+        SqliteSourceAccessError, SqliteSourceEvidence, SqliteSourceReadSnapshot,
+        SqliteSourceTerminalFence,
     },
     CaptureError, ProviderSource,
 };
@@ -57,56 +53,11 @@ pub enum OpenCodeTreeAuthority {
 
 pub struct OpenCodeDocumentLeaf {
     observation: OpenCodeLogicalObservation,
-    source_root: ProviderSourceRoot,
-    sqlite_authority: SqliteSourceDirectoryAuthority,
     snapshot: Mutex<Option<SqliteSourceReadSnapshot>>,
-    terminal_revalidate:
-        Box<dyn Fn() -> Result<(), SqliteSourceAccessError> + Send + Sync + 'static>,
-    work: Mutex<OpenCodeSqliteWorkCounters>,
+    terminal_fence: Mutex<Option<SqliteSourceTerminalFence>>,
 }
 
 type OpenCodeDocumentTree = CompleteDocumentTree<OpenCodeDocumentLeaf, OpenCodeTreeAuthority>;
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(super) struct OpenCodeSqliteWorkCounters {
-    pub(super) snapshot_opens: u64,
-    pub(super) immutable_snapshot_opens: u64,
-    pub(super) copied_snapshot_opens: u64,
-    pub(super) source_bytes_copied: u64,
-    pub(super) schema_probe_passes: u64,
-    pub(super) schema_event_validation_traversals: u64,
-    pub(super) logical_fingerprint_passes: u64,
-    pub(super) logical_row_traversals: u64,
-    pub(super) projection_passes: u64,
-    pub(super) logical_rows_projected: u64,
-    pub(super) documents_staged: u64,
-    pub(super) max_buffered_documents: u64,
-    pub(super) session_rows_scanned: u64,
-    pub(super) session_metadata_loads: u64,
-    pub(super) max_buffered_session_metadata: u64,
-    pub(super) max_session_ancestry_depth: u64,
-    pub(super) fallback_payload_hydrations: u64,
-    pub(super) max_buffered_payload_rows: u64,
-    pub(super) fallback_disk_sort: bool,
-    pub(super) fallback_sort_rows: u64,
-    pub(super) fallback_scratch_bytes: u64,
-    pub(super) ordering_data_statements: u64,
-    pub(super) ordering_sort_key_batches: u64,
-    pub(super) ordering_hydration_batches: u64,
-    pub(super) max_sort_key_batch_rows: u64,
-    pub(super) max_buffered_payload_bytes: u64,
-    pub(super) exact_replays: u64,
-    pub(super) terminal_fences: u64,
-    pub(super) terminal_revalidations: u64,
-    pub(super) active_snapshots: u64,
-    pub(super) max_active_snapshots: u64,
-}
-
-#[cfg(test)]
-thread_local! {
-    static LAST_WORK_COUNTERS: std::cell::RefCell<Option<OpenCodeSqliteWorkCounters>> =
-        const { std::cell::RefCell::new(None) };
-}
 
 impl<B: crate::LogicalSqliteRuntimeBinding> ReplacementDocumentTree
     for OpenCodeDocumentTreeAdapter<B>
@@ -194,32 +145,7 @@ impl<B: crate::LogicalSqliteRuntimeBinding> ReplacementDocumentTree
                 "OpenCode-family projection did not match its logical observation",
             ));
         }
-        {
-            let mut work = leaf
-                .work
-                .lock()
-                .map_err(|_| source_internal("OpenCode-family work counter lock was poisoned"))?;
-            work.projection_passes = 1;
-            work.logical_row_traversals = 1;
-            work.logical_rows_projected = scan.certificate.counts().complete_records;
-            work.documents_staged = scan.certificate.counts().indexed_documents;
-            work.max_buffered_documents =
-                u64::from(scan.certificate.counts().indexed_documents != 0);
-            work.session_rows_scanned = scan.bounds.session_rows_scanned;
-            work.session_metadata_loads = scan.bounds.session_metadata_loads;
-            work.max_buffered_session_metadata = scan.bounds.max_buffered_session_metadata;
-            work.max_session_ancestry_depth = scan.bounds.max_session_ancestry_depth;
-            work.fallback_payload_hydrations = scan.bounds.fallback_payload_hydrations;
-            work.max_buffered_payload_rows = scan.bounds.max_buffered_payload_rows;
-            work.fallback_disk_sort = scan.bounds.fallback_disk_sort;
-            work.fallback_sort_rows = scan.bounds.fallback_sort_rows;
-            work.fallback_scratch_bytes = scan.bounds.fallback_scratch_bytes;
-            work.ordering_data_statements = scan.bounds.ordering_data_statements;
-            work.ordering_sort_key_batches = scan.bounds.ordering_sort_key_batches;
-            work.ordering_hydration_batches = scan.bounds.ordering_hydration_batches;
-            work.max_sort_key_batch_rows = scan.bounds.max_sort_key_batch_rows;
-            work.max_buffered_payload_bytes = scan.bounds.max_buffered_payload_bytes;
-        }
+        install_terminal_fence(leaf, scan.terminal_fence)?;
         let observation = scan.certificate.observation().clone();
         Ok(DocumentSourceTerminal {
             source: scan.source,
@@ -243,24 +169,18 @@ impl<B: crate::LogicalSqliteRuntimeBinding> ReplacementDocumentTree
                     ));
                 };
                 let leaf = &observed.provider_leaf;
-                let exact_replay = if let Some(snapshot) = leaf
+                if let Some(snapshot) = leaf
                     .snapshot
                     .lock()
                     .map_err(|_| source_internal("OpenCode-family snapshot lock was poisoned"))?
                     .take()
                 {
-                    snapshot
-                        .finish()
-                        .map_err(|error| route_error(error.into()))?;
-                    true
-                } else {
-                    false
-                };
-                leaf.source_root
-                    .revalidate_same_object()
+                    let fence = snapshot.seal().map_err(|error| route_error(error.into()))?;
+                    install_terminal_fence(leaf, fence)?;
+                }
+                retained_terminal_fence(leaf)?
+                    .revalidate()
                     .map_err(|error| route_error(error.into()))?;
-                (leaf.terminal_revalidate)().map_err(|error| route_error(error.into()))?;
-                finalize_work_counters(leaf, exact_replay)?;
                 Ok(tree.tree_fingerprint)
             }
             OpenCodeTreeAuthority::Missing {
@@ -369,7 +289,6 @@ fn observe_present_document_tree_with_progress(
         Ok(observation) => observation,
         Err(error) => return Err(abort_authorized_snapshot(authorized, error)),
     };
-    let terminal_revalidate = authorized.sqlite_snapshot.terminal_revalidator();
     let leaf_fingerprint = DocumentLeafFingerprint::new(admitted_leaf_fingerprint(
         &observation.source,
         authorized.sqlite_snapshot.evidence(),
@@ -377,7 +296,6 @@ fn observe_present_document_tree_with_progress(
     let replay_from_frontier = authorized
         .sqlite_snapshot
         .admitted_revision_is_replay_safe();
-    let schema_event_validation_traversals = observation.schema.event_validation_traversals;
     let tree_fingerprint = leaf_fingerprint.as_bytes();
     Ok(CompleteDocumentTree::new(
         tree_fingerprint,
@@ -385,15 +303,8 @@ fn observe_present_document_tree_with_progress(
             leaf_fingerprint,
             OpenCodeDocumentLeaf {
                 observation,
-                source_root: authorized.source_root,
-                sqlite_authority: authorized.sqlite_authority,
                 snapshot: Mutex::new(Some(authorized.sqlite_snapshot)),
-                terminal_revalidate,
-                work: Mutex::new(OpenCodeSqliteWorkCounters {
-                    schema_probe_passes: 1,
-                    schema_event_validation_traversals,
-                    ..OpenCodeSqliteWorkCounters::default()
-                }),
+                terminal_fence: Mutex::new(None),
             },
             replay_from_frontier,
         )],
@@ -480,86 +391,30 @@ fn revalidate_missing_database(
     Ok(())
 }
 
-fn finalize_work_counters(
+fn install_terminal_fence(
     leaf: &OpenCodeDocumentLeaf,
-    exact_replay: bool,
-) -> SourceBackedRouteResult<OpenCodeSqliteWorkCounters> {
-    let snapshot = leaf.sqlite_authority.snapshot_counters();
-    let mut work = leaf
-        .work
+    fence: SqliteSourceTerminalFence,
+) -> SourceBackedRouteResult<()> {
+    let mut terminal_fence = leaf
+        .terminal_fence
         .lock()
-        .map_err(|_| source_internal("OpenCode-family work counter lock was poisoned"))?;
-    work.immutable_snapshot_opens = snapshot.immutable_snapshot_opens();
-    work.copied_snapshot_opens = snapshot.copied_snapshot_opens();
-    work.snapshot_opens = work
-        .immutable_snapshot_opens
-        .checked_add(work.copied_snapshot_opens)
-        .ok_or_else(|| source_internal("OpenCode-family snapshot open count overflowed"))?;
-    work.source_bytes_copied = snapshot.source_bytes_copied();
-    work.terminal_fences = snapshot.terminal_fences();
-    work.terminal_revalidations = snapshot.terminal_revalidations();
-    work.active_snapshots = snapshot.active_snapshots();
-    work.max_active_snapshots = snapshot.max_active_snapshots();
-    work.exact_replays = u64::from(exact_replay);
-    let counters = *work;
-    if counters.snapshot_opens != 1
-        || counters.immutable_snapshot_opens != 0
-        || counters.copied_snapshot_opens != 1
-        || counters.schema_probe_passes != 1
-        || counters.logical_fingerprint_passes != 0
-        || counters.terminal_fences != 1
-        || counters.terminal_revalidations < 2
-        || counters.active_snapshots != 0
-        || counters.max_active_snapshots != 1
-        || counters.projection_passes + counters.exact_replays != 1
-        || counters.max_buffered_documents > 1
-        || counters.max_buffered_session_metadata > 1
-        || counters.max_session_ancestry_depth > 64
-        || counters.max_buffered_payload_rows > OPENCODE_HYDRATION_BATCH_ROWS as u64
-        || counters.max_sort_key_batch_rows > OPENCODE_HYDRATION_BATCH_ROWS as u64
-        || counters.max_buffered_payload_bytes > OPENCODE_HYDRATION_SINGLETON_MAX_BYTES
-        || (counters.max_buffered_payload_bytes > OPENCODE_HYDRATION_BATCH_BYTES
-            && counters.max_buffered_payload_rows != 1)
-        || counters.session_metadata_loads > counters.session_rows_scanned
-        || (counters.fallback_disk_sort
-            && counters.fallback_payload_hydrations != counters.logical_rows_projected)
-        || (!counters.fallback_disk_sort && counters.fallback_payload_hydrations != 0)
-        || (counters.fallback_disk_sort
-            && (counters.fallback_sort_rows != counters.logical_rows_projected
-                || counters.fallback_scratch_bytes == 0))
-        || (!counters.fallback_disk_sort
-            && (counters.fallback_sort_rows != 0 || counters.fallback_scratch_bytes != 0))
-        || (counters.fallback_disk_sort
-            && counters.ordering_data_statements
-                != 2_u64
-                    .saturating_add(counters.ordering_sort_key_batches)
-                    .saturating_add(counters.ordering_hydration_batches))
-        || (!counters.fallback_disk_sort
-            && (counters.ordering_data_statements != 0
-                || counters.ordering_sort_key_batches != 0
-                || counters.ordering_hydration_batches != 0
-                || counters.max_sort_key_batch_rows != 0
-                || counters.max_buffered_payload_bytes != 0))
-        || (leaf.observation.schema.message_part_indexed_streaming
-            && counters.schema_event_validation_traversals != 2)
-        || (exact_replay
-            && (counters.projection_passes != 0
-                || counters.logical_row_traversals != 0
-                || counters.logical_rows_projected != 0
-                || counters.documents_staged != 0
-                || counters.max_buffered_documents != 0))
-        || (!exact_replay
-            && (counters.projection_passes != 1
-                || counters.logical_row_traversals != 1
-                || counters.documents_staged > counters.logical_rows_projected))
-    {
+        .map_err(|_| source_internal("OpenCode-family terminal fence lock was poisoned"))?;
+    if terminal_fence.replace(fence).is_some() {
         return Err(source_internal(
-            "OpenCode-family lifecycle violated its one-snapshot bounded-work contract",
+            "OpenCode-family snapshot produced more than one terminal fence",
         ));
     }
-    #[cfg(test)]
-    LAST_WORK_COUNTERS.with(|slot| slot.replace(Some(counters)));
-    Ok(counters)
+    Ok(())
+}
+
+fn retained_terminal_fence(
+    leaf: &OpenCodeDocumentLeaf,
+) -> SourceBackedRouteResult<SqliteSourceTerminalFence> {
+    leaf.terminal_fence
+        .lock()
+        .map_err(|_| source_internal("OpenCode-family terminal fence lock was poisoned"))?
+        .clone()
+        .ok_or_else(|| source_internal("OpenCode-family snapshot did not produce a terminal fence"))
 }
 
 fn source_missing(error: &OpenCodeSourceBackedError) -> bool {
@@ -582,6 +437,12 @@ pub(super) fn route_error(error: OpenCodeSourceBackedError) -> SourceBackedRoute
     let kind = match &error {
         OpenCodeSourceBackedError::Capture(CaptureError::SourceChangedDuringCapture) => {
             SourceBackedRouteErrorKind::SourceChanged
+        }
+        OpenCodeSourceBackedError::SqliteSource(error) if error.is_snapshot_capacity_failure() => {
+            SourceBackedRouteErrorKind::Unavailable
+        }
+        OpenCodeSourceBackedError::SqliteSource(error) if error.is_systemic_resource_failure() => {
+            SourceBackedRouteErrorKind::ResourceUnavailable
         }
         OpenCodeSourceBackedError::SqliteSource(error) if error.is_source_changed() => {
             SourceBackedRouteErrorKind::SourceChanged
@@ -619,15 +480,9 @@ pub(super) fn route_error(error: OpenCodeSourceBackedError) -> SourceBackedRoute
         OpenCodeSourceBackedError::SqliteSource(error) if error.is_ctx_owned_corruption() => {
             SourceBackedRouteErrorKind::Internal
         }
-        OpenCodeSourceBackedError::SqliteSource(error) if error.is_snapshot_capacity_failure() => {
-            SourceBackedRouteErrorKind::Unavailable
-        }
         OpenCodeSourceBackedError::SqliteSource(SqliteSourceAccessError::ResourceUnavailable {
             ..
         }) => SourceBackedRouteErrorKind::ResourceUnavailable,
-        OpenCodeSourceBackedError::SqliteSource(error) if error.is_systemic_resource_failure() => {
-            SourceBackedRouteErrorKind::ResourceUnavailable
-        }
         _ => SourceBackedRouteErrorKind::InvalidSource,
     };
     SourceBackedRouteError::new(kind, error.to_string())

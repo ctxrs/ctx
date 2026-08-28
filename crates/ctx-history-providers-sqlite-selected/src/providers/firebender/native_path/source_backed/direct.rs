@@ -20,10 +20,10 @@ use super::{
 use crate::{
     document_inventory_authority,
     provider::source_backed::{
-        route_error, ChangedDocumentSink, CompleteDocumentTree, DocumentLeafFingerprint,
-        DocumentSourceTerminal, ObservedDocumentLeaf, ReplacementDocumentTree,
-        SourceBackedRouteDriver, SourceBackedRouteError, SourceBackedRouteErrorKind,
-        SourceBackedRouteResult,
+        route_error, sqlite_source_route_error, ChangedDocumentSink, CompleteDocumentTree,
+        DocumentLeafFingerprint, DocumentSourceTerminal, ObservedDocumentLeaf,
+        ReplacementDocumentTree, SourceBackedRouteDriver, SourceBackedRouteError,
+        SourceBackedRouteErrorKind, SourceBackedRouteResult,
     },
     provider::sqlite::{
         sqlite_schema_fingerprint, sqlite_table_columns, SqliteLengthPreflightGuard,
@@ -71,12 +71,6 @@ struct FirebenderPresentAuthority {
     opening_evidence: SqliteSourceEvidence,
     _sqlite_authority: SqliteSourceDirectoryAuthority,
     snapshot: Mutex<Option<Box<OpenedSnapshot>>>,
-    terminal_revalidate: Box<
-        dyn Fn() -> Result<(), crate::provider_sources::SqliteSourceAccessError>
-            + Send
-            + Sync
-            + 'static,
-    >,
 }
 
 #[derive(Debug)]
@@ -109,15 +103,15 @@ impl<B: SelectedSqliteCaptureBinding> ReplacementDocumentTree for FirebenderDocu
         let (database_path, source) =
             firebender_database_path_and_source_scoped(&self.path, self.source_scope)
                 .map_err(route_error)?;
-        match open_database_leaf(&self.data_root, &database_path).map_err(route_error)? {
+        match open_database_leaf(&self.data_root, &database_path).map_err(firebender_scan_error)? {
             OpenDatabaseLeaf::Present(snapshot) => {
-                let opening_evidence = snapshot.evidence().map_err(route_error)?.clone();
+                let opening_evidence = snapshot.evidence().map_err(firebender_scan_error)?.clone();
                 let fingerprint = observe_logical_snapshot(
-                    snapshot.connection().map_err(route_error)?,
+                    snapshot.connection().map_err(firebender_scan_error)?,
                     &database_path,
                 )
-                .map_err(route_error)?;
-                snapshot.revalidate().map_err(route_error)?;
+                .map_err(firebender_scan_error)?;
+                snapshot.revalidate().map_err(firebender_scan_error)?;
                 Ok(CompleteDocumentTree::new(
                     fingerprint,
                     vec![ObservedDocumentLeaf::new(
@@ -127,9 +121,6 @@ impl<B: SelectedSqliteCaptureBinding> ReplacementDocumentTree for FirebenderDocu
                     FirebenderTreeAuthority::Present(Box::new(FirebenderPresentAuthority {
                         opening_evidence,
                         _sqlite_authority: snapshot.sqlite_authority(),
-                        terminal_revalidate: snapshot
-                            .terminal_revalidator()
-                            .map_err(route_error)?,
                         snapshot: Mutex::new(Some(snapshot)),
                     })),
                 ))
@@ -174,7 +165,7 @@ impl<B: SelectedSqliteCaptureBinding> ReplacementDocumentTree for FirebenderDocu
                 "Firebender SQLite physical inventory changed during logical projection",
             ));
         }
-        snapshot.revalidate().map_err(route_error)?;
+        snapshot.revalidate().map_err(firebender_scan_error)?;
         restore_opened_snapshot(&authority.snapshot, snapshot)?;
         Ok(document_terminal(scan))
     }
@@ -186,13 +177,15 @@ impl<B: SelectedSqliteCaptureBinding> ReplacementDocumentTree for FirebenderDocu
         match &tree.authority {
             FirebenderTreeAuthority::Present(authority) => {
                 let snapshot = take_opened_snapshot(&authority.snapshot)?;
-                let evidence = snapshot.finish().map_err(route_error)?;
+                let (terminal_fence, evidence) = snapshot.seal().map_err(firebender_scan_error)?;
                 if evidence != authority.opening_evidence {
                     return Err(source_changed(
                         "Firebender SQLite physical inventory changed before commit",
                     ));
                 }
-                (authority.terminal_revalidate)().map_err(route_error)?;
+                terminal_fence
+                    .revalidate()
+                    .map_err(sqlite_source_route_error)?;
             }
             FirebenderTreeAuthority::Missing(fence) if !fence.revalidate() => {
                 return Err(source_changed(
@@ -664,6 +657,7 @@ fn firebender_database_path_and_source_scoped(
 fn firebender_scan_error(error: FirebenderSourceBackedError) -> SourceBackedRouteError {
     match error {
         FirebenderSourceBackedError::Route(error) => error,
+        FirebenderSourceBackedError::SqliteSource(error) => sqlite_source_route_error(error),
         error => route_error(error),
     }
 }
@@ -678,7 +672,56 @@ fn internal_error(detail: impl Into<String>) -> SourceBackedRouteError {
 
 #[cfg(test)]
 mod tests {
+    use std::{io, path::PathBuf};
+
     use super::*;
+    use crate::provider_sources::SqliteSourceAccessError;
+
+    #[test]
+    fn sqlite_source_errors_keep_their_shared_route_classification() {
+        let cases = [
+            (
+                SqliteSourceAccessError::SourceChanged,
+                SourceBackedRouteErrorKind::SourceChanged,
+            ),
+            (
+                SqliteSourceAccessError::SnapshotTooLarge {
+                    path: PathBuf::from("firebender.sqlite"),
+                    length: 2,
+                    maximum: 1,
+                },
+                SourceBackedRouteErrorKind::Unavailable,
+            ),
+            (
+                SqliteSourceAccessError::ResourceUnavailable {
+                    operation: "sealing a Firebender SQLite snapshot",
+                    path: PathBuf::from("firebender.sqlite"),
+                    source: io::Error::from(io::ErrorKind::OutOfMemory),
+                },
+                SourceBackedRouteErrorKind::ResourceUnavailable,
+            ),
+            (
+                SqliteSourceAccessError::ProviderContentCorruption {
+                    source: Box::new(SqliteSourceAccessError::SqliteControl {
+                        operation: "reading a Firebender SQLite snapshot",
+                        code: rusqlite::ffi::SQLITE_CORRUPT,
+                    }),
+                },
+                SourceBackedRouteErrorKind::InvalidSource,
+            ),
+            (
+                SqliteSourceAccessError::SqliteControl {
+                    operation: "revalidating a Firebender SQLite terminal fence",
+                    code: rusqlite::ffi::SQLITE_BUSY,
+                },
+                SourceBackedRouteErrorKind::ResourceUnavailable,
+            ),
+        ];
+
+        for (error, expected_kind) in cases {
+            assert_eq!(firebender_scan_error(error.into()).kind, expected_kind);
+        }
+    }
 
     #[test]
     fn indivisible_tool_result_larger_than_page_target_is_retained() {

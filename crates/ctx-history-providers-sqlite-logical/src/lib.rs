@@ -137,7 +137,7 @@ pub(crate) mod provider_sources {
         SqliteArtifactKind, SqliteCleanupStatus, SqliteFailurePhase, SqliteLogicalSnapshot,
         SqliteRetryDecision, SqliteSourceAccessError, SqliteSourceDirectoryAuthority,
         SqliteSourceErrorComposition, SqliteSourceEvidence, SqliteSourceProgressError,
-        SqliteSourceReadSnapshot,
+        SqliteSourceReadSnapshot, SqliteSourceTerminalFence,
     };
 }
 

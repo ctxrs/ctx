@@ -92,6 +92,29 @@ pub(crate) mod provider {
             )
         }
 
+        pub(crate) fn sqlite_source_route_error(
+            error: crate::provider_sources::SqliteSourceAccessError,
+        ) -> SourceBackedRouteError {
+            let kind = if error.is_snapshot_capacity_failure() {
+                SourceBackedRouteErrorKind::Unavailable
+            } else if error.is_systemic_resource_failure() {
+                SourceBackedRouteErrorKind::ResourceUnavailable
+            } else if error.is_source_changed() {
+                SourceBackedRouteErrorKind::SourceChanged
+            } else if error.is_ctx_owned_corruption() {
+                SourceBackedRouteErrorKind::Internal
+            } else if error.is_provider_corruption() || error.is_provider_path_unavailable() {
+                SourceBackedRouteErrorKind::InvalidSource
+            } else if error.is_busy_or_locked() {
+                SourceBackedRouteErrorKind::ResourceUnavailable
+            } else if error.is_operational_failure() {
+                SourceBackedRouteErrorKind::Internal
+            } else {
+                SourceBackedRouteErrorKind::InvalidSource
+            };
+            SourceBackedRouteError::new(kind, error.to_string())
+        }
+
         pub(crate) fn combine_primary_and_cleanup_route_errors(
             primary: SourceBackedRouteError,
             cleanup: SourceBackedRouteError,
@@ -118,6 +141,46 @@ pub(crate) mod provider {
                 SourceBackedRouteErrorKind::InvalidSource => 3,
                 SourceBackedRouteErrorKind::Unsupported => 2,
                 SourceBackedRouteErrorKind::Unavailable => 1,
+            }
+        }
+
+        #[cfg(test)]
+        mod tests {
+            use std::{io, path::PathBuf};
+
+            use super::*;
+            use crate::provider_sources::SqliteSourceAccessError;
+
+            #[test]
+            fn sqlite_terminal_fence_errors_keep_their_route_class_and_detail() {
+                let resource = SqliteSourceAccessError::ResourceUnavailable {
+                    operation: "revalidating a selected SQLite terminal fence",
+                    path: PathBuf::from("provider.sqlite"),
+                    source: io::Error::from(io::ErrorKind::OutOfMemory),
+                };
+                let detail = resource.to_string();
+                let route = sqlite_source_route_error(resource);
+                assert_eq!(route.kind, SourceBackedRouteErrorKind::ResourceUnavailable);
+                assert_eq!(route.detail, detail);
+
+                let changed = sqlite_source_route_error(SqliteSourceAccessError::SourceChanged);
+                assert_eq!(changed.kind, SourceBackedRouteErrorKind::SourceChanged);
+
+                let composite = SqliteSourceAccessError::Finalization {
+                    primary: Box::new(SqliteSourceAccessError::SourceChanged),
+                    cleanup: Box::new(SqliteSourceAccessError::ResourceUnavailable {
+                        operation: "cleaning a selected SQLite snapshot",
+                        path: PathBuf::from("ctx-owned-snapshot.sqlite"),
+                        source: io::Error::from(io::ErrorKind::OutOfMemory),
+                    }),
+                };
+                let composite = sqlite_source_route_error(composite);
+                assert_eq!(
+                    composite.kind,
+                    SourceBackedRouteErrorKind::ResourceUnavailable
+                );
+                assert!(composite.detail.contains("changed"));
+                assert!(composite.detail.contains("cleanup"));
             }
         }
     }

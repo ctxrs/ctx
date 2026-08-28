@@ -21,6 +21,23 @@ fn snapshot_capacity_failure_is_isolated_to_the_opencode_route() {
 }
 
 #[test]
+fn terminal_change_with_resource_cleanup_failure_stays_systemic() {
+    let error = OpenCodeSourceBackedError::SqliteSource(SqliteSourceAccessError::Finalization {
+        primary: Box::new(SqliteSourceAccessError::SourceChanged),
+        cleanup: Box::new(SqliteSourceAccessError::ResourceUnavailable {
+            operation: "cleaning an OpenCode SQLite snapshot",
+            path: PathBuf::from("ctx-owned-snapshot.sqlite"),
+            source: std::io::Error::from(std::io::ErrorKind::OutOfMemory),
+        }),
+    });
+
+    assert_eq!(
+        adapter::route_error(error).kind,
+        SourceBackedRouteErrorKind::ResourceUnavailable
+    );
+}
+
+#[test]
 #[ignore = "explicit multi-gibibyte copy/open resource proof"]
 fn opencode_source_above_two_gibibytes_copies_opens_observes_and_cleans_up() {
     const ABOVE_TWO_GIB: u64 = 2 * 1024 * 1024 * 1024 + 4096;

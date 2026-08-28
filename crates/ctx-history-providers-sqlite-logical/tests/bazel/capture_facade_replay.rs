@@ -192,6 +192,12 @@ where
 }
 
 fn only_matching_event(index: &VerifiedIndex, marker: &str) -> ctx_history_index::EventRecord {
+    let mut matches = matching_events(index, marker);
+    assert_eq!(matches.len(), 1);
+    matches.remove(0)
+}
+
+fn matching_events(index: &VerifiedIndex, marker: &str) -> Vec<ctx_history_index::EventRecord> {
     let filter = CompiledSearchFilter::compile(Default::default()).unwrap();
     let queries = [marker];
     let batch = index
@@ -207,17 +213,17 @@ fn only_matching_event(index: &VerifiedIndex, marker: &str) -> ctx_history_index
         "lexical execution must complete: {:?}",
         batch.exhaustion
     );
-    let mut matches = batch
+    batch
         .candidates
         .into_iter()
-        .map(ctx_history_index::EventSearchCandidate::from)
-        .collect::<Vec<_>>();
-    assert_eq!(matches.len(), 1);
-    let winner = matches.remove(0);
-    index
-        .event_by_id(winner.event.event_id)
-        .unwrap()
-        .expect("selected lexical winner must hydrate")
+        .map(|candidate| {
+            let winner = ctx_history_index::EventSearchCandidate::from(candidate);
+            index
+                .event_by_id(winner.event.event_id)
+                .unwrap()
+                .expect("selected lexical winner must hydrate")
+        })
+        .collect()
 }
 
 fn create_deepagents_database(path: &Path, text: &str) {
@@ -329,16 +335,30 @@ fn create_zed_database(path: &Path, text: &str) {
 }
 
 #[test]
-fn unchanged_replay_finishes_progress_and_propagates_systemic_failure() {
+fn opencode_family_changed_wal_capture_then_exact_replay_finishes_progress() {
+    for provider in [
+        CaptureProvider::OpenCode,
+        CaptureProvider::Kilo,
+        CaptureProvider::MiMoCode,
+    ] {
+        assert_opencode_family_changed_wal_capture_then_exact_replay(provider);
+    }
+}
+
+fn assert_opencode_family_changed_wal_capture_then_exact_replay(provider: CaptureProvider) {
     let temp = tempfile::tempdir().unwrap();
     let data_root = tempfile::tempdir().unwrap();
-    let database = temp.path().join("source/opencode.sqlite");
-    create_opencode_database(&database);
+    let database = temp
+        .path()
+        .join("source")
+        .join(format!("{}.sqlite", provider.as_str()));
+    let writer = create_opencode_wal_database(&database, "logical SQLite facade cold capture");
+    assert_active_wal(&database);
     let index_root = temp.path().join("index");
     let mut registry = SourceBackedProviderRegistry::new();
     register_landed_source_backed_route_with_data_root(
         &mut registry,
-        provider_source_for_path(CaptureProvider::OpenCode, database),
+        provider_source_for_path(provider, database.clone()),
         SourceBackedRouteSelection::ExplicitManual,
         data_root.path(),
     )
@@ -358,14 +378,53 @@ fn unchanged_replay_finishes_progress_and_propagates_systemic_failure() {
         )
         .unwrap();
     let cold_generation = cold.commit.generation_id.clone();
-    let cold_opstamp = cold.commit.opstamp;
-    assert_eq!(cold.successful_route_outcomes.len(), 1);
-    assert!(cold.successful_route_outcomes[0].changed);
+    assert_eq!(cold.successful_route_outcomes.len(), 1, "{provider:?}");
+    assert!(cold.successful_route_outcomes[0].changed, "{provider:?}");
     assert_eq!(
         cold.take_verified_publication().unwrap().0,
-        CapturePublicationDisposition::Published
+        CapturePublicationDisposition::Published,
+        "{provider:?}"
     );
 
+    let changed_marker = format!("{} logical SQLite changed WAL capture", provider.as_str());
+    append_opencode_message(&writer, &changed_marker);
+    assert_active_wal(&database);
+    let mut changed = executor
+        .refresh_scope_with_detailed_progress_and_publication_metadata(
+            &index_root,
+            SourceBackedRefreshScope::All,
+            |_| Ok(()),
+            |_| {
+                metadata_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(b"logical-sqlite-replay-v2".to_vec())
+            },
+        )
+        .unwrap();
+    assert_eq!(changed.successful_route_outcomes.len(), 1, "{provider:?}");
+    assert!(changed.successful_route_outcomes[0].changed, "{provider:?}");
+    assert_ne!(
+        changed.commit.generation_id, cold_generation,
+        "{provider:?}"
+    );
+    assert_eq!(changed.sources.len(), 1, "{provider:?}");
+    assert_eq!(
+        changed.sources[0].observation().source().provider(),
+        provider.as_str(),
+        "{provider:?}"
+    );
+    let changed_generation = changed.commit.generation_id.clone();
+    let changed_opstamp = changed.commit.opstamp;
+    let (changed_disposition, changed_pin) = changed.take_verified_publication().unwrap();
+    assert_eq!(
+        changed_disposition,
+        CapturePublicationDisposition::Published,
+        "{provider:?}"
+    );
+    let changed_index = changed_pin.into_inner().into_verified_index();
+    assert!(
+        !matching_events(&changed_index, &changed_marker).is_empty(),
+        "{provider:?}"
+    );
     let mut updates = Vec::new();
     let mut replay = executor
         .refresh_scope_with_detailed_progress_and_publication_metadata(
@@ -381,21 +440,38 @@ fn unchanged_replay_finishes_progress_and_propagates_systemic_failure() {
             },
         )
         .unwrap();
-    assert_eq!(replay.commit.generation_id, cold_generation);
-    assert_eq!(replay.commit.opstamp, cold_opstamp);
-    assert_eq!(metadata_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(replay.successful_route_outcomes.len(), 1);
-    assert!(!replay.successful_route_outcomes[0].changed);
     assert_eq!(
-        replay.take_verified_publication().unwrap().0,
-        CapturePublicationDisposition::Reused
+        replay.commit.generation_id, changed_generation,
+        "{provider:?}"
+    );
+    assert_eq!(replay.commit.opstamp, changed_opstamp, "{provider:?}");
+    assert_eq!(metadata_calls.load(Ordering::SeqCst), 2, "{provider:?}");
+    assert_eq!(replay.successful_route_outcomes.len(), 1, "{provider:?}");
+    assert!(!replay.successful_route_outcomes[0].changed, "{provider:?}");
+    let (replay_disposition, replay_pin) = replay.take_verified_publication().unwrap();
+    assert_eq!(
+        replay_disposition,
+        CapturePublicationDisposition::Reused,
+        "{provider:?}"
+    );
+    let replay_index = replay_pin.into_inner().into_verified_index();
+    assert!(
+        !matching_events(&replay_index, &changed_marker).is_empty(),
+        "{provider:?}"
     );
     let terminal = updates.last().expect("terminal replay progress");
-    assert_eq!(terminal.progress.phase, "committed");
-    assert!(terminal.current_source_progress.is_none());
-    assert!(terminal.progress.current_source.is_none());
-    assert!(terminal.progress.completed_records.is_none());
-    assert!(terminal.progress.completed_bytes.is_none());
+    assert_eq!(terminal.progress.phase, "committed", "{provider:?}");
+    assert!(terminal.current_source_progress.is_none(), "{provider:?}");
+    assert!(terminal.progress.current_source.is_none(), "{provider:?}");
+    assert!(
+        terminal.progress.completed_records.is_none(),
+        "{provider:?}"
+    );
+    assert!(terminal.progress.completed_bytes.is_none(), "{provider:?}");
+
+    if provider != CaptureProvider::OpenCode {
+        return;
+    }
 
     let error = executor
         .refresh_scope_with_detailed_progress(
@@ -421,13 +497,22 @@ fn unchanged_replay_finishes_progress_and_propagates_systemic_failure() {
     ));
     assert_eq!(
         VerifiedIndex::open(&index_root).unwrap().generation_id(),
-        cold_generation
+        changed_generation
     );
 }
 
-fn create_opencode_database(path: &Path) {
+fn create_opencode_wal_database(path: &Path, text: &str) -> Connection {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     let connection = Connection::open(path).unwrap();
+    let journal_mode = connection
+        .query_row("pragma journal_mode = wal", [], |row| {
+            row.get::<_, String>(0)
+        })
+        .unwrap();
+    assert_eq!(journal_mode, "wal");
+    connection
+        .pragma_update(None, "wal_autocheckpoint", 0)
+        .unwrap();
     connection
         .execute_batch(
             "create table session (
@@ -439,17 +524,24 @@ fn create_opencode_database(path: &Path) {
                  time_created integer not null,
                  time_updated integer not null
              );
-             create table session_message (
+             create table message (
                  id text primary key,
                  session_id text not null,
-                 type text not null,
-                 seq integer not null,
                  time_created integer not null,
                  time_updated integer not null,
                  data text not null
              );
-             create unique index session_message_session_seq_idx
-                 on session_message(session_id, seq);
+             create table part (
+                 id text primary key,
+                 message_id text not null,
+                 session_id text not null,
+                 time_created integer not null,
+                 time_updated integer not null,
+                 data text not null
+             );
+             create index message_session_time_created_id_idx
+                 on message(session_id, time_created, id);
+             create index part_message_id_id_idx on part(message_id, id);
              insert into session values (
                  'session-1', null, '/tmp/project', 'main', 'build', 1, 1
              );",
@@ -457,15 +549,52 @@ fn create_opencode_database(path: &Path) {
         .unwrap();
     connection
         .execute(
-            "insert into session_message values (
-                'message-1', 'session-1', 'message', 1, 1, 1, ?1
+            "insert into message values (
+                'message-1', 'session-1', 1, 1, ?1
             )",
             params![json!({
                 "role": "user",
-                "time": {"created": 1},
-                "text": "logical SQLite facade replay"
+                "time": {"created": 1}
             })
             .to_string()],
         )
         .unwrap();
+    connection
+        .execute(
+            "insert into part values (
+                'part-1', 'message-1', 'session-1', 1, 1, ?1
+            )",
+            params![json!({"type": "text", "text": text}).to_string()],
+        )
+        .unwrap();
+    connection
+}
+
+fn append_opencode_message(connection: &Connection, text: &str) {
+    connection
+        .execute(
+            "insert into message values (
+                'message-2', 'session-1', 2, 2, ?1
+            )",
+            params![json!({
+                "role": "assistant",
+                "time": {"created": 2}
+            })
+            .to_string()],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "insert into part values (
+                'part-2', 'message-2', 'session-1', 2, 2, ?1
+            )",
+            params![json!({"type": "text", "text": text}).to_string()],
+        )
+        .unwrap();
+}
+
+fn assert_active_wal(database: &Path) {
+    let mut wal = database.as_os_str().to_owned();
+    wal.push("-wal");
+    assert!(fs::metadata(Path::new(&wal)).unwrap().len() > 0);
 }
