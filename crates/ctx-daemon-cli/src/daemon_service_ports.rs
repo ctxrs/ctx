@@ -62,7 +62,6 @@ fn config_snapshot_with_channel(
         },
         semantic_enabled: config.semantic_search_enabled(),
         automatic_upgrade_enabled: config.auto_upgrade_enabled(),
-        allow_rfc2544_fake_ip: config.upgrade_allows_rfc2544_fake_ip(),
         automatic_upgrade_interval: config.upgrade.interval,
         upgrade_channel,
     }

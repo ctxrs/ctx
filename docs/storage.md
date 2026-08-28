@@ -29,6 +29,11 @@ The duplicate `upgrade.interval_seconds` config key is also removed. Use
 `upgrade.interval_hours` for persistent configuration or
 `CTX_UPGRADE_INTERVAL_SECONDS` for a process-level override.
 
+The short-lived `upgrade.allow_rfc2544_fake_ip` key is retired. Versions after
+1.2.1 ignore and remove it from `config.toml` while preserving unrelated
+settings. This compatibility migration is scheduled for removal after
+2026-11-30 and at least three subsequent stable releases.
+
 The canonical persisted indexing control is `[indexing] mode = "auto"` or
 `"manual"`. Auto is the default. Use `ctx index mode` to read the effective
 mode and `ctx index mode auto` or `ctx index mode manual` to persist a change.

@@ -1,5 +1,85 @@
 use super::*;
 
+const RETIRED_UPGRADE_FAKE_IP_CONTROL: &str = "upgrade.allow_rfc2544_fake_ip";
+
+// TODO(config-cleanup): Remove this compatibility migration after 2026-11-30
+// and after at least three stable releases following 1.2.1 have been available.
+pub(super) fn read_config_text_migrating_retired_controls(path: &Path) -> Result<Option<String>> {
+    let text = read_optional_config_text(path)?;
+    let Some(text) = text else {
+        return Ok(None);
+    };
+    let Some(updated) = remove_retired_upgrade_fake_ip_key(path, &text)? else {
+        return Ok(Some(text));
+    };
+
+    // The migration is best-effort compatibility work, not a new reason to
+    // reject a previously readable config. If the lock or durable rewrite is
+    // unavailable, use the validated migrated bytes in memory and retry on a
+    // later load.
+    let Ok(_mutation_lock) = ConfigMutationLock::acquire(path) else {
+        return Ok(Some(updated));
+    };
+    read_config_text_migrating_retired_controls_lock_held(path)
+}
+
+fn read_config_text_migrating_retired_controls_lock_held(path: &Path) -> Result<Option<String>> {
+    let text = read_optional_config_text(path)?;
+    let Some(text) = text else {
+        return Ok(None);
+    };
+    let Some(updated) = remove_retired_upgrade_fake_ip_key(path, &text)? else {
+        return Ok(Some(text));
+    };
+    let _ = write_config_durably(path, updated.as_bytes());
+    Ok(Some(updated))
+}
+
+fn remove_retired_upgrade_fake_ip_key(path: &Path, text: &str) -> Result<Option<String>> {
+    if !text.contains(
+        RETIRED_UPGRADE_FAKE_IP_CONTROL
+            .rsplit_once('.')
+            .expect("retired config control must include its table")
+            .1,
+    ) {
+        return Ok(None);
+    }
+    let parsed = parse_toml_subset(text).with_context(|| format!("parse {}", path.display()))?;
+    let Some(retired) = parsed.get(RETIRED_UPGRADE_FAKE_IP_CONTROL) else {
+        return Ok(None);
+    };
+    let updated = remove_config_line(text, retired.line)?;
+    validated_persisted_config(path, &updated)
+        .with_context(|| format!("validate migrated {}", path.display()))?;
+    Ok((updated != text).then_some(updated))
+}
+
+fn remove_config_line(text: &str, line_number: usize) -> Result<String> {
+    let start = if line_number == 1 {
+        0
+    } else {
+        text.match_indices('\n')
+            .nth(line_number.saturating_sub(2))
+            .map(|(index, _)| index + 1)
+            .ok_or_else(|| anyhow::anyhow!("retired config line is outside the parsed document"))?
+    };
+    let end = text[start..]
+        .find('\n')
+        .map_or(text.len(), |offset| start + offset + 1);
+    let mut updated = String::with_capacity(text.len().saturating_sub(end - start));
+    updated.push_str(&text[..start]);
+    updated.push_str(&text[end..]);
+    Ok(updated)
+}
+
+fn read_optional_config_text(path: &Path) -> Result<Option<String>> {
+    match fs::read_to_string(path) {
+        Ok(text) => Ok(Some(text)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("read {}", path.display())),
+    }
+}
+
 pub fn write_default_config(data_root: &Path) -> Result<()> {
     establish_private_data_root(data_root)?;
     Ok(())
@@ -20,11 +100,7 @@ pub fn set_indexing_mode(data_root: &Path, mode: IndexingMode) -> Result<()> {
     establish_private_data_root(data_root)?;
     let path = AppConfig::config_path(data_root);
     let _mutation_lock = ConfigMutationLock::acquire(&path)?;
-    let text = match fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => String::new(),
-        Err(err) => return Err(err).with_context(|| format!("read {}", path.display())),
-    };
+    let text = read_config_text(&path)?;
     let parsed = parse_toml_subset(&text).with_context(|| format!("parse {}", path.display()))?;
     let mut config = AppConfig::default();
     config
@@ -84,11 +160,7 @@ pub(super) fn set_config_bool(
     establish_private_data_root(data_root)?;
     let path = AppConfig::config_path(data_root);
     let _mutation_lock = ConfigMutationLock::acquire(&path)?;
-    let text = match fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => String::new(),
-        Err(err) => return Err(err).with_context(|| format!("read {}", path.display())),
-    };
+    let text = read_config_text(&path)?;
     let parsed = parse_toml_subset(&text).with_context(|| format!("parse {}", path.display()))?;
     let mut config = AppConfig::default();
     config
@@ -363,11 +435,7 @@ fn validated_provider_root_path(
 }
 
 fn read_config_text(path: &Path) -> Result<String> {
-    match fs::read_to_string(path) {
-        Ok(text) => Ok(text),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(String::new()),
-        Err(error) => Err(error).with_context(|| format!("read {}", path.display())),
-    }
+    Ok(read_config_text_migrating_retired_controls_lock_held(path)?.unwrap_or_default())
 }
 
 fn validated_persisted_config(path: &Path, text: &str) -> Result<AppConfig> {

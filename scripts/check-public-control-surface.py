@@ -31,7 +31,6 @@ RELEASED_DEFAULT_SCOPES = {
     "analytics.enabled": "all_cli_installations",
     "local_usage.enabled": "all_cli_installations",
     "upgrade.auto": "official_installer_managed",
-    "upgrade.allow_rfc2544_fake_ip": "official_installer_managed",
     "indexing.mode": "all_cli_installations",
     "search.semantic": "all_cli_installations",
     "sources.automatic": "all_cli_installations",
@@ -141,11 +140,6 @@ def extract_empty_config_defaults(config_source: str) -> dict[str, object]:
         ),
         "search.semantic": scalar_value(semantic.group(1), constants),
     }
-    if "allow_rfc2544_fake_ip" in default_source:
-        defaults["upgrade.allow_rfc2544_fake_ip"] = default_field(
-            r"upgrade:\s*UpgradeConfig\s*\{.*?allow_rfc2544_fake_ip:\s*([^,\n]+),",
-            "RFC 2544 artifact opt-in",
-        )
     if "SourcesConfig" in default_source:
         defaults["sources.automatic"] = default_field(
             r"sources:\s*SourcesConfig\s*\{.*?automatic:\s*([^,}\n]+)",
@@ -429,6 +423,38 @@ def main() -> None:
     if not isinstance(retired, list):
         fail("retired_controls must be a list")
     unique(retired, "retired controls")
+    retired_match_literals = contract.get("retired_control_match_literals", {})
+    if (
+        not isinstance(retired_match_literals, dict)
+        or any(
+            control not in retired
+            or not isinstance(literals, list)
+            or not literals
+            or any(not isinstance(literal, str) or not literal for literal in literals)
+            or len(set(literals)) != len(literals)
+            or control in literals
+            for control, literals in retired_match_literals.items()
+        )
+    ):
+        fail("retired_control_match_literals must map retired controls to unique non-empty aliases")
+    all_retired_aliases = [
+        literal
+        for literals in retired_match_literals.values()
+        for literal in literals
+    ]
+    unique(all_retired_aliases, "retired control match literals")
+
+    def retired_controls_present(text: str) -> list[str]:
+        return sorted(
+            control
+            for control in retired
+            if control in text
+            or any(
+                literal in text
+                for literal in retired_match_literals.get(control, [])
+            )
+        )
+
     retired_reference = root / contract["retired_control_reference"]
     reference_text = retired_reference.read_text(encoding="utf-8")
     missing_references = [control for control in retired if control not in reference_text]
@@ -454,7 +480,7 @@ def main() -> None:
         ):
             fail(f"invalid retired control containment: {containment!r}")
         text = path.read_text(encoding="utf-8")
-        present = sorted(control for control in retired if control in text)
+        present = retired_controls_present(text)
         if present != sorted(declared_controls):
             fail(
                 f"retired control containment {containment['path']} differs from inventory: "
@@ -516,9 +542,8 @@ def main() -> None:
         root, {contract_path, retired_reference, *retired_containment_paths}
     ):
         text = path.read_text(encoding="utf-8", errors="replace")
-        for control in retired:
-            if control in text:
-                violations.append(f"{path.relative_to(root)}: retired control {control}")
+        for control in retired_controls_present(text):
+            violations.append(f"{path.relative_to(root)}: retired control {control}")
     if violations:
         fail("\n  ".join(["retired controls remain:", *sorted(violations)]))
 

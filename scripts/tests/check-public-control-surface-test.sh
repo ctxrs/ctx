@@ -20,11 +20,17 @@ cp "${repo_root}/contracts/public-control-surface-v1.json" "${fixture}/contracts
 cp "${repo_root}/contracts/stable-defaults/v0.25.0.json" \
   "${fixture}/contracts/stable-defaults/"
 cp "${repo_root}/crates/ctx-cli/src/config.rs" "${fixture}/crates/ctx-cli/src/"
+mkdir -p "${fixture}/crates/ctx-cli/src/config"
+cp "${repo_root}/crates/ctx-cli/src/config/mutation.rs" \
+  "${fixture}/crates/ctx-cli/src/config/"
 cp "${repo_root}/crates/ctx-cli/src/deprecated_controls.rs" "${fixture}/crates/ctx-cli/src/"
 cp "${repo_root}/crates/ctx-client-observability/src/analytics/operation.rs" \
   "${fixture}/crates/ctx-client-observability/src/analytics/"
 cp "${repo_root}/crates/ctx-cli/src/config_tests.rs" "${fixture}/crates/ctx-cli/src/"
 cp "${repo_root}/crates/ctx-cli/src/process_environment.rs" "${fixture}/crates/ctx-cli/src/"
+mkdir -p "${fixture}/crates/ctx-daemon-cli/tests/contracts"
+cp "${repo_root}/crates/ctx-daemon-cli/tests/contracts/daemon_config_reload.rs" \
+  "${fixture}/crates/ctx-daemon-cli/tests/contracts/"
 cp "${repo_root}/crates/ctx-upgrade-engine/src/upgrade/metadata.rs" \
   "${fixture}/crates/ctx-upgrade-engine/src/upgrade/"
 cp "${repo_root}/crates/ctx-upgrade-engine/tests/contracts/upgrade.rs" \
@@ -35,12 +41,12 @@ cp "${repo_root}/scripts/test-windows-legacy-daemon-takeover.ps1" "${fixture}/sc
 cp "${repo_root}/docs/storage.md" "${fixture}/docs/"
 
 python3 "${checker}" "${fixture}" > "${tmp}/pass.out"
-grep -Fq '7 empty-config released defaults' "${tmp}/pass.out"
+grep -Fq '6 empty-config released defaults' "${tmp}/pass.out"
 
 mkdir "${tmp}/no-git-bin"
 ln -s "$(command -v python3)" "${tmp}/no-git-bin/python3"
 PATH="${tmp}/no-git-bin" python3 "${checker}" "${fixture}" > "${tmp}/no-git.out"
-grep -Fq '7 empty-config released defaults' "${tmp}/no-git.out"
+grep -Fq '6 empty-config released defaults' "${tmp}/no-git.out"
 
 expect_fail() {
   local name="$1"
@@ -165,6 +171,17 @@ path.write_text(f'const RETIRED: &str = "{control}";\n')
 PY
 }
 
+add_uncontained_section_scoped_retired_control() {
+  python3 - "$1/scripts/uncontained-section-key.rs" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+leaf = "allow_" + "rfc2544_fake_ip"
+path.write_text(f'const RETIRED: &str = "{leaf}";\n')
+PY
+}
+
 expect_fail inventory-default \
   'analytics delivery released default differs from empty-config runtime' \
   change_inventory_default
@@ -189,5 +206,9 @@ expect_fail undocumented-helper-env \
 expect_fail uncontained-retired-control \
   'retired controls remain' \
   add_uncontained_retired_control
+retired_fake_ip_control='upgrade.allow_''rfc2544_fake_ip'
+expect_fail uncontained-section-scoped-retired-control \
+  "retired control ${retired_fake_ip_control}" \
+  add_uncontained_section_scoped_retired_control
 
 printf 'public control surface checker tests passed\n'
