@@ -127,12 +127,22 @@ impl McpUsagePort for LocalUsagePort {
 }
 
 fn product_telemetry(data_root: PathBuf) -> McpTelemetry {
-    let enabled = config::AppConfig::load(&data_root).is_ok_and(|config| config.analytics.enabled);
+    let initial_config = config::AppConfig::load(&data_root).ok();
+    let enabled = initial_config
+        .as_ref()
+        .is_some_and(|config| config.analytics.enabled);
+    if let Some(config) = initial_config
+        .as_ref()
+        .filter(|config| !config.analytics.enabled)
+    {
+        crate::analytics::send_batch(&data_root, config, &[]);
+    }
     McpTelemetry::start(enabled, move |events: &[PublicEventV1]| {
         let Ok(config) = config::AppConfig::load(&data_root) else {
             return Ok(());
         };
         if !config.analytics.enabled {
+            crate::analytics::send_batch(&data_root, &config, &[]);
             return Ok(());
         }
         crate::analytics::send_batch(&data_root, &config, events);

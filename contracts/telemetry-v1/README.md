@@ -1,15 +1,16 @@
 # Public telemetry v1
 
-ctx emits only four durable, content-free event families:
+ctx emits only five durable, content-free event families:
 
 - `operation_completed@1`
 - `provider_refresh_completed@1`
 - `runtime_observation@1`
+- `analytics_delivery_observation@1`
 - `install_stage@1`
 
 On the wire, each family is represented by `event_name` plus
 `event_version: 1`. Producers use closed enums and typed payloads; arbitrary
-property maps are not part of the producer API. The first three fixtures show
+property maps are not part of the producer API. The first four fixtures show
 valid batch event envelopes, not an exhaustive list of every operation-specific
 property. The `install_stage@1` fixture is the exact standalone hosted endpoint
 body.
@@ -27,8 +28,8 @@ or at least seven days old; managed upgrades preserve the original timestamp.
 
 Each outbound batch contains at most 50 events. A pending capability snapshot is
 attached only to events in the first batch and is acknowledged after that batch
-succeeds. A later batch failure does not undo that successful acknowledgement;
-failure of the snapshot-bearing batch leaves the claim unacknowledged.
+is accepted by the network service or durably handed to the bounded local
+outbox. Failure of both paths leaves the claim unacknowledged.
 
 `operation_completed@1` records one terminal event for an eligible operation.
 `provider_refresh_completed@1` records one completed aggregate for every
@@ -48,7 +49,10 @@ Its decision fields are closed:
 - `failure_scope`: `none`, `record`, `source`, `system`, `mixed`, or `unknown`;
 - `failure_type`: `none`, `record_rejection`, `unsupported_schema`,
   `not_found`, `permission`, `source_database`, `malformed_source`, `store`,
-  `worker_panic`, `system_io`, `system`, `other`, `mixed`, or `unknown`.
+  `worker_panic`, `system_io`, `system`, `other`, `mixed`, or `unknown`;
+- `failure_code`: `none` or one closed structured Core terminal code from the
+  public producer enum; and
+- `retryable`: a boolean copied from the same structured terminal receipt.
 
 Optional workload measurements are limited to bucketed records and logical
 bytes. Per-provider duration is independently bucketed; a
@@ -56,7 +60,10 @@ multi-provider refresh never copies one aggregate duration into every provider
 event. Daemon terminals may additionally report only whether a successor is
 pending and, for failures, whether the previous generation was retained.
 `runtime_observation@1` is reserved for low-frequency lifecycle and liveness
-observations. `install_stage@1` is produced only by the hosted shell and
+observations. `analytics_delivery_observation@1` carries exactly bucketed queue
+depth, retry attempts, dropped count, oldest queued age, and one closed failure
+class. It never contains an endpoint, response, request body, or raw error.
+`install_stage@1` is produced only by the hosted shell and
 PowerShell installers and records one closed installer stage/status pair with
 coarse platform, architecture, and script-family fields.
 
@@ -69,3 +76,12 @@ locators, cursors, exact timestamps, permanent ingestion-engine labels, and
 free-form failure or rewrite reasons. Exact CPU time, resident memory, worker
 counts, preparation bytes, Store receipts, and journal sizes are never
 serialized; unavailable runtime dimensions are omitted rather than inferred.
+
+Failed batch delivery uses an owner-private, cross-process-locked local outbox.
+It preserves the original serialized event IDs, binds each entry to a one-way
+endpoint fingerprint, retries at most 10 entries per delivery call, and is
+bounded to 128 entries, 2 MiB total, 512 KiB per entry, and 30 days. An explicit
+analytics opt-out removes the outbox the next time ctx opens analytics state.
+Malformed or oversized owner-private state resets to an empty valid outbox and
+later reports one `local_io` drop; unsafe paths or permissions still fail
+closed.

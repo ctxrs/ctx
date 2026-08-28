@@ -10,8 +10,8 @@ use ctx_history_refresh::{
 use crate::analytics::{
     duration_bucket, DurationBucket, ForegroundProviderRefreshV1, Outcome, ProviderCoreResult,
     ProviderRefreshChange, ProviderRefreshCompletedV1, ProviderRefreshCountsV1,
-    ProviderRefreshFailureScope, ProviderRefreshFailureType, ProviderRefreshResult,
-    ProviderRefreshTrigger, PublicEventV1,
+    ProviderRefreshFailureCode, ProviderRefreshFailureScope, ProviderRefreshFailureType,
+    ProviderRefreshResult, ProviderRefreshTrigger, PublicEventV1,
 };
 
 use super::SourceStats;
@@ -36,6 +36,8 @@ enum CoreRefreshAnalyticsFacts {
         trigger: ProviderRefreshTrigger,
         failure_scope: ProviderRefreshFailureScope,
         failure_type: ProviderRefreshFailureType,
+        failure_code: ProviderRefreshFailureCode,
+        retryable: bool,
         work_remaining: bool,
     },
 }
@@ -170,6 +172,10 @@ impl ProviderRefreshCollector {
             trigger,
             failure_scope,
             failure_type,
+            failure_code: code
+                .map(provider_refresh_failure_code)
+                .unwrap_or(ProviderRefreshFailureCode::Unknown),
+            retryable: work_remaining,
             work_remaining,
         });
     }
@@ -240,6 +246,8 @@ impl ProviderRefreshCollector {
                         } else {
                             ProviderRefreshFailureType::None
                         },
+                        failure_code: ProviderRefreshFailureCode::None,
+                        retryable: false,
                         work_remaining: totals.capture_work_remaining,
                         counts: Some(ProviderRefreshCountsV1::new(
                             count_u64(totals.imported_events),
@@ -257,6 +265,8 @@ impl ProviderRefreshCollector {
                     trigger,
                     failure_scope,
                     failure_type,
+                    failure_code,
+                    retryable,
                     work_remaining,
                 } => {
                     let mut event = ProviderRefreshCompletedV1::foreground_bucketed(
@@ -270,6 +280,8 @@ impl ProviderRefreshCollector {
                             core_result: ProviderCoreResult::Failure,
                             failure_scope,
                             failure_type,
+                            failure_code,
+                            retryable,
                             work_remaining,
                             counts: None,
                         },
@@ -318,6 +330,8 @@ impl ProviderRefreshCollector {
                                 (true, false) => ProviderRefreshFailureType::Unknown,
                                 (true, true) => ProviderRefreshFailureType::Mixed,
                             },
+                            failure_code: ProviderRefreshFailureCode::None,
+                            retryable: false,
                             work_remaining: false,
                             counts: None,
                         },
@@ -356,6 +370,42 @@ impl ProviderRefreshCollector {
         self.aggregates
             .last_mut()
             .expect("a provider refresh aggregate was just inserted")
+    }
+}
+
+fn provider_refresh_failure_code(code: RefreshOutcomeCode) -> ProviderRefreshFailureCode {
+    match code {
+        RefreshOutcomeCode::SourceUnavailable => ProviderRefreshFailureCode::SourceUnavailable,
+        RefreshOutcomeCode::ExplicitSourcePathMissing => {
+            ProviderRefreshFailureCode::ExplicitSourcePathMissing
+        }
+        RefreshOutcomeCode::SourceChanged => ProviderRefreshFailureCode::SourceChanged,
+        RefreshOutcomeCode::MalformedSource => ProviderRefreshFailureCode::MalformedSource,
+        RefreshOutcomeCode::UnsupportedSchema => ProviderRefreshFailureCode::UnsupportedSchema,
+        RefreshOutcomeCode::SourceFailures => ProviderRefreshFailureCode::SourceFailures,
+        RefreshOutcomeCode::LogicalSourceFailures => {
+            ProviderRefreshFailureCode::LogicalSourceFailures
+        }
+        RefreshOutcomeCode::SourceUnclaimed => ProviderRefreshFailureCode::SourceUnclaimed,
+        RefreshOutcomeCode::SourceRefreshFailed => ProviderRefreshFailureCode::SourceRefreshFailed,
+        RefreshOutcomeCode::SourceRefreshInternal => {
+            ProviderRefreshFailureCode::SourceRefreshInternal
+        }
+        RefreshOutcomeCode::ResourceUnavailable => ProviderRefreshFailureCode::ResourceUnavailable,
+        RefreshOutcomeCode::IndexIncompatible => ProviderRefreshFailureCode::IndexIncompatible,
+        RefreshOutcomeCode::IndexCorruption => ProviderRefreshFailureCode::IndexCorruption,
+        RefreshOutcomeCode::SourceRefreshAdmissionFailed => {
+            ProviderRefreshFailureCode::SourceRefreshAdmissionFailed
+        }
+        RefreshOutcomeCode::AllProviderTerminalCoverageUnavailable => {
+            ProviderRefreshFailureCode::AllProviderTerminalCoverageUnavailable
+        }
+        RefreshOutcomeCode::Completed
+        | RefreshOutcomeCode::CompletedWithRejections
+        | RefreshOutcomeCode::CompletedWithSourceFailures
+        | RefreshOutcomeCode::CompletedWithRejectionsAndSourceFailures => {
+            ProviderRefreshFailureCode::None
+        }
     }
 }
 

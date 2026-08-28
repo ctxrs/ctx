@@ -300,6 +300,11 @@ mod tests {
             refresh.failure_type,
             ProviderRefreshFailureType::MalformedSource
         );
+        assert_eq!(
+            refresh.failure_code,
+            crate::analytics::ProviderRefreshFailureCode::MalformedSource
+        );
+        assert!(!refresh.retryable);
         assert!(!refresh.work_remaining);
         assert_eq!(refresh.counts, None);
         assert!(!format!("{events:?}").contains("content-bearing raw terminal detail"));
@@ -324,6 +329,11 @@ mod tests {
         assert_eq!(refresh.core_result, ProviderCoreResult::Failure);
         assert_eq!(refresh.failure_scope, ProviderRefreshFailureScope::Source);
         assert_eq!(refresh.failure_type, ProviderRefreshFailureType::Unknown);
+        assert_eq!(
+            refresh.failure_code,
+            crate::analytics::ProviderRefreshFailureCode::SourceFailures
+        );
+        assert!(refresh.retryable);
         assert!(refresh.work_remaining);
         assert_eq!(refresh.counts, None);
         assert!(!format!("{events:?}").contains("content-bearing raw terminal detail"));

@@ -424,18 +424,15 @@ impl AppConfig {
         observe_app_config_load();
         let mut config = Self::default();
         let path = data_root.join(CONFIG_FILE);
-        match mutation::read_config_text_migrating_retired_controls(&path)? {
-            Some(text) => {
-                let parsed = parse_toml_subset(&text)
-                    .with_context(|| format!("parse {}", path.display()))?;
-                config
-                    .apply_values(&parsed)
-                    .with_context(|| format!("load {}", path.display()))?;
-                config
-                    .validate_provider_root_data_root(data_root)
-                    .with_context(|| format!("load {}", path.display()))?;
-            }
-            None => {}
+        if let Some(text) = mutation::read_config_text_migrating_retired_controls(&path)? {
+            let parsed =
+                parse_toml_subset(&text).with_context(|| format!("parse {}", path.display()))?;
+            config
+                .apply_values(&parsed)
+                .with_context(|| format!("load {}", path.display()))?;
+            config
+                .validate_provider_root_data_root(data_root)
+                .with_context(|| format!("load {}", path.display()))?;
         }
         Ok(config)
     }

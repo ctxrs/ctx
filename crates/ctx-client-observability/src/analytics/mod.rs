@@ -4,6 +4,8 @@ mod client;
 pub use client::*;
 mod daemon;
 pub use daemon::*;
+mod delivery;
+pub use delivery::*;
 mod mcp;
 pub use mcp::*;
 mod provider;
@@ -19,7 +21,7 @@ pub use operation::*;
 mod product;
 pub use product::*;
 mod sender;
-pub use sender::{deliver_batch, AnalyticsDeliveryAuthority};
+pub use sender::{deliver_batch, deliver_delivery_observation, AnalyticsDeliveryAuthority};
 
 #[cfg(test)]
 mod tests;

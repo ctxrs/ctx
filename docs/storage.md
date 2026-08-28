@@ -755,16 +755,17 @@ metadata checks do not send provider
 transcript text, search queries, result snippets, source paths, repository
 names, or command output.
 
-ctx first-party telemetry is default-on and uses four content-free, versioned
+ctx first-party telemetry is default-on and uses five content-free, versioned
 families only: `operation_completed@1`, `provider_refresh_completed@1`,
-`runtime_observation@1`, and `install_stage@1`. The root-local `install.json`
-is product state independent of analytics.
+`runtime_observation@1`, `analytics_delivery_observation@1`, and
+`install_stage@1`. The root-local `install.json` is product state independent
+of analytics.
 
 `operation_completed@1` reports one terminal outcome for eligible foreground
 operations. Current CLI coverage includes setup, explicit import, status,
 index, sources, show, search, docs, integrations, upgrade, and doctor. Help,
-version output, and command-line parse errors are not
-observed. MCP and the daemon are first-class reporting surfaces rather than
+version output, and command-line parse errors are not observed. MCP and the
+daemon are first-class reporting surfaces.
 
 `provider_refresh_completed@1` carries only closed provider-refresh summaries
 that a producer already has safely available. Source sizes use coarse buckets
@@ -776,9 +777,15 @@ provider/source-mode aggregate may also include the process-lifetime RSS
 high-water mark observed at completion. That field is explicitly not a
 provider-window peak and is omitted from multi-aggregate batches and
 long-lived daemon surfaces.
+Terminal refresh failures also carry a closed `failure_code` copied from the
+structured Core receipt and a boolean `retryable` value. Neither field contains
+an error message, source coordinate, route, path, or retry instruction.
 `runtime_observation@1` is for low-frequency daemon or MCP lifecycle and
-liveness observations, not per-loop or per-request tracing. These three batch
-families are delivered to
+liveness observations, not per-loop or per-request tracing.
+`analytics_delivery_observation@1` reports only bucketed queue depth, retry
+attempts, drops, oldest queued age, and a closed delivery failure class. It is
+the receipt that distinguishes "the product succeeded" from "the analytics
+report never reached the service." These four batch families are delivered to
 `https://cli.ctx.rs/functions/v1/analytics`; `file://` endpoints remain
 available as local test sinks. `install_stage@1` is produced only by the hosted
 shell and PowerShell installers and is sent as a standalone body to the hosted
@@ -799,7 +806,7 @@ search query text, result rows or snippets, source bodies, source or
 repository paths, target values, repository or branch names, native session
 IDs, command text or output, raw error strings, credentials, authorization
 headers, access tokens, secrets, usernames, hostnames, raw IP addresses, exact
-CPU or GPU names, serial numbers, hardware IDs, exact resource values, live
+CPU or GPU names, serial numbers, hardware IDs, or exact resource values.
 
 The data-root identifier lives in `install.json` and represents that local
 index even when analytics are disabled. The client-profile identifier is a
@@ -807,9 +814,24 @@ random UUID used only for analytics events; it lives outside the ctx data root
 in OS user state, such as `$XDG_STATE_HOME/ctx/device.json` or
 `~/.local/state/ctx/device.json` on Linux. When a capability snapshot is
 eligible, ctx creates a private versioned claim in that state directory and
-promotes it to a version marker after delivery. A failed or uncertain delivery
-does not change command output or exit status and leaves the claim in place to
-avoid replay. For an official hosted installation, eligible product-analytics
+promotes it to a version marker after network acceptance or durable local
+queueing. A failed or uncertain local handoff does not change command output or
+exit status and leaves the claim in place to avoid replay.
+
+If delivery fails, ctx stores the exact already-serialized content-free batch
+in the same OS user-state directory as `analytics-outbox-v1.json`. The file is
+owner-private, is never stored under the ctx data root, and contains no response
+body or raw error. It stores a one-way endpoint fingerprint plus queue time and
+attempt bookkeeping so a payload is not replayed to a different endpoint. ctx
+retries up to 10 queued batches per delivery call and bounds the outbox to 128
+entries, 2 MiB total, 512 KiB per batch, and 30 days. Oldest entries are dropped
+when a bound is reached, and the drop is reported only through the closed
+delivery-health fields. If this owner-private file is malformed or oversized,
+ctx replaces it with an empty valid outbox and reports one `local_io` drop on
+the next successful delivery. Unsafe paths, links, and permissions still fail
+closed instead of being replaced.
+
+For an official hosted installation, eligible product-analytics
 events may also carry the installer attempt identifier for less than seven days
 after the marker's installation timestamp so aggregate reporting can measure
 initial activation. ctx omits that bridge at the seven-day boundary and
@@ -828,7 +850,9 @@ export CTX_ANALYTICS_ENABLED=false
 ```
 
 Either explicit opt-out disables CLI analytics. A config opt-out wins over
-`CTX_ANALYTICS_ENABLED=true` and over an endpoint override.
+`CTX_ANALYTICS_ENABLED=true` and over an endpoint override. The next ctx process
+that opens analytics state removes any existing analytics outbox without
+creating an analytics identity or making a telemetry request.
 
 ### Installer diagnostics
 

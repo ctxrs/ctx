@@ -29,6 +29,7 @@ macro_rules! eprintln {
 }
 
 mod analytics;
+mod analytics_outbox;
 mod cli;
 mod commands;
 mod companion;

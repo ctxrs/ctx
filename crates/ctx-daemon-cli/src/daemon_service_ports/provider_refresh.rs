@@ -11,8 +11,9 @@ use serde_json::Value;
 use ctx_client_observability::analytics::{
     duration_bucket, DurationBucket, ForegroundProviderRefreshV1, Outcome, ProviderCoreResult,
     ProviderRefreshChange, ProviderRefreshCompletedV1, ProviderRefreshCountsV1,
-    ProviderRefreshFailureScope, ProviderRefreshFailureType, ProviderRefreshResult,
-    ProviderRefreshTerminalHealthV1, ProviderRefreshTrigger, PublicEventV1, Surface,
+    ProviderRefreshFailureCode, ProviderRefreshFailureScope, ProviderRefreshFailureType,
+    ProviderRefreshResult, ProviderRefreshTerminalHealthV1, ProviderRefreshTrigger, PublicEventV1,
+    Surface,
 };
 
 pub(super) fn provider_refresh_event(
@@ -79,6 +80,8 @@ pub(super) fn provider_refresh_event(
             },
             failure_scope,
             failure_type,
+            failure_code: ProviderRefreshFailureCode::None,
+            retryable: structured_retryable,
             work_remaining: successor_pending || structured_retryable,
             counts,
         },
@@ -118,6 +121,8 @@ fn failed_provider_refresh_event(
                 core_result: ProviderCoreResult::Failure,
                 failure_scope,
                 failure_type,
+                failure_code: terminal_failure_code(outcome.code),
+                retryable: outcome.retryable,
                 work_remaining: successor_pending || outcome.retryable,
                 counts,
             },
@@ -127,6 +132,42 @@ fn failed_provider_refresh_event(
             Some(retained_previous_generation),
         )),
     ))
+}
+
+fn terminal_failure_code(code: RefreshOutcomeCode) -> ProviderRefreshFailureCode {
+    match code {
+        RefreshOutcomeCode::SourceUnavailable => ProviderRefreshFailureCode::SourceUnavailable,
+        RefreshOutcomeCode::ExplicitSourcePathMissing => {
+            ProviderRefreshFailureCode::ExplicitSourcePathMissing
+        }
+        RefreshOutcomeCode::SourceChanged => ProviderRefreshFailureCode::SourceChanged,
+        RefreshOutcomeCode::MalformedSource => ProviderRefreshFailureCode::MalformedSource,
+        RefreshOutcomeCode::UnsupportedSchema => ProviderRefreshFailureCode::UnsupportedSchema,
+        RefreshOutcomeCode::SourceFailures => ProviderRefreshFailureCode::SourceFailures,
+        RefreshOutcomeCode::LogicalSourceFailures => {
+            ProviderRefreshFailureCode::LogicalSourceFailures
+        }
+        RefreshOutcomeCode::SourceUnclaimed => ProviderRefreshFailureCode::SourceUnclaimed,
+        RefreshOutcomeCode::SourceRefreshFailed => ProviderRefreshFailureCode::SourceRefreshFailed,
+        RefreshOutcomeCode::SourceRefreshInternal => {
+            ProviderRefreshFailureCode::SourceRefreshInternal
+        }
+        RefreshOutcomeCode::ResourceUnavailable => ProviderRefreshFailureCode::ResourceUnavailable,
+        RefreshOutcomeCode::IndexIncompatible => ProviderRefreshFailureCode::IndexIncompatible,
+        RefreshOutcomeCode::IndexCorruption => ProviderRefreshFailureCode::IndexCorruption,
+        RefreshOutcomeCode::SourceRefreshAdmissionFailed => {
+            ProviderRefreshFailureCode::SourceRefreshAdmissionFailed
+        }
+        RefreshOutcomeCode::AllProviderTerminalCoverageUnavailable => {
+            ProviderRefreshFailureCode::AllProviderTerminalCoverageUnavailable
+        }
+        RefreshOutcomeCode::Completed
+        | RefreshOutcomeCode::CompletedWithRejections
+        | RefreshOutcomeCode::CompletedWithSourceFailures
+        | RefreshOutcomeCode::CompletedWithRejectionsAndSourceFailures => {
+            ProviderRefreshFailureCode::None
+        }
+    }
 }
 
 fn refresh_terminal_health(

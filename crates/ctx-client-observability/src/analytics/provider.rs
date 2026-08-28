@@ -156,6 +156,58 @@ impl ProviderRefreshFailureType {
     }
 }
 
+/// Stable content-free reason for a terminal Core refresh failure.
+///
+/// This deliberately mirrors only the closed structured outcome vocabulary.
+/// Raw error detail, retry advice, route identifiers, and source coordinates
+/// are never represented here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderRefreshFailureCode {
+    None,
+    SourceUnavailable,
+    ExplicitSourcePathMissing,
+    SourceChanged,
+    MalformedSource,
+    UnsupportedSchema,
+    SourceFailures,
+    LogicalSourceFailures,
+    SourceUnclaimed,
+    SourceRefreshFailed,
+    SourceRefreshInternal,
+    ResourceUnavailable,
+    IndexIncompatible,
+    IndexCorruption,
+    SourceRefreshAdmissionFailed,
+    AllProviderTerminalCoverageUnavailable,
+    Unknown,
+}
+
+impl ProviderRefreshFailureCode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::SourceUnavailable => "source_unavailable",
+            Self::ExplicitSourcePathMissing => "explicit_source_path_missing",
+            Self::SourceChanged => "source_changed",
+            Self::MalformedSource => "malformed_source",
+            Self::UnsupportedSchema => "unsupported_schema",
+            Self::SourceFailures => "source_failures",
+            Self::LogicalSourceFailures => "logical_source_failures",
+            Self::SourceUnclaimed => "source_unclaimed",
+            Self::SourceRefreshFailed => "source_refresh_failed",
+            Self::SourceRefreshInternal => "source_refresh_internal",
+            Self::ResourceUnavailable => "resource_unavailable",
+            Self::IndexIncompatible => "index_incompatible",
+            Self::IndexCorruption => "index_corruption",
+            Self::SourceRefreshAdmissionFailed => "source_refresh_admission_failed",
+            Self::AllProviderTerminalCoverageUnavailable => {
+                "all_provider_terminal_coverage_unavailable"
+            }
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProviderRefreshCountsV1 {
     pub records: Option<CountBucket>,
@@ -188,6 +240,8 @@ pub struct ForegroundProviderRefreshV1 {
     pub core_result: ProviderCoreResult,
     pub failure_scope: ProviderRefreshFailureScope,
     pub failure_type: ProviderRefreshFailureType,
+    pub failure_code: ProviderRefreshFailureCode,
+    pub retryable: bool,
     pub work_remaining: bool,
     pub counts: Option<ProviderRefreshCountsV1>,
 }
@@ -290,6 +344,8 @@ mod tests {
                     core_result: ProviderCoreResult::Partial,
                     failure_scope: ProviderRefreshFailureScope::Record,
                     failure_type: ProviderRefreshFailureType::RecordRejection,
+                    failure_code: ProviderRefreshFailureCode::None,
+                    retryable: false,
                     work_remaining: true,
                     counts: Some(ProviderRefreshCountsV1::new(8, 2048)),
                 },
@@ -312,6 +368,8 @@ mod tests {
                 "core_result": "partial",
                 "failure_scope": "record",
                 "failure_type": "record_rejection",
+                "failure_code": "none",
+                "retryable": false,
                 "work_remaining": true,
                 "records_bucket": "6-20",
                 "logical_bytes_bucket": "lt_100kb",
@@ -334,6 +392,8 @@ mod tests {
                     core_result: ProviderCoreResult::Failure,
                     failure_scope: ProviderRefreshFailureScope::System,
                     failure_type: ProviderRefreshFailureType::System,
+                    failure_code: ProviderRefreshFailureCode::IndexCorruption,
+                    retryable: true,
                     work_remaining: true,
                     counts: None,
                 },

@@ -1,0 +1,17 @@
+{
+  "event_id": "965515a7-07f9-4b1f-91ba-73bda3a0c7cf",
+  "event_name": "analytics_delivery_observation",
+  "event_version": 1,
+  "occurred_at": "2026-07-22T12:34:00Z",
+  "surface": "cli",
+  "operation": "outbox",
+  "outcome": "failure",
+  "duration_bucket": "unknown",
+  "properties": {
+    "queued_count_bucket": "2-5",
+    "retry_attempt_count_bucket": "2-5",
+    "dropped_count_bucket": "1",
+    "oldest_queued_age_bucket": "lt_10m",
+    "failure_class": "transport"
+  }
+}

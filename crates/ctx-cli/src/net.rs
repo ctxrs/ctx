@@ -10,33 +10,103 @@ use std::{
 use anyhow::{anyhow, Context, Result};
 use url::{Host, Url};
 
+use crate::analytics::AnalyticsDeliveryFailureClass;
+
 pub(crate) const TELEMETRY_HTTP_TIMEOUT: Duration = Duration::from_millis(250);
 const MAX_ARTIFACT_REDIRECTS: usize = 5;
 
-pub(crate) fn post_telemetry_json(endpoint: &str, body: &[u8]) -> Result<()> {
+#[derive(Debug)]
+pub(crate) struct TelemetryPostError {
+    class: AnalyticsDeliveryFailureClass,
+    source: anyhow::Error,
+}
+
+impl TelemetryPostError {
+    pub(crate) fn class(&self) -> AnalyticsDeliveryFailureClass {
+        self.class
+    }
+
+    fn new(class: AnalyticsDeliveryFailureClass, source: impl Into<anyhow::Error>) -> Self {
+        Self {
+            class,
+            source: source.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for TelemetryPostError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.source.fmt(formatter)
+    }
+}
+
+impl std::error::Error for TelemetryPostError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.source.source()
+    }
+}
+
+pub(crate) fn post_telemetry_json(
+    endpoint: &str,
+    body: &[u8],
+) -> std::result::Result<(), TelemetryPostError> {
     post_json_with_timeout(endpoint, body, TELEMETRY_HTTP_TIMEOUT)
 }
 
-fn post_json_with_timeout(endpoint: &str, body: &[u8], timeout: Duration) -> Result<()> {
-    if let Some(path) = file_url_path(endpoint)? {
+fn post_json_with_timeout(
+    endpoint: &str,
+    body: &[u8],
+    timeout: Duration,
+) -> std::result::Result<(), TelemetryPostError> {
+    let file_path = file_url_path(endpoint).map_err(|error| {
+        TelemetryPostError::new(AnalyticsDeliveryFailureClass::Configuration, error)
+    })?;
+    if let Some(path) = file_path {
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)
             .open(&path)
-            .with_context(|| format!("open {}", path.display()))?;
-        file.write_all(body)?;
-        file.write_all(b"\n")?;
+            .with_context(|| format!("open {}", path.display()))
+            .map_err(|error| {
+                TelemetryPostError::new(AnalyticsDeliveryFailureClass::LocalIo, error)
+            })?;
+        file.write_all(body).map_err(|error| {
+            TelemetryPostError::new(AnalyticsDeliveryFailureClass::LocalIo, error)
+        })?;
+        file.write_all(b"\n").map_err(|error| {
+            TelemetryPostError::new(AnalyticsDeliveryFailureClass::LocalIo, error)
+        })?;
         return Ok(());
     }
-    require_https_or_localhost(endpoint)?;
-    ureq::post(endpoint)
+    require_https_or_localhost(endpoint).map_err(|error| {
+        TelemetryPostError::new(AnalyticsDeliveryFailureClass::Configuration, error)
+    })?;
+    let result = ureq::post(endpoint)
         // ureq applies this overall deadline to connection establishment too
         // when no separate connect timeout overrides it.
         .timeout(timeout)
         .set("content-type", "application/json")
-        .send_bytes(body)
-        .map(|_| ())
-        .map_err(|err| anyhow!("POST {endpoint}: {err}"))
+        .send_bytes(body);
+    match result {
+        Ok(_) => Ok(()),
+        Err(error) => {
+            let class = match &error {
+                ureq::Error::Status(429, _) => AnalyticsDeliveryFailureClass::RateLimited,
+                ureq::Error::Status(status, _) if (400..500).contains(status) => {
+                    AnalyticsDeliveryFailureClass::ClientRejection
+                }
+                ureq::Error::Status(status, _) if (500..600).contains(status) => {
+                    AnalyticsDeliveryFailureClass::Server
+                }
+                ureq::Error::Status(_, _) => AnalyticsDeliveryFailureClass::Unknown,
+                ureq::Error::Transport(_) => AnalyticsDeliveryFailureClass::Transport,
+            };
+            Err(TelemetryPostError::new(
+                class,
+                anyhow!("POST {endpoint}: {error}"),
+            ))
+        }
+    }
 }
 
 pub fn get_bytes_limited(endpoint: &str, max_bytes: usize) -> Result<Vec<u8>> {
@@ -439,6 +509,12 @@ mod tests {
         assert!(require_https_or_localhost("http://example.com@localhost/events").is_err());
         assert!(require_https_or_localhost("https://user@example.com/events").is_err());
         assert!(require_https_or_localhost("https://").is_err());
+        assert_eq!(
+            post_telemetry_json("http://example.com/events", b"{}")
+                .unwrap_err()
+                .class(),
+            AnalyticsDeliveryFailureClass::Configuration
+        );
     }
 
     #[test]
@@ -487,7 +563,10 @@ mod tests {
         release_tx.send(()).unwrap();
         server.join().unwrap();
 
-        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().class(),
+            AnalyticsDeliveryFailureClass::Transport
+        );
         assert!(
             elapsed < Duration::from_secs(1),
             "telemetry request took {elapsed:?}"
