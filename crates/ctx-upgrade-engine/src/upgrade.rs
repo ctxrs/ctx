@@ -60,32 +60,6 @@ pub trait ReleaseTransport: Send + Sync {
         max_bytes: u64,
         timeout: Duration,
     ) -> Result<u64>;
-
-    /// Downloads an artifact with the narrowly scoped address policy selected
-    /// by the signed upgrade path. Implementations that do not perform network
-    /// I/O retain the public-only default behavior.
-    fn download_artifact_with_address_policy(
-        &self,
-        endpoint: &str,
-        destination: &mut File,
-        max_bytes: u64,
-        timeout: Duration,
-        address_policy: ArtifactAddressPolicy,
-    ) -> Result<u64> {
-        let _ = address_policy;
-        self.download_artifact(endpoint, destination, max_bytes, timeout)
-    }
-}
-
-/// Address admission for signed release artifacts.
-///
-/// The opt-in variant is meaningful only to the production CLI transport,
-/// which additionally pins it to the compiled production artifact authority.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum ArtifactAddressPolicy {
-    #[default]
-    PublicOnly,
-    AllowRfc2544ForProductionAuthority,
 }
 
 /// Child-process release-authority controls supplied by the CLI.
@@ -215,7 +189,6 @@ pub trait AutomaticUpgradePolicySnapshot {
     fn interval(&self) -> Duration;
     fn channel(&self) -> &str;
     fn semantic_enabled(&self) -> bool;
-    fn allow_rfc2544_fake_ip(&self) -> bool;
 }
 
 pub trait AutomaticUpgradePolicyProvider {
@@ -268,17 +241,6 @@ pub struct UpgradePolicy<'a> {
     pub channel: &'a str,
     pub interval: Duration,
     pub semantic_enabled: bool,
-    pub allow_rfc2544_fake_ip: bool,
-}
-
-impl UpgradePolicy<'_> {
-    pub const fn artifact_address_policy(self) -> ArtifactAddressPolicy {
-        if self.allow_rfc2544_fake_ip {
-            ArtifactAddressPolicy::AllowRfc2544ForProductionAuthority
-        } else {
-            ArtifactAddressPolicy::PublicOnly
-        }
-    }
 }
 
 pub struct UpgradeEngine<'a, D: DaemonUpgradePort + ?Sized> {

@@ -7,11 +7,10 @@ use std::{
 
 use anyhow::{anyhow, Result};
 use ctx_upgrade_engine::{
-    ArtifactAddressPolicy, AutomaticUpgradeObservation, AutomaticUpgradePolicyProvider,
-    DaemonRestart, DaemonUpgradeLease, DaemonUpgradePort, ProductBuildIdentity, ReleaseProcessPort,
-    ReleaseTransport, SemanticAccelerator, SemanticLayoutPort, SemanticModelContract,
-    SemanticModelVariant, UpgradeEngine, UpgradeFailureKind as EngineFailureKind, UpgradeObserver,
-    UpgradeTerminalStatus,
+    AutomaticUpgradeObservation, AutomaticUpgradePolicyProvider, DaemonRestart, DaemonUpgradeLease,
+    DaemonUpgradePort, ProductBuildIdentity, ReleaseProcessPort, ReleaseTransport,
+    SemanticAccelerator, SemanticLayoutPort, SemanticModelContract, SemanticModelVariant,
+    UpgradeEngine, UpgradeFailureKind as EngineFailureKind, UpgradeObserver, UpgradeTerminalStatus,
 };
 
 use crate::{
@@ -58,23 +57,6 @@ impl ReleaseTransport for CliReleaseTransport {
         timeout: Duration,
     ) -> Result<u64> {
         crate::net::download_artifact(endpoint, destination, max_bytes, timeout)
-    }
-
-    fn download_artifact_with_address_policy(
-        &self,
-        endpoint: &str,
-        destination: &mut File,
-        max_bytes: u64,
-        timeout: Duration,
-        address_policy: ArtifactAddressPolicy,
-    ) -> Result<u64> {
-        crate::net::download_artifact_with_address_policy(
-            endpoint,
-            destination,
-            max_bytes,
-            timeout,
-            address_policy,
-        )
     }
 }
 

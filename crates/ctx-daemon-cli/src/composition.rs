@@ -42,7 +42,6 @@ pub struct AnalyticsConfig {
 #[derive(Debug, Clone)]
 pub struct UpgradeConfig<'a> {
     automatic_upgrade_enabled: bool,
-    allow_rfc2544_fake_ip: bool,
     pub channel: Cow<'a, str>,
     pub interval: Duration,
 }
@@ -74,7 +73,6 @@ impl<'a> AppConfig<'a> {
             },
             upgrade: UpgradeConfig {
                 automatic_upgrade_enabled,
-                allow_rfc2544_fake_ip: false,
                 channel: upgrade_channel,
                 interval: upgrade_interval,
             },
@@ -113,15 +111,6 @@ impl<'a> AppConfig<'a> {
 
     pub const fn auto_upgrade_enabled(&self) -> bool {
         self.upgrade.automatic_upgrade_enabled
-    }
-
-    pub const fn upgrade_allows_rfc2544_fake_ip(&self) -> bool {
-        self.upgrade.allow_rfc2544_fake_ip
-    }
-
-    pub fn with_upgrade_allow_rfc2544_fake_ip(mut self, allow_rfc2544_fake_ip: bool) -> Self {
-        self.upgrade.allow_rfc2544_fake_ip = allow_rfc2544_fake_ip;
-        self
     }
 
     pub fn upgrade_channel(&self) -> &str {

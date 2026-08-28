@@ -49,17 +49,6 @@
       }
     },
     {
-      "behavior": "RFC 2544 official artifact download opt-in",
-      "config_key": "upgrade.allow_rfc2544_fake_ip",
-      "environment_variable": null,
-      "released_default": {
-        "value": false,
-        "state": "off",
-        "scope": "official_installer_managed"
-      },
-      "introduced_after": "v0.25.0"
-    },
-    {
       "behavior": "upgrade channel",
       "config_key": "upgrade.channel",
       "environment_variable": "CTX_UPGRADE_CHANNEL"
@@ -133,15 +122,36 @@
     "CTX_UPGRADE_FUNCTIONS_BASE",
     "CTX_DISABLE_SEMANTIC_SEARCH",
     "upgrade.functions_base",
-    "upgrade.interval_seconds"
+    "upgrade.interval_seconds",
+    "upgrade.allow_rfc2544_fake_ip"
   ],
+  "retired_control_match_literals": {
+    "upgrade.allow_rfc2544_fake_ip": [
+      "allow_rfc2544_fake_ip"
+    ]
+  },
   "retired_control_reference": "docs/storage.md",
   "retired_control_containment": [
     {
       "path": "crates/ctx-cli/src/config_tests.rs",
-      "purpose": "Assert that the removed persistent release-authority key is rejected.",
+      "purpose": "Assert rejection of the removed release-authority key and migration of the short-lived RFC 2544 compatibility key.",
       "controls": [
-        "upgrade.functions_base"
+        "upgrade.functions_base",
+        "upgrade.allow_rfc2544_fake_ip"
+      ]
+    },
+    {
+      "path": "crates/ctx-cli/src/config/mutation.rs",
+      "purpose": "Remove the short-lived RFC 2544 compatibility key from persisted 1.2.1 configuration without changing unrelated settings.",
+      "controls": [
+        "upgrade.allow_rfc2544_fake_ip"
+      ]
+    },
+    {
+      "path": "crates/ctx-daemon-cli/tests/contracts/daemon_config_reload.rs",
+      "purpose": "Exercise startup and live-reload migration of the short-lived RFC 2544 compatibility key.",
+      "controls": [
+        "upgrade.allow_rfc2544_fake_ip"
       ]
     },
     {

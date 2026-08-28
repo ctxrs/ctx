@@ -14,7 +14,7 @@ use ctx_history_platform::platform_security::{
 };
 use sha2::{Digest, Sha256};
 
-use super::{ArtifactAddressPolicy, ReleaseTransport};
+use super::ReleaseTransport;
 
 const DOWNLOAD_DIRECTORY: &str = ".ctx-upgrade-downloads";
 
@@ -29,7 +29,6 @@ pub(super) struct DownloadedArtifact {
 }
 
 impl DownloadedArtifact {
-    #[cfg(test)]
     pub(super) fn download_verified(
         transport: &dyn ReleaseTransport,
         managed_root: &Path,
@@ -37,26 +36,6 @@ impl DownloadedArtifact {
         expected_sha256: &str,
         max_bytes: u64,
         timeout: Duration,
-    ) -> Result<Self> {
-        Self::download_verified_with_address_policy(
-            transport,
-            managed_root,
-            endpoint,
-            expected_sha256,
-            max_bytes,
-            timeout,
-            ArtifactAddressPolicy::PublicOnly,
-        )
-    }
-
-    pub(super) fn download_verified_with_address_policy(
-        transport: &dyn ReleaseTransport,
-        managed_root: &Path,
-        endpoint: &str,
-        expected_sha256: &str,
-        max_bytes: u64,
-        timeout: Duration,
-        address_policy: ArtifactAddressPolicy,
     ) -> Result<Self> {
         validate_sha256(expected_sha256)?;
         if max_bytes == 0 {
@@ -73,13 +52,8 @@ impl DownloadedArtifact {
             sha256: expected_sha256.to_ascii_lowercase(),
             remove_on_drop: true,
         };
-        artifact.byte_len = transport.download_artifact_with_address_policy(
-            endpoint,
-            artifact.file_mut()?,
-            max_bytes,
-            timeout,
-            address_policy,
-        )?;
+        artifact.byte_len =
+            transport.download_artifact(endpoint, artifact.file_mut()?, max_bytes, timeout)?;
         artifact
             .file_ref()?
             .sync_all()
@@ -91,7 +65,6 @@ impl DownloadedArtifact {
     /// Reuses an owner-private cached artifact only after rehashing it against
     /// current signed metadata. A cache miss downloads into a bounded
     /// temporary file and publishes a verified copy for later releases.
-    #[cfg(test)]
     pub(super) fn download_or_reuse_verified(
         transport: &dyn ReleaseTransport,
         managed_root: &Path,
@@ -99,26 +72,6 @@ impl DownloadedArtifact {
         expected_sha256: &str,
         max_bytes: u64,
         timeout: Duration,
-    ) -> Result<Self> {
-        Self::download_or_reuse_verified_with_address_policy(
-            transport,
-            managed_root,
-            endpoint,
-            expected_sha256,
-            max_bytes,
-            timeout,
-            ArtifactAddressPolicy::PublicOnly,
-        )
-    }
-
-    pub(super) fn download_or_reuse_verified_with_address_policy(
-        transport: &dyn ReleaseTransport,
-        managed_root: &Path,
-        endpoint: &str,
-        expected_sha256: &str,
-        max_bytes: u64,
-        timeout: Duration,
-        address_policy: ArtifactAddressPolicy,
     ) -> Result<Self> {
         validate_sha256(expected_sha256)?;
         let downloads = prepare_download_directory(managed_root)?;
@@ -144,14 +97,13 @@ impl DownloadedArtifact {
             }
         }
 
-        let mut downloaded = Self::download_verified_with_address_policy(
+        let mut downloaded = Self::download_verified(
             transport,
             managed_root,
             endpoint,
             expected_sha256,
             max_bytes,
             timeout,
-            address_policy,
         )?;
         downloaded.publish_cache_copy(&cache_path)?;
         Ok(downloaded)

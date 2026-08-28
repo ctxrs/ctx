@@ -98,25 +98,6 @@ fn daemon_cli_config_borrows_passive_upgrade_policy() {
 }
 
 #[test]
-fn daemon_snapshot_propagates_rfc2544_fake_ip_upgrade_policy() {
-    let mut config = crate::config::AppConfig::default();
-    let default_snapshot = daemon_config_snapshot(&config);
-    assert!(
-        !ctx_upgrade_engine::AutomaticUpgradePolicySnapshot::allow_rfc2544_fake_ip(
-            &default_snapshot
-        )
-    );
-
-    config.upgrade.allow_rfc2544_fake_ip = true;
-    let opted_in_snapshot = daemon_config_snapshot(&config);
-    assert!(
-        ctx_upgrade_engine::AutomaticUpgradePolicySnapshot::allow_rfc2544_fake_ip(
-            &opted_in_snapshot
-        )
-    );
-}
-
-#[test]
 fn nonempty_daemon_observation_batch_loads_config_once() -> Result<()> {
     let _env_lock = crate::config::TEST_LOCAL_USAGE_ENV_LOCK
         .lock()

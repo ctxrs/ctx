@@ -38,7 +38,6 @@ use toml_subset::*;
 
 pub const CONFIG_FILE: &str = "config.toml";
 pub const AUTO_UPGRADE_DEFAULT_MODE: &str = "apply";
-pub const UPGRADE_ALLOW_RFC2544_FAKE_IP_DEFAULT: bool = false;
 pub const DAEMON_MODE_ENV: &str = "CTX_DAEMON_MODE";
 pub const LOCAL_USAGE_DEFAULT_ENABLED: bool = true;
 pub const SEMANTIC_SEARCH_DEFAULT_ENABLED: bool = false;
@@ -214,11 +213,9 @@ pub(crate) struct LocalUsageConfigResolver {
 impl LocalUsageConfigResolver {
     pub(crate) fn resolve(&mut self, data_root: &Path) -> LocalUsageResolution {
         let path = AppConfig::config_path(data_root);
-        let source = match fs::read_to_string(&path) {
-            Ok(text) => Some(LocalUsageConfigSource::Text(text)),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                Some(LocalUsageConfigSource::Missing)
-            }
+        let source = match mutation::read_config_text_migrating_retired_controls(&path) {
+            Ok(Some(text)) => Some(LocalUsageConfigSource::Text(text)),
+            Ok(None) => Some(LocalUsageConfigSource::Missing),
             Err(_) => None,
         };
         let config_state = match source {
@@ -292,7 +289,6 @@ impl LocalUsageResolution {
 #[derive(Debug, Clone)]
 pub struct UpgradeConfig {
     pub auto: String,
-    pub allow_rfc2544_fake_ip: bool,
     pub channel: String,
     pub interval: Duration,
 }
@@ -350,9 +346,6 @@ impl Default for AppConfig {
             upgrade: UpgradeConfig {
                 // Managed installs check and apply in the background unless explicitly disabled.
                 auto: AUTO_UPGRADE_DEFAULT_MODE.to_owned(),
-                // RFC 2544 benchmark addresses remain rejected unless a controlled
-                // official-artifact test environment explicitly enables them.
-                allow_rfc2544_fake_ip: UPGRADE_ALLOW_RFC2544_FAKE_IP_DEFAULT,
                 channel: "stable".to_owned(),
                 interval: Duration::from_secs(24 * 60 * 60),
             },
@@ -431,8 +424,8 @@ impl AppConfig {
         observe_app_config_load();
         let mut config = Self::default();
         let path = data_root.join(CONFIG_FILE);
-        match fs::read_to_string(&path) {
-            Ok(text) => {
+        match mutation::read_config_text_migrating_retired_controls(&path)? {
+            Some(text) => {
                 let parsed = parse_toml_subset(&text)
                     .with_context(|| format!("parse {}", path.display()))?;
                 config
@@ -442,8 +435,7 @@ impl AppConfig {
                     .validate_provider_root_data_root(data_root)
                     .with_context(|| format!("load {}", path.display()))?;
             }
-            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-            Err(err) => return Err(err).with_context(|| format!("read {}", path.display())),
+            None => {}
         }
         Ok(config)
     }
@@ -518,9 +510,6 @@ impl AppConfig {
                 }
                 "upgrade.auto" => {
                     self.upgrade.auto = parse_upgrade_auto(value)?;
-                }
-                "upgrade.allow_rfc2544_fake_ip" => {
-                    self.upgrade.allow_rfc2544_fake_ip = parse_config_bool(key, value)?;
                 }
                 "upgrade.channel" => {
                     self.upgrade.channel = parse_non_empty_string(key, value)?;

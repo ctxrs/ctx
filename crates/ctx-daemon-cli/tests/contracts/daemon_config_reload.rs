@@ -112,6 +112,22 @@ mod unix {
         .unwrap();
     }
 
+    fn write_config_with_retired_upgrade_control(
+        temp: &tempfile::TempDir,
+        daemon_mode: &str,
+        semantic: bool,
+    ) {
+        let root = data_root(temp);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("config.toml"),
+            format!(
+                "[analytics]\nenabled = false\n\n[upgrade]\nauto = \"off\"\nallow_rfc2544_fake_ip = true\n\n[daemon]\nenabled = true\nmode = \"{daemon_mode}\"\n\n[search]\nsemantic = {semantic}\n"
+            ),
+        )
+        .unwrap();
+    }
+
     fn initialize_store(temp: &tempfile::TempDir, binary: &Path) {
         fs::create_dir_all(temp.path().join(".codex/sessions")).unwrap();
         let mut command = std_ctx_from_binary(temp, binary);
@@ -259,6 +275,45 @@ mod unix {
         let mut command = ctx_from_binary(temp, binary);
         command.args(["daemon", "status", "--format=json"]);
         json_output(&mut command)["daemon"].clone()
+    }
+
+    #[test]
+    fn retired_upgrade_control_migrates_on_startup_and_live_reload_without_restart() {
+        let _serial = serial_daemon_test();
+        let temp = tempdir();
+        let binary = copied_ctx_binary(&temp);
+        write_config(&temp, false);
+        initialize_store(&temp, &binary);
+
+        write_config_with_retired_upgrade_control(&temp, "full", false);
+        let mut daemon = spawn_daemon(&temp, &binary, 1);
+        let original_pid = daemon.pid();
+        wait_for_disabled_cycle(&temp, original_pid);
+        let config_path = data_root(&temp).join("config.toml");
+        wait_for("startup config migration", || {
+            fs::read_to_string(&config_path)
+                .is_ok_and(|text| !text.contains("allow_rfc2544_fake_ip"))
+        });
+
+        write_config_with_retired_upgrade_control(&temp, "source-refresh-only", false);
+        wait_for("live config migration and mode reload", || {
+            daemon_lifecycle(&temp).is_some_and(|lifecycle| {
+                lifecycle["pid"] == original_pid
+                    && lifecycle["config_reload"]["status"] == "applied"
+                    && lifecycle["config_reload"]["applied"]["daemon_mode"]
+                        == "source-refresh-only"
+                    && fs::read_to_string(&config_path)
+                        .is_ok_and(|text| !text.contains("allow_rfc2544_fake_ip"))
+            })
+        });
+        let status = daemon_status(&temp, &binary);
+        assert_eq!(status["pid"], original_pid);
+        assert_eq!(status["config_reload"]["status"], "applied");
+        assert_eq!(status["config_reload"]["out_of_sync"], false);
+        let migrated = fs::read(&config_path).unwrap();
+        std::thread::sleep(Duration::from_secs(2));
+        assert_eq!(fs::read(&config_path).unwrap(), migrated);
+        daemon.assert_running();
     }
 
     #[test]
