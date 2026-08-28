@@ -41,4 +41,7 @@ pub use routing::{
     CaptureAdmissionPort, IngestProgressPort, IngestRefreshPort, IngestRequest, IngestRoute,
     ProviderSelectionGuidance, SourceDiscoveryPort,
 };
-pub use totals::{ImportFailureScope, ImportFailureType, ImportOutcome, ImportTotals};
+pub use totals::{
+    ImportFailureScope, ImportFailureType, ImportIndexDelta, ImportIndexFacts, ImportOutcome,
+    ImportTotals,
+};

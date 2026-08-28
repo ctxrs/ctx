@@ -4,7 +4,8 @@ use anyhow::Result;
 use ctx_history_capture::{source_backed_source_failure_identity, ProviderSource};
 use ctx_history_core::CaptureProvider;
 use ctx_history_ingest_application::{
-    HistorySourcePluginSource, ImportPathMissingDuringRefresh, IngestPublication, RefreshSelection,
+    HistorySourcePluginSource, ImportIndexFacts, ImportPathMissingDuringRefresh, IngestPublication,
+    RefreshSelection,
 };
 use ctx_history_platform::platform_security::establish_private_data_root;
 use ctx_history_refresh::ExplicitSourceCatalogUpsert;
@@ -95,6 +96,36 @@ impl ctx_history_cli::ImportApplicationPort for CliImportHost {
                 }
             })?;
         let pinned_generation = refresh.pin.generation_id().to_owned();
+        let current_index = refresh.pin.verified_index();
+        let current_sessions = current_index.session_count()?;
+        let current_searchable_events = current_index.document_count();
+        let previous_cardinalities = match refresh.request_previous_generation.as_deref() {
+            None => None,
+            Some(previous_generation) if previous_generation == pinned_generation => {
+                Some((current_sessions, current_searchable_events))
+            }
+            Some(previous_generation) => {
+                // The import publication is already authoritative. A later
+                // publication may have retired its predecessor before this
+                // optional presentation measurement, so omit the delta
+                // instead of failing a successful import or guessing.
+                optional_import_baseline(|| {
+                    let previous = ctx_history_refresh::pin_retained_generation(
+                        data_root,
+                        previous_generation,
+                    )?;
+                    Ok((
+                        previous.verified_index().session_count()?,
+                        previous.verified_index().document_count(),
+                    ))
+                })
+            }
+        };
+        let index_facts = ImportIndexFacts::from_cardinalities(
+            current_sessions,
+            current_searchable_events,
+            previous_cardinalities,
+        );
         let policy_schema_hash = exact_route_lineages.is_none().then(|| {
             refresh
                 .pin
@@ -122,13 +153,29 @@ impl ctx_history_cli::ImportApplicationPort for CliImportHost {
             pinned_generation,
             policy_schema_hash,
             catalog_content,
+            index_facts: Some(index_facts),
             receipt: refresh.receipt,
         })
     }
 }
 
+fn optional_import_baseline(measure: impl FnOnce() -> Result<(u64, u64)>) -> Option<(u64, u64)> {
+    measure().ok()
+}
+
 #[cfg(test)]
 mod tests {
+    use super::optional_import_baseline;
+
+    #[test]
+    fn optional_baseline_measurement_cannot_fail_a_successful_import() {
+        assert_eq!(
+            optional_import_baseline(|| anyhow::bail!("retained generation was reclaimed")),
+            None
+        );
+        assert_eq!(optional_import_baseline(|| Ok((3, 8))), Some((3, 8)));
+    }
+
     #[test]
     fn final_host_contains_only_concrete_side_effect_adapters() {
         let source = include_str!("application_adapter.rs");

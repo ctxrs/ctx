@@ -496,6 +496,15 @@ up to five rejection details when every content record was rejected.
 changed; it is independent of insert counters. A deterministic source
 replacement can therefore report `change: "changed"`, zero newly imported
 events, and skipped existing events while reconciling those rows in place.
+Run-level `totals` also includes `current_indexed_sessions`. On a manual import
+with a safely retained preceding Core generation, it includes an additive
+`index_delta` object whose signed `sessions` and `searchable_events` members
+report the net cardinality change in that exact Core publication. The object is
+omitted on the first import and whenever the preceding generation is no longer
+available; omission means unknown, not zero. A no-op reports zero deltas, while
+a same-cardinality rewrite may report `change: "changed"` with zero deltas.
+These are generation-wide index facts, not `imported_*` work counters, and are
+not repeated on individual source rows.
 Rejection details are exposed as `rejections`
 (bounded to five entries); `failed_sources` remains the count of source-level
 failures. `sources_completed_with_rejections` counts sources that committed

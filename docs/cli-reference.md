@@ -504,6 +504,15 @@ Import results report `change: changed|no_op` independently from import and
 skip counters. `change: changed` remains truthful even when a source projects
 to the same stable event identities.
 
+After a manual re-import, the human receipt reports signed `Sessions` and
+`Searchable events` under `Net index change`, followed by their current totals
+under `Current index`. Positive, zero, and negative values are net changes in
+the exact Core publication, not newly parsed or imported records. The first
+import shows current totals without a delta because there is no preceding Core
+generation to compare. If concurrent publication has already retired that
+preceding generation, ctx omits the delta rather than guessing. Background
+refresh and setup output do not gain this manual-import receipt section.
+
 In automatic mode, `import` may start the persistent daemon and uses its
 source-refresh endpoint for foreground Core publication. In manual mode, an
 explicit import may start the same Core engine as a finite worker; it waits for

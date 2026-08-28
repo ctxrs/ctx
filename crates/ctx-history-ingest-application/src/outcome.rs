@@ -4,7 +4,7 @@ use ctx_history_capture_model::{ProviderImportSummary, ProviderSource};
 use ctx_history_core::CaptureProvider;
 use ctx_history_refresh::{ExplicitSourceCatalogAuthority, SourceBackedRefreshCurrent};
 
-use crate::{HistorySourcePluginSource, ImportTotals, SourceStats};
+use crate::{HistorySourcePluginSource, ImportIndexFacts, ImportTotals, SourceStats};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IngestStatus {
@@ -315,5 +315,6 @@ pub struct IngestPublication {
     pub pinned_generation: String,
     pub policy_schema_hash: Option<String>,
     pub catalog_content: std::collections::BTreeMap<String, (bool, bool)>,
+    pub index_facts: Option<ImportIndexFacts>,
     pub receipt: Option<ctx_history_refresh::SourceBackedRefreshReceipt>,
 }

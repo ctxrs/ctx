@@ -197,10 +197,31 @@ fn codex_source(message: &str) -> String {
     .collect()
 }
 
-fn import_codex(temp: &TempDir) -> Value {
+fn codex_response_item(id: &str, timestamp: &str, message: &str) -> String {
+    format!(
+        "{}\n",
+        serde_json::to_string(&json!({
+            "timestamp": timestamp,
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "id": id,
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": message
+                }]
+            }
+        }))
+        .unwrap()
+    )
+}
+
+fn import_codex_with_selection(temp: &TempDir, selection: &[&str]) -> Value {
     let events_path = temp.path().join("analytics.jsonl");
-    let output = isolated_ctx(temp)
-        .args(["import", "--all"])
+    let mut command = isolated_ctx(temp);
+    command.arg("import").args(selection);
+    let output = command
         .args(["--no-daemon", "--format=json", "--progress", "none"])
         .env("CTX_ANALYTICS_ENABLED", "true")
         .env("CTX_ANALYTICS_DEBUG", "1")
@@ -220,6 +241,14 @@ fn import_codex(temp: &TempDir) -> Value {
         String::from_utf8_lossy(&output.stderr)
     );
     serde_json::from_slice(&output.stdout).unwrap()
+}
+
+fn import_codex(temp: &TempDir) -> Value {
+    import_codex_with_selection(temp, &["--provider", "codex"])
+}
+
+fn import_all_codex(temp: &TempDir) -> Value {
+    import_codex_with_selection(temp, &["--all"])
 }
 
 fn assert_change(report: &Value, expected: &str) {
@@ -261,11 +290,16 @@ fn assert_new_generation(report: &Value, prior_generation: &str) -> String {
 fn assert_current_generation(
     report: &Value,
     source_count: u64,
+    indexed_sessions: u64,
     indexed_documents: u64,
     rejected_records: u64,
 ) {
     assert_eq!(
         report["totals"]["current_source_count"], source_count,
+        "{report:#}"
+    );
+    assert_eq!(
+        report["totals"]["current_indexed_sessions"], indexed_sessions,
         "{report:#}"
     );
     assert_eq!(
@@ -319,6 +353,21 @@ fn assert_current_generation(
     assert!(report["totals"]["rejections"].is_object(), "{report:#}");
 }
 
+fn assert_index_delta(report: &Value, sessions: i64, searchable_events: i64) {
+    assert_eq!(
+        report["totals"]["index_delta"]["sessions"], sessions,
+        "{report:#}"
+    );
+    assert_eq!(
+        report["totals"]["index_delta"]["searchable_events"], searchable_events,
+        "{report:#}"
+    );
+    assert!(
+        report["sources"][0].get("index_delta").is_none(),
+        "run-level index delta leaked into a source row: {report:#}"
+    );
+}
+
 fn latest_source_refresh_properties(temp: &TempDir) -> serde_json::Map<String, Value> {
     let event = read_analytics_events(&temp.path().join("analytics.jsonl"))
         .last()
@@ -341,20 +390,20 @@ fn latest_source_refresh_properties(temp: &TempDir) -> serde_json::Map<String, V
 #[test]
 fn codex_reimport_rebuilds_from_provider_source() {
     let temp = tempdir();
-    let _daemon = start_source_refresh_daemon(&temp);
     let source_root = home_root(&temp).join(".codex/sessions");
     let source = source_root.join("2026/07/23/rollout-2026-07-23T01-00-00-source-authority.jsonl");
     fs::create_dir_all(source.parent().unwrap()).unwrap();
     fs::write(&source, codex_source("ctxsupersededtoken")).unwrap();
+    let _daemon = start_source_refresh_daemon(&temp);
 
-    let initial = import_codex(&temp);
+    let initial = import_all_codex(&temp);
     let initial_change = initial["sources"][0]["change"]
         .as_str()
         .expect("initial change classification");
     assert!(matches!(initial_change, "changed" | "no_op"), "{initial:#}");
     assert_change(&initial, initial_change);
     assert_eq!(initial["outcome"], "success", "{initial:#}");
-    assert_current_generation(&initial, 1, 1, 0);
+    assert_current_generation(&initial, 1, 1, 1, 0);
     assert_eq!(
         initial["sources"][0]["generation_changed"],
         initial_change == "changed",
@@ -376,10 +425,11 @@ fn codex_reimport_rebuilds_from_provider_source() {
     assert!(initial_analytics.get("provider").is_none());
     assert!(initial_analytics.get("events_bucket").is_none());
     assert!(initial_analytics.get("rejections_bucket").is_none());
-    let unchanged = import_codex(&temp);
+    let unchanged = import_all_codex(&temp);
     assert_change(&unchanged, "no_op");
     assert_eq!(unchanged["outcome"], "success", "{unchanged:#}");
-    assert_current_generation(&unchanged, 1, 1, 0);
+    assert_current_generation(&unchanged, 1, 1, 1, 0);
+    assert_index_delta(&unchanged, 0, 0);
     assert_eq!(
         unchanged["sources"][0]["previous_generation"],
         initial_generation
@@ -390,6 +440,19 @@ fn codex_reimport_rebuilds_from_provider_source() {
     );
     assert_eq!(unchanged["sources"][0]["generation_changed"], false);
     assert_eq!(latest_source_refresh_properties(&temp)["change"], "no_op");
+
+    let mut source_file = fs::OpenOptions::new().append(true).open(&source).unwrap();
+    source_file
+        .write_all(
+            codex_response_item("message-two", "2026-07-23T01:00:02Z", "ctxappendtoken").as_bytes(),
+        )
+        .unwrap();
+    source_file.sync_all().unwrap();
+    let appended = import_all_codex(&temp);
+    assert_eq!(appended["outcome"], "success", "{appended:#}");
+    assert_current_generation(&appended, 1, 1, 2, 0);
+    assert_index_delta(&appended, 0, 1);
+    let appended_generation = assert_new_generation(&appended, &initial_generation);
 
     let rewritten_source = fs::read_to_string(&source)
         .unwrap()
@@ -402,10 +465,11 @@ fn codex_reimport_rebuilds_from_provider_source() {
     source_file.write_all(rewritten_source.as_bytes()).unwrap();
     source_file.sync_all().unwrap();
 
-    let replay = import_codex(&temp);
+    let replay = import_all_codex(&temp);
     assert_eq!(replay["outcome"], "success", "{replay:#}");
-    assert_current_generation(&replay, 1, 1, 0);
-    let replay_generation = assert_new_generation(&replay, &initial_generation);
+    assert_current_generation(&replay, 1, 1, 2, 0);
+    assert_index_delta(&replay, 0, 0);
+    let replay_generation = assert_new_generation(&replay, &appended_generation);
     let search = json_output(isolated_ctx(&temp).args([
         "search",
         "ctxreplacementtext",
@@ -440,12 +504,13 @@ fn codex_reimport_rebuilds_from_provider_source() {
         fs::read_to_string(&source).unwrap()
     );
     fs::write(&source, with_rejection).unwrap();
-    let rejected = import_codex(&temp);
+    let rejected = import_all_codex(&temp);
     assert_eq!(
         rejected["outcome"], "completed_with_rejections",
         "{rejected:#}"
     );
-    assert_current_generation(&rejected, 1, 1, 1);
+    assert_current_generation(&rejected, 1, 1, 2, 1);
+    assert_index_delta(&rejected, 0, 0);
     let rejected_generation = assert_new_generation(&rejected, &replay_generation);
     assert_eq!(rejected["totals"]["rejected_records"], 1);
     assert_eq!(rejected["totals"]["sources_completed_with_rejections"], 1);
@@ -459,15 +524,16 @@ fn codex_reimport_rebuilds_from_provider_source() {
     assert!(rejection_analytics.get("source_mode").is_none());
 
     fs::remove_file(&source).unwrap();
-    let mut deleted = import_codex(&temp);
+    let mut deleted = import_all_codex(&temp);
     for _ in 1..3 {
         if deleted["totals"]["current_source_count"] == 0 {
             break;
         }
-        deleted = import_codex(&temp);
+        deleted = import_all_codex(&temp);
     }
     assert_eq!(deleted["outcome"], "success", "{deleted:#}");
-    assert_current_generation(&deleted, 0, 0, 0);
+    assert_current_generation(&deleted, 0, 0, 0, 0);
+    assert_index_delta(&deleted, -1, -2);
     assert_change(&deleted, "changed");
     assert_eq!(deleted["sources"][0]["generation_changed"], true);
     assert_ne!(
@@ -481,7 +547,6 @@ fn codex_reimport_rebuilds_from_provider_source() {
 #[test]
 fn discovered_codex_session_tree_reports_admitted_source_format() {
     let tree_temp = tempdir();
-    let _daemon = start_source_refresh_daemon(&tree_temp);
     let tree = home_root(&tree_temp).join(".codex/sessions");
     fs::create_dir_all(tree.join("2026/07/23")).unwrap();
     let compressed =
@@ -491,6 +556,7 @@ fn discovered_codex_session_tree_reports_admitted_source_format() {
         compressed,
     )
     .unwrap();
+    let _daemon = start_source_refresh_daemon(&tree_temp);
     let tree_report = import_codex(&tree_temp);
     assert_eq!(tree_report["outcome"], "success", "{tree_report:#}");
     assert_eq!(
@@ -508,6 +574,7 @@ fn discovered_codex_session_tree_reports_admitted_source_format() {
     ));
     assert!(tree_report["totals"].get("imported_sessions").is_none());
     assert!(tree_report["totals"].get("imported_events").is_none());
+    assert_eq!(tree_report["totals"]["current_indexed_sessions"], 1);
     assert_eq!(tree_report["totals"]["current_indexed_documents"], 1);
 
     let unchanged = import_codex(&tree_temp);
@@ -519,5 +586,7 @@ fn discovered_codex_session_tree_reports_admitted_source_format() {
     );
     assert_eq!(unchanged["sources"][0]["certified_source_count"], 1);
     assert_eq!(unchanged["sources"][0]["published_generation"], generation);
+    assert_eq!(unchanged["totals"]["current_indexed_sessions"], 1);
     assert_eq!(unchanged["totals"]["current_indexed_documents"], 1);
+    assert_index_delta(&unchanged, 0, 0);
 }

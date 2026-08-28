@@ -90,6 +90,7 @@ where
         rejected_record_total,
         sources_completed_with_rejections,
         publication.request_generation_changed,
+        publication.index_facts,
     );
     let has_source_failures = source_failure_total != 0;
     let has_rejections = rejected_record_total != 0;
@@ -248,7 +249,7 @@ fn exact_report(
         ..ProviderImportSummary::default()
     };
     let current = receipt.current;
-    let totals = ImportTotals {
+    let mut totals = ImportTotals {
         per_run_counts_available: false,
         terminal_route_counts_available: true,
         source_files: stats.files,
@@ -275,6 +276,7 @@ fn exact_report(
         },
         ..ImportTotals::default()
     };
+    apply_index_facts(&mut totals, publication.index_facts);
     let failure_type = exact_failure_type(
         requested_source_failed,
         requested_rejected,
@@ -432,7 +434,7 @@ fn plugin_report(
         ..ProviderImportSummary::default()
     };
     let current = receipt.current;
-    let totals = ImportTotals {
+    let mut totals = ImportTotals {
         terminal_route_counts_available: true,
         failed: usize::try_from(rejected_record_total).unwrap_or(usize::MAX),
         sources_completed_with_rejections: usize::from(rejected_record_total != 0),
@@ -454,6 +456,7 @@ fn plugin_report(
         },
         ..ImportTotals::default()
     };
+    apply_index_facts(&mut totals, publication.index_facts);
     let has_rejections = rejected_record_total != 0;
     let source_outcome = PluginPublicationOutcome {
         status: if has_rejections {
@@ -557,8 +560,9 @@ fn terminal_totals(
     rejected_record_total: u64,
     sources_completed_with_rejections: usize,
     generation_changed: bool,
+    index_facts: Option<crate::ImportIndexFacts>,
 ) -> ImportTotals {
-    ImportTotals {
+    let mut totals = ImportTotals {
         per_run_counts_available: false,
         terminal_route_counts_available: true,
         failed_sources: source_failure_total,
@@ -579,6 +583,15 @@ fn terminal_totals(
             ProviderImportWorkResult::NoOp
         },
         ..ImportTotals::default()
+    };
+    apply_index_facts(&mut totals, index_facts);
+    totals
+}
+
+fn apply_index_facts(totals: &mut ImportTotals, facts: Option<crate::ImportIndexFacts>) {
+    if let Some(facts) = facts {
+        totals.current_indexed_sessions = Some(facts.current_sessions);
+        totals.index_delta = facts.delta;
     }
 }
 
