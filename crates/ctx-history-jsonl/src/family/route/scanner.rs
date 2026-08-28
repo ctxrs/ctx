@@ -197,11 +197,15 @@ impl<E: super::super::JsonlFamilyError> JsonlFamilyOptimizedLeafOutcome<E> {
 #[derive(Debug)]
 pub struct JsonlFamilySemanticPage {
     records: Vec<CoreRecord>,
+    encoded_byte_limit: usize,
 }
 
 impl JsonlFamilySemanticPage {
     pub fn new(records: Vec<CoreRecord>) -> Self {
-        Self { records }
+        Self {
+            records,
+            encoded_byte_limit: PAGE_MAX_BYTES,
+        }
     }
 
     /// Splits projected records into publication pages without changing their
@@ -210,13 +214,42 @@ impl JsonlFamilySemanticPage {
     pub fn split_bounded<E: JsonlFamilyError>(
         records: Vec<CoreRecord>,
     ) -> JsonlResult<Vec<Self>, E> {
+        Self::split_bounded_with_singleton_limit(records, PAGE_MAX_BYTES)
+    }
+
+    /// Splits projected records at the ordinary page limit while allowing one
+    /// provider-bounded record to occupy a larger singleton page.
+    pub fn split_bounded_with_singleton_limit<E: JsonlFamilyError>(
+        records: Vec<CoreRecord>,
+        singleton_byte_limit: usize,
+    ) -> JsonlResult<Vec<Self>, E> {
+        if singleton_byte_limit < PAGE_MAX_BYTES {
+            return Err(E::invalid_payload(format!(
+                "JSONL semantic singleton byte limit is below {PAGE_MAX_BYTES}"
+            )));
+        }
         let encoded_lengths = semantic_record_encoded_lengths::<E>(&records)?;
-        let ranges = bounded_semantic_page_ranges::<E>(&encoded_lengths)?;
+        let ranges = bounded_semantic_page_ranges_with_singleton_limit::<E>(
+            &encoded_lengths,
+            singleton_byte_limit,
+        )?;
         let mut records = records.into_iter();
-        Ok(ranges
-            .into_iter()
-            .map(|range| Self::new(records.by_ref().take(range.len()).collect()))
-            .collect())
+        let mut pages = Vec::with_capacity(ranges.len());
+        for range in ranges {
+            let encoded_bytes = checked_semantic_page_byte_total::<E>(
+                encoded_lengths[range.clone()].iter().copied(),
+            )?;
+            let encoded_byte_limit = if range.len() == 1 && encoded_bytes > PAGE_MAX_BYTES {
+                singleton_byte_limit
+            } else {
+                PAGE_MAX_BYTES
+            };
+            pages.push(Self {
+                records: records.by_ref().take(range.len()).collect(),
+                encoded_byte_limit,
+            });
+        }
+        Ok(pages)
     }
 
     pub fn records(&self) -> &[CoreRecord] {
@@ -234,9 +267,10 @@ impl JsonlFamilySemanticPage {
         let encoded_bytes = checked_semantic_page_byte_total::<E>(
             semantic_record_encoded_lengths::<E>(&self.records)?,
         )?;
-        if encoded_bytes > PAGE_MAX_BYTES {
+        if encoded_bytes > self.encoded_byte_limit {
             return Err(E::invalid_payload(format!(
-                "JSONL semantic page exceeds the {PAGE_MAX_BYTES} byte limit"
+                "JSONL semantic page exceeds the {} byte limit",
+                self.encoded_byte_limit
             )));
         }
         Ok(self.records)
@@ -257,17 +291,34 @@ fn semantic_record_encoded_lengths<E: JsonlFamilyError>(
         .collect()
 }
 
+#[cfg(test)]
 fn bounded_semantic_page_ranges<E: JsonlFamilyError>(
     encoded_lengths: &[usize],
+) -> JsonlResult<Vec<std::ops::Range<usize>>, E> {
+    bounded_semantic_page_ranges_with_singleton_limit::<E>(encoded_lengths, PAGE_MAX_BYTES)
+}
+
+fn bounded_semantic_page_ranges_with_singleton_limit<E: JsonlFamilyError>(
+    encoded_lengths: &[usize],
+    singleton_byte_limit: usize,
 ) -> JsonlResult<Vec<std::ops::Range<usize>>, E> {
     let mut ranges = Vec::new();
     let mut page_start = 0_usize;
     let mut page_bytes = 0_usize;
     for (index, &encoded_length) in encoded_lengths.iter().enumerate() {
-        if encoded_length > PAGE_MAX_BYTES {
+        if encoded_length > singleton_byte_limit {
             return Err(E::invalid_payload(format!(
-                "JSONL semantic page exceeds the {PAGE_MAX_BYTES} byte limit"
+                "JSONL semantic page exceeds the {singleton_byte_limit} byte limit"
             )));
+        }
+        if encoded_length > PAGE_MAX_BYTES {
+            if page_start < index {
+                ranges.push(page_start..index);
+            }
+            ranges.push(index..index + 1);
+            page_start = index + 1;
+            page_bytes = 0;
+            continue;
         }
         let page_records = index.saturating_sub(page_start);
         let next_page_bytes = page_bytes.checked_add(encoded_length).ok_or_else(|| {
@@ -281,7 +332,9 @@ fn bounded_semantic_page_ranges<E: JsonlFamilyError>(
             page_bytes = next_page_bytes;
         }
     }
-    ranges.push(page_start..encoded_lengths.len());
+    if page_start < encoded_lengths.len() || encoded_lengths.is_empty() {
+        ranges.push(page_start..encoded_lengths.len());
+    }
     Ok(ranges)
 }
 
@@ -298,6 +351,10 @@ fn checked_semantic_page_byte_total<E: JsonlFamilyError>(
 #[cfg(test)]
 mod semantic_page_bound_tests {
     use super::*;
+    use ctx_history_core::{
+        derive_event_id, derive_session_id, EventIdentityInput, NativeItemKey, NativeSessionKey,
+        SessionIdentityInput, SourceAnchor, SourceKey, TypedKey,
+    };
     use ctx_history_source_io::SourceIoError;
 
     #[test]
@@ -325,6 +382,71 @@ mod semantic_page_bound_tests {
         let empty = bounded_semantic_page_ranges::<SourceIoError>(&[]).unwrap();
         assert_eq!(empty.len(), 1);
         assert_eq!(empty[0], 0..0);
+    }
+
+    #[test]
+    fn semantic_pages_allow_only_explicit_bounded_singletons_above_default_limit() {
+        let source = SourceKey::derive(
+            "codex",
+            "codex_session_jsonl_tree",
+            "session",
+            1,
+            SourceAnchor::CatalogLineage([1; 32]),
+        )
+        .unwrap();
+        let native_session_key =
+            NativeSessionKey::native_id("session", TypedKey::utf8("session").unwrap()).unwrap();
+        let session_id = derive_session_id(SessionIdentityInput {
+            source: &source,
+            logical_session_kind: "session",
+            native_session_key: &native_session_key,
+        })
+        .unwrap();
+        let native_item_key = NativeItemKey::native_id("message", TypedKey::U64(1)).unwrap();
+        let event_id = derive_event_id(EventIdentityInput {
+            source: &source,
+            session_id,
+            logical_item_kind: "message",
+            native_item_key: &native_item_key,
+            subrecord_selector: None,
+        })
+        .unwrap();
+        let oversized = CoreRecord::new_selected(
+            event_id,
+            session_id,
+            source,
+            1,
+            "message",
+            "jsonl-semantic-page-test-v1",
+            "x".repeat(PAGE_MAX_BYTES + 1),
+        )
+        .unwrap();
+
+        assert!(
+            JsonlFamilySemanticPage::split_bounded::<SourceIoError>(vec![oversized.clone()])
+                .is_err()
+        );
+        let mut before = oversized.clone();
+        before.event_sequence = 0;
+        before.content.normalized_body = Some("before".to_owned());
+        let mut after = before.clone();
+        after.event_sequence = 2;
+        after.content.normalized_body = Some("after".to_owned());
+        let pages = JsonlFamilySemanticPage::split_bounded_with_singleton_limit::<SourceIoError>(
+            vec![before, oversized, after],
+            16 * 1024 * 1024,
+        )
+        .unwrap();
+        assert_eq!(pages.len(), 3);
+        let sequences = pages
+            .into_iter()
+            .map(|page| {
+                let records = page.into_bounded_records::<SourceIoError>().unwrap();
+                assert_eq!(records.len(), 1);
+                records[0].event_sequence
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(sequences, vec![0, 1, 2]);
     }
 }
 

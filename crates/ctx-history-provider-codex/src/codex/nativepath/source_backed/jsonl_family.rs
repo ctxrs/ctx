@@ -1,6 +1,11 @@
-use std::{collections::BTreeMap, marker::PhantomData, sync::Mutex};
+use std::{
+    collections::{BTreeMap, VecDeque},
+    marker::PhantomData,
+    sync::Mutex,
+};
 
 use super::*;
+use crate::codex::nativepath::reader::MAX_CODEX_SOURCE_BACKED_SINGLE_ROW_PAGE_BYTES;
 use crate::provider::source_backed::{ProviderBaseEventLookup, ProviderRuntimeBinding};
 use crate::{
     provider::source_backed::{
@@ -173,6 +178,7 @@ struct CodexSessionJsonlFamilyStateV0 {
 struct CodexSessionSemanticExecutorV0<B: ProviderRuntimeBinding> {
     binding: PhantomData<fn() -> B>,
     scanner: Option<CodexNativeScanner>,
+    pending_pages: VecDeque<JsonlFamilySemanticPage>,
     checkpoint: Option<super::super::checkpoint::CodexSemanticCheckpoint>,
     append_checkpoint_required: bool,
 }
@@ -215,6 +221,7 @@ impl<B: ProviderRuntimeBinding> CodexSessionSemanticExecutorV0<B> {
         Ok(Self {
             binding: PhantomData,
             scanner: Some(scanner),
+            pending_pages: VecDeque::new(),
             checkpoint,
             append_checkpoint_required,
         })
@@ -263,6 +270,9 @@ impl<B: ProviderRuntimeBinding> JsonlFamilySemanticExecutor for CodexSessionSema
         input: &mut JsonlFamilyExecutionIo<B>,
         _worker: &mut JsonlFamilyWorkerContext<B>,
     ) -> Result<Option<JsonlFamilySemanticPage>> {
+        if let Some(page) = self.pending_pages.pop_front() {
+            return Ok(Some(page));
+        }
         let Some(page) = self
             .scanner
             .as_mut()
@@ -273,10 +283,21 @@ impl<B: ProviderRuntimeBinding> JsonlFamilySemanticExecutor for CodexSessionSema
         else {
             return Ok(None);
         };
-        Ok(Some(JsonlFamilySemanticPage::new(page.records)))
+        self.pending_pages.extend(
+            JsonlFamilySemanticPage::split_bounded_with_singleton_limit::<CaptureError>(
+                page.records,
+                MAX_CODEX_SOURCE_BACKED_SINGLE_ROW_PAGE_BYTES,
+            )?,
+        );
+        Ok(self.pending_pages.pop_front())
     }
 
     fn finish(mut self: Box<Self>) -> Result<JsonlFamilySemanticSummary> {
+        if !self.pending_pages.is_empty() {
+            return Err(CaptureError::SystemInvariant(
+                "Codex semantic executor finished with pending bounded pages",
+            ));
+        }
         let scanner = self.scanner.take().ok_or(CaptureError::SystemInvariant(
             "Codex semantic executor lost its scanner",
         ))?;
