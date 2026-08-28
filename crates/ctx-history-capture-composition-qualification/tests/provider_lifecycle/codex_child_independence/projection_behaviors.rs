@@ -7,7 +7,10 @@ fn codex_inline_image_over_page_limit_does_not_fail_route() {
     let index_root = temp.path().join("index-inline-image");
     fs::create_dir_all(&sessions).unwrap();
     let native_session_id = "019fb000-0000-7000-8000-000000000073";
-    let retained_marker = "inline-image-sibling-retained";
+    let call_id = "inline-image-result";
+    let before_marker = "inline-image-sibling-before";
+    let after_marker = "inline-image-sibling-after";
+    let omitted_marker = "inline-image-content-omitted";
     let image_url = format!("data:image/png;base64,{}", "A".repeat(9 * 1024 * 1024));
     write_session(
         &sessions,
@@ -15,14 +18,16 @@ fn codex_inline_image_over_page_limit_does_not_fail_route() {
         ProviderNativeSessionRelationship::Root,
         None,
         [
+            message(before_marker),
+            custom_tool_call(call_id),
             custom_tool_result_value(
-                "inline-image-result",
+                call_id,
                 serde_json::json!([
-                    {"type": "text", "text": "image result"},
-                    {"type": "image", "image_url": image_url}
+                    {"type": "input_text", "text": omitted_marker},
+                    {"type": "input_image", "image_url": image_url}
                 ]),
             ),
-            message(retained_marker),
+            message(after_marker),
         ],
     );
     let registry = register_tree(&[&sessions]);
@@ -35,18 +40,64 @@ fn codex_inline_image_over_page_limit_does_not_fail_route() {
     assert!(receipt.record_rejections.is_empty());
     let index = VerifiedIndex::open(&index_root).unwrap();
     let records = records_for(&index, native_session_id);
-    assert_eq!(records.len(), 2);
-    assert!(records.iter().any(|record| matches!(
-        &record.content.policy_status,
-        ctx_history_core::CoreContentPolicyStatus::Omitted { reason }
-            if reason == "Codex provider record exceeds the JSONL semantic page limit"
-    )));
-    assert!(
-        search_event_candidates(&index, retained_marker, 8)
-            .into_iter()
-            .any(|candidate| candidate.event.provider_session_id.as_deref()
-                == Some(native_session_id))
+    assert_eq!(records.len(), 4);
+    let omitted = records
+        .iter()
+        .find(|record| {
+            matches!(
+                &record.content.policy_status,
+                ctx_history_core::CoreContentPolicyStatus::Omitted { reason }
+                    if reason == "Codex provider record exceeds the JSONL semantic page limit"
+            )
+        })
+        .expect("the oversized tool result must remain as an omitted Core record");
+    assert_eq!(
+        omitted.provider_session_id.as_deref(),
+        Some(native_session_id)
     );
+    assert_eq!(omitted.parser_revision, CURRENT_PARSER_REVISION);
+    assert!(omitted.native_event_id.is_some());
+    assert!(omitted.content.normalized_body.is_none());
+    assert!(omitted.content.structured_content.is_none());
+    assert!(omitted.content.discovery_exclusion.is_none());
+    assert!(omitted.content.activity.is_none());
+    let omitted_record = omitted.clone();
+    assert!(!source_records_contain(
+        &index,
+        native_session_id,
+        omitted_marker
+    ));
+    for marker in [before_marker, after_marker] {
+        assert!(
+            search_event_candidates(&index, marker, 8)
+                .into_iter()
+                .any(|candidate| candidate.event.provider_session_id.as_deref()
+                    == Some(native_session_id)),
+            "missing retained sibling {marker}"
+        );
+    }
+    drop(index);
+
+    let (replayed, _) = incremental_refresh(&index_root, &registry, &receipt);
+    assert_eq!(replayed.commit.generation_id, receipt.commit.generation_id);
+    assert!(replayed.failed_routes.is_empty());
+    assert!(replayed.logical_source_failures.is_empty());
+    assert!(replayed.record_rejections.is_empty());
+    let replayed_index = VerifiedIndex::open(&index_root).unwrap();
+    assert_eq!(
+        replayed_index
+            .core_record_by_id(omitted_record.event_id.as_uuid())
+            .unwrap()
+            .as_ref(),
+        Some(&omitted_record)
+    );
+    assert!(records_for(&replayed_index, native_session_id)
+        .iter()
+        .any(|record| matches!(
+            &record.content.policy_status,
+            ctx_history_core::CoreContentPolicyStatus::Omitted { reason }
+                if reason == "Codex provider record exceeds the JSONL semantic page limit"
+        )));
 }
 
 #[test]

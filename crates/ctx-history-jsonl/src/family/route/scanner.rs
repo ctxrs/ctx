@@ -250,8 +250,7 @@ fn semantic_record_encoded_lengths<E: JsonlFamilyError>(
         .iter()
         .map(|record| {
             record
-                .encode_stored()
-                .map(|encoded| encoded.len())
+                .encoded_json_len()
                 .map_err(|error| E::invalid_payload(error.to_string()))
         })
         .collect()

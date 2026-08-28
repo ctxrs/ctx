@@ -156,6 +156,18 @@ fn neutral_record_serializes_no_interpreted_source_semantics() {
 }
 
 #[test]
+fn encoded_json_len_matches_stored_encoding_with_json_escaping() {
+    let mut record = record();
+    record.content.normalized_body = Some("quoted \"text\"\nwith a NUL: \0".to_owned());
+    record.content.structured_content = Some(json!({
+        "escaped": ["line\nfeed", "tab\tvalue", "\\path"]
+    }));
+
+    let encoded = record.encode_stored().unwrap();
+    assert_eq!(record.encoded_json_len().unwrap(), encoded.len());
+}
+
+#[test]
 fn generic_metadata_cannot_smuggle_repository_or_causal_semantics() {
     for metadata in [
         json!({"repository_bindings": [{"repository": "invented"}]}),

@@ -192,8 +192,16 @@ pub use route::{
 };
 pub use single_file::jsonl_single_file_inventory;
 const PAGE_MAX_RECORDS: usize = 64;
-pub const JSONL_FAMILY_SEMANTIC_PAGE_MAX_BYTES: usize = 8 * 1024 * 1024;
-const PAGE_MAX_BYTES: usize = JSONL_FAMILY_SEMANTIC_PAGE_MAX_BYTES;
+const PAGE_MAX_BYTES: usize = 8 * 1024 * 1024;
+
+/// Whether one complete Core record can be represented by a shared JSONL
+/// semantic page. Providers may use this exact publication boundary to apply
+/// an explicit content policy before the shared publisher's fail-closed check.
+pub fn jsonl_semantic_record_fits_page(
+    record: &ctx_history_core::CoreRecord,
+) -> ctx_history_core::CoreRecordResult<bool> {
+    Ok(record.encoded_json_len()? <= PAGE_MAX_BYTES)
+}
 
 #[derive(Debug, Clone)]
 pub struct JsonlProbe {

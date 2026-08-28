@@ -17,7 +17,7 @@ use ctx_history_core::{
 };
 use ctx_history_index::{GenerationWriter, RevalidationTarget, WriterOptions};
 
-const CURRENT_PARSER_REVISION: &str = "codex-nativepath-core-activity-v10-item-completed-plan";
+const CURRENT_PARSER_REVISION: &str = "codex-nativepath-core-activity-v11-jsonl-page-omission";
 
 #[path = "codex_child_independence/quarantine.rs"]
 mod quarantine;
@@ -242,6 +242,20 @@ fn successful_result(call_id: &str, output: String) -> serde_json::Value {
 
 fn custom_tool_result(call_id: &str, output: String) -> serde_json::Value {
     custom_tool_result_value(call_id, serde_json::Value::String(output))
+}
+
+fn custom_tool_call(call_id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "timestamp": "2026-08-09T12:00:03Z",
+        "type": "response_item",
+        "payload": {
+            "type": "custom_tool_call",
+            "status": "completed",
+            "call_id": call_id,
+            "name": "image",
+            "input": "{}"
+        }
+    })
 }
 
 fn custom_tool_result_value(call_id: &str, output: serde_json::Value) -> serde_json::Value {

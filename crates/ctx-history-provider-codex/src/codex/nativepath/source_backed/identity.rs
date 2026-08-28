@@ -376,7 +376,7 @@ pub(in crate::codex::nativepath) fn codex_core_record(
         .content
         .omit_structured_content_if_aggregate_exceeds_limit()?;
     record.validate_contract()?;
-    if record.encode_stored()?.len() > ctx_history_jsonl::JSONL_FAMILY_SEMANTIC_PAGE_MAX_BYTES {
+    if !ctx_history_jsonl::jsonl_semantic_record_fits_page(&record)? {
         omit_codex_record_content(
             &mut record,
             "Codex provider record exceeds the JSONL semantic page limit",

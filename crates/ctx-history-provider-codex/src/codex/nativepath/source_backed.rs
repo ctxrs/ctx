@@ -43,7 +43,7 @@ const CODEX_NATIVE_SESSION_NAMESPACE: &str = "codex.session";
 const CODEX_LOGICAL_SESSION_KIND: &str = "codex-session";
 const CODEX_LOGICAL_EVENT_KIND: &str = "codex-event";
 const CODEX_SOURCE_SCHEMA_VARIANT: &str = "codex-nativepath-jsonl-v0";
-const CODEX_PARSER_REVISION: &str = "codex-nativepath-core-activity-v10-item-completed-plan";
+const CODEX_PARSER_REVISION: &str = "codex-nativepath-core-activity-v11-jsonl-page-omission";
 
 type CodexSessionPlanV0 = (CodexCatalogSource, SourceKey, String);
 
