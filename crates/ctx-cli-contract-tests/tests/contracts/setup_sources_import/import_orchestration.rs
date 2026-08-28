@@ -557,6 +557,11 @@ fn manual_indexing_import_uses_a_finite_worker_and_background_search_stays_inert
             .timeout(Duration::from_secs(20)),
     );
     assert_eq!(imported["outcome"], "success", "{imported:#}");
+    assert_eq!(imported["totals"]["current_indexed_sessions"], 1);
+    assert!(
+        imported["totals"].get("index_delta").is_none(),
+        "a first import must not synthesize a delta from an empty baseline: {imported:#}"
+    );
     assert_eq!(
         imported["sources"][0]["status"], "published",
         "{imported:#}"

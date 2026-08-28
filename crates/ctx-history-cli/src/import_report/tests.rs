@@ -1,6 +1,7 @@
 use std::{io::Write as _, path::Path};
 
 use ctx_history_capture::ProviderImportWorkResult;
+use ctx_history_ingest_application::ImportIndexDelta;
 use unicode_width::UnicodeWidthStr as _;
 
 use crate::ui::{ColorMode, StreamKind, TestContext};
@@ -35,7 +36,12 @@ fn changed_report() -> IngestReport {
             imported_edges: 1,
             skipped: 1,
             current_source_count: Some(1),
+            current_indexed_sessions: Some(2),
             current_indexed_documents: Some(7),
+            index_delta: Some(ImportIndexDelta {
+                sessions: 2,
+                searchable_events: 7,
+            }),
             current_complete_records: Some(7),
             current_retained_records: Some(7),
             current_rejected_records: Some(0),
@@ -163,6 +169,10 @@ fn human_import_report_has_stable_copy_and_source_failure_recovery() {
         "✓ History import completed\n\
          Local history changed.\n\
          \n\
+         Net index change\n\
+         Sessions           +2\n\
+         Searchable events  +7\n\
+         \n\
          Imported\n\
          Sources          1\n\
          Sessions         2\n\
@@ -172,6 +182,7 @@ fn human_import_report_has_stable_copy_and_source_failure_recovery() {
          \n\
          Current index\n\
          Sources            1\n\
+         Sessions           2\n\
          Searchable events  7\n\
          Removed sources    0\n"
     );
@@ -442,7 +453,12 @@ fn import_json_contract_is_unchanged_by_human_renderer() {
                 "skipped": 1,
                 "rejected_records": 0,
                 "current_source_count": 1,
+                "current_indexed_sessions": 2,
                 "current_indexed_documents": 7,
+                "index_delta": {
+                    "sessions": 2,
+                    "searchable_events": 7
+                },
                 "current_complete_records": 7,
                 "current_retained_records": 7,
                 "current_rejected_records": 0,
@@ -455,6 +471,44 @@ fn import_json_contract_is_unchanged_by_human_renderer() {
             "sources": [],
         })
     );
+}
+
+#[test]
+fn import_index_deltas_render_as_signed_counts_and_are_absent_on_first_import() {
+    for (sessions, searchable_events, expected_sessions, expected_events) in
+        [(2, 7, "+2", "+7"), (0, 0, "0", "0"), (-1, -3, "-1", "-3")]
+    {
+        let mut report = changed_report();
+        report.totals.index_delta = Some(ImportIndexDelta {
+            sessions,
+            searchable_events,
+        });
+        let rendered =
+            render_import_report_human(&context(80, ColorMode::Never), &report).render_plain();
+        assert!(
+            rendered.contains(&format!("Sessions           {expected_sessions}")),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains(&format!("Searchable events  {expected_events}")),
+            "{rendered}"
+        );
+        let json = import_report_json(&report);
+        assert_eq!(json["totals"]["index_delta"]["sessions"], sessions);
+        assert_eq!(
+            json["totals"]["index_delta"]["searchable_events"],
+            searchable_events
+        );
+    }
+
+    let mut first = changed_report();
+    first.totals.index_delta = None;
+    let rendered =
+        render_import_report_human(&context(80, ColorMode::Never), &first).render_plain();
+    assert!(!rendered.contains("Net index change"), "{rendered}");
+    assert!(import_report_json(&first)["totals"]
+        .get("index_delta")
+        .is_none());
 }
 
 #[test]

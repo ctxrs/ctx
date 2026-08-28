@@ -3,6 +3,48 @@ use ctx_history_capture_model::{ProviderImportSummary, ProviderImportWorkResult}
 use crate::SourceStats;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImportIndexDelta {
+    pub sessions: i64,
+    pub searchable_events: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImportIndexFacts {
+    pub current_sessions: u64,
+    pub delta: Option<ImportIndexDelta>,
+}
+
+impl ImportIndexFacts {
+    pub fn from_cardinalities(
+        current_sessions: u64,
+        current_searchable_events: u64,
+        previous: Option<(u64, u64)>,
+    ) -> Self {
+        let delta = previous.and_then(|(previous_sessions, previous_searchable_events)| {
+            Some(ImportIndexDelta {
+                sessions: signed_count_delta(current_sessions, previous_sessions)?,
+                searchable_events: signed_count_delta(
+                    current_searchable_events,
+                    previous_searchable_events,
+                )?,
+            })
+        });
+        Self {
+            current_sessions,
+            delta,
+        }
+    }
+}
+
+fn signed_count_delta(current: u64, previous: u64) -> Option<i64> {
+    if current >= previous {
+        i64::try_from(current - previous).ok()
+    } else {
+        i64::try_from(previous - current).ok()?.checked_neg()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImportOutcome {
     Success,
     Failure,
@@ -63,8 +105,9 @@ impl ImportFailureType {
     }
 }
 
-/// Typed outcome totals. Presentation layers decide which fields are rendered;
-/// these facts do not imply a per-record or per-run Core delta.
+/// Typed outcome totals. `index_delta` is the only explicit Core cardinality
+/// delta; imported, skipped, source, and current-generation counters do not
+/// imply a per-record or per-run delta.
 #[derive(Debug, Clone, Default)]
 pub struct ImportTotals {
     pub per_run_counts_available: bool,
@@ -83,7 +126,9 @@ pub struct ImportTotals {
     pub skipped: usize,
     pub failed: usize,
     pub current_source_count: Option<usize>,
+    pub current_indexed_sessions: Option<u64>,
     pub current_indexed_documents: Option<u64>,
+    pub index_delta: Option<ImportIndexDelta>,
     pub current_complete_records: Option<u64>,
     pub current_retained_records: Option<u64>,
     pub current_rejected_records: Option<u64>,
@@ -189,6 +234,39 @@ impl ImportTotals {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn index_facts_omit_a_cold_or_unrepresentable_delta() {
+        assert_eq!(
+            ImportIndexFacts::from_cardinalities(3, 8, None),
+            ImportIndexFacts {
+                current_sessions: 3,
+                delta: None,
+            }
+        );
+        assert_eq!(
+            ImportIndexFacts::from_cardinalities(u64::MAX, 8, Some((0, 7))).delta,
+            None
+        );
+    }
+
+    #[test]
+    fn index_facts_report_positive_zero_and_negative_net_change() {
+        for (current, previous, expected) in [
+            ((3, 8), (1, 4), (2, 4)),
+            ((3, 8), (3, 8), (0, 0)),
+            ((1, 4), (3, 8), (-2, -4)),
+        ] {
+            let facts = ImportIndexFacts::from_cardinalities(current.0, current.1, Some(previous));
+            assert_eq!(
+                facts.delta,
+                Some(ImportIndexDelta {
+                    sessions: expected.0,
+                    searchable_events: expected.1,
+                })
+            );
+        }
+    }
 
     #[test]
     fn aggregate_outcomes_preserve_machine_compatibility_and_genuine_failures() {

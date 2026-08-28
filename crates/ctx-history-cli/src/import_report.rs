@@ -72,7 +72,12 @@ pub fn import_report_json(report: &IngestReport) -> Value {
 fn import_totals_json(totals: &ImportTotals) -> Value {
     let mut value = compact_json(json!({
         "current_source_count": totals.current_source_count,
+        "current_indexed_sessions": totals.current_indexed_sessions,
         "current_indexed_documents": totals.current_indexed_documents,
+        "index_delta": totals.index_delta.map(|delta| json!({
+            "sessions": delta.sessions,
+            "searchable_events": delta.searchable_events,
+        })),
         "current_complete_records": totals.current_complete_records,
         "current_retained_records": totals.current_retained_records,
         "current_rejected_records": totals.current_rejected_records,
@@ -144,6 +149,18 @@ pub fn render_import_report_human(context: &RenderContext, report: &IngestReport
         },
     );
 
+    if let Some(delta) = totals.index_delta {
+        let net_change = [
+            ("Sessions", signed_count(delta.sessions)),
+            ("Searchable events", signed_count(delta.searchable_events)),
+        ];
+        document.push_blank();
+        document.append(section(
+            "Net index change",
+            fields_from_owned(context, &net_change),
+        ));
+    }
+
     let mut imported = Vec::new();
     if totals.per_run_counts_available {
         imported.push(("Sources", totals.imported_sources.to_string()));
@@ -161,6 +178,7 @@ pub fn render_import_report_human(context: &RenderContext, report: &IngestReport
 
     let mut current = Vec::new();
     push_optional(&mut current, "Sources", totals.current_source_count);
+    push_optional(&mut current, "Sessions", totals.current_indexed_sessions);
     push_optional(
         &mut current,
         "Searchable events",
@@ -201,6 +219,14 @@ pub fn render_import_report_human(context: &RenderContext, report: &IngestReport
         ));
     }
     document
+}
+
+fn signed_count(value: i64) -> String {
+    if value > 0 {
+        format!("+{value}")
+    } else {
+        value.to_string()
+    }
 }
 
 const MAX_HUMAN_SOURCE_FAILURES: usize = 3;

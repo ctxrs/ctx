@@ -258,6 +258,7 @@ fn publication(receipt: SourceBackedRefreshReceipt) -> IngestPublication {
         pinned_generation: receipt.published_generation.clone(),
         policy_schema_hash: Some("policy-v1".to_owned()),
         catalog_content: std::collections::BTreeMap::new(),
+        index_facts: None,
         receipt: Some(receipt),
     }
 }
