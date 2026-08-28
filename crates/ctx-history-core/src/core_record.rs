@@ -456,6 +456,14 @@ impl CoreRecord {
         Ok(encoded)
     }
 
+    /// Returns the exact canonical JSON size without materializing the encoded
+    /// record. The storage and publication layers apply their own, narrower
+    /// admission limits to this measurement.
+    pub fn encoded_json_len(&self) -> CoreRecordResult<usize> {
+        self.validate_contract()?;
+        count_encoded_json_bytes(self)
+    }
+
     pub fn decode_stored(encoded: &[u8]) -> CoreRecordResult<Self> {
         validate_size(
             "encoded_core_record",

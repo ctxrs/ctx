@@ -366,11 +366,7 @@ pub(in crate::codex::nativepath) fn codex_core_record(
         }
     });
     if let Some(reason) = content_omission {
-        record.content.policy_status = ctx_history_core::CoreContentPolicyStatus::Omitted {
-            reason: reason.to_owned(),
-        };
-        record.content.normalized_body = None;
-        record.validate_contract()?;
+        omit_codex_record_content(&mut record, reason)?;
         return Ok(Some(record));
     }
     record.content.structured_content = structured_content;
@@ -381,6 +377,21 @@ pub(in crate::codex::nativepath) fn codex_core_record(
         .omit_structured_content_if_aggregate_exceeds_limit()?;
     record.validate_contract()?;
     Ok(Some(record))
+}
+
+fn omit_codex_record_content(
+    record: &mut CoreRecord,
+    reason: &str,
+) -> CodexSourceBackedResultV0<()> {
+    record.content.policy_status = ctx_history_core::CoreContentPolicyStatus::Omitted {
+        reason: reason.to_owned(),
+    };
+    record.content.normalized_body = None;
+    record.content.structured_content = None;
+    record.content.discovery_exclusion = None;
+    record.content.activity = None;
+    record.validate_contract()?;
+    Ok(())
 }
 
 fn codex_session_id_for_native_id(

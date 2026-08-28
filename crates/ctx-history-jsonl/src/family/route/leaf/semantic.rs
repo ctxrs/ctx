@@ -51,7 +51,7 @@ pub(super) fn prepare_semantic_leaf<R: JsonlFamilyRuntime>(
                 )
             })?;
         reported_prefix_end = complete_prefix_end;
-        let records = page.into_bounded_records::<JsonlRuntimeError<R>>()?;
+        let records = page.into_records();
         if records
             .iter()
             .any(|record| !record.source.exact_descriptor_eq(leaf.source()))
@@ -67,8 +67,8 @@ pub(super) fn prepare_semantic_leaf<R: JsonlFamilyRuntime>(
                     "JSONL document count overflowed".to_owned(),
                 )
             })?;
-        input.release_record_buffer()?;
         output.emit_page(is_append, completed_bytes, records)?;
+        input.release_record_buffer()?;
     }
     input.release_record_buffer()?;
     let summary = executor.finish()?;

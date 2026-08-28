@@ -1,6 +1,110 @@
 use super::*;
 
 #[test]
+fn codex_inline_image_over_page_limit_does_not_fail_route() {
+    let temp = tempdir().unwrap();
+    let sessions = temp.path().join("sessions-inline-image");
+    let index_root = temp.path().join("index-inline-image");
+    fs::create_dir_all(&sessions).unwrap();
+    let native_session_id = "019fb000-0000-7000-8000-000000000073";
+    let call_id = "inline-image-result";
+    let before_marker = "inline-image-sibling-before";
+    let after_marker = "inline-image-sibling-after";
+    let content_marker = "inline-image-content-retained";
+    let image_url = format!("data:image/png;base64,{}", "A".repeat(9 * 1024 * 1024));
+    write_session(
+        &sessions,
+        native_session_id,
+        ProviderNativeSessionRelationship::Root,
+        None,
+        [
+            message(before_marker),
+            custom_tool_call(call_id),
+            custom_tool_result_value(
+                call_id,
+                serde_json::json!([
+                    {"type": "input_text", "text": content_marker},
+                    {"type": "input_image", "image_url": image_url}
+                ]),
+            ),
+            message(after_marker),
+        ],
+    );
+    let registry = register_tree(&[&sessions]);
+
+    let receipt =
+        refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+
+    assert!(receipt.failed_routes.is_empty());
+    assert!(receipt.logical_source_failures.is_empty());
+    assert!(receipt.record_rejections.is_empty());
+    let index = VerifiedIndex::open(&index_root).unwrap();
+    let records = records_for(&index, native_session_id);
+    assert_eq!(records.len(), 4);
+    let oversized = records
+        .iter()
+        .find(|record| {
+            record
+                .content
+                .normalized_body
+                .as_deref()
+                .is_some_and(|body| body.contains(content_marker))
+        })
+        .expect("the oversized tool result must remain a complete Core record");
+    assert_eq!(
+        oversized.provider_session_id.as_deref(),
+        Some(native_session_id)
+    );
+    assert_eq!(oversized.parser_revision, CURRENT_PARSER_REVISION);
+    assert!(oversized.native_event_id.is_some());
+    assert!(matches!(
+        oversized.content.policy_status,
+        ctx_history_core::CoreContentPolicyStatus::Selected
+    ));
+    assert!(oversized
+        .content
+        .normalized_body
+        .as_ref()
+        .is_some_and(|body| body.len() > 9 * 1024 * 1024));
+    assert!(oversized.encoded_json_len().unwrap() > 8 * 1024 * 1024);
+    let oversized_record = oversized.clone();
+    assert!(source_records_contain(
+        &index,
+        native_session_id,
+        content_marker
+    ));
+    for marker in [before_marker, after_marker] {
+        assert!(
+            search_event_candidates(&index, marker, 8)
+                .into_iter()
+                .any(|candidate| candidate.event.provider_session_id.as_deref()
+                    == Some(native_session_id)),
+            "missing retained sibling {marker}"
+        );
+    }
+    drop(index);
+
+    let (replayed, _) = incremental_refresh(&index_root, &registry, &receipt);
+    assert_eq!(replayed.commit.generation_id, receipt.commit.generation_id);
+    assert!(replayed.failed_routes.is_empty());
+    assert!(replayed.logical_source_failures.is_empty());
+    assert!(replayed.record_rejections.is_empty());
+    let replayed_index = VerifiedIndex::open(&index_root).unwrap();
+    assert_eq!(
+        replayed_index
+            .core_record_by_id(oversized_record.event_id.as_uuid())
+            .unwrap()
+            .as_ref(),
+        Some(&oversized_record)
+    );
+    assert!(source_records_contain(
+        &replayed_index,
+        native_session_id,
+        content_marker
+    ));
+}
+
+#[test]
 fn codex_valid_custom_tool_result_over_16_mib_is_retained() {
     let temp = tempdir().unwrap();
     let sessions = temp.path().join("sessions-valid-large-result");
