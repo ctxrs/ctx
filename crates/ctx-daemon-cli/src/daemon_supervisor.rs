@@ -16,18 +16,24 @@ pub(super) use ctx_daemon_application::{
 
 pub(super) struct CliDaemonApplicationHost<'config, 'value> {
     run_config: Option<&'config crate::config::AppConfig<'value>>,
+    reload_persisted_config: bool,
 }
 
 impl CliDaemonApplicationHost<'_, '_> {
     const fn new() -> Self {
-        Self { run_config: None }
+        Self {
+            run_config: None,
+            reload_persisted_config: true,
+        }
     }
 
     const fn for_daemon_run<'config, 'value>(
         config: &'config crate::config::AppConfig<'value>,
+        reload_persisted_config: bool,
     ) -> CliDaemonApplicationHost<'config, 'value> {
         CliDaemonApplicationHost {
             run_config: Some(config),
+            reload_persisted_config,
         }
     }
 }
@@ -61,12 +67,15 @@ impl ctx_daemon_application::DaemonApplicationHost for CliDaemonApplicationHost<
         &self,
         data_root: &Path,
     ) -> Result<ctx_daemon_application::DaemonConfigSnapshot> {
+        if !self.reload_persisted_config {
+            if let Some(config) = self.run_config {
+                return Ok(daemon_config_snapshot(config));
+            }
+        }
+        // Mutating control operations persist a new mode before asking the
+        // application layer to apply it, so their snapshot must be reloaded.
         let config = crate::config::AppConfig::load(data_root)?;
-        Ok(ctx_daemon_application::DaemonConfigSnapshot {
-            enabled: config.daemon.enabled,
-            mode: daemon_mode(config.daemon.mode),
-            semantic_enabled: config.semantic_search_enabled(),
-        })
+        Ok(daemon_config_snapshot(&config))
     }
 
     fn persisted_daemon_enabled(&self, data_root: &Path) -> Result<bool> {
@@ -109,6 +118,10 @@ impl ctx_daemon_application::DaemonApplicationHost for CliDaemonApplicationHost<
         data_root: &Path,
         request: ctx_daemon_application::DaemonHostRunRequest,
     ) -> Result<()> {
+        if self.reload_persisted_config {
+            let config = crate::config::AppConfig::load(data_root)?;
+            return crate::composition::host().run_daemon_service(data_root, request, &config);
+        }
         let config = self
             .run_config
             .ok_or_else(|| anyhow::anyhow!("daemon run host is missing its borrowed config"))?;
@@ -180,6 +193,21 @@ impl ctx_daemon_application::DaemonApplicationHost for CliDaemonApplicationHost<
     }
 }
 
+fn daemon_config_snapshot(
+    config: &crate::config::AppConfig<'_>,
+) -> ctx_daemon_application::DaemonConfigSnapshot {
+    ctx_daemon_application::DaemonConfigSnapshot {
+        enabled: config.daemon.enabled,
+        mode: daemon_mode(config.daemon.mode),
+        semantic_enabled: config.semantic_search_enabled(),
+        semantic_executor: config
+            .semantic_embedding_executor()
+            .http_endpoint()
+            .unwrap_or("builtin")
+            .to_owned(),
+    }
+}
+
 fn json_string(value: &Value, key: &str) -> Option<String> {
     value.get(key).and_then(Value::as_str).map(str::to_owned)
 }
@@ -234,9 +262,10 @@ pub(super) fn with_daemon_application<T>(
 
 pub(super) fn with_daemon_run_application<T>(
     config: &crate::config::AppConfig<'_>,
+    reload_persisted_config: bool,
     operation: impl FnOnce(&ctx_daemon_application::DaemonApplication<'_>) -> T,
 ) -> T {
-    let host = CliDaemonApplicationHost::for_daemon_run(config);
+    let host = CliDaemonApplicationHost::for_daemon_run(config, reload_persisted_config);
     let application = ctx_daemon_application::DaemonApplication::new(&host);
     operation(&application)
 }

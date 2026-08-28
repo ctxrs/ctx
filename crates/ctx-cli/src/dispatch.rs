@@ -255,6 +255,7 @@ pub(crate) fn run_cli() -> Result<()> {
             }
             Err(error) => return Err(error),
         };
+    crate::config::bind_semantic_embedding_auth_endpoint(&config);
     if let Some(draft) = analytics_draft.as_mut() {
         draft.set_deprecated_controls(deprecated_controls.nonprivacy_analytics_ids().as_deref());
     }
@@ -379,6 +380,7 @@ pub(crate) fn run_cli() -> Result<()> {
             ctx_history_cli::HistoryCliConfig {
                 daemon_enabled: config.automatic_indexing_enabled(),
                 semantic_search_enabled: config.semantic_search_enabled(),
+                semantic_executor: config.semantic_embedding_executor().clone(),
                 local_usage_enabled: config.local_usage.enabled,
                 automatic_provider_discovery: config.automatic_source_discovery_enabled(),
                 provider_roots: config.provider_root_definitions(),

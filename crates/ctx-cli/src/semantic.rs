@@ -127,6 +127,7 @@ fn daemon_cli_config<'a>(config: &'a crate::config::AppConfig) -> DaemonCliConfi
         config.semantic_search_enabled(),
         config.semantic_search_source(),
     )
+    .with_semantic_embedding_executor(config.semantic_embedding_executor().clone())
     .with_automatic_provider_discovery(config.automatic_source_discovery_enabled())
     .with_provider_roots(config.provider_root_definitions())
 }
@@ -142,6 +143,7 @@ fn owned_daemon_cli_config(config: crate::config::AppConfig) -> DaemonCliConfig<
     };
     let semantic_enabled = config.semantic_search_enabled();
     let semantic_source = config.semantic_search_source();
+    let semantic_executor = config.semantic_embedding_executor().clone();
     let automatic_provider_discovery = config.automatic_source_discovery_enabled();
     let provider_roots = config.provider_root_definitions();
     DaemonCliConfig::new(
@@ -156,6 +158,7 @@ fn owned_daemon_cli_config(config: crate::config::AppConfig) -> DaemonCliConfig<
         semantic_enabled,
         semantic_source,
     )
+    .with_semantic_embedding_executor(semantic_executor)
     .with_automatic_provider_discovery(automatic_provider_discovery)
     .with_provider_roots(provider_roots)
 }
@@ -193,6 +196,18 @@ pub(crate) fn autostart_daemon_and_wait(
     trigger: crate::DaemonTriggerCommandArg,
 ) -> Result<DaemonHandoff> {
     ctx_daemon_cli::autostart_daemon_and_wait(
+        data_root,
+        &daemon_cli_config(config),
+        daemon_trigger(trigger),
+    )
+}
+
+pub(crate) fn restart_daemon_with_current_environment_and_wait(
+    data_root: &Path,
+    config: &crate::config::AppConfig,
+    trigger: crate::DaemonTriggerCommandArg,
+) -> Result<DaemonHandoff> {
+    ctx_daemon_cli::restart_daemon_with_current_environment_and_wait(
         data_root,
         &daemon_cli_config(config),
         daemon_trigger(trigger),

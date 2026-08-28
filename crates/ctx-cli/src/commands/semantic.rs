@@ -27,18 +27,44 @@ pub(crate) fn run_semantic(
             render_report(report, args.format.is_json(), quiet, ui)
         }
         SemanticCommand::Enable(args) => {
+            let previous_executor_was_http = config
+                .semantic_embedding_executor()
+                .http_endpoint()
+                .is_some();
+            let explicit_executor_selection = args.executor.is_some();
             if args.wait && !config.automatic_indexing_enabled() {
                 bail!(
                     "semantic --wait requires automatic indexing; run `ctx index mode auto` or omit --wait and use an explicit semantic search with --refresh wait"
                 );
             }
-            set_semantic_policy(&data_root, config, true)?;
+            if let Some(executor) = args.executor.as_deref() {
+                set_semantic_executor_and_enable(&data_root, config, executor)?;
+            } else {
+                set_semantic_policy(&data_root, config, true)?;
+            }
             if config.automatic_indexing_enabled() {
-                crate::semantic::autostart_daemon_and_wait(
-                    &data_root,
-                    config,
-                    crate::DaemonTriggerCommandArg::Semantic,
-                )?;
+                let credential_boundary_may_have_changed =
+                    semantic_mutation_requires_daemon_restart(
+                        previous_executor_was_http,
+                        config
+                            .semantic_embedding_executor()
+                            .http_endpoint()
+                            .is_some(),
+                        explicit_executor_selection,
+                    );
+                if credential_boundary_may_have_changed {
+                    crate::semantic::restart_daemon_with_current_environment_and_wait(
+                        &data_root,
+                        config,
+                        crate::DaemonTriggerCommandArg::Semantic,
+                    )?;
+                } else {
+                    crate::semantic::autostart_daemon_and_wait(
+                        &data_root,
+                        config,
+                        crate::DaemonTriggerCommandArg::Semantic,
+                    )?;
+                }
             }
 
             if args.wait {
@@ -55,7 +81,19 @@ pub(crate) fn run_semantic(
             render_report(report, args.format.is_json(), quiet, ui)
         }
         SemanticCommand::Disable(args) => {
+            let selected_executor_is_http = config
+                .semantic_embedding_executor()
+                .http_endpoint()
+                .is_some();
             set_semantic_policy(&data_root, config, false)?;
+            config::clear_semantic_embedding_auth_endpoint();
+            if config.automatic_indexing_enabled() && selected_executor_is_http {
+                crate::semantic::restart_daemon_with_current_environment_and_wait(
+                    &data_root,
+                    config,
+                    crate::DaemonTriggerCommandArg::Semantic,
+                )?;
+            }
             let report = semantic_report(&data_root, config, "disable", false)?;
             if args.format.is_json() {
                 print_json(report)
@@ -69,13 +107,45 @@ pub(crate) fn run_semantic(
     }
 }
 
+fn semantic_mutation_requires_daemon_restart(
+    previous_executor_was_http: bool,
+    selected_executor_is_http: bool,
+    explicit_executor_selection: bool,
+) -> bool {
+    previous_executor_was_http || selected_executor_is_http || explicit_executor_selection
+}
+
+fn set_semantic_executor_and_enable(
+    data_root: &Path,
+    config: &mut config::AppConfig,
+    executor: &str,
+) -> Result<()> {
+    let endpoint = (executor != "builtin").then_some(executor);
+    config::set_semantic_search_enabled_with_executor(data_root, endpoint)?;
+    reload_and_validate_semantic_policy(data_root, config, true)?;
+    // `--executor` is the explicit authority to bind the inherited token to a
+    // newly selected remote endpoint. Ordinary config loads preserve an
+    // existing independent binding and therefore fail closed on mismatch.
+    config::rebind_semantic_embedding_auth_endpoint(config);
+    Ok(())
+}
+
 pub(crate) fn set_semantic_policy(
     data_root: &Path,
     config: &mut config::AppConfig,
     enabled: bool,
 ) -> Result<()> {
     CliHistoryConfigAdapter::new(data_root, config).set_semantic_search_enabled(enabled)?;
+    reload_and_validate_semantic_policy(data_root, config, enabled)
+}
+
+fn reload_and_validate_semantic_policy(
+    data_root: &Path,
+    config: &mut config::AppConfig,
+    enabled: bool,
+) -> Result<()> {
     *config = config::AppConfig::load(data_root)?;
+    config::bind_semantic_embedding_auth_endpoint(config);
     if config.semantic_search_enabled() != enabled {
         if enabled {
             bail!(
@@ -102,6 +172,20 @@ fn semantic_report(
         .get("jobs")
         .and_then(|jobs| jobs.get("semantic_index"));
     let (status, reason) = semantic_lifecycle_state(semantic, daemon, daemon_semantic, config);
+    let executor = config.semantic_embedding_executor();
+    let executor_scope = executor.scope();
+    let token_present =
+        std::env::var_os(ctx_daemon_cli::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENV).is_some();
+    let token_bound_to_selected_endpoint = token_present
+        && executor.http_endpoint().is_some_and(|endpoint| {
+            std::env::var(ctx_daemon_cli::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV)
+                .ok()
+                .and_then(|binding| {
+                    ctx_daemon_cli::SemanticEmbeddingExecutorConfig::http(binding).ok()
+                })
+                .and_then(|binding| binding.http_endpoint().map(str::to_owned))
+                .is_some_and(|binding| binding == endpoint)
+        });
     Ok(compact_json(json!({
         "schema_version": 1,
         "operation": operation,
@@ -119,7 +203,19 @@ fn semantic_report(
             "running": daemon.get("running"),
             "semantic_index": daemon_semantic,
         },
-        "local_only": true,
+        "executor": {
+            "kind": executor.kind().as_str(),
+            "endpoint": executor.http_endpoint(),
+            "scope": executor_scope.as_str(),
+            "content_leaves_machine": executor_scope.content_leaves_machine(),
+            "authentication": {
+                "token_environment": ctx_daemon_cli::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENV,
+                "token_present_in_current_process": token_present,
+                "token_bound_to_selected_endpoint_in_current_process":
+                    token_bound_to_selected_endpoint,
+            },
+        },
+        "local_only": !executor_scope.content_leaves_machine(),
         "read_only": read_only,
     })))
 }
@@ -187,6 +283,29 @@ fn render_report(report: Value, json: bool, quiet: bool, ui: &mut Ui) -> Result<
 mod tests {
     use super::*;
 
+    struct TestEnvRestore {
+        name: &'static str,
+        value: Option<std::ffi::OsString>,
+    }
+
+    impl TestEnvRestore {
+        fn capture(name: &'static str) -> Self {
+            Self {
+                name,
+                value: std::env::var_os(name),
+            }
+        }
+    }
+
+    impl Drop for TestEnvRestore {
+        fn drop(&mut self) {
+            match self.value.take() {
+                Some(value) => std::env::set_var(self.name, value),
+                None => std::env::remove_var(self.name),
+            }
+        }
+    }
+
     #[test]
     fn lifecycle_surfaces_daemon_semantic_failure_reason() {
         let mut config = config::AppConfig::default();
@@ -199,5 +318,106 @@ mod tests {
 
         assert_eq!(status, "failed");
         assert_eq!(reason, "model_checksum_mismatch");
+    }
+
+    #[test]
+    fn executor_and_credential_boundary_mutations_require_daemon_restart() {
+        assert!(!semantic_mutation_requires_daemon_restart(
+            false, false, false
+        ));
+        assert!(semantic_mutation_requires_daemon_restart(
+            false, true, false
+        ));
+        assert!(semantic_mutation_requires_daemon_restart(
+            true, false, false
+        ));
+        assert!(semantic_mutation_requires_daemon_restart(true, true, false));
+        assert!(semantic_mutation_requires_daemon_restart(
+            false, false, true
+        ));
+    }
+
+    #[test]
+    fn semantic_scope_treats_only_builtin_and_exact_loopback_ips_as_local() {
+        let builtin = ctx_daemon_cli::SemanticEmbeddingExecutorConfig::builtin();
+        let ipv4 = ctx_daemon_cli::SemanticEmbeddingExecutorConfig::http("http://127.0.0.1:8080/")
+            .unwrap();
+        let ipv6 =
+            ctx_daemon_cli::SemanticEmbeddingExecutorConfig::http("http://[::1]:8080/").unwrap();
+        let remote =
+            ctx_daemon_cli::SemanticEmbeddingExecutorConfig::http("https://embed.example.test/")
+                .unwrap();
+        assert!(!builtin.scope().content_leaves_machine());
+        assert!(!ipv4.scope().content_leaves_machine());
+        assert!(!ipv6.scope().content_leaves_machine());
+        assert!(remote.scope().content_leaves_machine());
+        assert!(
+            ctx_daemon_cli::SemanticEmbeddingExecutorConfig::http("https://localhost/")
+                .unwrap()
+                .scope()
+                .content_leaves_machine()
+        );
+    }
+
+    #[test]
+    fn status_json_is_offline_redacted_and_uses_canonical_auth_binding() {
+        let _lock = crate::config::TEST_LOCAL_USAGE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _token = TestEnvRestore::capture(ctx_daemon_cli::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENV);
+        let _binding =
+            TestEnvRestore::capture(ctx_daemon_cli::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV);
+        std::env::remove_var(ctx_daemon_cli::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENV);
+        std::env::remove_var(ctx_daemon_cli::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV);
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = config::AppConfig::default();
+        config.search.semantic = Some(true);
+
+        let builtin = semantic_report(temp.path(), &config, "status", true).unwrap();
+        assert_eq!(builtin["executor"]["kind"], "builtin");
+        assert_eq!(builtin["executor"]["scope"], "builtin");
+        assert_eq!(builtin["local_only"], true);
+        assert_eq!(builtin["read_only"], true);
+
+        config.semantic.executor =
+            ctx_daemon_cli::SemanticEmbeddingExecutorConfig::http("http://127.0.0.1:9").unwrap();
+        std::env::set_var(
+            ctx_daemon_cli::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENV,
+            "loopback-secret",
+        );
+        let loopback = semantic_report(temp.path(), &config, "status", true).unwrap();
+        assert_eq!(loopback["executor"]["scope"], "loopback");
+        assert_eq!(loopback["executor"]["content_leaves_machine"], false);
+        assert_eq!(
+            loopback["executor"]["authentication"]
+                ["token_bound_to_selected_endpoint_in_current_process"],
+            false
+        );
+
+        config.semantic.executor = ctx_daemon_cli::SemanticEmbeddingExecutorConfig::http(
+            "https://embed.example.test/base",
+        )
+        .unwrap();
+        std::env::set_var(
+            ctx_daemon_cli::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENV,
+            "remote-secret",
+        );
+        std::env::set_var(
+            ctx_daemon_cli::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV,
+            "https://embed.example.test/base",
+        );
+        let remote = semantic_report(temp.path(), &config, "status", true).unwrap();
+        assert_eq!(remote["executor"]["scope"], "remote");
+        assert_eq!(remote["executor"]["content_leaves_machine"], true);
+        assert_eq!(remote["local_only"], false);
+        assert_eq!(remote["read_only"], true);
+        assert_eq!(
+            remote["executor"]["authentication"]
+                ["token_bound_to_selected_endpoint_in_current_process"],
+            true
+        );
+        let encoded = serde_json::to_string(&remote).unwrap();
+        assert!(!encoded.contains("remote-secret"));
+        assert!(!encoded.contains("loopback-secret"));
     }
 }

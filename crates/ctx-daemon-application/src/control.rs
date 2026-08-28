@@ -4,8 +4,8 @@ use anyhow::{anyhow, Context};
 use ctx_daemon_runtime::{daemon_lock_is_active, DaemonLifecycleControlLock};
 
 use crate::{
-    lifecycle, supervisor, DaemonApplicationHost, DaemonHandoff, DaemonStartError,
-    DaemonSupervisorReport, DaemonTrigger,
+    lifecycle, supervisor, DaemonApplicationHost, DaemonConfigSnapshot, DaemonHandoff,
+    DaemonStartError, DaemonSupervisorReport, DaemonTrigger,
 };
 
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -53,6 +53,41 @@ pub(super) fn update_daemon_enabled(
             apply_configured_enabled(host, data_root)
         },
     )
+}
+
+pub(super) fn restart_daemon_with_current_environment(
+    host: &dyn DaemonApplicationHost,
+    data_root: &Path,
+    config: &DaemonConfigSnapshot,
+    trigger: DaemonTrigger,
+) -> Result<DaemonHandoff, DaemonStartError> {
+    if !config.enabled {
+        return Err(DaemonStartError::Start(anyhow!(
+            "cannot restart a daemon while automatic indexing is disabled"
+        )));
+    }
+    if lifecycle::daemon_start_is_fenced(host) {
+        return Err(DaemonStartError::Suppressed("hosted_uninstall_active"));
+    }
+    let _control =
+        DaemonLifecycleControlLock::acquire(data_root).map_err(DaemonStartError::Start)?;
+    if lifecycle::daemon_start_is_fenced(host) {
+        return Err(DaemonStartError::Suppressed("hosted_uninstall_active"));
+    }
+
+    let supervised = lifecycle::daemon_autostart_suppression_reason().is_none();
+    if supervised {
+        // Validate and install the current endpoint-bound environment before
+        // interrupting a healthy owner. The second ensure below recreates the
+        // registration after the bounded stop.
+        supervisor::ensure_daemon_supervisor(host, data_root).map_err(DaemonStartError::Start)?;
+        supervisor::disable_daemon_supervisor(host, data_root).map_err(DaemonStartError::Start)?;
+    }
+    request_daemon_shutdown_and_wait(host, data_root).map_err(DaemonStartError::Start)?;
+    if supervised {
+        supervisor::ensure_daemon_supervisor(host, data_root).map_err(DaemonStartError::Start)?;
+    }
+    lifecycle::start_daemon_and_wait(host, data_root, config, trigger)
 }
 
 fn reject_hosted_uninstall(

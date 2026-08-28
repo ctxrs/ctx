@@ -81,6 +81,7 @@ fn history_config(daemon_enabled: bool, semantic_search_enabled: bool) -> config
     config::AppConfig::from_snapshot(HistoryCliConfig {
         daemon_enabled,
         semantic_search_enabled,
+        semantic_executor: ctx_daemon_cli::SemanticEmbeddingExecutorConfig::builtin(),
         local_usage_enabled: false,
         automatic_provider_discovery: true,
         provider_roots: Vec::new(),
@@ -91,6 +92,7 @@ fn history_snapshot(daemon_enabled: bool, semantic_search_enabled: bool) -> Hist
     HistoryCliConfig {
         daemon_enabled,
         semantic_search_enabled,
+        semantic_executor: ctx_daemon_cli::SemanticEmbeddingExecutorConfig::builtin(),
         local_usage_enabled: false,
         automatic_provider_discovery: true,
         provider_roots: Vec::new(),

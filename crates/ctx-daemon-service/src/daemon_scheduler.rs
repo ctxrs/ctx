@@ -807,7 +807,11 @@ fn prepare_semantic_retry_for_generation(
         });
     if status_generation.as_deref() != Some(core_generation_id) {
         runtime.semantic_retry.reset();
-        runtime.semantic_blocked_job = None;
+        if !runtime.semantic_blocked_job.as_ref().is_some_and(|job| {
+            semantic_failure_class_from_job(job) == Some(SemanticFailureClass::Permanent)
+        }) {
+            runtime.semantic_blocked_job = None;
+        }
     }
 }
 

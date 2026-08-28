@@ -24,6 +24,11 @@ fn application_config(config: &AppConfig<'_>) -> ctx_daemon_application::DaemonC
         enabled: config.daemon.enabled,
         mode: super::daemon_supervisor::daemon_mode(config.daemon.mode),
         semantic_enabled: config.semantic_search_enabled(),
+        semantic_executor: config
+            .semantic_embedding_executor()
+            .http_endpoint()
+            .unwrap_or("builtin")
+            .to_owned(),
     }
 }
 
@@ -46,7 +51,7 @@ pub(super) fn daemon_report_with_config(
     disabled_overrides_lifecycle: bool,
     current_config: &AppConfig<'_>,
 ) -> Value {
-    super::daemon_supervisor::with_daemon_application(|application| {
+    super::daemon_supervisor::with_daemon_run_application(current_config, false, |application| {
         daemon_report_with_config_and_application(
             application,
             data_root,
@@ -103,22 +108,43 @@ fn daemon_semantic_job_report(
     current_config: Option<&AppConfig<'_>>,
 ) -> Value {
     let reload = context.config_reload;
-    let daemon_enabled = reload
+    let current_daemon_enabled = current_config.map(|config| config.daemon.enabled);
+    let current_semantic_enabled = current_config.map(AppConfig::semantic_search_enabled);
+    let applied_daemon_enabled = if context.daemon_running {
+        reload.applied_daemon_enabled.or(current_daemon_enabled)
+    } else {
+        current_daemon_enabled.or(reload.applied_daemon_enabled)
+    }
+    .unwrap_or_else(|| AppConfig::default().daemon.enabled);
+    let applied_semantic_enabled =
+        if context.daemon_running || reload.status == "activation_failed" {
+            reload.applied_semantic_enabled.or(current_semantic_enabled)
+        } else {
+            current_semantic_enabled.or(reload.applied_semantic_enabled)
+        }
+        .unwrap_or(false);
+    let requested_daemon_enabled = reload
         .requested_daemon_enabled
-        .or(reload.applied_daemon_enabled)
-        .unwrap_or_else(|| {
-            current_config
-                .map(|config| config.daemon.enabled)
-                .unwrap_or_else(|| AppConfig::default().daemon.enabled)
-        });
-    let semantic_enabled = reload
+        .or(current_daemon_enabled)
+        .unwrap_or(applied_daemon_enabled);
+    let requested_semantic_enabled = reload
         .requested_semantic_enabled
-        .or(reload.applied_semantic_enabled)
-        .unwrap_or_else(|| current_config.is_some_and(AppConfig::semantic_search_enabled));
-    let semantic_supported = super::semantic_query_service_supported();
+        .or(current_semantic_enabled)
+        .unwrap_or(applied_semantic_enabled);
+    let semantic_supported = current_config.is_some_and(|config| {
+        config
+            .semantic_embedding_executor()
+            .http_endpoint()
+            .is_some()
+    }) || super::semantic_query_service_supported();
     let mode_allows_semantic = !context.daemon_mode.runs_only_source_refresh();
-    let enabled = daemon_enabled && semantic_enabled && semantic_supported && mode_allows_semantic;
-    let activation_failed = reload.status == "activation_failed" && enabled;
+    let requested = requested_daemon_enabled
+        && requested_semantic_enabled
+        && semantic_supported
+        && mode_allows_semantic;
+    let enabled = requested && applied_daemon_enabled && applied_semantic_enabled;
+    let activation_failed = reload.status == "activation_failed" && requested;
+    let reload_failed = context.daemon_running && reload.status == "failed";
     let reload_pending = context.daemon_running && reload.status == "pending" && reload.out_of_sync;
     let disabled = !enabled && disabled_overrides_lifecycle && !context.semantic_runtime_active;
     let status_value = read_daemon_job_status(&daemon_semantic_job_path(data_root));
@@ -128,7 +154,7 @@ fn daemon_semantic_job_report(
     let last_run_reason = status_value
         .as_ref()
         .and_then(|value| json_string(value, "reason"));
-    let status = if activation_failed {
+    let status = if activation_failed || reload_failed {
         "failed"
     } else if reload_pending
         || (context.daemon_running && enabled && !context.semantic_runtime_active)
@@ -141,6 +167,8 @@ fn daemon_semantic_job_report(
     };
     let reason = if activation_failed {
         Some("semantic_activation_failed".to_owned())
+    } else if reload_failed {
+        Some("daemon_config_reload_failed".to_owned())
     } else if reload_pending {
         Some("daemon_config_reload_pending".to_owned())
     } else if context.daemon_running && enabled && !context.semantic_runtime_active {
@@ -148,7 +176,7 @@ fn daemon_semantic_job_report(
     } else if disabled {
         Some(if context.daemon_mode.runs_only_source_refresh() {
             "daemon_mode_source_refresh_only".to_owned()
-        } else if !semantic_enabled {
+        } else if !applied_semantic_enabled {
             "semantic_disabled".to_owned()
         } else if !semantic_supported {
             "unsupported_platform".to_owned()
@@ -164,7 +192,9 @@ fn daemon_semantic_job_report(
     compact_json(json!({
         "status": status,
         "enabled": enabled,
-        "semantic_enabled": semantic_enabled,
+        "daemon_requested": requested_daemon_enabled,
+        "semantic_requested": requested_semantic_enabled,
+        "semantic_enabled": applied_semantic_enabled,
         "daemon_configured": reload.applied_daemon_enabled,
         "semantic_configured": reload.applied_semantic_enabled,
         "runtime_active": context.semantic_runtime_active,
@@ -176,19 +206,27 @@ fn daemon_semantic_job_report(
             .and_then(|value| json_i64(value, "last_run_at_ms")),
         "last_run_status": last_run_status,
         "last_run_reason": last_run_reason,
-        "last_error": if activation_failed {
+        "last_error": if activation_failed || reload_failed {
             reload.last_error.map(str::to_owned)
         } else {
             status_value
                 .as_ref()
                 .and_then(|value| json_string(value, "last_error"))
         },
-        "retryable": status_value
-            .as_ref()
-            .and_then(|value| value.get("retryable").and_then(Value::as_bool)),
-        "failure_class": status_value
-            .as_ref()
-            .and_then(|value| json_string(value, "failure_class")),
+        "retryable": if activation_failed || reload_failed {
+            None
+        } else {
+            status_value
+                .as_ref()
+                .and_then(|value| value.get("retryable").and_then(Value::as_bool))
+        },
+        "failure_class": if activation_failed || reload_failed {
+            None
+        } else {
+            status_value
+                .as_ref()
+                .and_then(|value| json_string(value, "failure_class"))
+        },
         "indexed_chunks": status_value
             .as_ref()
             .and_then(|value| value.get("indexed_chunks").and_then(Value::as_u64)),

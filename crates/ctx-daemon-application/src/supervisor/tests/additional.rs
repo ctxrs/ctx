@@ -1,4 +1,109 @@
 use super::*;
+use crate::{SEMANTIC_EMBEDDING_TOKEN_ENDPOINT_ENV, SEMANTIC_EMBEDDING_TOKEN_ENV};
+
+#[test]
+fn supervisor_reinstalls_rotated_scrubbed_and_reenabled_semantic_credentials() -> Result<()> {
+    let _env_lock = crate::test_environment_lock()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let _restore = RestoreTestEnvironment::capture(&[
+        SEMANTIC_EMBEDDING_TOKEN_ENV,
+        SEMANTIC_EMBEDDING_TOKEN_ENDPOINT_ENV,
+    ]);
+    let temp = tempfile::tempdir()?;
+    let executable = temp.path().join("ctx");
+    let backend = FakeSupervisorBackend::default();
+    let endpoint = "https://embeddings.example.test/";
+    let enabled_http = crate::DaemonConfigSnapshot {
+        enabled: true,
+        mode: crate::DaemonMode::Full,
+        semantic_enabled: true,
+        semantic_executor: endpoint.to_owned(),
+    };
+
+    env::set_var(SEMANTIC_EMBEDDING_TOKEN_ENV, "token-a");
+    env::set_var(SEMANTIC_EMBEDDING_TOKEN_ENDPOINT_ENV, endpoint);
+    let mut input_a = ManagedSupervisorInput::new(&TestHost, temp.path(), &executable)?;
+    input_a.daemon_environment = configured_supervisor_environment_for_config(
+        supervisor_environment_snapshot(&TestHost)?,
+        temp.path(),
+        None,
+        &enabled_http,
+    )?;
+    backend.expect_environment(&input_a.daemon_environment);
+    assert_eq!(
+        ensure_native_supervisor_with(&TestHost, &input_a, &backend)?,
+        DaemonSupervisorStart::Native
+    );
+
+    env::set_var(SEMANTIC_EMBEDDING_TOKEN_ENV, "token-b");
+    env::set_var(SEMANTIC_EMBEDDING_TOKEN_ENDPOINT_ENV, endpoint);
+    let mut input_b = ManagedSupervisorInput::new(&TestHost, temp.path(), &executable)?;
+    input_b.daemon_environment = configured_supervisor_environment_for_config(
+        supervisor_environment_snapshot(&TestHost)?,
+        temp.path(),
+        None,
+        &enabled_http,
+    )?;
+    backend.expect_environment(&input_b.daemon_environment);
+    assert_eq!(
+        ensure_native_supervisor_with(&TestHost, &input_b, &backend)?,
+        DaemonSupervisorStart::Native
+    );
+
+    let mut disabled = ManagedSupervisorInput::new(&TestHost, temp.path(), &executable)?;
+    let disabled_config = crate::DaemonConfigSnapshot {
+        semantic_enabled: false,
+        ..enabled_http.clone()
+    };
+    disabled.daemon_environment = configured_supervisor_environment_for_config(
+        supervisor_environment_snapshot(&TestHost)?,
+        temp.path(),
+        None,
+        &disabled_config,
+    )?;
+    backend.expect_environment(&disabled.daemon_environment);
+    assert_eq!(
+        ensure_native_supervisor_with(&TestHost, &disabled, &backend)?,
+        DaemonSupervisorStart::Native
+    );
+
+    let builtin_config = crate::DaemonConfigSnapshot {
+        semantic_executor: "builtin".to_owned(),
+        ..enabled_http.clone()
+    };
+    let builtin_environment = configured_supervisor_environment_for_config(
+        supervisor_environment_snapshot(&TestHost)?,
+        temp.path(),
+        None,
+        &builtin_config,
+    )?;
+    assert_eq!(
+        builtin_environment.identity_sha256(),
+        disabled.daemon_environment.identity_sha256()
+    );
+
+    let mut reenabled = ManagedSupervisorInput::new(&TestHost, temp.path(), &executable)?;
+    reenabled.daemon_environment = configured_supervisor_environment_for_config(
+        supervisor_environment_snapshot(&TestHost)?,
+        temp.path(),
+        None,
+        &enabled_http,
+    )?;
+    backend.expect_environment(&reenabled.daemon_environment);
+    assert_eq!(
+        ensure_native_supervisor_with(&TestHost, &reenabled, &backend)?,
+        DaemonSupervisorStart::Native
+    );
+
+    let state = backend.state.lock().unwrap();
+    assert_eq!(state.installs, 4);
+    assert_eq!(
+        state.installed_environment_sha256,
+        Some(reenabled.daemon_environment.identity_sha256().to_owned())
+    );
+    Ok(())
+}
 
 #[test]
 fn preserved_registration_hands_same_binary_fallback_to_native_once() -> Result<()> {
@@ -636,7 +741,7 @@ fn native_control_context_accepts_nonunicode_manager_values_without_launch_snaps
 }
 
 #[test]
-fn status_preserves_installed_environment_hash_and_flags_current_mismatch() -> Result<()> {
+fn status_flags_environment_mismatch_without_exposing_credential_derived_hashes() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let executable = temp.path().join("ctx");
     let backend = FakeSupervisorBackend::with_registration(Some(4_242));
@@ -654,17 +759,12 @@ fn status_preserves_installed_environment_hash_and_flags_current_mismatch() -> R
     ctx_daemon_runtime::write_private_json_file(&receipt_path, &installed)?;
 
     let report = revalidated_supervisor_report_with(&TestHost, temp.path(), &backend);
-    assert_eq!(
-        report["environment_snapshot"]["sha256"],
-        "0".repeat(64),
-        "status must retain the installed snapshot hash"
-    );
+    assert!(report["environment_snapshot"].get("sha256").is_none());
+    assert!(report["environment_snapshot"]
+        .get("current_sha256")
+        .is_none());
     assert_eq!(report["environment_snapshot"]["captured_at_ms"], 1234);
     assert_eq!(report["environment_snapshot"]["restart_required"], true);
-    assert_ne!(
-        report["environment_snapshot"]["current_sha256"],
-        report["environment_snapshot"]["sha256"]
-    );
     assert_eq!(report["environment_snapshot"]["values_exposed"], false);
     Ok(())
 }

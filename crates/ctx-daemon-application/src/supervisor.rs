@@ -177,6 +177,24 @@ fn configured_supervisor_environment(
 ) -> Result<SupervisorEnvironmentSnapshot> {
     let snapshot = supervisor_environment_snapshot(host)
         .context("capture native supervisor daemon environment")?;
+    let config = host.daemon_config(data_root)?;
+    configured_supervisor_environment_for_config(
+        snapshot,
+        data_root,
+        requested_loop_interval_seconds,
+        &config,
+    )
+}
+
+fn configured_supervisor_environment_for_config(
+    mut snapshot: SupervisorEnvironmentSnapshot,
+    data_root: &Path,
+    requested_loop_interval_seconds: Option<u64>,
+    config: &crate::DaemonConfigSnapshot,
+) -> Result<SupervisorEnvironmentSnapshot> {
+    if !config.semantic_enabled || config.semantic_executor == "builtin" {
+        snapshot = snapshot.without_semantic_embedding_auth();
+    }
     configured_supervisor_environment_from_snapshot(
         snapshot,
         data_root,

@@ -81,6 +81,23 @@ pub(super) fn semantic_background_resource_deferred(
     )
 }
 
+/// External inference uses no local model memory or energy budget, but index
+/// publication still requires the same local disk safety margin.
+pub(super) fn semantic_external_background_resource_deferred(
+    storage_path: &Path,
+) -> Option<SemanticResourceDeferred> {
+    let available_disk_bytes = semantic_available_space_unconditionally(storage_path);
+    available_disk_bytes
+        .is_some_and(|available| available < SEMANTIC_BACKGROUND_MIN_AVAILABLE_DISK_BYTES)
+        .then_some(SemanticResourceDeferred {
+            reason: SemanticResourceDeferralReason::DiskPressure,
+            available_memory_bytes: None,
+            required_available_memory_bytes: None,
+            available_disk_bytes,
+            required_available_disk_bytes: Some(SEMANTIC_BACKGROUND_MIN_AVAILABLE_DISK_BYTES),
+        })
+}
+
 fn semantic_background_resource_deferred_for(
     available_memory_bytes: Option<u64>,
     model_load_required_memory_bytes: u64,
@@ -128,6 +145,10 @@ fn semantic_available_space(path: &Path) -> Option<u64> {
     if !semantic_query_service_supported() {
         return None;
     }
+    semantic_available_space_unconditionally(path)
+}
+
+fn semantic_available_space_unconditionally(path: &Path) -> Option<u64> {
     let mut candidate = path;
     while !candidate.exists() {
         candidate = candidate.parent()?;

@@ -14,7 +14,11 @@ fn supervisor_environment_snapshot_for_registration(
     host: &dyn DaemonApplicationHost,
     data_root: &Path,
 ) -> Result<SupervisorEnvironmentSnapshot> {
-    let snapshot = supervisor_environment_snapshot(host)?;
+    let mut snapshot = supervisor_environment_snapshot(host)?;
+    let config = host.daemon_config(data_root)?;
+    if !config.semantic_enabled || config.semantic_executor == "builtin" {
+        snapshot = snapshot.without_semantic_embedding_auth();
+    }
     let persisted_loop_interval_seconds = persisted_supervisor_loop_interval_seconds(data_root);
     let loop_interval_seconds =
         persisted_loop_interval_seconds.or(snapshot.loop_interval_seconds());
@@ -224,10 +228,10 @@ fn append_supervisor_environment_report(
         .filter(Value::is_object)
         .unwrap_or_else(|| json!({}));
     if let Some(object) = environment.as_object_mut() {
-        object.insert(
-            "current_sha256".to_owned(),
-            current.get("sha256").cloned().unwrap_or(Value::Null),
-        );
+        // The private receipt retains this digest for change detection, but it
+        // includes credential values and must never become a status oracle.
+        object.remove("sha256");
+        object.remove("current_sha256");
         object.insert(
             "current_captured_names".to_owned(),
             current

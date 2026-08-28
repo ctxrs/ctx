@@ -41,8 +41,10 @@ pub struct DaemonConfigReloadContext<'a> {
     pub out_of_sync: bool,
     pub requested_daemon_enabled: Option<bool>,
     pub requested_semantic_enabled: Option<bool>,
+    pub requested_semantic_executor: Option<&'a str>,
     pub applied_daemon_enabled: Option<bool>,
     pub applied_semantic_enabled: Option<bool>,
+    pub applied_semantic_executor: Option<&'a str>,
     pub last_error: Option<&'a str>,
 }
 
@@ -205,12 +207,18 @@ impl DaemonStatusPreparation<'_> {
                 requested_semantic_enabled: reload
                     .pointer("/requested/semantic_enabled")
                     .and_then(Value::as_bool),
+                requested_semantic_executor: reload
+                    .pointer("/requested/semantic_executor")
+                    .and_then(Value::as_str),
                 applied_daemon_enabled: reload
                     .pointer("/applied/daemon_enabled")
                     .and_then(Value::as_bool),
                 applied_semantic_enabled: reload
                     .pointer("/applied/semantic_enabled")
                     .and_then(Value::as_bool),
+                applied_semantic_executor: reload
+                    .pointer("/applied/semantic_executor")
+                    .and_then(Value::as_str),
                 last_error: reload.get("last_error").and_then(Value::as_str),
             },
         }
@@ -375,13 +383,20 @@ fn daemon_config_reload_report(
         .get("applied")
         .and_then(|value| value.get("semantic_enabled"))
         .and_then(Value::as_bool);
+    let applied_semantic_executor = persisted
+        .get("applied")
+        .and_then(|value| value.get("semantic_executor"))
+        .and_then(Value::as_str);
     let requested_daemon_enabled = current_config.map(|config| config.enabled);
     let requested_daemon_mode = current_config.map(|config| config.mode.as_str());
     let requested_semantic_enabled = current_config.map(|config| config.semantic_enabled);
+    let requested_semantic_executor =
+        current_config.map(|config| config.semantic_executor.as_str());
     let out_of_sync = running
         && (requested_daemon_enabled != applied_daemon_enabled
             || requested_daemon_mode != applied_daemon_mode
-            || requested_semantic_enabled != applied_semantic_enabled);
+            || requested_semantic_enabled != applied_semantic_enabled
+            || requested_semantic_executor != applied_semantic_executor);
     let persisted_status = persisted
         .get("status")
         .and_then(Value::as_str)
@@ -407,11 +422,13 @@ fn daemon_config_reload_report(
             "daemon_enabled": requested_daemon_enabled,
             "daemon_mode": requested_daemon_mode,
             "semantic_enabled": requested_semantic_enabled,
+            "semantic_executor": requested_semantic_executor,
         },
         "applied": {
             "daemon_enabled": applied_daemon_enabled,
             "daemon_mode": applied_daemon_mode,
             "semantic_enabled": applied_semantic_enabled,
+            "semantic_executor": applied_semantic_executor,
         },
         "last_error": persisted.get("last_error").cloned(),
     }))
@@ -535,6 +552,7 @@ mod tests {
             enabled: false,
             mode: DaemonMode::Full,
             semantic_enabled: false,
+            semantic_executor: "builtin".to_owned(),
         };
 
         let disabled = report(temp.path(), true, Some(&config));
@@ -566,6 +584,7 @@ mod tests {
                         "daemon_enabled": true,
                         "daemon_mode": "full",
                         "semantic_enabled": false,
+                        "semantic_executor": "builtin",
                     },
                 },
             }),
@@ -574,6 +593,7 @@ mod tests {
             enabled: false,
             mode: DaemonMode::SourceRefreshOnly,
             semantic_enabled: true,
+            semantic_executor: "https://embeddings.example.test/v1/".to_owned(),
         };
         let host = TestHost;
         let application = DaemonApplication::new(&host);
@@ -587,8 +607,16 @@ mod tests {
         assert_eq!(context.config_reload.status, "applied");
         assert_eq!(context.config_reload.requested_daemon_enabled, Some(false));
         assert_eq!(context.config_reload.requested_semantic_enabled, Some(true));
+        assert_eq!(
+            context.config_reload.requested_semantic_executor,
+            Some("https://embeddings.example.test/v1/")
+        );
         assert_eq!(context.config_reload.applied_daemon_enabled, Some(true));
         assert_eq!(context.config_reload.applied_semantic_enabled, Some(false));
+        assert_eq!(
+            context.config_reload.applied_semantic_executor,
+            Some("builtin")
+        );
 
         let daemon = preparation.finish().into_json();
         assert_eq!(daemon["enabled"], false);
@@ -601,7 +629,7 @@ mod tests {
     }
 
     #[test]
-    fn running_owner_marks_changed_applied_config_pending() -> anyhow::Result<()> {
+    fn running_owner_marks_changed_semantic_executor_pending() -> anyhow::Result<()> {
         let temp = tempfile::tempdir()?;
         let lock = DaemonLock::acquire(temp.path())?.expect("daemon lock");
         let now = ctx_history_core::utc_now().timestamp_millis();
@@ -617,7 +645,8 @@ mod tests {
                     "applied": {
                         "daemon_enabled": true,
                         "daemon_mode": "full",
-                        "semantic_enabled": false,
+                        "semantic_enabled": true,
+                        "semantic_executor": "builtin",
                     },
                 },
             }),
@@ -626,6 +655,7 @@ mod tests {
             enabled: true,
             mode: DaemonMode::Full,
             semantic_enabled: true,
+            semantic_executor: "https://embeddings.example.test/v1/".to_owned(),
         };
         let host = TestHost;
         let application = DaemonApplication::new(&host);
@@ -636,11 +666,27 @@ mod tests {
         assert!(context.semantic_runtime_active);
         assert!(context.config_reload.out_of_sync);
         assert_eq!(context.config_reload.status, "pending");
+        assert_eq!(
+            context.config_reload.requested_semantic_executor,
+            Some("https://embeddings.example.test/v1/")
+        );
+        assert_eq!(
+            context.config_reload.applied_semantic_executor,
+            Some("builtin")
+        );
 
         let daemon = preparation.finish().into_json();
         assert_eq!(daemon["config_reload"]["status"], "pending");
         assert_eq!(daemon["config_reload"]["reason"], "config_changed");
         assert_eq!(daemon["config_reload"]["out_of_sync"], true);
+        assert_eq!(
+            daemon["config_reload"]["requested"]["semantic_executor"],
+            "https://embeddings.example.test/v1/"
+        );
+        assert_eq!(
+            daemon["config_reload"]["applied"]["semantic_executor"],
+            "builtin"
+        );
         drop(lock);
         Ok(())
     }
@@ -685,6 +731,7 @@ mod tests {
                         "daemon_enabled": true,
                         "daemon_mode": "full",
                         "semantic_enabled": false,
+                        "semantic_executor": "builtin",
                     },
                 },
             }),
@@ -693,6 +740,7 @@ mod tests {
             enabled: true,
             mode: DaemonMode::Full,
             semantic_enabled: true,
+            semantic_executor: "https://embeddings.example.test/v1/".to_owned(),
         };
         let host = TestHost;
         let application = DaemonApplication::new(&host);
@@ -707,6 +755,14 @@ mod tests {
         );
         assert_eq!(context.config_reload.requested_semantic_enabled, Some(true));
         assert_eq!(context.config_reload.applied_semantic_enabled, Some(false));
+        assert_eq!(
+            context.config_reload.requested_semantic_executor,
+            Some("https://embeddings.example.test/v1/")
+        );
+        assert_eq!(
+            context.config_reload.applied_semantic_executor,
+            Some("builtin")
+        );
         let daemon = preparation.finish().into_json();
         assert_eq!(daemon["status"], "failed");
         assert_eq!(daemon["last_error"], "outer lifecycle failure");
@@ -875,11 +931,13 @@ mod tests {
                         "daemon_enabled": true,
                         "daemon_mode": "source-refresh-only",
                         "semantic_enabled": false,
+                        "semantic_executor": "builtin",
                     },
                     "applied": {
                         "daemon_enabled": true,
                         "daemon_mode": "source-refresh-only",
                         "semantic_enabled": false,
+                        "semantic_executor": "builtin",
                     },
                 },
             }),
@@ -901,6 +959,7 @@ mod tests {
             enabled: true,
             mode: DaemonMode::SourceRefreshOnly,
             semantic_enabled: false,
+            semantic_executor: "builtin".to_owned(),
         };
 
         let report = application

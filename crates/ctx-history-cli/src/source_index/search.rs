@@ -313,7 +313,10 @@ pub fn run_search(
     let refresh_mode = request.refresh;
     let foreground_semantic = refresh_mode == RefreshArg::Wait && !config.daemon.enabled;
     let semantic_port = if foreground_semantic {
-        crate::semantic::SemanticQueryAdapter::foreground(&data_root)
+        crate::semantic::SemanticQueryAdapter::foreground(
+            &data_root,
+            config.semantic_embedding_executor().clone(),
+        )
     } else {
         crate::semantic::SemanticQueryAdapter::new(&data_root)
     };

@@ -141,6 +141,15 @@ const TOPICS: &[DocTopic] = &[
         body: include_str!("../../../docs/search.md"),
     },
     DocTopic {
+        id: "semantic-executors",
+        title: "Semantic Embedding Executors",
+        audience: "integrator-agent",
+        summary: "Select the built-in or exact-contract HTTP semantic embedding executor.",
+        tags: &["semantic", "embeddings", "executor", "http", "api"],
+        source_path: "docs/semantic-executors.md",
+        body: include_str!("../../../docs/semantic-executors.md"),
+    },
+    DocTopic {
         id: "event-queries",
         title: "Event Queries And JSONL",
         audience: "integrator-agent",

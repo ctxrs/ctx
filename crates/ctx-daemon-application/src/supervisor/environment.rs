@@ -8,7 +8,10 @@ use ctx_history_core::utc_now;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-use crate::{compact_json, DaemonApplicationHost};
+use crate::{
+    compact_json, DaemonApplicationHost, SEMANTIC_EMBEDDING_TOKEN_ENDPOINT_ENV,
+    SEMANTIC_EMBEDDING_TOKEN_ENV,
+};
 
 const SUPERVISOR_DAEMON_POLICY_ENV_ALLOWLIST: &[&str] = &[
     "ALL_PROXY",
@@ -18,6 +21,8 @@ const SUPERVISOR_DAEMON_POLICY_ENV_ALLOWLIST: &[&str] = &[
     "CTX_DAEMON_MODE",
     "CTX_LOCAL_USAGE_ENABLED",
     "CTX_SEARCH_SEMANTIC",
+    SEMANTIC_EMBEDDING_TOKEN_ENDPOINT_ENV,
+    SEMANTIC_EMBEDDING_TOKEN_ENV,
     "CTX_UPGRADE_AUTO",
     "CTX_UPGRADE_CHANNEL",
     "CTX_UPGRADE_INTERVAL_SECONDS",
@@ -137,6 +142,11 @@ impl SupervisorEnvironmentSnapshot {
         self.loop_interval_seconds
     }
 
+    #[cfg(test)]
+    pub(super) fn identity_sha256(&self) -> &str {
+        &self.sha256
+    }
+
     pub(super) fn with_loop_interval_seconds(
         mut self,
         loop_interval_seconds: Option<u64>,
@@ -149,6 +159,14 @@ impl SupervisorEnvironmentSnapshot {
         self.loop_interval_seconds = loop_interval_seconds;
         self.sha256 = supervisor_environment_sha256(&self.values, loop_interval_seconds);
         Ok(self)
+    }
+
+    pub(super) fn without_semantic_embedding_auth(mut self) -> Self {
+        self.values.retain(|(name, _)| {
+            name != SEMANTIC_EMBEDDING_TOKEN_ENV && name != SEMANTIC_EMBEDDING_TOKEN_ENDPOINT_ENV
+        });
+        self.sha256 = supervisor_environment_sha256(&self.values, self.loop_interval_seconds);
+        self
     }
 
     pub(super) fn contract_report(&self) -> Value {
@@ -189,6 +207,12 @@ pub(super) fn supervisor_environment_snapshot(
             (*name).to_owned(),
             validated_supervisor_environment_value(name, value)?,
         );
+    }
+    if !values.contains_key(SEMANTIC_EMBEDDING_TOKEN_ENV)
+        || !values.contains_key(SEMANTIC_EMBEDDING_TOKEN_ENDPOINT_ENV)
+    {
+        values.remove(SEMANTIC_EMBEDDING_TOKEN_ENV);
+        values.remove(SEMANTIC_EMBEDDING_TOKEN_ENDPOINT_ENV);
     }
     values.insert("PATH".to_owned(), SUPERVISOR_DAEMON_FIXED_PATH.to_owned());
     #[cfg(unix)]
@@ -394,7 +418,7 @@ mod tests {
     }
 
     #[test]
-    fn contract_is_narrow_nonsecret_and_rejects_controls() {
+    fn contract_is_narrow_and_rejects_controls() {
         let allowlist = supervisor_environment_allowlist_names();
         for required in [
             "CODEX_HOME",
@@ -406,6 +430,8 @@ mod tests {
             "CTX_LOCAL_USAGE_ENABLED",
             "CTX_ANALYTICS_ENABLED",
             "CTX_SEARCH_SEMANTIC",
+            SEMANTIC_EMBEDDING_TOKEN_ENDPOINT_ENV,
+            SEMANTIC_EMBEDDING_TOKEN_ENV,
             "CTX_UPGRADE_AUTO",
             "CTX_UPGRADE_CHANNEL",
             "CTX_UPGRADE_INTERVAL_SECONDS",
@@ -420,6 +446,7 @@ mod tests {
         for forbidden in [
             "CTX_PRO_CHANNEL",
             "CTX_PRO_HELPER",
+            "CTX_SEMANTIC_EMBEDDING_FALLBACK_TOKEN",
             "CTX_SEMANTIC_MODEL_ONNX",
             "CTX_SEMANTIC_COREML_NATIVE_COMPUTE",
             "CTX_ANALYTICS_ENDPOINT",
@@ -461,6 +488,123 @@ mod tests {
         }
         #[cfg(unix)]
         assert!(validated_supervisor_fallback_home(PathBuf::from("/tmp/home\ninjected")).is_err());
+    }
+
+    #[test]
+    fn supervisor_rotates_and_scrubs_only_the_endpoint_bound_semantic_embedding_token() -> Result<()>
+    {
+        const UNRELATED_TOKEN_ENV: &str = "CTX_SEMANTIC_EMBEDDING_FALLBACK_TOKEN";
+        const TOKEN_A: &str = "semantic-bearer-token-a";
+        const TOKEN_B: &str = "semantic-bearer-token-b";
+        const ENDPOINT: &str = "https://embeddings.example.test/";
+        const UNRELATED_VALUE: &str = "unrelated-token";
+        let _env_lock = crate::test_environment_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _restore = RestoreEnvironment::capture(&[
+            SEMANTIC_EMBEDDING_TOKEN_ENV,
+            SEMANTIC_EMBEDDING_TOKEN_ENDPOINT_ENV,
+            UNRELATED_TOKEN_ENV,
+        ]);
+
+        env::set_var(SEMANTIC_EMBEDDING_TOKEN_ENV, TOKEN_A);
+        env::set_var(SEMANTIC_EMBEDDING_TOKEN_ENDPOINT_ENV, ENDPOINT);
+        env::set_var(UNRELATED_TOKEN_ENV, UNRELATED_VALUE);
+        let snapshot = supervisor_environment_snapshot(&TestHost)?;
+        let unit = linux_systemd_unit_with_environment(
+            Path::new("/usr/local/bin/ctx"),
+            Path::new("/home/user/.local/share/ctx"),
+            &snapshot,
+        )?;
+        let launch_agent = launch_agent_plist_with_environment(
+            Path::new("/usr/local/bin/ctx"),
+            Path::new("/home/user/.local/share/ctx"),
+            &snapshot,
+        )?;
+        let windows_script = crate::supervisor::windows_sanitized_daemon_script_with_environment(
+            Path::new(r"C:\Program Files\ctx\ctx.exe"),
+            Path::new(r"C:\Users\ctx\AppData\Local\ctx"),
+            &snapshot,
+        )?;
+
+        assert!(snapshot
+            .values
+            .iter()
+            .any(|(name, value)| { name == SEMANTIC_EMBEDDING_TOKEN_ENV && value == TOKEN_A }));
+        assert!(snapshot.values.iter().any(|(name, value)| {
+            name == SEMANTIC_EMBEDDING_TOKEN_ENDPOINT_ENV && value == ENDPOINT
+        }));
+        assert!(!snapshot
+            .values
+            .iter()
+            .any(|(name, _)| name == UNRELATED_TOKEN_ENV));
+        assert!(unit.contains(SEMANTIC_EMBEDDING_TOKEN_ENV));
+        assert!(unit.contains(TOKEN_A));
+        assert!(!unit.contains(UNRELATED_TOKEN_ENV));
+        assert!(!unit.contains(UNRELATED_VALUE));
+        for artifact in [&launch_agent, &windows_script] {
+            assert!(artifact.contains(SEMANTIC_EMBEDDING_TOKEN_ENV));
+            assert!(artifact.contains(TOKEN_A));
+            assert!(!artifact.contains(UNRELATED_TOKEN_ENV));
+            assert!(!artifact.contains(UNRELATED_VALUE));
+        }
+
+        env::set_var(SEMANTIC_EMBEDDING_TOKEN_ENV, TOKEN_B);
+        env::set_var(SEMANTIC_EMBEDDING_TOKEN_ENDPOINT_ENV, ENDPOINT);
+        let rotated = supervisor_environment_snapshot(&TestHost)?;
+        let rotated_artifacts = [
+            linux_systemd_unit_with_environment(
+                Path::new("/usr/local/bin/ctx"),
+                Path::new("/home/user/.local/share/ctx"),
+                &rotated,
+            )?,
+            launch_agent_plist_with_environment(
+                Path::new("/usr/local/bin/ctx"),
+                Path::new("/home/user/.local/share/ctx"),
+                &rotated,
+            )?,
+            crate::supervisor::windows_sanitized_daemon_script_with_environment(
+                Path::new(r"C:\Program Files\ctx\ctx.exe"),
+                Path::new(r"C:\Users\ctx\AppData\Local\ctx"),
+                &rotated,
+            )?,
+        ];
+        assert_ne!(rotated.sha256, snapshot.sha256);
+        for artifact in &rotated_artifacts {
+            assert!(artifact.contains(TOKEN_B));
+            assert!(artifact.contains(ENDPOINT));
+            assert!(!artifact.contains(TOKEN_A));
+        }
+
+        let scrubbed = rotated.clone().without_semantic_embedding_auth();
+        assert_ne!(scrubbed.sha256, rotated.sha256);
+        assert!(!scrubbed.values.iter().any(|(name, _)| {
+            name == SEMANTIC_EMBEDDING_TOKEN_ENV || name == SEMANTIC_EMBEDDING_TOKEN_ENDPOINT_ENV
+        }));
+        for artifact in [
+            linux_systemd_unit_with_environment(
+                Path::new("/usr/local/bin/ctx"),
+                Path::new("/home/user/.local/share/ctx"),
+                &scrubbed,
+            )?,
+            launch_agent_plist_with_environment(
+                Path::new("/usr/local/bin/ctx"),
+                Path::new("/home/user/.local/share/ctx"),
+                &scrubbed,
+            )?,
+            crate::supervisor::windows_sanitized_daemon_script_with_environment(
+                Path::new(r"C:\Program Files\ctx\ctx.exe"),
+                Path::new(r"C:\Users\ctx\AppData\Local\ctx"),
+                &scrubbed,
+            )?,
+        ] {
+            assert!(!artifact.contains(SEMANTIC_EMBEDDING_TOKEN_ENV));
+            assert!(!artifact.contains(SEMANTIC_EMBEDDING_TOKEN_ENDPOINT_ENV));
+            assert!(!artifact.contains(TOKEN_A));
+            assert!(!artifact.contains(TOKEN_B));
+            assert!(!artifact.contains(ENDPOINT));
+        }
+        Ok(())
     }
 
     #[test]

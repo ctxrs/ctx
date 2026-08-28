@@ -3,6 +3,8 @@ mod cache_paths;
 mod configuration;
 mod embedding_executor;
 mod health_search;
+mod http_embedding_canary;
+mod http_embedding_executor;
 mod json;
 #[cfg(any(target_os = "macos", test, feature = "test-support"))]
 #[cfg_attr(
@@ -26,9 +28,17 @@ pub use configuration::{
     SemanticBackendPreference, SemanticCoreMlComputeMode, SemanticModelConfig, SemanticModelPaths,
     SemanticOnnxRuntimePaths,
 };
-pub use embedding_executor::{BuiltinSemanticEmbeddingExecutor, SemanticEmbeddingExecutor};
+pub use embedding_executor::{
+    BuiltinSemanticEmbeddingExecutor, SemanticEmbeddingExecutor, SemanticEmbeddingExecutorConfig,
+    SemanticEmbeddingExecutorHandle, SemanticEmbeddingExecutorKind, SemanticEmbeddingExecutorScope,
+};
 pub use health_search::{
     semantic_model_acquisition_integrity_error, semantic_model_cache_available,
+};
+pub use http_embedding_executor::{
+    semantic_embedding_failure_is_permanent, HttpSemanticEmbeddingExecutor,
+    SemanticEmbeddingExecutorAuth, SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV,
+    SEMANTIC_EMBEDDING_AUTH_TOKEN_ENV,
 };
 pub use model_contract::{
     semantic_e5_passage_text, semantic_model_contract, semantic_model_contract_descriptor,

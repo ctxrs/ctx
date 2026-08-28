@@ -7,6 +7,11 @@ fn application_config(config: &AppConfig<'_>) -> ctx_daemon_application::DaemonC
         enabled: config.daemon.enabled,
         mode: super::super::daemon_supervisor::daemon_mode(config.daemon.mode),
         semantic_enabled: config.semantic_search_enabled(),
+        semantic_executor: config
+            .semantic_embedding_executor()
+            .http_endpoint()
+            .unwrap_or("builtin")
+            .to_owned(),
     }
 }
 
@@ -93,6 +98,37 @@ pub fn autostart_daemon_and_wait(
     trigger: DaemonTriggerCommandArg,
 ) -> Result<DaemonHandoff> {
     Ok(autostart_daemon_for_setup_and_wait(data_root, config, trigger)?.handoff)
+}
+
+pub fn restart_daemon_with_current_environment_and_wait(
+    data_root: &Path,
+    config: &AppConfig<'_>,
+    trigger: DaemonTriggerCommandArg,
+) -> Result<DaemonHandoff> {
+    super::super::daemon_supervisor::with_daemon_application(|application| {
+        let handoff = application
+            .restart_daemon_with_current_environment(
+                data_root,
+                &application_config(config),
+                application_trigger(trigger),
+            )
+            .map_err(|error| match error {
+                ctx_daemon_application::DaemonStartError::Suppressed(reason) => anyhow!(
+                    "ctx daemon credential-bound restart was suppressed ({reason}); retry after it clears"
+                ),
+                ctx_daemon_application::DaemonStartError::BinaryIdentity(error) => error,
+                ctx_daemon_application::DaemonStartError::Start(error) => anyhow!(
+                    "ctx daemon credential-bound restart failed: {error:#}. Run `ctx status --format json`, then `ctx daemon run` for details"
+                ),
+                ctx_daemon_application::DaemonStartError::Ready(error) => anyhow!(
+                    "ctx daemon did not become ready after credential-bound restart: {error}. Run `ctx status --format json`, then `ctx daemon run` for details"
+                ),
+            })?;
+        Ok(DaemonHandoff {
+            pid: handoff.pid,
+            heartbeat_at_ms: handoff.heartbeat_at_ms,
+        })
+    })
 }
 
 pub fn autostart_daemon_for_setup_and_wait(

@@ -235,7 +235,13 @@ chunking, source projector, and lexical generation policies participate in
 generation identity, so incompatible derived data is rebuilt rather than
 silently reused.
 
-Enable local semantic search with:
+The selected embedding executor produces both indexed document vectors and
+query vectors. The built-in executor is the implicit default. An explicitly
+configured URL must implement the same pinned E5 model key and contract
+fingerprint; it is not a general model selector. ctx never silently falls back
+from an external executor to the built-in executor.
+
+Enable semantic search with:
 
 ```bash
 ctx semantic enable
@@ -256,11 +262,11 @@ is ready, the default hybrid backend uses lexical and semantic evidence together
 automatically.
 
 Only a manual CLI `--refresh wait` that actually needs semantic evidence may
-acquire the opted-in local model, initialize semantic storage, and perform
-foreground semantic catch-up. Explicit semantic search reports a typed local
-error when model, runtime, or generation convergence fails; it never silently
-changes a semantic-only request into lexical retrieval. Hybrid remains
-lexical-safe in those cases.
+initialize semantic storage, use the selected executor, and perform foreground
+semantic catch-up. Explicit semantic search reports a typed executor, model, or
+generation-convergence error; it never silently changes executors or turns a
+semantic-only request into lexical retrieval. Hybrid remains lexical-safe in
+those cases and reports why semantic evidence was unavailable.
 
 ## Refresh and freshness
 
@@ -289,9 +295,9 @@ importer. In auto mode, a semantic or nonzero-weight hybrid request also waits
 for daemon acknowledgement of the selected Core generation; if Core advances
 during that bounded wait, the query repins both indexes together. In manual
 mode, the same request fully reconciles semantic coverage for the pinned Core
-generation and uses the same foreground model runtime to embed the query.
-Lexical, zero-weight hybrid, and unsupported semantic scopes do no semantic
-model or projection work.
+generation and uses the same selected executor to embed the query. Lexical,
+zero-weight hybrid, and unsupported semantic scopes do no semantic executor or
+projection work.
 
 `--refresh off` queries the currently published generations without provider
 discovery, plugin execution, refresh scheduling, semantic catch-up, or model

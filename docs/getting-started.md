@@ -111,27 +111,42 @@ ctx --data-root /tmp/ctx-demo setup
 CTX_DATA_ROOT=/tmp/ctx-demo ctx status
 ```
 
-Setup does not write to source repositories, call model APIs, download embedding
-models, or require API keys while semantic search is disabled. If automatic
-indexing and semantic search are explicitly enabled, daemon maintenance may
-acquire the local ONNX Runtime asset and embedding model needed for the
-installed platform.
+Setup does not write to source repositories, call embedding executors, download
+embedding models, or require executor credentials while semantic search is
+disabled. If automatic indexing and semantic search are explicitly enabled,
+daemon maintenance uses the selected executor and may acquire the built-in ONNX
+Runtime asset and embedding model needed for the installed platform.
 
-Enable local semantic search with:
+Enable semantic search with the built-in executor, which is the implicit
+default:
 
 ```bash
 ctx semantic enable
 ctx semantic status
 ```
 
+To send semantic document and query text to an exact-contract executor instead,
+select its base URL explicitly:
+
+```bash
+export CTX_SEMANTIC_EMBEDDING_TOKEN='your-endpoint-token'
+ctx semantic enable --executor https://embeddings.example.test/ctx
+```
+
+Remote URLs require HTTPS. Plain HTTP is accepted only when the host is a
+literal loopback IP address; a loopback executor may omit the token. Use
+`ctx semantic enable --executor builtin` to return to the built-in executor.
+The selected executor is used for indexing and queries, with no silent built-in
+fallback.
+
 Automatic indexing is the default, so enablement starts or recovers the daemon
-that acquires the local model and builds the semantic projection. Add `--wait`
-to wait for readiness. If you selected manual indexing, plain enablement records
-the opt-in without changing modes; run `ctx index mode auto` for automatic
-catch-up or use an explicit semantic search with `--refresh wait`. Lexical
-search remains available while embeddings build; hybrid search uses lexical and
-semantic evidence automatically when coverage is ready. `ctx semantic disable`
-turns the feature off without deleting downloaded assets.
+that prepares the selected executor and builds the semantic projection. Add
+`--wait` to wait for readiness. If you selected manual indexing, plain
+enablement records the opt-in without changing modes; run `ctx index mode auto`
+for automatic catch-up or use an explicit semantic search with `--refresh wait`.
+Lexical search remains available while embeddings build; hybrid search uses
+lexical and semantic evidence automatically when coverage is ready.
+`ctx semantic disable` turns the feature off without deleting downloaded assets.
 
 ctx has no hosted-history client or `ctx cloud` subcommand. Official
 installer-managed binaries can separately run signed CLI
@@ -238,14 +253,14 @@ need a strictly read-only query over the active Core generation.
 
 Automatic background refresh may start the configured persistent daemon for
 local history freshness. Semantic and hybrid search read existing local sidecar
-coverage; when semantic is enabled, the daemon-owned query service can embed the
-query. Manual background refresh and `--refresh off` skip process startup.
-Search does not run semantic catch-up or download embedding models. Hybrid uses
-semantic evidence only after coverage is complete and dirty work is drained;
-until then it falls back to lexical search with a structured reason. Explicit
-semantic search can query partial coverage for diagnostics, but reports a local
-error when the model cache is missing or the semantic worker is actively
-indexing.
+coverage; when semantic is enabled, the daemon-owned query service uses the
+selected executor to embed the query. Manual background refresh and
+`--refresh off` skip process startup. Search does not run semantic catch-up or
+download embedding models. Hybrid uses semantic evidence only after coverage is
+complete and dirty work is drained; until then it returns lexical results with
+a structured reason. Explicit semantic search can query partial coverage for
+diagnostics, but reports an explicit executor, model, or indexing error instead
+of silently switching executors or retrieval modes.
 
 ## 6. Use JSON For Scripts
 

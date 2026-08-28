@@ -72,12 +72,15 @@ a hosted research agent.
 - `ctx status` and `ctx doctor` report ctx-owned daemon and supervisor health.
 - `ctx daemon run` is an advanced foreground, blocking maintenance command. It
   does not change the configured indexing mode. The daemon performs bounded
-  native provider-history refresh and local semantic indexing/freshness work.
-- `ctx semantic enable|status|disable` owns the local semantic-search lifecycle.
-  Enablement is the explicit opt-in and starts daemon-owned model acquisition
-  and catch-up in auto mode; status is read-only; disablement retains downloaded
-  assets. Lexical search remains available while embeddings build; hybrid
-  search uses lexical and semantic evidence when semantic coverage is ready.
+  native provider-history refresh and semantic indexing/freshness work.
+- `ctx semantic enable|status|disable` owns the semantic-search lifecycle.
+  Enablement is the explicit opt-in and may select `--executor builtin|URL` for
+  both indexing and query embeddings. Built-in execution is the unpersisted
+  default; an external executor must satisfy the pinned E5 contract and never
+  receives a silent built-in fallback. Status is credential-free, read-only,
+  and network-free; disablement retains downloaded assets. Lexical search
+  remains available while embeddings build, and hybrid search may preserve it
+  with explicit diagnostics when semantic execution fails.
 - `ctx stats` reports bounded local usage/value aggregates from the separate
   owner-private `usage.sqlite` sidecar. This default-on product state is
   independent of remote event reporting, has no network path or identity, keeps
@@ -94,8 +97,10 @@ a hosted research agent.
 
 ## Out Of Scope
 
-- hosted model inference, hidden LLM calls, or API-key-dependent inference by
-  ctx; local semantic embedding is allowed only as documented search behavior;
+- arbitrary model selection, hidden LLM calls, a ctx-hosted embedding service,
+  or Pro/cloud authentication and credential provisioning for external
+  executors; built-in and user-selected exact-contract semantic embedding are
+  allowed only as documented search behavior;
 - team and enterprise seats, invitations, SSO, SCIM, or organization
   administration;
 - annual plans, device caps, and device-management UI;
@@ -139,4 +144,6 @@ refresh publish provider-file changes into a new search generation.
 
 Core/Tantivy generations, semantic sidecars, `usage.sqlite`, and JSON output
 are private by default. A user must review copied output before sharing it
-outside the machine.
+outside the machine. Selecting an external semantic executor is an explicit
+authorization to send it prepared semantic query text and eligible document
+chunks and rollups; lexical search and the built-in executor remain local.
