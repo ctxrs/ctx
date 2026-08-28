@@ -1,4 +1,9 @@
-use std::{collections::HashSet, fs, path::PathBuf, time::Instant};
+use std::{
+    collections::HashSet,
+    fs,
+    path::{Path, PathBuf},
+    time::Instant,
+};
 
 use ctx_history_core::{
     derive_event_id, derive_session_id, AgentScope, CaptureProvider, CertifiedSource, CoreActivity,
@@ -222,6 +227,15 @@ impl Fixture {
 
     fn publish(&self, name: &str, specs: &[(usize, Vec<String>)]) -> Result<VerifiedIndex> {
         let root = self.data_root.join(format!("index-{name}"));
+        self.publish_to_root(&root, name, specs)
+    }
+
+    fn publish_to_root(
+        &self,
+        root: &Path,
+        name: &str,
+        specs: &[(usize, Vec<String>)],
+    ) -> Result<VerifiedIndex> {
         let mut writer = GenerationWriter::open(&root, WriterOptions::default())?
             .into_writer()
             .map_err(crate::committed_generation_recovery_error)?;
@@ -499,6 +513,19 @@ fn semantic_generation_uses_exact_per_source_core_aggregates_without_candidate_t
             .sum::<u64>(),
         5
     );
+    Ok(())
+}
+
+#[test]
+fn semantic_generation_uses_verified_delta_manifest_identity() -> Result<()> {
+    let fixture = Fixture::new(1)?;
+    let root = fixture.data_root.join("index-delta-manifest-identity");
+    drop(fixture.publish_to_root(&root, "delta-base", &[(0, bodies("base", 1))])?);
+    let index = fixture.publish_to_root(&root, "delta-next", &[(0, bodies("next", 2))])?;
+
+    assert_ne!(index.manifest().generation_id()?, index.generation_id());
+    let generation = SourceBackedSemanticGeneration::from_verified_index(&index)?;
+    assert_eq!(generation.core_generation_id, index.generation_id());
     Ok(())
 }
 

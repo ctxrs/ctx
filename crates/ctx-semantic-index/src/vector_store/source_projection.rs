@@ -111,12 +111,7 @@ impl SourceBackedSemanticGeneration {
                 "source-backed semantic manifest has mismatched source aggregates"
             ));
         }
-        let manifest_generation_id = manifest.generation_id()?;
-        if manifest_generation_id != index.generation_id() {
-            return Err(anyhow!(
-                "source-backed semantic manifest identity does not match its verified index"
-            ));
-        }
+        let core_generation_id = index.generation_id().to_owned();
         let sources = manifest
             .sources
             .iter()
@@ -132,7 +127,7 @@ impl SourceBackedSemanticGeneration {
             &model_descriptor,
         )?;
         let generation = Self {
-            core_generation_id: manifest_generation_id,
+            core_generation_id,
             semantic_policy_fingerprint,
             contract_fingerprint,
             model_descriptor,
