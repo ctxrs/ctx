@@ -1,4 +1,9 @@
-use std::{collections::HashSet, fs, path::PathBuf, time::Instant};
+use std::{
+    collections::HashSet,
+    fs,
+    path::{Path, PathBuf},
+    time::Instant,
+};
 
 use ctx_history_core::{
     derive_event_id, derive_session_id, AgentScope, CaptureProvider, CertifiedSource, CoreActivity,
@@ -19,6 +24,7 @@ use crate::vector_store_search::scan_exact_generation;
 
 mod content;
 mod filter_accounting;
+mod generation_identity;
 mod policy_rebuild;
 mod proportionality;
 mod provider_native;
@@ -222,7 +228,16 @@ impl Fixture {
 
     fn publish(&self, name: &str, specs: &[(usize, Vec<String>)]) -> Result<VerifiedIndex> {
         let root = self.data_root.join(format!("index-{name}"));
-        let mut writer = GenerationWriter::open(&root, WriterOptions::default())?
+        self.publish_to_root(&root, name, specs)
+    }
+
+    fn publish_to_root(
+        &self,
+        root: &Path,
+        name: &str,
+        specs: &[(usize, Vec<String>)],
+    ) -> Result<VerifiedIndex> {
+        let mut writer = GenerationWriter::open(root, WriterOptions::default())?
             .into_writer()
             .map_err(crate::committed_generation_recovery_error)?;
         for (source_index, records) in specs {
