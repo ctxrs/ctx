@@ -127,6 +127,7 @@ fn daemon_cli_config<'a>(config: &'a crate::config::AppConfig) -> DaemonCliConfi
         config.semantic_search_enabled(),
         config.semantic_search_source(),
     )
+    .with_upgrade_allow_rfc2544_fake_ip(config.upgrade.allow_rfc2544_fake_ip)
     .with_automatic_provider_discovery(config.automatic_source_discovery_enabled())
     .with_provider_roots(config.provider_root_definitions())
 }
@@ -135,6 +136,7 @@ fn owned_daemon_cli_config(config: crate::config::AppConfig) -> DaemonCliConfig<
     let analytics_enabled = config.analytics.enabled;
     let automatic_upgrade_enabled = crate::upgrade::automatic_upgrade_eligible_hint(&config);
     let upgrade_interval = config.upgrade.interval;
+    let upgrade_allow_rfc2544_fake_ip = config.upgrade.allow_rfc2544_fake_ip;
     let daemon_enabled = config.automatic_indexing_enabled();
     let daemon_mode = match config.daemon.mode {
         crate::config::DaemonMode::Full => DaemonMode::Full,
@@ -156,6 +158,7 @@ fn owned_daemon_cli_config(config: crate::config::AppConfig) -> DaemonCliConfig<
         semantic_enabled,
         semantic_source,
     )
+    .with_upgrade_allow_rfc2544_fake_ip(upgrade_allow_rfc2544_fake_ip)
     .with_automatic_provider_discovery(automatic_provider_discovery)
     .with_provider_roots(provider_roots)
 }

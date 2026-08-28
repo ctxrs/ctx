@@ -626,13 +626,14 @@ fn apply_upgrade<D: DaemonUpgradePort + ?Sized>(
         }
         let mut artifact = if plan.update_available {
             Some(
-                DownloadedArtifact::download_verified(
+                DownloadedArtifact::download_verified_with_address_policy(
                     engine.transport,
                     data_root,
                     &plan.artifact_url,
                     &plan.artifact_sha256,
                     RELEASE_ARTIFACT_MAX_BYTES as u64,
                     RELEASE_ARTIFACT_TIMEOUT,
+                    policy.artifact_address_policy(),
                 )
                 .with_context(|| format!("download {}", plan.artifact_url))?,
             )
@@ -647,13 +648,14 @@ fn apply_upgrade<D: DaemonUpgradePort + ?Sized>(
                 plan.onnxruntime_artifact_url(),
             ) {
                 (Some(runtime), Some(runtime_url)) => Some(
-                    DownloadedArtifact::download_or_reuse_verified(
+                    DownloadedArtifact::download_or_reuse_verified_with_address_policy(
                         engine.transport,
                         data_root,
                         &runtime_url,
                         &runtime.sha256,
                         RELEASE_ONNXRUNTIME_ARTIFACT_MAX_BYTES as u64,
                         RELEASE_ARTIFACT_TIMEOUT,
+                        policy.artifact_address_policy(),
                     )
                     .with_context(|| format!("download or reuse {runtime_url}"))?,
                 ),
@@ -672,13 +674,14 @@ fn apply_upgrade<D: DaemonUpgradePort + ?Sized>(
             for asset in &provisioning.assets {
                 let url = plan.semantic_artifact_url(&asset.metadata.artifact);
                 semantic_artifacts.push(
-                    DownloadedArtifact::download_or_reuse_verified(
+                    DownloadedArtifact::download_or_reuse_verified_with_address_policy(
                         engine.transport,
                         data_root,
                         &url,
                         &asset.metadata.archive_sha256,
                         semantic_archive_download_limit(&asset.metadata)?,
                         RELEASE_ARTIFACT_TIMEOUT,
+                        policy.artifact_address_policy(),
                     )
                     .with_context(|| format!("download or reuse {url}"))?,
                 );

@@ -113,6 +113,15 @@ Config files and process environment variables cannot replace those origins or
 the verification key. A key or authority change therefore requires a new ctx
 binary, not a shell-profile or config-file change.
 
+For controlled official-artifact test environments that resolve `cli.ctx.rs`
+to RFC 2544 benchmark addresses (`198.18.0.0/15`), set
+`upgrade.allow_rfc2544_fake_ip = true`. This is off by default. It permits
+that range only for a request hop whose URL is under the compiled production
+artifact authority; metadata remains signed, HTTPS and SHA-256 verification
+remain required, every redirect hop is revalidated, and RFC 2544 addresses are
+rejected after any redirect outside that authority. Every other private, local,
+and reserved address remains rejected.
+
 When local semantic search is explicitly enabled, the same signed release
 metadata may carry the semantic asset catalog. ctx verifies the metadata
 signature before it accepts any catalog URL, archive hash, expanded-size limit,

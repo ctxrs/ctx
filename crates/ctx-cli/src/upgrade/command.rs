@@ -75,6 +75,7 @@ pub fn run(
         channel: &config.upgrade.channel,
         interval: config.upgrade.interval,
         semantic_enabled: config.semantic_search_enabled(),
+        allow_rfc2544_fake_ip: config.upgrade.allow_rfc2544_fake_ip,
     };
     let result = (|| -> Result<()> {
         match &args.command {

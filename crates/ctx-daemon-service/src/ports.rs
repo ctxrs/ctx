@@ -100,6 +100,7 @@ pub struct DaemonConfigSnapshot {
     pub daemon: DaemonProductConfig,
     pub semantic_enabled: bool,
     pub automatic_upgrade_enabled: bool,
+    pub allow_rfc2544_fake_ip: bool,
     pub automatic_upgrade_interval: Duration,
     pub upgrade_channel: String,
 }
@@ -135,6 +136,10 @@ impl ctx_upgrade_engine::AutomaticUpgradePolicySnapshot for DaemonConfigSnapshot
 
     fn semantic_enabled(&self) -> bool {
         self.semantic_enabled
+    }
+
+    fn allow_rfc2544_fake_ip(&self) -> bool {
+        self.allow_rfc2544_fake_ip
     }
 }
 
@@ -413,6 +418,7 @@ mod tests {
             },
             semantic_enabled: true,
             automatic_upgrade_enabled: true,
+            allow_rfc2544_fake_ip: true,
             automatic_upgrade_interval: Duration::from_secs(3_600),
             upgrade_channel: "stable".to_owned(),
         };
@@ -421,6 +427,7 @@ mod tests {
         assert!(snapshot.daemon_maintenance_enabled());
         assert!(snapshot.semantic_enabled());
         assert!(snapshot.automatic_upgrade_enabled());
+        assert!(snapshot.allow_rfc2544_fake_ip());
         assert_eq!(snapshot.interval(), Duration::from_secs(3_600));
         assert_eq!(snapshot.channel(), "stable");
     }
