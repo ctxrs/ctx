@@ -386,6 +386,88 @@ steps:
       - "target/public-cli-artifacts/ctx-onnxruntime-linux-aarch64*"
       - "target/public-cli-artifacts/ctx-onnxruntime-macos-arm64*"
 
+  - label: ":test_tube: qualify final macos-arm64 CLI and runtime pair"
+    key: "public-cli-macos-arm64-release-pair-qualification"
+    depends_on:
+      - "github-release-candidate"
+      - "semantic-runtime-portable"
+    if: build.env("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") == "1" && build.env("CTX_PUBLIC_CLI_NATIVE_SMOKE_MATRIX") == "1" && build.env("CTX_PUBLIC_SEMANTIC_ASSET_MATRIX") == "1" && build.branch == "main" && build.pull_request.id == null
+    command: |
+      mkdir -p target/github-core-release-assets target/public-cli-artifacts
+      buildkite-agent artifact download \
+        "target/github-core-release-assets/ctx-macos-arm64*" . \
+        --step github-release-candidate
+      buildkite-agent artifact download \
+        "target/public-cli-artifacts/ctx-onnxruntime-macos-arm64.tar.gz*" . \
+        --step semantic-runtime-portable
+      buildkite-agent artifact download \
+        "target/public-cli-artifacts/ctx-onnxruntime-macos-arm64.signing.json" . \
+        --step semantic-runtime-portable
+      buildkite-agent artifact download \
+        "target/public-cli-artifacts/ctx-onnxruntime-macos-arm64.attestation.json" . \
+        --step semantic-runtime-portable
+      buildkite-agent artifact download \
+        "target/public-cli-artifacts/ctx-onnxruntime-macos-arm64.attestation.cms" . \
+        --step semantic-runtime-portable
+      scripts/check-macos-release-signing.sh macos-arm64 cli \
+        target/github-core-release-assets/ctx-macos-arm64
+      scripts/check-macos-release-signing.sh macos-arm64 runtime \
+        target/public-cli-artifacts/ctx-onnxruntime-macos-arm64.tar.gz
+      chmod 755 target/github-core-release-assets/ctx-macos-arm64
+      scripts/smoke-daemon-semantic-release.sh \
+        --ctx target/github-core-release-assets/ctx-macos-arm64 \
+        --runtime-archive target/public-cli-artifacts/ctx-onnxruntime-macos-arm64.tar.gz \
+        --runtime-platform macos-arm64 \
+        --require-authoritative
+    agents:
+      queue: "ctx-release-macos-arm64"
+      os: "darwin"
+      arch: "arm64"
+    concurrency: 1
+    concurrency_group: "ctx-public-cli-macos-arm64-release-pair"
+    timeout_in_minutes: 180
+
+  - label: ":test_tube: qualify final macos-x64 CLI and runtime pair"
+    key: "public-cli-macos-x64-release-pair-qualification"
+    depends_on:
+      - "github-release-candidate"
+      - "public-cli-macos-x64-runtime-producer"
+    if: build.env("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") == "1" && build.env("CTX_PUBLIC_CLI_NATIVE_SMOKE_MATRIX") == "1" && build.env("CTX_PUBLIC_SEMANTIC_ASSET_MATRIX") == "1" && build.branch == "main" && build.pull_request.id == null
+    command: |
+      mkdir -p target/github-core-release-assets target/public-cli-artifacts
+      buildkite-agent artifact download \
+        "target/github-core-release-assets/ctx-macos-x64*" . \
+        --step github-release-candidate
+      buildkite-agent artifact download \
+        "target/public-cli-artifacts/ctx-onnxruntime-macos-x64.tar.gz*" . \
+        --step public-cli-macos-x64-runtime-producer
+      buildkite-agent artifact download \
+        "target/public-cli-artifacts/ctx-onnxruntime-macos-x64.signing.json" . \
+        --step public-cli-macos-x64-runtime-producer
+      buildkite-agent artifact download \
+        "target/public-cli-artifacts/ctx-onnxruntime-macos-x64.attestation.json" . \
+        --step public-cli-macos-x64-runtime-producer
+      buildkite-agent artifact download \
+        "target/public-cli-artifacts/ctx-onnxruntime-macos-x64.attestation.cms" . \
+        --step public-cli-macos-x64-runtime-producer
+      scripts/check-macos-release-signing.sh macos-x64 cli \
+        target/github-core-release-assets/ctx-macos-x64
+      scripts/check-macos-release-signing.sh macos-x64 runtime \
+        target/public-cli-artifacts/ctx-onnxruntime-macos-x64.tar.gz
+      chmod 755 target/github-core-release-assets/ctx-macos-x64
+      scripts/smoke-daemon-semantic-release.sh \
+        --ctx target/github-core-release-assets/ctx-macos-x64 \
+        --runtime-archive target/public-cli-artifacts/ctx-onnxruntime-macos-x64.tar.gz \
+        --runtime-platform macos-x64 \
+        --require-authoritative
+    agents:
+      queue: "ctx-mac-gui-shared-x64"
+      os: "darwin"
+      arch: "x86_64"
+    concurrency: 1
+    concurrency_group: "ctx-public-cli-macos-x64-release-pair"
+    timeout_in_minutes: 180
+
   - label: ":package: assemble complete GitHub release assets"
     key: "github-release-assets"
     depends_on:
@@ -393,6 +475,8 @@ steps:
       - "semantic-runtime-portable"
       - "public-cli-macos-x64-runtime-producer"
       - "semantic-runtime-windows-ml"
+      - "public-cli-macos-arm64-release-pair-qualification"
+      - "public-cli-macos-x64-release-pair-qualification"
     if: build.env("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") == "1" && build.env("CTX_PUBLIC_CLI_NATIVE_SMOKE_MATRIX") == "1" && build.env("CTX_PUBLIC_SEMANTIC_ASSET_MATRIX") == "1" && build.branch == "main" && build.pull_request.id == null
     command: |
       mkdir -p target/public-cli-artifacts

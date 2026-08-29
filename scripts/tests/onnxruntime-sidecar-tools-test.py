@@ -353,6 +353,58 @@ class ManifestTests(unittest.TestCase):
         self.assertNotIn('"${platform}" cli', transcode)
         self.assertNotIn('"${artifact_dir%/}/ctx-${platform}"', transcode)
 
+    def test_macos_release_pair_qualification_joins_exact_assembly_inputs(self) -> None:
+        pipeline = (REPO_ROOT / ".buildkite" / "pipeline.yml").read_text()
+        assembly = pipeline.index('key: "github-release-assets"')
+        assembly_end = pipeline.index("\n  - label:", assembly)
+        assembly_block = pipeline[assembly:assembly_end]
+
+        expected = {
+            "macos-arm64": "semantic-runtime-portable",
+            "macos-x64": "public-cli-macos-x64-runtime-producer",
+        }
+        for platform, runtime_producer in expected.items():
+            with self.subTest(platform=platform):
+                key = f"public-cli-{platform}-release-pair-qualification"
+                start = pipeline.index(f'key: "{key}"')
+                end = pipeline.index("\n  - label:", start)
+                block = " ".join(pipeline[start:end].replace("\\\n", " ").split())
+                self.assertIn('"github-release-candidate"', block)
+                self.assertIn(f'"{runtime_producer}"', block)
+                self.assertIn(
+                    f'"target/github-core-release-assets/ctx-{platform}*"', block
+                )
+                self.assertIn(
+                    f'"target/public-cli-artifacts/ctx-onnxruntime-{platform}.tar.gz*"',
+                    block,
+                )
+                for sidecar in ("signing.json", "attestation.json", "attestation.cms"):
+                    self.assertIn(
+                        f'"target/public-cli-artifacts/ctx-onnxruntime-{platform}.{sidecar}"',
+                        block,
+                    )
+                self.assertIn(
+                    f"check-macos-release-signing.sh {platform} cli "
+                    f"target/github-core-release-assets/ctx-{platform}",
+                    block,
+                )
+                self.assertIn(
+                    f"check-macos-release-signing.sh {platform} runtime "
+                    f"target/public-cli-artifacts/ctx-onnxruntime-{platform}.tar.gz",
+                    block,
+                )
+                self.assertIn("smoke-daemon-semantic-release.sh", block)
+                self.assertIn("--require-authoritative", block)
+                self.assertIn(
+                    f"--ctx target/github-core-release-assets/ctx-{platform}", block
+                )
+                self.assertIn(
+                    "--runtime-archive "
+                    f"target/public-cli-artifacts/ctx-onnxruntime-{platform}.tar.gz",
+                    block,
+                )
+                self.assertIn(f'"{key}"', assembly_block)
+
     def test_archive_tool_defers_annotations_for_macos_python(self) -> None:
         source = (TOOLS / "archive_tool.py").read_text().splitlines()
         self.assertIn("from __future__ import annotations", source[:6])

@@ -75,6 +75,8 @@ required = {
     "semantic-runtime-linux-cuda12",
     "semantic-runtime-windows-ml",
     "semantic-runtime-portable",
+    "public-cli-macos-arm64-release-pair-qualification",
+    "public-cli-macos-x64-release-pair-qualification",
     "semantic-release-handoff",
 }
 if set(keyed) != required:
@@ -399,12 +401,99 @@ if (
 if "download-linux-factory-artifacts.sh" in macos_x64_runtime.get("command", ""):
     fail("macos-x64 Semantic runtime producer must not consume Core artifacts")
 
+release_pairs = {
+    "public-cli-macos-arm64-release-pair-qualification": (
+        "macos-arm64",
+        "semantic-runtime-portable",
+        "ctx-release-macos-arm64",
+        "arm64",
+        "ctx-public-cli-macos-arm64-release-pair",
+    ),
+    "public-cli-macos-x64-release-pair-qualification": (
+        "macos-x64",
+        "public-cli-macos-x64-runtime-producer",
+        "ctx-mac-gui-shared-x64",
+        "x86_64",
+        "ctx-public-cli-macos-x64-release-pair",
+    ),
+}
+for key, (platform, runtime_producer, queue, arch, concurrency_group) in release_pairs.items():
+    pair = keyed[key]
+    if pair.get("depends_on") != ["github-release-candidate", runtime_producer]:
+        fail(f"{key} must join only the sealed Core candidate and its runtime producer")
+    if pair.get("if") != github_release_condition:
+        fail(f"{key} has the wrong final-release condition")
+    if pair.get("allow_dependency_failure") or pair.get("soft_fail"):
+        fail(f"{key} must fail closed")
+    if pair.get("agents") != {"queue": queue, "os": "darwin", "arch": arch}:
+        fail(f"{key} has the wrong authoritative native macOS runner")
+    if (
+        pair.get("concurrency") != 1
+        or pair.get("concurrency_group") != concurrency_group
+        or pair.get("timeout_in_minutes") != 180
+    ):
+        fail(f"{key} lost its bounded native qualification contract")
+    if pair.get("artifact_paths") is not None:
+        fail(f"{key} must not substitute a receipt for its blocking native gate")
+
+    command = pair.get("command", "")
+    logical_command = " ".join(command.replace("\\\n", " ").split())
+    core_download = (
+        f'buildkite-agent artifact download "target/github-core-release-assets/ctx-{platform}*" '
+        ". --step github-release-candidate"
+    )
+    runtime_download = (
+        f'buildkite-agent artifact download "target/public-cli-artifacts/ctx-onnxruntime-{platform}.tar.gz*" '
+        f". --step {runtime_producer}"
+    )
+    if logical_command.count(core_download) != 1 or logical_command.count(runtime_download) != 1:
+        fail(f"{key} must download the exact Core CLI and final runtime assembly inputs")
+    for sidecar in ("signing.json", "attestation.json", "attestation.cms"):
+        sidecar_download = (
+            "buildkite-agent artifact download "
+            f'"target/public-cli-artifacts/ctx-onnxruntime-{platform}.{sidecar}" '
+            f". --step {runtime_producer}"
+        )
+        if logical_command.count(sidecar_download) != 1:
+            fail(f"{key} must download the runtime {sidecar} signing sidecar")
+    cli = f"target/github-core-release-assets/ctx-{platform}"
+    runtime = f"target/public-cli-artifacts/ctx-onnxruntime-{platform}.tar.gz"
+    for required_call in (
+        f"scripts/check-macos-release-signing.sh {platform} cli {cli}",
+        f"scripts/check-macos-release-signing.sh {platform} runtime {runtime}",
+        f"chmod 755 {cli}",
+        "scripts/smoke-daemon-semantic-release.sh",
+        f"--ctx {cli}",
+        f"--runtime-archive {runtime}",
+        f"--runtime-platform {platform}",
+        "--require-authoritative",
+    ):
+        if required_call not in logical_command:
+            fail(f"{key} is missing required pair qualification input: {required_call}")
+    cli_signing = f"scripts/check-macos-release-signing.sh {platform} cli {cli}"
+    runtime_signing = (
+        f"scripts/check-macos-release-signing.sh {platform} runtime {runtime}"
+    )
+    semantic_smoke = "scripts/smoke-daemon-semantic-release.sh"
+    if (
+        logical_command.count(semantic_smoke) != 1
+        or max(logical_command.index(cli_signing), logical_command.index(runtime_signing))
+        > logical_command.index(semantic_smoke)
+    ):
+        fail(f"{key} must complete both current-publisher signing checks before smoke")
+    if "download-linux-factory-artifacts.sh" in command or "--coreml" in command:
+        fail(f"{key} must consume only the final Core CLI/runtime pair")
+    if re.search(r"cargo (?:build|zigbuild)|bazelw run //:ctx_release", command):
+        fail(f"{key} must only qualify downloaded release inputs, never rebuild them")
+
 github_release = keyed["github-release-assets"]
 expected_github_dependencies = [
     "github-release-candidate",
     "semantic-runtime-portable",
     "public-cli-macos-x64-runtime-producer",
     "semantic-runtime-windows-ml",
+    "public-cli-macos-arm64-release-pair-qualification",
+    "public-cli-macos-x64-release-pair-qualification",
 ]
 if github_release.get("depends_on") != expected_github_dependencies:
     fail("final GitHub assembly has the wrong independent producer set")
@@ -446,6 +535,8 @@ if handoff_command.count("--step semantic-runtime-portable") != 3:
 for forbidden in (
     "public-release",
     "public-cli-linux-factory",
+    "public-cli-macos-arm64-release-pair-qualification",
+    "public-cli-macos-x64-release-pair-qualification",
     "sdk-swift-required",
 ):
     if forbidden in handoff_command:
@@ -480,7 +571,7 @@ for step in steps:
 
 print(
     "Buildkite release pipeline: independent Core/SDK/Semantic graphs, "
-    "five exact-byte Core validators"
+    "five exact-byte Core validators, two authoritative macOS release-pair gates"
 )
 PY
 
