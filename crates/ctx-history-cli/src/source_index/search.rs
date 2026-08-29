@@ -28,8 +28,9 @@ use crate::{
     HistoryCliConfig, RefreshMode, SearchExecutionObservation, SearchFailurePhase,
 };
 use ctx_daemon_cli::{
-    wait_for_daemon_query_service, PinnedSourceBackedGeneration,
-    SourceBackedRefreshDaemonUnavailable, SourceBackedRefreshMode, SourceBackedRefreshObservation,
+    wait_for_daemon_query_service, wait_for_daemon_semantic_generation,
+    PinnedSourceBackedGeneration, SourceBackedRefreshDaemonUnavailable, SourceBackedRefreshMode,
+    SourceBackedRefreshObservation,
 };
 
 use super::{
@@ -63,6 +64,7 @@ pub(super) use test_support::{
 };
 
 const MAX_USAGE_CONTEXT_EVENTS_PER_SESSION: usize = 256;
+const SEMANTIC_GENERATION_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 type RefreshArg = RefreshMode;
 pub(super) const MISSING_INDEX_ERROR: &str =
     "the Core index does not exist; retry with daemon refresh enabled";
@@ -370,18 +372,23 @@ fn run_search_inner<P: HistorySemanticPort>(
     let requested_backend = request.backend.unwrap_or(policy.default_backend);
     observation.backend_requested = Some(requested_backend);
     let semantic_weight = request.semantic_weight;
-    if refresh_mode == RefreshArg::Background
-        && policy.semantic == SemanticAvailability::Available
-        && matches!(
-            requested_backend,
-            SearchBackend::Semantic | SearchBackend::Hybrid
-        )
-        && unsupported_semantic_scope(request).is_none()
-        && !(requested_backend == SearchBackend::Hybrid && semantic_weight == 0.0)
-    {
+    let needs_semantic = search_needs_semantic_evidence(
+        request,
+        requested_backend,
+        semantic_weight,
+        policy.semantic,
+    );
+    if refresh_mode == RefreshArg::Background && needs_semantic {
         wait_for_daemon_query_service(&data_root, Duration::from_secs(3));
     }
-    let refresh = observed_refresh_for_search(request, refresh_mode, &data_root, observation)?;
+    let mut refresh = observed_refresh_for_search(request, refresh_mode, &data_root, observation)?;
+    if refresh_mode == RefreshArg::Wait && config.daemon.enabled && needs_semantic {
+        refresh.pin = wait_for_daemon_semantic_generation(
+            &data_root,
+            refresh.pin,
+            SEMANTIC_GENERATION_WAIT_TIMEOUT,
+        )?;
+    }
     let search_result = search_pinned_generation(
         plan,
         &data_root,
@@ -489,6 +496,21 @@ fn run_search_inner<P: HistorySemanticPort>(
     local_usage.set_search_context_observation(search_context);
     local_usage.set_measured_output_bytes(output_bytes);
     Ok(())
+}
+
+pub(super) fn search_needs_semantic_evidence(
+    request: &SourceSearchRequest,
+    requested_backend: SearchBackend,
+    semantic_weight: f32,
+    availability: SemanticAvailability,
+) -> bool {
+    availability == SemanticAvailability::Available
+        && matches!(
+            requested_backend,
+            SearchBackend::Semantic | SearchBackend::Hybrid
+        )
+        && unsupported_semantic_scope(request).is_none()
+        && !(requested_backend == SearchBackend::Hybrid && semantic_weight == 0.0)
 }
 
 pub(super) const fn compact_search_projection(json_output: bool, verbose: bool) -> bool {

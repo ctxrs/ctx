@@ -53,6 +53,12 @@ Freshness is separate from retrieval mode:
 | `off` | Serve current indexes and do not start, poke, wait for, or run indexing. |
 | `wait` | Wait for authoritative Core publication from the persistent daemon or a manual-mode finite Core worker, then search or fail with a clear local error. |
 
+When an automatic-mode `wait` search needs semantic evidence, it also waits
+for the daemon's semantic acknowledgement of the selected Core generation. If
+Core advances during that bounded wait, search repins Core and semantic
+together before querying. Lexical, zero-weight hybrid, and unsupported semantic
+scopes skip this wait.
+
 The existing `strict` behavior can map to `wait` for command-line users while
 the public docs move to `wait`. Do not add compatibility aliases unless a
 specific external contract requires them.

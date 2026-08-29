@@ -285,10 +285,13 @@ an explicit import.
 finite Core worker in manual mode, then waits for the requested source frontier
 and lexical-generation receipt. It fails with a typed source, lag, or system
 error when that receipt cannot publish; it does not fall back to a foreground
-importer. In manual mode, a semantic or nonzero-weight hybrid request then fully
-reconciles semantic coverage for that same pinned Core generation and uses the
-same foreground model runtime to embed the query. Lexical, zero-weight hybrid,
-and unsupported semantic scopes do no semantic model or projection work.
+importer. In auto mode, a semantic or nonzero-weight hybrid request also waits
+for daemon acknowledgement of the selected Core generation; if Core advances
+during that bounded wait, the query repins both indexes together. In manual
+mode, the same request fully reconciles semantic coverage for the pinned Core
+generation and uses the same foreground model runtime to embed the query.
+Lexical, zero-weight hybrid, and unsupported semantic scopes do no semantic
+model or projection work.
 
 `--refresh off` queries the currently published generations without provider
 discovery, plugin execution, refresh scheduling, semantic catch-up, or model

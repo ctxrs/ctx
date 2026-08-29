@@ -1,8 +1,12 @@
-use std::{path::Path, time::Duration as StdDuration, time::Instant};
+use std::{
+    path::Path,
+    thread,
+    time::{Duration as StdDuration, Instant},
+};
 
 use anyhow::{anyhow, Result};
-use ctx_daemon_service::DaemonQueryServiceUnavailable;
-use ctx_history_index::{CompiledSearchFilter, EventSearchCandidate, VerifiedIndex};
+use ctx_daemon_service::{DaemonQueryServiceUnavailable, PinnedSourceBackedGeneration};
+use ctx_history_index::{CompiledSearchFilter, EventSearchCandidate, IndexError, VerifiedIndex};
 use ctx_history_read_application::{
     HistorySemanticBatch, HistorySemanticError, HistorySemanticPort, HistorySemanticQuery,
     SemanticReason,
@@ -20,6 +24,94 @@ use serde_json::{json, Value};
 use crate::compact_json;
 
 use super::query_service::daemon_query_request;
+
+const SEMANTIC_GENERATION_POLL_INTERVAL: StdDuration = StdDuration::from_millis(100);
+
+/// Waits for daemon-owned semantic coverage of the current verified Core
+/// generation. A newer active Core generation replaces the original pin so
+/// query preflight never combines generations and does not wait for semantic
+/// coverage that the daemon has legitimately superseded.
+pub fn wait_for_daemon_semantic_generation(
+    data_root: &Path,
+    pin: PinnedSourceBackedGeneration,
+    timeout: StdDuration,
+) -> Result<PinnedSourceBackedGeneration> {
+    wait_for_daemon_semantic_generation_with(
+        data_root,
+        pin,
+        timeout,
+        || crate::pin_active_verified_generation(data_root),
+        thread::sleep,
+    )
+}
+
+fn wait_for_daemon_semantic_generation_with<Repin, Pause>(
+    data_root: &Path,
+    mut pin: PinnedSourceBackedGeneration,
+    timeout: StdDuration,
+    mut repin: Repin,
+    mut pause: Pause,
+) -> Result<PinnedSourceBackedGeneration>
+where
+    Repin: FnMut() -> Result<PinnedSourceBackedGeneration>,
+    Pause: FnMut(StdDuration),
+{
+    let started = Instant::now();
+    loop {
+        match repin() {
+            Ok(next) => {
+                if next.generation_id() != pin.generation_id() {
+                    pin = next;
+                }
+            }
+            Err(error) if active_generation_changed_during_repin(&error) => {
+                let remaining = timeout.saturating_sub(started.elapsed());
+                if remaining.is_zero() {
+                    return Err(error);
+                }
+                pause(SEMANTIC_GENERATION_POLL_INTERVAL.min(remaining));
+                continue;
+            }
+            Err(error) => return Err(error),
+        }
+        match SemanticQueryPin::preflight(
+            pin.verified_index(),
+            data_root,
+            semantic_model_contract(),
+        ) {
+            Ok(_) => return Ok(pin),
+            Err(error) if semantic_generation_wait_is_retryable(&error) => {}
+            Err(_) => return Ok(pin),
+        }
+        let remaining = timeout.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            return Ok(pin);
+        }
+        pause(SEMANTIC_GENERATION_POLL_INTERVAL.min(remaining));
+    }
+}
+
+fn active_generation_changed_during_repin(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<IndexError>(),
+            Some(IndexError::ConcurrentGenerationChange)
+        )
+    })
+}
+
+fn semantic_generation_wait_is_retryable(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<SemanticNotReady>()
+        .is_some_and(|error| {
+            matches!(
+                error.code(),
+                "semantic_store_unavailable"
+                    | "semantic_store_missing"
+                    | "semantic_generation_not_acknowledged"
+            )
+        })
+}
 
 pub struct SemanticQueryAdapter<'data_root> {
     data_root: &'data_root Path,
