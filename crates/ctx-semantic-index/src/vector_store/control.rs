@@ -24,7 +24,8 @@ pub(super) const FULL_REBUILD_STATE: &str = "projection_full_rebuild_v1";
 
 pub(crate) fn open_writable(root: &Path) -> Result<Connection> {
     validate_root(root, true)?;
-    let path = control_path(root);
+    let root = canonical_control_root(root)?;
+    let path = control_path(&root);
     validate_control_file(&path)?;
     let connection = Connection::open_with_flags(
         &path,
@@ -52,7 +53,8 @@ pub(crate) fn open_read_only(root: &Path) -> Result<Option<Connection>> {
         return Ok(None);
     }
     validate_root(root, false)?;
-    let path = control_path(root);
+    let root = canonical_control_root(root)?;
+    let path = control_path(&root);
     if !path.exists() {
         return Ok(None);
     }
@@ -74,7 +76,8 @@ pub(crate) fn preflight_writable_compatibility(root: &Path) -> Result<()> {
         return Ok(());
     }
     validate_root(root, false)?;
-    let path = control_path(root);
+    let root = canonical_control_root(root)?;
+    let path = control_path(&root);
     if !path.exists() {
         return Ok(());
     }
@@ -220,6 +223,26 @@ fn refuse_passive_sidecar(path: &Path, suffix: &OsStr, kind: &str) -> Result<()>
 
 fn control_path(root: &Path) -> PathBuf {
     root.join(CONTROL_FILE)
+}
+
+/// Resolves parent components while preserving no-follow checks for the
+/// semantic root and final database component.
+fn canonical_control_root(root: &Path) -> Result<PathBuf> {
+    let name = root.file_name().ok_or_else(|| {
+        SemanticVectorStoreError::unavailable(format!(
+            "semantic vector root has no final path component: {}",
+            root.display()
+        ))
+    })?;
+    let parent = root
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let parent = fs::canonicalize(parent)
+        .with_context(|| format!("resolve semantic vector parent {}", parent.display()))?;
+    let resolved = parent.join(name);
+    validate_root(&resolved, false)?;
+    Ok(resolved)
 }
 
 fn validate_root(root: &Path, create: bool) -> Result<()> {
@@ -477,6 +500,30 @@ mod tests {
             0,
             "the mutable control database must not carry model identity"
         );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ordinary_control_opens_resolve_parent_symlinks_but_reject_the_database_symlink() -> Result<()>
+    {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::tempdir()?;
+        let real_parent = temporary.path().join("real-parent");
+        fs::create_dir(&real_parent)?;
+        let alias_parent = temporary.path().join("alias-parent");
+        symlink(&real_parent, &alias_parent)?;
+        let alias_root = alias_parent.join("semantic");
+        drop(open_writable(&alias_root)?);
+        assert!(open_read_only(&alias_root)?.is_some());
+        assert!(real_parent.join("semantic/state.sqlite").is_file());
+
+        let database = real_parent.join("semantic/state.sqlite");
+        let real_database = real_parent.join("semantic/state.sqlite.real");
+        fs::rename(&database, &real_database)?;
+        symlink(&real_database, &database)?;
+        assert!(open_read_only(&alias_root).is_err());
         Ok(())
     }
 
