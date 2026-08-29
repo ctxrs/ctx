@@ -181,11 +181,15 @@ impl DaemonAvailabilityPort for CliDaemonAvailabilityPort {
         if demand == DaemonAvailabilityDemand::Background || trigger == DaemonTrigger::Setup {
             return Ok(DaemonAvailability::Disabled);
         }
-        super::daemon_autostart::start_finite_core_worker_and_wait(
+        if super::finite_worker_owner::foreground_interrupt_requested() {
+            anyhow::bail!(super::finite_worker_owner::FiniteWorkerInterrupted);
+        }
+        let lease = super::daemon_autostart::start_finite_core_worker_and_wait(
             data_root,
             &config,
             cli_trigger(trigger),
         )?;
+        super::finite_worker_owner::retain(lease);
         Ok(DaemonAvailability::Available)
     }
 }

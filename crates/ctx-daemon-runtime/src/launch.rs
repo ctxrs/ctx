@@ -60,8 +60,12 @@ impl NormalizedLaunch {
     }
 }
 
-/// Spawns an already-normalized launch without inheriting stdio or a terminal session.
-pub fn spawn_detached(launch: NormalizedLaunch) -> io::Result<Child> {
+/// Spawns an already-normalized launch without inheriting stdio.
+///
+/// This is deliberately the common part of both daemon launch policies.  In
+/// particular, a finite worker still receives the sanitized environment and
+/// null stdio, but remains in its caller's terminal/console group.
+fn spawn_with(launch: NormalizedLaunch, configure: impl FnOnce(&mut Command)) -> io::Result<Child> {
     let mut command = Command::new(launch.program);
     command
         .args(launch.args)
@@ -70,18 +74,33 @@ pub fn spawn_detached(launch: NormalizedLaunch) -> io::Result<Child> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    #[cfg(unix)]
-    unsafe {
-        command.pre_exec(|| {
-            if libc::setsid() == -1 {
-                return Err(io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
-    #[cfg(windows)]
-    command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+    configure(&mut command);
     command.spawn()
+}
+
+/// Spawns a persistent daemon detached from the invoking terminal session.
+pub fn spawn_detached(launch: NormalizedLaunch) -> io::Result<Child> {
+    spawn_with(launch, |command| {
+        #[cfg(unix)]
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        #[cfg(windows)]
+        command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+    })
+}
+
+/// Spawns a finite foreground worker in the caller's terminal/console group.
+///
+/// Do not add `setsid`, `DETACHED_PROCESS`, or `CREATE_NEW_PROCESS_GROUP`
+/// here: Ctrl-C must first follow the worker's normal foreground signal path.
+pub fn spawn_attached(launch: NormalizedLaunch) -> io::Result<Child> {
+    spawn_with(launch, |_| {})
 }
 
 #[cfg(test)]

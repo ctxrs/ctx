@@ -68,7 +68,7 @@ pub fn start_finite_core_worker_and_wait(
     data_root: &Path,
     config: &DaemonRuntimeConfig,
     trigger: DaemonTriggerCommandArg,
-) -> Result<DaemonHandoff> {
+) -> Result<ctx_daemon_application::FiniteCoreWorkerLease> {
     super::super::daemon_supervisor::with_daemon_application(|application| {
         let mut effective = application_config(config);
         effective.enabled = false;
@@ -88,10 +88,7 @@ pub fn start_finite_core_worker_and_wait(
                     anyhow!("ctx finite Core worker did not become ready: {error}")
                 }
             })?;
-        Ok(DaemonHandoff {
-            pid: handoff.pid,
-            heartbeat_at_ms: handoff.heartbeat_at_ms,
-        })
+        Ok(handoff)
     })
 }
 

@@ -20,12 +20,13 @@ use ctx_history_core::utc_now;
 use serde_json::{json, Value};
 
 use crate::*;
-
+mod finite_worker;
 mod launch;
 mod readiness_receipt;
 #[cfg(test)]
 mod tests;
-
+use finite_worker::reap_owned_candidate;
+pub use finite_worker::FiniteCoreWorkerLease;
 use launch::configured_finite_core_worker_command;
 #[cfg(test)]
 use launch::normalized_daemon_launch_for_test;
@@ -50,13 +51,11 @@ const DAEMON_UPGRADE_STOP_TIMEOUT: Duration = Duration::from_secs(5);
 const DAEMON_UPGRADE_RESTART_TIMEOUT: Duration = Duration::from_secs(5);
 const DAEMON_UPGRADE_HANDOFF_TOKEN_ENV: &str = "CTX_DAEMON_UPGRADE_HANDOFF_TOKEN";
 const DAEMON_MODE_ENV: &str = "CTX_DAEMON_MODE";
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DaemonHandoff {
     pub pid: u32,
     pub heartbeat_at_ms: i64,
 }
-
 #[derive(Debug)]
 pub enum DaemonStartError {
     Suppressed(&'static str),
@@ -64,7 +63,6 @@ pub enum DaemonStartError {
     Start(anyhow::Error),
     Ready(anyhow::Error),
 }
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum DaemonHandoffObservation {
     Pending,
@@ -72,7 +70,6 @@ enum DaemonHandoffObservation {
     Running(DaemonHandoff),
     Failed(String),
 }
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DaemonReadinessRequirement {
     Full,
@@ -85,18 +82,14 @@ enum DaemonLifecycleEndpointObservation {
     Starting,
     Ready,
 }
-
 #[derive(Debug)]
 struct DaemonHandoffTimeout;
-
 impl fmt::Display for DaemonHandoffTimeout {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("timed out waiting for live daemon lifecycle readiness")
     }
 }
-
 impl std::error::Error for DaemonHandoffTimeout {}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DaemonOwnerIdentity {
     owner_id: String,
@@ -104,20 +97,17 @@ struct DaemonOwnerIdentity {
     started_at_ms: i64,
     binary_sha256: String,
 }
-
 enum DaemonAutostartRequest {
     Suppressed(&'static str),
     Existing(DaemonOwnerIdentity),
     Deferred(DaemonHandoffRestartDeferral),
     Spawned(Child),
 }
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DaemonLaunchProfile {
     Persistent,
     FiniteCoreWorker,
 }
-
 fn daemon_autostart_exe() -> Result<std::path::PathBuf> {
     std::env::var("CTX_DAEMON_AUTOSTART_EXE")
         .ok()
@@ -127,11 +117,9 @@ fn daemon_autostart_exe() -> Result<std::path::PathBuf> {
             std::env::current_exe().context("resolve ctx daemon autostart executable")
         })
 }
-
 fn semantic_env_flag(name: &str) -> bool {
     matches!(std::env::var(name).as_deref(), Ok("1" | "true" | "TRUE"))
 }
-
 pub fn daemon_autostart_suppression_reason() -> Option<&'static str> {
     if semantic_env_flag(DAEMON_BACKGROUND_CHILD_ENV) {
         Some("daemon_child")
@@ -143,7 +131,6 @@ pub fn daemon_autostart_suppression_reason() -> Option<&'static str> {
         None
     }
 }
-
 fn write_daemon_autostart_status(
     data_root: &Path,
     trigger: DaemonTrigger,
@@ -403,7 +390,12 @@ fn request_daemon_autostart(
             configured_finite_core_worker_command(&exe, data_root, trigger)
         }
     };
-    match launch.and_then(|launch| spawn_daemon_child(host, launch)) {
+    match launch.and_then(|launch| match profile {
+        DaemonLaunchProfile::Persistent => spawn_daemon_child(host, launch),
+        DaemonLaunchProfile::FiniteCoreWorker => {
+            launch::spawn_attached_finite_core_worker(host, launch)
+        }
+    }) {
         Ok(child) => Ok(DaemonAutostartRequest::Spawned(child)),
         Err(error) => {
             let _ = write_daemon_autostart_status(
@@ -449,6 +441,7 @@ pub fn start_daemon_and_wait(
         DaemonLaunchProfile::Persistent,
         DaemonReadinessRequirement::Full,
     )
+    .map(|started| started.handoff)
 }
 
 pub fn start_core_daemon_and_wait(
@@ -465,6 +458,7 @@ pub fn start_core_daemon_and_wait(
         DaemonLaunchProfile::Persistent,
         DaemonReadinessRequirement::Core,
     )
+    .map(|started| started.handoff)
 }
 
 pub fn start_finite_core_worker_and_wait(
@@ -472,17 +466,29 @@ pub fn start_finite_core_worker_and_wait(
     data_root: &Path,
     config: &DaemonConfigSnapshot,
     trigger: DaemonTrigger,
-) -> std::result::Result<DaemonHandoff, DaemonStartError> {
-    start_daemon_profile_and_wait(
+) -> std::result::Result<FiniteCoreWorkerLease, DaemonStartError> {
+    let started = start_daemon_profile_and_wait(
         host,
         data_root,
         config,
         trigger,
         DaemonLaunchProfile::FiniteCoreWorker,
         DaemonReadinessRequirement::Full,
-    )
+    )?;
+    // Retain only the direct child matching the authenticated singleton winner.
+    let mut child = started.child;
+    if child
+        .as_ref()
+        .is_some_and(|candidate| candidate.id() != started.handoff.pid)
+    {
+        reap_owned_candidate(&mut child);
+    }
+    Ok(FiniteCoreWorkerLease::authenticated(started.handoff, child))
 }
-
+struct StartedDaemonProfile {
+    handoff: DaemonHandoff,
+    child: Option<Child>,
+}
 fn start_daemon_profile_and_wait(
     host: &dyn DaemonApplicationHost,
     data_root: &Path,
@@ -490,7 +496,7 @@ fn start_daemon_profile_and_wait(
     trigger: DaemonTrigger,
     profile: DaemonLaunchProfile,
     readiness: DaemonReadinessRequirement,
-) -> std::result::Result<DaemonHandoff, DaemonStartError> {
+) -> std::result::Result<StartedDaemonProfile, DaemonStartError> {
     let mut recovery_attempted = false;
     loop {
         let request = request_daemon_autostart(host, data_root, config, trigger, profile).map_err(
@@ -581,7 +587,9 @@ fn start_daemon_profile_and_wait(
             },
         );
         match handoff {
-            Ok(handoff) => return Ok(handoff),
+            Ok(handoff) => {
+                return Ok(StartedDaemonProfile { handoff, child });
+            }
             Err(error)
                 if !recovery_attempted
                     && daemon_autostart_suppression_reason().is_none()
@@ -597,7 +605,12 @@ fn start_daemon_profile_and_wait(
                     .map_err(DaemonStartError::Ready)?;
                 recovery_attempted = true;
             }
-            Err(error) => return Err(DaemonStartError::Ready(error)),
+            Err(error) => {
+                if profile == DaemonLaunchProfile::FiniteCoreWorker {
+                    reap_owned_candidate(&mut child);
+                }
+                return Err(DaemonStartError::Ready(error));
+            }
         }
     }
 }
