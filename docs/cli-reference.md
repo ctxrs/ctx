@@ -683,18 +683,23 @@ ctx search "incident follow-up" --source-group work
 Tantivy generation. In automatic indexing mode it may start or wake the
 persistent daemon for lexical publication and optional semantic catch-up. In
 manual mode, background refresh uses only the last published generation and
-does not contact, start, or wake a process; there is no hidden foreground
-bootstrap or importer. A daemon-free semantic or hybrid query may read an
-already-ready semantic generation and either embed from verified cached model
-assets or use an explicitly selected HTTP executor after preflight.
+does not contact, start, or wake a ctx daemon or worker; there is no hidden foreground
+bootstrap or importer. A direct CLI semantic or hybrid query may read an
+already-ready exact semantic generation and either embed from verified cached
+model/runtime assets or use an explicitly selected HTTP executor after
+preflight. A missing, stale, partial, incompatible, WAL-backed, or otherwise
+unsafe passive snapshot returns a typed semantic error; hybrid preserves its
+stable code and retryability while falling back to lexical.
 History-source plugins are searched from the published generation after
 explicit import; search refresh does not execute their commands in 1.0.
 Semantic retrieval reads an existing compatible generation under
 `search/semantic`. Use `--refresh off` to query published Core and semantic
-generations without starting or waking a process. With the daemon disabled,
+generations without starting or waking a ctx daemon or worker. With automatic indexing disabled,
 this path embeds the query in the foreground from verified cached model assets;
-it does not initialize semantic storage, download a model, reconcile semantic
-coverage, or write projection state. Use
+Core ML additionally requires an existing validated compiled artifact, Windows
+ML an already-ready provider, and ONNX an existing runtime. It does not
+initialize semantic storage, download or compile a model, prepare a provider,
+reconcile semantic coverage, or write projection state. Use
 `--refresh wait` to request authoritative Core publication; in manual mode it
 may start a finite worker that exits after admitted Core requests are terminal
 and IPC is quiescent. Results are rendered from Core under every refresh mode.

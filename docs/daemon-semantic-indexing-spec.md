@@ -263,10 +263,16 @@ background startup; there is no separate public daemon start command.
 
 - No public `auto` retrieval mode.
 - No lexical-then-semantic fallback as the default strategy.
-- Daemon-free `--refresh off` and `--refresh background` queries may embed from
-  verified cached model assets or use the configured HTTP executor only after
+- With automatic indexing disabled, direct CLI `--refresh off` and
+  `--refresh background` queries may embed from verified cached model assets
+  or use the configured HTTP executor only after
   exact-generation preflight succeeds; they never acquire a model, reconcile
-  coverage, or write projection state.
+  coverage, or write projection state. Passive preflight shares the existing
+  Flat transaction lock from SQLite sidecar inspection through control-schema
+  validation and exact Flat-generation pinning. It refuses WAL and rollback
+  journals and opens the main database immutable/read-only without creating
+  lock, WAL, or SHM files. Ordinary daemon and Reconcile preflight remains
+  WAL-aware so committed daemon work is visible.
   An opted-in manual-mode semantic or nonzero-weight hybrid `--refresh wait`
   may prepare the selected executor, acquire the pinned local model when
   selected, reconcile semantic coverage for that exact generation, and embed

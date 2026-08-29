@@ -597,14 +597,10 @@ fn manual_foreground_search_makes_semantic_execution_available_only_for_that_cli
     );
 
     let foreground = super::search::source_search_policy(&config, true);
-    let expected = if ctx_daemon_cli::semantic_query_service_supported() {
+    assert_eq!(
+        foreground.semantic,
         ctx_history_read_application::SemanticAvailability::Available
-    } else {
-        ctx_history_read_application::SemanticAvailability::Unavailable(
-            ctx_history_read_application::SemanticReason::PlatformUnsupported,
-        )
-    };
-    assert_eq!(foreground.semantic, expected);
+    );
 }
 
 #[test]

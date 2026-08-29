@@ -57,9 +57,14 @@ pub(in crate::source_index) fn source_search_policy(
     let semantic_enabled = config.semantic_search_enabled();
     let semantic = if !semantic_enabled {
         SemanticAvailability::Unavailable(SemanticReason::PolicyDisabled)
+    } else if semantic_execution_available {
+        // Daemon-free foreground execution performs exact preflight first.
+        // ReadyEmpty needs no executor, so backend/platform rejection belongs
+        // to lazy resolution only after a nonempty pin requires embedding.
+        SemanticAvailability::Available
     } else if !config.semantic_executor_supported() {
         SemanticAvailability::Unavailable(SemanticReason::PlatformUnsupported)
-    } else if !config.daemon.enabled && !semantic_execution_available {
+    } else if !config.daemon.enabled {
         SemanticAvailability::Unavailable(SemanticReason::ExecutionUnavailable)
     } else {
         SemanticAvailability::Available

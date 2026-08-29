@@ -93,10 +93,11 @@ pub(super) fn search_json_document(
     query_duration: Duration,
 ) -> Result<Value> {
     let commands = search_result_commands(request, collection, data_root);
-    let fallback_code = collection
-        .semantic_fallback
-        .as_ref()
-        .map(semantic_fallback_code);
+    let fallback_code = collection.semantic_fallback.as_ref().and_then(|fallback| {
+        fallback
+            .code
+            .or_else(|| fallback.reason.map(semantic_reason_code))
+    });
     let fallback_detail = collection
         .semantic_fallback
         .as_ref()
@@ -160,15 +161,6 @@ fn search_result_commands(
             }
         })
         .collect()
-}
-
-fn semantic_fallback_code(
-    fallback: &ctx_history_read_application::SemanticFallbackDiagnostics,
-) -> &'static str {
-    fallback
-        .reason
-        .map(semantic_reason_code)
-        .unwrap_or("semantic_query_failed")
 }
 
 fn semantic_fallback_detail(
