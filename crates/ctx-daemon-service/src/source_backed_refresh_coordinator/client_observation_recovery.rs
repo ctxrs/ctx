@@ -3,7 +3,7 @@ use super::*;
 const REQUEST_BOUND_STATUS_RECOVERY_ATTEMPT_LIMIT: usize = 3;
 const RETAINED_REQUEST_CONTINUOUS_OUTAGE_BUDGET: StdDuration = StdDuration::from_secs(30);
 const TYPED_UNKNOWN_RECOVERY_ATTEMPT_LIMIT: usize = 3;
-pub(super) const DISCONNECT_POLICY: &str = "retain_after_durable_admission";
+pub(super) const DISCONNECT_POLICY: &str = "request_outcome_unknown_after_acknowledgement";
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(in super::super) enum SourceRefreshRequestRecoveryFailureReason {
@@ -196,7 +196,7 @@ impl fmt::Display for SourceRefreshObservationRecoveryFailed {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "daemon source refresh status for durably admitted request {} remains temporarily unobservable after {} recovery attempts; disconnect_policy={} and the request continues under daemon ownership",
+            "daemon source refresh outcome for durably admitted request {} is no longer observable after {} recovery attempts; outcome is unknown; disconnect_policy={}",
             self.request_id, self.recovery_attempts, self.disconnect_policy
         )
     }

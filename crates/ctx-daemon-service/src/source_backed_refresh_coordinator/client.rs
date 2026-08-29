@@ -865,7 +865,11 @@ pub(super) fn source_refresh_request_is_unknown(
         && response.get("request_id").and_then(Value::as_str) == Some(expected_request_id)
         && response.get("request_state").and_then(Value::as_str)
             == Some(SOURCE_REFRESH_UNKNOWN_REQUEST_STATE)
-        && response.get("retryable").and_then(Value::as_bool) == Some(true);
+        // `request_not_retained_after_restart` is terminal from the
+        // requester's perspective: the original outcome cannot be observed
+        // and an equivalent enqueue would be new work.  Keep this strict so
+        // a malformed or pre-contract response cannot trigger recovery.
+        && response.get("retryable").and_then(Value::as_bool) == Some(false);
     if exact {
         Ok(true)
     } else {
