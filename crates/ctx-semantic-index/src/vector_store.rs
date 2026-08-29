@@ -52,6 +52,7 @@ pub struct SemanticVectorStore {
     pub(super) conn: Connection,
     pub(super) flat: flat_segments::FlatSegmentStore,
     pub(super) contract: SemanticModelContract,
+    pub(super) _passive_snapshot: Option<flat_segments::FlatStoreCoordinationGuard>,
 }
 
 impl SemanticVectorStore {

@@ -971,7 +971,7 @@ pub(super) use cache::{
 #[allow(unused_imports)]
 #[cfg(all(any(test, feature = "test-support"), ctx_semantic_fastembed))]
 pub(crate) use onnx::load_missing_semantic_onnxruntime_for_test;
-pub use passive::SemanticPassiveLoadUnavailable;
+pub use passive::{SemanticPassiveConfigurationError, SemanticPassiveLoadUnavailable};
 
 #[cfg(not(ctx_semantic_fastembed))]
 pub(super) struct SemanticEmbedder;

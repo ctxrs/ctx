@@ -26,6 +26,9 @@ EXPECTED_DEPENDENCIES: dict[str, Any] = {
     "serde_json": {"workspace": True},
     "sha2": {"workspace": True},
     "thiserror": {"workspace": True},
+    # Reviewed for percent-correct immutable SQLite file URIs. It carries no
+    # transport client into the storage crate.
+    "url": {"workspace": True},
     "uuid": {"workspace": True},
 }
 EXPECTED_DEV_DEPENDENCIES: dict[str, Any] = {"tempfile": {"workspace": True}}

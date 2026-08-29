@@ -1,12 +1,11 @@
 use std::{
     cell::Cell,
-    env,
     ffi::OsString,
     fs::{self, OpenOptions},
     io::{Read, Write},
     net::{TcpListener, TcpStream},
     path::PathBuf,
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{Arc, Mutex},
     thread,
     time::{Duration, Instant},
 };
@@ -19,7 +18,10 @@ use ctx_history_core::{
 use ctx_history_index::{CoreEventRecord, EventSearchFilters, GenerationWriter, WriterOptions};
 use ctx_semantic_index::{
     source_backed_semantic_vector_path,
-    test_support::{pinned_flat_generation, publish_chunk_replacements, semantic_chunk_document},
+    test_support::{
+        commit_control_wal, pinned_flat_generation, publish_chunk_replacements,
+        semantic_chunk_document,
+    },
     SemanticBatchEmbedder, SemanticChunkDocument, SemanticDocumentBuilder, SemanticEventDocument,
     SemanticQueryPin, SemanticVectorStore, SourceBackedGenerationPin,
     SourceBackedSemanticDocumentBuilder,
@@ -164,13 +166,8 @@ fn embedding() -> Vec<f32> {
     embedding
 }
 
-static SEMANTIC_ENV_LOCK: Mutex<()> = Mutex::new(());
-
 struct SemanticEnvironmentGuard {
-    _lock: MutexGuard<'static, ()>,
-    token: Option<OsString>,
-    endpoint: Option<OsString>,
-    cache_dir: Option<OsString>,
+    _environment: crate::test_environment::EnvironmentGuard,
 }
 
 impl SemanticEnvironmentGuard {
@@ -191,49 +188,23 @@ impl SemanticEnvironmentGuard {
         endpoint: Option<OsString>,
         cache_dir: Option<OsString>,
     ) -> Self {
-        let lock = SEMANTIC_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let saved_token = env::var_os(ctx_semantic_model::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENV);
-        let saved_endpoint =
-            env::var_os(ctx_semantic_model::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV);
-        let saved_cache_dir = env::var_os("CTX_SEMANTIC_CACHE_DIR");
-        set_environment(
+        let environment = crate::test_environment::EnvironmentGuard::capture(&[
+            ctx_semantic_model::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENV,
+            ctx_semantic_model::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV,
+            "CTX_SEMANTIC_CACHE_DIR",
+        ]);
+        environment.set(
             ctx_semantic_model::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENV,
             token.as_deref(),
         );
-        set_environment(
+        environment.set(
             ctx_semantic_model::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV,
             endpoint.as_deref(),
         );
-        set_environment("CTX_SEMANTIC_CACHE_DIR", cache_dir.as_deref());
+        environment.set("CTX_SEMANTIC_CACHE_DIR", cache_dir.as_deref());
         Self {
-            _lock: lock,
-            token: saved_token,
-            endpoint: saved_endpoint,
-            cache_dir: saved_cache_dir,
+            _environment: environment,
         }
-    }
-}
-
-impl Drop for SemanticEnvironmentGuard {
-    fn drop(&mut self) {
-        set_environment(
-            ctx_semantic_model::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENV,
-            self.token.take().as_deref(),
-        );
-        set_environment(
-            ctx_semantic_model::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV,
-            self.endpoint.take().as_deref(),
-        );
-        set_environment("CTX_SEMANTIC_CACHE_DIR", self.cache_dir.take().as_deref());
-    }
-}
-
-fn set_environment(name: &str, value: Option<&std::ffi::OsStr>) {
-    match value {
-        Some(value) => env::set_var(name, value),
-        None => env::remove_var(name),
     }
 }
 
@@ -402,10 +373,13 @@ fn tree_snapshot(root: &Path) -> Result<Vec<(PathBuf, Vec<u8>)>> {
     Ok(files)
 }
 
+type DurableTreeSnapshot = Vec<(PathBuf, Vec<u8>)>;
+type DurableQueryStateSnapshot = (DurableTreeSnapshot, DurableTreeSnapshot);
+
 fn durable_query_state_snapshot(
     data_root: &Path,
     cache_dir: &Path,
-) -> Result<(Vec<(PathBuf, Vec<u8>)>, Vec<(PathBuf, Vec<u8>)>)> {
+) -> Result<DurableQueryStateSnapshot> {
     Ok((
         tree_snapshot(data_root)?,
         if cache_dir.exists() {
@@ -764,6 +738,14 @@ impl SemanticBatchEmbedder for FixtureSemanticEmbedder {
 }
 
 fn reconcile_ready_nonempty_generation(index: &VerifiedIndex, data_root: &Path) -> Result<()> {
+    drop(reconciled_ready_nonempty_store(index, data_root)?);
+    Ok(())
+}
+
+fn reconciled_ready_nonempty_store(
+    index: &VerifiedIndex,
+    data_root: &Path,
+) -> Result<SemanticVectorStore> {
     let contract = semantic_model_contract();
     let mut store =
         SemanticVectorStore::open(&source_backed_semantic_vector_path(data_root), contract)?;
@@ -774,7 +756,7 @@ fn reconcile_ready_nonempty_generation(index: &VerifiedIndex, data_root: &Path) 
             .reconcile_source_backed_index(index, &mut builder, &mut embedder)?
             .ready()
         {
-            return Ok(());
+            return Ok(store);
         }
     }
     Err(anyhow!("nonempty semantic fixture did not converge"))
@@ -802,12 +784,131 @@ fn passive_ready_nonempty_builtin_uses_cache_only_without_acquisition_or_mutatio
     let error = session
         .prepare_alternative("cache-only passive query")
         .expect_err("an absent or invalid cache must fail without acquisition");
-    assert!(error.to_string().contains("semantic"));
+    assert!(matches!(
+        error,
+        SemanticQueryError::NotReady {
+            code: "semantic_executor_unavailable",
+            retryable: true,
+            ..
+        }
+    ));
     assert_eq!(foreground_acquisition_attempts(), 0);
     assert_eq!(
         durable_query_state_snapshot(temp.path(), &invalid_cache)?,
         before
     );
+    Ok(())
+}
+
+#[test]
+fn ordinary_preflight_reads_committed_wal_while_passive_preflight_fails_closed() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let (index, _) = semantic_index(temp.path())?;
+    let writer = reconciled_ready_nonempty_store(&index, temp.path())?;
+    commit_control_wal(&writer)?;
+    let wal = source_backed_semantic_vector_path(temp.path()).join("state.sqlite-wal");
+    assert!(wal.exists(), "fixture must retain committed WAL state");
+    let before = durable_query_state_snapshot(temp.path(), &temp.path().join("model-cache"))?;
+
+    SemanticQueryAdapter::new(temp.path())
+        .begin_query(&index)
+        .map_err(|error| anyhow!(error.to_string()))?;
+    let reconcile = SemanticQueryAdapter::foreground(
+        temp.path(),
+        SemanticEmbeddingExecutorConfig::http("http://127.0.0.1:9")?,
+    );
+    reconcile
+        .begin_query(&index)
+        .map_err(|error| anyhow!(error.to_string()))?;
+    let SemanticQueryExecution::Foreground { executor, .. } = &reconcile.execution else {
+        unreachable!("foreground constructor selected daemon execution")
+    };
+    assert!(!executor.is_resolved());
+
+    let passive = SemanticQueryAdapter::foreground_read_only(
+        temp.path(),
+        SemanticEmbeddingExecutorConfig::http("http://127.0.0.1:9")?,
+    );
+    let error = match passive.begin_query(&index) {
+        Ok(_) => panic!("passive immutable preflight must refuse committed WAL state"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        HistorySemanticError::NotReady {
+            reason: SemanticReason::StoreUnavailable,
+            retryable: true,
+            ..
+        }
+    ));
+    let SemanticQueryExecution::Foreground { executor, .. } = &passive.execution else {
+        unreachable!("foreground constructor selected daemon execution")
+    };
+    assert!(!executor.is_resolved());
+    assert_eq!(
+        durable_query_state_snapshot(temp.path(), &temp.path().join("model-cache"))?,
+        before
+    );
+    drop(writer);
+    Ok(())
+}
+
+#[test]
+fn reconcile_contract_mismatch_has_zero_executor_or_storage_activity() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let (index, _) = semantic_index(temp.path())?;
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    listener.set_nonblocking(true)?;
+    let endpoint = format!("http://{}/semantic-base", listener.local_addr()?);
+    let executor = SemanticEmbeddingExecutorHandle::build(
+        SemanticEmbeddingExecutorConfig::http(endpoint)?,
+        SharedSemanticRuntime::default(),
+        crate::model_config::semantic_model_config(temp.path()),
+    )?;
+    let cache = temp.path().join("model-cache");
+    let before = durable_query_state_snapshot(temp.path(), &cache)?;
+    reset_foreground_acquisition_attempts();
+
+    let error = reconcile_foreground_semantic_with_fingerprint(
+        &index,
+        temp.path(),
+        &executor,
+        "sha256:mismatched-executor-contract",
+    )
+    .expect_err("executor/index mismatch must fail before reconciliation");
+    assert!(error.to_string().contains("does not match"));
+    assert_eq!(foreground_acquisition_attempts(), 0);
+    assert!(matches!(
+        listener.accept(),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+    ));
+    assert!(!source_backed_semantic_vector_path(temp.path()).exists());
+    assert_eq!(durable_query_state_snapshot(temp.path(), &cache)?, before);
+    Ok(())
+}
+
+#[test]
+fn invalid_passive_executor_configuration_keeps_a_stable_nonretryable_taxonomy() -> Result<()> {
+    let config =
+        ctx_semantic_model::SemanticModelConfig::new(ctx_semantic_model::SemanticModelPaths::new(
+            PathBuf::from("invalid-passive-cache"),
+            ctx_semantic_model::SemanticOnnxRuntimePaths::new(PathBuf::from(
+                "invalid-passive-runtime",
+            )),
+        ))
+        .with_backend_preference_error("invalid backend preference fixture".to_owned());
+    let error = SharedSemanticRuntime::default()
+        .ensure_loaded_passively(&config)
+        .expect_err("invalid passive configuration must fail before backend access");
+    let classified = SemanticQueryError::from(error);
+    assert!(matches!(
+        classified,
+        SemanticQueryError::NotReady {
+            code: "semantic_executor_configuration_invalid",
+            retryable: false,
+            detail,
+        } if detail.contains("invalid backend preference fixture")
+    ));
     Ok(())
 }
 
@@ -960,16 +1061,15 @@ fn foreground_ready_nonempty_generation_skips_model_and_writable_reconciliation(
 }
 
 #[test]
-fn foreground_read_only_ready_generation_skips_writable_reconciliation() -> Result<()> {
+fn foreground_read_only_ready_generation_uses_shared_snapshot_coordination() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let (index, _) = semantic_index(temp.path())?;
     reconcile_ready_nonempty_generation(&index, temp.path())?;
     let semantic_path = source_backed_semantic_vector_path(temp.path());
     let transaction_lock = OpenOptions::new()
         .read(true)
-        .write(true)
         .open(semantic_path.join("flat_transaction.lock"))?;
-    transaction_lock.lock_exclusive()?;
+    transaction_lock.lock_shared()?;
 
     let adapter = SemanticQueryAdapter::foreground_read_only(
         temp.path(),
@@ -981,7 +1081,7 @@ fn foreground_read_only_ready_generation_skips_writable_reconciliation() -> Resu
         .map_err(|error| anyhow!(error.to_string()))?;
     assert!(
         started.elapsed() < Duration::from_secs(1),
-        "refresh off must not wait on the Flat write transaction lock"
+        "passive admission must share the existing Flat transaction lock"
     );
     Ok(())
 }

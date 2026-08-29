@@ -44,6 +44,8 @@ for target in lib test_support_lib; do
 done
 
 write_expected_external() {
+  # `url` constructs percent-correct immutable SQLite file URIs; no network
+  # client is admitted into ctx-semantic-index.
   cat <<'EOF'
 @crates//anyhow-1.0.103:anyhow-1.0.103
 @crates//fs2-0.4.3:fs2-0.4.3
@@ -53,6 +55,7 @@ write_expected_external() {
 @crates//serde_json-1.0.150:serde_json-1.0.150
 @crates//sha2-0.10.9:sha2-0.10.9
 @crates//thiserror-1.0.69:thiserror-1.0.69
+@crates//url-2.5.8:url-2.5.8
 @crates//uuid-1.23.4:uuid-1.23.4
 EOF
 }
