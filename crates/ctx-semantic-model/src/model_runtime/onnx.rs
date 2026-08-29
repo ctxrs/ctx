@@ -115,12 +115,23 @@ pub(super) struct SemanticOnnxRuntimeCandidate {
     try_even_if_missing: bool,
 }
 
-fn format_runtime_load_failure<E: std::fmt::Display>(
-    source: &str,
-    path: &Path,
-    error: E,
-) -> String {
-    format!("{source} {}: {error:#}", path.display())
+#[cfg(ctx_semantic_fastembed)]
+fn format_runtime_load_failure(source: &str, path: &Path, error: &ort::LoadDynamicError) -> String {
+    // `ort::LoadDynamicError` deliberately does not expose its `Dlopen`
+    // libloading error through `Error::source()`, so walk that one public
+    // variant explicitly. The libloading source holds the native loader text.
+    let native_cause = match error {
+        ort::LoadDynamicError::Dlopen { error, .. } => {
+            std::error::Error::source(error).map(|native_cause| native_cause.to_string())
+        }
+        _ => None,
+    };
+    let mut formatted = format!("{source} {}: {error}", path.display());
+    if let Some(native_cause) = native_cause {
+        formatted.push_str(": ");
+        formatted.push_str(&native_cause);
+    }
+    formatted
 }
 
 #[cfg(ctx_semantic_fastembed)]
@@ -227,7 +238,7 @@ pub(super) fn load_semantic_onnxruntime(
             Err(error) => failures.push(format_runtime_load_failure(
                 candidate.source,
                 &candidate.path,
-                error,
+                &error,
             )),
         }
     }
@@ -564,27 +575,41 @@ mod ort_runtime_tests {
 
     use super::*;
 
-    struct ChainedLoadError;
+    #[test]
+    fn runtime_load_failure_preserves_real_native_loader_detail() {
+        let temp = tempfile::tempdir().unwrap();
+        let missing_dylib = temp.path().join(SEMANTIC_ONNXRUNTIME_DYLIB);
+        let error = match ort::init_from(&missing_dylib) {
+            Ok(_) => panic!("a missing dynamic library should not load"),
+            Err(error) => error,
+        };
+        let native_cause = match &error {
+            ort::LoadDynamicError::Dlopen { error, .. } => std::error::Error::source(error)
+                .expect("a dynamic loader failure should retain its native cause")
+                .to_string(),
+            other => panic!("expected a dynamic loader failure, got {other:?}"),
+        };
+        let formatted =
+            format_runtime_load_failure("ctx_installed_runtime", &missing_dylib, &error);
+        assert!(formatted.contains("dlopen failed"));
+        assert!(formatted.contains(&native_cause), "{formatted}");
 
-    impl std::fmt::Display for ChainedLoadError {
-        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            if formatter.alternate() {
-                write!(formatter, "dlopen failed: image not found")
-            } else {
-                write!(formatter, "dlopen failed")
-            }
-        }
+        #[cfg(target_os = "linux")]
+        assert!(native_cause.contains("cannot open shared object file"));
     }
 
     #[test]
-    fn runtime_load_failure_preserves_native_error_chain() {
+    fn runtime_load_failure_formats_other_ort_variants() {
+        let missing_api = ort::LoadDynamicError::MissingApi {
+            path: test_absolute_path(SEMANTIC_ONNXRUNTIME_DYLIB),
+        };
         let formatted = format_runtime_load_failure(
             "ctx_installed_runtime",
-            Path::new("/tmp/libonnxruntime.dylib"),
-            ChainedLoadError,
+            Path::new("/tmp/libonnxruntime"),
+            &missing_api,
         );
-        assert!(formatted.contains("dlopen failed"));
-        assert!(formatted.contains("image not found"));
+        assert!(formatted.contains("does not export `OrtGetApiBase`"));
+        assert!(!formatted.ends_with(": "));
     }
 
     fn test_absolute_path(path: &str) -> PathBuf {
