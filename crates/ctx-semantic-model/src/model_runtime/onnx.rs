@@ -115,6 +115,14 @@ pub(super) struct SemanticOnnxRuntimeCandidate {
     try_even_if_missing: bool,
 }
 
+fn format_runtime_load_failure<E: std::fmt::Display>(
+    source: &str,
+    path: &Path,
+    error: E,
+) -> String {
+    format!("{source} {}: {error:#}", path.display())
+}
+
 #[cfg(ctx_semantic_fastembed)]
 pub(super) fn ensure_semantic_onnxruntime_loaded(paths: &SemanticModelPaths) -> Result<PathBuf> {
     if let Some(runtime) = LOADED_RUNTIME.get() {
@@ -216,10 +224,10 @@ pub(super) fn load_semantic_onnxruntime(
                 let _ = builder.commit();
                 return Ok(candidate.path);
             }
-            Err(error) => failures.push(format!(
-                "{} {}: {error:#}",
+            Err(error) => failures.push(format_runtime_load_failure(
                 candidate.source,
-                candidate.path.display()
+                &candidate.path,
+                error,
             )),
         }
     }
@@ -555,6 +563,29 @@ mod ort_runtime_tests {
     use std::env;
 
     use super::*;
+
+    struct ChainedLoadError;
+
+    impl std::fmt::Display for ChainedLoadError {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            if formatter.alternate() {
+                write!(formatter, "dlopen failed: image not found")
+            } else {
+                write!(formatter, "dlopen failed")
+            }
+        }
+    }
+
+    #[test]
+    fn runtime_load_failure_preserves_native_error_chain() {
+        let formatted = format_runtime_load_failure(
+            "ctx_installed_runtime",
+            Path::new("/tmp/libonnxruntime.dylib"),
+            ChainedLoadError,
+        );
+        assert!(formatted.contains("dlopen failed"));
+        assert!(formatted.contains("image not found"));
+    }
 
     fn test_absolute_path(path: &str) -> PathBuf {
         let root = if cfg!(windows) {
