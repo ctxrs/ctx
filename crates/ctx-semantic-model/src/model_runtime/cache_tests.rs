@@ -4,7 +4,7 @@ use std::{fs, path::Path};
 use super::compiled::discard_compile_destination;
 use super::compiled::{
     commit_compile_destination, invalidate_compiled_model_cache, prepare_compile_destination,
-    AtomicCommit,
+    validate_compiled_model_cache_path, AtomicCommit,
 };
 
 fn write(path: &Path, bytes: &[u8]) {
@@ -66,4 +66,48 @@ fn runtime_compiled_cache_rejects_symlinked_output_tree() {
     symlink("missing", destination.staging_path.join("link")).unwrap();
     assert!(commit_compile_destination(&destination).is_err());
     discard_compile_destination(&destination).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn passive_compiled_cache_rejects_symlinked_managed_ancestor() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let hash = "d".repeat(64);
+    let compiler_hash = "existing-compiler-hash";
+    let outside_model = outside
+        .path()
+        .join("sha256")
+        .join(&hash)
+        .join(compiler_hash)
+        .join("document.mlmodelc");
+    fs::create_dir_all(&outside_model).unwrap();
+    symlink(outside.path(), temp.path().join("coreml-compiled")).unwrap();
+    let model = temp
+        .path()
+        .join("coreml-compiled")
+        .join("sha256")
+        .join(hash)
+        .join(compiler_hash)
+        .join("document.mlmodelc");
+
+    assert!(validate_compiled_model_cache_path(temp.path(), &model).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn passive_compiled_cache_rejects_symlink_inside_bundle() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().unwrap();
+    let destination =
+        prepare_compile_destination(temp.path(), &"e".repeat(64), "query", "coremltools-8.3")
+            .unwrap();
+    write(&destination.staging_path.join("model.bin"), b"compiled");
+    commit_compile_destination(&destination).unwrap();
+    symlink("model.bin", destination.final_path.join("alias.bin")).unwrap();
+
+    assert!(validate_compiled_model_cache_path(temp.path(), &destination.final_path).is_err());
 }

@@ -2,6 +2,8 @@ use std::fmt;
 
 use anyhow::Result;
 
+use crate::health_search::semantic_model_acquisition_integrity_error;
+
 #[cfg(all(ctx_semantic_fastembed, not(target_os = "macos")))]
 use super::automatic_ort_accelerator_backend;
 #[cfg(not(ctx_semantic_fastembed))]
@@ -98,8 +100,25 @@ pub(super) fn acquire_semantic_embedder_passively(
 }
 
 pub(super) fn passive_load_result<T>(backend: &'static str, result: Result<T>) -> Result<T> {
-    result
-        .map_err(|error| SemanticPassiveLoadUnavailable::new(backend, format!("{error:#}")).into())
+    match result {
+        Ok(value) => Ok(value),
+        Err(error) if semantic_model_acquisition_integrity_error(&error) => Err(error),
+        Err(error) => {
+            Err(SemanticPassiveLoadUnavailable::new(backend, format!("{error:#}")).into())
+        }
+    }
+}
+
+#[cfg(ctx_semantic_fastembed)]
+pub(super) fn passive_fallback_unless_integrity<T, F>(primary: Result<T>, fallback: F) -> Result<T>
+where
+    F: FnOnce(anyhow::Error) -> Result<T>,
+{
+    match primary {
+        Ok(value) => Ok(value),
+        Err(error) if semantic_model_acquisition_integrity_error(&error) => Err(error),
+        Err(error) => fallback(error),
+    }
 }
 
 #[cfg(ctx_semantic_fastembed)]
@@ -124,26 +143,28 @@ fn acquire_cpu_fallback_backend_passively(
     accelerator: SemanticBackendKind,
 ) -> Result<SemanticEmbedder> {
     let policy = semantic_embed_policy_for(SemanticComputeClass::Cpu, config);
-    acquire_ort_backend_passively(
+    let accelerator_model = acquire_ort_backend_passively(
         config,
         policy.clone(),
         preference,
         SemanticBackendKind::Cpu,
         accelerator,
-    )
-    .or_else(|accelerator_model_error| {
-        acquire_ort_backend_passively(
+    );
+    passive_fallback_unless_integrity(accelerator_model, |accelerator_model_error| {
+        let cpu_model = acquire_ort_backend_passively(
             config,
             policy,
             preference,
             SemanticBackendKind::Cpu,
             SemanticBackendKind::Cpu,
-        )
-        .map_err(|cpu_model_error| {
-            anyhow::anyhow!(
+        );
+        match cpu_model {
+            Ok(embedder) => Ok(embedder),
+            Err(error) if semantic_model_acquisition_integrity_error(&error) => Err(error),
+            Err(cpu_model_error) => Err(anyhow::anyhow!(
                 "passive accelerator-model CPU fallback failed ({accelerator_model_error:#}); cached fp32 CPU fallback also failed: {cpu_model_error:#}"
-            )
-        })
+            )),
+        }
     })
     .map(|mut embedder| {
         embedder.acquisition_fallback = Some(accelerator_fallback_reason(accelerator));
@@ -190,8 +211,10 @@ fn passive_auto_backend(
     preference: SemanticBackendPreference,
 ) -> Result<SemanticEmbedder> {
     match automatic_ort_accelerator_backend() {
-        Some(kind) => acquire_accelerator_backend_passively(config, preference, kind)
-            .or_else(|_| acquire_cpu_fallback_backend_passively(config, preference, kind)),
+        Some(kind) => passive_fallback_unless_integrity(
+            acquire_accelerator_backend_passively(config, preference, kind),
+            |_| acquire_cpu_fallback_backend_passively(config, preference, kind),
+        ),
         None => acquire_cpu_backend_passively(config, preference),
     }
 }
