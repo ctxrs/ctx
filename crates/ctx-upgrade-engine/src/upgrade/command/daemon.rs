@@ -255,15 +255,6 @@ where
                 plan.latest_version
             ));
         }
-        if plan.update_available
-            && plan.semantic_provisioning.is_none()
-            && plan.metadata.onnxruntime.is_none()
-        {
-            return Err(anyhow!(
-                "release {} has no complete ONNX Runtime sidecar metadata",
-                plan.latest_version
-            ));
-        }
         let artifact = if plan.update_available {
             Some(
                 DownloadedArtifact::download_verified(
@@ -297,6 +288,7 @@ where
                     )
                     .with_context(|| format!("download or reuse {runtime_url}"))?,
                 ),
+                (None, None) => None,
                 _ => return Err(anyhow!("incomplete ONNX Runtime upgrade plan")),
             }
         } else {

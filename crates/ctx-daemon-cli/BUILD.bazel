@@ -169,6 +169,7 @@ daemon_cli_binary_contract(
     name = "auto_upgrade_acceptance_tests",
     src = "tests/contracts/auto_upgrade_acceptance.rs",
     extra_srcs = [
+        "tests/contracts/auto_upgrade_acceptance/core_only_release.rs",
         "tests/contracts/auto_upgrade_acceptance/invalid_marker.rs",
         "tests/contracts/auto_upgrade_acceptance/foreground_authority.rs",
     ],

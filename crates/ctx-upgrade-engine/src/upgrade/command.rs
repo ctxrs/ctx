@@ -579,15 +579,6 @@ fn apply_upgrade<D: DaemonUpgradePort + ?Sized>(
                 plan.latest_version
             ));
         }
-        if plan.update_available
-            && plan.semantic_provisioning.is_none()
-            && plan.metadata.onnxruntime.is_none()
-        {
-            return Err(anyhow!(
-                "release {} is newer than this ctx build but has no complete ONNX Runtime sidecar metadata; refusing a downgrade-compatible legacy update",
-                plan.latest_version
-            ));
-        }
         if dry_run {
             write_state_checked_locked(
                 data_root,
@@ -639,6 +630,9 @@ fn apply_upgrade<D: DaemonUpgradePort + ?Sized>(
         } else {
             None
         };
+        // Supplementary runtime metadata is optional for Core-only releases.
+        // Preserve or repair the legacy runtime only when signed metadata
+        // actually carries that runtime contract.
         let mut runtime_artifact = if (plan.update_available || repairs.legacy_runtime)
             && plan.semantic_provisioning.is_none()
         {
