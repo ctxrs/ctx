@@ -342,14 +342,27 @@ impl CoreRefreshEngine {
                         .get(admission.route())
                         .copied()?;
                     let published_generation = attempt.published_generation.as_deref()?;
-                    let covered_through =
+                    let newer_exhaustive_marker = state
+                        .hermes_routes_requiring_exhaustive_recovery
+                        .contains(admission.route())
+                        || state
+                            .routes_requiring_exhaustive_reconciliation
+                            .contains(admission.route());
+                    // An exhaustive marker regained after this route was
+                    // admitted is a separate obligation. Its newer watcher
+                    // revision must remain dirty even when the post-publication
+                    // observation proves the captured content still matches.
+                    let covered_through = if newer_exhaustive_marker {
+                        admitted_watermark
+                    } else {
                         post_publication_fence.map_or(admitted_watermark, |fence| {
                             fence.certified_boundary(
                                 admission.route(),
                                 admitted_watermark,
                                 observation,
                             )
-                        });
+                        })
+                    };
                     VerifiedSourceRefreshRouteBoundary::new(
                         request_id,
                         published_generation,

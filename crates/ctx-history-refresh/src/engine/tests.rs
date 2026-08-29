@@ -426,11 +426,42 @@ fn verified_publication_is_terminal_despite_synchronous_watch_uncertainty() {
 }
 
 #[test]
-fn exhaustive_obligation_is_consumed_at_admission_and_newer_exact_event_is_incremental() {
+fn newer_exhaustive_marker_survives_post_publication_coverage_fence() {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("data");
     let route = route_identity(0x61);
-    let coordinator = CoreRefreshEngine::new();
+    let coordinator_slot = Arc::new(Mutex::new(None::<Arc<CoreRefreshEngine>>));
+    let executor_slot = Arc::clone(&coordinator_slot);
+    let executor_route = route.clone();
+    let observation = "ab".repeat(32);
+    let executor_observation = observation.clone();
+    let executions = Arc::new(AtomicUsize::new(0));
+    let executor_executions = Arc::clone(&executions);
+    let executor: Arc<dyn SourceBackedRefreshExecutor> =
+        Arc::new(move |execution: SourceBackedRefreshExecution<'_>| {
+            let coordinator = executor_slot
+                .lock()
+                .unwrap()
+                .as_ref()
+                .expect("coordinator installed before execution")
+                .clone();
+            if executor_executions.fetch_add(1, Ordering::SeqCst) == 0 {
+                coordinator.record_watch_routes_requiring_exhaustive_reconciliation(
+                    [(executor_route.clone(), EventWatermark::new(1, 2))],
+                    ledger_now_ms().saturating_sub(1_000),
+                );
+                coordinator.set_route_observations_for_test(
+                    execution.request_id,
+                    BTreeMap::from([(executor_route.clone(), executor_observation.clone())]),
+                );
+            }
+            publish_pin_fixture(&execution, false)
+        });
+    let coordinator = Arc::new(CoreRefreshEngine::with_executor_and_admitted_routes(
+        executor,
+        [route.clone()],
+    ));
+    *coordinator_slot.lock().unwrap() = Some(Arc::clone(&coordinator));
     coordinator.initialize_watch_route_authority([route.clone()]);
     coordinator.record_watch_routes_requiring_exhaustive_reconciliation(
         [(route.clone(), EventWatermark::new(1, 1))],
@@ -439,42 +470,35 @@ fn exhaustive_obligation_is_consumed_at_admission_and_newer_exact_event_is_incre
     assert!(coordinator
         .enqueue_next_dirty_route(&data_root, ledger_now_ms())
         .unwrap());
-    let request_id = coordinator.lock_state().active_request_id.clone().unwrap();
-    assert!(coordinator
-        .prepare_next_pending_admission(&data_root)
-        .unwrap());
-    let route_for_run = route.clone();
     let run = coordinator
-        .run_next_with(
-            move |active, engine| {
-                engine.admit_refresh_scope_for_test(
-                    active,
-                    &SourceBackedRefreshScope::Exact(BTreeSet::from([route_for_run.clone()])),
-                )?;
-                engine.record_watch_routes(
-                    [(route_for_run.clone(), EventWatermark::new(1, 2))],
-                    ledger_now_ms().saturating_sub(1_000),
-                );
-                let mut publication = test_publication("generation-61");
-                publication.route_results = vec![SourceBackedRefreshRouteResult::succeeded(
-                    route_for_run.as_str().to_owned(),
-                    true,
-                )];
-                Ok(publication)
-            },
-            || Ok(Some("generation-61".to_owned())),
-            |_| Ok(()),
-            |_| Ok(()),
-        )
-        .unwrap();
-    assert_eq!(run.job["request_id"], request_id);
+        .run_next_with_coverage_fence_for_test(&data_root, |_, routes| {
+            assert_eq!(routes, &BTreeSet::from([route.clone()]));
+            Ok(BTreeMap::from([(route.clone(), Some(observation.clone()))]))
+        })
+        .expect("original exhaustive maintenance run");
+    let request_id = request_id(&run.job);
+    assert!(Uuid::parse_str(&request_id).is_ok());
     assert_eq!(run.job["request_state"], "published");
+    assert_eq!(
+        run.coverage_certificate()
+            .expect("coverage certificate")
+            .exact_route_boundaries()
+            .collect::<Vec<_>>(),
+        vec![(&route, EventWatermark::new(1, 1), observation.as_str())]
+    );
+    assert_eq!(
+        coordinator.status(&request_id).unwrap()["request_state"],
+        "published"
+    );
     assert!(coordinator
         .enqueue_next_dirty_route(&data_root, ledger_now_ms())
         .unwrap());
+    let successor_id = coordinator.lock_state().active_request_id.clone().unwrap();
+    assert!(Uuid::parse_str(&successor_id).is_ok());
+    assert_ne!(successor_id, request_id);
     assert_eq!(
         coordinator.active_reconciliation_demand_for_test(),
-        Some(SourceBackedReconciliationDemand::Incremental)
+        Some(SourceBackedReconciliationDemand::Exhaustive)
     );
 }
 
