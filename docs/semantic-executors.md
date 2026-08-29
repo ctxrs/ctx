@@ -41,27 +41,42 @@ ctx semantic disable
 reports the selected endpoint, whether content leaves the machine, daemon
 activation state, and the last closed failure category.
 
-## Passive daemon-free queries
+## Passive manual-mode queries
 
-With the daemon disabled, manual searches using `--refresh off` or
-`--refresh background` are read-only. Before ctx constructs an embedding
-executor or contacts an HTTP endpoint, it pins Core and checks that the exact
-semantic projection for that Core generation is complete and compatible.
+With automatic indexing disabled, direct CLI searches using `--refresh off` or
+`--refresh background` are read-only for Core and semantic storage. Before ctx
+constructs an embedding executor or contacts an HTTP endpoint, it pins Core and
+checks that the exact semantic projection for that Core generation is complete
+and compatible.
 
 If that projection is missing, stale, partial, unreadable, or incompatible, a
 semantic-only search returns its typed semantic readiness error. A hybrid
-search returns lexical results with that same reason. Neither case contacts an
+search returns lexical results with that same stable reason code and retryable
+classification. Neither case contacts an
 executor, starts a daemon, waits for IPC, acquires a model, embeds documents,
 or changes Core or semantic state.
 
 An exact empty projection succeeds without constructing the selected executor.
 For a nonempty projection, the built-in executor may load only an already
-verified local model cache; it never acquires a model. An HTTP executor uses
-the exact selected endpoint and its endpoint-bound authentication. It may send
-the normal conformance probes and query embedding request after preflight, so
+verified local model cache; it never acquires a model or runtime asset. Core ML
+uses only an existing validated compiled artifact, Windows ML only an
+already-ready provider, and ONNX only existing cache/runtime files. Auto may
+fall back from a non-integrity accelerator load or authorization failure to an
+already-cached CPU model; cached-artifact integrity failures remain fatal.
+An HTTP executor uses the exact selected endpoint and its endpoint-bound
+authentication. It may send the normal conformance probes and query embedding
+request after preflight, so
 `--refresh off` means no indexing or mutation, not necessarily no network when
 HTTP was explicitly selected. ctx never substitutes the built-in executor for
 an HTTP selection.
+
+Direct CLI passive preflight takes a shared lock on the semantic store's existing Flat
+transaction lock, refuses a SQLite WAL or rollback journal, opens the main
+database read-only with immutable semantics, validates control metadata, and
+pins the exact Flat generation before releasing the lock. The passive path
+does not create a lock, database, WAL, SHM, journal, directory, or cache file.
+Daemon and explicit Reconcile paths instead retain ordinary SQLite read-only
+semantics so they can observe committed WAL state.
 
 ## Transport policy
 

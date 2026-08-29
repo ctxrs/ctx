@@ -1,8 +1,5 @@
 #[cfg(test)]
-use std::{
-    collections::BTreeMap,
-    ffi::{OsStr, OsString},
-};
+use std::{collections::BTreeMap, ffi::OsStr};
 use std::{
     collections::BTreeSet,
     env, fs, io,

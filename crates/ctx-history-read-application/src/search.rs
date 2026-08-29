@@ -197,8 +197,10 @@ pub struct SearchResultWindow<Event = SearchEventMetadata> {
 
 #[derive(Debug, Clone)]
 pub struct SemanticFallbackDiagnostics {
+    pub code: Option<&'static str>,
     pub reason: Option<SemanticReason>,
     pub detail: String,
+    pub retryable: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -439,17 +441,22 @@ fn lexical_fallback_with_diagnostics(
         "query_count": queries.len(),
         "queries": semantic_query_diagnostics,
         "fallback": {
+            "code": fallback.code,
             "reason": format!("{:?}", fallback.reason),
             "detail": fallback.detail,
+            "retryable": fallback.retryable,
         },
     }));
     Ok(collection)
 }
 
 fn semantic_fallback_diagnostics(error: &HistorySemanticError) -> SemanticFallbackDiagnostics {
+    let reason = error.reason();
     SemanticFallbackDiagnostics {
-        reason: error.reason(),
+        code: reason.and_then(SemanticReason::adapter_code),
+        reason,
         detail: error.detail().to_owned(),
+        retryable: error.retryable(),
     }
 }
 

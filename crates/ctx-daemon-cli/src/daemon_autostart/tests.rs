@@ -251,21 +251,8 @@ fn detached_daemon_launch_dto_keeps_only_the_explicit_loop_interval() {
 
 #[test]
 fn detached_daemon_launch_freezes_the_normalized_environment() {
-    struct RestoreHome(Option<OsString>);
-    impl Drop for RestoreHome {
-        fn drop(&mut self) {
-            match self.0.take() {
-                Some(value) => env::set_var("HOME", value),
-                None => env::remove_var("HOME"),
-            }
-        }
-    }
-
-    let _env_lock = crate::config::TEST_LOCAL_USAGE_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    let _restore = RestoreHome(env::var_os("HOME"));
-    env::set_var("HOME", "/before-normalization");
+    let environment = crate::test_environment::EnvironmentGuard::capture(&["HOME"]);
+    environment.set("HOME", Some(OsStr::new("/before-normalization")));
     let launch = daemon_autostart_command(
         Path::new("ctx"),
         Path::new("/data"),
@@ -274,7 +261,7 @@ fn detached_daemon_launch_freezes_the_normalized_environment() {
         None,
     )
     .expect("normalized daemon launch");
-    env::set_var("HOME", "/after-normalization");
+    environment.set("HOME", Some(OsStr::new("/after-normalization")));
 
     let home = launch
         .get_envs()
@@ -285,21 +272,9 @@ fn detached_daemon_launch_freezes_the_normalized_environment() {
 
 #[test]
 fn fresh_v026_root_allows_daemon_autostart_without_legacy_store() {
-    struct RestoreAutostartEnv(Option<std::ffi::OsString>);
-    impl Drop for RestoreAutostartEnv {
-        fn drop(&mut self) {
-            match self.0.take() {
-                Some(value) => env::set_var(DAEMON_AUTOSTART_OFF_ENV, value),
-                None => env::remove_var(DAEMON_AUTOSTART_OFF_ENV),
-            }
-        }
-    }
-
-    let _env_lock = crate::config::TEST_LOCAL_USAGE_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let _restore = RestoreAutostartEnv(env::var_os(DAEMON_AUTOSTART_OFF_ENV));
-    env::remove_var(DAEMON_AUTOSTART_OFF_ENV);
+    let environment =
+        crate::test_environment::EnvironmentGuard::capture(&[DAEMON_AUTOSTART_OFF_ENV]);
+    environment.set(DAEMON_AUTOSTART_OFF_ENV, None);
     let temp = tempfile::tempdir().unwrap();
     let config = AppConfig::default();
 
@@ -313,21 +288,8 @@ fn fresh_v026_root_allows_daemon_autostart_without_legacy_store() {
 
 #[test]
 fn configured_autostart_child_inherits_source_refresh_only_mode() {
-    struct RestoreModeEnv(Option<std::ffi::OsString>);
-    impl Drop for RestoreModeEnv {
-        fn drop(&mut self) {
-            match self.0.take() {
-                Some(value) => env::set_var(DAEMON_MODE_ENV, value),
-                None => env::remove_var(DAEMON_MODE_ENV),
-            }
-        }
-    }
-
-    let _env_lock = crate::config::TEST_LOCAL_USAGE_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let _restore = RestoreModeEnv(env::var_os(DAEMON_MODE_ENV));
-    env::set_var(DAEMON_MODE_ENV, "source-refresh-only");
+    let environment = crate::test_environment::EnvironmentGuard::capture(&[DAEMON_MODE_ENV]);
+    environment.set(DAEMON_MODE_ENV, Some(OsStr::new("source-refresh-only")));
     let temp = tempfile::tempdir().unwrap();
 
     let command = configured_daemon_autostart_command(
@@ -390,37 +352,15 @@ fn mismatched_live_binary_never_joins_and_returns_one_actionable_handoff_command
 
 #[test]
 fn autostart_surfaces_only_the_binary_handoff_recovery_command() -> Result<()> {
-    struct RestoreEnvironment {
-        ci: Option<std::ffi::OsString>,
-        executable: Option<std::ffi::OsString>,
-    }
-    impl Drop for RestoreEnvironment {
-        fn drop(&mut self) {
-            match self.ci.take() {
-                Some(value) => env::set_var("CI", value),
-                None => env::remove_var("CI"),
-            }
-            match self.executable.take() {
-                Some(value) => env::set_var("CTX_DAEMON_AUTOSTART_EXE", value),
-                None => env::remove_var("CTX_DAEMON_AUTOSTART_EXE"),
-            }
-        }
-    }
-
-    let _environment_lock = crate::config::TEST_LOCAL_USAGE_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let _restore = RestoreEnvironment {
-        ci: env::var_os("CI"),
-        executable: env::var_os("CTX_DAEMON_AUTOSTART_EXE"),
-    };
+    let environment =
+        crate::test_environment::EnvironmentGuard::capture(&["CI", "CTX_DAEMON_AUTOSTART_EXE"]);
     let temp = tempfile::tempdir()?;
     let _lock = DaemonLock::acquire(temp.path())?
         .ok_or_else(|| anyhow!("test daemon could not acquire its process lock"))?;
     let replacement = temp.path().join("replacement-ctx");
     fs::write(&replacement, b"different ctx image")?;
-    env::set_var("CI", "1");
-    env::set_var("CTX_DAEMON_AUTOSTART_EXE", replacement);
+    environment.set("CI", Some(OsStr::new("1")));
+    environment.set("CTX_DAEMON_AUTOSTART_EXE", Some(replacement.as_os_str()));
 
     let error = autostart_daemon_and_wait(
         temp.path(),

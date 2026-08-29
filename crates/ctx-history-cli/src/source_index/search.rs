@@ -153,14 +153,17 @@ impl SourceSearchFailure {
     }
 }
 
-fn semantic_error_into_anyhow(error: HistorySemanticError) -> anyhow::Error {
+pub(super) fn semantic_error_into_anyhow(error: HistorySemanticError) -> anyhow::Error {
     match error {
-        HistorySemanticError::NotReady { reason, detail, .. } => {
-            anyhow::Error::new(crate::semantic::SemanticNotReady::new(
-                semantic_reason_code(reason),
-                semantic_external_detail(reason, &detail),
-            ))
-        }
+        HistorySemanticError::NotReady {
+            reason,
+            detail,
+            retryable,
+        } => anyhow::Error::new(crate::semantic::SemanticNotReady::new_with_retryable(
+            semantic_reason_code(reason),
+            semantic_external_detail(reason, &detail),
+            retryable,
+        )),
         HistorySemanticError::Failed { detail } => anyhow::anyhow!(detail),
     }
 }
@@ -173,6 +176,8 @@ pub(super) const fn semantic_reason_code(reason: SemanticReason) -> &'static str
         SemanticReason::ContentScopeUnsupported => "semantic_content_scope_unsupported",
         SemanticReason::EventTypeUnsupported => "semantic_event_type_unsupported",
         SemanticReason::QueryServiceUnavailable => "semantic_query_service_unavailable",
+        SemanticReason::ExecutorUnavailable => "semantic_executor_unavailable",
+        SemanticReason::ExecutorConfigurationInvalid => "semantic_executor_configuration_invalid",
         SemanticReason::StoreUnavailable => "semantic_store_unavailable",
         SemanticReason::StoreMissing => "semantic_store_missing",
         SemanticReason::GenerationUnreadable => "semantic_generation_unreadable",

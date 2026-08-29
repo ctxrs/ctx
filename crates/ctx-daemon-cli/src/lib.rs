@@ -19,6 +19,52 @@ pub use ctx_semantic_model::{
     SEMANTIC_EMBEDDING_AUTH_TOKEN_ENV,
 };
 
+#[cfg(test)]
+pub(crate) mod test_environment {
+    use std::{
+        ffi::{OsStr, OsString},
+        sync::{Mutex, MutexGuard},
+    };
+
+    static TEST_ENVIRONMENT_LOCK: Mutex<()> = Mutex::new(());
+
+    pub(crate) struct EnvironmentGuard {
+        _lock: MutexGuard<'static, ()>,
+        saved: Vec<(&'static str, Option<OsString>)>,
+    }
+
+    impl EnvironmentGuard {
+        pub(crate) fn capture(names: &[&'static str]) -> Self {
+            let lock = TEST_ENVIRONMENT_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let saved = names
+                .iter()
+                .map(|name| (*name, std::env::var_os(name)))
+                .collect();
+            Self { _lock: lock, saved }
+        }
+
+        pub(crate) fn set(&self, name: &'static str, value: Option<&OsStr>) {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+    }
+
+    impl Drop for EnvironmentGuard {
+        fn drop(&mut self) {
+            for (name, value) in self.saved.drain(..).rev() {
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
+    }
+}
+
 pub fn semantic_embedding_executor_auth_from_environment(
 ) -> anyhow::Result<SemanticEmbeddingExecutorAuth> {
     let endpoint_binding = match std::env::var(SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV) {
@@ -58,40 +104,13 @@ fn daemon_environment_preserves_the_endpoint_bound_semantic_embedding_token() {
 
 #[cfg(test)]
 mod semantic_executor_auth_tests {
-    use std::{ffi::OsString, path::PathBuf};
+    use std::{ffi::OsStr, path::PathBuf};
 
     use ctx_semantic_model::{
         SemanticModelConfig, SemanticModelPaths, SemanticOnnxRuntimePaths, SharedSemanticRuntime,
     };
 
     use super::*;
-
-    struct RestoreEnvironment {
-        token: Option<OsString>,
-        binding: Option<OsString>,
-    }
-
-    impl RestoreEnvironment {
-        fn capture() -> Self {
-            Self {
-                token: std::env::var_os(SEMANTIC_EMBEDDING_AUTH_TOKEN_ENV),
-                binding: std::env::var_os(SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV),
-            }
-        }
-    }
-
-    impl Drop for RestoreEnvironment {
-        fn drop(&mut self) {
-            match self.token.take() {
-                Some(value) => std::env::set_var(SEMANTIC_EMBEDDING_AUTH_TOKEN_ENV, value),
-                None => std::env::remove_var(SEMANTIC_EMBEDDING_AUTH_TOKEN_ENV),
-            }
-            match self.binding.take() {
-                Some(value) => std::env::set_var(SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV, value),
-                None => std::env::remove_var(SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV),
-            }
-        }
-    }
 
     fn loopback_executor() -> SemanticEmbeddingExecutorHandle {
         let auth = semantic_embedding_executor_auth_from_environment().unwrap();
@@ -109,20 +128,23 @@ mod semantic_executor_auth_tests {
 
     #[test]
     fn unbound_token_is_ignored_until_an_exact_endpoint_binding_is_present() {
-        let _lock = crate::config::TEST_LOCAL_USAGE_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let _restore = RestoreEnvironment::capture();
-        std::env::set_var(SEMANTIC_EMBEDDING_AUTH_TOKEN_ENV, "loopback-token");
-        std::env::remove_var(SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV);
+        let environment = crate::test_environment::EnvironmentGuard::capture(&[
+            SEMANTIC_EMBEDDING_AUTH_TOKEN_ENV,
+            SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV,
+        ]);
+        environment.set(
+            SEMANTIC_EMBEDDING_AUTH_TOKEN_ENV,
+            Some(OsStr::new("loopback-token")),
+        );
+        environment.set(SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV, None);
         assert!(!loopback_executor()
             .http_executor()
             .unwrap()
             .authentication_configured());
 
-        std::env::set_var(
+        environment.set(
             SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV,
-            "http://127.0.0.1:41007/",
+            Some(OsStr::new("http://127.0.0.1:41007/")),
         );
         assert!(loopback_executor()
             .http_executor()
@@ -138,9 +160,6 @@ mod config {
         persisted_daemon_enabled, set_daemon_enabled, AppConfig, DaemonMode, CONFIG_FILE,
         DAEMON_DEFAULT_ENABLED,
     };
-
-    #[cfg(test)]
-    pub(crate) static TEST_LOCAL_USAGE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 }
 
 use ctx_terminal::compact_json;
