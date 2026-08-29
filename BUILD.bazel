@@ -999,6 +999,7 @@ py_test(
     name = "onnxruntime_sidecar_tools_tests",
     srcs = ["scripts/tests/onnxruntime-sidecar-tools-test.py"],
     data = [
+        ".buildkite/pipeline.yml",
         "scripts/build-onnxruntime-sidecar.sh",
         "scripts/onnxruntime-sidecar/archive_tool.py",
         "scripts/onnxruntime-sidecar/build_freebsd_x64.sh",

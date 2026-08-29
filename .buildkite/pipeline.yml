@@ -394,36 +394,37 @@ steps:
     if: build.env("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") == "1" && build.env("CTX_PUBLIC_CLI_NATIVE_SMOKE_MATRIX") == "1" && build.env("CTX_PUBLIC_SEMANTIC_ASSET_MATRIX") == "1" && build.branch == "main" && build.pull_request.id == null
     command: |
       mkdir -p target/github-core-release-assets target/public-cli-artifacts
-      # --step excludes retried producer attempts by default. Buildkite has no
-      # static attempt UUID binding; manually retrying a producer after this
-      # gate has passed requires rerunning this gate and final assembly.
-      buildkite-agent artifact download \
+      # Qualification and assembly consume only each step's current attempt.
+      # Retrying either producer or this gate requires rerunning this gate and
+      # final assembly; historical artifact attempts are never accepted.
+      BUILDKITE_AGENT_INCLUDE_RETRIED_JOBS=false buildkite-agent artifact download \
         "target/github-core-release-assets/ctx-macos-arm64*" . \
         --step github-release-candidate
-      buildkite-agent artifact download \
+      BUILDKITE_AGENT_INCLUDE_RETRIED_JOBS=false buildkite-agent artifact download \
         "target/public-cli-artifacts/ctx-onnxruntime-macos-arm64.tar.gz*" . \
         --step semantic-runtime-portable
-      buildkite-agent artifact download \
+      BUILDKITE_AGENT_INCLUDE_RETRIED_JOBS=false buildkite-agent artifact download \
         "target/public-cli-artifacts/ctx-onnxruntime-macos-arm64.signing.json" . \
         --step semantic-runtime-portable
-      buildkite-agent artifact download \
+      BUILDKITE_AGENT_INCLUDE_RETRIED_JOBS=false buildkite-agent artifact download \
         "target/public-cli-artifacts/ctx-onnxruntime-macos-arm64.attestation.json" . \
         --step semantic-runtime-portable
-      buildkite-agent artifact download \
+      BUILDKITE_AGENT_INCLUDE_RETRIED_JOBS=false buildkite-agent artifact download \
         "target/public-cli-artifacts/ctx-onnxruntime-macos-arm64.attestation.cms" . \
         --step semantic-runtime-portable
-      buildkite-agent artifact download \
+      BUILDKITE_AGENT_INCLUDE_RETRIED_JOBS=false buildkite-agent artifact download \
         "target/public-cli-artifacts/ctx-onnxruntime-macos-arm64.release-attestation.json" . \
         --step semantic-runtime-portable
-      buildkite-agent artifact download \
+      BUILDKITE_AGENT_INCLUDE_RETRIED_JOBS=false buildkite-agent artifact download \
         "target/public-cli-artifacts/ctx-onnxruntime-macos-arm64.release-attestation.cms" . \
         --step semantic-runtime-portable
-      buildkite-agent artifact download \
+      BUILDKITE_AGENT_INCLUDE_RETRIED_JOBS=false buildkite-agent artifact download \
         "target/public-cli-artifacts/ctx-onnxruntime-macos-arm64.notary-submit.json" . \
         --step semantic-runtime-portable
       scripts/qualify-macos-release-pair.sh \
         macos-arm64 target/github-core-release-assets/ctx-macos-arm64 \
-        target/public-cli-artifacts/ctx-onnxruntime-macos-arm64.tar.gz
+        target/public-cli-artifacts/ctx-onnxruntime-macos-arm64.tar.gz \
+        target/macos-release-pair-qualification/ctx-macos-arm64.release-pair.sha256
     agents:
       queue: "ctx-release-macos-arm64"
       os: "darwin"
@@ -431,6 +432,8 @@ steps:
     concurrency: 1
     concurrency_group: "ctx-public-cli-macos-arm64-release-pair"
     timeout_in_minutes: 180
+    artifact_paths:
+      - "target/macos-release-pair-qualification/ctx-macos-arm64.release-pair.sha256"
 
   - label: ":test_tube: qualify final macos-x64 CLI and runtime pair"
     key: "public-cli-macos-x64-release-pair-qualification"
@@ -440,36 +443,37 @@ steps:
     if: build.env("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") == "1" && build.env("CTX_PUBLIC_CLI_NATIVE_SMOKE_MATRIX") == "1" && build.env("CTX_PUBLIC_SEMANTIC_ASSET_MATRIX") == "1" && build.branch == "main" && build.pull_request.id == null
     command: |
       mkdir -p target/github-core-release-assets target/public-cli-artifacts
-      # --step excludes retried producer attempts by default. Buildkite has no
-      # static attempt UUID binding; manually retrying a producer after this
-      # gate has passed requires rerunning this gate and final assembly.
-      buildkite-agent artifact download \
+      # Qualification and assembly consume only each step's current attempt.
+      # Retrying either producer or this gate requires rerunning this gate and
+      # final assembly; historical artifact attempts are never accepted.
+      BUILDKITE_AGENT_INCLUDE_RETRIED_JOBS=false buildkite-agent artifact download \
         "target/github-core-release-assets/ctx-macos-x64*" . \
         --step github-release-candidate
-      buildkite-agent artifact download \
+      BUILDKITE_AGENT_INCLUDE_RETRIED_JOBS=false buildkite-agent artifact download \
         "target/public-cli-artifacts/ctx-onnxruntime-macos-x64.tar.gz*" . \
         --step public-cli-macos-x64-runtime-producer
-      buildkite-agent artifact download \
+      BUILDKITE_AGENT_INCLUDE_RETRIED_JOBS=false buildkite-agent artifact download \
         "target/public-cli-artifacts/ctx-onnxruntime-macos-x64.signing.json" . \
         --step public-cli-macos-x64-runtime-producer
-      buildkite-agent artifact download \
+      BUILDKITE_AGENT_INCLUDE_RETRIED_JOBS=false buildkite-agent artifact download \
         "target/public-cli-artifacts/ctx-onnxruntime-macos-x64.attestation.json" . \
         --step public-cli-macos-x64-runtime-producer
-      buildkite-agent artifact download \
+      BUILDKITE_AGENT_INCLUDE_RETRIED_JOBS=false buildkite-agent artifact download \
         "target/public-cli-artifacts/ctx-onnxruntime-macos-x64.attestation.cms" . \
         --step public-cli-macos-x64-runtime-producer
-      buildkite-agent artifact download \
+      BUILDKITE_AGENT_INCLUDE_RETRIED_JOBS=false buildkite-agent artifact download \
         "target/public-cli-artifacts/ctx-onnxruntime-macos-x64.release-attestation.json" . \
         --step public-cli-macos-x64-runtime-producer
-      buildkite-agent artifact download \
+      BUILDKITE_AGENT_INCLUDE_RETRIED_JOBS=false buildkite-agent artifact download \
         "target/public-cli-artifacts/ctx-onnxruntime-macos-x64.release-attestation.cms" . \
         --step public-cli-macos-x64-runtime-producer
-      buildkite-agent artifact download \
+      BUILDKITE_AGENT_INCLUDE_RETRIED_JOBS=false buildkite-agent artifact download \
         "target/public-cli-artifacts/ctx-onnxruntime-macos-x64.notary-submit.json" . \
         --step public-cli-macos-x64-runtime-producer
       scripts/qualify-macos-release-pair.sh \
         macos-x64 target/github-core-release-assets/ctx-macos-x64 \
-        target/public-cli-artifacts/ctx-onnxruntime-macos-x64.tar.gz
+        target/public-cli-artifacts/ctx-onnxruntime-macos-x64.tar.gz \
+        target/macos-release-pair-qualification/ctx-macos-x64.release-pair.sha256
     agents:
       queue: "ctx-mac-gui-shared-x64"
       os: "darwin"
@@ -477,6 +481,10 @@ steps:
     concurrency: 1
     concurrency_group: "ctx-public-cli-macos-x64-release-pair"
     timeout_in_minutes: 180
+    env:
+      CTX_RELEASE_MACOS_X64_KVM_RUNNER_ID: "ctx-mac-gui-shared-x64"
+    artifact_paths:
+      - "target/macos-release-pair-qualification/ctx-macos-x64.release-pair.sha256"
 
   - label: ":package: assemble complete GitHub release assets"
     key: "github-release-assets"
@@ -489,29 +497,36 @@ steps:
       - "public-cli-macos-x64-release-pair-qualification"
     if: build.env("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") == "1" && build.env("CTX_PUBLIC_CLI_NATIVE_SMOKE_MATRIX") == "1" && build.env("CTX_PUBLIC_SEMANTIC_ASSET_MATRIX") == "1" && build.branch == "main" && build.pull_request.id == null
     command: |
-      mkdir -p target/public-cli-artifacts
-      buildkite-agent artifact download \
+      mkdir -p target/public-cli-artifacts target/macos-release-pair-qualification
+      BUILDKITE_AGENT_INCLUDE_RETRIED_JOBS=false buildkite-agent artifact download \
         "target/github-core-release-assets/*" . \
         --step github-release-candidate
-      buildkite-agent artifact download \
+      BUILDKITE_AGENT_INCLUDE_RETRIED_JOBS=false buildkite-agent artifact download \
         "target/public-cli-artifacts/ctx-onnxruntime-linux-x64.tar.gz*" . \
         --step semantic-runtime-portable
-      buildkite-agent artifact download \
+      BUILDKITE_AGENT_INCLUDE_RETRIED_JOBS=false buildkite-agent artifact download \
         "target/public-cli-artifacts/ctx-onnxruntime-linux-aarch64.tar.gz*" . \
         --step semantic-runtime-portable
-      buildkite-agent artifact download \
+      BUILDKITE_AGENT_INCLUDE_RETRIED_JOBS=false buildkite-agent artifact download \
         "target/public-cli-artifacts/ctx-onnxruntime-macos-arm64.tar.gz*" . \
         --step semantic-runtime-portable
-      buildkite-agent artifact download \
+      BUILDKITE_AGENT_INCLUDE_RETRIED_JOBS=false buildkite-agent artifact download \
         "target/public-cli-artifacts/ctx-onnxruntime-macos-x64.tar.gz*" . \
         --step public-cli-macos-x64-runtime-producer
-      buildkite-agent artifact download \
+      BUILDKITE_AGENT_INCLUDE_RETRIED_JOBS=false buildkite-agent artifact download \
         "*ctx-onnxruntime-windows-x64.zip*" . \
         --step semantic-runtime-windows-ml
+      BUILDKITE_AGENT_INCLUDE_RETRIED_JOBS=false buildkite-agent artifact download \
+        "target/macos-release-pair-qualification/ctx-macos-arm64.release-pair.sha256" . \
+        --step public-cli-macos-arm64-release-pair-qualification
+      BUILDKITE_AGENT_INCLUDE_RETRIED_JOBS=false buildkite-agent artifact download \
+        "target/macos-release-pair-qualification/ctx-macos-x64.release-pair.sha256" . \
+        --step public-cli-macos-x64-release-pair-qualification
       scripts/assemble-github-release-assets.sh \
         target/github-core-release-assets \
         target/public-cli-artifacts \
-        target/github-release-assets
+        target/github-release-assets \
+        target/macos-release-pair-qualification
     agents:
       queue: "release-linux-managed"
       ctx-runner-class: "release-linux-control"

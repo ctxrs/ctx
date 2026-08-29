@@ -438,31 +438,46 @@ def validate_release_pair(
         fail(f"{key} must fail closed")
     if pair.get("agents") != {"queue": queue, "os": "darwin", "arch": arch}:
         fail(f"{key} has the wrong authoritative native macOS runner")
+    expected_env = (
+        {"CTX_RELEASE_MACOS_X64_KVM_RUNNER_ID": "ctx-mac-gui-shared-x64"}
+        if platform == "macos-x64"
+        else None
+    )
+    if pair.get("env") != expected_env:
+        fail(f"{key} has the wrong macOS qualification runner identity")
     if (
         pair.get("concurrency") != 1
         or pair.get("concurrency_group") != concurrency_group
         or pair.get("timeout_in_minutes") != 180
     ):
         fail(f"{key} lost its bounded native qualification contract")
-    if pair.get("artifact_paths") is not None:
-        fail(f"{key} must not substitute a receipt for its blocking native gate")
+    receipt = (
+        f"target/macos-release-pair-qualification/ctx-{platform}.release-pair.sha256"
+    )
+    if pair.get("artifact_paths") != [receipt]:
+        fail(f"{key} must publish only its exact gate-owned digest receipt")
 
     command = pair.get("command", "")
     logical_command = " ".join(command.replace("\\\n", " ").split())
-    if re.search(r"(?:\|\||\b(?:exit|return)\b|set\s+\+e)", command):
-        fail(f"{key} must not mask failure or exit before qualification")
     if "--include-retried-jobs" in command:
-        fail(f"{key} must consume only the latest producer artifact attempt")
-    core_download = (
-        f'buildkite-agent artifact download "target/github-core-release-assets/ctx-{platform}*" '
-        ". --step github-release-candidate"
-    )
-    runtime_download = (
-        f'buildkite-agent artifact download "target/public-cli-artifacts/ctx-onnxruntime-{platform}.tar.gz*" '
-        f". --step {runtime_producer}"
-    )
-    if logical_command.count(core_download) != 1 or logical_command.count(runtime_download) != 1:
-        fail(f"{key} must download the exact Core CLI and final runtime assembly inputs")
+        fail(f"{key} must never consume historical retry artifacts")
+    if re.search(r"BUILDKITE_AGENT_INCLUDE_RETRIED_JOBS=(?!false\b)", command):
+        fail(f"{key} must set retry history exclusion exactly to false")
+
+    def download(pattern: str, step: str) -> str:
+        return (
+            "BUILDKITE_AGENT_INCLUDE_RETRIED_JOBS=false "
+            f'buildkite-agent artifact download "{pattern}" . --step {step}'
+        )
+
+    expected_commands = [
+        "mkdir -p target/github-core-release-assets target/public-cli-artifacts",
+        download(f"target/github-core-release-assets/ctx-{platform}*", "github-release-candidate"),
+        download(
+            f"target/public-cli-artifacts/ctx-onnxruntime-{platform}.tar.gz*",
+            runtime_producer,
+        ),
+    ]
     for sidecar in (
         "signing.json",
         "attestation.json",
@@ -471,18 +486,26 @@ def validate_release_pair(
         "release-attestation.cms",
         "notary-submit.json",
     ):
-        sidecar_download = (
-            "buildkite-agent artifact download "
-            f'"target/public-cli-artifacts/ctx-onnxruntime-{platform}.{sidecar}" '
-            f". --step {runtime_producer}"
+        expected_commands.append(
+            download(
+                f"target/public-cli-artifacts/ctx-onnxruntime-{platform}.{sidecar}",
+                runtime_producer,
+            )
         )
-        if logical_command.count(sidecar_download) != 1:
-            fail(f"{key} must download the runtime {sidecar} signing sidecar")
     cli = f"target/github-core-release-assets/ctx-{platform}"
     runtime = f"target/public-cli-artifacts/ctx-onnxruntime-{platform}.tar.gz"
-    wrapper = f"scripts/qualify-macos-release-pair.sh {platform} {cli} {runtime}"
-    if logical_command.count(wrapper) != 1:
-        fail(f"{key} must invoke exactly one fail-closed pair qualification wrapper")
+    wrapper = f"scripts/qualify-macos-release-pair.sh {platform} {cli} {runtime} {receipt}"
+    expected_commands.append(wrapper)
+    actual_commands = [
+        " ".join(line.split())
+        for line in command.replace("\\\n", " ").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    if actual_commands != expected_commands:
+        fail(
+            f"{key} must use the canonical unmasked download sequence with "
+            "the pair wrapper as its final unconditional simple command"
+        )
     for forbidden in (
         "check-macos-release-signing.sh",
         "verify-macos-release-attestation.sh",
@@ -508,8 +531,10 @@ for key, (platform, runtime_producer, queue, arch, concurrency_group) in release
         (f"target/github-core-release-assets/ctx-{platform}*", "target/wrong/ctx"),
         ("notary-submit.json", "missing-notary-submit.json"),
         ("--step github-release-candidate", "--step github-release-candidate --include-retried-jobs"),
+        ("scripts/qualify-macos-release-pair.sh", "if true; then scripts/qualify-macos-release-pair.sh"),
         ("scripts/qualify-macos-release-pair.sh", "exit 0\nscripts/qualify-macos-release-pair.sh"),
         ("scripts/qualify-macos-release-pair.sh", "scripts/qualify-macos-release-pair.sh || true"),
+        ("BUILDKITE_AGENT_INCLUDE_RETRIED_JOBS=false", "BUILDKITE_AGENT_INCLUDE_RETRIED_JOBS=true"),
     ):
         mutated = copy.deepcopy(pair)
         mutated_command = mutated["command"].replace(old, new, 1)
@@ -535,6 +560,17 @@ for key, (platform, runtime_producer, queue, arch, concurrency_group) in release
             pass
         else:
             fail(f"{key} accepted release-pair fail-open field: {field}")
+    if platform == "macos-x64":
+        mutated = copy.deepcopy(pair)
+        mutated["env"] = {"CTX_RELEASE_MACOS_X64_KVM_RUNNER_ID": "wrong-runner"}
+        try:
+            validate_release_pair(
+                key, platform, runtime_producer, queue, arch, concurrency_group, mutated
+            )
+        except SystemExit:
+            pass
+        else:
+            fail(f"{key} accepted a mutated x64 KVM runner identity")
 
 github_release = keyed["github-release-assets"]
 expected_github_dependencies = [
@@ -552,21 +588,97 @@ if github_release.get("if") != github_release_condition:
 if github_release.get("allow_dependency_failure") or github_release.get("soft_fail"):
     fail("final GitHub assembly must fail closed")
 github_release_command = github_release.get("command", "")
-if (
-    github_release_command.count("assemble-github-release-assets.sh") != 1
-    or github_release_command.count("--step semantic-runtime-portable") != 3
-    or github_release_command.count("--step public-cli-macos-x64-runtime-producer") != 1
-    or github_release_command.count("--step semantic-runtime-windows-ml") != 1
-    or github_release_command.count("--step github-release-candidate") != 1
-    or "target/github-core-release-assets" not in github_release_command
-    or "target/github-release-assets" not in github_release_command
-):
-    fail("final GitHub assembly must join the exact Core and five-runtime handoffs")
+def assembly_download(pattern: str, step: str) -> str:
+    return (
+        "BUILDKITE_AGENT_INCLUDE_RETRIED_JOBS=false "
+        f'buildkite-agent artifact download "{pattern}" . --step {step}'
+    )
+
+
+expected_assembly_commands = [
+    "mkdir -p target/public-cli-artifacts target/macos-release-pair-qualification",
+    assembly_download("target/github-core-release-assets/*", "github-release-candidate"),
+    assembly_download(
+        "target/public-cli-artifacts/ctx-onnxruntime-linux-x64.tar.gz*",
+        "semantic-runtime-portable",
+    ),
+    assembly_download(
+        "target/public-cli-artifacts/ctx-onnxruntime-linux-aarch64.tar.gz*",
+        "semantic-runtime-portable",
+    ),
+    assembly_download(
+        "target/public-cli-artifacts/ctx-onnxruntime-macos-arm64.tar.gz*",
+        "semantic-runtime-portable",
+    ),
+    assembly_download(
+        "target/public-cli-artifacts/ctx-onnxruntime-macos-x64.tar.gz*",
+        "public-cli-macos-x64-runtime-producer",
+    ),
+    assembly_download(
+        "*ctx-onnxruntime-windows-x64.zip*", "semantic-runtime-windows-ml"
+    ),
+    assembly_download(
+        "target/macos-release-pair-qualification/ctx-macos-arm64.release-pair.sha256",
+        "public-cli-macos-arm64-release-pair-qualification",
+    ),
+    assembly_download(
+        "target/macos-release-pair-qualification/ctx-macos-x64.release-pair.sha256",
+        "public-cli-macos-x64-release-pair-qualification",
+    ),
+    (
+        "scripts/assemble-github-release-assets.sh "
+        "target/github-core-release-assets target/public-cli-artifacts "
+        "target/github-release-assets target/macos-release-pair-qualification"
+    ),
+]
+
+def validate_assembly_command(command: str) -> None:
+    if "--include-retried-jobs" in command or re.search(
+        r"BUILDKITE_AGENT_INCLUDE_RETRIED_JOBS=(?!false\b)", command
+    ):
+        fail("final GitHub assembly must never consume historical retry artifacts")
+    actual_commands = [
+        " ".join(line.split())
+        for line in command.replace("\\\n", " ").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    if actual_commands != expected_assembly_commands:
+        fail(
+            "final GitHub assembly must join only current-attempt Core/five-runtime "
+            "handoffs and both gate-owned pair receipts"
+        )
+
+
+validate_assembly_command(github_release_command)
 for forbidden in ("multilingual-e5", "cuda12", "windowsml"):
     if forbidden in github_release_command.lower():
         fail(f"final GitHub assembly unexpectedly consumes {forbidden}")
 if github_release.get("artifact_paths") != ["target/github-release-assets/*"]:
     fail("final GitHub assembly must upload only the complete public asset set")
+for old, new in (
+    (
+        "target/macos-release-pair-qualification/ctx-macos-arm64.release-pair.sha256",
+        "target/macos-release-pair-qualification/missing.release-pair.sha256",
+    ),
+    (
+        "BUILDKITE_AGENT_INCLUDE_RETRIED_JOBS=false",
+        "BUILDKITE_AGENT_INCLUDE_RETRIED_JOBS=true",
+    ),
+    (
+        "target/macos-release-pair-qualification",
+        "target/unqualified-release-pair-receipts",
+    ),
+):
+    mutated = copy.deepcopy(github_release)
+    mutated_command = mutated["command"].replace(old, new, 1)
+    if mutated_command == mutated["command"]:
+        fail(f"final assembly negative mutation could not be constructed: {old}")
+    try:
+        validate_assembly_command(mutated_command)
+    except SystemExit:
+        pass
+    else:
+        fail(f"final GitHub assembly accepted mutation: {old} -> {new}")
 
 handoff = keyed["semantic-release-handoff"]
 expected_semantic_dependencies = [
