@@ -215,6 +215,7 @@ impl CoreRefreshEngine {
                 .unwrap_or_default();
             let failed_request_id = failed.request_id.clone();
             let failed_intent = failed.intent.clone();
+            let failed_reconciliation_demand = failed.reconciliation_demand;
             let failure_route_dispositions = failed.failure_outcome.as_ref().map(|outcome| {
                 (
                     outcome.retryable_routes.clone(),
@@ -236,6 +237,14 @@ impl CoreRefreshEngine {
                         blocked_routes,
                         Some(&failed_intent),
                     );
+                    if failed_reconciliation_demand == SourceBackedReconciliationDemand::Exhaustive {
+                        // The durable failed terminal can survive a crash
+                        // before route finalization re-arms the obligation
+                        // transferred at admission.
+                        state
+                            .routes_requiring_exhaustive_reconciliation
+                            .extend(retryable_routes.iter().cloned());
+                    }
                 }
                 Self::seed_rearmed_automatic_retry_routes_locked(&mut state, &build_rearmed_routes);
                 trim_terminal_attempt_history(&mut state);

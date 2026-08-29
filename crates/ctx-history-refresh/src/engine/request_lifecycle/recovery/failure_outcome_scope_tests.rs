@@ -104,3 +104,65 @@ fn recovery_rejects_source_unclaimed_without_its_blocked_culprit() {
 
     assert!(format!("{error:#}").contains("source-unclaimed outcome is inconsistent"));
 }
+
+#[test]
+fn crash_image_failed_exhaustive_attempt_rearms_retryable_route_ownership() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    ctx_history_platform::platform_security::establish_private_data_root(&data_root).unwrap();
+    let route = route('a');
+    let first = CoreRefreshEngine::new();
+    first.initialize_watch_route_authority([route.clone()]);
+    first.record_watch_routes_requiring_exhaustive_reconciliation(
+        [(route.clone(), EventWatermark::new(1, 1))],
+        source_route_ledger_now_ms().saturating_sub(1_000),
+    );
+    assert!(first
+        .enqueue_next_dirty_route(&data_root, source_route_ledger_now_ms())
+        .unwrap());
+    let request_id = first.lock_state().active_request_id.clone().unwrap();
+    assert!(first.prepare_next_pending_admission(&data_root).unwrap());
+    assert_eq!(
+        first.reconciliation_demand(&request_id),
+        Some(SourceBackedReconciliationDemand::Exhaustive)
+    );
+
+    let status_path = daemon_source_backed_refresh_job_path(&data_root);
+    let crash = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = first.run_next_with(
+            |active_request_id, engine| {
+                engine.admit_refresh_scope_for_test(
+                    active_request_id,
+                    &SourceBackedRefreshScope::Exact(BTreeSet::from([route.clone()])),
+                )?;
+                Err(anyhow!(
+                    "injected failed terminal before route finalization"
+                ))
+            },
+            || Ok(None),
+            |job| {
+                write_daemon_job_status(&status_path, job)?;
+                panic!("injected crash after durable failed terminal");
+            },
+            |_| Ok(()),
+        );
+    }));
+    assert!(crash.is_err());
+    assert_eq!(
+        read_daemon_job_status(&status_path).unwrap()["request_state"],
+        "failed"
+    );
+    drop(first);
+
+    let recovered = CoreRefreshEngine::new();
+    assert!(!recovered
+        .recover_interrupted_publication(&data_root)
+        .unwrap());
+    assert!(recovered
+        .enqueue_next_dirty_route(&data_root, u64::MAX)
+        .unwrap());
+    assert_eq!(
+        recovered.active_reconciliation_demand_for_test(),
+        Some(SourceBackedReconciliationDemand::Exhaustive)
+    );
+}
