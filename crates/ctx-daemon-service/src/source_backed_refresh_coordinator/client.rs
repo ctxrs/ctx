@@ -10,17 +10,8 @@ mod types;
 pub use observation_recovery::SourceRefreshObservationRecoveryFailed;
 #[cfg(test)]
 use observation_recovery::DISCONNECT_POLICY;
-pub(super) use observation_recovery::{
-    recover_typed_unknown_coalesced_request_with, recover_typed_unknown_request_with,
-    TypedUnknownRequestRecovery,
-};
 use observation_recovery::{
     request_bound_status_with_outage_budget, retained_request_unobservable,
-};
-#[cfg(test)]
-pub(super) use observation_recovery::{
-    SourceRefreshRequestRecoveryFailed, SourceRefreshRequestRecoveryFailureReason,
-    SourceRefreshRequestRetention,
 };
 use request_policy::SourceBackedRefreshRequestPolicy;
 use response::*;
@@ -763,6 +754,7 @@ pub(super) fn recover_wait_refresh_request(
     })
 }
 
+#[cfg(test)]
 fn enqueue_equivalent_wait_refresh_request(
     data_root: &Path,
     request_id: &str,
@@ -810,6 +802,7 @@ fn response_request_id(response: &Value, label: &str) -> Result<String> {
         .ok_or_else(|| anyhow!("{label} has no request ID"))
 }
 
+#[cfg(test)]
 fn source_refresh_protocol_state(response: &Value) -> Result<RefreshRequestState> {
     Ok(source_refresh_protocol_status(response)?.request_state())
 }

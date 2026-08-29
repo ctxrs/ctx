@@ -470,6 +470,9 @@ fn newer_exhaustive_marker_survives_post_publication_coverage_fence() {
     assert!(coordinator
         .enqueue_next_dirty_route(&data_root, ledger_now_ms())
         .unwrap());
+    assert!(coordinator
+        .prepare_next_pending_admission(&data_root)
+        .unwrap());
     let run = coordinator
         .run_next_with_coverage_fence_for_test(&data_root, |_, routes| {
             assert_eq!(routes, &BTreeSet::from([route.clone()]));

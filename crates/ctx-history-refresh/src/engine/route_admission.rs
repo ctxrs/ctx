@@ -380,15 +380,20 @@ impl CoreRefreshEngine {
                 };
                 if acknowledged {
                     state.route_retry_intents.remove(admission.route());
-                    if let Some((boundary, observation)) = verified_boundary {
-                        certified_routes.insert(
-                            admission.route().clone(),
-                            SourceBackedRefreshRouteCoverageCertificate {
-                                observation,
-                                admitted_watermark: boundary.covered_through(),
-                            },
-                        );
-                    }
+                }
+                // A valid verified boundary remains useful publication
+                // evidence even when a newer dirty revision prevented this
+                // admission from becoming clean.  In that case the capped
+                // boundary documents exactly what was covered, while the
+                // newer revision stays schedulable.
+                if let Some((boundary, observation)) = verified_boundary {
+                    certified_routes.insert(
+                        admission.route().clone(),
+                        SourceBackedRefreshRouteCoverageCertificate {
+                            observation,
+                            admitted_watermark: boundary.covered_through(),
+                        },
+                    );
                 }
             } else {
                 if let Some(intent) = selected_retry_intent.as_ref() {

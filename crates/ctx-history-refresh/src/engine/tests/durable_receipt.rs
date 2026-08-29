@@ -28,6 +28,121 @@ fn publication_pin_test_publication(
 }
 
 #[test]
+fn publication_metadata_ownership_rejects_table_driven_mismatches_for_terminal_and_running_recovery(
+) {
+    for request_state in ["published", "running"] {
+        let cases: &[&str] = if request_state == "published" {
+            &[
+                "request_id",
+                "operation",
+                "scope",
+                "generation",
+                "receipt",
+                "malformed",
+            ]
+        } else {
+            &["request_id", "operation", "scope", "malformed"]
+        };
+        for &case in cases {
+            let temp = tempfile::tempdir().unwrap();
+            let data_root = temp.path().join("data");
+            ctx_history_platform::platform_security::establish_private_data_root(&data_root)
+                .unwrap();
+            let receipt_slot = Arc::new(Mutex::new(None::<Value>));
+            let case_receipt_slot = Arc::clone(&receipt_slot);
+            let case_route = route_identity(0xae);
+            let published = ctx_history_index::GenerationWriter::open(
+                source_backed_index_root(&data_root),
+                WriterOptions::default(),
+            )
+            .unwrap()
+            .into_writer()
+            .unwrap()
+            .commit_with_publication_metadata(
+                |_| true,
+                |context| {
+                    let mut publication = empty_test_publication(context.generation_id());
+                    add_complete_empty_authority(&mut publication, case_route.clone());
+                    let receipt = SourceBackedRefreshReceipt::from_verified_publication(
+                        None,
+                        context.generation_id().to_owned(),
+                        &publication,
+                    )
+                    .map_err(|error| IndexError::PublicationMetadata(format!("{error:#}")))?;
+                    *case_receipt_slot.lock().unwrap() = Some(receipt.to_json());
+                    if case == "malformed" {
+                        return Ok(b"not-source-refresh-metadata".to_vec());
+                    }
+                    let mut metadata = SourceBackedPublicationMetadata {
+                        version: SOURCE_REFRESH_PUBLICATION_METADATA_VERSION,
+                        request_id: "expected-request".to_owned(),
+                        operation: SourceBackedRefreshOperation::Refresh,
+                        refresh_scope: SourceBackedRefreshScope::All,
+                        receipt: receipt.to_json(),
+                        route_observations: BTreeMap::new(),
+                        route_controls: BTreeMap::new(),
+                    };
+                    match case {
+                        "request_id" => metadata.request_id = "other-request".to_owned(),
+                        "operation" => metadata.operation = SourceBackedRefreshOperation::Import,
+                        "scope" => {
+                            metadata.refresh_scope =
+                                SourceBackedRefreshScope::Exact(BTreeSet::from([
+                                    case_route.clone()
+                                ]));
+                        }
+                        _ => {}
+                    }
+                    metadata.encode()
+                },
+            )
+            .unwrap();
+            let generation = published.receipt().generation_id.clone();
+            let receipt = receipt_slot.lock().unwrap().clone();
+            let mut job = json!({
+                "schema_version": 1,
+                "owner": "daemon",
+                "request_id": "expected-request",
+                "request_state": request_state,
+                "status": if request_state == "published" { "completed" } else { "running" },
+                "operation": "refresh",
+                "previous_generation": null,
+                "published_generation": if request_state == "published" { json!(generation) } else { Value::Null },
+                "refresh_scope": {"kind": "all"},
+            });
+            if request_state == "published" {
+                job["generation_changed"] = json!(true);
+                job["outcome"] = json!("completed");
+                let receipt = receipt.expect("valid metadata recorded its receipt");
+                job["certified_source_count"] = receipt["current"]["current_source_count"].clone();
+                job["certified_source_bytes"] =
+                    receipt["current"]["current_certified_source_bytes"].clone();
+                job["receipt"] = receipt;
+                if case == "generation" {
+                    job["published_generation"] = json!("other-generation");
+                }
+                if case == "receipt" {
+                    job["receipt"]["generation_changed"] = json!(false);
+                }
+            }
+            write_daemon_job_status(&daemon_source_backed_refresh_job_path(&data_root), &job)
+                .unwrap();
+
+            let error = test_refresh_engine()
+                .recover_interrupted_publication(&data_root)
+                .expect_err(&format!(
+                    "{request_state} recovery must reject {case} metadata"
+                ));
+            assert!(
+                format!("{error:#}").contains("metadata")
+                    || format!("{error:#}").contains("receipt"),
+                "{request_state} / {case}: {error:#}"
+            );
+        }
+    }
+}
+
+#[test]
 fn exact_no_op_restart_migrates_pre_fix_source_count_and_reuses_durable_receipt() {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("data");
