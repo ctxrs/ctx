@@ -3,10 +3,12 @@ set -euo pipefail
 
 usage() {
   cat >&2 <<'USAGE'
-Usage: scripts/qualify-macos-release-pair.sh PLATFORM CLI RUNTIME_ARCHIVE
+Usage: scripts/qualify-macos-release-pair.sh PLATFORM CLI RUNTIME_ARCHIVE [RECEIPT_PATH]
 
 Verifies the complete staged macOS CLI verifier input set and the exact final
 runtime archive attestation before running the authoritative semantic smoke.
+When RECEIPT_PATH is supplied, writes the successful CLI/runtime digest receipt
+there atomically after the smoke completes.
 USAGE
 }
 
@@ -22,10 +24,11 @@ require_regular_nonempty() {
     die "${label} must be a non-empty regular non-symlink file: ${path}"
 }
 
-[[ $# -eq 3 ]] || { usage; exit 2; }
+[[ $# -eq 3 || $# -eq 4 ]] || { usage; exit 2; }
 platform="$1"
 cli="$2"
 runtime_archive="$3"
+receipt_path="${4:-}"
 case "${platform}" in
   macos-arm64|macos-x64) ;;
   *) usage; exit 2 ;;
@@ -42,6 +45,10 @@ runtime_dir="$(cd "$(dirname "${runtime_archive}")" && pwd)"
 cli="${cli_dir}/$(basename "${cli}")"
 runtime_archive="${runtime_dir}/$(basename "${runtime_archive}")"
 runtime_prefix="${runtime_archive%.tar.gz}"
+if [[ -n "${receipt_path}" ]]; then
+  [[ ! -e "${receipt_path}" && ! -L "${receipt_path}" ]] || \
+    die "release-pair receipt already exists: ${receipt_path}"
+fi
 
 for input in \
   "${cli}" \
@@ -98,3 +105,30 @@ scripts/smoke-daemon-semantic-release.sh \
   --runtime-archive "${runtime_archive}" \
   --runtime-platform "${platform}" \
   --require-authoritative
+
+if [[ -n "${receipt_path}" ]]; then
+  receipt_dir="$(dirname "${receipt_path}")"
+  receipt_name="$(basename "${receipt_path}")"
+  mkdir -p "${receipt_dir}"
+  [[ -d "${receipt_dir}" && ! -L "${receipt_dir}" ]] || \
+    die "release-pair receipt directory must be a non-symlink directory: ${receipt_dir}"
+  receipt_tmp="$(mktemp "${receipt_dir}/.${receipt_name}.tmp.XXXXXX")"
+  if ! cli_digest="$(shasum -a 256 "${cli}")"; then
+    rm -f "${receipt_tmp}"
+    die "could not hash macOS CLI for release-pair receipt"
+  fi
+  if ! runtime_digest="$(shasum -a 256 "${runtime_archive}")"; then
+    rm -f "${receipt_tmp}"
+    die "could not hash macOS runtime archive for release-pair receipt"
+  fi
+  if ! printf '%s  %s\n%s  %s\n' \
+    "${cli_digest%% *}" "$(basename "${cli}")" \
+    "${runtime_digest%% *}" "$(basename "${runtime_archive}")" >"${receipt_tmp}"; then
+    rm -f "${receipt_tmp}"
+    die "could not write release-pair receipt"
+  fi
+  if ! mv -f "${receipt_tmp}" "${receipt_path}"; then
+    rm -f "${receipt_tmp}"
+    die "could not publish release-pair receipt"
+  fi
+fi

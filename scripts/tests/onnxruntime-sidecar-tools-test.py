@@ -5,6 +5,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 import shutil
 import struct
 import subprocess
@@ -20,7 +21,9 @@ from unittest import mock
 
 sys.dont_write_bytecode = True
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+# Do not resolve this path: under Bazel it must remain rooted in the runfiles
+# tree so a missing pipeline data dependency fails the test.
+REPO_ROOT = Path(__file__).absolute().parents[2]
 TOOLS = REPO_ROOT / "scripts" / "onnxruntime-sidecar"
 VERSION = "1.27.0"
 COMMIT = "8f0278c77bf44b0cc83c098c6c722b92a36ac4b5"
@@ -53,6 +56,15 @@ def load_module(name: str, path: Path):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def pipeline_text() -> str:
+    pipeline = REPO_ROOT / ".buildkite" / "pipeline.yml"
+    if not pipeline.is_file():
+        raise AssertionError(
+            f".buildkite/pipeline.yml is unavailable from the repository/runfiles root: {pipeline}"
+        )
+    return pipeline.read_text()
 
 
 archive_tool = load_module("archive_tool", TOOLS / "archive_tool.py")
@@ -167,6 +179,10 @@ def validate_release_pair_wrapper_contract(text: str) -> None:
         "--require-authoritative",
         "notary-submit.json",
         "libonnxruntime.dylib",
+        "[RECEIPT_PATH]",
+        "shasum -a 256",
+        "mktemp",
+        "mv -f",
     )
     for marker in required:
         if marker not in text:
@@ -174,6 +190,16 @@ def validate_release_pair_wrapper_contract(text: str) -> None:
     for marker in ("|| true", "set +e", "soft_fail", "allow_dependency_failure"):
         if marker in text:
             raise AssertionError(f"release-pair wrapper masks failure with {marker}")
+    ordered = (
+        'scripts/check-macos-release-signing.sh "${platform}" cli "${cli}"',
+        'scripts/check-macos-release-signing.sh "${platform}" runtime "${runtime_archive}"',
+        "scripts/verify-macos-release-attestation.sh --runtime-archive",
+        "scripts/smoke-daemon-semantic-release.sh",
+        'receipt_dir="$(dirname "${receipt_path}")"',
+    )
+    positions = [text.index(marker) for marker in ordered]
+    if positions != sorted(positions):
+        raise AssertionError("release-pair wrapper delegates are out of order")
 
 
 def validate_macos_cli_export_contract(text: str) -> None:
@@ -358,8 +384,11 @@ class ManifestTests(unittest.TestCase):
             self.assertNotIn("macos-release-signing-evidence.py", text, path.name)
             self.assertNotIn("temporary_output", text, path.name)
 
+    def test_pipeline_is_read_from_the_repository_runfiles_root(self) -> None:
+        self.assertIn("steps:", pipeline_text())
+
     def test_macos_x64_runtime_is_semantic_only(self) -> None:
-        pipeline = (REPO_ROOT / ".buildkite" / "pipeline.yml").read_text()
+        pipeline = pipeline_text()
         producer = pipeline.index('key: "public-cli-macos-x64-runtime-producer"')
         validator = pipeline.index('key: "public-cli-macos-x64-native-smoke"')
         handoff = pipeline.index('key: "semantic-release-handoff"')
@@ -396,7 +425,7 @@ class ManifestTests(unittest.TestCase):
         self.assertNotIn('"${artifact_dir%/}/ctx-${platform}"', transcode)
 
     def test_macos_release_pair_qualification_joins_exact_assembly_inputs(self) -> None:
-        pipeline = (REPO_ROOT / ".buildkite" / "pipeline.yml").read_text()
+        pipeline = pipeline_text()
         assembly = pipeline.index('key: "github-release-assets"')
         assembly_end = pipeline.index("\n  - label:", assembly)
         assembly_block = pipeline[assembly:assembly_end]
@@ -455,6 +484,19 @@ class ManifestTests(unittest.TestCase):
                     validate_release_pair_wrapper_contract(mutated)
         with self.assertRaises(AssertionError):
             validate_release_pair_wrapper_contract(wrapper + "\nfalse || true\n")
+        signing_cli = (
+            'scripts/check-macos-release-signing.sh "${platform}" cli "${cli}"'
+        )
+        signing_runtime = (
+            'scripts/check-macos-release-signing.sh "${platform}" runtime "${runtime_archive}"'
+        )
+        reordered = wrapper.replace(
+            f"{signing_cli}\n{signing_runtime}",
+            f"{signing_runtime}\n{signing_cli}",
+            1,
+        )
+        with self.assertRaises(AssertionError):
+            validate_release_pair_wrapper_contract(reordered)
 
     def test_core_staging_exports_complete_macos_cli_verifier_inputs(self) -> None:
         staging = (REPO_ROOT / "scripts" / "stage-github-release-assets.sh").read_text()
@@ -468,6 +510,170 @@ class ManifestTests(unittest.TestCase):
     def test_archive_tool_defers_annotations_for_macos_python(self) -> None:
         source = (TOOLS / "archive_tool.py").read_text().splitlines()
         self.assertIn("from __future__ import annotations", source[:6])
+
+
+class MacOSReleasePairWrapperExecutionTests(unittest.TestCase):
+    def prepare_fixture(self, root: Path) -> tuple[Path, Path, Path, Path]:
+        scripts = root / "scripts"
+        scripts.mkdir()
+        wrapper = scripts / "qualify-macos-release-pair.sh"
+        shutil.copy2(REPO_ROOT / "scripts" / wrapper.name, wrapper)
+
+        log = root / "delegates.log"
+        signing = scripts / "check-macos-release-signing.sh"
+        signing.write_text(
+            """#!/usr/bin/env bash
+set -euo pipefail
+kind="${2:?}"
+printf 'signing-%s|%s\\n' "${kind}" "$*" >> "${DELEGATE_LOG:?}"
+if [[ "${FAIL_DELEGATE:-}" == "signing-${kind}" ]]; then
+  exit 17
+fi
+"""
+        )
+        attestation = scripts / "verify-macos-release-attestation.sh"
+        attestation.write_text(
+            """#!/usr/bin/env bash
+set -euo pipefail
+printf 'attestation|%s\\n' "$*" >> "${DELEGATE_LOG:?}"
+if [[ "${FAIL_DELEGATE:-}" == "attestation" ]]; then
+  exit 23
+fi
+"""
+        )
+        smoke = scripts / "smoke-daemon-semantic-release.sh"
+        smoke.write_text(
+            """#!/usr/bin/env bash
+set -euo pipefail
+printf 'semantic-smoke|%s\\n' "$*" >> "${DELEGATE_LOG:?}"
+if [[ -n "${RECEIPT_PATH_EXPECTED:-}" && -e "${RECEIPT_PATH_EXPECTED}" ]]; then
+  exit 97
+fi
+if [[ "${FAIL_DELEGATE:-}" == "semantic-smoke" ]]; then
+  exit 29
+fi
+"""
+        )
+        for delegate in (signing, attestation, smoke):
+            delegate.chmod(0o755)
+
+        artifacts = root / "artifacts"
+        artifacts.mkdir()
+        cli = artifacts / "ctx-macos-arm64"
+        cli.write_bytes(b"fixture macOS CLI\n")
+        for suffix in (
+            ".sha256",
+            ".build-info.json",
+            ".signing.json",
+            ".attestation.json",
+            ".attestation.cms",
+            ".notary-submit.json",
+        ):
+            Path(f"{cli}{suffix}").write_text("fixture\n")
+
+        runtime = artifacts / "ctx-onnxruntime-macos-arm64.tar.gz"
+        runtime_library = b"fixture macOS runtime\n"
+        with tarfile.open(runtime, "w:gz") as bundle:
+            member = tarfile.TarInfo("lib/libonnxruntime.dylib")
+            member.size = len(runtime_library)
+            bundle.addfile(member, io.BytesIO(runtime_library))
+        runtime_prefix = Path(str(runtime)[: -len(".tar.gz")])
+        Path(f"{runtime}.sha256").write_text("fixture\n")
+        for suffix in (
+            ".signing.json",
+            ".attestation.json",
+            ".attestation.cms",
+            ".release-attestation.json",
+            ".release-attestation.cms",
+            ".notary-submit.json",
+        ):
+            Path(f"{runtime_prefix}{suffix}").write_text("fixture\n")
+
+        receipt = (
+            root
+            / "target"
+            / "macos-release-pair-qualification"
+            / "ctx-macos-arm64.release-pair.sha256"
+        )
+        return wrapper, cli, runtime, receipt
+
+    def run_wrapper(
+        self,
+        wrapper: Path,
+        cli: Path,
+        runtime: Path,
+        receipt: Path,
+        failure: str | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        environment = os.environ.copy()
+        environment["DELEGATE_LOG"] = str(wrapper.parent.parent / "delegates.log")
+        environment["RECEIPT_PATH_EXPECTED"] = str(receipt)
+        if failure is not None:
+            environment["FAIL_DELEGATE"] = failure
+        return subprocess.run(
+            ["bash", str(wrapper), "macos-arm64", str(cli), str(runtime), str(receipt)],
+            capture_output=True,
+            text=True,
+            env=environment,
+        )
+
+    def test_fake_delegates_run_in_order_then_write_the_two_line_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            wrapper, cli, runtime, receipt = self.prepare_fixture(root)
+            result = self.run_wrapper(wrapper, cli, runtime, receipt)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            invocations = (root / "delegates.log").read_text().splitlines()
+            self.assertEqual(
+                [line.partition("|")[0] for line in invocations],
+                ["signing-cli", "signing-runtime", "attestation", "semantic-smoke"],
+            )
+            self.assertEqual(
+                invocations[0], f"signing-cli|macos-arm64 cli {cli}"
+            )
+            self.assertEqual(
+                invocations[1], f"signing-runtime|macos-arm64 runtime {runtime}"
+            )
+            self.assertRegex(
+                invocations[2],
+                rf"^attestation\|--runtime-archive macos-arm64 {runtime} .*/libonnxruntime\.dylib "
+                rf"{runtime.with_suffix('').with_suffix('')}.release-attestation\.json "
+                rf"{runtime.with_suffix('').with_suffix('')}.release-attestation\.cms$",
+            )
+            self.assertEqual(
+                invocations[3],
+                f"semantic-smoke|--ctx {cli} --runtime-archive {runtime} "
+                "--runtime-platform macos-arm64 --require-authoritative",
+            )
+            expected_receipt = (
+                f"{hashlib.sha256(cli.read_bytes()).hexdigest()}  {cli.name}\n"
+                f"{hashlib.sha256(runtime.read_bytes()).hexdigest()}  {runtime.name}\n"
+            )
+            self.assertEqual(receipt.read_text(), expected_receipt)
+            self.assertEqual(list(receipt.parent.glob(f".{receipt.name}.tmp.*")), [])
+
+    def test_delegate_failures_propagate_and_leave_no_receipt(self) -> None:
+        cases = (
+            ("signing-cli", 17, 1),
+            ("signing-runtime", 17, 2),
+            ("attestation", 23, 3),
+            ("semantic-smoke", 29, 4),
+        )
+        expected_order = ["signing-cli", "signing-runtime", "attestation", "semantic-smoke"]
+        for failure, exit_code, delegate_count in cases:
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                wrapper, cli, runtime, receipt = self.prepare_fixture(root)
+                result = self.run_wrapper(wrapper, cli, runtime, receipt, failure)
+
+                self.assertEqual(result.returncode, exit_code, result.stderr)
+                invocations = (root / "delegates.log").read_text().splitlines()
+                self.assertEqual(
+                    [line.partition("|")[0] for line in invocations],
+                    expected_order[:delegate_count],
+                )
+                self.assertFalse(receipt.exists())
 
 
 class ArchiveTests(unittest.TestCase):
