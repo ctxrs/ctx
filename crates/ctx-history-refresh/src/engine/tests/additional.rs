@@ -475,6 +475,13 @@ fn failing_executor(calls: Arc<AtomicUsize>) -> Arc<dyn SourceBackedRefreshExecu
     })
 }
 
+fn coverage_failure_executor(calls: Arc<AtomicUsize>) -> Arc<dyn SourceBackedRefreshExecutor> {
+    Arc::new(move |_: SourceBackedRefreshExecution<'_>| {
+        calls.fetch_add(1, Ordering::SeqCst);
+        Err(ZeroSourcePublicationBlocked::new("stable terminal coverage failure").into())
+    })
+}
+
 #[test]
 fn mixed_automatic_retry_serialization_round_trips_through_recovery() {
     let paused_route = route_identity(0x72);
@@ -835,6 +842,34 @@ fn automatic_internal_retry_confirms_once_then_pauses_without_losing_last_good()
             .generation_id(),
         retained_generation
     );
+}
+
+#[test]
+fn automatic_terminal_coverage_retry_confirms_once_then_pauses() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (_temp, data_root, _source_path, coordinator, _catalog, route, _generation) =
+        automatic_retry_fixture(coverage_failure_executor(Arc::clone(&calls)));
+
+    let first = run_due_failure(&coordinator, &data_root, &route);
+    assert_eq!(
+        first.job["structured_outcome"]["code"],
+        "all_provider_terminal_coverage_unavailable"
+    );
+    assert_eq!(first.job["automatic_retry"]["state"], "confirming");
+    assert_eq!(
+        first.job["automatic_retry"]["reason"],
+        "internal_failure_confirmation"
+    );
+
+    let second = run_due_failure(&coordinator, &data_root, &route);
+    assert_eq!(second.job["automatic_retry"]["state"], "paused");
+    assert_eq!(
+        second.job["automatic_retry"]["reason"],
+        "repeated_internal_failure"
+    );
+    assert_eq!(second.job["structured_outcome"]["retryable"], false);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert!(!coordinator.has_scheduled_route_work());
 }
 
 #[test]
