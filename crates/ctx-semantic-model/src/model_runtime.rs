@@ -53,38 +53,6 @@ pub struct SemanticRuntimeBusyGuard<'a> {
 pub fn semantic_query_service_supported() -> bool {
     cfg!(ctx_semantic_fastembed)
 }
-
-/// A selected built-in executor could not be made ready without provisioning
-/// or changing durable state. Callers use this typed condition to keep a
-/// daemon-free query passive and select lexical fallback when appropriate.
-#[derive(Debug)]
-pub struct SemanticPassiveLoadUnavailable {
-    backend: &'static str,
-    detail: String,
-}
-
-impl SemanticPassiveLoadUnavailable {
-    fn new(backend: &'static str, detail: impl Into<String>) -> Self {
-        Self {
-            backend,
-            detail: detail.into(),
-        }
-    }
-}
-
-impl fmt::Display for SemanticPassiveLoadUnavailable {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "semantic {backend} executor is unavailable for a passive query: {detail}",
-            backend = self.backend,
-            detail = self.detail,
-        )
-    }
-}
-
-impl std::error::Error for SemanticPassiveLoadUnavailable {}
-
 impl SharedSemanticRuntime {
     pub fn is_loaded(&self) -> bool {
         self.embedder
@@ -92,7 +60,6 @@ impl SharedSemanticRuntime {
             .map(|embedder| embedder.is_some())
             .unwrap_or(false)
     }
-
     pub fn release_if_idle(&self) -> Result<bool> {
         match self.embedder.try_lock() {
             Ok(mut embedder) => Ok(embedder.take().is_some()),
@@ -102,13 +69,11 @@ impl SharedSemanticRuntime {
             }
         }
     }
-
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, Option<SemanticEmbedder>>> {
         self.embedder
             .lock()
             .map_err(|_| anyhow!("semantic embedder lock is poisoned"))
     }
-
     #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn lock_for_test(&self) -> Result<SemanticRuntimeBusyGuard<'_>> {
@@ -121,16 +86,13 @@ impl SharedSemanticRuntime {
         self.ensure_loaded(config, None)
     }
 
-    /// Loads only already-present, validated local assets. Unlike
-    /// `ensure_loaded_with_acquisition`, this path never downloads, repairs,
-    /// compiles, stages, invalidates, or prepares a platform provider.
     pub fn ensure_loaded_passively(&self, config: &SemanticModelConfig) -> Result<Option<u64>> {
         let mut embedder = self.lock()?;
         if embedder.is_some() {
             return Ok(None);
         }
         let started = Instant::now();
-        let acquired = acquire_semantic_embedder_passively(config)?;
+        let acquired = passive::acquire_semantic_embedder_passively(config)?;
         *embedder = Some(acquired);
         Ok(Some(started.elapsed().as_millis() as u64))
     }
@@ -786,86 +748,6 @@ fn acquire_semantic_embedder_from_cache(config: &SemanticModelConfig) -> Result<
 }
 
 #[cfg(ctx_semantic_fastembed)]
-fn acquire_semantic_embedder_passively(config: &SemanticModelConfig) -> Result<SemanticEmbedder> {
-    let preference = config.backend_preference()?;
-    let acquired = match preference {
-        SemanticBackendPreference::Cpu => acquire_cpu_backend(
-            config,
-            semantic_embed_policy_for(SemanticComputeClass::Cpu, config),
-            preference,
-        ),
-        SemanticBackendPreference::CoreMl => acquire_coreml_backend_passively(config, preference),
-        SemanticBackendPreference::Cuda => {
-            acquire_accelerator_backend_passively(config, preference, SemanticBackendKind::OrtCuda)
-        }
-        SemanticBackendPreference::WindowsMl => acquire_accelerator_backend_passively(
-            config,
-            preference,
-            SemanticBackendKind::WindowsMl,
-        ),
-        SemanticBackendPreference::Auto => {
-            #[cfg(target_os = "macos")]
-            {
-                acquire_coreml_backend_passively(config, preference).or_else(|_| {
-                    acquire_cpu_backend(
-                        config,
-                        semantic_embed_policy_for(SemanticComputeClass::Cpu, config),
-                        preference,
-                    )
-                })
-            }
-            #[cfg(not(target_os = "macos"))]
-            {
-                match automatic_ort_accelerator_backend() {
-                    Some(kind) => acquire_accelerator_backend_passively(config, preference, kind)
-                        .or_else(|_| {
-                            acquire_cpu_backend(
-                                config,
-                                semantic_embed_policy_for(SemanticComputeClass::Cpu, config),
-                                preference,
-                            )
-                        }),
-                    None => acquire_cpu_backend(
-                        config,
-                        semantic_embed_policy_for(SemanticComputeClass::Cpu, config),
-                        preference,
-                    ),
-                }
-            }
-        }
-    }
-    .map_err(|error| {
-        SemanticPassiveLoadUnavailable::new(preference.as_str(), format!("{error:#}"))
-    })?;
-    authorize_loaded_backend(acquired)
-}
-
-#[cfg(ctx_semantic_fastembed)]
-fn acquire_accelerator_backend_passively(
-    config: &SemanticModelConfig,
-    preference: SemanticBackendPreference,
-    kind: SemanticBackendKind,
-) -> Result<SemanticEmbedder> {
-    let acquired = acquire_ort_backend_passively(
-        config,
-        semantic_embed_policy_for(SemanticComputeClass::Accelerator, config),
-        preference,
-        kind,
-        kind,
-    )?;
-    authorize_loaded_backend(acquired)
-}
-
-#[cfg(not(ctx_semantic_fastembed))]
-fn acquire_semantic_embedder_passively(_config: &SemanticModelConfig) -> Result<SemanticEmbedder> {
-    Err(SemanticPassiveLoadUnavailable::new(
-        "builtin",
-        format!("semantic embedding model {SEMANTIC_MODEL_ID} is not supported on this platform"),
-    )
-    .into())
-}
-
-#[cfg(ctx_semantic_fastembed)]
 fn acquire_semantic_embedder_after_daemon_acquisition(
     config: &SemanticModelConfig,
     acquisition: SemanticDaemonModelAcquisition,
@@ -1043,8 +925,6 @@ mod cpu;
 mod document_batches;
 #[cfg(all(test, ctx_semantic_fastembed))]
 pub(super) use cpu::acquire_cpu_backend;
-#[cfg(ctx_semantic_fastembed)]
-use cpu::acquire_ort_backend_passively;
 #[cfg(all(ctx_semantic_fastembed, not(target_os = "macos")))]
 use cpu::automatic_ort_accelerator_backend;
 pub use cpu::prepare_platform_semantic_acceleration;
@@ -1074,13 +954,13 @@ use coreml::*;
 use coreml::{acquire_auto_coreml_backend_with, CoreMlE5Embedder};
 #[cfg(ctx_semantic_fastembed)]
 use coreml::{
-    acquire_coreml_backend, acquire_coreml_backend_passively, acquire_coreml_model_for_daemon,
-    recover_coreml_after_inference_with,
+    acquire_coreml_backend, acquire_coreml_model_for_daemon, recover_coreml_after_inference_with,
 };
 #[cfg(all(test, ctx_semantic_fastembed))]
 pub(super) use coreml::{pad_texts_to_exact_batch, semantic_fixed_shape_from_values};
 mod cache;
 mod onnx;
+mod passive;
 mod windows_ml;
 #[cfg(ctx_semantic_fastembed)]
 pub(super) use cache::{
@@ -1091,6 +971,7 @@ pub(super) use cache::{
 #[allow(unused_imports)]
 #[cfg(all(any(test, feature = "test-support"), ctx_semantic_fastembed))]
 pub(crate) use onnx::load_missing_semantic_onnxruntime_for_test;
+pub use passive::SemanticPassiveLoadUnavailable;
 
 #[cfg(not(ctx_semantic_fastembed))]
 pub(super) struct SemanticEmbedder;
