@@ -194,6 +194,91 @@ fn finite_core_worker_launch_is_forced_internal_and_has_no_persistent_timer() {
     }));
 }
 
+#[cfg(unix)]
+#[test]
+fn finite_worker_keeps_the_invoking_terminal_session() -> Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let temp = tempfile::tempdir()?;
+    let executable = temp.path().join("record-session.sh");
+    let receipt = temp.path().join("session.txt");
+    fs::write(
+        &executable,
+        "#!/bin/sh\nprintf '%s ' \"$$\" >\"$CTX_DAEMON_TEST_RECEIPT\"\nps -o sid= -p \"$$\" >>\"$CTX_DAEMON_TEST_RECEIPT\"\n",
+    )?;
+    let mut permissions = fs::metadata(&executable)?.permissions();
+    permissions.set_mode(0o700);
+    fs::set_permissions(&executable, permissions)?;
+    let launch = normalized_daemon_launch_for_test(
+        executable,
+        Vec::new(),
+        BTreeMap::from([(
+            OsString::from("CTX_DAEMON_TEST_RECEIPT"),
+            receipt.as_os_str().to_os_string(),
+        )]),
+    )?;
+    let mut child = ctx_daemon_runtime::spawn_attached(launch)?;
+    assert!(child.wait()?.success());
+    let recorded = fs::read_to_string(receipt)?;
+    let values = recorded
+        .split_whitespace()
+        .map(str::parse::<i32>)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+
+    assert_eq!(values.len(), 2);
+    assert_eq!(values[0], i32::try_from(child.id())?);
+    let parent_session = std::process::Command::new("ps")
+        .args(["-o", "sid=", "-p", &std::process::id().to_string()])
+        .output()?;
+    assert!(parent_session.status.success());
+    let parent_session = String::from_utf8(parent_session.stdout)?
+        .trim()
+        .parse::<i32>()?;
+    assert_eq!(values[1], parent_session);
+    Ok(())
+}
+
+#[test]
+fn finite_lease_has_control_only_for_authenticated_direct_child_and_reaps_it() -> Result<()> {
+    let child = std::process::Command::new("sh")
+        .arg("-c")
+        .arg("exit 0")
+        .spawn()?;
+    let pid = child.id();
+    let mut lease = FiniteCoreWorkerLease::authenticated(
+        DaemonHandoff {
+            pid,
+            heartbeat_at_ms: 1,
+        },
+        Some(child),
+    );
+
+    assert!(lease.controls_authenticated_child());
+    lease.reap_after_completion(Duration::from_secs(1))?;
+    assert!(
+        !lease.controls_authenticated_child()
+            || lease.child_for_test().unwrap().try_wait()?.is_some()
+    );
+
+    let losing_child = std::process::Command::new("sh")
+        .arg("-c")
+        .arg("exit 0")
+        .spawn()?;
+    let losing_pid = losing_child.id();
+    let started = StartedDaemonProfile {
+        handoff: DaemonHandoff {
+            pid: losing_pid.saturating_add(1),
+            heartbeat_at_ms: 1,
+        },
+        child: Some(losing_child),
+    };
+    let mut losing = started.child;
+    reap_owned_candidate(&mut losing);
+    let losing_lease = FiniteCoreWorkerLease::authenticated(started.handoff, losing);
+    assert!(!losing_lease.controls_authenticated_child());
+    Ok(())
+}
+
 fn test_daemon_owner(owner_id: &str, pid: u32) -> DaemonOwnerIdentity {
     DaemonOwnerIdentity {
         owner_id: owner_id.to_owned(),

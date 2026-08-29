@@ -33,7 +33,7 @@ pub use host::{
 pub use lifecycle::{
     configured_daemon_autostart_command, daemon_autostart_allowed, daemon_autostart_command,
     daemon_autostart_suppression_reason, daemon_restart_trigger, parse_persisted_trigger,
-    spawn_detached_daemon_child, DaemonHandoff, DaemonStartError,
+    spawn_detached_daemon_child, DaemonHandoff, DaemonStartError, FiniteCoreWorkerLease,
 };
 pub use status::{
     DaemonConfigReloadContext, DaemonSemanticStatusContext, DaemonStatusPreparation,
@@ -238,7 +238,7 @@ impl<'a> DaemonApplication<'a> {
         data_root: &Path,
         config: &DaemonConfigSnapshot,
         trigger: DaemonTrigger,
-    ) -> std::result::Result<DaemonHandoff, DaemonStartError> {
+    ) -> std::result::Result<FiniteCoreWorkerLease, DaemonStartError> {
         lifecycle::start_finite_core_worker_and_wait(self.host, data_root, config, trigger)
     }
 

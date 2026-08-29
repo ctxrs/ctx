@@ -11,6 +11,7 @@ publish = false
 
 [dependencies]
 anyhow.workspace = true
+ctrlc.workspace = true
 fs2 = "0.4.3"
 serde_json.workspace = true
 thiserror.workspace = true

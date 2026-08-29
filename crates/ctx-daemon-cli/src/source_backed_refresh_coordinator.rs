@@ -53,14 +53,16 @@ pub fn coordinate_import_source_backed_refresh_with_progress(
     allow_daemon_autostart: bool,
     report_progress: &mut dyn FnMut(&RefreshStatus) -> Result<()>,
 ) -> Result<SourceBackedRefreshObservation> {
-    ctx_daemon_service::coordinate_import_source_backed_refresh_with_progress(
-        &AVAILABILITY,
-        data_root,
-        mode,
-        selection,
-        allow_daemon_autostart,
-        report_progress,
-    )
+    super::finite_worker_owner::with_foreground_guard(|| {
+        ctx_daemon_service::coordinate_import_source_backed_refresh_with_progress(
+            &AVAILABILITY,
+            data_root,
+            mode,
+            selection,
+            allow_daemon_autostart,
+            report_progress,
+        )
+    })
 }
 
 #[cfg(test)]

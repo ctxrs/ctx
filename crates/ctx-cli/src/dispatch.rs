@@ -81,6 +81,7 @@ pub(crate) fn run() -> ExitCode {
         Err(error) if error.is::<RenderedJsonError>() || error.is::<RenderedCliError>() => {
             ExitCode::FAILURE
         }
+        Err(error) if ctx_daemon_cli::finite_worker_interrupted(&error) => ExitCode::from(130),
         Err(error) => {
             if render_unhandled_command_error(&error).is_err() {
                 eprintln!("Error: {error:?}");

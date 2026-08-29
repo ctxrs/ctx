@@ -184,6 +184,16 @@ pub fn spawn_daemon_child(
     spawn_detached_daemon_child(launch)
 }
 
+pub fn spawn_attached_finite_core_worker(
+    host: &dyn DaemonApplicationHost,
+    launch: NormalizedLaunch,
+) -> io::Result<Child> {
+    if hosted_uninstall_fences_daemon_autostart(host) {
+        return Err(hosted_uninstall_daemon_fence_error());
+    }
+    ctx_daemon_runtime::spawn_attached(launch)
+}
+
 pub fn spawn_daemon_child_for_upgrade_handoff(
     host: &dyn DaemonApplicationHost,
     launch: NormalizedLaunch,
