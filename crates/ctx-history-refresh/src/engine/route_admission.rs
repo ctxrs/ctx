@@ -271,8 +271,7 @@ impl CoreRefreshEngine {
         let mut certified_routes = BTreeMap::new();
         let mut stale_automatic_pauses = BTreeSet::new();
         for admission in admissions {
-            let terminal_failed = state.watch_uncertain_through.is_some()
-                || !publication_ready
+            let terminal_failed = !publication_ready
                 || attempt
                     .as_ref()
                     .is_none_or(|attempt| attempt.state != SourceBackedRefreshState::Published);
@@ -368,17 +367,6 @@ impl CoreRefreshEngine {
                 };
                 if acknowledged {
                     state.route_retry_intents.remove(admission.route());
-                    if attempt.as_ref().is_some_and(|attempt| {
-                        attempt.reconciliation_demand
-                            == SourceBackedReconciliationDemand::Exhaustive
-                    }) {
-                        state
-                            .hermes_routes_requiring_exhaustive_recovery
-                            .remove(admission.route());
-                        state
-                            .routes_requiring_exhaustive_reconciliation
-                            .remove(admission.route());
-                    }
                     if let Some((boundary, observation)) = verified_boundary {
                         certified_routes.insert(
                             admission.route().clone(),

@@ -136,10 +136,16 @@ impl CoreRefreshEngine {
         let interrupted_running = request_state == "running";
         // A terminal job must always recover or reject its exact publication,
         // even when its persisted previous-generation pointer already equals
-        // the active generation. A Running job is never terminal authority:
-        // callback uncertainty may have been fenced only in memory before a
-        // crash, so pointer advancement cannot safely complete its waiter.
-        if (pointer_advanced && !interrupted_running) || request_state == "published" {
+        // the active generation. A running job becomes terminal only when
+        // the active generation carries exact publication metadata for that
+        // request; metadata-free running snapshots remain replayable.
+        let running_has_publication_metadata = interrupted_running
+            && verified
+                .as_ref()
+                .is_some_and(|index| index.publication_metadata().is_some());
+        if (pointer_advanced && (!interrupted_running || running_has_publication_metadata))
+            || request_state == "published"
+        {
             let active_generation = active_generation.ok_or_else(|| {
                 anyhow!("interrupted source refresh advanced Core without an active generation")
             })?;

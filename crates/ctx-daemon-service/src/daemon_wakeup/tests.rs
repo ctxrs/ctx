@@ -652,7 +652,7 @@ fn partial_incremental_and_replacement_registration_failures_poll_until_restored
 
 #[cfg(target_os = "linux")]
 #[test]
-fn callback_channel_overflow_holds_active_wait_until_rearmed_recovery() -> Result<()> {
+fn callback_channel_overflow_leaves_terminal_owner_and_queues_distinct_maintenance() -> Result<()> {
     use std::{
         collections::BTreeMap,
         sync::{atomic::AtomicUsize, Barrier},
@@ -788,12 +788,12 @@ fn callback_channel_overflow_holds_active_wait_until_rearmed_recovery() -> Resul
     let overflowed = watcher.runtime_snapshot().ingress_overflows > 0;
     let first_boundary = coordinator.watch_uncertainty_watermark();
     execution_release.wait();
-    let stale = run.join().expect("join active wait");
+    let terminal_owner = run.join().expect("join active wait");
     worker_release.wait();
     assert!(overflowed, "real callback channel did not overflow");
     let first_boundary = first_boundary.expect("overflow must synchronously fence Core");
-    assert_eq!(stale.job["request_state"], "running");
-    assert_eq!(stale.job["progress"]["phase"], "watch_recovery");
+    assert_eq!(terminal_owner.job["request_id"], request_id);
+    assert_eq!(terminal_owner.job["request_state"], "published");
 
     let newer_boundary = EventWatermark::new(
         first_boundary.watcher_epoch,
@@ -827,9 +827,9 @@ fn callback_channel_overflow_holds_active_wait_until_rearmed_recovery() -> Resul
     assert!(recovered_coverage, "callback pressure never quiesced");
     assert_eq!(
         coordinator.status(request_id).unwrap()["request_state"],
-        "admission_pending"
+        "published"
     );
-    let mut recovered = None;
+    let mut maintenance = None;
     for _ in 0..64 {
         if let Some(boundary) = coordinator.watch_uncertainty_watermark() {
             watcher.reconcile_roots(true).1?;
@@ -842,20 +842,22 @@ fn callback_channel_overflow_holds_active_wait_until_rearmed_recovery() -> Resul
             let _ = wakeup.wait(Duration::from_millis(50));
             continue;
         }
-        let Some(rerun) = coordinator.run_next(&data_root) else {
+        if !coordinator.enqueue_next_dirty_route(&data_root, u64::MAX)? {
             thread::yield_now();
+            continue;
+        }
+        let Some(rerun) = coordinator.run_next(&data_root) else {
             continue;
         };
         if rerun.job["request_state"] == "published" {
-            recovered = Some(rerun);
+            maintenance = Some(rerun);
             break;
         }
-        assert_eq!(rerun.job["request_state"], "running");
-        assert_eq!(rerun.job["progress"]["phase"], "watch_recovery");
     }
-    let recovered = recovered.expect("overflow recovery and successor publication");
-    assert!(!recovered.failed, "{:#}", recovered.job);
-    assert_eq!(recovered.job["request_state"], "published");
+    let maintenance = maintenance.expect("overflow recovery and maintenance publication");
+    assert_ne!(maintenance.job["request_id"], request_id);
+    assert!(!maintenance.failed, "{:#}", maintenance.job);
+    assert_eq!(maintenance.job["request_state"], "published");
     assert!(launches.load(Ordering::SeqCst) >= 2);
     Ok(())
 }

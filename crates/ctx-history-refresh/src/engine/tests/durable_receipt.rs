@@ -275,7 +275,7 @@ fn lone_failed_terminal_recovers_exact_status_without_reenqueue() {
 }
 
 #[test]
-fn pointer_crash_requeues_active_exhaustive_and_preserves_fresh_successor() {
+fn pointer_crash_recovers_matching_running_publication_terminal_and_preserves_successor() {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("data");
     ctx_history_platform::platform_security::establish_private_data_root(&data_root).unwrap();
@@ -296,6 +296,8 @@ fn pointer_crash_requeues_active_exhaustive_and_preserves_fresh_successor() {
         .unwrap()
         .expect("active wait admission");
     assert_eq!(active["request_state"], "admission_pending");
+    let active_scope = refresh_scope_from_json(active.get("refresh_scope")).unwrap();
+    let active_operation = SourceBackedRefreshOperation::from_request_json(&active).unwrap();
     assert!(first.prepare_next_pending_admission(&data_root).unwrap());
 
     let successor_request_id = Arc::new(Mutex::new(None::<String>));
@@ -306,6 +308,8 @@ fn pointer_crash_requeues_active_exhaustive_and_preserves_fresh_successor() {
     let recorded_successor = Arc::clone(&successor_request_id);
     let execution_committed = Arc::clone(&committed);
     let execution_release = Arc::clone(&release);
+    let metadata_scope = active_scope.clone();
+    let metadata_operation = active_operation;
     let crash = std::thread::spawn(move || {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _ = runner.run_next_with(
@@ -337,8 +341,8 @@ fn pointer_crash_requeues_active_exhaustive_and_preserves_fresh_successor() {
                             SourceBackedPublicationMetadata {
                                 version: SOURCE_REFRESH_PUBLICATION_METADATA_VERSION,
                                 request_id: metadata_request_id.clone(),
-                                operation: SourceBackedRefreshOperation::Refresh,
-                                refresh_scope: SourceBackedRefreshScope::All,
+                                operation: metadata_operation,
+                                refresh_scope: metadata_scope.clone(),
                                 receipt: receipt.to_json(),
                                 route_observations: BTreeMap::new(),
                                 route_controls: BTreeMap::new(),
@@ -395,8 +399,7 @@ fn pointer_crash_requeues_active_exhaustive_and_preserves_fresh_successor() {
         .unwrap());
     assert_eq!(executions.load(Ordering::SeqCst), 0);
     let recovered = restarted.status(&active_request_id).unwrap();
-    assert_eq!(recovered["request_state"], "admission_pending");
-    assert_eq!(recovered["reconciliation_demand"], "exhaustive");
+    assert_eq!(recovered["request_state"], "published");
     assert_eq!(
         restarted.status(&successor_request_id).unwrap()["request_state"],
         "admission_pending"
@@ -417,15 +420,13 @@ fn pointer_crash_requeues_active_exhaustive_and_preserves_fresh_successor() {
         .unwrap()
         .expect("reconnected active wait");
     assert_eq!(reconnect["request_id"], active_request_id);
-    assert_eq!(reconnect["request_state"], "admission_pending");
+    assert_eq!(reconnect["request_state"], "published");
 
     assert!(restarted
         .prepare_next_pending_admission(&data_root)
         .unwrap());
-    let successor = restarted
-        .run_next(&data_root)
-        .expect("exhaustive successor");
-    assert_eq!(successor.job["request_id"], active_request_id);
+    let successor = restarted.run_next(&data_root).expect("queued successor");
+    assert_eq!(successor.job["request_id"], successor_request_id);
     assert_eq!(successor.job["request_state"], "published");
     assert_eq!(executions.load(Ordering::SeqCst), 1);
 }
