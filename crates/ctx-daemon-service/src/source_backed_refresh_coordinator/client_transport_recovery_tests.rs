@@ -1,3 +1,4 @@
+use super::observation_recovery::SourceRefreshObservationRecoveryFailed;
 use super::*;
 
 use std::{
@@ -376,9 +377,9 @@ fn exhausted_post_submission_disconnects_return_typed_ambiguous_admission() -> R
 }
 
 #[test]
-fn typed_unknown_readmission_preserves_lost_ack_retention_uncertainty() -> Result<()> {
+fn acknowledged_typed_unknown_does_not_reenqueue_equivalent_work() -> Result<()> {
     let data_root = short_data_root()?;
-    let socket_path = data_root.path().join("typed-unknown-lost-acks.sock");
+    let socket_path = data_root.path().join("acknowledged-typed-unknown.sock");
     let listener = UnixListener::bind(&socket_path)?;
     write_daemon_service_endpoint(
         data_root.path(),
@@ -386,55 +387,41 @@ fn typed_unknown_readmission_preserves_lost_ack_retention_uncertainty() -> Resul
         &source_refresh_endpoint(&socket_path),
     )?;
     let request_id = "019fcaaa-0000-7000-8000-000000000307";
-    let server = std::thread::spawn(move || -> Result<Vec<Vec<u8>>> {
-        let mut requests = Vec::new();
-        for _ in 0..=AMBIGUOUS_ADMISSION_RECOVERY_ATTEMPT_LIMIT {
-            let (mut stream, _) = listener.accept()?;
-            let mut received = Vec::new();
-            stream.read_to_end(&mut received)?;
-            requests.push(received);
-        }
-        Ok(requests)
+    let server = std::thread::spawn(move || -> Result<Vec<u8>> {
+        let (mut stream, _) = listener.accept()?;
+        let mut request = Vec::new();
+        stream.read_to_end(&mut request)?;
+        stream.write_all(
+            format!(
+                "{{\"ok\":false,\"owner\":\"daemon\",\"request_id\":\"{request_id}\",\"request_state\":\"request_unknown\",\"error_code\":\"source_refresh_request_unknown\",\"retryable\":true,\"schema_version\":1}}\n"
+            )
+            .as_bytes(),
+        )?;
+        Ok(request)
     });
 
-    let mut recovery = TypedUnknownRequestRecovery::new(request_id);
-    let error = recover_typed_unknown_request_with(
-        &mut recovery,
-        request_id,
-        |_| {},
-        || {
-            enqueue_equivalent_wait_refresh_request(
-                data_root.path(),
-                request_id,
-                RefreshIntent::AutomaticMaintenance,
-                RefreshRequestTrigger::Search,
-            )
-        },
-    )
-    .unwrap_err();
-    let requests = server.join().expect("lost-ack test server panicked")?;
+    let error = match wait_for_published_generation(
+        data_root.path(),
+        request_id.to_owned(),
+        SourceBackedRefreshMode::Wait,
+        ctx_history_refresh::RefreshOperation::Refresh,
+        None,
+        false,
+    ) {
+        Ok(_) => panic!("typed unknown after acknowledgement must not publish or reenqueue"),
+        Err(error) => error,
+    };
+    let request = server.join().expect("typed-unknown test server panicked")?;
 
     let typed = error
-        .downcast_ref::<SourceRefreshRequestRecoveryFailed>()
-        .expect("typed unknown re-admission keeps its request-bound failure");
+        .downcast_ref::<SourceRefreshObservationRecoveryFailed>()
+        .expect("post-ack typed unknown must remain request-bound and unobservable");
     assert_eq!(typed.request_id, request_id);
-    assert_eq!(typed.recovery_attempts, 1);
-    assert_eq!(
-        typed.reason,
-        SourceRefreshRequestRecoveryFailureReason::ReenqueueFailed
-    );
-    assert_eq!(
-        typed.retention,
-        SourceRefreshRequestRetention::MayBeRetained
-    );
-    assert_eq!(typed.disconnect_policy, Some(DISCONNECT_POLICY));
-    assert!(error
-        .to_string()
-        .contains("disconnect_policy=retain_after_durable_admission"));
-    assert_eq!(
-        requests.len(),
-        1 + AMBIGUOUS_ADMISSION_RECOVERY_ATTEMPT_LIMIT
-    );
-    assert!(requests.windows(2).all(|pair| pair[0] == pair[1]));
+    assert_eq!(typed.recovery_attempts, 0);
+    assert_eq!(typed.disconnect_policy, DISCONNECT_POLICY);
+
+    let request: Value = serde_json::from_slice(&request)?;
+    assert_eq!(request["op"], SOURCE_REFRESH_STATUS_OP);
+    assert_eq!(request["request_id"], request_id);
     Ok(())
 }

@@ -501,7 +501,6 @@ fn wait_for_published_generation_inner(
         allow_daemon_autostart,
         mut report_progress,
     } = wait;
-    let mut unknown_request_recovery = TypedUnknownRequestRecovery::new(&request_id);
     let mut last_reported_status = None;
     let mut last_reported_at = None;
     loop {
@@ -567,36 +566,11 @@ fn wait_for_published_generation_inner(
             }
         };
         if source_refresh_request_is_unknown(&response, &request_id)? {
-            let lost_request_id = request_id.clone();
-            let reenqueue = || {
-                enqueue_equivalent_wait_refresh_request(
-                    data_root,
-                    &lost_request_id,
-                    intent.clone(),
-                    trigger,
-                )
-            };
-            request_id = if intent.is_selected_import() {
-                recover_typed_unknown_request_with(
-                    &mut unknown_request_recovery,
-                    &lost_request_id,
-                    std::thread::sleep,
-                    reenqueue,
-                )
-            } else {
-                recover_typed_unknown_coalesced_request_with(
-                    &mut unknown_request_recovery,
-                    &lost_request_id,
-                    std::thread::sleep,
-                    reenqueue,
-                )
-            }
-            .with_context(|| {
-                format!(
-                    "reattach unknown daemon source refresh request {lost_request_id} using caller authority"
-                )
-            })?;
-            continue;
+            // Reaching this wait loop means the client already received an
+            // admission acknowledgement. A subsequent typed unknown response
+            // cannot safely distinguish a lost retained request from daemon
+            // state loss, so never replay equivalent work under its UUID.
+            return Err(retained_request_unobservable(&request_id, 0));
         }
         validate_source_refresh_status_response_authority(&response, &request_id)?;
         validate_daemon_refresh_response(&response)?;
