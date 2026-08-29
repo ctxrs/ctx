@@ -30,7 +30,14 @@ enum SemanticQueryExecution {
     Daemon,
     Foreground {
         executor: Box<BuiltinSemanticEmbeddingExecutor>,
+        mode: ForegroundSemanticMode,
     },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ForegroundSemanticMode {
+    ReadOnly,
+    Reconcile,
 }
 
 impl<'data_root> SemanticQueryAdapter<'data_root> {
@@ -44,6 +51,16 @@ impl<'data_root> SemanticQueryAdapter<'data_root> {
     /// Uses one foreground built-in executor for semantic reconciliation and
     /// the query embedding. Intended for explicit manual `--refresh wait`.
     pub fn foreground(data_root: &'data_root Path) -> Self {
+        Self::foreground_with_mode(data_root, ForegroundSemanticMode::Reconcile)
+    }
+
+    /// Uses a foreground built-in executor only to query a ready semantic
+    /// projection. Intended for daemon-free `--refresh off`.
+    pub fn foreground_read_only(data_root: &'data_root Path) -> Self {
+        Self::foreground_with_mode(data_root, ForegroundSemanticMode::ReadOnly)
+    }
+
+    fn foreground_with_mode(data_root: &'data_root Path, mode: ForegroundSemanticMode) -> Self {
         let executor = BuiltinSemanticEmbeddingExecutor::new(
             SharedSemanticRuntime::default(),
             crate::model_config::semantic_model_config(data_root),
@@ -52,6 +69,7 @@ impl<'data_root> SemanticQueryAdapter<'data_root> {
             data_root,
             execution: SemanticQueryExecution::Foreground {
                 executor: Box::new(executor),
+                mode,
             },
         }
     }
@@ -69,13 +87,21 @@ impl HistorySemanticPort for SemanticQueryAdapter<'_> {
     ) -> std::result::Result<Self::Query<'a>, HistorySemanticError> {
         match &self.execution {
             SemanticQueryExecution::Daemon => SemanticQuerySession::begin(index, self.data_root),
-            SemanticQueryExecution::Foreground { executor } => {
-                match SemanticQuerySession::begin_foreground(index, self.data_root, executor) {
+            SemanticQueryExecution::Foreground { executor, mode } => {
+                match SemanticQuerySession::begin_foreground(index, self.data_root, executor, *mode)
+                {
                     Ok(session) => Ok(session),
-                    Err(SemanticQueryError::NotReady { .. }) => {
+                    Err(SemanticQueryError::NotReady { .. })
+                        if *mode == ForegroundSemanticMode::Reconcile =>
+                    {
                         reconcile_foreground_semantic(index, self.data_root, executor)
                             .map_err(SemanticQueryError::from)?;
-                        SemanticQuerySession::begin_foreground(index, self.data_root, executor)
+                        SemanticQuerySession::begin_foreground(
+                            index,
+                            self.data_root,
+                            executor,
+                            *mode,
+                        )
                     }
                     Err(error) => Err(error),
                 }
@@ -141,6 +167,7 @@ enum SemanticQueryEmbeddingSource<'a> {
     Daemon,
     Foreground {
         executor: &'a BuiltinSemanticEmbeddingExecutor,
+        mode: ForegroundSemanticMode,
     },
 }
 
@@ -166,6 +193,7 @@ impl SemanticQuerySession<'_> {
         index: &'a VerifiedIndex,
         data_root: &'a Path,
         executor: &'a BuiltinSemanticEmbeddingExecutor,
+        mode: ForegroundSemanticMode,
     ) -> std::result::Result<SemanticQuerySession<'a>, SemanticQueryError> {
         let contract = semantic_index_contract(executor).map_err(SemanticQueryError::from)?;
         let pin = SemanticQueryPin::preflight(index, data_root, &contract)
@@ -175,7 +203,7 @@ impl SemanticQuerySession<'_> {
             index,
             data_root,
             contract,
-            embedding_source: SemanticQueryEmbeddingSource::Foreground { executor },
+            embedding_source: SemanticQueryEmbeddingSource::Foreground { executor, mode },
             embeddings: Vec::new(),
         })
     }
@@ -188,9 +216,9 @@ impl SemanticQuerySession<'_> {
             SemanticQueryEmbeddingSource::Daemon => {
                 self.prepare_alternative_with(query, daemon_query_embedding)
             }
-            SemanticQueryEmbeddingSource::Foreground { executor } => self
+            SemanticQueryEmbeddingSource::Foreground { executor, mode } => self
                 .prepare_alternative_with(query, |_, _, query| {
-                    foreground_query_embedding(executor, query).map(Some)
+                    foreground_query_embedding(executor, query, mode).map(Some)
                 }),
         }
     }
@@ -272,8 +300,16 @@ fn semantic_index_contract(
 fn foreground_query_embedding(
     executor: &BuiltinSemanticEmbeddingExecutor,
     semantic_text: &str,
+    mode: ForegroundSemanticMode,
 ) -> Result<(Vec<f32>, u64)> {
-    ensure_foreground_executor(executor)?;
+    match mode {
+        ForegroundSemanticMode::ReadOnly => {
+            executor
+                .shared_runtime()
+                .ensure_loaded_from_cache(executor.config())?;
+        }
+        ForegroundSemanticMode::Reconcile => ensure_foreground_executor(executor)?,
+    }
     let started = Instant::now();
     let executor: &dyn SemanticEmbeddingExecutor = executor;
     let embedding =

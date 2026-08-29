@@ -309,7 +309,7 @@ fn foreground_adapter_is_lazy_and_borrows_the_exact_data_root() {
     let adapter = SemanticQueryAdapter::foreground(&data_root);
 
     assert!(std::ptr::eq(adapter.data_root, data_root.as_path()));
-    let SemanticQueryExecution::Foreground { executor } = &adapter.execution else {
+    let SemanticQueryExecution::Foreground { executor, .. } = &adapter.execution else {
         panic!("manual wait must select foreground semantic execution");
     };
     assert!(
@@ -331,7 +331,7 @@ fn foreground_empty_generation_converges_without_loading_a_model() -> Result<()>
         session.prepare_alternative("empty generation")?,
         compact_json(json!({"query_embed_ms": null}))
     );
-    let SemanticQueryExecution::Foreground { executor } = &adapter.execution else {
+    let SemanticQueryExecution::Foreground { executor, .. } = &adapter.execution else {
         unreachable!("foreground constructor selected daemon execution")
     };
     assert!(!executor.shared_runtime().is_loaded());
@@ -388,12 +388,55 @@ fn foreground_ready_nonempty_generation_skips_model_and_writable_reconciliation(
         started.elapsed() < Duration::from_secs(1),
         "a ready foreground query must not wait on the Flat write transaction lock"
     );
-    let SemanticQueryExecution::Foreground { executor } = &adapter.execution else {
+    let SemanticQueryExecution::Foreground { executor, .. } = &adapter.execution else {
         unreachable!("foreground constructor selected daemon execution")
     };
     assert!(
         !executor.shared_runtime().is_loaded(),
         "a ready foreground query must not acquire or load the semantic model"
+    );
+    Ok(())
+}
+
+#[test]
+fn foreground_read_only_ready_generation_skips_writable_reconciliation() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let (index, _) = semantic_index(temp.path())?;
+    reconcile_ready_nonempty_generation(&index, temp.path())?;
+    let semantic_path = source_backed_semantic_vector_path(temp.path());
+    let transaction_lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(semantic_path.join("flat_transaction.lock"))?;
+    transaction_lock.lock_exclusive()?;
+
+    let adapter = SemanticQueryAdapter::foreground_read_only(temp.path());
+    let started = Instant::now();
+    let _session = adapter
+        .begin_query(&index)
+        .map_err(|error| anyhow!(error.to_string()))?;
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "refresh off must not wait on the Flat write transaction lock"
+    );
+    Ok(())
+}
+
+#[test]
+fn foreground_read_only_missing_store_does_not_reconcile() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let (index, _) = semantic_index(temp.path())?;
+    let semantic_path = source_backed_semantic_vector_path(temp.path());
+    let adapter = SemanticQueryAdapter::foreground_read_only(temp.path());
+
+    let error = adapter
+        .begin_query(&index)
+        .err()
+        .expect("refresh off must fail when the semantic projection is absent");
+    assert_eq!(error.reason(), Some(SemanticReason::StoreMissing));
+    assert!(
+        !semantic_path.exists(),
+        "refresh off must not create semantic projection state"
     );
     Ok(())
 }
