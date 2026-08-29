@@ -269,8 +269,10 @@ impl CoreMlE5Embedder {
             &bundle.manifest_sha256,
             "document",
             compute.units,
-            bundle.manifest.tensor_contract.document_batch_size as usize,
-            bundle.manifest.tensor_contract.max_sequence_length as usize,
+            [
+                bundle.manifest.tensor_contract.document_batch_size as usize,
+                bundle.manifest.tensor_contract.max_sequence_length as usize,
+            ],
             passive,
         )?;
         let query_batch_size = bundle.manifest.tensor_contract.query_batch_size;
@@ -285,8 +287,10 @@ impl CoreMlE5Embedder {
                     &bundle.manifest_sha256,
                     "query",
                     compute.units,
-                    expected_batch_size,
-                    bundle.manifest.tensor_contract.max_sequence_length as usize,
+                    [
+                        expected_batch_size,
+                        bundle.manifest.tensor_contract.max_sequence_length as usize,
+                    ],
                     passive,
                 )
             })
@@ -519,10 +523,10 @@ fn load_coreml_role_model_with_policy(
     manifest_sha256: &str,
     role: &str,
     compute_units: coreml_native::ComputeUnits,
-    expected_batch_size: usize,
-    expected_sequence_length: usize,
+    expected_shape: [usize; 2],
     passive: bool,
 ) -> Result<CoreMlRoleModel> {
+    let [expected_batch_size, expected_sequence_length] = expected_shape;
     if !passive {
         return load_coreml_role_model(
             source,

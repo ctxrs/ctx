@@ -4,16 +4,15 @@ use anyhow::Result;
 
 use crate::health_search::semantic_model_acquisition_integrity_error;
 
-#[cfg(all(ctx_semantic_fastembed, not(target_os = "macos")))]
-use super::automatic_ort_accelerator_backend;
 #[cfg(not(ctx_semantic_fastembed))]
 use super::SEMANTIC_MODEL_ID;
+#[cfg(all(ctx_semantic_fastembed, not(target_os = "macos")))]
+use super::{accelerator_fallback_reason, automatic_ort_accelerator_backend};
 #[cfg(ctx_semantic_fastembed)]
 use super::{
-    accelerator_fallback_reason, authorize_loaded_backend,
-    coreml::acquire_coreml_backend_passively, cpu::acquire_ort_backend_passively,
-    semantic_embed_policy_for, SemanticBackendKind, SemanticBackendPreference,
-    SemanticComputeClass,
+    authorize_loaded_backend, coreml::acquire_coreml_backend_passively,
+    cpu::acquire_ort_backend_passively, semantic_embed_policy_for, SemanticBackendKind,
+    SemanticBackendPreference, SemanticComputeClass,
 };
 use super::{SemanticEmbedder, SemanticModelConfig};
 
