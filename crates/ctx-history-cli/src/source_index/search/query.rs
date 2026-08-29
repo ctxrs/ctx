@@ -52,14 +52,14 @@ impl From<SearchRequest> for SourceSearchRequest {
 
 pub(in crate::source_index) fn source_search_policy(
     config: &config::AppConfig,
-    foreground_semantic: bool,
+    semantic_execution_available: bool,
 ) -> SearchPolicy {
     let semantic_enabled = config.semantic_search_enabled();
     let semantic = if !semantic_enabled {
         SemanticAvailability::Unavailable(SemanticReason::PolicyDisabled)
     } else if !config.semantic_executor_supported() {
         SemanticAvailability::Unavailable(SemanticReason::PlatformUnsupported)
-    } else if !config.daemon.enabled && !foreground_semantic {
+    } else if !config.daemon.enabled && !semantic_execution_available {
         SemanticAvailability::Unavailable(SemanticReason::ExecutionUnavailable)
     } else {
         SemanticAvailability::Available
