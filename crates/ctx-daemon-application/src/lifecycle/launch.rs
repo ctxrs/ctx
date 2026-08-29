@@ -1,4 +1,5 @@
 use super::*;
+use crate::{SEMANTIC_EMBEDDING_TOKEN_ENDPOINT_ENV, SEMANTIC_EMBEDDING_TOKEN_ENV};
 
 pub fn daemon_autostart_command(
     exe: &Path,
@@ -93,6 +94,8 @@ const DAEMON_CHILD_ENV_ALLOWLIST: &[&str] = &[
     "CTX_RUNTIME_DIR",
     "CTX_SEARCH_SEMANTIC",
     "CTX_SEMANTIC_COREML_NATIVE_COMPUTE",
+    SEMANTIC_EMBEDDING_TOKEN_ENDPOINT_ENV,
+    SEMANTIC_EMBEDDING_TOKEN_ENV,
     "CTX_SEMANTIC_MODEL_ONNX",
     "CTX_UPGRADE_AUTO",
     "CTX_UPGRADE_CHANNEL",
@@ -140,10 +143,17 @@ const DAEMON_CHILD_ENV_ALLOWLIST: &[&str] = &[
     "no_proxy",
 ];
 fn daemon_child_environment() -> BTreeMap<OsString, OsString> {
-    DAEMON_CHILD_ENV_ALLOWLIST
+    let mut environment = DAEMON_CHILD_ENV_ALLOWLIST
         .iter()
         .filter_map(|name| env::var_os(name).map(|value| (OsString::from(name), value)))
-        .collect()
+        .collect::<BTreeMap<_, _>>();
+    let token = OsString::from(SEMANTIC_EMBEDDING_TOKEN_ENV);
+    let endpoint = OsString::from(SEMANTIC_EMBEDDING_TOKEN_ENDPOINT_ENV);
+    if !environment.contains_key(&token) || !environment.contains_key(&endpoint) {
+        environment.remove(&token);
+        environment.remove(&endpoint);
+    }
+    environment
 }
 
 fn validate_daemon_launch_environment(

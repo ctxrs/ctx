@@ -910,6 +910,8 @@ fn daemon_applied_config_matches(status: &Value, expected: &DaemonConfigSnapshot
         && applied.get("daemon_mode").and_then(Value::as_str) == Some(expected.mode.as_str())
         && applied.get("semantic_enabled").and_then(Value::as_bool)
             == Some(expected.semantic_enabled)
+        && applied.get("semantic_executor").and_then(Value::as_str)
+            == Some(expected.semantic_executor.as_str())
 }
 
 fn wait_for_daemon_handoff_with(

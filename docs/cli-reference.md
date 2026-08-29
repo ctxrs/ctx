@@ -50,6 +50,8 @@ ctx index mode manual
 ctx index watch
 ctx index wait
 ctx semantic enable
+ctx semantic enable --executor builtin
+ctx semantic enable --executor https://embeddings.example.test/ctx
 ctx semantic enable --wait
 ctx semantic status
 ctx semantic disable
@@ -120,12 +122,19 @@ ctx daemon run
   met; `--format jsonl` emits one snapshot per line. `index wait` blocks until
   the selected lexical, semantic, or combined readiness target is met and
   supports one final `--format json` result.
-- `semantic enable` persists the explicit semantic-search opt-in. In auto mode
-  it starts or recovers daemon-owned model acquisition and semantic catch-up;
-  `--wait` waits for the current projection. `semantic status` is read-only.
-  `semantic disable` opts out without deleting downloaded model/runtime assets
-  or derived semantic indexes. Plain enablement in manual mode does not change
-  indexing mode.
+- `semantic enable` persists the explicit semantic-search opt-in. The optional
+  `--executor builtin|URL` also selects the executor used for both indexing and
+  query embeddings. `builtin` is the implicit default and leaves no executor
+  setting in `config.toml`. A URL selects the exact-contract HTTP executor;
+  remote endpoints require HTTPS, while plain HTTP is accepted only for a
+  literal loopback IP address. Remote authentication uses only
+  `CTX_SEMANTIC_EMBEDDING_TOKEN` as a bearer token; ctx does not provision or
+  refresh it. In auto mode, enablement starts or recovers daemon-owned semantic
+  catch-up; `--wait` waits for the current projection. `semantic status` reads
+  local configuration and state without requiring credentials, exposing a
+  token, or making a network request. `semantic disable` opts out without
+  deleting downloaded model/runtime assets or derived semantic indexes. Plain
+  enablement in manual mode does not change indexing mode.
 - `daemon run` is an advanced command that runs persistent local maintenance in
   the foreground and blocks until stopped. It does not change the configured
   indexing mode. In manual mode, pass `--force` to run it explicitly. Each pass
@@ -142,11 +151,11 @@ Lexical search remains available while embeddings build, and hybrid search uses
 lexical and semantic evidence automatically when semantic coverage is ready.
 
 Setup and health checks do not change shell startup files, install repository
-integrations, write into source repositories, call model APIs, or require API
-keys. Without semantic opt-in they do not download embedding models; with
-semantic enabled, daemon maintenance may acquire the local embedding model.
-Each daemon maintenance pass is bounded and local. Core storage checks use the
-configured data root, and JSON stdout remains structured.
+integrations, write into source repositories, call embedding executors, or
+require their credentials. Without semantic opt-in they do not download
+embedding models; with semantic enabled, daemon maintenance uses the selected
+executor and may acquire the built-in embedding model. Core storage checks use
+the configured data root, and JSON stdout remains structured.
 Output format does not change lifecycle authority. Use `--no-daemon` or search
 `--refresh off` for an invocation-level opt-out. The full automatic persistent
 daemon is the sole driver for signed automatic upgrade checks. Without that
@@ -827,8 +836,9 @@ Filters:
   `search/lexical`, `semantic` queries `search/semantic`, and `hybrid` blends
   both only when semantic coverage is complete and bound to the active lexical
   generation. Hybrid falls back to lexical with a structured reason when
-  semantic prerequisites are missing. Explicit semantic reports a local error
-  rather than downloading a model or using an incompatible generation;
+  semantic prerequisites are missing. Explicit semantic reports the selected
+  executor or generation error rather than switching executors, downloading a
+  model from the search path, or using an incompatible generation;
 - `--semantic-weight <0.0-1.0>`, for hybrid ranking;
 - `--primary-only`;
 - `--limit <n>`, capped at `200`;

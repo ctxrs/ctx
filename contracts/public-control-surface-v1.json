@@ -99,6 +99,11 @@
       }
     },
     {
+      "behavior": "semantic embedding executor",
+      "config_key": "semantic.executor",
+      "environment_variable": null
+    },
+    {
       "behavior": "automatic provider source discovery",
       "config_key": "sources.automatic",
       "environment_variable": null,

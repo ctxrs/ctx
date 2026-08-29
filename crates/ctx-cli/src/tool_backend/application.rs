@@ -137,6 +137,7 @@ impl LocalToolBackend {
             .map_err(classify_mcp_search_error)?;
         let config = config::AppConfig::load(&self.data_root);
         if let Ok(config) = &config {
+            config::bind_semantic_embedding_auth_endpoint(config);
             self.recover_enabled_daemon_before_search(config);
         }
         let config = match config {
@@ -155,6 +156,7 @@ impl LocalToolBackend {
                 ctx_history_cli::HistoryCliConfig {
                     daemon_enabled: config.automatic_indexing_enabled(),
                     semantic_search_enabled: config.semantic_search_enabled(),
+                    semantic_executor: config.semantic_embedding_executor().clone(),
                     local_usage_enabled: config.local_usage.enabled,
                     automatic_provider_discovery: config.automatic_source_discovery_enabled(),
                     provider_roots: config.provider_root_definitions(),

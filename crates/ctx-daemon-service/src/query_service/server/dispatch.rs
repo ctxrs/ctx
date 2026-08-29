@@ -6,8 +6,8 @@ use std::{
 
 use anyhow::{anyhow, Result};
 use ctx_semantic_model::{
-    semantic_model_cache_available, semantic_model_contract, BuiltinSemanticEmbeddingExecutor,
-    SemanticEmbeddingExecutor, SemanticModelContract, SharedSemanticRuntime,
+    semantic_model_cache_available, semantic_model_contract, SemanticEmbeddingExecutorHandle,
+    SemanticModelContract, SharedSemanticRuntime,
 };
 use serde_json::{json, Value};
 
@@ -211,6 +211,7 @@ pub(crate) fn bind_daemon_query_listener(
 pub(crate) struct CtxAuthenticatedRequestHandler {
     data_root: PathBuf,
     runtime: SharedSemanticRuntime,
+    semantic_executor: Option<Arc<SemanticEmbeddingExecutorHandle>>,
     source_refresh: Arc<CoreRefreshEngine>,
     wakeup: Arc<DaemonWakeup>,
     config: &'static dyn DaemonConfigPort,
@@ -227,7 +228,15 @@ pub(crate) fn ctx_authenticated_request_handler(
 ) -> Arc<CtxAuthenticatedRequestHandler> {
     ctx_authenticated_request_handler_with_lifecycle(
         data_root,
-        runtime,
+        runtime.clone(),
+        Some(Arc::new(
+            SemanticEmbeddingExecutorHandle::build(
+                Default::default(),
+                runtime,
+                config.semantic_model_config(data_root),
+            )
+            .expect("build test semantic executor"),
+        )),
         source_refresh,
         wakeup,
         config,
@@ -238,6 +247,7 @@ pub(crate) fn ctx_authenticated_request_handler(
 pub(crate) fn ctx_authenticated_request_handler_with_lifecycle(
     data_root: &Path,
     runtime: SharedSemanticRuntime,
+    semantic_executor: Option<Arc<SemanticEmbeddingExecutorHandle>>,
     source_refresh: Arc<CoreRefreshEngine>,
     wakeup: Arc<DaemonWakeup>,
     config: &'static dyn DaemonConfigPort,
@@ -246,6 +256,7 @@ pub(crate) fn ctx_authenticated_request_handler_with_lifecycle(
     Arc::new(CtxAuthenticatedRequestHandler {
         data_root: data_root.to_path_buf(),
         runtime,
+        semantic_executor,
         source_refresh,
         wakeup,
         config,
@@ -470,26 +481,30 @@ impl CtxAuthenticatedRequestHandler {
             return Err(anyhow!("daemon query text is empty"));
         }
         let started = Instant::now();
-        let executor = BuiltinSemanticEmbeddingExecutor::new(
-            self.runtime.clone(),
-            self.config.semantic_model_config(&self.data_root),
-        );
-        if !executor.shared_runtime().is_loaded()
-            && !semantic_model_cache_available(executor.config().paths().model_cache_dir())
-        {
-            return Err(anyhow!(
-                "semantic model cache is not available to daemon query service"
-            ));
+        let executor = self
+            .semantic_executor
+            .as_ref()
+            .ok_or_else(|| anyhow!("semantic embedding executor is not active"))?;
+        if let Some(builtin) = executor.builtin_executor() {
+            if !builtin.shared_runtime().is_loaded()
+                && !semantic_model_cache_available(builtin.config().paths().model_cache_dir())
+            {
+                return Err(anyhow!(
+                    "semantic model cache is not available to daemon query service"
+                ));
+            }
+            builtin
+                .shared_runtime()
+                .ensure_loaded_from_cache(builtin.config())?;
         }
-        executor
-            .shared_runtime()
-            .ensure_loaded_from_cache(executor.config())?;
-        let semantic_executor: &dyn SemanticEmbeddingExecutor = &executor;
+        let semantic_executor = executor.executor();
         let embedding = semantic_executor
             .embed_query(semantic_executor.contract().prepare_query(text.to_owned()))?;
         let query_embed_ms = started.elapsed().as_millis() as u64;
         successful_semantic_query_response(
-            executor.shared_runtime(),
+            executor
+                .builtin_executor()
+                .map(|builtin| builtin.shared_runtime()),
             semantic_executor.contract(),
             embedding,
             query_embed_ms,
@@ -498,12 +513,15 @@ impl CtxAuthenticatedRequestHandler {
 }
 
 fn successful_semantic_query_response(
-    runtime: &SharedSemanticRuntime,
+    runtime: Option<&SharedSemanticRuntime>,
     contract: &SemanticModelContract,
     embedding: Vec<f32>,
     query_embed_ms: u64,
 ) -> Result<Value> {
-    let (embedding_runtime, busy) = runtime.try_runtime_status_json()?;
+    let (embedding_runtime, busy) = match runtime {
+        Some(runtime) => runtime.try_runtime_status_json()?,
+        None => (None, false),
+    };
     Ok(compact_json(json!({
         "ok": true,
         "schema_version": 1,
@@ -528,7 +546,7 @@ mod tests {
         let mut embedding = vec![0.0; contract.dimensions()];
         embedding[0] = 1.0;
         let response =
-            successful_semantic_query_response(&runtime, contract, embedding.clone(), 17)?;
+            successful_semantic_query_response(Some(&runtime), contract, embedding.clone(), 17)?;
 
         assert_eq!(response["ok"], true);
         assert_eq!(response["schema_version"], 1);
@@ -576,5 +594,49 @@ mod tests {
         assert!(response["error"]
             .as_str()
             .is_some_and(|error| error.contains("model key mismatch")));
+    }
+
+    #[test]
+    fn selected_http_query_failure_never_loads_or_falls_back_to_builtin() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve port");
+        let endpoint = format!("http://{}", listener.local_addr().expect("local address"));
+        drop(listener);
+        let runtime = SharedSemanticRuntime::default();
+        let executor = Arc::new(
+            SemanticEmbeddingExecutorHandle::build(
+                ctx_semantic_model::SemanticEmbeddingExecutorConfig::http(endpoint)
+                    .expect("loopback endpoint"),
+                runtime.clone(),
+                crate::test_support::CONFIG.semantic_model_config(temp.path()),
+            )
+            .expect("build HTTP executor"),
+        );
+        let handler = ctx_authenticated_request_handler_with_lifecycle(
+            temp.path(),
+            runtime.clone(),
+            Some(executor),
+            Arc::new(crate::source_backed_refresh_adapter::refresh_engine(
+                &crate::test_support::CONFIG,
+            )),
+            Arc::new(DaemonWakeup::default()),
+            &crate::test_support::CONFIG,
+            Arc::new(DaemonLifecycleState::starting()),
+        );
+        let contract = semantic_model_contract();
+        let response = handler.semantic_query_response(&compact_json(json!({
+            "schema_version": 1,
+            "op": "embed_query",
+            "model_key": contract.model_key(),
+            "model_contract_fingerprint": contract.fingerprint(),
+            "text": "private query text",
+        })));
+
+        assert_eq!(response["ok"], false);
+        assert!(response["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("HTTP transport failed")));
+        assert!(!response.to_string().contains("private query text"));
+        assert!(!runtime.is_loaded());
     }
 }

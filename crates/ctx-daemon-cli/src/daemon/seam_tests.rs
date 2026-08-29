@@ -36,11 +36,13 @@ fn source_refresh_only_status_exposes_runtime_and_certified_refresh_identity() -
                     "daemon_enabled": true,
                     "daemon_mode": "source-refresh-only",
                     "semantic_enabled": false,
+                    "semantic_executor": "builtin",
                 },
                 "applied": {
                     "daemon_enabled": true,
                     "daemon_mode": "source-refresh-only",
                     "semantic_enabled": false,
+                    "semantic_executor": "builtin",
                 },
             },
         }),

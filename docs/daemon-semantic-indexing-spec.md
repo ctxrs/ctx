@@ -1,7 +1,6 @@
 # Indexing and Semantic Search Spec
 
-This spec records the product and architecture decision for local semantic
-search.
+This spec records the product and architecture decision for semantic search.
 
 ## Decision
 
@@ -79,6 +78,29 @@ existing structured metadata:
 No LLM is used to create semantic documents. No inferred "important findings"
 or summarization is allowed in the local indexing path.
 
+## Embedding Executor Contract
+
+The built-in executor is the invisible default. The command `ctx semantic
+enable --executor builtin|URL` selects the executor used for both document
+indexing and query embedding; selecting `builtin` removes persisted executor
+configuration.
+
+The normative URL, authentication, privacy, wire protocol, conformance,
+retry, and error contract is the
+[external semantic executor contract](semantic-executors.md). This document
+owns only its daemon lifecycle integration.
+
+The daemon constructs one executor per applied configuration and uses it for
+both indexing and query embedding. Switching the endpoint or its bound token
+reconstructs that executor; selecting `builtin` restores the existing local
+model lifecycle. A failed external activation remains visible in daemon config
+reload status and fails closed without falling back to the built-in executor.
+Lexical results may remain available only with an explicit semantic fallback
+diagnostic.
+
+`ctx semantic status` reads persisted and observed local state only. It does
+not require the token, send it, probe either route, or make any network request.
+
 ## Setup UX
 
 `ctx setup` should initialize local state, identify/index or enqueue available
@@ -86,11 +108,12 @@ history, start persistent daemon maintenance in automatic mode, and return
 promptly. Manual setup starts no worker. Setup should not block for full
 semantic completion by default.
 
-`ctx semantic enable` records the semantic-search opt-in. In auto mode it starts
-or recovers daemon-owned model acquisition and indexing; `--wait` waits for the
-current projection. A user who wants automatic catch-up from manual mode runs
-`ctx index mode auto` first. Lexical search remains available while embeddings
-build; hybrid retrieval uses both indexes when coverage is ready.
+`ctx semantic enable` records the semantic-search opt-in and may select an
+executor. In auto mode it starts or recovers daemon-owned executor preparation
+and indexing; `--wait` waits for the current projection. A user who wants
+automatic catch-up from manual mode runs `ctx index mode auto` first. Lexical
+search remains available while embeddings build; hybrid retrieval uses both
+indexes when coverage is ready.
 
 Default human output should include a strong foreground signal:
 
@@ -130,9 +153,17 @@ between maintenance cycles. A later supported semantic opt-in plus repeat setup
 must activate daemon-owned query service and indexing in the existing process;
 config-file mutation alone is not activation. Status reports current requested
 configuration, last daemon-applied configuration, reload failure, and observed
-semantic runtime ownership separately. A failed reload retains the last
-known-good runtime, and a failed semantic activation must never report the
-semantic job as enabled.
+semantic runtime ownership separately. A config parse/read failure is
+fail-closed for semantic work: ctx stops the query service, releases the
+executor, reports `daemon_config_reload_failed`, and retains `last_run_*` only
+as historical status. Core refresh continues independently, and the semantic
+runtime can recover after a later valid reload. Executor rotation follows the
+same no-fallback rule: once a newly requested executor differs from the applied
+executor, ctx stops the old query service and releases the old executor before
+it prepares the replacement. If replacement activation fails, ctx does not
+resume or send work to the old executor; requested intent remains visible,
+while applied semantic state and runtime ownership are inactive and the
+semantic job is not reported as enabled.
 
 ## Foreground Progress Commands
 
@@ -227,12 +258,13 @@ background startup; there is no separate public daemon start command.
 - No foreground semantic embedding from implicit/background or `--refresh off`
   search. An opted-in manual-mode semantic or nonzero-weight hybrid
   `--refresh wait` is the sole query-process exception: after finite Core
-  publication it may acquire the pinned local model, reconcile semantic
+  publication it may prepare the selected executor, reconcile semantic
   coverage for that exact generation, and embed the query.
-- No model download from foreground setup, import, status, doctor, MCP, or
-  index-observer commands. Acquisition belongs to the opted-in daemon in auto
-  mode and the explicit manual `--refresh wait` exception above; unverified
-  bytes must fail closed before cache publication.
+- No built-in model download from foreground setup, import, status, doctor,
+  MCP, or index-observer commands. Acquisition belongs to the opted-in daemon in
+  auto mode and the explicit manual `--refresh wait` exception above;
+  unverified bytes must fail closed before cache publication. Status and
+  observer commands never probe an external executor.
 - No duplicate inline importer. Persistent and finite publication both use the
   same daemon/Core refresh engine.
 - A finite Core worker installs no supervision, runs no watcher/timer/semantic/

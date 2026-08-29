@@ -57,7 +57,7 @@ pub(in crate::source_index) fn source_search_policy(
     let semantic_enabled = config.semantic_search_enabled();
     let semantic = if !semantic_enabled {
         SemanticAvailability::Unavailable(SemanticReason::PolicyDisabled)
-    } else if !ctx_daemon_cli::semantic_query_service_supported() {
+    } else if !config.semantic_executor_supported() {
         SemanticAvailability::Unavailable(SemanticReason::PlatformUnsupported)
     } else if !config.daemon.enabled && !foreground_semantic {
         SemanticAvailability::Unavailable(SemanticReason::ExecutionUnavailable)

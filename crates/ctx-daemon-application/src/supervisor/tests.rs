@@ -20,6 +20,30 @@ use std::{
 const SUPERVISOR_ENV_ARTIFACT_PROBE_STAGE: &str = "CTX_SUPERVISOR_ENV_ARTIFACT_PROBE_STAGE";
 const SUPERVISOR_ENV_ARTIFACT_PROBE_TEST: &str = "semantic::daemon_supervisor::tests::native_supervisor_artifacts_exclude_authority_and_fail_closed_on_controls";
 
+struct RestoreTestEnvironment(Vec<(&'static str, Option<OsString>)>);
+
+impl RestoreTestEnvironment {
+    fn capture(names: &[&'static str]) -> Self {
+        Self(
+            names
+                .iter()
+                .map(|name| (*name, env::var_os(name)))
+                .collect(),
+        )
+    }
+}
+
+impl Drop for RestoreTestEnvironment {
+    fn drop(&mut self) {
+        for (name, value) in self.0.drain(..) {
+            match value {
+                Some(value) => env::set_var(name, value),
+                None => env::remove_var(name),
+            }
+        }
+    }
+}
+
 fn linux_systemd_unit(executable: &Path, data_root: &Path) -> Result<String> {
     environment::linux_systemd_unit_with_environment(
         executable,
@@ -92,6 +116,8 @@ struct FakeSupervisorState {
     installs: usize,
     disables: usize,
     starts: usize,
+    installed_environment_sha256: Option<String>,
+    expected_environment_sha256: Option<String>,
     upgrade_fence_released: bool,
     start_observed_released_fence: bool,
 }
@@ -131,6 +157,11 @@ impl FakeSupervisorBackend {
             fail_start: false,
         }
     }
+
+    fn expect_environment(&self, environment: &SupervisorEnvironmentSnapshot) {
+        self.state.lock().unwrap().expected_environment_sha256 =
+            Some(environment.identity_sha256().to_owned());
+    }
 }
 
 impl NativeSupervisorBackend<SupervisorEnvironmentSnapshot> for FakeSupervisorBackend {
@@ -169,7 +200,7 @@ impl NativeSupervisorBackend<SupervisorEnvironmentSnapshot> for FakeSupervisorBa
         &self,
         data_root: &Path,
         _executable: &Path,
-        _environment: &SupervisorEnvironmentSnapshot,
+        environment: &SupervisorEnvironmentSnapshot,
     ) -> Result<PathBuf> {
         {
             let mut state = self.state.lock().unwrap();
@@ -184,6 +215,7 @@ impl NativeSupervisorBackend<SupervisorEnvironmentSnapshot> for FakeSupervisorBa
         }
         state.registered = true;
         state.live_owner = Some(4_242);
+        state.installed_environment_sha256 = Some(environment.identity_sha256().to_owned());
         if self.manager_unavailable_after_install {
             state.manager_unavailable = true;
         }
@@ -206,16 +238,22 @@ impl NativeSupervisorBackend<SupervisorEnvironmentSnapshot> for FakeSupervisorBa
         }
         state.registered = false;
         state.live_owner = None;
+        state.installed_environment_sha256 = None;
         Ok(None)
     }
 
     fn verify_registration(&self, _data_root: &Path, _executable: &Path) -> Result<()> {
         let mut state = self.state.lock().unwrap();
         state.registration_probes += 1;
-        state
-            .registered
-            .then_some(())
-            .ok_or_else(|| anyhow!("fake native registration is absent"))
+        if !state.registered {
+            return Err(anyhow!("fake native registration is absent"));
+        }
+        if state.expected_environment_sha256.is_some()
+            && state.installed_environment_sha256 != state.expected_environment_sha256
+        {
+            return Err(anyhow!("fake native registration environment changed"));
+        }
+        Ok(())
     }
 
     fn verify_live_owner(&self, _data_root: &Path, _executable: &Path) -> Result<u32> {

@@ -47,14 +47,14 @@ fn interrupted_queue_is_recovered_before_endpoint_accepts_a_new_admission() -> R
             &data_root,
             &args,
             &mut runtime,
-            DaemonConfigReloadTargets {
+            DaemonConfigReloadContext {
                 query_service: &mut query_service,
                 refresh_service: &mut refresh_service,
                 state: &mut reload,
+                wakeup: &wakeup,
+                lifecycle: &lifecycle,
+                config_port: &crate::test_support::CONFIG,
             },
-            &wakeup,
-            &lifecycle,
-            &crate::test_support::CONFIG,
         ),
         DaemonConfigReloadOutcome::Continue
     );

@@ -110,3 +110,101 @@ fn windows_private_file_replacement_has_a_bounded_retry_window() {
     assert_eq!(attempts, PRIVATE_FILE_REPLACE_ATTEMPTS);
     assert_eq!(waits, PRIVATE_FILE_REPLACE_ATTEMPTS - 1);
 }
+
+#[test]
+fn activation_failure_does_not_reuse_the_previous_executors_failure_class() {
+    let temp = tempfile::tempdir().unwrap();
+    write_private_json_file(
+        &daemon_semantic_job_path(temp.path()),
+        &json!({
+            "status": "failed",
+            "last_error": "old endpoint failed",
+            "retryable": false,
+            "failure_class": "permanent_protocol",
+        }),
+    )
+    .unwrap();
+    let config = AppConfig::new(
+        true,
+        true,
+        std::borrow::Cow::Borrowed("stable"),
+        std::time::Duration::from_secs(24 * 60 * 60),
+        crate::DaemonConfig {
+            enabled: true,
+            mode: crate::DaemonMode::Full,
+        },
+        true,
+        "config",
+    )
+    .with_semantic_embedding_executor(
+        crate::SemanticEmbeddingExecutorConfig::http("https://new.example.test").unwrap(),
+    );
+    let report = daemon_semantic_job_report(
+        temp.path(),
+        true,
+        ctx_daemon_application::DaemonSemanticStatusContext {
+            daemon_mode: ctx_daemon_application::DaemonMode::Full,
+            daemon_running: true,
+            semantic_runtime_active: false,
+            config_reload: ctx_daemon_application::DaemonConfigReloadContext {
+                status: "activation_failed",
+                out_of_sync: true,
+                requested_daemon_enabled: Some(true),
+                requested_semantic_enabled: Some(true),
+                requested_semantic_executor: Some("https://new.example.test/"),
+                applied_daemon_enabled: Some(true),
+                applied_semantic_enabled: Some(false),
+                applied_semantic_executor: None,
+                last_error: Some("new endpoint activation failed"),
+            },
+        },
+        Some(&config),
+    );
+
+    assert_eq!(report["status"], "failed");
+    assert_eq!(report["last_error"], "new endpoint activation failed");
+    assert!(report.get("retryable").is_none());
+    assert!(report.get("failure_class").is_none());
+}
+
+#[test]
+fn config_load_failure_surfaces_failed_instead_of_stale_semantic_readiness() {
+    let temp = tempfile::tempdir().unwrap();
+    write_private_json_file(
+        &daemon_semantic_job_path(temp.path()),
+        &json!({
+            "status": "ready",
+            "last_run_at_ms": 1,
+        }),
+    )
+    .unwrap();
+    let report = daemon_semantic_job_report(
+        temp.path(),
+        true,
+        ctx_daemon_application::DaemonSemanticStatusContext {
+            daemon_mode: ctx_daemon_application::DaemonMode::Full,
+            daemon_running: true,
+            semantic_runtime_active: false,
+            config_reload: ctx_daemon_application::DaemonConfigReloadContext {
+                status: "failed",
+                out_of_sync: true,
+                requested_daemon_enabled: Some(true),
+                requested_semantic_enabled: Some(true),
+                requested_semantic_executor: Some("https://old.example.test/"),
+                applied_daemon_enabled: Some(true),
+                applied_semantic_enabled: Some(false),
+                applied_semantic_executor: None,
+                last_error: Some("parse config.toml: invalid value"),
+            },
+        },
+        None,
+    );
+
+    assert_eq!(report["status"], "failed");
+    assert_eq!(report["reason"], "daemon_config_reload_failed");
+    assert_eq!(report["enabled"], false);
+    assert_eq!(report["runtime_active"], false);
+    assert_eq!(report["last_error"], "parse config.toml: invalid value");
+    assert!(report.get("retryable").is_none());
+    assert!(report.get("failure_class").is_none());
+}

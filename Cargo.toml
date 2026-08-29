@@ -126,6 +126,7 @@ tar = "0.4"
 url = "2.5"
 uuid = { version = "1.10", features = ["serde", "v4", "v7"] }
 ureq = { version = "2.10", default-features = true }
+ureq-semantic = { package = "ureq", version = "3.3", default-features = false, features = ["platform-verifier", "rustls"] }
 unicode-width = "0.2"
 unicode-segmentation = "1.12"
 xz2 = "0.1"

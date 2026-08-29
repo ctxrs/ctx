@@ -9,6 +9,7 @@ use std::{
 use anyhow::{anyhow, Result};
 use ctx_client_observability::analytics::PublicEventV1;
 use ctx_daemon_service::CoreGenerationPublished;
+use ctx_semantic_model::SemanticEmbeddingExecutorConfig;
 
 pub const CONFIG_FILE: &str = "config.toml";
 pub const DAEMON_DEFAULT_ENABLED: bool = true;
@@ -53,6 +54,7 @@ pub struct AppConfig<'a> {
     pub daemon: DaemonConfig,
     semantic_enabled: bool,
     semantic_source: &'static str,
+    semantic_executor: SemanticEmbeddingExecutorConfig,
     automatic_provider_discovery: bool,
     provider_roots: Vec<ctx_history_capture::ProviderRootDefinition>,
 }
@@ -79,6 +81,7 @@ impl<'a> AppConfig<'a> {
             daemon,
             semantic_enabled,
             semantic_source,
+            semantic_executor: SemanticEmbeddingExecutorConfig::builtin(),
             automatic_provider_discovery: true,
             provider_roots: Vec::new(),
         }
@@ -94,6 +97,14 @@ impl<'a> AppConfig<'a> {
 
     pub fn with_automatic_provider_discovery(mut self, enabled: bool) -> Self {
         self.automatic_provider_discovery = enabled;
+        self
+    }
+
+    pub fn with_semantic_embedding_executor(
+        mut self,
+        executor: SemanticEmbeddingExecutorConfig,
+    ) -> Self {
+        self.semantic_executor = executor;
         self
     }
 
@@ -123,6 +134,10 @@ impl<'a> AppConfig<'a> {
 
     pub const fn semantic_search_source(&self) -> &'static str {
         self.semantic_source
+    }
+
+    pub fn semantic_embedding_executor(&self) -> &SemanticEmbeddingExecutorConfig {
+        &self.semantic_executor
     }
 }
 
@@ -279,6 +294,15 @@ impl DaemonCliHost for TestHost {
             config.semantic_enabled = enabled;
             config.semantic_source = "config";
         }
+        let executor =
+            Self::config_item(&document, "semantic", "executor").and_then(toml_edit::Item::as_str);
+        if Self::config_item(&document, "semantic", "endpoint").is_some() {
+            return Err(anyhow!("unknown config key `semantic.endpoint`"));
+        }
+        config.semantic_executor = match executor {
+            None | Some("builtin") => SemanticEmbeddingExecutorConfig::builtin(),
+            Some(endpoint) => SemanticEmbeddingExecutorConfig::http(endpoint)?,
+        };
         Ok(config)
     }
 
@@ -337,5 +361,58 @@ impl DaemonCliHost for TestHost {
         _writer: &mut dyn Write,
     ) -> Result<u64> {
         Err(anyhow!("test artifact fetcher is unavailable"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_host_tracks_the_shipped_one_key_semantic_executor_contract() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(CONFIG_FILE);
+
+        std::fs::write(
+            &path,
+            "[semantic]\nexecutor = \"https://embed.example.test/base\"\n",
+        )
+        .unwrap();
+        let external = AppConfig::load(temp.path()).unwrap();
+        assert_eq!(
+            external.semantic_embedding_executor().http_endpoint(),
+            Some("https://embed.example.test/base/")
+        );
+
+        std::fs::write(&path, "[semantic]\nexecutor = \"builtin\"\n").unwrap();
+        assert!(AppConfig::load(temp.path())
+            .unwrap()
+            .semantic_embedding_executor()
+            .is_builtin());
+
+        std::fs::write(&path, "[search]\nsemantic = true\n").unwrap();
+        assert!(AppConfig::load(temp.path())
+            .unwrap()
+            .semantic_embedding_executor()
+            .is_builtin());
+
+        for retired in [
+            "[semantic]\nexecutor = \"http\"\nendpoint = \"https://embed.example.test\"\n",
+            "[semantic]\nendpoint = \"https://embed.example.test\"\n",
+        ] {
+            std::fs::write(&path, retired).unwrap();
+            let error = AppConfig::load(temp.path()).unwrap_err();
+            assert!(
+                format!("{error:#}").contains("unknown config key `semantic.endpoint`"),
+                "{error:#}"
+            );
+        }
+
+        std::fs::write(&path, "[semantic]\nexecutor = \"http\"\n").unwrap();
+        let error = AppConfig::load(temp.path()).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("endpoint is invalid"),
+            "{error:#}"
+        );
     }
 }

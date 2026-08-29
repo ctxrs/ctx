@@ -61,6 +61,7 @@ fn config_snapshot_with_channel(
             },
         },
         semantic_enabled: config.semantic_search_enabled(),
+        semantic_executor: config.semantic_embedding_executor().clone(),
         automatic_upgrade_enabled: config.auto_upgrade_enabled(),
         automatic_upgrade_interval: config.upgrade.interval,
         upgrade_channel,
@@ -134,6 +135,10 @@ impl DaemonConfigPort for CliDaemonConfigPort {
 
     fn semantic_model_config(&self, data_root: &Path) -> SemanticModelConfig {
         super::model_config::semantic_model_config(data_root)
+    }
+
+    fn semantic_executor_auth(&self) -> Result<ctx_semantic_model::SemanticEmbeddingExecutorAuth> {
+        crate::semantic_embedding_executor_auth_from_environment()
     }
 
     fn discovery_context(&self, data_root: &Path) -> Result<DiscoveryContext> {

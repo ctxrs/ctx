@@ -313,23 +313,53 @@ fn daemon_query_embedding_response_rejects_malformed_vectors() {
 #[test]
 fn foreground_adapter_is_lazy_and_borrows_the_exact_data_root() {
     let data_root = std::path::PathBuf::from("foreground-query-root");
-    let adapter = SemanticQueryAdapter::foreground(&data_root);
+    let adapter =
+        SemanticQueryAdapter::foreground(&data_root, SemanticEmbeddingExecutorConfig::builtin());
 
     assert!(std::ptr::eq(adapter.data_root, data_root.as_path()));
     let SemanticQueryExecution::Foreground { executor } = &adapter.execution else {
         panic!("manual wait must select foreground semantic execution");
     };
     assert!(
-        !executor.shared_runtime().is_loaded(),
+        !executor
+            .as_ref()
+            .expect("build foreground executor")
+            .builtin_executor()
+            .expect("default executor is built in")
+            .shared_runtime()
+            .is_loaded(),
         "constructing the adapter must not load the model before semantic retrieval begins"
     );
+}
+
+#[test]
+fn foreground_adapter_uses_the_exact_external_executor_without_config_reread() {
+    let temp = tempfile::tempdir().unwrap();
+    fs::write(
+        temp.path().join(crate::config::CONFIG_FILE),
+        "[semantic]\nendpoint = \"this file is intentionally invalid\"\n",
+    )
+    .unwrap();
+
+    let adapter = SemanticQueryAdapter::foreground(
+        temp.path(),
+        SemanticEmbeddingExecutorConfig::http("http://127.0.0.1:9").unwrap(),
+    );
+    let SemanticQueryExecution::Foreground { executor } = &adapter.execution else {
+        panic!("manual wait must select foreground semantic execution");
+    };
+    let executor = executor.as_ref().expect("build loopback HTTP executor");
+    assert_eq!(executor.kind().as_str(), "http");
+    assert!(executor.builtin_executor().is_none());
+    assert_eq!(executor.endpoint(), Some("http://127.0.0.1:9/"));
 }
 
 #[test]
 fn foreground_empty_generation_converges_without_loading_a_model() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let (index, _) = semantic_index_revision(temp.path(), 1, false)?;
-    let adapter = SemanticQueryAdapter::foreground(temp.path());
+    let adapter =
+        SemanticQueryAdapter::foreground(temp.path(), SemanticEmbeddingExecutorConfig::builtin());
 
     let mut session = adapter
         .begin_query(&index)
@@ -341,7 +371,13 @@ fn foreground_empty_generation_converges_without_loading_a_model() -> Result<()>
     let SemanticQueryExecution::Foreground { executor } = &adapter.execution else {
         unreachable!("foreground constructor selected daemon execution")
     };
-    assert!(!executor.shared_runtime().is_loaded());
+    assert!(!executor
+        .as_ref()
+        .expect("build foreground executor")
+        .builtin_executor()
+        .expect("default executor is built in")
+        .shared_runtime()
+        .is_loaded());
     Ok(())
 }
 
@@ -386,7 +422,8 @@ fn foreground_ready_nonempty_generation_skips_model_and_writable_reconciliation(
     state_permissions.set_readonly(true);
     fs::set_permissions(&state_path, state_permissions)?;
 
-    let adapter = SemanticQueryAdapter::foreground(temp.path());
+    let adapter =
+        SemanticQueryAdapter::foreground(temp.path(), SemanticEmbeddingExecutorConfig::builtin());
     let started = Instant::now();
     let _session = adapter
         .begin_query(&index)
@@ -399,7 +436,13 @@ fn foreground_ready_nonempty_generation_skips_model_and_writable_reconciliation(
         unreachable!("foreground constructor selected daemon execution")
     };
     assert!(
-        !executor.shared_runtime().is_loaded(),
+        !executor
+            .as_ref()
+            .expect("build foreground executor")
+            .builtin_executor()
+            .expect("default executor is built in")
+            .shared_runtime()
+            .is_loaded(),
         "a ready foreground query must not acquire or load the semantic model"
     );
     Ok(())

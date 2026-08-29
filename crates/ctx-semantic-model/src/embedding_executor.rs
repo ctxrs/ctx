@@ -7,9 +7,115 @@ use anyhow::Result;
 #[cfg(not(ctx_semantic_fastembed))]
 use crate::SEMANTIC_MODEL_ID;
 use crate::{
-    semantic_model_contract, PreparedSemanticDocuments, PreparedSemanticQuery, SemanticModelConfig,
-    SemanticModelContract, SharedSemanticRuntime,
+    http_embedding_executor::ValidatedHttpEndpoint, semantic_model_contract,
+    HttpSemanticEmbeddingExecutor, PreparedSemanticDocuments, PreparedSemanticQuery,
+    SemanticEmbeddingExecutorAuth, SemanticModelConfig, SemanticModelContract,
+    SharedSemanticRuntime,
 };
+
+/// The selected implementation of the pinned semantic embedding contract.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SemanticEmbeddingExecutorKind {
+    Builtin,
+    Http,
+}
+
+impl SemanticEmbeddingExecutorKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Builtin => "builtin",
+            Self::Http => "http",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SemanticEmbeddingExecutorScope {
+    Builtin,
+    Loopback,
+    Remote,
+}
+
+impl SemanticEmbeddingExecutorScope {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Builtin => "builtin",
+            Self::Loopback => "loopback",
+            Self::Remote => "remote",
+        }
+    }
+
+    pub const fn content_leaves_machine(self) -> bool {
+        matches!(self, Self::Remote)
+    }
+}
+
+/// Validated product-composition selection for semantic embedding execution.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SemanticEmbeddingExecutorConfig {
+    selection: SemanticEmbeddingExecutorSelection,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum SemanticEmbeddingExecutorSelection {
+    Builtin,
+    Http(ValidatedHttpEndpoint),
+}
+
+impl Default for SemanticEmbeddingExecutorConfig {
+    fn default() -> Self {
+        Self::builtin()
+    }
+}
+
+impl SemanticEmbeddingExecutorConfig {
+    pub const fn builtin() -> Self {
+        Self {
+            selection: SemanticEmbeddingExecutorSelection::Builtin,
+        }
+    }
+
+    /// Selects an exact-contract HTTP endpoint after validating its URL policy.
+    pub fn http(endpoint: impl AsRef<str>) -> Result<Self> {
+        Ok(Self {
+            selection: SemanticEmbeddingExecutorSelection::Http(ValidatedHttpEndpoint::parse(
+                endpoint.as_ref(),
+            )?),
+        })
+    }
+
+    pub const fn kind(&self) -> SemanticEmbeddingExecutorKind {
+        match &self.selection {
+            SemanticEmbeddingExecutorSelection::Builtin => SemanticEmbeddingExecutorKind::Builtin,
+            SemanticEmbeddingExecutorSelection::Http(_) => SemanticEmbeddingExecutorKind::Http,
+        }
+    }
+
+    pub fn http_endpoint(&self) -> Option<&str> {
+        match &self.selection {
+            SemanticEmbeddingExecutorSelection::Builtin => None,
+            SemanticEmbeddingExecutorSelection::Http(endpoint) => Some(endpoint.as_str()),
+        }
+    }
+
+    pub fn endpoint(&self) -> Option<&str> {
+        self.http_endpoint()
+    }
+
+    pub const fn is_builtin(&self) -> bool {
+        matches!(&self.selection, SemanticEmbeddingExecutorSelection::Builtin)
+    }
+
+    pub const fn scope(&self) -> SemanticEmbeddingExecutorScope {
+        match &self.selection {
+            SemanticEmbeddingExecutorSelection::Builtin => SemanticEmbeddingExecutorScope::Builtin,
+            SemanticEmbeddingExecutorSelection::Http(endpoint) if endpoint.is_loopback() => {
+                SemanticEmbeddingExecutorScope::Loopback
+            }
+            SemanticEmbeddingExecutorSelection::Http(_) => SemanticEmbeddingExecutorScope::Remote,
+        }
+    }
+}
 
 /// Produces vectors in one declared semantic compatibility space.
 ///
@@ -117,7 +223,106 @@ impl SemanticEmbeddingExecutor for BuiltinSemanticEmbeddingExecutor {
     }
 }
 
-fn ensure_prepared_contract(
+/// Owns the selected trusted executor for product composition.
+pub struct SemanticEmbeddingExecutorHandle {
+    executor: SemanticEmbeddingExecutorHandleInner,
+}
+
+enum SemanticEmbeddingExecutorHandleInner {
+    Builtin(BuiltinSemanticEmbeddingExecutor),
+    Http(HttpSemanticEmbeddingExecutor),
+}
+
+impl std::fmt::Debug for SemanticEmbeddingExecutorHandle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SemanticEmbeddingExecutorHandle")
+            .field("kind", &self.kind())
+            .finish()
+    }
+}
+
+impl SemanticEmbeddingExecutorHandle {
+    /// Builds exactly the configured executor. HTTP construction never loads
+    /// or falls back to the built-in runtime.
+    pub fn build(
+        config: SemanticEmbeddingExecutorConfig,
+        runtime: SharedSemanticRuntime,
+        model_config: SemanticModelConfig,
+    ) -> Result<Self> {
+        Self::build_with_auth(
+            config,
+            SemanticEmbeddingExecutorAuth::none(),
+            runtime,
+            model_config,
+        )
+    }
+
+    pub fn build_with_auth(
+        config: SemanticEmbeddingExecutorConfig,
+        auth: SemanticEmbeddingExecutorAuth,
+        runtime: SharedSemanticRuntime,
+        model_config: SemanticModelConfig,
+    ) -> Result<Self> {
+        let executor = match config.selection {
+            SemanticEmbeddingExecutorSelection::Builtin => {
+                SemanticEmbeddingExecutorHandleInner::Builtin(
+                    BuiltinSemanticEmbeddingExecutor::new(runtime, model_config),
+                )
+            }
+            SemanticEmbeddingExecutorSelection::Http(endpoint) => {
+                SemanticEmbeddingExecutorHandleInner::Http(
+                    HttpSemanticEmbeddingExecutor::from_validated_endpoint(endpoint, auth)?,
+                )
+            }
+        };
+        Ok(Self { executor })
+    }
+
+    pub fn executor(&self) -> &dyn SemanticEmbeddingExecutor {
+        match &self.executor {
+            SemanticEmbeddingExecutorHandleInner::Builtin(executor) => executor,
+            SemanticEmbeddingExecutorHandleInner::Http(executor) => executor,
+        }
+    }
+
+    pub fn builtin_executor(&self) -> Option<&BuiltinSemanticEmbeddingExecutor> {
+        match &self.executor {
+            SemanticEmbeddingExecutorHandleInner::Builtin(executor) => Some(executor),
+            SemanticEmbeddingExecutorHandleInner::Http(_) => None,
+        }
+    }
+
+    pub fn http_executor(&self) -> Option<&HttpSemanticEmbeddingExecutor> {
+        match &self.executor {
+            SemanticEmbeddingExecutorHandleInner::Builtin(_) => None,
+            SemanticEmbeddingExecutorHandleInner::Http(executor) => Some(executor),
+        }
+    }
+
+    pub const fn kind(&self) -> SemanticEmbeddingExecutorKind {
+        match &self.executor {
+            SemanticEmbeddingExecutorHandleInner::Builtin(_) => {
+                SemanticEmbeddingExecutorKind::Builtin
+            }
+            SemanticEmbeddingExecutorHandleInner::Http(_) => SemanticEmbeddingExecutorKind::Http,
+        }
+    }
+
+    pub fn endpoint(&self) -> Option<&str> {
+        self.http_executor()
+            .map(HttpSemanticEmbeddingExecutor::endpoint)
+    }
+
+    pub const fn is_builtin(&self) -> bool {
+        matches!(
+            &self.executor,
+            SemanticEmbeddingExecutorHandleInner::Builtin(_)
+        )
+    }
+}
+
+pub(super) fn ensure_prepared_contract(
     prepared_fingerprint: &str,
     contract: &SemanticModelContract,
 ) -> Result<()> {

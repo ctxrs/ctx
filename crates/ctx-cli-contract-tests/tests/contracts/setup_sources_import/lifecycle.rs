@@ -423,6 +423,89 @@ fn semantic_namespace_is_explicit_readable_and_retains_downloaded_assets() {
 }
 
 #[test]
+fn semantic_executor_selection_round_trips_local_remote_and_builtin_privacy() {
+    let temp = tempdir();
+    fs::create_dir_all(data_root(&temp)).unwrap();
+    fs::write(
+        data_root(&temp).join("config.toml"),
+        "[indexing]\nmode = \"manual\"\n",
+    )
+    .unwrap();
+
+    let loopback = json_output(ctx(&temp).args([
+        "semantic",
+        "enable",
+        "--executor",
+        "http://127.0.0.1:9423/embed",
+        "--format=json",
+    ]));
+    assert_eq!(loopback["enabled"], true, "{loopback:#}");
+    assert_eq!(loopback["executor"]["kind"], "http", "{loopback:#}");
+    assert_eq!(loopback["executor"]["scope"], "loopback", "{loopback:#}");
+    assert_eq!(
+        loopback["executor"]["content_leaves_machine"], false,
+        "{loopback:#}"
+    );
+    assert_eq!(loopback["local_only"], true, "{loopback:#}");
+
+    let remote = json_output(ctx(&temp).args([
+        "semantic",
+        "enable",
+        "--executor",
+        "https://embeddings.example.test/v1",
+        "--format=json",
+    ]));
+    assert_eq!(remote["enabled"], true, "{remote:#}");
+    assert_eq!(remote["executor"]["kind"], "http", "{remote:#}");
+    assert_eq!(remote["executor"]["scope"], "remote", "{remote:#}");
+    assert_eq!(
+        remote["executor"]["content_leaves_machine"], true,
+        "{remote:#}"
+    );
+    assert_eq!(remote["local_only"], false, "{remote:#}");
+
+    let persisted = fs::read_to_string(data_root(&temp).join("config.toml")).unwrap();
+    assert!(
+        persisted.contains("executor = \"https://embeddings.example.test/v1/\""),
+        "{persisted}"
+    );
+    let status = json_output(ctx(&temp).args(["semantic", "status", "--format=json"]));
+    assert_eq!(status["executor"], remote["executor"], "{status:#}");
+    assert_eq!(status["local_only"], false, "{status:#}");
+
+    let builtin = json_output(ctx(&temp).args([
+        "semantic",
+        "enable",
+        "--executor",
+        "builtin",
+        "--format=json",
+    ]));
+    assert_eq!(builtin["executor"]["kind"], "builtin", "{builtin:#}");
+    assert_eq!(builtin["executor"]["scope"], "builtin", "{builtin:#}");
+    assert_eq!(
+        builtin["executor"]["content_leaves_machine"], false,
+        "{builtin:#}"
+    );
+    assert_eq!(builtin["local_only"], true, "{builtin:#}");
+    let persisted = fs::read_to_string(data_root(&temp).join("config.toml")).unwrap();
+    assert!(!persisted.contains("executor ="), "{persisted}");
+
+    ctx(&temp)
+        .args([
+            "semantic",
+            "enable",
+            "--executor",
+            " https://embeddings.example.test/v1",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("semantic embedding endpoint"));
+    let persisted_after_rejection =
+        fs::read_to_string(data_root(&temp).join("config.toml")).unwrap();
+    assert_eq!(persisted_after_rejection, persisted);
+}
+
+#[test]
 fn semantic_wait_rejects_manual_mode_before_persisting_opt_in() {
     let temp = tempdir();
     fs::create_dir_all(data_root(&temp)).unwrap();

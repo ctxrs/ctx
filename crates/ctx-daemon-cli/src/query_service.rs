@@ -54,9 +54,6 @@ pub(crate) fn daemon_query_service_embedding_runtime(data_root: &Path) -> Option
 }
 
 pub fn wait_for_daemon_query_service(data_root: &Path, timeout: Duration) -> bool {
-    if !ctx_semantic_model::semantic_query_service_supported() {
-        return false;
-    }
     let started = Instant::now();
     loop {
         if daemon_query_service_available(data_root) {

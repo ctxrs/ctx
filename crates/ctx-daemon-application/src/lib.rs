@@ -21,6 +21,10 @@ mod lifecycle;
 mod status;
 mod supervisor;
 
+pub(crate) const SEMANTIC_EMBEDDING_TOKEN_ENV: &str = "CTX_SEMANTIC_EMBEDDING_TOKEN";
+pub(crate) const SEMANTIC_EMBEDDING_TOKEN_ENDPOINT_ENV: &str =
+    "CTX_SEMANTIC_EMBEDDING_TOKEN_ENDPOINT";
+
 pub use control::{DaemonEnabledUpdate, DaemonEnabledUpdateError};
 pub use host::{
     DaemonHostRunError, DaemonHostRunProfile, DaemonHostRunRequest, DaemonHostStartMode,
@@ -94,6 +98,8 @@ pub struct DaemonConfigSnapshot {
     pub enabled: bool,
     pub mode: DaemonMode,
     pub semantic_enabled: bool,
+    /// Redaction-safe exact selector: `builtin` or a normalized endpoint URL.
+    pub semantic_executor: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -157,7 +163,7 @@ enum DaemonStartMode {
     Auto,
 }
 
-/// Names the complete nonsecret environment contract that may cross the
+/// Names the complete approved environment contract that may cross the
 /// Core/companion boundary for setup and persist in daemon supervision.
 pub fn supervisor_environment_allowlist_names() -> Vec<&'static str> {
     supervisor::supervisor_environment_allowlist_names()
@@ -216,6 +222,15 @@ impl<'a> DaemonApplication<'a> {
         trigger: DaemonTrigger,
     ) -> std::result::Result<DaemonHandoff, DaemonStartError> {
         lifecycle::start_daemon_and_wait(self.host, data_root, config, trigger)
+    }
+
+    pub fn restart_daemon_with_current_environment(
+        &self,
+        data_root: &Path,
+        config: &DaemonConfigSnapshot,
+        trigger: DaemonTrigger,
+    ) -> std::result::Result<DaemonHandoff, DaemonStartError> {
+        control::restart_daemon_with_current_environment(self.host, data_root, config, trigger)
     }
 
     pub fn start_finite_core_worker_and_wait(
@@ -362,6 +377,7 @@ impl DaemonApplicationHost for TestHost {
             enabled: true,
             mode: DaemonMode::Full,
             semantic_enabled: true,
+            semantic_executor: "builtin".to_owned(),
         })
     }
 

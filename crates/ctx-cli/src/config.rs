@@ -19,13 +19,21 @@ use ctx_history_platform::platform_security::{
 mod durable_write;
 mod mutation;
 mod provider_roots;
+mod semantic;
 mod toml_subset;
 
 #[cfg(test)]
 pub(crate) use mutation::add_claude_root;
 pub(crate) use mutation::{
     add_provider_root_with_kind, persisted_daemon_enabled, remove_provider_root,
-    set_daemon_enabled, set_semantic_search_enabled, write_default_config, ProviderRootMutation,
+    set_daemon_enabled, set_semantic_search_enabled, set_semantic_search_enabled_with_executor,
+    write_default_config, ProviderRootMutation,
+};
+use semantic::parse_semantic_embedding_executor;
+pub use semantic::SemanticConfig;
+pub(crate) use semantic::{
+    bind_semantic_embedding_auth_endpoint, clear_semantic_embedding_auth_endpoint,
+    rebind_semantic_embedding_auth_endpoint,
 };
 
 use crate::deprecated_controls::DeprecatedControls;
@@ -144,6 +152,7 @@ pub struct AppConfig {
     pub upgrade: UpgradeConfig,
     pub indexing: IndexingConfig,
     pub daemon: DaemonConfig,
+    pub semantic: SemanticConfig,
     pub search: SearchConfig,
     pub sources: SourcesConfig,
     pub provider_roots: BTreeMap<String, ProviderRootDefinition>,
@@ -355,6 +364,7 @@ impl Default for AppConfig {
             daemon: DaemonConfig {
                 mode: DaemonMode::Full,
             },
+            semantic: SemanticConfig::default(),
             search: SearchConfig {
                 semantic: None,
                 semantic_source: SemanticSearchSource::Default,
@@ -390,6 +400,10 @@ impl AppConfig {
 
     pub fn semantic_search_source(&self) -> &'static str {
         self.search.semantic_source.as_str()
+    }
+
+    pub fn semantic_embedding_executor(&self) -> &ctx_daemon_cli::SemanticEmbeddingExecutorConfig {
+        &self.semantic.executor
     }
 
     pub(crate) fn apply_persisted_semantic_search_enabled(&mut self, enabled: bool) {
@@ -440,6 +454,7 @@ impl AppConfig {
     fn apply_values(&mut self, values: &BTreeMap<String, ConfigValue>) -> Result<()> {
         let mut legacy_daemon_enabled = None;
         let mut indexing_mode = None;
+        let mut semantic_executor = None;
         let mut provider_roots = BTreeMap::<
             String,
             (
@@ -524,6 +539,9 @@ impl AppConfig {
                 "indexing.mode" => {
                     indexing_mode = Some(parse_indexing_mode(value)?);
                 }
+                "semantic.executor" => {
+                    semantic_executor = Some(parse_non_empty_string(key, value)?);
+                }
                 "search.semantic" => {
                     self.search.semantic = Some(parse_config_bool(key, value)?);
                     self.search.semantic_source = SemanticSearchSource::Config;
@@ -540,6 +558,7 @@ impl AppConfig {
                 .map(IndexingMode::from_legacy_daemon_enabled)
                 .unwrap_or(self.indexing.mode)
         });
+        self.semantic.executor = parse_semantic_embedding_executor(semantic_executor.as_deref())?;
         if provider_roots.len() > MAX_CONFIGURED_PROVIDER_ROOTS {
             bail!(
                 "configured provider roots exceed the maximum of {MAX_CONFIGURED_PROVIDER_ROOTS}"
@@ -965,6 +984,10 @@ fn decode_basic_key_unicode_escape(
 
 #[cfg(test)]
 mod provider_root_mutation_tests;
+
+#[cfg(test)]
+#[path = "config/semantic_tests.rs"]
+mod semantic_tests;
 
 #[cfg(test)]
 #[path = "config_tests.rs"]

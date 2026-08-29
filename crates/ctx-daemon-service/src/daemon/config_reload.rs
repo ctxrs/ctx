@@ -2,7 +2,11 @@ use std::{path::Path, sync::Arc};
 
 use anyhow::anyhow;
 use ctx_history_core::utc_now;
-use ctx_semantic_model::semantic_query_service_supported;
+use ctx_semantic_model::{
+    semantic_query_service_supported, SemanticEmbeddingExecutorConfig,
+    SemanticEmbeddingExecutorHandle, SemanticEmbeddingExecutorKind, SemanticModelConfig,
+    SharedSemanticRuntime,
+};
 use serde_json::{json, Value};
 
 use crate::{
@@ -31,9 +35,11 @@ pub(super) struct DaemonConfigReloadState {
     requested_daemon_enabled: bool,
     requested_daemon_mode: DaemonMode,
     requested_semantic_enabled: bool,
+    requested_semantic_executor: String,
     applied_daemon_enabled: Option<bool>,
     applied_daemon_mode: Option<DaemonMode>,
     applied_semantic_enabled: Option<bool>,
+    applied_semantic_executor: Option<String>,
     pub(super) last_error: Option<String>,
 }
 
@@ -46,9 +52,11 @@ impl DaemonConfigReloadState {
             requested_daemon_enabled: config.daemon.enabled,
             requested_daemon_mode: config.daemon.mode,
             requested_semantic_enabled: config.semantic_search_enabled(),
+            requested_semantic_executor: semantic_executor_selector(config),
             applied_daemon_enabled: None,
             applied_daemon_mode: None,
             applied_semantic_enabled: None,
+            applied_semantic_executor: None,
             last_error: None,
         }
     }
@@ -58,6 +66,7 @@ impl DaemonConfigReloadState {
         self.requested_daemon_enabled = config.daemon.enabled;
         self.requested_daemon_mode = config.daemon.mode;
         self.requested_semantic_enabled = config.semantic_search_enabled();
+        self.requested_semantic_executor = semantic_executor_selector(config);
         self.last_error = None;
     }
 
@@ -67,18 +76,27 @@ impl DaemonConfigReloadState {
         self.applied_daemon_enabled = Some(self.requested_daemon_enabled);
         self.applied_daemon_mode = Some(self.requested_daemon_mode);
         self.applied_semantic_enabled = Some(self.requested_semantic_enabled);
+        self.applied_semantic_executor = Some(self.requested_semantic_executor.clone());
         self.last_error = None;
     }
 
     fn load_failed(&mut self, error: anyhow::Error) {
         self.status = "failed";
         self.last_attempt_at_ms = utc_now().timestamp_millis();
+        // The requested file cannot be trusted, so no semantic runtime remains
+        // applied even if the last successfully parsed configuration enabled
+        // one. Core refresh can continue independently.
+        self.applied_semantic_enabled = Some(false);
+        self.applied_semantic_executor = None;
         self.last_error = Some(format!("{error:#}"));
     }
 
     fn activation_failed(&mut self, error: anyhow::Error) {
         self.status = "activation_failed";
         self.applied_daemon_enabled = Some(self.requested_daemon_enabled);
+        self.applied_daemon_mode = Some(self.requested_daemon_mode);
+        self.applied_semantic_enabled = Some(false);
+        self.applied_semantic_executor = None;
         self.last_error = Some(format!("{error:#}"));
     }
 
@@ -91,15 +109,25 @@ impl DaemonConfigReloadState {
                 "daemon_enabled": self.requested_daemon_enabled,
                 "daemon_mode": self.requested_daemon_mode.as_str(),
                 "semantic_enabled": self.requested_semantic_enabled,
+                "semantic_executor": self.requested_semantic_executor,
             },
             "applied": {
                 "daemon_enabled": self.applied_daemon_enabled,
                 "daemon_mode": self.applied_daemon_mode.map(DaemonMode::as_str),
                 "semantic_enabled": self.applied_semantic_enabled,
+                "semantic_executor": self.applied_semantic_executor,
             },
             "last_error": self.last_error,
         })
     }
+}
+
+fn semantic_executor_selector(config: &AppConfig) -> String {
+    config
+        .semantic_executor
+        .http_endpoint()
+        .unwrap_or("builtin")
+        .to_owned()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,29 +136,61 @@ pub(super) enum DaemonConfigReloadOutcome {
     StopDisabled,
 }
 
-pub(super) struct DaemonConfigReloadTargets<'a> {
+pub(super) struct DaemonConfigReloadContext<'a> {
     pub(super) query_service: &'a mut Option<DaemonQueryService>,
     pub(super) refresh_service: &'a mut Option<DaemonQueryService>,
     pub(super) state: &'a mut DaemonConfigReloadState,
+    pub(super) wakeup: &'a Arc<DaemonWakeup>,
+    pub(super) lifecycle: &'a Arc<DaemonLifecycleState>,
+    pub(super) config_port: &'static dyn DaemonConfigPort,
 }
 
 pub(super) fn reload_daemon_runtime_config(
     data_root: &Path,
     args: &DaemonRunArgs,
     runtime: &mut DaemonRuntime,
-    targets: DaemonConfigReloadTargets<'_>,
-    wakeup: &Arc<DaemonWakeup>,
-    lifecycle: &Arc<DaemonLifecycleState>,
-    config_port: &'static dyn DaemonConfigPort,
+    context: DaemonConfigReloadContext<'_>,
 ) -> DaemonConfigReloadOutcome {
-    let DaemonConfigReloadTargets {
+    reload_daemon_runtime_config_with_executor_builder(
+        data_root,
+        args,
+        runtime,
+        context,
+        SemanticEmbeddingExecutorHandle::build_with_auth,
+    )
+}
+
+fn reload_daemon_runtime_config_with_executor_builder<BuildExecutor>(
+    data_root: &Path,
+    args: &DaemonRunArgs,
+    runtime: &mut DaemonRuntime,
+    context: DaemonConfigReloadContext<'_>,
+    build_executor: BuildExecutor,
+) -> DaemonConfigReloadOutcome
+where
+    BuildExecutor: FnOnce(
+        SemanticEmbeddingExecutorConfig,
+        ctx_semantic_model::SemanticEmbeddingExecutorAuth,
+        SharedSemanticRuntime,
+        SemanticModelConfig,
+    ) -> anyhow::Result<SemanticEmbeddingExecutorHandle>,
+{
+    let DaemonConfigReloadContext {
         query_service,
         refresh_service,
         state: reload,
-    } = targets;
+        wakeup,
+        lifecycle,
+        config_port,
+    } = context;
     let mut config = match config_port.load(data_root) {
         Ok(config) => config,
         Err(error) => {
+            drop(query_service.take());
+            runtime.semantic_executor = None;
+            runtime.semantic_retry = Default::default();
+            runtime.semantic_blocked_job = None;
+            let _ = runtime.semantic_runtime.release_if_idle();
             reload.load_failed(error);
             return DaemonConfigReloadOutcome::Continue;
         }
@@ -140,9 +200,10 @@ pub(super) fn reload_daemon_runtime_config(
         config.semantic_enabled = false;
     }
     reload.begin_attempt(&config);
-    runtime.config = config;
 
-    if !runtime.config.daemon.enabled && !args.force {
+    if !config.daemon.enabled && !args.force {
+        runtime.config = config;
+        runtime.semantic_executor = None;
         drop(query_service.take());
         drop(refresh_service.take());
         let _ = runtime.semantic_runtime.release_if_idle();
@@ -150,10 +211,43 @@ pub(super) fn reload_daemon_runtime_config(
         return DaemonConfigReloadOutcome::StopDisabled;
     }
 
-    let semantic_runtime_requested = daemon_semantic_runtime_requested(
-        &runtime.config,
-        semantic_query_service_supported() && daemon_query_service_transport_supported(),
-    );
+    let semantic_runtime_requested =
+        daemon_semantic_runtime_requested(&config, daemon_query_service_transport_supported());
+    let executor_changed = runtime.config.semantic_executor != config.semantic_executor;
+    let semantic_activation_changed =
+        runtime.config.semantic_search_enabled() != config.semantic_search_enabled();
+    if executor_changed || semantic_activation_changed {
+        drop(query_service.take());
+        runtime.semantic_executor = None;
+        runtime.semantic_retry = Default::default();
+        runtime.semantic_blocked_job = None;
+    }
+    runtime.config = config;
+    let selected_executor = if semantic_runtime_requested {
+        runtime.semantic_executor.clone().map_or_else(
+            || {
+                build_executor(
+                    runtime.config.semantic_executor.clone(),
+                    config_port.semantic_executor_auth()?,
+                    runtime.semantic_runtime.clone(),
+                    config_port.semantic_model_config(data_root),
+                )
+                .map(Arc::new)
+                .map(Some)
+            },
+            |executor| Ok(Some(executor)),
+        )
+    } else {
+        Ok(None)
+    };
+    let selected_executor = match selected_executor {
+        Ok(executor) => executor,
+        Err(error) => {
+            reload.activation_failed(error);
+            return DaemonConfigReloadOutcome::Continue;
+        }
+    };
+    runtime.semantic_executor = selected_executor;
     if daemon_query_service_transport_supported() && refresh_service.is_none() {
         let Some(source_refresh) = runtime.source_refresh_coordinator.as_ref().cloned() else {
             reload.activation_failed(anyhow!(
@@ -164,6 +258,7 @@ pub(super) fn reload_daemon_runtime_config(
         let handler = ctx_authenticated_request_handler_with_lifecycle(
             data_root,
             runtime.semantic_runtime.clone(),
+            None,
             source_refresh,
             Arc::clone(wakeup),
             config_port,
@@ -188,6 +283,7 @@ pub(super) fn reload_daemon_runtime_config(
         let handler = ctx_authenticated_request_handler_with_lifecycle(
             data_root,
             runtime.semantic_runtime.clone(),
+            runtime.semantic_executor.clone(),
             source_refresh,
             Arc::clone(wakeup),
             config_port,
@@ -219,6 +315,8 @@ pub(super) fn daemon_semantic_runtime_requested(
 ) -> bool {
     service_supported
         && config.semantic_search_enabled()
+        && (config.semantic_executor.kind() == SemanticEmbeddingExecutorKind::Http
+            || semantic_query_service_supported())
         && !config.daemon.mode.runs_only_source_refresh()
 }
 
@@ -228,5 +326,10 @@ pub(super) fn daemon_semantic_runtime_active(
 ) -> bool {
     query_service.is_some()
         && runtime.config.semantic_search_enabled()
-        && semantic_query_service_supported()
+        && (runtime.config.semantic_executor.kind() == SemanticEmbeddingExecutorKind::Http
+            || semantic_query_service_supported())
 }
+
+#[cfg(test)]
+#[path = "config_reload/tests.rs"]
+mod tests;

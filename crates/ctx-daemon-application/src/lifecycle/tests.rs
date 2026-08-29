@@ -1,4 +1,5 @@
 use super::*;
+use crate::{SEMANTIC_EMBEDDING_TOKEN_ENDPOINT_ENV, SEMANTIC_EMBEDDING_TOKEN_ENV};
 use std::cell::RefCell;
 
 const DAEMON_ENV_PROBE_STAGE: &str = "CTX_DAEMON_ENV_PROBE_STAGE";
@@ -7,6 +8,9 @@ const DAEMON_ENV_PROBE_TEST: &str =
     "lifecycle::tests::daemon_child_environment_strips_pro_channel_and_authority";
 const DAEMON_ENV_HOSTILE: &str = "CTX_UNTRUSTED_DAEMON_AMBIENT_SECRET";
 const DAEMON_ENV_ALLOWED_SENTINEL: &str = "/ctx-daemon-allowed-home";
+const DAEMON_ENV_SEMANTIC_TOKEN_SENTINEL: &str = "semantic-bearer-token";
+const DAEMON_ENV_SEMANTIC_ENDPOINT_SENTINEL: &str = "https://embeddings.example.test/";
+const DAEMON_ENV_UNRELATED_SEMANTIC_TOKEN: &str = "CTX_SEMANTIC_EMBEDDING_FALLBACK_TOKEN";
 
 #[test]
 fn daemon_child_environment_strips_pro_channel_and_authority() -> Result<()> {
@@ -15,8 +19,17 @@ fn daemon_child_environment_strips_pro_channel_and_authority() -> Result<()> {
             assert_eq!(env::var("HOME").as_deref(), Ok(DAEMON_ENV_ALLOWED_SENTINEL));
             assert_eq!(env::var("GROK_HOME").as_deref(), Ok("/ctx-grok-home"));
             assert_eq!(env::var("DSH_HOME").as_deref(), Ok("/ctx-dsh-home"));
+            assert_eq!(
+                env::var(SEMANTIC_EMBEDDING_TOKEN_ENV).as_deref(),
+                Ok(DAEMON_ENV_SEMANTIC_TOKEN_SENTINEL)
+            );
+            assert_eq!(
+                env::var(SEMANTIC_EMBEDDING_TOKEN_ENDPOINT_ENV).as_deref(),
+                Ok(DAEMON_ENV_SEMANTIC_ENDPOINT_SENTINEL)
+            );
             assert!(env::var_os(DAEMON_ENV_PRO_CHANNEL).is_none());
             assert!(env::var_os(DAEMON_ENV_HOSTILE).is_none());
+            assert!(env::var_os(DAEMON_ENV_UNRELATED_SEMANTIC_TOKEN).is_none());
             assert!(env::var_os("CTX_RELEASE_INHERITED_AUTHORITY").is_none());
             assert!(env::var_os("CTX_RELEASE_CONFIGURED_AUTHORITY").is_none());
             assert!(env::var_os("CTX_PRO_STAGING_ACCESS_CLIENT_SECRET").is_none());
@@ -71,6 +84,15 @@ fn daemon_child_environment_strips_pro_channel_and_authority() -> Result<()> {
             .env("XAI_API_KEY", "attacker")
             .env("DEEPSEEK_API_KEY", "attacker")
             .env("OPENROUTER_API_KEY", "attacker")
+            .env(
+                SEMANTIC_EMBEDDING_TOKEN_ENV,
+                DAEMON_ENV_SEMANTIC_TOKEN_SENTINEL,
+            )
+            .env(
+                SEMANTIC_EMBEDDING_TOKEN_ENDPOINT_ENV,
+                DAEMON_ENV_SEMANTIC_ENDPOINT_SENTINEL,
+            )
+            .env(DAEMON_ENV_UNRELATED_SEMANTIC_TOKEN, "attacker")
             .env("GROK_HOME", "/ctx-grok-home")
             .env("DSH_HOME", "/ctx-dsh-home")
             .env("HOME", DAEMON_ENV_ALLOWED_SENTINEL)
@@ -134,6 +156,7 @@ fn test_config() -> DaemonConfigSnapshot {
         enabled: true,
         mode: DaemonMode::Full,
         semantic_enabled: true,
+        semantic_executor: "builtin".to_owned(),
     }
 }
 
@@ -196,6 +219,7 @@ fn running_status(
                 "daemon_enabled": expected.enabled,
                 "daemon_mode": expected.mode.as_str(),
                 "semantic_enabled": expected.semantic_enabled,
+                "semantic_executor": expected.semantic_executor.as_str(),
             },
         },
     })
@@ -339,7 +363,8 @@ fn lifecycle_response_requires_every_strict_field_and_known_active_state() {
 }
 
 #[test]
-fn status_owner_start_time_and_exact_config_are_required_before_probe() {
+fn status_owner_start_time_and_exact_config_including_semantic_executor_are_required_before_probe()
+{
     let owner = test_daemon_owner("strict-owner", 44);
     let expected = test_config();
     let status = running_status(&owner, &expected, 50_000);
@@ -366,11 +391,21 @@ fn status_owner_start_time_and_exact_config_are_required_before_probe() {
         ("daemon_enabled", json!(!expected.enabled)),
         ("daemon_mode", json!(DaemonMode::SourceRefreshOnly.as_str())),
         ("semantic_enabled", json!(!expected.semantic_enabled)),
+        (
+            "semantic_executor",
+            json!("https://embeddings.example.test/v1/"),
+        ),
     ] {
         let mut wrong_config = status.clone();
         wrong_config["config_reload"]["applied"][field] = value;
         invalid_statuses.push(wrong_config);
     }
+    let mut missing_executor = status.clone();
+    missing_executor["config_reload"]["applied"]
+        .as_object_mut()
+        .expect("applied config must be an object")
+        .remove("semantic_executor");
+    invalid_statuses.push(missing_executor);
 
     for invalid in invalid_statuses {
         let observation = daemon_handoff_status_observation_from(

@@ -151,6 +151,62 @@ pub fn set_semantic_search_enabled(data_root: &Path, enabled: bool) -> Result<()
     set_config_bool(data_root, "search", "semantic", enabled)
 }
 
+pub fn set_semantic_search_enabled_with_executor(
+    data_root: &Path,
+    endpoint: Option<&str>,
+) -> Result<()> {
+    let executor = endpoint
+        .map(ctx_daemon_cli::SemanticEmbeddingExecutorConfig::http)
+        .transpose()?
+        .unwrap_or_else(ctx_daemon_cli::SemanticEmbeddingExecutorConfig::builtin);
+    establish_private_data_root(data_root)?;
+    let path = AppConfig::config_path(data_root);
+    let _mutation_lock = ConfigMutationLock::acquire(&path)?;
+    let text = read_config_text(&path)?;
+    validated_persisted_config(&path, &text)?;
+
+    let mut document = text
+        .parse::<toml_edit::DocumentMut>()
+        .with_context(|| format!("parse {}", path.display()))?;
+    match executor.http_endpoint() {
+        Some(endpoint) => {
+            if document.as_table().get("semantic").is_none() {
+                document
+                    .as_table_mut()
+                    .insert("semantic", toml_edit::table());
+            }
+            let semantic = document
+                .as_table_mut()
+                .get_mut("semantic")
+                .and_then(toml_edit::Item::as_table_mut)
+                .ok_or_else(|| anyhow::anyhow!("semantic configuration must be a table"))?;
+            semantic.insert("executor", toml_edit::value(endpoint));
+        }
+        None => {
+            let remove_semantic = if let Some(semantic) = document
+                .as_table_mut()
+                .get_mut("semantic")
+                .and_then(toml_edit::Item::as_table_mut)
+            {
+                semantic.remove("executor");
+                semantic.is_empty()
+            } else {
+                false
+            };
+            if remove_semantic {
+                document.as_table_mut().remove("semantic");
+            }
+        }
+    }
+    let updated = set_toml_bool(&document.to_string(), "search", "semantic", true);
+    validated_persisted_config(&path, &updated)
+        .with_context(|| format!("validate updated {}", path.display()))?;
+    if updated != text {
+        write_config_durably(&path, updated.as_bytes())?;
+    }
+    Ok(())
+}
+
 pub(super) fn set_config_bool(
     data_root: &Path,
     section: &str,

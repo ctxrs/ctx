@@ -20,6 +20,8 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tar.workspace = true
+ureq-semantic.workspace = true
+url.workspace = true
 uuid.workspace = true
 xz2.workspace = true
 
@@ -43,4 +45,5 @@ hf-hub = { version = "0.5.0", default-features = false, features = ["ureq", "rus
 ort = { version = "=2.0.0-rc.12", default-features = false, features = ["load-dynamic", "ndarray", "std", "api-24", "cuda", "directml"] }
 
 [dev-dependencies]
+rustls = { version = "0.23.19", default-features = false, features = ["ring", "std", "tls12"] }
 tempfile.workspace = true
