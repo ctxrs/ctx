@@ -72,7 +72,7 @@ pub(super) fn acquire_coreml_backend(
     preference: SemanticBackendPreference,
     fallback: Option<&'static str>,
 ) -> Result<SemanticEmbedder> {
-    let compute = coreml_compute_config(config.foreground_coreml_compute_mode()?);
+    let compute = coreml_compute_config(config.coreml_compute_mode()?);
     if let Some(deferred) = semantic_model_load_deferred(
         SemanticSystemResources::current().available_memory_bytes,
         compute.compute_class,

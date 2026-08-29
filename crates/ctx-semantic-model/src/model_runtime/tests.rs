@@ -344,16 +344,19 @@ pub(super) fn coreml_cpu_only_uses_cpu_quiet_policy_class() {
 }
 
 #[test]
-fn foreground_coreml_defaults_to_cpu_but_honors_explicit_compute_mode() {
+fn foreground_coreml_config_defaults_to_cpu_but_honors_explicit_compute_mode() {
     let temp = tempfile::tempdir().unwrap();
     let default_config = test_config(temp.path());
     assert_eq!(
         default_config.coreml_compute_mode().unwrap(),
         SemanticCoreMlComputeMode::All
     );
+    let foreground_config = default_config.with_foreground_coreml_cpu_default();
+    let foreground_mode = foreground_config.coreml_compute_mode().unwrap();
+    assert_eq!(foreground_mode, SemanticCoreMlComputeMode::CpuOnly);
     assert_eq!(
-        default_config.foreground_coreml_compute_mode().unwrap(),
-        SemanticCoreMlComputeMode::CpuOnly
+        coreml_compute_class(foreground_mode),
+        SemanticComputeClass::Cpu
     );
 
     for mode in [
@@ -362,8 +365,10 @@ fn foreground_coreml_defaults_to_cpu_but_honors_explicit_compute_mode() {
         SemanticCoreMlComputeMode::CpuAndGpu,
         SemanticCoreMlComputeMode::CpuOnly,
     ] {
-        let config = test_config(temp.path()).with_coreml_compute_mode(mode);
-        assert_eq!(config.foreground_coreml_compute_mode().unwrap(), mode);
+        let config = test_config(temp.path())
+            .with_coreml_compute_mode(mode)
+            .with_foreground_coreml_cpu_default();
+        assert_eq!(config.coreml_compute_mode().unwrap(), mode);
     }
 }
 
