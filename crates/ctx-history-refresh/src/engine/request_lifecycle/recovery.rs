@@ -7,6 +7,11 @@ use super::*;
 mod automatic_retry;
 use automatic_retry::durable_build_rearmed_automatic_retry_routes;
 pub(in crate::engine) use automatic_retry::recover_automatic_retry_checkpoints;
+mod publication_ownership;
+use publication_ownership::{
+    decode_published_request_receipt, validate_physical_publication_metadata,
+    validate_strict_publication_metadata_ownership,
+};
 
 impl CoreRefreshEngine {
     pub fn recover(&self, data_root: &Path) -> Result<bool> {
@@ -38,6 +43,17 @@ impl CoreRefreshEngine {
             .get("request_state")
             .and_then(Value::as_str)
             .unwrap_or("unknown");
+        let route_finalization_pending = match job.get("route_finalization_pending") {
+            None => false,
+            Some(Value::Bool(true)) => true,
+            Some(_) => bail!("durable source refresh has invalid route-finalization state"),
+        };
+        if route_finalization_pending && !matches!(request_state, "published" | "failed") {
+            bail!("nonterminal source refresh cannot own pending route finalization");
+        }
+        if request_state == "running" && job.get("request_outcome").is_some() {
+            bail!("durable running source refresh unexpectedly contains `request_outcome`");
+        }
 
         if rebuild_required {
             match request_state {
@@ -52,19 +68,19 @@ impl CoreRefreshEngine {
                         .context(
                             "recover durable published source refresh receipt before rebuild",
                         )?;
-                    validate_terminal_receipt_fields(&job, &publication_receipt)?;
-                    if let Some(outcome) = job.get("request_outcome") {
-                        let mut response = job.clone();
-                        response["receipt"] = outcome.clone();
-                        let request_receipt = published_refresh_receipt_for_recovery(&response)
-                            .context("recover durable logical source refresh outcome")?;
-                        if request_receipt == publication_receipt {
-                            bail!(
-                                "durable logical source refresh redundantly stores its publication receipt"
-                            );
-                        }
-                        validate_terminal_receipt_fields(&job, &request_receipt)?;
+                    if publication_receipt.published_generation
+                        != required_generation(
+                            job.get("published_generation"),
+                            "durable terminal published generation",
+                        )?
+                    {
+                        bail!("durable physical publication receipt names a different generation");
                     }
+                    let _ = decode_published_request_receipt(
+                        &job,
+                        &publication_receipt,
+                        published_refresh_receipt_for_recovery,
+                    )?;
                     let _ = recover_terminal_attempt(&job, SourceBackedRefreshState::Published)?;
                     return self.recover_published_rebuild(
                         data_root,
@@ -93,16 +109,23 @@ impl CoreRefreshEngine {
                         .context("decode terminal Core publication ownership metadata")?;
                     let status_receipt = published_refresh_receipt_for_index(&job, verified)
                         .context("recover durable terminal refresh receipt")?;
-                    let durable_receipt = validate_publication_metadata_ownership(
-                        &job,
+                    let durable_receipt = validate_physical_publication_metadata(
                         &metadata,
                         verified,
                         Some(&status_receipt),
                     )?;
+                    let request_receipt =
+                        decode_published_request_receipt(&job, &durable_receipt, |response| {
+                            published_refresh_receipt_for_index(response, verified)
+                        })?;
+                    if job.get("request_outcome").is_none() {
+                        validate_strict_publication_metadata_ownership(&job, &metadata)?;
+                    }
                     let attempt = recover_exact_published_attempt(
                         &job,
                         &metadata,
                         durable_receipt.clone(),
+                        request_receipt,
                         verified,
                     )?;
                     let request_id = attempt.request_id.clone();
@@ -151,8 +174,9 @@ impl CoreRefreshEngine {
             }
             let metadata = SourceBackedPublicationMetadata::decode(&verified)
                 .context("recover exact terminal refresh receipt from Core publication metadata")?;
+            validate_strict_publication_metadata_ownership(&job, &metadata)?;
             let receipt =
-                validate_publication_metadata_ownership(&job, &metadata, verified.as_ref(), None)?;
+                validate_physical_publication_metadata(&metadata, verified.as_ref(), None)?;
             let attempt =
                 recover_committed_attempt(&job, &metadata, receipt.clone(), verified.as_ref())?;
             let terminal = CoreRefreshTerminalSuccess::bind(receipt, Arc::clone(&verified))?;
@@ -174,7 +198,29 @@ impl CoreRefreshEngine {
                 .get("progress")
                 .and_then(Value::as_object)
                 .is_some_and(|progress| progress.contains_key("current_source_progress"));
-            let failed = recover_failed_attempt(&job)?;
+            let mut failed = recover_failed_attempt(&job)?;
+            if route_finalization_pending {
+                let provisional_pauses = failed
+                    .failure_outcome
+                    .as_ref()
+                    .map(|outcome| {
+                        failed
+                            .automatic_retry_checkpoints
+                            .iter()
+                            .filter(|(route, checkpoint)| {
+                                checkpoint.is_paused() && outcome.blocked_routes.contains(*route)
+                            })
+                            .map(|(route, _)| route.clone())
+                            .collect::<BTreeSet<_>>()
+                    })
+                    .unwrap_or_default();
+                for route in &provisional_pauses {
+                    failed.automatic_retry_checkpoints.remove(route);
+                }
+                if let Some(outcome) = failed.failure_outcome.as_mut() {
+                    outcome.rearm_automatic_retry_routes(&provisional_pauses);
+                }
+            }
             let durable_blocked_routes = job
                 .get("structured_outcome")
                 .and_then(Value::as_object)
@@ -235,6 +281,7 @@ impl CoreRefreshEngine {
                 || has_successors
                 || terminal_progress_needs_normalization
                 || !recovery_rearmed_routes.is_empty()
+                || route_finalization_pending
             {
                 self.persist_job_status(data_root, &finish.durable_request_id)?;
             }
@@ -326,6 +373,7 @@ impl CoreRefreshEngine {
             "outcome",
             "receipt",
             "request_outcome",
+            "route_finalization_pending",
             "generation_changed",
             "finished_at_ms",
             "last_error",
@@ -408,23 +456,10 @@ fn recover_exact_published_attempt(
     job: &Value,
     metadata: &SourceBackedPublicationMetadata,
     publication_receipt: SourceBackedRefreshReceipt,
+    request_receipt: SourceBackedRefreshReceipt,
     verified: &VerifiedIndex,
 ) -> Result<SourceBackedRefreshAttempt> {
     require_terminal_state(job, "published", "completed")?;
-    let request_receipt = match job.get("request_outcome") {
-        Some(outcome) => {
-            let mut response = job.clone();
-            response["receipt"] = outcome.clone();
-            let receipt = published_refresh_receipt_for_index(&response, verified)
-                .context("recover exact logical source refresh outcome")?;
-            if receipt == publication_receipt {
-                bail!("durable logical source refresh redundantly stores its publication receipt");
-            }
-            receipt
-        }
-        None => publication_receipt.clone(),
-    };
-    validate_terminal_receipt_fields(job, &request_receipt)?;
     let mut attempt = recover_terminal_attempt(job, SourceBackedRefreshState::Published)?;
     attempt.request_source_count = Some(request_receipt.source_count(verified));
     attempt.previous_generation = request_receipt.previous_generation.clone();
@@ -814,67 +849,6 @@ fn legacy_failure_outcome(
         affected_routes,
         Some(retry_advice),
     )
-}
-
-fn validate_terminal_receipt_fields(
-    job: &Value,
-    receipt: &SourceBackedRefreshReceipt,
-) -> Result<()> {
-    if optional_generation(job.get("previous_generation"))? != receipt.previous_generation
-        || required_generation(
-            job.get("published_generation"),
-            "durable terminal published generation",
-        )? != receipt.published_generation
-        || job.get("generation_changed").and_then(Value::as_bool)
-            != Some(receipt.generation_changed)
-        || job.get("outcome").and_then(Value::as_str) != Some(receipt.terminal_outcome())
-    {
-        bail!("durable logical source refresh response does not match its exact outcome receipt");
-    }
-    Ok(())
-}
-
-/// Validates metadata ownership for terminal and interrupted-running recovery.
-fn validate_publication_metadata_ownership(
-    job: &Value,
-    metadata: &SourceBackedPublicationMetadata,
-    verified: &VerifiedIndex,
-    status_receipt: Option<&SourceBackedRefreshReceipt>,
-) -> Result<SourceBackedRefreshReceipt> {
-    let request_id = required_nonempty_string(job, "request_id", "source refresh job")?;
-    let logical_no_op = job.get("request_outcome").is_some();
-    if metadata.request_id != request_id && !logical_no_op {
-        bail!("active Core refresh metadata belongs to a different request");
-    }
-    let operation = SourceBackedRefreshOperation::from_request_json(job)?;
-    if metadata.operation != operation {
-        bail!("active Core refresh metadata has a different operation");
-    }
-    let scope = refresh_scope_from_json(job.get("refresh_scope"))?;
-    if metadata.refresh_scope != scope {
-        bail!("active Core refresh metadata has a different scope");
-    }
-    let receipt = published_refresh_receipt_for_index(&metadata.response_value(), verified)
-        .context("decode exact Core publication receipt")?;
-    if receipt.published_generation != verified.generation_id() {
-        bail!("active Core refresh metadata names a different generation");
-    }
-    if let Some(publication_receipt) = status_receipt {
-        if receipt != *publication_receipt {
-            bail!("active Core refresh metadata has a different terminal receipt");
-        }
-        let logical_receipt = match job.get("request_outcome") {
-            Some(outcome) => {
-                let mut response = job.clone();
-                response["receipt"] = outcome.clone();
-                published_refresh_receipt_for_index(&response, verified)
-                    .context("recover exact logical source refresh outcome")?
-            }
-            None => receipt.clone(),
-        };
-        validate_terminal_receipt_fields(job, &logical_receipt)?;
-    }
-    Ok(receipt)
 }
 
 fn require_terminal_state(job: &Value, request_state: &str, status: &str) -> Result<()> {

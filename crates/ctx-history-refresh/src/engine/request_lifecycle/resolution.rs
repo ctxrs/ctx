@@ -2,6 +2,16 @@ use super::*;
 
 impl CoreRefreshEngine {
     pub fn run_next(&self, data_root: &Path) -> Option<SourceBackedRefreshRun> {
+        if self
+            .lock_state()
+            .pending_terminal_persistence
+            .as_ref()
+            .is_some_and(PendingTerminalPersistence::finalization_only)
+        {
+            return self.run_next_with_verified_index_opener(data_root, |index_root| {
+                Ok(Arc::new(open_verified_index(index_root)?))
+            });
+        }
         match self.resolve_active_pending_admission(data_root) {
             Ok(Some(run)) => return Some(run),
             Ok(None) => {}
@@ -150,6 +160,9 @@ impl CoreRefreshEngine {
             |job| self.write_status(data_root, job),
             |_| Ok(()),
         )?;
+        if run.route_finalization_performed {
+            return Some(run);
+        }
         let publication_ready = !run.failed && !run.terminal_persistence_pending;
         if let Some(request_id) = run.job.get("request_id").and_then(Value::as_str) {
             if !run.terminal_persistence_pending {
@@ -160,18 +173,17 @@ impl CoreRefreshEngine {
                     publication_ready,
                     post_publication_fence.as_ref(),
                 ) {
-                    Ok(finish) => {
+                    Ok((finish, finalized_job)) => {
+                        run.job = finalized_job;
                         run.coverage_certificate = finish.coverage_certificate;
                     }
-                    Err(error) => {
+                    Err(_) => {
+                        run.did_work = false;
                         run.terminal_persistence_pending = true;
-                        let mut state = self.lock_state();
-                        if let Some(active_request_id) = state.active_request_id.clone() {
-                            if let Some(active) = find_attempt_mut(&mut state, &active_request_id) {
-                                active.last_error = Some(format!(
-                                    "persist logical demand coverage after publication: {error:#}"
-                                ));
-                            }
+                        let state = self.lock_state();
+                        if let Some(pending) = state.pending_terminal_persistence.as_ref() {
+                            run.job =
+                                job_with_queued_successors(&state, pending.terminal_job.clone());
                         }
                     }
                 }

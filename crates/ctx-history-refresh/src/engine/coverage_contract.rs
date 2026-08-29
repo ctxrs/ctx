@@ -6,6 +6,7 @@ pub struct SourceBackedRefreshRun {
     pub terminal_persistence_pending: bool,
     pub scope: SourceBackedRefreshScope,
     pub(super) coverage_certificate: Option<SourceBackedRefreshCoverageCertificate>,
+    pub(super) route_finalization_performed: bool,
 }
 
 /// Coordinator-minted proof that exact routes were admitted before capture,

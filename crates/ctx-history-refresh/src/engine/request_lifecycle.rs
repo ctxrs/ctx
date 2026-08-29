@@ -406,6 +406,21 @@ impl CoreRefreshEngine {
             // root snapshot reaching the same durable status path.
             let persistence = published(&terminal_job);
             if let Err(error) = persistence {
+                if state
+                    .pending_terminal_persistence
+                    .as_ref()
+                    .is_some_and(PendingTerminalPersistence::finalization_only)
+                {
+                    return Some(SourceBackedRefreshRun {
+                        job: terminal_job,
+                        did_work: false,
+                        failed: failed_run,
+                        terminal_persistence_pending: true,
+                        scope: refresh_scope,
+                        coverage_certificate: None,
+                        route_finalization_performed: true,
+                    });
+                }
                 let terminal_error = terminal_job
                     .get("last_error")
                     .and_then(Value::as_str)
@@ -435,41 +450,53 @@ impl CoreRefreshEngine {
                     terminal_persistence_pending: true,
                     scope: refresh_scope,
                     coverage_certificate: None,
+                    route_finalization_performed: false,
                 });
             }
 
             let pending = state.pending_terminal_persistence.take()?;
-            let published_generation = match pending.outcome {
-                PendingTerminalOutcome::Published { terminal, .. } => {
-                    let receipt = terminal.install(&mut state);
-                    let published_generation = receipt.published_generation.clone();
-                    let attempt = find_attempt_mut(&mut state, &request_id)?;
-                    attempt.state = SourceBackedRefreshState::Published;
-                    attempt.progress.phase = "published".to_owned();
-                    attempt.failure_type = None;
-                    attempt.last_error = None;
-                    state.current_published_generation = Some(published_generation.clone());
-                    Some(published_generation)
-                }
-                PendingTerminalOutcome::Failed { .. } => {
-                    let attempt = find_attempt_mut(&mut state, &request_id)?;
-                    attempt.state = SourceBackedRefreshState::Failed;
-                    attempt.progress.phase = "failed".to_owned();
-                    attempt.last_error = pending
-                        .terminal_job
-                        .get("last_error")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned);
-                    attempt.published_generation.clone()
-                }
-            };
+            let (published_generation, coverage_certificate, advance_terminal) =
+                match pending.outcome {
+                    PendingTerminalOutcome::Published { terminal, .. } => {
+                        let receipt = terminal.install(&mut state);
+                        let published_generation = receipt.published_generation.clone();
+                        let attempt = find_attempt_mut(&mut state, &request_id)?;
+                        attempt.state = SourceBackedRefreshState::Published;
+                        attempt.progress.phase = "published".to_owned();
+                        attempt.failure_type = None;
+                        attempt.last_error = None;
+                        state.current_published_generation = Some(published_generation.clone());
+                        (Some(published_generation), None, true)
+                    }
+                    PendingTerminalOutcome::Failed { .. } => {
+                        let attempt = find_attempt_mut(&mut state, &request_id)?;
+                        attempt.state = SourceBackedRefreshState::Failed;
+                        attempt.progress.phase = "failed".to_owned();
+                        attempt.last_error = pending
+                            .terminal_job
+                            .get("last_error")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned);
+                        (attempt.published_generation.clone(), None, true)
+                    }
+                    PendingTerminalOutcome::FinalizationOnly {
+                        coverage_certificate,
+                        ..
+                    } => {
+                        let published_generation = find_attempt(&state, &request_id)
+                            .and_then(|attempt| attempt.published_generation.clone());
+                        (published_generation, coverage_certificate, false)
+                    }
+                };
             if failed_run && scheduler_retry {
                 // The daemon still has to add its durable retry deadline to
                 // this terminal root. Reserve the root's queue slot until
                 // that lock-serialized write completes.
                 state.pending_scheduler_retry_root_id = Some(request_id.clone());
             }
-            advance_after_terminal_attempt(&mut state, &request_id, published_generation);
+            if advance_terminal {
+                advance_after_terminal_attempt(&mut state, &request_id, published_generation);
+            }
             trim_terminal_attempt_history(&mut state);
             drop(state);
             return Some(SourceBackedRefreshRun {
@@ -478,7 +505,8 @@ impl CoreRefreshEngine {
                 failed: failed_run,
                 terminal_persistence_pending: false,
                 scope: refresh_scope,
-                coverage_certificate: None,
+                coverage_certificate,
+                route_finalization_performed: !advance_terminal,
             });
         }
         drop(state);
@@ -659,7 +687,8 @@ impl CoreRefreshEngine {
                     attempt.published_generation != previous_generation
                 };
                 update_automatic_retry_after_publication(&mut state, &request_id);
-                let terminal_job = durable_job_json(&state, &request_id)?;
+                let mut terminal_job = durable_job_json(&state, &request_id)?;
+                terminal_job["route_finalization_pending"] = Value::Bool(true);
                 if let Err(error) = published(&terminal_job) {
                     let attempt = find_attempt_mut(&mut state, &request_id)?;
                     attempt.state = SourceBackedRefreshState::Running;
@@ -705,7 +734,8 @@ impl CoreRefreshEngine {
                     attempt.last_error = Some(error);
                 }
                 update_automatic_retry_after_failure(&mut state, &request_id);
-                let failure_job = durable_job_json(&state, &request_id)?;
+                let mut failure_job = durable_job_json(&state, &request_id)?;
+                failure_job["route_finalization_pending"] = Value::Bool(true);
                 if let Err(persist_error) = published(&failure_job) {
                     let attempt = find_attempt_mut(&mut state, &request_id)?;
                     let original = attempt.last_error.take().unwrap_or_default();
@@ -749,6 +779,7 @@ impl CoreRefreshEngine {
             terminal_persistence_pending,
             scope: refresh_scope,
             coverage_certificate: None,
+            route_finalization_performed: false,
         })
     }
 

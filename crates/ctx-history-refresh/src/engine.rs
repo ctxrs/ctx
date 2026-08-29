@@ -49,7 +49,7 @@ use startup_observation::{
     startup_routes_requiring_refresh,
 };
 #[cfg(test)]
-pub(crate) use test_support::TestRefreshJournal;
+use test_support::test_refresh_engine_with_journal_executor_and_admitted_routes;
 #[cfg(test)]
 use test_support::{
     daemon_source_backed_refresh_job_path, pin_test_active_verified_generation,
@@ -57,6 +57,8 @@ use test_support::{
     test_refresh_engine_with_executor, test_refresh_engine_with_executor_and_admitted_routes,
     test_refresh_runtime, test_refresh_submission, write_daemon_job_status,
 };
+#[cfg(test)]
+pub(crate) use test_support::{TestFailTerminalStoreJournal, TestRefreshJournal};
 use whole_run_eta::WholeRunEtaEstimator;
 
 #[derive(Default)]
@@ -159,6 +161,11 @@ enum PendingTerminalOutcome {
     Failed {
         scheduler_retry: bool,
     },
+    FinalizationOnly {
+        did_work: bool,
+        failed: bool,
+        coverage_certificate: Option<SourceBackedRefreshCoverageCertificate>,
+    },
 }
 
 impl PendingTerminalPersistence {
@@ -166,11 +173,16 @@ impl PendingTerminalPersistence {
         matches!(
             self.outcome,
             PendingTerminalOutcome::Published { did_work: true, .. }
+                | PendingTerminalOutcome::FinalizationOnly { did_work: true, .. }
         )
     }
 
     fn failed(&self) -> bool {
-        matches!(self.outcome, PendingTerminalOutcome::Failed { .. })
+        matches!(
+            self.outcome,
+            PendingTerminalOutcome::Failed { .. }
+                | PendingTerminalOutcome::FinalizationOnly { failed: true, .. }
+        )
     }
 
     fn scheduler_retry(&self) -> bool {
@@ -179,6 +191,13 @@ impl PendingTerminalPersistence {
             PendingTerminalOutcome::Failed {
                 scheduler_retry: true
             }
+        )
+    }
+
+    fn finalization_only(&self) -> bool {
+        matches!(
+            self.outcome,
+            PendingTerminalOutcome::FinalizationOnly { .. }
         )
     }
 }

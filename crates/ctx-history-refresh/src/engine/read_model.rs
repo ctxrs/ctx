@@ -468,6 +468,9 @@ impl SourceBackedRefreshAttempt {
     }
 
     fn request_outcome_receipt(&self) -> Option<&SourceBackedRefreshReceipt> {
+        if self.state != SourceBackedRefreshState::Published {
+            return None;
+        }
         let request = self.receipt.as_ref()?;
         self.publication_receipt
             .as_ref()

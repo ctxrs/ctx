@@ -209,7 +209,7 @@ impl CoreRefreshEngine {
         request_id: &str,
         publication_ready: bool,
         post_publication_fence: Option<&PostPublicationRouteCoverageFence>,
-    ) -> Result<RouteAdmissionFinish> {
+    ) -> Result<(RouteAdmissionFinish, Value)> {
         let mut state = self.lock_state();
         let finish = Self::finish_route_admissions_locked(
             &mut state,
@@ -224,18 +224,22 @@ impl CoreRefreshEngine {
             )
         })?;
         if let Err(error) = self.write_status(data_root, &job) {
-            if finish.durable_request_id != request_id {
-                state.pending_terminal_persistence = Some(PendingTerminalPersistence {
-                    request_id: finish.durable_request_id.clone(),
-                    terminal_job: job,
-                    outcome: PendingTerminalOutcome::Failed {
-                        scheduler_retry: false,
-                    },
-                });
-            }
+            let failed = find_attempt(&state, request_id)
+                .is_some_and(|attempt| attempt.state == SourceBackedRefreshState::Failed);
+            let did_work =
+                !failed && job.get("generation_changed").and_then(Value::as_bool) == Some(true);
+            state.pending_terminal_persistence = Some(PendingTerminalPersistence {
+                request_id: finish.durable_request_id.clone(),
+                terminal_job: job,
+                outcome: PendingTerminalOutcome::FinalizationOnly {
+                    did_work,
+                    failed,
+                    coverage_certificate: finish.coverage_certificate.clone(),
+                },
+            });
             return Err(error);
         }
-        Ok(finish)
+        Ok((finish, job))
     }
 
     fn finish_route_admissions_locked(

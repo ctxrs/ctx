@@ -1061,6 +1061,9 @@ fn restart_recovers_matching_running_publication_as_terminal_after_pointer_crash
 
 mod additional;
 
+#[path = "tests/execution_persistence.rs"]
+mod execution_persistence;
+
 #[path = "tests/receipt.rs"]
 mod receipt_tests;
 
