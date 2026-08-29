@@ -6,7 +6,9 @@ use std::{
 };
 
 use anyhow::{anyhow, Result};
-use ctx_daemon_service::{DaemonQueryServiceUnavailable, PinnedSourceBackedGeneration};
+use ctx_daemon_service::{
+    daemon_semantic_job_path, DaemonQueryServiceUnavailable, PinnedSourceBackedGeneration,
+};
 use ctx_history_index::{CompiledSearchFilter, EventSearchCandidate, IndexError, VerifiedIndex};
 use ctx_history_read_application::{
     HistorySemanticBatch, HistorySemanticError, HistorySemanticPort, HistorySemanticQuery,
@@ -45,6 +47,158 @@ fn reset_foreground_acquisition_attempts() {
 #[cfg(test)]
 fn foreground_acquisition_attempts() -> usize {
     FOREGROUND_ACQUISITION_ATTEMPTS.with(std::cell::Cell::get)
+}
+
+/// A terminal observation while waiting for daemon-owned semantic completion
+/// of one exact Core generation.
+#[derive(Debug, thiserror::Error)]
+pub enum ExactDaemonSemanticCompletionError {
+    #[error(
+        "Core generation {generation_id} was superseded by active generation {active_generation_id}"
+    )]
+    CoreSuperseded {
+        generation_id: String,
+        active_generation_id: String,
+        retryable: bool,
+    },
+    #[error("daemon semantic job failed for Core generation {generation_id}: {detail}")]
+    DaemonJobFailed {
+        generation_id: String,
+        retryable: bool,
+        failure_class: Option<String>,
+        detail: String,
+    },
+    #[error("could not observe daemon semantic completion for Core generation {generation_id}: {source:#}")]
+    Observation {
+        generation_id: String,
+        #[source]
+        source: anyhow::Error,
+    },
+    #[error("semantic preflight failed for Core generation {generation_id}: {source:#}")]
+    Preflight {
+        generation_id: String,
+        #[source]
+        source: anyhow::Error,
+    },
+}
+
+/// Waits for daemon-owned semantic acknowledgement of the supplied exact Core
+/// generation. Unlike [`wait_for_daemon_semantic_generation`], this API never
+/// repins: callers must retry with a new pin after `CoreSuperseded`.
+///
+/// Completion requires `SemanticQueryPin::preflight` to report the supplied
+/// generation ready (including `ReadyEmpty`). A matching terminal daemon job
+/// failure is reported structurally, while stale job receipts are ignored.
+pub fn wait_for_exact_daemon_semantic_completion(
+    data_root: &Path,
+    pin: PinnedSourceBackedGeneration,
+) -> std::result::Result<PinnedSourceBackedGeneration, ExactDaemonSemanticCompletionError> {
+    wait_for_exact_daemon_semantic_completion_with(
+        pin,
+        || {
+            crate::pin_active_verified_generation(data_root)
+                .map(|active| active.generation_id().to_owned())
+        },
+        || ctx_daemon_runtime::read_daemon_job_status_strict(&daemon_semantic_job_path(data_root)),
+        |pin| {
+            SemanticQueryPin::preflight(pin.verified_index(), data_root, semantic_model_contract())
+                .map(|_| ())
+        },
+        thread::sleep,
+    )
+}
+
+fn wait_for_exact_daemon_semantic_completion_with<ActiveGeneration, ReadJob, Preflight, Pause>(
+    pin: PinnedSourceBackedGeneration,
+    mut active_generation: ActiveGeneration,
+    mut read_job: ReadJob,
+    mut preflight: Preflight,
+    mut pause: Pause,
+) -> std::result::Result<PinnedSourceBackedGeneration, ExactDaemonSemanticCompletionError>
+where
+    ActiveGeneration: FnMut() -> Result<String>,
+    ReadJob: FnMut() -> Result<Option<Value>>,
+    Preflight: FnMut(&PinnedSourceBackedGeneration) -> Result<()>,
+    Pause: FnMut(StdDuration),
+{
+    let generation_id = pin.generation_id().to_owned();
+    loop {
+        let active_generation_id = match active_generation() {
+            Ok(active_generation_id) => active_generation_id,
+            Err(error) if active_generation_changed_during_repin(&error) => {
+                pause(SEMANTIC_GENERATION_POLL_INTERVAL);
+                continue;
+            }
+            Err(source) => {
+                return Err(ExactDaemonSemanticCompletionError::Observation {
+                    generation_id,
+                    source,
+                });
+            }
+        };
+        if active_generation_id != generation_id {
+            return Err(ExactDaemonSemanticCompletionError::CoreSuperseded {
+                generation_id,
+                active_generation_id,
+                retryable: true,
+            });
+        }
+
+        let job = read_job().map_err(|source| ExactDaemonSemanticCompletionError::Observation {
+            generation_id: generation_id.clone(),
+            source,
+        })?;
+        if let Some(job) = job.filter(|job| {
+            job.get("core_generation_id").and_then(Value::as_str) == Some(generation_id.as_str())
+                && job.get("status").and_then(Value::as_str) == Some("failed")
+        }) {
+            return Err(ExactDaemonSemanticCompletionError::DaemonJobFailed {
+                generation_id,
+                retryable: job
+                    .get("retryable")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                failure_class: job
+                    .get("failure_class")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                detail: job
+                    .get("last_error")
+                    .and_then(Value::as_str)
+                    .or_else(|| job.get("reason").and_then(Value::as_str))
+                    .unwrap_or("daemon semantic job failed")
+                    .to_owned(),
+            });
+        }
+
+        match preflight(&pin) {
+            Ok(()) => {
+                let active_generation_id = active_generation().map_err(|source| {
+                    ExactDaemonSemanticCompletionError::Observation {
+                        generation_id: generation_id.clone(),
+                        source,
+                    }
+                })?;
+                if active_generation_id == generation_id {
+                    return Ok(pin);
+                }
+                return Err(ExactDaemonSemanticCompletionError::CoreSuperseded {
+                    generation_id,
+                    active_generation_id,
+                    retryable: true,
+                });
+            }
+            Err(error) if semantic_generation_preflight_is_pending(&error) => {
+                pause(SEMANTIC_GENERATION_POLL_INTERVAL);
+            }
+            Err(source) => {
+                return Err(ExactDaemonSemanticCompletionError::Preflight {
+                    generation_id,
+                    source,
+                });
+            }
+        }
+    }
 }
 
 /// Waits for daemon-owned semantic coverage of the current verified Core
@@ -150,6 +304,12 @@ fn semantic_generation_wait_is_retryable(error: &anyhow::Error) -> bool {
                     | "semantic_generation_not_acknowledged"
             )
         })
+}
+
+fn semantic_generation_preflight_is_pending(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<SemanticNotReady>()
+        .is_some_and(SemanticNotReady::retryable)
 }
 
 pub struct SemanticQueryAdapter<'data_root> {
