@@ -685,7 +685,8 @@ persistent daemon for lexical publication and optional semantic catch-up. In
 manual mode, background refresh uses only the last published generation and
 does not contact, start, or wake a process; there is no hidden foreground
 bootstrap or importer. A daemon-free semantic or hybrid query may read an
-already-ready semantic generation and embed from verified cached model assets.
+already-ready semantic generation and either embed from verified cached model
+assets or use an explicitly selected HTTP executor after preflight.
 History-source plugins are searched from the published generation after
 explicit import; search refresh does not execute their commands in 1.0.
 Semantic retrieval reads an existing compatible generation under
@@ -806,7 +807,9 @@ indexed snippets and typed show/locate data from the active Core generation.
 Explicit semantic or hybrid requests may read a compatible semantic generation.
 They embed the query through the retained daemon query service when it is
 available, or from verified cached model assets in the foreground when the
-daemon is disabled.
+daemon is disabled. An explicitly selected HTTP executor remains HTTP-capable
+after exact preflight; `off` prohibits indexing and durable mutation, not that
+selected network request.
 
 Results are local hits over indexed history. Event hits include `ctx_event_id`;
 hits with known session context include `ctx_session_id`; provider metadata

@@ -405,11 +405,9 @@ fn tree_snapshot(root: &Path) -> Result<Vec<(PathBuf, Vec<u8>)>> {
 fn durable_query_state_snapshot(
     data_root: &Path,
     cache_dir: &Path,
-) -> Result<(Vec<u8>, Vec<u8>, Vec<(PathBuf, Vec<u8>)>)> {
-    let semantic = source_backed_semantic_vector_path(data_root);
+) -> Result<(Vec<(PathBuf, Vec<u8>)>, Vec<(PathBuf, Vec<u8>)>)> {
     Ok((
-        fs::read(data_root.join("index").join("active-generation.json"))?,
-        fs::read(semantic.join("state.sqlite"))?,
+        tree_snapshot(data_root)?,
         if cache_dir.exists() {
             tree_snapshot(cache_dir)?
         } else {
