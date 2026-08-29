@@ -116,6 +116,36 @@ pub(super) struct SemanticOnnxRuntimeCandidate {
 }
 
 #[cfg(ctx_semantic_fastembed)]
+fn format_runtime_load_error(error: &ort::LoadDynamicError) -> String {
+    // `ort::LoadDynamicError` deliberately does not expose its `Dlopen`
+    // libloading error through `Error::source()`, so walk that one public
+    // variant explicitly. The libloading source holds the native loader text.
+    let native_cause = match error {
+        ort::LoadDynamicError::Dlopen { error, .. } => {
+            std::error::Error::source(error).map(|native_cause| native_cause.to_string())
+        }
+        _ => None,
+    };
+    let mut formatted = error.to_string();
+    if let Some(native_cause) =
+        native_cause.filter(|native_cause| !formatted.contains(native_cause))
+    {
+        formatted.push_str(": ");
+        formatted.push_str(&native_cause);
+    }
+    formatted
+}
+
+#[cfg(ctx_semantic_fastembed)]
+fn format_runtime_load_failure(source: &str, path: &Path, error: &ort::LoadDynamicError) -> String {
+    format!(
+        "{source} {}: {}",
+        path.display(),
+        format_runtime_load_error(error)
+    )
+}
+
+#[cfg(ctx_semantic_fastembed)]
 pub(super) fn ensure_semantic_onnxruntime_loaded(paths: &SemanticModelPaths) -> Result<PathBuf> {
     if let Some(runtime) = LOADED_RUNTIME.get() {
         if runtime.flavor != OnnxRuntimeFlavor::Cpu {
@@ -205,7 +235,7 @@ pub(super) fn load_semantic_onnxruntime(
         #[cfg(target_os = "windows")]
         if let Err(error) = preload_windows_onnxruntime(&candidate.path) {
             failures.push(format!(
-                "{} {}: {error}",
+                "{} {}: {error:#}",
                 candidate.source,
                 candidate.path.display()
             ));
@@ -216,10 +246,10 @@ pub(super) fn load_semantic_onnxruntime(
                 let _ = builder.commit();
                 return Ok(candidate.path);
             }
-            Err(error) => failures.push(format!(
-                "{} {}: {error}",
+            Err(error) => failures.push(format_runtime_load_failure(
                 candidate.source,
-                candidate.path.display()
+                &candidate.path,
+                &error,
             )),
         }
     }
@@ -256,7 +286,7 @@ fn load_verified_accelerator_runtime(
         };
         #[cfg(target_os = "windows")]
         if let Err(error) = preload_windows_onnxruntime(&path) {
-            failures.push(format!("{}: {error}", path.display()));
+            failures.push(format!("{}: {error:#}", path.display()));
             continue;
         }
         #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -286,7 +316,11 @@ fn load_verified_accelerator_runtime(
                     flavor,
                 });
             }
-            Err(error) => failures.push(format!("{}: {error}", path.display())),
+            Err(error) => failures.push(format!(
+                "{}: {}",
+                path.display(),
+                format_runtime_load_error(&error)
+            )),
         }
     }
     let detail = if failures.is_empty() {
@@ -555,6 +589,70 @@ mod ort_runtime_tests {
     use std::env;
 
     use super::*;
+
+    #[test]
+    fn runtime_load_failure_preserves_real_native_loader_detail() {
+        let temp = tempfile::tempdir().unwrap();
+        let missing_dylib = temp.path().join(SEMANTIC_ONNXRUNTIME_DYLIB);
+        let error = match ort::init_from(&missing_dylib) {
+            Ok(_) => panic!("a missing dynamic library should not load"),
+            Err(error) => error,
+        };
+        let native_cause = match &error {
+            ort::LoadDynamicError::Dlopen { error, .. } => std::error::Error::source(error)
+                .expect("a dynamic loader failure should retain its native cause")
+                .to_string(),
+            other => panic!("expected a dynamic loader failure, got {other:?}"),
+        };
+        let loader_display = error.to_string();
+        let formatted =
+            format_runtime_load_failure("ctx_installed_runtime", &missing_dylib, &error);
+        assert!(formatted.contains(&loader_display), "{formatted}");
+        assert!(formatted.contains(&native_cause), "{formatted}");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn production_candidate_loader_preserves_preload_error_chain() {
+        let temp = tempfile::tempdir().unwrap();
+        let missing_dylib = temp.path().join(SEMANTIC_ONNXRUNTIME_DYLIB);
+        let preload_error = preload_windows_onnxruntime(&missing_dylib)
+            .expect_err("a missing ONNX Runtime library should not preload");
+        let preload_chain = format!("{preload_error:#}");
+        assert_ne!(preload_chain, preload_error.to_string());
+
+        let production_error = load_semantic_onnxruntime(
+            &test_absolute_path("model-cache"),
+            &SemanticOnnxRuntimePaths {
+                ctx_dylib: Some(missing_dylib.clone()),
+                ..SemanticOnnxRuntimePaths::default()
+            },
+        )
+        .expect_err("a missing ONNX Runtime library should not load");
+        let production_display = production_error.to_string();
+        assert!(production_display.contains("failed to load ONNX Runtime dynamic library"));
+        assert!(production_display.contains(&missing_dylib.display().to_string()));
+        assert!(
+            production_display.contains(&preload_chain),
+            "{production_display}"
+        );
+    }
+
+    #[test]
+    fn runtime_load_failure_formats_other_ort_variants() {
+        let missing_api = ort::LoadDynamicError::MissingApi {
+            path: test_absolute_path(SEMANTIC_ONNXRUNTIME_DYLIB),
+        };
+        let formatted = format_runtime_load_failure(
+            "ctx_installed_runtime",
+            Path::new("/tmp/libonnxruntime"),
+            &missing_api,
+        );
+        assert_eq!(
+            formatted,
+            format!("ctx_installed_runtime /tmp/libonnxruntime: {missing_api}")
+        );
+    }
 
     fn test_absolute_path(path: &str) -> PathBuf {
         let root = if cfg!(windows) {
