@@ -656,7 +656,6 @@ fn callback_channel_overflow_leaves_terminal_owner_and_queues_distinct_maintenan
     use std::{
         collections::BTreeMap,
         sync::{atomic::AtomicUsize, Barrier},
-        time::Instant,
     };
 
     use crate::source_backed_refresh_coordinator::{
@@ -773,24 +772,25 @@ fn callback_channel_overflow_leaves_terminal_owner_and_queues_distinct_maintenan
     let run = thread::spawn(move || runner.run_next(&run_root).expect("active wait run"));
     execution_published.wait();
 
-    fs::write(&provider_file, b"changed during active refresh\n")?;
+    watcher
+        .runtime
+        .inject_callback_event_for_test(Ok(NativeWatchEvent::ordinary(
+            vec![provider_file.clone()],
+        )));
     worker_entered.wait();
-    for index in 0..1_024 {
-        fs::write(
-            provider_root.join(format!("overflow-{index}.jsonl")),
-            b"event\n",
-        )?;
+    for _ in 0..=WATCH_EVENT_QUEUE_CAPACITY {
+        watcher
+            .runtime
+            .inject_callback_event_for_test(Ok(NativeWatchEvent::ordinary(vec![
+                provider_file.clone()
+            ])));
     }
-    let deadline = Instant::now() + Duration::from_secs(3);
-    while watcher.runtime_snapshot().ingress_overflows == 0 && Instant::now() < deadline {
-        thread::yield_now();
-    }
-    let overflowed = watcher.runtime_snapshot().ingress_overflows > 0;
+    let pressure = watcher.runtime_snapshot();
+    assert_eq!(pressure.ingress_overflows, 1);
+    assert_eq!(pressure.ingress_disconnects, 0);
     let first_boundary = coordinator.watch_uncertainty_watermark();
     execution_release.wait();
     let terminal_owner = run.join().expect("join active wait");
-    worker_release.wait();
-    assert!(overflowed, "real callback channel did not overflow");
     let first_boundary = first_boundary.expect("overflow must synchronously fence Core");
     assert_eq!(terminal_owner.job["request_id"], request_id);
     assert_eq!(terminal_owner.job["request_state"], "published");
@@ -807,59 +807,42 @@ fn callback_channel_overflow_leaves_terminal_owner_and_queues_distinct_maintenan
         first_boundary,
         0,
     )?);
-    let mut recovered_coverage = false;
-    for _ in 0..8 {
-        let boundary = coordinator
-            .watch_uncertainty_watermark()
-            .expect("uncertainty remains fenced until recovery");
-        watcher.reconcile_roots(true).1?;
-        if coordinator.complete_watch_uncertainty_recovery(
-            &data_root,
-            catalog.clone(),
-            boundary,
-            0,
-        )? {
-            recovered_coverage = true;
-            break;
-        }
-        let _ = wakeup.wait(Duration::from_millis(50));
-    }
-    assert!(recovered_coverage, "callback pressure never quiesced");
+    worker_release.wait();
+    let overflow_wake = wakeup.wait(Duration::from_secs(3));
+    assert!(!overflow_wake.timed_out, "overflow wake handoff timed out");
+    assert!(
+        overflow_wake
+            .source_watch
+            .reconcile
+            .is_some_and(|watermark| watermark >= first_boundary),
+        "overflow wake must carry the synchronously fenced boundary"
+    );
+    let boundary = coordinator
+        .watch_uncertainty_watermark()
+        .expect("newer uncertainty remains fenced until recovery");
+    watcher.reconcile_roots(true).1?;
+    assert!(coordinator.complete_watch_uncertainty_recovery(
+        &data_root,
+        catalog.clone(),
+        boundary,
+        0,
+    )?);
+    assert_eq!(
+        coordinator.scheduled_route_ids_for_test(),
+        BTreeSet::from([route.clone()])
+    );
     assert_eq!(
         coordinator.status(request_id).unwrap()["request_state"],
         "published"
     );
-    let mut maintenance = None;
-    let maintenance_deadline = Instant::now() + Duration::from_secs(5);
-    while Instant::now() < maintenance_deadline {
-        if let Some(boundary) = coordinator.watch_uncertainty_watermark() {
-            watcher.reconcile_roots(true).1?;
-            let _ = coordinator.complete_watch_uncertainty_recovery(
-                &data_root,
-                catalog.clone(),
-                boundary,
-                0,
-            )?;
-            let _ = wakeup.wait(Duration::from_millis(50));
-            continue;
-        }
-        if !coordinator.enqueue_next_dirty_route(&data_root, u64::MAX)? {
-            let _ = wakeup.wait(Duration::from_millis(50));
-            continue;
-        }
-        let Some(rerun) = coordinator.run_next(&data_root) else {
-            continue;
-        };
-        if rerun.job["request_state"] == "published" {
-            maintenance = Some(rerun);
-            break;
-        }
-    }
-    let maintenance = maintenance.expect("overflow recovery and maintenance publication");
+    assert!(coordinator.enqueue_next_dirty_route(&data_root, u64::MAX)?);
+    let maintenance = coordinator
+        .run_next(&data_root)
+        .expect("overflow maintenance publication");
     assert_ne!(maintenance.job["request_id"], request_id);
     assert!(!maintenance.failed, "{:#}", maintenance.job);
     assert_eq!(maintenance.job["request_state"], "published");
-    assert!(launches.load(Ordering::SeqCst) >= 2);
+    assert_eq!(launches.load(Ordering::SeqCst), 2);
     Ok(())
 }
 
