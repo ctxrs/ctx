@@ -111,7 +111,7 @@ fn crash_image_failed_exhaustive_attempt_rearms_retryable_route_ownership() {
     let data_root = temp.path().join("data");
     ctx_history_platform::platform_security::establish_private_data_root(&data_root).unwrap();
     let route = route('a');
-    let first = CoreRefreshEngine::new();
+    let first = test_refresh_engine();
     first.initialize_watch_route_authority([route.clone()]);
     first.record_watch_routes_requiring_exhaustive_reconciliation(
         [(route.clone(), EventWatermark::new(1, 1))],
@@ -154,7 +154,7 @@ fn crash_image_failed_exhaustive_attempt_rearms_retryable_route_ownership() {
     );
     drop(first);
 
-    let recovered = CoreRefreshEngine::new();
+    let recovered = test_refresh_engine();
     assert!(!recovered
         .recover_interrupted_publication(&data_root)
         .unwrap());
