@@ -13,6 +13,7 @@ use url::{Host, Url};
 use crate::analytics::AnalyticsDeliveryFailureClass;
 
 pub(crate) const TELEMETRY_HTTP_TIMEOUT: Duration = Duration::from_millis(250);
+pub(crate) const DAEMON_TELEMETRY_HTTP_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_ARTIFACT_REDIRECTS: usize = 5;
 
 #[derive(Debug)]
@@ -46,14 +47,12 @@ impl std::error::Error for TelemetryPostError {
     }
 }
 
-pub(crate) fn post_telemetry_json(
-    endpoint: &str,
-    body: &[u8],
-) -> std::result::Result<(), TelemetryPostError> {
-    post_json_with_timeout(endpoint, body, TELEMETRY_HTTP_TIMEOUT)
+#[cfg(test)]
+fn post_telemetry_json(endpoint: &str, body: &[u8]) -> std::result::Result<(), TelemetryPostError> {
+    post_telemetry_json_with_timeout(endpoint, body, TELEMETRY_HTTP_TIMEOUT)
 }
 
-fn post_json_with_timeout(
+pub(crate) fn post_telemetry_json_with_timeout(
     endpoint: &str,
     body: &[u8],
     timeout: Duration,
@@ -543,8 +542,13 @@ mod tests {
     }
 
     #[test]
-    fn telemetry_http_budget_is_at_most_250_milliseconds() {
+    fn interactive_telemetry_budget_stays_bounded() {
         assert_eq!(TELEMETRY_HTTP_TIMEOUT, Duration::from_millis(250));
+    }
+
+    #[test]
+    fn background_daemon_telemetry_can_wait_for_durable_ingest() {
+        assert_eq!(DAEMON_TELEMETRY_HTTP_TIMEOUT, Duration::from_secs(2));
     }
 
     #[test]

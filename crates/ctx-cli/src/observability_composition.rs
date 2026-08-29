@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use crate::{
     analytics::{AnalyticsDeliveryAuthority, AnalyticsDeliveryFailureClass, PublicEventV1},
@@ -25,6 +28,7 @@ pub(crate) fn deliver_analytics_batch(
     data_root: &Path,
     config: &AppConfig,
     events: &[PublicEventV1],
+    timeout: Duration,
 ) -> anyhow::Result<()> {
     if std::env::var_os("CTX_ANALYTICS_DRY_RUN").is_some() {
         return Ok(());
@@ -61,7 +65,7 @@ pub(crate) fn deliver_analytics_batch(
     };
     let mut outbox = crate::analytics_outbox::AnalyticsOutbox::open(outbox_path)?;
     let flush = outbox.flush(&config.analytics.endpoint, |body| {
-        crate::net::post_telemetry_json(&config.analytics.endpoint, body)
+        crate::net::post_telemetry_json_with_timeout(&config.analytics.endpoint, body, timeout)
             .map_err(|error| error.class())
     })?;
     let mut blocked = match flush {
@@ -71,7 +75,11 @@ pub(crate) fn deliver_analytics_batch(
     {
         let mut post_or_queue = |body: &[u8]| -> anyhow::Result<()> {
             if blocked.is_none() {
-                match crate::net::post_telemetry_json(&config.analytics.endpoint, body) {
+                match crate::net::post_telemetry_json_with_timeout(
+                    &config.analytics.endpoint,
+                    body,
+                    timeout,
+                ) {
                     Ok(()) => return Ok(()),
                     Err(error) => blocked = Some(error.class()),
                 }
@@ -89,7 +97,11 @@ pub(crate) fn deliver_analytics_batch(
         {
             let mut post_or_queue = |body: &[u8]| -> anyhow::Result<()> {
                 if blocked.is_none() {
-                    match crate::net::post_telemetry_json(&config.analytics.endpoint, body) {
+                    match crate::net::post_telemetry_json_with_timeout(
+                        &config.analytics.endpoint,
+                        body,
+                        timeout,
+                    ) {
                         Ok(()) => return Ok(()),
                         Err(error) => blocked = Some(error.class()),
                     }

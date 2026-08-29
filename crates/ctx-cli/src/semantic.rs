@@ -361,7 +361,7 @@ impl ctx_daemon_cli::DaemonCliHost for CtxDaemonCliHost {
         let Ok(config) = crate::config::AppConfig::load(data_root) else {
             return;
         };
-        crate::analytics::send_batch(data_root, &config, events);
+        crate::analytics::send_daemon_batch(data_root, &config, events);
     }
 
     fn fetch_to_writer(

@@ -129,6 +129,8 @@ fn automatic_retry_json(
         .iter()
         .map(|(route, checkpoint)| (route.as_str().to_owned(), checkpoint.to_json()))
         .collect::<serde_json::Map<_, _>>();
+    // Keep these released reason values stable even though eligibility now
+    // also covers the terminal-coverage outcome.
     Some(json!({
         "state": state,
         "reason": if paused {
@@ -154,8 +156,16 @@ pub(super) struct SourceBackedRefreshFailureOutcome {
 
 impl SourceBackedRefreshFailureOutcome {
     pub(super) fn is_automatic_retry_eligible(&self) -> bool {
-        self.code == RefreshOutcomeCode::SourceRefreshFailed
-            && self.class == RefreshOutcomeClass::Internal
+        matches!(
+            (self.code, self.class),
+            (
+                RefreshOutcomeCode::SourceRefreshFailed,
+                RefreshOutcomeClass::Internal,
+            ) | (
+                RefreshOutcomeCode::AllProviderTerminalCoverageUnavailable,
+                RefreshOutcomeClass::Coverage,
+            )
+        )
     }
 
     pub(super) fn pause_automatic_retry_routes(&mut self, routes: &BTreeSet<SourceRouteIdentity>) {
