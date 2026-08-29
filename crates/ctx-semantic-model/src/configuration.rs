@@ -131,6 +131,7 @@ pub struct SemanticModelConfig {
     backend_preference: SemanticBackendPreference,
     backend_preference_error: Option<String>,
     coreml_compute_mode: SemanticCoreMlComputeMode,
+    coreml_compute_mode_explicit: bool,
     coreml_compute_mode_error: Option<String>,
     thread_override: Option<usize>,
     batch_size_override: Option<usize>,
@@ -144,6 +145,7 @@ impl SemanticModelConfig {
             backend_preference: SemanticBackendPreference::Auto,
             backend_preference_error: None,
             coreml_compute_mode: SemanticCoreMlComputeMode::All,
+            coreml_compute_mode_explicit: false,
             coreml_compute_mode_error: None,
             thread_override: None,
             batch_size_override: None,
@@ -164,6 +166,7 @@ impl SemanticModelConfig {
 
     pub fn with_coreml_compute_mode(mut self, mode: SemanticCoreMlComputeMode) -> Self {
         self.coreml_compute_mode = mode;
+        self.coreml_compute_mode_explicit = true;
         self.coreml_compute_mode_error = None;
         self
     }
@@ -207,6 +210,17 @@ impl SemanticModelConfig {
             .map_or(Ok(self.coreml_compute_mode), |error| {
                 Err(anyhow!(error.clone()))
             })
+    }
+
+    #[cfg(any(all(ctx_semantic_fastembed, target_os = "macos"), test))]
+    pub(crate) fn foreground_coreml_compute_mode(&self) -> Result<SemanticCoreMlComputeMode> {
+        self.coreml_compute_mode().map(|mode| {
+            if self.coreml_compute_mode_explicit {
+                mode
+            } else {
+                SemanticCoreMlComputeMode::CpuOnly
+            }
+        })
     }
 
     pub(crate) const fn thread_override(&self) -> Option<usize> {
