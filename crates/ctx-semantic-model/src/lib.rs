@@ -102,6 +102,27 @@ pub mod test_support {
 
     use crate::{SemanticDaemonModelAcquisition, SemanticOrtModelVariant};
 
+    /// Returns the normalized frozen HTTP conformance vector for a test server.
+    /// Production endpoints must provide their own conforming embeddings.
+    pub fn http_embedding_canary_vector(input_kind: &str) -> Vec<f32> {
+        let reference = match input_kind {
+            "query" => crate::http_embedding_canary::QUERY_DAEMON_RECOVERY_REFERENCE.as_slice(),
+            "documents" => {
+                crate::http_embedding_canary::DOCUMENT_DAEMON_RECOVERY_REFERENCE.as_slice()
+            }
+            _ => panic!("unknown HTTP embedding canary input kind: {input_kind}"),
+        };
+        let norm = reference
+            .iter()
+            .map(|value| f32::from(*value).powi(2))
+            .sum::<f32>()
+            .sqrt();
+        reference
+            .iter()
+            .map(|value| f32::from(*value) / norm)
+            .collect()
+    }
+
     #[cfg(ctx_semantic_fastembed)]
     pub fn write_test_semantic_cache(root: &Path) -> Result<()> {
         crate::write_test_semantic_cache(root)
