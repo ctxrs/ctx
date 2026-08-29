@@ -134,6 +134,10 @@ impl<B: crate::LogicalSqliteRuntimeBinding> ReplacementDocumentTree
                 OpenCodeScanOutput::Document(document) => {
                     sink.emit_core_record(document).map_err(Into::into)
                 }
+                OpenCodeScanOutput::Rejection(rejection) => {
+                    sink.record_rejection(rejection);
+                    Ok(())
+                }
                 OpenCodeScanOutput::Progress(progress) => sink
                     .report_current_source_progress(progress)
                     .map_err(Into::into),

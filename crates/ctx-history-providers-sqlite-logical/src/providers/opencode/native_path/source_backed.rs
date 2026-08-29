@@ -6,6 +6,7 @@
 
 use std::{collections::BTreeSet, path::Path};
 
+use ctx_history_capture_runtime::SourceBackedRecordRejectionDraft;
 use ctx_history_core::{
     derive_event_id, derive_session_id, CaptureProvider, CertifiedSource, CoreRecord,
     CoreRecordError, EventIdentityInput, NativeItemKey, NativeSessionKey, ProjectionContractError,
@@ -44,7 +45,7 @@ use crate::{
 
 const SOURCE_ANCHOR_KEY: &str = "active-database";
 const SOURCE_IDENTITY_VERSION: u32 = 1;
-const PARSER_REVISION: &str = "opencode-family-source-backed-v11-optional-metadata-admission";
+const PARSER_REVISION: &str = "opencode-family-source-backed-v12-known-file-carriers";
 const LOGICAL_SESSION_KIND: &str = "opencode-family-session";
 const LOGICAL_EVENT_KIND: &str = "opencode-family-event";
 const NATIVE_SESSION_NAMESPACE: &str = "opencode-family.session-id";
@@ -92,6 +93,7 @@ impl SqliteSourceErrorComposition for OpenCodeSourceBackedError {
 }
 
 mod adapter;
+mod diagnostics;
 mod fingerprint;
 mod ordering;
 mod projection;
@@ -100,6 +102,10 @@ mod value;
 pub use adapter::{
     adapter as source_backed_adapter, adapter_scoped as source_backed_adapter_scoped,
     OpenCodeDocumentTreeAdapter,
+};
+use diagnostics::{
+    core_projection_rejection_draft, projection_rejection_draft,
+    record_local_core_projection_failure,
 };
 use fingerprint::*;
 use ordering::{
@@ -232,11 +238,13 @@ enum OpenCodeScanOutput {
     Begin(SourceKey),
     CompletedBytes(u64),
     Document(CoreRecord),
+    Rejection(SourceBackedRecordRejectionDraft),
     Progress(SourceBackedCurrentSourceProgress),
 }
 
 #[derive(Debug)]
 struct SourceEventRow {
+    source_rowid: i64,
     native_identity: String,
     message_identity: String,
     session_identity: String,
@@ -492,6 +500,15 @@ fn stream_logical_rows(
                 ProjectionDisposition::Retained => {}
                 ProjectionDisposition::Rejected => {
                     counts.rejected_records = checked_add(counts.rejected_records, 1)?;
+                    if let Some(rejection) = projection_rejection_draft(
+                        source,
+                        dialect,
+                        path,
+                        event.source_rowid,
+                        &event.projection,
+                    ) {
+                        emit(OpenCodeScanOutput::Rejection(rejection))?;
+                    }
                 }
                 ProjectionDisposition::Ignored => {
                     counts.ignored_records = checked_add(counts.ignored_records, 1)?;
@@ -524,6 +541,7 @@ fn stream_logical_rows(
             let session = current_session.as_ref().ok_or_else(|| {
                 OpenCodeSourceBackedError::MissingSession(event.session_identity.clone())
             })?;
+            let source_rowid = event.source_rowid;
             let document = match core_record(
                 source,
                 schema.family,
@@ -539,6 +557,15 @@ fn stream_logical_rows(
                         return Err(OpenCodeSourceBackedError::CoreRecord(error));
                     }
                     counts.rejected_records = checked_add(counts.rejected_records, 1)?;
+                    emit(OpenCodeScanOutput::Rejection(
+                        core_projection_rejection_draft(
+                            source,
+                            dialect,
+                            path,
+                            source_rowid,
+                            &error,
+                        ),
+                    ))?;
                     return Ok(());
                 }
                 Err(error) => return Err(error),
@@ -583,16 +610,6 @@ fn stream_logical_rows(
             max_buffered_payload_bytes: fallback_stats.max_hydration_batch_bytes,
         },
     })
-}
-
-fn record_local_core_projection_failure(error: &CoreRecordError) -> bool {
-    matches!(
-        error,
-        CoreRecordError::FieldTooLarge {
-            field: "normalized_body" | "structured_content" | "selected_content",
-            ..
-        }
-    )
 }
 
 fn scan_session_evidence(

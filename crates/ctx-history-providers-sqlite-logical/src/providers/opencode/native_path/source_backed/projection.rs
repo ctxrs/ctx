@@ -199,6 +199,7 @@ pub(super) fn decode_source_event_row(
     // payload or timestamp evidence is present in the same unsafe row.
     projection = apply_relationship_rejection(projection, relationship_code)?;
     Ok(SourceEventRow {
+        source_rowid: row.get(11)?,
         native_order: source_backed_decode_order(
             order_tag,
             &session_identity,

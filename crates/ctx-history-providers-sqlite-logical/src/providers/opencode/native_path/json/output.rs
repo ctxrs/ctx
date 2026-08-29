@@ -81,6 +81,10 @@ pub(super) fn is_retained_type(family: Option<OpenCodeNativeSchemaFamily>, value
         && normalize_token(value) == "message")
 }
 
+pub(super) fn is_ignored_type(family: OpenCodeNativeSchemaFamily, value: &str) -> bool {
+    family == OpenCodeNativeSchemaFamily::MessagePart && normalize_token(value) == "file"
+}
+
 pub(super) fn is_tool_token(value: &str) -> bool {
     matches!(normalize_token(value).as_str(), "tool" | "shell")
 }
