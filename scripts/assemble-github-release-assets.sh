@@ -150,31 +150,29 @@ verify_macos_pair_receipt() {
   local cli_asset="ctx-${platform}"
   local runtime_asset="ctx-onnxruntime-${platform}.tar.gz"
   local receipt="${receipt_dir%/}/${cli_asset}.release-pair.sha256"
-  local line digest name
+  local cli_digest runtime_digest name
   local -a lines
-  declare -A receipt_digests=()
 
   require_regular "${receipt}" "macOS release-pair digest receipt"
   [[ -s "${receipt}" ]] || die "macOS release-pair digest receipt is empty: ${receipt}"
   mapfile -t lines < "${receipt}"
   [[ "${#lines[@]}" -eq 2 ]] || \
     die "macOS release-pair digest receipt must contain exactly two entries: ${receipt}"
-  for line in "${lines[@]}"; do
-    [[ "${line}" =~ ^([0-9a-f]{64})\ \ ([A-Za-z0-9][A-Za-z0-9._-]{0,127})$ ]] || \
-      die "macOS release-pair digest receipt is malformed: ${receipt}"
-    digest="${BASH_REMATCH[1]}"
-    name="${BASH_REMATCH[2]}"
-    [[ ! -v "receipt_digests[${name}]" ]] || \
-      die "macOS release-pair digest receipt repeats ${name}: ${receipt}"
-    receipt_digests["${name}"]="${digest}"
-  done
-  [[ "${#receipt_digests[@]}" -eq 2 \
-    && -v "receipt_digests[${cli_asset}]" \
-    && -v "receipt_digests[${runtime_asset}]" ]] || \
-    die "macOS release-pair digest receipt has the wrong assets: ${receipt}"
-  [[ "${core_digests[${cli_asset}]}" == "${receipt_digests[${cli_asset}]}" ]] || \
+  [[ "${lines[0]}" =~ ^([0-9a-f]{64})\ \ ([A-Za-z0-9][A-Za-z0-9._-]{0,127})$ ]] || \
+    die "macOS release-pair digest receipt is malformed: ${receipt}"
+  cli_digest="${BASH_REMATCH[1]}"
+  name="${BASH_REMATCH[2]}"
+  [[ "${name}" == "${cli_asset}" ]] || \
+    die "macOS release-pair digest receipt must list ${cli_asset} first: ${receipt}"
+  [[ "${lines[1]}" =~ ^([0-9a-f]{64})\ \ ([A-Za-z0-9][A-Za-z0-9._-]{0,127})$ ]] || \
+    die "macOS release-pair digest receipt is malformed: ${receipt}"
+  runtime_digest="${BASH_REMATCH[1]}"
+  name="${BASH_REMATCH[2]}"
+  [[ "${name}" == "${runtime_asset}" ]] || \
+    die "macOS release-pair digest receipt must list ${runtime_asset} second: ${receipt}"
+  [[ "${core_digests[${cli_asset}]}" == "${cli_digest}" ]] || \
     die "macOS release-pair receipt digest mismatch for ${cli_asset}"
-  [[ "${runtime_digests[${runtime_asset}]}" == "${receipt_digests[${runtime_asset}]}" ]] || \
+  [[ "${runtime_digests[${runtime_asset}]}" == "${runtime_digest}" ]] || \
     die "macOS release-pair receipt digest mismatch for ${runtime_asset}"
 }
 

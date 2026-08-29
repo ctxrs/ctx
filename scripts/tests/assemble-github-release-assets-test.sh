@@ -85,6 +85,23 @@ grep -Fq 'macOS release-pair receipt digest mismatch for ctx-macos-arm64' \
   "${tmp}/mismatched.err"
 test ! -e "${tmp}/mismatched-output"
 
+swapped_receipts="${tmp}/swapped-receipts"
+cp -a "${receipts}" "${swapped_receipts}"
+{
+  sed -n '2p' "${swapped_receipts}/ctx-macos-arm64.release-pair.sha256"
+  sed -n '1p' "${swapped_receipts}/ctx-macos-arm64.release-pair.sha256"
+} > "${tmp}/swapped-receipt"
+mv "${tmp}/swapped-receipt" \
+  "${swapped_receipts}/ctx-macos-arm64.release-pair.sha256"
+if bash "${assembler}" "${core}" "${runtime}" "${tmp}/swapped-output" "${swapped_receipts}" \
+  > "${tmp}/swapped.out" 2> "${tmp}/swapped.err"; then
+  printf 'assembler accepted a swapped macOS release-pair receipt\n' >&2
+  exit 1
+fi
+grep -Fq 'macOS release-pair digest receipt must list ctx-macos-arm64 first' \
+  "${tmp}/swapped.err"
+test ! -e "${tmp}/swapped-output"
+
 unqualified_runtime="${tmp}/unqualified-runtime"
 cp -a "${runtime}" "${unqualified_runtime}"
 printf 'unqualified macOS runtime fixture\n' \
