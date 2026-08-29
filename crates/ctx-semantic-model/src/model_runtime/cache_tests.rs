@@ -4,7 +4,7 @@ use std::{fs, path::Path};
 use super::compiled::discard_compile_destination;
 use super::compiled::{
     commit_compile_destination, invalidate_compiled_model_cache, prepare_compile_destination,
-    validate_compiled_model_cache_path, AtomicCommit,
+    validate_compiled_model_cache, AtomicCommit,
 };
 
 fn write(path: &Path, bytes: &[u8]) {
@@ -93,7 +93,7 @@ fn passive_compiled_cache_rejects_symlinked_managed_ancestor() {
         .join(compiler_hash)
         .join("document.mlmodelc");
 
-    assert!(validate_compiled_model_cache_path(temp.path(), &model).is_err());
+    assert!(validate_compiled_model_cache(temp.path(), &model).is_err());
 }
 
 #[cfg(unix)]
@@ -109,5 +109,5 @@ fn passive_compiled_cache_rejects_symlink_inside_bundle() {
     commit_compile_destination(&destination).unwrap();
     symlink("model.bin", destination.final_path.join("alias.bin")).unwrap();
 
-    assert!(validate_compiled_model_cache_path(temp.path(), &destination.final_path).is_err());
+    assert!(validate_compiled_model_cache(temp.path(), &destination.final_path).is_err());
 }

@@ -15,7 +15,7 @@ use super::{
     cache::{
         commit_compile_destination, create_private_dir_all, discard_compile_destination,
         invalidate_compiled_model_cache, prepare_compile_destination,
-        validate_compiled_model_cache_path,
+        validate_compiled_model_cache,
     },
     SemanticEmbeddingBackend,
 };
@@ -575,7 +575,7 @@ fn passive_compiled_coreml_model_path(
             ),
         ));
     }
-    validate_compiled_model_cache_path(cache_dir, &path).map_err(|error| {
+    validate_compiled_model_cache(cache_dir, &path).map_err(|error| {
         crate::model_acquisition::coreml_model_integrity_error(format!(
             "passive Core ML compiled artifact validation failed: {error:#}"
         ))
