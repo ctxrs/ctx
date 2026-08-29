@@ -1633,6 +1633,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "thiserror 1.0.69",
+ "url",
  "uuid",
 ]
 
