@@ -110,7 +110,10 @@ mod client_admission_recovery_tests {
             .downcast_ref::<SourceRefreshObservationRecoveryFailed>()
             .expect("configuration failure remains request-bound after acknowledgement");
         assert_eq!(retained.request_id, request_id);
-        assert_eq!(retained.disconnect_policy, "retain_after_durable_admission");
+        assert_eq!(
+            retained.disconnect_policy,
+            "request_outcome_unknown_after_acknowledgement"
+        );
         assert!(format!("{error:#}").contains("load daemon configuration"));
     }
 }
