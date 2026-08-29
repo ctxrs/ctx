@@ -41,6 +41,28 @@ ctx semantic disable
 reports the selected endpoint, whether content leaves the machine, daemon
 activation state, and the last closed failure category.
 
+## Passive daemon-free queries
+
+With the daemon disabled, manual searches using `--refresh off` or
+`--refresh background` are read-only. Before ctx constructs an embedding
+executor or contacts an HTTP endpoint, it pins Core and checks that the exact
+semantic projection for that Core generation is complete and compatible.
+
+If that projection is missing, stale, partial, unreadable, or incompatible, a
+semantic-only search returns its typed semantic readiness error. A hybrid
+search returns lexical results with that same reason. Neither case contacts an
+executor, starts a daemon, waits for IPC, acquires a model, embeds documents,
+or changes Core or semantic state.
+
+An exact empty projection succeeds without constructing the selected executor.
+For a nonempty projection, the built-in executor may load only an already
+verified local model cache; it never acquires a model. An HTTP executor uses
+the exact selected endpoint and its endpoint-bound authentication. It may send
+the normal conformance probes and query embedding request after preflight, so
+`--refresh off` means no indexing or mutation, not necessarily no network when
+HTTP was explicitly selected. ctx never substitutes the built-in executor for
+an HTTP selection.
+
 ## Transport policy
 
 - Plain HTTP is accepted only for a literal loopback IP address.

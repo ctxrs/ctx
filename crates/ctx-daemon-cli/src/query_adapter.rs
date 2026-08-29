@@ -28,6 +28,21 @@ use super::query_service::daemon_query_request;
 
 const SEMANTIC_GENERATION_POLL_INTERVAL: StdDuration = StdDuration::from_millis(100);
 
+#[cfg(test)]
+thread_local! {
+    static FOREGROUND_ACQUISITION_ATTEMPTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn reset_foreground_acquisition_attempts() {
+    FOREGROUND_ACQUISITION_ATTEMPTS.with(|attempts| attempts.set(0));
+}
+
+#[cfg(test)]
+fn foreground_acquisition_attempts() -> usize {
+    FOREGROUND_ACQUISITION_ATTEMPTS.with(std::cell::Cell::get)
+}
+
 /// Waits for daemon-owned semantic coverage of the current verified Core
 /// generation. A newer active Core generation replaces the original pin so
 /// query preflight never combines generations and does not wait for semantic
@@ -228,19 +243,27 @@ impl HistorySemanticPort for SemanticQueryAdapter<'_> {
         match &self.execution {
             SemanticQueryExecution::Daemon => SemanticQuerySession::begin(index, self.data_root),
             SemanticQueryExecution::Foreground { executor, mode } => {
-                match SemanticQuerySession::begin_foreground(index, self.data_root, executor, *mode) {
+                match SemanticQuerySession::begin_foreground(index, self.data_root, executor, *mode)
+                {
                     Ok(session) => Ok(session),
                     Err(SemanticQueryError::NotReady { .. })
                         if *mode == ForegroundSemanticMode::Reconcile =>
                     {
-                        let handle = executor.resolve(self.data_root).map_err(SemanticQueryError::from)?;
+                        let handle = executor
+                            .resolve(self.data_root)
+                            .map_err(SemanticQueryError::from)?;
                         reconcile_foreground_semantic(index, self.data_root, handle)
                             .map_err(SemanticQueryError::from)?;
-                        SemanticQuerySession::begin_foreground(index, self.data_root, executor, *mode)
+                        SemanticQuerySession::begin_foreground(
+                            index,
+                            self.data_root,
+                            executor,
+                            *mode,
+                        )
                     }
                     Err(error) => Err(error),
                 }
-            },
+            }
         }
         .map_err(HistorySemanticError::from)
     }
@@ -443,6 +466,8 @@ fn foreground_query_embedding(
 
 fn ensure_foreground_executor(executor: &SemanticEmbeddingExecutorHandle) -> Result<()> {
     if let Some(builtin) = executor.builtin_executor() {
+        #[cfg(test)]
+        FOREGROUND_ACQUISITION_ATTEMPTS.with(|attempts| attempts.set(attempts.get() + 1));
         builtin.shared_runtime().ensure_loaded_with_acquisition(
             builtin.config(),
             &crate::daemon_service_ports::ARTIFACT_FETCHER,
