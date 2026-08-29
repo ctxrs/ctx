@@ -903,6 +903,7 @@ fn passive_ready_empty_ignores_an_unusable_external_executor() -> Result<()> {
     let mut store =
         SemanticVectorStore::open(&source_backed_semantic_vector_path(temp.path()), contract)?;
     acknowledge_empty_generation(&mut store, &index)?;
+    drop(store);
     let adapter = SemanticQueryAdapter::foreground_read_only(
         temp.path(),
         SemanticEmbeddingExecutorConfig::http("https://embedding.invalid/ctx")?,

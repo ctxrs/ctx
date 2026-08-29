@@ -6,6 +6,7 @@ use super::super::{
     vector_store_search::{scan_exact_generation, SEMANTIC_EXACT_TOP_K_MAX},
 };
 use super::*;
+use std::path::Path;
 
 fn test_event_identity_digest(event_id: Uuid) -> Option<[u8; 32]> {
     let mut digest = [0; 32];
@@ -142,8 +143,10 @@ fn passive_snapshot_refuses_a_live_wal_without_touching_it() -> Result<()> {
     assert!(wal.exists(), "fixture must retain live WAL state");
     let before = std::fs::read(&wal)?;
 
-    let error = SemanticVectorStore::open_passive_snapshot(&root, &contract)
-        .expect_err("a live WAL cannot be read through an immutable passive snapshot");
+    let error = match SemanticVectorStore::open_passive_snapshot(&root, &contract) {
+        Ok(_) => panic!("a live WAL cannot be read through an immutable passive snapshot"),
+        Err(error) => error,
+    };
 
     assert_eq!(
         semantic_vector_failure_kind(&error),
