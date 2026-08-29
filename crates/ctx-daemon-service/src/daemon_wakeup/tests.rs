@@ -830,7 +830,8 @@ fn callback_channel_overflow_leaves_terminal_owner_and_queues_distinct_maintenan
         "published"
     );
     let mut maintenance = None;
-    for _ in 0..64 {
+    let maintenance_deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < maintenance_deadline {
         if let Some(boundary) = coordinator.watch_uncertainty_watermark() {
             watcher.reconcile_roots(true).1?;
             let _ = coordinator.complete_watch_uncertainty_recovery(
@@ -843,7 +844,7 @@ fn callback_channel_overflow_leaves_terminal_owner_and_queues_distinct_maintenan
             continue;
         }
         if !coordinator.enqueue_next_dirty_route(&data_root, u64::MAX)? {
-            thread::yield_now();
+            let _ = wakeup.wait(Duration::from_millis(50));
             continue;
         }
         let Some(rerun) = coordinator.run_next(&data_root) else {
