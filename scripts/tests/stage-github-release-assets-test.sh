@@ -179,6 +179,7 @@ for platform in macos-arm64 macos-x64; do
   printf '{}\n' > "${matrix}/ctx-${platform}.signing.json"
   printf '{}\n' > "${matrix}/ctx-${platform}.attestation.json"
   printf 'cms\n' > "${matrix}/ctx-${platform}.attestation.cms"
+  printf '{}\n' > "${matrix}/ctx-${platform}.notary-submit.json"
 done
 proof_root="${tmp_dir}/native-proofs"
 for platform in linux-x64 linux-aarch64 macos-arm64 macos-x64 windows-x64; do
@@ -362,6 +363,17 @@ cli_evidence_assets=(
   ctx-windows-x64.exe.third-party-notices.txt
 )
 default_assets+=("${cli_evidence_assets[@]}")
+macos_cli_verifier_assets=()
+for platform in macos-arm64 macos-x64; do
+  macos_cli_verifier_assets+=(
+    "ctx-${platform}.sha256"
+    "ctx-${platform}.build-info.json"
+    "ctx-${platform}.signing.json"
+    "ctx-${platform}.attestation.json"
+    "ctx-${platform}.attestation.cms"
+    "ctx-${platform}.notary-submit.json"
+  )
+done
 
 assert_exact_assets() {
   local output="$1"
@@ -374,6 +386,7 @@ assert_exact_assets() {
   awk '{print $2}' "${output}/SHA256SUMS" | sort > "${actual}"
   test "$(wc -l < "${actual}")" -eq "${expected_count}"
   cmp "${expected}" "${actual}"
+  printf '%s\n' "$@" "${macos_cli_verifier_assets[@]}" | sort > "${expected}"
   find "${output}" -maxdepth 1 -type f ! -name SHA256SUMS \
     -printf '%f\n' | sort > "${actual}"
   cmp "${expected}" "${actual}"
