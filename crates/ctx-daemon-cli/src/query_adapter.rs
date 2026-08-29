@@ -139,13 +139,15 @@ impl<'data_root> SemanticQueryAdapter<'data_root> {
         data_root: &'data_root Path,
         config: SemanticEmbeddingExecutorConfig,
     ) -> Self {
+        let model_config =
+            foreground_coreml_model_config(crate::model_config::semantic_model_config(data_root));
         let executor = crate::semantic_embedding_executor_auth_from_environment()
             .and_then(|auth| {
                 SemanticEmbeddingExecutorHandle::build_with_auth(
                     config,
                     auth,
                     SharedSemanticRuntime::default(),
-                    crate::model_config::semantic_model_config(data_root),
+                    model_config,
                 )
             })
             .map(Box::new)
@@ -155,6 +157,12 @@ impl<'data_root> SemanticQueryAdapter<'data_root> {
             execution: SemanticQueryExecution::Foreground { executor },
         }
     }
+}
+
+pub(crate) fn foreground_coreml_model_config(
+    config: ctx_semantic_model::SemanticModelConfig,
+) -> ctx_semantic_model::SemanticModelConfig {
+    config.with_foreground_coreml_cpu_default()
 }
 
 impl HistorySemanticPort for SemanticQueryAdapter<'_> {
