@@ -151,6 +151,48 @@ def semantic_catalog_fixture(asset_id: str) -> dict[str, object]:
     return {"asset": asset, "id": asset_id}
 
 
+def validate_release_pair_wrapper_contract(text: str) -> None:
+    required = (
+        "#!/usr/bin/env bash",
+        "set -euo pipefail",
+        "scripts/check-macos-release-signing.sh",
+        "scripts/verify-macos-release-attestation.sh --runtime-archive",
+        "release-attestation.json",
+        "release-attestation.cms",
+        "scripts/smoke-daemon-semantic-release.sh",
+        '"${platform}" cli "${cli}"',
+        '"${platform}" runtime "${runtime_archive}"',
+        '--ctx "${cli}"',
+        '--runtime-platform "${platform}"',
+        "--require-authoritative",
+        "notary-submit.json",
+        "libonnxruntime.dylib",
+    )
+    for marker in required:
+        if marker not in text:
+            raise AssertionError(f"release-pair wrapper is missing {marker}")
+    for marker in ("|| true", "set +e", "soft_fail", "allow_dependency_failure"):
+        if marker in text:
+            raise AssertionError(f"release-pair wrapper masks failure with {marker}")
+
+
+def validate_macos_cli_export_contract(text: str) -> None:
+    required = (
+        "stage_macos_cli_verifier_inputs()",
+        ".sha256",
+        ".build-info.json",
+        ".signing.json",
+        ".attestation.json",
+        ".attestation.cms",
+        ".notary-submit.json",
+        "stage_macos_cli_verifier_inputs ctx-macos-arm64 ctx-macos-arm64",
+        "stage_macos_cli_verifier_inputs ctx-macos-x64 ctx-macos-x64",
+    )
+    for marker in required:
+        if marker not in text:
+            raise AssertionError(f"Core staging does not export verifier input {marker}")
+
+
 class ManifestTests(unittest.TestCase):
     def test_all_platform_release_shapes_are_exact(self) -> None:
         expected = {
@@ -378,32 +420,50 @@ class ManifestTests(unittest.TestCase):
                     f'"target/public-cli-artifacts/ctx-onnxruntime-{platform}.tar.gz*"',
                     block,
                 )
-                for sidecar in ("signing.json", "attestation.json", "attestation.cms"):
+                for sidecar in (
+                    "signing.json",
+                    "attestation.json",
+                    "attestation.cms",
+                    "release-attestation.json",
+                    "release-attestation.cms",
+                    "notary-submit.json",
+                ):
                     self.assertIn(
                         f'"target/public-cli-artifacts/ctx-onnxruntime-{platform}.{sidecar}"',
                         block,
                     )
-                self.assertIn(
-                    f"check-macos-release-signing.sh {platform} cli "
-                    f"target/github-core-release-assets/ctx-{platform}",
-                    block,
+                expected_wrapper = (
+                    "scripts/qualify-macos-release-pair.sh "
+                    f"{platform} target/github-core-release-assets/ctx-{platform} "
+                    f"target/public-cli-artifacts/ctx-onnxruntime-{platform}.tar.gz"
                 )
-                self.assertIn(
-                    f"check-macos-release-signing.sh {platform} runtime "
-                    f"target/public-cli-artifacts/ctx-onnxruntime-{platform}.tar.gz",
-                    block,
-                )
-                self.assertIn("smoke-daemon-semantic-release.sh", block)
-                self.assertIn("--require-authoritative", block)
-                self.assertIn(
-                    f"--ctx target/github-core-release-assets/ctx-{platform}", block
-                )
-                self.assertIn(
-                    "--runtime-archive "
-                    f"target/public-cli-artifacts/ctx-onnxruntime-{platform}.tar.gz",
-                    block,
-                )
+                self.assertEqual(block.count(expected_wrapper), 1)
+                self.assertNotIn("smoke-daemon-semantic-release.sh", block)
                 self.assertIn(f'"{key}"', assembly_block)
+
+    def test_release_pair_wrapper_is_fail_closed_and_binds_final_runtime_archive(self) -> None:
+        wrapper = (REPO_ROOT / "scripts" / "qualify-macos-release-pair.sh").read_text()
+        validate_release_pair_wrapper_contract(wrapper)
+        for original, replacement in (
+            ("set -euo pipefail", "set -uo pipefail"),
+            ("--runtime-archive", "--runtime"),
+            ("--require-authoritative", "--non-authoritative"),
+        ):
+            with self.subTest(original=original):
+                mutated = wrapper.replace(original, replacement, 1)
+                with self.assertRaises(AssertionError):
+                    validate_release_pair_wrapper_contract(mutated)
+        with self.assertRaises(AssertionError):
+            validate_release_pair_wrapper_contract(wrapper + "\nfalse || true\n")
+
+    def test_core_staging_exports_complete_macos_cli_verifier_inputs(self) -> None:
+        staging = (REPO_ROOT / "scripts" / "stage-github-release-assets.sh").read_text()
+        validate_macos_cli_export_contract(staging)
+        for removed in (".signing.json", ".attestation.cms", ".notary-submit.json"):
+            with self.subTest(removed=removed):
+                mutated = staging.replace(removed, ".removed")
+                with self.assertRaises(AssertionError):
+                    validate_macos_cli_export_contract(mutated)
 
     def test_archive_tool_defers_annotations_for_macos_python(self) -> None:
         source = (TOOLS / "archive_tool.py").read_text().splitlines()

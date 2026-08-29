@@ -306,6 +306,36 @@ stage_cli_evidence() {
     "${dest_name}.third-party-notices.txt" 0644
 }
 
+stage_macos_cli_verifier_inputs() {
+  local source_name="$1"
+  local dest_name="$2"
+  local source_path="${artifact_dir%/}/${source_name}"
+  local suffix source destination source_digest destination_digest
+
+  for suffix in \
+    .sha256 \
+    .build-info.json \
+    .signing.json \
+    .attestation.json \
+    .attestation.cms \
+    .notary-submit.json; do
+    source="${source_path}${suffix}"
+    destination="${out_dir%/}/${dest_name}${suffix}"
+    require_regular_input "${source}" "macOS CLI verifier input"
+    [[ -s "${source}" ]] || {
+      printf 'macOS CLI verifier input is empty: %s\n' "${source}" >&2
+      exit 1
+    }
+    source_digest="$(sha256_file "${source}")"
+    install -m 0644 "${source}" "${destination}"
+    destination_digest="$(sha256_file "${destination}")"
+    [[ "${source_digest}" == "${destination_digest}" ]] || {
+      printf 'staged macOS CLI verifier input changed: %s\n' "${source}" >&2
+      exit 1
+    }
+  done
+}
+
 validate_staged_cli_evidence() {
   local source_name="$1"
   local dest_name="$2"
@@ -454,8 +484,10 @@ stage_asset ctx-linux-aarch64 ctx-linux-aarch64
 stage_cli_evidence ctx-linux-aarch64 ctx-linux-aarch64
 stage_asset ctx-macos-arm64 ctx-macos-arm64
 stage_cli_evidence ctx-macos-arm64 ctx-macos-arm64
+stage_macos_cli_verifier_inputs ctx-macos-arm64 ctx-macos-arm64
 stage_asset ctx-macos-x64 ctx-macos-x64
 stage_cli_evidence ctx-macos-x64 ctx-macos-x64
+stage_macos_cli_verifier_inputs ctx-macos-x64 ctx-macos-x64
 stage_asset ctx.exe ctx-windows-x64.exe
 stage_cli_evidence ctx.exe ctx-windows-x64.exe
 

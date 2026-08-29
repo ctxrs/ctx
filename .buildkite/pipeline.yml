@@ -394,6 +394,9 @@ steps:
     if: build.env("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") == "1" && build.env("CTX_PUBLIC_CLI_NATIVE_SMOKE_MATRIX") == "1" && build.env("CTX_PUBLIC_SEMANTIC_ASSET_MATRIX") == "1" && build.branch == "main" && build.pull_request.id == null
     command: |
       mkdir -p target/github-core-release-assets target/public-cli-artifacts
+      # --step excludes retried producer attempts by default. Buildkite has no
+      # static attempt UUID binding; manually retrying a producer after this
+      # gate has passed requires rerunning this gate and final assembly.
       buildkite-agent artifact download \
         "target/github-core-release-assets/ctx-macos-arm64*" . \
         --step github-release-candidate
@@ -409,16 +412,18 @@ steps:
       buildkite-agent artifact download \
         "target/public-cli-artifacts/ctx-onnxruntime-macos-arm64.attestation.cms" . \
         --step semantic-runtime-portable
-      scripts/check-macos-release-signing.sh macos-arm64 cli \
-        target/github-core-release-assets/ctx-macos-arm64
-      scripts/check-macos-release-signing.sh macos-arm64 runtime \
+      buildkite-agent artifact download \
+        "target/public-cli-artifacts/ctx-onnxruntime-macos-arm64.release-attestation.json" . \
+        --step semantic-runtime-portable
+      buildkite-agent artifact download \
+        "target/public-cli-artifacts/ctx-onnxruntime-macos-arm64.release-attestation.cms" . \
+        --step semantic-runtime-portable
+      buildkite-agent artifact download \
+        "target/public-cli-artifacts/ctx-onnxruntime-macos-arm64.notary-submit.json" . \
+        --step semantic-runtime-portable
+      scripts/qualify-macos-release-pair.sh \
+        macos-arm64 target/github-core-release-assets/ctx-macos-arm64 \
         target/public-cli-artifacts/ctx-onnxruntime-macos-arm64.tar.gz
-      chmod 755 target/github-core-release-assets/ctx-macos-arm64
-      scripts/smoke-daemon-semantic-release.sh \
-        --ctx target/github-core-release-assets/ctx-macos-arm64 \
-        --runtime-archive target/public-cli-artifacts/ctx-onnxruntime-macos-arm64.tar.gz \
-        --runtime-platform macos-arm64 \
-        --require-authoritative
     agents:
       queue: "ctx-release-macos-arm64"
       os: "darwin"
@@ -435,6 +440,9 @@ steps:
     if: build.env("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") == "1" && build.env("CTX_PUBLIC_CLI_NATIVE_SMOKE_MATRIX") == "1" && build.env("CTX_PUBLIC_SEMANTIC_ASSET_MATRIX") == "1" && build.branch == "main" && build.pull_request.id == null
     command: |
       mkdir -p target/github-core-release-assets target/public-cli-artifacts
+      # --step excludes retried producer attempts by default. Buildkite has no
+      # static attempt UUID binding; manually retrying a producer after this
+      # gate has passed requires rerunning this gate and final assembly.
       buildkite-agent artifact download \
         "target/github-core-release-assets/ctx-macos-x64*" . \
         --step github-release-candidate
@@ -450,16 +458,18 @@ steps:
       buildkite-agent artifact download \
         "target/public-cli-artifacts/ctx-onnxruntime-macos-x64.attestation.cms" . \
         --step public-cli-macos-x64-runtime-producer
-      scripts/check-macos-release-signing.sh macos-x64 cli \
-        target/github-core-release-assets/ctx-macos-x64
-      scripts/check-macos-release-signing.sh macos-x64 runtime \
+      buildkite-agent artifact download \
+        "target/public-cli-artifacts/ctx-onnxruntime-macos-x64.release-attestation.json" . \
+        --step public-cli-macos-x64-runtime-producer
+      buildkite-agent artifact download \
+        "target/public-cli-artifacts/ctx-onnxruntime-macos-x64.release-attestation.cms" . \
+        --step public-cli-macos-x64-runtime-producer
+      buildkite-agent artifact download \
+        "target/public-cli-artifacts/ctx-onnxruntime-macos-x64.notary-submit.json" . \
+        --step public-cli-macos-x64-runtime-producer
+      scripts/qualify-macos-release-pair.sh \
+        macos-x64 target/github-core-release-assets/ctx-macos-x64 \
         target/public-cli-artifacts/ctx-onnxruntime-macos-x64.tar.gz
-      chmod 755 target/github-core-release-assets/ctx-macos-x64
-      scripts/smoke-daemon-semantic-release.sh \
-        --ctx target/github-core-release-assets/ctx-macos-x64 \
-        --runtime-archive target/public-cli-artifacts/ctx-onnxruntime-macos-x64.tar.gz \
-        --runtime-platform macos-x64 \
-        --require-authoritative
     agents:
       queue: "ctx-mac-gui-shared-x64"
       os: "darwin"

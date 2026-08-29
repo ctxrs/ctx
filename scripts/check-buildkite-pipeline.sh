@@ -9,6 +9,7 @@ for required in \
   scripts/release/build-public-candidate-on-linux.sh \
   scripts/validate-public-cli-factory-artifact.sh \
   scripts/stage-github-release-assets.sh \
+  scripts/qualify-macos-release-pair.sh \
   scripts/assemble-github-release-assets.sh \
   scripts/stage-semantic-release-handoff.sh \
   scripts/build-onnxruntime-sidecar.sh \
@@ -22,6 +23,7 @@ done
 python3 - "${pipeline}" <<'PY'
 from __future__ import annotations
 
+import copy
 import json
 import re
 import subprocess
@@ -417,13 +419,22 @@ release_pairs = {
         "ctx-public-cli-macos-x64-release-pair",
     ),
 }
-for key, (platform, runtime_producer, queue, arch, concurrency_group) in release_pairs.items():
-    pair = keyed[key]
+
+
+def validate_release_pair(
+    key: str,
+    platform: str,
+    runtime_producer: str,
+    queue: str,
+    arch: str,
+    concurrency_group: str,
+    pair: dict,
+) -> None:
     if pair.get("depends_on") != ["github-release-candidate", runtime_producer]:
         fail(f"{key} must join only the sealed Core candidate and its runtime producer")
     if pair.get("if") != github_release_condition:
         fail(f"{key} has the wrong final-release condition")
-    if pair.get("allow_dependency_failure") or pair.get("soft_fail"):
+    if any(field in pair for field in ("allow_dependency_failure", "soft_fail", "skip")):
         fail(f"{key} must fail closed")
     if pair.get("agents") != {"queue": queue, "os": "darwin", "arch": arch}:
         fail(f"{key} has the wrong authoritative native macOS runner")
@@ -438,6 +449,10 @@ for key, (platform, runtime_producer, queue, arch, concurrency_group) in release
 
     command = pair.get("command", "")
     logical_command = " ".join(command.replace("\\\n", " ").split())
+    if re.search(r"(?:\|\||\b(?:exit|return)\b|set\s+\+e)", command):
+        fail(f"{key} must not mask failure or exit before qualification")
+    if "--include-retried-jobs" in command:
+        fail(f"{key} must consume only the latest producer artifact attempt")
     core_download = (
         f'buildkite-agent artifact download "target/github-core-release-assets/ctx-{platform}*" '
         ". --step github-release-candidate"
@@ -448,7 +463,14 @@ for key, (platform, runtime_producer, queue, arch, concurrency_group) in release
     )
     if logical_command.count(core_download) != 1 or logical_command.count(runtime_download) != 1:
         fail(f"{key} must download the exact Core CLI and final runtime assembly inputs")
-    for sidecar in ("signing.json", "attestation.json", "attestation.cms"):
+    for sidecar in (
+        "signing.json",
+        "attestation.json",
+        "attestation.cms",
+        "release-attestation.json",
+        "release-attestation.cms",
+        "notary-submit.json",
+    ):
         sidecar_download = (
             "buildkite-agent artifact download "
             f'"target/public-cli-artifacts/ctx-onnxruntime-{platform}.{sidecar}" '
@@ -458,33 +480,61 @@ for key, (platform, runtime_producer, queue, arch, concurrency_group) in release
             fail(f"{key} must download the runtime {sidecar} signing sidecar")
     cli = f"target/github-core-release-assets/ctx-{platform}"
     runtime = f"target/public-cli-artifacts/ctx-onnxruntime-{platform}.tar.gz"
-    for required_call in (
-        f"scripts/check-macos-release-signing.sh {platform} cli {cli}",
-        f"scripts/check-macos-release-signing.sh {platform} runtime {runtime}",
-        f"chmod 755 {cli}",
-        "scripts/smoke-daemon-semantic-release.sh",
-        f"--ctx {cli}",
-        f"--runtime-archive {runtime}",
-        f"--runtime-platform {platform}",
-        "--require-authoritative",
+    wrapper = f"scripts/qualify-macos-release-pair.sh {platform} {cli} {runtime}"
+    if logical_command.count(wrapper) != 1:
+        fail(f"{key} must invoke exactly one fail-closed pair qualification wrapper")
+    for forbidden in (
+        "check-macos-release-signing.sh",
+        "verify-macos-release-attestation.sh",
+        "smoke-daemon-semantic-release.sh",
+        "--coreml",
+        "download-linux-factory-artifacts.sh",
     ):
-        if required_call not in logical_command:
-            fail(f"{key} is missing required pair qualification input: {required_call}")
-    cli_signing = f"scripts/check-macos-release-signing.sh {platform} cli {cli}"
-    runtime_signing = (
-        f"scripts/check-macos-release-signing.sh {platform} runtime {runtime}"
-    )
-    semantic_smoke = "scripts/smoke-daemon-semantic-release.sh"
-    if (
-        logical_command.count(semantic_smoke) != 1
-        or max(logical_command.index(cli_signing), logical_command.index(runtime_signing))
-        > logical_command.index(semantic_smoke)
-    ):
-        fail(f"{key} must complete both current-publisher signing checks before smoke")
+        if forbidden in command:
+            fail(f"{key} must delegate qualification only to the pair wrapper ({forbidden})")
     if "download-linux-factory-artifacts.sh" in command or "--coreml" in command:
         fail(f"{key} must consume only the final Core CLI/runtime pair")
     if re.search(r"cargo (?:build|zigbuild)|bazelw run //:ctx_release", command):
         fail(f"{key} must only qualify downloaded release inputs, never rebuild them")
+
+
+for key, (platform, runtime_producer, queue, arch, concurrency_group) in release_pairs.items():
+    pair = keyed[key]
+    validate_release_pair(
+        key, platform, runtime_producer, queue, arch, concurrency_group, pair
+    )
+    for old, new in (
+        (f"--step {runtime_producer}", "--step public-cli-linux-factory"),
+        (f"target/github-core-release-assets/ctx-{platform}*", "target/wrong/ctx"),
+        ("notary-submit.json", "missing-notary-submit.json"),
+        ("--step github-release-candidate", "--step github-release-candidate --include-retried-jobs"),
+        ("scripts/qualify-macos-release-pair.sh", "exit 0\nscripts/qualify-macos-release-pair.sh"),
+        ("scripts/qualify-macos-release-pair.sh", "scripts/qualify-macos-release-pair.sh || true"),
+    ):
+        mutated = copy.deepcopy(pair)
+        mutated_command = mutated["command"].replace(old, new, 1)
+        if mutated_command == mutated["command"]:
+            fail(f"{key} release-pair negative mutation could not be constructed")
+        mutated["command"] = mutated_command
+        try:
+            validate_release_pair(
+                key, platform, runtime_producer, queue, arch, concurrency_group, mutated
+            )
+        except SystemExit:
+            pass
+        else:
+            fail(f"{key} accepted release-pair mutation: {old} -> {new}")
+    for field in ("allow_dependency_failure", "soft_fail", "skip"):
+        mutated = copy.deepcopy(pair)
+        mutated[field] = True
+        try:
+            validate_release_pair(
+                key, platform, runtime_producer, queue, arch, concurrency_group, mutated
+            )
+        except SystemExit:
+            pass
+        else:
+            fail(f"{key} accepted release-pair fail-open field: {field}")
 
 github_release = keyed["github-release-assets"]
 expected_github_dependencies = [

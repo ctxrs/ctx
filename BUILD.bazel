@@ -1012,6 +1012,8 @@ py_test(
         "scripts/semantic_release_assets/__init__.py",
         "scripts/semantic_release_assets/common.py",
         "scripts/semantic_release_assets/contracts.py",
+        "scripts/qualify-macos-release-pair.sh",
+        "scripts/stage-github-release-assets.sh",
         "scripts/verify-macos-runtime-builder-output.sh",
     ],
     main = "scripts/tests/onnxruntime-sidecar-tools-test.py",
