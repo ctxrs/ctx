@@ -3,11 +3,12 @@ set -euo pipefail
 
 usage() {
   cat >&2 <<'USAGE'
-Usage: scripts/assemble-github-release-assets.sh CORE_DIR RUNTIME_DIR [OUT_DIR]
+Usage: scripts/assemble-github-release-assets.sh CORE_DIR RUNTIME_DIR OUT_DIR RECEIPT_DIR
 
 Combines an independently staged Core GitHub handoff with the five qualified
-ONNX Runtime transports. OUT_DIR defaults to target/github-release-assets.
-The input directories are never modified and the output is published once.
+ONNX Runtime transports. RECEIPT_DIR contains the macOS release-pair
+qualification receipts. The input directories are never modified and the
+output is published once.
 USAGE
 }
 
@@ -16,7 +17,7 @@ die() {
   exit 1
 }
 
-[[ $# -ge 2 && $# -le 3 ]] || {
+[[ $# -eq 4 ]] || {
   usage
   exit 2
 }
@@ -25,8 +26,9 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 bundle_tool="${repo_root}/scripts/release/release_bundle.py"
 core_dir="$1"
 runtime_dir="$2"
-out_dir="${3:-target/github-release-assets}"
-for variable in core_dir runtime_dir out_dir; do
+out_dir="$3"
+receipt_dir="$4"
+for variable in core_dir runtime_dir out_dir receipt_dir; do
   value="${!variable}"
   [[ "${value}" != -* ]] || die "release directory cannot start with '-': ${value}"
   if [[ "${value}" != /* ]]; then
@@ -36,6 +38,7 @@ done
 
 python3 -I "${bundle_tool}" require-directory --directory "${core_dir}"
 python3 -I "${bundle_tool}" require-directory --directory "${runtime_dir}"
+python3 -I "${bundle_tool}" require-directory --directory "${receipt_dir}"
 python3 -I "${bundle_tool}" preflight-publication \
   --input-dir "${core_dir}" --output-dir "${out_dir}"
 python3 -I "${bundle_tool}" preflight-publication \
@@ -141,6 +144,42 @@ for asset in "${runtime_assets[@]}"; do
   [[ "${actual}" == "${expected}" ]] || die "runtime checksum mismatch for ${asset}"
   runtime_digests["${asset}"]="${actual}"
 done
+
+verify_macos_pair_receipt() {
+  local platform="$1"
+  local cli_asset="ctx-${platform}"
+  local runtime_asset="ctx-onnxruntime-${platform}.tar.gz"
+  local receipt="${receipt_dir%/}/${cli_asset}.release-pair.sha256"
+  local line digest name
+  local -a lines
+  declare -A receipt_digests=()
+
+  require_regular "${receipt}" "macOS release-pair digest receipt"
+  [[ -s "${receipt}" ]] || die "macOS release-pair digest receipt is empty: ${receipt}"
+  mapfile -t lines < "${receipt}"
+  [[ "${#lines[@]}" -eq 2 ]] || \
+    die "macOS release-pair digest receipt must contain exactly two entries: ${receipt}"
+  for line in "${lines[@]}"; do
+    [[ "${line}" =~ ^([0-9a-f]{64})\ \ ([A-Za-z0-9][A-Za-z0-9._-]{0,127})$ ]] || \
+      die "macOS release-pair digest receipt is malformed: ${receipt}"
+    digest="${BASH_REMATCH[1]}"
+    name="${BASH_REMATCH[2]}"
+    [[ ! -v "receipt_digests[${name}]" ]] || \
+      die "macOS release-pair digest receipt repeats ${name}: ${receipt}"
+    receipt_digests["${name}"]="${digest}"
+  done
+  [[ "${#receipt_digests[@]}" -eq 2 \
+    && -v "receipt_digests[${cli_asset}]" \
+    && -v "receipt_digests[${runtime_asset}]" ]] || \
+    die "macOS release-pair digest receipt has the wrong assets: ${receipt}"
+  [[ "${core_digests[${cli_asset}]}" == "${receipt_digests[${cli_asset}]}" ]] || \
+    die "macOS release-pair receipt digest mismatch for ${cli_asset}"
+  [[ "${runtime_digests[${runtime_asset}]}" == "${receipt_digests[${runtime_asset}]}" ]] || \
+    die "macOS release-pair receipt digest mismatch for ${runtime_asset}"
+}
+
+verify_macos_pair_receipt macos-arm64
+verify_macos_pair_receipt macos-x64
 
 staged="$(mktemp -d "$(dirname "${out_dir}")/.github-release-final.XXXXXX")"
 cleanup() {
