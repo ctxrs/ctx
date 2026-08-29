@@ -60,7 +60,7 @@ pub use model_runtime::{
     prepare_platform_semantic_acceleration, semantic_native_accelerator_target,
     semantic_query_service_supported, SemanticDaemonCpuFallbackRequired,
     SemanticDaemonModelAcquisition, SemanticEmbeddingRuntimeInfo, SemanticNativeAcceleratorTarget,
-    SemanticPassiveLoadUnavailable, SharedSemanticRuntime,
+    SemanticPassiveConfigurationError, SemanticPassiveLoadUnavailable, SharedSemanticRuntime,
 };
 pub use resource_policy::{
     semantic_model_load_resource_facts, SemanticModelLoadResourceFacts, SemanticQuietPolicy,

@@ -74,6 +74,10 @@ pub mod test_support {
             .ok_or_else(|| anyhow!("semantic test store has no flat generation"))
     }
 
+    pub fn commit_control_wal(store: &SemanticVectorStore) -> Result<()> {
+        store.commit_control_wal_for_test()
+    }
+
     pub fn semantic_query_pin(
         core_generation_id: &str,
         readiness: SourceBackedGenerationPin,

@@ -25,13 +25,23 @@ const MAX_SEMANTIC_QUERY_VECTORS: usize = 32;
 pub struct SemanticNotReady {
     code: &'static str,
     detail: String,
+    retryable: bool,
 }
 
 impl SemanticNotReady {
     pub fn new(code: &'static str, detail: impl Into<String>) -> Self {
+        Self::new_with_retryable(code, detail, default_semantic_retryable(code))
+    }
+
+    pub fn new_with_retryable(
+        code: &'static str,
+        detail: impl Into<String>,
+        retryable: bool,
+    ) -> Self {
         Self {
             code,
             detail: detail.into(),
+            retryable,
         }
     }
 
@@ -44,16 +54,7 @@ impl SemanticNotReady {
     }
 
     pub fn retryable(&self) -> bool {
-        matches!(
-            self.code,
-            "semantic_store_unavailable"
-                | "semantic_store_missing"
-                | "semantic_generation_unreadable"
-                | "semantic_generation_not_acknowledged"
-                | "semantic_query_service_unavailable"
-                | "semantic_projection_event_mismatch"
-                | "semantic_generation_receipt_mismatch"
-        )
+        self.retryable
     }
 
     pub fn structured(&self) -> Value {
@@ -64,6 +65,20 @@ impl SemanticNotReady {
             "retryable": self.retryable(),
         })
     }
+}
+
+fn default_semantic_retryable(code: &str) -> bool {
+    matches!(
+        code,
+        "semantic_store_unavailable"
+            | "semantic_store_missing"
+            | "semantic_generation_unreadable"
+            | "semantic_generation_not_acknowledged"
+            | "semantic_query_service_unavailable"
+            | "semantic_projection_event_mismatch"
+            | "semantic_generation_receipt_mismatch"
+            | "semantic_executor_unavailable"
+    )
 }
 
 pub struct SemanticQueryPin {
@@ -79,7 +94,7 @@ impl SemanticQueryPin {
         contract: &SemanticModelContract,
     ) -> Result<Self> {
         let vector_root = source_backed_semantic_vector_path(data_root);
-        let vector_store = SemanticVectorStore::open_passive_snapshot(&vector_root, contract)
+        let vector_store = SemanticVectorStore::open_read_only(&vector_root, contract)
             .map_err(|error| {
                 semantic_not_ready("semantic_store_unavailable", format!("{error:#}"))
             })?
@@ -89,6 +104,40 @@ impl SemanticQueryPin {
                     "the fresh flat-F32 semantic projection does not exist",
                 )
             })?;
+        Self::preflight_store(index, vector_store)
+    }
+
+    /// Exact daemon-free preflight over a coordinated immutable snapshot.
+    /// Unlike ordinary daemon/Reconcile reads this never opens SQLite's WAL.
+    pub fn preflight_passive(
+        index: &VerifiedIndex,
+        data_root: &Path,
+        contract: &SemanticModelContract,
+    ) -> Result<Self> {
+        let semantic_documents = index.semantic_eligible_event_count().map_err(|error| {
+            semantic_not_ready(
+                "semantic_generation_unreadable",
+                format!("semantic-eligible event count failed: {error}"),
+            )
+        })?;
+        let vector_root = source_backed_semantic_vector_path(data_root);
+        let readiness = SemanticVectorStore::source_backed_generation_pin_passive(
+            &vector_root,
+            contract,
+            index.generation_id(),
+            semantic_documents,
+        )
+        .map_err(|error| semantic_not_ready("semantic_store_unavailable", format!("{error:#}")))?
+        .ok_or_else(|| {
+            semantic_not_ready(
+                "semantic_store_missing",
+                "the fresh flat-F32 semantic projection does not exist",
+            )
+        })?;
+        semantic_query_pin_from_readiness(index.generation_id(), readiness)
+    }
+
+    fn preflight_store(index: &VerifiedIndex, vector_store: SemanticVectorStore) -> Result<Self> {
         let semantic_documents = index.semantic_eligible_event_count().map_err(|error| {
             semantic_not_ready(
                 "semantic_generation_unreadable",

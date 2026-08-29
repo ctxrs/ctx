@@ -18,7 +18,8 @@ use ctx_semantic_index::{
     SemanticVectorStore, SourceBackedSemanticDocumentBuilder,
 };
 use ctx_semantic_model::{
-    SemanticEmbeddingExecutorConfig, SemanticEmbeddingExecutorHandle,
+    semantic_embedding_failure_is_permanent, SemanticEmbeddingExecutorConfig,
+    SemanticEmbeddingExecutorHandle, SemanticPassiveConfigurationError,
     SemanticPassiveLoadUnavailable, SharedSemanticRuntime,
 };
 use serde_json::{json, Value};
@@ -184,7 +185,10 @@ impl ForegroundSemanticExecutor {
                             model_config,
                         )
                     })
-                    .map(Box::new)
+                    .and_then(|executor| {
+                        ensure_semantic_executor_contract(&executor)?;
+                        Ok(Box::new(executor))
+                    })
                     .map_err(|error| format!("{error:#}"))
             })
             .as_deref()
@@ -287,6 +291,10 @@ struct ForegroundSemanticEmbedder<'a> {
     executor: &'a SemanticEmbeddingExecutorHandle,
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+struct RetryableSemanticExecutorUnavailable(String);
+
 impl SemanticBatchEmbedder for ForegroundSemanticEmbedder<'_> {
     fn embed_chunks(&mut self, chunks: &[SemanticChunkDocument]) -> Result<Vec<Vec<f32>>> {
         ensure_foreground_executor(self.executor)?;
@@ -304,6 +312,24 @@ fn reconcile_foreground_semantic(
     data_root: &Path,
     executor: &SemanticEmbeddingExecutorHandle,
 ) -> Result<()> {
+    reconcile_foreground_semantic_with_fingerprint(
+        index,
+        data_root,
+        executor,
+        executor.executor().contract().fingerprint(),
+    )
+}
+
+fn reconcile_foreground_semantic_with_fingerprint(
+    index: &VerifiedIndex,
+    data_root: &Path,
+    executor: &SemanticEmbeddingExecutorHandle,
+    executor_fingerprint: &str,
+) -> Result<()> {
+    // Keep this boundary defensive even though lazy resolution validates too:
+    // no acquisition, endpoint traffic, writable open, or embedding may occur
+    // for a mismatched executor.
+    ensure_semantic_executor_contract_fingerprint(executor_fingerprint)?;
     if index.semantic_eligible_event_count()? > 0 {
         ensure_foreground_executor(executor)?;
     }
@@ -368,8 +394,15 @@ impl SemanticQuerySession<'_> {
         mode: ForegroundSemanticMode,
     ) -> std::result::Result<SemanticQuerySession<'a>, SemanticQueryError> {
         let contract = semantic_model_contract();
-        let pin = SemanticQueryPin::preflight(index, data_root, contract)
-            .map_err(SemanticQueryError::from)?;
+        let pin = match mode {
+            ForegroundSemanticMode::ReadOnly => {
+                SemanticQueryPin::preflight_passive(index, data_root, contract)
+            }
+            ForegroundSemanticMode::Reconcile => {
+                SemanticQueryPin::preflight(index, data_root, contract)
+            }
+        }
+        .map_err(SemanticQueryError::from)?;
         Ok(SemanticQuerySession {
             pin,
             index,
@@ -461,7 +494,6 @@ fn foreground_query_embedding(
     mode: ForegroundSemanticMode,
 ) -> Result<(Vec<f32>, u64)> {
     let executor = selected_executor.resolve(data_root)?;
-    ensure_semantic_executor_contract(executor)?;
     match mode {
         ForegroundSemanticMode::ReadOnly => {
             if let Some(builtin) = executor.builtin_executor() {
@@ -473,15 +505,31 @@ fn foreground_query_embedding(
         ForegroundSemanticMode::Reconcile => ensure_foreground_executor(executor)?,
     }
     let started = Instant::now();
-    let executor = executor.executor();
-    let embedding =
-        executor.embed_query(executor.contract().prepare_query(semantic_text.to_owned()))?;
+    let embedding_executor = executor.executor();
+    let embedding = embedding_executor
+        .embed_query(
+            embedding_executor
+                .contract()
+                .prepare_query(semantic_text.to_owned()),
+        )
+        .map_err(|error| {
+            if mode == ForegroundSemanticMode::ReadOnly
+                && !semantic_embedding_failure_is_permanent(&error)
+            {
+                anyhow::Error::new(RetryableSemanticExecutorUnavailable(format!("{error:#}")))
+            } else {
+                error
+            }
+        })?;
     Ok((embedding, started.elapsed().as_millis() as u64))
 }
 
 fn ensure_semantic_executor_contract(executor: &SemanticEmbeddingExecutorHandle) -> Result<()> {
-    let contract = semantic_model_contract();
-    if executor.executor().contract().fingerprint() != contract.fingerprint() {
+    ensure_semantic_executor_contract_fingerprint(executor.executor().contract().fingerprint())
+}
+
+fn ensure_semantic_executor_contract_fingerprint(executor_fingerprint: &str) -> Result<()> {
+    if executor_fingerprint != semantic_model_contract().fingerprint() {
         return Err(anyhow!(
             "semantic executor model contract does not match the semantic index contract"
         ));
@@ -568,7 +616,23 @@ impl From<anyhow::Error> for SemanticQueryError {
                     Ok(error) => {
                         Self::not_ready("semantic_executor_unavailable", error.to_string(), true)
                     }
-                    Err(error) => Self::failed(format!("{error:#}")),
+                    Err(error) => match error.downcast::<SemanticPassiveConfigurationError>() {
+                        Ok(error) => Self::not_ready(
+                            "semantic_executor_configuration_invalid",
+                            error.to_string(),
+                            false,
+                        ),
+                        Err(error) => {
+                            match error.downcast::<RetryableSemanticExecutorUnavailable>() {
+                                Ok(error) => Self::not_ready(
+                                    "semantic_executor_unavailable",
+                                    error.to_string(),
+                                    true,
+                                ),
+                                Err(error) => Self::failed(format!("{error:#}")),
+                            }
+                        }
+                    },
                 },
             },
         }

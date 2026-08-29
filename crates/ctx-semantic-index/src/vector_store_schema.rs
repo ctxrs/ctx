@@ -5,8 +5,10 @@ use ctx_semantic_model::SemanticModelContract;
 
 use super::vector_store::{
     control,
-    flat_segments::{FlatModelContract, FlatSegmentStore, FlatStoreError},
-    SemanticVectorStore,
+    flat_segments::{
+        FlatModelContract, FlatSegmentStore, FlatStoreCoordinationGuard, FlatStoreError,
+    },
+    SemanticVectorStore, SourceBackedGenerationPin,
 };
 
 pub(super) const SEMANTIC_VECTOR_SCHEMA_VERSION: i64 = 6;
@@ -84,14 +86,24 @@ pub fn semantic_vector_failure_kind(error: &anyhow::Error) -> Option<SemanticVec
 
 impl SemanticVectorStore {
     pub fn open(path: &Path, contract: &SemanticModelContract) -> Result<Self> {
+        // Reject newer or incompatible control state before Flat recovery can
+        // remove artifacts. The same validation runs again under coordination
+        // in `open_writable`, closing the concurrent-writer window.
+        control::preflight_writable_compatibility(path)?;
         let flat_contract = flat_model_contract(contract).map_err(semantic_flat_store_error)?;
+        let (flat, coordination) = FlatSegmentStore::prepare_writable_open(path, flat_contract)
+            .map_err(semantic_flat_store_error)?;
+        // Recovery, control migration/open, and model-reset handoff share the
+        // same transaction lock used by source reconciliation.
         let conn = control::open_writable(path)?;
-        let flat =
-            FlatSegmentStore::open(path, flat_contract).map_err(semantic_flat_store_error)?;
+        let flat = flat
+            .finish_writable_open()
+            .map_err(semantic_flat_store_error)?;
         let store = Self {
             conn,
             flat,
             contract: contract.clone(),
+            _passive_snapshot: None,
         };
         if store
             .flat
@@ -104,6 +116,7 @@ impl SemanticVectorStore {
                 .acknowledge_model_contract_reset()
                 .map_err(semantic_flat_store_error)?;
         }
+        drop(coordination);
         Ok(store)
     }
 
@@ -124,21 +137,36 @@ impl SemanticVectorStore {
             conn,
             flat,
             contract: contract.clone(),
+            _passive_snapshot: None,
         }))
     }
 
     /// Opens a completed semantic snapshot without giving SQLite any write
     /// capability. This is the only store opener suitable for daemon-free
     /// passive queries.
-    pub fn open_passive_snapshot(
+    pub(crate) fn open_passive_snapshot(
         path: &Path,
         contract: &SemanticModelContract,
     ) -> Result<Option<Self>> {
-        let flat_contract = flat_model_contract(contract).map_err(semantic_flat_store_error)?;
-        let Some(conn) = control::open_passive_snapshot(path)? else {
+        Self::open_passive_snapshot_with_admission(path, contract, || {})
+    }
+
+    fn open_passive_snapshot_with_admission(
+        path: &Path,
+        contract: &SemanticModelContract,
+        admitted: impl FnOnce(),
+    ) -> Result<Option<Self>> {
+        let Some(path) = control::passive_snapshot_root(path)? else {
             return Ok(None);
         };
-        let flat = FlatSegmentStore::open_read_only(path, flat_contract)
+        let passive_snapshot = FlatStoreCoordinationGuard::lock_passive_snapshot(&path)
+            .map_err(passive_flat_store_error)?;
+        admitted();
+        let Some(conn) = control::open_passive_snapshot(&path)? else {
+            return Ok(None);
+        };
+        let flat_contract = flat_model_contract(contract).map_err(semantic_flat_store_error)?;
+        let flat = FlatSegmentStore::open_read_only(&path, flat_contract)
             .map_err(semantic_flat_store_error)?;
         if flat
             .model_contract_reset_pending()
@@ -150,7 +178,42 @@ impl SemanticVectorStore {
             conn,
             flat,
             contract: contract.clone(),
+            _passive_snapshot: Some(passive_snapshot),
         }))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open_passive_snapshot_after_admission(
+        path: &Path,
+        contract: &SemanticModelContract,
+        admitted: impl FnOnce(),
+    ) -> Result<Option<Self>> {
+        Self::open_passive_snapshot_with_admission(path, contract, admitted)
+    }
+
+    /// Pins one exact passive generation while the writer coordination lock is
+    /// held, then releases the lock before returning the immutable flat pin.
+    pub fn source_backed_generation_pin_passive(
+        path: &Path,
+        contract: &SemanticModelContract,
+        core_generation_id: &str,
+        semantic_documents: u64,
+    ) -> Result<Option<SourceBackedGenerationPin>> {
+        let Some(store) = Self::open_passive_snapshot(path, contract)? else {
+            return Ok(None);
+        };
+        store
+            .source_backed_generation_pin_exact(core_generation_id, semantic_documents)
+            .map(Some)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn commit_control_wal_for_test(&self) -> Result<()> {
+        self.conn.execute(
+            "UPDATE semantic_index_stats SET dirty_items = dirty_items",
+            [],
+        )?;
+        Ok(())
     }
 }
 
@@ -226,4 +289,11 @@ fn semantic_flat_store_error(error: FlatStoreError) -> anyhow::Error {
         | FlatStoreError::Io { .. }
         | FlatStoreError::Serialize(_) => anyhow::Error::new(error),
     }
+}
+
+fn passive_flat_store_error(error: FlatStoreError) -> anyhow::Error {
+    SemanticVectorStoreError::passive_snapshot_unavailable(format!(
+        "passive semantic snapshot coordination is unavailable: {error}"
+    ))
+    .into()
 }

@@ -34,8 +34,14 @@ impl FlatSegmentStore {
     }
 
     pub(crate) fn compact(&self) -> FlatResult<FlatPublishOutcome> {
-        self.require_writable()?;
         let _transaction = self.lock_transaction()?;
+        self.compact_coordinated()
+    }
+
+    /// Compacts while the caller retains `flat_transaction.lock` across a
+    /// larger Flat/control handoff.
+    pub(crate) fn compact_coordinated(&self) -> FlatResult<FlatPublishOutcome> {
+        self.require_writable()?;
         let _guard = self.lock_exclusive()?;
         let Some(current) = self.load_current_locked()? else {
             return Ok(noop_outcome(None));
@@ -190,8 +196,7 @@ impl FlatSegmentStore {
         Ok(())
     }
 
-    pub(super) fn recover_internal(&self) -> FlatResult<FlatRecoveryReport> {
-        let _transaction = self.lock_transaction()?;
+    pub(super) fn recover_internal_coordinated(&self) -> FlatResult<FlatRecoveryReport> {
         let _guard = self.lock_exclusive()?;
         let mut report = remove_temporary_files(&self.root)?;
         let selected = match select_manifest_any(&self.root) {

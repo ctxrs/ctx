@@ -357,6 +357,13 @@ pub(crate) struct FlatSegmentStore {
     fail_after_source_acknowledgement: std::sync::atomic::AtomicBool,
 }
 
+/// Coordinates one semantic control/flat snapshot with source-backed writers.
+/// The lock file is part of every initialized flat store; passive callers open
+/// it read-only and therefore cannot create storage artifacts.
+pub(crate) struct FlatStoreCoordinationGuard {
+    _lock: FileLock,
+}
+
 struct FlatSourceGenerationView {
     _transaction_lock: FileLock,
     selected: Option<SelectedManifest>,
@@ -434,11 +441,23 @@ impl FlatReconciliationView {
 }
 
 impl FlatSegmentStore {
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn open(root: impl AsRef<Path>, contract: FlatModelContract) -> FlatResult<Self> {
+        let (store, coordination) = Self::prepare_writable_open(root, contract)?;
+        let store = store.finish_writable_open()?;
+        drop(coordination);
+        Ok(store)
+    }
+
+    pub(crate) fn prepare_writable_open(
+        root: impl AsRef<Path>,
+        contract: FlatModelContract,
+    ) -> FlatResult<(Self, FlatStoreCoordinationGuard)> {
         ensure_little_endian()?;
         validate_model_contract(&contract)?;
         let root = root.as_ref().to_path_buf();
         ensure_store_directories(&root)?;
+        let coordination = FlatStoreCoordinationGuard::lock_control_writer(&root)?;
         let store = Self {
             root,
             contract,
@@ -479,16 +498,22 @@ impl FlatSegmentStore {
             #[cfg(test)]
             fail_after_source_acknowledgement: std::sync::atomic::AtomicBool::new(false),
         };
-        let recovery = store.recover_internal()?;
+        Ok((store, coordination))
+    }
+
+    pub(crate) fn finish_writable_open(self) -> FlatResult<Self> {
+        let recovery = self.recover_internal_coordinated()?;
         #[cfg(test)]
-        let store = {
-            let mut store = store;
+        {
+            let mut store = self;
             store.recovery = recovery;
-            store
-        };
+            Ok(store)
+        }
         #[cfg(not(test))]
-        let _ = recovery;
-        Ok(store)
+        {
+            let _ = recovery;
+            Ok(self)
+        }
     }
 
     pub(crate) fn open_read_only(
@@ -779,9 +804,19 @@ impl FlatSegmentStore {
         replacements: &[FlatEventReplacement],
         tombstones: &[Uuid],
     ) -> FlatResult<FlatPublishOutcome> {
+        let _transaction = self.lock_transaction()?;
+        self.publish_replacement_event_chunks_coordinated(replacements, tombstones)
+    }
+
+    /// Publishes while the caller retains `flat_transaction.lock` across a
+    /// larger Flat/control handoff.
+    pub(crate) fn publish_replacement_event_chunks_coordinated(
+        &self,
+        replacements: &[FlatEventReplacement],
+        tombstones: &[Uuid],
+    ) -> FlatResult<FlatPublishOutcome> {
         self.require_writable()?;
         validate_publication_input(&self.contract, replacements, tombstones)?;
-        let _transaction = self.lock_transaction()?;
         let _guard = self.lock_exclusive()?;
         let current = self.load_current_locked()?;
         if replacements.is_empty() && tombstones.is_empty() {
@@ -955,6 +990,20 @@ impl FlatSegmentStore {
 
     fn lock_transaction(&self) -> FlatResult<FileLock> {
         FileLock::exclusive(&transaction_lock_path(&self.root))
+    }
+}
+
+impl FlatStoreCoordinationGuard {
+    pub(crate) fn lock_passive_snapshot(root: &Path) -> FlatResult<Self> {
+        Ok(Self {
+            _lock: FileLock::shared(&transaction_lock_path(root))?,
+        })
+    }
+
+    pub(crate) fn lock_control_writer(root: &Path) -> FlatResult<Self> {
+        Ok(Self {
+            _lock: FileLock::exclusive(&transaction_lock_path(root))?,
+        })
     }
 }
 

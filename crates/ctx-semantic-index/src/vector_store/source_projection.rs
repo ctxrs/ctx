@@ -332,13 +332,13 @@ impl SemanticVectorStore {
                 "source-backed semantic target does not match its pinned Core index"
             ));
         }
-        if let Some(outcome) = self.reconcile_pending_full_rebuild()? {
-            return Ok(outcome);
-        }
         self.flat
             .begin_source_generation_view()
             .map_err(anyhow::Error::new)?;
         let result = (|| {
+            if let Some(outcome) = self.reconcile_pending_full_rebuild()? {
+                return Ok(outcome);
+            }
             self.recover_lost_flat_publication()?;
             if self
                 .acknowledged_source_projection(
@@ -524,7 +524,7 @@ impl SemanticVectorStore {
             .reconciliation_event_ids(FULL_REBUILD_STATE, MAX_SOURCE_EVENT_PAGE_ITEMS)
             .map_err(anyhow::Error::new)?;
         if !event_ids.is_empty() {
-            let deleted_chunks = self.delete_events(&event_ids)?;
+            let deleted_chunks = self.delete_events_coordinated(&event_ids)?;
             return Ok(Some(SourceBackedSemanticOutcome {
                 deleted_chunks,
                 work_remaining: true,
@@ -532,13 +532,19 @@ impl SemanticVectorStore {
             }));
         }
         self.flat
-            .finish_reconciliation_view()
+            .finish_reconciliation_view_coordinated()
             .map_err(anyhow::Error::new)?;
         self.conn.execute(
             "DELETE FROM semantic_maintenance_state WHERE key = ?1",
             [FULL_REBUILD_STATE],
         )?;
-        Ok(None)
+        // End this coordinated generation view before beginning a new source
+        // projection. Final compaction can replace the active Flat manifest,
+        // so source staging must pin that post-compaction generation afresh.
+        Ok(Some(SourceBackedSemanticOutcome {
+            work_remaining: true,
+            ..SourceBackedSemanticOutcome::default()
+        }))
     }
 
     fn reconcile_source_page(
