@@ -11,6 +11,7 @@ use anyhow::Result;
 use ctx_client_observability::analytics::PublicEventV1;
 use ctx_companion_bridge::CancellationToken;
 use ctx_daemon_cli::{DaemonConfig, DaemonMode, DaemonRuntimeConfig};
+use ctx_history_read_application::HistorySemanticPort;
 
 pub(crate) use ctx_daemon_cli::{
     begin_daemon_upgrade_handoff, begin_legacy_daemon_upgrade_handoff,
@@ -23,12 +24,135 @@ pub(crate) use ctx_daemon_cli::{
     semantic_provisioning_coreml_asset_matches, semantic_provisioning_model_contract_matches,
     semantic_provisioning_model_path_count, semantic_provisioning_model_path_matches,
     semantic_required_model_file_count, semantic_required_model_file_matches,
-    semantic_runtime_cache_dir, semantic_worker_cache_dir, DaemonHandoff, DaemonSetupHandoff,
-    DaemonUpgradeHandoff, RefreshStatus, SemanticNativeAcceleratorTarget, SemanticNotReady,
-    SemanticOrtModelVariant, SourceBackedRefreshDaemonUnavailable, SourceBackedRefreshMode,
-    SourceBackedRefreshObservation, SourceBackedRefreshPendingPublication,
-    SourceBackedRefreshTerminalError, SEMANTIC_WORKER_BATCH_MAX,
+    semantic_runtime_cache_dir, semantic_worker_cache_dir,
+    wait_for_exact_daemon_semantic_completion, DaemonHandoff, DaemonSetupHandoff,
+    DaemonUpgradeHandoff, ExactDaemonSemanticCompletionError, PinnedSourceBackedGeneration,
+    RefreshStatus, SemanticNativeAcceleratorTarget, SemanticNotReady, SemanticOrtModelVariant,
+    SourceBackedRefreshDaemonUnavailable, SourceBackedRefreshMode, SourceBackedRefreshObservation,
+    SourceBackedRefreshPendingPublication, SourceBackedRefreshTerminalError,
+    SEMANTIC_WORKER_BATCH_MAX,
 };
+
+/// The semantic completion owner selected after Import has durably published
+/// and pinned its exact Core generation.
+#[derive(Clone, Debug)]
+pub(crate) enum ImportSemanticCompletion {
+    Disabled,
+    Foreground {
+        executor: ctx_daemon_cli::SemanticEmbeddingExecutorConfig,
+    },
+    Daemon,
+}
+
+impl ImportSemanticCompletion {
+    pub(crate) fn from_import_config(config: &crate::config::AppConfig) -> Self {
+        if !config.semantic_search_enabled() {
+            Self::Disabled
+        } else if !config.automatic_indexing_enabled() {
+            Self::Foreground {
+                executor: config.semantic_embedding_executor().clone(),
+            }
+        } else {
+            Self::Daemon
+        }
+    }
+
+    pub(crate) const fn is_enabled(&self) -> bool {
+        !matches!(self, Self::Disabled)
+    }
+}
+
+/// Semantic completion failed after Core had already published the named
+/// generation. Callers can therefore report the semantic failure without
+/// treating the durable Core publication as rolled back.
+#[derive(Debug, thiserror::Error)]
+#[error("semantic completion failed for Core generation {generation_id}: {source}")]
+pub(crate) struct ImportSemanticCompletionError {
+    generation_id: String,
+    retryable: bool,
+    #[source]
+    source: anyhow::Error,
+}
+
+impl ImportSemanticCompletionError {
+    fn new(generation_id: String, retryable: bool, source: impl Into<anyhow::Error>) -> Self {
+        Self {
+            generation_id,
+            retryable,
+            source: source.into(),
+        }
+    }
+
+    pub(crate) fn structured(&self) -> serde_json::Value {
+        serde_json::json!({
+            "error": self.to_string(),
+            "error_code": "semantic_completion_failed",
+            "generation_id": self.generation_id,
+            "detail": self.source.to_string(),
+            "retryable": self.retryable,
+        })
+    }
+}
+
+/// Completes semantic coverage for exactly the Core generation just published
+/// by import. The daemon path is read-only; an explicit `--no-daemon` import
+/// retains the established foreground reconciliation behavior instead.
+pub(crate) fn complete_import_semantic(
+    completion: &ImportSemanticCompletion,
+    data_root: &Path,
+    pin: PinnedSourceBackedGeneration,
+) -> std::result::Result<PinnedSourceBackedGeneration, ImportSemanticCompletionError> {
+    let generation_id = pin.generation_id().to_owned();
+    match completion {
+        ImportSemanticCompletion::Disabled => Ok(pin),
+        ImportSemanticCompletion::Foreground { executor } => {
+            let adapter =
+                ctx_daemon_cli::SemanticQueryAdapter::foreground(data_root, executor.clone());
+            HistorySemanticPort::begin_query(&adapter, pin.verified_index()).map_err(|source| {
+                ImportSemanticCompletionError::new(
+                    generation_id,
+                    source.retryable(),
+                    anyhow::Error::new(source),
+                )
+            })?;
+            Ok(pin)
+        }
+        ImportSemanticCompletion::Daemon => {
+            wait_for_exact_daemon_semantic_completion(data_root, pin)
+                .map_err(import_daemon_semantic_completion_error)
+        }
+    }
+}
+
+fn import_daemon_semantic_completion_error(
+    source: ExactDaemonSemanticCompletionError,
+) -> ImportSemanticCompletionError {
+    let (generation_id, retryable) = match &source {
+        ExactDaemonSemanticCompletionError::CoreSuperseded {
+            generation_id,
+            retryable,
+            ..
+        }
+        | ExactDaemonSemanticCompletionError::DaemonJobFailed {
+            generation_id,
+            retryable,
+            ..
+        } => (generation_id.clone(), *retryable),
+        ExactDaemonSemanticCompletionError::Observation { generation_id, .. } => {
+            (generation_id.clone(), false)
+        }
+        ExactDaemonSemanticCompletionError::Preflight {
+            generation_id,
+            source,
+        } => (
+            generation_id.clone(),
+            source
+                .downcast_ref::<SemanticNotReady>()
+                .is_some_and(SemanticNotReady::retryable),
+        ),
+    };
+    ImportSemanticCompletionError::new(generation_id, retryable, anyhow::Error::new(source))
+}
 
 struct CtxDaemonCliHost;
 
@@ -518,6 +642,39 @@ impl ctx_daemon_cli::DaemonCliHost for CtxDaemonCliHost {
             Err(_) => COMPANION_MAINTENANCE_WAKE_STATE.store(0, Ordering::Release),
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod import_semantic_completion_tests {
+    use super::ImportSemanticCompletion;
+
+    #[test]
+    fn import_semantic_completion_selects_only_core_when_semantic_is_disabled() {
+        let mut config = crate::config::AppConfig::default();
+        config.search.semantic = Some(false);
+
+        assert!(matches!(
+            ImportSemanticCompletion::from_import_config(&config),
+            ImportSemanticCompletion::Disabled
+        ));
+    }
+
+    #[test]
+    fn import_semantic_completion_is_governed_by_configured_indexing_mode() {
+        let mut config = crate::config::AppConfig::default();
+        config.search.semantic = Some(true);
+
+        assert!(matches!(
+            ImportSemanticCompletion::from_import_config(&config),
+            ImportSemanticCompletion::Daemon
+        ));
+
+        config.indexing.mode = crate::config::IndexingMode::Manual;
+        assert!(matches!(
+            ImportSemanticCompletion::from_import_config(&config),
+            ImportSemanticCompletion::Foreground { .. }
+        ));
     }
 }
 

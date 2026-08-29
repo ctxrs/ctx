@@ -578,6 +578,15 @@ fn render_command_result_error(
                     &serde_json::to_string(&error.structured())?,
                 )?;
                 Some(RenderedJsonError.into())
+            } else if let Some(error) =
+                error.downcast_ref::<semantic::ImportSemanticCompletionError>()
+            {
+                write_machine_error(
+                    search_operation,
+                    ui,
+                    &serde_json::to_string(&error.structured())?,
+                )?;
+                Some(RenderedJsonError.into())
             } else {
                 write_machine_error(search_operation, ui, &format!("Error: {error:?}"))?;
                 Some(RenderedCliError.into())
