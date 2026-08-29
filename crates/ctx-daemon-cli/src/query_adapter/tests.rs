@@ -35,6 +35,14 @@ fn semantic_index_revision(
     revision: u64,
     include_record: bool,
 ) -> Result<(VerifiedIndex, Uuid)> {
+    semantic_index_revision_at(&root.join("index"), revision, include_record)
+}
+
+fn semantic_index_revision_at(
+    index_root: &Path,
+    revision: u64,
+    include_record: bool,
+) -> Result<(VerifiedIndex, Uuid)> {
     let source = SourceKey::derive(
         "codex",
         "codex_session_jsonl",
@@ -56,8 +64,7 @@ fn semantic_index_revision(
         native_item_key: &NativeItemKey::native_id("message", TypedKey::U64(revision))?,
         subrecord_selector: None,
     })?;
-    let index_root = root.join("index");
-    let mut writer = GenerationWriter::open(&index_root, WriterOptions::default())?
+    let mut writer = GenerationWriter::open(index_root, WriterOptions::default())?
         .into_writer()
         .map_err(crate::committed_generation_recovery_error)?;
     writer.begin_source(source.clone())?;
@@ -94,7 +101,7 @@ fn semantic_index_revision(
         },
     )?)?;
     writer.commit(|_| true)?;
-    Ok((VerifiedIndex::open_pinned(&index_root)?, event_id.as_uuid()))
+    Ok((VerifiedIndex::open_pinned(index_root)?, event_id.as_uuid()))
 }
 
 struct RejectingSemanticPorts;
@@ -450,6 +457,138 @@ fn adapter_never_embeds_before_missing_or_unacknowledged_store_preflight() -> Re
             }
         ));
     }
+    Ok(())
+}
+
+#[test]
+fn daemon_generation_wait_observes_delayed_acknowledgement_without_sleeping() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let index_root = ctx_history_refresh::source_backed_index_root(temp.path());
+    let (index, _) = semantic_index_revision_at(&index_root, 1, true)?;
+    let generation = index.generation_id().to_owned();
+    let reconciliation_index = VerifiedIndex::open_pinned(&index_root)?;
+    let pauses = Cell::new(0_u32);
+
+    let pin = wait_for_daemon_semantic_generation_with(
+        temp.path(),
+        PinnedSourceBackedGeneration::from_index(index),
+        Duration::from_secs(1),
+        || crate::pin_active_verified_generation(temp.path()),
+        |_| {
+            pauses.set(pauses.get() + 1);
+            reconcile_ready_nonempty_generation(&reconciliation_index, temp.path()).unwrap();
+        },
+    )?;
+
+    assert_eq!(pauses.get(), 1);
+    assert_eq!(pin.generation_id(), generation);
+    SemanticQueryPin::preflight(pin.verified_index(), temp.path(), semantic_model_contract())?;
+    Ok(())
+}
+
+#[test]
+fn daemon_generation_wait_repins_both_indexes_after_core_supersession() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let index_root = ctx_history_refresh::source_backed_index_root(temp.path());
+    let (first, _) = semantic_index_revision_at(&index_root, 1, true)?;
+    let first_generation = first.generation_id().to_owned();
+    let (second, _) = semantic_index_revision_at(&index_root, 2, true)?;
+    let second_generation = second.generation_id().to_owned();
+    reconcile_ready_nonempty_generation(&second, temp.path())?;
+
+    let pin = wait_for_daemon_semantic_generation_with(
+        temp.path(),
+        PinnedSourceBackedGeneration::from_index(first),
+        Duration::from_secs(1),
+        || crate::pin_active_verified_generation(temp.path()),
+        |_| {},
+    )?;
+
+    assert_ne!(first_generation, second_generation);
+    assert_eq!(pin.generation_id(), second_generation);
+    SemanticQueryPin::preflight(pin.verified_index(), temp.path(), semantic_model_contract())?;
+    Ok(())
+}
+
+#[test]
+fn daemon_generation_wait_repins_before_returning_a_ready_old_generation() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let index_root = ctx_history_refresh::source_backed_index_root(temp.path());
+    let (first, _) = semantic_index_revision_at(&index_root, 1, true)?;
+    reconcile_ready_nonempty_generation(&first, temp.path())?;
+    let (second, _) = semantic_index_revision_at(&index_root, 2, true)?;
+    let second_generation = second.generation_id().to_owned();
+    reconcile_ready_nonempty_generation(&second, temp.path())?;
+
+    let pin = wait_for_daemon_semantic_generation_with(
+        temp.path(),
+        PinnedSourceBackedGeneration::from_index(first),
+        Duration::from_secs(1),
+        || crate::pin_active_verified_generation(temp.path()),
+        |_| {},
+    )?;
+
+    assert_eq!(pin.generation_id(), second_generation);
+    Ok(())
+}
+
+#[test]
+fn daemon_generation_wait_retries_a_concurrent_repin_before_preflight() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let index_root = ctx_history_refresh::source_backed_index_root(temp.path());
+    let (first, _) = semantic_index_revision_at(&index_root, 1, true)?;
+    reconcile_ready_nonempty_generation(&first, temp.path())?;
+    let (second, _) = semantic_index_revision_at(&index_root, 2, true)?;
+    let second_generation = second.generation_id().to_owned();
+    reconcile_ready_nonempty_generation(&second, temp.path())?;
+    let repins = Cell::new(0_u32);
+
+    let pin = wait_for_daemon_semantic_generation_with(
+        temp.path(),
+        PinnedSourceBackedGeneration::from_index(first),
+        Duration::from_secs(1),
+        || {
+            repins.set(repins.get() + 1);
+            if repins.get() == 1 {
+                Err(IndexError::ConcurrentGenerationChange.into())
+            } else {
+                crate::pin_active_verified_generation(temp.path())
+            }
+        },
+        |_| {},
+    )?;
+
+    assert_eq!(repins.get(), 2);
+    assert_eq!(pin.generation_id(), second_generation);
+    Ok(())
+}
+
+#[test]
+fn daemon_generation_wait_timeout_preserves_typed_query_preflight_failure() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let index_root = ctx_history_refresh::source_backed_index_root(temp.path());
+    let (index, _) = semantic_index_revision_at(&index_root, 1, true)?;
+    SemanticVectorStore::open(
+        &source_backed_semantic_vector_path(temp.path()),
+        semantic_model_contract(),
+    )?;
+
+    let pin = wait_for_daemon_semantic_generation_with(
+        temp.path(),
+        PinnedSourceBackedGeneration::from_index(index),
+        Duration::ZERO,
+        || crate::pin_active_verified_generation(temp.path()),
+        |_| panic!("zero timeout must not sleep"),
+    )?;
+    let error =
+        SemanticQueryPin::preflight(pin.verified_index(), temp.path(), semantic_model_contract())
+            .err()
+            .expect("unacknowledged generation must remain a typed query failure");
+    let not_ready = error
+        .downcast_ref::<SemanticNotReady>()
+        .expect("semantic preflight failure remains typed");
+    assert_eq!(not_ready.code(), "semantic_generation_not_acknowledged");
+    assert!(not_ready.retryable());
     Ok(())
 }
 
