@@ -7,15 +7,17 @@ use std::{
 };
 
 use anyhow::{anyhow, Result};
+use ctx_history_capture::SourceBackedRefreshScope;
 use ctx_history_core::{
     derive_event_id, derive_session_id, AgentScope, CaptureProvider, CertifiedSource, CoreRecord,
     EventIdentityInput, EventRole, EventType, NativeItemKey, NativeSessionKey, ScannedSourceCounts,
     SessionIdentityInput, SourceAnchor, SourceKey, SourceObservation, TypedKey,
 };
 use ctx_history_index::{CoreEventPageBudget, GenerationWriter, VerifiedIndex, WriterOptions};
+use ctx_history_refresh::RefreshOperation;
 use ctx_semantic_index::{
     source_backed_semantic_vector_path, SemanticDocumentBuilder, SemanticVectorStore,
-    SourceBackedSemanticDocumentBuilder,
+    SourceBackedGenerationPin, SourceBackedSemanticDocumentBuilder,
 };
 use ctx_semantic_model::{
     semantic_model_contract, ExternalSemanticSpace, PreparedSemanticDocuments,
@@ -48,6 +50,10 @@ use super::*;
 use crate::{
     daemon_retry::{DaemonRetryBackoff, SemanticFailureClass},
     daemon_scheduler::record_daemon_job_retry,
+    source_backed_refresh_coordinator::{
+        publish_authoritative_empty_generation_for_test, source_backed_index_root,
+    },
+    test_support::{ARTIFACT, CONFIG},
     CONFIG_FILE,
 };
 
@@ -256,6 +262,63 @@ fn daemon_job_json_keeps_outcomes_without_live_worker_snapshots() {
             "unexpected live snapshot: {field}"
         );
     }
+}
+
+#[test]
+fn empty_core_generation_is_acknowledged_without_constructing_an_executor() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let generation = publish_authoritative_empty_generation_for_test(
+        &source_backed_index_root(temp.path()),
+        "daemon-worker-empty-core",
+        RefreshOperation::Refresh,
+        SourceBackedRefreshScope::All,
+        None,
+    )?
+    .generation_id;
+    let mut runtime = DaemonRuntime::default();
+    let args = DaemonRunArgs {
+        loop_interval_seconds: None,
+        max_chunks: None,
+        handle_process_signals: false,
+        force: false,
+        profile: crate::DaemonRunProfile::Persistent,
+        start_mode: None,
+        trigger_command: None,
+        supervisor: crate::DaemonSupervisor::User,
+    };
+
+    let job = run_daemon_semantic_job(
+        &args,
+        temp.path(),
+        &mut runtime,
+        None,
+        true,
+        &ARTIFACT,
+        &CONFIG,
+    )?;
+
+    assert_eq!(job["status"], "ready");
+    assert!(runtime.semantic_executor.is_none());
+    let acknowledged = run_daemon_semantic_job(
+        &args,
+        temp.path(),
+        &mut runtime,
+        None,
+        true,
+        &ARTIFACT,
+        &CONFIG,
+    )?;
+    assert_eq!(acknowledged["status"], "ready");
+    assert!(runtime.semantic_executor.is_none());
+    let store = SemanticVectorStore::open(
+        &source_backed_semantic_vector_path(temp.path()),
+        semantic_model_contract(),
+    )?;
+    assert!(matches!(
+        store.source_backed_generation_pin_exact(&generation, 0)?,
+        SourceBackedGenerationPin::ReadyEmpty
+    ));
+    Ok(())
 }
 
 #[test]

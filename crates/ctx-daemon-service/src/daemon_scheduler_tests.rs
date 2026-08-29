@@ -1109,6 +1109,78 @@ fn semantic_retry_runs_across_core_backoff_and_recovers_independently() {
 }
 
 #[test]
+fn semantic_sidecar_retries_the_same_core_generation_on_its_second_cycle() {
+    let temp = tempfile::tempdir().unwrap();
+    let generation = publish_empty_core_generation(temp.path());
+    let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut runtime = DaemonRuntime::default();
+    runtime.sidecar_drain.generation = Some(generation.clone());
+
+    {
+        let _hooks = install_jobs(
+            calls.clone(),
+            Some(json!({
+                "status": "failed",
+                "failure_class": "retryable",
+                "retryable": true,
+                "last_error": "injected semantic sidecar failure",
+            })),
+        );
+        let first = run_daemon_scheduler_cycle_with_activity(
+            &daemon_args(),
+            temp.path(),
+            &mut runtime,
+            None,
+            true,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(!first.failed, "semantic failure cannot revoke Core");
+        assert!(first.continue_immediately);
+    }
+    assert_eq!(&*calls.borrow(), &["semantic_index"]);
+    assert_eq!(runtime.semantic_retry.consecutive_failures, 1);
+    assert_eq!(
+        runtime
+            .sidecar_drain
+            .semantic_attempted_generation
+            .as_deref(),
+        Some(generation.as_str())
+    );
+
+    runtime.semantic_retry.retry_not_before = None;
+    runtime.semantic_retry.retry_not_before_at_ms = None;
+    {
+        let _hooks = install_jobs(
+            calls.clone(),
+            Some(json!({
+                "status": "ready",
+                "source_generation_ready": true,
+                "source_work_remaining": false,
+            })),
+        );
+        let second = run_daemon_scheduler_cycle_with_activity(
+            &daemon_args(),
+            temp.path(),
+            &mut runtime,
+            None,
+            true,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(!second.failed);
+        assert!(second.continue_immediately);
+    }
+
+    assert_eq!(&*calls.borrow(), &["semantic_index", "semantic_index"]);
+    assert_eq!(runtime.semantic_retry.consecutive_failures, 0);
+    let semantic = read_daemon_job_status(&daemon_semantic_job_path(temp.path())).unwrap();
+    assert_eq!(semantic["core_generation_id"], generation);
+}
+
+#[test]
 fn semantic_projection_error_never_puts_core_refresh_into_backoff() {
     let core_job = json!({
         "status": "completed",
