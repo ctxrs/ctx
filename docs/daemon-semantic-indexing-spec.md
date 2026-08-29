@@ -32,7 +32,8 @@ opted-in semantic or nonzero-weight hybrid `--refresh wait` may reconcile the
 semantic document projection for that exact generation and embed the query in
 the waiting foreground process. Daemon-free `--refresh off` and `--refresh
 background` may embed a query in the foreground only when the exact semantic
-generation and verified cached model assets are already ready. They never
+generation and verified cached model assets are already ready, or through an
+explicitly selected HTTP executor after the same exact preflight. They never
 reconcile or write projection state.
 
 The public retrieval modes are:
@@ -52,7 +53,7 @@ Freshness is separate from retrieval mode:
 | Freshness | Meaning |
 | --- | --- |
 | `background` | Default. Serve current indexes; start/poke persistent daemon work only in automatic indexing mode. Manual mode may query an already-ready semantic projection and is otherwise refresh-inert. |
-| `off` | Serve current indexes and do not start, poke, wait for, or run indexing. A daemon-free query may use an already-ready semantic projection and verified cached model assets. |
+| `off` | Serve current indexes and do not start, poke, wait for, or run indexing. A daemon-free query may use an already-ready semantic projection with verified cached model assets, or its explicitly selected HTTP executor after exact preflight. |
 | `wait` | Wait for authoritative Core publication from the persistent daemon or a manual-mode finite Core worker, then search or fail with a clear local error. |
 
 When an automatic-mode `wait` search needs semantic evidence, it also waits

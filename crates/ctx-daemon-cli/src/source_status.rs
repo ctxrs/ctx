@@ -559,98 +559,94 @@ fn semantic_report(
         }));
     }
 
-    let flat_f32 =
-        match SemanticVectorStore::open_passive_snapshot(&path, semantic_model_contract()) {
-            Ok(Some(store)) => match index.semantic_eligible_event_count() {
-                Ok(semantic_documents) => {
-                    match validate_public_semantic_counter("semantic_documents", semantic_documents)
-                    {
-                        Ok(semantic_documents) => match store.source_backed_generation_pin_exact(
-                            index.generation_id(),
-                            semantic_documents,
-                        ) {
-                            Ok(SourceBackedGenerationPin::Ready(pin)) => {
-                                let counts = u64::try_from(pin.active_event_count())
-                                    .map_err(anyhow::Error::from)
-                                    .and_then(|projected_documents| {
-                                        PublicSemanticDocumentCounts::new(
-                                            semantic_documents,
-                                            projected_documents,
-                                        )
-                                    });
-                                match counts {
-                                    Ok(counts) => compact_json(json!({
-                                        "status": "ready",
-                                        "reason": Value::Null,
-                                        "path": path,
-                                        "core_generation_id": index.generation_id(),
-                                        "semantic_documents": counts.semantic_documents,
-                                        "projected_documents": counts.projected_documents,
-                                        "filtered_documents": counts.filtered_documents,
-                                        "flat_generation": pin.generation(),
-                                        "flat_generation_hash": pin.generation_hash(),
-                                        "active_events": counts.projected_documents,
-                                        "active_chunks": pin.active_chunk_count(),
-                                        "active_vector_bytes": pin.active_vector_bytes(),
-                                    })),
-                                    Err(error) => typed_unavailable_with_error(
-                                        "semantic_count_out_of_range",
-                                        path,
-                                        error,
-                                    ),
-                                }
+    let flat_f32 = match SemanticVectorStore::open_read_only(&path, semantic_model_contract()) {
+        Ok(Some(store)) => match index.semantic_eligible_event_count() {
+            Ok(semantic_documents) => {
+                match validate_public_semantic_counter("semantic_documents", semantic_documents) {
+                    Ok(semantic_documents) => match store.source_backed_generation_pin_exact(
+                        index.generation_id(),
+                        semantic_documents,
+                    ) {
+                        Ok(SourceBackedGenerationPin::Ready(pin)) => {
+                            let counts = u64::try_from(pin.active_event_count())
+                                .map_err(anyhow::Error::from)
+                                .and_then(|projected_documents| {
+                                    PublicSemanticDocumentCounts::new(
+                                        semantic_documents,
+                                        projected_documents,
+                                    )
+                                });
+                            match counts {
+                                Ok(counts) => compact_json(json!({
+                                    "status": "ready",
+                                    "reason": Value::Null,
+                                    "path": path,
+                                    "core_generation_id": index.generation_id(),
+                                    "semantic_documents": counts.semantic_documents,
+                                    "projected_documents": counts.projected_documents,
+                                    "filtered_documents": counts.filtered_documents,
+                                    "flat_generation": pin.generation(),
+                                    "flat_generation_hash": pin.generation_hash(),
+                                    "active_events": counts.projected_documents,
+                                    "active_chunks": pin.active_chunk_count(),
+                                    "active_vector_bytes": pin.active_vector_bytes(),
+                                })),
+                                Err(error) => typed_unavailable_with_error(
+                                    "semantic_count_out_of_range",
+                                    path,
+                                    error,
+                                ),
                             }
-                            Ok(SourceBackedGenerationPin::ReadyEmpty) => {
-                                match PublicSemanticDocumentCounts::new(semantic_documents, 0) {
-                                    Ok(counts) => compact_json(json!({
-                                        "status": "ready",
-                                        "reason": Value::Null,
-                                        "path": path,
-                                        "core_generation_id": index.generation_id(),
-                                        "semantic_documents": counts.semantic_documents,
-                                        "projected_documents": counts.projected_documents,
-                                        "filtered_documents": counts.filtered_documents,
-                                        "flat_generation": Value::Null,
-                                        "flat_generation_hash": Value::Null,
-                                        "active_events": counts.projected_documents,
-                                        "active_chunks": 0,
-                                        "active_vector_bytes": 0,
-                                    })),
-                                    Err(error) => typed_unavailable_with_error(
-                                        "semantic_count_out_of_range",
-                                        path,
-                                        error,
-                                    ),
-                                }
-                            }
-                            Ok(SourceBackedGenerationPin::NotReady) => compact_json(json!({
-                                "status": "pending",
-                                "reason": "generation_not_acknowledged",
-                                "path": path,
-                                "core_generation_id": index.generation_id(),
-                                "semantic_documents": semantic_documents,
-                            })),
-                            Err(error) => {
-                                typed_unavailable_with_error("flat_f32_status_failed", path, error)
-                            }
-                        },
-                        Err(error) => {
-                            typed_unavailable_with_error("semantic_count_out_of_range", path, error)
                         }
+                        Ok(SourceBackedGenerationPin::ReadyEmpty) => {
+                            match PublicSemanticDocumentCounts::new(semantic_documents, 0) {
+                                Ok(counts) => compact_json(json!({
+                                    "status": "ready",
+                                    "reason": Value::Null,
+                                    "path": path,
+                                    "core_generation_id": index.generation_id(),
+                                    "semantic_documents": counts.semantic_documents,
+                                    "projected_documents": counts.projected_documents,
+                                    "filtered_documents": counts.filtered_documents,
+                                    "flat_generation": Value::Null,
+                                    "flat_generation_hash": Value::Null,
+                                    "active_events": counts.projected_documents,
+                                    "active_chunks": 0,
+                                    "active_vector_bytes": 0,
+                                })),
+                                Err(error) => typed_unavailable_with_error(
+                                    "semantic_count_out_of_range",
+                                    path,
+                                    error,
+                                ),
+                            }
+                        }
+                        Ok(SourceBackedGenerationPin::NotReady) => compact_json(json!({
+                            "status": "pending",
+                            "reason": "generation_not_acknowledged",
+                            "path": path,
+                            "core_generation_id": index.generation_id(),
+                            "semantic_documents": semantic_documents,
+                        })),
+                        Err(error) => {
+                            typed_unavailable_with_error("flat_f32_status_failed", path, error)
+                        }
+                    },
+                    Err(error) => {
+                        typed_unavailable_with_error("semantic_count_out_of_range", path, error)
                     }
                 }
-                Err(error) => {
-                    typed_unavailable_with_error("semantic_count_failed", path, error.into())
-                }
-            },
-            Ok(None) => compact_json(json!({
-                "status": "pending",
-                "reason": "projection_control_missing",
-                "path": path,
-                "core_generation_id": index.generation_id(),
-            })),
-            Err(error) => typed_unavailable_with_error("flat_f32_open_failed", path, error),
-        };
+            }
+            Err(error) => typed_unavailable_with_error("semantic_count_failed", path, error.into()),
+        },
+        Ok(None) => compact_json(json!({
+            "status": "pending",
+            "reason": "projection_control_missing",
+            "path": path,
+            "core_generation_id": index.generation_id(),
+        })),
+        Err(error) => typed_unavailable_with_error("flat_f32_open_failed", path, error),
+    };
     let projection_status = flat_f32
         .get("status")
         .and_then(Value::as_str)

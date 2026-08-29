@@ -91,6 +91,70 @@ fn flat_store_control_catalog_has_no_vectors_or_plaintext() -> Result<()> {
 }
 
 #[test]
+fn passive_snapshot_open_leaves_the_durable_tree_unchanged() -> Result<()> {
+    fn snapshot(root: &Path) -> Result<Vec<(std::path::PathBuf, Vec<u8>)>> {
+        fn visit(
+            root: &Path,
+            path: &Path,
+            files: &mut Vec<(std::path::PathBuf, Vec<u8>)>,
+        ) -> Result<()> {
+            if path.is_file() {
+                files.push((path.strip_prefix(root)?.to_path_buf(), std::fs::read(path)?));
+                return Ok(());
+            }
+            for entry in std::fs::read_dir(path)? {
+                visit(root, &entry?.path(), files)?;
+            }
+            Ok(())
+        }
+        let mut files = Vec::new();
+        visit(root, root, &mut files)?;
+        files.sort_by(|left, right| left.0.cmp(&right.0));
+        Ok(files)
+    }
+
+    let temporary = tempfile::tempdir()?;
+    let root = source_backed_semantic_vector_path(temporary.path());
+    let contract = test_contract();
+    let store = SemanticVectorStore::open(&root, &contract)?;
+    drop(store);
+    let before = snapshot(&root)?;
+
+    let passive = SemanticVectorStore::open_passive_snapshot(&root, &contract)?;
+
+    assert!(passive.is_some());
+    assert_eq!(snapshot(&root)?, before);
+    assert!(!root.join("state.sqlite-wal").exists());
+    assert!(!root.join("state.sqlite-shm").exists());
+    Ok(())
+}
+
+#[test]
+fn passive_snapshot_refuses_a_live_wal_without_touching_it() -> Result<()> {
+    let temporary = tempfile::tempdir()?;
+    let root = source_backed_semantic_vector_path(temporary.path());
+    let contract = test_contract();
+    let store = SemanticVectorStore::open(&root, &contract)?;
+    store
+        .conn
+        .execute("UPDATE semantic_index_stats SET dirty_items = 0", [])?;
+    let wal = root.join("state.sqlite-wal");
+    assert!(wal.exists(), "fixture must retain live WAL state");
+    let before = std::fs::read(&wal)?;
+
+    let error = SemanticVectorStore::open_passive_snapshot(&root, &contract)
+        .expect_err("a live WAL cannot be read through an immutable passive snapshot");
+
+    assert_eq!(
+        semantic_vector_failure_kind(&error),
+        Some(SemanticVectorFailureKind::PassiveSnapshotUnavailable)
+    );
+    assert_eq!(std::fs::read(&wal)?, before);
+    drop(store);
+    Ok(())
+}
+
+#[test]
 fn flat_search_is_unique_deterministic_bounded_and_exact() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let contract = test_contract();
