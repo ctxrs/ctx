@@ -79,7 +79,7 @@ impl SemanticQueryPin {
         contract: &SemanticModelContract,
     ) -> Result<Self> {
         let vector_root = source_backed_semantic_vector_path(data_root);
-        let vector_store = SemanticVectorStore::open_read_only(&vector_root, contract)
+        let vector_store = SemanticVectorStore::open_passive_snapshot(&vector_root, contract)
             .map_err(|error| {
                 semantic_not_ready("semantic_store_unavailable", format!("{error:#}"))
             })?

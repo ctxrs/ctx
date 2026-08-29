@@ -44,6 +44,29 @@ pub(crate) fn acquire_ort_backend(
     kind: SemanticBackendKind,
     assets: SemanticBackendKind,
 ) -> Result<SemanticEmbedder> {
+    acquire_ort_backend_with_provider_policy(config, policy, preference, kind, assets, true)
+}
+
+#[cfg(ctx_semantic_fastembed)]
+pub(crate) fn acquire_ort_backend_passively(
+    config: &SemanticModelConfig,
+    policy: SemanticEmbedPolicy,
+    preference: SemanticBackendPreference,
+    kind: SemanticBackendKind,
+    assets: SemanticBackendKind,
+) -> Result<SemanticEmbedder> {
+    acquire_ort_backend_with_provider_policy(config, policy, preference, kind, assets, false)
+}
+
+#[cfg(ctx_semantic_fastembed)]
+fn acquire_ort_backend_with_provider_policy(
+    config: &SemanticModelConfig,
+    policy: SemanticEmbedPolicy,
+    preference: SemanticBackendPreference,
+    kind: SemanticBackendKind,
+    assets: SemanticBackendKind,
+    allow_provider_prepare: bool,
+) -> Result<SemanticEmbedder> {
     if let Some(deferred) = semantic_cpu_model_load_deferred(policy.available_memory_bytes) {
         if kind == SemanticBackendKind::Cpu {
             return Err(deferred.into());
@@ -57,8 +80,14 @@ pub(crate) fn acquire_ort_backend(
     let cache_dir = config.paths().model_cache_dir();
     let variant = SemanticOrtModelVariant::for_backend(assets);
     let snapshot = semantic_ort_cache_snapshot(cache_dir, variant)?;
-    let (model, runtime_artifact_identity, windows_ml_registration) =
-        load_cached_ort_model(&snapshot, config, &policy, kind, variant)?;
+    let (model, runtime_artifact_identity, windows_ml_registration) = load_cached_ort_model(
+        &snapshot,
+        config,
+        &policy,
+        kind,
+        variant,
+        allow_provider_prepare,
+    )?;
     Ok(SemanticEmbedder {
         backend: SemanticEmbeddingBackend::Ort {
             model,
@@ -149,6 +178,7 @@ pub(super) fn load_cached_cpu_model(
         policy,
         SemanticBackendKind::Cpu,
         SemanticOrtModelVariant::CpuFp32,
+        true,
     )
     .map(|(model, _, _)| model)
 }
@@ -160,6 +190,7 @@ pub(super) fn load_cached_ort_model(
     policy: &SemanticEmbedPolicy,
     kind: SemanticBackendKind,
     variant: SemanticOrtModelVariant,
+    allow_provider_prepare: bool,
 ) -> Result<(
     fastembed::TextEmbedding,
     String,
@@ -204,7 +235,7 @@ pub(super) fn load_cached_ort_model(
             .as_ref()
             .ok_or_else(|| anyhow!("Windows ML requires its verified runtime"))?;
         Some(
-            windows_ml::register_ready_providers(runtime)
+            windows_ml::register_providers(runtime, allow_provider_prepare)
                 .context("register Windows ML execution providers")?,
         )
     } else {
