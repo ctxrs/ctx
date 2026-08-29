@@ -109,7 +109,7 @@ pub(super) fn passive_load_result<T>(backend: &'static str, result: Result<T>) -
     }
 }
 
-#[cfg(ctx_semantic_fastembed)]
+#[cfg(all(ctx_semantic_fastembed, any(not(target_os = "macos"), test)))]
 pub(super) fn passive_fallback_unless_integrity<T, F>(primary: Result<T>, fallback: F) -> Result<T>
 where
     F: FnOnce(anyhow::Error) -> Result<T>,
@@ -136,7 +136,7 @@ fn acquire_cpu_backend_passively(
     .and_then(authorize_loaded_backend)
 }
 
-#[cfg(ctx_semantic_fastembed)]
+#[cfg(all(ctx_semantic_fastembed, not(target_os = "macos")))]
 fn acquire_cpu_fallback_backend_passively(
     config: &SemanticModelConfig,
     preference: SemanticBackendPreference,
