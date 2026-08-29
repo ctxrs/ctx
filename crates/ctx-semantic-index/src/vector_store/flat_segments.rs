@@ -20,6 +20,7 @@ mod artifacts;
 mod catalog;
 #[cfg(any(test, feature = "test-support"))]
 mod legacy_fixture;
+mod locking;
 mod manifest;
 mod pinned;
 mod recovery;
@@ -33,6 +34,8 @@ pub(crate) use legacy_fixture::seed_filter_unaware_manifest;
 
 use artifacts::*;
 use catalog::*;
+pub(crate) use locking::FlatStoreCoordinationGuard;
+use locking::{open_lock, FileLock};
 use manifest::*;
 use pinned::load_pinned_generation;
 pub use pinned::PinnedFlatGeneration;
@@ -355,13 +358,6 @@ pub(crate) struct FlatSegmentStore {
     fail_after_source_publication_commit: std::sync::atomic::AtomicBool,
     #[cfg(test)]
     fail_after_source_acknowledgement: std::sync::atomic::AtomicBool,
-}
-
-/// Coordinates one semantic control/flat snapshot with source-backed writers.
-/// The lock file is part of every initialized flat store; passive callers open
-/// it read-only and therefore cannot create storage artifacts.
-pub(crate) struct FlatStoreCoordinationGuard {
-    _lock: FileLock,
 }
 
 struct FlatSourceGenerationView {
@@ -991,56 +987,6 @@ impl FlatSegmentStore {
     fn lock_transaction(&self) -> FlatResult<FileLock> {
         FileLock::exclusive(&transaction_lock_path(&self.root))
     }
-}
-
-impl FlatStoreCoordinationGuard {
-    pub(crate) fn lock_passive_snapshot(root: &Path) -> FlatResult<Self> {
-        Ok(Self {
-            _lock: FileLock::shared(&transaction_lock_path(root))?,
-        })
-    }
-
-    pub(crate) fn lock_control_writer(root: &Path) -> FlatResult<Self> {
-        Ok(Self {
-            _lock: FileLock::exclusive(&transaction_lock_path(root))?,
-        })
-    }
-}
-
-struct FileLock {
-    file: File,
-}
-
-impl FileLock {
-    fn shared(path: &Path) -> FlatResult<Self> {
-        let file = open_lock(path, false)?;
-        fs2::FileExt::lock_shared(&file).map_err(|source| io_error("lock shared", path, source))?;
-        Ok(Self { file })
-    }
-
-    fn exclusive(path: &Path) -> FlatResult<Self> {
-        let file = open_lock(path, true)?;
-        fs2::FileExt::lock_exclusive(&file)
-            .map_err(|source| io_error("lock exclusive", path, source))?;
-        Ok(Self { file })
-    }
-}
-
-impl Drop for FileLock {
-    fn drop(&mut self) {
-        let _ = fs2::FileExt::unlock(&self.file);
-    }
-}
-
-fn open_lock(path: &Path, create: bool) -> FlatResult<File> {
-    let mut options = OpenOptions::new();
-    options.read(true);
-    if create {
-        options.write(true).create(true);
-    }
-    options
-        .open(path)
-        .map_err(|source| io_error("open flat writer lock", path, source))
 }
 
 #[cfg(test)]

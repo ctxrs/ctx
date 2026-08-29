@@ -753,18 +753,14 @@ mod compiled {
         }
     }
 
-    /// Validates an already-published compiled model without creating,
-    /// repairing, invalidating, or synchronizing any cache path.
-    pub(crate) fn validate_compiled_model_cache_path(
-        compiled_cache_root: &Path,
-        compiled_model_path: &Path,
-    ) -> Result<()> {
-        let parent = compiled_model_path
+    /// Read-only validation for an already-published compiled model.
+    pub(crate) fn validate_compiled_model_cache(root: &Path, path: &Path) -> Result<()> {
+        let parent = path
             .parent()
             .ok_or_else(|| anyhow!("compiled model cache path has no parent"))?;
-        validate_compiled_directory_tree_nofollow(compiled_cache_root, parent)?;
-        require_compiled_real_directory(compiled_model_path, "compiled model cache")?;
-        reject_compiled_symlinks_recursive(compiled_model_path)
+        validate_compiled_directory_tree_nofollow(root, parent)?;
+        require_compiled_real_directory(path, "compiled model cache")?;
+        reject_compiled_symlinks_recursive(path)
     }
 
     #[cfg(unix)]
@@ -989,11 +985,9 @@ mod compiled {
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) use compiled::discard_compile_destination;
-#[cfg(target_os = "macos")]
 pub(crate) use compiled::{
-    commit_compile_destination, create_private_dir_all, invalidate_compiled_model_cache,
-    prepare_compile_destination, validate_compiled_model_cache_path,
+    commit_compile_destination, create_private_dir_all, discard_compile_destination,
+    invalidate_compiled_model_cache, prepare_compile_destination, validate_compiled_model_cache,
 };
 
 #[cfg(all(test, ctx_semantic_fastembed))]
