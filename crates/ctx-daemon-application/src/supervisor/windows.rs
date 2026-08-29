@@ -16,8 +16,6 @@ use super::ManagedSupervisorInput;
 
 #[cfg(windows)]
 pub(super) use ctx_daemon_runtime::current_windows_user_sid;
-#[cfg(windows)]
-pub(super) use ctx_daemon_runtime::powershell_single_quote;
 pub(super) use ctx_daemon_runtime::{
     decode_supervisor_text, parse_windows_task_state, windows_command_line_quote,
     windows_task_state_script, windows_task_user_identity_matches, windows_task_xml_bytes,
@@ -35,12 +33,16 @@ pub(super) fn windows_sanitized_daemon_script_with_environment(
 ) -> Result<String> {
     let identity = windows_supervisor_identity(data_root, "S-1-0-0")?;
     let spec = supervisor_artifact_spec(identity, executable, data_root, snapshot)?;
-    ctx_daemon_runtime::windows_sanitized_process_supervisor_script(spec.launch())
+    ctx_daemon_runtime::windows_sanitized_process_supervisor_script(
+        spec.launch(),
+        spec.environment_path(),
+    )
 }
 
 #[cfg(windows)]
 pub(super) fn windows_sanitized_process_supervisor_script(
     executable: &Path,
+    data_root: &Path,
     arguments: &[String],
     snapshot: &SupervisorEnvironmentSnapshot,
 ) -> Result<String> {
@@ -54,7 +56,18 @@ pub(super) fn windows_sanitized_process_supervisor_script(
         arguments.iter().map(OsString::from).collect(),
         environment,
     );
-    ctx_daemon_runtime::windows_sanitized_process_supervisor_script(&launch)
+    let identity = windows_supervisor_identity(data_root, "S-1-0-0")?;
+    let spec = ctx_daemon_runtime::SupervisorSpec::new(
+        identity,
+        SUPERVISOR_DESCRIPTION,
+        ctx_daemon_runtime::supervisor_environment_path(data_root),
+        launch,
+    )?;
+    let environment_path = ctx_daemon_runtime::write_supervisor_environment(&spec)?;
+    ctx_daemon_runtime::windows_sanitized_process_supervisor_script(
+        spec.launch(),
+        &environment_path,
+    )
 }
 
 pub(super) fn windows_task_xml_with_environment(

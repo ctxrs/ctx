@@ -3,7 +3,6 @@ mod cache_paths;
 mod configuration;
 mod embedding_executor;
 mod health_search;
-mod http_embedding_canary;
 mod http_embedding_executor;
 mod json;
 #[cfg(any(target_os = "macos", test, feature = "test-support"))]
@@ -46,12 +45,13 @@ pub use model_contract::{
     semantic_provisioning_coreml_asset_matches, semantic_provisioning_model_contract_matches,
     semantic_provisioning_model_path_count, semantic_provisioning_model_path_matches,
     semantic_required_model_file_count, semantic_required_model_file_matches,
-    semantic_tokenizer_behavior_fingerprint, semantic_tokenizer_fingerprint,
+    semantic_tokenizer_behavior_fingerprint, semantic_tokenizer_fingerprint, ExternalSemanticSpace,
     PreparedSemanticDocuments, PreparedSemanticQuery, SemanticModelContract,
-    SemanticModelLoadDeferred, SemanticOrtModelVariant, SEMANTIC_BACKEND, SEMANTIC_DIMENSIONS,
-    SEMANTIC_LANGUAGE_SCOPE, SEMANTIC_MODEL_CONTRACT_VERSION, SEMANTIC_MODEL_ID,
-    SEMANTIC_MODEL_KEY, SEMANTIC_MODEL_REVISION, SEMANTIC_NORMALIZATION, SEMANTIC_PASSAGE_PREFIX,
-    SEMANTIC_POOLING, SEMANTIC_QUERY_PREFIX,
+    SemanticModelLoadDeferred, SemanticOrtModelVariant, BUILTIN_SEMANTIC_EXECUTOR_ROUTE_IDENTITY,
+    MAX_EXTERNAL_SEMANTIC_DIMENSIONS, MAX_EXTERNAL_SEMANTIC_SPACE_ID_BYTES, SEMANTIC_BACKEND,
+    SEMANTIC_DIMENSIONS, SEMANTIC_LANGUAGE_SCOPE, SEMANTIC_MODEL_CONTRACT_VERSION,
+    SEMANTIC_MODEL_ID, SEMANTIC_MODEL_KEY, SEMANTIC_MODEL_REVISION, SEMANTIC_NORMALIZATION,
+    SEMANTIC_PASSAGE_PREFIX, SEMANTIC_POOLING, SEMANTIC_QUERY_PREFIX,
 };
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]

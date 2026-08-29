@@ -1,9 +1,15 @@
 use std::env;
 
-use anyhow::Result;
-use ctx_daemon_cli::SemanticEmbeddingExecutorConfig;
+use anyhow::{bail, Context, Result};
+use ctx_daemon_cli::{ExternalSemanticSpace, SemanticEmbeddingExecutorConfig};
 
 use super::AppConfig;
+
+// `semantic.executor = URL` briefly shipped as a fixed-E5 exact-contract
+// selection before external vector-space discovery existed. Keep that shape
+// readable so an explicit `semantic enable --executor URL` can replace it
+// atomically with the discovered identity.
+const LEGACY_EXACT_HTTP_SPACE_ID: &str = "ctxrs/legacy-exact-e5-v1";
 
 #[derive(Debug, Clone)]
 pub struct SemanticConfig {
@@ -20,10 +26,50 @@ impl Default for SemanticConfig {
 
 pub(super) fn parse_semantic_embedding_executor(
     executor: Option<&str>,
+    space_id: Option<&str>,
+    dimensions: Option<u64>,
 ) -> Result<SemanticEmbeddingExecutorConfig> {
-    match executor {
-        None | Some("builtin") => Ok(SemanticEmbeddingExecutorConfig::builtin()),
-        Some(endpoint) => SemanticEmbeddingExecutorConfig::http(endpoint),
+    match (executor, space_id, dimensions) {
+        (None | Some("builtin"), None, None) => Ok(SemanticEmbeddingExecutorConfig::builtin()),
+        (Some("builtin"), _, _) => {
+            bail!("semantic.space_id and semantic.dimensions are not allowed with the builtin semantic executor")
+        }
+        (None, _, _) => bail!(
+            "semantic.space_id and semantic.dimensions require semantic.executor to be an HTTP endpoint"
+        ),
+        (Some(endpoint), None, None) => {
+            let dimensions = SemanticEmbeddingExecutorConfig::builtin()
+                .contract()
+                .dimensions();
+            SemanticEmbeddingExecutorConfig::http(
+                endpoint,
+                ExternalSemanticSpace::new(LEGACY_EXACT_HTTP_SPACE_ID, dimensions)?,
+            )
+        }
+        (Some(endpoint), Some(space_id), Some(dimensions)) => {
+            let dimensions = usize::try_from(dimensions)
+                .context("semantic.dimensions exceeds this platform's supported integer range")?;
+            SemanticEmbeddingExecutorConfig::http(
+                endpoint,
+                ExternalSemanticSpace::new(space_id, dimensions)?,
+            )
+        }
+        (Some(_), _, _) => bail!(
+            "semantic.space_id and semantic.dimensions must either both be present or both be absent for a legacy HTTP selection"
+        ),
+    }
+}
+
+pub(crate) fn rebind_semantic_embedding_auth_endpoint_for_explicit_selection(executor: &str) {
+    if executor == "builtin"
+        || env::var_os(ctx_daemon_cli::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENV).is_none()
+    {
+        env::remove_var(ctx_daemon_cli::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV);
+    } else {
+        env::set_var(
+            ctx_daemon_cli::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV,
+            executor,
+        );
     }
 }
 

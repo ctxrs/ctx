@@ -163,6 +163,7 @@ mod tests {
             semantic_search_enabled: true,
             semantic_executor: ctx_daemon_cli::SemanticEmbeddingExecutorConfig::http(
                 "http://127.0.0.1:9",
+                ctx_daemon_cli::ExternalSemanticSpace::new("test-space", 384).unwrap(),
             )
             .unwrap(),
             local_usage_enabled: false,

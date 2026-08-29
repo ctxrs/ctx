@@ -19,6 +19,7 @@ fn supervisor_reinstalls_rotated_scrubbed_and_reenabled_semantic_credentials() -
         mode: crate::DaemonMode::Full,
         semantic_enabled: true,
         semantic_executor: endpoint.to_owned(),
+        semantic_contract_fingerprint: "sha256:external-space-a".to_owned(),
     };
 
     env::set_var(SEMANTIC_EMBEDDING_TOKEN_ENV, "token-a");
@@ -51,6 +52,26 @@ fn supervisor_reinstalls_rotated_scrubbed_and_reenabled_semantic_credentials() -
         DaemonSupervisorStart::Native
     );
 
+    let changed_space = crate::DaemonConfigSnapshot {
+        semantic_contract_fingerprint: "sha256:external-space-b".to_owned(),
+        ..enabled_http.clone()
+    };
+    let changed_space_environment = configured_supervisor_environment_for_config(
+        supervisor_environment_snapshot(&TestHost)?,
+        temp.path(),
+        None,
+        &changed_space,
+    )?;
+    assert_eq!(
+        changed_space_environment.identity_sha256(),
+        input_b.daemon_environment.identity_sha256(),
+        "semantic contract identity must not change credential inclusion"
+    );
+    assert!(changed_space_environment
+        .values
+        .iter()
+        .any(|(name, value)| { name == SEMANTIC_EMBEDDING_TOKEN_ENV && value == "token-b" }));
+
     let mut disabled = ManagedSupervisorInput::new(&TestHost, temp.path(), &executable)?;
     let disabled_config = crate::DaemonConfigSnapshot {
         semantic_enabled: false,
@@ -70,6 +91,7 @@ fn supervisor_reinstalls_rotated_scrubbed_and_reenabled_semantic_credentials() -
 
     let builtin_config = crate::DaemonConfigSnapshot {
         semantic_executor: "builtin".to_owned(),
+        semantic_contract_fingerprint: "sha256:builtin-space".to_owned(),
         ..enabled_http.clone()
     };
     let builtin_environment = configured_supervisor_environment_for_config(
@@ -742,6 +764,17 @@ fn native_control_context_accepts_nonunicode_manager_values_without_launch_snaps
 
 #[test]
 fn status_flags_environment_mismatch_without_exposing_credential_derived_hashes() -> Result<()> {
+    const TOKEN: &str = "semantic-bearer-value-must-be-redacted";
+    const ENDPOINT: &str = "https://embeddings.example.test/";
+    let _env_lock = crate::test_environment_lock()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let _restore = RestoreTestEnvironment::capture(&[
+        SEMANTIC_EMBEDDING_TOKEN_ENV,
+        SEMANTIC_EMBEDDING_TOKEN_ENDPOINT_ENV,
+    ]);
+    env::set_var(SEMANTIC_EMBEDDING_TOKEN_ENV, TOKEN);
+    env::set_var(SEMANTIC_EMBEDDING_TOKEN_ENDPOINT_ENV, ENDPOINT);
     let temp = tempfile::tempdir()?;
     let executable = temp.path().join("ctx");
     let backend = FakeSupervisorBackend::with_registration(Some(4_242));
@@ -766,6 +799,14 @@ fn status_flags_environment_mismatch_without_exposing_credential_derived_hashes(
     assert_eq!(report["environment_snapshot"]["captured_at_ms"], 1234);
     assert_eq!(report["environment_snapshot"]["restart_required"], true);
     assert_eq!(report["environment_snapshot"]["values_exposed"], false);
+    assert!(!report["environment_snapshot"]["current_captured_names"]
+        .as_array()
+        .expect("current captured names")
+        .iter()
+        .any(|name| name.as_str().is_some_and(|name| {
+            name == SEMANTIC_EMBEDDING_TOKEN_ENV || name == SEMANTIC_EMBEDDING_TOKEN_ENDPOINT_ENV
+        })));
+    assert!(!serde_json::to_string(&report)?.contains(TOKEN));
     Ok(())
 }
 

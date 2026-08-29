@@ -1,3 +1,11 @@
+use std::{
+    io::{Read, Write},
+    net::TcpListener,
+    sync::Arc,
+    thread,
+    time::Duration,
+};
+
 use anyhow::{anyhow, Result};
 use ctx_history_core::{
     derive_event_id, derive_session_id, AgentScope, CaptureProvider, CertifiedSource, CoreRecord,
@@ -6,12 +14,13 @@ use ctx_history_core::{
 };
 use ctx_history_index::{CoreEventPageBudget, GenerationWriter, VerifiedIndex, WriterOptions};
 use ctx_semantic_index::{
-    source_backed_semantic_vector_path, SemanticDocumentBuilder,
+    source_backed_semantic_vector_path, SemanticDocumentBuilder, SemanticVectorStore,
     SourceBackedSemanticDocumentBuilder,
 };
 use ctx_semantic_model::{
-    semantic_model_contract, PreparedSemanticDocuments, PreparedSemanticQuery,
-    SemanticModelContract,
+    semantic_model_contract, ExternalSemanticSpace, PreparedSemanticDocuments,
+    PreparedSemanticQuery, SemanticEmbeddingExecutorConfig, SemanticEmbeddingExecutorHandle,
+    SemanticModelContract, SharedSemanticRuntime,
 };
 
 #[cfg(any(
@@ -37,7 +46,9 @@ use ctx_semantic_model::{
 
 use super::*;
 use crate::{
-    daemon_retry::DaemonRetryBackoff, daemon_scheduler::record_daemon_job_retry, CONFIG_FILE,
+    daemon_retry::{DaemonRetryBackoff, SemanticFailureClass},
+    daemon_scheduler::record_daemon_job_retry,
+    CONFIG_FILE,
 };
 
 struct RecordingSemanticExecutor {
@@ -101,6 +112,128 @@ fn daemon_document_execution_uses_the_pluggable_prepared_input_seam() -> Result<
         )]
     );
     Ok(())
+}
+
+#[test]
+fn external_document_execution_uses_each_selected_space_without_builtin_prefixes() -> Result<()> {
+    for (space_id, dimensions) in [("space-96", 96), ("space-768", 768)] {
+        let config = SemanticEmbeddingExecutorConfig::http(
+            "http://127.0.0.1:41020",
+            ExternalSemanticSpace::new(space_id, dimensions)?,
+        )?;
+        let executor = RecordingSemanticExecutor {
+            contract: config.contract().clone(),
+            documents: std::sync::Mutex::new(Vec::new()),
+        };
+
+        let embeddings =
+            execute_document_embeddings(&executor, vec!["raw document".to_owned()], None)?;
+
+        assert_eq!(embeddings.len(), 1);
+        assert_eq!(embeddings[0].len(), dimensions);
+        assert_eq!(
+            *executor.documents.lock().expect("recorded documents"),
+            [(vec!["raw document".to_owned()], None)]
+        );
+    }
+    Ok(())
+}
+
+fn contract_response_endpoint(body: &str) -> Result<(String, thread::JoinHandle<Result<()>>)> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let endpoint = format!("http://{}", listener.local_addr()?);
+    let body = body.to_owned();
+    let server = thread::spawn(move || -> Result<()> {
+        let (mut stream, _) = listener.accept()?;
+        stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 1024];
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let read = stream.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..read]);
+        }
+        let request = String::from_utf8(request)?;
+        assert!(
+            request.starts_with("GET /v1/contract HTTP/1.1\r\n"),
+            "unexpected semantic verification request: {request}"
+        );
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream.write_all(response.as_bytes())?;
+        Ok(())
+    });
+    Ok((endpoint, server))
+}
+
+fn assert_contract_verification_failure_preserves_store(
+    response_body: &str,
+    expected_error: &str,
+) -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let (endpoint, server) = contract_response_endpoint(response_body)?;
+    let old_config = SemanticEmbeddingExecutorConfig::http(
+        &endpoint,
+        ExternalSemanticSpace::new("old-space", 64)?,
+    )?;
+    let selected_config = SemanticEmbeddingExecutorConfig::http(
+        &endpoint,
+        ExternalSemanticSpace::new("selected-space", 128)?,
+    )?;
+    let vector_path = source_backed_semantic_vector_path(temp.path());
+    let old_index_contract = semantic_index_contract(old_config.contract())?;
+    drop(SemanticVectorStore::open(
+        &vector_path,
+        &old_index_contract,
+    )?);
+    let executor = Arc::new(SemanticEmbeddingExecutorHandle::build(
+        selected_config,
+        SharedSemanticRuntime::default(),
+        crate::test_support::CONFIG.semantic_model_config(temp.path()),
+    )?);
+
+    let error = match open_selected_semantic_vector_store(&vector_path, &executor) {
+        Ok(_) => panic!("endpoint verification must fail before writable store open"),
+        Err(error) => error,
+    };
+    assert!(format!("{error:#}").contains(expected_error), "{error:#}");
+    assert_eq!(
+        classify_semantic_failure(&error),
+        SemanticFailureClass::Permanent
+    );
+    let job = daemon_semantic_failed_job(temp.path(), error);
+    assert_eq!(job["failure_class"], "permanent");
+    assert_eq!(job["retryable"], false);
+    assert!(job["last_error"]
+        .as_str()
+        .is_some_and(|error| error.contains(expected_error)));
+    assert!(
+        SemanticVectorStore::open_read_only(&vector_path, &old_index_contract)?.is_some(),
+        "verification failure must preserve the previous contract's store"
+    );
+    server.join().expect("contract response server panicked")?;
+    Ok(())
+}
+
+#[test]
+fn remote_space_drift_fails_permanently_before_store_reset() -> Result<()> {
+    assert_contract_verification_failure_preserves_store(
+        r#"{"schema_version":1,"space_id":"drifted-space","dimensions":128}"#,
+        "asserted a different semantic space",
+    )
+}
+
+#[test]
+fn malformed_contract_output_fails_permanently_before_store_reset() -> Result<()> {
+    assert_contract_verification_failure_preserves_store(
+        r#"{"schema_version":1,"space_id":17,"dimensions":"bad"}"#,
+        "contract response is malformed",
+    )
 }
 
 #[test]

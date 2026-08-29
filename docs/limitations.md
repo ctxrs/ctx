@@ -75,11 +75,11 @@ shipped.
   return metadata-driven matches.
 - Semantic embeddings depend on the explicitly selected executor and the opt-in
   ctx daemon query service. The built-in executor still requires a compatible
-  local runtime. An external executor must serve the exact pinned E5 contract;
-  ctx does not accept arbitrary models or silently fall back to built-in
-  execution. Executor, transport, and contract failures remain lexical-safe:
-  `hybrid` can return lexical results with an explicit fallback diagnostic,
-  while explicit `semantic` reports the failure.
+  local runtime. An external executor must serve the V1 contract for its
+  explicitly accepted opaque vector space; ctx never silently falls back to
+  built-in execution. Executor, transport, identity, and vector-validation
+  failures remain lexical-safe: `hybrid` can return lexical results with an
+  explicit fallback diagnostic, while explicit `semantic` reports the failure.
 - Automatic semantic indexing requires auto mode. Use `ctx index mode auto`
   before `ctx semantic enable --wait` when manual mode is configured. A plain
   `ctx semantic enable` still records the opt-in in manual mode. Lexical search
@@ -103,8 +103,9 @@ shipped.
 ## Operations
 
 - Core setup/import and lexical search are local filesystem operations.
-  User-selected URL executors receive prepared semantic document and query text
-  only after semantic search is explicitly enabled with that executor.
+  User-selected remote URL executors receive raw semantic query text and
+  ctx-created document chunks only after semantic search is explicitly enabled
+  with that executor.
 - Official installer-managed binaries can use signed release metadata for an
   explicit `ctx upgrade` command and automatic checks while automatic upgrades
   are enabled. Auto indexing with the full daemon profile uses the persistent

@@ -153,6 +153,7 @@ pub enum StoredSourceContent {
 #[serde(rename_all = "snake_case")]
 pub enum SemanticCoreContentFilter {
     PolicySelectedCompleteContentAndLiteralFactsV2,
+    PolicySelectedCompleteContentAndBoundedLiteralFactsV3,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -230,14 +231,15 @@ pub fn current_source_generation_policy_hash() -> serde_json::Result<String> {
     current_source_generation_policy().canonical_sha256()
 }
 
-pub fn current_semantic_generation_policy() -> SemanticGenerationPolicy {
-    let model = ctx_semantic_model::semantic_model_contract();
+pub fn semantic_generation_policy(
+    model_contract: &ctx_semantic_model::SemanticModelContract,
+) -> SemanticGenerationPolicy {
     SemanticGenerationPolicy {
         eligibility_revision: SEMANTIC_ELIGIBILITY_REVISION,
         candidate_event_classes: [SourceEventClass::Message],
         candidate_roles: [SourceEventRole::User],
         core_content_filter:
-            SemanticCoreContentFilter::PolicySelectedCompleteContentAndLiteralFactsV2,
+            SemanticCoreContentFilter::PolicySelectedCompleteContentAndBoundedLiteralFactsV3,
         provider_native_event_copy:
             SemanticEventCopyFilter::IncludeAllOccurrencesDirectCopyNeutralV1,
         chunking_revision: SEMANTIC_CHUNKING_REVISION,
@@ -245,17 +247,27 @@ pub fn current_semantic_generation_policy() -> SemanticGenerationPolicy {
         chunk_overlap_chars: SEMANTIC_CHUNK_OVERLAP_CHARS as u32,
         source_max_chars: SEMANTIC_SOURCE_MAX_CHARS as u32,
         embedding: EmbeddingGenerationPolicy {
-            contract_revision: model.contract_revision(),
-            model: model.model_id().to_owned(),
-            model_revision: model.model_revision().to_owned(),
-            dimensions: model.dimensions() as u32,
-            normalization: model.normalization().to_owned(),
+            contract_revision: model_contract.contract_revision(),
+            model: model_contract.model_id().to_owned(),
+            model_revision: model_contract.model_revision().to_owned(),
+            dimensions: model_contract.dimensions() as u32,
+            normalization: model_contract.normalization().to_owned(),
         },
     }
 }
 
+pub fn semantic_generation_policy_hash(
+    model_contract: &ctx_semantic_model::SemanticModelContract,
+) -> serde_json::Result<String> {
+    semantic_generation_policy(model_contract).canonical_sha256()
+}
+
+pub fn current_semantic_generation_policy() -> SemanticGenerationPolicy {
+    semantic_generation_policy(ctx_semantic_model::semantic_model_contract())
+}
+
 pub fn current_semantic_generation_policy_hash() -> serde_json::Result<String> {
-    current_semantic_generation_policy().canonical_sha256()
+    semantic_generation_policy_hash(ctx_semantic_model::semantic_model_contract())
 }
 
 pub fn is_semantic_candidate(event_type: &str, role: Option<&str>) -> bool {
@@ -346,16 +358,16 @@ mod tests {
 
     #[test]
     fn semantic_policy_persisted_bytes_and_model_authority_are_frozen() {
-        const EXPECTED: &str = "{\"eligibility_revision\":6,\"candidate_event_classes\":[\"message\"],\"candidate_roles\":[\"user\"],\"core_content_filter\":\"policy_selected_complete_content_and_literal_facts_v2\",\"provider_native_event_copy\":\"include_all_occurrences_direct_copy_neutral_v1\",\"chunking_revision\":1,\"chunk_target_chars\":1200,\"chunk_overlap_chars\":200,\"source_max_chars\":65536,\"embedding\":{\"contract_revision\":2,\"model\":\"intfloat/multilingual-e5-small\",\"model_revision\":\"614241f622f53c4eeff9890bdc4f31cfecc418b3\",\"dimensions\":384,\"normalization\":\"l2\"}}";
+        const EXPECTED: &str = "{\"eligibility_revision\":6,\"candidate_event_classes\":[\"message\"],\"candidate_roles\":[\"user\"],\"core_content_filter\":\"policy_selected_complete_content_and_bounded_literal_facts_v3\",\"provider_native_event_copy\":\"include_all_occurrences_direct_copy_neutral_v1\",\"chunking_revision\":1,\"chunk_target_chars\":1200,\"chunk_overlap_chars\":200,\"source_max_chars\":65536,\"embedding\":{\"contract_revision\":2,\"model\":\"intfloat/multilingual-e5-small\",\"model_revision\":\"614241f622f53c4eeff9890bdc4f31cfecc418b3\",\"dimensions\":384,\"normalization\":\"l2\"}}";
         let policy = current_semantic_generation_policy();
         let contract = ctx_semantic_model::semantic_model_contract();
         let persisted = serde_json::to_string(&policy).unwrap();
-        assert_eq!(EXPECTED.len(), 521);
-        assert_eq!(persisted.len(), 521);
+        assert_eq!(EXPECTED.len(), 529);
+        assert_eq!(persisted.len(), 529);
         assert_eq!(persisted, EXPECTED);
         assert_eq!(
             policy.canonical_sha256().unwrap(),
-            "232500997e228abd69adaa91ef31dc0518726518b38408f9b289ae2530726f7c"
+            "e8d31418a1da20200d75580348b8b2e7ee4f97c58f34a46900fc6d87daa83ccf"
         );
         assert_eq!(
             policy.embedding.contract_revision,
@@ -365,5 +377,10 @@ mod tests {
         assert_eq!(policy.embedding.model_revision, contract.model_revision());
         assert_eq!(policy.embedding.dimensions, contract.dimensions() as u32);
         assert_eq!(policy.embedding.normalization, contract.normalization());
+        assert_eq!(policy, semantic_generation_policy(contract));
+        assert_eq!(
+            current_semantic_generation_policy_hash().unwrap(),
+            semantic_generation_policy_hash(contract).unwrap()
+        );
     }
 }

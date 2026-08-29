@@ -37,11 +37,14 @@ the local retrieval product.
   auto request.
 - In the default local-only security mode, setup, import, and search do not use
   executor network access or credentials. Explicitly selecting a URL executor
-  leaves that local-only boundary and may send prepared semantic document and
-  query text only to the configured endpoint. Remote URLs require HTTPS and the
-  canonical bearer-token environment variable; plain HTTP requires a literal
-  loopback IP address. Status and observer commands never contact the executor,
-  and an external failure never activates the built-in executor.
+  may send raw semantic query text and ctx-created document chunks only to that
+  endpoint. A remote URL sends that content off the machine; a loopback URL
+  constrains only ctx's first hop, and the receiving process can retain or
+  forward the content, including off-machine. Remote URLs require HTTPS and the
+  canonical endpoint-bound bearer-token environment variable; plain HTTP
+  requires a literal loopback IP address. Status and observer commands never
+  contact the executor, and an external failure never activates the built-in
+  executor.
 - `ctx setup --no-daemon` and `ctx import --no-daemon` must not autostart daemon
   maintenance or finite workers. Machine-readable output is not a process-start
   security control. The deprecated `ctx setup --catalog-only` flag is ignored and is not
@@ -76,7 +79,8 @@ the local retrieval product.
   catch-up. It must not run history-source plugins.
   Network model acquisition is allowed only for the built-in embedding model,
   and external embedding calls are allowed only to the explicitly selected
-  exact-contract URL. Both require semantic opt-in. `ctx daemon run` blocks in
+  V1 executor URL and its accepted vector-space identity. Both require semantic
+  opt-in. `ctx daemon run` blocks in
   the foreground and does not mutate indexing mode.
 - A finite Core worker may start only for explicit import or search
   `--refresh wait`. It must not install persistent supervision or run watcher,

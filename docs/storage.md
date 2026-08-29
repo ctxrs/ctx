@@ -77,14 +77,16 @@ Automatic mode may also install a current-user supervisor definition. Its
 platform locations are `${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/ctx.service`
 on Linux, `$HOME/Library/LaunchAgents/rs.ctx.daemon.plist` on macOS, and
 `<data-root>/daemon/windows-task.xml` plus the corresponding current-user
-scheduled task on Windows. These definitions contain ctx's allowlisted daemon
-launch environment. When both `CTX_SEMANTIC_EMBEDDING_TOKEN` and its internal
-endpoint binding are present, both values are captured in the definition so
-the supervised daemon can authenticate only to that endpoint. Treat these as
-credential-bearing owner-private artifacts. On Unix, ctx atomically publishes
-the definition as an owner-owned, single-link, non-symlink regular file with
-mode `0600`; the Windows definition remains under the owner-private daemon
-root and current-user scheduler registration.
+scheduled task on Windows. The exact allowlisted launch environment is stored
+separately at `<data-root>/daemon/supervisor-environment.json`; supervisor
+arguments contain only its path. When both `CTX_SEMANTIC_EMBEDDING_TOKEN` and
+its internal endpoint binding are present, both values are captured in that
+file so the supervised daemon can authenticate only to that endpoint. Treat
+the environment file as a credential-bearing owner-private artifact. ctx
+publishes it atomically as an owner-owned, single-link, non-symlink regular
+file and verifies it before replacing the process environment. Unix supervisor
+definitions are also mode `0600`; the Windows task definition remains under
+the owner-private daemon root and current-user scheduler registration.
 
 ## Local Usage Product State
 
@@ -601,13 +603,25 @@ semantic = true
 ```
 
 The built-in executor is also the default and is omitted from `config.toml`.
-Selecting a URL writes the following additional section; selecting
-`--executor builtin` removes it:
+Prefer `ctx semantic enable --executor URL`, which discovers protocol V1 and
+writes the complete accepted identity below; selecting `--executor builtin`
+removes it:
 
 ```toml
 [semantic]
 executor = "https://embeddings.example.test/ctx/"
+space_id = "opaque-space-id"
+dimensions = 768
 ```
+
+The complete `executor`, `space_id`, and `dimensions` triple is required.
+Writing it directly is an advanced, operator-authored acceptance rather than
+discovery; `schema_version` is validated on the wire and is not stored in
+config. Before sending content, ctx verifies that the endpoint serves schema V1
+and the accepted identity. Intentionally changing the accepted `space_id` or
+`dimensions` causes ctx to rebuild the derived semantic vectors. Moving the
+same declared space to a new endpoint changes routing but preserves compatible
+vectors.
 
 Do not put credentials in the URL or config file. Remote authentication uses
 only the `CTX_SEMANTIC_EMBEDDING_TOKEN` bearer-token environment variable. In
@@ -621,11 +635,13 @@ restart, not a credential vault, secure erasure, or a guarantee that an old
 value has been removed from every OS or process-memory surface.
 
 In `ctx semantic status --format json`,
-`executor.content_leaves_machine` and the inverse top-level `local_only` value
-describe the selected executor's configured transfer capability, not observed
-network activity. A disabled report can therefore retain a remote executor and
-report that capability while making no embedding request; `enabled = false`
-remains the authority that semantic transfer and indexing are inactive.
+`executor.content_leaves_machine` describes ctx's configured direct HTTP hop,
+not observed downstream activity. The top-level `local_only` value is true only
+for the in-process builtin; it is false for a loopback executor because that
+separate process may retain, log, or forward content. A disabled report can
+retain a remote executor and report that capability while making no embedding
+request; `enabled = false` remains the authority that semantic transfer and
+indexing are inactive.
 
 See [Retrieval backends](search.md#retrieval-backends) for the setup command and
 readiness behavior.
@@ -774,9 +790,9 @@ Recommended handling:
 
 - keep `~/.ctx` out of source repositories;
 - do not share provider transcripts, ctx search generations, or logs;
-  logs;
 - select an external semantic executor only when it is trusted to receive
-  prepared query text and eligible document chunks and rollups;
+  raw query text and eligible ctx-created document chunks and rollups, and to
+  handle or forward them according to the operator's policy;
 - review JSON output before sharing it outside the machine;
 - delete or rebuild local Core and derived data when working on shared machines;
 - use provider filters and result limits to keep agent retrieval focused on
@@ -787,9 +803,11 @@ Recommended handling:
 Core indexing work uses the local filesystem and Tantivy, and semantic vectors
 remain in the local flat-vector sidecar. The built-in embedding executor is
 local. When a URL executor is explicitly selected, semantic indexing sends
-eligible prepared document text and semantic or nonzero-weight hybrid queries
-to that exact endpoint. Lexical and zero-weight hybrid search do not contact it.
-ctx does not silently route failed external work to the built-in executor.
+raw text from eligible ctx-created document chunks and raw semantic or
+nonzero-weight hybrid queries to that exact endpoint. For loopback URLs, this is
+only ctx's first hop; the receiving process can retain or forward the content.
+Lexical and zero-weight hybrid search do not contact it. ctx does not silently
+route failed external work to the built-in executor.
 `ctx semantic status` is credential-free and makes no network request. The tools
 that originally produced provider transcripts may have used the network
 according to their own configuration; ctx indexing those transcripts does not

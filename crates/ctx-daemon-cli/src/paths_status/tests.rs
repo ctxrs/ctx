@@ -1,4 +1,31 @@
 use super::*;
+
+#[test]
+fn daemon_application_snapshot_tracks_same_endpoint_space_changes() {
+    let endpoint = "https://embed.example.test/base";
+    let first = AppConfig::default().with_semantic_embedding_executor(
+        crate::SemanticEmbeddingExecutorConfig::http(
+            endpoint,
+            crate::ExternalSemanticSpace::new("space-a", 384).unwrap(),
+        )
+        .unwrap(),
+    );
+    let second = AppConfig::default().with_semantic_embedding_executor(
+        crate::SemanticEmbeddingExecutorConfig::http(
+            endpoint,
+            crate::ExternalSemanticSpace::new("space-b", 768).unwrap(),
+        )
+        .unwrap(),
+    );
+
+    let first = application_config(&first);
+    let second = application_config(&second);
+    assert_eq!(first.semantic_executor, second.semantic_executor);
+    assert_ne!(
+        first.semantic_contract_fingerprint,
+        second.semantic_contract_fingerprint
+    );
+}
 use std::sync::{Arc, Barrier};
 
 #[test]
@@ -137,7 +164,11 @@ fn activation_failure_does_not_reuse_the_previous_executors_failure_class() {
         "config",
     )
     .with_semantic_embedding_executor(
-        crate::SemanticEmbeddingExecutorConfig::http("https://new.example.test").unwrap(),
+        crate::SemanticEmbeddingExecutorConfig::http(
+            "https://new.example.test",
+            crate::ExternalSemanticSpace::new("test-space", 384).unwrap(),
+        )
+        .unwrap(),
     );
     let report = daemon_semantic_job_report(
         temp.path(),
@@ -152,9 +183,13 @@ fn activation_failure_does_not_reuse_the_previous_executors_failure_class() {
                 requested_daemon_enabled: Some(true),
                 requested_semantic_enabled: Some(true),
                 requested_semantic_executor: Some("https://new.example.test/"),
+                requested_semantic_contract_fingerprint: Some(
+                    config.semantic_model_contract().fingerprint(),
+                ),
                 applied_daemon_enabled: Some(true),
                 applied_semantic_enabled: Some(false),
                 applied_semantic_executor: None,
+                applied_semantic_contract_fingerprint: None,
                 last_error: Some("new endpoint activation failed"),
             },
         },
@@ -191,9 +226,11 @@ fn config_load_failure_surfaces_failed_instead_of_stale_semantic_readiness() {
                 requested_daemon_enabled: Some(true),
                 requested_semantic_enabled: Some(true),
                 requested_semantic_executor: Some("https://old.example.test/"),
+                requested_semantic_contract_fingerprint: Some("sha256:old-space"),
                 applied_daemon_enabled: Some(true),
                 applied_semantic_enabled: Some(false),
                 applied_semantic_executor: None,
+                applied_semantic_contract_fingerprint: None,
                 last_error: Some("parse config.toml: invalid value"),
             },
         },

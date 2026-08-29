@@ -11,6 +11,11 @@ const DAEMON_ENV_ALLOWED_SENTINEL: &str = "/ctx-daemon-allowed-home";
 const DAEMON_ENV_SEMANTIC_TOKEN_SENTINEL: &str = "semantic-bearer-token";
 const DAEMON_ENV_SEMANTIC_ENDPOINT_SENTINEL: &str = "https://embeddings.example.test/";
 const DAEMON_ENV_UNRELATED_SEMANTIC_TOKEN: &str = "CTX_SEMANTIC_EMBEDDING_FALLBACK_TOKEN";
+#[cfg(unix)]
+const DETACH_PROBE_STAGE: &str = "CTX_DAEMON_DETACH_PROBE_STAGE";
+#[cfg(unix)]
+const DETACH_PROBE_TEST: &str =
+    "lifecycle::tests::autostart_child_detaches_from_the_invoking_terminal_session";
 
 #[test]
 fn daemon_child_environment_strips_pro_channel_and_authority() -> Result<()> {
@@ -108,46 +113,34 @@ fn daemon_child_environment_strips_pro_channel_and_authority() -> Result<()> {
 #[cfg(unix)]
 #[test]
 fn autostart_child_detaches_from_the_invoking_terminal_session() -> Result<()> {
-    use std::os::unix::fs::PermissionsExt as _;
+    unsafe extern "C" {
+        fn getsid(pid: std::ffi::c_int) -> std::ffi::c_int;
+    }
 
-    let temp = tempfile::tempdir()?;
-    let executable = temp.path().join("record-session.sh");
-    let receipt = temp.path().join("session.txt");
-    fs::write(
-        &executable,
-        "#!/bin/sh\nprintf '%s ' \"$$\" >\"$CTX_DAEMON_TEST_RECEIPT\"\nps -o sid= -p \"$$\" >>\"$CTX_DAEMON_TEST_RECEIPT\"\nexec sleep 30\n",
-    )?;
-    let mut permissions = fs::metadata(&executable)?.permissions();
-    permissions.set_mode(0o700);
-    fs::set_permissions(&executable, permissions)?;
+    if env::var_os(DETACH_PROBE_STAGE).as_deref() == Some(std::ffi::OsStr::new("child")) {
+        std::thread::sleep(Duration::from_secs(30));
+        return Ok(());
+    }
 
     let launch = normalized_daemon_launch_for_test(
-        executable.clone(),
-        Vec::new(),
-        BTreeMap::from([(
-            OsString::from("CTX_DAEMON_TEST_RECEIPT"),
-            receipt.as_os_str().to_os_string(),
-        )]),
+        env::current_exe()?,
+        ["--exact", DETACH_PROBE_TEST, "--nocapture"]
+            .into_iter()
+            .map(OsString::from)
+            .collect(),
+        BTreeMap::from([(OsString::from(DETACH_PROBE_STAGE), OsString::from("child"))]),
     )?;
     let mut child = spawn_detached_daemon_child(launch)?;
-    for _ in 0..100 {
-        if fs::read_to_string(&receipt)
-            .is_ok_and(|recorded| recorded.split_whitespace().count() == 2)
-        {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    let recorded = fs::read_to_string(&receipt);
+    let child_pid = std::ffi::c_int::try_from(child.id())?;
+    // SAFETY: `child_pid` names the live child owned by `child`.
+    let child_session = unsafe { getsid(child_pid) };
+    let session_error = io::Error::last_os_error();
     child.kill()?;
     child.wait()?;
-    let recorded = recorded?;
-    let values = recorded
-        .split_whitespace()
-        .map(str::parse::<u32>)
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-
-    assert_eq!(values, vec![child.id(), child.id()]);
+    if child_session == -1 {
+        return Err(session_error.into());
+    }
+    assert_eq!(child_session, child_pid);
     Ok(())
 }
 
@@ -156,7 +149,8 @@ fn test_config() -> DaemonConfigSnapshot {
         enabled: true,
         mode: DaemonMode::Full,
         semantic_enabled: true,
-        semantic_executor: "builtin".to_owned(),
+        semantic_executor: "https://embeddings.example.test/v1/".to_owned(),
+        semantic_contract_fingerprint: "sha256:external-space-a".to_owned(),
     }
 }
 
@@ -220,6 +214,7 @@ fn running_status(
                 "daemon_mode": expected.mode.as_str(),
                 "semantic_enabled": expected.semantic_enabled,
                 "semantic_executor": expected.semantic_executor.as_str(),
+                "semantic_contract_fingerprint": expected.semantic_contract_fingerprint.as_str(),
             },
         },
     })
@@ -363,7 +358,7 @@ fn lifecycle_response_requires_every_strict_field_and_known_active_state() {
 }
 
 #[test]
-fn status_owner_start_time_and_exact_config_including_semantic_executor_are_required_before_probe()
+fn status_owner_start_time_and_exact_config_including_semantic_contract_are_required_before_probe()
 {
     let owner = test_daemon_owner("strict-owner", 44);
     let expected = test_config();
@@ -393,7 +388,11 @@ fn status_owner_start_time_and_exact_config_including_semantic_executor_are_requ
         ("semantic_enabled", json!(!expected.semantic_enabled)),
         (
             "semantic_executor",
-            json!("https://embeddings.example.test/v1/"),
+            json!("https://other-embeddings.example.test/v1/"),
+        ),
+        (
+            "semantic_contract_fingerprint",
+            json!("sha256:different-space-at-the-same-endpoint"),
         ),
     ] {
         let mut wrong_config = status.clone();
@@ -406,6 +405,12 @@ fn status_owner_start_time_and_exact_config_including_semantic_executor_are_requ
         .expect("applied config must be an object")
         .remove("semantic_executor");
     invalid_statuses.push(missing_executor);
+    let mut missing_contract = status.clone();
+    missing_contract["config_reload"]["applied"]
+        .as_object_mut()
+        .expect("applied config must be an object")
+        .remove("semantic_contract_fingerprint");
+    invalid_statuses.push(missing_contract);
 
     for invalid in invalid_statuses {
         let observation = daemon_handoff_status_observation_from(

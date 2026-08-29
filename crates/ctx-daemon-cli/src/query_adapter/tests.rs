@@ -1,6 +1,7 @@
 use std::{
     cell::Cell,
     fs::{self, OpenOptions},
+    net::TcpListener,
     time::{Duration, Instant},
 };
 
@@ -21,6 +22,14 @@ use fs2::FileExt as _;
 use uuid::Uuid;
 
 use super::*;
+
+fn external_executor_config(endpoint: &str) -> SemanticEmbeddingExecutorConfig {
+    SemanticEmbeddingExecutorConfig::http(
+        endpoint,
+        crate::ExternalSemanticSpace::new("test-space", 7).unwrap(),
+    )
+    .unwrap()
+}
 
 fn default_compiled_filter() -> CompiledSearchFilter {
     CompiledSearchFilter::compile(EventSearchFilters::default()).unwrap()
@@ -151,9 +160,10 @@ fn embedding() -> Vec<f32> {
 fn daemon_embedding_response(contract: &SemanticModelContract, embedding: Value) -> Value {
     compact_json(json!({
         "ok": true,
-        "schema_version": 1,
+        "schema_version": DAEMON_SEMANTIC_QUERY_SCHEMA_VERSION,
         "model_key": contract.model_key(),
         "model_contract_fingerprint": contract.fingerprint(),
+        "executor_route_identity": contract.executor_route_identity(),
         "query_embed_ms": 17,
         "embedding": embedding,
     }))
@@ -168,16 +178,17 @@ fn request_adapter_borrows_the_exact_data_root() {
 }
 
 #[test]
-fn daemon_query_embedding_request_preserves_schema_v1_and_binds_the_model_contract() {
+fn daemon_query_embedding_request_binds_the_model_contract_and_executor_route() {
     let contract = semantic_model_contract();
 
     assert_eq!(
         daemon_query_embedding_request(contract, "query text"),
         compact_json(json!({
-            "schema_version": 1,
+            "schema_version": DAEMON_SEMANTIC_QUERY_SCHEMA_VERSION,
             "op": "embed_query",
             "model_key": contract.model_key(),
             "model_contract_fingerprint": contract.fingerprint(),
+            "executor_route_identity": contract.executor_route_identity(),
             "text": "query text",
         }))
     );
@@ -197,19 +208,21 @@ fn daemon_query_embedding_response_accepts_the_exact_model_contract() -> Result<
 }
 
 #[test]
-fn daemon_query_embedding_response_accepts_the_frozen_legacy_v1_contract() -> Result<()> {
+fn daemon_query_embedding_response_rejects_v1_without_a_routing_fence() {
     let contract = semantic_model_contract();
     let expected = embedding();
     let mut response = daemon_embedding_response(contract, json!(expected));
     let response_object = response.as_object_mut().expect("object");
-    response_object.remove("model_contract_fingerprint");
-    response_object.remove("schema_version");
+    response_object.insert("schema_version".to_owned(), json!(1));
+    response_object.remove("executor_route_identity");
 
-    let (actual, query_embed_ms) = parse_daemon_query_embedding_response(&response, contract)?;
+    let error = parse_daemon_query_embedding_response(&response, contract)
+        .expect_err("a V1 response cannot prove the selected executor route");
 
-    assert_eq!(actual, expected);
-    assert_eq!(query_embed_ms, 17);
-    Ok(())
+    assert_eq!(
+        error.to_string(),
+        "daemon query response schema_version mismatch"
+    );
 }
 
 #[test]
@@ -235,7 +248,7 @@ fn daemon_query_embedding_response_rejects_incompatible_protocol_identity() {
         (
             "schema",
             "schema_version",
-            json!(2),
+            json!(1),
             "daemon query response schema_version mismatch",
         ),
         (
@@ -250,12 +263,16 @@ fn daemon_query_embedding_response_rejects_incompatible_protocol_identity() {
             json!("sha256:mismatched"),
             "daemon query response model contract fingerprint mismatch",
         ),
+        (
+            "executor route identity",
+            "executor_route_identity",
+            json!("sha256:mismatched"),
+            "daemon query response executor route identity mismatch",
+        ),
     ] {
-        if field != "model_contract_fingerprint" {
-            let mut missing = valid.clone();
-            missing.as_object_mut().expect("object").remove(field);
-            invalid.push((format!("missing {case}"), missing, expected));
-        }
+        let mut missing = valid.clone();
+        missing.as_object_mut().expect("object").remove(field);
+        invalid.push((format!("missing {case}"), missing, expected));
 
         let mut mismatched = valid.clone();
         mismatched[field] = mismatch;
@@ -268,6 +285,43 @@ fn daemon_query_embedding_response_rejects_incompatible_protocol_identity() {
 
         assert_eq!(error.to_string(), expected, "{case}");
     }
+}
+
+#[test]
+fn client_rejects_a_stale_same_space_daemon_on_another_endpoint() {
+    let contract_a = ctx_semantic_index::external_http_semantic_model_contract(
+        "http://127.0.0.1:41040",
+        "test-space",
+        7,
+    )
+    .unwrap();
+    let contract_b = ctx_semantic_index::external_http_semantic_model_contract(
+        "http://127.0.0.1:41041",
+        "test-space",
+        7,
+    )
+    .unwrap();
+    assert_eq!(contract_a.fingerprint(), contract_b.fingerprint());
+    assert_ne!(
+        contract_a.executor_route_identity(),
+        contract_b.executor_route_identity()
+    );
+
+    let request = daemon_query_embedding_request(&contract_b, "private endpoint-B query");
+    assert_eq!(
+        request["executor_route_identity"],
+        contract_b.executor_route_identity()
+    );
+    let mut stale_embedding = vec![0.0; contract_a.dimensions()];
+    stale_embedding[0] = 1.0;
+    let stale_response = daemon_embedding_response(&contract_a, json!(stale_embedding));
+
+    let error = parse_daemon_query_embedding_response(&stale_response, &contract_b)
+        .expect_err("endpoint B must reject endpoint A's daemon response");
+    assert_eq!(
+        error.to_string(),
+        "daemon query response executor route identity mismatch"
+    );
 }
 
 #[test]
@@ -343,7 +397,7 @@ fn foreground_adapter_uses_the_exact_external_executor_without_config_reread() {
 
     let adapter = SemanticQueryAdapter::foreground(
         temp.path(),
-        SemanticEmbeddingExecutorConfig::http("http://127.0.0.1:9").unwrap(),
+        external_executor_config("http://127.0.0.1:9"),
     );
     let SemanticQueryExecution::Foreground { executor } = &adapter.execution else {
         panic!("manual wait must select foreground semantic execution");
@@ -352,6 +406,15 @@ fn foreground_adapter_uses_the_exact_external_executor_without_config_reread() {
     assert_eq!(executor.kind().as_str(), "http");
     assert!(executor.builtin_executor().is_none());
     assert_eq!(executor.endpoint(), Some("http://127.0.0.1:9/"));
+    assert_eq!(executor.executor().contract().dimensions(), 7);
+    assert_eq!(
+        executor
+            .executor()
+            .contract()
+            .prepare_query("raw query".to_owned())
+            .into_text(),
+        "raw query"
+    );
 }
 
 #[test]
@@ -378,6 +441,43 @@ fn foreground_empty_generation_converges_without_loading_a_model() -> Result<()>
         .expect("default executor is built in")
         .shared_runtime()
         .is_loaded());
+    Ok(())
+}
+
+#[test]
+fn unavailable_external_contract_preserves_ready_builtin_store() -> Result<()> {
+    for include_record in [false, true] {
+        let temp = tempfile::tempdir()?;
+        let (index, _) = semantic_index_revision(temp.path(), 1, include_record)?;
+        let semantic_path = source_backed_semantic_vector_path(temp.path());
+        if include_record {
+            reconcile_ready_nonempty_generation(&index, temp.path())?;
+        } else {
+            let mut store = SemanticVectorStore::open(&semantic_path, semantic_model_contract())?;
+            acknowledge_empty_generation(&mut store, &index)?;
+        }
+        SemanticQueryPin::preflight(&index, temp.path(), semantic_model_contract())?;
+
+        let unavailable = TcpListener::bind("127.0.0.1:0")?;
+        let endpoint = format!("http://{}", unavailable.local_addr()?);
+        drop(unavailable);
+        let adapter = SemanticQueryAdapter::foreground(
+            temp.path(),
+            external_executor_config(endpoint.as_str()),
+        );
+
+        let error = adapter
+            .begin_query(&index)
+            .err()
+            .expect("an unavailable external endpoint must fail verification");
+        assert!(
+            error
+                .to_string()
+                .contains("semantic embedding HTTP transport failed"),
+            "unexpected foreground verification error: {error}"
+        );
+        SemanticQueryPin::preflight(&index, temp.path(), semantic_model_contract())?;
+    }
     Ok(())
 }
 

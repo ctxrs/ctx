@@ -29,6 +29,7 @@ fn application_config(config: &AppConfig<'_>) -> ctx_daemon_application::DaemonC
             .http_endpoint()
             .unwrap_or("builtin")
             .to_owned(),
+        semantic_contract_fingerprint: config.semantic_model_contract().fingerprint().to_owned(),
     }
 }
 
@@ -187,7 +188,14 @@ fn daemon_semantic_job_report(
         last_run_reason.clone()
     };
     let embedding_runtime = (context.daemon_running && context.semantic_runtime_active)
-        .then(|| crate::query_service::daemon_query_service_embedding_runtime(data_root))
+        .then(|| {
+            current_config.and_then(|config| {
+                crate::query_service::daemon_query_service_embedding_runtime(
+                    data_root,
+                    config.semantic_model_contract(),
+                )
+            })
+        })
         .flatten();
     compact_json(json!({
         "status": status,

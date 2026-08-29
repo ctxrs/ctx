@@ -7,13 +7,14 @@ use anyhow::Result;
 #[cfg(not(ctx_semantic_fastembed))]
 use crate::SEMANTIC_MODEL_ID;
 use crate::{
-    http_embedding_executor::ValidatedHttpEndpoint, semantic_model_contract,
+    http_embedding_executor::ValidatedHttpEndpoint, semantic_model_contract, ExternalSemanticSpace,
     HttpSemanticEmbeddingExecutor, PreparedSemanticDocuments, PreparedSemanticQuery,
     SemanticEmbeddingExecutorAuth, SemanticModelConfig, SemanticModelContract,
     SharedSemanticRuntime,
 };
 
-/// The selected implementation of the pinned semantic embedding contract.
+/// The selected implementation of a builtin or accepted external semantic
+/// embedding contract.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SemanticEmbeddingExecutorKind {
     Builtin,
@@ -59,7 +60,14 @@ pub struct SemanticEmbeddingExecutorConfig {
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum SemanticEmbeddingExecutorSelection {
     Builtin,
-    Http(ValidatedHttpEndpoint),
+    Http(HttpExecutorSelection),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct HttpExecutorSelection {
+    endpoint: ValidatedHttpEndpoint,
+    space: ExternalSemanticSpace,
+    contract: SemanticModelContract,
 }
 
 impl Default for SemanticEmbeddingExecutorConfig {
@@ -75,13 +83,41 @@ impl SemanticEmbeddingExecutorConfig {
         }
     }
 
-    /// Selects an exact-contract HTTP endpoint after validating its URL policy.
-    pub fn http(endpoint: impl AsRef<str>) -> Result<Self> {
-        Ok(Self {
-            selection: SemanticEmbeddingExecutorSelection::Http(ValidatedHttpEndpoint::parse(
-                endpoint.as_ref(),
-            )?),
-        })
+    /// Selects an HTTP endpoint and the external semantic space explicitly
+    /// accepted by persisted configuration. Exact-loopback HTTP is permitted
+    /// for local deployment convenience, but does not authenticate which local
+    /// process is listening.
+    pub fn http(endpoint: impl AsRef<str>, space: ExternalSemanticSpace) -> Result<Self> {
+        let endpoint = ValidatedHttpEndpoint::parse(endpoint.as_ref())?;
+        Ok(Self::from_http_selection(endpoint, space))
+    }
+
+    /// Discovers an endpoint's currently declared semantic space.
+    ///
+    /// The returned configuration fixes that accepted space. Executor
+    /// construction and first embedding re-verify it and fail closed on drift;
+    /// ordinary activation never adopts a changed endpoint contract.
+    pub fn discover_http(
+        endpoint: impl AsRef<str>,
+        auth: SemanticEmbeddingExecutorAuth,
+    ) -> Result<Self> {
+        let endpoint = ValidatedHttpEndpoint::parse(endpoint.as_ref())?;
+        let space = HttpSemanticEmbeddingExecutor::discover_space_from_validated_endpoint(
+            endpoint.clone(),
+            auth,
+        )?;
+        Ok(Self::from_http_selection(endpoint, space))
+    }
+
+    fn from_http_selection(endpoint: ValidatedHttpEndpoint, space: ExternalSemanticSpace) -> Self {
+        let contract = SemanticModelContract::external_http(endpoint.as_str(), space.clone());
+        Self {
+            selection: SemanticEmbeddingExecutorSelection::Http(HttpExecutorSelection {
+                endpoint,
+                space,
+                contract,
+            }),
+        }
     }
 
     pub const fn kind(&self) -> SemanticEmbeddingExecutorKind {
@@ -94,12 +130,30 @@ impl SemanticEmbeddingExecutorConfig {
     pub fn http_endpoint(&self) -> Option<&str> {
         match &self.selection {
             SemanticEmbeddingExecutorSelection::Builtin => None,
-            SemanticEmbeddingExecutorSelection::Http(endpoint) => Some(endpoint.as_str()),
+            SemanticEmbeddingExecutorSelection::Http(selection) => {
+                Some(selection.endpoint.as_str())
+            }
         }
     }
 
     pub fn endpoint(&self) -> Option<&str> {
         self.http_endpoint()
+    }
+
+    pub fn external_space(&self) -> Option<&ExternalSemanticSpace> {
+        match &self.selection {
+            SemanticEmbeddingExecutorSelection::Builtin => None,
+            SemanticEmbeddingExecutorSelection::Http(selection) => Some(&selection.space),
+        }
+    }
+
+    /// Returns the complete vector/index compatibility contract selected by
+    /// this configuration.
+    pub fn contract(&self) -> &SemanticModelContract {
+        match &self.selection {
+            SemanticEmbeddingExecutorSelection::Builtin => semantic_model_contract(),
+            SemanticEmbeddingExecutorSelection::Http(selection) => &selection.contract,
+        }
     }
 
     pub const fn is_builtin(&self) -> bool {
@@ -109,7 +163,9 @@ impl SemanticEmbeddingExecutorConfig {
     pub const fn scope(&self) -> SemanticEmbeddingExecutorScope {
         match &self.selection {
             SemanticEmbeddingExecutorSelection::Builtin => SemanticEmbeddingExecutorScope::Builtin,
-            SemanticEmbeddingExecutorSelection::Http(endpoint) if endpoint.is_loopback() => {
+            SemanticEmbeddingExecutorSelection::Http(selection)
+                if selection.endpoint.is_loopback() =>
+            {
                 SemanticEmbeddingExecutorScope::Loopback
             }
             SemanticEmbeddingExecutorSelection::Http(_) => SemanticEmbeddingExecutorScope::Remote,
@@ -123,10 +179,12 @@ impl SemanticEmbeddingExecutorConfig {
 /// admission/security boundary. Product composition must choose a trusted
 /// implementation. A future implementation may use another process or host,
 /// but its client is responsible for explicit privacy authorization,
-/// authenticated contract negotiation, conformance checks, and fail-closed
-/// routing before it reaches this interface. Local artifact acquisition and
-/// backend selection remain implementation details of the built-in executor.
-/// Inputs carry the fingerprint of the contract that prepared them.
+/// authenticated contract negotiation and fail-closed routing before it
+/// reaches this interface. Local artifact acquisition and backend selection
+/// remain implementation details of the built-in executor. Inputs carry the
+/// fingerprint of the contract that prepared them; external HTTP contracts
+/// deliberately preserve raw ctx text so the endpoint owns all model-specific
+/// preprocessing.
 pub trait SemanticEmbeddingExecutor: Send + Sync {
     fn contract(&self) -> &SemanticModelContract;
 
@@ -270,9 +328,14 @@ impl SemanticEmbeddingExecutorHandle {
                     BuiltinSemanticEmbeddingExecutor::new(runtime, model_config),
                 )
             }
-            SemanticEmbeddingExecutorSelection::Http(endpoint) => {
+            SemanticEmbeddingExecutorSelection::Http(selection) => {
                 SemanticEmbeddingExecutorHandleInner::Http(
-                    HttpSemanticEmbeddingExecutor::from_validated_endpoint(endpoint, auth)?,
+                    HttpSemanticEmbeddingExecutor::from_validated_selection(
+                        selection.endpoint,
+                        selection.space,
+                        selection.contract,
+                        auth,
+                    )?,
                 )
             }
         };
@@ -312,6 +375,15 @@ impl SemanticEmbeddingExecutorHandle {
     pub fn endpoint(&self) -> Option<&str> {
         self.http_executor()
             .map(HttpSemanticEmbeddingExecutor::endpoint)
+    }
+
+    /// Performs a content-free activation check for HTTP executors. The
+    /// built-in contract is compile-time pinned and needs no network check.
+    pub fn verify_contract(&self) -> Result<()> {
+        match &self.executor {
+            SemanticEmbeddingExecutorHandleInner::Builtin(_) => Ok(()),
+            SemanticEmbeddingExecutorHandleInner::Http(executor) => executor.verify_contract(),
+        }
     }
 
     pub const fn is_builtin(&self) -> bool {

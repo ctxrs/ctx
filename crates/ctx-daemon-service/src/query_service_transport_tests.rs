@@ -1,9 +1,15 @@
 use super::*;
+use ctx_semantic_model::{
+    ExternalSemanticSpace, SemanticEmbeddingExecutorConfig, SemanticEmbeddingExecutorHandle,
+};
 #[cfg(unix)]
 use std::path::PathBuf;
 
 #[path = "query_service_transport_tests/admission_lifecycle.rs"]
 mod admission_lifecycle;
+#[cfg(any(unix, windows))]
+#[path = "query_service_transport_tests/semantic_route.rs"]
+mod semantic_route;
 
 #[cfg(unix)]
 use std::io::Read as _;
@@ -43,6 +49,35 @@ fn start_test_query_service_with_runtime(
         source_refresh,
         wakeup,
         &crate::test_support::CONFIG,
+    );
+    start_daemon_query_service_with_request_timeout(
+        data_root,
+        handler,
+        TEST_QUERY_REQUEST_READ_TIMEOUT,
+    )
+}
+
+#[cfg(any(unix, windows))]
+fn start_test_query_service_with_executor(
+    data_root: &Path,
+    config: SemanticEmbeddingExecutorConfig,
+) -> Result<DaemonQueryService> {
+    let runtime = SharedSemanticRuntime::default();
+    let executor = Arc::new(SemanticEmbeddingExecutorHandle::build(
+        config,
+        runtime.clone(),
+        crate::test_support::CONFIG.semantic_model_config(data_root),
+    )?);
+    let handler = ctx_authenticated_request_handler_with_lifecycle(
+        data_root,
+        runtime,
+        Some(executor),
+        Arc::new(super::source_backed_refresh_adapter::refresh_engine(
+            &crate::test_support::CONFIG,
+        )),
+        Arc::new(super::daemon_wakeup::DaemonWakeup::default()),
+        &crate::test_support::CONFIG,
+        Arc::new(DaemonLifecycleState::starting()),
     );
     start_daemon_query_service_with_request_timeout(
         data_root,
@@ -806,15 +841,24 @@ fn semantic_query_protocol_rejects_incompatible_requests_before_model_access() -
     let temp = tempfile::tempdir()?;
     let runtime = SharedSemanticRuntime::default();
     let service = start_test_query_service_with_runtime(temp.path(), runtime.clone())?;
+    let builtin_contract = ctx_semantic_model::semantic_model_contract();
+    let route_identity = builtin_contract.executor_route_identity();
     let negotiated = daemon_query_request(
         temp.path(),
-        compact_json(json!({"schema_version": 1, "op": "ping"})),
+        compact_json(json!({
+            "schema_version": DAEMON_SEMANTIC_QUERY_SCHEMA_VERSION,
+            "op": "ping",
+            "executor_route_identity": route_identity,
+        })),
         StdDuration::from_secs(1),
         64 * 1024,
     )?
     .expect("query response");
     assert_eq!(negotiated["ok"], true);
-    assert_eq!(negotiated["schema_version"], 1);
+    assert_eq!(
+        negotiated["schema_version"],
+        DAEMON_SEMANTIC_QUERY_SCHEMA_VERSION
+    );
     let model_key = negotiated["model_key"]
         .as_str()
         .ok_or_else(|| anyhow!("ping response omitted model key"))?
@@ -823,16 +867,18 @@ fn semantic_query_protocol_rejects_incompatible_requests_before_model_access() -
         .as_str()
         .ok_or_else(|| anyhow!("ping response omitted model contract fingerprint"))?
         .to_owned();
+    assert_eq!(negotiated["executor_route_identity"], route_identity);
     let exact_embed = compact_json(json!({
-        "schema_version": 1,
+        "schema_version": DAEMON_SEMANTIC_QUERY_SCHEMA_VERSION,
         "op": "embed_query",
         "model_key": model_key,
         "model_contract_fingerprint": contract_fingerprint,
+        "executor_route_identity": route_identity,
         "text": "query text",
     }));
     let mut invalid = Vec::new();
 
-    for schema in [None, Some(2)] {
+    for schema in [None, Some(3)] {
         let mut ping = compact_json(json!({"op": "ping"}));
         let mut embed = exact_embed.clone();
         embed
@@ -846,14 +892,22 @@ fn semantic_query_protocol_rejects_incompatible_requests_before_model_access() -
         invalid.push((
             "ping schema",
             ping,
-            "daemon query request schema_version must be 1",
+            "daemon query request schema_version must be 2",
         ));
         invalid.push((
             "embed schema",
             embed,
-            "daemon query request schema_version must be 1",
+            "daemon query request schema_version must be 2",
         ));
     }
+
+    let mut mismatched_route = exact_embed.clone();
+    mismatched_route["executor_route_identity"] = json!("sha256:mismatched");
+    invalid.push((
+        "mismatched executor route",
+        mismatched_route,
+        "daemon query executor route identity mismatch",
+    ));
 
     let mut mismatched_fingerprint = exact_embed.clone();
     mismatched_fingerprint["model_contract_fingerprint"] = json!("sha256:mismatched");
@@ -875,10 +929,10 @@ fn semantic_query_protocol_rejects_incompatible_requests_before_model_access() -
     assert!(!runtime.is_loaded());
 
     let mut legacy_embed = exact_embed.clone();
-    legacy_embed
-        .as_object_mut()
-        .expect("object")
-        .remove("model_contract_fingerprint");
+    let legacy_embed_object = legacy_embed.as_object_mut().expect("object");
+    legacy_embed_object.insert("schema_version".to_owned(), json!(1));
+    legacy_embed_object.remove("model_contract_fingerprint");
+    legacy_embed_object.remove("executor_route_identity");
     let legacy_response = daemon_query_request(
         temp.path(),
         legacy_embed,
@@ -900,18 +954,26 @@ fn semantic_query_protocol_rejects_incompatible_requests_before_model_access() -
 
     let exact_ping = daemon_query_request(
         temp.path(),
-        compact_json(json!({"schema_version": 1, "op": "ping"})),
+        compact_json(json!({
+            "schema_version": DAEMON_SEMANTIC_QUERY_SCHEMA_VERSION,
+            "op": "ping",
+            "executor_route_identity": route_identity,
+        })),
         StdDuration::from_secs(1),
         64 * 1024,
     )?
     .expect("query response");
     assert_eq!(exact_ping["ok"], true);
-    assert_eq!(exact_ping["schema_version"], 1);
+    assert_eq!(
+        exact_ping["schema_version"],
+        DAEMON_SEMANTIC_QUERY_SCHEMA_VERSION
+    );
     assert_eq!(exact_ping["model_key"], model_key);
     assert_eq!(
         exact_ping["model_contract_fingerprint"],
         contract_fingerprint
     );
+    assert_eq!(exact_ping["executor_route_identity"], route_identity);
 
     let exact_embed = daemon_query_request(
         temp.path(),

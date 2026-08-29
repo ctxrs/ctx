@@ -9,7 +9,9 @@ use std::{
 use anyhow::{anyhow, Result};
 use ctx_client_observability::analytics::PublicEventV1;
 use ctx_daemon_service::CoreGenerationPublished;
-use ctx_semantic_model::SemanticEmbeddingExecutorConfig;
+#[cfg(test)]
+use ctx_semantic_model::ExternalSemanticSpace;
+use ctx_semantic_model::{SemanticEmbeddingExecutorConfig, SemanticModelContract};
 
 pub const CONFIG_FILE: &str = "config.toml";
 pub const DAEMON_DEFAULT_ENABLED: bool = true;
@@ -138,6 +140,10 @@ impl<'a> AppConfig<'a> {
 
     pub fn semantic_embedding_executor(&self) -> &SemanticEmbeddingExecutorConfig {
         &self.semantic_executor
+    }
+
+    pub fn semantic_model_contract(&self) -> &SemanticModelContract {
+        self.semantic_executor.contract()
     }
 }
 
@@ -294,14 +300,56 @@ impl DaemonCliHost for TestHost {
             config.semantic_enabled = enabled;
             config.semantic_source = "config";
         }
-        let executor =
-            Self::config_item(&document, "semantic", "executor").and_then(toml_edit::Item::as_str);
+        let executor_item = Self::config_item(&document, "semantic", "executor");
+        let executor = executor_item
+            .map(|item| {
+                item.as_str()
+                    .ok_or_else(|| anyhow!("semantic.executor must be a string"))
+            })
+            .transpose()?;
+        let space_id_item = Self::config_item(&document, "semantic", "space_id");
+        let space_id = space_id_item
+            .map(|item| {
+                item.as_str()
+                    .ok_or_else(|| anyhow!("semantic.space_id must be a string"))
+            })
+            .transpose()?;
+        let dimensions_item = Self::config_item(&document, "semantic", "dimensions");
+        let dimensions = dimensions_item
+            .map(|item| {
+                let value = item
+                    .as_integer()
+                    .ok_or_else(|| anyhow!("semantic.dimensions must be an integer"))?;
+                usize::try_from(value)
+                    .map_err(|_| anyhow!("semantic.dimensions must be a positive integer"))
+            })
+            .transpose()?;
         if Self::config_item(&document, "semantic", "endpoint").is_some() {
             return Err(anyhow!("unknown config key `semantic.endpoint`"));
         }
-        config.semantic_executor = match executor {
-            None | Some("builtin") => SemanticEmbeddingExecutorConfig::builtin(),
-            Some(endpoint) => SemanticEmbeddingExecutorConfig::http(endpoint)?,
+        config.semantic_executor = match (executor, space_id, dimensions) {
+            (None | Some("builtin"), None, None) => SemanticEmbeddingExecutorConfig::builtin(),
+            (Some("builtin"), _, _) => {
+                return Err(anyhow!(
+                    "semantic.space_id and semantic.dimensions are not allowed with the builtin semantic executor"
+                ));
+            }
+            (None, _, _) => {
+                return Err(anyhow!(
+                    "semantic.space_id and semantic.dimensions require semantic.executor to be an HTTP endpoint"
+                ));
+            }
+            (Some(endpoint), Some(space_id), Some(dimensions)) => {
+                SemanticEmbeddingExecutorConfig::http(
+                    endpoint,
+                    ExternalSemanticSpace::new(space_id, dimensions)?,
+                )?
+            }
+            (Some(_), _, _) => {
+                return Err(anyhow!(
+                    "an HTTP semantic executor requires the complete semantic.executor, semantic.space_id, and semantic.dimensions triple"
+                ));
+            }
         };
         Ok(config)
     }
@@ -375,7 +423,7 @@ mod tests {
 
         std::fs::write(
             &path,
-            "[semantic]\nexecutor = \"https://embed.example.test/base\"\n",
+            "[semantic]\nexecutor = \"https://embed.example.test/base\"\nspace_id = \"acme/multilingual-v2\"\ndimensions = 768\n",
         )
         .unwrap();
         let external = AppConfig::load(temp.path()).unwrap();
@@ -383,6 +431,12 @@ mod tests {
             external.semantic_embedding_executor().http_endpoint(),
             Some("https://embed.example.test/base/")
         );
+        let space = external
+            .semantic_embedding_executor()
+            .external_space()
+            .unwrap();
+        assert_eq!(space.space_id(), "acme/multilingual-v2");
+        assert_eq!(space.dimensions(), 768);
 
         std::fs::write(&path, "[semantic]\nexecutor = \"builtin\"\n").unwrap();
         assert!(AppConfig::load(temp.path())
@@ -408,11 +462,27 @@ mod tests {
             );
         }
 
-        std::fs::write(&path, "[semantic]\nexecutor = \"http\"\n").unwrap();
+        std::fs::write(
+            &path,
+            "[semantic]\nexecutor = \"http\"\nspace_id = \"space-v1\"\ndimensions = 384\n",
+        )
+        .unwrap();
         let error = AppConfig::load(temp.path()).unwrap_err();
         assert!(
             format!("{error:#}").contains("endpoint is invalid"),
             "{error:#}"
         );
+
+        for incomplete in [
+            "[semantic]\nexecutor = \"https://embed.example.test\"\n",
+            "[semantic]\nspace_id = \"space-v1\"\ndimensions = 384\n",
+            "[semantic]\nexecutor = \"builtin\"\nspace_id = \"space-v1\"\ndimensions = 384\n",
+        ] {
+            std::fs::write(&path, incomplete).unwrap();
+            assert!(
+                AppConfig::load(temp.path()).is_err(),
+                "accepted {incomplete}"
+            );
+        }
     }
 }

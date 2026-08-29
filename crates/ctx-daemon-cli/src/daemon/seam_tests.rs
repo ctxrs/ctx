@@ -17,6 +17,10 @@ fn source_refresh_only_status_exposes_runtime_and_certified_refresh_identity() -
         temp.path().join(CONFIG_FILE),
         "[daemon]\nmode = \"source-refresh-only\"\n",
     )?;
+    let semantic_contract_fingerprint = AppConfig::load(temp.path())?
+        .semantic_model_contract()
+        .fingerprint()
+        .to_owned();
     let lock = DaemonLock::acquire(temp.path())?.expect("daemon lock");
     let now = ctx_history_core::utc_now().timestamp_millis();
     ctx_daemon_service::testing::write_daemon_lifecycle_status(
@@ -37,12 +41,14 @@ fn source_refresh_only_status_exposes_runtime_and_certified_refresh_identity() -
                     "daemon_mode": "source-refresh-only",
                     "semantic_enabled": false,
                     "semantic_executor": "builtin",
+                    "semantic_contract_fingerprint": semantic_contract_fingerprint,
                 },
                 "applied": {
                     "daemon_enabled": true,
                     "daemon_mode": "source-refresh-only",
                     "semantic_enabled": false,
                     "semantic_executor": "builtin",
+                    "semantic_contract_fingerprint": semantic_contract_fingerprint,
                 },
             },
         }),
@@ -78,6 +84,11 @@ fn source_refresh_only_status_exposes_runtime_and_certified_refresh_identity() -
     assert_eq!(report["live_pid"], process::id());
     assert_eq!(report["trigger_command"], "search");
     assert_eq!(report["trigger_provenance"], "autostart");
+    assert_eq!(report["config_reload"]["out_of_sync"], false);
+    assert_eq!(
+        report["config_reload"]["applied"]["semantic_contract_fingerprint"],
+        semantic_contract_fingerprint
+    );
     assert_eq!(report["lock_identity"]["active"], true);
     assert!(report["lock_identity"]["owner_id"]
         .as_str()

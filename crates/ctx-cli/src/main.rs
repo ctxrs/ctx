@@ -86,6 +86,12 @@ pub(crate) use transcript::TranscriptMode;
 pub(crate) use value_parsers::parse_event_window_limit;
 
 fn main() -> ExitCode {
+    if let Err(error) = ctx_daemon_cli::apply_supervisor_environment_handoff() {
+        output::write_stderr_line(format_args!(
+            "ctx supervisor environment handoff failed: {error:#}"
+        ));
+        return ExitCode::FAILURE;
+    }
     let arguments = std::env::args_os().collect::<Vec<_>>();
     if let Some(exit) = core_capability::intercept(&arguments) {
         return exit;

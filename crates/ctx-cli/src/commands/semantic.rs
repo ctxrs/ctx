@@ -120,8 +120,16 @@ fn set_semantic_executor_and_enable(
     config: &mut config::AppConfig,
     executor: &str,
 ) -> Result<()> {
-    let endpoint = (executor != "builtin").then_some(executor);
-    config::set_semantic_search_enabled_with_executor(data_root, endpoint)?;
+    config::rebind_semantic_embedding_auth_endpoint_for_explicit_selection(executor);
+    let accepted = if executor == "builtin" {
+        ctx_daemon_cli::SemanticEmbeddingExecutorConfig::builtin()
+    } else {
+        ctx_daemon_cli::SemanticEmbeddingExecutorConfig::discover_http(
+            executor,
+            ctx_daemon_cli::semantic_embedding_executor_auth_from_environment()?,
+        )?
+    };
+    config::set_semantic_search_enabled_with_executor(data_root, &accepted)?;
     reload_and_validate_semantic_policy(data_root, config, true)?;
     // `--executor` is the explicit authority to bind the inherited token to a
     // newly selected remote endpoint. Ordinary config loads preserve an
@@ -177,15 +185,23 @@ fn semantic_report(
     let token_present =
         std::env::var_os(ctx_daemon_cli::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENV).is_some();
     let token_bound_to_selected_endpoint = token_present
-        && executor.http_endpoint().is_some_and(|endpoint| {
-            std::env::var(ctx_daemon_cli::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV)
-                .ok()
-                .and_then(|binding| {
-                    ctx_daemon_cli::SemanticEmbeddingExecutorConfig::http(binding).ok()
-                })
-                .and_then(|binding| binding.http_endpoint().map(str::to_owned))
-                .is_some_and(|binding| binding == endpoint)
-        });
+        && executor
+            .external_space()
+            .zip(executor.http_endpoint())
+            .is_some_and(|(space, endpoint)| {
+                std::env::var(ctx_daemon_cli::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV)
+                    .ok()
+                    .and_then(|binding| {
+                        ctx_daemon_cli::SemanticEmbeddingExecutorConfig::http(
+                            binding,
+                            space.clone(),
+                        )
+                        .ok()
+                    })
+                    .and_then(|binding| binding.http_endpoint().map(str::to_owned))
+                    .is_some_and(|binding| binding == endpoint)
+            });
+    let reported_space = executor.external_space();
     Ok(compact_json(json!({
         "schema_version": 1,
         "operation": operation,
@@ -206,6 +222,8 @@ fn semantic_report(
         "executor": {
             "kind": executor.kind().as_str(),
             "endpoint": executor.http_endpoint(),
+            "space_id": reported_space.map(|space| space.space_id()),
+            "dimensions": reported_space.map(|space| space.dimensions()),
             "scope": executor_scope.as_str(),
             "content_leaves_machine": executor_scope.content_leaves_machine(),
             "authentication": {
@@ -215,7 +233,9 @@ fn semantic_report(
                     token_bound_to_selected_endpoint,
             },
         },
-        "local_only": !executor_scope.content_leaves_machine(),
+        // An external loopback process can forward content after ctx's first
+        // hop, so only the in-process builtin can truthfully claim local-only.
+        "local_only": executor.http_endpoint().is_none(),
         "read_only": read_only,
     })))
 }
@@ -283,6 +303,18 @@ fn render_report(report: Value, json: bool, quiet: bool, ui: &mut Ui) -> Result<
 mod tests {
     use super::*;
 
+    fn external_executor(
+        endpoint: &str,
+        space_id: &str,
+        dimensions: usize,
+    ) -> ctx_daemon_cli::SemanticEmbeddingExecutorConfig {
+        ctx_daemon_cli::SemanticEmbeddingExecutorConfig::http(
+            endpoint,
+            ctx_daemon_cli::ExternalSemanticSpace::new(space_id, dimensions).unwrap(),
+        )
+        .unwrap()
+    }
+
     struct TestEnvRestore {
         name: &'static str,
         value: Option<std::ffi::OsString>,
@@ -340,23 +372,16 @@ mod tests {
     #[test]
     fn semantic_scope_treats_only_builtin_and_exact_loopback_ips_as_local() {
         let builtin = ctx_daemon_cli::SemanticEmbeddingExecutorConfig::builtin();
-        let ipv4 = ctx_daemon_cli::SemanticEmbeddingExecutorConfig::http("http://127.0.0.1:8080/")
-            .unwrap();
-        let ipv6 =
-            ctx_daemon_cli::SemanticEmbeddingExecutorConfig::http("http://[::1]:8080/").unwrap();
-        let remote =
-            ctx_daemon_cli::SemanticEmbeddingExecutorConfig::http("https://embed.example.test/")
-                .unwrap();
+        let ipv4 = external_executor("http://127.0.0.1:8080/", "space-v1", 384);
+        let ipv6 = external_executor("http://[::1]:8080/", "space-v1", 384);
+        let remote = external_executor("https://embed.example.test/", "space-v1", 384);
         assert!(!builtin.scope().content_leaves_machine());
         assert!(!ipv4.scope().content_leaves_machine());
         assert!(!ipv6.scope().content_leaves_machine());
         assert!(remote.scope().content_leaves_machine());
-        assert!(
-            ctx_daemon_cli::SemanticEmbeddingExecutorConfig::http("https://localhost/")
-                .unwrap()
-                .scope()
-                .content_leaves_machine()
-        );
+        assert!(external_executor("https://localhost/", "space-v1", 384)
+            .scope()
+            .content_leaves_machine());
     }
 
     #[test]
@@ -379,8 +404,7 @@ mod tests {
         assert_eq!(builtin["local_only"], true);
         assert_eq!(builtin["read_only"], true);
 
-        config.semantic.executor =
-            ctx_daemon_cli::SemanticEmbeddingExecutorConfig::http("http://127.0.0.1:9").unwrap();
+        config.semantic.executor = external_executor("http://127.0.0.1:9", "loopback-v1", 128);
         std::env::set_var(
             ctx_daemon_cli::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENV,
             "loopback-secret",
@@ -388,16 +412,18 @@ mod tests {
         let loopback = semantic_report(temp.path(), &config, "status", true).unwrap();
         assert_eq!(loopback["executor"]["scope"], "loopback");
         assert_eq!(loopback["executor"]["content_leaves_machine"], false);
+        assert_eq!(loopback["local_only"], false);
         assert_eq!(
             loopback["executor"]["authentication"]
                 ["token_bound_to_selected_endpoint_in_current_process"],
             false
         );
 
-        config.semantic.executor = ctx_daemon_cli::SemanticEmbeddingExecutorConfig::http(
+        config.semantic.executor = external_executor(
             "https://embed.example.test/base",
-        )
-        .unwrap();
+            "acme/multilingual-v2",
+            768,
+        );
         std::env::set_var(
             ctx_daemon_cli::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENV,
             "remote-secret",
@@ -411,6 +437,8 @@ mod tests {
         assert_eq!(remote["executor"]["content_leaves_machine"], true);
         assert_eq!(remote["local_only"], false);
         assert_eq!(remote["read_only"], true);
+        assert_eq!(remote["executor"]["space_id"], "acme/multilingual-v2");
+        assert_eq!(remote["executor"]["dimensions"], 768);
         assert_eq!(
             remote["executor"]["authentication"]
                 ["token_bound_to_selected_endpoint_in_current_process"],
@@ -419,5 +447,9 @@ mod tests {
         let encoded = serde_json::to_string(&remote).unwrap();
         assert!(!encoded.contains("remote-secret"));
         assert!(!encoded.contains("loopback-secret"));
+
+        let enable = semantic_report(temp.path(), &config, "enable", false).unwrap();
+        assert_eq!(enable["executor"]["space_id"], "acme/multilingual-v2");
+        assert_eq!(enable["executor"]["dimensions"], 768);
     }
 }

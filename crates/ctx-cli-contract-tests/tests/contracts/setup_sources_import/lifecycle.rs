@@ -432,13 +432,46 @@ fn semantic_executor_selection_round_trips_local_remote_and_builtin_privacy() {
     )
     .unwrap();
 
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}/embed", listener.local_addr().unwrap());
+    let contract_server = std::thread::spawn(move || {
+        use std::io::{Read as _, Write as _};
+
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        let mut request = Vec::new();
+        let mut chunk = [0_u8; 1024];
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let count = stream.read(&mut chunk).unwrap();
+            assert!(count > 0, "semantic contract request ended before headers");
+            request.extend_from_slice(&chunk[..count]);
+        }
+        assert!(
+            String::from_utf8_lossy(&request).starts_with("GET /embed/v1/contract HTTP/1.1\r\n"),
+            "unexpected semantic discovery request: {}",
+            String::from_utf8_lossy(&request)
+        );
+        let body =
+            br#"{"schema_version":1,"space_id":"contract-test-loopback-v1","dimensions":384}"#;
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .unwrap();
+        stream.write_all(body).unwrap();
+    });
+
     let loopback = json_output(ctx(&temp).args([
         "semantic",
         "enable",
         "--executor",
-        "http://127.0.0.1:9423/embed",
+        &endpoint,
         "--format=json",
     ]));
+    contract_server.join().unwrap();
     assert_eq!(loopback["enabled"], true, "{loopback:#}");
     assert_eq!(loopback["executor"]["kind"], "http", "{loopback:#}");
     assert_eq!(loopback["executor"]["scope"], "loopback", "{loopback:#}");
@@ -447,14 +480,18 @@ fn semantic_executor_selection_round_trips_local_remote_and_builtin_privacy() {
         "{loopback:#}"
     );
     assert_eq!(loopback["local_only"], true, "{loopback:#}");
+    assert_eq!(
+        loopback["executor"]["space_id"], "contract-test-loopback-v1",
+        "{loopback:#}"
+    );
+    assert_eq!(loopback["executor"]["dimensions"], 384, "{loopback:#}");
 
-    let remote = json_output(ctx(&temp).args([
-        "semantic",
-        "enable",
-        "--executor",
-        "https://embeddings.example.test/v1",
-        "--format=json",
-    ]));
+    fs::write(
+        data_root(&temp).join("config.toml"),
+        "[indexing]\nmode = \"manual\"\n[search]\nsemantic = true\n[semantic]\nexecutor = \"https://embeddings.example.test/v1/\"\nspace_id = \"contract-test-remote-v1\"\ndimensions = 768\n",
+    )
+    .unwrap();
+    let remote = json_output(ctx(&temp).args(["semantic", "status", "--format=json"]));
     assert_eq!(remote["enabled"], true, "{remote:#}");
     assert_eq!(remote["executor"]["kind"], "http", "{remote:#}");
     assert_eq!(remote["executor"]["scope"], "remote", "{remote:#}");
@@ -463,6 +500,11 @@ fn semantic_executor_selection_round_trips_local_remote_and_builtin_privacy() {
         "{remote:#}"
     );
     assert_eq!(remote["local_only"], false, "{remote:#}");
+    assert_eq!(
+        remote["executor"]["space_id"], "contract-test-remote-v1",
+        "{remote:#}"
+    );
+    assert_eq!(remote["executor"]["dimensions"], 768, "{remote:#}");
 
     let persisted = fs::read_to_string(data_root(&temp).join("config.toml")).unwrap();
     assert!(

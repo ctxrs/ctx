@@ -34,6 +34,68 @@ fn test_ui() -> (Ui, SharedWriter) {
     )
 }
 
+struct BuiltinSemanticTestHost;
+
+static BUILTIN_SEMANTIC_TEST_HOST: BuiltinSemanticTestHost = BuiltinSemanticTestHost;
+static INSTALL_BUILTIN_SEMANTIC_TEST_HOST: std::sync::Once = std::sync::Once::new();
+
+fn install_builtin_semantic_test_host() {
+    INSTALL_BUILTIN_SEMANTIC_TEST_HOST.call_once(|| {
+        ctx_daemon_cli::install_host(&BUILTIN_SEMANTIC_TEST_HOST)
+            .expect("install the ctx-history-cli semantic test host");
+    });
+}
+
+impl ctx_daemon_cli::DaemonCliHost for BuiltinSemanticTestHost {
+    fn load_config(&self, _data_root: &Path) -> anyhow::Result<ctx_daemon_cli::AppConfig<'static>> {
+        Ok(ctx_daemon_cli::AppConfig::default())
+    }
+
+    fn persisted_daemon_enabled(&self, _data_root: &Path) -> anyhow::Result<bool> {
+        Ok(true)
+    }
+
+    fn set_daemon_enabled(&self, _data_root: &Path, _enabled: bool) -> anyhow::Result<()> {
+        Err(anyhow::anyhow!(
+            "the ctx-history-cli semantic test host cannot mutate daemon config"
+        ))
+    }
+
+    fn home_dir(&self) -> Option<PathBuf> {
+        None
+    }
+
+    fn run_daemon_service(
+        &self,
+        _data_root: &Path,
+        _request: ctx_daemon_cli::DaemonHostRunRequest,
+        _config: &ctx_daemon_cli::AppConfig<'_>,
+    ) -> anyhow::Result<()> {
+        Err(anyhow::anyhow!(
+            "the ctx-history-cli semantic test host cannot run a daemon"
+        ))
+    }
+
+    fn deliver_daemon_events(
+        &self,
+        _data_root: &Path,
+        _events: &[ctx_client_observability::analytics::PublicEventV1],
+    ) {
+    }
+
+    fn fetch_to_writer(
+        &self,
+        _endpoint: &str,
+        _max_bytes: u64,
+        _timeout: std::time::Duration,
+        _writer: &mut dyn Write,
+    ) -> anyhow::Result<u64> {
+        Err(anyhow::anyhow!(
+            "the ctx-history-cli semantic test host cannot fetch artifacts"
+        ))
+    }
+}
+
 fn fixture_event(
     provider: CaptureProvider,
     source_format: &str,

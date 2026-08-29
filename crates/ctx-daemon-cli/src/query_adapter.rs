@@ -11,10 +11,12 @@ use ctx_history_read_application::{
     HistorySemanticBatch, HistorySemanticError, HistorySemanticPort, HistorySemanticQuery,
     SemanticReason,
 };
+#[cfg(test)]
+use ctx_semantic_index::semantic_model_contract;
 use ctx_semantic_index::{
-    semantic_model_contract, source_backed_semantic_vector_path, SemanticBatchEmbedder,
-    SemanticChunkDocument, SemanticModelContract, SemanticNotReady, SemanticQueryPin,
-    SemanticVectorStore, SourceBackedSemanticDocumentBuilder,
+    source_backed_semantic_vector_path, SemanticBatchEmbedder, SemanticChunkDocument,
+    SemanticModelContract, SemanticNotReady, SemanticQueryPin, SemanticVectorStore,
+    SourceBackedSemanticDocumentBuilder,
 };
 use ctx_semantic_model::{
     SemanticEmbeddingExecutorConfig, SemanticEmbeddingExecutorHandle, SharedSemanticRuntime,
@@ -23,7 +25,7 @@ use serde_json::{json, Value};
 
 use crate::compact_json;
 
-use super::query_service::daemon_query_request;
+use super::query_service::{daemon_query_request, DAEMON_SEMANTIC_QUERY_SCHEMA_VERSION};
 
 const SEMANTIC_GENERATION_POLL_INTERVAL: StdDuration = StdDuration::from_millis(100);
 
@@ -56,6 +58,7 @@ where
     Repin: FnMut() -> Result<PinnedSourceBackedGeneration>,
     Pause: FnMut(StdDuration),
 {
+    let contract = selected_semantic_contract(data_root)?;
     let started = Instant::now();
     loop {
         match repin() {
@@ -74,11 +77,7 @@ where
             }
             Err(error) => return Err(error),
         }
-        match SemanticQueryPin::preflight(
-            pin.verified_index(),
-            data_root,
-            semantic_model_contract(),
-        ) {
+        match SemanticQueryPin::preflight(pin.verified_index(), data_root, &contract) {
             Ok(_) => return Ok(pin),
             Err(error) if semantic_generation_wait_is_retryable(&error) => {}
             Err(_) => return Ok(pin),
@@ -212,9 +211,7 @@ fn reconcile_foreground_semantic(
     if index.semantic_eligible_event_count()? > 0 {
         ensure_foreground_executor(executor)?;
     }
-    let contract = semantic_index_contract(executor)?;
-    let mut store =
-        SemanticVectorStore::open(&source_backed_semantic_vector_path(data_root), &contract)?;
+    let mut store = open_foreground_semantic_vector_store(data_root, executor)?;
     let mut builder = SourceBackedSemanticDocumentBuilder::new(index);
     let mut embedder = ForegroundSemanticEmbedder { executor };
     loop {
@@ -228,6 +225,18 @@ fn reconcile_foreground_semantic(
             ));
         }
     }
+}
+
+/// Establishes an external endpoint's configured identity before a mismatched
+/// writable vector store can perform its reset-on-open recovery. Verification
+/// is a content-free GET; the built-in contract is already compile-time pinned.
+fn open_foreground_semantic_vector_store(
+    data_root: &Path,
+    executor: &SemanticEmbeddingExecutorHandle,
+) -> Result<SemanticVectorStore> {
+    executor.verify_contract()?;
+    let contract = semantic_index_contract_for_selected(executor.executor().contract())?;
+    SemanticVectorStore::open(&source_backed_semantic_vector_path(data_root), &contract)
 }
 
 pub struct SemanticQuerySession<'a> {
@@ -252,14 +261,14 @@ impl SemanticQuerySession<'_> {
         index: &'a VerifiedIndex,
         data_root: &'a Path,
     ) -> std::result::Result<SemanticQuerySession<'a>, SemanticQueryError> {
-        let contract = semantic_model_contract();
-        let pin = SemanticQueryPin::preflight(index, data_root, contract)
+        let contract = selected_semantic_contract(data_root).map_err(SemanticQueryError::from)?;
+        let pin = SemanticQueryPin::preflight(index, data_root, &contract)
             .map_err(SemanticQueryError::from)?;
         Ok(SemanticQuerySession {
             pin,
             index,
             data_root,
-            contract: contract.clone(),
+            contract,
             embedding_source: SemanticQueryEmbeddingSource::Daemon,
             embeddings: Vec::new(),
         })
@@ -270,7 +279,8 @@ impl SemanticQuerySession<'_> {
         data_root: &'a Path,
         executor: &'a SemanticEmbeddingExecutorHandle,
     ) -> std::result::Result<SemanticQuerySession<'a>, SemanticQueryError> {
-        let contract = semantic_index_contract(executor).map_err(SemanticQueryError::from)?;
+        let contract = semantic_index_contract_for_selected(executor.executor().contract())
+            .map_err(SemanticQueryError::from)?;
         let pin = SemanticQueryPin::preflight(index, data_root, &contract)
             .map_err(SemanticQueryError::from)?;
         Ok(SemanticQuerySession {
@@ -357,19 +367,31 @@ impl SemanticQuerySession<'_> {
     }
 }
 
-fn semantic_index_contract(
-    executor: &SemanticEmbeddingExecutorHandle,
+pub(crate) fn semantic_index_contract_for_selected(
+    selected: &ctx_semantic_model::SemanticModelContract,
 ) -> Result<SemanticModelContract> {
-    // Bazel may materialize the model crate separately across this dependency
-    // boundary. Compare the portable fingerprint, then return the index
-    // crate's own contract type.
-    let contract = semantic_model_contract();
-    if executor.executor().contract().fingerprint() != contract.fingerprint() {
+    if let Some(space) = selected.external_space() {
+        let endpoint = selected
+            .external_http_endpoint()
+            .ok_or_else(|| anyhow!("external semantic contract has no endpoint identity"))?;
+        return ctx_semantic_index::external_http_semantic_model_contract(
+            endpoint,
+            space.space_id(),
+            space.dimensions(),
+        );
+    }
+    let local = ctx_semantic_index::semantic_model_contract();
+    if selected.fingerprint() != local.fingerprint() {
         return Err(anyhow!(
-            "semantic executor model contract does not match the semantic index contract"
+            "selected semantic model contract is incompatible with the semantic index"
         ));
     }
-    Ok(contract.clone())
+    Ok(local.clone())
+}
+
+fn selected_semantic_contract(data_root: &Path) -> Result<SemanticModelContract> {
+    let config = crate::config::AppConfig::load(data_root)?;
+    semantic_index_contract_for_selected(config.semantic_model_contract())
 }
 
 fn foreground_query_embedding(
@@ -495,10 +517,11 @@ fn daemon_query_embedding(
 
 fn daemon_query_embedding_request(contract: &SemanticModelContract, semantic_text: &str) -> Value {
     compact_json(json!({
-        "schema_version": 1,
+        "schema_version": DAEMON_SEMANTIC_QUERY_SCHEMA_VERSION,
         "op": "embed_query",
         "model_key": contract.model_key(),
         "model_contract_fingerprint": contract.fingerprint(),
+        "executor_route_identity": contract.executor_route_identity(),
         "text": semantic_text,
     }))
 }
@@ -508,36 +531,34 @@ fn parse_daemon_query_embedding_response(
     contract: &SemanticModelContract,
 ) -> Result<(Vec<f32>, u64)> {
     let ok = response.get("ok").and_then(Value::as_bool);
-    let legacy_v1 = contract.supports_frozen_legacy_v1()
-        && response.get("model_contract_fingerprint").is_none();
-    if !legacy_v1 {
-        if response.get("schema_version").and_then(Value::as_u64) != Some(1) {
-            return Err(anyhow!("daemon query response schema_version mismatch"));
-        }
-        let model_key = response
-            .get("model_key")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        if model_key != contract.model_key() {
-            return Err(anyhow!("daemon query response model key mismatch"));
-        }
-        let model_contract_fingerprint = response
-            .get("model_contract_fingerprint")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        if model_contract_fingerprint != contract.fingerprint() {
-            return Err(anyhow!(
-                "daemon query response model contract fingerprint mismatch"
-            ));
-        }
-    } else if ok == Some(true)
-        && (response
-            .get("schema_version")
-            .is_some_and(|value| value.as_u64() != Some(1))
-            || response.get("model_key").and_then(Value::as_str) != Some(contract.model_key()))
+    if response.get("schema_version").and_then(Value::as_u64)
+        != Some(DAEMON_SEMANTIC_QUERY_SCHEMA_VERSION)
     {
+        return Err(anyhow!("daemon query response schema_version mismatch"));
+    }
+    let model_key = response
+        .get("model_key")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if model_key != contract.model_key() {
+        return Err(anyhow!("daemon query response model key mismatch"));
+    }
+    let model_contract_fingerprint = response
+        .get("model_contract_fingerprint")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if model_contract_fingerprint != contract.fingerprint() {
         return Err(anyhow!(
-            "legacy daemon query response protocol identity mismatch"
+            "daemon query response model contract fingerprint mismatch"
+        ));
+    }
+    let executor_route_identity = response
+        .get("executor_route_identity")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if executor_route_identity != contract.executor_route_identity() {
+        return Err(anyhow!(
+            "daemon query response executor route identity mismatch"
         ));
     }
     if ok != Some(true) {

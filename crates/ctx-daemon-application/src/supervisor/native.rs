@@ -266,11 +266,13 @@ fn install_native_supervisor(
 
 #[cfg(target_os = "linux")]
 fn disable_native_supervisor(
-    _data_root: &Path,
+    data_root: &Path,
     manager_environment: &SupervisorManagerEnvironment,
     identity: &SupervisorIdentity,
 ) -> Result<Option<PathBuf>> {
-    ctx_daemon_runtime::disable_systemd_supervisor(identity, manager_environment)
+    let artifact = ctx_daemon_runtime::disable_systemd_supervisor(identity, manager_environment)?;
+    ctx_daemon_runtime::remove_supervisor_environment(data_root)?;
+    Ok(artifact)
 }
 
 #[cfg(target_os = "linux")]
@@ -321,11 +323,13 @@ fn install_native_supervisor(
 
 #[cfg(target_os = "macos")]
 fn disable_native_supervisor(
-    _data_root: &Path,
+    data_root: &Path,
     manager_environment: &SupervisorManagerEnvironment,
     identity: &SupervisorIdentity,
 ) -> Result<Option<PathBuf>> {
-    ctx_daemon_runtime::disable_launch_agent(identity, manager_environment)
+    let artifact = ctx_daemon_runtime::disable_launch_agent(identity, manager_environment)?;
+    ctx_daemon_runtime::remove_supervisor_environment(data_root)?;
+    Ok(artifact)
 }
 
 #[cfg(target_os = "macos")]
@@ -379,11 +383,13 @@ fn install_native_supervisor(
 
 #[cfg(windows)]
 fn disable_native_supervisor(
-    _data_root: &Path,
+    data_root: &Path,
     manager_environment: &SupervisorManagerEnvironment,
     identity: &SupervisorIdentity,
 ) -> Result<Option<PathBuf>> {
-    ctx_daemon_runtime::disable_windows_supervisor(identity, manager_environment)
+    let artifact = ctx_daemon_runtime::disable_windows_supervisor(identity, manager_environment)?;
+    ctx_daemon_runtime::remove_supervisor_environment(data_root)?;
+    Ok(artifact)
 }
 
 #[cfg(windows)]

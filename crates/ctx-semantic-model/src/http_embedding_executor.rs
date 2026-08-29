@@ -1,7 +1,5 @@
 use std::{
-    collections::HashMap,
     fmt,
-    io::Read,
     net::IpAddr,
     sync::{Condvar, Mutex},
     time::{Duration, Instant},
@@ -13,13 +11,23 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::{
-    embedding_executor::ensure_prepared_contract,
-    http_embedding_canary::{
-        prepared_document_probes, prepared_query_probes, validate_conformance_canary,
-    },
-    semantic_model_contract, PreparedSemanticDocuments, PreparedSemanticQuery,
-    SemanticEmbeddingExecutor, SemanticModelContract,
+    embedding_executor::ensure_prepared_contract, ExternalSemanticSpace, PreparedSemanticDocuments,
+    PreparedSemanticQuery, SemanticEmbeddingExecutor, SemanticModelContract,
 };
+
+mod request_body;
+mod resolver;
+mod response;
+
+#[cfg(test)]
+use request_body::encoded_json_len;
+use request_body::{encode_preflighted_request, RequestBodySizer};
+use resolver::build_http_agent;
+#[cfg(test)]
+use resolver::{ResolverRuntime, RESOLVER_QUEUE_CAPACITY, RESOLVER_THREADS};
+#[cfg(test)]
+use response::validate_embedding;
+use response::{map_embeddings_by_id, read_response_body, ResponseBodyError};
 
 pub const SEMANTIC_EMBEDDING_AUTH_TOKEN_ENV: &str = "CTX_SEMANTIC_EMBEDDING_TOKEN";
 pub const SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV: &str =
@@ -29,14 +37,12 @@ const PROTOCOL_SCHEMA_VERSION: u32 = 1;
 const CONTRACT_ROUTE: &str = "v1/contract";
 const EMBEDDINGS_ROUTE: &str = "v1/embeddings";
 const SCHEMA_HEADER: &str = "x-ctx-semantic-schema-version";
-const MODEL_KEY_HEADER: &str = "x-ctx-semantic-model-key";
-const CONTRACT_FINGERPRINT_HEADER: &str = "x-ctx-semantic-model-contract-fingerprint";
 const MAX_ENDPOINT_BYTES: usize = 2 * 1024;
 const MAX_TOKEN_BYTES: usize = 4 * 1024;
-const MAX_INPUT_COUNT: usize = 512;
 const MAX_REQUEST_BODY_BYTES: usize = 8 * 1024 * 1024;
 const MAX_RESPONSE_BODY_BYTES: usize = 8 * 1024 * 1024;
-const NORMALIZED_NORM_SQUARED_TOLERANCE: f64 = 1.0e-3;
+const MAX_CONTRACT_BODY_BYTES: usize = 4 * 1024;
+const UUID_WIRE_VALUE: &str = "00000000-0000-0000-0000-000000000000";
 const DNS_RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const EXECUTION_BUDGET: Duration = Duration::from_secs(24);
@@ -180,11 +186,12 @@ impl ValidatedHttpEndpoint {
     }
 }
 
-/// Portable client for the pinned ctx semantic embedding contract.
+/// Portable client for one explicitly accepted external semantic space.
 pub struct HttpSemanticEmbeddingExecutor {
     endpoint: ValidatedHttpEndpoint,
     agent: ureq_semantic::Agent,
     bearer_token: Option<BearerToken>,
+    space: ExternalSemanticSpace,
     contract: SemanticModelContract,
     lifecycle: Mutex<ExecutorLifecycle>,
     contract_verification_changed: Condvar,
@@ -203,6 +210,7 @@ impl fmt::Debug for HttpSemanticEmbeddingExecutor {
         formatter
             .debug_struct("HttpSemanticEmbeddingExecutor")
             .field("endpoint", &self.endpoint.as_str())
+            .field("space", &self.space)
             .field("authentication_configured", &self.bearer_token.is_some())
             .field("contract_verified", &self.contract_verified())
             .finish()
@@ -210,53 +218,50 @@ impl fmt::Debug for HttpSemanticEmbeddingExecutor {
 }
 
 impl HttpSemanticEmbeddingExecutor {
-    pub fn new(endpoint: impl AsRef<str>) -> Result<Self> {
-        Self::new_with_auth(endpoint, SemanticEmbeddingExecutorAuth::none())
+    pub fn new(endpoint: impl AsRef<str>, space: ExternalSemanticSpace) -> Result<Self> {
+        Self::new_with_auth(endpoint, space, SemanticEmbeddingExecutorAuth::none())
     }
 
     pub fn new_with_auth(
         endpoint: impl AsRef<str>,
+        space: ExternalSemanticSpace,
         auth: SemanticEmbeddingExecutorAuth,
     ) -> Result<Self> {
-        Self::from_validated_endpoint(ValidatedHttpEndpoint::parse(endpoint.as_ref())?, auth)
+        let endpoint = ValidatedHttpEndpoint::parse(endpoint.as_ref())?;
+        let contract = SemanticModelContract::external_http(endpoint.as_str(), space.clone());
+        Self::from_validated_selection(endpoint, space, contract, auth)
     }
 
-    pub(crate) fn from_validated_endpoint(
+    pub(crate) fn from_validated_selection(
         endpoint: ValidatedHttpEndpoint,
+        space: ExternalSemanticSpace,
+        contract: SemanticModelContract,
         auth: SemanticEmbeddingExecutorAuth,
     ) -> Result<Self> {
-        Self::from_validated_endpoint_with_root_certs(
+        Self::from_validated_selection_with_root_certs(
             endpoint,
+            space,
+            contract,
             auth,
             ureq_semantic::tls::RootCerts::PlatformVerifier,
         )
     }
 
-    fn from_validated_endpoint_with_root_certs(
+    fn from_validated_selection_with_root_certs(
         endpoint: ValidatedHttpEndpoint,
+        space: ExternalSemanticSpace,
+        contract: SemanticModelContract,
         auth: SemanticEmbeddingExecutorAuth,
         root_certs: ureq_semantic::tls::RootCerts,
     ) -> Result<Self> {
         let bearer_token = BearerToken::from_auth(auth, &endpoint)?;
-        let agent = ureq_semantic::Agent::config_builder()
-            .http_status_as_error(false)
-            .max_redirects(0)
-            .proxy(None)
-            .tls_config(
-                ureq_semantic::tls::TlsConfig::builder()
-                    .root_certs(root_certs)
-                    .build(),
-            )
-            .timeout_global(Some(EXECUTION_BUDGET))
-            .timeout_resolve(Some(DNS_RESOLVE_TIMEOUT))
-            .timeout_connect(Some(CONNECT_TIMEOUT))
-            .build()
-            .new_agent();
+        let agent = build_http_agent(root_certs)?;
         Ok(Self {
             endpoint,
             agent,
             bearer_token,
-            contract: semantic_model_contract().clone(),
+            space,
+            contract,
             lifecycle: Mutex::new(ExecutorLifecycle::Unverified),
             contract_verification_changed: Condvar::new(),
         })
@@ -265,13 +270,23 @@ impl HttpSemanticEmbeddingExecutor {
     #[cfg(test)]
     fn new_with_auth_and_root_certs(
         endpoint: impl AsRef<str>,
+        space: ExternalSemanticSpace,
         auth: SemanticEmbeddingExecutorAuth,
         root_certs: ureq_semantic::tls::RootCerts,
     ) -> Result<Self> {
-        Self::from_validated_endpoint_with_root_certs(
-            ValidatedHttpEndpoint::parse(endpoint.as_ref())?,
+        let endpoint = ValidatedHttpEndpoint::parse(endpoint.as_ref())?;
+        let contract = SemanticModelContract::external_http(endpoint.as_str(), space.clone());
+        Self::from_validated_selection_with_root_certs(endpoint, space, contract, auth, root_certs)
+    }
+
+    pub(crate) fn discover_space_from_validated_endpoint(
+        endpoint: ValidatedHttpEndpoint,
+        auth: SemanticEmbeddingExecutorAuth,
+    ) -> Result<ExternalSemanticSpace> {
+        discover_space_with_root_certs(
+            endpoint,
             auth,
-            root_certs,
+            ureq_semantic::tls::RootCerts::PlatformVerifier,
         )
     }
 
@@ -283,11 +298,24 @@ impl HttpSemanticEmbeddingExecutor {
         self.bearer_token.is_some()
     }
 
+    pub fn external_space(&self) -> &ExternalSemanticSpace {
+        &self.space
+    }
+
     pub fn contract_verified(&self) -> bool {
         self.lifecycle
             .lock()
             .map(|lifecycle| matches!(*lifecycle, ExecutorLifecycle::Verified))
             .unwrap_or(false)
+    }
+
+    /// Revalidates the configured semantic space without sending user content.
+    ///
+    /// This performs and caches only `GET v1/contract`. It is suitable for a
+    /// fail-closed activation check before opening a writable vector store.
+    pub fn verify_contract(&self) -> Result<()> {
+        self.fail_if_permanently_failed()?;
+        self.ensure_contract(execution_deadline())
     }
 
     fn ensure_contract(&self, deadline: Instant) -> Result<()> {
@@ -304,7 +332,7 @@ impl HttpSemanticEmbeddingExecutor {
                 ExecutorLifecycle::Unverified => {
                     *lifecycle = ExecutorLifecycle::Verifying;
                     drop(lifecycle);
-                    let result = self.verify_contract(deadline);
+                    let result = self.fetch_and_verify_contract(deadline);
                     let mut lifecycle = self
                         .lifecycle
                         .lock()
@@ -345,30 +373,12 @@ impl HttpSemanticEmbeddingExecutor {
         }
     }
 
-    fn verify_contract(&self, deadline: Instant) -> Result<()> {
+    fn fetch_and_verify_contract(&self, deadline: Instant) -> Result<()> {
         let route = self.endpoint.route(CONTRACT_ROUTE);
-        let response = self.exchange(&route, None, deadline)?;
-        let response: ContractResponse = serde_json::from_slice(&response)
-            .map_err(|_| permanent_failure("semantic embedding contract response is malformed"))?;
-        self.validate_identity(
-            response.schema_version,
-            &response.model_key,
-            &response.model_contract_fingerprint,
-        )?;
-        let query_embeddings = self.request_embeddings(
-            InputKind::Query,
-            &prepared_query_probes(&self.contract),
-            deadline,
-        )?;
-        let document_embeddings = self.request_embeddings(
-            InputKind::Documents,
-            &prepared_document_probes(&self.contract),
-            deadline,
-        )?;
-        validate_conformance_canary(&query_embeddings, &document_embeddings).map_err(|_| {
-            permanent_failure("semantic embedding endpoint failed the conformance canary")
-        })?;
-        Ok(())
+        let response = self.exchange(&route, None, MAX_CONTRACT_BODY_BYTES, deadline)?;
+        let asserted = parse_contract_response(&response)
+            .map_err(|error| permanent_failure(error.to_string()))?;
+        self.validate_space(&asserted)
     }
 
     fn embed(
@@ -379,6 +389,14 @@ impl HttpSemanticEmbeddingExecutor {
     ) -> Result<Vec<Vec<f32>>> {
         self.fail_if_permanently_failed()?;
         let request = self.prepare_embeddings_request(input_kind, inputs)?;
+        self.embed_prepared(request, deadline)
+    }
+
+    fn embed_prepared(
+        &self,
+        request: PreparedEmbeddingsRequest,
+        deadline: Instant,
+    ) -> Result<Vec<Vec<f32>>> {
         self.ensure_contract(deadline)?;
         let result = self.exchange_embeddings(request, deadline);
         self.cache_permanent_result(result)
@@ -420,69 +438,96 @@ impl HttpSemanticEmbeddingExecutor {
         })
     }
 
-    fn request_embeddings(
+    fn prepare_embeddings_request(
         &self,
         input_kind: InputKind,
         inputs: &[String],
-        deadline: Instant,
-    ) -> Result<Vec<Vec<f32>>> {
-        let request = self.prepare_embeddings_request(input_kind, inputs)?;
-        self.exchange_embeddings(request, deadline)
+    ) -> Result<PreparedEmbeddingsRequest> {
+        let body_len = self.plan_embeddings_request(input_kind, inputs)?;
+        self.prepare_preflighted_embeddings_request(input_kind, inputs, body_len)
     }
 
-    fn prepare_embeddings_request<'a>(
-        &self,
-        input_kind: InputKind,
-        inputs: &'a [String],
-    ) -> Result<PreparedEmbeddingsRequest<'a>> {
-        if inputs.len() > MAX_INPUT_COUNT {
+    fn plan_embeddings_request(&self, input_kind: InputKind, inputs: &[String]) -> Result<usize> {
+        if inputs.len() > self.max_inputs_per_request() {
             return Err(permanent_failure(
-                "semantic embedding request exceeds the input count limit",
+                "semantic embedding request exceeds the input or scalar count limit",
             ));
         }
+
+        let mut sizer = RequestBodySizer::new(self, input_kind)?;
+        for input in inputs {
+            if !sizer.try_push(input)? {
+                return Err(request_body_limit_failure());
+            }
+        }
+        Ok(sizer.body_len())
+    }
+
+    fn plan_document_batch(&self, inputs: &[String]) -> Result<(usize, usize)> {
+        let mut sizer = RequestBodySizer::new(self, InputKind::Documents)?;
+        let mut input_count = 0;
+        for input in inputs.iter().take(self.max_inputs_per_request()) {
+            if !sizer.try_push(input)? {
+                break;
+            }
+            input_count += 1;
+        }
+        if input_count == 0 {
+            return Err(request_body_limit_failure());
+        }
+        Ok((input_count, sizer.body_len()))
+    }
+
+    fn prepare_preflighted_embeddings_request(
+        &self,
+        input_kind: InputKind,
+        inputs: &[String],
+        body_len: usize,
+    ) -> Result<PreparedEmbeddingsRequest> {
         let request_id = Uuid::new_v4().to_string();
-        let wire_inputs = inputs
+        let input_ids = inputs
             .iter()
-            .map(|text| EmbeddingInput {
-                id: Uuid::new_v4().to_string(),
-                text,
-            })
+            .map(|_| Uuid::new_v4().to_string())
+            .collect::<Vec<_>>();
+        let wire_inputs = input_ids
+            .iter()
+            .zip(inputs)
+            .map(|(id, text)| EmbeddingInput { id, text })
             .collect::<Vec<_>>();
         let request = EmbeddingsRequest {
             schema_version: PROTOCOL_SCHEMA_VERSION,
-            model_key: self.contract.model_key(),
-            model_contract_fingerprint: self.contract.fingerprint(),
+            space_id: self.space.space_id(),
+            dimensions: self.space.dimensions(),
             request_id: &request_id,
             input_kind,
             inputs: &wire_inputs,
         };
-        let body = serde_json::to_vec(&request)
-            .map_err(|_| anyhow!("semantic embedding request could not be encoded"))?;
-        if body.len() > MAX_REQUEST_BODY_BYTES {
-            return Err(permanent_failure(
-                "semantic embedding request exceeds the body size limit",
-            ));
-        }
+        let body = encode_preflighted_request(&request, body_len)?;
         Ok(PreparedEmbeddingsRequest {
             request_id,
-            inputs: wire_inputs,
+            input_ids,
             body,
         })
     }
 
     fn exchange_embeddings(
         &self,
-        request: PreparedEmbeddingsRequest<'_>,
+        request: PreparedEmbeddingsRequest,
         deadline: Instant,
     ) -> Result<Vec<Vec<f32>>> {
         let route = self.endpoint.route(EMBEDDINGS_ROUTE);
-        let response = self.exchange(&route, Some(&request.body), deadline)?;
+        let response = self.exchange(
+            &route,
+            Some(&request.body),
+            MAX_RESPONSE_BODY_BYTES,
+            deadline,
+        )?;
         let response: EmbeddingsResponse = serde_json::from_slice(&response)
             .map_err(|_| permanent_failure("semantic embedding response is malformed"))?;
-        self.validate_identity(
+        self.validate_protocol_space(
             response.schema_version,
-            &response.model_key,
-            &response.model_contract_fingerprint,
+            &response.space_id,
+            response.dimensions,
         )?;
         if response.request_id != request.request_id {
             return Err(permanent_failure(
@@ -491,121 +536,175 @@ impl HttpSemanticEmbeddingExecutor {
         }
         map_embeddings_by_id(
             response.embeddings,
-            &request.inputs,
+            &request.input_ids,
             self.contract.dimensions(),
         )
         .map_err(|error| permanent_failure(error.to_string()))
     }
 
-    fn validate_identity(
-        &self,
-        schema_version: u32,
-        model_key: &str,
-        fingerprint: &str,
-    ) -> Result<()> {
-        if schema_version != PROTOCOL_SCHEMA_VERSION
-            || model_key != self.contract.model_key()
-            || fingerprint != self.contract.fingerprint()
-        {
+    fn validate_space(&self, space: &ExternalSemanticSpace) -> Result<()> {
+        if space != &self.space {
             return Err(permanent_failure(
-                "semantic embedding endpoint asserted a different model contract",
+                "semantic embedding endpoint asserted a different semantic space",
             ));
         }
         Ok(())
     }
 
-    fn exchange(&self, route: &Url, body: Option<&[u8]>, deadline: Instant) -> Result<Vec<u8>> {
-        for attempt in 0..MAX_ATTEMPTS {
-            let remaining = remaining_budget(deadline)?;
-            // The resolver and connector each have their own ceiling in
-            // addition to the request-global deadline. Avoid starting another
-            // network attempt when either bounded phase lacks its full allowance.
-            if remaining < DNS_RESOLVE_TIMEOUT || remaining < CONNECT_TIMEOUT {
-                return Err(execution_budget_exhausted());
+    fn validate_protocol_space(
+        &self,
+        schema_version: u32,
+        space_id: &str,
+        dimensions: usize,
+    ) -> Result<()> {
+        if schema_version != PROTOCOL_SCHEMA_VERSION
+            || space_id != self.space.space_id()
+            || dimensions != self.space.dimensions()
+        {
+            return Err(permanent_failure(
+                "semantic embedding endpoint asserted a different semantic space",
+            ));
+        }
+        Ok(())
+    }
+
+    fn max_inputs_per_request(&self) -> usize {
+        self.space.max_inputs_per_request()
+    }
+
+    fn exchange(
+        &self,
+        route: &Url,
+        body: Option<&[u8]>,
+        max_response_body_bytes: usize,
+        deadline: Instant,
+    ) -> Result<Vec<u8>> {
+        exchange_http(
+            &self.agent,
+            self.bearer_token.as_ref(),
+            route,
+            body,
+            max_response_body_bytes,
+            deadline,
+        )
+    }
+}
+
+fn request_body_limit_failure() -> anyhow::Error {
+    permanent_failure("semantic embedding request exceeds the body size limit")
+}
+
+fn discover_space_with_root_certs(
+    endpoint: ValidatedHttpEndpoint,
+    auth: SemanticEmbeddingExecutorAuth,
+    root_certs: ureq_semantic::tls::RootCerts,
+) -> Result<ExternalSemanticSpace> {
+    let bearer_token = BearerToken::from_auth(auth, &endpoint)?;
+    let agent = build_http_agent(root_certs)?;
+    let response = exchange_http(
+        &agent,
+        bearer_token.as_ref(),
+        &endpoint.route(CONTRACT_ROUTE),
+        None,
+        MAX_CONTRACT_BODY_BYTES,
+        execution_deadline(),
+    )?;
+    parse_contract_response(&response)
+}
+
+fn exchange_http(
+    agent: &ureq_semantic::Agent,
+    bearer_token: Option<&BearerToken>,
+    route: &Url,
+    body: Option<&[u8]>,
+    max_response_body_bytes: usize,
+    deadline: Instant,
+) -> Result<Vec<u8>> {
+    for attempt in 0..MAX_ATTEMPTS {
+        let remaining = remaining_budget(deadline)?;
+        // The resolver and connector each have their own ceiling in addition
+        // to the request-global deadline. Avoid starting a network attempt when
+        // either bounded phase lacks its full allowance.
+        if remaining < DNS_RESOLVE_TIMEOUT || remaining < CONNECT_TIMEOUT {
+            return Err(execution_budget_exhausted());
+        }
+        let result = match body {
+            Some(body) => prepare_http_request(agent.post(route.as_str()), bearer_token, remaining)
+                .header("content-type", "application/json")
+                .send(body),
+            None => prepare_http_request(agent.get(route.as_str()), bearer_token, remaining).call(),
+        };
+        match result {
+            Ok(response)
+                if !response.status().is_success()
+                    && retryable_status(response.status().as_u16())
+                    && attempt + 1 < MAX_ATTEMPTS =>
+            {
+                continue;
             }
-            let result = match body {
-                Some(body) => self
-                    .request(self.agent.post(route.as_str()), remaining)
-                    .header("content-type", "application/json")
-                    .send(body),
-                None => self
-                    .request(self.agent.get(route.as_str()), remaining)
-                    .call(),
-            };
-            match result {
-                Ok(response)
-                    if !response.status().is_success()
-                        && retryable_status(response.status().as_u16())
-                        && attempt + 1 < MAX_ATTEMPTS =>
-                {
-                    continue;
-                }
-                Ok(response) if !response.status().is_success() => {
-                    let status = response.status().as_u16();
-                    if retryable_status(status) {
-                        return Err(anyhow!(
-                            "semantic embedding endpoint returned retryable HTTP status {status}"
-                        ));
-                    }
-                    return Err(permanent_failure(format!(
-                        "semantic embedding endpoint returned HTTP status {status}"
-                    )));
-                }
-                Ok(response) => match read_response_body(response) {
-                    Ok(response) => return Ok(response),
-                    Err(ResponseBodyError::TooLarge) => {
-                        return Err(permanent_failure(
-                            "semantic embedding response exceeds the body size limit",
-                        ));
-                    }
-                    Err(ResponseBodyError::InvalidLength) => {
-                        return Err(permanent_failure(
-                            "semantic embedding response has an invalid body length",
-                        ));
-                    }
-                    Err(ResponseBodyError::Transport) if attempt + 1 < MAX_ATTEMPTS => continue,
-                    Err(ResponseBodyError::Transport) => {
-                        return Err(anyhow!(
-                            "semantic embedding HTTP transport failed after bounded retry"
-                        ));
-                    }
-                },
-                Err(error) if ureq_error_is_permanent(&error) => {
-                    return Err(permanent_failure(
-                        "semantic embedding endpoint returned invalid HTTP protocol",
+            Ok(response) if !response.status().is_success() => {
+                let status = response.status().as_u16();
+                if retryable_status(status) {
+                    return Err(anyhow!(
+                        "semantic embedding endpoint returned retryable HTTP status {status}"
                     ));
                 }
-                Err(_) if attempt + 1 < MAX_ATTEMPTS => continue,
-                Err(_) => {
+                return Err(permanent_failure(format!(
+                    "semantic embedding endpoint returned HTTP status {status}"
+                )));
+            }
+            Ok(response) => match read_response_body(response, max_response_body_bytes) {
+                Ok(response) => return Ok(response),
+                Err(ResponseBodyError::TooLarge) => {
+                    return Err(permanent_failure(
+                        "semantic embedding response exceeds the body size limit",
+                    ));
+                }
+                Err(ResponseBodyError::InvalidLength) => {
+                    return Err(permanent_failure(
+                        "semantic embedding response has an invalid body length",
+                    ));
+                }
+                Err(ResponseBodyError::Transport) if attempt + 1 < MAX_ATTEMPTS => continue,
+                Err(ResponseBodyError::Transport) => {
                     return Err(anyhow!(
                         "semantic embedding HTTP transport failed after bounded retry"
                     ));
                 }
+            },
+            Err(error) if ureq_error_is_permanent(&error) => {
+                return Err(permanent_failure(
+                    "semantic embedding endpoint returned invalid HTTP protocol",
+                ));
+            }
+            Err(_) if attempt + 1 < MAX_ATTEMPTS => continue,
+            Err(_) => {
+                return Err(anyhow!(
+                    "semantic embedding HTTP transport failed after bounded retry"
+                ));
             }
         }
-        unreachable!("HTTP exchange has at least one bounded attempt")
     }
+    unreachable!("HTTP exchange has at least one bounded attempt")
+}
 
-    fn request<Any>(
-        &self,
-        request: ureq_semantic::RequestBuilder<Any>,
-        timeout: Duration,
-    ) -> ureq_semantic::RequestBuilder<Any> {
-        let mut request = request
-            .config()
-            .timeout_global(Some(timeout))
-            .build()
-            .header("accept", "application/json")
-            .header("accept-encoding", "identity")
-            .header("cache-control", "no-store")
-            .header(SCHEMA_HEADER, "1")
-            .header(MODEL_KEY_HEADER, self.contract.model_key())
-            .header(CONTRACT_FINGERPRINT_HEADER, self.contract.fingerprint());
-        if let Some(token) = &self.bearer_token {
-            request = request.header("authorization", format!("Bearer {}", token.expose()));
-        }
-        request
+fn prepare_http_request<Any>(
+    request: ureq_semantic::RequestBuilder<Any>,
+    bearer_token: Option<&BearerToken>,
+    timeout: Duration,
+) -> ureq_semantic::RequestBuilder<Any> {
+    let mut request = request
+        .config()
+        .timeout_global(Some(timeout))
+        .build()
+        .header("accept", "application/json")
+        .header("accept-encoding", "identity")
+        .header("cache-control", "no-store")
+        .header(SCHEMA_HEADER, "1");
+    if let Some(token) = bearer_token {
+        request = request.header("authorization", format!("Bearer {}", token.expose()));
     }
+    request
 }
 
 impl SemanticEmbeddingExecutor for HttpSemanticEmbeddingExecutor {
@@ -637,8 +736,17 @@ impl SemanticEmbeddingExecutor for HttpSemanticEmbeddingExecutor {
             return Ok(Vec::new());
         }
         let mut embeddings = Vec::with_capacity(documents.len());
-        for batch in documents.chunks(MAX_INPUT_COUNT) {
-            embeddings.extend(self.embed(InputKind::Documents, batch, deadline)?);
+        let mut batch_start = 0;
+        while batch_start < documents.len() {
+            let (batch_len, body_len) = self.plan_document_batch(&documents[batch_start..])?;
+            let batch_end = batch_start + batch_len;
+            let request = self.prepare_preflighted_embeddings_request(
+                InputKind::Documents,
+                &documents[batch_start..batch_end],
+                body_len,
+            )?;
+            embeddings.extend(self.embed_prepared(request, deadline)?);
+            batch_start = batch_end;
         }
         Ok(embeddings)
     }
@@ -699,8 +807,20 @@ impl fmt::Debug for BearerToken {
 #[serde(deny_unknown_fields)]
 struct ContractResponse {
     schema_version: u32,
-    model_key: String,
-    model_contract_fingerprint: String,
+    space_id: String,
+    dimensions: usize,
+}
+
+fn parse_contract_response(response: &[u8]) -> Result<ExternalSemanticSpace> {
+    let response: ContractResponse = serde_json::from_slice(response)
+        .map_err(|_| anyhow!("semantic embedding contract response is malformed"))?;
+    if response.schema_version != PROTOCOL_SCHEMA_VERSION {
+        return Err(anyhow!(
+            "semantic embedding endpoint uses an unsupported contract schema"
+        ));
+    }
+    ExternalSemanticSpace::new(response.space_id, response.dimensions)
+        .map_err(|_| anyhow!("semantic embedding contract response declares an invalid space"))
 }
 
 #[derive(Clone, Copy, Serialize)]
@@ -713,8 +833,8 @@ enum InputKind {
 #[derive(Serialize)]
 struct EmbeddingsRequest<'a> {
     schema_version: u32,
-    model_key: &'a str,
-    model_contract_fingerprint: &'a str,
+    space_id: &'a str,
+    dimensions: usize,
     request_id: &'a str,
     input_kind: InputKind,
     inputs: &'a [EmbeddingInput<'a>],
@@ -722,13 +842,13 @@ struct EmbeddingsRequest<'a> {
 
 #[derive(Serialize)]
 struct EmbeddingInput<'a> {
-    id: String,
+    id: &'a str,
     text: &'a str,
 }
 
-struct PreparedEmbeddingsRequest<'a> {
+struct PreparedEmbeddingsRequest {
     request_id: String,
-    inputs: Vec<EmbeddingInput<'a>>,
+    input_ids: Vec<String>,
     body: Vec<u8>,
 }
 
@@ -736,8 +856,8 @@ struct PreparedEmbeddingsRequest<'a> {
 #[serde(deny_unknown_fields)]
 struct EmbeddingsResponse {
     schema_version: u32,
-    model_key: String,
-    model_contract_fingerprint: String,
+    space_id: String,
+    dimensions: usize,
     request_id: String,
     embeddings: Vec<EmbeddingOutput>,
 }
@@ -747,111 +867,6 @@ struct EmbeddingsResponse {
 struct EmbeddingOutput {
     id: String,
     embedding: Vec<f32>,
-}
-
-enum ResponseBodyError {
-    TooLarge,
-    InvalidLength,
-    Transport,
-}
-
-fn read_response_body(
-    mut response: ureq_semantic::http::Response<ureq_semantic::Body>,
-) -> std::result::Result<Vec<u8>, ResponseBodyError> {
-    let declared_length = response
-        .headers()
-        .get("content-length")
-        .map(|value| {
-            value
-                .to_str()
-                .map_err(|_| ResponseBodyError::InvalidLength)?
-                .parse::<usize>()
-                .map_err(|_| ResponseBodyError::InvalidLength)
-        })
-        .transpose()?;
-    if declared_length.is_some_and(|length| length > MAX_RESPONSE_BODY_BYTES) {
-        return Err(ResponseBodyError::TooLarge);
-    }
-    let mut body = Vec::with_capacity(declared_length.unwrap_or(0));
-    response
-        .body_mut()
-        .as_reader()
-        .take((MAX_RESPONSE_BODY_BYTES + 1) as u64)
-        .read_to_end(&mut body)
-        .map_err(|_| ResponseBodyError::Transport)?;
-    if body.len() > MAX_RESPONSE_BODY_BYTES {
-        return Err(ResponseBodyError::TooLarge);
-    }
-    if declared_length.is_some_and(|length| length != body.len()) {
-        return Err(ResponseBodyError::Transport);
-    }
-    Ok(body)
-}
-
-fn map_embeddings_by_id(
-    embeddings: Vec<EmbeddingOutput>,
-    inputs: &[EmbeddingInput<'_>],
-    dimensions: usize,
-) -> Result<Vec<Vec<f32>>> {
-    let expected = inputs
-        .iter()
-        .enumerate()
-        .map(|(index, input)| (input.id.as_str(), index))
-        .collect::<HashMap<_, _>>();
-    if expected.len() != inputs.len() {
-        return Err(anyhow!(
-            "semantic embedding request contains a duplicate input ID"
-        ));
-    }
-    let mut ordered = (0..inputs.len()).map(|_| None).collect::<Vec<_>>();
-    for output in embeddings {
-        let Some(index) = expected.get(output.id.as_str()).copied() else {
-            return Err(anyhow!(
-                "semantic embedding response returned an unknown input ID"
-            ));
-        };
-        if ordered[index].is_some() {
-            return Err(anyhow!(
-                "semantic embedding response returned a duplicate input ID"
-            ));
-        }
-        validate_embedding(&output.embedding, dimensions)?;
-        ordered[index] = Some(output.embedding);
-    }
-    ordered
-        .into_iter()
-        .map(|embedding| {
-            embedding.ok_or_else(|| anyhow!("semantic embedding response is missing an input ID"))
-        })
-        .collect()
-}
-
-fn validate_embedding(embedding: &[f32], dimensions: usize) -> Result<()> {
-    if embedding.len() != dimensions {
-        return Err(anyhow!(
-            "semantic embedding response returned the wrong dimensions"
-        ));
-    }
-    let mut norm_squared = 0.0_f64;
-    for value in embedding {
-        if !value.is_finite() {
-            return Err(anyhow!(
-                "semantic embedding response contains a non-finite value"
-            ));
-        }
-        norm_squared += f64::from(*value) * f64::from(*value);
-    }
-    if norm_squared == 0.0 {
-        return Err(anyhow!(
-            "semantic embedding response contains a zero-norm vector"
-        ));
-    }
-    if !norm_squared.is_finite() || (norm_squared - 1.0).abs() > NORMALIZED_NORM_SQUARED_TOLERANCE {
-        return Err(anyhow!(
-            "semantic embedding response contains a vector that is not L2-normalized"
-        ));
-    }
-    Ok(())
 }
 
 fn execution_deadline() -> Instant {

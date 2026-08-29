@@ -205,6 +205,7 @@ fn daemon_config_snapshot(
             .http_endpoint()
             .unwrap_or("builtin")
             .to_owned(),
+        semantic_contract_fingerprint: config.semantic_model_contract().fingerprint().to_owned(),
     }
 }
 

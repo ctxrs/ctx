@@ -303,3 +303,112 @@ fn e5_query_and_passage_policy_applies_each_role_prefix_exactly_once() {
         contract.document_text("  passage: daemon failed to restart")
     );
 }
+
+#[test]
+fn external_space_validation_and_dimension_aware_work_units_are_bounded() {
+    let common = ExternalSemanticSpace::new("acme/multilingual-v2:rev@host+fp=abc_1", 768)
+        .expect("common opaque model IDs are header-safe");
+    assert_eq!(common.space_id(), "acme/multilingual-v2:rev@host+fp=abc_1");
+    assert_eq!(common.dimensions(), 768);
+    assert_eq!(common.max_inputs_per_request(), 341);
+
+    assert_eq!(
+        ExternalSemanticSpace::new("small", 1)
+            .unwrap()
+            .max_inputs_per_request(),
+        512
+    );
+    assert_eq!(
+        ExternalSemanticSpace::new("maximum", MAX_EXTERNAL_SEMANTIC_DIMENSIONS)
+            .unwrap()
+            .max_inputs_per_request(),
+        64
+    );
+
+    for unsafe_id in [
+        "",
+        "bad space",
+        "bad\nheader",
+        "unicode-世界",
+        "brackets[bad]",
+    ] {
+        assert!(ExternalSemanticSpace::new(unsafe_id, 384).is_err());
+    }
+    assert!(
+        ExternalSemanticSpace::new("x".repeat(MAX_EXTERNAL_SEMANTIC_SPACE_ID_BYTES + 1), 384,)
+            .is_err()
+    );
+    assert!(ExternalSemanticSpace::new("zero", 0).is_err());
+    assert!(ExternalSemanticSpace::new("too-large", MAX_EXTERNAL_SEMANTIC_DIMENSIONS + 1).is_err());
+}
+
+#[test]
+fn external_contract_keeps_endpoint_out_of_vector_identity_and_preserves_raw_text() {
+    let endpoint = "https://embed.example.test/base/";
+    let space = ExternalSemanticSpace::new("acme/multilingual-v2", 1_536).unwrap();
+    let contract = SemanticModelContract::external_http(endpoint, space.clone());
+
+    assert_eq!(contract.external_space(), Some(&space));
+    assert_eq!(contract.external_http_endpoint(), Some(endpoint));
+    assert_eq!(contract.model_key(), space.space_id());
+    assert_eq!(contract.model_id(), "external-http-v1");
+    assert_eq!(contract.model_revision(), space.space_id());
+    assert_eq!(contract.tokenizer_fingerprint(), "endpoint-owned-v1");
+    assert_eq!(
+        contract.tokenizer_behavior_fingerprint(),
+        "endpoint-owned-v1"
+    );
+    assert_eq!(contract.pooling(), "endpoint-owned");
+    assert_eq!(contract.normalization(), "l2");
+    assert_eq!(contract.dimensions(), 1_536);
+    assert!(!contract.descriptor().contains(endpoint));
+    assert!(contract.executor_route_identity().starts_with("sha256:"));
+    let moved = SemanticModelContract::external_http(
+        "https://other.example.test/embeddings/",
+        space.clone(),
+    );
+    assert_eq!(contract.fingerprint(), moved.fingerprint());
+    assert_eq!(contract.descriptor(), moved.descriptor());
+    assert_ne!(
+        contract.executor_route_identity(),
+        moved.executor_route_identity()
+    );
+    assert_eq!(
+        contract.query_text("  query-looking text"),
+        "  query-looking text"
+    );
+    assert_eq!(
+        contract.document_text("passage: raw document"),
+        "passage: raw document"
+    );
+    assert_eq!(
+        contract
+            .prepare_documents(vec!["  first".to_owned(), "second".to_owned()])
+            .into_texts(),
+        ["  first", "second"]
+    );
+
+    let changed_endpoint =
+        SemanticModelContract::external_http("https://embed.example.test/other/", space.clone());
+    let changed_space = SemanticModelContract::external_http(
+        endpoint,
+        ExternalSemanticSpace::new("acme/multilingual-v3", 1_536).unwrap(),
+    );
+    let changed_dimensions = SemanticModelContract::external_http(
+        endpoint,
+        ExternalSemanticSpace::new(space.space_id(), 768).unwrap(),
+    );
+    assert_eq!(contract.fingerprint(), changed_endpoint.fingerprint());
+    assert_ne!(contract.fingerprint(), changed_space.fingerprint());
+    assert_ne!(contract.fingerprint(), changed_dimensions.fingerprint());
+    assert_eq!(contract.model_id(), changed_endpoint.model_id());
+    assert_ne!(contract.model_revision(), changed_space.model_revision());
+}
+
+#[test]
+fn builtin_contract_uses_the_fixed_executor_route_sentinel() {
+    assert_eq!(
+        semantic_model_contract().executor_route_identity(),
+        BUILTIN_SEMANTIC_EXECUTOR_ROUTE_IDENTITY
+    );
+}

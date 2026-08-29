@@ -153,12 +153,8 @@ pub fn set_semantic_search_enabled(data_root: &Path, enabled: bool) -> Result<()
 
 pub fn set_semantic_search_enabled_with_executor(
     data_root: &Path,
-    endpoint: Option<&str>,
+    executor: &ctx_daemon_cli::SemanticEmbeddingExecutorConfig,
 ) -> Result<()> {
-    let executor = endpoint
-        .map(ctx_daemon_cli::SemanticEmbeddingExecutorConfig::http)
-        .transpose()?
-        .unwrap_or_else(ctx_daemon_cli::SemanticEmbeddingExecutorConfig::builtin);
     establish_private_data_root(data_root)?;
     let path = AppConfig::config_path(data_root);
     let _mutation_lock = ConfigMutationLock::acquire(&path)?;
@@ -168,8 +164,8 @@ pub fn set_semantic_search_enabled_with_executor(
     let mut document = text
         .parse::<toml_edit::DocumentMut>()
         .with_context(|| format!("parse {}", path.display()))?;
-    match executor.http_endpoint() {
-        Some(endpoint) => {
+    match (executor.http_endpoint(), executor.external_space()) {
+        (Some(endpoint), Some(space)) => {
             if document.as_table().get("semantic").is_none() {
                 document
                     .as_table_mut()
@@ -181,14 +177,23 @@ pub fn set_semantic_search_enabled_with_executor(
                 .and_then(toml_edit::Item::as_table_mut)
                 .ok_or_else(|| anyhow::anyhow!("semantic configuration must be a table"))?;
             semantic.insert("executor", toml_edit::value(endpoint));
+            semantic.insert("space_id", toml_edit::value(space.space_id()));
+            semantic.insert(
+                "dimensions",
+                toml_edit::value(i64::try_from(space.dimensions()).map_err(|_| {
+                    anyhow::anyhow!("semantic dimensions exceed the TOML integer range")
+                })?),
+            );
         }
-        None => {
+        (None, None) => {
             let remove_semantic = if let Some(semantic) = document
                 .as_table_mut()
                 .get_mut("semantic")
                 .and_then(toml_edit::Item::as_table_mut)
             {
                 semantic.remove("executor");
+                semantic.remove("space_id");
+                semantic.remove("dimensions");
                 semantic.is_empty()
             } else {
                 false
@@ -197,6 +202,7 @@ pub fn set_semantic_search_enabled_with_executor(
                 document.as_table_mut().remove("semantic");
             }
         }
+        _ => bail!("semantic executor configuration is internally inconsistent"),
     }
     let updated = set_toml_bool(&document.to_string(), "search", "semantic", true);
     validated_persisted_config(&path, &updated)

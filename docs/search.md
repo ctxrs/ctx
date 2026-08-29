@@ -228,24 +228,28 @@ coverage is complete, and pending dirty work is drained. When semantic is
 disabled or otherwise unavailable, hybrid may return lexical results with a
 structured fallback reason.
 
-The production embedding model is
-`intfloat/multilingual-e5-small` with 384-dimensional vectors. Queries use the
-E5 `query: ` input contract and document chunks use `passage: `. The model,
-chunking, source projector, and lexical generation policies participate in
-generation identity, so incompatible derived data is rebuilt rather than
-silently reused.
+The built-in executor uses `intfloat/multilingual-e5-small` locally and remains
+the default. A configured external executor declares its own opaque `space_id`
+and dimensions and owns model preprocessing, tokenization, and execution. ctx
+provides raw query text and raw text from ctx-created document chunks.
 
-The selected embedding executor produces both indexed document vectors and
-query vectors. The built-in executor is the implicit default. An explicitly
-configured URL must implement the same pinned E5 model key and contract
-fingerprint; it is not a general model selector. ctx never silently falls back
-from an external executor to the built-in executor.
+The selected executor produces both indexed document vectors and query vectors.
+Each data root has one accepted vector space. Incompatible or drifted identity
+is never silently reused or replaced with the built-in executor; accepting a
+changed identity rebuilds only the derived semantic index.
 
 Enable semantic search with:
 
 ```bash
 ctx semantic enable
 ctx semantic status
+```
+
+This preserves the current executor selection. To select or restore local E5
+explicitly, run:
+
+```bash
+ctx semantic enable --executor builtin
 ```
 
 Semantic opt-in is independent of indexing mode. In auto mode, the daemon keeps

@@ -41,7 +41,7 @@ pub struct SemanticEnableArgs {
     #[arg(
         long,
         value_name = "builtin|URL",
-        help = "Select the built-in executor (default) or persist an exact-contract endpoint URL"
+        help = "Select builtin or discover and accept the semantic space served by URL"
     )]
     pub executor: Option<String>,
     #[arg(long, value_enum, default_value_t = JsonOutputFormat::Text)]
@@ -127,15 +127,37 @@ pub fn render_semantic_status(context: &crate::ui::RenderContext, report: &Value
     {
         values.push(Field::new("Endpoint", endpoint));
     }
-    if !bool_at(report, "/local_only") {
-        values.push(Field::new(
-            "Content",
+    if let Some(space_id) = report
+        .pointer("/executor/space_id")
+        .and_then(Value::as_str)
+        .filter(|space_id| !space_id.is_empty())
+    {
+        values.push(Field::new("Space", space_id));
+    }
+    let dimensions = report
+        .pointer("/executor/dimensions")
+        .and_then(Value::as_u64)
+        .map(|dimensions| dimensions.to_string());
+    if let Some(dimensions) = dimensions.as_deref() {
+        values.push(Field::new("Dimensions", dimensions));
+    }
+    if report
+        .pointer("/executor/endpoint")
+        .and_then(Value::as_str)
+        .is_some()
+    {
+        let content = if str_at(report, "/executor/scope", "remote") == "loopback" {
             if enabled {
-                "can be sent to the configured executor when semantic work runs"
+                "is sent to the loopback executor; trust it not to retain or forward"
             } else {
-                "remote transfer is configured for when semantic search is enabled"
-            },
-        ));
+                "will be sent to the loopback executor when semantic search is enabled"
+            }
+        } else if enabled {
+            "can be sent to the configured executor when semantic work runs"
+        } else {
+            "remote transfer is configured for when semantic search is enabled"
+        };
+        values.push(Field::new("Content", content));
     }
     if let Some(reason) = reason {
         values.push(Field::new("Reason", reason));
@@ -256,7 +278,9 @@ mod tests {
                 "daemon": {"status": "disabled"},
                 "executor": {
                     "kind": "http",
-                    "endpoint": "https://embed.example.test"
+                    "endpoint": "https://embed.example.test",
+                    "space_id": "acme/multilingual-v2",
+                    "dimensions": 768
                 },
                 "local_only": false,
             }),
@@ -291,7 +315,9 @@ mod tests {
                 "daemon": {"status": "running"},
                 "executor": {
                     "kind": "http",
-                    "endpoint": "https://embed.example.test"
+                    "endpoint": "https://embed.example.test",
+                    "space_id": "acme/multilingual-v2",
+                    "dimensions": 768
                 },
                 "local_only": false,
             }),
@@ -300,9 +326,12 @@ mod tests {
 
         assert!(rendered.contains("Executor    http"), "{rendered}");
         assert!(
-            rendered.contains("Endpoint    https://embed.example.test"),
+            rendered.contains("https://embed.example.test"),
             "{rendered}"
         );
+        assert!(rendered.contains("acme/multilingual-v2"), "{rendered}");
+        assert!(rendered.contains("Dimensions"), "{rendered}");
+        assert!(rendered.contains("768"), "{rendered}");
         assert!(
             rendered.contains(
                 "Content     can be sent to the configured executor when semantic work runs"
@@ -337,6 +366,35 @@ mod tests {
         );
         assert!(
             !rendered.contains("Content     sent to the configured executor"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn loopback_executor_warns_that_the_local_process_can_retain_or_forward_content() {
+        let rendered = render_semantic_status(
+            &context(),
+            &json!({
+                "enabled": true,
+                "status": "ready",
+                "indexing": {"mode": "manual"},
+                "daemon": {"status": "disabled"},
+                "executor": {
+                    "kind": "http",
+                    "endpoint": "http://127.0.0.1:8080/",
+                    "scope": "loopback",
+                    "space_id": "local/model-v1",
+                    "dimensions": 384
+                },
+                "local_only": true,
+            }),
+        )
+        .render_plain();
+
+        assert!(
+            rendered.contains(
+                "Content     is sent to the loopback executor; trust it not to retain or forward"
+            ),
             "{rendered}"
         );
     }

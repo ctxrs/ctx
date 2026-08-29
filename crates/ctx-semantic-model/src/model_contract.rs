@@ -1,5 +1,6 @@
 use std::{fmt, sync::OnceLock};
 
+use anyhow::{anyhow, Result};
 use sha2::{Digest, Sha256};
 
 pub const SEMANTIC_BACKEND: &str = "multilingual-e5";
@@ -50,6 +51,11 @@ pub(super) const SEMANTIC_PROVISIONING_MODEL_PATHS: &[&str] = &[
     "tokenizer_config.json",
 ];
 pub const SEMANTIC_DIMENSIONS: usize = 384;
+pub const BUILTIN_SEMANTIC_EXECUTOR_ROUTE_IDENTITY: &str = "builtin";
+pub const MAX_EXTERNAL_SEMANTIC_DIMENSIONS: usize = 4_096;
+pub const MAX_EXTERNAL_SEMANTIC_SPACE_ID_BYTES: usize = 256;
+const MAX_EXTERNAL_SEMANTIC_INPUTS_PER_REQUEST: usize = 512;
+const MAX_EXTERNAL_SEMANTIC_SCALARS_PER_REQUEST: usize = 262_144;
 pub(super) const SEMANTIC_MAX_SEQUENCE_LENGTH: usize = 512;
 pub const SEMANTIC_POOLING: &str = "attention-mask-mean";
 pub const SEMANTIC_NORMALIZATION: &str = "l2";
@@ -69,6 +75,72 @@ const LEGACY_COMPATIBLE_VECTOR_CONTRACT_FINGERPRINT: &str =
     "sha256:611f11c9b715543137d1b6be8d87497a2b6ef4945d425f3c0b973d2cb0c6036d";
 #[allow(dead_code)] // Signed provisioning consumes this seam in a separate integration lane.
 const SEMANTIC_RELEASE_POOLING: &str = "attention_mask_mean";
+
+/// The endpoint-declared compatibility identity of an external semantic space.
+///
+/// `space_id` is opaque to ctx and must be globally unique for one compatible
+/// coordinate system. Endpoints must change it whenever preprocessing,
+/// tokenization, model behavior, or any other detail affecting produced vectors
+/// becomes incompatible. The value uses a conservative ASCII model-ID alphabet
+/// so it is safe to persist, log, and compare exactly across protocol boundaries.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct ExternalSemanticSpace {
+    space_id: String,
+    dimensions: usize,
+}
+
+impl ExternalSemanticSpace {
+    pub fn new(space_id: impl Into<String>, dimensions: usize) -> Result<Self> {
+        let space_id = space_id.into();
+        if space_id.is_empty()
+            || space_id.len() > MAX_EXTERNAL_SEMANTIC_SPACE_ID_BYTES
+            || !space_id.bytes().all(is_header_safe_space_id_byte)
+        {
+            return Err(anyhow!(
+                "external semantic space ID must use safe ASCII model-ID characters and be at most {MAX_EXTERNAL_SEMANTIC_SPACE_ID_BYTES} bytes"
+            ));
+        }
+        if !(1..=MAX_EXTERNAL_SEMANTIC_DIMENSIONS).contains(&dimensions) {
+            return Err(anyhow!(
+                "external semantic space dimensions must be between 1 and {MAX_EXTERNAL_SEMANTIC_DIMENSIONS}"
+            ));
+        }
+        Ok(Self {
+            space_id,
+            dimensions,
+        })
+    }
+
+    pub fn space_id(&self) -> &str {
+        &self.space_id
+    }
+
+    pub const fn dimensions(&self) -> usize {
+        self.dimensions
+    }
+
+    /// Maximum inputs in one external embedding request or index work unit.
+    /// This caps both input cardinality and total vector scalars.
+    pub const fn max_inputs_per_request(&self) -> usize {
+        let scalar_limited = MAX_EXTERNAL_SEMANTIC_SCALARS_PER_REQUEST / self.dimensions;
+        if scalar_limited < MAX_EXTERNAL_SEMANTIC_INPUTS_PER_REQUEST {
+            scalar_limited
+        } else {
+            MAX_EXTERNAL_SEMANTIC_INPUTS_PER_REQUEST
+        }
+    }
+}
+
+fn is_header_safe_space_id_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric()
+        || matches!(byte, b'.' | b'_' | b':' | b'/' | b'@' | b'+' | b'=' | b'-')
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ExternalSemanticContractIdentity {
+    normalized_endpoint: String,
+    space: ExternalSemanticSpace,
+}
 
 /// Query text prepared according to one semantic vector-space contract.
 #[derive(Clone, Eq, PartialEq)]
@@ -106,9 +178,11 @@ impl PreparedSemanticDocuments {
 
 /// The complete compatibility identity of one semantic vector space.
 ///
-/// This value intentionally excludes executor, runtime, accelerator, and
-/// artifact-publication identity. Those details describe how ctx produces a
-/// vector, not whether that vector is compatible with an existing index.
+/// Builtin identity excludes executor, runtime, accelerator, and artifact
+/// publication details while retaining the complete pinned E5 compatibility
+/// contract. An external vector space is identified by the endpoint-declared
+/// space and dimensions; the endpoint remains runtime routing and fencing
+/// state rather than part of vector compatibility.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SemanticModelContract {
     model_key: String,
@@ -126,9 +200,61 @@ pub struct SemanticModelContract {
     language_scope: String,
     descriptor: String,
     fingerprint: String,
+    external: Option<ExternalSemanticContractIdentity>,
 }
 
 impl SemanticModelContract {
+    pub(crate) fn external_http(normalized_endpoint: &str, space: ExternalSemanticSpace) -> Self {
+        let mut contract = Self {
+            model_key: space.space_id().to_owned(),
+            model_id: "external-http-v1".to_owned(),
+            model_revision: space.space_id().to_owned(),
+            contract_version: 1,
+            tokenizer_fingerprint: "endpoint-owned-v1".to_owned(),
+            tokenizer_behavior_fingerprint: "endpoint-owned-v1".to_owned(),
+            dimensions: space.dimensions(),
+            max_sequence_length: 0,
+            pooling: "endpoint-owned".to_owned(),
+            normalization: SEMANTIC_NORMALIZATION.to_owned(),
+            query_prefix: String::new(),
+            document_prefix: String::new(),
+            language_scope: "endpoint-owned".to_owned(),
+            descriptor: String::new(),
+            fingerprint: String::new(),
+            external: Some(ExternalSemanticContractIdentity {
+                normalized_endpoint: normalized_endpoint.to_owned(),
+                space,
+            }),
+        };
+        contract.rebuild_identity();
+        contract
+    }
+
+    /// Returns the endpoint-declared space for an external HTTP contract.
+    pub fn external_space(&self) -> Option<&ExternalSemanticSpace> {
+        self.external.as_ref().map(|identity| &identity.space)
+    }
+
+    /// Returns the normalized runtime endpoint associated with this contract.
+    pub fn external_http_endpoint(&self) -> Option<&str> {
+        self.external
+            .as_ref()
+            .map(|identity| identity.normalized_endpoint.as_str())
+    }
+
+    /// Identifies the configured executor route independently of vector-space
+    /// compatibility. External identities are derived from the normalized
+    /// endpoint; the built-in executor uses a fixed sentinel.
+    pub fn executor_route_identity(&self) -> String {
+        match self.external_http_endpoint() {
+            Some(endpoint) => sha256_fingerprint(&format!(
+                "ctx-semantic-executor-route-v1|endpoint_bytes={}|endpoint={endpoint}",
+                endpoint.len(),
+            )),
+            None => BUILTIN_SEMANTIC_EXECUTOR_ROUTE_IDENTITY.to_owned(),
+        }
+    }
+
     pub fn model_key(&self) -> &str {
         &self.model_key
     }
@@ -194,7 +320,11 @@ impl SemanticModelContract {
     pub fn prepare_query(&self, text: String) -> PreparedSemanticQuery {
         PreparedSemanticQuery {
             contract_fingerprint: self.fingerprint().to_owned(),
-            text: semantic_prefixed_text(self.query_prefix(), text),
+            text: if self.external.is_some() {
+                text
+            } else {
+                semantic_prefixed_text(self.query_prefix(), text)
+            },
         }
     }
 
@@ -202,10 +332,14 @@ impl SemanticModelContract {
     pub fn prepare_documents(&self, texts: Vec<String>) -> PreparedSemanticDocuments {
         PreparedSemanticDocuments {
             contract_fingerprint: self.fingerprint().to_owned(),
-            texts: texts
-                .into_iter()
-                .map(|text| semantic_prefixed_text(self.document_prefix(), text))
-                .collect(),
+            texts: if self.external.is_some() {
+                texts
+            } else {
+                texts
+                    .into_iter()
+                    .map(|text| semantic_prefixed_text(self.document_prefix(), text))
+                    .collect()
+            },
         }
     }
 
@@ -216,7 +350,11 @@ impl SemanticModelContract {
 
     /// Returns document text prepared for this vector space.
     pub fn document_text(&self, text: &str) -> String {
-        semantic_prefixed_text(self.document_prefix(), text.to_owned())
+        if self.external.is_some() {
+            text.to_owned()
+        } else {
+            semantic_prefixed_text(self.document_prefix(), text.to_owned())
+        }
     }
 
     /// Returns the canonical compatibility descriptor for this vector space.
@@ -225,6 +363,16 @@ impl SemanticModelContract {
     }
 
     fn rebuild_identity(&mut self) {
+        if let Some(identity) = &self.external {
+            self.descriptor = format!(
+                "ctx-semantic-external-space-v1|space_id_bytes={}|space_id={}|dimensions={}",
+                identity.space.space_id().len(),
+                identity.space.space_id(),
+                identity.space.dimensions(),
+            );
+            self.fingerprint = sha256_fingerprint(&self.descriptor);
+            return;
+        }
         self.descriptor = format!(
             "ctx-semantic-vector-space-v{}|model_key={}|model_id={}|model_revision={}|tokenizer_fingerprint={}|tokenizer_behavior_fingerprint={}|dimensions={}|max_sequence_length={}|pooling={}|normalization={}|query_prefix={}|document_prefix={}|language_scope={}",
             self.contract_version,
@@ -313,6 +461,7 @@ fn builtin_semantic_model_contract() -> &'static SemanticModelContract {
             language_scope: SEMANTIC_LANGUAGE_SCOPE.to_owned(),
             descriptor: String::new(),
             fingerprint: String::new(),
+            external: None,
         };
         contract.rebuild_identity();
         contract

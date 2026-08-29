@@ -19,6 +19,7 @@ use ctx_history_platform::platform_security::{
 mod durable_write;
 mod mutation;
 mod provider_roots;
+mod removed_cloud_mode;
 mod semantic;
 mod toml_subset;
 
@@ -29,11 +30,14 @@ pub(crate) use mutation::{
     set_daemon_enabled, set_semantic_search_enabled, set_semantic_search_enabled_with_executor,
     write_default_config, ProviderRootMutation,
 };
+pub(crate) use removed_cloud_mode::is_removed_cloud_mode_error;
+use removed_cloud_mode::RemovedCloudModeConfigError;
 use semantic::parse_semantic_embedding_executor;
 pub use semantic::SemanticConfig;
 pub(crate) use semantic::{
     bind_semantic_embedding_auth_endpoint, clear_semantic_embedding_auth_endpoint,
     rebind_semantic_embedding_auth_endpoint,
+    rebind_semantic_embedding_auth_endpoint_for_explicit_selection,
 };
 
 use crate::deprecated_controls::DeprecatedControls;
@@ -89,16 +93,6 @@ impl IndexingMode {
             Self::Manual
         }
     }
-}
-
-#[derive(Debug, thiserror::Error)]
-#[error("unknown config key `cloud.mode`: cloud history configuration is no longer supported")]
-struct RemovedCloudModeConfigError;
-
-pub(crate) fn is_removed_cloud_mode_error(error: &anyhow::Error) -> bool {
-    error
-        .downcast_ref::<RemovedCloudModeConfigError>()
-        .is_some()
 }
 
 #[cfg(test)]
@@ -455,6 +449,8 @@ impl AppConfig {
         let mut legacy_daemon_enabled = None;
         let mut indexing_mode = None;
         let mut semantic_executor = None;
+        let mut semantic_space_id = None;
+        let mut semantic_dimensions = None;
         let mut provider_roots = BTreeMap::<
             String,
             (
@@ -542,6 +538,12 @@ impl AppConfig {
                 "semantic.executor" => {
                     semantic_executor = Some(parse_non_empty_string(key, value)?);
                 }
+                "semantic.space_id" => {
+                    semantic_space_id = Some(parse_non_empty_string(key, value)?);
+                }
+                "semantic.dimensions" => {
+                    semantic_dimensions = Some(parse_config_u64(key, value)?);
+                }
                 "search.semantic" => {
                     self.search.semantic = Some(parse_config_bool(key, value)?);
                     self.search.semantic_source = SemanticSearchSource::Config;
@@ -558,7 +560,11 @@ impl AppConfig {
                 .map(IndexingMode::from_legacy_daemon_enabled)
                 .unwrap_or(self.indexing.mode)
         });
-        self.semantic.executor = parse_semantic_embedding_executor(semantic_executor.as_deref())?;
+        self.semantic.executor = parse_semantic_embedding_executor(
+            semantic_executor.as_deref(),
+            semantic_space_id.as_deref(),
+            semantic_dimensions,
+        )?;
         if provider_roots.len() > MAX_CONFIGURED_PROVIDER_ROOTS {
             bail!(
                 "configured provider roots exceed the maximum of {MAX_CONFIGURED_PROVIDER_ROOTS}"
