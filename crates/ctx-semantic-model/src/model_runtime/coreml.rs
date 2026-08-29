@@ -15,6 +15,7 @@ use super::{
     cache::{
         commit_compile_destination, create_private_dir_all, discard_compile_destination,
         invalidate_compiled_model_cache, prepare_compile_destination,
+        validate_compiled_model_cache_path,
     },
     SemanticEmbeddingBackend,
 };
@@ -567,11 +568,18 @@ fn passive_compiled_coreml_model_path(
         )
     })?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return Err(anyhow!(
-            "passive Core ML compiled artifact is not a real directory: {}",
-            path.display()
+        return Err(crate::model_acquisition::coreml_model_integrity_error(
+            format!(
+                "passive Core ML compiled artifact is not a real directory: {}",
+                path.display(),
+            ),
         ));
     }
+    validate_compiled_model_cache_path(cache_dir, &path).map_err(|error| {
+        crate::model_acquisition::coreml_model_integrity_error(format!(
+            "passive Core ML compiled artifact validation failed: {error:#}"
+        ))
+    })?;
     Ok(path)
 }
 

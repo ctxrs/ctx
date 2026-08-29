@@ -753,6 +753,20 @@ mod compiled {
         }
     }
 
+    /// Validates an already-published compiled model without creating,
+    /// repairing, invalidating, or synchronizing any cache path.
+    pub(crate) fn validate_compiled_model_cache_path(
+        compiled_cache_root: &Path,
+        compiled_model_path: &Path,
+    ) -> Result<()> {
+        let parent = compiled_model_path
+            .parent()
+            .ok_or_else(|| anyhow!("compiled model cache path has no parent"))?;
+        validate_compiled_directory_tree_nofollow(compiled_cache_root, parent)?;
+        require_compiled_real_directory(compiled_model_path, "compiled model cache")?;
+        reject_compiled_symlinks_recursive(compiled_model_path)
+    }
+
     #[cfg(unix)]
     pub(crate) fn discard_compile_destination(destination: &CompileDestination) -> Result<()> {
         validate_compile_staging_pair(destination)?;
@@ -836,6 +850,22 @@ mod compiled {
                     });
                 }
             }
+            require_compiled_real_directory(&current, "compiled cache directory")?;
+        }
+        Ok(())
+    }
+
+    fn validate_compiled_directory_tree_nofollow(base: &Path, leaf: &Path) -> Result<()> {
+        let relative = leaf
+            .strip_prefix(base)
+            .map_err(|_| anyhow!("cache path escaped its root"))?;
+        require_compiled_real_directory(base, "compiled cache root")?;
+        let mut current = base.to_path_buf();
+        for component in relative.components() {
+            let std::path::Component::Normal(component) = component else {
+                bail!("compiled cache path contains invalid component");
+            };
+            current.push(component);
             require_compiled_real_directory(&current, "compiled cache directory")?;
         }
         Ok(())
@@ -963,7 +993,7 @@ pub(crate) use compiled::discard_compile_destination;
 #[cfg(target_os = "macos")]
 pub(crate) use compiled::{
     commit_compile_destination, create_private_dir_all, invalidate_compiled_model_cache,
-    prepare_compile_destination,
+    prepare_compile_destination, validate_compiled_model_cache_path,
 };
 
 #[cfg(all(test, ctx_semantic_fastembed))]
