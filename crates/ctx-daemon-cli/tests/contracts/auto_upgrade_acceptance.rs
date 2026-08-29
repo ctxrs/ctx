@@ -925,6 +925,12 @@ mod unix {
         include!("auto_upgrade_acceptance/foreground_authority.rs");
     }
 
+    mod core_only_release {
+        use super::*;
+
+        include!("auto_upgrade_acceptance/core_only_release.rs");
+    }
+
     #[test]
     fn daemon_disabled_has_no_automatic_upgrade_side_effects() {
         let temp = tempdir();

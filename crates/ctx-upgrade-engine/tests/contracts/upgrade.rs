@@ -675,19 +675,19 @@ fn upgrade_status_accepts_current_legacy_metadata_without_sidecar_fields() {
 
 #[cfg(unix)]
 #[test]
-fn upgrade_refuses_newer_legacy_metadata_without_sidecar_fields() {
+fn upgrade_applies_newer_metadata_without_sidecar_fields() {
     let temp = tempdir();
     let release = fake_legacy_release(&temp, "9.9.9");
 
-    let stderr = failure_stderr(fake_release_env(
+    let outcome = json_output(fake_release_env(
         ctx(&temp).args(["upgrade", "--format=json"]),
         &release,
     ));
 
-    assert!(
-        stderr.contains("has no complete ONNX Runtime sidecar metadata"),
-        "{stderr}"
-    );
+    assert_eq!(outcome["status"], "applied");
+    assert!(fs::read_to_string(&release.target)
+        .unwrap()
+        .contains("ctx 9.9.9"));
     assert!(!data_root(&temp).join("runtime").exists());
 }
 
