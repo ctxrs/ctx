@@ -55,6 +55,61 @@ fn source_refresh_failure(command: &mut Command) -> String {
 }
 
 #[test]
+fn opencode_rejection_diagnostics_reach_the_import_contract() {
+    let temp = daemon_test_root();
+    let marker = "opencode retained peer oracle";
+    let database = write_native_opencode_fixture(&temp, marker);
+    let connection = Connection::open(&database).unwrap();
+    connection
+        .execute(
+            "insert into part values (?1, ?2, ?3, 1782259201003, 1782259201003, ?4)",
+            params![
+                "opencode-cli-native-unsupported",
+                "opencode-cli-native-assistant",
+                "opencode-cli-native",
+                json!({"type": "future_part", "value": "unsupported"}).to_string(),
+            ],
+        )
+        .unwrap();
+    drop(connection);
+
+    let report = json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "opencode",
+        "--path",
+        &database,
+        "--format=json",
+        "--progress",
+        "none",
+    ]));
+    let source = assert_source_backed_publication(&report, "opencode", "opencode_sqlite", 1);
+    let diagnostics = source["rejection_diagnostics"].as_array().unwrap();
+    assert_eq!(diagnostics.len(), 1, "{report:#}");
+    assert_eq!(diagnostics[0]["provider"], "opencode", "{report:#}");
+    assert_eq!(diagnostics[0]["line"], 3, "{report:#}");
+    assert_eq!(diagnostics[0]["payload_type"], "sqlite_row", "{report:#}");
+    assert_eq!(diagnostics[0]["class"], "unsupported_record", "{report:#}");
+    assert!(
+        diagnostics[0]["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("unsupported record type")),
+        "{report:#}"
+    );
+
+    let search = json_output(ctx(&temp).args([
+        "search",
+        marker,
+        "--provider",
+        "opencode",
+        "--refresh",
+        "off",
+        "--format=json",
+    ]));
+    assert_search_provider_oracle(&search, "opencode", marker, 1, "message");
+}
+
+#[test]
 fn partial_source_import_keeps_cli_classification_and_searchable_records() {
     let temp = daemon_test_root();
     let session = temp.path().join("partial-source.jsonl");

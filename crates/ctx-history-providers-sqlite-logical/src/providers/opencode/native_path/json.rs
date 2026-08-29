@@ -78,6 +78,15 @@ pub(super) fn project_json(
         .as_ref()
         .and_then(|value| object_text(&value.value, "role"));
     let effective_type = effective_type(column_type, body_role, body_type, parent_role);
+    if is_ignored_type(family, &effective_type) {
+        if body.duplicate_key || parent.as_ref().is_some_and(|value| value.duplicate_key) {
+            return OpenCodeJsonProjection::Rejected(OpenCodeNativeRejectionKind::MalformedJson);
+        }
+        // OpenCode file carriers may contain inline data URLs. Recognize valid
+        // file parts before generic output detection without copying attachment
+        // bytes or metadata into Core.
+        return OpenCodeJsonProjection::Output(OpenCodeOutputJson { diagnostic: None });
+    }
     let output = direct_column_output
         || is_direct_output_token(&effective_type)
         || body.forbidden_output
@@ -271,5 +280,36 @@ mod tests {
                 _
             )
         ));
+    }
+
+    #[test]
+    fn current_file_parts_are_known_ignored_carriers() {
+        let (projection, explicit_time) = project(
+            r#"{"type":"file","mime":"image/png","filename":"diagram.png","url":"data:image/png;base64,must-not-be-indexed"}"#,
+            "part",
+            Some(r#"{"role":"user"}"#),
+            OpenCodeNativeSchemaFamily::MessagePart,
+        );
+
+        assert!(!explicit_time);
+        assert_eq!(
+            projection,
+            OpenCodeJsonProjection::Output(OpenCodeOutputJson { diagnostic: None })
+        );
+    }
+
+    #[test]
+    fn current_file_parts_cannot_enter_generic_output_retention() {
+        let (projection, _) = project(
+            r#"{"type":"file","mime":"image/png","url":"data:image/png;base64,must-not-be-indexed","metadata":{"output":"must-not-be-indexed","result":"must-not-be-indexed"}}"#,
+            "part",
+            Some(r#"{"role":"user"}"#),
+            OpenCodeNativeSchemaFamily::MessagePart,
+        );
+
+        assert_eq!(
+            projection,
+            OpenCodeJsonProjection::Output(OpenCodeOutputJson { diagnostic: None })
+        );
     }
 }

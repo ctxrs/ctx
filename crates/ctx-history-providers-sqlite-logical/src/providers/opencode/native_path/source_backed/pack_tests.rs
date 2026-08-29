@@ -197,7 +197,24 @@ fn scan_current_schema(
     OpenCodeSourceBackedScan,
     Vec<CoreRecord>,
 ) {
-    scan_current_schema_result(
+    let (observation, scan, records, _) = scan_current_schema_result_with_rejections(
+        path,
+        crate::test_provider_sqlite_data_root(),
+        OPENCODE_FALLBACK_SCRATCH_MAX_BYTES,
+    )
+    .unwrap();
+    (observation, scan, records)
+}
+
+fn scan_current_schema_with_rejections(
+    path: &Path,
+) -> (
+    OpenCodeLogicalObservation,
+    OpenCodeSourceBackedScan,
+    Vec<CoreRecord>,
+    Vec<SourceBackedRecordRejectionDraft>,
+) {
+    scan_current_schema_result_with_rejections(
         path,
         crate::test_provider_sqlite_data_root(),
         OPENCODE_FALLBACK_SCRATCH_MAX_BYTES,
@@ -214,12 +231,28 @@ fn scan_current_schema_result(
     OpenCodeSourceBackedScan,
     Vec<CoreRecord>,
 )> {
+    let (observation, scan, records, _) =
+        scan_current_schema_result_with_rejections(path, data_root, scratch_limit)?;
+    Ok((observation, scan, records))
+}
+
+fn scan_current_schema_result_with_rejections(
+    path: &Path,
+    data_root: &Path,
+    scratch_limit: u64,
+) -> OpenCodeSourceBackedResult<(
+    OpenCodeLogicalObservation,
+    OpenCodeSourceBackedScan,
+    Vec<CoreRecord>,
+    Vec<SourceBackedRecordRejectionDraft>,
+)> {
     let authorized = open_root_authorized_snapshot_retained(data_root, path)?;
     let observation = observe_logical_source(
         authorized.sqlite_snapshot.connection()?,
         &crate::provider::providers::opencode::OPENCODE_SQLITE_DIALECT,
     )?;
     let mut records = Vec::new();
+    let mut rejections = Vec::new();
     let scan = scan_pinned_source_with_scratch_limit(
         path,
         &crate::provider::providers::opencode::OPENCODE_SQLITE_DIALECT,
@@ -227,13 +260,17 @@ fn scan_current_schema_result(
         authorized.sqlite_snapshot,
         scratch_limit,
         &mut |output| {
-            if let OpenCodeScanOutput::Document(record) = output {
-                records.push(record);
+            match output {
+                OpenCodeScanOutput::Document(record) => records.push(record),
+                OpenCodeScanOutput::Rejection(rejection) => rejections.push(rejection),
+                OpenCodeScanOutput::Begin(_)
+                | OpenCodeScanOutput::CompletedBytes(_)
+                | OpenCodeScanOutput::Progress(_) => {}
             }
             Ok(())
         },
     )?;
-    Ok((observation, scan, records))
+    Ok((observation, scan, records, rejections))
 }
 
 #[test]
@@ -407,35 +444,6 @@ fn empty_and_oversized_call_ids_omit_dependent_activity_without_losing_content()
         assert!(!activity.facts.is_empty());
         record.validate_contract().unwrap();
     }
-}
-
-#[test]
-fn invalid_call_id_never_publishes_a_summary_after_raw_content_no_longer_fits() {
-    let temp = crate::test_support_paths::tempdir().unwrap();
-    let database = temp.path().join("oversized-invalid-call-opencode.db");
-    let mut body = json!({
-        "type": "tool",
-        "call_id": "",
-        "tool": "read_file",
-        "state": {"input": {"payload": ""}}
-    });
-    let fixed_bytes = body.to_string().len();
-    body["state"]["input"]["payload"] = serde_json::Value::String(
-        "x".repeat(ctx_history_core::MAX_CORE_CONTENT_BYTES - fixed_bytes - 8),
-    );
-    assert_eq!(
-        body.to_string().len(),
-        ctx_history_core::MAX_CORE_CONTENT_BYTES - 8
-    );
-    drop(write_current_schema(&database, temp.path(), &body));
-
-    let (_, scan, records) = scan_current_schema(&database);
-
-    assert!(records.is_empty());
-    let counts = scan.certificate.counts();
-    assert_eq!(counts.complete_records, 1);
-    assert_eq!(counts.retained_records, 0);
-    assert_eq!(counts.rejected_records, 1);
 }
 
 #[test]
@@ -1004,6 +1012,7 @@ fn rejection_heavy_scan_reports_authoritative_completed_bytes_before_finishing()
     .unwrap();
     let mut completed_bytes = Vec::new();
     let mut accepted = 0_u64;
+    let mut rejections = 0_u64;
     let scan = scan_pinned_source(
         &database,
         &crate::provider::providers::opencode::OPENCODE_SQLITE_DIALECT,
@@ -1014,6 +1023,9 @@ fn rejection_heavy_scan_reports_authoritative_completed_bytes_before_finishing()
                 OpenCodeScanOutput::Begin(_) => {}
                 OpenCodeScanOutput::CompletedBytes(bytes) => completed_bytes.push(bytes),
                 OpenCodeScanOutput::Document(_) => accepted = accepted.saturating_add(1),
+                OpenCodeScanOutput::Rejection(_) => {
+                    rejections = rejections.saturating_add(1);
+                }
                 OpenCodeScanOutput::Progress(_) => {}
             }
             Ok(())
@@ -1026,6 +1038,7 @@ fn rejection_heavy_scan_reports_authoritative_completed_bytes_before_finishing()
     assert_eq!(counts.retained_records, 1);
     assert_eq!(counts.rejected_records, (ROWS - 1) as u64);
     assert_eq!(accepted, 1);
+    assert_eq!(rejections, (ROWS - 1) as u64);
     assert_eq!(completed_bytes.len(), ROWS as usize);
     assert_eq!(completed_bytes.iter().sum::<u64>(), counts.certified_bytes);
 }

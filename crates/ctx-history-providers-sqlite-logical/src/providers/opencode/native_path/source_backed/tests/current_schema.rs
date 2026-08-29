@@ -1,4 +1,130 @@
 use super::*;
+use ctx_history_capture_runtime::SourceBackedRecordRejectionClass;
+
+#[test]
+fn current_file_parts_are_ignored_without_indexing_attachment_payloads() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let database = temp.path().join("current-file-part-opencode.db");
+    let attachment_sentinel = "attachment-payload-must-not-be-indexed";
+    drop(write_current_schema(
+        &database,
+        temp.path(),
+        &json!({
+            "type": "file",
+            "mime": "image/png",
+            "filename": "diagram.png",
+            "url": format!("data:image/png;base64,{attachment_sentinel}"),
+            "source": {
+                "type": "file",
+                "path": "diagram.png",
+                "text": {"value": attachment_sentinel, "start": 0, "end": 1}
+            }
+        }),
+    ));
+
+    let (_, scan, records, rejections) = scan_current_schema_with_rejections(&database);
+
+    assert!(records.is_empty());
+    assert!(rejections.is_empty());
+    assert_eq!(scan.certificate.counts().complete_records, 1);
+    assert_eq!(scan.certificate.counts().retained_records, 0);
+    assert_eq!(scan.certificate.counts().rejected_records, 0);
+    assert_eq!(scan.certificate.counts().ignored_records, 1);
+}
+
+#[test]
+fn unsupported_current_parts_emit_bounded_row_diagnostics() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let database = temp.path().join("unsupported-current-part-opencode.db");
+    drop(write_current_schema(
+        &database,
+        temp.path(),
+        &json!({"type": "future_part", "value": "unsupported"}),
+    ));
+
+    let (_, scan, records, rejections) = scan_current_schema_with_rejections(&database);
+
+    assert!(records.is_empty());
+    assert_eq!(scan.certificate.counts().rejected_records, 1);
+    let [rejection] = rejections.as_slice() else {
+        panic!("expected one bounded OpenCode row diagnostic");
+    };
+    assert_eq!(rejection.provider, CaptureProvider::OpenCode);
+    assert_eq!(rejection.source_selector, database.to_string_lossy());
+    assert_eq!(rejection.line_number, 1);
+    assert_eq!(rejection.payload_type.as_deref(), Some("sqlite_row"));
+    assert_eq!(
+        rejection.class,
+        SourceBackedRecordRejectionClass::UnsupportedRecord
+    );
+    assert!(rejection.detail.contains("unsupported record type"));
+}
+
+#[test]
+fn invalid_timestamp_diagnostics_do_not_echo_provider_values() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let database = temp.path().join("invalid-timestamp-opencode.db");
+    let connection = write_current_schema(
+        &database,
+        temp.path(),
+        &json!({"type": "text", "text": "invalid timestamp"}),
+    );
+    connection
+        .execute("update part set time_created = ?1", [i64::MAX])
+        .unwrap();
+    drop(connection);
+
+    let (_, scan, records, rejections) = scan_current_schema_with_rejections(&database);
+
+    assert!(records.is_empty());
+    assert_eq!(scan.certificate.counts().rejected_records, 1);
+    let [rejection] = rejections.as_slice() else {
+        panic!("expected one invalid timestamp diagnostic");
+    };
+    assert_eq!(
+        rejection.class,
+        SourceBackedRecordRejectionClass::MalformedRecord
+    );
+    assert!(rejection.detail.contains("invalid timestamp"));
+    assert!(!rejection.detail.contains(&i64::MAX.to_string()));
+}
+
+#[test]
+fn core_projection_failures_emit_row_diagnostics() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let database = temp.path().join("oversized-invalid-call-opencode.db");
+    let mut body = json!({
+        "type": "tool",
+        "call_id": "",
+        "tool": "read_file",
+        "state": {"input": {"payload": ""}}
+    });
+    let fixed_bytes = body.to_string().len();
+    body["state"]["input"]["payload"] = serde_json::Value::String(
+        "x".repeat(ctx_history_core::MAX_CORE_CONTENT_BYTES - fixed_bytes - 8),
+    );
+    assert_eq!(
+        body.to_string().len(),
+        ctx_history_core::MAX_CORE_CONTENT_BYTES - 8
+    );
+    drop(write_current_schema(&database, temp.path(), &body));
+
+    let (_, scan, records, rejections) = scan_current_schema_with_rejections(&database);
+
+    assert!(records.is_empty());
+    let counts = scan.certificate.counts();
+    assert_eq!(counts.complete_records, 1);
+    assert_eq!(counts.retained_records, 0);
+    assert_eq!(counts.rejected_records, 1);
+    let [rejection] = rejections.as_slice() else {
+        panic!("expected one Core projection rejection diagnostic");
+    };
+    assert_eq!(
+        rejection.class,
+        SourceBackedRecordRejectionClass::UnsupportedRecord
+    );
+    assert!(rejection.detail.contains("Core projection limits"));
+}
 
 pub(super) fn create_current_fixture(path: &Path) -> Connection {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
