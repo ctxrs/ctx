@@ -31,7 +31,7 @@ pub use coverage_contract::{
     VerifiedSourceRefreshRouteBoundary,
 };
 use durable_queue::{
-    durable_job_json, install_recovered_successors, job_with_queued_successors,
+    durable_job_json, finalized_job_json, install_recovered_successors, job_with_queued_successors,
     recover_queued_root, recover_queued_successors,
 };
 use generation_authority::CoreRefreshTerminalSuccess;
@@ -161,6 +161,13 @@ enum PendingTerminalOutcome {
     Failed {
         scheduler_retry: bool,
     },
+    // The marker-bearing terminal image is already durable. Retain its exact
+    // root fields while route disposition and coverage are finalized into a
+    // second, markerless image.
+    RouteFinalization {
+        did_work: bool,
+        failed: bool,
+    },
     FinalizationOnly {
         did_work: bool,
         failed: bool,
@@ -173,6 +180,7 @@ impl PendingTerminalPersistence {
         matches!(
             self.outcome,
             PendingTerminalOutcome::Published { did_work: true, .. }
+                | PendingTerminalOutcome::RouteFinalization { did_work: true, .. }
                 | PendingTerminalOutcome::FinalizationOnly { did_work: true, .. }
         )
     }
@@ -181,6 +189,7 @@ impl PendingTerminalPersistence {
         matches!(
             self.outcome,
             PendingTerminalOutcome::Failed { .. }
+                | PendingTerminalOutcome::RouteFinalization { failed: true, .. }
                 | PendingTerminalOutcome::FinalizationOnly { failed: true, .. }
         )
     }
@@ -198,6 +207,13 @@ impl PendingTerminalPersistence {
         matches!(
             self.outcome,
             PendingTerminalOutcome::FinalizationOnly { .. }
+        )
+    }
+
+    fn route_finalization_in_progress(&self) -> bool {
+        matches!(
+            self.outcome,
+            PendingTerminalOutcome::RouteFinalization { .. }
         )
     }
 }
@@ -244,6 +260,8 @@ pub struct CoreRefreshEngine {
     admission_fence: Arc<SourceRefreshAdmissionFence>,
     pub(super) journal: Arc<dyn RefreshJournal>,
     pub(super) runtime: Arc<dyn RefreshRuntime>,
+    #[cfg(test)]
+    before_route_finalization: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 #[derive(Debug)]
@@ -375,6 +393,8 @@ impl CoreRefreshEngine {
             admission_fence,
             journal,
             runtime,
+            #[cfg(test)]
+            before_route_finalization: Mutex::new(None),
         }
     }
 

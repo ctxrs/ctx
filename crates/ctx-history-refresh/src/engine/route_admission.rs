@@ -195,12 +195,22 @@ impl CoreRefreshEngine {
         post_publication_fence: Option<&PostPublicationRouteCoverageFence>,
     ) -> RouteAdmissionFinish {
         let mut state = self.lock_state();
-        Self::finish_route_admissions_locked(
+        let finish = Self::finish_route_admissions_locked(
             &mut state,
             request_id,
             publication_ready,
             post_publication_fence,
-        )
+        );
+        if state
+            .pending_terminal_persistence
+            .as_ref()
+            .is_some_and(|pending| {
+                pending.request_id == request_id && pending.route_finalization_in_progress()
+            })
+        {
+            state.pending_terminal_persistence = None;
+        }
+        finish
     }
 
     pub(super) fn finish_route_admissions_and_persist(
@@ -217,7 +227,7 @@ impl CoreRefreshEngine {
             publication_ready,
             post_publication_fence,
         );
-        let job = durable_job_json(&state, &finish.durable_request_id).ok_or_else(|| {
+        let job = finalized_job_json(&state, &finish.durable_request_id).ok_or_else(|| {
             anyhow!(
                 "source refresh request `{}` disappeared during route finalization",
                 finish.durable_request_id
@@ -238,6 +248,15 @@ impl CoreRefreshEngine {
                 },
             });
             return Err(error);
+        }
+        if state
+            .pending_terminal_persistence
+            .as_ref()
+            .is_some_and(|pending| {
+                pending.request_id == request_id && pending.route_finalization_in_progress()
+            })
+        {
+            state.pending_terminal_persistence = None;
         }
         Ok((finish, job))
     }

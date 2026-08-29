@@ -380,6 +380,7 @@ impl CoreRefreshEngine {
         let pending_retry = state
             .pending_terminal_persistence
             .as_ref()
+            .filter(|pending| !pending.route_finalization_in_progress())
             .and_then(|pending| {
                 find_attempt(&state, &pending.request_id).map(|attempt| {
                     (
@@ -442,7 +443,7 @@ impl CoreRefreshEngine {
                         ));
                     }
                 }
-                let job = durable_job_json(&state, &request_id)?;
+                let job = finalized_job_json(&state, &request_id)?;
                 return Some(SourceBackedRefreshRun {
                     job,
                     did_work: false,
@@ -455,6 +456,7 @@ impl CoreRefreshEngine {
             }
 
             let pending = state.pending_terminal_persistence.take()?;
+            let exact_terminal_job = pending.terminal_job.clone();
             let (published_generation, coverage_certificate, advance_terminal) =
                 match pending.outcome {
                     PendingTerminalOutcome::Published { terminal, .. } => {
@@ -479,6 +481,9 @@ impl CoreRefreshEngine {
                             .map(str::to_owned);
                         (attempt.published_generation.clone(), None, true)
                     }
+                    PendingTerminalOutcome::RouteFinalization { .. } => {
+                        unreachable!("an in-flight route finalization is not a persistence retry")
+                    }
                     PendingTerminalOutcome::FinalizationOnly {
                         coverage_certificate,
                         ..
@@ -496,6 +501,17 @@ impl CoreRefreshEngine {
             }
             if advance_terminal {
                 advance_after_terminal_attempt(&mut state, &request_id, published_generation);
+                // This owner is installed before releasing the state lock, so
+                // advancing the successor cannot expose a markerless root to
+                // a concurrent admission or scheduler writer.
+                state.pending_terminal_persistence = Some(PendingTerminalPersistence {
+                    request_id: request_id.clone(),
+                    terminal_job: exact_terminal_job,
+                    outcome: PendingTerminalOutcome::RouteFinalization {
+                        did_work,
+                        failed: failed_run,
+                    },
+                });
             }
             trim_terminal_attempt_history(&mut state);
             drop(state);
@@ -706,6 +722,16 @@ impl CoreRefreshEngine {
                 } else {
                     terminal.install(&mut state);
                     newly_published_generation = Some(observed);
+                    // Preserve the exact first durable image before advancing
+                    // the queue or sampling post-publication route coverage.
+                    state.pending_terminal_persistence = Some(PendingTerminalPersistence {
+                        request_id: request_id.clone(),
+                        terminal_job,
+                        outcome: PendingTerminalOutcome::RouteFinalization {
+                            did_work,
+                            failed: false,
+                        },
+                    });
                 }
                 (false, did_work)
             }
@@ -755,6 +781,16 @@ impl CoreRefreshEngine {
                     // write. Keep this failed root inside the shared queue
                     // bound until that write has completed.
                     state.pending_scheduler_retry_root_id = Some(request_id.clone());
+                    // Preserve the exact first durable image before advancing
+                    // the queue or restoring retryable route ownership.
+                    state.pending_terminal_persistence = Some(PendingTerminalPersistence {
+                        request_id: request_id.clone(),
+                        terminal_job: failure_job,
+                        outcome: PendingTerminalOutcome::RouteFinalization {
+                            did_work: false,
+                            failed: true,
+                        },
+                    });
                 }
                 (true, false)
             }
@@ -770,7 +806,7 @@ impl CoreRefreshEngine {
             );
         }
         trim_terminal_attempt_history(&mut state);
-        let job = find_attempt(&state, &request_id)?.job_json();
+        let job = finalized_job_json(&state, &request_id)?;
         drop(state);
         Some(SourceBackedRefreshRun {
             job,

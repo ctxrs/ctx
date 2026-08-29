@@ -2,12 +2,20 @@ use super::*;
 
 impl CoreRefreshEngine {
     pub fn run_next(&self, data_root: &Path) -> Option<SourceBackedRefreshRun> {
-        if self
-            .lock_state()
-            .pending_terminal_persistence
-            .as_ref()
-            .is_some_and(PendingTerminalPersistence::finalization_only)
-        {
+        let pending_finalization =
+            self.lock_state()
+                .pending_terminal_persistence
+                .as_ref()
+                .map(|pending| {
+                    (
+                        pending.finalization_only(),
+                        pending.route_finalization_in_progress(),
+                    )
+                });
+        if pending_finalization.is_some_and(|(_, in_progress)| in_progress) {
+            return None;
+        }
+        if pending_finalization.is_some_and(|(retry, _)| retry) {
             return self.run_next_with_verified_index_opener(data_root, |index_root| {
                 Ok(Arc::new(open_verified_index(index_root)?))
             });
@@ -166,6 +174,8 @@ impl CoreRefreshEngine {
         let publication_ready = !run.failed && !run.terminal_persistence_pending;
         if let Some(request_id) = run.job.get("request_id").and_then(Value::as_str) {
             if !run.terminal_persistence_pending {
+                #[cfg(test)]
+                self.run_before_route_finalization_hook();
                 let post_publication_fence = publication_ready.then(|| coverage_fence(request_id));
                 match self.finish_route_admissions_and_persist(
                     data_root,
@@ -190,6 +200,34 @@ impl CoreRefreshEngine {
             }
         }
         Some(run)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn install_before_route_finalization_hook(
+        &self,
+        hook: impl FnOnce() + Send + 'static,
+    ) {
+        let previous = self
+            .before_route_finalization
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .replace(Box::new(hook));
+        assert!(
+            previous.is_none(),
+            "route-finalization test hooks must not nest"
+        );
+    }
+
+    #[cfg(test)]
+    fn run_before_route_finalization_hook(&self) {
+        let hook = self
+            .before_route_finalization
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(hook) = hook {
+            hook();
+        }
     }
 
     fn set_publication_probe_timing(&self, request_id: &str, duration_us: u64) {

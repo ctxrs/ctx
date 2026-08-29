@@ -743,8 +743,8 @@ pub(super) fn recover_wait_refresh_request(
         // The acknowledged request may be a command waiter coalesced onto a
         // periodic/search attempt. Restarting and immediately re-submitting
         // the command payload under that physical ID would be a genuine
-        // idempotency conflict. Re-observe the durable ID first; only the
-        // typed unknown-request branch may re-admit it.
+        // idempotency conflict. Re-observe the durable ID; a typed unknown
+        // after acknowledgement is terminal and must not re-admit it.
         Ok(request_id.to_owned())
     })();
     recovery.map_err(|error| {
