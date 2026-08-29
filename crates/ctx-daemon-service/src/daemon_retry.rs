@@ -54,7 +54,10 @@ pub(super) fn classify_semantic_failure(error: &anyhow::Error) -> SemanticFailur
     }
     if let Some(kind) = semantic_vector_failure_kind(error) {
         return match kind {
-            SemanticVectorFailureKind::Unavailable => SemanticFailureClass::Retryable,
+            SemanticVectorFailureKind::Unavailable
+            | SemanticVectorFailureKind::PassiveSnapshotUnavailable => {
+                SemanticFailureClass::Retryable
+            }
             SemanticVectorFailureKind::ResetRequired => SemanticFailureClass::CorruptSidecar,
             SemanticVectorFailureKind::StorageConflict | SemanticVectorFailureKind::NewerSchema => {
                 SemanticFailureClass::Permanent

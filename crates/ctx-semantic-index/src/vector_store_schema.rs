@@ -15,6 +15,7 @@ pub(super) const SEMANTIC_VECTOR_BACKEND_FLAT_F32: &str = "flat-f32";
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SemanticVectorFailureKind {
     Unavailable,
+    PassiveSnapshotUnavailable,
     StorageConflict,
     ResetRequired,
     NewerSchema,
@@ -30,6 +31,13 @@ impl SemanticVectorStoreError {
     pub(super) fn unavailable(message: impl Into<String>) -> Self {
         Self {
             kind: SemanticVectorFailureKind::Unavailable,
+            message: message.into(),
+        }
+    }
+
+    pub(super) fn passive_snapshot_unavailable(message: impl Into<String>) -> Self {
+        Self {
+            kind: SemanticVectorFailureKind::PassiveSnapshotUnavailable,
             message: message.into(),
         }
     }
@@ -102,6 +110,32 @@ impl SemanticVectorStore {
     pub fn open_read_only(path: &Path, contract: &SemanticModelContract) -> Result<Option<Self>> {
         let flat_contract = flat_model_contract(contract).map_err(semantic_flat_store_error)?;
         let Some(conn) = control::open_read_only(path)? else {
+            return Ok(None);
+        };
+        let flat = FlatSegmentStore::open_read_only(path, flat_contract)
+            .map_err(semantic_flat_store_error)?;
+        if flat
+            .model_contract_reset_pending()
+            .map_err(semantic_flat_store_error)?
+        {
+            return Ok(None);
+        }
+        Ok(Some(Self {
+            conn,
+            flat,
+            contract: contract.clone(),
+        }))
+    }
+
+    /// Opens a completed semantic snapshot without giving SQLite any write
+    /// capability. This is the only store opener suitable for daemon-free
+    /// passive queries.
+    pub fn open_passive_snapshot(
+        path: &Path,
+        contract: &SemanticModelContract,
+    ) -> Result<Option<Self>> {
+        let flat_contract = flat_model_contract(contract).map_err(semantic_flat_store_error)?;
+        let Some(conn) = control::open_passive_snapshot(path)? else {
             return Ok(None);
         };
         let flat = FlatSegmentStore::open_read_only(path, flat_contract)

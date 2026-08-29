@@ -7,6 +7,8 @@ use std::{fs, path::PathBuf};
 #[cfg(all(ctx_semantic_fastembed, target_os = "macos"))]
 use anyhow::Context;
 use anyhow::{anyhow, Result};
+#[cfg(all(ctx_semantic_fastembed, target_os = "macos"))]
+use sha2::{Digest, Sha256};
 
 #[cfg(all(ctx_semantic_fastembed, target_os = "macos"))]
 use super::{
@@ -79,7 +81,7 @@ pub(super) fn acquire_coreml_backend(
     ) {
         return Err(deferred.into());
     }
-    let model = CoreMlE5Embedder::acquire(config.paths().model_cache_dir(), None, compute)?;
+    let model = CoreMlE5Embedder::acquire(config.paths().model_cache_dir(), None, compute, false)?;
     let policy = semantic_embed_policy_for(model.compute_class, config);
     let acquisition_source = model.acquisition_source;
     Ok(SemanticEmbedder {
@@ -88,6 +90,41 @@ pub(super) fn acquire_coreml_backend(
         preference,
         acquisition_source,
         acquisition_fallback: fallback,
+        model_fingerprint: String::new(),
+        backend_fingerprint: String::new(),
+        canary_passed: false,
+    })
+}
+
+#[cfg(all(ctx_semantic_fastembed, not(target_os = "macos")))]
+pub(super) fn acquire_coreml_backend_passively(
+    _config: &SemanticModelConfig,
+    _preference: SemanticBackendPreference,
+) -> Result<SemanticEmbedder> {
+    Err(anyhow!("Core ML semantic embeddings require macOS"))
+}
+
+#[cfg(all(ctx_semantic_fastembed, target_os = "macos"))]
+pub(super) fn acquire_coreml_backend_passively(
+    config: &SemanticModelConfig,
+    preference: SemanticBackendPreference,
+) -> Result<SemanticEmbedder> {
+    let compute = coreml_compute_config(config.coreml_compute_mode()?);
+    if let Some(deferred) = semantic_model_load_deferred(
+        SemanticSystemResources::current().available_memory_bytes,
+        compute.compute_class,
+    ) {
+        return Err(deferred.into());
+    }
+    let model = CoreMlE5Embedder::acquire(config.paths().model_cache_dir(), None, compute, true)?;
+    let policy = semantic_embed_policy_for(model.compute_class, config);
+    let acquisition_source = model.acquisition_source;
+    Ok(SemanticEmbedder {
+        batch_size: model.document.batch_size.min(policy.batch_size).max(1),
+        backend: SemanticEmbeddingBackend::CoreMl(model),
+        preference,
+        acquisition_source,
+        acquisition_fallback: None,
         model_fingerprint: String::new(),
         backend_fingerprint: String::new(),
         canary_passed: false,
@@ -211,6 +248,7 @@ impl CoreMlE5Embedder {
         cache_dir: &Path,
         acquired: Option<AcquiredCoreMlBundle>,
         compute: CoreMlComputeConfig,
+        passive: bool,
     ) -> Result<Self> {
         let acquired = match acquired {
             Some(acquired) => acquired,
@@ -224,7 +262,7 @@ impl CoreMlE5Embedder {
         let bundle = acquired.bundle;
         validate_coreml_bundle_identity(&bundle)?;
         let query_path = bundle.query_model_path();
-        let document_model = load_coreml_role_model(
+        let document_model = load_coreml_role_model_with_policy(
             &bundle.document_model_path(),
             cache_dir,
             &bundle.manifest_sha256,
@@ -232,6 +270,7 @@ impl CoreMlE5Embedder {
             compute.units,
             bundle.manifest.tensor_contract.document_batch_size as usize,
             bundle.manifest.tensor_contract.max_sequence_length as usize,
+            passive,
         )?;
         let query_batch_size = bundle.manifest.tensor_contract.query_batch_size;
         let query_model = query_path
@@ -239,7 +278,7 @@ impl CoreMlE5Embedder {
                 let expected_batch_size = query_batch_size.ok_or_else(|| {
                     anyhow!("Core ML query model has no signed query batch contract")
                 })? as usize;
-                load_coreml_role_model(
+                load_coreml_role_model_with_policy(
                     &path,
                     cache_dir,
                     &bundle.manifest_sha256,
@@ -247,6 +286,7 @@ impl CoreMlE5Embedder {
                     compute.units,
                     expected_batch_size,
                     bundle.manifest.tensor_contract.max_sequence_length as usize,
+                    passive,
                 )
             })
             .transpose()?;
@@ -469,6 +509,70 @@ pub(super) fn load_coreml_role_model(
         }
         Err(error) => Err(error),
     }
+}
+
+#[cfg(all(ctx_semantic_fastembed, target_os = "macos"))]
+fn load_coreml_role_model_with_policy(
+    source: &Path,
+    cache_dir: &Path,
+    manifest_sha256: &str,
+    role: &str,
+    compute_units: coreml_native::ComputeUnits,
+    expected_batch_size: usize,
+    expected_sequence_length: usize,
+    passive: bool,
+) -> Result<CoreMlRoleModel> {
+    if !passive {
+        return load_coreml_role_model(
+            source,
+            cache_dir,
+            manifest_sha256,
+            role,
+            compute_units,
+            expected_batch_size,
+            expected_sequence_length,
+        );
+    }
+    let path = passive_compiled_coreml_model_path(cache_dir, manifest_sha256, role)?;
+    load_and_validate_coreml_role_model(
+        &path,
+        role,
+        compute_units,
+        expected_batch_size,
+        expected_sequence_length,
+    )
+}
+
+#[cfg(all(ctx_semantic_fastembed, target_os = "macos"))]
+fn passive_compiled_coreml_model_path(
+    cache_dir: &Path,
+    manifest_sha256: &str,
+    role: &str,
+) -> Result<PathBuf> {
+    const COMPILER_IDENTITY: &str = "coreml-native-0.2.0:MLModel.compileModelAtURL";
+    if !matches!(role, "document" | "query") || manifest_sha256.len() != 64 {
+        return Err(anyhow!("invalid signed Core ML compiled-cache identity"));
+    }
+    let compiler_hash = format!("{:x}", Sha256::digest(COMPILER_IDENTITY.as_bytes()));
+    let path = cache_dir
+        .join("coreml-compiled")
+        .join("sha256")
+        .join(manifest_sha256)
+        .join(compiler_hash)
+        .join(format!("{role}.mlmodelc"));
+    let metadata = fs::symlink_metadata(&path).with_context(|| {
+        format!(
+            "inspect passive Core ML compiled artifact {}",
+            path.display()
+        )
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(anyhow!(
+            "passive Core ML compiled artifact is not a real directory: {}",
+            path.display()
+        ));
+    }
+    Ok(path)
 }
 
 #[cfg(all(ctx_semantic_fastembed, target_os = "macos"))]

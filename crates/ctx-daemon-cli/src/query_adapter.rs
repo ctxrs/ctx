@@ -18,7 +18,8 @@ use ctx_semantic_index::{
     SemanticVectorStore, SourceBackedSemanticDocumentBuilder,
 };
 use ctx_semantic_model::{
-    SemanticEmbeddingExecutorConfig, SemanticEmbeddingExecutorHandle, SharedSemanticRuntime,
+    SemanticEmbeddingExecutorConfig, SemanticEmbeddingExecutorHandle,
+    SemanticPassiveLoadUnavailable, SharedSemanticRuntime,
 };
 use serde_json::{json, Value};
 
@@ -168,9 +169,9 @@ impl ForegroundSemanticExecutor {
         self.executor
             .get_or_init(|| {
                 let model_config = if self.config.is_builtin() {
-                    foreground_coreml_model_config(
-                        crate::model_config::semantic_model_config(data_root),
-                    )
+                    foreground_coreml_model_config(crate::model_config::semantic_model_config(
+                        data_root,
+                    ))
                 } else {
                     crate::model_config::semantic_model_config(data_root)
                 };
@@ -460,12 +461,13 @@ fn foreground_query_embedding(
     mode: ForegroundSemanticMode,
 ) -> Result<(Vec<f32>, u64)> {
     let executor = selected_executor.resolve(data_root)?;
+    ensure_semantic_executor_contract(executor)?;
     match mode {
         ForegroundSemanticMode::ReadOnly => {
             if let Some(builtin) = executor.builtin_executor() {
                 builtin
                     .shared_runtime()
-                    .ensure_loaded_from_cache(builtin.config())?;
+                    .ensure_loaded_passively(builtin.config())?;
             }
         }
         ForegroundSemanticMode::Reconcile => ensure_foreground_executor(executor)?,
@@ -475,6 +477,16 @@ fn foreground_query_embedding(
     let embedding =
         executor.embed_query(executor.contract().prepare_query(semantic_text.to_owned()))?;
     Ok((embedding, started.elapsed().as_millis() as u64))
+}
+
+fn ensure_semantic_executor_contract(executor: &SemanticEmbeddingExecutorHandle) -> Result<()> {
+    let contract = semantic_model_contract();
+    if executor.executor().contract().fingerprint() != contract.fingerprint() {
+        return Err(anyhow!(
+            "semantic executor model contract does not match the semantic index contract"
+        ));
+    }
+    Ok(())
 }
 
 fn ensure_foreground_executor(executor: &SemanticEmbeddingExecutorHandle) -> Result<()> {
@@ -552,7 +564,12 @@ impl From<anyhow::Error> for SemanticQueryError {
                     error.to_string(),
                     true,
                 ),
-                Err(error) => Self::failed(format!("{error:#}")),
+                Err(error) => match error.downcast::<SemanticPassiveLoadUnavailable>() {
+                    Ok(error) => {
+                        Self::not_ready("semantic_executor_unavailable", error.to_string(), true)
+                    }
+                    Err(error) => Self::failed(format!("{error:#}")),
+                },
             },
         }
     }

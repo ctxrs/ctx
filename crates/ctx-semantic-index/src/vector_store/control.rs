@@ -1,11 +1,12 @@
 use std::{
-    fs,
+    env, fs,
     path::{Path, PathBuf},
     time::Duration as StdDuration,
 };
 
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior};
+use url::Url;
 
 use crate::{
     private_fs::{
@@ -63,6 +64,58 @@ pub(crate) fn open_read_only(root: &Path) -> Result<Option<Connection>> {
     )
     .with_context(|| format!("open semantic control metadata {}", path.display()))?;
     connection.busy_timeout(StdDuration::from_millis(SEMANTIC_VECTOR_BUSY_TIMEOUT_MS))?;
+    validate_schema(&connection)?;
+    Ok(Some(connection))
+}
+
+/// Opens only a completed main-database snapshot. WAL state is deliberately
+/// refused: immutable SQLite opens ignore a WAL and could otherwise observe a
+/// stale acknowledgement, while a normal read-only WAL open may touch the SHM
+/// family on some VFSes. The caller can safely fall back to lexical search.
+pub(crate) fn open_passive_snapshot(root: &Path) -> Result<Option<Connection>> {
+    if !root.exists() {
+        return Ok(None);
+    }
+    validate_root(root, false)?;
+    let path = control_path(root);
+    if !path.exists() {
+        return Ok(None);
+    }
+    validate_control_file(&path)?;
+    let wal = PathBuf::from(format!("{}-wal", path.display()));
+    if wal.exists() {
+        return Err(
+            SemanticVectorStoreError::passive_snapshot_unavailable(format!(
+            "semantic control WAL {} is present; a passive immutable snapshot would not be exact",
+            wal.display()
+        ))
+            .into(),
+        );
+    }
+    let absolute = if path.is_absolute() {
+        path.clone()
+    } else {
+        env::current_dir()?.join(&path)
+    };
+    let mut uri = Url::from_file_path(&absolute).map_err(|()| {
+        SemanticVectorStoreError::passive_snapshot_unavailable(format!(
+            "semantic control metadata path cannot be represented as a file URI: {}",
+            absolute.display()
+        ))
+    })?;
+    uri.query_pairs_mut()
+        .append_pair("mode", "ro")
+        .append_pair("immutable", "1");
+    let connection = Connection::open_with_flags(
+        uri.as_str(),
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_URI
+            | OpenFlags::SQLITE_OPEN_PRIVATE_CACHE
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .with_context(|| format!("open passive semantic control metadata {}", path.display()))?;
+    connection.execute_batch("PRAGMA query_only = ON;")?;
     validate_schema(&connection)?;
     Ok(Some(connection))
 }

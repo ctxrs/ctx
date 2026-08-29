@@ -321,8 +321,9 @@ mod platform {
         })
     }
 
-    pub(super) fn register_ready_providers(
+    pub(super) fn register_providers(
         runtime: &LoadedOnnxRuntime,
+        allow_prepare: bool,
     ) -> Result<WindowsMlProviderRegistration> {
         let api = WindowsMlApi::load(runtime)?;
         api.with_catalog(|api, _catalog, providers| {
@@ -338,6 +339,12 @@ mod platform {
                     continue;
                 }
                 if provider.ready_state == NOT_READY {
+                    if !allow_prepare {
+                        return Err(anyhow!(
+                            "certified Windows ML provider {} is installed but not ready for a passive query",
+                            provider.name
+                        ));
+                    }
                     api.ensure_ready(provider.handle).with_context(|| {
                         format!("activate installed certified provider {}", provider.name)
                     })?;
@@ -369,15 +376,17 @@ pub(super) fn provision_catalog(runtime: &LoadedOnnxRuntime) -> Result<String> {
 }
 
 #[cfg(target_os = "windows")]
-pub(super) fn register_ready_providers(
+pub(super) fn register_providers(
     runtime: &LoadedOnnxRuntime,
+    allow_prepare: bool,
 ) -> Result<WindowsMlProviderRegistration> {
-    platform::register_ready_providers(runtime)
+    platform::register_providers(runtime, allow_prepare)
 }
 
 #[cfg(not(target_os = "windows"))]
-pub(super) fn register_ready_providers(
+pub(super) fn register_providers(
     _runtime: &LoadedOnnxRuntime,
+    _allow_prepare: bool,
 ) -> Result<WindowsMlProviderRegistration> {
     Ok(WindowsMlProviderRegistration::default())
 }
