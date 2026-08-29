@@ -217,7 +217,7 @@ pub(super) fn load_semantic_onnxruntime(
                 return Ok(candidate.path);
             }
             Err(error) => failures.push(format!(
-                "{} {}: {error}",
+                "{} {}: {error:#}",
                 candidate.source,
                 candidate.path.display()
             )),
