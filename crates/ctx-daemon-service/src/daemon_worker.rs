@@ -209,6 +209,21 @@ pub(super) fn run_daemon_semantic_job(
                 .is_some_and(SemanticNotReady::retryable) => {}
         Err(error) => return Err(error),
     }
+    // An empty Core generation still needs its durable semantic acknowledgement,
+    // but has no embedding work. Complete that acknowledgement from the
+    // configuration-derived index contract before resolving credentials or an
+    // executor, so an unavailable selected executor cannot strand it.
+    let vector_path = source_backed_semantic_vector_path(data_root);
+    if source_eligible_events == 0 && !vector_path.exists() {
+        let mut vector_store = SemanticVectorStore::open(&vector_path, &index_contract)?;
+        let (outcome, indexed_chunks) =
+            reconcile_empty_source_backed_semantic_page(source_generation, &mut vector_store)?;
+        return Ok(daemon_semantic_reconciliation_job(
+            last_run_at_ms,
+            outcome,
+            indexed_chunks,
+        ));
+    }
     if !daemon_deadline_has_min_budget(deadline, DAEMON_MIN_REMAINING_FOR_JOB_SECS) {
         return Ok(daemon_semantic_job_json(
             "skipped",
@@ -257,7 +272,6 @@ pub(super) fn run_daemon_semantic_job(
         ));
     }
 
-    let vector_path = source_backed_semantic_vector_path(data_root);
     let mut vector_store = open_selected_semantic_vector_store(&vector_path, &executor)?;
 
     let min_remaining_secs = executor
@@ -337,23 +351,11 @@ pub(super) fn run_daemon_semantic_job(
         deadline,
         &mut publish_progress,
     )?;
-    let (status, reason, last_error) = if outcome.ready() {
-        ("ready", None, None)
-    } else {
-        ("budget_exhausted", None, None)
-    };
-    let mut job = daemon_semantic_job_json(
-        status,
-        reason,
+    Ok(daemon_semantic_reconciliation_job(
         last_run_at_ms,
-        (indexed_chunks > 0).then_some(indexed_chunks),
-        last_error,
-    );
-    annotate_source_backed_semantic_progress(&mut job, &outcome);
-    if let Some(sequence) = outcome.semantic_progress_sequence() {
-        job["semantic_progress_sequence"] = json!(sequence);
-    }
-    Ok(job)
+        outcome,
+        indexed_chunks,
+    ))
 }
 
 fn open_selected_semantic_vector_store(
@@ -425,6 +427,42 @@ fn reconcile_source_backed_semantic_page(
     Ok((outcome, embedder.indexed_chunks))
 }
 
+fn reconcile_empty_source_backed_semantic_page(
+    generation: PinnedSourceBackedGeneration,
+    vector_store: &mut SemanticVectorStore,
+) -> Result<(SourceBackedSemanticOutcome, usize)> {
+    let index = generation.into_index();
+    let mut builder = SourceBackedSemanticDocumentBuilder::new(&index);
+    let mut embedder = EmptySourceSemanticEmbedder;
+    let outcome =
+        vector_store.reconcile_source_backed_index(&index, &mut builder, &mut embedder)?;
+    Ok((outcome, 0))
+}
+
+fn daemon_semantic_reconciliation_job(
+    last_run_at_ms: i64,
+    outcome: SourceBackedSemanticOutcome,
+    indexed_chunks: usize,
+) -> Value {
+    let status = if outcome.ready() {
+        "ready"
+    } else {
+        "budget_exhausted"
+    };
+    let mut job = daemon_semantic_job_json(
+        status,
+        None,
+        last_run_at_ms,
+        (indexed_chunks > 0).then_some(indexed_chunks),
+        None,
+    );
+    annotate_source_backed_semantic_progress(&mut job, &outcome);
+    if let Some(sequence) = outcome.semantic_progress_sequence() {
+        job["semantic_progress_sequence"] = json!(sequence);
+    }
+    job
+}
+
 fn annotate_source_backed_semantic_progress(
     job: &mut Value,
     outcome: &SourceBackedSemanticOutcome,
@@ -443,6 +481,14 @@ struct RuntimeSourceSemanticEmbedder<'a> {
     executor: &'a dyn SemanticEmbeddingExecutor,
     deadline: Option<Instant>,
     indexed_chunks: usize,
+}
+
+struct EmptySourceSemanticEmbedder;
+
+impl SemanticBatchEmbedder for EmptySourceSemanticEmbedder {
+    fn embed_chunks(&mut self, _chunks: &[SemanticChunkDocument]) -> Result<Vec<Vec<f32>>> {
+        anyhow::bail!("zero-eligible semantic reconciliation requested embeddings")
+    }
 }
 
 impl SemanticBatchEmbedder for RuntimeSourceSemanticEmbedder<'_> {

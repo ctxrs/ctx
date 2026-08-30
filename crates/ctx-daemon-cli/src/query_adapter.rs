@@ -16,8 +16,8 @@ use ctx_history_read_application::{
 use ctx_semantic_index::semantic_model_contract;
 use ctx_semantic_index::{
     source_backed_semantic_vector_path, SemanticBatchEmbedder, SemanticChunkDocument,
-    SemanticModelContract, SemanticNotReady, SemanticQueryPin, SemanticVectorStore,
-    SourceBackedSemanticDocumentBuilder,
+    SemanticDocumentBuilder, SemanticModelContract, SemanticNotReady, SemanticQueryPin,
+    SemanticVectorStore, SourceBackedSemanticDocumentBuilder,
 };
 use ctx_semantic_model::{
     semantic_embedding_failure_is_permanent, SemanticEmbeddingExecutorConfig,
@@ -298,11 +298,14 @@ impl HistorySemanticPort for SemanticQueryAdapter<'_> {
                         let contract =
                             semantic_index_contract_for_selected(executor.config.contract())
                                 .map_err(SemanticQueryError::from)?;
-                        let handle = executor
-                            .resolve(self.data_root, &contract)
-                            .map_err(SemanticQueryError::from)?;
-                        reconcile_foreground_semantic(index, self.data_root, handle, &contract)
-                            .map_err(SemanticQueryError::from)?;
+                        reconcile_foreground_semantic_with_selected_executor(
+                            index,
+                            self.data_root,
+                            executor,
+                            &contract,
+                            &mut || Ok(()),
+                        )
+                        .map_err(SemanticQueryError::from)?;
                         SemanticQuerySession::begin_foreground(
                             index,
                             self.data_root,
@@ -341,6 +344,7 @@ impl SemanticBatchEmbedder for ForegroundSemanticEmbedder<'_> {
     }
 }
 
+#[cfg(test)]
 fn reconcile_foreground_semantic(
     index: &VerifiedIndex,
     data_root: &Path,
@@ -360,9 +364,52 @@ pub(crate) fn reconcile_selected_foreground_semantic(
     checkpoint: &mut dyn FnMut() -> Result<()>,
 ) -> Result<()> {
     let selected = ForegroundSemanticExecutor::new(config);
+    reconcile_foreground_semantic_with_selected_executor(
+        index, data_root, &selected, contract, checkpoint,
+    )
+}
+
+fn reconcile_foreground_semantic_with_selected_executor(
+    index: &VerifiedIndex,
+    data_root: &Path,
+    selected: &ForegroundSemanticExecutor,
+    contract: &SemanticModelContract,
+    checkpoint: &mut dyn FnMut() -> Result<()>,
+) -> Result<()> {
     checkpoint()?;
+    if index.semantic_eligible_event_count()? == 0
+        && !source_backed_semantic_vector_path(data_root).exists()
+    {
+        return reconcile_empty_foreground_semantic_with_checkpoint(
+            index, data_root, contract, checkpoint,
+        );
+    }
     let executor = selected.resolve(data_root, contract)?;
     reconcile_foreground_semantic_with_checkpoint(index, data_root, executor, contract, checkpoint)
+}
+
+fn reconcile_empty_foreground_semantic_with_checkpoint(
+    index: &VerifiedIndex,
+    data_root: &Path,
+    contract: &SemanticModelContract,
+    checkpoint: &mut dyn FnMut() -> Result<()>,
+) -> Result<()> {
+    // Match the established pre-open checkpoint boundaries: an empty first
+    // generation has no executor work, but cancellation and supersession must
+    // still win before it can publish its durable acknowledgement.
+    checkpoint()?;
+    checkpoint()?;
+    let mut store =
+        SemanticVectorStore::open(&source_backed_semantic_vector_path(data_root), contract)?;
+    let mut builder = SourceBackedSemanticDocumentBuilder::new(index);
+    let mut embedder = EmptyForegroundSemanticEmbedder;
+    reconcile_foreground_source_backed_semantic_with_checkpoint(
+        index,
+        &mut store,
+        &mut builder,
+        &mut embedder,
+        checkpoint,
+    )
 }
 
 fn reconcile_foreground_semantic_with_checkpoint(
@@ -384,14 +431,27 @@ fn reconcile_foreground_semantic_with_checkpoint(
     let mut store = open_foreground_semantic_vector_store(data_root, executor, contract)?;
     let mut builder = SourceBackedSemanticDocumentBuilder::new(index);
     let mut embedder = ForegroundSemanticEmbedder { executor };
+    reconcile_foreground_source_backed_semantic_with_checkpoint(
+        index,
+        &mut store,
+        &mut builder,
+        &mut embedder,
+        checkpoint,
+    )
+}
+
+fn reconcile_foreground_source_backed_semantic_with_checkpoint(
+    index: &VerifiedIndex,
+    store: &mut SemanticVectorStore,
+    builder: &mut dyn SemanticDocumentBuilder,
+    embedder: &mut dyn SemanticBatchEmbedder,
+    checkpoint: &mut dyn FnMut() -> Result<()>,
+) -> Result<()> {
     loop {
         checkpoint()?;
-        let outcome = match store.reconcile_source_backed_index_with_checkpoint(
-            index,
-            &mut builder,
-            &mut embedder,
-            checkpoint,
-        ) {
+        let outcome = match store
+            .reconcile_source_backed_index_with_checkpoint(index, builder, embedder, checkpoint)
+        {
             Ok(outcome) => outcome,
             Err(error) => {
                 // An interrupt can also unwind a blocking executor as a
@@ -409,6 +469,14 @@ fn reconcile_foreground_semantic_with_checkpoint(
                 "semantic reconciliation stopped before the pinned Core generation was ready"
             ));
         }
+    }
+}
+
+struct EmptyForegroundSemanticEmbedder;
+
+impl SemanticBatchEmbedder for EmptyForegroundSemanticEmbedder {
+    fn embed_chunks(&mut self, _chunks: &[SemanticChunkDocument]) -> Result<Vec<Vec<f32>>> {
+        anyhow::bail!("zero-eligible semantic reconciliation requested embeddings")
     }
 }
 

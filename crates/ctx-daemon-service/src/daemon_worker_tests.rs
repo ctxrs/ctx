@@ -7,7 +7,7 @@ use std::{
 };
 
 use anyhow::{anyhow, Result};
-use ctx_history_capture::SourceBackedRefreshScope;
+use ctx_history_capture::{DiscoveryContext, SourceBackedRefreshScope};
 use ctx_history_core::{
     derive_event_id, derive_session_id, AgentScope, CaptureProvider, CertifiedSource, CoreRecord,
     EventIdentityInput, EventRole, EventType, NativeItemKey, NativeSessionKey, ScannedSourceCounts,
@@ -54,7 +54,7 @@ use crate::{
         publish_authoritative_empty_generation_for_test, source_backed_index_root,
     },
     test_support::{ARTIFACT, CONFIG},
-    CONFIG_FILE,
+    DaemonConfigSnapshot, CONFIG_FILE,
 };
 
 struct RecordingSemanticExecutor {
@@ -63,6 +63,28 @@ struct RecordingSemanticExecutor {
 }
 
 struct RejectingEmptySemanticEmbedder;
+
+struct RejectingSemanticAuthConfig;
+
+impl DaemonConfigPort for RejectingSemanticAuthConfig {
+    fn load(&self, data_root: &Path) -> Result<DaemonConfigSnapshot> {
+        CONFIG.load(data_root)
+    }
+
+    fn semantic_model_config(&self, data_root: &Path) -> ctx_semantic_model::SemanticModelConfig {
+        CONFIG.semantic_model_config(data_root)
+    }
+
+    fn semantic_executor_auth(&self) -> Result<ctx_semantic_model::SemanticEmbeddingExecutorAuth> {
+        Err(anyhow!(
+            "zero-eligible semantic generation must not resolve daemon auth"
+        ))
+    }
+
+    fn discovery_context(&self, data_root: &Path) -> Result<DiscoveryContext> {
+        CONFIG.discovery_context(data_root)
+    }
+}
 
 impl SemanticBatchEmbedder for RejectingEmptySemanticEmbedder {
     fn embed_chunks(&mut self, _chunks: &[SemanticChunkDocument]) -> Result<Vec<Vec<f32>>> {
@@ -350,7 +372,8 @@ fn ready_empty_v2_generation_is_observed_without_constructing_an_executor() -> R
 }
 
 #[test]
-fn unacknowledged_empty_v2_generation_verifies_before_writable_reconciliation() -> Result<()> {
+fn first_time_empty_v2_generation_acknowledges_without_executor_auth_or_endpoint_traffic(
+) -> Result<()> {
     let temp = tempfile::tempdir()?;
     let generation = publish_authoritative_empty_generation_for_test(
         &source_backed_index_root(temp.path()),
@@ -360,9 +383,9 @@ fn unacknowledged_empty_v2_generation_verifies_before_writable_reconciliation() 
         None,
     )?
     .generation_id;
-    let (endpoint, server) = contract_response_endpoint(
-        r#"{"schema_version":2,"space_id":"empty-v2","dimensions":96}"#,
-    )?;
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    listener.set_nonblocking(true)?;
+    let endpoint = format!("http://{}", listener.local_addr()?);
     let selected = SemanticEmbeddingExecutorConfig::http(
         &endpoint,
         ExternalSemanticSpace::new("empty-v2", 96)?,
@@ -388,13 +411,19 @@ fn unacknowledged_empty_v2_generation_verifies_before_writable_reconciliation() 
         None,
         true,
         &ARTIFACT,
-        &CONFIG,
+        &RejectingSemanticAuthConfig,
     )?;
 
     assert_eq!(job["status"], "ready");
-    assert!(runtime.semantic_executor.is_some());
+    assert_eq!(job["source_generation_ready"], true);
+    assert_eq!(job["source_work_remaining"], false);
+    assert_eq!(job["source_records_embedded"], 0);
+    assert!(runtime.semantic_executor.is_none());
     assert!(!runtime.semantic_runtime.is_loaded());
-    server.join().expect("contract server thread")?;
+    assert!(matches!(
+        listener.accept(),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+    ));
     let store =
         SemanticVectorStore::open(&source_backed_semantic_vector_path(temp.path()), &contract)?;
     assert!(matches!(

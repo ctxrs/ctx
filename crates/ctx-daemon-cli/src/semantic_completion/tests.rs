@@ -1,5 +1,7 @@
 use std::{
     cell::{Cell, RefCell},
+    ffi::OsString,
+    net::TcpListener,
     path::Path,
     time::{Duration, Instant},
 };
@@ -13,7 +15,7 @@ use ctx_history_core::{
 use ctx_history_index::{CoreEventRecord, GenerationWriter, VerifiedIndex, WriterOptions};
 use ctx_semantic_index::{
     source_backed_semantic_vector_path, SemanticBatchEmbedder, SemanticChunkDocument,
-    SemanticDocumentBuilder, SemanticEventDocument, SemanticVectorStore,
+    SemanticDocumentBuilder, SemanticEventDocument, SemanticVectorStore, SourceBackedGenerationPin,
     SourceBackedSemanticDocumentBuilder,
 };
 use ctx_semantic_model::{
@@ -798,5 +800,56 @@ fn ready_empty_external_v2_foreground_completion_is_executor_free() -> Result<()
     )?;
     assert_eq!(completed.generation_id(), generation);
     assert_eq!(*checkpoints.borrow(), 1);
+    Ok(())
+}
+
+#[test]
+fn first_time_empty_external_v2_foreground_completion_is_executor_and_auth_free() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let index_root = ctx_history_refresh::source_backed_index_root(temp.path());
+    let index = semantic_index_revision_at(&index_root, 1, false)?;
+    let generation = index.generation_id().to_owned();
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    listener.set_nonblocking(true)?;
+    let endpoint = format!("http://{}", listener.local_addr()?);
+    let environment = crate::test_environment::EnvironmentGuard::capture(&[
+        ctx_semantic_model::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENV,
+        ctx_semantic_model::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV,
+    ]);
+    let token = OsString::from("must-not-be-read");
+    let binding = OsString::from("http://127.0.0.1:9");
+    environment.set(
+        ctx_semantic_model::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENV,
+        Some(&token),
+    );
+    environment.set(
+        ctx_semantic_model::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV,
+        Some(&binding),
+    );
+    let config = SemanticEmbeddingExecutorConfig::http(
+        &endpoint,
+        ExternalSemanticSpace::new("first-time-empty-completion", 96)?,
+    )?;
+
+    let completed = complete_semantic_generation_foreground_with_checkpoint(
+        temp.path(),
+        PinnedSourceBackedGeneration::from_index(index),
+        config.clone(),
+        &mut || Ok(()),
+    )?;
+
+    assert_eq!(completed.generation_id(), generation);
+    assert!(matches!(
+        listener.accept(),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+    ));
+    assert!(!temp.path().join("model-cache").exists());
+    let contract = semantic_index_contract_for_selected(config.contract())?;
+    let store =
+        SemanticVectorStore::open(&source_backed_semantic_vector_path(temp.path()), &contract)?;
+    assert!(matches!(
+        store.source_backed_generation_pin_exact(&generation, 0)?,
+        SourceBackedGenerationPin::ReadyEmpty
+    ));
     Ok(())
 }

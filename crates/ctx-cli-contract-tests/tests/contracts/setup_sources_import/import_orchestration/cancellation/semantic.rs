@@ -151,9 +151,9 @@ fn ready_empty_manual_semantic_import_reuses_the_projection_without_an_executor(
         "{ready:#}"
     );
     let requests_after_initial_completion = server.request_count();
-    assert!(
-        requests_after_initial_completion > 0,
-        "the initial ReadyEmpty projection must establish its semantic contract"
+    assert_eq!(
+        requests_after_initial_completion, 0,
+        "a first-time ReadyEmpty projection must not construct or verify its executor"
     );
 
     let repeated = json_output(ctx(&temp).args(arguments));

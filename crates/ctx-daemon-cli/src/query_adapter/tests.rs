@@ -704,13 +704,50 @@ fn foreground_empty_generation_converges_without_loading_a_model() -> Result<()>
     let SemanticQueryExecution::Foreground { executor, .. } = &adapter.execution else {
         unreachable!("foreground constructor selected daemon execution")
     };
-    assert!(executor.is_resolved());
-    assert!(!executor
-        .resolve(temp.path(), semantic_model_contract())?
-        .builtin_executor()
-        .expect("default executor is built in")
-        .shared_runtime()
-        .is_loaded());
+    assert!(
+        !executor.is_resolved(),
+        "an empty generation must acknowledge without resolving the selected executor"
+    );
+    Ok(())
+}
+
+#[test]
+fn first_time_empty_http_generation_skips_executor_auth_endpoint_and_model_loading() -> Result<()> {
+    let temp = semantic_tempdir()?;
+    let (index, _) = semantic_index_revision(temp.path(), 1, false)?;
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    listener.set_nonblocking(true)?;
+    let endpoint = format!("http://{}/semantic-base", listener.local_addr()?);
+    // A resolver would reject this mismatched bound credential before it can
+    // build the HTTP executor. Successful completion therefore proves that
+    // zero eligible work did not consult foreground authentication either.
+    let _environment = SemanticEnvironmentGuard::http_auth("http://127.0.0.1:9");
+    let adapter =
+        SemanticQueryAdapter::foreground(temp.path(), external_executor_config(endpoint.as_str()));
+
+    adapter
+        .begin_query(&index)
+        .map_err(|error| anyhow!(error.to_string()))?;
+
+    let SemanticQueryExecution::Foreground { executor, .. } = &adapter.execution else {
+        unreachable!("foreground constructor selected daemon execution")
+    };
+    assert!(!executor.is_resolved());
+    assert!(matches!(
+        listener.accept(),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+    ));
+    assert!(
+        !temp.path().join("model-cache").exists(),
+        "empty HTTP reconciliation must not initialize local model state"
+    );
+    let contract = semantic_index_contract_for_selected(executor.config.contract())?;
+    let store =
+        SemanticVectorStore::open(&source_backed_semantic_vector_path(temp.path()), &contract)?;
+    assert!(matches!(
+        store.source_backed_generation_pin_exact(index.generation_id(), 0)?,
+        SourceBackedGenerationPin::ReadyEmpty
+    ));
     Ok(())
 }
 
