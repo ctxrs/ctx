@@ -11,6 +11,8 @@ use std::{
 mod cancellation;
 #[path = "import_orchestration/relocation.rs"]
 mod relocation;
+#[path = "import_orchestration/semantic_failure.rs"]
+mod semantic_failure;
 
 struct SourceRefreshDaemon {
     child: Option<Child>,

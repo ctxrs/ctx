@@ -12,7 +12,13 @@ use std::{
 const SEMANTIC_TEST_SPACE: &str = "ctx-contract-test-space";
 const SEMANTIC_TEST_DIMENSIONS: usize = 7;
 
-struct LoopbackSemanticServer {
+#[derive(Clone, Copy)]
+enum SemanticEmbeddingReply {
+    Valid,
+    WrongDimensions,
+}
+
+pub(super) struct LoopbackSemanticServer {
     endpoint: String,
     requests: Arc<Mutex<Vec<Value>>>,
     embedding_started: Arc<AtomicBool>,
@@ -23,6 +29,14 @@ struct LoopbackSemanticServer {
 
 impl LoopbackSemanticServer {
     fn start(block_embeddings: bool) -> Self {
+        Self::start_with_reply(block_embeddings, SemanticEmbeddingReply::Valid)
+    }
+
+    pub(super) fn start_with_wrong_dimensions() -> Self {
+        Self::start_with_reply(false, SemanticEmbeddingReply::WrongDimensions)
+    }
+
+    fn start_with_reply(block_embeddings: bool, embedding_reply: SemanticEmbeddingReply) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback semantic server");
         listener
             .set_nonblocking(true)
@@ -72,7 +86,7 @@ impl LoopbackSemanticServer {
                         if stopped.load(Ordering::Acquire) {
                             return;
                         }
-                        semantic_embedding_response(&request["body"])
+                        semantic_embedding_response(&request["body"], embedding_reply)
                     }
                     other => panic!("unexpected loopback semantic route: {other:?}"),
                 };
@@ -104,7 +118,7 @@ impl LoopbackSemanticServer {
         }
     }
 
-    fn endpoint(&self) -> &str {
+    pub(super) fn endpoint(&self) -> &str {
         &self.endpoint
     }
 
@@ -127,7 +141,7 @@ impl LoopbackSemanticServer {
         self.embedding_release.store(true, Ordering::Release);
     }
 
-    fn finish(mut self) -> Vec<Value> {
+    pub(super) fn finish(mut self) -> Vec<Value> {
         self.stop.store(true, Ordering::Release);
         self.thread
             .take()
@@ -208,8 +222,8 @@ fn read_semantic_http_request(stream: &mut TcpStream) -> Value {
     })
 }
 
-fn semantic_embedding_response(request: &Value) -> Value {
-    json!({
+fn semantic_embedding_response(request: &Value, reply: SemanticEmbeddingReply) -> Value {
+    let mut response = json!({
         "schema_version": 2,
         "space_id": SEMANTIC_TEST_SPACE,
         "dimensions": SEMANTIC_TEST_DIMENSIONS,
@@ -223,7 +237,13 @@ fn semantic_embedding_response(request: &Value) -> Value {
                 "embedding": [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
             }))
             .collect::<Vec<_>>(),
-    })
+    });
+    if matches!(reply, SemanticEmbeddingReply::WrongDimensions) {
+        for output in response["embeddings"].as_array_mut().unwrap() {
+            output["embedding"] = json!([1.0]);
+        }
+    }
+    response
 }
 
 fn write_semantic_http_json(stream: &mut TcpStream, body: &Value) -> io::Result<()> {
@@ -237,7 +257,7 @@ fn write_semantic_http_json(stream: &mut TcpStream, body: &Value) -> io::Result<
     stream.flush()
 }
 
-fn write_manual_semantic_config(temp: &TempDir, endpoint: &str) {
+pub(super) fn write_manual_semantic_config(temp: &TempDir, endpoint: &str) {
     fs::create_dir_all(data_root(temp)).unwrap();
     fs::write(
         data_root(temp).join("config.toml"),
@@ -267,7 +287,7 @@ fn semantic_status_ready(temp: &TempDir) -> Value {
     status
 }
 
-fn assert_single_semantic_writer(requests: &[Value]) {
+pub(super) fn assert_single_semantic_writer(requests: &[Value]) {
     let routes = requests
         .iter()
         .map(|request| request["path"].as_str().unwrap())

@@ -66,6 +66,7 @@ filegroup(
         "tests/contracts/setup_sources_import/import_orchestration/cancellation.rs",
         "tests/contracts/setup_sources_import/import_orchestration/cancellation/semantic.rs",
         "tests/contracts/setup_sources_import/import_orchestration/relocation.rs",
+        "tests/contracts/setup_sources_import/import_orchestration/semantic_failure.rs",
         "tests/contracts/setup_sources_import/lifecycle.rs",
         "tests/contracts/setup_sources_import/lifecycle/additional.rs",
         "tests/contracts/setup_sources_import/source_inventory.rs",
