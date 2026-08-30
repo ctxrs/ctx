@@ -267,4 +267,13 @@ impl CoreRefreshEngine {
     pub fn route_is_permanently_blocked_for_test(&self, route: &SourceRouteIdentity) -> bool {
         self.lock_state().dirty_routes.is_permanently_blocked(route)
     }
+
+    pub fn exhaustive_route_obligations_for_test(&self) -> BTreeSet<SourceRouteIdentity> {
+        let state = self.lock_state();
+        state
+            .hermes_routes_requiring_exhaustive_recovery
+            .union(&state.routes_requiring_exhaustive_reconciliation)
+            .cloned()
+            .collect()
+    }
 }

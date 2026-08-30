@@ -79,6 +79,60 @@ fn publish_owned_pin_fixture(
     Ok(publication)
 }
 
+#[derive(Debug, Default)]
+struct RouteFinalizationTransitionJournal {
+    finalization_transitions: AtomicUsize,
+}
+
+impl RouteFinalizationTransitionJournal {
+    fn finalization_transition_count(&self) -> usize {
+        self.finalization_transitions.load(Ordering::SeqCst)
+    }
+}
+
+impl RefreshJournal for RouteFinalizationTransitionJournal {
+    fn load(&self, data_root: &Path) -> Result<Option<Value>> {
+        Ok(read_daemon_job_status(
+            &daemon_source_backed_refresh_job_path(data_root),
+        ))
+    }
+
+    fn store(&self, data_root: &Path, value: &Value) -> Result<()> {
+        let path = daemon_source_backed_refresh_job_path(data_root);
+        let previous = read_daemon_job_status(&path);
+        let completes_route_finalization = previous.as_ref().is_some_and(|previous| {
+            previous["request_id"] == value["request_id"]
+                && previous["route_finalization_pending"] == true
+                && value.get("route_finalization_pending").is_none()
+                && matches!(
+                    value.get("request_state").and_then(Value::as_str),
+                    Some("published" | "failed")
+                )
+        });
+        write_daemon_job_status(&path, value)?;
+        if completes_route_finalization {
+            self.finalization_transitions.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok(())
+    }
+
+    fn store_before_ack(&self, data_root: &Path, value: &Value) -> DurableAdmissionPersistence {
+        match self.store(data_root, value) {
+            Ok(()) => DurableAdmissionPersistence::Confirmed,
+            Err(error) => DurableAdmissionPersistence::Failed(error),
+        }
+    }
+}
+
+fn queued_successor_ids(job: &Value) -> BTreeSet<String> {
+    job.get("queued_successors")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|successor| successor["request_id"].as_str().map(str::to_owned))
+        .collect()
+}
+
 #[test]
 fn publication_metadata_ownership_rejects_table_driven_mismatches_for_terminal_and_running_recovery(
 ) {
@@ -378,165 +432,252 @@ fn post_route_finalization_write_failure_retries_once_before_optional_successor(
     }
 }
 
+fn assert_marker_terminal_recovery_at_crash_boundary(
+    failed: bool,
+    with_existing_successor: bool,
+    crash_before_finalization: bool,
+) {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    ctx_history_platform::platform_security::establish_private_data_root(&data_root).unwrap();
+    let route = route_identity(if failed { 0xc1 } else { 0xc2 });
+    let execution_route = route.clone();
+    let executions = Arc::new(AtomicUsize::new(0));
+    let execution_count = Arc::clone(&executions);
+    let executor: Arc<dyn SourceBackedRefreshExecutor> =
+        Arc::new(move |execution: SourceBackedRefreshExecution<'_>| {
+            execution_count.fetch_add(1, Ordering::SeqCst);
+            if failed {
+                bail!("injected refresh failure before route finalization");
+            }
+            publish_owned_pin_fixture(&execution, execution_route.clone())
+        });
+    let journal = Arc::new(RouteFinalizationTransitionJournal::default());
+    let coordinator = Arc::new(
+        CoreRefreshEngine::with_journal_executor_and_admitted_routes(
+            Arc::clone(&journal) as Arc<dyn RefreshJournal>,
+            Arc::clone(&executor),
+            [route.clone()],
+        ),
+    );
+    coordinator.initialize_watch_route_authority([route.clone()]);
+    coordinator.record_watch_routes_requiring_exhaustive_reconciliation(
+        [(route.clone(), EventWatermark::new(1, 1))],
+        source_route_ledger_now_ms().saturating_sub(1_000),
+    );
+    assert!(coordinator
+        .enqueue_next_dirty_route(&data_root, u64::MAX)
+        .unwrap());
+    let root = read_daemon_job_status(&daemon_source_backed_refresh_job_path(&data_root))
+        .expect("exhaustive route root");
+    assert_eq!(root["reconciliation_demand"], "exhaustive");
+    let root_id = request_id(&root);
+    let existing_successor_id = with_existing_successor.then(|| {
+        request_id(&enqueue_synthetic_manual_all_request(
+            coordinator.as_ref(),
+            &data_root,
+            10,
+        ))
+    });
+    let finalization_entered = Arc::new(Barrier::new(2));
+    let finalization_release = Arc::new(Barrier::new(2));
+    let entered = Arc::clone(&finalization_entered);
+    let release = Arc::clone(&finalization_release);
+    coordinator.install_before_route_finalization_hook(move || {
+        entered.wait();
+        release.wait();
+        if crash_before_finalization {
+            // This hook runs without the engine-state lock and before the only
+            // route-finalization call. Unwinding terminates the writer; no
+            // engine or run Drop implementation can complete the second write.
+            panic!("terminate writer before route finalization");
+        }
+    });
+
+    let notifications = Arc::new(AtomicUsize::new(0));
+    let run_notifications = Arc::clone(&notifications);
+    let runner = Arc::clone(&coordinator);
+    let run_root = data_root.clone();
+    let run = std::thread::spawn(move || {
+        let terminal = runner.run_next(&run_root);
+        if terminal.as_ref().is_some_and(|terminal| {
+            !terminal.failed && !terminal.terminal_persistence_pending && terminal.did_work
+        }) {
+            run_notifications.fetch_add(1, Ordering::SeqCst);
+        }
+        terminal
+    });
+    finalization_entered.wait();
+
+    let concurrent_successor_id = request_id(&enqueue_synthetic_manual_all_request(
+        coordinator.as_ref(),
+        &data_root,
+        11,
+    ));
+    coordinator
+        .persist_job_status_for_test(&data_root, &concurrent_successor_id)
+        .unwrap();
+    let retry_probe = coordinator
+        .persist_retry_status(
+            &data_root,
+            coordinator.status(&concurrent_successor_id).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(retry_probe["request_id"], root_id);
+    assert_eq!(retry_probe["route_finalization_pending"], true);
+    let scheduler_probe = coordinator
+        .persist_scheduler_status(
+            &data_root,
+            json!({
+                "request_id": root_id,
+                "retryable": true,
+                "retry_after_ms": 1,
+            }),
+        )
+        .unwrap();
+    assert_eq!(scheduler_probe["request_id"], root_id);
+    assert_eq!(scheduler_probe["route_finalization_pending"], true);
+    assert!(coordinator.run_next(&data_root).is_none());
+    let expected_successors = existing_successor_id
+        .iter()
+        .cloned()
+        .chain(std::iter::once(concurrent_successor_id.clone()))
+        .collect::<BTreeSet<_>>();
+    let marker = read_daemon_job_status(&daemon_source_backed_refresh_job_path(&data_root))
+        .expect("marker-bearing terminal owner");
+    assert_eq!(marker["request_id"], root_id);
+    assert_eq!(marker["route_finalization_pending"], true);
+    assert_eq!(
+        marker["request_state"],
+        if failed { "failed" } else { "published" }
+    );
+    assert_eq!(queued_successor_ids(&marker), expected_successors);
+    assert_eq!(journal.finalization_transition_count(), 0);
+    assert_eq!(executions.load(Ordering::SeqCst), 1);
+    assert_eq!(notifications.load(Ordering::SeqCst), 0);
+
+    finalization_release.wait();
+    if crash_before_finalization {
+        assert!(
+            run.join().is_err(),
+            "pre-finalization writer must terminate"
+        );
+        assert_eq!(journal.finalization_transition_count(), 0);
+    } else {
+        let terminal = run
+            .join()
+            .expect("join route finalization")
+            .expect("terminal root");
+        assert_eq!(terminal.job["request_id"], root_id);
+        assert_eq!(terminal.failed, failed);
+        assert!(!terminal.terminal_persistence_pending);
+        assert_eq!(journal.finalization_transition_count(), 1);
+    }
+    assert_eq!(executions.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        notifications.load(Ordering::SeqCst),
+        usize::from(!crash_before_finalization && !failed)
+    );
+    drop(coordinator);
+
+    let crash_image = read_daemon_job_status(&daemon_source_backed_refresh_job_path(&data_root))
+        .expect("durable crash image after dropping original writer");
+    assert_eq!(crash_image["request_id"], root_id);
+    assert_eq!(
+        crash_image
+            .get("route_finalization_pending")
+            .and_then(Value::as_bool),
+        crash_before_finalization.then_some(true)
+    );
+    assert_eq!(queued_successor_ids(&crash_image), expected_successors);
+    assert_eq!(
+        journal.finalization_transition_count(),
+        usize::from(!crash_before_finalization)
+    );
+
+    let restarted = CoreRefreshEngine::with_journal_executor_and_admitted_routes(
+        Arc::clone(&journal) as Arc<dyn RefreshJournal>,
+        executor,
+        [route.clone()],
+    );
+    assert!(restarted
+        .recover_interrupted_publication(&data_root)
+        .unwrap());
+    let recovered_root = restarted.status(&root_id).unwrap_or_else(|| {
+        panic!(
+            "missing recovered root: failed={failed} existing_successor={with_existing_successor} crash_before={crash_before_finalization}"
+        )
+    });
+    assert_eq!(
+        recovered_root["request_state"],
+        if failed { "failed" } else { "published" }
+    );
+    for successor_id in &expected_successors {
+        assert_eq!(
+            restarted.status(successor_id).unwrap()["request_state"],
+            "admission_pending"
+        );
+    }
+    let normalized = read_daemon_job_status(&daemon_source_backed_refresh_job_path(&data_root))
+        .expect("normalized terminal owner");
+    assert_eq!(normalized["request_id"], root_id);
+    assert!(normalized.get("route_finalization_pending").is_none());
+    assert_eq!(queued_successor_ids(&normalized), expected_successors);
+    assert_eq!(
+        restarted.scheduled_route_ids_for_test(),
+        if failed {
+            BTreeSet::from([route.clone()])
+        } else {
+            BTreeSet::new()
+        }
+    );
+    assert_eq!(
+        restarted.dirty_route_ids_for_test(),
+        if failed {
+            BTreeSet::from([route.clone()])
+        } else {
+            BTreeSet::new()
+        }
+    );
+    assert_eq!(
+        restarted.exhaustive_route_obligations_for_test(),
+        if failed {
+            BTreeSet::from([route.clone()])
+        } else {
+            BTreeSet::new()
+        }
+    );
+    assert!(!restarted.route_is_permanently_blocked_for_test(&route));
+    assert_eq!(journal.finalization_transition_count(), 1);
+    assert_eq!(executions.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        notifications.load(Ordering::SeqCst),
+        usize::from(!crash_before_finalization && !failed)
+    );
+}
+
 #[test]
-fn marker_terminal_owns_concurrent_writes_until_route_finalization_commits() {
+fn marker_terminal_recovers_after_true_pre_finalization_writer_termination() {
     for failed in [false, true] {
         for with_existing_successor in [false, true] {
-            for crash_before_finalization in [false, true] {
-                let temp = tempfile::tempdir().unwrap();
-                let data_root = temp.path().join("data");
-                ctx_history_platform::platform_security::establish_private_data_root(&data_root)
-                    .unwrap();
-                let route = route_identity(if failed { 0xc1 } else { 0xc2 });
-                let execution_route = route.clone();
-                let executions = Arc::new(AtomicUsize::new(0));
-                let execution_count = Arc::clone(&executions);
-                let executor: Arc<dyn SourceBackedRefreshExecutor> =
-                    Arc::new(move |execution: SourceBackedRefreshExecution<'_>| {
-                        execution_count.fetch_add(1, Ordering::SeqCst);
-                        if failed {
-                            bail!("injected refresh failure before route finalization");
-                        }
-                        publish_owned_pin_fixture(&execution, execution_route.clone())
-                    });
-                let coordinator = Arc::new(CoreRefreshEngine::with_executor_and_admitted_routes(
-                    executor,
-                    [route.clone()],
-                ));
-                let root = coordinator.enqueue_periodic(&data_root).unwrap();
-                let root_id = request_id(&root);
-                let existing_successor_id = with_existing_successor.then(|| {
-                    request_id(&enqueue_synthetic_manual_all_request(
-                        coordinator.as_ref(),
-                        &data_root,
-                        10,
-                    ))
-                });
-                let finalization_entered = Arc::new(Barrier::new(2));
-                let finalization_release = Arc::new(Barrier::new(2));
-                let entered = Arc::clone(&finalization_entered);
-                let release = Arc::clone(&finalization_release);
-                coordinator.install_before_route_finalization_hook(move || {
-                    entered.wait();
-                    release.wait();
-                });
+            assert_marker_terminal_recovery_at_crash_boundary(
+                failed,
+                with_existing_successor,
+                true,
+            );
+        }
+    }
+}
 
-                let runner = Arc::clone(&coordinator);
-                let run_root = data_root.clone();
-                let run =
-                    std::thread::spawn(move || runner.run_next(&run_root).expect("terminal root"));
-                finalization_entered.wait();
-
-                let concurrent_successor_id = request_id(&enqueue_synthetic_manual_all_request(
-                    coordinator.as_ref(),
-                    &data_root,
-                    11,
-                ));
-                coordinator
-                    .persist_job_status_for_test(&data_root, &concurrent_successor_id)
-                    .unwrap();
-                let retry_probe = coordinator
-                    .persist_retry_status(
-                        &data_root,
-                        coordinator.status(&concurrent_successor_id).unwrap(),
-                    )
-                    .unwrap();
-                assert_eq!(retry_probe["request_id"], root_id);
-                assert_eq!(retry_probe["route_finalization_pending"], true);
-                let scheduler_probe = coordinator
-                    .persist_scheduler_status(
-                        &data_root,
-                        json!({
-                            "request_id": root_id,
-                            "retryable": true,
-                            "retry_after_ms": 1,
-                        }),
-                    )
-                    .unwrap();
-                assert_eq!(scheduler_probe["request_id"], root_id);
-                assert_eq!(scheduler_probe["route_finalization_pending"], true);
-                assert!(coordinator.run_next(&data_root).is_none());
-                let marker =
-                    read_daemon_job_status(&daemon_source_backed_refresh_job_path(&data_root))
-                        .expect("marker-bearing terminal owner");
-                assert_eq!(marker["request_id"], root_id);
-                assert_eq!(marker["route_finalization_pending"], true);
-                assert_eq!(
-                    marker["request_state"],
-                    if failed { "failed" } else { "published" }
-                );
-                let marker_successors = marker
-                    .get("queued_successors")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|successor| successor["request_id"].as_str())
-                    .collect::<BTreeSet<_>>();
-                let expected_successors = existing_successor_id
-                    .as_deref()
-                    .into_iter()
-                    .chain(std::iter::once(concurrent_successor_id.as_str()))
-                    .collect::<BTreeSet<_>>();
-                assert_eq!(
-                    marker_successors,
-                    expected_successors,
-                    "failed={failed} existing_successor={with_existing_successor} crash_before={crash_before_finalization}"
-                );
-
-                let restarted_before = crash_before_finalization.then(|| {
-                    let restarted = CoreRefreshEngine::new();
-                    assert!(restarted
-                        .recover_interrupted_publication(&data_root)
-                        .unwrap());
-                    restarted
-                });
-                assert_eq!(executions.load(Ordering::SeqCst), 1);
-
-                finalization_release.wait();
-                let terminal = run.join().expect("join route finalization");
-                assert_eq!(terminal.job["request_id"], root_id);
-                assert_eq!(terminal.failed, failed);
-                assert!(!terminal.terminal_persistence_pending);
-                assert_eq!(executions.load(Ordering::SeqCst), 1);
-                drop(coordinator);
-
-                let restarted = restarted_before.unwrap_or_else(|| {
-                    let restarted = CoreRefreshEngine::new();
-                    assert!(restarted
-                        .recover_interrupted_publication(&data_root)
-                        .unwrap());
-                    restarted
-                });
-                let recovered_root = restarted.status(&root_id).unwrap_or_else(|| {
-                    panic!(
-                        "missing recovered root: failed={failed} existing_successor={with_existing_successor} crash_before={crash_before_finalization}"
-                    )
-                });
-                assert_eq!(
-                    recovered_root["request_state"],
-                    if failed { "failed" } else { "published" }
-                );
-                for successor_id in existing_successor_id
-                    .as_deref()
-                    .into_iter()
-                    .chain(std::iter::once(concurrent_successor_id.as_str()))
-                {
-                    assert_eq!(
-                        restarted.status(successor_id).unwrap()["request_state"],
-                        "admission_pending"
-                    );
-                }
-                let normalized =
-                    read_daemon_job_status(&daemon_source_backed_refresh_job_path(&data_root))
-                        .expect("normalized terminal owner");
-                assert_eq!(normalized["request_id"], root_id);
-                assert!(normalized.get("route_finalization_pending").is_none());
-                assert_eq!(
-                    restarted.scheduled_route_ids_for_test().contains(&route),
-                    failed
-                );
-                assert_eq!(executions.load(Ordering::SeqCst), 1);
-            }
+#[test]
+fn finalized_terminal_recovers_after_writer_completes_before_restart() {
+    for failed in [false, true] {
+        for with_existing_successor in [false, true] {
+            assert_marker_terminal_recovery_at_crash_boundary(
+                failed,
+                with_existing_successor,
+                false,
+            );
         }
     }
 }
