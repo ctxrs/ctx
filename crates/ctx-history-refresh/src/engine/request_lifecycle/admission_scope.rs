@@ -123,6 +123,23 @@ impl CoreRefreshEngine {
                     anyhow!("one or more exact source routes are no longer due for admission")
                 })?
         };
+        // An exhaustive obligation is transferred to this admitted attempt.
+        // Subsequent watcher evidence re-adds its own reason, while failure
+        // finalization re-arms this attempt's reason.  Do not leave cleanup
+        // to terminal success: it cannot distinguish a pre-admission reason
+        // from a newer one recorded while the executor was running.
+        if find_attempt(&state, request_id).is_some_and(|attempt| {
+            attempt.reconciliation_demand == SourceBackedReconciliationDemand::Exhaustive
+        }) {
+            for admission in &admissions {
+                state
+                    .hermes_routes_requiring_exhaustive_recovery
+                    .remove(admission.route());
+                state
+                    .routes_requiring_exhaustive_reconciliation
+                    .remove(admission.route());
+            }
+        }
         state
             .route_admissions
             .insert(request_id.to_owned(), admissions);

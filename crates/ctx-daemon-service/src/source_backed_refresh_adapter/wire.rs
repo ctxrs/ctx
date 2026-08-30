@@ -399,8 +399,11 @@ fn unknown_refresh_request_response(request_id: &str) -> Value {
         "request_state": "request_unknown",
         "error_code": "source_refresh_request_unknown",
         "reason": "request_not_retained_after_restart",
-        "retryable": true,
-        "error": "source refresh request is not retained by this daemon process",
+        // This request's durable terminal outcome is no longer observable
+        // after a daemon restart.  Re-enqueuing equivalent work would create
+        // a new request, not recover this one.
+        "retryable": false,
+        "error": "source refresh request outcome is no longer observable after daemon restart",
     }))
 }
 

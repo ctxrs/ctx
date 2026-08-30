@@ -7,14 +7,18 @@ use super::*;
 mod automatic_retry;
 use automatic_retry::durable_build_rearmed_automatic_retry_routes;
 pub(in crate::engine) use automatic_retry::recover_automatic_retry_checkpoints;
+mod publication_ownership;
+use publication_ownership::{
+    decode_published_request_receipt, validate_physical_publication_metadata,
+    validate_strict_publication_metadata_ownership,
+};
 
 impl CoreRefreshEngine {
     pub fn recover(&self, data_root: &Path) -> Result<bool> {
         self.recover_interrupted_publication(data_root)
     }
 
-    /// Restores exact durable terminal responses, or queues one bounded replay
-    /// when Core may have committed past the last terminal job snapshot.
+    /// Restores exact durable terminals, or queues one bounded replay.
     pub fn recover_interrupted_publication(&self, data_root: &Path) -> Result<bool> {
         prepare_generation_control_state(data_root)?;
         let Some(job) = self.journal.load(data_root)? else {
@@ -39,14 +43,22 @@ impl CoreRefreshEngine {
             .get("request_state")
             .and_then(Value::as_str)
             .unwrap_or("unknown");
+        let route_finalization_pending = match job.get("route_finalization_pending") {
+            None => false,
+            Some(Value::Bool(true)) => true,
+            Some(_) => bail!("durable source refresh has invalid route-finalization state"),
+        };
+        if route_finalization_pending && !matches!(request_state, "published" | "failed") {
+            bail!("nonterminal source refresh cannot own pending route finalization");
+        }
+        if request_state == "running" && job.get("request_outcome").is_some() {
+            bail!("durable running source refresh unexpectedly contains `request_outcome`");
+        }
 
         if rebuild_required {
             match request_state {
                 "published" => {
-                    // The active generation is disposable, but the durable
-                    // terminal journal is still an authority boundary. Validate
-                    // all generation-independent terminal fields before turning
-                    // it back into source-authoritative work.
+                    // Validate the durable terminal before rebuilding source work.
                     require_terminal_state(&job, "published", "completed")?;
                     let _ = required_generation(
                         job.get("published_generation"),
@@ -56,19 +68,19 @@ impl CoreRefreshEngine {
                         .context(
                             "recover durable published source refresh receipt before rebuild",
                         )?;
-                    validate_terminal_receipt_fields(&job, &publication_receipt)?;
-                    if let Some(outcome) = job.get("request_outcome") {
-                        let mut response = job.clone();
-                        response["receipt"] = outcome.clone();
-                        let request_receipt = published_refresh_receipt_for_recovery(&response)
-                            .context("recover durable logical source refresh outcome")?;
-                        if request_receipt == publication_receipt {
-                            bail!(
-                                "durable logical source refresh redundantly stores its publication receipt"
-                            );
-                        }
-                        validate_terminal_receipt_fields(&job, &request_receipt)?;
+                    if publication_receipt.published_generation
+                        != required_generation(
+                            job.get("published_generation"),
+                            "durable terminal published generation",
+                        )?
+                    {
+                        bail!("durable physical publication receipt names a different generation");
                     }
+                    let _ = decode_published_request_receipt(
+                        &job,
+                        &publication_receipt,
+                        published_refresh_receipt_for_recovery,
+                    )?;
                     let _ = recover_terminal_attempt(&job, SourceBackedRefreshState::Published)?;
                     return self.recover_published_rebuild(
                         data_root,
@@ -92,40 +104,44 @@ impl CoreRefreshEngine {
 
         if request_state == "published" {
             if let Some(verified) = verified.as_ref() {
-                if let (Ok(status_receipt), Ok(metadata)) = (
-                    published_refresh_receipt_for_index(&job, verified),
-                    SourceBackedPublicationMetadata::decode(verified),
-                ) {
-                    let durable_receipt =
-                        published_refresh_receipt_for_index(&metadata.response_value(), verified);
-                    if durable_receipt.as_ref().is_ok_and(|receipt| {
-                        receipt == &status_receipt
-                            && receipt.published_generation == verified.generation_id()
-                    }) {
-                        let durable_receipt = durable_receipt?;
-                        let attempt = recover_exact_published_attempt(
-                            &job,
-                            &metadata,
-                            durable_receipt.clone(),
-                            verified,
-                        )?;
-                        let request_id = attempt.request_id.clone();
-                        let terminal = CoreRefreshTerminalSuccess::bind(
-                            durable_receipt,
-                            Arc::clone(verified),
-                        )?;
-                        let has_successors = !queued_successors.is_empty();
-                        self.install_published_recovery(
-                            attempt,
-                            terminal,
-                            queued_successors,
-                            active_generation,
-                            &build_rearmed_routes,
-                        )?;
-                        let _ = self.finish_route_admissions(&request_id, true, None);
-                        self.persist_job_status(data_root, &request_id)?;
-                        return Ok(has_successors);
+                if verified.publication_metadata().is_some() {
+                    let metadata = SourceBackedPublicationMetadata::decode(verified)
+                        .context("decode terminal Core publication ownership metadata")?;
+                    let status_receipt = published_refresh_receipt_for_index(&job, verified)
+                        .context("recover durable terminal refresh receipt")?;
+                    let durable_receipt = validate_physical_publication_metadata(
+                        &metadata,
+                        verified,
+                        Some(&status_receipt),
+                    )?;
+                    let request_receipt =
+                        decode_published_request_receipt(&job, &durable_receipt, |response| {
+                            published_refresh_receipt_for_index(response, verified)
+                        })?;
+                    if job.get("request_outcome").is_none() {
+                        validate_strict_publication_metadata_ownership(&job, &metadata)?;
                     }
+                    let attempt = recover_exact_published_attempt(
+                        &job,
+                        &metadata,
+                        durable_receipt.clone(),
+                        request_receipt,
+                        verified,
+                    )?;
+                    let request_id = attempt.request_id.clone();
+                    let terminal =
+                        CoreRefreshTerminalSuccess::bind(durable_receipt, Arc::clone(verified))?;
+                    let has_successors = !queued_successors.is_empty();
+                    self.install_published_recovery(
+                        attempt,
+                        terminal,
+                        queued_successors,
+                        active_generation,
+                        &build_rearmed_routes,
+                    )?;
+                    let _ = self.finish_route_admissions(&request_id, true, None);
+                    self.persist_job_status(data_root, &request_id)?;
+                    return Ok(has_successors);
                 }
             }
         }
@@ -134,12 +150,14 @@ impl CoreRefreshEngine {
         let previous_generation = job.get("previous_generation").and_then(Value::as_str);
         let pointer_advanced = active_generation.as_deref() != previous_generation;
         let interrupted_running = request_state == "running";
-        // A terminal job must always recover or reject its exact publication,
-        // even when its persisted previous-generation pointer already equals
-        // the active generation. A Running job is never terminal authority:
-        // callback uncertainty may have been fenced only in memory before a
-        // crash, so pointer advancement cannot safely complete its waiter.
-        if (pointer_advanced && !interrupted_running) || request_state == "published" {
+        // Only metadata-owned Running work is terminal; metadata-free work replays.
+        let running_has_publication_metadata = interrupted_running
+            && verified
+                .as_ref()
+                .is_some_and(|index| index.publication_metadata().is_some());
+        if (pointer_advanced && (!interrupted_running || running_has_publication_metadata))
+            || request_state == "published"
+        {
             let active_generation = active_generation.ok_or_else(|| {
                 anyhow!("interrupted source refresh advanced Core without an active generation")
             })?;
@@ -156,19 +174,9 @@ impl CoreRefreshEngine {
             }
             let metadata = SourceBackedPublicationMetadata::decode(&verified)
                 .context("recover exact terminal refresh receipt from Core publication metadata")?;
-            if metadata.request_id != job_request_id {
-                bail!("active Core refresh metadata belongs to a different request");
-            }
-            let job_operation = SourceBackedRefreshOperation::from_request_json(&job)?;
-            let job_scope = refresh_scope_from_json(job.get("refresh_scope"))?;
-            if metadata.operation != job_operation || metadata.refresh_scope != job_scope {
-                bail!("active Core refresh metadata does not match the interrupted request");
-            }
+            validate_strict_publication_metadata_ownership(&job, &metadata)?;
             let receipt =
-                published_refresh_receipt_for_index(&metadata.response_value(), verified.as_ref())?;
-            if receipt.published_generation != active_generation {
-                bail!("active Core refresh metadata names a different generation");
-            }
+                validate_physical_publication_metadata(&metadata, verified.as_ref(), None)?;
             let attempt =
                 recover_committed_attempt(&job, &metadata, receipt.clone(), verified.as_ref())?;
             let terminal = CoreRefreshTerminalSuccess::bind(receipt, Arc::clone(&verified))?;
@@ -190,7 +198,29 @@ impl CoreRefreshEngine {
                 .get("progress")
                 .and_then(Value::as_object)
                 .is_some_and(|progress| progress.contains_key("current_source_progress"));
-            let failed = recover_failed_attempt(&job)?;
+            let mut failed = recover_failed_attempt(&job)?;
+            if route_finalization_pending {
+                let provisional_pauses = failed
+                    .failure_outcome
+                    .as_ref()
+                    .map(|outcome| {
+                        failed
+                            .automatic_retry_checkpoints
+                            .iter()
+                            .filter(|(route, checkpoint)| {
+                                checkpoint.is_paused() && outcome.blocked_routes.contains(*route)
+                            })
+                            .map(|(route, _)| route.clone())
+                            .collect::<BTreeSet<_>>()
+                    })
+                    .unwrap_or_default();
+                for route in &provisional_pauses {
+                    failed.automatic_retry_checkpoints.remove(route);
+                }
+                if let Some(outcome) = failed.failure_outcome.as_mut() {
+                    outcome.rearm_automatic_retry_routes(&provisional_pauses);
+                }
+            }
             let durable_blocked_routes = job
                 .get("structured_outcome")
                 .and_then(Value::as_object)
@@ -209,6 +239,7 @@ impl CoreRefreshEngine {
                 .unwrap_or_default();
             let failed_request_id = failed.request_id.clone();
             let failed_intent = failed.intent.clone();
+            let failed_reconciliation_demand = failed.reconciliation_demand;
             let failure_route_dispositions = failed.failure_outcome.as_ref().map(|outcome| {
                 (
                     outcome.retryable_routes.clone(),
@@ -230,6 +261,13 @@ impl CoreRefreshEngine {
                         blocked_routes,
                         Some(&failed_intent),
                     );
+                    if failed_reconciliation_demand == SourceBackedReconciliationDemand::Exhaustive
+                    {
+                        // Crash recovery restores admission's exhaustive obligation.
+                        state
+                            .routes_requiring_exhaustive_reconciliation
+                            .extend(retryable_routes.iter().cloned());
+                    }
                 }
                 Self::seed_rearmed_automatic_retry_routes_locked(&mut state, &build_rearmed_routes);
                 trim_terminal_attempt_history(&mut state);
@@ -243,6 +281,7 @@ impl CoreRefreshEngine {
                 || has_successors
                 || terminal_progress_needs_normalization
                 || !recovery_rearmed_routes.is_empty()
+                || route_finalization_pending
             {
                 self.persist_job_status(data_root, &finish.durable_request_id)?;
             }
@@ -334,6 +373,7 @@ impl CoreRefreshEngine {
             "outcome",
             "receipt",
             "request_outcome",
+            "route_finalization_pending",
             "generation_changed",
             "finished_at_ms",
             "last_error",
@@ -416,23 +456,10 @@ fn recover_exact_published_attempt(
     job: &Value,
     metadata: &SourceBackedPublicationMetadata,
     publication_receipt: SourceBackedRefreshReceipt,
+    request_receipt: SourceBackedRefreshReceipt,
     verified: &VerifiedIndex,
 ) -> Result<SourceBackedRefreshAttempt> {
     require_terminal_state(job, "published", "completed")?;
-    let request_receipt = match job.get("request_outcome") {
-        Some(outcome) => {
-            let mut response = job.clone();
-            response["receipt"] = outcome.clone();
-            let receipt = published_refresh_receipt_for_index(&response, verified)
-                .context("recover exact logical source refresh outcome")?;
-            if receipt == publication_receipt {
-                bail!("durable logical source refresh redundantly stores its publication receipt");
-            }
-            receipt
-        }
-        None => publication_receipt.clone(),
-    };
-    validate_terminal_receipt_fields(job, &request_receipt)?;
     let mut attempt = recover_terminal_attempt(job, SourceBackedRefreshState::Published)?;
     attempt.request_source_count = Some(request_receipt.source_count(verified));
     attempt.previous_generation = request_receipt.previous_generation.clone();
@@ -568,10 +595,7 @@ fn recover_terminal_attempt(
     let _legacy_coalesced_logical_demands = optional_u64(job, "coalesced_logical_demands")?;
     attempt.coalesced_requests = optional_u64(job, "coalesced_requests")?.unwrap_or_default();
     attempt.progress = SourceBackedRefreshProgress::from_status_json(job)?;
-    // Pre-fix schema-v1 terminal snapshots could retain an active-source
-    // detail fragment after publication or failure. Terminal state is the
-    // authority boundary: retain cumulative counters, but never recover an
-    // active source substep that can no longer make progress.
+    // Legacy terminal snapshots may retain stale active-source detail.
     attempt.progress.current_source_progress = None;
     attempt.progress_total_sources_known = status_progress_total_sources_known(job);
     attempt.scanned_routes = optional_usize(job, "scanned_routes")?;
@@ -631,8 +655,7 @@ fn recover_terminal_attempt(
         outcome.rearm_automatic_retry_routes(&checkpointless_pauses);
     }
     rearm_build_changed_automatic_retry_checkpoints(&mut attempt);
-    // Estimator state is deliberately non-durable. Recovery never revives a
-    // deadline from a prior process or physical attempt.
+    // Estimator state is deliberately non-durable.
     attempt.whole_run_eta.clear();
     Ok(attempt)
 }
@@ -826,24 +849,6 @@ fn legacy_failure_outcome(
         affected_routes,
         Some(retry_advice),
     )
-}
-
-fn validate_terminal_receipt_fields(
-    job: &Value,
-    receipt: &SourceBackedRefreshReceipt,
-) -> Result<()> {
-    if optional_generation(job.get("previous_generation"))? != receipt.previous_generation
-        || required_generation(
-            job.get("published_generation"),
-            "durable terminal published generation",
-        )? != receipt.published_generation
-        || job.get("generation_changed").and_then(Value::as_bool)
-            != Some(receipt.generation_changed)
-        || job.get("outcome").and_then(Value::as_str) != Some(receipt.terminal_outcome())
-    {
-        bail!("durable logical source refresh response does not match its exact outcome receipt");
-    }
-    Ok(())
 }
 
 fn require_terminal_state(job: &Value, request_state: &str, status: &str) -> Result<()> {

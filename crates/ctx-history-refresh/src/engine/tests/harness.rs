@@ -31,6 +31,18 @@ impl CoreRefreshEngine {
         ))
     }
 
+    pub(super) fn with_journal_executor_and_admitted_routes(
+        journal: Arc<dyn RefreshJournal>,
+        executor: Arc<dyn SourceBackedRefreshExecutor>,
+        routes: impl IntoIterator<Item = SourceRouteIdentity>,
+    ) -> Self {
+        Self(
+            test_refresh_engine_with_journal_executor_and_admitted_routes(
+                journal, executor, routes,
+            ),
+        )
+    }
+
     pub(super) fn status(&self, request_id: &str) -> Option<Value> {
         self.0.status_for_test(request_id)
     }

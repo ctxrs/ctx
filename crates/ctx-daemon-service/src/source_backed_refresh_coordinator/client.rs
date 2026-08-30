@@ -10,17 +10,8 @@ mod types;
 pub use observation_recovery::SourceRefreshObservationRecoveryFailed;
 #[cfg(test)]
 use observation_recovery::DISCONNECT_POLICY;
-pub(super) use observation_recovery::{
-    recover_typed_unknown_coalesced_request_with, recover_typed_unknown_request_with,
-    TypedUnknownRequestRecovery,
-};
 use observation_recovery::{
     request_bound_status_with_outage_budget, retained_request_unobservable,
-};
-#[cfg(test)]
-pub(super) use observation_recovery::{
-    SourceRefreshRequestRecoveryFailed, SourceRefreshRequestRecoveryFailureReason,
-    SourceRefreshRequestRetention,
 };
 use request_policy::SourceBackedRefreshRequestPolicy;
 use response::*;
@@ -501,7 +492,6 @@ fn wait_for_published_generation_inner(
         allow_daemon_autostart,
         mut report_progress,
     } = wait;
-    let mut unknown_request_recovery = TypedUnknownRequestRecovery::new(&request_id);
     let mut last_reported_status = None;
     let mut last_reported_at = None;
     loop {
@@ -567,36 +557,11 @@ fn wait_for_published_generation_inner(
             }
         };
         if source_refresh_request_is_unknown(&response, &request_id)? {
-            let lost_request_id = request_id.clone();
-            let reenqueue = || {
-                enqueue_equivalent_wait_refresh_request(
-                    data_root,
-                    &lost_request_id,
-                    intent.clone(),
-                    trigger,
-                )
-            };
-            request_id = if intent.is_selected_import() {
-                recover_typed_unknown_request_with(
-                    &mut unknown_request_recovery,
-                    &lost_request_id,
-                    std::thread::sleep,
-                    reenqueue,
-                )
-            } else {
-                recover_typed_unknown_coalesced_request_with(
-                    &mut unknown_request_recovery,
-                    &lost_request_id,
-                    std::thread::sleep,
-                    reenqueue,
-                )
-            }
-            .with_context(|| {
-                format!(
-                    "reattach unknown daemon source refresh request {lost_request_id} using caller authority"
-                )
-            })?;
-            continue;
+            // Reaching this wait loop means the client already received an
+            // admission acknowledgement. A subsequent typed unknown response
+            // cannot safely distinguish a lost retained request from daemon
+            // state loss, so never replay equivalent work under its UUID.
+            return Err(retained_request_unobservable(&request_id, 0));
         }
         validate_source_refresh_status_response_authority(&response, &request_id)?;
         validate_daemon_refresh_response(&response)?;
@@ -778,8 +743,8 @@ pub(super) fn recover_wait_refresh_request(
         // The acknowledged request may be a command waiter coalesced onto a
         // periodic/search attempt. Restarting and immediately re-submitting
         // the command payload under that physical ID would be a genuine
-        // idempotency conflict. Re-observe the durable ID first; only the
-        // typed unknown-request branch may re-admit it.
+        // idempotency conflict. Re-observe the durable ID; a typed unknown
+        // after acknowledgement is terminal and must not re-admit it.
         Ok(request_id.to_owned())
     })();
     recovery.map_err(|error| {
@@ -789,6 +754,7 @@ pub(super) fn recover_wait_refresh_request(
     })
 }
 
+#[cfg(test)]
 fn enqueue_equivalent_wait_refresh_request(
     data_root: &Path,
     request_id: &str,
@@ -836,6 +802,7 @@ fn response_request_id(response: &Value, label: &str) -> Result<String> {
         .ok_or_else(|| anyhow!("{label} has no request ID"))
 }
 
+#[cfg(test)]
 fn source_refresh_protocol_state(response: &Value) -> Result<RefreshRequestState> {
     Ok(source_refresh_protocol_status(response)?.request_state())
 }
@@ -891,7 +858,11 @@ pub(super) fn source_refresh_request_is_unknown(
         && response.get("request_id").and_then(Value::as_str) == Some(expected_request_id)
         && response.get("request_state").and_then(Value::as_str)
             == Some(SOURCE_REFRESH_UNKNOWN_REQUEST_STATE)
-        && response.get("retryable").and_then(Value::as_bool) == Some(true);
+        // `request_not_retained_after_restart` is terminal from the
+        // requester's perspective: the original outcome cannot be observed
+        // and an equivalent enqueue would be new work.  Keep this strict so
+        // a malformed or pre-contract response cannot trigger recovery.
+        && response.get("retryable").and_then(Value::as_bool) == Some(false);
     if exact {
         Ok(true)
     } else {

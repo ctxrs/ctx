@@ -62,6 +62,63 @@ impl RefreshJournal for TestRefreshJournal {
     }
 }
 
+#[derive(Debug)]
+pub(crate) struct TestFailTerminalStoreJournal {
+    terminal_stores: std::sync::atomic::AtomicUsize,
+    fail_on_terminal_store: usize,
+}
+
+impl TestFailTerminalStoreJournal {
+    pub(super) fn failing_on(fail_on_terminal_store: usize) -> Self {
+        Self {
+            terminal_stores: std::sync::atomic::AtomicUsize::new(0),
+            fail_on_terminal_store,
+        }
+    }
+
+    pub(super) fn terminal_store_count(&self) -> usize {
+        self.terminal_stores.load(Ordering::SeqCst)
+    }
+}
+
+impl Default for TestFailTerminalStoreJournal {
+    fn default() -> Self {
+        Self::failing_on(2)
+    }
+}
+
+impl RefreshJournal for TestFailTerminalStoreJournal {
+    fn load(&self, data_root: &Path) -> Result<Option<Value>> {
+        Ok(read_daemon_job_status(
+            &daemon_source_backed_refresh_job_path(data_root),
+        ))
+    }
+
+    fn store(&self, data_root: &Path, value: &Value) -> Result<()> {
+        let terminal = matches!(
+            value.get("request_state").and_then(Value::as_str),
+            Some("published" | "failed")
+        );
+        if terminal
+            && self
+                .terminal_stores
+                .fetch_add(1, Ordering::SeqCst)
+                .saturating_add(1)
+                == self.fail_on_terminal_store
+        {
+            bail!("injected route-finalization persistence failure");
+        }
+        write_daemon_job_status(&daemon_source_backed_refresh_job_path(data_root), value)
+    }
+
+    fn store_before_ack(&self, data_root: &Path, value: &Value) -> DurableAdmissionPersistence {
+        match self.store(data_root, value) {
+            Ok(()) => DurableAdmissionPersistence::Confirmed,
+            Err(error) => DurableAdmissionPersistence::Failed(error),
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 struct TestFileRefreshJournal;
 
@@ -149,12 +206,24 @@ pub(super) fn test_refresh_engine_with_executor_and_admitted_routes(
     executor: Arc<dyn SourceBackedRefreshExecutor>,
     routes: impl IntoIterator<Item = SourceRouteIdentity>,
 ) -> CoreRefreshEngine {
+    test_refresh_engine_with_journal_executor_and_admitted_routes(
+        Arc::new(TestFileRefreshJournal),
+        executor,
+        routes,
+    )
+}
+
+pub(super) fn test_refresh_engine_with_journal_executor_and_admitted_routes(
+    journal: Arc<dyn RefreshJournal>,
+    executor: Arc<dyn SourceBackedRefreshExecutor>,
+    routes: impl IntoIterator<Item = SourceRouteIdentity>,
+) -> CoreRefreshEngine {
     let observations = routes
         .into_iter()
         .map(|route| (route, Some("ab".repeat(32))))
         .collect::<BTreeMap<_, _>>();
     CoreRefreshEngine::with_runtime_for_test(
-        Arc::new(TestFileRefreshJournal),
+        journal,
         test_refresh_runtime(),
         executor,
         Arc::new(move |_, _, _, _| Ok(observations.clone())),
@@ -197,5 +266,14 @@ impl CoreRefreshEngine {
 
     pub fn route_is_permanently_blocked_for_test(&self, route: &SourceRouteIdentity) -> bool {
         self.lock_state().dirty_routes.is_permanently_blocked(route)
+    }
+
+    pub fn exhaustive_route_obligations_for_test(&self) -> BTreeSet<SourceRouteIdentity> {
+        let state = self.lock_state();
+        state
+            .hermes_routes_requiring_exhaustive_recovery
+            .union(&state.routes_requiring_exhaustive_reconciliation)
+            .cloned()
+            .collect()
     }
 }

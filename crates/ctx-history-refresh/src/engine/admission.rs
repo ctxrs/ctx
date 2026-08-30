@@ -675,6 +675,7 @@ impl CoreRefreshEngine {
             terminal_persistence_pending: true,
             scope,
             coverage_certificate: None,
+            route_finalization_performed: false,
         })
     }
 
@@ -941,6 +942,7 @@ impl CoreRefreshEngine {
             terminal_persistence_pending: false,
             scope,
             coverage_certificate: None,
+            route_finalization_performed: false,
         }))
     }
 

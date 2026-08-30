@@ -1,8 +1,10 @@
+use super::observation_recovery::SourceRefreshObservationRecoveryFailed;
 use super::*;
 
 use std::{
     io::{Read as _, Write as _},
     os::unix::net::UnixListener,
+    sync::Mutex,
 };
 
 use ctx_history_core::CaptureProvider;
@@ -14,6 +16,24 @@ use crate::query_service::{
 use crate::SharedSemanticRuntime;
 
 const TEST_ENDPOINT_TOKEN: &str = "0123456789abcdef0123456789abcdef";
+
+#[derive(Default)]
+struct RecordingAvailability(Mutex<Vec<(crate::DaemonTrigger, crate::DaemonAvailabilityDemand)>>);
+
+impl crate::DaemonAvailabilityPort for RecordingAvailability {
+    fn ensure_available(
+        &self,
+        _data_root: &Path,
+        trigger: crate::DaemonTrigger,
+        demand: crate::DaemonAvailabilityDemand,
+    ) -> Result<crate::DaemonAvailability> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((trigger, demand));
+        Ok(crate::DaemonAvailability::Available)
+    }
+}
 
 fn short_data_root() -> Result<tempfile::TempDir> {
     tempfile::Builder::new()
@@ -376,9 +396,9 @@ fn exhausted_post_submission_disconnects_return_typed_ambiguous_admission() -> R
 }
 
 #[test]
-fn typed_unknown_readmission_preserves_lost_ack_retention_uncertainty() -> Result<()> {
+fn acknowledged_typed_unknown_does_not_reenqueue_equivalent_work() -> Result<()> {
     let data_root = short_data_root()?;
-    let socket_path = data_root.path().join("typed-unknown-lost-acks.sock");
+    let socket_path = data_root.path().join("acknowledged-typed-unknown.sock");
     let listener = UnixListener::bind(&socket_path)?;
     write_daemon_service_endpoint(
         data_root.path(),
@@ -386,55 +406,146 @@ fn typed_unknown_readmission_preserves_lost_ack_retention_uncertainty() -> Resul
         &source_refresh_endpoint(&socket_path),
     )?;
     let request_id = "019fcaaa-0000-7000-8000-000000000307";
-    let server = std::thread::spawn(move || -> Result<Vec<Vec<u8>>> {
-        let mut requests = Vec::new();
-        for _ in 0..=AMBIGUOUS_ADMISSION_RECOVERY_ATTEMPT_LIMIT {
-            let (mut stream, _) = listener.accept()?;
-            let mut received = Vec::new();
-            stream.read_to_end(&mut received)?;
-            requests.push(received);
-        }
-        Ok(requests)
+    let server = std::thread::spawn(move || -> Result<Vec<u8>> {
+        let (mut stream, _) = listener.accept()?;
+        let mut request = Vec::new();
+        stream.read_to_end(&mut request)?;
+        stream.write_all(
+            format!(
+                "{{\"ok\":false,\"owner\":\"daemon\",\"request_id\":\"{request_id}\",\"request_state\":\"request_unknown\",\"error_code\":\"source_refresh_request_unknown\",\"reason\":\"request_not_retained_after_restart\",\"retryable\":false,\"schema_version\":1}}\n"
+            )
+            .as_bytes(),
+        )?;
+        Ok(request)
     });
 
-    let mut recovery = TypedUnknownRequestRecovery::new(request_id);
-    let error = recover_typed_unknown_request_with(
-        &mut recovery,
-        request_id,
-        |_| {},
-        || {
-            enqueue_equivalent_wait_refresh_request(
-                data_root.path(),
-                request_id,
-                RefreshIntent::AutomaticMaintenance,
-                RefreshRequestTrigger::Search,
-            )
-        },
-    )
-    .unwrap_err();
-    let requests = server.join().expect("lost-ack test server panicked")?;
+    let error = match wait_for_published_generation(
+        data_root.path(),
+        request_id.to_owned(),
+        SourceBackedRefreshMode::Wait,
+        ctx_history_refresh::RefreshOperation::Refresh,
+        None,
+        false,
+    ) {
+        Ok(_) => panic!("typed unknown after acknowledgement must not publish or reenqueue"),
+        Err(error) => error,
+    };
+    let request = server.join().expect("typed-unknown test server panicked")?;
 
     let typed = error
-        .downcast_ref::<SourceRefreshRequestRecoveryFailed>()
-        .expect("typed unknown re-admission keeps its request-bound failure");
+        .downcast_ref::<SourceRefreshObservationRecoveryFailed>()
+        .expect("post-ack typed unknown must remain request-bound and unobservable");
     assert_eq!(typed.request_id, request_id);
-    assert_eq!(typed.recovery_attempts, 1);
+    assert_eq!(typed.recovery_attempts, 0);
+    assert_eq!(typed.disconnect_policy, DISCONNECT_POLICY);
+
+    let request: Value = serde_json::from_slice(&request)?;
+    assert_eq!(request["op"], SOURCE_REFRESH_STATUS_OP);
+    assert_eq!(request["request_id"], request_id);
+    Ok(())
+}
+
+#[test]
+fn autostarted_wait_acknowledgement_then_restart_unknown_is_not_replayed() -> Result<()> {
+    let data_root = short_data_root()?;
+    let socket_path = data_root.path().join("acknowledged-restart-unknown.sock");
+    let listener = UnixListener::bind(&socket_path)?;
+    write_daemon_service_endpoint(
+        data_root.path(),
+        DaemonIpcService::SourceRefresh,
+        &source_refresh_endpoint(&socket_path),
+    )?;
+    let server = std::thread::spawn(move || -> Result<[Value; 2]> {
+        let mut requests = Vec::with_capacity(2);
+        for attempt in 0..2 {
+            let (mut stream, _) = listener.accept()?;
+            let mut request = Vec::new();
+            stream.read_to_end(&mut request)?;
+            let request: Value = serde_json::from_slice(&request)?;
+            let request_id = request["request_id"]
+                .as_str()
+                .context("source refresh request had no request ID")?;
+            if attempt == 0 {
+                stream.write_all(
+                    format!(
+                        "{{\"ok\":true,\"owner\":\"daemon\",\"request_id\":\"{request_id}\",\"request_state\":\"admission_pending\",\"schema_version\":1}}\n"
+                    )
+                    .as_bytes(),
+                )?;
+            } else {
+                stream.write_all(
+                    format!(
+                        "{{\"ok\":false,\"owner\":\"daemon\",\"request_id\":\"{request_id}\",\"request_state\":\"request_unknown\",\"error_code\":\"source_refresh_request_unknown\",\"reason\":\"request_not_retained_after_restart\",\"retryable\":false,\"error\":\"source refresh request outcome is no longer observable after daemon restart\",\"schema_version\":1}}\n"
+                    )
+                    .as_bytes(),
+                )?;
+            }
+            requests.push(request);
+        }
+        requests
+            .try_into()
+            .map_err(|_| anyhow!("test server did not observe exactly two requests"))
+    });
+    let availability = RecordingAvailability::default();
+
+    let error = match coordinate_source_backed_refresh_with_policy(
+        &availability,
+        data_root.path(),
+        SourceBackedRefreshMode::Wait,
+        SourceBackedRefreshRequestPolicy {
+            intent: RefreshIntent::AutomaticMaintenance,
+            trigger: RefreshRequestTrigger::Search,
+            allow_daemon_autostart: true,
+        },
+        None,
+    ) {
+        Ok(_) => {
+            panic!("an acknowledged request that is not retained after restart is unobservable")
+        }
+        Err(error) => error,
+    };
+    let [admission, status] = server
+        .join()
+        .expect("restart-unknown test server panicked")?;
+
+    let unknown = error
+        .downcast_ref::<SourceRefreshObservationRecoveryFailed>()
+        .expect("post-ack restart unknown remains request-bound and unobservable");
+    assert_eq!(unknown.recovery_attempts, 0);
+    assert_eq!(unknown.disconnect_policy, DISCONNECT_POLICY);
+    let wording = unknown.to_string();
+    assert!(
+        wording.contains("is no longer observable"),
+        "unexpected observation-recovery wording: {wording}"
+    );
+    assert!(
+        wording.contains("outcome is unknown"),
+        "unexpected observation-recovery wording: {wording}"
+    );
+
+    assert_eq!(admission["op"], SOURCE_REFRESH_REQUEST_OP);
+    assert_eq!(status["op"], SOURCE_REFRESH_STATUS_OP);
+    let request_id = admission["request_id"]
+        .as_str()
+        .expect("admission response has a request ID");
+    assert_eq!(status["request_id"].as_str(), Some(request_id));
+    assert_eq!(unknown.request_id, request_id);
+    assert!(Uuid::parse_str(request_id).is_ok());
+    assert_eq!(admission["mode"], "wait");
+    assert_eq!(admission["trigger"], "search");
     assert_eq!(
-        typed.reason,
-        SourceRefreshRequestRecoveryFailureReason::ReenqueueFailed
+        admission["refresh_intent"],
+        json!({"kind": "automatic_maintenance"})
     );
     assert_eq!(
-        typed.retention,
-        SourceRefreshRequestRetention::MayBeRetained
+        *availability
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+        [(
+            crate::DaemonTrigger::Search,
+            crate::DaemonAvailabilityDemand::ExplicitWait,
+        )]
     );
-    assert_eq!(typed.disconnect_policy, Some(DISCONNECT_POLICY));
-    assert!(error
-        .to_string()
-        .contains("disconnect_policy=retain_after_durable_admission"));
-    assert_eq!(
-        requests.len(),
-        1 + AMBIGUOUS_ADMISSION_RECOVERY_ATTEMPT_LIMIT
-    );
-    assert!(requests.windows(2).all(|pair| pair[0] == pair[1]));
     Ok(())
 }
