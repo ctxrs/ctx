@@ -203,9 +203,10 @@ pub fn restrict_private_file(path: &Path) -> io::Result<()> {
     }
 }
 
-/// Verifies an existing regular file and repairs its owner-only policy when
-/// the current user owns it. Symlinks, reparse points, unsafe ownership, and
-/// non-regular files fail closed.
+/// Verifies an existing regular file and repairs its private access policy.
+/// Unix repair requires current-user ownership. Windows repair installs the
+/// exact protected current-user/SYSTEM DACL without changing ownership.
+/// Symlinks, reparse points, and non-regular files fail closed.
 pub fn ensure_private_file(path: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {
@@ -226,11 +227,12 @@ pub fn ensure_private_file(path: &Path) -> io::Result<()> {
     }
 }
 
-/// Verifies an already-open regular file and repairs its owner-only policy
-/// through that same handle when the current user owns it.
+/// Verifies an already-open regular file and repairs its private access policy
+/// through that same handle.
 ///
-/// Callers opening by pathname must use platform no-follow semantics. Unsafe
-/// ownership and non-regular handles fail closed, as do unsuccessful repairs.
+/// Callers opening by pathname must use platform no-follow semantics. Unix
+/// repair requires current-user ownership; Windows repair changes only the
+/// DACL. Non-regular handles and unsuccessful repairs fail closed.
 pub fn ensure_private_file_handle(handle: &std::fs::File) -> io::Result<()> {
     #[cfg(unix)]
     {
@@ -302,7 +304,8 @@ pub fn restrict_private_executable(path: &Path) -> io::Result<()> {
     }
 }
 
-/// Verifies the exact owner-only directory policy without mutating it.
+/// Verifies the exact private directory policy without mutating it. Windows
+/// requires a protected current-user/SYSTEM DACL but does not constrain owner.
 pub fn verify_private_directory(path: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {
@@ -332,7 +335,8 @@ pub fn verify_private_directory(path: &Path) -> io::Result<()> {
     }
 }
 
-/// Verifies the exact owner-only regular-file policy without mutating it.
+/// Verifies the exact private regular-file policy without mutating it. Windows
+/// requires a protected current-user/SYSTEM DACL but does not constrain owner.
 pub fn verify_private_file(path: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {
@@ -385,7 +389,9 @@ pub fn verify_private_executable(path: &Path) -> io::Result<()> {
 }
 
 /// Verifies an already-open Windows directory handle without reopening its
-/// pathname. Callers may retain the handle to keep the verified object stable.
+/// pathname. Windows verifies type, non-reparse status, and the exact protected
+/// current-user/SYSTEM DACL without constraining owner. Callers may retain the
+/// handle to keep the verified object stable.
 #[cfg(windows)]
 pub fn verify_private_directory_handle(handle: &std::fs::File) -> io::Result<()> {
     windows_acl::verify_private_directory_handle(handle)
@@ -422,7 +428,7 @@ pub fn verify_private_file_handle(handle: &std::fs::File) -> io::Result<()> {
 }
 
 /// Opens a Windows private file while rejecting reparse points in every path
-/// component, then verifies owner and DACL on the retained final handle.
+/// component, then verifies type and the protected DACL on the retained handle.
 #[cfg(windows)]
 pub fn open_verified_private_file(path: &Path) -> io::Result<std::fs::File> {
     windows_acl::open_verified_private_file(path)
