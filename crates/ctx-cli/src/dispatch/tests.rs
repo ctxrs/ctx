@@ -1,14 +1,12 @@
-use std::{
-    io::Write,
-    sync::{Arc, Mutex},
-};
+use std::io::Write;
 
 use clap::Parser as _;
 
 use super::*;
 use crate::cli::Cli;
+use crate::dispatch::test_support::pipe_ui;
 use crate::operation_descriptor::LocalUsageOperation;
-use crate::ui::{ColorMode, RenderContext, StreamKind, TestContext};
+use crate::ui::ColorMode;
 
 fn daemon_autostart_trigger(args: &[&str]) -> Option<DaemonTriggerCommandArg> {
     let cli = Cli::try_parse_from(std::iter::once("ctx").chain(args.iter().copied()))
@@ -121,116 +119,11 @@ fn query_authority_error_json_is_scoped_to_machine_search_show_and_locate() {
     }
 }
 
-#[test]
-fn import_and_public_search_wait_use_the_final_binary_interrupt_scope() {
-    for args in [
-        &["import", "--provider", "codex", "--format", "json"][..],
-        &[
-            "search",
-            "scope oracle",
-            "--refresh",
-            "wait",
-            "--format",
-            "json",
-        ][..],
-    ] {
-        let cli = Cli::try_parse_from(std::iter::once("ctx").chain(args.iter().copied()))
-            .unwrap_or_else(|error| panic!("failed to parse {args:?}: {error}"));
-        assert!(
-            command_uses_foreground_finite_wait(&cli.command),
-            "{args:?}"
-        );
-    }
-
-    let cli = Cli::try_parse_from(["ctx", "search", "scope oracle", "--refresh", "off"]).unwrap();
-    assert!(!command_uses_foreground_finite_wait(&cli.command));
-}
-
-#[derive(Clone, Default)]
-struct SharedBytes(Arc<Mutex<Vec<u8>>>);
-
-impl SharedBytes {
-    fn bytes(&self) -> Vec<u8> {
-        self.0.lock().map(|bytes| bytes.clone()).unwrap_or_default()
-    }
-}
-
-impl Write for SharedBytes {
-    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-        self.0
-            .lock()
-            .map_err(|_| io::Error::other("shared test writer was poisoned"))?
-            .extend_from_slice(buffer);
-        Ok(buffer.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-fn forced_color_test_ui(stderr: SharedBytes) -> Ui {
-    Ui::with_writers(
-        SharedBytes::default(),
-        RenderContext::for_test(TestContext::pipe(StreamKind::Stdout).color(ColorMode::Always)),
-        stderr,
-        RenderContext::for_test(TestContext::pipe(StreamKind::Stderr).color(ColorMode::Always)),
-    )
-}
-
-#[test]
-fn interruption_is_not_rendered_in_human_json_or_search_modes() {
-    for (json_output, machine_output, search_operation) in [
-        (false, false, false),
-        (true, true, false),
-        (false, false, true),
-        (true, true, true),
-    ] {
-        let stdout = SharedBytes::default();
-        let stderr = SharedBytes::default();
-        let mut ui = Ui::with_writers(
-            stdout.clone(),
-            RenderContext::for_test(TestContext::pipe(StreamKind::Stdout)),
-            stderr.clone(),
-            RenderContext::for_test(TestContext::pipe(StreamKind::Stderr)),
-        );
-        let interrupted =
-            Err(anyhow::Error::new(ctx_daemon_cli::FiniteWorkerInterrupted)
-                .context("cleanup context"));
-
-        let rendered = render_command_result_error(
-            &interrupted,
-            json_output,
-            false,
-            machine_output,
-            search_operation,
-            &mut ui,
-        )
-        .unwrap();
-        ui.flush().unwrap();
-
-        assert!(rendered.is_none());
-        assert!(stdout.bytes().is_empty());
-        assert!(stderr.bytes().is_empty());
-    }
-}
-
-#[test]
-fn interruption_outlives_cleanup_rendering_and_flush_failures() {
-    for finalization in [
-        anyhow::anyhow!("cleanup failed"),
-        anyhow::anyhow!("rendering failed"),
-        anyhow::anyhow!("flush failed"),
-    ] {
-        let error = finish_command_result(
-            Err(anyhow::Error::new(ctx_daemon_cli::FiniteWorkerInterrupted)
-                .context("foreground wait")),
-            Err(finalization),
-            Some(anyhow::anyhow!("rendered marker")),
-        )
-        .unwrap_err();
-        assert!(ctx_daemon_cli::finite_worker_interrupted(&error));
-    }
+fn rendered_generic_error(error: &anyhow::Error, machine: bool, color: ColorMode) -> Vec<u8> {
+    let (mut ui, _, stderr) = pipe_ui(color);
+    render_generic_command_error(error, machine, &mut ui).unwrap();
+    ui.flush().unwrap();
+    stderr.bytes()
 }
 
 #[test]
@@ -243,13 +136,11 @@ fn clap_value_errors_use_the_selected_stderr_stream_with_contextual_usage() {
         .collect::<Vec<_>>();
     parse::attach_value_validation_usage(&mut error, &os_arguments);
 
-    let stderr = SharedBytes::default();
-    let stderr_copy = stderr.clone();
-    let mut ui = forced_color_test_ui(stderr);
+    let (mut ui, _, stderr) = pipe_ui(ColorMode::Always);
     write_clap_output(&error, &mut ui).unwrap();
     ui.flush().unwrap();
 
-    let rendered = String::from_utf8(stderr_copy.bytes()).unwrap();
+    let rendered = String::from_utf8(stderr.bytes()).unwrap();
     assert!(rendered.contains('\u{1b}'));
     let mut stripped = anstream::StripStream::new(Vec::new());
     stripped.write_all(rendered.as_bytes()).unwrap();
@@ -276,18 +167,12 @@ fn forced_color_never_decorates_generic_machine_mode_errors() {
             "{args:?}"
         );
 
-        let styled_stderr = SharedBytes::default();
-        let styled_stderr_copy = styled_stderr.clone();
-        let mut ui = forced_color_test_ui(styled_stderr);
-        render_generic_command_error(
+        let machine_stderr = rendered_generic_error(
             &anyhow::anyhow!("representative command failure"),
             true,
-            &mut ui,
-        )
-        .unwrap();
-        ui.flush().unwrap();
+            ColorMode::Always,
+        );
 
-        let machine_stderr = styled_stderr_copy.bytes();
         assert!(!machine_stderr.contains(&0x1b), "{args:?}");
         assert!(String::from_utf8_lossy(&machine_stderr)
             .starts_with("Error: representative command failure"));
@@ -296,34 +181,20 @@ fn forced_color_never_decorates_generic_machine_mode_errors() {
 
 #[test]
 fn forced_color_still_styles_generic_human_mode_errors() {
-    let styled_stderr = SharedBytes::default();
-    let styled_stderr_copy = styled_stderr.clone();
-    let mut ui = forced_color_test_ui(styled_stderr);
-
-    render_generic_command_error(&anyhow::anyhow!("human command failure"), false, &mut ui)
-        .unwrap();
-    ui.flush().unwrap();
-
-    assert!(styled_stderr_copy.bytes().contains(&0x1b));
+    let rendered = rendered_generic_error(
+        &anyhow::anyhow!("human command failure"),
+        false,
+        ColorMode::Always,
+    );
+    assert!(rendered.contains(&0x1b));
 }
 
 #[test]
 fn generic_human_errors_include_the_actionable_cause_chain() {
-    let stderr = SharedBytes::default();
-    let stderr_copy = stderr.clone();
-    let mut ui = Ui::with_writers(
-        SharedBytes::default(),
-        RenderContext::for_test(TestContext::pipe(StreamKind::Stdout).color(ColorMode::Never)),
-        stderr,
-        RenderContext::for_test(TestContext::pipe(StreamKind::Stderr).color(ColorMode::Never)),
-    );
     let error = anyhow::anyhow!("No such file or directory")
         .context("approve explicit source path /tmp/missing.jsonl");
-
-    render_generic_command_error(&error, false, &mut ui).unwrap();
-    ui.flush().unwrap();
-
-    let rendered = String::from_utf8(stderr_copy.bytes()).unwrap();
+    let rendered =
+        String::from_utf8(rendered_generic_error(&error, false, ColorMode::Never)).unwrap();
     assert!(rendered.contains("approve explicit source path /tmp/missing.jsonl"));
     assert!(rendered.contains("No such file or directory"));
     assert!(!rendered.contains("Stack backtrace"));

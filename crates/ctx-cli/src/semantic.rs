@@ -112,45 +112,6 @@ pub(crate) fn initialize() -> Result<()> {
     ctx_daemon_cli::install_host(&HOST)
 }
 
-/// Final-binary boundary for every foreground finite-worker wait. Installing
-/// the broker here keeps daemon/service libraries handler-free and lets nested
-/// coordinator guards share one interrupt epoch.
-pub(crate) fn coordinate_source_backed_refresh_with_progress(
-    data_root: &Path,
-    mode: SourceBackedRefreshMode,
-    report_progress: &mut dyn FnMut(&RefreshStatus) -> Result<()>,
-) -> Result<SourceBackedRefreshObservation> {
-    ctx_daemon_cli::coordinate_source_backed_refresh_with_progress(data_root, mode, report_progress)
-}
-
-pub(crate) fn coordinate_import_source_backed_refresh_with_progress(
-    data_root: &Path,
-    mode: SourceBackedRefreshMode,
-    selection: ctx_history_refresh::RefreshSelection,
-    allow_daemon_autostart: bool,
-    report_progress: &mut dyn FnMut(&RefreshStatus) -> Result<()>,
-) -> Result<SourceBackedRefreshObservation> {
-    ctx_daemon_cli::coordinate_import_source_backed_refresh_with_progress(
-        data_root,
-        mode,
-        selection,
-        allow_daemon_autostart,
-        report_progress,
-    )
-}
-
-pub(crate) fn coordinate_setup_source_backed_refresh_with_progress(
-    data_root: &Path,
-    mode: SourceBackedRefreshMode,
-    report_progress: &mut dyn FnMut(&RefreshStatus) -> Result<()>,
-) -> Result<SourceBackedRefreshObservation> {
-    ctx_daemon_cli::coordinate_setup_source_backed_refresh_with_progress(
-        data_root,
-        mode,
-        report_progress,
-    )
-}
-
 pub(crate) fn rebind_embedding_auth_for_explicit_selection(executor: &str) {
     if executor == "builtin"
         || env::var_os(ctx_daemon_cli::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENV).is_none()

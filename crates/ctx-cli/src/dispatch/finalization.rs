@@ -90,7 +90,7 @@ mod tests {
         cell::Cell,
         io::{self, Write},
         rc::Rc,
-        sync::{Arc, Barrier, Mutex},
+        sync::{Arc, Barrier},
         thread,
         time::Duration,
     };
@@ -109,6 +109,7 @@ mod tests {
         cli::Cli,
         dispatch::{
             command_local_usage_draft, command_operation_descriptor, render_generic_command_error,
+            test_support::{pipe_ui, SharedBytes},
             write_machine_error,
         },
         operation_descriptor::{CliOperation, OperationDescriptor},
@@ -249,29 +250,6 @@ mod tests {
         );
     }
 
-    #[derive(Clone, Default)]
-    struct SharedBytes(Arc<Mutex<Vec<u8>>>);
-
-    impl SharedBytes {
-        fn bytes(&self) -> Vec<u8> {
-            self.0.lock().map(|bytes| bytes.clone()).unwrap_or_default()
-        }
-    }
-
-    impl Write for SharedBytes {
-        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-            self.0
-                .lock()
-                .map_err(|_| io::Error::other("shared test writer was poisoned"))?
-                .extend_from_slice(buffer);
-            Ok(buffer.len())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
     struct FailingWriter;
 
     impl Write for FailingWriter {
@@ -289,17 +267,10 @@ mod tests {
 
     #[test]
     fn search_machine_error_uses_the_ui_writer_and_propagates_failure() {
-        let stderr = SharedBytes::default();
-        let stderr_copy = stderr.clone();
-        let mut ui = Ui::with_writers(
-            io::sink(),
-            RenderContext::for_test(TestContext::pipe(StreamKind::Stdout)),
-            stderr,
-            RenderContext::for_test(TestContext::pipe(StreamKind::Stderr)),
-        );
+        let (mut ui, _, stderr) = pipe_ui(ColorMode::Never);
 
         write_machine_error(true, &mut ui, "structured search error").unwrap();
-        assert_eq!(stderr_copy.bytes(), b"structured search error\n");
+        assert_eq!(stderr.bytes(), b"structured search error\n");
 
         let mut failing_ui = Ui::with_writers(
             io::sink(),

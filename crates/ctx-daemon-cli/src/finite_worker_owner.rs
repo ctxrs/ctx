@@ -59,10 +59,28 @@ pub fn finite_worker_interrupted(error: &anyhow::Error) -> bool {
         .any(|cause| cause.is::<FiniteWorkerInterrupted>())
 }
 
+pub fn foreground_result_interrupted<T>(result: &Result<T>) -> bool {
+    result.as_ref().is_err_and(finite_worker_interrupted)
+}
+
+pub fn finish_foreground_result<T>(
+    result: Result<T>,
+    finalization: impl FnOnce() -> Result<()>,
+) -> Result<T> {
+    if foreground_result_interrupted(&result) {
+        return result;
+    }
+    finalization()?;
+    result
+}
+
 /// Called only by the final-binary signal broker. It is intentionally safe in
-/// a signal callback: no locks, allocation, child access, or I/O.
-pub fn record_foreground_interrupt() {
-    BROKER_STATE.fetch_add(INTERRUPT_EPOCH_INCREMENT, Ordering::SeqCst);
+/// a signal callback: no locks, allocation, child access, or I/O. A `true`
+/// return means no foreground scope owned cleanup authority when the interrupt
+/// was recorded, so the final binary must exit immediately instead of entering
+/// post-command finalization.
+pub fn record_foreground_interrupt() -> bool {
+    BROKER_STATE.fetch_add(INTERRUPT_EPOCH_INCREMENT, Ordering::SeqCst) & ACTIVE_COUNT_MASK == 0
 }
 
 pub fn foreground_interrupt_epoch() -> u64 {
@@ -283,6 +301,42 @@ mod tests {
         assert!(finite_worker_interrupted(&error));
     }
 
+    fn interrupted_result() -> Result<()> {
+        let result = Err::<(), _>(
+            anyhow::Error::new(FiniteWorkerInterrupted).context("foreground operation"),
+        );
+        finish_foreground_result(result, || Err(anyhow::anyhow!("flush failed")))
+    }
+
+    #[test]
+    fn interruption_outlives_flush_failure() {
+        let error = interrupted_result().unwrap_err();
+        assert!(finite_worker_interrupted(&error));
+    }
+
+    #[test]
+    fn interruption_outlives_rendering_failure() {
+        let result = Err::<(), _>(anyhow::Error::new(FiniteWorkerInterrupted));
+        let error =
+            finish_foreground_result(result, || Err(anyhow::anyhow!("render failed"))).unwrap_err();
+        assert!(finite_worker_interrupted(&error));
+    }
+
+    #[test]
+    fn interruption_outlives_cleanup_failure() {
+        let result = Err::<(), _>(anyhow::Error::new(FiniteWorkerInterrupted));
+        let error = finish_foreground_result(result, || Err(anyhow::anyhow!("cleanup failed")))
+            .unwrap_err();
+        assert!(finite_worker_interrupted(&error));
+    }
+
+    #[test]
+    fn ordinary_finalization_failure_remains_authoritative() {
+        let error =
+            finish_foreground_result(Ok(()), || Err(anyhow::anyhow!("flush failed"))).unwrap_err();
+        assert_eq!(error.to_string(), "flush failed");
+    }
+
     #[test]
     fn interrupt_after_epoch_capture_is_not_adopted_as_the_scope_baseline() {
         let captured = foreground_interrupt_epoch();
@@ -296,7 +350,9 @@ mod tests {
     #[test]
     fn interrupt_racing_scope_deactivation_is_not_lost() {
         BEFORE_DEACTIVATE_FOR_TEST.with(|hook| {
-            *hook.borrow_mut() = Some(Box::new(record_foreground_interrupt));
+            *hook.borrow_mut() = Some(Box::new(|| {
+                record_foreground_interrupt();
+            }));
         });
 
         let error = with_foreground_guard(|| Ok(())).unwrap_err();

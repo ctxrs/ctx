@@ -43,6 +43,8 @@ use ctx_app_config::{AppConfig, DeprecatedControls};
 
 mod finalization;
 mod parse;
+#[cfg(test)]
+mod test_support;
 
 use finalization::{
     complete_local_usage, flush_cli_output, record_search_final_delivery, send_online_after_output,
@@ -440,9 +442,7 @@ pub(crate) fn run_cli() -> Result<()> {
     } else {
         execute_command()
     };
-    let foreground_interrupted = result
-        .as_ref()
-        .is_err_and(ctx_daemon_cli::finite_worker_interrupted);
+    let foreground_interrupted = ctx_daemon_cli::foreground_result_interrupted(&result);
     let output_started = Instant::now();
     let (rendered_error, search_error_render_failure) = match render_command_result_error(
         &result,
@@ -517,35 +517,15 @@ pub(crate) fn run_cli() -> Result<()> {
             semantic::maybe_autostart_daemon(&data_root, &config, trigger);
         }
     }
-    finish_command_result(result, output_result, rendered_error)
+    ctx_daemon_cli::finish_foreground_result(result, || {
+        output_result?;
+        rendered_error.map_or(Ok(()), Err)
+    })
 }
 
 fn command_uses_foreground_finite_wait(command: &CommandRoot) -> bool {
-    match command {
-        CommandRoot::Import(_) => true,
-        CommandRoot::Search(args) => args.refresh == CliRefreshArg::Wait,
-        _ => false,
-    }
-}
-
-fn finish_command_result(
-    result: Result<()>,
-    output_result: Result<()>,
-    rendered_error: Option<anyhow::Error>,
-) -> Result<()> {
-    if result
-        .as_ref()
-        .is_err_and(ctx_daemon_cli::finite_worker_interrupted)
-    {
-        // Rendering, stream flush, analytics, and post-command work cannot
-        // erase the typed interruption retained by the final exit boundary.
-        return result;
-    }
-    output_result?;
-    if let Some(error) = rendered_error {
-        return Err(error);
-    }
-    result
+    matches!(command, CommandRoot::Import(_))
+        || matches!(command, CommandRoot::Search(args) if args.refresh == CliRefreshArg::Wait)
 }
 
 fn render_command_result_error(
@@ -556,10 +536,7 @@ fn render_command_result_error(
     search_operation: bool,
     ui: &mut Ui,
 ) -> Result<Option<anyhow::Error>> {
-    if result
-        .as_ref()
-        .is_err_and(ctx_daemon_cli::finite_worker_interrupted)
-    {
+    if ctx_daemon_cli::foreground_result_interrupted(result) {
         // Interruption remains typed through UI flush, analytics, and command
         // finalization. The outer exit boundary maps it to exactly 130 and no
         // public format receives an ordinary error document.
