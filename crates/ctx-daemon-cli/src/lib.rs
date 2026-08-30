@@ -12,9 +12,10 @@ fn committed_generation_recovery_error(
 mod composition;
 pub use composition::{install_host, AppConfig, DaemonCliHost, DaemonConfig, DaemonMode};
 pub use ctx_daemon_application::DaemonHostRunRequest;
+pub use ctx_daemon_runtime::apply_supervisor_environment_handoff;
 pub use ctx_daemon_service::{CoreGenerationPublished, DaemonConfigSnapshot, DaemonUpgradePorts};
 pub use ctx_semantic_model::{
-    SemanticEmbeddingExecutorAuth, SemanticEmbeddingExecutorConfig,
+    ExternalSemanticSpace, SemanticEmbeddingExecutorAuth, SemanticEmbeddingExecutorConfig,
     SemanticEmbeddingExecutorHandle, SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV,
     SEMANTIC_EMBEDDING_AUTH_TOKEN_ENV,
 };
@@ -96,7 +97,11 @@ mod semantic_executor_auth_tests {
     fn loopback_executor() -> SemanticEmbeddingExecutorHandle {
         let auth = semantic_embedding_executor_auth_from_environment().unwrap();
         SemanticEmbeddingExecutorHandle::build_with_auth(
-            SemanticEmbeddingExecutorConfig::http("http://127.0.0.1:41007").unwrap(),
+            SemanticEmbeddingExecutorConfig::http(
+                "http://127.0.0.1:41007",
+                ExternalSemanticSpace::new("test-space", 384).unwrap(),
+            )
+            .unwrap(),
             auth,
             SharedSemanticRuntime::default(),
             SemanticModelConfig::new(SemanticModelPaths::new(

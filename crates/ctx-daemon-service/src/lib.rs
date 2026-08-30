@@ -78,6 +78,7 @@ pub use query_service::{
     daemon_query_request, daemon_service_endpoint_path, daemon_source_refresh_request,
     read_daemon_service_endpoint_identity, DaemonIpcService, DaemonQueryEndpoint,
     DaemonQueryServiceUnavailable, DaemonSourceRefreshServiceUnavailable,
+    DAEMON_SEMANTIC_QUERY_SCHEMA_VERSION,
 };
 pub use runtime_limits::SEMANTIC_WORKER_BATCH_MAX;
 pub use source_backed_refresh_coordinator::{

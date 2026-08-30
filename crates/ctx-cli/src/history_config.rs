@@ -73,8 +73,11 @@ mod tests {
     fn adapter_delegates_mutation_without_reloading_config() {
         let temp = tempfile::tempdir().unwrap();
         let mut config = AppConfig::default();
-        config.semantic.executor =
-            ctx_daemon_cli::SemanticEmbeddingExecutorConfig::http("http://127.0.0.1:9").unwrap();
+        config.semantic.executor = ctx_daemon_cli::SemanticEmbeddingExecutorConfig::http(
+            "http://127.0.0.1:9",
+            ctx_daemon_cli::ExternalSemanticSpace::new("test-space", 384).unwrap(),
+        )
+        .unwrap();
         let (snapshot, load_count) = config::count_app_config_loads(|| {
             let mut adapter = CliHistoryConfigAdapter::new(temp.path(), &mut config);
 

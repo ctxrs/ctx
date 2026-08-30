@@ -1,10 +1,15 @@
 use std::{
+    io::{Read, Write},
+    net::TcpListener,
     path::Path,
     sync::{Arc, Mutex, MutexGuard},
+    thread,
+    time::Duration,
 };
 
 use anyhow::{anyhow, Result};
 use ctx_history_capture::DiscoveryContext;
+use ctx_semantic_model::ExternalSemanticSpace;
 
 use super::*;
 use crate::{DaemonConfigSnapshot, DaemonIpcService, DaemonProductConfig};
@@ -86,6 +91,76 @@ fn semantic_config(executor: SemanticEmbeddingExecutorConfig) -> DaemonConfigSna
     }
 }
 
+fn http_executor(
+    endpoint: &str,
+    space_id: &str,
+    dimensions: usize,
+) -> SemanticEmbeddingExecutorConfig {
+    SemanticEmbeddingExecutorConfig::http(
+        endpoint,
+        ExternalSemanticSpace::new(space_id, dimensions).expect("external semantic space"),
+    )
+    .expect("loopback HTTP executor config")
+}
+
+fn contract_response_endpoint(
+    space_id: &str,
+    dimensions: usize,
+) -> (String, thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind contract response server");
+    let endpoint = format!(
+        "http://{}",
+        listener
+            .local_addr()
+            .expect("read contract response server address")
+    );
+    let body = json!({
+        "schema_version": 2,
+        "space_id": space_id,
+        "dimensions": dimensions,
+    })
+    .to_string();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept contract verification");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("bound contract request read");
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 1024];
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let read = stream.read(&mut buffer).expect("read contract request");
+            assert!(read > 0, "contract request ended before headers");
+            request.extend_from_slice(&buffer[..read]);
+        }
+        let request = String::from_utf8(request).expect("contract request is UTF-8");
+        assert!(
+            request.starts_with("GET /v2/contract HTTP/1.1\r\n") && request.ends_with("\r\n\r\n"),
+            "verification must be a content-free contract GET: {request}"
+        );
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream
+            .write_all(response.as_bytes())
+            .expect("write contract response");
+    });
+    (endpoint, server)
+}
+
+fn unavailable_http_endpoint() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("reserve unavailable HTTP endpoint");
+    let endpoint = format!(
+        "http://{}",
+        listener
+            .local_addr()
+            .expect("read unavailable HTTP endpoint")
+    );
+    drop(listener);
+    endpoint
+}
+
 struct ReloadTestContext {
     temp: tempfile::TempDir,
     config_port: &'static ReloadTestConfig,
@@ -165,6 +240,43 @@ impl ReloadTestContext {
 }
 
 #[cfg(any(unix, windows))]
+fn assert_refresh_service_usable(context: &ReloadTestContext) {
+    let response = crate::query_service::daemon_source_refresh_request(
+        context.temp.path(),
+        json!({"schema_version": 1, "op": "ping"}),
+        Duration::from_secs(1),
+        64 * 1024,
+    )
+    .expect("source refresh IPC request")
+    .expect("source refresh ping response");
+    assert_eq!(response["ok"], true);
+    assert_eq!(response["service"], "source_refresh");
+}
+
+#[cfg(any(unix, windows))]
+fn assert_external_activation_failed(context: &ReloadTestContext) {
+    assert_eq!(context.reload.status, "activation_failed");
+    assert!(context.reload.last_error.is_some());
+    assert!(context.runtime.semantic_executor.is_none());
+    assert!(context.query_service.is_none());
+    assert!(context.refresh_service.is_some());
+    assert!(!daemon_semantic_runtime_active(
+        &context.runtime,
+        context.query_service.as_ref()
+    ));
+    assert!(!crate::query_service::daemon_service_endpoint_path(
+        context.temp.path(),
+        DaemonIpcService::SemanticQuery,
+    )
+    .exists());
+    let status = context.reload.to_json();
+    assert_eq!(status["applied"]["semantic_enabled"], false);
+    assert!(status["applied"]["semantic_executor"].is_null());
+    assert!(status["applied"]["semantic_contract_fingerprint"].is_null());
+    assert_refresh_service_usable(context);
+}
+
+#[cfg(any(unix, windows))]
 fn assert_failed_executor_switch(
     initial: SemanticEmbeddingExecutorConfig,
     replacement: SemanticEmbeddingExecutorConfig,
@@ -178,6 +290,8 @@ fn assert_failed_executor_switch(
             .as_ref()
             .expect("initial semantic executor"),
     );
+    context.runtime.sidecar_drain.generation = Some("old-generation".to_owned());
+    context.runtime.sidecar_drain.semantic_attempted_generation = Some("old-generation".to_owned());
     let replacement_config = semantic_config(replacement.clone());
     context.config_port.replace(replacement_config);
     let query_endpoint = crate::query_service::daemon_service_endpoint_path(
@@ -221,6 +335,12 @@ fn assert_failed_executor_switch(
         .is_some_and(|error| error.contains("replacement executor construction failed")));
     assert_eq!(context.runtime.config.semantic_executor, replacement);
     assert!(context.runtime.semantic_executor.is_none());
+    assert!(context.runtime.sidecar_drain.generation.is_none());
+    assert!(context
+        .runtime
+        .sidecar_drain
+        .semantic_attempted_generation
+        .is_none());
     assert!(context.query_service.is_none());
     assert!(context.refresh_service.is_some());
     assert!(!daemon_semantic_runtime_active(
@@ -235,30 +355,34 @@ fn assert_failed_executor_switch(
 fn failed_builtin_to_http_switch_clears_old_runtime_without_fallback() {
     assert_failed_executor_switch(
         SemanticEmbeddingExecutorConfig::builtin(),
-        SemanticEmbeddingExecutorConfig::http("http://127.0.0.1:41001")
-            .expect("loopback HTTP executor config"),
+        http_executor("http://127.0.0.1:41001", "space-a", 128),
     );
 }
 
 #[cfg(any(unix, windows))]
 #[test]
-fn failed_http_to_http_switch_clears_old_runtime_without_fallback() {
-    assert_failed_executor_switch(
-        SemanticEmbeddingExecutorConfig::http("http://127.0.0.1:41002")
-            .expect("initial loopback HTTP executor config"),
-        SemanticEmbeddingExecutorConfig::http("http://127.0.0.1:41003")
-            .expect("replacement loopback HTTP executor config"),
-    );
+fn endpoint_space_and_dimension_drift_each_replace_the_executor_boundary() {
+    for replacement_kind in 0..3 {
+        let (initial_endpoint, server) = contract_response_endpoint("space-a", 128);
+        let initial = http_executor(&initial_endpoint, "space-a", 128);
+        let replacement = match replacement_kind {
+            0 => http_executor("http://127.0.0.1:41003", "space-a", 128),
+            1 => http_executor(&initial_endpoint, "space-b", 128),
+            _ => http_executor(&initial_endpoint, "space-a", 256),
+        };
+        assert_failed_executor_switch(initial.clone(), replacement);
+        server.join().expect("contract response server");
+    }
 }
 
 #[cfg(any(unix, windows))]
 #[test]
 fn successful_executor_switches_replace_runtime_and_query_service_including_builtin_return() {
     let builtin = SemanticEmbeddingExecutorConfig::builtin();
-    let http_a = SemanticEmbeddingExecutorConfig::http("http://127.0.0.1:41004")
-        .expect("first loopback HTTP executor config");
-    let http_b = SemanticEmbeddingExecutorConfig::http("http://127.0.0.1:41005")
-        .expect("second loopback HTTP executor config");
+    let (http_a_endpoint, http_a_server) = contract_response_endpoint("space-a", 128);
+    let (http_b_endpoint, http_b_server) = contract_response_endpoint("space-b", 256);
+    let http_a = http_executor(&http_a_endpoint, "space-a", 128);
+    let http_b = http_executor(&http_b_endpoint, "space-b", 256);
     let mut context = ReloadTestContext::new(semantic_config(builtin.clone()));
     context.activate_initial_executor();
 
@@ -270,6 +394,9 @@ fn successful_executor_switches_replace_runtime_and_query_service_including_buil
                 .as_ref()
                 .expect("active semantic executor"),
         );
+        context.runtime.sidecar_drain.generation = Some("old-generation".to_owned());
+        context.runtime.sidecar_drain.semantic_attempted_generation =
+            Some("old-generation".to_owned());
         context
             .config_port
             .replace(semantic_config(expected.clone()));
@@ -284,20 +411,42 @@ fn successful_executor_switches_replace_runtime_and_query_service_including_buil
             .expect("replacement semantic executor");
         assert_eq!(executor.kind(), expected.kind());
         assert_eq!(executor.endpoint(), expected.http_endpoint());
+        assert_eq!(executor.executor().contract(), expected.contract());
+        let status = context.reload.to_json();
+        assert_eq!(
+            status["requested"]["semantic_contract_fingerprint"],
+            expected.contract().fingerprint()
+        );
+        assert_eq!(
+            status["applied"]["semantic_contract_fingerprint"],
+            expected.contract().fingerprint()
+        );
         assert!(old_executor.upgrade().is_none());
+        assert!(context.runtime.sidecar_drain.generation.is_none());
+        assert!(context
+            .runtime
+            .sidecar_drain
+            .semantic_attempted_generation
+            .is_none());
         assert!(context.query_service.is_some());
         assert!(daemon_semantic_runtime_active(
             &context.runtime,
             context.query_service.as_ref()
         ));
     }
+    http_a_server
+        .join()
+        .expect("first contract response server");
+    http_b_server
+        .join()
+        .expect("second contract response server");
 }
 
 #[cfg(any(unix, windows))]
 #[test]
 fn disable_and_reenable_same_executor_clears_permanent_block_state() {
-    let endpoint = SemanticEmbeddingExecutorConfig::http("http://127.0.0.1:41006")
-        .expect("loopback HTTP executor config");
+    let (server_endpoint, server) = contract_response_endpoint("space-a", 128);
+    let endpoint = http_executor(&server_endpoint, "space-a", 128);
     let mut context = ReloadTestContext::new(semantic_config(endpoint.clone()));
     context.runtime.semantic_retry.record_failure();
     context.runtime.semantic_blocked_job = Some(json!({
@@ -336,15 +485,132 @@ fn disable_and_reenable_same_executor_clears_permanent_block_state() {
     assert_eq!(context.runtime.config.semantic_executor, endpoint);
     assert!(context.runtime.semantic_executor.is_some());
     assert!(context.query_service.is_some());
+    server.join().expect("contract response server");
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn source_refresh_only_round_trip_resets_worker_state_and_reactivates_same_contract() {
+    let executor = SemanticEmbeddingExecutorConfig::builtin();
+    let mut context = ReloadTestContext::new(semantic_config(executor.clone()));
+    context.activate_initial_executor();
+    context.runtime.semantic_retry.record_failure();
+    context.runtime.semantic_blocked_job = Some(json!({
+        "status": "failed",
+        "failure_class": "permanent",
+    }));
+    context.runtime.sidecar_drain.generation = Some("blocked-generation".to_owned());
+    context.runtime.sidecar_drain.semantic_attempted_generation =
+        Some("blocked-generation".to_owned());
+
+    let mut source_only = semantic_config(executor.clone());
+    source_only.daemon.mode = DaemonMode::SourceRefreshOnly;
+    context.config_port.replace(source_only);
+    assert_eq!(context.reload(), DaemonConfigReloadOutcome::Continue);
+
+    assert_eq!(context.runtime.semantic_retry.consecutive_failures, 0);
+    assert!(context.runtime.semantic_blocked_job.is_none());
+    assert!(context.runtime.sidecar_drain.generation.is_none());
+    assert!(context
+        .runtime
+        .sidecar_drain
+        .semantic_attempted_generation
+        .is_none());
+    assert!(context.runtime.semantic_executor.is_none());
+    assert!(context.query_service.is_none());
+    assert_refresh_service_usable(&context);
+
+    context
+        .config_port
+        .replace(semantic_config(executor.clone()));
+    assert_eq!(context.reload(), DaemonConfigReloadOutcome::Continue);
+
+    assert_eq!(context.reload.status, "applied");
+    assert_eq!(context.runtime.config.semantic_executor, executor);
+    assert_eq!(context.runtime.semantic_retry.consecutive_failures, 0);
+    assert!(context.runtime.semantic_blocked_job.is_none());
+    assert!(context.runtime.semantic_executor.is_some());
+    assert!(context.query_service.is_some());
+    assert!(daemon_semantic_runtime_active(
+        &context.runtime,
+        context.query_service.as_ref()
+    ));
+    assert_refresh_service_usable(&context);
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn finite_core_worker_applies_selected_contract_without_activating_semantic_runtime() {
+    let endpoint = http_executor("http://127.0.0.1:41008", "space-finite", 192);
+    let mut context = ReloadTestContext::new(semantic_config(endpoint.clone()));
+    context.args.profile = DaemonRunProfile::FiniteCoreWorker;
+
+    assert_eq!(
+        reload_daemon_runtime_config_with_executor_builder(
+            context.temp.path(),
+            &context.args,
+            &mut context.runtime,
+            DaemonConfigReloadContext {
+                query_service: &mut context.query_service,
+                refresh_service: &mut context.refresh_service,
+                state: &mut context.reload,
+                wakeup: &context.wakeup,
+                lifecycle: &context.lifecycle,
+                config_port: context.config_port,
+            },
+            |_, _, _, _| panic!("finite Core worker must not build a semantic executor"),
+        ),
+        DaemonConfigReloadOutcome::Continue
+    );
+
+    assert!(context.runtime.semantic_executor.is_none());
+    assert!(context.query_service.is_none());
+    assert!(context.refresh_service.is_some());
+    let status = context.reload.to_json();
+    assert_eq!(status["status"], "applied");
+    assert_eq!(status["applied"]["semantic_enabled"], false);
+    assert_eq!(
+        status["applied"]["semantic_executor"],
+        endpoint.http_endpoint().unwrap()
+    );
+    assert_eq!(
+        status["applied"]["semantic_contract_fingerprint"],
+        endpoint.contract().fingerprint()
+    );
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn unavailable_external_contract_fails_before_semantic_runtime_activation() {
+    let endpoint = http_executor(&unavailable_http_endpoint(), "selected-space", 128);
+    let mut context = ReloadTestContext::new(semantic_config(endpoint));
+
+    assert_eq!(context.reload(), DaemonConfigReloadOutcome::Continue);
+
+    assert_external_activation_failed(&context);
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn drifted_external_contract_fails_before_semantic_runtime_activation() {
+    let (server_endpoint, server) = contract_response_endpoint("drifted-space", 128);
+    let endpoint = http_executor(&server_endpoint, "selected-space", 128);
+    let mut context = ReloadTestContext::new(semantic_config(endpoint));
+
+    assert_eq!(context.reload(), DaemonConfigReloadOutcome::Continue);
+    server.join().expect("contract response server");
+
+    assert_external_activation_failed(&context);
 }
 
 #[cfg(any(unix, windows))]
 #[test]
 fn config_load_failure_deactivates_semantic_runtime_without_stopping_core_refresh() {
-    let endpoint = SemanticEmbeddingExecutorConfig::http("http://127.0.0.1:41007")
-        .expect("loopback HTTP executor config");
+    let (server_endpoint, server) = contract_response_endpoint("space-a", 128);
+    let endpoint = http_executor(&server_endpoint, "space-a", 128);
     let mut context = ReloadTestContext::new(semantic_config(endpoint));
     context.activate_initial_executor();
+    server.join().expect("contract response server");
     let old_executor = Arc::downgrade(
         context
             .runtime

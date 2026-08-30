@@ -16,6 +16,7 @@ mod vector_store_search;
 mod vector_store_state;
 
 pub use ctx_semantic_model::{semantic_model_contract, SemanticModelContract};
+use ctx_semantic_model::{ExternalSemanticSpace, SemanticEmbeddingExecutorConfig};
 pub use document::SemanticEventDocument;
 pub use query_index::{SemanticNotReady, SemanticQueryPin};
 pub use source_document::SourceBackedSemanticDocumentBuilder;
@@ -26,6 +27,35 @@ pub use vector_store::{
     SourceBackedSemanticOutcome,
 };
 pub use vector_store_schema::{semantic_vector_failure_kind, SemanticVectorFailureKind};
+
+/// Reconstructs an external HTTP contract inside this crate's semantic-model
+/// dependency instance.
+///
+/// Bazel may materialize `ctx-semantic-model` separately across dependency
+/// boundaries, so callers bridge the non-secret primitive selection instead
+/// of passing a Rust contract value across that boundary.
+pub fn external_http_semantic_model_contract(
+    endpoint: &str,
+    space_id: &str,
+    dimensions: usize,
+) -> anyhow::Result<SemanticModelContract> {
+    let space = ExternalSemanticSpace::new(space_id, dimensions)?;
+    Ok(SemanticEmbeddingExecutorConfig::http(endpoint, space)?
+        .contract()
+        .clone())
+}
+
+/// Reconstructs the retained fixed-E5 V1 HTTP route while preserving the
+/// built-in vector/index fingerprint.
+pub fn legacy_fixed_http_semantic_model_contract(
+    endpoint: &str,
+) -> anyhow::Result<SemanticModelContract> {
+    Ok(
+        SemanticEmbeddingExecutorConfig::legacy_fixed_http(endpoint)?
+            .contract()
+            .clone(),
+    )
+}
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support {

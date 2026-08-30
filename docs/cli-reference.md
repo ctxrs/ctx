@@ -124,17 +124,26 @@ ctx daemon run
   supports one final `--format json` result.
 - `semantic enable` persists the explicit semantic-search opt-in. The optional
   `--executor builtin|URL` also selects the executor used for both indexing and
-  query embeddings. `builtin` is the implicit default and leaves no executor
-  setting in `config.toml`. A URL selects the exact-contract HTTP executor;
-  remote endpoints require HTTPS, while plain HTTP is accepted only for a
-  literal loopback IP address. Remote authentication uses only
-  `CTX_SEMANTIC_EMBEDDING_TOKEN` as a bearer token; ctx does not provision or
-  refresh it. In auto mode, enablement starts or recovers daemon-owned semantic
+  query embeddings. Without `--executor`, the command preserves the current
+  selection. `--executor builtin` restores local multilingual E5 and leaves no
+  executor setting in `config.toml`; built-in is also the default when no
+  selection exists. An explicit URL validates protocol schema V2, with a
+  fixed-E5 V1 fallback only when V2 is absent, then persists the selected
+  protocol's endpoint and identity. `schema_version` is not a config field.
+  Each data root has one accepted vector space.
+  Remote endpoints require HTTPS and
+  `CTX_SEMANTIC_EMBEDDING_TOKEN`; plain HTTP is accepted only for a literal
+  loopback IP address. The token is bound to that endpoint. Later identity drift
+  fails semantic work closed until the user reruns the explicit URL selection.
+  Accepting a changed identity wipes and rebuilds only the derived semantic
+  index. In auto mode, enablement starts or recovers daemon-owned semantic
   catch-up; `--wait` waits for the current projection. `semantic status` reads
   local configuration and state without requiring credentials, exposing a
   token, or making a network request. `semantic disable` opts out without
   deleting downloaded model/runtime assets or derived semantic indexes. Plain
-  enablement in manual mode does not change indexing mode.
+  enablement in manual mode does not change indexing mode. See
+  [Semantic Embedding Executors](semantic-executors.md) for the V2 protocol and
+  retained fixed-E5 V1 compatibility.
 - `daemon run` is an advanced command that runs persistent local maintenance in
   the foreground and blocks until stopped. It does not change the configured
   indexing mode. In manual mode, pass `--force` to run it explicitly. Each pass

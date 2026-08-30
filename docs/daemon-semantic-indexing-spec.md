@@ -80,23 +80,25 @@ or summarization is allowed in the local indexing path.
 
 ## Embedding Executor Contract
 
-The built-in executor is the invisible default. The command `ctx semantic
-enable --executor builtin|URL` selects the executor used for both document
-indexing and query embedding; selecting `builtin` removes persisted executor
-configuration.
+The built-in multilingual E5 executor is the local default. The command `ctx
+semantic enable --executor builtin|URL` selects the executor used for both
+document indexing and query embedding; bare `ctx semantic enable` preserves the
+current selection. Each data root has one accepted vector space. An explicit
+URL selection tries protocol V2 first and persists its endpoint, opaque
+`space_id`, and dimensions. Fixed-E5 V1 is retained only as an endpoint-only
+fallback when V2 returns 404; its vector identity remains the pinned built-in
+contract. `schema_version` is not a config field.
 
-The normative URL, authentication, privacy, wire protocol, conformance,
-retry, and error contract is the
+The normative URL, authentication, privacy, wire protocol, identity, and
+responsibility boundary is the
 [external semantic executor contract](semantic-executors.md). This document
 owns only its daemon lifecycle integration.
 
 The daemon constructs one executor per applied configuration and uses it for
-both indexing and query embedding. Switching the endpoint or its bound token
-reconstructs that executor; selecting `builtin` restores the existing local
-model lifecycle. A failed external activation remains visible in daemon config
-reload status and fails closed without falling back to the built-in executor.
-Lexical results may remain available only with an explicit semantic fallback
-diagnostic.
+both indexing and query embedding. Endpoint identity drift fails closed without
+falling back to E5. Rerunning `ctx semantic enable --executor URL` explicitly
+accepts the current identity; if it changed, ctx wipes and rebuilds only the
+derived semantic index. Core history and lexical generations remain intact.
 
 `ctx semantic status` reads persisted and observed local state only. It does
 not require the token, send it, probe either route, or make any network request.
@@ -108,9 +110,11 @@ history, start persistent daemon maintenance in automatic mode, and return
 promptly. Manual setup starts no worker. Setup should not block for full
 semantic completion by default.
 
-`ctx semantic enable` records the semantic-search opt-in and may select an
-executor. In auto mode it starts or recovers daemon-owned executor preparation
-and indexing; `--wait` waits for the current projection. A user who wants
+`ctx semantic enable` records the semantic-search opt-in without changing the
+selected executor. An explicit URL also discovers and accepts the endpoint's
+vector-space identity. In auto mode the command starts or recovers daemon-owned
+executor preparation and indexing;
+`--wait` waits for the current projection. A user who wants
 automatic catch-up from manual mode runs `ctx index mode auto` first. Lexical
 search remains available while embeddings build; hybrid retrieval uses both
 indexes when coverage is ready.

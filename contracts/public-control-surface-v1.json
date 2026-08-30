@@ -104,6 +104,16 @@
       "environment_variable": null
     },
     {
+      "behavior": "semantic embedding vector-space identity",
+      "config_key": "semantic.space_id",
+      "environment_variable": null
+    },
+    {
+      "behavior": "semantic embedding vector dimensions",
+      "config_key": "semantic.dimensions",
+      "environment_variable": null
+    },
+    {
       "behavior": "automatic provider source discovery",
       "config_key": "sources.automatic",
       "environment_variable": null,

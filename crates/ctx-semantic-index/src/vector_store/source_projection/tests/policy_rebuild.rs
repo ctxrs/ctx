@@ -1,6 +1,390 @@
 use super::*;
 
 #[test]
+fn high_odd_dimension_external_projection_preserves_full_ordinary_batches() -> Result<()> {
+    let fixture = Fixture::new(1)?;
+    let contract = external_contract(
+        "http://127.0.0.1:43122/v1/embeddings",
+        "space-high-odd",
+        4_095,
+    )?;
+    let page_limit = contract
+        .external_space()
+        .ok_or_else(|| anyhow!("external fixture lost its declared space"))?
+        .max_inputs_per_request();
+    assert_eq!(page_limit, 64);
+    assert_eq!(source_event_page_limit(&contract), page_limit);
+    assert_eq!(
+        source_event_page_limit(semantic_model_contract()),
+        MAX_SOURCE_EVENT_PAGE_ITEMS
+    );
+    let record_count = page_limit + 1;
+    let index = fixture.publish(
+        "external-high-dimension-pages",
+        &[(0, bodies("high-dimension", record_count))],
+    )?;
+    let core_generation_id = index.generation_id().to_owned();
+    let mut store = SemanticVectorStore::open(&fixture.semantic_path, &contract)?;
+    let mut embedder = DimensionEmbedder::new(&contract);
+
+    let outcome = reconcile_all(
+        &mut store,
+        &index,
+        &mut CoreBuilder::default(),
+        &mut embedder,
+    )?;
+
+    assert_eq!(outcome.records_decoded, record_count);
+    assert_eq!(outcome.records_embedded, record_count);
+    assert_eq!(embedder.batch_sizes, vec![page_limit, 1]);
+    assert!(embedder
+        .batch_sizes
+        .iter()
+        .all(|batch| *batch <= page_limit));
+    assert_eq!(index.generation_id(), core_generation_id);
+    assert_eq!(
+        VerifiedIndex::open_pinned(
+            fixture
+                .data_root
+                .join("index-external-high-dimension-pages"),
+        )?
+        .generation_id(),
+        core_generation_id
+    );
+    Ok(())
+}
+
+#[test]
+fn single_max_length_external_record_bounds_batches_at_max_dimensions() -> Result<()> {
+    const EXTERNAL_SCALAR_LIMIT: usize = 262_144;
+
+    for (dimensions, port) in [(4_095, 43_125), (4_096, 43_126)] {
+        let fixture = Fixture::new(1)?;
+        let contract = external_contract(
+            &format!("http://127.0.0.1:{port}/v1/embeddings"),
+            &format!("space-max-record-{dimensions}"),
+            dimensions,
+        )?;
+        let batch_limit = source_event_page_limit(&contract);
+        assert_eq!(batch_limit, 64);
+        let index = fixture.publish(
+            &format!("external-max-record-{dimensions}"),
+            &[(
+                0,
+                vec!["x".repeat(ctx_history_index::SEMANTIC_SOURCE_MAX_CHARS)],
+            )],
+        )?;
+        let mut store = SemanticVectorStore::open(&fixture.semantic_path, &contract)?;
+        let mut embedder = DimensionEmbedder::new(&contract);
+
+        let outcome = reconcile_all(
+            &mut store,
+            &index,
+            &mut CoreBuilder::default(),
+            &mut embedder,
+        )?;
+
+        assert!(outcome.ready);
+        assert_eq!(outcome.records_decoded, 1);
+        assert_eq!(outcome.records_embedded, 1);
+        assert!(embedder.chunks > batch_limit);
+        assert!(embedder.batch_sizes.len() > 1);
+        assert!(embedder.batch_sizes.iter().all(|batch| {
+            *batch <= batch_limit
+                && batch
+                    .checked_mul(dimensions)
+                    .is_some_and(|scalars| scalars <= EXTERNAL_SCALAR_LIMIT)
+        }));
+        let snapshot = projection_snapshot(&store)?;
+        assert_eq!(snapshot.events.len(), 1);
+        assert_eq!(snapshot.events[0].0, fixture.event_id(0, 1)?);
+        assert_eq!(snapshot.events[0].3 as usize, embedder.chunks);
+        assert_eq!(snapshot.chunks.len(), embedder.chunks);
+    }
+    Ok(())
+}
+
+struct InterruptingDimensionEmbedder {
+    inner: DimensionEmbedder,
+    fail_on_call: usize,
+    calls: usize,
+    requested_batch_sizes: Vec<usize>,
+}
+
+impl InterruptingDimensionEmbedder {
+    fn new(contract: &SemanticModelContract, fail_on_call: usize) -> Self {
+        Self {
+            inner: DimensionEmbedder::new(contract),
+            fail_on_call,
+            calls: 0,
+            requested_batch_sizes: Vec::new(),
+        }
+    }
+}
+
+impl SemanticBatchEmbedder for InterruptingDimensionEmbedder {
+    fn embed_chunks(&mut self, chunks: &[SemanticChunkDocument]) -> Result<Vec<Vec<f32>>> {
+        self.calls = self.calls.saturating_add(1);
+        self.requested_batch_sizes.push(chunks.len());
+        if self.calls == self.fail_on_call {
+            return Err(anyhow!("forced external embedding interruption"));
+        }
+        self.inner.embed_chunks(chunks)
+    }
+}
+
+#[test]
+fn max_length_external_records_resume_atomically_without_skips() -> Result<()> {
+    const DIMENSIONS: usize = 4_096;
+    const EXTERNAL_SCALAR_LIMIT: usize = 262_144;
+    const RECORD_COUNT: usize = 3;
+
+    let fixture = Fixture::new(1)?;
+    let contract = external_contract(
+        "http://127.0.0.1:43127/v1/embeddings",
+        "space-max-record-restart",
+        DIMENSIONS,
+    )?;
+    let batch_limit = source_event_page_limit(&contract);
+    let index = fixture.publish(
+        "external-max-record-restart",
+        &[(
+            0,
+            vec!["x".repeat(ctx_history_index::SEMANTIC_SOURCE_MAX_CHARS); RECORD_COUNT],
+        )],
+    )?;
+    let expected_event_ids = (1..=RECORD_COUNT)
+        .map(|sequence| fixture.event_id(0, u64::try_from(sequence)?))
+        .collect::<Result<HashSet<_>>>()?;
+    let mut store = SemanticVectorStore::open(&fixture.semantic_path, &contract)?;
+    let mut builder = CoreBuilder::default();
+    // One oversized record completes in two bounded batches. The fourth call
+    // interrupts the second record after its first batch has returned.
+    let mut interrupted = InterruptingDimensionEmbedder::new(&contract, 4);
+    let error = store
+        .reconcile_source_backed_index(&index, &mut builder, &mut interrupted)
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("forced external embedding interruption"));
+    assert_eq!(interrupted.requested_batch_sizes.len(), 4);
+    assert!(interrupted.requested_batch_sizes.iter().all(|batch| {
+        *batch <= batch_limit
+            && batch
+                .checked_mul(DIMENSIONS)
+                .is_some_and(|scalars| scalars <= EXTERNAL_SCALAR_LIMIT)
+    }));
+    let frontier = store
+        .source_frontier()?
+        .ok_or_else(|| anyhow!("interrupted external rebuild lost its frontier"))?;
+    assert_eq!(frontier.processed_source_documents, 1);
+    assert!(!frontier.source_scan_complete);
+    let committed_event_id = frontier
+        .after_identity
+        .as_deref()
+        .map(StableEntityId::decode_canonical)
+        .transpose()?
+        .ok_or_else(|| anyhow!("interrupted external rebuild lost committed progress"))?
+        .as_uuid();
+    assert!(expected_event_ids.contains(&committed_event_id));
+    assert!(store.source_acknowledgement()?.is_none());
+
+    drop(store);
+    let mut store = SemanticVectorStore::open(&fixture.semantic_path, &contract)?;
+    builder.calls.clear();
+    let mut resumed_embedder = DimensionEmbedder::new(&contract);
+    let resumed = reconcile_all(&mut store, &index, &mut builder, &mut resumed_embedder)?;
+
+    assert!(resumed.ready);
+    assert_eq!(resumed.records_embedded, RECORD_COUNT - 1);
+    assert!(builder
+        .calls
+        .iter()
+        .all(|event_id| *event_id != committed_event_id));
+    assert!(resumed_embedder.batch_sizes.iter().all(|batch| {
+        *batch <= batch_limit
+            && batch
+                .checked_mul(DIMENSIONS)
+                .is_some_and(|scalars| scalars <= EXTERNAL_SCALAR_LIMIT)
+    }));
+    let snapshot = projection_snapshot(&store)?;
+    assert_eq!(snapshot.events.len(), RECORD_COUNT);
+    assert_eq!(
+        snapshot
+            .events
+            .iter()
+            .map(|event| event.0)
+            .collect::<HashSet<_>>(),
+        expected_event_ids
+    );
+    assert!(snapshot
+        .events
+        .iter()
+        .all(|event| event.3 as usize > batch_limit));
+    assert_eq!(
+        snapshot.chunks.len(),
+        snapshot
+            .events
+            .iter()
+            .map(|event| event.3 as usize)
+            .sum::<usize>()
+    );
+    assert!(store.source_acknowledgement()?.is_some());
+    Ok(())
+}
+
+#[test]
+fn same_dimension_external_space_change_resets_and_reembeds_unchanged_core() -> Result<()> {
+    let fixture = Fixture::new(1)?;
+    let index = fixture.publish("external-space-reset", &[(0, bodies("space", 3))])?;
+    let core_generation_id = index.generation_id().to_owned();
+    let endpoint = "http://127.0.0.1:43123/v1/embeddings";
+    let first_contract = external_contract(endpoint, "space-a", 6)?;
+    let second_contract = external_contract(endpoint, "space-b", 6)?;
+    let moved_contract =
+        external_contract("http://127.0.0.1:43123/other/embeddings", "space-a", 6)?;
+    assert_eq!(first_contract.dimensions(), second_contract.dimensions());
+    assert_ne!(first_contract, second_contract);
+    let first_policy = semantic_generation_policy(&first_contract);
+    let second_policy = semantic_generation_policy(&second_contract);
+    assert_eq!(first_policy.embedding.model, first_contract.model_id());
+    assert_eq!(first_policy.embedding.model_revision, "space-a");
+    assert_eq!(first_policy.embedding.dimensions, 6);
+    assert_eq!(second_policy.embedding.model, second_contract.model_id());
+    assert_eq!(second_policy.embedding.model_revision, "space-b");
+    assert_eq!(second_policy.embedding.dimensions, 6);
+    assert_ne!(
+        semantic_generation_policy_hash(&first_contract)?,
+        semantic_generation_policy_hash(&second_contract)?
+    );
+    assert_ne!(
+        source_backed_semantic_contract_fingerprint(&first_contract)?,
+        source_backed_semantic_contract_fingerprint(&second_contract)?
+    );
+    assert_ne!(
+        crate::vector_store_schema::flat_model_contract(&first_contract)
+            .map_err(anyhow::Error::new)?,
+        crate::vector_store_schema::flat_model_contract(&second_contract)
+            .map_err(anyhow::Error::new)?
+    );
+    assert_eq!(
+        semantic_generation_policy_hash(&first_contract)?,
+        semantic_generation_policy_hash(&moved_contract)?,
+        "executor location must not change vector compatibility"
+    );
+    assert_eq!(
+        source_backed_semantic_contract_fingerprint(&first_contract)?,
+        source_backed_semantic_contract_fingerprint(&moved_contract)?,
+        "executor location must not change source projection identity"
+    );
+    assert_eq!(
+        crate::vector_store_schema::flat_model_contract(&first_contract)
+            .map_err(anyhow::Error::new)?,
+        crate::vector_store_schema::flat_model_contract(&moved_contract)
+            .map_err(anyhow::Error::new)?,
+        "executor location must not reset compatible Flat vectors"
+    );
+
+    let mut store = SemanticVectorStore::open(&fixture.semantic_path, &first_contract)?;
+    let mut first_embedder = DimensionEmbedder::new(&first_contract);
+    let initial = reconcile_all(
+        &mut store,
+        &index,
+        &mut CoreBuilder::default(),
+        &mut first_embedder,
+    )?;
+    assert_eq!(initial.records_embedded, 3);
+    assert_eq!(initial.records_reused, 0);
+    assert_eq!(first_embedder.chunks, 3);
+    let first_acknowledgement = store
+        .source_acknowledgement()?
+        .ok_or_else(|| anyhow!("missing first external-space acknowledgement"))?;
+    drop(store);
+
+    let mut store = SemanticVectorStore::open(&fixture.semantic_path, &second_contract)?;
+    assert!(store.conn.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM semantic_maintenance_state WHERE key = ?1
+         )",
+        [FULL_REBUILD_STATE],
+        |row| row.get::<_, bool>(0),
+    )?);
+    assert!(store.source_acknowledgement()?.is_none());
+    let mut builder = CoreBuilder::default();
+    let mut second_embedder = DimensionEmbedder::new(&second_contract);
+    let rebuilt = reconcile_all(&mut store, &index, &mut builder, &mut second_embedder)?;
+    assert_eq!(rebuilt.records_embedded, 3);
+    assert_eq!(rebuilt.records_reused, 0);
+    assert_eq!(builder.calls.len(), 3);
+    assert_eq!(second_embedder.chunks, 3);
+    let second_acknowledgement = store
+        .source_acknowledgement()?
+        .ok_or_else(|| anyhow!("missing second external-space acknowledgement"))?;
+    assert_ne!(
+        first_acknowledgement.semantic_policy_fingerprint,
+        second_acknowledgement.semantic_policy_fingerprint
+    );
+    assert_ne!(
+        first_acknowledgement.contract_fingerprint,
+        second_acknowledgement.contract_fingerprint
+    );
+    assert_eq!(index.generation_id(), core_generation_id);
+    assert_eq!(
+        VerifiedIndex::open_pinned(fixture.data_root.join("index-external-space-reset"))?
+            .generation_id(),
+        core_generation_id
+    );
+    Ok(())
+}
+
+#[test]
+fn odd_dimension_external_change_resets_and_rebuilds_without_affecting_core() -> Result<()> {
+    let fixture = Fixture::new(1)?;
+    let index = fixture.publish("external-dimension-reset", &[(0, bodies("dimension", 2))])?;
+    let core_generation_id = index.generation_id().to_owned();
+    let endpoint = "http://127.0.0.1:43124/v1/embeddings";
+    let initial_contract = external_contract(endpoint, "space-even", 6)?;
+    let odd_contract = external_contract(endpoint, "space-odd", 7)?;
+
+    let mut store = SemanticVectorStore::open(&fixture.semantic_path, &initial_contract)?;
+    reconcile_all(
+        &mut store,
+        &index,
+        &mut CoreBuilder::default(),
+        &mut DimensionEmbedder::new(&initial_contract),
+    )?;
+    drop(store);
+
+    let mut store = SemanticVectorStore::open(&fixture.semantic_path, &odd_contract)?;
+    assert!(store.conn.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM semantic_maintenance_state WHERE key = ?1
+         )",
+        [FULL_REBUILD_STATE],
+        |row| row.get::<_, bool>(0),
+    )?);
+    let mut builder = CoreBuilder::default();
+    let mut embedder = DimensionEmbedder::new(&odd_contract);
+    let rebuilt = reconcile_all(&mut store, &index, &mut builder, &mut embedder)?;
+    assert_eq!(rebuilt.records_embedded, 2);
+    assert_eq!(rebuilt.records_reused, 0);
+    assert_eq!(builder.calls.len(), 2);
+    assert_eq!(embedder.chunks, 2);
+    let pinned = store
+        .flat_pin_generation()?
+        .ok_or_else(|| anyhow!("odd-dimension rebuild lost its Flat generation"))?;
+    assert_eq!(pinned.model_contract().dimensions, 7);
+    assert_eq!(pinned.stats().active_events, 2);
+    assert_eq!(index.generation_id(), core_generation_id);
+    assert_eq!(
+        VerifiedIndex::open_pinned(fixture.data_root.join("index-external-dimension-reset"))?
+            .generation_id(),
+        core_generation_id
+    );
+    Ok(())
+}
+
+#[test]
 fn flat_contract_reset_survives_both_control_handoff_crash_windows() -> Result<()> {
     let fixture = Fixture::new(1)?;
     let index = fixture.publish("flat-contract-reset", &[(0, bodies("first", 3))])?;
@@ -116,13 +500,77 @@ fn descriptor_only_model_change_rebuilds_every_vector_from_unchanged_core() -> R
 }
 
 #[test]
-fn exact_builtin_legacy_descriptor_migrates_without_reembedding_across_restart() -> Result<()> {
+fn bounded_literal_fact_policy_upgrade_reembeds_without_touching_core() -> Result<()> {
+    let fixture = Fixture::new(1)?;
+    let index = fixture.publish("bounded-facts-upgrade", &[(0, bodies("facts", 3))])?;
+    let core_generation_id = index.generation_id().to_owned();
+    let model_contract = semantic_model_contract();
+
+    let mut legacy_policy = current_semantic_generation_policy();
+    legacy_policy.core_content_filter =
+        SemanticCoreContentFilter::PolicySelectedCompleteContentAndLiteralFactsV2;
+    let current_policy = current_semantic_generation_policy();
+    assert_eq!(
+        current_policy.core_content_filter,
+        SemanticCoreContentFilter::PolicySelectedCompleteContentAndBoundedLiteralFactsV3
+    );
+    assert_ne!(
+        legacy_policy.canonical_sha256()?,
+        current_policy.canonical_sha256()?
+    );
+
+    let legacy = SourceBackedSemanticGeneration::from_verified_index_with_policy(
+        &index,
+        legacy_policy,
+        model_contract,
+    )?;
+    let current = SourceBackedSemanticGeneration::from_verified_index(&index, model_contract)?;
+    assert_ne!(
+        legacy.semantic_policy_fingerprint,
+        current.semantic_policy_fingerprint
+    );
+    assert_ne!(legacy.contract_fingerprint, current.contract_fingerprint);
+
+    let mut store = SemanticVectorStore::open(&fixture.semantic_path, model_contract)?;
+    let mut builder = CoreBuilder::default();
+    let mut embedder = MarkerEmbedder::default();
+    let initial = reconcile_generation(&mut store, &index, &legacy, &mut builder, &mut embedder)?;
+    assert_eq!(initial.records_embedded, 3);
+    let calls_before_upgrade = embedder.calls;
+
+    builder.calls.clear();
+    let rebuilt = reconcile_generation(&mut store, &index, &current, &mut builder, &mut embedder)?;
+    assert_eq!(rebuilt.records_embedded, 3);
+    assert_eq!(rebuilt.records_reused, 0);
+    assert_eq!(builder.calls.len(), 3);
+    assert!(embedder.calls > calls_before_upgrade);
+    assert_eq!(
+        store
+            .source_acknowledgement()?
+            .ok_or_else(|| anyhow!("missing bounded-facts acknowledgement"))?
+            .semantic_policy_fingerprint,
+        current.semantic_policy_fingerprint
+    );
+    assert_eq!(index.generation_id(), core_generation_id);
+    assert_eq!(
+        VerifiedIndex::open_pinned(fixture.data_root.join("index-bounded-facts-upgrade"))?
+            .generation_id(),
+        core_generation_id,
+        "semantic policy replacement must leave committed Core and lexical state active"
+    );
+    Ok(())
+}
+
+#[test]
+fn fixed_e5_http_migrates_legacy_receipts_without_reembedding_across_restart() -> Result<()> {
     let fixture = Fixture::new(2)?;
     let index = fixture.publish(
         "legacy-descriptor-migration",
         &[(0, bodies("first", 1)), (1, bodies("second", 1))],
     )?;
-    let model_contract = semantic_model_contract();
+    let model_contract = &legacy_fixed_http_semantic_model_contract("http://127.0.0.1:43123")?;
+    assert!(model_contract.external_http_endpoint().is_some());
+    assert!(!model_contract.supports_frozen_legacy_v1());
     let legacy_descriptor = model_contract
         .legacy_builtin_descriptor_alias()
         .ok_or_else(|| anyhow!("exact built-in contract lost its legacy descriptor alias"))?;

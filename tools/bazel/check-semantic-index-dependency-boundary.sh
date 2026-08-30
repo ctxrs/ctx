@@ -142,6 +142,8 @@ done
 
 expected_model_imports="${tmp}/expected-model-imports.txt"
 printf '%s\n' \
+  'ExternalSemanticSpace' \
+  'SemanticEmbeddingExecutorConfig' \
   'SemanticModelContract' \
   'semantic_model_contract' | LC_ALL=C sort >"${expected_model_imports}"
 
@@ -168,7 +170,7 @@ done <"${production_sources}"
 LC_ALL=C sort -u -o "${actual_model_imports}" "${actual_model_imports}"
 
 if ! diff -u "${expected_model_imports}" "${actual_model_imports}"; then
-  echo 'ctx-semantic-index may consume only the frozen model contract/E5 projection API' >&2
+  echo 'ctx-semantic-index model contract/config import seam drifted' >&2
   exit 1
 fi
 if [[ -s "${fully_qualified_model_uses}" ]]; then

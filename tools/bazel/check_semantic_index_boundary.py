@@ -90,13 +90,16 @@ ALLOWED_DAEMON_SERVICE_SEMANTIC_SOURCES = {
     for path in """
 daemon.rs
 daemon/config_reload.rs
+daemon/config_reload/tests.rs
 daemon_retry.rs
 daemon_scheduler.rs
+daemon_scheduler_tests.rs
 daemon_worker.rs
 daemon_worker_tests.rs
 lib.rs
 ports.rs
 query_service/server/dispatch.rs
+query_service_transport_tests.rs
 resource_policy.rs
 source_backed_refresh_coordinator/restart_recovery_tests.rs
 test_support.rs

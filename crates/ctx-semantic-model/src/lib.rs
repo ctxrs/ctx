@@ -46,12 +46,13 @@ pub use model_contract::{
     semantic_provisioning_coreml_asset_matches, semantic_provisioning_model_contract_matches,
     semantic_provisioning_model_path_count, semantic_provisioning_model_path_matches,
     semantic_required_model_file_count, semantic_required_model_file_matches,
-    semantic_tokenizer_behavior_fingerprint, semantic_tokenizer_fingerprint,
+    semantic_tokenizer_behavior_fingerprint, semantic_tokenizer_fingerprint, ExternalSemanticSpace,
     PreparedSemanticDocuments, PreparedSemanticQuery, SemanticModelContract,
-    SemanticModelLoadDeferred, SemanticOrtModelVariant, SEMANTIC_BACKEND, SEMANTIC_DIMENSIONS,
-    SEMANTIC_LANGUAGE_SCOPE, SEMANTIC_MODEL_CONTRACT_VERSION, SEMANTIC_MODEL_ID,
-    SEMANTIC_MODEL_KEY, SEMANTIC_MODEL_REVISION, SEMANTIC_NORMALIZATION, SEMANTIC_PASSAGE_PREFIX,
-    SEMANTIC_POOLING, SEMANTIC_QUERY_PREFIX,
+    SemanticModelLoadDeferred, SemanticOrtModelVariant, BUILTIN_SEMANTIC_EXECUTOR_ROUTE_IDENTITY,
+    MAX_EXTERNAL_SEMANTIC_DIMENSIONS, MAX_EXTERNAL_SEMANTIC_SPACE_ID_BYTES, SEMANTIC_BACKEND,
+    SEMANTIC_DIMENSIONS, SEMANTIC_LANGUAGE_SCOPE, SEMANTIC_MODEL_CONTRACT_VERSION,
+    SEMANTIC_MODEL_ID, SEMANTIC_MODEL_KEY, SEMANTIC_MODEL_REVISION, SEMANTIC_NORMALIZATION,
+    SEMANTIC_PASSAGE_PREFIX, SEMANTIC_POOLING, SEMANTIC_QUERY_PREFIX,
 };
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
@@ -86,6 +87,16 @@ fn write_test_semantic_cache(root: &std::path::Path) -> anyhow::Result<()> {
 #[cfg(feature = "test-support")]
 pub mod test_support {
     use std::path::Path;
+
+    #[doc(hidden)]
+    pub fn legacy_fixed_http_query_canary_embedding() -> Vec<f32> {
+        super::http_embedding_canary::normalized_query_reference()
+    }
+
+    #[doc(hidden)]
+    pub fn legacy_fixed_http_document_canary_embedding() -> Vec<f32> {
+        super::http_embedding_canary::normalized_document_reference()
+    }
 
     use anyhow::Result;
 

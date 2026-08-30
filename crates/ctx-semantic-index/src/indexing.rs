@@ -6,6 +6,9 @@ use super::{vector_store::SemanticChunkDocument, SemanticEventDocument};
 const SEMANTIC_CHUNK_TARGET_CHARS: usize = ctx_history_index::SEMANTIC_CHUNK_TARGET_CHARS;
 const SEMANTIC_CHUNK_OVERLAP_CHARS: usize = ctx_history_index::SEMANTIC_CHUNK_OVERLAP_CHARS;
 const SEMANTIC_SOURCE_MAX_CHARS: usize = ctx_history_index::SEMANTIC_SOURCE_MAX_CHARS;
+// Metadata is repeated for every body chunk. Limit it to one chunk so a valid
+// max-facts Core record cannot amplify its header without bound.
+const SEMANTIC_DOCUMENT_HEADER_MAX_CHARS: usize = SEMANTIC_CHUNK_TARGET_CHARS;
 
 pub(super) fn semantic_source_text(text: &str) -> String {
     text.chars().take(SEMANTIC_SOURCE_MAX_CHARS).collect()
@@ -100,14 +103,29 @@ pub(super) fn semantic_document_header(doc: &SemanticEventDocument) -> String {
     if let Some(agent_scope) = doc.agent_scope {
         lines.push(format!("agent_scope: {}", agent_scope.as_str()));
     }
+    let mut header = lines.join("\n");
+    let mut header_chars = header.chars().count();
+    if header_chars > SEMANTIC_DOCUMENT_HEADER_MAX_CHARS {
+        return header
+            .chars()
+            .take(SEMANTIC_DOCUMENT_HEADER_MAX_CHARS)
+            .collect();
+    }
     for fact in &doc.literal_facts {
-        lines.push(format!(
+        let line = format!(
             "fact_{}: {}",
             fact.kind.as_str(),
             semantic_header_value(&fact.value, 240)
-        ));
+        );
+        let added_chars = line.chars().count().saturating_add(1);
+        if header_chars.saturating_add(added_chars) > SEMANTIC_DOCUMENT_HEADER_MAX_CHARS {
+            break;
+        }
+        header.push('\n');
+        header.push_str(&line);
+        header_chars = header_chars.saturating_add(added_chars);
     }
-    lines.join("\n")
+    header
 }
 
 pub(super) fn semantic_header_value(value: &str, max_chars: usize) -> String {
@@ -166,7 +184,10 @@ pub(super) fn semantic_text_hash(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use ctx_history_core::{EventRole, EventType};
+    use ctx_history_core::{
+        AgentScope, CaptureProvider, EventRole, EventType, LiteralFactKind, ProviderDeclaredFact,
+        MAX_PROVIDER_DECLARED_FACTS,
+    };
     use ctx_semantic_model::semantic_model_contract;
     use uuid::Uuid;
 
@@ -213,5 +234,84 @@ mod tests {
             ),
             "759a8ad7af9c74ee56fe04157b610ad76537e48c83d224bc794f95e9f14f83bc"
         );
+    }
+
+    #[test]
+    fn ordinary_document_header_preserves_all_metadata_and_fact_order() {
+        let document = SemanticEventDocument {
+            event_id: Uuid::nil(),
+            session_id: None,
+            seq: 1,
+            occurred_at_ms: 0,
+            event_type: EventType::ToolCall,
+            role: Some(EventRole::Assistant),
+            rank_bucket: " tool   activity ".to_owned(),
+            provider: Some(CaptureProvider::Codex),
+            source_format: Some("codex  jsonl".to_owned()),
+            agent_scope: Some(AgentScope::Primary),
+            literal_facts: vec![
+                ProviderDeclaredFact {
+                    kind: LiteralFactKind::Workspace,
+                    value: "/workspace/ctx".to_owned(),
+                },
+                ProviderDeclaredFact {
+                    kind: LiteralFactKind::File,
+                    value: "crates/ctx-semantic-index/src/indexing.rs".to_owned(),
+                },
+            ],
+            text: "bound semantic metadata".to_owned(),
+        };
+        let expected_header = "semantic_document: v3\nevent_type: tool_call\nrole: assistant\nrank_bucket: tool activity\nprovider: codex\nsource_format: codex jsonl\nagent_scope: primary\nfact_workspace: /workspace/ctx\nfact_file: crates/ctx-semantic-index/src/indexing.rs";
+
+        assert_eq!(semantic_document_header(&document), expected_header);
+        assert_eq!(
+            semantic_document_input_text(&document, &document.text),
+            format!("{expected_header}\n\nbound semantic metadata")
+        );
+    }
+
+    #[test]
+    fn max_fact_document_bounds_the_header_repeated_across_chunks() {
+        let literal_facts = (0..MAX_PROVIDER_DECLARED_FACTS)
+            .map(|index| ProviderDeclaredFact {
+                kind: LiteralFactKind::File,
+                value: format!("/hostile/fact-{index:04}-{}", "x".repeat(240)),
+            })
+            .collect();
+        let document = SemanticEventDocument {
+            event_id: Uuid::nil(),
+            session_id: None,
+            seq: 1,
+            occurred_at_ms: 0,
+            event_type: EventType::Message,
+            role: Some(EventRole::User),
+            rank_bucket: "lite_turn".to_owned(),
+            provider: Some(CaptureProvider::Custom),
+            source_format: Some("hostile-max-facts-v1".to_owned()),
+            agent_scope: Some(AgentScope::Subagent),
+            literal_facts,
+            text: "x".repeat(SEMANTIC_SOURCE_MAX_CHARS),
+        };
+
+        let header = semantic_document_header(&document);
+        let header_chars = header.chars().count();
+        assert!(header_chars <= SEMANTIC_DOCUMENT_HEADER_MAX_CHARS);
+        assert!(header.contains("fact_file: /hostile/fact-0000-"));
+        assert!(!header.contains(&format!(
+            "fact_file: /hostile/fact-{:04}-",
+            MAX_PROVIDER_DECLARED_FACTS - 1
+        )));
+
+        let chunks = semantic_chunks_for_document(&document, &document.text, &"0".repeat(64));
+        let expected_chunk_prefix = format!("{header}\n\n");
+        assert!(chunks.len() > 1);
+        assert_eq!(
+            chunks.last().map(|chunk| chunk.end_char),
+            Some(SEMANTIC_SOURCE_MAX_CHARS)
+        );
+        for chunk in chunks {
+            assert!(chunk.text.starts_with(&expected_chunk_prefix));
+            assert!(chunk.text.chars().count() <= header_chars + 2 + SEMANTIC_CHUNK_TARGET_CHARS);
+        }
     }
 }

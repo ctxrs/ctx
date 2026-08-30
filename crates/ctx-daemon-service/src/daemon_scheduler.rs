@@ -1,14 +1,12 @@
+#[path = "daemon_scheduler_retry_deferral.rs"]
+mod retry_deferral;
+
+pub(super) use retry_deferral::DaemonConsumerRetryDeferral;
+
 #[derive(Default)]
 pub(super) struct DaemonSidecarDrain {
     pub(super) generation: Option<String>,
     pub(super) semantic_attempted_generation: Option<String>,
-}
-
-pub(super) const DAEMON_CONSUMER_RETRY_QUERY_GRACE: StdDuration = StdDuration::from_secs(2);
-
-#[derive(Debug, Default)]
-pub(super) struct DaemonConsumerRetryDeferral {
-    pub(super) retry_at: Option<Instant>,
 }
 
 pub(super) struct DaemonSchedulerCycleContext<'a> {
@@ -28,28 +26,6 @@ pub(super) struct DaemonSchedulerPorts<'a, N: ?Sized> {
     pub(super) generation_published: &'a N,
     pub(super) semantic: DaemonSemanticJobPorts<'a>,
     pub(super) observation: &'a dyn crate::DaemonObservationPort,
-}
-
-impl DaemonConsumerRetryDeferral {
-    fn defer_for_foreground_query(&mut self, now: Instant) -> bool {
-        let retry_at = self
-            .retry_at
-            .get_or_insert(now + DAEMON_CONSUMER_RETRY_QUERY_GRACE);
-        if now < *retry_at {
-            return true;
-        }
-        self.reset();
-        false
-    }
-
-    pub(super) fn remaining(&self, now: Instant) -> Option<StdDuration> {
-        self.retry_at
-            .and_then(|retry_at| retry_at.checked_duration_since(now))
-    }
-
-    fn reset(&mut self) {
-        self.retry_at = None;
-    }
 }
 
 fn immediate_follow_up(mut iteration: DaemonIteration) -> DaemonIteration {
@@ -253,8 +229,10 @@ fn run_pending_core_semantic_catch_up(
     let Some(generation) = pin_published_generation(data_root)? else {
         return Ok(None);
     };
+    let semantic_contract = selected_semantic_contract(runtime)?;
     let generation_id = generation.generation_id();
-    let page_continuation_pending = semantic_page_continuation_pending(data_root, generation_id);
+    let page_continuation_pending =
+        semantic_page_continuation_pending(data_root, generation_id, &semantic_contract);
     let retry_due =
         runtime.semantic_retry.consecutive_failures > 0 && runtime.semantic_retry.ready();
     if runtime.sidecar_drain.generation.as_deref() == Some(generation_id)
@@ -268,11 +246,11 @@ fn run_pending_core_semantic_catch_up(
     {
         return Ok(None);
     }
-    if !semantic_generation_needs_catch_up(data_root, generation_id) {
+    if !semantic_generation_needs_catch_up(data_root, generation_id, &semantic_contract) {
         runtime.semantic_retry.reset();
         return Ok(None);
     }
-    prepare_semantic_retry_for_generation(runtime, data_root, generation_id);
+    prepare_semantic_retry_for_generation(runtime, data_root, generation_id, &semantic_contract);
     if !runtime.semantic_retry.ready() {
         return Ok(None);
     }
@@ -283,6 +261,7 @@ fn run_pending_core_semantic_catch_up(
         deadline,
         true,
         Some(generation_id),
+        &semantic_contract,
         semantic_ports,
     );
     let did_work = daemon_semantic_job_did_work(&job);
@@ -728,6 +707,7 @@ fn run_daemon_semantic_job_with_retry(
     deadline: Option<Instant>,
     semantic_enabled: bool,
     core_generation_id: Option<&str>,
+    semantic_contract: &ctx_semantic_index::SemanticModelContract,
     ports: DaemonSemanticJobPorts<'_>,
 ) -> Value {
     if let Some(job) = runtime.semantic_blocked_job.as_ref() {
@@ -735,7 +715,7 @@ fn run_daemon_semantic_job_with_retry(
     }
     if !runtime.semantic_retry.ready() {
         let job = daemon_semantic_retry_backoff_job(data_root, &runtime.semantic_retry);
-        return bind_semantic_generation(job, core_generation_id);
+        return bind_semantic_generation(job, core_generation_id, semantic_contract);
     }
     let job = run_daemon_semantic_job(
         args,
@@ -747,7 +727,7 @@ fn run_daemon_semantic_job_with_retry(
         ports.config,
     )
     .unwrap_or_else(|error| daemon_semantic_failed_job(data_root, error));
-    let job = bind_semantic_generation(job, core_generation_id);
+    let job = bind_semantic_generation(job, core_generation_id, semantic_contract);
     let job = record_daemon_job_retry(&mut runtime.semantic_retry, job);
     if semantic_failure_class_from_job(&job).is_some_and(SemanticFailureClass::blocks_until_restart)
     {
@@ -756,10 +736,16 @@ fn run_daemon_semantic_job_with_retry(
     job
 }
 
-fn bind_semantic_generation(mut job: Value, core_generation_id: Option<&str>) -> Value {
-    if let Ok(fingerprint) = ctx_semantic_index::source_backed_semantic_contract_fingerprint(
-        ctx_semantic_index::semantic_model_contract(),
-    ) {
+fn bind_semantic_generation(
+    mut job: Value,
+    core_generation_id: Option<&str>,
+    semantic_contract: &ctx_semantic_index::SemanticModelContract,
+) -> Value {
+    job["model_key"] = Value::String(semantic_contract.model_key().to_owned());
+    job["model_contract_fingerprint"] = Value::String(semantic_contract.fingerprint().to_owned());
+    if let Ok(fingerprint) =
+        ctx_semantic_index::source_backed_semantic_contract_fingerprint(semantic_contract)
+    {
         job["source_contract_fingerprint"] = Value::String(fingerprint);
     }
     if let Some(core_generation_id) = core_generation_id {
@@ -768,10 +754,14 @@ fn bind_semantic_generation(mut job: Value, core_generation_id: Option<&str>) ->
     job
 }
 
-fn semantic_generation_needs_catch_up(data_root: &Path, core_generation_id: &str) -> bool {
-    let Ok(contract_fingerprint) = ctx_semantic_index::source_backed_semantic_contract_fingerprint(
-        ctx_semantic_index::semantic_model_contract(),
-    ) else {
+fn semantic_generation_needs_catch_up(
+    data_root: &Path,
+    core_generation_id: &str,
+    semantic_contract: &ctx_semantic_index::SemanticModelContract,
+) -> bool {
+    let Ok(contract_fingerprint) =
+        ctx_semantic_index::source_backed_semantic_contract_fingerprint(semantic_contract)
+    else {
         return true;
     };
     let Some(job) = read_daemon_job_status(&daemon_semantic_job_path(data_root)) else {
@@ -785,9 +775,22 @@ fn semantic_generation_needs_catch_up(data_root: &Path, core_generation_id: &str
             != Some(contract_fingerprint.as_str())
 }
 
-fn semantic_page_continuation_pending(data_root: &Path, core_generation_id: &str) -> bool {
+fn semantic_page_continuation_pending(
+    data_root: &Path,
+    core_generation_id: &str,
+    semantic_contract: &ctx_semantic_index::SemanticModelContract,
+) -> bool {
+    let Ok(contract_fingerprint) =
+        ctx_semantic_index::source_backed_semantic_contract_fingerprint(semantic_contract)
+    else {
+        return false;
+    };
     read_daemon_job_status(&daemon_semantic_job_path(data_root)).is_some_and(|job| {
         job.get("core_generation_id").and_then(Value::as_str) == Some(core_generation_id)
+            && job
+                .get("source_contract_fingerprint")
+                .and_then(Value::as_str)
+                == Some(contract_fingerprint.as_str())
             && job.get("source_generation_ready").and_then(Value::as_bool) == Some(false)
             && job.get("source_work_remaining").and_then(Value::as_bool) == Some(true)
             && !daemon_job_should_backoff(&job)
@@ -798,14 +801,29 @@ fn prepare_semantic_retry_for_generation(
     runtime: &mut DaemonRuntime,
     data_root: &Path,
     core_generation_id: &str,
+    semantic_contract: &ctx_semantic_index::SemanticModelContract,
 ) {
-    let status_generation =
-        read_daemon_job_status(&daemon_semantic_job_path(data_root)).and_then(|job| {
+    let expected_contract_fingerprint =
+        ctx_semantic_index::source_backed_semantic_contract_fingerprint(semantic_contract).ok();
+    let status_binding = read_daemon_job_status(&daemon_semantic_job_path(data_root)).map(|job| {
+        (
             job.get("core_generation_id")
                 .and_then(Value::as_str)
-                .map(str::to_owned)
+                .map(str::to_owned),
+            job.get("source_contract_fingerprint")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+        )
+    });
+    let status_matches = expected_contract_fingerprint
+        .as_ref()
+        .is_some_and(|expected| {
+            status_binding.is_some_and(|(generation, contract)| {
+                generation.as_deref() == Some(core_generation_id)
+                    && contract.as_deref() == Some(expected.as_str())
+            })
         });
-    if status_generation.as_deref() != Some(core_generation_id) {
+    if !status_matches {
         runtime.semantic_retry.reset();
         if !runtime.semantic_blocked_job.as_ref().is_some_and(|job| {
             semantic_failure_class_from_job(job) == Some(SemanticFailureClass::Permanent)
@@ -813,6 +831,27 @@ fn prepare_semantic_retry_for_generation(
             runtime.semantic_blocked_job = None;
         }
     }
+}
+
+fn selected_semantic_contract(
+    runtime: &DaemonRuntime,
+) -> Result<ctx_semantic_index::SemanticModelContract> {
+    if let Some(executor) = runtime.semantic_executor.as_ref() {
+        let active = executor.executor().contract();
+        let selected = runtime.config.semantic_executor.contract();
+        if active.fingerprint() != selected.fingerprint() {
+            return Err(anyhow::anyhow!(
+                "active semantic executor contract is stale for the selected configuration"
+            ));
+        }
+        return semantic_index_contract(active);
+    }
+    if runtime.config.semantic_executor.is_builtin() {
+        return semantic_index_contract(runtime.config.semantic_executor.contract());
+    }
+    Err(anyhow::anyhow!(
+        "selected semantic embedding executor is not active"
+    ))
 }
 
 pub(super) fn record_daemon_job_retry(backoff: &mut DaemonRetryBackoff, mut job: Value) -> Value {
@@ -942,6 +981,7 @@ use super::{
     daemon_retry::{semantic_failure_class_from_job, DaemonRetryBackoff, SemanticFailureClass},
     daemon_worker::{
         daemon_semantic_failed_job, daemon_semantic_retry_backoff_job, run_daemon_semantic_job,
+        semantic_index_contract,
     },
     paths_status::{
         daemon_core_refresh_job_path, daemon_semantic_job_path, read_daemon_job_status,

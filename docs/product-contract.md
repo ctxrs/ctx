@@ -8,8 +8,10 @@ Given local provider histories that ctx supports, the CLI treats those native
 records as the acquisition authority for import and refresh, publishes an
 immutable local Core/Tantivy search generation, and returns deterministic
 retrieval results with citations and stable provider/source identities. Core
-does not generate an LLM interpretation, upload transcript content, or require
-a hosted research agent.
+does not generate an LLM interpretation or require a hosted research agent. It
+does not upload transcript content unless the user explicitly selects an
+external semantic executor, which receives the raw query text and eligible
+ctx-created document chunks documented below.
 
 ## In Scope
 
@@ -75,12 +77,16 @@ a hosted research agent.
   native provider-history refresh and semantic indexing/freshness work.
 - `ctx semantic enable|status|disable` owns the semantic-search lifecycle.
   Enablement is the explicit opt-in and may select `--executor builtin|URL` for
-  both indexing and query embeddings. Built-in execution is the unpersisted
-  default; an external executor must satisfy the pinned E5 contract and never
-  receives a silent built-in fallback. Status is credential-free, read-only,
-  and network-free; disablement retains downloaded assets. Lexical search
-  remains available while embeddings build, and hybrid search may preserve it
-  with explicit diagnostics when semantic execution fails.
+  both indexing and query embeddings; without that option, enablement preserves
+  the current selection. `--executor builtin` restores local E5, which is also
+  the default when no selection exists. An explicit URL discovers and persists
+  one accepted opaque vector space for the data root. Identity drift fails
+  closed; explicitly accepting a changed identity rebuilds only derived
+  semantic data. Status is
+  credential-free, read-only, and network-free; disablement retains downloaded
+  assets. Lexical search remains available while embeddings build, and hybrid
+  search may preserve it with explicit diagnostics when semantic execution
+  fails.
 - `ctx stats` reports bounded local usage/value aggregates from the separate
   owner-private `usage.sqlite` sidecar. This default-on product state is
   independent of remote event reporting, has no network path or identity, keeps
@@ -97,10 +103,9 @@ a hosted research agent.
 
 ## Out Of Scope
 
-- arbitrary model selection, hidden LLM calls, a ctx-hosted embedding service,
-  or Pro/cloud authentication and credential provisioning for external
-  executors; built-in and user-selected exact-contract semantic embedding are
-  allowed only as documented search behavior;
+- hidden LLM calls, a ctx-hosted embedding service, or Pro/cloud authentication
+  and credential provisioning for external executors; model selection and
+  execution belong to the explicitly configured executor;
 - team and enterprise seats, invitations, SSO, SCIM, or organization
   administration;
 - annual plans, device caps, and device-management UI;
@@ -145,5 +150,6 @@ refresh publish provider-file changes into a new search generation.
 Core/Tantivy generations, semantic sidecars, `usage.sqlite`, and JSON output
 are private by default. A user must review copied output before sharing it
 outside the machine. Selecting an external semantic executor is an explicit
-authorization to send it prepared semantic query text and eligible document
-chunks and rollups; lexical search and the built-in executor remain local.
+authorization to send it raw semantic query text and eligible ctx-created
+document chunks and rollups; lexical search and the built-in executor remain
+local.

@@ -467,7 +467,7 @@ impl SemanticVectorStore {
             || acknowledgement.semantic_policy_fingerprint
                 != expected_semantic_policy_fingerprint
                     .map(str::to_owned)
-                    .unwrap_or(semantic_policy_fingerprint()?)
+                    .unwrap_or(semantic_policy_fingerprint(self.contract())?)
             || acknowledgement.consumer_build_id
                 != source_consumer_build_id(&fingerprint, core_generation_id)
             || expected_semantic_documents

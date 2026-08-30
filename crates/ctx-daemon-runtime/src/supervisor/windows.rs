@@ -66,6 +66,7 @@ pub fn install_windows_supervisor(
     let system_root = manager_environment_value(manager_environment, "SystemRoot")
         .ok_or_else(|| anyhow!("Windows SystemRoot is unavailable"))?;
     let sid = crate::current_windows_user_sid()?;
+    write_supervisor_environment(spec)?;
     let xml = windows_task_xml(spec, Path::new(system_root), &sid)?;
     write_atomic_supervisor_file(path, &windows_task_xml_bytes(&xml))?;
 
@@ -101,12 +102,17 @@ pub fn disable_windows_supervisor(
         windows_task_state(&task_name, Path::new(system_root), manager_environment),
     )?;
     remove_windows_supervisor_owner_provenance(identity)?;
-    match fs::remove_file(path) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error).context("remove ctx scheduled-task definition"),
-    }
+    remove_windows_supervisor_file(path, "remove ctx scheduled-task definition")?;
     Ok(Some(path.to_path_buf()))
+}
+
+#[cfg(windows)]
+fn remove_windows_supervisor_file(path: &Path, context: &'static str) -> Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).context(context),
+    }
 }
 
 #[cfg(any(windows, test))]
@@ -137,6 +143,7 @@ pub fn windows_task_xml(
 ) -> Result<String> {
     let script = windows_sanitized_process_supervisor_script_with_provenance(
         spec.launch(),
+        spec.environment_path(),
         &windows_supervisor_daemon_lock_path(spec.identity())?,
         &windows_supervisor_owner_provenance_path(spec.identity())?,
     )?;
@@ -193,8 +200,11 @@ pub fn windows_task_xml_bytes(xml: &str) -> Vec<u8> {
     bytes
 }
 
-pub fn windows_sanitized_process_supervisor_script(launch: &NormalizedLaunch) -> Result<String> {
-    let process = windows_sanitized_process_start_info(launch)?;
+pub fn windows_sanitized_process_supervisor_script(
+    launch: &NormalizedLaunch,
+    environment_path: &Path,
+) -> Result<String> {
+    let process = windows_sanitized_process_start_info(launch, environment_path)?;
     Ok(format!(
         "$ErrorActionPreference='Stop';{process}[int]$delay=2;while($true){{$c=$null;$code=1;$started=[DateTime]::UtcNow;try{{$c=[Diagnostics.Process]::Start($p);$c.WaitForExit();$code=$c.ExitCode}}catch{{$code=1}}finally{{if($null -ne $c){{$c.Dispose()}}}};if($code -eq 0){{exit 0}};if(([DateTime]::UtcNow-$started).TotalSeconds -ge 60){{$delay=2}};Start-Sleep -Seconds $delay;$delay=[Math]::Min($delay*2,60)}}"
     ))
@@ -202,10 +212,11 @@ pub fn windows_sanitized_process_supervisor_script(launch: &NormalizedLaunch) ->
 
 fn windows_sanitized_process_supervisor_script_with_provenance(
     launch: &NormalizedLaunch,
+    environment_path: &Path,
     daemon_lock: &Path,
     owner_provenance: &Path,
 ) -> Result<String> {
-    let process = windows_sanitized_process_start_info(launch)?;
+    let process = windows_sanitized_process_start_info(launch, environment_path)?;
     let daemon_lock = validated_supervisor_artifact_path("Windows daemon lock", daemon_lock)?;
     let owner_provenance = validated_supervisor_artifact_path(
         "Windows supervisor owner provenance",
@@ -218,31 +229,15 @@ fn windows_sanitized_process_supervisor_script_with_provenance(
     ))
 }
 
-fn windows_sanitized_process_start_info(launch: &NormalizedLaunch) -> Result<String> {
+fn windows_sanitized_process_start_info(
+    launch: &NormalizedLaunch,
+    environment_path: &Path,
+) -> Result<String> {
     let executable =
         validated_supervisor_artifact_path("Windows child executable", launch.program())?;
-    let environment = launch
-        .environment()
-        .map(|(name, value)| -> Result<String> {
-            let name = name
-                .to_str()
-                .ok_or_else(|| anyhow!("Windows child environment name is not Unicode"))?;
-            validated_supervisor_artifact_text("Windows child environment name", name)?;
-            let value = value
-                .to_str()
-                .ok_or_else(|| anyhow!("Windows child environment value {name} is not Unicode"))?;
-            validated_supervisor_artifact_text(
-                &format!("Windows child environment value {name}"),
-                value,
-            )?;
-            Ok(format!(
-                "$p.EnvironmentVariables['{}']='{}';",
-                powershell_single_quote(name),
-                powershell_single_quote(value)
-            ))
-        })
-        .collect::<Result<Vec<_>>>()?
-        .join("");
+    let environment_path =
+        validated_supervisor_artifact_path("Windows child environment file", environment_path)?;
+    validate_windows_child_environment(launch)?;
     let arguments = launch
         .args()
         .enumerate()
@@ -256,10 +251,29 @@ fn windows_sanitized_process_start_info(launch: &NormalizedLaunch) -> Result<Str
         .collect::<Result<Vec<_>>>()?
         .join(" ");
     Ok(format!(
-        "$p=New-Object System.Diagnostics.ProcessStartInfo;$p.FileName='{}';$p.UseShellExecute=$false;$p.CreateNoWindow=$true;$p.EnvironmentVariables.Clear();{environment}$p.Arguments='{}';",
+        "$p=New-Object System.Diagnostics.ProcessStartInfo;$p.FileName='{}';$p.UseShellExecute=$false;$p.CreateNoWindow=$true;$p.EnvironmentVariables.Clear();$p.EnvironmentVariables['{}']='{}';$p.Arguments='{}';",
         powershell_single_quote(executable),
+        SUPERVISOR_ENVIRONMENT_FILE_ENV,
+        powershell_single_quote(environment_path),
         powershell_single_quote(&arguments),
     ))
+}
+
+fn validate_windows_child_environment(launch: &NormalizedLaunch) -> Result<()> {
+    for (name, value) in launch.environment() {
+        let name = name
+            .to_str()
+            .ok_or_else(|| anyhow!("Windows child environment name is not Unicode"))?;
+        validated_supervisor_artifact_text("Windows child environment name", name)?;
+        let value = value
+            .to_str()
+            .ok_or_else(|| anyhow!("Windows child environment value {name} is not Unicode"))?;
+        validated_supervisor_artifact_text(
+            &format!("Windows child environment value {name}"),
+            value,
+        )?;
+    }
+    Ok(())
 }
 
 pub fn powershell_single_quote(value: &str) -> String {
@@ -309,6 +323,7 @@ pub fn verify_windows_supervisor_registration(
     spec: &SupervisorSpec,
     manager_environment: &SupervisorManagerEnvironment,
 ) -> Result<()> {
+    verify_supervisor_environment(spec)?;
     let system_root = manager_environment_value(manager_environment, "SystemRoot")
         .ok_or_else(|| anyhow!("Windows SystemRoot is unavailable"))?;
     let sid = crate::current_windows_user_sid()?;
@@ -535,6 +550,7 @@ pub fn windows_task_registration_matches(
         .join("powershell.exe");
     let script = windows_sanitized_process_supervisor_script_with_provenance(
         spec.launch(),
+        spec.environment_path(),
         &windows_supervisor_daemon_lock_path(spec.identity())?,
         &windows_supervisor_owner_provenance_path(spec.identity())?,
     )?;

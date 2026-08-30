@@ -370,6 +370,13 @@ pub fn verify_private_file_handle(handle: &std::fs::File) -> io::Result<()> {
     }
 }
 
+/// Opens a Windows private file while rejecting reparse points in every path
+/// component, then verifies owner and DACL on the retained final handle.
+#[cfg(windows)]
+pub fn open_verified_private_file(path: &Path) -> io::Result<std::fs::File> {
+    windows_acl::open_verified_private_file(path)
+}
+
 #[cfg(unix)]
 fn private_policy_error() -> io::Error {
     io::Error::new(

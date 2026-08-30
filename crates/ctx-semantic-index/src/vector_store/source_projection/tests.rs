@@ -14,13 +14,20 @@ use ctx_history_core::{
     CORE_ACTIVITY_REVISION,
 };
 use ctx_history_index::{
-    current_semantic_generation_policy, CoreEventRecord, GenerationWriter, SourceEventRole,
-    VerifiedIndex, WriterOptions,
+    current_semantic_generation_policy,
+    policy::{
+        semantic_generation_policy, semantic_generation_policy_hash, SemanticCoreContentFilter,
+    },
+    CoreEventRecord, GenerationWriter, SourceEventRole, VerifiedIndex, WriterOptions,
 };
-use ctx_semantic_model::semantic_model_contract;
+use ctx_semantic_model::{
+    semantic_model_contract, ExternalSemanticSpace, SemanticEmbeddingExecutorConfig,
+    SemanticModelContract,
+};
 use tempfile::TempDir;
 
 use super::*;
+use crate::legacy_fixed_http_semantic_model_contract;
 use crate::vector_store_search::scan_exact_generation;
 
 mod content;
@@ -30,6 +37,7 @@ mod policy_rebuild;
 mod proportionality;
 mod provider_native;
 mod recovery;
+mod retrieval_exclusion;
 
 const TAIL_TOKEN: &str = "semantic-tail-token-7f0d";
 const EMPTY_DOCUMENT_TOKEN: &str = "semantic-empty-document-fixture-7f0d";
@@ -104,6 +112,48 @@ impl SemanticBatchEmbedder for MarkerEmbedder {
             })
             .collect())
     }
+}
+
+struct DimensionEmbedder {
+    dimensions: usize,
+    chunks: usize,
+    batch_sizes: Vec<usize>,
+}
+
+impl DimensionEmbedder {
+    fn new(contract: &SemanticModelContract) -> Self {
+        Self {
+            dimensions: contract.dimensions(),
+            chunks: 0,
+            batch_sizes: Vec::new(),
+        }
+    }
+}
+
+impl SemanticBatchEmbedder for DimensionEmbedder {
+    fn embed_chunks(&mut self, chunks: &[SemanticChunkDocument]) -> Result<Vec<Vec<f32>>> {
+        self.chunks = self.chunks.saturating_add(chunks.len());
+        self.batch_sizes.push(chunks.len());
+        Ok(chunks
+            .iter()
+            .map(|_| {
+                let mut embedding = vec![0.0; self.dimensions];
+                embedding[0] = 1.0;
+                embedding
+            })
+            .collect())
+    }
+}
+
+fn external_contract(
+    endpoint: &str,
+    space_id: &str,
+    dimensions: usize,
+) -> Result<SemanticModelContract> {
+    let space = ExternalSemanticSpace::new(space_id, dimensions)?;
+    Ok(SemanticEmbeddingExecutorConfig::http(endpoint, space)?
+        .contract()
+        .clone())
 }
 
 struct FixtureSource {
@@ -399,13 +449,8 @@ fn reconcile_all(
     builder: &mut CoreBuilder,
     embedder: &mut dyn SemanticBatchEmbedder,
 ) -> Result<SourceBackedSemanticOutcome> {
-    reconcile_generation(
-        store,
-        index,
-        &SourceBackedSemanticGeneration::from_verified_index(index, semantic_model_contract())?,
-        builder,
-        embedder,
-    )
+    let generation = SourceBackedSemanticGeneration::from_verified_index(index, store.contract())?;
+    reconcile_generation(store, index, &generation, builder, embedder)
 }
 
 fn active_events(store: &SemanticVectorStore) -> Result<usize> {
@@ -521,63 +566,6 @@ fn semantic_generation_uses_exact_per_source_core_aggregates_without_candidate_t
             .sum::<u64>(),
         5
     );
-    Ok(())
-}
-
-#[test]
-fn retrieval_excluded_events_never_enter_the_source_backed_semantic_projection() -> Result<()> {
-    let fixture = Fixture::new(1)?;
-    let mut excluded = fixture.record(0, 1, "retrieval payload must not embed")?;
-    excluded.content.discovery_exclusion = Some(CoreDiscoveryExclusion::CtxRetrievalDerived);
-    excluded.validate_contract()?;
-
-    let root = fixture.data_root.join("index-retrieval-semantic-exclusion");
-    let fixture_source = &fixture.sources[0];
-    let mut writer = GenerationWriter::open(&root, WriterOptions::default())?
-        .into_writer()
-        .map_err(crate::committed_generation_recovery_error)?;
-    writer.begin_source(fixture_source.source.clone())?;
-    writer.add_core_record(excluded.clone())?;
-    let observation = SourceObservation::new(
-        fixture_source.source.clone(),
-        "fixture-retrieval-semantic-exclusion",
-        b"retrieval-semantic-exclusion".to_vec(),
-    )?;
-    writer.certify_source(CertifiedSource::certify(
-        observation.clone(),
-        observation,
-        "fixture-parser-v1",
-        [1; 32],
-        ScannedSourceCounts {
-            complete_records: 1,
-            retained_records: 1,
-            indexed_documents: 1,
-            certified_bytes: 50,
-            ..ScannedSourceCounts::default()
-        },
-    )?)?;
-    writer.commit(|_| true)?;
-    let index = VerifiedIndex::open_pinned(root)?;
-    let source_digest = index.manifest().core_record_aggregates[0]
-        .source_identity_digest()
-        .to_owned();
-
-    assert_eq!(index.manifest().indexed_documents, 1);
-    assert_eq!(index.semantic_eligible_event_count()?, 0);
-    let semantic = index.core_semantic_event_page(None, 1)?;
-    assert!(semantic.terminal);
-    assert!(semantic.items.is_empty());
-
-    let mut store = SemanticVectorStore::open(&fixture.semantic_path, semantic_model_contract())?;
-    let mut builder = CoreBuilder::default();
-    let mut embedder = MarkerEmbedder::default();
-    let outcome = reconcile_all(&mut store, &index, &mut builder, &mut embedder)?;
-    assert_eq!(outcome.records_decoded, 1);
-    assert_eq!(outcome.records_embedded, 0);
-    assert!(builder.calls.is_empty());
-    assert_eq!(embedder.chunks, 0);
-    assert_eq!(active_events(&store)?, 0);
-    assert!(source_rows(&store, &source_digest)?.is_empty());
     Ok(())
 }
 

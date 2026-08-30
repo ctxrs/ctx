@@ -210,15 +210,6 @@ pub(super) fn run_daemon_semantic_job(
         }
     };
     let semantic_executor = executor.executor();
-    // Bazel may materialize the model crate separately across this dependency
-    // boundary, so bridge compatibility by fingerprint before opening the
-    // index with its own contract type.
-    let index_contract = ctx_semantic_index::semantic_model_contract();
-    if semantic_executor.contract().fingerprint() != index_contract.fingerprint() {
-        return Err(anyhow::anyhow!(
-            "semantic executor model contract does not match the semantic index contract"
-        ));
-    }
     let resource_deferred = if let Some(builtin) = executor.builtin_executor() {
         let admission_operation = if builtin.shared_runtime().is_loaded() {
             SemanticBackgroundOperation::IndexBatch
@@ -242,7 +233,7 @@ pub(super) fn run_daemon_semantic_job(
     }
 
     let vector_path = source_backed_semantic_vector_path(data_root);
-    let mut vector_store = SemanticVectorStore::open(&vector_path, index_contract)?;
+    let mut vector_store = open_selected_semantic_vector_store(&vector_path, &executor)?;
     let source_eligible_events = source_generation.semantic_eligible_event_count()?;
     let source_pending = matches!(
         vector_store.source_backed_generation_pin_exact(
@@ -328,6 +319,50 @@ pub(super) fn run_daemon_semantic_job(
     );
     annotate_source_backed_semantic_progress(&mut job, &outcome);
     Ok(job)
+}
+
+fn open_selected_semantic_vector_store(
+    vector_path: &Path,
+    executor: &ctx_semantic_model::SemanticEmbeddingExecutorHandle,
+) -> Result<SemanticVectorStore> {
+    verify_external_semantic_contract_before_store_open(executor)?;
+    let contract = semantic_index_contract(executor.executor().contract())?;
+    SemanticVectorStore::open(vector_path, &contract)
+}
+
+pub(super) fn semantic_index_contract(
+    selected: &ctx_semantic_model::SemanticModelContract,
+) -> Result<ctx_semantic_index::SemanticModelContract> {
+    if let Some(space) = selected.external_space() {
+        let endpoint = selected.external_http_endpoint().ok_or_else(|| {
+            anyhow::anyhow!("external semantic contract has no endpoint identity")
+        })?;
+        return ctx_semantic_index::external_http_semantic_model_contract(
+            endpoint,
+            space.space_id(),
+            space.dimensions(),
+        );
+    }
+    if let Some(endpoint) = selected.external_http_endpoint() {
+        return ctx_semantic_index::legacy_fixed_http_semantic_model_contract(endpoint);
+    }
+    let local = ctx_semantic_index::semantic_model_contract();
+    if selected.fingerprint() != local.fingerprint() {
+        return Err(anyhow::anyhow!(
+            "semantic executor model contract does not match the semantic index contract"
+        ));
+    }
+    Ok(local.clone())
+}
+
+/// Establishes the endpoint's configured identity before a mismatched writable
+/// vector store can perform its existing reset-on-open recovery. V2 verification
+/// is a content-free GET; retained fixed-E5 V1 may submit only frozen public
+/// canary probes and never user history or query content.
+fn verify_external_semantic_contract_before_store_open(
+    executor: &ctx_semantic_model::SemanticEmbeddingExecutorHandle,
+) -> Result<()> {
+    executor.verify_contract()
 }
 
 fn reconcile_source_backed_semantic_page(

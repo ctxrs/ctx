@@ -12,6 +12,7 @@ fn application_config(config: &AppConfig<'_>) -> ctx_daemon_application::DaemonC
             .http_endpoint()
             .unwrap_or("builtin")
             .to_owned(),
+        semantic_contract_fingerprint: config.semantic_model_contract().fingerprint().to_owned(),
     }
 }
 

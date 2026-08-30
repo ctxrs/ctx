@@ -117,16 +117,18 @@ disabled. If automatic indexing and semantic search are explicitly enabled,
 daemon maintenance uses the selected executor and may acquire the built-in ONNX
 Runtime asset and embedding model needed for the installed platform.
 
-Enable semantic search with the built-in executor, which is the implicit
-default:
+Select the built-in multilingual E5 executor and enable semantic search:
 
 ```bash
-ctx semantic enable
+ctx semantic enable --executor builtin
 ctx semantic status
 ```
 
-To send semantic document and query text to an exact-contract executor instead,
-select its base URL explicitly:
+Bare `ctx semantic enable` preserves whichever executor is already selected;
+on a new data root with no executor configuration, the default is built-in E5.
+
+To use an external executor's vector space instead, select its base URL
+explicitly:
 
 ```bash
 export CTX_SEMANTIC_EMBEDDING_TOKEN='your-endpoint-token'
@@ -136,8 +138,17 @@ ctx semantic enable --executor https://embeddings.example.test/ctx
 Remote URLs require HTTPS. Plain HTTP is accepted only when the host is a
 literal loopback IP address; a loopback executor may omit the token. Use
 `ctx semantic enable --executor builtin` to return to the built-in executor.
-The selected executor is used for indexing and queries, with no silent built-in
-fallback.
+Loopback is only ctx's first hop; the local process can retain or forward the
+content it receives. URL selection tries V2 first and persists the endpoint's
+opaque space identity and dimensions for this data root. A fixed-E5 V1 endpoint
+is accepted only when V2 returns 404. The selected executor receives raw ctx
+query text and document chunks and owns model preprocessing and tokenization.
+It is used for both indexing and queries, with no silent built-in fallback.
+
+If the endpoint later reports a different identity, semantic work fails closed.
+Rerun the same `ctx semantic enable --executor URL` command to accept it. An
+accepted identity change rebuilds derived semantic data without deleting
+history or the lexical index.
 
 Automatic indexing is the default, so enablement starts or recovers the daemon
 that prepares the selected executor and builds the semantic projection. Add

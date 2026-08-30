@@ -2,26 +2,25 @@ use anyhow::{anyhow, Result};
 
 use crate::SemanticModelContract;
 
-pub(super) struct SemanticEmbeddingCanaryProbe {
-    pub(super) id: &'static str,
-    pub(super) text: &'static str,
+struct SemanticEmbeddingCanaryProbe {
+    id: &'static str,
+    text: &'static str,
 }
 
-pub(super) const QUERY_PROBES: &[SemanticEmbeddingCanaryProbe] = &[SemanticEmbeddingCanaryProbe {
+const QUERY_PROBES: &[SemanticEmbeddingCanaryProbe] = &[SemanticEmbeddingCanaryProbe {
     id: "query-daemon-recovery",
     text: "recover a background daemon after a local connection failure",
 }];
 
-pub(super) const DOCUMENT_PROBES: &[SemanticEmbeddingCanaryProbe] =
-    &[SemanticEmbeddingCanaryProbe {
-        id: "document-daemon-recovery",
-        text: "Restart the background daemon when its local socket refuses connections.",
-    }];
+const DOCUMENT_PROBES: &[SemanticEmbeddingCanaryProbe] = &[SemanticEmbeddingCanaryProbe {
+    id: "document-daemon-recovery",
+    text: "Restart the background daemon when its local socket refuses connections.",
+}];
 
 // Quantized from the pinned built-in CPU executor. Keeping the reference as
-// i8 makes the public conformance point compact while retaining >0.998 cosine
-// with the original normalized vector.
-pub(super) const QUERY_DAEMON_RECOVERY_REFERENCE: &[i8; 384] = &[
+// i8 makes the compatibility check compact while retaining >0.998 cosine with
+// the original normalized vector.
+const QUERY_DAEMON_RECOVERY_REFERENCE: &[i8; 384] = &[
     8, -7, 2, -3, 6, -6, 6, 4, 6, 1, 4, 6, 2, -4, -6, 6, 11, -6, -6, -6, 2, 1, -6, 9, 2, 5, -7, 10,
     3, -10, -10, 0, 2, -6, 4, 1, -2, -5, 12, -7, -9, 12, 2, 11, 1, 4, -7, 3, -2, -4, -8, 9, 1, 7,
     10, -6, -14, -6, -9, 9, 5, 0, 3, 3, 11, 10, 6, 7, -10, -3, -7, 7, 2, -6, 1, 1, 3, 0, 4, -1, -4,
@@ -39,7 +38,7 @@ pub(super) const QUERY_DAEMON_RECOVERY_REFERENCE: &[i8; 384] = &[
     -10, 12, 7, 2, -3, -9, -6, -3, 2, -5, -4, 8, 1, -1, 6,
 ];
 
-pub(super) const DOCUMENT_DAEMON_RECOVERY_REFERENCE: &[i8; 384] = &[
+const DOCUMENT_DAEMON_RECOVERY_REFERENCE: &[i8; 384] = &[
     5, -5, 2, -6, 10, -6, 0, -3, 11, 4, 6, 2, 4, -1, -7, 5, 8, -1, -9, -7, 3, 0, -5, 8, 5, 9, -5,
     5, 2, -13, -6, -5, 2, -5, 1, 4, -6, -9, 9, -7, -6, 12, 0, 16, 5, 6, -9, 2, -6, -2, -7, 9, -3,
     7, 5, -4, -10, -8, -10, 7, 9, -1, 4, 1, 11, 11, 5, 7, -7, -2, -6, 8, 0, -7, 0, 1, 2, -2, 4, 0,
@@ -57,11 +56,7 @@ pub(super) const DOCUMENT_DAEMON_RECOVERY_REFERENCE: &[i8; 384] = &[
     12, 7, 0, -5, -7, -4, -3, 8, -7, -11, 7, 5, 0, 7,
 ];
 
-// Each entry is (probe ID, quantized normalized embedding, minimum cosine).
-// These public probes catch accidental incompatibility and ordinary
-// misconfiguration. An intentionally malicious endpoint can recognize and
-// special-case them, so passing the canary is not an endpoint trust boundary.
-pub(super) const FROZEN_CANARY_REFERENCES: &[(&str, &[i8], f64)] = &[
+const FROZEN_CANARY_REFERENCES: &[(&str, &[i8], f64)] = &[
     (
         "query-daemon-recovery",
         QUERY_DAEMON_RECOVERY_REFERENCE,
@@ -97,13 +92,6 @@ pub(super) fn validate_conformance_canary(
     {
         return Err(canary_failed());
     }
-    validate_frozen_references(query_embeddings, document_embeddings)
-}
-
-fn validate_frozen_references(
-    query_embeddings: &[Vec<f32>],
-    document_embeddings: &[Vec<f32>],
-) -> Result<()> {
     for (probe_id, reference, minimum_cosine) in FROZEN_CANARY_REFERENCES {
         let actual = QUERY_PROBES
             .iter()
@@ -152,39 +140,55 @@ fn canary_failed() -> anyhow::Error {
     anyhow!("semantic embedding endpoint failed the conformance canary")
 }
 
+#[cfg(any(test, feature = "test-support"))]
+pub(super) fn normalized_query_reference() -> Vec<f32> {
+    normalized_reference(QUERY_DAEMON_RECOVERY_REFERENCE)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(super) fn normalized_document_reference() -> Vec<f32> {
+    normalized_reference(DOCUMENT_DAEMON_RECOVERY_REFERENCE)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn normalized_reference(reference: &[i8]) -> Vec<f32> {
+    let vector = reference
+        .iter()
+        .map(|value| f32::from(*value))
+        .collect::<Vec<_>>();
+    let norm = vector.iter().map(|value| value.powi(2)).sum::<f32>().sqrt();
+    vector.iter().map(|value| value / norm).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn normalized(reference: &[i8]) -> Vec<f32> {
-        let vector = reference
-            .iter()
-            .map(|value| f32::from(*value))
-            .collect::<Vec<_>>();
-        let norm = vector.iter().map(|value| value.powi(2)).sum::<f32>().sqrt();
-        vector.iter().map(|value| value / norm).collect()
+        normalized_reference(reference)
     }
 
     #[test]
     fn correct_frozen_query_and_document_data_passes() {
-        let query_embeddings = vec![normalized(QUERY_DAEMON_RECOVERY_REFERENCE)];
-        let document_embeddings = vec![normalized(DOCUMENT_DAEMON_RECOVERY_REFERENCE)];
-
-        validate_conformance_canary(&query_embeddings, &document_embeddings).unwrap();
+        validate_conformance_canary(
+            &[normalized(QUERY_DAEMON_RECOVERY_REFERENCE)],
+            &[normalized(DOCUMENT_DAEMON_RECOVERY_REFERENCE)],
+        )
+        .unwrap();
     }
 
     #[test]
     fn swapped_or_reused_roles_fail_the_frozen_pair() {
-        let frozen_query = normalized(QUERY_DAEMON_RECOVERY_REFERENCE);
-        let frozen_document = normalized(DOCUMENT_DAEMON_RECOVERY_REFERENCE);
+        let query = normalized(QUERY_DAEMON_RECOVERY_REFERENCE);
+        let document = normalized(DOCUMENT_DAEMON_RECOVERY_REFERENCE);
         assert!(validate_conformance_canary(
-            std::slice::from_ref(&frozen_document),
-            std::slice::from_ref(&frozen_query),
+            std::slice::from_ref(&document),
+            std::slice::from_ref(&query),
         )
         .is_err());
         assert!(validate_conformance_canary(
-            std::slice::from_ref(&frozen_query),
-            std::slice::from_ref(&frozen_query),
+            std::slice::from_ref(&query),
+            std::slice::from_ref(&query),
         )
         .is_err());
     }

@@ -6,8 +6,7 @@ use ctx_history_index::{
 };
 use ctx_history_read_application::{history_health_report, HistoryHealthReport};
 use ctx_semantic_index::{
-    semantic_model_contract, source_backed_semantic_vector_path, SemanticVectorStore,
-    SourceBackedGenerationPin,
+    source_backed_semantic_vector_path, SemanticVectorStore, SourceBackedGenerationPin,
 };
 use serde_json::{json, Value};
 
@@ -559,7 +558,25 @@ fn semantic_report(
         }));
     }
 
-    let flat_f32 = match SemanticVectorStore::open_read_only(&path, semantic_model_contract()) {
+    let contract = match crate::query_adapter::semantic_index_contract_for_selected(
+        config.semantic_model_contract(),
+    ) {
+        Ok(contract) => contract,
+        Err(error) => {
+            return compact_json(json!({
+                "status": "unavailable",
+                "reason": "semantic_contract_invalid",
+                "enabled": enabled,
+                "config_source": config.semantic_search_source(),
+                "flat_f32": typed_unavailable_with_error(
+                    "semantic_contract_invalid",
+                    path,
+                    error,
+                ),
+            }));
+        }
+    };
+    let flat_f32 = match SemanticVectorStore::open_read_only(&path, &contract) {
         Ok(Some(store)) => match index.semantic_eligible_event_count() {
             Ok(semantic_documents) => {
                 match validate_public_semantic_counter("semantic_documents", semantic_documents) {

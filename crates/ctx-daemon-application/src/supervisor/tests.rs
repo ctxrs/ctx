@@ -18,7 +18,11 @@ use std::{
 };
 
 const SUPERVISOR_ENV_ARTIFACT_PROBE_STAGE: &str = "CTX_SUPERVISOR_ENV_ARTIFACT_PROBE_STAGE";
-const SUPERVISOR_ENV_ARTIFACT_PROBE_TEST: &str = "semantic::daemon_supervisor::tests::native_supervisor_artifacts_exclude_authority_and_fail_closed_on_controls";
+const SUPERVISOR_ENV_ARTIFACT_PROBE_TEST: &str =
+    "supervisor::tests::native_supervisor_artifacts_exclude_authority_and_fail_closed_on_controls";
+#[cfg(windows)]
+const WINDOWS_RESTART_PROBE_TEST: &str =
+    "supervisor::tests::windows_supervisor_restart_probe_applies_handoff";
 
 struct RestoreTestEnvironment(Vec<(&'static str, Option<OsString>)>);
 
@@ -75,13 +79,14 @@ fn windows_task_xml(
     user_sid: &str,
     task_name: &str,
 ) -> Result<String> {
+    let input = ManagedSupervisorInput::new(&TestHost, data_root, executable)?;
     windows_task_xml_with_environment(
         executable,
         data_root,
         system_root,
         user_sid,
         task_name,
-        &supervisor_environment_snapshot(&TestHost)?,
+        &input.daemon_environment,
     )
 }
 
@@ -371,10 +376,49 @@ fn systemd_unit_is_persistent_and_restarts_after_clean_or_failed_exit() {
     .unwrap();
     assert!(unit.contains("Restart=always"));
     assert!(unit.contains("WantedBy=default.target"));
-    assert!(unit.contains("ExecStart=/usr/bin/env -i "));
+    assert!(unit.contains("UnsetEnvironment=LD_AUDIT LD_LIBRARY_PATH LD_PRELOAD"));
+    let exec_start = unit
+        .lines()
+        .find(|line| line.starts_with("ExecStart="))
+        .expect("systemd ExecStart");
+    assert_eq!(
+        exec_start,
+        format!(
+            "ExecStart=/usr/bin/env -i \"{}=/home/user/.local/share/ctx/daemon/supervisor-environment.json\" \"/home/user/.local/bin/ctx\" --data-root \"/home/user/.local/share/ctx\" daemon run --format=json",
+            ctx_daemon_runtime::SUPERVISOR_ENVIRONMENT_FILE_ENV
+        )
+    );
+    assert!(!unit.lines().any(|line| line.starts_with("Environment=")));
+    assert_eq!(
+        exec_start
+            .matches(&format!(
+                "{}=",
+                ctx_daemon_runtime::SUPERVISOR_ENVIRONMENT_FILE_ENV
+            ))
+            .count(),
+        1
+    );
     assert!(!unit.contains("CTX_RELEASE_"));
     assert!(!unit.contains("idle-exit-seconds"));
     assert!(!unit.contains("loop-interval-seconds"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn systemd_unit_escapes_dollar_expansion_in_all_persisted_paths() {
+    let unit = linux_systemd_unit(
+        Path::new("/home/${CTX_EXEC_REDIRECT}/ctx"),
+        Path::new("/data/${CTX_ROOT_REDIRECT}"),
+    )
+    .unwrap();
+    let exec_start = unit
+        .lines()
+        .find(|line| line.starts_with("ExecStart="))
+        .expect("systemd ExecStart");
+    assert!(exec_start.contains("/home/$${CTX_EXEC_REDIRECT}/ctx"));
+    assert!(exec_start.contains("/data/$${CTX_ROOT_REDIRECT}"));
+    assert!(!exec_start.contains("/home/${CTX_EXEC_REDIRECT}/ctx"));
+    assert!(!exec_start.contains("/data/${CTX_ROOT_REDIRECT}"));
 }
 
 #[test]
@@ -394,7 +438,28 @@ fn launch_agent_plist_is_persistent_sanitized_and_gui_registration_is_identity_b
     assert!(plist.contains("<key>Label</key><string>rs.ctx.daemon</string>"));
     assert!(plist.contains("<key>RunAtLoad</key><true/>"));
     assert!(plist.contains("<key>KeepAlive</key>"));
-    assert!(plist.contains("<string>/usr/bin/env</string><string>-i</string>"));
+    assert!(plist.contains("<key>EnvironmentVariables</key>"));
+    for variable in [
+        "DYLD_FALLBACK_FRAMEWORK_PATH",
+        "DYLD_FALLBACK_LIBRARY_PATH",
+        "DYLD_FRAMEWORK_PATH",
+        "DYLD_INSERT_LIBRARIES",
+        "DYLD_LIBRARY_PATH",
+    ] {
+        assert!(plist.contains(&format!("<key>{variable}</key><string></string>")));
+    }
+    let program_arguments = plist
+        .split_once("<key>ProgramArguments</key><array>")
+        .and_then(|(_, remainder)| remainder.split_once("</array>"))
+        .map(|(arguments, _)| arguments)
+        .expect("launchd ProgramArguments array");
+    assert_eq!(
+        program_arguments,
+        format!(
+            "<string>/usr/bin/env</string><string>-i</string><string>{}=/Users/test/Library/Application Support/ctx/data/daemon/supervisor-environment.json</string><string>/Users/test/Library/Application Support/ctx/ctx</string><string>--data-root</string><string>/Users/test/Library/Application Support/ctx/data</string><string>daemon</string><string>run</string><string>--format=json</string>",
+            ctx_daemon_runtime::SUPERVISOR_ENVIRONMENT_FILE_ENV
+        )
+    );
     assert!(!plist.contains("CTX_RELEASE_"));
     assert!(!plist.contains("idle-exit-seconds"));
     assert_eq!(
@@ -412,6 +477,8 @@ fn windows_task_contract_is_current_user_restartable_and_spawns_with_a_clear_env
     )
     .unwrap();
     assert!(script.contains("EnvironmentVariables.Clear()"));
+    assert!(script.contains(ctx_daemon_runtime::SUPERVISOR_ENVIRONMENT_FILE_ENV));
+    assert!(!script.contains("Get-Content -LiteralPath"));
     assert!(script.contains("UseShellExecute=$false"));
     assert!(script.contains("while($true)"));
     assert!(script.contains("if($code -eq 0){exit 0}"));
@@ -546,6 +613,34 @@ fn supervisor_artifact_atomic_write_replaces_existing_file() {
 
 #[cfg(windows)]
 #[test]
+fn windows_supervisor_restart_probe_applies_handoff() -> Result<()> {
+    let Some(environment_path) = env::var_os(ctx_daemon_runtime::SUPERVISOR_ENVIRONMENT_FILE_ENV)
+    else {
+        return Ok(());
+    };
+    assert!(ctx_daemon_runtime::apply_supervisor_environment_handoff()?);
+
+    let environment_path = PathBuf::from(environment_path);
+    let artifact_root = environment_path
+        .parent()
+        .ok_or_else(|| anyhow!("Windows restart probe environment path has no parent"))?;
+    let counter = artifact_root.join("restart-count.txt");
+    let marker = artifact_root.join("restart-recovered.txt");
+    let count = fs::read_to_string(&counter)
+        .ok()
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .unwrap_or(0)
+        + 1;
+    fs::write(&counter, count.to_string())?;
+    if count == 1 {
+        std::process::exit(23);
+    }
+    fs::write(marker, "recovered")?;
+    Ok(())
+}
+
+#[cfg(windows)]
+#[test]
 fn windows_task_xml_registers_with_task_scheduler() -> Result<()> {
     struct TaskCleanup {
         task_name: String,
@@ -662,34 +757,21 @@ fn windows_task_xml_registers_with_task_scheduler() -> Result<()> {
         &task_name,
     )?);
 
-    let probe = temp.path().join("restart-probe.ps1");
-    let counter = temp.path().join("restart-count.txt");
-    let marker = temp.path().join("restart-recovered.txt");
-    let probe_script = format!(
-        "$ErrorActionPreference='Stop';$countPath='{}';$markerPath='{}';$count=0;if(Test-Path -LiteralPath $countPath){{$count=[int](Get-Content -Raw -LiteralPath $countPath)}};$count++;[IO.File]::WriteAllText($countPath,[string]$count);if($count -eq 1){{exit 23}};[IO.File]::WriteAllText($markerPath,'recovered');exit 0",
-        powershell_single_quote(validated_supervisor_artifact_path(
-            "Windows restart test counter",
-            &counter,
-        )?),
-        powershell_single_quote(validated_supervisor_artifact_path(
-            "Windows restart test marker",
-            &marker,
-        )?),
-    );
-    let mut probe_bytes = vec![0xff, 0xfe];
-    probe_bytes.extend(probe_script.encode_utf16().flat_map(u16::to_le_bytes));
-    fs::write(&probe, probe_bytes)?;
+    let data_root = temp.path().join("data");
+    let environment_path = ctx_daemon_runtime::supervisor_environment_path(&data_root);
+    let artifact_root = environment_path
+        .parent()
+        .ok_or_else(|| anyhow!("Windows restart probe environment path has no parent"))?;
+    let counter = artifact_root.join("restart-count.txt");
+    let marker = artifact_root.join("restart-recovered.txt");
     let probe_arguments = vec![
-        "-NoLogo".to_owned(),
-        "-NoProfile".to_owned(),
-        "-NonInteractive".to_owned(),
-        "-ExecutionPolicy".to_owned(),
-        "Bypass".to_owned(),
-        "-File".to_owned(),
-        validated_supervisor_artifact_path("Windows restart test probe", &probe)?.to_owned(),
+        "--exact".to_owned(),
+        WINDOWS_RESTART_PROBE_TEST.to_owned(),
+        "--nocapture".to_owned(),
     ];
     let action_script = windows_sanitized_process_supervisor_script(
-        &powershell,
+        &env::current_exe()?,
+        &data_root,
         &probe_arguments,
         &supervisor_environment_snapshot(&TestHost)?,
     )?;
@@ -711,26 +793,21 @@ fn windows_task_xml_registers_with_task_scheduler() -> Result<()> {
         ));
     }
 
-    let run = Command::new("schtasks")
-        .args(["/Run", "/TN"])
-        .arg(&task_name)
-        .output()?;
-    assert!(
-        run.status.success(),
-        "schtasks /Run failed: {}{}",
-        String::from_utf8_lossy(&run.stdout),
-        String::from_utf8_lossy(&run.stderr)
-    );
+    let identity = SupervisorIdentity::new(&task_name, path.clone())?;
+    let manager_environment = supervisor_manager_environment(&TestHost)?;
+    ctx_daemon_runtime::start_windows_supervisor(&identity, &manager_environment)?;
     let recovery_deadline = Instant::now() + Duration::from_secs(20);
     while Instant::now() < recovery_deadline && !marker.exists() {
         std::thread::sleep(Duration::from_millis(100));
     }
+    let observed_count =
+        fs::read_to_string(&counter).unwrap_or_else(|error| format!("unavailable ({error})"));
     assert!(
         marker.exists(),
-        "scheduled action did not relaunch its failing child"
+        "scheduled action did not relaunch its failing child; count={observed_count}"
     );
     assert_eq!(
-        fs::read_to_string(&counter)?.trim(),
+        observed_count.trim(),
         "2",
         "scheduled action did not recover on exactly the second child launch"
     );
@@ -788,6 +865,8 @@ fn native_supervisor_artifacts_exclude_authority_and_fail_closed_on_controls() -
         "CTX_RELEASE_PUBLIC_KEY",
         "CTX_RELEASE_SIGNATURE",
         "CTX_RELEASE_VERSION",
+        "CTX_SEMANTIC_EMBEDDING_TOKEN",
+        "CTX_SEMANTIC_EMBEDDING_TOKEN_ENDPOINT",
         "GITHUB_TOKEN",
     ];
     if env::var(SUPERVISOR_ENV_ARTIFACT_PROBE_STAGE).as_deref() != Ok("final") {

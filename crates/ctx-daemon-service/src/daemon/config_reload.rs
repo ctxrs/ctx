@@ -36,10 +36,12 @@ pub(super) struct DaemonConfigReloadState {
     requested_daemon_mode: DaemonMode,
     requested_semantic_enabled: bool,
     requested_semantic_executor: String,
+    requested_semantic_contract_fingerprint: String,
     applied_daemon_enabled: Option<bool>,
     applied_daemon_mode: Option<DaemonMode>,
     applied_semantic_enabled: Option<bool>,
     applied_semantic_executor: Option<String>,
+    applied_semantic_contract_fingerprint: Option<String>,
     pub(super) last_error: Option<String>,
 }
 
@@ -53,10 +55,16 @@ impl DaemonConfigReloadState {
             requested_daemon_mode: config.daemon.mode,
             requested_semantic_enabled: config.semantic_search_enabled(),
             requested_semantic_executor: semantic_executor_selector(config),
+            requested_semantic_contract_fingerprint: config
+                .semantic_executor
+                .contract()
+                .fingerprint()
+                .to_owned(),
             applied_daemon_enabled: None,
             applied_daemon_mode: None,
             applied_semantic_enabled: None,
             applied_semantic_executor: None,
+            applied_semantic_contract_fingerprint: None,
             last_error: None,
         }
     }
@@ -67,6 +75,8 @@ impl DaemonConfigReloadState {
         self.requested_daemon_mode = config.daemon.mode;
         self.requested_semantic_enabled = config.semantic_search_enabled();
         self.requested_semantic_executor = semantic_executor_selector(config);
+        self.requested_semantic_contract_fingerprint =
+            config.semantic_executor.contract().fingerprint().to_owned();
         self.last_error = None;
     }
 
@@ -77,6 +87,8 @@ impl DaemonConfigReloadState {
         self.applied_daemon_mode = Some(self.requested_daemon_mode);
         self.applied_semantic_enabled = Some(self.requested_semantic_enabled);
         self.applied_semantic_executor = Some(self.requested_semantic_executor.clone());
+        self.applied_semantic_contract_fingerprint =
+            Some(self.requested_semantic_contract_fingerprint.clone());
         self.last_error = None;
     }
 
@@ -88,6 +100,7 @@ impl DaemonConfigReloadState {
         // one. Core refresh can continue independently.
         self.applied_semantic_enabled = Some(false);
         self.applied_semantic_executor = None;
+        self.applied_semantic_contract_fingerprint = None;
         self.last_error = Some(format!("{error:#}"));
     }
 
@@ -97,6 +110,7 @@ impl DaemonConfigReloadState {
         self.applied_daemon_mode = Some(self.requested_daemon_mode);
         self.applied_semantic_enabled = Some(false);
         self.applied_semantic_executor = None;
+        self.applied_semantic_contract_fingerprint = None;
         self.last_error = Some(format!("{error:#}"));
     }
 
@@ -110,12 +124,14 @@ impl DaemonConfigReloadState {
                 "daemon_mode": self.requested_daemon_mode.as_str(),
                 "semantic_enabled": self.requested_semantic_enabled,
                 "semantic_executor": self.requested_semantic_executor,
+                "semantic_contract_fingerprint": self.requested_semantic_contract_fingerprint,
             },
             "applied": {
                 "daemon_enabled": self.applied_daemon_enabled,
                 "daemon_mode": self.applied_daemon_mode.map(DaemonMode::as_str),
                 "semantic_enabled": self.applied_semantic_enabled,
                 "semantic_executor": self.applied_semantic_executor,
+                "semantic_contract_fingerprint": self.applied_semantic_contract_fingerprint,
             },
             "last_error": self.last_error,
         })
@@ -190,6 +206,7 @@ where
             runtime.semantic_executor = None;
             runtime.semantic_retry = Default::default();
             runtime.semantic_blocked_job = None;
+            runtime.sidecar_drain = Default::default();
             let _ = runtime.semantic_runtime.release_if_idle();
             reload.load_failed(error);
             return DaemonConfigReloadOutcome::Continue;
@@ -204,6 +221,7 @@ where
     if !config.daemon.enabled && !args.force {
         runtime.config = config;
         runtime.semantic_executor = None;
+        runtime.sidecar_drain = Default::default();
         drop(query_service.take());
         drop(refresh_service.take());
         let _ = runtime.semantic_runtime.release_if_idle();
@@ -211,44 +229,24 @@ where
         return DaemonConfigReloadOutcome::StopDisabled;
     }
 
-    let semantic_runtime_requested =
-        daemon_semantic_runtime_requested(&config, daemon_query_service_transport_supported());
+    let service_supported = daemon_query_service_transport_supported();
+    let semantic_runtime_requested = daemon_semantic_runtime_requested(&config, service_supported);
+    let semantic_runtime_request_changed =
+        daemon_semantic_runtime_requested(&runtime.config, service_supported)
+            != semantic_runtime_requested;
     let executor_changed = runtime.config.semantic_executor != config.semantic_executor;
     let semantic_activation_changed =
         runtime.config.semantic_search_enabled() != config.semantic_search_enabled();
-    if executor_changed || semantic_activation_changed {
+    if executor_changed || semantic_activation_changed || semantic_runtime_request_changed {
         drop(query_service.take());
         runtime.semantic_executor = None;
         runtime.semantic_retry = Default::default();
         runtime.semantic_blocked_job = None;
+        runtime.sidecar_drain = Default::default();
+        let _ = runtime.semantic_runtime.release_if_idle();
     }
     runtime.config = config;
-    let selected_executor = if semantic_runtime_requested {
-        runtime.semantic_executor.clone().map_or_else(
-            || {
-                build_executor(
-                    runtime.config.semantic_executor.clone(),
-                    config_port.semantic_executor_auth()?,
-                    runtime.semantic_runtime.clone(),
-                    config_port.semantic_model_config(data_root),
-                )
-                .map(Arc::new)
-                .map(Some)
-            },
-            |executor| Ok(Some(executor)),
-        )
-    } else {
-        Ok(None)
-    };
-    let selected_executor = match selected_executor {
-        Ok(executor) => executor,
-        Err(error) => {
-            reload.activation_failed(error);
-            return DaemonConfigReloadOutcome::Continue;
-        }
-    };
-    runtime.semantic_executor = selected_executor;
-    if daemon_query_service_transport_supported() && refresh_service.is_none() {
+    if service_supported && refresh_service.is_none() {
         let Some(source_refresh) = runtime.source_refresh_coordinator.as_ref().cloned() else {
             reload.activation_failed(anyhow!(
                 "daemon source refresh engine was not recovered before IPC activation"
@@ -273,6 +271,56 @@ where
             }
         }
     }
+    let selected_executor = if semantic_runtime_requested {
+        runtime.semantic_executor.clone().map_or_else(
+            || {
+                build_executor(
+                    runtime.config.semantic_executor.clone(),
+                    config_port.semantic_executor_auth()?,
+                    runtime.semantic_runtime.clone(),
+                    config_port.semantic_model_config(data_root),
+                )
+                .map(Arc::new)
+                .map(Some)
+            },
+            |executor| Ok(Some(executor)),
+        )
+    } else {
+        Ok(None)
+    };
+    let selected_executor = match selected_executor {
+        Ok(executor) => executor,
+        Err(error) => {
+            reload.activation_failed(error);
+            return DaemonConfigReloadOutcome::Continue;
+        }
+    };
+    if let Some(executor) = selected_executor.as_ref() {
+        let selected_contract = executor.executor().contract();
+        let configured_contract = runtime.config.semantic_executor.contract();
+        if selected_contract.fingerprint() != configured_contract.fingerprint() {
+            drop(query_service.take());
+            runtime.semantic_executor = None;
+            runtime.semantic_retry = Default::default();
+            runtime.semantic_blocked_job = None;
+            runtime.sidecar_drain = Default::default();
+            let _ = runtime.semantic_runtime.release_if_idle();
+            reload.activation_failed(anyhow!(
+                "semantic executor contract does not match the selected configuration"
+            ));
+            return DaemonConfigReloadOutcome::Continue;
+        }
+        if let Err(error) = executor.verify_contract() {
+            drop(query_service.take());
+            runtime.semantic_executor = None;
+            runtime.semantic_retry = Default::default();
+            runtime.semantic_blocked_job = None;
+            runtime.sidecar_drain = Default::default();
+            let _ = runtime.semantic_runtime.release_if_idle();
+            reload.activation_failed(error);
+            return DaemonConfigReloadOutcome::Continue;
+        }
+    }
     if semantic_runtime_requested && query_service.is_none() {
         let Some(source_refresh) = runtime.source_refresh_coordinator.as_ref().cloned() else {
             reload.activation_failed(anyhow!(
@@ -283,7 +331,7 @@ where
         let handler = ctx_authenticated_request_handler_with_lifecycle(
             data_root,
             runtime.semantic_runtime.clone(),
-            runtime.semantic_executor.clone(),
+            selected_executor.clone(),
             source_refresh,
             Arc::clone(wakeup),
             config_port,
@@ -296,6 +344,11 @@ where
                 lower_semantic_worker_priority();
             }
             Err(error) => {
+                runtime.semantic_executor = None;
+                runtime.semantic_retry = Default::default();
+                runtime.semantic_blocked_job = None;
+                runtime.sidecar_drain = Default::default();
+                let _ = runtime.semantic_runtime.release_if_idle();
                 reload.activation_failed(error);
                 return DaemonConfigReloadOutcome::Continue;
             }
@@ -304,6 +357,7 @@ where
         drop(query_service.take());
         let _ = runtime.semantic_runtime.release_if_idle();
     }
+    runtime.semantic_executor = selected_executor;
 
     reload.applied();
     DaemonConfigReloadOutcome::Continue
@@ -325,6 +379,7 @@ pub(super) fn daemon_semantic_runtime_active(
     query_service: Option<&DaemonQueryService>,
 ) -> bool {
     query_service.is_some()
+        && runtime.semantic_executor.is_some()
         && runtime.config.semantic_search_enabled()
         && (runtime.config.semantic_executor.kind() == SemanticEmbeddingExecutorKind::Http
             || semantic_query_service_supported())
