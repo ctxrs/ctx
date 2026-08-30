@@ -133,23 +133,95 @@ fn matching_job_failure_preserves_retryability_and_taxonomy() {
     );
 }
 
+fn pending(observation: DaemonSemanticCompletionObservation) -> DaemonSemanticProgress {
+    match observation {
+        DaemonSemanticCompletionObservation::Pending(progress) => progress,
+        other => panic!("expected pending observation, got {other:?}"),
+    }
+}
+
 #[test]
-fn progress_marker_changes_only_with_observable_activation_or_job_progress() {
+fn substantive_progress_ignores_liveness_timestamps_and_accepts_indexed_work() {
     let selected = "https://semantic.example.test/";
-    let first = classify_exact_daemon_semantic_completion(
-        &status("pending", selected, "https://old.example.test/"),
-        Some(&job("budget_exhausted")),
+    let mut first_job = job("budget_exhausted");
+    first_job["indexed_chunks"] = json!(8);
+    let first = pending(classify_exact_daemon_semantic_completion(
+        &status("applied", selected, selected),
+        Some(&first_job),
         &target(),
-    );
+    ));
     let mut advanced_job = job("budget_exhausted");
     advanced_job["last_run_at_ms"] = json!(201);
     advanced_job["indexed_chunks"] = json!(32);
-    let second = classify_exact_daemon_semantic_completion(
-        &status("pending", selected, "https://old.example.test/"),
+    let second = pending(classify_exact_daemon_semantic_completion(
+        &status("applied", selected, selected),
         Some(&advanced_job),
         &target(),
-    );
-    assert_ne!(first, second);
+    ));
+    assert!(second.substantively_advances_from(Some(&first)));
+
+    let mut timestamp_only_job = advanced_job;
+    timestamp_only_job["last_run_at_ms"] = json!(999);
+    let mut timestamp_only_status = status("applied", selected, selected);
+    timestamp_only_status["config_reload"]["last_attempt_at_ms"] = json!(999);
+    timestamp_only_status["config_reload"]["last_applied_at_ms"] = json!(999);
+    let timestamp_only = pending(classify_exact_daemon_semantic_completion(
+        &timestamp_only_status,
+        Some(&timestamp_only_job),
+        &target(),
+    ));
+    assert!(!timestamp_only.substantively_advances_from(Some(&second)));
+}
+
+#[test]
+fn resource_deferred_churn_is_not_substantive_progress() {
+    let selected = "https://semantic.example.test/";
+    let mut deferred_job = job("resource_deferred");
+    deferred_job["reason"] = json!("memory_pressure");
+    let first = pending(classify_exact_daemon_semantic_completion(
+        &status("applied", selected, selected),
+        Some(&deferred_job),
+        &target(),
+    ));
+    assert!(first.substantively_advances_from(None));
+
+    let mut later_status = status("applied", selected, selected);
+    later_status["config_reload"]["last_attempt_at_ms"] = json!(999);
+    later_status["config_reload"]["last_applied_at_ms"] = json!(999);
+    deferred_job["last_run_at_ms"] = json!(999);
+    deferred_job["reason"] = json!("disk_pressure");
+    let later = pending(classify_exact_daemon_semantic_completion(
+        &later_status,
+        Some(&deferred_job),
+        &target(),
+    ));
+    assert!(!later.substantively_advances_from(Some(&first)));
+}
+
+#[test]
+fn exact_job_binding_and_source_readiness_are_substantive_progress() {
+    let selected = "https://semantic.example.test/";
+    let config_active = pending(classify_exact_daemon_semantic_completion(
+        &status("applied", selected, selected),
+        None,
+        &target(),
+    ));
+    let job_active = pending(classify_exact_daemon_semantic_completion(
+        &status("applied", selected, selected),
+        Some(&job("budget_exhausted")),
+        &target(),
+    ));
+    assert!(job_active.substantively_advances_from(Some(&config_active)));
+
+    let mut source_ready_job = job("budget_exhausted");
+    source_ready_job["source_generation_ready"] = json!(true);
+    source_ready_job["source_work_remaining"] = json!(false);
+    let source_ready = pending(classify_exact_daemon_semantic_completion(
+        &status("applied", selected, selected),
+        Some(&source_ready_job),
+        &target(),
+    ));
+    assert!(source_ready.substantively_advances_from(Some(&job_active)));
 }
 
 #[test]

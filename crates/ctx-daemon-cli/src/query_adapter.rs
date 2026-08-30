@@ -386,7 +386,21 @@ fn reconcile_foreground_semantic_with_checkpoint(
     let mut embedder = ForegroundSemanticEmbedder { executor };
     loop {
         checkpoint()?;
-        let outcome = store.reconcile_source_backed_index(index, &mut builder, &mut embedder)?;
+        let outcome = match store.reconcile_source_backed_index_with_checkpoint(
+            index,
+            &mut builder,
+            &mut embedder,
+            checkpoint,
+        ) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                // An interrupt can also unwind a blocking executor as a
+                // transport error. Re-check foreground authority before
+                // classifying that incidental failure.
+                checkpoint()?;
+                return Err(error);
+            }
+        };
         if outcome.ready() {
             return Ok(());
         }

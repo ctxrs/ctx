@@ -71,6 +71,7 @@ pub(super) fn wait_for_import_core_refresh(
         };
     }
     if let Some(status) = deferred_terminal_core_success {
+        ctx_daemon_cli::foreground_checkpoint()?;
         progress
             .source_refresh(&status)
             .map_err(anyhow::Error::new)?;

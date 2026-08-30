@@ -67,9 +67,11 @@ impl DaemonSemanticCompletionTarget {
     }
 }
 
-/// Fields whose change proves that daemon semantic work or activation made
-/// observable progress. Polling code can compare this marker without treating
-/// stale receipts as authority.
+/// Daemon semantic state observed while waiting for one exact target.
+///
+/// The timestamps are liveness receipts for diagnostics and retry scheduling,
+/// not semantic-progress evidence. Use [`Self::substantively_advances_from`]
+/// when accounting against a bounded no-progress budget.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DaemonSemanticProgress {
     pub reload_status: Option<String>,
@@ -83,6 +85,49 @@ pub struct DaemonSemanticProgress {
     pub job_indexed_chunks: Option<u64>,
     pub job_source_generation_ready: Option<bool>,
     pub job_source_work_remaining: Option<bool>,
+}
+
+impl DaemonSemanticProgress {
+    /// Returns whether this observation proves a substantive advance beyond
+    /// the last one accepted for the same completion attempt.
+    ///
+    /// Re-applying the exact requested configuration is a one-time activation
+    /// advance. Binding the exact job, reaching source readiness, completing
+    /// source work, or changing the positive indexed-chunk evidence are also
+    /// advances. Reload and job receipt timestamps, retry states, and resource
+    /// deferrals deliberately do not advance this marker.
+    pub fn substantively_advances_from(&self, previous: Option<&Self>) -> bool {
+        if self.exact_config_is_active()
+            && previous.is_none_or(|progress| !progress.exact_config_is_active())
+        {
+            return true;
+        }
+        if self.job_target_matches && previous.is_none_or(|progress| !progress.job_target_matches) {
+            return true;
+        }
+        if self.job_source_generation_ready == Some(true)
+            && previous.is_none_or(|progress| progress.job_source_generation_ready != Some(true))
+        {
+            return true;
+        }
+        if self.job_source_work_remaining == Some(false)
+            && previous.is_none_or(|progress| progress.job_source_work_remaining != Some(false))
+        {
+            return true;
+        }
+        if let Some(indexed_chunks) = self.job_indexed_chunks.filter(|chunks| *chunks > 0) {
+            return previous
+                .and_then(|progress| progress.job_indexed_chunks.filter(|chunks| *chunks > 0))
+                != Some(indexed_chunks);
+        }
+        false
+    }
+
+    fn exact_config_is_active(&self) -> bool {
+        self.reload_status.as_deref() == Some("applied")
+            && self.requested_config_matches
+            && self.applied_config_matches
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

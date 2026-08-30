@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "policy_rebuild/checkpoints.rs"]
+mod checkpoints;
+
 #[test]
 fn high_odd_dimension_external_projection_preserves_full_ordinary_batches() -> Result<()> {
     let fixture = Fixture::new(1)?;

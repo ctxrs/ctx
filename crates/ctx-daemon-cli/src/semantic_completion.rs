@@ -222,7 +222,7 @@ pub struct DaemonSemanticCompletion {
     contract: SemanticModelContract,
     budgets: SemanticCompletionBudgets,
     progress_since: Instant,
-    last_progress: Option<CompletionProgress>,
+    last_substantive_progress: Option<CompletionProgress>,
     outage_since: Option<Instant>,
 }
 
@@ -250,7 +250,7 @@ impl DaemonSemanticCompletion {
             contract: selected.contract,
             budgets,
             progress_since: now,
-            last_progress: None,
+            last_substantive_progress: None,
             outage_since: None,
         })
     }
@@ -393,9 +393,9 @@ impl DaemonSemanticCompletion {
         progress: CompletionProgress,
     ) -> std::result::Result<SemanticCompletionCheckpoint, SemanticCompletionError> {
         self.outage_since = None;
-        if self.last_progress.as_ref() != Some(&progress) {
+        if progress.substantively_advances_from(self.last_substantive_progress.as_ref()) {
             self.progress_since = now;
-            self.last_progress = Some(progress);
+            self.last_substantive_progress = Some(progress);
         } else if now.saturating_duration_since(self.progress_since) >= self.budgets.no_progress {
             return Err(SemanticCompletionError::NoProgress {
                 generation_id: self.target.core_generation_id().to_owned(),
@@ -578,6 +578,21 @@ fn reconciliation_failure_is_retryable(source: &anyhow::Error) -> bool {
 enum CompletionProgress {
     Pending(DaemonSemanticProgress),
     ReadyAwaitingIndex,
+}
+
+impl CompletionProgress {
+    fn substantively_advances_from(&self, previous: Option<&Self>) -> bool {
+        match self {
+            Self::Pending(_) if matches!(previous, Some(Self::ReadyAwaitingIndex)) => false,
+            Self::Pending(progress) => {
+                progress.substantively_advances_from(previous.map(|previous| match previous {
+                    Self::Pending(progress) => progress,
+                    Self::ReadyAwaitingIndex => unreachable!("handled above"),
+                }))
+            }
+            Self::ReadyAwaitingIndex => !matches!(previous, Some(Self::ReadyAwaitingIndex)),
+        }
+    }
 }
 
 fn semantic_preflight_ready(

@@ -99,6 +99,17 @@ fn test_pin() -> Result<(tempfile::TempDir, PinnedSourceBackedGeneration)> {
     Ok((temp, PinnedSourceBackedGeneration::from_index(index)))
 }
 
+fn foreground_empty_generation_fixture() -> Result<(tempfile::TempDir, PinnedSourceBackedGeneration)>
+{
+    let temp = tempfile::tempdir()?;
+    let index = semantic_index_revision_at(
+        &ctx_history_refresh::source_backed_index_root(temp.path()),
+        1,
+        false,
+    )?;
+    Ok((temp, PinnedSourceBackedGeneration::from_index(index)))
+}
+
 fn daemon_completion(
     pin: &PinnedSourceBackedGeneration,
     budgets: SemanticCompletionBudgets,
@@ -114,19 +125,44 @@ fn daemon_completion(
     .map_err(Into::into)
 }
 
-fn pending_progress(run_at_ms: i64) -> DaemonSemanticCompletionObservation {
+fn pending_progress(
+    reload_attempt_at_ms: i64,
+    reload_applied_at_ms: i64,
+    run_at_ms: i64,
+    indexed_chunks: u64,
+) -> DaemonSemanticCompletionObservation {
     DaemonSemanticCompletionObservation::Pending(DaemonSemanticProgress {
         reload_status: Some("applied".to_owned()),
-        reload_last_attempt_at_ms: Some(1),
-        reload_last_applied_at_ms: Some(1),
+        reload_last_attempt_at_ms: Some(reload_attempt_at_ms),
+        reload_last_applied_at_ms: Some(reload_applied_at_ms),
         requested_config_matches: true,
         applied_config_matches: true,
         job_target_matches: true,
         job_status: Some("budget_exhausted".to_owned()),
         job_last_run_at_ms: Some(run_at_ms),
-        job_indexed_chunks: Some(8),
+        job_indexed_chunks: Some(indexed_chunks),
         job_source_generation_ready: Some(false),
         job_source_work_remaining: Some(true),
+    })
+}
+
+fn resource_deferred_progress(
+    reload_attempt_at_ms: i64,
+    reload_applied_at_ms: i64,
+    run_at_ms: i64,
+) -> DaemonSemanticCompletionObservation {
+    DaemonSemanticCompletionObservation::Pending(DaemonSemanticProgress {
+        reload_status: Some("applied".to_owned()),
+        reload_last_attempt_at_ms: Some(reload_attempt_at_ms),
+        reload_last_applied_at_ms: Some(reload_applied_at_ms),
+        requested_config_matches: true,
+        applied_config_matches: true,
+        job_target_matches: true,
+        job_status: Some("resource_deferred".to_owned()),
+        job_last_run_at_ms: Some(run_at_ms),
+        job_indexed_chunks: None,
+        job_source_generation_ready: None,
+        job_source_work_remaining: None,
     })
 }
 
@@ -209,14 +245,23 @@ fn no_progress_budget_is_deterministic_and_progress_resets_it() -> Result<()> {
         Duration::from_secs(10),
     );
     let mut completion = daemon_completion(&pin, budgets, started)?;
-    for (elapsed, run_at_ms) in [(0, 1), (1, 2), (2, 2)] {
+    for (elapsed, reload_attempt_at_ms, reload_applied_at_ms, run_at_ms, indexed_chunks) in
+        [(0, 1, 1, 1, 8), (1, 2, 2, 2, 16), (2, 3, 3, 3, 16)]
+    {
         assert_eq!(
             completion.checkpoint_with(
                 started + Duration::from_secs(elapsed),
                 &pin,
                 || Ok(generation.clone()),
                 |_| Ok(false),
-                || Ok(pending_progress(run_at_ms)),
+                || {
+                    Ok(pending_progress(
+                        reload_attempt_at_ms,
+                        reload_applied_at_ms,
+                        run_at_ms,
+                        indexed_chunks,
+                    ))
+                },
             )?,
             SemanticCompletionCheckpoint::Pending {
                 poll_after: Duration::from_secs(1),
@@ -230,7 +275,7 @@ fn no_progress_budget_is_deterministic_and_progress_resets_it() -> Result<()> {
             &pin,
             || Ok(generation.clone()),
             |_| Ok(false),
-            || Ok(pending_progress(2)),
+            || Ok(pending_progress(4, 4, 4, 16)),
         ),
         "unchanged progress must exhaust the no-progress budget",
     );
@@ -242,6 +287,70 @@ fn no_progress_budget_is_deterministic_and_progress_resets_it() -> Result<()> {
         }
     ));
     Ok(())
+}
+
+#[test]
+fn resource_deferred_receipt_churn_exhausts_the_no_progress_budget() -> Result<()> {
+    let (_temp, pin) = test_pin()?;
+    let generation = pin.generation_id().to_owned();
+    let started = Instant::now();
+    let budgets = SemanticCompletionBudgets::new(
+        Duration::from_secs(1),
+        Duration::from_secs(2),
+        Duration::from_secs(10),
+    );
+    let mut completion = daemon_completion(&pin, budgets, started)?;
+    for (elapsed, reload_attempt_at_ms, reload_applied_at_ms, run_at_ms) in
+        [(0, 1, 1, 1), (1, 2, 2, 2)]
+    {
+        assert!(matches!(
+            completion.checkpoint_with(
+                started + Duration::from_secs(elapsed),
+                &pin,
+                || Ok(generation.clone()),
+                |_| Ok(false),
+                || {
+                    Ok(resource_deferred_progress(
+                        reload_attempt_at_ms,
+                        reload_applied_at_ms,
+                        run_at_ms,
+                    ))
+                },
+            )?,
+            SemanticCompletionCheckpoint::Pending { .. }
+        ));
+    }
+
+    let error = expect_completion_error(
+        completion.checkpoint_with(
+            started + Duration::from_secs(2),
+            &pin,
+            || Ok(generation.clone()),
+            |_| Ok(false),
+            || Ok(resource_deferred_progress(3, 3, 3)),
+        ),
+        "resource-deferred receipt churn must not reset the no-progress budget",
+    );
+    assert!(matches!(
+        error,
+        SemanticCompletionError::NoProgress {
+            retryable: true,
+            ..
+        }
+    ));
+    Ok(())
+}
+
+#[test]
+fn readiness_regression_does_not_reset_semantic_progress() {
+    let pending = match pending_progress(9, 9, 9, 8) {
+        DaemonSemanticCompletionObservation::Pending(progress) => {
+            CompletionProgress::Pending(progress)
+        }
+        other => panic!("expected pending observation, got {other:?}"),
+    };
+    assert!(CompletionProgress::ReadyAwaitingIndex.substantively_advances_from(Some(&pending)));
+    assert!(!pending.substantively_advances_from(Some(&CompletionProgress::ReadyAwaitingIndex)));
 }
 
 #[test]
@@ -316,7 +425,7 @@ fn observation_recovery_without_semantic_progress_does_not_reset_budget() -> Res
             &pin,
             || Ok(generation.clone()),
             |_| Ok(false),
-            || Ok(pending_progress(1)),
+            || Ok(pending_progress(1, 1, 1, 8)),
         )?,
         SemanticCompletionCheckpoint::Pending { .. }
     ));
@@ -341,7 +450,7 @@ fn observation_recovery_without_semantic_progress_does_not_reset_budget() -> Res
             &pin,
             || Ok(generation.clone()),
             |_| Ok(false),
-            || Ok(pending_progress(1)),
+            || Ok(pending_progress(2, 2, 2, 8)),
         ),
         "observation recovery must not masquerade as semantic progress",
     );
@@ -373,35 +482,139 @@ fn foreground_checkpoint_failure_precedes_active_generation_and_reconciliation()
 }
 
 #[test]
-fn foreground_in_reconciliation_cancellation_preserves_checkpoint_identity() -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let index_root = ctx_history_refresh::source_backed_index_root(temp.path());
-    let index = semantic_index_revision_at(&index_root, 1, false)?;
-    let generation_id = index.generation_id().to_owned();
+fn foreground_inner_source_projection_cancellation_preserves_checkpoint_identity() -> Result<()> {
+    let (completed_temp, completed_pin) = foreground_empty_generation_fixture()?;
+    let completed_generation_id = completed_pin.generation_id().to_owned();
+    let completed_checkpoint_calls = Cell::new(0_u32);
+    let completed = complete_semantic_generation_foreground_with_checkpoint(
+        completed_temp.path(),
+        completed_pin,
+        SemanticEmbeddingExecutorConfig::builtin(),
+        &mut || {
+            completed_checkpoint_calls.set(completed_checkpoint_calls.get() + 1);
+            Ok(())
+        },
+    )?;
+    assert_eq!(completed.generation_id(), completed_generation_id);
+
+    // The successful final callback is the outer post-reconciliation
+    // authority check. Its predecessor is therefore the final checkpoint
+    // inside source projection; derive it from the observed path so the test
+    // remains valid if empty-generation checkpoint placement evolves.
+    let inner_projection_checkpoint = completed_checkpoint_calls
+        .get()
+        .checked_sub(1)
+        .expect("foreground reconciliation must run a source-projection checkpoint");
+    assert!(
+        inner_projection_checkpoint > 2,
+        "the inner source-projection checkpoint must follow the pre-reconcile barriers"
+    );
+
+    let (temp, pin) = foreground_empty_generation_fixture()?;
+    let generation_id = pin.generation_id().to_owned();
     let checkpoint_calls = Cell::new(0_u32);
+    let inner_checkpoint_failed = Cell::new(false);
 
     let error = expect_completion_error(
         complete_semantic_generation_foreground_with_checkpoint(
             temp.path(),
-            PinnedSourceBackedGeneration::from_index(index),
+            pin,
             SemanticEmbeddingExecutorConfig::builtin(),
             &mut || {
                 let call = checkpoint_calls.get() + 1;
                 checkpoint_calls.set(call);
-                if call == 3 {
-                    return Err(anyhow!("cancelled during reconciliation"));
+                if call >= inner_projection_checkpoint {
+                    if call == inner_projection_checkpoint {
+                        inner_checkpoint_failed.set(true);
+                    }
+                    return Err(anyhow!("cancelled at inner source-projection checkpoint"));
                 }
                 Ok(())
             },
         ),
-        "in-reconciliation cancellation must preserve checkpoint identity",
+        "inner source-projection cancellation must preserve checkpoint identity",
     );
 
-    assert_eq!(checkpoint_calls.get(), 3);
+    assert!(inner_checkpoint_failed.get());
+    assert_eq!(
+        checkpoint_calls.get(),
+        inner_projection_checkpoint.saturating_add(1),
+        "the reconciliation error boundary must re-check sticky cancellation once"
+    );
     assert_eq!(error.generation_id(), generation_id);
     assert_eq!(error.code(), "semantic_completion_interrupted");
     assert!(!error.retryable());
-    assert!(format!("{error:#}").contains("cancelled during reconciliation"));
+    assert!(format!("{error:#}").contains("cancelled at inner source-projection checkpoint"));
+    Ok(())
+}
+
+#[test]
+fn foreground_supersession_at_source_publication_checkpoint_has_no_exact_commit() -> Result<()> {
+    let (completed_temp, completed_pin) = foreground_empty_generation_fixture()?;
+    let completed_checkpoint_calls = Cell::new(0_u32);
+    complete_semantic_generation_foreground_with_checkpoint(
+        completed_temp.path(),
+        completed_pin,
+        SemanticEmbeddingExecutorConfig::builtin(),
+        &mut || {
+            completed_checkpoint_calls.set(completed_checkpoint_calls.get() + 1);
+            Ok(())
+        },
+    )?;
+    // The final callback is the outer post-reconcile authority check and its
+    // predecessor is the exact acknowledgement commit. The callback before
+    // both is the source-view publication boundary.
+    let source_publication_checkpoint = completed_checkpoint_calls
+        .get()
+        .checked_sub(2)
+        .expect("foreground reconciliation must expose a source publication checkpoint");
+
+    let (temp, pin) = foreground_empty_generation_fixture()?;
+    let index_root = ctx_history_refresh::source_backed_index_root(temp.path());
+    let generation_id = pin.generation_id().to_owned();
+    let replacement_generation = RefCell::new(None);
+    let checkpoint_calls = Cell::new(0_u32);
+    let error = expect_completion_error(
+        complete_semantic_generation_foreground_with_checkpoint(
+            temp.path(),
+            pin,
+            SemanticEmbeddingExecutorConfig::builtin(),
+            &mut || {
+                let call = checkpoint_calls.get() + 1;
+                checkpoint_calls.set(call);
+                if call == source_publication_checkpoint {
+                    let replacement = semantic_index_revision_at(&index_root, 2, false)?;
+                    *replacement_generation.borrow_mut() =
+                        Some(replacement.generation_id().to_owned());
+                }
+                Ok(())
+            },
+        ),
+        "supersession at source publication must remain typed",
+    );
+
+    assert!(matches!(
+        error,
+        SemanticCompletionError::CoreSuperseded {
+            generation_id: error_generation,
+            active_generation_id,
+            retryable: true,
+        } if error_generation == generation_id
+            && Some(active_generation_id.clone()) == replacement_generation.into_inner()
+    ));
+    let retained = VerifiedIndex::open_pinned_generation(&index_root, &generation_id)?;
+    let selected = SemanticEmbeddingExecutorConfig::builtin();
+    let contract = crate::query_adapter::semantic_index_contract_for_selected(selected.contract())?;
+    let not_ready = match SemanticQueryPin::preflight(&retained, temp.path(), &contract) {
+        Ok(_) => panic!("a superseded source view unexpectedly became query ready"),
+        Err(error) => error,
+    };
+    assert!(
+        not_ready
+            .downcast_ref::<SemanticNotReady>()
+            .is_some_and(SemanticNotReady::retryable),
+        "a superseded source view must not acquire an exact semantic acknowledgement"
+    );
     Ok(())
 }
 

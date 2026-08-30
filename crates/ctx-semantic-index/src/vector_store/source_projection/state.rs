@@ -313,6 +313,7 @@ impl SemanticVectorStore {
         frontier: &SourceProjectionFrontier,
         generation: &SourceBackedSemanticGeneration,
         states: &SourceProjectionStates,
+        checkpoint: &mut dyn FnMut() -> Result<()>,
     ) -> Result<SourceBackedSemanticOutcome> {
         let contract_fingerprint = &generation.contract_fingerprint;
         if states.len() != generation.sources.len()
@@ -388,6 +389,7 @@ impl SemanticVectorStore {
             "DELETE FROM semantic_maintenance_state WHERE key = ?1",
             [SOURCE_FRONTIER_STATE],
         )?;
+        checkpoint()?;
         transaction.commit()?;
         #[cfg(test)]
         if self.flat.take_source_acknowledgement_failure() {
