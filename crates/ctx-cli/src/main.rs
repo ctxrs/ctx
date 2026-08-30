@@ -39,6 +39,7 @@ mod deprecated_controls;
 mod dispatch;
 mod docs;
 mod execution_capabilities;
+mod foreground_interrupt;
 mod history_config;
 mod history_source_plugins;
 mod identity;

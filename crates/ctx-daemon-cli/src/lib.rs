@@ -295,7 +295,9 @@ pub use source_backed_refresh_coordinator::{
     SourceBackedRefreshPendingPublication, SourceBackedRefreshTerminalError,
 };
 mod finite_worker_owner;
-pub use finite_worker_owner::{finite_worker_interrupted, FiniteWorkerInterrupted};
+pub use finite_worker_owner::{
+    finite_worker_interrupted, record_foreground_interrupt, FiniteWorkerInterrupted,
+};
 mod daemon_autostart;
 #[allow(unused_imports)]
 pub use daemon_autostart::{

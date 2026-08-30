@@ -165,6 +165,10 @@ impl DaemonAvailabilityPort for CliDaemonAvailabilityPort {
         trigger: DaemonTrigger,
         demand: DaemonAvailabilityDemand,
     ) -> Result<DaemonAvailability> {
+        // This checkpoint is deliberately before any finite-worker lifecycle
+        // mutation. A Ctrl-C observed by the final-binary broker can therefore
+        // never turn into a late manual-worker spawn.
+        super::finite_worker_owner::checkpoint()?;
         let config = AppConfig::load(data_root)
             .context("load daemon configuration before availability check")?;
         if config.daemon.enabled {
@@ -178,15 +182,13 @@ impl DaemonAvailabilityPort for CliDaemonAvailabilityPort {
         if demand == DaemonAvailabilityDemand::Background || trigger == DaemonTrigger::Setup {
             return Ok(DaemonAvailability::Disabled);
         }
-        if super::finite_worker_owner::foreground_interrupt_requested() {
-            anyhow::bail!(super::finite_worker_owner::FiniteWorkerInterrupted);
-        }
+        super::finite_worker_owner::checkpoint()?;
         let lease = super::daemon_autostart::start_finite_core_worker_and_wait(
             data_root,
             &config,
             cli_trigger(trigger),
         )?;
-        super::finite_worker_owner::retain(lease);
+        super::finite_worker_owner::retain(lease)?;
         Ok(DaemonAvailability::Available)
     }
 }
