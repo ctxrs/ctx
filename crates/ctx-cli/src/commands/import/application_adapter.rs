@@ -24,15 +24,11 @@ use super::{
 
 /// Final-host implementation of the static import application port. This is
 /// deliberately limited to concrete filesystem/catalog/daemon side effects.
-pub(super) struct CliImportHost {
-    semantic_completion: crate::semantic::ImportSemanticCompletion,
-}
+pub(super) struct CliImportHost;
 
 impl CliImportHost {
-    pub(super) fn new(semantic_completion: crate::semantic::ImportSemanticCompletion) -> Self {
-        Self {
-            semantic_completion,
-        }
+    pub(super) const fn new() -> Self {
+        Self
     }
 }
 
@@ -91,20 +87,14 @@ impl ctx_history_cli::ImportApplicationPort for CliImportHost {
         let exact_route_lineages = selection
             .explicit_source_authority()
             .map(|authority| authority.route_lineages());
-        let refresh = wait_for_import_core_refresh(
-            data_root,
-            no_daemon,
-            selection,
-            &self.semantic_completion,
-            progress,
-        )
-        .map_err(|error| {
-            if is_terminal_missing_import_path(&error) {
-                error.context(ImportPathMissingDuringRefresh)
-            } else {
-                error
-            }
-        })?;
+        let refresh = wait_for_import_core_refresh(data_root, no_daemon, selection, progress)
+            .map_err(|error| {
+                if is_terminal_missing_import_path(&error) {
+                    error.context(ImportPathMissingDuringRefresh)
+                } else {
+                    error
+                }
+            })?;
         let pinned_generation = refresh.pin.generation_id().to_owned();
         let current_index = refresh.pin.verified_index();
         let current_sessions = current_index.session_count()?;
