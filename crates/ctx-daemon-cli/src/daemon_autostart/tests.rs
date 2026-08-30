@@ -162,24 +162,42 @@ fn failed_restart_intent_write_preserves_partial_acknowledgement() -> Result<()>
 
 #[test]
 fn autostart_child_inherits_effective_analytics_policy() {
-    let command = daemon_autostart_command(
-        Path::new("ctx"),
-        Path::new("/tmp/ctx-daemon-telemetry-test"),
-        DaemonTriggerCommandArg::Search,
-        Some(5),
-        None,
-    )
-    .expect("normalized daemon launch");
-    let env = command
+    const ANALYTICS_POLICY_ENV: &str = "CTX_ANALYTICS_ENABLED";
+    let environment = crate::test_environment::EnvironmentGuard::capture(&[ANALYTICS_POLICY_ENV]);
+    let launch_environment = || {
+        daemon_autostart_command(
+            Path::new("ctx"),
+            Path::new("/tmp/ctx-daemon-telemetry-test"),
+            DaemonTriggerCommandArg::Search,
+            Some(5),
+            None,
+        )
+        .expect("normalized daemon launch")
         .get_envs()
         .map(|(key, value)| (key.to_owned(), value.map(ToOwned::to_owned)))
-        .collect::<Vec<_>>();
-    assert!(env.iter().any(|(key, value)| {
+        .collect::<Vec<_>>()
+    };
+
+    environment.set(ANALYTICS_POLICY_ENV, None);
+    let absent_policy_env = launch_environment();
+    assert!(absent_policy_env.iter().any(|(key, value)| {
         key == DAEMON_BACKGROUND_CHILD_ENV && value.as_deref() == Some(std::ffi::OsStr::new("1"))
     }));
-    assert!(env
+    assert!(absent_policy_env
         .iter()
-        .all(|(key, _)| key != std::ffi::OsStr::new("CTX_ANALYTICS_ENABLED")));
+        .all(|(key, _)| key != std::ffi::OsStr::new(ANALYTICS_POLICY_ENV)));
+
+    environment.set(ANALYTICS_POLICY_ENV, Some(std::ffi::OsStr::new("false")));
+    let explicit_policy_env = launch_environment();
+    let analytics_policy = explicit_policy_env
+        .iter()
+        .filter(|(key, _)| key == std::ffi::OsStr::new(ANALYTICS_POLICY_ENV))
+        .collect::<Vec<_>>();
+    assert_eq!(analytics_policy.len(), 1);
+    assert_eq!(
+        analytics_policy[0].1.as_deref(),
+        Some(std::ffi::OsStr::new("false"))
+    );
 }
 
 #[test]
