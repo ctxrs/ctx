@@ -52,3 +52,14 @@ pub enum SourceIoError {
 }
 
 pub type Result<T> = std::result::Result<T, SourceIoError>;
+
+pub const PROVIDER_SOURCE_IO_OPERATION_PREFIX: &str = "provider source ";
+
+pub fn is_provider_source_io_operation(operation: &str) -> bool {
+    operation.starts_with(PROVIDER_SOURCE_IO_OPERATION_PREFIX)
+}
+
+pub fn is_provider_source_unavailable_io(operation: &str, source: &std::io::Error) -> bool {
+    is_provider_source_io_operation(operation)
+        && source.kind() == std::io::ErrorKind::PermissionDenied
+}
