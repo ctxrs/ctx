@@ -753,7 +753,6 @@ mod compiled {
         }
     }
 
-    /// Read-only validation for an already-published compiled model.
     #[cfg(unix)]
     pub(crate) fn validate_compiled_model_cache(root: &Path, path: &Path) -> Result<()> {
         let parent = path
