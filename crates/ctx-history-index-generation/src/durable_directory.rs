@@ -30,7 +30,8 @@ use ctx_history_platform::platform_security::{
 
 #[cfg(any(test, feature = "test-support"))]
 use crate::publication_probe::{
-    publication_io_checkpoint, PublicationIoEvent, PublicationIoProbeGuard,
+    publication_io_checkpoint, publication_io_observer_active, PublicationIoEvent,
+    PublicationIoProbeGuard,
 };
 
 #[cfg(windows)]
@@ -40,6 +41,9 @@ use windows_sys::Win32::Storage::FileSystem::{
 
 const TEMPORARY_FILE_PREFIX: &str = ".ctx-tantivy-atomic-";
 const TEMPORARY_FILE_ATTEMPTS: usize = 16;
+
+#[cfg(any(test, feature = "test-support"))]
+mod publication_failure_probe;
 
 /// An [`MmapDirectory`] that does not return from `atomic_write` until the
 /// replacement is durable.
@@ -566,7 +570,17 @@ where
     atomic_write_checkpoint(AtomicWriteStage::BeforeReplace, target_path)?;
 
     if let Err(error) = replace(&temporary_path, target_path) {
-        let _ = fs::remove_file(&temporary_path);
+        #[cfg(any(test, feature = "test-support"))]
+        let failure_probe = publication_io_observer_active()
+            .then(|| publication_failure_probe::capture(&temporary_path, target_path, &error));
+        let cleanup_result = fs::remove_file(&temporary_path);
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(mut probe) = failure_probe {
+            probe.source_cleanup = publication_failure_probe::io_result(&cleanup_result);
+            // A diagnostic observer cannot replace the original move failure.
+            let _ = publication_io_checkpoint(PublicationIoEvent::AtomicReplacementFailure(probe));
+        }
+        let _ = cleanup_result;
         return Err(error.into());
     }
 
@@ -622,6 +636,7 @@ impl AtomicWriteTestHookGuard {
                 PublicationIoEvent::CandidateGenerationSync => Ok(()),
                 #[cfg(windows)]
                 PublicationIoEvent::TerminalSealOpen => Ok(()),
+                PublicationIoEvent::AtomicReplacementFailure(_) => Ok(()),
             }),
         }
     }
@@ -754,6 +769,9 @@ fn replace_file(source: &Path, target: &Path) -> io::Result<()> {
 
 #[cfg(test)]
 mod publication_probe_tests;
+
+#[cfg(test)]
+mod publication_failure_probe_tests;
 
 #[cfg(test)]
 mod tests {
@@ -901,29 +919,6 @@ mod tests {
         durable_atomic_replace_file(&replacement, &target).unwrap();
         assert_eq!(fs::read(&target).unwrap(), b"replacement");
         assert!(!replacement.exists());
-    }
-
-    #[test]
-    fn replacement_failure_preserves_previous_file_and_removes_temporary_file() {
-        let temporary_directory = tempdir().unwrap();
-        let target_path = temporary_directory.path().join("meta.json");
-        fs::write(&target_path, b"previous").unwrap();
-
-        let error = atomic_replace_with(
-            &target_path,
-            b"replacement",
-            |temporary_path, target_path| {
-                assert_eq!(fs::read(temporary_path).unwrap(), b"replacement");
-                assert_eq!(fs::read(target_path).unwrap(), b"previous");
-                Err(io::Error::other("injected replacement failure"))
-            },
-            || panic!("parent sync must not run after replacement failure"),
-        )
-        .unwrap_err();
-
-        assert_eq!(error.to_string(), "injected replacement failure");
-        assert_eq!(fs::read(&target_path).unwrap(), b"previous");
-        assert_no_temporary_files(temporary_directory.path());
     }
 
     #[test]

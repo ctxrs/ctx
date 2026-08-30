@@ -20,6 +20,16 @@ impl From<crate::AtomicWriteStage> for AtomicPublicationStage {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AtomicReplacementFailureProbe {
+    pub move_error: Option<i32>,
+    pub source_readonly: Option<bool>,
+    pub source_delete_open: Option<Result<(), i32>>,
+    pub parent_delete_child_open: Option<Result<(), i32>>,
+    pub target_delete_open: Option<Result<(), i32>>,
+    pub source_cleanup: Option<Result<(), i32>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PublicationIoProbe {
     CandidateMetadata(AtomicPublicationStage),
     CertificationSidecar(AtomicPublicationStage),
@@ -27,6 +37,7 @@ pub enum PublicationIoProbe {
     OtherAtomicPublication(AtomicPublicationStage),
     CandidateGenerationSync,
     TerminalSealOpen,
+    AtomicReplacementFailure(AtomicReplacementFailureProbe),
 }
 
 impl PublicationIoProbe {
@@ -49,6 +60,7 @@ pub(crate) enum PublicationIoEvent<'a> {
     CandidateGenerationSync,
     #[cfg(windows)]
     TerminalSealOpen,
+    AtomicReplacementFailure(AtomicReplacementFailureProbe),
 }
 
 impl PublicationIoEvent<'_> {
@@ -58,6 +70,9 @@ impl PublicationIoEvent<'_> {
             Self::CandidateGenerationSync => PublicationIoProbe::CandidateGenerationSync,
             #[cfg(windows)]
             Self::TerminalSealOpen => PublicationIoProbe::TerminalSealOpen,
+            Self::AtomicReplacementFailure(probe) => {
+                PublicationIoProbe::AtomicReplacementFailure(probe)
+            }
         }
     }
 }
@@ -94,4 +109,8 @@ pub(crate) fn publication_io_checkpoint(event: PublicationIoEvent<'_>) -> io::Re
         Some(hook) => hook(event),
         None => Ok(()),
     })
+}
+
+pub(crate) fn publication_io_observer_active() -> bool {
+    PUBLICATION_IO_HOOK.with(|active| active.borrow().is_some())
 }

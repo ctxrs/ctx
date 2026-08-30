@@ -74,7 +74,8 @@ pub use ctx_history_index_format::{
 #[doc(hidden)]
 pub mod test_support {
     pub use ctx_history_index_generation::{
-        AtomicPublicationStage, PublicationIoProbe, PublicationIoProbeGuard,
+        AtomicPublicationStage, AtomicReplacementFailureProbe, PublicationIoProbe,
+        PublicationIoProbeGuard,
     };
 
     use super::IndexError;
