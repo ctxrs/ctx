@@ -87,6 +87,9 @@ pub(crate) fn daemon_wait_duration(
         if let Some(retry_after_ms) = runtime.semantic_retry.retry_after_ms() {
             wait_for = wait_for.min(StdDuration::from_millis(retry_after_ms));
         }
+        if let Some(retry_after_ms) = runtime.semantic_activation_retry.retry_after_ms() {
+            wait_for = wait_for.min(StdDuration::from_millis(retry_after_ms));
+        }
     }
     if let Some(route_due_ms) = source_refresh
         .and_then(|refresh| refresh.next_dirty_route_due_in_ms(source_route_ledger_now_ms()))

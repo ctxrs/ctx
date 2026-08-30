@@ -207,6 +207,7 @@ mod tests {
         });
         let mut backoff = DaemonRetryBackoff::default();
         backoff.restore(Some(&persisted));
+        let restored_at_ms = utc_now().timestamp_millis();
 
         let maximum_ms = DaemonRetryBackoff::MAX_DELAY.as_millis() as u64;
         assert!(
@@ -217,7 +218,7 @@ mod tests {
         );
         assert!(
             backoff.retry_not_before_at_ms.is_some_and(|deadline| {
-                deadline > now_ms && deadline <= now_ms + maximum_ms as i64
+                deadline > now_ms && deadline <= restored_at_ms + maximum_ms as i64
             }),
             "{backoff:#?}"
         );

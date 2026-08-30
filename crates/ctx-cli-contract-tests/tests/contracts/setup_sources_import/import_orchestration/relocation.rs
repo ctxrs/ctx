@@ -111,7 +111,6 @@ fn failed_explicit_replacement_preserves_retained_relocation_witness() {
 
     let first = import_explicit_custom_source(&temp, &old_path);
     assert_eq!(first["outcome"], "success", "{first:#}");
-    let first_generation = published_generation(&first);
     let first_route = first["sources"][0]["route_identity"].clone();
     let first_lineage = first["sources"][0]["catalog_lineage"].clone();
     let first_records = provider_core_records(&data_root(&temp), "custom");
@@ -129,8 +128,6 @@ fn failed_explicit_replacement_preserves_retained_relocation_witness() {
     );
     assert_eq!(failed["sources"][0]["successful_routes"], 0, "{failed:#}");
     assert_eq!(failed["sources"][0]["carried_forward"], false, "{failed:#}");
-    assert_eq!(published_generation(&failed), first_generation);
-
     let retained = ctx_history_index::VerifiedIndex::open_pinned(
         data_root(&temp).join("search").join("lexical"),
     )

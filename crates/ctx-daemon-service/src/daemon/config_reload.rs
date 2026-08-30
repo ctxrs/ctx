@@ -114,6 +114,10 @@ impl DaemonConfigReloadState {
         self.last_error = Some(format!("{error:#}"));
     }
 
+    pub(super) fn blocks_daemon_startup(&self, source_refresh_active: bool) -> bool {
+        self.status == "activation_failed" && !source_refresh_active
+    }
+
     pub(super) fn to_json(&self) -> Value {
         json!({
             "status": self.status,
@@ -199,11 +203,15 @@ where
         lifecycle,
         config_port,
     } = context;
+    let previous_activation_error = (reload.status == "activation_failed")
+        .then(|| reload.last_error.clone())
+        .flatten();
     let mut config = match config_port.load(data_root) {
         Ok(config) => config,
         Err(error) => {
             drop(query_service.take());
             runtime.semantic_executor = None;
+            runtime.semantic_activation_retry.reset();
             runtime.semantic_retry = Default::default();
             runtime.semantic_blocked_job = None;
             runtime.sidecar_drain = Default::default();
@@ -221,6 +229,7 @@ where
     if !config.daemon.enabled && !args.force {
         runtime.config = config;
         runtime.semantic_executor = None;
+        runtime.semantic_activation_retry.reset();
         runtime.sidecar_drain = Default::default();
         drop(query_service.take());
         drop(refresh_service.take());
@@ -240,6 +249,7 @@ where
     if executor_changed || semantic_activation_changed || semantic_runtime_request_changed {
         drop(query_service.take());
         runtime.semantic_executor = None;
+        runtime.semantic_activation_retry.reset();
         runtime.semantic_retry = Default::default();
         runtime.semantic_blocked_job = None;
         runtime.sidecar_drain = Default::default();
@@ -271,6 +281,20 @@ where
             }
         }
     }
+    let core_refresh_pending = runtime
+        .source_refresh_coordinator
+        .as_ref()
+        .is_some_and(|refresh| refresh.has_pending_request());
+    if semantic_runtime_requested
+        && runtime.semantic_executor.is_none()
+        && runtime.semantic_activation_retry.consecutive_failures > 0
+        && (!runtime.semantic_activation_retry.ready() || core_refresh_pending)
+    {
+        reload.activation_failed(anyhow!(previous_activation_error.unwrap_or_else(|| {
+            "semantic executor activation is waiting for its retry deadline".to_owned()
+        })));
+        return DaemonConfigReloadOutcome::Continue;
+    }
     let selected_executor = if semantic_runtime_requested {
         runtime.semantic_executor.clone().map_or_else(
             || {
@@ -291,7 +315,7 @@ where
     let selected_executor = match selected_executor {
         Ok(executor) => executor,
         Err(error) => {
-            reload.activation_failed(error);
+            semantic_activation_failed(runtime, reload, error);
             return DaemonConfigReloadOutcome::Continue;
         }
     };
@@ -305,9 +329,11 @@ where
             runtime.semantic_blocked_job = None;
             runtime.sidecar_drain = Default::default();
             let _ = runtime.semantic_runtime.release_if_idle();
-            reload.activation_failed(anyhow!(
-                "semantic executor contract does not match the selected configuration"
-            ));
+            semantic_activation_failed(
+                runtime,
+                reload,
+                anyhow!("semantic executor contract does not match the selected configuration"),
+            );
             return DaemonConfigReloadOutcome::Continue;
         }
         if let Err(error) = executor.verify_contract() {
@@ -317,7 +343,7 @@ where
             runtime.semantic_blocked_job = None;
             runtime.sidecar_drain = Default::default();
             let _ = runtime.semantic_runtime.release_if_idle();
-            reload.activation_failed(error);
+            semantic_activation_failed(runtime, reload, error);
             return DaemonConfigReloadOutcome::Continue;
         }
     }
@@ -349,7 +375,7 @@ where
                 runtime.semantic_blocked_job = None;
                 runtime.sidecar_drain = Default::default();
                 let _ = runtime.semantic_runtime.release_if_idle();
-                reload.activation_failed(error);
+                semantic_activation_failed(runtime, reload, error);
                 return DaemonConfigReloadOutcome::Continue;
             }
         }
@@ -358,9 +384,19 @@ where
         let _ = runtime.semantic_runtime.release_if_idle();
     }
     runtime.semantic_executor = selected_executor;
+    runtime.semantic_activation_retry.reset();
 
     reload.applied();
     DaemonConfigReloadOutcome::Continue
+}
+
+fn semantic_activation_failed(
+    runtime: &mut DaemonRuntime,
+    reload: &mut DaemonConfigReloadState,
+    error: anyhow::Error,
+) {
+    runtime.semantic_activation_retry.record_failure();
+    reload.activation_failed(error);
 }
 
 pub(super) fn daemon_semantic_runtime_requested(

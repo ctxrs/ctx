@@ -168,7 +168,7 @@ impl DaemonAvailabilityPort for CliDaemonAvailabilityPort {
         let config = AppConfig::load(data_root)
             .context("load daemon configuration before availability check")?;
         if config.daemon.enabled {
-            super::daemon_autostart::autostart_daemon_and_wait(
+            super::daemon_autostart::autostart_core_daemon_and_wait(
                 data_root,
                 &config,
                 cli_trigger(trigger),

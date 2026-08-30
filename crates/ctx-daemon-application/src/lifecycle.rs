@@ -70,6 +70,12 @@ enum DaemonHandoffObservation {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DaemonReadinessRequirement {
+    Full,
+    Core,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DaemonLifecycleEndpointObservation {
     Unavailable,
     Starting,
@@ -437,6 +443,23 @@ pub fn start_daemon_and_wait(
         config,
         trigger,
         DaemonLaunchProfile::Persistent,
+        DaemonReadinessRequirement::Full,
+    )
+}
+
+pub fn start_core_daemon_and_wait(
+    host: &dyn DaemonApplicationHost,
+    data_root: &Path,
+    config: &DaemonConfigSnapshot,
+    trigger: DaemonTrigger,
+) -> std::result::Result<DaemonHandoff, DaemonStartError> {
+    start_daemon_profile_and_wait(
+        host,
+        data_root,
+        config,
+        trigger,
+        DaemonLaunchProfile::Persistent,
+        DaemonReadinessRequirement::Core,
     )
 }
 
@@ -452,6 +475,7 @@ pub fn start_finite_core_worker_and_wait(
         config,
         trigger,
         DaemonLaunchProfile::FiniteCoreWorker,
+        DaemonReadinessRequirement::Full,
     )
 }
 
@@ -461,6 +485,7 @@ fn start_daemon_profile_and_wait(
     config: &DaemonConfigSnapshot,
     trigger: DaemonTrigger,
     profile: DaemonLaunchProfile,
+    readiness: DaemonReadinessRequirement,
 ) -> std::result::Result<DaemonHandoff, DaemonStartError> {
     let mut recovery_attempted = false;
     loop {
@@ -504,6 +529,7 @@ fn start_daemon_profile_and_wait(
                         data_root,
                         expected_failure_pid,
                         config,
+                        readiness,
                         deadline
                             .get()
                             .saturating_duration_since(Instant::now())
@@ -589,6 +615,7 @@ pub fn observe_daemon_and_wait(
                 data_root,
                 None,
                 config,
+                DaemonReadinessRequirement::Full,
                 deadline
                     .get()
                     .saturating_duration_since(Instant::now())
@@ -708,6 +735,7 @@ fn daemon_handoff_observation(
     data_root: &Path,
     expected_failure_pid: Option<u32>,
     expected_config: &DaemonConfigSnapshot,
+    readiness: DaemonReadinessRequirement,
     health_timeout: Duration,
 ) -> DaemonHandoffObservation {
     let status = read_daemon_status(data_root);
@@ -718,6 +746,7 @@ fn daemon_handoff_observation(
         owner_before_probe.as_ref(),
         expected_failure_pid,
         expected_config,
+        readiness,
         now_ms,
     );
     if !matches!(observation, DaemonHandoffObservation::Running(_)) {
@@ -770,6 +799,7 @@ fn daemon_handoff_status_observation_from(
     owner: Option<&DaemonOwnerIdentity>,
     expected_failure_pid: Option<u32>,
     expected_config: &DaemonConfigSnapshot,
+    readiness: DaemonReadinessRequirement,
     now_ms: i64,
 ) -> DaemonHandoffObservation {
     let Some(status) = status else {
@@ -827,6 +857,11 @@ fn daemon_handoff_status_observation_from(
         .and_then(|reload| reload.get("status"))
         .and_then(Value::as_str)
     {
+        Some("activation_failed")
+            if readiness == DaemonReadinessRequirement::Core
+                && expected_config.semantic_enabled
+                && daemon_requested_config_matches(status, expected_config)
+                && daemon_applied_degraded_semantic_config_matches(status, expected_config) => {}
         Some("failed" | "activation_failed") => {
             if heartbeat_is_fresh() {
                 let error = status
@@ -906,16 +941,48 @@ fn daemon_applied_config_matches(status: &Value, expected: &DaemonConfigSnapshot
     else {
         return false;
     };
-    applied.get("daemon_enabled").and_then(Value::as_bool) == Some(expected.enabled)
-        && applied.get("daemon_mode").and_then(Value::as_str) == Some(expected.mode.as_str())
-        && applied.get("semantic_enabled").and_then(Value::as_bool)
-            == Some(expected.semantic_enabled)
-        && applied.get("semantic_executor").and_then(Value::as_str)
+    daemon_config_value_matches(applied, expected)
+}
+
+fn daemon_requested_config_matches(status: &Value, expected: &DaemonConfigSnapshot) -> bool {
+    let Some(requested) = status
+        .get("config_reload")
+        .and_then(|reload| reload.get("requested"))
+    else {
+        return false;
+    };
+    daemon_config_value_matches(requested, expected)
+}
+
+fn daemon_config_value_matches(value: &Value, expected: &DaemonConfigSnapshot) -> bool {
+    value.get("daemon_enabled").and_then(Value::as_bool) == Some(expected.enabled)
+        && value.get("daemon_mode").and_then(Value::as_str) == Some(expected.mode.as_str())
+        && value.get("semantic_enabled").and_then(Value::as_bool) == Some(expected.semantic_enabled)
+        && value.get("semantic_executor").and_then(Value::as_str)
             == Some(expected.semantic_executor.as_str())
-        && applied
+        && value
             .get("semantic_contract_fingerprint")
             .and_then(Value::as_str)
             == Some(expected.semantic_contract_fingerprint.as_str())
+}
+
+fn daemon_applied_degraded_semantic_config_matches(
+    status: &Value,
+    expected: &DaemonConfigSnapshot,
+) -> bool {
+    let Some(applied) = status
+        .get("config_reload")
+        .and_then(|reload| reload.get("applied"))
+    else {
+        return false;
+    };
+    applied.get("daemon_enabled").and_then(Value::as_bool) == Some(expected.enabled)
+        && applied.get("daemon_mode").and_then(Value::as_str) == Some(expected.mode.as_str())
+        && applied.get("semantic_enabled").and_then(Value::as_bool) == Some(false)
+        && applied.get("semantic_executor").is_none_or(Value::is_null)
+        && applied
+            .get("semantic_contract_fingerprint")
+            .is_none_or(Value::is_null)
 }
 
 fn wait_for_daemon_handoff_with(

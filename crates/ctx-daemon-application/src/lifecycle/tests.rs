@@ -252,6 +252,7 @@ fn blocked_or_fresh_catch_up_without_lifecycle_endpoint_is_pending() {
             Some(&owner),
             Some(owner.pid),
             &expected,
+            DaemonReadinessRequirement::Full,
             now_ms,
         );
 
@@ -281,6 +282,7 @@ fn live_ready_endpoint_with_stale_heartbeat_can_succeed() {
         Some(&owner),
         Some(owner.pid),
         &expected,
+        DaemonReadinessRequirement::Full,
         now_ms,
     );
 
@@ -296,6 +298,159 @@ fn live_ready_endpoint_with_stale_heartbeat_can_succeed() {
             heartbeat_at_ms: stale_heartbeat,
         })
     );
+}
+
+#[test]
+fn core_readiness_accepts_semantic_activation_failure_but_full_readiness_does_not() {
+    let owner = test_daemon_owner("semantic-degraded-owner", 43);
+    let full = test_config();
+    let now_ms = 100_000;
+    let status = json!({
+        "status": "running",
+        "pid": owner.pid,
+        "started_at_ms": owner.started_at_ms,
+        "heartbeat_at_ms": now_ms,
+        "config_reload": {
+            "status": "activation_failed",
+            "requested": {
+                "daemon_enabled": full.enabled,
+                "daemon_mode": full.mode.as_str(),
+                "semantic_enabled": full.semantic_enabled,
+                "semantic_executor": full.semantic_executor,
+                "semantic_contract_fingerprint": full.semantic_contract_fingerprint,
+            },
+            "applied": {
+                "daemon_enabled": full.enabled,
+                "daemon_mode": full.mode.as_str(),
+                "semantic_enabled": false,
+                "semantic_executor": Value::Null,
+                "semantic_contract_fingerprint": Value::Null,
+            },
+            "last_error": "semantic endpoint unavailable",
+        },
+    });
+
+    assert!(matches!(
+        daemon_handoff_status_observation_from(
+            Some(&status),
+            Some(&owner),
+            Some(owner.pid),
+            &full,
+            DaemonReadinessRequirement::Core,
+            now_ms,
+        ),
+        DaemonHandoffObservation::Running(_)
+    ));
+    assert_eq!(
+        daemon_handoff_status_observation_from(
+            Some(&status),
+            Some(&owner),
+            Some(owner.pid),
+            &full,
+            DaemonReadinessRequirement::Full,
+            now_ms,
+        ),
+        DaemonHandoffObservation::Failed("semantic endpoint unavailable".to_owned())
+    );
+}
+
+#[test]
+fn core_readiness_accepts_a_fully_applied_healthy_semantic_runtime() {
+    let owner = test_daemon_owner("semantic-healthy-owner", 44);
+    let expected = test_config();
+    let now_ms = 100_000;
+    let status = running_status(&owner, &expected, now_ms);
+
+    assert!(matches!(
+        daemon_handoff_status_observation_from(
+            Some(&status),
+            Some(&owner),
+            Some(owner.pid),
+            &expected,
+            DaemonReadinessRequirement::Core,
+            now_ms,
+        ),
+        DaemonHandoffObservation::Running(_)
+    ));
+}
+
+#[test]
+fn core_readiness_rejects_malformed_semantic_activation_failure_receipts() {
+    let owner = test_daemon_owner("semantic-malformed-owner", 45);
+    let expected = test_config();
+    let now_ms = 100_000;
+    let valid = json!({
+        "status": "running",
+        "pid": owner.pid,
+        "started_at_ms": owner.started_at_ms,
+        "heartbeat_at_ms": now_ms,
+        "config_reload": {
+            "status": "activation_failed",
+            "requested": {
+                "daemon_enabled": expected.enabled,
+                "daemon_mode": expected.mode.as_str(),
+                "semantic_enabled": expected.semantic_enabled,
+                "semantic_executor": expected.semantic_executor,
+                "semantic_contract_fingerprint": expected.semantic_contract_fingerprint,
+            },
+            "applied": {
+                "daemon_enabled": expected.enabled,
+                "daemon_mode": expected.mode.as_str(),
+                "semantic_enabled": false,
+                "semantic_executor": Value::Null,
+                "semantic_contract_fingerprint": Value::Null,
+            },
+            "last_error": "semantic endpoint unavailable",
+        },
+    });
+    let mut malformed = Vec::new();
+
+    let mut missing_requested = valid.clone();
+    missing_requested["config_reload"]
+        .as_object_mut()
+        .expect("config reload must be an object")
+        .remove("requested");
+    malformed.push(missing_requested);
+
+    let mut stale_requested_contract = valid.clone();
+    stale_requested_contract["config_reload"]["requested"]["semantic_contract_fingerprint"] =
+        json!("stale-contract");
+    malformed.push(stale_requested_contract);
+
+    let mut semantic_still_applied = valid.clone();
+    semantic_still_applied["config_reload"]["applied"]["semantic_enabled"] = json!(true);
+    malformed.push(semantic_still_applied);
+
+    let mut retained_executor = valid.clone();
+    retained_executor["config_reload"]["applied"]["semantic_executor"] = json!("builtin");
+    malformed.push(retained_executor);
+
+    let mut retained_fingerprint = valid.clone();
+    retained_fingerprint["config_reload"]["applied"]["semantic_contract_fingerprint"] =
+        json!("stale-contract");
+    malformed.push(retained_fingerprint);
+
+    let mut missing_semantic_state = valid;
+    missing_semantic_state["config_reload"]["applied"]
+        .as_object_mut()
+        .expect("applied config must be an object")
+        .remove("semantic_enabled");
+    malformed.push(missing_semantic_state);
+
+    for status in malformed {
+        assert_eq!(
+            daemon_handoff_status_observation_from(
+                Some(&status),
+                Some(&owner),
+                Some(owner.pid),
+                &expected,
+                DaemonReadinessRequirement::Core,
+                now_ms,
+            ),
+            DaemonHandoffObservation::Failed("semantic endpoint unavailable".to_owned()),
+            "malformed receipt gained Core readiness authority: {status}",
+        );
+    }
 }
 
 #[test]
@@ -361,6 +516,7 @@ fn status_owner_start_time_and_exact_config_including_semantic_contract_are_requ
             Some(&owner),
             Some(owner.pid),
             &expected,
+            DaemonReadinessRequirement::Full,
             50_000,
         ),
         DaemonHandoffObservation::Running(_)
@@ -409,6 +565,7 @@ fn status_owner_start_time_and_exact_config_including_semantic_contract_are_requ
             Some(&owner),
             Some(owner.pid),
             &expected,
+            DaemonReadinessRequirement::Full,
             50_000,
         );
         assert_eq!(
@@ -428,6 +585,7 @@ fn status_owner_start_time_and_exact_config_including_semantic_contract_are_requ
             None,
             Some(owner.pid),
             &expected,
+            DaemonReadinessRequirement::Full,
             50_000,
         ),
         DaemonHandoffObservation::Pending,
@@ -444,6 +602,7 @@ fn owner_replacement_during_probe_rejects_readiness() {
         Some(&owner),
         Some(owner.pid),
         &expected,
+        DaemonReadinessRequirement::Full,
         60_000,
     );
     let mut replacements = Vec::new();
@@ -489,6 +648,7 @@ fn identity_stable_starting_endpoint_reports_progress_without_readiness() {
         Some(&owner),
         Some(owner.pid),
         &expected,
+        DaemonReadinessRequirement::Full,
         61_000,
     );
 
@@ -658,6 +818,7 @@ fn fresh_spawned_failure_requires_the_full_active_owner_identity() {
             Some(&owner),
             Some(owner.pid),
             &expected,
+            DaemonReadinessRequirement::Full,
             now_ms,
         ),
         DaemonHandoffObservation::Failed("query service failed".to_owned()),
@@ -668,6 +829,7 @@ fn fresh_spawned_failure_requires_the_full_active_owner_identity() {
             None,
             Some(owner.pid),
             &expected,
+            DaemonReadinessRequirement::Full,
             now_ms,
         ),
         DaemonHandoffObservation::Pending,
@@ -682,6 +844,7 @@ fn fresh_spawned_failure_requires_the_full_active_owner_identity() {
             Some(&owner),
             Some(owner.pid),
             &expected,
+            DaemonReadinessRequirement::Full,
             now_ms,
         ),
         DaemonHandoffObservation::Pending,
@@ -707,6 +870,7 @@ fn fresh_existing_owner_failure_matches_full_lifecycle_identity() {
             Some(&owner),
             None,
             &expected,
+            DaemonReadinessRequirement::Full,
             now_ms,
         ),
         DaemonHandoffObservation::Failed("existing daemon failed".to_owned()),
@@ -732,6 +896,7 @@ fn fresh_failure_from_reused_pid_does_not_match_existing_owner() {
             Some(&owner),
             None,
             &expected,
+            DaemonReadinessRequirement::Full,
             now_ms,
         ),
         DaemonHandoffObservation::Pending,

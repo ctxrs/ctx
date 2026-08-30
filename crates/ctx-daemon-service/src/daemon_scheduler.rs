@@ -633,6 +633,8 @@ pub(super) fn daemon_consumer_retry_due(runtime: &DaemonRuntime) -> bool {
 pub(super) fn daemon_retry_due(runtime: &DaemonRuntime) -> bool {
     (runtime.history_retry.consecutive_failures > 0 && runtime.history_retry.ready())
         || daemon_consumer_retry_due(runtime)
+        || (runtime.semantic_activation_retry.consecutive_failures > 0
+            && runtime.semantic_activation_retry.ready())
 }
 
 pub(super) fn daemon_scheduled_refresh_due(
