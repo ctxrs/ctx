@@ -20,6 +20,32 @@ impl crate::DaemonAvailabilityPort for RecordingAvailability {
     }
 }
 
+#[derive(Default)]
+struct CancelledRecoveryAvailability {
+    ensures: std::sync::atomic::AtomicUsize,
+}
+
+impl crate::DaemonAvailabilityPort for CancelledRecoveryAvailability {
+    fn ensure_available(
+        &self,
+        _data_root: &Path,
+        _trigger: crate::DaemonTrigger,
+        _demand: crate::DaemonAvailabilityDemand,
+    ) -> Result<crate::DaemonAvailability> {
+        self.ensures
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(crate::DaemonAvailability::Available)
+    }
+
+    fn checkpoint(&self) -> Result<()> {
+        Err(anyhow!("cancelled before recovery ensure"))
+    }
+
+    fn interrupted(&self, error: &anyhow::Error) -> bool {
+        error.to_string() == "cancelled before recovery ensure"
+    }
+}
+
 fn admitted_response(request_id: &str, request_state: &str) -> Value {
     compact_json(json!({
         "ok": true,
@@ -52,6 +78,50 @@ fn definite_pre_submission_error_is_preserved_without_retry() {
     assert!(error
         .downcast_ref::<SourceRefreshAdmissionRecoveryFailed>()
         .is_none());
+}
+
+#[test]
+fn cancellation_before_admission_performs_no_roundtrip() {
+    let mut roundtrips = 0;
+    let error = request_admission_with_recovery_cancellable(
+        "cancel-before-admission",
+        |_| panic!("pre-admission cancellation must not sleep"),
+        || Err(anyhow!("cancelled before admission")),
+        || {
+            roundtrips += 1;
+            Ok(None)
+        },
+    )
+    .unwrap_err();
+
+    assert_eq!(error.to_string(), "cancelled before admission");
+    assert_eq!(roundtrips, 0);
+}
+
+#[test]
+fn cancellation_during_ambiguous_admission_backoff_prevents_replay() {
+    let mut roundtrips = 0;
+    let mut checkpoints = 0;
+    let error = recover_ambiguous_admission(
+        "cancel-ambiguous-admission",
+        |backoff| {
+            assert_eq!(backoff, StdDuration::from_millis(25));
+            Err(anyhow!("cancelled during admission backoff"))
+        },
+        || {
+            checkpoints += 1;
+            Ok(())
+        },
+        || {
+            roundtrips += 1;
+            Ok(None)
+        },
+    )
+    .unwrap_err();
+
+    assert_eq!(error.to_string(), "cancelled during admission backoff");
+    assert_eq!(checkpoints, 1);
+    assert_eq!(roundtrips, 0);
 }
 
 #[test]
@@ -121,6 +191,27 @@ fn no_daemon_post_ack_recovery_is_typed_retained_and_unobservable() {
     assert!(!error
         .to_string()
         .contains("no foreground writer was started"));
+}
+
+#[test]
+fn cancellation_before_recovery_ensure_never_starts_a_replacement() {
+    let availability = CancelledRecoveryAvailability::default();
+    let error = recover_wait_refresh_request(
+        &availability,
+        Path::new("unused-before-recovery"),
+        "cancelled-recovery-request",
+        RefreshRequestTrigger::Search,
+        true,
+    )
+    .unwrap_err();
+
+    assert_eq!(error.to_string(), "cancelled before recovery ensure");
+    assert_eq!(
+        availability
+            .ensures
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
 }
 
 #[test]

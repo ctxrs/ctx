@@ -15,6 +15,7 @@ pub(crate) use server::{
     start_daemon_source_refresh_service, DaemonLifecycleState, DaemonQueryActivity,
     DaemonQueryService,
 };
+pub(crate) use transport::daemon_source_refresh_request_with_cancellation;
 #[cfg(all(feature = "test-support", not(test)))]
 pub(crate) use transport::write_daemon_service_endpoint;
 #[cfg(test)]

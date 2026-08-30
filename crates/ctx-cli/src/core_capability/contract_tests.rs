@@ -1043,6 +1043,22 @@ fn recognized_terminal_failure_writes_one_exact_frame_and_exits_nonzero() {
 }
 
 #[test]
+fn refresh_and_wait_interruption_writes_no_failure_frame_and_exits_130() {
+    let request = json!({"data_root": tempfile::tempdir().unwrap().path(), "operation": "RefreshAndWait", "options": {},
+        "protocol_version": CORE_PRO_PROTOCOL_VERSION.get(), "schema_version": 1});
+    let input = [canonical(&request).unwrap(), b"\n".to_vec()].concat();
+    let mut output = Vec::new();
+    let interrupted = anyhow::Error::new(ctx_daemon_cli::FiniteWorkerInterrupted)
+        .context("cleanup context must not replace interruption");
+    let status = capability_exit_code(run_with_io(
+        std::io::Cursor::new(input),
+        &mut output,
+        |_| Err(interrupted),
+    ));
+    assert_eq!((status, output), (ExitCode::from(130), Vec::new()));
+}
+
+#[test]
 fn event_terminal_state_and_final_failure_are_ordered_and_typed_the_same() {
     let root = tempfile::tempdir().unwrap();
     let request = json!({

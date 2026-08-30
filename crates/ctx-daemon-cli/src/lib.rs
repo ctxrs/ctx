@@ -311,7 +311,8 @@ pub use source_backed_refresh_coordinator::{
 };
 mod finite_worker_owner;
 pub use finite_worker_owner::{
-    finite_worker_interrupted, record_foreground_interrupt, FiniteWorkerInterrupted,
+    finite_worker_interrupted, foreground_interrupt_epoch, foreground_operation_active,
+    record_foreground_interrupt, with_foreground_guard_since, FiniteWorkerInterrupted,
 };
 mod daemon_autostart;
 #[allow(unused_imports)]

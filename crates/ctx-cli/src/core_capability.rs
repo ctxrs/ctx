@@ -161,7 +161,11 @@ fn run_with_protocol_io(
     let input = read_frame_from(reader)?;
     let (bytes, terminal_error) = produce_response(input, |request| {
         let mut events = ProtocolEventWriter::new(request.operation, &mut writer);
-        execute_request(request, &mut events)
+        if request.operation == Operation::RefreshAndWait {
+            crate::foreground_interrupt::with_scope(|| execute_request(request, &mut events))
+        } else {
+            execute_request(request, &mut events)
+        }
     })?;
     write_response_frame(&mut writer, &bytes)?;
     if let Some(error) = terminal_error {
@@ -517,6 +521,11 @@ fn refresh_and_facts(data_root: &Path, events: &mut dyn CapabilityEventSink) -> 
     let observation = match result {
         Ok(observation) => observation,
         Err(error) => {
+            // Progress replay is secondary to process interruption. Parsing or
+            // writing a buffered terminal event must not replace exit 130.
+            if ctx_daemon_cli::finite_worker_interrupted(&error) {
+                return Err(error);
+            }
             if let Some(terminal) = terminal_progress.take() {
                 let terminal = crate::semantic::RefreshStatus::parse_schema_v1(terminal)?;
                 events.refresh(&terminal)?;

@@ -17,13 +17,7 @@ pub fn coordinate_source_backed_refresh(
     data_root: &Path,
     mode: SourceBackedRefreshMode,
 ) -> Result<SourceBackedRefreshObservation> {
-    if mode == SourceBackedRefreshMode::Wait {
-        super::finite_worker_owner::with_foreground_guard(|| {
-            ctx_daemon_service::coordinate_source_backed_refresh(&AVAILABILITY, data_root, mode)
-        })
-    } else {
-        ctx_daemon_service::coordinate_source_backed_refresh(&AVAILABILITY, data_root, mode)
-    }
+    ctx_daemon_service::coordinate_source_backed_refresh(&AVAILABILITY, data_root, mode)
 }
 
 pub fn coordinate_source_backed_refresh_with_progress(
@@ -31,23 +25,12 @@ pub fn coordinate_source_backed_refresh_with_progress(
     mode: SourceBackedRefreshMode,
     report_progress: &mut dyn FnMut(&RefreshStatus) -> Result<()>,
 ) -> Result<SourceBackedRefreshObservation> {
-    if mode == SourceBackedRefreshMode::Wait {
-        super::finite_worker_owner::with_foreground_guard(|| {
-            ctx_daemon_service::coordinate_source_backed_refresh_with_progress(
-                &AVAILABILITY,
-                data_root,
-                mode,
-                report_progress,
-            )
-        })
-    } else {
-        ctx_daemon_service::coordinate_source_backed_refresh_with_progress(
-            &AVAILABILITY,
-            data_root,
-            mode,
-            report_progress,
-        )
-    }
+    ctx_daemon_service::coordinate_source_backed_refresh_with_progress(
+        &AVAILABILITY,
+        data_root,
+        mode,
+        report_progress,
+    )
 }
 
 pub fn coordinate_setup_source_backed_refresh_with_progress(
@@ -70,16 +53,14 @@ pub fn coordinate_import_source_backed_refresh_with_progress(
     allow_daemon_autostart: bool,
     report_progress: &mut dyn FnMut(&RefreshStatus) -> Result<()>,
 ) -> Result<SourceBackedRefreshObservation> {
-    super::finite_worker_owner::with_foreground_guard(|| {
-        ctx_daemon_service::coordinate_import_source_backed_refresh_with_progress(
-            &AVAILABILITY,
-            data_root,
-            mode,
-            selection,
-            allow_daemon_autostart,
-            report_progress,
-        )
-    })
+    ctx_daemon_service::coordinate_import_source_backed_refresh_with_progress(
+        &AVAILABILITY,
+        data_root,
+        mode,
+        selection,
+        allow_daemon_autostart,
+        report_progress,
+    )
 }
 
 #[cfg(test)]

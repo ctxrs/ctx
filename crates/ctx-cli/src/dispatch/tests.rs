@@ -121,6 +121,31 @@ fn query_authority_error_json_is_scoped_to_machine_search_show_and_locate() {
     }
 }
 
+#[test]
+fn import_and_public_search_wait_use_the_final_binary_interrupt_scope() {
+    for args in [
+        &["import", "--provider", "codex", "--format", "json"][..],
+        &[
+            "search",
+            "scope oracle",
+            "--refresh",
+            "wait",
+            "--format",
+            "json",
+        ][..],
+    ] {
+        let cli = Cli::try_parse_from(std::iter::once("ctx").chain(args.iter().copied()))
+            .unwrap_or_else(|error| panic!("failed to parse {args:?}: {error}"));
+        assert!(
+            command_uses_foreground_finite_wait(&cli.command),
+            "{args:?}"
+        );
+    }
+
+    let cli = Cli::try_parse_from(["ctx", "search", "scope oracle", "--refresh", "off"]).unwrap();
+    assert!(!command_uses_foreground_finite_wait(&cli.command));
+}
+
 #[derive(Clone, Default)]
 struct SharedBytes(Arc<Mutex<Vec<u8>>>);
 
@@ -151,6 +176,61 @@ fn forced_color_test_ui(stderr: SharedBytes) -> Ui {
         stderr,
         RenderContext::for_test(TestContext::pipe(StreamKind::Stderr).color(ColorMode::Always)),
     )
+}
+
+#[test]
+fn interruption_is_not_rendered_in_human_json_or_search_modes() {
+    for (json_output, machine_output, search_operation) in [
+        (false, false, false),
+        (true, true, false),
+        (false, false, true),
+        (true, true, true),
+    ] {
+        let stdout = SharedBytes::default();
+        let stderr = SharedBytes::default();
+        let mut ui = Ui::with_writers(
+            stdout.clone(),
+            RenderContext::for_test(TestContext::pipe(StreamKind::Stdout)),
+            stderr.clone(),
+            RenderContext::for_test(TestContext::pipe(StreamKind::Stderr)),
+        );
+        let interrupted =
+            Err(anyhow::Error::new(ctx_daemon_cli::FiniteWorkerInterrupted)
+                .context("cleanup context"));
+
+        let rendered = render_command_result_error(
+            &interrupted,
+            json_output,
+            false,
+            machine_output,
+            search_operation,
+            &mut ui,
+        )
+        .unwrap();
+        ui.flush().unwrap();
+
+        assert!(rendered.is_none());
+        assert!(stdout.bytes().is_empty());
+        assert!(stderr.bytes().is_empty());
+    }
+}
+
+#[test]
+fn interruption_outlives_cleanup_rendering_and_flush_failures() {
+    for finalization in [
+        anyhow::anyhow!("cleanup failed"),
+        anyhow::anyhow!("rendering failed"),
+        anyhow::anyhow!("flush failed"),
+    ] {
+        let error = finish_command_result(
+            Err(anyhow::Error::new(ctx_daemon_cli::FiniteWorkerInterrupted)
+                .context("foreground wait")),
+            Err(finalization),
+            Some(anyhow::anyhow!("rendered marker")),
+        )
+        .unwrap_err();
+        assert!(ctx_daemon_cli::finite_worker_interrupted(&error));
+    }
 }
 
 #[test]

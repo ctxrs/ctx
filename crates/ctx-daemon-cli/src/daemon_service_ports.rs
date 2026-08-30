@@ -194,6 +194,14 @@ impl DaemonAvailabilityPort for CliDaemonAvailabilityPort {
         super::finite_worker_owner::retain(lease)?;
         Ok(DaemonAvailability::Available)
     }
+
+    fn checkpoint(&self) -> Result<()> {
+        super::finite_worker_owner::checkpoint()
+    }
+
+    fn interrupted(&self, error: &anyhow::Error) -> bool {
+        super::finite_worker_owner::finite_worker_interrupted(error)
+    }
 }
 
 pub(super) struct CliDaemonInstallationPort;

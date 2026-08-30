@@ -155,6 +155,27 @@ pub trait DaemonAvailabilityPort: Sync {
         trigger: DaemonTrigger,
         demand: DaemonAvailabilityDemand,
     ) -> Result<DaemonAvailability>;
+
+    /// Operation-scoped foreground cancellation seam. Non-foreground callers
+    /// retain the existing inert default; the final binary adapter injects its
+    /// interrupt epoch without adding durable protocol state.
+    fn checkpoint(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Classifies the operation-local typed cancellation without coupling this
+    /// service layer to the final CLI's concrete error type.
+    fn interrupted(&self, _error: &anyhow::Error) -> bool {
+        false
+    }
+
+    /// Injectable wait seam used by retry and observation loops. Tests can
+    /// advance a fake clock or trip a deterministic barrier without sleeping.
+    fn pause(&self, duration: std::time::Duration) -> Result<()> {
+        self.checkpoint()?;
+        std::thread::sleep(duration);
+        self.checkpoint()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

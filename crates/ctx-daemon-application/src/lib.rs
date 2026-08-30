@@ -236,6 +236,30 @@ impl<'a> DaemonApplication<'a> {
         lifecycle::start_core_daemon_and_wait(self.host, data_root, config, trigger)
     }
 
+    pub fn start_daemon_and_wait_with_cancellation(
+        &self,
+        data_root: &Path,
+        config: &DaemonConfigSnapshot,
+        trigger: DaemonTrigger,
+        checkpoint: &mut dyn FnMut() -> Result<()>,
+    ) -> std::result::Result<DaemonHandoff, DaemonStartError> {
+        lifecycle::start_daemon_and_wait_with_cancellation(
+            self.host, data_root, config, trigger, checkpoint,
+        )
+    }
+
+    pub fn start_core_daemon_and_wait_with_cancellation(
+        &self,
+        data_root: &Path,
+        config: &DaemonConfigSnapshot,
+        trigger: DaemonTrigger,
+        checkpoint: &mut dyn FnMut() -> Result<()>,
+    ) -> std::result::Result<DaemonHandoff, DaemonStartError> {
+        lifecycle::start_core_daemon_and_wait_with_cancellation(
+            self.host, data_root, config, trigger, checkpoint,
+        )
+    }
+
     pub fn restart_daemon_with_current_environment(
         &self,
         data_root: &Path,
@@ -252,6 +276,18 @@ impl<'a> DaemonApplication<'a> {
         trigger: DaemonTrigger,
     ) -> std::result::Result<FiniteCoreWorkerLease, DaemonStartError> {
         lifecycle::start_finite_core_worker_and_wait(self.host, data_root, config, trigger)
+    }
+
+    pub fn start_finite_core_worker_and_wait_with_cancellation(
+        &self,
+        data_root: &Path,
+        config: &DaemonConfigSnapshot,
+        trigger: DaemonTrigger,
+        checkpoint: &mut dyn FnMut() -> Result<()>,
+    ) -> std::result::Result<FiniteCoreWorkerLease, DaemonStartError> {
+        lifecycle::start_finite_core_worker_and_wait_with_cancellation(
+            self.host, data_root, config, trigger, checkpoint,
+        )
     }
 
     pub fn observe_daemon_and_wait(

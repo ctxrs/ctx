@@ -179,6 +179,24 @@ fn finite_core_worker_launch_is_forced_internal_and_has_no_persistent_timer() {
     }));
 }
 
+#[test]
+fn cancellation_at_the_last_spawn_boundary_starts_no_process() {
+    let launch = NormalizedLaunch::new(
+        Path::new("/ctx-must-not-spawn-after-cancellation").to_path_buf(),
+        Vec::new(),
+        BTreeMap::new(),
+    );
+    let error = spawn_daemon_profile(
+        &crate::TestHost,
+        launch,
+        DaemonLaunchProfile::FiniteCoreWorker,
+        &mut || Err(anyhow!("cancelled before spawn")),
+    )
+    .unwrap_err();
+
+    assert_eq!(error.to_string(), "cancelled before spawn");
+}
+
 #[cfg(unix)]
 #[test]
 fn finite_worker_keeps_the_invoking_terminal_session() -> Result<()> {
@@ -224,6 +242,7 @@ fn finite_worker_keeps_the_invoking_terminal_session() -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 #[test]
 fn finite_lease_distinguishes_owned_direct_child_from_joined_owner() -> Result<()> {
     let mut child = std::process::Command::new("sh")
@@ -233,12 +252,13 @@ fn finite_lease_distinguishes_owned_direct_child_from_joined_owner() -> Result<(
     let pid = child.id();
     let _ = child.wait()?;
     let mut lease = FiniteCoreWorkerLease::from_handoff(
+        PathBuf::new(),
         DaemonHandoff {
             pid,
             heartbeat_at_ms: 1,
         },
         Some(child),
-    );
+    )?;
 
     let FiniteCoreWorkerLease::Owned(lease) = &mut lease else {
         panic!("matching direct child must retain owned authority");
@@ -251,14 +271,227 @@ fn finite_lease_distinguishes_owned_direct_child_from_joined_owner() -> Result<(
         .spawn()?;
     let losing_pid = losing_child.id();
     let losing_lease = FiniteCoreWorkerLease::from_handoff(
+        PathBuf::new(),
         DaemonHandoff {
             pid: losing_pid.saturating_add(1),
             heartbeat_at_ms: 1,
         },
         Some(losing_child),
-    );
+    )?;
     assert!(matches!(losing_lease, FiniteCoreWorkerLease::Joined(_)));
     Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn graceful_delivery_failure_still_escalates_and_reaps_the_exact_child() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let child = std::process::Command::new("sh")
+        .args(["-c", "exec sleep 30"])
+        .spawn()?;
+    let pid = child.id();
+    let mut lease = FiniteCoreWorkerLease::from_handoff(
+        temp.path().to_path_buf(),
+        DaemonHandoff {
+            pid,
+            heartbeat_at_ms: 1,
+        },
+        Some(child),
+    )?;
+    let FiniteCoreWorkerLease::Owned(lease) = &mut lease else {
+        panic!("matching direct child must retain owned authority");
+    };
+
+    let error = lease
+        .interrupt_and_reap_with_signal_for_test(Duration::ZERO, |_| {
+            Err(std::io::Error::other("injected group delivery failure"))
+        })
+        .expect_err("delivery failure remains observable after cleanup");
+    assert_eq!(error.to_string(), "injected group delivery failure");
+    assert!(lease.reap_if_exited()?);
+    assert_eq!(
+        ctx_daemon_runtime::process_state(pid),
+        ctx_daemon_runtime::ProcessState::NotRunning
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn transient_hard_kill_failure_is_retried_and_the_exact_child_is_reaped() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let child = std::process::Command::new("sh")
+        .args(["-c", "exec sleep 30"])
+        .spawn()?;
+    let pid = child.id();
+    let mut lease = FiniteCoreWorkerLease::from_handoff(
+        temp.path().to_path_buf(),
+        DaemonHandoff {
+            pid,
+            heartbeat_at_ms: 1,
+        },
+        Some(child),
+    )?;
+    let FiniteCoreWorkerLease::Owned(lease) = &mut lease else {
+        panic!("matching direct child must retain owned authority");
+    };
+    let mut kill_attempts = 0;
+
+    let error = lease
+        .interrupt_and_reap_with_actions_for_test(
+            Duration::ZERO,
+            |_| Ok(()),
+            |child| {
+                kill_attempts += 1;
+                if kill_attempts == 1 {
+                    Err(std::io::Error::other("injected transient kill failure"))
+                } else {
+                    child.kill()
+                }
+            },
+        )
+        .expect_err("the first delivery error remains diagnostic after exact reap");
+
+    assert_eq!(error.to_string(), "injected transient kill failure");
+    assert!(kill_attempts >= 2);
+    assert!(lease.reap_if_exited()?);
+    assert_eq!(
+        ctx_daemon_runtime::process_state(pid),
+        ctx_daemon_runtime::ProcessState::NotRunning
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn graceful_interrupt_targets_the_owned_private_group_and_reaps_it() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let interrupted = temp.path().join("interrupted");
+    let ready = temp.path().join("ready");
+    let launch = NormalizedLaunch::new(
+        Path::new("/bin/sh").to_path_buf(),
+        vec![
+            OsString::from("-c"),
+            OsString::from(
+                "trap 'printf interrupted >\"$1\"; exit 0' INT; printf ready >\"$2\"; while :; do /bin/sleep 1; done",
+            ),
+            OsString::from("finite-worker"),
+            interrupted.as_os_str().to_os_string(),
+            ready.as_os_str().to_os_string(),
+        ],
+        BTreeMap::new(),
+    );
+    let child = ctx_daemon_runtime::spawn_attached(launch)?;
+    let pid = child.id();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !ready.exists() {
+        if Instant::now() >= deadline {
+            panic!("finite worker did not install its signal trap");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let mut lease = FiniteCoreWorkerLease::from_handoff(
+        temp.path().to_path_buf(),
+        DaemonHandoff {
+            pid,
+            heartbeat_at_ms: 1,
+        },
+        Some(child),
+    )?;
+    let FiniteCoreWorkerLease::Owned(lease) = &mut lease else {
+        panic!("matching direct child must retain owned authority");
+    };
+
+    lease.interrupt_and_reap(Duration::from_secs(2))?;
+
+    assert_eq!(fs::read_to_string(interrupted)?, "interrupted");
+    assert!(lease.reap_if_exited()?);
+    assert_eq!(
+        ctx_daemon_runtime::process_state(pid),
+        ctx_daemon_runtime::ProcessState::NotRunning
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn readiness_interrupt_reaps_the_spawned_candidate() -> Result<()> {
+    let child = ctx_daemon_runtime::spawn_attached(NormalizedLaunch::new(
+        PathBuf::from("sh"),
+        ["-c", "exec sleep 30"]
+            .into_iter()
+            .map(OsString::from)
+            .collect(),
+        BTreeMap::new(),
+    ))?;
+    let pid = child.id();
+    let mut checkpoints = 0;
+    let mut pauses = 0;
+    let error = wait_for_daemon_handoff_with_cancellation(
+        10,
+        || DaemonHandoffObservation::Pending,
+        || Ok(None),
+        || {},
+        || pauses += 1,
+        &mut || {
+            checkpoints += 1;
+            if checkpoints == 4 {
+                Err(anyhow!("cancelled during readiness wait"))
+            } else {
+                Ok(())
+            }
+        },
+    )
+    .unwrap_err();
+    let mut child = Some(child);
+    let DaemonStartError::Ready(error) =
+        daemon_ready_error(DaemonLaunchProfile::FiniteCoreWorker, &mut child, error)
+    else {
+        panic!("readiness cancellation must remain a ready error");
+    };
+
+    assert_eq!(error.to_string(), "cancelled during readiness wait");
+    assert_eq!(checkpoints, 4);
+    assert_eq!(pauses, 1);
+    assert!(child
+        .as_mut()
+        .expect("candidate child")
+        .try_wait()?
+        .is_some());
+    assert_eq!(
+        ctx_daemon_runtime::process_state(pid),
+        ctx_daemon_runtime::ProcessState::NotRunning
+    );
+    Ok(())
+}
+
+#[test]
+fn authenticated_starting_handoff_remains_cancellable() {
+    let mut checkpoints = 0;
+    let mut renewals = 0;
+    let mut pauses = 0;
+
+    let error = wait_for_daemon_handoff_with_cancellation(
+        10,
+        || DaemonHandoffObservation::Starting,
+        || Ok(None),
+        || renewals += 1,
+        || pauses += 1,
+        &mut || {
+            checkpoints += 1;
+            if checkpoints == 4 {
+                Err(anyhow!("cancelled during authenticated startup"))
+            } else {
+                Ok(())
+            }
+        },
+    )
+    .unwrap_err();
+
+    assert_eq!(error.to_string(), "cancelled during authenticated startup");
+    assert_eq!(checkpoints, 4);
+    assert_eq!(renewals, 1);
+    assert_eq!(pauses, 1);
 }
 
 fn test_daemon_owner(owner_id: &str, pid: u32) -> DaemonOwnerIdentity {
@@ -1005,6 +1238,7 @@ fn recovery_probes_first_then_revalidates_the_full_owner_before_termination() ->
             events.borrow_mut().push("terminate");
             Ok(())
         },
+        || Ok(()),
     )?;
 
     assert!(terminated);
@@ -1036,6 +1270,7 @@ fn recovery_never_terminates_an_owner_replaced_during_the_probe() -> Result<()> 
             events.borrow_mut().push("terminate");
             Ok(())
         },
+        || Ok(()),
     )?;
 
     assert!(!terminated);
@@ -1062,10 +1297,80 @@ fn recovery_preserves_a_daemon_with_a_live_usable_endpoint() -> Result<()> {
             events.borrow_mut().push("terminate");
             Ok(())
         },
+        || Ok(()),
     )?;
 
     assert!(!terminated);
     assert_eq!(events.borrow().as_slice(), &["probe"]);
+    Ok(())
+}
+
+#[test]
+fn cancellation_after_recovery_probe_prevents_owner_termination() {
+    let owner = test_daemon_owner("cancelled-recovery-owner", 50);
+    let events = RefCell::new(Vec::new());
+    let mut checkpoints = 0;
+
+    let error = recover_unusable_daemon_owner_with(
+        &owner,
+        || {
+            events.borrow_mut().push("probe");
+            Ok(false)
+        },
+        || {
+            events.borrow_mut().push("revalidate");
+            Ok(Some(owner.clone()))
+        },
+        |_| {
+            events.borrow_mut().push("terminate");
+            Ok(())
+        },
+        || {
+            checkpoints += 1;
+            if checkpoints == 2 {
+                Err(anyhow!("cancelled after recovery probe"))
+            } else {
+                Ok(())
+            }
+        },
+    )
+    .unwrap_err();
+
+    assert_eq!(error.to_string(), "cancelled after recovery probe");
+    assert_eq!(events.borrow().as_slice(), &["probe"]);
+}
+
+#[test]
+fn cancellation_after_mismatch_probe_preserves_the_existing_owner() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let expected = temp.path().join("replacement-ctx");
+    fs::write(&expected, b"different binary identity")?;
+    let lock = ctx_daemon_runtime::DaemonLock::acquire(temp.path())?
+        .expect("test process owns the existing daemon lock");
+    let mut checkpoints = 0;
+
+    let error = handoff_mismatched_daemon_owner_with_cancellation(
+        &crate::TestHost,
+        temp.path(),
+        &expected,
+        &mut || {
+            checkpoints += 1;
+            if checkpoints == 2 {
+                Err(anyhow!("cancelled after mismatch probe"))
+            } else {
+                Ok(())
+            }
+        },
+    )
+    .unwrap_err();
+
+    assert_eq!(error.to_string(), "cancelled after mismatch probe");
+    assert!(daemon_lock_is_active(temp.path()));
+    assert_eq!(
+        ctx_daemon_runtime::process_state(std::process::id()),
+        ctx_daemon_runtime::ProcessState::Running
+    );
+    drop(lock);
     Ok(())
 }
 

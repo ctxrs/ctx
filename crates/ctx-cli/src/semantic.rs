@@ -120,7 +120,6 @@ pub(crate) fn coordinate_source_backed_refresh_with_progress(
     mode: SourceBackedRefreshMode,
     report_progress: &mut dyn FnMut(&RefreshStatus) -> Result<()>,
 ) -> Result<SourceBackedRefreshObservation> {
-    crate::foreground_interrupt::install()?;
     ctx_daemon_cli::coordinate_source_backed_refresh_with_progress(data_root, mode, report_progress)
 }
 
@@ -131,7 +130,6 @@ pub(crate) fn coordinate_import_source_backed_refresh_with_progress(
     allow_daemon_autostart: bool,
     report_progress: &mut dyn FnMut(&RefreshStatus) -> Result<()>,
 ) -> Result<SourceBackedRefreshObservation> {
-    crate::foreground_interrupt::install()?;
     ctx_daemon_cli::coordinate_import_source_backed_refresh_with_progress(
         data_root,
         mode,
@@ -146,9 +144,6 @@ pub(crate) fn coordinate_setup_source_backed_refresh_with_progress(
     mode: SourceBackedRefreshMode,
     report_progress: &mut dyn FnMut(&RefreshStatus) -> Result<()>,
 ) -> Result<SourceBackedRefreshObservation> {
-    if mode == SourceBackedRefreshMode::Wait {
-        crate::foreground_interrupt::install()?;
-    }
     ctx_daemon_cli::coordinate_setup_source_backed_refresh_with_progress(
         data_root,
         mode,

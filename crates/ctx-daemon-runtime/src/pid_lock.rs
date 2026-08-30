@@ -202,6 +202,59 @@ pub fn daemon_lock_is_owned_by(data_root: &Path, pid: u32) -> bool {
     read_pid_lock_file(&path) == Some(pid) && !daemon_lock_is_stale(&path)
 }
 
+/// Marks only an exact reaped daemon owner as released and removes only its
+/// endpoint identities. A replacement which acquires ownership first makes
+/// this a no-op.
+pub fn cleanup_reaped_daemon_owner(
+    data_root: &Path,
+    owner_pid: u32,
+    endpoint_paths: &[PathBuf],
+) -> Result<bool> {
+    let Some(_quiescence) = DaemonQuiescenceGuard::acquire(data_root)? else {
+        return Ok(false);
+    };
+    let lock_path = daemon_lock_path(data_root);
+    let Some(mut lock) = read_pid_lock_json(&lock_path) else {
+        return Ok(false);
+    };
+    if !pid_lock_uses_advisory_protocol(&lock) || pid_from_lock_json(&lock) != Some(owner_pid) {
+        return Ok(false);
+    }
+    if let Some(object) = lock.as_object_mut() {
+        object.insert("released".to_owned(), Value::Bool(true));
+    }
+    if !publish_pid_lock_metadata(&lock_path, &lock)? {
+        return Ok(false);
+    }
+    for endpoint_path in endpoint_paths {
+        let identity = crate::read_daemon_service_endpoint_identity_at(endpoint_path)?;
+        let Some(identity) = identity.filter(|identity| identity.owner_pid == owner_pid) else {
+            continue;
+        };
+        #[cfg(unix)]
+        {
+            let crate::DaemonQueryEndpoint::Unix { path, .. } = identity.endpoint;
+            remove_reaped_artifact(&path)
+                .with_context(|| format!("remove reaped daemon socket {}", path.display()))?;
+        }
+        remove_reaped_artifact(endpoint_path).with_context(|| {
+            format!(
+                "remove reaped daemon endpoint identity {}",
+                endpoint_path.display()
+            )
+        })?;
+    }
+    Ok(true)
+}
+
+fn remove_reaped_artifact(path: &Path) -> std::io::Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
 pub fn pid_lock_file_is_stale(path: &Path) -> bool {
     if let Some(observation) = observe_pid_advisory_lock(path) {
         return !observation.held;
