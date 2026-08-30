@@ -177,6 +177,10 @@ struct SemanticEnvironmentGuard {
 }
 
 impl SemanticEnvironmentGuard {
+    fn clear() -> Self {
+        Self::set(None, None, None)
+    }
+
     fn http_auth(endpoint: &str) -> Self {
         Self::set(
             Some(OsString::from("passive-semantic-test-token")),
@@ -692,6 +696,7 @@ fn foreground_empty_generation_converges_without_loading_a_model() -> Result<()>
 
 #[test]
 fn unavailable_external_contract_preserves_ready_builtin_store() -> Result<()> {
+    let _environment = SemanticEnvironmentGuard::clear();
     for include_record in [false, true] {
         let temp = tempfile::tempdir()?;
         let (index, _) = semantic_index_revision(temp.path(), 1, include_record)?;
