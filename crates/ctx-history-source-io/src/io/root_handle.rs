@@ -33,6 +33,13 @@ use sha2::{Digest, Sha256};
 use crate::ordinary_file::ORDINARY_FILE_V2_TOKEN_DOMAIN;
 use crate::{Result, SourceIoError};
 
+#[path = "root_handle/diagnostics.rs"]
+mod diagnostics;
+use diagnostics::{
+    changed_path, ensure_absolute_traversal_free, invalid_path, map_changed_open_error,
+    map_open_error, provider_source_io_result, validate_child_name, validate_relative_path,
+};
+
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
 #[path = "root_handle/unix.rs"]
 mod platform;
@@ -51,6 +58,17 @@ mod platform;
 #[derive(Debug)]
 pub(super) enum AuthorityOpenError {
     Io(io::Error),
+    #[cfg_attr(
+        not(any(target_os = "windows", test, feature = "test-support")),
+        allow(
+            dead_code,
+            reason = "Windows source authority reports exact system operations"
+        )
+    )]
+    SystemIo {
+        operation: &'static str,
+        source: io::Error,
+    },
     Rejected(&'static str),
 }
 
@@ -164,7 +182,11 @@ impl ProviderSourceRoot {
     }
 
     pub fn directory(&self) -> Result<ProviderSourceDirectory> {
-        let directory = self.inner.directory.try_clone()?;
+        let directory = provider_source_io_result(
+            self.named_path(),
+            "provider source directory-handle clone",
+            self.inner.directory.try_clone(),
+        )?;
         Ok(ProviderSourceDirectory {
             root: self.clone(),
             relative_path: PathBuf::new(),
@@ -222,8 +244,16 @@ impl ProviderSourceRoot {
     /// Confirms both the retained directory and its current named route still
     /// identify the exact root admitted at construction.
     pub fn revalidate(&self) -> Result<()> {
-        let current_metadata = self.inner.directory.metadata()?;
-        let current = platform::object_stamp(&self.inner.directory, &current_metadata)?;
+        let current_metadata = provider_source_io_result(
+            &self.inner.named_path,
+            "provider source retained-directory metadata query",
+            self.inner.directory.metadata(),
+        )?;
+        let current = provider_source_io_result(
+            &self.inner.named_path,
+            "provider source retained-directory identity query",
+            platform::object_stamp(&self.inner.directory, &current_metadata),
+        )?;
         if current != self.inner.opened {
             return Err(changed_path(&self.inner.named_path));
         }
@@ -232,7 +262,11 @@ impl ProviderSourceRoot {
         let platform::OpenedPath::Directory { file, metadata, .. } = reopened else {
             return Err(changed_path(&self.inner.named_path));
         };
-        let named = platform::object_stamp(&file, &metadata)?;
+        let named = provider_source_io_result(
+            &self.inner.named_path,
+            "provider source reopened-directory identity query",
+            platform::object_stamp(&file, &metadata),
+        )?;
         if named != self.inner.opened {
             return Err(changed_path(&self.inner.named_path));
         }
@@ -244,8 +278,16 @@ impl ProviderSourceRoot {
     /// children being added, removed, or updated. Inventory owners use
     /// [`Self::revalidate`] separately when they require an exact tree fence.
     pub fn revalidate_same_object(&self) -> Result<()> {
-        let current_metadata = self.inner.directory.metadata()?;
-        let current = platform::object_stamp(&self.inner.directory, &current_metadata)?;
+        let current_metadata = provider_source_io_result(
+            &self.inner.named_path,
+            "provider source retained-directory metadata query",
+            self.inner.directory.metadata(),
+        )?;
+        let current = provider_source_io_result(
+            &self.inner.named_path,
+            "provider source retained-directory identity query",
+            platform::object_stamp(&self.inner.directory, &current_metadata),
+        )?;
         if !platform::same_object(&current, &self.inner.opened) {
             return Err(changed_path(&self.inner.named_path));
         }
@@ -254,7 +296,11 @@ impl ProviderSourceRoot {
         let platform::OpenedPath::Directory { file, metadata, .. } = reopened else {
             return Err(changed_path(&self.inner.named_path));
         };
-        let named = platform::object_stamp(&file, &metadata)?;
+        let named = provider_source_io_result(
+            &self.inner.named_path,
+            "provider source reopened-directory identity query",
+            platform::object_stamp(&file, &metadata),
+        )?;
         if !platform::same_object(&named, &self.inner.opened) {
             return Err(changed_path(&self.inner.named_path));
         }
@@ -333,15 +379,20 @@ impl ProviderSourceDirectory {
     pub fn open_child(&self, name: &OsStr) -> Result<OpenedProviderSourcePath> {
         validate_child_name(name, self.display_path())?;
         let relative_path = self.relative_path.join(name);
+        let named_path = self.root.named_path().join(&relative_path);
         let opened = platform::open_child(&self.directory, name, &self.root.inner.filesystem)
-            .map_err(|error| map_open_error(&self.root.named_path().join(&relative_path), error))?;
+            .map_err(|error| map_open_error(&named_path, error))?;
         match opened {
             platform::OpenedPath::File {
                 file,
                 metadata,
                 filesystem: _,
             } => {
-                let stamp = platform::object_stamp(&file, &metadata)?;
+                let stamp = provider_source_io_result(
+                    &named_path,
+                    "provider source opened-file identity query",
+                    platform::object_stamp(&file, &metadata),
+                )?;
                 Ok(OpenedProviderSourcePath::File(OpenedProviderSourceFile {
                     route: ProviderSourceFileRoute::Relative {
                         root: self.root.clone(),
@@ -357,7 +408,11 @@ impl ProviderSourceDirectory {
                 metadata,
                 filesystem: _,
             } => {
-                let stamp = platform::object_stamp(&file, &metadata)?;
+                let stamp = provider_source_io_result(
+                    &named_path,
+                    "provider source opened-directory identity query",
+                    platform::object_stamp(&file, &metadata),
+                )?;
                 Ok(OpenedProviderSourcePath::Directory(
                     ProviderSourceDirectory {
                         root: self.root.clone(),
@@ -373,8 +428,16 @@ impl ProviderSourceDirectory {
     /// Detects mutation of the directory while its children were enumerated
     /// and opened.
     pub fn revalidate(&self) -> Result<()> {
-        let metadata = self.directory.metadata()?;
-        let current = platform::object_stamp(&self.directory, &metadata)?;
+        let metadata = provider_source_io_result(
+            self.display_path(),
+            "provider source retained-directory metadata query",
+            self.directory.metadata(),
+        )?;
+        let current = provider_source_io_result(
+            self.display_path(),
+            "provider source retained-directory identity query",
+            platform::object_stamp(&self.directory, &metadata),
+        )?;
         if current != self.opened {
             return Err(changed_path(self.display_path()));
         }
@@ -427,8 +490,16 @@ impl OpenedProviderSourceFile {
 
     /// Strong token for the retained file's current metadata observation.
     pub fn current_ordinary_file_token(&self) -> Result<[u8; 32]> {
-        let metadata = self.file.metadata()?;
-        let current = platform::object_stamp(&self.file, &metadata)?;
+        let metadata = provider_source_io_result(
+            self.display_path(),
+            "provider source retained-file metadata query",
+            self.file.metadata(),
+        )?;
+        let current = provider_source_io_result(
+            self.display_path(),
+            "provider source retained-file identity query",
+            platform::object_stamp(&self.file, &metadata),
+        )?;
         Ok(ordinary_file_token(&current))
     }
 
@@ -450,7 +521,11 @@ impl OpenedProviderSourceFile {
                 let platform::OpenedPath::File { file, metadata, .. } = reopened else {
                     return Err(changed_path(path));
                 };
-                let opened = platform::object_stamp(&file, &metadata)?;
+                let opened = provider_source_io_result(
+                    path,
+                    "provider source reopened-file identity query",
+                    platform::object_stamp(&file, &metadata),
+                )?;
                 if !platform::same_object(&opened, &self.opened) {
                     return Err(changed_path(path));
                 }
@@ -476,7 +551,12 @@ impl OpenedProviderSourceFile {
                 "provider source file exceeds {maximum_bytes} bytes"
             )));
         }
-        Ok(self.file.try_clone()?.take(self.len()))
+        Ok(provider_source_io_result(
+            self.display_path(),
+            "provider source file-handle clone",
+            self.file.try_clone(),
+        )?
+        .take(self.len()))
     }
 
     pub fn read_all_bounded(&self, maximum_bytes: usize) -> Result<Vec<u8>> {
@@ -487,7 +567,11 @@ impl OpenedProviderSourceFile {
             SourceIoError::InvalidPayload("provider source file is too large".into())
         })?;
         let mut bytes = Vec::with_capacity(capacity);
-        reader.read_to_end(&mut bytes)?;
+        provider_source_io_result(
+            self.display_path(),
+            "provider source bounded file read",
+            reader.read_to_end(&mut bytes),
+        )?;
         if bytes.len() != capacity {
             return Err(changed_path(self.display_path()));
         }
@@ -517,7 +601,11 @@ impl OpenedProviderSourceFile {
             ));
         }
         let mut bytes = vec![0_u8; length];
-        platform::read_exact_at(&self.file, &mut bytes, offset)?;
+        provider_source_io_result(
+            self.display_path(),
+            "provider source exact range read",
+            platform::read_exact_at(&self.file, &mut bytes, offset),
+        )?;
         self.revalidate()?;
         Ok(bytes)
     }
@@ -541,14 +629,23 @@ impl OpenedProviderSourceFile {
         let end = offset.checked_add(length_u64).ok_or_else(|| {
             SourceIoError::InvalidPayload("provider source range overflows".into())
         })?;
-        let current_len = self.file.metadata()?.len();
+        let current_len = provider_source_io_result(
+            self.display_path(),
+            "provider source retained-file metadata query",
+            self.file.metadata(),
+        )?
+        .len();
         if end > current_len {
             return Err(SourceIoError::InvalidPayload(
                 "provider source range exceeds the opened file".into(),
             ));
         }
         let mut bytes = vec![0_u8; length];
-        platform::read_exact_at(&self.file, &mut bytes, offset)?;
+        provider_source_io_result(
+            self.display_path(),
+            "provider source exact range read",
+            platform::read_exact_at(&self.file, &mut bytes, offset),
+        )?;
         self.revalidate_same_object()?;
         Ok(bytes)
     }
@@ -559,8 +656,16 @@ impl OpenedProviderSourceFile {
     /// Relative callers must perform one terminal [`ProviderSourceRoot::revalidate`]
     /// after all leaf checks before publishing aggregate evidence.
     pub fn revalidate_leaf(&self) -> Result<()> {
-        let current_metadata = self.file.metadata()?;
-        let current = platform::object_stamp(&self.file, &current_metadata)?;
+        let current_metadata = provider_source_io_result(
+            self.display_path(),
+            "provider source retained-file metadata query",
+            self.file.metadata(),
+        )?;
+        let current = provider_source_io_result(
+            self.display_path(),
+            "provider source retained-file identity query",
+            platform::object_stamp(&self.file, &current_metadata),
+        )?;
         if current != self.opened {
             return Err(changed_path(self.display_path()));
         }
@@ -583,7 +688,11 @@ impl OpenedProviderSourceFile {
         let platform::OpenedPath::File { file, metadata, .. } = reopened else {
             return Err(changed_path(self.display_path()));
         };
-        let named = platform::object_stamp(&file, &metadata)?;
+        let named = provider_source_io_result(
+            self.display_path(),
+            "provider source reopened-file identity query",
+            platform::object_stamp(&file, &metadata),
+        )?;
         if named != self.opened {
             return Err(changed_path(self.display_path()));
         }
@@ -593,8 +702,16 @@ impl OpenedProviderSourceFile {
     /// Confirms the route still names the same ordinary file while allowing
     /// append-only metadata changes on that object.
     pub fn revalidate_same_object_leaf(&self) -> Result<()> {
-        let current_metadata = self.file.metadata()?;
-        let current = platform::object_stamp(&self.file, &current_metadata)?;
+        let current_metadata = provider_source_io_result(
+            self.display_path(),
+            "provider source retained-file metadata query",
+            self.file.metadata(),
+        )?;
+        let current = provider_source_io_result(
+            self.display_path(),
+            "provider source retained-file identity query",
+            platform::object_stamp(&self.file, &current_metadata),
+        )?;
         if !platform::same_object(&current, &self.opened) {
             return Err(changed_path(self.display_path()));
         }
@@ -619,7 +736,11 @@ impl OpenedProviderSourceFile {
         let platform::OpenedPath::File { file, metadata, .. } = reopened else {
             return Err(changed_path(self.display_path()));
         };
-        let named = platform::object_stamp(&file, &metadata)?;
+        let named = provider_source_io_result(
+            self.display_path(),
+            "provider source reopened-file identity query",
+            platform::object_stamp(&file, &metadata),
+        )?;
         if !platform::same_object(&named, &self.opened) {
             return Err(changed_path(self.display_path()));
         }
@@ -760,7 +881,11 @@ pub fn open_provider_source_path(path: &Path) -> Result<OpenedProviderSourcePath
             metadata,
             filesystem: _,
         } => {
-            let stamp = platform::object_stamp(&file, &metadata)?;
+            let stamp = provider_source_io_result(
+                &path,
+                "provider source opened-file identity query",
+                platform::object_stamp(&file, &metadata),
+            )?;
             Ok(OpenedProviderSourcePath::File(OpenedProviderSourceFile {
                 route: ProviderSourceFileRoute::Absolute(path),
                 file,
@@ -773,7 +898,11 @@ pub fn open_provider_source_path(path: &Path) -> Result<OpenedProviderSourcePath
             metadata,
             filesystem,
         } => {
-            let stamp = platform::object_stamp(&file, &metadata)?;
+            let stamp = provider_source_io_result(
+                &path,
+                "provider source opened-directory identity query",
+                platform::object_stamp(&file, &metadata),
+            )?;
             let root = ProviderSourceRoot {
                 inner: Arc::new(ProviderSourceRootInner {
                     named_path: path,
@@ -784,77 +913,6 @@ pub fn open_provider_source_path(path: &Path) -> Result<OpenedProviderSourcePath
             };
             Ok(OpenedProviderSourcePath::Directory(root.directory()?))
         }
-    }
-}
-
-fn ensure_absolute_traversal_free(path: &Path) -> Result<()> {
-    if !path.is_absolute()
-        || path.as_os_str().is_empty()
-        || path
-            .components()
-            .any(|component| matches!(component, Component::ParentDir))
-    {
-        return Err(invalid_path(
-            path,
-            "provider source authority paths must be absolute and traversal-free",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_relative_path(path: &Path) -> Result<()> {
-    if path.is_absolute()
-        || path
-            .components()
-            .any(|component| !matches!(component, Component::Normal(_) | Component::CurDir))
-    {
-        return Err(invalid_path(
-            path,
-            "provider source descendants must be traversal-free relative paths",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_child_name(name: &OsStr, path: &Path) -> Result<()> {
-    if name.is_empty()
-        || name == OsStr::new(".")
-        || name == OsStr::new("..")
-        || Path::new(name).components().count() != 1
-        || !matches!(
-            Path::new(name).components().next(),
-            Some(Component::Normal(_))
-        )
-    {
-        return Err(invalid_path(
-            path,
-            "provider source child names must be single normal components",
-        ));
-    }
-    Ok(())
-}
-
-fn map_open_error(path: &Path, error: AuthorityOpenError) -> SourceIoError {
-    match error {
-        AuthorityOpenError::Io(error) => error.into(),
-        AuthorityOpenError::Rejected(reason) => invalid_path(path, reason),
-    }
-}
-
-fn map_changed_open_error(path: &Path, error: AuthorityOpenError) -> SourceIoError {
-    match error {
-        AuthorityOpenError::Io(error)
-            if matches!(
-                error.kind(),
-                io::ErrorKind::NotFound
-                    | io::ErrorKind::InvalidData
-                    | io::ErrorKind::PermissionDenied
-            ) =>
-        {
-            changed_path(path)
-        }
-        AuthorityOpenError::Rejected(_) => changed_path(path),
-        AuthorityOpenError::Io(error) => error.into(),
     }
 }
 
@@ -900,20 +958,6 @@ pub fn is_symlink_source_rejection(error: &SourceIoError) -> bool {
             if *reason == SYMLINK_PROVIDER_SOURCE_REASON
                 || *reason == REPARSE_PROVIDER_SOURCE_REASON
     )
-}
-
-fn invalid_path(path: &Path, reason: &'static str) -> SourceIoError {
-    SourceIoError::InvalidProviderTranscriptPath {
-        path: path.to_path_buf(),
-        reason,
-    }
-}
-
-fn changed_path(path: &Path) -> SourceIoError {
-    SourceIoError::InvalidProviderTranscriptPath {
-        path: path.to_path_buf(),
-        reason: "provider source changed while its authority handle was retained",
-    }
 }
 
 #[cfg(any(test, feature = "test-support"))]

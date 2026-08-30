@@ -155,8 +155,18 @@ impl JsonlFamilyError for CaptureError {
             )
     }
 
+    fn is_source_unavailable(&self) -> bool {
+        matches!(
+            self,
+            Self::SystemIo { operation, source }
+                if ctx_history_source_io::is_provider_source_unavailable_io(operation, source)
+        )
+    }
+
     fn is_resource_unavailable(&self) -> bool {
-        matches!(self, Self::Io(_) | Self::SystemIo { .. }) && !self.is_not_found()
+        matches!(self, Self::Io(_) | Self::SystemIo { .. })
+            && !self.is_not_found()
+            && !self.is_source_unavailable()
     }
 
     fn is_internal(&self) -> bool {
@@ -177,6 +187,28 @@ impl JsonlFamilyError for CaptureError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_io_mapping_preserves_provider_source_unavailability() {
+        let mapped = CaptureError::from(ctx_history_source_io::SourceIoError::SystemIo {
+            operation: "provider source target open",
+            source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+        });
+
+        assert!(mapped.is_source_unavailable());
+        assert!(!mapped.is_resource_unavailable());
+    }
+
+    #[test]
+    fn source_io_mapping_preserves_tagged_resource_exhaustion() {
+        let mapped = CaptureError::from(ctx_history_source_io::SourceIoError::SystemIo {
+            operation: "provider source target open",
+            source: std::io::Error::from_raw_os_error(24),
+        });
+
+        assert!(!mapped.is_source_unavailable());
+        assert!(mapped.is_resource_unavailable());
+    }
 
     #[test]
     fn source_io_mapping_preserves_inventory_limit_identity() {

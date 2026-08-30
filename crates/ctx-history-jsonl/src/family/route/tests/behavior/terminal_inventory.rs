@@ -442,7 +442,21 @@ fn jsonl_terminal_drift_and_io_failures_keep_distinct_route_kinds() {
         Some(SourceBackedRouteErrorKind::ResourceUnavailable)
     );
     assert_eq!(
+        normalized_jsonl_error_kind(&CaptureError::SystemIo {
+            operation: "provider source target open",
+            source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+        }),
+        Some(SourceBackedRouteErrorKind::Unavailable)
+    );
+    assert_eq!(
         normalized_jsonl_error_kind(&CaptureError::Io(std::io::Error::from_raw_os_error(24))),
+        Some(SourceBackedRouteErrorKind::ResourceUnavailable)
+    );
+    assert_eq!(
+        normalized_jsonl_error_kind(&CaptureError::SystemIo {
+            operation: "provider source target open",
+            source: std::io::Error::from_raw_os_error(24),
+        }),
         Some(SourceBackedRouteErrorKind::ResourceUnavailable)
     );
     assert_eq!(

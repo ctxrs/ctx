@@ -61,6 +61,9 @@ pub trait JsonlFamilyError:
     fn source_changed() -> Self;
     fn is_not_found(&self) -> bool;
     fn is_source_changed(&self) -> bool;
+    fn is_source_unavailable(&self) -> bool {
+        false
+    }
     fn is_resource_unavailable(&self) -> bool;
     fn is_internal(&self) -> bool;
     fn is_ignorable_membership_entry(&self) -> bool;
@@ -121,8 +124,18 @@ impl JsonlFamilyError for SourceIoError {
             )
     }
 
+    fn is_source_unavailable(&self) -> bool {
+        matches!(
+            self,
+            Self::SystemIo { operation, source }
+                if ctx_history_source_io::is_provider_source_unavailable_io(operation, source)
+        )
+    }
+
     fn is_resource_unavailable(&self) -> bool {
-        matches!(self, Self::Io(_) | Self::SystemIo { .. }) && !self.is_not_found()
+        matches!(self, Self::Io(_) | Self::SystemIo { .. })
+            && !self.is_not_found()
+            && !self.is_source_unavailable()
     }
 
     fn is_internal(&self) -> bool {
