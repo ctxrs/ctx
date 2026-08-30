@@ -373,6 +373,72 @@ fn foreground_checkpoint_failure_precedes_active_generation_and_reconciliation()
 }
 
 #[test]
+fn foreground_in_reconciliation_cancellation_preserves_checkpoint_identity() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let index_root = ctx_history_refresh::source_backed_index_root(temp.path());
+    let index = semantic_index_revision_at(&index_root, 1, false)?;
+    let generation_id = index.generation_id().to_owned();
+    let checkpoint_calls = Cell::new(0_u32);
+
+    let error = expect_completion_error(
+        complete_semantic_generation_foreground_with_checkpoint(
+            temp.path(),
+            PinnedSourceBackedGeneration::from_index(index),
+            SemanticEmbeddingExecutorConfig::builtin(),
+            &mut || {
+                let call = checkpoint_calls.get() + 1;
+                checkpoint_calls.set(call);
+                if call == 3 {
+                    return Err(anyhow!("cancelled during reconciliation"));
+                }
+                Ok(())
+            },
+        ),
+        "in-reconciliation cancellation must preserve checkpoint identity",
+    );
+
+    assert_eq!(checkpoint_calls.get(), 3);
+    assert_eq!(error.generation_id(), generation_id);
+    assert_eq!(error.code(), "semantic_completion_interrupted");
+    assert!(!error.retryable());
+    assert!(format!("{error:#}").contains("cancelled during reconciliation"));
+    Ok(())
+}
+
+#[test]
+fn foreground_in_reconciliation_active_generation_read_failure_preserves_preflight_identity(
+) -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let index_root = ctx_history_refresh::source_backed_index_root(temp.path());
+    let index = semantic_index_revision_at(&index_root, 1, false)?;
+    let generation_id = index.generation_id().to_owned();
+    let checkpoint_calls = Cell::new(0_u32);
+
+    let error = expect_completion_error(
+        complete_semantic_generation_foreground_with_checkpoint(
+            temp.path(),
+            PinnedSourceBackedGeneration::from_index(index),
+            SemanticEmbeddingExecutorConfig::builtin(),
+            &mut || {
+                let call = checkpoint_calls.get() + 1;
+                checkpoint_calls.set(call);
+                if call == 3 {
+                    std::fs::write(index_root.join("active-generation.json"), b"{")?;
+                }
+                Ok(())
+            },
+        ),
+        "in-reconciliation active-generation read failure must preserve preflight identity",
+    );
+
+    assert_eq!(checkpoint_calls.get(), 3);
+    assert_eq!(error.generation_id(), generation_id);
+    assert_eq!(error.code(), "semantic_completion_preflight_failed");
+    assert!(error.retryable());
+    Ok(())
+}
+
+#[test]
 fn foreground_supersession_before_writable_open_preserves_semantic_state() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let index_root = ctx_history_refresh::source_backed_index_root(temp.path());

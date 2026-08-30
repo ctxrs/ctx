@@ -544,21 +544,16 @@ fn complete_semantic_generation_foreground_with_checkpoint_and_final_preflight(
         &selected.contract,
         &mut foreground_checkpoint,
     )
-    .map_err(|source| {
-        if matches!(
-            source.downcast_ref::<SemanticCompletionError>(),
-            Some(SemanticCompletionError::CoreSuperseded { .. })
-        ) {
-            return source
-                .downcast::<SemanticCompletionError>()
-                .expect("matched semantic completion supersession error");
-        }
-        SemanticCompletionError::Reconciliation {
-            generation_id: generation_id.clone(),
-            retryable: reconciliation_failure_is_retryable(&source),
-            source,
-        }
-    })?;
+    .map_err(
+        |source| match source.downcast::<SemanticCompletionError>() {
+            Ok(error) => error,
+            Err(source) => SemanticCompletionError::Reconciliation {
+                generation_id: generation_id.clone(),
+                retryable: reconciliation_failure_is_retryable(&source),
+                source,
+            },
+        },
+    )?;
     run_foreground_checkpoint(data_root, checkpoint, &generation_id)?;
     match final_preflight(&pin, data_root, &selected.contract) {
         Ok(()) => {
