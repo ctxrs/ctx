@@ -674,63 +674,6 @@ fn passive_snapshot_refuses_a_root_junction_without_touching_its_target() -> Res
     Ok(())
 }
 
-#[cfg(windows)]
-#[test]
-fn passive_snapshot_retains_windows_root_authority_for_its_lifetime() -> Result<()> {
-    let temporary = tempfile::tempdir()?;
-    let root = source_backed_semantic_vector_path(temporary.path());
-    let displaced = root.with_file_name("semantic-displaced");
-    let parent = root
-        .parent()
-        .expect("semantic root must have a parent")
-        .to_path_buf();
-    let displaced_parent = parent.with_file_name("search-displaced");
-    let contract = test_contract();
-    drop(SemanticVectorStore::open(&root, &contract)?);
-
-    let mut admission_replacement = None;
-    let mut admission_parent_replacement = None;
-    let passive =
-        SemanticVectorStore::open_passive_snapshot_after_admission(&root, &contract, || {
-            admission_replacement = Some(std::fs::rename(&root, &displaced));
-            admission_parent_replacement = Some(std::fs::rename(&parent, &displaced_parent));
-        })?
-        .expect("initialized semantic store must open passively");
-    assert!(
-        admission_replacement
-            .expect("root replacement must be attempted during passive admission")
-            .is_err(),
-        "root authority must precede SQLite and Flat child opens"
-    );
-    assert!(
-        admission_parent_replacement
-            .expect("parent replacement must be attempted during passive admission")
-            .is_err(),
-        "root authority must prevent its pathname from moving during child opens"
-    );
-    let replacement = std::fs::rename(&root, &displaced);
-    let parent_replacement = std::fs::rename(&parent, &displaced_parent);
-
-    assert!(
-        replacement.is_err(),
-        "the retained Windows root authority must deny rename/replacement"
-    );
-    assert!(
-        parent_replacement.is_err(),
-        "the retained Windows root authority must pin its admitted pathname"
-    );
-    assert!(root.is_dir());
-    assert!(!displaced.exists());
-    assert!(matches!(
-        passive.source_backed_generation_pin_exact(&"f".repeat(64), 0)?,
-        SourceBackedGenerationPin::NotReady
-    ));
-    drop(passive);
-    std::fs::rename(&parent, &displaced_parent)?;
-    assert!(displaced_parent.join("semantic").is_dir());
-    Ok(())
-}
-
 #[test]
 #[ignore = "manual isolated syscall probe; set CTX_PASSIVE_SNAPSHOT_PROBE_ROOT and mode"]
 fn passive_snapshot_external_syscall_probe() -> Result<()> {

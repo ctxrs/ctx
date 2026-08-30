@@ -23,12 +23,32 @@ pub(crate) struct FlatStoreCoordinationGuard {
 impl FlatStoreCoordinationGuard {
     pub(crate) fn lock_passive_snapshot(root: &Path) -> FlatResult<Self> {
         #[cfg(windows)]
-        let root_authority = PassiveRootAuthority::open(root)?;
+        return Self::lock_passive_snapshot_windows(root, || {});
+        #[cfg(not(windows))]
         Ok(Self {
             lock: FileLock::try_shared_passive(&transaction_lock_path(root))?,
-            #[cfg(windows)]
+        })
+    }
+
+    #[cfg(windows)]
+    fn lock_passive_snapshot_windows(
+        root: &Path,
+        root_authority_admitted: impl FnOnce(),
+    ) -> FlatResult<Self> {
+        let root_authority = PassiveRootAuthority::open(root)?;
+        root_authority_admitted();
+        Ok(Self {
+            lock: FileLock::try_shared_passive(&transaction_lock_path(root))?,
             root_authority: Some(root_authority),
         })
+    }
+
+    #[cfg(all(test, windows))]
+    fn lock_passive_snapshot_after_root_authority(
+        root: &Path,
+        root_authority_admitted: impl FnOnce(),
+    ) -> FlatResult<Self> {
+        Self::lock_passive_snapshot_windows(root, root_authority_admitted)
     }
 
     pub(crate) fn lock_control_writer(root: &Path) -> FlatResult<Self> {
@@ -278,5 +298,75 @@ mod tests {
 
         assert!(file.metadata().unwrap().is_file());
         assert_eq!(std::fs::read(path).unwrap(), b"winner");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn passive_root_authority_precedes_the_child_lock_open() {
+        let temporary = tempfile::tempdir().unwrap();
+        let parent = temporary.path().join("search");
+        let root = parent.join("semantic");
+        let displaced_root = parent.join("semantic-displaced");
+        let displaced_parent = temporary.path().join("search-displaced");
+        let lock = transaction_lock_path(&root);
+        let displaced_lock = root.join("flat_transaction.lock.displaced");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&lock, b"").unwrap();
+        let mut attempts = None;
+
+        let guard =
+            FlatStoreCoordinationGuard::lock_passive_snapshot_after_root_authority(&root, || {
+                std::fs::rename(&lock, &displaced_lock)
+                    .expect("the hook must run before the child lock is opened");
+                std::fs::rename(&displaced_lock, &lock).unwrap();
+                attempts = Some((
+                    std::fs::rename(&root, &displaced_root),
+                    std::fs::rename(&parent, &displaced_parent),
+                ));
+            })
+            .unwrap();
+        let (root_replacement, parent_replacement) =
+            attempts.expect("root replacement must be attempted in the admission hook");
+
+        assert!(
+            root_replacement.is_err(),
+            "root authority alone must deny direct-root replacement"
+        );
+        assert!(
+            parent_replacement.is_err(),
+            "root authority alone must pin the admitted ancestor path"
+        );
+        guard.validate_retained().unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn passive_root_authority_pins_its_path_without_a_child_lock_handle() {
+        let temporary = tempfile::tempdir().unwrap();
+        let parent = temporary.path().join("search");
+        let root = parent.join("semantic");
+        let displaced_root = parent.join("semantic-displaced");
+        let displaced_parent = temporary.path().join("search-displaced");
+        let lock = transaction_lock_path(&root);
+        let displaced_lock = root.join("flat_transaction.lock.displaced");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&lock, b"").unwrap();
+
+        let authority = PassiveRootAuthority::open(&root).unwrap();
+        std::fs::rename(&lock, &displaced_lock)
+            .expect("no child lock handle may contribute replacement authority");
+        assert!(
+            std::fs::rename(&root, &displaced_root).is_err(),
+            "retained root authority must deny direct-root replacement"
+        );
+        assert!(
+            std::fs::rename(&parent, &displaced_parent).is_err(),
+            "retained root authority must pin the admitted ancestor path"
+        );
+        authority.validate_retained().unwrap();
+        drop(authority);
+
+        std::fs::rename(&parent, &displaced_parent)
+            .expect("dropping root authority must release the path");
     }
 }
