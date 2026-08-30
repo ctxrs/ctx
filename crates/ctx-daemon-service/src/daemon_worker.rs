@@ -10,7 +10,7 @@ use ctx_semantic_index::{
 use ctx_semantic_model::{
     semantic_model_acquisition_integrity_error, semantic_model_key, ArtifactFetcher,
     SemanticDaemonCpuFallbackRequired, SemanticDaemonModelAcquisition, SemanticEmbeddingExecutor,
-    SemanticModelLoadDeferred,
+    SemanticEmbeddingExecutorConfig, SemanticModelLoadDeferred,
 };
 use serde_json::{json, Value};
 
@@ -37,6 +37,33 @@ use super::{
 use super::daemon::daemon_test_job;
 
 use crate::compact_json;
+
+#[cfg(test)]
+thread_local! {
+    static FORCE_SEMANTIC_INDEX_PUBLICATION_DEFERRAL: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+struct SemanticIndexPublicationDeferralGuard;
+
+#[cfg(test)]
+impl Drop for SemanticIndexPublicationDeferralGuard {
+    fn drop(&mut self) {
+        FORCE_SEMANTIC_INDEX_PUBLICATION_DEFERRAL.with(|forced| forced.set(false));
+    }
+}
+
+#[cfg(test)]
+fn force_semantic_index_publication_deferral_for_test() -> SemanticIndexPublicationDeferralGuard {
+    FORCE_SEMANTIC_INDEX_PUBLICATION_DEFERRAL.with(|forced| {
+        assert!(
+            !forced.replace(true),
+            "semantic publication deferral already forced"
+        );
+    });
+    SemanticIndexPublicationDeferralGuard
+}
 
 #[derive(Debug)]
 pub(super) enum DaemonSemanticModelStartup {
@@ -209,21 +236,7 @@ pub(super) fn run_daemon_semantic_job(
                 .is_some_and(SemanticNotReady::retryable) => {}
         Err(error) => return Err(error),
     }
-    // An empty Core generation still needs its durable semantic acknowledgement,
-    // but has no embedding work. Complete that acknowledgement from the
-    // configuration-derived index contract before resolving credentials or an
-    // executor, so an unavailable selected executor cannot strand it.
     let vector_path = source_backed_semantic_vector_path(data_root);
-    if source_eligible_events == 0 && !vector_path.exists() {
-        let mut vector_store = SemanticVectorStore::open(&vector_path, &index_contract)?;
-        let (outcome, indexed_chunks) =
-            reconcile_empty_source_backed_semantic_page(source_generation, &mut vector_store)?;
-        return Ok(daemon_semantic_reconciliation_job(
-            last_run_at_ms,
-            outcome,
-            indexed_chunks,
-        ));
-    }
     if !daemon_deadline_has_min_budget(deadline, DAEMON_MIN_REMAINING_FOR_JOB_SECS) {
         return Ok(daemon_semantic_job_json(
             "skipped",
@@ -231,6 +244,30 @@ pub(super) fn run_daemon_semantic_job(
             last_run_at_ms,
             None,
             None,
+        ));
+    }
+    // An empty Core generation still needs its durable semantic acknowledgement,
+    // but has no embedding work. Admit that index publication through the same
+    // deadline and resource boundaries as ordinary daemon work, then complete
+    // it from the configuration-derived contract before resolving credentials
+    // or constructing an executor.
+    if source_eligible_events == 0 && !vector_path.exists() {
+        if let Some(deferred) = semantic_index_publication_resource_deferred(
+            data_root,
+            &runtime.config.semantic_executor,
+        ) {
+            return Ok(daemon_semantic_resource_deferred_job(
+                last_run_at_ms,
+                deferred,
+            ));
+        }
+        let mut vector_store = SemanticVectorStore::open(&vector_path, &index_contract)?;
+        let (outcome, indexed_chunks) =
+            reconcile_empty_source_backed_semantic_page(source_generation, &mut vector_store)?;
+        return Ok(daemon_semantic_reconciliation_job(
+            last_run_at_ms,
+            outcome,
+            indexed_chunks,
         ));
     }
 
@@ -356,6 +393,22 @@ pub(super) fn run_daemon_semantic_job(
         outcome,
         indexed_chunks,
     ))
+}
+
+fn semantic_index_publication_resource_deferred(
+    data_root: &Path,
+    executor: &SemanticEmbeddingExecutorConfig,
+) -> Option<SemanticResourceDeferred> {
+    #[cfg(test)]
+    if FORCE_SEMANTIC_INDEX_PUBLICATION_DEFERRAL.with(std::cell::Cell::get) {
+        return Some(SemanticResourceDeferred::disk_pressure_for_test());
+    }
+
+    if executor.is_builtin() {
+        semantic_background_resource_deferred(data_root, SemanticBackgroundOperation::IndexBatch)
+    } else {
+        semantic_external_background_resource_deferred(data_root)
+    }
 }
 
 fn open_selected_semantic_vector_store(

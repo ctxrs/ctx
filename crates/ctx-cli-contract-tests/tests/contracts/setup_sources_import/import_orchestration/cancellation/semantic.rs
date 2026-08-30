@@ -1,5 +1,20 @@
 use super::*;
 
+fn wait_for_semantic_status_ready(temp: &TempDir) -> Value {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let status = json_output(ctx(temp).args(["status", "--format=json"]));
+        if status["semantic"]["status"] == "ready" {
+            return status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "semantic daemon did not finish its durable continuation: {status:#}"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
 #[test]
 fn manual_semantic_import_is_ready_on_return_and_defers_terminal_output_for_json_and_human_modes() {
     for (format, progress) in [(Some("json"), "json"), (None, "plain")] {
@@ -253,4 +268,111 @@ fn foreground_semantic_sigint_exits_130_without_terminal_success_or_daemon_colla
             .expect("source-refresh-only daemon lock JSON");
     assert_eq!(lock["pid"], daemon_pid, "{lock:#}");
     assert_eq!(lock["released"], false, "{lock:#}");
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn full_daemon_semantic_observation_sigint_exits_130_without_stopping_or_orphaning_worker() {
+    let temp = tempdir();
+    let server = LoopbackSemanticServer::start(true);
+    let mut daemon =
+        start_source_refresh_daemon_with_semantic_executor(&temp, "full", server.endpoint());
+    let daemon_pid = daemon.child.as_ref().unwrap().id();
+    let daemon_process =
+        NativeProcessProbe::open(daemon_pid).expect("open full semantic daemon process probe");
+    let fixture = temp
+        .path()
+        .join("semantic-full-daemon-observer-sigint.jsonl");
+    write_valid_explicit_custom_source(
+        &fixture,
+        "automatic full daemon semantic observation survives client cancellation",
+    );
+
+    let prepared = ctx(&temp);
+    let mut command = StdCommand::new(prepared.get_program());
+    for (name, value) in prepared.get_envs() {
+        match value {
+            Some(value) => {
+                command.env(name, value);
+            }
+            None => {
+                command.env_remove(name);
+            }
+        }
+    }
+    command
+        .args([
+            "import",
+            "--input-format",
+            "ctx-history-jsonl-v2",
+            "--path",
+            fixture.to_str().unwrap(),
+            "--format=json",
+            "--progress",
+            "json",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    configure_interruptible_client(&mut command);
+    let mut client = SourceRefreshDaemon {
+        child: Some(
+            command
+                .spawn()
+                .expect("start full-daemon semantic observer import"),
+        ),
+    };
+    let client_pid = client.child.as_ref().unwrap().id();
+    server.wait_for_embedding_request();
+
+    interrupt_client_group(client_pid).expect("interrupt full-daemon semantic observer");
+    let exit_deadline = Instant::now() + Duration::from_secs(8);
+    let status = loop {
+        if let Some(status) = client.child.as_mut().unwrap().try_wait().unwrap() {
+            break status;
+        }
+        assert!(
+            Instant::now() < exit_deadline,
+            "full-daemon semantic observer did not exit within the cancellation bound"
+        );
+        thread::sleep(Duration::from_millis(20));
+    };
+    let output = client.child.take().unwrap().wait_with_output().unwrap();
+    assert_eq!(status.code(), Some(130));
+    assert_eq!(output.status, status);
+    assert!(
+        output.stdout.is_empty(),
+        "stdout={}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("History refresh complete"),
+        "stderr={stderr}"
+    );
+    assert!(!stderr.contains("\"done\":true"), "stderr={stderr}");
+
+    daemon_process.assert_running();
+    assert!(daemon.child.as_mut().unwrap().try_wait().unwrap().is_none());
+    assert_eq!(server.request_count(), 2);
+    let daemon_root = data_root(&temp).join("daemon");
+    let lock: Value = serde_json::from_slice(&fs::read(daemon_root.join("daemon.lock")).unwrap())
+        .expect("full semantic daemon lock JSON");
+    assert_eq!(lock["pid"], daemon_pid, "{lock:#}");
+    assert_eq!(lock["released"], false, "{lock:#}");
+    let endpoint: Value = serde_json::from_slice(
+        &fs::read(daemon_root.join("source-refresh-endpoint.json")).unwrap(),
+    )
+    .expect("full semantic daemon endpoint JSON");
+    assert_eq!(endpoint["pid"], daemon_pid, "{endpoint:#}");
+
+    server.release_embedding_response();
+    let ready = wait_for_semantic_status_ready(&temp);
+    assert_eq!(
+        ready["semantic"]["flat_f32"]["core_generation_id"], ready["lexical"]["generation_id"],
+        "{ready:#}"
+    );
+    assert_eq!(ready["daemon"]["pid"], daemon_pid, "{ready:#}");
+    daemon_process.assert_running();
+    assert!(daemon.child.as_mut().unwrap().try_wait().unwrap().is_none());
+    assert_single_semantic_writer(&server.finish());
 }

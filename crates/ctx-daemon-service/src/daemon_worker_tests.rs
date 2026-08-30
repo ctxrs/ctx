@@ -374,63 +374,160 @@ fn ready_empty_v2_generation_is_observed_without_constructing_an_executor() -> R
 #[test]
 fn first_time_empty_v2_generation_acknowledges_without_executor_auth_or_endpoint_traffic(
 ) -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let generation = publish_authoritative_empty_generation_for_test(
-        &source_backed_index_root(temp.path()),
-        "daemon-worker-unacknowledged-empty-v2",
-        RefreshOperation::Refresh,
-        SourceBackedRefreshScope::All,
-        None,
-    )?
-    .generation_id;
-    let listener = TcpListener::bind("127.0.0.1:0")?;
-    listener.set_nonblocking(true)?;
-    let endpoint = format!("http://{}", listener.local_addr()?);
-    let selected = SemanticEmbeddingExecutorConfig::http(
-        &endpoint,
-        ExternalSemanticSpace::new("empty-v2", 96)?,
-    )?;
-    let contract = semantic_index_contract(selected.contract())?;
-    let mut runtime = DaemonRuntime::default();
-    runtime.config.semantic_executor = selected;
-    let args = DaemonRunArgs {
-        loop_interval_seconds: None,
-        max_chunks: None,
-        handle_process_signals: false,
-        force: false,
-        profile: crate::DaemonRunProfile::Persistent,
-        start_mode: None,
-        trigger_command: None,
-        supervisor: crate::DaemonSupervisor::User,
-    };
+    let mut case = FirstTimeEmptyV2DaemonCase::new("acknowledged")?;
+    let job = case.run(None)?;
 
-    let job = run_daemon_semantic_job(
-        &args,
-        temp.path(),
-        &mut runtime,
-        None,
-        true,
-        &ARTIFACT,
-        &RejectingSemanticAuthConfig,
-    )?;
+    assert_ready_empty_daemon_job(&job);
+    case.assert_executor_auth_endpoint_and_model_inactive();
+    case.assert_ready_empty_store()?;
+    Ok(())
+}
 
+#[test]
+fn first_time_empty_v2_generation_respects_expired_deadline_before_store_or_executor_activity(
+) -> Result<()> {
+    let mut case = FirstTimeEmptyV2DaemonCase::new("expired-deadline")?;
+
+    let deferred = case.run(Some(Instant::now()))?;
+
+    assert_eq!(deferred["status"], "skipped", "{deferred:#}");
+    assert_eq!(deferred["reason"], "daemon_deadline", "{deferred:#}");
+    case.assert_unwritten_and_executor_auth_endpoint_model_inactive();
+
+    let ready = case.run(None)?;
+    assert_ready_empty_daemon_job(&ready);
+    case.assert_executor_auth_endpoint_and_model_inactive();
+    case.assert_ready_empty_store()?;
+    Ok(())
+}
+
+#[test]
+fn first_time_empty_v2_generation_respects_resource_deferral_before_store_or_executor_activity(
+) -> Result<()> {
+    let mut case = FirstTimeEmptyV2DaemonCase::new("resource-deferral")?;
+    let forced = force_semantic_index_publication_deferral_for_test();
+
+    let deferred = case.run(None)?;
+
+    drop(forced);
+    assert_eq!(deferred["status"], "resource_deferred", "{deferred:#}");
+    assert_eq!(deferred["reason"], "disk_pressure", "{deferred:#}");
+    assert_eq!(deferred["failure_class"], "resource_pressure");
+    assert_eq!(deferred["retryable"], true);
+    assert_eq!(deferred["resource_deferral"]["available_disk_bytes"], 0);
+    case.assert_unwritten_and_executor_auth_endpoint_model_inactive();
+
+    let ready = case.run(None)?;
+    assert_ready_empty_daemon_job(&ready);
+    case.assert_executor_auth_endpoint_and_model_inactive();
+    case.assert_ready_empty_store()?;
+    Ok(())
+}
+
+struct FirstTimeEmptyV2DaemonCase {
+    temp: tempfile::TempDir,
+    generation: String,
+    listener: TcpListener,
+    contract: ctx_semantic_index::SemanticModelContract,
+    runtime: DaemonRuntime,
+    args: DaemonRunArgs,
+}
+
+impl FirstTimeEmptyV2DaemonCase {
+    fn new(label: &str) -> Result<Self> {
+        let temp = tempfile::tempdir()?;
+        let generation = publish_authoritative_empty_generation_for_test(
+            &source_backed_index_root(temp.path()),
+            &format!("daemon-worker-unacknowledged-empty-v2-{label}"),
+            RefreshOperation::Refresh,
+            SourceBackedRefreshScope::All,
+            None,
+        )?
+        .generation_id;
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        listener.set_nonblocking(true)?;
+        let endpoint = format!("http://{}", listener.local_addr()?);
+        let selected = SemanticEmbeddingExecutorConfig::http(
+            &endpoint,
+            ExternalSemanticSpace::new("empty-v2", 96)?,
+        )?;
+        let contract = semantic_index_contract(selected.contract())?;
+        let mut runtime = DaemonRuntime::default();
+        runtime.config.semantic_executor = selected;
+        Ok(Self {
+            temp,
+            generation,
+            listener,
+            contract,
+            runtime,
+            args: DaemonRunArgs {
+                loop_interval_seconds: None,
+                max_chunks: None,
+                handle_process_signals: false,
+                force: false,
+                profile: crate::DaemonRunProfile::Persistent,
+                start_mode: None,
+                trigger_command: None,
+                supervisor: crate::DaemonSupervisor::User,
+            },
+        })
+    }
+
+    fn run(&mut self, deadline: Option<Instant>) -> Result<Value> {
+        run_daemon_semantic_job(
+            &self.args,
+            self.temp.path(),
+            &mut self.runtime,
+            deadline,
+            true,
+            &ARTIFACT,
+            &RejectingSemanticAuthConfig,
+        )
+    }
+
+    fn assert_executor_auth_endpoint_and_model_inactive(&self) {
+        assert!(self.runtime.semantic_executor.is_none());
+        assert!(!self.runtime.semantic_runtime.is_loaded());
+        assert!(matches!(
+            self.listener.accept(),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+        ));
+    }
+
+    fn assert_unwritten_and_executor_auth_endpoint_model_inactive(&self) {
+        assert!(
+            !source_backed_semantic_vector_path(self.temp.path()).exists(),
+            "deadline/resource deferral must precede semantic store creation"
+        );
+        self.assert_executor_auth_endpoint_and_model_inactive();
+    }
+
+    fn assert_ready_empty_store(&self) -> Result<()> {
+        let store = SemanticVectorStore::open(
+            &source_backed_semantic_vector_path(self.temp.path()),
+            &self.contract,
+        )?;
+        assert!(matches!(
+            store.source_backed_generation_pin_exact(&self.generation, 0)?,
+            SourceBackedGenerationPin::ReadyEmpty
+        ));
+        Ok(())
+    }
+}
+
+fn assert_ready_empty_daemon_job(job: &Value) {
     assert_eq!(job["status"], "ready");
     assert_eq!(job["source_generation_ready"], true);
     assert_eq!(job["source_work_remaining"], false);
     assert_eq!(job["source_records_embedded"], 0);
-    assert!(runtime.semantic_executor.is_none());
-    assert!(!runtime.semantic_runtime.is_loaded());
-    assert!(matches!(
-        listener.accept(),
-        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
-    ));
-    let store =
-        SemanticVectorStore::open(&source_backed_semantic_vector_path(temp.path()), &contract)?;
-    assert!(matches!(
-        store.source_backed_generation_pin_exact(&generation, 0)?,
-        SourceBackedGenerationPin::ReadyEmpty
-    ));
-    Ok(())
+    assert_eq!(job["source_records_decoded"], 0);
+    assert_eq!(job["source_records_filtered"], 0);
+    assert!(
+        job["semantic_progress_sequence"]
+            .as_u64()
+            .is_some_and(|sequence| sequence > 0),
+        "{job:#}"
+    );
 }
 
 #[test]
