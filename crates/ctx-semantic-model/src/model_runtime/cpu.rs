@@ -404,7 +404,7 @@ pub fn prepare_platform_semantic_acceleration(
         if !windows_ml::runtime_is_windows_ml(&runtime) {
             return Err(anyhow!("verified Windows ML runtime is incomplete"));
         }
-        return windows_ml::provision_catalog(&runtime).map(Some);
+        windows_ml::provision_catalog(&runtime).map(Some)
     }
     #[cfg(not(all(ctx_semantic_fastembed, target_os = "windows", target_arch = "x86_64")))]
     {
