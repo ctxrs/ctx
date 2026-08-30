@@ -69,6 +69,7 @@ fn semantic_index_revision_at(
     revision: u64,
     include_record: bool,
 ) -> Result<(VerifiedIndex, Uuid)> {
+    ctx_history_platform::platform_security::establish_private_data_root(index_root)?;
     let source = SourceKey::derive(
         "codex",
         "codex_session_jsonl",
