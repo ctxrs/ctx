@@ -231,7 +231,7 @@ mod platform {
                 let get_path: GetLibraryPath = self.symbol(b"WinMLEpGetLibraryPath\0")?;
                 let mut size = 0;
                 let result = get_size(provider, &mut size);
-                if !succeeded(result) || size < 2 || size > 32 * 1024 {
+                if !succeeded(result) || !(2..=32 * 1024).contains(&size) {
                     return Err(anyhow!(
                         "Windows ML execution provider returned an invalid library path"
                     ));
