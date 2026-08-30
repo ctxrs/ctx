@@ -754,6 +754,7 @@ mod compiled {
     }
 
     /// Read-only validation for an already-published compiled model.
+    #[cfg(unix)]
     pub(crate) fn validate_compiled_model_cache(root: &Path, path: &Path) -> Result<()> {
         let parent = path
             .parent()
@@ -851,6 +852,7 @@ mod compiled {
         Ok(())
     }
 
+    #[cfg(unix)]
     fn validate_compiled_directory_tree_nofollow(base: &Path, leaf: &Path) -> Result<()> {
         let relative = leaf
             .strip_prefix(base)

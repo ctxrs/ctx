@@ -1,11 +1,11 @@
 use std::{fs, path::Path};
 
-#[cfg(unix)]
-use super::compiled::discard_compile_destination;
 use super::compiled::{
     commit_compile_destination, invalidate_compiled_model_cache, prepare_compile_destination,
-    validate_compiled_model_cache, AtomicCommit,
+    AtomicCommit,
 };
+#[cfg(unix)]
+use super::compiled::{discard_compile_destination, validate_compiled_model_cache};
 
 fn write(path: &Path, bytes: &[u8]) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
