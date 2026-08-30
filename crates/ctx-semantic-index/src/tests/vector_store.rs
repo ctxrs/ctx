@@ -237,7 +237,11 @@ fn passive_snapshot_lock_blocks_a_writer_from_committing_between_admission_and_p
     Ok(())
 }
 
-#[cfg(unix)]
+// Darwin filesystems reject malformed UTF-8 path components with EILSEQ before
+// the store can be created. Other Unix targets retain the invalid-byte oracle;
+// Darwin separately exercises WAL/rollback-journal refusal and symlinked
+// parent components.
+#[cfg(all(unix, not(target_os = "macos")))]
 #[test]
 fn passive_snapshot_supports_non_utf8_roots_and_exact_sidecar_paths() -> Result<()> {
     use std::os::unix::ffi::OsStringExt;
