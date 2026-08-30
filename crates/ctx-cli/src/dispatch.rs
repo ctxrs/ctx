@@ -578,6 +578,15 @@ fn render_command_result_error(
                     &serde_json::to_string(&error.structured())?,
                 )?;
                 Some(RenderedJsonError.into())
+            } else if let Some(error) =
+                error.downcast_ref::<ctx_daemon_cli::SemanticCompletionError>()
+            {
+                write_machine_error(
+                    search_operation,
+                    ui,
+                    &serde_json::to_string(&semantic_completion_error_json(error))?,
+                )?;
+                Some(RenderedJsonError.into())
             } else {
                 write_machine_error(search_operation, ui, &format!("Error: {error:?}"))?;
                 Some(RenderedCliError.into())
@@ -590,6 +599,46 @@ fn render_command_result_error(
         None
     };
     Ok(rendered_error)
+}
+
+fn semantic_completion_error_json(
+    error: &ctx_daemon_cli::SemanticCompletionError,
+) -> serde_json::Value {
+    let detail = error.to_string();
+    let mut structured = serde_json::json!({
+        "error": detail,
+        "error_code": "semantic_completion_failed",
+        "reason": error.code(),
+        "generation_id": error.generation_id(),
+        "core_published": true,
+        "retryable": error.retryable(),
+        "detail": detail,
+    });
+    let fields = structured
+        .as_object_mut()
+        .expect("semantic completion error JSON must be an object");
+    match error {
+        ctx_daemon_cli::SemanticCompletionError::CoreSuperseded {
+            active_generation_id,
+            ..
+        } => {
+            fields.insert(
+                "active_generation_id".to_owned(),
+                serde_json::Value::String(active_generation_id.clone()),
+            );
+        }
+        ctx_daemon_cli::SemanticCompletionError::DaemonJobFailed {
+            failure_class: Some(failure_class),
+            ..
+        } => {
+            fields.insert(
+                "failure_class".to_owned(),
+                serde_json::Value::String(failure_class.clone()),
+            );
+        }
+        _ => {}
+    }
+    structured
 }
 
 fn write_machine_error(search_operation: bool, ui: &mut Ui, message: &str) -> Result<()> {

@@ -583,6 +583,35 @@ authority. A process started for import reports `start_mode: "auto"` and
 Import result schema version 2 does not embed daemon process state. Use
 `ctx status --format json` to inspect daemon and supervisor health.
 
+When opted-in semantic completion fails after Import has durably published
+Core, JSON mode exits nonzero, writes no import result to stdout, and writes
+one structured error object to stderr. For example:
+
+```json
+{
+  "error": "daemon semantic job failed for Core generation core-gen-42: embedding executor unavailable",
+  "error_code": "semantic_completion_failed",
+  "reason": "semantic_completion_job_failed",
+  "generation_id": "core-gen-42",
+  "core_published": true,
+  "retryable": true,
+  "detail": "daemon semantic job failed for Core generation core-gen-42: embedding executor unavailable",
+  "failure_class": "resource_pressure"
+}
+```
+
+`error_code` is the stable top-level classification. `reason` retains the
+granular `SemanticCompletionError` code, `generation_id` identifies the
+already-published Core generation, and `core_published: true` makes clear that
+semantic failure did not roll Core back. `detail` and `error` contain the same
+human-readable typed diagnostic. `retryable` comes from the typed completion
+failure. A superseded-generation failure additionally includes
+`active_generation_id`; a daemon-job failure includes `failure_class` when the
+daemon supplied one. Those variant-specific members are otherwise omitted.
+Clients must ignore unknown additive fields and should branch first on
+`error_code`, then on `reason` when finer recovery behavior is needed. Human
+output is unchanged.
+
 ## Progress
 
 ```bash
