@@ -141,10 +141,11 @@ fn pending(observation: DaemonSemanticCompletionObservation) -> DaemonSemanticPr
 }
 
 #[test]
-fn substantive_progress_ignores_liveness_timestamps_and_accepts_indexed_work() {
+fn substantive_progress_uses_only_the_durable_sequence() {
     let selected = "https://semantic.example.test/";
     let mut first_job = job("budget_exhausted");
     first_job["indexed_chunks"] = json!(8);
+    first_job["semantic_progress_sequence"] = json!(8);
     let first = pending(classify_exact_daemon_semantic_completion(
         &status("applied", selected, selected),
         Some(&first_job),
@@ -153,6 +154,7 @@ fn substantive_progress_ignores_liveness_timestamps_and_accepts_indexed_work() {
     let mut advanced_job = job("budget_exhausted");
     advanced_job["last_run_at_ms"] = json!(201);
     advanced_job["indexed_chunks"] = json!(32);
+    advanced_job["semantic_progress_sequence"] = json!(16);
     let second = pending(classify_exact_daemon_semantic_completion(
         &status("applied", selected, selected),
         Some(&advanced_job),
@@ -183,7 +185,7 @@ fn resource_deferred_churn_is_not_substantive_progress() {
         Some(&deferred_job),
         &target(),
     ));
-    assert!(first.substantively_advances_from(None));
+    assert!(!first.substantively_advances_from(None));
 
     let mut later_status = status("applied", selected, selected);
     later_status["config_reload"]["last_attempt_at_ms"] = json!(999);
@@ -199,7 +201,7 @@ fn resource_deferred_churn_is_not_substantive_progress() {
 }
 
 #[test]
-fn exact_job_binding_and_source_readiness_are_substantive_progress() {
+fn exact_job_binding_and_source_readiness_without_a_sequence_are_not_progress() {
     let selected = "https://semantic.example.test/";
     let config_active = pending(classify_exact_daemon_semantic_completion(
         &status("applied", selected, selected),
@@ -211,7 +213,7 @@ fn exact_job_binding_and_source_readiness_are_substantive_progress() {
         Some(&job("budget_exhausted")),
         &target(),
     ));
-    assert!(job_active.substantively_advances_from(Some(&config_active)));
+    assert!(!job_active.substantively_advances_from(Some(&config_active)));
 
     let mut source_ready_job = job("budget_exhausted");
     source_ready_job["source_generation_ready"] = json!(true);
@@ -221,7 +223,38 @@ fn exact_job_binding_and_source_readiness_are_substantive_progress() {
         Some(&source_ready_job),
         &target(),
     ));
-    assert!(source_ready.substantively_advances_from(Some(&job_active)));
+    assert!(!source_ready.substantively_advances_from(Some(&job_active)));
+}
+
+#[test]
+fn sequence_regression_with_8_to_16_to_8_chunk_churn_is_not_progress() {
+    let selected = "https://semantic.example.test/";
+    let mut first_job = job("budget_exhausted");
+    first_job["indexed_chunks"] = json!(8);
+    first_job["semantic_progress_sequence"] = json!(8);
+    let first = pending(classify_exact_daemon_semantic_completion(
+        &status("applied", selected, selected),
+        Some(&first_job),
+        &target(),
+    ));
+    let mut advanced_job = job("budget_exhausted");
+    advanced_job["indexed_chunks"] = json!(16);
+    advanced_job["semantic_progress_sequence"] = json!(16);
+    let advanced = pending(classify_exact_daemon_semantic_completion(
+        &status("applied", selected, selected),
+        Some(&advanced_job),
+        &target(),
+    ));
+    assert!(advanced.substantively_advances_from(Some(&first)));
+    let mut regressed_job = job("budget_exhausted");
+    regressed_job["indexed_chunks"] = json!(8);
+    regressed_job["semantic_progress_sequence"] = json!(8);
+    let regressed = pending(classify_exact_daemon_semantic_completion(
+        &status("applied", selected, selected),
+        Some(&regressed_job),
+        &target(),
+    ));
+    assert!(!regressed.substantively_advances_from(Some(&advanced)));
 }
 
 #[test]

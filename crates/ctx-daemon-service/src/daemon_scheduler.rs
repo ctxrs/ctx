@@ -1,7 +1,9 @@
 #[path = "daemon_scheduler_retry_deferral.rs"]
 mod retry_deferral;
+mod semantic_progress;
 
 pub(super) use retry_deferral::DaemonConsumerRetryDeferral;
+use semantic_progress::bind_semantic_generation;
 
 #[derive(Default)]
 pub(super) struct DaemonSidecarDrain {
@@ -721,7 +723,7 @@ fn run_daemon_semantic_job_with_retry(
     }
     if !runtime.semantic_retry.ready() {
         let job = daemon_semantic_retry_backoff_job(data_root, &runtime.semantic_retry);
-        return bind_semantic_generation(job, generation);
+        return bind_semantic_generation(data_root, job, generation);
     }
     let job = run_daemon_semantic_job(
         args,
@@ -733,26 +735,11 @@ fn run_daemon_semantic_job_with_retry(
         ports.config,
     )
     .unwrap_or_else(|error| daemon_semantic_failed_job(data_root, error));
-    let job = bind_semantic_generation(job, generation);
+    let job = bind_semantic_generation(data_root, job, generation);
     let job = record_daemon_job_retry(&mut runtime.semantic_retry, job);
     if semantic_failure_class_from_job(&job).is_some_and(SemanticFailureClass::blocks_until_restart)
     {
         runtime.semantic_blocked_job = Some(job.clone());
-    }
-    job
-}
-
-fn bind_semantic_generation(mut job: Value, generation: DaemonSemanticGeneration<'_>) -> Value {
-    let semantic_contract = generation.contract;
-    job["model_key"] = Value::String(semantic_contract.model_key().to_owned());
-    job["model_contract_fingerprint"] = Value::String(semantic_contract.fingerprint().to_owned());
-    if let Ok(fingerprint) =
-        ctx_semantic_index::source_backed_semantic_contract_fingerprint(semantic_contract)
-    {
-        job["source_contract_fingerprint"] = Value::String(fingerprint);
-    }
-    if let Some(core_generation_id) = generation.core_generation_id {
-        job["core_generation_id"] = Value::String(core_generation_id.to_owned());
     }
     job
 }

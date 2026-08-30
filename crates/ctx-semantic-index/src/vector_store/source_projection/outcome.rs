@@ -14,6 +14,8 @@ pub struct SourceBackedSemanticOutcome {
     pub(crate) metadata_records_touched: u64,
     pub(crate) ready: bool,
     pub(crate) work_remaining: bool,
+    pub(crate) semantic_progress_sequence: Option<u64>,
+    pub(crate) full_rebuild_boundary: bool,
 }
 
 impl SourceBackedSemanticOutcome {
@@ -64,6 +66,12 @@ impl SourceBackedSemanticOutcome {
     pub fn work_remaining(&self) -> bool {
         self.work_remaining
     }
+
+    /// Opaque durable progress marker for the exact source-backed semantic
+    /// target reconciled by this outcome.
+    pub fn semantic_progress_sequence(&self) -> Option<u64> {
+        self.semantic_progress_sequence
+    }
 }
 
 pub(super) fn merge_outcome(
@@ -90,4 +98,8 @@ pub(super) fn merge_outcome(
         .saturating_add(next.metadata_records_touched);
     total.ready |= next.ready;
     total.work_remaining |= next.work_remaining;
+    total.semantic_progress_sequence = total
+        .semantic_progress_sequence
+        .max(next.semantic_progress_sequence);
+    total.full_rebuild_boundary |= next.full_rebuild_boundary;
 }

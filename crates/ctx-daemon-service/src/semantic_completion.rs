@@ -82,6 +82,9 @@ pub struct DaemonSemanticProgress {
     pub job_target_matches: bool,
     pub job_status: Option<String>,
     pub job_last_run_at_ms: Option<i64>,
+    /// Opaque durable sequence owned by the exact semantic projection target.
+    /// It is the only no-progress-budget authority.
+    pub job_semantic_progress_sequence: Option<u64>,
     pub job_indexed_chunks: Option<u64>,
     pub job_source_generation_ready: Option<bool>,
     pub job_source_work_remaining: Option<bool>,
@@ -91,36 +94,22 @@ impl DaemonSemanticProgress {
     /// Returns whether this observation proves a substantive advance beyond
     /// the last one accepted for the same completion attempt.
     ///
-    /// Re-applying the exact requested configuration is a one-time activation
-    /// advance. Binding the exact job, reaching source readiness, completing
-    /// source work, or changing the positive indexed-chunk evidence are also
-    /// advances. Reload and job receipt timestamps, retry states, and resource
-    /// deferrals deliberately do not advance this marker.
+    /// Only a strict increase in the durable sequence is an advance. Reload
+    /// timestamps, job-status churn, source counters, retries, deferrals,
+    /// target changes, and malformed receipts deliberately do not reset the
+    /// no-progress budget.
     pub fn substantively_advances_from(&self, previous: Option<&Self>) -> bool {
-        if self.exact_config_is_active()
-            && previous.is_none_or(|progress| !progress.exact_config_is_active())
-        {
-            return true;
-        }
-        if self.job_target_matches && previous.is_none_or(|progress| !progress.job_target_matches) {
-            return true;
-        }
-        if self.job_source_generation_ready == Some(true)
-            && previous.is_none_or(|progress| progress.job_source_generation_ready != Some(true))
-        {
-            return true;
-        }
-        if self.job_source_work_remaining == Some(false)
-            && previous.is_none_or(|progress| progress.job_source_work_remaining != Some(false))
-        {
-            return true;
-        }
-        if let Some(indexed_chunks) = self.job_indexed_chunks.filter(|chunks| *chunks > 0) {
-            return previous
-                .and_then(|progress| progress.job_indexed_chunks.filter(|chunks| *chunks > 0))
-                != Some(indexed_chunks);
-        }
-        false
+        self.exact_config_is_active()
+            && self.job_target_matches
+            && self
+                .job_semantic_progress_sequence
+                .is_some_and(|current| current > 0)
+            && previous
+                .and_then(|progress| progress.job_semantic_progress_sequence)
+                .is_none_or(|previous| {
+                    self.job_semantic_progress_sequence
+                        .is_some_and(|current| current > previous)
+                })
     }
 
     fn exact_config_is_active(&self) -> bool {
@@ -267,6 +256,10 @@ pub fn classify_exact_daemon_semantic_completion(
         job_last_run_at_ms: exact_job
             .and_then(|job| job.get("last_run_at_ms"))
             .and_then(Value::as_i64),
+        job_semantic_progress_sequence: exact_job
+            .and_then(|job| job.get("semantic_progress_sequence"))
+            .and_then(Value::as_u64)
+            .filter(|sequence| *sequence > 0),
         job_indexed_chunks: exact_job
             .and_then(|job| job.get("indexed_chunks"))
             .and_then(Value::as_u64),

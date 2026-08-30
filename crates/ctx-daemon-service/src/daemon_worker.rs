@@ -20,7 +20,7 @@ use super::{
     daemon::DaemonRuntime,
     daemon_retry::{annotate_semantic_failure, classify_semantic_failure, DaemonRetryBackoff},
     daemon_scheduler::{daemon_deadline_has_min_budget, daemon_run_start_mode},
-    paths_status::write_daemon_status,
+    paths_status::{daemon_semantic_job_path, write_daemon_job_status, write_daemon_status},
     resource_policy::{
         semantic_background_resource_deferred, semantic_external_background_resource_deferred,
         semantic_resource_deferral_releases_runtime, SemanticBackgroundOperation,
@@ -307,12 +307,35 @@ pub(super) fn run_daemon_semantic_job(
             DaemonSemanticModelStartup::Finished(job) => return Ok(job),
         }
     }
+    let core_generation_id = source_generation.generation_id().to_owned();
+    let source_contract_fingerprint =
+        ctx_semantic_index::source_backed_semantic_contract_fingerprint(&index_contract)?;
+    let mut publish_progress = |sequence| {
+        let mut progress = daemon_semantic_job_json(
+            "budget_exhausted",
+            None,
+            utc_now().timestamp_millis(),
+            None,
+            None,
+        );
+        progress["model_key"] = Value::String(index_contract.model_key().to_owned());
+        progress["model_contract_fingerprint"] =
+            Value::String(index_contract.fingerprint().to_owned());
+        progress["source_contract_fingerprint"] =
+            Value::String(source_contract_fingerprint.clone());
+        progress["core_generation_id"] = Value::String(core_generation_id.clone());
+        progress["semantic_progress_sequence"] = json!(sequence);
+        progress["source_generation_ready"] = Value::Bool(false);
+        progress["source_work_remaining"] = Value::Bool(true);
+        write_daemon_job_status(&daemon_semantic_job_path(data_root), &progress)
+    };
     let (outcome, indexed_chunks) = reconcile_source_backed_semantic_page(
         data_root,
         source_generation,
         &mut vector_store,
         semantic_executor,
         deadline,
+        &mut publish_progress,
     )?;
     let (status, reason, last_error) = if outcome.ready() {
         ("ready", None, None)
@@ -327,6 +350,9 @@ pub(super) fn run_daemon_semantic_job(
         last_error,
     );
     annotate_source_backed_semantic_progress(&mut job, &outcome);
+    if let Some(sequence) = outcome.semantic_progress_sequence() {
+        job["semantic_progress_sequence"] = json!(sequence);
+    }
     Ok(job)
 }
 
@@ -380,6 +406,7 @@ fn reconcile_source_backed_semantic_page(
     vector_store: &mut SemanticVectorStore,
     executor: &dyn SemanticEmbeddingExecutor,
     deadline: Option<Instant>,
+    progress: &mut dyn FnMut(u64) -> Result<()>,
 ) -> Result<(SourceBackedSemanticOutcome, usize)> {
     let index = generation.into_index();
     let mut builder = SourceBackedSemanticDocumentBuilder::new(&index);
@@ -388,8 +415,13 @@ fn reconcile_source_backed_semantic_page(
         deadline,
         indexed_chunks: 0,
     };
-    let outcome =
-        vector_store.reconcile_source_backed_index(&index, &mut builder, &mut embedder)?;
+    let outcome = vector_store.reconcile_source_backed_index_with_checkpoint_and_progress(
+        &index,
+        &mut builder,
+        &mut embedder,
+        &mut || Ok(()),
+        progress,
+    )?;
     Ok((outcome, embedder.indexed_chunks))
 }
 

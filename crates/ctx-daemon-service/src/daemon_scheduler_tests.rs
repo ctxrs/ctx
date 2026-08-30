@@ -805,6 +805,10 @@ fn automatic_scheduler_restart_migrates_legacy_semantic_state_despite_ready_job(
     assert_eq!(initial_job["status"], "ready");
     assert_eq!(initial_job["core_generation_id"], generation);
     assert_eq!(
+        initial_job["semantic_progress_sequence"], 1,
+        "automatic scheduler publishes the final durable acknowledgement sequence"
+    );
+    assert_eq!(
         initial_job["source_contract_fingerprint"],
         contract_fingerprint
     );

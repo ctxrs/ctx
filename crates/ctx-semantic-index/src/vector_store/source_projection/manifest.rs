@@ -48,6 +48,11 @@ pub(super) struct SourceProjectionFrontier {
     pub(super) flat_publication: FlatPublicationToken,
     #[serde(default)]
     pub(super) flat_staging: Option<FlatSourceStagingToken>,
+    /// Monotonic only within this exact Core/model/source target. It is
+    /// advanced with a durable reconciliation boundary, never with a status
+    /// write or an elapsed-time observation.
+    #[serde(default)]
+    pub(super) semantic_progress_sequence: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -78,6 +83,10 @@ pub(super) struct SourceProjectionAcknowledgement {
     pub(super) flat_active_events: u64,
     #[serde(default)]
     pub(super) flat_active_chunks: u64,
+    /// Carries the frontier sequence across final acknowledgement, after the
+    /// frontier itself has been removed.
+    #[serde(default)]
+    pub(super) semantic_progress_sequence: u64,
 }
 
 pub(super) struct AcknowledgedSourceProjection {

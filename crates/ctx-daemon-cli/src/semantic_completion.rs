@@ -583,6 +583,10 @@ enum CompletionProgress {
 impl CompletionProgress {
     fn substantively_advances_from(&self, previous: Option<&Self>) -> bool {
         match self {
+            // A ready job is not a progress receipt. The projection's final
+            // acknowledgement has already advanced its durable sequence, and
+            // readiness itself may be stale or malformed status data.
+            Self::ReadyAwaitingIndex => false,
             Self::Pending(_) if matches!(previous, Some(Self::ReadyAwaitingIndex)) => false,
             Self::Pending(progress) => {
                 progress.substantively_advances_from(previous.map(|previous| match previous {
@@ -590,7 +594,6 @@ impl CompletionProgress {
                     Self::ReadyAwaitingIndex => unreachable!("handled above"),
                 }))
             }
-            Self::ReadyAwaitingIndex => !matches!(previous, Some(Self::ReadyAwaitingIndex)),
         }
     }
 }

@@ -140,6 +140,7 @@ fn pending_progress(
         job_target_matches: true,
         job_status: Some("budget_exhausted".to_owned()),
         job_last_run_at_ms: Some(run_at_ms),
+        job_semantic_progress_sequence: Some(indexed_chunks),
         job_indexed_chunks: Some(indexed_chunks),
         job_source_generation_ready: Some(false),
         job_source_work_remaining: Some(true),
@@ -160,6 +161,7 @@ fn resource_deferred_progress(
         job_target_matches: true,
         job_status: Some("resource_deferred".to_owned()),
         job_last_run_at_ms: Some(run_at_ms),
+        job_semantic_progress_sequence: None,
         job_indexed_chunks: None,
         job_source_generation_ready: None,
         job_source_work_remaining: None,
@@ -342,14 +344,14 @@ fn resource_deferred_receipt_churn_exhausts_the_no_progress_budget() -> Result<(
 }
 
 #[test]
-fn readiness_regression_does_not_reset_semantic_progress() {
+fn readiness_without_a_sequence_does_not_reset_semantic_progress() {
     let pending = match pending_progress(9, 9, 9, 8) {
         DaemonSemanticCompletionObservation::Pending(progress) => {
             CompletionProgress::Pending(progress)
         }
         other => panic!("expected pending observation, got {other:?}"),
     };
-    assert!(CompletionProgress::ReadyAwaitingIndex.substantively_advances_from(Some(&pending)));
+    assert!(!CompletionProgress::ReadyAwaitingIndex.substantively_advances_from(Some(&pending)));
     assert!(!pending.substantively_advances_from(Some(&CompletionProgress::ReadyAwaitingIndex)));
 }
 

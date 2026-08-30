@@ -16,6 +16,38 @@ impl std::fmt::Display for ProjectionCheckpointFailure {
 impl std::error::Error for ProjectionCheckpointFailure {}
 
 #[test]
+fn durable_sequence_is_published_for_each_multi_page_boundary_before_return() -> Result<()> {
+    let fixture = Fixture::new(1)?;
+    let contract = external_contract(
+        "http://127.0.0.1:43122/v1/embeddings",
+        "space-progress-pages",
+        4_095,
+    )?;
+    let page_limit = source_event_page_limit(&contract);
+    let index = fixture.publish(
+        "progress-pages",
+        &[(0, bodies("progress-pages", page_limit + 1))],
+    )?;
+    let mut store = SemanticVectorStore::open(&fixture.semantic_path, &contract)?;
+    let mut published = Vec::new();
+    let outcome = store.reconcile_source_backed_index_with_checkpoint_and_progress(
+        &index,
+        &mut CoreBuilder::default(),
+        &mut DimensionEmbedder::new(&contract),
+        &mut || Ok(()),
+        &mut |sequence| {
+            published.push(sequence);
+            Ok(())
+        },
+    )?;
+
+    assert!(outcome.ready());
+    assert_eq!(published, vec![1, 2, 3, 4]);
+    assert_eq!(outcome.semantic_progress_sequence(), Some(4));
+    Ok(())
+}
+
+#[test]
 fn checkpoint_inside_source_page_loop_preserves_typed_interruption_and_hides_staged_pages(
 ) -> Result<()> {
     let fixture = Fixture::new(1)?;
