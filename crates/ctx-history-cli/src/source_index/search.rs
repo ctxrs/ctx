@@ -28,7 +28,7 @@ use crate::{
     HistoryCliConfig, RefreshMode, SearchExecutionObservation, SearchFailurePhase,
 };
 use ctx_daemon_cli::{
-    wait_for_daemon_query_service, wait_for_daemon_semantic_generation,
+    wait_for_daemon_query_service_cancellable, wait_for_daemon_semantic_generation,
     PinnedSourceBackedGeneration, SourceBackedRefreshDaemonUnavailable, SourceBackedRefreshMode,
     SourceBackedRefreshObservation,
 };
@@ -420,7 +420,7 @@ fn run_search_inner<P: HistorySemanticPort>(
         policy.semantic,
     );
     if should_wait_for_daemon_query_service(refresh_mode, config.daemon.enabled) && needs_semantic {
-        wait_for_daemon_query_service(&data_root, Duration::from_secs(3));
+        let _ = wait_for_daemon_query_service_cancellable(&data_root, Duration::from_secs(3))?;
     }
     let mut refresh = observed_refresh_for_search(request, refresh_mode, &data_root, observation)?;
     if refresh_mode == RefreshArg::Wait && config.daemon.enabled && needs_semantic {

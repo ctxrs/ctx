@@ -77,20 +77,63 @@ fn selected_semantic_contract(data_root: &Path) -> Result<SemanticModelContract>
 }
 
 pub fn wait_for_daemon_query_service(data_root: &Path, timeout: Duration) -> bool {
+    wait_for_daemon_query_service_with(
+        timeout,
+        || daemon_query_service_available(data_root),
+        || Ok(()),
+        std::thread::sleep,
+    )
+    .expect("passive daemon query-service wait has an inert checkpoint")
+}
+
+/// Waits for semantic query-service readiness while observing the active
+/// final-binary foreground operation. Outside that operation the checkpoint is
+/// inert, preserving the passive readiness contract.
+pub fn wait_for_daemon_query_service_cancellable(
+    data_root: &Path,
+    timeout: Duration,
+) -> Result<bool> {
+    wait_for_daemon_query_service_with(
+        timeout,
+        || daemon_query_service_available(data_root),
+        super::finite_worker_owner::checkpoint,
+        std::thread::sleep,
+    )
+}
+
+fn wait_for_daemon_query_service_with<Available, Checkpoint, Pause>(
+    timeout: Duration,
+    mut available: Available,
+    mut checkpoint: Checkpoint,
+    mut pause: Pause,
+) -> Result<bool>
+where
+    Available: FnMut() -> bool,
+    Checkpoint: FnMut() -> Result<()>,
+    Pause: FnMut(Duration),
+{
     let started = Instant::now();
     loop {
-        if daemon_query_service_available(data_root) {
-            return true;
+        checkpoint()?;
+        if available() {
+            checkpoint()?;
+            return Ok(true);
         }
+        checkpoint()?;
         if started.elapsed() >= timeout {
-            return false;
+            checkpoint()?;
+            return Ok(false);
         }
-        std::thread::sleep(Duration::from_millis(100));
+        checkpoint()?;
+        pause(Duration::from_millis(100));
+        checkpoint()?;
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+
     use super::*;
 
     fn compatible_ping_response() -> Value {
@@ -194,5 +237,77 @@ mod tests {
             &response,
             semantic_model_contract()
         ));
+    }
+
+    #[test]
+    fn cancellable_wait_interrupts_after_pause_before_another_probe() {
+        let interrupted = Cell::new(false);
+        let probes = Cell::new(0_u32);
+        let pauses = Cell::new(0_u32);
+        let continued_to_query_or_output = Cell::new(false);
+
+        let result = (|| -> Result<()> {
+            let _ = wait_for_daemon_query_service_with(
+                Duration::from_secs(1),
+                || {
+                    probes.set(probes.get() + 1);
+                    false
+                },
+                || {
+                    if interrupted.get() {
+                        Err(anyhow::Error::new(crate::FiniteWorkerInterrupted))
+                    } else {
+                        Ok(())
+                    }
+                },
+                |_| {
+                    pauses.set(pauses.get() + 1);
+                    interrupted.set(true);
+                },
+            )?;
+            continued_to_query_or_output.set(true);
+            Ok(())
+        })();
+
+        let error = result.expect_err("query-service wait must stop after interrupted pause");
+        assert!(crate::finite_worker_interrupted(&error));
+        assert_eq!(probes.get(), 1);
+        assert_eq!(pauses.get(), 1);
+        assert!(!continued_to_query_or_output.get());
+    }
+
+    #[test]
+    fn cancellable_wait_checks_interruption_after_a_successful_probe() {
+        let interrupted = Cell::new(false);
+        let probes = Cell::new(0_u32);
+        let pauses = Cell::new(0_u32);
+        let continued_to_query_or_output = Cell::new(false);
+
+        let result = (|| -> Result<()> {
+            let _ = wait_for_daemon_query_service_with(
+                Duration::from_secs(1),
+                || {
+                    probes.set(probes.get() + 1);
+                    interrupted.set(true);
+                    true
+                },
+                || {
+                    if interrupted.get() {
+                        Err(anyhow::Error::new(crate::FiniteWorkerInterrupted))
+                    } else {
+                        Ok(())
+                    }
+                },
+                |_| pauses.set(pauses.get() + 1),
+            )?;
+            continued_to_query_or_output.set(true);
+            Ok(())
+        })();
+
+        let error = result.expect_err("query-service readiness must not hide interruption");
+        assert!(crate::finite_worker_interrupted(&error));
+        assert_eq!(probes.get(), 1);
+        assert_eq!(pauses.get(), 0);
+        assert!(!continued_to_query_or_output.get());
     }
 }

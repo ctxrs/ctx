@@ -289,7 +289,7 @@ pub use runtime_limits::SEMANTIC_WORKER_BATCH_MAX;
 mod query_adapter;
 pub use query_adapter::{wait_for_daemon_semantic_generation, SemanticQueryAdapter};
 mod query_service;
-pub use query_service::wait_for_daemon_query_service;
+pub use query_service::{wait_for_daemon_query_service, wait_for_daemon_query_service_cancellable};
 mod daemon;
 mod paths_status;
 pub use daemon::{run_daemon_command, update_indexing_mode};
