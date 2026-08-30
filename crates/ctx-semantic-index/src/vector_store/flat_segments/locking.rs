@@ -23,7 +23,7 @@ pub(crate) struct FlatStoreCoordinationGuard {
 impl FlatStoreCoordinationGuard {
     pub(crate) fn lock_passive_snapshot(root: &Path) -> FlatResult<Self> {
         #[cfg(windows)]
-        return Self::lock_passive_snapshot_windows(root, || {});
+        return Self::lock_passive_snapshot_windows(root, || {}, || {});
         #[cfg(not(windows))]
         Ok(Self {
             lock: FileLock::try_shared_passive(&transaction_lock_path(root))?,
@@ -33,22 +33,33 @@ impl FlatStoreCoordinationGuard {
     #[cfg(windows)]
     fn lock_passive_snapshot_windows(
         root: &Path,
+        lock_admitted: impl FnOnce(),
         root_authority_admitted: impl FnOnce(),
     ) -> FlatResult<Self> {
+        // The shared transaction lock is the admission gate.  In particular,
+        // do not retain root authority until that admission succeeds: a writer
+        // which already holds the exclusive lock must remain able to publish.
+        let lock = FileLock::try_shared_passive(&transaction_lock_path(root))?;
+        lock_admitted();
+
+        // Once admitted, the no-delete lock handle pins the lock's root path
+        // while this stricter directory authority is acquired before callers
+        // can open SQLite or Flat children.
         let root_authority = PassiveRootAuthority::open(root)?;
         root_authority_admitted();
         Ok(Self {
-            lock: FileLock::try_shared_passive(&transaction_lock_path(root))?,
+            lock,
             root_authority: Some(root_authority),
         })
     }
 
     #[cfg(all(test, windows))]
-    fn lock_passive_snapshot_after_root_authority(
+    fn lock_passive_snapshot_with_admission_hooks(
         root: &Path,
+        lock_admitted: impl FnOnce(),
         root_authority_admitted: impl FnOnce(),
     ) -> FlatResult<Self> {
-        Self::lock_passive_snapshot_windows(root, root_authority_admitted)
+        Self::lock_passive_snapshot_windows(root, lock_admitted, root_authority_admitted)
     }
 
     pub(crate) fn lock_control_writer(root: &Path) -> FlatResult<Self> {
@@ -68,10 +79,21 @@ impl FlatStoreCoordinationGuard {
     }
 }
 
+#[cfg(windows)]
+impl Drop for FlatStoreCoordinationGuard {
+    fn drop(&mut self) {
+        // This is deliberately not left to field-drop order.  A newly admitted
+        // writer may publish as soon as the transaction lock is released, so
+        // release the restrictive root share before that can happen.
+        drop(self.root_authority.take());
+        self.lock.unlock();
+    }
+}
+
 /// Retains the absolute Windows semantic root with generic-read authority and
-/// read/write sharing, but without delete sharing. The admitted directory
-/// therefore cannot be renamed, replaced, or converted to a reparse point
-/// while passive children are open.
+/// read sharing, but without write or delete sharing. The admitted directory
+/// therefore cannot be mutated, renamed, replaced, or converted to a reparse
+/// point while passive children are open.
 #[cfg(windows)]
 struct PassiveRootAuthority {
     path: std::path::PathBuf,
@@ -84,7 +106,6 @@ impl PassiveRootAuthority {
         use std::os::windows::fs::OpenOptionsExt as _;
 
         const FILE_SHARE_READ: u32 = 0x0000_0001;
-        const FILE_SHARE_WRITE: u32 = 0x0000_0002;
         const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
         const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
         const FILE_GENERIC_READ: u32 = 0x0012_0089;
@@ -93,7 +114,7 @@ impl PassiveRootAuthority {
             .map_err(|source| io_error("resolve passive root authority", root, source))?;
         let handle = OpenOptions::new()
             .access_mode(FILE_GENERIC_READ)
-            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .share_mode(FILE_SHARE_READ)
             .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
             .open(&path)
             .map_err(|source| io_error("open passive root authority", &path, source))?;
@@ -168,11 +189,15 @@ impl FileLock {
     fn validate_retained(&self) -> FlatResult<()> {
         validate_lock_file(&self.path, &self.file)
     }
+
+    fn unlock(&self) {
+        let _ = fs2::FileExt::unlock(&self.file);
+    }
 }
 
 impl Drop for FileLock {
     fn drop(&mut self) {
-        let _ = fs2::FileExt::unlock(&self.file);
+        self.unlock();
     }
 }
 
@@ -304,39 +329,43 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn passive_root_authority_precedes_the_child_lock_open() {
+    fn passive_transaction_lock_precedes_root_authority() {
         let temporary = tempfile::tempdir().unwrap();
         let parent = temporary.path().join("search");
         let root = parent.join("semantic");
         let displaced_root = parent.join("semantic-displaced");
         let displaced_parent = temporary.path().join("search-displaced");
         let lock = transaction_lock_path(&root);
-        let displaced_lock = root.join("flat_transaction.lock.displaced");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(&lock, b"").unwrap();
         let mut attempts = None;
 
-        let guard =
-            FlatStoreCoordinationGuard::lock_passive_snapshot_after_root_authority(&root, || {
-                std::fs::rename(&lock, &displaced_lock)
-                    .expect("the hook must run before the child lock is opened");
-                std::fs::rename(&displaced_lock, &lock).unwrap();
+        let guard = FlatStoreCoordinationGuard::lock_passive_snapshot_with_admission_hooks(
+            &root,
+            || {
                 attempts = Some((
+                    std::fs::rename(&lock, root.join("flat_transaction.lock.displaced")),
                     std::fs::rename(&root, &displaced_root),
                     std::fs::rename(&parent, &displaced_parent),
                 ));
-            })
-            .unwrap();
-        let (root_replacement, parent_replacement) =
+            },
+            || {},
+        )
+        .unwrap();
+        let (lock_replacement, root_replacement, parent_replacement) =
             attempts.expect("root replacement must be attempted in the admission hook");
 
         assert!(
+            lock_replacement.is_err(),
+            "the admission hook must run after the no-delete child lock is retained"
+        );
+        assert!(
             root_replacement.is_err(),
-            "root authority alone must deny direct-root replacement"
+            "the admitted transaction lock must deny direct-root replacement"
         );
         assert!(
             parent_replacement.is_err(),
-            "root authority alone must pin the admitted ancestor path"
+            "the admitted transaction lock must pin the admitted ancestor path"
         );
         guard.validate_retained().unwrap();
     }
@@ -380,8 +409,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn writer_publication_survives_overlapping_passive_admission() {
-        use std::sync::{Arc, Barrier};
-
         let temporary = tempfile::tempdir().unwrap();
         let root = temporary.path().join("semantic");
         super::super::ensure_store_directories(&root).unwrap();
@@ -390,22 +417,16 @@ mod tests {
         let staged = segments.join(".artifact.staged");
         let published = segments.join("artifact.bin");
         std::fs::write(&staged, b"published while passive admission overlaps").unwrap();
-        let admission_gate = Arc::new(Barrier::new(2));
-        let passive_gate = Arc::clone(&admission_gate);
         let passive_root = root.clone();
 
         let passive = std::thread::spawn(move || {
-            FlatStoreCoordinationGuard::lock_passive_snapshot_after_root_authority(
+            FlatStoreCoordinationGuard::lock_passive_snapshot_with_admission_hooks(
                 &passive_root,
-                || {
-                    passive_gate.wait();
-                    passive_gate.wait();
-                },
+                || panic!("writer-first admission must fail before root authority is opened"),
+                || {},
             )
         });
-        admission_gate.wait();
         let publication = super::super::commit_unique_file(&staged, &published);
-        admission_gate.wait();
 
         publication.expect("live passive root authority must permit child publication");
         let passive = passive.join().expect("join passive admission");
@@ -417,6 +438,36 @@ mod tests {
         assert_eq!(
             std::fs::read(published).unwrap(),
             b"published while passive admission overlaps"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn passive_first_handoff_releases_root_authority_before_writer_admission() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("semantic");
+        super::super::ensure_store_directories(&root).unwrap();
+        let staged = super::super::segments_directory(&root).join(".artifact.staged");
+        let published = super::super::segments_directory(&root).join("artifact.bin");
+        std::fs::write(&staged, b"published after passive teardown").unwrap();
+
+        let passive = FlatStoreCoordinationGuard::lock_passive_snapshot(&root).unwrap();
+        let writer_lock = transaction_lock_path(&root);
+        let writer_file = open_lock(&writer_lock, true).unwrap();
+        assert!(
+            fs2::FileExt::try_lock_exclusive(&writer_file).is_err(),
+            "a passive shared admission must exclude a writer"
+        );
+        drop(passive);
+
+        fs2::FileExt::try_lock_exclusive(&writer_file)
+            .expect("passive teardown must release shared admission after root authority");
+        super::super::commit_unique_file(&staged, &published)
+            .expect("writer publication must proceed once passive authority is gone");
+        fs2::FileExt::unlock(&writer_file).unwrap();
+        assert_eq!(
+            std::fs::read(published).unwrap(),
+            b"published after passive teardown"
         );
     }
 }
