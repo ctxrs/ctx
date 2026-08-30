@@ -452,7 +452,7 @@ fn stale_binary_owner_uses_cooperative_supervisor_handoff_before_releasing_lock(
 
     let temp = tempfile::Builder::new()
         .prefix("ctx-handoff-")
-        .tempdir_in("/tmp")?;
+        .tempdir_in(fs::canonicalize("/tmp")?)?;
     let owner_lock = DaemonLock::acquire(temp.path())?
         .ok_or_else(|| anyhow!("test daemon could not acquire its process lock"))?;
     let replacement = temp.path().join("replacement-ctx");
