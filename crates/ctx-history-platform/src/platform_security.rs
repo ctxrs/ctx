@@ -520,7 +520,7 @@ mod windows_tests {
     }
 
     #[test]
-    fn recursive_creation_is_private_at_creation_under_a_permissive_parent(
+    fn recursive_creation_is_private_and_user_owned_under_a_permissive_parent(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let parent = tempfile::tempdir()?;
         let status = Command::new("icacls.exe")
@@ -538,6 +538,38 @@ mod windows_tests {
         verify_private_directory(&first)?;
         verify_private_directory(&nested)?;
         fs::write(nested.join("usable"), b"ok")?;
+        Ok(())
+    }
+
+    #[test]
+    fn created_file_is_private_and_user_owned_under_a_permissive_parent(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_WRITE, READ_CONTROL, WRITE_DAC,
+        };
+
+        let parent = tempfile::tempdir()?;
+        let status = Command::new("icacls.exe")
+            .arg(parent.path())
+            .args(["/grant", "*S-1-1-0:(OI)(CI)F"])
+            .status()?;
+        if !status.success() {
+            return Err("failed to make inherited ACL fixture permissive".into());
+        }
+        let path = parent.path().join("created-private-file");
+        let mut options = fs::OpenOptions::new();
+        options
+            .write(true)
+            .create_new(true)
+            .access_mode(FILE_GENERIC_WRITE | READ_CONTROL | WRITE_DAC)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+        let file = options.open(&path)?;
+
+        restrict_private_file_handle(&file)?;
+
+        verify_private_file_handle(&file)?;
+        verify_private_file(&path)?;
         Ok(())
     }
 

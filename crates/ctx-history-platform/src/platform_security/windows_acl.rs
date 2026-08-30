@@ -10,7 +10,7 @@ use std::{
     os::windows::{
         ffi::OsStrExt as _,
         fs::{MetadataExt as _, OpenOptionsExt as _},
-        io::AsRawHandle as _,
+        io::{AsRawHandle as _, FromRawHandle as _},
     },
     path::Path,
     ptr::{addr_of, null_mut},
@@ -20,20 +20,22 @@ use windows_sys::Win32::{
     Foundation::{
         CloseHandle, GetLastError, LocalFree, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND,
         ERROR_INSUFFICIENT_BUFFER, ERROR_PATH_NOT_FOUND, ERROR_SUCCESS, HANDLE,
+        INVALID_HANDLE_VALUE,
     },
     Security::{
         AddAccessAllowedAceEx,
         Authorization::{GetSecurityInfo, SetSecurityInfo, SE_FILE_OBJECT},
         CreateWellKnownSid, EqualSid, GetAce, GetLengthSid, GetSecurityDescriptorControl,
         GetTokenInformation, InitializeAcl, InitializeSecurityDescriptor, IsValidSid,
-        SetSecurityDescriptorControl, SetSecurityDescriptorDacl, TokenUser, WinLocalSystemSid,
-        ACCESS_ALLOWED_ACE, ACL, ACL_REVISION, DACL_SECURITY_INFORMATION,
-        OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSID, SECURITY_ATTRIBUTES,
-        SECURITY_DESCRIPTOR, SE_DACL_PROTECTED, TOKEN_QUERY, TOKEN_USER,
+        SetSecurityDescriptorControl, SetSecurityDescriptorDacl, SetSecurityDescriptorOwner,
+        TokenOwner, TokenUser, WinLocalSystemSid, ACCESS_ALLOWED_ACE, ACL, ACL_REVISION,
+        DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
+        PSID, SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR, SE_DACL_PROTECTED, TOKEN_INFORMATION_CLASS,
+        TOKEN_OWNER, TOKEN_QUERY, TOKEN_USER,
     },
     Storage::FileSystem::{
-        CreateDirectoryW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-        FILE_GENERIC_READ, FILE_SHARE_READ, FILE_SHARE_WRITE, READ_CONTROL, WRITE_DAC,
+        CreateDirectoryW, ReOpenFile, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+        FILE_GENERIC_READ, FILE_SHARE_READ, FILE_SHARE_WRITE, READ_CONTROL, WRITE_DAC, WRITE_OWNER,
     },
     System::Threading::{GetCurrentProcess, OpenProcessToken},
 };
@@ -68,6 +70,15 @@ pub(super) fn create_private_directory_all(path: &Path) -> io::Result<()> {
     if unsafe {
         InitializeSecurityDescriptor((&raw mut descriptor).cast(), SECURITY_DESCRIPTOR_REVISION)
     } == 0
+    {
+        return Err(last_error());
+    }
+    // Elevated tokens may default new objects to the Administrators group.
+    // Bind every directory created by ctx to the exact current-user SID so
+    // owner authority is as narrow as the protected DACL from first visibility.
+    // SAFETY: descriptor and the token-user SID remain live for every create.
+    if unsafe { SetSecurityDescriptorOwner((&raw mut descriptor).cast(), identities.user_sid(), 0) }
+        == 0
     {
         return Err(last_error());
     }
@@ -229,14 +240,34 @@ fn restrict_handle_with_identities(
     identities: &PrivateIdentities,
 ) -> io::Result<()> {
     let mut acl = private_acl(identities, kind)?;
-    // SAFETY: the file owns a live handle with WRITE_DAC and the ACL remains
-    // live for this synchronous call.
+    let assign_owner = handle_owner_repair_required(handle, identities)?;
+    let security_information = DACL_SECURITY_INFORMATION
+        | PROTECTED_DACL_SECURITY_INFORMATION
+        | if assign_owner {
+            OWNER_SECURITY_INFORMATION
+        } else {
+            0
+        };
+    let owner = if assign_owner {
+        identities.user_sid()
+    } else {
+        null_mut()
+    };
+    let owner_handle = if assign_owner {
+        Some(reopen_with_owner_access(handle, kind)?)
+    } else {
+        None
+    };
+    let mutation_handle = owner_handle.as_ref().unwrap_or(handle);
+    // SAFETY: the original handle owns WRITE_DAC. ReOpenFile supplies
+    // WRITE_OWNER on that same object only for the token-default-owner repair;
+    // the SID and ACL remain live for this synchronous call.
     let result = unsafe {
         SetSecurityInfo(
-            handle.as_raw_handle().cast(),
+            mutation_handle.as_raw_handle().cast(),
             SE_FILE_OBJECT,
-            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-            null_mut(),
+            security_information,
+            owner,
             null_mut(),
             acl.as_mut_ptr().cast(),
             null_mut(),
@@ -245,10 +276,69 @@ fn restrict_handle_with_identities(
     if result != ERROR_SUCCESS {
         return Err(win32_error(result));
     }
+    verify_handle_owner(handle, identities.user_sid())?;
     verify_handle_with_identities(handle, kind, identities)
 }
 
+fn reopen_with_owner_access(handle: &File, kind: ObjectKind) -> io::Result<File> {
+    let flags = FILE_FLAG_OPEN_REPARSE_POINT
+        | match kind {
+            ObjectKind::Directory => FILE_FLAG_BACKUP_SEMANTICS,
+            ObjectKind::File => 0,
+        };
+    let share = match kind {
+        ObjectKind::Directory => FILE_SHARE_READ,
+        ObjectKind::File => FILE_SHARE_READ | FILE_SHARE_WRITE,
+    };
+    // SAFETY: ReOpenFile binds the new handle to the same live object instead
+    // of resolving a pathname; successful ownership transfers exactly once.
+    let reopened = unsafe {
+        ReOpenFile(
+            handle.as_raw_handle().cast(),
+            READ_CONTROL | WRITE_DAC | WRITE_OWNER,
+            share,
+            flags,
+        )
+    };
+    if reopened == INVALID_HANDLE_VALUE {
+        Err(last_error())
+    } else {
+        Ok(unsafe { File::from_raw_handle(reopened.cast()) })
+    }
+}
+
 fn verify_handle_owner(handle: &File, expected_owner: PSID) -> io::Result<()> {
+    with_handle_owner(handle, |owner| {
+        // SAFETY: both SIDs remain live for this comparison.
+        if unsafe { EqualSid(owner, expected_owner) } == 0 {
+            Err(invalid_owner())
+        } else {
+            Ok(())
+        }
+    })
+}
+
+fn handle_owner_repair_required(handle: &File, identities: &PrivateIdentities) -> io::Result<bool> {
+    with_handle_owner(handle, |owner| owner_repair_required(owner, identities))
+}
+
+fn owner_repair_required(owner: PSID, identities: &PrivateIdentities) -> io::Result<bool> {
+    // SAFETY: all SIDs are validated and backed by live buffers.
+    if unsafe { EqualSid(owner, identities.user_sid()) } != 0 {
+        Ok(false)
+    } else if unsafe { EqualSid(owner, identities.owner_sid()) } != 0 {
+        // Elevated tokens can make Administrators their default owner. Repair
+        // that exact token-owned case, but never adopt an unrelated object.
+        Ok(true)
+    } else {
+        Err(invalid_owner())
+    }
+}
+
+fn with_handle_owner<T>(
+    handle: &File,
+    inspect: impl FnOnce(PSID) -> io::Result<T>,
+) -> io::Result<T> {
     let mut owner = null_mut();
     let mut descriptor = null_mut();
     // SAFETY: all out pointers are valid and the returned descriptor is guarded.
@@ -268,14 +358,10 @@ fn verify_handle_owner(handle: &File, expected_owner: PSID) -> io::Result<()> {
         return Err(win32_error(result));
     }
     let _descriptor = LocalAllocation(descriptor);
-    if owner.is_null() || unsafe { EqualSid(owner, expected_owner) } == 0 {
-        Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "private state path is not owned by the current user",
-        ))
-    } else {
-        Ok(())
+    if owner.is_null() {
+        return Err(invalid_owner());
     }
+    inspect(owner)
 }
 
 fn verify(path: &Path, kind: ObjectKind) -> io::Result<()> {
@@ -540,6 +626,7 @@ fn sid_size(sid: PSID) -> io::Result<usize> {
 struct PrivateIdentities {
     _token: Handle,
     token_user: AlignedBuffer,
+    token_owner: AlignedBuffer,
     system: AlignedBuffer,
     user_is_system: bool,
 }
@@ -552,28 +639,8 @@ impl PrivateIdentities {
             return Err(last_error());
         }
         let token = Handle(token);
-        let mut required = 0;
-        // SAFETY: a null first buffer requests the token-user size.
-        let first =
-            unsafe { GetTokenInformation(token.0, TokenUser, null_mut(), 0, &raw mut required) };
-        if first != 0 || last_error_code() != ERROR_INSUFFICIENT_BUFFER || required == 0 {
-            return Err(last_error());
-        }
-        let mut token_user =
-            AlignedBuffer::new(usize::try_from(required).map_err(|_| invalid_acl())?)?;
-        // SAFETY: the output buffer has the requested capacity.
-        if unsafe {
-            GetTokenInformation(
-                token.0,
-                TokenUser,
-                token_user.as_mut_ptr().cast(),
-                required,
-                &raw mut required,
-            )
-        } == 0
-        {
-            return Err(last_error());
-        }
+        let token_user = token_information(token.0, TokenUser)?;
+        let token_owner = token_information(token.0, TokenOwner)?;
         let mut system = AlignedBuffer::new(SECURITY_MAX_SID_SIZE)?;
         let mut system_size = u32::try_from(system.byte_len()).map_err(|_| invalid_acl())?;
         // SAFETY: system is aligned and has SECURITY_MAX_SID_SIZE capacity.
@@ -591,10 +658,12 @@ impl PrivateIdentities {
         let mut identities = Self {
             _token: token,
             token_user,
+            token_owner,
             system,
             user_is_system: false,
         };
         let _ = sid_size(identities.user_sid())?;
+        let _ = sid_size(identities.owner_sid())?;
         let _ = sid_size(identities.system_sid())?;
         // SAFETY: both SIDs are valid and backed by identities.
         identities.user_is_system =
@@ -609,6 +678,37 @@ impl PrivateIdentities {
 
     fn system_sid(&self) -> PSID {
         self.system.as_ptr().cast_mut().cast()
+    }
+
+    fn owner_sid(&self) -> PSID {
+        // SAFETY: token_owner contains a successful TOKEN_OWNER response.
+        unsafe { (*self.token_owner.as_ptr().cast::<TOKEN_OWNER>()).Owner }
+    }
+}
+
+fn token_information(token: HANDLE, class: TOKEN_INFORMATION_CLASS) -> io::Result<AlignedBuffer> {
+    let mut required = 0;
+    // SAFETY: a null first buffer requests the selected token-information size.
+    let first = unsafe { GetTokenInformation(token, class, null_mut(), 0, &raw mut required) };
+    if first != 0 || last_error_code() != ERROR_INSUFFICIENT_BUFFER || required == 0 {
+        return Err(last_error());
+    }
+    let mut information =
+        AlignedBuffer::new(usize::try_from(required).map_err(|_| invalid_acl())?)?;
+    // SAFETY: the output buffer has the requested capacity.
+    if unsafe {
+        GetTokenInformation(
+            token,
+            class,
+            information.as_mut_ptr().cast(),
+            required,
+            &raw mut required,
+        )
+    } == 0
+    {
+        Err(last_error())
+    } else {
+        Ok(information)
     }
 }
 
@@ -664,6 +764,13 @@ fn invalid_acl() -> io::Error {
     io::Error::new(
         io::ErrorKind::PermissionDenied,
         "private state ACL must be protected and allow only the current user and SYSTEM",
+    )
+}
+
+fn invalid_owner() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        "private state path is not owned by the current user",
     )
 }
 
@@ -770,7 +877,26 @@ mod tests {
     }
 
     #[test]
-    fn reparse_handle_is_rejected_before_acl_repair() -> Result<(), Box<dyn std::error::Error>> {
+    fn owner_repair_accepts_only_user_or_token_default_owner(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let identities = PrivateIdentities::current()?;
+        let world = world_sid()?;
+
+        assert!(!owner_repair_required(identities.user_sid(), &identities)?);
+        let token_default_repair = owner_repair_required(identities.owner_sid(), &identities)?;
+        // A non-elevated token commonly uses the user SID as its default
+        // owner; an elevated token commonly uses Administrators instead.
+        let same_owner = unsafe { EqualSid(identities.user_sid(), identities.owner_sid()) } != 0;
+        assert_eq!(token_default_repair, !same_owner);
+        let error = owner_repair_required(world.as_ptr().cast_mut().cast(), &identities)
+            .expect_err("an unrelated owner must never be adopted");
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        Ok(())
+    }
+
+    #[test]
+    fn reparse_handle_is_rejected_before_acl_or_owner_repair(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let parent = tempfile::tempdir()?;
         let target = parent.path().join("target");
         let junction = parent.path().join("junction");
@@ -786,6 +912,11 @@ mod tests {
         let handle = open_handle(&junction, ObjectKind::Directory, READ_CONTROL | WRITE_DAC)?;
 
         let error = ensure_private_file_handle(&handle).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("reparse point"));
+
+        let error = restrict_handle(&handle, ObjectKind::Directory).unwrap_err();
 
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
         assert!(error.to_string().contains("reparse point"));
