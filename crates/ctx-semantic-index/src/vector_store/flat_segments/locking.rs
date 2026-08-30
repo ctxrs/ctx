@@ -69,8 +69,9 @@ impl FlatStoreCoordinationGuard {
 }
 
 /// Retains the absolute Windows semantic root with generic-read authority and
-/// without delete sharing. The admitted directory therefore cannot be renamed,
-/// replaced, or converted to a reparse point while passive children are open.
+/// read/write sharing, but without delete sharing. The admitted directory
+/// therefore cannot be renamed, replaced, or converted to a reparse point
+/// while passive children are open.
 #[cfg(windows)]
 struct PassiveRootAuthority {
     path: std::path::PathBuf,
@@ -83,6 +84,7 @@ impl PassiveRootAuthority {
         use std::os::windows::fs::OpenOptionsExt as _;
 
         const FILE_SHARE_READ: u32 = 0x0000_0001;
+        const FILE_SHARE_WRITE: u32 = 0x0000_0002;
         const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
         const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
         const FILE_GENERIC_READ: u32 = 0x0012_0089;
@@ -91,7 +93,7 @@ impl PassiveRootAuthority {
             .map_err(|source| io_error("resolve passive root authority", root, source))?;
         let handle = OpenOptions::new()
             .access_mode(FILE_GENERIC_READ)
-            .share_mode(FILE_SHARE_READ)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
             .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
             .open(&path)
             .map_err(|source| io_error("open passive root authority", &path, source))?;
@@ -355,6 +357,8 @@ mod tests {
         let authority = PassiveRootAuthority::open(&root).unwrap();
         std::fs::rename(&lock, &displaced_lock)
             .expect("no child lock handle may contribute replacement authority");
+        std::fs::remove_file(&displaced_lock)
+            .expect("root authority alone must permit child deletion");
         assert!(
             std::fs::rename(&root, &displaced_root).is_err(),
             "retained root authority must deny direct-root replacement"
@@ -366,7 +370,53 @@ mod tests {
         authority.validate_retained().unwrap();
         drop(authority);
 
+        std::fs::rename(&root, &displaced_root)
+            .expect("dropping root authority must release the root path");
+        std::fs::rename(&displaced_root, &root).unwrap();
         std::fs::rename(&parent, &displaced_parent)
-            .expect("dropping root authority must release the path");
+            .expect("dropping root authority must release the ancestor path");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn writer_publication_survives_overlapping_passive_admission() {
+        use std::sync::{Arc, Barrier};
+
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("semantic");
+        super::super::ensure_store_directories(&root).unwrap();
+        let writer = FlatStoreCoordinationGuard::lock_control_writer(&root).unwrap();
+        let segments = super::super::segments_directory(&root);
+        let staged = segments.join(".artifact.staged");
+        let published = segments.join("artifact.bin");
+        std::fs::write(&staged, b"published while passive admission overlaps").unwrap();
+        let admission_gate = Arc::new(Barrier::new(2));
+        let passive_gate = Arc::clone(&admission_gate);
+        let passive_root = root.clone();
+
+        let passive = std::thread::spawn(move || {
+            FlatStoreCoordinationGuard::lock_passive_snapshot_after_root_authority(
+                &passive_root,
+                || {
+                    passive_gate.wait();
+                    passive_gate.wait();
+                },
+            )
+        });
+        admission_gate.wait();
+        let publication = super::super::commit_unique_file(&staged, &published);
+        admission_gate.wait();
+
+        publication.expect("live passive root authority must permit child publication");
+        let passive = passive.join().expect("join passive admission");
+        assert!(
+            passive.is_err(),
+            "writer-first exclusive coordination must make passive admission unavailable"
+        );
+        writer.validate_retained().unwrap();
+        assert_eq!(
+            std::fs::read(published).unwrap(),
+            b"published while passive admission overlaps"
+        );
     }
 }
