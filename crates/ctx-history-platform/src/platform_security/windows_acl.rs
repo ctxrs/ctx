@@ -814,7 +814,7 @@ mod tests {
         );
     }
 
-    fn set_permissive_null_dacl(handle: &File) -> io::Result<()> {
+    pub(super) fn set_permissive_null_dacl(handle: &File) -> io::Result<()> {
         // SAFETY: the file owns a live handle with WRITE_DAC. A null DACL is an
         // intentionally permissive fixture that ensure_private_file_handle
         // must replace before the file is used as private state.
