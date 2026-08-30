@@ -24,6 +24,35 @@ fn initial_legacy_directory_remains_compatible_without_owner_adoption(
 }
 
 #[test]
+fn initial_permissive_legacy_directory_is_hardened_without_owner_adoption(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let parent = tempfile::tempdir()?;
+    let path = parent.path().join("permissive-legacy-private-root");
+    create_private_directory_all(&path)?;
+    let before = OpenedPrivateObject::open(&path, ObjectKind::Directory, true)?;
+    set_permissive_null_dacl(before.file())?;
+    let identities = PrivateIdentities::current()?;
+    assert!(
+        verify_handle_with_identities(before.file(), ObjectKind::Directory, &identities).is_err()
+    );
+
+    with_handle_owner(before.file(), |before_owner| {
+        create_current_user_owned_private_directory_all(&path)?;
+        let after = OpenedPrivateObject::open(&path, ObjectKind::Directory, false)?;
+        verify_handle_with_identities(after.file(), ObjectKind::Directory, &identities)?;
+        with_handle_owner(after.file(), |after_owner| {
+            // SAFETY: both SIDs remain backed by live security descriptors.
+            if unsafe { EqualSid(before_owner, after_owner) } != 0 {
+                Ok(())
+            } else {
+                Err(invalid_owner())
+            }
+        })
+    })?;
+    Ok(())
+}
+
+#[test]
 fn current_user_owned_directory_rejects_a_wrong_owner_create_race(
 ) -> Result<(), Box<dyn std::error::Error>> {
     use windows_sys::Win32::Security::{TokenOwner, TOKEN_OWNER};

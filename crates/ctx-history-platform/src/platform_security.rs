@@ -89,7 +89,9 @@ pub fn create_private_directory_all(path: &Path) -> io::Result<()> {
 ///
 /// This is intentionally distinct from [`create_private_directory_all`],
 /// whose established cross-platform contract does not change token-default
-/// ownership. Pre-existing or raced objects are validated but never adopted.
+/// ownership. An initially existing final directory keeps its owner and has
+/// only its DACL hardened. Objects that win a missing-path create race must
+/// already have the exact current-user owner and are never adopted.
 #[cfg(windows)]
 pub fn create_current_user_owned_private_directory_all(path: &Path) -> io::Result<()> {
     windows_acl::create_current_user_owned_private_directory_all(path)

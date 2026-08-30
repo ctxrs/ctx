@@ -97,16 +97,17 @@ fn create_private_directory_all_with_owner_after_missing(
         bInheritHandle: 0,
     };
 
-    // Each open omits delete and write sharing. Retaining every ancestor handle
-    // prevents a checked component from being replaced or converted to a
-    // reparse point while descendant creation is in progress.
+    // Retained no-delete-sharing handles prevent checked ancestors from being
+    // replaced or converted to reparse points during descendant creation.
     let mut held = Vec::with_capacity(component_paths.len());
     let mut created_private_ancestor = false;
     for candidate in component_paths {
         let is_final = candidate == absolute;
         let mut raced_existing = false;
         let mut created_here = false;
-        let access = if is_final || created_private_ancestor {
+        let access = if is_final && assign_current_user_owner {
+            READ_CONTROL | WRITE_DAC
+        } else if is_final || created_private_ancestor {
             READ_CONTROL
         } else {
             0
@@ -116,8 +117,7 @@ fn create_private_directory_all_with_owner_after_missing(
             Err(error) if is_not_found(&error) => {
                 after_missing(candidate)?;
                 let wide = wide_path(candidate)?;
-                // The protected owner/SYSTEM DACL is installed by the create
-                // itself; no inherited-permissive interval exists.
+                // Creation installs the owner/protected DACL atomically.
                 if unsafe { CreateDirectoryW(wide.as_ptr(), &raw const attributes) } == 0 {
                     let code = last_error_code();
                     if code != ERROR_ALREADY_EXISTS {
@@ -142,12 +142,14 @@ fn create_private_directory_all_with_owner_after_missing(
                 error
             }
         })?;
-        // An object that won a create race is part of this creation attempt,
-        // so it must satisfy the same owner invariant as our own create.
-        // Objects found by the initial open remain legacy-compatible and are
-        // neither owner-validated nor modified by this creator.
+        // A create-race winner must satisfy our new-object owner invariant.
         if assign_current_user_owner && (created_here || raced_existing) {
             verify_handle_owner(&handle, identities.user_sid())?;
+        }
+        // Preserve an initially existing legacy root's owner while hardening
+        // its DACL through the retained no-follow handle.
+        if assign_current_user_owner && is_final && !created_here && !raced_existing {
+            restrict_handle_with_identities(&handle, ObjectKind::Directory, &identities)?;
         }
         if is_final || created_private_ancestor || raced_existing {
             verify_handle_with_identities(&handle, ObjectKind::Directory, &identities)?;
@@ -175,9 +177,8 @@ pub(super) fn create_private_file_new(path: &Path) -> io::Result<File> {
         bInheritHandle: 0,
     };
     let wide = wide_path(&absolute)?;
-    // The owner and protected user/SYSTEM DACL are installed by CreateFileW
-    // before the pathname becomes visible. No token-default ownership repair
-    // or post-create permissive interval is accepted.
+    // CreateFileW installs the owner/protected DACL before visibility; no
+    // token-default repair or post-create permissive interval is accepted.
     let handle = unsafe {
         CreateFileW(
             wide.as_ptr(),
@@ -587,8 +588,7 @@ fn private_security_descriptor(
     {
         return Err(last_error());
     }
-    // The existing generic directory creator retains token-default ownership;
-    // only explicit new semantic objects bind the current-user SID at create.
+    // Only explicit new semantic objects bind current-user ownership.
     if assign_current_user_owner
         && unsafe {
             SetSecurityDescriptorOwner((&raw mut descriptor).cast(), identities.user_sid(), 0)
