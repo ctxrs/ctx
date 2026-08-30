@@ -70,6 +70,23 @@ pub use ctx_history_index_format::{
     LEXICAL_ANALYZER_VERSION, LEXICAL_SCHEMA_VERSION, LEXICAL_SEGMENT_MERGE_FAN_IN,
     MAX_DETACHED_RELEASED_PROVIDER_ROOTS, MAX_PUBLICATION_METADATA_BYTES,
 };
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub mod test_support {
+    pub use ctx_history_index_generation::{
+        AtomicPublicationStage, PublicationIoProbe, PublicationIoProbeGuard,
+    };
+
+    use super::IndexError;
+
+    pub fn publication_io_error(error: &IndexError) -> Option<&std::io::Error> {
+        match error {
+            IndexError::Io(error) => Some(error),
+            IndexError::Tantivy(tantivy::TantivyError::IoError(error)) => Some(error),
+            _ => None,
+        }
+    }
+}
 #[cfg(test)]
 pub(crate) use ctx_history_index_generation::sha256_hex;
 pub(crate) use ctx_history_index_generation::{hex, is_generation_id, MANIFEST_DIRECTORY};

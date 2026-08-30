@@ -28,6 +28,11 @@ use ctx_history_platform::platform_security::{
     restrict_private_file_handle, verify_private_file_handle,
 };
 
+#[cfg(any(test, feature = "test-support"))]
+use crate::publication_probe::{
+    publication_io_checkpoint, PublicationIoEvent, PublicationIoProbeGuard,
+};
+
 #[cfg(windows)]
 use windows_sys::Win32::Storage::FileSystem::{
     FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_WRITE, READ_CONTROL, WRITE_DAC,
@@ -525,6 +530,7 @@ where
     SyncParent: FnOnce() -> io::Result<()>,
     Validate: FnOnce() -> crate::Result<()>,
 {
+    atomic_write_checkpoint(AtomicWriteStage::BeforeTemporaryWrite, target_path)?;
     let parent_path = target_path.parent().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -532,8 +538,6 @@ where
         )
     })?;
     let (temporary_path, mut temporary_file) = create_temporary_file(parent_path)?;
-
-    atomic_write_checkpoint(AtomicWriteStage::BeforeTemporaryWrite, target_path)?;
 
     let write_result = temporary_file
         .write_all(data)
@@ -551,16 +555,15 @@ where
         AtomicWriteStage::AfterTemporarySyncBeforeReplace,
         target_path,
     )?;
-    atomic_write_checkpoint(AtomicWriteStage::BeforeReplace, target_path)?;
 
-    // This is the terminal publication fence: every fallible preparation and
-    // test checkpoint has completed, and the replacement below is the next
-    // operation. The validator can therefore reject a raced candidate while
-    // the previous target is still authoritative.
+    // The validator can reject a raced candidate while the previous target is
+    // still authoritative. Once it succeeds, the replacement checkpoint is
+    // the final fallible test fence before replacement.
     if let Err(error) = validate_before_replace() {
         let _ = fs::remove_file(&temporary_path);
         return Err(error);
     }
+    atomic_write_checkpoint(AtomicWriteStage::BeforeReplace, target_path)?;
 
     if let Err(error) = replace(&temporary_path, target_path) {
         let _ = fs::remove_file(&temporary_path);
@@ -603,44 +606,30 @@ enum AtomicWriteStage {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-type AtomicWriteTestHook = Box<dyn for<'a> FnMut(AtomicWriteStage, &'a Path) -> io::Result<()>>;
-
-#[cfg(any(test, feature = "test-support"))]
-thread_local! {
-    static ATOMIC_WRITE_TEST_HOOK: std::cell::RefCell<Option<AtomicWriteTestHook>> =
-        std::cell::RefCell::new(None);
+pub struct AtomicWriteTestHookGuard {
+    _guard: PublicationIoProbeGuard,
 }
-
-#[cfg(any(test, feature = "test-support"))]
-pub struct AtomicWriteTestHookGuard(Option<AtomicWriteTestHook>);
 
 #[cfg(any(test, feature = "test-support"))]
 impl AtomicWriteTestHookGuard {
-    pub fn set<F>(hook: F) -> Self
+    pub fn set<F>(mut hook: F) -> Self
     where
         F: for<'a> FnMut(AtomicWriteStage, &'a Path) -> io::Result<()> + 'static,
     {
-        let previous = ATOMIC_WRITE_TEST_HOOK.with(|active| active.replace(Some(Box::new(hook))));
-        Self(previous)
-    }
-}
-
-#[cfg(any(test, feature = "test-support"))]
-impl Drop for AtomicWriteTestHookGuard {
-    fn drop(&mut self) {
-        ATOMIC_WRITE_TEST_HOOK.with(|active| active.replace(self.0.take()));
+        Self {
+            _guard: PublicationIoProbeGuard::set_raw(move |event| match event {
+                PublicationIoEvent::Atomic(stage, target) => hook(stage, target),
+                PublicationIoEvent::CandidateGenerationSync => Ok(()),
+                #[cfg(windows)]
+                PublicationIoEvent::TerminalSealOpen => Ok(()),
+            }),
+        }
     }
 }
 
 #[cfg(any(test, feature = "test-support"))]
 fn atomic_write_checkpoint(stage: AtomicWriteStage, target: &Path) -> io::Result<()> {
-    ATOMIC_WRITE_TEST_HOOK.with(|active| {
-        let mut active = active.borrow_mut();
-        match active.as_mut() {
-            Some(hook) => hook(stage, target),
-            None => Ok(()),
-        }
-    })
+    publication_io_checkpoint(PublicationIoEvent::Atomic(stage, target))
 }
 
 #[cfg(not(any(test, feature = "test-support")))]
@@ -762,6 +751,9 @@ fn replace_file(source: &Path, target: &Path) -> io::Result<()> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod publication_probe_tests;
 
 #[cfg(test)]
 mod tests {

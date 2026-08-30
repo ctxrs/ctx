@@ -569,7 +569,7 @@
           "FILE:@@//crates/ctx-daemon-service/Cargo.toml 4c88e07cad2e0c1f081569645ec954910a2c76178907d1bfbc18f759a03bdb7d",
           "FILE:@@//crates/ctx-history-refresh/Cargo.toml 9c5c1c7cc2280582d8ab750b3b165fab40470025c00f028b8307de7b924cb9be",
           "FILE:@@//crates/ctx-history-refresh-execution/Cargo.toml 588b2733ff2dd192c6c250f65e848e6bbf28e179c3ef06eb171a0dd0823774b0",
-          "FILE:@@//crates/ctx-semantic-index/Cargo.toml a254cc7576f6a2d333c94f6f080d7b055c0d8f60921696091faca8d8ff5efe35",
+          "FILE:@@//crates/ctx-semantic-index/Cargo.toml 1f873ad000acc18d17b9c6036ec0c3b9f22c87bdb2b02526080d92247f48da36",
           "FILE:@@//crates/ctx-upgrade-engine/Cargo.toml 9fe09c4f5fb7ff3127e28f263f7c281619f13f9dfa45002075e5802e13e82117",
           "FILE:@@//crates/ctx-managed-pair-engine/Cargo.toml 31dfee3d767d7d2f6bc6caf89a9d67794b8baf0bd81887ff0fc115709a65ea3f",
           "FILE:@@//crates/ctx-history-read-application/Cargo.toml f34a1bd70159bee58951e815600f110138f4e6d2649f683870d5e82f62e8e0ab",

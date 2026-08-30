@@ -13,6 +13,8 @@ mod identity;
 mod lock;
 mod manifest;
 mod physical;
+#[cfg(any(test, feature = "test-support"))]
+mod publication_probe;
 mod read_root;
 mod retention;
 
@@ -74,6 +76,8 @@ pub use physical::{
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use physical::{checksum_walks, hashed_artifact_bytes, reset_physical_verification_activity};
+#[cfg(any(test, feature = "test-support"))]
+pub use publication_probe::{AtomicPublicationStage, PublicationIoProbe, PublicationIoProbeGuard};
 pub use read_root::GenerationReadRoot;
 #[cfg(any(test, feature = "test-support"))]
 pub use read_root::{GenerationRootTraversalStage, GenerationRootTraversalTestHookGuard};

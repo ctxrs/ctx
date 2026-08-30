@@ -31,4 +31,5 @@ url.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+ctx-history-index = { path = "../ctx-history-index", features = ["test-support"] }
 tempfile.workspace = true
