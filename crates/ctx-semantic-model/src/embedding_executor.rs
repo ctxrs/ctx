@@ -60,7 +60,7 @@ pub struct SemanticEmbeddingExecutorConfig {
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum SemanticEmbeddingExecutorSelection {
     Builtin,
-    Http(HttpExecutorSelection),
+    Http(Box<HttpExecutorSelection>),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -104,11 +104,11 @@ impl SemanticEmbeddingExecutorConfig {
         let endpoint = ValidatedHttpEndpoint::parse(endpoint.as_ref())?;
         let contract = SemanticModelContract::legacy_fixed_http(endpoint.as_str());
         Ok(Self {
-            selection: SemanticEmbeddingExecutorSelection::Http(HttpExecutorSelection {
+            selection: SemanticEmbeddingExecutorSelection::Http(Box::new(HttpExecutorSelection {
                 endpoint,
                 protocol: HttpExecutorProtocol::LegacyFixedV1,
                 contract,
-            }),
+            })),
         })
     }
 
@@ -131,11 +131,13 @@ impl SemanticEmbeddingExecutorConfig {
             HttpExecutorProtocol::LegacyFixedV1 => {
                 let contract = SemanticModelContract::legacy_fixed_http(endpoint.as_str());
                 Self {
-                    selection: SemanticEmbeddingExecutorSelection::Http(HttpExecutorSelection {
-                        endpoint,
-                        protocol: HttpExecutorProtocol::LegacyFixedV1,
-                        contract,
-                    }),
+                    selection: SemanticEmbeddingExecutorSelection::Http(Box::new(
+                        HttpExecutorSelection {
+                            endpoint,
+                            protocol: HttpExecutorProtocol::LegacyFixedV1,
+                            contract,
+                        },
+                    )),
                 }
             }
             HttpExecutorProtocol::ExternalSpaceV2(space) => {
@@ -147,11 +149,11 @@ impl SemanticEmbeddingExecutorConfig {
     fn from_http_selection(endpoint: ValidatedHttpEndpoint, space: ExternalSemanticSpace) -> Self {
         let contract = SemanticModelContract::external_http(endpoint.as_str(), space.clone());
         Self {
-            selection: SemanticEmbeddingExecutorSelection::Http(HttpExecutorSelection {
+            selection: SemanticEmbeddingExecutorSelection::Http(Box::new(HttpExecutorSelection {
                 endpoint,
                 protocol: HttpExecutorProtocol::ExternalSpaceV2(space),
                 contract,
-            }),
+            })),
         }
     }
 
@@ -199,26 +201,21 @@ impl SemanticEmbeddingExecutorConfig {
     }
 
     pub const fn is_legacy_fixed_http(&self) -> bool {
-        matches!(
-            &self.selection,
-            SemanticEmbeddingExecutorSelection::Http(HttpExecutorSelection {
-                protocol: HttpExecutorProtocol::LegacyFixedV1,
-                ..
-            })
-        )
+        match &self.selection {
+            SemanticEmbeddingExecutorSelection::Http(selection) => {
+                matches!(&selection.protocol, HttpExecutorProtocol::LegacyFixedV1)
+            }
+            SemanticEmbeddingExecutorSelection::Builtin => false,
+        }
     }
 
     pub const fn http_protocol_schema_version(&self) -> Option<u32> {
         match &self.selection {
             SemanticEmbeddingExecutorSelection::Builtin => None,
-            SemanticEmbeddingExecutorSelection::Http(HttpExecutorSelection {
-                protocol: HttpExecutorProtocol::LegacyFixedV1,
-                ..
-            }) => Some(1),
-            SemanticEmbeddingExecutorSelection::Http(HttpExecutorSelection {
-                protocol: HttpExecutorProtocol::ExternalSpaceV2(_),
-                ..
-            }) => Some(2),
+            SemanticEmbeddingExecutorSelection::Http(selection) => match &selection.protocol {
+                HttpExecutorProtocol::LegacyFixedV1 => Some(1),
+                HttpExecutorProtocol::ExternalSpaceV2(_) => Some(2),
+            },
         }
     }
 
@@ -391,6 +388,7 @@ impl SemanticEmbeddingExecutorHandle {
                 )
             }
             SemanticEmbeddingExecutorSelection::Http(selection) => {
+                let selection = *selection;
                 SemanticEmbeddingExecutorHandleInner::Http(
                     HttpSemanticEmbeddingExecutor::from_validated_selection(
                         selection.endpoint,

@@ -258,6 +258,19 @@ fn assert_external_activation_failed(context: &ReloadTestContext) {
     assert_eq!(context.reload.status, "activation_failed");
     assert!(context.reload.last_error.is_some());
     assert!(context.runtime.semantic_executor.is_none());
+    assert_eq!(
+        context
+            .runtime
+            .semantic_activation_retry
+            .consecutive_failures,
+        1
+    );
+    assert!(!context.runtime.semantic_activation_retry.ready());
+    assert!(context
+        .runtime
+        .semantic_activation_retry
+        .retry_after_ms()
+        .is_some_and(|delay| delay > 0 && delay <= 10_000));
     assert!(context.query_service.is_none());
     assert!(context.refresh_service.is_some());
     assert!(!daemon_semantic_runtime_active(
@@ -274,6 +287,85 @@ fn assert_external_activation_failed(context: &ReloadTestContext) {
     assert!(status["applied"]["semantic_executor"].is_null());
     assert!(status["applied"]["semantic_contract_fingerprint"].is_null());
     assert_refresh_service_usable(context);
+}
+
+#[test]
+fn only_core_service_activation_failure_blocks_daemon_startup() {
+    let config = AppConfig::default();
+    let mut reload = DaemonConfigReloadState::pending(&config);
+    reload.activation_failed(anyhow!("activation failed"));
+
+    assert!(reload.blocks_daemon_startup(false));
+    assert!(!reload.blocks_daemon_startup(true));
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn failed_semantic_activation_is_deferred_until_its_retry_deadline() {
+    let endpoint = http_executor(&unavailable_http_endpoint(), "selected-space", 128);
+    let mut context = ReloadTestContext::new(semantic_config(endpoint));
+
+    assert_eq!(context.reload(), DaemonConfigReloadOutcome::Continue);
+    let initial_error = context.reload.last_error.clone();
+    assert_eq!(
+        reload_daemon_runtime_config_with_executor_builder(
+            context.temp.path(),
+            &context.args,
+            &mut context.runtime,
+            DaemonConfigReloadContext {
+                query_service: &mut context.query_service,
+                refresh_service: &mut context.refresh_service,
+                state: &mut context.reload,
+                wakeup: &context.wakeup,
+                lifecycle: &context.lifecycle,
+                config_port: context.config_port,
+            },
+            |_, _, _, _| panic!("semantic executor must remain backed off"),
+        ),
+        DaemonConfigReloadOutcome::Continue
+    );
+
+    assert_eq!(context.reload.status, "activation_failed");
+    assert_eq!(context.reload.last_error, initial_error);
+    assert_eq!(
+        context
+            .runtime
+            .semantic_activation_retry
+            .consecutive_failures,
+        1
+    );
+    assert_external_activation_failed(&context);
+    context.runtime.semantic_activation_retry.retry_not_before = None;
+    context
+        .runtime
+        .semantic_activation_retry
+        .retry_not_before_at_ms = None;
+    context
+        .runtime
+        .source_refresh_coordinator
+        .as_ref()
+        .expect("source refresh coordinator")
+        .enqueue_for_test(None);
+    assert_eq!(
+        reload_daemon_runtime_config_with_executor_builder(
+            context.temp.path(),
+            &context.args,
+            &mut context.runtime,
+            DaemonConfigReloadContext {
+                query_service: &mut context.query_service,
+                refresh_service: &mut context.refresh_service,
+                state: &mut context.reload,
+                wakeup: &context.wakeup,
+                lifecycle: &context.lifecycle,
+                config_port: context.config_port,
+            },
+            |_, _, _, _| panic!("pending Core refresh must preempt semantic reactivation"),
+        ),
+        DaemonConfigReloadOutcome::Continue
+    );
+    assert_eq!(context.reload.status, "activation_failed");
+    assert_eq!(context.reload.last_error, initial_error);
+    assert_refresh_service_usable(&context);
 }
 
 #[cfg(any(unix, windows))]

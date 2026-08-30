@@ -101,6 +101,20 @@ pub fn autostart_daemon_and_wait(
     Ok(autostart_daemon_for_setup_and_wait(data_root, config, trigger)?.handoff)
 }
 
+pub fn autostart_core_daemon_and_wait(
+    data_root: &Path,
+    config: &AppConfig<'_>,
+    trigger: DaemonTriggerCommandArg,
+) -> Result<DaemonHandoff> {
+    Ok(autostart_persistent_daemon_and_wait(
+        data_root,
+        config,
+        trigger,
+        PersistentDaemonReadiness::Core,
+    )?
+    .handoff)
+}
+
 pub fn restart_daemon_with_current_environment_and_wait(
     data_root: &Path,
     config: &AppConfig<'_>,
@@ -137,6 +151,26 @@ pub fn autostart_daemon_for_setup_and_wait(
     config: &AppConfig<'_>,
     trigger: DaemonTriggerCommandArg,
 ) -> Result<DaemonSetupHandoff> {
+    autostart_persistent_daemon_and_wait(
+        data_root,
+        config,
+        trigger,
+        PersistentDaemonReadiness::Full,
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PersistentDaemonReadiness {
+    Full,
+    Core,
+}
+
+fn autostart_persistent_daemon_and_wait(
+    data_root: &Path,
+    config: &AppConfig<'_>,
+    trigger: DaemonTriggerCommandArg,
+    readiness: PersistentDaemonReadiness,
+) -> Result<DaemonSetupHandoff> {
     super::super::daemon_supervisor::with_daemon_application(|application| {
         if application.daemon_start_is_fenced() {
             return Err(anyhow!(
@@ -147,12 +181,19 @@ pub fn autostart_daemon_for_setup_and_wait(
             super::super::daemon_supervisor::ensure_daemon_supervisor(application, data_root)
                 .context("establish ctx daemon supervision")?;
         }
-        let handoff = application
-            .start_daemon_and_wait(
+        let application_config = application_config(config);
+        let handoff = match readiness {
+            PersistentDaemonReadiness::Full => application.start_daemon_and_wait(
                 data_root,
-                &application_config(config),
+                &application_config,
                 application_trigger(trigger),
-            )
+            ),
+            PersistentDaemonReadiness::Core => application.start_core_daemon_and_wait(
+                data_root,
+                &application_config,
+                application_trigger(trigger),
+            ),
+        }
             .map_err(|error| match error {
                 ctx_daemon_application::DaemonStartError::Suppressed(reason) => anyhow!(
                     "ctx daemon start was suppressed ({reason}); retry after it clears or run `ctx setup --no-daemon`"

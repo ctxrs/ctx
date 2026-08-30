@@ -259,7 +259,6 @@ fn run_pending_core_semantic_catch_up(
         data_root,
         runtime,
         deadline,
-        true,
         Some(generation_id),
         &semantic_contract,
         semantic_ports,
@@ -633,6 +632,8 @@ pub(super) fn daemon_consumer_retry_due(runtime: &DaemonRuntime) -> bool {
 pub(super) fn daemon_retry_due(runtime: &DaemonRuntime) -> bool {
     (runtime.history_retry.consecutive_failures > 0 && runtime.history_retry.ready())
         || daemon_consumer_retry_due(runtime)
+        || (runtime.semantic_activation_retry.consecutive_failures > 0
+            && runtime.semantic_activation_retry.ready())
 }
 
 pub(super) fn daemon_scheduled_refresh_due(
@@ -705,7 +706,6 @@ fn run_daemon_semantic_job_with_retry(
     data_root: &Path,
     runtime: &mut DaemonRuntime,
     deadline: Option<Instant>,
-    semantic_enabled: bool,
     core_generation_id: Option<&str>,
     semantic_contract: &ctx_semantic_index::SemanticModelContract,
     ports: DaemonSemanticJobPorts<'_>,
@@ -722,7 +722,7 @@ fn run_daemon_semantic_job_with_retry(
         data_root,
         runtime,
         deadline,
-        semantic_enabled,
+        true,
         ports.artifact_fetcher,
         ports.config,
     )

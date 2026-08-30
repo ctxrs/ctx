@@ -43,7 +43,7 @@ use autostart::daemon_autostart_allowed;
 #[cfg(test)]
 use autostart::handoff_mismatched_daemon_owner;
 pub use autostart::{
-    autostart_daemon_and_wait, autostart_daemon_for_setup_and_wait,
+    autostart_core_daemon_and_wait, autostart_daemon_and_wait, autostart_daemon_for_setup_and_wait,
     daemon_autostart_suppression_reason, maybe_autostart_daemon, observe_daemon_for_setup_and_wait,
     restart_daemon_with_current_environment_and_wait, start_finite_core_worker_and_wait,
 };

@@ -38,7 +38,7 @@ impl crate::DaemonAvailabilityPort for RecordingAvailability {
 fn short_data_root() -> Result<tempfile::TempDir> {
     tempfile::Builder::new()
         .prefix("ctx-refresh-")
-        .tempdir_in("/tmp")
+        .tempdir_in(std::fs::canonicalize("/tmp")?)
         .map_err(Into::into)
 }
 

@@ -1,3 +1,6 @@
+#[path = "semantic_activation_backoff_tests.rs"]
+mod semantic_activation_backoff;
+
 #[path = "tests/startup_recovery.rs"]
 mod startup_recovery;
 

@@ -109,6 +109,7 @@ pub(super) struct DaemonRuntime {
     pub(super) source_refresh_coordinator: Option<Arc<CoreRefreshEngine>>,
     pub(super) history_retry: DaemonRetryBackoff,
     pub(super) semantic_retry: DaemonRetryBackoff,
+    pub(super) semantic_activation_retry: DaemonRetryBackoff,
     pub(super) semantic_blocked_job: Option<Value>,
     pub(super) sidecar_drain: DaemonSidecarDrain,
     pub(super) consumer_retry_deferral: DaemonConsumerRetryDeferral,
@@ -413,7 +414,7 @@ where
                     .and(runtime.source_refresh_coordinator.as_ref()),
             );
         }
-        if config_reload.status == "activation_failed" {
+        if config_reload.blocks_daemon_startup(refresh_service.is_some()) {
             let activation_error = config_reload
                 .last_error
                 .clone()

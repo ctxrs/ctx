@@ -226,6 +226,15 @@ impl<'a> DaemonApplication<'a> {
         lifecycle::start_daemon_and_wait(self.host, data_root, config, trigger)
     }
 
+    pub fn start_core_daemon_and_wait(
+        &self,
+        data_root: &Path,
+        config: &DaemonConfigSnapshot,
+        trigger: DaemonTrigger,
+    ) -> std::result::Result<DaemonHandoff, DaemonStartError> {
+        lifecycle::start_core_daemon_and_wait(self.host, data_root, config, trigger)
+    }
+
     pub fn restart_daemon_with_current_environment(
         &self,
         data_root: &Path,
