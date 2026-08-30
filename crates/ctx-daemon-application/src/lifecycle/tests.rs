@@ -16,6 +16,11 @@ const DETACH_PROBE_STAGE: &str = "CTX_DAEMON_DETACH_PROBE_STAGE";
 #[cfg(unix)]
 const DETACH_PROBE_TEST: &str =
     "lifecycle::tests::autostart_child_detaches_from_the_invoking_terminal_session";
+#[cfg(unix)]
+const FINITE_WORKER_SESSION_PROBE_STAGE: &str = "CTX_DAEMON_FINITE_SESSION_PROBE_STAGE";
+#[cfg(unix)]
+const FINITE_WORKER_SESSION_PROBE_TEST: &str =
+    "lifecycle::tests::finite_worker_keeps_the_invoking_terminal_session";
 
 #[test]
 fn daemon_child_environment_strips_pro_channel_and_authority() -> Result<()> {
@@ -200,45 +205,41 @@ fn cancellation_at_the_last_spawn_boundary_starts_no_process() {
 #[cfg(unix)]
 #[test]
 fn finite_worker_keeps_the_invoking_terminal_session() -> Result<()> {
-    use std::os::unix::fs::PermissionsExt as _;
+    if env::var_os(FINITE_WORKER_SESSION_PROBE_STAGE).as_deref() == Some(OsStr::new("child")) {
+        loop {
+            std::thread::park();
+        }
+    }
 
-    let temp = tempfile::tempdir()?;
-    let executable = temp.path().join("record-session.sh");
-    let receipt = temp.path().join("session.txt");
-    fs::write(
-        &executable,
-        "#!/bin/sh\nprintf '%s ' \"$$\" >\"$CTX_DAEMON_TEST_RECEIPT\"\nps -o sid= -p \"$$\" >>\"$CTX_DAEMON_TEST_RECEIPT\"\nprintf ' ' >>\"$CTX_DAEMON_TEST_RECEIPT\"\nps -o pgid= -p \"$$\" >>\"$CTX_DAEMON_TEST_RECEIPT\"\n",
-    )?;
-    let mut permissions = fs::metadata(&executable)?.permissions();
-    permissions.set_mode(0o700);
-    fs::set_permissions(&executable, permissions)?;
     let launch = normalized_daemon_launch_for_test(
-        executable,
-        Vec::new(),
+        env::current_exe()?,
+        ["--exact", FINITE_WORKER_SESSION_PROBE_TEST, "--nocapture"]
+            .into_iter()
+            .map(OsString::from)
+            .collect(),
         BTreeMap::from([(
-            OsString::from("CTX_DAEMON_TEST_RECEIPT"),
-            receipt.as_os_str().to_os_string(),
+            OsString::from(FINITE_WORKER_SESSION_PROBE_STAGE),
+            OsString::from("child"),
         )]),
     )?;
     let mut child = ctx_daemon_runtime::spawn_attached(launch)?;
-    assert!(child.wait()?.success());
-    let recorded = fs::read_to_string(receipt)?;
-    let values = recorded
-        .split_whitespace()
-        .map(str::parse::<i32>)
-        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let child_pid = child.id();
+    let child_session = ctx_daemon_runtime::process_session_id(child_pid);
+    let parent_session = ctx_daemon_runtime::process_session_id(std::process::id());
+    let child_group = ctx_daemon_runtime::process_group_id(child_pid);
+    let kill = child.kill();
+    let wait = child.wait();
+    kill.context("terminate finite worker session probe")?;
+    wait.context("reap finite worker session probe")?;
 
-    assert_eq!(values.len(), 3);
-    assert_eq!(values[0], i32::try_from(child.id())?);
-    let parent_session = std::process::Command::new("ps")
-        .args(["-o", "sid=", "-p", &std::process::id().to_string()])
-        .output()?;
-    assert!(parent_session.status.success());
-    let parent_session = String::from_utf8(parent_session.stdout)?
-        .trim()
-        .parse::<i32>()?;
-    assert_eq!(values[1], parent_session);
-    assert_eq!(values[2], i32::try_from(child.id())?);
+    assert_eq!(
+        child_session.context("read finite worker session ID")?,
+        parent_session.context("read invoking test session ID")?
+    );
+    assert_eq!(
+        child_group.context("read finite worker process group ID")?,
+        child_pid
+    );
     Ok(())
 }
 
