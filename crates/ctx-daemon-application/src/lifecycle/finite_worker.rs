@@ -29,6 +29,7 @@ pub struct FiniteWorkerLease {
     handoff: DaemonHandoff,
     child: Child,
     data_root: PathBuf,
+    owner_id: String,
 }
 
 impl FiniteCoreWorkerLease {
@@ -36,13 +37,24 @@ impl FiniteCoreWorkerLease {
         data_root: PathBuf,
         handoff: DaemonHandoff,
         child: Option<Child>,
+        owner_id: Option<String>,
     ) -> io::Result<Self> {
         Ok(match child {
-            Some(child) if child.id() == handoff.pid => Self::Owned(FiniteWorkerLease {
-                handoff,
-                child,
-                data_root,
-            }),
+            Some(child) if child.id() == handoff.pid => {
+                let Some(owner_id) = owner_id else {
+                    let mut child = child;
+                    reap_owned_candidate(&mut child)?;
+                    return Err(io::Error::other(
+                        "owned finite worker has no stable daemon owner identity",
+                    ));
+                };
+                Self::Owned(FiniteWorkerLease {
+                    handoff,
+                    child,
+                    data_root,
+                    owner_id,
+                })
+            }
             Some(mut child) => {
                 reap_owned_candidate(&mut child)?;
                 Self::Joined(handoff)
@@ -86,6 +98,7 @@ impl FiniteWorkerLease {
             timeout,
             ctx_daemon_runtime::interrupt_attached_child_group,
             Child::kill,
+            Child::try_wait,
         )
     }
 
@@ -94,10 +107,11 @@ impl FiniteWorkerLease {
         timeout: Duration,
         signal: impl FnOnce(&Child) -> io::Result<()>,
         mut kill: impl FnMut(&mut Child) -> io::Result<()>,
+        mut try_wait: impl FnMut(&mut Child) -> io::Result<Option<std::process::ExitStatus>>,
     ) -> io::Result<()> {
-        let mut first_error = match self.reap_if_exited() {
-            Ok(true) => return self.finish_reaped_cleanup(None),
-            Ok(false) => None,
+        let mut first_error = match try_wait(&mut self.child) {
+            Ok(Some(_)) => return self.finish_reaped_cleanup(None),
+            Ok(None) => None,
             // Even a failed non-blocking status probe cannot waive the exact
             // child's mandatory kill/reap cleanup.
             Err(error) => Some(error),
@@ -115,9 +129,9 @@ impl FiniteWorkerLease {
         if graceful_wait {
             let deadline = Instant::now() + timeout;
             loop {
-                match self.reap_if_exited() {
-                    Ok(true) => return self.finish_reaped_cleanup(first_error),
-                    Ok(false) => {}
+                match try_wait(&mut self.child) {
+                    Ok(Some(_)) => return self.finish_reaped_cleanup(first_error),
+                    Ok(None) => {}
                     Err(error) => {
                         first_error.get_or_insert(error);
                         break;
@@ -149,9 +163,9 @@ impl FiniteWorkerLease {
                     }
                 }
             }
-            match self.reap_if_exited() {
-                Ok(true) => return self.finish_reaped_cleanup(first_error),
-                Ok(false) => {}
+            match try_wait(&mut self.child) {
+                Ok(Some(_)) => return self.finish_reaped_cleanup(first_error),
+                Ok(None) => {}
                 Err(error) => {
                     first_error.get_or_insert(error);
                 }
@@ -179,6 +193,7 @@ impl FiniteWorkerLease {
         if let Err(error) = ctx_daemon_runtime::cleanup_reaped_daemon_owner(
             &self.data_root,
             self.handoff.pid,
+            &self.owner_id,
             &endpoints,
         ) {
             first_error.get_or_insert_with(|| io::Error::other(error.to_string()));
@@ -192,7 +207,7 @@ impl FiniteWorkerLease {
         timeout: Duration,
         signal: impl FnOnce(&Child) -> io::Result<()>,
     ) -> io::Result<()> {
-        self.interrupt_and_reap_with(timeout, signal, Child::kill)
+        self.interrupt_and_reap_with(timeout, signal, Child::kill, Child::try_wait)
     }
 
     #[cfg(test)]
@@ -202,7 +217,18 @@ impl FiniteWorkerLease {
         signal: impl FnOnce(&Child) -> io::Result<()>,
         kill: impl FnMut(&mut Child) -> io::Result<()>,
     ) -> io::Result<()> {
-        self.interrupt_and_reap_with(timeout, signal, kill)
+        self.interrupt_and_reap_with(timeout, signal, kill, Child::try_wait)
+    }
+
+    #[cfg(test)]
+    pub(super) fn interrupt_and_reap_with_probe_for_test(
+        &mut self,
+        timeout: Duration,
+        signal: impl FnOnce(&Child) -> io::Result<()>,
+        kill: impl FnMut(&mut Child) -> io::Result<()>,
+        try_wait: impl FnMut(&mut Child) -> io::Result<Option<std::process::ExitStatus>>,
+    ) -> io::Result<()> {
+        self.interrupt_and_reap_with(timeout, signal, kill, try_wait)
     }
 }
 

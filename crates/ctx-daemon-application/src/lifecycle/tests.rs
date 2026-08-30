@@ -258,6 +258,7 @@ fn finite_lease_distinguishes_owned_direct_child_from_joined_owner() -> Result<(
             heartbeat_at_ms: 1,
         },
         Some(child),
+        Some("owned-worker".to_owned()),
     )?;
 
     let FiniteCoreWorkerLease::Owned(lease) = &mut lease else {
@@ -277,6 +278,7 @@ fn finite_lease_distinguishes_owned_direct_child_from_joined_owner() -> Result<(
             heartbeat_at_ms: 1,
         },
         Some(losing_child),
+        None,
     )?;
     assert!(matches!(losing_lease, FiniteCoreWorkerLease::Joined(_)));
     Ok(())
@@ -297,6 +299,7 @@ fn graceful_delivery_failure_still_escalates_and_reaps_the_exact_child() -> Resu
             heartbeat_at_ms: 1,
         },
         Some(child),
+        Some("owned-worker".to_owned()),
     )?;
     let FiniteCoreWorkerLease::Owned(lease) = &mut lease else {
         panic!("matching direct child must retain owned authority");
@@ -331,6 +334,7 @@ fn transient_hard_kill_failure_is_retried_and_the_exact_child_is_reaped() -> Res
             heartbeat_at_ms: 1,
         },
         Some(child),
+        Some("owned-worker".to_owned()),
     )?;
     let FiniteCoreWorkerLease::Owned(lease) = &mut lease else {
         panic!("matching direct child must retain owned authority");
@@ -359,6 +363,96 @@ fn transient_hard_kill_failure_is_retried_and_the_exact_child_is_reaped() -> Res
         ctx_daemon_runtime::process_state(pid),
         ctx_daemon_runtime::ProcessState::NotRunning
     );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn successful_hard_kill_with_delayed_exit_is_bounded_for_the_owned_worker() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    ctx_history_platform::platform_security::establish_private_data_root(temp.path())?;
+    ctx_daemon_runtime::create_private_dir_all(&ctx_daemon_runtime::daemon_root_path(temp.path()))?;
+    let child = std::process::Command::new("sh")
+        .args(["-c", "exec sleep 30"])
+        .spawn()?;
+    let pid = child.id();
+    let lock_path = ctx_daemon_runtime::daemon_lock_path(temp.path());
+    let payload = ctx_daemon_runtime::pid_lock_payload(json!({ "pid": pid }));
+    let owner_id = payload["owner_id"]
+        .as_str()
+        .expect("test owner id")
+        .to_owned();
+    assert!(ctx_daemon_runtime::publish_pid_lock_metadata(
+        &lock_path, &payload,
+    )?);
+    let mut lease = FiniteCoreWorkerLease::from_handoff(
+        temp.path().to_path_buf(),
+        DaemonHandoff {
+            pid,
+            heartbeat_at_ms: 1,
+        },
+        Some(child),
+        Some(owner_id),
+    )?;
+    let FiniteCoreWorkerLease::Owned(lease) = &mut lease else {
+        panic!("matching direct child must retain owned authority");
+    };
+
+    let kill_succeeded = Cell::new(false);
+    let kill_attempts = Cell::new(0);
+    let probes_after_kill = Cell::new(0);
+    let started = Instant::now();
+    let error = lease
+        .interrupt_and_reap_with_probe_for_test(
+            Duration::ZERO,
+            |_| Ok(()),
+            |_| {
+                kill_attempts.set(kill_attempts.get() + 1);
+                kill_succeeded.set(true);
+                std::thread::sleep(Duration::from_millis(1_100));
+                Ok(())
+            },
+            |child| {
+                if kill_succeeded.get() {
+                    probes_after_kill.set(probes_after_kill.get() + 1);
+                }
+                child.try_wait()
+            },
+        )
+        .expect_err("a successful kill must not make delayed exit unbounded");
+
+    assert_eq!(
+        kill_attempts.get(),
+        1,
+        "successful kill must not be retried"
+    );
+    assert_eq!(
+        probes_after_kill.get(),
+        1,
+        "deadline expiry must retain one final post-kill status probe"
+    );
+    assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    assert_eq!(
+        error.to_string(),
+        "finite worker did not exit after bounded kill escalation"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "delayed owned-worker exit exceeded its escalation bound"
+    );
+    assert!(!lease.reap_if_exited()?);
+    let unreaped = ctx_daemon_runtime::read_pid_lock_json(&lock_path).expect("unreaped lock");
+    assert_eq!(unreaped["released"], false, "{unreaped:#}");
+
+    let cleanup_error = lease
+        .interrupt_and_reap_with_signal_for_test(Duration::ZERO, |_| {
+            Err(io::Error::other("cleanup signal failure"))
+        })
+        .expect_err("fixture cleanup retains its injected signal error");
+    assert_eq!(cleanup_error.to_string(), "cleanup signal failure");
+    assert!(lease.reap_if_exited()?);
+    let reaped = ctx_daemon_runtime::read_pid_lock_json(&lock_path).expect("reaped lock");
+    assert_eq!(reaped["released"], true, "{reaped:#}");
     Ok(())
 }
 
@@ -397,6 +491,7 @@ fn graceful_interrupt_targets_the_owned_private_group_and_reaps_it() -> Result<(
             heartbeat_at_ms: 1,
         },
         Some(child),
+        Some("owned-worker".to_owned()),
     )?;
     let FiniteCoreWorkerLease::Owned(lease) = &mut lease else {
         panic!("matching direct child must retain owned authority");

@@ -369,13 +369,7 @@ pub fn start_core_daemon_and_wait(
     config: &DaemonConfigSnapshot,
     trigger: DaemonTrigger,
 ) -> std::result::Result<DaemonHandoff, DaemonStartError> {
-    start_core_daemon_and_wait_with_cancellation(
-        host,
-        data_root,
-        config,
-        trigger,
-        &mut || Ok(()),
-    )
+    start_core_daemon_and_wait_with_cancellation(host, data_root, config, trigger, &mut || Ok(()))
 }
 
 pub fn start_core_daemon_and_wait_with_cancellation(
@@ -419,7 +413,7 @@ pub fn start_finite_core_worker_and_wait_with_cancellation(
     trigger: DaemonTrigger,
     checkpoint: &mut dyn FnMut() -> Result<()>,
 ) -> std::result::Result<FiniteCoreWorkerLease, DaemonStartError> {
-    let started = start_daemon_profile_and_wait(
+    let mut started = start_daemon_profile_and_wait(
         host,
         data_root,
         config,
@@ -428,10 +422,34 @@ pub fn start_finite_core_worker_and_wait_with_cancellation(
         DaemonReadinessRequirement::Full,
         checkpoint,
     )?;
-    FiniteCoreWorkerLease::from_handoff(data_root.to_path_buf(), started.handoff, started.child)
-        .map_err(|error| {
-            DaemonStartError::Ready(anyhow!(error).context("reap losing finite worker candidate"))
-        })
+    let owner_id = if started
+        .child
+        .as_ref()
+        .is_some_and(|child| child.id() == started.handoff.pid)
+    {
+        match read_daemon_owner_identity(data_root) {
+            Ok(Some(owner)) if owner.pid == started.handoff.pid => Some(owner.owner_id),
+            Ok(_) => None,
+            Err(error) => {
+                return Err(daemon_ready_error(
+                    DaemonLaunchProfile::FiniteCoreWorker,
+                    &mut started.child,
+                    error.context("read owned finite worker identity after readiness"),
+                ));
+            }
+        }
+    } else {
+        None
+    };
+    FiniteCoreWorkerLease::from_handoff(
+        data_root.to_path_buf(),
+        started.handoff,
+        started.child,
+        owner_id,
+    )
+    .map_err(|error| {
+        DaemonStartError::Ready(anyhow!(error).context("reap losing finite worker candidate"))
+    })
 }
 struct StartedDaemonProfile {
     handoff: DaemonHandoff,
