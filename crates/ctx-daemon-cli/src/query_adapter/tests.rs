@@ -34,6 +34,12 @@ use super::*;
 
 mod passive_v2;
 
+fn semantic_tempdir() -> Result<tempfile::TempDir> {
+    let temporary = tempfile::tempdir()?;
+    ctx_history_platform::platform_security::establish_private_data_root(temporary.path())?;
+    Ok(temporary)
+}
+
 fn external_executor_config(endpoint: &str) -> SemanticEmbeddingExecutorConfig {
     SemanticEmbeddingExecutorConfig::http(
         endpoint,
@@ -639,7 +645,7 @@ fn foreground_adapter_is_lazy_and_borrows_the_exact_data_root() {
 
 #[test]
 fn foreground_adapter_uses_the_exact_external_executor_without_config_reread() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = semantic_tempdir().unwrap();
     fs::write(
         temp.path().join(ctx_app_config::CONFIG_FILE),
         "[semantic]\nendpoint = \"this file is intentionally invalid\"\n",
@@ -669,7 +675,7 @@ fn foreground_adapter_uses_the_exact_external_executor_without_config_reread() {
 
 #[test]
 fn foreground_empty_generation_converges_without_loading_a_model() -> Result<()> {
-    let temp = tempfile::tempdir()?;
+    let temp = semantic_tempdir()?;
     let (index, _) = semantic_index_revision(temp.path(), 1, false)?;
     let adapter =
         SemanticQueryAdapter::foreground(temp.path(), SemanticEmbeddingExecutorConfig::builtin());
@@ -698,7 +704,7 @@ fn foreground_empty_generation_converges_without_loading_a_model() -> Result<()>
 fn unavailable_external_contract_preserves_ready_builtin_store() -> Result<()> {
     let _environment = SemanticEnvironmentGuard::clear();
     for include_record in [false, true] {
-        let temp = tempfile::tempdir()?;
+        let temp = semantic_tempdir()?;
         let (index, _) = semantic_index_revision(temp.path(), 1, include_record)?;
         let semantic_path = source_backed_semantic_vector_path(temp.path());
         if include_record {
@@ -785,7 +791,7 @@ fn reconciled_ready_nonempty_store_with_contract(
 
 #[test]
 fn passive_ready_nonempty_builtin_uses_cache_only_without_acquisition_or_mutation() -> Result<()> {
-    let temp = tempfile::tempdir()?;
+    let temp = semantic_tempdir()?;
     let (index, _) = semantic_index(temp.path())?;
     reconcile_ready_nonempty_generation(&index, temp.path())?;
     let invalid_cache = temp.path().join("invalid-semantic-cache");
@@ -823,7 +829,7 @@ fn passive_ready_nonempty_builtin_uses_cache_only_without_acquisition_or_mutatio
 
 #[test]
 fn ordinary_preflight_reads_committed_wal_while_passive_preflight_fails_closed() -> Result<()> {
-    let temp = tempfile::tempdir()?;
+    let temp = semantic_tempdir()?;
     let (index, _) = semantic_index(temp.path())?;
     let writer = reconciled_ready_nonempty_store(&index, temp.path())?;
     commit_control_wal(&writer)?;
@@ -874,7 +880,7 @@ fn ordinary_preflight_reads_committed_wal_while_passive_preflight_fails_closed()
 
 #[test]
 fn reconcile_contract_mismatch_has_zero_executor_or_storage_activity() -> Result<()> {
-    let temp = tempfile::tempdir()?;
+    let temp = semantic_tempdir()?;
     let (index, _) = semantic_index(temp.path())?;
     let listener = TcpListener::bind("127.0.0.1:0")?;
     listener.set_nonblocking(true)?;
@@ -934,7 +940,7 @@ fn invalid_passive_executor_configuration_keeps_a_stable_nonretryable_taxonomy()
 
 #[test]
 fn foreground_ready_nonempty_generation_skips_model_and_writable_reconciliation() -> Result<()> {
-    let temp = tempfile::tempdir()?;
+    let temp = semantic_tempdir()?;
     let (index, _) = semantic_index(temp.path())?;
     reconcile_ready_nonempty_generation(&index, temp.path())?;
     let semantic_path = source_backed_semantic_vector_path(temp.path());
@@ -970,7 +976,7 @@ fn foreground_ready_nonempty_generation_skips_model_and_writable_reconciliation(
 
 #[test]
 fn foreground_read_only_ready_generation_uses_shared_snapshot_coordination() -> Result<()> {
-    let temp = tempfile::tempdir()?;
+    let temp = semantic_tempdir()?;
     let (index, _) = semantic_index(temp.path())?;
     reconcile_ready_nonempty_generation(&index, temp.path())?;
     let semantic_path = source_backed_semantic_vector_path(temp.path());
@@ -996,7 +1002,7 @@ fn foreground_read_only_ready_generation_uses_shared_snapshot_coordination() -> 
 
 #[test]
 fn foreground_read_only_missing_store_does_not_reconcile() -> Result<()> {
-    let temp = tempfile::tempdir()?;
+    let temp = semantic_tempdir()?;
     let (index, _) = semantic_index(temp.path())?;
     let semantic_path = source_backed_semantic_vector_path(temp.path());
     let adapter = SemanticQueryAdapter::foreground_read_only(
@@ -1046,7 +1052,7 @@ fn ready_adapter<'a>(
 #[test]
 fn adapter_never_embeds_before_missing_or_unacknowledged_store_preflight() -> Result<()> {
     for unacknowledged_store in [false, true] {
-        let temp = tempfile::tempdir()?;
+        let temp = semantic_tempdir()?;
         let (index, _) = semantic_index(temp.path())?;
         if unacknowledged_store {
             let contract = semantic_model_contract();
@@ -1073,7 +1079,7 @@ fn adapter_never_embeds_before_missing_or_unacknowledged_store_preflight() -> Re
 
 #[test]
 fn daemon_generation_wait_observes_delayed_acknowledgement_without_sleeping() -> Result<()> {
-    let temp = tempfile::tempdir()?;
+    let temp = semantic_tempdir()?;
     let index_root = ctx_history_refresh::source_backed_index_root(temp.path());
     let (index, _) = semantic_index_revision_at(&index_root, 1, true)?;
     let generation = index.generation_id().to_owned();
@@ -1099,7 +1105,7 @@ fn daemon_generation_wait_observes_delayed_acknowledgement_without_sleeping() ->
 
 #[test]
 fn daemon_generation_wait_repins_both_indexes_after_core_supersession() -> Result<()> {
-    let temp = tempfile::tempdir()?;
+    let temp = semantic_tempdir()?;
     let index_root = ctx_history_refresh::source_backed_index_root(temp.path());
     let (first, _) = semantic_index_revision_at(&index_root, 1, true)?;
     let first_generation = first.generation_id().to_owned();
@@ -1123,7 +1129,7 @@ fn daemon_generation_wait_repins_both_indexes_after_core_supersession() -> Resul
 
 #[test]
 fn daemon_generation_wait_repins_before_returning_a_ready_old_generation() -> Result<()> {
-    let temp = tempfile::tempdir()?;
+    let temp = semantic_tempdir()?;
     let index_root = ctx_history_refresh::source_backed_index_root(temp.path());
     let (first, _) = semantic_index_revision_at(&index_root, 1, true)?;
     reconcile_ready_nonempty_generation(&first, temp.path())?;
@@ -1145,7 +1151,7 @@ fn daemon_generation_wait_repins_before_returning_a_ready_old_generation() -> Re
 
 #[test]
 fn daemon_generation_wait_retries_a_concurrent_repin_before_preflight() -> Result<()> {
-    let temp = tempfile::tempdir()?;
+    let temp = semantic_tempdir()?;
     let index_root = ctx_history_refresh::source_backed_index_root(temp.path());
     let (first, _) = semantic_index_revision_at(&index_root, 1, true)?;
     reconcile_ready_nonempty_generation(&first, temp.path())?;
@@ -1176,7 +1182,7 @@ fn daemon_generation_wait_retries_a_concurrent_repin_before_preflight() -> Resul
 
 #[test]
 fn daemon_generation_wait_timeout_preserves_typed_query_preflight_failure() -> Result<()> {
-    let temp = tempfile::tempdir()?;
+    let temp = semantic_tempdir()?;
     let index_root = ctx_history_refresh::source_backed_index_root(temp.path());
     let (index, _) = semantic_index_revision_at(&index_root, 1, true)?;
     SemanticVectorStore::open(
@@ -1205,7 +1211,7 @@ fn daemon_generation_wait_timeout_preserves_typed_query_preflight_failure() -> R
 
 #[test]
 fn adapter_never_embeds_before_acknowledged_stale_generation_preflight() -> Result<()> {
-    let temp = tempfile::tempdir()?;
+    let temp = semantic_tempdir()?;
     let (stale_index, _) = semantic_index_revision(temp.path(), 1, false)?;
     let semantic_path = source_backed_semantic_vector_path(temp.path());
     let contract = semantic_model_contract();
@@ -1234,7 +1240,7 @@ fn adapter_never_embeds_before_acknowledged_stale_generation_preflight() -> Resu
 
 #[test]
 fn adapter_never_embeds_for_mismatched_or_ready_empty_pins() -> Result<()> {
-    let temp = tempfile::tempdir()?;
+    let temp = semantic_tempdir()?;
     let (index, _) = semantic_index(temp.path())?;
     for generation in ["different-generation", index.generation_id()] {
         let pin = SemanticQueryPin::from_readiness_for_test(
@@ -1297,7 +1303,7 @@ fn adapter_never_embeds_for_mismatched_or_ready_empty_pins() -> Result<()> {
 
 #[test]
 fn adapter_embeds_ordered_queries_then_runs_one_scan_with_one_filter_projection() -> Result<()> {
-    let temp = tempfile::tempdir()?;
+    let temp = semantic_tempdir()?;
     let (index, event_id) = semantic_index(temp.path())?;
     let mut adapter = ready_adapter(&index, temp.path(), event_id, &temp.path().join("vectors"))?;
     let calls = Cell::new(0_u8);
@@ -1327,7 +1333,7 @@ fn adapter_embeds_ordered_queries_then_runs_one_scan_with_one_filter_projection(
 
 #[test]
 fn adapter_preserves_daemon_query_service_unavailable_contract() -> Result<()> {
-    let temp = tempfile::tempdir()?;
+    let temp = semantic_tempdir()?;
     let (index, event_id) = semantic_index(temp.path())?;
     let mut adapter = ready_adapter(&index, temp.path(), event_id, &temp.path().join("vectors"))?;
     let calls = Cell::new(0_u8);
@@ -1352,7 +1358,7 @@ fn adapter_preserves_daemon_query_service_unavailable_contract() -> Result<()> {
 
 #[test]
 fn adapter_scores_only_the_active_flat_core_intersection() -> Result<()> {
-    let temp = tempfile::tempdir()?;
+    let temp = semantic_tempdir()?;
     let (index, _) = semantic_index(temp.path())?;
     let mut adapter = ready_adapter(
         &index,

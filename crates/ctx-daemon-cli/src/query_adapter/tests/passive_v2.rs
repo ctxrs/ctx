@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn ready_nonempty_http_uses_the_configured_authenticated_executor_without_mutation() -> Result<()> {
-    let temp = tempfile::tempdir()?;
+    let temp = semantic_tempdir()?;
     let (index, event_id) = semantic_index(temp.path())?;
     let server = LoopbackEmbeddingServer::start();
     let config = external_executor_config(&server.base_url);
@@ -48,7 +48,7 @@ fn ready_nonempty_http_uses_the_configured_authenticated_executor_without_mutati
 
 #[test]
 fn http_contract_drift_is_typed_nonretryable_and_does_not_mutate() -> Result<()> {
-    let temp = tempfile::tempdir()?;
+    let temp = semantic_tempdir()?;
     let (index, _) = semantic_index(temp.path())?;
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let endpoint = format!("http://{}/semantic-base", listener.local_addr()?);
@@ -103,7 +103,7 @@ fn http_contract_drift_is_typed_nonretryable_and_does_not_mutate() -> Result<()>
 
 #[test]
 fn stale_projection_preflight_makes_no_http_request_or_mutation() -> Result<()> {
-    let temp = tempfile::tempdir()?;
+    let temp = semantic_tempdir()?;
     let (old_index, _) = semantic_index_revision(temp.path(), 1, true)?;
     let listener = TcpListener::bind("127.0.0.1:0")?;
     listener.set_nonblocking(true)?;
@@ -141,7 +141,7 @@ fn stale_projection_preflight_makes_no_http_request_or_mutation() -> Result<()> 
 
 #[test]
 fn mismatched_external_space_makes_no_http_request_or_mutation() -> Result<()> {
-    let temp = tempfile::tempdir()?;
+    let temp = semantic_tempdir()?;
     let (index, _) = semantic_index(temp.path())?;
     let listener = TcpListener::bind("127.0.0.1:0")?;
     listener.set_nonblocking(true)?;
@@ -186,7 +186,7 @@ fn mismatched_external_space_makes_no_http_request_or_mutation() -> Result<()> {
 
 #[test]
 fn ready_empty_ignores_an_unusable_external_executor() -> Result<()> {
-    let temp = tempfile::tempdir()?;
+    let temp = semantic_tempdir()?;
     let (index, _) = semantic_index_revision(temp.path(), 1, false)?;
     let config = external_executor_config("https://embedding.invalid/ctx");
     let contract = semantic_index_contract_for_selected(config.contract())?;
