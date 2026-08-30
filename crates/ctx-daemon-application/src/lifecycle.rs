@@ -25,8 +25,7 @@ mod launch;
 mod readiness_receipt;
 #[cfg(test)]
 mod tests;
-use finite_worker::reap_owned_candidate;
-pub use finite_worker::FiniteCoreWorkerLease;
+pub use finite_worker::{FiniteCoreWorkerLease, FiniteWorkerLease};
 use launch::configured_finite_core_worker_command;
 #[cfg(test)]
 use launch::normalized_daemon_launch_for_test;
@@ -475,15 +474,10 @@ pub fn start_finite_core_worker_and_wait(
         DaemonLaunchProfile::FiniteCoreWorker,
         DaemonReadinessRequirement::Full,
     )?;
-    // Retain only the direct child matching the authenticated singleton winner.
-    let mut child = started.child;
-    if child
-        .as_ref()
-        .is_some_and(|candidate| candidate.id() != started.handoff.pid)
-    {
-        reap_owned_candidate(&mut child);
-    }
-    Ok(FiniteCoreWorkerLease::authenticated(started.handoff, child))
+    Ok(FiniteCoreWorkerLease::from_handoff(
+        started.handoff,
+        started.child,
+    ))
 }
 struct StartedDaemonProfile {
     handoff: DaemonHandoff,
@@ -591,7 +585,8 @@ fn start_daemon_profile_and_wait(
                 return Ok(StartedDaemonProfile { handoff, child });
             }
             Err(error)
-                if !recovery_attempted
+                if profile == DaemonLaunchProfile::Persistent
+                    && !recovery_attempted
                     && daemon_autostart_suppression_reason().is_none()
                     && error.is::<DaemonHandoffTimeout>()
                     && existing_owner.is_some() =>
@@ -607,7 +602,9 @@ fn start_daemon_profile_and_wait(
             }
             Err(error) => {
                 if profile == DaemonLaunchProfile::FiniteCoreWorker {
-                    reap_owned_candidate(&mut child);
+                    if let Some(child) = child.as_mut() {
+                        finite_worker::reap_owned_candidate(child);
+                    }
                 }
                 return Err(DaemonStartError::Ready(error));
             }

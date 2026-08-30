@@ -775,6 +775,7 @@ dependencies = [
  "ctx-daemon-service",
  "ctx-history-core",
  "ctx-history-platform",
+ "libc",
  "serde_json",
  "sha2",
  "tempfile",
@@ -785,7 +786,6 @@ name = "ctx-daemon-cli"
 version = "1.2.4"
 dependencies = [
  "anyhow",
- "ctrlc",
  "ctx-app-config",
  "ctx-client-observability",
  "ctx-daemon-application",

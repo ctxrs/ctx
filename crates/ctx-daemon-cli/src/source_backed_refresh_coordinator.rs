@@ -17,7 +17,13 @@ pub fn coordinate_source_backed_refresh(
     data_root: &Path,
     mode: SourceBackedRefreshMode,
 ) -> Result<SourceBackedRefreshObservation> {
-    ctx_daemon_service::coordinate_source_backed_refresh(&AVAILABILITY, data_root, mode)
+    if mode == SourceBackedRefreshMode::Wait {
+        super::finite_worker_owner::with_foreground_guard(|| {
+            ctx_daemon_service::coordinate_source_backed_refresh(&AVAILABILITY, data_root, mode)
+        })
+    } else {
+        ctx_daemon_service::coordinate_source_backed_refresh(&AVAILABILITY, data_root, mode)
+    }
 }
 
 pub fn coordinate_source_backed_refresh_with_progress(
@@ -25,12 +31,23 @@ pub fn coordinate_source_backed_refresh_with_progress(
     mode: SourceBackedRefreshMode,
     report_progress: &mut dyn FnMut(&RefreshStatus) -> Result<()>,
 ) -> Result<SourceBackedRefreshObservation> {
-    ctx_daemon_service::coordinate_source_backed_refresh_with_progress(
-        &AVAILABILITY,
-        data_root,
-        mode,
-        report_progress,
-    )
+    if mode == SourceBackedRefreshMode::Wait {
+        super::finite_worker_owner::with_foreground_guard(|| {
+            ctx_daemon_service::coordinate_source_backed_refresh_with_progress(
+                &AVAILABILITY,
+                data_root,
+                mode,
+                report_progress,
+            )
+        })
+    } else {
+        ctx_daemon_service::coordinate_source_backed_refresh_with_progress(
+            &AVAILABILITY,
+            data_root,
+            mode,
+            report_progress,
+        )
+    }
 }
 
 pub fn coordinate_setup_source_backed_refresh_with_progress(

@@ -34,6 +34,7 @@ pub use lifecycle::{
     configured_daemon_autostart_command, daemon_autostart_allowed, daemon_autostart_command,
     daemon_autostart_suppression_reason, daemon_restart_trigger, parse_persisted_trigger,
     spawn_detached_daemon_child, DaemonHandoff, DaemonStartError, FiniteCoreWorkerLease,
+    FiniteWorkerLease,
 };
 pub use status::{
     DaemonConfigReloadContext, DaemonSemanticStatusContext, DaemonStatusPreparation,

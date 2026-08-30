@@ -144,6 +144,7 @@ pub(crate) fn intercept(arguments: &[std::ffi::OsString]) -> Option<ExitCode> {
 fn capability_exit_code(result: Result<()>) -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
+        Err(error) if ctx_daemon_cli::finite_worker_interrupted(&error) => ExitCode::from(130),
         Err(_) => ExitCode::FAILURE,
     }
 }
