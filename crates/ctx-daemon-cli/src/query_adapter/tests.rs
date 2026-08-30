@@ -10,6 +10,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use anyhow::Context as _;
 use ctx_history_core::{
     derive_event_id, derive_session_id, CertifiedSource, CoreRecord, EventIdentityInput,
     NativeItemKey, NativeSessionKey, ScannedSourceCounts, SessionIdentityInput, SourceAnchor,
@@ -69,7 +70,10 @@ fn semantic_index_revision_at(
     revision: u64,
     include_record: bool,
 ) -> Result<(VerifiedIndex, Uuid)> {
-    ctx_history_platform::platform_security::establish_private_data_root(index_root)?;
+    ctx_history_platform::platform_security::establish_private_data_root(index_root)
+        .context("establish private query-adapter lexical fixture root")?;
+    ctx_history_platform::platform_security::verify_private_directory(index_root)
+        .context("verify private query-adapter lexical fixture root")?;
     let source = SourceKey::derive(
         "codex",
         "codex_session_jsonl",
@@ -91,9 +95,11 @@ fn semantic_index_revision_at(
         native_item_key: &NativeItemKey::native_id("message", TypedKey::U64(revision))?,
         subrecord_selector: None,
     })?;
-    let mut writer = GenerationWriter::open(index_root, WriterOptions::default())?
+    let mut writer = GenerationWriter::open(index_root, WriterOptions::default())
+        .context("open query-adapter lexical fixture writer")?
         .into_writer()
-        .map_err(crate::committed_generation_recovery_error)?;
+        .map_err(crate::committed_generation_recovery_error)
+        .context("recover query-adapter lexical fixture writer")?;
     writer.begin_source(source.clone())?;
     if include_record {
         let mut record = CoreRecord::new_selected(
@@ -127,8 +133,14 @@ fn semantic_index_revision_at(
             ..ScannedSourceCounts::default()
         },
     )?)?;
-    writer.commit(|_| true)?;
-    Ok((VerifiedIndex::open_pinned(index_root)?, event_id.as_uuid()))
+    writer
+        .commit(|_| true)
+        .context("commit query-adapter lexical fixture")?;
+    Ok((
+        VerifiedIndex::open_pinned(index_root)
+            .context("pin query-adapter lexical fixture generation")?,
+        event_id.as_uuid(),
+    ))
 }
 
 struct RejectingSemanticPorts;
