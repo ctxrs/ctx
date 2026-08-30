@@ -77,7 +77,7 @@ where
         {
             return Err(error);
         }
-        Err(_) => {}
+        Err(_) => checkpoint()?,
     }
 
     for recovery_attempt in 0..REQUEST_BOUND_STATUS_RECOVERY_ATTEMPT_LIMIT {
@@ -98,7 +98,7 @@ where
             {
                 return Err(error);
             }
-            Err(_) => {}
+            Err(_) => checkpoint()?,
         }
     }
 

@@ -209,4 +209,19 @@ mod tests {
             started_at + FINITE_WORKER_QUIET_GRACE + FINITE_WORKER_QUIET_GRACE,
         ));
     }
+
+    #[test]
+    fn queued_successor_prevents_retirement_after_first_completion() {
+        let started_at = Instant::now();
+        let mut exit = tracker(started_at);
+
+        assert!(!exit.observe_state(true, 1, 1, 1, started_at));
+        let after_first_completion = started_at + FINITE_WORKER_REQUEST_TIMEOUT;
+        assert!(!exit.observe_state(true, 0, 2, 2, after_first_completion,));
+        let successor_completed = after_first_completion + StdDuration::from_millis(1);
+        assert!(!exit.observe_state(false, 0, 3, 2, successor_completed));
+        let quiet_started = successor_completed + StdDuration::from_millis(1);
+        assert!(!exit.observe_state(false, 0, 3, 2, quiet_started));
+        assert!(exit.observe_state(false, 0, 3, 2, quiet_started + FINITE_WORKER_QUIET_GRACE,));
+    }
 }

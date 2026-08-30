@@ -79,6 +79,34 @@ fn cancellation_during_status_retry_backoff_prevents_another_roundtrip() {
 }
 
 #[test]
+fn cancellation_during_final_status_roundtrip_is_not_reclassified() {
+    let cancelled = std::cell::Cell::new(false);
+    let mut roundtrips = 0;
+    let error = request_bound_status_with_recovery_cancellable(
+        "cancel-final-status-roundtrip",
+        |_| Ok(()),
+        || {
+            if cancelled.get() {
+                Err(anyhow!("cancelled during final status roundtrip"))
+            } else {
+                Ok(())
+            }
+        },
+        || {
+            roundtrips += 1;
+            if roundtrips == REQUEST_BOUND_STATUS_RECOVERY_ATTEMPT_LIMIT + 1 {
+                cancelled.set(true);
+            }
+            Err(anyhow!("status transport unavailable"))
+        },
+    )
+    .unwrap_err();
+
+    assert_eq!(error.to_string(), "cancelled during final status roundtrip");
+    assert_eq!(roundtrips, REQUEST_BOUND_STATUS_RECOVERY_ATTEMPT_LIMIT + 1);
+}
+
+#[test]
 fn cancellation_between_outage_bursts_stops_before_the_next_burst() {
     let request_id = "cancel-between-outage-bursts";
     let started = StdInstant::now();

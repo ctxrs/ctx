@@ -184,8 +184,9 @@ where
         checkpoint()?;
         sleep(backoff)?;
         checkpoint()?;
-        if let Ok(Some(response)) = roundtrip() {
-            return Ok(Some(response));
+        match roundtrip() {
+            Ok(Some(response)) => return Ok(Some(response)),
+            Ok(None) | Err(_) => checkpoint()?,
         }
     }
 

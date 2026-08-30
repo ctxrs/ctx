@@ -125,6 +125,37 @@ fn cancellation_during_ambiguous_admission_backoff_prevents_replay() {
 }
 
 #[test]
+fn cancellation_during_final_ambiguous_roundtrip_is_not_reclassified() {
+    let cancelled = std::cell::Cell::new(false);
+    let mut roundtrips = 0;
+    let error = recover_ambiguous_admission(
+        "cancel-final-ambiguous-roundtrip",
+        |_| Ok(()),
+        || {
+            if cancelled.get() {
+                Err(anyhow!("cancelled during final admission roundtrip"))
+            } else {
+                Ok(())
+            }
+        },
+        || {
+            roundtrips += 1;
+            if roundtrips == AMBIGUOUS_ADMISSION_RECOVERY_ATTEMPT_LIMIT {
+                cancelled.set(true);
+            }
+            Err(anyhow!("ambiguous admission transport failure"))
+        },
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        "cancelled during final admission roundtrip"
+    );
+    assert_eq!(roundtrips, AMBIGUOUS_ADMISSION_RECOVERY_ATTEMPT_LIMIT);
+}
+
+#[test]
 fn admission_pending_is_a_non_terminal_protocol_state() {
     let request_id = "019fcaaa-0000-7000-8000-000000000295";
     let response = admitted_response(request_id, "admission_pending");
