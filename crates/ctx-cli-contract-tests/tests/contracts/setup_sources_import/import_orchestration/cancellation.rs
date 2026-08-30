@@ -125,8 +125,7 @@ fn assert_private_worker_group(_pid: u32) {
 }
 
 #[cfg(any(unix, windows))]
-#[test]
-fn blocked_import_sigint_exits_130_and_reaps_only_its_finite_worker() {
+fn assert_blocked_owned_wait_exits_130(arguments: &[&str], capability_request: bool) {
     let temp = tempdir();
     let root = data_root(&temp);
     fs::create_dir_all(&root).unwrap();
@@ -157,20 +156,34 @@ fn blocked_import_sigint_exits_130_and_reaps_only_its_finite_worker() {
         }
     }
     command
-        .args([
-            "import",
-            "--all",
-            "--format=json",
-            "--progress",
-            "none",
-            "--quiet",
-        ])
+        .args(arguments)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if capability_request {
+        command.stdin(Stdio::piped());
+    }
     configure_interruptible_client(&mut command);
     let mut client = SourceRefreshDaemon {
         child: Some(command.spawn().expect("start blocked finite import")),
     };
+    if capability_request {
+        let request = json!({
+            "data_root": root.clone(),
+            "operation": "RefreshAndWait",
+            "options": {},
+            "protocol_version": 3,
+            "schema_version": 1,
+        });
+        let mut input = client
+            .child
+            .as_mut()
+            .unwrap()
+            .stdin
+            .take()
+            .expect("hidden capability stdin");
+        serde_json::to_writer(&mut input, &request).unwrap();
+        input.write_all(b"\n").unwrap();
+    }
     let client_pid = client.child.as_ref().unwrap().id();
 
     let marker_deadline = Instant::now() + Duration::from_secs(15);
@@ -246,6 +259,53 @@ fn blocked_import_sigint_exits_130_and_reaps_only_its_finite_worker() {
             Err(error) => panic!("remove finite cancellation gate: {error}"),
         }
     }
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn blocked_import_sigint_exits_130_and_reaps_only_its_finite_worker() {
+    for arguments in [
+        &["import", "--all", "--progress", "none"][..],
+        &["import", "--all", "--format=json", "--progress", "none"],
+        &["import", "--all", "--progress", "none", "--quiet"],
+    ] {
+        assert_blocked_owned_wait_exits_130(arguments, false);
+    }
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn blocked_search_wait_sigint_exits_130_and_reaps_only_its_finite_worker() {
+    for arguments in [
+        &[
+            "search",
+            "setup should import",
+            "--provider=codex",
+            "--refresh=wait",
+        ][..],
+        &[
+            "search",
+            "setup should import",
+            "--provider=codex",
+            "--refresh=wait",
+            "--format=json",
+        ],
+        &[
+            "search",
+            "setup should import",
+            "--provider=codex",
+            "--refresh=wait",
+            "--quiet",
+        ],
+    ] {
+        assert_blocked_owned_wait_exits_130(arguments, false);
+    }
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn blocked_hidden_refresh_and_wait_exits_130_and_reaps_only_its_finite_worker() {
+    assert_blocked_owned_wait_exits_130(&["--ctx-core-capability-v1"], true);
 }
 
 #[cfg(any(unix, windows))]
