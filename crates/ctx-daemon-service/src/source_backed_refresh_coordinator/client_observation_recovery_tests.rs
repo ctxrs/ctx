@@ -58,9 +58,7 @@ fn one_status_outage_burst_is_typed_and_bounded() {
     );
     assert_eq!(recovery.disconnect_policy, DISCONNECT_POLICY);
     assert!(error.to_string().contains("durably admitted request"));
-    assert!(error
-        .to_string()
-        .contains("continues under daemon ownership"));
+    assert!(error.to_string().contains("outcome is unknown"));
     assert!(!error.to_string().contains("timed out"));
 }
 

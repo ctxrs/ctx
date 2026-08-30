@@ -195,12 +195,22 @@ impl CoreRefreshEngine {
         post_publication_fence: Option<&PostPublicationRouteCoverageFence>,
     ) -> RouteAdmissionFinish {
         let mut state = self.lock_state();
-        Self::finish_route_admissions_locked(
+        let finish = Self::finish_route_admissions_locked(
             &mut state,
             request_id,
             publication_ready,
             post_publication_fence,
-        )
+        );
+        if state
+            .pending_terminal_persistence
+            .as_ref()
+            .is_some_and(|pending| {
+                pending.request_id == request_id && pending.route_finalization_in_progress()
+            })
+        {
+            state.pending_terminal_persistence = None;
+        }
+        finish
     }
 
     pub(super) fn finish_route_admissions_and_persist(
@@ -209,7 +219,7 @@ impl CoreRefreshEngine {
         request_id: &str,
         publication_ready: bool,
         post_publication_fence: Option<&PostPublicationRouteCoverageFence>,
-    ) -> Result<RouteAdmissionFinish> {
+    ) -> Result<(RouteAdmissionFinish, Value)> {
         let mut state = self.lock_state();
         let finish = Self::finish_route_admissions_locked(
             &mut state,
@@ -217,25 +227,38 @@ impl CoreRefreshEngine {
             publication_ready,
             post_publication_fence,
         );
-        let job = durable_job_json(&state, &finish.durable_request_id).ok_or_else(|| {
+        let job = finalized_job_json(&state, &finish.durable_request_id).ok_or_else(|| {
             anyhow!(
                 "source refresh request `{}` disappeared during route finalization",
                 finish.durable_request_id
             )
         })?;
         if let Err(error) = self.write_status(data_root, &job) {
-            if finish.durable_request_id != request_id {
-                state.pending_terminal_persistence = Some(PendingTerminalPersistence {
-                    request_id: finish.durable_request_id.clone(),
-                    terminal_job: job,
-                    outcome: PendingTerminalOutcome::Failed {
-                        scheduler_retry: false,
-                    },
-                });
-            }
+            let failed = find_attempt(&state, request_id)
+                .is_some_and(|attempt| attempt.state == SourceBackedRefreshState::Failed);
+            let did_work =
+                !failed && job.get("generation_changed").and_then(Value::as_bool) == Some(true);
+            state.pending_terminal_persistence = Some(PendingTerminalPersistence {
+                request_id: finish.durable_request_id.clone(),
+                terminal_job: job,
+                outcome: PendingTerminalOutcome::FinalizationOnly {
+                    did_work,
+                    failed,
+                    coverage_certificate: finish.coverage_certificate.clone(),
+                },
+            });
             return Err(error);
         }
-        Ok(finish)
+        if state
+            .pending_terminal_persistence
+            .as_ref()
+            .is_some_and(|pending| {
+                pending.request_id == request_id && pending.route_finalization_in_progress()
+            })
+        {
+            state.pending_terminal_persistence = None;
+        }
+        Ok((finish, job))
     }
 
     fn finish_route_admissions_locked(
@@ -271,8 +294,7 @@ impl CoreRefreshEngine {
         let mut certified_routes = BTreeMap::new();
         let mut stale_automatic_pauses = BTreeSet::new();
         for admission in admissions {
-            let terminal_failed = state.watch_uncertain_through.is_some()
-                || !publication_ready
+            let terminal_failed = !publication_ready
                 || attempt
                     .as_ref()
                     .is_none_or(|attempt| attempt.state != SourceBackedRefreshState::Published);
@@ -343,14 +365,27 @@ impl CoreRefreshEngine {
                         .get(admission.route())
                         .copied()?;
                     let published_generation = attempt.published_generation.as_deref()?;
-                    let covered_through =
+                    let newer_exhaustive_marker = state
+                        .hermes_routes_requiring_exhaustive_recovery
+                        .contains(admission.route())
+                        || state
+                            .routes_requiring_exhaustive_reconciliation
+                            .contains(admission.route());
+                    // An exhaustive marker regained after this route was
+                    // admitted is a separate obligation. Its newer watcher
+                    // revision must remain dirty even when the post-publication
+                    // observation proves the captured content still matches.
+                    let covered_through = if newer_exhaustive_marker {
+                        admitted_watermark
+                    } else {
                         post_publication_fence.map_or(admitted_watermark, |fence| {
                             fence.certified_boundary(
                                 admission.route(),
                                 admitted_watermark,
                                 observation,
                             )
-                        });
+                        })
+                    };
                     VerifiedSourceRefreshRouteBoundary::new(
                         request_id,
                         published_generation,
@@ -368,26 +403,20 @@ impl CoreRefreshEngine {
                 };
                 if acknowledged {
                     state.route_retry_intents.remove(admission.route());
-                    if attempt.as_ref().is_some_and(|attempt| {
-                        attempt.reconciliation_demand
-                            == SourceBackedReconciliationDemand::Exhaustive
-                    }) {
-                        state
-                            .hermes_routes_requiring_exhaustive_recovery
-                            .remove(admission.route());
-                        state
-                            .routes_requiring_exhaustive_reconciliation
-                            .remove(admission.route());
-                    }
-                    if let Some((boundary, observation)) = verified_boundary {
-                        certified_routes.insert(
-                            admission.route().clone(),
-                            SourceBackedRefreshRouteCoverageCertificate {
-                                observation,
-                                admitted_watermark: boundary.covered_through(),
-                            },
-                        );
-                    }
+                }
+                // A valid verified boundary remains useful publication
+                // evidence even when a newer dirty revision prevented this
+                // admission from becoming clean.  In that case the capped
+                // boundary documents exactly what was covered, while the
+                // newer revision stays schedulable.
+                if let Some((boundary, observation)) = verified_boundary {
+                    certified_routes.insert(
+                        admission.route().clone(),
+                        SourceBackedRefreshRouteCoverageCertificate {
+                            observation,
+                            admitted_watermark: boundary.covered_through(),
+                        },
+                    );
                 }
             } else {
                 if let Some(intent) = selected_retry_intent.as_ref() {

@@ -16,7 +16,7 @@ use notify::{
 };
 
 use crate::CoalescingWakePayload;
-
+mod callback_injection;
 mod native_subscription;
 
 pub const WATCH_EVENT_QUEUE_CAPACITY: usize = 256;

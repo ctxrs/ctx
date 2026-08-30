@@ -28,18 +28,15 @@ pub(super) fn durable_request_id<'a>(
     state: &'a CoreRefreshEngineState,
     request_id: &'a str,
 ) -> &'a str {
+    if let Some(pending) = state.pending_terminal_persistence.as_ref() {
+        return &pending.request_id;
+    }
     if find_attempt(state, request_id).is_some_and(|attempt| !attempt.state.is_active()) {
         return request_id;
     }
     state
         .pending_scheduler_retry_root_id
         .as_deref()
-        .or_else(|| {
-            state
-                .pending_terminal_persistence
-                .as_ref()
-                .map(|pending| pending.request_id.as_str())
-        })
         .or(state.active_request_id.as_deref())
         .unwrap_or(request_id)
 }

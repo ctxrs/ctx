@@ -584,7 +584,7 @@ fn persistent_terminal_status_failure_retries_without_reexecution_or_hot_spin() 
 }
 
 #[test]
-fn scheduler_retries_terminal_status_without_republishing_core() {
+fn scheduler_retries_post_route_finalization_once_and_notifies_generation_once() {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("data");
     ctx_history_platform::platform_security::establish_private_data_root(&data_root).unwrap();
@@ -614,9 +614,9 @@ fn scheduler_retries_terminal_status_without_republishing_core() {
     let failures = Arc::clone(&terminal_failures);
     let writer = Arc::new(move |path: &Path, job: &Value| {
         if job.get("request_state").and_then(Value::as_str) == Some("published")
-            && failures.fetch_add(1, Ordering::SeqCst) == 0
+            && failures.fetch_add(1, Ordering::SeqCst) == 1
         {
-            anyhow::bail!("injected scheduler terminal persistence failure");
+            anyhow::bail!("injected scheduler route-finalization persistence failure");
         }
         write_daemon_job_status(path, job)
     });
@@ -630,13 +630,14 @@ fn scheduler_retries_terminal_status_without_republishing_core() {
         )
         .unwrap();
     let mut runtime = DaemonRuntime::default();
+    let notification = FailingGenerationPublished::default();
 
     let first = run_pending_core_refresh(
         &data_root,
         &mut runtime,
         Some(&coordinator),
         true,
-        &crate::test_support::GENERATION_PUBLISHED,
+        &notification,
         &crate::test_support::OBSERVATION,
     )
     .unwrap()
@@ -644,17 +645,17 @@ fn scheduler_retries_terminal_status_without_republishing_core() {
     assert!(first.failed);
     assert!(first.provider_refresh_events.is_empty());
     assert_eq!(executions.load(Ordering::SeqCst), 1);
-    assert_eq!(
-        read_daemon_job_status(&daemon_core_refresh_job_path(&data_root)).unwrap()["request_state"],
-        "running"
-    );
+    assert_eq!(notification.calls.load(Ordering::SeqCst), 0);
+    let pending = read_daemon_job_status(&daemon_core_refresh_job_path(&data_root)).unwrap();
+    assert_eq!(pending["request_state"], "published");
+    assert_eq!(pending["route_finalization_pending"], true);
 
     let mut retry = run_pending_core_refresh(
         &data_root,
         &mut runtime,
         Some(&coordinator),
         true,
-        &crate::test_support::GENERATION_PUBLISHED,
+        &notification,
         &crate::test_support::OBSERVATION,
     )
     .unwrap()
@@ -669,8 +670,11 @@ fn scheduler_retries_terminal_status_without_republishing_core() {
         [PublicEventV1::ProviderRefreshCompleted(_)]
     ));
     assert_eq!(executions.load(Ordering::SeqCst), 1);
+    assert_eq!(terminal_failures.load(Ordering::SeqCst), 3);
+    assert_eq!(notification.calls.load(Ordering::SeqCst), 1);
     let terminal = read_daemon_job_status(&daemon_core_refresh_job_path(&data_root)).unwrap();
     assert_eq!(terminal["request_state"], "published");
+    assert!(terminal.get("route_finalization_pending").is_none());
     assert!(terminal.get("last_error").is_none());
     assert!(terminal.get("failure_type").is_none());
 }

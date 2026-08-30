@@ -15,19 +15,15 @@ impl CoreRefreshEngine {
         let state = self.lock_state();
         let requested_attempt = find_attempt(&state, request_id)
             .ok_or_else(|| anyhow!("source refresh request `{request_id}` is unknown"))?;
-        let requested_terminal = !requested_attempt.state.is_active();
-        let durable_request_id = if requested_terminal {
+        let durable_request_id = if let Some(pending) = state.pending_terminal_persistence.as_ref()
+        {
+            pending.request_id.as_str()
+        } else if !requested_attempt.state.is_active() {
             request_id
         } else {
             state
                 .pending_scheduler_retry_root_id
                 .as_deref()
-                .or_else(|| {
-                    state
-                        .pending_terminal_persistence
-                        .as_ref()
-                        .map(|pending| pending.request_id.as_str())
-                })
                 .or(state.active_request_id.as_deref())
                 .unwrap_or(request_id)
         };
@@ -103,6 +99,10 @@ impl CoreRefreshEngine {
         if durable_queue_entry_count(&state) > SOURCE_REFRESH_ACTIVE_PENDING_LIMIT {
             bail!("source refresh retry queue exceeds its bounded capacity");
         }
+        if let Some(authoritative) = pending_terminal_job_json(&state) {
+            self.write_status(data_root, &authoritative)?;
+            return Ok(authoritative);
+        }
         if let Some(authoritative) = authoritative_route_terminal_job(&state, &request_id) {
             // Route retry/block disposition is already part of the engine's
             // durable terminal outcome. Do not let a caller turn it into a
@@ -163,6 +163,10 @@ impl CoreRefreshEngine {
         if durable_queue_entry_count(&state) > SOURCE_REFRESH_ACTIVE_PENDING_LIMIT {
             bail!("source refresh scheduler queue exceeds its bounded capacity");
         }
+        if let Some(authoritative) = pending_terminal_job_json(&state) {
+            self.write_status(data_root, &authoritative)?;
+            return Ok(authoritative);
+        }
         if let Some(request_id) = scheduler_job
             .get("request_id")
             .and_then(Value::as_str)
@@ -177,12 +181,6 @@ impl CoreRefreshEngine {
         let durable_root = state
             .pending_scheduler_retry_root_id
             .as_deref()
-            .or_else(|| {
-                state
-                    .pending_terminal_persistence
-                    .as_ref()
-                    .map(|pending| pending.request_id.as_str())
-            })
             .or(state.active_request_id.as_deref())
             .map(str::to_owned);
         let job = durable_root
@@ -311,7 +309,30 @@ fn authoritative_route_terminal_job(
 }
 
 pub(super) fn durable_job_json(state: &CoreRefreshEngineState, request_id: &str) -> Option<Value> {
+    if let Some(pending) = state.pending_terminal_persistence.as_ref() {
+        // Every ordinary writer preserves the exact terminal root until the
+        // dedicated route-finalization writer commits its markerless image.
+        return Some(job_with_queued_successors(
+            state,
+            pending.terminal_job.clone(),
+        ));
+    }
+    finalized_job_json(state, request_id)
+}
+
+pub(super) fn finalized_job_json(
+    state: &CoreRefreshEngineState,
+    request_id: &str,
+) -> Option<Value> {
     projected_job_json(state, request_id).map(|job| job_with_queued_successors(state, job))
+}
+
+fn pending_terminal_job_json(state: &CoreRefreshEngineState) -> Option<Value> {
+    let pending = state.pending_terminal_persistence.as_ref()?;
+    Some(job_with_queued_successors(
+        state,
+        pending.terminal_job.clone(),
+    ))
 }
 
 pub(super) fn job_with_queued_successors(state: &CoreRefreshEngineState, mut job: Value) -> Value {
