@@ -23,8 +23,9 @@ const CONTROL_SCHEMA_VERSION: i64 = 6;
 pub(super) const FULL_REBUILD_STATE: &str = "projection_full_rebuild_v1";
 
 pub(crate) fn open_writable(root: &Path) -> Result<Connection> {
-    validate_root(root, true)?;
-    let root = canonical_control_root(root)?;
+    let root = crate::private_fs::writable_private_root(root)?;
+    validate_root(&root, true)?;
+    let root = canonical_control_root(&root)?;
     let path = control_path(&root);
     validate_control_file(&path)?;
     let connection = Connection::open_with_flags(

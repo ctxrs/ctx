@@ -147,6 +147,54 @@ fn writable_open_establishes_the_private_root_before_any_flat_artifact() -> Resu
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn writable_open_refuses_a_symlinked_final_root_without_creation() -> Result<()> {
+    use std::os::unix::fs::{symlink, PermissionsExt as _};
+
+    let temporary = tempfile::tempdir()?;
+    let target = temporary.path().join("outside");
+    let root = temporary.path().join("semantic");
+    std::fs::create_dir(&target)?;
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o700))?;
+    symlink(&target, &root)?;
+
+    assert!(SemanticVectorStore::open(&root, &test_contract()).is_err());
+    assert!(std::fs::symlink_metadata(&root)?.file_type().is_symlink());
+    assert!(
+        std::fs::read_dir(&target)?.next().is_none(),
+        "private creation must not follow a symlinked final root"
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn writable_open_repairs_only_an_existing_legacy_semantic_root() -> Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let temporary = tempfile::tempdir()?;
+    let search = temporary.path().join("search");
+    let root = search.join("semantic");
+    std::fs::create_dir(&search)?;
+    std::fs::create_dir(&root)?;
+    std::fs::set_permissions(&search, std::fs::Permissions::from_mode(0o755))?;
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755))?;
+
+    drop(SemanticVectorStore::open(&root, &test_contract())?);
+
+    assert_eq!(
+        std::fs::metadata(&root)?.permissions().mode() & 0o777,
+        0o700
+    );
+    assert_eq!(
+        std::fs::metadata(&search)?.permissions().mode() & 0o777,
+        0o755,
+        "private root establishment must not chmod an existing ancestor"
+    );
+    Ok(())
+}
+
 #[test]
 fn passive_snapshot_accepts_a_legacy_regular_coordination_lock() -> Result<()> {
     let temporary = tempfile::tempdir()?;
@@ -228,6 +276,9 @@ fn passive_snapshot_lock_blocks_writer_until_pin_and_refuses_later_wal() -> Resu
 
     let passive =
         SemanticVectorStore::open_passive_snapshot_after_admission(&root, &contract, || {
+            fs2::FileExt::try_lock_shared(&writer_lock)
+                .expect("passive admission must use a shared coordination lock");
+            fs2::FileExt::unlock(&writer_lock).unwrap();
             assert!(
                 fs2::FileExt::try_lock_exclusive(&writer_lock).is_err(),
                 "the passive admission guard must exclude a writer before open"
@@ -587,6 +638,96 @@ fn passive_snapshot_retained_lock_prevents_windows_path_replacement() -> Result<
         passive.source_backed_generation_pin_exact(&"d".repeat(64), 0)?,
         SourceBackedGenerationPin::NotReady
     ));
+    Ok(())
+}
+
+#[cfg(windows)]
+#[test]
+fn passive_snapshot_refuses_a_root_junction_without_touching_its_target() -> Result<()> {
+    let temporary = tempfile::tempdir()?;
+    let target = temporary.path().join("semantic-target");
+    let junction = temporary.path().join("semantic-junction");
+    let contract = test_contract();
+    drop(SemanticVectorStore::open(&target, &contract)?);
+    let before = durable_tree_snapshot(&target)?;
+    let status = std::process::Command::new("cmd.exe")
+        .args(["/D", "/C", "mklink", "/J"])
+        .arg(&junction)
+        .arg(&target)
+        .status()?;
+    if !status.success() {
+        return Err(anyhow::anyhow!(
+            "failed to create semantic root junction fixture"
+        ));
+    }
+
+    let error = match SemanticVectorStore::open_passive_snapshot(&junction, &contract) {
+        Ok(_) => panic!("a reparse-point semantic root must be refused"),
+        Err(error) => error,
+    };
+
+    assert_eq!(
+        semantic_vector_failure_kind(&error),
+        Some(SemanticVectorFailureKind::PassiveSnapshotUnavailable)
+    );
+    assert_eq!(durable_tree_snapshot(&target)?, before);
+    Ok(())
+}
+
+#[cfg(windows)]
+#[test]
+fn passive_snapshot_retains_windows_root_authority_for_its_lifetime() -> Result<()> {
+    let temporary = tempfile::tempdir()?;
+    let root = source_backed_semantic_vector_path(temporary.path());
+    let displaced = root.with_file_name("semantic-displaced");
+    let parent = root
+        .parent()
+        .expect("semantic root must have a parent")
+        .to_path_buf();
+    let displaced_parent = parent.with_file_name("search-displaced");
+    let contract = test_contract();
+    drop(SemanticVectorStore::open(&root, &contract)?);
+
+    let mut admission_replacement = None;
+    let mut admission_parent_replacement = None;
+    let passive =
+        SemanticVectorStore::open_passive_snapshot_after_admission(&root, &contract, || {
+            admission_replacement = Some(std::fs::rename(&root, &displaced));
+            admission_parent_replacement = Some(std::fs::rename(&parent, &displaced_parent));
+        })?
+        .expect("initialized semantic store must open passively");
+    assert!(
+        admission_replacement
+            .expect("root replacement must be attempted during passive admission")
+            .is_err(),
+        "root authority must precede SQLite and Flat child opens"
+    );
+    assert!(
+        admission_parent_replacement
+            .expect("parent replacement must be attempted during passive admission")
+            .is_err(),
+        "root authority must prevent its pathname from moving during child opens"
+    );
+    let replacement = std::fs::rename(&root, &displaced);
+    let parent_replacement = std::fs::rename(&parent, &displaced_parent);
+
+    assert!(
+        replacement.is_err(),
+        "the retained Windows root authority must deny rename/replacement"
+    );
+    assert!(
+        parent_replacement.is_err(),
+        "the retained Windows root authority must pin its admitted pathname"
+    );
+    assert!(root.is_dir());
+    assert!(!displaced.exists());
+    assert!(matches!(
+        passive.source_backed_generation_pin_exact(&"f".repeat(64), 0)?,
+        SourceBackedGenerationPin::NotReady
+    ));
+    drop(passive);
+    std::fs::rename(&parent, &displaced_parent)?;
+    assert!(displaced_parent.join("semantic").is_dir());
     Ok(())
 }
 

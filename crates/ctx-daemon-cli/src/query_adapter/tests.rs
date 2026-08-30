@@ -7,7 +7,7 @@ use std::{
     path::PathBuf,
     sync::{Arc, Mutex},
     thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use anyhow::Context as _;
@@ -956,27 +956,14 @@ fn foreground_ready_nonempty_generation_skips_model_and_writable_reconciliation(
     let temp = semantic_tempdir()?;
     let (index, _) = semantic_index(temp.path())?;
     reconcile_ready_nonempty_generation(&index, temp.path())?;
-    let semantic_path = source_backed_semantic_vector_path(temp.path());
-    let transaction_lock = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(semantic_path.join("flat_transaction.lock"))?;
-    transaction_lock.lock_exclusive()?;
-    let state_path = semantic_path.join("state.sqlite");
-    let mut state_permissions = fs::metadata(&state_path)?.permissions();
-    state_permissions.set_readonly(true);
-    fs::set_permissions(&state_path, state_permissions)?;
-
+    reset_foreground_acquisition_attempts();
+    let cache_path = temp.path().join("model-cache");
     let adapter =
         SemanticQueryAdapter::foreground(temp.path(), SemanticEmbeddingExecutorConfig::builtin());
-    let started = Instant::now();
     let _session = adapter
         .begin_query(&index)
         .map_err(|error| anyhow!(error.to_string()))?;
-    assert!(
-        started.elapsed() < Duration::from_secs(1),
-        "a ready foreground query must not wait on the Flat write transaction lock"
-    );
+    assert_eq!(foreground_acquisition_attempts(), 0);
     let SemanticQueryExecution::Foreground { executor, .. } = &adapter.execution else {
         unreachable!("foreground constructor selected daemon execution")
     };
@@ -984,31 +971,49 @@ fn foreground_ready_nonempty_generation_skips_model_and_writable_reconciliation(
         !executor.is_resolved(),
         "a ready foreground query must not build the selected executor"
     );
+    assert!(
+        !cache_path.exists(),
+        "ready preflight must not create model cache state"
+    );
     Ok(())
 }
 
 #[test]
-fn foreground_read_only_ready_generation_uses_shared_snapshot_coordination() -> Result<()> {
+fn foreground_read_only_writer_contention_is_typed_without_mutation() -> Result<()> {
     let temp = semantic_tempdir()?;
     let (index, _) = semantic_index(temp.path())?;
     reconcile_ready_nonempty_generation(&index, temp.path())?;
     let semantic_path = source_backed_semantic_vector_path(temp.path());
+    let before = durable_query_state_snapshot(temp.path(), &temp.path().join("model-cache"))?;
     let transaction_lock = OpenOptions::new()
         .read(true)
+        .write(true)
         .open(semantic_path.join("flat_transaction.lock"))?;
-    transaction_lock.lock_shared()?;
-
+    transaction_lock.lock_exclusive()?;
     let adapter = SemanticQueryAdapter::foreground_read_only(
         temp.path(),
         SemanticEmbeddingExecutorConfig::builtin(),
     );
-    let started = Instant::now();
-    let _session = adapter
-        .begin_query(&index)
-        .map_err(|error| anyhow!(error.to_string()))?;
-    assert!(
-        started.elapsed() < Duration::from_secs(1),
-        "passive admission must share the existing Flat transaction lock"
+    let error = match adapter.begin_query(&index) {
+        Ok(_) => panic!("writer-first contention must fail passive admission"),
+        Err(error) => error,
+    };
+    transaction_lock.unlock()?;
+    assert!(matches!(
+        error,
+        HistorySemanticError::NotReady {
+            reason: SemanticReason::StoreUnavailable,
+            retryable: true,
+            ..
+        }
+    ));
+    let SemanticQueryExecution::Foreground { executor, .. } = &adapter.execution else {
+        unreachable!("foreground constructor selected daemon execution")
+    };
+    assert!(!executor.is_resolved());
+    assert_eq!(
+        durable_query_state_snapshot(temp.path(), &temp.path().join("model-cache"))?,
+        before
     );
     Ok(())
 }

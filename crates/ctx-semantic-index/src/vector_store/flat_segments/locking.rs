@@ -16,23 +16,89 @@ use super::{io_error, transaction_lock_path, FlatResult};
 /// lock, not from changing or reinterpreting their owner or DACL.
 pub(crate) struct FlatStoreCoordinationGuard {
     lock: FileLock,
+    #[cfg(windows)]
+    root_authority: Option<PassiveRootAuthority>,
 }
 
 impl FlatStoreCoordinationGuard {
     pub(crate) fn lock_passive_snapshot(root: &Path) -> FlatResult<Self> {
+        #[cfg(windows)]
+        let root_authority = PassiveRootAuthority::open(root)?;
         Ok(Self {
             lock: FileLock::try_shared_passive(&transaction_lock_path(root))?,
+            #[cfg(windows)]
+            root_authority: Some(root_authority),
         })
     }
 
     pub(crate) fn lock_control_writer(root: &Path) -> FlatResult<Self> {
         Ok(Self {
             lock: FileLock::exclusive(&transaction_lock_path(root))?,
+            #[cfg(windows)]
+            root_authority: None,
         })
     }
 
     pub(crate) fn validate_retained(&self) -> FlatResult<()> {
+        #[cfg(windows)]
+        if let Some(root_authority) = &self.root_authority {
+            root_authority.validate_retained()?;
+        }
         self.lock.validate_retained()
+    }
+}
+
+/// Retains the absolute Windows semantic root with generic-read authority and
+/// without delete sharing. The admitted directory therefore cannot be renamed,
+/// replaced, or converted to a reparse point while passive children are open.
+#[cfg(windows)]
+struct PassiveRootAuthority {
+    path: std::path::PathBuf,
+    handle: File,
+}
+
+#[cfg(windows)]
+impl PassiveRootAuthority {
+    fn open(root: &Path) -> FlatResult<Self> {
+        use std::os::windows::fs::OpenOptionsExt as _;
+
+        const FILE_SHARE_READ: u32 = 0x0000_0001;
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        const FILE_GENERIC_READ: u32 = 0x0012_0089;
+
+        let path = std::path::absolute(root)
+            .map_err(|source| io_error("resolve passive root authority", root, source))?;
+        let handle = OpenOptions::new()
+            .access_mode(FILE_GENERIC_READ)
+            .share_mode(FILE_SHARE_READ)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(&path)
+            .map_err(|source| io_error("open passive root authority", &path, source))?;
+        validate_retained_directory(&path, &handle)?;
+        Ok(Self { path, handle })
+    }
+
+    fn validate_retained(&self) -> FlatResult<()> {
+        validate_retained_directory(&self.path, &self.handle)
+    }
+}
+
+#[cfg(windows)]
+fn validate_retained_directory(path: &Path, handle: &File) -> FlatResult<()> {
+    use std::os::windows::fs::MetadataExt as _;
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+    let metadata = handle
+        .metadata()
+        .map_err(|source| io_error("inspect passive root authority", path, source))?;
+    if metadata.is_dir() && metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0 {
+        Ok(())
+    } else {
+        Err(super::FlatStoreError::Corrupt(format!(
+            "{} is not a retained non-reparse semantic root component",
+            path.display()
+        )))
     }
 }
 

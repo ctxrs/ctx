@@ -97,21 +97,22 @@ impl SemanticVectorStore {
         contract: &SemanticModelContract,
         private_root_ready: impl FnOnce(),
     ) -> Result<Self> {
+        let path = private_fs::writable_private_root(path)?;
         // Reject newer or incompatible control state before Flat recovery can
         // remove artifacts. The same validation runs again under coordination
         // in `open_writable`, closing the concurrent-writer window.
-        control::preflight_writable_compatibility(path)?;
+        control::preflight_writable_compatibility(&path)?;
         // Establish the private semantic root before Flat can create any
         // directory or coordination artifact. Later Flat/control validation
         // remains authoritative for redirects and incompatible state.
-        private_fs::create_private_dir_all(path)?;
+        private_fs::create_private_dir_all(&path)?;
         private_root_ready();
         let flat_contract = flat_model_contract(contract).map_err(semantic_flat_store_error)?;
-        let (flat, coordination) = FlatSegmentStore::prepare_writable_open(path, flat_contract)
+        let (flat, coordination) = FlatSegmentStore::prepare_writable_open(&path, flat_contract)
             .map_err(semantic_flat_store_error)?;
         // Recovery, control migration/open, and model-reset handoff share the
         // same transaction lock used by source reconciliation.
-        let conn = control::open_writable(path)?;
+        let conn = control::open_writable(&path)?;
         let flat = flat
             .finish_writable_open()
             .map_err(semantic_flat_store_error)?;
