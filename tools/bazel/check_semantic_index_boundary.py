@@ -20,6 +20,9 @@ EXPECTED_DEPENDENCIES: dict[str, Any] = {
     "ctx-history-platform": {"path": "../ctx-history-platform"},
     "ctx-semantic-model": {"path": "../ctx-semantic-model"},
     "fs2": "0.4.3",
+    # Reviewed only for O_NOFOLLOW/O_CLOEXEC on the existing transaction-lock
+    # file; it does not add a storage or execution backend.
+    "libc": {"workspace": True},
     "memmap2": {"workspace": True},
     "rusqlite": {"workspace": True},
     "serde": {"workspace": True},

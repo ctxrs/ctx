@@ -162,6 +162,9 @@ impl SemanticVectorStore {
         let passive_snapshot = FlatStoreCoordinationGuard::lock_passive_snapshot(&path)
             .map_err(passive_flat_store_error)?;
         admitted();
+        passive_snapshot
+            .validate_retained()
+            .map_err(passive_flat_store_error)?;
         let Some(conn) = control::open_passive_snapshot(&path)? else {
             return Ok(None);
         };
@@ -174,6 +177,9 @@ impl SemanticVectorStore {
         {
             return Ok(None);
         }
+        passive_snapshot
+            .validate_retained()
+            .map_err(passive_flat_store_error)?;
         Ok(Some(Self {
             conn,
             flat,
@@ -189,6 +195,15 @@ impl SemanticVectorStore {
         admitted: impl FnOnce(),
     ) -> Result<Option<Self>> {
         Self::open_passive_snapshot_with_admission(path, contract, admitted)
+    }
+
+    pub(super) fn validate_passive_snapshot_coordination(&self) -> Result<()> {
+        if let Some(snapshot) = &self._passive_snapshot {
+            snapshot
+                .validate_retained()
+                .map_err(passive_flat_store_error)?;
+        }
+        Ok(())
     }
 
     /// Pins one exact passive generation while the writer coordination lock is

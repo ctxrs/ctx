@@ -1,16 +1,23 @@
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
+#[cfg(not(windows))]
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use ctx_history_platform::platform_security::{restrict_private_directory, restrict_private_file};
+#[cfg(not(windows))]
+use ctx_history_platform::platform_security::restrict_private_directory;
+use ctx_history_platform::platform_security::restrict_private_file;
 
 pub(crate) fn create_private_dir_all(path: &Path) -> Result<()> {
-    fs::create_dir_all(path)
+    #[cfg(windows)]
+    ctx_history_platform::platform_security::create_current_user_owned_private_directory_all(path)
         .with_context(|| format!("create private directory {}", path.display()))?;
-    restrict_private_directory(path)
-        .with_context(|| format!("secure private directory {}", path.display()))?;
+    #[cfg(not(windows))]
+    {
+        fs::create_dir_all(path)
+            .with_context(|| format!("create private directory {}", path.display()))?;
+        restrict_private_directory(path)
+            .with_context(|| format!("secure private directory {}", path.display()))?;
+    }
     Ok(())
 }
 

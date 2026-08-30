@@ -115,6 +115,41 @@ fn flat_store_control_catalog_has_no_vectors_or_plaintext() -> Result<()> {
 }
 
 #[test]
+fn new_store_creates_a_private_root_and_coordination_lock() -> Result<()> {
+    use ctx_history_platform::platform_security::{verify_private_directory, verify_private_file};
+
+    let temporary = tempfile::tempdir()?;
+    let root = source_backed_semantic_vector_path(temporary.path());
+    drop(SemanticVectorStore::open(&root, &test_contract())?);
+
+    verify_private_directory(&root)?;
+    verify_private_file(&root.join("flat_transaction.lock"))?;
+    Ok(())
+}
+
+#[test]
+fn passive_snapshot_accepts_a_legacy_regular_coordination_lock() -> Result<()> {
+    let temporary = tempfile::tempdir()?;
+    let root = source_backed_semantic_vector_path(temporary.path());
+    let contract = test_contract();
+    drop(SemanticVectorStore::open(&root, &contract)?);
+    let lock = root.join("flat_transaction.lock");
+    std::fs::remove_file(&lock)?;
+    std::fs::write(&lock, b"legacy")?;
+    let before = durable_tree_snapshot(&root)?;
+
+    let passive = SemanticVectorStore::open_passive_snapshot(&root, &contract)?
+        .expect("a legacy regular lock must remain compatible");
+
+    assert!(matches!(
+        passive.source_backed_generation_pin_exact(&"e".repeat(64), 0)?,
+        SourceBackedGenerationPin::NotReady
+    ));
+    assert_eq!(durable_tree_snapshot(&root)?, before);
+    Ok(())
+}
+
+#[test]
 fn passive_snapshot_open_leaves_the_durable_tree_unchanged() -> Result<()> {
     let temporary = tempfile::tempdir()?;
     let root = source_backed_semantic_vector_path(temporary.path());
@@ -234,6 +269,35 @@ fn passive_snapshot_lock_blocks_a_writer_from_committing_between_admission_and_p
         semantic_vector_failure_kind(&error),
         Some(SemanticVectorFailureKind::PassiveSnapshotUnavailable)
     );
+    Ok(())
+}
+
+#[test]
+fn passive_snapshot_writer_contention_fails_promptly_without_mutation() -> Result<()> {
+    let temporary = tempfile::tempdir()?;
+    let root = source_backed_semantic_vector_path(temporary.path());
+    let contract = test_contract();
+    drop(SemanticVectorStore::open(&root, &contract)?);
+    let before = durable_tree_snapshot(&root)?;
+    let writer_lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(root.join("flat_transaction.lock"))?;
+    fs2::FileExt::lock_exclusive(&writer_lock)?;
+    // Passive admission uses try_lock_shared, so writer-first contention is an
+    // ordinary typed result in this thread rather than a timing assertion.
+    let result = SemanticVectorStore::open_passive_snapshot(&root, &contract);
+    fs2::FileExt::unlock(&writer_lock)?;
+    let error = match result {
+        Ok(_) => panic!("writer contention must make the passive snapshot unavailable"),
+        Err(error) => error,
+    };
+
+    assert_eq!(
+        semantic_vector_failure_kind(&error),
+        Some(SemanticVectorFailureKind::PassiveSnapshotUnavailable)
+    );
+    assert_eq!(durable_tree_snapshot(&root)?, before);
     Ok(())
 }
 
@@ -382,6 +446,138 @@ fn passive_snapshot_never_recreates_a_missing_coordination_lock() -> Result<()> 
     );
     assert!(!lock.exists());
     assert_eq!(durable_tree_snapshot(&root)?, before);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn passive_snapshot_refuses_a_symlinked_coordination_lock_without_touching_the_target() -> Result<()>
+{
+    use std::os::unix::fs::symlink;
+
+    let temporary = tempfile::tempdir()?;
+    let root = source_backed_semantic_vector_path(temporary.path());
+    let contract = test_contract();
+    drop(SemanticVectorStore::open(&root, &contract)?);
+    let lock = root.join("flat_transaction.lock");
+    let target = temporary.path().join("outside-lock");
+    std::fs::write(&target, b"outside")?;
+    std::fs::remove_file(&lock)?;
+    symlink(&target, &lock)?;
+    let before = std::fs::read(&target)?;
+
+    let error = match SemanticVectorStore::open_passive_snapshot(&root, &contract) {
+        Ok(_) => panic!("a redirected passive coordination lock must be refused"),
+        Err(error) => error,
+    };
+
+    assert_eq!(
+        semantic_vector_failure_kind(&error),
+        Some(SemanticVectorFailureKind::PassiveSnapshotUnavailable)
+    );
+    assert_eq!(std::fs::read(target)?, before);
+    assert!(std::fs::symlink_metadata(lock)?.file_type().is_symlink());
+    Ok(())
+}
+
+#[cfg(windows)]
+#[test]
+fn passive_snapshot_refuses_a_reparse_point_coordination_lock_without_creation() -> Result<()> {
+    let temporary = tempfile::tempdir()?;
+    let root = source_backed_semantic_vector_path(temporary.path());
+    let contract = test_contract();
+    drop(SemanticVectorStore::open(&root, &contract)?);
+    let lock = root.join("flat_transaction.lock");
+    let target = temporary.path().join("outside-lock-directory");
+    std::fs::create_dir(&target)?;
+    std::fs::remove_file(&lock)?;
+    let status = std::process::Command::new("cmd.exe")
+        .args(["/D", "/C", "mklink", "/J"])
+        .arg(&lock)
+        .arg(&target)
+        .status()?;
+    if !status.success() {
+        return Err(anyhow::anyhow!("failed to create junction lock fixture"));
+    }
+
+    let error = match SemanticVectorStore::open_passive_snapshot(&root, &contract) {
+        Ok(_) => panic!("a reparse-point passive coordination lock must be refused"),
+        Err(error) => error,
+    };
+
+    assert_eq!(
+        semantic_vector_failure_kind(&error),
+        Some(SemanticVectorFailureKind::PassiveSnapshotUnavailable)
+    );
+    assert!(std::fs::read_dir(&target)?.next().is_none());
+    assert!(!lock.is_file());
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn passive_snapshot_detects_coordination_lock_replacement_after_admission() -> Result<()> {
+    let temporary = tempfile::tempdir()?;
+    let root = source_backed_semantic_vector_path(temporary.path());
+    let contract = test_contract();
+    drop(SemanticVectorStore::open(&root, &contract)?);
+    let lock = root.join("flat_transaction.lock");
+    let displaced = root.join("flat_transaction.lock.displaced");
+
+    let result =
+        SemanticVectorStore::open_passive_snapshot_after_admission(&root, &contract, || {
+            std::fs::rename(&lock, &displaced).unwrap();
+            std::fs::write(&lock, b"replacement").unwrap();
+        });
+    let error = match result {
+        Ok(_) => panic!("a replaced coordination lock must invalidate passive admission"),
+        Err(error) => error,
+    };
+
+    assert_eq!(
+        semantic_vector_failure_kind(&error),
+        Some(SemanticVectorFailureKind::PassiveSnapshotUnavailable)
+    );
+    assert_eq!(std::fs::read(lock)?, b"replacement");
+    assert!(displaced.is_file());
+    Ok(())
+}
+
+#[cfg(windows)]
+#[test]
+fn passive_snapshot_retained_lock_prevents_windows_path_replacement() -> Result<()> {
+    use std::sync::{Arc, Mutex};
+
+    let temporary = tempfile::tempdir()?;
+    let root = source_backed_semantic_vector_path(temporary.path());
+    let contract = test_contract();
+    drop(SemanticVectorStore::open(&root, &contract)?);
+    let lock = root.join("flat_transaction.lock");
+    let displaced = root.join("flat_transaction.lock.displaced");
+    let replacement = Arc::new(Mutex::new(None));
+    let attempted = Arc::clone(&replacement);
+
+    let passive =
+        SemanticVectorStore::open_passive_snapshot_after_admission(&root, &contract, || {
+            *attempted.lock().unwrap() = Some(std::fs::rename(&lock, &displaced));
+        })?
+        .expect("a denied replacement must leave the passive snapshot valid");
+    let replacement = replacement
+        .lock()
+        .unwrap()
+        .take()
+        .expect("replacement was attempted");
+
+    assert!(
+        replacement.is_err(),
+        "the retained Windows lock must deny rename/delete sharing"
+    );
+    assert!(lock.is_file());
+    assert!(!displaced.exists());
+    assert!(matches!(
+        passive.source_backed_generation_pin_exact(&"d".repeat(64), 0)?,
+        SourceBackedGenerationPin::NotReady
+    ));
     Ok(())
 }
 

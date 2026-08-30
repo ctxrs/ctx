@@ -28,14 +28,15 @@ use windows_sys::Win32::{
         CreateWellKnownSid, EqualSid, GetAce, GetLengthSid, GetSecurityDescriptorControl,
         GetTokenInformation, InitializeAcl, InitializeSecurityDescriptor, IsValidSid,
         SetSecurityDescriptorControl, SetSecurityDescriptorDacl, SetSecurityDescriptorOwner,
-        TokenOwner, TokenUser, WinLocalSystemSid, ACCESS_ALLOWED_ACE, ACL, ACL_REVISION,
+        TokenUser, WinLocalSystemSid, ACCESS_ALLOWED_ACE, ACL, ACL_REVISION,
         DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
         PSID, SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR, SE_DACL_PROTECTED, TOKEN_INFORMATION_CLASS,
-        TOKEN_OWNER, TOKEN_QUERY, TOKEN_USER,
+        TOKEN_QUERY, TOKEN_USER,
     },
     Storage::FileSystem::{
-        CreateDirectoryW, ReOpenFile, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-        FILE_GENERIC_READ, FILE_SHARE_READ, FILE_SHARE_WRITE, READ_CONTROL, WRITE_DAC, WRITE_OWNER,
+        CreateDirectoryW, CreateFileW, CREATE_NEW, FILE_ATTRIBUTE_NORMAL,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ,
+        FILE_GENERIC_WRITE, FILE_SHARE_READ, FILE_SHARE_WRITE, READ_CONTROL, WRITE_DAC,
     },
     System::Threading::{GetCurrentProcess, OpenProcessToken},
 };
@@ -48,6 +49,17 @@ const PRIVATE_DIRECTORY_INHERITANCE: u8 = 0x03;
 const SECURITY_DESCRIPTOR_REVISION: u32 = 1;
 
 pub(super) fn create_private_directory_all(path: &Path) -> io::Result<()> {
+    create_private_directory_all_with_owner(path, false)
+}
+
+pub(super) fn create_current_user_owned_private_directory_all(path: &Path) -> io::Result<()> {
+    create_private_directory_all_with_owner(path, true)
+}
+
+fn create_private_directory_all_with_owner(
+    path: &Path,
+    assign_current_user_owner: bool,
+) -> io::Result<()> {
     if path.as_os_str().is_empty()
         || path
             .components()
@@ -64,43 +76,11 @@ pub(super) fn create_private_directory_all(path: &Path) -> io::Result<()> {
     component_paths.retain(|candidate| !candidate.as_os_str().is_empty());
 
     let identities = PrivateIdentities::current()?;
-    let mut acl = private_acl(&identities, ObjectKind::Directory)?;
-    let mut descriptor = SECURITY_DESCRIPTOR::default();
-    // SAFETY: descriptor is live and writable for this initialization.
-    if unsafe {
-        InitializeSecurityDescriptor((&raw mut descriptor).cast(), SECURITY_DESCRIPTOR_REVISION)
-    } == 0
-    {
-        return Err(last_error());
-    }
-    // Elevated tokens may default new objects to the Administrators group.
-    // Bind every directory created by ctx to the exact current-user SID so
-    // owner authority is as narrow as the protected DACL from first visibility.
-    // SAFETY: descriptor and the token-user SID remain live for every create.
-    if unsafe { SetSecurityDescriptorOwner((&raw mut descriptor).cast(), identities.user_sid(), 0) }
-        == 0
-    {
-        return Err(last_error());
-    }
-    // SAFETY: descriptor and ACL remain live for every synchronous create.
-    if unsafe {
-        SetSecurityDescriptorDacl((&raw mut descriptor).cast(), 1, acl.as_mut_ptr().cast(), 0)
-    } == 0
-    {
-        return Err(last_error());
-    }
-    // Prevent CreateDirectoryW from merging inherited permissive entries.
-    // SAFETY: descriptor is initialized and remains live.
-    if unsafe {
-        SetSecurityDescriptorControl(
-            (&raw mut descriptor).cast(),
-            SE_DACL_PROTECTED,
-            SE_DACL_PROTECTED,
-        )
-    } == 0
-    {
-        return Err(last_error());
-    }
+    let (_acl, mut descriptor) = private_security_descriptor(
+        &identities,
+        ObjectKind::Directory,
+        assign_current_user_owner,
+    )?;
     let attributes = SECURITY_ATTRIBUTES {
         nLength: u32::try_from(size_of::<SECURITY_ATTRIBUTES>()).map_err(|_| invalid_acl())?,
         lpSecurityDescriptor: (&raw mut descriptor).cast(),
@@ -115,6 +95,7 @@ pub(super) fn create_private_directory_all(path: &Path) -> io::Result<()> {
     for candidate in component_paths {
         let is_final = candidate == absolute;
         let mut raced_existing = false;
+        let mut created_here = false;
         let access = if is_final || created_private_ancestor {
             READ_CONTROL
         } else {
@@ -133,6 +114,7 @@ pub(super) fn create_private_directory_all(path: &Path) -> io::Result<()> {
                     }
                     raced_existing = true;
                 } else {
+                    created_here = true;
                     created_private_ancestor = true;
                 }
                 open_handle(candidate, ObjectKind::Directory, READ_CONTROL)?
@@ -149,6 +131,9 @@ pub(super) fn create_private_directory_all(path: &Path) -> io::Result<()> {
                 error
             }
         })?;
+        if created_here && assign_current_user_owner {
+            verify_handle_owner(&handle, identities.user_sid())?;
+        }
         if is_final || created_private_ancestor || raced_existing {
             verify_handle_with_identities(&handle, ObjectKind::Directory, &identities)?;
         }
@@ -156,6 +141,47 @@ pub(super) fn create_private_directory_all(path: &Path) -> io::Result<()> {
         held.push(handle);
     }
     Ok(())
+}
+
+pub(super) fn create_private_file_new(path: &Path) -> io::Result<File> {
+    let absolute = std::path::absolute(path)?;
+    let parent = absolute.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "private file path has no parent directory",
+        )
+    })?;
+    let _parent_authority = OpenedPrivateObject::open(parent, ObjectKind::Directory, false)?;
+    let identities = PrivateIdentities::current()?;
+    let (_acl, mut descriptor) = private_security_descriptor(&identities, ObjectKind::File, true)?;
+    let attributes = SECURITY_ATTRIBUTES {
+        nLength: u32::try_from(size_of::<SECURITY_ATTRIBUTES>()).map_err(|_| invalid_acl())?,
+        lpSecurityDescriptor: (&raw mut descriptor).cast(),
+        bInheritHandle: 0,
+    };
+    let wide = wide_path(&absolute)?;
+    // The owner and protected user/SYSTEM DACL are installed by CreateFileW
+    // before the pathname becomes visible. No token-default ownership repair
+    // or post-create permissive interval is accepted.
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            FILE_GENERIC_READ | FILE_GENERIC_WRITE | READ_CONTROL | WRITE_DAC,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            &raw const attributes,
+            CREATE_NEW,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+            null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(last_error());
+    }
+    let file = unsafe { File::from_raw_handle(handle.cast()) };
+    validate_handle_type(&file, ObjectKind::File)?;
+    verify_handle_owner(&file, identities.user_sid())?;
+    verify_handle_with_identities(&file, ObjectKind::File, &identities)?;
+    Ok(file)
 }
 
 pub(super) fn restrict_private_directory(path: &Path) -> io::Result<()> {
@@ -240,34 +266,15 @@ fn restrict_handle_with_identities(
     identities: &PrivateIdentities,
 ) -> io::Result<()> {
     let mut acl = private_acl(identities, kind)?;
-    let assign_owner = handle_owner_repair_required(handle, identities)?;
-    let security_information = DACL_SECURITY_INFORMATION
-        | PROTECTED_DACL_SECURITY_INFORMATION
-        | if assign_owner {
-            OWNER_SECURITY_INFORMATION
-        } else {
-            0
-        };
-    let owner = if assign_owner {
-        identities.user_sid()
-    } else {
-        null_mut()
-    };
-    let owner_handle = if assign_owner {
-        Some(reopen_with_owner_access(handle, kind)?)
-    } else {
-        None
-    };
-    let mutation_handle = owner_handle.as_ref().unwrap_or(handle);
-    // SAFETY: the original handle owns WRITE_DAC. ReOpenFile supplies
-    // WRITE_OWNER on that same object only for the token-default-owner repair;
-    // the SID and ACL remain live for this synchronous call.
+    // SAFETY: the retained handle owns WRITE_DAC and was verified as a regular
+    // object. The ACL remains live for this synchronous call. SetSecurityInfo
+    // receives no owner SID and therefore cannot transfer ownership.
     let result = unsafe {
         SetSecurityInfo(
-            mutation_handle.as_raw_handle().cast(),
+            handle.as_raw_handle().cast(),
             SE_FILE_OBJECT,
-            security_information,
-            owner,
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            null_mut(),
             null_mut(),
             acl.as_mut_ptr().cast(),
             null_mut(),
@@ -276,35 +283,7 @@ fn restrict_handle_with_identities(
     if result != ERROR_SUCCESS {
         return Err(win32_error(result));
     }
-    verify_handle_owner(handle, identities.user_sid())?;
     verify_handle_with_identities(handle, kind, identities)
-}
-
-fn reopen_with_owner_access(handle: &File, kind: ObjectKind) -> io::Result<File> {
-    let flags = FILE_FLAG_OPEN_REPARSE_POINT
-        | match kind {
-            ObjectKind::Directory => FILE_FLAG_BACKUP_SEMANTICS,
-            ObjectKind::File => 0,
-        };
-    let share = match kind {
-        ObjectKind::Directory => FILE_SHARE_READ,
-        ObjectKind::File => FILE_SHARE_READ | FILE_SHARE_WRITE,
-    };
-    // SAFETY: ReOpenFile binds the new handle to the same live object instead
-    // of resolving a pathname; successful ownership transfers exactly once.
-    let reopened = unsafe {
-        ReOpenFile(
-            handle.as_raw_handle().cast(),
-            READ_CONTROL | WRITE_DAC | WRITE_OWNER,
-            share,
-            flags,
-        )
-    };
-    if reopened == INVALID_HANDLE_VALUE {
-        Err(last_error())
-    } else {
-        Ok(unsafe { File::from_raw_handle(reopened.cast()) })
-    }
 }
 
 fn verify_handle_owner(handle: &File, expected_owner: PSID) -> io::Result<()> {
@@ -316,23 +295,6 @@ fn verify_handle_owner(handle: &File, expected_owner: PSID) -> io::Result<()> {
             Ok(())
         }
     })
-}
-
-fn handle_owner_repair_required(handle: &File, identities: &PrivateIdentities) -> io::Result<bool> {
-    with_handle_owner(handle, |owner| owner_repair_required(owner, identities))
-}
-
-fn owner_repair_required(owner: PSID, identities: &PrivateIdentities) -> io::Result<bool> {
-    // SAFETY: all SIDs are validated and backed by live buffers.
-    if unsafe { EqualSid(owner, identities.user_sid()) } != 0 {
-        Ok(false)
-    } else if unsafe { EqualSid(owner, identities.owner_sid()) } != 0 {
-        // Elevated tokens can make Administrators their default owner. Repair
-        // that exact token-owned case, but never adopt an unrelated object.
-        Ok(true)
-    } else {
-        Err(invalid_owner())
-    }
 }
 
 fn with_handle_owner<T>(
@@ -596,6 +558,51 @@ fn private_acl(identities: &PrivateIdentities, kind: ObjectKind) -> io::Result<A
     Ok(acl)
 }
 
+fn private_security_descriptor(
+    identities: &PrivateIdentities,
+    kind: ObjectKind,
+    assign_current_user_owner: bool,
+) -> io::Result<(AlignedBuffer, SECURITY_DESCRIPTOR)> {
+    let mut acl = private_acl(identities, kind)?;
+    let mut descriptor = SECURITY_DESCRIPTOR::default();
+    // SAFETY: descriptor is live and writable for this initialization.
+    if unsafe {
+        InitializeSecurityDescriptor((&raw mut descriptor).cast(), SECURITY_DESCRIPTOR_REVISION)
+    } == 0
+    {
+        return Err(last_error());
+    }
+    // The existing generic directory creator retains token-default ownership;
+    // only explicit new semantic objects bind the current-user SID at create.
+    if assign_current_user_owner
+        && unsafe {
+            SetSecurityDescriptorOwner((&raw mut descriptor).cast(), identities.user_sid(), 0)
+        } == 0
+    {
+        return Err(last_error());
+    }
+    // SAFETY: descriptor and ACL remain live for creation.
+    if unsafe {
+        SetSecurityDescriptorDacl((&raw mut descriptor).cast(), 1, acl.as_mut_ptr().cast(), 0)
+    } == 0
+    {
+        return Err(last_error());
+    }
+    // Prevent creation from merging inherited permissive entries.
+    // SAFETY: descriptor is initialized and remains live.
+    if unsafe {
+        SetSecurityDescriptorControl(
+            (&raw mut descriptor).cast(),
+            SE_DACL_PROTECTED,
+            SE_DACL_PROTECTED,
+        )
+    } == 0
+    {
+        return Err(last_error());
+    }
+    Ok((acl, descriptor))
+}
+
 fn add_allowed_ace(acl: &mut AlignedBuffer, kind: ObjectKind, sid: PSID) -> io::Result<()> {
     // SAFETY: the ACL has sufficient capacity and sid is valid and live.
     if unsafe {
@@ -626,7 +633,6 @@ fn sid_size(sid: PSID) -> io::Result<usize> {
 struct PrivateIdentities {
     _token: Handle,
     token_user: AlignedBuffer,
-    token_owner: AlignedBuffer,
     system: AlignedBuffer,
     user_is_system: bool,
 }
@@ -640,7 +646,6 @@ impl PrivateIdentities {
         }
         let token = Handle(token);
         let token_user = token_information(token.0, TokenUser)?;
-        let token_owner = token_information(token.0, TokenOwner)?;
         let mut system = AlignedBuffer::new(SECURITY_MAX_SID_SIZE)?;
         let mut system_size = u32::try_from(system.byte_len()).map_err(|_| invalid_acl())?;
         // SAFETY: system is aligned and has SECURITY_MAX_SID_SIZE capacity.
@@ -658,12 +663,10 @@ impl PrivateIdentities {
         let mut identities = Self {
             _token: token,
             token_user,
-            token_owner,
             system,
             user_is_system: false,
         };
         let _ = sid_size(identities.user_sid())?;
-        let _ = sid_size(identities.owner_sid())?;
         let _ = sid_size(identities.system_sid())?;
         // SAFETY: both SIDs are valid and backed by identities.
         identities.user_is_system =
@@ -678,11 +681,6 @@ impl PrivateIdentities {
 
     fn system_sid(&self) -> PSID {
         self.system.as_ptr().cast_mut().cast()
-    }
-
-    fn owner_sid(&self) -> PSID {
-        // SAFETY: token_owner contains a successful TOKEN_OWNER response.
-        unsafe { (*self.token_owner.as_ptr().cast::<TOKEN_OWNER>()).Owner }
     }
 }
 
@@ -821,33 +819,12 @@ mod tests {
         }
     }
 
-    fn world_sid() -> io::Result<AlignedBuffer> {
-        use windows_sys::Win32::Security::WinWorldSid;
-
-        let mut sid = AlignedBuffer::new(SECURITY_MAX_SID_SIZE)?;
-        let mut size = u32::try_from(sid.byte_len()).map_err(|_| invalid_acl())?;
-        // SAFETY: sid is aligned and has SECURITY_MAX_SID_SIZE capacity.
-        if unsafe {
-            CreateWellKnownSid(
-                WinWorldSid,
-                null_mut(),
-                sid.as_mut_ptr().cast(),
-                &raw mut size,
-            )
-        } == 0
-        {
-            Err(last_error())
-        } else {
-            Ok(sid)
-        }
-    }
-
     #[test]
     fn permissive_file_dacl_is_repaired_on_the_open_handle(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let parent = tempfile::tempdir()?;
         let path = parent.path().join("legacy-config.toml");
-        fs::write(&path, b"legacy")?;
+        drop(create_private_file_new(&path)?);
         let object = OpenedPrivateObject::open(&path, ObjectKind::File, true)?;
         set_permissive_null_dacl(object.file())?;
         assert!(verify_handle(object.file(), ObjectKind::File).is_err());
@@ -859,44 +836,62 @@ mod tests {
     }
 
     #[test]
-    fn wrong_owner_is_rejected_before_acl_repair() -> Result<(), Box<dyn std::error::Error>> {
+    fn dacl_restriction_preserves_the_existing_owner() -> Result<(), Box<dyn std::error::Error>> {
         let parent = tempfile::tempdir()?;
-        let path = parent.path().join("wrong-owner.toml");
-        fs::write(&path, b"legacy")?;
-        let object = OpenedPrivateObject::open(&path, ObjectKind::File, true)?;
-        set_permissive_null_dacl(object.file())?;
-        let world = world_sid()?;
+        let path = parent.path().join("legacy-default-owner.lock");
+        let mut options = fs::OpenOptions::new();
+        options
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .access_mode(FILE_GENERIC_READ | FILE_GENERIC_WRITE | READ_CONTROL | WRITE_DAC)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+        let file = options.open(&path)?;
 
-        let error =
-            verify_handle_owner(object.file(), world.as_ptr().cast_mut().cast()).unwrap_err();
+        with_handle_owner(&file, |before| {
+            restrict_private_file_handle(&file)?;
+            with_handle_owner(&file, |after| {
+                // SAFETY: both SIDs remain backed by live security descriptors.
+                if unsafe { EqualSid(before, after) } != 0 {
+                    Ok(())
+                } else {
+                    Err(invalid_owner())
+                }
+            })
+        })?;
 
-        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
-        assert!(error.to_string().contains("not owned by the current user"));
-        assert!(verify_handle(object.file(), ObjectKind::File).is_err());
-        Ok(())
-    }
-
-    #[test]
-    fn owner_repair_accepts_only_user_or_token_default_owner(
-    ) -> Result<(), Box<dyn std::error::Error>> {
         let identities = PrivateIdentities::current()?;
-        let world = world_sid()?;
-
-        assert!(!owner_repair_required(identities.user_sid(), &identities)?);
-        let token_default_repair = owner_repair_required(identities.owner_sid(), &identities)?;
-        // A non-elevated token commonly uses the user SID as its default
-        // owner; an elevated token commonly uses Administrators instead.
-        let same_owner = unsafe { EqualSid(identities.user_sid(), identities.owner_sid()) } != 0;
-        assert_eq!(token_default_repair, !same_owner);
-        let error = owner_repair_required(world.as_ptr().cast_mut().cast(), &identities)
-            .expect_err("an unrelated owner must never be adopted");
-        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        verify_handle_with_identities(&file, ObjectKind::File, &identities)?;
         Ok(())
     }
 
     #[test]
-    fn reparse_handle_is_rejected_before_acl_or_owner_repair(
+    fn atomic_private_file_creation_refuses_an_intermediate_reparse_point(
     ) -> Result<(), Box<dyn std::error::Error>> {
+        let temporary = tempfile::tempdir()?;
+        let target = temporary.path().join("target");
+        let junction = temporary.path().join("junction");
+        create_private_directory_all(&target)?;
+        let status = std::process::Command::new("cmd.exe")
+            .args(["/D", "/C", "mklink", "/J"])
+            .arg(&junction)
+            .arg(&target)
+            .status()?;
+        if !status.success() {
+            return Err("failed to create junction fixture".into());
+        }
+
+        let error = create_private_file_new(&junction.join("redirected-child")).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("reparse point"));
+        assert!(!target.join("redirected-child").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn reparse_handle_is_rejected_before_acl_restriction() -> Result<(), Box<dyn std::error::Error>>
+    {
         let parent = tempfile::tempdir()?;
         let target = parent.path().join("target");
         let junction = parent.path().join("junction");
@@ -953,7 +948,7 @@ mod tests {
         let parent = tempfile::tempdir()?;
         let path = parent.path().join("private.db");
         let replacement = parent.path().join("replacement.db");
-        fs::write(&path, b"original")?;
+        drop(create_private_file_new(&path)?);
 
         let object = OpenedPrivateObject::open(&path, ObjectKind::File, true)?;
         fs::rename(&path, &replacement)?;
@@ -972,7 +967,7 @@ mod tests {
         let parent = tempfile::tempdir()?;
         let path = parent.path().join("private");
         let replacement = parent.path().join("replacement");
-        fs::create_dir(&path)?;
+        create_current_user_owned_private_directory_all(&path)?;
 
         let object = OpenedPrivateObject::open(&path, ObjectKind::Directory, true)?;
         fs::rename(&path, &replacement)?;

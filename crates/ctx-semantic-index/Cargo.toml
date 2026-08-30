@@ -20,6 +20,7 @@ ctx-history-index = { path = "../ctx-history-index" }
 ctx-history-platform = { path = "../ctx-history-platform" }
 ctx-semantic-model = { path = "../ctx-semantic-model" }
 fs2 = "0.4.3"
+libc.workspace = true
 memmap2.workspace = true
 rusqlite.workspace = true
 serde.workspace = true

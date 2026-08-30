@@ -406,7 +406,8 @@ impl SemanticVectorStore {
         core_generation_id: &str,
         semantic_documents: u64,
     ) -> Result<SourceBackedGenerationPin> {
-        semantic_owned_sidecar_result((|| {
+        self.validate_passive_snapshot_coordination()?;
+        let pin = semantic_owned_sidecar_result((|| {
             let Some(projection) = self.acknowledged_source_projection(
                 core_generation_id,
                 Some(semantic_documents),
@@ -429,7 +430,9 @@ impl SemanticVectorStore {
                     )
                     .into()
                 })
-        })())
+        })())?;
+        self.validate_passive_snapshot_coordination()?;
+        Ok(pin)
     }
 
     pub(super) fn acknowledged_source_projection(
