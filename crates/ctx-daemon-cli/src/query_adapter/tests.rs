@@ -32,6 +32,8 @@ use uuid::Uuid;
 
 use super::*;
 
+mod passive_v2;
+
 fn external_executor_config(endpoint: &str) -> SemanticEmbeddingExecutorConfig {
     SemanticEmbeddingExecutorConfig::http(
         endpoint,
@@ -161,7 +163,11 @@ fn acknowledge_empty_generation(
 }
 
 fn embedding() -> Vec<f32> {
-    let mut embedding = vec![0.0; semantic_model_contract().dimensions()];
+    embedding_with_dimensions(semantic_model_contract().dimensions())
+}
+
+fn embedding_with_dimensions(dimensions: usize) -> Vec<f32> {
+    let mut embedding = vec![0.0; dimensions];
     embedding[0] = 1.0;
     embedding
 }
@@ -238,7 +244,7 @@ impl LoopbackEmbeddingServer {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let captured = Arc::clone(&requests);
         let thread = thread::spawn(move || {
-            for request_number in 0..4 {
+            for request_number in 0..2 {
                 let (mut stream, _) = listener.accept().expect("accept embedding request");
                 stream
                     .set_read_timeout(Some(Duration::from_secs(2)))
@@ -246,19 +252,11 @@ impl LoopbackEmbeddingServer {
                 let request = read_http_request(&mut stream);
                 let response = match request_number {
                     0 => compact_json(json!({
-                        "schema_version": 1,
-                        "model_key": semantic_model_contract().model_key(),
-                        "model_contract_fingerprint": semantic_model_contract().fingerprint(),
+                        "schema_version": 2,
+                        "space_id": "test-space",
+                        "dimensions": 7,
                     })),
-                    1 => embedding_response(
-                        &request.body,
-                        ctx_semantic_model::test_support::http_embedding_canary_vector("query"),
-                    ),
-                    2 => embedding_response(
-                        &request.body,
-                        ctx_semantic_model::test_support::http_embedding_canary_vector("documents"),
-                    ),
-                    3 => embedding_response(&request.body, embedding()),
+                    1 => external_embedding_response(&request.body, 7),
                     _ => unreachable!(),
                 };
                 captured.lock().unwrap().push(request);
@@ -328,15 +326,15 @@ fn read_http_request(stream: &mut TcpStream) -> RecordedHttpRequest {
     }
 }
 
-fn embedding_response(request: &Value, embedding: Vec<f32>) -> Value {
+fn external_embedding_response(request: &Value, dimensions: usize) -> Value {
     compact_json(json!({
-        "schema_version": 1,
-        "model_key": semantic_model_contract().model_key(),
-        "model_contract_fingerprint": semantic_model_contract().fingerprint(),
+        "schema_version": 2,
+        "space_id": request["space_id"],
+        "dimensions": dimensions,
         "request_id": request["request_id"],
         "embeddings": request["inputs"].as_array().expect("embedding inputs").iter().map(|input| json!({
             "id": input["id"],
-            "embedding": embedding,
+            "embedding": embedding_with_dimensions(dimensions),
         })).collect::<Vec<_>>(),
     }))
 }
@@ -684,7 +682,7 @@ fn foreground_empty_generation_converges_without_loading_a_model() -> Result<()>
     };
     assert!(executor.is_resolved());
     assert!(!executor
-        .resolve(temp.path())?
+        .resolve(temp.path(), semantic_model_contract())?
         .builtin_executor()
         .expect("default executor is built in")
         .shared_runtime()
@@ -729,16 +727,25 @@ fn unavailable_external_contract_preserves_ready_builtin_store() -> Result<()> {
     Ok(())
 }
 
-struct FixtureSemanticEmbedder;
+struct FixtureSemanticEmbedder {
+    dimensions: usize,
+}
 
 impl SemanticBatchEmbedder for FixtureSemanticEmbedder {
     fn embed_chunks(&mut self, chunks: &[SemanticChunkDocument]) -> Result<Vec<Vec<f32>>> {
-        Ok(chunks.iter().map(|_| embedding()).collect())
+        Ok(chunks
+            .iter()
+            .map(|_| embedding_with_dimensions(self.dimensions))
+            .collect())
     }
 }
 
 fn reconcile_ready_nonempty_generation(index: &VerifiedIndex, data_root: &Path) -> Result<()> {
-    drop(reconciled_ready_nonempty_store(index, data_root)?);
+    drop(reconciled_ready_nonempty_store_with_contract(
+        index,
+        data_root,
+        semantic_model_contract(),
+    )?);
     Ok(())
 }
 
@@ -746,11 +753,20 @@ fn reconciled_ready_nonempty_store(
     index: &VerifiedIndex,
     data_root: &Path,
 ) -> Result<SemanticVectorStore> {
-    let contract = semantic_model_contract();
+    reconciled_ready_nonempty_store_with_contract(index, data_root, semantic_model_contract())
+}
+
+fn reconciled_ready_nonempty_store_with_contract(
+    index: &VerifiedIndex,
+    data_root: &Path,
+    contract: &SemanticModelContract,
+) -> Result<SemanticVectorStore> {
     let mut store =
         SemanticVectorStore::open(&source_backed_semantic_vector_path(data_root), contract)?;
     let mut builder = SourceBackedSemanticDocumentBuilder::new(index);
-    let mut embedder = FixtureSemanticEmbedder;
+    let mut embedder = FixtureSemanticEmbedder {
+        dimensions: contract.dimensions(),
+    };
     for _ in 0..32 {
         if store
             .reconcile_source_backed_index(index, &mut builder, &mut embedder)?
@@ -813,10 +829,8 @@ fn ordinary_preflight_reads_committed_wal_while_passive_preflight_fails_closed()
     SemanticQueryAdapter::new(temp.path())
         .begin_query(&index)
         .map_err(|error| anyhow!(error.to_string()))?;
-    let reconcile = SemanticQueryAdapter::foreground(
-        temp.path(),
-        SemanticEmbeddingExecutorConfig::http("http://127.0.0.1:9")?,
-    );
+    let reconcile =
+        SemanticQueryAdapter::foreground(temp.path(), SemanticEmbeddingExecutorConfig::builtin());
     reconcile
         .begin_query(&index)
         .map_err(|error| anyhow!(error.to_string()))?;
@@ -827,7 +841,7 @@ fn ordinary_preflight_reads_committed_wal_while_passive_preflight_fails_closed()
 
     let passive = SemanticQueryAdapter::foreground_read_only(
         temp.path(),
-        SemanticEmbeddingExecutorConfig::http("http://127.0.0.1:9")?,
+        SemanticEmbeddingExecutorConfig::builtin(),
     );
     let error = match passive.begin_query(&index) {
         Ok(_) => panic!("passive immutable preflight must refuse committed WAL state"),
@@ -860,22 +874,23 @@ fn reconcile_contract_mismatch_has_zero_executor_or_storage_activity() -> Result
     let listener = TcpListener::bind("127.0.0.1:0")?;
     listener.set_nonblocking(true)?;
     let endpoint = format!("http://{}/semantic-base", listener.local_addr()?);
+    let selected = external_executor_config(&endpoint);
     let executor = SemanticEmbeddingExecutorHandle::build(
-        SemanticEmbeddingExecutorConfig::http(endpoint)?,
+        selected,
         SharedSemanticRuntime::default(),
         crate::model_config::semantic_model_config(temp.path()),
+    )?;
+    let mismatched_contract = ctx_semantic_index::external_http_semantic_model_contract(
+        &endpoint,
+        "mismatched-test-space",
+        7,
     )?;
     let cache = temp.path().join("model-cache");
     let before = durable_query_state_snapshot(temp.path(), &cache)?;
     reset_foreground_acquisition_attempts();
 
-    let error = reconcile_foreground_semantic_with_fingerprint(
-        &index,
-        temp.path(),
-        &executor,
-        "sha256:mismatched-executor-contract",
-    )
-    .expect_err("executor/index mismatch must fail before reconciliation");
+    let error = reconcile_foreground_semantic(&index, temp.path(), &executor, &mismatched_contract)
+        .expect_err("executor/index mismatch must fail before reconciliation");
     assert!(error.to_string().contains("does not match"));
     assert_eq!(foreground_acquisition_attempts(), 0);
     assert!(matches!(
@@ -909,118 +924,6 @@ fn invalid_passive_executor_configuration_keeps_a_stable_nonretryable_taxonomy()
             detail,
         } if detail.contains("invalid backend preference fixture")
     ));
-    Ok(())
-}
-
-#[test]
-fn passive_ready_nonempty_http_uses_the_configured_authenticated_executor_without_mutation(
-) -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let (index, event_id) = semantic_index(temp.path())?;
-    reconcile_ready_nonempty_generation(&index, temp.path())?;
-    let before =
-        durable_query_state_snapshot(temp.path(), &temp.path().join("semantic-model-cache"))?;
-    let server = LoopbackEmbeddingServer::start();
-    let _environment = SemanticEnvironmentGuard::http_auth(&server.base_url);
-    let adapter = SemanticQueryAdapter::foreground_read_only(
-        temp.path(),
-        SemanticEmbeddingExecutorConfig::http(&server.base_url)?,
-    );
-
-    let mut session = adapter
-        .begin_query(&index)
-        .map_err(|error| anyhow!(error.to_string()))?;
-    session.prepare_alternative("exact selected HTTP executor")?;
-    let batch = session.candidates(&default_compiled_filter(), 10)?;
-    assert_eq!(batch.candidates.len(), 1);
-    assert_eq!(batch.candidates[0].event.event_id, event_id);
-    assert_eq!(
-        durable_query_state_snapshot(temp.path(), &temp.path().join("semantic-model-cache"))?,
-        before
-    );
-
-    let requests = server.finish();
-    assert_eq!(requests.len(), 4);
-    assert_eq!(requests[0].method, "GET");
-    assert_eq!(requests[0].path, "/semantic-base/v1/contract");
-    assert!(requests.iter().all(|request| {
-        request.header("authorization") == Some("Bearer passive-semantic-test-token")
-    }));
-    assert_eq!(requests[1].body["input_kind"], "query");
-    assert_eq!(requests[2].body["input_kind"], "documents");
-    assert_eq!(requests[2].body["inputs"].as_array().unwrap().len(), 1);
-    assert!(requests[2].body["inputs"][0]["text"]
-        .as_str()
-        .unwrap()
-        .contains("Restart the background daemon"));
-    assert!(!requests[2]
-        .body
-        .to_string()
-        .contains("query adapter fixture"));
-    assert_eq!(requests[3].body["input_kind"], "query");
-    Ok(())
-}
-
-#[test]
-fn passive_stale_projection_preflight_makes_no_http_request_or_mutation() -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let (old_index, _) = semantic_index_revision(temp.path(), 1, true)?;
-    reconcile_ready_nonempty_generation(&old_index, temp.path())?;
-    let (index, _) = semantic_index_revision(temp.path(), 2, true)?;
-    let before =
-        durable_query_state_snapshot(temp.path(), &temp.path().join("semantic-model-cache"))?;
-    let listener = TcpListener::bind("127.0.0.1:0")?;
-    listener.set_nonblocking(true)?;
-    let endpoint = format!("http://{}/semantic-base", listener.local_addr()?);
-    let adapter = SemanticQueryAdapter::foreground_read_only(
-        temp.path(),
-        SemanticEmbeddingExecutorConfig::http(endpoint)?,
-    );
-
-    let error = match adapter.begin_query(&index) {
-        Ok(_) => panic!("a stale exact-generation projection must fail preflight"),
-        Err(error) => error,
-    };
-    assert!(matches!(
-        error.reason(),
-        Some(SemanticReason::GenerationNotAcknowledged | SemanticReason::ProjectionEventMismatch)
-    ));
-    assert!(
-        matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
-        "stale preflight must not contact the configured HTTP endpoint"
-    );
-    assert_eq!(
-        durable_query_state_snapshot(temp.path(), &temp.path().join("semantic-model-cache"))?,
-        before
-    );
-    Ok(())
-}
-
-#[test]
-fn passive_ready_empty_ignores_an_unusable_external_executor() -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let (index, _) = semantic_index_revision(temp.path(), 1, false)?;
-    let contract = semantic_model_contract();
-    let mut store =
-        SemanticVectorStore::open(&source_backed_semantic_vector_path(temp.path()), contract)?;
-    acknowledge_empty_generation(&mut store, &index)?;
-    drop(store);
-    let adapter = SemanticQueryAdapter::foreground_read_only(
-        temp.path(),
-        SemanticEmbeddingExecutorConfig::http("https://embedding.invalid/ctx")?,
-    );
-
-    let mut session = adapter
-        .begin_query(&index)
-        .map_err(|error| anyhow!(error.to_string()))?;
-    assert_eq!(
-        session.prepare_alternative("ready empty ignores executor")?,
-        compact_json(json!({"query_embed_ms": null}))
-    );
-    let SemanticQueryExecution::Foreground { executor, .. } = &adapter.execution else {
-        unreachable!("ready empty test selected foreground execution")
-    };
-    assert!(!executor.is_resolved());
     Ok(())
 }
 

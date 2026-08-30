@@ -22,6 +22,11 @@ pub(super) struct DaemonSemanticJobPorts<'a> {
     pub(super) config: &'a dyn crate::DaemonConfigPort,
 }
 
+#[derive(Clone, Copy)]
+struct DaemonSemanticGeneration<'a> {
+    core_generation_id: Option<&'a str>,
+    contract: &'a ctx_semantic_index::SemanticModelContract,
+}
 pub(super) struct DaemonSchedulerPorts<'a, N: ?Sized> {
     pub(super) generation_published: &'a N,
     pub(super) semantic: DaemonSemanticJobPorts<'a>,
@@ -259,8 +264,10 @@ fn run_pending_core_semantic_catch_up(
         data_root,
         runtime,
         deadline,
-        Some(generation_id),
-        &semantic_contract,
+        DaemonSemanticGeneration {
+            core_generation_id: Some(generation_id),
+            contract: &semantic_contract,
+        },
         semantic_ports,
     );
     let did_work = daemon_semantic_job_did_work(&job);
@@ -706,8 +713,7 @@ fn run_daemon_semantic_job_with_retry(
     data_root: &Path,
     runtime: &mut DaemonRuntime,
     deadline: Option<Instant>,
-    core_generation_id: Option<&str>,
-    semantic_contract: &ctx_semantic_index::SemanticModelContract,
+    generation: DaemonSemanticGeneration<'_>,
     ports: DaemonSemanticJobPorts<'_>,
 ) -> Value {
     if let Some(job) = runtime.semantic_blocked_job.as_ref() {
@@ -715,7 +721,7 @@ fn run_daemon_semantic_job_with_retry(
     }
     if !runtime.semantic_retry.ready() {
         let job = daemon_semantic_retry_backoff_job(data_root, &runtime.semantic_retry);
-        return bind_semantic_generation(job, core_generation_id, semantic_contract);
+        return bind_semantic_generation(job, generation);
     }
     let job = run_daemon_semantic_job(
         args,
@@ -727,7 +733,7 @@ fn run_daemon_semantic_job_with_retry(
         ports.config,
     )
     .unwrap_or_else(|error| daemon_semantic_failed_job(data_root, error));
-    let job = bind_semantic_generation(job, core_generation_id, semantic_contract);
+    let job = bind_semantic_generation(job, generation);
     let job = record_daemon_job_retry(&mut runtime.semantic_retry, job);
     if semantic_failure_class_from_job(&job).is_some_and(SemanticFailureClass::blocks_until_restart)
     {
@@ -736,11 +742,8 @@ fn run_daemon_semantic_job_with_retry(
     job
 }
 
-fn bind_semantic_generation(
-    mut job: Value,
-    core_generation_id: Option<&str>,
-    semantic_contract: &ctx_semantic_index::SemanticModelContract,
-) -> Value {
+fn bind_semantic_generation(mut job: Value, generation: DaemonSemanticGeneration<'_>) -> Value {
+    let semantic_contract = generation.contract;
     job["model_key"] = Value::String(semantic_contract.model_key().to_owned());
     job["model_contract_fingerprint"] = Value::String(semantic_contract.fingerprint().to_owned());
     if let Ok(fingerprint) =
@@ -748,7 +751,7 @@ fn bind_semantic_generation(
     {
         job["source_contract_fingerprint"] = Value::String(fingerprint);
     }
-    if let Some(core_generation_id) = core_generation_id {
+    if let Some(core_generation_id) = generation.core_generation_id {
         job["core_generation_id"] = Value::String(core_generation_id.to_owned());
     }
     job
