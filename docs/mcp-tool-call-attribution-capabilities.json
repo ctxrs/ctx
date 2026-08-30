@@ -52,17 +52,17 @@
     "exact_requires_source_commits": false
   },
   "expected_counts": {
-    "providers": 42,
-    "base_routes": 47,
-    "capability_lanes": 51,
+    "providers": 43,
+    "base_routes": 48,
+    "capability_lanes": 52,
     "lane_statuses": {
       "exact": 3,
-      "not-qualified": 47,
+      "not-qualified": 48,
       "excluded": 1
     },
     "provider_statuses": {
       "exact": 3,
-      "not-qualified": 39,
+      "not-qualified": 40,
       "excluded": 0
     }
   },
@@ -362,6 +362,13 @@
       "status": "not-qualified", "reason": "lossy_composite",
       "detail": "The durable mcp_<server>_<tool> name is non-injective and the ID relationship is not enforced as a unique terminal join.",
       "evidence": ["https://plugins.jetbrains.com/files/25224/1109733/Firebender-1.0.12.zip"]
+    },
+    {
+      "provider_id": "xopc", "route": "native_import", "source_format": "xopc_sessions_sqlite", "source_schema": "xopc-transcripts-sqlite-v1",
+      "producer_bound": {"kind": "source_commits", "commits": ["fa3d1bd0b76d7d14d8898638213d94c6d0380a2b"], "unknown_generations": "not-qualified"},
+      "status": "not-qualified", "reason": "no_server_field",
+      "detail": "Durable XOPC tool calls retain tool names, arguments, and call IDs, but no authoritative MCP server alias separate from the registered tool name.",
+      "evidence": ["https://github.com/xopcai/xopc/blob/fa3d1bd0b76d7d14d8898638213d94c6d0380a2b/src/session/session-context-for-llm.ts"]
     },
     {
       "provider_id": "forgecode", "route": "native_import", "source_format": "forgecode_sqlite", "source_schema": "forgecode-conversation-sqlite-v1",

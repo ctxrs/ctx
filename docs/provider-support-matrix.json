@@ -1881,6 +1881,64 @@
       }
     },
     {
+      "id": "xopc",
+      "display_name": "XOPC",
+      "status": "supported",
+      "capture_provider": "xopc",
+      "configured_root": {
+        "state": "enabled",
+        "expected_path_kind": "file",
+        "expander": {
+          "kind": "exact_source",
+          "source_format": "xopc_sessions_sqlite",
+          "route_role": "xopc-session-database"
+        }
+      },
+      "implemented_paths": [
+        {
+          "kind": "native_import",
+          "source_format": "xopc_sessions_sqlite",
+          "fidelity": "imported",
+          "notes": [
+            "Reads XOPC's local SQLite transcript store through a read-only logical snapshot that includes live WAL state.",
+            "Uses transcript session_id as the stable session generation and splits mixed assistant content into message, reasoning-summary, tool-call, and tool-output events."
+          ]
+        }
+      ],
+      "history_locations": [
+        "`$XOPC_STATE_DIR/xopc.db`, `$XOPC_HOME/.xopc/xopc.db`, or `~/.xopc/xopc.db`."
+      ],
+      "imports_existing_history": true,
+      "captures_new_runs_passively": false,
+      "child_sessions_supported": false,
+      "lineage_support": {
+        "session_relationship": "unknown",
+        "event_origin": "unknown"
+      },
+      "fidelity": {
+        "user_prompts": true,
+        "assistant_messages": true,
+        "tool_calls": true,
+        "tool_output": true,
+        "command_output": true,
+        "files_touched": false,
+        "artifacts": false,
+        "model_identity": false,
+        "costs": false,
+        "token_usage": false,
+        "parent_child_session_edges": false
+      },
+      "limitations": [
+        "Parent/child lineage, token usage, cost, attachments, and inferred file effects are not imported. Compaction rows retain their summary but do not duplicate nested historical messages."
+      ],
+      "public_docs": "docs/provider-support.md",
+      "metadata": {
+        "npx_skills_id": "xopc",
+        "canonical_provider_id": "xopc",
+        "schema_family": "XOPC SQLite transcripts"
+      }
+    },
+    {
       "id": "forgecode",
       "display_name": "ForgeCode",
       "status": "supported",

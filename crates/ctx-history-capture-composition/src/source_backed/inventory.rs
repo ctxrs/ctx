@@ -478,6 +478,7 @@ pub const LANDED_SOURCE_BACKED_ROUTES: &[SourceBackedProviderRouteMetadata] = &[
         ExplicitPath
     ),
     sqlite_route!(Warp, "warp_sqlite", true, true, NamedSurface, NamedSurface),
+    sqlite_route!(Xopc, "xopc_sessions_sqlite", true, true, DiscoveredWinner),
     route!(
         CodeBuddy,
         CODEBUDDY_SOURCE_FORMAT,
@@ -584,6 +585,7 @@ Lingma|lingma_sqlite|lingma_sqlite|true|true|DiscoveredWinner|none|FiniteInvento
 Qoder|qoder_transcript_jsonl_tree|qoder_transcript_jsonl|true|true|DiscoveredWinner|none|ProviderSource
 Qoder|qoder_transcript_jsonl|qoder_transcript_jsonl|false|true|ExplicitPath|none|ProviderSource
 Warp|warp_sqlite|warp_sqlite|true|true|NamedSurface|none|NamedSurface
+Xopc|xopc_sessions_sqlite|xopc_sessions_sqlite|true|true|DiscoveredWinner|none|ProviderSource
 CodeBuddy|codebuddy_history_json|codebuddy_history_json|true|true|DiscoveredWinner|none|ProviderSource
 MiMoCode|mimocode_sqlite|mimocode_sqlite|true|true|DiscoveredWinner|none|ProviderSource
 Fx|fx_sessions_tree|fx_sessions_tree|true|true|CatalogLineage|none|CatalogLineage

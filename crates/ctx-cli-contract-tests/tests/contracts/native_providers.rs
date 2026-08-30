@@ -630,6 +630,12 @@ fn native_provider_cli_flow_imports_supported_provider_paths() {
             write_native_firebender_fixture,
         ),
         (
+            "xopc",
+            "xopc",
+            "xopc_sessions_sqlite",
+            write_native_xopc_fixture,
+        ),
+        (
             "openclaw",
             "openclaw",
             "openclaw_session_jsonl_tree",

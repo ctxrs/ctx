@@ -54,6 +54,7 @@ pub enum ProviderId {
     Qoder,
     #[serde(rename = "warp")]
     Warp,
+    Xopc,
     #[serde(rename = "codebuddy", alias = "code_buddy", alias = "code-buddy")]
     CodeBuddy,
     #[serde(rename = "openhands")]
@@ -101,7 +102,7 @@ pub enum ProviderId {
 }
 
 impl ProviderId {
-    pub const ALL: [Self; 52] = [
+    pub const ALL: [Self; 53] = [
         Self::Codex,
         Self::GrokBuild,
         Self::DeepSeekHarness,
@@ -133,6 +134,7 @@ impl ProviderId {
         Self::Lingma,
         Self::Qoder,
         Self::Warp,
+        Self::Xopc,
         Self::CodeBuddy,
         Self::OpenHands,
         Self::Cagent,
@@ -335,6 +337,7 @@ mod tests {
             ProviderId::CopilotCli,
             ProviderId::FactoryAiDroid,
             ProviderId::Firebender,
+            ProviderId::Xopc,
             ProviderId::ForgeCode,
             ProviderId::DeepAgents,
             ProviderId::MistralVibe,

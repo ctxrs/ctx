@@ -55,6 +55,33 @@ pub(super) fn register_kiro_source_backed_route(
     Ok(())
 }
 
+pub(super) fn register_xopc_source_backed_route(
+    registry: &mut SourceBackedProviderRegistry,
+    source: ProviderSource,
+    selection: SourceBackedRouteSelection,
+    data_root: &Path,
+    source_root_lineage: Option<[u8; 32]>,
+) -> SourceBackedCoordinatorResult<()> {
+    let driver = ctx_history_providers_sqlite_selected::xopc_source_backed_driver_scoped::<
+        CaptureSelectedSqliteBinding,
+    >(
+        &source.path,
+        data_root,
+        source_root_lineage.map_or(
+            ctx_history_core::SourceAnchorScope::Unqualified,
+            ctx_history_core::SourceAnchorScope::Lineage,
+        ),
+    )
+    .map_err(|error| invalid_route(source.provider, error.to_string()))?;
+    registry.register(executable_route(
+        source,
+        selection,
+        SourceBackedSelectorAuthority::DiscoveredWinner,
+        driver,
+    )?);
+    Ok(())
+}
+
 /// Registers a Warp database under its stable installed-surface key.
 pub fn register_warp_source_backed_route(
     registry: &mut SourceBackedProviderRegistry,

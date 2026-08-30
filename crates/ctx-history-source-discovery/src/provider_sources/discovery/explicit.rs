@@ -181,6 +181,7 @@ fn provider_source_for_path_with_optional_data_root(
         CaptureProvider::Junie if is_directory => "junie_session_events_jsonl_tree",
         CaptureProvider::Junie => "junie_session_events_jsonl",
         CaptureProvider::Firebender => "firebender_chat_history_sqlite",
+        CaptureProvider::Xopc => "xopc_sessions_sqlite",
         CaptureProvider::ForgeCode => "forgecode_sqlite",
         CaptureProvider::DeepAgents => "deepagents_sessions_sqlite",
         CaptureProvider::MistralVibe if is_directory => "mistral_vibe_session_jsonl_tree",

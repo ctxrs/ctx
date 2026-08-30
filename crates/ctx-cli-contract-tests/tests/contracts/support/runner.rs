@@ -140,6 +140,8 @@ pub(crate) fn apply_hermetic_env(command: &mut Command, temp: &TempDir) {
     command.env_remove("FORGE_CONFIG");
     command.env_remove("VIBE_HOME");
     command.env_remove("CODEX_HOME");
+    command.env_remove("XOPC_HOME");
+    command.env_remove("XOPC_STATE_DIR");
     command.env_remove("CLAUDE_CONFIG_DIR");
     command.env_remove("COPILOT_HOME");
     if persistent_daemon_test {

@@ -1,6 +1,6 @@
 //! Selected/direct SQLite provider implementations for ctx history capture.
 //!
-//! Firebender, Goose, Kiro, and Warp own their native parsing, immutable
+//! Firebender, Goose, Kiro, Warp, and XOPC own their native parsing, immutable
 //! snapshot interpretation, source identities, and replacement-tree adapters
 //! here. Concrete generation publication remains in the capture façade.
 
@@ -14,7 +14,7 @@ pub use providers::{
     firebender_source_backed_driver, firebender_source_backed_driver_scoped,
     goose_source_backed_driver, goose_source_backed_driver_scoped, kiro_source_backed_driver,
     kiro_source_backed_driver_scoped, warp_source_backed_driver, warp_source_backed_driver_scoped,
-    GooseSourceRoute,
+    xopc_source_backed_driver, xopc_source_backed_driver_scoped, GooseSourceRoute,
 };
 
 pub use ctx_history_capture_runtime::{
@@ -26,6 +26,7 @@ pub const FIREBENDER_SQLITE_SOURCE_FORMAT: &str = "firebender_chat_history_sqlit
 pub const GOOSE_SESSIONS_SQLITE_SOURCE_FORMAT: &str = "goose_sessions_sqlite";
 pub const KIRO_SQLITE_SOURCE_FORMAT: &str = "kiro_cli_sqlite";
 pub const WARP_SQLITE_SOURCE_FORMAT: &str = "warp_sqlite";
+pub const XOPC_SESSIONS_SQLITE_SOURCE_FORMAT: &str = "xopc_sessions_sqlite";
 
 #[cfg(feature = "test-support")]
 pub fn fail_next_opened_snapshot_cleanup_for_test() {

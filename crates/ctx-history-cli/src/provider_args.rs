@@ -128,6 +128,11 @@ const NATIVE_PROVIDER_CLI_SPECS: &[ProviderCliSpec] = &[
         aliases: &["firebender-jetbrains", "firebender_jetbrains"],
     },
     ProviderCliSpec {
+        provider: CaptureProvider::Xopc,
+        cli_name: "xopc",
+        aliases: &[],
+    },
+    ProviderCliSpec {
         provider: CaptureProvider::ForgeCode,
         cli_name: "forgecode",
         aliases: &["forge", "forge-code", "forge_code"],

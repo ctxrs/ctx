@@ -141,6 +141,11 @@ fn configured_exact_roots_register_with_named_identity_without_automatic_authori
             "firebender-chat-history-database",
         ),
         (
+            CaptureProvider::Xopc,
+            "xopc_sessions_sqlite",
+            "xopc-session-database",
+        ),
+        (
             CaptureProvider::DeepAgents,
             "deepagents_sessions_sqlite",
             "deepagents-sessions-database",

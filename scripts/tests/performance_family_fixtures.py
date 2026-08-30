@@ -79,8 +79,10 @@ PROVIDER_FAMILY_COVERAGE = (
     ("lingma", SQLITE_WAL_FAMILY, None),
     ("qoder", JSONL_FAMILY, None),
     ("warp", SQLITE_WAL_FAMILY, None),
+    ("xopc", SQLITE_WAL_FAMILY, None),
     ("codebuddy", DOCUMENT_TREE_FAMILY, None),
     ("mimocode", SQLITE_WAL_FAMILY, None),
+    ("fx", DOCUMENT_TREE_FAMILY, None),
 )
 
 

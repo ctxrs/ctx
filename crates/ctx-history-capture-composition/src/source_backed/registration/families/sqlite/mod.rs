@@ -31,6 +31,13 @@ pub(super) fn register_route(
             data_root,
             source_root_lineage,
         ),
+        CaptureProvider::Xopc => other::register_xopc_source_backed_route(
+            registry,
+            source,
+            selection,
+            data_root,
+            source_root_lineage,
+        ),
         CaptureProvider::DeepAgents => logical::register_deepagents_route(
             registry,
             source,

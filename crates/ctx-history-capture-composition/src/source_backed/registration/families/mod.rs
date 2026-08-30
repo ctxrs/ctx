@@ -136,6 +136,7 @@ fn register_landed_source_backed_route_inner(
         | CaptureProvider::KiroCli
         | CaptureProvider::Zed
         | CaptureProvider::Firebender
+        | CaptureProvider::Xopc
         | CaptureProvider::ForgeCode
         | CaptureProvider::DeepAgents
         | CaptureProvider::MiMoCode => {

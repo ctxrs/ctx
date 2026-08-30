@@ -133,6 +133,10 @@ const PROVIDER_EVIDENCE_COHORTS: &[(CaptureProvider, EvidenceCohort)] = &[
         EvidenceCohort::DedicatedSqliteMessages,
     ),
     (
+        CaptureProvider::Xopc,
+        EvidenceCohort::DedicatedSqliteMessages,
+    ),
+    (
         CaptureProvider::ForgeCode,
         EvidenceCohort::DedicatedSqliteMessages,
     ),
@@ -194,7 +198,7 @@ fn every_registered_provider_is_routed_to_one_evidence_cohort() {
     let registered = provider_source_specs();
     assert_eq!(
         registered.len(),
-        42,
+        43,
         "update the evidence matrix deliberately"
     );
     assert_eq!(PROVIDER_EVIDENCE_COHORTS.len(), registered.len());

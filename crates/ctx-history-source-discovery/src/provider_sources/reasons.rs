@@ -60,6 +60,9 @@ pub(super) fn empty_source_reason(provider: CaptureProvider) -> Option<&'static 
         CaptureProvider::Firebender => {
             Some("path exists but no Firebender chat_sessions table was found")
         }
+        CaptureProvider::Xopc => {
+            Some("path exists but no XOPC transcript tables were found")
+        }
         CaptureProvider::ForgeCode => {
             Some("path exists but no ForgeCode conversations table was found")
         }
@@ -160,6 +163,9 @@ pub(super) fn unknown_source_reason(provider: CaptureProvider) -> Option<&'stati
         CaptureProvider::Firebender => {
             Some("path exists but the Firebender database could not be fully probed")
         }
+        CaptureProvider::Xopc => {
+            Some("path exists but the XOPC database could not be fully probed")
+        }
         CaptureProvider::MistralVibe => {
             Some("path exists but the Mistral Vibe session probe hit its scan budget")
         }
@@ -253,6 +259,9 @@ pub(super) fn probe_io_error_reason(provider: CaptureProvider) -> Option<&'stati
         }
         CaptureProvider::Firebender => {
             Some("path exists but the Firebender chat history database could not be read; check permissions")
+        }
+        CaptureProvider::Xopc => {
+            Some("path exists but the XOPC session database could not be read; check permissions")
         }
         CaptureProvider::ForgeCode => {
             Some("path exists but the ForgeCode database could not be read; check permissions")

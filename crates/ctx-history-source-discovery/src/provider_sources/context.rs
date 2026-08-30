@@ -69,6 +69,8 @@ pub const DISCOVERY_ENV_ALLOWLIST: &[&str] = &[
     "XDG_CONFIG_HOME",
     "XDG_DATA_HOME",
     "XDG_STATE_HOME",
+    "XOPC_HOME",
+    "XOPC_STATE_DIR",
     "ZED_STATELESS",
 ];
 

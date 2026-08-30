@@ -3,12 +3,12 @@ use std::collections::BTreeSet;
 use super::*;
 
 #[test]
-fn provider_vocabulary_keeps_all_42_recognized_native_providers_importable() {
+fn provider_vocabulary_keeps_all_43_recognized_native_providers_importable() {
     let recognized = native_provider_cli_specs()
         .iter()
         .map(|spec| spec.provider.as_str())
         .collect::<BTreeSet<_>>();
-    assert_eq!(recognized.len(), 42, "recognized provider count changed");
+    assert_eq!(recognized.len(), 43, "recognized provider count changed");
     let registered = ctx_history_capture::provider_source_specs()
         .iter()
         .map(|spec| spec.provider.as_str())
@@ -19,11 +19,13 @@ fn provider_vocabulary_keeps_all_42_recognized_native_providers_importable() {
         .iter()
         .filter(|provider| parse_native_provider_name(provider).is_some_and(provider_is_importable))
         .collect::<BTreeSet<_>>();
-    assert_eq!(importable.len(), 42, "importable provider count changed");
+    assert_eq!(importable.len(), 43, "importable provider count changed");
     assert!(provider_is_importable(CaptureProvider::Hermes));
     assert!(cli_supported_provider(CaptureProvider::Hermes));
     assert!(provider_is_importable(CaptureProvider::Fx));
     assert!(cli_supported_provider(CaptureProvider::Fx));
+    assert!(provider_is_importable(CaptureProvider::Xopc));
+    assert!(cli_supported_provider(CaptureProvider::Xopc));
 }
 
 #[test]

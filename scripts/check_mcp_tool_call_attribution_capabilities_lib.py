@@ -44,12 +44,12 @@ PUBLIC_DOC_PATHS = (
 )
 ALLOWED_STATUSES = {"exact", "not-qualified", "excluded"}
 EXACT_PROVIDERS = {"codex", "copilot_cli", "warp"}
-EXPECTED_PROVIDER_STATUS_COUNTS = {"exact": 3, "not-qualified": 39, "excluded": 0}
-EXPECTED_LANE_STATUS_COUNTS = {"exact": 3, "not-qualified": 47, "excluded": 1}
+EXPECTED_PROVIDER_STATUS_COUNTS = {"exact": 3, "not-qualified": 40, "excluded": 0}
+EXPECTED_LANE_STATUS_COUNTS = {"exact": 3, "not-qualified": 48, "excluded": 1}
 EXPECTED_COUNTS = {
-    "providers": 42,
-    "base_routes": 47,
-    "capability_lanes": 51,
+    "providers": 43,
+    "base_routes": 48,
+    "capability_lanes": 52,
     "lane_statuses": EXPECTED_LANE_STATUS_COUNTS,
     "provider_statuses": EXPECTED_PROVIDER_STATUS_COUNTS,
 }
@@ -96,6 +96,7 @@ EXPECTED_NOT_QUALIFIED_REASONS = {
     "auggie": "lossy_composite",
     "junie": "lossy_composite",
     "firebender": "lossy_composite",
+    "xopc": "no_server_field",
     "forgecode": "lossy_composite",
     "mux": "lossy_composite",
     "rovodev": "lossy_composite",
@@ -814,7 +815,7 @@ def validate_public_docs(
     normalized_main = " ".join(main.split())
     required = (
         "Codex `codex_session_jsonl_tree` / `codex-nativepath-jsonl-v0`",
-        "51 capability lanes: three `exact`, 47 `not-qualified`, and one `excluded`",
+        "52 capability lanes: three `exact`, 48 `not-qualified`, and one `excluded`",
         "`activity.invocation`",
         "`provider_call_id`",
         "`protocol` equal to `mcp`",
@@ -899,8 +900,8 @@ def validate_contract(
         if provider_id in support_by_id:
             fail(f"duplicate support provider: {provider_id}")
         support_by_id[provider_id] = row
-    if len(support_by_id) != 42:
-        fail(f"support matrix must contain 42 providers, found {len(support_by_id)}")
+    if len(support_by_id) != 43:
+        fail(f"support matrix must contain 43 providers, found {len(support_by_id)}")
 
     rows, lane_statuses, provider_statuses = validate_routes(capability, support_by_id)
     exact_suites, exact_tests, exact_links = validate_exact_checks(

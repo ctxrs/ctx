@@ -63,6 +63,58 @@ fn assert_structural_probe_finished(authority: &SqliteSourceDirectoryAuthority) 
 }
 
 #[test]
+fn xopc_probe_accepts_required_transcript_schema_with_future_columns() {
+    let temp = tempdir();
+    let data = tempdir();
+    let path = temp.path().join("xopc.db");
+    let connection = Connection::open(&path).unwrap();
+    connection
+        .execute_batch(
+            "create table sessions (
+                session_key text primary key,
+                agent_id text not null,
+                session_id text not null,
+                future_session_value text
+            );
+            create table transcripts (
+                session_id text primary key,
+                session_key text not null,
+                status text not null,
+                created_at integer not null,
+                cwd text not null,
+                future_transcript_value text
+            );
+            create table transcript_entries (
+                entry_id text primary key,
+                session_id text not null,
+                seq integer not null,
+                entry_kind text not null,
+                role text,
+                payload_json text not null,
+                created_at integer not null,
+                future_entry_value text
+            );",
+        )
+        .unwrap();
+    drop(connection);
+
+    assert_eq!(
+        has_xopc_transcript_tables(Some(data.path()), &path),
+        BoundedProbe::Found
+    );
+
+    let invalid = temp.path().join("invalid-xopc.db");
+    Connection::open(&invalid)
+        .unwrap()
+        .execute("create table sessions (session_key text)", [])
+        .unwrap();
+    assert_eq!(
+        has_xopc_transcript_tables(Some(data.path()), &invalid),
+        BoundedProbe::NotFound
+    );
+}
+
+#[test]
 fn sqlite_probe_reads_committed_live_wal_without_mutating_provider_files() {
     let temp = tempdir();
     let data = tempdir();

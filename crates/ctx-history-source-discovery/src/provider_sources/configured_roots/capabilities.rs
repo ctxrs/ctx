@@ -30,7 +30,7 @@ const INTENTIONAL_AUTOMATIC_EXACT: ConfiguredRootCapabilityState =
     ConfiguredRootCapabilityState::IntentionalAutomaticExact;
 
 // Keep this table in the exact landed provider-spec order. It is the one
-// exhaustive configured-root capability declaration for all 42 providers.
+// exhaustive configured-root capability declaration for all 43 providers.
 pub(super) const CONFIGURED_ROOT_CAPABILITIES: &[ConfiguredRootCapability] = &[
     ConfiguredRootCapability {
         provider: CaptureProvider::Codex,
@@ -202,6 +202,14 @@ pub(super) const CONFIGURED_ROOT_CAPABILITIES: &[ConfiguredRootCapability] = &[
             ConfiguredRootPathKind::File,
             "firebender_chat_history_sqlite",
             "firebender-chat-history-database",
+        ),
+    },
+    ConfiguredRootCapability {
+        provider: CaptureProvider::Xopc,
+        state: exact_source(
+            ConfiguredRootPathKind::File,
+            "xopc_sessions_sqlite",
+            "xopc-session-database",
         ),
     },
     ConfiguredRootCapability {

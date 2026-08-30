@@ -54,9 +54,45 @@ pub(super) fn resolve(
         CaptureProvider::Junie => resolve_junie(probes, context, spec),
         CaptureProvider::FactoryAiDroid => resolve_factory(probes, context, spec),
         CaptureProvider::ForgeCode => resolve_forgecode(probes, context, spec),
+        CaptureProvider::Xopc => resolve_xopc(probes, context, spec),
         CaptureProvider::Fx => resolve_fx(probes, context, spec),
         _ => DiscoveryReport::default(),
     }
+}
+
+fn resolve_xopc(
+    probes: &StaticProviderProbeCatalog,
+    context: &DiscoveryContext,
+    spec: &ProviderSourceSpec,
+) -> DiscoveryReport {
+    let state_root = match nonempty_env(context, "XOPC_STATE_DIR") {
+        Some(value) => {
+            let path = PathBuf::from(value);
+            if !path.is_absolute() {
+                return manual_report(spec, safe_issue_path(&path), MANUAL_PATH_REASON);
+            }
+            path
+        }
+        None => match nonempty_env(context, "XOPC_HOME") {
+            Some(value) => {
+                let home = PathBuf::from(value);
+                if !home.is_absolute() {
+                    return manual_report(spec, safe_issue_path(&home), MANUAL_PATH_REASON);
+                }
+                home.join(".xopc")
+            }
+            None => match supported_default(context, spec) {
+                Ok(()) => context.home().join(".xopc"),
+                Err(report) => return report,
+            },
+        },
+    };
+    one_source(
+        probes,
+        spec,
+        state_root.join("xopc.db"),
+        "xopc_sessions_sqlite",
+    )
 }
 
 fn resolve_deepseek_harness(

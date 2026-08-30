@@ -87,6 +87,12 @@ const GOOSE_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
     source_kind: ProviderSourceKind::NativeHistory,
 }];
 
+const XOPC_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
+    path_components: &[".xopc", "xopc.db"],
+    source_format: "xopc_sessions_sqlite",
+    source_kind: ProviderSourceKind::NativeHistory,
+}];
+
 const WARP_DEFAULTS: &[ProviderDefaultLocation] = &[
     ProviderDefaultLocation {
         path_components: &[".local", "state", "warp-terminal", "warp.sqlite"],
@@ -511,6 +517,13 @@ pub(super) const PROVIDER_SPECS: &[ProviderSourceSpec] = &[
     ProviderSourceSpec {
         provider: CaptureProvider::Firebender,
         default_locations: FIREBENDER_DEFAULTS,
+        import_support: ProviderImportSupport::Native,
+        catalog_support: ProviderCatalogSupport::None,
+        unsupported_reason: None,
+    },
+    ProviderSourceSpec {
+        provider: CaptureProvider::Xopc,
+        default_locations: XOPC_DEFAULTS,
         import_support: ProviderImportSupport::Native,
         catalog_support: ProviderCatalogSupport::None,
         unsupported_reason: None,

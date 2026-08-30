@@ -958,7 +958,7 @@ fn forgecode_official_root_preserves_raw_cwd_semantics_and_exists_winner() {
 }
 
 #[test]
-fn simple_lane_has_seventeen_reviewed_winner_only_policies() {
+fn simple_lane_has_eighteen_reviewed_winner_only_policies() {
     let temp = tempdir();
     let context = context(&temp, DiscoveryPlatform::Linux);
     let providers = [
@@ -978,9 +978,10 @@ fn simple_lane_has_seventeen_reviewed_winner_only_policies() {
         CaptureProvider::Junie,
         CaptureProvider::FactoryAiDroid,
         CaptureProvider::ForgeCode,
+        CaptureProvider::Xopc,
         CaptureProvider::Fx,
     ];
-    assert_eq!(providers.len(), 17);
+    assert_eq!(providers.len(), 18);
     for provider in providers {
         let report = resolve_provider(&context, provider);
         let expected = if provider == CaptureProvider::Codex {
@@ -990,6 +991,50 @@ fn simple_lane_has_seventeen_reviewed_winner_only_policies() {
         };
         assert_eq!(report.sources.len(), expected, "{provider:?}");
         assert!(report.issues.is_empty(), "{provider:?}");
+    }
+}
+
+#[test]
+fn xopc_state_root_and_home_overrides_are_absolute_winners() {
+    let temp = tempdir();
+    let base = context(&temp, DiscoveryPlatform::Linux);
+    let state = temp.path().join("xopc-state");
+    let home = temp.path().join("xopc-home");
+
+    let selected = resolve_provider(
+        &base
+            .clone()
+            .with_env("XOPC_HOME", home.as_os_str())
+            .with_env("XOPC_STATE_DIR", state.as_os_str()),
+        CaptureProvider::Xopc,
+    );
+    assert_eq!(paths(&selected), [state.join("xopc.db")]);
+    assert_eq!(selected.sources[0].source_format, "xopc_sessions_sqlite");
+
+    let home_only = resolve_provider(
+        &base.clone().with_env("XOPC_HOME", home.as_os_str()),
+        CaptureProvider::Xopc,
+    );
+    assert_eq!(paths(&home_only), [home.join(".xopc/xopc.db")]);
+
+    let default = resolve_provider(&base, CaptureProvider::Xopc);
+    assert_eq!(paths(&default), [base.home().join(".xopc/xopc.db")]);
+}
+
+#[test]
+fn xopc_relative_overrides_fail_closed() {
+    let temp = tempdir();
+    let base = context(&temp, DiscoveryPlatform::Linux);
+    for (name, value) in [
+        ("XOPC_STATE_DIR", "relative-state"),
+        ("XOPC_HOME", "relative-home"),
+    ] {
+        let report = resolve_provider(&base.clone().with_env(name, value), CaptureProvider::Xopc);
+        assert!(report.sources.is_empty());
+        assert_eq!(
+            report.issues[0].kind,
+            DiscoveryIssueKind::SelectorUnreconstructible
+        );
     }
 }
 

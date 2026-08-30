@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     fs,
     io::{BufReader, ErrorKind},
     path::{Path, PathBuf},
@@ -119,6 +120,7 @@ pub(super) fn default_location_import_probe(
         CaptureProvider::Auggie => has_auggie_session_json(path),
         CaptureProvider::Junie => has_junie_session_events(path, 10_000),
         CaptureProvider::Firebender => has_firebender_chat_sessions_table(data_root, path),
+        CaptureProvider::Xopc => has_xopc_transcript_tables(data_root, path),
         CaptureProvider::ForgeCode => has_forgecode_conversations_table(data_root, path),
         CaptureProvider::DeepAgents => has_deepagents_checkpoint_tables(data_root, path),
         CaptureProvider::MistralVibe => has_jsonl_file_under_matching(path, 10_000, |candidate| {
@@ -164,6 +166,50 @@ pub(super) fn default_location_import_probe(
         | CaptureProvider::Custom
         | CaptureProvider::Unknown => BoundedProbe::NotFound,
     }
+}
+
+fn has_xopc_transcript_tables(data_root: Option<&Path>, path: &Path) -> BoundedProbe {
+    match path_is_file_probe(path) {
+        BoundedProbe::Found => {}
+        other => return other,
+    }
+    sqlite_structural_probe(
+        data_root,
+        path,
+        SqliteProbeLimits::default(),
+        |connection| xopc_supported_transcript_shape(connection),
+    )
+}
+
+fn xopc_supported_transcript_shape(connection: &Connection) -> rusqlite::Result<bool> {
+    for (table, required) in [
+        ("sessions", &["session_key", "session_id", "agent_id"][..]),
+        (
+            "transcripts",
+            &["session_id", "session_key", "status", "created_at", "cwd"][..],
+        ),
+        (
+            "transcript_entries",
+            &[
+                "entry_id",
+                "session_id",
+                "seq",
+                "entry_kind",
+                "role",
+                "payload_json",
+                "created_at",
+            ][..],
+        ),
+    ] {
+        let mut statement = connection.prepare(&format!("pragma table_info('{table}')"))?;
+        let columns = statement
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<rusqlite::Result<BTreeSet<_>>>()?;
+        if !required.iter().all(|column| columns.contains(*column)) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn has_auggie_session_json(root: &Path) -> BoundedProbe {

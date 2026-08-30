@@ -224,6 +224,12 @@ const ADAPTER_CASES: &[ProviderCase] = &[
         assistant_text: "Firebender fixture oracle response",
     },
     ProviderCase {
+        matrix_id: "xopc",
+        provider: "xopc",
+        user_text: "xopcuseroracle",
+        assistant_text: "XOPC fixture oracle response",
+    },
+    ProviderCase {
         matrix_id: "forgecode",
         provider: "forgecode",
         user_text: "forgecodeuseroracle",
@@ -290,7 +296,7 @@ fn supported_provider_defaults_conform_to_the_public_matrix() {
         .collect::<Vec<_>>();
     assert_eq!(
         provider_cases.len(),
-        42,
+        43,
         "support conformance must not be vacuous"
     );
     let temp = tempdir();
@@ -402,8 +408,8 @@ fn assert_closed_world_case_ids() -> BTreeSet<String> {
     );
     assert_eq!(
         supported_ids.len(),
-        42,
-        "support conformance must execute 42 rows"
+        43,
+        "support conformance must execute 43 rows"
     );
     supported_ids
 }

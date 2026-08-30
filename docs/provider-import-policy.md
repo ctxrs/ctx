@@ -205,6 +205,7 @@ Secondary traits are noted only to guide tests and hardening work.
 | Auggie | `auggie_session_json` | JSON session/task document | Single-session JSON. |
 | Junie | `junie_session_events_jsonl_tree` | JSONL transcript stream/tree | Session event tree. |
 | Firebender | `firebender_chat_history_sqlite` | SQLite message store | SQLite chat history. |
+| XOPC | `xopc_sessions_sqlite` | SQLite message store | SQLite transcript generations and structured message/tool entries. |
 | ForgeCode | `forgecode_sqlite` | SQLite message store | SQLite sessions/messages. |
 | Deep Agents | `deepagents_sessions_sqlite` | SQLite encoded/blob store | SQLite checkpoints/writes with decoded MessagePack values. |
 | Mistral Vibe | `mistral_vibe_session_jsonl_tree` | JSONL transcript stream/tree | Session JSONL tree. |

@@ -22,6 +22,7 @@ use super::{
     write_native_factory_droid_fixture, write_native_firebender_fixture,
     write_native_gemini_fixture, write_native_kimi_code_cli_wire_fixture,
     write_native_opencode_fixture, write_native_qwen_fixture, write_pi_session_jsonl,
+    write_xopc_sqlite_fixture,
 };
 
 pub(crate) fn install_provider_default_fixture(
@@ -81,6 +82,11 @@ pub(crate) fn install_provider_default_fixture(
         "auggie" => install_default_auggie_fixture(temp, user_text),
         "junie" => install_default_junie_fixture(temp, user_text),
         "firebender" => install_firebender(temp, workspace, user_text),
+        "xopc" => write_xopc_sqlite_fixture(
+            &temp.path().join(".xopc/xopc.db"),
+            user_text,
+            assistant_text,
+        ),
         "forgecode" => install_default_forgecode_fixture(temp, user_text),
         "deepagents" => install_fixture_file(
             "deepagents/v1/sessions.db",

@@ -459,6 +459,147 @@ pub(crate) fn write_native_firebender_fixture(temp: &TempDir, query: &str) -> St
     project.to_str().unwrap().to_owned()
 }
 
+pub(crate) fn write_native_xopc_fixture(temp: &TempDir, query: &str) -> String {
+    let db = temp.path().join("native-xopc.db");
+    write_xopc_sqlite_fixture(&db, query, "XOPC fixture oracle response");
+    db.to_str().unwrap().to_owned()
+}
+
+pub(crate) fn write_xopc_sqlite_fixture(path: &Path, query: &str, assistant: &str) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let connection = Connection::open(path).unwrap();
+    connection
+        .execute_batch(
+            "create table sessions (
+                session_key text primary key,
+                agent_id text not null,
+                session_id text not null unique
+            );
+            create table transcripts (
+                session_id text primary key,
+                session_key text not null,
+                status text not null,
+                archive_reason text,
+                created_at integer not null,
+                archived_at integer,
+                cwd text not null
+            );
+            create table transcript_entries (
+                entry_id text primary key,
+                session_id text not null,
+                seq integer not null,
+                entry_kind text not null,
+                role text,
+                payload_json text not null,
+                created_at integer not null,
+                unique(session_id, seq)
+            );",
+        )
+        .unwrap();
+    connection
+        .execute(
+            "insert into sessions (session_key, agent_id, session_id)
+             values ('agent:main:cli', 'main', 'xopc-current-generation')",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "insert into transcripts
+             (session_id, session_key, status, archive_reason, created_at, archived_at, cwd)
+             values ('xopc-archived-generation', 'agent:main:cli', 'archived', 'reset',
+                     1782259199000, 1782259200000, '/workspace')",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "insert into transcripts
+             (session_id, session_key, status, archive_reason, created_at, archived_at, cwd)
+             values ('xopc-current-generation', 'agent:main:cli', 'active', null,
+                     1782259200000, null, '/workspace')",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "insert into transcript_entries
+             (entry_id, session_id, seq, entry_kind, role, payload_json, created_at)
+             values ('xopc-before-reset', 'xopc-archived-generation', 0, 'message', 'user',
+                     '{\"role\":\"user\",\"content\":\"XOPC before reset oracle\"}',
+                     1782259199000)",
+            [],
+        )
+        .unwrap();
+    let rows = [
+        (
+            "xopc-user",
+            0_i64,
+            "message",
+            Some("user"),
+            json!({
+                "role": "user",
+                "content": [{"type": "text", "text": query}],
+                "timestamp": 1782259200000_i64
+            }),
+        ),
+        (
+            "xopc-assistant",
+            1_i64,
+            "message",
+            Some("assistant"),
+            json!({
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": assistant},
+                    {"type": "thinking", "thinking": "XOPC reasoning summary", "thinkingSignature": "not-imported"},
+                    {"type": "toolCall", "id": "xopc-call-1", "name": "read", "arguments": {"path": "src/xopc.rs"}}
+                ],
+                "provider": "openai",
+                "model": "gpt-test",
+                "timestamp": 1782259201000_i64
+            }),
+        ),
+        (
+            "xopc-tool-result",
+            2_i64,
+            "message",
+            Some("toolResult"),
+            json!({
+                "role": "toolResult",
+                "toolCallId": "xopc-call-1",
+                "toolName": "read",
+                "content": [{"type": "text", "text": "XOPC tool result oracle"}],
+                "isError": false,
+                "timestamp": 1782259202000_i64
+            }),
+        ),
+        (
+            "xopc-bash",
+            3_i64,
+            "message",
+            Some("bashExecution"),
+            json!({
+                "role": "bashExecution",
+                "command": "pwd",
+                "output": "/workspace\n",
+                "exitCode": 0,
+                "timestamp": 1782259203000_i64
+            }),
+        ),
+    ];
+    for (entry_id, seq, entry_kind, role, payload) in rows {
+        connection
+            .execute(
+                "insert into transcript_entries
+                 (entry_id, session_id, seq, entry_kind, role, payload_json, created_at)
+                 values (?1, 'xopc-current-generation', ?2, ?3, ?4, ?5, 1782259200000 + ?2)",
+                params![entry_id, seq, entry_kind, role, payload.to_string()],
+            )
+            .unwrap();
+    }
+}
+
 pub(crate) fn write_native_lingma_fixture(temp: &TempDir, query: &str) -> String {
     let db = temp.path().join("native-lingma/local.db");
     write_lingma_sqlite_fixture(&db, query);
