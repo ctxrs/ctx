@@ -4,7 +4,7 @@ use anyhow::Result;
 use ctx_history_core::utc_now;
 use ctx_semantic_index::{
     source_backed_semantic_vector_path, SemanticBatchEmbedder, SemanticChunkDocument,
-    SemanticVectorStore, SourceBackedGenerationPin, SourceBackedSemanticDocumentBuilder,
+    SemanticNotReady, SemanticQueryPin, SemanticVectorStore, SourceBackedSemanticDocumentBuilder,
     SourceBackedSemanticOutcome,
 };
 use ctx_semantic_model::{
@@ -184,18 +184,17 @@ pub(super) fn run_daemon_semantic_job(
             None,
         ));
     };
-    // Readiness is a semantic-index property, not an executor property. Check
-    // it before constructing an executor so an already acknowledged Core
-    // generation never waits on model setup.
-    let index_contract = ctx_semantic_index::semantic_model_contract();
-    let vector_path = source_backed_semantic_vector_path(data_root);
-    let mut vector_store = SemanticVectorStore::open(&vector_path, index_contract)?;
+    // Readiness is an exact semantic-index property. Derive the selected V2
+    // contract from configuration alone, then use the ordinary WAL-aware
+    // preflight before constructing an executor or touching writable state.
+    let index_contract = semantic_index_contract(runtime.config.semantic_executor.contract())?;
     let source_eligible_events = source_generation.semantic_eligible_event_count()?;
-    match vector_store.source_backed_generation_pin_exact(
-        source_generation.generation_id(),
-        source_eligible_events,
-    )? {
-        SourceBackedGenerationPin::ReadyEmpty | SourceBackedGenerationPin::Ready(_) => {
+    match SemanticQueryPin::preflight(
+        source_generation.verified_index(),
+        data_root,
+        &index_contract,
+    ) {
+        Ok(_) => {
             return Ok(daemon_semantic_job_json(
                 "ready",
                 None,
@@ -204,24 +203,11 @@ pub(super) fn run_daemon_semantic_job(
                 None,
             ));
         }
-        SourceBackedGenerationPin::NotReady if source_eligible_events == 0 => {
-            let outcome =
-                reconcile_empty_source_backed_semantic_page(source_generation, &mut vector_store)?;
-            let mut job = daemon_semantic_job_json(
-                if outcome.ready() {
-                    "ready"
-                } else {
-                    "budget_exhausted"
-                },
-                None,
-                last_run_at_ms,
-                None,
-                None,
-            );
-            annotate_source_backed_semantic_progress(&mut job, &outcome);
-            return Ok(job);
-        }
-        SourceBackedGenerationPin::NotReady => {}
+        Err(error)
+            if error
+                .downcast_ref::<SemanticNotReady>()
+                .is_some_and(SemanticNotReady::retryable) => {}
+        Err(error) => return Err(error),
     }
     if !daemon_deadline_has_min_budget(deadline, DAEMON_MIN_REMAINING_FOR_JOB_SECS) {
         return Ok(daemon_semantic_job_json(
@@ -270,6 +256,9 @@ pub(super) fn run_daemon_semantic_job(
             deferred,
         ));
     }
+
+    let vector_path = source_backed_semantic_vector_path(data_root);
+    let mut vector_store = open_selected_semantic_vector_store(&vector_path, &executor)?;
 
     let min_remaining_secs = executor
         .builtin_executor()
@@ -402,26 +391,6 @@ fn reconcile_source_backed_semantic_page(
     let outcome =
         vector_store.reconcile_source_backed_index(&index, &mut builder, &mut embedder)?;
     Ok((outcome, embedder.indexed_chunks))
-}
-
-fn reconcile_empty_source_backed_semantic_page(
-    generation: PinnedSourceBackedGeneration,
-    vector_store: &mut SemanticVectorStore,
-) -> Result<SourceBackedSemanticOutcome> {
-    let index = generation.into_index();
-    let mut builder = SourceBackedSemanticDocumentBuilder::new(&index);
-    let mut embedder = EmptySourceSemanticEmbedder;
-    vector_store.reconcile_source_backed_index(&index, &mut builder, &mut embedder)
-}
-
-struct EmptySourceSemanticEmbedder;
-
-impl SemanticBatchEmbedder for EmptySourceSemanticEmbedder {
-    fn embed_chunks(&mut self, _chunks: &[SemanticChunkDocument]) -> Result<Vec<Vec<f32>>> {
-        Err(anyhow::anyhow!(
-            "empty source-backed semantic generation unexpectedly requested embeddings"
-        ))
-    }
 }
 
 fn annotate_source_backed_semantic_progress(

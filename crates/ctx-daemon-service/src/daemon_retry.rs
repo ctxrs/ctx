@@ -8,8 +8,11 @@ use ctx_semantic_model::{
 };
 use serde_json::Value;
 
+/// Stable semantic worker failure taxonomy shared by daemon receipts and
+/// foreground completion. The class, rather than an error's display text,
+/// determines whether retrying is appropriate.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum SemanticFailureClass {
+pub enum SemanticFailureClass {
     Retryable,
     Permanent,
     CorruptSidecar,
@@ -40,12 +43,16 @@ impl SemanticFailureClass {
         self == Self::Retryable
     }
 
+    pub const fn retryable(self) -> bool {
+        matches!(self, Self::Retryable | Self::ResourcePressure)
+    }
+
     pub(super) fn blocks_until_restart(self) -> bool {
         matches!(self, Self::Permanent | Self::CorruptSidecar)
     }
 }
 
-pub(super) fn classify_semantic_failure(error: &anyhow::Error) -> SemanticFailureClass {
+pub fn classify_semantic_failure(error: &anyhow::Error) -> SemanticFailureClass {
     if semantic_embedding_failure_is_permanent(error) {
         return SemanticFailureClass::Permanent;
     }
@@ -98,10 +105,7 @@ fn semantic_sqlite_error_code(error: &anyhow::Error) -> Option<rusqlite::ErrorCo
 
 pub(super) fn annotate_semantic_failure(mut job: Value, class: SemanticFailureClass) -> Value {
     job["failure_class"] = Value::String(class.as_str().to_owned());
-    job["retryable"] = Value::Bool(matches!(
-        class,
-        SemanticFailureClass::Retryable | SemanticFailureClass::ResourcePressure
-    ));
+    job["retryable"] = Value::Bool(class.retryable());
     job
 }
 

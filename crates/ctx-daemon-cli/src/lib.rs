@@ -287,9 +287,13 @@ pub use ctx_semantic_index::SemanticNotReady;
 #[allow(unused_imports)]
 pub use runtime_limits::SEMANTIC_WORKER_BATCH_MAX;
 mod query_adapter;
-pub use query_adapter::{
-    wait_for_daemon_semantic_generation, wait_for_exact_daemon_semantic_completion,
-    ExactDaemonSemanticCompletionError, SemanticQueryAdapter,
+pub use query_adapter::{wait_for_daemon_semantic_generation, SemanticQueryAdapter};
+mod semantic_completion;
+pub use semantic_completion::{
+    complete_semantic_generation_foreground,
+    complete_semantic_generation_foreground_with_checkpoint, DaemonSemanticCompletion,
+    SemanticCompletionBudgets, SemanticCompletionCheckpoint, SemanticCompletionDaemonConfig,
+    SemanticCompletionError,
 };
 mod query_service;
 pub use query_service::{wait_for_daemon_query_service, wait_for_daemon_query_service_cancellable};

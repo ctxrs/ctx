@@ -62,6 +62,28 @@ struct RecordingSemanticExecutor {
     documents: std::sync::Mutex<Vec<(Vec<String>, Option<Instant>)>>,
 }
 
+struct RejectingEmptySemanticEmbedder;
+
+impl SemanticBatchEmbedder for RejectingEmptySemanticEmbedder {
+    fn embed_chunks(&mut self, _chunks: &[SemanticChunkDocument]) -> Result<Vec<Vec<f32>>> {
+        panic!("an empty semantic generation must not request embeddings")
+    }
+}
+
+fn acknowledge_empty_semantic_generation(
+    index: &VerifiedIndex,
+    data_root: &Path,
+    contract: &ctx_semantic_index::SemanticModelContract,
+) -> Result<()> {
+    let mut store =
+        SemanticVectorStore::open(&source_backed_semantic_vector_path(data_root), contract)?;
+    let mut builder = SourceBackedSemanticDocumentBuilder::new(index);
+    let mut embedder = RejectingEmptySemanticEmbedder;
+    let outcome = store.reconcile_source_backed_index(index, &mut builder, &mut embedder)?;
+    assert!(outcome.ready());
+    Ok(())
+}
+
 impl SemanticEmbeddingExecutor for RecordingSemanticExecutor {
     fn contract(&self) -> &SemanticModelContract {
         &self.contract
@@ -265,7 +287,7 @@ fn daemon_job_json_keeps_outcomes_without_live_worker_snapshots() {
 }
 
 #[test]
-fn empty_core_generation_is_acknowledged_without_constructing_an_executor() -> Result<()> {
+fn ready_empty_v2_generation_is_observed_without_constructing_an_executor() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let generation = publish_authoritative_empty_generation_for_test(
         &source_backed_index_root(temp.path()),
@@ -275,7 +297,15 @@ fn empty_core_generation_is_acknowledged_without_constructing_an_executor() -> R
         None,
     )?
     .generation_id;
+    let index = VerifiedIndex::open_pinned(source_backed_index_root(temp.path()))?;
+    let selected = SemanticEmbeddingExecutorConfig::http(
+        "http://127.0.0.1:9",
+        ExternalSemanticSpace::new("ready-empty-v2", 96)?,
+    )?;
+    let contract = semantic_index_contract(selected.contract())?;
+    acknowledge_empty_semantic_generation(&index, temp.path(), &contract)?;
     let mut runtime = DaemonRuntime::default();
+    runtime.config.semantic_executor = selected;
     let args = DaemonRunArgs {
         loop_interval_seconds: None,
         max_chunks: None,
@@ -310,10 +340,63 @@ fn empty_core_generation_is_acknowledged_without_constructing_an_executor() -> R
     )?;
     assert_eq!(acknowledged["status"], "ready");
     assert!(runtime.semantic_executor.is_none());
-    let store = SemanticVectorStore::open(
-        &source_backed_semantic_vector_path(temp.path()),
-        semantic_model_contract(),
+    let store =
+        SemanticVectorStore::open(&source_backed_semantic_vector_path(temp.path()), &contract)?;
+    assert!(matches!(
+        store.source_backed_generation_pin_exact(&generation, 0)?,
+        SourceBackedGenerationPin::ReadyEmpty
+    ));
+    Ok(())
+}
+
+#[test]
+fn unacknowledged_empty_v2_generation_verifies_before_writable_reconciliation() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let generation = publish_authoritative_empty_generation_for_test(
+        &source_backed_index_root(temp.path()),
+        "daemon-worker-unacknowledged-empty-v2",
+        RefreshOperation::Refresh,
+        SourceBackedRefreshScope::All,
+        None,
+    )?
+    .generation_id;
+    let (endpoint, server) = contract_response_endpoint(
+        r#"{"schema_version":2,"space_id":"empty-v2","dimensions":96}"#,
     )?;
+    let selected = SemanticEmbeddingExecutorConfig::http(
+        &endpoint,
+        ExternalSemanticSpace::new("empty-v2", 96)?,
+    )?;
+    let contract = semantic_index_contract(selected.contract())?;
+    let mut runtime = DaemonRuntime::default();
+    runtime.config.semantic_executor = selected;
+    let args = DaemonRunArgs {
+        loop_interval_seconds: None,
+        max_chunks: None,
+        handle_process_signals: false,
+        force: false,
+        profile: crate::DaemonRunProfile::Persistent,
+        start_mode: None,
+        trigger_command: None,
+        supervisor: crate::DaemonSupervisor::User,
+    };
+
+    let job = run_daemon_semantic_job(
+        &args,
+        temp.path(),
+        &mut runtime,
+        None,
+        true,
+        &ARTIFACT,
+        &CONFIG,
+    )?;
+
+    assert_eq!(job["status"], "ready");
+    assert!(runtime.semantic_executor.is_some());
+    assert!(!runtime.semantic_runtime.is_loaded());
+    server.join().expect("contract server thread")?;
+    let store =
+        SemanticVectorStore::open(&source_backed_semantic_vector_path(temp.path()), &contract)?;
     assert!(matches!(
         store.source_backed_generation_pin_exact(&generation, 0)?,
         SourceBackedGenerationPin::ReadyEmpty
