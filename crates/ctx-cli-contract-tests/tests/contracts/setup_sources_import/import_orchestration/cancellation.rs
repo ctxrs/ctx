@@ -1,5 +1,292 @@
 use super::*;
-use std::io;
+use std::{
+    io,
+    net::{TcpListener, TcpStream},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
+    thread,
+};
+
+const SEMANTIC_TEST_SPACE: &str = "ctx-contract-test-space";
+const SEMANTIC_TEST_DIMENSIONS: usize = 7;
+
+struct LoopbackSemanticServer {
+    endpoint: String,
+    requests: Arc<Mutex<Vec<Value>>>,
+    embedding_started: Arc<AtomicBool>,
+    embedding_release: Arc<AtomicBool>,
+    stop: Arc<AtomicBool>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+impl LoopbackSemanticServer {
+    fn start(block_embeddings: bool) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback semantic server");
+        listener
+            .set_nonblocking(true)
+            .expect("set loopback semantic server nonblocking");
+        let endpoint = format!(
+            "http://{}/semantic-contract",
+            listener.local_addr().unwrap()
+        );
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let embedding_started = Arc::new(AtomicBool::new(false));
+        let embedding_release = Arc::new(AtomicBool::new(false));
+        let stop = Arc::new(AtomicBool::new(false));
+        let captured = Arc::clone(&requests);
+        let embedding_observer = Arc::clone(&embedding_started);
+        let embedding_release_observer = Arc::clone(&embedding_release);
+        let stopped = Arc::clone(&stop);
+        let thread = thread::spawn(move || {
+            while !stopped.load(Ordering::Acquire) {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(connection) => connection,
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(5));
+                        continue;
+                    }
+                    Err(error) => panic!("accept loopback semantic request: {error}"),
+                };
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .expect("set loopback semantic request timeout");
+                let request = read_semantic_http_request(&mut stream);
+                let is_embedding = request["path"] == "/semantic-contract/v2/embeddings";
+                captured.lock().unwrap().push(request.clone());
+                let response = match request["path"].as_str() {
+                    Some("/semantic-contract/v2/contract") => json!({
+                        "schema_version": 2,
+                        "space_id": SEMANTIC_TEST_SPACE,
+                        "dimensions": SEMANTIC_TEST_DIMENSIONS,
+                    }),
+                    Some("/semantic-contract/v2/embeddings") => {
+                        embedding_observer.store(true, Ordering::Release);
+                        while block_embeddings
+                            && !embedding_release_observer.load(Ordering::Acquire)
+                            && !stopped.load(Ordering::Acquire)
+                        {
+                            thread::sleep(Duration::from_millis(5));
+                        }
+                        if stopped.load(Ordering::Acquire) {
+                            return;
+                        }
+                        semantic_embedding_response(&request["body"])
+                    }
+                    other => panic!("unexpected loopback semantic route: {other:?}"),
+                };
+                if is_embedding && stopped.load(Ordering::Acquire) {
+                    return;
+                }
+                if let Err(error) = write_semantic_http_json(&mut stream, &response) {
+                    let interrupted_client = block_embeddings
+                        && matches!(
+                            error.kind(),
+                            io::ErrorKind::BrokenPipe
+                                | io::ErrorKind::ConnectionAborted
+                                | io::ErrorKind::ConnectionReset
+                        );
+                    assert!(
+                        interrupted_client,
+                        "write loopback semantic response: {error}"
+                    );
+                }
+            }
+        });
+        Self {
+            endpoint,
+            requests,
+            embedding_started,
+            embedding_release,
+            stop,
+            thread: Some(thread),
+        }
+    }
+
+    fn endpoint(&self) -> &str {
+        &self.endpoint
+    }
+
+    fn request_count(&self) -> usize {
+        self.requests.lock().unwrap().len()
+    }
+
+    fn wait_for_embedding_request(&self) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !self.embedding_started.load(Ordering::Acquire) {
+            assert!(
+                Instant::now() < deadline,
+                "semantic foreground work never reached the loopback executor"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn release_embedding_response(&self) {
+        self.embedding_release.store(true, Ordering::Release);
+    }
+
+    fn finish(mut self) -> Vec<Value> {
+        self.stop.store(true, Ordering::Release);
+        self.thread
+            .take()
+            .unwrap()
+            .join()
+            .expect("join loopback semantic server");
+        let requests = std::mem::replace(&mut self.requests, Arc::new(Mutex::new(Vec::new())));
+        Arc::try_unwrap(requests)
+            .expect("loopback semantic server retains no request observers")
+            .into_inner()
+            .unwrap()
+    }
+}
+
+impl Drop for LoopbackSemanticServer {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+fn read_semantic_http_request(stream: &mut TcpStream) -> Value {
+    let mut bytes = Vec::new();
+    let header_end = loop {
+        if let Some(position) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+            break position + 4;
+        }
+        let mut chunk = [0_u8; 4096];
+        let read = stream
+            .read(&mut chunk)
+            .expect("read loopback semantic headers");
+        assert!(read > 0, "loopback semantic request ended before headers");
+        bytes.extend_from_slice(&chunk[..read]);
+    };
+    let header = std::str::from_utf8(&bytes[..header_end]).expect("semantic headers UTF-8");
+    let mut lines = header.trim_end().split("\r\n");
+    let mut request_line = lines
+        .next()
+        .expect("semantic request line")
+        .split_whitespace();
+    let method = request_line
+        .next()
+        .expect("semantic request method")
+        .to_owned();
+    let path = request_line
+        .next()
+        .expect("semantic request path")
+        .to_owned();
+    let content_length = lines
+        .filter_map(|line| line.split_once(':'))
+        .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+        .map(|(_, value)| {
+            value
+                .trim()
+                .parse::<usize>()
+                .expect("semantic content length")
+        })
+        .unwrap_or(0);
+    while bytes.len() < header_end + content_length {
+        let mut chunk = [0_u8; 4096];
+        let read = stream
+            .read(&mut chunk)
+            .expect("read loopback semantic body");
+        assert!(read > 0, "loopback semantic request ended before body");
+        bytes.extend_from_slice(&chunk[..read]);
+    }
+    json!({
+        "method": method,
+        "path": path,
+        "body": if content_length == 0 {
+            Value::Null
+        } else {
+            serde_json::from_slice(&bytes[header_end..header_end + content_length])
+                .expect("semantic request body JSON")
+        },
+    })
+}
+
+fn semantic_embedding_response(request: &Value) -> Value {
+    json!({
+        "schema_version": 2,
+        "space_id": SEMANTIC_TEST_SPACE,
+        "dimensions": SEMANTIC_TEST_DIMENSIONS,
+        "request_id": request["request_id"],
+        "embeddings": request["inputs"]
+            .as_array()
+            .expect("semantic embedding inputs")
+            .iter()
+            .map(|input| json!({
+                "id": input["id"],
+                "embedding": [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            }))
+            .collect::<Vec<_>>(),
+    })
+}
+
+fn write_semantic_http_json(stream: &mut TcpStream, body: &Value) -> io::Result<()> {
+    let body = serde_json::to_vec(body).expect("loopback semantic response JSON");
+    write!(
+        stream,
+        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+        body.len()
+    )?;
+    stream.write_all(&body)?;
+    stream.flush()
+}
+
+fn write_manual_semantic_config(temp: &TempDir, endpoint: &str) {
+    fs::create_dir_all(data_root(temp)).unwrap();
+    fs::write(
+        data_root(temp).join("config.toml"),
+        format!(
+            "[indexing]\nmode = \"manual\"\n\n[search]\nsemantic = true\n\n[semantic]\nexecutor = \"{endpoint}\"\nspace_id = \"{SEMANTIC_TEST_SPACE}\"\ndimensions = {SEMANTIC_TEST_DIMENSIONS}\n"
+        ),
+    )
+    .unwrap();
+}
+
+fn write_semantically_filtered_explicit_custom_source(path: &Path) {
+    fs::write(
+        path,
+        concat!(
+            "{\"record_type\":\"manifest\",\"schema_version\":\"ctx-history-jsonl-v2\"}\n",
+            "{\"record_type\":\"source\",\"source_id\":\"semantic-empty-source\",\"provider_key\":\"semantic-empty-agent\",\"source_format\":\"semantic-empty-jsonl\"}\n",
+            "{\"record_type\":\"session\",\"source_id\":\"semantic-empty-source\",\"provider_session_id\":\"semantic-empty-session\",\"started_at\":\"2026-08-30T12:00:00Z\",\"agent_scope\":\"primary\"}\n",
+            "{\"record_type\":\"event\",\"source_id\":\"semantic-empty-source\",\"provider_session_id\":\"semantic-empty-session\",\"event_index\":0,\"event_type\":\"message\",\"role\":\"assistant\",\"occurred_at\":\"2026-08-30T12:00:01Z\",\"payload\":{\"text\":\"valid Core history excluded by the user-only semantic policy\"}}\n",
+        ),
+    )
+    .unwrap();
+}
+
+fn semantic_status_ready(temp: &TempDir) -> Value {
+    let status = json_output(ctx(temp).args(["status", "--format=json"]));
+    assert_eq!(status["semantic"]["status"], "ready", "{status:#}");
+    status
+}
+
+fn assert_single_semantic_writer(requests: &[Value]) {
+    let routes = requests
+        .iter()
+        .map(|request| request["path"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        routes,
+        [
+            "/semantic-contract/v2/contract",
+            "/semantic-contract/v2/embeddings",
+        ],
+        "semantic completion must have one writer: {requests:#?}"
+    );
+    assert_eq!(requests[0]["method"], "GET", "{requests:#?}");
+    assert_eq!(requests[1]["method"], "POST", "{requests:#?}");
+    assert_eq!(
+        requests[1]["body"]["input_kind"], "documents",
+        "{requests:#?}"
+    );
+}
 
 #[cfg(any(unix, windows))]
 fn configure_interruptible_client(_command: &mut StdCommand) {
@@ -560,3 +847,6 @@ fn interrupted_search_joiner_leaves_persistent_daemon_untouched() {
         Err(error) => panic!("remove persistent join marker: {error}"),
     }
 }
+
+#[path = "cancellation/semantic.rs"]
+mod semantic;
