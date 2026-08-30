@@ -7,12 +7,7 @@ use super::super::{
 };
 use super::*;
 use crate::SourceBackedGenerationPin;
-use std::{
-    path::{Path, PathBuf},
-    sync::mpsc,
-    thread,
-    time::Duration,
-};
+use std::path::{Path, PathBuf};
 
 fn test_event_identity_digest(event_id: Uuid) -> Option<[u8; 32]> {
     let mut digest = [0; 32];
@@ -128,6 +123,31 @@ fn new_store_creates_a_private_root_and_coordination_lock() -> Result<()> {
 }
 
 #[test]
+fn writable_open_establishes_the_private_root_before_any_flat_artifact() -> Result<()> {
+    use ctx_history_platform::platform_security::verify_private_directory;
+
+    let temporary = tempfile::tempdir()?;
+    let root = source_backed_semantic_vector_path(temporary.path());
+    let observed_root = root.clone();
+    let store =
+        SemanticVectorStore::open_after_private_root_ready(&root, &test_contract(), move || {
+            verify_private_directory(&observed_root)
+                .expect("the semantic root must be private before Flat initialization");
+            assert!(
+                std::fs::read_dir(&observed_root)
+                    .expect("the private semantic root must be readable")
+                    .next()
+                    .is_none(),
+                "no Flat artifact may predate the private semantic root"
+            );
+        })?;
+
+    assert!(root.join("flat_transaction.lock").is_file());
+    drop(store);
+    Ok(())
+}
+
+#[test]
 fn passive_snapshot_accepts_a_legacy_regular_coordination_lock() -> Result<()> {
     let temporary = tempfile::tempdir()?;
     let root = source_backed_semantic_vector_path(temporary.path());
@@ -195,45 +215,22 @@ fn passive_snapshot_refuses_a_live_wal_without_touching_it() -> Result<()> {
 }
 
 #[test]
-fn passive_snapshot_lock_blocks_a_writer_from_committing_between_admission_and_pin() -> Result<()> {
+fn passive_snapshot_lock_blocks_writer_until_pin_and_refuses_later_wal() -> Result<()> {
     let temporary = tempfile::tempdir()?;
     let root = source_backed_semantic_vector_path(temporary.path());
     let contract = test_contract();
     let writer = SemanticVectorStore::open(&root, &contract)?;
     assert!(!root.join("state.sqlite-wal").exists());
-
-    let (start_tx, start_rx) = mpsc::channel();
-    let (attempted_tx, attempted_rx) = mpsc::channel();
-    let (committed_tx, committed_rx) = mpsc::channel();
-    let writer_thread = thread::spawn(move || -> Result<()> {
-        start_rx.recv()?;
-        attempted_tx.send(())?;
-        writer
-            .flat
-            .begin_source_generation_view()
-            .map_err(anyhow::Error::new)?;
-        writer.conn.execute(
-            "INSERT INTO semantic_index_stats(id, dirty_items) VALUES (1, 7)
-             ON CONFLICT(id) DO UPDATE SET dirty_items = excluded.dirty_items",
-            [],
-        )?;
-        writer
-            .flat
-            .end_source_generation_view()
-            .map_err(anyhow::Error::new)?;
-        committed_tx.send(())?;
-        Ok(())
-    });
+    let writer_lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(root.join("flat_transaction.lock"))?;
 
     let passive =
         SemanticVectorStore::open_passive_snapshot_after_admission(&root, &contract, || {
-            start_tx.send(()).unwrap();
-            attempted_rx.recv().unwrap();
             assert!(
-                committed_rx
-                    .recv_timeout(Duration::from_millis(100))
-                    .is_err(),
-                "the writer must block before committing while passive admission is held"
+                fs2::FileExt::try_lock_exclusive(&writer_lock).is_err(),
+                "the passive admission guard must exclude a writer before open"
             );
         })?
         .expect("the initialized passive store must open");
@@ -242,14 +239,26 @@ fn passive_snapshot_lock_blocks_a_writer_from_committing_between_admission_and_p
         SourceBackedGenerationPin::NotReady
     ));
     assert!(
-        committed_rx
-            .recv_timeout(Duration::from_millis(100))
-            .is_err(),
-        "the passive pin must retain coordination until it is complete"
+        fs2::FileExt::try_lock_exclusive(&writer_lock).is_err(),
+        "the passive store must retain coordination through generation pinning"
     );
     drop(passive);
-    committed_rx.recv_timeout(Duration::from_secs(2))?;
-    writer_thread.join().expect("writer thread")?;
+    fs2::FileExt::try_lock_exclusive(&writer_lock)?;
+    fs2::FileExt::unlock(&writer_lock)?;
+
+    writer
+        .flat
+        .begin_source_generation_view()
+        .map_err(anyhow::Error::new)?;
+    writer.conn.execute(
+        "INSERT INTO semantic_index_stats(id, dirty_items) VALUES (1, 7)
+         ON CONFLICT(id) DO UPDATE SET dirty_items = excluded.dirty_items",
+        [],
+    )?;
+    writer
+        .flat
+        .end_source_generation_view()
+        .map_err(anyhow::Error::new)?;
 
     let ordinary = SemanticVectorStore::open_read_only(&root, &contract)?
         .expect("ordinary WAL-aware read must open");

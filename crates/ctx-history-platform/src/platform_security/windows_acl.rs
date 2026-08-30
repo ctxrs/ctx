@@ -60,6 +60,16 @@ fn create_private_directory_all_with_owner(
     path: &Path,
     assign_current_user_owner: bool,
 ) -> io::Result<()> {
+    create_private_directory_all_with_owner_after_missing(path, assign_current_user_owner, |_| {
+        Ok(())
+    })
+}
+
+fn create_private_directory_all_with_owner_after_missing(
+    path: &Path,
+    assign_current_user_owner: bool,
+    mut after_missing: impl FnMut(&Path) -> io::Result<()>,
+) -> io::Result<()> {
     if path.as_os_str().is_empty()
         || path
             .components()
@@ -104,6 +114,7 @@ fn create_private_directory_all_with_owner(
         let handle = match open_handle(candidate, ObjectKind::Directory, access) {
             Ok(handle) => handle,
             Err(error) if is_not_found(&error) => {
+                after_missing(candidate)?;
                 let wide = wide_path(candidate)?;
                 // The protected owner/SYSTEM DACL is installed by the create
                 // itself; no inherited-permissive interval exists.
@@ -131,7 +142,11 @@ fn create_private_directory_all_with_owner(
                 error
             }
         })?;
-        if created_here && assign_current_user_owner {
+        // An object that won a create race is part of this creation attempt,
+        // so it must satisfy the same owner invariant as our own create.
+        // Objects found by the initial open remain legacy-compatible and are
+        // neither owner-validated nor modified by this creator.
+        if assign_current_user_owner && (created_here || raced_existing) {
             verify_handle_owner(&handle, identities.user_sid())?;
         }
         if is_final || created_private_ancestor || raced_existing {
@@ -785,6 +800,8 @@ fn win32_error(code: u32) -> io::Error {
     io::Error::from_raw_os_error(i32::try_from(code).unwrap_or(i32::MAX))
 }
 
+#[cfg(test)]
+mod creation_tests;
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -3,12 +3,15 @@ use std::{fmt, path::Path};
 use anyhow::Result;
 use ctx_semantic_model::SemanticModelContract;
 
-use super::vector_store::{
-    control,
-    flat_segments::{
-        FlatModelContract, FlatSegmentStore, FlatStoreCoordinationGuard, FlatStoreError,
+use super::{
+    private_fs,
+    vector_store::{
+        control,
+        flat_segments::{
+            FlatModelContract, FlatSegmentStore, FlatStoreCoordinationGuard, FlatStoreError,
+        },
+        SemanticVectorStore, SourceBackedGenerationPin,
     },
-    SemanticVectorStore, SourceBackedGenerationPin,
 };
 
 pub(super) const SEMANTIC_VECTOR_SCHEMA_VERSION: i64 = 6;
@@ -86,10 +89,23 @@ pub fn semantic_vector_failure_kind(error: &anyhow::Error) -> Option<SemanticVec
 
 impl SemanticVectorStore {
     pub fn open(path: &Path, contract: &SemanticModelContract) -> Result<Self> {
+        Self::open_with_private_root_ready(path, contract, || {})
+    }
+
+    fn open_with_private_root_ready(
+        path: &Path,
+        contract: &SemanticModelContract,
+        private_root_ready: impl FnOnce(),
+    ) -> Result<Self> {
         // Reject newer or incompatible control state before Flat recovery can
         // remove artifacts. The same validation runs again under coordination
         // in `open_writable`, closing the concurrent-writer window.
         control::preflight_writable_compatibility(path)?;
+        // Establish the private semantic root before Flat can create any
+        // directory or coordination artifact. Later Flat/control validation
+        // remains authoritative for redirects and incompatible state.
+        private_fs::create_private_dir_all(path)?;
+        private_root_ready();
         let flat_contract = flat_model_contract(contract).map_err(semantic_flat_store_error)?;
         let (flat, coordination) = FlatSegmentStore::prepare_writable_open(path, flat_contract)
             .map_err(semantic_flat_store_error)?;
@@ -118,6 +134,15 @@ impl SemanticVectorStore {
         }
         drop(coordination);
         Ok(store)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open_after_private_root_ready(
+        path: &Path,
+        contract: &SemanticModelContract,
+        private_root_ready: impl FnOnce(),
+    ) -> Result<Self> {
+        Self::open_with_private_root_ready(path, contract, private_root_ready)
     }
 
     pub fn open_read_only(path: &Path, contract: &SemanticModelContract) -> Result<Option<Self>> {
