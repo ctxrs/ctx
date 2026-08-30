@@ -6,8 +6,8 @@ use ctx_history_refresh::{RefreshOutcomeCode, RefreshSelection};
 use crate::{
     progress::ProgressReporter,
     semantic::{
-        coordinate_import_source_backed_refresh_with_progress, SourceBackedRefreshMode,
-        SourceBackedRefreshObservation,
+        complete_import_semantic, coordinate_import_source_backed_refresh_with_progress,
+        ImportSemanticCompletion, SourceBackedRefreshMode, SourceBackedRefreshObservation,
     },
 };
 
@@ -18,15 +18,24 @@ pub(super) fn wait_for_import_core_refresh(
     data_root: &Path,
     no_daemon: bool,
     selection: RefreshSelection,
+    semantic_completion: &ImportSemanticCompletion,
     progress: &mut ProgressReporter<'_>,
 ) -> Result<SourceBackedRefreshObservation> {
+    let mut deferred_terminal_core_success = None;
     let mut report_progress = |update: &crate::semantic::RefreshStatus| {
         if import_rerenders_terminal_missing_path(update)? {
             return Ok(());
         }
+        if semantic_completion.is_enabled() && import_terminal_core_success(update)? {
+            // Core is durable, but semantic completion is part of Import's
+            // success contract. Hold only this final success frame until the
+            // exact semantic generation is query-ready.
+            deferred_terminal_core_success = Some(update.clone());
+            return Ok(());
+        }
         progress.source_refresh(update).map_err(anyhow::Error::new)
     };
-    let refresh = coordinate_import_source_backed_refresh_with_progress(
+    let mut refresh = coordinate_import_source_backed_refresh_with_progress(
         data_root,
         SourceBackedRefreshMode::Wait,
         selection,
@@ -46,7 +55,34 @@ pub(super) fn wait_for_import_core_refresh(
             refresh.pin.generation_id()
         );
     }
+    if semantic_completion.is_enabled() {
+        progress
+            .message("semantic", "Reconciling semantic search.")
+            .map_err(anyhow::Error::new)?;
+        refresh.pin = match complete_import_semantic(semantic_completion, data_root, refresh.pin) {
+            Ok(pin) => pin,
+            Err(error) if ctx_daemon_cli::finite_worker_interrupted(&error) => return Err(error),
+            Err(error) => {
+                progress
+                    .failure("semantic", error.to_string())
+                    .map_err(anyhow::Error::new)?;
+                return Err(error);
+            }
+        };
+    }
+    if let Some(status) = deferred_terminal_core_success {
+        progress
+            .source_refresh(&status)
+            .map_err(anyhow::Error::new)?;
+    }
     Ok(refresh)
+}
+
+fn import_terminal_core_success(status: &crate::semantic::RefreshStatus) -> Result<bool> {
+    Ok(status
+        .kind()?
+        .terminal_outcome()
+        .is_some_and(|outcome| !outcome.code.is_failure()))
 }
 
 /// The import application turns this one Core terminal outcome into its
@@ -116,6 +152,55 @@ mod tests {
             "unavailable"
         ))
         .unwrap());
+    }
+
+    #[test]
+    fn semantic_completion_defers_only_successful_core_terminal_progress() {
+        assert!(import_terminal_core_success(&terminal_status("completed", "completed")).unwrap());
+        assert!(import_terminal_core_success(&terminal_status(
+            "completed_with_rejections",
+            "completed"
+        ))
+        .unwrap());
+        assert!(!import_terminal_core_success(&terminal_status(
+            "source_unavailable",
+            "unavailable"
+        ))
+        .unwrap());
+    }
+
+    #[test]
+    fn semantic_phase_follows_the_exact_core_gate_and_precedes_terminal_success() {
+        let source = include_str!("core_refresh.rs");
+        let exact_core_gate = source
+            .find("Core refresh receipt names generation")
+            .expect("Core receipt/pin equality gate");
+        let semantic_phase = source
+            .find(".message(\"semantic\", \"Reconciling semantic search.\")")
+            .expect("nonterminal semantic phase");
+        let completion = source
+            .find("complete_import_semantic(semantic_completion")
+            .expect("semantic completion");
+        let terminal_success = source
+            .rfind("progress\n            .source_refresh(&status)")
+            .expect("deferred Core terminal success");
+
+        assert!(exact_core_gate < semantic_phase);
+        assert!(semantic_phase < completion);
+        assert!(completion < terminal_success);
+    }
+
+    #[test]
+    fn interruption_does_not_render_a_semantic_failure_frame() {
+        let source = include_str!("core_refresh.rs");
+        let interruption = source
+            .find("Err(error) if ctx_daemon_cli::finite_worker_interrupted(&error)")
+            .expect("interruption guard");
+        let failure = source
+            .find(".failure(\"semantic\", error.to_string())")
+            .expect("semantic failure frame");
+
+        assert!(interruption < failure);
     }
 
     #[test]

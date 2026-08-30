@@ -494,10 +494,13 @@ provider sources. Use `import` to repair, re-run, resume, or target a specific
 provider/path. It creates the data root if needed, reads provider transcript
 files, builds a private immutable Core/Tantivy candidate containing complete
 normalized stored records plus lexical fields, identities, and filter metadata,
-verifies it, and atomically publishes it under `search/lexical`. Before
-returning, it waits only for that Core publication. Optional semantic indexing
-advances independently and does not extend the foreground import boundary. It
-does not write `config.toml` for implicit defaults.
+verifies it, and atomically publishes it under `search/lexical`. With semantic
+search disabled, it returns after that Core publication. With semantic search
+enabled, a successful import waits until the exact Core generation it published
+has a complete compatible semantic generation: a full daemon owns that write,
+while manual and source-refresh-only operation reconcile it in the foreground.
+An already-ready empty generation succeeds without constructing an executor.
+It does not write `config.toml` for implicit defaults.
 
 History-source plugin import is explicit and single-source in 1.0. A selected
 manifest declares a durable provider-owned `ctx-history-jsonl-v2` path; the

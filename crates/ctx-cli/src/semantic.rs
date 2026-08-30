@@ -5,7 +5,7 @@ use std::sync::{
     atomic::{AtomicU8, Ordering},
     Mutex,
 };
-use std::{io::Write, path::Path, time::Duration};
+use std::{io::Write, path::Path, thread, time::Duration};
 
 use anyhow::Result;
 use ctx_client_observability::analytics::PublicEventV1;
@@ -24,11 +24,116 @@ pub(crate) use ctx_daemon_cli::{
     semantic_provisioning_model_path_count, semantic_provisioning_model_path_matches,
     semantic_required_model_file_count, semantic_required_model_file_matches,
     semantic_runtime_cache_dir, semantic_worker_cache_dir, DaemonHandoff, DaemonSetupHandoff,
-    DaemonUpgradeHandoff, RefreshStatus, SemanticNativeAcceleratorTarget, SemanticNotReady,
-    SemanticOrtModelVariant, SourceBackedRefreshDaemonUnavailable, SourceBackedRefreshMode,
-    SourceBackedRefreshObservation, SourceBackedRefreshPendingPublication,
-    SourceBackedRefreshTerminalError, SEMANTIC_WORKER_BATCH_MAX,
+    DaemonUpgradeHandoff, PinnedSourceBackedGeneration, RefreshStatus,
+    SemanticNativeAcceleratorTarget, SemanticNotReady, SemanticOrtModelVariant,
+    SourceBackedRefreshDaemonUnavailable, SourceBackedRefreshMode, SourceBackedRefreshObservation,
+    SourceBackedRefreshPendingPublication, SourceBackedRefreshTerminalError,
+    SEMANTIC_WORKER_BATCH_MAX,
 };
+
+/// Selects the sole semantic writer after Import has durably published and
+/// pinned its exact Core generation. `--no-daemon` deliberately does not
+/// participate: it suppresses only Core daemon autostart, never ownership.
+#[derive(Clone, Debug)]
+pub(crate) enum ImportSemanticCompletion {
+    Disabled,
+    Foreground {
+        executor: ctx_daemon_cli::SemanticEmbeddingExecutorConfig,
+    },
+    Daemon {
+        executor: ctx_daemon_cli::SemanticEmbeddingExecutorConfig,
+        daemon: ctx_daemon_cli::SemanticCompletionDaemonConfig,
+    },
+}
+
+impl ImportSemanticCompletion {
+    pub(crate) fn from_import_config(config: &ctx_app_config::AppConfig) -> Self {
+        if !config.semantic_search_enabled() {
+            return Self::Disabled;
+        }
+
+        let executor = config.semantic_embedding_executor().clone();
+        if config.automatic_indexing_enabled()
+            && matches!(config.daemon.mode, ctx_app_config::DaemonMode::Full)
+        {
+            return Self::Daemon {
+                executor,
+                daemon: ctx_daemon_cli::SemanticCompletionDaemonConfig::new(true, "full", true),
+            };
+        }
+
+        Self::Foreground { executor }
+    }
+
+    pub(crate) const fn is_enabled(&self) -> bool {
+        !matches!(self, Self::Disabled)
+    }
+}
+
+/// Completes exactly the Core generation published by Import. The daemon path
+/// only observes the bound daemon identity; the foreground path is the only
+/// path that opens the semantic writer and it uses no query session.
+pub(crate) fn complete_import_semantic(
+    completion: &ImportSemanticCompletion,
+    data_root: &Path,
+    pin: PinnedSourceBackedGeneration,
+) -> Result<PinnedSourceBackedGeneration> {
+    match completion {
+        ImportSemanticCompletion::Disabled => Ok(pin),
+        ImportSemanticCompletion::Foreground { executor } => {
+            ctx_daemon_cli::complete_semantic_generation_foreground_with_checkpoint(
+                data_root,
+                pin,
+                executor.clone(),
+                &mut ctx_daemon_cli::foreground_checkpoint,
+            )
+            .map_err(Into::into)
+        }
+        ImportSemanticCompletion::Daemon { executor, daemon } => {
+            wait_for_import_daemon_semantic_completion(
+                data_root,
+                pin,
+                executor.clone(),
+                daemon.clone(),
+            )
+            .map_err(Into::into)
+        }
+    }
+}
+
+fn wait_for_import_daemon_semantic_completion(
+    data_root: &Path,
+    pin: PinnedSourceBackedGeneration,
+    executor: ctx_daemon_cli::SemanticEmbeddingExecutorConfig,
+    daemon: ctx_daemon_cli::SemanticCompletionDaemonConfig,
+) -> std::result::Result<PinnedSourceBackedGeneration, ctx_daemon_cli::SemanticCompletionError> {
+    let mut completion = ctx_daemon_cli::DaemonSemanticCompletion::new(
+        &pin,
+        executor,
+        daemon,
+        ctx_daemon_cli::SemanticCompletionBudgets::default(),
+    )?;
+    loop {
+        ctx_daemon_cli::foreground_checkpoint().map_err(|source| {
+            ctx_daemon_cli::SemanticCompletionError::Checkpoint {
+                generation_id: pin.generation_id().to_owned(),
+                source,
+            }
+        })?;
+        match completion.checkpoint(data_root, &pin)? {
+            ctx_daemon_cli::SemanticCompletionCheckpoint::Ready => return Ok(pin),
+            ctx_daemon_cli::SemanticCompletionCheckpoint::Pending { poll_after } => {
+                thread::sleep(poll_after);
+                ctx_daemon_cli::foreground_checkpoint().map_err(|source| {
+                    ctx_daemon_cli::SemanticCompletionError::Checkpoint {
+                        generation_id: pin.generation_id().to_owned(),
+                        source,
+                    }
+                })?;
+            }
+        }
+    }
+}
 
 struct CtxDaemonCliHost;
 

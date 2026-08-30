@@ -17,6 +17,50 @@ use ctx_terminal::{RenderContext, StreamKind, TestContext};
 use super::*;
 
 #[test]
+fn import_semantic_completion_owner_matrix_has_one_configured_writer() {
+    let mut config = ctx_app_config::AppConfig::default();
+    config.search.semantic = Some(false);
+    assert!(matches!(
+        ImportSemanticCompletion::from_import_config(&config),
+        ImportSemanticCompletion::Disabled
+    ));
+
+    config.search.semantic = Some(true);
+    config.indexing.mode = ctx_app_config::IndexingMode::Manual;
+    assert!(matches!(
+        ImportSemanticCompletion::from_import_config(&config),
+        ImportSemanticCompletion::Foreground { .. }
+    ));
+
+    config.indexing.mode = ctx_app_config::IndexingMode::Automatic;
+    config.daemon.mode = ctx_app_config::DaemonMode::Full;
+    assert!(matches!(
+        ImportSemanticCompletion::from_import_config(&config),
+        ImportSemanticCompletion::Daemon { .. }
+    ));
+
+    config.daemon.mode = ctx_app_config::DaemonMode::SourceRefreshOnly;
+    assert!(matches!(
+        ImportSemanticCompletion::from_import_config(&config),
+        ImportSemanticCompletion::Foreground { .. }
+    ));
+}
+
+#[test]
+fn import_semantic_owner_is_independent_of_daemon_autostart_suppression() {
+    let mut config = ctx_app_config::AppConfig::default();
+    config.search.semantic = Some(true);
+    config.daemon.mode = ctx_app_config::DaemonMode::Full;
+
+    // `ImportSemanticCompletion::from_import_config` intentionally receives
+    // no `--no-daemon` flag: Core alone decides whether it may start a daemon.
+    assert!(matches!(
+        ImportSemanticCompletion::from_import_config(&config),
+        ImportSemanticCompletion::Daemon { .. }
+    ));
+}
+
+#[test]
 fn companion_maintenance_wake_coalesces_without_losing_a_publication() {
     let state = AtomicU8::new(0);
 

@@ -360,10 +360,10 @@ local upsert as described above.
 | `ctx stats` | owner-private aggregate `usage.sqlite` when present | none; does not create pristine usage state or count itself |
 | `ctx sources` | bounded provider path metadata, allowlisted persistent selector files, local history-source plugin manifests, and configured named history roots | none |
 | `ctx sources add [--replace]` / `ctx sources remove` | `config.toml` and named provider history root path metadata used for validation | atomically updates `config.toml`; provider history is never modified |
-| `ctx import` | provider transcript files and path metadata, the explicit custom history JSONL file passed with `--input-format ctx-history-jsonl-v2 --path`, or a durable provider-owned custom history JSONL file declared by an explicit history-source plugin manifest | immutable candidate Core/Tantivy generation and atomic publication, catalog/epoch metadata, and optional persistent or finite-worker daemon files; finite workers do not run semantic work |
+| `ctx import` | provider transcript files and path metadata, the explicit custom history JSONL file passed with `--input-format ctx-history-jsonl-v2 --path`, or a durable provider-owned custom history JSONL file declared by an explicit history-source plugin manifest | immutable candidate Core/Tantivy generation and atomic publication, catalog/epoch metadata, and optional persistent or finite-worker daemon files; when semantic search is enabled, the exact published generation may also create or update its semantic projection through the selected executor (including built-in model/runtime acquisition or an explicitly selected HTTP executor); finite workers remain Core-only |
 | `ctx show session` / `ctx show event` | complete policy-selected records in the active verified Core/Tantivy generation | selected `--out` path for `show session` when provided |
 | `ctx list events` | complete policy-selected records and existing index terms in one pinned verified Core/Tantivy generation | none; event enumeration is read-only |
-| `ctx search` | active verified Core/Tantivy generation and existing semantic generation; direct CLI passive semantic/hybrid queries may also read selected-executor metadata and verified cached model/runtime assets; when refresh has authority, bounded provider discovery/path metadata | candidate Core publication and daemon state only when refresh has authority; manual background and `--refresh off` do not start or wake a ctx daemon or worker and do not mutate Core or semantic projection state |
+| `ctx search` | active verified Core/Tantivy generation and existing semantic generation; direct CLI passive semantic/hybrid queries may also read selected-executor metadata and verified cached model/runtime assets, or call an explicitly selected HTTP executor after preflight; when refresh has authority, bounded provider discovery/path metadata | a refresh-authorized search may publish a candidate Core generation and daemon state, and an exact semantic `--refresh wait` may create or update the semantic projection through the selected executor (including built-in model/runtime acquisition); manual background and `--refresh off` do not start or wake a ctx daemon or worker and do not mutate Core or semantic projection state |
 | `ctx docs` | embedded documentation in the binary | selected topic `--out` path for `ctx docs show --out` or selected `--out` directory for `ctx docs man --out` |
 | `ctx upgrade` | signed release metadata and installed binary/sidecar metadata | installed binary for manual upgrade, install sidecar, and executable-adjacent `.ctx.upgrade-state.json`, `.ctx.install.lock`, and transaction journal |
 | `ctx doctor` | source epoch, lexical/semantic generation metadata, and ctx-owned daemon lock/status/job metadata | none |
@@ -372,15 +372,17 @@ local upsert as described above.
 Setup, import, and default lexical search do not require source repository
 writes, embedding APIs, executor credentials, or remote accounts. Without
 semantic opt-in they do not download models or runtime assets or contact an
-embedding executor. With semantic enabled, daemon maintenance uses the selected
-executor and may acquire the built-in ONNX Runtime asset and embedding model
-when the installed build supports that path. In automatic indexing mode,
-setup and import may start the persistent ctx-owned daemon regardless of output
-format. In manual mode, setup starts no worker; explicit imports may start only
-a finite Core worker using the same source-refresh endpoint and publication
-engine. Use `ctx setup --no-daemon` or `ctx import --no-daemon` for a one-run
-opt-out; an explicit provider-source import with that opt-out requires an
-existing endpoint.
+embedding executor. With semantic enabled, exact import completion and
+refresh-authorized semantic search use the selected executor and may acquire
+the built-in ONNX Runtime asset and embedding model when the installed build
+supports that path; an explicitly selected HTTP executor may make its normal
+conformance or embedding requests. In automatic indexing mode, setup and
+import may start the persistent ctx-owned daemon regardless of output format.
+In manual mode, setup starts no worker; explicit imports may start only a
+finite Core worker using the same source-refresh endpoint and publication
+engine, then reconcile the exact semantic generation in the foreground. Use
+`ctx setup --no-daemon` or `ctx import --no-daemon` for a one-run opt-out; an
+explicit provider-source import with that opt-out requires an existing endpoint.
 The deprecated `ctx setup --catalog-only` flag is ignored and does not change
 daemon-autostart behavior.
 `ctx search --refresh off` does not refresh providers, run plugins, autostart
