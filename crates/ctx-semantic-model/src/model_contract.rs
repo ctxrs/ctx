@@ -138,7 +138,6 @@ fn is_header_safe_space_id_byte(byte: u8) -> bool {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ExternalSemanticContractIdentity {
-    normalized_endpoint: String,
     space: ExternalSemanticSpace,
 }
 
@@ -200,6 +199,7 @@ pub struct SemanticModelContract {
     language_scope: String,
     descriptor: String,
     fingerprint: String,
+    http_endpoint: Option<String>,
     external: Option<ExternalSemanticContractIdentity>,
 }
 
@@ -221,12 +221,19 @@ impl SemanticModelContract {
             language_scope: "endpoint-owned".to_owned(),
             descriptor: String::new(),
             fingerprint: String::new(),
-            external: Some(ExternalSemanticContractIdentity {
-                normalized_endpoint: normalized_endpoint.to_owned(),
-                space,
-            }),
+            http_endpoint: Some(normalized_endpoint.to_owned()),
+            external: Some(ExternalSemanticContractIdentity { space }),
         };
         contract.rebuild_identity();
+        contract
+    }
+
+    /// Selects the historical fixed-E5 HTTP executor without changing vector
+    /// compatibility. The endpoint remains routing state while preparation and
+    /// index identity stay byte-for-byte compatible with the built-in model.
+    pub(crate) fn legacy_fixed_http(normalized_endpoint: &str) -> Self {
+        let mut contract = semantic_model_contract().clone();
+        contract.http_endpoint = Some(normalized_endpoint.to_owned());
         contract
     }
 
@@ -237,9 +244,7 @@ impl SemanticModelContract {
 
     /// Returns the normalized runtime endpoint associated with this contract.
     pub fn external_http_endpoint(&self) -> Option<&str> {
-        self.external
-            .as_ref()
-            .map(|identity| identity.normalized_endpoint.as_str())
+        self.http_endpoint.as_deref()
     }
 
     /// Identifies the configured executor route independently of vector-space
@@ -404,13 +409,23 @@ impl SemanticModelContract {
             && (std::ptr::eq(self, builtin) || self == builtin)
     }
 
+    fn matches_builtin_vector_contract(&self) -> bool {
+        let builtin = builtin_semantic_model_contract();
+        if self.fingerprint() != LEGACY_COMPATIBLE_VECTOR_CONTRACT_FINGERPRINT {
+            return false;
+        }
+        let mut vector_contract = self.clone();
+        vector_contract.http_endpoint = None;
+        vector_contract == *builtin
+    }
+
     /// Returns the exact pre-refactor built-in descriptor for index migration.
     ///
     /// The alias is available only for the exact built-in vector contract and
     /// only while reconstruction still matches the descriptor digest shipped
     /// before executor identity was separated from vector-space identity.
     pub fn legacy_builtin_descriptor_alias(&self) -> Option<&'static str> {
-        if !self.supports_frozen_legacy_v1() {
+        if !self.matches_builtin_vector_contract() {
             return None;
         }
         static ALIAS: OnceLock<Option<String>> = OnceLock::new();
@@ -461,6 +476,7 @@ fn builtin_semantic_model_contract() -> &'static SemanticModelContract {
             language_scope: SEMANTIC_LANGUAGE_SCOPE.to_owned(),
             descriptor: String::new(),
             fingerprint: String::new(),
+            http_endpoint: None,
             external: None,
         };
         contract.rebuild_identity();

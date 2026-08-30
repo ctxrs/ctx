@@ -343,6 +343,9 @@ pub(super) fn semantic_index_contract(
             space.dimensions(),
         );
     }
+    if let Some(endpoint) = selected.external_http_endpoint() {
+        return ctx_semantic_index::legacy_fixed_http_semantic_model_contract(endpoint);
+    }
     let local = ctx_semantic_index::semantic_model_contract();
     if selected.fingerprint() != local.fingerprint() {
         return Err(anyhow::anyhow!(
@@ -353,8 +356,9 @@ pub(super) fn semantic_index_contract(
 }
 
 /// Establishes the endpoint's configured identity before a mismatched writable
-/// vector store can perform its existing reset-on-open recovery. Verification
-/// is a content-free GET; it never submits an embedding probe.
+/// vector store can perform its existing reset-on-open recovery. V2 verification
+/// is a content-free GET; retained fixed-E5 V1 may submit only frozen public
+/// canary probes and never user history or query content.
 fn verify_external_semantic_contract_before_store_open(
     executor: &ctx_semantic_model::SemanticEmbeddingExecutorHandle,
 ) -> Result<()> {

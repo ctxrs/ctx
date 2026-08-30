@@ -185,6 +185,21 @@ pub fn set_semantic_search_enabled_with_executor(
                 })?),
             );
         }
+        (Some(endpoint), None) => {
+            if document.as_table().get("semantic").is_none() {
+                document
+                    .as_table_mut()
+                    .insert("semantic", toml_edit::table());
+            }
+            let semantic = document
+                .as_table_mut()
+                .get_mut("semantic")
+                .and_then(toml_edit::Item::as_table_mut)
+                .ok_or_else(|| anyhow::anyhow!("semantic configuration must be a table"))?;
+            semantic.insert("executor", toml_edit::value(endpoint));
+            semantic.remove("space_id");
+            semantic.remove("dimensions");
+        }
         (None, None) => {
             let remove_semantic = if let Some(semantic) = document
                 .as_table_mut()
@@ -202,7 +217,7 @@ pub fn set_semantic_search_enabled_with_executor(
                 document.as_table_mut().remove("semantic");
             }
         }
-        _ => bail!("semantic executor configuration is internally inconsistent"),
+        (None, Some(_)) => bail!("semantic executor configuration is internally inconsistent"),
     }
     let updated = set_toml_bool(&document.to_string(), "search", "semantic", true);
     validated_persisted_config(&path, &updated)

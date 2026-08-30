@@ -45,6 +45,18 @@ pub fn external_http_semantic_model_contract(
         .clone())
 }
 
+/// Reconstructs the retained fixed-E5 V1 HTTP route while preserving the
+/// built-in vector/index fingerprint.
+pub fn legacy_fixed_http_semantic_model_contract(
+    endpoint: &str,
+) -> anyhow::Result<SemanticModelContract> {
+    Ok(
+        SemanticEmbeddingExecutorConfig::legacy_fixed_http(endpoint)?
+            .contract()
+            .clone(),
+    )
+}
+
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support {
     use anyhow::{anyhow, Result};

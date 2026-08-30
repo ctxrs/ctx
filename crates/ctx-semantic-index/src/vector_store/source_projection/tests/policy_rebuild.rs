@@ -562,13 +562,15 @@ fn bounded_literal_fact_policy_upgrade_reembeds_without_touching_core() -> Resul
 }
 
 #[test]
-fn exact_builtin_legacy_descriptor_migrates_without_reembedding_across_restart() -> Result<()> {
+fn fixed_e5_http_migrates_legacy_receipts_without_reembedding_across_restart() -> Result<()> {
     let fixture = Fixture::new(2)?;
     let index = fixture.publish(
         "legacy-descriptor-migration",
         &[(0, bodies("first", 1)), (1, bodies("second", 1))],
     )?;
-    let model_contract = semantic_model_contract();
+    let model_contract = &legacy_fixed_http_semantic_model_contract("http://127.0.0.1:43123")?;
+    assert!(model_contract.external_http_endpoint().is_some());
+    assert!(!model_contract.supports_frozen_legacy_v1());
     let legacy_descriptor = model_contract
         .legacy_builtin_descriptor_alias()
         .ok_or_else(|| anyhow!("exact built-in contract lost its legacy descriptor alias"))?;

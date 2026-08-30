@@ -87,15 +87,14 @@ fn executor_config_requires_one_coherent_offline_selection() {
         legacy_executor.http_endpoint(),
         Some("https://embed.example.test/")
     );
+    assert!(legacy_executor.external_space().is_none());
+    assert!(legacy_executor.is_legacy_fixed_http());
+    assert_eq!(legacy_executor.http_protocol_schema_version(), Some(1));
     assert_eq!(
-        legacy_executor.external_space().unwrap().space_id(),
-        "ctxrs/legacy-exact-e5-v1"
-    );
-    assert_eq!(
-        legacy_executor.external_space().unwrap().dimensions(),
+        legacy_executor.contract().fingerprint(),
         ctx_daemon_cli::SemanticEmbeddingExecutorConfig::builtin()
             .contract()
-            .dimensions()
+            .fingerprint()
     );
 
     for (contents, expected) in [
@@ -201,6 +200,32 @@ fn explicit_discovery_replaces_legacy_endpoint_only_selection_atomically() {
     assert!(persisted.contains("space_id = \"operator/model-v2\""));
     assert!(persisted.contains("dimensions = 512"));
     assert!(!persisted.contains("old.example.test"));
+}
+
+#[test]
+fn legacy_fixed_http_persistence_remains_endpoint_only() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join(CONFIG_FILE);
+    fs::write(
+        &path,
+        "[search]\nsemantic = false\n[semantic]\nexecutor = \"https://old.example.test\"\nspace_id = \"stale\"\ndimensions = 7\n",
+    )
+    .unwrap();
+    let legacy = ctx_daemon_cli::SemanticEmbeddingExecutorConfig::legacy_fixed_http(
+        "https://legacy.example.test/base",
+    )
+    .unwrap();
+
+    set_semantic_search_enabled_with_executor(temp.path(), &legacy).unwrap();
+
+    let updated = AppConfig::load(temp.path()).unwrap();
+    assert!(updated.semantic_search_enabled());
+    assert!(updated.semantic_embedding_executor().is_legacy_fixed_http());
+    assert_eq!(updated.semantic_embedding_executor(), &legacy);
+    let persisted = fs::read_to_string(path).unwrap();
+    assert!(persisted.contains("executor = \"https://legacy.example.test/base/\""));
+    assert!(!persisted.contains("space_id"));
+    assert!(!persisted.contains("dimensions"));
 }
 
 struct EnvRestore {

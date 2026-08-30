@@ -144,7 +144,7 @@ const TOPICS: &[DocTopic] = &[
         id: "semantic-executors",
         title: "Semantic Embedding Executors",
         audience: "integrator-agent",
-        summary: "Select local E5 or a V1 HTTP executor with an accepted vector space.",
+        summary: "Select local E5 or a V2 HTTP executor with an accepted vector space.",
         tags: &["semantic", "embeddings", "executor", "http", "api"],
         source_path: "docs/semantic-executors.md",
         body: include_str!("../../../docs/semantic-executors.md"),

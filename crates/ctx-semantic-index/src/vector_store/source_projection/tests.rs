@@ -27,6 +27,7 @@ use ctx_semantic_model::{
 use tempfile::TempDir;
 
 use super::*;
+use crate::legacy_fixed_http_semantic_model_contract;
 use crate::vector_store_search::scan_exact_generation;
 
 mod content;

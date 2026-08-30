@@ -1,6 +1,7 @@
 use super::*;
 use ctx_semantic_model::{
-    ExternalSemanticSpace, SemanticEmbeddingExecutorConfig, SemanticEmbeddingExecutorHandle,
+    ExternalSemanticSpace, SemanticEmbeddingExecutorAuth, SemanticEmbeddingExecutorConfig,
+    SemanticEmbeddingExecutorHandle,
 };
 #[cfg(unix)]
 use std::path::PathBuf;
@@ -16,6 +17,19 @@ use std::io::Read as _;
 
 #[cfg(any(unix, windows))]
 const TEST_QUERY_REQUEST_READ_TIMEOUT: StdDuration = StdDuration::from_millis(100);
+
+#[cfg(any(unix, windows))]
+fn legacy_fixed_http_canary_embedding(input_kind: &str) -> Option<Vec<f32>> {
+    match input_kind {
+        "query" => {
+            Some(ctx_semantic_model::test_support::legacy_fixed_http_query_canary_embedding())
+        }
+        "documents" => {
+            Some(ctx_semantic_model::test_support::legacy_fixed_http_document_canary_embedding())
+        }
+        _ => None,
+    }
+}
 
 #[cfg(unix)]
 fn short_test_query_socket_path() -> Result<(tempfile::TempDir, PathBuf)> {
@@ -62,9 +76,23 @@ fn start_test_query_service_with_executor(
     data_root: &Path,
     config: SemanticEmbeddingExecutorConfig,
 ) -> Result<DaemonQueryService> {
-    let runtime = SharedSemanticRuntime::default();
-    let executor = Arc::new(SemanticEmbeddingExecutorHandle::build(
+    start_test_query_service_with_executor_and_auth(
+        data_root,
         config,
+        SemanticEmbeddingExecutorAuth::none(),
+    )
+}
+
+#[cfg(any(unix, windows))]
+fn start_test_query_service_with_executor_and_auth(
+    data_root: &Path,
+    config: SemanticEmbeddingExecutorConfig,
+    auth: SemanticEmbeddingExecutorAuth,
+) -> Result<DaemonQueryService> {
+    let runtime = SharedSemanticRuntime::default();
+    let executor = Arc::new(SemanticEmbeddingExecutorHandle::build_with_auth(
+        config,
+        auth,
         runtime.clone(),
         crate::test_support::CONFIG.semantic_model_config(data_root),
     )?);

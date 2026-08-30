@@ -139,11 +139,11 @@ Remote URLs require HTTPS. Plain HTTP is accepted only when the host is a
 literal loopback IP address; a loopback executor may omit the token. Use
 `ctx semantic enable --executor builtin` to return to the built-in executor.
 Loopback is only ctx's first hop; the local process can retain or forward the
-content it receives. The URL selection validates protocol schema V1 and
-persists the endpoint's opaque space identity and dimensions for this data
-root. The selected executor receives raw ctx query text and document chunks and
-owns model preprocessing and tokenization. It is used for both indexing and
-queries, with no silent built-in fallback.
+content it receives. URL selection tries V2 first and persists the endpoint's
+opaque space identity and dimensions for this data root. A fixed-E5 V1 endpoint
+is accepted only when V2 returns 404. The selected executor receives raw ctx
+query text and document chunks and owns model preprocessing and tokenization.
+It is used for both indexing and queries, with no silent built-in fallback.
 
 If the endpoint later reports a different identity, semantic work fails closed.
 Rerun the same `ctx semantic enable --executor URL` command to accept it. An

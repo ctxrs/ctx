@@ -345,9 +345,12 @@ impl DaemonCliHost for TestHost {
                     ExternalSemanticSpace::new(space_id, dimensions)?,
                 )?
             }
+            (Some(endpoint), None, None) => {
+                SemanticEmbeddingExecutorConfig::legacy_fixed_http(endpoint)?
+            }
             (Some(_), _, _) => {
                 return Err(anyhow!(
-                    "an HTTP semantic executor requires the complete semantic.executor, semantic.space_id, and semantic.dimensions triple"
+                    "semantic.space_id and semantic.dimensions must either both be present or both be absent for a legacy HTTP selection"
                 ));
             }
         };
@@ -473,8 +476,15 @@ mod tests {
             "{error:#}"
         );
 
-        for incomplete in [
+        std::fs::write(
+            &path,
             "[semantic]\nexecutor = \"https://embed.example.test\"\n",
+        )
+        .unwrap();
+        let legacy = AppConfig::load(temp.path()).unwrap();
+        assert!(legacy.semantic_embedding_executor().is_legacy_fixed_http());
+
+        for incomplete in [
             "[semantic]\nspace_id = \"space-v1\"\ndimensions = 384\n",
             "[semantic]\nexecutor = \"builtin\"\nspace_id = \"space-v1\"\ndimensions = 384\n",
         ] {

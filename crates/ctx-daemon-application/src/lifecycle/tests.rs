@@ -113,10 +113,6 @@ fn daemon_child_environment_strips_pro_channel_and_authority() -> Result<()> {
 #[cfg(unix)]
 #[test]
 fn autostart_child_detaches_from_the_invoking_terminal_session() -> Result<()> {
-    unsafe extern "C" {
-        fn getsid(pid: std::ffi::c_int) -> std::ffi::c_int;
-    }
-
     if env::var_os(DETACH_PROBE_STAGE).as_deref() == Some(std::ffi::OsStr::new("child")) {
         std::thread::sleep(Duration::from_secs(30));
         return Ok(());
@@ -131,16 +127,11 @@ fn autostart_child_detaches_from_the_invoking_terminal_session() -> Result<()> {
         BTreeMap::from([(OsString::from(DETACH_PROBE_STAGE), OsString::from("child"))]),
     )?;
     let mut child = spawn_detached_daemon_child(launch)?;
-    let child_pid = std::ffi::c_int::try_from(child.id())?;
-    // SAFETY: `child_pid` names the live child owned by `child`.
-    let child_session = unsafe { getsid(child_pid) };
-    let session_error = io::Error::last_os_error();
+    let child_pid = child.id();
+    let child_session = ctx_daemon_runtime::process_session_id(child_pid);
     child.kill()?;
     child.wait()?;
-    if child_session == -1 {
-        return Err(session_error.into());
-    }
-    assert_eq!(child_session, child_pid);
+    assert_eq!(child_session?, child_pid);
     Ok(())
 }
 

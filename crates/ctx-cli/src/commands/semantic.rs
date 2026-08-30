@@ -185,22 +185,24 @@ fn semantic_report(
     let token_present =
         std::env::var_os(ctx_daemon_cli::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENV).is_some();
     let token_bound_to_selected_endpoint = token_present
-        && executor
-            .external_space()
-            .zip(executor.http_endpoint())
-            .is_some_and(|(space, endpoint)| {
-                std::env::var(ctx_daemon_cli::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV)
-                    .ok()
-                    .and_then(|binding| {
-                        ctx_daemon_cli::SemanticEmbeddingExecutorConfig::http(
+        && executor.http_endpoint().is_some_and(|endpoint| {
+            std::env::var(ctx_daemon_cli::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV)
+                .ok()
+                .and_then(|binding| {
+                    match executor.external_space() {
+                        Some(space) => ctx_daemon_cli::SemanticEmbeddingExecutorConfig::http(
                             binding,
                             space.clone(),
-                        )
-                        .ok()
-                    })
-                    .and_then(|binding| binding.http_endpoint().map(str::to_owned))
-                    .is_some_and(|binding| binding == endpoint)
-            });
+                        ),
+                        None => ctx_daemon_cli::SemanticEmbeddingExecutorConfig::legacy_fixed_http(
+                            binding,
+                        ),
+                    }
+                    .ok()
+                })
+                .and_then(|binding| binding.http_endpoint().map(str::to_owned))
+                .is_some_and(|binding| binding == endpoint)
+        });
     let reported_space = executor.external_space();
     Ok(compact_json(json!({
         "schema_version": 1,
@@ -221,6 +223,7 @@ fn semantic_report(
         },
         "executor": {
             "kind": executor.kind().as_str(),
+            "protocol_schema_version": executor.http_protocol_schema_version(),
             "endpoint": executor.http_endpoint(),
             "space_id": reported_space.map(|space| space.space_id()),
             "dimensions": reported_space.map(|space| space.dimensions()),

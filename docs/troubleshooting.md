@@ -158,7 +158,9 @@ For a URL executor, `ctx semantic status` shows the local selection but does not
 use the token or probe the endpoint. Verify that the URL follows the HTTPS or
 literal-loopback HTTP policy, that remote processes receive
 `CTX_SEMANTIC_EMBEDDING_TOKEN`, and that the server implements the
-[V1 executor contract](semantic-executors.md#v1-http-protocol). If the endpoint
+[V2 executor contract](semantic-executors.md#v2-http-protocol), or the retained
+fixed-E5 [V1 contract](semantic-executors.md#retained-fixed-e5-v1).
+If the endpoint
 identity changed, rerun `ctx semantic enable --executor URL` to accept it and
 rebuild the derived semantic index. ctx does not silently retry with the
 built-in executor; hybrid may still return lexical results while reporting why

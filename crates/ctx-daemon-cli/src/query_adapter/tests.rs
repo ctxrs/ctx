@@ -325,6 +325,28 @@ fn client_rejects_a_stale_same_space_daemon_on_another_endpoint() {
 }
 
 #[test]
+fn legacy_fixed_http_index_bridge_preserves_builtin_vectors_and_endpoint_fence() {
+    let selected = ctx_semantic_model::SemanticEmbeddingExecutorConfig::legacy_fixed_http(
+        "http://127.0.0.1:41042",
+    )
+    .unwrap();
+    let bridged = semantic_index_contract_for_selected(selected.contract()).unwrap();
+
+    assert_eq!(
+        bridged.fingerprint(),
+        ctx_semantic_index::semantic_model_contract().fingerprint()
+    );
+    assert_eq!(
+        bridged.executor_route_identity(),
+        selected.contract().executor_route_identity()
+    );
+    assert_ne!(
+        bridged.executor_route_identity(),
+        ctx_semantic_index::semantic_model_contract().executor_route_identity()
+    );
+}
+
+#[test]
 fn daemon_query_embedding_response_rejects_malformed_vectors() {
     let contract = semantic_model_contract();
     let malformed = [

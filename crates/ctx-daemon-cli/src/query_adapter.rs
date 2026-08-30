@@ -229,7 +229,8 @@ fn reconcile_foreground_semantic(
 
 /// Establishes an external endpoint's configured identity before a mismatched
 /// writable vector store can perform its reset-on-open recovery. Verification
-/// is a content-free GET; the built-in contract is already compile-time pinned.
+/// uses only endpoint metadata for V2 and frozen public canary text for legacy
+/// V1; the built-in contract is already compile-time pinned.
 fn open_foreground_semantic_vector_store(
     data_root: &Path,
     executor: &SemanticEmbeddingExecutorHandle,
@@ -379,6 +380,9 @@ pub(crate) fn semantic_index_contract_for_selected(
             space.space_id(),
             space.dimensions(),
         );
+    }
+    if let Some(endpoint) = selected.external_http_endpoint() {
+        return ctx_semantic_index::legacy_fixed_http_semantic_model_contract(endpoint);
     }
     let local = ctx_semantic_index::semantic_model_contract();
     if selected.fingerprint() != local.fingerprint() {

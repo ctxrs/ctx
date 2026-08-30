@@ -603,9 +603,10 @@ semantic = true
 ```
 
 The built-in executor is also the default and is omitted from `config.toml`.
-Prefer `ctx semantic enable --executor URL`, which discovers protocol V1 and
-writes the complete accepted identity below; selecting `--executor builtin`
-removes it:
+Prefer `ctx semantic enable --executor URL`, which tries V2 first and writes
+the complete V2 identity below. Fixed-E5 V1 is considered only when the V2
+contract route returns 404 and remains endpoint-only. Selecting `--executor
+builtin` removes the selection:
 
 ```toml
 [semantic]
@@ -617,7 +618,7 @@ dimensions = 768
 The complete `executor`, `space_id`, and `dimensions` triple is required.
 Writing it directly is an advanced, operator-authored acceptance rather than
 discovery; `schema_version` is validated on the wire and is not stored in
-config. Before sending content, ctx verifies that the endpoint serves schema V1
+config. Before sending content, ctx verifies that the endpoint serves schema V2
 and the accepted identity. Intentionally changing the accepted `space_id` or
 `dimensions` causes ctx to rebuild the derived semantic vectors. Moving the
 same declared space to a new endpoint changes routing but preserves compatible

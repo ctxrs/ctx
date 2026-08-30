@@ -77,10 +77,11 @@ the local retrieval product.
   data root, respect `[indexing] mode` unless explicitly forced, and may run
   only bounded native local provider-history refresh and bounded semantic
   catch-up. It must not run history-source plugins.
-  Network model acquisition is allowed only for the built-in embedding model,
-  and external embedding calls are allowed only to the explicitly selected
-  V1 executor URL and its accepted vector-space identity. Both require semantic
-  opt-in. `ctx daemon run` blocks in
+  Network model acquisition is allowed only for the built-in embedding model.
+  External embedding calls are allowed only to the explicitly selected V2
+  executor URL and its accepted vector-space identity, or to the explicitly
+  selected fixed-E5 V1 compatibility URL. Both require semantic opt-in.
+  `ctx daemon run` blocks in
   the foreground and does not mutate indexing mode.
 - A finite Core worker may start only for explicit import or search
   `--refresh wait`. It must not install persistent supervision or run watcher,

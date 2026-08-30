@@ -126,7 +126,7 @@ pub fn linux_systemd_unit(spec: &SupervisorSpec) -> Result<String> {
             .collect::<Result<Vec<_>>>()?
             .join(" ");
     Ok(format!(
-        "[Unit]\nDescription={}\n\n[Service]\nType=simple\nEnvironment={}\nExecStart={}{}\nRestart=always\nRestartSec=2\nStandardOutput=null\nStandardError=journal\n\n[Install]\nWantedBy=default.target\n",
+        "[Unit]\nDescription={}\n\n[Service]\nType=simple\nUnsetEnvironment=LD_AUDIT LD_LIBRARY_PATH LD_PRELOAD\nExecStart=/usr/bin/env -i {} {}{}\nRestart=always\nRestartSec=2\nStandardOutput=null\nStandardError=journal\n\n[Install]\nWantedBy=default.target\n",
         spec.description(),
         systemd_quote_text(&format!(
             "{SUPERVISOR_ENVIRONMENT_FILE_ENV}={environment_path}"
@@ -154,7 +154,7 @@ pub fn launch_agent_plist(spec: &SupervisorSpec) -> Result<String> {
         .collect::<Result<Vec<_>>>()?
         .join("");
     Ok(format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n<key>Label</key><string>{}</string>\n<key>EnvironmentVariables</key><dict><key>{}</key><string>{}</string></dict>\n<key>ProgramArguments</key><array><string>{}</string>{}</array>\n<key>RunAtLoad</key><true/>\n<key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>\n<key>ProcessType</key><string>Background</string>\n<key>StandardOutPath</key><string>/dev/null</string>\n<key>StandardErrorPath</key><string>/dev/null</string>\n</dict></plist>\n",
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n<key>Label</key><string>{}</string>\n<key>EnvironmentVariables</key><dict><key>DYLD_FALLBACK_FRAMEWORK_PATH</key><string></string><key>DYLD_FALLBACK_LIBRARY_PATH</key><string></string><key>DYLD_FRAMEWORK_PATH</key><string></string><key>DYLD_INSERT_LIBRARIES</key><string></string><key>DYLD_LIBRARY_PATH</key><string></string></dict>\n<key>ProgramArguments</key><array><string>/usr/bin/env</string><string>-i</string><string>{}={}</string><string>{}</string>{}</array>\n<key>RunAtLoad</key><true/>\n<key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>\n<key>ProcessType</key><string>Background</string>\n<key>StandardOutPath</key><string>/dev/null</string>\n<key>StandardErrorPath</key><string>/dev/null</string>\n</dict></plist>\n",
         xml_escape(spec.identity().name()),
         SUPERVISOR_ENVIRONMENT_FILE_ENV,
         xml_escape(environment_path),
@@ -279,7 +279,7 @@ fn validated_supervisor_environment_name(name: &str) -> Result<&str> {
 }
 
 fn systemd_quote_text(value: &str) -> String {
-    let value = value.replace('%', "%%");
+    let value = value.replace('%', "%%").replace('$', "$$");
     format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
 

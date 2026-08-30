@@ -376,15 +376,49 @@ fn systemd_unit_is_persistent_and_restarts_after_clean_or_failed_exit() {
     .unwrap();
     assert!(unit.contains("Restart=always"));
     assert!(unit.contains("WantedBy=default.target"));
-    assert!(unit.contains(&format!(
-        "Environment=\"{}=",
-        ctx_daemon_runtime::SUPERVISOR_ENVIRONMENT_FILE_ENV
-    )));
-    assert!(unit.contains("ExecStart=\"/home/user/.local/bin/ctx\" "));
-    assert!(!unit.contains("ExecStart=/usr/bin/env"));
+    assert!(unit.contains("UnsetEnvironment=LD_AUDIT LD_LIBRARY_PATH LD_PRELOAD"));
+    let exec_start = unit
+        .lines()
+        .find(|line| line.starts_with("ExecStart="))
+        .expect("systemd ExecStart");
+    assert_eq!(
+        exec_start,
+        format!(
+            "ExecStart=/usr/bin/env -i \"{}=/home/user/.local/share/ctx/daemon/supervisor-environment.json\" \"/home/user/.local/bin/ctx\" --data-root \"/home/user/.local/share/ctx\" daemon run --format=json",
+            ctx_daemon_runtime::SUPERVISOR_ENVIRONMENT_FILE_ENV
+        )
+    );
+    assert!(!unit.lines().any(|line| line.starts_with("Environment=")));
+    assert_eq!(
+        exec_start
+            .matches(&format!(
+                "{}=",
+                ctx_daemon_runtime::SUPERVISOR_ENVIRONMENT_FILE_ENV
+            ))
+            .count(),
+        1
+    );
     assert!(!unit.contains("CTX_RELEASE_"));
     assert!(!unit.contains("idle-exit-seconds"));
     assert!(!unit.contains("loop-interval-seconds"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn systemd_unit_escapes_dollar_expansion_in_all_persisted_paths() {
+    let unit = linux_systemd_unit(
+        Path::new("/home/${CTX_EXEC_REDIRECT}/ctx"),
+        Path::new("/data/${CTX_ROOT_REDIRECT}"),
+    )
+    .unwrap();
+    let exec_start = unit
+        .lines()
+        .find(|line| line.starts_with("ExecStart="))
+        .expect("systemd ExecStart");
+    assert!(exec_start.contains("/home/$${CTX_EXEC_REDIRECT}/ctx"));
+    assert!(exec_start.contains("/data/$${CTX_ROOT_REDIRECT}"));
+    assert!(!exec_start.contains("/home/${CTX_EXEC_REDIRECT}/ctx"));
+    assert!(!exec_start.contains("/data/${CTX_ROOT_REDIRECT}"));
 }
 
 #[test]
@@ -404,11 +438,28 @@ fn launch_agent_plist_is_persistent_sanitized_and_gui_registration_is_identity_b
     assert!(plist.contains("<key>Label</key><string>rs.ctx.daemon</string>"));
     assert!(plist.contains("<key>RunAtLoad</key><true/>"));
     assert!(plist.contains("<key>KeepAlive</key>"));
-    assert!(plist.contains("<key>EnvironmentVariables</key><dict>"));
-    assert!(plist.contains(
-        "<key>ProgramArguments</key><array><string>/Users/test/Library/Application Support/ctx/ctx</string>"
-    ));
-    assert!(!plist.contains("<string>/usr/bin/env</string><string>-i</string>"));
+    assert!(plist.contains("<key>EnvironmentVariables</key>"));
+    for variable in [
+        "DYLD_FALLBACK_FRAMEWORK_PATH",
+        "DYLD_FALLBACK_LIBRARY_PATH",
+        "DYLD_FRAMEWORK_PATH",
+        "DYLD_INSERT_LIBRARIES",
+        "DYLD_LIBRARY_PATH",
+    ] {
+        assert!(plist.contains(&format!("<key>{variable}</key><string></string>")));
+    }
+    let program_arguments = plist
+        .split_once("<key>ProgramArguments</key><array>")
+        .and_then(|(_, remainder)| remainder.split_once("</array>"))
+        .map(|(arguments, _)| arguments)
+        .expect("launchd ProgramArguments array");
+    assert_eq!(
+        program_arguments,
+        format!(
+            "<string>/usr/bin/env</string><string>-i</string><string>{}=/Users/test/Library/Application Support/ctx/data/daemon/supervisor-environment.json</string><string>/Users/test/Library/Application Support/ctx/ctx</string><string>--data-root</string><string>/Users/test/Library/Application Support/ctx/data</string><string>daemon</string><string>run</string><string>--format=json</string>",
+            ctx_daemon_runtime::SUPERVISOR_ENVIRONMENT_FILE_ENV
+        )
+    );
     assert!(!plist.contains("CTX_RELEASE_"));
     assert!(!plist.contains("idle-exit-seconds"));
     assert_eq!(
@@ -814,6 +865,8 @@ fn native_supervisor_artifacts_exclude_authority_and_fail_closed_on_controls() -
         "CTX_RELEASE_PUBLIC_KEY",
         "CTX_RELEASE_SIGNATURE",
         "CTX_RELEASE_VERSION",
+        "CTX_SEMANTIC_EMBEDDING_TOKEN",
+        "CTX_SEMANTIC_EMBEDDING_TOKEN_ENDPOINT",
         "GITHUB_TOKEN",
     ];
     if env::var(SUPERVISOR_ENV_ARTIFACT_PROBE_STAGE).as_deref() != Ok("final") {

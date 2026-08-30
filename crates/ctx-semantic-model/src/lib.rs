@@ -3,6 +3,7 @@ mod cache_paths;
 mod configuration;
 mod embedding_executor;
 mod health_search;
+mod http_embedding_canary;
 mod http_embedding_executor;
 mod json;
 #[cfg(any(target_os = "macos", test, feature = "test-support"))]
@@ -86,6 +87,16 @@ fn write_test_semantic_cache(root: &std::path::Path) -> anyhow::Result<()> {
 #[cfg(feature = "test-support")]
 pub mod test_support {
     use std::path::Path;
+
+    #[doc(hidden)]
+    pub fn legacy_fixed_http_query_canary_embedding() -> Vec<f32> {
+        super::http_embedding_canary::normalized_query_reference()
+    }
+
+    #[doc(hidden)]
+    pub fn legacy_fixed_http_document_canary_embedding() -> Vec<f32> {
+        super::http_embedding_canary::normalized_document_reference()
+    }
 
     use anyhow::Result;
 

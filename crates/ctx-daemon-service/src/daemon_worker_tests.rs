@@ -157,7 +157,7 @@ fn contract_response_endpoint(body: &str) -> Result<(String, thread::JoinHandle<
         }
         let request = String::from_utf8(request)?;
         assert!(
-            request.starts_with("GET /v1/contract HTTP/1.1\r\n"),
+            request.starts_with("GET /v2/contract HTTP/1.1\r\n"),
             "unexpected semantic verification request: {request}"
         );
         let response = format!(
@@ -223,7 +223,7 @@ fn assert_contract_verification_failure_preserves_store(
 #[test]
 fn remote_space_drift_fails_permanently_before_store_reset() -> Result<()> {
     assert_contract_verification_failure_preserves_store(
-        r#"{"schema_version":1,"space_id":"drifted-space","dimensions":128}"#,
+        r#"{"schema_version":2,"space_id":"drifted-space","dimensions":128}"#,
         "asserted a different semantic space",
     )
 }
@@ -231,7 +231,7 @@ fn remote_space_drift_fails_permanently_before_store_reset() -> Result<()> {
 #[test]
 fn malformed_contract_output_fails_permanently_before_store_reset() -> Result<()> {
     assert_contract_verification_failure_preserves_store(
-        r#"{"schema_version":1,"space_id":17,"dimensions":"bad"}"#,
+        r#"{"schema_version":2,"space_id":17,"dimensions":"bad"}"#,
         "contract response is malformed",
     )
 }

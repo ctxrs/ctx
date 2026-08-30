@@ -75,8 +75,9 @@ shipped.
   return metadata-driven matches.
 - Semantic embeddings depend on the explicitly selected executor and the opt-in
   ctx daemon query service. The built-in executor still requires a compatible
-  local runtime. An external executor must serve the V1 contract for its
-  explicitly accepted opaque vector space; ctx never silently falls back to
+  local runtime. An external executor normally serves the V2 contract for its
+  explicitly accepted opaque vector space. The retained V1 compatibility route
+  is limited to the exact fixed-E5 contract. ctx never silently falls back to
   built-in execution. Executor, transport, identity, and vector-validation
   failures remain lexical-safe: `hybrid` can return lexical results with an
   explicit fallback diagnostic, while explicit `semantic` reports the failure.

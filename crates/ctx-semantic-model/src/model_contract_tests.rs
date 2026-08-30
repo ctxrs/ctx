@@ -412,3 +412,31 @@ fn builtin_contract_uses_the_fixed_executor_route_sentinel() {
         BUILTIN_SEMANTIC_EXECUTOR_ROUTE_IDENTITY
     );
 }
+
+#[test]
+fn legacy_fixed_http_preserves_builtin_vectors_but_fences_the_endpoint_route() {
+    let builtin = semantic_model_contract();
+    let legacy = SemanticModelContract::legacy_fixed_http("https://embed.example.test/");
+
+    assert!(legacy.external_space().is_none());
+    assert_eq!(
+        legacy.external_http_endpoint(),
+        Some("https://embed.example.test/")
+    );
+    assert_eq!(legacy.fingerprint(), builtin.fingerprint());
+    assert_eq!(legacy.descriptor(), builtin.descriptor());
+    assert_eq!(legacy.query_text("hello"), builtin.query_text("hello"));
+    assert_eq!(
+        legacy.document_text("hello"),
+        builtin.document_text("hello")
+    );
+    assert_ne!(
+        legacy.executor_route_identity(),
+        builtin.executor_route_identity()
+    );
+    assert!(legacy.legacy_builtin_descriptor_alias().is_some());
+    assert!(
+        !legacy.supports_frozen_legacy_v1(),
+        "an HTTP route must not accept fingerprint-less daemon V1 requests"
+    );
+}

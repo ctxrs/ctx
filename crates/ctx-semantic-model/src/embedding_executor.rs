@@ -66,8 +66,14 @@ enum SemanticEmbeddingExecutorSelection {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct HttpExecutorSelection {
     endpoint: ValidatedHttpEndpoint,
-    space: ExternalSemanticSpace,
+    protocol: HttpExecutorProtocol,
     contract: SemanticModelContract,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum HttpExecutorProtocol {
+    LegacyFixedV1,
+    ExternalSpaceV2(ExternalSemanticSpace),
 }
 
 impl Default for SemanticEmbeddingExecutorConfig {
@@ -92,21 +98,50 @@ impl SemanticEmbeddingExecutorConfig {
         Ok(Self::from_http_selection(endpoint, space))
     }
 
-    /// Discovers an endpoint's currently declared semantic space.
+    /// Preserves the endpoint-only fixed-E5 HTTP selection shipped before
+    /// externally declared vector spaces. New selections use [`Self::http`].
+    pub fn legacy_fixed_http(endpoint: impl AsRef<str>) -> Result<Self> {
+        let endpoint = ValidatedHttpEndpoint::parse(endpoint.as_ref())?;
+        let contract = SemanticModelContract::legacy_fixed_http(endpoint.as_str());
+        Ok(Self {
+            selection: SemanticEmbeddingExecutorSelection::Http(HttpExecutorSelection {
+                endpoint,
+                protocol: HttpExecutorProtocol::LegacyFixedV1,
+                contract,
+            }),
+        })
+    }
+
+    /// Discovers an endpoint's supported HTTP protocol and vector identity.
     ///
-    /// The returned configuration fixes that accepted space. Executor
-    /// construction and first embedding re-verify it and fail closed on drift;
-    /// ordinary activation never adopts a changed endpoint contract.
+    /// The returned configuration fixes either the declared V2 space or the
+    /// historical pinned-E5 V1 contract. Executor construction and first
+    /// embedding re-verify it and fail closed on drift; ordinary activation
+    /// never adopts a changed endpoint contract.
     pub fn discover_http(
         endpoint: impl AsRef<str>,
         auth: SemanticEmbeddingExecutorAuth,
     ) -> Result<Self> {
         let endpoint = ValidatedHttpEndpoint::parse(endpoint.as_ref())?;
-        let space = HttpSemanticEmbeddingExecutor::discover_space_from_validated_endpoint(
+        let protocol = HttpSemanticEmbeddingExecutor::discover_protocol_from_validated_endpoint(
             endpoint.clone(),
             auth,
         )?;
-        Ok(Self::from_http_selection(endpoint, space))
+        Ok(match protocol {
+            HttpExecutorProtocol::LegacyFixedV1 => {
+                let contract = SemanticModelContract::legacy_fixed_http(endpoint.as_str());
+                Self {
+                    selection: SemanticEmbeddingExecutorSelection::Http(HttpExecutorSelection {
+                        endpoint,
+                        protocol: HttpExecutorProtocol::LegacyFixedV1,
+                        contract,
+                    }),
+                }
+            }
+            HttpExecutorProtocol::ExternalSpaceV2(space) => {
+                Self::from_http_selection(endpoint, space)
+            }
+        })
     }
 
     fn from_http_selection(endpoint: ValidatedHttpEndpoint, space: ExternalSemanticSpace) -> Self {
@@ -114,7 +149,7 @@ impl SemanticEmbeddingExecutorConfig {
         Self {
             selection: SemanticEmbeddingExecutorSelection::Http(HttpExecutorSelection {
                 endpoint,
-                space,
+                protocol: HttpExecutorProtocol::ExternalSpaceV2(space),
                 contract,
             }),
         }
@@ -143,7 +178,10 @@ impl SemanticEmbeddingExecutorConfig {
     pub fn external_space(&self) -> Option<&ExternalSemanticSpace> {
         match &self.selection {
             SemanticEmbeddingExecutorSelection::Builtin => None,
-            SemanticEmbeddingExecutorSelection::Http(selection) => Some(&selection.space),
+            SemanticEmbeddingExecutorSelection::Http(selection) => match &selection.protocol {
+                HttpExecutorProtocol::LegacyFixedV1 => None,
+                HttpExecutorProtocol::ExternalSpaceV2(space) => Some(space),
+            },
         }
     }
 
@@ -158,6 +196,30 @@ impl SemanticEmbeddingExecutorConfig {
 
     pub const fn is_builtin(&self) -> bool {
         matches!(&self.selection, SemanticEmbeddingExecutorSelection::Builtin)
+    }
+
+    pub const fn is_legacy_fixed_http(&self) -> bool {
+        matches!(
+            &self.selection,
+            SemanticEmbeddingExecutorSelection::Http(HttpExecutorSelection {
+                protocol: HttpExecutorProtocol::LegacyFixedV1,
+                ..
+            })
+        )
+    }
+
+    pub const fn http_protocol_schema_version(&self) -> Option<u32> {
+        match &self.selection {
+            SemanticEmbeddingExecutorSelection::Builtin => None,
+            SemanticEmbeddingExecutorSelection::Http(HttpExecutorSelection {
+                protocol: HttpExecutorProtocol::LegacyFixedV1,
+                ..
+            }) => Some(1),
+            SemanticEmbeddingExecutorSelection::Http(HttpExecutorSelection {
+                protocol: HttpExecutorProtocol::ExternalSpaceV2(_),
+                ..
+            }) => Some(2),
+        }
     }
 
     pub const fn scope(&self) -> SemanticEmbeddingExecutorScope {
@@ -332,7 +394,7 @@ impl SemanticEmbeddingExecutorHandle {
                 SemanticEmbeddingExecutorHandleInner::Http(
                     HttpSemanticEmbeddingExecutor::from_validated_selection(
                         selection.endpoint,
-                        selection.space,
+                        selection.protocol,
                         selection.contract,
                         auth,
                     )?,
@@ -377,8 +439,9 @@ impl SemanticEmbeddingExecutorHandle {
             .map(HttpSemanticEmbeddingExecutor::endpoint)
     }
 
-    /// Performs a content-free activation check for HTTP executors. The
-    /// built-in contract is compile-time pinned and needs no network check.
+    /// Performs an activation check without user content. External V2 uses a
+    /// contract GET; retained fixed-E5 V1 may also send frozen public canaries.
+    /// The built-in contract is compile-time pinned and needs no network check.
     pub fn verify_contract(&self) -> Result<()> {
         match &self.executor {
             SemanticEmbeddingExecutorHandleInner::Builtin(_) => Ok(()),

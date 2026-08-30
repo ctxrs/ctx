@@ -4,8 +4,10 @@ use anyhow::{anyhow, Result};
 use serde::Serialize;
 
 use super::{
-    request_body_limit_failure, EmbeddingInput, EmbeddingsRequest, HttpSemanticEmbeddingExecutor,
-    InputKind, MAX_REQUEST_BODY_BYTES, PROTOCOL_SCHEMA_VERSION, UUID_WIRE_VALUE,
+    request_body_limit_failure, EmbeddingInput, EmbeddingsRequest, HttpExecutorProtocol,
+    HttpSemanticEmbeddingExecutor, InputKind, LegacyEmbeddingsRequest,
+    LEGACY_PROTOCOL_SCHEMA_VERSION, MAX_REQUEST_BODY_BYTES, PROTOCOL_SCHEMA_VERSION,
+    UUID_WIRE_VALUE,
 };
 
 pub(super) struct RequestBodySizer {
@@ -18,15 +20,31 @@ impl RequestBodySizer {
         executor: &HttpSemanticEmbeddingExecutor,
         input_kind: InputKind,
     ) -> Result<Self> {
-        let request = EmbeddingsRequest {
-            schema_version: PROTOCOL_SCHEMA_VERSION,
-            space_id: executor.space.space_id(),
-            dimensions: executor.space.dimensions(),
-            request_id: UUID_WIRE_VALUE,
-            input_kind,
-            inputs: &[],
+        let body_len = match &executor.protocol {
+            HttpExecutorProtocol::ExternalSpaceV2(space) => encoded_json_len(
+                &EmbeddingsRequest {
+                    schema_version: PROTOCOL_SCHEMA_VERSION,
+                    space_id: space.space_id(),
+                    dimensions: space.dimensions(),
+                    request_id: UUID_WIRE_VALUE,
+                    input_kind,
+                    inputs: &[],
+                },
+                MAX_REQUEST_BODY_BYTES,
+            )?,
+            HttpExecutorProtocol::LegacyFixedV1 => encoded_json_len(
+                &LegacyEmbeddingsRequest {
+                    schema_version: LEGACY_PROTOCOL_SCHEMA_VERSION,
+                    model_key: executor.contract.model_key(),
+                    model_contract_fingerprint: executor.contract.fingerprint(),
+                    request_id: UUID_WIRE_VALUE,
+                    input_kind,
+                    inputs: &[],
+                },
+                MAX_REQUEST_BODY_BYTES,
+            )?,
         };
-        let Some(body_len) = encoded_json_len(&request, MAX_REQUEST_BODY_BYTES)? else {
+        let Some(body_len) = body_len else {
             return Err(request_body_limit_failure());
         };
         Ok(Self {
@@ -101,7 +119,7 @@ impl Write for CountingWriter {
 }
 
 pub(super) fn encode_preflighted_request(
-    request: &EmbeddingsRequest<'_>,
+    request: &impl Serialize,
     body_len: usize,
 ) -> Result<Vec<u8>> {
     let mut writer = BoundedBodyWriter {

@@ -84,8 +84,10 @@ The built-in multilingual E5 executor is the local default. The command `ctx
 semantic enable --executor builtin|URL` selects the executor used for both
 document indexing and query embedding; bare `ctx semantic enable` preserves the
 current selection. Each data root has one accepted vector space. An explicit
-URL selection validates protocol schema V1 and persists its endpoint, opaque
-`space_id`, and `dimensions`. The schema version is not persisted.
+URL selection tries protocol V2 first and persists its endpoint, opaque
+`space_id`, and dimensions. Fixed-E5 V1 is retained only as an endpoint-only
+fallback when V2 returns 404; its vector identity remains the pinned built-in
+contract. `schema_version` is not a config field.
 
 The normative URL, authentication, privacy, wire protocol, identity, and
 responsibility boundary is the

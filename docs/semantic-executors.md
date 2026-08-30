@@ -38,12 +38,18 @@ to another endpoint. Loopback describes only ctx's first HTTP hop: the receiving
 process can retain, log, or forward content, including to another machine. A
 remote URL explicitly sends semantic content off the machine.
 
-`ctx semantic enable --executor URL` discovers `GET <base>/v1/contract`,
-validates protocol schema V1, accepts the returned identity, and persists the
+`ctx semantic enable --executor URL` discovers `GET <base>/v2/contract`,
+validates protocol schema V2, accepts the returned identity, and persists the
 endpoint plus opaque `space_id` and `dimensions` for the current data root.
 `schema_version` is validated on the wire, not persisted. Discovery sends no
 history or query text. `ctx semantic status` reads local state without
 contacting the endpoint.
+
+For compatibility with the earlier fixed-E5 HTTP executor, explicit discovery
+falls back to V1 only when the V2 contract route returns HTTP 404. It does not
+downgrade after authentication, transport, TLS, malformed-response, server, or
+identity errors. A V1 selection remains endpoint-only in configuration and
+retains the exact built-in E5 vector contract.
 
 The accepted identity is fail-closed. If the endpoint later reports a different
 identity, ctx stops semantic indexing and querying until the user reruns
@@ -51,21 +57,21 @@ identity, ctx stops semantic indexing and querying until the user reruns
 deletes and rebuilds only the derived semantic index. Imported history and the
 lexical index remain intact.
 
-## V1 HTTP protocol
+## V2 HTTP protocol
 
 The base URL exposes JSON routes:
 
-- `GET <base>/v1/contract`
-- `POST <base>/v1/embeddings`
+- `GET <base>/v2/contract`
+- `POST <base>/v2/embeddings`
 
 Remote requests use `Authorization: Bearer <token>`. Embedding requests use
 `Content-Type: application/json`.
 
-`GET /v1/contract` returns:
+`GET /v2/contract` returns:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "space_id": "opaque-space-id",
   "dimensions": 2
 }
@@ -78,11 +84,11 @@ keep it stable while vectors remain compatible and change it when they do not.
 ctx does not parse it as a provider or model name. Reusing an ID asserts that
 the vectors are compatible even when the serving endpoint changes.
 
-`POST /v1/embeddings` accepts one `input_kind`, either `query` or `documents`:
+`POST /v2/embeddings` accepts one `input_kind`, either `query` or `documents`:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "space_id": "opaque-space-id",
   "dimensions": 2,
   "request_id": "request-123",
@@ -101,7 +107,7 @@ The response echoes the accepted space and request identity:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "space_id": "opaque-space-id",
   "dimensions": 2,
   "request_id": "request-123",
@@ -139,7 +145,7 @@ mismatch fails semantic work closed; lexical search remains available.
   Redirects and ambient HTTP proxy discovery are disabled.
 
 Every request carries `Accept: application/json`, `Accept-Encoding: identity`,
-`Cache-Control: no-store`, and `X-Ctx-Semantic-Schema-Version: 1`. Requests
+`Cache-Control: no-store`, and `X-Ctx-Semantic-Schema-Version: 2`. Requests
 to embed content assert the accepted space in the JSON body and use
 `Content-Type: application/json`. Authorization is added only when a bound token
 is configured.
@@ -164,21 +170,36 @@ space_id = "opaque-space-id"
 dimensions = 768
 ```
 
-All three fields are required for an HTTP executor. Writing this triple is an
-advanced, manual acceptance of that endpoint and vector-space identity; config
+All three fields are required for a V2 external-space executor. Writing this
+triple is an advanced, manual acceptance of that endpoint and vector-space identity; config
 loading does not discover it. Before sending content, ctx still verifies that
-the endpoint serves protocol schema V1 and the exact accepted identity. If an
+the endpoint serves protocol schema V2 and the exact accepted identity. If an
 operator intentionally changes `space_id` or `dimensions`, ctx rebuilds the
 derived semantic vectors for the new identity. Moving the same declared vector
 space to a different endpoint restarts runtime routing but does not rebuild
 compatible vectors.
 Do not add `schema_version` to the config.
 
+## Retained fixed-E5 V1
+
 An endpoint-only `semantic.executor` written by the earlier fixed-E5
-current-main implementation remains readable only as legacy migration input.
-ctx does not write that partial form. Rerun
-`ctx semantic enable --executor URL` to discover and persist its complete V1
-identity.
+implementation remains a fully functional V1 selection:
+
+```toml
+[semantic]
+executor = "https://embeddings.example.com/ctx/"
+```
+
+V1 uses `GET <base>/v1/contract` and `POST <base>/v1/embeddings`, with
+`schema_version: 1`, `X-Ctx-Semantic-Schema-Version: 1`, `model_key`, and
+`model_contract_fingerprint`. ctx applies
+the pinned E5 query/document prefixes before sending text and verifies the
+historical public conformance canary. Its vector fingerprint is exactly the
+same as the built-in E5 executor, while the endpoint remains separately fenced
+as runtime routing state. ctx never rewrites this selection during ordinary
+loading or status. Explicit selection prefers V2 and persists a V2 triple; it
+retains endpoint-only V1 only when V2 returns 404 and the V1 identity exactly
+matches the pinned built-in contract.
 
 ## Responsibility boundary
 

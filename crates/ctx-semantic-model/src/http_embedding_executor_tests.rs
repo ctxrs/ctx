@@ -313,6 +313,43 @@ fn contract_reply(space: ExternalSemanticSpace) -> Responder {
     Box::new(move |_| json_http(contract_value(&space)))
 }
 
+fn legacy_contract_value() -> Value {
+    let contract = semantic_model_contract();
+    json!({
+        "schema_version": 1,
+        "model_key": contract.model_key(),
+        "model_contract_fingerprint": contract.fingerprint(),
+    })
+}
+
+fn legacy_contract_reply() -> Responder {
+    Box::new(|_| json_http(legacy_contract_value()))
+}
+
+fn legacy_embedding_reply() -> Responder {
+    Box::new(|request| {
+        let request_json = request.json();
+        let embedding = match request_json["input_kind"].as_str() {
+            Some("query") => crate::http_embedding_canary::normalized_query_reference(),
+            Some("documents") => crate::http_embedding_canary::normalized_document_reference(),
+            other => panic!("unexpected legacy input kind: {other:?}"),
+        };
+        let embeddings = request_json["inputs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|input| json!({"id": input["id"], "embedding": embedding.clone()}))
+            .collect::<Vec<_>>();
+        json_http(json!({
+            "schema_version": 1,
+            "model_key": request_json["model_key"],
+            "model_contract_fingerprint": request_json["model_contract_fingerprint"],
+            "request_id": request_json["request_id"],
+            "embeddings": embeddings,
+        }))
+    })
+}
+
 fn unit_embedding(dimensions: usize, position: usize) -> Vec<f32> {
     let mut embedding = vec![0.0; dimensions];
     embedding[position] = 1.0;
@@ -441,10 +478,116 @@ fn discovery_gets_authenticated_contract_and_freezes_the_accepted_space() {
     assert!(requests.iter().all(|request| request.method == "GET"));
     assert!(requests
         .iter()
-        .all(|request| request.path == "/semantic-base/v1/contract"));
+        .all(|request| request.path == "/semantic-base/v2/contract"));
     assert!(requests
         .iter()
         .all(|request| request.header("authorization") == Some("Bearer secret-token")));
+}
+
+#[test]
+fn discovery_falls_back_on_v2_not_found_and_preserves_fixed_e5_v1_wire_behavior() {
+    let server = FakeServer::start(vec![
+        Box::new(|_| http(404, Vec::new())),
+        legacy_contract_reply(),
+        legacy_contract_reply(),
+        legacy_embedding_reply(),
+        legacy_embedding_reply(),
+        legacy_embedding_reply(),
+    ]);
+    let auth = SemanticEmbeddingExecutorAuth::bearer(
+        "legacy-secret-token".to_owned(),
+        server.base_url.clone(),
+    );
+    let config =
+        SemanticEmbeddingExecutorConfig::discover_http(&server.base_url, auth.clone()).unwrap();
+    assert!(config.is_legacy_fixed_http());
+    assert!(config.external_space().is_none());
+    assert_eq!(
+        config.contract().fingerprint(),
+        semantic_model_contract().fingerprint()
+    );
+    let handle = SemanticEmbeddingExecutorHandle::build_with_auth(
+        config,
+        auth,
+        SharedSemanticRuntime::default(),
+        model_config(),
+    )
+    .unwrap();
+    let executor = handle.executor();
+    let embedding = executor
+        .embed_query(executor.contract().prepare_query("user text".to_owned()))
+        .unwrap();
+    assert_eq!(embedding.len(), 384);
+
+    let requests = server.finish();
+    assert!(requests
+        .iter()
+        .all(|request| { request.header("authorization") == Some("Bearer legacy-secret-token") }));
+    assert_eq!(requests[0].path, "/semantic-base/v2/contract");
+    assert_eq!(requests[0].header(SCHEMA_HEADER), Some("2"));
+    assert_eq!(requests[1].path, "/semantic-base/v1/contract");
+    assert_eq!(requests[1].header(SCHEMA_HEADER), Some("1"));
+    assert_eq!(
+        requests[1].header(LEGACY_MODEL_KEY_HEADER),
+        Some(semantic_model_contract().model_key())
+    );
+    assert_eq!(
+        requests[1].header(LEGACY_CONTRACT_FINGERPRINT_HEADER),
+        Some(semantic_model_contract().fingerprint())
+    );
+    assert_eq!(requests[2].path, "/semantic-base/v1/contract");
+    for request in &requests[3..] {
+        assert_eq!(request.path, "/semantic-base/v1/embeddings");
+        assert_eq!(request.header(SCHEMA_HEADER), Some("1"));
+        let body = request.json();
+        assert_eq!(body["schema_version"], 1);
+        assert!(body.get("space_id").is_none());
+        assert!(body.get("dimensions").is_none());
+        assert_eq!(body["model_key"], semantic_model_contract().model_key());
+        assert_eq!(
+            body["model_contract_fingerprint"],
+            semantic_model_contract().fingerprint()
+        );
+    }
+    assert_eq!(requests[5].json()["inputs"][0]["text"], "query: user text");
+}
+
+#[test]
+fn discovery_does_not_accept_a_v1_endpoint_with_another_model_contract() {
+    let server = FakeServer::start(vec![
+        Box::new(|_| http(404, Vec::new())),
+        Box::new(|_| {
+            json_http(json!({
+                "schema_version": 1,
+                "model_key": "another-model",
+                "model_contract_fingerprint": semantic_model_contract().fingerprint(),
+            }))
+        }),
+    ]);
+    let error = SemanticEmbeddingExecutorConfig::discover_http(
+        &server.base_url,
+        SemanticEmbeddingExecutorAuth::none(),
+    )
+    .unwrap_err();
+    assert!(semantic_embedding_failure_is_permanent(&error));
+    let requests = server.finish();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].path, "/semantic-base/v2/contract");
+    assert_eq!(requests[1].path, "/semantic-base/v1/contract");
+}
+
+#[test]
+fn discovery_never_downgrades_after_v2_authentication_failure() {
+    let server = FakeServer::start(vec![Box::new(|_| http(401, Vec::new()))]);
+    let error = SemanticEmbeddingExecutorConfig::discover_http(
+        &server.base_url,
+        SemanticEmbeddingExecutorAuth::none(),
+    )
+    .unwrap_err();
+    assert!(semantic_embedding_failure_is_permanent(&error));
+    let requests = server.finish();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].path, "/semantic-base/v2/contract");
 }
 
 #[test]
@@ -499,11 +642,11 @@ fn query_and_documents_send_exact_raw_text_and_protocol_assertions() {
     let requests = server.finish();
     assert_eq!(requests.len(), 3);
     for request in &requests {
-        assert_eq!(request.header(SCHEMA_HEADER), Some("1"));
+        assert_eq!(request.header(SCHEMA_HEADER), Some("2"));
         assert_eq!(request.header_count("authorization"), 0);
     }
     let query = requests[1].json();
-    assert_eq!(query["schema_version"], 1);
+    assert_eq!(query["schema_version"], 2);
     assert_eq!(query["space_id"], "raw-text-v1");
     assert_eq!(query["dimensions"], 5);
     assert_eq!(query["input_kind"], "query");
@@ -954,11 +1097,11 @@ fn aggregate_deadline_and_response_metadata_bounds_are_enforced() {
 #[test]
 fn malformed_or_unsafe_discovery_contracts_fail_closed() {
     for value in [
-        json!({"schema_version": 2, "space_id": "safe-v1", "dimensions": 8}),
-        json!({"schema_version": 1, "space_id": "bad space", "dimensions": 8}),
-        json!({"schema_version": 1, "space_id": "safe-v1", "dimensions": 0}),
-        json!({"schema_version": 1, "space_id": "safe-v1", "dimensions": 4097}),
-        json!({"schema_version": 1, "space_id": "safe-v1", "dimensions": 8, "extra": true}),
+        json!({"schema_version": 1, "space_id": "safe-v1", "dimensions": 8}),
+        json!({"schema_version": 2, "space_id": "bad space", "dimensions": 8}),
+        json!({"schema_version": 2, "space_id": "safe-v1", "dimensions": 0}),
+        json!({"schema_version": 2, "space_id": "safe-v1", "dimensions": 4097}),
+        json!({"schema_version": 2, "space_id": "safe-v1", "dimensions": 8, "extra": true}),
     ] {
         let server = FakeServer::start(vec![Box::new(move |_| json_http(value.clone()))]);
         assert!(SemanticEmbeddingExecutorConfig::discover_http(
@@ -1160,6 +1303,9 @@ fn executor_handle_keeps_builtin_and_http_behind_one_interface() {
     )
     .unwrap();
     assert_eq!(http.kind(), SemanticEmbeddingExecutorKind::Http);
-    assert_eq!(http.http_executor().unwrap().external_space(), &accepted);
+    assert_eq!(
+        http.http_executor().unwrap().external_space(),
+        Some(&accepted)
+    );
     assert_eq!(http.executor().contract().dimensions(), 12);
 }

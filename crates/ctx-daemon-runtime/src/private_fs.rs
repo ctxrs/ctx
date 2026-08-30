@@ -31,15 +31,7 @@ pub(crate) fn private_open_existing_file_nofollow(path: &Path) -> std::io::Resul
 
 #[cfg(windows)]
 pub(crate) fn private_open_existing_file_nofollow(path: &Path) -> std::io::Result<fs::File> {
-    use std::os::windows::fs::OpenOptionsExt as _;
-    use windows_sys::Win32::Storage::FileSystem::{
-        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-    };
-
-    fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
-        .open(path)
+    ctx_history_platform::platform_security::open_verified_private_file(path)
 }
 
 #[cfg(not(any(unix, windows)))]

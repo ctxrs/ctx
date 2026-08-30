@@ -172,17 +172,19 @@ These commands return `schema_version: 1`, `operation` (`enable`, `status`, or
 `indexing.mode`, optional `projection` and `catch_up` diagnostics, reduced
 `daemon` state, `executor`, `local_only`, and `read_only`. `executor.kind` is
 `builtin` or `http`; an HTTP executor also reports its configured `endpoint`.
-After URL discovery and acceptance, it also reports the persisted opaque
-`space_id` and `dimensions`.
+HTTP executors report `protocol_schema_version`. V2 URL selections also report
+the persisted opaque `space_id` and `dimensions`; retained fixed-E5 V1
+selections omit those two fields.
 `executor.scope` is `builtin`, `loopback`, or `remote`, and
 `executor.content_leaves_machine` makes the content boundary explicit.
 `executor.authentication` names the canonical token environment and may report
 whether the current process environment is usable for the selected endpoint;
 it never reports the token or claims that shell state is daemon-effective.
-`local_only` is true for the built-in and loopback executors. For loopback, that
-describes ctx's first hop only; the receiving process can retain or forward the
-content. Status is credential-free and read-only: it reads local configuration
-and observed state without probing the endpoint or making a network request.
+`local_only` is true only for the in-process built-in executor. A loopback
+executor keeps ctx's first hop on the machine, but the receiving process can
+retain or forward the content. Status is credential-free and read-only: it
+reads local configuration and observed state without probing the endpoint or
+making a network request.
 Enable and disable persist policy and report `read_only: false`. Disablement
 retains downloaded model/runtime assets and derived semantic indexes.
 

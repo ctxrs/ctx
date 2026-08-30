@@ -9,26 +9,32 @@ const RELEASE_AUTHORITY_ENV_VARS: &[&str] = &[
     "CTX_FUNCTIONS_BASE",
     "CTX_UPGRADE_FUNCTIONS_BASE",
 ];
+const SEMANTIC_CREDENTIAL_ENV_VARS: &[&str] = &[
+    "CTX_SEMANTIC_EMBEDDING_TOKEN",
+    "CTX_SEMANTIC_EMBEDDING_TOKEN_ENDPOINT",
+];
 
-/// Prevent a child process from inheriting ambient release-root authority.
+/// Prevent a child process from inheriting ambient release-root authority or
+/// daemon-only semantic credentials.
 ///
 /// Call this after adding command-specific environment entries and immediately
 /// before spawning or replacing the current process. Normal runtime controls
-/// remain inherited; only release metadata, signature, key, and artifact-origin
-/// substitution is removed.
+/// remain inherited; release authority and semantic bearer material are
+/// removed.
 pub(crate) fn sanitize_release_authority_env(command: &mut Command) -> &mut Command {
     let configured_authority = command
         .get_envs()
-        .filter(|(key, _)| is_release_authority_env_var(key))
+        .filter(|(key, _)| is_forbidden_child_env_var(key))
         .map(|(key, _)| key.to_os_string())
         .collect::<Vec<_>>();
     let inherited_authority = env::vars_os()
         .map(|(key, _)| key)
-        .filter(|key| is_release_authority_env_var(key))
+        .filter(|key| is_forbidden_child_env_var(key))
         .collect::<Vec<_>>();
 
     for key in RELEASE_AUTHORITY_ENV_VARS
         .iter()
+        .chain(SEMANTIC_CREDENTIAL_ENV_VARS)
         .map(OsString::from)
         .chain(inherited_authority)
         .chain(configured_authority)
@@ -36,6 +42,14 @@ pub(crate) fn sanitize_release_authority_env(command: &mut Command) -> &mut Comm
         command.env_remove(key);
     }
     command
+}
+
+fn is_forbidden_child_env_var(key: &OsStr) -> bool {
+    let upper = key.to_string_lossy().to_ascii_uppercase();
+    is_release_authority_env_var(key)
+        || SEMANTIC_CREDENTIAL_ENV_VARS
+            .iter()
+            .any(|forbidden| upper == *forbidden)
 }
 
 fn is_release_authority_env_var(key: &OsStr) -> bool {
@@ -72,6 +86,11 @@ mod tests {
             .env("CTX_ALLOW_CUSTOM_RELEASE_BASE_URL", "1")
             .env("CTX_UPGRADE_CHANNEL", "stable")
             .env("CTX_UPGRADE_AUTO", "off")
+            .env("CTX_SEMANTIC_EMBEDDING_TOKEN", "secret")
+            .env(
+                "CTX_SEMANTIC_EMBEDDING_TOKEN_ENDPOINT",
+                "https://embed.example.test/",
+            )
             .env("CTX_DATA_ROOT", "/legitimate/data");
 
         sanitize_release_authority_env(&mut command);
@@ -92,6 +111,8 @@ mod tests {
             "CTX_UPGRADE_FUNCTIONS_BASE",
             "CTX_FUNCTIONS_BASE",
             "CTX_ALLOW_CUSTOM_RELEASE_BASE_URL",
+            "CTX_SEMANTIC_EMBEDDING_TOKEN",
+            "CTX_SEMANTIC_EMBEDDING_TOKEN_ENDPOINT",
         ] {
             assert_eq!(
                 configured.get(forbidden),
@@ -132,7 +153,12 @@ mod tests {
             .env("CTX_FUNCTIONS_BASE", "https://legacy-attacker.invalid")
             .env("CTX_ALLOW_CUSTOM_RELEASE_BASE_URL", "1")
             .env("CTX_UPGRADE_CHANNEL", "stable")
-            .env("CTX_UPGRADE_AUTO", "off");
+            .env("CTX_UPGRADE_AUTO", "off")
+            .env("CTX_SEMANTIC_EMBEDDING_TOKEN", "secret")
+            .env(
+                "CTX_SEMANTIC_EMBEDDING_TOKEN_ENDPOINT",
+                "https://embed.example.test/",
+            );
         sanitize_release_authority_env(&mut command);
 
         assert!(command
@@ -151,8 +177,8 @@ mod tests {
             return;
         };
         assert!(
-            !env::vars_os().any(|(key, _)| is_release_authority_env_var(&key)),
-            "release authority leaked into descendant environment"
+            !env::vars_os().any(|(key, _)| is_forbidden_child_env_var(&key)),
+            "release authority or semantic credentials leaked into descendant environment"
         );
         assert_eq!(env::var("CTX_UPGRADE_CHANNEL").as_deref(), Ok("stable"));
         assert_eq!(env::var("CTX_UPGRADE_AUTO").as_deref(), Ok("off"));

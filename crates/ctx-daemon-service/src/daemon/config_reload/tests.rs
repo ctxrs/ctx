@@ -115,7 +115,7 @@ fn contract_response_endpoint(
             .expect("read contract response server address")
     );
     let body = json!({
-        "schema_version": 1,
+        "schema_version": 2,
         "space_id": space_id,
         "dimensions": dimensions,
     })
@@ -134,7 +134,7 @@ fn contract_response_endpoint(
         }
         let request = String::from_utf8(request).expect("contract request is UTF-8");
         assert!(
-            request.starts_with("GET /v1/contract HTTP/1.1\r\n") && request.ends_with("\r\n\r\n"),
+            request.starts_with("GET /v2/contract HTTP/1.1\r\n") && request.ends_with("\r\n\r\n"),
             "verification must be a content-free contract GET: {request}"
         );
         let response = format!(

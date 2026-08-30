@@ -127,9 +127,10 @@ ctx daemon run
   query embeddings. Without `--executor`, the command preserves the current
   selection. `--executor builtin` restores local multilingual E5 and leaves no
   executor setting in `config.toml`; built-in is also the default when no
-  selection exists. An explicit URL validates protocol schema V1, then persists
-  the endpoint, opaque `space_id`, and `dimensions`; `schema_version` is not a
-  config field. Each data root has one accepted vector space.
+  selection exists. An explicit URL validates protocol schema V2, with a
+  fixed-E5 V1 fallback only when V2 is absent, then persists the selected
+  protocol's endpoint and identity. `schema_version` is not a config field.
+  Each data root has one accepted vector space.
   Remote endpoints require HTTPS and
   `CTX_SEMANTIC_EMBEDDING_TOKEN`; plain HTTP is accepted only for a literal
   loopback IP address. The token is bound to that endpoint. Later identity drift
@@ -141,7 +142,8 @@ ctx daemon run
   token, or making a network request. `semantic disable` opts out without
   deleting downloaded model/runtime assets or derived semantic indexes. Plain
   enablement in manual mode does not change indexing mode. See
-  [Semantic Embedding Executors](semantic-executors.md) for the V1 protocol.
+  [Semantic Embedding Executors](semantic-executors.md) for the V2 protocol and
+  retained fixed-E5 V1 compatibility.
 - `daemon run` is an advanced command that runs persistent local maintenance in
   the foreground and blocks until stopped. It does not change the configured
   indexing mode. In manual mode, pass `--force` to run it explicitly. Each pass

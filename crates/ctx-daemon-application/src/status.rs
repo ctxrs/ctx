@@ -10,7 +10,6 @@ use serde_json::{json, Value};
 
 use crate::{compact_json, supervisor, DaemonApplicationHost, DaemonConfigSnapshot, DaemonMode};
 
-#[path = "status_core_refresh_job.rs"]
 mod core_refresh_job;
 
 pub struct DaemonStatusPreparation<'a> {

@@ -33,7 +33,7 @@ use windows_sys::Win32::{
     },
     Storage::FileSystem::{
         CreateDirectoryW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-        FILE_SHARE_READ, FILE_SHARE_WRITE, READ_CONTROL, WRITE_DAC,
+        FILE_GENERIC_READ, FILE_SHARE_READ, FILE_SHARE_WRITE, READ_CONTROL, WRITE_DAC,
     },
     System::Threading::{GetCurrentProcess, OpenProcessToken},
 };
@@ -190,6 +190,13 @@ pub(super) fn verify_private_file_handle(handle: &File) -> io::Result<()> {
     verify_handle(handle, ObjectKind::File)
 }
 
+pub(super) fn open_verified_private_file(path: &Path) -> io::Result<File> {
+    let object =
+        OpenedPrivateObject::open_with_access(path, ObjectKind::File, false, FILE_GENERIC_READ)?;
+    verify_handle(object.file(), ObjectKind::File)?;
+    Ok(object.into_file())
+}
+
 #[derive(Clone, Copy)]
 enum ObjectKind {
     Directory,
@@ -279,6 +286,7 @@ fn verify(path: &Path, kind: ObjectKind) -> io::Result<()> {
 fn verify_handle(handle: &File, kind: ObjectKind) -> io::Result<()> {
     validate_handle_type(handle, kind)?;
     let identities = PrivateIdentities::current()?;
+    verify_handle_owner(handle, identities.user_sid())?;
     verify_handle_with_identities(handle, kind, &identities)
 }
 
@@ -389,6 +397,15 @@ struct OpenedPrivateObject {
 
 impl OpenedPrivateObject {
     fn open(path: &Path, kind: ObjectKind, mutate: bool) -> io::Result<Self> {
+        Self::open_with_access(path, kind, mutate, 0)
+    }
+
+    fn open_with_access(
+        path: &Path,
+        kind: ObjectKind,
+        mutate: bool,
+        additional_access: u32,
+    ) -> io::Result<Self> {
         let absolute = std::path::absolute(path)?;
         let mut ancestor_paths: Vec<_> = absolute.ancestors().skip(1).collect();
         ancestor_paths.reverse();
@@ -410,7 +427,7 @@ impl OpenedPrivateObject {
             })?;
             ancestors.push(handle);
         }
-        let access = READ_CONTROL | if mutate { WRITE_DAC } else { 0 };
+        let access = READ_CONTROL | additional_access | if mutate { WRITE_DAC } else { 0 };
         let file = open_handle(&absolute, kind, access)?;
         validate_handle_type(&file, kind)?;
         Ok(Self {
@@ -421,6 +438,10 @@ impl OpenedPrivateObject {
 
     fn file(&self) -> &File {
         &self.file
+    }
+
+    fn into_file(self) -> File {
+        self.file
     }
 }
 
@@ -768,6 +789,30 @@ mod tests {
 
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
         assert!(error.to_string().contains("reparse point"));
+        Ok(())
+    }
+
+    #[test]
+    fn verified_file_open_rejects_an_intermediate_junction(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let parent = tempfile::tempdir()?;
+        let target = parent.path().join("target");
+        let junction = parent.path().join("junction");
+        fs::create_dir(&target)?;
+        fs::write(target.join("secret.json"), b"secret")?;
+        let status = std::process::Command::new("cmd.exe")
+            .args(["/D", "/C", "mklink", "/J"])
+            .arg(&junction)
+            .arg(&target)
+            .status()?;
+        if !status.success() {
+            return Err("failed to create junction fixture".into());
+        }
+
+        let error = open_verified_private_file(&junction.join("secret.json")).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("traverses a reparse point"));
         Ok(())
     }
 

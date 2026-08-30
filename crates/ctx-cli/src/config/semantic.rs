@@ -5,12 +5,6 @@ use ctx_daemon_cli::{ExternalSemanticSpace, SemanticEmbeddingExecutorConfig};
 
 use super::AppConfig;
 
-// `semantic.executor = URL` briefly shipped as a fixed-E5 exact-contract
-// selection before external vector-space discovery existed. Keep that shape
-// readable so an explicit `semantic enable --executor URL` can replace it
-// atomically with the discovered identity.
-const LEGACY_EXACT_HTTP_SPACE_ID: &str = "ctxrs/legacy-exact-e5-v1";
-
 #[derive(Debug, Clone)]
 pub struct SemanticConfig {
     pub executor: SemanticEmbeddingExecutorConfig,
@@ -38,13 +32,7 @@ pub(super) fn parse_semantic_embedding_executor(
             "semantic.space_id and semantic.dimensions require semantic.executor to be an HTTP endpoint"
         ),
         (Some(endpoint), None, None) => {
-            let dimensions = SemanticEmbeddingExecutorConfig::builtin()
-                .contract()
-                .dimensions();
-            SemanticEmbeddingExecutorConfig::http(
-                endpoint,
-                ExternalSemanticSpace::new(LEGACY_EXACT_HTTP_SPACE_ID, dimensions)?,
-            )
+            SemanticEmbeddingExecutorConfig::legacy_fixed_http(endpoint)
         }
         (Some(endpoint), Some(space_id), Some(dimensions)) => {
             let dimensions = usize::try_from(dimensions)
