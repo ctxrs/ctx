@@ -46,8 +46,9 @@ use super::{
     daemon_core_refresh_job_path, daemon_job_should_backoff,
     daemon_mode_runs_core_semantic_projection, daemon_semantic_job_path, read_daemon_job_status,
     record_daemon_job_retry, record_source_refresh_retry, restore_daemon_consumer_retries,
-    run_pending_core_refresh, write_daemon_job_status, DaemonRetryBackoff, DaemonRuntime,
-    DaemonSchedulerCycleContext, DaemonSchedulerPorts, DaemonSemanticJobPorts,
+    run_daemon_semantic_job_with_retry, run_pending_core_refresh, write_daemon_job_status,
+    DaemonRetryBackoff, DaemonRuntime, DaemonSchedulerCycleContext, DaemonSchedulerPorts,
+    DaemonSemanticGeneration, DaemonSemanticJobPorts,
 };
 
 const READINESS_QUERY: &str = "readiness-boundary-regression";
@@ -350,6 +351,54 @@ fn publish_semantic_catch_up_generation(data_root: &Path, event_count: u64) -> S
     let receipt = writer.commit(|_| true).unwrap();
     assert_eq!(receipt.indexed_documents, event_count);
     receipt.generation_id
+}
+
+#[test]
+fn one_scheduler_pin_controls_worker_mutation_receipt_and_retry_accounting() {
+    let temp = tempfile::tempdir().unwrap();
+    let generation_one = publish_empty_core_generation(temp.path());
+    let pinned_one =
+        crate::source_backed_refresh_coordinator::pin_published_generation(temp.path())
+            .unwrap()
+            .expect("published G1");
+    assert_eq!(pinned_one.generation_id(), generation_one);
+
+    let generation_two = publish_semantic_catch_up_generation(temp.path(), 1);
+    assert_ne!(generation_two, generation_one);
+    assert_eq!(pinned_generation(temp.path()), generation_two);
+
+    let mut runtime = DaemonRuntime::default();
+    let contract =
+        super::semantic_index_contract(runtime.config.semantic_executor.contract()).unwrap();
+    let job = run_daemon_semantic_job_with_retry(
+        temp.path(),
+        &mut runtime,
+        None,
+        DaemonSemanticGeneration {
+            source_generation: &pinned_one,
+            contract: &contract,
+        },
+        DaemonSemanticJobPorts {
+            artifact_fetcher: &crate::test_support::ARTIFACT,
+            config: &crate::test_support::CONFIG,
+        },
+    );
+
+    assert_eq!(job["status"], "ready", "{job:#}");
+    assert_eq!(job["core_generation_id"], generation_one, "{job:#}");
+    assert_eq!(job["source_generation_ready"], true, "{job:#}");
+    assert!(runtime.semantic_executor.is_none());
+    assert_eq!(runtime.semantic_retry.consecutive_failures, 0);
+    assert!(semantic_generation_is_ready_empty(
+        &semantic_vector_path(temp.path()),
+        &generation_one,
+    )
+    .unwrap());
+    assert!(!semantic_generation_is_ready_empty(
+        &semantic_vector_path(temp.path()),
+        &generation_two,
+    )
+    .unwrap());
 }
 
 fn readiness_certificate(source: &ctx_history_core::SourceKey) -> CertifiedSource {

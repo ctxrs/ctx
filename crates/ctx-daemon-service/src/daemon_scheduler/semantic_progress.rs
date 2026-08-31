@@ -17,9 +17,8 @@ pub(super) fn bind_semantic_generation(
     {
         job["source_contract_fingerprint"] = Value::String(fingerprint);
     }
-    if let Some(core_generation_id) = generation.core_generation_id {
-        job["core_generation_id"] = Value::String(core_generation_id.to_owned());
-    }
+    job["core_generation_id"] =
+        Value::String(generation.source_generation.generation_id().to_owned());
     // Retry, resource, and deadline receipts have no semantic work of their
     // own. Carry the same-target durable sequence forward so status churn can
     // neither erase nor regress the CLI's sole progress authority.

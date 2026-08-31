@@ -239,6 +239,50 @@ fn exact_checkpoint_maps_matching_job_failure_without_preflight_authority() -> R
 }
 
 #[test]
+fn core_supersession_precedes_daemon_job_failure_observation() -> Result<()> {
+    let (_temp, pin) = test_pin()?;
+    let generation = pin.generation_id().to_owned();
+    let replacement = "replacement-generation".to_owned();
+    let now = Instant::now();
+    let mut completion = daemon_completion(&pin, SemanticCompletionBudgets::default(), now)?;
+    let preflight_called = Cell::new(false);
+    let observation_called = Cell::new(false);
+
+    let error = expect_completion_error(
+        completion.checkpoint_with(
+            now,
+            &pin,
+            || Ok(replacement.clone()),
+            |_| {
+                preflight_called.set(true);
+                Ok(false)
+            },
+            || {
+                observation_called.set(true);
+                Ok(DaemonSemanticCompletionObservation::JobFailed {
+                    detail: "stale target failure".to_owned(),
+                    retryable: false,
+                    failure_class: Some("permanent".to_owned()),
+                })
+            },
+        ),
+        "Core supersession must win over a stale daemon failure",
+    );
+
+    assert!(matches!(
+        error,
+        SemanticCompletionError::CoreSuperseded {
+            generation_id,
+            active_generation_id,
+            retryable: true,
+        } if generation_id == generation && active_generation_id == replacement
+    ));
+    assert!(!preflight_called.get());
+    assert!(!observation_called.get());
+    Ok(())
+}
+
+#[test]
 fn no_progress_budget_is_deterministic_and_progress_resets_it() -> Result<()> {
     let (_temp, pin) = test_pin()?;
     let generation = pin.generation_id().to_owned();

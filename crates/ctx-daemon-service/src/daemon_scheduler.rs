@@ -26,7 +26,7 @@ pub(super) struct DaemonSemanticJobPorts<'a> {
 
 #[derive(Clone, Copy)]
 struct DaemonSemanticGeneration<'a> {
-    core_generation_id: Option<&'a str>,
+    source_generation: &'a PinnedSourceBackedGeneration,
     contract: &'a ctx_semantic_index::SemanticModelContract,
 }
 pub(super) struct DaemonSchedulerPorts<'a, N: ?Sized> {
@@ -174,7 +174,6 @@ where
         }
     }
     if let Some(iteration) = run_pending_core_semantic_catch_up(
-        args,
         data_root,
         runtime,
         deadline,
@@ -219,7 +218,6 @@ fn deferred_pending_core_refresh(data_root: &Path, runtime: &DaemonRuntime) -> D
 }
 
 fn run_pending_core_semantic_catch_up(
-    args: &DaemonRunArgs,
     data_root: &Path,
     runtime: &mut DaemonRuntime,
     deadline: Option<Instant>,
@@ -262,12 +260,11 @@ fn run_pending_core_semantic_catch_up(
         return Ok(None);
     }
     let job = run_daemon_semantic_job_with_retry(
-        args,
         data_root,
         runtime,
         deadline,
         DaemonSemanticGeneration {
-            core_generation_id: Some(generation_id),
+            source_generation: &generation,
             contract: &semantic_contract,
         },
         semantic_ports,
@@ -711,7 +708,6 @@ pub(super) fn preserve_daemon_retry_state(job: &mut Value, backoff: &DaemonRetry
 }
 
 fn run_daemon_semantic_job_with_retry(
-    args: &DaemonRunArgs,
     data_root: &Path,
     runtime: &mut DaemonRuntime,
     deadline: Option<Instant>,
@@ -726,8 +722,8 @@ fn run_daemon_semantic_job_with_retry(
         return bind_semantic_generation(data_root, job, generation);
     }
     let job = run_daemon_semantic_job(
-        args,
         data_root,
+        generation.source_generation,
         runtime,
         deadline,
         true,
@@ -979,7 +975,9 @@ use super::{
     },
     query_service::DaemonQueryActivity,
     runtime_limits::DAEMON_MIN_REMAINING_FOR_JOB_SECS,
-    source_backed_refresh_coordinator::{pin_published_generation, CoreRefreshEngine},
+    source_backed_refresh_coordinator::{
+        pin_published_generation, CoreRefreshEngine, PinnedSourceBackedGeneration,
+    },
 };
 
 #[cfg(test)]

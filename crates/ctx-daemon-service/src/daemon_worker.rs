@@ -30,7 +30,7 @@ use super::{
         DAEMON_MIN_REMAINING_FOR_JOB_SECS, DAEMON_SEMANTIC_RESERVE_GRACE_SECS,
         SEMANTIC_MODEL_INIT_MIN_REMAINING_SECS,
     },
-    source_backed_refresh_coordinator::{pin_published_generation, PinnedSourceBackedGeneration},
+    source_backed_refresh_coordinator::PinnedSourceBackedGeneration,
 };
 
 #[cfg(test)]
@@ -192,8 +192,8 @@ where
 }
 
 pub(super) fn run_daemon_semantic_job(
-    _args: &DaemonRunArgs,
     data_root: &Path,
+    source_generation: &PinnedSourceBackedGeneration,
     runtime: &mut DaemonRuntime,
     deadline: Option<Instant>,
     semantic_enabled: bool,
@@ -216,15 +216,6 @@ pub(super) fn run_daemon_semantic_job(
         return Ok(value);
     }
 
-    let Some(source_generation) = pin_published_generation(data_root)? else {
-        return Ok(daemon_semantic_job_json(
-            "skipped",
-            Some("source_generation_missing"),
-            last_run_at_ms,
-            None,
-            None,
-        ));
-    };
     // Readiness is an exact semantic-index property. Derive the selected V2
     // contract from configuration alone, then use the ordinary WAL-aware
     // preflight before constructing an executor or touching writable state.
@@ -471,21 +462,21 @@ fn verify_external_semantic_contract_before_store_open(
 
 fn reconcile_source_backed_semantic_page(
     _data_root: &Path,
-    generation: PinnedSourceBackedGeneration,
+    generation: &PinnedSourceBackedGeneration,
     vector_store: &mut SemanticVectorStore,
     executor: &dyn SemanticEmbeddingExecutor,
     deadline: Option<Instant>,
     progress: &mut dyn FnMut(u64) -> Result<()>,
 ) -> Result<(SourceBackedSemanticOutcome, usize)> {
-    let index = generation.into_index();
-    let mut builder = SourceBackedSemanticDocumentBuilder::new(&index);
+    let index = generation.verified_index();
+    let mut builder = SourceBackedSemanticDocumentBuilder::new(index);
     let mut embedder = RuntimeSourceSemanticEmbedder {
         executor,
         deadline,
         indexed_chunks: 0,
     };
     let outcome = vector_store.reconcile_source_backed_index_with_checkpoint_and_progress(
-        &index,
+        index,
         &mut builder,
         &mut embedder,
         &mut || Ok(()),
@@ -495,14 +486,13 @@ fn reconcile_source_backed_semantic_page(
 }
 
 fn reconcile_empty_source_backed_semantic_page(
-    generation: PinnedSourceBackedGeneration,
+    generation: &PinnedSourceBackedGeneration,
     vector_store: &mut SemanticVectorStore,
 ) -> Result<(SourceBackedSemanticOutcome, usize)> {
-    let index = generation.into_index();
-    let mut builder = SourceBackedSemanticDocumentBuilder::new(&index);
+    let index = generation.verified_index();
+    let mut builder = SourceBackedSemanticDocumentBuilder::new(index);
     let mut embedder = EmptySourceSemanticEmbedder;
-    let outcome =
-        vector_store.reconcile_source_backed_index(&index, &mut builder, &mut embedder)?;
+    let outcome = vector_store.reconcile_source_backed_index(index, &mut builder, &mut embedder)?;
     Ok((outcome, 0))
 }
 

@@ -326,22 +326,14 @@ fn ready_empty_v2_generation_is_observed_without_constructing_an_executor() -> R
     )?;
     let contract = semantic_index_contract(selected.contract())?;
     acknowledge_empty_semantic_generation(&index, temp.path(), &contract)?;
+    let source_generation =
+        crate::source_backed_refresh_coordinator::pin_published_generation(temp.path())?
+            .expect("published empty Core generation");
     let mut runtime = DaemonRuntime::default();
     runtime.config.semantic_executor = selected;
-    let args = DaemonRunArgs {
-        loop_interval_seconds: None,
-        max_chunks: None,
-        handle_process_signals: false,
-        force: false,
-        profile: crate::DaemonRunProfile::Persistent,
-        start_mode: None,
-        trigger_command: None,
-        supervisor: crate::DaemonSupervisor::User,
-    };
-
     let job = run_daemon_semantic_job(
-        &args,
         temp.path(),
+        &source_generation,
         &mut runtime,
         None,
         true,
@@ -352,8 +344,8 @@ fn ready_empty_v2_generation_is_observed_without_constructing_an_executor() -> R
     assert_eq!(job["status"], "ready");
     assert!(runtime.semantic_executor.is_none());
     let acknowledged = run_daemon_semantic_job(
-        &args,
         temp.path(),
+        &source_generation,
         &mut runtime,
         None,
         true,
@@ -427,10 +419,10 @@ fn first_time_empty_v2_generation_respects_resource_deferral_before_store_or_exe
 struct FirstTimeEmptyV2DaemonCase {
     temp: tempfile::TempDir,
     generation: String,
+    source_generation: PinnedSourceBackedGeneration,
     listener: TcpListener,
     contract: ctx_semantic_index::SemanticModelContract,
     runtime: DaemonRuntime,
-    args: DaemonRunArgs,
 }
 
 impl FirstTimeEmptyV2DaemonCase {
@@ -444,6 +436,10 @@ impl FirstTimeEmptyV2DaemonCase {
             None,
         )?
         .generation_id;
+        let source_generation =
+            crate::source_backed_refresh_coordinator::pin_published_generation(temp.path())?
+                .expect("published empty Core generation");
+        assert_eq!(source_generation.generation_id(), generation);
         let listener = TcpListener::bind("127.0.0.1:0")?;
         listener.set_nonblocking(true)?;
         let endpoint = format!("http://{}", listener.local_addr()?);
@@ -457,26 +453,17 @@ impl FirstTimeEmptyV2DaemonCase {
         Ok(Self {
             temp,
             generation,
+            source_generation,
             listener,
             contract,
             runtime,
-            args: DaemonRunArgs {
-                loop_interval_seconds: None,
-                max_chunks: None,
-                handle_process_signals: false,
-                force: false,
-                profile: crate::DaemonRunProfile::Persistent,
-                start_mode: None,
-                trigger_command: None,
-                supervisor: crate::DaemonSupervisor::User,
-            },
         })
     }
 
     fn run(&mut self, deadline: Option<Instant>) -> Result<Value> {
         run_daemon_semantic_job(
-            &self.args,
             self.temp.path(),
+            &self.source_generation,
             &mut self.runtime,
             deadline,
             true,
