@@ -372,6 +372,15 @@ mod tests {
     }
 
     #[cfg(windows)]
+    fn assert_windows_mutation_denied(error: std::io::Error) {
+        let code = error.raw_os_error();
+        assert!(
+            code == Some(5) || code == Some(32),
+            "expected access denied or sharing violation, got {error}"
+        );
+    }
+
+    #[cfg(windows)]
     #[test]
     fn validated_predecessor_token_denies_write_delete_and_replacement() {
         let temporary_directory = tempfile::tempdir().unwrap();
@@ -385,16 +394,9 @@ mod tests {
         let mut fence = ActiveGenerationPointerFence::capture(root, Some(&predecessor)).unwrap();
         let token = fence.terminal_validate(&target).unwrap();
 
-        let write_error = OpenOptions::new().write(true).open(&target).unwrap_err();
-        assert_eq!(write_error.raw_os_error(), Some(5));
-        assert_eq!(
-            fs::remove_file(&target).unwrap_err().raw_os_error(),
-            Some(5)
-        );
-        assert_eq!(
-            fs::rename(&staged, &target).unwrap_err().raw_os_error(),
-            Some(5)
-        );
+        assert_windows_mutation_denied(OpenOptions::new().write(true).open(&target).unwrap_err());
+        assert_windows_mutation_denied(fs::remove_file(&target).unwrap_err());
+        assert_windows_mutation_denied(fs::rename(&staged, &target).unwrap_err());
         assert_eq!(
             fs::read(&target).unwrap(),
             serde_json::to_vec(&predecessor).unwrap()

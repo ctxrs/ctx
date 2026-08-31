@@ -67,11 +67,21 @@ pub(crate) fn install_default_mimocode_fixture(temp: &TempDir, query: &str) {
     write_mimocode_sqlite_fixture(&target.join("mimocode.db"), query, "mimocode-default");
 }
 
-pub(crate) fn install_default_kiro_fixture(temp: &TempDir, query: &str) {
+pub(crate) fn install_default_kiro_fixture(temp: &TempDir, query: &str) -> PathBuf {
     let source = PathBuf::from(write_native_kiro_fixture(temp, query));
-    let target = temp.path().join(".local/share/kiro-cli");
-    fs::create_dir_all(&target).unwrap();
-    fs::copy(source, target.join("data.sqlite3")).unwrap();
+    let target = if cfg!(target_os = "linux") {
+        temp.path().join(".local/share/kiro-cli/data.sqlite3")
+    } else if cfg!(target_os = "macos") {
+        temp.path()
+            .join("Library/Application Support/kiro-cli/data.sqlite3")
+    } else {
+        // Kiro has no released automatic legacy default on Windows. Keep an
+        // exact-path fixture for tests that explicitly exercise support.
+        temp.path().join("exact/kiro-cli/data.sqlite3")
+    };
+    fs::create_dir_all(target.parent().unwrap()).unwrap();
+    fs::copy(source, &target).unwrap();
+    target
 }
 
 pub(crate) fn install_default_astrbot_fixture(temp: &TempDir, query: &str) {

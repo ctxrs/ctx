@@ -28,10 +28,10 @@ use windows_sys::Win32::{
         CreateWellKnownSid, EqualSid, GetAce, GetLengthSid, GetSecurityDescriptorControl,
         GetTokenInformation, InitializeAcl, InitializeSecurityDescriptor, IsValidSid,
         SetSecurityDescriptorControl, SetSecurityDescriptorDacl, SetSecurityDescriptorOwner,
-        TokenUser, WinLocalSystemSid, ACCESS_ALLOWED_ACE, ACL, ACL_REVISION,
+        TokenOwner, TokenUser, WinLocalSystemSid, ACCESS_ALLOWED_ACE, ACL, ACL_REVISION,
         DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
         PSID, SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR, SE_DACL_PROTECTED, TOKEN_INFORMATION_CLASS,
-        TOKEN_QUERY, TOKEN_USER,
+        TOKEN_OWNER, TOKEN_QUERY, TOKEN_USER,
     },
     Storage::FileSystem::{
         CreateDirectoryW, CreateFileW, CREATE_NEW, FILE_ATTRIBUTE_NORMAL,
@@ -280,6 +280,7 @@ fn restrict_handle_with_identities(
     kind: ObjectKind,
     identities: &PrivateIdentities,
 ) -> io::Result<()> {
+    verify_handle_admissible_owner(handle, identities)?;
     let mut acl = private_acl(identities, kind)?;
     // SAFETY: the retained handle owns WRITE_DAC and was verified as a regular
     // object. The ACL remains live for this synchronous call. SetSecurityInfo
@@ -310,6 +311,22 @@ fn verify_handle_owner(handle: &File, expected_owner: PSID) -> io::Result<()> {
             Ok(())
         }
     })
+}
+
+fn verify_handle_admissible_owner(handle: &File, identities: &PrivateIdentities) -> io::Result<()> {
+    with_handle_owner(handle, |owner| verify_admissible_owner(owner, identities))
+}
+
+fn verify_admissible_owner(owner: PSID, identities: &PrivateIdentities) -> io::Result<()> {
+    // SAFETY: all SIDs remain backed by live security descriptors or token
+    // information buffers for these comparisons.
+    if unsafe { EqualSid(owner, identities.user_sid()) } != 0
+        || unsafe { EqualSid(owner, identities.token_owner_sid()) } != 0
+    {
+        Ok(())
+    } else {
+        Err(invalid_owner())
+    }
 }
 
 fn with_handle_owner<T>(
@@ -379,6 +396,7 @@ fn verify_handle_with_identities(
     kind: ObjectKind,
     identities: &PrivateIdentities,
 ) -> io::Result<()> {
+    let mut owner = null_mut();
     let mut dacl: *mut ACL = null_mut();
     let mut descriptor = null_mut();
     // SAFETY: all out pointers are valid and the returned descriptor is guarded.
@@ -386,8 +404,8 @@ fn verify_handle_with_identities(
         GetSecurityInfo(
             handle.as_raw_handle().cast(),
             SE_FILE_OBJECT,
-            DACL_SECURITY_INFORMATION,
-            null_mut(),
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            &raw mut owner,
             null_mut(),
             &raw mut dacl,
             null_mut(),
@@ -398,6 +416,10 @@ fn verify_handle_with_identities(
         return Err(win32_error(result));
     }
     let _descriptor = LocalAllocation(descriptor);
+    if owner.is_null() {
+        return Err(invalid_owner());
+    }
+    verify_admissible_owner(owner, identities)?;
     if dacl.is_null() {
         return Err(invalid_acl());
     }
@@ -646,6 +668,7 @@ fn sid_size(sid: PSID) -> io::Result<usize> {
 struct PrivateIdentities {
     _token: Handle,
     token_user: AlignedBuffer,
+    token_owner: AlignedBuffer,
     system: AlignedBuffer,
     user_is_system: bool,
 }
@@ -659,6 +682,7 @@ impl PrivateIdentities {
         }
         let token = Handle(token);
         let token_user = token_information(token.0, TokenUser)?;
+        let token_owner = token_information(token.0, TokenOwner)?;
         let mut system = AlignedBuffer::new(SECURITY_MAX_SID_SIZE)?;
         let mut system_size = u32::try_from(system.byte_len()).map_err(|_| invalid_acl())?;
         // SAFETY: system is aligned and has SECURITY_MAX_SID_SIZE capacity.
@@ -676,10 +700,12 @@ impl PrivateIdentities {
         let mut identities = Self {
             _token: token,
             token_user,
+            token_owner,
             system,
             user_is_system: false,
         };
         let _ = sid_size(identities.user_sid())?;
+        let _ = sid_size(identities.token_owner_sid())?;
         let _ = sid_size(identities.system_sid())?;
         // SAFETY: both SIDs are valid and backed by identities.
         identities.user_is_system =
@@ -694,6 +720,11 @@ impl PrivateIdentities {
 
     fn system_sid(&self) -> PSID {
         self.system.as_ptr().cast_mut().cast()
+    }
+
+    fn token_owner_sid(&self) -> PSID {
+        // SAFETY: token_owner contains a successful TOKEN_OWNER response.
+        unsafe { (*self.token_owner.as_ptr().cast::<TOKEN_OWNER>()).Owner }
     }
 }
 
@@ -781,7 +812,7 @@ fn invalid_acl() -> io::Error {
 fn invalid_owner() -> io::Error {
     io::Error::new(
         io::ErrorKind::PermissionDenied,
-        "private state path is not owned by the current user",
+        "private state path owner is outside the current token authority",
     )
 }
 
@@ -869,7 +900,6 @@ mod tests {
         }
 
         let error = create_private_file_new(&junction.join("redirected-child")).unwrap_err();
-
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
         assert!(error.to_string().contains("reparse point"));
         assert!(!target.join("redirected-child").exists());

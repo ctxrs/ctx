@@ -2,6 +2,8 @@ use super::*;
 use crate::{SEMANTIC_EMBEDDING_TOKEN_ENDPOINT_ENV, SEMANTIC_EMBEDDING_TOKEN_ENV};
 use std::cell::RefCell;
 
+mod owner_wait_tests;
+
 const DAEMON_ENV_PROBE_STAGE: &str = "CTX_DAEMON_ENV_PROBE_STAGE";
 const DAEMON_ENV_PRO_CHANNEL: &str = "CTX_PRO_CHANNEL";
 const DAEMON_ENV_PROBE_TEST: &str =

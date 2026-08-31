@@ -1,14 +1,9 @@
 use super::*;
 
 fn assert_token_default_owner(handle: &File, identities: &PrivateIdentities) -> io::Result<()> {
-    use windows_sys::Win32::Security::{TokenOwner, TOKEN_OWNER};
-
-    let token_owner = token_information(identities._token.0, TokenOwner)?;
-    // SAFETY: token_owner contains a successful TOKEN_OWNER response.
-    let token_owner_sid = unsafe { (*token_owner.as_ptr().cast::<TOKEN_OWNER>()).Owner };
     with_handle_owner(handle, |owner| {
         // SAFETY: all compared SIDs remain backed by live buffers.
-        assert_ne!(unsafe { EqualSid(owner, token_owner_sid) }, 0);
+        assert_ne!(unsafe { EqualSid(owner, identities.token_owner_sid()) }, 0);
         if std::env::var("CTX_TEST_WINDOWS_ELEVATED_OWNER").as_deref() == Ok("1") {
             assert_eq!(
                 unsafe { EqualSid(owner, identities.user_sid()) },
@@ -18,6 +13,45 @@ fn assert_token_default_owner(handle: &File, identities: &PrivateIdentities) -> 
         }
         Ok(())
     })
+}
+
+#[test]
+fn generic_private_objects_reject_an_owner_outside_token_authority(
+) -> Result<(), Box<dyn std::error::Error>> {
+    use windows_sys::Win32::Security::WinWorldSid;
+
+    let identities = PrivateIdentities::current()?;
+    let mut world = AlignedBuffer::new(SECURITY_MAX_SID_SIZE)?;
+    let mut world_size = u32::try_from(world.byte_len()).map_err(|_| invalid_owner())?;
+    // SAFETY: world is aligned and has SECURITY_MAX_SID_SIZE capacity.
+    if unsafe {
+        CreateWellKnownSid(
+            WinWorldSid,
+            null_mut(),
+            world.as_mut_ptr().cast(),
+            &raw mut world_size,
+        )
+    } == 0
+    {
+        return Err(last_error().into());
+    }
+    let world_sid = world.as_ptr().cast_mut().cast();
+    // SAFETY: all SIDs remain backed by live buffers.
+    assert_eq!(unsafe { EqualSid(world_sid, identities.user_sid()) }, 0);
+    // SAFETY: all SIDs remain backed by live buffers.
+    assert_eq!(
+        unsafe { EqualSid(world_sid, identities.token_owner_sid()) },
+        0
+    );
+
+    let error = verify_admissible_owner(world_sid, &identities).unwrap_err();
+
+    assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+    assert_eq!(
+        error.to_string(),
+        "private state path owner is outside the current token authority"
+    );
+    Ok(())
 }
 
 #[test]

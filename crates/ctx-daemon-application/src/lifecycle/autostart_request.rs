@@ -37,23 +37,17 @@ pub(super) fn request_daemon_autostart_with(
     {
         let executable = daemon_autostart_exe()?;
         if daemon_lock_matches_executable(data_root, &executable)? {
-            return Ok(DaemonAutostartRequest::Existing(
-                wait_for_daemon_owner_identity_with_cancellation(data_root, checkpoint)?
-                    .ok_or_else(|| {
-                        anyhow!("active ctx daemon lock has no stable owner identity")
-                    })?,
-            ));
+            if let Some(existing) = existing_daemon_request(data_root, checkpoint)? {
+                return Ok(existing);
+            }
         }
         if profile == DaemonLaunchProfile::FiniteCoreWorker {
             // A finite foreground joiner has observational authority only over
             // any existing owner, even when it was started by another binary.
             // Binary handoff and replacement remain persistent lifecycle work.
-            return Ok(DaemonAutostartRequest::Existing(
-                wait_for_daemon_owner_identity_with_cancellation(data_root, checkpoint)?
-                    .ok_or_else(|| {
-                        anyhow!("active ctx daemon lock has no stable owner identity")
-                    })?,
-            ));
+            if let Some(existing) = existing_daemon_request(data_root, checkpoint)? {
+                return Ok(existing);
+            }
         }
         if daemon_autostart_suppression_reason().is_some() {
             return Err(binary_identity_handoff_error());
@@ -65,12 +59,9 @@ pub(super) fn request_daemon_autostart_with(
             checkpoint,
         )?;
         if daemon_lock_is_active(data_root) {
-            return Ok(DaemonAutostartRequest::Existing(
-                wait_for_daemon_owner_identity_with_cancellation(data_root, checkpoint)?
-                    .ok_or_else(|| {
-                        anyhow!("active replacement ctx daemon has no stable owner identity")
-                    })?,
-            ));
+            if let Some(existing) = existing_daemon_request(data_root, checkpoint)? {
+                return Ok(existing);
+            }
         }
     }
     if let Some(reason) = daemon_autostart_suppression_reason() {
@@ -103,12 +94,9 @@ pub(super) fn request_daemon_autostart_with(
             checkpoint,
         )?;
         if daemon_lock_is_active(data_root) {
-            return Ok(DaemonAutostartRequest::Existing(
-                wait_for_daemon_owner_identity_with_cancellation(data_root, checkpoint)?
-                    .ok_or_else(|| {
-                        anyhow!("active replacement ctx daemon has no stable owner identity")
-                    })?,
-            ));
+            if let Some(existing) = existing_daemon_request(data_root, checkpoint)? {
+                return Ok(existing);
+            }
         }
     }
     let exe = match daemon_autostart_exe() {
