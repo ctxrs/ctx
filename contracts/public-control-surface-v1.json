@@ -104,6 +104,17 @@
       "environment_variable": null
     },
     {
+      "behavior": "semantic built-in throttling",
+      "config_key": "semantic.builtin_throttling",
+      "environment_variable": null,
+      "released_default": {
+        "value": true,
+        "state": "on",
+        "scope": "all_cli_installations"
+      },
+      "introduced_after": "v0.25.0"
+    },
+    {
       "behavior": "semantic embedding vector-space identity",
       "config_key": "semantic.space_id",
       "environment_variable": null

@@ -49,6 +49,7 @@ pub const CONFIG_FILE: &str = "config.toml";
 pub const AUTO_UPGRADE_DEFAULT_MODE: &str = "apply";
 pub const DAEMON_MODE_ENV: &str = "CTX_DAEMON_MODE";
 pub const LOCAL_USAGE_DEFAULT_ENABLED: bool = true;
+pub const SEMANTIC_BUILTIN_THROTTLING_DEFAULT_ENABLED: bool = true;
 pub const SEMANTIC_SEARCH_DEFAULT_ENABLED: bool = false;
 
 pub fn normalized_analytics_environment_override() -> Option<bool> {
@@ -443,6 +444,7 @@ impl AppConfig {
         let mut semantic_executor = None;
         let mut semantic_space_id = None;
         let mut semantic_dimensions = None;
+        let mut semantic_builtin_throttling = None;
         let mut provider_roots = BTreeMap::<
             String,
             (
@@ -536,6 +538,9 @@ impl AppConfig {
                 "semantic.dimensions" => {
                     semantic_dimensions = Some(parse_config_u64(key, value)?);
                 }
+                "semantic.builtin_throttling" => {
+                    semantic_builtin_throttling = Some(parse_config_bool(key, value)?);
+                }
                 "search.semantic" => {
                     self.search.semantic = Some(parse_config_bool(key, value)?);
                     self.search.semantic_source = SemanticSearchSource::Config;
@@ -556,7 +561,9 @@ impl AppConfig {
             semantic_executor.as_deref(),
             semantic_space_id.as_deref(),
             semantic_dimensions,
+            semantic_builtin_throttling,
         )?;
+        self.semantic.builtin_throttling = semantic_builtin_throttling;
         if provider_roots.len() > MAX_CONFIGURED_PROVIDER_ROOTS {
             bail!(
                 "configured provider roots exceed the maximum of {MAX_CONFIGURED_PROVIDER_ROOTS}"

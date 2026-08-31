@@ -58,7 +58,12 @@ impl ImportSemanticCompletion {
         {
             return Self::Daemon {
                 executor,
-                daemon: ctx_daemon_cli::SemanticCompletionDaemonConfig::new(true, "full", true),
+                daemon: ctx_daemon_cli::SemanticCompletionDaemonConfig::new(
+                    true,
+                    "full",
+                    true,
+                    config.semantic_builtin_throttling_configured(),
+                ),
             };
         }
 
@@ -316,6 +321,10 @@ fn daemon_cli_config_with_automatic_upgrade_eligibility(
         config.semantic_search_source(),
     )
     .with_semantic_embedding_executor(config.semantic_embedding_executor().clone())
+    .with_semantic_builtin_throttling(
+        config.semantic_builtin_throttling_configured(),
+        config.semantic_builtin_throttling_source(),
+    )
     .with_automatic_provider_discovery(config.automatic_source_discovery_enabled())
     .with_provider_roots(config.provider_root_definitions())
 }
@@ -331,6 +340,8 @@ fn owned_daemon_cli_config(config: ctx_app_config::AppConfig) -> DaemonRuntimeCo
     };
     let semantic_enabled = config.semantic_search_enabled();
     let semantic_source = config.semantic_search_source();
+    let semantic_builtin_throttling_configured = config.semantic_builtin_throttling_configured();
+    let semantic_builtin_throttling_source = config.semantic_builtin_throttling_source();
     let semantic_executor = config.semantic_embedding_executor().clone();
     let automatic_provider_discovery = config.automatic_source_discovery_enabled();
     let provider_roots = config.provider_root_definitions();
@@ -347,6 +358,10 @@ fn owned_daemon_cli_config(config: ctx_app_config::AppConfig) -> DaemonRuntimeCo
         semantic_source,
     )
     .with_semantic_embedding_executor(semantic_executor)
+    .with_semantic_builtin_throttling(
+        semantic_builtin_throttling_configured,
+        semantic_builtin_throttling_source,
+    )
     .with_automatic_provider_discovery(automatic_provider_discovery)
     .with_provider_roots(provider_roots)
 }

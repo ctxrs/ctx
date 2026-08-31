@@ -35,6 +35,8 @@ fn application_config(
             .unwrap_or("builtin")
             .to_owned(),
         semantic_contract_fingerprint: config.semantic_model_contract().fingerprint().to_owned(),
+        semantic_builtin_throttling_configured: config.semantic_builtin_throttling_configured(),
+        semantic_builtin_throttling_effective: config.semantic_builtin_throttling_effective(),
     }
 }
 

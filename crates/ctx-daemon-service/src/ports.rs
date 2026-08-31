@@ -95,14 +95,29 @@ pub enum DaemonSupervisor {
     CliAutostart,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct DaemonConfigSnapshot {
     pub daemon: DaemonProductConfig,
     pub semantic_enabled: bool,
     pub semantic_executor: SemanticEmbeddingExecutorConfig,
+    pub semantic_builtin_throttling_configured: bool,
     pub automatic_upgrade_enabled: bool,
     pub automatic_upgrade_interval: Duration,
     pub upgrade_channel: String,
+}
+
+impl Default for DaemonConfigSnapshot {
+    fn default() -> Self {
+        Self {
+            daemon: DaemonProductConfig::default(),
+            semantic_enabled: false,
+            semantic_executor: SemanticEmbeddingExecutorConfig::default(),
+            semantic_builtin_throttling_configured: true,
+            automatic_upgrade_enabled: false,
+            automatic_upgrade_interval: Duration::default(),
+            upgrade_channel: String::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -114,6 +129,10 @@ pub struct DaemonProductConfig {
 impl DaemonConfigSnapshot {
     pub const fn semantic_search_enabled(&self) -> bool {
         self.semantic_enabled
+    }
+
+    pub const fn semantic_builtin_throttling_effective(&self) -> Option<bool> {
+        self.semantic_executor.builtin_throttling()
     }
 }
 
@@ -438,6 +457,7 @@ mod tests {
             },
             semantic_enabled: true,
             semantic_executor: Default::default(),
+            semantic_builtin_throttling_configured: true,
             automatic_upgrade_enabled: true,
             automatic_upgrade_interval: Duration::from_secs(3_600),
             upgrade_channel: "stable".to_owned(),

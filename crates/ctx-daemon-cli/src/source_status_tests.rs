@@ -314,10 +314,43 @@ fn semantic_status_reports_ready_only_with_exact_projected_and_filtered_counts()
     let status = source_epoch_status_report(&data_root, &config).unwrap();
     let semantic = &status.report["semantic"];
     assert_eq!(semantic["status"], "ready");
+    assert_eq!(
+        semantic["builtin_throttling"],
+        serde_json::json!({
+            "configured": true,
+            "effective": true,
+            "config_source": "default",
+        })
+    );
     assert_eq!(semantic["flat_f32"]["semantic_documents"], 3);
     assert_eq!(semantic["flat_f32"]["projected_documents"], 1);
     assert_eq!(semantic["flat_f32"]["filtered_documents"], 2);
     assert_eq!(semantic["flat_f32"]["active_events"], 1);
+}
+
+#[test]
+fn status_reports_external_executor_throttling_as_not_applicable_with_null_effective_value() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    fs::create_dir_all(&data_root).unwrap();
+    fs::write(
+        data_root.join(ctx_app_config::CONFIG_FILE),
+        "[semantic]\nexecutor = \"https://embed.example.test\"\n",
+    )
+    .unwrap();
+
+    let config = crate::composition::load_runtime_config(&data_root).unwrap();
+    let status = source_epoch_status_report(&data_root, &config).unwrap();
+
+    assert_eq!(
+        status.report["semantic"]["builtin_throttling"],
+        serde_json::json!({
+            "configured": true,
+            "effective": null,
+            "config_source": "default",
+            "reason": "external_executor",
+        })
+    );
 }
 
 #[test]

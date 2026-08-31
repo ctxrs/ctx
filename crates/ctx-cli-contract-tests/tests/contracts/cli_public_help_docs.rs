@@ -657,6 +657,22 @@ fn machine_readable_output_uses_format_without_a_json_alias() {
 }
 
 #[test]
+fn builtin_throttling_remains_config_only_without_new_semantic_flags() {
+    let temp = tempdir();
+    for args in [
+        &["semantic", "enable", "--help"][..],
+        &["semantic", "status", "--help"],
+        &["semantic", "disable", "--help"],
+    ] {
+        let output = ctx(&temp).args(args).output().unwrap();
+        assert!(output.status.success(), "{args:?}: {:?}", output.stderr);
+        let help = String::from_utf8(output.stdout).unwrap();
+        assert!(!help.contains("builtin-throttling"), "{help}");
+        assert!(!help.contains("builtin_throttling"), "{help}");
+    }
+}
+
+#[test]
 fn indexing_mode_and_daemon_run_help_expose_the_public_controls() {
     let temp = tempdir();
     for (args, required) in [

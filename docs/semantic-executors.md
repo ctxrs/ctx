@@ -57,6 +57,37 @@ identity, ctx stops semantic indexing and querying until the user reruns
 deletes and rebuilds only the derived semantic index. Imported history and the
 lexical index remain intact.
 
+## Built-in indexing throttling
+
+The built-in executor deliberately paces semantic document indexing by
+default. `builtin_throttling` defaults to `true` when it is absent. To disable
+that pacing for one data root, edit `config.toml`:
+
+```toml
+[semantic]
+builtin_throttling = false
+```
+
+This is a built-in-only configuration setting, not a semantic enablement or
+executor-selection control. `ctx semantic enable` and
+`ctx semantic enable --executor builtin|URL` retain their existing behavior;
+there is no corresponding CLI throttling flag. A config file that explicitly
+selects an HTTP executor and also sets `builtin_throttling` is invalid and is
+rejected instead of silently ignoring the setting.
+
+With throttling disabled, built-in document indexing adds no deliberate delay
+between inference batches. It uses batches of up to 512 inputs and up to eight
+threads, never exceeding the process's available parallelism. This does not
+make semantic work unbounded: existing work admission, model and runtime
+integrity checks, cancellation boundaries, source-page atomicity, and hard
+resource, input, and platform limits still apply. The built-in model and vector
+contract remain pinned to `intfloat/multilingual-e5-small`; the setting does not
+select another model or affect HTTP executor behavior.
+
+`ctx semantic status` reports the configured and effective built-in throttling
+values in human output and JSON, including the default when the key is absent.
+The effective value is not applicable for an HTTP executor.
+
 ## Passive manual-mode queries
 
 With automatic indexing disabled, direct CLI searches using `--refresh off` or

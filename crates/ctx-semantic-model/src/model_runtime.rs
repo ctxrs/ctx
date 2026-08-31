@@ -22,8 +22,8 @@ use super::{
         SEMANTIC_REQUIRED_MODEL_FILES,
     },
     resource_policy::{
-        semantic_quiet_policy, throttle_semantic_batch, SemanticComputeClass, SemanticQuietPolicy,
-        SemanticSystemResources,
+        semantic_builtin_policy, throttle_semantic_batch, SemanticComputeClass,
+        SemanticQuietPolicy, SemanticSystemResources,
     },
 };
 
@@ -629,10 +629,11 @@ impl SemanticEmbedder {
         }
     }
 
-    pub(super) fn quiet_policy(&self) -> SemanticQuietPolicy {
-        semantic_quiet_policy(
+    pub(super) fn quiet_policy(&self, throttling: bool) -> SemanticQuietPolicy {
+        semantic_builtin_policy(
             SemanticSystemResources::current(),
             self.backend.compute_class(),
+            throttling,
         )
     }
 }

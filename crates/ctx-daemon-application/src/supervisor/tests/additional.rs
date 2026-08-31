@@ -20,6 +20,8 @@ fn supervisor_reinstalls_rotated_scrubbed_and_reenabled_semantic_credentials() -
         semantic_enabled: true,
         semantic_executor: endpoint.to_owned(),
         semantic_contract_fingerprint: "sha256:external-space-a".to_owned(),
+        semantic_builtin_throttling_configured: true,
+        semantic_builtin_throttling_effective: None,
     };
 
     env::set_var(SEMANTIC_EMBEDDING_TOKEN_ENV, "token-a");
@@ -92,6 +94,8 @@ fn supervisor_reinstalls_rotated_scrubbed_and_reenabled_semantic_credentials() -
     let builtin_config = crate::DaemonConfigSnapshot {
         semantic_executor: "builtin".to_owned(),
         semantic_contract_fingerprint: "sha256:builtin-space".to_owned(),
+        semantic_builtin_throttling_configured: true,
+        semantic_builtin_throttling_effective: Some(true),
         ..enabled_http.clone()
     };
     let builtin_environment = configured_supervisor_environment_for_config(

@@ -25,6 +25,7 @@ pub struct SemanticCompletionDaemonConfig {
     daemon_enabled: bool,
     daemon_mode: String,
     semantic_enabled: bool,
+    semantic_builtin_throttling_configured: bool,
 }
 
 impl SemanticCompletionDaemonConfig {
@@ -32,11 +33,13 @@ impl SemanticCompletionDaemonConfig {
         daemon_enabled: bool,
         daemon_mode: impl Into<String>,
         semantic_enabled: bool,
+        semantic_builtin_throttling_configured: bool,
     ) -> Self {
         Self {
             daemon_enabled,
             daemon_mode: daemon_mode.into(),
             semantic_enabled,
+            semantic_builtin_throttling_configured,
         }
     }
 }
@@ -470,6 +473,8 @@ impl SelectedSemanticCompletion {
                 daemon.semantic_enabled,
                 self.executor_selector.clone(),
                 self.executor.contract().fingerprint(),
+                daemon.semantic_builtin_throttling_configured,
+                self.executor.builtin_throttling(),
             ),
         )
     }

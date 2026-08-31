@@ -622,6 +622,20 @@ semantic = true
 ```
 
 The built-in executor is also the default and is omitted from `config.toml`.
+Its semantic document-index throttling likewise defaults to enabled and can be
+omitted. The built-in-only opt-out is:
+
+```toml
+[semantic]
+builtin_throttling = false
+```
+
+This setting does not enable semantic search or select an executor. A config
+file that explicitly selects an HTTP executor and also contains
+`builtin_throttling` is invalid. `ctx semantic enable` and its existing
+`--executor builtin|URL` option retain their lifecycle and selection behavior.
+Human and JSON semantic status report configured and effective throttling.
+
 Prefer `ctx semantic enable --executor URL`, which tries V2 first and writes
 the complete V2 identity below. Fixed-E5 V1 is considered only when the V2
 contract route returns 404 and remains endpoint-only. Selecting `--executor

@@ -33,6 +33,7 @@ RELEASED_DEFAULT_SCOPES = {
     "upgrade.auto": "official_installer_managed",
     "indexing.mode": "all_cli_installations",
     "search.semantic": "all_cli_installations",
+    "semantic.builtin_throttling": "all_cli_installations",
     "sources.automatic": "all_cli_installations",
 }
 PINNED_STABLE_SNAPSHOTS = {
@@ -140,6 +141,10 @@ def extract_empty_config_defaults(config_source: str) -> dict[str, object]:
         ),
         "search.semantic": scalar_value(semantic.group(1), constants),
     }
+    if "SEMANTIC_BUILTIN_THROTTLING_DEFAULT_ENABLED" in constants:
+        defaults["semantic.builtin_throttling"] = constants[
+            "SEMANTIC_BUILTIN_THROTTLING_DEFAULT_ENABLED"
+        ]
     if "SourcesConfig" in default_source:
         defaults["sources.automatic"] = default_field(
             r"sources:\s*SourcesConfig\s*\{.*?automatic:\s*([^,}\n]+)",

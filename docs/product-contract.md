@@ -86,7 +86,14 @@ ctx-created document chunks documented below.
   credential-free, read-only, and network-free; disablement retains downloaded
   assets. Lexical search remains available while embeddings build, and hybrid
   search may preserve it with explicit diagnostics when semantic execution
-  fails.
+  fails. Built-in semantic document indexing is throttled by default. The
+  built-in-only `[semantic] builtin_throttling = false` config opt-out removes
+  deliberate inter-batch pacing and uses the safely supported built-in thread
+  and batch maxima without changing enablement, executor selection, the pinned
+  E5 model, work admission, integrity validation, cancellation, atomic
+  publication, or hard limits. Combining the key with an explicitly configured
+  HTTP executor is invalid. Status reports both configured and effective
+  throttling.
 - `ctx stats` reports bounded local usage/value aggregates from the separate
   owner-private `usage.sqlite` sidecar. This default-on product state is
   independent of remote event reporting, has no network path or identity, keeps

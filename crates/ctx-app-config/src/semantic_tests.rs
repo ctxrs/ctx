@@ -56,6 +56,69 @@ fn executor_defaults_to_builtin_and_parses_external_endpoint() {
 }
 
 #[test]
+fn builtin_throttling_defaults_enabled_and_tracks_configured_and_effective_state() {
+    let default = AppConfig::default();
+    assert!(default.semantic_builtin_throttling_configured());
+    assert_eq!(default.semantic_builtin_throttling_effective(), Some(true));
+    assert_eq!(default.semantic_builtin_throttling_source(), "default");
+    assert_eq!(default.semantic_builtin_throttling_reason(), None);
+
+    let temp = tempfile::tempdir().unwrap();
+    fs::write(
+        temp.path().join(CONFIG_FILE),
+        "[semantic]\nbuiltin_throttling = false\n",
+    )
+    .unwrap();
+    let disabled = AppConfig::load(temp.path()).unwrap();
+    assert!(!disabled.semantic_builtin_throttling_configured());
+    assert_eq!(
+        disabled.semantic_builtin_throttling_effective(),
+        Some(false)
+    );
+    assert_eq!(disabled.semantic_builtin_throttling_source(), "config");
+    assert_eq!(disabled.semantic_builtin_throttling_reason(), None);
+    assert_eq!(
+        disabled.semantic_embedding_executor().builtin_throttling(),
+        Some(false)
+    );
+
+    fs::write(
+        temp.path().join(CONFIG_FILE),
+        "[semantic]\nexecutor = \"https://embed.example.test\"\n",
+    )
+    .unwrap();
+    let external = AppConfig::load(temp.path()).unwrap();
+    assert!(external.semantic_builtin_throttling_configured());
+    assert_eq!(external.semantic_builtin_throttling_effective(), None);
+    assert_eq!(external.semantic_builtin_throttling_source(), "default");
+    assert_eq!(
+        external.semantic_builtin_throttling_reason(),
+        Some("external_executor")
+    );
+}
+
+#[test]
+fn explicit_builtin_throttling_is_rejected_with_every_http_executor_shape() {
+    for enabled in [true, false] {
+        for executor in [
+            "executor = \"https://embed.example.test\"\n".to_owned(),
+            "executor = \"https://embed.example.test\"\nspace_id = \"space-v1\"\ndimensions = 384\n"
+                .to_owned(),
+        ] {
+            let error = load_config_error(&format!(
+                "[semantic]\n{executor}builtin_throttling = {enabled}\n"
+            ));
+            assert!(
+                error.contains(
+                    "semantic.builtin_throttling is only valid with the builtin semantic executor"
+                ),
+                "{error}"
+            );
+        }
+    }
+}
+
+#[test]
 fn executor_config_rejects_the_retired_endpoint_key_and_unsafe_urls() {
     for (contents, expected) in [
         (
@@ -200,6 +263,37 @@ fn explicit_discovery_replaces_legacy_endpoint_only_selection_atomically() {
     assert!(persisted.contains("space_id = \"operator/model-v2\""));
     assert!(persisted.contains("dimensions = 512"));
     assert!(!persisted.contains("old.example.test"));
+}
+
+#[test]
+fn executor_selection_preserves_builtin_throttling_for_builtin_and_removes_it_for_http() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join(CONFIG_FILE);
+    fs::write(
+        &path,
+        "# retained\n[search]\nsemantic = false\n[semantic]\nbuiltin_throttling = false\n",
+    )
+    .unwrap();
+
+    set_semantic_search_enabled_with_executor(
+        temp.path(),
+        &ctx_semantic_model::SemanticEmbeddingExecutorConfig::builtin(),
+    )
+    .unwrap();
+    let builtin_text = fs::read_to_string(&path).unwrap();
+    assert!(builtin_text.contains("builtin_throttling = false"));
+    let builtin = AppConfig::load(temp.path()).unwrap();
+    assert_eq!(builtin.semantic_builtin_throttling_effective(), Some(false));
+
+    let external = external_executor("https://embed.example.test", "space-v1", 384);
+    set_semantic_search_enabled_with_executor(temp.path(), &external).unwrap();
+    let external_text = fs::read_to_string(&path).unwrap();
+    assert!(external_text.contains("# retained"));
+    assert!(!external_text.contains("builtin_throttling"));
+    let external = AppConfig::load(temp.path()).unwrap();
+    assert!(external.semantic_builtin_throttling_configured());
+    assert_eq!(external.semantic_builtin_throttling_effective(), None);
+    assert_eq!(external.semantic_builtin_throttling_source(), "default");
 }
 
 #[test]

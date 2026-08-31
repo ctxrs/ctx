@@ -53,6 +53,8 @@ pub struct DaemonRuntimeConfig {
     semantic_enabled: bool,
     semantic_source: &'static str,
     semantic_executor: SemanticEmbeddingExecutorConfig,
+    semantic_builtin_throttling_configured: bool,
+    semantic_builtin_throttling_source: &'static str,
     automatic_provider_discovery: bool,
     provider_roots: Vec<ctx_history_capture::ProviderRootDefinition>,
 }
@@ -80,6 +82,8 @@ impl DaemonRuntimeConfig {
             semantic_enabled,
             semantic_source,
             semantic_executor: SemanticEmbeddingExecutorConfig::builtin(),
+            semantic_builtin_throttling_configured: true,
+            semantic_builtin_throttling_source: "default",
             automatic_provider_discovery: true,
             provider_roots: Vec::new(),
         }
@@ -103,6 +107,16 @@ impl DaemonRuntimeConfig {
         executor: SemanticEmbeddingExecutorConfig,
     ) -> Self {
         self.semantic_executor = executor;
+        self
+    }
+
+    pub fn with_semantic_builtin_throttling(
+        mut self,
+        configured: bool,
+        source: &'static str,
+    ) -> Self {
+        self.semantic_builtin_throttling_configured = configured;
+        self.semantic_builtin_throttling_source = source;
         self
     }
 
@@ -132,6 +146,26 @@ impl DaemonRuntimeConfig {
 
     pub fn semantic_embedding_executor(&self) -> &SemanticEmbeddingExecutorConfig {
         &self.semantic_executor
+    }
+
+    pub const fn semantic_builtin_throttling_configured(&self) -> bool {
+        self.semantic_builtin_throttling_configured
+    }
+
+    pub const fn semantic_builtin_throttling_effective(&self) -> Option<bool> {
+        self.semantic_executor.builtin_throttling()
+    }
+
+    pub const fn semantic_builtin_throttling_source(&self) -> &'static str {
+        self.semantic_builtin_throttling_source
+    }
+
+    pub const fn semantic_builtin_throttling_reason(&self) -> Option<&'static str> {
+        if self.semantic_builtin_throttling_effective().is_none() {
+            Some("external_executor")
+        } else {
+            None
+        }
     }
 
     pub fn semantic_model_contract(&self) -> &SemanticModelContract {
@@ -230,6 +264,9 @@ impl DaemonCliHost for TestHost {
         };
         let semantic_enabled = config.semantic_search_enabled();
         let semantic_source = config.semantic_search_source();
+        let semantic_builtin_throttling_configured =
+            config.semantic_builtin_throttling_configured();
+        let semantic_builtin_throttling_source = config.semantic_builtin_throttling_source();
         let semantic_executor = config.semantic_embedding_executor().clone();
         let automatic_provider_discovery = config.automatic_source_discovery_enabled();
         let provider_roots = config.provider_root_definitions();
@@ -246,6 +283,10 @@ impl DaemonCliHost for TestHost {
             semantic_source,
         )
         .with_semantic_embedding_executor(semantic_executor)
+        .with_semantic_builtin_throttling(
+            semantic_builtin_throttling_configured,
+            semantic_builtin_throttling_source,
+        )
         .with_automatic_provider_discovery(automatic_provider_discovery)
         .with_provider_roots(provider_roots))
     }

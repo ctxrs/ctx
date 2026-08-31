@@ -103,6 +103,8 @@ pub struct DaemonConfigSnapshot {
     pub semantic_executor: String,
     /// Redaction-safe exact fingerprint of the selected semantic vector-space contract.
     pub semantic_contract_fingerprint: String,
+    pub semantic_builtin_throttling_configured: bool,
+    pub semantic_builtin_throttling_effective: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -427,6 +429,8 @@ impl DaemonApplicationHost for TestHost {
             semantic_enabled: true,
             semantic_executor: "builtin".to_owned(),
             semantic_contract_fingerprint: "sha256:test-builtin-contract".to_owned(),
+            semantic_builtin_throttling_configured: true,
+            semantic_builtin_throttling_effective: Some(true),
         })
     }
 

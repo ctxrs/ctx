@@ -1076,3 +1076,54 @@ fn daemon_lifecycle_receipt_preserves_service_trigger_metadata() -> anyhow::Resu
     assert_eq!(status["started_at_ms"], 123);
     Ok(())
 }
+
+#[test]
+fn daemon_lifecycle_receipt_preserves_not_applicable_builtin_throttling() -> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let args = DaemonRunArgs {
+        loop_interval_seconds: None,
+        max_chunks: None,
+        handle_process_signals: false,
+        force: false,
+        profile: crate::DaemonRunProfile::Persistent,
+        start_mode: Some(crate::DaemonStartMode::Auto),
+        trigger_command: Some(crate::DaemonTrigger::Search),
+        supervisor: crate::DaemonSupervisor::User,
+    };
+    let reload = json!({
+        "status": "activation_failed",
+        "requested": {
+            "semantic_builtin_throttling_configured": true,
+            "semantic_builtin_throttling_effective": null,
+        },
+        "applied": {
+            "semantic_builtin_throttling_configured": null,
+            "semantic_builtin_throttling_effective": null,
+        },
+    });
+
+    write_daemon_lifecycle_status_with_runtime(
+        temp.path(),
+        &args,
+        "running",
+        123,
+        None,
+        None,
+        false,
+        &reload,
+    )?;
+
+    let status = crate::paths_status::read_daemon_status(temp.path()).expect("daemon status");
+    assert_eq!(
+        status["config_reload"]["requested"]["semantic_builtin_throttling_effective"],
+        Value::Null
+    );
+    assert_eq!(
+        status["config_reload"]["applied"]["semantic_builtin_throttling_effective"],
+        Value::Null
+    );
+    assert!(status["config_reload"]["applied"]
+        .get("semantic_builtin_throttling_configured")
+        .is_none());
+    Ok(())
+}

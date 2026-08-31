@@ -201,6 +201,7 @@ pub fn set_semantic_search_enabled_with_executor(
                 .get_mut("semantic")
                 .and_then(toml_edit::Item::as_table_mut)
                 .ok_or_else(|| anyhow::anyhow!("semantic configuration must be a table"))?;
+            semantic.remove("builtin_throttling");
             semantic.insert("executor", toml_edit::value(endpoint));
             semantic.insert("space_id", toml_edit::value(space.space_id()));
             semantic.insert(
@@ -221,6 +222,7 @@ pub fn set_semantic_search_enabled_with_executor(
                 .get_mut("semantic")
                 .and_then(toml_edit::Item::as_table_mut)
                 .ok_or_else(|| anyhow::anyhow!("semantic configuration must be a table"))?;
+            semantic.remove("builtin_throttling");
             semantic.insert("executor", toml_edit::value(endpoint));
             semantic.remove("space_id");
             semantic.remove("dimensions");

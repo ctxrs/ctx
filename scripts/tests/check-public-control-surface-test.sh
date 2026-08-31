@@ -42,12 +42,12 @@ cp "${repo_root}/scripts/test-windows-legacy-daemon-takeover.ps1" "${fixture}/sc
 cp "${repo_root}/docs/storage.md" "${fixture}/docs/"
 
 python3 "${checker}" "${fixture}" > "${tmp}/pass.out"
-grep -Fq '6 empty-config released defaults' "${tmp}/pass.out"
+grep -Fq '7 empty-config released defaults' "${tmp}/pass.out"
 
 mkdir "${tmp}/no-git-bin"
 ln -s "$(command -v python3)" "${tmp}/no-git-bin/python3"
 PATH="${tmp}/no-git-bin" python3 "${checker}" "${fixture}" > "${tmp}/no-git.out"
-grep -Fq '6 empty-config released defaults' "${tmp}/no-git.out"
+grep -Fq '7 empty-config released defaults' "${tmp}/no-git.out"
 
 expect_fail() {
   local name="$1"
@@ -114,6 +114,12 @@ PY
 
 change_runtime_default() {
   sed -i 's/AUTO_UPGRADE_DEFAULT_MODE: &str = "apply"/AUTO_UPGRADE_DEFAULT_MODE: \&str = "off"/' \
+    "$1/crates/ctx-app-config/src/lib.rs"
+}
+
+change_builtin_throttling_runtime_default() {
+  sed -i \
+    's/SEMANTIC_BUILTIN_THROTTLING_DEFAULT_ENABLED: bool = true/SEMANTIC_BUILTIN_THROTTLING_DEFAULT_ENABLED: bool = false/' \
     "$1/crates/ctx-app-config/src/lib.rs"
 }
 
@@ -195,6 +201,9 @@ expect_fail unscoped-evidence \
 expect_fail runtime-default \
   'automatic upgrade mode released default differs from empty-config runtime' \
   change_runtime_default
+expect_fail builtin-throttling-runtime-default \
+  'semantic built-in throttling released default differs from empty-config runtime' \
+  change_builtin_throttling_runtime_default
 expect_fail rewritten-history \
   'analytics delivery previous stable default differs from v0.25.0' \
   rewrite_history_to_hide_a_regression

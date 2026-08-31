@@ -149,6 +149,8 @@ fn test_config() -> DaemonConfigSnapshot {
         semantic_enabled: true,
         semantic_executor: "https://embeddings.example.test/v1/".to_owned(),
         semantic_contract_fingerprint: "sha256:external-space-a".to_owned(),
+        semantic_builtin_throttling_configured: true,
+        semantic_builtin_throttling_effective: None,
     }
 }
 
@@ -619,6 +621,8 @@ fn running_status(
                 "semantic_enabled": expected.semantic_enabled,
                 "semantic_executor": expected.semantic_executor.as_str(),
                 "semantic_contract_fingerprint": expected.semantic_contract_fingerprint.as_str(),
+                "semantic_builtin_throttling_configured": expected.semantic_builtin_throttling_configured,
+                "semantic_builtin_throttling_effective": expected.semantic_builtin_throttling_effective,
             },
         },
     })
@@ -731,6 +735,8 @@ fn core_readiness_accepts_semantic_activation_failure_but_full_readiness_does_no
                 "semantic_enabled": full.semantic_enabled,
                 "semantic_executor": full.semantic_executor,
                 "semantic_contract_fingerprint": full.semantic_contract_fingerprint,
+                "semantic_builtin_throttling_configured": full.semantic_builtin_throttling_configured,
+                "semantic_builtin_throttling_effective": full.semantic_builtin_throttling_effective,
             },
             "applied": {
                 "daemon_enabled": full.enabled,
@@ -805,6 +811,8 @@ fn core_readiness_rejects_malformed_semantic_activation_failure_receipts() {
                 "semantic_enabled": expected.semantic_enabled,
                 "semantic_executor": expected.semantic_executor,
                 "semantic_contract_fingerprint": expected.semantic_contract_fingerprint,
+                "semantic_builtin_throttling_configured": expected.semantic_builtin_throttling_configured,
+                "semantic_builtin_throttling_effective": expected.semantic_builtin_throttling_effective,
             },
             "applied": {
                 "daemon_enabled": expected.enabled,
@@ -954,6 +962,8 @@ fn status_owner_start_time_and_exact_config_including_semantic_contract_are_requ
             "semantic_contract_fingerprint",
             json!("sha256:different-space-at-the-same-endpoint"),
         ),
+        ("semantic_builtin_throttling_configured", json!(false)),
+        ("semantic_builtin_throttling_effective", json!(true)),
     ] {
         let mut wrong_config = status.clone();
         wrong_config["config_reload"]["applied"][field] = value;
@@ -965,12 +975,18 @@ fn status_owner_start_time_and_exact_config_including_semantic_contract_are_requ
         .expect("applied config must be an object")
         .remove("semantic_executor");
     invalid_statuses.push(missing_executor);
-    let mut missing_contract = status.clone();
-    missing_contract["config_reload"]["applied"]
-        .as_object_mut()
-        .expect("applied config must be an object")
-        .remove("semantic_contract_fingerprint");
-    invalid_statuses.push(missing_contract);
+    for field in [
+        "semantic_contract_fingerprint",
+        "semantic_builtin_throttling_configured",
+        "semantic_builtin_throttling_effective",
+    ] {
+        let mut missing = status.clone();
+        missing["config_reload"]["applied"]
+            .as_object_mut()
+            .expect("applied config must be an object")
+            .remove(field);
+        invalid_statuses.push(missing);
+    }
 
     for invalid in invalid_statuses {
         let observation = daemon_handoff_status_observation_from(
