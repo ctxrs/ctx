@@ -482,9 +482,6 @@ where
                 ports.installation,
                 !finite_core_worker,
             )?;
-        if lifecycle_ready {
-            ctx_daemon_runtime::block_daemon_main_after_ready_for_test(data_root)?;
-        }
         // The ready persistent daemon is the automatic-check driver; foreground commands never are.
         if lifecycle_ready
             && !finite_core_worker
@@ -637,9 +634,6 @@ where
             let source_refresh = refresh_service
                 .as_ref()
                 .and(daemon_scheduler_source_refresh(&source_refresh_coordinator));
-            if source_refresh.is_some_and(CoreRefreshEngine::has_pending_request) {
-                ctx_daemon_runtime::block_daemon_main_after_ready_for_test(data_root)?;
-            }
             if finite_core_worker_exit.as_mut().is_some_and(|exit| {
                 exit.begin_stopping(
                     source_refresh,
@@ -650,6 +644,7 @@ where
             }) {
                 break;
             }
+            ctx_daemon_runtime::block_daemon_main_after_ready_for_test(data_root)?;
             let mut iteration = run_daemon_scheduler_cycle_with_activity(
                 &args,
                 data_root,

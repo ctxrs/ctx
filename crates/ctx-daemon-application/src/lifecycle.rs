@@ -100,6 +100,13 @@ struct DaemonOwnerIdentity {
     started_at_ms: i64,
     binary_sha256: String,
 }
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DaemonOwnerWaitOutcome {
+    Owner(DaemonOwnerIdentity),
+    Released,
+    StillActiveWithoutStableOwner,
+}
+
 enum DaemonAutostartRequest {
     Suppressed(&'static str),
     Existing(DaemonOwnerIdentity),
@@ -248,6 +255,46 @@ fn wait_for_daemon_owner_identity_with_cancellation(
         std::thread::sleep(DAEMON_UPGRADE_POLL_INTERVAL);
         checkpoint()?;
     }
+}
+
+fn classify_daemon_owner_wait_with(
+    wait_for_owner: impl FnOnce() -> Result<Option<DaemonOwnerIdentity>>,
+    lock_is_active: impl FnOnce() -> bool,
+) -> Result<DaemonOwnerWaitOutcome> {
+    Ok(match wait_for_owner()? {
+        Some(owner) => DaemonOwnerWaitOutcome::Owner(owner),
+        None if lock_is_active() => DaemonOwnerWaitOutcome::StillActiveWithoutStableOwner,
+        None => DaemonOwnerWaitOutcome::Released,
+    })
+}
+
+fn classify_daemon_owner_wait(
+    data_root: &Path,
+    checkpoint: &mut dyn FnMut() -> Result<()>,
+) -> Result<DaemonOwnerWaitOutcome> {
+    classify_daemon_owner_wait_with(
+        || wait_for_daemon_owner_identity_with_cancellation(data_root, checkpoint),
+        || daemon_lock_is_active(data_root),
+    )
+}
+
+fn existing_daemon_request_after_owner_wait(
+    outcome: DaemonOwnerWaitOutcome,
+) -> Result<Option<DaemonAutostartRequest>> {
+    match outcome {
+        DaemonOwnerWaitOutcome::Owner(owner) => Ok(Some(DaemonAutostartRequest::Existing(owner))),
+        DaemonOwnerWaitOutcome::Released => Ok(None),
+        DaemonOwnerWaitOutcome::StillActiveWithoutStableOwner => {
+            Err(ActiveDaemonOwnerIdentityError.into())
+        }
+    }
+}
+
+fn existing_daemon_request(
+    data_root: &Path,
+    checkpoint: &mut dyn FnMut() -> Result<()>,
+) -> Result<Option<DaemonAutostartRequest>> {
+    existing_daemon_request_after_owner_wait(classify_daemon_owner_wait(data_root, checkpoint)?)
 }
 
 fn recover_unusable_daemon_owner(
@@ -756,6 +803,17 @@ impl fmt::Display for BinaryIdentityHandoffError {
 }
 
 impl std::error::Error for BinaryIdentityHandoffError {}
+
+#[derive(Debug)]
+struct ActiveDaemonOwnerIdentityError;
+
+impl fmt::Display for ActiveDaemonOwnerIdentityError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("active ctx daemon lock has no stable owner identity")
+    }
+}
+
+impl std::error::Error for ActiveDaemonOwnerIdentityError {}
 
 fn daemon_handoff_observation(
     host: &dyn DaemonApplicationHost,

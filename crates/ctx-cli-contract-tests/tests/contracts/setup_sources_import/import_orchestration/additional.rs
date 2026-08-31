@@ -298,16 +298,21 @@ fn import_all_without_sources_does_not_report_missing_explicit_path() {
 
 #[test]
 fn import_all_discovers_sources_when_home_unset_and_userprofile_set() {
-    let temp = tempdir();
+    let temp = daemon_test_root();
     copy_dir_all(
         Path::new(&provider_history_fixture("codex-sessions")),
         &temp.path().join(".codex").join("sessions"),
     );
+    // Establish the exact retained daemon while the fixture-owned HOME is
+    // intact. The import below exercises USERPROFILE discovery without
+    // authorizing a detached child to escape through the installed-user home.
+    let _daemon = start_full_source_refresh_daemon(&temp);
 
     let imported = json_output(
         ctx(&temp)
             .env_remove("HOME")
             .env("USERPROFILE", temp.path())
+            .env("CTX_DAEMON_AUTOSTART_OFF", "1")
             .args(["import", "--all", "--format=json", "--progress", "none"]),
     );
     assert!(imported["totals"]["current_source_count"]
@@ -317,6 +322,26 @@ fn import_all_discovers_sources_when_home_unset_and_userprofile_set() {
     assert_eq!(
         imported["sources"][0]["source_format"],
         "provider_authoritative_all"
+    );
+
+    let discovered = json_output(
+        ctx(&temp)
+            .env_remove("HOME")
+            .env("USERPROFILE", temp.path())
+            .env("CTX_DAEMON_AUTOSTART_OFF", "1")
+            .args(["sources", "--format=json"]),
+    );
+    let codex = discovered["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|source| {
+            source["provider"] == "codex" && source["source_format"] == "codex_session_jsonl_tree"
+        })
+        .unwrap_or_else(|| panic!("missing USERPROFILE Codex route: {discovered:#}"));
+    assert!(
+        Path::new(codex["path"].as_str().unwrap()).starts_with(temp.path()),
+        "USERPROFILE discovery escaped the fixture root: {codex:#}"
     );
 }
 
