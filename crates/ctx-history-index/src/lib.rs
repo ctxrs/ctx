@@ -70,6 +70,24 @@ pub use ctx_history_index_format::{
     LEXICAL_ANALYZER_VERSION, LEXICAL_SCHEMA_VERSION, LEXICAL_SEGMENT_MERGE_FAN_IN,
     MAX_DETACHED_RELEASED_PROVIDER_ROOTS, MAX_PUBLICATION_METADATA_BYTES,
 };
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub mod test_support {
+    pub use ctx_history_index_generation::{
+        AtomicPublicationStage, AtomicReplacementFailureProbe, PublicationIoProbe,
+        PublicationIoProbeGuard,
+    };
+
+    use super::IndexError;
+
+    pub fn publication_io_error(error: &IndexError) -> Option<&std::io::Error> {
+        match error {
+            IndexError::Io(error) => Some(error),
+            IndexError::Tantivy(tantivy::TantivyError::IoError(error)) => Some(error),
+            _ => None,
+        }
+    }
+}
 #[cfg(test)]
 pub(crate) use ctx_history_index_generation::sha256_hex;
 pub(crate) use ctx_history_index_generation::{hex, is_generation_id, MANIFEST_DIRECTORY};
@@ -106,6 +124,8 @@ pub use preparation::{
 };
 #[cfg(test)]
 pub(crate) use publication::publish_active_generation_pointer;
+#[cfg(not(windows))]
+pub(crate) use publication::publish_active_generation_pointer_validated;
 #[cfg(all(test, target_os = "linux"))]
 pub(crate) use publication::republish_current_for_qualification;
 #[cfg(test)]
@@ -115,8 +135,8 @@ pub(crate) use publication::{
     certify_candidate_physical_integrity, create_candidate_generation,
     load_active_generation_pointer, meta_generation, open_slot_index, payload_generation_id,
     prepare_successor_manifest, prime_candidate_physical_proof,
-    publish_active_generation_pointer_validated, reclaim_inactive_generation_directories,
-    reclaim_unreferenced_certifications, reclaim_unreferenced_manifests, reconcile_commit_error,
+    reclaim_inactive_generation_directories, reclaim_unreferenced_certifications,
+    reclaim_unreferenced_manifests, reconcile_commit_error,
     republish_current_with_publication_metadata, searcher_generation, sync_directory,
     sync_generation, validate_candidate_managed_files, write_prepared_manifest,
     ActiveGenerationPointer, CandidateActivationFence, CandidatePhysicalProof,

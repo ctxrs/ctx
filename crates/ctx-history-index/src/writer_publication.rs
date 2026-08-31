@@ -602,14 +602,12 @@ impl GenerationWriter {
         let terminal_index = verified.publication.publication().searcher().index();
         let expected_audit = verified.publication.physical_integrity_audit();
         #[cfg(windows)]
-        let mut terminal_guard = Some(
-            ctx_history_index_generation::acquire_terminal_publication_guard(
-                &root,
-                &candidate_path,
-                terminal_index,
-                self.active_pointer.as_ref(),
-            )?,
-        );
+        let terminal_guard = ctx_history_index_generation::acquire_terminal_publication_guard(
+            &root,
+            &candidate_path,
+            terminal_index,
+            self.active_pointer.as_ref(),
+        )?;
         certify_candidate_physical_integrity(
             &root,
             &self.active_pointer_fence,
@@ -623,39 +621,44 @@ impl GenerationWriter {
             &verified.slot,
         )?;
         report_progress(PublicationStage::Activation)?;
-        match publish_active_generation_pointer_validated(&root, &next_pointer, || {
-            activation_fence.validate_binding()?;
-            prepared_manifest
-                .verify_persisted(&root)
-                .map_err(|_| ctx_history_index_generation::GenerationError::ChecksumMismatch)?;
-            validate_candidate_managed_files(
-                terminal_index,
-                &candidate_path,
-                self.active_pointer.as_ref(),
-            )?;
-            ctx_history_index_generation::verify_candidate_physical_integrity_read_only(
-                &root,
-                &self.active_pointer_fence,
-                &verified.slot,
-                terminal_index,
-            )?;
-            #[cfg(windows)]
-            terminal_guard
-                .as_ref()
-                .ok_or(ctx_history_index_generation::GenerationError::ConcurrentGenerationChange)?
-                .verify_physical_fence(expected_audit)?;
-            activation_fence.validate_binding()?;
-            #[cfg(windows)]
-            {
-                let terminal_guard = terminal_guard.take().ok_or(
-                    ctx_history_index_generation::GenerationError::ConcurrentGenerationChange,
+        let validate_before_replace =
+            |predecessor_fence: &ctx_history_index_generation::ActiveGenerationPointerFence| {
+                activation_fence.validate_binding()?;
+                prepared_manifest
+                    .verify_persisted(&root)
+                    .map_err(|_| ctx_history_index_generation::GenerationError::ChecksumMismatch)?;
+                validate_candidate_managed_files(
+                    terminal_index,
+                    &candidate_path,
+                    self.active_pointer.as_ref(),
                 )?;
+                ctx_history_index_generation::verify_candidate_physical_integrity_read_only(
+                    &root,
+                    predecessor_fence,
+                    &verified.slot,
+                    terminal_index,
+                )?;
+                #[cfg(windows)]
+                terminal_guard.verify_physical_fence(expected_audit)?;
+                activation_fence.validate_binding()?;
+                #[cfg(windows)]
                 terminal_guard.verify_identities()?;
-                Ok(terminal_guard)
-            }
-            #[cfg(not(windows))]
-            Ok(())
-        }) {
+                Ok(())
+            };
+        #[cfg(windows)]
+        let publication_result = ctx_history_index_generation::publish_active_generation_pointer_validated_predecessor_fence(
+            &root,
+            &next_pointer,
+            &mut self.active_pointer_fence,
+            validate_before_replace,
+        )
+        .map_err(IndexError::from);
+        #[cfg(not(windows))]
+        let publication_result =
+            publish_active_generation_pointer_validated(&root, &next_pointer, || {
+                validate_before_replace(&self.active_pointer_fence)
+            });
+        match publication_result {
             Ok(PointerPublicationOutcome::Durable) => {}
             Ok(PointerPublicationOutcome::CommittedVisible { detail }) => {
                 return Err(IndexError::CommittedGenerationNeedsRecovery {

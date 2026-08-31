@@ -1,4 +1,5 @@
 use std::{
+    ffi::OsStr,
     fs,
     path::{Path, PathBuf},
     time::Duration as StdDuration,
@@ -6,6 +7,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior};
+use url::Url;
 
 use crate::{
     private_fs::{
@@ -21,8 +23,10 @@ const CONTROL_SCHEMA_VERSION: i64 = 6;
 pub(super) const FULL_REBUILD_STATE: &str = "projection_full_rebuild_v1";
 
 pub(crate) fn open_writable(root: &Path) -> Result<Connection> {
-    validate_root(root, true)?;
-    let path = control_path(root);
+    let root = crate::private_fs::writable_private_root(root)?;
+    validate_root(&root, true)?;
+    let root = canonical_control_root(&root)?;
+    let path = control_path(&root);
     validate_control_file(&path)?;
     let connection = Connection::open_with_flags(
         &path,
@@ -50,7 +54,8 @@ pub(crate) fn open_read_only(root: &Path) -> Result<Option<Connection>> {
         return Ok(None);
     }
     validate_root(root, false)?;
-    let path = control_path(root);
+    let root = canonical_control_root(root)?;
+    let path = control_path(&root);
     if !path.exists() {
         return Ok(None);
     }
@@ -67,8 +72,178 @@ pub(crate) fn open_read_only(root: &Path) -> Result<Option<Connection>> {
     Ok(Some(connection))
 }
 
+pub(crate) fn preflight_writable_compatibility(root: &Path) -> Result<()> {
+    if !root.exists() {
+        return Ok(());
+    }
+    validate_root(root, false)?;
+    let root = canonical_control_root(root)?;
+    let path = control_path(&root);
+    if !path.exists() {
+        return Ok(());
+    }
+    validate_control_file(&path)?;
+    let connection = Connection::open_with_flags(
+        &path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .with_context(|| format!("preflight semantic control metadata {}", path.display()))?;
+    connection.busy_timeout(StdDuration::from_millis(SEMANTIC_VECTOR_BUSY_TIMEOUT_MS))?;
+    let application_id = pragma_i64(&connection, "application_id")?;
+    let schema_version = pragma_i64(&connection, "user_version")?;
+    if application_id == CONTROL_APPLICATION_ID
+        && (1..=CONTROL_SCHEMA_VERSION).contains(&schema_version)
+    {
+        return Ok(());
+    }
+    if application_id == 0 && schema_version == 0 && user_table_count(&connection)? == 0 {
+        return Ok(());
+    }
+    validate_schema(&connection)
+}
+
+/// Opens only a completed main-database snapshot. WAL state is deliberately
+/// refused: immutable SQLite opens ignore a WAL and could otherwise observe a
+/// stale acknowledgement, while a normal read-only WAL open may touch the SHM
+/// family on some VFSes. The caller can safely fall back to lexical search.
+pub(crate) fn open_passive_snapshot(root: &Path) -> Result<Option<Connection>> {
+    if !passive_control_exists(root)? {
+        return Ok(None);
+    }
+    let path = control_path(root);
+    refuse_passive_sidecar(&path, OsStr::new("-wal"), "WAL")?;
+    refuse_passive_sidecar(&path, OsStr::new("-journal"), "rollback journal")?;
+    let mut uri = Url::from_file_path(&path).map_err(|()| {
+        SemanticVectorStoreError::passive_snapshot_unavailable(format!(
+            "semantic control metadata path cannot be represented as a file URI: {}",
+            path.display()
+        ))
+    })?;
+    uri.query_pairs_mut()
+        .append_pair("mode", "ro")
+        .append_pair("immutable", "1");
+    let connection = Connection::open_with_flags(
+        uri.as_str(),
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_URI
+            | OpenFlags::SQLITE_OPEN_PRIVATE_CACHE
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .with_context(|| format!("open passive semantic control metadata {}", path.display()))?;
+    connection.execute_batch("PRAGMA query_only = ON;")?;
+    validate_schema(&connection)?;
+    Ok(Some(connection))
+}
+
+/// Resolves only parent components so SQLite receives a canonical absolute
+/// path on platforms whose NOFOLLOW VFS rejects `/var`-style parent symlinks.
+/// The semantic root and final database component remain unresolved and are
+/// separately rejected if either is itself a symlink.
+pub(crate) fn passive_snapshot_root(root: &Path) -> Result<Option<PathBuf>> {
+    let name = root.file_name().ok_or_else(|| {
+        SemanticVectorStoreError::passive_snapshot_unavailable(format!(
+            "semantic vector root has no final path component: {}",
+            root.display()
+        ))
+    })?;
+    let parent = root
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let parent = match fs::canonicalize(parent) {
+        Ok(parent) => parent,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("resolve semantic vector parent {}", parent.display()));
+        }
+    };
+    let resolved = parent.join(name);
+    if passive_control_exists(&resolved)? {
+        Ok(Some(resolved))
+    } else {
+        Ok(None)
+    }
+}
+
+pub(crate) fn passive_control_exists(root: &Path) -> Result<bool> {
+    match fs::symlink_metadata(root) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            return Err(
+                SemanticVectorStoreError::passive_snapshot_unavailable(format!(
+                    "refusing semantic vector root symlink or non-directory {}",
+                    root.display()
+                ))
+                .into(),
+            );
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("inspect semantic vector root {}", root.display()));
+        }
+    }
+    let path = control_path(root);
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => Err(
+            SemanticVectorStoreError::passive_snapshot_unavailable(format!(
+                "refusing semantic control metadata symlink or non-file {}",
+                path.display()
+            ))
+            .into(),
+        ),
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error)
+            .with_context(|| format!("inspect semantic control metadata {}", path.display())),
+    }
+}
+
+fn refuse_passive_sidecar(path: &Path, suffix: &OsStr, kind: &str) -> Result<()> {
+    let mut sidecar = path.as_os_str().to_os_string();
+    sidecar.push(suffix);
+    let sidecar = PathBuf::from(sidecar);
+    match fs::symlink_metadata(&sidecar) {
+        Ok(_) => Err(SemanticVectorStoreError::passive_snapshot_unavailable(format!(
+            "semantic control {kind} {} is present; a passive immutable snapshot would not be exact",
+            sidecar.display()
+        ))
+        .into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(SemanticVectorStoreError::passive_snapshot_unavailable(format!(
+            "semantic control {kind} {} could not be inspected: {error}",
+            sidecar.display()
+        ))
+        .into()),
+    }
+}
+
 fn control_path(root: &Path) -> PathBuf {
     root.join(CONTROL_FILE)
+}
+
+/// Resolves parent components while preserving no-follow checks for the
+/// semantic root and final database component.
+fn canonical_control_root(root: &Path) -> Result<PathBuf> {
+    let name = root.file_name().ok_or_else(|| {
+        SemanticVectorStoreError::unavailable(format!(
+            "semantic vector root has no final path component: {}",
+            root.display()
+        ))
+    })?;
+    let parent = root
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let parent = fs::canonicalize(parent)
+        .with_context(|| format!("resolve semantic vector parent {}", parent.display()))?;
+    let resolved = parent.join(name);
+    validate_root(&resolved, false)?;
+    Ok(resolved)
 }
 
 fn validate_root(root: &Path, create: bool) -> Result<()> {
@@ -326,6 +501,30 @@ mod tests {
             0,
             "the mutable control database must not carry model identity"
         );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ordinary_control_opens_resolve_parent_symlinks_but_reject_the_database_symlink() -> Result<()>
+    {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::tempdir()?;
+        let real_parent = temporary.path().join("real-parent");
+        fs::create_dir(&real_parent)?;
+        let alias_parent = temporary.path().join("alias-parent");
+        symlink(&real_parent, &alias_parent)?;
+        let alias_root = alias_parent.join("semantic");
+        drop(open_writable(&alias_root)?);
+        assert!(open_read_only(&alias_root)?.is_some());
+        assert!(real_parent.join("semantic/state.sqlite").is_file());
+
+        let database = real_parent.join("semantic/state.sqlite");
+        let real_database = real_parent.join("semantic/state.sqlite.real");
+        fs::rename(&database, &real_database)?;
+        symlink(&real_database, &database)?;
+        assert!(open_read_only(&alias_root).is_err());
         Ok(())
     }
 

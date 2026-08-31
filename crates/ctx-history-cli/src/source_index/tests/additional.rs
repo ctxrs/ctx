@@ -542,7 +542,7 @@ fn mcp_source_route_applies_the_semantic_config_default_to_source_generations() 
 }
 
 #[test]
-fn daemon_disabled_cli_default_and_hybrid_fall_back_but_semantic_is_typed() {
+fn daemon_disabled_passive_policy_falls_back_and_semantic_is_typed() {
     let temp = tempdir().unwrap();
     write_test_generation(temp.path());
     let config = history_config(false, true);
@@ -586,7 +586,7 @@ fn daemon_disabled_cli_default_and_hybrid_fall_back_but_semantic_is_typed() {
 }
 
 #[test]
-fn manual_wait_makes_semantic_execution_available_only_for_that_cli_search() {
+fn manual_foreground_search_makes_semantic_execution_available_only_for_that_cli_search() {
     let config = history_config(false, true);
     let passive = super::search::source_search_policy(&config, false);
     assert_eq!(
@@ -597,14 +597,10 @@ fn manual_wait_makes_semantic_execution_available_only_for_that_cli_search() {
     );
 
     let foreground = super::search::source_search_policy(&config, true);
-    let expected = if ctx_daemon_cli::semantic_query_service_supported() {
+    assert_eq!(
+        foreground.semantic,
         ctx_history_read_application::SemanticAvailability::Available
-    } else {
-        ctx_history_read_application::SemanticAvailability::Unavailable(
-            ctx_history_read_application::SemanticReason::PlatformUnsupported,
-        )
-    };
-    assert_eq!(foreground.semantic, expected);
+    );
 }
 
 #[test]
@@ -654,6 +650,36 @@ fn semantic_generation_wait_is_limited_to_queries_that_need_semantic_evidence() 
         ctx_history_read_application::SemanticAvailability::Unavailable(
             ctx_history_read_application::SemanticReason::PolicyDisabled,
         ),
+    ));
+}
+
+#[test]
+fn manual_cli_selects_read_only_semantic_for_passive_refresh_and_reconciliation_for_wait() {
+    use super::search::ForegroundSemanticExecution;
+
+    assert_eq!(
+        super::search::foreground_semantic_execution(RefreshArg::Off, false),
+        Some(ForegroundSemanticExecution::ReadOnly)
+    );
+    assert_eq!(
+        super::search::foreground_semantic_execution(RefreshArg::Wait, false),
+        Some(ForegroundSemanticExecution::Reconcile)
+    );
+    assert_eq!(
+        super::search::foreground_semantic_execution(RefreshArg::Background, false),
+        Some(ForegroundSemanticExecution::ReadOnly)
+    );
+    assert_eq!(
+        super::search::foreground_semantic_execution(RefreshArg::Off, true),
+        None
+    );
+    assert!(!super::search::should_wait_for_daemon_query_service(
+        RefreshArg::Background,
+        false
+    ));
+    assert!(super::search::should_wait_for_daemon_query_service(
+        RefreshArg::Background,
+        true
     ));
 }
 

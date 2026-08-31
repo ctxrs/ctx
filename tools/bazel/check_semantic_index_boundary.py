@@ -20,18 +20,36 @@ EXPECTED_DEPENDENCIES: dict[str, Any] = {
     "ctx-history-platform": {"path": "../ctx-history-platform"},
     "ctx-semantic-model": {"path": "../ctx-semantic-model"},
     "fs2": "0.4.3",
+    # Reviewed only for O_NOFOLLOW/O_CLOEXEC on the existing transaction-lock
+    # file; it does not add a storage or execution backend.
+    "libc": {"workspace": True},
     "memmap2": {"workspace": True},
     "rusqlite": {"workspace": True},
     "serde": {"workspace": True},
     "serde_json": {"workspace": True},
     "sha2": {"workspace": True},
     "thiserror": {"workspace": True},
+    # Reviewed for percent-correct immutable SQLite file URIs. It carries no
+    # transport client into the storage crate.
+    "url": {"workspace": True},
     "uuid": {"workspace": True},
 }
-EXPECTED_DEV_DEPENDENCIES: dict[str, Any] = {"tempfile": {"workspace": True}}
+EXPECTED_DEV_DEPENDENCIES: dict[str, Any] = {
+    "ctx-history-index": {
+        "path": "../ctx-history-index",
+        "features": ["test-support"],
+    },
+    "tempfile": {"workspace": True},
+}
 EXPECTED_INTERNAL_LABELS = [
     "//crates/ctx-history-core:lib",
     "//crates/ctx-history-index:lib",
+    "//crates/ctx-history-platform:lib",
+    "//crates/ctx-semantic-model:lib",
+]
+EXPECTED_INTERNAL_TEST_LABELS = [
+    "//crates/ctx-history-core:lib",
+    "//crates/ctx-history-index:test_support_lib",
     "//crates/ctx-history-platform:lib",
     "//crates/ctx-semantic-model:lib",
 ]
@@ -152,11 +170,18 @@ def validate_build(path: Path) -> None:
     text = re.sub(r"(?m)#.*$", "", path.read_text(encoding="utf-8"))
     if _extract_string_list(text, "CTX_SEMANTIC_INDEX_DEPS") != EXPECTED_INTERNAL_LABELS:
         raise BoundaryError("ctx-semantic-index Bazel internal dependency inventory drifted")
+    if (
+        _extract_string_list(text, "CTX_SEMANTIC_INDEX_TEST_DEPS")
+        != EXPECTED_INTERNAL_TEST_LABELS
+    ):
+        raise BoundaryError(
+            "ctx-semantic-index Bazel test dependency inventory drifted"
+        )
 
     expected_deps = Counter(
         {
             "all_crate_deps(normal = True) + CTX_SEMANTIC_INDEX_DEPS": 2,
-            "all_crate_deps(normal = True, normal_dev = True) + CTX_SEMANTIC_INDEX_DEPS": 1,
+            "all_crate_deps(normal = True, normal_dev = True) + CTX_SEMANTIC_INDEX_TEST_DEPS": 1,
         }
     )
     if _assignment_values(text, "deps") != expected_deps:

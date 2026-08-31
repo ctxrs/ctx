@@ -9,9 +9,7 @@ use super::*;
 #[cfg(unix)]
 #[test]
 fn source_refresh_only_status_exposes_runtime_and_certified_refresh_identity() -> Result<()> {
-    let _env_lock = crate::TEST_LOCAL_USAGE_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _environment = crate::test_environment::EnvironmentGuard::capture(&[]);
     let temp = tempfile::tempdir()?;
     fs::write(
         temp.path().join(CONFIG_FILE),

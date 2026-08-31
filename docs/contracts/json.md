@@ -1038,6 +1038,8 @@ importer. Off mode sends no maintenance wake.
 - `semantic_status`;
 - `semantic_fallback_code`, nullable/omitted stable reason code for clients;
 - `semantic_fallback`, nullable/omitted;
+- `semantic_fallback_retryable`, nullable/omitted boolean retaining whether the
+  typed semantic failure may succeed after external state changes;
 - `embedding_model`, nullable/omitted;
 - `coverage`;
 - `worker`, using the same shape as `status.semantic`, nullable/omitted;
@@ -1058,6 +1060,8 @@ importer. Off mode sends no maintenance wake.
 `retrieval.semantic_fallback_code`, when present, is the stable machine-readable
 reason why a hybrid request used lexical fallback.
 `retrieval.semantic_fallback`, when present, is the human-readable explanation.
+`retrieval.semantic_fallback_retryable`, when present, is copied from the same
+typed semantic failure rather than inferred from its display text.
 Semantic-only unavailability is a typed command error, not a successful
 `search_results` object with `effective_mode: "lexical"`.
 

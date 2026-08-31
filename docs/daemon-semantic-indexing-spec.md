@@ -30,7 +30,11 @@ Neither search path performs inline history refresh or lexical publication in
 the query process. After the finite worker publishes Core in manual mode, an
 opted-in semantic or nonzero-weight hybrid `--refresh wait` may reconcile the
 semantic document projection for that exact generation and embed the query in
-the waiting foreground process.
+the waiting foreground process. Daemon-free `--refresh off` and `--refresh
+background` may embed a query in the foreground only when the exact semantic
+generation and verified cached model assets are already ready, or through an
+explicitly selected HTTP executor after the same exact preflight. They never
+reconcile or write projection state.
 
 The public retrieval modes are:
 
@@ -48,8 +52,8 @@ Freshness is separate from retrieval mode:
 
 | Freshness | Meaning |
 | --- | --- |
-| `background` | Default. Serve current indexes; start/poke persistent daemon work only in automatic indexing mode. Manual mode is inert. |
-| `off` | Serve current indexes and do not start, poke, wait for, or run indexing. |
+| `background` | Default. Serve current indexes; start/poke persistent daemon work only in automatic indexing mode. Manual mode may query an already-ready semantic projection and is otherwise refresh-inert. |
+| `off` | Serve current indexes and do not start, poke, wait for, or run indexing. A daemon-free query may use an already-ready semantic projection with verified cached model assets, or its explicitly selected HTTP executor after exact preflight. |
 | `wait` | Wait for authoritative Core publication from the persistent daemon or a manual-mode finite Core worker, then search or fail with a clear local error. |
 
 When an automatic-mode `wait` search needs semantic evidence, it also waits
@@ -259,16 +263,24 @@ background startup; there is no separate public daemon start command.
 
 - No public `auto` retrieval mode.
 - No lexical-then-semantic fallback as the default strategy.
-- No foreground semantic embedding from implicit/background or `--refresh off`
-  search. An opted-in manual-mode semantic or nonzero-weight hybrid
-  `--refresh wait` is the sole query-process exception: after finite Core
-  publication it may prepare the selected executor, reconcile semantic
-  coverage for that exact generation, and embed the query.
-- No built-in model download from foreground setup, import, status, doctor,
-  MCP, or index-observer commands. Acquisition belongs to the opted-in daemon in
-  auto mode and the explicit manual `--refresh wait` exception above;
-  unverified bytes must fail closed before cache publication. Status and
-  observer commands never probe an external executor.
+- With automatic indexing disabled, direct CLI `--refresh off` and
+  `--refresh background` queries may embed from verified cached model assets
+  or use the configured HTTP executor only after
+  exact-generation preflight succeeds; they never acquire a model, reconcile
+  coverage, or write projection state. Passive preflight shares the existing
+  Flat transaction lock from SQLite sidecar inspection through control-schema
+  validation and exact Flat-generation pinning. It refuses WAL and rollback
+  journals and opens the main database immutable/read-only without creating
+  lock, WAL, or SHM files. Ordinary daemon and Reconcile preflight remains
+  WAL-aware so committed daemon work is visible.
+  An opted-in manual-mode semantic or nonzero-weight hybrid `--refresh wait`
+  may prepare the selected executor, acquire the pinned local model when
+  selected, reconcile semantic coverage for that exact generation, and embed
+  the query.
+- No model download from foreground setup, import, status, doctor, MCP, or
+  index-observer commands. Acquisition belongs to the opted-in daemon in auto
+  mode and the explicit manual `--refresh wait` exception above; unverified
+  bytes must fail closed before cache publication.
 - No duplicate inline importer. Persistent and finite publication both use the
   same daemon/Core refresh engine.
 - A finite Core worker installs no supervision, runs no watcher/timer/semantic/

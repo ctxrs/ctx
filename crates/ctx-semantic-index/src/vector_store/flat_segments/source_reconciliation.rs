@@ -174,6 +174,18 @@ impl FlatSegmentStore {
     }
 
     pub(crate) fn finish_reconciliation_view(&self) -> FlatResult<()> {
+        self.finish_reconciliation_view_with(|| self.compact())
+    }
+
+    /// Finishes while the source-generation view retains the transaction lock.
+    pub(crate) fn finish_reconciliation_view_coordinated(&self) -> FlatResult<()> {
+        self.finish_reconciliation_view_with(|| self.compact_coordinated())
+    }
+
+    fn finish_reconciliation_view_with(
+        &self,
+        compact: impl FnOnce() -> FlatResult<FlatPublishOutcome>,
+    ) -> FlatResult<()> {
         let retained = {
             let mut current = self.reconciliation_view.lock().map_err(|_| {
                 FlatStoreError::Corrupt("flat reconciliation view lock is poisoned".to_owned())
@@ -183,7 +195,7 @@ impl FlatSegmentStore {
         let Some(retained) = retained else {
             return Ok(());
         };
-        if let Err(error) = self.compact().map(|_| ()) {
+        if let Err(error) = compact().map(|_| ()) {
             let mut current = self.reconciliation_view.lock().map_err(|_| {
                 FlatStoreError::Corrupt("flat reconciliation view lock is poisoned".to_owned())
             })?;

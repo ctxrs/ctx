@@ -1,5 +1,6 @@
 use std::{
     path::Path,
+    sync::OnceLock,
     thread,
     time::{Duration as StdDuration, Instant},
 };
@@ -19,7 +20,9 @@ use ctx_semantic_index::{
     SourceBackedSemanticDocumentBuilder,
 };
 use ctx_semantic_model::{
-    SemanticEmbeddingExecutorConfig, SemanticEmbeddingExecutorHandle, SharedSemanticRuntime,
+    semantic_embedding_failure_is_permanent, SemanticEmbeddingExecutorConfig,
+    SemanticEmbeddingExecutorHandle, SemanticPassiveConfigurationError,
+    SemanticPassiveLoadUnavailable, SharedSemanticRuntime,
 };
 use serde_json::{json, Value};
 
@@ -28,6 +31,21 @@ use crate::compact_json;
 use super::query_service::{daemon_query_request, DAEMON_SEMANTIC_QUERY_SCHEMA_VERSION};
 
 const SEMANTIC_GENERATION_POLL_INTERVAL: StdDuration = StdDuration::from_millis(100);
+
+#[cfg(test)]
+thread_local! {
+    static FOREGROUND_ACQUISITION_ATTEMPTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn reset_foreground_acquisition_attempts() {
+    FOREGROUND_ACQUISITION_ATTEMPTS.with(|attempts| attempts.set(0));
+}
+
+#[cfg(test)]
+fn foreground_acquisition_attempts() -> usize {
+    FOREGROUND_ACQUISITION_ATTEMPTS.with(std::cell::Cell::get)
+}
 
 /// Waits for daemon-owned semantic coverage of the current verified Core
 /// generation. A newer active Core generation replaces the original pin so
@@ -120,8 +138,73 @@ pub struct SemanticQueryAdapter<'data_root> {
 enum SemanticQueryExecution {
     Daemon,
     Foreground {
-        executor: std::result::Result<Box<SemanticEmbeddingExecutorHandle>, String>,
+        executor: ForegroundSemanticExecutor,
+        mode: ForegroundSemanticMode,
     },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ForegroundSemanticMode {
+    ReadOnly,
+    Reconcile,
+}
+
+/// Defers selected-executor construction until a ready nonempty projection
+/// actually needs a query embedding. This keeps passive semantic preflight
+/// local and makes a ready empty projection independent of executor config.
+struct ForegroundSemanticExecutor {
+    config: SemanticEmbeddingExecutorConfig,
+    executor: OnceLock<std::result::Result<Box<SemanticEmbeddingExecutorHandle>, String>>,
+}
+
+impl ForegroundSemanticExecutor {
+    fn new(config: SemanticEmbeddingExecutorConfig) -> Self {
+        Self {
+            config,
+            executor: OnceLock::new(),
+        }
+    }
+
+    fn resolve(
+        &self,
+        data_root: &Path,
+        expected_contract: &SemanticModelContract,
+    ) -> Result<&SemanticEmbeddingExecutorHandle> {
+        let executor = self
+            .executor
+            .get_or_init(|| {
+                let model_config = if self.config.is_builtin() {
+                    foreground_coreml_model_config(crate::model_config::semantic_model_config(
+                        data_root,
+                    ))
+                } else {
+                    crate::model_config::semantic_model_config(data_root)
+                };
+                crate::semantic_embedding_executor_auth_from_environment()
+                    .and_then(|auth| {
+                        SemanticEmbeddingExecutorHandle::build_with_auth(
+                            self.config.clone(),
+                            auth,
+                            SharedSemanticRuntime::default(),
+                            model_config,
+                        )
+                    })
+                    .and_then(|executor| {
+                        ensure_semantic_executor_contract(&executor, expected_contract)?;
+                        Ok(Box::new(executor))
+                    })
+                    .map_err(|error| format!("{error:#}"))
+            })
+            .as_deref()
+            .map_err(|error| anyhow!(error.clone()))?;
+        ensure_semantic_executor_contract(executor, expected_contract)?;
+        Ok(executor)
+    }
+
+    #[cfg(test)]
+    fn is_resolved(&self) -> bool {
+        self.executor.get().is_some()
+    }
 }
 
 impl<'data_root> SemanticQueryAdapter<'data_root> {
@@ -138,22 +221,29 @@ impl<'data_root> SemanticQueryAdapter<'data_root> {
         data_root: &'data_root Path,
         config: SemanticEmbeddingExecutorConfig,
     ) -> Self {
-        let model_config =
-            foreground_coreml_model_config(crate::model_config::semantic_model_config(data_root));
-        let executor = crate::semantic_embedding_executor_auth_from_environment()
-            .and_then(|auth| {
-                SemanticEmbeddingExecutorHandle::build_with_auth(
-                    config,
-                    auth,
-                    SharedSemanticRuntime::default(),
-                    model_config,
-                )
-            })
-            .map(Box::new)
-            .map_err(|error| format!("{error:#}"));
+        Self::foreground_with_mode(data_root, config, ForegroundSemanticMode::Reconcile)
+    }
+
+    /// Uses the selected foreground executor only to query a ready semantic
+    /// projection. Intended for daemon-free `--refresh off` and background.
+    pub fn foreground_read_only(
+        data_root: &'data_root Path,
+        config: SemanticEmbeddingExecutorConfig,
+    ) -> Self {
+        Self::foreground_with_mode(data_root, config, ForegroundSemanticMode::ReadOnly)
+    }
+
+    fn foreground_with_mode(
+        data_root: &'data_root Path,
+        config: SemanticEmbeddingExecutorConfig,
+        mode: ForegroundSemanticMode,
+    ) -> Self {
         Self {
             data_root,
-            execution: SemanticQueryExecution::Foreground { executor },
+            execution: SemanticQueryExecution::Foreground {
+                executor: ForegroundSemanticExecutor::new(config),
+                mode,
+            },
         }
     }
 }
@@ -176,20 +266,31 @@ impl HistorySemanticPort for SemanticQueryAdapter<'_> {
     ) -> std::result::Result<Self::Query<'a>, HistorySemanticError> {
         match &self.execution {
             SemanticQueryExecution::Daemon => SemanticQuerySession::begin(index, self.data_root),
-            SemanticQueryExecution::Foreground {
-                executor: Err(error),
-            } => Err(SemanticQueryError::failed(error.clone())),
-            SemanticQueryExecution::Foreground {
-                executor: Ok(executor),
-            } => match SemanticQuerySession::begin_foreground(index, self.data_root, executor) {
-                Ok(session) => Ok(session),
-                Err(SemanticQueryError::NotReady { .. }) => {
-                    reconcile_foreground_semantic(index, self.data_root, executor)
-                        .map_err(SemanticQueryError::from)?;
-                    SemanticQuerySession::begin_foreground(index, self.data_root, executor)
+            SemanticQueryExecution::Foreground { executor, mode } => {
+                match SemanticQuerySession::begin_foreground(index, self.data_root, executor, *mode)
+                {
+                    Ok(session) => Ok(session),
+                    Err(SemanticQueryError::NotReady { .. })
+                        if *mode == ForegroundSemanticMode::Reconcile =>
+                    {
+                        let contract =
+                            semantic_index_contract_for_selected(executor.config.contract())
+                                .map_err(SemanticQueryError::from)?;
+                        let handle = executor
+                            .resolve(self.data_root, &contract)
+                            .map_err(SemanticQueryError::from)?;
+                        reconcile_foreground_semantic(index, self.data_root, handle, &contract)
+                            .map_err(SemanticQueryError::from)?;
+                        SemanticQuerySession::begin_foreground(
+                            index,
+                            self.data_root,
+                            executor,
+                            *mode,
+                        )
+                    }
+                    Err(error) => Err(error),
                 }
-                Err(error) => Err(error),
-            },
+            }
         }
         .map_err(HistorySemanticError::from)
     }
@@ -197,6 +298,13 @@ impl HistorySemanticPort for SemanticQueryAdapter<'_> {
 
 struct ForegroundSemanticEmbedder<'a> {
     executor: &'a SemanticEmbeddingExecutorHandle,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("{detail}")]
+struct PassiveSemanticExecutorUnavailable {
+    detail: String,
+    retryable: bool,
 }
 
 impl SemanticBatchEmbedder for ForegroundSemanticEmbedder<'_> {
@@ -215,11 +323,16 @@ fn reconcile_foreground_semantic(
     index: &VerifiedIndex,
     data_root: &Path,
     executor: &SemanticEmbeddingExecutorHandle,
+    contract: &SemanticModelContract,
 ) -> Result<()> {
+    // Keep this boundary defensive even though lazy resolution validates too:
+    // no acquisition, endpoint traffic, writable open, or embedding may occur
+    // for a mismatched executor.
+    ensure_semantic_executor_contract(executor, contract)?;
     if index.semantic_eligible_event_count()? > 0 {
         ensure_foreground_executor(executor)?;
     }
-    let mut store = open_foreground_semantic_vector_store(data_root, executor)?;
+    let mut store = open_foreground_semantic_vector_store(data_root, executor, contract)?;
     let mut builder = SourceBackedSemanticDocumentBuilder::new(index);
     let mut embedder = ForegroundSemanticEmbedder { executor };
     loop {
@@ -242,10 +355,10 @@ fn reconcile_foreground_semantic(
 fn open_foreground_semantic_vector_store(
     data_root: &Path,
     executor: &SemanticEmbeddingExecutorHandle,
+    contract: &SemanticModelContract,
 ) -> Result<SemanticVectorStore> {
     executor.verify_contract()?;
-    let contract = semantic_index_contract_for_selected(executor.executor().contract())?;
-    SemanticVectorStore::open(&source_backed_semantic_vector_path(data_root), &contract)
+    SemanticVectorStore::open(&source_backed_semantic_vector_path(data_root), contract)
 }
 
 pub struct SemanticQuerySession<'a> {
@@ -261,7 +374,8 @@ pub struct SemanticQuerySession<'a> {
 enum SemanticQueryEmbeddingSource<'a> {
     Daemon,
     Foreground {
-        executor: &'a SemanticEmbeddingExecutorHandle,
+        executor: &'a ForegroundSemanticExecutor,
+        mode: ForegroundSemanticMode,
     },
 }
 
@@ -286,18 +400,26 @@ impl SemanticQuerySession<'_> {
     fn begin_foreground<'a>(
         index: &'a VerifiedIndex,
         data_root: &'a Path,
-        executor: &'a SemanticEmbeddingExecutorHandle,
+        executor: &'a ForegroundSemanticExecutor,
+        mode: ForegroundSemanticMode,
     ) -> std::result::Result<SemanticQuerySession<'a>, SemanticQueryError> {
-        let contract = semantic_index_contract_for_selected(executor.executor().contract())
+        let contract = semantic_index_contract_for_selected(executor.config.contract())
             .map_err(SemanticQueryError::from)?;
-        let pin = SemanticQueryPin::preflight(index, data_root, &contract)
-            .map_err(SemanticQueryError::from)?;
+        let pin = match mode {
+            ForegroundSemanticMode::ReadOnly => {
+                SemanticQueryPin::preflight_passive(index, data_root, &contract)
+            }
+            ForegroundSemanticMode::Reconcile => {
+                SemanticQueryPin::preflight(index, data_root, &contract)
+            }
+        }
+        .map_err(SemanticQueryError::from)?;
         Ok(SemanticQuerySession {
             pin,
             index,
             data_root,
-            contract,
-            embedding_source: SemanticQueryEmbeddingSource::Foreground { executor },
+            contract: contract.clone(),
+            embedding_source: SemanticQueryEmbeddingSource::Foreground { executor, mode },
             embeddings: Vec::new(),
         })
     }
@@ -310,9 +432,10 @@ impl SemanticQuerySession<'_> {
             SemanticQueryEmbeddingSource::Daemon => {
                 self.prepare_alternative_with(query, daemon_query_embedding)
             }
-            SemanticQueryEmbeddingSource::Foreground { executor } => self
-                .prepare_alternative_with(query, |_, _, query| {
-                    foreground_query_embedding(executor, query).map(Some)
+            SemanticQueryEmbeddingSource::Foreground { executor, mode } => self
+                .prepare_alternative_with(query, |_, contract, query| {
+                    foreground_query_embedding(executor, self.data_root, contract, query, mode)
+                        .map(Some)
                 }),
         }
     }
@@ -407,19 +530,62 @@ fn selected_semantic_contract(data_root: &Path) -> Result<SemanticModelContract>
 }
 
 fn foreground_query_embedding(
-    executor: &SemanticEmbeddingExecutorHandle,
+    selected_executor: &ForegroundSemanticExecutor,
+    data_root: &Path,
+    contract: &SemanticModelContract,
     semantic_text: &str,
+    mode: ForegroundSemanticMode,
 ) -> Result<(Vec<f32>, u64)> {
-    ensure_foreground_executor(executor)?;
+    let executor = selected_executor.resolve(data_root, contract)?;
+    match mode {
+        ForegroundSemanticMode::ReadOnly => {
+            if let Some(builtin) = executor.builtin_executor() {
+                builtin
+                    .shared_runtime()
+                    .ensure_loaded_passively(builtin.config())?;
+            }
+        }
+        ForegroundSemanticMode::Reconcile => ensure_foreground_executor(executor)?,
+    }
     let started = Instant::now();
-    let executor = executor.executor();
-    let embedding =
-        executor.embed_query(executor.contract().prepare_query(semantic_text.to_owned()))?;
+    let embedding_executor = executor.executor();
+    let embedding = embedding_executor
+        .embed_query(
+            embedding_executor
+                .contract()
+                .prepare_query(semantic_text.to_owned()),
+        )
+        .map_err(|error| match mode {
+            ForegroundSemanticMode::ReadOnly => {
+                anyhow::Error::new(PassiveSemanticExecutorUnavailable {
+                    retryable: !semantic_embedding_failure_is_permanent(&error),
+                    detail: format!("{error:#}"),
+                })
+            }
+            ForegroundSemanticMode::Reconcile => error,
+        })?;
     Ok((embedding, started.elapsed().as_millis() as u64))
+}
+
+fn ensure_semantic_executor_contract(
+    executor: &SemanticEmbeddingExecutorHandle,
+    expected: &SemanticModelContract,
+) -> Result<()> {
+    let actual = semantic_index_contract_for_selected(executor.executor().contract())?;
+    if actual.fingerprint() != expected.fingerprint()
+        || actual.executor_route_identity() != expected.executor_route_identity()
+    {
+        return Err(anyhow!(
+            "semantic executor model contract does not match the semantic index contract"
+        ));
+    }
+    Ok(())
 }
 
 fn ensure_foreground_executor(executor: &SemanticEmbeddingExecutorHandle) -> Result<()> {
     if let Some(builtin) = executor.builtin_executor() {
+        #[cfg(test)]
+        FOREGROUND_ACQUISITION_ATTEMPTS.with(|attempts| attempts.set(attempts.get() + 1));
         builtin.shared_runtime().ensure_loaded_with_acquisition(
             builtin.config(),
             &crate::daemon_service_ports::ARTIFACT_FETCHER,
@@ -491,7 +657,28 @@ impl From<anyhow::Error> for SemanticQueryError {
                     error.to_string(),
                     true,
                 ),
-                Err(error) => Self::failed(format!("{error:#}")),
+                Err(error) => match error.downcast::<SemanticPassiveLoadUnavailable>() {
+                    Ok(error) => {
+                        Self::not_ready("semantic_executor_unavailable", error.to_string(), true)
+                    }
+                    Err(error) => match error.downcast::<SemanticPassiveConfigurationError>() {
+                        Ok(error) => Self::not_ready(
+                            "semantic_executor_configuration_invalid",
+                            error.to_string(),
+                            false,
+                        ),
+                        Err(error) => {
+                            match error.downcast::<PassiveSemanticExecutorUnavailable>() {
+                                Ok(error) => Self::not_ready(
+                                    "semantic_executor_unavailable",
+                                    error.detail,
+                                    error.retryable,
+                                ),
+                                Err(error) => Self::failed(format!("{error:#}")),
+                            }
+                        }
+                    },
+                },
             },
         }
     }

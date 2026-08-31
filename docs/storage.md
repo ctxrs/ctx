@@ -363,7 +363,7 @@ local upsert as described above.
 | `ctx import` | provider transcript files and path metadata, the explicit custom history JSONL file passed with `--input-format ctx-history-jsonl-v2 --path`, or a durable provider-owned custom history JSONL file declared by an explicit history-source plugin manifest | immutable candidate Core/Tantivy generation and atomic publication, catalog/epoch metadata, and optional persistent or finite-worker daemon files; finite workers do not run semantic work |
 | `ctx show session` / `ctx show event` | complete policy-selected records in the active verified Core/Tantivy generation | selected `--out` path for `show session` when provided |
 | `ctx list events` | complete policy-selected records and existing index terms in one pinned verified Core/Tantivy generation | none; event enumeration is read-only |
-| `ctx search` | active verified Core/Tantivy generation and existing semantic generation; when refresh has authority, bounded provider discovery/path metadata | candidate Core publication and daemon state only when refresh has authority; manual background and `--refresh off` do not start or wake a process |
+| `ctx search` | active verified Core/Tantivy generation and existing semantic generation; direct CLI passive semantic/hybrid queries may also read selected-executor metadata and verified cached model/runtime assets; when refresh has authority, bounded provider discovery/path metadata | candidate Core publication and daemon state only when refresh has authority; manual background and `--refresh off` do not start or wake a ctx daemon or worker and do not mutate Core or semantic projection state |
 | `ctx docs` | embedded documentation in the binary | selected topic `--out` path for `ctx docs show --out` or selected `--out` directory for `ctx docs man --out` |
 | `ctx upgrade` | signed release metadata and installed binary/sidecar metadata | installed binary for manual upgrade, install sidecar, and executable-adjacent `.ctx.upgrade-state.json`, `.ctx.install.lock`, and transaction journal |
 | `ctx doctor` | source epoch, lexical/semantic generation metadata, and ctx-owned daemon lock/status/job metadata | none |
@@ -385,13 +385,30 @@ The deprecated `ctx setup --catalog-only` flag is ignored and does not change
 daemon-autostart behavior.
 `ctx search --refresh off` does not refresh providers, run plugins, autostart
 daemon maintenance, start semantic workers, schedule semantic indexing, or
-write any derived generation. It serves results from the active Core
-generation. Default `--backend hybrid --refresh off`
-uses semantic evidence only when semantic coverage is complete and dirty work is
-drained, and otherwise falls back to lexical. Explicit semantic searches with
-`--refresh off` may ask the daemon query service to use the selected executor
-for the query and read partial existing semantic generation coverage, but they
-do not download a model or write semantic catch-up work.
+write any derived generation. It serves the active Core generation and may use
+semantic evidence only after exact-generation preflight confirms that the
+compatible semantic projection is complete. Hybrid otherwise falls back to
+lexical with a typed reason; semantic-only returns that readiness error.
+
+Ordinary daemon and explicit Reconcile preflight use read-only SQLite access
+that observes committed WAL state; the retained daemon query service uses the
+selected executor. With automatic indexing disabled, direct CLI `off` and
+`background` passive preflight shares the existing `flat_transaction.lock` from
+SQLite sidecar inspection through control/schema validation and exact Flat
+generation pinning, refuses WAL and rollback-journal state, and opens only the
+main database with immutable read-only semantics. That path does not create a
+lock, database, WAL, SHM, journal, directory, compiled model, runtime, or cache
+artifact. Hybrid preserves the typed fallback code and retryability; semantic
+only preserves the same typed error. A selected built-in executor may load only
+verified cached model/runtime assets; an explicitly selected HTTP executor may
+send its normal conformance probes and query request after preflight. Neither
+path acquires a model, reconciles coverage, or writes semantic catch-up work.
+System-call qualification for this promise scopes write assertions to
+semantic storage, model/runtime caches, and indexing state. An ordinary search
+also opens and locks Tantivy's pre-existing lexical query lock with
+write-capable flags; full-tree snapshots show that mechanism makes no durable
+change. Redesigning lexical query locking is outside the passive semantic
+contract.
 Semantic coverage is exact across the content-filter boundary. Persisted
 flat-F32 source receipts account for every pre-filter Core candidate as either
 an active projected event or an intentionally filtered event. Query metadata

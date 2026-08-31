@@ -36,7 +36,8 @@ pub fn normalize_platform_namespace_alias(path: &Path) -> PathBuf {
 ///
 /// Missing components are private at creation. An existing final directory is
 /// repaired through a no-follow handle, while unsafe ownership, symlinks, and
-/// Windows reparse points fail closed.
+/// Windows reparse points fail closed. On Windows, generic private state accepts
+/// only the current token user or that token's default owner.
 pub fn establish_private_data_root(path: &Path) -> io::Result<()> {
     let path = path_overlap::absolute_data_root_path(path)?;
     #[cfg(unix)]
@@ -84,8 +85,59 @@ pub fn create_private_directory_all(path: &Path) -> io::Result<()> {
     }
 }
 
+/// Creates missing Windows directory components with a protected private DACL
+/// and the exact current-user owner in the creation descriptor.
+///
+/// This is intentionally distinct from [`create_private_directory_all`],
+/// whose established cross-platform contract does not change token-default
+/// ownership. An initially existing final directory keeps its owner and has
+/// only its DACL hardened. Objects that win a missing-path create race must
+/// already have the exact current-user owner and are never adopted.
+#[cfg(windows)]
+pub fn create_current_user_owned_private_directory_all(path: &Path) -> io::Result<()> {
+    windows_acl::create_current_user_owned_private_directory_all(path)
+}
+
+/// Atomically creates one new owner-private regular file and returns its
+/// retained handle.
+///
+/// The private owner and access policy are part of creation, so no permissive
+/// or token-default-owner pathname is ever visible. Existing paths, links,
+/// reparse points, and non-regular objects fail closed.
+pub fn create_private_file_new(path: &Path) -> io::Result<std::fs::File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+            .open(path)?;
+        // The creation mode is already owner-only. Normalize a restrictive
+        // umask through the retained handle so later passive opens remain
+        // usable without introducing any permissive interval.
+        restrict_private_file_handle(&file)?;
+        Ok(file)
+    }
+    #[cfg(windows)]
+    {
+        windows_acl::create_private_file_new(path)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = path;
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "private file creation is unavailable on this platform",
+        ))
+    }
+}
+
 /// Creates missing directories with an owner-only policy and repairs an
-/// existing final directory when it is owned by the current user but is not
+/// existing final directory when it has a platform-admissible owner but is not
 /// private yet.
 ///
 /// Existing owner-private directories are left unchanged, including more
@@ -110,7 +162,7 @@ pub fn ensure_private_directory(path: &Path) -> io::Result<()> {
     }
 }
 
-/// Applies and verifies an owner-only directory policy.
+/// Applies and verifies the private access policy without changing ownership.
 pub fn restrict_private_directory(path: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {
@@ -131,7 +183,7 @@ pub fn restrict_private_directory(path: &Path) -> io::Result<()> {
     }
 }
 
-/// Applies and verifies an owner-only regular-file policy.
+/// Applies and verifies the private access policy without changing ownership.
 pub fn restrict_private_file(path: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {
@@ -152,9 +204,11 @@ pub fn restrict_private_file(path: &Path) -> io::Result<()> {
     }
 }
 
-/// Verifies an existing regular file and repairs its owner-only policy when
-/// the current user owns it. Symlinks, reparse points, unsafe ownership, and
-/// non-regular files fail closed.
+/// Verifies an existing regular file and repairs its private access policy.
+/// Unix repair requires current-user ownership. Windows repair installs the
+/// exact protected current-user/SYSTEM DACL without changing ownership, after
+/// requiring the current token user or token-default owner.
+/// Symlinks, reparse points, and non-regular files fail closed.
 pub fn ensure_private_file(path: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {
@@ -175,11 +229,13 @@ pub fn ensure_private_file(path: &Path) -> io::Result<()> {
     }
 }
 
-/// Verifies an already-open regular file and repairs its owner-only policy
-/// through that same handle when the current user owns it.
+/// Verifies an already-open regular file and repairs its private access policy
+/// through that same handle.
 ///
-/// Callers opening by pathname must use platform no-follow semantics. Unsafe
-/// ownership and non-regular handles fail closed, as do unsuccessful repairs.
+/// Callers opening by pathname must use platform no-follow semantics. Unix
+/// repair requires current-user ownership; Windows repair changes only the
+/// DACL after requiring the current token user or token-default owner.
+/// Non-regular handles and unsuccessful repairs fail closed.
 pub fn ensure_private_file_handle(handle: &std::fs::File) -> io::Result<()> {
     #[cfg(unix)]
     {
@@ -202,8 +258,8 @@ pub fn ensure_private_file_handle(handle: &std::fs::File) -> io::Result<()> {
     }
 }
 
-/// Applies and verifies an owner-only regular-file policy through an already
-/// open handle.
+/// Applies and verifies the private access policy through an already-open
+/// handle without changing ownership.
 pub fn restrict_private_file_handle(handle: &std::fs::File) -> io::Result<()> {
     #[cfg(unix)]
     {
@@ -251,7 +307,9 @@ pub fn restrict_private_executable(path: &Path) -> io::Result<()> {
     }
 }
 
-/// Verifies the exact owner-only directory policy without mutating it.
+/// Verifies the exact private directory policy without mutating it. Windows
+/// requires the current token user or token-default owner plus a protected
+/// current-user/SYSTEM DACL.
 pub fn verify_private_directory(path: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {
@@ -281,7 +339,9 @@ pub fn verify_private_directory(path: &Path) -> io::Result<()> {
     }
 }
 
-/// Verifies the exact owner-only regular-file policy without mutating it.
+/// Verifies the exact private regular-file policy without mutating it. Windows
+/// requires the current token user or token-default owner plus a protected
+/// current-user/SYSTEM DACL.
 pub fn verify_private_file(path: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {
@@ -334,7 +394,9 @@ pub fn verify_private_executable(path: &Path) -> io::Result<()> {
 }
 
 /// Verifies an already-open Windows directory handle without reopening its
-/// pathname. Callers may retain the handle to keep the verified object stable.
+/// pathname. Windows verifies type, non-reparse status, current token user or
+/// token-default ownership, and the exact protected current-user/SYSTEM DACL.
+/// Callers may retain the handle to keep the verified object stable.
 #[cfg(windows)]
 pub fn verify_private_directory_handle(handle: &std::fs::File) -> io::Result<()> {
     windows_acl::verify_private_directory_handle(handle)
@@ -371,7 +433,8 @@ pub fn verify_private_file_handle(handle: &std::fs::File) -> io::Result<()> {
 }
 
 /// Opens a Windows private file while rejecting reparse points in every path
-/// component, then verifies owner and DACL on the retained final handle.
+/// component, then verifies type, bounded token ownership, and the protected
+/// DACL on the retained handle.
 #[cfg(windows)]
 pub fn open_verified_private_file(path: &Path) -> io::Result<std::fs::File> {
     windows_acl::open_verified_private_file(path)
@@ -478,6 +541,23 @@ mod unix_tests {
         Ok(())
     }
 
+    #[test]
+    fn new_private_file_is_atomic_and_exclusive() -> io::Result<()> {
+        let parent = tempfile::tempdir()?;
+        let target = parent.path().join("private-state");
+
+        let file = create_private_file_new(&target)?;
+
+        verify_private_file_handle(&file)?;
+        verify_private_file(&target)?;
+        assert_eq!(file.metadata()?.permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            create_private_file_new(&target).unwrap_err().kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        Ok(())
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn private_file_without_extended_acl_is_valid() -> io::Result<()> {
@@ -508,9 +588,22 @@ mod windows_tests {
             return Err("failed to make inherited ACL fixture permissive".into());
         }
         let directory = parent.path().join("private");
-        fs::create_dir(&directory)?;
+        create_current_user_owned_private_directory_all(&directory)?;
         let file = directory.join("ctx.db");
-        fs::write(&file, b"private")?;
+        drop(create_private_file_new(&file)?);
+        let directory_permissive = Command::new("icacls.exe")
+            .arg(&directory)
+            .args(["/grant", "*S-1-1-0:(OI)(CI)F"])
+            .status()?;
+        let file_permissive = Command::new("icacls.exe")
+            .arg(&file)
+            .args(["/grant", "*S-1-1-0:F"])
+            .status()?;
+        if !directory_permissive.success() || !file_permissive.success() {
+            return Err("failed to create permissive current-user-owned ACL fixtures".into());
+        }
+        assert!(verify_private_directory(&directory).is_err());
+        assert!(verify_private_file(&file).is_err());
 
         restrict_private_directory(&directory)?;
         restrict_private_file(&file)?;
@@ -520,7 +613,7 @@ mod windows_tests {
     }
 
     #[test]
-    fn recursive_creation_is_private_at_creation_under_a_permissive_parent(
+    fn recursive_creation_is_private_and_user_owned_under_a_permissive_parent(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let parent = tempfile::tempdir()?;
         let status = Command::new("icacls.exe")
@@ -533,11 +626,34 @@ mod windows_tests {
         let first = parent.path().join("private");
         let nested = first.join("state");
 
-        create_private_directory_all(&nested)?;
+        create_current_user_owned_private_directory_all(&nested)?;
 
         verify_private_directory(&first)?;
         verify_private_directory(&nested)?;
         fs::write(nested.join("usable"), b"ok")?;
+        Ok(())
+    }
+
+    #[test]
+    fn created_file_is_private_and_user_owned_under_a_permissive_parent(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let parent = tempfile::tempdir()?;
+        let status = Command::new("icacls.exe")
+            .arg(parent.path())
+            .args(["/grant", "*S-1-1-0:(OI)(CI)F"])
+            .status()?;
+        if !status.success() {
+            return Err("failed to make inherited ACL fixture permissive".into());
+        }
+        let path = parent.path().join("created-private-file");
+        let file = create_private_file_new(&path)?;
+
+        verify_private_file_handle(&file)?;
+        verify_private_file(&path)?;
+        assert_eq!(
+            create_private_file_new(&path).unwrap_err().kind(),
+            io::ErrorKind::AlreadyExists
+        );
         Ok(())
     }
 
@@ -573,7 +689,14 @@ mod windows_tests {
             return Err("failed to make inherited ACL fixture permissive".into());
         }
         let target = parent.path().join("data");
-        fs::create_dir(&target)?;
+        create_current_user_owned_private_directory_all(&target)?;
+        let permissive = Command::new("icacls.exe")
+            .arg(&target)
+            .args(["/grant", "*S-1-1-0:(OI)(CI)F"])
+            .status()?;
+        if !permissive.success() {
+            return Err("failed to make current-user-owned data root permissive".into());
+        }
         assert!(verify_private_directory(&target).is_err());
 
         establish_private_data_root(&target)?;
@@ -640,11 +763,13 @@ mod windows_tests {
             return Err("failed to create permissive parent ACL".into());
         }
         let directory = parent.path().join("private");
-        fs::create_dir(&directory)?;
+        create_current_user_owned_private_directory_all(&directory)?;
         let file = directory.join("secret.txt");
-        fs::write(&file, b"must not be readable")?;
-        restrict_private_directory(&directory)?;
-        restrict_private_file(&file)?;
+        let mut secret = create_private_file_new(&file)?;
+        use std::io::Write as _;
+        secret.write_all(b"must not be readable")?;
+        secret.sync_all()?;
+        drop(secret);
 
         let script = r#"
 $secure = ConvertTo-SecureString $env:CTX_ACL_TEST_PASSWORD -AsPlainText -Force

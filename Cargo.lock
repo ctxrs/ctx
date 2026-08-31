@@ -1626,6 +1626,7 @@ dependencies = [
  "ctx-history-platform",
  "ctx-semantic-model",
  "fs2",
+ "libc",
  "memmap2",
  "rusqlite",
  "serde",
@@ -1633,6 +1634,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "thiserror 1.0.69",
+ "url",
  "uuid",
 ]
 

@@ -153,14 +153,17 @@ impl SourceSearchFailure {
     }
 }
 
-fn semantic_error_into_anyhow(error: HistorySemanticError) -> anyhow::Error {
+pub(super) fn semantic_error_into_anyhow(error: HistorySemanticError) -> anyhow::Error {
     match error {
-        HistorySemanticError::NotReady { reason, detail, .. } => {
-            anyhow::Error::new(crate::semantic::SemanticNotReady::new(
-                semantic_reason_code(reason),
-                semantic_external_detail(reason, &detail),
-            ))
-        }
+        HistorySemanticError::NotReady {
+            reason,
+            detail,
+            retryable,
+        } => anyhow::Error::new(crate::semantic::SemanticNotReady::new_with_retryable(
+            semantic_reason_code(reason),
+            semantic_external_detail(reason, &detail),
+            retryable,
+        )),
         HistorySemanticError::Failed { detail } => anyhow::anyhow!(detail),
     }
 }
@@ -173,6 +176,8 @@ pub(super) const fn semantic_reason_code(reason: SemanticReason) -> &'static str
         SemanticReason::ContentScopeUnsupported => "semantic_content_scope_unsupported",
         SemanticReason::EventTypeUnsupported => "semantic_event_type_unsupported",
         SemanticReason::QueryServiceUnavailable => "semantic_query_service_unavailable",
+        SemanticReason::ExecutorUnavailable => "semantic_executor_unavailable",
+        SemanticReason::ExecutorConfigurationInvalid => "semantic_executor_configuration_invalid",
         SemanticReason::StoreUnavailable => "semantic_store_unavailable",
         SemanticReason::StoreMissing => "semantic_store_missing",
         SemanticReason::GenerationUnreadable => "semantic_generation_unreadable",
@@ -299,6 +304,32 @@ struct SearchRefreshContext<'a> {
     source_count: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::source_index) enum ForegroundSemanticExecution {
+    ReadOnly,
+    Reconcile,
+}
+
+pub(in crate::source_index) fn foreground_semantic_execution(
+    refresh_mode: RefreshArg,
+    daemon_enabled: bool,
+) -> Option<ForegroundSemanticExecution> {
+    if daemon_enabled {
+        return None;
+    }
+    match refresh_mode {
+        RefreshArg::Off | RefreshArg::Background => Some(ForegroundSemanticExecution::ReadOnly),
+        RefreshArg::Wait => Some(ForegroundSemanticExecution::Reconcile),
+    }
+}
+
+pub(in crate::source_index) fn should_wait_for_daemon_query_service(
+    refresh_mode: RefreshArg,
+    daemon_enabled: bool,
+) -> bool {
+    refresh_mode == RefreshArg::Background && daemon_enabled
+}
+
 pub fn run_search(
     args: SearchArgs,
     data_root: PathBuf,
@@ -311,19 +342,26 @@ pub fn run_search(
     let config = config::AppConfig::from_snapshot(config);
     let request = crate::SearchRequest::from(args);
     let refresh_mode = request.refresh;
-    let foreground_semantic = refresh_mode == RefreshArg::Wait && !config.daemon.enabled;
-    let semantic_port = if foreground_semantic {
-        crate::semantic::SemanticQueryAdapter::foreground(
-            &data_root,
-            config.semantic_embedding_executor().clone(),
-        )
-    } else {
-        crate::semantic::SemanticQueryAdapter::new(&data_root)
+    let foreground_semantic = foreground_semantic_execution(refresh_mode, config.daemon.enabled);
+    let semantic_port = match foreground_semantic {
+        Some(ForegroundSemanticExecution::ReadOnly) => {
+            crate::semantic::SemanticQueryAdapter::foreground_read_only(
+                &data_root,
+                config.semantic_embedding_executor().clone(),
+            )
+        }
+        Some(ForegroundSemanticExecution::Reconcile) => {
+            crate::semantic::SemanticQueryAdapter::foreground(
+                &data_root,
+                config.semantic_embedding_executor().clone(),
+            )
+        }
+        None => crate::semantic::SemanticQueryAdapter::new(&data_root),
     };
     let json_output = request.format == crate::OutputFormat::Json;
     let verbose = request.verbose;
     let request = SourceSearchRequest::from(request);
-    let policy = source_search_policy(&config, foreground_semantic);
+    let policy = source_search_policy(&config, foreground_semantic.is_some());
     let mut observation = initial_search_observation();
     let result = run_search_inner(
         request,
@@ -381,7 +419,7 @@ fn run_search_inner<P: HistorySemanticPort>(
         semantic_weight,
         policy.semantic,
     );
-    if refresh_mode == RefreshArg::Background && needs_semantic {
+    if should_wait_for_daemon_query_service(refresh_mode, config.daemon.enabled) && needs_semantic {
         wait_for_daemon_query_service(&data_root, Duration::from_secs(3));
     }
     let mut refresh = observed_refresh_for_search(request, refresh_mode, &data_root, observation)?;

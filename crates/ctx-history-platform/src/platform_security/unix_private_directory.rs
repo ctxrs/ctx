@@ -220,9 +220,18 @@ pub(super) fn verify_no_extended_acl(_file: &File) -> io::Result<()> {
 }
 
 fn open_or_create_directory(parent: &File, name: &OsStr) -> io::Result<(File, bool, bool)> {
+    open_or_create_directory_after_missing(parent, name, || Ok(()))
+}
+
+fn open_or_create_directory_after_missing(
+    parent: &File,
+    name: &OsStr,
+    after_missing: impl FnOnce() -> io::Result<()>,
+) -> io::Result<(File, bool, bool)> {
     match open_directory(parent.as_raw_fd(), name) {
         Ok(directory) => Ok((directory, false, false)),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            after_missing()?;
             let name = path_component(name)?;
             // mkdirat applies umask only by removing bits from 0700, so a new
             // directory is never exposed to group or other while it is made
@@ -345,7 +354,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn nested_creation_is_exact_and_usable_under_umask_0777() {
+    fn private_data_root_creation_is_exact_and_usable_under_umask_0777() {
         const CHILD_ENV: &str = "CTX_TEST_PRIVATE_DIRECTORY_UMASK_CHILD";
         if let Some(target) = std::env::var_os(CHILD_ENV) {
             // SAFETY: this is a single-test child process, so changing its
@@ -355,7 +364,7 @@ mod tests {
             }
             let first = Path::new(&target).join("private");
             let nested = first.join("state");
-            create_private_directory_all(&nested).unwrap();
+            ensure_private_directory(&nested).unwrap();
             assert_eq!(
                 fs::metadata(&first).unwrap().permissions().mode() & 0o777,
                 0o700
@@ -371,7 +380,9 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let status = std::process::Command::new(std::env::current_exe().unwrap())
             .arg("--exact")
-            .arg("nested_creation_is_exact_and_usable_under_umask_0777")
+            .arg(
+                "platform_security::unix_private_directory::tests::private_data_root_creation_is_exact_and_usable_under_umask_0777",
+            )
             .arg("--nocapture")
             .env(CHILD_ENV, temp.path())
             .status()
@@ -412,8 +423,36 @@ mod tests {
     }
 
     #[test]
+    fn create_race_refuses_a_symlink_winner_without_repair() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let target = temp.path().join("target");
+        let raced = temp.path().join("raced");
+        fs::create_dir(&target).unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).unwrap();
+        let parent = File::open(temp.path()).unwrap();
+
+        let result = open_or_create_directory_after_missing(&parent, OsStr::new("raced"), || {
+            symlink(&target, &raced)
+        });
+
+        assert!(result.is_err());
+        assert!(fs::symlink_metadata(&raced)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+    }
+
+    #[test]
     fn establishing_data_root_repairs_existing_mode_before_use() {
         let temp = tempfile::tempdir().unwrap();
+        fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o755)).unwrap();
         let target = temp.path().join("data");
         fs::create_dir(&target).unwrap();
         fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).unwrap();
@@ -423,6 +462,11 @@ mod tests {
         assert_eq!(
             fs::metadata(&target).unwrap().permissions().mode() & 0o777,
             0o700
+        );
+        assert_eq!(
+            fs::metadata(temp.path()).unwrap().permissions().mode() & 0o777,
+            0o755,
+            "establishing a legacy final root must not chmod existing ancestors"
         );
         fs::write(target.join("first-write"), b"private").unwrap();
     }

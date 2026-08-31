@@ -44,15 +44,20 @@ for target in lib test_support_lib; do
 done
 
 write_expected_external() {
+  # `url` constructs percent-correct immutable SQLite file URIs and `libc`
+  # supplies O_NOFOLLOW/O_CLOEXEC for the existing transaction-lock file; no
+  # network client or storage backend is admitted into ctx-semantic-index.
   cat <<'EOF'
 @crates//anyhow-1.0.103:anyhow-1.0.103
 @crates//fs2-0.4.3:fs2-0.4.3
+@crates//libc-0.2.186:libc-0.2.186
 @crates//memmap2-0.9.11:memmap2-0.9.11
 @crates//rusqlite-0.32.1:rusqlite-0.32.1
 @crates//serde-1.0.228:serde-1.0.228
 @crates//serde_json-1.0.150:serde_json-1.0.150
 @crates//sha2-0.10.9:sha2-0.10.9
 @crates//thiserror-1.0.69:thiserror-1.0.69
+@crates//url-2.5.8:url-2.5.8
 @crates//uuid-1.23.4:uuid-1.23.4
 EOF
 }

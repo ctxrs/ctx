@@ -13,6 +13,8 @@ mod identity;
 mod lock;
 mod manifest;
 mod physical;
+#[cfg(any(test, feature = "test-support"))]
+mod publication_probe;
 mod read_root;
 mod retention;
 
@@ -50,6 +52,8 @@ pub use durable_directory::{
 #[cfg(any(test, feature = "test-support"))]
 pub use durable_directory::{AtomicWriteStage, AtomicWriteTestHookGuard};
 pub use error::{GenerationError, Result};
+#[cfg(windows)]
+pub use generation::publish_active_generation_pointer_validated_predecessor_fence;
 pub use generation::{
     create_candidate_generation, lexical_index_settings, load_active_generation_pointer,
     open_slot_index, publish_active_generation_pointer,
@@ -74,6 +78,11 @@ pub use physical::{
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use physical::{checksum_walks, hashed_artifact_bytes, reset_physical_verification_activity};
+#[cfg(any(test, feature = "test-support"))]
+pub use publication_probe::{
+    AtomicPublicationStage, AtomicReplacementFailureProbe, PublicationIoProbe,
+    PublicationIoProbeGuard,
+};
 pub use read_root::GenerationReadRoot;
 #[cfg(any(test, feature = "test-support"))]
 pub use read_root::{GenerationRootTraversalStage, GenerationRootTraversalTestHookGuard};

@@ -683,14 +683,23 @@ ctx search "incident follow-up" --source-group work
 Tantivy generation. In automatic indexing mode it may start or wake the
 persistent daemon for lexical publication and optional semantic catch-up. In
 manual mode, background refresh uses only the last published generation and
-does not contact, start, or wake a process; there is no hidden foreground
-bootstrap or importer. History-source plugins are searched from the published
-generation after explicit import; search refresh does not execute their
-commands in 1.0.
+does not contact, start, or wake a ctx daemon or worker; there is no hidden foreground
+bootstrap or importer. A direct CLI semantic or hybrid query may read an
+already-ready exact semantic generation and either embed from verified cached
+model/runtime assets or use an explicitly selected HTTP executor after
+preflight. A missing, stale, partial, incompatible, WAL-backed, or otherwise
+unsafe passive snapshot returns a typed semantic error; hybrid preserves its
+stable code and retryability while falling back to lexical.
+History-source plugins are searched from the published generation after
+explicit import; search refresh does not execute their commands in 1.0.
 Semantic retrieval reads an existing compatible generation under
-`search/semantic`; search does not initialize semantic storage, download
-embedding models, or run semantic indexing. Use `--refresh off` to query the
-published generations without starting or waking a process. Use
+`search/semantic`. Use `--refresh off` to query published Core and semantic
+generations without starting or waking a ctx daemon or worker. With automatic indexing disabled,
+this path embeds the query in the foreground from verified cached model assets;
+Core ML additionally requires an existing validated compiled artifact, Windows
+ML an already-ready provider, and ONNX an existing runtime. It does not
+initialize semantic storage, download or compile a model, prepare a provider,
+reconcile semantic coverage, or write projection state. Use
 `--refresh wait` to request authoritative Core publication; in manual mode it
 may start a finite worker that exits after admitted Core requests are terminal
 and IPC is quiescent. Results are rendered from Core under every refresh mode.
@@ -800,9 +809,12 @@ MCP searches do not automatically exclude the caller's session.
 
 `--refresh off` is read-only for ctx-derived storage, but it still serves
 indexed snippets and typed show/locate data from the active Core generation.
-Explicit semantic or hybrid
-requests may read a compatible semantic generation and ask the retained daemon
-query service to embed the query from an already-cached model.
+Explicit semantic or hybrid requests may read a compatible semantic generation.
+They embed the query through the retained daemon query service when it is
+available, or from verified cached model assets in the foreground when the
+daemon is disabled. An explicitly selected HTTP executor remains HTTP-capable
+after exact preflight; `off` prohibits indexing and durable mutation, not that
+selected network request.
 
 Results are local hits over indexed history. Event hits include `ctx_event_id`;
 hits with known session context include `ctx_session_id`; provider metadata

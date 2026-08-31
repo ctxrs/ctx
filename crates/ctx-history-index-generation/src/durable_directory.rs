@@ -28,6 +28,12 @@ use ctx_history_platform::platform_security::{
     restrict_private_file_handle, verify_private_file_handle,
 };
 
+#[cfg(any(test, feature = "test-support"))]
+use crate::publication_probe::{
+    publication_io_checkpoint, publication_io_observer_active, PublicationIoEvent,
+    PublicationIoProbeGuard,
+};
+
 #[cfg(windows)]
 use windows_sys::Win32::Storage::FileSystem::{
     FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_WRITE, READ_CONTROL, WRITE_DAC,
@@ -35,6 +41,12 @@ use windows_sys::Win32::Storage::FileSystem::{
 
 const TEMPORARY_FILE_PREFIX: &str = ".ctx-tantivy-atomic-";
 const TEMPORARY_FILE_ATTEMPTS: usize = 16;
+
+#[cfg(any(test, feature = "test-support"))]
+mod publication_failure_probe;
+
+#[cfg(windows)]
+mod windows_replace;
 
 /// An [`MmapDirectory`] that does not return from `atomic_write` until the
 /// replacement is durable.
@@ -513,6 +525,64 @@ where
     }
 }
 
+fn prepare_atomic_write(target_path: &Path, data: &[u8]) -> crate::Result<PathBuf> {
+    atomic_write_checkpoint(AtomicWriteStage::BeforeTemporaryWrite, target_path)?;
+    let parent_path = target_path.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("path {} has no parent directory", target_path.display()),
+        )
+    })?;
+    let (temporary_path, mut temporary_file) = create_temporary_file(parent_path)?;
+    let write_result = temporary_file
+        .write_all(data)
+        .and_then(|()| temporary_file.flush())
+        .and_then(|()| temporary_file.sync_all());
+    drop(temporary_file);
+    if let Err(error) = write_result {
+        let _ = fs::remove_file(&temporary_path);
+        return Err(error.into());
+    }
+    Ok(temporary_path)
+}
+
+fn failed_atomic_replacement(
+    temporary_path: &Path,
+    _target_path: &Path,
+    error: io::Error,
+) -> crate::GenerationError {
+    #[cfg(any(test, feature = "test-support"))]
+    let failure_probe = publication_io_observer_active()
+        .then(|| publication_failure_probe::capture(temporary_path, _target_path, &error));
+    let cleanup_result = fs::remove_file(temporary_path);
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(mut probe) = failure_probe {
+        probe.source_cleanup = publication_failure_probe::io_result(&cleanup_result);
+        let _ = publication_io_checkpoint(PublicationIoEvent::AtomicReplacementFailure(probe));
+    }
+    let _ = cleanup_result;
+    error.into()
+}
+
+fn finish_atomic_write<SyncParent>(
+    target_path: &Path,
+    sync_parent: SyncParent,
+) -> DurableAtomicWriteOutcome
+where
+    SyncParent: FnOnce() -> io::Result<()>,
+{
+    if let Err(error) = atomic_write_checkpoint(
+        AtomicWriteStage::AfterReplaceBeforeDirectorySync,
+        target_path,
+    ) {
+        return DurableAtomicWriteOutcome::VisibleButDurabilityUncertain(error);
+    }
+    match sync_parent() {
+        Ok(()) => DurableAtomicWriteOutcome::Durable,
+        Err(error) => DurableAtomicWriteOutcome::VisibleButDurabilityUncertain(error),
+    }
+}
+
 fn atomic_replace_with_outcome_validated<Replace, SyncParent, Validate>(
     target_path: &Path,
     data: &[u8],
@@ -525,63 +595,29 @@ where
     SyncParent: FnOnce() -> io::Result<()>,
     Validate: FnOnce() -> crate::Result<()>,
 {
-    let parent_path = target_path.parent().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("path {} has no parent directory", target_path.display()),
-        )
-    })?;
-    let (temporary_path, mut temporary_file) = create_temporary_file(parent_path)?;
-
-    atomic_write_checkpoint(AtomicWriteStage::BeforeTemporaryWrite, target_path)?;
-
-    let write_result = temporary_file
-        .write_all(data)
-        .and_then(|()| temporary_file.flush())
-        .and_then(|()| temporary_file.sync_all());
-    // Windows does not permit moving this file while its default, non-sharing
-    // handle is open.
-    drop(temporary_file);
-    if let Err(error) = write_result {
-        let _ = fs::remove_file(&temporary_path);
-        return Err(error.into());
-    }
-
+    let temporary_path = prepare_atomic_write(target_path, data)?;
     atomic_write_checkpoint(
         AtomicWriteStage::AfterTemporarySyncBeforeReplace,
         target_path,
     )?;
-    atomic_write_checkpoint(AtomicWriteStage::BeforeReplace, target_path)?;
 
-    // This is the terminal publication fence: every fallible preparation and
-    // test checkpoint has completed, and the replacement below is the next
-    // operation. The validator can therefore reject a raced candidate while
-    // the previous target is still authoritative.
+    // The validator can reject a raced candidate while the previous target is
+    // still authoritative. Once it succeeds, the replacement checkpoint is
+    // the final fallible test fence before replacement.
     if let Err(error) = validate_before_replace() {
         let _ = fs::remove_file(&temporary_path);
         return Err(error);
     }
+    atomic_write_checkpoint(AtomicWriteStage::BeforeReplace, target_path)?;
 
     if let Err(error) = replace(&temporary_path, target_path) {
-        let _ = fs::remove_file(&temporary_path);
-        return Err(error.into());
-    }
-
-    if let Err(error) = atomic_write_checkpoint(
-        AtomicWriteStage::AfterReplaceBeforeDirectorySync,
-        target_path,
-    ) {
-        return Ok(DurableAtomicWriteOutcome::VisibleButDurabilityUncertain(
+        return Err(failed_atomic_replacement(
+            &temporary_path,
+            target_path,
             error,
         ));
     }
-
-    match sync_parent() {
-        Ok(()) => Ok(DurableAtomicWriteOutcome::Durable),
-        Err(error) => Ok(DurableAtomicWriteOutcome::VisibleButDurabilityUncertain(
-            error,
-        )),
-    }
+    Ok(finish_atomic_write(target_path, sync_parent))
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -603,44 +639,31 @@ enum AtomicWriteStage {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-type AtomicWriteTestHook = Box<dyn for<'a> FnMut(AtomicWriteStage, &'a Path) -> io::Result<()>>;
-
-#[cfg(any(test, feature = "test-support"))]
-thread_local! {
-    static ATOMIC_WRITE_TEST_HOOK: std::cell::RefCell<Option<AtomicWriteTestHook>> =
-        std::cell::RefCell::new(None);
+pub struct AtomicWriteTestHookGuard {
+    _guard: PublicationIoProbeGuard,
 }
-
-#[cfg(any(test, feature = "test-support"))]
-pub struct AtomicWriteTestHookGuard(Option<AtomicWriteTestHook>);
 
 #[cfg(any(test, feature = "test-support"))]
 impl AtomicWriteTestHookGuard {
-    pub fn set<F>(hook: F) -> Self
+    pub fn set<F>(mut hook: F) -> Self
     where
         F: for<'a> FnMut(AtomicWriteStage, &'a Path) -> io::Result<()> + 'static,
     {
-        let previous = ATOMIC_WRITE_TEST_HOOK.with(|active| active.replace(Some(Box::new(hook))));
-        Self(previous)
-    }
-}
-
-#[cfg(any(test, feature = "test-support"))]
-impl Drop for AtomicWriteTestHookGuard {
-    fn drop(&mut self) {
-        ATOMIC_WRITE_TEST_HOOK.with(|active| active.replace(self.0.take()));
+        Self {
+            _guard: PublicationIoProbeGuard::set_raw(move |event| match event {
+                PublicationIoEvent::Atomic(stage, target) => hook(stage, target),
+                PublicationIoEvent::CandidateGenerationSync => Ok(()),
+                #[cfg(windows)]
+                PublicationIoEvent::TerminalSealOpen => Ok(()),
+                PublicationIoEvent::AtomicReplacementFailure(_) => Ok(()),
+            }),
+        }
     }
 }
 
 #[cfg(any(test, feature = "test-support"))]
 fn atomic_write_checkpoint(stage: AtomicWriteStage, target: &Path) -> io::Result<()> {
-    ATOMIC_WRITE_TEST_HOOK.with(|active| {
-        let mut active = active.borrow_mut();
-        match active.as_mut() {
-            Some(hook) => hook(stage, target),
-            None => Ok(()),
-        }
-    })
+    publication_io_checkpoint(PublicationIoEvent::Atomic(stage, target))
 }
 
 #[cfg(not(any(test, feature = "test-support")))]
@@ -718,54 +741,20 @@ fn replace_file(source: &Path, target: &Path) -> io::Result<()> {
 
 #[cfg(windows)]
 fn replace_file(source: &Path, target: &Path) -> io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-
-    const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
-    const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
-
-    #[link(name = "kernel32")]
-    unsafe extern "system" {
-        #[link_name = "MoveFileExW"]
-        fn move_file_ex_w(
-            existing_file_name: *const u16,
-            new_file_name: *const u16,
-            flags: u32,
-        ) -> i32;
-    }
-
-    fn nul_terminated(path: &Path) -> io::Result<Vec<u16>> {
-        let mut path_wide = path.as_os_str().encode_wide().collect::<Vec<_>>();
-        if path_wide.contains(&0) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "Windows path contains an interior NUL",
-            ));
-        }
-        path_wide.push(0);
-        Ok(path_wide)
-    }
-
-    let source_wide = nul_terminated(source)?;
-    let target_wide = nul_terminated(target)?;
-    // SAFETY: both path buffers are NUL-terminated and remain alive for the
-    // duration of the call.
-    let moved = unsafe {
-        move_file_ex_w(
-            source_wide.as_ptr(),
-            target_wide.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    };
-    if moved == 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
+    windows_replace::WindowsAtomicReplacement::prepare(source, target)?.replace()
 }
+
+#[cfg(test)]
+mod publication_probe_tests;
+
+#[cfg(test)]
+mod publication_failure_probe_tests;
 
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
+    #[cfg(not(windows))]
+    use std::{cell::RefCell, rc::Rc};
 
     use tempfile::tempdir;
 
@@ -886,6 +875,31 @@ mod tests {
         assert_no_temporary_files(temporary_directory.path());
     }
 
+    #[cfg(not(windows))]
+    #[test]
+    fn validated_atomic_write_runs_validator_before_before_replace_checkpoint() {
+        let temporary_directory = tempdir().unwrap();
+        let directory = DurableMmapDirectory::open(temporary_directory.path()).unwrap();
+        let observed = Rc::new(RefCell::new(Vec::new()));
+        let observed_by_hook = Rc::clone(&observed);
+        let hook = AtomicWriteTestHookGuard::set(move |stage, _path| {
+            if stage == AtomicWriteStage::BeforeReplace {
+                observed_by_hook.borrow_mut().push("before-replace");
+            }
+            Ok(())
+        });
+
+        directory
+            .atomic_write_with_outcome_validated(Path::new("meta.json"), b"candidate", || {
+                observed.borrow_mut().push("validator");
+                Ok(())
+            })
+            .unwrap();
+        drop(hook);
+
+        assert_eq!(*observed.borrow(), ["validator", "before-replace"]);
+    }
+
     #[test]
     fn durable_staged_file_replacement_supports_first_publish_and_replace() {
         let temporary_directory = tempdir().unwrap();
@@ -909,29 +923,6 @@ mod tests {
         durable_atomic_replace_file(&replacement, &target).unwrap();
         assert_eq!(fs::read(&target).unwrap(), b"replacement");
         assert!(!replacement.exists());
-    }
-
-    #[test]
-    fn replacement_failure_preserves_previous_file_and_removes_temporary_file() {
-        let temporary_directory = tempdir().unwrap();
-        let target_path = temporary_directory.path().join("meta.json");
-        fs::write(&target_path, b"previous").unwrap();
-
-        let error = atomic_replace_with(
-            &target_path,
-            b"replacement",
-            |temporary_path, target_path| {
-                assert_eq!(fs::read(temporary_path).unwrap(), b"replacement");
-                assert_eq!(fs::read(target_path).unwrap(), b"previous");
-                Err(io::Error::other("injected replacement failure"))
-            },
-            || panic!("parent sync must not run after replacement failure"),
-        )
-        .unwrap_err();
-
-        assert_eq!(error.to_string(), "injected replacement failure");
-        assert_eq!(fs::read(&target_path).unwrap(), b"previous");
-        assert_no_temporary_files(temporary_directory.path());
     }
 
     #[test]
