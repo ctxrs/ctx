@@ -54,16 +54,6 @@ impl ctx_daemon_cli::DaemonCliHost for BuiltinSemanticTestHost {
         Ok(ctx_daemon_cli::DaemonRuntimeConfig::default())
     }
 
-    fn persisted_daemon_enabled(&self, _data_root: &Path) -> anyhow::Result<bool> {
-        Ok(true)
-    }
-
-    fn set_daemon_enabled(&self, _data_root: &Path, _enabled: bool) -> anyhow::Result<()> {
-        Err(anyhow::anyhow!(
-            "the ctx-history-cli semantic test host cannot mutate daemon config"
-        ))
-    }
-
     fn home_dir(&self) -> Option<PathBuf> {
         None
     }

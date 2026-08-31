@@ -158,8 +158,6 @@ impl Default for DaemonRuntimeConfig {
 
 pub trait DaemonCliHost: Send + Sync {
     fn load_config(&self, data_root: &Path) -> Result<DaemonRuntimeConfig>;
-    fn persisted_daemon_enabled(&self, data_root: &Path) -> Result<bool>;
-    fn set_daemon_enabled(&self, data_root: &Path, enabled: bool) -> Result<()>;
     fn home_dir(&self) -> Option<PathBuf>;
     fn run_daemon_service(
         &self,
@@ -250,14 +248,6 @@ impl DaemonCliHost for TestHost {
         .with_semantic_embedding_executor(semantic_executor)
         .with_automatic_provider_discovery(automatic_provider_discovery)
         .with_provider_roots(provider_roots))
-    }
-
-    fn persisted_daemon_enabled(&self, data_root: &Path) -> Result<bool> {
-        Ok(self.load_config(data_root)?.daemon.enabled)
-    }
-
-    fn set_daemon_enabled(&self, data_root: &Path, enabled: bool) -> Result<()> {
-        ctx_app_config::set_daemon_enabled(data_root, enabled)
     }
 
     fn home_dir(&self) -> Option<PathBuf> {
