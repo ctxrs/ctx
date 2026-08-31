@@ -654,18 +654,20 @@ fn foreground_import_returns_at_ready_core_generation() {
         import["totals"]["current_indexed_documents"], 1,
         "{import:#}"
     );
-    let generation = import["sources"][0]["published_generation"]
-        .as_str()
-        .unwrap();
+    let source = &import["sources"][0];
+    assert_eq!(source["status"], "published", "{import:#}");
+    let request_id = source["daemon_request_id"].as_str().unwrap();
+    assert!(!request_id.is_empty(), "{import:#}");
+    assert_eq!(
+        source["daemon_request_metadata"]["owner"], "daemon",
+        "{import:#}",
+    );
+    let generation = source["published_generation"].as_str().unwrap();
+    assert!(!generation.is_empty(), "{import:#}");
 
     let status = json_output(ctx_from_binary(&temp, &binary).args(["status", "--format=json"]));
     assert_eq!(status["lexical"]["generation_id"], generation, "{status:#}");
     assert_eq!(status["lexical"]["status"], "ready", "{status:#}");
-    assert_eq!(status["refresh"]["status"], "ready", "{status:#}");
-    assert_eq!(
-        status["refresh"]["published_generation"], generation,
-        "{status:#}"
-    );
     assert!(status.get("relational").is_none(), "{status:#}");
     assert!(!data_root(&temp).join("relational.sqlite").exists());
 
@@ -684,6 +686,10 @@ fn foreground_import_returns_at_ready_core_generation() {
         "prompt history daemon refresh oracle",
         1,
         "message",
+    );
+    assert_eq!(
+        search["retrieval"]["generation_id"], generation,
+        "{search:#}"
     );
 
     drop(core_daemon);

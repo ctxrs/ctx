@@ -105,6 +105,13 @@ struct DaemonOwnerIdentity {
     binary_sha256: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DaemonOwnerWaitOutcome {
+    Owner(DaemonOwnerIdentity),
+    Released,
+    StillActiveWithoutStableOwner,
+}
+
 enum DaemonAutostartRequest {
     Suppressed(&'static str),
     Existing(DaemonOwnerIdentity),
@@ -254,6 +261,40 @@ fn wait_for_daemon_owner_identity(data_root: &Path) -> Result<Option<DaemonOwner
     }
 }
 
+fn classify_daemon_owner_wait_with(
+    wait_for_owner: impl FnOnce() -> Result<Option<DaemonOwnerIdentity>>,
+    lock_is_active: impl FnOnce() -> bool,
+) -> Result<DaemonOwnerWaitOutcome> {
+    Ok(match wait_for_owner()? {
+        Some(owner) => DaemonOwnerWaitOutcome::Owner(owner),
+        None if lock_is_active() => DaemonOwnerWaitOutcome::StillActiveWithoutStableOwner,
+        None => DaemonOwnerWaitOutcome::Released,
+    })
+}
+
+fn classify_daemon_owner_wait(data_root: &Path) -> Result<DaemonOwnerWaitOutcome> {
+    classify_daemon_owner_wait_with(
+        || wait_for_daemon_owner_identity(data_root),
+        || daemon_lock_is_active(data_root),
+    )
+}
+
+fn existing_daemon_request_after_owner_wait(
+    outcome: DaemonOwnerWaitOutcome,
+) -> Result<Option<DaemonAutostartRequest>> {
+    match outcome {
+        DaemonOwnerWaitOutcome::Owner(owner) => Ok(Some(DaemonAutostartRequest::Existing(owner))),
+        DaemonOwnerWaitOutcome::Released => Ok(None),
+        DaemonOwnerWaitOutcome::StillActiveWithoutStableOwner => {
+            Err(ActiveDaemonOwnerIdentityError.into())
+        }
+    }
+}
+
+fn existing_daemon_request(data_root: &Path) -> Result<Option<DaemonAutostartRequest>> {
+    existing_daemon_request_after_owner_wait(classify_daemon_owner_wait(data_root)?)
+}
+
 fn recover_unusable_daemon_owner(
     host: &dyn DaemonApplicationHost,
     data_root: &Path,
@@ -334,22 +375,19 @@ fn request_daemon_autostart(
     {
         let executable = daemon_autostart_exe()?;
         if daemon_lock_matches_executable(data_root, &executable)? {
-            return Ok(DaemonAutostartRequest::Existing(
-                wait_for_daemon_owner_identity(data_root)?.ok_or_else(|| {
-                    anyhow!("active ctx daemon lock has no stable owner identity")
-                })?,
-            ));
-        }
-        if daemon_autostart_suppression_reason().is_some() {
-            return Err(binary_identity_handoff_error());
-        }
-        handoff_mismatched_daemon_owner(host, data_root, &executable)?;
-        if daemon_lock_is_active(data_root) {
-            return Ok(DaemonAutostartRequest::Existing(
-                wait_for_daemon_owner_identity(data_root)?.ok_or_else(|| {
-                    anyhow!("active replacement ctx daemon has no stable owner identity")
-                })?,
-            ));
+            if let Some(existing) = existing_daemon_request(data_root)? {
+                return Ok(existing);
+            }
+        } else {
+            if daemon_autostart_suppression_reason().is_some() {
+                return Err(binary_identity_handoff_error());
+            }
+            handoff_mismatched_daemon_owner(host, data_root, &executable)?;
+            if daemon_lock_is_active(data_root) {
+                if let Some(existing) = existing_daemon_request(data_root)? {
+                    return Ok(existing);
+                }
+            }
         }
     }
     if let Some(reason) = daemon_autostart_suppression_reason() {
@@ -374,11 +412,9 @@ fn request_daemon_autostart(
         let executable = daemon_autostart_exe()?;
         handoff_mismatched_daemon_owner(host, data_root, &executable)?;
         if daemon_lock_is_active(data_root) {
-            return Ok(DaemonAutostartRequest::Existing(
-                wait_for_daemon_owner_identity(data_root)?.ok_or_else(|| {
-                    anyhow!("active replacement ctx daemon has no stable owner identity")
-                })?,
-            ));
+            if let Some(existing) = existing_daemon_request(data_root)? {
+                return Ok(existing);
+            }
         }
     }
     let exe = match daemon_autostart_exe() {
@@ -733,6 +769,17 @@ impl fmt::Display for BinaryIdentityHandoffError {
 }
 
 impl std::error::Error for BinaryIdentityHandoffError {}
+
+#[derive(Debug)]
+struct ActiveDaemonOwnerIdentityError;
+
+impl fmt::Display for ActiveDaemonOwnerIdentityError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("active ctx daemon lock has no stable owner identity")
+    }
+}
+
+impl std::error::Error for ActiveDaemonOwnerIdentityError {}
 
 fn daemon_handoff_observation(
     host: &dyn DaemonApplicationHost,

@@ -149,6 +149,63 @@ fn kiro_legacy_selection_is_os_gated_and_xdg_is_replacement() {
 }
 
 #[test]
+fn kiro_default_fixture_matrix_matches_released_platform_locations() {
+    for platform in [
+        DiscoveryPlatform::Linux,
+        DiscoveryPlatform::MacOS,
+        DiscoveryPlatform::Windows,
+        DiscoveryPlatform::OtherUnix,
+    ] {
+        let temp = tempdir();
+        let context = context(temp.path(), platform);
+        let current = context.home().join(".kiro/sessions");
+        let linux_legacy = context.home().join(".local/share/kiro-cli/data.sqlite3");
+        let macos_legacy = context
+            .home()
+            .join("Library/Application Support/kiro-cli/data.sqlite3");
+        fs::create_dir_all(&current).unwrap();
+        write_file(&linux_legacy, b"linux legacy");
+        write_file(&macos_legacy, b"macos legacy");
+
+        let report = provider_report(&context, CaptureProvider::KiroCli);
+        assert_eq!(report.issues, [], "{platform:?}");
+        if platform == DiscoveryPlatform::OtherUnix {
+            assert!(report.sources.is_empty(), "{platform:?}: {report:#?}");
+            continue;
+        }
+
+        let current_source = report
+            .sources
+            .iter()
+            .find(|source| source.path == current)
+            .unwrap_or_else(|| panic!("missing current Kiro route for {platform:?}: {report:#?}"));
+        assert_eq!(current_source.status, ProviderSourceStatus::Unsupported);
+        assert_eq!(
+            current_source.source_kind,
+            ProviderSourceKind::DetectionOnly
+        );
+
+        let available = report
+            .sources
+            .iter()
+            .filter(|source| source.status == ProviderSourceStatus::Available)
+            .collect::<Vec<_>>();
+        match platform {
+            DiscoveryPlatform::Linux => {
+                assert_eq!(available.len(), 1, "{report:#?}");
+                assert_eq!(available[0].path, linux_legacy);
+            }
+            DiscoveryPlatform::MacOS => {
+                assert_eq!(available.len(), 1, "{report:#?}");
+                assert_eq!(available[0].path, macos_legacy);
+            }
+            DiscoveryPlatform::Windows => assert!(available.is_empty(), "{report:#?}"),
+            DiscoveryPlatform::OtherUnix => unreachable!(),
+        }
+    }
+}
+
+#[test]
 fn kiro_relative_home_is_manual_and_does_not_fall_back() {
     let temp = tempdir();
     let context =
