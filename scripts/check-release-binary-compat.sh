@@ -490,12 +490,13 @@ check_macos() {
   minimum="$(macho_min_version)"
   [[ -n "${minimum}" ]] || fail "missing macOS minimum version load command"
   version_le "${minimum}" 13.0 || fail "minimum macOS ${minimum} is newer than 13.0"
-  # Core ML support and the persistent daemon's FSEvents watcher are compiled
-  # into both macOS artifacts. CoreServices.framework is the exact native API
-  # dependency of that watcher. The C++ runtime is retained when a native
-  # linker records it, but Zig can correctly omit that unused load command
-  # after linking the same static esaxx object. Keep every other system-library
-  # entry exact so an accidental third-party dylib still fails.
+  # Core ML support, the locked platform TLS verifier, and the persistent
+  # daemon's FSEvents watcher are compiled into both macOS artifacts.
+  # CoreServices.framework and Security.framework are their exact native API
+  # dependencies. The C++ runtime is retained when a native linker records it,
+  # but Zig can correctly omit that unused load command after linking the same
+  # static esaxx object. Keep every other system-library entry exact so an
+  # accidental third-party dylib still fails.
   local expected_macos_dylibs expected_macos_dylibs_with_cxx actual_macos_dylibs
   expected_macos_dylibs="/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation
 /System/Library/Frameworks/CoreGraphics.framework/Versions/A/CoreGraphics
@@ -505,6 +506,7 @@ check_macos() {
 /System/Library/Frameworks/Foundation.framework/Versions/C/Foundation
 /System/Library/Frameworks/ImageIO.framework/Versions/A/ImageIO
 /System/Library/Frameworks/Metal.framework/Versions/A/Metal
+/System/Library/Frameworks/Security.framework/Versions/A/Security
 /usr/lib/libSystem.B.dylib
 /usr/lib/libcharset.1.dylib
 /usr/lib/libiconv.2.dylib
