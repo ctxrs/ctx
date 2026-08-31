@@ -3,6 +3,7 @@
 RUST_FORMAT_TARGETS = [
     "//crates/ctx-agent-application:unit_tests",
     "//crates/ctx-agent-integrations:unit_tests",
+    "//crates/ctx-app-config:unit_tests",
     "//crates/ctx-companion-bridge:unit_tests",
     "//crates/ctx-client-observability:unit_tests",
     "//crates/ctx-client-observability:analytics_identity_tests",

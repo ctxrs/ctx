@@ -33,6 +33,8 @@ source_paths=(
   scripts
   crates/ctx-agent-application/src
   crates/ctx-agent-integrations/src
+  crates/ctx-app-config/Cargo.toml
+  crates/ctx-app-config/src
   crates/ctx-cli/Cargo.toml
   crates/ctx-cli/src
   crates/ctx-cli-presentation/Cargo.toml

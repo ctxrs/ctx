@@ -10,6 +10,7 @@ fixture="${tmp}/fixture"
 mkdir -p \
   "${fixture}/contracts" \
   "${fixture}/contracts/stable-defaults" \
+  "${fixture}/crates/ctx-app-config/src" \
   "${fixture}/crates/ctx-cli/src" \
   "${fixture}/crates/ctx-client-observability/src/analytics" \
   "${fixture}/crates/ctx-upgrade-engine/tests/contracts" \
@@ -19,14 +20,14 @@ mkdir -p \
 cp "${repo_root}/contracts/public-control-surface-v1.json" "${fixture}/contracts/"
 cp "${repo_root}/contracts/stable-defaults/v0.25.0.json" \
   "${fixture}/contracts/stable-defaults/"
-cp "${repo_root}/crates/ctx-cli/src/config.rs" "${fixture}/crates/ctx-cli/src/"
-mkdir -p "${fixture}/crates/ctx-cli/src/config"
-cp "${repo_root}/crates/ctx-cli/src/config/mutation.rs" \
-  "${fixture}/crates/ctx-cli/src/config/"
-cp "${repo_root}/crates/ctx-cli/src/deprecated_controls.rs" "${fixture}/crates/ctx-cli/src/"
+cp "${repo_root}/crates/ctx-app-config/src/lib.rs" "${fixture}/crates/ctx-app-config/src/"
+cp "${repo_root}/crates/ctx-app-config/src/mutation.rs" \
+  "${fixture}/crates/ctx-app-config/src/"
+cp "${repo_root}/crates/ctx-app-config/src/deprecated_controls.rs" \
+  "${fixture}/crates/ctx-app-config/src/"
 cp "${repo_root}/crates/ctx-client-observability/src/analytics/operation.rs" \
   "${fixture}/crates/ctx-client-observability/src/analytics/"
-cp "${repo_root}/crates/ctx-cli/src/config_tests.rs" "${fixture}/crates/ctx-cli/src/"
+cp "${repo_root}/crates/ctx-app-config/src/tests.rs" "${fixture}/crates/ctx-app-config/src/"
 cp "${repo_root}/crates/ctx-cli/src/process_environment.rs" "${fixture}/crates/ctx-cli/src/"
 mkdir -p "${fixture}/crates/ctx-daemon-cli/tests/contracts"
 cp "${repo_root}/crates/ctx-daemon-cli/tests/contracts/daemon_config_reload.rs" \
@@ -69,7 +70,7 @@ change_inventory_default() {
 
 make_unapproved_change() {
   sed -i '0,/enabled: true/{s/enabled: true/enabled: false/}' \
-    "$1/crates/ctx-cli/src/config.rs"
+    "$1/crates/ctx-app-config/src/lib.rs"
   python3 - "$1/contracts/public-control-surface-v1.json" <<'PY'
 import json
 import pathlib
@@ -113,12 +114,12 @@ PY
 
 change_runtime_default() {
   sed -i 's/AUTO_UPGRADE_DEFAULT_MODE: &str = "apply"/AUTO_UPGRADE_DEFAULT_MODE: \&str = "off"/' \
-    "$1/crates/ctx-cli/src/config.rs"
+    "$1/crates/ctx-app-config/src/lib.rs"
 }
 
 rewrite_history_to_hide_a_regression() {
   sed -i '0,/enabled: true/{s/enabled: true/enabled: false/}' \
-    "$1/crates/ctx-cli/src/config.rs"
+    "$1/crates/ctx-app-config/src/lib.rs"
   python3 - "$1/contracts/public-control-surface-v1.json" <<'PY'
 import json
 import pathlib
@@ -157,7 +158,7 @@ PY
 add_undocumented_helper_env() {
   sed -i '/fn local_usage_env_override() -> LocalUsageEnvOverride {/a\
     let _undocumented = env::var_os("CTX_UNDOCUMENTED_HELPER_CONTROL");' \
-    "$1/crates/ctx-cli/src/config.rs"
+    "$1/crates/ctx-app-config/src/lib.rs"
 }
 
 add_uncontained_retired_control() {
