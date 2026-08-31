@@ -352,10 +352,10 @@ fn execute(request: Request, events: &mut dyn CapabilityEventSink) -> Result<Val
 }
 
 fn wake_refresh_facts(data_root: &Path) -> Value {
-    let config = crate::config::AppConfig::load(data_root);
+    let config = ctx_app_config::AppConfig::load(data_root);
     let analytics_enabled = config
         .as_ref()
-        .is_ok_and(crate::config::resolved_analytics_consent);
+        .is_ok_and(crate::analytics::effective_analytics_enabled);
     if let Ok(config) = config {
         crate::semantic::maybe_autostart_daemon(
             data_root,
@@ -367,7 +367,7 @@ fn wake_refresh_facts(data_root: &Path) -> Value {
 }
 
 fn status_facts(data_root: &Path) -> Result<Value> {
-    let config = crate::config::AppConfig::load(data_root)?;
+    let config = ctx_app_config::AppConfig::load(data_root)?;
     let storage = crate::observability_composition::local_usage_storage_authority(data_root);
     let control =
         crate::observability_composition::usage_control_snapshot(config.local_usage.enabled);
@@ -392,8 +392,8 @@ fn core_status_facts(data_root: &Path, usage: Option<UsageAction>) -> Result<Val
     let usage_action = match usage {
         Some(UsageAction::Enable | UsageAction::Disable) => {
             let enabled = matches!(usage, Some(UsageAction::Enable));
-            crate::config::set_local_usage_enabled(data_root, enabled)?;
-            let control = crate::config::read_local_usage_control(data_root)?;
+            ctx_app_config::set_local_usage_enabled(data_root, enabled)?;
+            let control = ctx_app_config::read_local_usage_control(data_root)?;
             Some(json!({
                 "action": if enabled { "enable" } else { "disable" },
                 "effective_enabled": control.effective_enabled,
@@ -431,10 +431,10 @@ fn core_setup_facts(
         semantic,
         wait,
     } = options;
-    let mut config = crate::config::AppConfig::load(data_root)?;
+    let mut config = ctx_app_config::AppConfig::load(data_root)?;
     if semantic {
-        crate::config::set_semantic_search_enabled(data_root, true)?;
-        config = crate::config::AppConfig::load(data_root)?;
+        ctx_app_config::set_semantic_search_enabled(data_root, true)?;
+        config = ctx_app_config::AppConfig::load(data_root)?;
     }
     crate::history_config::CliHistoryConfigAdapter::new(data_root, &mut config)
         .write_default_config()?;

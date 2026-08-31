@@ -16,7 +16,7 @@ struct AnalyticsEnvironment {
 
 impl AnalyticsEnvironment {
     fn new() -> Self {
-        let lock = crate::config::TEST_LOCAL_USAGE_ENV_LOCK
+        let lock = ctx_app_config::TEST_LOCAL_USAGE_ENV_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let saved = ANALYTICS_ENVIRONMENT_NAMES
@@ -237,7 +237,7 @@ fn mcp_analytics_consent_is_resolved_from_authoritative_config() {
 
     let root = tempfile::tempdir().unwrap();
     std::fs::write(
-        root.path().join(crate::config::CONFIG_FILE),
+        root.path().join(ctx_app_config::CONFIG_FILE),
         "[analytics]\nenabled = true\n",
     )
     .unwrap();
@@ -267,7 +267,7 @@ fn mcp_analytics_consent_is_resolved_from_authoritative_config() {
 
     std::env::set_var("CTX_ANALYTICS_ENABLED", "true");
     std::fs::write(
-        root.path().join(crate::config::CONFIG_FILE),
+        root.path().join(ctx_app_config::CONFIG_FILE),
         "[analytics]\nenabled = false\n",
     )
     .unwrap();
@@ -279,7 +279,7 @@ fn mcp_analytics_consent_is_resolved_from_authoritative_config() {
     );
 
     std::fs::write(
-        root.path().join(crate::config::CONFIG_FILE),
+        root.path().join(ctx_app_config::CONFIG_FILE),
         "[analytics]\nenabled = true\n",
     )
     .unwrap();
@@ -325,7 +325,7 @@ fn mcp_analytics_consent_is_resolved_from_authoritative_config() {
 
     std::env::set_var("CTX_ANALYTICS_ENABLED", "true");
     std::fs::write(
-        root.path().join(crate::config::CONFIG_FILE),
+        root.path().join(ctx_app_config::CONFIG_FILE),
         "[analytics]\nenabled = malformed\n",
     )
     .unwrap();

@@ -8,11 +8,11 @@ use ctx_history_cli::HistoryConfigPort;
 use serde_json::{json, Value};
 
 use crate::{
-    config,
     history_config::CliHistoryConfigAdapter,
     output::{compact_json, print_json},
     ui::Ui,
 };
+use ctx_app_config as config;
 
 pub(crate) fn run_semantic(
     args: SemanticArgs,
@@ -86,7 +86,7 @@ pub(crate) fn run_semantic(
                 .http_endpoint()
                 .is_some();
             set_semantic_policy(&data_root, config, false)?;
-            config::clear_semantic_embedding_auth_endpoint();
+            crate::semantic::clear_embedding_auth_endpoint();
             if config.automatic_indexing_enabled() && selected_executor_is_http {
                 crate::semantic::restart_daemon_with_current_environment_and_wait(
                     &data_root,
@@ -120,7 +120,7 @@ fn set_semantic_executor_and_enable(
     config: &mut config::AppConfig,
     executor: &str,
 ) -> Result<()> {
-    config::rebind_semantic_embedding_auth_endpoint_for_explicit_selection(executor);
+    crate::semantic::rebind_embedding_auth_for_explicit_selection(executor);
     let accepted = if executor == "builtin" {
         ctx_daemon_cli::SemanticEmbeddingExecutorConfig::builtin()
     } else {
@@ -134,7 +134,7 @@ fn set_semantic_executor_and_enable(
     // `--executor` is the explicit authority to bind the inherited token to a
     // newly selected remote endpoint. Ordinary config loads preserve an
     // existing independent binding and therefore fail closed on mismatch.
-    config::rebind_semantic_embedding_auth_endpoint(config);
+    crate::semantic::rebind_embedding_auth_endpoint(config);
     Ok(())
 }
 
@@ -153,7 +153,7 @@ fn reload_and_validate_semantic_policy(
     enabled: bool,
 ) -> Result<()> {
     *config = config::AppConfig::load(data_root)?;
-    config::bind_semantic_embedding_auth_endpoint(config);
+    crate::semantic::bind_embedding_auth_endpoint(config);
     if config.semantic_search_enabled() != enabled {
         if enabled {
             bail!(
@@ -389,7 +389,7 @@ mod tests {
 
     #[test]
     fn status_json_is_offline_redacted_and_uses_canonical_auth_binding() {
-        let _lock = crate::config::TEST_LOCAL_USAGE_ENV_LOCK
+        let _lock = ctx_app_config::TEST_LOCAL_USAGE_ENV_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let _token = TestEnvRestore::capture(ctx_daemon_cli::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENV);

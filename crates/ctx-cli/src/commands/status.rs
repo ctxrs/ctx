@@ -4,12 +4,12 @@ use anyhow::Result;
 use serde_json::{json, Value};
 
 use crate::analytics::{count_bucket, StatusTelemetry};
-use crate::config::{self, CONFIG_FILE};
 use crate::local_usage;
 use crate::output::print_json;
 use crate::semantic::source_epoch_status_report;
 use crate::ui::Ui;
 use crate::StatusArgs;
+use ctx_app_config::{self as config, CONFIG_FILE};
 use ctx_cli_presentation::commands::compact_usage_health_json;
 
 mod usage;

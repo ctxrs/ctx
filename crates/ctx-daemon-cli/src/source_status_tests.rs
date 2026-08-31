@@ -208,7 +208,7 @@ fn semantic_status_reports_ready_only_with_exact_projected_and_filtered_counts()
     let data_root = temp.path().join("data");
     fs::create_dir_all(&data_root).unwrap();
     fs::write(
-        data_root.join(crate::config::CONFIG_FILE),
+        data_root.join(ctx_app_config::CONFIG_FILE),
         "[search]\nsemantic = true\n",
     )
     .unwrap();
@@ -310,7 +310,7 @@ fn semantic_status_reports_ready_only_with_exact_projected_and_filtered_counts()
         }
     }
 
-    let config = AppConfig::load(&data_root).unwrap();
+    let config = crate::composition::load_runtime_config(&data_root).unwrap();
     let status = source_epoch_status_report(&data_root, &config).unwrap();
     let semantic = &status.report["semantic"];
     assert_eq!(semantic["status"], "ready");
@@ -333,8 +333,8 @@ fn pristine_source_status_is_read_only_and_exposes_stable_paths() {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("missing");
 
-    let status =
-        source_epoch_status_report(&data_root, &AppConfig::default()).expect("source status");
+    let status = source_epoch_status_report(&data_root, &DaemonRuntimeConfig::default())
+        .expect("source status");
 
     assert!(!data_root.exists());
     assert_eq!(
@@ -502,7 +502,7 @@ fn source_daemon_report_preserves_semantic_terminal_job_facts() {
     let data_root = temp.path().join("data");
     fs::create_dir_all(&data_root).unwrap();
     fs::write(
-        data_root.join(crate::config::CONFIG_FILE),
+        data_root.join(ctx_app_config::CONFIG_FILE),
         "[daemon]\nenabled = true\n\n[search]\nsemantic = true\n",
     )
     .unwrap();
@@ -516,7 +516,7 @@ fn source_daemon_report_preserves_semantic_terminal_job_facts() {
     )
     .unwrap();
 
-    let config = crate::config::AppConfig::load(&data_root).unwrap();
+    let config = crate::composition::load_runtime_config(&data_root).unwrap();
     let daemon = source_daemon_report(&data_root, &config);
     let jobs = daemon["jobs"].as_object().unwrap();
     assert!(jobs.contains_key("core_refresh"), "{daemon:#}");
@@ -634,7 +634,7 @@ fn admission_pending_is_active_with_existing_and_empty_generations() {
     )
     .unwrap();
 
-    let existing = source_epoch_status_report(&data_root, &AppConfig::default()).unwrap();
+    let existing = source_epoch_status_report(&data_root, &DaemonRuntimeConfig::default()).unwrap();
     assert_eq!(existing.report["refresh"]["status"], "pending");
     assert_eq!(existing.report["lexical"]["status"], "ready");
     assert_eq!(
@@ -653,7 +653,7 @@ fn admission_pending_is_active_with_existing_and_empty_generations() {
         }),
     )
     .unwrap();
-    let empty = source_epoch_status_report(&empty_root, &AppConfig::default()).unwrap();
+    let empty = source_epoch_status_report(&empty_root, &DaemonRuntimeConfig::default()).unwrap();
     assert_eq!(empty.report["refresh"]["status"], "pending");
     assert_eq!(empty.report["lexical"]["status"], "pending");
     assert_eq!(
@@ -677,7 +677,7 @@ fn authoritative_empty_stays_query_ready_when_the_latest_refresh_failed() {
     )
     .unwrap();
 
-    let status = source_epoch_status_report(&data_root, &AppConfig::default()).unwrap();
+    let status = source_epoch_status_report(&data_root, &DaemonRuntimeConfig::default()).unwrap();
     assert_eq!(status.report["lexical"]["status"], "ready");
     assert_eq!(status.report["history_epoch"]["status"], "ready");
     assert_eq!(status.report["refresh"]["status"], "unavailable");
@@ -712,7 +712,7 @@ fn legacy_zero_source_publication_is_not_projected_as_ready() {
         )
         .unwrap();
 
-    let status = source_epoch_status_report(&data_root, &AppConfig::default()).unwrap();
+    let status = source_epoch_status_report(&data_root, &DaemonRuntimeConfig::default()).unwrap();
     assert_eq!(status.report["lexical"]["status"], "unavailable");
     assert_eq!(
         status.report["lexical"]["reason"],

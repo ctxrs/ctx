@@ -4,12 +4,9 @@ use anyhow::Result;
 use serde_json::{json, Value};
 
 use crate::{
-    analytics::IndexTelemetry,
-    config::{self, CONFIG_FILE},
-    output::compact_json,
-    semantic::source_epoch_status_report,
-    ui::Ui,
+    analytics::IndexTelemetry, output::compact_json, semantic::source_epoch_status_report, ui::Ui,
 };
+use ctx_app_config::{self as config, CONFIG_FILE};
 
 #[cfg(test)]
 pub(crate) mod dashboard_fixture;

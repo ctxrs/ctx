@@ -9,7 +9,7 @@ use super::*;
 #[cfg(unix)]
 #[test]
 fn source_refresh_only_status_exposes_runtime_and_certified_refresh_identity() -> Result<()> {
-    let _env_lock = crate::config::TEST_LOCAL_USAGE_ENV_LOCK
+    let _env_lock = crate::TEST_LOCAL_USAGE_ENV_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let temp = tempfile::tempdir()?;
@@ -17,7 +17,7 @@ fn source_refresh_only_status_exposes_runtime_and_certified_refresh_identity() -
         temp.path().join(CONFIG_FILE),
         "[daemon]\nmode = \"source-refresh-only\"\n",
     )?;
-    let semantic_contract_fingerprint = AppConfig::load(temp.path())?
+    let semantic_contract_fingerprint = crate::composition::load_runtime_config(temp.path())?
         .semantic_model_contract()
         .fingerprint()
         .to_owned();

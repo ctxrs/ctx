@@ -1,6 +1,6 @@
 use std::{
     collections::BTreeMap,
-    env, fs, io,
+    env, fs,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -10,10 +10,10 @@ use ctx_history_capture::{
     provider_paths_equivalent, ProviderRootDefinition, ProviderRootKind,
     MAX_CONFIGURED_PROVIDER_ROOTS,
 };
-use ctx_history_cli::parse_capture_provider_name;
-use ctx_history_core::CaptureProvider;
+use ctx_history_core::{parse_capture_provider_name, CaptureProvider};
 use ctx_history_platform::platform_security::{
     establish_private_data_root, validate_provider_source_outside_data_root,
+    verify_private_directory,
 };
 
 mod durable_write;
@@ -24,23 +24,20 @@ mod semantic;
 mod toml_subset;
 
 #[cfg(test)]
-pub(crate) use mutation::add_claude_root;
-pub(crate) use mutation::{
+pub use mutation::add_claude_root;
+pub use mutation::{
     add_provider_root_with_kind, persisted_daemon_enabled, remove_provider_root,
-    set_daemon_enabled, set_semantic_search_enabled, set_semantic_search_enabled_with_executor,
-    write_default_config, ProviderRootMutation,
+    set_auto_upgrade_mode, set_daemon_enabled, set_semantic_search_enabled,
+    set_semantic_search_enabled_with_executor, write_default_config, ProviderRootMutation,
 };
-pub(crate) use removed_cloud_mode::is_removed_cloud_mode_error;
+pub use removed_cloud_mode::is_removed_cloud_mode_error;
 use removed_cloud_mode::RemovedCloudModeConfigError;
 use semantic::parse_semantic_embedding_executor;
 pub use semantic::SemanticConfig;
-pub(crate) use semantic::{
-    bind_semantic_embedding_auth_endpoint, clear_semantic_embedding_auth_endpoint,
-    rebind_semantic_embedding_auth_endpoint,
-    rebind_semantic_embedding_auth_endpoint_for_explicit_selection,
-};
 
-use crate::deprecated_controls::DeprecatedControls;
+mod deprecated_controls;
+
+pub use deprecated_controls::DeprecatedControls;
 use durable_write::{write_config_durably, ConfigMutationLock};
 use provider_roots::{
     validate_provider_root_existing_kind, validate_provider_root_kind, validate_provider_root_path,
@@ -54,17 +51,13 @@ pub const DAEMON_MODE_ENV: &str = "CTX_DAEMON_MODE";
 pub const LOCAL_USAGE_DEFAULT_ENABLED: bool = true;
 pub const SEMANTIC_SEARCH_DEFAULT_ENABLED: bool = false;
 
-pub(crate) fn normalized_analytics_environment_override() -> Option<bool> {
+pub fn normalized_analytics_environment_override() -> Option<bool> {
     let deprecated_controls = DeprecatedControls::detect();
     if deprecated_controls.disables_analytics() {
         return Some(false);
     }
     env::var_os("CTX_ANALYTICS_ENABLED")
         .map(|value| value.to_str().and_then(parse_bool_value).unwrap_or(false))
-}
-
-pub(crate) fn resolved_analytics_consent(config: &AppConfig) -> bool {
-    config.analytics.enabled && normalized_analytics_environment_override() != Some(false)
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -95,8 +88,8 @@ impl IndexingMode {
     }
 }
 
-#[cfg(test)]
-pub(crate) static TEST_LOCAL_USAGE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+#[cfg(any(test, feature = "test-support"))]
+pub static TEST_LOCAL_USAGE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AutoUpgradeMode {
@@ -130,7 +123,7 @@ pub enum DaemonMode {
 }
 
 impl DaemonMode {
-    pub(crate) fn parse(value: &str) -> Option<Self> {
+    pub fn parse(value: &str) -> Option<Self> {
         match value.to_ascii_lowercase().as_str() {
             "full" => Some(Self::Full),
             "source-refresh-only" => Some(Self::SourceRefreshOnly),
@@ -164,7 +157,7 @@ pub struct LocalUsageConfig {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum LocalUsageEnvOverride {
+pub enum LocalUsageEnvOverride {
     Unset,
     Enabled,
     Disabled,
@@ -172,7 +165,7 @@ pub(crate) enum LocalUsageEnvOverride {
 }
 
 impl LocalUsageEnvOverride {
-    pub(crate) const fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Unset => "none",
             Self::Enabled => "enabled",
@@ -183,23 +176,23 @@ impl LocalUsageEnvOverride {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct LocalUsageControl {
-    pub(crate) persisted_enabled: bool,
-    pub(crate) effective_enabled: bool,
-    pub(crate) environment_override: LocalUsageEnvOverride,
+pub struct LocalUsageControl {
+    pub persisted_enabled: bool,
+    pub effective_enabled: bool,
+    pub environment_override: LocalUsageEnvOverride,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum LocalUsageConfigState {
+pub enum LocalUsageConfigState {
     Resolved(bool),
     Malformed,
     Unresolved,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct LocalUsageResolution {
-    pub(crate) config_state: LocalUsageConfigState,
-    pub(crate) environment_override: LocalUsageEnvOverride,
+pub struct LocalUsageResolution {
+    pub config_state: LocalUsageConfigState,
+    pub environment_override: LocalUsageEnvOverride,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -209,12 +202,12 @@ enum LocalUsageConfigSource {
 }
 
 #[derive(Debug, Default)]
-pub(crate) struct LocalUsageConfigResolver {
+pub struct LocalUsageConfigResolver {
     cached: Option<(LocalUsageConfigSource, LocalUsageConfigState)>,
 }
 
 impl LocalUsageConfigResolver {
-    pub(crate) fn resolve(&mut self, data_root: &Path) -> LocalUsageResolution {
+    pub fn resolve(&mut self, data_root: &Path) -> LocalUsageResolution {
         let path = AppConfig::config_path(data_root);
         let source = match mutation::read_config_text_migrating_retired_controls(&path) {
             Ok(Some(text)) => Some(LocalUsageConfigSource::Text(text)),
@@ -254,11 +247,11 @@ impl LocalUsageConfigResolver {
 }
 
 impl LocalUsageResolution {
-    pub(crate) fn effective_on_startup(self) -> bool {
+    pub fn effective_on_startup(self) -> bool {
         self.effective_after(None)
     }
 
-    pub(crate) fn effective_after(self, previous: Option<bool>) -> bool {
+    pub fn effective_after(self, previous: Option<bool>) -> bool {
         if matches!(
             self.environment_override,
             LocalUsageEnvOverride::Disabled | LocalUsageEnvOverride::Invalid
@@ -396,11 +389,13 @@ impl AppConfig {
         self.search.semantic_source.as_str()
     }
 
-    pub fn semantic_embedding_executor(&self) -> &ctx_daemon_cli::SemanticEmbeddingExecutorConfig {
+    pub fn semantic_embedding_executor(
+        &self,
+    ) -> &ctx_semantic_model::SemanticEmbeddingExecutorConfig {
         &self.semantic.executor
     }
 
-    pub(crate) fn apply_persisted_semantic_search_enabled(&mut self, enabled: bool) {
+    pub fn apply_persisted_semantic_search_enabled(&mut self, enabled: bool) {
         if self.search.semantic_source != SemanticSearchSource::Environment {
             self.search.semantic = Some(enabled);
             self.search.semantic_source = SemanticSearchSource::Config;
@@ -416,15 +411,12 @@ impl AppConfig {
         Self::load_with_deprecated_controls(data_root, &deprecated_controls)
     }
 
-    pub(crate) fn load_with_deprecated_controls(
+    pub fn load_with_deprecated_controls(
         data_root: &Path,
         deprecated_controls: &DeprecatedControls,
     ) -> Result<Self> {
         let mut config = Self::load_persisted(data_root)?;
         config.apply_env(deprecated_controls)?;
-        if ctx_upgrade_engine::current_exe_is_staging_dogfood() {
-            config.upgrade.auto = AutoUpgradeMode::Off.as_str().to_owned();
-        }
         Ok(config)
     }
 
@@ -726,7 +718,7 @@ impl AppConfig {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static APP_CONFIG_LOAD_COUNT: std::cell::Cell<Option<usize>> = const {
         std::cell::Cell::new(None)
@@ -734,7 +726,7 @@ thread_local! {
 }
 
 fn observe_app_config_load() {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     APP_CONFIG_LOAD_COUNT.with(|count| {
         if let Some(current) = count.get() {
             count.set(Some(current.saturating_add(1)));
@@ -742,8 +734,8 @@ fn observe_app_config_load() {
     });
 }
 
-#[cfg(test)]
-pub(crate) fn count_app_config_loads<T>(operation: impl FnOnce() -> T) -> (T, usize) {
+#[cfg(any(test, feature = "test-support"))]
+pub fn count_app_config_loads<T>(operation: impl FnOnce() -> T) -> (T, usize) {
     APP_CONFIG_LOAD_COUNT.with(|count| {
         let previous = count.replace(Some(0));
         assert!(
@@ -760,7 +752,7 @@ pub fn set_local_usage_enabled(data_root: &Path, enabled: bool) -> Result<()> {
     mutation::set_config_bool(data_root, "local_usage", "enabled", enabled)
 }
 
-pub(crate) fn read_local_usage_control(data_root: &Path) -> Result<LocalUsageControl> {
+pub fn read_local_usage_control(data_root: &Path) -> Result<LocalUsageControl> {
     let resolution = resolve_local_usage_control(data_root);
     let Some(control) = resolution.control() else {
         bail!("local usage configuration could not be resolved");
@@ -768,7 +760,7 @@ pub(crate) fn read_local_usage_control(data_root: &Path) -> Result<LocalUsageCon
     Ok(control)
 }
 
-pub(crate) fn resolve_local_usage_control(data_root: &Path) -> LocalUsageResolution {
+pub fn resolve_local_usage_control(data_root: &Path) -> LocalUsageResolution {
     LocalUsageConfigResolver::default().resolve(data_root)
 }
 
@@ -992,9 +984,10 @@ fn decode_basic_key_unicode_escape(
 mod provider_root_mutation_tests;
 
 #[cfg(test)]
-#[path = "config/semantic_tests.rs"]
+mod provider_root_config_tests;
+
+#[cfg(test)]
 mod semantic_tests;
 
 #[cfg(test)]
-#[path = "config_tests.rs"]
 mod tests;

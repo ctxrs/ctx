@@ -13,13 +13,11 @@ use ctx_upgrade_engine::{
     UpgradeEngine, UpgradeFailureKind as EngineFailureKind, UpgradeObserver, UpgradeTerminalStatus,
 };
 
-use crate::{
-    analytics::{
-        count_bucket, OperationCompletedV1, Outcome, PublicEventV1, UpgradeChannel,
-        UpgradeFailureKind, UpgradeMode, UpgradeOperation, UpgradeStatus, UpgradeTelemetry,
-    },
-    config::AppConfig,
+use crate::analytics::{
+    count_bucket, OperationCompletedV1, Outcome, PublicEventV1, UpgradeChannel, UpgradeFailureKind,
+    UpgradeMode, UpgradeOperation, UpgradeStatus, UpgradeTelemetry,
 };
+use ctx_app_config::AppConfig;
 
 pub(crate) static RELEASE_TRANSPORT: CliReleaseTransport = CliReleaseTransport;
 pub(crate) static RELEASE_PROCESS: CliReleaseProcess = CliReleaseProcess;

@@ -2,7 +2,9 @@
 
 use super::*;
 
-fn application_config(config: &AppConfig<'_>) -> ctx_daemon_application::DaemonConfigSnapshot {
+fn application_config(
+    config: &DaemonRuntimeConfig,
+) -> ctx_daemon_application::DaemonConfigSnapshot {
     ctx_daemon_application::DaemonConfigSnapshot {
         enabled: config.daemon.enabled,
         mode: super::super::daemon_supervisor::daemon_mode(config.daemon.mode),
@@ -21,7 +23,7 @@ fn application_trigger(trigger: DaemonTriggerCommandArg) -> ctx_daemon_applicati
 }
 
 #[cfg(test)]
-pub(super) fn daemon_autostart_allowed(data_root: &Path, config: &AppConfig<'_>) -> bool {
+pub(super) fn daemon_autostart_allowed(data_root: &Path, config: &DaemonRuntimeConfig) -> bool {
     ctx_daemon_application::daemon_autostart_allowed(data_root, &application_config(config))
 }
 
@@ -31,7 +33,7 @@ pub fn daemon_autostart_suppression_reason() -> Option<&'static str> {
 
 pub fn maybe_autostart_daemon(
     data_root: &Path,
-    config: &AppConfig<'_>,
+    config: &DaemonRuntimeConfig,
     trigger: DaemonTriggerCommandArg,
 ) {
     if !config.daemon.enabled {
@@ -64,7 +66,7 @@ pub fn maybe_autostart_daemon(
 
 pub fn start_finite_core_worker_and_wait(
     data_root: &Path,
-    config: &AppConfig<'_>,
+    config: &DaemonRuntimeConfig,
     trigger: DaemonTriggerCommandArg,
 ) -> Result<DaemonHandoff> {
     super::super::daemon_supervisor::with_daemon_application(|application| {
@@ -95,7 +97,7 @@ pub fn start_finite_core_worker_and_wait(
 
 pub fn autostart_daemon_and_wait(
     data_root: &Path,
-    config: &AppConfig<'_>,
+    config: &DaemonRuntimeConfig,
     trigger: DaemonTriggerCommandArg,
 ) -> Result<DaemonHandoff> {
     Ok(autostart_daemon_for_setup_and_wait(data_root, config, trigger)?.handoff)
@@ -103,7 +105,7 @@ pub fn autostart_daemon_and_wait(
 
 pub fn autostart_core_daemon_and_wait(
     data_root: &Path,
-    config: &AppConfig<'_>,
+    config: &DaemonRuntimeConfig,
     trigger: DaemonTriggerCommandArg,
 ) -> Result<DaemonHandoff> {
     Ok(autostart_persistent_daemon_and_wait(
@@ -117,7 +119,7 @@ pub fn autostart_core_daemon_and_wait(
 
 pub fn restart_daemon_with_current_environment_and_wait(
     data_root: &Path,
-    config: &AppConfig<'_>,
+    config: &DaemonRuntimeConfig,
     trigger: DaemonTriggerCommandArg,
 ) -> Result<DaemonHandoff> {
     super::super::daemon_supervisor::with_daemon_application(|application| {
@@ -148,7 +150,7 @@ pub fn restart_daemon_with_current_environment_and_wait(
 
 pub fn autostart_daemon_for_setup_and_wait(
     data_root: &Path,
-    config: &AppConfig<'_>,
+    config: &DaemonRuntimeConfig,
     trigger: DaemonTriggerCommandArg,
 ) -> Result<DaemonSetupHandoff> {
     autostart_persistent_daemon_and_wait(
@@ -167,7 +169,7 @@ enum PersistentDaemonReadiness {
 
 fn autostart_persistent_daemon_and_wait(
     data_root: &Path,
-    config: &AppConfig<'_>,
+    config: &DaemonRuntimeConfig,
     trigger: DaemonTriggerCommandArg,
     readiness: PersistentDaemonReadiness,
 ) -> Result<DaemonSetupHandoff> {
@@ -217,7 +219,7 @@ fn autostart_persistent_daemon_and_wait(
 
 pub fn observe_daemon_for_setup_and_wait(
     data_root: &Path,
-    config: &AppConfig<'_>,
+    config: &DaemonRuntimeConfig,
 ) -> Result<DaemonSetupHandoff> {
     super::super::daemon_supervisor::with_daemon_application(|application| {
         let handoff = application

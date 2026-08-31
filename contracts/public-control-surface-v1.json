@@ -148,7 +148,7 @@
   "retired_control_reference": "docs/storage.md",
   "retired_control_containment": [
     {
-      "path": "crates/ctx-cli/src/config_tests.rs",
+      "path": "crates/ctx-app-config/src/tests.rs",
       "purpose": "Assert rejection of the removed release-authority key and migration of the short-lived RFC 2544 compatibility key.",
       "controls": [
         "upgrade.functions_base",
@@ -156,7 +156,7 @@
       ]
     },
     {
-      "path": "crates/ctx-cli/src/config/mutation.rs",
+      "path": "crates/ctx-app-config/src/mutation.rs",
       "purpose": "Remove the short-lived RFC 2544 compatibility key from persisted 1.2.1 configuration without changing unrelated settings.",
       "controls": [
         "upgrade.allow_rfc2544_fake_ip"
@@ -208,7 +208,7 @@
       ]
     }
   ],
-  "deprecated_compatibility_handler": "crates/ctx-cli/src/deprecated_controls.rs",
+  "deprecated_compatibility_handler": "crates/ctx-app-config/src/deprecated_controls.rs",
   "deprecated_compatibility_count": 7,
   "deprecated_compatibility_removal_version": null,
   "deprecated_control_references": [

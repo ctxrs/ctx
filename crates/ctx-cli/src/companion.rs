@@ -251,9 +251,9 @@ fn forward_environment(environment: &mut CompanionEnvironment) {
 
 fn forward_mcp_environment(environment: &mut CompanionEnvironment, data_root: &Path) {
     forward_environment(environment);
-    let analytics_enabled = crate::config::AppConfig::load(data_root)
+    let analytics_enabled = ctx_app_config::AppConfig::load(data_root)
         .as_ref()
-        .is_ok_and(crate::config::resolved_analytics_consent);
+        .is_ok_and(crate::analytics::effective_analytics_enabled);
     environment.set(
         EnvironmentKey::AnalyticsEnabled,
         if analytics_enabled { "true" } else { "false" },
@@ -261,7 +261,7 @@ fn forward_mcp_environment(environment: &mut CompanionEnvironment, data_root: &P
 }
 
 fn forward_paid_cli_analytics_override(environment: &mut CompanionEnvironment) {
-    if let Some(enabled) = crate::config::normalized_analytics_environment_override() {
+    if let Some(enabled) = ctx_app_config::normalized_analytics_environment_override() {
         environment.set(
             EnvironmentKey::AnalyticsEnabled,
             if enabled { "true" } else { "false" },

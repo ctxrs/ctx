@@ -1,4 +1,4 @@
-use std::{ffi::OsString, fs};
+use std::fs;
 
 use super::*;
 
@@ -6,10 +6,10 @@ fn external_executor(
     endpoint: &str,
     space_id: &str,
     dimensions: usize,
-) -> ctx_daemon_cli::SemanticEmbeddingExecutorConfig {
-    ctx_daemon_cli::SemanticEmbeddingExecutorConfig::http(
+) -> ctx_semantic_model::SemanticEmbeddingExecutorConfig {
+    ctx_semantic_model::SemanticEmbeddingExecutorConfig::http(
         endpoint,
-        ctx_daemon_cli::ExternalSemanticSpace::new(space_id, dimensions).unwrap(),
+        ctx_semantic_model::ExternalSemanticSpace::new(space_id, dimensions).unwrap(),
     )
     .unwrap()
 }
@@ -92,7 +92,7 @@ fn executor_config_requires_one_coherent_offline_selection() {
     assert_eq!(legacy_executor.http_protocol_schema_version(), Some(1));
     assert_eq!(
         legacy_executor.contract().fingerprint(),
-        ctx_daemon_cli::SemanticEmbeddingExecutorConfig::builtin()
+        ctx_semantic_model::SemanticEmbeddingExecutorConfig::builtin()
             .contract()
             .fingerprint()
     );
@@ -123,9 +123,9 @@ fn executor_enable_mutation_is_atomic_validated_and_builtin_is_invisible() {
     fs::write(&path, "# retained\n[search]\nsemantic = false\n").unwrap();
     let before = fs::read_to_string(&path).unwrap();
 
-    let invalid = ctx_daemon_cli::SemanticEmbeddingExecutorConfig::http(
+    let invalid = ctx_semantic_model::SemanticEmbeddingExecutorConfig::http(
         "http://example.test",
-        ctx_daemon_cli::ExternalSemanticSpace::new("space-v1", 384).unwrap(),
+        ctx_semantic_model::ExternalSemanticSpace::new("space-v1", 384).unwrap(),
     )
     .unwrap_err();
     assert!(format!("{invalid:#}").contains("plain HTTP"));
@@ -163,7 +163,7 @@ fn executor_enable_mutation_is_atomic_validated_and_builtin_is_invisible() {
 
     set_semantic_search_enabled_with_executor(
         temp.path(),
-        &ctx_daemon_cli::SemanticEmbeddingExecutorConfig::builtin(),
+        &ctx_semantic_model::SemanticEmbeddingExecutorConfig::builtin(),
     )
     .unwrap();
     let builtin = AppConfig::load(temp.path()).unwrap();
@@ -185,9 +185,9 @@ fn explicit_discovery_replaces_legacy_endpoint_only_selection_atomically() {
         "[search]\nsemantic = true\n[semantic]\nexecutor = \"https://old.example.test\"\n",
     )
     .unwrap();
-    let accepted = ctx_daemon_cli::SemanticEmbeddingExecutorConfig::http(
+    let accepted = ctx_semantic_model::SemanticEmbeddingExecutorConfig::http(
         "https://new.example.test/base",
-        ctx_daemon_cli::ExternalSemanticSpace::new("operator/model-v2", 512).unwrap(),
+        ctx_semantic_model::ExternalSemanticSpace::new("operator/model-v2", 512).unwrap(),
     )
     .unwrap();
 
@@ -211,7 +211,7 @@ fn legacy_fixed_http_persistence_remains_endpoint_only() {
         "[search]\nsemantic = false\n[semantic]\nexecutor = \"https://old.example.test\"\nspace_id = \"stale\"\ndimensions = 7\n",
     )
     .unwrap();
-    let legacy = ctx_daemon_cli::SemanticEmbeddingExecutorConfig::legacy_fixed_http(
+    let legacy = ctx_semantic_model::SemanticEmbeddingExecutorConfig::legacy_fixed_http(
         "https://legacy.example.test/base",
     )
     .unwrap();
@@ -226,139 +226,4 @@ fn legacy_fixed_http_persistence_remains_endpoint_only() {
     assert!(persisted.contains("executor = \"https://legacy.example.test/base/\""));
     assert!(!persisted.contains("space_id"));
     assert!(!persisted.contains("dimensions"));
-}
-
-struct EnvRestore {
-    name: &'static str,
-    original: Option<OsString>,
-}
-
-impl EnvRestore {
-    fn capture(name: &'static str) -> Self {
-        Self {
-            name,
-            original: std::env::var_os(name),
-        }
-    }
-}
-
-impl Drop for EnvRestore {
-    fn drop(&mut self) {
-        match &self.original {
-            Some(value) => std::env::set_var(self.name, value),
-            None => std::env::remove_var(self.name),
-        }
-    }
-}
-
-#[test]
-fn explicit_selection_binds_auth_before_enablement_or_discovery() {
-    let _lock = TEST_LOCAL_USAGE_ENV_LOCK.lock().unwrap();
-    let _token = EnvRestore::capture(ctx_daemon_cli::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENV);
-    let _binding = EnvRestore::capture(ctx_daemon_cli::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV);
-    std::env::set_var(ctx_daemon_cli::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENV, "secret");
-    std::env::remove_var(ctx_daemon_cli::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV);
-
-    rebind_semantic_embedding_auth_endpoint_for_explicit_selection(
-        "https://embed.example.test/base",
-    );
-    assert_eq!(
-        std::env::var(ctx_daemon_cli::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV).unwrap(),
-        "https://embed.example.test/base"
-    );
-
-    rebind_semantic_embedding_auth_endpoint_for_explicit_selection("builtin");
-    assert!(std::env::var_os(ctx_daemon_cli::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV).is_none());
-}
-
-#[test]
-fn auth_endpoint_binding_requires_enabled_http_and_the_token() {
-    let _lock = TEST_LOCAL_USAGE_ENV_LOCK.lock().unwrap();
-    let _token = EnvRestore::capture(ctx_daemon_cli::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENV);
-    let _binding = EnvRestore::capture(ctx_daemon_cli::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV);
-    let mut config = AppConfig::default();
-    config.semantic.executor =
-        external_executor("https://embed.example.test/base", "space-v1", 384);
-    config.search.semantic = Some(true);
-
-    std::env::set_var(ctx_daemon_cli::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENV, "secret");
-    bind_semantic_embedding_auth_endpoint(&config);
-    assert_eq!(
-        std::env::var(ctx_daemon_cli::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV).unwrap(),
-        "https://embed.example.test/base/"
-    );
-
-    std::env::set_var(
-        ctx_daemon_cli::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV,
-        "https://independently-bound.example.test/",
-    );
-    bind_semantic_embedding_auth_endpoint(&config);
-    assert_eq!(
-        std::env::var(ctx_daemon_cli::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV).unwrap(),
-        "https://independently-bound.example.test/"
-    );
-    rebind_semantic_embedding_auth_endpoint(&config);
-    assert_eq!(
-        std::env::var(ctx_daemon_cli::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV).unwrap(),
-        "https://embed.example.test/base/"
-    );
-
-    config.semantic.executor = external_executor("http://127.0.0.1:8080", "space-v1", 384);
-    bind_semantic_embedding_auth_endpoint(&config);
-    assert!(std::env::var_os(ctx_daemon_cli::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV).is_none());
-    rebind_semantic_embedding_auth_endpoint(&config);
-    assert_eq!(
-        std::env::var(ctx_daemon_cli::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV).unwrap(),
-        "http://127.0.0.1:8080/"
-    );
-    clear_semantic_embedding_auth_endpoint();
-    std::env::set_var(
-        ctx_daemon_cli::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV,
-        "http://127.0.0.1:8080/",
-    );
-    bind_semantic_embedding_auth_endpoint(&config);
-    assert_eq!(
-        std::env::var(ctx_daemon_cli::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV).unwrap(),
-        "http://127.0.0.1:8080/"
-    );
-
-    config.semantic.executor =
-        external_executor("https://embed.example.test/base", "space-v1", 384);
-
-    std::env::remove_var(ctx_daemon_cli::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENV);
-    bind_semantic_embedding_auth_endpoint(&config);
-    assert_eq!(
-        std::env::var(ctx_daemon_cli::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV).unwrap(),
-        "http://127.0.0.1:8080/"
-    );
-    clear_semantic_embedding_auth_endpoint();
-    assert!(std::env::var_os(ctx_daemon_cli::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV).is_none());
-
-    std::env::set_var(ctx_daemon_cli::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENV, "secret");
-    std::env::set_var(
-        ctx_daemon_cli::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV,
-        "https://independently-bound.example.test/",
-    );
-    config.search.semantic = Some(false);
-    bind_semantic_embedding_auth_endpoint(&config);
-    assert_eq!(
-        std::env::var(ctx_daemon_cli::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV).unwrap(),
-        "https://independently-bound.example.test/"
-    );
-    clear_semantic_embedding_auth_endpoint();
-    assert!(std::env::var_os(ctx_daemon_cli::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV).is_none());
-
-    config.search.semantic = Some(true);
-    config.semantic.executor = ctx_daemon_cli::SemanticEmbeddingExecutorConfig::builtin();
-    std::env::set_var(
-        ctx_daemon_cli::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV,
-        "https://independently-bound.example.test/",
-    );
-    bind_semantic_embedding_auth_endpoint(&config);
-    assert_eq!(
-        std::env::var(ctx_daemon_cli::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV).unwrap(),
-        "https://independently-bound.example.test/"
-    );
-    rebind_semantic_embedding_auth_endpoint(&config);
-    assert!(std::env::var_os(ctx_daemon_cli::SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV).is_none());
 }

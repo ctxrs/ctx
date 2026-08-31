@@ -59,12 +59,12 @@ struct DetectedControl {
 }
 
 #[derive(Debug, Clone, Default)]
-pub(crate) struct DeprecatedControls {
+pub struct DeprecatedControls {
     detected: Vec<DetectedControl>,
 }
 
 impl DeprecatedControls {
-    pub(crate) fn detect() -> Self {
+    pub fn detect() -> Self {
         let detected = REGISTRY
             .iter()
             .filter_map(|control| {
@@ -77,19 +77,19 @@ impl DeprecatedControls {
         Self { detected }
     }
 
-    pub(crate) fn disables_analytics(&self) -> bool {
+    pub fn disables_analytics(&self) -> bool {
         self.active(DeprecatedControlKind::Privacy)
     }
 
-    pub(crate) fn disables_daemon(&self) -> bool {
+    pub fn disables_daemon(&self) -> bool {
         self.active(DeprecatedControlKind::Daemon)
     }
 
-    pub(crate) fn disables_auto_upgrade(&self) -> bool {
+    pub fn disables_auto_upgrade(&self) -> bool {
         self.active(DeprecatedControlKind::Upgrade)
     }
 
-    pub(crate) fn warning(&self) -> Option<String> {
+    pub fn warning(&self) -> Option<String> {
         if self.detected.is_empty() {
             return None;
         }
@@ -109,7 +109,7 @@ impl DeprecatedControls {
         ))
     }
 
-    pub(crate) fn nonprivacy_analytics_ids(&self) -> Option<String> {
+    pub fn nonprivacy_analytics_ids(&self) -> Option<String> {
         let ids = self
             .detected
             .iter()

@@ -14,7 +14,8 @@ use crate::semantic::{
     SourceBackedRefreshPendingPublication,
 };
 use crate::ui::Ui;
-use crate::{config, SetupArgs};
+use crate::SetupArgs;
+use ctx_app_config as config;
 use ctx_cli_presentation::commands::{render_setup_human, SetupDaemonState};
 use ctx_history_cli::HistoryConfigPort;
 
@@ -145,7 +146,7 @@ pub(crate) fn run_setup(
 
 fn observe_setup_output_daemon(
     data_root: &std::path::Path,
-    config: &crate::config::AppConfig,
+    config: &ctx_app_config::AppConfig,
 ) -> Result<(ctx_daemon_cli::SourceEpochStatus, DaemonSetupHandoff)> {
     observe_setup_output_daemon_with(
         SETUP_OUTPUT_DAEMON_BIND_ATTEMPTS,

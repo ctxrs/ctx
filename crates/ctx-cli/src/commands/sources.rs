@@ -34,7 +34,7 @@ pub(crate) fn run_sources(
             source_group,
             kind,
             replace,
-        } => crate::config::add_provider_root_with_kind(
+        } => ctx_app_config::add_provider_root_with_kind(
             &environment.data_root,
             &name,
             provider.capture_provider(),
@@ -44,7 +44,7 @@ pub(crate) fn run_sources(
             replace,
         )?,
         SourcesCommand::Remove { name } => {
-            crate::config::remove_provider_root(&environment.data_root, &name)?
+            ctx_app_config::remove_provider_root(&environment.data_root, &name)?
         }
     };
     let value = provider_root_mutation_json(operation, &mutation);
@@ -58,7 +58,7 @@ pub(crate) fn run_sources(
 
 fn provider_root_mutation_json(
     operation: &str,
-    mutation: &crate::config::ProviderRootMutation,
+    mutation: &ctx_app_config::ProviderRootMutation,
 ) -> serde_json::Value {
     let mut root = serde_json::json!({
         "name": mutation.root.id.clone(),
@@ -79,7 +79,7 @@ fn provider_root_mutation_json(
 
 fn provider_root_mutation_human(
     operation: &str,
-    mutation: &crate::config::ProviderRootMutation,
+    mutation: &ctx_app_config::ProviderRootMutation,
 ) -> crate::ui::Document {
     crate::ui::Document::from_line(crate::ui::Line::text(format!(
         "{} {} history root '{}' ({})",
@@ -106,8 +106,8 @@ mod tests {
 
     use super::*;
 
-    fn mutation(changed: bool, replaced: bool) -> crate::config::ProviderRootMutation {
-        crate::config::ProviderRootMutation {
+    fn mutation(changed: bool, replaced: bool) -> ctx_app_config::ProviderRootMutation {
+        ctx_app_config::ProviderRootMutation {
             root: ProviderRootDefinition {
                 id: "work".to_owned(),
                 provider: CaptureProvider::Claude,

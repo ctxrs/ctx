@@ -47,8 +47,11 @@ fn install_builtin_semantic_test_host() {
 }
 
 impl ctx_daemon_cli::DaemonCliHost for BuiltinSemanticTestHost {
-    fn load_config(&self, _data_root: &Path) -> anyhow::Result<ctx_daemon_cli::AppConfig<'static>> {
-        Ok(ctx_daemon_cli::AppConfig::default())
+    fn load_config(
+        &self,
+        _data_root: &Path,
+    ) -> anyhow::Result<ctx_daemon_cli::DaemonRuntimeConfig> {
+        Ok(ctx_daemon_cli::DaemonRuntimeConfig::default())
     }
 
     fn persisted_daemon_enabled(&self, _data_root: &Path) -> anyhow::Result<bool> {
@@ -69,7 +72,7 @@ impl ctx_daemon_cli::DaemonCliHost for BuiltinSemanticTestHost {
         &self,
         _data_root: &Path,
         _request: ctx_daemon_cli::DaemonHostRunRequest,
-        _config: &ctx_daemon_cli::AppConfig<'_>,
+        _config: &ctx_daemon_cli::DaemonRuntimeConfig,
     ) -> anyhow::Result<()> {
         Err(anyhow::anyhow!(
             "the ctx-history-cli semantic test host cannot run a daemon"
