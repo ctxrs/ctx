@@ -210,7 +210,7 @@ struct SemanticCompletionErrorCase {
 }
 
 fn semantic_completion_error_cases() -> Vec<SemanticCompletionErrorCase> {
-    use ctx_daemon_cli::SemanticCompletionError;
+    use ctx_daemon_cli::{SemanticCompletionError, SemanticFailureClass};
 
     vec![
         SemanticCompletionErrorCase {
@@ -301,12 +301,12 @@ fn semantic_completion_error_cases() -> Vec<SemanticCompletionErrorCase> {
                 generation_id: "core-job-classified".to_owned(),
                 detail: "job detail".to_owned(),
                 retryable: true,
-                failure_class: Some("resource_unavailable".to_owned()),
+                failure_class: Some(SemanticFailureClass::ResourcePressure),
             },
             reason: "semantic_completion_job_failed",
             retryable: true,
             active_generation_id: None,
-            failure_class: Some("resource_unavailable"),
+            failure_class: Some("resource_pressure"),
         },
         SemanticCompletionErrorCase {
             name: "daemon_job_without_failure_class",

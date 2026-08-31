@@ -220,7 +220,7 @@ fn exact_checkpoint_maps_matching_job_failure_without_preflight_authority() -> R
                 Ok(DaemonSemanticCompletionObservation::JobFailed {
                     detail: "backend unavailable".to_owned(),
                     retryable: true,
-                    failure_class: Some("retryable".to_owned()),
+                    failure_class: Some(SemanticFailureClass::Retryable),
                 })
             },
         ),
@@ -233,7 +233,7 @@ fn exact_checkpoint_maps_matching_job_failure_without_preflight_authority() -> R
             failure_class: Some(failure_class),
             detail,
             ..
-        } if failure_class == "retryable" && detail == "backend unavailable"
+        } if failure_class == SemanticFailureClass::Retryable && detail == "backend unavailable"
     ));
     Ok(())
 }
@@ -262,7 +262,7 @@ fn core_supersession_precedes_daemon_job_failure_observation() -> Result<()> {
                 Ok(DaemonSemanticCompletionObservation::JobFailed {
                     detail: "stale target failure".to_owned(),
                     retryable: false,
-                    failure_class: Some("permanent".to_owned()),
+                    failure_class: Some(SemanticFailureClass::Permanent),
                 })
             },
         ),

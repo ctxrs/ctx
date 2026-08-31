@@ -115,52 +115,71 @@ fn matching_activation_failure_is_terminal_but_stale_failure_is_ignored() {
 #[test]
 fn matching_job_failure_preserves_retryability_and_taxonomy() {
     let selected = "https://semantic.example.test/";
-    let mut failed_job = job("failed");
-    failed_job["retryable"] = json!(true);
-    failed_job["failure_class"] = json!("retryable");
-    failed_job["last_error"] = json!("backend unavailable");
-    assert_eq!(
-        classify_exact_daemon_semantic_completion(
-            &status("applied", selected, selected),
-            Some(&failed_job),
-            &target(),
-        ),
-        DaemonSemanticCompletionObservation::JobFailed {
-            detail: "backend unavailable".to_owned(),
-            retryable: true,
-            failure_class: Some("retryable".to_owned()),
-        }
-    );
+    for (name, class) in [
+        ("retryable", SemanticFailureClass::Retryable),
+        ("permanent", SemanticFailureClass::Permanent),
+        ("corrupt_sidecar", SemanticFailureClass::CorruptSidecar),
+        ("resource_pressure", SemanticFailureClass::ResourcePressure),
+    ] {
+        let mut failed_job = job("failed");
+        failed_job["retryable"] = json!(true);
+        failed_job["failure_class"] = json!(name);
+        failed_job["last_error"] = json!(format!("{name} failure"));
+        assert_eq!(
+            classify_exact_daemon_semantic_completion(
+                &status("applied", selected, selected),
+                Some(&failed_job),
+                &target(),
+            ),
+            DaemonSemanticCompletionObservation::JobFailed {
+                detail: format!("{name} failure"),
+                retryable: true,
+                failure_class: Some(class),
+            }
+        );
+    }
 }
 
 #[test]
-fn canonical_failure_is_terminal_even_without_a_known_failure_class() {
+fn invalid_failure_classes_are_omitted_without_weakening_terminal_failure() {
     let selected = "https://semantic.example.test/";
-    let mut failed_job = job("failed");
-    failed_job["retryable"] = json!(false);
-    failed_job["last_error"] = json!("unclassified terminal failure");
-    assert_eq!(
-        classify_exact_daemon_semantic_completion(
-            &status("applied", selected, selected),
-            Some(&failed_job),
-            &target(),
-        ),
-        DaemonSemanticCompletionObservation::JobFailed {
-            detail: "unclassified terminal failure".to_owned(),
-            retryable: false,
-            failure_class: None,
+    for (label, raw_class, retryable) in [
+        ("missing", None, false),
+        ("unknown", Some(json!("future_failure_class")), true),
+        ("non-string", Some(json!(17)), false),
+    ] {
+        let mut failed_job = job("failed");
+        failed_job["retryable"] = json!(retryable);
+        failed_job["last_error"] = json!(format!("{label} terminal failure"));
+        if let Some(raw_class) = raw_class {
+            failed_job["failure_class"] = raw_class;
         }
-    );
+        assert_eq!(
+            classify_exact_daemon_semantic_completion(
+                &status("applied", selected, selected),
+                Some(&failed_job),
+                &target(),
+            ),
+            DaemonSemanticCompletionObservation::JobFailed {
+                detail: format!("{label} terminal failure"),
+                retryable,
+                failure_class: None,
+            }
+        );
+    }
 }
 
 #[test]
 fn legacy_skipped_blocking_failures_are_terminal_but_retryable_classes_remain_pending() {
     let selected = "https://semantic.example.test/";
-    for class in ["permanent", "corrupt_sidecar"] {
+    for (name, class) in [
+        ("permanent", SemanticFailureClass::Permanent),
+        ("corrupt_sidecar", SemanticFailureClass::CorruptSidecar),
+    ] {
         let mut legacy_job = job("skipped");
-        legacy_job["failure_class"] = json!(class);
+        legacy_job["failure_class"] = json!(name);
         legacy_job["retryable"] = json!(false);
-        legacy_job["last_error"] = json!(format!("legacy {class} failure"));
+        legacy_job["last_error"] = json!(format!("legacy {name} failure"));
         assert_eq!(
             classify_exact_daemon_semantic_completion(
                 &status("applied", selected, selected),
@@ -168,11 +187,11 @@ fn legacy_skipped_blocking_failures_are_terminal_but_retryable_classes_remain_pe
                 &target(),
             ),
             DaemonSemanticCompletionObservation::JobFailed {
-                detail: format!("legacy {class} failure"),
+                detail: format!("legacy {name} failure"),
                 retryable: false,
-                failure_class: Some(class.to_owned()),
+                failure_class: Some(class),
             },
-            "{class}"
+            "{name}"
         );
     }
 

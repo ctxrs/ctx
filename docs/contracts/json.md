@@ -606,8 +606,12 @@ already-published Core generation, and `core_published: true` makes clear that
 semantic failure did not roll Core back. `detail` and `error` contain the same
 human-readable typed diagnostic. `retryable` comes from the typed completion
 failure. A superseded-generation failure additionally includes
-`active_generation_id`; a daemon-job failure includes `failure_class` when the
-daemon supplied one. Those variant-specific members are otherwise omitted.
+`active_generation_id`. A daemon-job failure includes `failure_class` only for
+the four recognized values: `retryable`, `permanent`, `corrupt_sidecar`, and
+`resource_pressure`. Missing, non-string, and unknown durable legacy values are
+omitted rather than echoed. The job remains a terminal typed failure, and its
+`detail` and `retryable` fields are preserved. Those variant-specific members
+are otherwise omitted.
 Clients must ignore unknown additive fields and should branch first on
 `error_code`, then on `reason` when finer recovery behavior is needed. Human
 output is unchanged.

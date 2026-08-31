@@ -13,7 +13,9 @@ mod composition;
 pub use composition::{install_host, DaemonCliHost, DaemonConfig, DaemonMode, DaemonRuntimeConfig};
 pub use ctx_daemon_application::DaemonHostRunRequest;
 pub use ctx_daemon_runtime::apply_supervisor_environment_handoff;
-pub use ctx_daemon_service::{CoreGenerationPublished, DaemonConfigSnapshot, DaemonUpgradePorts};
+pub use ctx_daemon_service::{
+    CoreGenerationPublished, DaemonConfigSnapshot, DaemonUpgradePorts, SemanticFailureClass,
+};
 pub use ctx_semantic_model::{
     ExternalSemanticSpace, SemanticEmbeddingExecutorAuth, SemanticEmbeddingExecutorConfig,
     SemanticEmbeddingExecutorHandle, SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV,

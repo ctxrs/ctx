@@ -138,7 +138,7 @@ pub enum DaemonSemanticCompletionObservation {
     JobFailed {
         detail: String,
         retryable: bool,
-        failure_class: Option<String>,
+        failure_class: Option<SemanticFailureClass>,
     },
 }
 
@@ -231,10 +231,7 @@ pub fn classify_exact_daemon_semantic_completion(
                     .get("retryable")
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
-                failure_class: job
-                    .get("failure_class")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
+                failure_class: semantic_failure_class_from_job(job),
             };
         }
     }

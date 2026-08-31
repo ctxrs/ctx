@@ -31,7 +31,7 @@ pub(super) fn structured(error: &SemanticCompletionError) -> Value {
         } => {
             fields.insert(
                 "failure_class".to_owned(),
-                Value::String(failure_class.clone()),
+                Value::String(failure_class.as_str().to_owned()),
             );
         }
         _ => {}

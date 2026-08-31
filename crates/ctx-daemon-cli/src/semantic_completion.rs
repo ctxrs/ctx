@@ -7,6 +7,7 @@ use anyhow::Result;
 use ctx_daemon_service::{
     classify_semantic_failure, DaemonSemanticCompletionObservation, DaemonSemanticCompletionTarget,
     DaemonSemanticConfigBinding, DaemonSemanticProgress, PinnedSourceBackedGeneration,
+    SemanticFailureClass,
 };
 use ctx_semantic_index::{SemanticModelContract, SemanticNotReady, SemanticQueryPin};
 use ctx_semantic_model::SemanticEmbeddingExecutorConfig;
@@ -128,7 +129,7 @@ pub enum SemanticCompletionError {
         generation_id: String,
         detail: String,
         retryable: bool,
-        failure_class: Option<String>,
+        failure_class: Option<SemanticFailureClass>,
     },
     #[error("daemon semantic completion made no progress for Core generation {generation_id}")]
     NoProgress {
