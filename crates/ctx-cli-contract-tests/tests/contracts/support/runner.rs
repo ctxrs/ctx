@@ -133,6 +133,7 @@ pub(crate) fn apply_hermetic_env(command: &mut Command, temp: &TempDir) {
     command.env_remove("ASTRBOT_ROOT");
     command.env_remove("SHELLEY_DB");
     command.env_remove("KILO_DB");
+    command.env_remove("KIRO_HOME");
     command.env_remove("MIMOCODE_HOME");
     command.env_remove("MIMOCODE_CONFIG_DIR");
     command.env_remove("MIMOCODE_DB");
@@ -188,7 +189,6 @@ pub(crate) fn apply_hermetic_env(command: &mut Command, temp: &TempDir) {
             "GOOSE_PATH_ROOT",
             "JUNIE_HOME",
             "KIMI_CODE_HOME",
-            "KIRO_HOME",
             "MUX_ROOT",
             "OH_PERSISTENCE_DIR",
             "OPENCLAW_HOME",
