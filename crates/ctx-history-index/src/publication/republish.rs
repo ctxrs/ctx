@@ -20,7 +20,9 @@ use super::{
     INDEX_GENERATIONS_DIRECTORY,
 };
 
-use super::{publish_active_generation_pointer_validated, validate_candidate_managed_files};
+#[cfg(not(windows))]
+use super::publish_active_generation_pointer_validated;
+use super::validate_candidate_managed_files;
 
 mod clone {
     pub(crate) use ctx_history_index_generation::{
@@ -177,6 +179,13 @@ fn republish_candidate(
     current_manifest: Arc<GenerationManifest>,
     current_generation_id: String,
 ) -> Result<CurrentRepublishOutcome> {
+    #[cfg(windows)]
+    let mut predecessor_fence =
+        ctx_history_index_generation::ActiveGenerationPointerFence::capture(
+            root,
+            Some(base_pointer),
+        )?;
+    #[cfg(not(windows))]
     let predecessor_fence = ctx_history_index_generation::ActiveGenerationPointerFence::capture(
         root,
         Some(base_pointer),
@@ -267,14 +276,12 @@ fn republish_candidate(
     let next_pointer =
         ActiveGenerationPointer::new(verified.slot.clone(), Some(base_pointer.active().clone()))?;
     #[cfg(windows)]
-    let mut terminal_guard = Some(
-        ctx_history_index_generation::acquire_terminal_publication_guard(
-            root,
-            candidate_path,
-            &verified.index,
-            Some(base_pointer),
-        )?,
-    );
+    let terminal_guard = ctx_history_index_generation::acquire_terminal_publication_guard(
+        root,
+        candidate_path,
+        &verified.index,
+        Some(base_pointer),
+    )?;
     certify_candidate_physical_integrity(
         root,
         &predecessor_fence,
@@ -292,27 +299,34 @@ fn republish_candidate(
         Some(candidate_path),
     )?;
     candidate.validate_binding()?;
-    let publication_result =
-        publish_active_generation_pointer_validated(root, &next_pointer, || {
+    let validate_before_replace =
+        |predecessor_fence: &ctx_history_index_generation::ActiveGenerationPointerFence| {
             candidate.validate_binding()?;
             validate_candidate_managed_files(&verified.index, candidate_path, Some(base_pointer))?;
             ctx_history_index_generation::verify_candidate_physical_integrity_read_only(
                 root,
-                &predecessor_fence,
+                predecessor_fence,
                 &verified.slot,
                 &verified.index,
             )?;
             #[cfg(windows)]
-            {
-                let terminal_guard = terminal_guard.take().ok_or(
-                    ctx_history_index_generation::GenerationError::ConcurrentGenerationChange,
-                )?;
-                terminal_guard.verify_physical_fence(&verified.physical_integrity_audit)?;
-                terminal_guard.verify_identities()?;
-                Ok(terminal_guard)
-            }
-            #[cfg(not(windows))]
+            terminal_guard.verify_physical_fence(&verified.physical_integrity_audit)?;
+            #[cfg(windows)]
+            terminal_guard.verify_identities()?;
             Ok(())
+        };
+    #[cfg(windows)]
+    let publication_result = ctx_history_index_generation::publish_active_generation_pointer_validated_predecessor_fence(
+        root,
+        &next_pointer,
+        &mut predecessor_fence,
+        validate_before_replace,
+    )
+    .map_err(IndexError::from);
+    #[cfg(not(windows))]
+    let publication_result =
+        publish_active_generation_pointer_validated(root, &next_pointer, || {
+            validate_before_replace(&predecessor_fence)
         });
     match publication_result {
         Ok(PointerPublicationOutcome::Durable) => {

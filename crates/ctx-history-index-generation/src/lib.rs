@@ -52,6 +52,8 @@ pub use durable_directory::{
 #[cfg(any(test, feature = "test-support"))]
 pub use durable_directory::{AtomicWriteStage, AtomicWriteTestHookGuard};
 pub use error::{GenerationError, Result};
+#[cfg(windows)]
+pub use generation::publish_active_generation_pointer_validated_predecessor_fence;
 pub use generation::{
     create_candidate_generation, lexical_index_settings, load_active_generation_pointer,
     open_slot_index, publish_active_generation_pointer,

@@ -863,6 +863,8 @@ pub use candidate::{
 };
 use install::{install_certification, CertificationInstallPolicy};
 pub use pointer_fence::ActiveGenerationPointerFence;
+#[cfg(windows)]
+pub(crate) use pointer_fence::ValidatedPredecessorPointer;
 
 #[cfg(any(test, feature = "test-support"))]
 pub use sidecar::certification_file_for_active;

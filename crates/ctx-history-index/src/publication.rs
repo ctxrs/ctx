@@ -25,10 +25,11 @@ pub(crate) use ctx_history_index_generation::{
 pub(crate) use ctx_history_index_generation::{
     prime_candidate_physical_proof, CandidateActivationFence, CandidatePhysicalProof,
 };
+#[cfg(not(windows))]
+pub(crate) use generation::publish_active_generation_pointer_validated;
 pub(crate) use generation::{
     create_candidate_generation, lexical_index_settings, load_active_generation_pointer,
-    open_slot_index, publish_active_generation_pointer,
-    publish_active_generation_pointer_validated, reclaim_inactive_generation_directories,
+    open_slot_index, publish_active_generation_pointer, reclaim_inactive_generation_directories,
     slot_path, sync_generation, ActiveGenerationPointer, GenerationSlot, PointerPublicationOutcome,
     INDEX_GENERATIONS_DIRECTORY,
 };
