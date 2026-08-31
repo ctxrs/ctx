@@ -21,7 +21,7 @@ impl SharedSemanticRuntime {
             let quiet_policy = embedder
                 .as_ref()
                 .ok_or_else(|| anyhow!("semantic embedder was not initialized"))?
-                .quiet_policy();
+                .quiet_policy(config.builtin_throttling());
             return Ok((Vec::new(), quiet_policy));
         }
 
@@ -67,7 +67,7 @@ impl SharedSemanticRuntime {
             let quiet_policy = embedder
                 .as_ref()
                 .ok_or_else(|| anyhow!("semantic embedder was not initialized"))?
-                .quiet_policy();
+                .quiet_policy(config.builtin_throttling());
             drop(embedder);
 
             embeddings.extend(batch_embeddings);

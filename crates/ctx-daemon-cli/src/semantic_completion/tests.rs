@@ -120,7 +120,7 @@ fn daemon_completion(
     DaemonSemanticCompletion::new_at(
         pin,
         SemanticEmbeddingExecutorConfig::builtin(),
-        SemanticCompletionDaemonConfig::new(true, "full", true),
+        SemanticCompletionDaemonConfig::new(true, "full", true, true),
         budgets,
         now,
     )

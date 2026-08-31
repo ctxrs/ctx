@@ -134,6 +134,7 @@ pub struct SemanticModelConfig {
     coreml_compute_mode_error: Option<String>,
     thread_override: Option<usize>,
     batch_size_override: Option<usize>,
+    builtin_throttling: bool,
     deprecated_model_onnx_present: bool,
 }
 
@@ -147,6 +148,7 @@ impl SemanticModelConfig {
             coreml_compute_mode_error: None,
             thread_override: None,
             batch_size_override: None,
+            builtin_throttling: true,
             deprecated_model_onnx_present: false,
         }
     }
@@ -180,6 +182,11 @@ impl SemanticModelConfig {
 
     pub fn with_batch_size_override(mut self, batch_size: Option<usize>) -> Self {
         self.batch_size_override = batch_size;
+        self
+    }
+
+    pub(crate) fn with_builtin_throttling(mut self, enabled: bool) -> Self {
+        self.builtin_throttling = enabled;
         self
     }
 
@@ -221,6 +228,10 @@ impl SemanticModelConfig {
 
     pub(crate) const fn batch_size_override(&self) -> Option<usize> {
         self.batch_size_override
+    }
+
+    pub(crate) const fn builtin_throttling(&self) -> bool {
+        self.builtin_throttling
     }
 
     pub(crate) const fn deprecated_model_onnx_present(&self) -> bool {

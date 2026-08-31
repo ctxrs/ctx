@@ -204,7 +204,7 @@ fn semantic_report(
                 .is_some_and(|binding| binding == endpoint)
         });
     let reported_space = executor.external_space();
-    Ok(compact_json(json!({
+    let mut report = compact_json(json!({
         "schema_version": 1,
         "operation": operation,
         "enabled": semantic.get("enabled"),
@@ -236,11 +236,21 @@ fn semantic_report(
                     token_bound_to_selected_endpoint,
             },
         },
+        "builtin_throttling": {
+            "configured": config.semantic_builtin_throttling_configured(),
+            "effective": config.semantic_builtin_throttling_effective(),
+            "config_source": config.semantic_builtin_throttling_source(),
+            "reason": config.semantic_builtin_throttling_reason(),
+        },
         // An external loopback process can forward content after ctx's first
         // hop, so only the in-process builtin can truthfully claim local-only.
         "local_only": executor.http_endpoint().is_none(),
         "read_only": read_only,
-    })))
+    }));
+    if config.semantic_builtin_throttling_effective().is_none() {
+        report["builtin_throttling"]["effective"] = Value::Null;
+    }
+    Ok(report)
 }
 
 fn semantic_lifecycle_state(
@@ -406,6 +416,14 @@ mod tests {
         assert_eq!(builtin["executor"]["scope"], "builtin");
         assert_eq!(builtin["local_only"], true);
         assert_eq!(builtin["read_only"], true);
+        assert_eq!(
+            builtin["builtin_throttling"],
+            json!({
+                "configured": true,
+                "effective": true,
+                "config_source": "default",
+            })
+        );
 
         config.semantic.executor = external_executor("http://127.0.0.1:9", "loopback-v1", 128);
         std::env::set_var(
@@ -416,6 +434,13 @@ mod tests {
         assert_eq!(loopback["executor"]["scope"], "loopback");
         assert_eq!(loopback["executor"]["content_leaves_machine"], false);
         assert_eq!(loopback["local_only"], false);
+        assert_eq!(loopback["builtin_throttling"]["configured"], true);
+        assert_eq!(loopback["builtin_throttling"]["effective"], Value::Null);
+        assert_eq!(loopback["builtin_throttling"]["config_source"], "default");
+        assert_eq!(
+            loopback["builtin_throttling"]["reason"],
+            "external_executor"
+        );
         assert_eq!(
             loopback["executor"]["authentication"]
                 ["token_bound_to_selected_endpoint_in_current_process"],
@@ -454,5 +479,54 @@ mod tests {
         let enable = semantic_report(temp.path(), &config, "enable", false).unwrap();
         assert_eq!(enable["executor"]["space_id"], "acme/multilingual-v2");
         assert_eq!(enable["executor"]["dimensions"], 768);
+    }
+
+    #[test]
+    fn semantic_status_reports_explicitly_disabled_builtin_throttling() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join(config::CONFIG_FILE),
+            "[semantic]\nbuiltin_throttling = false\n",
+        )
+        .unwrap();
+        let config = config::AppConfig::load(temp.path()).unwrap();
+
+        let report = semantic_report(temp.path(), &config, "status", true).unwrap();
+
+        assert_eq!(
+            report["builtin_throttling"],
+            json!({
+                "configured": false,
+                "effective": false,
+                "config_source": "config",
+            })
+        );
+    }
+
+    #[test]
+    fn bare_semantic_enable_preserves_explicitly_disabled_builtin_throttling() {
+        let _lock = ctx_app_config::TEST_LOCAL_USAGE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _semantic_override = TestEnvRestore::capture("CTX_SEARCH_SEMANTIC");
+        std::env::remove_var("CTX_SEARCH_SEMANTIC");
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join(config::CONFIG_FILE),
+            "[semantic]\nbuiltin_throttling = false\n",
+        )
+        .unwrap();
+        let mut config = config::AppConfig::load(temp.path()).unwrap();
+
+        set_semantic_policy(temp.path(), &mut config, true).unwrap();
+
+        assert!(config.semantic_search_enabled());
+        assert!(!config.semantic_builtin_throttling_configured());
+        assert_eq!(config.semantic_builtin_throttling_effective(), Some(false));
+        assert!(
+            std::fs::read_to_string(temp.path().join(config::CONFIG_FILE))
+                .unwrap()
+                .contains("builtin_throttling = false")
+        );
     }
 }

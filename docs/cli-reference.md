@@ -141,7 +141,14 @@ ctx daemon run
   local configuration and state without requiring credentials, exposing a
   token, or making a network request. `semantic disable` opts out without
   deleting downloaded model/runtime assets or derived semantic indexes. Plain
-  enablement in manual mode does not change indexing mode. See
+  enablement in manual mode does not change indexing mode. Built-in document
+  indexing is throttled by default. Its config-only opt-out is `[semantic]
+  builtin_throttling = false`; it is rejected alongside an explicitly
+  configured HTTP executor and does not change `semantic enable` or
+  `--executor`. With the opt-out active, ctx removes deliberate inter-batch
+  pacing and uses the safely supported built-in thread and batch maxima while
+  retaining admission, integrity, cancellation, atomicity, and hard limits.
+  `semantic status` reports configured and effective throttling. See
   [Semantic Embedding Executors](semantic-executors.md) for the V2 protocol and
   retained fixed-E5 V1 compatibility.
 - `daemon run` is an advanced command that runs persistent local maintenance in

@@ -185,6 +185,12 @@ executor keeps ctx's first hop on the machine, but the receiving process can
 retain or forward the content. Status is credential-free and read-only: it
 reads local configuration and observed state without probing the endpoint or
 making a network request.
+`builtin_throttling.configured` is boolean and includes the default value
+`true` when the config key is absent. `builtin_throttling.effective` is boolean
+for the selected built-in executor and null for an HTTP executor.
+`config_source` is `default` or `config`; optional `reason` is
+`external_executor` when the setting is not applicable. An explicitly configured
+HTTP executor cannot also set the built-in-only config key.
 Enable and disable persist policy and report `read_only: false`. Disablement
 retains downloaded model/runtime assets and derived semantic indexes.
 
@@ -233,7 +239,7 @@ Wait returns one object with `schema_version`, `status` (`ready`, `blocked`, or
 including daemon and supervisor diagnostics.
 
 Index snapshots expose the reduced
-`semantic.{status,reason,enabled,coverage.{candidate_items,searchable_items,embedded_items,filtered_items,embedded_chunks}}`
+`semantic.{status,reason,enabled,builtin_throttling.{configured,effective,config_source,reason},coverage.{candidate_items,searchable_items,embedded_items,filtered_items,embedded_chunks}}`
 shape and `daemon.{status,running,jobs.semantic_index}`. The complete semantic
 and daemon fields below describe `ctx status --format json`, not index
 snapshots.
@@ -287,7 +293,10 @@ without reporting the daemon process itself as stopped.
 `config_reload.status` is `applied`, `pending`, `failed`,
 `activation_failed`, or `unknown`. `requested` reflects the current effective
 daemon/semantic configuration read by the status command. `applied` is the last
-configuration acknowledged by the running daemon. A changed config remains
+configuration acknowledged by the running daemon. Both include
+`semantic_builtin_throttling_configured` and
+`semantic_builtin_throttling_effective`; the effective value is null when the
+selected executor is HTTP. A changed config remains
 `pending` with `out_of_sync: true` until the daemon reloads it. Parse/read
 failures report `failed`, deactivate semantic runtime ownership, stop the
 semantic query service, clear the applied semantic executor, and surface

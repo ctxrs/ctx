@@ -127,6 +127,16 @@ ctx semantic status
 Bare `ctx semantic enable` preserves whichever executor is already selected;
 on a new data root with no executor configuration, the default is built-in E5.
 
+Built-in document indexing is throttled by default. To remove deliberate
+inter-batch pacing and use the safely supported built-in thread and batch
+maxima, set `builtin_throttling = false` under `[semantic]` in `config.toml`.
+The setting is valid only for the built-in executor, does not change semantic
+enablement or `--executor`, and leaves the pinned E5 model plus all admission,
+integrity, cancellation, atomicity, and hard limits intact. `ctx semantic
+status` reports its configured and effective values. See
+[Built-in indexing throttling](semantic-executors.md#built-in-indexing-throttling)
+for the complete contract.
+
 To use an external executor's vector space instead, select its base URL
 explicitly:
 

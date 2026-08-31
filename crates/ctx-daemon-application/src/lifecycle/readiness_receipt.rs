@@ -147,6 +147,22 @@ fn daemon_config_value_matches(value: &Value, expected: &DaemonConfigSnapshot) -
             .get("semantic_contract_fingerprint")
             .and_then(Value::as_str)
             == Some(expected.semantic_contract_fingerprint.as_str())
+        && value
+            .get("semantic_builtin_throttling_configured")
+            .and_then(Value::as_bool)
+            == Some(expected.semantic_builtin_throttling_configured)
+        && nullable_bool_matches(
+            value,
+            "semantic_builtin_throttling_effective",
+            expected.semantic_builtin_throttling_effective,
+        )
+}
+
+fn nullable_bool_matches(value: &Value, key: &str, expected: Option<bool>) -> bool {
+    match expected {
+        Some(expected) => value.get(key).and_then(Value::as_bool) == Some(expected),
+        None => value.get(key).is_some_and(Value::is_null),
+    }
 }
 
 fn daemon_applied_degraded_semantic_config_matches(
@@ -166,4 +182,14 @@ fn daemon_applied_degraded_semantic_config_matches(
         && applied
             .get("semantic_contract_fingerprint")
             .is_none_or(Value::is_null)
+        && applied
+            .get("semantic_builtin_throttling_configured")
+            .is_none_or(Value::is_null)
+        && applied
+            .get("semantic_builtin_throttling_effective")
+            .is_none_or(Value::is_null)
 }
+
+#[cfg(test)]
+#[path = "readiness_receipt_tests.rs"]
+mod tests;

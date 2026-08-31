@@ -59,7 +59,7 @@ pub struct SemanticEmbeddingExecutorConfig {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum SemanticEmbeddingExecutorSelection {
-    Builtin,
+    Builtin { throttling: bool },
     Http(Box<HttpExecutorSelection>),
 }
 
@@ -84,8 +84,12 @@ impl Default for SemanticEmbeddingExecutorConfig {
 
 impl SemanticEmbeddingExecutorConfig {
     pub const fn builtin() -> Self {
+        Self::builtin_with_throttling(true)
+    }
+
+    pub const fn builtin_with_throttling(throttling: bool) -> Self {
         Self {
-            selection: SemanticEmbeddingExecutorSelection::Builtin,
+            selection: SemanticEmbeddingExecutorSelection::Builtin { throttling },
         }
     }
 
@@ -159,14 +163,16 @@ impl SemanticEmbeddingExecutorConfig {
 
     pub const fn kind(&self) -> SemanticEmbeddingExecutorKind {
         match &self.selection {
-            SemanticEmbeddingExecutorSelection::Builtin => SemanticEmbeddingExecutorKind::Builtin,
+            SemanticEmbeddingExecutorSelection::Builtin { .. } => {
+                SemanticEmbeddingExecutorKind::Builtin
+            }
             SemanticEmbeddingExecutorSelection::Http(_) => SemanticEmbeddingExecutorKind::Http,
         }
     }
 
     pub fn http_endpoint(&self) -> Option<&str> {
         match &self.selection {
-            SemanticEmbeddingExecutorSelection::Builtin => None,
+            SemanticEmbeddingExecutorSelection::Builtin { .. } => None,
             SemanticEmbeddingExecutorSelection::Http(selection) => {
                 Some(selection.endpoint.as_str())
             }
@@ -179,7 +185,7 @@ impl SemanticEmbeddingExecutorConfig {
 
     pub fn external_space(&self) -> Option<&ExternalSemanticSpace> {
         match &self.selection {
-            SemanticEmbeddingExecutorSelection::Builtin => None,
+            SemanticEmbeddingExecutorSelection::Builtin { .. } => None,
             SemanticEmbeddingExecutorSelection::Http(selection) => match &selection.protocol {
                 HttpExecutorProtocol::LegacyFixedV1 => None,
                 HttpExecutorProtocol::ExternalSpaceV2(space) => Some(space),
@@ -191,13 +197,23 @@ impl SemanticEmbeddingExecutorConfig {
     /// this configuration.
     pub fn contract(&self) -> &SemanticModelContract {
         match &self.selection {
-            SemanticEmbeddingExecutorSelection::Builtin => semantic_model_contract(),
+            SemanticEmbeddingExecutorSelection::Builtin { .. } => semantic_model_contract(),
             SemanticEmbeddingExecutorSelection::Http(selection) => &selection.contract,
         }
     }
 
     pub const fn is_builtin(&self) -> bool {
-        matches!(&self.selection, SemanticEmbeddingExecutorSelection::Builtin)
+        matches!(
+            &self.selection,
+            SemanticEmbeddingExecutorSelection::Builtin { .. }
+        )
+    }
+
+    pub const fn builtin_throttling(&self) -> Option<bool> {
+        match &self.selection {
+            SemanticEmbeddingExecutorSelection::Builtin { throttling } => Some(*throttling),
+            SemanticEmbeddingExecutorSelection::Http(_) => None,
+        }
     }
 
     pub const fn is_legacy_fixed_http(&self) -> bool {
@@ -205,13 +221,13 @@ impl SemanticEmbeddingExecutorConfig {
             SemanticEmbeddingExecutorSelection::Http(selection) => {
                 matches!(&selection.protocol, HttpExecutorProtocol::LegacyFixedV1)
             }
-            SemanticEmbeddingExecutorSelection::Builtin => false,
+            SemanticEmbeddingExecutorSelection::Builtin { .. } => false,
         }
     }
 
     pub const fn http_protocol_schema_version(&self) -> Option<u32> {
         match &self.selection {
-            SemanticEmbeddingExecutorSelection::Builtin => None,
+            SemanticEmbeddingExecutorSelection::Builtin { .. } => None,
             SemanticEmbeddingExecutorSelection::Http(selection) => match &selection.protocol {
                 HttpExecutorProtocol::LegacyFixedV1 => Some(1),
                 HttpExecutorProtocol::ExternalSpaceV2(_) => Some(2),
@@ -221,7 +237,9 @@ impl SemanticEmbeddingExecutorConfig {
 
     pub const fn scope(&self) -> SemanticEmbeddingExecutorScope {
         match &self.selection {
-            SemanticEmbeddingExecutorSelection::Builtin => SemanticEmbeddingExecutorScope::Builtin,
+            SemanticEmbeddingExecutorSelection::Builtin { .. } => {
+                SemanticEmbeddingExecutorScope::Builtin
+            }
             SemanticEmbeddingExecutorSelection::Http(selection)
                 if selection.endpoint.is_loopback() =>
             {
@@ -382,9 +400,12 @@ impl SemanticEmbeddingExecutorHandle {
         model_config: SemanticModelConfig,
     ) -> Result<Self> {
         let executor = match config.selection {
-            SemanticEmbeddingExecutorSelection::Builtin => {
+            SemanticEmbeddingExecutorSelection::Builtin { throttling } => {
                 SemanticEmbeddingExecutorHandleInner::Builtin(
-                    BuiltinSemanticEmbeddingExecutor::new(runtime, model_config),
+                    BuiltinSemanticEmbeddingExecutor::new(
+                        runtime,
+                        model_config.with_builtin_throttling(throttling),
+                    ),
                 )
             }
             SemanticEmbeddingExecutorSelection::Http(selection) => {
@@ -489,6 +510,13 @@ mod tests {
     struct TestExecutor {
         contract: SemanticModelContract,
         calls: Mutex<Vec<TestCall>>,
+    }
+
+    fn test_model_config() -> SemanticModelConfig {
+        SemanticModelConfig::new(SemanticModelPaths::new(
+            PathBuf::from("test-model-cache"),
+            SemanticOnnxRuntimePaths::new(PathBuf::from("test-runtime-cache")),
+        ))
     }
 
     impl SemanticEmbeddingExecutor for TestExecutor {
@@ -596,12 +624,63 @@ mod tests {
     }
 
     #[test]
+    fn builtin_throttling_defaults_enabled_and_propagates_through_handle() {
+        assert_eq!(
+            SemanticEmbeddingExecutorConfig::default().builtin_throttling(),
+            Some(true)
+        );
+        assert_eq!(
+            SemanticEmbeddingExecutorConfig::builtin().builtin_throttling(),
+            Some(true)
+        );
+
+        let handle = SemanticEmbeddingExecutorHandle::build(
+            SemanticEmbeddingExecutorConfig::builtin_with_throttling(false),
+            SharedSemanticRuntime::default(),
+            test_model_config(),
+        )
+        .unwrap();
+        assert!(!handle
+            .builtin_executor()
+            .unwrap()
+            .config()
+            .builtin_throttling());
+
+        let handle = SemanticEmbeddingExecutorHandle::build(
+            SemanticEmbeddingExecutorConfig::builtin(),
+            SharedSemanticRuntime::default(),
+            test_model_config().with_builtin_throttling(false),
+        )
+        .unwrap();
+        assert!(handle
+            .builtin_executor()
+            .unwrap()
+            .config()
+            .builtin_throttling());
+    }
+
+    #[test]
+    fn http_selection_and_construction_have_no_builtin_throttling_policy() {
+        let config =
+            SemanticEmbeddingExecutorConfig::legacy_fixed_http("http://127.0.0.1:8080/embeddings")
+                .unwrap();
+        assert_eq!(config.builtin_throttling(), None);
+
+        let handle = SemanticEmbeddingExecutorHandle::build(
+            config,
+            SharedSemanticRuntime::default(),
+            test_model_config().with_builtin_throttling(false),
+        )
+        .unwrap();
+        assert_eq!(handle.kind(), SemanticEmbeddingExecutorKind::Http);
+        assert_eq!(handle.endpoint(), Some("http://127.0.0.1:8080/embeddings/"));
+        assert!(handle.builtin_executor().is_none());
+    }
+
+    #[test]
     fn builtin_executor_rejects_input_prepared_by_another_contract() {
         let runtime = SharedSemanticRuntime::default();
-        let config = SemanticModelConfig::new(SemanticModelPaths::new(
-            PathBuf::from("test-model-cache"),
-            SemanticOnnxRuntimePaths::new(PathBuf::from("test-runtime-cache")),
-        ));
+        let config = test_model_config();
         let executor = BuiltinSemanticEmbeddingExecutor::new(runtime, config);
         let other_contract = semantic_model_contract()
             .clone()

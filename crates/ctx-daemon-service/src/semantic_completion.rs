@@ -18,6 +18,8 @@ pub struct DaemonSemanticConfigBinding {
     semantic_enabled: bool,
     semantic_executor: String,
     semantic_contract_fingerprint: String,
+    semantic_builtin_throttling_configured: bool,
+    semantic_builtin_throttling_effective: Option<bool>,
 }
 
 impl DaemonSemanticConfigBinding {
@@ -27,6 +29,8 @@ impl DaemonSemanticConfigBinding {
         semantic_enabled: bool,
         semantic_executor: impl Into<String>,
         semantic_contract_fingerprint: impl Into<String>,
+        semantic_builtin_throttling_configured: bool,
+        semantic_builtin_throttling_effective: Option<bool>,
     ) -> Self {
         Self {
             daemon_enabled,
@@ -34,6 +38,8 @@ impl DaemonSemanticConfigBinding {
             semantic_enabled,
             semantic_executor: semantic_executor.into(),
             semantic_contract_fingerprint: semantic_contract_fingerprint.into(),
+            semantic_builtin_throttling_configured,
+            semantic_builtin_throttling_effective,
         }
     }
 }
@@ -284,6 +290,21 @@ fn config_matches(config: &Value, expected: &DaemonSemanticConfigBinding) -> boo
             .get("semantic_contract_fingerprint")
             .and_then(Value::as_str)
             == Some(expected.semantic_contract_fingerprint.as_str())
+        && config
+            .get("semantic_builtin_throttling_configured")
+            .and_then(Value::as_bool)
+            == Some(expected.semantic_builtin_throttling_configured)
+        && match expected.semantic_builtin_throttling_effective {
+            Some(effective) => {
+                config
+                    .get("semantic_builtin_throttling_effective")
+                    .and_then(Value::as_bool)
+                    == Some(effective)
+            }
+            None => config
+                .get("semantic_builtin_throttling_effective")
+                .is_some_and(Value::is_null),
+        }
 }
 
 fn job_matches(job: &Value, target: &DaemonSemanticCompletionTarget) -> bool {

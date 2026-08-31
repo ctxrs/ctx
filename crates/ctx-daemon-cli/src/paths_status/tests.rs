@@ -26,6 +26,21 @@ fn daemon_application_snapshot_tracks_same_endpoint_space_changes() {
         second.semantic_contract_fingerprint
     );
 }
+
+#[test]
+fn daemon_application_snapshot_tracks_explicitly_unthrottled_builtin_executor() {
+    let config = DaemonRuntimeConfig::default()
+        .with_semantic_embedding_executor(
+            crate::SemanticEmbeddingExecutorConfig::builtin_with_throttling(false),
+        )
+        .with_semantic_builtin_throttling(false, "config");
+
+    let snapshot = application_config(&config);
+
+    assert_eq!(snapshot.semantic_executor, "builtin");
+    assert!(!snapshot.semantic_builtin_throttling_configured);
+    assert_eq!(snapshot.semantic_builtin_throttling_effective, Some(false));
+}
 use std::sync::{Arc, Barrier};
 
 #[test]
@@ -186,10 +201,14 @@ fn activation_failure_does_not_reuse_the_previous_executors_failure_class() {
                 requested_semantic_contract_fingerprint: Some(
                     config.semantic_model_contract().fingerprint(),
                 ),
+                requested_semantic_builtin_throttling_configured: Some(true),
+                requested_semantic_builtin_throttling_effective: None,
                 applied_daemon_enabled: Some(true),
                 applied_semantic_enabled: Some(false),
                 applied_semantic_executor: None,
                 applied_semantic_contract_fingerprint: None,
+                applied_semantic_builtin_throttling_configured: None,
+                applied_semantic_builtin_throttling_effective: None,
                 last_error: Some("new endpoint activation failed"),
             },
         },
@@ -227,10 +246,14 @@ fn config_load_failure_surfaces_failed_instead_of_stale_semantic_readiness() {
                 requested_semantic_enabled: Some(true),
                 requested_semantic_executor: Some("https://old.example.test/"),
                 requested_semantic_contract_fingerprint: Some("sha256:old-space"),
+                requested_semantic_builtin_throttling_configured: Some(true),
+                requested_semantic_builtin_throttling_effective: None,
                 applied_daemon_enabled: Some(true),
                 applied_semantic_enabled: Some(false),
                 applied_semantic_executor: None,
                 applied_semantic_contract_fingerprint: None,
+                applied_semantic_builtin_throttling_configured: None,
+                applied_semantic_builtin_throttling_effective: None,
                 last_error: Some("parse config.toml: invalid value"),
             },
         },

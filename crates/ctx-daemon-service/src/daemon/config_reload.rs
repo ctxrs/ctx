@@ -37,11 +37,15 @@ pub(super) struct DaemonConfigReloadState {
     requested_semantic_enabled: bool,
     requested_semantic_executor: String,
     requested_semantic_contract_fingerprint: String,
+    requested_semantic_builtin_throttling_configured: bool,
+    requested_semantic_builtin_throttling_effective: Option<bool>,
     applied_daemon_enabled: Option<bool>,
     applied_daemon_mode: Option<DaemonMode>,
     applied_semantic_enabled: Option<bool>,
     applied_semantic_executor: Option<String>,
     applied_semantic_contract_fingerprint: Option<String>,
+    applied_semantic_builtin_throttling_configured: Option<bool>,
+    applied_semantic_builtin_throttling_effective: Option<bool>,
     pub(super) last_error: Option<String>,
 }
 
@@ -60,11 +64,17 @@ impl DaemonConfigReloadState {
                 .contract()
                 .fingerprint()
                 .to_owned(),
+            requested_semantic_builtin_throttling_configured: config
+                .semantic_builtin_throttling_configured,
+            requested_semantic_builtin_throttling_effective: config
+                .semantic_builtin_throttling_effective(),
             applied_daemon_enabled: None,
             applied_daemon_mode: None,
             applied_semantic_enabled: None,
             applied_semantic_executor: None,
             applied_semantic_contract_fingerprint: None,
+            applied_semantic_builtin_throttling_configured: None,
+            applied_semantic_builtin_throttling_effective: None,
             last_error: None,
         }
     }
@@ -77,6 +87,10 @@ impl DaemonConfigReloadState {
         self.requested_semantic_executor = semantic_executor_selector(config);
         self.requested_semantic_contract_fingerprint =
             config.semantic_executor.contract().fingerprint().to_owned();
+        self.requested_semantic_builtin_throttling_configured =
+            config.semantic_builtin_throttling_configured;
+        self.requested_semantic_builtin_throttling_effective =
+            config.semantic_builtin_throttling_effective();
         self.last_error = None;
     }
 
@@ -89,6 +103,10 @@ impl DaemonConfigReloadState {
         self.applied_semantic_executor = Some(self.requested_semantic_executor.clone());
         self.applied_semantic_contract_fingerprint =
             Some(self.requested_semantic_contract_fingerprint.clone());
+        self.applied_semantic_builtin_throttling_configured =
+            Some(self.requested_semantic_builtin_throttling_configured);
+        self.applied_semantic_builtin_throttling_effective =
+            self.requested_semantic_builtin_throttling_effective;
         self.last_error = None;
     }
 
@@ -101,6 +119,8 @@ impl DaemonConfigReloadState {
         self.applied_semantic_enabled = Some(false);
         self.applied_semantic_executor = None;
         self.applied_semantic_contract_fingerprint = None;
+        self.applied_semantic_builtin_throttling_configured = None;
+        self.applied_semantic_builtin_throttling_effective = None;
         self.last_error = Some(format!("{error:#}"));
     }
 
@@ -111,6 +131,8 @@ impl DaemonConfigReloadState {
         self.applied_semantic_enabled = Some(false);
         self.applied_semantic_executor = None;
         self.applied_semantic_contract_fingerprint = None;
+        self.applied_semantic_builtin_throttling_configured = None;
+        self.applied_semantic_builtin_throttling_effective = None;
         self.last_error = Some(format!("{error:#}"));
     }
 
@@ -129,6 +151,8 @@ impl DaemonConfigReloadState {
                 "semantic_enabled": self.requested_semantic_enabled,
                 "semantic_executor": self.requested_semantic_executor,
                 "semantic_contract_fingerprint": self.requested_semantic_contract_fingerprint,
+                "semantic_builtin_throttling_configured": self.requested_semantic_builtin_throttling_configured,
+                "semantic_builtin_throttling_effective": self.requested_semantic_builtin_throttling_effective,
             },
             "applied": {
                 "daemon_enabled": self.applied_daemon_enabled,
@@ -136,6 +160,8 @@ impl DaemonConfigReloadState {
                 "semantic_enabled": self.applied_semantic_enabled,
                 "semantic_executor": self.applied_semantic_executor,
                 "semantic_contract_fingerprint": self.applied_semantic_contract_fingerprint,
+                "semantic_builtin_throttling_configured": self.applied_semantic_builtin_throttling_configured,
+                "semantic_builtin_throttling_effective": self.applied_semantic_builtin_throttling_effective,
             },
             "last_error": self.last_error,
         })
@@ -244,9 +270,17 @@ where
         daemon_semantic_runtime_requested(&runtime.config, service_supported)
             != semantic_runtime_requested;
     let executor_changed = runtime.config.semantic_executor != config.semantic_executor;
+    let builtin_throttling_changed = runtime.config.semantic_builtin_throttling_configured
+        != config.semantic_builtin_throttling_configured
+        || runtime.config.semantic_builtin_throttling_effective()
+            != config.semantic_builtin_throttling_effective();
     let semantic_activation_changed =
         runtime.config.semantic_search_enabled() != config.semantic_search_enabled();
-    if executor_changed || semantic_activation_changed || semantic_runtime_request_changed {
+    if executor_changed
+        || builtin_throttling_changed
+        || semantic_activation_changed
+        || semantic_runtime_request_changed
+    {
         drop(query_service.take());
         runtime.semantic_executor = None;
         runtime.semantic_activation_retry.reset();

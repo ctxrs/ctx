@@ -726,22 +726,29 @@ fn write_daemon_lifecycle_status_observed(
     semantic_runtime_active: Option<bool>,
     config_reload: Option<&Value>,
 ) -> Result<()> {
-    write_daemon_status(
-        data_root,
-        &compact_json(json!({
-            "schema_version": 1,
-            "status": status,
-            "pid": process::id(),
-            "started_at_ms": started_at_ms,
-            "heartbeat_at_ms": utc_now().timestamp_millis(),
-            "finished_at_ms": finished_at_ms,
-            "start_mode": daemon_run_start_mode(args).as_str(),
-            "trigger_command": args.trigger_command.map(DaemonTriggerCommandArg::as_str),
-            "last_error": last_error,
-            "semantic_runtime_active": semantic_runtime_active,
-            "config_reload": config_reload,
-        })),
-    )
+    let mut value = compact_json(json!({
+        "schema_version": 1,
+        "status": status,
+        "pid": process::id(),
+        "started_at_ms": started_at_ms,
+        "heartbeat_at_ms": utc_now().timestamp_millis(),
+        "finished_at_ms": finished_at_ms,
+        "start_mode": daemon_run_start_mode(args).as_str(),
+        "trigger_command": args.trigger_command.map(DaemonTriggerCommandArg::as_str),
+        "last_error": last_error,
+        "semantic_runtime_active": semantic_runtime_active,
+        "config_reload": config_reload,
+    }));
+    for binding in ["requested", "applied"] {
+        let pointer = format!("/{binding}/semantic_builtin_throttling_effective");
+        if config_reload
+            .and_then(|reload| reload.pointer(&pointer))
+            .is_some_and(Value::is_null)
+        {
+            value["config_reload"][binding]["semantic_builtin_throttling_effective"] = Value::Null;
+        }
+    }
+    write_daemon_status(data_root, &value)
 }
 
 #[cfg(test)]

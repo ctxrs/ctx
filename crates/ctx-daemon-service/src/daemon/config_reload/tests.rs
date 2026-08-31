@@ -286,6 +286,8 @@ fn assert_external_activation_failed(context: &ReloadTestContext) {
     assert_eq!(status["applied"]["semantic_enabled"], false);
     assert!(status["applied"]["semantic_executor"].is_null());
     assert!(status["applied"]["semantic_contract_fingerprint"].is_null());
+    assert!(status["applied"]["semantic_builtin_throttling_configured"].is_null());
+    assert!(status["applied"]["semantic_builtin_throttling_effective"].is_null());
     assert_refresh_service_usable(context);
 }
 
@@ -513,6 +515,22 @@ fn successful_executor_switches_replace_runtime_and_query_service_including_buil
             status["applied"]["semantic_contract_fingerprint"],
             expected.contract().fingerprint()
         );
+        assert_eq!(
+            status["requested"]["semantic_builtin_throttling_configured"],
+            true
+        );
+        assert_eq!(
+            status["requested"]["semantic_builtin_throttling_effective"],
+            json!(expected.builtin_throttling())
+        );
+        assert_eq!(
+            status["applied"]["semantic_builtin_throttling_configured"],
+            true
+        );
+        assert_eq!(
+            status["applied"]["semantic_builtin_throttling_effective"],
+            json!(expected.builtin_throttling())
+        );
         assert!(old_executor.upgrade().is_none());
         assert!(context.runtime.sidecar_drain.generation.is_none());
         assert!(context
@@ -532,6 +550,56 @@ fn successful_executor_switches_replace_runtime_and_query_service_including_buil
     http_b_server
         .join()
         .expect("second contract response server");
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn builtin_throttling_change_replaces_executor_and_updates_reload_identity() {
+    let mut context = ReloadTestContext::new(semantic_config(
+        SemanticEmbeddingExecutorConfig::builtin_with_throttling(true),
+    ));
+    context.activate_initial_executor();
+    let old_executor = Arc::downgrade(
+        context
+            .runtime
+            .semantic_executor
+            .as_ref()
+            .expect("active built-in executor"),
+    );
+    let mut replacement = semantic_config(
+        SemanticEmbeddingExecutorConfig::builtin_with_throttling(false),
+    );
+    replacement.semantic_builtin_throttling_configured = false;
+    context.config_port.replace(replacement);
+
+    assert_eq!(context.reload(), DaemonConfigReloadOutcome::Continue);
+
+    assert!(old_executor.upgrade().is_none());
+    assert_eq!(
+        context
+            .runtime
+            .config
+            .semantic_executor
+            .builtin_throttling(),
+        Some(false)
+    );
+    let status = context.reload.to_json();
+    assert_eq!(
+        status["requested"]["semantic_builtin_throttling_configured"],
+        false
+    );
+    assert_eq!(
+        status["requested"]["semantic_builtin_throttling_effective"],
+        false
+    );
+    assert_eq!(
+        status["applied"]["semantic_builtin_throttling_configured"],
+        false
+    );
+    assert_eq!(
+        status["applied"]["semantic_builtin_throttling_effective"],
+        false
+    );
 }
 
 #[cfg(any(unix, windows))]

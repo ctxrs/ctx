@@ -10,7 +10,11 @@ use serde_json::{json, Value};
 
 use crate::{compact_json, supervisor, DaemonApplicationHost, DaemonConfigSnapshot, DaemonMode};
 
+mod config_reload;
 mod core_refresh_job;
+
+use config_reload::daemon_config_reload_report;
+pub use config_reload::DaemonConfigReloadContext;
 
 pub struct DaemonStatusPreparation<'a> {
     host: &'a dyn DaemonApplicationHost,
@@ -35,21 +39,6 @@ pub struct DaemonStatusPreparation<'a> {
     trigger_command: Option<String>,
     trigger_provenance: Option<String>,
     core_refresh_job: Value,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct DaemonConfigReloadContext<'a> {
-    pub status: &'a str,
-    pub out_of_sync: bool,
-    pub requested_daemon_enabled: Option<bool>,
-    pub requested_semantic_enabled: Option<bool>,
-    pub requested_semantic_executor: Option<&'a str>,
-    pub requested_semantic_contract_fingerprint: Option<&'a str>,
-    pub applied_daemon_enabled: Option<bool>,
-    pub applied_semantic_enabled: Option<bool>,
-    pub applied_semantic_executor: Option<&'a str>,
-    pub applied_semantic_contract_fingerprint: Option<&'a str>,
-    pub last_error: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -217,6 +206,12 @@ impl DaemonStatusPreparation<'_> {
                 requested_semantic_contract_fingerprint: reload
                     .pointer("/requested/semantic_contract_fingerprint")
                     .and_then(Value::as_str),
+                requested_semantic_builtin_throttling_configured: reload
+                    .pointer("/requested/semantic_builtin_throttling_configured")
+                    .and_then(Value::as_bool),
+                requested_semantic_builtin_throttling_effective: reload
+                    .pointer("/requested/semantic_builtin_throttling_effective")
+                    .and_then(Value::as_bool),
                 applied_daemon_enabled: reload
                     .pointer("/applied/daemon_enabled")
                     .and_then(Value::as_bool),
@@ -229,6 +224,12 @@ impl DaemonStatusPreparation<'_> {
                 applied_semantic_contract_fingerprint: reload
                     .pointer("/applied/semantic_contract_fingerprint")
                     .and_then(Value::as_str),
+                applied_semantic_builtin_throttling_configured: reload
+                    .pointer("/applied/semantic_builtin_throttling_configured")
+                    .and_then(Value::as_bool),
+                applied_semantic_builtin_throttling_effective: reload
+                    .pointer("/applied/semantic_builtin_throttling_effective")
+                    .and_then(Value::as_bool),
                 last_error: reload.get("last_error").and_then(Value::as_str),
             },
         }
@@ -315,87 +316,6 @@ fn daemon_core_refresh_endpoint_report(
         "transport": identity.transport,
         "owner_pid": identity.owner_pid,
         "address": identity.address,
-    }))
-}
-
-fn daemon_config_reload_report(
-    daemon_status: Option<&Value>,
-    running: bool,
-    current_config: Option<&DaemonConfigSnapshot>,
-) -> Value {
-    let persisted = daemon_status
-        .and_then(|value| value.get("config_reload"))
-        .cloned()
-        .unwrap_or_else(|| json!({}));
-    let applied_daemon_enabled = persisted
-        .get("applied")
-        .and_then(|value| value.get("daemon_enabled"))
-        .and_then(Value::as_bool);
-    let applied_daemon_mode = persisted
-        .get("applied")
-        .and_then(|value| value.get("daemon_mode"))
-        .and_then(Value::as_str);
-    let applied_semantic_enabled = persisted
-        .get("applied")
-        .and_then(|value| value.get("semantic_enabled"))
-        .and_then(Value::as_bool);
-    let applied_semantic_executor = persisted
-        .get("applied")
-        .and_then(|value| value.get("semantic_executor"))
-        .and_then(Value::as_str);
-    let applied_semantic_contract_fingerprint = persisted
-        .get("applied")
-        .and_then(|value| value.get("semantic_contract_fingerprint"))
-        .and_then(Value::as_str);
-    let requested_daemon_enabled = current_config.map(|config| config.enabled);
-    let requested_daemon_mode = current_config.map(|config| config.mode.as_str());
-    let requested_semantic_enabled = current_config.map(|config| config.semantic_enabled);
-    let requested_semantic_executor =
-        current_config.map(|config| config.semantic_executor.as_str());
-    let requested_semantic_contract_fingerprint =
-        current_config.map(|config| config.semantic_contract_fingerprint.as_str());
-    let out_of_sync = running
-        && (requested_daemon_enabled != applied_daemon_enabled
-            || requested_daemon_mode != applied_daemon_mode
-            || requested_semantic_enabled != applied_semantic_enabled
-            || requested_semantic_executor != applied_semantic_executor
-            || requested_semantic_contract_fingerprint != applied_semantic_contract_fingerprint);
-    let persisted_status = persisted
-        .get("status")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown");
-    let status = if out_of_sync && persisted_status == "applied" {
-        "pending"
-    } else {
-        persisted_status
-    };
-    let reason = if out_of_sync && persisted_status == "applied" {
-        Some("config_changed")
-    } else {
-        None
-    };
-
-    compact_json(json!({
-        "status": status,
-        "reason": reason,
-        "out_of_sync": out_of_sync,
-        "last_attempt_at_ms": persisted.get("last_attempt_at_ms").cloned(),
-        "last_applied_at_ms": persisted.get("last_applied_at_ms").cloned(),
-        "requested": {
-            "daemon_enabled": requested_daemon_enabled,
-            "daemon_mode": requested_daemon_mode,
-            "semantic_enabled": requested_semantic_enabled,
-            "semantic_executor": requested_semantic_executor,
-            "semantic_contract_fingerprint": requested_semantic_contract_fingerprint,
-        },
-        "applied": {
-            "daemon_enabled": applied_daemon_enabled,
-            "daemon_mode": applied_daemon_mode,
-            "semantic_enabled": applied_semantic_enabled,
-            "semantic_executor": applied_semantic_executor,
-            "semantic_contract_fingerprint": applied_semantic_contract_fingerprint,
-        },
-        "last_error": persisted.get("last_error").cloned(),
     }))
 }
 
@@ -520,6 +440,8 @@ mod tests {
             semantic_enabled: false,
             semantic_executor: "builtin".to_owned(),
             semantic_contract_fingerprint: "sha256:builtin-space".to_owned(),
+            semantic_builtin_throttling_configured: true,
+            semantic_builtin_throttling_effective: Some(true),
         };
 
         let disabled = report(temp.path(), true, Some(&config));
@@ -553,6 +475,8 @@ mod tests {
                         "semantic_enabled": false,
                         "semantic_executor": "builtin",
                         "semantic_contract_fingerprint": "sha256:builtin-space",
+                        "semantic_builtin_throttling_configured": true,
+                        "semantic_builtin_throttling_effective": true,
                     },
                 },
             }),
@@ -563,6 +487,8 @@ mod tests {
             semantic_enabled: true,
             semantic_executor: "https://embeddings.example.test/v1/".to_owned(),
             semantic_contract_fingerprint: "sha256:external-space".to_owned(),
+            semantic_builtin_throttling_configured: true,
+            semantic_builtin_throttling_effective: None,
         };
         let host = TestHost;
         let application = DaemonApplication::new(&host);
@@ -627,6 +553,8 @@ mod tests {
                         "semantic_enabled": true,
                         "semantic_executor": "https://embeddings.example.test/v1/",
                         "semantic_contract_fingerprint": "sha256:external-space-a",
+                        "semantic_builtin_throttling_configured": true,
+                        "semantic_builtin_throttling_effective": null,
                     },
                 },
             }),
@@ -637,6 +565,8 @@ mod tests {
             semantic_enabled: true,
             semantic_executor: "https://embeddings.example.test/v1/".to_owned(),
             semantic_contract_fingerprint: "sha256:external-space-b".to_owned(),
+            semantic_builtin_throttling_configured: true,
+            semantic_builtin_throttling_effective: None,
         };
         let host = TestHost;
         let application = DaemonApplication::new(&host);
@@ -691,6 +621,66 @@ mod tests {
     }
 
     #[test]
+    fn running_owner_marks_changed_builtin_throttling_identity_pending() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let lock = DaemonLock::acquire(temp.path())?.expect("daemon lock");
+        let now = ctx_history_core::utc_now().timestamp_millis();
+        write_private_json_file(
+            &daemon_status_path(temp.path()),
+            &json!({
+                "status": "running",
+                "pid": process::id(),
+                "heartbeat_at_ms": now,
+                "semantic_runtime_active": true,
+                "config_reload": {
+                    "status": "applied",
+                    "applied": {
+                        "daemon_enabled": true,
+                        "daemon_mode": "full",
+                        "semantic_enabled": true,
+                        "semantic_executor": "builtin",
+                        "semantic_contract_fingerprint": "sha256:builtin-space",
+                        "semantic_builtin_throttling_configured": true,
+                        "semantic_builtin_throttling_effective": true,
+                    },
+                },
+            }),
+        )?;
+        let config = DaemonConfigSnapshot {
+            enabled: true,
+            mode: DaemonMode::Full,
+            semantic_enabled: true,
+            semantic_executor: "builtin".to_owned(),
+            semantic_contract_fingerprint: "sha256:builtin-space".to_owned(),
+            semantic_builtin_throttling_configured: false,
+            semantic_builtin_throttling_effective: Some(false),
+        };
+
+        let daemon = report(temp.path(), true, Some(&config));
+
+        assert_eq!(daemon["config_reload"]["status"], "pending");
+        assert_eq!(daemon["config_reload"]["reason"], "config_changed");
+        assert_eq!(
+            daemon["config_reload"]["requested"]["semantic_builtin_throttling_configured"],
+            false
+        );
+        assert_eq!(
+            daemon["config_reload"]["requested"]["semantic_builtin_throttling_effective"],
+            false
+        );
+        assert_eq!(
+            daemon["config_reload"]["applied"]["semantic_builtin_throttling_configured"],
+            true
+        );
+        assert_eq!(
+            daemon["config_reload"]["applied"]["semantic_builtin_throttling_effective"],
+            true
+        );
+        drop(lock);
+        Ok(())
+    }
+
+    #[test]
     fn persisted_applied_mode_is_used_when_current_config_is_unavailable() -> anyhow::Result<()> {
         let temp = tempfile::tempdir()?;
         write_private_json_file(
@@ -732,6 +722,8 @@ mod tests {
                         "semantic_enabled": false,
                         "semantic_executor": "builtin",
                         "semantic_contract_fingerprint": "sha256:builtin-space",
+                        "semantic_builtin_throttling_configured": true,
+                        "semantic_builtin_throttling_effective": true,
                     },
                 },
             }),
@@ -742,6 +734,8 @@ mod tests {
             semantic_enabled: true,
             semantic_executor: "https://embeddings.example.test/v1/".to_owned(),
             semantic_contract_fingerprint: "sha256:external-space".to_owned(),
+            semantic_builtin_throttling_configured: true,
+            semantic_builtin_throttling_effective: None,
         };
         let host = TestHost;
         let application = DaemonApplication::new(&host);
@@ -944,6 +938,8 @@ mod tests {
                         "semantic_enabled": false,
                         "semantic_executor": "builtin",
                         "semantic_contract_fingerprint": "sha256:builtin-space",
+                        "semantic_builtin_throttling_configured": true,
+                        "semantic_builtin_throttling_effective": true,
                     },
                     "applied": {
                         "daemon_enabled": true,
@@ -951,6 +947,8 @@ mod tests {
                         "semantic_enabled": false,
                         "semantic_executor": "builtin",
                         "semantic_contract_fingerprint": "sha256:builtin-space",
+                        "semantic_builtin_throttling_configured": true,
+                        "semantic_builtin_throttling_effective": true,
                     },
                 },
             }),
@@ -974,6 +972,8 @@ mod tests {
             semantic_enabled: false,
             semantic_executor: "builtin".to_owned(),
             semantic_contract_fingerprint: "sha256:builtin-space".to_owned(),
+            semantic_builtin_throttling_configured: true,
+            semantic_builtin_throttling_effective: Some(true),
         };
 
         let report = application

@@ -104,8 +104,29 @@ falling back to E5. Rerunning `ctx semantic enable --executor URL` explicitly
 accepts the current identity; if it changed, ctx wipes and rebuilds only the
 derived semantic index. Core history and lexical generations remain intact.
 
+Built-in semantic document indexing is throttled by default. The effective
+default is `builtin_throttling = true` even when the key is absent. An operator
+can opt the built-in executor out in `config.toml`:
+
+```toml
+[semantic]
+builtin_throttling = false
+```
+
+The setting is configuration-only and does not change `ctx semantic enable`,
+`--executor`, or semantic query/index identity. Combining it with an explicitly
+configured HTTP executor is invalid and fails configuration loading. When
+disabled, ctx adds no deliberate delay between built-in inference batches and
+uses up to eight threads, bounded by available parallelism, with batches of up
+to 512 inputs. Work admission, model/runtime integrity, cancellation
+boundaries, source-page atomicity, and all hard resource and protocol limits
+remain authoritative. The built-in model remains the pinned
+`intfloat/multilingual-e5-small` contract.
+
 `ctx semantic status` reads persisted and observed local state only. It does
 not require the token, send it, probe either route, or make any network request.
+Its human and JSON forms report configured and effective built-in throttling,
+including the defaulted configured value.
 
 ## Setup UX
 

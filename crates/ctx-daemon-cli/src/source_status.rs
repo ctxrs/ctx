@@ -111,6 +111,46 @@ pub fn source_epoch_status_report(
         .map(|index| index.session_count())
         .transpose()?;
 
+    let mut report = compact_json(json!({
+        "schema_version": 2,
+        "initialized": initialized,
+        "data_root": data_root,
+        "config_path": data_root.join(ctx_app_config::CONFIG_FILE),
+        "history_epoch": history_epoch,
+        "lexical": lexical,
+        "catalog": catalog,
+        "refresh": refresh,
+        "semantic": semantic,
+        "daemon": daemon,
+        "indexed_items": indexed_items,
+        "indexed_sessions": indexed_sessions,
+        "indexed_events": indexed_events,
+        "indexed_sources": indexed_sources,
+        "local_only": true,
+        "read_only": true,
+    }));
+    if config.semantic_builtin_throttling_effective().is_none() {
+        report["semantic"]["builtin_throttling"]["effective"] = Value::Null;
+        if report
+            .pointer("/daemon/config_reload/requested/semantic_builtin_throttling_configured")
+            .is_some()
+        {
+            report["daemon"]["config_reload"]["requested"]
+                ["semantic_builtin_throttling_effective"] = Value::Null;
+        }
+    }
+    if report
+        .pointer("/daemon/config_reload/applied/semantic_executor")
+        .and_then(Value::as_str)
+        .is_some_and(|executor| executor != "builtin")
+        && report
+            .pointer("/daemon/config_reload/applied/semantic_builtin_throttling_configured")
+            .is_some()
+    {
+        report["daemon"]["config_reload"]["applied"]["semantic_builtin_throttling_effective"] =
+            Value::Null;
+    }
+
     Ok(SourceEpochStatus {
         initialized,
         indexed_items,
@@ -118,24 +158,7 @@ pub fn source_epoch_status_report(
         indexed_events,
         indexed_sources,
         health,
-        report: compact_json(json!({
-            "schema_version": 2,
-            "initialized": initialized,
-            "data_root": data_root,
-            "config_path": data_root.join(ctx_app_config::CONFIG_FILE),
-            "history_epoch": history_epoch,
-            "lexical": lexical,
-            "catalog": catalog,
-            "refresh": refresh,
-            "semantic": semantic,
-            "daemon": daemon,
-            "indexed_items": indexed_items,
-            "indexed_sessions": indexed_sessions,
-            "indexed_events": indexed_events,
-            "indexed_sources": indexed_sources,
-            "local_only": true,
-            "read_only": true,
-        })),
+        report,
     })
 }
 
@@ -528,6 +551,7 @@ fn semantic_report(
             },
             "enabled": enabled,
             "config_source": config.semantic_search_source(),
+            "builtin_throttling": builtin_throttling_report(config),
             "flat_f32": {
                 "status": "unavailable",
                 "reason": "lexical_generation_unavailable",
@@ -545,6 +569,7 @@ fn semantic_report(
             },
             "enabled": enabled,
             "config_source": config.semantic_search_source(),
+            "builtin_throttling": builtin_throttling_report(config),
             "flat_f32": {
                 "status": if enabled { "pending" } else { "disabled" },
                 "reason": if enabled {
@@ -568,6 +593,7 @@ fn semantic_report(
                 "reason": "semantic_contract_invalid",
                 "enabled": enabled,
                 "config_source": config.semantic_search_source(),
+                "builtin_throttling": builtin_throttling_report(config),
                 "flat_f32": typed_unavailable_with_error(
                     "semantic_contract_invalid",
                     path,
@@ -681,8 +707,18 @@ fn semantic_report(
         },
         "enabled": enabled,
         "config_source": config.semantic_search_source(),
+        "builtin_throttling": builtin_throttling_report(config),
         "flat_f32": flat_f32,
     }))
+}
+
+fn builtin_throttling_report(config: &DaemonRuntimeConfig) -> Value {
+    json!({
+        "configured": config.semantic_builtin_throttling_configured(),
+        "effective": config.semantic_builtin_throttling_effective(),
+        "config_source": config.semantic_builtin_throttling_source(),
+        "reason": config.semantic_builtin_throttling_reason(),
+    })
 }
 
 #[cfg(test)]

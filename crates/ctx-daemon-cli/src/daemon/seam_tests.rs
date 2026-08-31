@@ -40,6 +40,8 @@ fn source_refresh_only_status_exposes_runtime_and_certified_refresh_identity() -
                     "semantic_enabled": false,
                     "semantic_executor": "builtin",
                     "semantic_contract_fingerprint": semantic_contract_fingerprint,
+                    "semantic_builtin_throttling_configured": true,
+                    "semantic_builtin_throttling_effective": true,
                 },
                 "applied": {
                     "daemon_enabled": true,
@@ -47,6 +49,8 @@ fn source_refresh_only_status_exposes_runtime_and_certified_refresh_identity() -
                     "semantic_enabled": false,
                     "semantic_executor": "builtin",
                     "semantic_contract_fingerprint": semantic_contract_fingerprint,
+                    "semantic_builtin_throttling_configured": true,
+                    "semantic_builtin_throttling_effective": true,
                 },
             },
         }),

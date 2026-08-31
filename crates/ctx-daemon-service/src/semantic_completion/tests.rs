@@ -13,6 +13,25 @@ fn target() -> DaemonSemanticCompletionTarget {
             true,
             "https://semantic.example.test/",
             "sha256:model",
+            true,
+            None,
+        ),
+    )
+}
+
+fn unthrottled_builtin_target() -> DaemonSemanticCompletionTarget {
+    DaemonSemanticCompletionTarget::new(
+        "generation-1",
+        "sha256:model",
+        "sha256:source",
+        DaemonSemanticConfigBinding::new(
+            true,
+            "full",
+            true,
+            "builtin",
+            "sha256:model",
+            false,
+            Some(false),
         ),
     )
 }
@@ -30,6 +49,8 @@ fn status(reload_status: &str, requested_executor: &str, applied_executor: &str)
                 "semantic_enabled": true,
                 "semantic_executor": requested_executor,
                 "semantic_contract_fingerprint": "sha256:model",
+                "semantic_builtin_throttling_configured": true,
+                "semantic_builtin_throttling_effective": null,
             },
             "applied": {
                 "daemon_enabled": true,
@@ -37,6 +58,35 @@ fn status(reload_status: &str, requested_executor: &str, applied_executor: &str)
                 "semantic_enabled": true,
                 "semantic_executor": applied_executor,
                 "semantic_contract_fingerprint": "sha256:model",
+                "semantic_builtin_throttling_configured": true,
+                "semantic_builtin_throttling_effective": null,
+            },
+        },
+    })
+}
+
+fn unthrottled_builtin_status() -> Value {
+    json!({
+        "status": "running",
+        "config_reload": {
+            "status": "applied",
+            "requested": {
+                "daemon_enabled": true,
+                "daemon_mode": "full",
+                "semantic_enabled": true,
+                "semantic_executor": "builtin",
+                "semantic_contract_fingerprint": "sha256:model",
+                "semantic_builtin_throttling_configured": false,
+                "semantic_builtin_throttling_effective": false,
+            },
+            "applied": {
+                "daemon_enabled": true,
+                "daemon_mode": "full",
+                "semantic_enabled": true,
+                "semantic_executor": "builtin",
+                "semantic_contract_fingerprint": "sha256:model",
+                "semantic_builtin_throttling_configured": false,
+                "semantic_builtin_throttling_effective": false,
             },
         },
     })
@@ -90,6 +140,35 @@ fn ready_requires_exact_requested_applied_and_job_bindings() {
         ),
         DaemonSemanticCompletionObservation::Pending(_)
     ));
+}
+
+#[test]
+fn ready_requires_exact_unthrottled_builtin_requested_and_applied_identity() {
+    let target = unthrottled_builtin_target();
+    let exact = unthrottled_builtin_status();
+    assert_eq!(
+        classify_exact_daemon_semantic_completion(&exact, Some(&job("ready")), &target),
+        DaemonSemanticCompletionObservation::Ready
+    );
+
+    for binding in ["requested", "applied"] {
+        for replacement in [Some(json!(true)), Some(Value::Null), None] {
+            let mut stale = exact.clone();
+            let config = stale["config_reload"][binding].as_object_mut().unwrap();
+            match replacement {
+                Some(value) => {
+                    config.insert("semantic_builtin_throttling_effective".to_owned(), value);
+                }
+                None => {
+                    config.remove("semantic_builtin_throttling_effective");
+                }
+            }
+            assert!(matches!(
+                classify_exact_daemon_semantic_completion(&stale, Some(&job("ready")), &target,),
+                DaemonSemanticCompletionObservation::Pending(_)
+            ));
+        }
+    }
 }
 
 #[test]
