@@ -91,6 +91,19 @@ fn semantic_config(executor: SemanticEmbeddingExecutorConfig) -> DaemonConfigSna
     }
 }
 
+fn assert_builtin_throttling_status(status: &Value, configured: bool, effective: Option<bool>) {
+    for binding in ["requested", "applied"] {
+        assert_eq!(
+            status[binding]["semantic_builtin_throttling_configured"],
+            configured
+        );
+        assert_eq!(
+            status[binding]["semantic_builtin_throttling_effective"],
+            json!(effective)
+        );
+    }
+}
+
 fn http_executor(
     endpoint: &str,
     space_id: &str,
@@ -515,22 +528,7 @@ fn successful_executor_switches_replace_runtime_and_query_service_including_buil
             status["applied"]["semantic_contract_fingerprint"],
             expected.contract().fingerprint()
         );
-        assert_eq!(
-            status["requested"]["semantic_builtin_throttling_configured"],
-            true
-        );
-        assert_eq!(
-            status["requested"]["semantic_builtin_throttling_effective"],
-            json!(expected.builtin_throttling())
-        );
-        assert_eq!(
-            status["applied"]["semantic_builtin_throttling_configured"],
-            true
-        );
-        assert_eq!(
-            status["applied"]["semantic_builtin_throttling_effective"],
-            json!(expected.builtin_throttling())
-        );
+        assert_builtin_throttling_status(&status, true, expected.builtin_throttling());
         assert!(old_executor.upgrade().is_none());
         assert!(context.runtime.sidecar_drain.generation.is_none());
         assert!(context
@@ -584,22 +582,7 @@ fn builtin_throttling_change_replaces_executor_and_updates_reload_identity() {
         Some(false)
     );
     let status = context.reload.to_json();
-    assert_eq!(
-        status["requested"]["semantic_builtin_throttling_configured"],
-        false
-    );
-    assert_eq!(
-        status["requested"]["semantic_builtin_throttling_effective"],
-        false
-    );
-    assert_eq!(
-        status["applied"]["semantic_builtin_throttling_configured"],
-        false
-    );
-    assert_eq!(
-        status["applied"]["semantic_builtin_throttling_effective"],
-        false
-    );
+    assert_builtin_throttling_status(&status, false, Some(false));
 }
 
 #[cfg(any(unix, windows))]

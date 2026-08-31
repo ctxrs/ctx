@@ -1055,19 +1055,23 @@ fn core_builder_preserves_assistant_after_more_than_sixty_four_tool_events() {
     assert_eq!(document.occurred_at_ms(), (TOOL_EVENTS + 2) as i64);
 }
 
-#[test]
-fn daemon_lifecycle_receipt_preserves_service_trigger_metadata() -> anyhow::Result<()> {
-    let temp = tempfile::tempdir()?;
-    let args = DaemonRunArgs {
+fn lifecycle_args(trigger_command: crate::DaemonTrigger) -> DaemonRunArgs {
+    DaemonRunArgs {
         loop_interval_seconds: None,
         max_chunks: None,
         handle_process_signals: false,
         force: false,
         profile: crate::DaemonRunProfile::Persistent,
         start_mode: Some(crate::DaemonStartMode::Auto),
-        trigger_command: Some(crate::DaemonTrigger::Setup),
+        trigger_command: Some(trigger_command),
         supervisor: crate::DaemonSupervisor::User,
-    };
+    }
+}
+
+#[test]
+fn daemon_lifecycle_receipt_preserves_service_trigger_metadata() -> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let args = lifecycle_args(crate::DaemonTrigger::Setup);
 
     write_daemon_lifecycle_status(temp.path(), &args, "running", 123, None, None)?;
     let status = crate::paths_status::read_daemon_status(temp.path()).expect("daemon status");
@@ -1080,16 +1084,7 @@ fn daemon_lifecycle_receipt_preserves_service_trigger_metadata() -> anyhow::Resu
 #[test]
 fn daemon_lifecycle_receipt_preserves_not_applicable_builtin_throttling() -> anyhow::Result<()> {
     let temp = tempfile::tempdir()?;
-    let args = DaemonRunArgs {
-        loop_interval_seconds: None,
-        max_chunks: None,
-        handle_process_signals: false,
-        force: false,
-        profile: crate::DaemonRunProfile::Persistent,
-        start_mode: Some(crate::DaemonStartMode::Auto),
-        trigger_command: Some(crate::DaemonTrigger::Search),
-        supervisor: crate::DaemonSupervisor::User,
-    };
+    let args = lifecycle_args(crate::DaemonTrigger::Search);
     let reload = json!({
         "status": "activation_failed",
         "requested": {
@@ -1114,14 +1109,12 @@ fn daemon_lifecycle_receipt_preserves_not_applicable_builtin_throttling() -> any
     )?;
 
     let status = crate::paths_status::read_daemon_status(temp.path()).expect("daemon status");
-    assert_eq!(
-        status["config_reload"]["requested"]["semantic_builtin_throttling_effective"],
-        Value::Null
-    );
-    assert_eq!(
-        status["config_reload"]["applied"]["semantic_builtin_throttling_effective"],
-        Value::Null
-    );
+    for binding in ["requested", "applied"] {
+        assert_eq!(
+            status["config_reload"][binding]["semantic_builtin_throttling_effective"],
+            Value::Null
+        );
+    }
     assert!(status["config_reload"]["applied"]
         .get("semantic_builtin_throttling_configured")
         .is_none());
