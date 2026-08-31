@@ -308,6 +308,9 @@ Load command 8
      name /System/Library/Frameworks/Metal.framework/Versions/A/Metal (offset 24)
 Load command 9
       cmd LC_LOAD_DYLIB
+     name /System/Library/Frameworks/Security.framework/Versions/A/Security (offset 24)
+Load command 10
+      cmd LC_LOAD_DYLIB
      name /usr/lib/libSystem.B.dylib (offset 24)
 Load command 11
       cmd LC_LOAD_DYLIB
@@ -419,8 +422,8 @@ sed '/NeededLibraries \[/a\  ld-linux-aarch64.so.1\
   libgcc_s.so.1' "${linux_arm64}" >"${linux_arm64_gnu_runtime}"
 expect_pass linux_arm64_optional_gnu_runtime run_check linux-aarch64 \
   "${linux_arm64_gnu_runtime}"
-expect_pass mac_arm64_frameworks run_check macos-arm64 "${mac_arm_readobj}" "${mac_objdump}"
-expect_pass mac_x64_frameworks run_check macos-x64 "${mac_x64_readobj}" "${mac_objdump}"
+expect_pass mac_arm64_security_framework run_check macos-arm64 "${mac_arm_readobj}" "${mac_objdump}"
+expect_pass mac_x64_security_framework run_check macos-x64 "${mac_x64_readobj}" "${mac_objdump}"
 expect_pass windows run_check windows-x64 "${windows}"
 expect_pass windows_declared_tool run_declared_windows_check "${windows}"
 expect_fail malformed run_check linux-x64 "${tmp}/empty"
@@ -582,14 +585,11 @@ sed 's#/System/Library/Frameworks/CoreServices.framework/Versions/A/CoreServices
   "${mac_objdump}" > "${bad_mac_framework_path}"
 expect_fail mac_arbitrary_framework_path run_check macos-arm64 "${mac_arm_readobj}" "${bad_mac_framework_path}"
 expect_fail mac_x64_arbitrary_framework_path run_check macos-x64 "${mac_x64_readobj}" "${bad_mac_framework_path}"
-unexpected_mac_security="${tmp}/unexpected-mac-security.txt"
-sed '/name \/usr\/lib\/libobjc.A.dylib/a\
-Load command 15\
-      cmd LC_LOAD_DYLIB\
-     name /System/Library/Frameworks/Security.framework/Versions/A/Security (offset 24)' \
-  "${mac_objdump}" > "${unexpected_mac_security}"
-expect_fail mac_unexpected_security_framework run_check macos-arm64 "${mac_arm_readobj}" "${unexpected_mac_security}"
-expect_fail mac_x64_unexpected_security_framework run_check macos-x64 "${mac_x64_readobj}" "${unexpected_mac_security}"
+bad_mac_security_sibling="${tmp}/bad-mac-security-sibling.txt"
+sed 's#/System/Library/Frameworks/Security.framework/Versions/A/Security#/System/Library/Frameworks/Security.framework/Versions/B/Security#' \
+  "${mac_objdump}" > "${bad_mac_security_sibling}"
+expect_fail mac_security_sibling run_check macos-arm64 "${mac_arm_readobj}" "${bad_mac_security_sibling}"
+expect_fail mac_x64_security_sibling run_check macos-x64 "${mac_x64_readobj}" "${bad_mac_security_sibling}"
 missing_mac_core_services="${tmp}/missing-mac-core-services.txt"
 sed '/CoreServices.framework\/Versions\/A\/CoreServices/d' "${mac_objdump}" > "${missing_mac_core_services}"
 expect_fail mac_missing_core_services_framework run_check macos-arm64 "${mac_arm_readobj}" "${missing_mac_core_services}"
