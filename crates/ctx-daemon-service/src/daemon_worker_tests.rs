@@ -519,7 +519,7 @@ impl CoreFixture {
 }
 
 #[test]
-fn core_builder_combines_complete_lite_turn_with_provider_source_absent() {
+fn core_builder_combines_all_lite_turn_messages_with_provider_source_absent() {
     let fixture = CoreFixture::new();
     let index = fixture.index(vec![
         fixture.record(1, EventRole::User, "exact Gemini question"),
@@ -547,7 +547,7 @@ fn core_builder_combines_complete_lite_turn_with_provider_source_absent() {
     assert_eq!(document.occurred_at_ms(), 3);
     assert_eq!(
         document.text(),
-        "user:\nexact Gemini question\n\nassistant:\nfinal exact Gemini answer"
+        "user:\nexact Gemini question\n\nassistant:\nearly answer\n\nassistant:\nfinal exact Gemini answer"
     );
 }
 
@@ -600,7 +600,7 @@ fn core_builder_pairs_multiple_lite_turns_with_bounded_forward_queries() {
 }
 
 #[test]
-fn core_builder_streams_multiple_pairing_pages_to_the_final_assistant() {
+fn core_builder_streams_multiple_pairing_pages_without_dropping_assistants() {
     let fixture = CoreFixture::new();
     let index = fixture.index(vec![
         fixture.record(1, EventRole::User, "bounded question"),
@@ -623,7 +623,7 @@ fn core_builder_streams_multiple_pairing_pages_to_the_final_assistant() {
 
     assert_eq!(
         document.text(),
-        "user:\nbounded question\n\nassistant:\nlate bounded answer"
+        "user:\nbounded question\n\nassistant:\nearly bounded answer\n\nassistant:\nlate bounded answer"
     );
     assert_eq!(document.occurred_at_ms(), 3);
 }

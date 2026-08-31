@@ -40,18 +40,30 @@ impl VerifiedIndex {
             .and_then(|mut events| events.pop()))
     }
 
-    /// Streams forward from one semantic user anchor until the next user and
-    /// returns the latest nonempty assistant text in that turn.
-    ///
-    /// Session coordinates are sought directly in fixed-size term pages. Tool
-    /// records remain metadata-only, assistant Core bodies are decoded one at
-    /// a time, and no session-wide collector or retained session cache is used.
+    /// Returns the latest bounded assistant text in one semantic lite turn.
     pub fn semantic_lite_turn_assistant(
         &self,
         anchor: &CoreEventRecord,
         page_items: usize,
         pairing_budget: CoreEventPageBudget,
     ) -> Result<Option<(String, i64)>> {
+        Ok(self
+            .semantic_lite_turn_assistants(anchor, page_items, pairing_budget)?
+            .pop())
+    }
+
+    /// Streams forward from one semantic user anchor until the next user and
+    /// returns all nonempty assistant text in that turn.
+    ///
+    /// Session coordinates are sought directly in fixed-size term pages. Tool
+    /// records remain metadata-only, assistant Core bodies are decoded one at
+    /// a time, and the byte budget applies across the complete turn.
+    pub fn semantic_lite_turn_assistants(
+        &self,
+        anchor: &CoreEventRecord,
+        page_items: usize,
+        pairing_budget: CoreEventPageBudget,
+    ) -> Result<Vec<(String, i64)>> {
         if !(1..=MAX_SEMANTIC_PAIRING_PAGE_ITEMS).contains(&page_items) {
             return Err(IndexError::InvalidSessionEventCoordinateLimit {
                 requested: page_items,
@@ -101,7 +113,8 @@ impl VerifiedIndex {
             .collect::<std::io::Result<Vec<_>>>()?;
         let mut merged = TermMerger::new(streams);
 
-        let mut latest_assistant = None;
+        let mut assistant_messages = Vec::new();
+        let mut remaining_budget = pairing_budget;
         loop {
             let candidates = session_event_address_page(
                 session_id,
@@ -111,7 +124,7 @@ impl VerifiedIndex {
                 segments,
             )?;
             if candidates.is_empty() {
-                return Ok(latest_assistant);
+                return Ok(assistant_messages);
             }
 
             for candidate in candidates {
@@ -128,20 +141,27 @@ impl VerifiedIndex {
                 }
                 after = candidate.order;
                 if event.event_type == "message" && event.role.as_deref() == Some("user") {
-                    return Ok(latest_assistant);
+                    return Ok(assistant_messages);
                 }
                 if event.event_type != "message" || event.role.as_deref() != Some("assistant") {
                     continue;
+                }
+                if remaining_budget.maximum_encoded_core_bytes == 0
+                    || remaining_budget.maximum_content_bytes == 0
+                {
+                    return Ok(assistant_messages);
                 }
 
                 let Some(batch) = self.core_events_by_ids_with_strict_budget(
                     &[event.event_id.as_uuid()],
                     1,
-                    pairing_budget,
+                    remaining_budget,
                 )?
                 else {
-                    return Ok(None);
+                    return Ok(assistant_messages);
                 };
+                remaining_budget.maximum_encoded_core_bytes -= batch.encoded_core_bytes;
+                remaining_budget.maximum_content_bytes -= batch.content_bytes;
                 let assistant = batch.items.into_iter().next().ok_or(
                     IndexError::InvalidStoredDocumentField(SESSION_EVENT_ORDER_FIELD),
                 )?;
@@ -155,7 +175,7 @@ impl VerifiedIndex {
                 }
                 let text = assistant.core_record.content.meaningful_text().trim();
                 if !text.is_empty() {
-                    latest_assistant = Some((
+                    assistant_messages.push((
                         text.to_owned(),
                         assistant.occurred_at_unix_ms.unwrap_or_default(),
                     ));
