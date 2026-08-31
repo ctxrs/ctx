@@ -22,7 +22,7 @@ use serde_json::{json, Value};
 use crate::*;
 mod autostart_request;
 mod finite_worker;
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod finite_worker_bounded_tests;
 mod launch;
 mod readiness_receipt;
