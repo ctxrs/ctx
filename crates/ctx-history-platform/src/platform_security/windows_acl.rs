@@ -900,7 +900,6 @@ mod tests {
         }
 
         let error = create_private_file_new(&junction.join("redirected-child")).unwrap_err();
-
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
         assert!(error.to_string().contains("reparse point"));
         assert!(!target.join("redirected-child").exists());
