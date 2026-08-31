@@ -20,11 +20,11 @@ use {
 
 pub(crate) mod text;
 
-use super::config;
 use crate::{
     analytics::PublicEventV1, operation_descriptor::observed_mcp_product_operation,
     tool_backend::LocalToolBackend,
 };
+use ctx_app_config as config;
 
 #[derive(Debug, Args)]
 pub(crate) struct McpArgs {

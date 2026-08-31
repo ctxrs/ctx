@@ -10,7 +10,7 @@ use ctx_semantic_index::{
 };
 use serde_json::{json, Value};
 
-use crate::{compact_json, config::AppConfig};
+use crate::{compact_json, composition::DaemonRuntimeConfig};
 
 use super::paths_status::{
     daemon_core_refresh_job_path, daemon_report_with_config, daemon_semantic_job_path,
@@ -69,7 +69,7 @@ pub struct SourceEpochStatus {
 
 pub fn source_epoch_status_report(
     data_root: &Path,
-    config: &AppConfig<'_>,
+    config: &DaemonRuntimeConfig,
 ) -> Result<SourceEpochStatus> {
     let current_policy = current_source_generation_policy();
     let current_policy_hash = current_source_generation_policy_hash()?;
@@ -122,7 +122,7 @@ pub fn source_epoch_status_report(
             "schema_version": 2,
             "initialized": initialized,
             "data_root": data_root,
-            "config_path": data_root.join(crate::config::CONFIG_FILE),
+            "config_path": data_root.join(ctx_app_config::CONFIG_FILE),
             "history_epoch": history_epoch,
             "lexical": lexical,
             "catalog": catalog,
@@ -159,7 +159,7 @@ fn attach_catch_up_status(report: &mut Value, status: Option<Value>) {
     }
 }
 
-fn source_daemon_report(data_root: &Path, config: &AppConfig<'_>) -> Value {
+fn source_daemon_report(data_root: &Path, config: &DaemonRuntimeConfig) -> Value {
     let mut daemon = daemon_report_with_config(data_root, true, config);
     if let Some(jobs) = daemon.get_mut("jobs").and_then(Value::as_object_mut) {
         jobs.retain(|name, _| matches!(name.as_str(), "core_refresh" | "semantic_index"));
@@ -513,7 +513,7 @@ fn catalog_report(generation_id: Option<&str>, index: Option<&VerifiedIndex>) ->
 
 fn semantic_report(
     data_root: &Path,
-    config: &AppConfig<'_>,
+    config: &DaemonRuntimeConfig,
     index: Option<&VerifiedIndex>,
 ) -> Value {
     let enabled = config.semantic_search_enabled();

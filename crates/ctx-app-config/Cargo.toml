@@ -1,0 +1,34 @@
+[package]
+name = "ctx-app-config"
+version.workspace = true
+description = "Authoritative persisted application configuration for ctx"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+publish = false
+
+[features]
+test-support = []
+
+[dependencies]
+anyhow.workspace = true
+ctx-history-capture = { path = "../ctx-history-capture" }
+ctx-history-core = { path = "../ctx-history-core" }
+ctx-history-platform = { path = "../ctx-history-platform" }
+ctx-semantic-model = { path = "../ctx-semantic-model" }
+fs2 = "0.4.3"
+toml_edit = "0.22"
+thiserror.workspace = true
+uuid.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_IO"] }
+
+[dev-dependencies]
+serde_json.workspace = true
+tempfile.workspace = true

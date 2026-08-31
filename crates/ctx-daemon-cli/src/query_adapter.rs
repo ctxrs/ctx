@@ -402,7 +402,7 @@ pub(crate) fn semantic_index_contract_for_selected(
 }
 
 fn selected_semantic_contract(data_root: &Path) -> Result<SemanticModelContract> {
-    let config = crate::config::AppConfig::load(data_root)?;
+    let config = crate::composition::load_runtime_config(data_root)?;
     semantic_index_contract_for_selected(config.semantic_model_contract())
 }
 

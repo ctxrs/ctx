@@ -3,7 +3,7 @@ use super::*;
 pub fn run_daemon_command(
     args: DaemonArgs,
     data_root: PathBuf,
-    config: &AppConfig<'_>,
+    config: &DaemonRuntimeConfig,
     ui: &mut Ui,
 ) -> Result<()> {
     let reload_persisted_config = matches!(
@@ -117,7 +117,7 @@ pub(super) fn run_daemon_enabled_update(
 
 pub fn update_indexing_mode(
     data_root: &Path,
-    config: &AppConfig<'_>,
+    config: &DaemonRuntimeConfig,
     automatic: bool,
 ) -> Result<crate::IndexingModeUpdate> {
     super::super::daemon_supervisor::with_daemon_run_application(config, true, |application| {

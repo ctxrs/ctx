@@ -31,7 +31,6 @@ serde_json.workspace = true
 sha2.workspace = true
 terminal_size.workspace = true
 thiserror.workspace = true
-toml_edit = "0.22"
 ureq = { version = "2.10", default-features = true }
 url.workspace = true
 unicode-width.workspace = true
@@ -39,6 +38,7 @@ uuid.workspace = true
 fs2 = "0.4.3"
 ctx-agent-application = { path = "../ctx-agent-application" }
 ctx-agent-integrations = { path = "../ctx-agent-integrations" }
+ctx-app-config = { path = "../ctx-app-config" }
 ctx-cli-presentation = { path = "../ctx-cli-presentation" }
 ctx-daemon-cli = { path = "../ctx-daemon-cli" }
 ctx-history-capture = { path = "../ctx-history-capture" }
@@ -62,7 +62,9 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Securit
 
 [dev-dependencies]
 assert_cmd.workspace = true
+ctx-app-config = { path = "../ctx-app-config", features = ["test-support"] }
 ctx-client-observability = { path = "../ctx-client-observability", features = ["test-support"] }
+ctx-daemon-cli = { path = "../ctx-daemon-cli", features = ["test-support"] }
 ctx-upgrade-engine = { path = "../ctx-upgrade-engine", features = ["test-support"] }
 ctx-history-refresh = { path = "../ctx-history-refresh", features = ["test-support"] }
 predicates.workspace = true

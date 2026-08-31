@@ -1,5 +1,5 @@
 use super::*;
-use crate::config::CONFIG_FILE;
+use ctx_app_config::CONFIG_FILE;
 use ctx_daemon_runtime::DaemonLock;
 use std::sync::{Arc, Barrier};
 
@@ -261,7 +261,7 @@ fn detached_daemon_launch_freezes_the_normalized_environment() {
         }
     }
 
-    let _env_lock = crate::config::TEST_LOCAL_USAGE_ENV_LOCK
+    let _env_lock = crate::TEST_LOCAL_USAGE_ENV_LOCK
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     let _restore = RestoreHome(env::var_os("HOME"));
@@ -295,13 +295,13 @@ fn fresh_v026_root_allows_daemon_autostart_without_legacy_store() {
         }
     }
 
-    let _env_lock = crate::config::TEST_LOCAL_USAGE_ENV_LOCK
+    let _env_lock = crate::TEST_LOCAL_USAGE_ENV_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let _restore = RestoreAutostartEnv(env::var_os(DAEMON_AUTOSTART_OFF_ENV));
     env::remove_var(DAEMON_AUTOSTART_OFF_ENV);
     let temp = tempfile::tempdir().unwrap();
-    let config = AppConfig::default();
+    let config = DaemonRuntimeConfig::default();
 
     assert!(!temp.path().join("work.sqlite").exists());
     assert!(daemon_autostart_allowed(temp.path(), &config));
@@ -323,7 +323,7 @@ fn configured_autostart_child_inherits_source_refresh_only_mode() {
         }
     }
 
-    let _env_lock = crate::config::TEST_LOCAL_USAGE_ENV_LOCK
+    let _env_lock = crate::TEST_LOCAL_USAGE_ENV_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let _restore = RestoreModeEnv(env::var_os(DAEMON_MODE_ENV));
@@ -407,7 +407,7 @@ fn autostart_surfaces_only_the_binary_handoff_recovery_command() -> Result<()> {
         }
     }
 
-    let _environment_lock = crate::config::TEST_LOCAL_USAGE_ENV_LOCK
+    let _environment_lock = crate::TEST_LOCAL_USAGE_ENV_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let _restore = RestoreEnvironment {
@@ -424,7 +424,7 @@ fn autostart_surfaces_only_the_binary_handoff_recovery_command() -> Result<()> {
 
     let error = autostart_daemon_and_wait(
         temp.path(),
-        &AppConfig::default(),
+        &DaemonRuntimeConfig::default(),
         DaemonTriggerCommandArg::Search,
     )
     .expect_err("a mismatched live image must fail through the public autostart path");

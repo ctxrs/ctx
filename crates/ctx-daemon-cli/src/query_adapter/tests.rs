@@ -412,7 +412,7 @@ fn foreground_adapter_is_lazy_and_borrows_the_exact_data_root() {
 fn foreground_adapter_uses_the_exact_external_executor_without_config_reread() {
     let temp = tempfile::tempdir().unwrap();
     fs::write(
-        temp.path().join(crate::config::CONFIG_FILE),
+        temp.path().join(ctx_app_config::CONFIG_FILE),
         "[semantic]\nendpoint = \"this file is intentionally invalid\"\n",
     )
     .unwrap();

@@ -578,6 +578,7 @@ dependencies = [
  "ctrlc",
  "ctx-agent-application",
  "ctx-agent-integrations",
+ "ctx-app-config",
  "ctx-cli-presentation",
  "ctx-client-observability",
  "ctx-companion-bridge",
@@ -602,7 +603,6 @@ dependencies = [
  "tempfile",
  "terminal_size",
  "thiserror 1.0.69",
- "toml_edit",
  "unicode-width",
  "ureq 2.12.1",
  "url",
@@ -645,6 +645,25 @@ dependencies = [
  "serde_yaml",
  "sha2",
  "tempfile",
+ "toml_edit",
+ "uuid",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "ctx-app-config"
+version = "1.2.4"
+dependencies = [
+ "anyhow",
+ "ctx-history-capture",
+ "ctx-history-core",
+ "ctx-history-platform",
+ "ctx-semantic-model",
+ "fs2",
+ "libc",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
  "toml_edit",
  "uuid",
  "windows-sys 0.61.2",
@@ -766,6 +785,7 @@ name = "ctx-daemon-cli"
 version = "1.2.4"
 dependencies = [
  "anyhow",
+ "ctx-app-config",
  "ctx-client-observability",
  "ctx-daemon-application",
  "ctx-daemon-runtime",
@@ -784,7 +804,6 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 1.0.69",
- "toml_edit",
  "unicode-width",
  "uuid",
 ]

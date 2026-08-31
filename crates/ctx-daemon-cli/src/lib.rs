@@ -10,7 +10,7 @@ fn committed_generation_recovery_error(
 }
 
 mod composition;
-pub use composition::{install_host, AppConfig, DaemonCliHost, DaemonConfig, DaemonMode};
+pub use composition::{install_host, DaemonCliHost, DaemonConfig, DaemonMode, DaemonRuntimeConfig};
 pub use ctx_daemon_application::DaemonHostRunRequest;
 pub use ctx_daemon_runtime::apply_supervisor_environment_handoff;
 pub use ctx_daemon_service::{CoreGenerationPublished, DaemonConfigSnapshot, DaemonUpgradePorts};
@@ -114,7 +114,7 @@ mod semantic_executor_auth_tests {
 
     #[test]
     fn unbound_token_is_ignored_until_an_exact_endpoint_binding_is_present() {
-        let _lock = crate::config::TEST_LOCAL_USAGE_ENV_LOCK
+        let _lock = crate::TEST_LOCAL_USAGE_ENV_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let _restore = RestoreEnvironment::capture();
@@ -136,17 +136,8 @@ mod semantic_executor_auth_tests {
     }
 }
 
-mod config {
-    #[cfg(test)]
-    pub use crate::composition::DAEMON_MODE_ENV;
-    pub use crate::composition::{
-        persisted_daemon_enabled, set_daemon_enabled, AppConfig, DaemonMode, CONFIG_FILE,
-        DAEMON_DEFAULT_ENABLED,
-    };
-
-    #[cfg(test)]
-    pub(crate) static TEST_LOCAL_USAGE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-}
+#[cfg(test)]
+pub(crate) static TEST_LOCAL_USAGE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 use ctx_terminal::compact_json;
 

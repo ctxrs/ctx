@@ -17,9 +17,9 @@ use ctx_history_core::utc_now;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
+use crate::{compact_json, composition::DaemonRuntimeConfig, DaemonTriggerCommandArg};
 #[cfg(test)]
-use crate::config::DAEMON_MODE_ENV;
-use crate::{compact_json, config::AppConfig, DaemonTriggerCommandArg};
+use ctx_app_config::DAEMON_MODE_ENV;
 
 #[cfg(test)]
 use super::runtime_limits::{DAEMON_AUTOSTART_OFF_ENV, DAEMON_BACKGROUND_CHILD_ENV};

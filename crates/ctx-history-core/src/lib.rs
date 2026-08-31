@@ -147,7 +147,10 @@ pub use provider::{
     ProviderSupportEntry, ProviderSupportMatrixDocument, ProviderSupportPath,
     ProviderSupportStatus, PROVIDER_SUPPORT_MATRIX_SCHEMA_VERSION,
 };
-pub use source::CaptureProvider;
+pub use source::{
+    native_provider_cli_specs, parse_capture_provider_name, provider_cli_spec, provider_cli_specs,
+    CaptureProvider, ProviderCliSpec,
+};
 pub(crate) fn default_metadata() -> serde_json::Value {
     serde_json::Value::Object(serde_json::Map::new())
 }

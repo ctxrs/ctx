@@ -71,7 +71,7 @@ pub(crate) fn daemon_query_service_embedding_runtime(
 }
 
 fn selected_semantic_contract(data_root: &Path) -> Result<SemanticModelContract> {
-    Ok(crate::config::AppConfig::load(data_root)?
+    Ok(crate::composition::load_runtime_config(data_root)?
         .semantic_model_contract()
         .clone())
 }

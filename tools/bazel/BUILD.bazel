@@ -8,6 +8,8 @@ exports_files([
     "binary_contracts.bzl",
     "check_agent_application_boundary.py",
     "check_agent_integrations_boundary.py",
+    "check-app-config-dependency-boundary.sh",
+    "check-app-config-dependency-boundary-test.sh",
     "check-client-observability-boundary.sh",
     "check-cli-build-cfg.sh",
     "check-daemon-application-dependency-boundary.sh",

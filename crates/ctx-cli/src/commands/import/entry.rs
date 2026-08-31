@@ -21,7 +21,7 @@ pub(crate) fn run_import(
     data_root: PathBuf,
     telemetry: &mut ImportTelemetry,
     provider_refreshes: &mut ProviderRefreshCollector,
-    config: &crate::config::AppConfig,
+    config: &ctx_app_config::AppConfig,
     ui: &mut Ui,
 ) -> Result<()> {
     let json = args.format.is_json();

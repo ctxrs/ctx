@@ -3,14 +3,14 @@ use super::*;
 #[test]
 fn daemon_application_snapshot_tracks_same_endpoint_space_changes() {
     let endpoint = "https://embed.example.test/base";
-    let first = AppConfig::default().with_semantic_embedding_executor(
+    let first = DaemonRuntimeConfig::default().with_semantic_embedding_executor(
         crate::SemanticEmbeddingExecutorConfig::http(
             endpoint,
             crate::ExternalSemanticSpace::new("space-a", 384).unwrap(),
         )
         .unwrap(),
     );
-    let second = AppConfig::default().with_semantic_embedding_executor(
+    let second = DaemonRuntimeConfig::default().with_semantic_embedding_executor(
         crate::SemanticEmbeddingExecutorConfig::http(
             endpoint,
             crate::ExternalSemanticSpace::new("space-b", 768).unwrap(),
@@ -151,10 +151,10 @@ fn activation_failure_does_not_reuse_the_previous_executors_failure_class() {
         }),
     )
     .unwrap();
-    let config = AppConfig::new(
+    let config = DaemonRuntimeConfig::new(
         true,
         true,
-        std::borrow::Cow::Borrowed("stable"),
+        "stable".to_owned(),
         std::time::Duration::from_secs(24 * 60 * 60),
         crate::DaemonConfig {
             enabled: true,

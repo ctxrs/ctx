@@ -1,0 +1,87 @@
+load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_edition")
+load("@rules_rust//rust:defs.bzl", "rust_library")
+load("//:rust_sources.bzl", "RUST_PROD_SRC_EXCLUDES")
+load("//tools/bazel:ctx_rust.bzl", "ctx_rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files([
+    "BUILD.bazel",
+    "Cargo.toml",
+])
+
+filegroup(
+    name = "cargo_package_data",
+    srcs = glob(["**"], exclude = ["BUILD.bazel"]),
+)
+
+COMMON_RUSTC_ENV = {
+    "CARGO_MANIFEST_DIR": "crates/ctx-app-config",
+}
+
+RUST_SRCS = glob(["src/**/*.rs"])
+
+PROD_SRCS = glob(
+    ["src/**/*.rs"],
+    exclude = RUST_PROD_SRC_EXCLUDES,
+)
+
+CTX_APP_CONFIG_DEPS = [
+    "//crates/ctx-history-capture:lib",
+    "//crates/ctx-history-core:lib",
+    "//crates/ctx-history-platform:lib",
+    "//crates/ctx-semantic-model:lib",
+]
+
+CTX_APP_CONFIG_TEST_SUPPORT_DEPS = [
+    "//crates/ctx-history-capture:lib",
+    "//crates/ctx-history-core:lib",
+    "//crates/ctx-history-platform:lib",
+    "//crates/ctx-semantic-model:test_support_lib",
+]
+
+CTX_APP_CONFIG_RUSTC_FLAGS = [
+    "--check-cfg=cfg(test)",
+    '--check-cfg=cfg(feature, values("test-support"))',
+]
+
+rust_library(
+    name = "lib",
+    srcs = PROD_SRCS,
+    crate_name = "ctx_app_config",
+    crate_root = "src/lib.rs",
+    edition = crate_edition(),
+    aliases = aliases(),
+    deps = all_crate_deps(normal = True) + CTX_APP_CONFIG_DEPS,
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    rustc_env = COMMON_RUSTC_ENV,
+    rustc_flags = CTX_APP_CONFIG_RUSTC_FLAGS,
+)
+
+rust_library(
+    name = "test_support_lib",
+    testonly = True,
+    srcs = PROD_SRCS,
+    crate_name = "ctx_app_config",
+    crate_root = "src/lib.rs",
+    edition = crate_edition(),
+    aliases = aliases(),
+    deps = all_crate_deps(normal = True) + CTX_APP_CONFIG_TEST_SUPPORT_DEPS,
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    rustc_env = COMMON_RUSTC_ENV,
+    rustc_flags = CTX_APP_CONFIG_RUSTC_FLAGS + ['--cfg=feature="test-support"'],
+)
+
+ctx_rust_test(
+    name = "unit_tests",
+    srcs = RUST_SRCS,
+    crate_name = "ctx_app_config",
+    crate_root = "src/lib.rs",
+    edition = crate_edition(),
+    aliases = aliases(normal_dev = True, proc_macro_dev = True),
+    deps = all_crate_deps(normal = True, normal_dev = True) + CTX_APP_CONFIG_DEPS,
+    proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+    compile_data = ["//:release_contracts"],
+    rustc_env = COMMON_RUSTC_ENV,
+    rustc_flags = CTX_APP_CONFIG_RUSTC_FLAGS,
+)

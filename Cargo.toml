@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/ctx-app-config",
     "crates/ctx-agent-application",
     "crates/ctx-agent-integrations",
     "crates/ctx-companion-bridge",

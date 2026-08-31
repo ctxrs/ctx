@@ -27,10 +27,10 @@ use crate::{
         decode_cursor, event_range_page_value, mcp_event_query_core_record_bytes, selection,
         validated_limit, EventContentProjection, EventQueryError, EventQueryWireRequest,
     },
-    config,
     observability_composition::{local_usage_storage_authority, usage_control_snapshot},
     ProviderArg,
 };
+use ctx_app_config as config;
 
 #[derive(Debug, Clone)]
 pub(crate) struct LocalToolBackend {
@@ -137,7 +137,7 @@ impl LocalToolBackend {
             .map_err(classify_mcp_search_error)?;
         let config = config::AppConfig::load(&self.data_root);
         if let Ok(config) = &config {
-            config::bind_semantic_embedding_auth_endpoint(config);
+            crate::semantic::bind_embedding_auth_endpoint(config);
             self.recover_enabled_daemon_before_search(config);
         }
         let config = match config {
@@ -705,7 +705,7 @@ mod tests {
         let root = private_tempdir();
         let backend = LocalToolBackend::new(root.path().to_path_buf());
         let ((result, metadata_reads), config_loads) =
-            crate::config::count_app_config_loads(|| {
+            ctx_app_config::count_app_config_loads(|| {
                 crate::observability_composition::count_usage_control_metadata_reads(|| {
                     backend.status()
                 })
@@ -722,7 +722,7 @@ mod tests {
         let backend = LocalToolBackend::new(root.path().to_path_buf());
 
         let (result, config_loads) =
-            crate::config::count_app_config_loads(|| backend.search(lexical_search_request()));
+            ctx_app_config::count_app_config_loads(|| backend.search(lexical_search_request()));
 
         assert!(matches!(
             result,

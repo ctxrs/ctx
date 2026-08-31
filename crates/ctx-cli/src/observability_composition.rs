@@ -5,9 +5,9 @@ use std::{
 
 use crate::{
     analytics::{AnalyticsDeliveryAuthority, AnalyticsDeliveryFailureClass, PublicEventV1},
-    config::{AppConfig, LocalUsageConfigResolver, LocalUsageConfigState},
     local_usage::{UsageControlRevision, UsageControlSnapshot},
 };
+use ctx_app_config::{AppConfig, LocalUsageConfigResolver, LocalUsageConfigState};
 
 const LOCAL_USAGE_DATABASE_FILE: &str = "usage.sqlite";
 

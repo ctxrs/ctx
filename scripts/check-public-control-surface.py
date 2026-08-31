@@ -322,7 +322,7 @@ def main() -> None:
         else Path(__file__).resolve().parent.parent
     )
     contract_path = root / "contracts" / "public-control-surface-v1.json"
-    config_path = root / "crates" / "ctx-cli" / "src" / "config.rs"
+    config_path = root / "crates" / "ctx-app-config" / "src" / "lib.rs"
     contract = json.loads(contract_path.read_text(encoding="utf-8"))
     if contract.get("schema_version") != 1:
         fail("unsupported contract schema")
@@ -558,6 +558,7 @@ def main() -> None:
         relative = path.relative_to(root)
         is_test = (
             "tests" in relative.parts
+            or relative.name == "tests.rs"
             or relative.name.endswith("_tests.rs")
             or relative.name.startswith("test-")
         )

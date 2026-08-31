@@ -141,7 +141,7 @@ fn reject_undiscovered_installation_roots(roots: &BTreeSet<PathBuf>) -> Result<(
 
 fn disable_installation_roots(roots: &BTreeSet<PathBuf>) -> Result<()> {
     for root in roots {
-        crate::config::set_daemon_enabled(root, false).with_context(|| {
+        ctx_app_config::set_daemon_enabled(root, false).with_context(|| {
             format!(
                 "durably set manual indexing for ctx root {} before uninstall",
                 root.display()

@@ -8,7 +8,8 @@ use ctx_upgrade_engine::{
 };
 use serde_json::json;
 
-use crate::{config::AppConfig, ui::Ui};
+use crate::ui::Ui;
+use ctx_app_config::AppConfig;
 
 pub(super) fn render_status(
     _data_root: &Path,
