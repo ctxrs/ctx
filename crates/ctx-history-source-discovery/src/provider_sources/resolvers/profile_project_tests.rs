@@ -236,6 +236,46 @@ fn nanoclaw_macos_launchd_registration_discovers_checkout() {
 }
 
 #[test]
+fn nanoclaw_platform_matrix_uses_only_authentic_service_authority() {
+    for platform in [
+        DiscoveryPlatform::Linux,
+        DiscoveryPlatform::MacOS,
+        DiscoveryPlatform::Windows,
+        DiscoveryPlatform::OtherUnix,
+    ] {
+        let temp = tempdir();
+        let home = temp.path().join("home");
+        let cwd = temp.path().join("exact-cwd");
+        let registered = temp.path().join("registered-project");
+        write_nanoclaw_project(&cwd);
+        write_nanoclaw_project(&registered);
+        write_nanoclaw_systemd_unit(&home, &registered);
+        write_nanoclaw_launchd_plist(&home, &registered);
+
+        let discovery =
+            DiscoveryContext::new(&home, &cwd, platform, DiscoveryPlatformDirs::default());
+        let report = report(&discovery, CaptureProvider::NanoClaw);
+        assert_eq!(report.issues, [], "{platform:?}");
+        let mut paths = report
+            .sources
+            .iter()
+            .map(|source| source.path.clone())
+            .collect::<Vec<_>>();
+        paths.sort();
+        let mut expected = if matches!(
+            platform,
+            DiscoveryPlatform::Linux | DiscoveryPlatform::MacOS
+        ) {
+            vec![cwd, registered]
+        } else {
+            Vec::new()
+        };
+        expected.sort();
+        assert_eq!(paths, expected, "{platform:?}");
+    }
+}
+
+#[test]
 fn nanoclaw_exact_cwd_coexists_with_distinct_registration_and_dedupes_itself() {
     let temp = tempdir();
     let home = temp.path().join("home");
