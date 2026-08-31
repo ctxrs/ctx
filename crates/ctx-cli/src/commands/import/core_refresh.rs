@@ -13,7 +13,8 @@ use crate::{
 
 /// Applies import-specific policy around the one Core refresh control path.
 ///
-/// Import may start the daemon and waits only for authoritative Core publication.
+/// Import may start a finite Core worker. It reports success only after
+/// authoritative Core publication and any requested semantic completion.
 pub(super) fn wait_for_import_core_refresh(
     data_root: &Path,
     no_daemon: bool,
