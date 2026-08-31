@@ -18,7 +18,7 @@ use crate::{
         index::run_index,
         list::run_list,
         locate::run_locate,
-        search::run_search,
+        search::{run_search, CliRefreshArg},
         semantic::run_semantic,
         setup::run_setup,
         show::{run_show, ShowArgs, ShowTarget},
@@ -43,6 +43,8 @@ use ctx_app_config::{AppConfig, DeprecatedControls};
 
 mod finalization;
 mod parse;
+#[cfg(test)]
+mod test_support;
 
 use finalization::{
     complete_local_usage, flush_cli_output, record_search_final_delivery, send_online_after_output,
@@ -71,6 +73,7 @@ pub(crate) fn run() -> ExitCode {
 
     match run_cli() {
         Ok(()) => ExitCode::SUCCESS,
+        Err(error) if ctx_daemon_cli::finite_worker_interrupted(&error) => ExitCode::from(130),
         Err(error) if error.is::<RenderedClapError>() => {
             let exit_code = error
                 .downcast_ref::<RenderedClapError>()
@@ -268,7 +271,8 @@ pub(crate) fn run_cli() -> Result<()> {
     };
 
     let search_operation = matches!(&cli.command, CommandRoot::Search(_));
-    let result = match cli.command {
+    let foreground_finite_wait = command_uses_foreground_finite_wait(&cli.command);
+    let execute_command = || match cli.command {
         CommandRoot::Pro | CommandRoot::Blame | CommandRoot::Referral => Err(anyhow::anyhow!(
             "companion-owned command bypassed native argv routing"
         )),
@@ -433,6 +437,12 @@ pub(crate) fn run_cli() -> Result<()> {
             &mut ui,
         ),
     };
+    let result = if foreground_finite_wait {
+        crate::foreground_interrupt::with_scope(execute_command)
+    } else {
+        execute_command()
+    };
+    let foreground_interrupted = ctx_daemon_cli::foreground_result_interrupted(&result);
     let output_started = Instant::now();
     let (rendered_error, search_error_render_failure) = match render_command_result_error(
         &result,
@@ -455,9 +465,13 @@ pub(crate) fn run_cli() -> Result<()> {
     } else {
         // Preserve the released non-Search ordering: buffered UI failure
         // returns here; final process-stream failure is returned after the
-        // analytics and the daemon post-command hook below.
-        ui.flush().context("flush structured terminal output")?;
-        flush_cli_output(&mut stdout, &mut stderr).map_err(Into::into)
+        // analytics and the daemon post-command hook below. Interruption is
+        // the sole exception: delivery failures stay secondary to exit 130.
+        match ui.flush().context("flush structured terminal output") {
+            Ok(()) => flush_cli_output(&mut stdout, &mut stderr).map_err(Into::into),
+            Err(error) if foreground_interrupted => Err(error),
+            Err(error) => return Err(error),
+        }
     };
     let output_duration = output_started.elapsed();
     let duration = started.elapsed();
@@ -503,11 +517,15 @@ pub(crate) fn run_cli() -> Result<()> {
             semantic::maybe_autostart_daemon(&data_root, &config, trigger);
         }
     }
-    output_result?;
-    if let Some(error) = rendered_error {
-        return Err(error);
-    }
-    result
+    ctx_daemon_cli::finish_foreground_result(result, || {
+        output_result?;
+        rendered_error.map_or(Ok(()), Err)
+    })
+}
+
+fn command_uses_foreground_finite_wait(command: &CommandRoot) -> bool {
+    matches!(command, CommandRoot::Import(_))
+        || matches!(command, CommandRoot::Search(args) if args.refresh == CliRefreshArg::Wait)
 }
 
 fn render_command_result_error(
@@ -518,6 +536,12 @@ fn render_command_result_error(
     search_operation: bool,
     ui: &mut Ui,
 ) -> Result<Option<anyhow::Error>> {
+    if ctx_daemon_cli::foreground_result_interrupted(result) {
+        // Interruption remains typed through UI flush, analytics, and command
+        // finalization. The outer exit boundary maps it to exactly 130 and no
+        // public format receives an ordinary error document.
+        return Ok(None);
+    }
     let rendered_error = if let Err(error) = result {
         if error.is::<RenderedJsonError>() || error.is::<RenderedCliError>() {
             Some(RenderedCliError.into())

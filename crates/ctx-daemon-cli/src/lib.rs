@@ -289,7 +289,7 @@ pub use runtime_limits::SEMANTIC_WORKER_BATCH_MAX;
 mod query_adapter;
 pub use query_adapter::{wait_for_daemon_semantic_generation, SemanticQueryAdapter};
 mod query_service;
-pub use query_service::wait_for_daemon_query_service;
+pub use query_service::{wait_for_daemon_query_service, wait_for_daemon_query_service_cancellable};
 mod daemon;
 mod paths_status;
 pub use daemon::{run_daemon_command, update_indexing_mode};
@@ -308,6 +308,12 @@ pub use source_backed_refresh_coordinator::{
     published_explicit_source_relocation_authority, PinnedSourceBackedGeneration, RefreshStatus,
     SourceBackedRefreshDaemonUnavailable, SourceBackedRefreshMode, SourceBackedRefreshObservation,
     SourceBackedRefreshPendingPublication, SourceBackedRefreshTerminalError,
+};
+mod finite_worker_owner;
+pub use finite_worker_owner::{
+    finish_foreground_result, finite_worker_interrupted, foreground_interrupt_epoch,
+    foreground_operation_active, foreground_result_interrupted, record_foreground_interrupt,
+    with_foreground_guard_since, FiniteWorkerInterrupted,
 };
 mod daemon_autostart;
 #[allow(unused_imports)]

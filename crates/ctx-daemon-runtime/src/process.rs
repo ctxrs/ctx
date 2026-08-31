@@ -84,6 +84,21 @@ pub fn process_session_id(pid: u32) -> std::io::Result<u32> {
 }
 
 #[cfg(unix)]
+pub fn process_group_id(pid: u32) -> std::io::Result<u32> {
+    let pid = libc::pid_t::try_from(pid).map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "process ID overflow")
+    })?;
+    let group = unsafe { libc::getpgid(pid) };
+    if group == -1 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        u32::try_from(group).map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "negative process group ID")
+        })
+    }
+}
+
+#[cfg(unix)]
 pub fn process_state(pid: u32) -> ProcessState {
     if pid == 0 {
         return ProcessState::NotRunning;

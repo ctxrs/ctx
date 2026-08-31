@@ -20,12 +20,16 @@ use ctx_history_core::utc_now;
 use serde_json::{json, Value};
 
 use crate::*;
-
+mod autostart_request;
+mod finite_worker;
+#[cfg(test)]
+mod finite_worker_bounded_tests;
 mod launch;
 mod readiness_receipt;
 #[cfg(test)]
 mod tests;
-
+use autostart_request::*;
+pub use finite_worker::{FiniteCoreWorkerLease, FiniteWorkerLease};
 use launch::configured_finite_core_worker_command;
 #[cfg(test)]
 use launch::normalized_daemon_launch_for_test;
@@ -50,13 +54,11 @@ const DAEMON_UPGRADE_STOP_TIMEOUT: Duration = Duration::from_secs(5);
 const DAEMON_UPGRADE_RESTART_TIMEOUT: Duration = Duration::from_secs(5);
 const DAEMON_UPGRADE_HANDOFF_TOKEN_ENV: &str = "CTX_DAEMON_UPGRADE_HANDOFF_TOKEN";
 const DAEMON_MODE_ENV: &str = "CTX_DAEMON_MODE";
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DaemonHandoff {
     pub pid: u32,
     pub heartbeat_at_ms: i64,
 }
-
 #[derive(Debug)]
 pub enum DaemonStartError {
     Suppressed(&'static str),
@@ -64,7 +66,6 @@ pub enum DaemonStartError {
     Start(anyhow::Error),
     Ready(anyhow::Error),
 }
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum DaemonHandoffObservation {
     Pending,
@@ -72,7 +73,6 @@ enum DaemonHandoffObservation {
     Running(DaemonHandoff),
     Failed(String),
 }
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DaemonReadinessRequirement {
     Full,
@@ -85,18 +85,14 @@ enum DaemonLifecycleEndpointObservation {
     Starting,
     Ready,
 }
-
 #[derive(Debug)]
 struct DaemonHandoffTimeout;
-
 impl fmt::Display for DaemonHandoffTimeout {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("timed out waiting for live daemon lifecycle readiness")
     }
 }
-
 impl std::error::Error for DaemonHandoffTimeout {}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DaemonOwnerIdentity {
     owner_id: String,
@@ -104,7 +100,6 @@ struct DaemonOwnerIdentity {
     started_at_ms: i64,
     binary_sha256: String,
 }
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum DaemonOwnerWaitOutcome {
     Owner(DaemonOwnerIdentity),
@@ -118,13 +113,11 @@ enum DaemonAutostartRequest {
     Deferred(DaemonHandoffRestartDeferral),
     Spawned(Child),
 }
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DaemonLaunchProfile {
     Persistent,
     FiniteCoreWorker,
 }
-
 fn daemon_autostart_exe() -> Result<std::path::PathBuf> {
     std::env::var("CTX_DAEMON_AUTOSTART_EXE")
         .ok()
@@ -134,11 +127,9 @@ fn daemon_autostart_exe() -> Result<std::path::PathBuf> {
             std::env::current_exe().context("resolve ctx daemon autostart executable")
         })
 }
-
 fn semantic_env_flag(name: &str) -> bool {
     matches!(std::env::var(name).as_deref(), Ok("1" | "true" | "TRUE"))
 }
-
 pub fn daemon_autostart_suppression_reason() -> Option<&'static str> {
     if semantic_env_flag(DAEMON_BACKGROUND_CHILD_ENV) {
         Some("daemon_child")
@@ -150,7 +141,6 @@ pub fn daemon_autostart_suppression_reason() -> Option<&'static str> {
         None
     }
 }
-
 fn write_daemon_autostart_status(
     data_root: &Path,
     trigger: DaemonTrigger,
@@ -248,16 +238,22 @@ fn read_daemon_owner_identity(data_root: &Path) -> Result<Option<DaemonOwnerIden
     }))
 }
 
-fn wait_for_daemon_owner_identity(data_root: &Path) -> Result<Option<DaemonOwnerIdentity>> {
+fn wait_for_daemon_owner_identity_with_cancellation(
+    data_root: &Path,
+    checkpoint: &mut dyn FnMut() -> Result<()>,
+) -> Result<Option<DaemonOwnerIdentity>> {
     let deadline = Instant::now() + DAEMON_SETUP_HANDOFF_STALL_TIMEOUT;
     loop {
+        checkpoint()?;
         if let Some(owner) = read_daemon_owner_identity(data_root)? {
             return Ok(Some(owner));
         }
         if !daemon_lock_is_active(data_root) || Instant::now() >= deadline {
             return Ok(None);
         }
+        checkpoint()?;
         std::thread::sleep(DAEMON_UPGRADE_POLL_INTERVAL);
+        checkpoint()?;
     }
 }
 
@@ -272,9 +268,12 @@ fn classify_daemon_owner_wait_with(
     })
 }
 
-fn classify_daemon_owner_wait(data_root: &Path) -> Result<DaemonOwnerWaitOutcome> {
+fn classify_daemon_owner_wait(
+    data_root: &Path,
+    checkpoint: &mut dyn FnMut() -> Result<()>,
+) -> Result<DaemonOwnerWaitOutcome> {
     classify_daemon_owner_wait_with(
-        || wait_for_daemon_owner_identity(data_root),
+        || wait_for_daemon_owner_identity_with_cancellation(data_root, checkpoint),
         || daemon_lock_is_active(data_root),
     )
 }
@@ -291,15 +290,20 @@ fn existing_daemon_request_after_owner_wait(
     }
 }
 
-fn existing_daemon_request(data_root: &Path) -> Result<Option<DaemonAutostartRequest>> {
-    existing_daemon_request_after_owner_wait(classify_daemon_owner_wait(data_root)?)
+fn existing_daemon_request(
+    data_root: &Path,
+    checkpoint: &mut dyn FnMut() -> Result<()>,
+) -> Result<Option<DaemonAutostartRequest>> {
+    existing_daemon_request_after_owner_wait(classify_daemon_owner_wait(data_root, checkpoint)?)
 }
 
 fn recover_unusable_daemon_owner(
     host: &dyn DaemonApplicationHost,
     data_root: &Path,
     observed_owner: &DaemonOwnerIdentity,
+    checkpoint: &mut dyn FnMut() -> Result<()>,
 ) -> Result<()> {
+    checkpoint()?;
     let executable = daemon_autostart_exe()?;
     let terminated = recover_unusable_daemon_owner_with(
         observed_owner,
@@ -319,13 +323,20 @@ fn recover_unusable_daemon_owner(
                 Some(owner_id),
             )
         },
+        &mut *checkpoint,
     )?;
     if terminated {
         let deadline = Instant::now() + DAEMON_UPGRADE_RESTART_TIMEOUT;
-        while read_daemon_owner_identity(data_root)?.as_ref() == Some(observed_owner)
-            && Instant::now() < deadline
-        {
+        loop {
+            checkpoint()?;
+            if read_daemon_owner_identity(data_root)?.as_ref() != Some(observed_owner)
+                || Instant::now() >= deadline
+            {
+                break;
+            }
+            checkpoint()?;
             std::thread::sleep(DAEMON_UPGRADE_POLL_INTERVAL);
+            checkpoint()?;
         }
     }
     Ok(())
@@ -336,123 +347,23 @@ fn recover_unusable_daemon_owner_with(
     mut endpoint_usable: impl FnMut() -> Result<bool>,
     mut current_owner: impl FnMut() -> Result<Option<DaemonOwnerIdentity>>,
     mut terminate: impl FnMut(&str) -> Result<()>,
+    mut checkpoint: impl FnMut() -> Result<()>,
 ) -> Result<bool> {
+    checkpoint()?;
     if endpoint_usable()? {
         return Ok(false);
     }
+    checkpoint()?;
     // The health probe can race a supervisor or another foreground recovery.
     // Revalidate the complete advisory-lock owner identity after the bounded
     // probe immediately before any destructive action.
     if current_owner()?.as_ref() != Some(observed_owner) {
         return Ok(false);
     }
+    checkpoint()?;
     terminate(&observed_owner.owner_id)?;
+    checkpoint()?;
     Ok(true)
-}
-
-fn request_daemon_autostart(
-    host: &dyn DaemonApplicationHost,
-    data_root: &Path,
-    config: &DaemonConfigSnapshot,
-    trigger: DaemonTrigger,
-    profile: DaemonLaunchProfile,
-) -> Result<DaemonAutostartRequest> {
-    if hosted_uninstall_fences_daemon_autostart(host) {
-        return Ok(DaemonAutostartRequest::Suppressed(
-            "hosted_uninstall_active",
-        ));
-    }
-    if profile == DaemonLaunchProfile::Persistent && config.enabled {
-        if let Some(deferral) = host.defer_restart_for_upgrade_handoff(data_root, trigger)? {
-            return Ok(DaemonAutostartRequest::Deferred(deferral));
-        }
-    }
-    // Suppression disables spawning, not reuse. Test harnesses and managed
-    // callers can intentionally provide an already-owned daemon while
-    // forbidding any additional detached process.
-    if (config.enabled || profile == DaemonLaunchProfile::FiniteCoreWorker)
-        && daemon_lock_is_active(data_root)
-    {
-        let executable = daemon_autostart_exe()?;
-        if daemon_lock_matches_executable(data_root, &executable)? {
-            if let Some(existing) = existing_daemon_request(data_root)? {
-                return Ok(existing);
-            }
-        } else {
-            if daemon_autostart_suppression_reason().is_some() {
-                return Err(binary_identity_handoff_error());
-            }
-            handoff_mismatched_daemon_owner(host, data_root, &executable)?;
-            if daemon_lock_is_active(data_root) {
-                if let Some(existing) = existing_daemon_request(data_root)? {
-                    return Ok(existing);
-                }
-            }
-        }
-    }
-    if let Some(reason) = daemon_autostart_suppression_reason() {
-        return Ok(DaemonAutostartRequest::Suppressed(reason));
-    }
-    if profile == DaemonLaunchProfile::Persistent && !daemon_autostart_allowed(data_root, config) {
-        return Ok(DaemonAutostartRequest::Suppressed("not_allowed"));
-    }
-    let automatic_recovery_allowed = profile == DaemonLaunchProfile::Persistent
-        && config.enabled
-        && config.mode == DaemonMode::Full
-        && host
-            .automatic_upgrade_recovery_allowed(data_root)
-            .unwrap_or(false);
-    if host.installation_upgrade_active().unwrap_or(false) && !automatic_recovery_allowed {
-        return Ok(DaemonAutostartRequest::Suppressed(
-            "installation_upgrade_active",
-        ));
-    }
-    let lock_path = daemon_lock_path(data_root);
-    if lock_path.exists() && !daemon_lock_is_stale(&lock_path) {
-        let executable = daemon_autostart_exe()?;
-        handoff_mismatched_daemon_owner(host, data_root, &executable)?;
-        if daemon_lock_is_active(data_root) {
-            if let Some(existing) = existing_daemon_request(data_root)? {
-                return Ok(existing);
-            }
-        }
-    }
-    let exe = match daemon_autostart_exe() {
-        Ok(exe) => exe,
-        Err(error) => {
-            let _ = write_daemon_autostart_status(
-                data_root,
-                trigger,
-                "failed",
-                Some("current_exe"),
-                Some(format!("{error:#}")),
-                None,
-            );
-            return Err(error);
-        }
-    };
-    let launch = match profile {
-        DaemonLaunchProfile::Persistent => {
-            configured_daemon_autostart_command(&exe, data_root, trigger, None)
-        }
-        DaemonLaunchProfile::FiniteCoreWorker => {
-            configured_finite_core_worker_command(&exe, data_root, trigger)
-        }
-    };
-    match launch.and_then(|launch| spawn_daemon_child(host, launch)) {
-        Ok(child) => Ok(DaemonAutostartRequest::Spawned(child)),
-        Err(error) => {
-            let _ = write_daemon_autostart_status(
-                data_root,
-                trigger,
-                "failed",
-                Some("spawn_failed"),
-                Some(error.to_string()),
-                None,
-            );
-            Err(error).context("spawn ctx daemon")
-        }
-    }
 }
 
 pub fn request_daemon_start(
@@ -477,6 +388,16 @@ pub fn start_daemon_and_wait(
     config: &DaemonConfigSnapshot,
     trigger: DaemonTrigger,
 ) -> std::result::Result<DaemonHandoff, DaemonStartError> {
+    start_daemon_and_wait_with_cancellation(host, data_root, config, trigger, &mut || Ok(()))
+}
+
+pub fn start_daemon_and_wait_with_cancellation(
+    host: &dyn DaemonApplicationHost,
+    data_root: &Path,
+    config: &DaemonConfigSnapshot,
+    trigger: DaemonTrigger,
+    checkpoint: &mut dyn FnMut() -> Result<()>,
+) -> std::result::Result<DaemonHandoff, DaemonStartError> {
     start_daemon_profile_and_wait(
         host,
         data_root,
@@ -484,7 +405,9 @@ pub fn start_daemon_and_wait(
         trigger,
         DaemonLaunchProfile::Persistent,
         DaemonReadinessRequirement::Full,
+        checkpoint,
     )
+    .map(|started| started.handoff)
 }
 
 pub fn start_core_daemon_and_wait(
@@ -493,6 +416,16 @@ pub fn start_core_daemon_and_wait(
     config: &DaemonConfigSnapshot,
     trigger: DaemonTrigger,
 ) -> std::result::Result<DaemonHandoff, DaemonStartError> {
+    start_core_daemon_and_wait_with_cancellation(host, data_root, config, trigger, &mut || Ok(()))
+}
+
+pub fn start_core_daemon_and_wait_with_cancellation(
+    host: &dyn DaemonApplicationHost,
+    data_root: &Path,
+    config: &DaemonConfigSnapshot,
+    trigger: DaemonTrigger,
+    checkpoint: &mut dyn FnMut() -> Result<()>,
+) -> std::result::Result<DaemonHandoff, DaemonStartError> {
     start_daemon_profile_and_wait(
         host,
         data_root,
@@ -500,7 +433,9 @@ pub fn start_core_daemon_and_wait(
         trigger,
         DaemonLaunchProfile::Persistent,
         DaemonReadinessRequirement::Core,
+        checkpoint,
     )
+    .map(|started| started.handoff)
 }
 
 pub fn start_finite_core_worker_and_wait(
@@ -508,15 +443,81 @@ pub fn start_finite_core_worker_and_wait(
     data_root: &Path,
     config: &DaemonConfigSnapshot,
     trigger: DaemonTrigger,
-) -> std::result::Result<DaemonHandoff, DaemonStartError> {
-    start_daemon_profile_and_wait(
+) -> std::result::Result<FiniteCoreWorkerLease, DaemonStartError> {
+    start_finite_core_worker_and_wait_with_cancellation(
+        host,
+        data_root,
+        config,
+        trigger,
+        &mut || Ok(()),
+    )
+}
+
+pub fn start_finite_core_worker_and_wait_with_cancellation(
+    host: &dyn DaemonApplicationHost,
+    data_root: &Path,
+    config: &DaemonConfigSnapshot,
+    trigger: DaemonTrigger,
+    checkpoint: &mut dyn FnMut() -> Result<()>,
+) -> std::result::Result<FiniteCoreWorkerLease, DaemonStartError> {
+    let mut started = start_daemon_profile_and_wait(
         host,
         data_root,
         config,
         trigger,
         DaemonLaunchProfile::FiniteCoreWorker,
         DaemonReadinessRequirement::Full,
+        checkpoint,
+    )?;
+    let owner_id = if started
+        .child
+        .as_ref()
+        .is_some_and(|child| child.id() == started.handoff.pid)
+    {
+        match read_daemon_owner_identity(data_root) {
+            Ok(Some(owner)) if owner.pid == started.handoff.pid => Some(owner.owner_id),
+            Ok(_) => None,
+            Err(error) => {
+                return Err(daemon_ready_error(
+                    DaemonLaunchProfile::FiniteCoreWorker,
+                    &mut started.child,
+                    error.context("read owned finite worker identity after readiness"),
+                ));
+            }
+        }
+    } else {
+        None
+    };
+    FiniteCoreWorkerLease::from_handoff(
+        data_root.to_path_buf(),
+        started.handoff,
+        started.child,
+        owner_id,
     )
+    .map_err(|error| {
+        DaemonStartError::Ready(anyhow!(error).context("reap losing finite worker candidate"))
+    })
+}
+struct StartedDaemonProfile {
+    handoff: DaemonHandoff,
+    child: Option<Child>,
+}
+
+fn daemon_ready_error(
+    profile: DaemonLaunchProfile,
+    child: &mut Option<Child>,
+    mut error: anyhow::Error,
+) -> DaemonStartError {
+    if profile == DaemonLaunchProfile::FiniteCoreWorker {
+        if let Some(child) = child.as_mut() {
+            if let Err(cleanup) = finite_worker::reap_owned_candidate(child) {
+                error = error.context(format!(
+                    "reap finite worker after readiness failure: {cleanup}"
+                ));
+            }
+        }
+    }
+    DaemonStartError::Ready(error)
 }
 
 fn start_daemon_profile_and_wait(
@@ -526,18 +527,20 @@ fn start_daemon_profile_and_wait(
     trigger: DaemonTrigger,
     profile: DaemonLaunchProfile,
     readiness: DaemonReadinessRequirement,
-) -> std::result::Result<DaemonHandoff, DaemonStartError> {
+    checkpoint: &mut dyn FnMut() -> Result<()>,
+) -> std::result::Result<StartedDaemonProfile, DaemonStartError> {
     let mut recovery_attempted = false;
     loop {
-        let request = request_daemon_autostart(host, data_root, config, trigger, profile).map_err(
-            |error| {
-                if error.is::<BinaryIdentityHandoffError>() {
-                    DaemonStartError::BinaryIdentity(error)
-                } else {
-                    DaemonStartError::Start(error)
-                }
-            },
-        )?;
+        checkpoint().map_err(DaemonStartError::Ready)?;
+        let request =
+            request_daemon_autostart_with(host, data_root, config, trigger, profile, checkpoint)
+                .map_err(|error| {
+                    if error.is::<BinaryIdentityHandoffError>() {
+                        DaemonStartError::BinaryIdentity(error)
+                    } else {
+                        DaemonStartError::Start(error)
+                    }
+                })?;
         let (mut child, pending_restart_request, existing_owner) = match request {
             DaemonAutostartRequest::Existing(owner) => (None, None, Some(owner)),
             DaemonAutostartRequest::Deferred(deferral) => (
@@ -555,7 +558,7 @@ fn start_daemon_profile_and_wait(
         };
         let expected_failure_pid = child.as_ref().map(Child::id);
         let deadline = Cell::new(Instant::now() + DAEMON_SETUP_HANDOFF_STALL_TIMEOUT);
-        let handoff = wait_for_daemon_handoff_with(
+        let handoff = wait_for_daemon_handoff_with_cancellation(
             DAEMON_SETUP_HANDOFF_STALL_POLL_ATTEMPTS,
             || {
                 if pending_restart_request
@@ -615,11 +618,15 @@ fn start_daemon_profile_and_wait(
                         .min(deadline.get().saturating_duration_since(Instant::now())),
                 )
             },
+            checkpoint,
         );
         match handoff {
-            Ok(handoff) => return Ok(handoff),
+            Ok(handoff) => {
+                return Ok(StartedDaemonProfile { handoff, child });
+            }
             Err(error)
-                if !recovery_attempted
+                if profile == DaemonLaunchProfile::Persistent
+                    && !recovery_attempted
                     && daemon_autostart_suppression_reason().is_none()
                     && error.is::<DaemonHandoffTimeout>()
                     && existing_owner.is_some() =>
@@ -629,11 +636,14 @@ fn start_daemon_profile_and_wait(
                         "daemon owner identity disappeared before recovery"
                     )));
                 };
-                recover_unusable_daemon_owner(host, data_root, existing_owner)
+                checkpoint().map_err(DaemonStartError::Ready)?;
+                recover_unusable_daemon_owner(host, data_root, existing_owner, checkpoint)
                     .map_err(DaemonStartError::Ready)?;
                 recovery_attempted = true;
             }
-            Err(error) => return Err(DaemonStartError::Ready(error)),
+            Err(error) => {
+                return Err(daemon_ready_error(profile, &mut child, error));
+            }
         }
     }
 }
@@ -677,6 +687,21 @@ pub fn handoff_mismatched_daemon_owner(
     data_root: &Path,
     expected_executable: &Path,
 ) -> Result<()> {
+    handoff_mismatched_daemon_owner_with_cancellation(
+        host,
+        data_root,
+        expected_executable,
+        &mut || Ok(()),
+    )
+}
+
+fn handoff_mismatched_daemon_owner_with_cancellation(
+    host: &dyn DaemonApplicationHost,
+    data_root: &Path,
+    expected_executable: &Path,
+    checkpoint: &mut dyn FnMut() -> Result<()>,
+) -> Result<()> {
+    checkpoint()?;
     if !daemon_lock_is_active(data_root)
         || daemon_lock_matches_executable(data_root, expected_executable)?
     {
@@ -698,6 +723,7 @@ pub fn handoff_mismatched_daemon_owner(
         DAEMON_HEALTH_TIMEOUT,
         DAEMON_HEALTH_RESPONSE_MAX_BYTES,
     );
+    checkpoint()?;
     let accepted = response.ok().flatten().as_ref().is_some_and(|value| {
         value.get("ok").and_then(Value::as_bool) == Some(true)
             && value
@@ -709,6 +735,7 @@ pub fn handoff_mismatched_daemon_owner(
     if accepted {
         let deadline = Instant::now() + DAEMON_UPGRADE_STOP_TIMEOUT;
         while daemon_lock_is_active(data_root) {
+            checkpoint()?;
             if daemon_lock_matches_cached_identity(data_root, &expected_canonical, &expected_sha256)
             {
                 return Ok(());
@@ -716,22 +743,29 @@ pub fn handoff_mismatched_daemon_owner(
             if Instant::now() >= deadline {
                 break;
             }
+            checkpoint()?;
             std::thread::sleep(DAEMON_UPGRADE_POLL_INTERVAL);
+            checkpoint()?;
         }
     }
     if daemon_lock_is_active(data_root) {
+        checkpoint()?;
         ctx_daemon_runtime::terminate_identity_verified_residual_daemon(
             data_root,
             expected_executable,
         )
         .map_err(|_| binary_identity_handoff_error())?;
+        checkpoint()?;
     }
     let deadline = Instant::now() + DAEMON_UPGRADE_RESTART_TIMEOUT;
     while daemon_lock_is_active(data_root) {
+        checkpoint()?;
         if Instant::now() >= deadline {
             return Err(binary_identity_handoff_error());
         }
+        checkpoint()?;
         std::thread::sleep(DAEMON_UPGRADE_POLL_INTERVAL);
+        checkpoint()?;
     }
     Ok(())
 }
@@ -870,16 +904,35 @@ fn daemon_lifecycle_endpoint_observation(
 
 fn wait_for_daemon_handoff_with(
     attempts: usize,
+    observe: impl FnMut() -> DaemonHandoffObservation,
+    child_failure: impl FnMut() -> Result<Option<String>>,
+    renew_starting_progress: impl FnMut(),
+    pause: impl FnMut(),
+) -> Result<DaemonHandoff> {
+    wait_for_daemon_handoff_with_cancellation(
+        attempts,
+        observe,
+        child_failure,
+        renew_starting_progress,
+        pause,
+        &mut || Ok(()),
+    )
+}
+
+fn wait_for_daemon_handoff_with_cancellation(
+    attempts: usize,
     mut observe: impl FnMut() -> DaemonHandoffObservation,
     mut child_failure: impl FnMut() -> Result<Option<String>>,
     mut renew_starting_progress: impl FnMut(),
     mut pause: impl FnMut(),
+    checkpoint: &mut dyn FnMut() -> Result<()>,
 ) -> Result<DaemonHandoff> {
     if attempts == 0 {
         return Err(DaemonHandoffTimeout.into());
     }
     let mut stalled_attempts = 0;
     loop {
+        checkpoint()?;
         match observe() {
             DaemonHandoffObservation::Running(handoff) => return Ok(handoff),
             DaemonHandoffObservation::Failed(error) => return Err(anyhow!(error)),
@@ -889,13 +942,16 @@ fn wait_for_daemon_handoff_with(
             }
             DaemonHandoffObservation::Pending => stalled_attempts += 1,
         }
+        checkpoint()?;
         if let Some(error) = child_failure()? {
             return Err(anyhow!(error));
         }
         if stalled_attempts >= attempts {
             return Err(DaemonHandoffTimeout.into());
         }
+        checkpoint()?;
         pause();
+        checkpoint()?;
     }
 }
 

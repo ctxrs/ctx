@@ -33,6 +33,7 @@ use uuid::Uuid;
 
 use super::*;
 
+mod cancellation;
 mod passive_v2;
 
 fn semantic_tempdir() -> Result<tempfile::TempDir> {
@@ -1109,6 +1110,7 @@ fn daemon_generation_wait_observes_delayed_acknowledgement_without_sleeping() ->
         PinnedSourceBackedGeneration::from_index(index),
         Duration::from_secs(1),
         || crate::pin_active_verified_generation(temp.path()),
+        || Ok(()),
         |_| {
             pauses.set(pauses.get() + 1);
             reconcile_ready_nonempty_generation(&reconciliation_index, temp.path()).unwrap();
@@ -1136,6 +1138,7 @@ fn daemon_generation_wait_repins_both_indexes_after_core_supersession() -> Resul
         PinnedSourceBackedGeneration::from_index(first),
         Duration::from_secs(1),
         || crate::pin_active_verified_generation(temp.path()),
+        || Ok(()),
         |_| {},
     )?;
 
@@ -1160,6 +1163,7 @@ fn daemon_generation_wait_repins_before_returning_a_ready_old_generation() -> Re
         PinnedSourceBackedGeneration::from_index(first),
         Duration::from_secs(1),
         || crate::pin_active_verified_generation(temp.path()),
+        || Ok(()),
         |_| {},
     )?;
 
@@ -1190,6 +1194,7 @@ fn daemon_generation_wait_retries_a_concurrent_repin_before_preflight() -> Resul
                 crate::pin_active_verified_generation(temp.path())
             }
         },
+        || Ok(()),
         |_| {},
     )?;
 
@@ -1213,6 +1218,7 @@ fn daemon_generation_wait_timeout_preserves_typed_query_preflight_failure() -> R
         PinnedSourceBackedGeneration::from_index(index),
         Duration::ZERO,
         || crate::pin_active_verified_generation(temp.path()),
+        || Ok(()),
         |_| panic!("zero timeout must not sleep"),
     )?;
     let error =

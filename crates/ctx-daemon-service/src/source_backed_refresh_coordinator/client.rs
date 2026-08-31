@@ -11,7 +11,7 @@ pub use observation_recovery::SourceRefreshObservationRecoveryFailed;
 #[cfg(test)]
 use observation_recovery::DISCONNECT_POLICY;
 use observation_recovery::{
-    request_bound_status_with_outage_budget, retained_request_unobservable,
+    request_bound_status_with_outage_budget_cancellable, retained_request_unobservable,
 };
 use request_policy::SourceBackedRefreshRequestPolicy;
 use response::*;
@@ -34,7 +34,10 @@ fn daemon_trigger(trigger: RefreshRequestTrigger) -> crate::DaemonTrigger {
     }
 }
 
-fn block_after_daemon_availability_for_test(data_root: &Path) -> Result<()> {
+fn block_after_daemon_availability_for_test(
+    availability: &dyn crate::DaemonAvailabilityPort,
+    data_root: &Path,
+) -> Result<()> {
     if !cfg!(debug_assertions) {
         return Ok(());
     }
@@ -51,7 +54,7 @@ fn block_after_daemon_availability_for_test(data_root: &Path) -> Result<()> {
     })?;
     let deadline = StdInstant::now() + StdDuration::from_secs(30);
     while block.exists() && StdInstant::now() < deadline {
-        std::thread::sleep(StdDuration::from_millis(10));
+        availability.pause(StdDuration::from_millis(10))?;
     }
     if block.exists() {
         bail!("timed out at source refresh post-availability test gate");
@@ -111,15 +114,39 @@ impl fmt::Display for SourceRefreshAdmissionRecoveryFailed {
 
 impl std::error::Error for SourceRefreshAdmissionRecoveryFailed {}
 
+#[cfg(test)]
 fn request_admission_with_recovery<S, R>(
     request_id: &str,
     mut sleep: S,
-    mut roundtrip: R,
+    roundtrip: R,
 ) -> Result<Option<Value>>
 where
     S: FnMut(StdDuration),
     R: FnMut() -> Result<Option<Value>>,
 {
+    request_admission_with_recovery_cancellable(
+        request_id,
+        |duration| {
+            sleep(duration);
+            Ok(())
+        },
+        || Ok(()),
+        roundtrip,
+    )
+}
+
+fn request_admission_with_recovery_cancellable<S, C, R>(
+    request_id: &str,
+    sleep: S,
+    mut checkpoint: C,
+    mut roundtrip: R,
+) -> Result<Option<Value>>
+where
+    S: FnMut(StdDuration) -> Result<()>,
+    C: FnMut() -> Result<()>,
+    R: FnMut() -> Result<Option<Value>>,
+{
+    checkpoint()?;
     match roundtrip() {
         Ok(response) => return Ok(response),
         Err(error)
@@ -134,15 +161,32 @@ where
         Err(error) => return Err(error),
     }
 
+    recover_ambiguous_admission(request_id, sleep, checkpoint, roundtrip)
+}
+
+fn recover_ambiguous_admission<S, C, R>(
+    request_id: &str,
+    mut sleep: S,
+    mut checkpoint: C,
+    mut roundtrip: R,
+) -> Result<Option<Value>>
+where
+    S: FnMut(StdDuration) -> Result<()>,
+    C: FnMut() -> Result<()>,
+    R: FnMut() -> Result<Option<Value>>,
+{
     for recovery_attempt in 0..AMBIGUOUS_ADMISSION_RECOVERY_ATTEMPT_LIMIT {
         let backoff = match recovery_attempt {
             0 => StdDuration::from_millis(25),
             1 => StdDuration::from_millis(50),
             _ => StdDuration::from_millis(100),
         };
-        sleep(backoff);
-        if let Ok(Some(response)) = roundtrip() {
-            return Ok(Some(response));
+        checkpoint()?;
+        sleep(backoff)?;
+        checkpoint()?;
+        match roundtrip() {
+            Ok(Some(response)) => return Ok(Some(response)),
+            Ok(None) | Err(_) => checkpoint()?,
         }
     }
 
@@ -265,6 +309,7 @@ fn coordinate_source_backed_refresh_with_policy(
         trigger,
         allow_daemon_autostart,
     } = policy;
+    availability.checkpoint()?;
     if mode == SourceBackedRefreshMode::Off {
         if intent.operation() == ctx_history_refresh::RefreshOperation::Import {
             bail!("explicit source catalog imports require daemon refresh mode `wait`");
@@ -304,8 +349,11 @@ fn coordinate_source_backed_refresh_with_policy(
     {
         return daemon_unavailable_fallback(data_root, mode, None);
     }
+    // Availability may synchronously launch and retain a finite worker. Catch
+    // an interrupt from that work before admission can reach IPC.
+    availability.checkpoint()?;
     if allow_daemon_autostart && mode == SourceBackedRefreshMode::Wait {
-        block_after_daemon_availability_for_test(data_root)?;
+        block_after_daemon_availability_for_test(availability, data_root)?;
     }
 
     let logical_request_id = Uuid::now_v7().to_string();
@@ -314,44 +362,50 @@ fn coordinate_source_backed_refresh_with_policy(
     let admission_request = wait_authority_request_json(mode, &canonical_request)?;
     let mut retirement_recovery_attempted = false;
     let response = loop {
-        let retirement_error =
-            match request_admission_with_recovery(&logical_request_id, std::thread::sleep, || {
-                daemon_source_refresh_request(
+        let retirement_error = match request_admission_with_recovery_cancellable(
+            &logical_request_id,
+            |duration| availability.pause(duration),
+            || availability.checkpoint(),
+            || {
+                daemon_source_refresh_request_with_cancellation(
+                    availability,
                     data_root,
                     admission_request.clone(),
                     SOURCE_REFRESH_IPC_TIMEOUT,
                     SOURCE_REFRESH_RESPONSE_MAX_BYTES,
                 )
-            }) {
-                Ok(Some(response)) => break response,
-                Ok(None)
-                    if mode == SourceBackedRefreshMode::Wait
-                        && allow_daemon_autostart
-                        && !retirement_recovery_attempted =>
-                {
-                    None
-                }
-                Ok(None) => return daemon_unavailable_fallback(data_root, mode, None),
-                Err(error)
-                    if error
-                        .downcast_ref::<DaemonSourceRefreshServiceUnavailable>()
-                        .is_some()
-                        && mode == SourceBackedRefreshMode::Wait
-                        && allow_daemon_autostart
-                        && !retirement_recovery_attempted =>
-                {
-                    Some(error)
-                }
-                Err(error)
-                    if error
-                        .downcast_ref::<DaemonSourceRefreshServiceUnavailable>()
-                        .is_some() =>
-                {
-                    return daemon_unavailable_fallback(data_root, mode, Some(error));
-                }
-                Err(error) => return Err(error),
-            };
+            },
+        ) {
+            Ok(Some(response)) => break response,
+            Ok(None)
+                if mode == SourceBackedRefreshMode::Wait
+                    && allow_daemon_autostart
+                    && !retirement_recovery_attempted =>
+            {
+                None
+            }
+            Ok(None) => return daemon_unavailable_fallback(data_root, mode, None),
+            Err(error)
+                if error
+                    .downcast_ref::<DaemonSourceRefreshServiceUnavailable>()
+                    .is_some()
+                    && mode == SourceBackedRefreshMode::Wait
+                    && allow_daemon_autostart
+                    && !retirement_recovery_attempted =>
+            {
+                Some(error)
+            }
+            Err(error)
+                if error
+                    .downcast_ref::<DaemonSourceRefreshServiceUnavailable>()
+                    .is_some() =>
+            {
+                return daemon_unavailable_fallback(data_root, mode, Some(error));
+            }
+            Err(error) => return Err(error),
+        };
         retirement_recovery_attempted = true;
+        availability.checkpoint()?;
         if availability
             .ensure_available(
                 data_root,
@@ -363,6 +417,7 @@ fn coordinate_source_backed_refresh_with_policy(
         {
             return daemon_unavailable_fallback(data_root, mode, retirement_error);
         }
+        availability.checkpoint()?;
     };
     validate_daemon_refresh_response(&response)?;
     let accepted_request_id = response_request_id(&response, "daemon source refresh response")?;
@@ -495,17 +550,20 @@ fn wait_for_published_generation_inner(
     let mut last_reported_status = None;
     let mut last_reported_at = None;
     loop {
+        availability.checkpoint()?;
         let status_request = compact_json(json!({
             "schema_version": 1,
             "op": SOURCE_REFRESH_STATUS_OP,
             "request_id": request_id,
         }));
-        let response = match request_bound_status_with_outage_budget(
+        let response = match request_bound_status_with_outage_budget_cancellable(
             &request_id,
-            std::thread::sleep,
+            |duration| availability.pause(duration),
             StdInstant::now,
+            || availability.checkpoint(),
             || {
-                daemon_source_refresh_request(
+                daemon_source_refresh_request_with_cancellation(
+                    availability,
                     data_root,
                     status_request.clone(),
                     SOURCE_REFRESH_IPC_TIMEOUT,
@@ -518,6 +576,7 @@ fn wait_for_published_generation_inner(
                 if !allow_daemon_autostart {
                     return Err(retained_request_unobservable(&request_id, 0));
                 }
+                availability.checkpoint()?;
                 request_id = recover_wait_refresh_request(
                     availability,
                     data_root,
@@ -538,6 +597,7 @@ fn wait_for_published_generation_inner(
                 if !allow_daemon_autostart {
                     return Err(retained_request_unobservable(&request_id, 0));
                 }
+                availability.checkpoint()?;
                 request_id = recover_wait_refresh_request(
                     availability,
                     data_root,
@@ -556,6 +616,7 @@ fn wait_for_published_generation_inner(
                 return Err(error.context("wait for daemon-owned source-backed refresh publication"))
             }
         };
+        availability.checkpoint()?;
         if source_refresh_request_is_unknown(&response, &request_id)? {
             // Reaching this wait loop means the client already received an
             // admission acknowledgement. A subsequent typed unknown response
@@ -576,7 +637,9 @@ fn wait_for_published_generation_inner(
                 protocol_state,
                 StdInstant::now(),
             ) {
+                availability.checkpoint()?;
                 report_progress(&status).context("render daemon-owned source refresh progress")?;
+                availability.checkpoint()?;
                 last_reported_status = Some(status.clone());
                 last_reported_at = Some(StdInstant::now());
             }
@@ -597,7 +660,7 @@ fn wait_for_published_generation_inner(
             RefreshRequestState::AdmissionPending
             | RefreshRequestState::Queued
             | RefreshRequestState::Running => {
-                std::thread::sleep(SOURCE_REFRESH_POLL_INTERVAL);
+                availability.pause(SOURCE_REFRESH_POLL_INTERVAL)?;
             }
         }
     }
@@ -732,6 +795,7 @@ pub(super) fn recover_wait_refresh_request(
         return Err(retained_request_unobservable(request_id, 0));
     }
     let recovery = (|| {
+        availability.checkpoint()?;
         if availability.ensure_available(
             data_root,
             daemon_trigger(trigger),
@@ -740,6 +804,7 @@ pub(super) fn recover_wait_refresh_request(
         {
             bail!("daemon was disabled while waiting for source refresh");
         }
+        availability.checkpoint()?;
         // The acknowledged request may be a command waiter coalesced onto a
         // periodic/search attempt. Restarting and immediately re-submitting
         // the command payload under that physical ID would be a genuine
@@ -748,9 +813,13 @@ pub(super) fn recover_wait_refresh_request(
         Ok(request_id.to_owned())
     })();
     recovery.map_err(|error| {
-        retained_request_unobservable(request_id, 0).context(format!(
-            "recover daemon observation for durably admitted request {request_id}: {error:#}"
-        ))
+        if availability.interrupted(&error) {
+            error
+        } else {
+            retained_request_unobservable(request_id, 0).context(format!(
+                "recover daemon observation for durably admitted request {request_id}: {error:#}"
+            ))
+        }
     })
 }
 

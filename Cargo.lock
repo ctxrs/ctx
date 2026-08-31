@@ -775,6 +775,7 @@ dependencies = [
  "ctx-daemon-service",
  "ctx-history-core",
  "ctx-history-platform",
+ "libc",
  "serde_json",
  "sha2",
  "tempfile",

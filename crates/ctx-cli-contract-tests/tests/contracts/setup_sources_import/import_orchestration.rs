@@ -7,6 +7,8 @@ use std::{
     process::{Child, Command as StdCommand, Stdio},
 };
 
+#[path = "import_orchestration/cancellation.rs"]
+mod cancellation;
 #[path = "import_orchestration/relocation.rs"]
 mod relocation;
 

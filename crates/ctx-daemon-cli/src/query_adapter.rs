@@ -50,7 +50,8 @@ fn foreground_acquisition_attempts() -> usize {
 /// Waits for daemon-owned semantic coverage of the current verified Core
 /// generation. A newer active Core generation replaces the original pin so
 /// query preflight never combines generations and does not wait for semantic
-/// coverage that the daemon has legitimately superseded.
+/// coverage that the daemon has legitimately superseded. Foreground callers
+/// observe the same operation-local interrupt epoch as Core coordination.
 pub fn wait_for_daemon_semantic_generation(
     data_root: &Path,
     pin: PinnedSourceBackedGeneration,
@@ -61,24 +62,29 @@ pub fn wait_for_daemon_semantic_generation(
         pin,
         timeout,
         || crate::pin_active_verified_generation(data_root),
+        super::finite_worker_owner::checkpoint,
         thread::sleep,
     )
 }
 
-fn wait_for_daemon_semantic_generation_with<Repin, Pause>(
+fn wait_for_daemon_semantic_generation_with<Repin, Checkpoint, Pause>(
     data_root: &Path,
     mut pin: PinnedSourceBackedGeneration,
     timeout: StdDuration,
     mut repin: Repin,
+    mut checkpoint: Checkpoint,
     mut pause: Pause,
 ) -> Result<PinnedSourceBackedGeneration>
 where
     Repin: FnMut() -> Result<PinnedSourceBackedGeneration>,
+    Checkpoint: FnMut() -> Result<()>,
     Pause: FnMut(StdDuration),
 {
+    checkpoint()?;
     let contract = selected_semantic_contract(data_root)?;
     let started = Instant::now();
     loop {
+        checkpoint()?;
         match repin() {
             Ok(next) => {
                 if next.generation_id() != pin.generation_id() {
@@ -88,23 +94,39 @@ where
             Err(error) if active_generation_changed_during_repin(&error) => {
                 let remaining = timeout.saturating_sub(started.elapsed());
                 if remaining.is_zero() {
+                    checkpoint()?;
                     return Err(error);
                 }
+                checkpoint()?;
                 pause(SEMANTIC_GENERATION_POLL_INTERVAL.min(remaining));
+                checkpoint()?;
                 continue;
             }
-            Err(error) => return Err(error),
+            Err(error) => {
+                checkpoint()?;
+                return Err(error);
+            }
         }
+        checkpoint()?;
         match SemanticQueryPin::preflight(pin.verified_index(), data_root, &contract) {
-            Ok(_) => return Ok(pin),
+            Ok(_) => {
+                checkpoint()?;
+                return Ok(pin);
+            }
             Err(error) if semantic_generation_wait_is_retryable(&error) => {}
-            Err(_) => return Ok(pin),
+            Err(_) => {
+                checkpoint()?;
+                return Ok(pin);
+            }
         }
         let remaining = timeout.saturating_sub(started.elapsed());
         if remaining.is_zero() {
+            checkpoint()?;
             return Ok(pin);
         }
+        checkpoint()?;
         pause(SEMANTIC_GENERATION_POLL_INTERVAL.min(remaining));
+        checkpoint()?;
     }
 }
 

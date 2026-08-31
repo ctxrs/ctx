@@ -16,8 +16,12 @@ use ctx_history_refresh::{ExplicitSourceCatalogAuthority, ExplicitSourceRelocati
 
 use crate::compact_json;
 
+#[cfg(test)]
+use super::query_service::daemon_source_refresh_request;
 use super::{
-    query_service::{daemon_source_refresh_request, DaemonSourceRefreshServiceUnavailable},
+    query_service::{
+        daemon_source_refresh_request_with_cancellation, DaemonSourceRefreshServiceUnavailable,
+    },
     source_backed_refresh_adapter::{journal::DaemonRefreshJournal, runtime::DaemonRefreshRuntime},
 };
 
