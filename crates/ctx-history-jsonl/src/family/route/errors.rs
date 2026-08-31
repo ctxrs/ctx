@@ -36,6 +36,8 @@ pub(super) fn normalized_jsonl_error_kind<E: JsonlFamilyError>(
         Some(SourceBackedRouteErrorKind::SourceChanged)
     } else if error.is_not_found() {
         None
+    } else if error.is_source_unavailable() {
+        Some(SourceBackedRouteErrorKind::Unavailable)
     } else if error.is_resource_unavailable() {
         Some(SourceBackedRouteErrorKind::ResourceUnavailable)
     } else if error.is_internal() {

@@ -18,6 +18,7 @@ mod support;
 mod unix {
     use std::{
         fs,
+        net::TcpListener,
         path::{Path, PathBuf},
         process::{Child, Command, Stdio},
         sync::{Mutex, MutexGuard},
@@ -61,25 +62,6 @@ mod unix {
             );
         }
 
-        fn wait_for_exit(&mut self) -> std::process::ExitStatus {
-            let deadline = Instant::now() + Duration::from_secs(20);
-            loop {
-                if let Some(status) = self
-                    .child
-                    .as_mut()
-                    .expect("running daemon child")
-                    .try_wait()
-                    .unwrap()
-                {
-                    return status;
-                }
-                assert!(
-                    Instant::now() < deadline,
-                    "timed out waiting for daemon exit"
-                );
-                std::thread::sleep(Duration::from_millis(25));
-            }
-        }
     }
 
     impl Drop for DaemonGuard {
@@ -110,6 +92,25 @@ mod unix {
             ),
         )
         .unwrap();
+    }
+
+    fn write_external_semantic_config(temp: &tempfile::TempDir, endpoint: &str) {
+        let root = data_root(temp);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("config.toml"),
+            format!(
+                "[analytics]\nenabled = false\n\n[upgrade]\nauto = \"off\"\n\n[daemon]\nenabled = true\nmode = \"full\"\n\n[search]\nsemantic = true\n\n[semantic]\nexecutor = \"{endpoint}\"\nspace_id = \"selected-space\"\ndimensions = 128\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    fn unavailable_http_endpoint() -> String {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        format!("http://{address}")
     }
 
     fn write_config_with_retired_upgrade_control(
@@ -300,8 +301,7 @@ mod unix {
             daemon_lifecycle(&temp).is_some_and(|lifecycle| {
                 lifecycle["pid"] == original_pid
                     && lifecycle["config_reload"]["status"] == "applied"
-                    && lifecycle["config_reload"]["applied"]["daemon_mode"]
-                        == "source-refresh-only"
+                    && lifecycle["config_reload"]["applied"]["daemon_mode"] == "source-refresh-only"
                     && fs::read_to_string(&config_path)
                         .is_ok_and(|text| !text.contains("allow_rfc2544_fake_ip"))
             })
@@ -344,6 +344,21 @@ mod unix {
                 && data_root(&temp).join("daemon/query-endpoint.json").exists()
                 && semantic_job(&temp).is_some_and(|job| job["status"] == "ready")
         });
+        daemon.assert_running();
+
+        let mut search = ctx_from_binary(&temp, &binary);
+        search.args([
+            "search",
+            "anything",
+            "--backend",
+            "lexical",
+            "--refresh",
+            "wait",
+            "--format=json",
+        ]);
+        let packet = json_output(&mut search);
+        assert_eq!(packet["freshness"]["status"], "completed", "{packet:#}");
+        assert_eq!(packet["retrieval"]["index"], "core", "{packet:#}");
         daemon.assert_running();
 
         let status = daemon_status(&temp, &binary);
@@ -508,10 +523,10 @@ mod unix {
             .is_some_and(|error| error.contains("parse")));
         assert_eq!(status["jobs"]["semantic_index"]["enabled"], false);
         assert_eq!(status["jobs"]["semantic_index"]["runtime_active"], false);
-        assert_eq!(status["jobs"]["semantic_index"]["status"], "disabled");
+        assert_eq!(status["jobs"]["semantic_index"]["status"], "failed");
         assert_eq!(
             status["jobs"]["semantic_index"]["reason"],
-            "semantic_disabled"
+            "daemon_config_reload_failed"
         );
         assert_eq!(
             status["jobs"]["semantic_index"]["config_reload_status"],
@@ -542,7 +557,7 @@ mod unix {
     }
 
     #[test]
-    fn malformed_reload_preserves_active_semantic_job_status() {
+    fn malformed_reload_deactivates_semantic_runtime_and_reports_failure() {
         let _serial = serial_daemon_test();
         let temp = tempdir();
         let binary = copied_ctx_binary(&temp);
@@ -565,12 +580,12 @@ mod unix {
         )
         .unwrap();
         wait_for(
-            "failed config reload with retained semantic runtime",
+            "failed config reload with deactivated semantic runtime",
             || {
                 daemon_lifecycle(&temp).is_some_and(|status| {
                     status["config_reload"]["status"] == "failed"
-                        && status["config_reload"]["applied"]["semantic_enabled"] == true
-                        && status["semantic_runtime_active"] == true
+                        && status["config_reload"]["applied"]["semantic_enabled"] == false
+                        && status["semantic_runtime_active"] == false
                         && status["config_reload"]["last_error"]
                             .as_str()
                             .is_some_and(|error| error.contains("parse"))
@@ -585,12 +600,18 @@ mod unix {
         assert!(status["config_reload"]["last_error"]
             .as_str()
             .is_some_and(|error| error.contains("parse")));
-        assert_eq!(status["jobs"]["semantic_index"]["enabled"], true);
-        assert_eq!(status["jobs"]["semantic_index"]["runtime_active"], true);
-        assert_eq!(status["jobs"]["semantic_index"]["status"], "ready");
-        assert!(status["jobs"]["semantic_index"]["reason"].is_null());
+        assert_eq!(status["jobs"]["semantic_index"]["enabled"], false);
+        assert_eq!(status["jobs"]["semantic_index"]["runtime_active"], false);
+        assert_eq!(status["jobs"]["semantic_index"]["status"], "failed");
+        assert_eq!(
+            status["jobs"]["semantic_index"]["reason"],
+            "daemon_config_reload_failed"
+        );
         assert_eq!(status["jobs"]["semantic_index"]["last_run_status"], "ready");
         assert!(status["jobs"]["semantic_index"]["last_run_reason"].is_null());
+        assert!(status["jobs"]["semantic_index"]["last_error"]
+            .as_str()
+            .is_some_and(|error| error.contains("parse")));
         assert_eq!(
             status["jobs"]["semantic_index"]["config_reload_status"],
             "failed"
@@ -639,7 +660,22 @@ mod unix {
         assert!(status["config_reload"]["last_error"]
             .as_str()
             .is_some_and(|error| error.contains("query-endpoint.json")));
-        assert_eq!(status["jobs"]["semantic_index"]["enabled"], true);
+        assert_eq!(
+            status["config_reload"]["requested"]["semantic_enabled"],
+            true
+        );
+        assert_eq!(
+            status["config_reload"]["requested"]["semantic_executor"],
+            "builtin"
+        );
+        assert_eq!(
+            status["config_reload"]["applied"]["semantic_enabled"],
+            false
+        );
+        assert!(status["config_reload"]["applied"]["semantic_executor"].is_null());
+        assert_eq!(status["jobs"]["semantic_index"]["enabled"], false);
+        assert_eq!(status["jobs"]["semantic_index"]["semantic_requested"], true);
+        assert_eq!(status["jobs"]["semantic_index"]["semantic_enabled"], false);
         assert_eq!(status["jobs"]["semantic_index"]["runtime_active"], false);
         assert_eq!(status["jobs"]["semantic_index"]["status"], "failed");
         assert_eq!(
@@ -650,6 +686,26 @@ mod unix {
             data_root(&temp).join("daemon/query-endpoint.json").is_dir(),
             "the endpoint path should remain the blocking test fixture"
         );
+
+        fs::remove_dir(data_root(&temp).join("daemon/query-endpoint.json")).unwrap();
+        wait_for("semantic activation recovery", || {
+            daemon_lifecycle(&temp).is_some_and(|status| {
+                status["config_reload"]["status"] == "applied"
+                    && status["config_reload"]["applied"]["semantic_enabled"] == true
+                    && status["semantic_runtime_active"] == true
+            })
+        });
+        let recovered = daemon_status(&temp, &binary);
+        assert_eq!(recovered["jobs"]["semantic_index"]["enabled"], true);
+        assert_eq!(
+            recovered["jobs"]["semantic_index"]["semantic_requested"],
+            true
+        );
+        assert_eq!(
+            recovered["jobs"]["semantic_index"]["semantic_enabled"],
+            true
+        );
+        assert_eq!(recovered["jobs"]["semantic_index"]["runtime_active"], true);
     }
 
     #[test]
@@ -707,8 +763,7 @@ mod unix {
             assert_eq!(status["jobs"]["semantic_index"]["enabled"], false);
             assert_eq!(status["jobs"]["semantic_index"]["status"], "disabled");
             assert_eq!(
-                status["jobs"]["semantic_index"]["reason"],
-                "daemon_disabled",
+                status["jobs"]["semantic_index"]["reason"], "daemon_disabled",
                 "configured={configured} environment={environment:?}: {status:#}"
             );
             assert_eq!(
@@ -719,27 +774,68 @@ mod unix {
     }
 
     #[test]
-    fn initial_semantic_activation_failure_fails_daemon_startup_truthfully() {
+    fn unavailable_external_executor_does_not_block_core_daemon_startup() {
         let _serial = serial_daemon_test();
         let temp = tempdir();
         let binary = copied_ctx_binary(&temp);
-        write_config(&temp, true);
+        write_external_semantic_config(&temp, &unavailable_http_endpoint());
         initialize_store(&temp, &binary);
-        fs::create_dir_all(data_root(&temp).join("daemon/query-endpoint.json")).unwrap();
 
         let mut daemon = spawn_daemon(&temp, &binary, 1);
-        assert!(!daemon.wait_for_exit().success());
+        let pid = daemon.pid();
+        wait_for("degraded semantic daemon startup", || {
+            daemon_lifecycle(&temp).is_some_and(|lifecycle| {
+                lifecycle["status"] == "running"
+                    && lifecycle["pid"] == pid
+                    && lifecycle["semantic_runtime_active"] == false
+                    && lifecycle["config_reload"]["status"] == "activation_failed"
+                    && data_root(&temp)
+                        .join("daemon/source-refresh-endpoint.json")
+                        .exists()
+            })
+        });
+        daemon.assert_running();
 
         let status = daemon_status(&temp, &binary);
-        assert_eq!(status["running"], false);
-        assert_eq!(status["status"], "failed");
+        assert_eq!(status["running"], true);
+        assert_eq!(status["status"], "running");
+        assert_eq!(status["pid"], pid);
+        assert_eq!(status["core_refresh_endpoint"]["available"], true);
         assert_eq!(status["semantic_runtime_active"], false);
         assert_eq!(status["config_reload"]["status"], "activation_failed");
-        assert_eq!(status["jobs"]["semantic_index"]["enabled"], true);
+        assert!(status["config_reload"]["last_error"]
+            .as_str()
+            .is_some_and(|error| !error.is_empty()));
+        assert_eq!(
+            status["config_reload"]["requested"]["semantic_enabled"],
+            true
+        );
+        assert_eq!(
+            status["config_reload"]["applied"]["semantic_enabled"],
+            false
+        );
+        assert_eq!(status["jobs"]["semantic_index"]["enabled"], false);
+        assert_eq!(status["jobs"]["semantic_index"]["semantic_requested"], true);
+        assert_eq!(status["jobs"]["semantic_index"]["semantic_enabled"], false);
         assert_eq!(status["jobs"]["semantic_index"]["status"], "failed");
         assert_eq!(
             status["jobs"]["semantic_index"]["reason"],
             "semantic_activation_failed"
         );
+        assert!(!data_root(&temp).join("daemon/query-endpoint.json").exists());
+        let mut search = ctx_from_binary(&temp, &binary);
+        search.args([
+            "search",
+            "anything",
+            "--backend",
+            "lexical",
+            "--refresh",
+            "wait",
+            "--format=json",
+        ]);
+        let packet = json_output(&mut search);
+        assert_eq!(packet["freshness"]["status"], "completed", "{packet:#}");
+        assert_eq!(packet["retrieval"]["index"], "core", "{packet:#}");
+        daemon.assert_running();
     }
 }

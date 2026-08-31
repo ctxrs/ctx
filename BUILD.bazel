@@ -72,6 +72,7 @@ NON_RUST_GATE_DATA = glob([
 CARGO_WORKSPACE_PACKAGE_DATA = [
     "//crates/ctx-agent-application:cargo_package_data",
     "//crates/ctx-agent-integrations:cargo_package_data",
+    "//crates/ctx-app-config:cargo_package_data",
     "//crates/ctx-companion-bridge:cargo_package_data",
     "//crates/ctx-cli:cargo_package_data",
     "//crates/ctx-cli-contract-tests:cargo_package_data",
@@ -999,6 +1000,7 @@ py_test(
     name = "onnxruntime_sidecar_tools_tests",
     srcs = ["scripts/tests/onnxruntime-sidecar-tools-test.py"],
     data = [
+        ".buildkite/pipeline.yml",
         "scripts/build-onnxruntime-sidecar.sh",
         "scripts/onnxruntime-sidecar/archive_tool.py",
         "scripts/onnxruntime-sidecar/build_freebsd_x64.sh",
@@ -1012,6 +1014,8 @@ py_test(
         "scripts/semantic_release_assets/__init__.py",
         "scripts/semantic_release_assets/common.py",
         "scripts/semantic_release_assets/contracts.py",
+        "scripts/qualify-macos-release-pair.sh",
+        "scripts/stage-github-release-assets.sh",
         "scripts/verify-macos-runtime-builder-output.sh",
     ],
     main = "scripts/tests/onnxruntime-sidecar-tools-test.py",
@@ -1084,6 +1088,26 @@ sh_test(
         "//crates/ctx-upgrade-engine:Cargo.toml",
         "//crates/ctx-upgrade-engine:build.rs",
         "//crates/ctx-upgrade-engine:cargo_package_data",
+    ],
+)
+
+sh_test(
+    name = "app_config_dependency_boundary_check",
+    srcs = ["//tools/bazel:check-app-config-dependency-boundary-test.sh"],
+    args = [
+        "$(rootpath //tools/bazel:check-app-config-dependency-boundary.sh)",
+        "$(rootpath BUILD.bazel)",
+    ],
+    data = [
+        "BUILD.bazel",
+        "scripts/bazelw",
+        "//tools/bazel:check-app-config-dependency-boundary.sh",
+    ] + CARGO_WORKSPACE_PACKAGE_DATA,
+    tags = [
+        "build-graph",
+        "exclusive",
+        "no-cache",
+        "no-sandbox",
     ],
 )
 
@@ -1383,6 +1407,7 @@ non_rust_gate(
     data = NON_RUST_GATE_DATA + [
         "//crates/ctx-agent-application:cargo_package_data",
         "//crates/ctx-agent-integrations:cargo_package_data",
+        "//crates/ctx-app-config:cargo_package_data",
         "//crates/ctx-cli:cargo_package_data",
         "//crates/ctx-client-observability:cargo_package_data",
         "//crates/ctx-daemon-cli:cargo_package_data",

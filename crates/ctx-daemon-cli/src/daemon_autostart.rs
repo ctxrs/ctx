@@ -1,8 +1,5 @@
 #[cfg(test)]
-use std::{
-    collections::BTreeMap,
-    ffi::{OsStr, OsString},
-};
+use std::{collections::BTreeMap, ffi::OsStr};
 use std::{
     collections::BTreeSet,
     env, fs, io,
@@ -17,9 +14,9 @@ use ctx_history_core::utc_now;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
+use crate::{compact_json, composition::DaemonRuntimeConfig, DaemonTriggerCommandArg};
 #[cfg(test)]
-use crate::config::DAEMON_MODE_ENV;
-use crate::{compact_json, config::AppConfig, DaemonTriggerCommandArg};
+use ctx_app_config::DAEMON_MODE_ENV;
 
 #[cfg(test)]
 use super::runtime_limits::{DAEMON_AUTOSTART_OFF_ENV, DAEMON_BACKGROUND_CHILD_ENV};
@@ -43,9 +40,9 @@ use autostart::daemon_autostart_allowed;
 #[cfg(test)]
 use autostart::handoff_mismatched_daemon_owner;
 pub use autostart::{
-    autostart_daemon_and_wait, autostart_daemon_for_setup_and_wait,
+    autostart_core_daemon_and_wait, autostart_daemon_and_wait, autostart_daemon_for_setup_and_wait,
     daemon_autostart_suppression_reason, maybe_autostart_daemon, observe_daemon_for_setup_and_wait,
-    start_finite_core_worker_and_wait,
+    restart_daemon_with_current_environment_and_wait, start_finite_core_worker_and_wait,
 };
 use autostart::{
     daemon_autostart_command, daemon_restart_allowed, daemon_restart_trigger, parse_daemon_trigger,

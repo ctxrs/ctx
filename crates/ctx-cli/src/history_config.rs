@@ -5,7 +5,7 @@ use std::path::Path;
 use anyhow::Result;
 use ctx_history_cli::{HistoryCliConfig, HistoryConfigPort, HistoryConfigSnapshotPort};
 
-use crate::config::{self, AppConfig};
+use ctx_app_config::{self as config, AppConfig};
 
 /// Static bridge to the final binary's persisted configuration authority.
 /// It intentionally performs no loading, environment lookup, or fallback.
@@ -31,6 +31,7 @@ impl HistoryConfigSnapshotPort for CliHistoryConfigSnapshot<'_> {
         HistoryCliConfig {
             daemon_enabled: self.config.automatic_indexing_enabled(),
             semantic_search_enabled: self.config.semantic_search_enabled(),
+            semantic_executor: self.config.semantic_embedding_executor().clone(),
             local_usage_enabled: self.config.local_usage.enabled,
             automatic_provider_discovery: self.config.automatic_source_discovery_enabled(),
             provider_roots: self.config.provider_root_definitions(),
@@ -72,6 +73,11 @@ mod tests {
     fn adapter_delegates_mutation_without_reloading_config() {
         let temp = tempfile::tempdir().unwrap();
         let mut config = AppConfig::default();
+        config.semantic.executor = ctx_daemon_cli::SemanticEmbeddingExecutorConfig::http(
+            "http://127.0.0.1:9",
+            ctx_daemon_cli::ExternalSemanticSpace::new("test-space", 384).unwrap(),
+        )
+        .unwrap();
         let (snapshot, load_count) = config::count_app_config_loads(|| {
             let mut adapter = CliHistoryConfigAdapter::new(temp.path(), &mut config);
 
@@ -86,5 +92,9 @@ mod tests {
         );
         assert_eq!(load_count, 0);
         assert!(snapshot.semantic_search_enabled);
+        assert_eq!(
+            snapshot.semantic_executor.http_endpoint(),
+            Some("http://127.0.0.1:9/")
+        );
     }
 }

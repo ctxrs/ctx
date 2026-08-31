@@ -8,7 +8,10 @@ use ctx_history_core::utc_now;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-use crate::{compact_json, DaemonApplicationHost};
+use crate::{
+    compact_json, DaemonApplicationHost, SEMANTIC_EMBEDDING_TOKEN_ENDPOINT_ENV,
+    SEMANTIC_EMBEDDING_TOKEN_ENV,
+};
 
 const SUPERVISOR_DAEMON_POLICY_ENV_ALLOWLIST: &[&str] = &[
     "ALL_PROXY",
@@ -18,6 +21,8 @@ const SUPERVISOR_DAEMON_POLICY_ENV_ALLOWLIST: &[&str] = &[
     "CTX_DAEMON_MODE",
     "CTX_LOCAL_USAGE_ENABLED",
     "CTX_SEARCH_SEMANTIC",
+    SEMANTIC_EMBEDDING_TOKEN_ENDPOINT_ENV,
+    SEMANTIC_EMBEDDING_TOKEN_ENV,
     "CTX_UPGRADE_AUTO",
     "CTX_UPGRADE_CHANNEL",
     "CTX_UPGRADE_INTERVAL_SECONDS",
@@ -137,6 +142,11 @@ impl SupervisorEnvironmentSnapshot {
         self.loop_interval_seconds
     }
 
+    #[cfg(test)]
+    pub(super) fn identity_sha256(&self) -> &str {
+        &self.sha256
+    }
+
     pub(super) fn with_loop_interval_seconds(
         mut self,
         loop_interval_seconds: Option<u64>,
@@ -149,6 +159,14 @@ impl SupervisorEnvironmentSnapshot {
         self.loop_interval_seconds = loop_interval_seconds;
         self.sha256 = supervisor_environment_sha256(&self.values, loop_interval_seconds);
         Ok(self)
+    }
+
+    pub(super) fn without_semantic_embedding_auth(mut self) -> Self {
+        self.values.retain(|(name, _)| {
+            name != SEMANTIC_EMBEDDING_TOKEN_ENV && name != SEMANTIC_EMBEDDING_TOKEN_ENDPOINT_ENV
+        });
+        self.sha256 = supervisor_environment_sha256(&self.values, self.loop_interval_seconds);
+        self
     }
 
     pub(super) fn contract_report(&self) -> Value {
@@ -170,7 +188,7 @@ impl SupervisorEnvironmentSnapshot {
 }
 
 pub(super) fn supervisor_environment_snapshot(
-    host: &dyn DaemonApplicationHost,
+    _host: &dyn DaemonApplicationHost,
 ) -> Result<SupervisorEnvironmentSnapshot> {
     let mut values = BTreeMap::new();
     let hosted_installer_setup =
@@ -190,10 +208,16 @@ pub(super) fn supervisor_environment_snapshot(
             validated_supervisor_environment_value(name, value)?,
         );
     }
+    if !values.contains_key(SEMANTIC_EMBEDDING_TOKEN_ENV)
+        || !values.contains_key(SEMANTIC_EMBEDDING_TOKEN_ENDPOINT_ENV)
+    {
+        values.remove(SEMANTIC_EMBEDDING_TOKEN_ENV);
+        values.remove(SEMANTIC_EMBEDDING_TOKEN_ENDPOINT_ENV);
+    }
     values.insert("PATH".to_owned(), SUPERVISOR_DAEMON_FIXED_PATH.to_owned());
     #[cfg(unix)]
     if !values.contains_key("HOME") {
-        if let Some(home) = host.home_dir() {
+        if let Some(home) = _host.home_dir() {
             let home = validated_supervisor_fallback_home(home)?;
             values.insert("HOME".to_owned(), home);
         }
@@ -321,6 +345,7 @@ pub(super) fn supervisor_artifact_spec(
     SupervisorSpec::new(
         identity,
         SUPERVISOR_DESCRIPTION,
+        ctx_daemon_runtime::supervisor_environment_path(data_root),
         NormalizedLaunch::new(executable.to_path_buf(), arguments, environment),
     )
 }
@@ -338,14 +363,6 @@ fn validated_supervisor_environment_value(name: &str, value: OsString) -> Result
 #[cfg(unix)]
 fn validated_supervisor_fallback_home(home: PathBuf) -> Result<String> {
     validated_supervisor_environment_value("HOME", home.into_os_string())
-}
-
-#[cfg(all(test, windows))]
-pub(super) fn validated_supervisor_artifact_path<'a>(
-    label: &str,
-    path: &'a Path,
-) -> Result<&'a str> {
-    ctx_daemon_runtime::validated_supervisor_artifact_path(label, path)
 }
 
 pub(super) fn validated_supervisor_artifact_text<'a>(
@@ -394,7 +411,7 @@ mod tests {
     }
 
     #[test]
-    fn contract_is_narrow_nonsecret_and_rejects_controls() {
+    fn contract_is_narrow_and_rejects_controls() {
         let allowlist = supervisor_environment_allowlist_names();
         for required in [
             "CODEX_HOME",
@@ -406,6 +423,8 @@ mod tests {
             "CTX_LOCAL_USAGE_ENABLED",
             "CTX_ANALYTICS_ENABLED",
             "CTX_SEARCH_SEMANTIC",
+            SEMANTIC_EMBEDDING_TOKEN_ENDPOINT_ENV,
+            SEMANTIC_EMBEDDING_TOKEN_ENV,
             "CTX_UPGRADE_AUTO",
             "CTX_UPGRADE_CHANNEL",
             "CTX_UPGRADE_INTERVAL_SECONDS",
@@ -420,6 +439,7 @@ mod tests {
         for forbidden in [
             "CTX_PRO_CHANNEL",
             "CTX_PRO_HELPER",
+            "CTX_SEMANTIC_EMBEDDING_FALLBACK_TOKEN",
             "CTX_SEMANTIC_MODEL_ONNX",
             "CTX_SEMANTIC_COREML_NATIVE_COMPUTE",
             "CTX_ANALYTICS_ENDPOINT",
@@ -461,6 +481,192 @@ mod tests {
         }
         #[cfg(unix)]
         assert!(validated_supervisor_fallback_home(PathBuf::from("/tmp/home\ninjected")).is_err());
+    }
+
+    #[test]
+    fn supervisor_handoffs_endpoint_bound_semantic_auth_without_argument_exposure() -> Result<()> {
+        const UNRELATED_TOKEN_ENV: &str = "CTX_SEMANTIC_EMBEDDING_FALLBACK_TOKEN";
+        const TOKEN_A: &str = "semantic-bearer-token-a";
+        const TOKEN_B: &str = "semantic-bearer-token-b";
+        const ENDPOINT: &str = "https://embeddings.example.test/";
+        const UNRELATED_VALUE: &str = "unrelated-token";
+        let _env_lock = crate::test_environment_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _restore = RestoreEnvironment::capture(&[
+            SEMANTIC_EMBEDDING_TOKEN_ENV,
+            SEMANTIC_EMBEDDING_TOKEN_ENDPOINT_ENV,
+            UNRELATED_TOKEN_ENV,
+        ]);
+
+        env::set_var(SEMANTIC_EMBEDDING_TOKEN_ENV, TOKEN_A);
+        env::set_var(SEMANTIC_EMBEDDING_TOKEN_ENDPOINT_ENV, ENDPOINT);
+        env::set_var(UNRELATED_TOKEN_ENV, UNRELATED_VALUE);
+        let snapshot = supervisor_environment_snapshot(&TestHost)?;
+        let temp = tempfile::tempdir()?;
+        let windows_data_root = temp.path().join("data");
+        let windows_executable = Path::new(r"C:\Program Files\ctx\ctx.exe");
+        let unit = linux_systemd_unit_with_environment(
+            Path::new("/usr/local/bin/ctx"),
+            Path::new("/home/user/.local/share/ctx"),
+            &snapshot,
+        )?;
+        let launch_agent = launch_agent_plist_with_environment(
+            Path::new("/usr/local/bin/ctx"),
+            Path::new("/home/user/.local/share/ctx"),
+            &snapshot,
+        )?;
+        let windows_script = crate::supervisor::windows_sanitized_daemon_script_with_environment(
+            windows_executable,
+            &windows_data_root,
+            &snapshot,
+        )?;
+        let windows_identity = windows_supervisor_identity(&windows_data_root, "S-1-0-0")?;
+        let windows_spec = supervisor_artifact_spec(
+            windows_identity,
+            windows_executable,
+            &windows_data_root,
+            &snapshot,
+        )?;
+        let windows_environment_path =
+            ctx_daemon_runtime::write_supervisor_environment(&windows_spec)?;
+        ctx_history_platform::platform_security::verify_private_file(&windows_environment_path)?;
+        let windows_environment: Value =
+            serde_json::from_slice(&std::fs::read(&windows_environment_path)?)?;
+
+        assert!(snapshot
+            .values
+            .iter()
+            .any(|(name, value)| { name == SEMANTIC_EMBEDDING_TOKEN_ENV && value == TOKEN_A }));
+        assert!(snapshot.values.iter().any(|(name, value)| {
+            name == SEMANTIC_EMBEDDING_TOKEN_ENDPOINT_ENV && value == ENDPOINT
+        }));
+        assert!(!snapshot
+            .values
+            .iter()
+            .any(|(name, _)| name == UNRELATED_TOKEN_ENV));
+        let exec_start = unit
+            .lines()
+            .find(|line| line.starts_with("ExecStart="))
+            .expect("systemd ExecStart");
+        assert!(!exec_start.contains(SEMANTIC_EMBEDDING_TOKEN_ENV));
+        assert!(!exec_start.contains(TOKEN_A));
+        assert!(unit.contains(ctx_daemon_runtime::SUPERVISOR_ENVIRONMENT_FILE_ENV));
+        assert!(!unit.contains(TOKEN_A));
+        assert!(!unit.contains(ENDPOINT));
+        assert!(!unit.contains(UNRELATED_TOKEN_ENV));
+        assert!(!unit.contains(UNRELATED_VALUE));
+        let launch_arguments = launch_agent
+            .split_once("<key>ProgramArguments</key><array>")
+            .and_then(|(_, remainder)| remainder.split_once("</array>"))
+            .map(|(arguments, _)| arguments)
+            .expect("launchd ProgramArguments array");
+        assert!(!launch_arguments.contains(SEMANTIC_EMBEDDING_TOKEN_ENV));
+        assert!(!launch_arguments.contains(TOKEN_A));
+        assert!(launch_agent.contains(ctx_daemon_runtime::SUPERVISOR_ENVIRONMENT_FILE_ENV));
+        assert!(!launch_agent.contains(TOKEN_A));
+        assert!(!launch_agent.contains(ENDPOINT));
+        assert!(!launch_agent.contains(UNRELATED_TOKEN_ENV));
+        assert!(!launch_agent.contains(UNRELATED_VALUE));
+        assert!(windows_script.contains(ctx_daemon_runtime::SUPERVISOR_ENVIRONMENT_FILE_ENV));
+        assert!(!windows_script.contains("Get-Content -LiteralPath"));
+        assert!(!windows_script.contains(SEMANTIC_EMBEDDING_TOKEN_ENV));
+        assert!(!windows_script.contains(TOKEN_A));
+        assert!(!windows_script.contains(ENDPOINT));
+        assert!(windows_environment["environment"]
+            .as_array()
+            .expect("Windows supervisor environment entries")
+            .iter()
+            .any(|entry| {
+                entry["name"] == SEMANTIC_EMBEDDING_TOKEN_ENV && entry["value"] == TOKEN_A
+            }));
+        assert!(windows_environment["environment"]
+            .as_array()
+            .expect("Windows supervisor environment entries")
+            .iter()
+            .any(|entry| {
+                entry["name"] == SEMANTIC_EMBEDDING_TOKEN_ENDPOINT_ENV && entry["value"] == ENDPOINT
+            }));
+
+        env::set_var(SEMANTIC_EMBEDDING_TOKEN_ENV, TOKEN_B);
+        env::set_var(SEMANTIC_EMBEDDING_TOKEN_ENDPOINT_ENV, ENDPOINT);
+        let rotated = supervisor_environment_snapshot(&TestHost)?;
+        let rotated_unit = linux_systemd_unit_with_environment(
+            Path::new("/usr/local/bin/ctx"),
+            Path::new("/home/user/.local/share/ctx"),
+            &rotated,
+        )?;
+        let rotated_launch_agent = launch_agent_plist_with_environment(
+            Path::new("/usr/local/bin/ctx"),
+            Path::new("/home/user/.local/share/ctx"),
+            &rotated,
+        )?;
+        let rotated_windows_script =
+            crate::supervisor::windows_sanitized_daemon_script_with_environment(
+                windows_executable,
+                &windows_data_root,
+                &rotated,
+            )?;
+        assert_ne!(rotated.sha256, snapshot.sha256);
+        for artifact in [&rotated_unit, &rotated_launch_agent] {
+            assert!(!artifact.contains(TOKEN_B));
+            assert!(!artifact.contains(ENDPOINT));
+            assert!(!artifact.contains(TOKEN_A));
+        }
+        assert!(!rotated_windows_script.contains(TOKEN_A));
+        assert!(!rotated_windows_script.contains(TOKEN_B));
+        assert!(!rotated_windows_script.contains(ENDPOINT));
+        let rotated_windows_identity = windows_supervisor_identity(&windows_data_root, "S-1-0-0")?;
+        let rotated_windows_spec = supervisor_artifact_spec(
+            rotated_windows_identity,
+            windows_executable,
+            &windows_data_root,
+            &rotated,
+        )?;
+        ctx_daemon_runtime::write_supervisor_environment(&rotated_windows_spec)?;
+        let rotated_windows_environment = std::fs::read_to_string(&windows_environment_path)?;
+        assert!(rotated_windows_environment.contains(TOKEN_B));
+        assert!(rotated_windows_environment.contains(ENDPOINT));
+        assert!(!rotated_windows_environment.contains(TOKEN_A));
+
+        let scrubbed = rotated.clone().without_semantic_embedding_auth();
+        assert_ne!(scrubbed.sha256, rotated.sha256);
+        assert!(!scrubbed.values.iter().any(|(name, _)| {
+            name == SEMANTIC_EMBEDDING_TOKEN_ENV || name == SEMANTIC_EMBEDDING_TOKEN_ENDPOINT_ENV
+        }));
+        for artifact in [
+            linux_systemd_unit_with_environment(
+                Path::new("/usr/local/bin/ctx"),
+                Path::new("/home/user/.local/share/ctx"),
+                &scrubbed,
+            )?,
+            launch_agent_plist_with_environment(
+                Path::new("/usr/local/bin/ctx"),
+                Path::new("/home/user/.local/share/ctx"),
+                &scrubbed,
+            )?,
+        ] {
+            assert!(!artifact.contains(SEMANTIC_EMBEDDING_TOKEN_ENV));
+            assert!(!artifact.contains(SEMANTIC_EMBEDDING_TOKEN_ENDPOINT_ENV));
+            assert!(!artifact.contains(TOKEN_A));
+            assert!(!artifact.contains(TOKEN_B));
+            assert!(!artifact.contains(ENDPOINT));
+        }
+        let scrubbed_windows_identity = windows_supervisor_identity(&windows_data_root, "S-1-0-0")?;
+        let scrubbed_windows_spec = supervisor_artifact_spec(
+            scrubbed_windows_identity,
+            windows_executable,
+            &windows_data_root,
+            &scrubbed,
+        )?;
+        ctx_daemon_runtime::write_supervisor_environment(&scrubbed_windows_spec)?;
+        let scrubbed_windows_environment = std::fs::read_to_string(&windows_environment_path)?;
+        assert!(!scrubbed_windows_environment.contains(SEMANTIC_EMBEDDING_TOKEN_ENV));
+        assert!(!scrubbed_windows_environment.contains(SEMANTIC_EMBEDDING_TOKEN_ENDPOINT_ENV));
+        assert!(!scrubbed_windows_environment.contains(TOKEN_A));
+        assert!(!scrubbed_windows_environment.contains(TOKEN_B));
+        assert!(!scrubbed_windows_environment.contains(ENDPOINT));
+        Ok(())
     }
 
     #[test]
@@ -511,7 +717,10 @@ mod tests {
             "CTX_SEARCH_SEMANTIC",
             "CTX_UPGRADE_CHANNEL",
         ] {
-            assert!(!installer_unit.contains(excluded));
+            assert!(!installer_snapshot
+                .values
+                .iter()
+                .any(|(name, _)| name == excluded));
         }
         for retained in [
             "CODEX_HOME",
@@ -519,7 +728,13 @@ mod tests {
             "HTTP_PROXY",
             "SSL_CERT_FILE",
         ] {
-            assert!(installer_unit.contains(retained), "missing {retained}");
+            assert!(
+                installer_snapshot
+                    .values
+                    .iter()
+                    .any(|(name, _)| name == retained),
+                "missing {retained}"
+            );
         }
 
         env::set_var("SSL_CERT_FILE", "/tmp/ctx-supervisor-ca-after.pem");
@@ -559,8 +774,16 @@ mod tests {
             &snapshot,
         )?;
 
-        assert!(unit.contains("CTX_SEARCH_SEMANTIC=true"));
-        assert!(unit.contains("CTX_UPGRADE_CHANNEL=staging"));
+        assert!(snapshot
+            .values
+            .iter()
+            .any(|(name, value)| name == "CTX_SEARCH_SEMANTIC" && value == "true"));
+        assert!(snapshot
+            .values
+            .iter()
+            .any(|(name, value)| name == "CTX_UPGRADE_CHANNEL" && value == "staging"));
+        assert!(!unit.contains("CTX_SEARCH_SEMANTIC=true"));
+        assert!(!unit.contains("CTX_UPGRADE_CHANNEL=staging"));
         Ok(())
     }
 

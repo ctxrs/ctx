@@ -1,6 +1,8 @@
 mod server;
 mod transport;
 
+pub const DAEMON_SEMANTIC_QUERY_SCHEMA_VERSION: u64 = 2;
+
 #[cfg(all(test, unix))]
 pub(crate) use server::bind_daemon_query_listener;
 #[cfg(test)]

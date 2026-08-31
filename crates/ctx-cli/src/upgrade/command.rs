@@ -15,12 +15,12 @@ use crate::{
     analytics::{
         count_bucket, UpgradeChannel, UpgradeFailureKind, UpgradeStatus, UpgradeTelemetry,
     },
-    config::AppConfig,
     output::JsonOutputFormat,
     ui::Ui,
 };
+use ctx_app_config::{set_auto_upgrade_mode, AppConfig, AutoUpgradeMode};
 
-use super::{config::set_auto_mode, ports};
+use super::ports;
 
 mod status;
 use status::render_status;
@@ -100,7 +100,7 @@ pub fn run(
             Some(UpgradeCommand::Enable) => {
                 require_managed_install_for_auto_upgrade()?;
                 insert_upgrade_simple_analytics(telemetry, UpgradeStatus::AutoEnabled);
-                set_auto_mode(&data_root, "apply")?;
+                set_auto_upgrade_mode(&data_root, AutoUpgradeMode::Apply)?;
                 render_auto_mode(
                     true,
                     AutoModeInstallAuthority::Hosted,
@@ -117,7 +117,7 @@ pub fn run(
                     }
                 };
                 insert_upgrade_simple_analytics(telemetry, UpgradeStatus::AutoDisabled);
-                set_auto_mode(&data_root, "off")?;
+                set_auto_upgrade_mode(&data_root, AutoUpgradeMode::Off)?;
                 render_auto_mode(false, authority, args.format.is_json(), ui)
             }
             None => {

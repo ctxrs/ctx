@@ -3,31 +3,41 @@ use super::*;
 pub fn run_daemon_command(
     args: DaemonArgs,
     data_root: PathBuf,
-    config: &AppConfig<'_>,
+    config: &DaemonRuntimeConfig,
     ui: &mut Ui,
 ) -> Result<()> {
-    super::super::daemon_supervisor::with_daemon_run_application(config, |application| {
-        let started = Instant::now();
-        let operation = daemon_operation_for_command(&args.command);
-        let telemetry_root = data_root.clone();
-        let result = match args.command {
-            DaemonCommand::Run(args) => run_daemon(application, args, data_root, ui),
-            DaemonCommand::Status(args) => run_daemon_status(application, args, data_root, ui),
-            DaemonCommand::Enable(args) => {
-                run_daemon_enabled_update(application, args, data_root, true, ui)
+    let reload_persisted_config = matches!(
+        &args.command,
+        DaemonCommand::Enable(_) | DaemonCommand::Disable(_)
+    );
+    super::super::daemon_supervisor::with_daemon_run_application(
+        config,
+        reload_persisted_config,
+        |application| {
+            let started = Instant::now();
+            let operation = daemon_operation_for_command(&args.command);
+            let telemetry_root = data_root.clone();
+            let result = match args.command {
+                DaemonCommand::Run(args) => run_daemon(application, args, data_root, ui),
+                DaemonCommand::Status(args) => run_daemon_status(application, args, data_root, ui),
+                DaemonCommand::Enable(args) => {
+                    run_daemon_enabled_update(application, args, data_root, true, ui)
+                }
+                DaemonCommand::Disable(args) => {
+                    run_daemon_disable(application, args, data_root, ui)
+                }
+            };
+            if let Some(operation) = operation {
+                application.observe_daemon_operation(
+                    &telemetry_root,
+                    operation,
+                    result.is_ok(),
+                    started.elapsed(),
+                );
             }
-            DaemonCommand::Disable(args) => run_daemon_disable(application, args, data_root, ui),
-        };
-        if let Some(operation) = operation {
-            application.observe_daemon_operation(
-                &telemetry_root,
-                operation,
-                result.is_ok(),
-                started.elapsed(),
-            );
-        }
-        result
-    })
+            result
+        },
+    )
 }
 
 fn daemon_operation_for_command(
@@ -107,10 +117,10 @@ pub(super) fn run_daemon_enabled_update(
 
 pub fn update_indexing_mode(
     data_root: &Path,
-    config: &AppConfig<'_>,
+    config: &DaemonRuntimeConfig,
     automatic: bool,
 ) -> Result<crate::IndexingModeUpdate> {
-    super::super::daemon_supervisor::with_daemon_run_application(config, |application| {
+    super::super::daemon_supervisor::with_daemon_run_application(config, true, |application| {
         apply_indexing_mode(application, data_root, automatic)
     })
 }

@@ -1,15 +1,15 @@
 use std::{
     fs, io,
-    io::Write as _,
-    path::Path,
-    process,
-    sync::atomic::{AtomicU64, Ordering},
+    io::{Read as _, Write as _},
+    path::{Path, PathBuf},
 };
 
 use anyhow::{Context, Result};
-use ctx_history_platform::platform_security::restrict_private_file_handle;
+use ctx_history_platform::platform_security::{
+    ensure_private_file_handle, restrict_private_file_handle, verify_private_file_handle,
+};
+use uuid::Uuid;
 
-static CONFIG_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const CONFIG_MUTATION_LOCK_FILE: &str = ".config.mutation.lock";
 
 pub(super) struct ConfigMutationLock {
@@ -82,23 +82,82 @@ impl Drop for ConfigMutationLock {
     }
 }
 
+pub(super) fn read_config_text(path: &Path) -> Result<Option<String>> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+
+        options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        use windows_sys::Win32::{
+            Foundation::GENERIC_READ,
+            Storage::FileSystem::{
+                FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+                READ_CONTROL, WRITE_DAC,
+            },
+        };
+
+        options
+            .access_mode(GENERIC_READ | READ_CONTROL | WRITE_DAC)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let mut file = match options.open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).with_context(|| format!("open {}", path.display())),
+    };
+    ensure_private_file_handle(&file)
+        .with_context(|| format!("protect private config {}", path.display()))?;
+    let mut text = String::new();
+    file.read_to_string(&mut text)
+        .with_context(|| format!("read {}", path.display()))?;
+    Ok(Some(text))
+}
+
 pub(super) fn write_config_durably(path: &Path, body: &[u8]) -> Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("config path has no parent: {}", path.display()))?;
-    let sequence = CONFIG_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let temp = parent.join(format!(".config.{}.{}.tmp", process::id(), sequence));
+    let temp = temporary_config_path(parent);
     let result = (|| -> Result<()> {
         let mut options = fs::OpenOptions::new();
-        options.write(true).create_new(true);
+        options.read(true).write(true).create_new(true);
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt as _;
-            options.mode(0o600);
+
+            options
+                .mode(0o600)
+                .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt as _;
+            use windows_sys::Win32::{
+                Foundation::{GENERIC_READ, GENERIC_WRITE},
+                Storage::FileSystem::{
+                    FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, READ_CONTROL, WRITE_DAC,
+                },
+            };
+
+            options
+                .access_mode(GENERIC_READ | GENERIC_WRITE | READ_CONTROL | WRITE_DAC)
+                .share_mode(FILE_SHARE_READ)
+                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
         }
         let mut file = options
             .open(&temp)
             .with_context(|| format!("create temporary config {}", temp.display()))?;
+        restrict_private_file_handle(&file)
+            .with_context(|| format!("protect temporary config {}", temp.display()))?;
+        verify_private_file_handle(&file)
+            .with_context(|| format!("verify temporary config {}", temp.display()))?;
         file.write_all(body)
             .with_context(|| format!("write temporary config {}", temp.display()))?;
         file.sync_all()
@@ -112,6 +171,10 @@ pub(super) fn write_config_durably(path: &Path, body: &[u8]) -> Result<()> {
         let _ = fs::remove_file(&temp);
     }
     result
+}
+
+fn temporary_config_path(parent: &Path) -> PathBuf {
+    parent.join(format!(".config.{}.tmp", Uuid::new_v4().simple()))
 }
 
 #[cfg(not(windows))]
@@ -161,4 +224,20 @@ fn sync_config_directory(path: &Path) -> Result<()> {
 #[cfg(not(unix))]
 fn sync_config_directory(_path: &Path) -> Result<()> {
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn temporary_config_names_use_unpredictable_uuids() {
+        let path = temporary_config_path(Path::new("private-root"));
+        let name = path.file_name().unwrap().to_str().unwrap();
+        let uuid = name
+            .strip_prefix(".config.")
+            .and_then(|name| name.strip_suffix(".tmp"))
+            .unwrap();
+        assert!(Uuid::parse_str(uuid).is_ok(), "{name}");
+    }
 }

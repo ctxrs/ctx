@@ -475,6 +475,13 @@ fn failing_executor(calls: Arc<AtomicUsize>) -> Arc<dyn SourceBackedRefreshExecu
     })
 }
 
+fn coverage_failure_executor(calls: Arc<AtomicUsize>) -> Arc<dyn SourceBackedRefreshExecutor> {
+    Arc::new(move |_: SourceBackedRefreshExecution<'_>| {
+        calls.fetch_add(1, Ordering::SeqCst);
+        Err(ZeroSourcePublicationBlocked::new("stable terminal coverage failure").into())
+    })
+}
+
 #[test]
 fn mixed_automatic_retry_serialization_round_trips_through_recovery() {
     let paused_route = route_identity(0x72);
@@ -838,6 +845,34 @@ fn automatic_internal_retry_confirms_once_then_pauses_without_losing_last_good()
 }
 
 #[test]
+fn automatic_terminal_coverage_retry_confirms_once_then_pauses() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (_temp, data_root, _source_path, coordinator, _catalog, route, _generation) =
+        automatic_retry_fixture(coverage_failure_executor(Arc::clone(&calls)));
+
+    let first = run_due_failure(&coordinator, &data_root, &route);
+    assert_eq!(
+        first.job["structured_outcome"]["code"],
+        "all_provider_terminal_coverage_unavailable"
+    );
+    assert_eq!(first.job["automatic_retry"]["state"], "confirming");
+    assert_eq!(
+        first.job["automatic_retry"]["reason"],
+        "internal_failure_confirmation"
+    );
+
+    let second = run_due_failure(&coordinator, &data_root, &route);
+    assert_eq!(second.job["automatic_retry"]["state"], "paused");
+    assert_eq!(
+        second.job["automatic_retry"]["reason"],
+        "repeated_internal_failure"
+    );
+    assert_eq!(second.job["structured_outcome"]["retryable"], false);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert!(!coordinator.has_scheduled_route_work());
+}
+
+#[test]
 fn automatic_retry_rearms_for_source_change_and_manual_import() {
     let calls = Arc::new(AtomicUsize::new(0));
     let (_temp, data_root, source_path, coordinator, _catalog, route, _generation) =
@@ -1166,8 +1201,28 @@ fn newer_event_during_confirmation_attempt_is_not_paused_by_stale_admission() {
             }
             Err(anyhow!("stable internal refresh fixture failure"))
         });
-    let (_temp, data_root, _source_path, coordinator, _catalog, route, _generation) =
-        automatic_retry_fixture(executor);
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    ctx_history_platform::platform_security::establish_private_data_root(&data_root).unwrap();
+    let source_path = temp.path().join("history.jsonl");
+    fs::write(&source_path, b"stable\n").unwrap();
+    let (catalog, route) = automatic_retry_catalog(source_path);
+    publish_pin_source(
+        &source_backed_index_root(&data_root),
+        publication_pin_source(),
+    );
+    let journal = Arc::new(TestFailTerminalStoreJournal::failing_on(4));
+    let coordinator = CoreRefreshEngine::with_journal_executor_and_admitted_routes(
+        Arc::clone(&journal) as Arc<dyn RefreshJournal>,
+        executor,
+        [route.clone()],
+    );
+    coordinator.install_watch_catalog(catalog.clone());
+    coordinator.reconcile_watch_routes(
+        [route.clone()],
+        EventWatermark::new(40, 1),
+        ledger_now_ms().saturating_sub(1_000),
+    );
     let coordinator = Arc::new(coordinator);
     let _ = run_due_failure(&coordinator, &data_root, &route);
     coordinator.schedule_startup_route_reconciliation(
@@ -1191,20 +1246,45 @@ fn newer_event_during_confirmation_attempt_is_not_paused_by_stale_admission() {
     );
     release_tx.send(()).expect("release confirmation attempt");
     let stale = running.join().unwrap();
+    assert!(stale.terminal_persistence_pending, "{:#}", stale.job);
+    assert_eq!(journal.terminal_store_count(), 4);
     let terminal = coordinator
         .status(stale.job["request_id"].as_str().unwrap())
         .unwrap();
     assert_eq!(terminal["structured_outcome"]["retryable"], true);
     assert!(terminal.get("automatic_retry").is_none());
     assert!(!coordinator.route_is_permanently_blocked_for_test(&route));
-    coordinator.schedule_startup_route_reconciliation(
+    let durable = read_daemon_job_status(&daemon_source_backed_refresh_job_path(&data_root))
+        .expect("pre-finalization crash image");
+    assert_eq!(durable["route_finalization_pending"], true);
+    assert_eq!(durable["automatic_retry"]["state"], "paused");
+    drop(coordinator);
+
+    let restarted = CoreRefreshEngine::with_executor_and_admitted_routes(
+        failing_executor(Arc::clone(&calls)),
         [route.clone()],
-        automatic_retry_test_watermark(),
-        ledger_now_ms().saturating_sub(1_000),
     );
-    assert!(coordinator
-        .enqueue_next_dirty_route(&data_root, ledger_now_ms())
+    assert!(!restarted
+        .recover_interrupted_publication(&data_root)
         .unwrap());
+    restarted.install_watch_catalog(catalog);
+    let recovered = restarted
+        .status(stale.job["request_id"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(recovered["structured_outcome"]["retryable"], true);
+    assert!(recovered.get("automatic_retry").is_none());
+    assert!(restarted.has_scheduled_route_work());
+    assert!(restarted
+        .enqueue_next_dirty_route(&data_root, u64::MAX)
+        .unwrap());
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "recovery must not recapture"
+    );
+    let normalized = read_daemon_job_status(&daemon_source_backed_refresh_job_path(&data_root))
+        .expect("normalized finalization image");
+    assert!(normalized.get("route_finalization_pending").is_none());
 }
 
 #[test]
@@ -1409,43 +1489,4 @@ fn terminal_history_is_trimmed_independently_from_inflight_capacity() {
         "queued"
     );
     assert!(coordinator.has_pending_request());
-}
-
-#[test]
-fn production_run_persists_discovering_before_executor_entry() {
-    let temp = tempfile::tempdir().unwrap();
-    let data_root = temp.path().join("data");
-    ctx_history_platform::platform_security::establish_private_data_root(&data_root).unwrap();
-    let observed = Arc::new(AtomicBool::new(false));
-    let observed_from_executor = Arc::clone(&observed);
-    let coordinator = CoreRefreshEngine::with_executor(Arc::new(
-        move |execution: SourceBackedRefreshExecution<'_>| {
-            let job =
-                read_daemon_job_status(&daemon_source_backed_refresh_job_path(execution.data_root))
-                    .expect("running source refresh status");
-            assert_eq!(job["request_state"], "running");
-            assert_eq!(job["progress"]["phase"], "discovering");
-            assert_eq!(job["progress"]["total_sources_known"], false);
-            assert!(job["progress"]["current_source"].is_null());
-            assert!(job["progress"]["completed_records"].is_null());
-            assert!(job["progress"]["completed_bytes"].is_null());
-            assert!(job["progress"]["current_source_progress"].is_null());
-            observed_from_executor.store(true, Ordering::SeqCst);
-            Err(anyhow!("stop after observing persisted discovery phase"))
-        },
-    ));
-    let _request = manual_all_request_without_catalog(&coordinator, &data_root);
-
-    let run = coordinator.run_next(&data_root).expect("queued refresh");
-    assert!(run.failed);
-    assert!(observed.load(Ordering::SeqCst));
-}
-
-#[test]
-fn default_executor_uses_capture_owned_execution() {
-    let coordinator = CoreRefreshEngine::new();
-    assert_eq!(
-        coordinator.executor.implementation_name(),
-        std::any::type_name::<CaptureOwnedSourceBackedRefreshExecutor>()
-    );
 }

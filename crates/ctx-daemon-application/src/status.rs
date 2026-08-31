@@ -2,13 +2,15 @@ use std::path::{Path, PathBuf};
 
 use ctx_daemon_runtime::{
     daemon_lock_path, daemon_owner_binary_identity_matches, daemon_root_path, daemon_status_path,
-    pid_lock_file_is_orphaned, pid_lock_file_reports_running, process_state,
-    read_daemon_job_status, read_daemon_status, read_pid_lock_file, read_pid_lock_json,
+    pid_lock_file_is_orphaned, pid_lock_file_reports_running, process_state, read_daemon_status,
+    read_pid_lock_file, read_pid_lock_json,
 };
-use ctx_daemon_service::{daemon_core_refresh_job_path, daemon_wakeup_report};
+use ctx_daemon_service::daemon_wakeup_report;
 use serde_json::{json, Value};
 
 use crate::{compact_json, supervisor, DaemonApplicationHost, DaemonConfigSnapshot, DaemonMode};
+
+mod core_refresh_job;
 
 pub struct DaemonStatusPreparation<'a> {
     host: &'a dyn DaemonApplicationHost,
@@ -41,8 +43,12 @@ pub struct DaemonConfigReloadContext<'a> {
     pub out_of_sync: bool,
     pub requested_daemon_enabled: Option<bool>,
     pub requested_semantic_enabled: Option<bool>,
+    pub requested_semantic_executor: Option<&'a str>,
+    pub requested_semantic_contract_fingerprint: Option<&'a str>,
     pub applied_daemon_enabled: Option<bool>,
     pub applied_semantic_enabled: Option<bool>,
+    pub applied_semantic_executor: Option<&'a str>,
+    pub applied_semantic_contract_fingerprint: Option<&'a str>,
     pub last_error: Option<&'a str>,
 }
 
@@ -150,7 +156,7 @@ pub(super) fn prepare_daemon_status<'a>(
             .clone()
             .or_else(|| Some("manual".to_owned()))
     };
-    let core_refresh_job = daemon_core_refresh_job_report(
+    let core_refresh_job = core_refresh_job::daemon_core_refresh_job_report(
         data_root,
         disabled_overrides_lifecycle,
         current_config
@@ -205,12 +211,24 @@ impl DaemonStatusPreparation<'_> {
                 requested_semantic_enabled: reload
                     .pointer("/requested/semantic_enabled")
                     .and_then(Value::as_bool),
+                requested_semantic_executor: reload
+                    .pointer("/requested/semantic_executor")
+                    .and_then(Value::as_str),
+                requested_semantic_contract_fingerprint: reload
+                    .pointer("/requested/semantic_contract_fingerprint")
+                    .and_then(Value::as_str),
                 applied_daemon_enabled: reload
                     .pointer("/applied/daemon_enabled")
                     .and_then(Value::as_bool),
                 applied_semantic_enabled: reload
                     .pointer("/applied/semantic_enabled")
                     .and_then(Value::as_bool),
+                applied_semantic_executor: reload
+                    .pointer("/applied/semantic_executor")
+                    .and_then(Value::as_str),
+                applied_semantic_contract_fingerprint: reload
+                    .pointer("/applied/semantic_contract_fingerprint")
+                    .and_then(Value::as_str),
                 last_error: reload.get("last_error").and_then(Value::as_str),
             },
         }
@@ -285,60 +303,6 @@ impl DaemonStatusPreparation<'_> {
     }
 }
 
-fn daemon_core_refresh_job_report(
-    data_root: &Path,
-    disabled_overrides_lifecycle: bool,
-    daemon_enabled: bool,
-) -> Value {
-    let status_value = read_daemon_job_status(&daemon_core_refresh_job_path(data_root));
-    let job = status_value.as_ref();
-    let disabled = !daemon_enabled && disabled_overrides_lifecycle;
-    compact_json(json!({
-        "status": if disabled {
-            "disabled"
-        } else {
-            job.and_then(|value| value.get("status"))
-                .and_then(Value::as_str)
-                .unwrap_or("unknown")
-        },
-        "enabled": daemon_enabled,
-        "reason": if disabled {
-            Some("daemon_disabled".to_owned())
-        } else {
-            job.and_then(|value| json_string(value, "reason"))
-        },
-        "error_code": job.and_then(|value| json_string(value, "error_code")),
-        "mode": job.and_then(|value| json_string(value, "mode")),
-        "owner": job.and_then(|value| json_string(value, "owner")),
-        "kind": job.and_then(|value| json_string(value, "kind")),
-        "request_id": job.and_then(|value| json_string(value, "request_id")),
-        "request_state": job.and_then(|value| json_string(value, "request_state")),
-        "last_run_at_ms": job.and_then(|value| json_i64(value, "last_run_at_ms")),
-        "source_count": job.and_then(|value| value.get("source_count").cloned()),
-        "previous_generation": job.and_then(|value| json_string(value, "previous_generation")),
-        "published_generation": job.and_then(|value| json_string(value, "published_generation")),
-        "generation_changed": job.and_then(|value| value.get("generation_changed").cloned()),
-        "receipt": job.and_then(|value| value.get("receipt").cloned()),
-        "coalesced_requests": job.and_then(|value| value.get("coalesced_requests").cloned()),
-        "progress": job.and_then(|value| value.get("progress").cloned()),
-        "daemon_mode": job.and_then(|value| json_string(value, "daemon_mode")),
-        "trigger": job.and_then(|value| json_string(value, "trigger")),
-        "trigger_provenance": job.and_then(|value| json_string(value, "trigger_provenance")),
-        "scanned_routes": job.and_then(|value| value.get("scanned_routes").cloned()),
-        "unsupported_routes": job.and_then(|value| value.get("unsupported_routes").cloned()),
-        "certified_source_count": job.and_then(|value| value.get("certified_source_count").cloned()),
-        "certified_source_bytes": job.and_then(|value| value.get("certified_source_bytes").cloned()),
-        "timings_us": job.and_then(|value| value.get("timings_us").cloned()),
-        "structured_outcome": job.and_then(|value| value.get("structured_outcome").cloned()),
-        "automatic_retry": job.and_then(|value| value.get("automatic_retry").cloned()),
-        "retryable": job.and_then(|value| value.get("retryable").cloned()),
-        "retry_after_ms": job.and_then(|value| value.get("retry_after_ms").cloned()),
-        "consecutive_failures": job.and_then(|value| value.get("consecutive_failures").cloned()),
-        "retry_not_before_at_ms": job.and_then(|value| value.get("retry_not_before_at_ms").cloned()),
-        "last_error": job.and_then(|value| json_string(value, "last_error")),
-    }))
-}
-
 fn daemon_core_refresh_endpoint_report(
     host: &dyn DaemonApplicationHost,
     data_root: &Path,
@@ -375,13 +339,27 @@ fn daemon_config_reload_report(
         .get("applied")
         .and_then(|value| value.get("semantic_enabled"))
         .and_then(Value::as_bool);
+    let applied_semantic_executor = persisted
+        .get("applied")
+        .and_then(|value| value.get("semantic_executor"))
+        .and_then(Value::as_str);
+    let applied_semantic_contract_fingerprint = persisted
+        .get("applied")
+        .and_then(|value| value.get("semantic_contract_fingerprint"))
+        .and_then(Value::as_str);
     let requested_daemon_enabled = current_config.map(|config| config.enabled);
     let requested_daemon_mode = current_config.map(|config| config.mode.as_str());
     let requested_semantic_enabled = current_config.map(|config| config.semantic_enabled);
+    let requested_semantic_executor =
+        current_config.map(|config| config.semantic_executor.as_str());
+    let requested_semantic_contract_fingerprint =
+        current_config.map(|config| config.semantic_contract_fingerprint.as_str());
     let out_of_sync = running
         && (requested_daemon_enabled != applied_daemon_enabled
             || requested_daemon_mode != applied_daemon_mode
-            || requested_semantic_enabled != applied_semantic_enabled);
+            || requested_semantic_enabled != applied_semantic_enabled
+            || requested_semantic_executor != applied_semantic_executor
+            || requested_semantic_contract_fingerprint != applied_semantic_contract_fingerprint);
     let persisted_status = persisted
         .get("status")
         .and_then(Value::as_str)
@@ -407,11 +385,15 @@ fn daemon_config_reload_report(
             "daemon_enabled": requested_daemon_enabled,
             "daemon_mode": requested_daemon_mode,
             "semantic_enabled": requested_semantic_enabled,
+            "semantic_executor": requested_semantic_executor,
+            "semantic_contract_fingerprint": requested_semantic_contract_fingerprint,
         },
         "applied": {
             "daemon_enabled": applied_daemon_enabled,
             "daemon_mode": applied_daemon_mode,
             "semantic_enabled": applied_semantic_enabled,
+            "semantic_executor": applied_semantic_executor,
+            "semantic_contract_fingerprint": applied_semantic_contract_fingerprint,
         },
         "last_error": persisted.get("last_error").cloned(),
     }))
@@ -440,6 +422,7 @@ mod tests {
         create_private_dir_all, daemon_lock_path, daemon_status_path, pid_lock_guard_path,
         pid_lock_payload, private_create_new_lock_file, write_private_json_file, DaemonLock,
     };
+    use ctx_daemon_service::daemon_core_refresh_job_path;
 
     use super::*;
     use crate::{DaemonApplication, TestHost};
@@ -535,6 +518,8 @@ mod tests {
             enabled: false,
             mode: DaemonMode::Full,
             semantic_enabled: false,
+            semantic_executor: "builtin".to_owned(),
+            semantic_contract_fingerprint: "sha256:builtin-space".to_owned(),
         };
 
         let disabled = report(temp.path(), true, Some(&config));
@@ -566,6 +551,8 @@ mod tests {
                         "daemon_enabled": true,
                         "daemon_mode": "full",
                         "semantic_enabled": false,
+                        "semantic_executor": "builtin",
+                        "semantic_contract_fingerprint": "sha256:builtin-space",
                     },
                 },
             }),
@@ -574,6 +561,8 @@ mod tests {
             enabled: false,
             mode: DaemonMode::SourceRefreshOnly,
             semantic_enabled: true,
+            semantic_executor: "https://embeddings.example.test/v1/".to_owned(),
+            semantic_contract_fingerprint: "sha256:external-space".to_owned(),
         };
         let host = TestHost;
         let application = DaemonApplication::new(&host);
@@ -587,8 +576,26 @@ mod tests {
         assert_eq!(context.config_reload.status, "applied");
         assert_eq!(context.config_reload.requested_daemon_enabled, Some(false));
         assert_eq!(context.config_reload.requested_semantic_enabled, Some(true));
+        assert_eq!(
+            context.config_reload.requested_semantic_executor,
+            Some("https://embeddings.example.test/v1/")
+        );
+        assert_eq!(
+            context
+                .config_reload
+                .requested_semantic_contract_fingerprint,
+            Some("sha256:external-space")
+        );
         assert_eq!(context.config_reload.applied_daemon_enabled, Some(true));
         assert_eq!(context.config_reload.applied_semantic_enabled, Some(false));
+        assert_eq!(
+            context.config_reload.applied_semantic_executor,
+            Some("builtin")
+        );
+        assert_eq!(
+            context.config_reload.applied_semantic_contract_fingerprint,
+            Some("sha256:builtin-space")
+        );
 
         let daemon = preparation.finish().into_json();
         assert_eq!(daemon["enabled"], false);
@@ -601,7 +608,7 @@ mod tests {
     }
 
     #[test]
-    fn running_owner_marks_changed_applied_config_pending() -> anyhow::Result<()> {
+    fn running_owner_marks_same_endpoint_changed_semantic_contract_pending() -> anyhow::Result<()> {
         let temp = tempfile::tempdir()?;
         let lock = DaemonLock::acquire(temp.path())?.expect("daemon lock");
         let now = ctx_history_core::utc_now().timestamp_millis();
@@ -617,7 +624,9 @@ mod tests {
                     "applied": {
                         "daemon_enabled": true,
                         "daemon_mode": "full",
-                        "semantic_enabled": false,
+                        "semantic_enabled": true,
+                        "semantic_executor": "https://embeddings.example.test/v1/",
+                        "semantic_contract_fingerprint": "sha256:external-space-a",
                     },
                 },
             }),
@@ -626,6 +635,8 @@ mod tests {
             enabled: true,
             mode: DaemonMode::Full,
             semantic_enabled: true,
+            semantic_executor: "https://embeddings.example.test/v1/".to_owned(),
+            semantic_contract_fingerprint: "sha256:external-space-b".to_owned(),
         };
         let host = TestHost;
         let application = DaemonApplication::new(&host);
@@ -636,11 +647,45 @@ mod tests {
         assert!(context.semantic_runtime_active);
         assert!(context.config_reload.out_of_sync);
         assert_eq!(context.config_reload.status, "pending");
+        assert_eq!(
+            context.config_reload.requested_semantic_executor,
+            Some("https://embeddings.example.test/v1/")
+        );
+        assert_eq!(
+            context.config_reload.applied_semantic_executor,
+            Some("https://embeddings.example.test/v1/")
+        );
+        assert_eq!(
+            context
+                .config_reload
+                .requested_semantic_contract_fingerprint,
+            Some("sha256:external-space-b")
+        );
+        assert_eq!(
+            context.config_reload.applied_semantic_contract_fingerprint,
+            Some("sha256:external-space-a")
+        );
 
         let daemon = preparation.finish().into_json();
         assert_eq!(daemon["config_reload"]["status"], "pending");
         assert_eq!(daemon["config_reload"]["reason"], "config_changed");
         assert_eq!(daemon["config_reload"]["out_of_sync"], true);
+        assert_eq!(
+            daemon["config_reload"]["requested"]["semantic_executor"],
+            "https://embeddings.example.test/v1/"
+        );
+        assert_eq!(
+            daemon["config_reload"]["applied"]["semantic_executor"],
+            "https://embeddings.example.test/v1/"
+        );
+        assert_eq!(
+            daemon["config_reload"]["requested"]["semantic_contract_fingerprint"],
+            "sha256:external-space-b"
+        );
+        assert_eq!(
+            daemon["config_reload"]["applied"]["semantic_contract_fingerprint"],
+            "sha256:external-space-a"
+        );
         drop(lock);
         Ok(())
     }
@@ -685,6 +730,8 @@ mod tests {
                         "daemon_enabled": true,
                         "daemon_mode": "full",
                         "semantic_enabled": false,
+                        "semantic_executor": "builtin",
+                        "semantic_contract_fingerprint": "sha256:builtin-space",
                     },
                 },
             }),
@@ -693,6 +740,8 @@ mod tests {
             enabled: true,
             mode: DaemonMode::Full,
             semantic_enabled: true,
+            semantic_executor: "https://embeddings.example.test/v1/".to_owned(),
+            semantic_contract_fingerprint: "sha256:external-space".to_owned(),
         };
         let host = TestHost;
         let application = DaemonApplication::new(&host);
@@ -707,6 +756,24 @@ mod tests {
         );
         assert_eq!(context.config_reload.requested_semantic_enabled, Some(true));
         assert_eq!(context.config_reload.applied_semantic_enabled, Some(false));
+        assert_eq!(
+            context.config_reload.requested_semantic_executor,
+            Some("https://embeddings.example.test/v1/")
+        );
+        assert_eq!(
+            context.config_reload.applied_semantic_executor,
+            Some("builtin")
+        );
+        assert_eq!(
+            context
+                .config_reload
+                .requested_semantic_contract_fingerprint,
+            Some("sha256:external-space")
+        );
+        assert_eq!(
+            context.config_reload.applied_semantic_contract_fingerprint,
+            Some("sha256:builtin-space")
+        );
         let daemon = preparation.finish().into_json();
         assert_eq!(daemon["status"], "failed");
         assert_eq!(daemon["last_error"], "outer lifecycle failure");
@@ -847,7 +914,7 @@ mod tests {
         assert!(daemon["core_refresh_endpoint"].get("address").is_none());
         assert_eq!(
             daemon["core_refresh_endpoint"]["identity_path"],
-            json!(temp.path().join("daemon/source-refresh-endpoint.json"))
+            json!(daemon_root_path(temp.path()).join("source-refresh-endpoint.json"))
         );
         assert!(daemon.get("wakeup").is_some());
         assert!(daemon.get("supervisor").is_some());
@@ -875,11 +942,15 @@ mod tests {
                         "daemon_enabled": true,
                         "daemon_mode": "source-refresh-only",
                         "semantic_enabled": false,
+                        "semantic_executor": "builtin",
+                        "semantic_contract_fingerprint": "sha256:builtin-space",
                     },
                     "applied": {
                         "daemon_enabled": true,
                         "daemon_mode": "source-refresh-only",
                         "semantic_enabled": false,
+                        "semantic_executor": "builtin",
+                        "semantic_contract_fingerprint": "sha256:builtin-space",
                     },
                 },
             }),
@@ -901,6 +972,8 @@ mod tests {
             enabled: true,
             mode: DaemonMode::SourceRefreshOnly,
             semantic_enabled: false,
+            semantic_executor: "builtin".to_owned(),
+            semantic_contract_fingerprint: "sha256:builtin-space".to_owned(),
         };
 
         let report = application
@@ -914,6 +987,11 @@ mod tests {
         assert_eq!(report["trigger_provenance"], "autostart");
         assert_eq!(report["lock_identity"]["active"], true);
         assert_eq!(report["jobs"]["core_refresh"]["certified_source_count"], 4);
+        assert_eq!(report["config_reload"]["status"], "applied");
+        assert_eq!(
+            report["config_reload"]["requested"]["semantic_contract_fingerprint"],
+            "sha256:builtin-space"
+        );
         drop(lock);
         Ok(())
     }

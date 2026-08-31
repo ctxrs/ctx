@@ -367,7 +367,7 @@ fn pressure_fence_only_advances_global_uncertainty_authority() {
 }
 
 #[test]
-fn uncertainty_between_preterminal_binding_and_state_transition_keeps_wait_active() {
+fn verified_publication_is_terminal_despite_synchronous_watch_uncertainty() {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("data");
     let coordinator = Arc::new(CoreRefreshEngine::new());
@@ -388,7 +388,7 @@ fn uncertainty_between_preterminal_binding_and_state_transition_keeps_wait_activ
                     runner_release.wait();
                     Ok(CoreRefreshTerminalSuccess::state_only(receipt))
                 },
-                |_| panic!("fenced refresh must not persist terminal success"),
+                |_| Ok(()),
                 |_| Ok(()),
             )
             .expect("active wait run")
@@ -403,9 +403,9 @@ fn uncertainty_between_preterminal_binding_and_state_transition_keeps_wait_activ
     );
     release.wait();
 
-    let fenced = run.join().unwrap();
-    assert_eq!(fenced.job["request_state"], "running");
-    assert_eq!(fenced.job["progress"]["phase"], "watch_recovery");
+    let published = run.join().unwrap();
+    assert_eq!(published.job["request_state"], "published");
+    assert_eq!(published.job["progress"]["phase"], "published");
     let catalog_revision = coordinator.lock_state().watch_catalog_revision;
     assert!(coordinator
         .complete_watch_uncertainty_recovery(
@@ -420,23 +420,150 @@ fn uncertainty_between_preterminal_binding_and_state_transition_keeps_wait_activ
         catalog_revision.saturating_add(1),
         "watch recovery must invalidate out-of-lock catalog observations"
     );
-    let pending = coordinator.status(&request_id).unwrap();
-    assert_eq!(pending["request_state"], "admission_pending");
-    assert_eq!(pending["reconciliation_demand"], "exhaustive");
+    let terminal = coordinator.status(&request_id).unwrap();
+    assert_eq!(terminal["request_state"], "published");
+    assert_eq!(terminal["published_generation"], "stale");
+}
+
+#[test]
+fn newer_exhaustive_marker_survives_post_publication_coverage_fence() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    let route = route_identity(0x61);
+    let coordinator_slot = Arc::new(Mutex::new(None::<Arc<CoreRefreshEngine>>));
+    let executor_slot = Arc::clone(&coordinator_slot);
+    let executor_route = route.clone();
+    let observation = "ab".repeat(32);
+    let executor_observation = observation.clone();
+    let executions = Arc::new(AtomicUsize::new(0));
+    let executor_executions = Arc::clone(&executions);
+    let executor: Arc<dyn SourceBackedRefreshExecutor> =
+        Arc::new(move |execution: SourceBackedRefreshExecution<'_>| {
+            let coordinator = executor_slot
+                .lock()
+                .unwrap()
+                .as_ref()
+                .expect("coordinator installed before execution")
+                .clone();
+            if executor_executions.fetch_add(1, Ordering::SeqCst) == 0 {
+                coordinator.record_watch_routes_requiring_exhaustive_reconciliation(
+                    [(executor_route.clone(), EventWatermark::new(1, 2))],
+                    ledger_now_ms().saturating_sub(1_000),
+                );
+                coordinator.set_route_observations_for_test(
+                    execution.request_id,
+                    BTreeMap::from([(executor_route.clone(), executor_observation.clone())]),
+                );
+            }
+            publish_pin_fixture(&execution, false)
+        });
+    let coordinator = Arc::new(CoreRefreshEngine::with_executor_and_admitted_routes(
+        executor,
+        [route.clone()],
+    ));
+    *coordinator_slot.lock().unwrap() = Some(Arc::clone(&coordinator));
+    coordinator.initialize_watch_route_authority([route.clone()]);
+    coordinator.record_watch_routes_requiring_exhaustive_reconciliation(
+        [(route.clone(), EventWatermark::new(1, 1))],
+        ledger_now_ms().saturating_sub(1_000),
+    );
+    assert!(coordinator
+        .enqueue_next_dirty_route(&data_root, ledger_now_ms())
+        .unwrap());
     assert!(coordinator
         .prepare_next_pending_admission(&data_root)
         .unwrap());
+    let run = coordinator
+        .run_next_with_coverage_fence_for_test(&data_root, |_, routes| {
+            assert_eq!(routes, &BTreeSet::from([route.clone()]));
+            Ok(BTreeMap::from([(route.clone(), Some(observation.clone()))]))
+        })
+        .expect("original exhaustive maintenance run");
+    let request_id = request_id(&run.job);
+    assert!(Uuid::parse_str(&request_id).is_ok());
+    assert_eq!(run.job["request_state"], "published");
+    assert_eq!(
+        run.coverage_certificate()
+            .expect("coverage certificate")
+            .exact_route_boundaries()
+            .collect::<Vec<_>>(),
+        vec![(&route, EventWatermark::new(1, 1), observation.as_str())]
+    );
+    assert_eq!(
+        coordinator.status(&request_id).unwrap()["request_state"],
+        "published"
+    );
+    assert!(coordinator
+        .enqueue_next_dirty_route(&data_root, ledger_now_ms())
+        .unwrap());
+    let successor_id = coordinator.lock_state().active_request_id.clone().unwrap();
+    assert!(Uuid::parse_str(&successor_id).is_ok());
+    assert_ne!(successor_id, request_id);
+    assert_eq!(
+        coordinator.active_reconciliation_demand_for_test(),
+        Some(SourceBackedReconciliationDemand::Exhaustive)
+    );
+}
 
-    let recovered = coordinator
-        .run_next_with(
-            |_, _| Ok(test_publication("recovered")),
-            || Ok(Some("recovered".to_owned())),
+#[test]
+fn newer_missing_member_uncertainty_and_failure_rearm_exhaustive_obligations() {
+    for fail in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let data_root = temp.path().join("data");
+        let route = route_identity(if fail { 0x63 } else { 0x62 });
+        let coordinator = CoreRefreshEngine::new();
+        coordinator.initialize_watch_route_authority([route.clone()]);
+        coordinator.record_watch_routes_requiring_exhaustive_reconciliation(
+            [(route.clone(), EventWatermark::new(1, 1))],
+            ledger_now_ms().saturating_sub(1_000),
+        );
+        assert!(coordinator
+            .enqueue_next_dirty_route(&data_root, ledger_now_ms())
+            .unwrap());
+        assert!(coordinator
+            .prepare_next_pending_admission(&data_root)
+            .unwrap());
+        let route_for_run = route.clone();
+        let _ = coordinator.run_next_with(
+            move |active, engine| {
+                engine.admit_refresh_scope_for_test(
+                    active,
+                    &SourceBackedRefreshScope::Exact(BTreeSet::from([route_for_run.clone()])),
+                )?;
+                if fail {
+                    Err(anyhow!("rearm exhaustive obligation"))
+                } else {
+                    engine.record_watch_routes_requiring_exhaustive_reconciliation(
+                        [(route_for_run.clone(), EventWatermark::new(1, 2))],
+                        ledger_now_ms().saturating_sub(1_000),
+                    );
+                    let mut publication = test_publication("generation-62");
+                    publication.route_results = vec![SourceBackedRefreshRouteResult::succeeded(
+                        route_for_run.as_str().to_owned(),
+                        true,
+                    )];
+                    Ok(publication)
+                }
+            },
+            || {
+                Ok(if fail {
+                    None
+                } else {
+                    Some("generation-62".to_owned())
+                })
+            },
             |_| Ok(()),
             |_| Ok(()),
-        )
-        .expect("exhaustive successor");
-    assert_eq!(recovered.job["request_id"], request_id);
-    assert_eq!(recovered.job["request_state"], "published");
+        );
+        assert!(coordinator
+            .enqueue_next_dirty_route(&data_root, u64::MAX)
+            .unwrap());
+        assert_eq!(
+            coordinator.active_reconciliation_demand_for_test(),
+            Some(SourceBackedReconciliationDemand::Exhaustive),
+            "fail={fail}"
+        );
+    }
 }
 
 fn empty_test_publication(generation_id: impl Into<String>) -> SourceBackedRefreshPublication {
@@ -843,7 +970,7 @@ fn warm_dirty_route_burst_uses_one_bounded_refresh_and_publication() {
 }
 
 #[test]
-fn restart_requeues_durable_watch_recovery_after_pointer_advance() {
+fn restart_recovers_matching_running_publication_as_terminal_after_pointer_crash() {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("data");
     let committed = Arc::new(Barrier::new(2));
@@ -885,8 +1012,8 @@ fn restart_requeues_durable_watch_recovery_after_pointer_advance() {
     first.fence_watch_uncertainty(EventWatermark::new(19, 1));
     release.wait();
     let interrupted = run.join().unwrap();
-    assert_eq!(interrupted.job["request_state"], "running");
-    assert_eq!(interrupted.job["progress"]["phase"], "watch_recovery");
+    assert_eq!(interrupted.job["request_state"], "published");
+    assert_eq!(interrupted.job["progress"]["phase"], "published");
     let generation = pin_published_generation(&data_root)
         .unwrap()
         .expect("physical generation advanced")
@@ -905,14 +1032,13 @@ fn restart_requeues_durable_watch_recovery_after_pointer_advance() {
             observed_executions.fetch_add(1, Ordering::SeqCst);
             Err(anyhow!("restart recovery must remain nonterminal"))
         }));
-    assert!(restarted
+    assert!(!restarted
         .recover_interrupted_publication(&data_root)
         .unwrap());
     let recovered = restarted
         .status(&request_id)
         .expect("recovered active wait");
-    assert_eq!(recovered["request_state"], "admission_pending");
-    assert_eq!(recovered["reconciliation_demand"], "exhaustive");
+    assert_eq!(recovered["request_state"], "published");
     assert_eq!(executions.load(Ordering::SeqCst), 0);
 
     let reconnect = restarted
@@ -930,10 +1056,13 @@ fn restart_requeues_durable_watch_recovery_after_pointer_advance() {
         .unwrap()
         .expect("reconnected active wait");
     assert_eq!(reconnect["request_id"], request_id);
-    assert_eq!(reconnect["request_state"], "admission_pending");
+    assert_eq!(reconnect["request_state"], "published");
 }
 
 mod additional;
+
+#[path = "tests/execution_persistence.rs"]
+mod execution_persistence;
 
 #[path = "tests/receipt.rs"]
 mod receipt_tests;

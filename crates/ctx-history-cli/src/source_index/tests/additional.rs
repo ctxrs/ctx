@@ -255,6 +255,7 @@ fn search_context_bytes_use_core_snippets_and_indexed_complete_session_sizes_not
 
 #[test]
 fn generation_only_semantic_is_typed_and_hybrid_falls_back_without_exact_projection() {
+    install_builtin_semantic_test_host();
     let temp = tempdir().unwrap();
     write_test_generation(temp.path());
     assert!(!temp.path().join("work.sqlite").exists());
@@ -505,6 +506,7 @@ fn exact_non_message_event_type_uses_the_same_semantic_boundary() {
 
 #[test]
 fn mcp_source_route_applies_the_semantic_config_default_to_source_generations() {
+    install_builtin_semantic_test_host();
     let temp = tempdir().unwrap();
     write_test_generation(temp.path());
     let mut source_request = request(RefreshArg::Off);
@@ -595,14 +597,60 @@ fn manual_foreground_search_makes_semantic_execution_available_only_for_that_cli
     );
 
     let foreground = super::search::source_search_policy(&config, true);
-    let expected = if ctx_daemon_cli::semantic_query_service_supported() {
+    assert_eq!(
+        foreground.semantic,
         ctx_history_read_application::SemanticAvailability::Available
-    } else {
+    );
+}
+
+#[test]
+fn semantic_generation_wait_is_limited_to_queries_that_need_semantic_evidence() {
+    let available = ctx_history_read_application::SemanticAvailability::Available;
+    let mut source_request = request(RefreshArg::Wait);
+
+    source_request.backend = Some(SearchBackendArg::Semantic);
+    assert!(super::search::search_needs_semantic_evidence(
+        &source_request,
+        SearchBackendArg::Semantic,
+        source_request.semantic_weight,
+        available,
+    ));
+
+    source_request.backend = Some(SearchBackendArg::Lexical);
+    assert!(!super::search::search_needs_semantic_evidence(
+        &source_request,
+        SearchBackendArg::Lexical,
+        source_request.semantic_weight,
+        available,
+    ));
+
+    source_request.backend = Some(SearchBackendArg::Hybrid);
+    source_request.semantic_weight = 0.0;
+    assert!(!super::search::search_needs_semantic_evidence(
+        &source_request,
+        SearchBackendArg::Hybrid,
+        source_request.semantic_weight,
+        available,
+    ));
+
+    source_request.semantic_weight = 0.35;
+    source_request.content_scope = SearchContentScope::Calls;
+    assert!(!super::search::search_needs_semantic_evidence(
+        &source_request,
+        SearchBackendArg::Hybrid,
+        source_request.semantic_weight,
+        available,
+    ));
+
+    source_request.content_scope = SearchContentScope::All;
+    assert!(!super::search::search_needs_semantic_evidence(
+        &source_request,
+        SearchBackendArg::Hybrid,
+        source_request.semantic_weight,
         ctx_history_read_application::SemanticAvailability::Unavailable(
-            ctx_history_read_application::SemanticReason::PlatformUnsupported,
-        )
-    };
-    assert_eq!(foreground.semantic, expected);
+            ctx_history_read_application::SemanticReason::PolicyDisabled,
+        ),
+    ));
 }
 
 #[test]

@@ -115,9 +115,65 @@ fn backend_and_coreml_controls_preserve_strict_parsing() {
     assert!(parse_backend_preference(Some("gpu")).is_err());
     assert_eq!(
         parse_coreml_compute_mode(Some(" CPU-ANE ")).unwrap(),
-        SemanticCoreMlComputeMode::CpuAndNeuralEngine
+        Some(SemanticCoreMlComputeMode::CpuAndNeuralEngine)
     );
     assert!(parse_coreml_compute_mode(Some("")).is_err());
+}
+
+#[test]
+fn coreml_compute_mode_composition_preserves_absence_and_foreground_defaults() {
+    assert_eq!(parse_coreml_compute_mode(None).unwrap(), None);
+
+    let data_root = Path::new("/data");
+    let absent = semantic_model_config_from_environment(data_root, &environment());
+    assert_eq!(
+        absent.coreml_compute_mode().unwrap(),
+        SemanticCoreMlComputeMode::All
+    );
+    assert_eq!(
+        crate::query_adapter::foreground_coreml_model_config(absent)
+            .coreml_compute_mode()
+            .unwrap(),
+        SemanticCoreMlComputeMode::CpuOnly
+    );
+
+    for (value, expected) in [
+        ("all", SemanticCoreMlComputeMode::All),
+        ("cpu", SemanticCoreMlComputeMode::CpuOnly),
+        ("cpu-ane", SemanticCoreMlComputeMode::CpuAndNeuralEngine),
+        ("cpu-gpu", SemanticCoreMlComputeMode::CpuAndGpu),
+    ] {
+        let environment = SemanticHostEnvironment {
+            coreml_compute_mode: Some(value.to_owned()),
+            ..environment()
+        };
+        let config = semantic_model_config_from_environment(data_root, &environment);
+        assert_eq!(config.coreml_compute_mode().unwrap(), expected, "{value}");
+        assert_eq!(
+            crate::query_adapter::foreground_coreml_model_config(config)
+                .coreml_compute_mode()
+                .unwrap(),
+            expected,
+            "{value}"
+        );
+    }
+
+    for value in ["", "invalid"] {
+        let environment = SemanticHostEnvironment {
+            coreml_compute_mode: Some(value.to_owned()),
+            ..environment()
+        };
+        let config = semantic_model_config_from_environment(data_root, &environment);
+        let error = crate::query_adapter::foreground_coreml_model_config(config)
+            .coreml_compute_mode()
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("CTX_SEMANTIC_COREML_NATIVE_COMPUTE"),
+            "{value:?} must remain invalid after foreground composition"
+        );
+    }
 }
 
 #[test]

@@ -27,8 +27,663 @@ fn publication_pin_test_publication(
     publication
 }
 
+fn publish_owned_pin_fixture(
+    execution: &SourceBackedRefreshExecution<'_>,
+    route: SourceRouteIdentity,
+) -> Result<SourceBackedRefreshPublication> {
+    let source = publication_pin_source();
+    let mut writer =
+        ctx_history_index::GenerationWriter::open(execution.index_root, WriterOptions::default())?
+            .into_writer()
+            .map_err(crate::committed_generation_recovery_error)?;
+    writer.begin_source(source.clone())?;
+    writer.add_core_record(publication_pin_record(&source))?;
+    writer.certify_source(publication_pin_certificate(&source))?;
+    let request_id = execution.request_id.to_owned();
+    let operation = execution.operation;
+    let scope = execution.admitted_refresh().publication_scope().clone();
+    let metadata_route = route.clone();
+    let published = writer.commit_with_publication_metadata(
+        |_| true,
+        move |context| {
+            let mut publication =
+                publication_pin_test_publication(context.generation_id().to_owned());
+            publication.route_results = vec![SourceBackedRefreshRouteResult::succeeded(
+                metadata_route.as_str().to_owned(),
+                true,
+            )];
+            let receipt = SourceBackedRefreshReceipt::from_verified_publication(
+                None,
+                context.generation_id().to_owned(),
+                &publication,
+            )
+            .map_err(|error| IndexError::PublicationMetadata(format!("{error:#}")))?;
+            SourceBackedPublicationMetadata {
+                version: SOURCE_REFRESH_PUBLICATION_METADATA_VERSION,
+                request_id: request_id.clone(),
+                operation,
+                refresh_scope: scope.clone(),
+                receipt: receipt.to_json(),
+                route_observations: BTreeMap::new(),
+                route_controls: BTreeMap::new(),
+            }
+            .encode()
+        },
+    )?;
+    let mut publication =
+        publication_pin_test_publication(published.receipt().generation_id.clone());
+    publication.route_results = vec![SourceBackedRefreshRouteResult::succeeded(
+        route.as_str().to_owned(),
+        true,
+    )];
+    Ok(publication)
+}
+
+#[derive(Debug, Default)]
+struct RouteFinalizationTransitionJournal {
+    finalization_transitions: AtomicUsize,
+}
+
+impl RouteFinalizationTransitionJournal {
+    fn finalization_transition_count(&self) -> usize {
+        self.finalization_transitions.load(Ordering::SeqCst)
+    }
+}
+
+impl RefreshJournal for RouteFinalizationTransitionJournal {
+    fn load(&self, data_root: &Path) -> Result<Option<Value>> {
+        Ok(read_daemon_job_status(
+            &daemon_source_backed_refresh_job_path(data_root),
+        ))
+    }
+
+    fn store(&self, data_root: &Path, value: &Value) -> Result<()> {
+        let path = daemon_source_backed_refresh_job_path(data_root);
+        let previous = read_daemon_job_status(&path);
+        let completes_route_finalization = previous.as_ref().is_some_and(|previous| {
+            previous["request_id"] == value["request_id"]
+                && previous["route_finalization_pending"] == true
+                && value.get("route_finalization_pending").is_none()
+                && matches!(
+                    value.get("request_state").and_then(Value::as_str),
+                    Some("published" | "failed")
+                )
+        });
+        write_daemon_job_status(&path, value)?;
+        if completes_route_finalization {
+            self.finalization_transitions.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok(())
+    }
+
+    fn store_before_ack(&self, data_root: &Path, value: &Value) -> DurableAdmissionPersistence {
+        match self.store(data_root, value) {
+            Ok(()) => DurableAdmissionPersistence::Confirmed,
+            Err(error) => DurableAdmissionPersistence::Failed(error),
+        }
+    }
+}
+
+fn queued_successor_ids(job: &Value) -> BTreeSet<String> {
+    job.get("queued_successors")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|successor| successor["request_id"].as_str().map(str::to_owned))
+        .collect()
+}
+
 #[test]
-fn exact_no_op_restart_migrates_pre_fix_source_count_and_reuses_durable_receipt() {
+fn publication_metadata_ownership_rejects_table_driven_mismatches_for_terminal_and_running_recovery(
+) {
+    for request_state in ["published", "running"] {
+        let cases: &[&str] = if request_state == "published" {
+            &[
+                "request_id",
+                "operation",
+                "scope",
+                "generation",
+                "receipt",
+                "malformed",
+                "request_outcome_null",
+                "request_outcome_malformed",
+                "request_outcome_redundant",
+                "physical_receipt_before_malformed_outcome",
+            ]
+        } else {
+            &[
+                "request_id",
+                "operation",
+                "scope",
+                "malformed",
+                "request_outcome_null",
+                "request_outcome_malformed",
+                "request_outcome_foreign",
+            ]
+        };
+        for &case in cases {
+            let temp = tempfile::tempdir().unwrap();
+            let data_root = temp.path().join("data");
+            ctx_history_platform::platform_security::establish_private_data_root(&data_root)
+                .unwrap();
+            let receipt_slot = Arc::new(Mutex::new(None::<Value>));
+            let case_receipt_slot = Arc::clone(&receipt_slot);
+            let case_route = route_identity(0xae);
+            let published = ctx_history_index::GenerationWriter::open(
+                source_backed_index_root(&data_root),
+                WriterOptions::default(),
+            )
+            .unwrap()
+            .into_writer()
+            .unwrap()
+            .commit_with_publication_metadata(
+                |_| true,
+                |context| {
+                    let mut publication = empty_test_publication(context.generation_id());
+                    add_complete_empty_authority(&mut publication, case_route.clone());
+                    let receipt = SourceBackedRefreshReceipt::from_verified_publication(
+                        None,
+                        context.generation_id().to_owned(),
+                        &publication,
+                    )
+                    .map_err(|error| IndexError::PublicationMetadata(format!("{error:#}")))?;
+                    *case_receipt_slot.lock().unwrap() = Some(receipt.to_json());
+                    if case == "malformed" {
+                        return Ok(b"not-source-refresh-metadata".to_vec());
+                    }
+                    let mut metadata = SourceBackedPublicationMetadata {
+                        version: SOURCE_REFRESH_PUBLICATION_METADATA_VERSION,
+                        request_id: "expected-request".to_owned(),
+                        operation: SourceBackedRefreshOperation::Refresh,
+                        refresh_scope: SourceBackedRefreshScope::All,
+                        receipt: receipt.to_json(),
+                        route_observations: BTreeMap::new(),
+                        route_controls: BTreeMap::new(),
+                    };
+                    match case {
+                        "request_id" => metadata.request_id = "other-request".to_owned(),
+                        "operation" => metadata.operation = SourceBackedRefreshOperation::Import,
+                        "scope" => {
+                            metadata.refresh_scope =
+                                SourceBackedRefreshScope::Exact(BTreeSet::from([
+                                    case_route.clone()
+                                ]));
+                        }
+                        _ => {}
+                    }
+                    metadata.encode()
+                },
+            )
+            .unwrap();
+            let generation = published.receipt().generation_id.clone();
+            let receipt = receipt_slot.lock().unwrap().clone();
+            let mut job = json!({
+                "schema_version": 1,
+                "owner": "daemon",
+                "request_id": "expected-request",
+                "request_state": request_state,
+                "status": if request_state == "published" { "completed" } else { "running" },
+                "operation": "refresh",
+                "previous_generation": null,
+                "published_generation": if request_state == "published" { json!(generation) } else { Value::Null },
+                "refresh_scope": {"kind": "all"},
+            });
+            if request_state == "published" {
+                job["generation_changed"] = json!(true);
+                job["outcome"] = json!("completed");
+                let receipt = receipt.expect("valid metadata recorded its receipt");
+                job["certified_source_count"] = receipt["current"]["current_source_count"].clone();
+                job["certified_source_bytes"] =
+                    receipt["current"]["current_certified_source_bytes"].clone();
+                job["receipt"] = receipt.clone();
+                if case == "generation" {
+                    job["published_generation"] = json!("other-generation");
+                }
+                if case == "receipt" {
+                    job["receipt"]["generation_changed"] = json!(false);
+                }
+                match case {
+                    "request_outcome_null" => job["request_outcome"] = Value::Null,
+                    "request_outcome_malformed" => {
+                        job["request_outcome"] = json!({"published_generation": 7});
+                    }
+                    "request_outcome_redundant" => job["request_outcome"] = receipt,
+                    "physical_receipt_before_malformed_outcome" => {
+                        job["receipt"]["generation_changed"] = json!(false);
+                        job["request_outcome"] = json!({"published_generation": 7});
+                    }
+                    _ => {}
+                }
+            } else {
+                match case {
+                    "request_outcome_null" => job["request_outcome"] = Value::Null,
+                    "request_outcome_malformed" => {
+                        job["request_outcome"] = json!({"published_generation": 7});
+                    }
+                    "request_outcome_foreign" => {
+                        job["request_outcome"] = receipt.expect("metadata receipt");
+                    }
+                    _ => {}
+                }
+            }
+            write_daemon_job_status(&daemon_source_backed_refresh_job_path(&data_root), &job)
+                .unwrap();
+
+            let error = test_refresh_engine()
+                .recover_interrupted_publication(&data_root)
+                .expect_err(&format!(
+                    "{request_state} recovery must reject {case} metadata"
+                ));
+            if case == "physical_receipt_before_malformed_outcome" {
+                assert!(
+                    format!("{error:#}").contains("recover durable terminal refresh receipt")
+                        || format!("{error:#}").contains("different terminal receipt"),
+                    "physical receipt must fail before logical outcome decoding: {error:#}"
+                );
+            }
+            assert!(
+                format!("{error:#}").contains("metadata")
+                    || format!("{error:#}").contains("receipt")
+                    || format!("{error:#}").contains("request_outcome"),
+                "{request_state} / {case}: {error:#}"
+            );
+        }
+    }
+}
+
+#[test]
+fn route_finalization_pending_marker_is_strict_and_terminal_only() {
+    let engine = CoreRefreshEngine::new();
+    engine.enqueue(None);
+    let failed = engine
+        .run_next_with(
+            |_, _| Err(anyhow!("marker fixture failure")),
+            || Ok(None),
+            |_| Ok(()),
+            |_| Ok(()),
+        )
+        .expect("failed marker fixture");
+    for (label, marker, request_state, status) in [
+        ("null", Value::Null, "failed", "failed"),
+        ("false", Value::Bool(false), "failed", "failed"),
+        ("string", json!("true"), "failed", "failed"),
+        ("active", Value::Bool(true), "running", "running"),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let data_root = temp.path().join("data");
+        ctx_history_platform::platform_security::establish_private_data_root(&data_root).unwrap();
+        let mut job = failed.job.clone();
+        job["route_finalization_pending"] = marker;
+        job["request_state"] = json!(request_state);
+        job["status"] = json!(status);
+        write_daemon_job_status(&daemon_source_backed_refresh_job_path(&data_root), &job).unwrap();
+        let error = test_refresh_engine()
+            .recover_interrupted_publication(&data_root)
+            .expect_err(&format!("reject {label} finalization marker"));
+        assert!(
+            format!("{error:#}").contains("route-finalization")
+                || format!("{error:#}").contains("pending route finalization"),
+            "{label}: {error:#}"
+        );
+    }
+}
+
+#[test]
+fn post_route_finalization_write_failure_retries_once_before_optional_successor() {
+    for failed in [false, true] {
+        for with_successor in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let data_root = temp.path().join("data");
+            ctx_history_platform::platform_security::establish_private_data_root(&data_root)
+                .unwrap();
+            let route = route_identity(if failed { 0xb1 } else { 0xb2 });
+            let executor_route = route.clone();
+            let executions = Arc::new(AtomicUsize::new(0));
+            let executor_executions = Arc::clone(&executions);
+            let executor: Arc<dyn SourceBackedRefreshExecutor> =
+                Arc::new(move |execution: SourceBackedRefreshExecution<'_>| {
+                    executor_executions.fetch_add(1, Ordering::SeqCst);
+                    if failed {
+                        bail!("injected refresh failure before route finalization");
+                    }
+                    let mut publication = publish_pin_fixture(&execution, false)?;
+                    let mut result = SourceBackedRefreshRouteResult::failed(
+                        executor_route.as_str().to_owned(),
+                        "unavailable".to_owned(),
+                        true,
+                    );
+                    result.source_failures = vec![SourceBackedRefreshSourceFailure {
+                        route_identity: executor_route.as_str().to_owned(),
+                        source_identity: "cd".repeat(32),
+                        provider: "fixture".to_owned(),
+                        class: "unavailable".to_owned(),
+                        carried_forward: true,
+                        source_selector: "fixture source".to_owned(),
+                        detail: "fixture route failure".to_owned(),
+                    }];
+                    publication.route_results = vec![result];
+                    Ok(publication)
+                });
+            let journal = Arc::new(TestFailTerminalStoreJournal::default());
+            let coordinator = CoreRefreshEngine::with_journal_executor_and_admitted_routes(
+                Arc::clone(&journal) as Arc<dyn RefreshJournal>,
+                executor,
+                [route.clone()],
+            );
+            let root = coordinator.enqueue_periodic(&data_root).unwrap();
+            let root_id = request_id(&root);
+            let successor_id = with_successor.then(|| {
+                request_id(&enqueue_synthetic_manual_all_request(
+                    &coordinator,
+                    &data_root,
+                    7,
+                ))
+            });
+
+            let first = coordinator.run_next(&data_root).expect("terminal root");
+            assert_eq!(first.job["request_id"], root_id);
+            assert_eq!(first.failed, failed, "{:#}", first.job);
+            assert!(first.terminal_persistence_pending, "{:#}", first.job);
+            assert_eq!(journal.terminal_store_count(), 2);
+            assert_eq!(executions.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                coordinator.status(&root_id).unwrap()["request_state"],
+                if failed { "failed" } else { "published" }
+            );
+            let pinned_before =
+                (!failed).then(|| coordinator.pinned_core_publication().expect("terminal pin"));
+
+            let retried = coordinator
+                .run_next(&data_root)
+                .expect("finalization-only persistence retry");
+            assert_eq!(retried.job["request_id"], root_id);
+            assert_eq!(retried.failed, failed);
+            assert!(!retried.terminal_persistence_pending);
+            assert_eq!(journal.terminal_store_count(), 3);
+            assert_eq!(executions.load(Ordering::SeqCst), 1);
+            if let Some(before) = pinned_before {
+                let after = coordinator.pinned_core_publication().expect("retained pin");
+                assert!(
+                    Arc::ptr_eq(&before, &after),
+                    "retry must not reinstall Core"
+                );
+                assert_eq!(
+                    usize::from(!first.terminal_persistence_pending)
+                        + usize::from(!retried.terminal_persistence_pending),
+                    1,
+                    "published generation becomes notifiable exactly once"
+                );
+            }
+            match successor_id {
+                Some(successor_id) => {
+                    assert_eq!(
+                        coordinator.status(&successor_id).unwrap()["request_state"],
+                        "admission_pending"
+                    );
+                    assert!(retried.job["queued_successors"].as_array().is_some_and(
+                        |successors| successors.iter().any(|successor| {
+                            successor["request_id"].as_str() == Some(successor_id.as_str())
+                        })
+                    ));
+                }
+                None => assert!(!coordinator.has_pending_request()),
+            }
+        }
+    }
+}
+
+fn assert_marker_terminal_recovery_at_crash_boundary(
+    failed: bool,
+    with_existing_successor: bool,
+    crash_before_finalization: bool,
+) {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    ctx_history_platform::platform_security::establish_private_data_root(&data_root).unwrap();
+    let route = route_identity(if failed { 0xc1 } else { 0xc2 });
+    let execution_route = route.clone();
+    let executions = Arc::new(AtomicUsize::new(0));
+    let execution_count = Arc::clone(&executions);
+    let executor: Arc<dyn SourceBackedRefreshExecutor> =
+        Arc::new(move |execution: SourceBackedRefreshExecution<'_>| {
+            execution_count.fetch_add(1, Ordering::SeqCst);
+            if failed {
+                bail!("injected refresh failure before route finalization");
+            }
+            publish_owned_pin_fixture(&execution, execution_route.clone())
+        });
+    let journal = Arc::new(RouteFinalizationTransitionJournal::default());
+    let coordinator = Arc::new(
+        CoreRefreshEngine::with_journal_executor_and_admitted_routes(
+            Arc::clone(&journal) as Arc<dyn RefreshJournal>,
+            Arc::clone(&executor),
+            [route.clone()],
+        ),
+    );
+    coordinator.initialize_watch_route_authority([route.clone()]);
+    coordinator.record_watch_routes_requiring_exhaustive_reconciliation(
+        [(route.clone(), EventWatermark::new(1, 1))],
+        source_route_ledger_now_ms().saturating_sub(1_000),
+    );
+    assert!(coordinator
+        .enqueue_next_dirty_route(&data_root, u64::MAX)
+        .unwrap());
+    let root = read_daemon_job_status(&daemon_source_backed_refresh_job_path(&data_root))
+        .expect("exhaustive route root");
+    assert_eq!(root["reconciliation_demand"], "exhaustive");
+    let root_id = request_id(&root);
+    let existing_successor_id = with_existing_successor.then(|| {
+        request_id(&enqueue_synthetic_manual_all_request(
+            coordinator.as_ref(),
+            &data_root,
+            10,
+        ))
+    });
+    let finalization_entered = Arc::new(Barrier::new(2));
+    let finalization_release = Arc::new(Barrier::new(2));
+    let entered = Arc::clone(&finalization_entered);
+    let release = Arc::clone(&finalization_release);
+    coordinator.install_before_route_finalization_hook(move || {
+        entered.wait();
+        release.wait();
+        if crash_before_finalization {
+            // This hook runs without the engine-state lock and before the only
+            // route-finalization call. Unwinding terminates the writer; no
+            // engine or run Drop implementation can complete the second write.
+            panic!("terminate writer before route finalization");
+        }
+    });
+
+    let notifications = Arc::new(AtomicUsize::new(0));
+    let run_notifications = Arc::clone(&notifications);
+    let runner = Arc::clone(&coordinator);
+    let run_root = data_root.clone();
+    let run = std::thread::spawn(move || {
+        let terminal = runner.run_next(&run_root);
+        if terminal.as_ref().is_some_and(|terminal| {
+            !terminal.failed && !terminal.terminal_persistence_pending && terminal.did_work
+        }) {
+            run_notifications.fetch_add(1, Ordering::SeqCst);
+        }
+        terminal
+    });
+    finalization_entered.wait();
+
+    let concurrent_successor_id = request_id(&enqueue_synthetic_manual_all_request(
+        coordinator.as_ref(),
+        &data_root,
+        11,
+    ));
+    coordinator
+        .persist_job_status_for_test(&data_root, &concurrent_successor_id)
+        .unwrap();
+    let retry_probe = coordinator
+        .persist_retry_status(
+            &data_root,
+            coordinator.status(&concurrent_successor_id).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(retry_probe["request_id"], root_id);
+    assert_eq!(retry_probe["route_finalization_pending"], true);
+    let scheduler_probe = coordinator
+        .persist_scheduler_status(
+            &data_root,
+            json!({
+                "request_id": root_id,
+                "retryable": true,
+                "retry_after_ms": 1,
+            }),
+        )
+        .unwrap();
+    assert_eq!(scheduler_probe["request_id"], root_id);
+    assert_eq!(scheduler_probe["route_finalization_pending"], true);
+    assert!(coordinator.run_next(&data_root).is_none());
+    let expected_successors = existing_successor_id
+        .iter()
+        .cloned()
+        .chain(std::iter::once(concurrent_successor_id.clone()))
+        .collect::<BTreeSet<_>>();
+    let marker = read_daemon_job_status(&daemon_source_backed_refresh_job_path(&data_root))
+        .expect("marker-bearing terminal owner");
+    assert_eq!(marker["request_id"], root_id);
+    assert_eq!(marker["route_finalization_pending"], true);
+    assert_eq!(
+        marker["request_state"],
+        if failed { "failed" } else { "published" }
+    );
+    assert_eq!(queued_successor_ids(&marker), expected_successors);
+    assert_eq!(journal.finalization_transition_count(), 0);
+    assert_eq!(executions.load(Ordering::SeqCst), 1);
+    assert_eq!(notifications.load(Ordering::SeqCst), 0);
+
+    finalization_release.wait();
+    if crash_before_finalization {
+        assert!(
+            run.join().is_err(),
+            "pre-finalization writer must terminate"
+        );
+        assert_eq!(journal.finalization_transition_count(), 0);
+    } else {
+        let terminal = run
+            .join()
+            .expect("join route finalization")
+            .expect("terminal root");
+        assert_eq!(terminal.job["request_id"], root_id);
+        assert_eq!(terminal.failed, failed);
+        assert!(!terminal.terminal_persistence_pending);
+        assert_eq!(journal.finalization_transition_count(), 1);
+    }
+    assert_eq!(executions.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        notifications.load(Ordering::SeqCst),
+        usize::from(!crash_before_finalization && !failed)
+    );
+    drop(coordinator);
+
+    let crash_image = read_daemon_job_status(&daemon_source_backed_refresh_job_path(&data_root))
+        .expect("durable crash image after dropping original writer");
+    assert_eq!(crash_image["request_id"], root_id);
+    assert_eq!(
+        crash_image
+            .get("route_finalization_pending")
+            .and_then(Value::as_bool),
+        crash_before_finalization.then_some(true)
+    );
+    assert_eq!(queued_successor_ids(&crash_image), expected_successors);
+    assert_eq!(
+        journal.finalization_transition_count(),
+        usize::from(!crash_before_finalization)
+    );
+
+    let restarted = CoreRefreshEngine::with_journal_executor_and_admitted_routes(
+        Arc::clone(&journal) as Arc<dyn RefreshJournal>,
+        executor,
+        [route.clone()],
+    );
+    assert!(restarted
+        .recover_interrupted_publication(&data_root)
+        .unwrap());
+    let recovered_root = restarted.status(&root_id).unwrap_or_else(|| {
+        panic!(
+            "missing recovered root: failed={failed} existing_successor={with_existing_successor} crash_before={crash_before_finalization}"
+        )
+    });
+    assert_eq!(
+        recovered_root["request_state"],
+        if failed { "failed" } else { "published" }
+    );
+    for successor_id in &expected_successors {
+        assert_eq!(
+            restarted.status(successor_id).unwrap()["request_state"],
+            "admission_pending"
+        );
+    }
+    let normalized = read_daemon_job_status(&daemon_source_backed_refresh_job_path(&data_root))
+        .expect("normalized terminal owner");
+    assert_eq!(normalized["request_id"], root_id);
+    assert!(normalized.get("route_finalization_pending").is_none());
+    assert_eq!(queued_successor_ids(&normalized), expected_successors);
+    assert_eq!(
+        restarted.scheduled_route_ids_for_test(),
+        if failed {
+            BTreeSet::from([route.clone()])
+        } else {
+            BTreeSet::new()
+        }
+    );
+    assert_eq!(
+        restarted.dirty_route_ids_for_test(),
+        if failed {
+            BTreeSet::from([route.clone()])
+        } else {
+            BTreeSet::new()
+        }
+    );
+    assert_eq!(
+        restarted.exhaustive_route_obligations_for_test(),
+        if failed {
+            BTreeSet::from([route.clone()])
+        } else {
+            BTreeSet::new()
+        }
+    );
+    assert!(!restarted.route_is_permanently_blocked_for_test(&route));
+    assert_eq!(journal.finalization_transition_count(), 1);
+    assert_eq!(executions.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        notifications.load(Ordering::SeqCst),
+        usize::from(!crash_before_finalization && !failed)
+    );
+}
+
+#[test]
+fn marker_terminal_recovers_after_true_pre_finalization_writer_termination() {
+    for failed in [false, true] {
+        for with_existing_successor in [false, true] {
+            assert_marker_terminal_recovery_at_crash_boundary(
+                failed,
+                with_existing_successor,
+                true,
+            );
+        }
+    }
+}
+
+#[test]
+fn finalized_terminal_recovers_after_writer_completes_before_restart() {
+    for failed in [false, true] {
+        for with_existing_successor in [false, true] {
+            assert_marker_terminal_recovery_at_crash_boundary(
+                failed,
+                with_existing_successor,
+                false,
+            );
+        }
+    }
+}
+
+#[test]
+fn refresh_all_to_import_exact_no_op_restart_restores_queued_successor() {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("data");
     ctx_history_platform::platform_security::establish_private_data_root(&data_root).unwrap();
@@ -92,9 +747,11 @@ fn exact_no_op_restart_migrates_pre_fix_source_count_and_reuses_durable_receipt(
         .to_owned();
     drop(first);
 
+    let selected_route = route_identity(0xaf);
+    let second_route = selected_route.clone();
     let second_factories = Arc::clone(&metadata_factories);
-    let second = CoreRefreshEngine::with_executor(Arc::new(
-        move |execution: SourceBackedRefreshExecution<'_>| {
+    let second = CoreRefreshEngine::with_executor_and_admitted_routes(
+        Arc::new(move |execution: SourceBackedRefreshExecution<'_>| {
             let source = publication_pin_source();
             let mut writer = ctx_history_index::GenerationWriter::open(
                 execution.index_root,
@@ -114,14 +771,53 @@ fn exact_no_op_restart_migrates_pre_fix_source_count_and_reuses_durable_receipt(
                     ))
                 },
             )?;
-            Ok(publication_pin_test_publication(
-                published.receipt().generation_id.clone(),
-            ))
-        },
-    ));
-    let no_op_request = second.enqueue_periodic(&data_root).unwrap();
+            let mut publication =
+                publication_pin_test_publication(published.receipt().generation_id.clone());
+            let mut result = SourceBackedRefreshRouteResult::failed(
+                second_route.as_str().to_owned(),
+                "unavailable".to_owned(),
+                true,
+            );
+            result.source_failures = vec![SourceBackedRefreshSourceFailure {
+                route_identity: second_route.as_str().to_owned(),
+                source_identity: "cd".repeat(32),
+                provider: "fixture".to_owned(),
+                class: "unavailable".to_owned(),
+                carried_forward: true,
+                source_selector: "fixture source".to_owned(),
+                detail: "fixture no-op failure".to_owned(),
+            }];
+            publication.route_results = vec![result];
+            Ok(publication)
+        }),
+        [selected_route.clone()],
+    );
+    let no_op_request = second
+        .enqueue_intent(
+            Some(generation.clone()),
+            SourceRefreshRuntimeMetadata {
+                operation: SourceBackedRefreshOperation::Import,
+                daemon_mode: "full".to_owned(),
+                trigger: "import",
+                trigger_provenance: "import_command",
+            },
+            RefreshIntent::SelectedImport(RefreshSelection::All),
+            SourceBackedRefreshScope::Exact(BTreeSet::from([selected_route.clone()])),
+            None,
+            None,
+        )
+        .unwrap();
     let no_op_request_id = request_id(&no_op_request);
     assert_ne!(no_op_request_id, initial_request_id);
+    second
+        .complete_pending_admission_for_test(
+            &data_root,
+            &no_op_request_id,
+            BTreeMap::from([(selected_route, Some("af".repeat(32)))]),
+        )
+        .unwrap();
+    let successor = enqueue_synthetic_manual_all_request(&second, &data_root, 9);
+    let successor_id = request_id(&successor);
     let replay = second.run_next(&data_root).expect("exact no-op replay");
     assert!(!replay.failed, "{:#}", replay.job);
     assert!(!replay.did_work);
@@ -160,7 +856,7 @@ fn exact_no_op_restart_migrates_pre_fix_source_count_and_reuses_durable_receipt(
     write_daemon_job_status(&status_path, &pre_fix_job).unwrap();
 
     let restarted = CoreRefreshEngine::new();
-    assert!(!restarted
+    assert!(restarted
         .recover_interrupted_publication(&data_root)
         .unwrap());
     assert_eq!(
@@ -176,6 +872,10 @@ fn exact_no_op_restart_migrates_pre_fix_source_count_and_reuses_durable_receipt(
         exact_no_op_response
     );
     assert!(restarted.status(&initial_request_id).is_none());
+    assert_eq!(
+        restarted.status(&successor_id).unwrap()["request_state"],
+        "admission_pending"
+    );
     let recovered =
         read_daemon_job_status(&status_path).expect("migrated no-op terminal after restart");
     assert_eq!(recovered["request_id"], no_op_request_id);
@@ -275,7 +975,7 @@ fn lone_failed_terminal_recovers_exact_status_without_reenqueue() {
 }
 
 #[test]
-fn pointer_crash_requeues_active_exhaustive_and_preserves_fresh_successor() {
+fn pointer_crash_recovers_matching_running_publication_terminal_and_preserves_successor() {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("data");
     ctx_history_platform::platform_security::establish_private_data_root(&data_root).unwrap();
@@ -296,6 +996,8 @@ fn pointer_crash_requeues_active_exhaustive_and_preserves_fresh_successor() {
         .unwrap()
         .expect("active wait admission");
     assert_eq!(active["request_state"], "admission_pending");
+    let active_scope = refresh_scope_from_json(active.get("refresh_scope")).unwrap();
+    let active_operation = SourceBackedRefreshOperation::from_request_json(&active).unwrap();
     assert!(first.prepare_next_pending_admission(&data_root).unwrap());
 
     let successor_request_id = Arc::new(Mutex::new(None::<String>));
@@ -306,6 +1008,8 @@ fn pointer_crash_requeues_active_exhaustive_and_preserves_fresh_successor() {
     let recorded_successor = Arc::clone(&successor_request_id);
     let execution_committed = Arc::clone(&committed);
     let execution_release = Arc::clone(&release);
+    let metadata_scope = active_scope.clone();
+    let metadata_operation = active_operation;
     let crash = std::thread::spawn(move || {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _ = runner.run_next_with(
@@ -337,8 +1041,8 @@ fn pointer_crash_requeues_active_exhaustive_and_preserves_fresh_successor() {
                             SourceBackedPublicationMetadata {
                                 version: SOURCE_REFRESH_PUBLICATION_METADATA_VERSION,
                                 request_id: metadata_request_id.clone(),
-                                operation: SourceBackedRefreshOperation::Refresh,
-                                refresh_scope: SourceBackedRefreshScope::All,
+                                operation: metadata_operation,
+                                refresh_scope: metadata_scope.clone(),
                                 receipt: receipt.to_json(),
                                 route_observations: BTreeMap::new(),
                                 route_controls: BTreeMap::new(),
@@ -395,8 +1099,7 @@ fn pointer_crash_requeues_active_exhaustive_and_preserves_fresh_successor() {
         .unwrap());
     assert_eq!(executions.load(Ordering::SeqCst), 0);
     let recovered = restarted.status(&active_request_id).unwrap();
-    assert_eq!(recovered["request_state"], "admission_pending");
-    assert_eq!(recovered["reconciliation_demand"], "exhaustive");
+    assert_eq!(recovered["request_state"], "published");
     assert_eq!(
         restarted.status(&successor_request_id).unwrap()["request_state"],
         "admission_pending"
@@ -417,15 +1120,13 @@ fn pointer_crash_requeues_active_exhaustive_and_preserves_fresh_successor() {
         .unwrap()
         .expect("reconnected active wait");
     assert_eq!(reconnect["request_id"], active_request_id);
-    assert_eq!(reconnect["request_state"], "admission_pending");
+    assert_eq!(reconnect["request_state"], "published");
 
     assert!(restarted
         .prepare_next_pending_admission(&data_root)
         .unwrap());
-    let successor = restarted
-        .run_next(&data_root)
-        .expect("exhaustive successor");
-    assert_eq!(successor.job["request_id"], active_request_id);
+    let successor = restarted.run_next(&data_root).expect("queued successor");
+    assert_eq!(successor.job["request_id"], successor_request_id);
     assert_eq!(successor.job["request_state"], "published");
     assert_eq!(executions.load(Ordering::SeqCst), 1);
 }

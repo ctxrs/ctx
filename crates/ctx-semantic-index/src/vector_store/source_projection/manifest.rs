@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Result};
 use ctx_history_core::{core_record_contract_fingerprint, StableEntityKind, IDENTITY_VERSION};
-use ctx_history_index::{current_semantic_generation_policy_hash, CoreEventRecord};
+use ctx_history_index::{policy::semantic_generation_policy_hash, CoreEventRecord};
 #[cfg(test)]
 use ctx_semantic_model::semantic_model_contract;
 use ctx_semantic_model::SemanticModelContract;
@@ -204,15 +204,17 @@ pub(super) fn validate_resolved_document(
     Ok(())
 }
 
-pub(super) fn semantic_policy_fingerprint() -> Result<String> {
-    Ok(current_semantic_generation_policy_hash()?)
+pub(super) fn semantic_policy_fingerprint(
+    model_contract: &SemanticModelContract,
+) -> Result<String> {
+    Ok(semantic_generation_policy_hash(model_contract)?)
 }
 
 pub(super) fn source_contract_fingerprint(
     model_contract: &SemanticModelContract,
 ) -> Result<String> {
     source_contract_fingerprint_with_authority(
-        &semantic_policy_fingerprint()?,
+        &semantic_policy_fingerprint(model_contract)?,
         model_contract.descriptor(),
     )
 }
@@ -297,7 +299,7 @@ mod tests {
     fn complete_model_descriptor_participates_in_semantic_contract_identity() {
         let model_contract = semantic_model_contract();
         let descriptor = model_contract.descriptor();
-        let policy = semantic_policy_fingerprint().unwrap();
+        let policy = semantic_policy_fingerprint(model_contract).unwrap();
         let baseline = source_contract_fingerprint_with_authority(&policy, descriptor).unwrap();
         for (index, component) in descriptor.split('|').enumerate() {
             let field = component

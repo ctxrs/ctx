@@ -16,7 +16,10 @@ mod path_identity;
 
 pub use bounded_tree::*;
 pub use error::ProviderJsonlInventoryLimit as SourceIoJsonlInventoryLimit;
-pub use error::{ProviderJsonlInventoryLimit, Result, SourceIoError};
+pub use error::{
+    is_provider_source_io_operation, is_provider_source_unavailable_io,
+    ProviderJsonlInventoryLimit, Result, SourceIoError, PROVIDER_SOURCE_IO_OPERATION_PREFIX,
+};
 pub use event_files::*;
 pub use io::*;
 pub use mapped_io::*;

@@ -48,6 +48,7 @@ pub(crate) fn publish_active_generation_pointer(
     Ok(ctx_history_index_generation::publish_active_generation_pointer(root, pointer)?)
 }
 
+#[cfg(not(windows))]
 pub(crate) fn publish_active_generation_pointer_validated<F, T>(
     root: &Path,
     pointer: &ActiveGenerationPointer,

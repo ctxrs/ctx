@@ -21,15 +21,18 @@ ctx-history-index = { path = "../ctx-history-index" }
 ctx-history-platform = { path = "../ctx-history-platform" }
 ctx-semantic-model = { path = "../ctx-semantic-model" }
 fs2 = "0.4.3"
+libc.workspace = true
 memmap2.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
+url.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+ctx-history-index = { path = "../ctx-history-index", features = ["test-support"] }
 tempfile.workspace = true
 """
 
@@ -42,6 +45,13 @@ filegroup(
 CTX_SEMANTIC_INDEX_DEPS = [
     "//crates/ctx-history-core:lib",
     "//crates/ctx-history-index:lib",
+    "//crates/ctx-history-platform:lib",
+    "//crates/ctx-semantic-model:lib",
+]
+
+CTX_SEMANTIC_INDEX_TEST_DEPS = [
+    "//crates/ctx-history-core:lib",
+    "//crates/ctx-history-index:test_support_lib",
     "//crates/ctx-history-platform:lib",
     "//crates/ctx-semantic-model:lib",
 ]
@@ -63,7 +73,7 @@ rust_library(
 ctx_rust_test(
     name = "unit_tests",
     srcs = RUST_SRCS,
-    deps = all_crate_deps(normal = True, normal_dev = True) + CTX_SEMANTIC_INDEX_DEPS,
+    deps = all_crate_deps(normal = True, normal_dev = True) + CTX_SEMANTIC_INDEX_TEST_DEPS,
     proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
     rustc_flags = CTX_SEMANTIC_INDEX_RUSTC_FLAGS,
 )

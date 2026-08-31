@@ -30,6 +30,8 @@ use ctx_history_platform::platform_security::{
 
 use crate::clone::{bind_candidate_activation_fence, create_authenticated_candidate_generation};
 use crate::is_generation_id;
+#[cfg(any(test, feature = "test-support"))]
+use crate::publication_probe::{publication_io_checkpoint, PublicationIoEvent};
 use crate::retention::{
     ensure_generation_read_lease_coordinator, try_generation_directory_reclaim_authority,
 };
@@ -301,7 +303,42 @@ where
     }
 }
 
+/// Publishes a successor pointer while retaining predecessor authority through
+/// terminal candidate validation. On Windows, the predecessor handle is
+/// released only as the direct predecessor of the prepared replacement call.
+#[cfg(windows)]
+pub fn publish_active_generation_pointer_validated_predecessor_fence<F>(
+    root: &Path,
+    pointer: &ActiveGenerationPointer,
+    predecessor_fence: &mut crate::ActiveGenerationPointerFence,
+    validate_before_replace: F,
+) -> Result<PointerPublicationOutcome>
+where
+    F: FnOnce(&crate::ActiveGenerationPointerFence) -> Result<()>,
+{
+    pointer.validate()?;
+    ensure_generation_read_lease_coordinator(root)?;
+    let bytes = serde_json::to_vec(pointer)?;
+    let directory = DurableMmapDirectory::open(root).map_err(tantivy::TantivyError::from)?;
+    let outcome = directory.atomic_write_with_outcome_validated_predecessor_fence(
+        Path::new(ACTIVE_GENERATION_POINTER_FILE),
+        &bytes,
+        predecessor_fence,
+        validate_before_replace,
+    )?;
+    match outcome {
+        DurableAtomicWriteOutcome::Durable => Ok(PointerPublicationOutcome::Durable),
+        DurableAtomicWriteOutcome::VisibleButDurabilityUncertain(error) => {
+            Ok(PointerPublicationOutcome::CommittedVisible {
+                detail: error.to_string(),
+            })
+        }
+    }
+}
+
 pub fn sync_generation(path: &Path) -> Result<()> {
+    #[cfg(any(test, feature = "test-support"))]
+    publication_io_checkpoint(PublicationIoEvent::CandidateGenerationSync)?;
     for entry in fs::read_dir(path)? {
         let entry = entry?;
         if entry.file_type()?.is_file() {

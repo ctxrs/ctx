@@ -73,15 +73,11 @@ fn remove_config_line(text: &str, line_number: usize) -> Result<String> {
 }
 
 fn read_optional_config_text(path: &Path) -> Result<Option<String>> {
-    match fs::read_to_string(path) {
-        Ok(text) => Ok(Some(text)),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error).with_context(|| format!("read {}", path.display())),
-    }
+    durable_write::read_config_text(path)
 }
 
 pub fn write_default_config(data_root: &Path) -> Result<()> {
-    establish_private_data_root(data_root)?;
+    let _ = config_path_for_mutation(data_root)?;
     Ok(())
 }
 
@@ -97,8 +93,7 @@ pub fn persisted_daemon_enabled(data_root: &Path) -> Result<bool> {
 }
 
 pub fn set_indexing_mode(data_root: &Path, mode: IndexingMode) -> Result<()> {
-    establish_private_data_root(data_root)?;
-    let path = AppConfig::config_path(data_root);
+    let path = config_path_for_mutation(data_root)?;
     let _mutation_lock = ConfigMutationLock::acquire(&path)?;
     let text = read_config_text(&path)?;
     let parsed = parse_toml_subset(&text).with_context(|| format!("parse {}", path.display()))?;
@@ -147,8 +142,115 @@ pub fn set_indexing_mode(data_root: &Path, mode: IndexingMode) -> Result<()> {
     Ok(())
 }
 
+/// Persists the automatic-upgrade policy through the same locked, validated,
+/// durable mutation path as every other application configuration change.
+pub fn set_auto_upgrade_mode(data_root: &Path, mode: AutoUpgradeMode) -> Result<()> {
+    let path = config_path_for_mutation(data_root)?;
+    let _mutation_lock = ConfigMutationLock::acquire(&path)?;
+    let text = read_config_text(&path)?;
+    validated_persisted_config(&path, &text)?;
+
+    let mut document = text
+        .parse::<toml_edit::DocumentMut>()
+        .with_context(|| format!("parse {}", path.display()))?;
+    if document.as_table().get("upgrade").is_none() {
+        document
+            .as_table_mut()
+            .insert("upgrade", toml_edit::table());
+    }
+    let upgrade = document
+        .as_table_mut()
+        .get_mut("upgrade")
+        .and_then(toml_edit::Item::as_table_mut)
+        .ok_or_else(|| anyhow::anyhow!("upgrade configuration must be a table"))?;
+    upgrade.insert("auto", toml_edit::value(mode.as_str()));
+    let updated = document.to_string();
+    validated_persisted_config(&path, &updated)
+        .with_context(|| format!("validate updated {}", path.display()))?;
+    if updated != text {
+        write_config_durably(&path, updated.as_bytes())?;
+    }
+    Ok(())
+}
+
 pub fn set_semantic_search_enabled(data_root: &Path, enabled: bool) -> Result<()> {
     set_config_bool(data_root, "search", "semantic", enabled)
+}
+
+pub fn set_semantic_search_enabled_with_executor(
+    data_root: &Path,
+    executor: &ctx_semantic_model::SemanticEmbeddingExecutorConfig,
+) -> Result<()> {
+    let path = config_path_for_mutation(data_root)?;
+    let _mutation_lock = ConfigMutationLock::acquire(&path)?;
+    let text = read_config_text(&path)?;
+    validated_persisted_config(&path, &text)?;
+
+    let mut document = text
+        .parse::<toml_edit::DocumentMut>()
+        .with_context(|| format!("parse {}", path.display()))?;
+    match (executor.http_endpoint(), executor.external_space()) {
+        (Some(endpoint), Some(space)) => {
+            if document.as_table().get("semantic").is_none() {
+                document
+                    .as_table_mut()
+                    .insert("semantic", toml_edit::table());
+            }
+            let semantic = document
+                .as_table_mut()
+                .get_mut("semantic")
+                .and_then(toml_edit::Item::as_table_mut)
+                .ok_or_else(|| anyhow::anyhow!("semantic configuration must be a table"))?;
+            semantic.insert("executor", toml_edit::value(endpoint));
+            semantic.insert("space_id", toml_edit::value(space.space_id()));
+            semantic.insert(
+                "dimensions",
+                toml_edit::value(i64::try_from(space.dimensions()).map_err(|_| {
+                    anyhow::anyhow!("semantic dimensions exceed the TOML integer range")
+                })?),
+            );
+        }
+        (Some(endpoint), None) => {
+            if document.as_table().get("semantic").is_none() {
+                document
+                    .as_table_mut()
+                    .insert("semantic", toml_edit::table());
+            }
+            let semantic = document
+                .as_table_mut()
+                .get_mut("semantic")
+                .and_then(toml_edit::Item::as_table_mut)
+                .ok_or_else(|| anyhow::anyhow!("semantic configuration must be a table"))?;
+            semantic.insert("executor", toml_edit::value(endpoint));
+            semantic.remove("space_id");
+            semantic.remove("dimensions");
+        }
+        (None, None) => {
+            let remove_semantic = if let Some(semantic) = document
+                .as_table_mut()
+                .get_mut("semantic")
+                .and_then(toml_edit::Item::as_table_mut)
+            {
+                semantic.remove("executor");
+                semantic.remove("space_id");
+                semantic.remove("dimensions");
+                semantic.is_empty()
+            } else {
+                false
+            };
+            if remove_semantic {
+                document.as_table_mut().remove("semantic");
+            }
+        }
+        (None, Some(_)) => bail!("semantic executor configuration is internally inconsistent"),
+    }
+    let updated = set_toml_bool(&document.to_string(), "search", "semantic", true);
+    validated_persisted_config(&path, &updated)
+        .with_context(|| format!("validate updated {}", path.display()))?;
+    if updated != text {
+        write_config_durably(&path, updated.as_bytes())?;
+    }
+    Ok(())
 }
 
 pub(super) fn set_config_bool(
@@ -157,8 +259,7 @@ pub(super) fn set_config_bool(
     key: &str,
     enabled: bool,
 ) -> Result<()> {
-    establish_private_data_root(data_root)?;
-    let path = AppConfig::config_path(data_root);
+    let path = config_path_for_mutation(data_root)?;
     let _mutation_lock = ConfigMutationLock::acquire(&path)?;
     let text = read_config_text(&path)?;
     let parsed = parse_toml_subset(&text).with_context(|| format!("parse {}", path.display()))?;
@@ -274,8 +375,7 @@ pub fn add_provider_root_with_kind(
     replace: bool,
 ) -> Result<ProviderRootMutation> {
     validate_root_selector("provider root name", id)?;
-    establish_private_data_root(data_root)?;
-    let path = AppConfig::config_path(data_root);
+    let path = config_path_for_mutation(data_root)?;
     let _mutation_lock = ConfigMutationLock::acquire(&path)?;
     let text = read_config_text(&path)?;
     let current = validated_persisted_config(&path, &text)?;
@@ -385,8 +485,7 @@ pub fn add_provider_root_with_kind(
 
 pub fn remove_provider_root(data_root: &Path, id: &str) -> Result<ProviderRootMutation> {
     validate_root_selector("provider root name", id)?;
-    establish_private_data_root(data_root)?;
-    let path = AppConfig::config_path(data_root);
+    let path = config_path_for_mutation(data_root)?;
     let _mutation_lock = ConfigMutationLock::acquire(&path)?;
     let text = read_config_text(&path)?;
     let current = validated_persisted_config(&path, &text)?;
@@ -432,6 +531,14 @@ fn validated_provider_root_path(
         )
     })?;
     Ok(root)
+}
+
+fn config_path_for_mutation(data_root: &Path) -> Result<PathBuf> {
+    establish_private_data_root(data_root)
+        .with_context(|| format!("protect config data root {}", data_root.display()))?;
+    verify_private_directory(data_root)
+        .with_context(|| format!("verify config data root {}", data_root.display()))?;
+    Ok(AppConfig::config_path(data_root))
 }
 
 fn read_config_text(path: &Path) -> Result<String> {

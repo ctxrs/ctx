@@ -29,7 +29,7 @@ fn fingerprint_is_the_sha256_of_the_canonical_inventory() {
 
 #[test]
 fn wake_refresh_reports_resolved_analytics_consent_fail_closed() {
-    let _lock = crate::config::TEST_LOCAL_USAGE_ENV_LOCK
+    let _lock = ctx_app_config::TEST_LOCAL_USAGE_ENV_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let names = [
@@ -62,7 +62,7 @@ fn wake_refresh_reports_resolved_analytics_consent_fail_closed() {
 
     let root = tempfile::tempdir().unwrap();
     let receipt = |config: &str| {
-        std::fs::write(root.path().join(crate::config::CONFIG_FILE), config).unwrap();
+        std::fs::write(root.path().join(ctx_app_config::CONFIG_FILE), config).unwrap();
         execute(
             Request {
                 data_root: root.path().to_path_buf(),

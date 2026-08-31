@@ -6,7 +6,7 @@ use std::{
 
 use anyhow::{anyhow, Context, Result};
 use ctx_history_core::utc_now;
-use ctx_semantic_model::SharedSemanticRuntime;
+use ctx_semantic_model::{SemanticEmbeddingExecutorHandle, SharedSemanticRuntime};
 use ctx_upgrade_engine::{DaemonUpgradeLease, DaemonUpgradePort, PreparedAutomaticUpgrade};
 use serde_json::Value;
 
@@ -25,7 +25,6 @@ use crate::{
 };
 
 use super::source_backed_refresh_coordinator::CoreRefreshEngine;
-
 use super::{
     daemon_process_signal::install_daemon_process_signal_handler,
     daemon_retry::DaemonRetryBackoff,
@@ -53,8 +52,8 @@ mod watch_runtime;
 
 use automatic_upgrade::abort_prepared_automatic_upgrade;
 use config_reload::{
-    daemon_semantic_runtime_active, reload_daemon_runtime_config, DaemonConfigReloadOutcome,
-    DaemonConfigReloadState, DaemonConfigReloadTargets,
+    daemon_semantic_runtime_active, reload_daemon_runtime_config, DaemonConfigReloadContext,
+    DaemonConfigReloadOutcome, DaemonConfigReloadState,
 };
 use lifecycle::*;
 pub(super) use source_watch::daemon_wait_duration;
@@ -106,9 +105,11 @@ impl DaemonIteration {
 #[derive(Default)]
 pub(super) struct DaemonRuntime {
     pub(super) semantic_runtime: SharedSemanticRuntime,
+    pub(super) semantic_executor: Option<Arc<SemanticEmbeddingExecutorHandle>>,
     pub(super) source_refresh_coordinator: Option<Arc<CoreRefreshEngine>>,
     pub(super) history_retry: DaemonRetryBackoff,
     pub(super) semantic_retry: DaemonRetryBackoff,
+    pub(super) semantic_activation_retry: DaemonRetryBackoff,
     pub(super) semantic_blocked_job: Option<Value>,
     pub(super) sidecar_drain: DaemonSidecarDrain,
     pub(super) consumer_retry_deferral: DaemonConsumerRetryDeferral,
@@ -396,14 +397,14 @@ where
             data_root,
             &args,
             &mut runtime,
-            DaemonConfigReloadTargets {
+            DaemonConfigReloadContext {
                 query_service: &mut query_service,
                 refresh_service: &mut refresh_service,
                 state: &mut config_reload,
+                wakeup: &wakeup,
+                lifecycle: &lifecycle_state,
+                config_port: ports.config,
             },
-            &wakeup,
-            &lifecycle_state,
-            ports.config,
         ) == DaemonConfigReloadOutcome::StopDisabled;
         if !finite_core_worker {
             install_source_watch_ingress(
@@ -413,7 +414,7 @@ where
                     .and(runtime.source_refresh_coordinator.as_ref()),
             );
         }
-        if config_reload.status == "activation_failed" {
+        if config_reload.blocks_daemon_startup(refresh_service.is_some()) {
             let activation_error = config_reload
                 .last_error
                 .clone()
@@ -530,14 +531,14 @@ where
                 data_root,
                 &args,
                 &mut runtime,
-                DaemonConfigReloadTargets {
+                DaemonConfigReloadContext {
                     query_service: &mut query_service,
                     refresh_service: &mut refresh_service,
                     state: &mut config_reload,
+                    wakeup: &wakeup,
+                    lifecycle: &lifecycle_state,
+                    config_port: ports.config,
                 },
-                &wakeup,
-                &lifecycle_state,
-                ports.config,
             );
             if !daemon_should_schedule_auto_upgrade(
                 runtime.config.daemon.enabled,

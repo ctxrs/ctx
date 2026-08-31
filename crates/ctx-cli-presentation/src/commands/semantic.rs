@@ -23,11 +23,11 @@ impl SemanticArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum SemanticCommand {
-    #[command(about = "Enable local semantic search and start model indexing")]
+    #[command(about = "Enable semantic search and start model indexing")]
     Enable(SemanticEnableArgs),
-    #[command(about = "Show local semantic search readiness")]
+    #[command(about = "Show semantic search readiness and executor selection")]
     Status(SemanticFormatArgs),
-    #[command(about = "Disable local semantic search and retain downloaded assets")]
+    #[command(about = "Disable semantic search and retain local assets")]
     Disable(SemanticFormatArgs),
 }
 
@@ -38,6 +38,12 @@ pub struct SemanticEnableArgs {
         help = "Wait until semantic search is ready for the current index"
     )]
     pub wait: bool,
+    #[arg(
+        long,
+        value_name = "builtin|URL",
+        help = "Select builtin or discover and accept the semantic space served by URL"
+    )]
+    pub executor: Option<String>,
     #[arg(long, value_enum, default_value_t = JsonOutputFormat::Text)]
     pub format: JsonOutputFormat,
 }
@@ -63,7 +69,7 @@ pub fn render_semantic_status(context: &crate::ui::RenderContext, report: &Value
             (
                 OutcomeState::Neutral,
                 "Semantic search is disabled",
-                Some("No model acquisition or semantic indexing will run."),
+                Some("No model acquisition, embedding requests, or semantic indexing will run."),
             )
         }
     } else {
@@ -112,7 +118,47 @@ pub fn render_semantic_status(context: &crate::ui::RenderContext, report: &Value
         Field::new("Status", status),
         Field::new("Indexing", indexing_mode),
         Field::new("Background", daemon_status),
+        Field::new("Executor", str_at(report, "/executor/kind", "builtin")),
     ];
+    if let Some(endpoint) = report
+        .pointer("/executor/endpoint")
+        .and_then(Value::as_str)
+        .filter(|endpoint| !endpoint.is_empty())
+    {
+        values.push(Field::new("Endpoint", endpoint));
+    }
+    if let Some(space_id) = report
+        .pointer("/executor/space_id")
+        .and_then(Value::as_str)
+        .filter(|space_id| !space_id.is_empty())
+    {
+        values.push(Field::new("Space", space_id));
+    }
+    let dimensions = report
+        .pointer("/executor/dimensions")
+        .and_then(Value::as_u64)
+        .map(|dimensions| dimensions.to_string());
+    if let Some(dimensions) = dimensions.as_deref() {
+        values.push(Field::new("Dimensions", dimensions));
+    }
+    if report
+        .pointer("/executor/endpoint")
+        .and_then(Value::as_str)
+        .is_some()
+    {
+        let content = if str_at(report, "/executor/scope", "remote") == "loopback" {
+            if enabled {
+                "is sent to the loopback executor; trust it not to retain or forward"
+            } else {
+                "will be sent to the loopback executor when semantic search is enabled"
+            }
+        } else if enabled {
+            "can be sent to the configured executor when semantic work runs"
+        } else {
+            "remote transfer is configured for when semantic search is enabled"
+        };
+        values.push(Field::new("Content", content));
+    }
     if let Some(reason) = reason {
         values.push(Field::new("Reason", reason));
     }
@@ -230,6 +276,13 @@ mod tests {
                 "reason": "flat_f32_projection_missing",
                 "indexing": {"mode": "manual"},
                 "daemon": {"status": "disabled"},
+                "executor": {
+                    "kind": "http",
+                    "endpoint": "https://embed.example.test",
+                    "space_id": "acme/multilingual-v2",
+                    "dimensions": 768
+                },
+                "local_only": false,
             }),
         )
         .render_plain();
@@ -243,6 +296,107 @@ mod tests {
             "{rendered}"
         );
         assert!(rendered.contains("ctx index mode auto"), "{rendered}");
+        assert!(
+            rendered.contains(
+                "Content     can be sent to the configured executor when semantic work runs"
+            ),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn external_executor_status_makes_the_content_boundary_visible() {
+        let rendered = render_semantic_status(
+            &context(),
+            &json!({
+                "enabled": true,
+                "status": "ready",
+                "indexing": {"mode": "auto"},
+                "daemon": {"status": "running"},
+                "executor": {
+                    "kind": "http",
+                    "endpoint": "https://embed.example.test",
+                    "space_id": "acme/multilingual-v2",
+                    "dimensions": 768
+                },
+                "local_only": false,
+            }),
+        )
+        .render_plain();
+
+        assert!(rendered.contains("Executor    http"), "{rendered}");
+        assert!(
+            rendered.contains("https://embed.example.test"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("acme/multilingual-v2"), "{rendered}");
+        assert!(rendered.contains("Dimensions"), "{rendered}");
+        assert!(rendered.contains("768"), "{rendered}");
+        assert!(
+            rendered.contains(
+                "Content     can be sent to the configured executor when semantic work runs"
+            ),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn disabled_external_executor_reports_transfer_as_configured_not_active() {
+        let rendered = render_semantic_status(
+            &context(),
+            &json!({
+                "enabled": false,
+                "status": "disabled",
+                "indexing": {"mode": "auto"},
+                "daemon": {"status": "running"},
+                "executor": {
+                    "kind": "http",
+                    "endpoint": "https://embed.example.test"
+                },
+                "local_only": false,
+            }),
+        )
+        .render_plain();
+
+        assert!(
+            rendered.contains(
+                "Content     remote transfer is configured for when semantic search is enabled"
+            ),
+            "{rendered}"
+        );
+        assert!(
+            !rendered.contains("Content     sent to the configured executor"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn loopback_executor_warns_that_the_local_process_can_retain_or_forward_content() {
+        let rendered = render_semantic_status(
+            &context(),
+            &json!({
+                "enabled": true,
+                "status": "ready",
+                "indexing": {"mode": "manual"},
+                "daemon": {"status": "disabled"},
+                "executor": {
+                    "kind": "http",
+                    "endpoint": "http://127.0.0.1:8080/",
+                    "scope": "loopback",
+                    "space_id": "local/model-v1",
+                    "dimensions": 384
+                },
+                "local_only": true,
+            }),
+        )
+        .render_plain();
+
+        assert!(
+            rendered.contains(
+                "Content     is sent to the loopback executor; trust it not to retain or forward"
+            ),
+            "{rendered}"
+        );
     }
 
     #[test]

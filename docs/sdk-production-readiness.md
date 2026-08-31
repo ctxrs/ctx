@@ -15,8 +15,10 @@ be boringly reliable before external consumers build on them.
 - Keep local adapter details out of the public product contract. CLI JSON,
   provider-native storage paths/schemas, migrations, and release tooling are
   adapter internals.
-- Local mode must not perform network calls, provider API calls, or transcript
-  upload.
+- Local SDK adapters must not add provider API calls or transcript upload. The
+  local ctx process may contact an explicitly selected external semantic
+  executor and send it raw query text and eligible ctx-created document chunks;
+  the built-in executor remains on-machine.
 - Hosted mode may be configurable, but until a hosted service exists operations
   must fail before network I/O with `not_supported`.
 

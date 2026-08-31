@@ -162,6 +162,7 @@ local diagnostics.
 
 ```bash
 ctx semantic enable --format json
+ctx semantic enable --executor https://embeddings.example.test/ctx --format json
 ctx semantic status --format json
 ctx semantic disable --format json
 ```
@@ -169,15 +170,30 @@ ctx semantic disable --format json
 These commands return `schema_version: 1`, `operation` (`enable`, `status`, or
 `disable`), the effective `enabled`, `status`, `reason`, and `config_source`,
 `indexing.mode`, optional `projection` and `catch_up` diagnostics, reduced
-`daemon` state, `local_only: true`, and `read_only`. Status is read-only;
-enable and disable persist policy and report `read_only: false`. Disablement
+`daemon` state, `executor`, `local_only`, and `read_only`. `executor.kind` is
+`builtin` or `http`; an HTTP executor also reports its configured `endpoint`.
+HTTP executors report `protocol_schema_version`. V2 URL selections also report
+the persisted opaque `space_id` and `dimensions`; retained fixed-E5 V1
+selections omit those two fields.
+`executor.scope` is `builtin`, `loopback`, or `remote`, and
+`executor.content_leaves_machine` makes the content boundary explicit.
+`executor.authentication` names the canonical token environment and may report
+whether the current process environment is usable for the selected endpoint;
+it never reports the token or claims that shell state is daemon-effective.
+`local_only` is true only for the in-process built-in executor. A loopback
+executor keeps ctx's first hop on the machine, but the receiving process can
+retain or forward the content. Status is credential-free and read-only: it
+reads local configuration and observed state without probing the endpoint or
+making a network request.
+Enable and disable persist policy and report `read_only: false`. Disablement
 retains downloaded model/runtime assets and derived semantic indexes.
 
 In auto mode, enablement starts or recovers the persistent daemon and returns
 after semantic work is accepted. `ctx semantic enable --wait --format json`
 uses the Index Readiness wait result below and waits for the current Core
 generation's semantic projection. Plain enablement in manual mode records the
-opt-in without changing mode; wait requires auto mode.
+opt-in without changing mode or the current executor selection; wait requires
+auto mode.
 
 ## Index Readiness
 
@@ -273,11 +289,14 @@ without reporting the daemon process itself as stopped.
 daemon/semantic configuration read by the status command. `applied` is the last
 configuration acknowledged by the running daemon. A changed config remains
 `pending` with `out_of_sync: true` until the daemon reloads it. Parse/read
-failures retain the last applied runtime and report `failed`; inability to
-establish newly requested semantic runtime ownership reports
-`activation_failed`. `ctx daemon status --format json` remains a hidden
-compatibility diagnostic when malformed configuration caused the retained
-reload failure; ordinary commands reject malformed configuration.
+failures report `failed`, deactivate semantic runtime ownership, stop the
+semantic query service, clear the applied semantic executor, and surface
+`daemon_config_reload_failed`; Core refresh continues independently and
+`last_run_*` remains historical. A later valid configuration can reactivate
+semantic work. Inability to establish newly requested semantic runtime
+ownership reports `activation_failed`. `ctx daemon status --format json`
+remains a hidden compatibility diagnostic when malformed configuration caused
+the reload failure; ordinary commands reject malformed configuration.
 
 `daemon.jobs.semantic_index` mirrors live semantic coverage and includes
 `status`, `enabled`, `runtime_active`, `semantic_enabled`,
@@ -297,9 +316,10 @@ reload they therefore may differ. A pending opt-in reports `enabled: true`,
 `runtime_active: false`, `status: "pending"`, and
 `reason: "daemon_config_reload_pending"`; failed query-service activation
 reports `status: "failed"` and `reason: "semantic_activation_failed"`. A config
-parse/read failure remains in `config_reload` and does not replace the retained
-semantic runtime's job `status`, `reason`, or `last_error`. When the daemon is
-disabled for ordinary status reporting, the semantic job reports
+parse/read failure reports `enabled: false`, `runtime_active: false`,
+`status: "failed"`, and `reason: "daemon_config_reload_failed"`; its
+`last_error` comes from the reload while `last_run_*` remains historical. When
+the daemon is disabled for ordinary status reporting, the semantic job reports
 `enabled: false`, `status: "disabled"`, and `reason: "daemon_disabled"`.
 
 `daemon.jobs.history_refresh.rejection_diagnostics` preserves aggregate
@@ -1018,6 +1038,8 @@ importer. Off mode sends no maintenance wake.
 - `semantic_status`;
 - `semantic_fallback_code`, nullable/omitted stable reason code for clients;
 - `semantic_fallback`, nullable/omitted;
+- `semantic_fallback_retryable`, nullable/omitted boolean retaining whether the
+  typed semantic failure may succeed after external state changes;
 - `embedding_model`, nullable/omitted;
 - `coverage`;
 - `worker`, using the same shape as `status.semantic`, nullable/omitted;
@@ -1038,6 +1060,8 @@ importer. Off mode sends no maintenance wake.
 `retrieval.semantic_fallback_code`, when present, is the stable machine-readable
 reason why a hybrid request used lexical fallback.
 `retrieval.semantic_fallback`, when present, is the human-readable explanation.
+`retrieval.semantic_fallback_retryable`, when present, is copied from the same
+typed semantic failure rather than inferred from its display text.
 Semantic-only unavailability is a typed command error, not a successful
 `search_results` object with `effective_mode: "lexical"`.
 
@@ -1279,10 +1303,10 @@ Reads local storage and returns findings:
 
 Doctor checks Core/Tantivy generation health, read-only semantic sidecar health,
 source/daemon state, and compact local-usage health. Its JSON includes daemon
-status. It does not initialize embedding models or write sidecar data.
-Semantic or hybrid search may ask the daemon query service to embed the query
-from an already-cached local model; search does not download models or write
-sidecar data from the search path.
+status. It does not initialize embedding executors or write sidecar data.
+Semantic or hybrid search may ask the daemon query service to use the selected
+executor for the query; search does not download models or write sidecar data
+from the search path.
 
 ## Provider Smoke
 

@@ -2,7 +2,10 @@ use std::time::{Duration as StdDuration, Instant};
 
 use ctx_history_core::utc_now;
 use ctx_semantic_index::{semantic_vector_failure_kind, SemanticVectorFailureKind};
-use ctx_semantic_model::{semantic_model_acquisition_integrity_error, SemanticModelLoadDeferred};
+use ctx_semantic_model::{
+    semantic_embedding_failure_is_permanent, semantic_model_acquisition_integrity_error,
+    SemanticModelLoadDeferred,
+};
 use serde_json::Value;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -43,12 +46,18 @@ impl SemanticFailureClass {
 }
 
 pub(super) fn classify_semantic_failure(error: &anyhow::Error) -> SemanticFailureClass {
+    if semantic_embedding_failure_is_permanent(error) {
+        return SemanticFailureClass::Permanent;
+    }
     if error.downcast_ref::<SemanticModelLoadDeferred>().is_some() {
         return SemanticFailureClass::ResourcePressure;
     }
     if let Some(kind) = semantic_vector_failure_kind(error) {
         return match kind {
-            SemanticVectorFailureKind::Unavailable => SemanticFailureClass::Retryable,
+            SemanticVectorFailureKind::Unavailable
+            | SemanticVectorFailureKind::PassiveSnapshotUnavailable => {
+                SemanticFailureClass::Retryable
+            }
             SemanticVectorFailureKind::ResetRequired => SemanticFailureClass::CorruptSidecar,
             SemanticVectorFailureKind::StorageConflict | SemanticVectorFailureKind::NewerSchema => {
                 SemanticFailureClass::Permanent
@@ -201,6 +210,7 @@ mod tests {
         });
         let mut backoff = DaemonRetryBackoff::default();
         backoff.restore(Some(&persisted));
+        let restored_at_ms = utc_now().timestamp_millis();
 
         let maximum_ms = DaemonRetryBackoff::MAX_DELAY.as_millis() as u64;
         assert!(
@@ -211,7 +221,7 @@ mod tests {
         );
         assert!(
             backoff.retry_not_before_at_ms.is_some_and(|deadline| {
-                deadline > now_ms && deadline <= now_ms + maximum_ms as i64
+                deadline > now_ms && deadline <= restored_at_ms + maximum_ms as i64
             }),
             "{backoff:#?}"
         );

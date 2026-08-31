@@ -22,6 +22,27 @@ pub fn private_create_new_file(path: &Path) -> std::io::Result<fs::File> {
 }
 
 #[cfg(unix)]
+pub(crate) fn private_open_existing_file_nofollow(path: &Path) -> std::io::Result<fs::File> {
+    fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(path)
+}
+
+#[cfg(windows)]
+pub(crate) fn private_open_existing_file_nofollow(path: &Path) -> std::io::Result<fs::File> {
+    ctx_history_platform::platform_security::open_verified_private_file(path)
+}
+
+#[cfg(not(any(unix, windows)))]
+pub(crate) fn private_open_existing_file_nofollow(_path: &Path) -> std::io::Result<fs::File> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "private no-follow file access is unavailable on this platform",
+    ))
+}
+
+#[cfg(unix)]
 pub fn private_create_new_lock_file(path: &Path) -> std::io::Result<fs::File> {
     fs::OpenOptions::new()
         .read(true)

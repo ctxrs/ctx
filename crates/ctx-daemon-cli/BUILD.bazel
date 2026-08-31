@@ -35,6 +35,7 @@ PROD_SRCS = glob(
 )
 
 CTX_DAEMON_CLI_DEPS = [
+    "//crates/ctx-app-config:lib",
     "//crates/ctx-client-observability:lib",
     "//crates/ctx-daemon-application:lib",
     "//crates/ctx-daemon-runtime:lib",
@@ -52,6 +53,7 @@ CTX_DAEMON_CLI_DEPS = [
 ]
 
 CTX_DAEMON_CLI_TEST_DEPS = [
+    "//crates/ctx-app-config:test_support_lib",
     "//crates/ctx-client-observability:test_support_lib",
     "//crates/ctx-daemon-application:test_support_lib",
     "//crates/ctx-daemon-runtime:lib",
@@ -69,6 +71,7 @@ CTX_DAEMON_CLI_TEST_DEPS = [
 ]
 
 CTX_DAEMON_CLI_QUALIFICATION_DEPS = [
+    "//crates/ctx-app-config:lib",
     "//crates/ctx-client-observability:lib",
     "//crates/ctx-daemon-application:qualification_lib",
     "//crates/ctx-daemon-runtime:qualification_lib",
@@ -86,6 +89,7 @@ CTX_DAEMON_CLI_QUALIFICATION_DEPS = [
 ]
 
 CTX_DAEMON_CLI_QUALIFICATION_TEST_SUPPORT_DEPS = [
+    "//crates/ctx-app-config:lib",
     "//crates/ctx-client-observability:lib",
     "//crates/ctx-daemon-application:lib",
     "//crates/ctx-daemon-runtime:lib",

@@ -8,9 +8,10 @@ use ctx_terminal::{print_json, Ui};
 use serde_json::json;
 
 use crate::{
-    config::{AppConfig, CONFIG_FILE},
-    DaemonArgs, DaemonCommand, DaemonDisableArgs, DaemonRunArgs, DaemonStartModeArg, FormatArgs,
+    composition::DaemonRuntimeConfig, DaemonArgs, DaemonCommand, DaemonDisableArgs, DaemonRunArgs,
+    DaemonStartModeArg, FormatArgs,
 };
+use ctx_app_config::CONFIG_FILE;
 
 use super::{
     daemon_status::{

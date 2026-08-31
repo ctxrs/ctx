@@ -10,24 +10,152 @@ fn committed_generation_recovery_error(
 }
 
 mod composition;
-pub use composition::{install_host, AppConfig, DaemonCliHost, DaemonConfig, DaemonMode};
+pub use composition::{install_host, DaemonCliHost, DaemonConfig, DaemonMode, DaemonRuntimeConfig};
 pub use ctx_daemon_application::DaemonHostRunRequest;
+pub use ctx_daemon_runtime::apply_supervisor_environment_handoff;
 pub use ctx_daemon_service::{CoreGenerationPublished, DaemonConfigSnapshot, DaemonUpgradePorts};
+pub use ctx_semantic_model::{
+    ExternalSemanticSpace, SemanticEmbeddingExecutorAuth, SemanticEmbeddingExecutorConfig,
+    SemanticEmbeddingExecutorHandle, SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV,
+    SEMANTIC_EMBEDDING_AUTH_TOKEN_ENV,
+};
+
+#[cfg(test)]
+pub(crate) mod test_environment {
+    use std::{
+        ffi::{OsStr, OsString},
+        sync::{Mutex, MutexGuard},
+    };
+
+    static TEST_ENVIRONMENT_LOCK: Mutex<()> = Mutex::new(());
+
+    pub(crate) struct EnvironmentGuard {
+        _lock: MutexGuard<'static, ()>,
+        saved: Vec<(&'static str, Option<OsString>)>,
+    }
+
+    impl EnvironmentGuard {
+        pub(crate) fn capture(names: &[&'static str]) -> Self {
+            let lock = TEST_ENVIRONMENT_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let saved = names
+                .iter()
+                .map(|name| (*name, std::env::var_os(name)))
+                .collect();
+            Self { _lock: lock, saved }
+        }
+
+        pub(crate) fn set(&self, name: &'static str, value: Option<&OsStr>) {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+    }
+
+    impl Drop for EnvironmentGuard {
+        fn drop(&mut self) {
+            for (name, value) in self.saved.drain(..).rev() {
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
+    }
+}
+
+pub fn semantic_embedding_executor_auth_from_environment(
+) -> anyhow::Result<SemanticEmbeddingExecutorAuth> {
+    let endpoint_binding = match std::env::var(SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV) {
+        Ok(binding) => binding,
+        // An unbound inherited token is deliberately ignored. This keeps a
+        // remote credential out of an unauthenticated loopback executor; a
+        // remote executor subsequently fails closed because it has no auth.
+        Err(std::env::VarError::NotPresent) => return Ok(SemanticEmbeddingExecutorAuth::none()),
+        Err(std::env::VarError::NotUnicode(_)) => anyhow::bail!(
+            "semantic embedding authentication endpoint binding must be valid Unicode"
+        ),
+    };
+    let token = match std::env::var(SEMANTIC_EMBEDDING_AUTH_TOKEN_ENV) {
+        Ok(token) => token,
+        Err(std::env::VarError::NotPresent) => return Ok(SemanticEmbeddingExecutorAuth::none()),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            anyhow::bail!("semantic embedding authentication token must be valid Unicode")
+        }
+    };
+    Ok(SemanticEmbeddingExecutorAuth::bearer(
+        token,
+        endpoint_binding,
+    ))
+}
 
 pub fn supervisor_environment_allowlist_names() -> Vec<&'static str> {
     ctx_daemon_application::supervisor_environment_allowlist_names()
 }
 
-mod config {
-    #[cfg(test)]
-    pub use crate::composition::DAEMON_MODE_ENV;
-    pub use crate::composition::{
-        persisted_daemon_enabled, set_daemon_enabled, AppConfig, DaemonMode, CONFIG_FILE,
-        DAEMON_DEFAULT_ENABLED,
+#[cfg(test)]
+#[test]
+fn daemon_environment_preserves_the_endpoint_bound_semantic_embedding_token() {
+    let allowlist = supervisor_environment_allowlist_names();
+    assert!(allowlist.contains(&SEMANTIC_EMBEDDING_AUTH_TOKEN_ENV));
+    assert!(allowlist.contains(&SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV));
+}
+
+#[cfg(test)]
+mod semantic_executor_auth_tests {
+    use std::{ffi::OsStr, path::PathBuf};
+
+    use ctx_semantic_model::{
+        SemanticModelConfig, SemanticModelPaths, SemanticOnnxRuntimePaths, SharedSemanticRuntime,
     };
 
-    #[cfg(test)]
-    pub(crate) static TEST_LOCAL_USAGE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    use super::*;
+
+    fn loopback_executor() -> SemanticEmbeddingExecutorHandle {
+        let auth = semantic_embedding_executor_auth_from_environment().unwrap();
+        SemanticEmbeddingExecutorHandle::build_with_auth(
+            SemanticEmbeddingExecutorConfig::http(
+                "http://127.0.0.1:41007",
+                ExternalSemanticSpace::new("test-space", 384).unwrap(),
+            )
+            .unwrap(),
+            auth,
+            SharedSemanticRuntime::default(),
+            SemanticModelConfig::new(SemanticModelPaths::new(
+                PathBuf::from("test-semantic-model-cache"),
+                SemanticOnnxRuntimePaths::new(PathBuf::from("test-semantic-runtime-cache")),
+            )),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn unbound_token_is_ignored_until_an_exact_endpoint_binding_is_present() {
+        let environment = crate::test_environment::EnvironmentGuard::capture(&[
+            SEMANTIC_EMBEDDING_AUTH_TOKEN_ENV,
+            SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV,
+        ]);
+        environment.set(
+            SEMANTIC_EMBEDDING_AUTH_TOKEN_ENV,
+            Some(OsStr::new("loopback-token")),
+        );
+        environment.set(SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV, None);
+        assert!(!loopback_executor()
+            .http_executor()
+            .unwrap()
+            .authentication_configured());
+
+        environment.set(
+            SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV,
+            Some(OsStr::new("http://127.0.0.1:41007/")),
+        );
+        assert!(loopback_executor()
+            .http_executor()
+            .unwrap()
+            .authentication_configured());
+    }
 }
 
 use ctx_terminal::compact_json;
@@ -159,7 +287,7 @@ pub use ctx_semantic_index::SemanticNotReady;
 #[allow(unused_imports)]
 pub use runtime_limits::SEMANTIC_WORKER_BATCH_MAX;
 mod query_adapter;
-pub use query_adapter::SemanticQueryAdapter;
+pub use query_adapter::{wait_for_daemon_semantic_generation, SemanticQueryAdapter};
 mod query_service;
 pub use query_service::wait_for_daemon_query_service;
 mod daemon;
@@ -189,8 +317,8 @@ pub use daemon_autostart::{
     begin_legacy_daemon_upgrade_handoff, complete_replacement_daemon_handoff,
     daemon_autostart_suppression_reason, finish_replacement_daemon_handoff,
     mark_replacement_helper_handoff, maybe_autostart_daemon, observe_daemon_for_setup_and_wait,
-    replacement_helper_owns_daemon_handoff, DaemonHandoff, DaemonSetupHandoff,
-    DaemonUpgradeHandoff,
+    replacement_helper_owns_daemon_handoff, restart_daemon_with_current_environment_and_wait,
+    DaemonHandoff, DaemonSetupHandoff, DaemonUpgradeHandoff,
 };
 
 /// Persists the final-binary restart intent consumed only after daemon readiness.

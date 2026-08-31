@@ -180,7 +180,8 @@ fn semantic_model_config_from_environment(
         Err(error) => config.with_backend_preference_error(error.to_string()),
     };
     match parse_coreml_compute_mode(environment.coreml_compute_mode.as_deref()) {
-        Ok(mode) => config.with_coreml_compute_mode(mode),
+        Ok(Some(mode)) => config.with_coreml_compute_mode(mode),
+        Ok(None) => config,
         Err(error) => config.with_coreml_compute_mode_error(error.to_string()),
     }
 }
@@ -204,12 +205,13 @@ fn parse_backend_preference(value: Option<&str>) -> Result<SemanticBackendPrefer
     }
 }
 
-fn parse_coreml_compute_mode(value: Option<&str>) -> Result<SemanticCoreMlComputeMode> {
-    match value.unwrap_or("all").trim().to_ascii_lowercase().as_str() {
-        "all" => Ok(SemanticCoreMlComputeMode::All),
-        "ane" | "cpu-ane" => Ok(SemanticCoreMlComputeMode::CpuAndNeuralEngine),
-        "gpu" | "cpu-gpu" => Ok(SemanticCoreMlComputeMode::CpuAndGpu),
-        "cpu" => Ok(SemanticCoreMlComputeMode::CpuOnly),
+fn parse_coreml_compute_mode(value: Option<&str>) -> Result<Option<SemanticCoreMlComputeMode>> {
+    match value.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+        None => Ok(None),
+        Some("all") => Ok(Some(SemanticCoreMlComputeMode::All)),
+        Some("ane" | "cpu-ane") => Ok(Some(SemanticCoreMlComputeMode::CpuAndNeuralEngine)),
+        Some("gpu" | "cpu-gpu") => Ok(Some(SemanticCoreMlComputeMode::CpuAndGpu)),
+        Some("cpu") => Ok(Some(SemanticCoreMlComputeMode::CpuOnly)),
         value => Err(anyhow!(
             "unsupported CTX_SEMANTIC_COREML_NATIVE_COMPUTE mode {value:?}"
         )),

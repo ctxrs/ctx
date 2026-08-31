@@ -20,6 +20,7 @@ use ctx_history_index::{
     CompiledSearchFilter, EventRecord, GenerationWriter, LexicalExecution, LexicalMode,
     SourceRouteIdentity, VerifiedIndex, WriterOptions, MAX_SEMANTIC_EVENT_PAGE_ITEMS,
 };
+use ctx_semantic_model::{ExternalSemanticSpace, SemanticEmbeddingExecutorConfig};
 use serde_json::{json, Value};
 
 use crate::{
@@ -161,6 +162,18 @@ fn publish_empty_core_generation(data_root: &Path) -> String {
     )
     .unwrap()
     .generation_id
+}
+
+fn external_contract(
+    endpoint: &str,
+    space_id: &str,
+    dimensions: usize,
+) -> SemanticEmbeddingExecutorConfig {
+    SemanticEmbeddingExecutorConfig::http(
+        endpoint,
+        ExternalSemanticSpace::new(space_id, dimensions).expect("external semantic space"),
+    )
+    .expect("external semantic executor config")
 }
 
 #[path = "daemon_scheduler_tests/refresh_retry.rs"]
@@ -659,7 +672,8 @@ fn one_core_cycle_then_scheduler_drains_semantic_consumer() {
     assert!(!coordinator.has_pending_request());
     assert!(super::semantic_generation_needs_catch_up(
         temp.path(),
-        &generation
+        &generation,
+        ctx_semantic_index::semantic_model_contract(),
     ));
     assert!(runtime
         .sidecar_drain
@@ -716,6 +730,59 @@ fn one_core_cycle_then_scheduler_drains_semantic_consumer() {
 }
 
 #[test]
+fn persisted_ready_and_retry_state_are_bound_to_the_selected_external_contract() {
+    let temp = tempfile::tempdir().unwrap();
+    let generation = "generation-a";
+    let old = external_contract("http://127.0.0.1:41030", "space-a", 96);
+    let replacement = external_contract("http://127.0.0.1:41030", "space-a", 192);
+    let old_index_contract = super::semantic_index_contract(old.contract()).unwrap();
+    let replacement_index_contract =
+        super::semantic_index_contract(replacement.contract()).unwrap();
+    let old_source_fingerprint =
+        ctx_semantic_index::source_backed_semantic_contract_fingerprint(&old_index_contract)
+            .unwrap();
+    write_daemon_job_status(
+        &daemon_semantic_job_path(temp.path()),
+        &json!({
+            "schema_version": 1,
+            "status": "ready",
+            "core_generation_id": generation,
+            "source_contract_fingerprint": old_source_fingerprint,
+            "source_generation_ready": true,
+            "source_work_remaining": false,
+            "retryable": true,
+            "consecutive_failures": 3,
+            "retry_not_before_at_ms": ctx_history_core::utc_now().timestamp_millis() + 60_000,
+        }),
+    )
+    .unwrap();
+
+    assert!(!super::semantic_generation_needs_catch_up(
+        temp.path(),
+        generation,
+        &old_index_contract,
+    ));
+    assert!(super::semantic_generation_needs_catch_up(
+        temp.path(),
+        generation,
+        &replacement_index_contract,
+    ));
+
+    let mut runtime = DaemonRuntime::default();
+    runtime
+        .semantic_retry
+        .restore(read_daemon_job_status(&daemon_semantic_job_path(temp.path())).as_ref());
+    assert_eq!(runtime.semantic_retry.consecutive_failures, 3);
+    super::prepare_semantic_retry_for_generation(
+        &mut runtime,
+        temp.path(),
+        generation,
+        &replacement_index_contract,
+    );
+    assert_eq!(runtime.semantic_retry.consecutive_failures, 0);
+}
+
+#[test]
 fn automatic_scheduler_restart_migrates_legacy_semantic_state_despite_ready_job() {
     let temp = tempfile::tempdir().unwrap();
     let generation = publish_empty_core_generation(temp.path());
@@ -764,7 +831,8 @@ fn automatic_scheduler_restart_migrates_legacy_semantic_state_despite_ready_job(
     let mut restarted_runtime = DaemonRuntime::default();
     assert!(super::semantic_generation_needs_catch_up(
         temp.path(),
-        &generation
+        &generation,
+        ctx_semantic_index::semantic_model_contract(),
     ));
     for _ in 0..8 {
         run_daemon_scheduler_cycle_with_activity(
@@ -777,14 +845,19 @@ fn automatic_scheduler_restart_migrates_legacy_semantic_state_despite_ready_job(
             None,
         )
         .unwrap();
-        if !super::semantic_generation_needs_catch_up(temp.path(), &generation) {
+        if !super::semantic_generation_needs_catch_up(
+            temp.path(),
+            &generation,
+            ctx_semantic_index::semantic_model_contract(),
+        ) {
             break;
         }
     }
 
     assert!(!super::semantic_generation_needs_catch_up(
         temp.path(),
-        &generation
+        &generation,
+        ctx_semantic_index::semantic_model_contract(),
     ));
     let migrated_job = read_daemon_job_status(&daemon_semantic_job_path(temp.path())).unwrap();
     assert_eq!(migrated_job["status"], "ready");

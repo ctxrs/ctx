@@ -12,7 +12,7 @@ use std::io::Read;
 use std::{
     io::ErrorKind,
     os::windows::fs::{symlink_dir, symlink_file},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 use super::{
@@ -303,6 +303,28 @@ fn windows_ordinary_absolute_provider_file_is_accepted() {
     let source = open_provider_source_file(&path).unwrap();
     assert_eq!(source.read_all_bounded(8).unwrap(), b"provider");
     source.revalidate().unwrap();
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn windows_qualified_external_provider_file_is_accepted() {
+    let mut retained_temp = None;
+    let path = match std::env::var_os("CTX_TEST_WINDOWS_PROVIDER_FILE") {
+        Some(path) => PathBuf::from(path),
+        None => {
+            let temp = crate::test_support_paths::tempdir().unwrap();
+            let path = temp.path().join("provider-external.db");
+            fs::write(&path, b"provider").unwrap();
+            retained_temp = Some(temp);
+            path
+        }
+    };
+    let expected = fs::read(&path).unwrap();
+
+    let source = open_provider_source_file(&path).unwrap();
+    assert_eq!(source.read_all_bounded(1024 * 1024).unwrap(), expected);
+    source.revalidate().unwrap();
+    drop(retained_temp);
 }
 
 #[cfg(target_os = "windows")]

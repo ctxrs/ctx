@@ -6,7 +6,7 @@ use std::{
 use anyhow::{anyhow, Result};
 use ctx_history_core::{SourceKey, StableEntityId};
 use ctx_history_index::{
-    current_semantic_generation_policy, CoreEventRecord, SemanticGenerationPolicy,
+    policy::semantic_generation_policy, CoreEventRecord, SemanticGenerationPolicy,
     SourceCoreRecordAggregate, SourceEventCursor, VerifiedIndex, LEXICAL_SCHEMA_VERSION,
     MAX_SOURCE_EVENT_PAGE_ITEMS,
 };
@@ -28,6 +28,7 @@ use crate::{
 };
 
 mod manifest;
+mod outcome;
 mod state;
 
 #[cfg(test)]
@@ -37,6 +38,8 @@ use manifest::{
     validate_page, validate_resolved_document, SourceProjectionFrontier, SourceTraversalPhase,
     SOURCE_INPUT_LEXICAL_SCHEMA_VERSION,
 };
+use outcome::merge_outcome;
+pub use outcome::SourceBackedSemanticOutcome;
 use state::{
     clear_active_source, commit_frontier_after_flat, source_projection_states,
     source_receipt_allows_vector_reuse, source_receipt_matches, SourceProjectionStates,
@@ -46,6 +49,16 @@ const SEARCH_DIRECTORY: &str = "search";
 const SEMANTIC_DIRECTORY: &str = "semantic";
 pub fn source_backed_semantic_vector_path(data_root: &Path) -> PathBuf {
     data_root.join(SEARCH_DIRECTORY).join(SEMANTIC_DIRECTORY)
+}
+
+fn external_embedding_chunk_limit(model_contract: &SemanticModelContract) -> Option<usize> {
+    model_contract
+        .external_space()
+        .map(|space| space.max_inputs_per_request())
+}
+
+fn source_event_page_limit(model_contract: &SemanticModelContract) -> usize {
+    external_embedding_chunk_limit(model_contract).unwrap_or(MAX_SOURCE_EVENT_PAGE_ITEMS)
 }
 
 /// Returns persisted projection identity for one vector space, excluding
@@ -81,7 +94,7 @@ impl SourceBackedSemanticGeneration {
     ) -> Result<Self> {
         Self::from_verified_index_with_policy(
             index,
-            current_semantic_generation_policy(),
+            semantic_generation_policy(model_contract),
             model_contract,
         )
     }
@@ -193,97 +206,6 @@ pub trait SemanticBatchEmbedder {
     fn embed_chunks(&mut self, chunks: &[SemanticChunkDocument]) -> Result<Vec<Vec<f32>>>;
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct SourceBackedSemanticOutcome {
-    /// Exact number of complete Core records decoded from changed-source pages.
-    pub(crate) records_decoded: usize,
-    /// Exact stored Core JSON bytes decoded from changed-source pages.
-    pub(crate) record_bytes_decoded: u64,
-    pub(crate) records_embedded: usize,
-    pub(crate) records_reused: usize,
-    pub(crate) records_filtered: usize,
-    pub(crate) invalidated_chunks: usize,
-    pub(crate) deleted_chunks: usize,
-    pub(crate) vectors_touched: u64,
-    pub(crate) vector_bytes_touched: u64,
-    pub(crate) metadata_records_touched: u64,
-    pub(crate) ready: bool,
-    pub(crate) work_remaining: bool,
-}
-
-impl SourceBackedSemanticOutcome {
-    pub fn records_decoded(&self) -> usize {
-        self.records_decoded
-    }
-
-    pub fn record_bytes_decoded(&self) -> u64 {
-        self.record_bytes_decoded
-    }
-
-    pub fn records_embedded(&self) -> usize {
-        self.records_embedded
-    }
-
-    pub fn records_reused(&self) -> usize {
-        self.records_reused
-    }
-
-    pub fn records_filtered(&self) -> usize {
-        self.records_filtered
-    }
-
-    pub fn invalidated_chunks(&self) -> usize {
-        self.invalidated_chunks
-    }
-
-    pub fn deleted_chunks(&self) -> usize {
-        self.deleted_chunks
-    }
-
-    pub fn vectors_touched(&self) -> u64 {
-        self.vectors_touched
-    }
-
-    pub fn vector_bytes_touched(&self) -> u64 {
-        self.vector_bytes_touched
-    }
-
-    pub fn metadata_records_touched(&self) -> u64 {
-        self.metadata_records_touched
-    }
-
-    pub fn ready(&self) -> bool {
-        self.ready
-    }
-
-    pub fn work_remaining(&self) -> bool {
-        self.work_remaining
-    }
-}
-
-fn merge_outcome(total: &mut SourceBackedSemanticOutcome, next: SourceBackedSemanticOutcome) {
-    total.records_decoded = total.records_decoded.saturating_add(next.records_decoded);
-    total.record_bytes_decoded = total
-        .record_bytes_decoded
-        .saturating_add(next.record_bytes_decoded);
-    total.records_embedded = total.records_embedded.saturating_add(next.records_embedded);
-    total.records_reused = total.records_reused.saturating_add(next.records_reused);
-    total.records_filtered = total.records_filtered.saturating_add(next.records_filtered);
-    total.invalidated_chunks = total
-        .invalidated_chunks
-        .saturating_add(next.invalidated_chunks);
-    total.deleted_chunks = total.deleted_chunks.saturating_add(next.deleted_chunks);
-    total.vectors_touched = total.vectors_touched.saturating_add(next.vectors_touched);
-    total.vector_bytes_touched = total
-        .vector_bytes_touched
-        .saturating_add(next.vector_bytes_touched);
-    total.metadata_records_touched = total
-        .metadata_records_touched
-        .saturating_add(next.metadata_records_touched);
-    total.ready |= next.ready;
-    total.work_remaining |= next.work_remaining;
-}
-
 pub enum SourceBackedGenerationPin {
     NotReady,
     ReadyEmpty,
@@ -296,6 +218,36 @@ struct ResolvedSourceDocument {
     stable_identity: Vec<u8>,
     source_text_sha256: String,
     seq: u64,
+    chunks: Vec<SemanticChunkDocument>,
+}
+
+fn embed_chunks_in_bounded_batches(
+    embedder: &mut dyn SemanticBatchEmbedder,
+    chunks: Vec<SemanticChunkDocument>,
+    dimensions: usize,
+    batch_limit: Option<usize>,
+) -> Result<Vec<(SemanticChunkDocument, Vec<f32>)>> {
+    let batch_limit = batch_limit.unwrap_or(chunks.len()).max(1);
+    let mut chunks = chunks.into_iter();
+    let mut replacements = Vec::new();
+    loop {
+        let batch = chunks.by_ref().take(batch_limit).collect::<Vec<_>>();
+        if batch.is_empty() {
+            return Ok(replacements);
+        }
+        let embeddings = embedder.embed_chunks(&batch)?;
+        if embeddings.len() != batch.len()
+            || embeddings
+                .iter()
+                .any(|embedding| embedding.len() != dimensions)
+        {
+            return Err(SemanticVectorStoreError::unavailable(
+                "source-backed semantic embedder returned an invalid batch",
+            )
+            .into());
+        }
+        replacements.extend(batch.into_iter().zip(embeddings));
+    }
 }
 
 impl SemanticVectorStore {
@@ -332,13 +284,13 @@ impl SemanticVectorStore {
                 "source-backed semantic target does not match its pinned Core index"
             ));
         }
-        if let Some(outcome) = self.reconcile_pending_full_rebuild()? {
-            return Ok(outcome);
-        }
         self.flat
             .begin_source_generation_view()
             .map_err(anyhow::Error::new)?;
         let result = (|| {
+            if let Some(outcome) = self.reconcile_pending_full_rebuild()? {
+                return Ok(outcome);
+            }
             self.recover_lost_flat_publication()?;
             if self
                 .acknowledged_source_projection(
@@ -524,7 +476,7 @@ impl SemanticVectorStore {
             .reconciliation_event_ids(FULL_REBUILD_STATE, MAX_SOURCE_EVENT_PAGE_ITEMS)
             .map_err(anyhow::Error::new)?;
         if !event_ids.is_empty() {
-            let deleted_chunks = self.delete_events(&event_ids)?;
+            let deleted_chunks = self.delete_events_coordinated(&event_ids)?;
             return Ok(Some(SourceBackedSemanticOutcome {
                 deleted_chunks,
                 work_remaining: true,
@@ -532,13 +484,19 @@ impl SemanticVectorStore {
             }));
         }
         self.flat
-            .finish_reconciliation_view()
+            .finish_reconciliation_view_coordinated()
             .map_err(anyhow::Error::new)?;
         self.conn.execute(
             "DELETE FROM semantic_maintenance_state WHERE key = ?1",
             [FULL_REBUILD_STATE],
         )?;
-        Ok(None)
+        // End this coordinated generation view before beginning a new source
+        // projection. Final compaction can replace the active Flat manifest,
+        // so source staging must pin that post-compaction generation afresh.
+        Ok(Some(SourceBackedSemanticOutcome {
+            work_remaining: true,
+            ..SourceBackedSemanticOutcome::default()
+        }))
     }
 
     fn reconcile_source_page(
@@ -551,6 +509,7 @@ impl SemanticVectorStore {
         embedder: &mut dyn SemanticBatchEmbedder,
     ) -> Result<SourceBackedSemanticOutcome> {
         let model_contract = self.contract().clone();
+        let embedding_chunk_limit = external_embedding_chunk_limit(&model_contract);
         let after = frontier
             .after_identity
             .as_deref()
@@ -566,10 +525,10 @@ impl SemanticVectorStore {
         let core_page = index.core_source_event_page(
             &source.source,
             cursor.as_ref(),
-            MAX_SOURCE_EVENT_PAGE_ITEMS,
+            source_event_page_limit(&model_contract),
         )?;
         let record_bytes_decoded = u64::try_from(core_page.encoded_core_bytes)?;
-        let page = SourceBackedSemanticPage {
+        let mut page = SourceBackedSemanticPage {
             core_generation_id: core_page.generation_id,
             source_identity_digest: source.aggregate.source_identity_digest().to_owned(),
             after,
@@ -578,23 +537,6 @@ impl SemanticVectorStore {
         };
         validate_page(frontier, &page)?;
         let records_decoded = page.records.len();
-        let page_documents = u64::try_from(page.records.len())?;
-        let processed_documents = frontier
-            .processed_source_documents
-            .checked_add(page_documents)
-            .ok_or_else(|| {
-                SemanticVectorStoreError::reset_required(
-                    "source-backed semantic source document count overflowed",
-                )
-            })?;
-        if processed_documents > source.aggregate.indexed_documents()
-            || (page.terminal && processed_documents != source.aggregate.indexed_documents())
-        {
-            return Err(SemanticVectorStoreError::reset_required(
-                "source-backed semantic source page count disagrees with its Core aggregate",
-            )
-            .into());
-        }
 
         let reconciliation_id = frontier
             .active_source_reconciliation_id
@@ -628,6 +570,118 @@ impl SemanticVectorStore {
                 ..SourceBackedSemanticOutcome::default()
             });
         }
+        let mut outcome = SourceBackedSemanticOutcome {
+            records_decoded,
+            record_bytes_decoded,
+            ..SourceBackedSemanticOutcome::default()
+        };
+        let mut semantic_records = 0_u64;
+        let mut filtered_records = 0_u64;
+        let mut replacements = Vec::new();
+        let mut resolved = Vec::new();
+        let mut retire = Vec::new();
+        let mut projected_chunks = 0_usize;
+        let mut processed_page_records = 0_usize;
+
+        for record in &page.records {
+            if !generation.includes(record) {
+                processed_page_records = processed_page_records.saturating_add(1);
+                continue;
+            }
+            // Stop on a record boundary once this external work unit has filled
+            // its embedding budget. A first record is always admitted below so
+            // one valid document that expands past the limit still progresses.
+            if embedding_chunk_limit.is_some_and(|limit| projected_chunks >= limit) {
+                break;
+            }
+            let next_semantic_records = semantic_records.checked_add(1).ok_or_else(|| {
+                SemanticVectorStoreError::reset_required(
+                    "source-backed semantic candidate count overflowed",
+                )
+            })?;
+            let Some(document) = builder.build_document(record)? else {
+                semantic_records = next_semantic_records;
+                retire.push(record.event_id.as_uuid());
+                filtered_records = filtered_records.checked_add(1).ok_or_else(|| {
+                    SemanticVectorStoreError::reset_required(
+                        "source-backed semantic filtered count overflowed",
+                    )
+                })?;
+                outcome.records_filtered = outcome.records_filtered.saturating_add(1);
+                processed_page_records = processed_page_records.saturating_add(1);
+                continue;
+            };
+            validate_resolved_document(record, &document)?;
+            let source_text = semantic_source_text(&document.text);
+            if semantic_core_content_is_control(&source_text) {
+                semantic_records = next_semantic_records;
+                retire.push(record.event_id.as_uuid());
+                filtered_records = filtered_records.checked_add(1).ok_or_else(|| {
+                    SemanticVectorStoreError::reset_required(
+                        "source-backed semantic filtered count overflowed",
+                    )
+                })?;
+                outcome.records_filtered = outcome.records_filtered.saturating_add(1);
+                processed_page_records = processed_page_records.saturating_add(1);
+                continue;
+            }
+            let source_text_sha256 = semantic_document_hash(
+                &model_contract,
+                &document,
+                &source_text,
+                &frontier.semantic_policy_fingerprint,
+            );
+            let chunks = semantic_chunks_for_document(&document, &source_text, &source_text_sha256);
+            if chunks.is_empty() {
+                return Err(anyhow!(
+                    "Core semantic projection produced an empty document for {}",
+                    record.event_id
+                ));
+            }
+            let generated_chunks = projected_chunks.checked_add(chunks.len()).ok_or_else(|| {
+                SemanticVectorStoreError::reset_required(
+                    "source-backed semantic embedding chunk count overflowed",
+                )
+            })?;
+            if projected_chunks != 0
+                && embedding_chunk_limit.is_some_and(|limit| generated_chunks > limit)
+            {
+                break;
+            }
+            projected_chunks = generated_chunks;
+            semantic_records = next_semantic_records;
+            resolved.push(ResolvedSourceDocument {
+                event_id: record.event_id,
+                stable_identity: record.event_id.encode_canonical()?.to_vec(),
+                source_text_sha256,
+                seq: document.seq,
+                chunks,
+            });
+            processed_page_records = processed_page_records.saturating_add(1);
+        }
+
+        let page_was_truncated = processed_page_records < page.records.len();
+        page.records.truncate(processed_page_records);
+        if page_was_truncated {
+            page.terminal = false;
+        }
+        let page_documents = u64::try_from(page.records.len())?;
+        let processed_documents = frontier
+            .processed_source_documents
+            .checked_add(page_documents)
+            .ok_or_else(|| {
+                SemanticVectorStoreError::reset_required(
+                    "source-backed semantic source document count overflowed",
+                )
+            })?;
+        if processed_documents > source.aggregate.indexed_documents()
+            || (page.terminal && processed_documents != source.aggregate.indexed_documents())
+        {
+            return Err(SemanticVectorStoreError::reset_required(
+                "source-backed semantic source page count disagrees with its Core aggregate",
+            )
+            .into());
+        }
         let eligible_event_ids = page
             .records
             .iter()
@@ -642,32 +696,13 @@ impl SemanticVectorStore {
             .zip(eligible_event_ids)
             .filter_map(|(event, event_id)| event.map(|event| (event_id, event)))
             .collect::<HashMap<_, _>>();
-        let existing_lookup =
-            FlatActiveEventLookup::from_events(existing_events.values().cloned().collect());
-        let mut outcome = SourceBackedSemanticOutcome {
-            records_decoded,
-            record_bytes_decoded,
-            ..SourceBackedSemanticOutcome::default()
-        };
-        let mut semantic_records = 0_u64;
-        let mut filtered_records = 0_u64;
-        let mut replacements = Vec::new();
-        let mut resolved = Vec::new();
-        let mut retire = Vec::new();
-        let mut pending_chunks = Vec::new();
-        let mut pending_documents = 0_usize;
-
-        for record in &page.records {
-            if !generation.includes(record) {
-                continue;
-            }
-            semantic_records = semantic_records.checked_add(1).ok_or_else(|| {
-                SemanticVectorStoreError::reset_required(
-                    "source-backed semantic candidate count overflowed",
-                )
-            })?;
-            let stable_identity = record.event_id.encode_canonical()?.to_vec();
-            let stable_identity_hash = Sha256::digest(&stable_identity);
+        for record in page
+            .records
+            .iter()
+            .filter(|record| generation.includes(record))
+        {
+            let stable_identity = record.event_id.encode_canonical()?;
+            let stable_identity_hash = Sha256::digest(stable_identity);
             if let Some(prior) = existing_events.get(&record.event_id.as_uuid()) {
                 if (prior.stable_identity_hash != [0; 32]
                     && prior.stable_identity_hash != stable_identity_hash.as_slice())
@@ -680,59 +715,28 @@ impl SemanticVectorStore {
                     .into());
                 }
             }
-
-            let Some(document) = builder.build_document(record)? else {
-                retire.push(record.event_id.as_uuid());
-                filtered_records = filtered_records.checked_add(1).ok_or_else(|| {
-                    SemanticVectorStoreError::reset_required(
-                        "source-backed semantic filtered count overflowed",
-                    )
-                })?;
-                outcome.records_filtered = outcome.records_filtered.saturating_add(1);
-                continue;
-            };
-            validate_resolved_document(record, &document)?;
-            let source_text = semantic_source_text(&document.text);
-            if semantic_core_content_is_control(&source_text) {
-                retire.push(record.event_id.as_uuid());
-                filtered_records = filtered_records.checked_add(1).ok_or_else(|| {
-                    SemanticVectorStoreError::reset_required(
-                        "source-backed semantic filtered count overflowed",
-                    )
-                })?;
-                outcome.records_filtered = outcome.records_filtered.saturating_add(1);
-                continue;
-            }
-            let source_text_sha256 = semantic_document_hash(
-                &model_contract,
-                &document,
-                &source_text,
-                &frontier.semantic_policy_fingerprint,
-            );
+        }
+        let existing_lookup = FlatActiveEventLookup::from_events(
+            page.records
+                .iter()
+                .filter_map(|record| existing_events.get(&record.event_id.as_uuid()).cloned())
+                .collect(),
+        );
+        let mut pending_chunks = Vec::new();
+        let mut pending_documents = 0_usize;
+        for document in &mut resolved {
             let reusable = frontier.vector_reuse_allowed
                 && existing_events
-                    .get(&document.event_id)
-                    .is_some_and(|event| event.source_text_hash.to_hex() == source_text_sha256);
+                    .get(&document.event_id.as_uuid())
+                    .is_some_and(|event| {
+                        event.source_text_hash.to_hex() == document.source_text_sha256
+                    });
             if reusable {
                 outcome.records_reused = outcome.records_reused.saturating_add(1);
             } else {
-                let chunks =
-                    semantic_chunks_for_document(&document, &source_text, &source_text_sha256);
-                if chunks.is_empty() {
-                    return Err(anyhow!(
-                        "Core semantic projection produced an empty document for {}",
-                        record.event_id
-                    ));
-                }
-                pending_chunks.extend(chunks);
+                pending_chunks.append(&mut document.chunks);
                 pending_documents = pending_documents.saturating_add(1);
             }
-            resolved.push(ResolvedSourceDocument {
-                event_id: record.event_id,
-                stable_identity,
-                source_text_sha256,
-                seq: document.seq,
-            });
         }
 
         let processed_semantic_documents = frontier
@@ -780,18 +784,12 @@ impl SemanticVectorStore {
                 })
         })?;
         if !pending_chunks.is_empty() {
-            let embeddings = embedder.embed_chunks(&pending_chunks)?;
-            if embeddings.len() != pending_chunks.len()
-                || embeddings
-                    .iter()
-                    .any(|embedding| embedding.len() != model_contract.dimensions())
-            {
-                return Err(SemanticVectorStoreError::unavailable(
-                    "source-backed semantic embedder returned an invalid batch",
-                )
-                .into());
-            }
-            replacements.extend(pending_chunks.into_iter().zip(embeddings));
+            replacements = embed_chunks_in_bounded_batches(
+                embedder,
+                pending_chunks,
+                model_contract.dimensions(),
+                embedding_chunk_limit,
+            )?;
             outcome.records_embedded = outcome.records_embedded.saturating_add(pending_documents);
         }
         let publication =

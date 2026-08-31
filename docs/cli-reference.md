@@ -50,6 +50,8 @@ ctx index mode manual
 ctx index watch
 ctx index wait
 ctx semantic enable
+ctx semantic enable --executor builtin
+ctx semantic enable --executor https://embeddings.example.test/ctx
 ctx semantic enable --wait
 ctx semantic status
 ctx semantic disable
@@ -120,12 +122,28 @@ ctx daemon run
   met; `--format jsonl` emits one snapshot per line. `index wait` blocks until
   the selected lexical, semantic, or combined readiness target is met and
   supports one final `--format json` result.
-- `semantic enable` persists the explicit semantic-search opt-in. In auto mode
-  it starts or recovers daemon-owned model acquisition and semantic catch-up;
-  `--wait` waits for the current projection. `semantic status` is read-only.
-  `semantic disable` opts out without deleting downloaded model/runtime assets
-  or derived semantic indexes. Plain enablement in manual mode does not change
-  indexing mode.
+- `semantic enable` persists the explicit semantic-search opt-in. The optional
+  `--executor builtin|URL` also selects the executor used for both indexing and
+  query embeddings. Without `--executor`, the command preserves the current
+  selection. `--executor builtin` restores local multilingual E5 and leaves no
+  executor setting in `config.toml`; built-in is also the default when no
+  selection exists. An explicit URL validates protocol schema V2, with a
+  fixed-E5 V1 fallback only when V2 is absent, then persists the selected
+  protocol's endpoint and identity. `schema_version` is not a config field.
+  Each data root has one accepted vector space.
+  Remote endpoints require HTTPS and
+  `CTX_SEMANTIC_EMBEDDING_TOKEN`; plain HTTP is accepted only for a literal
+  loopback IP address. The token is bound to that endpoint. Later identity drift
+  fails semantic work closed until the user reruns the explicit URL selection.
+  Accepting a changed identity wipes and rebuilds only the derived semantic
+  index. In auto mode, enablement starts or recovers daemon-owned semantic
+  catch-up; `--wait` waits for the current projection. `semantic status` reads
+  local configuration and state without requiring credentials, exposing a
+  token, or making a network request. `semantic disable` opts out without
+  deleting downloaded model/runtime assets or derived semantic indexes. Plain
+  enablement in manual mode does not change indexing mode. See
+  [Semantic Embedding Executors](semantic-executors.md) for the V2 protocol and
+  retained fixed-E5 V1 compatibility.
 - `daemon run` is an advanced command that runs persistent local maintenance in
   the foreground and blocks until stopped. It does not change the configured
   indexing mode. In manual mode, pass `--force` to run it explicitly. Each pass
@@ -142,11 +160,11 @@ Lexical search remains available while embeddings build, and hybrid search uses
 lexical and semantic evidence automatically when semantic coverage is ready.
 
 Setup and health checks do not change shell startup files, install repository
-integrations, write into source repositories, call model APIs, or require API
-keys. Without semantic opt-in they do not download embedding models; with
-semantic enabled, daemon maintenance may acquire the local embedding model.
-Each daemon maintenance pass is bounded and local. Core storage checks use the
-configured data root, and JSON stdout remains structured.
+integrations, write into source repositories, call embedding executors, or
+require their credentials. Without semantic opt-in they do not download
+embedding models; with semantic enabled, daemon maintenance uses the selected
+executor and may acquire the built-in embedding model. Core storage checks use
+the configured data root, and JSON stdout remains structured.
 Output format does not change lifecycle authority. Use `--no-daemon` or search
 `--refresh off` for an invocation-level opt-out. The full automatic persistent
 daemon is the sole driver for signed automatic upgrade checks. Without that
@@ -665,17 +683,23 @@ ctx search "incident follow-up" --source-group work
 Tantivy generation. In automatic indexing mode it may start or wake the
 persistent daemon for lexical publication and optional semantic catch-up. In
 manual mode, background refresh uses only the last published generation and
-does not contact, start, or wake a process; there is no hidden foreground
-bootstrap or importer. A daemon-free semantic or hybrid query may read an
-already-ready semantic generation and embed from verified cached model assets.
+does not contact, start, or wake a ctx daemon or worker; there is no hidden foreground
+bootstrap or importer. A direct CLI semantic or hybrid query may read an
+already-ready exact semantic generation and either embed from verified cached
+model/runtime assets or use an explicitly selected HTTP executor after
+preflight. A missing, stale, partial, incompatible, WAL-backed, or otherwise
+unsafe passive snapshot returns a typed semantic error; hybrid preserves its
+stable code and retryability while falling back to lexical.
 History-source plugins are searched from the published generation after
 explicit import; search refresh does not execute their commands in 1.0.
 Semantic retrieval reads an existing compatible generation under
 `search/semantic`. Use `--refresh off` to query published Core and semantic
-generations without starting or waking a process. With the daemon disabled,
+generations without starting or waking a ctx daemon or worker. With automatic indexing disabled,
 this path embeds the query in the foreground from verified cached model assets;
-it does not initialize semantic storage, download a model, reconcile semantic
-coverage, or write projection state. Use
+Core ML additionally requires an existing validated compiled artifact, Windows
+ML an already-ready provider, and ONNX an existing runtime. It does not
+initialize semantic storage, download or compile a model, prepare a provider,
+reconcile semantic coverage, or write projection state. Use
 `--refresh wait` to request authoritative Core publication; in manual mode it
 may start a finite worker that exits after admitted Core requests are terminal
 and IPC is quiescent. Results are rendered from Core under every refresh mode.
@@ -788,7 +812,9 @@ indexed snippets and typed show/locate data from the active Core generation.
 Explicit semantic or hybrid requests may read a compatible semantic generation.
 They embed the query through the retained daemon query service when it is
 available, or from verified cached model assets in the foreground when the
-daemon is disabled.
+daemon is disabled. An explicitly selected HTTP executor remains HTTP-capable
+after exact preflight; `off` prohibits indexing and durable mutation, not that
+selected network request.
 
 Results are local hits over indexed history. Event hits include `ctx_event_id`;
 hits with known session context include `ctx_session_id`; provider metadata
@@ -831,8 +857,9 @@ Filters:
   `search/lexical`, `semantic` queries `search/semantic`, and `hybrid` blends
   both only when semantic coverage is complete and bound to the active lexical
   generation. Hybrid falls back to lexical with a structured reason when
-  semantic prerequisites are missing. Explicit semantic reports a local error
-  rather than downloading a model or using an incompatible generation;
+  semantic prerequisites are missing. Explicit semantic reports the selected
+  executor or generation error rather than switching executors, downloading a
+  model from the search path, or using an incompatible generation;
 - `--semantic-weight <0.0-1.0>`, for hybrid ranking;
 - `--primary-only`;
 - `--limit <n>`, capped at `200`;

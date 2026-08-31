@@ -3,7 +3,7 @@ use std::{path::Path, time::Duration};
 use anyhow::Result;
 use ctx_client_observability::analytics::PublicEventV1;
 use ctx_history_capture::DiscoveryContext;
-use ctx_semantic_model::SemanticModelConfig;
+use ctx_semantic_model::{SemanticEmbeddingExecutorConfig, SemanticModelConfig};
 use serde_json::Value;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -99,6 +99,7 @@ pub enum DaemonSupervisor {
 pub struct DaemonConfigSnapshot {
     pub daemon: DaemonProductConfig,
     pub semantic_enabled: bool,
+    pub semantic_executor: SemanticEmbeddingExecutorConfig,
     pub automatic_upgrade_enabled: bool,
     pub automatic_upgrade_interval: Duration,
     pub upgrade_channel: String,
@@ -141,6 +142,9 @@ impl ctx_upgrade_engine::AutomaticUpgradePolicySnapshot for DaemonConfigSnapshot
 pub trait DaemonConfigPort: Sync {
     fn load(&self, data_root: &Path) -> Result<DaemonConfigSnapshot>;
     fn semantic_model_config(&self, data_root: &Path) -> SemanticModelConfig;
+    fn semantic_executor_auth(&self) -> Result<ctx_semantic_model::SemanticEmbeddingExecutorAuth> {
+        Ok(ctx_semantic_model::SemanticEmbeddingExecutorAuth::none())
+    }
     fn discovery_context(&self, data_root: &Path) -> Result<DiscoveryContext>;
 }
 
@@ -412,6 +416,7 @@ mod tests {
                 mode: DaemonMode::Full,
             },
             semantic_enabled: true,
+            semantic_executor: Default::default(),
             automatic_upgrade_enabled: true,
             automatic_upgrade_interval: Duration::from_secs(3_600),
             upgrade_channel: "stable".to_owned(),

@@ -4,11 +4,11 @@ use anyhow::Result;
 use serde_json::{json, Value};
 
 use crate::analytics::{count_bucket, DoctorTelemetry};
-use crate::config::AppConfig;
 use crate::output::print_json;
 use crate::semantic::source_epoch_status_report;
 use crate::ui::Ui;
 use crate::DoctorArgs;
+use ctx_app_config::AppConfig;
 
 pub(crate) fn run_doctor(
     args: DoctorArgs,

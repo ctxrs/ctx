@@ -1,5 +1,5 @@
 use super::*;
-use crate::config::CONFIG_FILE;
+use ctx_app_config::CONFIG_FILE;
 use ctx_daemon_runtime::DaemonLock;
 use std::sync::{Arc, Barrier};
 
@@ -162,24 +162,42 @@ fn failed_restart_intent_write_preserves_partial_acknowledgement() -> Result<()>
 
 #[test]
 fn autostart_child_inherits_effective_analytics_policy() {
-    let command = daemon_autostart_command(
-        Path::new("ctx"),
-        Path::new("/tmp/ctx-daemon-telemetry-test"),
-        DaemonTriggerCommandArg::Search,
-        Some(5),
-        None,
-    )
-    .expect("normalized daemon launch");
-    let env = command
+    const ANALYTICS_POLICY_ENV: &str = "CTX_ANALYTICS_ENABLED";
+    let environment = crate::test_environment::EnvironmentGuard::capture(&[ANALYTICS_POLICY_ENV]);
+    let launch_environment = || {
+        daemon_autostart_command(
+            Path::new("ctx"),
+            Path::new("/tmp/ctx-daemon-telemetry-test"),
+            DaemonTriggerCommandArg::Search,
+            Some(5),
+            None,
+        )
+        .expect("normalized daemon launch")
         .get_envs()
         .map(|(key, value)| (key.to_owned(), value.map(ToOwned::to_owned)))
-        .collect::<Vec<_>>();
-    assert!(env.iter().any(|(key, value)| {
+        .collect::<Vec<_>>()
+    };
+
+    environment.set(ANALYTICS_POLICY_ENV, None);
+    let absent_policy_env = launch_environment();
+    assert!(absent_policy_env.iter().any(|(key, value)| {
         key == DAEMON_BACKGROUND_CHILD_ENV && value.as_deref() == Some(std::ffi::OsStr::new("1"))
     }));
-    assert!(env
+    assert!(absent_policy_env
         .iter()
-        .all(|(key, _)| key != std::ffi::OsStr::new("CTX_ANALYTICS_ENABLED")));
+        .all(|(key, _)| key != std::ffi::OsStr::new(ANALYTICS_POLICY_ENV)));
+
+    environment.set(ANALYTICS_POLICY_ENV, Some(std::ffi::OsStr::new("false")));
+    let explicit_policy_env = launch_environment();
+    let analytics_policy = explicit_policy_env
+        .iter()
+        .filter(|(key, _)| key == std::ffi::OsStr::new(ANALYTICS_POLICY_ENV))
+        .collect::<Vec<_>>();
+    assert_eq!(analytics_policy.len(), 1);
+    assert_eq!(
+        analytics_policy[0].1.as_deref(),
+        Some(std::ffi::OsStr::new("false"))
+    );
 }
 
 #[test]
@@ -251,21 +269,8 @@ fn detached_daemon_launch_dto_keeps_only_the_explicit_loop_interval() {
 
 #[test]
 fn detached_daemon_launch_freezes_the_normalized_environment() {
-    struct RestoreHome(Option<OsString>);
-    impl Drop for RestoreHome {
-        fn drop(&mut self) {
-            match self.0.take() {
-                Some(value) => env::set_var("HOME", value),
-                None => env::remove_var("HOME"),
-            }
-        }
-    }
-
-    let _env_lock = crate::config::TEST_LOCAL_USAGE_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    let _restore = RestoreHome(env::var_os("HOME"));
-    env::set_var("HOME", "/before-normalization");
+    let environment = crate::test_environment::EnvironmentGuard::capture(&["HOME"]);
+    environment.set("HOME", Some(OsStr::new("/before-normalization")));
     let launch = daemon_autostart_command(
         Path::new("ctx"),
         Path::new("/data"),
@@ -274,7 +279,7 @@ fn detached_daemon_launch_freezes_the_normalized_environment() {
         None,
     )
     .expect("normalized daemon launch");
-    env::set_var("HOME", "/after-normalization");
+    environment.set("HOME", Some(OsStr::new("/after-normalization")));
 
     let home = launch
         .get_envs()
@@ -285,23 +290,11 @@ fn detached_daemon_launch_freezes_the_normalized_environment() {
 
 #[test]
 fn fresh_v026_root_allows_daemon_autostart_without_legacy_store() {
-    struct RestoreAutostartEnv(Option<std::ffi::OsString>);
-    impl Drop for RestoreAutostartEnv {
-        fn drop(&mut self) {
-            match self.0.take() {
-                Some(value) => env::set_var(DAEMON_AUTOSTART_OFF_ENV, value),
-                None => env::remove_var(DAEMON_AUTOSTART_OFF_ENV),
-            }
-        }
-    }
-
-    let _env_lock = crate::config::TEST_LOCAL_USAGE_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let _restore = RestoreAutostartEnv(env::var_os(DAEMON_AUTOSTART_OFF_ENV));
-    env::remove_var(DAEMON_AUTOSTART_OFF_ENV);
+    let environment =
+        crate::test_environment::EnvironmentGuard::capture(&[DAEMON_AUTOSTART_OFF_ENV]);
+    environment.set(DAEMON_AUTOSTART_OFF_ENV, None);
     let temp = tempfile::tempdir().unwrap();
-    let config = AppConfig::default();
+    let config = DaemonRuntimeConfig::default();
 
     assert!(!temp.path().join("work.sqlite").exists());
     assert!(daemon_autostart_allowed(temp.path(), &config));
@@ -313,21 +306,8 @@ fn fresh_v026_root_allows_daemon_autostart_without_legacy_store() {
 
 #[test]
 fn configured_autostart_child_inherits_source_refresh_only_mode() {
-    struct RestoreModeEnv(Option<std::ffi::OsString>);
-    impl Drop for RestoreModeEnv {
-        fn drop(&mut self) {
-            match self.0.take() {
-                Some(value) => env::set_var(DAEMON_MODE_ENV, value),
-                None => env::remove_var(DAEMON_MODE_ENV),
-            }
-        }
-    }
-
-    let _env_lock = crate::config::TEST_LOCAL_USAGE_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let _restore = RestoreModeEnv(env::var_os(DAEMON_MODE_ENV));
-    env::set_var(DAEMON_MODE_ENV, "source-refresh-only");
+    let environment = crate::test_environment::EnvironmentGuard::capture(&[DAEMON_MODE_ENV]);
+    environment.set(DAEMON_MODE_ENV, Some(OsStr::new("source-refresh-only")));
     let temp = tempfile::tempdir().unwrap();
 
     let command = configured_daemon_autostart_command(
@@ -390,41 +370,19 @@ fn mismatched_live_binary_never_joins_and_returns_one_actionable_handoff_command
 
 #[test]
 fn autostart_surfaces_only_the_binary_handoff_recovery_command() -> Result<()> {
-    struct RestoreEnvironment {
-        ci: Option<std::ffi::OsString>,
-        executable: Option<std::ffi::OsString>,
-    }
-    impl Drop for RestoreEnvironment {
-        fn drop(&mut self) {
-            match self.ci.take() {
-                Some(value) => env::set_var("CI", value),
-                None => env::remove_var("CI"),
-            }
-            match self.executable.take() {
-                Some(value) => env::set_var("CTX_DAEMON_AUTOSTART_EXE", value),
-                None => env::remove_var("CTX_DAEMON_AUTOSTART_EXE"),
-            }
-        }
-    }
-
-    let _environment_lock = crate::config::TEST_LOCAL_USAGE_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let _restore = RestoreEnvironment {
-        ci: env::var_os("CI"),
-        executable: env::var_os("CTX_DAEMON_AUTOSTART_EXE"),
-    };
+    let environment =
+        crate::test_environment::EnvironmentGuard::capture(&["CI", "CTX_DAEMON_AUTOSTART_EXE"]);
     let temp = tempfile::tempdir()?;
     let _lock = DaemonLock::acquire(temp.path())?
         .ok_or_else(|| anyhow!("test daemon could not acquire its process lock"))?;
     let replacement = temp.path().join("replacement-ctx");
     fs::write(&replacement, b"different ctx image")?;
-    env::set_var("CI", "1");
-    env::set_var("CTX_DAEMON_AUTOSTART_EXE", replacement);
+    environment.set("CI", Some(OsStr::new("1")));
+    environment.set("CTX_DAEMON_AUTOSTART_EXE", Some(replacement.as_os_str()));
 
     let error = autostart_daemon_and_wait(
         temp.path(),
-        &AppConfig::default(),
+        &DaemonRuntimeConfig::default(),
         DaemonTriggerCommandArg::Search,
     )
     .expect_err("a mismatched live image must fail through the public autostart path");
@@ -450,9 +408,10 @@ fn stale_binary_owner_uses_cooperative_supervisor_handoff_before_releasing_lock(
         sync::mpsc,
     };
 
+    let short_temp_root = fs::canonicalize("/tmp").context("resolve short test temp root")?;
     let temp = tempfile::Builder::new()
         .prefix("ctx-handoff-")
-        .tempdir_in("/tmp")?;
+        .tempdir_in(short_temp_root)?;
     let owner_lock = DaemonLock::acquire(temp.path())?
         .ok_or_else(|| anyhow!("test daemon could not acquire its process lock"))?;
     let replacement = temp.path().join("replacement-ctx");

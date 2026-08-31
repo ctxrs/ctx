@@ -73,6 +73,21 @@ binary, for example:
 The sidecar is outside the ctx data root because it describes ownership of the
 installed executable, not indexed provider history.
 
+Automatic mode may also install a current-user supervisor definition. Its
+platform locations are `${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/ctx.service`
+on Linux, `$HOME/Library/LaunchAgents/rs.ctx.daemon.plist` on macOS, and
+`<data-root>/daemon/windows-task.xml` plus the corresponding current-user
+scheduled task on Windows. The exact allowlisted launch environment is stored
+separately at `<data-root>/daemon/supervisor-environment.json`; supervisor
+arguments contain only its path. When both `CTX_SEMANTIC_EMBEDDING_TOKEN` and
+its internal endpoint binding are present, both values are captured in that
+file so the supervised daemon can authenticate only to that endpoint. Treat
+the environment file as a credential-bearing owner-private artifact. ctx
+publishes it atomically as an owner-owned, single-link, non-symlink regular
+file and verifies it before replacing the process environment. Unix supervisor
+definitions are also mode `0600`; the Windows task definition remains under
+the owner-private daemon root and current-user scheduler registration.
+
 ## Local Usage Product State
 
 `usage.sqlite` is an owner-private SQLite sidecar under the selected ctx data
@@ -337,8 +352,8 @@ local upsert as described above.
 | Command | Reads | Writes |
 | --- | --- | --- |
 | `ctx setup` | provider transcript files and bounded path metadata for source discovery | data root, source catalog/epoch metadata, `search/lexical`, and optional persistent daemon lock/status/job files in automatic mode; old Store artifacts are neither opened nor deleted |
-| `ctx semantic status` | semantic policy, generation and local asset metadata, indexing mode, and daemon state | none |
-| `ctx semantic enable` / `ctx semantic disable` | semantic policy, generation and local asset metadata, indexing mode, and daemon state | atomically updates `config.toml`; automatic-mode enable may start the daemon and acquire the local runtime and model, while disable lets daemon maintenance quiesce semantic work and retains downloaded assets |
+| `ctx semantic status` | semantic policy, selected executor metadata, generation and local asset metadata, indexing mode, and daemon state; does not require or expose an executor credential or make a network request | none |
+| `ctx semantic enable` / `ctx semantic disable` | semantic policy, selected executor metadata, generation and local asset metadata, indexing mode, and daemon state | atomically updates `config.toml`; automatic-mode enable may start the daemon and use the selected executor, while disable lets daemon maintenance quiesce semantic work and retains downloaded assets |
 | `ctx status` | data root metadata, source epoch, lexical/semantic generation metadata, daemon state, and compact local usage health | none; does not mutate provider history, Core generations, or usage aggregates |
 | `ctx index` / `ctx index watch` / `ctx index wait` | indexing mode, lexical/semantic generation metadata, and daemon state | none |
 | `ctx index mode` | `config.toml` when present | none when reading; `auto` or `manual` writes `config.toml` and establishes or removes persistent supervision |
@@ -348,17 +363,18 @@ local upsert as described above.
 | `ctx import` | provider transcript files and path metadata, the explicit custom history JSONL file passed with `--input-format ctx-history-jsonl-v2 --path`, or a durable provider-owned custom history JSONL file declared by an explicit history-source plugin manifest | immutable candidate Core/Tantivy generation and atomic publication, catalog/epoch metadata, and optional persistent or finite-worker daemon files; finite workers do not run semantic work |
 | `ctx show session` / `ctx show event` | complete policy-selected records in the active verified Core/Tantivy generation | selected `--out` path for `show session` when provided |
 | `ctx list events` | complete policy-selected records and existing index terms in one pinned verified Core/Tantivy generation | none; event enumeration is read-only |
-| `ctx search` | active verified Core/Tantivy generation and existing semantic generation; when refresh has authority, bounded provider discovery/path metadata | candidate Core publication and daemon state only when refresh has authority; manual background and `--refresh off` do not start or wake a process |
+| `ctx search` | active verified Core/Tantivy generation and existing semantic generation; direct CLI passive semantic/hybrid queries may also read selected-executor metadata and verified cached model/runtime assets; when refresh has authority, bounded provider discovery/path metadata | candidate Core publication and daemon state only when refresh has authority; manual background and `--refresh off` do not start or wake a ctx daemon or worker and do not mutate Core or semantic projection state |
 | `ctx docs` | embedded documentation in the binary | selected topic `--out` path for `ctx docs show --out` or selected `--out` directory for `ctx docs man --out` |
 | `ctx upgrade` | signed release metadata and installed binary/sidecar metadata | installed binary for manual upgrade, install sidecar, and executable-adjacent `.ctx.upgrade-state.json`, `.ctx.install.lock`, and transaction journal |
 | `ctx doctor` | source epoch, lexical/semantic generation metadata, and ctx-owned daemon lock/status/job metadata | none |
 | `ctx daemon run` | provider transcripts, active lexical and semantic generations, model-cache metadata, and daemon state | candidate lexical generation publication, semantic catch-up, and daemon state |
 
-Setup, import, and default search do not require source repository writes, model
-APIs, API keys, or remote accounts. Without semantic opt-in they do not download
-models or runtime assets; with semantic enabled, installer/runtime acquisition
-and daemon maintenance may acquire the local ONNX Runtime asset and embedding
-model when the installed build supports that path. In automatic indexing mode,
+Setup, import, and default lexical search do not require source repository
+writes, embedding APIs, executor credentials, or remote accounts. Without
+semantic opt-in they do not download models or runtime assets or contact an
+embedding executor. With semantic enabled, daemon maintenance uses the selected
+executor and may acquire the built-in ONNX Runtime asset and embedding model
+when the installed build supports that path. In automatic indexing mode,
 setup and import may start the persistent ctx-owned daemon regardless of output
 format. In manual mode, setup starts no worker; explicit imports may start only
 a finite Core worker using the same source-refresh endpoint and publication
@@ -369,13 +385,30 @@ The deprecated `ctx setup --catalog-only` flag is ignored and does not change
 daemon-autostart behavior.
 `ctx search --refresh off` does not refresh providers, run plugins, autostart
 daemon maintenance, start semantic workers, schedule semantic indexing, or
-write any derived generation. It serves results from the active Core
-generation. Default `--backend hybrid --refresh off`
-uses semantic evidence only when semantic coverage is complete and dirty work is
-drained, and otherwise falls back to lexical. Explicit semantic searches with
-`--refresh off` may ask the daemon query service to embed the query from an
-already-cached local model and read partial existing semantic generation
-coverage, but they do not download a model or write semantic catch-up work.
+write any derived generation. It serves the active Core generation and may use
+semantic evidence only after exact-generation preflight confirms that the
+compatible semantic projection is complete. Hybrid otherwise falls back to
+lexical with a typed reason; semantic-only returns that readiness error.
+
+Ordinary daemon and explicit Reconcile preflight use read-only SQLite access
+that observes committed WAL state; the retained daemon query service uses the
+selected executor. With automatic indexing disabled, direct CLI `off` and
+`background` passive preflight shares the existing `flat_transaction.lock` from
+SQLite sidecar inspection through control/schema validation and exact Flat
+generation pinning, refuses WAL and rollback-journal state, and opens only the
+main database with immutable read-only semantics. That path does not create a
+lock, database, WAL, SHM, journal, directory, compiled model, runtime, or cache
+artifact. Hybrid preserves the typed fallback code and retryability; semantic
+only preserves the same typed error. A selected built-in executor may load only
+verified cached model/runtime assets; an explicitly selected HTTP executor may
+send its normal conformance probes and query request after preflight. Neither
+path acquires a model, reconciles coverage, or writes semantic catch-up work.
+System-call qualification for this promise scopes write assertions to
+semantic storage, model/runtime caches, and indexing state. An ordinary search
+also opens and locks Tantivy's pre-existing lexical query lock with
+write-capable flags; full-tree snapshots show that mechanism makes no durable
+change. Redesigning lexical query locking is outside the passive semantic
+contract.
 Semantic coverage is exact across the content-filter boundary. Persisted
 flat-F32 source receipts account for every pre-filter Core candidate as either
 an active projected event or an intentionally filtered event. Query metadata
@@ -390,14 +423,15 @@ rebuild. Manual indexing remains passive and performs no scheduled migration.
 Explicit imports may best-effort mark recent semantic-eligible items dirty in
 the semantic generation when it already exists; this does not create semantic
 storage, initialize the model, or embed text.
-When the required local cache is missing, `--refresh off` refuses to initialize
-or download the embedding model; hybrid falls back to lexical in that case. In
-automatic mode, default `--refresh background` lets persistent daemon
+When the selected executor is unavailable, `--refresh off` does not silently
+switch to the built-in executor; hybrid may return lexical results with an
+explicit diagnostic. In automatic mode, default `--refresh background` lets
+persistent daemon
 maintenance own native provider refresh and may autostart the configured daemon
 query service for semantic/hybrid retrieval. In manual mode, background refresh
 serves the last published generation without starting or waking a process. An
 explicit semantic or nonzero-weight hybrid `--refresh wait` may start a finite
-Core worker and, after Core publication, acquire the opted-in local model and
+Core worker and, after Core publication, use the selected executor and
 reconcile semantic coverage for that exact pinned generation. History-source
 plugins are refreshed only by an explicit selected-plugin import in 1.0.
 
@@ -406,9 +440,9 @@ private lock/status files under `daemon/` in the ctx data root. Auto mode owns
 background startup; there is no separate public daemon start command. Explicit
 `ctx daemon run` runs the same coordinator in the foreground and blocks until
 stopped without changing indexing mode; `--force` is required in manual mode.
-The coordinator always bounds native provider-history refresh and local semantic
-indexing by its local runtime/model availability. Foreground query activity
-preempts background work.
+The coordinator always bounds native provider-history refresh and semantic
+indexing by selected-executor availability. Foreground query activity preempts
+background work.
 
 Manual explicit import and search `--refresh wait` instead start the same Core
 refresh engine in a finite worker. The finite profile does not install native
@@ -428,12 +462,12 @@ an absent process. This fallback does not create a second importer or index
 writer.
 Native ownership, identity, integrity, fencing, and security failures still
 fail closed.
-A looping daemon may keep the
-local embedding model resident between passes and uses semantic projection state
-to prioritize recent/stale events. Automatic background refresh may start the
-configured persistent daemon for local history freshness. With semantic
-enabled, the same daemon-owned query service can embed the query;
-`ctx search --refresh off` and manual background refresh do not start it.
+A looping daemon may keep the built-in embedding model resident between passes
+and uses semantic projection state to prioritize recent/stale events. Automatic
+background refresh may start the configured persistent daemon for local history
+freshness. With semantic enabled, the same daemon-owned query service uses the
+selected executor to embed the query; `ctx search --refresh off` and manual
+background refresh do not start it.
 
 ## Config Overrides
 
@@ -554,7 +588,10 @@ the effective mode. When auto is not overridden, ctx installs or repairs
 supervision and starts the persistent background daemon. Manual mode stops it
 and removes supervision. An explicit manual config continues to win after CLI
 upgrades and over `CTX_DAEMON_ENABLED=true`; `CTX_DAEMON_ENABLED=false` remains
-a process-level manual-mode override.
+a process-level manual-mode override. Persistent shutdown waits up to five
+seconds for cooperative release, then may terminate the revalidated daemon
+owner once and wait up to another five seconds before failing; supervisor
+removal happens only after ownership is released.
 
 For a daemon that serves and serializes only atomic Core refreshes,
 set:
@@ -575,13 +612,54 @@ upgrades do not run. Ordinary foreground commands do not substitute for the
 disabled maintenance paths. Manual finite workers always enforce the Core-only
 exclusions independently of this persistent-daemon setting.
 
-Local semantic search remains disabled by default and requires automatic
-indexing. Its config opt-in is:
+Semantic search remains disabled by default. Its config opt-in is:
 
 ```toml
 [search]
 semantic = true
 ```
+
+The built-in executor is also the default and is omitted from `config.toml`.
+Prefer `ctx semantic enable --executor URL`, which tries V2 first and writes
+the complete V2 identity below. Fixed-E5 V1 is considered only when the V2
+contract route returns 404 and remains endpoint-only. Selecting `--executor
+builtin` removes the selection:
+
+```toml
+[semantic]
+executor = "https://embeddings.example.test/ctx/"
+space_id = "opaque-space-id"
+dimensions = 768
+```
+
+The complete `executor`, `space_id`, and `dimensions` triple is required.
+Writing it directly is an advanced, operator-authored acceptance rather than
+discovery; `schema_version` is validated on the wire and is not stored in
+config. Before sending content, ctx verifies that the endpoint serves schema V2
+and the accepted identity. Intentionally changing the accepted `space_id` or
+`dimensions` causes ctx to rebuild the derived semantic vectors. Moving the
+same declared space to a new endpoint changes routing but preserves compatible
+vectors.
+
+Do not put credentials in the URL or config file. Remote authentication uses
+only the `CTX_SEMANTIC_EMBEDDING_TOKEN` bearer-token environment variable. In
+automatic mode, selecting an executor or disabling semantic search while a URL
+executor is selected uses a credential-bound daemon restart. The command
+validates and writes the current supervisor environment, removes supervision,
+performs the bounded shutdown above, then recreates supervision and starts the
+daemon with the new environment. A missing token/binding pair is omitted from
+the recreated definition. This is bounded artifact replacement and process
+restart, not a credential vault, secure erasure, or a guarantee that an old
+value has been removed from every OS or process-memory surface.
+
+In `ctx semantic status --format json`,
+`executor.content_leaves_machine` describes ctx's configured direct HTTP hop,
+not observed downstream activity. The top-level `local_only` value is true only
+for the in-process builtin; it is false for a loopback executor because that
+separate process may retain, log, or forward content. A disabled report can
+retain a remote executor and report that capability while making no embedding
+request; `enabled = false` remains the authority that semantic transfer and
+indexing are inactive.
 
 See [Retrieval backends](search.md#retrieval-backends) for the setup command and
 readiness behavior.
@@ -730,7 +808,9 @@ Recommended handling:
 
 - keep `~/.ctx` out of source repositories;
 - do not share provider transcripts, ctx search generations, or logs;
-  logs;
+- select an external semantic executor only when it is trusted to receive
+  raw query text and eligible ctx-created document chunks and rollups, and to
+  handle or forward them according to the operator's policy;
 - review JSON output before sharing it outside the machine;
 - delete or rebuild local Core and derived data when working on shared machines;
 - use provider filters and result limits to keep agent retrieval focused on
@@ -738,11 +818,19 @@ Recommended handling:
 
 ## Network Behavior
 
-Core indexing work uses the local filesystem and Tantivy; optional semantic
-indexing uses local flat-vector operations. The tools that
-originally produced provider transcripts may have used the network according to
-their own configuration; ctx indexing those transcripts does not repeat that
-behavior.
+Core indexing work uses the local filesystem and Tantivy, and semantic vectors
+remain in the local flat-vector sidecar. The built-in embedding executor is
+local. When a URL executor is explicitly selected, semantic indexing sends
+raw text from eligible ctx-created document chunks and raw semantic or
+nonzero-weight hybrid queries to that exact endpoint. For loopback URLs, this is
+only ctx's first hop; the receiving process can retain or forward the content.
+Lexical and zero-weight hybrid search do not contact it. ctx does not silently
+route failed external work to the built-in executor.
+`ctx semantic status` is credential-free and makes no network request. The tools
+that originally produced provider transcripts may have used the network
+according to their own configuration; ctx indexing those transcripts does not
+repeat that behavior unless their text is selected for the explicitly
+configured semantic executor.
 
 Official installer-managed binaries can contact the signed release metadata
 endpoint for an explicit `ctx upgrade` command. With automatic upgrades

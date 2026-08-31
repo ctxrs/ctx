@@ -39,6 +39,7 @@ pub use cli::{
     SearchBackendArg, ShowArgs, ShowEventArgs, ShowSessionArgs, ShowTarget,
 };
 pub use ctx_history_capture::{ProviderRootDefinition, ProviderRootKind};
+pub use ctx_history_core::parse_capture_provider_name;
 pub use import_application::{run_import_application, ImportApplicationPort};
 pub use import_report::{
     import_completion_error, import_error_scope, import_failure_type, import_report_failure_type,
@@ -56,9 +57,9 @@ pub use list_events::{
 };
 pub use provider_args::{
     cli_supported_provider, compact_provider_error, mcp_provider_names, native_provider_cli_specs,
-    parse_capture_provider_name, parse_native_provider, parse_native_provider_name, parse_provider,
-    parse_provider_name, provider_cli_name, provider_cli_spec, provider_cli_specs,
-    provider_is_importable, ProviderArg, ProviderCliSpec,
+    parse_native_provider, parse_native_provider_name, parse_provider, parse_provider_name,
+    provider_cli_name, provider_cli_spec, provider_cli_specs, provider_is_importable, ProviderArg,
+    ProviderCliSpec,
 };
 pub use provider_sources::{
     discovered_plugin_sources_json, discovered_sources_for_provider_report,

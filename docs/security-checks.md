@@ -20,10 +20,10 @@ the local retrieval product.
   querying the active Core generation. Manual background search and
   `--refresh off` must not start or wake a process. The query process does not
   write Core generations. In manual mode, an opted-in semantic or nonzero-weight
-  hybrid `--refresh wait` may acquire the pinned model and write semantic
+  hybrid `--refresh wait` may use the selected executor and write semantic
   projection data only after finite Core publication for the exact pinned
   generation. Without semantic opt-in, default search must not download
-  embedding models or start semantic indexing.
+  embedding models, contact an executor, or start semantic indexing.
 - `ctx show` writes nothing in local-only security mode, except
   `ctx show session --out` writes only the explicit path when one is provided.
 - `ctx status` does not mutate canonical history: missing stores stay missing,
@@ -35,11 +35,16 @@ the local retrieval product.
   mutations. They persist the requested mode and reconcile supervision to the
   effective mode; a process-level override can keep manual mode active after an
   auto request.
-- In local-only security mode, setup/import/default search do not use network
-  access or API keys. Explicit semantic use still must not call hosted model
-  APIs, and search must not download the local embedding model when the required
-  cache is missing. Explicit semantic/hybrid search may initialize an
-  already-cached local model to embed the query.
+- In the default local-only security mode, setup, import, and search do not use
+  executor network access or credentials. Explicitly selecting a URL executor
+  may send raw semantic query text and ctx-created document chunks only to that
+  endpoint. A remote URL sends that content off the machine; a loopback URL
+  constrains only ctx's first hop, and the receiving process can retain or
+  forward the content, including off-machine. Remote URLs require HTTPS and the
+  canonical endpoint-bound bearer-token environment variable; plain HTTP
+  requires a literal loopback IP address. Status and observer commands never
+  contact the executor, and an external failure never activates the built-in
+  executor.
 - `ctx setup --no-daemon` and `ctx import --no-daemon` must not autostart daemon
   maintenance or finite workers. Machine-readable output is not a process-start
   security control. The deprecated `ctx setup --catalog-only` flag is ignored and is not
@@ -72,10 +77,12 @@ the local retrieval product.
   data root, respect `[indexing] mode` unless explicitly forced, and may run
   only bounded native local provider-history refresh and bounded semantic
   catch-up. It must not run history-source plugins.
-  Network model acquisition is allowed only for the local embedding model when
-  semantic search is explicitly enabled with `ctx semantic enable` in auto
-  mode. `ctx daemon run` blocks in the foreground and does not mutate indexing
-  mode.
+  Network model acquisition is allowed only for the built-in embedding model.
+  External embedding calls are allowed only to the explicitly selected V2
+  executor URL and its accepted vector-space identity, or to the explicitly
+  selected fixed-E5 V1 compatibility URL. Both require semantic opt-in.
+  `ctx daemon run` blocks in
+  the foreground and does not mutate indexing mode.
 - A finite Core worker may start only for explicit import or search
   `--refresh wait`. It must not install persistent supervision or run watcher,
   timer, semantic, or upgrade maintenance, and it must not exit before admitted

@@ -14,25 +14,31 @@ pub(super) use ctx_daemon_application::{
     DaemonSupervisorStart, DaemonSupervisorUpgradeFence, DaemonSupervisorUpgradeResume,
 };
 
-pub(super) struct CliDaemonApplicationHost<'config, 'value> {
-    run_config: Option<&'config crate::config::AppConfig<'value>>,
+pub(super) struct CliDaemonApplicationHost<'config> {
+    run_config: Option<&'config crate::composition::DaemonRuntimeConfig>,
+    reload_persisted_config: bool,
 }
 
-impl CliDaemonApplicationHost<'_, '_> {
+impl CliDaemonApplicationHost<'_> {
     const fn new() -> Self {
-        Self { run_config: None }
+        Self {
+            run_config: None,
+            reload_persisted_config: true,
+        }
     }
 
-    const fn for_daemon_run<'config, 'value>(
-        config: &'config crate::config::AppConfig<'value>,
-    ) -> CliDaemonApplicationHost<'config, 'value> {
+    const fn for_daemon_run<'config>(
+        config: &'config crate::composition::DaemonRuntimeConfig,
+        reload_persisted_config: bool,
+    ) -> CliDaemonApplicationHost<'config> {
         CliDaemonApplicationHost {
             run_config: Some(config),
+            reload_persisted_config,
         }
     }
 }
 
-impl ctx_daemon_application::DaemonApplicationHost for CliDaemonApplicationHost<'_, '_> {
+impl ctx_daemon_application::DaemonApplicationHost for CliDaemonApplicationHost<'_> {
     fn hosted_uninstall_active(&self) -> Result<bool> {
         ctx_upgrade_engine::installation_hosted_uninstall_is_active()
     }
@@ -50,9 +56,9 @@ impl ctx_daemon_application::DaemonApplicationHost for CliDaemonApplicationHost<
     }
 
     fn automatic_upgrade_recovery_allowed(&self, data_root: &Path) -> Result<bool> {
-        let config = crate::config::AppConfig::load(data_root)?;
+        let config = crate::composition::load_runtime_config(data_root)?;
         Ok(config.daemon.enabled
-            && config.daemon.mode == crate::config::DaemonMode::Full
+            && config.daemon.mode == crate::composition::DaemonMode::Full
             && config.auto_upgrade_enabled()
             && ctx_upgrade_engine::installation_interrupted_automatic_upgrade_is_recoverable()?)
     }
@@ -61,16 +67,19 @@ impl ctx_daemon_application::DaemonApplicationHost for CliDaemonApplicationHost<
         &self,
         data_root: &Path,
     ) -> Result<ctx_daemon_application::DaemonConfigSnapshot> {
-        let config = crate::config::AppConfig::load(data_root)?;
-        Ok(ctx_daemon_application::DaemonConfigSnapshot {
-            enabled: config.daemon.enabled,
-            mode: daemon_mode(config.daemon.mode),
-            semantic_enabled: config.semantic_search_enabled(),
-        })
+        if !self.reload_persisted_config {
+            if let Some(config) = self.run_config {
+                return Ok(daemon_config_snapshot(config));
+            }
+        }
+        // Mutating control operations persist a new mode before asking the
+        // application layer to apply it, so their snapshot must be reloaded.
+        let config = crate::composition::load_runtime_config(data_root)?;
+        Ok(daemon_config_snapshot(&config))
     }
 
     fn persisted_daemon_enabled(&self, data_root: &Path) -> Result<bool> {
-        crate::config::persisted_daemon_enabled(data_root)
+        ctx_app_config::persisted_daemon_enabled(data_root)
     }
 
     fn defer_restart_for_upgrade_handoff(
@@ -109,6 +118,10 @@ impl ctx_daemon_application::DaemonApplicationHost for CliDaemonApplicationHost<
         data_root: &Path,
         request: ctx_daemon_application::DaemonHostRunRequest,
     ) -> Result<()> {
+        if self.reload_persisted_config {
+            let config = crate::composition::load_runtime_config(data_root)?;
+            return crate::composition::host().run_daemon_service(data_root, request, &config);
+        }
         let config = self
             .run_config
             .ok_or_else(|| anyhow::anyhow!("daemon run host is missing its borrowed config"))?;
@@ -116,7 +129,7 @@ impl ctx_daemon_application::DaemonApplicationHost for CliDaemonApplicationHost<
     }
 
     fn set_daemon_enabled(&self, data_root: &Path, enabled: bool) -> Result<()> {
-        crate::config::set_daemon_enabled(data_root, enabled)
+        ctx_app_config::set_daemon_enabled(data_root, enabled)
     }
 
     fn request_daemon_shutdown(
@@ -180,6 +193,22 @@ impl ctx_daemon_application::DaemonApplicationHost for CliDaemonApplicationHost<
     }
 }
 
+fn daemon_config_snapshot(
+    config: &crate::composition::DaemonRuntimeConfig,
+) -> ctx_daemon_application::DaemonConfigSnapshot {
+    ctx_daemon_application::DaemonConfigSnapshot {
+        enabled: config.daemon.enabled,
+        mode: daemon_mode(config.daemon.mode),
+        semantic_enabled: config.semantic_search_enabled(),
+        semantic_executor: config
+            .semantic_embedding_executor()
+            .http_endpoint()
+            .unwrap_or("builtin")
+            .to_owned(),
+        semantic_contract_fingerprint: config.semantic_model_contract().fingerprint().to_owned(),
+    }
+}
+
 fn json_string(value: &Value, key: &str) -> Option<String> {
     value.get(key).and_then(Value::as_str).map(str::to_owned)
 }
@@ -214,11 +243,11 @@ pub(super) const fn daemon_trigger(
 }
 
 pub(super) const fn daemon_mode(
-    mode: crate::config::DaemonMode,
+    mode: crate::composition::DaemonMode,
 ) -> ctx_daemon_application::DaemonMode {
     match mode {
-        crate::config::DaemonMode::Full => ctx_daemon_application::DaemonMode::Full,
-        crate::config::DaemonMode::SourceRefreshOnly => {
+        crate::composition::DaemonMode::Full => ctx_daemon_application::DaemonMode::Full,
+        crate::composition::DaemonMode::SourceRefreshOnly => {
             ctx_daemon_application::DaemonMode::SourceRefreshOnly
         }
     }
@@ -233,10 +262,11 @@ pub(super) fn with_daemon_application<T>(
 }
 
 pub(super) fn with_daemon_run_application<T>(
-    config: &crate::config::AppConfig<'_>,
+    config: &crate::composition::DaemonRuntimeConfig,
+    reload_persisted_config: bool,
     operation: impl FnOnce(&ctx_daemon_application::DaemonApplication<'_>) -> T,
 ) -> T {
-    let host = CliDaemonApplicationHost::for_daemon_run(config);
+    let host = CliDaemonApplicationHost::for_daemon_run(config, reload_persisted_config);
     let application = ctx_daemon_application::DaemonApplication::new(&host);
     operation(&application)
 }

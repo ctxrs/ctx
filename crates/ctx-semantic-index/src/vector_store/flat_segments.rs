@@ -20,6 +20,7 @@ mod artifacts;
 mod catalog;
 #[cfg(any(test, feature = "test-support"))]
 mod legacy_fixture;
+mod locking;
 mod manifest;
 mod pinned;
 mod recovery;
@@ -33,6 +34,8 @@ pub(crate) use legacy_fixture::seed_filter_unaware_manifest;
 
 use artifacts::*;
 use catalog::*;
+pub(crate) use locking::FlatStoreCoordinationGuard;
+use locking::{open_lock, FileLock};
 use manifest::*;
 use pinned::load_pinned_generation;
 pub use pinned::PinnedFlatGeneration;
@@ -434,11 +437,23 @@ impl FlatReconciliationView {
 }
 
 impl FlatSegmentStore {
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn open(root: impl AsRef<Path>, contract: FlatModelContract) -> FlatResult<Self> {
+        let (store, coordination) = Self::prepare_writable_open(root, contract)?;
+        let store = store.finish_writable_open()?;
+        drop(coordination);
+        Ok(store)
+    }
+
+    pub(crate) fn prepare_writable_open(
+        root: impl AsRef<Path>,
+        contract: FlatModelContract,
+    ) -> FlatResult<(Self, FlatStoreCoordinationGuard)> {
         ensure_little_endian()?;
         validate_model_contract(&contract)?;
         let root = root.as_ref().to_path_buf();
         ensure_store_directories(&root)?;
+        let coordination = FlatStoreCoordinationGuard::lock_control_writer(&root)?;
         let store = Self {
             root,
             contract,
@@ -479,16 +494,22 @@ impl FlatSegmentStore {
             #[cfg(test)]
             fail_after_source_acknowledgement: std::sync::atomic::AtomicBool::new(false),
         };
-        let recovery = store.recover_internal()?;
+        Ok((store, coordination))
+    }
+
+    pub(crate) fn finish_writable_open(self) -> FlatResult<Self> {
+        let recovery = self.recover_internal_coordinated()?;
         #[cfg(test)]
-        let store = {
-            let mut store = store;
+        {
+            let mut store = self;
             store.recovery = recovery;
-            store
-        };
+            Ok(store)
+        }
         #[cfg(not(test))]
-        let _ = recovery;
-        Ok(store)
+        {
+            let _ = recovery;
+            Ok(self)
+        }
     }
 
     pub(crate) fn open_read_only(
@@ -779,9 +800,19 @@ impl FlatSegmentStore {
         replacements: &[FlatEventReplacement],
         tombstones: &[Uuid],
     ) -> FlatResult<FlatPublishOutcome> {
+        let _transaction = self.lock_transaction()?;
+        self.publish_replacement_event_chunks_coordinated(replacements, tombstones)
+    }
+
+    /// Publishes while the caller retains `flat_transaction.lock` across a
+    /// larger Flat/control handoff.
+    pub(crate) fn publish_replacement_event_chunks_coordinated(
+        &self,
+        replacements: &[FlatEventReplacement],
+        tombstones: &[Uuid],
+    ) -> FlatResult<FlatPublishOutcome> {
         self.require_writable()?;
         validate_publication_input(&self.contract, replacements, tombstones)?;
-        let _transaction = self.lock_transaction()?;
         let _guard = self.lock_exclusive()?;
         let current = self.load_current_locked()?;
         if replacements.is_empty() && tombstones.is_empty() {
@@ -956,42 +987,6 @@ impl FlatSegmentStore {
     fn lock_transaction(&self) -> FlatResult<FileLock> {
         FileLock::exclusive(&transaction_lock_path(&self.root))
     }
-}
-
-struct FileLock {
-    file: File,
-}
-
-impl FileLock {
-    fn shared(path: &Path) -> FlatResult<Self> {
-        let file = open_lock(path, false)?;
-        fs2::FileExt::lock_shared(&file).map_err(|source| io_error("lock shared", path, source))?;
-        Ok(Self { file })
-    }
-
-    fn exclusive(path: &Path) -> FlatResult<Self> {
-        let file = open_lock(path, true)?;
-        fs2::FileExt::lock_exclusive(&file)
-            .map_err(|source| io_error("lock exclusive", path, source))?;
-        Ok(Self { file })
-    }
-}
-
-impl Drop for FileLock {
-    fn drop(&mut self) {
-        let _ = fs2::FileExt::unlock(&self.file);
-    }
-}
-
-fn open_lock(path: &Path, create: bool) -> FlatResult<File> {
-    let mut options = OpenOptions::new();
-    options.read(true);
-    if create {
-        options.write(true).create(true);
-    }
-    options
-        .open(path)
-        .map_err(|source| io_error("open flat writer lock", path, source))
 }
 
 #[cfg(test)]

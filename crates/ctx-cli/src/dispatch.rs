@@ -29,8 +29,6 @@ use crate::{
             run_status_authorized as run_status, run_usage_action,
         },
     },
-    config::AppConfig,
-    deprecated_controls::DeprecatedControls,
     docs, integrations, local_usage, mcp,
     operation_descriptor::{CliOperation, OperationDescriptor},
     output::{OutputFormat, OutputMeasurement},
@@ -41,6 +39,7 @@ use crate::{
     },
     upgrade,
 };
+use ctx_app_config::{AppConfig, DeprecatedControls};
 
 mod finalization;
 mod parse;
@@ -233,7 +232,7 @@ pub(crate) fn run_cli() -> Result<()> {
             Ok(config) => config,
             Err(error)
                 if command_is_status_report(&cli.command)
-                    && crate::config::is_removed_cloud_mode_error(&error) =>
+                    && ctx_app_config::is_removed_cloud_mode_error(&error) =>
             {
                 return removed_cloud_config_failure(json_output, &mut ui);
             }
@@ -250,11 +249,12 @@ pub(crate) fn run_cli() -> Result<()> {
                 let mut fallback = AppConfig::default();
                 fallback.analytics.enabled = false;
                 fallback.local_usage.enabled =
-                    crate::config::resolve_local_usage_control(&data_root).effective_on_startup();
+                    ctx_app_config::resolve_local_usage_control(&data_root).effective_on_startup();
                 fallback
             }
             Err(error) => return Err(error),
         };
+    crate::semantic::bind_embedding_auth_endpoint(&config);
     if let Some(draft) = analytics_draft.as_mut() {
         draft.set_deprecated_controls(deprecated_controls.nonprivacy_analytics_ids().as_deref());
     }
@@ -379,6 +379,7 @@ pub(crate) fn run_cli() -> Result<()> {
             ctx_history_cli::HistoryCliConfig {
                 daemon_enabled: config.automatic_indexing_enabled(),
                 semantic_search_enabled: config.semantic_search_enabled(),
+                semantic_executor: config.semantic_embedding_executor().clone(),
                 local_usage_enabled: config.local_usage.enabled,
                 automatic_provider_discovery: config.automatic_source_discovery_enabled(),
                 provider_roots: config.provider_root_definitions(),

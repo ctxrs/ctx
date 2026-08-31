@@ -151,8 +151,20 @@ using both lexical and semantic evidence when coverage is ready.
 
 In manual mode, there is no background semantic maintenance. After enabling
 semantic search, run an explicit semantic or nonzero-weight hybrid search with
-`--refresh wait` to acquire the local model when needed and reconcile the
+`--refresh wait` to prepare the selected executor when needed and reconcile the
 semantic projection for that request's pinned Core generation.
+
+For a URL executor, `ctx semantic status` shows the local selection but does not
+use the token or probe the endpoint. Verify that the URL follows the HTTPS or
+literal-loopback HTTP policy, that remote processes receive
+`CTX_SEMANTIC_EMBEDDING_TOKEN`, and that the server implements the
+[V2 executor contract](semantic-executors.md#v2-http-protocol), or the retained
+fixed-E5 [V1 contract](semantic-executors.md#retained-fixed-e5-v1).
+If the endpoint
+identity changed, rerun `ctx semantic enable --executor URL` to accept it and
+rebuild the derived semantic index. ctx does not silently retry with the
+built-in executor; hybrid may still return lexical results while reporting why
+semantic evidence was unavailable.
 
 ## Store Problems
 

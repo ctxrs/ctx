@@ -1,4 +1,4 @@
-use std::{path::Path, process, time::Instant};
+use std::{path::Path, process, sync::Arc, time::Instant};
 
 use anyhow::Result;
 use ctx_history_core::utc_now;
@@ -9,8 +9,8 @@ use ctx_semantic_index::{
 };
 use ctx_semantic_model::{
     semantic_model_acquisition_integrity_error, semantic_model_key, ArtifactFetcher,
-    BuiltinSemanticEmbeddingExecutor, SemanticDaemonCpuFallbackRequired,
-    SemanticDaemonModelAcquisition, SemanticEmbeddingExecutor, SemanticModelLoadDeferred,
+    SemanticDaemonCpuFallbackRequired, SemanticDaemonModelAcquisition, SemanticEmbeddingExecutor,
+    SemanticModelLoadDeferred,
 };
 use serde_json::{json, Value};
 
@@ -22,8 +22,9 @@ use super::{
     daemon_scheduler::{daemon_deadline_has_min_budget, daemon_run_start_mode},
     paths_status::write_daemon_status,
     resource_policy::{
-        semantic_background_resource_deferred, semantic_resource_deferral_releases_runtime,
-        SemanticBackgroundOperation, SemanticResourceDeferred,
+        semantic_background_resource_deferred, semantic_external_background_resource_deferred,
+        semantic_resource_deferral_releases_runtime, SemanticBackgroundOperation,
+        SemanticResourceDeferred,
     },
     runtime_limits::{
         DAEMON_MIN_REMAINING_FOR_JOB_SECS, DAEMON_SEMANTIC_RESERVE_GRACE_SECS,
@@ -193,27 +194,37 @@ pub(super) fn run_daemon_semantic_job(
         ));
     }
 
-    let executor = BuiltinSemanticEmbeddingExecutor::new(
-        runtime.semantic_runtime.clone(),
-        config.semantic_model_config(data_root),
-    );
-    // Bazel may materialize the model crate separately across this dependency
-    // boundary, so bridge compatibility by fingerprint before opening the
-    // index with its own contract type.
-    let index_contract = ctx_semantic_index::semantic_model_contract();
-    if executor.contract().fingerprint() != index_contract.fingerprint() {
-        return Err(anyhow::anyhow!(
-            "semantic executor model contract does not match the semantic index contract"
-        ));
-    }
-    let admission_operation = if executor.shared_runtime().is_loaded() {
-        SemanticBackgroundOperation::IndexBatch
-    } else {
-        SemanticBackgroundOperation::ModelLoad
+    let executor = match runtime.semantic_executor.clone() {
+        Some(executor) => executor,
+        None => {
+            let executor = Arc::new(
+                ctx_semantic_model::SemanticEmbeddingExecutorHandle::build_with_auth(
+                    runtime.config.semantic_executor.clone(),
+                    config.semantic_executor_auth()?,
+                    runtime.semantic_runtime.clone(),
+                    config.semantic_model_config(data_root),
+                )?,
+            );
+            runtime.semantic_executor = Some(Arc::clone(&executor));
+            executor
+        }
     };
-    if let Some(deferred) = semantic_background_resource_deferred(data_root, admission_operation) {
+    let semantic_executor = executor.executor();
+    let resource_deferred = if let Some(builtin) = executor.builtin_executor() {
+        let admission_operation = if builtin.shared_runtime().is_loaded() {
+            SemanticBackgroundOperation::IndexBatch
+        } else {
+            SemanticBackgroundOperation::ModelLoad
+        };
+        semantic_background_resource_deferred(data_root, admission_operation)
+    } else {
+        semantic_external_background_resource_deferred(data_root)
+    };
+    if let Some(deferred) = resource_deferred {
         if semantic_resource_deferral_releases_runtime(deferred.reason()) {
-            let _ = executor.shared_runtime().release_if_idle();
+            if let Some(builtin) = executor.builtin_executor() {
+                let _ = builtin.shared_runtime().release_if_idle();
+            }
         }
         return Ok(daemon_semantic_resource_deferred_job(
             last_run_at_ms,
@@ -222,7 +233,7 @@ pub(super) fn run_daemon_semantic_job(
     }
 
     let vector_path = source_backed_semantic_vector_path(data_root);
-    let mut vector_store = SemanticVectorStore::open(&vector_path, index_contract)?;
+    let mut vector_store = open_selected_semantic_vector_store(&vector_path, &executor)?;
     let source_eligible_events = source_generation.semantic_eligible_event_count()?;
     let source_pending = matches!(
         vector_store.source_backed_generation_pin_exact(
@@ -240,12 +251,17 @@ pub(super) fn run_daemon_semantic_job(
             None,
         ));
     }
-    let min_remaining_secs = if executor.shared_runtime().is_loaded() {
-        DAEMON_MIN_REMAINING_FOR_JOB_SECS
-    } else {
-        SEMANTIC_MODEL_INIT_MIN_REMAINING_SECS
-    }
-    .saturating_add(DAEMON_SEMANTIC_RESERVE_GRACE_SECS);
+    let min_remaining_secs = executor
+        .builtin_executor()
+        .map(|builtin| {
+            if builtin.shared_runtime().is_loaded() {
+                DAEMON_MIN_REMAINING_FOR_JOB_SECS
+            } else {
+                SEMANTIC_MODEL_INIT_MIN_REMAINING_SECS
+            }
+        })
+        .unwrap_or(DAEMON_MIN_REMAINING_FOR_JOB_SECS)
+        .saturating_add(DAEMON_SEMANTIC_RESERVE_GRACE_SECS);
     if !daemon_deadline_has_min_budget(deadline, min_remaining_secs) {
         return Ok(daemon_semantic_job_json(
             "skipped",
@@ -255,25 +271,26 @@ pub(super) fn run_daemon_semantic_job(
             None,
         ));
     }
-    let source_model_load_needed =
-        source_eligible_events > 0 && !executor.shared_runtime().is_loaded();
-    if source_model_load_needed {
+    if let Some(builtin) = executor
+        .builtin_executor()
+        .filter(|builtin| source_eligible_events > 0 && !builtin.shared_runtime().is_loaded())
+    {
         match run_daemon_semantic_model_startup_with(
             last_run_at_ms,
             || {
-                executor
+                builtin
                     .shared_runtime()
-                    .acquire_for_daemon(executor.config(), artifact_fetcher)
+                    .acquire_for_daemon(builtin.config(), artifact_fetcher)
             },
             |fallback| {
-                executor
+                builtin
                     .shared_runtime()
-                    .acquire_cpu_fallback_for_daemon(executor.config(), fallback)
+                    .acquire_cpu_fallback_for_daemon(builtin.config(), fallback)
             },
             |acquisition| {
-                executor
+                builtin
                     .shared_runtime()
-                    .ensure_loaded_after_daemon_acquisition(executor.config(), acquisition)?;
+                    .ensure_loaded_after_daemon_acquisition(builtin.config(), acquisition)?;
                 Ok(())
             },
         )? {
@@ -285,7 +302,7 @@ pub(super) fn run_daemon_semantic_job(
         data_root,
         source_generation,
         &mut vector_store,
-        &executor,
+        semantic_executor,
         deadline,
     )?;
     let (status, reason, last_error) = if outcome.ready() {
@@ -302,6 +319,50 @@ pub(super) fn run_daemon_semantic_job(
     );
     annotate_source_backed_semantic_progress(&mut job, &outcome);
     Ok(job)
+}
+
+fn open_selected_semantic_vector_store(
+    vector_path: &Path,
+    executor: &ctx_semantic_model::SemanticEmbeddingExecutorHandle,
+) -> Result<SemanticVectorStore> {
+    verify_external_semantic_contract_before_store_open(executor)?;
+    let contract = semantic_index_contract(executor.executor().contract())?;
+    SemanticVectorStore::open(vector_path, &contract)
+}
+
+pub(super) fn semantic_index_contract(
+    selected: &ctx_semantic_model::SemanticModelContract,
+) -> Result<ctx_semantic_index::SemanticModelContract> {
+    if let Some(space) = selected.external_space() {
+        let endpoint = selected.external_http_endpoint().ok_or_else(|| {
+            anyhow::anyhow!("external semantic contract has no endpoint identity")
+        })?;
+        return ctx_semantic_index::external_http_semantic_model_contract(
+            endpoint,
+            space.space_id(),
+            space.dimensions(),
+        );
+    }
+    if let Some(endpoint) = selected.external_http_endpoint() {
+        return ctx_semantic_index::legacy_fixed_http_semantic_model_contract(endpoint);
+    }
+    let local = ctx_semantic_index::semantic_model_contract();
+    if selected.fingerprint() != local.fingerprint() {
+        return Err(anyhow::anyhow!(
+            "semantic executor model contract does not match the semantic index contract"
+        ));
+    }
+    Ok(local.clone())
+}
+
+/// Establishes the endpoint's configured identity before a mismatched writable
+/// vector store can perform its existing reset-on-open recovery. V2 verification
+/// is a content-free GET; retained fixed-E5 V1 may submit only frozen public
+/// canary probes and never user history or query content.
+fn verify_external_semantic_contract_before_store_open(
+    executor: &ctx_semantic_model::SemanticEmbeddingExecutorHandle,
+) -> Result<()> {
+    executor.verify_contract()
 }
 
 fn reconcile_source_backed_semantic_page(

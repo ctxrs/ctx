@@ -423,6 +423,156 @@ fn semantic_namespace_is_explicit_readable_and_retains_downloaded_assets() {
 }
 
 #[test]
+fn semantic_executor_selection_round_trips_local_remote_and_builtin_privacy() {
+    let temp = tempdir();
+    fs::create_dir_all(data_root(&temp)).unwrap();
+    fs::write(
+        data_root(&temp).join("config.toml"),
+        "[indexing]\nmode = \"manual\"\n",
+    )
+    .unwrap();
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}/embed", listener.local_addr().unwrap());
+    let contract_server = std::thread::spawn(move || {
+        use std::io::{Read as _, Write as _};
+
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        let mut request = Vec::new();
+        let mut chunk = [0_u8; 1024];
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let count = stream.read(&mut chunk).unwrap();
+            assert!(count > 0, "semantic contract request ended before headers");
+            request.extend_from_slice(&chunk[..count]);
+        }
+        assert!(
+            String::from_utf8_lossy(&request).starts_with("GET /embed/v2/contract HTTP/1.1\r\n"),
+            "unexpected semantic discovery request: {}",
+            String::from_utf8_lossy(&request)
+        );
+        let body =
+            br#"{"schema_version":2,"space_id":"contract-test-loopback-v1","dimensions":384}"#;
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .unwrap();
+        stream.write_all(body).unwrap();
+    });
+
+    let loopback = json_output(ctx(&temp).args([
+        "semantic",
+        "enable",
+        "--executor",
+        &endpoint,
+        "--format=json",
+    ]));
+    contract_server.join().unwrap();
+    assert_eq!(loopback["enabled"], true, "{loopback:#}");
+    assert_eq!(loopback["executor"]["kind"], "http", "{loopback:#}");
+    assert_eq!(loopback["executor"]["scope"], "loopback", "{loopback:#}");
+    assert_eq!(
+        loopback["executor"]["content_leaves_machine"], false,
+        "{loopback:#}"
+    );
+    assert_eq!(loopback["local_only"], false, "{loopback:#}");
+    assert_eq!(
+        loopback["executor"]["space_id"], "contract-test-loopback-v1",
+        "{loopback:#}"
+    );
+    assert_eq!(loopback["executor"]["dimensions"], 384, "{loopback:#}");
+
+    fs::write(
+        data_root(&temp).join("config.toml"),
+        "[indexing]\nmode = \"manual\"\n[search]\nsemantic = true\n[semantic]\nexecutor = \"https://embeddings.example.test/v1/\"\nspace_id = \"contract-test-remote-v1\"\ndimensions = 768\n",
+    )
+    .unwrap();
+    let remote = json_output(ctx(&temp).args(["semantic", "status", "--format=json"]));
+    assert_eq!(remote["enabled"], true, "{remote:#}");
+    assert_eq!(remote["executor"]["kind"], "http", "{remote:#}");
+    assert_eq!(remote["executor"]["scope"], "remote", "{remote:#}");
+    assert_eq!(
+        remote["executor"]["content_leaves_machine"], true,
+        "{remote:#}"
+    );
+    assert_eq!(remote["local_only"], false, "{remote:#}");
+    assert_eq!(
+        remote["executor"]["space_id"], "contract-test-remote-v1",
+        "{remote:#}"
+    );
+    assert_eq!(remote["executor"]["dimensions"], 768, "{remote:#}");
+
+    let persisted = fs::read_to_string(data_root(&temp).join("config.toml")).unwrap();
+    assert!(
+        persisted.contains("executor = \"https://embeddings.example.test/v1/\""),
+        "{persisted}"
+    );
+    let status = json_output(ctx(&temp).args(["semantic", "status", "--format=json"]));
+    assert_eq!(status["executor"], remote["executor"], "{status:#}");
+    assert_eq!(status["local_only"], false, "{status:#}");
+
+    let legacy_config = "[indexing]\nmode = \"manual\"\n[search]\nsemantic = true\n[semantic]\nexecutor = \"https://legacy-embeddings.example.test/ctx/\"\n";
+    fs::write(data_root(&temp).join("config.toml"), legacy_config).unwrap();
+    let legacy = json_output(ctx(&temp).args(["semantic", "status", "--format=json"]));
+    assert_eq!(legacy["executor"]["kind"], "http", "{legacy:#}");
+    assert_eq!(
+        legacy["executor"]["protocol_schema_version"], 1,
+        "{legacy:#}"
+    );
+    assert_eq!(
+        legacy["executor"]["space_id"],
+        serde_json::Value::Null,
+        "{legacy:#}"
+    );
+    assert_eq!(
+        legacy["executor"]["dimensions"],
+        serde_json::Value::Null,
+        "{legacy:#}"
+    );
+    assert_eq!(legacy["local_only"], false, "{legacy:#}");
+    assert_eq!(
+        fs::read_to_string(data_root(&temp).join("config.toml")).unwrap(),
+        legacy_config,
+        "read-only status must not rewrite endpoint-only V1 configuration"
+    );
+
+    let builtin = json_output(ctx(&temp).args([
+        "semantic",
+        "enable",
+        "--executor",
+        "builtin",
+        "--format=json",
+    ]));
+    assert_eq!(builtin["executor"]["kind"], "builtin", "{builtin:#}");
+    assert_eq!(builtin["executor"]["scope"], "builtin", "{builtin:#}");
+    assert_eq!(
+        builtin["executor"]["content_leaves_machine"], false,
+        "{builtin:#}"
+    );
+    assert_eq!(builtin["local_only"], true, "{builtin:#}");
+    let persisted = fs::read_to_string(data_root(&temp).join("config.toml")).unwrap();
+    assert!(!persisted.contains("executor ="), "{persisted}");
+
+    ctx(&temp)
+        .args([
+            "semantic",
+            "enable",
+            "--executor",
+            " https://embeddings.example.test/v1",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("semantic embedding endpoint"));
+    let persisted_after_rejection =
+        fs::read_to_string(data_root(&temp).join("config.toml")).unwrap();
+    assert_eq!(persisted_after_rejection, persisted);
+}
+
+#[test]
 fn semantic_wait_rejects_manual_mode_before_persisting_opt_in() {
     let temp = tempdir();
     fs::create_dir_all(data_root(&temp)).unwrap();

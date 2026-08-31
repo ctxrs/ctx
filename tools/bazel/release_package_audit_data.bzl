@@ -3,6 +3,7 @@
 RELEASE_PACKAGE_AUDIT_PACKAGE_DATA = [
     "//crates/ctx-agent-application:cargo_package_data",
     "//crates/ctx-agent-integrations:cargo_package_data",
+    "//crates/ctx-app-config:cargo_package_data",
     "//crates/ctx-companion-bridge:cargo_package_data",
     "//crates/ctx-cli:cargo_package_data",
     "//crates/ctx-cli-qualification:cargo_package_data",

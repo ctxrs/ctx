@@ -33,6 +33,10 @@ use sha2::{Digest, Sha256};
 
 use super::{AuthorityOpenError, DirectoryEntryVisitError};
 
+#[path = "windows/access.rs"]
+mod access;
+use access::ProviderSourceOpenKind;
+
 const DIRECTORY_QUERY_BUFFER_BYTES: usize = 64 * 1024;
 const ERROR_NO_MORE_FILES: i32 = 18;
 const ERROR_CLOUD_FILE_NOT_UNDER_SYNC_ROOT_HRESULT: i32 =
@@ -40,17 +44,33 @@ const ERROR_CLOUD_FILE_NOT_UNDER_SYNC_ROOT_HRESULT: i32 =
 const ERROR_INVALID_FUNCTION_HRESULT: i32 = win32_error_hresult(ERROR_INVALID_FUNCTION);
 const CF_SYNC_ROOT_INFO_BASIC: i32 = 0;
 
-const FILE_READ_ATTRIBUTES: u32 = 0x0000_0080;
-const FILE_READ_DATA: u32 = 0x0000_0001;
-const SYNCHRONIZE: u32 = 0x0010_0000;
-const PROVIDER_SOURCE_READ_ACCESS: u32 = FILE_READ_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE;
 const OBJ_CASE_INSENSITIVE: u32 = 0x0000_0040;
-const FILE_SYNCHRONOUS_IO_NONALERT: u32 = 0x0000_0020;
-const FILE_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 const DRIVE_FIXED: u32 = 3;
 
 const fn win32_error_hresult(error: u32) -> i32 {
     (0x8007_0000_u32 | (error & 0x0000_FFFF)) as i32
+}
+
+#[derive(Debug)]
+struct WindowsIoContext {
+    operation: &'static str,
+    source: io::Error,
+}
+
+impl std::fmt::Display for WindowsIoContext {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}: {}", self.operation, self.source)
+    }
+}
+
+impl std::error::Error for WindowsIoContext {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
+fn contextual_windows_io(operation: &'static str, source: io::Error) -> io::Error {
+    io::Error::new(source.kind(), WindowsIoContext { operation, source })
 }
 
 #[link(name = "ntdll")]
@@ -152,16 +172,26 @@ pub(super) fn open_absolute(path: &Path) -> Result<OpenedPath, AuthorityOpenErro
         ));
     }
 
+    let root_kind = if names.is_empty() {
+        ProviderSourceOpenKind::Target
+    } else {
+        ProviderSourceOpenKind::AncestorDirectory
+    };
     let root = OpenOptions::new()
-        .read(true)
+        .access_mode(root_kind.desired_access())
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-        .open(drive_root_path)?;
+        .open(drive_root_path)
+        .map_err(|source| AuthorityOpenError::SystemIo {
+            operation: "provider source drive-root open",
+            source,
+        })?;
     let mut current = classify_opened(root)?;
     verify_root_drive(&current, drive)?;
     let root_filesystem = opened_filesystem(&current).clone();
 
-    for name in names {
+    let final_component = names.len().saturating_sub(1);
+    for (index, name) in names.into_iter().enumerate() {
         let parent = match &current {
             OpenedPath::Directory { file, .. } => file,
             OpenedPath::File { .. } => {
@@ -170,7 +200,12 @@ pub(super) fn open_absolute(path: &Path) -> Result<OpenedPath, AuthorityOpenErro
                 ));
             }
         };
-        current = open_child(parent, name, &root_filesystem)?;
+        let kind = if index == final_component {
+            ProviderSourceOpenKind::Target
+        } else {
+            ProviderSourceOpenKind::AncestorDirectory
+        };
+        current = open_child_with_kind(parent, name, &root_filesystem, kind)?;
     }
     Ok(current)
 }
@@ -180,8 +215,17 @@ pub(super) fn open_child(
     name: &OsStr,
     filesystem: &FilesystemIdentity,
 ) -> Result<OpenedPath, AuthorityOpenError> {
+    open_child_with_kind(parent, name, filesystem, ProviderSourceOpenKind::Target)
+}
+
+fn open_child_with_kind(
+    parent: &File,
+    name: &OsStr,
+    filesystem: &FilesystemIdentity,
+    kind: ProviderSourceOpenKind,
+) -> Result<OpenedPath, AuthorityOpenError> {
     validate_child_name(name)?;
-    let file = nt_open_child(parent, name)?;
+    let file = nt_open_child(parent, name, kind)?;
     let opened = classify_opened(file)?;
     if opened_filesystem(&opened) != filesystem {
         return Err(AuthorityOpenError::Rejected(
@@ -239,7 +283,12 @@ pub(super) fn visit_directory_entries<E>(
             if cause.raw_os_error() == Some(ERROR_NO_MORE_FILES) {
                 break;
             }
-            return Err(DirectoryEntryVisitError::Authority(cause.into()));
+            return Err(DirectoryEntryVisitError::Authority(
+                AuthorityOpenError::SystemIo {
+                    operation: "provider source directory enumeration",
+                    source: cause,
+                },
+            ));
         }
         restart = false;
         visit_directory_buffer(&buffer, visit)?;
@@ -297,14 +346,32 @@ pub(super) fn retained_file_identity(
     version: super::RetainedFileIdentityVersion,
 ) -> Result<Option<([u8; 32], [u8; 32])>, AuthorityOpenError> {
     let mut basic = FILE_BASIC_INFO::default();
-    query_handle_info(file, FileBasicInfo, &mut basic)?;
+    query_handle_info(
+        file,
+        FileBasicInfo,
+        &mut basic,
+        "GetFileInformationByHandleEx(FileBasicInfo)",
+    )
+    .map_err(|source| AuthorityOpenError::SystemIo {
+        operation: "provider source retained-identity query",
+        source,
+    })?;
     if basic.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
         return Err(AuthorityOpenError::Rejected(
             "reparse-point provider transcript files are rejected",
         ));
     }
     let mut id = FILE_ID_INFO::default();
-    query_handle_info(file, FileIdInfo, &mut id)?;
+    query_handle_info(
+        file,
+        FileIdInfo,
+        &mut id,
+        "GetFileInformationByHandleEx(FileIdInfo)",
+    )
+    .map_err(|source| AuthorityOpenError::SystemIo {
+        operation: "provider source retained-identity query",
+        source,
+    })?;
     let mut stable = Sha256::new();
     let mut change = Sha256::new();
     match version {
@@ -396,7 +463,7 @@ fn read_at(file: &File, bytes: &mut [u8], offset: u64) -> io::Result<usize> {
         if cause.raw_os_error() == Some(ERROR_HANDLE_EOF as i32) {
             Ok(0)
         } else {
-            Err(cause)
+            Err(contextual_windows_io("ReadFile", cause))
         }
     }
 }
@@ -466,7 +533,11 @@ fn validate_child_name(name: &OsStr) -> Result<(), AuthorityOpenError> {
     Ok(())
 }
 
-fn nt_open_child(parent: &File, name: &OsStr) -> Result<File, AuthorityOpenError> {
+fn nt_open_child(
+    parent: &File,
+    name: &OsStr,
+    kind: ProviderSourceOpenKind,
+) -> Result<File, AuthorityOpenError> {
     let mut units = name.encode_wide().collect::<Vec<_>>();
     let length = units
         .len()
@@ -498,17 +569,25 @@ fn nt_open_child(parent: &File, name: &OsStr) -> Result<File, AuthorityOpenError
     let status = unsafe {
         NtOpenFile(
             &mut handle,
-            PROVIDER_SOURCE_READ_ACCESS,
+            kind.desired_access(),
             &attributes,
             &mut io_status,
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-            FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT,
+            kind.open_options(),
         )
     };
     if status < 0 {
         let windows_error = unsafe { RtlNtStatusToDosError(status) };
         let windows_error = i32::try_from(windows_error).unwrap_or(i32::MAX);
-        return Err(io::Error::from_raw_os_error(windows_error).into());
+        return Err(AuthorityOpenError::SystemIo {
+            operation: match kind {
+                ProviderSourceOpenKind::AncestorDirectory => {
+                    "provider source ancestor-directory open"
+                }
+                ProviderSourceOpenKind::Target => "provider source target open",
+            },
+            source: io::Error::from_raw_os_error(windows_error),
+        });
     }
     if handle.is_null() {
         return Err(AuthorityOpenError::Rejected(
@@ -519,8 +598,16 @@ fn nt_open_child(parent: &File, name: &OsStr) -> Result<File, AuthorityOpenError
 }
 
 fn classify_opened(file: File) -> Result<OpenedPath, AuthorityOpenError> {
-    let metadata = file.metadata()?;
-    let details = handle_details(&file)?;
+    let metadata = file
+        .metadata()
+        .map_err(|source| AuthorityOpenError::SystemIo {
+            operation: "provider source metadata query",
+            source,
+        })?;
+    let details = handle_details(&file).map_err(|source| AuthorityOpenError::SystemIo {
+        operation: "provider source handle-information query",
+        source,
+    })?;
     ensure_handle_is_ordinary(&file, &details)?;
     let filesystem = filesystem_identity(&file, &details)?;
     ensure_not_cloud_root(&file, &filesystem)?;
@@ -551,11 +638,26 @@ struct HandleDetails {
 
 fn handle_details(file: &File) -> io::Result<HandleDetails> {
     let mut basic = FILE_BASIC_INFO::default();
-    query_handle_info(file, FileBasicInfo, &mut basic)?;
+    query_handle_info(
+        file,
+        FileBasicInfo,
+        &mut basic,
+        "GetFileInformationByHandleEx(FileBasicInfo)",
+    )?;
     let mut id = FILE_ID_INFO::default();
-    query_handle_info(file, FileIdInfo, &mut id)?;
+    query_handle_info(
+        file,
+        FileIdInfo,
+        &mut id,
+        "GetFileInformationByHandleEx(FileIdInfo)",
+    )?;
     let mut tags = FILE_ATTRIBUTE_TAG_INFO::default();
-    query_handle_info(file, FileAttributeTagInfo, &mut tags)?;
+    query_handle_info(
+        file,
+        FileAttributeTagInfo,
+        &mut tags,
+        "GetFileInformationByHandleEx(FileAttributeTagInfo)",
+    )?;
     Ok(HandleDetails {
         basic,
         id,
@@ -563,7 +665,12 @@ fn handle_details(file: &File) -> io::Result<HandleDetails> {
     })
 }
 
-fn query_handle_info<T>(file: &File, class: i32, output: &mut T) -> io::Result<()> {
+fn query_handle_info<T>(
+    file: &File,
+    class: i32,
+    output: &mut T,
+    operation: &'static str,
+) -> io::Result<()> {
     let output_size = u32::try_from(size_of::<T>())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "handle info is too large"))?;
     let result = unsafe {
@@ -575,7 +682,7 @@ fn query_handle_info<T>(file: &File, class: i32, output: &mut T) -> io::Result<(
         )
     };
     if result == 0 {
-        Err(io::Error::last_os_error())
+        Err(contextual_windows_io(operation, io::Error::last_os_error()))
     } else {
         Ok(())
     }
@@ -699,7 +806,10 @@ fn filesystem_identity(
         )
     };
     if result == 0 {
-        return Err(io::Error::last_os_error().into());
+        return Err(AuthorityOpenError::SystemIo {
+            operation: "provider source volume-information query",
+            source: io::Error::last_os_error(),
+        });
     }
     let end = filesystem_name
         .iter()
@@ -740,7 +850,10 @@ fn verify_root_drive(opened: &OpenedPath, expected_drive: u8) -> Result<(), Auth
         )
     };
     if required == 0 {
-        return Err(io::Error::last_os_error().into());
+        return Err(AuthorityOpenError::SystemIo {
+            operation: "provider source drive-path qualification",
+            source: io::Error::last_os_error(),
+        });
     }
     let mut buffer = vec![0_u16; required as usize + 1];
     let written = unsafe {
@@ -752,7 +865,10 @@ fn verify_root_drive(opened: &OpenedPath, expected_drive: u8) -> Result<(), Auth
         )
     };
     if written == 0 || written as usize >= buffer.len() {
-        return Err(io::Error::last_os_error().into());
+        return Err(AuthorityOpenError::SystemIo {
+            operation: "provider source drive-path qualification",
+            source: io::Error::last_os_error(),
+        });
     }
     buffer.truncate(written as usize);
     let prefix = [
@@ -859,70 +975,5 @@ fn ascii_upper_u16(value: u16) -> u16 {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn verified_ntfs() -> FilesystemIdentity {
-        FilesystemIdentity {
-            volume_serial_number: 1,
-            filesystem_name: "NTFS".to_owned(),
-        }
-    }
-
-    #[test]
-    fn explicit_non_cloud_and_unsupported_verified_ntfs_results_are_accepted() {
-        let filesystem = verified_ntfs();
-        assert!(
-            qualify_sync_root_query(ERROR_CLOUD_FILE_NOT_UNDER_SYNC_ROOT_HRESULT, &filesystem,)
-                .is_ok()
-        );
-        assert!(qualify_sync_root_query(ERROR_INVALID_FUNCTION_HRESULT, &filesystem).is_ok());
-    }
-
-    #[test]
-    fn unsupported_cloud_query_requires_verified_ntfs() {
-        let unqualified = FilesystemIdentity {
-            volume_serial_number: 1,
-            filesystem_name: "ReFS".to_owned(),
-        };
-        assert!(matches!(
-            qualify_sync_root_query(ERROR_INVALID_FUNCTION_HRESULT, &unqualified),
-            Err(AuthorityOpenError::Rejected(
-                "Windows could not qualify the provider source as non-cloud storage"
-            ))
-        ));
-    }
-
-    #[test]
-    fn not_a_cloud_placeholder_does_not_prove_not_under_sync_root() {
-        let filesystem = verified_ntfs();
-
-        let not_a_cloud_file =
-            win32_error_hresult(windows_sys::Win32::Foundation::ERROR_NOT_A_CLOUD_FILE);
-        assert!(matches!(
-            qualify_sync_root_query(not_a_cloud_file, &filesystem),
-            Err(AuthorityOpenError::Rejected(
-                "Windows could not qualify the provider source as non-cloud storage"
-            ))
-        ));
-    }
-
-    #[test]
-    fn sync_root_and_ambiguous_query_results_remain_rejected() {
-        let filesystem = verified_ntfs();
-        let access_denied =
-            win32_error_hresult(windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED);
-        assert!(matches!(
-            qualify_sync_root_query(0, &filesystem),
-            Err(AuthorityOpenError::Rejected(
-                "cloud-synchronized provider source roots are rejected"
-            ))
-        ));
-        assert!(matches!(
-            qualify_sync_root_query(access_denied, &filesystem),
-            Err(AuthorityOpenError::Rejected(
-                "Windows could not qualify the provider source as non-cloud storage"
-            ))
-        ));
-    }
-}
+#[path = "windows/tests.rs"]
+mod tests;

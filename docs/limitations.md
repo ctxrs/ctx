@@ -73,11 +73,14 @@ shipped.
   not a claim of semantic understanding.
 - Empty or punctuation-only search is invalid. Broad valid queries can still
   return metadata-driven matches.
-- Semantic embeddings depend on a compatible local ONNX Runtime backend and
-  the opt-in ctx daemon query service. Release/platform combinations without a
-  validated local runtime remain lexical-safe: `hybrid` falls back to lexical
-  and explicit `semantic` reports a local unavailable/runtime error instead of
-  linking an unsupported backend.
+- Semantic embeddings depend on the explicitly selected executor and the opt-in
+  ctx daemon query service. The built-in executor still requires a compatible
+  local runtime. An external executor normally serves the V2 contract for its
+  explicitly accepted opaque vector space. The retained V1 compatibility route
+  is limited to the exact fixed-E5 contract. ctx never silently falls back to
+  built-in execution. Executor, transport, identity, and vector-validation
+  failures remain lexical-safe: `hybrid` can return lexical results with an
+  explicit fallback diagnostic, while explicit `semantic` reports the failure.
 - Automatic semantic indexing requires auto mode. Use `ctx index mode auto`
   before `ctx semantic enable --wait` when manual mode is configured. A plain
   `ctx semantic enable` still records the opt-in in manual mode. Lexical search
@@ -85,7 +88,7 @@ shipped.
   coverage is ready.
 - The ctx macOS CLI targets macOS 13, but ONNX Runtime 1.27 follows its upstream
   macOS 14 minimum. On macOS 13, daemon-backed lexical search remains available
-  while semantic search is unavailable.
+  when the built-in semantic executor is unavailable.
 
 ## Retrieval Semantics
 
@@ -100,7 +103,10 @@ shipped.
 
 ## Operations
 
-- Core setup/import/search are local filesystem operations.
+- Core setup/import and lexical search are local filesystem operations.
+  User-selected remote URL executors receive raw semantic query text and
+  ctx-created document chunks only after semantic search is explicitly enabled
+  with that executor.
 - Official installer-managed binaries can use signed release metadata for an
   explicit `ctx upgrade` command and automatic checks while automatic upgrades
   are enabled. Auto indexing with the full daemon profile uses the persistent

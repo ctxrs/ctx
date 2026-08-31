@@ -71,8 +71,11 @@ results remain unchanged. See
 ## Local and hosted backends
 
 Local clients execute the local `ctx` CLI and adapt its JSON into the public
-`agent-history-v1` contract. Local mode stays local-first: it does not make network
-calls, call provider APIs, require API keys, or upload transcripts.
+`agent-history-v1` contract. The SDK adapter does not call provider APIs or
+upload transcripts on its own. The local CLI stays on-machine with the built-in
+executor, but a search can use the network and send raw query text and eligible
+ctx-created document chunks when the data root has an explicitly selected
+external semantic executor.
 
 Hosted client configuration is reserved for future ctx service support. Until a
 hosted service exists, hosted operations fail before network I/O with a

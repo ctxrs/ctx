@@ -9,6 +9,7 @@
 pub struct HistoryCliConfig {
     pub daemon_enabled: bool,
     pub semantic_search_enabled: bool,
+    pub semantic_executor: ctx_daemon_cli::SemanticEmbeddingExecutorConfig,
     pub local_usage_enabled: bool,
     /// Provider discovery policy captured from the final host exactly once for
     /// this command invocation.
@@ -51,6 +52,7 @@ pub(crate) struct AppConfig {
     pub(crate) daemon: DaemonConfig,
     pub(crate) local_usage: LocalUsageConfig,
     semantic_enabled: bool,
+    semantic_executor: ctx_daemon_cli::SemanticEmbeddingExecutorConfig,
 }
 
 #[derive(Debug, Clone)]
@@ -76,11 +78,23 @@ impl AppConfig {
                 enabled: config.local_usage_enabled,
             },
             semantic_enabled: config.semantic_search_enabled,
+            semantic_executor: config.semantic_executor,
         }
     }
 
     pub(crate) const fn semantic_search_enabled(&self) -> bool {
         self.semantic_enabled
+    }
+
+    pub(crate) fn semantic_embedding_executor(
+        &self,
+    ) -> &ctx_daemon_cli::SemanticEmbeddingExecutorConfig {
+        &self.semantic_executor
+    }
+
+    pub(crate) fn semantic_executor_supported(&self) -> bool {
+        self.semantic_executor.http_endpoint().is_some()
+            || ctx_daemon_cli::semantic_query_service_supported()
     }
 }
 
@@ -126,6 +140,7 @@ mod tests {
             snapshot: HistoryCliConfig {
                 daemon_enabled: true,
                 semantic_search_enabled: false,
+                semantic_executor: ctx_daemon_cli::SemanticEmbeddingExecutorConfig::builtin(),
                 local_usage_enabled: true,
                 automatic_provider_discovery: true,
                 provider_roots: Vec::new(),
@@ -146,6 +161,11 @@ mod tests {
         let config = AppConfig::from_snapshot(HistoryCliConfig {
             daemon_enabled: false,
             semantic_search_enabled: true,
+            semantic_executor: ctx_daemon_cli::SemanticEmbeddingExecutorConfig::http(
+                "http://127.0.0.1:9",
+                ctx_daemon_cli::ExternalSemanticSpace::new("test-space", 384).unwrap(),
+            )
+            .unwrap(),
             local_usage_enabled: false,
             automatic_provider_discovery: true,
             provider_roots: Vec::new(),
@@ -153,6 +173,11 @@ mod tests {
 
         assert!(!config.daemon.enabled);
         assert!(config.semantic_search_enabled());
+        assert_eq!(
+            config.semantic_embedding_executor().http_endpoint(),
+            Some("http://127.0.0.1:9/")
+        );
+        assert!(config.semantic_executor_supported());
         assert!(!config.local_usage.enabled);
     }
 
@@ -161,6 +186,7 @@ mod tests {
         let config = AppConfig::from_snapshot(HistoryCliConfig {
             daemon_enabled: true,
             semantic_search_enabled: false,
+            semantic_executor: ctx_daemon_cli::SemanticEmbeddingExecutorConfig::builtin(),
             local_usage_enabled: true,
             automatic_provider_discovery: true,
             provider_roots: Vec::new(),

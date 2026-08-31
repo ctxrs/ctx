@@ -138,6 +138,10 @@ pub fn render_search_json(input: SearchJsonInput<'_>) -> Result<Value> {
             "semantic_status": collection.semantic_status,
             "semantic_fallback_code": semantic_fallback_code,
             "semantic_fallback": semantic_fallback_detail,
+            "semantic_fallback_retryable": collection
+                .semantic_fallback
+                .as_ref()
+                .map(|fallback| fallback.retryable),
             "semantic_diagnostics": semantic_diagnostics,
             "index": "core",
             "generation_id": index.generation_id(),
@@ -179,17 +183,19 @@ pub fn semantic_diagnostics_read_model(
     fallback_detail: Option<&str>,
 ) -> Option<Value> {
     let mut diagnostics = collection.semantic_diagnostics.clone()?;
-    if collection.semantic_fallback.is_none() {
+    let Some(fallback) = collection.semantic_fallback.as_ref() else {
         return Some(diagnostics);
-    }
+    };
     let Some(object) = diagnostics.as_object_mut() else {
         return Some(diagnostics);
     };
     object.insert(
         "fallback".to_owned(),
         json!({
-            "code": fallback_code,
-            "detail": fallback_detail,
+            "code": fallback_code.or(fallback.code),
+            "reason": fallback.reason.map(|reason| format!("{reason:?}")),
+            "detail": fallback_detail.unwrap_or(&fallback.detail),
+            "retryable": fallback.retryable,
         }),
     );
     Some(diagnostics)

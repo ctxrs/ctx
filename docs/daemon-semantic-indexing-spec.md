@@ -1,7 +1,6 @@
 # Indexing and Semantic Search Spec
 
-This spec records the product and architecture decision for local semantic
-search.
+This spec records the product and architecture decision for semantic search.
 
 ## Decision
 
@@ -33,7 +32,8 @@ opted-in semantic or nonzero-weight hybrid `--refresh wait` may reconcile the
 semantic document projection for that exact generation and embed the query in
 the waiting foreground process. Daemon-free `--refresh off` and `--refresh
 background` may embed a query in the foreground only when the exact semantic
-generation and verified cached model assets are already ready. They never
+generation and verified cached model assets are already ready, or through an
+explicitly selected HTTP executor after the same exact preflight. They never
 reconcile or write projection state.
 
 The public retrieval modes are:
@@ -53,8 +53,14 @@ Freshness is separate from retrieval mode:
 | Freshness | Meaning |
 | --- | --- |
 | `background` | Default. Serve current indexes; start/poke persistent daemon work only in automatic indexing mode. Manual mode may query an already-ready semantic projection and is otherwise refresh-inert. |
-| `off` | Serve current indexes and do not start, poke, wait for, or run indexing. A daemon-free query may use an already-ready semantic projection and verified cached model assets. |
+| `off` | Serve current indexes and do not start, poke, wait for, or run indexing. A daemon-free query may use an already-ready semantic projection with verified cached model assets, or its explicitly selected HTTP executor after exact preflight. |
 | `wait` | Wait for authoritative Core publication from the persistent daemon or a manual-mode finite Core worker, then search or fail with a clear local error. |
+
+When an automatic-mode `wait` search needs semantic evidence, it also waits
+for the daemon's semantic acknowledgement of the selected Core generation. If
+Core advances during that bounded wait, search repins Core and semantic
+together before querying. Lexical, zero-weight hybrid, and unsupported semantic
+scopes skip this wait.
 
 The existing `strict` behavior can map to `wait` for command-line users while
 the public docs move to `wait`. Do not add compatibility aliases unless a
@@ -76,6 +82,31 @@ existing structured metadata:
 No LLM is used to create semantic documents. No inferred "important findings"
 or summarization is allowed in the local indexing path.
 
+## Embedding Executor Contract
+
+The built-in multilingual E5 executor is the local default. The command `ctx
+semantic enable --executor builtin|URL` selects the executor used for both
+document indexing and query embedding; bare `ctx semantic enable` preserves the
+current selection. Each data root has one accepted vector space. An explicit
+URL selection tries protocol V2 first and persists its endpoint, opaque
+`space_id`, and dimensions. Fixed-E5 V1 is retained only as an endpoint-only
+fallback when V2 returns 404; its vector identity remains the pinned built-in
+contract. `schema_version` is not a config field.
+
+The normative URL, authentication, privacy, wire protocol, identity, and
+responsibility boundary is the
+[external semantic executor contract](semantic-executors.md). This document
+owns only its daemon lifecycle integration.
+
+The daemon constructs one executor per applied configuration and uses it for
+both indexing and query embedding. Endpoint identity drift fails closed without
+falling back to E5. Rerunning `ctx semantic enable --executor URL` explicitly
+accepts the current identity; if it changed, ctx wipes and rebuilds only the
+derived semantic index. Core history and lexical generations remain intact.
+
+`ctx semantic status` reads persisted and observed local state only. It does
+not require the token, send it, probe either route, or make any network request.
+
 ## Setup UX
 
 `ctx setup` should initialize local state, identify/index or enqueue available
@@ -83,11 +114,14 @@ history, start persistent daemon maintenance in automatic mode, and return
 promptly. Manual setup starts no worker. Setup should not block for full
 semantic completion by default.
 
-`ctx semantic enable` records the semantic-search opt-in. In auto mode it starts
-or recovers daemon-owned model acquisition and indexing; `--wait` waits for the
-current projection. A user who wants automatic catch-up from manual mode runs
-`ctx index mode auto` first. Lexical search remains available while embeddings
-build; hybrid retrieval uses both indexes when coverage is ready.
+`ctx semantic enable` records the semantic-search opt-in without changing the
+selected executor. An explicit URL also discovers and accepts the endpoint's
+vector-space identity. In auto mode the command starts or recovers daemon-owned
+executor preparation and indexing;
+`--wait` waits for the current projection. A user who wants
+automatic catch-up from manual mode runs `ctx index mode auto` first. Lexical
+search remains available while embeddings build; hybrid retrieval uses both
+indexes when coverage is ready.
 
 Default human output should include a strong foreground signal:
 
@@ -127,9 +161,17 @@ between maintenance cycles. A later supported semantic opt-in plus repeat setup
 must activate daemon-owned query service and indexing in the existing process;
 config-file mutation alone is not activation. Status reports current requested
 configuration, last daemon-applied configuration, reload failure, and observed
-semantic runtime ownership separately. A failed reload retains the last
-known-good runtime, and a failed semantic activation must never report the
-semantic job as enabled.
+semantic runtime ownership separately. A config parse/read failure is
+fail-closed for semantic work: ctx stops the query service, releases the
+executor, reports `daemon_config_reload_failed`, and retains `last_run_*` only
+as historical status. Core refresh continues independently, and the semantic
+runtime can recover after a later valid reload. Executor rotation follows the
+same no-fallback rule: once a newly requested executor differs from the applied
+executor, ctx stops the old query service and releases the old executor before
+it prepares the replacement. If replacement activation fails, ctx does not
+resume or send work to the old executor; requested intent remains visible,
+while applied semantic state and runtime ownership are inactive and the
+semantic job is not reported as enabled.
 
 ## Foreground Progress Commands
 
@@ -221,12 +263,20 @@ background startup; there is no separate public daemon start command.
 
 - No public `auto` retrieval mode.
 - No lexical-then-semantic fallback as the default strategy.
-- Daemon-free `--refresh off` and `--refresh background` queries may embed from
-  verified cached model assets only after exact-generation preflight succeeds;
-  they never acquire a model, reconcile coverage, or write projection state.
+- With automatic indexing disabled, direct CLI `--refresh off` and
+  `--refresh background` queries may embed from verified cached model assets
+  or use the configured HTTP executor only after
+  exact-generation preflight succeeds; they never acquire a model, reconcile
+  coverage, or write projection state. Passive preflight shares the existing
+  Flat transaction lock from SQLite sidecar inspection through control-schema
+  validation and exact Flat-generation pinning. It refuses WAL and rollback
+  journals and opens the main database immutable/read-only without creating
+  lock, WAL, or SHM files. Ordinary daemon and Reconcile preflight remains
+  WAL-aware so committed daemon work is visible.
   An opted-in manual-mode semantic or nonzero-weight hybrid `--refresh wait`
-  may acquire the pinned local model, reconcile semantic coverage for that
-  exact generation, and embed the query.
+  may prepare the selected executor, acquire the pinned local model when
+  selected, reconcile semantic coverage for that exact generation, and embed
+  the query.
 - No model download from foreground setup, import, status, doctor, MCP, or
   index-observer commands. Acquisition belongs to the opted-in daemon in auto
   mode and the explicit manual `--refresh wait` exception above; unverified

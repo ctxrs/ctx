@@ -183,6 +183,7 @@ pub fn install_systemd_supervisor(
         .ok_or_else(|| anyhow!("systemd user unit has no parent directory"))?;
     fs::create_dir_all(parent)
         .with_context(|| format!("create systemd user unit directory {}", parent.display()))?;
+    crate::write_supervisor_environment(spec)?;
     let unit = super::linux_systemd_unit(spec)?;
     write_atomic_supervisor_file_if_changed(path, unit.as_bytes())?;
     // Installation is a repair path: reload even when the on-disk bytes are
@@ -240,6 +241,7 @@ pub fn verify_systemd_registration(
     spec: &SupervisorSpec,
     manager_environment: &SupervisorManagerEnvironment,
 ) -> Result<()> {
+    crate::verify_supervisor_environment(spec)?;
     let identity = spec.identity();
     let service_name = identity.name();
     let path = identity.artifact_path();
@@ -380,6 +382,7 @@ pub fn install_launch_agent(
         .ok_or_else(|| anyhow!("LaunchAgent has no parent directory"))?;
     fs::create_dir_all(parent)
         .with_context(|| format!("create LaunchAgent directory {}", parent.display()))?;
+    crate::write_supervisor_environment(spec)?;
     write_atomic_supervisor_file(path, super::launch_agent_plist(spec)?.as_bytes())?;
     let domain = launchctl_domain();
     let mut bootout = supervisor_command("launchctl", manager_environment);
@@ -435,6 +438,7 @@ pub fn verify_launch_agent_registration(
     spec: &SupervisorSpec,
     manager_environment: &SupervisorManagerEnvironment,
 ) -> Result<()> {
+    crate::verify_supervisor_environment(spec)?;
     let identity = spec.identity();
     let path = identity.artifact_path();
     let registered =
@@ -735,6 +739,7 @@ mod tests {
         let spec = SupervisorSpec::new(
             identity,
             "ctx test daemon",
+            crate::supervisor_environment_path(temp.path()),
             crate::NormalizedLaunch::new(
                 PathBuf::from("/opt/ctx/bin/ctx"),
                 vec![OsString::from("daemon"), OsString::from("run")],

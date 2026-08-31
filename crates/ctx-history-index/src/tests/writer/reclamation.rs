@@ -20,7 +20,7 @@ fn writer_open_reclaims_unreferenced_and_quarantined_manifests() {
     let obsolete_integrity =
         directory.join("generation-0123456789abcdef0123456789abcdef.integrity.json");
     let uppercase_integrity =
-        directory.join("generation-0123456789ABCDEF0123456789ABCDEF.integrity.json");
+        directory.join("generation-FEDCBA9876543210FEDCBA9876543210.integrity.json");
     let sha256_integrity = directory.join(format!(
         "generation-{}.integrity.json",
         receipt.generation_id
@@ -36,6 +36,10 @@ fn writer_open_reclaims_unreferenced_and_quarantined_manifests() {
     .unwrap();
     fs::write(&sha256_integrity, b"not a legacy UUID receipt").unwrap();
     fs::write(&unrelated, b"not managed by ctx manifest retention").unwrap();
+    assert_ne!(
+        fs::read(&obsolete_integrity).unwrap(),
+        fs::read(&uppercase_integrity).unwrap()
+    );
 
     let writer = GenerationWriter::open(temp.path(), WriterOptions::default())
         .unwrap()

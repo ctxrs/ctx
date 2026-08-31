@@ -11,7 +11,10 @@ use ctx_daemon_service::{
 use ctx_history_capture::DiscoveryContext;
 use ctx_semantic_model::{ArtifactFetchRequest, ArtifactFetcher, SemanticModelConfig};
 
-use crate::{config::AppConfig, DaemonTriggerCommandArg};
+use crate::{
+    composition::{load_runtime_config, DaemonRuntimeConfig},
+    DaemonTriggerCommandArg,
+};
 
 mod provider_refresh;
 
@@ -39,28 +42,29 @@ pub(super) static PORTS: DaemonServicePorts<
     artifact_fetcher: &ARTIFACT_FETCHER,
 };
 
-pub fn config_snapshot(config: &AppConfig<'_>) -> DaemonConfigSnapshot {
+pub fn config_snapshot(config: &DaemonRuntimeConfig) -> DaemonConfigSnapshot {
     config_snapshot_with_channel(config, config.upgrade_channel().to_owned())
 }
 
-fn into_config_snapshot(mut config: AppConfig<'static>) -> DaemonConfigSnapshot {
-    let upgrade_channel = std::mem::take(&mut config.upgrade.channel).into_owned();
+fn into_config_snapshot(mut config: DaemonRuntimeConfig) -> DaemonConfigSnapshot {
+    let upgrade_channel = std::mem::take(&mut config.upgrade.channel);
     config_snapshot_with_channel(&config, upgrade_channel)
 }
 
 fn config_snapshot_with_channel(
-    config: &AppConfig<'_>,
+    config: &DaemonRuntimeConfig,
     upgrade_channel: String,
 ) -> DaemonConfigSnapshot {
     DaemonConfigSnapshot {
         daemon: DaemonProductConfig {
             enabled: config.daemon.enabled,
             mode: match config.daemon.mode {
-                crate::config::DaemonMode::Full => DaemonMode::Full,
-                crate::config::DaemonMode::SourceRefreshOnly => DaemonMode::SourceRefreshOnly,
+                crate::composition::DaemonMode::Full => DaemonMode::Full,
+                crate::composition::DaemonMode::SourceRefreshOnly => DaemonMode::SourceRefreshOnly,
             },
         },
         semantic_enabled: config.semantic_search_enabled(),
+        semantic_executor: config.semantic_embedding_executor().clone(),
         automatic_upgrade_enabled: config.auto_upgrade_enabled(),
         automatic_upgrade_interval: config.upgrade.interval,
         upgrade_channel,
@@ -70,7 +74,7 @@ fn config_snapshot_with_channel(
 pub fn run_daemon_service<D, AP, UO>(
     request: ctx_daemon_application::DaemonHostRunRequest,
     data_root: &Path,
-    config: &AppConfig<'_>,
+    config: &DaemonRuntimeConfig,
     upgrade: &ctx_daemon_service::DaemonUpgradePorts<'_, D, AP, UO>,
 ) -> Result<()>
 where
@@ -129,15 +133,19 @@ pub(super) struct CliDaemonConfigPort;
 
 impl DaemonConfigPort for CliDaemonConfigPort {
     fn load(&self, data_root: &Path) -> Result<DaemonConfigSnapshot> {
-        AppConfig::load(data_root).map(into_config_snapshot)
+        load_runtime_config(data_root).map(into_config_snapshot)
     }
 
     fn semantic_model_config(&self, data_root: &Path) -> SemanticModelConfig {
         super::model_config::semantic_model_config(data_root)
     }
 
+    fn semantic_executor_auth(&self) -> Result<ctx_semantic_model::SemanticEmbeddingExecutorAuth> {
+        crate::semantic_embedding_executor_auth_from_environment()
+    }
+
     fn discovery_context(&self, data_root: &Path) -> Result<DiscoveryContext> {
-        let config = AppConfig::load(data_root)
+        let config = load_runtime_config(data_root)
             .context("load configured provider roots for source-backed discovery")?;
         let home = crate::identity::home_dir();
         let home_available = home.is_some();
@@ -160,10 +168,10 @@ impl DaemonAvailabilityPort for CliDaemonAvailabilityPort {
         trigger: DaemonTrigger,
         demand: DaemonAvailabilityDemand,
     ) -> Result<DaemonAvailability> {
-        let config = AppConfig::load(data_root)
+        let config = load_runtime_config(data_root)
             .context("load daemon configuration before availability check")?;
         if config.daemon.enabled {
-            super::daemon_autostart::autostart_daemon_and_wait(
+            super::daemon_autostart::autostart_core_daemon_and_wait(
                 data_root,
                 &config,
                 cli_trigger(trigger),

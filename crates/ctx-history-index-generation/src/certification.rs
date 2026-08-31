@@ -14,6 +14,8 @@ use tantivy::directory::Directory as _;
 
 use ctx_history_platform::platform_security::ensure_private_directory;
 
+#[cfg(all(windows, any(test, feature = "test-support")))]
+use crate::publication_probe::{publication_io_checkpoint, PublicationIoEvent};
 use crate::{
     active_index_files, load_active_generation_pointer, manifest_path,
     physical::physical_integrity_digest_from_parts,
@@ -542,6 +544,8 @@ pub fn acquire_terminal_publication_guard(
         return Err(IndexError::ChecksumMismatch);
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    publication_io_checkpoint(PublicationIoEvent::TerminalSealOpen)?;
     let mut entries = allowlist
         .into_iter()
         .map(|relative_path| {
@@ -859,6 +863,8 @@ pub use candidate::{
 };
 use install::{install_certification, CertificationInstallPolicy};
 pub use pointer_fence::ActiveGenerationPointerFence;
+#[cfg(windows)]
+pub(crate) use pointer_fence::ValidatedPredecessorPointer;
 
 #[cfg(any(test, feature = "test-support"))]
 pub use sidecar::certification_file_for_active;

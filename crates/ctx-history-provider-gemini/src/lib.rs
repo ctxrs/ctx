@@ -78,11 +78,20 @@ impl JsonlFamilyError for GeminiError {
             || matches!(self, Self::Source(error) if error.is_source_changed())
     }
 
+    fn is_source_unavailable(&self) -> bool {
+        matches!(
+            self,
+            Self::Source(SourceIoError::SystemIo { operation, source })
+                if ctx_history_source_io::is_provider_source_unavailable_io(operation, source)
+        )
+    }
+
     fn is_resource_unavailable(&self) -> bool {
         matches!(
             self,
             Self::Source(SourceIoError::Io(_) | SourceIoError::SystemIo { .. })
         ) && !self.is_not_found()
+            && !self.is_source_unavailable()
     }
 
     fn is_internal(&self) -> bool {

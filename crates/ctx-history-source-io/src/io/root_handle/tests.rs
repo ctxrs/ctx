@@ -3,6 +3,30 @@ use std::{fs, io::Read, time::Duration};
 use super::*;
 
 #[test]
+fn provider_source_system_io_names_the_operation_and_path() {
+    let path = Path::new("provider-root/history.jsonl");
+    let error = map_open_error(
+        path,
+        AuthorityOpenError::SystemIo {
+            operation: "provider source target open",
+            source: io::Error::from(io::ErrorKind::PermissionDenied),
+        },
+    );
+    let rendered = error.to_string();
+
+    assert!(matches!(
+        error,
+        SourceIoError::SystemIo {
+            operation: "provider source target open",
+            ..
+        }
+    ));
+    assert!(rendered.contains("provider source target open"));
+    assert!(rendered.contains("provider-root/history.jsonl"));
+    assert!(rendered.contains("permission denied"));
+}
+
+#[test]
 fn streaming_entries_stop_at_the_existing_bounded_entry_diagnostic() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let root = temp.path().join("root");

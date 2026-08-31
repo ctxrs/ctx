@@ -2,11 +2,19 @@
 
 use super::*;
 
-fn application_config(config: &AppConfig<'_>) -> ctx_daemon_application::DaemonConfigSnapshot {
+fn application_config(
+    config: &DaemonRuntimeConfig,
+) -> ctx_daemon_application::DaemonConfigSnapshot {
     ctx_daemon_application::DaemonConfigSnapshot {
         enabled: config.daemon.enabled,
         mode: super::super::daemon_supervisor::daemon_mode(config.daemon.mode),
         semantic_enabled: config.semantic_search_enabled(),
+        semantic_executor: config
+            .semantic_embedding_executor()
+            .http_endpoint()
+            .unwrap_or("builtin")
+            .to_owned(),
+        semantic_contract_fingerprint: config.semantic_model_contract().fingerprint().to_owned(),
     }
 }
 
@@ -15,7 +23,7 @@ fn application_trigger(trigger: DaemonTriggerCommandArg) -> ctx_daemon_applicati
 }
 
 #[cfg(test)]
-pub(super) fn daemon_autostart_allowed(data_root: &Path, config: &AppConfig<'_>) -> bool {
+pub(super) fn daemon_autostart_allowed(data_root: &Path, config: &DaemonRuntimeConfig) -> bool {
     ctx_daemon_application::daemon_autostart_allowed(data_root, &application_config(config))
 }
 
@@ -25,7 +33,7 @@ pub fn daemon_autostart_suppression_reason() -> Option<&'static str> {
 
 pub fn maybe_autostart_daemon(
     data_root: &Path,
-    config: &AppConfig<'_>,
+    config: &DaemonRuntimeConfig,
     trigger: DaemonTriggerCommandArg,
 ) {
     if !config.daemon.enabled {
@@ -58,7 +66,7 @@ pub fn maybe_autostart_daemon(
 
 pub fn start_finite_core_worker_and_wait(
     data_root: &Path,
-    config: &AppConfig<'_>,
+    config: &DaemonRuntimeConfig,
     trigger: DaemonTriggerCommandArg,
 ) -> Result<DaemonHandoff> {
     super::super::daemon_supervisor::with_daemon_application(|application| {
@@ -89,16 +97,81 @@ pub fn start_finite_core_worker_and_wait(
 
 pub fn autostart_daemon_and_wait(
     data_root: &Path,
-    config: &AppConfig<'_>,
+    config: &DaemonRuntimeConfig,
     trigger: DaemonTriggerCommandArg,
 ) -> Result<DaemonHandoff> {
     Ok(autostart_daemon_for_setup_and_wait(data_root, config, trigger)?.handoff)
 }
 
+pub fn autostart_core_daemon_and_wait(
+    data_root: &Path,
+    config: &DaemonRuntimeConfig,
+    trigger: DaemonTriggerCommandArg,
+) -> Result<DaemonHandoff> {
+    Ok(autostart_persistent_daemon_and_wait(
+        data_root,
+        config,
+        trigger,
+        PersistentDaemonReadiness::Core,
+    )?
+    .handoff)
+}
+
+pub fn restart_daemon_with_current_environment_and_wait(
+    data_root: &Path,
+    config: &DaemonRuntimeConfig,
+    trigger: DaemonTriggerCommandArg,
+) -> Result<DaemonHandoff> {
+    super::super::daemon_supervisor::with_daemon_application(|application| {
+        let handoff = application
+            .restart_daemon_with_current_environment(
+                data_root,
+                &application_config(config),
+                application_trigger(trigger),
+            )
+            .map_err(|error| match error {
+                ctx_daemon_application::DaemonStartError::Suppressed(reason) => anyhow!(
+                    "ctx daemon credential-bound restart was suppressed ({reason}); retry after it clears"
+                ),
+                ctx_daemon_application::DaemonStartError::BinaryIdentity(error) => error,
+                ctx_daemon_application::DaemonStartError::Start(error) => anyhow!(
+                    "ctx daemon credential-bound restart failed: {error:#}. Run `ctx status --format json`, then `ctx daemon run` for details"
+                ),
+                ctx_daemon_application::DaemonStartError::Ready(error) => anyhow!(
+                    "ctx daemon did not become ready after credential-bound restart: {error}. Run `ctx status --format json`, then `ctx daemon run` for details"
+                ),
+            })?;
+        Ok(DaemonHandoff {
+            pid: handoff.pid,
+            heartbeat_at_ms: handoff.heartbeat_at_ms,
+        })
+    })
+}
+
 pub fn autostart_daemon_for_setup_and_wait(
     data_root: &Path,
-    config: &AppConfig<'_>,
+    config: &DaemonRuntimeConfig,
     trigger: DaemonTriggerCommandArg,
+) -> Result<DaemonSetupHandoff> {
+    autostart_persistent_daemon_and_wait(
+        data_root,
+        config,
+        trigger,
+        PersistentDaemonReadiness::Full,
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PersistentDaemonReadiness {
+    Full,
+    Core,
+}
+
+fn autostart_persistent_daemon_and_wait(
+    data_root: &Path,
+    config: &DaemonRuntimeConfig,
+    trigger: DaemonTriggerCommandArg,
+    readiness: PersistentDaemonReadiness,
 ) -> Result<DaemonSetupHandoff> {
     super::super::daemon_supervisor::with_daemon_application(|application| {
         if application.daemon_start_is_fenced() {
@@ -110,12 +183,19 @@ pub fn autostart_daemon_for_setup_and_wait(
             super::super::daemon_supervisor::ensure_daemon_supervisor(application, data_root)
                 .context("establish ctx daemon supervision")?;
         }
-        let handoff = application
-            .start_daemon_and_wait(
+        let application_config = application_config(config);
+        let handoff = match readiness {
+            PersistentDaemonReadiness::Full => application.start_daemon_and_wait(
                 data_root,
-                &application_config(config),
+                &application_config,
                 application_trigger(trigger),
-            )
+            ),
+            PersistentDaemonReadiness::Core => application.start_core_daemon_and_wait(
+                data_root,
+                &application_config,
+                application_trigger(trigger),
+            ),
+        }
             .map_err(|error| match error {
                 ctx_daemon_application::DaemonStartError::Suppressed(reason) => anyhow!(
                     "ctx daemon start was suppressed ({reason}); retry after it clears or run `ctx setup --no-daemon`"
@@ -139,7 +219,7 @@ pub fn autostart_daemon_for_setup_and_wait(
 
 pub fn observe_daemon_for_setup_and_wait(
     data_root: &Path,
-    config: &AppConfig<'_>,
+    config: &DaemonRuntimeConfig,
 ) -> Result<DaemonSetupHandoff> {
     super::super::daemon_supervisor::with_daemon_application(|application| {
         let handoff = application

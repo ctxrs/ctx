@@ -80,6 +80,7 @@ RELEASE_BUILD_RUSTC_ENV = select({
 CTX_CLI_DEPS = [
     "//crates/ctx-agent-application:lib",
     "//crates/ctx-agent-integrations:lib",
+    "//crates/ctx-app-config:lib",
     "//crates/ctx-client-observability:lib",
     "//crates/ctx-companion-bridge:lib",
     "//crates/ctx-cli-presentation:lib",
@@ -100,6 +101,7 @@ CTX_CLI_DEPS = [
 CTX_CLI_TEST_DEPS = [
     "//crates/ctx-agent-application:test_support_lib",
     "//crates/ctx-agent-integrations:lib",
+    "//crates/ctx-app-config:test_support_lib",
     "//crates/ctx-client-observability:test_support_lib",
     "//crates/ctx-companion-bridge:lib",
     "//crates/ctx-cli-presentation:test_support_lib",
@@ -122,6 +124,7 @@ CTX_CLI_TEST_DEPS = [
 CTX_CLI_QUALIFICATION_DEPS = [
     "//crates/ctx-agent-application:lib",
     "//crates/ctx-agent-integrations:lib",
+    "//crates/ctx-app-config:lib",
     "//crates/ctx-client-observability:lib",
     "//crates/ctx-companion-bridge:lib",
     "//crates/ctx-cli-presentation:qualification_lib",

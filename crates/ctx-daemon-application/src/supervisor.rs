@@ -39,8 +39,6 @@ mod unsupported;
 mod windows;
 
 pub(crate) use environment::supervisor_environment_allowlist_names;
-#[cfg(all(test, windows))]
-use environment::validated_supervisor_artifact_path;
 use environment::{
     supervisor_environment_contract_report, supervisor_environment_snapshot,
     SupervisorEnvironmentSnapshot,
@@ -87,7 +85,7 @@ pub(super) fn persisted_supervisor_loop_interval_seconds(data_root: &Path) -> Op
 }
 
 fn supervisor_manager_environment(
-    host: &dyn DaemonApplicationHost,
+    _host: &dyn DaemonApplicationHost,
 ) -> Result<SupervisorManagerEnvironment> {
     let values = SUPERVISOR_ENV_ALLOWLIST
         .iter()
@@ -97,7 +95,7 @@ fn supervisor_manager_environment(
     let values = {
         let mut values = values;
         if !values.contains_key(OsStr::new("HOME")) {
-            if let Some(home) = host.home_dir() {
+            if let Some(home) = _host.home_dir() {
                 values.insert(OsString::from("HOME"), home.into_os_string());
             }
         }
@@ -177,6 +175,24 @@ fn configured_supervisor_environment(
 ) -> Result<SupervisorEnvironmentSnapshot> {
     let snapshot = supervisor_environment_snapshot(host)
         .context("capture native supervisor daemon environment")?;
+    let config = host.daemon_config(data_root)?;
+    configured_supervisor_environment_for_config(
+        snapshot,
+        data_root,
+        requested_loop_interval_seconds,
+        &config,
+    )
+}
+
+fn configured_supervisor_environment_for_config(
+    mut snapshot: SupervisorEnvironmentSnapshot,
+    data_root: &Path,
+    requested_loop_interval_seconds: Option<u64>,
+    config: &crate::DaemonConfigSnapshot,
+) -> Result<SupervisorEnvironmentSnapshot> {
+    if !config.semantic_enabled || config.semantic_executor == "builtin" {
+        snapshot = snapshot.without_semantic_embedding_auth();
+    }
     configured_supervisor_environment_from_snapshot(
         snapshot,
         data_root,

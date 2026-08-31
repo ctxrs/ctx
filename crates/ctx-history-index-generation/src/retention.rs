@@ -319,6 +319,8 @@ fn remove_lease_file(root: &Path) -> Result<()> {
 mod tests {
     use std::{process::Command, thread, time::Duration};
 
+    #[cfg(windows)]
+    use ctx_history_platform::platform_security::restrict_private_directory;
     use ctx_history_platform::platform_security::restrict_private_file_handle;
     use tempfile::tempdir;
 
@@ -548,6 +550,23 @@ mod tests {
             1,
             "reader opens created per-generation or per-read lock objects"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn generation_lease_accepts_a_private_root_with_token_default_owner() {
+        let root = tempdir().unwrap();
+        restrict_private_directory(root.path()).unwrap();
+        let slot = create_slot(root.path(), 'e');
+        publish_active_generation_pointer(
+            root.path(),
+            &ActiveGenerationPointer::new(slot.clone(), None).unwrap(),
+        )
+        .unwrap();
+
+        let lease = acquire_generation_read_lease(root.path(), slot.generation_id()).unwrap();
+
+        assert_eq!(lease.target(), &slot);
     }
 
     #[test]

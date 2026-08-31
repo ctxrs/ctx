@@ -228,18 +228,28 @@ coverage is complete, and pending dirty work is drained. When semantic is
 disabled or otherwise unavailable, hybrid may return lexical results with a
 structured fallback reason.
 
-The production embedding model is
-`intfloat/multilingual-e5-small` with 384-dimensional vectors. Queries use the
-E5 `query: ` input contract and document chunks use `passage: `. The model,
-chunking, source projector, and lexical generation policies participate in
-generation identity, so incompatible derived data is rebuilt rather than
-silently reused.
+The built-in executor uses `intfloat/multilingual-e5-small` locally and remains
+the default. A configured external executor declares its own opaque `space_id`
+and dimensions and owns model preprocessing, tokenization, and execution. ctx
+provides raw query text and raw text from ctx-created document chunks.
 
-Enable local semantic search with:
+The selected executor produces both indexed document vectors and query vectors.
+Each data root has one accepted vector space. Incompatible or drifted identity
+is never silently reused or replaced with the built-in executor; accepting a
+changed identity rebuilds only the derived semantic index.
+
+Enable semantic search with:
 
 ```bash
 ctx semantic enable
 ctx semantic status
+```
+
+This preserves the current executor selection. To select or restore local E5
+explicitly, run:
+
+```bash
+ctx semantic enable --executor builtin
 ```
 
 Semantic opt-in is independent of indexing mode. In auto mode, the daemon keeps
@@ -256,11 +266,11 @@ is ready, the default hybrid backend uses lexical and semantic evidence together
 automatically.
 
 Only a manual CLI `--refresh wait` that actually needs semantic evidence may
-acquire the opted-in local model, initialize semantic storage, and perform
-foreground semantic catch-up. Explicit semantic search reports a typed local
-error when model, runtime, or generation convergence fails; it never silently
-changes a semantic-only request into lexical retrieval. Hybrid remains
-lexical-safe in those cases.
+initialize semantic storage, use the selected executor, and perform foreground
+semantic catch-up. Explicit semantic search reports a typed executor, model, or
+generation-convergence error; it never silently changes executors or turns a
+semantic-only request into lexical retrieval. Hybrid remains lexical-safe in
+those cases and reports why semantic evidence was unavailable.
 
 ## Refresh and freshness
 
@@ -285,10 +295,13 @@ an explicit import.
 finite Core worker in manual mode, then waits for the requested source frontier
 and lexical-generation receipt. It fails with a typed source, lag, or system
 error when that receipt cannot publish; it does not fall back to a foreground
-importer. In manual mode, a semantic or nonzero-weight hybrid request then fully
-reconciles semantic coverage for that same pinned Core generation and uses the
-same foreground model runtime to embed the query. Lexical, zero-weight hybrid,
-and unsupported semantic scopes do no semantic model or projection work.
+importer. In auto mode, a semantic or nonzero-weight hybrid request also waits
+for daemon acknowledgement of the selected Core generation; if Core advances
+during that bounded wait, the query repins both indexes together. In manual
+mode, the same request fully reconciles semantic coverage for the pinned Core
+generation and uses the same selected executor to embed the query. Lexical,
+zero-weight hybrid, and unsupported semantic scopes do no semantic executor or
+projection work.
 
 `--refresh off` queries the currently published generations without provider
 discovery, plugin execution, refresh scheduling, semantic catch-up, or model

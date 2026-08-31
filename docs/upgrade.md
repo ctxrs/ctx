@@ -113,13 +113,13 @@ Config files and process environment variables cannot replace those origins or
 the verification key. A key or authority change therefore requires a new ctx
 binary, not a shell-profile or config-file change.
 
-When local semantic search is explicitly enabled, the same signed release
-metadata may carry the semantic asset catalog. ctx verifies the metadata
-signature before it accepts any catalog URL, archive hash, expanded-size limit,
-or per-file hash. Downloads are streamed with role-specific byte limits, and
-archive extraction accepts only the signed regular-file inventory. Semantic
-search remains off by default; a disabled semantic configuration neither
-selects nor downloads these assets.
+When semantic search is explicitly enabled with the built-in executor, the same
+signed release metadata may carry the semantic asset catalog. ctx verifies the
+metadata signature before it accepts any catalog URL, archive hash,
+expanded-size limit, or per-file hash. Downloads are streamed with role-specific
+byte limits, and archive extraction accepts only the signed regular-file
+inventory. Semantic search remains off by default; a disabled semantic
+configuration neither selects nor downloads these assets.
 
 The selected catalog entry pairs one exact model with one local backend:
 ONNX Runtime 1.27.0 for portable CPU execution, WindowsML 2.1.74 with DirectML

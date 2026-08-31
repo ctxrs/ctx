@@ -37,6 +37,7 @@ def synthetic_lock_text() -> str:
             (
                 "ctx-agent-application",
                 "ctx-agent-integrations",
+                "ctx-app-config",
                 "ctx-companion-bridge",
                 "ctx-cli-presentation 1.0.0",
                 "ctx-client-observability",
@@ -78,6 +79,16 @@ def synthetic_lock_text() -> str:
             ("ctx-history-core",),
         ),
         package(
+            "ctx-app-config",
+            "0.26.0",
+            (
+                "ctx-history-capture",
+                "ctx-history-core",
+                "ctx-history-platform",
+                "ctx-semantic-model",
+            ),
+        ),
+        package(
             "ctx-companion-bridge",
             "0.26.0",
             ("ctx-history-platform",),
@@ -116,6 +127,7 @@ def synthetic_lock_text() -> str:
             "ctx-daemon-cli",
             "1.0.0",
             (
+                "ctx-app-config",
                 "ctx-client-observability",
                 "ctx-daemon-application 1.0.0",
                 "ctx-daemon-runtime 1.0.0",

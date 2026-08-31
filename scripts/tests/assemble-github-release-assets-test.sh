@@ -11,7 +11,8 @@ tmp="$(mktemp -d "${TMPDIR:-/tmp}/ctx-assemble-github-assets.XXXXXX")"
 trap 'rm -rf "${tmp}"' EXIT
 core="${tmp}/core"
 runtime="${tmp}/runtime"
-mkdir -p "${core}" "${runtime}"
+receipts="${tmp}/macos-release-pair-qualification"
+mkdir -p "${core}" "${runtime}" "${receipts}"
 
 core_assets=(
   ctx-linux-x64
@@ -47,9 +48,77 @@ for asset in "${runtime_assets[@]}"; do
   printf 'qualified runtime fixture: %s\n' "${asset}" > "${runtime}/${asset}"
   sha256sum "${runtime}/${asset}" | awk '{print $1}' > "${runtime}/${asset}.sha256"
 done
+for platform in macos-arm64 macos-x64; do
+  cli="ctx-${platform}"
+  runtime_archive="ctx-onnxruntime-${platform}.tar.gz"
+  {
+    sha256sum "${core}/${cli}"
+    sha256sum "${runtime}/${runtime_archive}"
+  } | sed "s#  ${core}/#  #; s#  ${runtime}/#  #" \
+    > "${receipts}/${cli}.release-pair.sha256"
+done
+
+missing_receipts="${tmp}/missing-receipts"
+mkdir "${missing_receipts}"
+if bash "${assembler}" "${core}" "${runtime}" "${tmp}/missing-output" "${missing_receipts}" \
+  > "${tmp}/missing.out" 2> "${tmp}/missing.err"; then
+  printf 'assembler accepted missing macOS release-pair receipts\n' >&2
+  exit 1
+fi
+grep -Fq 'macOS release-pair digest receipt must be a regular non-symlink file' \
+  "${tmp}/missing.err"
+test ! -e "${tmp}/missing-output"
+
+mismatched_receipts="${tmp}/mismatched-receipts"
+cp -a "${receipts}" "${mismatched_receipts}"
+printf '%064d  ctx-macos-arm64\n' 0 \
+  > "${mismatched_receipts}/ctx-macos-arm64.release-pair.sha256"
+sha256sum "${runtime}/ctx-onnxruntime-macos-arm64.tar.gz" \
+  | sed "s#  ${runtime}/#  #" \
+  >> "${mismatched_receipts}/ctx-macos-arm64.release-pair.sha256"
+if bash "${assembler}" "${core}" "${runtime}" "${tmp}/mismatched-output" "${mismatched_receipts}" \
+  > "${tmp}/mismatched.out" 2> "${tmp}/mismatched.err"; then
+  printf 'assembler accepted a mismatched macOS release-pair receipt\n' >&2
+  exit 1
+fi
+grep -Fq 'macOS release-pair receipt digest mismatch for ctx-macos-arm64' \
+  "${tmp}/mismatched.err"
+test ! -e "${tmp}/mismatched-output"
+
+swapped_receipts="${tmp}/swapped-receipts"
+cp -a "${receipts}" "${swapped_receipts}"
+{
+  sed -n '2p' "${swapped_receipts}/ctx-macos-arm64.release-pair.sha256"
+  sed -n '1p' "${swapped_receipts}/ctx-macos-arm64.release-pair.sha256"
+} > "${tmp}/swapped-receipt"
+mv "${tmp}/swapped-receipt" \
+  "${swapped_receipts}/ctx-macos-arm64.release-pair.sha256"
+if bash "${assembler}" "${core}" "${runtime}" "${tmp}/swapped-output" "${swapped_receipts}" \
+  > "${tmp}/swapped.out" 2> "${tmp}/swapped.err"; then
+  printf 'assembler accepted a swapped macOS release-pair receipt\n' >&2
+  exit 1
+fi
+grep -Fq 'macOS release-pair digest receipt must list ctx-macos-arm64 first' \
+  "${tmp}/swapped.err"
+test ! -e "${tmp}/swapped-output"
+
+unqualified_runtime="${tmp}/unqualified-runtime"
+cp -a "${runtime}" "${unqualified_runtime}"
+printf 'unqualified macOS runtime fixture\n' \
+  > "${unqualified_runtime}/ctx-onnxruntime-macos-arm64.tar.gz"
+sha256sum "${unqualified_runtime}/ctx-onnxruntime-macos-arm64.tar.gz" | awk '{print $1}' \
+  > "${unqualified_runtime}/ctx-onnxruntime-macos-arm64.tar.gz.sha256"
+if bash "${assembler}" "${core}" "${unqualified_runtime}" "${tmp}/unqualified-output" "${receipts}" \
+  > "${tmp}/unqualified.out" 2> "${tmp}/unqualified.err"; then
+  printf 'assembler accepted unqualified macOS runtime bytes\n' >&2
+  exit 1
+fi
+grep -Fq 'macOS release-pair receipt digest mismatch for ctx-onnxruntime-macos-arm64.tar.gz' \
+  "${tmp}/unqualified.err"
+test ! -e "${tmp}/unqualified-output"
 
 output="${tmp}/release"
-bash "${assembler}" "${core}" "${runtime}" "${output}"
+bash "${assembler}" "${core}" "${runtime}" "${output}" "${receipts}"
 test "$(find "${output}" -maxdepth 1 -type f | wc -l)" -eq 21
 test "$(wc -l < "${output}/SHA256SUMS")" -eq 20
 (
@@ -59,7 +128,7 @@ test "$(wc -l < "${output}/SHA256SUMS")" -eq 20
 test -x "${output}/ctx-linux-x64"
 test ! -x "${output}/ctx-onnxruntime-linux-x64.tar.gz"
 
-if bash "${assembler}" "${core}" "${runtime}" "${output}" \
+if bash "${assembler}" "${core}" "${runtime}" "${output}" "${receipts}" \
   > "${tmp}/existing.out" 2> "${tmp}/existing.err"; then
   printf 'assembler replaced an existing release directory\n' >&2
   exit 1
@@ -69,7 +138,7 @@ grep -Fq 'release publication destination already exists' "${tmp}/existing.err"
 bad_runtime="${tmp}/bad-runtime"
 cp -a "${runtime}" "${bad_runtime}"
 printf 'corrupt\n' >> "${bad_runtime}/ctx-onnxruntime-linux-x64.tar.gz"
-if bash "${assembler}" "${core}" "${bad_runtime}" "${tmp}/bad-runtime-output" \
+if bash "${assembler}" "${core}" "${bad_runtime}" "${tmp}/bad-runtime-output" "${receipts}" \
   > "${tmp}/bad-runtime.out" 2> "${tmp}/bad-runtime.err"; then
   printf 'assembler accepted a runtime checksum mismatch\n' >&2
   exit 1
@@ -81,7 +150,7 @@ test ! -e "${tmp}/bad-runtime-output"
 bad_core="${tmp}/bad-core"
 cp -a "${core}" "${bad_core}"
 printf '%064d  unexpected\n' 0 >> "${bad_core}/SHA256SUMS"
-if bash "${assembler}" "${bad_core}" "${runtime}" "${tmp}/bad-core-output" \
+if bash "${assembler}" "${bad_core}" "${runtime}" "${tmp}/bad-core-output" "${receipts}" \
   > "${tmp}/bad-core.out" 2> "${tmp}/bad-core.err"; then
   printf 'assembler accepted an expanded Core inventory\n' >&2
   exit 1
@@ -94,7 +163,7 @@ cp -a "${runtime}" "${symlink_runtime}"
 rm "${symlink_runtime}/ctx-onnxruntime-windows-x64.zip"
 ln -s "${runtime}/ctx-onnxruntime-windows-x64.zip" \
   "${symlink_runtime}/ctx-onnxruntime-windows-x64.zip"
-if bash "${assembler}" "${core}" "${symlink_runtime}" "${tmp}/symlink-output" \
+if bash "${assembler}" "${core}" "${symlink_runtime}" "${tmp}/symlink-output" "${receipts}" \
   > "${tmp}/symlink.out" 2> "${tmp}/symlink.err"; then
   printf 'assembler accepted a symlink runtime\n' >&2
   exit 1

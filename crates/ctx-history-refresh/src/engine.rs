@@ -31,7 +31,7 @@ pub use coverage_contract::{
     VerifiedSourceRefreshRouteBoundary,
 };
 use durable_queue::{
-    durable_job_json, install_recovered_successors, job_with_queued_successors,
+    durable_job_json, finalized_job_json, install_recovered_successors, job_with_queued_successors,
     recover_queued_root, recover_queued_successors,
 };
 use generation_authority::CoreRefreshTerminalSuccess;
@@ -49,7 +49,7 @@ use startup_observation::{
     startup_routes_requiring_refresh,
 };
 #[cfg(test)]
-pub(crate) use test_support::TestRefreshJournal;
+use test_support::test_refresh_engine_with_journal_executor_and_admitted_routes;
 #[cfg(test)]
 use test_support::{
     daemon_source_backed_refresh_job_path, pin_test_active_verified_generation,
@@ -57,6 +57,8 @@ use test_support::{
     test_refresh_engine_with_executor, test_refresh_engine_with_executor_and_admitted_routes,
     test_refresh_runtime, test_refresh_submission, write_daemon_job_status,
 };
+#[cfg(test)]
+pub(crate) use test_support::{TestFailTerminalStoreJournal, TestRefreshJournal};
 use whole_run_eta::WholeRunEtaEstimator;
 
 #[derive(Default)]
@@ -159,6 +161,18 @@ enum PendingTerminalOutcome {
     Failed {
         scheduler_retry: bool,
     },
+    // The marker-bearing terminal image is already durable. Retain its exact
+    // root fields while route disposition and coverage are finalized into a
+    // second, markerless image.
+    RouteFinalization {
+        did_work: bool,
+        failed: bool,
+    },
+    FinalizationOnly {
+        did_work: bool,
+        failed: bool,
+        coverage_certificate: Option<SourceBackedRefreshCoverageCertificate>,
+    },
 }
 
 impl PendingTerminalPersistence {
@@ -166,11 +180,18 @@ impl PendingTerminalPersistence {
         matches!(
             self.outcome,
             PendingTerminalOutcome::Published { did_work: true, .. }
+                | PendingTerminalOutcome::RouteFinalization { did_work: true, .. }
+                | PendingTerminalOutcome::FinalizationOnly { did_work: true, .. }
         )
     }
 
     fn failed(&self) -> bool {
-        matches!(self.outcome, PendingTerminalOutcome::Failed { .. })
+        matches!(
+            self.outcome,
+            PendingTerminalOutcome::Failed { .. }
+                | PendingTerminalOutcome::RouteFinalization { failed: true, .. }
+                | PendingTerminalOutcome::FinalizationOnly { failed: true, .. }
+        )
     }
 
     fn scheduler_retry(&self) -> bool {
@@ -179,6 +200,20 @@ impl PendingTerminalPersistence {
             PendingTerminalOutcome::Failed {
                 scheduler_retry: true
             }
+        )
+    }
+
+    fn finalization_only(&self) -> bool {
+        matches!(
+            self.outcome,
+            PendingTerminalOutcome::FinalizationOnly { .. }
+        )
+    }
+
+    fn route_finalization_in_progress(&self) -> bool {
+        matches!(
+            self.outcome,
+            PendingTerminalOutcome::RouteFinalization { .. }
         )
     }
 }
@@ -225,6 +260,8 @@ pub struct CoreRefreshEngine {
     admission_fence: Arc<SourceRefreshAdmissionFence>,
     pub(super) journal: Arc<dyn RefreshJournal>,
     pub(super) runtime: Arc<dyn RefreshRuntime>,
+    #[cfg(test)]
+    before_route_finalization: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 #[derive(Debug)]
@@ -356,6 +393,8 @@ impl CoreRefreshEngine {
             admission_fence,
             journal,
             runtime,
+            #[cfg(test)]
+            before_route_finalization: Mutex::new(None),
         }
     }
 

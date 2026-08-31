@@ -1,4 +1,4 @@
-use crate::config::AppConfig;
+use ctx_app_config::AppConfig;
 
 pub(crate) fn upgrade_diagnostics(
     config: &AppConfig,
