@@ -33,6 +33,7 @@ mod ports;
 mod query_service;
 mod resource_policy;
 mod runtime_limits;
+mod semantic_completion;
 mod source_backed_refresh_adapter;
 mod source_backed_refresh_coordinator;
 #[cfg(test)]
@@ -66,6 +67,7 @@ use source_backed_refresh_coordinator::SourceBackedRefreshPublication;
 mod query_service_transport_tests;
 
 pub use daemon::run_daemon;
+pub use daemon_retry::{classify_semantic_failure, SemanticFailureClass};
 pub use daemon_wakeup::daemon_wakeup_report;
 pub use paths_status::{
     daemon_core_refresh_job_path, daemon_semantic_job_path, daemon_source_backed_refresh_job_path,
@@ -81,6 +83,11 @@ pub use query_service::{
     DAEMON_SEMANTIC_QUERY_SCHEMA_VERSION,
 };
 pub use runtime_limits::SEMANTIC_WORKER_BATCH_MAX;
+pub use semantic_completion::{
+    classify_exact_daemon_semantic_completion, observe_exact_daemon_semantic_completion,
+    DaemonSemanticCompletionObservation, DaemonSemanticCompletionTarget,
+    DaemonSemanticConfigBinding, DaemonSemanticProgress,
+};
 pub use source_backed_refresh_coordinator::{
     coordinate_import_source_backed_refresh_with_progress,
     coordinate_setup_source_backed_refresh_with_progress, coordinate_source_backed_refresh,

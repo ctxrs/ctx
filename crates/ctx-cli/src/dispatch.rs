@@ -43,6 +43,7 @@ use ctx_app_config::{AppConfig, DeprecatedControls};
 
 mod finalization;
 mod parse;
+mod semantic_completion_error;
 #[cfg(test)]
 mod test_support;
 
@@ -576,6 +577,15 @@ fn render_command_result_error(
                     search_operation,
                     ui,
                     &serde_json::to_string(&error.structured())?,
+                )?;
+                Some(RenderedJsonError.into())
+            } else if let Some(error) =
+                error.downcast_ref::<ctx_daemon_cli::SemanticCompletionError>()
+            {
+                write_machine_error(
+                    search_operation,
+                    ui,
+                    &serde_json::to_string(&semantic_completion_error::structured(error))?,
                 )?;
                 Some(RenderedJsonError.into())
             } else {

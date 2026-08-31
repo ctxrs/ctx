@@ -111,6 +111,7 @@ daemon/config_reload.rs
 daemon/config_reload/tests.rs
 daemon_retry.rs
 daemon_scheduler.rs
+daemon_scheduler/semantic_progress.rs
 daemon_scheduler_tests.rs
 daemon_worker.rs
 daemon_worker_tests.rs

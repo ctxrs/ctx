@@ -11,6 +11,8 @@ use std::{
 mod cancellation;
 #[path = "import_orchestration/relocation.rs"]
 mod relocation;
+#[path = "import_orchestration/semantic_failure.rs"]
+mod semantic_failure;
 
 struct SourceRefreshDaemon {
     child: Option<Child>,
@@ -31,13 +33,35 @@ impl Drop for SourceRefreshDaemon {
 }
 
 fn start_full_source_refresh_daemon(temp: &TempDir) -> SourceRefreshDaemon {
-    bind_test_ctx_binary(temp);
-    fs::create_dir_all(data_root(temp)).unwrap();
-    fs::write(
-        data_root(temp).join("config.toml"),
+    start_source_refresh_daemon_with_config(
+        temp,
+        "full",
         "[daemon]\nenabled = true\nmode = \"full\"\n\n[search]\nsemantic = false\n",
     )
-    .unwrap();
+}
+
+fn start_source_refresh_daemon_with_semantic_executor(
+    temp: &TempDir,
+    mode: &str,
+    semantic_executor: &str,
+) -> SourceRefreshDaemon {
+    start_source_refresh_daemon_with_config(
+        temp,
+        mode,
+        &format!(
+            "[daemon]\nenabled = true\nmode = \"{mode}\"\n\n[search]\nsemantic = true\n\n[semantic]\nexecutor = \"{semantic_executor}\"\nspace_id = \"ctx-contract-test-space\"\ndimensions = 7\n"
+        ),
+    )
+}
+
+fn start_source_refresh_daemon_with_config(
+    temp: &TempDir,
+    mode: &str,
+    config: &str,
+) -> SourceRefreshDaemon {
+    bind_test_ctx_binary(temp);
+    fs::create_dir_all(data_root(temp)).unwrap();
+    fs::write(data_root(temp).join("config.toml"), config).unwrap();
     let binary = copied_ctx_binary(temp);
     let prepared = ctx_from_binary(temp, &binary);
     let mut command = StdCommand::new(prepared.get_program());
@@ -53,7 +77,7 @@ fn start_full_source_refresh_daemon(temp: &TempDir) -> SourceRefreshDaemon {
     }
     command
         .args(["daemon", "run", "--force", "--loop-interval-seconds", "600"])
-        .env("CTX_DAEMON_MODE", "full")
+        .env("CTX_DAEMON_MODE", mode)
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
     let spawn_deadline = Instant::now() + Duration::from_secs(1);

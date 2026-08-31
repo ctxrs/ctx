@@ -13,7 +13,9 @@ mod composition;
 pub use composition::{install_host, DaemonCliHost, DaemonConfig, DaemonMode, DaemonRuntimeConfig};
 pub use ctx_daemon_application::DaemonHostRunRequest;
 pub use ctx_daemon_runtime::apply_supervisor_environment_handoff;
-pub use ctx_daemon_service::{CoreGenerationPublished, DaemonConfigSnapshot, DaemonUpgradePorts};
+pub use ctx_daemon_service::{
+    CoreGenerationPublished, DaemonConfigSnapshot, DaemonUpgradePorts, SemanticFailureClass,
+};
 pub use ctx_semantic_model::{
     ExternalSemanticSpace, SemanticEmbeddingExecutorAuth, SemanticEmbeddingExecutorConfig,
     SemanticEmbeddingExecutorHandle, SEMANTIC_EMBEDDING_AUTH_TOKEN_ENDPOINT_ENV,
@@ -288,6 +290,13 @@ pub use ctx_semantic_index::SemanticNotReady;
 pub use runtime_limits::SEMANTIC_WORKER_BATCH_MAX;
 mod query_adapter;
 pub use query_adapter::{wait_for_daemon_semantic_generation, SemanticQueryAdapter};
+mod semantic_completion;
+pub use semantic_completion::{
+    complete_semantic_generation_foreground,
+    complete_semantic_generation_foreground_with_checkpoint, DaemonSemanticCompletion,
+    SemanticCompletionBudgets, SemanticCompletionCheckpoint, SemanticCompletionDaemonConfig,
+    SemanticCompletionError,
+};
 mod query_service;
 pub use query_service::{wait_for_daemon_query_service, wait_for_daemon_query_service_cancellable};
 mod daemon;
@@ -311,9 +320,9 @@ pub use source_backed_refresh_coordinator::{
 };
 mod finite_worker_owner;
 pub use finite_worker_owner::{
-    finish_foreground_result, finite_worker_interrupted, foreground_interrupt_epoch,
-    foreground_operation_active, foreground_result_interrupted, record_foreground_interrupt,
-    with_foreground_guard_since, FiniteWorkerInterrupted,
+    checkpoint as foreground_checkpoint, finish_foreground_result, finite_worker_interrupted,
+    foreground_interrupt_epoch, foreground_operation_active, foreground_result_interrupted,
+    record_foreground_interrupt, with_foreground_guard_since, FiniteWorkerInterrupted,
 };
 mod daemon_autostart;
 #[allow(unused_imports)]

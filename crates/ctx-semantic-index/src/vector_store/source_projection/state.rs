@@ -128,6 +128,18 @@ impl SemanticVectorStore {
                     transaction.commit()?;
                 }
                 std::cmp::Ordering::Less => {
+                    if self.full_rebuild_pending()?
+                        && frontier.active_source_identity_digest.is_none()
+                    {
+                        // A full-rebuild deletion page commits Flat before its
+                        // separate frontier/sequence receipt. That crash window
+                        // must resume from the durable Flat publication without
+                        // inventing a sequence for the interrupted page.
+                        frontier.flat_publication = current;
+                        frontier.flat_staging = None;
+                        self.store_source_frontier(&frontier)?;
+                        return Ok(());
+                    }
                     let source = frontier
                         .active_source_identity_digest
                         .as_deref()
@@ -313,6 +325,8 @@ impl SemanticVectorStore {
         frontier: &SourceProjectionFrontier,
         generation: &SourceBackedSemanticGeneration,
         states: &SourceProjectionStates,
+        checkpoint: &mut dyn FnMut() -> Result<()>,
+        progress: &mut dyn FnMut(u64) -> Result<()>,
     ) -> Result<SourceBackedSemanticOutcome> {
         let contract_fingerprint = &generation.contract_fingerprint;
         if states.len() != generation.sources.len()
@@ -374,6 +388,14 @@ impl SemanticVectorStore {
             flat_generation_hash: stats.generation_hash.unwrap_or_default(),
             flat_active_events: stats.active_events as u64,
             flat_active_chunks: stats.active_chunks as u64,
+            semantic_progress_sequence: frontier
+                .semantic_progress_sequence
+                .checked_add(1)
+                .ok_or_else(|| {
+                    SemanticVectorStoreError::reset_required(
+                        "semantic progress sequence overflowed",
+                    )
+                })?,
         };
         let transaction = self.conn.transaction()?;
         transaction.execute(
@@ -388,6 +410,7 @@ impl SemanticVectorStore {
             "DELETE FROM semantic_maintenance_state WHERE key = ?1",
             [SOURCE_FRONTIER_STATE],
         )?;
+        checkpoint()?;
         transaction.commit()?;
         #[cfg(test)]
         if self.flat.take_source_acknowledgement_failure() {
@@ -395,8 +418,10 @@ impl SemanticVectorStore {
                 "injected failure after semantic source acknowledgement"
             ));
         }
+        progress(acknowledgement.semantic_progress_sequence)?;
         Ok(SourceBackedSemanticOutcome {
             ready: true,
+            semantic_progress_sequence: Some(acknowledgement.semantic_progress_sequence),
             ..SourceBackedSemanticOutcome::default()
         })
     }
@@ -587,6 +612,7 @@ impl SemanticVectorStore {
                 .active_publication_token()
                 .map_err(anyhow::Error::new)?,
             flat_staging: None,
+            semantic_progress_sequence: 0,
         };
         let transaction = self.conn.unchecked_transaction()?;
         store_frontier(&transaction, &frontier)?;
@@ -650,12 +676,51 @@ pub(super) fn commit_frontier_after_flat(
     transaction: &Transaction<'_>,
     frontier: &mut SourceProjectionFrontier,
     publication: Option<&FlatPublishOutcome>,
-) -> Result<()> {
+    advance_semantic_progress: bool,
+) -> Result<Option<u64>> {
     if let Some(publication) = publication {
         frontier.flat_publication = publication.token();
         frontier.flat_staging = None;
     }
-    store_frontier(transaction, frontier)
+    let sequence = if advance_semantic_progress {
+        frontier.semantic_progress_sequence = frontier
+            .semantic_progress_sequence
+            .checked_add(1)
+            .ok_or_else(|| {
+                SemanticVectorStoreError::reset_required("semantic progress sequence overflowed")
+            })?;
+        Some(frontier.semantic_progress_sequence)
+    } else {
+        None
+    };
+    store_frontier(transaction, frontier)?;
+    Ok(sequence)
+}
+
+/// Records progress after a Flat operation whose own coordinated commit has
+/// already completed. A crash before this second durable write is conservative:
+/// completed work may be replayed, but never reported as having advanced.
+pub(super) fn advance_frontier_progress(
+    store: &SemanticVectorStore,
+    frontier: &mut SourceProjectionFrontier,
+) -> Result<u64> {
+    // Full-rebuild deletion pages publish a new Flat generation outside the
+    // source-page helper. Bind the frontier to that committed publication
+    // before recording its sequence so restart recovery observes one coherent
+    // durable boundary.
+    frontier.flat_publication = store
+        .flat
+        .active_publication_token()
+        .map_err(anyhow::Error::new)?;
+    frontier.flat_staging = None;
+    frontier.semantic_progress_sequence = frontier
+        .semantic_progress_sequence
+        .checked_add(1)
+        .ok_or_else(|| {
+            SemanticVectorStoreError::reset_required("semantic progress sequence overflowed")
+        })?;
+    store.store_source_frontier(frontier)?;
+    Ok(frontier.semantic_progress_sequence)
 }
 
 fn publication_order(
@@ -708,6 +773,7 @@ fn frontier_from_acknowledgement(
         last_failure: None,
         flat_publication: current,
         flat_staging: None,
+        semantic_progress_sequence: acknowledgement.semantic_progress_sequence,
     }
 }
 

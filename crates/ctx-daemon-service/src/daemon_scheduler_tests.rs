@@ -46,8 +46,9 @@ use super::{
     daemon_core_refresh_job_path, daemon_job_should_backoff,
     daemon_mode_runs_core_semantic_projection, daemon_semantic_job_path, read_daemon_job_status,
     record_daemon_job_retry, record_source_refresh_retry, restore_daemon_consumer_retries,
-    run_pending_core_refresh, write_daemon_job_status, DaemonRetryBackoff, DaemonRuntime,
-    DaemonSchedulerCycleContext, DaemonSchedulerPorts, DaemonSemanticJobPorts,
+    run_daemon_semantic_job_with_retry, run_pending_core_refresh, write_daemon_job_status,
+    DaemonRetryBackoff, DaemonRuntime, DaemonSchedulerCycleContext, DaemonSchedulerPorts,
+    DaemonSemanticGeneration, DaemonSemanticJobPorts,
 };
 
 const READINESS_QUERY: &str = "readiness-boundary-regression";
@@ -350,6 +351,54 @@ fn publish_semantic_catch_up_generation(data_root: &Path, event_count: u64) -> S
     let receipt = writer.commit(|_| true).unwrap();
     assert_eq!(receipt.indexed_documents, event_count);
     receipt.generation_id
+}
+
+#[test]
+fn one_scheduler_pin_controls_worker_mutation_receipt_and_retry_accounting() {
+    let temp = tempfile::tempdir().unwrap();
+    let generation_one = publish_empty_core_generation(temp.path());
+    let pinned_one =
+        crate::source_backed_refresh_coordinator::pin_published_generation(temp.path())
+            .unwrap()
+            .expect("published G1");
+    assert_eq!(pinned_one.generation_id(), generation_one);
+
+    let generation_two = publish_semantic_catch_up_generation(temp.path(), 1);
+    assert_ne!(generation_two, generation_one);
+    assert_eq!(pinned_generation(temp.path()), generation_two);
+
+    let mut runtime = DaemonRuntime::default();
+    let contract =
+        super::semantic_index_contract(runtime.config.semantic_executor.contract()).unwrap();
+    let job = run_daemon_semantic_job_with_retry(
+        temp.path(),
+        &mut runtime,
+        None,
+        DaemonSemanticGeneration {
+            source_generation: &pinned_one,
+            contract: &contract,
+        },
+        DaemonSemanticJobPorts {
+            artifact_fetcher: &crate::test_support::ARTIFACT,
+            config: &crate::test_support::CONFIG,
+        },
+    );
+
+    assert_eq!(job["status"], "ready", "{job:#}");
+    assert_eq!(job["core_generation_id"], generation_one, "{job:#}");
+    assert_eq!(job["source_generation_ready"], true, "{job:#}");
+    assert!(runtime.semantic_executor.is_none());
+    assert_eq!(runtime.semantic_retry.consecutive_failures, 0);
+    assert!(semantic_generation_is_ready_empty(
+        &semantic_vector_path(temp.path()),
+        &generation_one,
+    )
+    .unwrap());
+    assert!(!semantic_generation_is_ready_empty(
+        &semantic_vector_path(temp.path()),
+        &generation_two,
+    )
+    .unwrap());
 }
 
 fn readiness_certificate(source: &ctx_history_core::SourceKey) -> CertifiedSource {
@@ -805,6 +854,10 @@ fn automatic_scheduler_restart_migrates_legacy_semantic_state_despite_ready_job(
     assert_eq!(initial_job["status"], "ready");
     assert_eq!(initial_job["core_generation_id"], generation);
     assert_eq!(
+        initial_job["semantic_progress_sequence"], 1,
+        "automatic scheduler publishes the final durable acknowledgement sequence"
+    );
+    assert_eq!(
         initial_job["source_contract_fingerprint"],
         contract_fingerprint
     );
@@ -1105,6 +1158,78 @@ fn semantic_retry_runs_across_core_backoff_and_recovers_independently() {
     assert_eq!(restarted.history_retry.consecutive_failures, 1);
     let semantic = read_daemon_job_status(&daemon_semantic_job_path(temp.path())).unwrap();
     assert_eq!(semantic["status"], "ready");
+    assert_eq!(semantic["core_generation_id"], generation);
+}
+
+#[test]
+fn semantic_sidecar_retries_the_same_core_generation_on_its_second_cycle() {
+    let temp = tempfile::tempdir().unwrap();
+    let generation = publish_empty_core_generation(temp.path());
+    let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut runtime = DaemonRuntime::default();
+    runtime.sidecar_drain.generation = Some(generation.clone());
+
+    {
+        let _hooks = install_jobs(
+            calls.clone(),
+            Some(json!({
+                "status": "failed",
+                "failure_class": "retryable",
+                "retryable": true,
+                "last_error": "injected semantic sidecar failure",
+            })),
+        );
+        let first = run_daemon_scheduler_cycle_with_activity(
+            &daemon_args(),
+            temp.path(),
+            &mut runtime,
+            None,
+            true,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(!first.failed, "semantic failure cannot revoke Core");
+        assert!(first.continue_immediately);
+    }
+    assert_eq!(&*calls.borrow(), &["semantic_index"]);
+    assert_eq!(runtime.semantic_retry.consecutive_failures, 1);
+    assert_eq!(
+        runtime
+            .sidecar_drain
+            .semantic_attempted_generation
+            .as_deref(),
+        Some(generation.as_str())
+    );
+
+    runtime.semantic_retry.retry_not_before = None;
+    runtime.semantic_retry.retry_not_before_at_ms = None;
+    {
+        let _hooks = install_jobs(
+            calls.clone(),
+            Some(json!({
+                "status": "ready",
+                "source_generation_ready": true,
+                "source_work_remaining": false,
+            })),
+        );
+        let second = run_daemon_scheduler_cycle_with_activity(
+            &daemon_args(),
+            temp.path(),
+            &mut runtime,
+            None,
+            true,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(!second.failed);
+        assert!(second.continue_immediately);
+    }
+
+    assert_eq!(&*calls.borrow(), &["semantic_index", "semantic_index"]);
+    assert_eq!(runtime.semantic_retry.consecutive_failures, 0);
+    let semantic = read_daemon_job_status(&daemon_semantic_job_path(temp.path())).unwrap();
     assert_eq!(semantic["core_generation_id"], generation);
 }
 

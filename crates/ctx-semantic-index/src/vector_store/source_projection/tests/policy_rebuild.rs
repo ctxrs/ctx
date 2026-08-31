@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "policy_rebuild/checkpoints.rs"]
+mod checkpoints;
+
 #[test]
 fn high_odd_dimension_external_projection_preserves_full_ordinary_batches() -> Result<()> {
     let fixture = Fixture::new(1)?;
@@ -805,11 +808,46 @@ fn control_reset_retires_unowned_flat_vectors_before_rebuild() -> Result<()> {
     drop(control);
     let mut store = SemanticVectorStore::open(&fixture.semantic_path, semantic_model_contract())?;
     builder.calls.clear();
-    let first_drain = store.reconcile_source_backed_index(&target, &mut builder, &mut embedder)?;
+    let mut deletion_progress = Vec::new();
+    let first_drain = store.reconcile_source_backed_index_with_checkpoint_and_progress(
+        &target,
+        &mut builder,
+        &mut embedder,
+        &mut || Ok(()),
+        &mut |sequence| {
+            deletion_progress.push(sequence);
+            Ok(())
+        },
+    )?;
     assert_eq!(first_drain.deleted_chunks, MAX_SOURCE_EVENT_PAGE_ITEMS);
     assert!(first_drain.work_remaining);
+    assert_eq!(deletion_progress, vec![1]);
+    assert_eq!(first_drain.semantic_progress_sequence(), Some(1));
 
     drop(store);
+    // Simulate a crash after the deletion receipt is durable but before the
+    // enclosing source view refreshes its Flat publication. Recovery must
+    // resume without regressing the already-published sequence.
+    let control = rusqlite::Connection::open(fixture.semantic_path.join("state.sqlite"))?;
+    let frontier_json = control.query_row(
+        "SELECT value FROM semantic_maintenance_state WHERE key = 'core_semantic_frontier_v1'",
+        [],
+        |row| row.get::<_, String>(0),
+    )?;
+    let mut frontier: serde_json::Value = serde_json::from_str(&frontier_json)?;
+    let publication = frontier["flat_publication"]["generation"]
+        .as_u64()
+        .ok_or_else(|| anyhow!("test frontier has no Flat publication generation"))?;
+    assert!(
+        publication > 0,
+        "test fixture must have a newer Flat publication"
+    );
+    frontier["flat_publication"]["generation"] = serde_json::json!(publication - 1);
+    control.execute(
+        "UPDATE semantic_maintenance_state SET value = ?1 WHERE key = 'core_semantic_frontier_v1'",
+        [serde_json::to_string(&frontier)?],
+    )?;
+    drop(control);
     let mut store = SemanticVectorStore::open(&fixture.semantic_path, semantic_model_contract())?;
     store.reset_flat_active_event_snapshot_count();
     let rebuilt = reconcile_all(&mut store, &target, &mut builder, &mut embedder)?;
