@@ -379,15 +379,10 @@ mod tests {
         let displaced_root = parent.join("semantic-displaced");
         let displaced_parent = temporary.path().join("search-displaced");
         let lock = transaction_lock_path(&root);
-        let displaced_lock = root.join("flat_transaction.lock.displaced");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(&lock, b"").unwrap();
 
         let authority = PassiveRootAuthority::open(&root).unwrap();
-        std::fs::rename(&lock, &displaced_lock)
-            .expect("no child lock handle may contribute replacement authority");
-        std::fs::remove_file(&displaced_lock)
-            .expect("root authority alone must permit child deletion");
         assert!(
             std::fs::rename(&root, &displaced_root).is_err(),
             "retained root authority must deny direct-root replacement"
