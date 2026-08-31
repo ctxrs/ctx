@@ -3,6 +3,7 @@ use std::path::Path;
 use anyhow::Result;
 use serde_json::Value;
 
+use crate::daemon_retry::{semantic_failure_class_from_job, SemanticFailureClass};
 use crate::paths_status::{
     daemon_semantic_job_path, daemon_status_path, read_daemon_job_status_strict,
 };
@@ -211,27 +212,30 @@ pub fn classify_exact_daemon_semantic_completion(
     let selected_config_active =
         requested_config_matches && applied_config_matches && reload_status == Some("applied");
     if let Some(job) = exact_job.filter(|_| selected_config_active) {
-        match job.get("status").and_then(Value::as_str) {
-            Some("ready") => return DaemonSemanticCompletionObservation::Ready,
-            Some("failed") => {
-                return DaemonSemanticCompletionObservation::JobFailed {
-                    detail: job
-                        .get("last_error")
-                        .and_then(Value::as_str)
-                        .or_else(|| job.get("reason").and_then(Value::as_str))
-                        .unwrap_or("daemon semantic job failed")
-                        .to_owned(),
-                    retryable: job
-                        .get("retryable")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false),
-                    failure_class: job
-                        .get("failure_class")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned),
-                };
-            }
-            _ => {}
+        let job_status = job.get("status").and_then(Value::as_str);
+        if job_status == Some("ready") {
+            return DaemonSemanticCompletionObservation::Ready;
+        }
+        let blocking_legacy_failure = job_status == Some("skipped")
+            && semantic_failure_class_from_job(job)
+                .is_some_and(SemanticFailureClass::blocks_until_restart);
+        if job_status == Some("failed") || blocking_legacy_failure {
+            return DaemonSemanticCompletionObservation::JobFailed {
+                detail: job
+                    .get("last_error")
+                    .and_then(Value::as_str)
+                    .or_else(|| job.get("reason").and_then(Value::as_str))
+                    .unwrap_or("daemon semantic job failed")
+                    .to_owned(),
+                retryable: job
+                    .get("retryable")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                failure_class: job
+                    .get("failure_class")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+            };
         }
     }
 

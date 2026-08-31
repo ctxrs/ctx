@@ -89,16 +89,35 @@ fn daemon_semantic_model_acquisition_error(
     } else {
         "model_acquisition_failed"
     };
-    DaemonSemanticModelStartup::Finished(annotate_semantic_failure(
+    DaemonSemanticModelStartup::Finished(daemon_semantic_model_startup_failure(
+        last_run_at_ms,
+        failure_code,
+        message,
+        failure_class,
+    ))
+}
+
+fn daemon_semantic_model_startup_failure(
+    last_run_at_ms: i64,
+    failure_code: &'static str,
+    message: String,
+    failure_class: super::daemon_retry::SemanticFailureClass,
+) -> Value {
+    let status = if failure_class.blocks_until_restart() {
+        "failed"
+    } else {
+        "skipped"
+    };
+    annotate_semantic_failure(
         daemon_semantic_job_json(
-            "skipped",
+            status,
             Some(failure_code),
             last_run_at_ms,
             None,
             Some(message),
         ),
         failure_class,
-    ))
+    )
 }
 
 pub(super) fn run_daemon_semantic_model_startup_with<Acquire, AcquireCpuFallback, Load>(
@@ -159,16 +178,11 @@ where
             Err(error) => {
                 let message = format!("{error:#}");
                 let failure_class = classify_semantic_failure(&error);
-                let failure_code = "model_load_failed";
                 return Ok(DaemonSemanticModelStartup::Finished(
-                    annotate_semantic_failure(
-                        daemon_semantic_job_json(
-                            "skipped",
-                            Some(failure_code),
-                            last_run_at_ms,
-                            None,
-                            Some(message),
-                        ),
+                    daemon_semantic_model_startup_failure(
+                        last_run_at_ms,
+                        "model_load_failed",
+                        message,
                         failure_class,
                     ),
                 ));

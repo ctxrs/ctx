@@ -562,6 +562,81 @@ fn daemon_acquisition_failure_is_explicit_retryable_and_fail_closed() -> Result<
     Ok(())
 }
 
+#[test]
+fn permanent_acquisition_and_load_failures_are_immediately_terminal() -> Result<()> {
+    fn permanent_error(phase: &str) -> anyhow::Error {
+        std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("permanent {phase} denial"),
+        )
+        .into()
+    }
+
+    let acquisition = run_daemon_semantic_model_startup_with(
+        1234,
+        || Err(permanent_error("acquisition")),
+        |_| -> Result<SemanticDaemonModelAcquisition> {
+            unreachable!("failed initial acquisition must not request CPU fallback")
+        },
+        |_| -> Result<()> { unreachable!("failed acquisition must never load the runtime") },
+    )?;
+    let DaemonSemanticModelStartup::Finished(acquisition) = acquisition else {
+        panic!("permanent acquisition failure must stop startup");
+    };
+    assert_eq!(acquisition["status"], "failed", "{acquisition:#}");
+    assert_eq!(
+        acquisition["reason"], "model_acquisition_failed",
+        "{acquisition:#}"
+    );
+    assert_eq!(acquisition["failure_class"], "permanent");
+    assert_eq!(acquisition["retryable"], false);
+
+    let load = run_daemon_semantic_model_startup_with(
+        1234,
+        || Ok(SemanticDaemonModelAcquisition::verified_cpu_cache_for_test()),
+        |_| -> Result<SemanticDaemonModelAcquisition> {
+            unreachable!("permanent CPU load failure must not request CPU fallback")
+        },
+        |_| Err(permanent_error("load")),
+    )?;
+    let DaemonSemanticModelStartup::Finished(load) = load else {
+        panic!("permanent load failure must stop startup");
+    };
+    assert_eq!(load["status"], "failed", "{load:#}");
+    assert_eq!(load["reason"], "model_load_failed", "{load:#}");
+    assert_eq!(load["failure_class"], "permanent");
+    assert_eq!(load["retryable"], false);
+    Ok(())
+}
+
+#[test]
+fn corrupt_startup_failure_is_terminal_while_resource_pressure_remains_deferred() {
+    let corrupt: anyhow::Error = rusqlite::Error::SqliteFailure(
+        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CORRUPT),
+        None,
+    )
+    .into();
+    let corrupt_class = classify_semantic_failure(&corrupt);
+    let corrupt = daemon_semantic_model_startup_failure(
+        1234,
+        "model_load_failed",
+        format!("{corrupt:#}"),
+        corrupt_class,
+    );
+    assert_eq!(corrupt["status"], "failed", "{corrupt:#}");
+    assert_eq!(corrupt["failure_class"], "corrupt_sidecar");
+    assert_eq!(corrupt["retryable"], false);
+
+    let deferred = daemon_semantic_model_load_deferred_job(
+        1234,
+        &ctx_semantic_model::SemanticModelLoadDeferred::for_test(1, 2),
+    );
+    assert_eq!(deferred["status"], "skipped", "{deferred:#}");
+    assert_eq!(deferred["reason"], "memory_pressure", "{deferred:#}");
+    assert_eq!(deferred["failure_class"], "resource_pressure");
+    assert_eq!(deferred["retryable"], true);
+}
+
 #[cfg(any(
     all(
         target_os = "linux",

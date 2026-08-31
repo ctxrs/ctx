@@ -133,6 +133,101 @@ fn matching_job_failure_preserves_retryability_and_taxonomy() {
     );
 }
 
+#[test]
+fn canonical_failure_is_terminal_even_without_a_known_failure_class() {
+    let selected = "https://semantic.example.test/";
+    let mut failed_job = job("failed");
+    failed_job["retryable"] = json!(false);
+    failed_job["last_error"] = json!("unclassified terminal failure");
+    assert_eq!(
+        classify_exact_daemon_semantic_completion(
+            &status("applied", selected, selected),
+            Some(&failed_job),
+            &target(),
+        ),
+        DaemonSemanticCompletionObservation::JobFailed {
+            detail: "unclassified terminal failure".to_owned(),
+            retryable: false,
+            failure_class: None,
+        }
+    );
+}
+
+#[test]
+fn legacy_skipped_blocking_failures_are_terminal_but_retryable_classes_remain_pending() {
+    let selected = "https://semantic.example.test/";
+    for class in ["permanent", "corrupt_sidecar"] {
+        let mut legacy_job = job("skipped");
+        legacy_job["failure_class"] = json!(class);
+        legacy_job["retryable"] = json!(false);
+        legacy_job["last_error"] = json!(format!("legacy {class} failure"));
+        assert_eq!(
+            classify_exact_daemon_semantic_completion(
+                &status("applied", selected, selected),
+                Some(&legacy_job),
+                &target(),
+            ),
+            DaemonSemanticCompletionObservation::JobFailed {
+                detail: format!("legacy {class} failure"),
+                retryable: false,
+                failure_class: Some(class.to_owned()),
+            },
+            "{class}"
+        );
+    }
+
+    for (job_status, class) in [
+        ("skipped", "retryable"),
+        ("skipped", "resource_pressure"),
+        ("resource_deferred", "resource_pressure"),
+    ] {
+        let mut retryable_job = job(job_status);
+        retryable_job["failure_class"] = json!(class);
+        retryable_job["retryable"] = json!(true);
+        assert!(matches!(
+            classify_exact_daemon_semantic_completion(
+                &status("applied", selected, selected),
+                Some(&retryable_job),
+                &target(),
+            ),
+            DaemonSemanticCompletionObservation::Pending(_)
+        ));
+    }
+}
+
+#[test]
+fn ready_and_exact_target_checks_precede_legacy_failure_classification() {
+    let selected = "https://semantic.example.test/";
+    let mut ready_job = job("ready");
+    ready_job["failure_class"] = json!("permanent");
+    ready_job["retryable"] = json!(false);
+    ready_job["last_error"] = json!("stale terminal metadata");
+    assert_eq!(
+        classify_exact_daemon_semantic_completion(
+            &status("applied", selected, selected),
+            Some(&ready_job),
+            &target(),
+        ),
+        DaemonSemanticCompletionObservation::Ready
+    );
+
+    let mut stale_job = job("failed");
+    stale_job["core_generation_id"] = json!("generation-old");
+    stale_job["failure_class"] = json!("permanent");
+    stale_job["retryable"] = json!(false);
+    assert!(matches!(
+        classify_exact_daemon_semantic_completion(
+            &status("applied", selected, selected),
+            Some(&stale_job),
+            &target(),
+        ),
+        DaemonSemanticCompletionObservation::Pending(DaemonSemanticProgress {
+            job_target_matches: false,
+            ..
+        })
+    ));
+}
+
 fn pending(observation: DaemonSemanticCompletionObservation) -> DaemonSemanticProgress {
     match observation {
         DaemonSemanticCompletionObservation::Pending(progress) => progress,
