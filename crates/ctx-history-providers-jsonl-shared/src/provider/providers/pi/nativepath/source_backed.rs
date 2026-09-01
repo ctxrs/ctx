@@ -15,8 +15,8 @@ use ctx_history_core::{
     derive_event_id, derive_native_session_id, ActivityInvocation, ActivityJsonCapture,
     ActivityResult, ActivityTextCapture, CaptureProvider, CoreActivity, CoreRecord,
     EventIdentityInput, EventType, LiteralFactKind, NativeItemKey, ProviderDeclaredFact,
-    SourceAnchorScope, SourceKey, StableEntityId, TypedKey, CORE_ACTIVITY_REVISION,
-    MAX_CORE_CONTENT_BYTES,
+    ProviderNativeSessionRelationship, SourceAnchorScope, SourceKey, StableEntityId, TypedKey,
+    CORE_ACTIVITY_REVISION, MAX_CORE_CONTENT_BYTES,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -53,7 +53,7 @@ const NATIVE_EVENT_NAMESPACE: &str = "pi.entry";
 const LOGICAL_SESSION_KIND: &str = "pi-session";
 const LOGICAL_EVENT_KIND: &str = "pi-event";
 const SOURCE_SCHEMA_VARIANT: &str = "pi-nativepath-jsonl-v1";
-const PARSER_REVISION: &str = "pi-shared-jsonl-v10-child-local-lineage";
+const PARSER_REVISION: &str = "pi-shared-jsonl-v11-omp-parent-lineage";
 const EVENT_IDENTITY_REVISION: &str = "pi-content-occurrence-v1";
 const FALLBACK_FINGERPRINT_DOMAIN: &[u8] = b"ctx.pi.fallback-event-fingerprint.v1\0";
 const MAX_TOUCHES_PER_RECORD: usize = 63;
@@ -129,8 +129,17 @@ struct CachedBinding {
 struct Binding {
     native_session_id: String,
     cwd: Option<String>,
+    #[serde(skip)]
+    parent_session: Option<String>,
+    resolved_parent_session_id: Option<StableEntityId>,
     header_digest: [u8; 32],
     leading_rejected_records: u64,
+}
+
+#[derive(Deserialize)]
+struct ParentSessionHeader {
+    #[serde(rename = "parentSession")]
+    parent_session: Option<String>,
 }
 
 struct DiscoveredPiSource {
@@ -248,6 +257,7 @@ impl<R: JsonlProviderRuntime> JsonlFamilyAdapter for PiJsonlAdapter<R> {
                 identity_probe,
             });
         }
+        resolve_parent_sessions(&mut discovered, self.source_anchor_scope)?;
         let mut sources = HashMap::<[u8; 32], JsonlFileObservation>::new();
         let mut leaves = Vec::with_capacity(discovered.len());
         for discovered in discovered {
@@ -452,6 +462,10 @@ impl<R: JsonlProviderRuntime> JsonlFamilyProjector for PiProjector<R> {
         )
         .map_err(contract)?;
         core.provider_session_id = Some(self.binding.native_session_id.clone());
+        if let Some(parent_session_id) = self.binding.resolved_parent_session_id {
+            core.parent_session_id = Some(parent_session_id);
+            core.session_relationship = Some(ProviderNativeSessionRelationship::Forked);
+        }
         core.native_event_id = Some(native_event_id);
         core.occurred_at_unix_ms = Some(occurred_at.timestamp_millis());
         core.role = value
@@ -529,9 +543,161 @@ fn parse_header_binding(record: JsonlRecordRef<'_>) -> Result<Option<Binding>> {
     Ok(Some(Binding {
         native_session_id,
         cwd: value.get("cwd").and_then(Value::as_str).map(str::to_owned),
+        parent_session: serde_json::from_slice::<ParentSessionHeader>(record.bytes())
+            .ok()
+            .and_then(|header| header.parent_session)
+            .filter(|parent| !parent.trim().is_empty())
+            .map(|parent| parent.trim().to_owned()),
+        resolved_parent_session_id: None,
         header_digest: Sha256::digest(record.bytes()).into(),
         leading_rejected_records: 0,
     }))
+}
+
+fn resolve_parent_sessions(
+    discovered: &mut [DiscoveredPiSource],
+    source_anchor_scope: SourceAnchorScope,
+) -> Result<()> {
+    let paths = discovered
+        .iter()
+        .enumerate()
+        .filter_map(|(index, source)| omp_path_identity(&source.path).map(|path| (path, index)))
+        .collect::<HashMap<_, _>>();
+    let mut native_ids = HashMap::<&str, Option<usize>>::new();
+    for (index, source) in discovered.iter().enumerate() {
+        native_ids
+            .entry(&source.binding.native_session_id)
+            .and_modify(|candidate| *candidate = None)
+            .or_insert(Some(index));
+    }
+    let mut resolved = discovered
+        .iter()
+        .enumerate()
+        .map(|(child_index, source)| {
+            let parent = source.binding.parent_session.as_deref()?;
+            let parent_index = if Path::new(parent).is_absolute() {
+                paths
+                    .get(&omp_path_identity(Path::new(parent))?)
+                    .copied()
+                    .filter(|index| {
+                        omp_session_path_matches_id(
+                            parent,
+                            &discovered[*index].binding.native_session_id,
+                        )
+                    })
+            } else {
+                native_ids.get(parent).copied().flatten()
+            }?;
+            (parent_index != child_index).then_some(parent_index)
+        })
+        .collect::<Vec<_>>();
+    clear_cyclic_parent_references(&mut resolved);
+    let parent_session_ids = resolved
+        .into_iter()
+        .map(|parent_index| {
+            parent_index
+                .map(|parent_index| {
+                    let parent = &discovered[parent_index].binding.native_session_id;
+                    session_identity_for_native(parent, source_anchor_scope)
+                })
+                .transpose()
+        })
+        .collect::<Result<Vec<_>>>()?;
+    for (child, parent_session_id) in discovered.iter_mut().zip(parent_session_ids) {
+        child.binding.resolved_parent_session_id = parent_session_id;
+    }
+    Ok(())
+}
+
+fn omp_session_path_matches_id(parent: &str, native_session_id: &str) -> bool {
+    let Some(file_name) = Path::new(parent).file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    file_name
+        .strip_suffix(".jsonl")
+        .and_then(|stem| stem.strip_suffix(native_session_id))
+        .is_some_and(|prefix| prefix.ends_with('_'))
+}
+
+fn omp_path_identity(path: &Path) -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        use std::{
+            ffi::OsString,
+            os::windows::ffi::{OsStrExt as _, OsStringExt as _},
+            path::{Component, Prefix},
+        };
+
+        if !path.is_absolute()
+            || path
+                .components()
+                .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
+        {
+            return None;
+        }
+        let Component::Prefix(prefix) = path.components().next()? else {
+            return None;
+        };
+        let verbatim = match prefix.kind() {
+            Prefix::Disk(_) => false,
+            Prefix::VerbatimDisk(_) => true,
+            Prefix::UNC(_, _)
+            | Prefix::VerbatimUNC(_, _)
+            | Prefix::DeviceNS(_)
+            | Prefix::Verbatim(_) => return None,
+        };
+        let identity = path.as_os_str().encode_wide().collect::<Vec<_>>();
+        if !verbatim {
+            return Some(PathBuf::from(OsString::from_wide(&identity)));
+        }
+        const VERBATIM_NAMESPACE: &[u16] = &[b'\\' as u16, b'\\' as u16, b'?' as u16, b'\\' as u16];
+        identity
+            .strip_prefix(VERBATIM_NAMESPACE)
+            .map(OsString::from_wide)
+            .map(PathBuf::from)
+    }
+    #[cfg(not(windows))]
+    {
+        Some(path.to_path_buf())
+    }
+}
+
+fn clear_cyclic_parent_references(parents: &mut [Option<usize>]) {
+    let mut state = vec![0_u8; parents.len()];
+    let mut positions = vec![None; parents.len()];
+    for start in 0..parents.len() {
+        if state[start] != 0 {
+            continue;
+        }
+        let mut path = Vec::new();
+        let mut current = start;
+        loop {
+            match state[current] {
+                0 => {
+                    state[current] = 1;
+                    positions[current] = Some(path.len());
+                    path.push(current);
+                    let Some(parent) = parents[current] else {
+                        break;
+                    };
+                    current = parent;
+                }
+                1 => {
+                    let cycle_start =
+                        positions[current].expect("active parent traversal must have a position");
+                    for node in &path[cycle_start..] {
+                        parents[*node] = None;
+                    }
+                    break;
+                }
+                _ => break,
+            }
+        }
+        for node in path {
+            state[node] = 2;
+            positions[node] = None;
+        }
+    }
 }
 
 fn is_omp_title_slot(record: JsonlRecordRef<'_>) -> bool {
@@ -691,7 +857,6 @@ fn session_identity(source: &SourceKey, native_session_id: &str) -> Result<Stabl
     .map_err(contract)
 }
 
-#[cfg(test)]
 fn session_identity_for_native(
     native_session_id: &str,
     source_anchor_scope: SourceAnchorScope,
@@ -774,6 +939,38 @@ mod tests {
         ] {
             assert!(!is_omp_title_slot(JsonlRecordRef::for_test(title, 0)));
         }
+    }
+
+    #[test]
+    fn omp_path_parent_requires_the_native_session_id_filename_suffix() {
+        assert!(omp_session_path_matches_id(
+            "/tmp/2026-09-01T00-00-00-000Z_parent.jsonl",
+            "parent"
+        ));
+        assert!(!omp_session_path_matches_id(
+            "/tmp/2026-09-01T00-00-00-000Z_other.jsonl",
+            "parent"
+        ));
+        assert!(!omp_session_path_matches_id("/tmp/parent.jsonl", "parent"));
+        assert!(!omp_session_path_matches_id(
+            "/tmp/2026-09-01T00-00-00-000Z_parent.jsonl.bak",
+            "parent"
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn omp_path_identity_equates_only_ordinary_and_verbatim_disk_paths() {
+        let ordinary = Path::new(r"C:\Users\ctx\.omp\agent\sessions\session.jsonl");
+        let verbatim = Path::new(r"\\?\C:\Users\ctx\.omp\agent\sessions\session.jsonl");
+
+        assert_eq!(
+            omp_path_identity(ordinary),
+            omp_path_identity(verbatim),
+            "Windows canonical paths use verbatim spelling while OMP records ordinary paths"
+        );
+        assert!(omp_path_identity(Path::new(r"\\server\share\session.jsonl")).is_none());
+        assert!(omp_path_identity(Path::new(r"C:\tmp\..\session.jsonl")).is_none());
     }
 
     #[test]

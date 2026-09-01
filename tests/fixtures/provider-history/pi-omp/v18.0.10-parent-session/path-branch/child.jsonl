@@ -1,0 +1,4 @@
+{"type":"title","v":1,"title":"","updatedAt":"2026-09-01T00:00:00.000Z","pad":"                                                                                                                                                                              "}
+{"type":"session","version":3,"id":"omp-path-branch-fixture","timestamp":"2026-09-01T00:00:00.000Z","cwd":"/workspace/omp-lineage-fixture","parentSession":"/sanitized/omp-parent-session/2026-09-01T00-00-00-000Z_omp-parent-session-fixture.jsonl"}
+{"type":"model_change","id":"path-child-entry-02","parentId":null,"timestamp":"2026-09-01T00:00:01.000Z","model":"huggingface/Qwen/Qwen2.5-Coder-3B-Instruct","resolvedModelIsFallback":false}
+{"type":"thinking_level_change","id":"path-child-entry-03","parentId":"path-child-entry-02","timestamp":"2026-09-01T00:00:02.000Z","thinkingLevel":null,"configured":null}

@@ -281,6 +281,12 @@ filegroup(
 )
 
 filegroup(
+    name = "omp_parent_session_test_fixtures",
+    srcs = glob(["tests/fixtures/provider-history/pi-omp/v18.0.10-parent-session/**"]),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
     name = "upgrade_extractor_contract",
     srcs = ["scripts/test-windows-runtime-upgrade-extractor.ps1"],
     visibility = ["//visibility:public"],
