@@ -572,6 +572,8 @@ check_windows() {
   version_le "${os_version}" 10.0 || fail "Windows header OS version ${os_version} is newer than 10.0"
   version_le "${subsystem_version}" 10.0 || fail "Windows subsystem version ${subsystem_version} is newer than 10.0"
 
+  # The locked platform TLS verifier uses the native Windows certificate store,
+  # which imports crypt32.dll. Keep every DLL exact so unrelated imports fail.
   assert_exact_lines "PE imported DLLs" "$(pe_imports)" "advapi32.dll
 api-ms-win-crt-environment-l1-1-0.dll
 api-ms-win-crt-heap-l1-1-0.dll
@@ -585,6 +587,7 @@ api-ms-win-crt-utility-l1-1-0.dll
 api-ms-win-core-synch-l1-2-0.dll
 bcrypt.dll
 bcryptprimitives.dll
+crypt32.dll
 kernel32.dll
 ntdll.dll
 ole32.dll

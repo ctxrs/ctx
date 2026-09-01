@@ -387,6 +387,9 @@ Import {
   Name: bcryptprimitives.dll
 }
 Import {
+  Name: crypt32.dll
+}
+Import {
   Name: KERNEL32.dll
 }
 Import {
@@ -424,7 +427,7 @@ expect_pass linux_arm64_optional_gnu_runtime run_check linux-aarch64 \
   "${linux_arm64_gnu_runtime}"
 expect_pass mac_arm64_security_framework run_check macos-arm64 "${mac_arm_readobj}" "${mac_objdump}"
 expect_pass mac_x64_security_framework run_check macos-x64 "${mac_x64_readobj}" "${mac_objdump}"
-expect_pass windows run_check windows-x64 "${windows}"
+expect_pass windows_native_trust_store run_check windows-x64 "${windows}"
 expect_pass windows_declared_tool run_declared_windows_check "${windows}"
 expect_fail malformed run_check linux-x64 "${tmp}/empty"
 grep -Fq "scanner-inputs=llvm-readobj=${tmp}/llvm-readobj" \
@@ -655,6 +658,7 @@ mutate_and_fail windows_subsystem windows-x64 "${windows}" 's/IMAGE_SUBSYSTEM_WI
 mutate_and_fail windows_version windows-x64 "${windows}" 's/MajorOperatingSystemVersion: 10/MajorOperatingSystemVersion: 11/'
 mutate_and_fail windows_subsystem_version windows-x64 "${windows}" 's/MajorSubsystemVersion: 6/MajorSubsystemVersion: 11/'
 mutate_and_fail windows_missing_restart_manager windows-x64 "${windows}" '/Name: rstrtmgr.dll/d'
+mutate_and_fail windows_crypt32_sibling windows-x64 "${windows}" 's/crypt32.dll/cryptnet.dll/'
 mutate_and_fail windows_dll windows-x64 "${windows}" 's/ws2_32.dll/winhttp.dll/'
 mutate_and_fail windows_static_symbols windows-x64 "${windows}" 's/Import {/Symbols [\n  Symbol {\n    Name: main (1)\n  }\n]\nImport {/'
 # The no-Buildkite local runner validates published bytes through this public
