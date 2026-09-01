@@ -84,10 +84,12 @@ history_read_binary_contract(
 history_read_binary_contract(
     name = "search_show_tests",
     src = "tests/contracts/search_show.rs",
+    extra_env = {"RUST_TEST_THREADS": "1"},
     extra_srcs = [
         "tests/support/search_show/import_paths.rs",
         "tests/support/search_show/pi_flow.rs",
         "tests/support/search_show/search_filters.rs",
         "tests/support/search_show/search_flows.rs",
     ],
+    tags = ["exclusive"],
 )
