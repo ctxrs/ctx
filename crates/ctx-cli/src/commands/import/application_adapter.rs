@@ -91,6 +91,16 @@ impl ctx_history_cli::ImportApplicationPort for CliImportHost {
         let exact_route_lineages = selection
             .explicit_source_authority()
             .map(|authority| authority.route_lineages());
+        let import_baseline = optional_import_baseline(|| {
+            let pin = ctx_daemon_cli::pin_active_verified_generation(data_root)?;
+            let generation_id = pin.generation_id().to_owned();
+            let index = pin.verified_index();
+            Ok(ImportIndexBaseline {
+                generation_id,
+                session_count: index.session_count()?,
+                document_count: index.document_count(),
+            })
+        });
         let refresh = wait_for_import_core_refresh(
             data_root,
             no_daemon,
@@ -109,28 +119,12 @@ impl ctx_history_cli::ImportApplicationPort for CliImportHost {
         let current_index = refresh.pin.verified_index();
         let current_sessions = current_index.session_count()?;
         let current_searchable_events = current_index.document_count();
-        let previous_cardinalities = match refresh.request_previous_generation.as_deref() {
-            None => None,
-            Some(previous_generation) if previous_generation == pinned_generation => {
-                Some((current_sessions, current_searchable_events))
-            }
-            Some(previous_generation) => {
-                // The import publication is already authoritative. A later
-                // publication may have retired its predecessor before this
-                // optional presentation measurement, so omit the delta
-                // instead of failing a successful import or guessing.
-                optional_import_baseline(|| {
-                    let previous = ctx_history_refresh::pin_retained_generation(
-                        data_root,
-                        previous_generation,
-                    )?;
-                    Ok((
-                        previous.verified_index().session_count()?,
-                        previous.verified_index().document_count(),
-                    ))
-                })
-            }
-        };
+        let previous_cardinalities = import_previous_cardinalities(
+            import_baseline.as_ref(),
+            refresh.request_previous_generation.as_deref(),
+            &pinned_generation,
+            (current_sessions, current_searchable_events),
+        );
         let index_facts = ImportIndexFacts::from_cardinalities(
             current_sessions,
             current_searchable_events,
@@ -169,21 +163,128 @@ impl ctx_history_cli::ImportApplicationPort for CliImportHost {
     }
 }
 
-fn optional_import_baseline(measure: impl FnOnce() -> Result<(u64, u64)>) -> Option<(u64, u64)> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ImportIndexBaseline {
+    generation_id: String,
+    session_count: u64,
+    document_count: u64,
+}
+
+fn optional_import_baseline(
+    measure: impl FnOnce() -> Result<ImportIndexBaseline>,
+) -> Option<ImportIndexBaseline> {
     measure().ok()
+}
+
+fn import_previous_cardinalities(
+    baseline: Option<&ImportIndexBaseline>,
+    request_previous_generation: Option<&str>,
+    pinned_generation: &str,
+    current: (u64, u64),
+) -> Option<(u64, u64)> {
+    let previous_generation = request_previous_generation?;
+    if previous_generation == pinned_generation {
+        return Some(current);
+    }
+    baseline
+        .filter(|baseline| baseline.generation_id == previous_generation)
+        .map(|baseline| (baseline.session_count, baseline.document_count))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::optional_import_baseline;
+    use super::{import_previous_cardinalities, optional_import_baseline, ImportIndexBaseline};
+
+    fn baseline(
+        generation_id: &str,
+        session_count: u64,
+        document_count: u64,
+    ) -> ImportIndexBaseline {
+        ImportIndexBaseline {
+            generation_id: generation_id.to_owned(),
+            session_count,
+            document_count,
+        }
+    }
 
     #[test]
-    fn optional_baseline_measurement_cannot_fail_a_successful_import() {
+    fn baseline_capture_failure_cannot_fail_a_successful_import() {
         assert_eq!(
-            optional_import_baseline(|| anyhow::bail!("retained generation was reclaimed")),
+            optional_import_baseline(|| anyhow::bail!("active generation is unavailable")),
             None
         );
-        assert_eq!(optional_import_baseline(|| Ok((3, 8))), Some((3, 8)));
+    }
+
+    #[test]
+    fn cold_import_or_missing_baseline_omits_previous_cardinalities() {
+        let captured = baseline("generation-0", 1, 4);
+        assert_eq!(
+            import_previous_cardinalities(Some(&captured), None, "generation-1", (3, 8)),
+            None
+        );
+        assert_eq!(
+            import_previous_cardinalities(None, Some("generation-0"), "generation-1", (3, 8)),
+            None
+        );
+    }
+
+    #[test]
+    fn matching_changed_predecessor_uses_captured_baseline() {
+        let captured = baseline("generation-0", 1, 4);
+        assert_eq!(
+            import_previous_cardinalities(
+                Some(&captured),
+                Some("generation-0"),
+                "generation-1",
+                (3, 8),
+            ),
+            Some((1, 4))
+        );
+    }
+
+    #[test]
+    fn current_predecessor_uses_current_cardinalities_for_zero_delta() {
+        let captured = baseline("generation-0", 1, 4);
+        assert_eq!(
+            import_previous_cardinalities(
+                Some(&captured),
+                Some("generation-1"),
+                "generation-1",
+                (3, 8),
+            ),
+            Some((3, 8))
+        );
+    }
+
+    #[test]
+    fn mismatched_concurrent_predecessor_omits_previous_cardinalities() {
+        let captured = baseline("generation-0", 1, 4);
+        assert_eq!(
+            import_previous_cardinalities(
+                Some(&captured),
+                Some("generation-1"),
+                "generation-2",
+                (3, 8),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn baseline_capture_precedes_refresh_without_post_publication_repin() {
+        let source = include_str!("application_adapter.rs");
+        let capture = source
+            .find("let import_baseline = optional_import_baseline")
+            .expect("import baseline capture must remain present");
+        let refresh = source
+            .find("let refresh = wait_for_import_core_refresh")
+            .expect("terminal import refresh must remain present");
+        assert!(capture < refresh, "baseline capture must precede refresh");
+        let retained_generation_repin = ["pin_retained_", "generation"].concat();
+        assert!(
+            !source.contains(&retained_generation_repin),
+            "delta presentation must not repin a generation after publication"
+        );
     }
 
     #[test]
