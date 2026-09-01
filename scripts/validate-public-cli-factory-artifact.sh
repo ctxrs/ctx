@@ -133,4 +133,11 @@ python3 -I scripts/native-execution-proof.py create \
   --artifact "${artifact}" \
   --smoke-result "${output_dir%/}/candidate-smoke.json" \
   --output "${output_dir%/}/ctx-${platform}.native-execution.json"
+if [[ "${platform}" == macos-* ]]; then
+  signing_evidence="${artifact_dir%/}/ctx-${platform}.signing.json"
+  [[ -f "${signing_evidence}" && ! -L "${signing_evidence}" ]] || \
+    die "passed macOS signing evidence is not a regular file"
+  install -m 0644 "${signing_evidence}" \
+    "${output_dir%/}/ctx-${platform}.signing.json"
+fi
 printf 'native exact-byte validation passed: %s sha256=%s\n' "${platform}" "${after}"
