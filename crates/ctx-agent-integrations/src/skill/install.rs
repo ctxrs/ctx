@@ -183,9 +183,7 @@ pub fn default_maintenance_selection(
     include_installed_targets(super::default_agent_selection(context), project, context)
 }
 
-/// Extends default maintenance to every recognized location that already has
-/// a current or legacy skill. Explicit and picker selections remain exact.
-fn include_installed_targets(
+pub(super) fn include_installed_targets(
     mut selection: SkillAgentSelection,
     project: bool,
     context: &super::PathContext,
@@ -424,7 +422,9 @@ fn inspect_current_skill(
         Some(hash) if hash == bundled_hash() => SkillInstallStatus::Stale,
         Some(hash) if LEGACY_BUNDLED_SKILL_HASHES.contains(&hash) => SkillInstallStatus::Stale,
         Some(hash) => match metadata.as_ref() {
-            Some(metadata) if metadata.skill_hash == hash => SkillInstallStatus::Stale,
+            Some(metadata) if metadata_manages_hash(Some(metadata), hash) => {
+                SkillInstallStatus::Stale
+            }
             _ => SkillInstallStatus::Modified,
         },
     };
@@ -467,7 +467,7 @@ fn ensure_safe_skill_directory(target: &SkillTarget) -> Result<()> {
         .with_context(|| format!("create {}", target.skill_dir.display()))
 }
 
-fn validate_directory_path(authority_root: &Path, path: &Path) -> Result<()> {
+pub(super) fn validate_directory_path(authority_root: &Path, path: &Path) -> Result<()> {
     ensure_path_inside(authority_root, path)?;
     let relative = path
         .strip_prefix(authority_root)
@@ -500,7 +500,7 @@ fn validate_directory_path(authority_root: &Path, path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn legacy_skill_dir(target: &SkillTarget) -> Result<PathBuf> {
+pub(super) fn legacy_skill_dir(target: &SkillTarget) -> Result<PathBuf> {
     let path = target.base_dir.join(LEGACY_BUNDLED_SKILL_NAME);
     ensure_path_inside(&target.base_dir, &path)?;
     Ok(path)
@@ -512,14 +512,12 @@ fn remove_legacy_skill_files(target: &SkillTarget, legacy: &LegacySkillSnapshot)
     atomic_remove_if_unchanged(&legacy_dir.join("SKILL.md"), &legacy.body)
         .with_context(|| format!("remove {}", legacy_dir.join("SKILL.md").display()))?;
     if let Some(metadata_body) = &legacy.managed_metadata_body {
-        // The skill file is the active integration surface. Metadata that was
-        // concurrently edited is no longer installer-owned, so preserve it.
         let _ = atomic_remove_if_unchanged(&legacy_dir.join(METADATA_FILE), metadata_body);
     }
     Ok(())
 }
 
-fn read_optional_regular_file(path: &Path) -> Result<Option<Vec<u8>>> {
+pub(super) fn read_optional_regular_file(path: &Path) -> Result<Option<Vec<u8>>> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_file() && !is_windows_reparse_point(&metadata) => {
             fs::read(path)
@@ -579,7 +577,7 @@ fn metadata_is_current(metadata: Option<&SkillMetadata>, product_version: &str) 
         && metadata.is_some_and(|metadata| metadata.ctx_cli_version == product_version)
 }
 
-fn metadata_manages_hash(metadata: Option<&SkillMetadata>, hash: &str) -> bool {
+pub(super) fn metadata_manages_hash(metadata: Option<&SkillMetadata>, hash: &str) -> bool {
     metadata.is_some_and(|metadata| {
         metadata.schema_version == 1
             && metadata.installer == "ctx-cli"
@@ -588,7 +586,7 @@ fn metadata_manages_hash(metadata: Option<&SkillMetadata>, hash: &str) -> bool {
     })
 }
 
-fn metadata_manages_legacy_hash(metadata: Option<&SkillMetadata>, hash: &str) -> bool {
+pub(super) fn metadata_manages_legacy_hash(metadata: Option<&SkillMetadata>, hash: &str) -> bool {
     metadata.is_some_and(|metadata| {
         metadata.schema_version == 1
             && metadata.installer == "ctx-cli"

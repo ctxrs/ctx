@@ -10,7 +10,7 @@ use ctx_agent_integrations::skill::{parse_picker_selection, SkillAgentSelection}
 use super::{
     agents::{picker_agents, SkillAgentArg},
     paths::PathContext,
-    SkillInstallArgs, SkillStatusArgs,
+    SkillInstallArgs, SkillRemoveArgs, SkillStatusArgs,
 };
 use crate::ui::Ui;
 
@@ -40,6 +40,13 @@ pub(super) fn install_agent_selection(
 
 pub(super) fn status_agent_selection(
     args: &SkillStatusArgs,
+    context: &PathContext,
+) -> Result<SkillAgentSelection> {
+    status_selection(&args.agent, args.all_agents, args.project, context)
+}
+
+pub(super) fn remove_agent_selection(
+    args: &SkillRemoveArgs,
     context: &PathContext,
 ) -> Result<SkillAgentSelection> {
     status_selection(&args.agent, args.all_agents, args.project, context)

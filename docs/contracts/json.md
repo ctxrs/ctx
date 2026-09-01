@@ -1205,6 +1205,15 @@ protocol-level parse-error or invalid-params responses.
 ctx integrations install mcp --format json
 ctx integrations remove mcp --format json
 ctx integrations status mcp --format json
+ctx integrations install skill --format json
+ctx integrations status skill --format json
+ctx integrations remove skill --format json
+ctx integrations install slash-command --format json
+ctx integrations status slash-command --format json
+ctx integrations remove slash-command --format json
+ctx integrations install plugin --format json
+ctx integrations status plugin --format json
+ctx integrations remove plugin --format json
 ```
 
 MCP integration JSON returns:
@@ -1237,6 +1246,37 @@ Each remove result uses the install target fields and includes `success`,
 `previous_status`, `status`, `already_absent`, `modified`, and `error`.
 Successful results have `status: "missing"`; `modified` distinguishes an
 entry removed by this invocation from an idempotent already-absent result.
+
+Skill integration JSON keeps the top-level `skill: "ctx"`, `scope`, and
+`results[]` fields. Install and status retain their existing target fields and
+status values: `current`, `stale`, `modified`, and `missing`. Remove results
+include `agent`, `agent_display_name`, `scope`, `path`, `success`,
+`previous_status`, `status`, `already_absent`, `removed`, `removed_current`,
+`removed_legacy`, and `error`. Successful removal reports `status: "missing"`.
+
+Slash-command integration JSON keeps the released top-level discriminator
+`integration: "slash-commands"`, plus `command: "ctx"`, `scope`, and
+`results[]`. Status results include target identity, nullable `scope`, `path`,
+and `legacy_path`, plus `success`, `status`, `error`, and `note`. Remove adds
+`previous_status`, `already_absent`, `modified`, `current_removed`,
+`legacy_removed`, and `metadata_removed`. Informational `skill_only` and
+`manual_only` targets have null paths and are non-mutating.
+
+Plugin integration JSON uses `integration: "plugin"`, `scope`, and
+`results[]`. Each result includes `agent`, `agent_display_name`, `scope`,
+`capability`, `detected`, `supported`, `marketplace_status`, `previous_status`,
+`status`, `action`, `installed_version`, `success`, `modified`, `instructions`,
+and `error`. Automatic status values are `installed`, `legacy_installed`, and
+`missing`; the native manager owns release selection, so `installed_version` is
+nullable and informational. `capability: "manual_required"` means the host must
+be managed through its UI; ctx does not claim an installed or missing state.
+Status invokes manager list operations only. Plugin removal does not remove the
+retained marketplace, direct skills, MCP configuration, the ctx CLI, or
+history.
+
+The canonical CLI targets are `mcp`, `skill`, `slash-command`, and `plugin`.
+The released plural spellings `skills` and `slash-commands` remain accepted as
+hidden aliases. Alias use never changes JSON discriminators or field shapes.
 
 ## Docs
 

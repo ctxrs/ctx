@@ -94,6 +94,21 @@ struct DocTopic {
     body: &'static str,
 }
 
+const MAN_PAGE_COMPATIBILITY_ALIASES: &[(&str, &str)] = &[
+    (
+        "ctx-integrations-install-skills",
+        "ctx-integrations-install-skill",
+    ),
+    (
+        "ctx-integrations-status-skills",
+        "ctx-integrations-status-skill",
+    ),
+    (
+        "ctx-integrations-install-slash-commands",
+        "ctx-integrations-install-slash-command",
+    ),
+];
+
 const TOPICS: &[DocTopic] = &[
     DocTopic {
         id: "getting-started",
@@ -205,10 +220,10 @@ const TOPICS: &[DocTopic] = &[
     },
     DocTopic {
         id: "agent-skill-install",
-        title: "Agent Skill Install",
+        title: "Agent Plugin And Skill Lifecycle",
         audience: "human",
-        summary: "Install the ctx agent-history search skill for supported agents.",
-        tags: &["skills", "agents", "install"],
+        summary: "Install, inspect, or remove the ctx plugin and bundled skill.",
+        tags: &["plugin", "skills", "agents", "install", "remove"],
         source_path: "docs/agent-skill-install.md",
         body: include_str!("../../../docs/agent-skill-install.md"),
     },
@@ -216,8 +231,14 @@ const TOPICS: &[DocTopic] = &[
         id: "slash-command-integrations",
         title: "Slash Command Integrations",
         audience: "human-agent",
-        summary: "Provider matrix and installer behavior for ctx slash-command entry points.",
-        tags: &["integrations", "slash-commands", "skills", "agents"],
+        summary: "Provider matrix and lifecycle behavior for ctx slash-command entry points.",
+        tags: &[
+            "integrations",
+            "slash-commands",
+            "skills",
+            "agents",
+            "remove",
+        ],
         source_path: "docs/slash-command-integrations.md",
         body: include_str!("../../../docs/slash-command-integrations.md"),
     },
@@ -686,7 +707,7 @@ fn man_docs(args: DocsManArgs, ui: &mut Ui, root_command: &Command) -> Result<us
         .out
         .ok_or_else(|| anyhow!("ctx docs man requires --out DIR or --print PAGE"))?;
     fs::create_dir_all(&out_dir).with_context(|| format!("create {}", out_dir.display()))?;
-    for (name, command) in man_pages(root_command) {
+    for (name, command) in installed_man_pages(root_command) {
         let path = out_dir.join(format!("{name}.1"));
         let mut out = Vec::new();
         clap_mangen::Man::new(command).render(&mut out)?;
@@ -712,10 +733,27 @@ fn man_docs(args: DocsManArgs, ui: &mut Ui, root_command: &Command) -> Result<us
 }
 
 fn man_page(name: &str, root_command: &Command) -> Result<(String, Command)> {
+    let name = MAN_PAGE_COMPATIBILITY_ALIASES
+        .iter()
+        .find_map(|(alias, canonical)| (*alias == name).then_some(*canonical))
+        .unwrap_or(name);
     man_pages(root_command)
         .into_iter()
         .find(|(candidate, _)| candidate == name)
         .ok_or_else(|| unknown_man_page_error(name))
+}
+
+fn installed_man_pages(root_command: &Command) -> Vec<(String, Command)> {
+    let mut pages = man_pages(root_command);
+    for (alias, canonical) in MAN_PAGE_COMPATIBILITY_ALIASES {
+        if let Some(command) = pages
+            .iter()
+            .find_map(|(name, command)| (name == canonical).then(|| command.clone()))
+        {
+            pages.push(((*alias).to_owned(), command));
+        }
+    }
+    pages
 }
 
 fn unknown_doc_topic_error(id: &str) -> anyhow::Error {

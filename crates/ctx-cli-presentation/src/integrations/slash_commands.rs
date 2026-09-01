@@ -20,6 +20,10 @@ use crate::ui::{
 
 pub(crate) use ctx_agent_integrations::slash_commands::PathContext;
 
+mod lifecycle;
+
+pub(crate) use lifecycle::{run_remove, run_status};
+
 #[derive(Debug, Args)]
 pub(crate) struct SlashCommandInstallArgs {
     #[arg(long = "agent", value_enum, conflicts_with = "all_agents")]
@@ -34,6 +38,35 @@ pub(crate) struct SlashCommandInstallArgs {
     #[arg(long, value_enum, default_value_t = JsonOutputFormat::Text)]
     pub(crate) format: JsonOutputFormat,
     #[arg(long, help = "Overwrite locally modified ctx-managed command files")]
+    force: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct SlashCommandStatusArgs {
+    #[arg(long = "agent", value_enum, conflicts_with = "all_agents")]
+    agent: Vec<SlashCommandAgentArg>,
+    #[arg(long, conflicts_with = "agent")]
+    all_agents: bool,
+    #[arg(long, help = "Check the current project instead of global agent dirs")]
+    project: bool,
+    #[arg(long, value_enum, default_value_t = JsonOutputFormat::Text)]
+    pub(crate) format: JsonOutputFormat,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct SlashCommandRemoveArgs {
+    #[arg(long = "agent", value_enum, conflicts_with = "all_agents")]
+    agent: Vec<SlashCommandAgentArg>,
+    #[arg(long, conflicts_with = "agent")]
+    all_agents: bool,
+    #[arg(
+        long,
+        help = "Remove from the current project instead of global agent dirs"
+    )]
+    project: bool,
+    #[arg(long, value_enum, default_value_t = JsonOutputFormat::Text)]
+    pub(crate) format: JsonOutputFormat,
+    #[arg(long, help = "Remove locally modified exact command files")]
     force: bool,
 }
 
@@ -102,6 +135,59 @@ pub(crate) fn insert_install_analytics(
         SlashCommandAgentArg::value_variants().len() as u64
     } else {
         args.agent.len() as u64
+    }));
+}
+
+pub(crate) fn insert_status_analytics(
+    telemetry: &mut IntegrationTelemetry,
+    args: &SlashCommandStatusArgs,
+) {
+    insert_target_analytics(
+        telemetry,
+        args.agent.len(),
+        args.all_agents,
+        args.project,
+        false,
+    );
+}
+
+pub(crate) fn insert_remove_analytics(
+    telemetry: &mut IntegrationTelemetry,
+    args: &SlashCommandRemoveArgs,
+) {
+    insert_target_analytics(
+        telemetry,
+        args.agent.len(),
+        args.all_agents,
+        args.project,
+        args.force,
+    );
+}
+
+fn insert_target_analytics(
+    telemetry: &mut IntegrationTelemetry,
+    explicit_agents: usize,
+    all_agents: bool,
+    project: bool,
+    force: bool,
+) {
+    telemetry.scope = Some(if project {
+        IntegrationScope::Project
+    } else {
+        IntegrationScope::Global
+    });
+    telemetry.selection = Some(if all_agents {
+        TargetSelection::All
+    } else if explicit_agents == 0 {
+        TargetSelection::Detected
+    } else {
+        TargetSelection::Explicit
+    });
+    telemetry.force = Some(force);
+    telemetry.target_agents = Some(count_bucket(if all_agents {
+        SlashCommandAgentArg::value_variants().len() as u64
+    } else {
+        explicit_agents as u64
     }));
 }
 
@@ -186,7 +272,7 @@ fn render_install_results(context: &RenderContext, results: &[InstallResult]) ->
                 title: "No separate slash-command targets detected",
                 detail: "Select a file-based agent explicitly, or install the bundled Agent Skill.",
                 action: Some(Action {
-                    command: "ctx integrations install skills",
+                    command: "ctx integrations install skill",
                 }),
             },
         );
@@ -250,7 +336,7 @@ fn render_install_results(context: &RenderContext, results: &[InstallResult]) ->
                 text: "Skill-based agents use the bundled Agent Skill.",
             },
             Some(Action {
-                command: "ctx integrations install skills",
+                command: "ctx integrations install skill",
             }),
         ));
     }

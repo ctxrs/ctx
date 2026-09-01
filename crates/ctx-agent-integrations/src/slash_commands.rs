@@ -11,6 +11,14 @@ use sha2::{Digest as _, Sha256};
 
 use crate::filesystem::{atomic_remove_if_unchanged, atomic_update};
 
+mod lifecycle;
+
+pub use lifecycle::{
+    execute_remove, execute_status, SlashCommandRemoveReceipt, SlashCommandRemoveRequest,
+    SlashCommandRemoveResult, SlashCommandStatusReceipt, SlashCommandStatusRequest,
+    SlashCommandStatusResult,
+};
+
 pub const COMMAND_NAME: &str = "ctx";
 const LEGACY_COMMAND_NAME: &str = "ctx-history";
 const METADATA_FILE: &str = ".ctx-slash-commands.json";
@@ -106,16 +114,22 @@ impl SlashCommandAgent {
         }
     }
 
-    fn detected(self, context: &PathContext) -> bool {
-        match self {
-            Self::OpenCode => context.xdg_config_home.join("opencode").exists(),
-            Self::MiMoCode => {
-                context.mimocode_home.is_some()
-                    || context.mimocode_config_dir.is_some()
-                    || context.mimocode_config_dir().exists()
-            }
-            Self::GeminiCli => context.home.join(".gemini").exists(),
-            Self::QwenCode => context.home.join(".qwen").exists(),
+    fn root_detected(self, project: bool, context: &PathContext) -> bool {
+        if self == Self::MiMoCode
+            && !project
+            && (context.mimocode_home.is_some() || context.mimocode_config_dir.is_some())
+        {
+            return true;
+        }
+        let root = match self {
+            Self::OpenCode if project => Some(context.cwd.join(".opencode")),
+            Self::OpenCode => Some(context.xdg_config_home.join("opencode")),
+            Self::MiMoCode if project => Some(context.cwd.join(".mimocode")),
+            Self::MiMoCode => Some(context.mimocode_config_dir()),
+            Self::GeminiCli if project => Some(context.cwd.join(".gemini")),
+            Self::GeminiCli => Some(context.home.join(".gemini")),
+            Self::QwenCode if project => Some(context.cwd.join(".qwen")),
+            Self::QwenCode => Some(context.home.join(".qwen")),
             Self::Codex
             | Self::GrokBuild
             | Self::ClaudeCode
@@ -124,8 +138,23 @@ impl SlashCommandAgent {
             | Self::GitHubCopilot
             | Self::Pi
             | Self::Goose
-            | Self::Continue => false,
+            | Self::Continue => None,
+        };
+        root.is_some_and(|root| {
+            fs::symlink_metadata(root).is_ok_and(|metadata| metadata.file_type().is_dir())
+        })
+    }
+
+    fn detected(self, project: bool, context: &PathContext) -> bool {
+        if self.root_detected(project, context) {
+            return true;
         }
+        let SlashCommandPlan::File(target) = self.install_plan(project, context) else {
+            return false;
+        };
+        [target.command_path(), target.legacy_command_path()]
+            .iter()
+            .any(|path| safe_regular_file(path))
     }
 
     fn install_plan(self, project: bool, context: &PathContext) -> SlashCommandPlan {
@@ -182,12 +211,12 @@ impl SlashCommandAgent {
             | Self::Antigravity => {
                 SlashCommandPlan::SkillOnly {
                     agent: self,
-                    note: "slash-style invocation is covered by Agent Skills; run `ctx integrations install skills --agent <agent>`",
+                note: "slash-style invocation is covered by Agent Skills; run `ctx integrations install skill --agent <agent>`",
                 }
             }
             Self::GitHubCopilot | Self::Pi => SlashCommandPlan::SkillOnly {
                 agent: self,
-                note: "ctx supports this provider through the bundled Agent Skill; run `ctx integrations install skills --agent <agent>`",
+                note: "ctx supports this provider through the bundled Agent Skill; run `ctx integrations install skill --agent <agent>`",
             },
             Self::Goose => SlashCommandPlan::ManualOnly {
                 agent: self,
@@ -327,7 +356,12 @@ pub fn execute_install(
     request: SlashCommandInstallRequest,
     context: &PathContext,
 ) -> Result<SlashCommandInstallReceipt> {
-    let agents = selected_agents(&request, context);
+    let agents = selected_agents(
+        &request.agents,
+        request.all_agents,
+        request.project,
+        context,
+    );
     let results = agents
         .into_iter()
         .map(|agent| {
@@ -358,19 +392,21 @@ pub fn execute_install(
 }
 
 fn selected_agents(
-    request: &SlashCommandInstallRequest,
+    agents: &[SlashCommandAgent],
+    all_agents: bool,
+    project: bool,
     context: &PathContext,
 ) -> Vec<SlashCommandAgent> {
-    if request.all_agents {
+    if all_agents {
         return SlashCommandAgent::ALL.to_vec();
     }
-    if !request.agents.is_empty() {
-        return dedupe_agents(request.agents.iter().copied());
+    if !agents.is_empty() {
+        return dedupe_agents(agents.iter().copied());
     }
     SlashCommandAgent::WRITABLE
         .iter()
         .copied()
-        .filter(|agent| agent.detected(context))
+        .filter(|agent| agent.detected(project, context))
         .collect()
 }
 
@@ -432,7 +468,6 @@ impl CommandFileTarget {
 struct StatusResult {
     status: SlashCommandInstallStatus,
     metadata: Option<SlashCommandMetadata>,
-    installed_hash: Option<String>,
     installed_body: Option<Vec<u8>>,
 }
 
@@ -511,13 +546,7 @@ fn install_file_target(
 ) -> Result<SlashCommandInstallResult> {
     let previous = status_file_target(target)?;
     let legacy = status_legacy_file_target(target)?;
-    let effective_previous_status = if previous.status == SlashCommandInstallStatus::Missing {
-        legacy
-            .as_ref()
-            .map_or(previous.status, |legacy| legacy.status)
-    } else {
-        previous.status
-    };
+    let effective_previous_status = combined_file_status(previous.status, legacy.as_ref());
     if legacy
         .as_ref()
         .is_some_and(|legacy| legacy.status == SlashCommandInstallStatus::Modified)
@@ -541,8 +570,7 @@ fn install_file_target(
             note: None,
         });
     }
-    let bundled_hash = target.bundled_hash();
-    if previous.installed_hash.as_deref() == Some(bundled_hash.as_str()) {
+    if previous.status == SlashCommandInstallStatus::Current {
         let migrated = if let Some(legacy) = &legacy {
             remove_legacy_command_file(target, legacy)?;
             true
@@ -629,7 +657,7 @@ fn status_legacy_file_target(target: &CommandFileTarget) -> Result<Option<Legacy
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
     };
-    if file_metadata.file_type().is_symlink() || file_metadata.is_dir() {
+    if !file_metadata.file_type().is_file() {
         return Ok(Some(LegacyStatusResult {
             path,
             status: SlashCommandInstallStatus::Modified,
@@ -671,39 +699,36 @@ fn status_file_target(target: &CommandFileTarget) -> Result<StatusResult> {
     ensure_path_inside(&target.base_dir, &target.command_path())?;
     let command_path = target.command_path();
     let metadata = read_metadata(&target.base_dir);
-    let installed_body = match fs::symlink_metadata(&command_path) {
-        Ok(metadata) if metadata.file_type().is_symlink() || metadata.is_dir() => None,
-        Ok(_) => Some(
-            fs::read(&command_path).with_context(|| format!("read {}", command_path.display()))?,
+    let (command_exists, installed_body) = match fs::symlink_metadata(&command_path) {
+        Ok(metadata) if !metadata.file_type().is_file() => (true, None),
+        Ok(_) => (
+            true,
+            Some(
+                fs::read(&command_path)
+                    .with_context(|| format!("read {}", command_path.display()))?,
+            ),
         ),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (false, None),
         Err(error) => {
             return Err(error).with_context(|| format!("read {}", command_path.display()))
         }
     };
     let installed_hash = installed_body.as_deref().map(sha256_hex);
     let status = match installed_hash.as_deref() {
-        None if command_path.exists() => SlashCommandInstallStatus::Modified,
+        None if command_exists => SlashCommandInstallStatus::Modified,
         None => SlashCommandInstallStatus::Missing,
-        Some(hash)
-            if hash == target.bundled_hash()
-                && metadata_manages_hash(target, metadata.as_ref(), hash) =>
-        {
-            SlashCommandInstallStatus::Current
+        Some(hash) if metadata_manages_hash(target, metadata.as_ref(), hash) => {
+            if hash == target.bundled_hash() {
+                SlashCommandInstallStatus::Current
+            } else {
+                SlashCommandInstallStatus::Stale
+            }
         }
-        Some(hash) if hash == target.bundled_hash() => SlashCommandInstallStatus::Stale,
-        Some(hash) => match metadata
-            .as_ref()
-            .and_then(|metadata| metadata.files.get(&target.filename))
-        {
-            Some(metadata_hash) if metadata_hash == hash => SlashCommandInstallStatus::Stale,
-            _ => SlashCommandInstallStatus::Modified,
-        },
+        Some(_) => SlashCommandInstallStatus::Modified,
     };
     Ok(StatusResult {
         status,
         metadata,
-        installed_hash,
         installed_body,
     })
 }
@@ -790,6 +815,21 @@ fn legacy_metadata_manages_hash(
     })
 }
 
+fn combined_file_status(
+    current: SlashCommandInstallStatus,
+    legacy: Option<&LegacyStatusResult>,
+) -> SlashCommandInstallStatus {
+    if current == SlashCommandInstallStatus::Modified
+        || legacy.is_some_and(|legacy| legacy.status == SlashCommandInstallStatus::Modified)
+    {
+        SlashCommandInstallStatus::Modified
+    } else if legacy.is_some() || current == SlashCommandInstallStatus::Stale {
+        SlashCommandInstallStatus::Stale
+    } else {
+        current
+    }
+}
+
 fn scope(project: bool) -> SlashCommandScope {
     if project {
         SlashCommandScope::Project
@@ -863,6 +903,10 @@ fn ensure_path_inside(base: &Path, target: &Path) -> Result<()> {
         return Err(anyhow!("slash command path escapes target directory"));
     }
     Ok(())
+}
+
+fn safe_regular_file(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_file())
 }
 
 fn has_parent_component(path: &Path) -> bool {

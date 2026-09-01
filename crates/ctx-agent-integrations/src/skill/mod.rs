@@ -1,6 +1,7 @@
 mod agents;
 mod install;
 mod paths;
+mod remove;
 mod selection;
 mod target;
 
@@ -11,6 +12,9 @@ pub use install::{
     SkillStatusReceipt, SkillStatusRequest, StatusResult,
 };
 pub use paths::{bundled_hash, ensure_path_inside, sanitize_skill_name, sha256_hex, PathContext};
+pub use remove::{
+    execute_remove, remove_target, SkillRemoveReceipt, SkillRemoveRequest, SkillRemoveResult,
+};
 pub use selection::{
     default_agent_selection, default_noninteractive_agents, detected_agents,
     explicit_agent_selection, parse_picker_selection, picker_agent_selection, SkillAgentSelection,

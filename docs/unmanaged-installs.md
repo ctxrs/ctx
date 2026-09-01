@@ -11,7 +11,7 @@ build.
 After any unmanaged install, run:
 
 ```bash
-ctx integrations install skills
+ctx integrations install skill
 ctx setup
 ```
 
@@ -67,7 +67,7 @@ retried. ctx never falls back to a PID-only or process-name kill.
 After an upgrade or reinstall, restore the normal unmanaged installation:
 
 ```bash
-ctx integrations install skills
+ctx integrations install skill
 ctx index mode auto
 ctx setup
 ```

@@ -636,7 +636,7 @@ try {
     }
 
     if ($runSkill) {
-        $skillArgs = @("integrations", "install", "skills")
+        $skillArgs = @("integrations", "install", "skill")
         if ($allSkillAgentsRequested) {
             $skillArgs += "--all-agents"
         } else {
@@ -647,11 +647,11 @@ try {
         Write-Host ""
         & $installPath @skillArgs
         if ($LASTEXITCODE -ne 0) {
-            Write-Warning "ctx integrations install skills failed after install; run $installPath integrations install skills to retry"
+            Write-Warning "ctx integrations install skill failed after install; run $installPath integrations install skill to retry"
         }
     } else {
         Write-Host ""
-        Write-Host "Agent skill skipped. Run $installPath integrations install skills to install it later."
+        Write-Host "Agent skill skipped. Run $installPath integrations install skill to install it later."
     }
 
     $setupStatus = 0
