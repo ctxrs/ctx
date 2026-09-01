@@ -128,7 +128,7 @@ fn slash_commands_install_codex_is_skill_only_without_deprecated_prompts() {
     assert!(output["results"][0]["note"]
         .as_str()
         .unwrap()
-        .contains("ctx integrations install skills --agent codex"));
+        .contains("ctx integrations install skill --agent codex"));
     assert!(!temp.path().join(".codex").join("prompts").exists());
 }
 
@@ -187,4 +187,184 @@ fn slash_commands_install_qwen_project_writes_markdown() {
     let body = fs::read_to_string(command_path).unwrap();
     assert!(body.contains("---\ndescription:"));
     assert!(body.contains("{{args}}"));
+}
+
+#[cfg(unix)]
+#[test]
+fn plugin_cli_delegates_exact_argv_and_preserves_the_marketplace() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let temp = tempdir();
+    let bin_dir = temp.path().join("bin");
+    let codex = bin_dir.join("codex");
+    fs::create_dir_all(&bin_dir).unwrap();
+    fs::write(
+        &codex,
+        r#"#!/bin/sh
+set -eu
+state="$0.state"
+log="$0.log"
+/bin/mkdir -p "$state"
+printf '%s\n' "$*" >> "$log"
+case "$*" in
+  "plugin marketplace list --json")
+    if [ -f "$state/marketplace" ]; then
+      printf '%s\n' '{"marketplaces":[{"name":"ctx","marketplaceSource":{"type":"github","value":"ctxrs/ctx"}}]}'
+    else
+      printf '%s\n' '{"marketplaces":[]}'
+    fi
+    ;;
+  "plugin marketplace add ctxrs/ctx --json")
+    : > "$state/marketplace"
+    printf '%s\n' '{}'
+    ;;
+  "plugin list --json")
+    printf '%s' '{"installed":['
+    separator=''
+    if [ -f "$state/current" ]; then
+      printf '%s' '{"pluginId":"ctx@ctx","name":"ctx","marketplaceName":"ctx","installed":true,"version":"99.0.0"}'
+      separator=','
+    fi
+    if [ -f "$state/legacy" ]; then
+      printf '%s%s' "$separator" '{"pluginId":"ctx-agent-history-search@ctx","name":"ctx-agent-history-search","marketplaceName":"ctx","installed":true}'
+    fi
+    printf '%s\n' ']}'
+    ;;
+  "plugin add ctx@ctx --json")
+    if [ -f "$state/fail-install" ]; then
+      printf '%s\n' 'private install failure' >&2
+      exit 23
+    fi
+    : > "$state/current"
+    printf '%s\n' '{}'
+    ;;
+  "plugin remove ctx@ctx --json")
+    /bin/rm -f "$state/current"
+    printf '%s\n' '{}'
+    ;;
+  "plugin remove ctx-agent-history-search@ctx --json")
+    /bin/rm -f "$state/legacy"
+    printf '%s\n' '{}'
+    ;;
+  *) exit 99 ;;
+esac
+"#,
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&codex).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&codex, permissions).unwrap();
+
+    let installed = json_output(ctx(&temp).env("PATH", &bin_dir).args([
+        "integrations",
+        "install",
+        "plugin",
+        "--agent",
+        "codex",
+        "--format=json",
+    ]));
+    assert_eq!(installed["integration"], "plugin");
+    assert_eq!(installed["results"][0]["action"], "installed");
+    assert_eq!(installed["results"][0]["status"], "installed");
+    assert_eq!(installed["results"][0]["installed_version"], "99.0.0");
+    assert!(installed["results"][0].get("expected_version").is_none());
+
+    let status = json_output(ctx(&temp).env("PATH", &bin_dir).args([
+        "integrations",
+        "status",
+        "plugin",
+        "--agent",
+        "codex",
+        "--format=json",
+    ]));
+    assert_eq!(status["results"][0]["action"], "inspected");
+    assert_eq!(status["results"][0]["status"], "installed");
+
+    let removed = json_output(ctx(&temp).env("PATH", &bin_dir).args([
+        "integrations",
+        "remove",
+        "plugin",
+        "--agent",
+        "codex",
+        "--format=json",
+    ]));
+    assert_eq!(removed["results"][0]["action"], "removed");
+    assert_eq!(removed["results"][0]["status"], "missing");
+
+    let absent = json_output(ctx(&temp).env("PATH", &bin_dir).args([
+        "integrations",
+        "remove",
+        "plugin",
+        "--agent",
+        "codex",
+        "--format=json",
+    ]));
+    assert_eq!(absent["results"][0]["action"], "already_absent");
+    let state = PathBuf::from(format!("{}.state", codex.display()));
+    assert!(state.join("marketplace").is_file());
+
+    fs::write(state.join("legacy"), "").unwrap();
+    fs::write(state.join("fail-install"), "").unwrap();
+    let failed = ctx(&temp)
+        .env("PATH", &bin_dir)
+        .args([
+            "integrations",
+            "install",
+            "plugin",
+            "--agent",
+            "codex",
+            "--format=json",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    let failed: Value = serde_json::from_slice(&failed).unwrap();
+    assert_eq!(failed["results"][0]["action"], "failed");
+    assert_eq!(failed["results"][0]["status"], "legacy_installed");
+    assert!(state.join("legacy").is_file());
+    assert!(!state.join("current").exists());
+
+    fs::remove_file(state.join("fail-install")).unwrap();
+    let migrated = json_output(ctx(&temp).env("PATH", &bin_dir).args([
+        "integrations",
+        "install",
+        "plugin",
+        "--agent",
+        "codex",
+        "--format=json",
+    ]));
+    assert_eq!(migrated["results"][0]["action"], "installed");
+    assert!(state.join("current").is_file());
+    assert!(!state.join("legacy").exists());
+    assert_eq!(
+        fs::read_to_string(format!("{}.log", codex.display())).unwrap(),
+        concat!(
+            "plugin marketplace list --json\n",
+            "plugin list --json\n",
+            "plugin marketplace add ctxrs/ctx --json\n",
+            "plugin marketplace list --json\n",
+            "plugin add ctx@ctx --json\n",
+            "plugin list --json\n",
+            "plugin marketplace list --json\n",
+            "plugin list --json\n",
+            "plugin marketplace list --json\n",
+            "plugin list --json\n",
+            "plugin remove ctx@ctx --json\n",
+            "plugin list --json\n",
+            "plugin marketplace list --json\n",
+            "plugin list --json\n",
+            "plugin marketplace list --json\n",
+            "plugin list --json\n",
+            "plugin add ctx@ctx --json\n",
+            "plugin list --json\n",
+            "plugin marketplace list --json\n",
+            "plugin list --json\n",
+            "plugin add ctx@ctx --json\n",
+            "plugin list --json\n",
+            "plugin remove ctx-agent-history-search@ctx --json\n",
+            "plugin list --json\n",
+        )
+    );
 }

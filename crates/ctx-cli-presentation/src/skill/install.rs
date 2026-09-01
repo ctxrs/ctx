@@ -345,7 +345,7 @@ mod render_tests {
                 render_status_results(
                     &render_context(80, ColorMode::Never),
                     &[missing],
-                    "ctx integrations install skills --agent universal",
+                    "ctx integrations install skill --agent universal",
                 ),
                 "Agent skill needs attention",
             ),
@@ -378,10 +378,10 @@ mod render_tests {
             .unwrap()
             .remove(0);
         let result = status_target(&target).unwrap();
-        let command = "ctx integrations install skills --agent universal --project".to_owned();
+        let command = "ctx integrations install skill --agent universal --project".to_owned();
         assert_eq!(
             command,
-            "ctx integrations install skills --agent universal --project"
+            "ctx integrations install skill --agent universal --project"
         );
 
         for width in [32, 48, 80, 120] {
@@ -423,7 +423,7 @@ mod render_tests {
             };
             let expected_project = if project { " --project" } else { "" };
             let expected = format!(
-                "ctx integrations install skills --agent universal{expected_project} --force"
+                "ctx integrations install skill --agent universal{expected_project} --force"
             );
 
             for width in [32, 48, 80, 120] {

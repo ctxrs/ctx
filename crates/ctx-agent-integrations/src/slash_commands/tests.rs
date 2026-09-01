@@ -29,7 +29,12 @@ fn detected_file_targets_are_selected_once_and_in_order() {
     };
 
     assert_eq!(
-        selected_agents(&request, &context),
+        selected_agents(
+            &request.agents,
+            request.all_agents,
+            request.project,
+            &context,
+        ),
         vec![SlashCommandAgent::OpenCode, SlashCommandAgent::MiMoCode]
     );
 }
@@ -233,7 +238,7 @@ fn grok_build_is_skill_only_and_writes_no_command_file() {
 }
 
 #[test]
-fn interrupted_content_then_metadata_publication_is_stale_and_recoverable() {
+fn interrupted_content_then_metadata_publication_is_unowned_until_forced() {
     let root = tempfile::tempdir().unwrap();
     let context = PathContext::for_tests(root.path().to_owned(), root.path().to_owned());
     let request = request(SlashCommandAgent::OpenCode);
@@ -252,13 +257,21 @@ fn interrupted_content_then_metadata_publication_is_stale_and_recoverable() {
     );
     assert_eq!(
         status_file_target(&target).unwrap().status,
-        SlashCommandInstallStatus::Stale
+        SlashCommandInstallStatus::Modified
     );
 
     fs::remove_dir(target.base_dir.join(METADATA_FILE)).unwrap();
-    let repaired = execute_install(request, &context).unwrap();
-    assert!(repaired.results[0].already_installed);
-    assert!(!repaired.results[0].updated);
+    let preserved = execute_install(request.clone(), &context).unwrap();
+    assert!(!preserved.results[0].success);
+    assert_eq!(
+        preserved.results[0].status,
+        SlashCommandInstallStatus::Modified
+    );
+
+    let mut forced = request;
+    forced.force = true;
+    let repaired = execute_install(forced, &context).unwrap();
+    assert!(repaired.results[0].success);
     assert_eq!(
         status_file_target(&target).unwrap().status,
         SlashCommandInstallStatus::Current

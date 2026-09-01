@@ -254,17 +254,17 @@ fn leaf_command_for_arguments<'a>(
         if argument.starts_with('-') {
             continue;
         }
-        let Some(index) = current
-            .get_subcommands()
-            .position(|subcommand| subcommand.get_name() == argument)
-        else {
+        let Some(index) = current.get_subcommands().position(|subcommand| {
+            subcommand.get_name() == argument
+                || subcommand.get_all_aliases().any(|alias| alias == argument)
+        }) else {
             continue;
         };
         current = current
             .get_subcommands_mut()
             .nth(index)
             .expect("subcommand index came from the same command");
-        command_path.push(argument.to_owned());
+        command_path.push(current.get_name().to_owned());
     }
     current.set_bin_name(command_path.join(" "));
     current

@@ -182,16 +182,19 @@ upgrade checks; explicit `ctx upgrade` remains available.
 ## Agent Skill
 
 ```bash
-ctx integrations install skills
-ctx integrations install skills --agent codex --agent claude-code --agent mimocode
-ctx integrations install skills --all-agents
-ctx integrations install skills --project
-ctx integrations install skills --force
-ctx integrations status skills
-ctx integrations status skills --agent codex --format json
+ctx integrations install skill
+ctx integrations install skill --agent codex --agent claude-code --agent mimocode
+ctx integrations install skill --all-agents
+ctx integrations install skill --project
+ctx integrations install skill --force
+ctx integrations status skill
+ctx integrations status skill --agent codex --format json
+ctx integrations remove skill
+ctx integrations remove skill --agent codex --project
+ctx integrations remove skill --force
 ```
 
-`integrations install skills` installs or refreshes ctx's bundled `ctx` skill.
+`integrations install skill` installs or refreshes ctx's bundled `ctx` skill.
 With no target flags in an interactive
 terminal, it opens a small agent picker with the universal `~/.agents/skills`
 location selected plus detected agent-specific folders for tools that need
@@ -206,12 +209,17 @@ MiMo Code, Gemini CLI, Antigravity, GitHub Copilot, Pi, and Goose.
 `--all-agents` writes all supported target folders. `--project` switches from
 global paths to the current project's skill folders.
 
-`integrations status skills` reports whether the bundled skill is `current`,
-`stale`, `modified`, or `missing`. `integrations install skills` refreshes
+`integrations status skill` reports whether the bundled skill is `current`,
+`stale`, `modified`, or `missing`. `integrations install skill` refreshes
 stale bundled copies automatically, but it refuses to overwrite locally
 modified skill files unless you pass `--force`. The command only manages the
 bundled ctx skill and does not fetch arbitrary remote skills. Without target
 flags, status uses the same default maintenance set as install.
+
+`integrations remove skill` removes current or stale ctx-managed copies and is
+an idempotent no-op when they are absent. Modified or unowned files are
+preserved unless `--force` is passed. Removal never deletes the parent skill
+directory, unrelated files, or plugin-manager-owned copies.
 
 The 1.0 installer performs a one-way migration from a managed
 `ctx-agent-history-search` directory to `ctx`. It preserves a locally edited
@@ -233,14 +241,23 @@ ctx integrations remove mcp --all-agents --format json
 ctx integrations remove mcp --agent cursor --force
 ctx integrations status mcp
 ctx integrations status mcp --agent codex --format json
-ctx integrations install slash-commands
-ctx integrations install slash-commands --agent opencode
-ctx integrations install slash-commands --agent mimocode
-ctx integrations install slash-commands --agent gemini-cli --project
-ctx integrations install slash-commands --agent qwen-code
-ctx integrations install slash-commands --all-agents
-ctx integrations install slash-commands --force
-ctx integrations install slash-commands --format json
+ctx integrations install plugin
+ctx integrations install plugin --agent codex
+ctx integrations install plugin --agent claude-code --project
+ctx integrations status plugin --all-agents --format json
+ctx integrations remove plugin --agent codex
+ctx integrations install slash-command
+ctx integrations install slash-command --agent opencode
+ctx integrations install slash-command --agent mimocode
+ctx integrations install slash-command --agent gemini-cli --project
+ctx integrations install slash-command --agent qwen-code
+ctx integrations install slash-command --all-agents
+ctx integrations install slash-command --force
+ctx integrations install slash-command --format json
+ctx integrations status slash-command
+ctx integrations status slash-command --agent gemini-cli --project
+ctx integrations remove slash-command
+ctx integrations remove slash-command --agent opencode --force
 ```
 
 `integrations install mcp` adds a local MCP server named `ctx` to supported
@@ -265,7 +282,7 @@ configuration and the containing file. An absent entry is a successful no-op.
 A conflicting entry is preserved unless `--force` is supplied; invalid configs
 remain untouched even with `--force`.
 
-`integrations install slash-commands` installs a `/ctx` entry point only
+`integrations install slash-command` installs a `/ctx` entry point only
 for providers where ctx has a documented, file-based command surface it can
 manage safely: OpenCode, MiMo Code, Gemini CLI, and Qwen Code. With no
 explicit agent flag, it writes detected file-based targets only. `--project`
@@ -280,8 +297,28 @@ you pass `--force`.
 The 1.0 installer also migrates a managed `/ctx-history` file to `/ctx`. It
 preserves a locally edited legacy command unless `--force` is passed.
 
+`integrations status slash-command` inspects the same targets.
+`integrations remove slash-command` removes only current or stale ctx-managed
+command files. Modified or unowned files require `--force`; parent directories,
+unrelated files, skill integrations, and manual YAML integrations are never
+removed.
+
+`integrations install|status|remove plugin` delegates plugin ownership to the
+host manager. Codex and Claude Code have automated adapters; Cursor returns
+actionable manual Marketplace guidance because it does not expose a verified
+noninteractive lifecycle CLI. Plugin removal leaves the marketplace, direct
+skills, MCP configuration, CLI, and history intact. The plugin remains
+skill-only in this release; install MCP separately when needed. Native managers
+own plugin release selection; ctx treats their exact `ctx@ctx` installed state
+as authoritative and reports a manager-provided version only as information.
+
+The canonical targets are singular: `mcp`, `skill`, `slash-command`, and
+`plugin`. The released `skills` and `slash-commands` spellings remain accepted
+as hidden compatibility aliases. JSON discriminators and other machine
+identifiers do not change when an alias is used.
+
 For Codex, Claude Code, Cursor, GitHub Copilot CLI, Pi, and other skill-first
-agents, use `ctx integrations install skills`; those providers expose the
+agents, use `ctx integrations install skill`; those providers expose the
 bundled skill through their own skill invocation surface rather than a separate
 `/ctx` command file. See `ctx docs show slash-command-integrations` for
 the provider matrix and rationale.

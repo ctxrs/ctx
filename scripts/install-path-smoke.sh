@@ -38,6 +38,8 @@ grep -F '$setupNoDaemon = [bool]$NoDaemon -or $env:CTX_INSTALL_NO_DAEMON -eq "1"
   "${repo_root}/scripts/install.ps1" >/dev/null
 grep -F '$setupArgs += "--no-daemon"' "${repo_root}/scripts/install.ps1" >/dev/null
 grep -F '& $installPath @setupArgs' "${repo_root}/scripts/install.ps1" >/dev/null
+grep -F '$skillArgs = @("integrations", "install", "skill")' \
+  "${repo_root}/scripts/install.ps1" >/dev/null
 grep -F 'CTX_RELEASE_MANAGED_PAIR_ENVELOPE_' \
   "${repo_root}/scripts/dev-install-from-metadata.sh" >/dev/null
 grep -F 'install-managed-pair.py' \

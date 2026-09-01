@@ -22,6 +22,7 @@ pub enum IntegrationTarget {
     Mcp,
     Skills,
     SlashCommands,
+    Plugin,
 }
 
 impl IntegrationTarget {
@@ -30,6 +31,7 @@ impl IntegrationTarget {
             Self::Mcp => "mcp",
             Self::Skills => "skills",
             Self::SlashCommands => "slash_commands",
+            Self::Plugin => "plugin",
         }
     }
 }

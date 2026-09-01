@@ -63,11 +63,10 @@ pub fn status(
     identity: ProductIdentity<'_>,
 ) -> Result<SkillStatusOutcome> {
     let selection_fact = selection_fact(selection.source);
-    let resolved_agents = selection.agents.len();
     let receipt = execute_status(SkillStatusRequest { selection, project }, context)?;
     let telemetry = IntegrationTelemetryFacts {
         selection: Some(selection_fact),
-        resolved_agents: Some(resolved_agents),
+        resolved_agents: Some(receipt.selection.agents.len()),
         result: Some(if receipt.current_count == receipt.results.len() {
             IntegrationResultFact::AllCurrent
         } else if receipt.current_count == 0 {
@@ -96,13 +95,13 @@ pub fn force_install_command(identity: ProductIdentity<'_>, target: &SkillTarget
         ""
     };
     format!(
-        "{} integrations install skills --agent {}{project} --force",
+        "{} integrations install skill --agent {}{project} --force",
         identity.name,
         target.agent.id()
     )
 }
 
-fn selection_fact(source: SkillSelectionSource) -> TargetSelectionFact {
+pub(super) fn selection_fact(source: SkillSelectionSource) -> TargetSelectionFact {
     match source {
         SkillSelectionSource::Explicit => TargetSelectionFact::Explicit,
         SkillSelectionSource::All => TargetSelectionFact::All,
@@ -125,7 +124,7 @@ fn status_install_command(
     project: bool,
     results: &[StatusResult],
 ) -> String {
-    let mut tokens = [identity.name, "integrations", "install", "skills"]
+    let mut tokens = [identity.name, "integrations", "install", "skill"]
         .into_iter()
         .map(str::to_owned)
         .collect::<Vec<_>>();

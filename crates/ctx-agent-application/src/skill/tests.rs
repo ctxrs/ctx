@@ -11,7 +11,10 @@ use ctx_agent_integrations::skill::{
     SkillSelectionSource,
 };
 
-use super::{install, plan_install_selection, SkillInstallSelectionPlan, SkillSelectionRequest};
+use super::{
+    force_install_command, force_remove_command, install, plan_install_selection, remove, status,
+    SkillInstallSelectionPlan, SkillSelectionRequest,
+};
 use crate::{IntegrationResultFact, ProductIdentity, TargetSelectionFact};
 
 const PRODUCT: ProductIdentity<'static> = ProductIdentity {
@@ -311,4 +314,64 @@ fn workflow_facts_are_closed_and_path_free() {
     assert_eq!(outcome.telemetry.resolved_agents, Some(2));
     assert_eq!(outcome.telemetry.result, Some(IntegrationResultFact::Ok));
     assert_eq!(outcome.telemetry.modified_targets, Some(0));
+}
+
+#[test]
+fn status_and_force_recovery_commands_use_the_canonical_singular_skill_route() {
+    let temp = tempfile::tempdir().unwrap();
+    let context = PathContext::for_tests(temp.path().join("home"), temp.path().join("repo"));
+    let selection = explicit_agent_selection(&[SkillAgentArg::Universal], false).unwrap();
+
+    let missing = status(selection, false, &context, PRODUCT).unwrap();
+    assert_eq!(
+        missing.recovery_command,
+        "ctx integrations install skill --agent universal"
+    );
+
+    let target = resolve_targets(&[], false, true, &context)
+        .unwrap()
+        .remove(0);
+    assert_eq!(
+        force_install_command(PRODUCT, &target),
+        "ctx integrations install skill --agent universal --project --force"
+    );
+    assert_eq!(
+        force_remove_command(PRODUCT, &target),
+        "ctx integrations remove skill --agent universal --project --force"
+    );
+}
+
+#[test]
+fn remove_reports_existing_telemetry_facts_for_maintenance_expansion() {
+    let temp = tempfile::tempdir().unwrap();
+    let context = PathContext::for_tests(temp.path().join("home"), temp.path().join("repo"));
+    let cursor =
+        ctx_agent_integrations::skill::single_target(SkillAgentArg::Cursor, false, &context)
+            .unwrap();
+    install_target(&cursor, false, true, PRODUCT.version).unwrap();
+
+    let outcome = remove(
+        ctx_agent_integrations::skill::default_agent_selection(&context),
+        false,
+        false,
+        &context,
+    )
+    .unwrap();
+
+    assert!(outcome
+        .receipt
+        .selection
+        .agents
+        .contains(&SkillAgentArg::Cursor));
+    assert_eq!(
+        outcome.telemetry.selection,
+        Some(TargetSelectionFact::Fallback)
+    );
+    assert_eq!(
+        outcome.telemetry.resolved_agents,
+        Some(outcome.receipt.selection.agents.len())
+    );
+    assert_eq!(outcome.telemetry.result, Some(IntegrationResultFact::Ok));
+    assert_eq!(outcome.telemetry.modified_targets, Some(1));
+    assert!(!cursor.skill_dir.join("SKILL.md").exists());
 }

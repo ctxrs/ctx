@@ -94,7 +94,7 @@ fn no_detected_targets_is_actionable() {
     let context = render_context(48, ColorMode::Never);
     let rendered = render_install_results(&context, &[]).render_plain();
     assert!(rendered.starts_with("No separate slash-command targets detected\n"));
-    assert!(rendered.contains("Next\n  ctx integrations install skills\n"));
+    assert!(rendered.contains("Next\n  ctx integrations install skill\n"));
 }
 
 #[test]
@@ -117,7 +117,7 @@ fn modified_target_has_a_force_recovery_command() {
     .render_plain();
     let compact = diagnostic.split_whitespace().collect::<String>();
     assert!(diagnostic.contains("local command edits detected"));
-    assert!(compact.contains("ctxintegrationsinstallslash-commands--agentopencode--force"));
+    assert!(compact.contains("ctxintegrationsinstallslash-command--agentopencode--force"));
     assert_fits(&document, &context);
 }
 
@@ -161,7 +161,7 @@ fn failed_target_details_and_recovery_are_written_to_stderr() {
     assert!(stdout.contains("Targets"));
     assert!(!stdout.contains("local command edits detected"));
     assert!(stderr.contains("local command edits detected"));
-    assert!(stderr.contains("--agent gemini-cli --force"));
+    assert!(stderr.contains("--agent gemini-cli --project --force"));
 }
 
 #[test]

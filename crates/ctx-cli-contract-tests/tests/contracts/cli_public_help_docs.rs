@@ -620,11 +620,17 @@ fn machine_readable_output_uses_format_without_a_json_alias() {
         &["docs", "search", "--help"],
         &["docs", "show", "--help"],
         &["integrations", "install", "mcp", "--help"],
-        &["integrations", "install", "skills", "--help"],
-        &["integrations", "install", "slash-commands", "--help"],
+        &["integrations", "install", "skill", "--help"],
+        &["integrations", "install", "slash-command", "--help"],
+        &["integrations", "install", "plugin", "--help"],
         &["integrations", "remove", "mcp", "--help"],
+        &["integrations", "remove", "skill", "--help"],
+        &["integrations", "remove", "slash-command", "--help"],
+        &["integrations", "remove", "plugin", "--help"],
         &["integrations", "status", "mcp", "--help"],
-        &["integrations", "status", "skills", "--help"],
+        &["integrations", "status", "skill", "--help"],
+        &["integrations", "status", "slash-command", "--help"],
+        &["integrations", "status", "plugin", "--help"],
         &["daemon", "run", "--help"],
         &["upgrade", "--help"],
         &["upgrade", "check", "--help"],
@@ -656,6 +662,43 @@ fn machine_readable_output_uses_format_without_a_json_alias() {
         .stderr(predicate::str::contains(
             "unexpected argument '--progress' found",
         ));
+}
+
+#[test]
+fn integrations_use_singular_targets_with_hidden_released_aliases() {
+    let temp = tempdir();
+    for (action, alias, canonical) in [
+        ("install", "skills", "skill"),
+        ("status", "skills", "skill"),
+        ("install", "slash-commands", "slash-command"),
+    ] {
+        let output = ctx(&temp)
+            .args(["integrations", action, alias, "--help"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let help = String::from_utf8(output).unwrap();
+        assert!(
+            help.contains(&format!("Usage: ctx integrations {action} {canonical}")),
+            "alias {alias} did not resolve to canonical {canonical}:\n{help}"
+        );
+    }
+
+    let install = ctx(&temp)
+        .args(["integrations", "install", "--help"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let install = String::from_utf8(install).unwrap();
+    for canonical in ["mcp", "skill", "slash-command", "plugin"] {
+        assert!(install.contains(&format!("\n  {canonical}")), "{install}");
+    }
+    assert!(!install.contains("\n  skills"), "{install}");
+    assert!(!install.contains("\n  slash-commands"), "{install}");
 }
 
 #[test]
@@ -944,6 +987,51 @@ fn docs_commands_expose_embedded_docs_and_man_pages() {
     let stats_man = String::from_utf8(stats_man).unwrap();
     assert!(stats_man.contains(".TH ctx-stats"));
     assert!(stats_man.contains(r"\-\-detail"));
+
+    let compatibility_man_pages = [
+        (
+            "ctx-integrations-install-skills",
+            "ctx-integrations-install-skill",
+        ),
+        (
+            "ctx-integrations-status-skills",
+            "ctx-integrations-status-skill",
+        ),
+        (
+            "ctx-integrations-install-slash-commands",
+            "ctx-integrations-install-slash-command",
+        ),
+    ];
+    for (alias, canonical) in compatibility_man_pages {
+        let legacy_man = ctx(&temp)
+            .args(["docs", "man", "--print", alias])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let legacy_man = String::from_utf8(legacy_man).unwrap();
+        assert!(
+            legacy_man.contains(&format!(".TH {canonical}")),
+            "{legacy_man}"
+        );
+        assert!(!legacy_man.contains(alias), "{legacy_man}");
+    }
+
+    let man_dir = temp.path().join("man");
+    ctx(&temp)
+        .args(["docs", "man", "--out"])
+        .arg(&man_dir)
+        .assert()
+        .success();
+    for (alias, canonical) in compatibility_man_pages {
+        let legacy_man = fs::read_to_string(man_dir.join(format!("{alias}.1"))).unwrap();
+        assert!(
+            legacy_man.contains(&format!(".TH {canonical}")),
+            "{legacy_man}"
+        );
+        assert!(!legacy_man.contains(alias), "{legacy_man}");
+    }
 }
 
 #[test]

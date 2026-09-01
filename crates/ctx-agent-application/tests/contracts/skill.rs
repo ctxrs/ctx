@@ -585,7 +585,7 @@ fn skill_install_default_fallback_preserves_custom_copy_without_failing() {
         .stderr(
             predicate::str::contains("Universal .agents Agent Skill was not changed").and(
                 predicate::str::contains(
-                    "ctx integrations install skills --agent universal --force",
+                    "ctx integrations install skill --agent universal --force",
                 ),
             ),
         );
@@ -611,7 +611,7 @@ fn skill_install_preserves_modified_copy_unless_forced() {
         .stderr(
             predicate::str::contains("Universal .agents Agent Skill was not changed")
                 .and(predicate::str::contains(
-                    "ctx integrations install skills --agent universal --force",
+                    "ctx integrations install skill --agent universal --force",
                 ))
                 .and(predicate::str::contains("failed to install skill").not()),
         );
@@ -802,4 +802,155 @@ fn skill_install_mimocode_rejects_relative_home_override() {
     );
 
     assert!(stderr.contains("MIMOCODE_HOME must be an absolute path"));
+}
+
+#[test]
+fn skill_remove_is_idempotent_preserves_siblings_and_keeps_telemetry_identifiers() {
+    let temp = tempdir();
+    let skill_dir = temp.path().join(".agents").join("skills").join("ctx");
+    let analytics_path = temp.path().join("skill-remove-analytics.jsonl");
+    json_output(ctx(&temp).args([
+        "integrations",
+        "install",
+        "skill",
+        "--agent",
+        "universal",
+        "--format=json",
+    ]));
+    fs::write(skill_dir.join("notes.txt"), "keep sibling").unwrap();
+
+    let output = ctx(&temp)
+        .env("CTX_ANALYTICS_ENABLED", "true")
+        .env("CTX_ANALYTICS_ENDPOINT", file_url(&analytics_path))
+        .args([
+            "integrations",
+            "remove",
+            "skill",
+            "--agent",
+            "universal",
+            "--format=json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let removed: Value = serde_json::from_slice(&output).unwrap();
+
+    let top_level = removed.as_object().unwrap();
+    assert_eq!(top_level.len(), 3);
+    assert!(top_level.contains_key("results"));
+    assert!(top_level.contains_key("scope"));
+    assert!(top_level.contains_key("skill"));
+    assert_eq!(removed["skill"], "ctx");
+    assert_eq!(removed["scope"], "global");
+    assert_eq!(removed["results"][0]["previous_status"], "current");
+    assert_eq!(removed["results"][0]["status"], "missing");
+    assert_eq!(removed["results"][0]["removed"], true);
+    assert!(!skill_dir.join("SKILL.md").exists());
+    assert!(!skill_dir.join(".ctx-skill.json").exists());
+    assert_eq!(
+        fs::read_to_string(skill_dir.join("notes.txt")).unwrap(),
+        "keep sibling"
+    );
+
+    let events = read_analytics_events(&analytics_path);
+    let event = analytics_cli_event(events.last().unwrap());
+    let properties = event["properties"].as_object().unwrap();
+    assert_eq!(properties["integration_action"], "remove");
+    assert_eq!(properties["integration_target"], "skills");
+    assert_eq!(properties["integration_scope"], "global");
+    assert_eq!(properties["target_agent_group"], "explicit");
+    assert_eq!(properties["force"], false);
+    assert_eq!(properties["resolved_agents_count_bucket"], "1");
+    assert_eq!(properties["integration_result"], "ok");
+    assert_eq!(properties["modified_targets_bucket"], "1");
+
+    let absent = json_output(ctx(&temp).args([
+        "integrations",
+        "remove",
+        "skill",
+        "--agent",
+        "universal",
+        "--format=json",
+    ]));
+    assert_eq!(absent["results"][0]["already_absent"], true);
+    assert_eq!(absent["results"][0]["removed"], false);
+    assert!(skill_dir.is_dir());
+}
+
+#[test]
+fn skill_remove_preserves_unowned_bytes_until_canonical_force_recovery() {
+    let temp = tempdir();
+    let skill_dir = temp.path().join(".agents").join("skills").join("ctx");
+    fs::create_dir_all(&skill_dir).unwrap();
+    fs::write(skill_dir.join("SKILL.md"), CURRENT_BUNDLED_SKILL_BODY).unwrap();
+    fs::write(skill_dir.join(".ctx-skill.json"), "foreign metadata").unwrap();
+    fs::write(skill_dir.join("notes.txt"), "keep sibling").unwrap();
+
+    ctx(&temp)
+        .args(["integrations", "remove", "skill", "--agent", "universal"])
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("Universal .agents Agent Skill was not removed").and(
+                predicate::str::contains("ctx integrations remove skill --agent universal --force"),
+            ),
+        );
+    assert_eq!(
+        fs::read_to_string(skill_dir.join("SKILL.md")).unwrap(),
+        CURRENT_BUNDLED_SKILL_BODY
+    );
+
+    let forced = json_output(ctx(&temp).args([
+        "integrations",
+        "remove",
+        "skill",
+        "--agent",
+        "universal",
+        "--force",
+        "--format=json",
+    ]));
+    assert_eq!(forced["results"][0]["previous_status"], "stale");
+    assert_eq!(forced["results"][0]["removed_current"], true);
+    assert!(!skill_dir.join("SKILL.md").exists());
+    assert_eq!(
+        fs::read_to_string(skill_dir.join(".ctx-skill.json")).unwrap(),
+        "foreign metadata"
+    );
+    assert_eq!(
+        fs::read_to_string(skill_dir.join("notes.txt")).unwrap(),
+        "keep sibling"
+    );
+}
+
+#[test]
+fn no_flag_skill_remove_uses_maintenance_selection_for_existing_native_copies() {
+    let temp = tempdir();
+    let cursor_dir = temp.path().join(".cursor").join("skills").join("ctx");
+    let body = "managed cursor snapshot\n";
+    fs::create_dir_all(&cursor_dir).unwrap();
+    fs::write(cursor_dir.join("SKILL.md"), body).unwrap();
+    fs::write(
+        cursor_dir.join(".ctx-skill.json"),
+        json!({
+            "schema_version": 1,
+            "installer": "ctx-cli",
+            "skill_name": "ctx",
+            "skill_hash": bundled_skill_hash(body),
+            "ctx_cli_version": "0.9.0",
+            "installed_at": "2026-01-01T00:00:00Z"
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let removed = json_output(
+        ctx(&temp)
+            .env("CODEX_HOME", temp.path().join("missing-codex"))
+            .args(["integrations", "remove", "skill", "--format=json"]),
+    );
+
+    assert_eq!(skill_result(&removed, "cursor")["removed"], true);
+    assert!(!cursor_dir.join("SKILL.md").exists());
 }
