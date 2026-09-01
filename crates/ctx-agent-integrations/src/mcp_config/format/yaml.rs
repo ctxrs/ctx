@@ -5,20 +5,32 @@ use super::{server_command, ConfigStatus};
 
 pub fn status_continue(body: &str) -> Result<ConfigStatus> {
     let doc: serde_yaml::Value = serde_yaml::from_str(body).context("parse YAML config")?;
-    let Some(servers) = mapping_get(&doc, "mcpServers") else {
+    let root = doc
+        .as_mapping()
+        .ok_or_else(|| anyhow!("YAML config root must be a mapping"))?;
+    let Some(servers) = root.get(serde_yaml::Value::String("mcpServers".to_owned())) else {
         return Ok(ConfigStatus::Missing);
     };
     let servers = servers
         .as_sequence()
         .ok_or_else(|| anyhow!("mcpServers must be a YAML sequence"))?;
-    let Some(server) = continue_server_by_name(servers) else {
+    let matching = servers
+        .iter()
+        .filter(|server| continue_server_has_name(server))
+        .collect::<Vec<_>>();
+    if matching.is_empty() {
         return Ok(ConfigStatus::Missing);
-    };
-    Ok(if continue_server_is_current(server) {
-        ConfigStatus::Current
-    } else {
-        ConfigStatus::Conflict
-    })
+    }
+    Ok(
+        if matching
+            .iter()
+            .all(|server| continue_server_is_current(server))
+        {
+            ConfigStatus::Current
+        } else {
+            ConfigStatus::Conflict
+        },
+    )
 }
 
 pub fn upsert_continue(body: &str, force: bool) -> Result<String> {
@@ -66,12 +78,49 @@ pub fn upsert_continue(body: &str, force: bool) -> Result<String> {
     render(&doc)
 }
 
+pub fn remove_continue(body: &str, force: bool) -> Result<String> {
+    let mut doc: serde_yaml::Value = serde_yaml::from_str(body).context("parse YAML config")?;
+    let root = doc
+        .as_mapping_mut()
+        .ok_or_else(|| anyhow!("YAML config root must be a mapping"))?;
+    let Some(servers) = root.get_mut(serde_yaml::Value::String("mcpServers".to_owned())) else {
+        return Ok(body.to_owned());
+    };
+    let servers = servers
+        .as_sequence_mut()
+        .ok_or_else(|| anyhow!("mcpServers must be a YAML sequence"))?;
+    let matching = servers
+        .iter()
+        .filter(|server| continue_server_has_name(server))
+        .collect::<Vec<_>>();
+    if matching.is_empty() {
+        return Ok(body.to_owned());
+    }
+    if !force
+        && matching
+            .iter()
+            .any(|server| !continue_server_is_current(server))
+    {
+        return Err(anyhow!(
+            "existing ctx MCP server has different command or args"
+        ));
+    }
+    servers.retain(|server| !continue_server_has_name(server));
+    render(&doc)
+}
+
 pub fn status_goose(body: &str) -> Result<ConfigStatus> {
     let doc: serde_yaml::Value = serde_yaml::from_str(body).context("parse YAML config")?;
-    let Some(extensions) = mapping_get(&doc, "extensions") else {
+    let root = doc
+        .as_mapping()
+        .ok_or_else(|| anyhow!("YAML config root must be a mapping"))?;
+    let Some(extensions) = root.get(serde_yaml::Value::String("extensions".to_owned())) else {
         return Ok(ConfigStatus::Missing);
     };
-    let Some(server) = mapping_get(extensions, SERVER_NAME) else {
+    let extensions = extensions
+        .as_mapping()
+        .ok_or_else(|| anyhow!("extensions must be a YAML mapping"))?;
+    let Some(server) = extensions.get(serde_yaml::Value::String(SERVER_NAME.to_owned())) else {
         return Ok(ConfigStatus::Missing);
     };
     Ok(if goose_server_is_current(server) {
@@ -112,14 +161,41 @@ pub fn upsert_goose(body: &str, force: bool) -> Result<String> {
     render(&doc)
 }
 
+pub fn remove_goose(body: &str, force: bool) -> Result<String> {
+    let mut doc: serde_yaml::Value = serde_yaml::from_str(body).context("parse YAML config")?;
+    let root = doc
+        .as_mapping_mut()
+        .ok_or_else(|| anyhow!("YAML config root must be a mapping"))?;
+    let Some(extensions) = root.get_mut(serde_yaml::Value::String("extensions".to_owned())) else {
+        return Ok(body.to_owned());
+    };
+    let extensions = extensions
+        .as_mapping_mut()
+        .ok_or_else(|| anyhow!("extensions must be a YAML mapping"))?;
+    let ctx_key = serde_yaml::Value::String(SERVER_NAME.to_owned());
+    let Some(existing) = extensions.get(&ctx_key) else {
+        return Ok(body.to_owned());
+    };
+    if !goose_server_is_current(existing) && !force {
+        return Err(anyhow!(
+            "existing ctx MCP extension has different command or args"
+        ));
+    }
+    extensions.shift_remove(&ctx_key);
+    render(&doc)
+}
+
+#[cfg(test)]
 fn continue_server_by_name(servers: &[serde_yaml::Value]) -> Option<&serde_yaml::Value> {
     continue_server_index(servers).map(|index| &servers[index])
 }
 
 fn continue_server_index(servers: &[serde_yaml::Value]) -> Option<usize> {
-    servers.iter().position(|server| {
-        mapping_get(server, "name").and_then(serde_yaml::Value::as_str) == Some(SERVER_NAME)
-    })
+    servers.iter().position(continue_server_has_name)
+}
+
+fn continue_server_has_name(server: &serde_yaml::Value) -> bool {
+    mapping_get(server, "name").and_then(serde_yaml::Value::as_str) == Some(SERVER_NAME)
 }
 
 fn continue_server_value() -> serde_yaml::Value {
@@ -329,5 +405,85 @@ mod tests {
                 .map(|arg| serde_yaml::Value::String((*arg).to_owned()))
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn continue_remover_preserves_unrelated_entries_and_empty_sequence() {
+        let current_only =
+            "name: Local\nmcpServers:\n  - name: ctx\n    command: ctx\n    args: [mcp, serve]\n";
+        let removed = remove_continue(current_only, false).unwrap();
+        let value: serde_yaml::Value = serde_yaml::from_str(&removed).unwrap();
+        assert_eq!(
+            mapping_get(&value, "name").and_then(serde_yaml::Value::as_str),
+            Some("Local")
+        );
+        assert!(mapping_get(&value, "mcpServers")
+            .unwrap()
+            .as_sequence()
+            .unwrap()
+            .is_empty());
+        assert_eq!(remove_continue(&removed, false).unwrap(), removed);
+
+        let with_other = "mcpServers:\n  - name: ctx\n    command: ctx\n    args: [mcp, serve]\n  - name: other\n    command: other\n    args: []\n";
+        let removed = remove_continue(with_other, false).unwrap();
+        assert!(removed.contains("name: other"));
+        assert!(!removed.contains("name: ctx"));
+    }
+
+    #[test]
+    fn continue_remover_requires_force_for_conflicts_and_rejects_invalid_yaml() {
+        let conflict = "mcpServers:\n  - name: ctx\n    command: custom\n    args: []\n";
+        assert!(remove_continue(conflict, false).is_err());
+        assert_eq!(status_continue(conflict).unwrap(), ConfigStatus::Conflict);
+        assert_eq!(
+            status_continue(&remove_continue(conflict, true).unwrap()).unwrap(),
+            ConfigStatus::Missing
+        );
+        assert!(remove_continue("mcpServers: [", true).is_err());
+        assert!(status_continue("[]").is_err());
+        assert!(status_continue("mcpServers: {}").is_err());
+    }
+
+    #[test]
+    fn goose_remover_preserves_unrelated_values_and_empty_mapping() {
+        let current_only =
+            "GOOSE_MODEL: test\nextensions:\n  ctx:\n    cmd: ctx\n    args: [mcp, serve]\n";
+        let removed = remove_goose(current_only, false).unwrap();
+        let value: serde_yaml::Value = serde_yaml::from_str(&removed).unwrap();
+        assert_eq!(
+            mapping_get(&value, "GOOSE_MODEL").and_then(serde_yaml::Value::as_str),
+            Some("test")
+        );
+        assert!(mapping_get(&value, "extensions")
+            .unwrap()
+            .as_mapping()
+            .unwrap()
+            .is_empty());
+        assert_eq!(remove_goose(&removed, false).unwrap(), removed);
+
+        let with_other = "extensions:\n  other:\n    cmd: other\n    args: []\n  ctx:\n    cmd: ctx\n    args: [mcp, serve]\n";
+        let removed = remove_goose(with_other, false).unwrap();
+        let value: serde_yaml::Value = serde_yaml::from_str(&removed).unwrap();
+        let extensions = mapping_get(&value, "extensions").unwrap();
+        assert!(mapping_get(extensions, "ctx").is_none());
+        assert_eq!(
+            mapping_get(mapping_get(extensions, "other").unwrap(), "cmd")
+                .and_then(serde_yaml::Value::as_str),
+            Some("other")
+        );
+    }
+
+    #[test]
+    fn goose_remover_requires_force_for_conflicts_and_rejects_invalid_yaml() {
+        let conflict = "extensions:\n  ctx:\n    cmd: custom\n    args: []\n";
+        assert!(remove_goose(conflict, false).is_err());
+        assert_eq!(status_goose(conflict).unwrap(), ConfigStatus::Conflict);
+        assert_eq!(
+            status_goose(&remove_goose(conflict, true).unwrap()).unwrap(),
+            ConfigStatus::Missing
+        );
+        assert!(remove_goose("extensions: [", true).is_err());
+        assert!(status_goose("[]").is_err());
+        assert!(status_goose("extensions: []").is_err());
     }
 }

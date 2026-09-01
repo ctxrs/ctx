@@ -3,6 +3,7 @@ use super::CountBucket;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IntegrationAction {
     Install,
+    Remove,
     Status,
 }
 
@@ -10,6 +11,7 @@ impl IntegrationAction {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Install => "install",
+            Self::Remove => "remove",
             Self::Status => "status",
         }
     }
