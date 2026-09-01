@@ -682,10 +682,10 @@ def verify_bundle_only(
     ):
         raise ValueError("candidate manifest does not bind its exact build-info")
     evidence_paths = {
-        "binary_size_report": args.size_report,
-        "build_info": args.build_info,
-        "cyclonedx_sbom": args.sbom,
-        "third_party_notices": args.notices,
+        "binary_size_report": (args.size_report, ".size.json"),
+        "build_info": (args.build_info, ".build-info.json"),
+        "cyclonedx_sbom": (args.sbom, ".cdx.json"),
+        "third_party_notices": (args.notices, ".third-party-notices.txt"),
     }
     evidence = candidate.get("evidence")
     if not isinstance(evidence, dict) or set(evidence) != CANDIDATE_EVIDENCE_FIELDS:
@@ -699,10 +699,13 @@ def verify_bundle_only(
             or HEX_64.fullmatch(str(record.get("sha256"))) is None
         ):
             raise ValueError(f"candidate manifest {name} evidence is malformed")
-    for name, path in evidence_paths.items():
+    for name, (path, suffix) in evidence_paths.items():
         record = evidence.get(name)
         payload = regular_bytes(path, name.replace("_", " "), 32 * 1024 * 1024)
-        if record != {"file": path.name, "sha256": sha256_bytes(payload)}:
+        if record != {
+            "file": f"{candidate_artifact_name}{suffix}",
+            "sha256": sha256_bytes(payload),
+        }:
             raise ValueError(f"candidate manifest does not bind {name}")
     size_report, _ = read_canonical_json(
         args.size_report, "binary size report", 256 * 1024
