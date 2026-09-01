@@ -1148,7 +1148,7 @@ dependencies = [
 name = "ctx-history-platform"
 version = "1.3.0"
 dependencies = [
- "directories",
+ "dirs",
  "libc",
  "tempfile",
  "thiserror 1.0.69",
