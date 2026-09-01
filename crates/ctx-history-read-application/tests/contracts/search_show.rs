@@ -850,7 +850,7 @@ fn search_backend_defaults_and_supported_semantic_config_are_reported() {
     assert_eq!(supported_hybrid["retrieval"]["effective_mode"], "lexical");
     assert_eq!(
         supported_hybrid["retrieval"]["semantic_fallback_code"],
-        "semantic_store_missing"
+        "semantic_generation_not_acknowledged"
     );
 
     let missing_index_strict_semantic = ctx(&temp)
