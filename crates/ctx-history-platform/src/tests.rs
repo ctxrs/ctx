@@ -29,6 +29,12 @@ fn retained_local_layout_paths_are_flat_under_data_root() {
 }
 
 #[test]
+fn managed_data_root_matches_the_home_only_platform_api() {
+    let home = dirs::home_dir().expect("test host must provide a home directory");
+    assert_eq!(managed_data_root().unwrap(), home.join(".ctx"));
+}
+
+#[test]
 fn ctx_data_root_env_is_the_ctx_root_itself() {
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
