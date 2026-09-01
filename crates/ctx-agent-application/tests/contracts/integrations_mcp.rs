@@ -72,6 +72,29 @@ fn integrations_mcp_human_receipts_use_ui_and_json_stays_plain() {
     assert!(!machine.stdout.contains(&0x1b), "{:?}", machine.stdout);
     let value: Value = serde_json::from_slice(&machine.stdout).unwrap();
     assert_eq!(value["results"][0]["status"], "current");
+
+    let removed = human_stdout(ctx(&temp).args([
+        "--color=always",
+        "integrations",
+        "remove",
+        "mcp",
+        "--agent",
+        "codex",
+    ]));
+    assert!(removed.contains("ctx MCP integration removed"), "{removed}");
+
+    let absent = human_stdout(ctx(&temp).args([
+        "--color=always",
+        "integrations",
+        "remove",
+        "mcp",
+        "--agent",
+        "codex",
+    ]));
+    assert!(
+        absent.contains("ctx MCP integration is already absent"),
+        "{absent}"
+    );
 }
 
 #[test]
@@ -110,6 +133,211 @@ fn integrations_mcp_install_defaults_to_detected_agents_and_is_idempotent() {
     assert!(second["results"].as_array().unwrap().iter().all(|row| {
         row["success"] == true && row["already_installed"] == true && row["modified"] == false
     }));
+}
+
+#[test]
+fn integrations_mcp_remove_is_idempotent_and_preserves_unrelated_configuration() {
+    let temp = tempdir();
+    let cursor_dir = temp.path().join(".cursor");
+    fs::create_dir_all(&cursor_dir).unwrap();
+    fs::write(
+        cursor_dir.join("mcp.json"),
+        r#"{"theme":"dark","mcpServers":{"ctx":{"type":"stdio","command":"ctx","args":["mcp","serve"]},"other":{"command":"other","args":[]}}}"#,
+    )
+    .unwrap();
+
+    let first = json_output(ctx(&temp).args([
+        "integrations",
+        "remove",
+        "mcp",
+        "--agent",
+        "cursor",
+        "--format=json",
+    ]));
+    assert_eq!(first["integration"], "mcp");
+    assert_eq!(first["results"][0]["success"], true);
+    assert_eq!(first["results"][0]["previous_status"], "current");
+    assert_eq!(first["results"][0]["status"], "missing");
+    assert_eq!(first["results"][0]["already_absent"], false);
+    assert_eq!(first["results"][0]["modified"], true);
+
+    let config: Value =
+        serde_json::from_str(&fs::read_to_string(cursor_dir.join("mcp.json")).unwrap()).unwrap();
+    assert_eq!(config["theme"], "dark");
+    assert!(config["mcpServers"].get("ctx").is_none());
+    assert_eq!(config["mcpServers"]["other"]["command"], "other");
+
+    let second = json_output(ctx(&temp).args([
+        "integrations",
+        "remove",
+        "mcp",
+        "--agent",
+        "cursor",
+        "--format=json",
+    ]));
+    assert_eq!(second["results"][0]["success"], true);
+    assert_eq!(second["results"][0]["already_absent"], true);
+    assert_eq!(second["results"][0]["modified"], false);
+}
+
+#[test]
+fn integrations_mcp_remove_requires_force_for_a_conflicting_entry() {
+    let temp = tempdir();
+    let cursor_dir = temp.path().join(".cursor");
+    fs::create_dir_all(&cursor_dir).unwrap();
+    let path = cursor_dir.join("mcp.json");
+    let original = r#"{"unrelated":true,"mcpServers":{"ctx":{"command":"custom","args":[]}}}"#;
+    fs::write(&path, original).unwrap();
+
+    let human = ctx(&temp)
+        .args(["integrations", "remove", "mcp", "--agent", "cursor"])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let stderr = String::from_utf8(human.stderr).unwrap();
+    assert!(
+        stderr.contains("ctx integrations remove mcp --agent cursor --force"),
+        "{stderr}"
+    );
+    assert_eq!(fs::read_to_string(&path).unwrap(), original);
+
+    let output = ctx(&temp)
+        .args([
+            "integrations",
+            "remove",
+            "mcp",
+            "--agent",
+            "cursor",
+            "--format=json",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["results"][0]["status"], "conflict");
+    assert_eq!(value["results"][0]["success"], false);
+    assert_eq!(fs::read_to_string(&path).unwrap(), original);
+
+    let forced = json_output(ctx(&temp).args([
+        "integrations",
+        "remove",
+        "mcp",
+        "--agent",
+        "cursor",
+        "--force",
+        "--format=json",
+    ]));
+    assert_eq!(forced["results"][0]["success"], true);
+    assert_eq!(forced["results"][0]["previous_status"], "conflict");
+    assert_eq!(forced["results"][0]["status"], "missing");
+    let config: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+    assert_eq!(config["unrelated"], true);
+    assert!(config["mcpServers"].get("ctx").is_none());
+}
+
+#[test]
+fn integrations_mcp_remove_rejects_structurally_invalid_yaml_even_with_force() {
+    let temp = tempdir();
+    let cases = [
+        (
+            "continue",
+            temp.path().join(".continue").join("config.yaml"),
+            "[]",
+        ),
+        (
+            "goose",
+            temp.path()
+                .join(".config")
+                .join("goose")
+                .join("config.yaml"),
+            "extensions: []\n",
+        ),
+    ];
+
+    for (agent, path, original) in cases {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, original).unwrap();
+        let output = ctx(&temp)
+            .args([
+                "integrations",
+                "remove",
+                "mcp",
+                "--agent",
+                agent,
+                "--force",
+                "--format=json",
+            ])
+            .assert()
+            .failure()
+            .get_output()
+            .clone();
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["results"][0]["status"], "invalid_config");
+        assert_eq!(fs::read_to_string(path).unwrap(), original);
+    }
+}
+
+#[test]
+fn integrations_mcp_remove_preserves_duplicate_json_keys_even_with_force() {
+    let temp = tempdir();
+    let cursor_path = temp.path().join(".cursor").join("mcp.json");
+    let cursor_config = r#"{
+  "mcpServers": {"other": {"command": "other"}},
+  "mcpServers": {"ctx": {"command": "ctx", "args": ["mcp", "serve"]}}
+}"#;
+    fs::create_dir_all(cursor_path.parent().unwrap()).unwrap();
+    fs::write(&cursor_path, cursor_config).unwrap();
+
+    let cursor = ctx(&temp)
+        .args([
+            "integrations",
+            "remove",
+            "mcp",
+            "--agent",
+            "cursor",
+            "--force",
+            "--format=json",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let cursor_json: Value = serde_json::from_slice(&cursor.stdout).unwrap();
+    assert_eq!(cursor_json["results"][0]["status"], "invalid_config");
+    assert_eq!(fs::read_to_string(&cursor_path).unwrap(), cursor_config);
+
+    let mimocode_dir = temp.path().join("mimocode-duplicate-config");
+    let mimocode_path = mimocode_dir.join("mimocode.jsonc");
+    let mimocode_config = r#"{
+  // Both entries must remain byte-for-byte intact.
+  "mcp": {
+    "ctx": {"type": "local", "command": ["custom"]},
+    "ctx": {"type": "local", "command": ["ctx", "mcp", "serve"]},
+  },
+}"#;
+    fs::create_dir_all(&mimocode_dir).unwrap();
+    fs::write(&mimocode_path, mimocode_config).unwrap();
+
+    let mimocode = ctx(&temp)
+        .env("MIMOCODE_CONFIG_DIR", &mimocode_dir)
+        .args([
+            "integrations",
+            "remove",
+            "mcp",
+            "--agent",
+            "mimocode",
+            "--force",
+            "--format=json",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let mimocode_json: Value = serde_json::from_slice(&mimocode.stdout).unwrap();
+    assert_eq!(mimocode_json["results"][0]["status"], "invalid_config");
+    assert_eq!(fs::read_to_string(&mimocode_path).unwrap(), mimocode_config);
 }
 
 #[test]
@@ -226,6 +454,27 @@ fn integrations_mcp_reports_invalid_config_without_overwriting() {
         .get_output()
         .clone();
     let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["results"][0]["status"], "invalid_config");
+    assert_eq!(
+        fs::read_to_string(qwen_dir.join("settings.json")).unwrap(),
+        "{ not json"
+    );
+
+    let remove = ctx(&temp)
+        .args([
+            "integrations",
+            "remove",
+            "mcp",
+            "--agent",
+            "qwen-code",
+            "--force",
+            "--format=json",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let json: Value = serde_json::from_slice(&remove.stdout).unwrap();
     assert_eq!(json["results"][0]["status"], "invalid_config");
     assert_eq!(
         fs::read_to_string(qwen_dir.join("settings.json")).unwrap(),

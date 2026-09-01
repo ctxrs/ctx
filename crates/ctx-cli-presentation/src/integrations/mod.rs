@@ -15,7 +15,9 @@ use ctx_agent_application::{
 mod mcp;
 mod slash_commands;
 
-use mcp::{run_install as run_mcp_install, run_status as run_mcp_status};
+use mcp::{
+    run_install as run_mcp_install, run_remove as run_mcp_remove, run_status as run_mcp_status,
+};
 
 #[derive(Debug, Args)]
 pub struct IntegrationsArgs {
@@ -27,6 +29,8 @@ pub struct IntegrationsArgs {
 enum IntegrationCommand {
     #[command(about = "Install ctx into an external integration")]
     Install(IntegrationInstallArgs),
+    #[command(about = "Remove ctx from an external integration")]
+    Remove(IntegrationRemoveArgs),
     #[command(about = "Inspect ctx integration install state")]
     Status(IntegrationStatusArgs),
 }
@@ -51,6 +55,18 @@ enum IntegrationInstallTarget {
 }
 
 #[derive(Debug, Args)]
+struct IntegrationRemoveArgs {
+    #[command(subcommand)]
+    target: IntegrationRemoveTarget,
+}
+
+#[derive(Debug, Subcommand)]
+enum IntegrationRemoveTarget {
+    #[command(about = "Remove the local ctx MCP server from coding-agent clients")]
+    Mcp(mcp::McpRemoveArgs),
+}
+
+#[derive(Debug, Args)]
 struct IntegrationStatusArgs {
     #[command(subcommand)]
     target: IntegrationStatusTarget,
@@ -71,6 +87,9 @@ impl IntegrationsArgs {
                 IntegrationInstallTarget::Mcp(args) => args.format.is_json(),
                 IntegrationInstallTarget::Skills(args) => args.json_output(),
                 IntegrationInstallTarget::SlashCommands(args) => args.format.is_json(),
+            },
+            IntegrationCommand::Remove(args) => match &args.target {
+                IntegrationRemoveTarget::Mcp(args) => args.format.is_json(),
             },
             IntegrationCommand::Status(args) => match &args.target {
                 IntegrationStatusTarget::Mcp(args) => args.format.is_json(),
@@ -107,6 +126,15 @@ pub fn run(
                 slash_commands::insert_install_analytics(telemetry, &args);
                 let context = slash_commands::PathContext::from_env()?;
                 slash_commands::run_install(args, &context, identity, telemetry, ui)
+            }
+        },
+        IntegrationCommand::Remove(args) => match args.target {
+            IntegrationRemoveTarget::Mcp(args) => {
+                telemetry.action = Some(IntegrationAction::Remove);
+                telemetry.target = Some(IntegrationTarget::Mcp);
+                args.add_initial_analytics(telemetry);
+                let context = mcp::McpPathContext::from_env()?;
+                run_mcp_remove(args, &context, identity, telemetry, ui)
             }
         },
         IntegrationCommand::Status(args) => match args.target {

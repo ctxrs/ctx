@@ -1203,6 +1203,7 @@ protocol-level parse-error or invalid-params responses.
 
 ```bash
 ctx integrations install mcp --format json
+ctx integrations remove mcp --format json
 ctx integrations status mcp --format json
 ```
 
@@ -1231,6 +1232,11 @@ Each install result includes:
 Each status result uses the same target fields and includes `status` and
 `error`. Status values are `current`, `missing`, `conflict`, `invalid_config`,
 and `unsupported`.
+
+Each remove result uses the install target fields and includes `success`,
+`previous_status`, `status`, `already_absent`, `modified`, and `error`.
+Successful results have `status: "missing"`; `modified` distinguishes an
+entry removed by this invocation from an idempotent already-absent result.
 
 ## Docs
 

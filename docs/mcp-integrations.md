@@ -23,9 +23,16 @@ preserves unrelated settings, is idempotent, and refuses to overwrite an
 existing `ctx` MCP server whose command or args differ unless `--force` is set.
 Invalid configs are reported and left untouched.
 
+`ctx integrations remove mcp` reverses the registration without uninstalling
+ctx or deleting history. It uses the same agent and project selectors as
+install, removes only the `ctx` server entry, and treats an absent entry as a
+successful no-op. A valid but conflicting entry is preserved unless `--force`
+is supplied. Invalid configs, the containing file, and unrelated settings are
+always preserved.
+
 ## Test Coverage
 
-The Bazel target `//crates/ctx-cli:mcp_integration_e2e_tests` runs hermetic
+The Bazel target `//crates/ctx-agent-application:mcp_integration_e2e_tests` runs hermetic
 fake-harness tests for the stable local configuration surfaces. Those tests run
 the real ctx installer with temporary `HOME`, `XDG_CONFIG_HOME`,
 `CTX_DATA_ROOT`, and provider-specific home variables, then parse the generated
@@ -41,6 +48,9 @@ ctx integrations install mcp --agent codex
 ctx integrations install mcp --agent grok-build
 ctx integrations install mcp --provider cursor --project
 ctx integrations install mcp --all-agents --format json
+ctx integrations remove mcp --agent codex
+ctx integrations remove mcp --provider cursor --project
+ctx integrations remove mcp --all-agents --format json
 ctx integrations status mcp --format json
 ctx integrations status mcp --agent grok-build --project
 ```
