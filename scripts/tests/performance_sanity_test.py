@@ -45,10 +45,11 @@ QUERY = "nightly performance sentinel"
 APPEND_QUERY = f"{QUERY} tiny append"
 TOP_PROVIDER_QUERY = "ctxtopproviderperfsentinel"
 SAMPLE_COUNT = 3
-# The checked debug build measures about 33 KiB of immutable Tantivy segment,
-# metadata, and manifest growth for one tiny append. Keep one fixed 40 KiB
-# allowance instead of scaling retained storage with the existing corpus.
-MAX_APPEND_SEGMENT_OVERHEAD_BYTES = 40 * 1024
+# The checked debug build writes about 33 KiB of immutable Tantivy segment,
+# metadata, and manifest payload across several files. Their physical extents
+# occupy 56 KiB on the release runner's 4 KiB-block XFS volume. Keep one fixed
+# 64 KiB allowance instead of scaling retained storage with the existing corpus.
+MAX_APPEND_SEGMENT_OVERHEAD_BYTES = 64 * 1024
 
 # Normal CI keeps the small provider/scheduler contracts. Nightly and release
 # add enough independent leaves to require multiple source workers while
@@ -472,7 +473,10 @@ class PhysicalStorageAccountingTest(unittest.TestCase):
             linked.parent.mkdir()
             copied.parent.mkdir()
             original.write_bytes(b"physical-segment")
+            original_bytes = published_index_bytes(root)
+            self.assertGreater(original_bytes, 0)
             os.link(original, linked)
+            self.assertEqual(published_index_bytes(root), original_bytes)
             copied.write_bytes(original.read_bytes())
             (root / ".ctx-generation-writer.lock").write_bytes(b"control")
             (root / "active-generation.json").write_bytes(b"control")
@@ -481,9 +485,38 @@ class PhysicalStorageAccountingTest(unittest.TestCase):
             certifications.mkdir()
             (certifications / "generation-proof.json").write_bytes(b"asynchronous")
 
-            self.assertEqual(
-                published_index_bytes(root), 2 * len(b"physical-segment")
-            )
+            self.assertGreater(published_index_bytes(root), original_bytes)
+
+    @unittest.skipUnless(sys.platform == "linux", "FIEMAP is Linux-specific")
+    def test_reflinked_generation_extents_count_once(self) -> None:
+        import errno
+        import fcntl
+
+        with tempfile.TemporaryDirectory(
+            prefix="ctx-performance-reflink-accounting-"
+        ) as temporary:
+            root = Path(temporary)
+            generations = root / "index-generations"
+            original = generations / "generation-a" / "segment"
+            cloned = generations / "generation-b" / "segment"
+            original.parent.mkdir(parents=True)
+            cloned.parent.mkdir()
+            original.write_bytes(b"physical-segment" * 4096)
+            original_bytes = published_index_bytes(root)
+            self.assertGreater(original_bytes, 0)
+            with original.open("rb") as source, cloned.open("xb") as destination:
+                try:
+                    fcntl.ioctl(destination.fileno(), 0x40049409, source.fileno())
+                except OSError as error:
+                    if error.errno in {
+                        errno.EINVAL,
+                        errno.ENOTTY,
+                        errno.EOPNOTSUPP,
+                        errno.EXDEV,
+                    }:
+                        self.skipTest("test filesystem does not support reflinks")
+                    raise
+            self.assertEqual(published_index_bytes(root), original_bytes)
 
 
 class SmallQueryShowPerformanceTest(unittest.TestCase):
