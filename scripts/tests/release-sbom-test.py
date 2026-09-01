@@ -682,6 +682,12 @@ repository = "https://example.invalid/{name}"
         staged_artifact.write_bytes(self.artifact.read_bytes())
         self.artifact = staged_artifact
         self.assertNotEqual(self.run_command("verify-bundle", check=False).returncode, 0)
+        staged_sbom = self.root / "ctx-linux-x64.cdx.json"
+        staged_sbom.write_bytes(self.sbom.read_bytes())
+        self.sbom = staged_sbom
+        staged_notices = self.root / "ctx-linux-x64.third-party-notices.txt"
+        staged_notices.write_bytes(self.notices.read_bytes())
+        self.notices = staged_notices
         renamed = subprocess.run(
             self.command("verify-bundle") + ["--candidate-artifact-name", "ctx"],
             check=True,

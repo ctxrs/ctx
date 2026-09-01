@@ -176,7 +176,8 @@ for binary in "${cli_sources[@]}"; do
     > "${matrix}/${binary}.dependency-advisory.json"
 done
 for platform in macos-arm64 macos-x64; do
-  printf '{}\n' > "${matrix}/ctx-${platform}.signing.json"
+  printf '{"origin":"factory-pending"}\n' \
+    > "${matrix}/ctx-${platform}.signing.json"
   printf '{}\n' > "${matrix}/ctx-${platform}.attestation.json"
   printf 'cms\n' > "${matrix}/ctx-${platform}.attestation.cms"
   printf '{}\n' > "${matrix}/ctx-${platform}.notary-submit.json"
@@ -195,6 +196,10 @@ for platform in linux-x64 linux-aarch64 macos-arm64 macos-x64 windows-x64; do
       --artifact "${matrix}/${binary}" \
       --smoke-result "${proof_root}/${platform}/candidate-smoke.json" \
       --output "${proof_root}/${platform}/ctx-${platform}.native-execution.json" >/dev/null
+  if [[ "${platform}" == macos-* ]]; then
+    printf '{"origin":"native-passed"}\n' \
+      > "${proof_root}/${platform}/ctx-${platform}.signing.json"
+  fi
 done
 export CTX_PUBLIC_NATIVE_PROOF_DIR="${proof_root}"
 
@@ -402,6 +407,12 @@ CTX_FAKE_SBOM_LOG="${default_sbom_log}" \
   PATH="${fake_bin}:${PATH}" \
   /bin/bash "${stage}" "${matrix}" "${default_output}"
 assert_exact_assets "${default_output}" 15 "${default_assets[@]}"
+for platform in macos-arm64 macos-x64; do
+  grep -Fq '"origin":"native-passed"' \
+    "${default_output}/ctx-${platform}.signing.json"
+  grep -Fq '"origin":"factory-pending"' \
+    "${matrix}/ctx-${platform}.signing.json"
+done
 default_authority="${default_output}.authority"
 test "$(find "${default_authority}" -maxdepth 1 -type f | wc -l)" -eq 20
 for candidate in \

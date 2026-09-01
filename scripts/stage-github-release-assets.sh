@@ -309,7 +309,9 @@ stage_cli_evidence() {
 stage_macos_cli_verifier_inputs() {
   local source_name="$1"
   local dest_name="$2"
+  local platform="$3"
   local source_path="${artifact_dir%/}/${source_name}"
+  local native_signing_evidence="${native_proof_dir%/}/${platform}/${source_name}.signing.json"
   local suffix source destination source_digest destination_digest
 
   for suffix in \
@@ -319,7 +321,11 @@ stage_macos_cli_verifier_inputs() {
     .attestation.json \
     .attestation.cms \
     .notary-submit.json; do
-    source="${source_path}${suffix}"
+    if [[ "${suffix}" == .signing.json ]]; then
+      source="${native_signing_evidence}"
+    else
+      source="${source_path}${suffix}"
+    fi
     destination="${out_dir%/}/${dest_name}${suffix}"
     require_regular_input "${source}" "macOS CLI verifier input"
     [[ -s "${source}" ]] || {
@@ -410,7 +416,7 @@ validate_macos_cli_signing_evidence() (
   local platform="$1"
   local binary="${out_dir%/}/ctx-${platform}"
   local binary_checksum="${artifact_dir%/}/ctx-${platform}.sha256"
-  local cli_evidence="${artifact_dir%/}/ctx-${platform}.signing.json"
+  local cli_evidence="${out_dir%/}/ctx-${platform}.signing.json"
   local cli_attestation="${artifact_dir%/}/ctx-${platform}.attestation.json"
   local cli_attestation_cms="${artifact_dir%/}/ctx-${platform}.attestation.cms"
   local build_info="${artifact_dir%/}/ctx-${platform}.build-info.json"
@@ -484,10 +490,10 @@ stage_asset ctx-linux-aarch64 ctx-linux-aarch64
 stage_cli_evidence ctx-linux-aarch64 ctx-linux-aarch64
 stage_asset ctx-macos-arm64 ctx-macos-arm64
 stage_cli_evidence ctx-macos-arm64 ctx-macos-arm64
-stage_macos_cli_verifier_inputs ctx-macos-arm64 ctx-macos-arm64
+stage_macos_cli_verifier_inputs ctx-macos-arm64 ctx-macos-arm64 macos-arm64
 stage_asset ctx-macos-x64 ctx-macos-x64
 stage_cli_evidence ctx-macos-x64 ctx-macos-x64
-stage_macos_cli_verifier_inputs ctx-macos-x64 ctx-macos-x64
+stage_macos_cli_verifier_inputs ctx-macos-x64 ctx-macos-x64 macos-x64
 stage_asset ctx.exe ctx-windows-x64.exe
 stage_cli_evidence ctx.exe ctx-windows-x64.exe
 

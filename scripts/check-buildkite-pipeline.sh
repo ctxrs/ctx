@@ -283,11 +283,16 @@ for key, (platform, queue, os_name, arch) in native.items():
             fail(f"{key} must not consume semantic model/runtime input ({marker})")
     if re.search(r"cargo (?:build|zigbuild)|bazelw run //:ctx_release", command):
         fail(f"{key} must never rebuild the candidate")
-    if step.get("artifact_paths") != [
+    expected_artifacts = [
         f"target/public-cli-native-smoke/{platform}/candidate-smoke.json",
         f"target/public-cli-native-smoke/{platform}/ctx-{platform}.native-execution.json",
-    ]:
-        fail(f"{key} must upload only its exact Core validation evidence")
+    ]
+    if platform.startswith("macos-"):
+        expected_artifacts.append(
+            f"target/public-cli-native-smoke/{platform}/ctx-{platform}.signing.json"
+        )
+    if step.get("artifact_paths") != expected_artifacts:
+        fail(f"{key} must upload its exact Core validation evidence")
 
     output = f"target/public-cli-native-smoke/{platform}"
     mutated = command.replace(
@@ -341,6 +346,22 @@ for proof in native.values():
     platform = proof[0]
     if f"ctx-{platform}.native-execution.json" not in candidate_command:
         fail(f"Core candidate staging must consume native {platform} proof")
+logical_candidate_command = "\n".join(
+    " ".join(line.split())
+    for line in re.sub(r"\\\n[ \t]*", " ", candidate_command).splitlines()
+)
+for platform in ("macos-arm64", "macos-x64"):
+    expected_signing_download = (
+        "BUILDKITE_AGENT_INCLUDE_RETRIED_JOBS=false "
+        "buildkite-agent artifact download "
+        f'"target/public-cli-native-smoke/{platform}/ctx-{platform}.signing.json" . '
+        f"--step public-cli-{platform}-native-smoke"
+    )
+    if logical_candidate_command.count(expected_signing_download) != 1:
+        fail(
+            "Core candidate staging must consume the exact native-passed "
+            f"{platform} signing evidence"
+        )
 
 semantic_keys = {
     "public-cli-macos-x64-runtime-producer",
