@@ -15,8 +15,8 @@ use ctx_history_core::{
     derive_event_id, derive_native_session_id, ActivityInvocation, ActivityJsonCapture,
     ActivityResult, ActivityTextCapture, CaptureProvider, CoreActivity, CoreRecord,
     EventIdentityInput, EventType, LiteralFactKind, NativeItemKey, ProviderDeclaredFact,
-    SourceAnchorScope, SourceKey, StableEntityId, TypedKey, CORE_ACTIVITY_REVISION,
-    MAX_CORE_CONTENT_BYTES,
+    ProviderNativeSessionRelationship, SourceAnchorScope, SourceKey, StableEntityId, TypedKey,
+    CORE_ACTIVITY_REVISION, MAX_CORE_CONTENT_BYTES,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -53,7 +53,7 @@ const NATIVE_EVENT_NAMESPACE: &str = "pi.entry";
 const LOGICAL_SESSION_KIND: &str = "pi-session";
 const LOGICAL_EVENT_KIND: &str = "pi-event";
 const SOURCE_SCHEMA_VARIANT: &str = "pi-nativepath-jsonl-v1";
-const PARSER_REVISION: &str = "pi-shared-jsonl-v10-child-local-lineage";
+const PARSER_REVISION: &str = "pi-shared-jsonl-v11-omp-parent-lineage";
 const EVENT_IDENTITY_REVISION: &str = "pi-content-occurrence-v1";
 const FALLBACK_FINGERPRINT_DOMAIN: &[u8] = b"ctx.pi.fallback-event-fingerprint.v1\0";
 const MAX_TOUCHES_PER_RECORD: usize = 63;
@@ -129,8 +129,15 @@ struct CachedBinding {
 struct Binding {
     native_session_id: String,
     cwd: Option<String>,
+    parent_session_id: Option<StableEntityId>,
     header_digest: [u8; 32],
     leading_rejected_records: u64,
+}
+
+#[derive(Deserialize)]
+struct ParentSessionHeader {
+    #[serde(rename = "parentSession")]
+    parent_session: Option<String>,
 }
 
 struct DiscoveredPiSource {
@@ -217,7 +224,9 @@ impl<R: JsonlProviderRuntime> JsonlFamilyAdapter for PiJsonlAdapter<R> {
                         &opened,
                         MAX_HEADER_PROBE_RECORDS,
                         |record| -> Result<Option<Binding>> {
-                            let Some(mut binding) = parse_header_binding(record)? else {
+                            let Some(mut binding) =
+                                parse_header_binding(record, self.source_anchor_scope)?
+                            else {
                                 if !is_omp_title_slot(record) {
                                     leading_rejected_records = leading_rejected_records
                                         .checked_add(1)
@@ -452,6 +461,10 @@ impl<R: JsonlProviderRuntime> JsonlFamilyProjector for PiProjector<R> {
         )
         .map_err(contract)?;
         core.provider_session_id = Some(self.binding.native_session_id.clone());
+        if let Some(parent_session_id) = self.binding.parent_session_id {
+            core.parent_session_id = Some(parent_session_id);
+            core.session_relationship = Some(ProviderNativeSessionRelationship::Forked);
+        }
         core.native_event_id = Some(native_event_id);
         core.occurred_at_unix_ms = Some(occurred_at.timestamp_millis());
         core.role = value
@@ -508,7 +521,10 @@ fn fallback_fingerprint(bytes: &[u8]) -> Result<TypedKey> {
     TypedKey::bytes(digest.finalize().to_vec()).map_err(contract)
 }
 
-fn parse_header_binding(record: JsonlRecordRef<'_>) -> Result<Option<Binding>> {
+fn parse_header_binding(
+    record: JsonlRecordRef<'_>,
+    source_anchor_scope: SourceAnchorScope,
+) -> Result<Option<Binding>> {
     let Ok(value) = serde_json::from_slice::<Value>(record.bytes()) else {
         return Ok(None);
     };
@@ -526,12 +542,54 @@ fn parse_header_binding(record: JsonlRecordRef<'_>) -> Result<Option<Binding>> {
     if event_timestamp(&value).is_none() {
         return Ok(None);
     }
+    let parent_session_id = serde_json::from_slice::<ParentSessionHeader>(record.bytes())
+        .ok()
+        .and_then(|header| header.parent_session)
+        .and_then(omp_parent_native_session_id)
+        .filter(|parent| parent != &native_session_id)
+        .and_then(|parent| session_identity_for_native(&parent, source_anchor_scope).ok());
     Ok(Some(Binding {
         native_session_id,
         cwd: value.get("cwd").and_then(Value::as_str).map(str::to_owned),
+        parent_session_id,
         header_digest: Sha256::digest(record.bytes()).into(),
         leading_rejected_records: 0,
     }))
+}
+
+fn omp_parent_native_session_id(parent: String) -> Option<String> {
+    let parent = admit_optional_metadata_text(Some(parent))?;
+    if !looks_like_absolute_path(&parent) {
+        return Some(parent);
+    }
+    omp_session_id_from_path(&parent).map(str::to_owned)
+}
+
+fn looks_like_absolute_path(value: &str) -> bool {
+    value.starts_with('/')
+        || value.starts_with(r"\\")
+        || value.as_bytes().get(..3).is_some_and(|prefix| {
+            prefix[0].is_ascii_alphabetic()
+                && prefix[1] == b':'
+                && matches!(prefix[2], b'/' | b'\\')
+        })
+}
+
+fn omp_session_id_from_path(path: &str) -> Option<&str> {
+    let stem = path.rsplit(['/', '\\']).next()?.strip_suffix(".jsonl")?;
+    let (timestamp, session_id) = stem.split_once('_')?;
+    (is_omp_filename_timestamp(timestamp) && !session_id.is_empty()).then_some(session_id)
+}
+
+fn is_omp_filename_timestamp(timestamp: &str) -> bool {
+    let bytes = timestamp.as_bytes();
+    bytes.len() == 24
+        && bytes.iter().enumerate().all(|(index, byte)| match index {
+            4 | 7 | 13 | 16 | 19 => *byte == b'-',
+            10 => *byte == b'T',
+            23 => *byte == b'Z',
+            _ => byte.is_ascii_digit(),
+        })
 }
 
 fn is_omp_title_slot(record: JsonlRecordRef<'_>) -> bool {
@@ -691,7 +749,6 @@ fn session_identity(source: &SourceKey, native_session_id: &str) -> Result<Stabl
     .map_err(contract)
 }
 
-#[cfg(test)]
 fn session_identity_for_native(
     native_session_id: &str,
     source_anchor_scope: SourceAnchorScope,
@@ -773,6 +830,43 @@ mod tests {
             br#"{"type":"title","v":1,"title":"fixture","updatedAt":"2026-08-20T15:12:20.989Z","pad":"","source":"other"}"#.as_slice(),
         ] {
             assert!(!is_omp_title_slot(JsonlRecordRef::for_test(title, 0)));
+        }
+    }
+
+    #[test]
+    fn omp_path_parent_uses_only_the_native_filename_claim() {
+        assert_eq!(
+            omp_parent_native_session_id(
+                r"C:\Users\ctx\.omp\agent\sessions\2026-09-01T00-00-00-000Z_parent.jsonl"
+                    .to_owned()
+            ),
+            Some("parent".to_owned())
+        );
+        assert_eq!(
+            omp_parent_native_session_id("opaque-parent-id".to_owned()),
+            Some("opaque-parent-id".to_owned())
+        );
+        assert_eq!(
+            omp_parent_native_session_id("/tmp/not-an-omp-session.jsonl".to_owned()),
+            None
+        );
+        assert_eq!(
+            omp_session_id_from_path("/tmp/2026-09-01T00-00-00-000Z_parent_with_underscores.jsonl"),
+            Some("parent_with_underscores")
+        );
+        assert_eq!(
+            omp_session_id_from_path(
+                r"C:\Users\ctx\.omp\agent\sessions\2026-09-01T00-00-00-000Z_parent.jsonl"
+            ),
+            Some("parent")
+        );
+        for malformed in [
+            "/tmp/parent.jsonl",
+            "/tmp/2026-09-01T00-00-00-000Z_.jsonl",
+            "/tmp/2026-09-01T00-00-00-000Z_parent.jsonl.bak",
+            "/tmp/not-a-timestamp_parent.jsonl",
+        ] {
+            assert_eq!(omp_session_id_from_path(malformed), None);
         }
     }
 
