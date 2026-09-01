@@ -191,5 +191,4 @@ fn daemon_applied_degraded_semantic_config_matches(
 }
 
 #[cfg(test)]
-#[path = "readiness_receipt_tests.rs"]
 mod tests;

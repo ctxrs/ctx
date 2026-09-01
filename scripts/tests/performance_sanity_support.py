@@ -4,16 +4,23 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
+import errno
 import hashlib
 import json
 import os
 from pathlib import Path
 import signal
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
 import time
+
+try:
+    import fcntl
+except ModuleNotFoundError:  # pragma: no cover - unavailable on Windows
+    fcntl = None
 
 
 COMMAND_TIMEOUT_SECONDS = 30.0
@@ -23,6 +30,39 @@ FORCE_SINGLE_CPU_ENV = "CTX_PERFORMANCE_FORCE_SINGLE_CPU"
 TASK_BINARY_ENV = "CTX_PERFORMANCE_TASK_BINARY"
 SOURCE_WORKER_THREAD_PREFIX = "ctx-src-scan"
 MIN_SOURCE_WORKER_CPU_TICKS = 1
+
+# Linux FIEMAP reports the physical extents behind each regular file. Counting
+# the union keeps the storage oracle truthful for both hard links and
+# copy-on-write reflinks instead of charging a retained generation twice merely
+# because its shared extents have distinct inodes.
+FIEMAP_IOCTL = 0xC020660B
+FIEMAP_FLAG_SYNC = 0x00000001
+FIEMAP_EXTENT_LAST = 0x00000001
+FIEMAP_EXTENT_UNKNOWN = 0x00000002
+FIEMAP_EXTENT_DELALLOC = 0x00000004
+FIEMAP_EXTENT_ENCODED = 0x00000008
+FIEMAP_EXTENT_DATA_ENCRYPTED = 0x00000080
+FIEMAP_EXTENT_NOT_ALIGNED = 0x00000100
+FIEMAP_EXTENT_DATA_INLINE = 0x00000200
+FIEMAP_EXTENT_DATA_TAIL = 0x00000400
+FIEMAP_UNACCOUNTABLE_FLAGS = (
+    FIEMAP_EXTENT_UNKNOWN
+    | FIEMAP_EXTENT_DELALLOC
+    | FIEMAP_EXTENT_ENCODED
+    | FIEMAP_EXTENT_DATA_ENCRYPTED
+    | FIEMAP_EXTENT_NOT_ALIGNED
+    | FIEMAP_EXTENT_DATA_INLINE
+    | FIEMAP_EXTENT_DATA_TAIL
+)
+FIEMAP_EXTENT_BATCH = 128
+FIEMAP_HEADER = struct.Struct("=QQIIII")
+FIEMAP_EXTENT = struct.Struct("=QQQQQIIII")
+FIEMAP_UNSUPPORTED_ERRNOS = {
+    errno.EBADF,
+    errno.EINVAL,
+    errno.ENOTTY,
+    errno.EOPNOTSUPP,
+}
 
 
 def ctx_binary_argument() -> Path:
@@ -372,8 +412,8 @@ def published_file_state(path: Path) -> PublishedFileState:
     )
 
 
-def published_index_bytes(path: Path) -> int:
-    physical_files: dict[tuple[int, int], int] = {}
+def published_index_files(path: Path) -> tuple[Path, ...]:
+    entries: list[Path] = []
     for directory_name in (
         "ctx-generations",
         "index-generations",
@@ -381,18 +421,119 @@ def published_index_bytes(path: Path) -> int:
         directory = path / directory_name
         if not directory.is_dir():
             continue
-        for entry in directory.rglob("*"):
-            if (
-                not entry.is_file()
-                or entry.name.endswith(".lock")
-                or entry.name.startswith(".ctx-tantivy-atomic-")
-            ):
-                continue
-            metadata = entry.stat()
-            physical_files.setdefault(
-                (metadata.st_dev, metadata.st_ino), metadata.st_size
-            )
+        entries.extend(
+            entry
+            for entry in directory.rglob("*")
+            if entry.is_file()
+            and not entry.name.endswith(".lock")
+            and not entry.name.startswith(".ctx-tantivy-atomic-")
+        )
+    return tuple(entries)
+
+
+def logical_inode_index_bytes(path: Path) -> int:
+    physical_files: dict[tuple[int, int], int] = {}
+    for entry in published_index_files(path):
+        metadata = entry.stat()
+        physical_files.setdefault(
+            (metadata.st_dev, metadata.st_ino), metadata.st_size
+        )
     return sum(physical_files.values())
+
+
+def linux_file_physical_extents(
+    descriptor: int,
+) -> tuple[tuple[int, int], ...] | None:
+    if sys.platform != "linux" or fcntl is None:
+        return None
+    metadata = os.fstat(descriptor)
+    if metadata.st_blocks == 0:
+        return ()
+
+    extents: list[tuple[int, int]] = []
+    logical_start = 0
+    while True:
+        buffer = bytearray(
+            FIEMAP_HEADER.size + FIEMAP_EXTENT_BATCH * FIEMAP_EXTENT.size
+        )
+        FIEMAP_HEADER.pack_into(
+            buffer,
+            0,
+            logical_start,
+            (1 << 64) - 1 - logical_start,
+            FIEMAP_FLAG_SYNC,
+            0,
+            FIEMAP_EXTENT_BATCH,
+            0,
+        )
+        try:
+            fcntl.ioctl(descriptor, FIEMAP_IOCTL, buffer, True)
+        except OSError as error:
+            if error.errno in FIEMAP_UNSUPPORTED_ERRNOS:
+                return None
+            raise
+        _, _, _, mapped, _, _ = FIEMAP_HEADER.unpack_from(buffer)
+        if mapped == 0:
+            return None
+
+        last = False
+        next_logical_start = logical_start
+        for index in range(mapped):
+            offset = FIEMAP_HEADER.size + index * FIEMAP_EXTENT.size
+            (
+                logical,
+                physical,
+                length,
+                _,
+                _,
+                flags,
+                _,
+                _,
+                _,
+            ) = FIEMAP_EXTENT.unpack_from(buffer, offset)
+            if physical == 0 or length == 0 or flags & FIEMAP_UNACCOUNTABLE_FLAGS:
+                return None
+            extents.append((physical, length))
+            next_logical_start = max(next_logical_start, logical + length)
+            last = bool(flags & FIEMAP_EXTENT_LAST)
+        if last:
+            return tuple(extents)
+        if next_logical_start <= logical_start:
+            return None
+        logical_start = next_logical_start
+
+
+def merged_extent_bytes(extents: list[tuple[int, int]]) -> int:
+    total = 0
+    end = 0
+    for start, length in sorted(extents):
+        extent_end = start + length
+        if start >= end:
+            total += length
+        elif extent_end > end:
+            total += extent_end - end
+        end = max(end, extent_end)
+    return total
+
+
+def published_index_bytes(path: Path) -> int:
+    if sys.platform != "linux":
+        return logical_inode_index_bytes(path)
+
+    observed_inodes: set[tuple[int, int]] = set()
+    extents_by_device: dict[int, list[tuple[int, int]]] = {}
+    for entry in published_index_files(path):
+        with entry.open("rb") as file:
+            metadata = os.fstat(file.fileno())
+            identity = (metadata.st_dev, metadata.st_ino)
+            if identity in observed_inodes:
+                continue
+            observed_inodes.add(identity)
+            extents = linux_file_physical_extents(file.fileno())
+            if extents is None:
+                return logical_inode_index_bytes(path)
+            extents_by_device.setdefault(metadata.st_dev, []).extend(extents)
+    return sum(merged_extent_bytes(extents) for extents in extents_by_device.values())
 
 
 def immutable_tree_snapshot(path: Path) -> tuple[ImmutableTreeEntry, ...]:
