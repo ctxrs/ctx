@@ -1,6 +1,10 @@
-use std::path::Path;
+use std::{fmt, path::Path};
 
 use anyhow::{anyhow, Context, Result};
+use serde::{
+    de::{Error as _, MapAccess, SeqAccess, Visitor},
+    Deserialize, Deserializer,
+};
 use serde_json::{json, Map, Value};
 
 use super::super::SERVER_NAME;
@@ -93,15 +97,136 @@ pub fn upsert(
     render(&doc)
 }
 
+pub fn remove(
+    body: &str,
+    root: JsonRoot,
+    shape: JsonServerShape,
+    force: bool,
+    path: &Path,
+) -> Result<String> {
+    let mut doc = parse(body, path)?;
+    let object = doc
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("JSON config root must be an object"))?;
+    let Some(root_value) = object.get_mut(root.key()) else {
+        return Ok(body.to_owned());
+    };
+    let servers = root_value
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("{} must be an object", root.key()))?;
+    let Some(existing) = servers.get(SERVER_NAME) else {
+        return Ok(body.to_owned());
+    };
+    if !server_is_current(existing, shape) && !force {
+        return Err(anyhow!(
+            "existing ctx MCP server has different command or args"
+        ));
+    }
+    servers.remove(SERVER_NAME);
+    render(&doc)
+}
+
 fn parse(body: &str, path: &Path) -> Result<Value> {
     if path
         .extension()
         .is_some_and(|extension| extension == "jsonc")
     {
-        jsonc_parser::parse_to_serde_value::<Value>(body, &Default::default())
+        jsonc_parser::parse_to_serde_value::<StrictJsonValue>(body, &Default::default())
+            .map(StrictJsonValue::into_inner)
             .with_context(|| format!("parse JSONC config {}", path.display()))
     } else {
-        serde_json::from_str(body).with_context(|| format!("parse JSON config {}", path.display()))
+        serde_json::from_str::<StrictJsonValue>(body)
+            .map(StrictJsonValue::into_inner)
+            .with_context(|| format!("parse JSON config {}", path.display()))
+    }
+}
+
+struct StrictJsonValue(Value);
+
+impl StrictJsonValue {
+    fn into_inner(self) -> Value {
+        self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for StrictJsonValue {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_any(StrictJsonValueVisitor)
+    }
+}
+
+struct StrictJsonValueVisitor;
+
+impl<'de> Visitor<'de> for StrictJsonValueVisitor {
+    type Value = StrictJsonValue;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a JSON value without duplicate object keys")
+    }
+
+    fn visit_bool<E>(self, value: bool) -> std::result::Result<Self::Value, E> {
+        Ok(StrictJsonValue(Value::Bool(value)))
+    }
+
+    fn visit_i64<E>(self, value: i64) -> std::result::Result<Self::Value, E> {
+        Ok(StrictJsonValue(Value::Number(value.into())))
+    }
+
+    fn visit_u64<E>(self, value: u64) -> std::result::Result<Self::Value, E> {
+        Ok(StrictJsonValue(Value::Number(value.into())))
+    }
+
+    fn visit_f64<E>(self, value: f64) -> std::result::Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        let number = serde_json::Number::from_f64(value)
+            .ok_or_else(|| E::custom("JSON number must be finite"))?;
+        Ok(StrictJsonValue(Value::Number(number)))
+    }
+
+    fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E> {
+        Ok(StrictJsonValue(Value::String(value.to_owned())))
+    }
+
+    fn visit_string<E>(self, value: String) -> std::result::Result<Self::Value, E> {
+        Ok(StrictJsonValue(Value::String(value)))
+    }
+
+    fn visit_none<E>(self) -> std::result::Result<Self::Value, E> {
+        Ok(StrictJsonValue(Value::Null))
+    }
+
+    fn visit_unit<E>(self) -> std::result::Result<Self::Value, E> {
+        Ok(StrictJsonValue(Value::Null))
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> std::result::Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        let mut values = Vec::new();
+        while let Some(value) = sequence.next_element::<StrictJsonValue>()? {
+            values.push(value.into_inner());
+        }
+        Ok(StrictJsonValue(Value::Array(values)))
+    }
+
+    fn visit_map<A>(self, mut object: A) -> std::result::Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut values = Map::new();
+        while let Some((key, value)) = object.next_entry::<String, StrictJsonValue>()? {
+            if values.contains_key(&key) {
+                return Err(A::Error::custom("duplicate JSON object key"));
+            }
+            values.insert(key, value.into_inner());
+        }
+        Ok(StrictJsonValue(Value::Object(values)))
     }
 }
 
@@ -430,5 +555,127 @@ mod tests {
             value["mcp"]["ctx"]["command"],
             json!(["ctx", "mcp", "serve"])
         );
+    }
+
+    #[test]
+    fn remover_preserves_unrelated_json_and_empty_server_container() {
+        let original =
+            r#"{"other":true,"mcpServers":{"ctx":{"command":"ctx","args":["mcp","serve"]}}}"#;
+        let removed = remove(
+            original,
+            JsonRoot::McpServers,
+            JsonServerShape::Plain,
+            false,
+            json_path(),
+        )
+        .unwrap();
+        let value: Value = serde_json::from_str(&removed).unwrap();
+        assert_eq!(value["other"], true);
+        assert_eq!(value["mcpServers"], json!({}));
+        assert_eq!(
+            status(
+                &removed,
+                JsonRoot::McpServers,
+                JsonServerShape::Plain,
+                json_path()
+            )
+            .unwrap(),
+            ConfigStatus::Missing
+        );
+        assert_eq!(
+            remove(
+                &removed,
+                JsonRoot::McpServers,
+                JsonServerShape::Plain,
+                false,
+                json_path(),
+            )
+            .unwrap(),
+            removed
+        );
+    }
+
+    #[test]
+    fn remover_requires_force_for_conflicts_and_never_accepts_invalid_json() {
+        let conflict = r#"{"mcpServers":{"ctx":{"command":"custom","args":[]}}}"#;
+        assert!(remove(
+            conflict,
+            JsonRoot::McpServers,
+            JsonServerShape::Plain,
+            false,
+            json_path(),
+        )
+        .is_err());
+        let forced = remove(
+            conflict,
+            JsonRoot::McpServers,
+            JsonServerShape::Plain,
+            true,
+            json_path(),
+        )
+        .unwrap();
+        let value: Value = serde_json::from_str(&forced).unwrap();
+        assert_eq!(value["mcpServers"], json!({}));
+        assert!(remove(
+            "{ not json",
+            JsonRoot::McpServers,
+            JsonServerShape::Plain,
+            true,
+            json_path(),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn remover_supports_jsonc_and_preserves_unrelated_values() {
+        let body = r#"{
+          // existing MiMo config
+          "theme": "dark",
+          "mcp": {
+            "ctx": {"type": "local", "command": ["ctx", "mcp", "serve"]},
+          },
+        }"#;
+        let removed = remove(
+            body,
+            JsonRoot::Mcp,
+            JsonServerShape::OpenCodeLocal,
+            false,
+            jsonc_path(),
+        )
+        .unwrap();
+        let value: Value = serde_json::from_str(&removed).unwrap();
+        assert_eq!(value["theme"], "dark");
+        assert_eq!(value["mcp"], json!({}));
+    }
+
+    #[test]
+    fn duplicate_object_keys_are_invalid_in_json_and_jsonc() {
+        let duplicate_ctx = r#"{
+          "mcpServers": {
+            "ctx": {"command": "custom", "args": []},
+            "ctx": {"command": "ctx", "args": ["mcp", "serve"]}
+          }
+        }"#;
+        let duplicate_parent = r#"{
+          "mcpServers": {"other": {"command": "other"}},
+          "mcpServers": {"ctx": {"command": "ctx", "args": ["mcp", "serve"]}}
+        }"#;
+
+        for (path, body) in [
+            (json_path(), duplicate_ctx),
+            (json_path(), duplicate_parent),
+            (jsonc_path(), duplicate_ctx),
+            (jsonc_path(), duplicate_parent),
+        ] {
+            assert!(status(body, JsonRoot::McpServers, JsonServerShape::Plain, path).is_err());
+            assert!(remove(
+                body,
+                JsonRoot::McpServers,
+                JsonServerShape::Plain,
+                true,
+                path,
+            )
+            .is_err());
+        }
     }
 }

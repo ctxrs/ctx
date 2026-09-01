@@ -226,6 +226,11 @@ ctx integrations install mcp --agent mimocode
 ctx integrations install mcp --provider cursor --project
 ctx integrations install mcp --all-agents --format json
 ctx integrations install mcp --agent cursor --force
+ctx integrations remove mcp
+ctx integrations remove mcp --agent codex
+ctx integrations remove mcp --provider cursor --project
+ctx integrations remove mcp --all-agents --format json
+ctx integrations remove mcp --agent cursor --force
 ctx integrations status mcp
 ctx integrations status mcp --agent codex --format json
 ctx integrations install slash-commands
@@ -253,6 +258,12 @@ different command or args, install reports a conflict and leaves the file
 untouched unless `--force` is passed. Invalid JSON, JSONC, TOML, or YAML configs are
 reported and left untouched. `integrations status mcp` reports `current`,
 `missing`, `conflict`, `invalid_config`, or `unsupported`.
+
+`integrations remove mcp` uses the same agent and project selectors. It removes
+only the selected clients' `ctx` MCP server entry while preserving unrelated
+configuration and the containing file. An absent entry is a successful no-op.
+A conflicting entry is preserved unless `--force` is supplied; invalid configs
+remain untouched even with `--force`.
 
 `integrations install slash-commands` installs a `/ctx` entry point only
 for providers where ctx has a documented, file-based command surface it can
@@ -1063,6 +1074,7 @@ ctx docs list --format json
 ctx docs search <query> --format json
 ctx docs show <topic> --format json
 ctx integrations install mcp --format json
+ctx integrations remove mcp --format json
 ctx integrations status mcp --format json
 ctx upgrade --format json
 ctx upgrade check --format json

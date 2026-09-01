@@ -151,7 +151,7 @@ pub(crate) enum CommandRoot {
     Search(SearchArgs),
     #[command(about = "Read embedded ctx documentation")]
     Docs(docs::DocsArgs),
-    #[command(about = "Install or inspect ctx integrations")]
+    #[command(about = "Install, inspect, or remove ctx integrations")]
     Integrations(integrations::IntegrationsArgs),
     #[command(about = "Serve local ctx tools over MCP")]
     Mcp(mcp::McpArgs),

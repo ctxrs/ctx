@@ -10,12 +10,18 @@ derived-state writer.
 ```bash
 ctx mcp serve
 ctx integrations install mcp
+ctx integrations remove mcp
 ctx integrations status mcp
 ```
 
 `ctx integrations install mcp` can add this local server to supported
 file-backed coding-agent MCP configs. Run `ctx docs show mcp-integrations` for
 the support matrix, config paths, and manual snippets.
+
+`ctx integrations remove mcp` removes only the selected clients' `ctx` server
+entries. It preserves unrelated configuration and treats an absent entry as a
+successful no-op. A conflicting entry is left untouched unless `--force` is
+supplied; invalid configuration is always left untouched.
 
 The server advertises its current tool set through MCP discovery rather than a
 fixed documented count. Core tools include:

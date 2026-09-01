@@ -508,8 +508,9 @@ fn public_subcommand_help_is_golden_enough_for_session_retrieval() {
             vec![
                 "Usage: ctx integrations",
                 "install",
+                "remove",
                 "status",
-                "Install or inspect ctx integrations",
+                "Install, inspect, or remove ctx integrations",
             ],
         ),
         (
@@ -621,6 +622,7 @@ fn machine_readable_output_uses_format_without_a_json_alias() {
         &["integrations", "install", "mcp", "--help"],
         &["integrations", "install", "skills", "--help"],
         &["integrations", "install", "slash-commands", "--help"],
+        &["integrations", "remove", "mcp", "--help"],
         &["integrations", "status", "mcp", "--help"],
         &["integrations", "status", "skills", "--help"],
         &["daemon", "run", "--help"],

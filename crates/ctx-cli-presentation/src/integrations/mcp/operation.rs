@@ -28,9 +28,9 @@ pub(super) fn run_install(
 ) -> Result<()> {
     let outcome = application::install(
         McpInstallRequest {
-            agents: args.agent.clone(),
-            all_agents: args.all_agents,
-            project: args.project,
+            agents: args.target.agent.clone(),
+            all_agents: args.target.all_agents,
+            project: args.target.project,
             force: args.force,
         },
         context,
@@ -83,9 +83,9 @@ pub(super) fn run_status(
 ) -> Result<()> {
     let outcome = application::status(
         McpStatusRequest {
-            agents: args.agent.clone(),
-            all_agents: args.all_agents,
-            project: args.project,
+            agents: args.target.agent.clone(),
+            all_agents: args.target.all_agents,
+            project: args.target.project,
         },
         context,
         identity,
