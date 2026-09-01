@@ -27,15 +27,24 @@ const OPENCLAW_PARSER_REVISION: &str = "openclaw-source-backed-v20-direct-parent
 const PI_SOURCE_FORMAT: &str = "pi_session_jsonl";
 const CUSTOM_HISTORY_SOURCE_FORMAT: &str = "ctx_history_jsonl_v2";
 const OMP_PARENT_SESSION_FIXTURE_ROOT: &str =
-    "../../tests/fixtures/provider-history/pi-omp/v18.0.10-parent-session";
-const OMP_PARENT_PATH_PLACEHOLDER: &str = concat!(
-    "/sanitized/omp-parent-session/",
-    "2026-09-01T00-00-00-000Z_omp-parent-session-fixture.jsonl"
+    "../../tests/fixtures/provider-history/pi-omp/v18.0.10-parent-session/native";
+const OMP_PATH_PARENT_PLACEHOLDER: &str = concat!(
+    "/fixture/provider-history/pi/omp/v18.0.10-parent-session/capture-0000000/",
+    "sessions/branch-source/",
+    "2026-09-01T16-01-16-494Z_85600000-0000-7000-8000-000000000003.jsonl"
 );
-const OMP_PARENT_SESSION_ID: &str = "omp-parent-session-fixture";
-const OMP_ID_FORK_SESSION_ID: &str = "omp-id-fork-fixture";
-const OMP_PATH_BRANCH_SESSION_ID: &str = "omp-path-branch-fixture";
-const OMP_PARENT_FILE_NAME: &str = "2026-09-01T00-00-00-000Z_omp-parent-session-fixture.jsonl";
+const OMP_ID_PARENT_SESSION_ID: &str = "85600000-0000-7000-8000-000000000001";
+const OMP_ID_FORK_SESSION_ID: &str = "85600000-0000-7000-8000-000000000002";
+const OMP_PATH_PARENT_SESSION_ID: &str = "85600000-0000-7000-8000-000000000003";
+const OMP_PATH_BRANCH_SESSION_ID: &str = "85600000-0000-7000-8000-000000000004";
+const OMP_ID_PARENT_FILE_NAME: &str =
+    "2026-09-01T15-57-30-326Z_85600000-0000-7000-8000-000000000001.jsonl";
+const OMP_ID_CHILD_FILE_NAME: &str =
+    "2026-09-01T15-59-59-751Z_85600000-0000-7000-8000-000000000002.jsonl";
+const OMP_PATH_PARENT_FILE_NAME: &str =
+    "2026-09-01T16-01-16-494Z_85600000-0000-7000-8000-000000000003.jsonl";
+const OMP_PATH_CHILD_FILE_NAME: &str =
+    "2026-09-01T16-01-47-647Z_85600000-0000-7000-8000-000000000004.jsonl";
 
 fn writer_options() -> WriterOptions {
     WriterOptions {
@@ -249,30 +258,34 @@ fn write_omp_pi_session(path: &Path, title: &str, body: &str) {
     fs::write(path, format!("{title_slot}\n{header}\n{message}\n")).unwrap();
 }
 
-fn copy_omp_parent_session_fixture(case: &str, sessions: &Path) {
+fn copy_omp_parent_session_fixture(case: &str, sessions: &Path, include_parent: bool) {
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join(OMP_PARENT_SESSION_FIXTURE_ROOT)
         .join(case);
+    let (parent_file_name, child_file_name, parent_path_placeholder) = match case {
+        "ordinary-id-fork" => (OMP_ID_PARENT_FILE_NAME, OMP_ID_CHILD_FILE_NAME, None),
+        "path-branch" => (
+            OMP_PATH_PARENT_FILE_NAME,
+            OMP_PATH_CHILD_FILE_NAME,
+            Some(OMP_PATH_PARENT_PLACEHOLDER),
+        ),
+        _ => panic!("unknown OMP fixture case: {case}"),
+    };
     fs::create_dir_all(sessions).unwrap();
-    for name in ["parent.jsonl", "child.jsonl"] {
-        let source = fixture.join(name);
-        if source.exists() {
-            let destination = if name == "parent.jsonl" {
-                OMP_PARENT_FILE_NAME
-            } else {
-                name
-            };
-            fs::copy(&source, sessions.join(destination)).unwrap();
-        }
+    if include_parent {
+        fs::copy(
+            fixture.join(parent_file_name),
+            sessions.join(parent_file_name),
+        )
+        .unwrap();
     }
-    let parent = sessions.join(OMP_PARENT_FILE_NAME);
-    let child = sessions.join("child.jsonl");
-    if parent.exists() {
-        let canonical_parent = fs::canonicalize(parent).unwrap();
-        let bytes = fs::read_to_string(&child).unwrap().replace(
-            OMP_PARENT_PATH_PLACEHOLDER,
-            &canonical_parent.to_string_lossy(),
-        );
+    let child = sessions.join(child_file_name);
+    fs::copy(fixture.join(child_file_name), &child).unwrap();
+    if let Some(placeholder) = parent_path_placeholder {
+        let canonical_parent = fs::canonicalize(sessions.join(parent_file_name)).unwrap();
+        let bytes = fs::read_to_string(&child)
+            .unwrap()
+            .replace(placeholder, &canonical_parent.to_string_lossy());
         fs::write(child, bytes).unwrap();
     }
 }
@@ -315,15 +328,26 @@ fn assert_omp_fork_lineage(
     parent_provider_session_id: &str,
 ) {
     let parent = assert_omp_no_lineage(records, parent_provider_session_id);
+    let child = assert_omp_direct_fork_claim(records, child_provider_session_id);
+    let parent_session_id = parent[0].session_id;
+    assert!(child
+        .iter()
+        .all(|record| record.parent_session_id == Some(parent_session_id)));
+}
+
+fn assert_omp_direct_fork_claim(
+    records: &[CoreRecord],
+    child_provider_session_id: &str,
+) -> Vec<CoreRecord> {
     let child = published_session(records, child_provider_session_id);
     assert!(!child.is_empty());
-    let parent_session_id = parent[0].session_id;
     assert!(child.iter().all(|record| {
-        record.parent_session_id == Some(parent_session_id)
+        record.parent_session_id.is_some()
             && record.root_session_id.is_none()
             && record.session_relationship == Some(ProviderNativeSessionRelationship::Forked)
             && record.agent_scope.is_none()
     }));
+    child
 }
 
 fn assert_omp_no_lineage(records: &[CoreRecord], provider_session_id: &str) -> Vec<CoreRecord> {
@@ -1021,15 +1045,23 @@ fn pi_omp_title_slot_cold_repeat_and_rewrite_are_rejection_free() {
 }
 
 #[test]
-fn pi_omp_id_fork_and_path_branch_resolve_within_the_admitted_inventory() {
-    for (case, child_session_id) in [
-        ("ordinary-id-fork", OMP_ID_FORK_SESSION_ID),
-        ("path-branch", OMP_PATH_BRANCH_SESSION_ID),
+fn pi_omp_id_fork_and_path_branch_normalize_from_the_child_header() {
+    for (case, child_session_id, parent_session_id) in [
+        (
+            "ordinary-id-fork",
+            OMP_ID_FORK_SESSION_ID,
+            OMP_ID_PARENT_SESSION_ID,
+        ),
+        (
+            "path-branch",
+            OMP_PATH_BRANCH_SESSION_ID,
+            OMP_PATH_PARENT_SESSION_ID,
+        ),
     ] {
         let temp = crate::test_support_paths::tempdir().unwrap();
         let index_temp = crate::test_support_paths::tempdir().unwrap();
         let sessions = temp.path().join(case);
-        copy_omp_parent_session_fixture(case, &sessions);
+        copy_omp_parent_session_fixture(case, &sessions, true);
 
         let index = index_temp.path().join("index");
         let publication =
@@ -1039,13 +1071,13 @@ fn pi_omp_id_fork_and_path_branch_resolve_within_the_admitted_inventory() {
         assert_omp_fork_lineage(
             &all_indexed_records(&index),
             child_session_id,
-            OMP_PARENT_SESSION_ID,
+            parent_session_id,
         );
     }
 }
 
 #[test]
-fn pi_omp_parent_cycles_abstain_without_rejecting_session_content() {
+fn pi_omp_parent_cycles_preserve_each_childs_direct_claim() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let index_temp = crate::test_support_paths::tempdir().unwrap();
     let sessions = temp.path().join("cycles");
@@ -1075,10 +1107,90 @@ fn pi_omp_parent_cycles_abstain_without_rejecting_session_content() {
             .unwrap();
     assert!(publication.failed_routes.is_empty());
     let records = all_indexed_records(&index);
-    let _ = assert_omp_no_lineage(&records, "omp-cycle-a");
-    let _ = assert_omp_no_lineage(&records, "omp-cycle-b");
+    let cycle_a = assert_omp_direct_fork_claim(&records, "omp-cycle-a");
+    let cycle_b = assert_omp_direct_fork_claim(&records, "omp-cycle-b");
+    assert_eq!(cycle_a[0].parent_session_id, Some(cycle_b[0].session_id));
+    assert_eq!(cycle_b[0].parent_session_id, Some(cycle_a[0].session_id));
     let _ = assert_omp_no_lineage(&records, "omp-independent");
     assert_eq!(records.len(), 3);
+}
+
+#[test]
+fn pi_omp_self_parent_abstains_without_rejecting_session_content() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let index_temp = crate::test_support_paths::tempdir().unwrap();
+    let sessions = temp.path().join("self-parent");
+    fs::create_dir_all(&sessions).unwrap();
+    write_pi_session_with_parent(
+        &sessions.join("self.jsonl"),
+        "omp-self-parent",
+        Some("omp-self-parent"),
+        "self-parent content remains available",
+    );
+
+    let index = index_temp.path().join("index");
+    let publication =
+        refresh_source_backed_generation(&index, &pi_registry(&sessions), writer_options())
+            .unwrap();
+    assert!(publication.failed_routes.is_empty());
+    let records = all_indexed_records(&index);
+    let child = assert_omp_no_lineage(&records, "omp-self-parent");
+    assert_eq!(
+        child[0].content.meaningful_text(),
+        "self-parent content remains available"
+    );
+}
+
+#[test]
+fn pi_omp_empty_non_string_and_path_self_parents_abstain() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let index_temp = crate::test_support_paths::tempdir().unwrap();
+    let sessions = temp.path().join("invalid-local-claims");
+    fs::create_dir_all(&sessions).unwrap();
+    write_pi_session_with_parent(
+        &sessions.join("empty.jsonl"),
+        "omp-empty-parent",
+        Some(""),
+        "empty parent content remains available",
+    );
+    fs::write(
+        sessions.join("non-string.jsonl"),
+        format!(
+            "{}\n{}\n",
+            json!({
+                "type": "session",
+                "version": 3,
+                "id": "omp-non-string-parent",
+                "timestamp": "2026-01-02T03:04:05Z",
+                "cwd": "/tmp/pi",
+                "parentSession": 42,
+            }),
+            json!({
+                "type": "message",
+                "id": "non-string-parent-message",
+                "timestamp": "2026-01-02T03:04:06Z",
+                "message": {"role": "user", "content": "non-string parent content remains available"},
+            })
+        ),
+    )
+    .unwrap();
+    let path_self = sessions.join("2026-09-01T00-00-00-000Z_omp-path-self.jsonl");
+    write_pi_session(
+        &path_self,
+        "omp-path-self",
+        Some(&path_self),
+        "path self-parent content remains available",
+    );
+
+    let index = index_temp.path().join("index");
+    let publication =
+        refresh_source_backed_generation(&index, &pi_registry(&sessions), writer_options())
+            .unwrap();
+    assert!(publication.failed_routes.is_empty());
+    let records = all_indexed_records(&index);
+    for session_id in ["omp-empty-parent", "omp-non-string-parent", "omp-path-self"] {
+        assert_eq!(assert_omp_no_lineage(&records, session_id).len(), 1);
+    }
 }
 
 #[test]
@@ -1152,7 +1264,7 @@ fn pi_omp_oversized_parent_claim_abstains_without_rejecting_the_child() {
 }
 
 #[test]
-fn pi_omp_path_parent_requires_the_filename_to_match_the_parent_session_id() {
+fn pi_omp_path_parent_uses_the_filename_claim_not_the_target_header() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let index_temp = crate::test_support_paths::tempdir().unwrap();
     let sessions = temp.path().join("path-id-mismatch");
@@ -1178,50 +1290,69 @@ fn pi_omp_path_parent_requires_the_filename_to_match_the_parent_session_id() {
             .unwrap();
     assert!(publication.failed_routes.is_empty());
     let records = all_indexed_records(&index);
-    let _ = assert_omp_no_lineage(&records, "omp-path-id-mismatch-child");
-    assert!(!published_session(&records, "omp-actual-parent").is_empty());
+    let parent = assert_omp_no_lineage(&records, "omp-actual-parent");
+    let child = assert_omp_direct_fork_claim(&records, "omp-path-id-mismatch-child");
+    assert!(child
+        .iter()
+        .all(|record| record.parent_session_id != Some(parent[0].session_id)));
 }
 
 #[test]
-fn pi_omp_parent_deletion_keeps_the_child_and_clears_normalized_lineage() {
+fn pi_omp_parent_deletion_keeps_the_childs_literal_lineage_unchanged() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let index_temp = crate::test_support_paths::tempdir().unwrap();
     let sessions = temp.path().join("parent-deletion");
-    copy_omp_parent_session_fixture("path-branch", &sessions);
+    copy_omp_parent_session_fixture("path-branch", &sessions, true);
 
     let index = index_temp.path().join("index");
     refresh_source_backed_generation(&index, &pi_registry(&sessions), writer_options()).unwrap();
+    let before_records = all_indexed_records(&index);
     assert_omp_fork_lineage(
-        &all_indexed_records(&index),
+        &before_records,
         OMP_PATH_BRANCH_SESSION_ID,
-        OMP_PARENT_SESSION_ID,
+        OMP_PATH_PARENT_SESSION_ID,
     );
+    let before_child = published_session(&before_records, OMP_PATH_BRANCH_SESSION_ID);
 
-    fs::remove_file(sessions.join(OMP_PARENT_FILE_NAME)).unwrap();
+    fs::remove_file(sessions.join(OMP_PATH_PARENT_FILE_NAME)).unwrap();
     let deleted =
         refresh_source_backed_generation(&index, &pi_registry(&sessions), writer_options())
             .unwrap();
     assert!(deleted.failed_routes.is_empty());
     let records = all_indexed_records(&index);
-    let _ = assert_omp_no_lineage(&records, OMP_PATH_BRANCH_SESSION_ID);
+    let after_child = assert_omp_direct_fork_claim(&records, OMP_PATH_BRANCH_SESSION_ID);
+    assert_eq!(after_child, before_child);
+
+    let fixture_parent = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join(OMP_PARENT_SESSION_FIXTURE_ROOT)
+        .join("path-branch")
+        .join(OMP_PATH_PARENT_FILE_NAME);
+    fs::copy(fixture_parent, sessions.join(OMP_PATH_PARENT_FILE_NAME)).unwrap();
+    let restored =
+        refresh_source_backed_generation(&index, &pi_registry(&sessions), writer_options())
+            .unwrap();
+    assert!(restored.failed_routes.is_empty());
+    let restored_child =
+        assert_omp_direct_fork_claim(&all_indexed_records(&index), OMP_PATH_BRANCH_SESSION_ID);
+    assert_eq!(restored_child, before_child);
 }
 
 #[test]
-fn pi_declared_missing_parent_is_accepted_without_normalized_lineage() {
+fn pi_declared_missing_parent_keeps_normalized_direct_lineage() {
     let temp = crate::test_support_paths::tempdir().unwrap();
     let index_temp = crate::test_support_paths::tempdir().unwrap();
-    copy_omp_parent_session_fixture("missing-parent", temp.path());
+    copy_omp_parent_session_fixture("ordinary-id-fork", temp.path(), false);
 
     let index = index_temp.path().join("index");
     let publication =
         refresh_source_backed_generation(&index, &pi_registry(temp.path()), writer_options())
             .unwrap();
     assert!(publication.failed_routes.is_empty());
-    assert_eq!(publication.commit.indexed_documents, 6);
+    assert_eq!(publication.commit.indexed_documents, 5);
     let records = all_indexed_records(&index);
-    let child = assert_omp_no_lineage(&records, OMP_ID_FORK_SESSION_ID);
-    assert_eq!(child.len(), 6);
+    let child = assert_omp_direct_fork_claim(&records, OMP_ID_FORK_SESSION_ID);
+    assert_eq!(child.len(), 5);
     assert!(child.iter().any(|record| {
-        record.content.normalized_body.as_deref() == Some("authentic OMP lineage fixture prompt")
+        record.content.normalized_body.as_deref() == Some("controlled parent prompt")
     }));
 }

@@ -1,5 +1,7 @@
 const PI_V10_PARSER_REVISION: &str = "pi-shared-jsonl-v10-child-local-lineage";
 const PI_V11_PARSER_REVISION: &str = "pi-shared-jsonl-v11-omp-parent-lineage";
+const PI_V10_PARENT_SESSION_ID: &str = "pi-v10-parent";
+const PI_V10_CHILD_SESSION_ID: &str = "pi-session-docs-1";
 
 fn pi_parser_revision(data_root: &Path) -> String {
     let index =
@@ -16,32 +18,36 @@ fn pi_parser_revision(data_root: &Path) -> String {
 
 fn publish_pi_v10_predecessor(data_root: &Path) -> String {
     let index_root = data_root.join("search/lexical");
-    let (source, routes, mut certificate) = {
+    let (legacy_sources, routes) = {
         let index = ctx_history_index::VerifiedIndex::open_pinned(&index_root).unwrap();
-        let current = index
+        let legacy_sources = index
             .manifest()
             .sources
             .iter()
-            .find(|certificate| certificate.observation().source().provider() == "pi")
-            .expect("published generation must contain the Pi source");
-        assert_eq!(current.parser_revision(), PI_V11_PARSER_REVISION);
-        (
-            current.observation().source().clone(),
-            index.manifest().source_routes().to_vec(),
-            serde_json::to_value(current).unwrap(),
-        )
+            .filter(|certificate| certificate.observation().source().provider() == "pi")
+            .map(|current| {
+                assert_eq!(current.parser_revision(), PI_V11_PARSER_REVISION);
+                let mut certificate = serde_json::to_value(current).unwrap();
+                certificate["parser_revision"] = json!(PI_V10_PARSER_REVISION);
+                (
+                    current.observation().source().clone(),
+                    serde_json::from_value(certificate).unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(legacy_sources.len(), 2);
+        (legacy_sources, index.manifest().source_routes().to_vec())
     };
 
     let mut records = provider_core_records(data_root, "pi");
     for record in &mut records {
         record.parser_revision = PI_V10_PARSER_REVISION.to_owned();
-        record.root_session_id = Some(record.session_id);
-        record.agent_scope = serde_json::from_value(json!("primary")).unwrap();
+        record.parent_session_id = None;
+        record.session_relationship = None;
+        assert_eq!(record.root_session_id, None);
+        assert_eq!(record.agent_scope, None);
         record.validate_contract().unwrap();
     }
-
-    certificate["parser_revision"] = json!(PI_V10_PARSER_REVISION);
-    let legacy_certificate = serde_json::from_value(certificate).unwrap();
 
     let mut writer = ctx_history_index::GenerationWriter::open(
         &index_root,
@@ -54,11 +60,19 @@ fn publish_pi_v10_predecessor(data_root: &Path) -> String {
     .into_writer()
     .unwrap();
     writer.set_present_source_routes(routes).unwrap();
-    writer.begin_source(source).unwrap();
-    for record in records {
-        writer.add_core_record(record).unwrap();
+    let mut published_records = 0;
+    for (source, legacy_certificate) in legacy_sources {
+        writer.begin_source(source.clone()).unwrap();
+        for record in records
+            .iter()
+            .filter(|record| record.source.exact_descriptor_eq(&source))
+        {
+            writer.add_core_record(record.clone()).unwrap();
+            published_records += 1;
+        }
+        writer.certify_source(legacy_certificate).unwrap();
     }
-    writer.certify_source(legacy_certificate).unwrap();
+    assert_eq!(published_records, records.len());
     let legacy_generation = writer.commit(|_| true).unwrap().generation_id;
 
     let legacy = ctx_history_index::VerifiedIndex::open_pinned(&index_root).unwrap();
@@ -66,11 +80,10 @@ fn publish_pi_v10_predecessor(data_root: &Path) -> String {
     assert!(legacy.publication_metadata().is_none());
     assert_eq!(pi_parser_revision(data_root), PI_V10_PARSER_REVISION);
     for record in provider_core_records(data_root, "pi") {
-        assert_eq!(record.root_session_id, Some(record.session_id));
-        assert_eq!(
-            serde_json::to_value(record.agent_scope.as_ref()).unwrap(),
-            json!("primary")
-        );
+        assert_eq!(record.parent_session_id, None);
+        assert_eq!(record.root_session_id, None);
+        assert_eq!(record.session_relationship, None);
+        assert_eq!(record.agent_scope, None);
     }
 
     let job = json!({
@@ -104,6 +117,16 @@ fn pi_cli_import_search_flow() {
         .join(".pi/agent/sessions/--workspace--/pi-session.jsonl");
     fs::create_dir_all(fixture.parent().unwrap()).unwrap();
     fs::copy(provider_history_fixture("pi-session.jsonl"), &fixture).unwrap();
+    let child = fs::read_to_string(&fixture).unwrap();
+    let (header, entries) = child.split_once('\n').unwrap();
+    let mut header = serde_json::from_str::<Value>(header).unwrap();
+    header["parentSession"] = json!(PI_V10_PARENT_SESSION_ID);
+    fs::write(&fixture, format!("{header}\n{entries}")).unwrap();
+    write_pi_session_jsonl(
+        &fixture.parent().unwrap().join("pi-parent.jsonl"),
+        PI_V10_PARENT_SESSION_ID,
+        "parent session migration oracle",
+    );
     let daemon = start_source_refresh_daemon(&temp);
 
     let imported = json_output(ctx(&temp).args([
@@ -133,7 +156,7 @@ fn pi_cli_import_search_flow() {
     drop(daemon);
     let legacy_generation = publish_pi_v10_predecessor(&data_root(&temp));
     assert_ne!(legacy_generation, first_generation);
-    assert_eq!(provider_core_counts(&data_root(&temp), "pi"), (1, 6));
+    assert_eq!(provider_core_counts(&data_root(&temp), "pi"), (2, 7));
     let _daemon = start_source_refresh_daemon(&temp);
 
     let second = json_output(ctx(&temp).args([
@@ -158,18 +181,33 @@ fn pi_cli_import_search_flow() {
     );
 
     let records = provider_core_records(&data_root(&temp), "pi");
-    assert_eq!(provider_core_counts(&data_root(&temp), "pi"), (1, 6));
+    assert_eq!(provider_core_counts(&data_root(&temp), "pi"), (2, 7));
+    let parent_session_id = records
+        .iter()
+        .find(|record| record.provider_session_id.as_deref() == Some(PI_V10_PARENT_SESSION_ID))
+        .unwrap()
+        .session_id;
     for record in &records {
-        assert_eq!(record.parent_session_id, None);
         assert_eq!(record.root_session_id, None);
-        assert_eq!(record.session_relationship, None);
         assert_eq!(record.agent_scope, None);
+        if record.provider_session_id.as_deref() == Some(PI_V10_CHILD_SESSION_ID) {
+            assert_eq!(record.parent_session_id, Some(parent_session_id));
+            assert_eq!(
+                serde_json::to_value(record.session_relationship).unwrap(),
+                json!("forked")
+            );
+        } else {
+            assert_eq!(record.parent_session_id, None);
+            assert_eq!(record.session_relationship, None);
+        }
     }
     assert_eq!(
         records
             .iter()
             .filter(|record| {
-                record.event_type == "message" && record.role.as_deref() == Some("user")
+                record.provider_session_id.as_deref() == Some(PI_V10_CHILD_SESSION_ID)
+                    && record.event_type == "message"
+                    && record.role.as_deref() == Some("user")
             })
             .count(),
         1
@@ -178,7 +216,9 @@ fn pi_cli_import_search_flow() {
         records
             .iter()
             .filter(|record| {
-                record.event_type == "message" && record.role.as_deref() == Some("assistant")
+                record.provider_session_id.as_deref() == Some(PI_V10_CHILD_SESSION_ID)
+                    && record.event_type == "message"
+                    && record.role.as_deref() == Some("assistant")
             })
             .count(),
         1

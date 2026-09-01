@@ -173,7 +173,7 @@ Secondary traits are noted only to guide tests and hardening work.
 | Codex | `codex_session_jsonl_tree`, `codex_history_jsonl` | JSONL transcript stream/tree | Session rollouts may be raw `.jsonl` or standard-Zstandard `.jsonl.zst`; exact compressed imports recover the embedded session UUID with a bounded catalog probe. Raw and compressed copies coalesce to one UUID-based source, preferring raw. Legacy prompt history remains raw JSONL. |
 | Grok Build | `grok_build_session_updates_jsonl_tree` | JSONL transcript stream/tree | Session directories contain authoritative `updates.jsonl`; exact leaves use `grok_build_session_updates_jsonl`. Derived sidecars are excluded. |
 | DeepSeek Harness | `deepseek_harness_session_jsonl_tree` | JSONL transcript stream/tree | Supported for local format version 0 only. Nested leaves use default `session.jsonl.zstd` or configured raw `session.jsonl`; exact leaves use `deepseek_harness_session_jsonl`. Hosted/cloud history is excluded. |
-| Pi | `pi_session_jsonl` | JSONL transcript stream/tree | Single-provider JSONL sessions, including OMP-compatible paths. |
+| Pi | `pi_session_jsonl` | JSONL transcript stream/tree | Single-provider JSONL sessions, including OMP-compatible paths. OMP `parentSession` headers retain a direct fork claim from either the native parent ID or the ID encoded in an OMP session filename; the parent file does not need to remain present. |
 | Claude Code | `claude_projects_jsonl_tree` | JSONL transcript stream/tree | Project tree of JSONL transcripts. |
 | OpenCode | `opencode_sqlite` | SQLite message store | Current schemas may split messages and parts. |
 | Kilo Code | `kilo_sqlite` | SQLite message store | Current schemas may split messages and parts. |
