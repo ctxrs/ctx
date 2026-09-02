@@ -133,7 +133,7 @@ impl SourceRefreshTransportUnavailable {
 
 impl fmt::Display for SourceRefreshTransportUnavailable {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("daemon source refresh transport is unavailable")
+        formatter.write_str("daemon source refresh service is unavailable")
     }
 }
 

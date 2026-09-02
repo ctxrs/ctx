@@ -266,6 +266,14 @@ fn missing_endpoint_before_any_roundtrip_remains_genuinely_unavailable() {
 }
 
 #[test]
+fn transport_unavailable_preserves_the_service_error_wording() {
+    assert_eq!(
+        SourceRefreshTransportUnavailable::new(false).to_string(),
+        "daemon source refresh service is unavailable"
+    );
+}
+
+#[test]
 fn no_daemon_post_ack_recovery_is_typed_retained_and_unobservable() {
     let request_id = "019fcaaa-0000-7000-8000-000000000296";
     let error = recover_wait_refresh_request(

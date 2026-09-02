@@ -6,8 +6,7 @@ pub struct SourceBackedRefreshDaemonUnavailable {
 }
 
 impl SourceBackedRefreshDaemonUnavailable {
-    #[doc(hidden)]
-    pub fn new(detail: Option<String>) -> Self {
+    pub(crate) fn new(detail: Option<String>) -> Self {
         Self { detail }
     }
 }
