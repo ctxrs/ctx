@@ -3,7 +3,8 @@ use super::*;
 #[test]
 fn source_unclaimed_failure_writes_the_singleton_and_mixed_contracts() {
     for retryable in [false, true] {
-        let (status, output) = run_terminal_failure(source_unclaimed_terminal_failure(retryable));
+        let (status, output) =
+            run_terminal_failure(source_unclaimed_terminal_failure(retryable).into());
         assert_eq!(status, ExitCode::FAILURE);
         let response: Value = serde_json::from_slice(output.strip_suffix(b"\n").unwrap()).unwrap();
         assert_eq!(response["error_code"], "source_unclaimed");
@@ -36,9 +37,9 @@ fn source_unclaimed_failure_writes_the_singleton_and_mixed_contracts() {
 
 #[test]
 fn maximum_valid_failure_frame_writes_and_route_cap_fails_closed() {
-    let (status, output) = run_terminal_failure(terminal_failure_with_blocked_routes(
-        failure::MAX_FAILURE_ROUTES,
-    ));
+    let (status, output) = run_terminal_failure(
+        terminal_failure_with_blocked_routes(failure::MAX_FAILURE_ROUTES).into(),
+    );
     assert_eq!(status, ExitCode::FAILURE);
     assert_eq!(output.last(), Some(&b'\n'));
     assert_eq!(output.iter().filter(|byte| **byte == b'\n').count(), 1);
@@ -60,9 +61,9 @@ fn maximum_valid_failure_frame_writes_and_route_cap_fails_closed() {
         failure::MAX_FAILURE_ROUTES
     );
 
-    let (status, output) = run_terminal_failure(terminal_failure_with_blocked_routes(
-        failure::MAX_FAILURE_ROUTES + 1,
-    ));
+    let (status, output) = run_terminal_failure(
+        terminal_failure_with_blocked_routes(failure::MAX_FAILURE_ROUTES + 1).into(),
+    );
     assert_eq!(status, ExitCode::FAILURE);
     assert!(output.is_empty());
 }

@@ -855,6 +855,10 @@ fn automatic_terminal_coverage_retry_confirms_once_then_pauses() {
         first.job["structured_outcome"]["code"],
         "all_provider_terminal_coverage_unavailable"
     );
+    assert_eq!(
+        first.job["reason"],
+        "provider_terminal_coverage_unavailable"
+    );
     assert_eq!(first.job["automatic_retry"]["state"], "confirming");
     assert_eq!(
         first.job["automatic_retry"]["reason"],

@@ -554,13 +554,11 @@ fn setup_receipt_does_not_embed_unbounded_source_diagnostics() {
     assert!(canonical(&facts).unwrap().len() < MAX_RESPONSE_BYTES);
 }
 
-fn terminal_failure_with_blocked_routes(
-    route_count: usize,
-) -> crate::semantic::SourceBackedRefreshTerminalError {
+fn terminal_failure_with_blocked_routes(route_count: usize) -> RefreshTerminalOutcome {
     let routes = (0..route_count)
         .map(|index| SourceRouteIdentity::from_sha256(format!("{index:064x}")).unwrap())
         .collect::<BTreeSet<_>>();
-    crate::semantic::SourceBackedRefreshTerminalError::from(RefreshTerminalOutcome {
+    RefreshTerminalOutcome {
         code: RefreshOutcomeCode::IndexCorruption,
         class: RefreshOutcomeClass::Corruption,
         retryable: false,
@@ -572,12 +570,12 @@ fn terminal_failure_with_blocked_routes(
         published_generation: None,
         retry_advice: Some(RefreshRetryAdvice::RebuildIndex),
         detail: Some("arbitrary source detail must not cross the boundary".to_owned()),
-    })
+    }
 }
 
-fn retryable_terminal_failure() -> crate::semantic::SourceBackedRefreshTerminalError {
+fn retryable_terminal_failure() -> RefreshTerminalOutcome {
     let route = SourceRouteIdentity::from_sha256("ab".repeat(32)).unwrap();
-    crate::semantic::SourceBackedRefreshTerminalError::from(RefreshTerminalOutcome {
+    RefreshTerminalOutcome {
         code: RefreshOutcomeCode::SourceUnavailable,
         class: RefreshOutcomeClass::Unavailable,
         retryable: true,
@@ -589,15 +587,13 @@ fn retryable_terminal_failure() -> crate::semantic::SourceBackedRefreshTerminalE
         published_generation: None,
         retry_advice: Some(RefreshRetryAdvice::RetryAffectedRoutes),
         detail: None,
-    })
+    }
 }
 
-fn source_unclaimed_terminal_failure(
-    retryable: bool,
-) -> crate::semantic::SourceBackedRefreshTerminalError {
+fn source_unclaimed_terminal_failure(retryable: bool) -> RefreshTerminalOutcome {
     let blocked = SourceRouteIdentity::from_sha256("ab".repeat(32)).unwrap();
     let retryable_route = SourceRouteIdentity::from_sha256("cd".repeat(32)).unwrap();
-    crate::semantic::SourceBackedRefreshTerminalError::from(RefreshTerminalOutcome {
+    RefreshTerminalOutcome {
         code: RefreshOutcomeCode::SourceUnclaimed,
         class: RefreshOutcomeClass::Coverage,
         retryable,
@@ -621,23 +617,23 @@ fn source_unclaimed_terminal_failure(
             RefreshRetryAdvice::InspectSources
         }),
         detail: None,
-    })
+    }
 }
 
 fn mutated_terminal_failure(
-    mutate: impl FnOnce(&mut crate::semantic::SourceBackedRefreshTerminalError),
+    mutate: impl FnOnce(&mut RefreshTerminalOutcome),
 ) -> crate::semantic::SourceBackedRefreshTerminalError {
-    let mut terminal = terminal_failure_with_blocked_routes(1);
-    mutate(&mut terminal);
-    terminal
+    let mut outcome = terminal_failure_with_blocked_routes(1);
+    mutate(&mut outcome);
+    crate::semantic::SourceBackedRefreshTerminalError::from(outcome)
 }
 
 fn mutated_retryable_terminal_failure(
-    mutate: impl FnOnce(&mut crate::semantic::SourceBackedRefreshTerminalError),
+    mutate: impl FnOnce(&mut RefreshTerminalOutcome),
 ) -> crate::semantic::SourceBackedRefreshTerminalError {
-    let mut terminal = retryable_terminal_failure();
-    mutate(&mut terminal);
-    terminal
+    let mut outcome = retryable_terminal_failure();
+    mutate(&mut outcome);
+    crate::semantic::SourceBackedRefreshTerminalError::from(outcome)
 }
 
 fn run_terminal_failure(
@@ -1148,119 +1144,84 @@ fn event_terminal_state_and_final_failure_are_ordered_and_typed_the_same() {
 }
 
 #[test]
-fn malformed_typed_failures_remain_silent_and_nonzero() {
-    let route = "00".repeat(32);
-    let other = "11".repeat(32);
-    let upper = "22".repeat(32);
+fn inconsistent_typed_failures_remain_silent_and_nonzero() {
+    let other = SourceRouteIdentity::from_sha256("11".repeat(32)).unwrap();
     let cases = [
         (
-            "unknown_code",
-            mutated_terminal_failure(|terminal| terminal.code = "future_failure".to_owned()),
-        ),
-        (
-            "unknown_class",
-            mutated_terminal_failure(|terminal| terminal.class = "future_class".to_owned()),
-        ),
-        (
             "code_class_mismatch",
-            mutated_terminal_failure(|terminal| terminal.class = "unavailable".to_owned()),
+            mutated_terminal_failure(|outcome| {
+                outcome.class = RefreshOutcomeClass::Unavailable;
+            }),
         ),
         (
             "code_retryability_mismatch",
-            mutated_terminal_failure(|terminal| {
-                terminal.affected_routes.clear();
-                terminal.blocked_routes.clear();
-                terminal.retryable = true;
-                terminal.retry_advice = None;
-            }),
-        ),
-        (
-            "malformed_route",
-            mutated_terminal_failure(|terminal| {
-                terminal.affected_routes = vec!["AB".repeat(32)];
-                terminal.blocked_routes = terminal.affected_routes.clone();
-            }),
-        ),
-        (
-            "duplicate_route",
-            mutated_terminal_failure(|terminal| {
-                terminal.affected_routes = vec![route.clone(), route.clone()];
-                terminal.blocked_routes = terminal.affected_routes.clone();
-            }),
-        ),
-        (
-            "unsorted_routes",
-            mutated_terminal_failure(|terminal| {
-                terminal.affected_routes = vec![upper.clone(), other.clone()];
-                terminal.blocked_routes = terminal.affected_routes.clone();
+            mutated_terminal_failure(|outcome| {
+                outcome.affected_routes.clear();
+                outcome.blocked_routes.clear();
+                outcome.retryable = true;
+                outcome.retry_advice = None;
             }),
         ),
         (
             "retryable_not_affected",
-            mutated_retryable_terminal_failure(|terminal| {
-                terminal.retryable_routes = vec![other.clone()];
+            mutated_retryable_terminal_failure(|outcome| {
+                outcome.retryable_routes = BTreeSet::from([other.clone()]);
             }),
         ),
         (
             "overlapping_dispositions",
-            mutated_retryable_terminal_failure(|terminal| {
-                terminal.blocked_routes = terminal.affected_routes.clone();
+            mutated_retryable_terminal_failure(|outcome| {
+                outcome.blocked_routes = outcome.affected_routes.clone();
             }),
         ),
         (
             "undisposed_route",
-            mutated_terminal_failure(|terminal| {
-                terminal.affected_routes.push(other.clone());
+            mutated_terminal_failure(|outcome| {
+                outcome.affected_routes.insert(other.clone());
             }),
         ),
         (
             "route_retryability_mismatch",
-            mutated_terminal_failure(|terminal| {
-                terminal.code = "source_failures".to_owned();
-                terminal.class = "mixed".to_owned();
-                terminal.retryable = true;
-                terminal.retry_advice = None;
-            }),
-        ),
-        (
-            "unknown_advice",
-            mutated_terminal_failure(|terminal| {
-                terminal.retry_advice = Some("try_magic".to_owned());
+            mutated_terminal_failure(|outcome| {
+                outcome.code = RefreshOutcomeCode::SourceFailures;
+                outcome.class = RefreshOutcomeClass::Mixed;
+                outcome.retryable = true;
+                outcome.retry_advice = None;
             }),
         ),
         (
             "advice_retryability_mismatch",
-            mutated_terminal_failure(|terminal| {
-                terminal.retry_advice = Some("retry_request".to_owned());
+            mutated_terminal_failure(|outcome| {
+                outcome.retry_advice = Some(RefreshRetryAdvice::RetryRequest);
             }),
         ),
         (
             "known_but_wrong_advice",
-            mutated_terminal_failure(|terminal| {
-                terminal.retry_advice = Some("inspect_sources".to_owned());
+            mutated_terminal_failure(|outcome| {
+                outcome.retry_advice = Some(RefreshRetryAdvice::InspectSources);
             }),
         ),
         ("source_unclaimed_without_advice", {
-            let mut terminal = source_unclaimed_terminal_failure(false);
-            terminal.retry_advice = None;
-            terminal
+            let mut outcome = source_unclaimed_terminal_failure(false);
+            outcome.retry_advice = None;
+            crate::semantic::SourceBackedRefreshTerminalError::from(outcome)
         }),
         ("source_unclaimed_without_blocked_culprit", {
-            let mut terminal = source_unclaimed_terminal_failure(true);
-            terminal.blocked_routes.clear();
-            terminal.affected_routes = terminal.retryable_routes.clone();
-            terminal
+            let mut outcome = source_unclaimed_terminal_failure(true);
+            outcome.blocked_routes.clear();
+            outcome.affected_routes = outcome.retryable_routes.clone();
+            crate::semantic::SourceBackedRefreshTerminalError::from(outcome)
         }),
         (
             "malformed_attempt_identity",
-            mutated_terminal_failure(|terminal| {
-                terminal.physical_attempt_id = "00000000-0000-0000-0000-00000000\n123".to_owned();
+            mutated_terminal_failure(|outcome| {
+                outcome.physical_attempt_id = "00000000-0000-0000-0000-00000000\n123".to_owned();
             }),
         ),
         (
             "malformed_generation_identity",
-            mutated_terminal_failure(|terminal| {
-                terminal.retained_generation = Some("AB".repeat(32));
+            mutated_terminal_failure(|outcome| {
+                outcome.retained_generation = Some("AB".repeat(32));
             }),
         ),
     ];

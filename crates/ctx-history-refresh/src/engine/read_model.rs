@@ -438,24 +438,19 @@ impl SourceBackedRefreshAttempt {
     }
 
     fn failure_code(&self) -> Option<&'static str> {
-        self.last_error
-            .as_deref()
-            .filter(|error| error.contains(TERMINAL_COVERAGE_ERROR_CODE))
-            .map(|_| TERMINAL_COVERAGE_ERROR_CODE)
-            .or_else(|| {
-                self.failure_outcome
-                    .as_ref()
-                    .map(|outcome| outcome.code.as_str())
-            })
+        self.failure_outcome
+            .as_ref()
+            .map(|outcome| outcome.code.as_str())
     }
 
     fn failure_reason(&self) -> Option<&'static str> {
-        if self.failure_code() == Some(TERMINAL_COVERAGE_ERROR_CODE) {
-            return Some("provider_terminal_coverage_unavailable");
-        }
-        self.failure_outcome
-            .as_ref()
-            .map(|outcome| outcome.class.as_str())
+        self.failure_outcome.as_ref().map(|outcome| {
+            if outcome.code == RefreshOutcomeCode::AllProviderTerminalCoverageUnavailable {
+                "provider_terminal_coverage_unavailable"
+            } else {
+                outcome.class.as_str()
+            }
+        })
     }
 
     fn request_generation_changed(&self) -> Option<bool> {

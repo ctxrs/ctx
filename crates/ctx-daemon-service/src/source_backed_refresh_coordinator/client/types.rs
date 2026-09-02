@@ -55,37 +55,54 @@ pub struct SourceBackedRefreshObservation {
 
 #[derive(Debug)]
 pub struct SourceBackedRefreshTerminalError {
-    pub code: String,
-    pub class: String,
-    pub retryable: bool,
-    pub affected_routes: Vec<String>,
-    pub retryable_routes: Vec<String>,
-    pub blocked_routes: Vec<String>,
-    pub physical_attempt_id: String,
-    pub retained_generation: Option<String>,
-    pub retry_advice: Option<String>,
-    detail: Option<String>,
+    outcome: RefreshTerminalOutcome,
     capture_error: Option<CaptureError>,
+}
+
+impl SourceBackedRefreshTerminalError {
+    pub fn outcome(&self) -> &RefreshTerminalOutcome {
+        &self.outcome
+    }
 }
 
 impl fmt::Display for SourceBackedRefreshTerminalError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let outcome = self.outcome();
+        let affected_routes = outcome
+            .affected_routes
+            .iter()
+            .map(|route| route.as_str())
+            .collect::<Vec<_>>();
+        let retryable_routes = outcome
+            .retryable_routes
+            .iter()
+            .map(|route| route.as_str())
+            .collect::<Vec<_>>();
+        let blocked_routes = outcome
+            .blocked_routes
+            .iter()
+            .map(|route| route.as_str())
+            .collect::<Vec<_>>();
         write!(
             formatter,
             "daemon-owned source-backed refresh failed (code={}, class={}, retryable={}, attempt={}",
-            self.code, self.class, self.retryable, self.physical_attempt_id
+            outcome.code.as_str(),
+            outcome.class.as_str(),
+            outcome.retryable,
+            outcome.physical_attempt_id
         )?;
         write!(
             formatter,
             ", affected_routes={:?}, retryable_routes={:?}, blocked_routes={:?}",
-            self.affected_routes, self.retryable_routes, self.blocked_routes
+            affected_routes, retryable_routes, blocked_routes
         )?;
         write!(
             formatter,
             ", retained_generation={:?}, retry_advice={:?})",
-            self.retained_generation, self.retry_advice
+            outcome.retained_generation,
+            outcome.retry_advice.map(|advice| advice.as_str())
         )?;
-        if let Some(detail) = self.detail.as_deref() {
+        if let Some(detail) = outcome.detail.as_deref() {
             write!(formatter, ": {detail}")?;
         }
         Ok(())
@@ -118,30 +135,7 @@ impl From<RefreshTerminalOutcome> for SourceBackedRefreshTerminalError {
             _ => None,
         };
         Self {
-            code: outcome.code.as_str().to_owned(),
-            class: outcome.class.as_str().to_owned(),
-            retryable: outcome.retryable,
-            affected_routes: outcome
-                .affected_routes
-                .into_iter()
-                .map(|route| route.as_str().to_owned())
-                .collect(),
-            retryable_routes: outcome
-                .retryable_routes
-                .into_iter()
-                .map(|route| route.as_str().to_owned())
-                .collect(),
-            blocked_routes: outcome
-                .blocked_routes
-                .into_iter()
-                .map(|route| route.as_str().to_owned())
-                .collect(),
-            physical_attempt_id: outcome.physical_attempt_id,
-            retained_generation: outcome.retained_generation,
-            retry_advice: outcome
-                .retry_advice
-                .map(|advice| advice.as_str().to_owned()),
-            detail: outcome.detail,
+            outcome,
             capture_error,
         }
     }

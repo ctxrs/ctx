@@ -100,7 +100,7 @@ pub(super) fn is_terminal_missing_import_path(error: &anyhow::Error) -> bool {
     error
         .chain()
         .find_map(|cause| cause.downcast_ref::<crate::semantic::SourceBackedRefreshTerminalError>())
-        .and_then(|terminal| terminal.code.parse::<RefreshOutcomeCode>().ok())
+        .map(|terminal| terminal.outcome().code)
         == Some(RefreshOutcomeCode::ExplicitSourcePathMissing)
 }
 
