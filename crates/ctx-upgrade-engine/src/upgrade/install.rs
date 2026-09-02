@@ -21,7 +21,8 @@ use anyhow::{bail, Result};
 
 pub use hosted_transaction::{
     hosted_uninstall_is_active_for_executable as installation_hosted_uninstall_is_active_for_executable,
-    installation_hosted_uninstall_is_active,
+    installation_hosted_uninstall_is_active, run_hosted_uninstall_after_parent_exit,
+    HOSTED_UNINSTALL_POST_EXIT_READY,
 };
 pub use hosted_transaction::{
     run as run_hosted_transaction, HostedTransactionAction, HostedTransactionArgs,
@@ -41,6 +42,9 @@ pub use marker::{
     current_exe_has_managed_install_marker_hint, current_exe_is_unmanaged, current_install_path,
     invalid_install_marker_recovery_guidance, unmanaged_install_conversion_guidance, InstallMarker,
 };
+pub(in crate::upgrade) use marker::{
+    existing_install_attribution, install_marker_bytes, MAX_INSTALL_MARKER_BYTES,
+};
 pub use marker::{managed_install_marker_for_current_exe, ManagedInstallMarker};
 pub use path_identity::managed_install_path_identity_matches;
 pub(super) use transaction::ApplyResult;
@@ -48,6 +52,11 @@ pub(super) use transaction::ApplyResult;
 pub(in crate::upgrade) use transaction::HelperOutcome;
 #[cfg(unix)]
 pub(super) use transaction::RECOVERY_REEXEC_ENV;
+#[cfg(windows)]
+pub(in crate::upgrade) use transaction::{
+    open_managed_pair_parent, prepare_managed_pair_helper, spawn_managed_pair_helper,
+    write_managed_pair_helper_ready,
+};
 pub(super) use transaction::{PendingRecovery, TerminalRecovery};
 
 use self::lock::canonical_executable;
@@ -64,6 +73,18 @@ pub fn try_acquire_managed_installation_mutation(
     executable: &Path,
 ) -> Result<Option<ManagedInstallationMutationGuard>> {
     Ok(InstallationLock::try_acquire(executable)?
+        .map(|lock| ManagedInstallationMutationGuard { _lock: lock }))
+}
+
+/// Tries to serialize fresh managed-install publication before Core exists.
+///
+/// `install_root` must already contain a canonical, owner-safe `bin`
+/// directory. This acquires the same persistent `bin/.ctx.install.lock` used
+/// by executable-based upgrades; it does not create a bootstrap-only lock.
+pub fn try_acquire_managed_installation_mutation_at_root(
+    install_root: &Path,
+) -> Result<Option<ManagedInstallationMutationGuard>> {
+    Ok(InstallationLock::try_acquire_at_root(install_root)?
         .map(|lock| ManagedInstallationMutationGuard { _lock: lock }))
 }
 
@@ -199,6 +220,25 @@ pub(in crate::upgrade) fn apply_artifact(
     daemon_restart: Option<(&str, Option<u64>)>,
     before_publish: &mut dyn FnMut() -> Result<()>,
 ) -> Result<ApplyResult> {
+    revalidate_plan_snapshot_under_installation_lock(plan, _installation_lock)?;
+    transaction::apply_artifact_for_attempt(
+        process,
+        semantic_layout,
+        plan,
+        artifact,
+        runtime_artifact,
+        semantic_artifacts,
+        data_root,
+        attempt_id,
+        daemon_restart,
+        before_publish,
+    )
+}
+
+pub(in crate::upgrade) fn revalidate_plan_snapshot_under_installation_lock(
+    plan: &UpgradePlan,
+    _installation_lock: &InstallationLock,
+) -> Result<()> {
     let running_executable = current_install_path()?;
     let planned_executable = canonical_executable(&plan.install_path)?;
     if planned_executable != running_executable {
@@ -212,19 +252,7 @@ pub(in crate::upgrade) fn apply_artifact(
     // On Windows the parent retains this lock through the helper's validated
     // readiness receipt. The helper then blocks on the same lock and performs
     // a second fingerprint check immediately before publication.
-    revalidate_plan_snapshot_locked(plan, &running_executable)?;
-    transaction::apply_artifact_for_attempt(
-        process,
-        semantic_layout,
-        plan,
-        artifact,
-        runtime_artifact,
-        semantic_artifacts,
-        data_root,
-        attempt_id,
-        daemon_restart,
-        before_publish,
-    )
+    revalidate_plan_snapshot_locked(plan, &running_executable)
 }
 
 fn revalidate_plan_snapshot_locked(plan: &UpgradePlan, running_executable: &Path) -> Result<()> {

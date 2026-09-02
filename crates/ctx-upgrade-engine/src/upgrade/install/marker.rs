@@ -21,7 +21,7 @@ use super::path_identity::managed_install_path_identity_matches;
 
 const MIN_INSTALL_ATTEMPT_ID_BODY_BYTES: usize = 8;
 const MAX_INSTALL_ATTEMPT_ID_BODY_BYTES: usize = 128;
-const MAX_INSTALL_MARKER_BYTES: u64 = 64 * 1024;
+pub(in crate::upgrade) const MAX_INSTALL_MARKER_BYTES: u64 = 64 * 1024;
 const MAX_MANAGED_BINARY_BYTES: u64 = 128 * 1024 * 1024;
 const TEST_HARNESS_UPGRADE_TARGET_ENV: &str = "CTX_UPGRADE_TEST_TARGET";
 
@@ -269,6 +269,24 @@ pub(super) fn write_install_marker_to(
     plan: &UpgradePlan,
     install_attribution: Option<&ActiveInstallAttribution>,
 ) -> Result<()> {
+    let body = install_marker_value(existing_marker_path, plan, install_attribution)?;
+    atomic_write_json(marker_path, &body)
+}
+
+pub(in crate::upgrade) fn install_marker_bytes(
+    existing_marker_path: &Path,
+    plan: &UpgradePlan,
+    install_attribution: Option<&ActiveInstallAttribution>,
+) -> Result<Vec<u8>> {
+    let body = install_marker_value(existing_marker_path, plan, install_attribution)?;
+    serde_json::to_vec_pretty(&body).context("serialize managed Core install marker")
+}
+
+fn install_marker_value(
+    existing_marker_path: &Path,
+    plan: &UpgradePlan,
+    install_attribution: Option<&ActiveInstallAttribution>,
+) -> Result<Value> {
     let installed_at = install_attribution
         .map(|attribution| attribution.installed_at)
         .unwrap_or_else(utc_now);
@@ -278,6 +296,7 @@ pub(super) fn write_install_marker_to(
         "install_path": plan.install_path,
         "platform": plan.platform,
         "channel": plan.channel,
+        "staging_dogfood": plan.channel == "staging",
         "version": plan.latest_version,
         "sha256": plan.artifact_sha256,
         "metadata_url": plan.metadata_url,
@@ -299,7 +318,7 @@ pub(super) fn write_install_marker_to(
     // Preserve only man-page ownership; integration ownership follows its
     // pre-existing installer transaction path.
     preserve_man_pages_from_existing_marker(&mut body, existing_marker_path)?;
-    atomic_write_json(marker_path, &body)
+    Ok(body)
 }
 
 pub(super) fn preserve_man_pages_from_existing_marker(
@@ -318,7 +337,9 @@ pub(super) fn preserve_man_pages_from_existing_marker(
     Ok(())
 }
 
-pub(super) fn existing_install_attribution(marker_path: &Path) -> Option<ActiveInstallAttribution> {
+pub(in crate::upgrade) fn existing_install_attribution(
+    marker_path: &Path,
+) -> Option<ActiveInstallAttribution> {
     read_install_marker_bytes(marker_path)
         .ok()
         .flatten()

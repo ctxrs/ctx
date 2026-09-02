@@ -18,6 +18,9 @@ impl PreparedAutomaticUpgrade {
         match &self.0 {
             PreparedAutomaticUpgradeKind::Apply { attempt, .. } => Some(attempt.id()),
             PreparedAutomaticUpgradeKind::Recover { recovery, .. } => Some(&recovery.attempt_id),
+            PreparedAutomaticUpgradeKind::ManagedPairRecover { recovery, .. } => {
+                Some(&recovery.attempt_id)
+            }
         }
     }
 
@@ -25,6 +28,9 @@ impl PreparedAutomaticUpgrade {
         match &self.0 {
             PreparedAutomaticUpgradeKind::Apply { data_root, .. } => data_root,
             PreparedAutomaticUpgradeKind::Recover { recovery, .. } => &recovery.data_root,
+            PreparedAutomaticUpgradeKind::ManagedPairRecover { recovery, .. } => {
+                &recovery.data_root
+            }
         }
     }
 
@@ -32,6 +38,9 @@ impl PreparedAutomaticUpgrade {
         match &self.0 {
             PreparedAutomaticUpgradeKind::Apply { plan, .. } => &plan.install_path,
             PreparedAutomaticUpgradeKind::Recover { recovery, .. } => &recovery.install_path,
+            PreparedAutomaticUpgradeKind::ManagedPairRecover { recovery, .. } => {
+                &recovery.install_path
+            }
         }
     }
 
@@ -44,6 +53,12 @@ impl PreparedAutomaticUpgrade {
                 ..
             } => (data_root, lock, attempt),
             PreparedAutomaticUpgradeKind::Recover {
+                recovery,
+                lock,
+                attempt,
+                ..
+            } => (recovery.data_root, lock, attempt),
+            PreparedAutomaticUpgradeKind::ManagedPairRecover {
                 recovery,
                 lock,
                 attempt,
@@ -71,12 +86,19 @@ enum PreparedAutomaticUpgradeKind {
         lock: UpgradeLock,
         attempt: UpgradeAttempt,
         plan: UpgradePlan,
-        artifact: Option<DownloadedArtifact>,
+        pair_mode: ManagedPairMode,
+        core: PreparedCoreArtifact,
         provisioning: PreparedProvisioningArtifacts,
     },
     Recover {
         recovery: PendingRecovery,
         interval: Duration,
+        started: Instant,
+        lock: UpgradeLock,
+        attempt: UpgradeAttempt,
+    },
+    ManagedPairRecover {
+        recovery: ManagedPairRecovery,
         started: Instant,
         lock: UpgradeLock,
         attempt: UpgradeAttempt,
@@ -114,6 +136,28 @@ where
         return Ok(None);
     }
     let (attempt, lock) = loop {
+        if let Some(attempt_id) = managed_pair_recovery_hint()? {
+            let Some(lock) = try_acquire_managed_pair_recovery_lock(&attempt_id)? else {
+                return Ok(None);
+            };
+            let recovery = managed_pair_recovery_locked(&lock, &attempt_id)?;
+            let current = policy_provider.reload(&recovery.data_root)?;
+            if !automatic_maintenance_allowed(&current)
+                || !automatic_channel_is_current(&current, &recovery.channel)
+                || !recovery.automatic
+            {
+                return Ok(None);
+            }
+            let attempt = begin_recovery_attempt_locked(&lock, &attempt_id, "automatic")?;
+            return Ok(Some(PreparedAutomaticUpgrade(
+                PreparedAutomaticUpgradeKind::ManagedPairRecover {
+                    recovery,
+                    started,
+                    lock,
+                    attempt,
+                },
+            )));
+        }
         if let Some(recovery) = pending_recovery(data_root, engine.semantic_layout)? {
             if let Some(terminal) = recovery.terminal.as_ref() {
                 let Some(lock) =
@@ -194,6 +238,10 @@ where
         // transaction that appeared while the lock was contended must be
         // recovered, and a brand-new attempt requires full hosted authority
         // while that same installation lock is held.
+        if managed_pair_recovery_hint()?.is_some() {
+            drop(lock);
+            continue;
+        }
         if pending_recovery(data_root, engine.semantic_layout)?.is_some() {
             drop(lock);
             continue;
@@ -218,13 +266,15 @@ where
             semantic_enabled: current.semantic_enabled(),
         };
         let plan = build_upgrade_plan(engine, policy, None, true)?;
+        let pair_mode =
+            inspect_plan_under_installation_lock(&plan, lock.as_ref().unwrap().installation())?;
         let repairs = classify_repair_requirements(
             engine.semantic_layout,
             &plan,
             data_root,
             policy.semantic_enabled,
         )?;
-        if !plan.update_available && !repairs.any() {
+        if !plan.update_available && !pair_mode.pair_apply_required(&plan) && !repairs.any() {
             write_state_checked_locked(
                 data_root,
                 lock.as_ref().unwrap(),
@@ -255,21 +305,7 @@ where
                 plan.latest_version
             ));
         }
-        let artifact = if plan.update_available {
-            Some(
-                DownloadedArtifact::download_verified(
-                    engine.transport,
-                    data_root,
-                    &plan.artifact_url,
-                    &plan.artifact_sha256,
-                    RELEASE_ARTIFACT_MAX_BYTES as u64,
-                    RELEASE_ARTIFACT_TIMEOUT,
-                )
-                .with_context(|| format!("download {}", plan.artifact_url))?,
-            )
-        } else {
-            None
-        };
+        let core = download_core_artifact(engine.transport, data_root, &plan, &pair_mode)?;
         let runtime_artifact = if (plan.update_available || repairs.legacy_runtime)
             && plan.semantic_provisioning.is_none()
         {
@@ -331,7 +367,8 @@ where
                 lock: lock.take().unwrap(),
                 attempt: attempt.take().unwrap(),
                 plan,
-                artifact,
+                pair_mode,
+                core,
                 provisioning: PreparedProvisioningArtifacts {
                     runtime: runtime_artifact,
                     semantic: semantic_artifacts,
@@ -396,7 +433,7 @@ where
     let restart = handoff
         .replacement_restart()
         .map(|restart| (restart.trigger, restart.loop_interval_seconds));
-    let (data_root, interval, started, lock, attempt, plan, mut artifact, mut provisioning) =
+    let (data_root, interval, started, lock, attempt, plan, pair_mode, mut core, mut provisioning) =
         match prepared.0 {
             PreparedAutomaticUpgradeKind::Apply {
                 data_root,
@@ -405,7 +442,8 @@ where
                 lock,
                 attempt,
                 plan,
-                artifact,
+                pair_mode,
+                core,
                 provisioning,
             } => (
                 data_root,
@@ -414,9 +452,101 @@ where
                 lock,
                 attempt,
                 plan,
-                artifact,
+                pair_mode,
+                core,
                 provisioning,
             ),
+            PreparedAutomaticUpgradeKind::ManagedPairRecover {
+                recovery,
+                started,
+                lock,
+                attempt,
+            } => {
+                #[cfg(not(windows))]
+                let _ = &attempt;
+                let current = match policy_provider.reload(&recovery.data_root) {
+                    Ok(current) => current,
+                    Err(error) => {
+                        drop(lock);
+                        let restart_error = handoff.resume_with(&recovery.install_path).err();
+                        return Err(with_automatic_cleanup_errors(error, None, restart_error));
+                    }
+                };
+                if !automatic_maintenance_allowed(&current)
+                    || !automatic_channel_is_current(&current, &recovery.channel)
+                {
+                    reconcile_replacement_terminal_locked(
+                        &lock,
+                        &recovery.attempt_id,
+                        false,
+                        Some("automatic managed-pair recovery was disabled or changed channel"),
+                        recovery.interval,
+                    )?;
+                    drop(lock);
+                    return handoff.resume_with(&recovery.install_path);
+                }
+                #[cfg(windows)]
+                {
+                    let helper_pid = match schedule_existing_windows_helper(
+                        engine.process,
+                        &recovery,
+                        &lock,
+                        &attempt,
+                    ) {
+                        Ok(helper_pid) => helper_pid,
+                        Err(error) => {
+                            drop(lock);
+                            let restart_error = handoff.resume_with(&recovery.install_path).err();
+                            return Err(with_automatic_cleanup_errors(error, None, restart_error));
+                        }
+                    };
+                    return handoff.transfer_to_replacement_helper(helper_pid);
+                }
+                #[cfg(not(windows))]
+                {
+                    let applied = match resume_or_confirm_pending_under_installation_lock(
+                        &recovery.install_path,
+                        &recovery.channel,
+                        &recovery.core_sha256,
+                        &recovery.envelope_sha256,
+                        lock.installation(),
+                    ) {
+                        Ok(applied) => applied,
+                        Err(error) => {
+                            drop(lock);
+                            let restart_error = handoff.resume_with(&recovery.install_path).err();
+                            return Err(with_automatic_cleanup_errors(error, None, restart_error));
+                        }
+                    };
+                    reconcile_replacement_terminal_locked(
+                        &lock,
+                        &recovery.attempt_id,
+                        applied,
+                        (!applied).then_some(
+                            "managed-pair recovery record disappeared before publication",
+                        ),
+                        recovery.interval,
+                    )?;
+                    drop(lock);
+                    let resumed = handoff.resume_with(&recovery.install_path);
+                    send_daemon_upgrade_terminal(
+                        observer,
+                        &recovery.data_root,
+                        &current,
+                        None,
+                        &recovery.attempt_id,
+                        if applied {
+                            UpgradeTerminalStatus::Applied
+                        } else {
+                            UpgradeTerminalStatus::Failed
+                        },
+                        applied,
+                        (!applied).then_some(UpgradeFailureKind::ApplyFailed),
+                        started.elapsed(),
+                    );
+                    return resumed;
+                }
+            }
             PreparedAutomaticUpgradeKind::Recover {
                 recovery,
                 interval,
@@ -651,16 +781,18 @@ where
         write_state_phase_locked(&lock, &attempt, "applying")?;
         Ok(())
     };
-    let result = apply_artifact(
+    let result = apply_prepared_install(
         engine.process,
         engine.semantic_layout,
-        lock.installation(),
+        &lock,
         &plan,
-        artifact.as_mut(),
+        &pair_mode,
+        &mut core,
         provisioning.runtime.as_mut(),
         &mut provisioning.semantic,
         &data_root,
-        attempt.id(),
+        &attempt,
+        interval,
         restart,
         &mut record_applying,
     );

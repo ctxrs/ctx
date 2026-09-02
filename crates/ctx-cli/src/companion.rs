@@ -11,9 +11,9 @@ use ctx_client_observability::local_usage::{self, CompletedOperation, Surface};
 use ctx_companion_bridge::{
     BridgeError, BridgeLimits, CancellationToken, CliRequest, CompanionBridge,
     CompanionEnvironment, EnvironmentKey, ExitClass, InstalledCompanion, LimitConfiguration,
-    MaintenanceRequest, ManagedPairExpectations, McpRequest, ProtocolVersion, ReleaseChannel,
-    TerminationReason, MAX_ADMISSION_WAIT, MAX_ARGUMENTS, MAX_CAPTURED_WALL_TIME,
-    MAX_CONCURRENT_PROCESSES, MAX_CONTROL_BYTES, MAX_ENVIRONMENT_ENTRIES, MAX_STDERR_BYTES,
+    MaintenanceRequest, McpRequest, ProtocolVersion, TerminationReason, MAX_ADMISSION_WAIT,
+    MAX_ARGUMENTS, MAX_CAPTURED_WALL_TIME, MAX_CONCURRENT_PROCESSES, MAX_CONTROL_BYTES,
+    MAX_ENVIRONMENT_ENTRIES, MAX_STDERR_BYTES,
 };
 use serde_json::{json, Value};
 
@@ -70,15 +70,6 @@ enum CompanionLaunchError {
         reason: &'static str,
     },
     Unavailable,
-}
-
-impl CompanionRouteError {
-    pub(crate) const fn code(self) -> &'static str {
-        match self {
-            Self::Unavailable => "companion_unavailable",
-            Self::Incompatible => "companion_incompatible",
-        }
-    }
 }
 
 impl CompanionLaunchError {
@@ -367,28 +358,6 @@ fn source_override_path(pro: PathBuf) -> Result<PathBuf, CompanionLaunchError> {
         });
     }
     Ok(pro)
-}
-
-pub(crate) fn managed_pair_expectations() -> Result<ManagedPairExpectations, CompanionRouteError> {
-    let marker = match ctx_upgrade_engine::managed_install_marker_for_current_exe()
-        .map_err(|_| CompanionRouteError::Unavailable)?
-    {
-        ctx_upgrade_engine::ManagedInstallMarker::Valid(marker) => marker,
-        ctx_upgrade_engine::ManagedInstallMarker::Absent => {
-            return Err(CompanionRouteError::Unavailable)
-        }
-        ctx_upgrade_engine::ManagedInstallMarker::Invalid { .. } => {
-            return Err(CompanionRouteError::Incompatible)
-        }
-    };
-    let channel = if marker.staging_dogfood {
-        ReleaseChannel::Staging
-    } else if marker.channel == "stable" {
-        ReleaseChannel::Stable
-    } else {
-        return Err(CompanionRouteError::Incompatible);
-    };
-    Ok(ManagedPairExpectations::new(channel))
 }
 
 fn mcp_limits() -> Result<BridgeLimits, CompanionRouteError> {

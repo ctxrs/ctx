@@ -88,6 +88,24 @@ cat > "${fake_template}" <<'EOF'
 #!/bin/sh
 set -eu
 
+if test "${1:-}" = --ctx-core-managed-pair-apply-v1; then
+  test "$#" = 7
+  test "$3" = -
+  install_root="$2"
+  mkdir -p "${install_root}/bin" "${install_root}/libexec" "${install_root}/share/ctx"
+  cp "$5" "${install_root}/bin/ctx"
+  chmod 0700 "${install_root}/bin/ctx"
+  cp "$6" "${install_root}/libexec/ctx-pro"
+  chmod 0700 "${install_root}/libexec/ctx-pro"
+  cp "$4" "${install_root}/share/ctx/managed-pair-envelope.json"
+  cp "$7" "${install_root}/bin/ctx.install.json"
+  printf '%s\n' '{"schema_version":1,"command":"managed_pair_apply","ok":true,"status":"committed"}'
+  case "${0##*/}" in
+    *extra-receipt*) printf '%s\n' 'unexpected output' ;;
+  esac
+  exit 0
+fi
+
 test "${CTX_DAEMON_AUTOSTART_OFF:-}" = 1
 test -n "${CTX_DATA_ROOT:-}"
 test -n "${HOME:-}"
@@ -184,11 +202,20 @@ case "${1:-}" in
   search)
     printf '%s\n' '{"retrieval":{"requested_mode":"lexical","effective_mode":"lexical"},"results":[{"text":"Add a parser test."}]}'
     ;;
+  pro)
+    test "${2:-}" = --help
+    ;;
   status)
     if test "${CTX_ANALYTICS_ENABLED+x}" != x; then
       analytics_path="${CTX_ANALYTICS_ENDPOINT#file://}"
       printf '%s\n' '{"events":[{"event_name":"operation_completed"}]}' > "${analytics_path}"
-      cat <<'JSON'
+      upgrade_auto=off
+      upgrade_enabled=false
+      if test -f "$0.install.json"; then
+        upgrade_auto=apply
+        upgrade_enabled=true
+      fi
+      cat <<JSON
 {
   "read_only": true,
   "daemon": {
@@ -200,8 +227,8 @@ case "${1:-}" in
     "enabled": true
   },
   "upgrade": {
-    "auto": "off",
-    "auto_enabled": false
+    "auto": "${upgrade_auto}",
+    "auto_enabled": ${upgrade_enabled}
   },
   "semantic": {
     "config_source": "default",
@@ -291,6 +318,30 @@ assert_passed_result "${v1_result}" || {
   cat "${v1_result}" >&2
   exit 1
 }
+
+pair_companion="${tmp}/ctx-pro"
+printf '%s\n' '#!/bin/sh' 'exit 0' > "${pair_companion}"
+chmod +x "${pair_companion}"
+pair_envelope="${tmp}/pair-envelope.json"
+printf '%s\n' '{}' > "${pair_envelope}"
+pair_result="${tmp}/result-pair.json"
+"${smoke}" "${fake}" "${pair_companion}" "${pair_envelope}" \
+  "${tmp}/fixture.jsonl" 0.25.0 "${pair_result}" >/dev/null
+assert_passed_result "${pair_result}"
+grep -Fq '"managed_pair_apply":"passed"' "${pair_result}"
+grep -Fq '"companion_selection":"passed"' "${pair_result}"
+test "$(grep -Fc -- '--ctx-core-managed-pair-apply-v1' "${smoke}")" = 1
+extra_receipt_fake="${tmp}/ctx-extra-receipt"
+make_fake "${extra_receipt_fake}"
+extra_receipt_result="${tmp}/result-pair-extra-receipt.json"
+if "${smoke}" "${extra_receipt_fake}" "${pair_companion}" "${pair_envelope}" \
+  "${tmp}/fixture.jsonl" 0.25.0 "${extra_receipt_result}" \
+  >"${tmp}/extra-receipt.out" 2>"${tmp}/extra-receipt.err"; then
+  printf 'candidate smoke accepted extra managed-pair receipt output\n' >&2
+  exit 1
+fi
+grep -Fq 'invalid managed-pair apply receipt' "${tmp}/extra-receipt.err"
+test ! -e "${extra_receipt_result}"
 
 lifecycle_parent="${tmp}/lifecycle-candidate"
 lifecycle_tmpdir_real="${tmp}/lifecycle-smoke-tmp-real"

@@ -2,16 +2,20 @@ use std::path::{Path, PathBuf};
 #[cfg(not(test))]
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use super::lock::{installation_lock_path, OwnerFileLock};
 use super::marker::{install_marker_path, is_valid_install_attempt_id};
 use super::path_identity::managed_install_path_identity_matches;
 use crate::upgrade::{platform_key, sha256_hex};
 use anyhow::{anyhow, bail, Context, Result};
+use ctx_managed_pair_engine::ManagedPairVerifier;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 mod filesystem;
-
+mod managed_pair;
+mod post_exit;
 use filesystem::*;
+use managed_pair::*;
 
 const SCHEMA_VERSION: u32 = 1;
 const JOURNAL_SUFFIX: &str = "hosted-install-transaction.json";
@@ -19,6 +23,7 @@ const MAX_MARKER_BYTES: u64 = 64 * 1024;
 const MAX_OWNERSHIP_BYTES: u64 = 1024 * 1024;
 const MAX_BINARY_BYTES: u64 = 512 * 1024 * 1024;
 const UNINSTALL_RECEIPT_SCHEMA_VERSION: u32 = 2;
+pub use post_exit::{run_hosted_uninstall_after_parent_exit, HOSTED_UNINSTALL_POST_EXIT_READY};
 #[cfg(not(test))]
 static HOSTED_UNINSTALL_FENCE_OBSERVED: AtomicBool = AtomicBool::new(false);
 
@@ -38,14 +43,12 @@ pub struct HostedTransactionArgs {
     pub ownership_source: Option<PathBuf>,
     pub binary_sha256: Option<String>,
 }
-
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum TransactionKind {
     Install,
     Uninstall,
 }
-
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum Phase {
@@ -66,7 +69,6 @@ enum Phase {
     RemovingMarker,
     Committed,
 }
-
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Journal {
@@ -90,6 +92,12 @@ struct Journal {
     ownership_sha256: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     ownership_body: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    managed_pair_state_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    managed_pair_envelope_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    managed_pair_companion_sha256: Option<String>,
     phase: Phase,
     binding_sha256: String,
 }
@@ -97,6 +105,7 @@ struct Journal {
 pub fn run(args: HostedTransactionArgs) -> Result<()> {
     reject_unexpected_inputs(&args)?;
     let install_path = validate_install_path(&args.install_path)?;
+    let _installation_lock = OwnerFileLock::acquire(&installation_lock_path(&install_path)?)?;
     match args.action {
         HostedTransactionAction::Install => install(args, install_path),
         HostedTransactionAction::UninstallPrepare => uninstall_prepare(args, install_path),
@@ -291,6 +300,9 @@ fn install(args: HostedTransactionArgs, install_path: PathBuf) -> Result<()> {
                 ownership_path,
                 ownership_sha256,
                 ownership_body,
+                managed_pair_state_sha256: None,
+                managed_pair_envelope_sha256: None,
+                managed_pair_companion_sha256: None,
                 phase: Phase::Prepared,
                 binding_sha256: String::new(),
             };
@@ -440,27 +452,28 @@ fn complete_install_with_fault(
 
 fn uninstall_prepare(args: HostedTransactionArgs, install_path: PathBuf) -> Result<()> {
     let journal_path = journal_path(&install_path);
-    let mut journal = match read_journal(&journal_path)? {
+    let (mut journal, fresh) = match read_journal(&journal_path)? {
         Some(journal) => {
             validate_journal(&journal, &install_path, TransactionKind::Uninstall)?;
             if !matches!(journal.phase, Phase::Prepared | Phase::HelperStaged) {
                 bail!("hosted uninstall transaction has already advanced past preparation");
             }
-            journal
+            (journal, false)
         }
         None => {
             let attempt_id = args
                 .attempt_id
                 .as_deref()
                 .ok_or_else(|| anyhow!("hosted uninstall missing attempt identity"))?;
-            let journal = new_uninstall_journal(&install_path, attempt_id)?;
-            write_initial_journal(&journal_path, &journal)?;
-            journal
+            (new_uninstall_journal(&install_path, attempt_id)?, true)
         }
     };
     let current = current_executable()?;
     validate_uninstall_caller(&current, &journal)?;
     let helper = uninstall_helper_path(&install_path);
+    if fresh {
+        begin_fresh_uninstall(&journal_path, &journal, &helper)?;
+    }
     if !file_has_digest(&helper, &journal.binary_sha256, MAX_BINARY_BYTES)? {
         if helper.try_exists()? {
             bail!("hosted uninstall helper does not match its recorded executable");
@@ -478,26 +491,36 @@ fn uninstall_prepare(args: HostedTransactionArgs, install_path: PathBuf) -> Resu
     print_uninstall_receipt(&journal, &helper, "prepared")
 }
 
+fn begin_fresh_uninstall(journal_path: &Path, journal: &Journal, helper: &Path) -> Result<()> {
+    // A completed Windows uninstall cannot remove its running helper. With no
+    // journal, this fixed path is only an orphan from an earlier transaction.
+    remove_durable(helper)?;
+    write_initial_journal(journal_path, journal)
+}
+
 fn uninstall_arm(_args: HostedTransactionArgs, install_path: PathBuf) -> Result<()> {
     let journal_path = journal_path(&install_path);
     let mut journal = required_uninstall_journal(&journal_path, &install_path)?;
     let current = current_executable()?;
     validate_helper_caller(&current, &journal)?;
-    verify_file_digest(
-        &install_path,
-        &journal.binary_sha256,
-        MAX_BINARY_BYTES,
-        "managed executable",
-    )?;
-    verify_file_digest(
-        &journal.marker_path,
-        &journal.marker_sha256,
-        MAX_MARKER_BYTES,
-        "managed marker",
-    )?;
-    verify_recorded_ownership(&journal)?;
-    journal.phase = Phase::Armed;
-    write_journal(&journal_path, &journal)?;
+    if matches!(journal.phase, Phase::Prepared | Phase::HelperStaged) {
+        verify_file_digest(
+            &install_path,
+            &journal.binary_sha256,
+            MAX_BINARY_BYTES,
+            "managed executable",
+        )?;
+        verify_file_digest(
+            &journal.marker_path,
+            &journal.marker_sha256,
+            MAX_MARKER_BYTES,
+            "managed marker",
+        )?;
+        verify_recorded_ownership(&journal)?;
+        verify_recorded_pair_files(&journal, true)?;
+        journal.phase = Phase::Armed;
+        write_journal(&journal_path, &journal)?;
+    }
     print_uninstall_receipt(&journal, &uninstall_helper_path(&install_path), "armed")
 }
 
@@ -511,6 +534,14 @@ fn uninstall_commit(_args: HostedTransactionArgs, install_path: PathBuf) -> Resu
 }
 
 fn new_uninstall_journal(install_path: &Path, attempt_id: &str) -> Result<Journal> {
+    new_uninstall_journal_with_optional_verifier(install_path, attempt_id, None)
+}
+
+fn new_uninstall_journal_with_optional_verifier(
+    install_path: &Path,
+    attempt_id: &str,
+    verifier: Option<&dyn ManagedPairVerifier>,
+) -> Result<Journal> {
     if !is_valid_install_attempt_id(attempt_id) {
         bail!("hosted uninstall has an invalid attempt identity");
     }
@@ -542,9 +573,13 @@ fn new_uninstall_journal(install_path: &Path, attempt_id: &str) -> Result<Journa
         ownership_path,
         ownership_sha256,
         ownership_body,
+        managed_pair_state_sha256: None,
+        managed_pair_envelope_sha256: None,
+        managed_pair_companion_sha256: None,
         phase: Phase::Prepared,
         binding_sha256: String::new(),
     };
+    snapshot_managed_pair_files(&mut journal, verifier)?;
     journal.binding_sha256 = journal_binding(&journal);
     validate_journal(&journal, install_path, TransactionKind::Uninstall)?;
     Ok(journal)
@@ -570,6 +605,8 @@ fn complete_uninstall_commit(
         bail!("hosted uninstall transaction is not armed for removal");
     }
     fault("armed")?;
+    verify_recorded_pair_files(journal, false)?;
+    remove_recorded_pair_files(journal, fault)?;
     if journal.install_path.try_exists()? {
         verify_file_digest(
             &journal.install_path,
@@ -852,6 +889,7 @@ fn validate_journal(journal: &Journal, install_path: &Path, kind: TransactionKin
             .prior_ownership_sha256
             .as_deref()
             .is_some_and(|value| !is_normalized_sha256(value))
+        || !journal_fields_are_valid(journal, install_path, kind)
         || journal.binding_sha256 != journal_binding(journal)
         || !phase_matches_kind(journal.phase, kind)
     {
@@ -928,9 +966,10 @@ fn phase_matches_kind(phase: Phase, kind: TransactionKind) -> bool {
 }
 
 fn journal_binding(journal: &Journal) -> String {
+    let pair_binding = journal_binding_suffix(journal);
     sha256_hex(
         format!(
-            "{}\0{:?}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}",
+            "{}\0{:?}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}{}",
             journal.schema_version,
             journal.kind,
             journal.attempt_id,
@@ -944,7 +983,8 @@ fn journal_binding(journal: &Journal) -> String {
                 .prior_ownership_sha256
                 .as_deref()
                 .unwrap_or_default(),
-            journal.ownership_sha256.as_deref().unwrap_or_default()
+            journal.ownership_sha256.as_deref().unwrap_or_default(),
+            pair_binding,
         )
         .as_bytes(),
     )

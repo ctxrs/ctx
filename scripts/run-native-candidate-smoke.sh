@@ -27,6 +27,23 @@ absolute_path() {
   esac
 }
 
+json_escape() {
+  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+sha256_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{ print $1 }'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{ print $1 }'
+  elif command -v sha256 >/dev/null 2>&1; then
+    sha256 -q "$1"
+  else
+    printf 'candidate smoke requires a SHA-256 command\n' >&2
+    exit 127
+  fi
+}
+
 pair_mode=false
 binary="$(absolute_path "$1")"
 if [ "$#" -eq 6 ]; then
@@ -167,21 +184,27 @@ mkdir -p "${profile}" "${data_root}" "${config_root}" "${cache_root}" \
 candidate_dir="${root}/candidate"
 if [ "${pair_mode}" = true ]; then
   case "$(uname -s):$(uname -m)" in
-    Linux:x86_64|Linux:amd64) pair_target=linux-x64 ;;
-    Linux:aarch64|Linux:arm64) pair_target=linux-arm64 ;;
-    Darwin:x86_64|Darwin:amd64) pair_target=macos-x64 ;;
-    Darwin:aarch64|Darwin:arm64) pair_target=macos-arm64 ;;
+    Linux:x86_64|Linux:amd64) pair_platform=linux-x64 ;;
+    Linux:aarch64|Linux:arm64) pair_platform=linux-aarch64 ;;
+    Darwin:x86_64|Darwin:amd64) pair_platform=macos-x64 ;;
+    Darwin:aarch64|Darwin:arm64) pair_platform=macos-arm64 ;;
     *) printf 'candidate smoke signed pairs are unsupported on this host\n' >&2; exit 1 ;;
   esac
-  command -v python3 >/dev/null 2>&1 || {
-    printf 'candidate smoke requires Python 3 for signed-pair verification\n' >&2
-    exit 127
-  }
-  candidate_dir="${root}/installation/bin"
-  python3 -I "${script_dir}/install-managed-pair.py" install \
-    --envelope "${pair_envelope}" --core "${binary}" --companion "${companion}" \
-    --install-root "${root}/installation" --target "${pair_target}" >/dev/null
-  candidate_binary="${root}/installation/bin/ctx"
+  pair_channel="${CTX_MANAGED_PAIR_CHANNEL:-stable}"
+  case "${pair_channel}" in
+    stable) staging_dogfood=false ;;
+    staging) staging_dogfood=true ;;
+    *) printf 'candidate smoke managed-pair channel must be stable or staging\n' >&2; exit 1 ;;
+  esac
+  install_root="${root}/installation"
+  candidate_dir="${install_root}/bin"
+  candidate_binary=""
+  marker_source="${root}/ctx.install.json"
+  binary_sha256="$(sha256_file "${binary}")"
+  mkdir -p "${candidate_dir}"
+  cat > "${marker_source}" <<EOF
+{"schema_version":1,"manager":"ctx-hosted-installer","install_attempt_id":"ia_native_smoke_$$","install_path":"$(json_escape "${candidate_dir}/ctx")","platform":"${pair_platform}","channel":"${pair_channel}","version":"$(json_escape "${expected_version}")","sha256":"${binary_sha256}","staging_dogfood":${staging_dogfood},"metadata_url":"native-candidate-smoke","artifact_url":"native-candidate-smoke","installed_at":"1970-01-01T00:00:00Z"}
+EOF
 else
   candidate_binary="${candidate_dir}/${binary##*/}"
   mkdir -p "${candidate_dir}"
@@ -193,10 +216,10 @@ else
     exit 1
   fi
   chmod 0700 "${candidate_binary}"
-fi
-if ! cmp -s "${binary}" "${candidate_binary}"; then
-  printf 'candidate smoke private candidate copy does not match the supplied binary\n' >&2
-  exit 1
+  if ! cmp -s "${binary}" "${candidate_binary}"; then
+    printf 'candidate smoke private candidate copy does not match the supplied binary\n' >&2
+    exit 1
+  fi
 fi
 
 # Start from an empty environment so provider overrides and user configuration
@@ -310,6 +333,28 @@ run_bounded() {
   fi
   return "${bounded_status}"
 }
+
+if [ "${pair_mode}" = true ]; then
+  pair_receipt="${root}/managed-pair-apply.json"
+  run_bounded "${pair_receipt}" "${root}/managed-pair-apply.err" clean_env \
+    "${binary}" --ctx-core-managed-pair-apply-v1 "${install_root}" - \
+    "${pair_envelope}" "${binary}" "${companion}" "${marker_source}" || {
+    cat "${root}/managed-pair-apply.err" >&2
+    printf 'candidate Core could not apply the signed managed pair\n' >&2
+    exit 1
+  }
+  if [ -s "${root}/managed-pair-apply.err" ] || ! printf '%s\n' \
+    '{"schema_version":1,"command":"managed_pair_apply","ok":true,"status":"committed"}' \
+    | cmp -s - "${pair_receipt}"; then
+    printf 'candidate Core returned an invalid managed-pair apply receipt\n' >&2
+    exit 1
+  fi
+  candidate_binary="${candidate_dir}/ctx"
+  if [ ! -x "${candidate_binary}" ] || ! cmp -s "${binary}" "${candidate_binary}"; then
+    printf 'candidate Core did not publish its exact executable bytes\n' >&2
+    exit 1
+  fi
+fi
 
 process_ids_for_binary() {
   ps -axo pid=,command= 2>/dev/null \
@@ -458,14 +503,20 @@ if ! status_top_level_bool daemon enabled true "${root}/status.json"; then
   exit 1
 fi
 status_compact="$(tr '\r\n' '  ' < "${root}/status.json")"
-# Both validation layouts deliberately omit the hosted-install marker. The
-# control inventory above proves the released `apply` default; this runtime
-# probe proves an isolated, unmanaged candidate fails safe instead of trying to
-# self-upgrade.
-if ! printf '%s\n' "${status_compact}" \
-  | grep -Eq '"upgrade"[[:space:]]*:[[:space:]]*\{[^}]*"auto"[[:space:]]*:[[:space:]]*"off"[^}]*"auto_enabled"[[:space:]]*:[[:space:]]*false'; then
-  printf 'candidate does not disable auto-upgrade in the unmanaged validation layout\n' >&2
-  exit 1
+if [ "${pair_mode}" = true ]; then
+  if ! printf '%s\n' "${status_compact}" \
+    | grep -Eq '"upgrade"[[:space:]]*:[[:space:]]*\{[^}]*"auto"[[:space:]]*:[[:space:]]*"apply"[^}]*"auto_enabled"[[:space:]]*:[[:space:]]*true'; then
+    printf 'candidate does not enable managed auto-upgrade by default\n' >&2
+    exit 1
+  fi
+else
+  # A Core-only candidate has no hosted marker, so the released `apply`
+  # default must fail safe without attempting an unmanaged self-upgrade.
+  if ! printf '%s\n' "${status_compact}" \
+    | grep -Eq '"upgrade"[[:space:]]*:[[:space:]]*\{[^}]*"auto"[[:space:]]*:[[:space:]]*"off"[^}]*"auto_enabled"[[:space:]]*:[[:space:]]*false'; then
+    printf 'candidate does not disable auto-upgrade in the unmanaged validation layout\n' >&2
+    exit 1
+  fi
 fi
 if [ ! -s "${analytics_default_events}" ]; then
   printf 'candidate did not exercise default-on analytics through the local endpoint\n' >&2
@@ -550,7 +601,7 @@ if [ -n "${survivors}" ]; then
 fi
 
 if [ "${pair_mode}" = true ]; then
-  printf '%s\n' '{"schema_version":1,"kind":"ctx-native-candidate-smoke","status":"passed","steps":{"signed_pair_install":"passed","companion_selection":"passed","version":"passed","setup":"passed","import":"passed","search":"passed","read_only":"passed","released_defaults":"passed","explicit_opt_outs":"passed","semantic_offline_fail_closed":"passed"}}' \
+  printf '%s\n' '{"schema_version":1,"kind":"ctx-native-candidate-smoke","status":"passed","steps":{"managed_pair_apply":"passed","companion_selection":"passed","version":"passed","setup":"passed","import":"passed","search":"passed","read_only":"passed","released_defaults":"passed","explicit_opt_outs":"passed","semantic_offline_fail_closed":"passed"}}' \
     > "${result_tmp}"
 else
   printf '%s\n' '{"schema_version":1,"kind":"ctx-native-candidate-smoke","status":"passed","steps":{"version":"passed","setup":"passed","import":"passed","search":"passed","read_only":"passed","released_defaults":"passed","explicit_opt_outs":"passed","semantic_offline_fail_closed":"passed"}}' \

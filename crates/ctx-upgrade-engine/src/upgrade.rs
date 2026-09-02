@@ -14,7 +14,10 @@ mod diagnostics;
 mod download;
 mod install;
 mod legacy_automatic;
+mod managed_pair;
 mod metadata;
+#[cfg(test)]
+mod metadata_tests;
 mod state;
 mod version;
 mod version_probe;
@@ -29,10 +32,11 @@ pub use install::{
     installation_hosted_uninstall_is_active_for_executable,
     invalid_install_marker_recovery_guidance, is_valid_install_attempt_id,
     managed_install_marker_for_current_exe, managed_install_path_identity_matches,
-    reconcile_current_man_pages, run_hosted_transaction, try_acquire_managed_installation_mutation,
+    reconcile_current_man_pages, run_hosted_transaction, run_hosted_uninstall_after_parent_exit,
+    try_acquire_managed_installation_mutation, try_acquire_managed_installation_mutation_at_root,
     unmanaged_install_conversion_guidance, HostedTransactionAction, HostedTransactionArgs,
     InstallMarker, ManagedInstallMarker, ManagedInstallationMutationGuard, ManagedManBundle,
-    ManagedManPage,
+    ManagedManPage, HOSTED_UNINSTALL_POST_EXIT_READY,
 };
 use state::automatic_upgrade_check_due;
 pub use state::{
@@ -300,6 +304,7 @@ pub struct UpgradePlan {
     update_available: bool,
     managed: bool,
     warnings: Vec<String>,
+    managed_pair_release: Option<metadata::ManagedPairReleaseMetadata>,
     metadata: metadata::ReleaseMetadata,
     semantic_provisioning: Option<metadata::SelectedSemanticProvisioning>,
 }
@@ -361,6 +366,36 @@ impl UpgradePlan {
 
     pub fn warnings(&self) -> &[String] {
         &self.warnings
+    }
+
+    pub fn managed_pair_envelope_url(&self) -> Option<&str> {
+        self.managed_pair_release
+            .as_ref()
+            .map(|release| release.envelope_url.as_str())
+    }
+
+    pub fn managed_pair_core_object_url(&self) -> Option<&str> {
+        self.managed_pair_release
+            .as_ref()
+            .map(|release| release.core_object_url.as_str())
+    }
+
+    pub fn managed_pair_core_sha256(&self) -> Option<&str> {
+        self.managed_pair_release
+            .as_ref()
+            .map(|release| release.core_sha256.as_str())
+    }
+
+    pub fn managed_pair_companion_object_url(&self) -> Option<&str> {
+        self.managed_pair_release
+            .as_ref()
+            .map(|release| release.companion_object_url.as_str())
+    }
+
+    pub fn managed_pair_companion_sha256(&self) -> Option<&str> {
+        self.managed_pair_release
+            .as_ref()
+            .map(|release| release.companion_sha256.as_str())
     }
 
     pub fn self_upgrade_allowed(&self) -> bool {

@@ -3,6 +3,16 @@ $ErrorActionPreference = "Stop"
 
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\.."))
 $smoke = Join-Path $repoRoot "scripts\run-native-candidate-smoke.ps1"
+$installer = Join-Path $repoRoot "scripts\install.ps1"
+$smokeSource = [IO.File]::ReadAllText($smoke)
+$installerSource = [IO.File]::ReadAllText($installer)
+if ($smokeSource -notmatch [regex]::Escape("--ctx-core-managed-pair-apply-v1") -or
+    $smokeSource -notmatch [regex]::Escape('ctx.exe.install.json') -or
+    $smokeSource -notmatch [regex]::Escape('[Text.Encoding]::UTF8.GetByteCount($pairApply.Stdout) -ne 83') -or
+    $installerSource -notmatch [regex]::Escape('[Text.Encoding]::UTF8.GetByteCount($pairResult.Stdout) -ne 83') -or
+    $installerSource -notmatch [regex]::Escape('$markerPath = "$installPath.install.json"')) {
+    throw "Windows candidate smoke does not use the single Core managed-pair authority"
+}
 $root = Join-Path ([System.IO.Path]::GetTempPath()) ("ctx-native-smoke-test-" + [Guid]::NewGuid().ToString("n"))
 New-Item -ItemType Directory -Path $root | Out-Null
 $savedCI = $env:CI
@@ -18,7 +28,8 @@ $testEnvironmentNames = @(
     "CTX_NATIVE_CANDIDATE_TEST_BINARY",
     "CTX_NATIVE_CANDIDATE_TEST_UNRELATED_PID",
     "CTX_NATIVE_CANDIDATE_TEST_ROOT_EXIT_CODE",
-    "CTX_NATIVE_CANDIDATE_COMMAND_TIMEOUT_SECONDS"
+    "CTX_NATIVE_CANDIDATE_COMMAND_TIMEOUT_SECONDS",
+    "CTX_FAKE_MANAGED_PAIR_EXTRA_OUTPUT"
 )
 $savedTestEnvironment = @{}
 foreach ($name in $testEnvironmentNames) {
@@ -117,6 +128,94 @@ exit /b 99
     $freshEpochParsed = Get-Content -LiteralPath $freshEpochResult -Raw | ConvertFrom-Json
     if ($freshEpochParsed.status -ne "passed") {
         throw "fresh-epoch candidate smoke did not pass"
+    }
+
+    $pairFake = Join-Path $root "ctx-pair.exe"
+    $pairFakeSource = @'
+using System;
+using System.IO;
+using System.Text;
+
+public static class CtxManagedPairFake {
+    private static bool Has(string[] args, string value) {
+        return Array.IndexOf(args, value) >= 0;
+    }
+
+    public static int Main(string[] args) {
+        if (args.Length == 7 && args[0] == "--ctx-core-managed-pair-apply-v1") {
+            string bin = Path.Combine(args[1], "bin");
+            string libexec = Path.Combine(args[1], "libexec");
+            string share = Path.Combine(args[1], "share", "ctx");
+            Directory.CreateDirectory(bin);
+            Directory.CreateDirectory(libexec);
+            Directory.CreateDirectory(share);
+            File.Copy(args[4], Path.Combine(bin, "ctx.exe"), true);
+            File.Copy(args[5], Path.Combine(libexec, "ctx-pro.exe"), true);
+            File.Copy(args[3], Path.Combine(share, "managed-pair-envelope.json"), true);
+            File.Copy(args[6], Path.Combine(bin, "ctx.exe.install.json"), true);
+            byte[] receipt = Encoding.UTF8.GetBytes(
+                "{\"schema_version\":1,\"command\":\"managed_pair_apply\",\"ok\":true,\"status\":\"committed\"}\n");
+            Stream stdout = Console.OpenStandardOutput();
+            stdout.Write(receipt, 0, receipt.Length);
+            if (Environment.GetEnvironmentVariable("CTX_FAKE_MANAGED_PAIR_EXTRA_OUTPUT") == "1") {
+                byte[] extra = Encoding.UTF8.GetBytes("unexpected output\n");
+                stdout.Write(extra, 0, extra.Length);
+            }
+            return 0;
+        }
+        if (Has(args, "--backend") && Has(args, "semantic")) {
+            Console.Error.WriteLine("semantic-only search will not initialize or download a model");
+            return 1;
+        }
+        if (args.Length == 1 && args[0] == "--version") {
+            Console.WriteLine("ctx 0.25.0");
+            return 0;
+        }
+        if (args.Length == 2 && args[0] == "pro" && args[1] == "--help") return 0;
+        if (args.Length > 0 && args[0] == "setup") return 0;
+        if (args.Length > 0 && args[0] == "import") {
+            Console.WriteLine("{\"totals\":{\"imported_events\":2}}");
+            return 0;
+        }
+        if (args.Length > 0 && args[0] == "search") {
+            Console.WriteLine("{\"retrieval\":{\"requested_mode\":\"lexical\",\"effective_mode\":\"lexical\"},\"results\":[{\"text\":\"Add a parser test.\"}]}");
+            return 0;
+        }
+        if (args.Length > 0 && args[0] == "status") {
+            Console.WriteLine("{\"read_only\":true,\"managed_upgrade\":{\"auto\":\"apply\",\"auto_enabled\":true},\"semantic\":{\"config_source\":\"default\",\"reason\":\"semantic_disabled\"}}");
+            return 0;
+        }
+        return 99;
+    }
+}
+'@
+    Add-Type -TypeDefinition $pairFakeSource -OutputAssembly $pairFake -OutputType ConsoleApplication
+    $pairCompanion = Join-Path $root "ctx-pro.exe"
+    $pairEnvelope = Join-Path $root "managed-pair-envelope.json"
+    [IO.File]::WriteAllText($pairCompanion, "companion", [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText($pairEnvelope, "{}", [Text.UTF8Encoding]::new($false))
+    $pairResult = Join-Path $root "pair-result.json"
+    & $smoke -Binary $pairFake -Companion $pairCompanion -PairEnvelope $pairEnvelope `
+        -Fixture $fixture -ExpectedVersion 0.25.0 -ResultPath $pairResult | Out-Null
+    $pairParsed = Get-Content -LiteralPath $pairResult -Raw | ConvertFrom-Json
+    if ($pairParsed.status -ne "passed" -or
+        $pairParsed.steps.managed_pair_apply -ne "passed" -or
+        $pairParsed.steps.companion_selection -ne "passed") {
+        throw "managed-pair candidate smoke did not pass"
+    }
+    $extraPairResult = Join-Path $root "pair-extra-output-result.json"
+    $env:CTX_FAKE_MANAGED_PAIR_EXTRA_OUTPUT = "1"
+    try {
+        & $smoke -Binary $pairFake -Companion $pairCompanion -PairEnvelope $pairEnvelope `
+            -Fixture $fixture -ExpectedVersion 0.25.0 -ResultPath $extraPairResult 2>$null | Out-Null
+        throw "candidate smoke accepted extra managed-pair receipt output"
+    } catch {
+        if ($_.Exception.Message -notmatch "invalid managed-pair apply receipt") { throw }
+    } finally {
+        $env:CTX_FAKE_MANAGED_PAIR_EXTRA_OUTPUT = $null
+    }
+    if (Test-Path -LiteralPath $extraPairResult) {
+        throw "candidate smoke wrote evidence after extra managed-pair receipt output"
     }
 
     $hung = Join-Path $root "ctx-hang.cmd"

@@ -543,22 +543,28 @@ foreach ($path in @($profile, $dataRoot, $configRoot, $cacheRoot, $stateRoot, $t
     New-Item -ItemType Directory -Path $path -Force | Out-Null
 }
 if ($pairMode) {
-    $helper = Join-Path $PSScriptRoot "install-managed-pair.py"
-    $python = Get-Command python3 -ErrorAction SilentlyContinue
-    if ($null -eq $python) {
-        $python = Get-Command python -ErrorAction SilentlyContinue
-    }
-    if ($null -eq $python -or -not (Test-Path -LiteralPath $helper -PathType Leaf)) {
-        Fail "Python 3 and install-managed-pair.py are required for signed-pair qualification"
-    }
+    $pairChannel = if ([string]::IsNullOrWhiteSpace($env:CTX_MANAGED_PAIR_CHANNEL)) { "stable" } else { $env:CTX_MANAGED_PAIR_CHANNEL }
+    if ($pairChannel -cnotin @("stable", "staging")) { Fail "managed-pair channel must be stable or staging" }
     $installRoot = Join-Path $root "installation"
-    & $python.Source -I $helper install `
-        --envelope $PairEnvelope --core $Binary --companion $Companion `
-        --install-root $installRoot --target windows-x64 | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        Fail "signed managed-pair installation failed"
+    $installedBinary = Join-Path $installRoot "bin\ctx.exe"
+    $installedMarker = "$installedBinary.install.json"
+    $markerSource = Join-Path $root "ctx.install.json"
+    New-Item -ItemType Directory -Path (Join-Path $installRoot "bin") -Force | Out-Null
+    $marker = [ordered]@{
+        schema_version = 1
+        manager = "ctx-hosted-installer"
+        install_attempt_id = "ia_native_smoke_$PID"
+        install_path = $installedBinary
+        platform = "windows-x64"
+        channel = $pairChannel
+        version = $ExpectedVersion
+        sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $Binary).Hash.ToLowerInvariant()
+        staging_dogfood = $pairChannel -ceq "staging"
+        metadata_url = "native-candidate-smoke"
+        artifact_url = "native-candidate-smoke"
+        installed_at = "1970-01-01T00:00:00Z"
     }
-    $Binary = Join-Path $installRoot "bin\ctx.exe"
+    [IO.File]::WriteAllText($markerSource, ($marker | ConvertTo-Json -Compress), [Text.UTF8Encoding]::new($false))
 }
 
 $savedLocation = (Get-Location).Path
@@ -713,14 +719,17 @@ function Invoke-CtxRaw([string[]]$Arguments) {
         }
 
         if ($null -eq $timeoutPhase -and -not $cleanupAfterExit) {
-            $text = @($stdout.GetAwaiter().GetResult(), $stderr.GetAwaiter().GetResult()) |
+            $stdoutText = $stdout.GetAwaiter().GetResult()
+            $stderrText = $stderr.GetAwaiter().GetResult()
+            $text = @($stdoutText, $stderrText) |
                 Where-Object { -not [string]::IsNullOrEmpty($_) }
             return [pscustomobject]@{
                 ExitCode = $rootExitCode
+                Stdout = $stdoutText
+                Stderr = $stderrText
                 Text = ($text -join [Environment]::NewLine).TrimEnd()
             }
         }
-
         $terminationErrors = @()
         try {
             # The root may already have exited while a descendant retains its
@@ -769,10 +778,14 @@ function Invoke-CtxRaw([string[]]$Arguments) {
                 ($Arguments -join " "))
         }
 
-        $text = @($stdout.GetAwaiter().GetResult(), $stderr.GetAwaiter().GetResult()) |
+        $stdoutText = $stdout.GetAwaiter().GetResult()
+        $stderrText = $stderr.GetAwaiter().GetResult()
+        $text = @($stdoutText, $stderrText) |
             Where-Object { -not [string]::IsNullOrEmpty($_) }
         return [pscustomobject]@{
             ExitCode = $rootExitCode
+            Stdout = $stdoutText
+            Stderr = $stderrText
             Text = ($text -join [Environment]::NewLine).TrimEnd()
         }
     } finally {
@@ -796,6 +809,22 @@ try {
         [Environment]::SetEnvironmentVariable($name, [string]$isolation[$name], "Process")
     }
     Set-Location -LiteralPath $workRoot
+
+    if ($pairMode) {
+        $pairApply = Invoke-CtxRaw @(
+            "--ctx-core-managed-pair-apply-v1", $installRoot, "-",
+            $PairEnvelope, $Binary, $Companion, $markerSource)
+        if ($pairApply.ExitCode -ne 0) {
+            Fail ("candidate Core could not apply the signed managed pair: " + $pairApply.Stderr.Trim())
+        }
+        $expectedReceipt = '{"schema_version":1,"command":"managed_pair_apply","ok":true,"status":"committed"}' + "`n"
+        if ([Text.Encoding]::UTF8.GetByteCount($pairApply.Stdout) -ne 83 -or
+            $pairApply.Stdout -cne $expectedReceipt -or $pairApply.Stderr.Length -ne 0) {
+            Fail "candidate Core returned an invalid managed-pair apply receipt"
+        }
+        if (-not (Test-Path -LiteralPath $installedMarker -PathType Leaf)) { Fail "candidate Core did not publish ctx.exe.install.json" }
+        $Binary = $installedBinary
+    }
 
     $version = Invoke-Ctx @("--version")
     if ($version.Trim() -ne "ctx $ExpectedVersion") {
@@ -878,6 +907,11 @@ try {
     if ($status -notmatch '"read_only"\s*:\s*true') {
         Fail "read-only status command returned an unexpected payload"
     }
+    if ($pairMode -and
+        ($status -notmatch '"auto"\s*:\s*"apply"' -or
+         $status -notmatch '"auto_enabled"\s*:\s*true')) {
+        Fail "candidate does not enable managed auto-upgrade by default"
+    }
     if ($status -notmatch '"config_source"\s*:\s*"default"' -or
         $status -notmatch '"reason"\s*:\s*"semantic_disabled"') {
         Fail "native candidate does not report semantic search as disabled by default"
@@ -934,7 +968,7 @@ try {
     }
     if ($pairMode) {
         $resultSteps = [ordered]@{
-            signed_pair_install = "passed"
+            managed_pair_apply = "passed"
             companion_selection = "passed"
             version = "passed"
             setup = "passed"

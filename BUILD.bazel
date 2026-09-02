@@ -770,29 +770,6 @@ py_test(
 )
 
 py_test(
-    name = "managed_pair_installer_tests",
-    srcs = [
-        "scripts/check-managed-pair-contracts.py",
-        "scripts/install-managed-pair.py",
-        "scripts/managed_pair_installer/__init__.py",
-        "scripts/managed_pair_installer/transaction_contract.py",
-        "scripts/tests/check-managed-pair-contracts-test.py",
-        "scripts/tests/install-managed-pair-test.py",
-    ],
-    main = "scripts/tests/install-managed-pair-test.py",
-    data = [
-        "contracts/ctx-managed-pair-manifest-v1.schema.json",
-        "contracts/ctx-managed-pair-release-authority-v1.json",
-        "contracts/ctx-managed-pair-release-set-v1.schema.json",
-        "contracts/ctx-managed-pair-signed-envelope-v1.schema.json",
-        "contracts/ctx-managed-pair-state-v1.schema.json",
-        "contracts/release-targets-v1.json",
-        "scripts/check-release-target-matrix.py",
-    ],
-    tags = ["release-gate"],
-)
-
-py_test(
     name = "provider_support_matrix_tests",
     srcs = [
         "scripts/check-provider-support-matrix.py",

@@ -30,6 +30,7 @@ PROD_SRCS = glob(
 )
 
 CTX_UPGRADE_ENGINE_DEPS = [
+    "//crates/ctx-companion-bridge:lib",
     "//crates/ctx-history-core:lib",
     "//crates/ctx-history-platform:lib",
     "//crates/ctx-managed-pair-engine:lib",

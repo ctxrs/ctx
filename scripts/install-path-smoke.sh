@@ -42,14 +42,29 @@ grep -F '$skillArgs = @("integrations", "install", "skill")' \
   "${repo_root}/scripts/install.ps1" >/dev/null
 grep -F 'CTX_RELEASE_MANAGED_PAIR_ENVELOPE_' \
   "${repo_root}/scripts/dev-install-from-metadata.sh" >/dev/null
-grep -F 'install-managed-pair.py' \
+grep -F 'CTX_RELEASE_MANAGED_PAIR_CORE_OBJECT_' \
   "${repo_root}/scripts/dev-install-from-metadata.sh" >/dev/null
 grep -F 'signed-managed-pair-v1' \
   "${repo_root}/scripts/dev-install-from-metadata.sh" >/dev/null
 grep -F 'CTX_RELEASE_MANAGED_PAIR_ENVELOPE_' \
   "${repo_root}/scripts/install.ps1" >/dev/null
-grep -F 'install-managed-pair.py' "${repo_root}/scripts/install.ps1" >/dev/null
+grep -F 'CTX_RELEASE_MANAGED_PAIR_CORE_OBJECT_' \
+  "${repo_root}/scripts/install.ps1" >/dev/null
 grep -F 'signed-managed-pair-v1' "${repo_root}/scripts/install.ps1" >/dev/null
+for managed_pair_caller in \
+  scripts/dev-install-from-metadata.sh \
+  scripts/install.ps1 \
+  scripts/run-native-candidate-smoke.sh \
+  scripts/run-native-candidate-smoke.ps1; do
+  grep -F -- '--ctx-core-managed-pair-apply-v1' \
+    "${repo_root}/${managed_pair_caller}" >/dev/null
+done
+if git -C "${repo_root}" grep -n -E \
+  'install-managed-pair\.py|managed_pair_installer' -- \
+  BUILD.bazel scripts ':!scripts/tests/**' ':!scripts/install-path-smoke.sh'; then
+  printf 'superseded Python managed-pair installer is still referenced\n' >&2
+  exit 1
+fi
 
 tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/ctx-install-path-smoke.XXXXXX")"
 server_pid=""
@@ -67,11 +82,31 @@ trap cleanup EXIT
 artifact="${tmp_dir}/ctx-linux-x64"
 cat > "${artifact}" <<'SH'
 #!/usr/bin/env sh
+set -eu
+if [ "${1:-}" = "--ctx-core-managed-pair-apply-v1" ]; then
+  test "$#" = 7
+  test "$3" = "-"
+  install_root="$2"
+  mkdir -p "${install_root}/bin" "${install_root}/libexec" "${install_root}/share/ctx"
+  cp "$5" "${install_root}/bin/ctx"
+  chmod 0700 "${install_root}/bin/ctx"
+  cp "$6" "${install_root}/libexec/ctx-pro"
+  chmod 0700 "${install_root}/libexec/ctx-pro"
+  cp "$4" "${install_root}/share/ctx/managed-pair-envelope.json"
+  cp "$7" "${install_root}/bin/ctx.install.json"
+  test -z "${CTX_FAKE_MANAGED_PAIR_APPLY_LOG:-}" || printf '%s\n' "$*" >> "${CTX_FAKE_MANAGED_PAIR_APPLY_LOG}"
+  printf '%s\n' '{"schema_version":1,"command":"managed_pair_apply","ok":true,"status":"committed"}'
+  test "${CTX_FAKE_MANAGED_PAIR_EXTRA_OUTPUT:-0}" != 1 || printf '%s\n' 'unexpected output'
+  exit 0
+fi
 if [ "${1:-}" = "setup" ]; then
   if [ -n "${CTX_FAKE_SETUP_ARGS_LOG:-}" ]; then
     printf '%s\n' "$@" > "${CTX_FAKE_SETUP_ARGS_LOG}"
   fi
   exit "${CTX_FAKE_SETUP_EXIT:-0}"
+fi
+if [ "${1:-}" = "pro" ] && [ "${2:-}" = "--help" ]; then
+  exit 0
 fi
 exit 0
 SH
@@ -145,6 +180,60 @@ metadata="${tmp_dir}/metadata.env"
   printf 'CTX_RELEASE_ARTIFACT_linux_aarch64=ctx-linux-aarch64\n'
   printf 'CTX_RELEASE_SHA256_linux_aarch64=%s\n' "${checksum_aarch64}"
 } > "${metadata}"
+
+pair_envelope="${tmp_dir}/managed-pair-linux-x64.json"
+printf '%s\n' '{}' > "${pair_envelope}"
+pair_companion="${tmp_dir}/ctx-pro-linux-x64"
+printf '%s\n' '#!/usr/bin/env sh' 'exit 0' > "${pair_companion}"
+chmod +x "${pair_companion}"
+pair_companion_checksum="$(sha256_file "${pair_companion}")"
+pair_core_object="sha256/${checksum}/ctx-linux-x64"
+pair_companion_object="sha256/${pair_companion_checksum}/ctx-pro-linux-x64"
+mkdir -p \
+  "${tmp_dir}/$(dirname "${pair_core_object}")" \
+  "${tmp_dir}/$(dirname "${pair_companion_object}")"
+cp "${artifact}" "${tmp_dir}/${pair_core_object}"
+cp "${pair_companion}" "${tmp_dir}/${pair_companion_object}"
+pair_metadata="${tmp_dir}/metadata-pair.env"
+cp "${metadata}" "${pair_metadata}"
+{
+  printf 'CTX_RELEASE_CHANNEL=staging\n'
+  printf 'CTX_RELEASE_MANAGED_PAIR_ENVELOPE_linux_x64=%s\n' "$(basename "${pair_envelope}")"
+  printf 'CTX_RELEASE_MANAGED_PAIR_CORE_OBJECT_linux_x64=%s\n' "${pair_core_object}"
+  printf 'CTX_RELEASE_MANAGED_PAIR_CORE_SHA256_linux_x64=%s\n' "${checksum}"
+  printf 'CTX_RELEASE_MANAGED_PAIR_COMPANION_OBJECT_linux_x64=%s\n' "${pair_companion_object}"
+  printf 'CTX_RELEASE_MANAGED_PAIR_COMPANION_SHA256_linux_x64=%s\n' "${pair_companion_checksum}"
+} >> "${pair_metadata}"
+pair_install_root="${tmp_dir}/pair-install"
+pair_apply_log="${tmp_dir}/pair-apply.log"
+mkdir -p "${tmp_dir}/pair-home"
+CTX_FAKE_MANAGED_PAIR_APPLY_LOG="${pair_apply_log}" \
+  HOME="${tmp_dir}/pair-home" PATH="/usr/bin:/bin" \
+  bash "${repo_root}/scripts/dev-install-from-metadata.sh" \
+    --metadata "${pair_metadata}" --artifact-dir "${tmp_dir}" \
+    --platform linux-x64 --bin-dir "${pair_install_root}/bin" \
+    --no-setup --no-skill --no-man --no-modify-path \
+    > "${tmp_dir}/pair-install.out"
+test "$(wc -l < "${pair_apply_log}")" = 1
+awk '$1 == "--ctx-core-managed-pair-apply-v1" && $3 == "-" && NF == 7 { found = 1 } END { exit found ? 0 : 1 }' \
+  "${pair_apply_log}"
+cmp -s "${artifact}" "${pair_install_root}/bin/ctx"
+cmp -s "${pair_companion}" "${pair_install_root}/libexec/ctx-pro"
+grep -F '"manager": "ctx-hosted-installer"' \
+  "${pair_install_root}/bin/ctx.install.json" >/dev/null
+grep -F '"staging_dogfood": true' \
+  "${pair_install_root}/bin/ctx.install.json" >/dev/null
+if CTX_FAKE_MANAGED_PAIR_EXTRA_OUTPUT=1 \
+  HOME="${tmp_dir}/pair-home" PATH="/usr/bin:/bin" \
+  bash "${repo_root}/scripts/dev-install-from-metadata.sh" \
+    --metadata "${pair_metadata}" --artifact-dir "${tmp_dir}" \
+    --platform linux-x64 --bin-dir "${tmp_dir}/pair-extra-output/bin" \
+    --no-setup --no-skill --no-man --no-modify-path \
+    > "${tmp_dir}/pair-extra-output.out" 2> "${tmp_dir}/pair-extra-output.err"; then
+  printf 'managed-pair installer accepted extra Core receipt output\n' >&2
+  exit 1
+fi
+grep -F 'invalid managed-pair apply receipt' "${tmp_dir}/pair-extra-output.err" >/dev/null
 
 runtime_stub="${tmp_dir}/ctx-onnxruntime-linux-x64.tar.gz"
 python3 - "${runtime_stub}" "${tmp_dir}" <<'PY'

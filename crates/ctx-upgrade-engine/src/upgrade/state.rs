@@ -25,6 +25,22 @@ use super::{
     SemanticLayoutPort, UpgradePlan,
 };
 
+mod managed_pair;
+#[cfg(any(windows, test))]
+pub(super) use managed_pair::validate_helper_file as validate_managed_pair_helper_file;
+#[cfg(windows)]
+pub(super) use managed_pair::{
+    acquire_helper_recovery_lock as acquire_managed_pair_helper_recovery_lock,
+    helper_recovery_hint as managed_pair_helper_recovery_hint,
+    update_helper_parent_locked as update_managed_pair_helper_parent_locked,
+};
+pub(super) use managed_pair::{
+    acquire_recovery_lock as acquire_managed_pair_recovery_lock,
+    recovery_hint as managed_pair_recovery_hint, recovery_locked as managed_pair_recovery_locked,
+    try_acquire_recovery_lock as try_acquire_managed_pair_recovery_lock,
+    write_attempt_locked as write_managed_pair_attempt_locked, ManagedPairRecovery,
+};
+
 pub const STATE_FILE: &str = "upgrade-state.json";
 pub const STATE_SCHEMA_VERSION: u64 = 1;
 const DAEMON_QUIESCENCE_LOCK_FILE: &str = "daemon-quiescence.lock";
@@ -34,7 +50,6 @@ const INITIAL_FAILURE_BACKOFF: Duration = Duration::from_secs(60);
 const MAX_FAILURE_BACKOFF: Duration = Duration::from_secs(6 * 60 * 60);
 const DUE_HINT_STATE_MAX_BYTES: u64 = 64 * 1024;
 const DUE_HINT_RECENT_ATTEMPT_GRACE: Duration = Duration::from_secs(30 * 60);
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct UpgradeAttempt {
     id: String,
@@ -123,6 +138,7 @@ impl UpgradeState {
         self.last_attempt_at = Some(utc_now());
         self.last_attempt_finished_at = None;
         self.error = None;
+        managed_pair::clear_attempt(&mut self.plan);
         attempt
     }
 
