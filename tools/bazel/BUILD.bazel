@@ -79,9 +79,10 @@ exports_files([
 
 package(default_visibility = ["//visibility:public"])
 
-# Bazel visibility owns the durable capture-runtime layering rules. Cargo path
-# dependencies are mirrored into Bazel by the existing Rust target inventory,
-# so an upward edge fails during normal target analysis without a source parser.
+# These visibility groups keep ordinary direct Bazel dependencies inside the
+# intended history layers during normal development. They are not Cargo-parity
+# checks or an audit of aliases/re-exports: review changes to these groups when
+# changing a source-family boundary.
 package_group(
     name = "history_above_capture_runtime_consumers",
     packages = [
@@ -95,17 +96,29 @@ package_group(
 package_group(
     name = "history_jsonl_consumers",
     packages = [
-        "//...",
-        "-//crates/ctx-history-capture-runtime",
+        "//crates/ctx-history-capture-composition",
+        "//crates/ctx-history-provider-claude-cursor",
+        "//crates/ctx-history-provider-codex",
+        "//crates/ctx-history-provider-fx",
+        "//crates/ctx-history-provider-gemini",
+        "//crates/ctx-history-provider-mistral-mux",
+        "//crates/ctx-history-provider-native-jsonl",
+        "//crates/ctx-history-provider-runtime",
+        "//crates/ctx-history-providers-jsonl-shared",
     ],
 )
 
 package_group(
     name = "history_source_sqlite_consumers",
     packages = [
-        "//...",
-        "-//crates/ctx-history-capture-runtime",
-        "-//crates/ctx-history-jsonl",
+        "//crates/ctx-history-provider-docproj",
+        "//crates/ctx-history-provider-hermes",
+        "//crates/ctx-history-provider-runtime",
+        "//crates/ctx-history-providers-sqlite-inventory",
+        "//crates/ctx-history-providers-sqlite-logical",
+        "//crates/ctx-history-providers-sqlite-selected",
+        "//crates/ctx-history-providers-task-docs",
+        "//crates/ctx-history-source-discovery",
     ],
 )
 

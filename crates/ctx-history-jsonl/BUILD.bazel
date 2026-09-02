@@ -3,7 +3,7 @@ load("@rules_rust//rust:defs.bzl", "rust_library")
 load("//:rust_sources.bzl", "RUST_PROD_SRC_EXCLUDES")
 load("//tools/bazel:ctx_rust.bzl", "ctx_rust_test")
 
-package(default_visibility = ["//tools/bazel:history_jsonl_consumers"])
+package(default_visibility = ["//visibility:public"])
 
 filegroup(
     name = "cargo_package_data",
@@ -41,6 +41,7 @@ rust_library(
     deps = all_crate_deps(normal = True) + JSONL_DEPS,
     proc_macro_deps = all_crate_deps(proc_macro = True),
     rustc_env = COMMON_RUSTC_ENV,
+    visibility = ["//tools/bazel:history_jsonl_consumers"],
 )
 
 rust_library(
@@ -55,6 +56,7 @@ rust_library(
     proc_macro_deps = all_crate_deps(proc_macro = True),
     rustc_env = COMMON_RUSTC_ENV,
     rustc_flags = ['--cfg=feature="test-support"'],
+    visibility = ["//tools/bazel:history_jsonl_consumers"],
 )
 
 ctx_rust_test(
