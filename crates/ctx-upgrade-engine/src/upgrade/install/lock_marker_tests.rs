@@ -12,7 +12,8 @@ use std::{ffi::OsString, os::windows::ffi::OsStringExt as _, path::PathBuf, proc
 use super::{
     absent_install_marker_error, classify_install_marker_at, install_fingerprint,
     install_marker_path, installation_is_unmanaged_at, invalid_install_marker_recovery_guidance,
-    is_valid_install_attempt_id, unmanaged_install_conversion_guidance, ManagedInstallMarker,
+    is_valid_install_attempt_id, preserve_man_pages_from_existing_marker,
+    unmanaged_install_conversion_guidance, ManagedInstallMarker,
 };
 use crate::upgrade::sha256_hex;
 
@@ -206,6 +207,30 @@ fn valid_marker_uses_the_canonical_executable_path() -> Result<()> {
         }
         other => panic!("expected valid marker, got {other:?}"),
     }
+    Ok(())
+}
+
+#[test]
+fn upgraded_marker_preserves_only_the_man_page_receipt_extension() -> Result<()> {
+    let fixture = tempdir()?;
+    let existing_path = fixture.path().join("ctx.install.json");
+    let receipt = json!({"schema_version": 1, "status": "installed"});
+    fs::write(
+        &existing_path,
+        serde_json::to_vec(&json!({
+            "man_pages": receipt,
+            "integrations_path": "old-sidecar",
+        }))?,
+    )?;
+    let mut replacement = json!({
+        "manager": "ctx-hosted-installer",
+        "integrations_path": "new-sidecar",
+    });
+
+    preserve_man_pages_from_existing_marker(&mut replacement, &existing_path)?;
+
+    assert_eq!(replacement["man_pages"], receipt);
+    assert_eq!(replacement["integrations_path"], "new-sidecar");
     Ok(())
 }
 

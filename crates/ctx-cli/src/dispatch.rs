@@ -173,6 +173,11 @@ pub(crate) fn run_cli() -> Result<()> {
     let cli = parse_cli_from(env::args_os())?;
     integrations::refresh_existing_managed_skills_on_startup(&cli.command);
     let mut ui = Ui::stdio(cli.color.into());
+    if should_reconcile_man_pages(&cli.command) {
+        ctx_upgrade_engine::reconcile_current_man_pages(|| {
+            docs::managed_man_bundle(&crate::Cli::command())
+        });
+    }
     let json_output = command_json_output(&cli.command);
     let machine_output = command_machine_readable_output(&cli.command, json_output);
     let query_authority_error_json =
@@ -524,6 +529,13 @@ pub(crate) fn run_cli() -> Result<()> {
         output_result?;
         rendered_error.map_or(Ok(()), Err)
     })
+}
+
+fn should_reconcile_man_pages(command: &CommandRoot) -> bool {
+    !matches!(
+        command,
+        CommandRoot::Docs(args) if matches!(&args.command, Some(docs::DocsCommand::Man(_)))
+    )
 }
 
 fn command_uses_foreground_finite_wait(command: &CommandRoot) -> bool {

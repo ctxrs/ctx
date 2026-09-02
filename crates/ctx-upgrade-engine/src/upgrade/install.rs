@@ -5,6 +5,7 @@ mod lock;
 mod lock_fs;
 #[cfg(test)]
 mod lock_tests;
+mod managed_man;
 mod marker;
 mod path_identity;
 mod runtime;
@@ -26,6 +27,9 @@ pub use hosted_transaction::{
     run as run_hosted_transaction, HostedTransactionAction, HostedTransactionArgs,
 };
 pub(in crate::upgrade) use lock_fs::{read_stable_file, StableFileKind};
+pub use managed_man::{
+    disable_current_man_pages, reconcile_current_man_pages, ManagedManBundle, ManagedManPage,
+};
 pub(in crate::upgrade) use marker::absent_install_marker_error;
 #[cfg(any(unix, test))]
 pub(in crate::upgrade) use marker::classify_install_marker_at;
@@ -49,6 +53,19 @@ pub(super) use transaction::{PendingRecovery, TerminalRecovery};
 use self::lock::canonical_executable;
 pub(in crate::upgrade) use self::lock::InstallationLock;
 use super::{ReleaseProcessPort, SemanticLayoutPort, UpgradePlan};
+
+/// Holds the lock shared by all mutations of one managed installation.
+pub struct ManagedInstallationMutationGuard {
+    _lock: InstallationLock,
+}
+
+/// Tries to serialize an external managed-install mutation with Core upgrades.
+pub fn try_acquire_managed_installation_mutation(
+    executable: &Path,
+) -> Result<Option<ManagedInstallationMutationGuard>> {
+    Ok(InstallationLock::try_acquire(executable)?
+        .map(|lock| ManagedInstallationMutationGuard { _lock: lock }))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct RepairRequirements {

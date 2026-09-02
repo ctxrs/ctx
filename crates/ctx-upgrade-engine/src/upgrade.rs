@@ -25,12 +25,14 @@ pub use diagnostics::{
 };
 pub use install::{
     current_exe_has_managed_install_marker_hint, current_exe_is_unmanaged, current_install_path,
-    installation_hosted_uninstall_is_active,
+    disable_current_man_pages, installation_hosted_uninstall_is_active,
     installation_hosted_uninstall_is_active_for_executable,
     invalid_install_marker_recovery_guidance, is_valid_install_attempt_id,
     managed_install_marker_for_current_exe, managed_install_path_identity_matches,
-    run_hosted_transaction, unmanaged_install_conversion_guidance, HostedTransactionAction,
-    HostedTransactionArgs, InstallMarker, ManagedInstallMarker,
+    reconcile_current_man_pages, run_hosted_transaction, try_acquire_managed_installation_mutation,
+    unmanaged_install_conversion_guidance, HostedTransactionAction, HostedTransactionArgs,
+    InstallMarker, ManagedInstallMarker, ManagedInstallationMutationGuard, ManagedManBundle,
+    ManagedManPage,
 };
 use state::automatic_upgrade_check_due;
 pub use state::{

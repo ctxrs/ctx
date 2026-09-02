@@ -5,29 +5,36 @@ the local retrieval product.
 
 ## Required Invariants
 
+The command-specific write bounds below exclude two independent startup
+maintenance paths for hosted-managed binaries. An eligible command may refresh
+an existing metadata-owned ctx skill in a recognized global agent directory;
+that path skips observational commands. Separately, after the managed binary
+changes, any ordinary command except `ctx docs man` may refresh exact
+receipt-owned, unmodified man pages and advance their receipt. Missing, legacy,
+malformed, modified, or unsafe man-page state is left alone. Both paths are
+silent, best-effort, and cannot change the requested command's result.
+
 - `ctx setup` reads supported provider history and writes only under the
   configured ctx data root: Core/Tantivy generations, optional semantic data,
   config data, and optional persistent daemon lock/status/job state when
-  automatic autostart runs. Manual setup starts no worker. As an independent
-  maintenance exception, an eligible command from a hosted-managed binary may
-  best-effort refresh an existing metadata-owned ctx skill in a recognized
-  global agent skill directory; it does not create a missing integration or
-  make an unowned copy managed.
+  automatic autostart runs. Manual setup starts no worker. Skill maintenance
+  does not create a missing integration or make an unowned copy managed.
 - `ctx sources` listing writes nothing in local-only security mode.
   `ctx sources add [--replace]` and `ctx sources remove` write only the locked,
-  durably replaced `config.toml` as their core effect; the managed-skill
-  maintenance exception above may also apply. They never modify provider
+  durably replaced `config.toml` as their core effect; the startup maintenance
+  exceptions above may also apply. They never modify provider
   history.
 - `ctx import` writes only under the configured ctx data root: Core generations,
   optional semantic data, config data, and optional daemon lock/status/job
   state when a persistent daemon or finite Core worker runs, apart from the
-  managed-skill maintenance exception above.
+  startup maintenance exceptions above.
 - Automatic background search and explicit search `--refresh wait` may request
   a bounded daemon-owned refresh of discovered native provider history before
   querying the active Core generation. Manual background search and
   `--refresh off` must not start or wake a process. The query process does not
-  write Core generations. An eligible search may use the same hosted-managed
-  existing-skill maintenance exception; `--refresh off` may not. In manual
+  write Core generations. An eligible search may use the hosted-managed skill
+  maintenance path; `--refresh off` may not. The man-page maintenance path may
+  still apply because it does not write ctx-derived search storage. In manual
   mode, an opted-in semantic or nonzero-weight
   hybrid `--refresh wait` may use the selected executor and write semantic
   projection data only after finite Core publication for the exact pinned
@@ -60,7 +67,9 @@ the local retrieval product.
   a daemon-autostart security control either.
 - `ctx docs` reads embedded documentation and writes only an explicit topic
   output path for `ctx docs show --out` or an explicit man-page output
-  directory when `ctx docs man --out` is used.
+  directory when `ctx docs man --out` is used, apart from the startup
+  maintenance exceptions above. `ctx docs man` itself skips automatic man-page
+  maintenance.
 - `ctx upgrade` uses signed release metadata with explicit self-upgrade policy
   and applies only to official installer-managed binaries with a matching
   install sidecar. Production metadata origin, detached-signature derivation,

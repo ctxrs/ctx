@@ -20,6 +20,16 @@ version, channel, binary SHA-256, metadata URL, and artifact URL. Source builds,
 `cargo install`, package-manager installs, and copied binaries without that
 marker are unmanaged and will not self-upgrade. A present but invalid marker
 is an inconsistent managed installation and also fails closed.
+
+On Unix, new official managed installations record the canonical man-page
+directory and exact file names and hashes installed there. After the managed
+binary changes, ctx makes one best-effort refresh of only those recorded pages;
+it never searches for or glob-deletes `ctx*.1`. Missing, malformed, legacy, or
+disabled receipts are ignored. Modified, missing, symlinked, unsafe, or
+unexpected paths are also left alone without affecting the command. An
+interrupted refresh may remain stale; regenerate explicitly with `ctx docs man
+--out DIR` when needed. `--no-man` and custom installer directories remain
+respected. Windows and unmanaged installations do nothing.
 `ctx upgrade status --format json` also lists every `ctx` binary found on `PATH` and
 warns when another binary shadows the managed install.
 

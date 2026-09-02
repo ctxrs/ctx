@@ -150,6 +150,11 @@ fn only_the_exact_hidden_argv_is_intercepted() {
     assert!(intercept(&["ctx".into(), INVOCATION.into()]).is_some());
     assert!(intercept(&["ctx".into(), "--ctx-core-capability-v1=x".into()]).is_none());
     assert!(intercept(&["ctx".into(), "--ctx-core-hosted-pair-install-v1=x".into()]).is_none());
+    assert!(intercept(&[
+        "ctx".into(),
+        "--ctx-core-disable-managed-man-pages-v1=x".into()
+    ])
+    .is_none());
 }
 
 #[test]
@@ -503,10 +508,12 @@ fn hosted_pair_exact_reinstall_publishes_rollback_watermark_before_companion() {
 #[test]
 fn hosted_pair_installation_is_serialized_without_persistent_lock_state() {
     let root = tempfile::tempdir().unwrap();
-    let first = acquire_hosted_install_lock(root.path()).unwrap();
-    assert!(acquire_hosted_install_lock(root.path()).is_err());
+    let executable = root.path().join("ctx");
+    std::fs::write(&executable, b"ctx").unwrap();
+    let first = acquire_hosted_install_lock(&executable).unwrap();
+    assert!(acquire_hosted_install_lock(&executable).is_err());
     drop(first);
-    assert!(acquire_hosted_install_lock(root.path()).is_ok());
+    assert!(acquire_hosted_install_lock(&executable).is_ok());
 }
 
 #[test]

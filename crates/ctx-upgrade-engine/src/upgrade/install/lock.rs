@@ -25,12 +25,15 @@ pub(in crate::upgrade) struct InstallationLock {
 
 #[cfg_attr(windows, allow(dead_code))]
 impl InstallationLock {
+    pub(in crate::upgrade) fn acquire(executable: &Path) -> Result<Self> {
+        Self::acquire_inner(executable, false)
+    }
+
     #[cfg(windows)]
     pub(in crate::upgrade) fn acquire_for_recovery(executable: &Path) -> Result<Self> {
         Self::acquire_inner(executable, true)
     }
 
-    #[cfg(windows)]
     fn acquire_inner(executable: &Path, allow_recovery_hardlink: bool) -> Result<Self> {
         let executable = executable_lock_identity(executable, allow_recovery_hardlink)?;
         validate_lock_executable(&executable, allow_recovery_hardlink)?;
@@ -81,7 +84,6 @@ pub(in crate::upgrade) struct OwnerFileLock {
 }
 
 impl OwnerFileLock {
-    #[cfg(windows)]
     pub(in crate::upgrade) fn acquire(path: &Path) -> Result<Self> {
         let file = open_lock_file(path)?;
         lock_file(&file, false)

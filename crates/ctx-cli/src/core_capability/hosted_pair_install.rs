@@ -10,11 +10,12 @@ use ctx_companion_bridge::{verify_signed_managed_pair_envelope, SignedManagedPai
 use ctx_upgrade_engine::current_install_path;
 use ctx_upgrade_engine::{
     managed_install_marker_for_current_exe, managed_install_path_identity_matches,
-    ManagedInstallMarker, VerifiedManagedPairIdentity, MANAGED_PAIR_ENVELOPE_RELATIVE_PATH,
-    MANAGED_PAIR_STATE_RELATIVE_PATH,
+    try_acquire_managed_installation_mutation, ManagedInstallMarker,
+    ManagedInstallationMutationGuard, VerifiedManagedPairIdentity,
+    MANAGED_PAIR_ENVELOPE_RELATIVE_PATH, MANAGED_PAIR_STATE_RELATIVE_PATH,
 };
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{json, Value};
 use sha2::{Digest as _, Sha256};
 
 use super::{engine_identity, write_response_frame};
@@ -90,7 +91,7 @@ pub(super) fn run(arguments: &[std::ffi::OsString]) -> Result<()> {
             "candidate install marker does not match the signed Core artifact"
         ));
     }
-    let _lock = acquire_hosted_install_lock(install_root)?;
+    let _lock = acquire_hosted_install_lock(&core)?;
     reject_hosted_rollback(install_root, &expectations, &signed_identity)?;
 
     let installed_companion = install_root.join("libexec").join(if cfg!(windows) {
@@ -121,12 +122,7 @@ pub(super) fn run(arguments: &[std::ffi::OsString]) -> Result<()> {
     )?;
     let staged_envelope =
         stage_hosted_file(&envelope, &installed_envelope, 0o600, "signed envelope")?;
-    let staged_marker = stage_hosted_file(
-        &candidate_marker,
-        &current_marker_path,
-        0o600,
-        "install marker",
-    )?;
+    let staged_marker = stage_hosted_marker(&candidate_marker, &current_marker_path)?;
     let staged_receipt =
         stage_hosted_bytes(&receipt, &installed_receipt, 0o600, "install receipt")?;
 
@@ -311,6 +307,37 @@ fn hosted_pair_receipt(identity: &VerifiedManagedPairIdentity, envelope: &[u8]) 
 fn stage_hosted_file(source: &Path, target: &Path, mode: u32, label: &str) -> Result<PathBuf> {
     let bytes = fs::read(source).with_context(|| format!("read hosted {label}"))?;
     stage_hosted_bytes(&bytes, target, mode, label)
+}
+
+/// A null candidate value asks the lock-owning Core transaction to carry the
+/// current man-page receipt forward. Fresh and explicitly disabled receipts
+/// remain authoritative as supplied by the installer.
+pub(super) fn stage_hosted_marker(candidate: &Path, current: &Path) -> Result<PathBuf> {
+    let candidate_bytes = read_bounded_file(
+        candidate,
+        MAX_HOSTED_MARKER_BYTES,
+        "candidate install marker",
+    )?;
+    let current_bytes =
+        read_bounded_file(current, MAX_HOSTED_MARKER_BYTES, "installed Core marker")?;
+    let mut next: Value = serde_json::from_slice(&candidate_bytes)
+        .context("parse candidate install marker for extensions")?;
+    let previous: Value =
+        serde_json::from_slice(&current_bytes).context("parse installed Core marker extensions")?;
+    if next.get("man_pages").is_some_and(Value::is_null) {
+        let object = next
+            .as_object_mut()
+            .ok_or_else(|| anyhow!("candidate install marker is not an object"))?;
+        if let Some(receipt) = previous.get("man_pages") {
+            object.insert("man_pages".to_owned(), receipt.clone());
+        } else {
+            object.remove("man_pages");
+        }
+    }
+    let mut bytes = serde_json::to_vec_pretty(&next)
+        .context("serialize candidate install marker extensions")?;
+    bytes.push(b'\n');
+    stage_hosted_bytes(&bytes, current, 0o600, "install marker")
 }
 
 pub(super) fn stage_hosted_file_if_changed(
@@ -588,38 +615,11 @@ pub(super) fn stage_hosted_bytes(
     Ok(staged)
 }
 
-pub(super) struct HostedInstallLock {
-    _file: File,
-}
-
-pub(super) fn acquire_hosted_install_lock(install_root: &Path) -> Result<HostedInstallLock> {
-    use fs2::FileExt as _;
-
-    let control = install_root.join("share/ctx");
-    fs::create_dir_all(&control).context("create hosted install control directory")?;
-    if fs::symlink_metadata(&control)?.file_type().is_symlink() {
-        return Err(anyhow!(
-            "hosted install control directory must not be a symlink"
-        ));
-    }
-    let path = control.join(".hosted-pair-install.lock");
-    match fs::symlink_metadata(&path) {
-        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {}
-        Ok(_) => return Err(anyhow!("hosted install lock path is unsafe")),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error).context("inspect hosted install lock"),
-    }
-    let mut options = OpenOptions::new();
-    options.read(true).write(true).create(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.mode(0o600);
-    }
-    let file = options.open(&path).context("open hosted install lock")?;
-    file.try_lock_exclusive()
-        .context("another hosted pair installation is active")?;
-    Ok(HostedInstallLock { _file: file })
+pub(super) fn acquire_hosted_install_lock(
+    executable: &Path,
+) -> Result<ManagedInstallationMutationGuard> {
+    try_acquire_managed_installation_mutation(executable)?
+        .ok_or_else(|| anyhow!("another upgrade or hosted pair installation is active"))
 }
 
 pub(super) fn replace_hosted_file(staged: &Path, target: &Path, label: &str) -> Result<()> {

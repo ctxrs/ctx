@@ -205,9 +205,12 @@ pub(in crate::upgrade) fn apply_artifact_for_attempt(
             return Err(error);
         }
         let install_attribution = existing_install_attribution(&marker_path);
-        if let Err(error) =
-            write_install_marker_to(marker_staged, plan, install_attribution.as_ref())
-        {
+        if let Err(error) = write_install_marker_to(
+            marker_staged,
+            &marker_path,
+            plan,
+            install_attribution.as_ref(),
+        ) {
             remove_unpublished_file(staged);
             remove_unpublished_file(marker_staged);
             return Err(error);
