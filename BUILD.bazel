@@ -493,6 +493,15 @@ py_test(
 )
 
 py_test(
+    name = "rust_toolchain_module_policy",
+    srcs = ["//tools/bazel:check_rust_toolchain_module_policy.py"],
+    main = "//tools/bazel:check_rust_toolchain_module_policy.py",
+    args = ["$(rootpath MODULE.bazel)"],
+    data = ["MODULE.bazel"],
+    tags = ["build-graph", "rust"],
+)
+
+py_test(
     name = "freebsd_ort_exit_contract",
     srcs = ["//tools/bazel:check_freebsd_ort_exit_contract.py"],
     main = "//tools/bazel:check_freebsd_ort_exit_contract.py",

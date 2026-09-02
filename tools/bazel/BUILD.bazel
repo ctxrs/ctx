@@ -61,6 +61,7 @@ exports_files([
     "check_freebsd_ort_exit_contract_test.py",
     "check_rust_target_inventory.py",
     "check_rust_target_inventory_test.py",
+    "check_rust_toolchain_module_policy.py",
     "ctx_rust.bzl",
     "gates.bzl",
     "history_provider_docproj_boundary.bzl",
