@@ -66,6 +66,7 @@ ctx_rust_test(
     aliases = aliases(normal_dev = True, proc_macro_dev = True),
     deps = all_crate_deps(normal = True, normal_dev = True) + CTX_AGENT_APPLICATION_DEPS + [
         "//crates/ctx-history-core:lib",
+        "//crates/ctx-history-index:lib",
     ],
     proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
     rustc_env = COMMON_RUSTC_ENV,

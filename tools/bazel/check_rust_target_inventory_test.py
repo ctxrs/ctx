@@ -4,22 +4,27 @@ import ast
 from pathlib import Path
 import subprocess
 import tempfile
+import tomllib
 import unittest
 
 try:
     from tools.bazel.check_rust_target_inventory import (
+        InventoryError,
         bazel_path_declared,
         cargo_targets,
         dependency_ownership,
         live_package_manifests,
+        local_graph,
         rust_source_owned,
     )
 except ModuleNotFoundError:
     from check_rust_target_inventory import (
+        InventoryError,
         bazel_path_declared,
         cargo_targets,
         dependency_ownership,
         live_package_manifests,
+        local_graph,
         rust_source_owned,
     )
 
@@ -29,6 +34,117 @@ def module(source: str) -> ast.Module:
 
 
 class RustTargetInventoryTest(unittest.TestCase):
+    def local_edge_fixture(
+        self,
+        *,
+        dependency_definition: str,
+        workspace_dependencies: str = "",
+        labels: tuple[str, ...] = (),
+    ) -> tuple[Path, dict[str, tuple[Path, dict[str, object]]]]:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        (root / "Cargo.toml").write_text(
+            "[workspace]\n" + workspace_dependencies,
+            encoding="utf-8",
+        )
+        consumer = root / "consumer"
+        consumer.joinpath("src").mkdir(parents=True)
+        consumer.joinpath("src/lib.rs").write_text("", encoding="utf-8")
+        label_list = (
+            " + [" + ", ".join(repr(label) for label in labels) + "]"
+            if labels
+            else ""
+        )
+        consumer.joinpath("BUILD.bazel").write_text(
+            "rust_library(\n"
+            '    name = "lib",\n'
+            '    crate_root = "src/lib.rs",\n'
+            "    deps = all_crate_deps(normal = True, build = True)"
+            + label_list
+            + ",\n)\n"
+            "ctx_rust_test(\n"
+            '    name = "unit_tests",\n'
+            '    crate_root = "src/lib.rs",\n'
+            "    deps = all_crate_deps(normal_dev = True)"
+            + label_list
+            + ",\n)\n",
+            encoding="utf-8",
+        )
+        consumer_data: dict[str, object] = {
+            "package": {"name": "consumer"},
+            **tomllib.loads(dependency_definition),
+        }
+
+        packages: dict[str, tuple[Path, dict[str, object]]] = {"consumer": (consumer, consumer_data)}
+        for name in (
+            "ctx-history-capture",
+            "ctx-history-index",
+            "ctx-history-index-format",
+            "ctx-history-index-generation",
+            "ctx-history-index-query",
+            "ctx-history-provider-native-jsonl",
+            "ctx-history-jsonl",
+            "ctx-history-source-sqlite",
+        ):
+            directory = root / "crates" / name
+            directory.mkdir(parents=True)
+            directory.joinpath("Cargo.toml").write_text(
+                f'[package]\nname = "{name}"\n', encoding="utf-8"
+            )
+            directory.joinpath("BUILD.bazel").write_text("rust_library(name = \"lib\")\n", encoding="utf-8")
+            packages[name] = (directory, {"package": {"name": name}})
+        return root, packages
+
+    def test_workspace_inherited_renamed_local_edge_needs_an_explicit_bazel_label(self) -> None:
+        root, packages = self.local_edge_fixture(
+            dependency_definition="[dependencies]\nhistory_sqlite.workspace = true\n",
+            workspace_dependencies=(
+                "[workspace.dependencies]\n"
+                'history_sqlite = { package = "ctx-history-source-sqlite", path = "crates/ctx-history-source-sqlite" }\n'
+            ),
+        )
+        with self.assertRaisesRegex(InventoryError, "explicitly declare.*ctx-history-source-sqlite"):
+            local_graph(root, packages)
+
+    def test_local_edges_require_explicit_labels_in_every_dependency_table(self) -> None:
+        cases = (
+            (
+                "dev-dependencies",
+                "ctx-history-index",
+                "[dev-dependencies]\n"
+                'ctx-history-index = { path = "../crates/ctx-history-index" }\n',
+            ),
+            (
+                "build-dependencies",
+                "ctx-history-provider-native-jsonl",
+                "[build-dependencies]\n"
+                'ctx-history-provider-native-jsonl = { path = "../crates/ctx-history-provider-native-jsonl" }\n',
+            ),
+            (
+                "target-specific dependencies",
+                "ctx-history-index-query",
+                "[target.'cfg(unix)'.dependencies]\n"
+                'ctx-history-index-query = { path = "../crates/ctx-history-index-query" }\n',
+            ),
+        )
+        for table, package, dependency_definition in cases:
+            with self.subTest(table=table, package=package):
+                root, packages = self.local_edge_fixture(
+                    dependency_definition=dependency_definition,
+                )
+                with self.assertRaisesRegex(InventoryError, f"explicitly declare.*{package}"):
+                    local_graph(root, packages)
+
+                root, packages = self.local_edge_fixture(
+                    dependency_definition=dependency_definition,
+                    labels=(f"//crates/{package}:lib",),
+                )
+                self.assertEqual(
+                    local_graph(root, packages)["consumer"],
+                    set() if table == "dev-dependencies" else {package},
+                )
+
     def test_explicit_target_does_not_hide_implicit_targets(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             package = Path(temporary)

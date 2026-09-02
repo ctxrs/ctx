@@ -148,38 +148,6 @@ pub(super) fn capture_checkpoint_test_generation(
     capture_parallel_test_generation(&CheckpointTestAdapter::default(), root, index_root, workers).0
 }
 
-pub(super) fn run_scheduler_test_capture(
-    adapter: &JsonlFamilyAdapterObject,
-    root: &Path,
-    index_root: &Path,
-    workers: usize,
-) -> SourceBackedRouteResult<JsonlFamilyScannerActivity> {
-    let (_writer, _resident, result) = capture_test_generation!(
-        adapter,
-        root,
-        index_root,
-        workers,
-        |resident, sink| capture(adapter, root, resident, sink)
-    );
-    result.map(|()| jsonl_family_scanner_activity())
-}
-
-pub(super) fn scheduler_test_repository(parent: &Path) -> PathBuf {
-    let repository = parent.join("attributed-repository");
-    fs::create_dir(&repository).unwrap();
-    repository
-}
-
-pub(super) fn write_scheduler_test_leaf(root: &Path, partition: u64, phase: usize, ordinal: usize) {
-    fs::write(
-        root.join(format!(
-            "partition-{partition:02}-phase-{phase}-leaf-{ordinal}.jsonl"
-        )),
-        b"{\"message\":\"scheduler\"}\n",
-    )
-    .unwrap();
-}
-
 pub(super) fn provider_checkpoints(receipt: &IndexCaptureCommitReceipt) -> Vec<Option<TypedKey>> {
     receipt
         .manifest()

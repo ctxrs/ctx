@@ -155,20 +155,6 @@ macro_rules! sqlite_route {
     };
 }
 
-pub const fn source_backed_route_constructor(
-    provider: CaptureProvider,
-) -> Option<SourceBackedRouteConstructor> {
-    let mut index = 0;
-    while index < LANDED_SOURCE_BACKED_ROUTES.len() {
-        let route = LANDED_SOURCE_BACKED_ROUTES[index];
-        if route.provider as usize == provider as usize {
-            return Some(route.constructor);
-        }
-        index += 1;
-    }
-    None
-}
-
 /// The central landed-adapter inventory. Adding a provider is deliberately a
 /// data entry plus one private driver registration, not a new public trait.
 pub const LANDED_SOURCE_BACKED_ROUTES: &[SourceBackedProviderRouteMetadata] = &[
