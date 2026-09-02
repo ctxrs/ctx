@@ -15,15 +15,15 @@ from typing import Any
 
 DEPENDENCY_TABLES = ("dependencies", "dev-dependencies", "build-dependencies")
 TARGET_KINDS = ("bin", "test", "example", "bench")
-VISIBILITY_RESTRICTED_LOCAL_DEPENDENCIES = {
-    "ctx-history-capture",
-    "ctx-history-index",
-    "ctx-history-index-format",
-    "ctx-history-index-generation",
-    "ctx-history-index-query",
-    "ctx-history-provider-native-jsonl",
-    "ctx-history-jsonl",
-    "ctx-history-source-sqlite",
+VISIBILITY_RESTRICTED_LOCAL_LABELS = {
+    "ctx-history-jsonl": {
+        "//crates/ctx-history-jsonl:lib",
+        "//crates/ctx-history-jsonl:test_support_lib",
+    },
+    "ctx-history-source-sqlite": {
+        "//crates/ctx-history-source-sqlite:lib",
+        "//crates/ctx-history-source-sqlite:test_support_lib",
+    },
 }
 
 
@@ -203,18 +203,13 @@ def cargo_targets(package_dir: Path, data: dict[str, Any]) -> dict[str, Path]:
 
 
 def package_bazel_modules(root: Path, package_dir: Path) -> list[ast.Module]:
-    files = [package_dir / "BUILD.bazel", *sorted(package_dir.glob("*.bzl"))]
-    if not files[0].is_file():
+    path = package_dir / "BUILD.bazel"
+    if not path.is_file():
         fail(f"Cargo package has no BUILD.bazel: {package_dir.relative_to(root)}")
-    modules: list[ast.Module] = []
-    for path in files:
-        if not path.is_file():
-            continue
-        try:
-            modules.append(ast.parse(path.read_text(encoding="utf-8"), path.as_posix()))
-        except (OSError, UnicodeError, SyntaxError) as error:
-            fail(f"cannot parse Bazel metadata {path.relative_to(root)}: {error}")
-    return modules
+    try:
+        return [ast.parse(path.read_text(encoding="utf-8"), path.as_posix())]
+    except (OSError, UnicodeError, SyntaxError) as error:
+        fail(f"cannot parse Bazel metadata {path.relative_to(root)}: {error}")
 
 
 def assignments(module: ast.Module) -> dict[str, ast.AST]:
@@ -613,13 +608,11 @@ def local_graph(
                 has_explicit_label = any(
                     label.startswith(package_label) for label in dependency_labels
                 )
-                if (
-                    target in VISIBILITY_RESTRICTED_LOCAL_DEPENDENCIES
-                    and not has_explicit_label
-                ):
+                protected_labels = VISIBILITY_RESTRICTED_LOCAL_LABELS.get(target)
+                if protected_labels and not protected_labels & dependency_labels:
                     fail(
                         f"{name} Bazel {cargo_target} must explicitly declare "
-                        "visibility-restricted "
+                        "the visibility-restricted library label for "
                         f"Cargo path dependency {target}"
                     )
                 if not has_explicit_label and required_flag not in dependency_flags:
