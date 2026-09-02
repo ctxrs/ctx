@@ -218,7 +218,7 @@ fn search_context_bytes_use_core_snippets_and_indexed_complete_session_sizes_not
         .iter()
         .map(|result| result["snippet"].as_str().unwrap().len())
         .sum::<usize>();
-    let session_id = collection.result_window.hits[0].event.session_id;
+    let session_id = collection.result_window.hits[0].event.session_id.as_uuid();
     let complete_bytes = index
         .core_events_for_session(session_id)
         .unwrap()

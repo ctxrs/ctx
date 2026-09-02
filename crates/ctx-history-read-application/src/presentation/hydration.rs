@@ -4,7 +4,8 @@ use anyhow::{anyhow, Result};
 use ctx_history_core::{MAX_CORE_CONTENT_BYTES, MAX_ENCODED_CORE_RECORD_BYTES};
 use ctx_history_index_format::search_projection::project_search_content;
 use ctx_history_index_query::{
-    CompiledSearchFilter, CoreEventPageBudget, CoreEventRecord, RankedEventRef, VerifiedIndex,
+    CompiledSearchFilter, CoreEventPageBudget, CoreEventRecord, EventRecord, RankedEventRef,
+    VerifiedIndex,
 };
 use uuid::Uuid;
 
@@ -13,9 +14,7 @@ use super::{
     SEARCH_SNIPPET_MAX_BYTES,
 };
 use crate::search::RankedSearchCollection;
-use crate::{
-    NormalizedSearchQuery, SearchCollection, SearchEventMetadata, SearchHit, SearchResultWindow,
-};
+use crate::{NormalizedSearchQuery, SearchCollection, SearchHit, SearchResultWindow};
 
 const SEARCH_CORE_RECORD_BUDGET: CoreEventPageBudget =
     CoreEventPageBudget::new(MAX_ENCODED_CORE_RECORD_BYTES, MAX_CORE_CONTENT_BYTES);
@@ -180,7 +179,7 @@ fn ranked_search_projection(
     expected: &RankedEventRef,
     query_terms: &AnalyzedQueryTerms,
     filter: &CompiledSearchFilter,
-) -> Result<(SearchEventMetadata, SearchPresentation, usize)> {
+) -> Result<(EventRecord, SearchPresentation, usize)> {
     if !filter.matches_core(&record)? {
         return Err(anyhow!(
             "pinned Core lookup no longer matches the compiled Search filter for event {}",
@@ -211,10 +210,9 @@ fn ranked_search_projection(
     })?;
     let (snippet, snippet_truncated) = search_excerpt(&projection, query_terms);
     let retained_snippet_bytes = snippet.len();
-    let metadata = SearchEventMetadata::from(&event);
     drop(projection);
     Ok((
-        metadata,
+        event,
         SearchPresentation {
             event_id: expected.event_id,
             snippet,

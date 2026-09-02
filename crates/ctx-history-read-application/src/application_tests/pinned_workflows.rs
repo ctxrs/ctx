@@ -303,8 +303,8 @@ fn semantic_and_hybrid_recall_filtered_copy_with_absent_ancestor_end_to_end() {
         let hits = &application.query().collection.result_window.hits;
         assert_eq!(hits.len(), 2);
         assert!(application.query().collection.result_window.more_available);
-        assert_eq!(hits[0].event.event_id, copied.event_id.as_uuid());
-        assert_eq!(hits[0].event.session_id, copied.session_id.as_uuid());
+        assert_eq!(hits[0].event.event_id, copied.event_id);
+        assert_eq!(hits[0].event.session_id, copied.session_id);
         assert_eq!(
             hits[0].event.provider_session_id.as_deref(),
             Some("copied-occurrence")
@@ -313,8 +313,8 @@ fn semantic_and_hybrid_recall_filtered_copy_with_absent_ancestor_end_to_end() {
             hits[0].event.event_copy.as_ref(),
             copied.event_copy.as_ref()
         );
-        assert_eq!(hits[1].event.event_id, independent.event_id.as_uuid());
-        assert_eq!(hits[1].event.session_id, independent.session_id.as_uuid());
+        assert_eq!(hits[1].event.event_id, independent.event_id);
+        assert_eq!(hits[1].event.session_id, independent.session_id);
 
         let commands = hits
             .iter()
@@ -605,6 +605,106 @@ fn structured_read_models_are_composed_from_pinned_query_results() {
     assert_eq!(record["record_type"], "event_range_event");
     assert_eq!(record["ordinal"], 0);
     assert_eq!(record["event"]["text"], "needle first");
+}
+
+#[test]
+fn event_projections_share_published_custom_metadata_and_absent_semantics() {
+    let temp = tempdir().unwrap();
+    let source = SourceKey::derive(
+        "custom",
+        "ctx_history_jsonl",
+        "catalog",
+        1,
+        SourceAnchor::CatalogLineage([42; 32]),
+    )
+    .unwrap();
+    let mut record = record_for_session(
+        &source,
+        "fixture-session",
+        2,
+        "assistant",
+        "fixture projection body",
+    );
+    record.provider_session_id = None;
+    record.occurred_at_unix_ms = None;
+    record.native_event_id = Some(
+        TypedKey::composite(vec![
+            TypedKey::utf8("fixture-provider").unwrap(),
+            TypedKey::utf8("fixture-source").unwrap(),
+            TypedKey::utf8("fixture-event").unwrap(),
+        ])
+        .unwrap(),
+    );
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    writer.begin_source(source.clone()).unwrap();
+    writer.add_core_record(record.clone()).unwrap();
+    writer.certify_source(certificate(&source, 1)).unwrap();
+    writer.commit(|_| true).unwrap();
+
+    let index = VerifiedIndex::open_pinned(temp.path()).unwrap();
+    let event = index
+        .core_event_by_id(record.event_id.as_uuid())
+        .unwrap()
+        .unwrap();
+    assert_eq!(event.core_record, record);
+
+    let event_id = event.event_id.as_uuid();
+    let session_id = event.session_id.as_uuid();
+
+    let search = crate::search_result_json(
+        &SearchHit {
+            event: event.event.clone(),
+            score: 0.75,
+            more_matches_in_session: 0,
+        },
+        &SearchPresentation {
+            event_id,
+            snippet: "fixture projection body".to_owned(),
+            snippet_truncated: false,
+        },
+        "event",
+        1,
+        &SearchResultCommands {
+            suggested_next_commands: vec!["adapter fixture command".to_owned()],
+        },
+    )
+    .unwrap();
+
+    let shown = render_show_event_read_model(&event);
+    let listed = render_event_read_model(&event, EventContentProjection::Text).unwrap();
+    let located = locate_read_model(&LocateResult::Event(Box::new(event.clone())));
+
+    for (field, expected) in [
+        ("ctx_event_id", json!(event_id)),
+        ("ctx_session_id", json!(session_id)),
+        ("provider", json!("custom")),
+        ("provider_key", json!("fixture-provider")),
+        ("source_id", json!("fixture-source")),
+    ] {
+        for (surface, value) in [
+            ("search", &search),
+            ("show", &shown),
+            ("event query", &listed),
+            ("locate", &located),
+        ] {
+            assert_eq!(value[field], expected, "{surface} {field}");
+        }
+    }
+
+    assert_eq!(search["citations"][0]["session_id"], json!(session_id));
+    assert!(listed["provider_session_id"].is_null());
+    assert!(listed["occurred_at"].is_null());
+    assert!(listed["citations"][0]["time"].is_null());
+    assert!(listed["citations"][0]["session_id"].is_null());
+    assert!(search.get("provider_session_id").is_none());
+    assert!(search.get("timestamp").is_none());
+    for value in [&shown, &located] {
+        assert!(value.get("provider_session_id").is_none());
+        assert!(value.get("occurred_at").is_none());
+    }
 }
 
 #[test]

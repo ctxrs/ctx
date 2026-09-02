@@ -182,7 +182,7 @@ fn usage_invocation(usage: McpUsage) -> Option<McpInvocation> {
 }
 
 #[cfg(test)]
-pub(crate) fn query_events_for_test(arguments: &Value, data_root: &Path) -> Result<Value> {
+fn query_events_mcp_result_for_test(arguments: &Value, data_root: &Path) -> Result<Value> {
     let request = json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -197,14 +197,10 @@ pub(crate) fn query_events_for_test(arguments: &Value, data_root: &Path) -> Resu
         .value
         .and_then(|response| response.get("result").cloned())
         .ok_or_else(|| anyhow::anyhow!("MCP query_events returned no result"))?;
-    let structured = result
-        .get("structuredContent")
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("MCP query_events returned no structured content"))?;
     if result.get("isError").and_then(Value::as_bool) == Some(true) {
-        return Err(anyhow::anyhow!(serde_json::to_string(&structured)?));
+        return Err(anyhow::anyhow!(serde_json::to_string(&result)?));
     }
-    Ok(structured)
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -214,7 +210,7 @@ pub(crate) fn render_tool_text_for_test(value: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{query_events_for_test, render_tool_text_for_test};
+    use super::{query_events_mcp_result_for_test, render_tool_text_for_test};
     use ctx_history_capture::{
         provider_source_for_path, refresh_source_backed_generation,
         register_landed_source_backed_route, SourceBackedProviderRegistry,
@@ -283,8 +279,14 @@ mod tests {
         let temp = tempdir().unwrap();
         write_query_events_fixture(temp.path());
 
-        let page =
-            query_events_for_test(&json!({"content": "full", "limit": 100}), temp.path()).unwrap();
+        let result = query_events_mcp_result_for_test(
+            &json!({"content": "full", "limit": 100}),
+            temp.path(),
+        )
+        .unwrap();
+        let page = result
+            .get("structuredContent")
+            .expect("MCP query_events returns the event page as structured content");
         assert_eq!(page["payload_type"], "event_range_page");
         let event = page["events"]
             .as_array()
