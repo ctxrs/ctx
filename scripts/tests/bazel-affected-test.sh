@@ -15,10 +15,11 @@ fail() {
   exit 1
 }
 
-mkdir -p "${repo_root}/scripts/tests/fixtures" "${repo_root}/tools/bazel" "${repo_root}/src"
+mkdir -p "${repo_root}/scripts/bazel" "${repo_root}/scripts/tests/fixtures" "${repo_root}/tools/bazel" "${repo_root}/src"
 cp "${source_root}/.bazelversion" "${repo_root}/.bazelversion"
 cp "${source_root}/scripts/bazelw" "${repo_root}/scripts/bazelw"
 cp "${source_root}/scripts/bazel-affected.sh" "${repo_root}/scripts/bazel-affected.sh"
+cp "${source_root}/scripts/bazel/workspace-status.sh" "${repo_root}/scripts/bazel/workspace-status.sh"
 cp "${source_root}/scripts/ci-common.sh" "${repo_root}/scripts/ci-common.sh"
 cp "${source_root}/scripts/tests/fixtures/fake-bazel.sh" "${repo_root}/scripts/tests/fixtures/fake-bazel.sh"
 chmod +x \
@@ -49,6 +50,79 @@ printf '%s\n' '//pkg:unfamiliar_routine' >"${query_output}"
 : >"${fake_log}"
 affected_impacted="${impacted}"
 affected_query="${query_output}"
+
+# This is intentionally a small real Bazel fixture rather than another test
+# classifier. It proves Bazel evaluates the suite and exact routing-tag query
+# used by the selector, including a query-safe punctuation label.
+real_repo="${test_root}/real-query"
+mkdir -p "${real_repo}"
+cp "${source_root}/.bazelversion" "${real_repo}/.bazelversion"
+printf 'module(name = "affected_query_fixture")\nbazel_dep(name = "rules_shell", version = "0.8.0")\n' >"${real_repo}/MODULE.bazel"
+printf '#!/usr/bin/env bash\nexit 0\n' >"${real_repo}/pass.sh"
+chmod +x "${real_repo}/pass.sh"
+cat >"${real_repo}/BUILD.bazel" <<'EOF'
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
+sh_test(
+    name = "unfamiliar+comma,equals=target",
+    srcs = ["pass.sh"],
+)
+
+sh_test(
+    name = "release_gate_test",
+    srcs = ["pass.sh"],
+    tags = ["release-gate"],
+)
+
+sh_test(
+    name = "no_cache_test",
+    srcs = ["pass.sh"],
+    tags = ["no-cache"],
+)
+
+sh_test(
+    name = "manual_test",
+    srcs = ["pass.sh"],
+    tags = ["manual"],
+)
+
+sh_test(
+    name = "nightly_test",
+    srcs = ["pass.sh"],
+    tags = ["tier-nightly"],
+)
+
+sh_test(
+    name = "release_test",
+    srcs = ["pass.sh"],
+    tags = ["tier-release"],
+)
+
+test_suite(
+    name = "affected_suite",
+    tests = [
+        ":unfamiliar+comma,equals=target",
+        ":release_gate_test",
+        ":no_cache_test",
+        ":manual_test",
+        ":nightly_test",
+        ":release_test",
+    ],
+)
+EOF
+real_test_query='kind(".*_test rule", tests(//:affected_suite))'
+real_excluded_tags='(^|\[|, )(manual|tier[-]nightly|tier[-]release)(, |\])'
+CTX_BAZEL_WORKSPACE="${real_repo}" \
+  "${source_root}/scripts/bazelw" query \
+    "${real_test_query} except attr(\"tags\", \"${real_excluded_tags}\", ${real_test_query})" \
+    --output=label | LC_ALL=C sort >"${test_root}/real-query.out"
+cat >"${test_root}/real-query.expected" <<'EOF'
+//:no_cache_test
+//:release_gate_test
+//:unfamiliar+comma,equals=target
+EOF
+cmp -s "${test_root}/real-query.expected" "${test_root}/real-query.out" \
+  || fail 'real Bazel suite/tag query did not preserve default-CI tests exactly'
 
 run_affected() {
   local stdout="$1"
@@ -124,8 +198,8 @@ grep -Fq 'tests(set(' "${fake_log}" \
   || fail 'affected query did not expand test suites'
 grep -Fq 'kind(".*_test rule"' "${fake_log}" \
   || fail 'affected query did not discard non-test rules'
-grep -Fq 'advisory|external|flaky-repetition|manual|network|no-cache|platform-native|release|requires-local-history|requires-signing|requires-vm|stress|tier-nightly|tier-release' "${fake_log}" \
-  || fail 'Bazel query did not exclude non-routine tags'
+grep -Fq '(^|\[|, )(manual|tier[-]nightly|tier[-]release)(, |\])' "${fake_log}" \
+  || fail 'Bazel query did not use exact public-CI routing tags'
 
 generate_count_before="$(grep -c '^event=generate-hashes ' "${fake_log}")"
 run_affected "${test_root}/warm.out" "${test_root}/warm.err"
@@ -148,7 +222,8 @@ for global_input in \
   "${repo_root}/MODULE.bazel" \
   "${repo_root}/MODULE.bazel.lock" \
   "${repo_root}/Cargo.lock" \
-  "${repo_root}/.bazelrc"; do
+  "${repo_root}/.bazelrc" \
+  "${repo_root}/scripts/bazel/workspace-status.sh"; do
   assert_global_fallback "${global_input}"
 done
 
@@ -159,7 +234,23 @@ run_affected "${test_root}/malformed.out" "${test_root}/malformed.err"
 grep -Fq 'invalid affected label' "${test_root}/malformed.err" \
   || fail 'malformed-label diagnostic was not emitted'
 
+printf '%s\n' '//pkg:punctuation+comma,equals=target' >"${impacted}"
+printf '%s\n' '//pkg:punctuation+comma,equals=target' >"${query_output}"
+run_affected "${test_root}/punctuation.out" "${test_root}/punctuation.err"
+[[ "$(cat "${test_root}/punctuation.out")" == '//pkg:punctuation+comma,equals=target' ]] \
+  || fail 'query-safe punctuation label did not survive selection'
+grep -Fq '//pkg:punctuation+comma,equals=target' "${fake_log}" \
+  || fail 'query-safe punctuation label was not interpolated as one Bazel label'
+
+printf '%s\n' '//pkg:focused_suite) union //...' >"${impacted}"
+run_affected "${test_root}/injection.out" "${test_root}/injection.err"
+[[ "$(cat "${test_root}/injection.out")" == '//...' ]] \
+  || fail 'query injection-shaped label did not select ci'
+grep -Fq 'invalid affected label' "${test_root}/injection.err" \
+  || fail 'query injection-shaped label diagnostic was not emitted'
+
 printf '%s\n' '//pkg:focused_suite' >"${impacted}"
+printf '%s\n' '//pkg:unfamiliar_routine' >"${query_output}"
 affected_query="${test_root}/missing-query-output"
 run_affected "${test_root}/query-failure.out" "${test_root}/query-failure.err"
 [[ "$(cat "${test_root}/query-failure.out")" == '//...' ]] \

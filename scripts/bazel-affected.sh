@@ -47,7 +47,7 @@ cleanup() {
 trap cleanup EXIT
 
 generate_selection() {
-  local impacted_set label
+  local impacted_set label test_query excluded_routing_tags
   local -a impacted_labels=() selected_labels=()
 
   {
@@ -59,7 +59,7 @@ generate_selection() {
     return 0
   fi
   if grep -Eq \
-    '(^|/)(BUILD|BUILD\.bazel|MODULE\.bazel|MODULE\.bazel\.lock|WORKSPACE|WORKSPACE\.bazel|Cargo\.lock|Cargo\.toml|\.bazelignore|\.bazelrc|\.bazelversion|[^/]+\.bzl)$|^scripts/(bazel-affected\.sh|bazelw|ci-common\.sh)$|^tools/bazel/' \
+    '(^|/)(BUILD|BUILD\.bazel|MODULE\.bazel|MODULE\.bazel\.lock|WORKSPACE|WORKSPACE\.bazel|Cargo\.lock|Cargo\.toml|\.bazelignore|\.bazelrc|\.bazelversion|[^/]+\.bzl)$|^scripts/(bazel-affected\.sh|bazelw|ci-common\.sh|bazel/workspace-status\.sh)$|^tools/bazel/' \
     "${changed}"; then
     return 12
   fi
@@ -98,8 +98,11 @@ generate_selection() {
     --output="${impacted}" || return 1
 
   # bazel-diff is the graph authority, but never interpolate its output until
-  # each label is syntactically safe. tests() expands suites; kind() leaves
-  # only executable test rules, and tags remain Bazel's authority.
+  # each label is syntactically safe for a Bazel query set(). This deliberately
+  # accepts query-safe absolute main-workspace labels, including +, , and =,
+  # rather than attempting to quote the complete Bazel label grammar. Anything
+  # else fails closed below. tests() expands suites; kind() leaves only
+  # executable test rules, and tags remain Bazel's authority.
   while IFS= read -r label || [[ -n "${label}" ]]; do
     [[ -z "${label}" ]] && continue
     if [[ ! "${label}" =~ ^//[A-Za-z0-9_@.+,=~/-]*:[A-Za-z0-9_@.+,=~/-]+$ ]]; then
@@ -111,9 +114,13 @@ generate_selection() {
   (( ${#impacted_labels[@]} > 0 )) || return 24
   impacted_set="$(printf '%s\n' "${impacted_labels[@]}" | sort -u | paste -sd ' ')"
 
-  local test_query="kind(\".*_test rule\", tests(set(${impacted_set})))"
+  test_query="kind(\".*_test rule\", tests(set(${impacted_set})))"
+  # Match whole elements of Bazel's rendered tag list. These are exactly the
+  # public CI routing exceptions; descriptive tags such as release-gate and
+  # execution tags such as no-cache remain selected.
+  excluded_routing_tags='(^|\[|, )(manual|tier[-]nightly|tier[-]release)(, |\])'
   scripts/bazelw query \
-    "${test_query} except attr(\"tags\", \".*(advisory|external|flaky-repetition|manual|network|no-cache|platform-native|release|requires-local-history|requires-signing|requires-vm|stress|tier-nightly|tier-release).*\", ${test_query})" \
+    "${test_query} except attr(\"tags\", \"${excluded_routing_tags}\", ${test_query})" \
     --output=label >"${filtered_impacted}" || return 25
 
   while IFS= read -r label || [[ -n "${label}" ]]; do

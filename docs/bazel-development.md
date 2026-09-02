@@ -167,7 +167,14 @@ mapped test does the same. Non-routine external, manual, network,
 platform, stress, and release targets stay outside affected execution. Git
 supplies changed files; after validating every bazel-diff label, Bazel's
 evaluated `tests()` expansion, test-rule kind, and tags are the sole routine
-test classifier.
+test classifier. The selector accepts only query-safe absolute main-workspace
+labels (`//package:target` with alphanumeric, `_`, `@`, `.`, `+`, `,`, `=`,
+`~`, `/`, and `-` components); malformed or broader Bazel label forms fail
+closed to default CI before entering a query. Its routing filter exactly
+matches `manual`, `tier-nightly`, and `tier-release`, as public CI does:
+descriptive tags such as `release-gate` and execution tags such as `no-cache`
+remain routine CI tests. The configured workspace-status command
+`scripts/bazel/workspace-status.sh` is build-global.
 
 `//:repository_policy_check` reads the live Git and Cargo workspaces on every
 invocation. It enforces fixed physical-line limits and discovers every Cargo

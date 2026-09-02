@@ -626,6 +626,7 @@ sh_test(
     data = [
         ".bazelversion",
         "scripts/bazel-affected.sh",
+        "scripts/bazel/workspace-status.sh",
         "scripts/bazelw",
         "scripts/ci-common.sh",
         "scripts/tests/fixtures/fake-bazel.sh",
