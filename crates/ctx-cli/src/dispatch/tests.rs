@@ -15,6 +15,24 @@ fn daemon_autostart_trigger(args: &[&str]) -> Option<DaemonTriggerCommandArg> {
 }
 
 #[test]
+fn explicit_man_generation_skips_automatic_man_reconciliation() {
+    for (args, expected) in [
+        (&["docs", "man", "--out", "/tmp/man"][..], false),
+        (&["docs", "man", "--print", "ctx"][..], false),
+        (&["docs", "list"][..], true),
+        (&["status"][..], true),
+    ] {
+        let cli = Cli::try_parse_from(std::iter::once("ctx").chain(args.iter().copied()))
+            .unwrap_or_else(|error| panic!("failed to parse {args:?}: {error}"));
+        assert_eq!(
+            should_reconcile_man_pages(&cli.command),
+            expected,
+            "{args:?}"
+        );
+    }
+}
+
+#[test]
 fn setup_handoff_is_owned_by_setup_and_machine_import_does_not_autostart() {
     for args in [
         &["setup"][..],

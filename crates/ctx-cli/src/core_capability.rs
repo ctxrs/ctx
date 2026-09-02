@@ -42,6 +42,7 @@ use setup_refresh::{
 
 const INVOCATION: &str = "--ctx-core-capability-v1";
 const HOSTED_PAIR_INSTALL_INVOCATION: &str = "--ctx-core-hosted-pair-install-v1";
+const DISABLE_MAN_PAGES_INVOCATION: &str = "--ctx-core-disable-managed-man-pages-v1";
 const POST_EXIT_INVOCATION: &str = "--ctx-core-managed-pair-swap-v1";
 const POST_EXIT_UNINSTALL_INVOCATION: &str = "--ctx-core-managed-pair-uninstall-v1";
 const MAX_FRAME_BYTES: usize = 64 * 1024;
@@ -105,6 +106,17 @@ impl Operation {
 /// Intercepts only the fixed hidden invocation. Any spelling variation stays in
 /// the ordinary public parser and receives no privileged transport.
 pub(crate) fn intercept(arguments: &[std::ffi::OsString]) -> Option<ExitCode> {
+    if arguments.len() == 2
+        && arguments
+            .get(1)
+            .is_some_and(|value| value == DISABLE_MAN_PAGES_INVOCATION)
+    {
+        return Some(if ctx_upgrade_engine::disable_current_man_pages().is_ok() {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        });
+    }
     if arguments
         .get(1)
         .is_some_and(|value| value == HOSTED_PAIR_INSTALL_INVOCATION)

@@ -344,15 +344,17 @@ generation; a failed refresh leaves the prior verified generation active.
 
 ## Command Read/Write Behavior
 
-This table describes core command effects. It excludes the independent
+This table describes direct command effects. It excludes the independent
 best-effort daily aggregate upsert to `usage.sqlite` and the optional
 first-party analytics marker described under network behavior. Disable the
-local upsert as described above. It also excludes hosted-managed skill
-maintenance: an eligible ordinary command may silently refresh an existing
-metadata-owned ctx skill in a recognized global agent directory. That
-maintenance does not install missing integrations, adopt unowned content, or
-change the command result; `status` and `search --refresh off` remain
-observational.
+local upsert as described above. It also excludes two startup maintenance paths
+for hosted-managed binaries. An eligible ordinary command may silently refresh
+an existing metadata-owned ctx skill in a recognized global agent directory;
+that path skips `status` and `search --refresh off`. Separately, after the
+managed binary changes, any ordinary command except `ctx docs man` may silently
+refresh exact receipt-owned, unmodified man pages and advance their receipt.
+Missing, legacy, malformed, modified, or unsafe man-page state is left alone.
+Neither maintenance path changes the command result.
 
 | Command | Reads | Writes |
 | --- | --- | --- |

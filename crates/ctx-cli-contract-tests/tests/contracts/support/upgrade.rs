@@ -455,6 +455,10 @@ pub(crate) fn fake_legacy_release(temp: &TempDir, latest_version: &str) -> FakeR
         "metadata_url": null,
         "artifact_url": null,
         "installed_at": installed_at,
+        "man_pages": {
+            "schema_version": 1,
+            "status": "disabled",
+        },
     });
     fs::write(
         install_marker_path(&target),

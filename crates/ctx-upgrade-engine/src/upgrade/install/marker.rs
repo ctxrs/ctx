@@ -265,6 +265,7 @@ fn verify_install_marker(marker: &InstallMarker, platform: &str) -> Result<()> {
 
 pub(super) fn write_install_marker_to(
     marker_path: &Path,
+    existing_marker_path: &Path,
     plan: &UpgradePlan,
     install_attribution: Option<&ActiveInstallAttribution>,
 ) -> Result<()> {
@@ -294,7 +295,27 @@ pub(super) fn write_install_marker_to(
             );
         }
     }
+    // The runtime owns this receipt and upgrades replace the marker atomically.
+    // Preserve only man-page ownership; integration ownership follows its
+    // pre-existing installer transaction path.
+    preserve_man_pages_from_existing_marker(&mut body, existing_marker_path)?;
     atomic_write_json(marker_path, &body)
+}
+
+pub(super) fn preserve_man_pages_from_existing_marker(
+    body: &mut Value,
+    existing_marker_path: &Path,
+) -> Result<()> {
+    let bytes = read_install_marker_bytes(existing_marker_path)?
+        .ok_or_else(|| anyhow!("existing managed install marker disappeared"))?;
+    let previous: Value =
+        serde_json::from_slice(&bytes).context("parse existing managed install marker")?;
+    if let Some(object) = body.as_object_mut() {
+        if let Some(value) = previous.get("man_pages") {
+            object.insert("man_pages".to_owned(), value.clone());
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn existing_install_attribution(marker_path: &Path) -> Option<ActiveInstallAttribution> {

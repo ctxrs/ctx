@@ -756,6 +756,23 @@ fn installed_man_pages(root_command: &Command) -> Vec<(String, Command)> {
     pages
 }
 
+/// Render the exact filesystem bundle used by `ctx docs man --out` without
+/// launching a second ctx process. The managed installer runtime owns where
+/// these bytes may be published; this helper only supplies deterministic names
+/// and content from the current in-process CLI grammar.
+pub fn managed_man_bundle(root_command: &Command) -> Result<ctx_upgrade_engine::ManagedManBundle> {
+    let mut pages = Vec::new();
+    for (name, command) in installed_man_pages(root_command) {
+        let mut bytes = Vec::new();
+        clap_mangen::Man::new(command).render(&mut bytes)?;
+        pages.push(ctx_upgrade_engine::ManagedManPage {
+            name: format!("{name}.1"),
+            bytes,
+        });
+    }
+    Ok(ctx_upgrade_engine::ManagedManBundle { pages })
+}
+
 fn unknown_doc_topic_error(id: &str) -> anyhow::Error {
     let mut message = format!("unknown ctx docs topic: {id}");
     let suggestions = suggested_doc_topics(id);
