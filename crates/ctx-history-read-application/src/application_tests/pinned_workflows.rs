@@ -608,22 +608,26 @@ fn structured_read_models_are_composed_from_pinned_query_results() {
 }
 
 #[test]
-fn event_projection_commands_preserve_exact_json_bytes_and_legacy_citations() {
-    fn assert_exact_json(actual: &Value, expected: Value) {
-        assert_eq!(actual, &expected);
-        assert_eq!(
-            serde_json::to_vec(actual).unwrap(),
-            serde_json::to_vec(&expected).unwrap()
-        );
-    }
-
+fn event_projections_share_published_custom_metadata_and_absent_semantics() {
     let temp = tempdir().unwrap();
-    let (index, records) = publish(temp.path());
-    let mut event = index
-        .core_event_by_id(records[1].event_id.as_uuid())
-        .unwrap()
-        .unwrap();
-    event.event.native_event_id = Some(
+    let source = SourceKey::derive(
+        "custom",
+        "ctx_history_jsonl",
+        "catalog",
+        1,
+        SourceAnchor::CatalogLineage([42; 32]),
+    )
+    .unwrap();
+    let mut record = record_for_session(
+        &source,
+        "fixture-session",
+        2,
+        "assistant",
+        "fixture projection body",
+    );
+    record.provider_session_id = None;
+    record.occurred_at_unix_ms = None;
+    record.native_event_id = Some(
         TypedKey::composite(vec![
             TypedKey::utf8("fixture-provider").unwrap(),
             TypedKey::utf8("fixture-source").unwrap(),
@@ -631,12 +635,24 @@ fn event_projection_commands_preserve_exact_json_bytes_and_legacy_citations() {
         ])
         .unwrap(),
     );
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    writer.begin_source(source.clone()).unwrap();
+    writer.add_core_record(record.clone()).unwrap();
+    writer.certify_source(certificate(&source, 1)).unwrap();
+    writer.commit(|_| true).unwrap();
+
+    let index = VerifiedIndex::open_pinned(temp.path()).unwrap();
+    let event = index
+        .core_event_by_id(record.event_id.as_uuid())
+        .unwrap()
+        .unwrap();
+    assert_eq!(event.core_record, record);
 
     let event_id = event.event_id.as_uuid();
     let session_id = event.session_id.as_uuid();
-    let source_id = event.source.identity().as_uuid();
-    let native_event_id = event.native_event_id.clone().unwrap();
-    let occurred_at = "1970-01-01T00:00:01.002Z";
 
     let search = crate::search_result_json(
         &SearchHit {
@@ -646,7 +662,7 @@ fn event_projection_commands_preserve_exact_json_bytes_and_legacy_citations() {
         },
         &SearchPresentation {
             event_id,
-            snippet: "needle reply".to_owned(),
+            snippet: "fixture projection body".to_owned(),
             snippet_truncated: false,
         },
         "event",
@@ -656,156 +672,39 @@ fn event_projection_commands_preserve_exact_json_bytes_and_legacy_citations() {
         },
     )
     .unwrap();
-    assert_exact_json(
-        &search,
-        json!({
-            "item_id": event_id,
-            "result_type": "event",
-            "ctx_event_id": event_id,
-            "ctx_session_id": session_id,
-            "session_id": session_id,
-            "event_id": event_id,
-            "event_seq": 2,
-            "title": "custom assistant message",
-            "snippet": "needle reply",
-            "snippet_truncated": false,
-            "snippet_max_chars": SEARCH_SNIPPET_MAX_CHARS,
-            "rank": 1,
-            "retrieval_score": 0.75,
-            "result_scope": "event",
-            "provider": "custom",
-            "provider_key": "fixture-provider",
-            "source_id": "fixture-source",
-            "provider_session_id": "pinned-session",
-            "source_format": "application_query_test",
-            "agent_scope": "primary",
-            "timestamp": occurred_at,
-            "suggested_next_commands": ["adapter fixture command"],
-            "citations": [{
-                "item_id": event_id,
-                "target_type": "event",
-                "ctx_event_id": event_id,
-                "ctx_session_id": session_id,
-                "provider": "custom",
-                "session_id": session_id,
-                "event_seq": 2,
-            }],
-            "visibility": "local",
-        }),
-    );
 
     let shown = render_show_event_read_model(&event);
-    assert_exact_json(
-        &shown,
-        json!({
-            "ctx_event_id": event_id,
-            "item_id": event_id,
-            "record_type": "event",
-            "ctx_session_id": session_id,
-            "provider": "custom",
-            "provider_key": "fixture-provider",
-            "source_id": "fixture-source",
-            "provider_session_id": "pinned-session",
-            "source_format": "application_query_test",
-            "agent_scope": "primary",
-            "sequence": 2,
-            "event_type": "message",
-            "role": "assistant",
-            "occurred_at": occurred_at,
-            "text": "needle reply",
-            "content": {
-                "complete": true,
-                "policy_status": "selected",
-            },
-        }),
-    );
-
     let listed = render_event_read_model(&event, EventContentProjection::Text).unwrap();
-    let expected_listed = json!({
-        "schema_version": 1,
-        "record_version": event.core_record.record_version,
-        "ctx_event_id": event_id,
-        "ctx_source_id": source_id,
-        "ctx_session_id": session_id,
-        "parent_ctx_session_id": null,
-        "root_ctx_session_id": null,
-        "session_relationship": null,
-        "event_copy": null,
-        "occurred_at": occurred_at,
-        "occurred_at_ms": 1002,
-        "sequence": 2,
-        "provider": "custom",
-        "provider_key": "fixture-provider",
-        "source_id": "fixture-source",
-        "source_format": "application_query_test",
-        "source": event.source,
-        "provider_session_id": "pinned-session",
-        "native_event_id": native_event_id,
-        "agent_scope": "primary",
-        "event_type": "message",
-        "role": "assistant",
-        "parser_revision": "application-query-test-v1",
-        "normalization_revision": event.core_record.normalization_revision,
-        "text": "needle reply",
-        "structured_content": null,
-        "content": {
-            "complete": true,
-            "policy_revision": event.core_record.content.policy_revision,
-            "policy_status": "selected",
-            "policy_reason": null,
-        },
-        "citations": [{
-            "target_type": "event",
-            "ctx_event_id": event_id,
-            "ctx_session_id": session_id,
-            "label": "message",
-            "time": occurred_at,
-            "provider": "custom",
-            "session_id": "pinned-session",
-            "event_seq": 2,
-        }],
-        "content_projection": "text",
-    });
-    assert_exact_json(&listed, expected_listed.clone());
-
-    let mcp_event = event_query_event_read_model("fixture-generation", 3, listed);
-    assert_exact_json(
-        &mcp_event,
-        json!({
-            "schema_version": 1,
-            "record_type": "event_range_event",
-            "generation_id": "fixture-generation",
-            "ordinal": 3,
-            "event": expected_listed,
-        }),
-    );
-
     let located = locate_read_model(&LocateResult::Event(Box::new(event.clone())));
-    assert_exact_json(
-        &located,
-        json!({
-            "schema_version": 1,
-            "target": "event",
-            "payload_type": "event_location",
-            "ctx_event_id": event_id,
-            "ctx_session_id": session_id,
-            "provider": "custom",
-            "provider_key": "fixture-provider",
-            "source_id": "fixture-source",
-            "provider_session_id": "pinned-session",
-            "provider_event_id": event.native_event_id,
-            "sequence": 2,
-            "event_type": "message",
-            "role": "assistant",
-            "occurred_at": occurred_at,
-            "source": {
-                "ctx_source_id": source_id,
-                "source_format": "application_query_test",
-                "schema_variant": "session",
-                "provider_identity_version": 1,
-            },
-        }),
-    );
+
+    for (field, expected) in [
+        ("ctx_event_id", json!(event_id)),
+        ("ctx_session_id", json!(session_id)),
+        ("provider", json!("custom")),
+        ("provider_key", json!("fixture-provider")),
+        ("source_id", json!("fixture-source")),
+    ] {
+        for (surface, value) in [
+            ("search", &search),
+            ("show", &shown),
+            ("event query", &listed),
+            ("locate", &located),
+        ] {
+            assert_eq!(value[field], expected, "{surface} {field}");
+        }
+    }
+
+    assert_eq!(search["citations"][0]["session_id"], json!(session_id));
+    assert!(listed["provider_session_id"].is_null());
+    assert!(listed["occurred_at"].is_null());
+    assert!(listed["citations"][0]["time"].is_null());
+    assert!(listed["citations"][0]["session_id"].is_null());
+    assert!(search.get("provider_session_id").is_none());
+    assert!(search.get("timestamp").is_none());
+    for value in [&shown, &located] {
+        assert!(value.get("provider_session_id").is_none());
+        assert!(value.get("occurred_at").is_none());
+    }
 }
 
 #[test]

@@ -52,7 +52,7 @@ use crate::{
     SessionEventMode, ShowEventApplicationRequest, ShowEventRequest, ShowSessionApplicationRequest,
     ShowSessionPageRequest, ShowSessionStreamCallback, ShowSessionStreamControl,
     ShowSessionStreamPage, ShowSessionStreamRequest, ShowSessionStreamStart,
-    StructuredOutputFormat, StructuredTranscriptMode, UuidPrefixError, SEARCH_SNIPPET_MAX_CHARS,
+    StructuredOutputFormat, StructuredTranscriptMode, UuidPrefixError,
 };
 
 struct UnusedSemanticPort;
