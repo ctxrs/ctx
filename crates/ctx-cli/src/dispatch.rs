@@ -171,6 +171,7 @@ pub(crate) fn run_cli() -> Result<()> {
     let started = Instant::now();
     let output_measurement = OutputMeasurement::start();
     let cli = parse_cli_from(env::args_os())?;
+    integrations::refresh_existing_managed_skills_on_startup(&cli.command);
     let mut ui = Ui::stdio(cli.color.into());
     let json_output = command_json_output(&cli.command);
     let machine_output = command_machine_readable_output(&cli.command, json_output);

@@ -216,14 +216,22 @@ modified skill files unless you pass `--force`. The command only manages the
 bundled ctx skill and does not fetch arbitrary remote skills. Without target
 flags, status uses the same default maintenance set as install.
 
+After a hosted-managed CLI upgrade, the first ordinary maintenance-capable run
+also makes a best-effort refresh of existing managed global copies. It does not
+install into missing agent folders, adopt local files, update plugins, emit
+user-facing output, or affect the requested command's result. Failed refreshes
+stay stale; a later eligible run retries when ownership remains provable, and
+an explicit install repairs ambiguous states.
+
 `integrations remove skill` removes current or stale ctx-managed copies and is
 an idempotent no-op when they are absent. Modified or unowned files are
 preserved unless `--force` is passed. Removal never deletes the parent skill
 directory, unrelated files, or plugin-manager-owned copies.
 
-The 1.0 installer performs a one-way migration from a managed
+The installer performs a one-way, current-first migration from a managed
 `ctx-agent-history-search` directory to `ctx`. It preserves a locally edited
-legacy skill unless `--force` is passed.
+legacy skill unless `--force` is passed; failed legacy cleanup may temporarily
+leave both names present.
 
 ## Integrations
 
