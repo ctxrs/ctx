@@ -533,7 +533,7 @@ impl ctx_daemon_cli::DaemonCliHost for CtxDaemonCliHost {
     fn load_config(&self, data_root: &Path) -> Result<DaemonRuntimeConfig> {
         let config = ctx_app_config::AppConfig::load(data_root)?;
         if !config.analytics.enabled {
-            crate::analytics::send_batch(data_root, &config, &[]);
+            crate::analytics::send_batch(data_root, &[]);
         }
         Ok(owned_daemon_cli_config(config))
     }
@@ -565,13 +565,11 @@ impl ctx_daemon_cli::DaemonCliHost for CtxDaemonCliHost {
     }
 
     fn deliver_daemon_events(&self, data_root: &Path, events: &[PublicEventV1]) {
-        if events.is_empty() {
-            return;
-        }
-        let Ok(config) = ctx_app_config::AppConfig::load(data_root) else {
-            return;
-        };
-        crate::analytics::send_daemon_batch(data_root, &config, events);
+        crate::analytics::send_batch(data_root, events);
+    }
+
+    fn upload_daemon_events(&self, data_root: &Path, events: &[PublicEventV1]) {
+        crate::analytics::send_daemon_batch(data_root, events);
     }
 
     fn fetch_to_writer(

@@ -244,7 +244,23 @@ pub(super) fn runtime_event(
     PublicEventV1::RuntimeObservation(RuntimeObservationV1::daemon(observation, outcome, duration))
 }
 
-pub(super) fn send_daemon_events(
+pub(super) fn deliver_active(
+    observation: &dyn DaemonObservationPort,
+    data_root: &Path,
+    uploader_enabled: bool,
+    events: &[PublicEventV1],
+) {
+    if events.is_empty() && !uploader_enabled {
+        return;
+    }
+    if uploader_enabled {
+        observation.append_and_upload(data_root, events);
+    } else {
+        observation.append(data_root, events);
+    }
+}
+
+pub(super) fn append_terminal_events(
     observation: &dyn DaemonObservationPort,
     data_root: &Path,
     events: &[PublicEventV1],
@@ -252,12 +268,102 @@ pub(super) fn send_daemon_events(
     if events.is_empty() {
         return;
     }
-    observation.deliver(data_root, events);
+    observation.append(data_root, events);
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::*;
+
+    #[derive(Default)]
+    struct RecordingObservation {
+        deliveries: Mutex<Vec<(usize, bool)>>,
+    }
+
+    impl RecordingObservation {
+        fn deliveries(&self) -> Vec<(usize, bool)> {
+            self.deliveries
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+        }
+    }
+
+    impl DaemonObservationPort for RecordingObservation {
+        fn provider_refresh_event(
+            &self,
+            _job: &serde_json::Value,
+            _successor_pending: bool,
+        ) -> Option<PublicEventV1> {
+            None
+        }
+
+        fn append(&self, _data_root: &Path, events: &[PublicEventV1]) {
+            self.deliveries
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push((events.len(), false));
+        }
+
+        fn append_and_upload(&self, _data_root: &Path, events: &[PublicEventV1]) {
+            self.deliveries
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push((events.len(), true));
+        }
+    }
+
+    fn test_run() -> DaemonRunFactsV1 {
+        DaemonRunFactsV1::new(
+            crate::analytics::DaemonStartModeV1::Manual,
+            crate::analytics::DaemonSupervisorV1::User,
+            None,
+        )
+    }
+
+    #[test]
+    fn active_empty_tick_requests_upload() {
+        let observation = RecordingObservation::default();
+
+        deliver_active(&observation, Path::new("test-root"), true, &[]);
+
+        assert_eq!(observation.deliveries(), [(0, true)]);
+    }
+
+    #[test]
+    fn finite_worker_events_append_without_upload() {
+        let observation = RecordingObservation::default();
+        let started = Instant::now();
+        let telemetry = DaemonTelemetry::new(test_run(), started, 0);
+        let events = telemetry.ready_events(false, started);
+
+        deliver_active(&observation, Path::new("test-root"), false, &events);
+
+        assert_eq!(observation.deliveries(), [(1, false)]);
+    }
+
+    #[test]
+    fn fatal_and_stopped_events_append_without_upload() {
+        let observation = RecordingObservation::default();
+        let started = Instant::now();
+        let mut fatal = DaemonTelemetry::new(test_run(), started, 0);
+        let mut stopped = DaemonTelemetry::new(test_run(), started, 1);
+
+        append_terminal_events(
+            &observation,
+            Path::new("test-root"),
+            &fatal.fatal_events(started),
+        );
+        append_terminal_events(
+            &observation,
+            Path::new("test-root"),
+            &stopped.stopped_events(false, started),
+        );
+
+        assert_eq!(observation.deliveries(), [(1, false), (1, false)]);
+    }
 
     #[test]
     fn safety_reconciliation_admits_a_sixty_minute_hermes_deadline_within_eighty_minutes() {

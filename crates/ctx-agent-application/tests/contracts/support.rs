@@ -25,6 +25,7 @@ pub(crate) use mcp::*;
 const BOUND_CTX_BINARY_TEST_ROOT_MARKER: &str = ".ctx-test-bound-binary";
 const READY_CTX_BINARY_TEST_ROOT_MARKER: &str = ".ctx-test-copy-ready";
 const PERSISTENT_DAEMON_TEST_ROOT_MARKER: &str = ".ctx-test-owned-daemon";
+const ANALYTICS_OUTBOX_FILE: &str = "analytics-outbox-v1.json";
 const DAEMON_STOP_TIMEOUT: Duration = Duration::from_secs(5);
 const DAEMON_STOP_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
@@ -382,11 +383,68 @@ pub(crate) fn ctx_product_version(temp: &TempDir) -> String {
         .to_owned()
 }
 
-pub(crate) fn read_analytics_events(path: &Path) -> Vec<Value> {
-    fs::read_to_string(path)
-        .unwrap()
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
+pub(crate) fn analytics_outbox_paths(root: &Path) -> Vec<PathBuf> {
+    fn visit(directory: &Path, outboxes: &mut Vec<PathBuf>) {
+        let entries = fs::read_dir(directory).unwrap_or_else(|error| {
+            panic!(
+                "inspect hermetic analytics root {}: {error}",
+                directory.display()
+            )
+        });
+        for entry in entries {
+            let entry = entry.unwrap_or_else(|error| {
+                panic!(
+                    "inspect analytics entry under {}: {error}",
+                    directory.display()
+                )
+            });
+            let file_type = entry.file_type().unwrap_or_else(|error| {
+                panic!("inspect analytics path {}: {error}", entry.path().display())
+            });
+            if file_type.is_symlink() {
+                continue;
+            }
+            if file_type.is_dir() {
+                visit(&entry.path(), outboxes);
+            } else if file_type.is_file() && entry.file_name() == ANALYTICS_OUTBOX_FILE {
+                outboxes.push(entry.path());
+            }
+        }
+    }
+
+    let mut outboxes = Vec::new();
+    if root.is_dir() {
+        visit(root, &mut outboxes);
+    }
+    outboxes.sort();
+    outboxes
+}
+
+pub(crate) fn read_queued_analytics_events(root: &Path) -> Vec<Value> {
+    analytics_outbox_paths(root)
+        .into_iter()
+        .flat_map(|outbox| {
+            let state: Value = serde_json::from_slice(&fs::read(&outbox).unwrap_or_else(|error| {
+                panic!("read analytics outbox {}: {error}", outbox.display())
+            }))
+            .unwrap_or_else(|error| panic!("parse analytics outbox {}: {error}", outbox.display()));
+            state["entries"]
+                .as_array()
+                .unwrap_or_else(|| panic!("analytics outbox has no entries array: {state:#}"))
+                .iter()
+                .map(|entry| {
+                    let payload = entry["payload"].as_str().unwrap_or_else(|| {
+                        panic!("analytics outbox entry has no JSON payload: {entry:#}")
+                    });
+                    serde_json::from_str(payload).unwrap_or_else(|error| {
+                        panic!(
+                            "parse queued analytics payload in {}: {error}",
+                            outbox.display()
+                        )
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
         .collect()
 }
 

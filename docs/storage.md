@@ -918,22 +918,40 @@ random UUID used only for analytics events; it lives outside the ctx data root
 in OS user state, such as `$XDG_STATE_HOME/ctx/device.json` or
 `~/.local/state/ctx/device.json` on Linux. When a capability snapshot is
 eligible, ctx creates a private versioned claim in that state directory and
-promotes it to a version marker after network acceptance or durable local
-queueing. A failed or uncertain local handoff does not change command output or
-exit status and leaves the claim in place to avoid replay.
+promotes it to a version marker after durable local queueing. A failed or
+uncertain local handoff does not change command output or exit status and leaves
+the claim in place to avoid replay.
 
-If delivery fails, ctx stores the exact already-serialized content-free batch
-in the same OS user-state directory as `analytics-outbox-v1.json`. The file is
+Foreground CLI and MCP commands never open a telemetry connection. They
+serialize each eligible event once, preserving its UUIDv4 event ID in the exact
+content-free batch body, and durably append that body to
+`analytics-outbox-v1.json` in the same OS user-state directory. The file is
 owner-private, is never stored under the ctx data root, and contains no response
 body or raw error. It stores a one-way endpoint fingerprint plus queue time and
-attempt bookkeeping so a payload is not replayed to a different endpoint. ctx
-retries up to 10 queued batches per delivery call and bounds the outbox to 128
-entries, 2 MiB total, 512 KiB per batch, and 30 days. Oldest entries are dropped
-when a bound is reached, and the drop is reported only through the closed
-delivery-health fields. If this owner-private file is malformed or oversized,
-ctx replaces it with an empty valid outbox and reports one `local_io` drop on
-the next successful delivery. Unsafe paths, links, and permissions still fail
-closed instead of being replaced.
+attempt bookkeeping so a payload is not replayed to a different endpoint. If
+the persistent daemon is disabled or absent, entries remain local until a later
+daemon run delivers them or the bounds below expire them.
+
+The enabled persistent daemon is the sole telemetry network uploader. It drains
+on startup, active wakes, and periodic cycles. Each drain briefly locks and
+snapshots up to 10 entries, releases the state lock while HTTP executes under
+one approximately two-second deadline, then re-locks to reconcile exact outbox
+entry IDs. Foreground writers therefore never wait behind a slow request. Only
+a final 2xx response removes an accepted entry; a crash after server acceptance
+replays the unchanged event IDs and relies on server idempotency. Network
+failures, HTTP 408/429, and 5xx responses retry under persisted capped
+exponential backoff with jitter. A valid bounded `Retry-After` can extend the
+delay. Other permanent HTTP rejections are dropped, and daemon shutdown appends
+its terminal event without starting another request.
+
+Delivery retry, drop, age, and failure counters are coalesced into one closed
+`analytics_delivery_observation@1` only after an ordinary payload is accepted.
+Failure to deliver that health event never recursively creates another health
+event. The outbox is bounded to 128 entries, 2 MiB total, 512 KiB per batch, and
+30 days. Oldest entries are dropped when a bound is reached. If this
+owner-private file is malformed or oversized, ctx replaces it with an empty
+valid outbox and reports one `local_io` drop after delivery recovers. Unsafe
+paths, links, and permissions still fail closed instead of being replaced.
 
 For an official hosted installation, eligible product-analytics
 events may also carry the installer attempt identifier for less than seven days

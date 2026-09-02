@@ -189,7 +189,7 @@ impl ctx_daemon_application::DaemonApplicationHost for CliDaemonApplicationHost<
     }
 
     fn deliver_daemon_events(&self, data_root: &Path, events: &[PublicEventV1]) {
-        super::daemon_service_ports::OBSERVATION.deliver(data_root, events);
+        super::daemon_service_ports::OBSERVATION.append(data_root, events);
     }
 }
 

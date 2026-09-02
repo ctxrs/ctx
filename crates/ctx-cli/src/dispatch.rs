@@ -48,7 +48,8 @@ mod semantic_completion_error;
 mod test_support;
 
 use finalization::{
-    complete_local_usage, flush_cli_output, record_search_final_delivery, send_online_after_output,
+    complete_local_usage, flush_cli_output, record_analytics_after_output,
+    record_search_final_delivery,
 };
 use parse::parse_cli_from;
 
@@ -510,8 +511,8 @@ pub(crate) fn run_cli() -> Result<()> {
             ));
         }
     }
-    let output_result = send_online_after_output(output_result, || {
-        analytics::send_batch(&data_root, &config, &events);
+    let output_result = record_analytics_after_output(output_result, || {
+        analytics::send_batch(&data_root, &events);
     });
     if result.is_ok() {
         if let Some(trigger) = daemon_autostart_trigger {

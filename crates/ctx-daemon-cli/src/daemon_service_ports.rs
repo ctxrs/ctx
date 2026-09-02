@@ -290,16 +290,17 @@ impl DaemonObservationPort for CliDaemonObservationPort {
         provider_refresh::provider_refresh_event(job, successor_pending)
     }
 
-    fn deliver(&self, data_root: &Path, events: &[PublicEventV1]) {
-        if events.is_empty() {
-            return;
-        }
-        crate::analytics::send_batch(data_root, events);
+    fn append(&self, data_root: &Path, events: &[PublicEventV1]) {
+        crate::analytics::append_batch(data_root, events);
+    }
+
+    fn append_and_upload(&self, data_root: &Path, events: &[PublicEventV1]) {
+        crate::analytics::append_and_upload_batch(data_root, events);
     }
 }
 
 pub fn deliver_daemon_events(data_root: &Path, events: &[PublicEventV1]) {
-    OBSERVATION.deliver(data_root, events);
+    OBSERVATION.append(data_root, events);
 }
 
 pub(super) struct CliDaemonArtifactFetcher;

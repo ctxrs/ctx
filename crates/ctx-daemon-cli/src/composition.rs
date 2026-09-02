@@ -200,6 +200,7 @@ pub trait DaemonCliHost: Send + Sync {
         config: &DaemonRuntimeConfig,
     ) -> Result<()>;
     fn deliver_daemon_events(&self, data_root: &Path, events: &[PublicEventV1]);
+    fn upload_daemon_events(&self, data_root: &Path, events: &[PublicEventV1]);
     fn fetch_to_writer(
         &self,
         endpoint: &str,
@@ -305,6 +306,8 @@ impl DaemonCliHost for TestHost {
     }
 
     fn deliver_daemon_events(&self, _data_root: &Path, _events: &[PublicEventV1]) {}
+
+    fn upload_daemon_events(&self, _data_root: &Path, _events: &[PublicEventV1]) {}
 
     fn fetch_to_writer(
         &self,

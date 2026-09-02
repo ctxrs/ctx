@@ -28,8 +28,8 @@ or at least seven days old; managed upgrades preserve the original timestamp.
 
 Each outbound batch contains at most 50 events. A pending capability snapshot is
 attached only to events in the first batch and is acknowledged after that batch
-is accepted by the network service or durably handed to the bounded local
-outbox. Failure of both paths leaves the claim unacknowledged.
+is durably handed to the bounded local outbox. A failed local handoff leaves the
+claim unacknowledged.
 
 `operation_completed@1` records one terminal event for an eligible operation.
 `provider_refresh_completed@1` records one completed aggregate for every
@@ -77,11 +77,28 @@ free-form failure or rewrite reasons. Exact CPU time, resident memory, worker
 counts, preparation bytes, Store receipts, and journal sizes are never
 serialized; unavailable runtime dimensions are omitted rather than inferred.
 
-Failed batch delivery uses an owner-private, cross-process-locked local outbox.
-It preserves the original serialized event IDs, binds each entry to a one-way
-endpoint fingerprint, retries at most 10 entries per delivery call, and is
-bounded to 128 entries, 2 MiB total, 512 KiB per entry, and 30 days. An explicit
-analytics opt-out removes the outbox the next time ctx opens analytics state.
+Foreground CLI and MCP producers perform no telemetry network I/O. They
+serialize each eligible event once, preserving its UUIDv4 event ID in the exact
+batch body, and durably append that body to an owner-private,
+cross-process-locked local outbox. If the persistent daemon is disabled or
+absent, entries remain local until later delivery or bounded expiry.
+
+The enabled persistent daemon is the sole network uploader. On startup, active
+wakes, and periodic cycles it briefly locks and snapshots at most 10 entries,
+releases the state lock before HTTP, then re-locks to reconcile exact outbox
+entry IDs. Only a final 2xx response removes an accepted entry. A crash after
+server acceptance therefore replays the unchanged event IDs, which the server
+treats idempotently. Network failures, HTTP 408/429, and 5xx responses retry
+under persisted capped exponential backoff with jitter; bounded `Retry-After`
+can extend that delay. Other permanent HTTP rejections are dropped. Daemon
+shutdown appends terminal events without starting another upload.
+
+Delivery failures are coalesced into one closed
+`analytics_delivery_observation@1` only after ordinary delivery recovers;
+failure to deliver that health event does not recursively create another one.
+The outbox binds each entry to a one-way endpoint fingerprint and is bounded to
+128 entries, 2 MiB total, 512 KiB per entry, and 30 days. An explicit analytics
+opt-out removes it the next time ctx opens analytics state, before any drain.
 Malformed or oversized owner-private state resets to an empty valid outbox and
-later reports one `local_io` drop; unsafe paths or permissions still fail
-closed.
+later reports one `local_io` drop after recovery; unsafe paths or permissions
+still fail closed.
