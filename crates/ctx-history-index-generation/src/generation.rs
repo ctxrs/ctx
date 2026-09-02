@@ -417,7 +417,7 @@ pub fn reclaim_inactive_generation_directories(
             };
             let candidate = RetainedGenerationDirectory::open(entry.path())?;
             reclamation_checkpoint(ReclamationStage::AfterCandidateRetained, candidate.path())?;
-            remove_reclaimed_generation_directory(&candidate)?;
+            remove_reclaimed_generation_directory(root, pointer, &candidate)?;
             removed = true;
         }
     }
@@ -427,7 +427,26 @@ pub fn reclaim_inactive_generation_directories(
     Ok(())
 }
 
-fn remove_reclaimed_generation_directory(candidate: &RetainedGenerationDirectory) -> Result<()> {
+fn remove_reclaimed_generation_directory(
+    root: &Path,
+    pointer: Option<&ActiveGenerationPointer>,
+    candidate: &RetainedGenerationDirectory,
+) -> Result<()> {
+    let remove = || remove_reclaimed_generation_directory_inner(candidate);
+    if let (Some(pointer), Some(directory)) = (
+        pointer,
+        candidate.path().file_name().and_then(|name| name.to_str()),
+    ) {
+        return crate::certification::reclaim_with_active_certification(
+            root, pointer, directory, remove,
+        );
+    }
+    remove()
+}
+
+fn remove_reclaimed_generation_directory_inner(
+    candidate: &RetainedGenerationDirectory,
+) -> Result<()> {
     for attempt in 0..GENERATION_RECLAIM_REMOVE_ATTEMPTS {
         candidate.validate_binding()?;
         match fs::remove_dir_all(candidate.path()) {

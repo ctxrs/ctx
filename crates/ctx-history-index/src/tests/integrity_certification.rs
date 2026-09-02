@@ -60,18 +60,32 @@ fn published_fixture(name: &str) -> (TempDir, SourceKey, CommitReceipt) {
 }
 
 fn append_one_record(root: &Path, source: &SourceKey) -> Result<CommitReceipt> {
+    append_record(root, source, 2)
+}
+
+fn append_record(root: &Path, source: &SourceKey, revision: u8) -> Result<CommitReceipt> {
     let mut writer = GenerationWriter::open(root, WriterOptions::default())
         .unwrap()
         .into_writer()
         .unwrap();
     let base = writer.begin_source_append(source.clone())?.clone();
-    writer.add_core_record(document(source, 2, "candidate append body"))?;
+    let frontier = base.frontier().unwrap();
+    writer.add_core_record(document(
+        source,
+        u64::from(revision),
+        "candidate append body",
+    ))?;
     writer.certify_source_append(
         CertifiedSourceAppend::certify(
             &base,
-            appendable_certificate(source, 2, 2, 20),
-            10,
-            [1; 32],
+            appendable_certificate(
+                source,
+                revision,
+                u64::from(revision),
+                u64::from(revision) * 10,
+            ),
+            frontier.certified_prefix_bytes(),
+            *frontier.certified_prefix_digest(),
         )
         .unwrap(),
     )?;
@@ -578,6 +592,104 @@ fn append_reports_nonreflink_fallback_without_faking_hardlink_availability() {
         assert!(metrics.retained_copied_files > 0);
         assert!(metrics.retained_copied_bytes > 0);
     }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn managed_three_generation_reclamation_preserves_active_certification() {
+    let (temp, source, _) = published_fixture("managed-reclamation-certification.jsonl");
+    let first_directory = active_generation_path(temp.path());
+    let guard = CloneTestHookGuard::set(
+        CloneTestOptions {
+            force_reflink_fallback: true,
+            ..CloneTestOptions::default()
+        },
+        |_, _| Ok(()),
+    );
+
+    append_record(temp.path(), &source, 2).unwrap();
+    append_record(temp.path(), &source, 3).unwrap();
+    let metrics = crate::publication::candidate_clone_metrics();
+    drop(guard);
+
+    assert!(metrics.retained_hardlinked_files > 0);
+    assert!(
+        !first_directory.exists(),
+        "the third publication must reclaim its unretained first generation"
+    );
+    crate::publication::reset_verification_activity();
+    drop(VerifiedIndex::open_pinned(temp.path()).unwrap());
+    assert_eq!(crate::publication::verification_activity().0, 0);
+    assert_eq!(crate::publication::hashed_artifact_bytes(), 0);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn reclamation_does_not_rebind_a_restored_metadata_mutation() {
+    let (temp, source, _) = published_fixture("managed-reclamation-mutation.jsonl");
+    let first_directory = active_generation_path(temp.path());
+    let guard = CloneTestHookGuard::set(
+        CloneTestOptions {
+            force_reflink_fallback: true,
+            ..CloneTestOptions::default()
+        },
+        |_, _| Ok(()),
+    );
+    append_record(temp.path(), &source, 2).unwrap();
+
+    let previous = active_generation_path(temp.path());
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    let base = writer.begin_source_append(source.clone()).unwrap().clone();
+    let frontier = base.frontier().unwrap();
+    writer.after_pointer_switch = Some(Box::new(move |candidate| {
+        let shared = fs::read_dir(candidate)
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "store")
+                    && previous.join(path.file_name().unwrap()).is_file()
+                    && std::os::unix::fs::MetadataExt::ino(&fs::metadata(path).unwrap())
+                        == std::os::unix::fs::MetadataExt::ino(
+                            &fs::metadata(previous.join(path.file_name().unwrap())).unwrap(),
+                        )
+            })
+            .expect("third generation must retain one hard-linked segment");
+        let bytes = mismatched_same_size_bytes(&shared);
+        with_temporarily_writable(&shared, || {
+            overwrite_same_size_and_restore_mtime(&shared, &bytes)
+        })
+        .unwrap();
+    }));
+    writer
+        .add_core_record(document(&source, 3, "candidate append body"))
+        .unwrap();
+    writer
+        .certify_source_append(
+            CertifiedSourceAppend::certify(
+                &base,
+                appendable_certificate(&source, 3, 3, 30),
+                frontier.certified_prefix_bytes(),
+                *frontier.certified_prefix_digest(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    writer.commit(|_| true).unwrap();
+    drop(guard);
+
+    assert!(!first_directory.exists());
+    crate::publication::reset_verification_activity();
+    assert!(matches!(
+        VerifiedIndex::open_pinned(temp.path()),
+        Err(IndexError::ChecksumMismatch)
+    ));
+    assert_eq!(crate::publication::verification_activity().0, 1);
+    assert!(crate::publication::hashed_artifact_bytes() > 0);
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
