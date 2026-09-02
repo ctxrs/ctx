@@ -14,6 +14,7 @@ exports_files([
     "check-cli-build-cfg.sh",
     "check-daemon-application-dependency-boundary.sh",
     "check-daemon-cli-dependency-boundary.sh",
+    "check-daemon-refresh-client-dependency-boundary.sh",
     "check-daemon-service-dependency-boundary.sh",
     "check-daemon-runtime-dependency-boundary.sh",
     "check-history-capture-build-cfg.sh",
@@ -28,8 +29,6 @@ exports_files([
     "check-history-read-application-dependency-boundary.sh",
     "check_history_application_contract_boundaries_test.py",
     "check-history-source-discovery-boundary.sh",
-    "check_history_capture_runtime_boundary.py",
-    "check_history_capture_runtime_boundary_test.py",
     "check_history_provider_runtime_boundary.py",
     "check_history_provider_runtime_boundary_test.py",
     "check_history_provider_claude_cursor_boundary.py",
@@ -79,6 +78,49 @@ exports_files([
 ])
 
 package(default_visibility = ["//visibility:public"])
+
+# These visibility groups keep ordinary direct Bazel dependencies inside the
+# intended history layers during normal development. They are not Cargo-parity
+# checks or an audit of aliases/re-exports: review changes to these groups when
+# changing a source-family boundary.
+package_group(
+    name = "history_above_capture_runtime_consumers",
+    packages = [
+        "//...",
+        "-//crates/ctx-history-capture-runtime",
+        "-//crates/ctx-history-jsonl",
+        "-//crates/ctx-history-provider-native-jsonl",
+    ],
+)
+
+package_group(
+    name = "history_jsonl_consumers",
+    packages = [
+        "//crates/ctx-history-capture-composition",
+        "//crates/ctx-history-provider-claude-cursor",
+        "//crates/ctx-history-provider-codex",
+        "//crates/ctx-history-provider-fx",
+        "//crates/ctx-history-provider-gemini",
+        "//crates/ctx-history-provider-mistral-mux",
+        "//crates/ctx-history-provider-native-jsonl",
+        "//crates/ctx-history-provider-runtime",
+        "//crates/ctx-history-providers-jsonl-shared",
+    ],
+)
+
+package_group(
+    name = "history_source_sqlite_consumers",
+    packages = [
+        "//crates/ctx-history-provider-docproj",
+        "//crates/ctx-history-provider-hermes",
+        "//crates/ctx-history-provider-runtime",
+        "//crates/ctx-history-providers-sqlite-inventory",
+        "//crates/ctx-history-providers-sqlite-logical",
+        "//crates/ctx-history-providers-sqlite-selected",
+        "//crates/ctx-history-providers-task-docs",
+        "//crates/ctx-history-source-discovery",
+    ],
+)
 
 bool_flag(
     name = "windows_gnu_release",

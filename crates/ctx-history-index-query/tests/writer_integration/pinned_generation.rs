@@ -573,6 +573,12 @@ fn reader_owned_peer_rejects_corrupt_physical_integrity() {
         })
         .expect("the generation did not contain a stored-field artifact");
     let mut permissions = fs::metadata(&artifact).unwrap().permissions();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        permissions.set_mode(permissions.mode() | 0o200);
+    }
+    #[cfg(not(unix))]
     permissions.set_readonly(false);
     fs::set_permissions(&artifact, permissions).unwrap();
     let mut bytes = fs::read(&artifact).unwrap();

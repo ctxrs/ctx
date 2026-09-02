@@ -1,5 +1,17 @@
-use super::observation_recovery::SourceRefreshObservationRecoveryFailed;
+//! Client/service transport recovery coverage.
+
 use super::*;
+use ctx_daemon_refresh_client::testing::{
+    coordinate_source_backed_refresh_with_policy, enqueue_equivalent_wait_refresh_request,
+    wait_authority_request_json, RefreshClientTestPolicy, SourceRefreshAdmissionRecoveryFailed,
+    AMBIGUOUS_ADMISSION_RECOVERY_ATTEMPT_LIMIT, SOURCE_REFRESH_REQUEST_OP,
+    SOURCE_REFRESH_RESPONSE_MAX_BYTES, SOURCE_REFRESH_STATUS_OP,
+};
+use ctx_daemon_refresh_client::testing::{
+    SourceRefreshObservationRecoveryFailed, SOURCE_REFRESH_DISCONNECT_POLICY,
+};
+use ctx_history_refresh::{RefreshIntent, RefreshRequest, RefreshRequestTrigger};
+use uuid::Uuid;
 
 use std::{
     io::{Read as _, Write as _},
@@ -13,7 +25,7 @@ use crate::query_service::{
     ctx_authenticated_request_handler, start_daemon_source_refresh_service_with_request_timeout,
     write_daemon_service_endpoint, DaemonIpcService, DaemonQueryEndpoint,
 };
-use crate::SharedSemanticRuntime;
+use crate::{DaemonSourceRefreshServiceUnavailable, SharedSemanticRuntime};
 
 const TEST_ENDPOINT_TOKEN: &str = "0123456789abcdef0123456789abcdef";
 
@@ -76,15 +88,14 @@ fn background_maintenance_wake_is_accepted_through_client_and_coordinator() -> R
     )?;
 
     let observation = coordinate_source_backed_refresh_with_policy(
-        &crate::test_support::AVAILABILITY,
+        &ServiceRefreshClientHost(&crate::test_support::AVAILABILITY),
         data_root.path(),
         SourceBackedRefreshMode::Background,
-        SourceBackedRefreshRequestPolicy {
+        RefreshClientTestPolicy {
             intent: RefreshIntent::AutomaticMaintenance,
             trigger: RefreshRequestTrigger::Search,
             allow_daemon_autostart: false,
         },
-        None,
     )?;
 
     assert_eq!(observation.mode, SourceBackedRefreshMode::Background);
@@ -161,6 +172,7 @@ fn same_id_reenqueue_replays_the_exact_payload_after_a_lost_ack() -> Result<()> 
     });
 
     let recovered = enqueue_equivalent_wait_refresh_request(
+        &ServiceRefreshClientHost(&crate::test_support::AVAILABILITY),
         data_root.path(),
         request_id,
         RefreshIntent::SelectedImport(RefreshSelection::Provider(CaptureProvider::Codex)),
@@ -257,10 +269,8 @@ fn canonical_requests_emit_only_the_canonical_intent() -> Result<()> {
 
 #[test]
 fn automatic_provider_import_policy_keeps_selector_and_import_identity() {
-    let policy = SourceBackedRefreshRequestPolicy::import(
-        RefreshSelection::Provider(CaptureProvider::Codex),
-        true,
-    );
+    let policy =
+        RefreshClientTestPolicy::import(RefreshSelection::Provider(CaptureProvider::Codex), true);
 
     assert_eq!(policy.trigger, RefreshRequestTrigger::Import);
     assert_eq!(
@@ -272,7 +282,7 @@ fn automatic_provider_import_policy_keeps_selector_and_import_identity() {
 
 #[test]
 fn all_automatic_import_policy_preserves_legacy_refresh_operation() {
-    let policy = SourceBackedRefreshRequestPolicy::import(RefreshSelection::All, true);
+    let policy = RefreshClientTestPolicy::import(RefreshSelection::All, true);
 
     assert_eq!(
         policy.intent.operation(),
@@ -323,15 +333,14 @@ fn background_lost_ack_terminal_replay_is_not_reported_as_pending() -> Result<()
     });
 
     let error = match coordinate_source_backed_refresh_with_policy(
-        &crate::test_support::AVAILABILITY,
+        &ServiceRefreshClientHost(&crate::test_support::AVAILABILITY),
         data_root.path(),
         SourceBackedRefreshMode::Background,
-        SourceBackedRefreshRequestPolicy {
+        RefreshClientTestPolicy {
             intent: RefreshIntent::AutomaticMaintenance,
             trigger: RefreshRequestTrigger::Search,
             allow_daemon_autostart: false,
         },
-        None,
     ) {
         Ok(_) => panic!("terminal failed replay must remain a failure"),
         Err(error) => error,
@@ -370,6 +379,7 @@ fn exhausted_post_submission_disconnects_return_typed_ambiguous_admission() -> R
     });
 
     let error = enqueue_equivalent_wait_refresh_request(
+        &ServiceRefreshClientHost(&crate::test_support::AVAILABILITY),
         data_root.path(),
         request_id,
         RefreshIntent::AutomaticMaintenance,
@@ -437,7 +447,7 @@ fn acknowledged_typed_unknown_does_not_reenqueue_equivalent_work() -> Result<()>
         .expect("post-ack typed unknown must remain request-bound and unobservable");
     assert_eq!(typed.request_id, request_id);
     assert_eq!(typed.recovery_attempts, 0);
-    assert_eq!(typed.disconnect_policy, DISCONNECT_POLICY);
+    assert_eq!(typed.disconnect_policy, SOURCE_REFRESH_DISCONNECT_POLICY);
 
     let request: Value = serde_json::from_slice(&request)?;
     assert_eq!(request["op"], SOURCE_REFRESH_STATUS_OP);
@@ -489,15 +499,14 @@ fn autostarted_wait_acknowledgement_then_restart_unknown_is_not_replayed() -> Re
     let availability = RecordingAvailability::default();
 
     let error = match coordinate_source_backed_refresh_with_policy(
-        &availability,
+        &ServiceRefreshClientHost(&availability),
         data_root.path(),
         SourceBackedRefreshMode::Wait,
-        SourceBackedRefreshRequestPolicy {
+        RefreshClientTestPolicy {
             intent: RefreshIntent::AutomaticMaintenance,
             trigger: RefreshRequestTrigger::Search,
             allow_daemon_autostart: true,
         },
-        None,
     ) {
         Ok(_) => {
             panic!("an acknowledged request that is not retained after restart is unobservable")
@@ -512,7 +521,7 @@ fn autostarted_wait_acknowledgement_then_restart_unknown_is_not_replayed() -> Re
         .downcast_ref::<SourceRefreshObservationRecoveryFailed>()
         .expect("post-ack restart unknown remains request-bound and unobservable");
     assert_eq!(unknown.recovery_attempts, 0);
-    assert_eq!(unknown.disconnect_policy, DISCONNECT_POLICY);
+    assert_eq!(unknown.disconnect_policy, SOURCE_REFRESH_DISCONNECT_POLICY);
     let wording = unknown.to_string();
     assert!(
         wording.contains("is no longer observable"),

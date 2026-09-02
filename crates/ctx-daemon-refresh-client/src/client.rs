@@ -1,24 +1,11 @@
 use super::*;
 
-#[path = "client_observation_recovery.rs"]
-mod observation_recovery;
 #[path = "client_request_policy.rs"]
 mod request_policy;
 mod response;
-mod types;
-#[cfg(feature = "test-support")]
-pub use observation_recovery::SourceRefreshObservationRecoveryFailed;
-#[cfg(test)]
-use observation_recovery::DISCONNECT_POLICY;
-use observation_recovery::{
-    request_bound_status_with_outage_budget_cancellable, retained_request_unobservable,
-};
+use crate::observation_recovery::request_bound_status_with_outage_budget_cancellable;
 use request_policy::SourceBackedRefreshRequestPolicy;
 use response::*;
-pub use types::{
-    SourceBackedRefreshObservation, SourceBackedRefreshPendingPublication,
-    SourceBackedRefreshTerminalError,
-};
 
 type SourceBackedRefreshProgressReporter<'a> = &'a mut dyn FnMut(&RefreshStatus) -> Result<()>;
 
@@ -26,16 +13,8 @@ type SourceBackedRefreshProgressReporter<'a> = &'a mut dyn FnMut(&RefreshStatus)
 // terminal feels live without making rendering itself the hot loop.
 const SOURCE_REFRESH_PROGRESS_HEARTBEAT: StdDuration = StdDuration::from_millis(100);
 
-fn daemon_trigger(trigger: RefreshRequestTrigger) -> crate::DaemonTrigger {
-    match trigger {
-        RefreshRequestTrigger::Setup => crate::DaemonTrigger::Setup,
-        RefreshRequestTrigger::Search => crate::DaemonTrigger::Search,
-        RefreshRequestTrigger::Import => crate::DaemonTrigger::Import,
-    }
-}
-
 fn block_after_daemon_availability_for_test(
-    availability: &dyn crate::DaemonAvailabilityPort,
+    host: &dyn SourceRefreshClientHost,
     data_root: &Path,
 ) -> Result<()> {
     if !cfg!(debug_assertions) {
@@ -54,7 +33,7 @@ fn block_after_daemon_availability_for_test(
     })?;
     let deadline = StdInstant::now() + StdDuration::from_secs(30);
     while block.exists() && StdInstant::now() < deadline {
-        availability.pause(StdDuration::from_millis(10))?;
+        host.pause(StdDuration::from_millis(10))?;
     }
     if block.exists() {
         bail!("timed out at source refresh post-availability test gate");
@@ -71,35 +50,12 @@ fn block_after_daemon_availability_for_test(
     }
 }
 
-#[derive(Debug)]
-pub struct SourceBackedRefreshDaemonUnavailable {
-    detail: Option<String>,
-}
-
-impl SourceBackedRefreshDaemonUnavailable {
-    fn new(detail: Option<String>) -> Self {
-        Self { detail }
-    }
-}
-
-impl fmt::Display for SourceBackedRefreshDaemonUnavailable {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("the ctx daemon is unavailable for source-backed refresh")?;
-        if let Some(detail) = self.detail.as_deref() {
-            write!(formatter, ": {detail}")?;
-        }
-        formatter.write_str("; no foreground writer was started")
-    }
-}
-
-impl std::error::Error for SourceBackedRefreshDaemonUnavailable {}
-
 const AMBIGUOUS_ADMISSION_RECOVERY_ATTEMPT_LIMIT: usize = 3;
 
 #[derive(Debug)]
-struct SourceRefreshAdmissionRecoveryFailed {
-    request_id: String,
-    recovery_attempts: usize,
+pub struct SourceRefreshAdmissionRecoveryFailed {
+    pub request_id: String,
+    pub recovery_attempts: usize,
 }
 
 impl fmt::Display for SourceRefreshAdmissionRecoveryFailed {
@@ -114,7 +70,7 @@ impl fmt::Display for SourceRefreshAdmissionRecoveryFailed {
 
 impl std::error::Error for SourceRefreshAdmissionRecoveryFailed {}
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn request_admission_with_recovery<S, R>(
     request_id: &str,
     mut sleep: S,
@@ -150,14 +106,14 @@ where
     match roundtrip() {
         Ok(response) => return Ok(response),
         Err(error)
+            if SourceRefreshTransportUnavailable::request_may_have_been_submitted(&error) => {}
+        Err(error)
             if error
-                .downcast_ref::<DaemonSourceRefreshServiceUnavailable>()
+                .downcast_ref::<SourceRefreshTransportUnavailable>()
                 .is_some() =>
         {
             return Err(error)
         }
-        Err(error)
-            if DaemonSourceRefreshServiceUnavailable::request_may_have_been_submitted(&error) => {}
         Err(error) => return Err(error),
     }
 
@@ -200,30 +156,30 @@ where
 /// Coordinates source-backed refresh without ever falling back to a foreground
 /// writer. The returned reader is already pinned to one verified generation.
 pub fn coordinate_source_backed_refresh(
-    availability: &dyn crate::DaemonAvailabilityPort,
+    host: &dyn SourceRefreshClientHost,
     data_root: &Path,
     mode: SourceBackedRefreshMode,
 ) -> Result<SourceBackedRefreshObservation> {
-    coordinate_source_backed_refresh_inner(availability, data_root, mode, None)
+    coordinate_source_backed_refresh_inner(host, data_root, mode, None)
 }
 
 pub fn coordinate_source_backed_refresh_with_progress(
-    availability: &dyn crate::DaemonAvailabilityPort,
+    host: &dyn SourceRefreshClientHost,
     data_root: &Path,
     mode: SourceBackedRefreshMode,
     report_progress: &mut dyn FnMut(&RefreshStatus) -> Result<()>,
 ) -> Result<SourceBackedRefreshObservation> {
-    coordinate_source_backed_refresh_inner(availability, data_root, mode, Some(report_progress))
+    coordinate_source_backed_refresh_inner(host, data_root, mode, Some(report_progress))
 }
 
 pub fn coordinate_setup_source_backed_refresh_with_progress(
-    availability: &dyn crate::DaemonAvailabilityPort,
+    host: &dyn SourceRefreshClientHost,
     data_root: &Path,
     mode: SourceBackedRefreshMode,
     report_progress: &mut dyn FnMut(&RefreshStatus) -> Result<()>,
 ) -> Result<SourceBackedRefreshObservation> {
     coordinate_source_backed_refresh_inner_with_trigger(
-        availability,
+        host,
         data_root,
         mode,
         RefreshRequestTrigger::Setup,
@@ -232,13 +188,13 @@ pub fn coordinate_setup_source_backed_refresh_with_progress(
 }
 
 fn coordinate_source_backed_refresh_inner(
-    availability: &dyn crate::DaemonAvailabilityPort,
+    host: &dyn SourceRefreshClientHost,
     data_root: &Path,
     mode: SourceBackedRefreshMode,
     report_progress: Option<SourceBackedRefreshProgressReporter<'_>>,
 ) -> Result<SourceBackedRefreshObservation> {
     coordinate_source_backed_refresh_inner_with_trigger(
-        availability,
+        host,
         data_root,
         mode,
         RefreshRequestTrigger::Search,
@@ -247,14 +203,14 @@ fn coordinate_source_backed_refresh_inner(
 }
 
 fn coordinate_source_backed_refresh_inner_with_trigger(
-    availability: &dyn crate::DaemonAvailabilityPort,
+    host: &dyn SourceRefreshClientHost,
     data_root: &Path,
     mode: SourceBackedRefreshMode,
     trigger: RefreshRequestTrigger,
     report_progress: Option<SourceBackedRefreshProgressReporter<'_>>,
 ) -> Result<SourceBackedRefreshObservation> {
     coordinate_source_backed_refresh_with_policy(
-        availability,
+        host,
         data_root,
         mode,
         SourceBackedRefreshRequestPolicy::refresh(trigger),
@@ -263,7 +219,7 @@ fn coordinate_source_backed_refresh_inner_with_trigger(
 }
 
 pub fn coordinate_import_source_backed_refresh_with_progress(
-    availability: &dyn crate::DaemonAvailabilityPort,
+    host: &dyn SourceRefreshClientHost,
     data_root: &Path,
     mode: SourceBackedRefreshMode,
     selection: RefreshSelection,
@@ -271,7 +227,7 @@ pub fn coordinate_import_source_backed_refresh_with_progress(
     report_progress: &mut dyn FnMut(&RefreshStatus) -> Result<()>,
 ) -> Result<SourceBackedRefreshObservation> {
     coordinate_import_source_backed_refresh_inner(
-        availability,
+        host,
         data_root,
         mode,
         selection,
@@ -281,7 +237,7 @@ pub fn coordinate_import_source_backed_refresh_with_progress(
 }
 
 fn coordinate_import_source_backed_refresh_inner(
-    availability: &dyn crate::DaemonAvailabilityPort,
+    host: &dyn SourceRefreshClientHost,
     data_root: &Path,
     mode: SourceBackedRefreshMode,
     selection: RefreshSelection,
@@ -289,7 +245,7 @@ fn coordinate_import_source_backed_refresh_inner(
     report_progress: Option<SourceBackedRefreshProgressReporter<'_>>,
 ) -> Result<SourceBackedRefreshObservation> {
     coordinate_source_backed_refresh_with_policy(
-        availability,
+        host,
         data_root,
         mode,
         SourceBackedRefreshRequestPolicy::import(selection, allow_daemon_autostart),
@@ -298,7 +254,7 @@ fn coordinate_import_source_backed_refresh_inner(
 }
 
 fn coordinate_source_backed_refresh_with_policy(
-    availability: &dyn crate::DaemonAvailabilityPort,
+    host: &dyn SourceRefreshClientHost,
     data_root: &Path,
     mode: SourceBackedRefreshMode,
     policy: SourceBackedRefreshRequestPolicy,
@@ -309,12 +265,12 @@ fn coordinate_source_backed_refresh_with_policy(
         trigger,
         allow_daemon_autostart,
     } = policy;
-    availability.checkpoint()?;
+    host.checkpoint()?;
     if mode == SourceBackedRefreshMode::Off {
         if intent.operation() == ctx_history_refresh::RefreshOperation::Import {
             bail!("explicit source catalog imports require daemon refresh mode `wait`");
         }
-        let pin = pin_active_verified_generation(data_root)?;
+        let pin = host.pin_active_verified_generation(data_root)?;
         return Ok(SourceBackedRefreshObservation {
             mode,
             status: "off".to_owned(),
@@ -330,30 +286,28 @@ fn coordinate_source_backed_refresh_with_policy(
     }
 
     if allow_daemon_autostart
-        && availability
+        && host
             .ensure_available(
                 data_root,
-                daemon_trigger(trigger),
+                trigger,
                 match mode {
-                    SourceBackedRefreshMode::Background => {
-                        crate::DaemonAvailabilityDemand::Background
-                    }
-                    SourceBackedRefreshMode::Wait => crate::DaemonAvailabilityDemand::ExplicitWait,
+                    SourceBackedRefreshMode::Background => SourceRefreshDaemonDemand::Background,
+                    SourceBackedRefreshMode::Wait => SourceRefreshDaemonDemand::ExplicitWait,
                     SourceBackedRefreshMode::Off => {
                         unreachable!("off returned before availability")
                     }
                 },
             )
             .context("start or recover daemon before source-backed refresh")?
-            == crate::DaemonAvailability::Disabled
+            == SourceRefreshDaemonAvailability::Disabled
     {
-        return daemon_unavailable_fallback(data_root, mode, None);
+        return daemon_unavailable_fallback(host, data_root, mode, None);
     }
     // Availability may synchronously launch and retain a finite worker. Catch
     // an interrupt from that work before admission can reach IPC.
-    availability.checkpoint()?;
+    host.checkpoint()?;
     if allow_daemon_autostart && mode == SourceBackedRefreshMode::Wait {
-        block_after_daemon_availability_for_test(availability, data_root)?;
+        block_after_daemon_availability_for_test(host, data_root)?;
     }
 
     let logical_request_id = Uuid::now_v7().to_string();
@@ -364,11 +318,10 @@ fn coordinate_source_backed_refresh_with_policy(
     let response = loop {
         let retirement_error = match request_admission_with_recovery_cancellable(
             &logical_request_id,
-            |duration| availability.pause(duration),
-            || availability.checkpoint(),
+            |duration| host.pause(duration),
+            || host.checkpoint(),
             || {
-                daemon_source_refresh_request_with_cancellation(
-                    availability,
+                host.source_refresh_request(
                     data_root,
                     admission_request.clone(),
                     SOURCE_REFRESH_IPC_TIMEOUT,
@@ -384,10 +337,10 @@ fn coordinate_source_backed_refresh_with_policy(
             {
                 None
             }
-            Ok(None) => return daemon_unavailable_fallback(data_root, mode, None),
+            Ok(None) => return daemon_unavailable_fallback(host, data_root, mode, None),
             Err(error)
                 if error
-                    .downcast_ref::<DaemonSourceRefreshServiceUnavailable>()
+                    .downcast_ref::<SourceRefreshTransportUnavailable>()
                     .is_some()
                     && mode == SourceBackedRefreshMode::Wait
                     && allow_daemon_autostart
@@ -397,27 +350,23 @@ fn coordinate_source_backed_refresh_with_policy(
             }
             Err(error)
                 if error
-                    .downcast_ref::<DaemonSourceRefreshServiceUnavailable>()
+                    .downcast_ref::<SourceRefreshTransportUnavailable>()
                     .is_some() =>
             {
-                return daemon_unavailable_fallback(data_root, mode, Some(error));
+                return daemon_unavailable_fallback(host, data_root, mode, Some(error));
             }
             Err(error) => return Err(error),
         };
         retirement_recovery_attempted = true;
-        availability.checkpoint()?;
-        if availability
-            .ensure_available(
-                data_root,
-                daemon_trigger(trigger),
-                crate::DaemonAvailabilityDemand::ExplicitWait,
-            )
+        host.checkpoint()?;
+        if host
+            .ensure_available(data_root, trigger, SourceRefreshDaemonDemand::ExplicitWait)
             .context("recover daemon after source refresh endpoint retirement")?
-            == crate::DaemonAvailability::Disabled
+            == SourceRefreshDaemonAvailability::Disabled
         {
-            return daemon_unavailable_fallback(data_root, mode, retirement_error);
+            return daemon_unavailable_fallback(host, data_root, mode, retirement_error);
         }
-        availability.checkpoint()?;
+        host.checkpoint()?;
     };
     validate_daemon_refresh_response(&response)?;
     let accepted_request_id = response_request_id(&response, "daemon source refresh response")?;
@@ -439,6 +388,7 @@ fn coordinate_source_backed_refresh_with_policy(
         match request_state {
             RefreshRequestState::Published => {
                 return published_refresh_observation(
+                    host,
                     data_root,
                     &response,
                     request_id,
@@ -454,7 +404,7 @@ fn coordinate_source_backed_refresh_with_policy(
             | RefreshRequestState::Running => {}
         }
         let source_count = response_source_count(&response);
-        let Some(pin) = pin_published_generation(data_root)? else {
+        let Some(pin) = host.pin_published_generation(data_root)? else {
             return Err(SourceBackedRefreshPendingPublication::new(
                 request_id,
                 refresh_request_state_name(request_state).to_owned(),
@@ -477,7 +427,7 @@ fn coordinate_source_backed_refresh_with_policy(
     }
 
     wait_for_published_generation_inner(
-        availability,
+        host,
         data_root,
         request_id,
         PublishedGenerationWait {
@@ -490,8 +440,37 @@ fn coordinate_source_backed_refresh_with_policy(
     )
 }
 
-#[cfg(test)]
-pub(super) fn wait_for_published_generation(
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn coordinate_source_backed_refresh_with_test_policy(
+    host: &dyn SourceRefreshClientHost,
+    data_root: &Path,
+    mode: SourceBackedRefreshMode,
+    policy: crate::testing::RefreshClientTestPolicy,
+) -> Result<SourceBackedRefreshObservation> {
+    coordinate_source_backed_refresh_with_policy(
+        host,
+        data_root,
+        mode,
+        SourceBackedRefreshRequestPolicy {
+            intent: policy.intent,
+            trigger: policy.trigger,
+            allow_daemon_autostart: policy.allow_daemon_autostart,
+        },
+        None,
+    )
+}
+
+struct PublishedGenerationWait<'progress> {
+    mode: SourceBackedRefreshMode,
+    intent: RefreshIntent,
+    trigger: RefreshRequestTrigger,
+    allow_daemon_autostart: bool,
+    report_progress: Option<SourceBackedRefreshProgressReporter<'progress>>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn wait_for_published_generation(
+    host: &dyn SourceRefreshClientHost,
     data_root: &Path,
     request_id: String,
     mode: SourceBackedRefreshMode,
@@ -500,7 +479,7 @@ pub(super) fn wait_for_published_generation(
     allow_daemon_autostart: bool,
 ) -> Result<SourceBackedRefreshObservation> {
     wait_for_published_generation_inner(
-        &crate::test_support::AVAILABILITY,
+        host,
         data_root,
         request_id,
         PublishedGenerationWait {
@@ -526,16 +505,8 @@ pub(super) fn wait_for_published_generation(
     )
 }
 
-struct PublishedGenerationWait<'progress> {
-    mode: SourceBackedRefreshMode,
-    intent: RefreshIntent,
-    trigger: RefreshRequestTrigger,
-    allow_daemon_autostart: bool,
-    report_progress: Option<SourceBackedRefreshProgressReporter<'progress>>,
-}
-
 fn wait_for_published_generation_inner(
-    availability: &dyn crate::DaemonAvailabilityPort,
+    host: &dyn SourceRefreshClientHost,
     data_root: &Path,
     mut request_id: String,
     wait: PublishedGenerationWait<'_>,
@@ -550,7 +521,7 @@ fn wait_for_published_generation_inner(
     let mut last_reported_status = None;
     let mut last_reported_at = None;
     loop {
-        availability.checkpoint()?;
+        host.checkpoint()?;
         let status_request = compact_json(json!({
             "schema_version": 1,
             "op": SOURCE_REFRESH_STATUS_OP,
@@ -558,12 +529,11 @@ fn wait_for_published_generation_inner(
         }));
         let response = match request_bound_status_with_outage_budget_cancellable(
             &request_id,
-            |duration| availability.pause(duration),
+            |duration| host.pause(duration),
             StdInstant::now,
-            || availability.checkpoint(),
+            || host.checkpoint(),
             || {
-                daemon_source_refresh_request_with_cancellation(
-                    availability,
+                host.source_refresh_request(
                     data_root,
                     status_request.clone(),
                     SOURCE_REFRESH_IPC_TIMEOUT,
@@ -576,9 +546,9 @@ fn wait_for_published_generation_inner(
                 if !allow_daemon_autostart {
                     return Err(retained_request_unobservable(&request_id, 0));
                 }
-                availability.checkpoint()?;
+                host.checkpoint()?;
                 request_id = recover_wait_refresh_request(
-                    availability,
+                    host,
                     data_root,
                     &request_id,
                     trigger,
@@ -591,15 +561,15 @@ fn wait_for_published_generation_inner(
             }
             Err(error)
                 if error
-                    .downcast_ref::<DaemonSourceRefreshServiceUnavailable>()
+                    .downcast_ref::<SourceRefreshTransportUnavailable>()
                     .is_some() =>
             {
                 if !allow_daemon_autostart {
                     return Err(retained_request_unobservable(&request_id, 0));
                 }
-                availability.checkpoint()?;
+                host.checkpoint()?;
                 request_id = recover_wait_refresh_request(
-                    availability,
+                    host,
                     data_root,
                     &request_id,
                     trigger,
@@ -616,7 +586,7 @@ fn wait_for_published_generation_inner(
                 return Err(error.context("wait for daemon-owned source-backed refresh publication"))
             }
         };
-        availability.checkpoint()?;
+        host.checkpoint()?;
         if source_refresh_request_is_unknown(&response, &request_id)? {
             // Reaching this wait loop means the client already received an
             // admission acknowledgement. A subsequent typed unknown response
@@ -637,9 +607,9 @@ fn wait_for_published_generation_inner(
                 protocol_state,
                 StdInstant::now(),
             ) {
-                availability.checkpoint()?;
+                host.checkpoint()?;
                 report_progress(&status).context("render daemon-owned source refresh progress")?;
-                availability.checkpoint()?;
+                host.checkpoint()?;
                 last_reported_status = Some(status.clone());
                 last_reported_at = Some(StdInstant::now());
             }
@@ -647,6 +617,7 @@ fn wait_for_published_generation_inner(
         match protocol_state {
             RefreshRequestState::Published => {
                 return published_refresh_observation(
+                    host,
                     data_root,
                     &response,
                     request_id,
@@ -660,13 +631,14 @@ fn wait_for_published_generation_inner(
             RefreshRequestState::AdmissionPending
             | RefreshRequestState::Queued
             | RefreshRequestState::Running => {
-                availability.pause(SOURCE_REFRESH_POLL_INTERVAL)?;
+                host.pause(SOURCE_REFRESH_POLL_INTERVAL)?;
             }
         }
     }
 }
 
 fn published_refresh_observation(
+    host: &dyn SourceRefreshClientHost,
     data_root: &Path,
     response: &Value,
     request_id: String,
@@ -677,7 +649,7 @@ fn published_refresh_observation(
         .get("published_generation")
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("published daemon source refresh has no generation ID"))?;
-    let pin = pin_retained_generation(data_root, expected).with_context(|| {
+    let pin = host.pin_retained_generation(data_root, expected).with_context(|| {
         format!(
             "daemon published Core generation {expected}, but its retained terminal generation cannot be opened"
         )
@@ -784,8 +756,8 @@ fn should_report_progress(
         })
 }
 
-pub(super) fn recover_wait_refresh_request(
-    availability: &dyn crate::DaemonAvailabilityPort,
+pub(crate) fn recover_wait_refresh_request(
+    host: &dyn SourceRefreshClientHost,
     data_root: &Path,
     request_id: &str,
     trigger: RefreshRequestTrigger,
@@ -795,16 +767,13 @@ pub(super) fn recover_wait_refresh_request(
         return Err(retained_request_unobservable(request_id, 0));
     }
     let recovery = (|| {
-        availability.checkpoint()?;
-        if availability.ensure_available(
-            data_root,
-            daemon_trigger(trigger),
-            crate::DaemonAvailabilityDemand::ExplicitWait,
-        )? == crate::DaemonAvailability::Disabled
+        host.checkpoint()?;
+        if host.ensure_available(data_root, trigger, SourceRefreshDaemonDemand::ExplicitWait)?
+            == SourceRefreshDaemonAvailability::Disabled
         {
             bail!("daemon was disabled while waiting for source refresh");
         }
-        availability.checkpoint()?;
+        host.checkpoint()?;
         // The acknowledged request may be a command waiter coalesced onto a
         // periodic/search attempt. Restarting and immediately re-submitting
         // the command payload under that physical ID would be a genuine
@@ -813,7 +782,7 @@ pub(super) fn recover_wait_refresh_request(
         Ok(request_id.to_owned())
     })();
     recovery.map_err(|error| {
-        if availability.interrupted(&error) {
+        if host.interrupted(&error) {
             error
         } else {
             retained_request_unobservable(request_id, 0).context(format!(
@@ -823,8 +792,24 @@ pub(super) fn recover_wait_refresh_request(
     })
 }
 
-#[cfg(test)]
-fn enqueue_equivalent_wait_refresh_request(
+fn wait_authority_request_json(
+    mode: SourceBackedRefreshMode,
+    request: &RefreshRequest,
+) -> Result<Value> {
+    SourceBackedRefreshRequest::new(mode, request).to_json()
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn test_wait_authority_request_json(
+    mode: SourceBackedRefreshMode,
+    request: &RefreshRequest,
+) -> Result<Value> {
+    wait_authority_request_json(mode, request)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn enqueue_equivalent_wait_refresh_request(
+    host: &dyn SourceRefreshClientHost,
     data_root: &Path,
     request_id: &str,
     intent: RefreshIntent,
@@ -834,7 +819,7 @@ fn enqueue_equivalent_wait_refresh_request(
     let canonical_request = RefreshRequest::new(request_id.to_owned(), intent, trigger);
     let request = wait_authority_request_json(SourceBackedRefreshMode::Wait, &canonical_request)?;
     let response = request_admission_with_recovery(request_id, std::thread::sleep, || {
-        daemon_source_refresh_request(
+        host.source_refresh_request(
             data_root,
             request.clone(),
             SOURCE_REFRESH_IPC_TIMEOUT,
@@ -855,13 +840,6 @@ fn enqueue_equivalent_wait_refresh_request(
     Ok(request_id)
 }
 
-fn wait_authority_request_json(
-    mode: SourceBackedRefreshMode,
-    request: &RefreshRequest,
-) -> Result<Value> {
-    SourceBackedRefreshRequest::new(mode, request).to_json()
-}
-
 fn response_request_id(response: &Value, label: &str) -> Result<String> {
     response
         .get("request_id")
@@ -871,7 +849,7 @@ fn response_request_id(response: &Value, label: &str) -> Result<String> {
         .ok_or_else(|| anyhow!("{label} has no request ID"))
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn source_refresh_protocol_state(response: &Value) -> Result<RefreshRequestState> {
     Ok(source_refresh_protocol_status(response)?.request_state())
 }
@@ -896,7 +874,7 @@ fn source_refresh_progress_status(response: Value) -> Result<RefreshStatus> {
         .context("validate engine-owned source refresh progress status")
 }
 
-pub(super) fn validate_source_refresh_status_response_authority(
+pub(crate) fn validate_source_refresh_status_response_authority(
     response: &Value,
     expected_request_id: &str,
 ) -> Result<()> {
@@ -912,7 +890,7 @@ pub(super) fn validate_source_refresh_status_response_authority(
     }
 }
 
-pub(super) fn source_refresh_request_is_unknown(
+pub(crate) fn source_refresh_request_is_unknown(
     response: &Value,
     expected_request_id: &str,
 ) -> Result<bool> {
@@ -946,7 +924,3 @@ pub(super) fn source_refresh_request_is_unknown(
 mod admission_recovery_tests;
 #[cfg(test)]
 mod progress_poll_tests;
-
-#[cfg(all(test, unix))]
-#[path = "client_transport_recovery_tests.rs"]
-mod transport_recovery_tests;
