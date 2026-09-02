@@ -390,8 +390,6 @@ finite Core worker using the same source-refresh endpoint and publication
 engine, then reconcile the exact semantic generation in the foreground. Use
 `ctx setup --no-daemon` or `ctx import --no-daemon` for a one-run opt-out; an
 explicit provider-source import with that opt-out requires an existing endpoint.
-The deprecated `ctx setup --catalog-only` flag is ignored and does not change
-daemon-autostart behavior.
 `ctx search --refresh off` does not refresh providers, run plugins, autostart
 daemon maintenance, start semantic workers, schedule semantic indexing, or
 write any derived generation. It serves the active Core generation and may use

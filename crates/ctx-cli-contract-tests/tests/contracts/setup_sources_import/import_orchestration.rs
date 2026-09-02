@@ -1,6 +1,6 @@
 use super::{
-    assert_daemon_process_running, assert_no_daemon_autostart_mutation, ctx, support::*,
-    wait_for_daemon_status, write_active_daemon_upgrade_handoff, write_codex_setup_session,
+    assert_daemon_process_running, ctx, support::*, wait_for_daemon_status,
+    write_active_daemon_upgrade_handoff, write_codex_setup_session,
 };
 use std::{
     io::Read,
@@ -310,35 +310,6 @@ fn manual_exact_noop_repairs_legacy_permissive_control_state() {
         published_generation(&initial)
     );
     assert_private_index_control_state(&temp);
-}
-
-#[test]
-fn deprecated_partial_remains_a_noop_without_bypassing_daemon_only_writes() {
-    let temp = tempdir();
-    write_codex_setup_session(&temp);
-    let source_root = temp.path().join(".codex").join("sessions");
-
-    ctx(&temp)
-        .args([
-            "import",
-            "--partial",
-            "--quiet",
-            "--provider",
-            "codex",
-            "--path",
-            source_root.to_str().unwrap(),
-            "--no-daemon",
-            "--progress",
-            "none",
-        ])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("--partial is deprecated"))
-        .stderr(predicate::str::contains(
-            "tolerant import is always enabled",
-        ))
-        .stderr(predicate::str::contains("no foreground writer was started"));
-    assert_no_daemon_autostart_mutation(&temp);
 }
 
 #[test]

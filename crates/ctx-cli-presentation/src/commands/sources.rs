@@ -24,8 +24,6 @@ pub struct SourcesArgs {
     pub provider: Option<crate::ProviderArg>,
     #[arg(long, help = "Show every supported provider location")]
     pub all: bool,
-    #[arg(long, help = "Show missing locations for every known provider")]
-    pub show_missing: bool,
 }
 
 #[derive(Debug, Subcommand, Clone)]
@@ -101,7 +99,6 @@ pub fn run_sources(
             .provider
             .map(|provider| provider.capture_provider().into()),
         all: args.all,
-        show_missing: args.show_missing,
         format: match args.format {
             JsonOutputFormat::Text => ctx_history_cli::OutputFormat::Text,
             JsonOutputFormat::Json => ctx_history_cli::OutputFormat::Json,

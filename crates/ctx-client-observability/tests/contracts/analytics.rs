@@ -1124,7 +1124,7 @@ fn setup_analytics_emits_one_terminal_event() {
     fs::create_dir_all(home.join(".codex").join("sessions")).unwrap();
 
     ctx(&temp)
-        .args(["setup", "--catalog-only", "--progress", "none"])
+        .args(["setup", "--progress", "none"])
         .env("CTX_DATA_ROOT", &data_root)
         .env("HOME", &home)
         .env("XDG_STATE_HOME", &state)
@@ -1146,7 +1146,7 @@ fn setup_analytics_emits_one_terminal_event() {
     assert_eq!(setup_events.len(), 1, "{events:#?}");
     assert_operation_event(setup_events[0], "setup", "success");
     let properties = analytics_event_properties(setup_events[0]);
-    assert_eq!(properties["catalog_only"], true);
+    assert!(properties.get("catalog_only").is_none());
     assert_eq!(properties["setup_mode"], "background");
     assert!(properties.get("has_indexed_content_after_setup").is_none());
     assert_capability_snapshot_is_coarse(properties);
@@ -1414,7 +1414,7 @@ fn setup_analytics_opt_out_suppresses_start_completion_and_identities() {
     fs::create_dir_all(home.join(".codex").join("sessions")).unwrap();
 
     ctx(&temp)
-        .args(["setup", "--catalog-only", "--progress", "none"])
+        .args(["setup", "--progress", "none"])
         .env("CTX_DATA_ROOT", &data_root)
         .env("HOME", &home)
         .env("XDG_STATE_HOME", &state)
@@ -1453,7 +1453,7 @@ fn setup_analytics_dry_run_suppresses_start_completion_and_identities() {
     fs::create_dir_all(home.join(".codex").join("sessions")).unwrap();
 
     ctx(&temp)
-        .args(["setup", "--catalog-only", "--progress", "none"])
+        .args(["setup", "--progress", "none"])
         .env("CTX_DATA_ROOT", &data_root)
         .env("HOME", &home)
         .env("XDG_STATE_HOME", &state)

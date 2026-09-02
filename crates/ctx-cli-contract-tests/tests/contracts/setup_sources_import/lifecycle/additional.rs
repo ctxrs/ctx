@@ -447,13 +447,7 @@ fn foreground_import_rejections_complete_and_preserve_diagnostics() {
     )
     .unwrap();
     ctx_from_binary(&temp, &binary)
-        .args([
-            "setup",
-            "--catalog-only",
-            "--no-daemon",
-            "--progress",
-            "none",
-        ])
+        .args(["setup", "--no-daemon", "--progress", "none"])
         .assert()
         .success();
 
@@ -550,13 +544,7 @@ fn foreground_import_rejection_diagnostics_survive_a_noop_source_cycle() {
     )
     .unwrap();
     ctx_from_binary(&temp, &binary)
-        .args([
-            "setup",
-            "--catalog-only",
-            "--no-daemon",
-            "--progress",
-            "none",
-        ])
+        .args(["setup", "--no-daemon", "--progress", "none"])
         .assert()
         .success();
 
@@ -610,13 +598,7 @@ fn foreground_import_returns_at_ready_core_generation() {
     )
     .unwrap();
     ctx_from_binary(&temp, &binary)
-        .args([
-            "setup",
-            "--catalog-only",
-            "--no-daemon",
-            "--progress",
-            "none",
-        ])
+        .args(["setup", "--no-daemon", "--progress", "none"])
         .assert()
         .success();
 

@@ -101,8 +101,7 @@ persistent daemon and removes its supervision; explicit `ctx import` and
 `ctx search --refresh wait` can still use finite workers.
 
 Machine-readable setup follows the same lifecycle and reports schema version 2
-with top-level `daemon_autostart` and `refresh_request` objects. The deprecated
-`--catalog-only` flag no longer disables daemon maintenance.
+with top-level `daemon_autostart` and `refresh_request` objects.
 
 Use a different root when testing:
 

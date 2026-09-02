@@ -136,7 +136,7 @@ mod unix {
         // live reload. Suppress only this initialization spawn, including for
         // semantic-enabled configurations that intentionally reject --no-daemon.
         command
-            .args(["setup", "--catalog-only", "--progress", "none"])
+            .args(["setup", "--progress", "none"])
             .env("CTX_DAEMON_AUTOSTART_OFF", "1");
         let output = command
             .output()
@@ -538,7 +538,7 @@ mod unix {
         );
 
         let mut setup = ctx_from_binary(&temp, &binary);
-        setup.args(["setup", "--catalog-only", "--progress", "none"]);
+        setup.args(["setup", "--progress", "none"]);
         let stderr = failure_stderr(&mut setup);
         assert!(
             stderr.contains("invalid config section header"),

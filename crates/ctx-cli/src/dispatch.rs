@@ -798,7 +798,6 @@ pub(crate) fn command_operation_descriptor(command: &CommandRoot) -> OperationDe
             unreachable!("companion-owned commands are routed before Clap")
         }
         CommandRoot::Setup(args) => CliOperation::Setup(SetupTelemetry {
-            catalog_only: args.catalog_only,
             no_daemon: args.no_daemon,
             wait: args.wait,
             progress_mode: crate::observability_product::progress_mode(args.progress),
@@ -832,7 +831,6 @@ pub(crate) fn command_operation_descriptor(command: &CommandRoot) -> OperationDe
         CommandRoot::Index(_) => CliOperation::Index(IndexTelemetry::default()),
         CommandRoot::Sources(args) => CliOperation::Sources(SourcesTelemetry {
             all: args.all,
-            show_missing: args.show_missing,
             provider_filter: args.provider.map(|provider| provider.capture_provider()),
             providers_detected: None,
             providers_existing: None,

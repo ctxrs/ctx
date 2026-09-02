@@ -216,8 +216,6 @@ pub(crate) struct ImportArgs {
     pub(crate) all: bool,
     #[arg(long)]
     pub(crate) resume: bool,
-    #[arg(long, hide = true)]
-    pub(crate) partial: bool,
     #[arg(
         long,
         help = "Do not start or restart the daemon; require an already-running daemon"

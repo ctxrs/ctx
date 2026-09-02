@@ -374,7 +374,7 @@ pub(crate) fn hosted_install_marker_path(binary: &Path) -> PathBuf {
 pub(crate) fn initialize_empty_store(temp: &TempDir) {
     fs::create_dir_all(temp.path().join(".codex").join("sessions")).unwrap();
     ctx_with_enabled_daemon(temp)
-        .args(["setup", "--catalog-only", "--wait", "--progress", "none"])
+        .args(["setup", "--wait", "--progress", "none"])
         .assert()
         .success();
 }
@@ -387,7 +387,7 @@ pub(crate) fn initialize_empty_store_with_env(
 ) {
     fs::create_dir_all(home.join(".codex").join("sessions")).unwrap();
     ctx(temp)
-        .args(["setup", "--catalog-only", "--progress", "none"])
+        .args(["setup", "--progress", "none"])
         .env("CTX_DATA_ROOT", data_root)
         .env("HOME", home)
         .env("XDG_STATE_HOME", state)

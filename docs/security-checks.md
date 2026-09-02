@@ -63,8 +63,7 @@ silent, best-effort, and cannot change the requested command's result.
   executor.
 - `ctx setup --no-daemon` and `ctx import --no-daemon` must not autostart daemon
   maintenance or finite workers. Machine-readable output is not a process-start
-  security control. The deprecated `ctx setup --catalog-only` flag is ignored and is not
-  a daemon-autostart security control either.
+  security control.
 - `ctx docs` reads embedded documentation and writes only an explicit topic
   output path for `ctx docs show --out` or an explicit man-page output
   directory when `ctx docs man --out` is used, apart from the startup

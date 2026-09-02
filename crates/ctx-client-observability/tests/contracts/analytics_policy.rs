@@ -275,7 +275,6 @@ fn nonprivacy_deprecated_ids_are_reported_on_only_one_eligible_event() {
     ctx(&temp)
         .args([
             "setup",
-            "--catalog-only",
             "--no-daemon",
             "--progress",
             "none",

@@ -845,20 +845,17 @@ fn status_does_not_repair_missing_tantivy_publication_pointer() {
 }
 
 #[test]
-fn deprecated_catalog_only_is_ignored_and_wait_publishes_setup_status_contract() {
+fn setup_wait_publishes_setup_status_contract() {
     let temp = daemon_test_root();
     write_codex_setup_session(&temp);
 
-    let setup = json_output(ctx(&temp).args([
-        "setup",
-        "--catalog-only",
-        "--wait",
-        "--format=json",
-        "--progress",
-        "none",
-    ]));
+    let setup =
+        json_output(ctx(&temp).args(["setup", "--wait", "--format=json", "--progress", "none"]));
     assert_eq!(setup["schema_version"], 2, "{setup:#}");
-    assert_eq!(setup["deprecated_catalog_only_ignored"], true, "{setup:#}");
+    assert!(
+        setup.get("deprecated_catalog_only_ignored").is_none(),
+        "{setup:#}"
+    );
     assert!(setup.get("read_only").is_none(), "{setup:#}");
     assert_eq!(setup["mode"], "ready", "{setup:#}");
     assert_eq!(setup["lexical"]["certified_sources"], 1, "{setup:#}");
@@ -891,64 +888,34 @@ fn deprecated_catalog_only_is_ignored_and_wait_publishes_setup_status_contract()
 }
 
 #[test]
-fn deprecated_catalog_only_is_ignored_for_non_codex_sources() {
-    let temp = daemon_test_root();
-    install_default_claude_fixture(&temp, "catalog-only claude inventory");
-
-    let setup = json_output(ctx(&temp).args([
-        "setup",
-        "--catalog-only",
-        "--wait",
-        "--format=json",
-        "--progress",
-        "none",
-    ]));
-    assert_eq!(setup["deprecated_catalog_only_ignored"], true, "{setup:#}");
-    assert_eq!(setup["mode"], "ready", "{setup:#}");
-    assert_eq!(setup["lexical"]["certified_sources"], 1, "{setup:#}");
-    assert!(
-        setup["lexical"]["indexed_documents"]
-            .as_u64()
-            .is_some_and(|count| count >= 1),
-        "{setup:#}"
-    );
-}
-
-#[test]
 fn quiet_setup_suppresses_success_output_but_not_json() {
     let temp = daemon_test_root();
     ctx(&temp)
-        .args(["--quiet", "setup", "--catalog-only"])
+        .args(["--quiet", "setup"])
         .assert()
         .success()
         .stdout(predicate::str::is_empty());
 
     let temp = daemon_test_root();
     ctx(&temp)
-        .args(["setup", "--quiet", "--catalog-only", "--progress", "none"])
+        .args(["setup", "--quiet", "--progress", "none"])
         .assert()
         .success()
         .stdout(predicate::str::is_empty());
 
     let temp = daemon_test_root();
     ctx(&temp)
-        .args(["setup", "--catalog-only", "--progress", "none"])
+        .args(["setup", "--progress", "none"])
         .env("CTX_QUIET", "1")
         .assert()
         .success()
         .stdout(predicate::str::is_empty());
 
     let temp = daemon_test_root();
-    let setup = json_output(ctx(&temp).args([
-        "--quiet",
-        "setup",
-        "--catalog-only",
-        "--format=json",
-        "--progress",
-        "none",
-    ]));
+    let setup =
+        json_output(ctx(&temp).args(["--quiet", "setup", "--format=json", "--progress", "none"]));
     assert_eq!(setup["schema_version"], 2);
-    assert_eq!(setup["deprecated_catalog_only_ignored"], true);
+    assert!(setup.get("deprecated_catalog_only_ignored").is_none());
 }
 
 #[test]
