@@ -77,16 +77,7 @@ class RustTargetInventoryTest(unittest.TestCase):
         }
 
         packages: dict[str, tuple[Path, dict[str, object]]] = {"consumer": (consumer, consumer_data)}
-        for name in (
-            "ctx-history-capture",
-            "ctx-history-index",
-            "ctx-history-index-format",
-            "ctx-history-index-generation",
-            "ctx-history-index-query",
-            "ctx-history-provider-native-jsonl",
-            "ctx-history-jsonl",
-            "ctx-history-source-sqlite",
-        ):
+        for name in ("ctx-history-jsonl", "ctx-history-source-sqlite"):
             directory = root / "crates" / name
             directory.mkdir(parents=True)
             directory.joinpath("Cargo.toml").write_text(
@@ -96,54 +87,113 @@ class RustTargetInventoryTest(unittest.TestCase):
             packages[name] = (directory, {"package": {"name": name}})
         return root, packages
 
-    def test_workspace_inherited_renamed_local_edge_needs_an_explicit_bazel_label(self) -> None:
-        root, packages = self.local_edge_fixture(
-            dependency_definition="[dependencies]\nhistory_sqlite.workspace = true\n",
-            workspace_dependencies=(
-                "[workspace.dependencies]\n"
-                'history_sqlite = { package = "ctx-history-source-sqlite", path = "crates/ctx-history-source-sqlite" }\n'
-            ),
-        )
-        with self.assertRaisesRegex(InventoryError, "explicitly declare.*ctx-history-source-sqlite"):
-            local_graph(root, packages)
-
-    def test_local_edges_require_explicit_labels_in_every_dependency_table(self) -> None:
+    def test_source_family_edges_require_their_explicit_library_labels(self) -> None:
         cases = (
             (
-                "dev-dependencies",
-                "ctx-history-index",
+                "normal direct JSONL",
+                "ctx-history-jsonl",
+                "[dependencies]\n"
+                'ctx-history-jsonl = { path = "../crates/ctx-history-jsonl" }\n',
+                "",
+                "//crates/ctx-history-jsonl:lib",
+                {"ctx-history-jsonl"},
+            ),
+            (
+                "normal inherited renamed SQLite",
+                "ctx-history-source-sqlite",
+                "[dependencies]\nhistory_sqlite.workspace = true\n",
+                "[workspace.dependencies]\n"
+                'history_sqlite = { package = "ctx-history-source-sqlite", path = "crates/ctx-history-source-sqlite" }\n',
+                "//crates/ctx-history-source-sqlite:lib",
+                {"ctx-history-source-sqlite"},
+            ),
+            (
+                "dev direct SQLite",
+                "ctx-history-source-sqlite",
                 "[dev-dependencies]\n"
-                'ctx-history-index = { path = "../crates/ctx-history-index" }\n',
+                'ctx-history-source-sqlite = { path = "../crates/ctx-history-source-sqlite" }\n',
+                "",
+                "//crates/ctx-history-source-sqlite:test_support_lib",
+                set(),
             ),
             (
-                "build-dependencies",
-                "ctx-history-provider-native-jsonl",
+                "dev renamed JSONL",
+                "ctx-history-jsonl",
+                "[dev-dependencies]\n"
+                'history_jsonl = { package = "ctx-history-jsonl", path = "../crates/ctx-history-jsonl" }\n',
+                "",
+                "//crates/ctx-history-jsonl:test_support_lib",
+                set(),
+            ),
+            (
+                "build direct SQLite",
+                "ctx-history-source-sqlite",
                 "[build-dependencies]\n"
-                'ctx-history-provider-native-jsonl = { path = "../crates/ctx-history-provider-native-jsonl" }\n',
+                'ctx-history-source-sqlite = { path = "../crates/ctx-history-source-sqlite" }\n',
+                "",
+                "//crates/ctx-history-source-sqlite:lib",
+                {"ctx-history-source-sqlite"},
             ),
             (
-                "target-specific dependencies",
-                "ctx-history-index-query",
+                "build inherited renamed JSONL",
+                "ctx-history-jsonl",
+                "[build-dependencies]\nhistory_jsonl.workspace = true\n",
+                "[workspace.dependencies]\n"
+                'history_jsonl = { package = "ctx-history-jsonl", path = "crates/ctx-history-jsonl" }\n',
+                "//crates/ctx-history-jsonl:lib",
+                {"ctx-history-jsonl"},
+            ),
+            (
+                "target-specific direct JSONL",
+                "ctx-history-jsonl",
                 "[target.'cfg(unix)'.dependencies]\n"
-                'ctx-history-index-query = { path = "../crates/ctx-history-index-query" }\n',
+                'ctx-history-jsonl = { path = "../crates/ctx-history-jsonl" }\n',
+                "",
+                "//crates/ctx-history-jsonl:lib",
+                {"ctx-history-jsonl"},
+            ),
+            (
+                "target-specific inherited renamed SQLite",
+                "ctx-history-source-sqlite",
+                "[target.'cfg(unix)'.dependencies]\nhistory_sqlite.workspace = true\n",
+                "[workspace.dependencies]\n"
+                'history_sqlite = { package = "ctx-history-source-sqlite", path = "crates/ctx-history-source-sqlite" }\n',
+                "//crates/ctx-history-source-sqlite:lib",
+                {"ctx-history-source-sqlite"},
             ),
         )
-        for table, package, dependency_definition in cases:
-            with self.subTest(table=table, package=package):
+        for (
+            edge,
+            package,
+            dependency_definition,
+            workspace_dependencies,
+            label,
+            expected_graph,
+        ) in cases:
+            with self.subTest(edge=edge):
                 root, packages = self.local_edge_fixture(
                     dependency_definition=dependency_definition,
+                    workspace_dependencies=workspace_dependencies,
                 )
                 with self.assertRaisesRegex(InventoryError, f"explicitly declare.*{package}"):
                     local_graph(root, packages)
 
                 root, packages = self.local_edge_fixture(
                     dependency_definition=dependency_definition,
-                    labels=(f"//crates/{package}:lib",),
+                    workspace_dependencies=workspace_dependencies,
+                    labels=(label,),
                 )
-                self.assertEqual(
-                    local_graph(root, packages)["consumer"],
-                    set() if table == "dev-dependencies" else {package},
-                )
+                self.assertEqual(local_graph(root, packages)["consumer"], expected_graph)
+
+        root, packages = self.local_edge_fixture(
+            dependency_definition=(
+                "[dependencies]\n"
+                'ctx-history-jsonl = { path = "../crates/ctx-history-jsonl" }\n'
+            ),
+            labels=("//crates/ctx-history-jsonl:other",),
+        )
+        with self.assertRaisesRegex(InventoryError, "explicitly declare.*ctx-history-jsonl"):
+            local_graph(root, packages)
 
     def test_explicit_target_does_not_hide_implicit_targets(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
