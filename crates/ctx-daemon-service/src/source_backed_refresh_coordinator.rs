@@ -54,7 +54,6 @@ pub use ctx_history_refresh::{
     RefreshOutcomeClass, RefreshRequest, RefreshRequestState, RefreshRequestTrigger,
     RefreshSelection, RefreshStatus, RefreshStatusKind, RefreshTerminalOutcome,
     SourceBackedCurrentSourceProgress, SourceBackedPublicationMetadata, SourceBackedRefreshReceipt,
-    VerifiedCorePublication,
 };
 
 #[cfg(test)]
@@ -62,7 +61,7 @@ pub(crate) use ctx_history_refresh::{
     open_verified_index, source_backed_index_root, EventWatermark, RefreshLogicalPhase,
     SourceBackedRefreshCurrent, SourceBackedRefreshExecution, SourceBackedRefreshExecutor,
     SourceBackedRefreshPublication, SourceBackedRefreshRouteResult,
-    SourceBackedRefreshSourceFailure, SourceBackedRefreshTimings,
+    SourceBackedRefreshSourceFailure, SourceBackedRefreshTimings, VerifiedCorePublication,
 };
 
 #[cfg(test)]

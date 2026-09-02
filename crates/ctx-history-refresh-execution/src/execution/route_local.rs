@@ -450,15 +450,14 @@ pub(super) fn refresh_all_provider_sources_route_local_with_reconciliation(
     };
     let verified_index = Arc::new(verified_index.into_inner().into_verified_index());
     let route_control_changed = receipt.route_controls != previous_route_controls;
-    let retained_generation_lacks_metadata =
-        retained_generation.is_some() && retained_publication_metadata.is_none();
-    if retained_generation_lacks_metadata
-        || route_control_changed
-        || (publication.current.source_count == 0
-            && !verify_generation_query_readiness(&verified_index)
-                .context("decode Core source-refresh publication authority")?
-                .is_ready())
-    {
+    // The live refresh already owns both this pin and its admitted metadata.
+    // Recertify only when that already-decoded authority cannot certify the
+    // new physical generation; decoding the just-published bytes again would
+    // only repeat the restart boundary.
+    let retained_metadata_certifies = retained_publication_metadata
+        .as_ref()
+        .is_some_and(|metadata| metadata.certifies_generation(&verified_index));
+    if !retained_metadata_certifies || route_control_changed {
         let route_observations = receipt
             .successful_route_outcomes
             .iter()

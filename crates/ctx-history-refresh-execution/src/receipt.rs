@@ -42,7 +42,9 @@ impl SourceBackedRefreshReceipt {
         Ok(receipt)
     }
 
-    pub(crate) fn validate(&self, verified_index: Option<&VerifiedIndex>) -> Result<()> {
+    /// Validates this typed receipt against an optional exact Core pin.
+    #[doc(hidden)]
+    pub fn validate(&self, verified_index: Option<&VerifiedIndex>) -> Result<()> {
         if self.published_generation.is_empty()
             || self.generation_changed
                 != (self.previous_generation.as_deref() != Some(self.published_generation.as_str()))

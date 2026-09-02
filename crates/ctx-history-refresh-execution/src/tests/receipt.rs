@@ -107,7 +107,7 @@ fn retained_catalog_exact_receipt_fixture() -> (
 }
 
 #[test]
-fn exact_route_receipt_retains_unselected_published_catalog_binding() {
+fn exact_route_receipt_validates_retained_catalog_bindings() {
     let (_temp, index_root, response, expected) = retained_catalog_exact_receipt_fixture();
     let verified = VerifiedIndex::open_pinned(&index_root).unwrap();
 
@@ -121,6 +121,24 @@ fn exact_route_receipt_retains_unselected_published_catalog_binding() {
     absent_from_manifest.catalog_route_bindings[0].route_identity = "c3".repeat(32);
     let error = absent_from_manifest.validate(Some(&verified)).unwrap_err();
     assert!(format!("{error:#}").contains("neither a retained witness"));
+
+    let mut transient = expected;
+    transient.published_explicit_source_catalog = None;
+    transient
+        .route_results
+        .push(SourceBackedRefreshRouteResult::failed(
+            transient.catalog_route_bindings[0].route_identity.clone(),
+            "unavailable".to_owned(),
+            true,
+        ));
+    transient.validate(Some(&verified)).unwrap();
+    transient.route_results[1] = SourceBackedRefreshRouteResult::failed(
+        transient.catalog_route_bindings[0].route_identity.clone(),
+        "unavailable".to_owned(),
+        false,
+    );
+    let error = transient.validate(Some(&verified)).unwrap_err();
+    assert!(format!("{error:#}").contains("consistent request failure"));
 }
 
 #[test]

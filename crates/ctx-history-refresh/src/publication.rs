@@ -226,58 +226,19 @@ pub(super) fn verify_source_backed_publication(
             verified.generation_id()
         );
     }
-    let manifest = verified.manifest();
-    let verified_current = SourceBackedRefreshCurrent::from_sources(
-        &manifest.sources,
-        publication.current.removed_source_count,
+    // This transient result has no predecessor identity of its own. Give the
+    // typed physical receipt a no-op predecessor solely to validate every
+    // generation-bound fact through the one receipt validator.
+    let receipt = SourceBackedRefreshReceipt::from_verified_publication(
+        Some(publication.generation_id.clone()),
+        publication.generation_id.clone(),
+        publication,
     )?;
-    if verified_current != publication.current
-        || publication.certified_source_count != verified_current.source_count
-        || publication.certified_source_bytes != verified_current.certified_source_bytes
-        || manifest.indexed_documents != verified_current.indexed_documents
+    receipt.validate(Some(verified))?;
+    if publication.certified_source_count != receipt.current.source_count
+        || publication.certified_source_bytes != receipt.current.certified_source_bytes
     {
         bail!("Core refresh publication facts do not match its exact verified generation");
-    }
-    let route_rejected_record_total =
-        publication
-            .route_results
-            .iter()
-            .try_fold(0_u64, |total, result| {
-                total
-                    .checked_add(result.rejected_record_total)
-                    .ok_or_else(|| {
-                        anyhow!("Core refresh publication route rejected-record total overflow")
-                    })
-            })?;
-    if route_rejected_record_total > verified_current.rejected_records {
-        bail!("Core refresh publication route rejections exceed its exact verified generation");
-    }
-    let witness_lineages = publication
-        .published_explicit_source_catalog
-        .as_ref()
-        .map(ExplicitSourceCatalogAuthority::route_lineages)
-        .unwrap_or_default();
-    if publication.catalog_route_bindings.iter().any(|binding| {
-        let Some(route) = SourceRouteIdentity::from_sha256(binding.route_identity.clone()).ok()
-        else {
-            return true;
-        };
-        let route_is_retained = manifest.source_route(&route).is_some();
-        if witness_lineages.contains(&binding.catalog_lineage) {
-            return !route_is_retained;
-        }
-        !publication.route_results.iter().any(|result| {
-            result.route_identity == binding.route_identity
-                && matches!(
-                    result.outcome,
-                    SourceBackedRefreshRouteOutcome::Failed {
-                        carried_forward,
-                        ..
-                    } if carried_forward == route_is_retained
-                )
-        })
-    }) {
-        bail!("Core refresh publication catalog binding has no generation-bound authority or cold request failure");
     }
     Ok(())
 }
@@ -312,55 +273,6 @@ pub fn explicit_catalog_request_is_accounted_for(
                     })
                 })
         })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use ctx_history_index::{GenerationWriter, SourceRouteSnapshot, WriterOptions};
-
-    #[test]
-    fn publication_accepts_retained_transient_binding_only_with_matching_failure_evidence() {
-        let temp = tempfile::tempdir().unwrap();
-        let route = SourceRouteIdentity::from_sha256("a1".repeat(32)).unwrap();
-        let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
-            .unwrap()
-            .into_writer()
-            .unwrap();
-        writer
-            .set_present_source_routes(vec![SourceRouteSnapshot::present(
-                route.clone(),
-                Vec::new(),
-            )
-            .unwrap()])
-            .unwrap();
-        let generation = writer.commit(|_| true).unwrap().generation_id;
-        let verified = VerifiedIndex::open_pinned(temp.path()).unwrap();
-        let publication = |carried_forward| SourceBackedRefreshPublication {
-            generation_id: generation.clone(),
-            published_explicit_source_catalog: None,
-            unsupported_routes: 0,
-            certified_source_count: 0,
-            certified_source_bytes: 0,
-            current: SourceBackedRefreshCurrent::default(),
-            timings: SourceBackedRefreshTimings::default(),
-            route_results: vec![SourceBackedRefreshRouteResult::failed(
-                route.as_str().to_owned(),
-                "unavailable".to_owned(),
-                carried_forward,
-            )],
-            zero_source_authority: Vec::new(),
-            catalog_route_bindings: vec![ExplicitSourceCatalogRouteBinding {
-                catalog_lineage: "b2".repeat(32),
-                route_identity: route.as_str().to_owned(),
-            }],
-            verified_publication: None,
-        };
-
-        verify_source_backed_publication(&publication(true), &verified).unwrap();
-        let error = verify_source_backed_publication(&publication(false), &verified).unwrap_err();
-        assert!(format!("{error:#}").contains("catalog binding"));
-    }
 }
 
 fn published_generation_receipt(
