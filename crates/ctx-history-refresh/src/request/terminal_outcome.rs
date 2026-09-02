@@ -126,8 +126,13 @@ fn valid_retry_contract(
         }
         RefreshOutcomeCode::UnsupportedSchema => {
             !retryable
-                && retry_advice
-                    .is_none_or(|advice| advice == RefreshRetryAdvice::UpgradeOrReconfigure)
+                && retry_advice.is_none_or(|advice| {
+                    matches!(
+                        advice,
+                        RefreshRetryAdvice::InspectSources
+                            | RefreshRetryAdvice::UpgradeOrReconfigure
+                    )
+                })
         }
         RefreshOutcomeCode::SourceFailures | RefreshOutcomeCode::LogicalSourceFailures => {
             matches!(
@@ -218,7 +223,7 @@ const fn valid_code_class(code: RefreshOutcomeCode, class: RefreshOutcomeClass) 
 mod tests {
     use super::*;
 
-    fn paused_outcome(
+    fn nonretryable_outcome(
         code: RefreshOutcomeCode,
         class: RefreshOutcomeClass,
     ) -> RefreshTerminalOutcome {
@@ -258,7 +263,7 @@ mod tests {
                 RefreshTerminalOutcome::automatic_retry_disposition(code, class, true),
                 Some((true, RefreshRetryAdvice::RetryAffectedRoutes)),
             );
-            assert!(paused_outcome(code, class).validate().is_ok());
+            assert!(nonretryable_outcome(code, class).validate().is_ok());
         }
 
         assert_eq!(
@@ -269,11 +274,26 @@ mod tests {
             ),
             None,
         );
-        assert!(paused_outcome(
+        assert!(nonretryable_outcome(
             RefreshOutcomeCode::SourceRefreshInternal,
             RefreshOutcomeClass::Internal,
         )
         .validate()
         .is_err());
+    }
+
+    #[test]
+    fn unsupported_schema_accepts_direct_and_aggregate_advice() {
+        let mut outcome = nonretryable_outcome(
+            RefreshOutcomeCode::UnsupportedSchema,
+            RefreshOutcomeClass::Incompatible,
+        );
+        for advice in [
+            RefreshRetryAdvice::UpgradeOrReconfigure,
+            RefreshRetryAdvice::InspectSources,
+        ] {
+            outcome.retry_advice = Some(advice);
+            assert!(outcome.validate().is_ok(), "{advice:?}");
+        }
     }
 }

@@ -139,6 +139,35 @@ fn recovery_accepts_paused_automatic_retry_outcomes() {
 }
 
 #[test]
+fn recovery_accepts_aggregate_unsupported_source_advice() {
+    let route = route('a');
+    let job = json!({
+        "structured_outcome": {
+            "code": "unsupported_schema",
+            "class": "incompatible",
+            "retryable": false,
+            "affected_routes": [route.as_str()],
+            "retryable_routes": [],
+            "blocked_routes": [route.as_str()],
+            "retry_advice": "inspect_sources"
+        }
+    });
+
+    let outcome = recover_failure_outcome(&job, &exact_scope(&route), None)
+        .unwrap()
+        .expect("aggregate unsupported-source outcome");
+
+    assert_eq!(outcome.code, RefreshOutcomeCode::UnsupportedSchema);
+    assert_eq!(outcome.class, RefreshOutcomeClass::Incompatible);
+    assert!(!outcome.retryable);
+    assert_eq!(outcome.blocked_routes, BTreeSet::from([route]));
+    assert_eq!(
+        outcome.retry_advice,
+        Some(RefreshRetryAdvice::InspectSources)
+    );
+}
+
+#[test]
 fn crash_image_failed_exhaustive_attempt_rearms_retryable_route_ownership() {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("data");
