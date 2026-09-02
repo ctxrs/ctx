@@ -15,7 +15,7 @@ fail() {
   exit 1
 }
 
-mkdir -p "${repo_root}/scripts/bazel" "${repo_root}/scripts/tests/fixtures" "${repo_root}/tools/bazel" "${repo_root}/src"
+mkdir -p "${repo_root}"/{scripts/bazel,scripts/tests/fixtures,src}
 cp "${source_root}/.bazelversion" "${repo_root}/.bazelversion"
 cp "${source_root}/scripts/bazelw" "${repo_root}/scripts/bazelw"
 cp "${source_root}/scripts/bazel-affected.sh" "${repo_root}/scripts/bazel-affected.sh"
@@ -51,9 +51,8 @@ printf '%s\n' '//pkg:unfamiliar_routine' >"${query_output}"
 affected_impacted="${impacted}"
 affected_query="${query_output}"
 
-# This is intentionally a small real Bazel fixture rather than another test
-# classifier. It proves Bazel evaluates the suite and exact routing-tag query
-# used by the selector, including a query-safe punctuation label.
+# This real Bazel fixture proves the selector's suite, routing-tag, and quoted
+# punctuation-label query semantics without another classifier.
 real_repo="${test_root}/real-query"
 mkdir -p "${real_repo}"
 cp "${source_root}/.bazelversion" "${real_repo}/.bazelversion"
@@ -62,55 +61,25 @@ printf '#!/usr/bin/env bash\nexit 0\n' >"${real_repo}/pass.sh"
 chmod +x "${real_repo}/pass.sh"
 cat >"${real_repo}/BUILD.bazel" <<'EOF'
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
-
-sh_test(
-    name = "unfamiliar+comma,equals=target",
-    srcs = ["pass.sh"],
-)
-
-sh_test(
-    name = "release_gate_test",
-    srcs = ["pass.sh"],
-    tags = ["release-gate"],
-)
-
-sh_test(
-    name = "no_cache_test",
-    srcs = ["pass.sh"],
-    tags = ["no-cache"],
-)
-
-sh_test(
-    name = "manual_test",
-    srcs = ["pass.sh"],
-    tags = ["manual"],
-)
-
-sh_test(
-    name = "nightly_test",
-    srcs = ["pass.sh"],
-    tags = ["tier-nightly"],
-)
-
-sh_test(
-    name = "release_test",
-    srcs = ["pass.sh"],
-    tags = ["tier-release"],
-)
-
-test_suite(
-    name = "affected_suite",
-    tests = [
-        ":unfamiliar+comma,equals=target",
-        ":release_gate_test",
-        ":no_cache_test",
-        ":manual_test",
-        ":nightly_test",
-        ":release_test",
-    ],
-)
 EOF
-real_test_query='kind(".*_test rule", tests(//:affected_suite))'
+real_tests=()
+for test in \
+  'unfamiliar+comma,equals=target:' \
+  'release_gate_test:release-gate' \
+  'no_cache_test:no-cache' \
+  'manual_test:manual' \
+  'nightly_test:tier-nightly' \
+  'release_test:tier-release'; do
+  name="${test%%:*}"
+  tags="${test#*:}"
+  real_tests+=(":${name}")
+  printf '\nsh_test(name = "%s", srcs = ["pass.sh"]' "${name}" >>"${real_repo}/BUILD.bazel"
+  [[ -z "${tags}" ]] || printf ', tags = ["%s"]' "${tags}" >>"${real_repo}/BUILD.bazel"
+  printf ')\n' >>"${real_repo}/BUILD.bazel"
+done
+printf '\ntest_suite(name = "affected_suite", tests = [%s])\n' \
+  "$(printf '"%s", ' "${real_tests[@]}")" >>"${real_repo}/BUILD.bazel"
+real_test_query='kind(".*_test rule", tests(set("//:affected_suite" "//:unfamiliar+comma,equals=target")))'
 real_excluded_tags='(^|\[|, )(manual|tier[-]nightly|tier[-]release)(, |\])'
 CTX_BAZEL_WORKSPACE="${real_repo}" \
   "${source_root}/scripts/bazelw" query \
@@ -144,6 +113,12 @@ run_affected() {
   ) >"${stdout}" 2>"${stderr}"
 }
 
+assert_fallback() {
+  local name="$1" stdout="$2" stderr="$3" diagnostic="$4"
+  [[ "$(cat "${stdout}")" == '//...' ]] || fail "${name} did not select ci"
+  grep -Fq "${diagnostic}" "${stderr}" || fail "${name} diagnostic was not emitted"
+}
+
 assert_global_fallback() {
   local path="$1"
   local restore="${test_root}/$(basename "${path}").restore"
@@ -153,10 +128,7 @@ assert_global_fallback() {
   mkdir -p "$(dirname "${path}")"
   printf 'changed global input\n' >>"${path}"
   run_affected "${test_root}/global.out" "${test_root}/global.err"
-  [[ "$(cat "${test_root}/global.out")" == '//...' ]] \
-    || fail "global input did not select ci: ${path}"
-  grep -Fq 'build configuration changed' "${test_root}/global.err" \
-    || fail "global-input diagnostic was not emitted: ${path}"
+  assert_fallback "global input ${path}" "${test_root}/global.out" "${test_root}/global.err" 'build configuration changed'
   if [[ -e "${restore}" ]]; then
     mv "${restore}" "${path}"
   else
@@ -211,10 +183,8 @@ generate_count_after="$(grep -c '^event=generate-hashes ' "${fake_log}")"
 
 CTX_FAKE_BAZEL_FAIL_MODE=get-impacted-targets \
   run_affected "${test_root}/failure.out" "${test_root}/failure.err"
-[[ "$(cat "${test_root}/failure.out")" == '//...' ]] \
-  || fail 'bazel-diff failure did not select ci'
-grep -Fq 'affected test selection failed closed to //...: bazel-diff failed' "${test_root}/failure.err" \
-  || fail 'fail-closed diagnostic was not emitted'
+assert_fallback 'bazel-diff failure' "${test_root}/failure.out" "${test_root}/failure.err" \
+  'affected test selection failed closed to //...: bazel-diff failed'
 
 for global_input in \
   "${repo_root}/BUILD.bazel" \
@@ -229,50 +199,35 @@ done
 
 printf 'not-a-bazel-label\n' >"${impacted}"
 run_affected "${test_root}/malformed.out" "${test_root}/malformed.err"
-[[ "$(cat "${test_root}/malformed.out")" == '//...' ]] \
-  || fail 'malformed bazel-diff output did not select ci'
-grep -Fq 'invalid affected label' "${test_root}/malformed.err" \
-  || fail 'malformed-label diagnostic was not emitted'
+assert_fallback 'malformed bazel-diff output' "${test_root}/malformed.out" "${test_root}/malformed.err" 'invalid affected label'
 
 printf '%s\n' '//pkg:punctuation+comma,equals=target' >"${impacted}"
 printf '%s\n' '//pkg:punctuation+comma,equals=target' >"${query_output}"
 run_affected "${test_root}/punctuation.out" "${test_root}/punctuation.err"
 [[ "$(cat "${test_root}/punctuation.out")" == '//pkg:punctuation+comma,equals=target' ]] \
   || fail 'query-safe punctuation label did not survive selection'
-grep -Fq '//pkg:punctuation+comma,equals=target' "${fake_log}" \
-  || fail 'query-safe punctuation label was not interpolated as one Bazel label'
+grep -Fq '"//pkg:punctuation+comma,equals=target"' "${fake_log}" \
+  || fail 'query-safe punctuation label was not rendered as a quoted Bazel query word'
 
 printf '%s\n' '//pkg:focused_suite) union //...' >"${impacted}"
 run_affected "${test_root}/injection.out" "${test_root}/injection.err"
-[[ "$(cat "${test_root}/injection.out")" == '//...' ]] \
-  || fail 'query injection-shaped label did not select ci'
-grep -Fq 'invalid affected label' "${test_root}/injection.err" \
-  || fail 'query injection-shaped label diagnostic was not emitted'
+assert_fallback 'query injection-shaped label' "${test_root}/injection.out" "${test_root}/injection.err" 'invalid affected label'
 
 printf '%s\n' '//pkg:focused_suite' >"${impacted}"
 printf '%s\n' '//pkg:unfamiliar_routine' >"${query_output}"
 affected_query="${test_root}/missing-query-output"
 run_affected "${test_root}/query-failure.out" "${test_root}/query-failure.err"
-[[ "$(cat "${test_root}/query-failure.out")" == '//...' ]] \
-  || fail 'query failure did not select ci'
-grep -Fq 'Bazel query failed' "${test_root}/query-failure.err" \
-  || fail 'query-failure diagnostic was not emitted'
+assert_fallback 'query failure' "${test_root}/query-failure.out" "${test_root}/query-failure.err" 'Bazel query failed'
 
 affected_query="${query_output}"
 : >"${query_output}"
 run_affected "${test_root}/empty.out" "${test_root}/empty.err"
-[[ "$(cat "${test_root}/empty.out")" == '//...' ]] \
-  || fail 'empty eligible result did not select ci'
-grep -Fq 'changed files have no eligible routine tests' "${test_root}/empty.err" \
-  || fail 'empty-result diagnostic was not emitted'
+assert_fallback 'empty eligible result' "${test_root}/empty.out" "${test_root}/empty.err" 'changed files have no eligible routine tests'
 
 (
   cd "${repo_root}"
   CTX_AFFECTED_DRY_RUN=1 scripts/bazel-affected.sh refs/heads/missing
 ) >"${test_root}/missing-base.out" 2>"${test_root}/missing-base.err"
-[[ "$(cat "${test_root}/missing-base.out")" == '//...' ]] \
-  || fail 'missing base did not select ci'
-grep -Fq 'could not resolve affected-test base' "${test_root}/missing-base.err" \
-  || fail 'missing-base fail-closed diagnostic was not emitted'
+assert_fallback 'missing base' "${test_root}/missing-base.out" "${test_root}/missing-base.err" 'could not resolve affected-test base'
 
 printf 'bazel-affected tests passed\n'

@@ -97,19 +97,15 @@ generate_selection() {
     --excludeExternalTargets \
     --output="${impacted}" || return 1
 
-  # bazel-diff is the graph authority, but never interpolate its output until
-  # each label is syntactically safe for a Bazel query set(). This deliberately
-  # accepts query-safe absolute main-workspace labels, including +, , and =,
-  # rather than attempting to quote the complete Bazel label grammar. Anything
-  # else fails closed below. tests() expands suites; kind() leaves only
-  # executable test rules, and tags remain Bazel's authority.
+  # Render each allowlisted label as a quoted query word. The whitelist excludes
+  # quotes and backslashes but preserves +, , and =; anything else fails closed.
   while IFS= read -r label || [[ -n "${label}" ]]; do
     [[ -z "${label}" ]] && continue
     if [[ ! "${label}" =~ ^//[A-Za-z0-9_@.+,=~/-]*:[A-Za-z0-9_@.+,=~/-]+$ ]]; then
       printf 'bazel-diff emitted an invalid affected label: %s\n' "${label}" >&2
       return 23
     fi
-    impacted_labels+=("${label}")
+    impacted_labels+=("\"${label}\"")
   done <"${impacted}"
   (( ${#impacted_labels[@]} > 0 )) || return 24
   impacted_set="$(printf '%s\n' "${impacted_labels[@]}" | sort -u | paste -sd ' ')"

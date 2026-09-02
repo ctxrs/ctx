@@ -165,16 +165,12 @@ both graphs. BUILD, `.bzl`, module, lock, and configuration changes select the
 full default-CI graph. A diff/query/filter failure or a changed file with no
 mapped test does the same. Non-routine external, manual, network,
 platform, stress, and release targets stay outside affected execution. Git
-supplies changed files; after validating every bazel-diff label, Bazel's
-evaluated `tests()` expansion, test-rule kind, and tags are the sole routine
-test classifier. The selector accepts only query-safe absolute main-workspace
-labels (`//package:target` with alphanumeric, `_`, `@`, `.`, `+`, `,`, `=`,
-`~`, `/`, and `-` components); malformed or broader Bazel label forms fail
-closed to default CI before entering a query. Its routing filter exactly
-matches `manual`, `tier-nightly`, and `tier-release`, as public CI does:
-descriptive tags such as `release-gate` and execution tags such as `no-cache`
-remain routine CI tests. The configured workspace-status command
-`scripts/bazel/workspace-status.sh` is build-global.
+supplies changed files; after allowlist validation, each affected label is a
+quoted Bazel query word, and Bazel's `tests()` expansion, test-rule kind, and
+tags classify routine tests. The routing filter excludes `manual`,
+`tier-nightly`, and `tier-release`; `release-gate` and `no-cache` remain CI
+tests. The configured workspace-status command `scripts/bazel/workspace-status.sh`
+is build-global.
 
 `//:repository_policy_check` reads the live Git and Cargo workspaces on every
 invocation. It enforces fixed physical-line limits and discovers every Cargo
