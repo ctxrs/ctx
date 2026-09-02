@@ -275,7 +275,7 @@ pub(super) fn append_terminal_events(
 mod tests {
     use std::sync::Mutex;
 
-    use crate::analytics;
+    use super::super::super::analytics;
 
     use super::*;
 

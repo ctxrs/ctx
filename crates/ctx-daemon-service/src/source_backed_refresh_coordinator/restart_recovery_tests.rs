@@ -1,7 +1,8 @@
-use super::*;
-use ctx_daemon_refresh_client::testing::{
+use super::client::{
     source_refresh_request_is_unknown, validate_source_refresh_status_response_authority,
+    wait_for_published_generation,
 };
+use super::*;
 
 use std::sync::Arc;
 
@@ -90,8 +91,8 @@ fn typed_unknown_response_requires_exact_request_identity_not_error_text() {
         "schema_version": 1,
         "owner": "daemon",
         "request_id": "lost-request",
-        "request_state": "request_unknown",
-        "error_code": "source_refresh_request_unknown",
+        "request_state": SOURCE_REFRESH_UNKNOWN_REQUEST_STATE,
+        "error_code": SOURCE_REFRESH_UNKNOWN_REQUEST_ERROR_CODE,
         "reason": "request_not_retained_after_restart",
         "retryable": false,
         "error": "arbitrary localized detail",
@@ -326,7 +327,7 @@ fn old_wait_request_keeps_exact_identity_across_restart_and_returns_exact_genera
         .handle_ipc_request(
             &data_root,
             &json!({
-                "op": "source_refresh_request",
+                "op": SOURCE_REFRESH_REQUEST_OP,
                 "mode": "wait",
                 "operation": "import",
                 "explicit_source_catalog": authority.to_json(),

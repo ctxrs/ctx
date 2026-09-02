@@ -42,7 +42,6 @@ source_paths=(
   crates/ctx-client-observability/src
   crates/ctx-daemon-cli/src
   crates/ctx-daemon-application/src
-  crates/ctx-daemon-refresh-client/src
   crates/ctx-daemon-runtime/src
   crates/ctx-daemon-service/src
   crates/ctx-terminal/src

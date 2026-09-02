@@ -14,7 +14,6 @@ exports_files([
     "check-cli-build-cfg.sh",
     "check-daemon-application-dependency-boundary.sh",
     "check-daemon-cli-dependency-boundary.sh",
-    "check-daemon-refresh-client-dependency-boundary.sh",
     "check-daemon-service-dependency-boundary.sh",
     "check-daemon-runtime-dependency-boundary.sh",
     "check-history-capture-build-cfg.sh",

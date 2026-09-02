@@ -1,31 +1,36 @@
 #[cfg(test)]
 use std::{collections::BTreeSet, sync::Arc};
-use std::{path::Path, time::Duration as StdDuration};
-
-use anyhow::Result;
-#[cfg(test)]
-use anyhow::{anyhow, Context};
-use ctx_daemon_refresh_client::{
-    SourceRefreshClientHost, SourceRefreshDaemonAvailability, SourceRefreshDaemonDemand,
-    SourceRefreshTransportUnavailable,
+use std::{
+    fmt,
+    path::Path,
+    time::{Duration as StdDuration, Instant as StdInstant},
 };
+
+use anyhow::{anyhow, bail, Context, Result};
+use ctx_history_capture::CaptureError;
 use ctx_history_refresh::RefreshRuntime;
-#[cfg(test)]
-use serde_json::json;
-use serde_json::Value;
+use serde_json::{json, Value};
+use uuid::Uuid;
 
-#[cfg(test)]
-use ctx_history_refresh::ExplicitSourceCatalogAuthority;
-use ctx_history_refresh::ExplicitSourceRelocationAuthority;
+use ctx_history_refresh::{ExplicitSourceCatalogAuthority, ExplicitSourceRelocationAuthority};
 
-#[cfg(test)]
 use crate::compact_json;
 
 #[cfg(test)]
 use super::query_service::daemon_source_refresh_request;
-use super::source_backed_refresh_adapter::{
-    journal::DaemonRefreshJournal, runtime::DaemonRefreshRuntime,
+use super::{
+    query_service::{
+        daemon_source_refresh_request_with_cancellation, DaemonSourceRefreshServiceUnavailable,
+    },
+    source_backed_refresh_adapter::{journal::DaemonRefreshJournal, runtime::DaemonRefreshRuntime},
 };
+
+mod client;
+mod refresh_mode;
+mod request;
+
+#[cfg(feature = "test-support")]
+pub use client::SourceRefreshObservationRecoveryFailed;
 
 #[cfg(feature = "test-support")]
 pub fn recover_wait_refresh_request_for_test(
@@ -33,8 +38,8 @@ pub fn recover_wait_refresh_request_for_test(
     data_root: &Path,
     request_id: &str,
 ) -> Result<String> {
-    ctx_daemon_refresh_client::testing::recover_wait_refresh_request(
-        &ServiceRefreshClientHost(availability),
+    client::recover_wait_refresh_request(
+        availability,
         data_root,
         request_id,
         ctx_history_refresh::RefreshRequestTrigger::Search,
@@ -44,13 +49,20 @@ pub fn recover_wait_refresh_request_for_test(
 
 #[cfg(not(test))]
 pub(crate) use ctx_history_refresh::RefreshEngine as CoreRefreshEngine;
-pub use ctx_history_refresh::{RefreshSelection, RefreshStatus, SourceBackedCurrentSourceProgress};
+pub use ctx_history_refresh::{
+    explicit_catalog_request_is_accounted_for, optional_generation,
+    published_refresh_receipt_for_index, RefreshIntent, RefreshOutcomeClass, RefreshRequest,
+    RefreshRequestState, RefreshRequestTrigger, RefreshSelection, RefreshStatus, RefreshStatusKind,
+    RefreshTerminalOutcome, SourceBackedCurrentSourceProgress, SourceBackedPublicationMetadata,
+    SourceBackedRefreshReceipt,
+};
 
 #[cfg(test)]
 pub(crate) use ctx_history_refresh::{
-    open_verified_index, source_backed_index_root, EventWatermark, SourceBackedRefreshCurrent,
-    SourceBackedRefreshExecution, SourceBackedRefreshExecutor, SourceBackedRefreshPublication,
-    SourceBackedRefreshRouteResult, SourceBackedRefreshSourceFailure, SourceBackedRefreshTimings,
+    open_verified_index, source_backed_index_root, EventWatermark, RefreshLogicalPhase,
+    SourceBackedRefreshCurrent, SourceBackedRefreshExecution, SourceBackedRefreshExecutor,
+    SourceBackedRefreshPublication, SourceBackedRefreshRouteResult,
+    SourceBackedRefreshSourceFailure, SourceBackedRefreshTimings,
 };
 
 #[cfg(test)]
@@ -393,179 +405,48 @@ impl CoreRefreshEngine {
     }
 }
 
-pub use ctx_daemon_refresh_client::{
-    PinnedSourceBackedGeneration, SourceBackedRefreshDaemonUnavailable, SourceBackedRefreshMode,
+#[allow(unused_imports)] // Stable typed terminal outcome for command/API integrations.
+pub use client::{
+    coordinate_import_source_backed_refresh_with_progress,
+    coordinate_setup_source_backed_refresh_with_progress, coordinate_source_backed_refresh,
+    coordinate_source_backed_refresh_with_progress, SourceBackedRefreshDaemonUnavailable,
     SourceBackedRefreshObservation, SourceBackedRefreshPendingPublication,
     SourceBackedRefreshTerminalError,
 };
+pub use refresh_mode::SourceBackedRefreshMode;
+use request::SourceBackedRefreshRequest;
 
-#[cfg(test)]
-use ctx_history_refresh::SourceBackedRefreshReceipt;
+const SOURCE_REFRESH_REQUEST_OP: &str = "source_refresh_request";
+const SOURCE_REFRESH_STATUS_OP: &str = "source_refresh_status";
+const SOURCE_REFRESH_UNKNOWN_REQUEST_STATE: &str = "request_unknown";
+const SOURCE_REFRESH_UNKNOWN_REQUEST_ERROR_CODE: &str = "source_refresh_request_unknown";
+const SOURCE_REFRESH_POLL_INTERVAL: StdDuration = StdDuration::from_millis(50);
+const SOURCE_REFRESH_IPC_TIMEOUT: StdDuration = StdDuration::from_secs(2);
+const SOURCE_REFRESH_RESPONSE_MAX_BYTES: u64 = 64 * 1024;
 
-struct ServiceRefreshClientHost<'a>(&'a dyn crate::DaemonAvailabilityPort);
+pub struct PinnedSourceBackedGeneration(ctx_history_refresh::PinnedSourceBackedGeneration);
 
-impl SourceRefreshClientHost for ServiceRefreshClientHost<'_> {
-    fn ensure_available(
-        &self,
-        data_root: &Path,
-        trigger: ctx_history_refresh::RefreshRequestTrigger,
-        demand: SourceRefreshDaemonDemand,
-    ) -> Result<SourceRefreshDaemonAvailability> {
-        let trigger = match trigger {
-            ctx_history_refresh::RefreshRequestTrigger::Setup => crate::DaemonTrigger::Setup,
-            ctx_history_refresh::RefreshRequestTrigger::Search => crate::DaemonTrigger::Search,
-            ctx_history_refresh::RefreshRequestTrigger::Import => crate::DaemonTrigger::Import,
-        };
-        let demand = match demand {
-            SourceRefreshDaemonDemand::Background => crate::DaemonAvailabilityDemand::Background,
-            SourceRefreshDaemonDemand::ExplicitWait => {
-                crate::DaemonAvailabilityDemand::ExplicitWait
-            }
-        };
-        match self.0.ensure_available(data_root, trigger, demand)? {
-            crate::DaemonAvailability::Available => Ok(SourceRefreshDaemonAvailability::Available),
-            crate::DaemonAvailability::Disabled => Ok(SourceRefreshDaemonAvailability::Disabled),
-        }
+impl PinnedSourceBackedGeneration {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn from_index(index: ctx_history_index::VerifiedIndex) -> Self {
+        Self(ctx_history_refresh::PinnedSourceBackedGeneration::from_index(index))
     }
 
-    fn checkpoint(&self) -> Result<()> {
-        self.0.checkpoint()
+    pub fn generation_id(&self) -> &str {
+        self.0.generation_id()
     }
 
-    fn interrupted(&self, error: &anyhow::Error) -> bool {
-        self.0.interrupted(error)
+    pub fn semantic_eligible_event_count(&self) -> Result<u64> {
+        self.0.semantic_eligible_event_count()
     }
 
-    fn pause(&self, duration: StdDuration) -> Result<()> {
-        self.0.pause(duration)
+    pub fn verified_index(&self) -> &ctx_history_index::VerifiedIndex {
+        self.0.verified_index()
     }
 
-    fn source_refresh_request(
-        &self,
-        data_root: &Path,
-        request: Value,
-        timeout: StdDuration,
-        max_response_bytes: u64,
-    ) -> Result<Option<Value>> {
-        super::query_service::daemon_source_refresh_request_with_cancellation(
-            self.0,
-            data_root,
-            request,
-            timeout,
-            max_response_bytes,
-        )
-        .map_err(|error| {
-            let request_may_have_been_submitted = super::query_service::DaemonSourceRefreshServiceUnavailable::request_may_have_been_submitted(&error);
-            if request_may_have_been_submitted || error
-                .downcast_ref::<super::query_service::DaemonSourceRefreshServiceUnavailable>()
-                .is_some()
-            {
-                SourceRefreshTransportUnavailable::new(request_may_have_been_submitted).into()
-            } else {
-                error
-            }
-        })
+    pub fn into_index(self) -> ctx_history_index::VerifiedIndex {
+        self.0.into_index()
     }
-
-    fn pin_published_generation(
-        &self,
-        data_root: &Path,
-    ) -> Result<Option<PinnedSourceBackedGeneration>> {
-        pin_published_generation(data_root)
-    }
-
-    fn pin_active_verified_generation(
-        &self,
-        data_root: &Path,
-    ) -> Result<PinnedSourceBackedGeneration> {
-        pin_active_verified_generation(data_root)
-    }
-
-    fn pin_retained_generation(
-        &self,
-        data_root: &Path,
-        generation_id: &str,
-    ) -> Result<PinnedSourceBackedGeneration> {
-        pin_retained_generation(data_root, generation_id)
-    }
-}
-
-pub fn coordinate_source_backed_refresh(
-    availability: &dyn crate::DaemonAvailabilityPort,
-    data_root: &Path,
-    mode: SourceBackedRefreshMode,
-) -> Result<SourceBackedRefreshObservation> {
-    ctx_daemon_refresh_client::coordinate_source_backed_refresh(
-        &ServiceRefreshClientHost(availability),
-        data_root,
-        mode,
-    )
-}
-
-pub fn coordinate_source_backed_refresh_with_progress(
-    availability: &dyn crate::DaemonAvailabilityPort,
-    data_root: &Path,
-    mode: SourceBackedRefreshMode,
-    report_progress: &mut dyn FnMut(&RefreshStatus) -> Result<()>,
-) -> Result<SourceBackedRefreshObservation> {
-    ctx_daemon_refresh_client::coordinate_source_backed_refresh_with_progress(
-        &ServiceRefreshClientHost(availability),
-        data_root,
-        mode,
-        report_progress,
-    )
-}
-
-pub fn coordinate_setup_source_backed_refresh_with_progress(
-    availability: &dyn crate::DaemonAvailabilityPort,
-    data_root: &Path,
-    mode: SourceBackedRefreshMode,
-    report_progress: &mut dyn FnMut(&RefreshStatus) -> Result<()>,
-) -> Result<SourceBackedRefreshObservation> {
-    ctx_daemon_refresh_client::coordinate_setup_source_backed_refresh_with_progress(
-        &ServiceRefreshClientHost(availability),
-        data_root,
-        mode,
-        report_progress,
-    )
-}
-
-pub fn coordinate_import_source_backed_refresh_with_progress(
-    availability: &dyn crate::DaemonAvailabilityPort,
-    data_root: &Path,
-    mode: SourceBackedRefreshMode,
-    selection: RefreshSelection,
-    allow_daemon_autostart: bool,
-    report_progress: &mut dyn FnMut(&RefreshStatus) -> Result<()>,
-) -> Result<SourceBackedRefreshObservation> {
-    ctx_daemon_refresh_client::coordinate_import_source_backed_refresh_with_progress(
-        &ServiceRefreshClientHost(availability),
-        data_root,
-        mode,
-        selection,
-        allow_daemon_autostart,
-        report_progress,
-    )
-}
-
-#[cfg(test)]
-fn wait_for_published_generation(
-    data_root: &Path,
-    request_id: String,
-    mode: SourceBackedRefreshMode,
-    operation: ctx_history_refresh::RefreshOperation,
-    expected_catalog: Option<&ExplicitSourceCatalogAuthority>,
-    allow_daemon_autostart: bool,
-) -> Result<SourceBackedRefreshObservation> {
-    ctx_daemon_refresh_client::testing::wait_for_published_generation(
-        &ServiceRefreshClientHost(&crate::test_support::AVAILABILITY),
-        data_root,
-        request_id,
-        mode,
-        operation,
-        expected_catalog,
-        allow_daemon_autostart,
-    )
 }
 
 pub(crate) fn pin_published_generation(
@@ -573,13 +454,13 @@ pub(crate) fn pin_published_generation(
 ) -> Result<Option<PinnedSourceBackedGeneration>> {
     Ok(
         ctx_history_refresh::pin_published_generation(data_root, &DaemonRefreshJournal)?
-            .map(PinnedSourceBackedGeneration::from_refresh_pin),
+            .map(PinnedSourceBackedGeneration),
     )
 }
 
 pub fn pin_active_verified_generation(data_root: &Path) -> Result<PinnedSourceBackedGeneration> {
     ctx_history_refresh::pin_active_verified_generation(data_root, &DaemonRefreshJournal)
-        .map(PinnedSourceBackedGeneration::from_refresh_pin)
+        .map(PinnedSourceBackedGeneration)
 }
 
 pub(crate) fn pin_retained_generation(
@@ -587,7 +468,14 @@ pub(crate) fn pin_retained_generation(
     generation_id: &str,
 ) -> Result<PinnedSourceBackedGeneration> {
     ctx_history_refresh::pin_retained_generation(data_root, generation_id)
-        .map(PinnedSourceBackedGeneration::from_refresh_pin)
+        .map(PinnedSourceBackedGeneration)
+}
+
+fn published_refresh_receipt(
+    response: &Value,
+    pin: &PinnedSourceBackedGeneration,
+) -> Result<SourceBackedRefreshReceipt> {
+    ctx_history_refresh::published_refresh_receipt(response, &pin.0)
 }
 
 pub(super) fn source_backed_watch_catalog(
@@ -612,7 +500,3 @@ pub fn published_explicit_source_relocation_authority(
 #[cfg(test)]
 #[path = "source_backed_refresh_coordinator/restart_recovery_tests.rs"]
 mod restart_recovery_tests;
-
-#[cfg(all(test, unix))]
-#[path = "source_backed_refresh_coordinator/client_transport_recovery_tests.rs"]
-mod client_transport_recovery_tests;

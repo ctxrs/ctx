@@ -1,5 +1,3 @@
-//! Canonical source-refresh request encoding for the final-binary client.
-
 use super::*;
 
 /// Schema-v1 source-refresh IPC encoder.

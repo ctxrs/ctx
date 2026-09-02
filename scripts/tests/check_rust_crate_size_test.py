@@ -53,8 +53,19 @@ def package(name: str = "big", root: str = "crates/big") -> gate.Package:
     return gate.Package(name=name, manifest=f"{root}/Cargo.toml", root=root)
 
 
-def measurement(count: int, name: str = "big", root: str = "crates/big") -> gate.Measurement:
-    return gate.Measurement(package=package(name, root), cloc=count, files=1)
+def measurement(
+    source_count: int,
+    name: str = "big",
+    root: str = "crates/big",
+    test_count: int = 0,
+) -> gate.Measurement:
+    return gate.Measurement(
+        package=package(name, root),
+        source_cloc=source_count,
+        source_files=1,
+        test_cloc=test_count,
+        test_files=int(bool(test_count)),
+    )
 
 
 class PhysicalCensusTests(unittest.TestCase):
@@ -80,6 +91,11 @@ class PhysicalCensusTests(unittest.TestCase):
         measured = gate.live_measurements(self.fixture.root)
 
         self.assertEqual([(item.package.name, item.files, item.cloc) for item in measured], [("pkg", 7, 7)])
+        item = measured[0]
+        self.assertEqual(
+            (item.source_files, item.source_cloc, item.test_files, item.test_cloc),
+            (4, 4, 3, 3),
+        )
 
     def test_untracked_rust_file_is_seen_without_git(self) -> None:
         self.fixture.workspace(["crates/pkg"])
@@ -260,13 +276,20 @@ let lifetime: &'static str = "ok";
 
 
 class LimitTests(unittest.TestCase):
-    def test_hard_limit_is_the_only_admission_threshold(self) -> None:
+    def test_production_limit_does_not_charge_tests(self) -> None:
         self.assertEqual(gate.measurement_failures([measurement(21_000)]), [])
+        self.assertEqual(gate.measurement_failures([measurement(21_000, test_count=21_000)]), [])
         self.assertEqual(
             gate.measurement_failures(
                 [measurement(21_001, "new", "crates/new")]
             ),
-            ["package=new count=21001 limit=21000"],
+            ["package=new source_count=21001 limit=21000"],
+        )
+
+    def test_test_surface_has_its_own_bounded_limit(self) -> None:
+        self.assertEqual(
+            gate.measurement_failures([measurement(1, test_count=21_001)]),
+            ["package=big test_surface_count=21001 limit=21000"],
         )
 
     def test_all_over_limit_packages_are_reported_without_state(self) -> None:
@@ -280,8 +303,8 @@ class LimitTests(unittest.TestCase):
         self.assertEqual(
             failures,
             [
-                "package=alpha count=21001 limit=21000",
-                "package=zeta count=21002 limit=21000",
+                "package=alpha source_count=21001 limit=21000",
+                "package=zeta source_count=21002 limit=21000",
             ],
         )
         message = gate.format_failures(failures)

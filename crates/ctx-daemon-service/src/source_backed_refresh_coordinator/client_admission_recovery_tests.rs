@@ -1,59 +1,22 @@
-//! Admission and cancellation coverage for the final-binary refresh client.
-
 use super::*;
-use crate::observation_recovery::{
-    SourceRefreshObservationRecoveryFailed, DISCONNECT_POLICY as SOURCE_REFRESH_DISCONNECT_POLICY,
-};
 
 #[derive(Default)]
 struct RecordingAvailability(
-    std::sync::Mutex<Vec<(RefreshRequestTrigger, SourceRefreshDaemonDemand)>>,
+    std::sync::Mutex<Vec<(crate::DaemonTrigger, crate::DaemonAvailabilityDemand)>>,
 );
 
-impl SourceRefreshClientHost for RecordingAvailability {
+impl crate::DaemonAvailabilityPort for RecordingAvailability {
     fn ensure_available(
         &self,
         _data_root: &Path,
-        trigger: RefreshRequestTrigger,
-        demand: SourceRefreshDaemonDemand,
-    ) -> Result<SourceRefreshDaemonAvailability> {
+        trigger: crate::DaemonTrigger,
+        demand: crate::DaemonAvailabilityDemand,
+    ) -> Result<crate::DaemonAvailability> {
         self.0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push((trigger, demand));
-        Ok(SourceRefreshDaemonAvailability::Available)
-    }
-
-    fn source_refresh_request(
-        &self,
-        _data_root: &Path,
-        _request: Value,
-        _timeout: StdDuration,
-        _max_response_bytes: u64,
-    ) -> Result<Option<Value>> {
-        Ok(None)
-    }
-
-    fn pin_published_generation(
-        &self,
-        _data_root: &Path,
-    ) -> Result<Option<PinnedSourceBackedGeneration>> {
-        Ok(None)
-    }
-
-    fn pin_active_verified_generation(
-        &self,
-        _data_root: &Path,
-    ) -> Result<PinnedSourceBackedGeneration> {
-        Err(anyhow!("test host has no generation"))
-    }
-
-    fn pin_retained_generation(
-        &self,
-        _data_root: &Path,
-        _generation_id: &str,
-    ) -> Result<PinnedSourceBackedGeneration> {
-        Err(anyhow!("test host has no retained generation"))
+        Ok(crate::DaemonAvailability::Available)
     }
 }
 
@@ -62,16 +25,16 @@ struct CancelledRecoveryAvailability {
     ensures: std::sync::atomic::AtomicUsize,
 }
 
-impl SourceRefreshClientHost for CancelledRecoveryAvailability {
+impl crate::DaemonAvailabilityPort for CancelledRecoveryAvailability {
     fn ensure_available(
         &self,
         _data_root: &Path,
-        _trigger: RefreshRequestTrigger,
-        _demand: SourceRefreshDaemonDemand,
-    ) -> Result<SourceRefreshDaemonAvailability> {
+        _trigger: crate::DaemonTrigger,
+        _demand: crate::DaemonAvailabilityDemand,
+    ) -> Result<crate::DaemonAvailability> {
         self.ensures
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        Ok(SourceRefreshDaemonAvailability::Available)
+        Ok(crate::DaemonAvailability::Available)
     }
 
     fn checkpoint(&self) -> Result<()> {
@@ -80,38 +43,6 @@ impl SourceRefreshClientHost for CancelledRecoveryAvailability {
 
     fn interrupted(&self, error: &anyhow::Error) -> bool {
         error.to_string() == "cancelled before recovery ensure"
-    }
-
-    fn source_refresh_request(
-        &self,
-        _data_root: &Path,
-        _request: Value,
-        _timeout: StdDuration,
-        _max_response_bytes: u64,
-    ) -> Result<Option<Value>> {
-        Ok(None)
-    }
-
-    fn pin_published_generation(
-        &self,
-        _data_root: &Path,
-    ) -> Result<Option<PinnedSourceBackedGeneration>> {
-        Ok(None)
-    }
-
-    fn pin_active_verified_generation(
-        &self,
-        _data_root: &Path,
-    ) -> Result<PinnedSourceBackedGeneration> {
-        Err(anyhow!("test host has no generation"))
-    }
-
-    fn pin_retained_generation(
-        &self,
-        _data_root: &Path,
-        _generation_id: &str,
-    ) -> Result<PinnedSourceBackedGeneration> {
-        Err(anyhow!("test host has no retained generation"))
     }
 }
 
@@ -253,7 +184,6 @@ fn missing_endpoint_before_any_roundtrip_remains_genuinely_unavailable() {
     assert!(response.is_none());
     assert_eq!(roundtrips, 1);
     let Err(error) = daemon_unavailable_fallback(
-        &RecordingAvailability::default(),
         Path::new("unused-for-wait-mode"),
         SourceBackedRefreshMode::Wait,
         None,
@@ -266,18 +196,10 @@ fn missing_endpoint_before_any_roundtrip_remains_genuinely_unavailable() {
 }
 
 #[test]
-fn transport_unavailable_preserves_the_service_error_wording() {
-    assert_eq!(
-        SourceRefreshTransportUnavailable::new(false).to_string(),
-        "daemon source refresh service is unavailable"
-    );
-}
-
-#[test]
 fn no_daemon_post_ack_recovery_is_typed_retained_and_unobservable() {
     let request_id = "019fcaaa-0000-7000-8000-000000000296";
     let error = recover_wait_refresh_request(
-        &RecordingAvailability::default(),
+        &crate::test_support::AVAILABILITY,
         Path::new("unused-after-durable-ack"),
         request_id,
         RefreshRequestTrigger::Search,
@@ -286,11 +208,14 @@ fn no_daemon_post_ack_recovery_is_typed_retained_and_unobservable() {
     .unwrap_err();
 
     let retained = error
-        .downcast_ref::<SourceRefreshObservationRecoveryFailed>()
+        .downcast_ref::<observation_recovery::SourceRefreshObservationRecoveryFailed>()
         .expect("post-ack endpoint loss must retain request identity");
     assert_eq!(retained.request_id, request_id);
     assert_eq!(retained.recovery_attempts, 0);
-    assert_eq!(retained.disconnect_policy, SOURCE_REFRESH_DISCONNECT_POLICY);
+    assert_eq!(
+        retained.disconnect_policy,
+        observation_recovery::DISCONNECT_POLICY
+    );
     assert!(error
         .downcast_ref::<SourceBackedRefreshDaemonUnavailable>()
         .is_none());
@@ -341,8 +266,8 @@ fn post_ack_daemon_recovery_reobserves_coalesced_id_before_readmission() {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner),
         [(
-            RefreshRequestTrigger::Search,
-            SourceRefreshDaemonDemand::ExplicitWait,
+            crate::DaemonTrigger::Search,
+            crate::DaemonAvailabilityDemand::ExplicitWait,
         )]
     );
 }
@@ -356,13 +281,13 @@ fn typed_initial_service_unavailability_preserves_existing_fallback() {
         |_| panic!("typed initial unavailability must not enter ambiguous recovery"),
         || {
             roundtrips += 1;
-            Err(SourceRefreshTransportUnavailable::new(false).into())
+            Err(DaemonSourceRefreshServiceUnavailable.into())
         },
     )
     .unwrap_err();
 
     assert_eq!(roundtrips, 1);
     assert!(error
-        .downcast_ref::<SourceRefreshTransportUnavailable>()
+        .downcast_ref::<DaemonSourceRefreshServiceUnavailable>()
         .is_some());
 }

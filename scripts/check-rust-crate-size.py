@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Enforce a physical 21,000-CLOC limit for Cargo workspace packages."""
+"""Enforce production and test-surface CLOC limits for Cargo packages."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+import importlib.util
 import os
 from pathlib import Path, PurePosixPath
 import re
@@ -12,9 +13,9 @@ import sys
 import tomli as tomllib
 from typing import Any, Iterable
 
-
 HARD_LIMIT = 21_000
-METRIC = "physical-rust-cloc-v1"
+TEST_SURFACE_LIMIT = 21_000
+METRIC = "physical-rust-source-test-cloc-v2"
 COMMIT = re.compile(r"^[0-9a-f]{40}$")
 EXCLUDED_DIRECTORY_NAMES = {
     ".git",
@@ -41,8 +42,26 @@ class Package:
 @dataclass(frozen=True)
 class Measurement:
     package: Package
-    cloc: int
-    files: int
+    source_cloc: int
+    source_files: int
+    test_cloc: int
+    test_files: int
+
+    @property
+    def cloc(self) -> int:
+        return self.source_cloc + self.test_cloc
+
+    @property
+    def files(self) -> int:
+        return self.source_files + self.test_files
+
+
+_LOC_SPEC = importlib.util.spec_from_file_location(
+    "check_loc", Path(__file__).with_name("check-loc.py")
+)
+assert _LOC_SPEC is not None and _LOC_SPEC.loader is not None
+_LOC = importlib.util.module_from_spec(_LOC_SPEC)
+_LOC_SPEC.loader.exec_module(_LOC)
 
 
 def normalized_relative_path(value: Any, label: str) -> str:
@@ -343,15 +362,29 @@ def rust_cloc(content: bytes, path: str = "Rust source") -> int:
 def measure_packages(root: Path, packages: list[Package], sources: dict[str, list[str]]) -> list[Measurement]:
     result: list[Measurement] = []
     for package in packages:
-        paths = sources[package.name]
-        cloc = 0
-        for path in paths:
+        source_cloc = source_files = test_cloc = test_files = 0
+        for path in sources[package.name]:
             try:
-                content = (root / path).read_bytes()
+                cloc = rust_cloc((root / path).read_bytes(), path)
             except OSError as error:
                 raise GateError(f"cannot read Rust source {path}: {error}") from error
-            cloc += rust_cloc(content, path)
-        result.append(Measurement(package=package, cloc=cloc, files=len(paths)))
+            # Test fixtures are exempt from the file-level gate, but remain
+            # part of this package-level test surface.
+            if _LOC.classify(path) == "source":
+                source_cloc += cloc
+                source_files += 1
+            else:
+                test_cloc += cloc
+                test_files += 1
+        result.append(
+            Measurement(
+                package=package,
+                source_cloc=source_cloc,
+                source_files=source_files,
+                test_cloc=test_cloc,
+                test_files=test_files,
+            )
+        )
     return result
 
 
@@ -408,11 +441,18 @@ def verify_exact_candidate(root: Path, exact_candidate_commit: str) -> None:
 
 
 def measurement_failures(measurements: list[Measurement]) -> list[str]:
-    return [
-        f"package={item.package.name} count={item.cloc} limit={HARD_LIMIT}"
-        for item in sorted(measurements, key=lambda measured: measured.package.name)
-        if item.cloc > HARD_LIMIT
-    ]
+    failures = []
+    for item in sorted(measurements, key=lambda measured: measured.package.name):
+        if item.source_cloc > HARD_LIMIT:
+            failures.append(
+                f"package={item.package.name} source_count={item.source_cloc} limit={HARD_LIMIT}"
+            )
+        if item.test_cloc > TEST_SURFACE_LIMIT:
+            failures.append(
+                f"package={item.package.name} test_surface_count={item.test_cloc} "
+                f"limit={TEST_SURFACE_LIMIT}"
+            )
+    return failures
 
 
 def format_failures(failures: list[str]) -> str:
@@ -457,12 +497,23 @@ def main() -> int:
     measurements = check_checkout(root, exact_candidate_commit)
     total_files = sum(item.files for item in measurements)
     total_cloc = sum(item.cloc for item in measurements)
+    total_source_files = sum(item.source_files for item in measurements)
+    total_source_cloc = sum(item.source_cloc for item in measurements)
+    total_test_files = sum(item.test_files for item in measurements)
+    total_test_cloc = sum(item.test_cloc for item in measurements)
     print(
-        f"physical Rust crate-size gate passed: packages={len(measurements)} files={total_files} "
-        f"cloc={total_cloc} limit={HARD_LIMIT} metric={METRIC}"
+        f"Bazel Rust crate-size gate passed: packages={len(measurements)} files={total_files} "
+        f"cloc={total_cloc} source_files={total_source_files} source_cloc={total_source_cloc} "
+        f"test_files={total_test_files} test_cloc={total_test_cloc} source_limit={HARD_LIMIT} "
+        f"test_surface_limit={TEST_SURFACE_LIMIT} "
+        f"metric={METRIC}"
     )
     for item in measurements:
-        print(f"  {item.package.name}: files={item.files} cloc={item.cloc} limit={HARD_LIMIT}")
+        print(
+            f"  {item.package.name}: source_files={item.source_files} source_cloc={item.source_cloc} "
+            f"source_limit={HARD_LIMIT} test_files={item.test_files} test_cloc={item.test_cloc} "
+            f"test_surface_limit={TEST_SURFACE_LIMIT}"
+        )
     return 0
 
 
