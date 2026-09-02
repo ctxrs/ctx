@@ -11,6 +11,7 @@ members = [
     "crates/ctx-client-observability",
     "crates/ctx-daemon-cli",
     "crates/ctx-daemon-application",
+    "crates/ctx-daemon-refresh-client",
     "crates/ctx-daemon-service",
     "crates/ctx-daemon-runtime",
     "crates/ctx-managed-pair-engine",

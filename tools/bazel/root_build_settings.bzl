@@ -13,6 +13,7 @@ def root_build_settings():
             "//crates/ctx-cli-presentation:Cargo.toml",
             "//crates/ctx-daemon-cli:Cargo.toml",
             "//crates/ctx-daemon-application:Cargo.toml",
+            "//crates/ctx-daemon-refresh-client:Cargo.toml",
             "//crates/ctx-daemon-runtime:Cargo.toml",
             "//crates/ctx-daemon-service:Cargo.toml",
         ],

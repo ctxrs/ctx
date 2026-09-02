@@ -1,0 +1,26 @@
+[package]
+name = "ctx-daemon-refresh-client"
+version.workspace = true
+description = "Process-neutral daemon source-refresh client for ctx"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+publish = false
+
+[features]
+test-support = []
+
+[dependencies]
+anyhow.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+ctx-history-capture = { path = "../ctx-history-capture" }
+ctx-history-index = { path = "../ctx-history-index" }
+ctx-history-refresh = { path = "../ctx-history-refresh" }
+
+[dev-dependencies]
+ctx-history-core = { path = "../ctx-history-core" }
+ctx-history-refresh = { path = "../ctx-history-refresh", features = ["test-support"] }
+tempfile.workspace = true

@@ -48,6 +48,7 @@ WORKSPACE_RELEASE_PACKAGES = {
     "ctx-client-observability",
     "ctx-daemon-cli",
     "ctx-daemon-application",
+    "ctx-daemon-refresh-client",
     "ctx-daemon-runtime",
     "ctx-daemon-service",
     "ctx-history-capture",

@@ -1,3 +1,5 @@
+//! Progress and publication-authority coverage for the refresh client.
+
 use super::*;
 use ctx_history_core::{
     CertifiedSource, ScannedSourceCounts, SourceAnchor, SourceKey, SourceObservation,

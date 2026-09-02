@@ -50,6 +50,7 @@ RUST_FORMAT_TARGETS = [
     "//crates/ctx-client-observability:upgrade_analytics_tests",
     "//crates/ctx-daemon-application:unit_tests",
     "//crates/ctx-daemon-cli:unit_tests",
+    "//crates/ctx-daemon-refresh-client:unit_tests",
     "//crates/ctx-daemon-runtime:unit_tests",
     "//crates/ctx-daemon-service:unit_tests",
     "//crates/ctx-history-capture-model:ctx_retrieval_classifier_tests",
