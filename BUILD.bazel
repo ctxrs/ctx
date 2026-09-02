@@ -555,16 +555,6 @@ py_test(
 )
 
 py_test(
-    name = "bazel_affected_mutation_tests",
-    srcs = [
-        "//tools/bazel:select_affected_tests.py",
-        "//tools/bazel:select_affected_tests_test.py",
-    ],
-    imports = ["tools/bazel"],
-    main = "//tools/bazel:select_affected_tests_test.py",
-)
-
-py_test(
     name = "performance_sanity_tests",
     srcs = [
         "scripts/tests/performance_family_fixtures.py",
@@ -636,10 +626,10 @@ sh_test(
     data = [
         ".bazelversion",
         "scripts/bazel-affected.sh",
+        "scripts/bazel/workspace-status.sh",
         "scripts/bazelw",
         "scripts/ci-common.sh",
         "scripts/tests/fixtures/fake-bazel.sh",
-        "//tools/bazel:select_affected_tests.py",
     ],
 )
 
