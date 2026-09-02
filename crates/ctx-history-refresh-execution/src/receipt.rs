@@ -109,7 +109,6 @@ impl SourceBackedRefreshReceipt {
             || self.catalog_route_bindings.iter().any(|binding| {
                 !is_sha256_identity(&binding.catalog_lineage)
                     || SourceRouteIdentity::from_sha256(binding.route_identity.clone()).is_err()
-                    || !routes.contains_key(binding.route_identity.as_str())
             })
             || self.catalog_route_bindings.iter().any(|binding| {
                 !expected_lineages.contains(&binding.catalog_lineage)

@@ -503,6 +503,34 @@ pub fn explicit_source_catalog_authority_for_test(revision: u64) -> ExplicitSour
     authority_for(revision, &[]).expect("empty test request authority")
 }
 
+#[cfg(test)]
+pub(crate) fn explicit_source_catalog_authority_for_sources_for_test(
+    sources: &[ProviderSource],
+) -> ExplicitSourceCatalogAuthority {
+    let mut entries = sources
+        .iter()
+        .map(|source| {
+            let metadata = route_metadata(source.provider, source.source_format)?;
+            Ok(CatalogEntry {
+                provider: source.provider.as_str().to_owned(),
+                source_format: source.source_format.to_owned(),
+                path: source.path.clone(),
+                catalog_lineage: encode_hex(&explicit_source_catalog_lineage(
+                    source.provider,
+                    metadata.certified_source_format,
+                    &source.path,
+                )),
+                route_identity: None,
+                relocate_from: None,
+                enabled: true,
+            })
+        })
+        .collect::<Result<Vec<_>>>()
+        .expect("valid explicit source catalog test entries");
+    sort_and_validate_entries(&mut entries).expect("valid explicit source catalog test authority");
+    authority_for(1, &entries).expect("explicit source catalog test authority")
+}
+
 fn validate_explicit_source_catalog_snapshot_roots(
     data_root: &Path,
     snapshot: &ExplicitSourceCatalogSnapshot,
