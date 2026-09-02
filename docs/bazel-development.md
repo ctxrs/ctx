@@ -164,7 +164,10 @@ worktree, a commit-keyed cached base hash, and complete target-graph hashes for
 both graphs. BUILD, `.bzl`, module, lock, and configuration changes select the
 full default-CI graph. A diff/query/filter failure or a changed file with no
 mapped test does the same. Non-routine external, manual, network,
-platform, stress, and release targets stay outside affected execution.
+platform, stress, and release targets stay outside affected execution. Git
+supplies changed files; after validating every bazel-diff label, Bazel's
+evaluated `tests()` expansion, test-rule kind, and tags are the sole routine
+test classifier.
 
 `//:repository_policy_check` reads the live Git and Cargo workspaces on every
 invocation. It enforces fixed physical-line limits and discovers every Cargo

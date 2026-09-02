@@ -47,7 +47,22 @@ cleanup() {
 trap cleanup EXIT
 
 generate_selection() {
-  local impacted_set
+  local impacted_set label
+  local -a impacted_labels=() selected_labels=()
+
+  {
+    git diff --name-only "${base_sha}" --
+    git ls-files --others --exclude-standard
+  } | sort -u >"${changed}" || return 1
+  if [[ ! -s "${changed}" ]]; then
+    : >"${selected}"
+    return 0
+  fi
+  if grep -Eq \
+    '(^|/)(BUILD|BUILD\.bazel|MODULE\.bazel|MODULE\.bazel\.lock|WORKSPACE|WORKSPACE\.bazel|Cargo\.lock|Cargo\.toml|\.bazelignore|\.bazelrc|\.bazelversion|[^/]+\.bzl)$|^scripts/(bazel-affected\.sh|bazelw|ci-common\.sh)$|^tools/bazel/' \
+    "${changed}"; then
+    return 12
+  fi
 
   # Omitting --modified-filepaths is intentional: both graphs receive complete
   # content hashing. Base hashes are published atomically by commit; concurrent
@@ -82,36 +97,53 @@ generate_selection() {
     --excludeExternalTargets \
     --output="${impacted}" || return 1
 
-  # bazel-diff deliberately reports every affected graph node. Let Bazel reduce
-  # that set to executable leaf tests and keep aggregate test suites, manual,
-  # network, external-harness, and release targets out of routine affected
-  # runs. Selecting an aggregate test suite would erase the benefit of
-  # selecting its affected members.
-  if [[ -s "${impacted}" ]]; then
-    impacted_set="$(tr '\n' ' ' <"${impacted}")"
-    scripts/bazelw query \
-      "kind(\".*_test rule\", set(${impacted_set})) except attr(\"tags\", \".*(advisory|external|flaky-repetition|manual|network|no-cache|platform-native|release|requires-local-history|requires-signing|requires-vm|stress|tier-nightly|tier-release).*\", set(${impacted_set}))" \
-      --output=label >"${filtered_impacted}" || return 1
-  else
-    : >"${filtered_impacted}"
-  fi
+  # bazel-diff is the graph authority, but never interpolate its output until
+  # each label is syntactically safe. tests() expands suites; kind() leaves
+  # only executable test rules, and tags remain Bazel's authority.
+  while IFS= read -r label || [[ -n "${label}" ]]; do
+    [[ -z "${label}" ]] && continue
+    if [[ ! "${label}" =~ ^//[A-Za-z0-9_@.+,=~/-]*:[A-Za-z0-9_@.+,=~/-]+$ ]]; then
+      printf 'bazel-diff emitted an invalid affected label: %s\n' "${label}" >&2
+      return 23
+    fi
+    impacted_labels+=("${label}")
+  done <"${impacted}"
+  (( ${#impacted_labels[@]} > 0 )) || return 24
+  impacted_set="$(printf '%s\n' "${impacted_labels[@]}" | sort -u | paste -sd ' ')"
 
-  {
-    git diff --name-only "${base_sha}" --
-    git ls-files --others --exclude-standard
-  } | sort -u >"${changed}" || return 1
+  local test_query="kind(\".*_test rule\", tests(set(${impacted_set})))"
+  scripts/bazelw query \
+    "${test_query} except attr(\"tags\", \".*(advisory|external|flaky-repetition|manual|network|no-cache|platform-native|release|requires-local-history|requires-signing|requires-vm|stress|tier-nightly|tier-release).*\", ${test_query})" \
+    --output=label >"${filtered_impacted}" || return 25
 
-  python3 tools/bazel/select_affected_tests.py "${changed}" "${filtered_impacted}" "${selected}" || return 1
+  while IFS= read -r label || [[ -n "${label}" ]]; do
+    [[ -z "${label}" ]] && continue
+    if [[ ! "${label}" =~ ^//[A-Za-z0-9_@.+,=~/-]*:[A-Za-z0-9_@.+,=~/-]+$ ]]; then
+      printf 'Bazel query emitted an invalid selected label: %s\n' "${label}" >&2
+      return 26
+    fi
+    selected_labels+=("${label}")
+  done <"${filtered_impacted}"
+  (( ${#selected_labels[@]} > 0 )) || return 24
+  printf '%s\n' "${selected_labels[@]}" | sort -u >"${selected}"
 }
 
 fail_closed() {
+  local reason="$1"
   printf '//...\n' >"${selected}"
-  printf 'bazel-diff failed; selecting default CI tests\n' >&2
+  printf 'affected test selection failed closed to //...: %s\n' "${reason}" >&2
 }
 
-if ! generate_selection; then
-  fail_closed
-fi
+selection_status=0
+generate_selection || selection_status=$?
+case "${selection_status}" in
+  0) ;;
+  12) fail_closed 'build configuration changed' ;;
+  23|26) fail_closed 'received an invalid Bazel label' ;;
+  24) fail_closed 'changed files have no eligible routine tests' ;;
+  25) fail_closed 'Bazel query failed' ;;
+  *) fail_closed "bazel-diff failed (status ${selection_status})" ;;
+esac
 
 cat "${selected}"
 if [[ "${CTX_AFFECTED_DRY_RUN:-0}" != "1" ]] && [[ -s "${selected}" ]]; then
