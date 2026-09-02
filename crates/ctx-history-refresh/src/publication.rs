@@ -258,19 +258,22 @@ pub(super) fn verify_source_backed_publication(
         .map(ExplicitSourceCatalogAuthority::route_lineages)
         .unwrap_or_default();
     if publication.catalog_route_bindings.iter().any(|binding| {
+        let Some(route) = SourceRouteIdentity::from_sha256(binding.route_identity.clone()).ok()
+        else {
+            return true;
+        };
+        let route_is_retained = manifest.source_route(&route).is_some();
         if witness_lineages.contains(&binding.catalog_lineage) {
-            return SourceRouteIdentity::from_sha256(binding.route_identity.clone())
-                .ok()
-                .is_none_or(|route| manifest.source_route(&route).is_none());
+            return !route_is_retained;
         }
         !publication.route_results.iter().any(|result| {
             result.route_identity == binding.route_identity
                 && matches!(
                     result.outcome,
                     SourceBackedRefreshRouteOutcome::Failed {
-                        carried_forward: false,
+                        carried_forward,
                         ..
-                    }
+                    } if carried_forward == route_is_retained
                 )
         })
     }) {
@@ -295,18 +298,69 @@ pub fn explicit_catalog_request_is_accounted_for(
                 .iter()
                 .find(|binding| binding.catalog_lineage == *lineage)
                 .is_some_and(|binding| {
+                    // Callers admit only a publication/receipt that was
+                    // already checked against its exact manifest above (or
+                    // while decoding it). That check establishes whether a
+                    // failed route was retained, so both cold and retained
+                    // transient request failures count here.
                     route_results.iter().any(|result| {
                         result.route_identity == binding.route_identity
                             && matches!(
                                 result.outcome,
-                                SourceBackedRefreshRouteOutcome::Failed {
-                                    carried_forward: false,
-                                    ..
-                                }
+                                SourceBackedRefreshRouteOutcome::Failed { .. }
                             )
                     })
                 })
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ctx_history_index::{GenerationWriter, SourceRouteSnapshot, WriterOptions};
+
+    #[test]
+    fn publication_accepts_retained_transient_binding_only_with_matching_failure_evidence() {
+        let temp = tempfile::tempdir().unwrap();
+        let route = SourceRouteIdentity::from_sha256("a1".repeat(32)).unwrap();
+        let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+            .unwrap()
+            .into_writer()
+            .unwrap();
+        writer
+            .set_present_source_routes(vec![SourceRouteSnapshot::present(
+                route.clone(),
+                Vec::new(),
+            )
+            .unwrap()])
+            .unwrap();
+        let generation = writer.commit(|_| true).unwrap().generation_id;
+        let verified = VerifiedIndex::open_pinned(temp.path()).unwrap();
+        let publication = |carried_forward| SourceBackedRefreshPublication {
+            generation_id: generation.clone(),
+            published_explicit_source_catalog: None,
+            unsupported_routes: 0,
+            certified_source_count: 0,
+            certified_source_bytes: 0,
+            current: SourceBackedRefreshCurrent::default(),
+            timings: SourceBackedRefreshTimings::default(),
+            route_results: vec![SourceBackedRefreshRouteResult::failed(
+                route.as_str().to_owned(),
+                "unavailable".to_owned(),
+                carried_forward,
+            )],
+            zero_source_authority: Vec::new(),
+            catalog_route_bindings: vec![ExplicitSourceCatalogRouteBinding {
+                catalog_lineage: "b2".repeat(32),
+                route_identity: route.as_str().to_owned(),
+            }],
+            verified_publication: None,
+        };
+
+        verify_source_backed_publication(&publication(true), &verified).unwrap();
+        let error = verify_source_backed_publication(&publication(false), &verified).unwrap_err();
+        assert!(format!("{error:#}").contains("catalog binding"));
+    }
 }
 
 fn published_generation_receipt(

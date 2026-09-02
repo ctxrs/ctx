@@ -1,6 +1,8 @@
 use super::*;
+use ctx_history_capture::provider_source_for_path;
 use ctx_history_core::{
-    CertifiedSource, ScannedSourceCounts, SourceAnchor, SourceKey, SourceObservation,
+    CaptureProvider, CertifiedSource, ScannedSourceCounts, SourceAnchor, SourceKey,
+    SourceObservation,
 };
 use ctx_history_index::{
     GenerationWriter, SourceRouteIdentity, SourceRouteSnapshot, VerifiedIndex, WriterOptions,
@@ -88,6 +90,47 @@ fn live_progress_heartbeat_is_ten_hertz() {
         SOURCE_REFRESH_PROGRESS_HEARTBEAT,
         StdDuration::from_millis(100)
     );
+}
+
+#[test]
+fn client_accepts_a_retained_transient_catalog_request_failure() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    let source_root = temp.path().join("source");
+    std::fs::create_dir_all(&source_root).unwrap();
+    let requested = ctx_history_refresh::upsert_explicit_source(
+        &data_root,
+        &provider_source_for_path(CaptureProvider::Codex, source_root),
+    )
+    .unwrap()
+    .authority;
+    let lineages = requested.route_lineages().into_iter().collect::<Vec<_>>();
+    let [lineage] = lineages.as_slice() else {
+        panic!("one explicit source should have one catalog lineage");
+    };
+    let route = source_count_route(1);
+    let bindings = [ctx_history_refresh::ExplicitSourceCatalogRouteBinding {
+        catalog_lineage: lineage.clone(),
+        route_identity: route.as_str().to_owned(),
+    }];
+    let carried = [SourceBackedRefreshRouteResult::failed(
+        route.as_str().to_owned(),
+        "unavailable".to_owned(),
+        true,
+    )];
+
+    assert!(explicit_catalog_request_is_accounted_for(
+        &requested, None, &bindings, &carried,
+    ));
+    assert!(!explicit_catalog_request_is_accounted_for(
+        &requested,
+        None,
+        &bindings,
+        &[SourceBackedRefreshRouteResult::succeeded(
+            route.as_str().to_owned(),
+            false,
+        )],
+    ));
 }
 
 #[test]
