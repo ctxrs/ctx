@@ -115,7 +115,7 @@ fn establish_fixture_generation(data_root: &Path, fixtures: &[MissingRouteFixtur
         );
     }
     writer.set_present_source_routes(routes).unwrap();
-    writer.commit(|_| true).unwrap();
+    commit_source_backed_test_generation(writer).unwrap();
 }
 
 fn missing_fixture_executor(
@@ -183,7 +183,7 @@ fn missing_fixture_executor(
             }
         }
         writer.set_present_source_routes(present)?;
-        let commit = writer.commit(|_| true)?;
+        let commit = commit_source_backed_test_generation(writer)?;
         let current = SourceBackedRefreshCurrent::from_sources(
             &commit.manifest().sources,
             removed_source_count,
@@ -204,7 +204,7 @@ fn missing_fixture_executor(
                 .collect(),
             zero_source_authority: Vec::new(),
             catalog_route_bindings: Vec::new(),
-            verified_publication: None,
+            verified_index: None,
         })
     })
 }

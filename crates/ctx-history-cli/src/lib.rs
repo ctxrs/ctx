@@ -75,10 +75,10 @@ pub use provider_sources::{
     MAX_DISCOVERY_ISSUE_MESSAGE_BYTES,
 };
 pub use source_index::{
-    copied_lineage_summary, generation_query_authority_error_json, mcp_search_with_compact,
-    mcp_show_event_application, mcp_show_session_application, normalize_mcp_search_request,
-    run_locate, run_search, run_show, validate_explicit_semantic_scope, McpSearchError,
-    McpSearchExecutionFailure, ShowApplicationError, SourceSearchRequest,
+    copied_lineage_summary, mcp_search_with_compact, mcp_show_event_application,
+    mcp_show_session_application, normalize_mcp_search_request, run_locate, run_search, run_show,
+    validate_explicit_semantic_scope, McpSearchError, McpSearchExecutionFailure,
+    ShowApplicationError, SourceSearchRequest,
 };
 pub use sources::{run_sources, SourcesDiscoveryObservation, SourcesExecutionObservation};
 

@@ -518,6 +518,8 @@ fn reader_owned_peer_lease_survives_parent_drop_after_integrity_verification() {
     };
     let mut reader =
         VerifiedIndex::open_pinned_generation(temp.path(), &second.generation_id).unwrap();
+    let mut second_reader =
+        VerifiedIndex::open_pinned_generation(temp.path(), &second.generation_id).unwrap();
 
     reset_physical_verification_activity();
     let peer = reader
@@ -526,6 +528,18 @@ fn reader_owned_peer_lease_survives_parent_drop_after_integrity_verification() {
         .expect("the reader-owned peer lease was not retained");
     assert_eq!(checksum_walks(), 1);
     assert!(hashed_artifact_bytes() > 0);
+
+    let second_peer = second_reader
+        .take_retained_generation_peer_for_reader()
+        .unwrap()
+        .expect("the cached reader-owned peer was not retained");
+    assert_eq!(
+        checksum_walks(),
+        1,
+        "the first verified peer open did not cache its physical proof"
+    );
+    assert_eq!(second_peer.generation_id(), first.generation_id);
+    drop((second_peer, second_reader));
 
     drop(reader);
     publish_pinned_test_generation(temp.path(), &source, 3, "third evidence");

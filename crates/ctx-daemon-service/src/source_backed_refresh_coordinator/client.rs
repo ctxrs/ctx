@@ -685,7 +685,7 @@ fn published_refresh_observation(
             "daemon published Core generation {expected}, but its retained terminal generation cannot be opened"
         )
     })?;
-    let receipt = published_request_outcome(response, &pin)?;
+    let receipt = published_refresh_receipt(response, &pin)?;
     let source_count = published_source_count(response, &receipt, pin.verified_index())?;
     if let Some(expected_catalog) = expected_catalog {
         if !explicit_catalog_request_is_accounted_for(
@@ -725,19 +725,6 @@ fn published_refresh_observation(
         receipt: Some(receipt),
         pin,
     })
-}
-
-fn published_request_outcome(
-    response: &Value,
-    pin: &PinnedSourceBackedGeneration,
-) -> Result<SourceBackedRefreshReceipt> {
-    let metadata = SourceBackedPublicationMetadata::decode(pin.verified_index())
-        .context("decode Core publication authority for daemon status")?;
-    ctx_history_refresh::published_refresh_request_outcome_for_index(
-        response,
-        pin.verified_index(),
-        &metadata,
-    )
 }
 
 fn should_report_progress(

@@ -317,15 +317,6 @@ impl GenerationWriter {
         if self.writer.is_some() || !self.deletions.is_empty() {
             return Ok(None);
         }
-        // Reuse would leave a migrated v8/v9 descriptor as durable authority.
-        // Send this one publication through the atomic candidate path instead.
-        if self
-            .base_publication
-            .as_ref()
-            .is_some_and(PinnedPublication::requires_current_manifest_anchor)
-        {
-            return Ok(None);
-        }
         let Some(base) = self.base_manifest() else {
             return Ok(None);
         };

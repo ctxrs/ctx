@@ -367,11 +367,8 @@ pub(super) struct SourceBackedRefreshAttempt {
     pub(super) request_source_count: Option<usize>,
     pub(super) certified_source_count: Option<usize>,
     pub(super) certified_source_bytes: Option<u64>,
-    /// Request-scoped route/result/rejection facts. This is mutable daemon
-    /// status, never publication authority.
+    /// The bounded terminal response owned by this request journal entry.
     pub(super) receipt: Option<SourceBackedRefreshReceipt>,
-    /// The sole publication receipt, decoded from Core CommitPayload metadata.
-    pub(super) publication_receipt: Option<SourceBackedRefreshReceipt>,
     pub(super) route_observations: BTreeMap<SourceRouteIdentity, String>,
     pub(super) automatic_retry_checkpoints:
         BTreeMap<SourceRouteIdentity, SourceBackedAutomaticRetryCheckpoint>,
@@ -465,17 +462,6 @@ impl SourceBackedRefreshAttempt {
         self.receipt
             .as_ref()
             .map(|_| self.published_generation != self.previous_generation)
-    }
-
-    fn request_outcome_receipt(&self) -> Option<&SourceBackedRefreshReceipt> {
-        if self.state != SourceBackedRefreshState::Published {
-            return None;
-        }
-        let request = self.receipt.as_ref()?;
-        self.publication_receipt
-            .as_ref()
-            .filter(|publication| *publication != request)
-            .map(|_| request)
     }
 
     fn default_logical_phase(&self) -> &'static str {
@@ -582,7 +568,6 @@ impl SourceBackedRefreshAttempt {
     }
 
     pub(super) fn to_json(&self) -> Value {
-        let publication_receipt = self.publication_receipt.as_ref().or(self.receipt.as_ref());
         let progress = self.live_progress();
         self.apply_base_read_fields(compact_json(json!({
             "ok": true,
@@ -608,9 +593,7 @@ impl SourceBackedRefreshAttempt {
             "coalesced_into_request_id": None::<String>,
             "coalesced_logical_demands": 0,
             "generation_changed": self.request_generation_changed(),
-            "receipt": publication_receipt.map(SourceBackedRefreshReceipt::to_json),
-            "request_outcome": self.request_outcome_receipt()
-                .map(SourceBackedRefreshReceipt::to_json),
+            "receipt": self.receipt.as_ref().map(SourceBackedRefreshReceipt::to_json),
             "outcome": self.receipt.as_ref().map(SourceBackedRefreshReceipt::terminal_outcome),
             "coalesced_requests": self.coalesced_requests,
             "progress": progress.to_json_with_total_known(
@@ -640,7 +623,6 @@ impl SourceBackedRefreshAttempt {
             | SourceBackedRefreshState::Queued
             | SourceBackedRefreshState::Running => "running",
         };
-        let publication_receipt = self.publication_receipt.as_ref().or(self.receipt.as_ref());
         self.apply_base_read_fields(compact_json(json!({
             "mode": "background",
             "owner": "daemon",
@@ -666,9 +648,7 @@ impl SourceBackedRefreshAttempt {
             "coalesced_into_request_id": None::<String>,
             "coalesced_logical_demands": 0,
             "generation_changed": self.request_generation_changed(),
-            "receipt": publication_receipt.map(SourceBackedRefreshReceipt::to_json),
-            "request_outcome": self.request_outcome_receipt()
-                .map(SourceBackedRefreshReceipt::to_json),
+            "receipt": self.receipt.as_ref().map(SourceBackedRefreshReceipt::to_json),
             "outcome": self.receipt.as_ref().map(SourceBackedRefreshReceipt::terminal_outcome),
             "coalesced_requests": self.coalesced_requests,
             "progress": self.progress.to_json_with_total_known(

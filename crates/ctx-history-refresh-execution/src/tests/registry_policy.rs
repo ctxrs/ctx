@@ -119,22 +119,37 @@ fn production_refresh_persists_both_split_publications_without_provider_roots() 
         )
         .unwrap()])
         .unwrap();
-    writer.commit(|_| true).unwrap();
+    writer
+        .commit_with_generation_state(
+            |_| true,
+            |_| false,
+            |_| {
+                SourceBackedGenerationState::new(
+                    None,
+                    Vec::new(),
+                    BTreeMap::new(),
+                    BTreeMap::new(),
+                    Vec::new(),
+                )?
+                .envelope()
+            },
+            |_| Ok(()),
+        )
+        .unwrap();
 
     let report = || DiscoveryReport {
         sources: vec![cli.clone(), ide.clone()],
         issues: Vec::new(),
     };
     let bridge = run_report(&discovery, report(), &data_root, &index_root).unwrap();
-    let bridge = bridge.verified_publication.as_ref().unwrap();
-    let bridge_index = bridge.verified_index();
+    let bridge_index = bridge.verified_index.as_ref().unwrap();
     assert!(bridge_index.manifest().source_route(&legacy).is_some());
-    let bridge_metadata = SourceBackedPublicationMetadata::decode(bridge_index).unwrap();
-    assert!(bridge_metadata.route_controls.contains_key(&legacy));
+    let bridge_state =
+        SourceBackedGenerationState::decode_from_verified_index(bridge_index).unwrap();
+    assert!(bridge_state.route_controls().contains_key(&legacy));
 
     let successor = run_report(&discovery, report(), &data_root, &index_root).unwrap();
-    let successor = successor.verified_publication.as_ref().unwrap();
-    let successor_index = successor.verified_index();
+    let successor_index = successor.verified_index.as_ref().unwrap();
     let final_routes = successor_index
         .manifest()
         .source_routes()
@@ -143,8 +158,9 @@ fn production_refresh_persists_both_split_publications_without_provider_roots() 
         .collect::<BTreeSet<_>>();
     assert_eq!(final_routes, successors);
     assert!(!final_routes.contains(&legacy));
-    let successor_metadata = SourceBackedPublicationMetadata::decode(successor_index).unwrap();
-    assert!(!successor_metadata.route_controls.contains_key(&legacy));
+    let successor_state =
+        SourceBackedGenerationState::decode_from_verified_index(successor_index).unwrap();
+    assert!(!successor_state.route_controls().contains_key(&legacy));
 }
 
 fn write_hermes_profile(path: &Path) {
@@ -193,39 +209,11 @@ fn warm_automatic_hermes_profile_rename_retires_the_old_route_and_remains_refres
         &index_root,
     )
     .unwrap();
-    let (cold_generation, legacy_metadata) = {
-        let cold = cold.verified_publication.as_ref().unwrap();
-        let cold_index = cold.verified_index();
-        assert!(cold_index.manifest().source_route(&alpha_route).is_some());
-        let mut metadata = SourceBackedPublicationMetadata::decode(cold_index).unwrap();
-        let mut legacy: serde_json::Value = serde_json::from_slice(
-            metadata
-                .route_controls
-                .get(&alpha_route)
-                .expect("cold Hermes route control"),
-        )
-        .unwrap();
-        legacy["version"] = serde_json::json!(2);
-        legacy.as_object_mut().unwrap().remove("parser_revision");
-        legacy.as_object_mut().unwrap().remove("physical_revision");
-        metadata
-            .route_controls
-            .insert(alpha_route.clone(), serde_json::to_vec(&legacy).unwrap());
-        (
-            cold_index.generation_id().to_owned(),
-            metadata.encode().unwrap(),
-        )
-    };
+    let cold_index = cold.verified_index.as_ref().unwrap();
+    assert!(cold_index.manifest().source_route(&alpha_route).is_some());
+    let cold_state = SourceBackedGenerationState::decode_from_verified_index(cold_index).unwrap();
+    assert!(cold_state.route_controls().contains_key(&alpha_route));
     drop(cold);
-    let writer = GenerationWriter::open(&index_root, WriterOptions::default())
-        .unwrap()
-        .into_writer()
-        .unwrap();
-    drop(
-        writer
-            .republish_current_publication_metadata(&cold_generation, legacy_metadata)
-            .unwrap(),
-    );
 
     std::fs::rename(alpha.parent().unwrap(), beta.parent().unwrap()).unwrap();
     let beta_source = provider_source_for_path(CaptureProvider::Hermes, beta);
@@ -235,17 +223,15 @@ fn warm_automatic_hermes_profile_rename_retires_the_old_route_and_remains_refres
         issues: Vec::new(),
     };
     let warm = run_report(&discovery, warm_report(), &data_root, &index_root).unwrap();
-    let warm = warm.verified_publication.as_ref().unwrap();
-    let warm_index = warm.verified_index();
+    let warm_index = warm.verified_index.as_ref().unwrap();
     assert!(warm_index.manifest().source_route(&alpha_route).is_none());
     assert!(warm_index.manifest().source_route(&beta_route).is_some());
-    let warm_metadata = SourceBackedPublicationMetadata::decode(warm_index).unwrap();
-    assert!(!warm_metadata.route_controls.contains_key(&alpha_route));
-    assert!(warm_metadata.route_controls.contains_key(&beta_route));
+    let warm_state = SourceBackedGenerationState::decode_from_verified_index(warm_index).unwrap();
+    assert!(!warm_state.route_controls().contains_key(&alpha_route));
+    assert!(warm_state.route_controls().contains_key(&beta_route));
 
     let subsequent = run_report(&discovery, warm_report(), &data_root, &index_root).unwrap();
-    let subsequent = subsequent.verified_publication.as_ref().unwrap();
-    let subsequent = subsequent.verified_index();
+    let subsequent = subsequent.verified_index.as_ref().unwrap();
     assert!(subsequent.manifest().source_route(&alpha_route).is_none());
     assert!(subsequent.manifest().source_route(&beta_route).is_some());
 }
@@ -673,7 +659,26 @@ fn unsupported_warp_preserves_same_epoch_last_good_route_as_stale() {
         )
         .unwrap()])
         .unwrap();
-    let retained_generation = writer.commit(|_| true).unwrap().generation_id;
+    let retained_generation = writer
+        .commit_with_generation_state(
+            |_| true,
+            |_| false,
+            |_| {
+                SourceBackedGenerationState::new(
+                    None,
+                    Vec::new(),
+                    BTreeMap::new(),
+                    BTreeMap::new(),
+                    Vec::new(),
+                )?
+                .envelope()
+            },
+            |_| Ok(()),
+        )
+        .unwrap()
+        .receipt()
+        .generation_id
+        .clone();
 
     let publication = run_report(
         &discovery,

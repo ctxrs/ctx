@@ -9,10 +9,9 @@ use std::{collections::BTreeSet, path::Path};
 
 use ctx_history_capture_model::SourceRouteIdentity;
 use ctx_history_capture_runtime::{
-    BaseEventLookup, CaptureCommitOutcome, CaptureCommitReceipt, CaptureLifecycleOpenOutcome,
-    CaptureLifecycleSink, CapturePublicationContext, CaptureRevalidationTarget, CaptureRouteRef,
-    CaptureSourceAggregateRef, CoreMaterialization, CorePreparationFailureKind,
-    CorePreparationPort, ImmutableCaptureSnapshot, PresentCaptureRoute,
+    BaseEventLookup, CaptureCommitReceipt, CaptureLifecycleOpenOutcome, CaptureLifecycleSink,
+    CaptureRevalidationTarget, CaptureRouteRef, CaptureSourceAggregateRef, CoreMaterialization,
+    CorePreparationFailureKind, CorePreparationPort, ImmutableCaptureSnapshot, PresentCaptureRoute,
 };
 use ctx_history_core::{
     CertifiedSource, CertifiedSourceAppend, CertifiedSourceDeletion, CertifiedSourceInventory,
@@ -336,22 +335,6 @@ impl CaptureLifecycleSink for NativeJsonlTestLifecycle {
     where
         F: FnMut(CaptureRevalidationTarget<'_>) -> bool,
         I: FnMut(&CertifiedSourceInventory) -> bool,
-    {
-        Err(Self::unsupported())
-    }
-
-    fn commit_with_metadata<F, I, M>(
-        self,
-        _revalidate: F,
-        _revalidate_inventory: I,
-        _metadata_factory: M,
-    ) -> Result<CaptureCommitOutcome<Self::CommittedSnapshot, Self::VerifiedPublication>, Self::Error>
-    where
-        F: FnMut(CaptureRevalidationTarget<'_>) -> bool,
-        I: FnMut(&CertifiedSourceInventory) -> bool,
-        M: for<'a> FnOnce(
-            CapturePublicationContext<'a, Self::Snapshot<'a>>,
-        ) -> Result<Vec<u8>, Self::Error>,
     {
         Err(Self::unsupported())
     }

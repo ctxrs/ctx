@@ -177,7 +177,10 @@ ctx_cli_contract_test(
 ctx_cli_contract_test(
     name = "native_providers_tests",
     src = "tests/contracts/native_providers.rs",
-    deps = ["//crates/ctx-history-index:lib"],
+    deps = [
+        "//crates/ctx-history-index:lib",
+        "//crates/ctx-history-refresh-execution:lib",
+    ],
     extra_srcs = [":native_providers_extra_srcs"],
     test_support = [
         "base",

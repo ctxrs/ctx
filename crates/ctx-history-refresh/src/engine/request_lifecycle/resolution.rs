@@ -2,20 +2,7 @@ use super::*;
 
 impl CoreRefreshEngine {
     pub fn run_next(&self, data_root: &Path) -> Option<SourceBackedRefreshRun> {
-        let pending_finalization =
-            self.lock_state()
-                .pending_terminal_persistence
-                .as_ref()
-                .map(|pending| {
-                    (
-                        pending.finalization_only(),
-                        pending.route_finalization_in_progress(),
-                    )
-                });
-        if pending_finalization.is_some_and(|(_, in_progress)| in_progress) {
-            return None;
-        }
-        if pending_finalization.is_some_and(|(retry, _)| retry) {
+        if self.lock_state().pending_terminal_persistence.is_some() {
             return self.run_next_with_verified_index_opener(data_root, |index_root| {
                 Ok(Arc::new(open_verified_index(index_root)?))
             });
@@ -92,20 +79,17 @@ impl CoreRefreshEngine {
         Coverage: FnOnce(&str) -> PostPublicationRouteCoverageFence,
     {
         let executor = Arc::clone(&self.executor);
-        let verified_publication = RefCell::new(None::<Arc<VerifiedCorePublication>>);
         let verified_index = RefCell::new(None::<Arc<VerifiedIndex>>);
         let publication_probe_attempted = Cell::new(false);
-        let mut run = self.run_next_with_terminal_success(
+        self.run_next_with_terminal_success(
             |request_id, coordinator| {
                 let intent = coordinator
                     .refresh_intent(request_id)
                     .ok_or_else(|| anyhow!("source refresh request `{request_id}` is unknown"))?;
-                let operation = intent.operation();
                 let reconciliation_demand = coordinator
                     .reconciliation_demand(request_id)
                     .ok_or_else(|| anyhow!("source refresh request `{request_id}` is unknown"))?;
                 let admitted = coordinator.admit_refresh(request_id)?;
-                let refresh_scope = admitted.publication_scope();
                 coordinator.persist_job_status(data_root, request_id)?;
                 let mut publication = execute_source_backed_refresh(
                     executor.as_ref(),
@@ -117,47 +101,26 @@ impl CoreRefreshEngine {
                     admitted,
                 )?;
                 let probe_started = StdInstant::now();
-                let authority = if let Some(authority) = publication.verified_publication.take() {
-                    verify_source_backed_publication(&publication, authority.verified_index())?;
-                    Some(authority)
+                let pin = if let Some(pin) = publication.verified_index.take() {
+                    pin
                 } else {
                     publication_probe_attempted.set(true);
-                    let pin = open_verified(&source_backed_index_root(data_root))
-                        .context("verify Core generation after publication")?;
-                    verify_source_backed_publication(&publication, &pin)?;
-                    if pin.publication_metadata().is_some() {
-                        Some(
-                            VerifiedCorePublication::open(pin)
-                                .context("decode durable Core refresh publication authority")?,
-                        )
-                    } else {
-                        verified_index.replace(Some(pin));
-                        None
-                    }
+                    open_verified(&source_backed_index_root(data_root))
+                        .context("verify Core generation after publication")?
                 };
+                let verification = verify_source_backed_publication(&publication, &pin);
                 coordinator.set_publication_probe_timing(
                     request_id,
                     nonzero_duration_micros(probe_started.elapsed()),
                 );
-                if let Some(authority) = authority.as_ref() {
-                    let metadata = authority.metadata();
-                    if metadata.request_id == request_id
-                        && metadata.operation == operation
-                        && metadata.refresh_scope == refresh_scope
-                    {
-                        coordinator.set_route_observations(
-                            request_id,
-                            metadata.route_observations.clone(),
-                        );
-                    }
-                }
-                verified_publication.replace(authority);
+                verification?;
+                let state = SourceBackedGenerationState::decode_from_verified_index(&pin)
+                    .context("decode published source-backed generation state")?;
+                coordinator.set_route_observations(request_id, state.route_observations().clone());
+                verified_index.replace(Some(pin));
                 Ok(publication)
             },
             || {
-                if let Some(authority) = verified_publication.borrow().as_ref() {
-                    return Ok(Some(authority.generation_id().to_owned()));
-                }
                 if let Some(verified) = verified_index.borrow().as_ref() {
                     return Ok(Some(verified.generation_id().to_owned()));
                 }
@@ -174,75 +137,17 @@ impl CoreRefreshEngine {
                 verified_index.replace(verified);
                 Ok(generation_id)
             },
-            |receipt| {
-                if let Some(authority) = verified_publication.borrow_mut().take() {
-                    return Ok(CoreRefreshTerminalSuccess::verified(authority));
-                }
-                missing_publication_metadata_authority(receipt, verified_index.borrow_mut().take())
+            |request_id, receipt| {
+                let pin = verified_index.borrow_mut().take().ok_or_else(|| {
+                    anyhow!("verified Core publication has no exact retained generation pin")
+                })?;
+                let terminal = CoreRefreshTerminalSuccess::bind(receipt, pin)
+                    .context("bind exact Core publication receipt and generation authority")?;
+                Ok((terminal, coverage_fence(request_id)))
             },
             |job| self.write_status(data_root, job),
             |_| Ok(()),
-        )?;
-        if run.route_finalization_performed {
-            return Some(run);
-        }
-        let publication_ready = !run.failed && !run.terminal_persistence_pending;
-        if let Some(request_id) = run.job.get("request_id").and_then(Value::as_str) {
-            if !run.terminal_persistence_pending {
-                #[cfg(test)]
-                self.run_before_route_finalization_hook();
-                let post_publication_fence = publication_ready.then(|| coverage_fence(request_id));
-                match self.finish_route_admissions_and_persist(
-                    data_root,
-                    request_id,
-                    publication_ready,
-                    post_publication_fence.as_ref(),
-                ) {
-                    Ok((finish, finalized_job)) => {
-                        run.job = finalized_job;
-                        run.coverage_certificate = finish.coverage_certificate;
-                    }
-                    Err(_) => {
-                        run.did_work = false;
-                        run.terminal_persistence_pending = true;
-                        let state = self.lock_state();
-                        if let Some(pending) = state.pending_terminal_persistence.as_ref() {
-                            run.job =
-                                job_with_queued_successors(&state, pending.terminal_job.clone());
-                        }
-                    }
-                }
-            }
-        }
-        Some(run)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn install_before_route_finalization_hook(
-        &self,
-        hook: impl FnOnce() + Send + 'static,
-    ) {
-        let previous = self
-            .before_route_finalization
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .replace(Box::new(hook));
-        assert!(
-            previous.is_none(),
-            "route-finalization test hooks must not nest"
-        );
-    }
-
-    #[cfg(test)]
-    fn run_before_route_finalization_hook(&self) {
-        let hook = self
-            .before_route_finalization
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
-        if let Some(hook) = hook {
-            hook();
-        }
+        )
     }
 
     fn set_publication_probe_timing(&self, request_id: &str, duration_us: u64) {

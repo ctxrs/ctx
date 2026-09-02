@@ -13,8 +13,8 @@ use super::{
     CandidateCloneMetrics, MAX_REPUBLISH_DIRECTORY_ENTRIES,
 };
 use crate::{
-    lexical_index_settings, physical_integrity_digest, verify_or_certify_physical_integrity,
-    ActiveGenerationPointer, CandidateGeneration, CandidatePhysicalProof, DurableMmapDirectory,
+    lexical_index_settings, verify_or_certify_physical_integrity, ActiveGenerationPointer,
+    CandidateGeneration, CandidatePhysicalProof, DurableMmapDirectory,
     GenerationError as IndexError, Result, INDEX_GENERATIONS_DIRECTORY,
 };
 
@@ -177,84 +177,6 @@ impl CandidateGuard {
         .is_ok()
         {
             let _ = platform::sync_directory(&self.generations.file);
-        }
-    }
-}
-
-pub(super) fn create_authenticated_republish_candidate(
-    root: &Path,
-    predecessor_pointer: &ActiveGenerationPointer,
-    predecessor_index: &Index,
-) -> Result<CandidateGeneration> {
-    let base = predecessor_pointer.active();
-    let root_directory = BoundDirectory::open_path(root)?;
-    let generations_name = Path::new(INDEX_GENERATIONS_DIRECTORY);
-    let generations = BoundDirectory::open_at(&root_directory, generations_name)?;
-    let source_name = Path::new(base.directory());
-    validate_single_component(source_name)?;
-    let source = BoundDirectory::open_at(&generations, source_name)?;
-
-    let plan =
-        planning::authenticated_clone_plan(&generations, source_name, &source, predecessor_index)?;
-    let available = available_bytes(&generations, false)?;
-    record_plan_metrics(&plan, available);
-    if available < plan.required_headroom() {
-        return Err(IndexError::CurrentRepublishInsufficientHeadroom {
-            available,
-            required: plan.required_headroom(),
-        });
-    }
-
-    let directory_name = format!("generation-{}", Uuid::now_v7().simple());
-    let destination_name = PathBuf::from(&directory_name);
-    let destination = BoundDirectory::create_at(&generations, &destination_name)?;
-    platform::restrict_destination_directory(&destination.file)?;
-    let guard = CandidateGuard {
-        _root: root_directory,
-        generations,
-        destination_name,
-        destination,
-    };
-    let destination_path = guard.destination.path.clone();
-    let clone_result = (|| {
-        source.validate_child_binding(&guard.generations, source_name)?;
-        guard.validate_binding()?;
-        transfer::clone_files(
-            &guard.generations,
-            source_name,
-            &source,
-            &guard.destination_name,
-            &guard.destination,
-            &plan,
-        )?;
-        platform::sync_directory(&guard.destination.file)?;
-        platform::sync_directory(&guard.generations.file)?;
-        source.validate_child_binding(&guard.generations, source_name)?;
-        guard.validate_binding()?;
-
-        let directory =
-            DurableMmapDirectory::open(&destination_path).map_err(tantivy::TantivyError::from)?;
-        let index = Index::open(directory)?;
-        if index.settings() != &lexical_index_settings() {
-            return Err(IndexError::IndexSettingsMismatch);
-        }
-        let cloned_digest =
-            physical_integrity_digest(&index, &destination_path, Some(predecessor_pointer))?;
-        if cloned_digest != base.physical_integrity_digest() {
-            return Err(IndexError::ChecksumMismatch);
-        }
-        Ok((directory_name, index, CandidatePhysicalProof::default()))
-    })();
-    match clone_result {
-        Ok((directory_name, index, physical_proof)) => Ok(CandidateGeneration {
-            directory_name,
-            index,
-            physical_proof,
-            activation_fence: CandidateActivationFence::portable(guard),
-        }),
-        Err(error) => {
-            guard.discard();
-            Err(error)
         }
     }
 }
@@ -463,7 +385,7 @@ mod support;
 pub(super) use support::forced_for_test;
 #[cfg(not(any(test, feature = "test-support")))]
 use support::PortableCloneStage;
-use support::{clone_checkpoint, record_plan_metrics, record_plan_metrics_with_required};
+use support::{clone_checkpoint, record_plan_metrics_with_required};
 #[cfg(any(test, feature = "test-support"))]
 pub use support::{
     PortableCloneMetrics, PortableCloneStage, PortableCloneTestGuard, PortableCloneTestOptions,

@@ -16,7 +16,6 @@ use ctx_semantic_model::SEMANTIC_DIMENSIONS;
 fn core_publication_fixture() -> (tempfile::TempDir, std::path::PathBuf, String) {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("data");
-    let route_identity = "ab".repeat(32);
     let publication = ctx_history_index::GenerationWriter::open(
         data_root.join("search/lexical"),
         ctx_history_index::WriterOptions::default(),
@@ -24,50 +23,9 @@ fn core_publication_fixture() -> (tempfile::TempDir, std::path::PathBuf, String)
     .unwrap()
     .into_writer()
     .unwrap()
-    .commit_with_publication_metadata(
-        |_| true,
-        |context| {
-            let generation_id = context.generation_id().to_owned();
-            let route = ctx_history_index::SourceRouteIdentity::from_sha256(
-                route_identity.clone(),
-            )
-            .map_err(|error| {
-                ctx_history_index::IndexError::PublicationMetadata(error.to_string())
-            })?;
-            let receipt = ctx_history_refresh::SourceBackedRefreshReceipt {
-                previous_generation: None,
-                published_generation: generation_id.clone(),
-                generation_changed: true,
-                published_explicit_source_catalog: None,
-                current: ctx_history_refresh::SourceBackedRefreshCurrent::default(),
-                route_results: vec![ctx_history_refresh::SourceBackedRefreshRouteResult::succeeded(
-                    route_identity.clone(),
-                    true,
-                )],
-                zero_source_authority: vec![
-                    ctx_history_refresh::SourceBackedZeroSourceAuthority {
-                        generation_id,
-                        route_identity: route,
-                        kind: ctx_history_refresh::SourceBackedZeroSourceAuthorityKind::CompleteEmptyInventory,
-                    },
-                ],
-                catalog_route_bindings: Vec::new(),
-            };
-            serde_json::to_vec(&json!({
-                "version": ctx_history_refresh::SOURCE_REFRESH_PUBLICATION_METADATA_VERSION,
-                "request_id": "core-publication",
-                "operation": "refresh",
-                "refresh_scope": {"kind": "all"},
-                "receipt": receipt.to_json(),
-                "route_observations": [null],
-                "route_controls": {},
-                "committed_rejection_diagnostics": {},
-            }))
-            .map_err(|error| ctx_history_index::IndexError::PublicationMetadata(error.to_string()))
-        },
-    )
+    .commit(|_| true)
     .unwrap();
-    let generation_id = publication.receipt().generation_id.clone();
+    let generation_id = publication.generation_id.clone();
     let catalog = ctx_history_refresh::explicit_source_catalog_authority_for_test(0);
     super::super::paths_status::write_daemon_job_status(
         &daemon_core_refresh_job_path(&data_root),
@@ -716,44 +674,6 @@ fn authoritative_empty_stays_query_ready_when_the_latest_refresh_failed() {
     assert_eq!(status.report["refresh"]["status"], "unavailable");
     assert_eq!(status.report["refresh"]["reason"], "core_refresh_failed");
     assert_eq!(status.indexed_items, Some(0));
-}
-
-#[test]
-fn legacy_zero_source_publication_is_not_projected_as_ready() {
-    let (_temp, data_root, generation_id) = core_publication_fixture();
-    let index_root = data_root.join("search/lexical");
-    let current = VerifiedIndex::open_pinned(&index_root).unwrap();
-    let mut metadata: Value =
-        serde_json::from_slice(current.publication_metadata().unwrap()).unwrap();
-    metadata["version"] = json!(1);
-    metadata["receipt"]
-        .as_object_mut()
-        .unwrap()
-        .remove("zero_source_authority");
-    let metadata_fields = metadata.as_object_mut().unwrap();
-    metadata_fields.remove("route_controls");
-    metadata_fields.remove("committed_rejection_diagnostics");
-    drop(current);
-    let writer = GenerationWriter::open(&index_root, WriterOptions::default())
-        .unwrap()
-        .into_writer()
-        .unwrap();
-    writer
-        .republish_current_publication_metadata(
-            &generation_id,
-            serde_json::to_vec(&metadata).unwrap(),
-        )
-        .unwrap();
-
-    let status = source_epoch_status_report(&data_root, &DaemonRuntimeConfig::default()).unwrap();
-    assert_eq!(status.report["lexical"]["status"], "unavailable");
-    assert_eq!(
-        status.report["lexical"]["reason"],
-        "zero_source_publication_uncertified"
-    );
-    assert_eq!(status.report["history_epoch"]["status"], "unavailable");
-    assert_eq!(status.indexed_items, None);
-    assert_eq!(status.indexed_sources, None);
 }
 
 #[test]

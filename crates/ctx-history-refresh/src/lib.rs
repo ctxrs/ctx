@@ -45,8 +45,7 @@ use ctx_history_index::{
 use ctx_history_refresh_execution::{
     is_sha256_identity, refresh_scope_from_json, refresh_scope_json, required_generation,
     source_backed_requested_route_observations, source_backed_route_retry_disposition,
-    verify_generation_query_readiness, GenerationQueryReadiness, PublishedSourceBackedState,
-    PublishedSourceBackedStatePort, SourceBackedAdmissionRouteFailures,
+    PublishedSourceBackedState, PublishedSourceBackedStatePort, SourceBackedAdmissionRouteFailures,
     SourceBackedExactScanProgress,
     SourceBackedRefreshProgressUpdate as PhysicalRefreshProgressUpdate,
 };
@@ -65,25 +64,22 @@ pub use ctx_history_refresh_execution::{
     explicit_source_for_path, explicit_source_path_is_symlink_or_reparse_point,
     explicit_source_path_metadata, explicit_source_path_symlink_metadata, nonzero_duration_micros,
     optional_generation, published_refresh_receipt_for_index,
-    published_refresh_receipt_for_recovery, published_refresh_request_outcome_for_index,
-    published_refresh_request_outcome_for_recovery, relocate_explicit_source,
-    source_backed_index_root, upsert_explicit_source, validate_explicit_relocation_source,
-    ExplicitSourceCatalogAuthority, ExplicitSourceCatalogRouteBinding, ExplicitSourceCatalogUpsert,
-    ExplicitSourcePathMissing, ExplicitSourceRelocationAuthority,
-    SourceBackedCurrentSourceProgress, SourceBackedCurrentSourceProgressStage,
-    SourceBackedPublicationMetadata,
+    published_refresh_receipt_for_recovery, relocate_explicit_source, source_backed_index_root,
+    upsert_explicit_source, validate_explicit_relocation_source, ExplicitSourceCatalogAuthority,
+    ExplicitSourceCatalogRouteBinding, ExplicitSourceCatalogUpsert, ExplicitSourcePathMissing,
+    ExplicitSourceRelocationAuthority, SourceBackedCurrentSourceProgress,
+    SourceBackedCurrentSourceProgressStage, SourceBackedGenerationState,
     SourceBackedReconciliationDemand as RefreshReconciliationDemand,
     SourceBackedRefreshCatalogRouteOutcome, SourceBackedRefreshCurrent,
     SourceBackedRefreshExecution, SourceBackedRefreshPublication, SourceBackedRefreshReceipt,
     SourceBackedRefreshRecordRejection, SourceBackedRefreshRouteOutcome,
     SourceBackedRefreshRouteResult, SourceBackedRefreshSourceFailure, SourceBackedRefreshTimings,
     SourceBackedRefreshWorkset, SourceBackedZeroSourceAuthority,
-    SourceBackedZeroSourceAuthorityKind, VerifiedCorePublication, ZeroSourcePublicationBlocked,
-    SOURCE_REFRESH_PUBLICATION_METADATA_VERSION,
+    SourceBackedZeroSourceAuthorityKind, ZeroSourcePublicationBlocked,
 };
 pub use engine::{
-    CoreRefreshEngine as RefreshEngine, RefreshRuntime, RefreshRuntimeMetadata,
-    SourceBackedRefreshCoverageCertificate, SourceBackedRefreshExecutor,
+    CoreRefreshEngine as RefreshEngine, PinnedCorePublication, RefreshRuntime,
+    RefreshRuntimeMetadata, SourceBackedRefreshCoverageCertificate, SourceBackedRefreshExecutor,
     SourceBackedRefreshProgress, SourceBackedRefreshRun as RefreshRun, SourceBackedRefreshStage,
     VerifiedSourceRefreshRouteBoundary,
 };
@@ -94,8 +90,7 @@ pub use publication::{
     explicit_catalog_request_is_accounted_for, open_verified_index, pin_active_verified_generation,
     pin_published_generation, pin_retained_generation,
     published_explicit_source_relocation_authority, published_refresh_receipt,
-    verified_generation_is_query_ready, verify_generation_query_authority,
-    GenerationQueryAuthorityError, MissingActiveGeneration, PinnedSourceBackedGeneration,
+    MissingActiveGeneration, PinnedSourceBackedGeneration,
 };
 pub use request::{
     AdmissionResponseBarrier, RefreshAdmission, RefreshIntent, RefreshLogicalPhase,
@@ -113,9 +108,8 @@ use engine::{CoreRefreshEngine, SourceBackedRefreshProgressUpdate};
 use orchestration::admitted_refresh_for_test;
 use orchestration::{execute_source_backed_refresh, source_backed_route_admission_fence};
 use publication::{
-    open_published_generation, open_published_generation_for_recovery,
-    prepare_generation_control_state, published_generation_id, retained_generation_hint,
-    verify_source_backed_publication, PublishedGenerationOpen,
+    open_published_generation, prepare_generation_control_state, published_generation_id,
+    retained_generation_hint, verify_source_backed_publication,
 };
 
 const SOURCE_REFRESH_ATTEMPT_HISTORY: usize = 64;

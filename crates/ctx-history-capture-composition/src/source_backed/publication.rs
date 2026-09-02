@@ -25,7 +25,7 @@ use execution_prelude::{
 #[cfg(test)]
 pub use model::assert_carried_route_failure;
 pub use model::{
-    SourceBackedPublicationMetadataContext, SourceBackedRefreshReceipt,
+    SourceBackedGenerationStateContext, SourceBackedRefreshReceipt,
     SourceBackedSuccessfulRouteOutcome,
 };
 use model::{SourceBackedRefreshPlan, SourceBackedVerifiedPublication};
@@ -37,10 +37,11 @@ use route_outcomes::successful_route_outcomes_for_snapshot;
 /// writes are throttled separately by the refresh engine.
 const SOURCE_RECORD_PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 
-type SourceBackedPublicationMetadataFactory<'factory> =
+type SourceBackedGenerationStateFactory<'factory> =
     dyn for<'context> FnMut(
-            SourceBackedPublicationMetadataContext<'context>,
-        ) -> ctx_history_index::Result<Vec<u8>>
+            SourceBackedGenerationStateContext<'context>,
+        )
+            -> ctx_history_index::Result<ctx_history_index::GenerationStateEnvelope>
         + 'factory;
 
 #[derive(Debug, Clone, Copy)]
@@ -262,71 +263,8 @@ impl SourceBackedRefreshExecutor {
         )
     }
 
-    /// Publishes one scope with control-plane metadata bound into the same
-    /// opaque Core commit payload. The factory runs only for a pointer-
-    /// advancing generation; exact reuse retains the active metadata.
-    pub fn refresh_scope_with_detailed_progress_and_publication_metadata(
-        &self,
-        index_root: impl AsRef<Path>,
-        scope: SourceBackedRefreshScope,
-        report_progress: impl FnMut(SourceBackedDetailedRefreshProgress) -> SourceBackedRouteResult<()>,
-        metadata_factory: impl for<'a> FnMut(
-            SourceBackedPublicationMetadataContext<'a>,
-        ) -> ctx_history_index::Result<Vec<u8>>,
-    ) -> SourceBackedCoordinatorResult<SourceBackedRefreshReceipt> {
-        self.refresh_scope_with_detailed_progress_publication_metadata_and_reconciliation(
-            index_root,
-            scope,
-            SourceBackedReconciliationDemand::Exhaustive,
-            report_progress,
-            metadata_factory,
-        )
-    }
-
-    pub fn refresh_scope_with_detailed_progress_publication_metadata_and_reconciliation(
-        &self,
-        index_root: impl AsRef<Path>,
-        scope: SourceBackedRefreshScope,
-        reconciliation_demand: SourceBackedReconciliationDemand,
-        report_progress: impl FnMut(SourceBackedDetailedRefreshProgress) -> SourceBackedRouteResult<()>,
-        metadata_factory: impl for<'a> FnMut(
-            SourceBackedPublicationMetadataContext<'a>,
-        ) -> ctx_history_index::Result<Vec<u8>>,
-    ) -> SourceBackedCoordinatorResult<SourceBackedRefreshReceipt> {
-        self.refresh_scope_with_detailed_progress_publication_metadata_reconciliation_and_worksets(
-            index_root,
-            scope,
-            reconciliation_demand,
-            BTreeMap::new(),
-            report_progress,
-            metadata_factory,
-        )
-    }
-
-    pub fn refresh_scope_with_detailed_progress_publication_metadata_reconciliation_and_worksets(
-        &self,
-        index_root: impl AsRef<Path>,
-        scope: SourceBackedRefreshScope,
-        reconciliation_demand: SourceBackedReconciliationDemand,
-        route_worksets: BTreeMap<SourceRouteIdentity, BTreeSet<PathBuf>>,
-        report_progress: impl FnMut(SourceBackedDetailedRefreshProgress) -> SourceBackedRouteResult<()>,
-        metadata_factory: impl for<'a> FnMut(
-            SourceBackedPublicationMetadataContext<'a>,
-        ) -> ctx_history_index::Result<Vec<u8>>,
-    ) -> SourceBackedCoordinatorResult<SourceBackedRefreshReceipt> {
-        self.refresh_physical_scope_with_detailed_progress_publication_metadata_reconciliation_and_worksets(
-            index_root,
-            scope.clone(),
-            scope,
-            reconciliation_demand,
-            route_worksets,
-            report_progress,
-            metadata_factory,
-        )
-    }
-
     #[allow(clippy::too_many_arguments)]
-    pub fn refresh_physical_scope_with_detailed_progress_publication_metadata_reconciliation_and_worksets(
+    pub fn refresh_physical_scope_with_detailed_progress_generation_state_reconciliation_and_worksets(
         &self,
         index_root: impl AsRef<Path>,
         physical_scope: SourceBackedRefreshScope,
@@ -334,9 +272,11 @@ impl SourceBackedRefreshExecutor {
         reconciliation_demand: SourceBackedReconciliationDemand,
         route_worksets: BTreeMap<SourceRouteIdentity, BTreeSet<PathBuf>>,
         report_progress: impl FnMut(SourceBackedDetailedRefreshProgress) -> SourceBackedRouteResult<()>,
-        mut metadata_factory: impl for<'a> FnMut(
-            SourceBackedPublicationMetadataContext<'a>,
-        ) -> ctx_history_index::Result<Vec<u8>>,
+        mut generation_state_factory: impl for<'a> FnMut(
+            SourceBackedGenerationStateContext<'a>,
+        ) -> ctx_history_index::Result<
+            ctx_history_index::GenerationStateEnvelope,
+        >,
     ) -> SourceBackedCoordinatorResult<SourceBackedRefreshReceipt> {
         refresh_source_backed_generation_with_detailed_progress_and_discovery_timing(
             index_root,
@@ -352,7 +292,7 @@ impl SourceBackedRefreshExecutor {
                 &self.base_route_controls,
             ),
             report_progress,
-            Some(&mut metadata_factory),
+            Some(&mut generation_state_factory),
         )
     }
 }

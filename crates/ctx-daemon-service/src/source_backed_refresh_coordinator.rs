@@ -53,15 +53,14 @@ pub use ctx_history_refresh::{
     explicit_catalog_request_is_accounted_for, optional_generation, RefreshIntent,
     RefreshOutcomeClass, RefreshRequest, RefreshRequestState, RefreshRequestTrigger,
     RefreshSelection, RefreshStatus, RefreshStatusKind, RefreshTerminalOutcome,
-    SourceBackedCurrentSourceProgress, SourceBackedPublicationMetadata, SourceBackedRefreshReceipt,
+    SourceBackedCurrentSourceProgress, SourceBackedRefreshReceipt,
 };
 
 #[cfg(test)]
 pub(crate) use ctx_history_refresh::{
-    open_verified_index, source_backed_index_root, EventWatermark, RefreshLogicalPhase,
-    SourceBackedRefreshCurrent, SourceBackedRefreshExecution, SourceBackedRefreshExecutor,
-    SourceBackedRefreshPublication, SourceBackedRefreshRouteResult,
-    SourceBackedRefreshSourceFailure, SourceBackedRefreshTimings, VerifiedCorePublication,
+    source_backed_index_root, EventWatermark, RefreshLogicalPhase, SourceBackedRefreshCurrent,
+    SourceBackedRefreshExecution, SourceBackedRefreshExecutor, SourceBackedRefreshPublication,
+    SourceBackedRefreshRouteResult, SourceBackedRefreshSourceFailure, SourceBackedRefreshTimings,
 };
 
 #[cfg(test)]
@@ -83,22 +82,43 @@ pub(crate) fn publish_authoritative_empty_generation_for_test(
 }
 
 #[cfg(test)]
+pub(crate) fn commit_source_backed_generation_for_test(
+    writer: ctx_history_index::GenerationWriter,
+) -> ctx_history_index::Result<ctx_history_index::PublishedGeneration> {
+    writer.commit_with_generation_state(
+        |_| true,
+        |_| true,
+        |_| {
+            ctx_history_refresh::SourceBackedGenerationState::new(
+                None,
+                Vec::new(),
+                Default::default(),
+                Default::default(),
+                Vec::new(),
+            )?
+            .envelope()
+        },
+        |_| Ok(()),
+    )
+}
+
+#[cfg(test)]
 pub(crate) fn publish_authoritative_empty_generation_with_route_results_for_test(
     index_root: &Path,
-    request_id: &str,
-    operation: ctx_history_refresh::RefreshOperation,
+    _request_id: &str,
+    _operation: ctx_history_refresh::RefreshOperation,
     scope: ctx_history_capture::SourceBackedRefreshScope,
     published_explicit_source_catalog: Option<ExplicitSourceCatalogAuthority>,
     route_results: Option<Vec<SourceBackedRefreshRouteResult>>,
 ) -> Result<SourceBackedRefreshPublication> {
-    use ctx_history_index::{GenerationWriter, IndexError, SourceRouteIdentity, WriterOptions};
+    use ctx_history_index::{
+        GenerationWriter, SourceRouteIdentity, SourceRouteSnapshot, WriterOptions,
+    };
     use ctx_history_refresh::{
+        ExplicitSourceCatalogRouteBinding, SourceBackedGenerationState,
         SourceBackedZeroSourceAuthority, SourceBackedZeroSourceAuthorityKind,
     };
 
-    let previous_generation = open_verified_index(index_root)
-        .ok()
-        .map(|index| index.generation_id().to_owned());
     let selected_routes = match &scope {
         ctx_history_capture::SourceBackedRefreshScope::All => {
             vec![SourceRouteIdentity::from_sha256("ab".repeat(32))?]
@@ -133,58 +153,42 @@ pub(crate) fn publish_authoritative_empty_generation_with_route_results_for_test
             "authoritative-empty test fixture contains a duplicate route"
         ));
     }
-    let refresh_scope = match &scope {
-        ctx_history_capture::SourceBackedRefreshScope::All => json!({"kind": "all"}),
-        ctx_history_capture::SourceBackedRefreshScope::Exact(routes) => json!({
-            "kind": "exact",
-            "routes": routes.iter().map(SourceRouteIdentity::as_str).collect::<Vec<_>>(),
-        }),
-    };
-    let metadata_previous_generation = previous_generation.clone();
-    let metadata_route_results = route_results.clone();
-    let metadata_authority_routes = authority_routes.clone();
-    let metadata_catalog = published_explicit_source_catalog.clone();
-    let request_id = request_id.to_owned();
-    let published = GenerationWriter::open(index_root, WriterOptions::default())?
+    let binding_route = authority_routes
+        .first()
+        .ok_or_else(|| anyhow!("authoritative-empty test fixture has no route"))?;
+    let catalog_route_bindings = published_explicit_source_catalog
+        .as_ref()
+        .into_iter()
+        .flat_map(ExplicitSourceCatalogAuthority::route_lineages)
+        .map(|catalog_lineage| ExplicitSourceCatalogRouteBinding {
+            catalog_lineage,
+            route_identity: binding_route.as_str().to_owned(),
+        })
+        .collect::<Vec<_>>();
+    let generation_state = SourceBackedGenerationState::new(
+        published_explicit_source_catalog.clone(),
+        catalog_route_bindings.clone(),
+        Default::default(),
+        Default::default(),
+        Vec::new(),
+    )?
+    .envelope()?;
+    let mut writer = GenerationWriter::open(index_root, WriterOptions::default())?
         .into_writer()
-        .map_err(crate::committed_generation_recovery_error)?
-        .commit_with_publication_metadata(
-            |_| true,
-            move |context| {
-                let generation_id = context.generation_id().to_owned();
-                let generation_changed =
-                    metadata_previous_generation.as_deref() != Some(generation_id.as_str());
-                let receipt = SourceBackedRefreshReceipt {
-                    previous_generation: metadata_previous_generation.clone(),
-                    published_generation: generation_id.clone(),
-                    generation_changed,
-                    published_explicit_source_catalog: metadata_catalog.clone(),
-                    current: SourceBackedRefreshCurrent::default(),
-                    route_results: metadata_route_results.clone(),
-                    zero_source_authority: metadata_authority_routes
-                        .iter()
-                        .cloned()
-                        .map(|route_identity| SourceBackedZeroSourceAuthority {
-                            generation_id: generation_id.clone(),
-                            route_identity,
-                            kind: SourceBackedZeroSourceAuthorityKind::CompleteEmptyInventory,
-                        })
-                        .collect(),
-                    catalog_route_bindings: Vec::new(),
-                };
-                serde_json::to_vec(&json!({
-                    "version": ctx_history_refresh::SOURCE_REFRESH_PUBLICATION_METADATA_VERSION,
-                    "request_id": request_id,
-                    "operation": operation.as_str(),
-                    "refresh_scope": refresh_scope,
-                    "receipt": receipt.to_json(),
-                    "route_observations": vec![Value::Null; metadata_authority_routes.len()],
-                    "route_controls": {},
-                    "committed_rejection_diagnostics": {},
-                }))
-                .map_err(|error| IndexError::PublicationMetadata(error.to_string()))
-            },
-        )?;
+        .map_err(crate::committed_generation_recovery_error)?;
+    writer.set_present_source_routes(
+        authority_routes
+            .iter()
+            .cloned()
+            .map(|route| SourceRouteSnapshot::present(route, Vec::new()))
+            .collect::<ctx_history_index::Result<Vec<_>>>()?,
+    )?;
+    let published = writer.commit_with_generation_state(
+        |_| true,
+        |_| false,
+        |_| Ok(generation_state),
+        |_| Ok(()),
+    )?;
     let generation_id = published.receipt().generation_id.clone();
     let (_, _, verified_index) = published.into_parts();
     Ok(SourceBackedRefreshPublication {
@@ -204,8 +208,8 @@ pub(crate) fn publish_authoritative_empty_generation_with_route_results_for_test
                 kind: SourceBackedZeroSourceAuthorityKind::CompleteEmptyInventory,
             })
             .collect(),
-        catalog_route_bindings: Vec::new(),
-        verified_publication: Some(VerifiedCorePublication::open(Arc::new(verified_index))?),
+        catalog_route_bindings,
+        verified_index: Some(Arc::new(verified_index)),
     })
 }
 
@@ -451,15 +455,11 @@ impl PinnedSourceBackedGeneration {
 pub(crate) fn pin_published_generation(
     data_root: &Path,
 ) -> Result<Option<PinnedSourceBackedGeneration>> {
-    Ok(
-        ctx_history_refresh::pin_published_generation(data_root, &DaemonRefreshJournal)?
-            .map(PinnedSourceBackedGeneration),
-    )
+    Ok(ctx_history_refresh::pin_published_generation(data_root)?.map(PinnedSourceBackedGeneration))
 }
 
 pub fn pin_active_verified_generation(data_root: &Path) -> Result<PinnedSourceBackedGeneration> {
-    ctx_history_refresh::pin_active_verified_generation(data_root, &DaemonRefreshJournal)
-        .map(PinnedSourceBackedGeneration)
+    ctx_history_refresh::pin_active_verified_generation(data_root).map(PinnedSourceBackedGeneration)
 }
 
 pub(crate) fn pin_retained_generation(
@@ -468,6 +468,13 @@ pub(crate) fn pin_retained_generation(
 ) -> Result<PinnedSourceBackedGeneration> {
     ctx_history_refresh::pin_retained_generation(data_root, generation_id)
         .map(PinnedSourceBackedGeneration)
+}
+
+fn published_refresh_receipt(
+    response: &Value,
+    pin: &PinnedSourceBackedGeneration,
+) -> Result<SourceBackedRefreshReceipt> {
+    ctx_history_refresh::published_refresh_receipt(response, &pin.0)
 }
 
 pub(super) fn source_backed_watch_catalog(

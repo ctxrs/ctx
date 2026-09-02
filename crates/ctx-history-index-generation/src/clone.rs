@@ -10,7 +10,7 @@ use crate::{ActiveGenerationPointer, CandidateGeneration, GenerationError as Ind
     target_os = "windows",
     target_os = "freebsd"
 )))]
-compile_error!("predecessor republish clone is only qualified on ctx release targets");
+compile_error!("predecessor clone is only qualified on ctx release targets");
 
 mod candidate;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -25,7 +25,7 @@ mod metrics;
 mod portable;
 mod resource;
 
-pub use candidate::{CandidateActivationFence, RepublishCandidate};
+pub use candidate::CandidateActivationFence;
 use metrics::record_candidate_clone_metrics;
 #[cfg(not(any(test, feature = "test-support")))]
 pub(crate) use metrics::CandidateCloneMetrics;
@@ -39,40 +39,6 @@ const MAX_REPUBLISH_DIRECTORY_ENTRIES: usize = 4_096;
 const REPUBLISH_HEADROOM_RESERVE_BYTES: u64 = 16 * 1024 * 1024;
 const MANAGED_FILE: &str = ".managed.json";
 const TANTIVY_LOCK_FILES: [&str; 2] = [".tantivy-meta.lock", ".tantivy-writer.lock"];
-
-pub fn create_authenticated_republish_candidate(
-    root: &Path,
-    predecessor_pointer: &ActiveGenerationPointer,
-    predecessor_index: &Index,
-) -> Result<RepublishCandidate> {
-    #[cfg(any(test, feature = "test-support"))]
-    if portable::forced_for_test() {
-        let candidate = portable::create_authenticated_republish_candidate(
-            root,
-            predecessor_pointer,
-            predecessor_index,
-        )?;
-        return Ok(RepublishCandidate::new(candidate));
-    }
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    {
-        let candidate = unix::create_authenticated_republish_candidate(
-            root,
-            predecessor_pointer,
-            predecessor_index,
-        )?;
-        Ok(RepublishCandidate::new(candidate))
-    }
-    #[cfg(any(target_os = "windows", target_os = "freebsd"))]
-    {
-        let candidate = portable::create_authenticated_republish_candidate(
-            root,
-            predecessor_pointer,
-            predecessor_index,
-        )?;
-        Ok(RepublishCandidate::new(candidate))
-    }
-}
 
 pub fn create_authenticated_candidate_generation(
     root: &Path,

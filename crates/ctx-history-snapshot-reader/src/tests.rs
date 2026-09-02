@@ -88,7 +88,7 @@ fn concurrent_publication_is_not_reported_as_corruption() {
 }
 
 #[test]
-fn retained_previous_generation_reopens_after_publication_metadata_changes() {
+fn retained_previous_generation_reopens_after_generation_state_changes() {
     let fixture = Fixture::new();
     let source = source("retained-previous");
     let previous_record = record(&source, 1, "previous");

@@ -20,8 +20,8 @@ use ctx_history_capture_model::{
     SourceRouteIdentity,
 };
 use ctx_history_capture_runtime::{
-    CaptureLifecycleSink, CapturePublicationContext, CapturePublicationDisposition,
-    CaptureSourceAggregateRef, ImmutableCaptureSnapshot,
+    CaptureLifecycleSink, CapturePublicationDisposition, CaptureSourceAggregateRef,
+    ImmutableCaptureSnapshot,
 };
 use ctx_history_core::{
     CaptureProvider, CertifiedSource, CertifiedSourceInventory, SourceKey, TypedKey,

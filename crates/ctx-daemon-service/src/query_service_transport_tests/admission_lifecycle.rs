@@ -30,7 +30,7 @@ fn successful_publication(generation_id: &str) -> SourceBackedRefreshPublication
         route_results: Vec::new(),
         zero_source_authority: Vec::new(),
         catalog_route_bindings: Vec::new(),
-        verified_publication: None,
+        verified_index: None,
     }
 }
 

@@ -23,9 +23,9 @@ use std::sync::atomic::AtomicBool;
 
 use super::*;
 use crate::source_backed_refresh_coordinator::{
-    source_backed_index_root, SourceBackedRefreshCurrent, SourceBackedRefreshExecution,
-    SourceBackedRefreshExecutor, SourceBackedRefreshPublication, SourceBackedRefreshRouteResult,
-    SourceBackedRefreshTimings,
+    commit_source_backed_generation_for_test, source_backed_index_root, SourceBackedRefreshCurrent,
+    SourceBackedRefreshExecution, SourceBackedRefreshExecutor, SourceBackedRefreshPublication,
+    SourceBackedRefreshRouteResult, SourceBackedRefreshTimings,
 };
 use crate::{
     analytics::{Outcome, ProviderRefreshCompletedV1, Surface},
@@ -50,21 +50,6 @@ use ctx_history_index::{
     AppliedProviderRoot, GenerationWriter, SourceRouteSnapshot, WriterOptions,
 };
 use ctx_history_refresh::EventWatermark;
-
-#[test]
-fn scheduler_source_refresh_selection_borrows_without_refcount_churn() {
-    let source_refresh = Arc::new(crate::source_backed_refresh_adapter::refresh_engine(
-        &crate::test_support::CONFIG,
-    ));
-    let stable_coordinator = Some(Arc::clone(&source_refresh));
-    let strong_count = Arc::strong_count(&source_refresh);
-
-    let selected = daemon_scheduler_source_refresh(&stable_coordinator)
-        .expect("stable coordinator must be selectable");
-
-    assert!(std::ptr::eq(selected, source_refresh.as_ref()));
-    assert_eq!(Arc::strong_count(&source_refresh), strong_count);
-}
 
 #[cfg(unix)]
 #[test]
@@ -406,7 +391,7 @@ impl ProviderObservationFixture {
                         true,
                     )],
                     catalog_route_bindings: Vec::new(),
-                    verified_publication: None,
+                    verified_index: None,
                 })
             });
         let fixture = Self {
@@ -566,7 +551,10 @@ fn write_observation_fixture_generation(
         route.clone(),
         vec![source.clone()],
     )?])?;
-    Ok(writer.commit(|_| true)?.generation_id)
+    Ok(commit_source_backed_generation_for_test(writer)?
+        .receipt()
+        .generation_id
+        .clone())
 }
 
 fn manual_run() -> DaemonRunFactsV1 {
@@ -1314,12 +1302,13 @@ fn source_refresh_only_and_full_modes_share_the_same_refresh_path() -> Result<()
                 )?
                 .into_writer()
                 .map_err(crate::committed_generation_recovery_error)?;
-                let receipt = writer.commit(|_| true)?;
+                let (receipt, _, verified_index) =
+                    commit_source_backed_generation_for_test(writer)?.into_parts();
                 Ok(SourceBackedRefreshPublication {
                     route_results: Vec::new(),
                     zero_source_authority: Vec::new(),
                     catalog_route_bindings: Vec::new(),
-                    verified_publication: None,
+                    verified_index: Some(Arc::new(verified_index)),
                     generation_id: receipt.generation_id,
                     published_explicit_source_catalog: execution.explicit_source_catalog.cloned(),
                     unsupported_routes: 0,
@@ -1423,7 +1412,8 @@ fn one_scheduler_cycle_publishes_core_before_consumer_jobs() -> Result<()> {
             )?
             .into_writer()
             .map_err(crate::committed_generation_recovery_error)?;
-            let receipt = writer.commit(|_| true)?;
+            let (receipt, _, verified_index) =
+                commit_source_backed_generation_for_test(writer)?.into_parts();
             Ok(SourceBackedRefreshPublication {
                 route_results: vec![SourceBackedRefreshRouteResult::succeeded(
                     executor_route.as_str().to_owned(),
@@ -1431,7 +1421,7 @@ fn one_scheduler_cycle_publishes_core_before_consumer_jobs() -> Result<()> {
                 )],
                 zero_source_authority: Vec::new(),
                 catalog_route_bindings: Vec::new(),
-                verified_publication: None,
+                verified_index: Some(Arc::new(verified_index)),
                 generation_id: receipt.generation_id,
                 published_explicit_source_catalog: execution.explicit_source_catalog.cloned(),
                 unsupported_routes: 0,

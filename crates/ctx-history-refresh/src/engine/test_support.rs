@@ -106,7 +106,7 @@ impl RefreshJournal for TestFailTerminalStoreJournal {
                 .saturating_add(1)
                 == self.fail_on_terminal_store
         {
-            bail!("injected route-finalization persistence failure");
+            bail!("injected terminal persistence failure");
         }
         write_daemon_job_status(&daemon_source_backed_refresh_job_path(data_root), value)
     }
@@ -245,13 +245,13 @@ pub(super) fn status_value(engine: &CoreRefreshEngine, request_id: &str) -> Valu
 pub(super) fn pin_test_published_generation(
     data_root: &Path,
 ) -> Result<Option<PinnedSourceBackedGeneration>> {
-    crate::pin_published_generation(data_root, &TestFileRefreshJournal)
+    crate::pin_published_generation(data_root)
 }
 
 pub(super) fn pin_test_active_verified_generation(
     data_root: &Path,
 ) -> Result<PinnedSourceBackedGeneration> {
-    crate::pin_active_verified_generation(data_root, &TestFileRefreshJournal)
+    crate::pin_active_verified_generation(data_root)
 }
 
 impl CoreRefreshEngine {

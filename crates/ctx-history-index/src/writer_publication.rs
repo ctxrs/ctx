@@ -45,7 +45,7 @@ impl CommitGenerationOutcome {
 
     fn into_published_generation(self) -> Result<PublishedGeneration> {
         let verified_index = self.verified_index.ok_or(IndexError::WriterInvariant(
-            "metadata publication completed without its verified index",
+            "publication completed without its verified index",
         ))?;
         PublishedGeneration::new(self.receipt, self.disposition, verified_index)
     }
@@ -56,76 +56,19 @@ struct VerifiedCandidate {
     publication: VerifiedCandidatePublication,
 }
 
-impl GenerationWriter {
-    /// Rebinds opaque owner metadata without changing the logical index payload.
-    /// Current-format publications preserve their generation identity; a
-    /// migrated publication first installs its required current manifest anchor.
-    pub fn republish_current_publication_metadata(
-        self,
-        expected_generation_id: &str,
-        publication_metadata: Vec<u8>,
-    ) -> Result<VerifiedIndex> {
-        self.ensure_reusable_base_not_invalidated()?;
-        if self.preflight_lock.is_none() {
-            return Err(IndexError::WriterInvariant(
-                "generation writer lost its root publication lock",
-            ));
-        }
-        let pointer = self
-            .active_pointer
-            .as_ref()
-            .ok_or(IndexError::WriterInvariant(
-                "publication metadata republish requires an active generation",
-            ))?;
-        let base_publication =
-            self.base_publication
-                .as_ref()
-                .ok_or(IndexError::WriterInvariant(
-                    "publication metadata republish requires a base publication",
-                ))?;
-        let generation_id = base_publication.generation_id();
-        let requires_current_manifest_anchor = base_publication.requires_current_manifest_anchor();
-        if generation_id != expected_generation_id
-            || pointer.active().generation_id() != expected_generation_id
-        {
-            return Err(IndexError::ConcurrentGenerationChange);
-        }
-        if publication_metadata.len() > MAX_PUBLICATION_METADATA_BYTES {
-            return Err(IndexError::PublicationMetadataTooLarge {
-                actual: publication_metadata.len(),
-                maximum: MAX_PUBLICATION_METADATA_BYTES,
-            });
-        }
-        if requires_current_manifest_anchor {
-            let published =
-                self.commit_with_publication_metadata(|_| true, move |_| Ok(publication_metadata))?;
-            return Ok(published.into_parts().2);
-        }
-        let outcome = republish_current_with_publication_metadata(
-            &self.root,
-            pointer,
-            &self.writer_options,
-            publication_metadata.into(),
-        )?;
-        let published_pointer = match outcome {
-            CurrentRepublishOutcome::Published(pointer) => pointer,
-            CurrentRepublishOutcome::CommittedVisible { recovery, .. }
-            | CurrentRepublishOutcome::CommittedRecoveryRequired { recovery } => {
-                return Err(IndexError::CommittedGenerationNeedsRecovery {
-                    generation_id: recovery.generation_id().to_owned(),
-                    stage: "publication metadata republish",
-                    detail: recovery.detail().to_owned(),
-                });
-            }
-        };
-        best_effort_post_republish_cleanup(&self.root, &published_pointer);
-        let verified = VerifiedIndex::open_pinned(&self.root)?;
-        if verified.generation_id() != expected_generation_id {
-            return Err(IndexError::ConcurrentGenerationChange);
-        }
-        Ok(verified)
-    }
+fn preserve_generation_state(
+    context: GenerationStateContext<'_>,
+) -> Result<GenerationStateEnvelope> {
+    context
+        .manifest()
+        .generation_state()
+        .cloned()
+        .ok_or(IndexError::WriterInvariant(
+            "current draft manifest is missing generation-owned state",
+        ))
+}
 
+impl GenerationWriter {
     pub(super) fn writer_mut(&mut self) -> Result<&mut IndexWriter<IndexDocument>> {
         if self.writer.is_none() {
             #[cfg(test)]
@@ -203,33 +146,14 @@ impl GenerationWriter {
         F: FnMut(RevalidationTarget<'_>) -> bool,
     {
         Ok(self
-            .commit_generation(revalidate, |_| false, |_| Ok(None), false, |_| Ok(()))?
+            .commit_generation(
+                revalidate,
+                |_| false,
+                preserve_generation_state,
+                false,
+                |_| Ok(()),
+            )?
             .into_receipt())
-    }
-
-    /// Publishes with refresh-owned opaque metadata constructed from the final
-    /// terminally revalidated logical generation.
-    ///
-    /// Exact no-op/reuse does not invoke `metadata_factory`; callers must use
-    /// [`PublicationDisposition`] to distinguish old generation metadata from
-    /// bytes constructed for the current request.
-    pub fn commit_with_publication_metadata<F, M>(
-        self,
-        revalidate: F,
-        metadata_factory: M,
-    ) -> Result<PublishedGeneration>
-    where
-        F: FnMut(RevalidationTarget<'_>) -> bool,
-        M: FnOnce(PublicationMetadataContext<'_>) -> Result<Vec<u8>>,
-    {
-        self.commit_generation(
-            revalidate,
-            |_| false,
-            |context| metadata_factory(context).map(Some),
-            true,
-            |_| Ok(()),
-        )?
-        .into_published_generation()
     }
 
     /// Publishes one atomic lexical generation with terminal revalidation for
@@ -247,78 +171,50 @@ impl GenerationWriter {
             .commit_generation(
                 revalidate,
                 revalidate_inventory,
-                |_| Ok(None),
+                preserve_generation_state,
                 false,
                 |_| Ok(()),
             )?
             .into_receipt())
     }
 
-    /// Publishes with terminal source/inventory revalidation and a final
-    /// refresh-owned opaque metadata factory.
-    pub fn commit_with_complete_inventory_revalidation_and_publication_metadata<F, I, M>(
+    /// Publishes with one generation-owned state producer before all reuse and
+    /// identity decisions, with real whole-run publication stage transitions.
+    pub fn commit_with_generation_state<F, I, S, P>(
         self,
         revalidate: F,
         revalidate_inventory: I,
-        metadata_factory: M,
-    ) -> Result<PublishedGeneration>
-    where
-        F: FnMut(RevalidationTarget<'_>) -> bool,
-        I: FnMut(&CertifiedSourceInventory) -> bool,
-        M: FnOnce(PublicationMetadataContext<'_>) -> Result<Vec<u8>>,
-    {
-        self.commit_generation(
-            revalidate,
-            revalidate_inventory,
-            |context| metadata_factory(context).map(Some),
-            true,
-            |_| Ok(()),
-        )?
-        .into_published_generation()
-    }
-
-    /// Publishes with terminal revalidation, owner metadata, and real
-    /// whole-run publication stage transitions.
-    pub fn commit_with_complete_inventory_revalidation_and_publication_metadata_and_progress<
-        F,
-        I,
-        M,
-        P,
-    >(
-        self,
-        revalidate: F,
-        revalidate_inventory: I,
-        metadata_factory: M,
+        state_producer: S,
         report_progress: P,
     ) -> Result<PublishedGeneration>
     where
         F: FnMut(RevalidationTarget<'_>) -> bool,
         I: FnMut(&CertifiedSourceInventory) -> bool,
-        M: FnOnce(PublicationMetadataContext<'_>) -> Result<Vec<u8>>,
+        S: FnOnce(GenerationStateContext<'_>) -> Result<GenerationStateEnvelope>,
         P: FnMut(PublicationStage) -> Result<()>,
     {
         self.commit_generation(
             revalidate,
             revalidate_inventory,
-            |context| metadata_factory(context).map(Some),
+            state_producer,
             true,
             report_progress,
         )?
         .into_published_generation()
     }
 
-    fn commit_generation<F, I, M, P>(
+    fn commit_generation<F, I, S, P>(
         mut self,
         mut revalidate: F,
         mut revalidate_inventory: I,
-        metadata_factory: M,
+        state_producer: S,
         return_verified_index: bool,
         mut report_progress: P,
     ) -> Result<CommitGenerationOutcome>
     where
         F: FnMut(RevalidationTarget<'_>) -> bool,
         I: FnMut(&CertifiedSourceInventory) -> bool,
-        M: FnOnce(PublicationMetadataContext<'_>) -> Result<Option<Vec<u8>>>,
+        S: FnOnce(GenerationStateContext<'_>) -> Result<GenerationStateEnvelope>,
         P: FnMut(PublicationStage) -> Result<()>,
     {
         self.ensure_reusable_base_not_invalidated()?;
@@ -328,7 +224,28 @@ impl GenerationWriter {
             ));
         }
         self.validate_source_route_plan_complete()?;
-        if let Some(witness) = self.exact_replay_inventory_witness()? {
+        for pending in self.pending.values() {
+            if pending.certificate.is_none() {
+                return Err(IndexError::SourceNotCertified(
+                    pending.source.identity().to_string(),
+                ));
+            }
+        }
+        let draft_manifest = self.next_manifest()?;
+        let generation_state = state_producer(GenerationStateContext::new(&draft_manifest))?;
+        let manifest = std::sync::Arc::new(draft_manifest.with_generation_state(generation_state)?);
+
+        let exact_replay = self.exact_replay_inventory_witness()?.is_some();
+        if exact_replay
+            && self
+                .base_manifest()
+                .is_some_and(|base| manifest.exact_snapshot_eq(base))
+        {
+            let witness =
+                self.exact_replay_inventory_witness()?
+                    .ok_or(IndexError::WriterInvariant(
+                        "exact replay witness changed before reuse",
+                    ))?;
             for route in witness.base.source_routes().iter().filter(|route| {
                 !self
                     .source_route_plan
@@ -379,16 +296,6 @@ impl GenerationWriter {
             report_progress(PublicationStage::Activation)?;
             return Ok(reused);
         }
-
-        for pending in self.pending.values() {
-            if pending.certificate.is_none() {
-                return Err(IndexError::SourceNotCertified(
-                    pending.source.identity().to_string(),
-                ));
-            }
-        }
-
-        let manifest = std::sync::Arc::new(self.next_manifest()?);
         if finish_identical_staging(
             &mut self,
             &manifest,
@@ -406,14 +313,9 @@ impl GenerationWriter {
         // A provider-source configuration change can be the only manifest
         // mutation (for example, disabling automatic discovery while carrying
         // the previously indexed routes). Materialize a candidate so that
-        // this metadata-only successor is published atomically as well.
+        // this manifest-only successor is published atomically as well.
         self.writer_mut()?;
 
-        // Build opaque owner metadata from the complete staged manifest before
-        // the terminal source fence. The bytes are bound only if every source
-        // and inventory revalidation below succeeds, so observations sampled
-        // by the owner cannot describe state newer than the Core projection
-        // that the fence accepts.
         let prepared_manifest = prepare_successor_manifest(
             &self.root,
             std::sync::Arc::clone(&manifest),
@@ -422,8 +324,6 @@ impl GenerationWriter {
                 .map(|base| (base.generation_id(), base.manifest())),
         )?;
         let generation_id = prepared_manifest.generation_id().to_owned();
-        let publication_metadata =
-            metadata_factory(PublicationMetadataContext::new(&generation_id, &manifest))?;
 
         self.apply_route_deletions()?;
         let candidate_path = self.candidate_path()?;
@@ -475,14 +375,13 @@ impl GenerationWriter {
             }
         }
 
-        let payload =
-            match canonical_commit_payload(&generation_id, publication_metadata.as_deref()) {
-                Ok(payload) => payload,
-                Err(error) => {
-                    prepared.abort()?;
-                    return Err(error);
-                }
-            };
+        let payload = match canonical_commit_payload(&generation_id) {
+            Ok(payload) => payload,
+            Err(error) => {
+                prepared.abort()?;
+                return Err(error);
+            }
+        };
         if let Err(error) = write_prepared_manifest(&root, &prepared_manifest) {
             let _ = prepared.abort();
             return Err(error);
@@ -505,7 +404,6 @@ impl GenerationWriter {
             commit_result
         };
         drop(payload);
-        drop(publication_metadata);
         let writer = self.writer.take().ok_or(IndexError::WriterInvariant(
             "candidate commit is missing its lazy writer",
         ))?;

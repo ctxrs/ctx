@@ -1,10 +1,9 @@
 use ctx_history_capture_runtime::{
     BaseEventLookup, CaptureCommitOutcome, CaptureCommitReceipt, CaptureLifecycleOpenOutcome,
-    CaptureLifecycleRecovery, CaptureLifecycleSink, CapturePublicationContext,
-    CapturePublicationDisposition, CaptureRevalidationTarget, CaptureRouteRef,
-    CaptureSourceAggregateRef, CoreMaterialization, CorePreparationFailureKind,
-    CorePreparationPort, CoreRouteByteLease, CoreRouteResourceKind, ImmutableCaptureSnapshot,
-    PresentCaptureRoute, VerifiedCapture,
+    CaptureLifecycleRecovery, CaptureLifecycleSink, CapturePublicationDisposition,
+    CaptureRevalidationTarget, CaptureRouteRef, CaptureSourceAggregateRef, CoreMaterialization,
+    CorePreparationFailureKind, CorePreparationPort, CoreRouteByteLease, CoreRouteResourceKind,
+    ImmutableCaptureSnapshot, PresentCaptureRoute, VerifiedCapture,
 };
 use ctx_history_core::{
     CertifiedSource, CertifiedSourceAppend, CertifiedSourceDeletion, CertifiedSourceInventory,
@@ -12,11 +11,10 @@ use ctx_history_core::{
 };
 use ctx_history_index::{
     AppliedProviderRoot, BaseEventIdentityLookup, CommitReceipt, CoreRecordPreparer,
-    GenerationBaseCertifiedSource, GenerationManifest, GenerationWriter,
+    GenerationBaseCertifiedSource, GenerationManifest, GenerationStateEnvelope, GenerationWriter,
     GenerationWriterOpenOutcome, IndexError, PreparedCoreRecord, PreparedCoreRecordDraft,
-    PreparedCoreRecordMaterialization, PublicationDisposition, PublicationMetadataContext,
-    PublicationStage, PublishedGeneration, RevalidationTarget, SourceRouteSnapshot, VerifiedIndex,
-    WriterOptions,
+    PreparedCoreRecordMaterialization, PublicationDisposition, PublicationStage,
+    PublishedGeneration, RevalidationTarget, SourceRouteSnapshot, VerifiedIndex, WriterOptions,
 };
 use std::{collections::BTreeSet, path::Path, sync::Arc};
 use uuid::Uuid;
@@ -423,28 +421,6 @@ impl CaptureLifecycleSink for IndexCaptureLifecycle {
             )
             .map(capture_runtime_commit_receipt)
     }
-
-    fn commit_with_metadata<F, I, M>(
-        self,
-        mut revalidate: F,
-        revalidate_inventory: I,
-        metadata_factory: M,
-    ) -> Result<CaptureCommitOutcome<Self::CommittedSnapshot, Self::VerifiedPublication>, Self::Error>
-    where
-        F: FnMut(CaptureRevalidationTarget<'_>) -> bool,
-        I: FnMut(&CertifiedSourceInventory) -> bool,
-        M: for<'a> FnOnce(
-            CapturePublicationContext<'a, Self::Snapshot<'a>>,
-        ) -> Result<Vec<u8>, Self::Error>,
-    {
-        self.0
-            .commit_with_complete_inventory_revalidation_and_publication_metadata(
-                |target| revalidate(index_revalidation_target(target)),
-                revalidate_inventory,
-                |context| metadata_factory(capture_publication_context(context)),
-            )
-            .map(capture_commit_outcome)
-    }
 }
 
 impl IndexCaptureLifecycle {
@@ -490,26 +466,26 @@ impl IndexCaptureLifecycle {
         self.0.set_authorized_topology_route_retirements(routes)
     }
 
-    pub(crate) fn commit_with_metadata_and_progress<F, I, M, P>(
+    pub(crate) fn commit_with_generation_state_and_progress<F, I, S, P>(
         self,
         mut revalidate: F,
         revalidate_inventory: I,
-        metadata_factory: M,
+        state_factory: S,
         report_progress: P,
     ) -> Result<IndexCaptureCommitOutcome, IndexError>
     where
         F: FnMut(CaptureRevalidationTarget<'_>) -> bool,
         I: FnMut(&CertifiedSourceInventory) -> bool,
-        M: for<'a> FnOnce(
-            CapturePublicationContext<'a, BorrowedIndexManifestView<'a>>,
-        ) -> Result<Vec<u8>, IndexError>,
+        S: for<'a> FnOnce(
+            BorrowedIndexManifestView<'a>,
+        ) -> Result<GenerationStateEnvelope, IndexError>,
         P: FnMut(PublicationStage) -> Result<(), IndexError>,
     {
         self.0
-            .commit_with_complete_inventory_revalidation_and_publication_metadata_and_progress(
+            .commit_with_generation_state(
                 |target| revalidate(index_revalidation_target(target)),
                 revalidate_inventory,
-                |context| metadata_factory(capture_publication_context(context)),
+                |context| state_factory(IndexManifestView::borrowed(context.manifest())),
                 report_progress,
             )
             .map(capture_commit_outcome)
@@ -698,13 +674,6 @@ impl ImmutableCaptureSnapshot for IndexManifestView<'_> {
             )
         })
     }
-}
-
-pub(crate) fn capture_publication_context<'a>(
-    context: PublicationMetadataContext<'a>,
-) -> CapturePublicationContext<'a, BorrowedIndexManifestView<'a>> {
-    let snapshot = IndexManifestView::borrowed(context.manifest());
-    CapturePublicationContext::new(context.generation_id(), snapshot)
 }
 
 fn capture_runtime_commit_receipt(

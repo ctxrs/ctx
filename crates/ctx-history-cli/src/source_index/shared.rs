@@ -2,7 +2,6 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
 use ctx_history_index::{IndexError, VerifiedIndex};
-use ctx_history_refresh::{verify_generation_query_authority, GenerationQueryAuthorityError};
 use serde_json::{json, Value};
 
 use crate::ui::{diagnostic, Action, Diagnostic, DiagnosticLevel, Field, RenderContext, Ui};
@@ -256,16 +255,6 @@ pub(crate) fn active_generation_race_error_json() -> Value {
     })
 }
 
-pub fn generation_query_authority_error_json(error: &GenerationQueryAuthorityError) -> Value {
-    let detail = error.to_string();
-    json!({
-        "error": detail.clone(),
-        "error_code": error.error_code(),
-        "detail": detail,
-        "retryable": error.retryable(),
-    })
-}
-
 pub(super) fn render_missing_lookup(
     context: &RenderContext,
     missing: &MissingLookupError,
@@ -311,7 +300,6 @@ pub(super) fn open_index(data_root: &Path) -> Result<VerifiedIndex> {
                 .with_context(|| format!("open verified Core index {}", root.display()));
         }
     };
-    verify_generation_query_authority(&index).map_err(anyhow::Error::new)?;
     Ok(index)
 }
 

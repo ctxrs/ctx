@@ -51,7 +51,6 @@ fn publish_unmerged_segments(segment_count: usize) -> (TempDir, VerifiedIndex, V
                 &serde_json::to_string(&CommitPayload {
                     version: COMMIT_PAYLOAD_VERSION,
                     generation_id: generation_id.clone(),
-                    publication_metadata: None,
                 })
                 .unwrap(),
             );

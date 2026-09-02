@@ -1103,8 +1103,6 @@ fn empty_inventory_requires_terminal_witness_and_rejects_discovered_source_race(
     );
 }
 
-include!("writer/downgrade.rs");
-
 include!("writer/reclamation.rs");
 
 include!("writer/core_records.rs");

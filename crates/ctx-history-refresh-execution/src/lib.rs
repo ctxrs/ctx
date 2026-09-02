@@ -3,7 +3,7 @@ mod current_state;
 mod execution;
 mod explicit_source_catalog;
 mod explicit_source_path;
-mod metadata;
+mod generation_state;
 mod observation;
 mod receipt;
 mod receipt_parse;
@@ -44,22 +44,16 @@ use ctx_history_capture_model::{
     DiscoveryIssueKind, DiscoveryReport, ProviderRootSourceIdentity, ProviderSource,
     ProviderSourceStatus, RetainedProviderRootAuthority,
 };
-use ctx_history_capture_runtime::{CapturePublicationDisposition, ImmutableCaptureSnapshot};
+use ctx_history_capture_runtime::ImmutableCaptureSnapshot;
 use ctx_history_core::{CaptureProvider, CertifiedSource, ScannedSourceCounts};
+#[cfg(test)]
+use ctx_history_index::GenerationWriter;
 use ctx_history_index::{
-    GenerationWriter, IndexError, SourceRouteIdentity, VerifiedIndex, WriterOptions,
+    GenerationManifest, IndexError, SourceRouteIdentity, VerifiedIndex, WriterOptions,
 };
 use serde_json::{json, Value};
 
 use catalog_witness::reconcile_published_catalog_witness;
-use observation::{admitted_route_observations, run_after_capture_scan_before_metadata_hook};
-use registry_issues::{
-    automatic_registry_admission_failures, automatic_registry_route_less_blockers,
-    selected_registry_route_count, terminal_registry_route_failures,
-    AutomaticRegistryAdmissionFailurePolicy, RouteLessRegistryBlockers,
-};
-type SourceBackedRefreshOperation = RefreshOperation;
-
 pub use ctx_history_capture::{SourceBackedReconciliationDemand, SourceBackedRefreshScope};
 pub use current_state::SourceBackedRefreshCurrent;
 #[doc(hidden)]
@@ -83,20 +77,22 @@ pub use explicit_source_path::{
     explicit_source_path_is_symlink_or_reparse_point, explicit_source_path_metadata,
     explicit_source_path_symlink_metadata, ExplicitSourcePathMissing,
 };
-pub use metadata::{
-    verify_generation_query_readiness, GenerationQueryReadiness, SourceBackedPublicationMetadata,
-    VerifiedCorePublication, SOURCE_REFRESH_PUBLICATION_METADATA_VERSION,
-};
+pub use generation_state::{SourceBackedGenerationState, SOURCE_BACKED_GENERATION_STATE_FORMAT};
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub use observation::install_after_capture_scan_before_metadata_hook_for_test;
+use observation::{admitted_route_observations, run_after_capture_scan_before_metadata_hook};
 pub use receipt::SourceBackedRefreshReceipt;
 pub use receipt_parse::{
     is_sha256_identity, optional_generation, parse_zero_source_authority,
     published_refresh_receipt_for_index, published_refresh_receipt_for_recovery,
-    published_refresh_request_outcome_for_index, published_refresh_request_outcome_for_recovery,
     required_generation, required_route_results, validate_zero_source_authority,
     zero_source_authority_json,
+};
+use registry_issues::{
+    automatic_registry_admission_failures, automatic_registry_route_less_blockers,
+    selected_registry_route_count, terminal_registry_route_failures,
+    AutomaticRegistryAdmissionFailurePolicy, RouteLessRegistryBlockers,
 };
 #[doc(hidden)]
 pub use registry_issues::{
@@ -386,16 +382,6 @@ pub fn source_backed_requested_route_observations(
             (route, observation)
         })
         .collect()
-}
-
-fn committed_generation_recovery_error(
-    recovery: ctx_history_index::CommittedPredecessorMigrationRecovery,
-) -> ctx_history_index::IndexError {
-    ctx_history_index::IndexError::CommittedGenerationNeedsRecovery {
-        generation_id: recovery.generation_id().to_owned(),
-        stage: "predecessor migration recovery",
-        detail: recovery.detail().to_owned(),
-    }
 }
 
 fn compact_json(mut value: Value) -> Value {

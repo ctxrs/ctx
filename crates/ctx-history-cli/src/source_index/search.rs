@@ -76,7 +76,6 @@ pub(super) enum SourceSearchFailure {
     Semantic(HistorySemanticError),
     SourceUnavailable,
     GenerationChanged,
-    GenerationAuthority(ctx_history_refresh::GenerationQueryAuthorityError),
     Other(anyhow::Error),
 }
 
@@ -96,8 +95,6 @@ pub enum McpSearchError {
         "History changed while ctx was opening the searchable generation. Retry the same request."
     )]
     GenerationChanged,
-    #[error(transparent)]
-    GenerationAuthority(ctx_history_refresh::GenerationQueryAuthorityError),
     #[error("{detail}")]
     Application { detail: String },
 }
@@ -124,7 +121,6 @@ impl SourceSearchFailure {
             Self::GenerationChanged => {
                 anyhow::Error::new(ctx_history_index::IndexError::ConcurrentGenerationChange)
             }
-            Self::GenerationAuthority(error) => anyhow::Error::new(error),
             Self::Other(error) => error,
         }
     }
@@ -145,7 +141,6 @@ impl SourceSearchFailure {
             }
             Self::SourceUnavailable => McpSearchError::SourceUnavailable,
             Self::GenerationChanged => McpSearchError::GenerationChanged,
-            Self::GenerationAuthority(error) => McpSearchError::GenerationAuthority(error),
             Self::Other(error) => McpSearchError::Application {
                 detail: error.to_string(),
             },
@@ -210,7 +205,6 @@ impl std::fmt::Display for SourceSearchFailure {
             Self::GenerationChanged => formatter.write_str(
                 "History changed while ctx was opening the searchable generation. Retry the same request.",
             ),
-            Self::GenerationAuthority(error) => std::fmt::Display::fmt(error, formatter),
             Self::Other(error) => std::fmt::Display::fmt(error, formatter),
         }
     }
@@ -234,10 +228,7 @@ impl From<anyhow::Error> for SourceSearchFailure {
             Ok(error) => return Self::from(error),
             Err(error) => error,
         };
-        match error.downcast::<ctx_history_refresh::GenerationQueryAuthorityError>() {
-            Ok(error) => Self::GenerationAuthority(error),
-            Err(error) => Self::Other(externalize_query_error(error)),
-        }
+        Self::Other(externalize_query_error(error))
     }
 }
 
@@ -844,20 +835,6 @@ where
     let mode = source_backed_refresh_mode(refresh);
     let observation = match coordinate(data_root, mode) {
         Ok(observation) => observation,
-        Err(error) if mode == SourceBackedRefreshMode::Background => {
-            // Background refresh may report an uncertified empty generation as
-            // unavailable. At the query gateway, preserve the stricter typed
-            // R1 authority error instead of replacing it with refresh state.
-            if let Err(authority_error) = crate::semantic::pin_active_verified_generation(data_root)
-            {
-                if let Ok(authority_error) =
-                    authority_error.downcast::<ctx_history_refresh::GenerationQueryAuthorityError>()
-                {
-                    return Err(SourceSearchFailure::GenerationAuthority(authority_error));
-                }
-            }
-            return Err(SourceSearchFailure::from(error));
-        }
         Err(error) => return Err(SourceSearchFailure::from(error)),
     };
     if observation.mode != mode {

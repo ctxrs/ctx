@@ -177,8 +177,6 @@ pub struct PinnedPublication {
     searcher: Searcher,
     manifest: Arc<GenerationManifest>,
     generation_id: String,
-    requires_current_manifest_anchor: bool,
-    publication_metadata: Option<Arc<[u8]>>,
     fields: Fields,
     opstamp: u64,
     physical_integrity: CertifiedPhysicalIntegrity,
@@ -198,16 +196,6 @@ impl PinnedPublication {
     #[doc(hidden)]
     pub fn generation_id(&self) -> &str {
         &self.generation_id
-    }
-
-    #[doc(hidden)]
-    pub fn requires_current_manifest_anchor(&self) -> bool {
-        self.requires_current_manifest_anchor
-    }
-
-    #[doc(hidden)]
-    pub fn publication_metadata(&self) -> Option<&Arc<[u8]>> {
-        self.publication_metadata.as_ref()
     }
 
     /// Applies replacements to this already-validated immutable base without
@@ -321,40 +309,31 @@ pub fn open_pinned_publication(
     verify_searcher_structure(&searcher, publication.manifest())?;
     let physical_integrity =
         verify_or_certify_physical_integrity(root, authority.pointer(), slot, searcher.index())?;
-    let requires_current_manifest_anchor = publication.requires_current_manifest_anchor();
-    let (generation_id, manifest, publication_metadata) = publication.into_parts();
+    let (generation_id, manifest) = publication.into_parts();
     Ok(OpenedPinnedPublication::Published(PinnedPublication {
         writer_index: Some(index),
         searcher,
         manifest,
         generation_id,
-        requires_current_manifest_anchor,
-        publication_metadata,
         fields,
         opstamp: metas.opstamp,
         physical_integrity,
     }))
 }
 
-/// Opaque authority proving that one immutable searcher and its publication
-/// metadata passed the format-owned trust checks required by a query reader.
+/// Opaque authority proving that one immutable searcher and manifest passed
+/// the format-owned trust checks required by a query reader.
 pub struct VerifiedPublication {
     searcher: Searcher,
     manifest: Arc<GenerationManifest>,
     generation_id: String,
-    publication_metadata: Option<Arc<[u8]>>,
 }
 
 impl VerifiedPublication {
     /// Decomposes an already-verified publication for the query package.
     #[doc(hidden)]
-    pub fn into_parts(self) -> (Searcher, Arc<GenerationManifest>, String, Option<Arc<[u8]>>) {
-        (
-            self.searcher,
-            self.manifest,
-            self.generation_id,
-            self.publication_metadata,
-        )
+    pub fn into_parts(self) -> (Searcher, Arc<GenerationManifest>, String) {
+        (self.searcher, self.manifest, self.generation_id)
     }
 
     #[doc(hidden)]
@@ -499,7 +478,7 @@ where
             IndexError::ConcurrentGenerationChange,
         ));
     }
-    let (generation_id, manifest, publication_metadata) = publication.into_parts();
+    let (generation_id, manifest) = publication.into_parts();
     let physical_integrity_audit = physical_integrity_audit_with_candidate_proof(
         searcher.index(),
         generation_path,
@@ -530,7 +509,6 @@ where
             searcher,
             manifest,
             generation_id,
-            publication_metadata,
         },
         physical_integrity_audit,
     })
@@ -588,7 +566,6 @@ pub fn verify_and_bind_reusable_publication(
         searcher: publication.searcher,
         manifest: publication.manifest,
         generation_id: publication.generation_id,
-        publication_metadata: publication.publication_metadata,
     })
 }
 

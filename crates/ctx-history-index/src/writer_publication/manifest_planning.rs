@@ -68,7 +68,7 @@ impl GenerationWriter {
             .unwrap_or_else(|| (true, provider_source_config_digest(true, &[]), Vec::new()));
         let detached_released_provider_roots =
             detached_released_provider_root_authorities(self.base_manifest(), &provider_roots)?;
-        GenerationManifest::from_parts_with_record_aggregates_and_provider_roots_and_detached_authorities(
+        let manifest = GenerationManifest::from_parts_with_record_aggregates_and_provider_roots_and_detached_authorities(
             sources,
             record_aggregates,
             source_routes,
@@ -76,7 +76,14 @@ impl GenerationWriter {
             provider_root_config_digest,
             provider_roots,
             detached_released_provider_roots,
-        )
+        )?;
+        match self
+            .base_manifest()
+            .and_then(GenerationManifest::generation_state)
+        {
+            Some(state) => manifest.with_generation_state(state.clone()),
+            None => Ok(manifest),
+        }
     }
 
     fn source_replacement_manifest_is_route_stable(&self, base: &GenerationManifest) -> bool {

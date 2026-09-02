@@ -437,20 +437,20 @@ fn incremental_cursor_advances_only_with_successful_core_publication() {
         )
         .unwrap();
 
-    let failed =
-        SourceBackedRefreshExecutor::new(registry.clone(), source_backed_refresh_writer_options())
-            .with_base_route_controls(cold.route_controls.clone())
-            .refresh_scope_with_detailed_progress_publication_metadata_and_reconciliation(
-                &index_root,
-                SourceBackedRefreshScope::All,
-                SourceBackedReconciliationDemand::Incremental,
-                |_| Ok(()),
-                |_| {
-                    Err(IndexError::PublicationMetadata(
-                        "injected Hermes publication failure".into(),
-                    ))
-                },
-            );
+    let failed = SourceBackedRefreshExecutor::new(
+        registry.clone(),
+        source_backed_refresh_writer_options(),
+    )
+    .with_base_route_controls(cold.route_controls.clone())
+    .refresh_physical_scope_with_detailed_progress_generation_state_reconciliation_and_worksets(
+        &index_root,
+        SourceBackedRefreshScope::All,
+        SourceBackedRefreshScope::All,
+        SourceBackedReconciliationDemand::Incremental,
+        BTreeMap::new(),
+        |_| Ok(()),
+        |_| Err(IndexError::InvalidGenerationStateEnvelope),
+    );
     assert!(failed.is_err());
     assert_eq!(
         VerifiedIndex::open_pinned(&index_root)
@@ -488,20 +488,20 @@ fn failed_exhaustive_publication_retains_due_control_and_retry_converges() {
         )
         .unwrap();
 
-    let failed =
-        SourceBackedRefreshExecutor::new(registry.clone(), source_backed_refresh_writer_options())
-            .with_base_route_controls(overdue_controls.clone())
-            .refresh_scope_with_detailed_progress_publication_metadata_and_reconciliation(
-                &index_root,
-                SourceBackedRefreshScope::All,
-                SourceBackedReconciliationDemand::Exhaustive,
-                |_| Ok(()),
-                |_| {
-                    Err(IndexError::PublicationMetadata(
-                        "injected exhaustive failure".into(),
-                    ))
-                },
-            );
+    let failed = SourceBackedRefreshExecutor::new(
+        registry.clone(),
+        source_backed_refresh_writer_options(),
+    )
+    .with_base_route_controls(overdue_controls.clone())
+    .refresh_physical_scope_with_detailed_progress_generation_state_reconciliation_and_worksets(
+        &index_root,
+        SourceBackedRefreshScope::All,
+        SourceBackedRefreshScope::All,
+        SourceBackedReconciliationDemand::Exhaustive,
+        BTreeMap::new(),
+        |_| Ok(()),
+        |_| Err(IndexError::InvalidGenerationStateEnvelope),
+    );
     assert!(failed.is_err());
     assert_eq!(
         VerifiedIndex::open_pinned(&index_root)

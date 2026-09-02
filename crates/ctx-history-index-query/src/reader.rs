@@ -15,9 +15,11 @@ use ctx_history_index_format::{
 use ctx_history_index_format::{scrub_and_certify_physical_integrity, verify_searcher};
 use ctx_history_index_generation::{
     acquire_generation_read_lease, acquire_retained_generation_read_lease,
-    load_active_generation_pointer, load_generation_retention_lease, open_slot_index,
+    cache_recertified_physical_integrity, load_active_generation_pointer,
+    load_generation_retention_lease, open_slot_index,
     verify_candidate_physical_integrity_read_only, verify_physical_integrity_read_only,
-    ActiveGenerationPointer, GenerationReadLease, GenerationRetentionLease, GenerationSlot,
+    ActiveGenerationPointer, CertifiedPhysicalIntegrity, GenerationReadLease,
+    GenerationRetentionLease, GenerationSlot,
 };
 use tantivy::{ReloadPolicy, Searcher};
 
@@ -43,7 +45,6 @@ pub struct VerifiedIndex {
     pub(crate) searcher: Searcher,
     pub(crate) manifest: Arc<GenerationManifest>,
     pub(crate) generation_id: String,
-    pub(crate) publication_metadata: Option<Arc<[u8]>>,
     pub(crate) semantic_eligibility_postings: OnceLock<crate::SemanticEligibilityPostings>,
     _reader_leases: Option<ReaderLeaseBundle>,
 }
@@ -222,9 +223,9 @@ impl VerifiedIndex {
     ) -> Result<Self> {
         let leases = Self::acquire_reader_leases(root, pointer, &selection)?;
         let target = &leases.target;
-        let mut index = target
+        let (mut index, recertified) = target
             .with_root_access(|root| {
-                Self::open_slot(
+                Self::open_slot_with_certification(
                     root,
                     pointer,
                     target.target(),
@@ -239,6 +240,15 @@ impl VerifiedIndex {
                 )
             })
             .map_err(IndexError::from)??;
+        if let Some(certified) = recertified {
+            let _ = cache_recertified_physical_integrity(
+                root,
+                pointer,
+                target.target(),
+                index.searcher.index(),
+                &certified,
+            );
+        }
         index._reader_leases = Some(leases);
         Ok(index)
     }
@@ -286,7 +296,7 @@ impl VerifiedIndex {
         validate_schema(&index.schema())?;
         let metas = index.load_metas()?;
         let publication = load_publication_for_metas(&root, &metas)?;
-        let (generation_id, manifest, publication_metadata) = publication.into_parts();
+        let (generation_id, manifest) = publication.into_parts();
         if generation_id != slot.generation_id() {
             return Err(IndexError::ConcurrentGenerationChange);
         }
@@ -307,7 +317,6 @@ impl VerifiedIndex {
             searcher,
             manifest,
             generation_id,
-            publication_metadata,
             semantic_eligibility_postings: OnceLock::new(),
             _reader_leases: None,
         })
@@ -349,13 +358,17 @@ impl VerifiedIndex {
             lease,
             ReopenPhysicalVerification::ReadOnly,
         )
+        .map(|(index, _)| index)
     }
 
     fn open_generation_read_lease_with_verification(
         root: &Path,
         lease: &GenerationReadLease,
         physical_verification: ReopenPhysicalVerification,
-    ) -> Result<Self> {
+    ) -> Result<(
+        Self,
+        Option<(ActiveGenerationPointer, CertifiedPhysicalIntegrity)>,
+    )> {
         let control_directory =
             DurableMmapDirectory::open(root).map_err(tantivy::TantivyError::from)?;
         let root = control_directory.root_path().to_path_buf();
@@ -364,7 +377,7 @@ impl VerifiedIndex {
         }
         let first_pointer = load_active_generation_pointer(&root)?
             .ok_or(IndexError::MissingActiveGenerationPointer)?;
-        let first_result = Self::open_slot(
+        let first_result = Self::open_slot_with_certification(
             &root,
             &first_pointer,
             lease.target(),
@@ -377,10 +390,11 @@ impl VerifiedIndex {
         let observed_pointer = load_active_generation_pointer(&root)?
             .ok_or(IndexError::MissingActiveGenerationPointer)?;
         if observed_pointer == first_pointer {
-            return first_result;
+            return first_result
+                .map(|(index, proof)| (index, proof.map(|proof| (first_pointer, proof))));
         }
 
-        let retry_result = Self::open_slot(
+        let retry_result = Self::open_slot_with_certification(
             &root,
             &observed_pointer,
             lease.target(),
@@ -393,7 +407,7 @@ impl VerifiedIndex {
         if load_active_generation_pointer(&root)?.as_ref() != Some(&observed_pointer) {
             return Err(IndexError::ConcurrentGenerationChange);
         }
-        retry_result
+        retry_result.map(|(index, proof)| (index, proof.map(|proof| (observed_pointer, proof))))
     }
 
     /// Moves this reader's already selected retained-peer lease into a peer
@@ -407,7 +421,7 @@ impl VerifiedIndex {
         else {
             return Ok(None);
         };
-        let mut peer = lease
+        let (mut peer, recertified) = lease
             .with_root_access(|root| {
                 Self::open_generation_read_lease_with_verification(
                     root,
@@ -416,6 +430,15 @@ impl VerifiedIndex {
                 )
             })
             .map_err(IndexError::from)??;
+        if let Some((pointer, certified)) = recertified {
+            let _ = cache_recertified_physical_integrity(
+                lease.root(),
+                &pointer,
+                lease.target(),
+                peer.searcher.index(),
+                &certified,
+            );
+        }
         peer._reader_leases = Some(ReaderLeaseBundle {
             target: lease,
             peer: None,
@@ -494,22 +517,23 @@ impl VerifiedIndex {
         let root = control_directory.root_path().to_path_buf();
         let pointer = load_active_generation_pointer(&root)?
             .ok_or(IndexError::MissingActiveGenerationPointer)?;
-        Self::open_slot(
+        Self::open_slot_with_certification(
             &root,
             &pointer,
             pointer.active(),
             physical_verification,
             |_| IndexError::InvalidActiveGenerationPointer,
         )
+        .map(|(index, _)| index)
     }
 
-    fn open_slot<F>(
+    fn open_slot_with_certification<F>(
         root: &Path,
         pointer: &ActiveGenerationPointer,
         slot: &GenerationSlot,
         physical_verification: ReopenPhysicalVerification,
         generation_mismatch: F,
-    ) -> Result<Self>
+    ) -> Result<(Self, Option<CertifiedPhysicalIntegrity>)>
     where
         F: FnOnce(String) -> IndexError,
     {
@@ -520,7 +544,7 @@ impl VerifiedIndex {
         validate_schema(&index.schema())?;
         let metas = index.load_metas()?;
         let publication = load_publication_for_metas(root, &metas)?;
-        let (generation_id, manifest, publication_metadata) = publication.into_parts();
+        let (generation_id, manifest) = publication.into_parts();
         if slot.generation_id() != generation_id {
             return Err(generation_mismatch(generation_id));
         }
@@ -532,27 +556,31 @@ impl VerifiedIndex {
         if searcher_generation(&searcher) != meta_generation(&metas) {
             return Err(IndexError::ConcurrentGenerationChange);
         }
-        match physical_verification {
-            ReopenPhysicalVerification::VerifyOrCertify => {
-                verify_or_certify_physical_integrity(root, pointer, slot, &index)?;
-            }
+        let recertified = match physical_verification {
+            ReopenPhysicalVerification::VerifyOrCertify => Some(
+                verify_or_certify_physical_integrity(root, pointer, slot, &index)?,
+            ),
             ReopenPhysicalVerification::ReadOnly => {
                 verify_physical_integrity_read_only(root, slot, &index)?;
+                None
             }
             #[cfg(any(test, feature = "test-support"))]
             ReopenPhysicalVerification::ScrubAndCertify => {
                 scrub_and_certify_physical_integrity(root, pointer, slot, &index)?;
+                None
             }
-        }
+        };
         verify_searcher_structure(&searcher, &manifest)?;
-        Ok(Self {
-            searcher,
-            manifest,
-            generation_id,
-            publication_metadata,
-            semantic_eligibility_postings: OnceLock::new(),
-            _reader_leases: None,
-        })
+        Ok((
+            Self {
+                searcher,
+                manifest,
+                generation_id,
+                semantic_eligibility_postings: OnceLock::new(),
+                _reader_leases: None,
+            },
+            recertified,
+        ))
     }
 
     #[doc(hidden)]
@@ -560,12 +588,11 @@ impl VerifiedIndex {
         #[cfg(any(test, feature = "test-support"))]
         VERIFIED_INDEX_PUBLICATION_CONSTRUCTION_COUNT
             .with(|count| count.set(count.get().saturating_add(1)));
-        let (searcher, manifest, generation_id, publication_metadata) = publication.into_parts();
+        let (searcher, manifest, generation_id) = publication.into_parts();
         Self {
             searcher,
             manifest,
             generation_id,
-            publication_metadata,
             semantic_eligibility_postings: OnceLock::new(),
             _reader_leases: None,
         }
@@ -591,12 +618,6 @@ impl VerifiedIndex {
         self.searcher = searcher;
         self.semantic_eligibility_postings = OnceLock::new();
         self
-    }
-
-    /// Returns refresh-owned opaque bytes bound to this exact generation's
-    /// canonical Tantivy commit payload.
-    pub fn publication_metadata(&self) -> Option<&[u8]> {
-        self.publication_metadata.as_deref()
     }
 
     pub fn document_count(&self) -> u64 {

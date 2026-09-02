@@ -6,7 +6,6 @@ use std::{
     sync::{Arc, Mutex, OnceLock, Weak},
 };
 
-use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
 use ctx_history_core::{CORE_RECORD_VERSION, IDENTITY_VERSION};
 use ctx_history_index_generation::{
     load_manifest_bytes, load_manifest_metadata, manifest_path, sha256_hex, write_manifest_bytes,
@@ -15,24 +14,19 @@ use serde::{Deserialize, Serialize};
 use tantivy::{IndexMeta, Searcher};
 
 use crate::{
-    expected_source_generation_policy_hash, is_generation_id, provider_source_config_digest,
-    validate_core_contract_fingerprint, CommitPayload, GenerationManifest, IndexError,
-    ProviderRootDefinition, ProviderRootSourceIdentity, Result, SourceCoreRecordAggregate,
-    SourceRouteIdentity, SourceRouteSnapshot, COMMIT_PAYLOAD_VERSION, GENERATION_MANIFEST_VERSION,
-    LEXICAL_ANALYZER_VERSION, LEXICAL_SCHEMA_VERSION, MAX_PUBLICATION_METADATA_BYTES,
+    expected_source_generation_policy_hash, is_generation_id, validate_core_contract_fingerprint,
+    CommitPayload, GenerationManifest, IndexError, Result, SourceCoreRecordAggregate,
+    COMMIT_PAYLOAD_VERSION, GENERATION_MANIFEST_VERSION, LEXICAL_ANALYZER_VERSION,
+    LEXICAL_SCHEMA_VERSION,
 };
 
-use ctx_history_core::{CaptureProvider, CertifiedSource};
+use ctx_history_core::CertifiedSource;
 
-const MAX_PUBLICATION_METADATA_ENCODED_BYTES: usize =
-    MAX_PUBLICATION_METADATA_BYTES.div_ceil(3) * 4;
-const MAX_COMMIT_PAYLOAD_BYTES: usize = MAX_PUBLICATION_METADATA_ENCODED_BYTES + 256;
+const MAX_COMMIT_PAYLOAD_BYTES: usize = 256;
 const MANIFEST_FLAT_DELTA_STORAGE: &str = "ctx-manifest-flat-delta-v1";
 const MANIFEST_FLAT_DELTA_PREFIX: &[u8] = br#"{"storage_format":"ctx-manifest-flat-delta-v1","#;
 const MAX_MANIFEST_DELTA_CHANGES: usize = 64;
 const MAX_MANIFEST_DELTA_BYTES: usize = 1024 * 1024;
-const PREVIOUS_GENERATION_MANIFEST_VERSION: u32 = 9;
-const LEGACY_GENERATION_MANIFEST_VERSION: u32 = 8;
 
 type ManifestCacheKey = (PathBuf, String);
 static MANIFEST_CACHE: OnceLock<Mutex<BTreeMap<ManifestCacheKey, ManifestCacheEntry>>> =
@@ -56,15 +50,7 @@ pub fn clear_manifest_cache_for_root(root: &Path) -> Result<()> {
 #[derive(Clone)]
 struct ManifestCacheEntry {
     manifest: Weak<GenerationManifest>,
-    requires_current_anchor: bool,
     identity: ManifestFileIdentity,
-}
-
-#[derive(Clone)]
-struct MaterializedManifest {
-    manifest: Arc<GenerationManifest>,
-    // Versionless deltas inherit this from their full persisted anchor.
-    requires_current_anchor: bool,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -107,73 +93,6 @@ struct StoredManifestSourceChangeV1 {
     aggregate: SourceCoreRecordAggregate,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PreviousProviderRootDefinitionV9 {
-    id: String,
-    provider: CaptureProvider,
-    path: PathBuf,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    group: Option<String>,
-}
-
-impl From<&PreviousProviderRootDefinitionV9> for ProviderRootDefinition {
-    fn from(previous: &PreviousProviderRootDefinitionV9) -> Self {
-        Self {
-            id: previous.id.clone(),
-            provider: previous.provider,
-            path: previous.path.clone(),
-            group: previous.group.clone(),
-            kind: None,
-        }
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PreviousAppliedProviderRootV9 {
-    definition: PreviousProviderRootDefinitionV9,
-    source_identity: ProviderRootSourceIdentity,
-    routes: Vec<SourceRouteIdentity>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PreviousGenerationManifestV9 {
-    manifest_version: u32,
-    identity_version: u16,
-    core_record_version: u32,
-    core_record_contract_fingerprint: String,
-    lexical_schema_version: u32,
-    lexical_analyzer_version: u32,
-    policy_schema_hash: String,
-    indexed_documents: u64,
-    certified_source_bytes: u64,
-    sources: Vec<CertifiedSource>,
-    core_record_aggregates: Vec<SourceCoreRecordAggregate>,
-    source_routes: Vec<SourceRouteSnapshot>,
-    automatic_provider_discovery: bool,
-    provider_root_config_digest: String,
-    provider_roots: Vec<PreviousAppliedProviderRootV9>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PreviousGenerationManifestV8 {
-    manifest_version: u32,
-    identity_version: u16,
-    core_record_version: u32,
-    core_record_contract_fingerprint: String,
-    lexical_schema_version: u32,
-    lexical_analyzer_version: u32,
-    policy_schema_hash: String,
-    indexed_documents: u64,
-    certified_source_bytes: u64,
-    sources: Vec<CertifiedSource>,
-    core_record_aggregates: Vec<SourceCoreRecordAggregate>,
-    source_routes: Vec<SourceRouteSnapshot>,
-}
-
 #[derive(Deserialize)]
 struct StoredManifestVersion {
     manifest_version: u32,
@@ -208,8 +127,6 @@ impl PreparedManifest {
 pub struct LoadedPublication {
     generation_id: String,
     manifest: Arc<GenerationManifest>,
-    requires_current_anchor: bool,
-    metadata: Option<Arc<[u8]>>,
 }
 
 impl LoadedPublication {
@@ -221,18 +138,9 @@ impl LoadedPublication {
         &self.manifest
     }
 
-    pub fn metadata(&self) -> Option<&Arc<[u8]>> {
-        self.metadata.as_ref()
-    }
-
     #[doc(hidden)]
-    pub fn requires_current_manifest_anchor(&self) -> bool {
-        self.requires_current_anchor
-    }
-
-    #[doc(hidden)]
-    pub fn into_parts(self) -> (String, Arc<GenerationManifest>, Option<Arc<[u8]>>) {
-        (self.generation_id, self.manifest, self.metadata)
+    pub fn into_parts(self) -> (String, Arc<GenerationManifest>) {
+        (self.generation_id, self.manifest)
     }
 }
 
@@ -242,14 +150,11 @@ struct BorrowedCommitPayload<'a> {
     version: u32,
     #[serde(borrow)]
     generation_id: &'a str,
-    #[serde(borrow)]
-    publication_metadata: Option<&'a str>,
 }
 
 #[derive(Debug)]
 struct DecodedCommitPayload {
     generation_id: String,
-    publication_metadata: Option<Vec<u8>>,
 }
 
 pub fn load_publication_for_metas(root: &Path, metas: &IndexMeta) -> Result<LoadedPublication> {
@@ -262,11 +167,7 @@ pub fn load_publication_for_metas(root: &Path, metas: &IndexMeta) -> Result<Load
     let loaded = load_materialized_manifest(root, &payload.generation_id, 0)?;
     Ok(LoadedPublication {
         generation_id: payload.generation_id,
-        manifest: loaded.manifest,
-        requires_current_anchor: loaded.requires_current_anchor,
-        metadata: payload
-            .publication_metadata
-            .map(|metadata| Arc::from(metadata.into_boxed_slice())),
+        manifest: loaded,
     })
 }
 
@@ -274,7 +175,7 @@ fn load_materialized_manifest(
     root: &Path,
     generation_id: &str,
     depth: usize,
-) -> Result<MaterializedManifest> {
+) -> Result<Arc<GenerationManifest>> {
     if depth > 128 {
         return Err(IndexError::NonCanonicalManifest);
     }
@@ -291,7 +192,7 @@ fn load_materialized_manifest(
     if let Some(manifest) = cached_manifest(&key)? {
         return Ok(manifest);
     }
-    let (manifest, requires_current_anchor) = if bytes.starts_with(MANIFEST_FLAT_DELTA_PREFIX) {
+    let manifest = if bytes.starts_with(MANIFEST_FLAT_DELTA_PREFIX) {
         let delta: StoredManifestFlatDeltaV1 = serde_json::from_slice(&bytes)?;
         if serde_json::to_vec(&delta)? != bytes
             || delta.storage_format != MANIFEST_FLAT_DELTA_STORAGE
@@ -303,29 +204,26 @@ fn load_materialized_manifest(
         }
         let base = load_materialized_manifest(root, &delta.base_generation_id, depth + 1)?;
         let manifest = materialize_delta(
-            base.manifest.as_ref(),
+            base.as_ref(),
             delta.indexed_documents,
             delta.certified_source_bytes,
             delta.source_count,
             delta.changes,
         )?;
-        (manifest, base.requires_current_anchor)
+        manifest
     } else {
         let stored_version: StoredManifestVersion = serde_json::from_slice(&bytes)?;
-        let (manifest, requires_current_anchor) = match stored_version.manifest_version {
-            GENERATION_MANIFEST_VERSION => {
-                let manifest: GenerationManifest = serde_json::from_slice(&bytes)?;
-                if serde_json::to_vec(&manifest)? != bytes {
-                    return Err(IndexError::NonCanonicalManifest);
-                }
-                (manifest, false)
-            }
-            PREVIOUS_GENERATION_MANIFEST_VERSION => (migrate_previous_manifest_v9(&bytes)?, true),
-            LEGACY_GENERATION_MANIFEST_VERSION => (migrate_previous_manifest_v8(&bytes)?, true),
-            version => return Err(IndexError::UnsupportedManifest(version)),
-        };
+        if stored_version.manifest_version != GENERATION_MANIFEST_VERSION {
+            return Err(IndexError::UnsupportedManifest(
+                stored_version.manifest_version,
+            ));
+        }
+        let manifest: GenerationManifest = serde_json::from_slice(&bytes)?;
+        if serde_json::to_vec(&manifest)? != bytes {
+            return Err(IndexError::NonCanonicalManifest);
+        }
         validate_manifest_contract(&manifest)?;
-        (manifest, requires_current_anchor)
+        manifest
     };
     let manifest = Arc::new(manifest);
     let mut cache = MANIFEST_CACHE
@@ -337,137 +235,13 @@ fn load_materialized_manifest(
         key,
         ManifestCacheEntry {
             manifest: Arc::downgrade(&manifest),
-            requires_current_anchor,
             identity: capture_manifest_identity(root, generation_id)?,
         },
     );
-    Ok(MaterializedManifest {
-        manifest,
-        requires_current_anchor,
-    })
+    Ok(manifest)
 }
 
-fn migrate_previous_manifest_v9(bytes: &[u8]) -> Result<GenerationManifest> {
-    let previous: PreviousGenerationManifestV9 = serde_json::from_slice(bytes)?;
-    if previous.manifest_version != PREVIOUS_GENERATION_MANIFEST_VERSION
-        || serde_json::to_vec(&previous)? != bytes
-    {
-        return Err(IndexError::NonCanonicalManifest);
-    }
-    validate_previous_provider_roots_v9(&previous)?;
-    let mut value = serde_json::to_value(previous)?;
-    let object = value
-        .as_object_mut()
-        .ok_or(IndexError::NonCanonicalManifest)?;
-    object.insert(
-        "manifest_version".to_owned(),
-        serde_json::json!(GENERATION_MANIFEST_VERSION),
-    );
-    let roots = object
-        .get_mut("provider_roots")
-        .and_then(serde_json::Value::as_array_mut)
-        .ok_or(IndexError::NonCanonicalManifest)?;
-    for root in roots {
-        let root = root
-            .as_object_mut()
-            .ok_or(IndexError::NonCanonicalManifest)?;
-        root.insert("exact_source_memberships".to_owned(), serde_json::json!([]));
-        if root.get("source_identity") == Some(&serde_json::json!("released")) {
-            root.insert(
-                "connector_binding".to_owned(),
-                serde_json::json!({
-                    "kind": "released_path_independent_v1",
-                }),
-            );
-        }
-    }
-    Ok(serde_json::from_value(value)?)
-}
-
-fn validate_previous_provider_roots_v9(previous: &PreviousGenerationManifestV9) -> Result<()> {
-    if previous
-        .source_routes
-        .windows(2)
-        .any(|pair| pair[0].route_identity() >= pair[1].route_identity())
-    {
-        return Err(IndexError::NonCanonicalSourceRoutes);
-    }
-    let retained = previous
-        .source_routes
-        .iter()
-        .map(SourceRouteSnapshot::route_identity)
-        .collect::<std::collections::BTreeSet<_>>();
-    if previous
-        .provider_roots
-        .windows(2)
-        .any(|pair| pair[0].definition.id >= pair[1].definition.id)
-    {
-        return Err(IndexError::InvalidProviderRoots(
-            "v9 root definitions are not strictly sorted and unique".to_owned(),
-        ));
-    }
-    let mut owned_routes = std::collections::BTreeSet::new();
-    for root in &previous.provider_roots {
-        if !matches!(
-            root.definition.provider,
-            CaptureProvider::Codex | CaptureProvider::Claude
-        ) {
-            return Err(IndexError::InvalidProviderRoots(format!(
-                "v9 root {} uses a provider outside the public v9 contract",
-                root.definition.id
-            )));
-        }
-        if root.routes.windows(2).any(|pair| pair[0] >= pair[1]) {
-            return Err(IndexError::InvalidProviderRoots(format!(
-                "v9 root {} routes are not strictly sorted and unique",
-                root.definition.id
-            )));
-        }
-        for route in &root.routes {
-            if !retained.contains(route) {
-                return Err(IndexError::ProviderRootRouteNotRetained {
-                    root_id: root.definition.id.clone(),
-                    route_id: route.as_str().to_owned(),
-                });
-            }
-            if !owned_routes.insert(route) {
-                return Err(IndexError::SourceRouteOwnedByMultipleProviderRoots {
-                    route_id: route.as_str().to_owned(),
-                });
-            }
-        }
-    }
-    Ok(())
-}
-
-fn migrate_previous_manifest_v8(bytes: &[u8]) -> Result<GenerationManifest> {
-    let previous: PreviousGenerationManifestV8 = serde_json::from_slice(bytes)?;
-    if previous.manifest_version != LEGACY_GENERATION_MANIFEST_VERSION
-        || serde_json::to_vec(&previous)? != bytes
-    {
-        return Err(IndexError::NonCanonicalManifest);
-    }
-    let mut value = serde_json::to_value(previous)?;
-    let object = value
-        .as_object_mut()
-        .ok_or(IndexError::NonCanonicalManifest)?;
-    object.insert(
-        "manifest_version".to_owned(),
-        serde_json::json!(GENERATION_MANIFEST_VERSION),
-    );
-    object.insert(
-        "automatic_provider_discovery".to_owned(),
-        serde_json::json!(true),
-    );
-    object.insert(
-        "provider_root_config_digest".to_owned(),
-        serde_json::json!(provider_source_config_digest(true, &[])),
-    );
-    object.insert("provider_roots".to_owned(), serde_json::json!([]));
-    Ok(serde_json::from_value(value)?)
-}
-
-fn cached_manifest(key: &ManifestCacheKey) -> Result<Option<MaterializedManifest>> {
+fn cached_manifest(key: &ManifestCacheKey) -> Result<Option<Arc<GenerationManifest>>> {
     let entry = MANIFEST_CACHE
         .get_or_init(|| Mutex::new(BTreeMap::new()))
         .lock()
@@ -483,18 +257,7 @@ fn cached_manifest(key: &ManifestCacheKey) -> Result<Option<MaterializedManifest
     if capture_manifest_identity(&key.0, &key.1)? != entry.identity {
         return Err(IndexError::NonCanonicalManifest);
     }
-    Ok(Some(MaterializedManifest {
-        manifest,
-        requires_current_anchor: entry.requires_current_anchor,
-    }))
-}
-
-fn requires_current_manifest_anchor(root: &Path, generation_id: &str) -> Result<bool> {
-    let key = (root.to_path_buf(), generation_id.to_owned());
-    if let Some(loaded) = cached_manifest(&key)? {
-        return Ok(loaded.requires_current_anchor);
-    }
-    Ok(load_materialized_manifest(root, generation_id, 0)?.requires_current_anchor)
+    Ok(Some(manifest))
 }
 
 fn capture_manifest_identity(root: &Path, generation_id: &str) -> Result<ManifestFileIdentity> {
@@ -619,28 +382,13 @@ fn hex_digest(digest: [u8; 32]) -> String {
         .collect()
 }
 
-pub fn canonical_commit_payload(
-    generation_id: &str,
-    publication_metadata: Option<&[u8]>,
-) -> Result<String> {
+pub fn canonical_commit_payload(generation_id: &str) -> Result<String> {
     if !is_generation_id(generation_id) {
         return Err(IndexError::InvalidGenerationId);
     }
-    let publication_metadata = publication_metadata
-        .map(|metadata| {
-            if metadata.len() > MAX_PUBLICATION_METADATA_BYTES {
-                return Err(IndexError::PublicationMetadataTooLarge {
-                    actual: metadata.len(),
-                    maximum: MAX_PUBLICATION_METADATA_BYTES,
-                });
-            }
-            Ok(STANDARD_NO_PAD.encode(metadata))
-        })
-        .transpose()?;
     Ok(serde_json::to_string(&CommitPayload {
         version: COMMIT_PAYLOAD_VERSION,
         generation_id: generation_id.to_owned(),
-        publication_metadata,
     })?)
 }
 
@@ -658,53 +406,12 @@ fn decode_commit_payload(encoded: &str) -> Result<DecodedCommitPayload> {
     if !is_generation_id(payload.generation_id) {
         return Err(IndexError::InvalidGenerationId);
     }
-    let publication_metadata_decoded_len = payload
-        .publication_metadata
-        .map(|metadata| {
-            let decoded_len = unpadded_base64_decoded_len(metadata.len())?;
-            if decoded_len > MAX_PUBLICATION_METADATA_BYTES {
-                return Err(IndexError::PublicationMetadataTooLarge {
-                    actual: decoded_len,
-                    maximum: MAX_PUBLICATION_METADATA_BYTES,
-                });
-            }
-            Ok(decoded_len)
-        })
-        .transpose()?;
     if serde_json::to_string(&payload)? != encoded {
         return Err(IndexError::NonCanonicalCommitPayload);
     }
-    let publication_metadata = payload
-        .publication_metadata
-        .zip(publication_metadata_decoded_len)
-        .map(|(metadata, decoded_len)| {
-            let decoded = STANDARD_NO_PAD
-                .decode(metadata)
-                .map_err(|_| IndexError::InvalidPublicationMetadataEncoding)?;
-            if decoded.len() != decoded_len {
-                return Err(IndexError::InvalidPublicationMetadataEncoding);
-            }
-            Ok(decoded)
-        })
-        .transpose()?;
     Ok(DecodedCommitPayload {
         generation_id: payload.generation_id.to_owned(),
-        publication_metadata,
     })
-}
-
-fn unpadded_base64_decoded_len(encoded_len: usize) -> Result<usize> {
-    let trailing = match encoded_len % 4 {
-        0 => 0,
-        2 => 1,
-        3 => 2,
-        _ => return Err(IndexError::InvalidPublicationMetadataEncoding),
-    };
-    encoded_len
-        .checked_div(4)
-        .and_then(|groups| groups.checked_mul(3))
-        .and_then(|prefix| prefix.checked_add(trailing))
-        .ok_or(IndexError::CountOverflow)
 }
 
 pub fn reconcile_commit_error(
@@ -761,7 +468,7 @@ pub fn write_manifest(
 ) -> Result<()> {
     if manifest_path(root, generation_id).is_file() {
         let retained = load_materialized_manifest(root, generation_id, 0)?;
-        if serde_json::to_vec(retained.manifest.as_ref())? == serde_json::to_vec(manifest)? {
+        if serde_json::to_vec(retained.as_ref())? == serde_json::to_vec(manifest)? {
             return Ok(());
         }
         return Err(IndexError::NonCanonicalManifest);
@@ -787,12 +494,6 @@ pub fn prepare_successor_manifest(
     let Some((base_generation_id, base)) = base else {
         return full();
     };
-    // V9 understands the same versionless delta envelope. Reusing a migrated
-    // descriptor, or anchoring a delta on it, would therefore bypass the
-    // intentional v10 downgrade boundary.
-    if requires_current_manifest_anchor(root, base_generation_id)? {
-        return full();
-    }
     if manifest.exact_snapshot_eq(base) {
         return Ok(PreparedManifest {
             generation_id: base_generation_id.to_owned(),
@@ -817,6 +518,7 @@ pub fn prepare_successor_manifest(
         || base.lexical_schema_version != manifest.lexical_schema_version
         || base.lexical_analyzer_version != manifest.lexical_analyzer_version
         || base.policy_schema_hash != manifest.policy_schema_hash
+        || base.generation_state() != manifest.generation_state()
         || base.automatic_provider_discovery() != manifest.automatic_provider_discovery()
         || base.provider_root_config_digest() != manifest.provider_root_config_digest()
         || base.provider_roots() != manifest.provider_roots()
@@ -940,7 +642,6 @@ pub fn write_prepared_manifest(root: &Path, manifest: &PreparedManifest) -> Resu
         key,
         ManifestCacheEntry {
             manifest: Arc::downgrade(&manifest.materialized),
-            requires_current_anchor: false,
             identity: capture_manifest_identity(root, &manifest.generation_id)?,
         },
     );

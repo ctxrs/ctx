@@ -11,88 +11,6 @@ pub fn exclusive_scan_stage_duration(
     scan_stage_duration.saturating_sub(commit_duration)
 }
 
-pub(super) struct PublicationMetadataEvidence<'a> {
-    pub(super) committed_rejection_diagnostics: &'a [SourceBackedRefreshRecordRejection],
-    pub(super) route_observations: BTreeMap<SourceRouteIdentity, String>,
-    pub(super) route_controls: BTreeMap<SourceRouteIdentity, Vec<u8>>,
-}
-
-pub(super) struct EncodedPublicationMetadata {
-    pub(super) bytes: Vec<u8>,
-    pub(super) metadata: SourceBackedPublicationMetadata,
-}
-
-pub(super) fn encode_publication_metadata(
-    request_id: &str,
-    operation: RefreshOperation,
-    scope: &SourceBackedRefreshScope,
-    previous_generation: Option<&str>,
-    publication: &SourceBackedRefreshPublication,
-    evidence: PublicationMetadataEvidence<'_>,
-) -> Result<EncodedPublicationMetadata> {
-    let terminal = SourceBackedRefreshReceipt::from_verified_publication(
-        previous_generation.map(str::to_owned),
-        publication.generation_id.clone(),
-        publication,
-    )?;
-    let metadata = SourceBackedPublicationMetadata {
-        version: SOURCE_REFRESH_PUBLICATION_METADATA_VERSION,
-        request_id: request_id.to_owned(),
-        operation,
-        refresh_scope: scope.clone(),
-        receipt: terminal,
-        route_observations: evidence.route_observations,
-        route_controls: evidence.route_controls,
-    };
-    let mut committed_rejection_diagnostics = evidence.committed_rejection_diagnostics.to_vec();
-    loop {
-        let ledger_json = rejection_diagnostics_ledger_json(&committed_rejection_diagnostics)?;
-        match metadata.encode_with_committed_rejection_diagnostics(&ledger_json) {
-            Ok(bytes) => {
-                return Ok(EncodedPublicationMetadata { bytes, metadata });
-            }
-            Err(IndexError::PublicationMetadataTooLarge { .. })
-                if committed_rejection_diagnostics.pop().is_some() => {}
-            Err(error) => return Err(error.into()),
-        }
-    }
-}
-
-pub(super) fn publication_from_verified_metadata(
-    request_id: &str,
-    operation: RefreshOperation,
-    scope: &SourceBackedRefreshScope,
-    timings: SourceBackedRefreshTimings,
-    metadata: SourceBackedPublicationMetadata,
-    verified_index: Arc<VerifiedIndex>,
-) -> Result<SourceBackedRefreshPublication> {
-    if metadata.request_id != request_id
-        || metadata.operation != operation
-        || metadata.refresh_scope != *scope
-    {
-        bail!("published Core source-refresh metadata does not match its exact request");
-    }
-    let receipt = metadata.receipt.clone();
-    let unsupported_routes = receipt
-        .route_results
-        .iter()
-        .filter(|result| result.outcome.failure_class() == Some("incompatible"))
-        .count();
-    Ok(SourceBackedRefreshPublication {
-        generation_id: receipt.published_generation,
-        published_explicit_source_catalog: receipt.published_explicit_source_catalog,
-        unsupported_routes,
-        certified_source_count: receipt.current.source_count,
-        certified_source_bytes: receipt.current.certified_source_bytes,
-        current: receipt.current,
-        route_results: receipt.route_results,
-        zero_source_authority: receipt.zero_source_authority,
-        catalog_route_bindings: receipt.catalog_route_bindings,
-        timings,
-        verified_publication: Some(VerifiedCorePublication::bind(metadata, verified_index)?),
-    })
-}
-
 /// Replays only rejection evidence already authenticated by the retained
 /// generation and still backed by an identical source certificate. Automatic
 /// route identities may change while a source is carried unchanged, so source
@@ -101,29 +19,18 @@ pub(super) fn preserve_carried_rejection_diagnostics(
     route_results: &mut [SourceBackedRefreshRouteResult],
     snapshot: &(impl ImmutableCaptureSnapshot + ?Sized),
     retained_generation: Option<&VerifiedIndex>,
-    retained_metadata: Option<&SourceBackedPublicationMetadata>,
-    retained_diagnostics: Option<&[SourceBackedRefreshRecordRejection]>,
 ) -> Result<Vec<SourceBackedRefreshRecordRejection>> {
     let authority = current_rejection_authority(snapshot)?;
-    let (previous_diagnostics, stable_sources) = match (retained_generation, retained_metadata) {
-        (Some(retained_generation), Some(metadata)) => {
-            let previous = &metadata.receipt;
-            if previous.published_generation != retained_generation.generation_id() {
-                bail!("carried Core rejection diagnostics do not match the retained generation");
-            }
+    let (previous_diagnostics, stable_sources) = match retained_generation {
+        Some(retained_generation) => {
+            let state =
+                SourceBackedGenerationState::decode_from_verified_index(retained_generation)?;
             (
-                retained_diagnostics.map(<[_]>::to_vec).unwrap_or_else(|| {
-                    previous
-                        .route_results
-                        .iter()
-                        .filter(|result| result.outcome.is_success())
-                        .flat_map(|result| result.rejection_diagnostics.iter().cloned())
-                        .collect()
-                }),
+                state.committed_rejection_diagnostics().to_vec(),
                 stable_source_identities(snapshot, retained_generation),
             )
         }
-        _ => (Vec::new(), BTreeSet::new()),
+        None => (Vec::new(), BTreeSet::new()),
     };
     let current_diagnostics = route_results
         .iter()
@@ -274,7 +181,7 @@ fn build_committed_rejection_ledger(
     Ok(ledger)
 }
 
-fn rejection_diagnostics_ledger_json(
+pub(crate) fn rejection_diagnostics_ledger_json(
     diagnostics: &[SourceBackedRefreshRecordRejection],
 ) -> Result<Value> {
     let mut by_route = BTreeMap::<String, SourceBackedRefreshRouteResult>::new();
@@ -694,104 +601,6 @@ mod carried_rejection_tests {
                 .map(|rejection| (rejection.source_identity.as_str(), rejection.line))
                 .collect::<Vec<_>>(),
             vec![(source_a.as_str(), 2), (source_b.as_str(), 1)]
-        );
-    }
-
-    #[test]
-    fn metadata_size_truncation_is_deterministic_and_does_not_revive_evidence() {
-        let route_identity = "a".repeat(64);
-        let source_identity = "b".repeat(64);
-        let route = SourceRouteIdentity::from_sha256(route_identity.clone()).unwrap();
-        let diagnostics = (1..=64)
-            .map(|line| {
-                let mut rejection = rejection(&source_identity, line);
-                rejection.source_selector = "s".repeat(512);
-                rejection.payload_type = "p".repeat(128);
-                rejection.detail = "d".repeat(512);
-                rejection
-            })
-            .collect::<Vec<_>>();
-        let mut result = SourceBackedRefreshRouteResult::succeeded(route_identity.clone(), false);
-        result.rejected_record_total = diagnostics.len() as u64;
-        result.rejection_diagnostics = diagnostics.clone();
-        let publication = SourceBackedRefreshPublication {
-            generation_id: "c".repeat(64),
-            published_explicit_source_catalog: None,
-            unsupported_routes: 0,
-            certified_source_count: 1,
-            certified_source_bytes: 1,
-            current: SourceBackedRefreshCurrent {
-                source_count: 1,
-                complete_records: diagnostics.len() as u64,
-                rejected_records: diagnostics.len() as u64,
-                certified_source_bytes: 1,
-                sources_with_rejections: 1,
-                ..SourceBackedRefreshCurrent::default()
-            },
-            route_results: vec![result],
-            zero_source_authority: Vec::new(),
-            catalog_route_bindings: Vec::new(),
-            timings: SourceBackedRefreshTimings::default(),
-            verified_publication: None,
-        };
-        let encode = || {
-            encode_publication_metadata(
-                "metadata-ledger-size-test",
-                RefreshOperation::Refresh,
-                &SourceBackedRefreshScope::exact([route.clone()]),
-                Some(&publication.generation_id),
-                &publication,
-                PublicationMetadataEvidence {
-                    committed_rejection_diagnostics: &diagnostics,
-                    route_observations: BTreeMap::new(),
-                    route_controls: BTreeMap::from([(
-                        route.clone(),
-                        vec![0; MAX_SOURCE_BACKED_ROUTE_CONTROL_BYTES],
-                    )]),
-                },
-            )
-            .unwrap()
-        };
-
-        let first = encode();
-        let second = encode();
-        assert_eq!(first.bytes, second.bytes);
-        let encoded: Value = serde_json::from_slice(&first.bytes).unwrap();
-        let persisted = required_route_results(
-            encoded.get(crate::metadata::COMMITTED_REJECTION_DIAGNOSTICS_FIELD),
-        )
-        .unwrap()
-        .into_iter()
-        .flat_map(|result| result.rejection_diagnostics)
-        .collect::<Vec<_>>();
-        assert!(!persisted.is_empty());
-        assert!(persisted.len() < diagnostics.len());
-
-        let authority = CurrentRejectionAuthority {
-            sources: HashMap::from([(
-                source_identity.clone(),
-                RejectionSourceAuthority {
-                    route_identity: route_identity.clone(),
-                    capacity: diagnostics.len() as u64,
-                },
-            )]),
-        };
-        let carried = build_committed_rejection_ledger(
-            &[],
-            &persisted,
-            &BTreeSet::from([source_identity]),
-            &authority,
-        )
-        .unwrap();
-        assert_eq!(carried, persisted);
-        assert!(!carried.iter().any(|rejection| rejection.line == 64));
-        let mut next = SourceBackedRefreshRouteResult::succeeded(route_identity, false);
-        next.rejected_record_total = diagnostics.len() as u64;
-        carry_route_rejection_diagnostics(&mut next, &carried, &authority).unwrap();
-        assert_eq!(next.rejection_diagnostics, persisted);
-        assert_eq!(
-            next.rejected_record_total - next.rejection_diagnostics.len() as u64,
-            (diagnostics.len() - persisted.len()) as u64
         );
     }
 }

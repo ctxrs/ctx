@@ -20,44 +20,13 @@ impl SourceBackedRefreshReceipt {
         published_generation: String,
         publication: &SourceBackedRefreshPublication,
     ) -> Result<Self> {
-        let receipt = Self {
-            generation_changed: previous_generation.as_deref()
-                != Some(published_generation.as_str()),
-            previous_generation,
-            published_generation,
-            published_explicit_source_catalog: publication
-                .published_explicit_source_catalog
-                .clone(),
-            current: publication.current,
-            route_results: publication.route_results.clone(),
-            zero_source_authority: publication.zero_source_authority.clone(),
-            catalog_route_bindings: publication.catalog_route_bindings.clone(),
-        };
-        receipt.validate(None)?;
-        if serde_json::to_vec(&receipt.to_json()).map_or(true, |json| {
-            json.len() > SOURCE_REFRESH_RECEIPT_JSON_BUDGET_BYTES
-        }) {
-            bail!("terminal Core publication cannot fit its bounded exact receipt");
-        }
-        Ok(receipt)
-    }
-
-    /// Validates this typed receipt against an optional exact Core pin.
-    #[doc(hidden)]
-    pub fn validate(&self, verified_index: Option<&VerifiedIndex>) -> Result<()> {
-        if self.published_generation.is_empty()
-            || self.generation_changed
-                != (self.previous_generation.as_deref() != Some(self.published_generation.as_str()))
-        {
-            bail!("terminal Core publication has inconsistent generation identity");
-        }
-        if self.route_results.len() > SOURCE_REFRESH_TERMINAL_ROUTE_LIMIT {
+        if publication.route_results.len() > SOURCE_REFRESH_TERMINAL_ROUTE_LIMIT {
             bail!(
                 "terminal Core publication exceeds the bounded route-result limit of {SOURCE_REFRESH_TERMINAL_ROUTE_LIMIT}"
             );
         }
         let mut routes = BTreeMap::new();
-        for result in &self.route_results {
+        for result in &publication.route_results {
             SourceRouteIdentity::from_sha256(result.route_identity.clone())
                 .context("validate terminal route-result identity")?;
             if routes
@@ -76,7 +45,8 @@ impl SourceBackedRefreshReceipt {
             result.validate_source_failures()?;
         }
         let _source_failure_total =
-            self.route_results
+            publication
+                .route_results
                 .iter()
                 .try_fold(0_usize, |total, result| {
                     total
@@ -86,33 +56,35 @@ impl SourceBackedRefreshReceipt {
                         })
                 })?;
         let rejected_record_total =
-            self.route_results.iter().try_fold(0_u64, |total, result| {
-                total
-                    .checked_add(result.rejected_record_total)
-                    .ok_or_else(|| {
-                        anyhow!("terminal Core publication rejected-record total overflow")
-                    })
-            })?;
-        if rejected_record_total > self.current.rejected_records {
+            publication
+                .route_results
+                .iter()
+                .try_fold(0_u64, |total, result| {
+                    total
+                        .checked_add(result.rejected_record_total)
+                        .ok_or_else(|| {
+                            anyhow!("terminal Core publication rejected-record total overflow")
+                        })
+                })?;
+        if rejected_record_total > publication.current.rejected_records {
             bail!("terminal Core publication route rejections exceed the committed generation");
         }
-        let expected_lineages = self
+        let expected_lineages = publication
             .published_explicit_source_catalog
             .as_ref()
             .map(ExplicitSourceCatalogAuthority::route_lineages)
             .unwrap_or_default();
-        let actual_lineages = self
+        let actual_lineages = publication
             .catalog_route_bindings
             .iter()
             .map(|binding| binding.catalog_lineage.clone())
             .collect::<BTreeSet<_>>();
-        if actual_lineages.len() != self.catalog_route_bindings.len()
+        if actual_lineages.len() != publication.catalog_route_bindings.len()
             || !expected_lineages.is_subset(&actual_lineages)
-            || self.catalog_route_bindings.iter().any(|binding| {
-                !is_sha256_identity(&binding.catalog_lineage)
-                    || SourceRouteIdentity::from_sha256(binding.route_identity.clone()).is_err()
+            || publication.catalog_route_bindings.iter().any(|binding| {
+                SourceRouteIdentity::from_sha256(binding.route_identity.clone()).is_err()
             })
-            || self.catalog_route_bindings.iter().any(|binding| {
+            || publication.catalog_route_bindings.iter().any(|binding| {
                 !expected_lineages.contains(&binding.catalog_lineage)
                     && !routes
                         .get(binding.route_identity.as_str())
@@ -128,50 +100,32 @@ impl SourceBackedRefreshReceipt {
                 "terminal Core publication has incomplete or inconsistent catalog lineage bindings"
             );
         }
-        if let Some(verified) = verified_index {
-            if self.published_generation != verified.generation_id() {
-                bail!("terminal Core publication does not match its verified generation");
-            }
-            let manifest = verified.manifest();
-            let verified_current = SourceBackedRefreshCurrent::from_sources(
-                &manifest.sources,
-                self.current.removed_source_count,
-            )?;
-            if self.current != verified_current {
-                bail!(
-                    "published daemon source refresh receipt does not match the verified current generation"
-                );
-            }
-            let retained = manifest
-                .source_routes()
-                .iter()
-                .map(|route| route.route_identity().as_str())
-                .collect::<BTreeSet<_>>();
-            if self.catalog_route_bindings.iter().any(|binding| {
-                if expected_lineages.contains(&binding.catalog_lineage) {
-                    return !retained.contains(binding.route_identity.as_str());
-                }
-                !self.route_results.iter().any(|result| {
-                    result.route_identity == binding.route_identity
-                        && matches!(
-                            result.outcome,
-                            SourceBackedRefreshRouteOutcome::Failed {
-                                carried_forward,
-                                ..
-                            } if carried_forward == retained.contains(binding.route_identity.as_str())
-                        )
-                })
-            }) {
-                bail!("terminal Core publication catalog binding is neither a retained witness nor a consistent request failure");
-            }
-        }
         crate::receipt_parse::validate_zero_source_authority(
-            &self.published_generation,
-            self.current.source_count,
-            &self.route_results,
-            &self.zero_source_authority,
+            &published_generation,
+            publication.current.source_count,
+            &publication.route_results,
+            &publication.zero_source_authority,
             false,
-        )
+        )?;
+        let receipt = Self {
+            generation_changed: previous_generation.as_deref()
+                != Some(published_generation.as_str()),
+            previous_generation,
+            published_generation,
+            published_explicit_source_catalog: publication
+                .published_explicit_source_catalog
+                .clone(),
+            current: publication.current,
+            route_results: publication.route_results.clone(),
+            zero_source_authority: publication.zero_source_authority.clone(),
+            catalog_route_bindings: publication.catalog_route_bindings.clone(),
+        };
+        if serde_json::to_vec(&receipt.to_json()).map_or(true, |json| {
+            json.len() > SOURCE_REFRESH_RECEIPT_JSON_BUDGET_BYTES
+        }) {
+            bail!("terminal Core publication cannot fit its bounded exact receipt");
+        }
+        Ok(receipt)
     }
 
     pub fn terminal_outcome(&self) -> &'static str {

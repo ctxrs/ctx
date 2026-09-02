@@ -1,7 +1,7 @@
 //! Filesystem mutation and digest-authenticated transfer of validated clone plans.
 
 use std::{
-    fs::{File, Permissions},
+    fs::Permissions,
     io::{Read, Write},
     path::Path,
 };
@@ -12,8 +12,8 @@ use super::{
     open_bound_file,
     planning::{PlannedFile, ValidatedClonePlan},
     resource::admit_available_bytes,
-    support::{clone_checkpoint, record_clone_metrics, PortableCloneStage},
-    validate_named_file, BoundDirectory, FileIdentity, PermissionIdentity,
+    support::{clone_checkpoint, PortableCloneStage},
+    BoundDirectory, PermissionIdentity,
 };
 use crate::{
     certification::{
@@ -24,93 +24,6 @@ use crate::{
     ActiveGenerationPointer, CandidatePhysicalProof, CertifiedPhysicalIntegrity,
     GenerationError as IndexError, Result,
 };
-
-pub(super) fn clone_files(
-    generations: &BoundDirectory,
-    source_name: &Path,
-    source: &BoundDirectory,
-    destination_name: &Path,
-    destination: &BoundDirectory,
-    plan: &ValidatedClonePlan,
-) -> Result<()> {
-    let mut copied_bytes = 0_u64;
-    for planned in plan.files() {
-        source.validate_child_binding(generations, source_name)?;
-        clone_checkpoint(PortableCloneStage::BeforeCopy, planned.path())?;
-        if planned.path() == Path::new(MANAGED_FILE) {
-            destination.validate_child_binding(generations, destination_name)?;
-            let copied =
-                write_authenticated_plan_bytes(destination, planned, plan.managed_bytes())?;
-            copied_bytes = copied_bytes
-                .checked_add(copied)
-                .ok_or(IndexError::CountOverflow)?;
-            clone_checkpoint(PortableCloneStage::AfterCopy, planned.path())?;
-            continue;
-        }
-        let mut source_file = planned.open(source)?;
-        clone_checkpoint(PortableCloneStage::AfterSourceOpen, planned.path())?;
-        destination.validate_child_binding(generations, destination_name)?;
-        let mut destination_file = super::platform::create_regular_file_at(
-            &destination.file,
-            &destination.path,
-            planned.path(),
-        )?;
-
-        let remaining_allowance = plan.logical_bytes().checked_sub(copied_bytes).ok_or(
-            IndexError::CurrentRepublishByteLimit {
-                actual: copied_bytes,
-                maximum: plan.logical_bytes(),
-            },
-        )?;
-        let (copied, source_digest) = copy_with_digest(
-            &mut source_file,
-            &mut destination_file,
-            planned.identity().bytes,
-            remaining_allowance,
-        )?;
-        destination_file.flush()?;
-        destination_file.set_permissions(candidate_permissions(planned.permissions()))?;
-        destination_file.sync_all()?;
-        if copied != planned.identity().bytes {
-            return Err(IndexError::CurrentRepublishSourceTopology(
-                "copy byte count does not match authenticated source",
-            ));
-        }
-        copied_bytes = copied_bytes
-            .checked_add(copied)
-            .ok_or(IndexError::CountOverflow)?;
-        if copied_bytes > MAX_REPUBLISH_CLONE_BYTES || copied_bytes > plan.logical_bytes() {
-            return Err(IndexError::CurrentRepublishByteLimit {
-                actual: copied_bytes,
-                maximum: plan.logical_bytes().min(MAX_REPUBLISH_CLONE_BYTES),
-            });
-        }
-
-        planned.validate_open_and_named(source, &source_file)?;
-        let destination_opened = open_bound_file(destination, planned.path())?;
-        if destination_opened.identity.bytes != planned.identity().bytes
-            || destination_opened.identity.permissions
-                != candidate_permission_identity(planned.identity().permissions)
-        {
-            return Err(IndexError::CurrentRepublishSourceTopology(
-                "copied file metadata does not match authenticated source",
-            ));
-        }
-        let destination_digest = digest_exact_file(
-            destination,
-            planned.path(),
-            &destination_opened.identity,
-            destination_opened.file,
-        )?;
-        if destination_digest != source_digest {
-            return Err(IndexError::ChecksumMismatch);
-        }
-        clone_checkpoint(PortableCloneStage::AfterCopy, planned.path())?;
-        drop(destination_file);
-    }
-    record_clone_metrics(copied_bytes, plan.files().len());
-    Ok(())
-}
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn clone_candidate_files(
@@ -344,46 +257,6 @@ fn copy_with_digest<R: Read, W: Write>(
         ));
     }
     Ok((copied, digest.finalize().into()))
-}
-
-fn digest_exact_file(
-    directory: &BoundDirectory,
-    relative: &Path,
-    expected: &FileIdentity,
-    mut file: File,
-) -> Result<[u8; 32]> {
-    let mut digest = Sha256::new();
-    let mut read_bytes = 0_u64;
-    let mut buffer = [0_u8; 64 * 1024];
-    while read_bytes < expected.bytes {
-        let remaining = expected.bytes - read_bytes;
-        let read_limit = usize::try_from(remaining.min(buffer.len() as u64))
-            .map_err(|_| IndexError::CountOverflow)?;
-        let read = file.read(&mut buffer[..read_limit])?;
-        if read == 0 {
-            return Err(IndexError::CurrentRepublishSourceTopology(
-                "copied file truncated during verification",
-            ));
-        }
-        digest.update(&buffer[..read]);
-        read_bytes = read_bytes
-            .checked_add(read as u64)
-            .ok_or(IndexError::CountOverflow)?;
-    }
-    let mut growth_probe = [0_u8; 1];
-    if file.read(&mut growth_probe)? != 0 {
-        return Err(IndexError::CurrentRepublishSourceTopology(
-            "copied file grew during verification",
-        ));
-    }
-    let actual = FileIdentity::from_file(&file)?;
-    if &actual != expected {
-        return Err(IndexError::CurrentRepublishSourceTopology(
-            "copied file changed during verification",
-        ));
-    }
-    validate_named_file(directory, relative, expected)?;
-    Ok(digest.finalize().into())
 }
 
 #[cfg(test)]

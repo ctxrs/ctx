@@ -23,8 +23,9 @@ impl PublishedSourceBackedStatePort for TestPublishedState {
         if !index_root.is_dir() {
             return Ok(PublishedSourceBackedState {
                 verified_index: None,
-                publication_metadata: None,
-                committed_rejection_diagnostics: None,
+                explicit_source_catalog: None,
+                catalog_route_bindings: Vec::new(),
+                route_controls: BTreeMap::new(),
             });
         }
         let verified_index = match VerifiedIndex::open_pinned(&index_root) {
@@ -37,23 +38,22 @@ impl PublishedSourceBackedStatePort for TestPublishedState {
             }
             Err(error) => return Err(error.into()),
         };
-        let (publication_metadata, committed_rejection_diagnostics) = match verified_index
-            .as_ref()
-            .filter(|index| index.publication_metadata().is_some())
-        {
-            Some(index) => {
-                let (metadata, diagnostics) =
-                    SourceBackedPublicationMetadata::decode_with_committed_rejection_diagnostics(
-                        index,
-                    )?;
-                (Some(metadata), diagnostics)
-            }
-            None => (None, None),
-        };
+        let (explicit_source_catalog, catalog_route_bindings, route_controls) =
+            if let Some(index) = verified_index.as_ref() {
+                let state = SourceBackedGenerationState::decode_from_verified_index(index)?;
+                (
+                    state.applied_explicit_source_catalog().cloned(),
+                    state.catalog_route_bindings().to_vec(),
+                    state.route_controls().clone(),
+                )
+            } else {
+                (None, Vec::new(), BTreeMap::new())
+            };
         Ok(PublishedSourceBackedState {
             verified_index,
-            publication_metadata,
-            committed_rejection_diagnostics,
+            explicit_source_catalog,
+            catalog_route_bindings,
+            route_controls,
         })
     }
 }
@@ -354,27 +354,12 @@ fn publish_pin_source(index_root: &Path, source: SourceKey) -> String {
     writer.commit(|_| true).unwrap().generation_id
 }
 
-#[test]
-fn watch_catalog_reconstruction_uses_bounded_open_and_no_deep_logical_pass() {
-    let temp = tempfile::tempdir().unwrap();
-    let data_root = temp.path().join("data");
-    let index_root = source_backed_index_root(&data_root);
-    publish_pin_source(&index_root, publication_pin_source_with_anchor(0x99));
-    let (_, _, discovery) = discovery_fixture(&temp.path().join("discovery"));
-
-    // This unit target intentionally depends on the production index library,
-    // where the exhaustive `VerifiedIndex::open` oracle does not exist. The
-    // watch-catalog path therefore cannot compile if it becomes reachable from
-    // a deep logical open again.
-    source_backed_watch_catalog(&data_root, &discovery).unwrap();
-}
-
 fn test_publication(generation_id: impl Into<String>) -> SourceBackedRefreshPublication {
     SourceBackedRefreshPublication {
         route_results: Vec::new(),
         zero_source_authority: Vec::new(),
         catalog_route_bindings: Vec::new(),
-        verified_publication: None,
+        verified_index: None,
         generation_id: generation_id.into(),
         published_explicit_source_catalog: None,
         unsupported_routes: 0,
@@ -393,227 +378,18 @@ fn test_publication(generation_id: impl Into<String>) -> SourceBackedRefreshPubl
 }
 
 #[test]
-fn query_readiness_accepts_nonempty_generation_without_metadata() {
+fn watch_catalog_reconstruction_uses_bounded_open_and_no_deep_logical_pass() {
     let temp = tempfile::tempdir().unwrap();
-    let generation_id = publish_pin_source(temp.path(), publication_pin_source_with_anchor(0x95));
-    let verified = VerifiedIndex::open_pinned(temp.path()).unwrap();
+    let data_root = temp.path().join("data");
+    let index_root = source_backed_index_root(&data_root);
+    publish_pin_source(&index_root, publication_pin_source_with_anchor(0x99));
+    let (_, _, discovery) = discovery_fixture(&temp.path().join("discovery"));
 
-    assert_eq!(verified.generation_id(), generation_id);
-    assert!(verified.publication_metadata().is_none());
-    assert_eq!(
-        verify_generation_query_readiness(&verified).unwrap(),
-        GenerationQueryReadiness::Ready
-    );
-}
-
-#[test]
-fn query_readiness_decodes_metadata_before_certifying_generation() {
-    let temp = tempfile::tempdir().unwrap();
-    let generation_id = publish_pin_source(temp.path(), publication_pin_source_with_anchor(0x96));
-    let publication = test_publication(generation_id.clone());
-    let receipt = SourceBackedRefreshReceipt::from_verified_publication(
-        None,
-        generation_id.clone(),
-        &publication,
-    )
-    .unwrap();
-    let encoded = SourceBackedPublicationMetadata {
-        version: SOURCE_REFRESH_PUBLICATION_METADATA_VERSION,
-        request_id: "query-readiness-metadata".to_owned(),
-        operation: RefreshOperation::Refresh,
-        refresh_scope: SourceBackedRefreshScope::All,
-        receipt,
-        route_observations: BTreeMap::new(),
-        route_controls: BTreeMap::new(),
-    }
-    .encode()
-    .unwrap();
-    let writer = GenerationWriter::open(temp.path(), WriterOptions::default())
-        .unwrap()
-        .into_writer()
-        .unwrap();
-    let verified = writer
-        .republish_current_publication_metadata(&generation_id, encoded)
-        .unwrap();
-
-    assert!(verified.publication_metadata().is_some());
-    assert_eq!(
-        verify_generation_query_readiness(&verified).unwrap(),
-        GenerationQueryReadiness::Ready
-    );
-
-    let mut invalid_metadata: Value =
-        serde_json::from_slice(verified.publication_metadata().unwrap()).unwrap();
-    invalid_metadata["version"] = json!(99);
-    drop(verified);
-    let writer = GenerationWriter::open(temp.path(), WriterOptions::default())
-        .unwrap()
-        .into_writer()
-        .unwrap();
-    let invalid = writer
-        .republish_current_publication_metadata(
-            &generation_id,
-            serde_json::to_vec(&invalid_metadata).unwrap(),
-        )
-        .unwrap();
-    assert!(format!(
-        "{:#}",
-        verify_generation_query_readiness(&invalid).unwrap_err()
-    )
-    .contains("unsupported Core source-refresh publication metadata version"));
-}
-
-#[test]
-fn publication_metadata_versions_preserve_receipt_shape_and_gate_the_v4_ledger() {
-    let temp = tempfile::tempdir().unwrap();
-    let generation_id = publish_pin_source(temp.path(), publication_pin_source_with_anchor(0x98));
-    let publication = test_publication(generation_id.clone());
-    let receipt = SourceBackedRefreshReceipt::from_verified_publication(
-        None,
-        generation_id.clone(),
-        &publication,
-    )
-    .unwrap();
-    let route_identity = "11".repeat(32);
-    let source_identity = "22".repeat(32);
-    let ledger = json!({
-        (&route_identity): [
-            "s",
-            false,
-            0,
-            0,
-            [],
-            1,
-            [[
-                source_identity,
-                "qwen_code",
-                "/tmp/qwen.jsonl",
-                3,
-                "message",
-                "m",
-                "invalid shape"
-            ]]
-        ]
-    });
-    let metadata = SourceBackedPublicationMetadata {
-        version: SOURCE_REFRESH_PUBLICATION_METADATA_VERSION,
-        request_id: "metadata-version-ledger".to_owned(),
-        operation: RefreshOperation::Refresh,
-        refresh_scope: SourceBackedRefreshScope::All,
-        receipt: receipt.clone(),
-        route_observations: BTreeMap::new(),
-        route_controls: BTreeMap::new(),
-    };
-    let current = metadata
-        .encode_with_committed_rejection_diagnostics(&ledger)
-        .unwrap();
-    let republish = |bytes: Vec<u8>| {
-        let writer = GenerationWriter::open(temp.path(), WriterOptions::default())
-            .unwrap()
-            .into_writer()
-            .unwrap();
-        writer
-            .republish_current_publication_metadata(&generation_id, bytes)
-            .unwrap()
-    };
-
-    let verified = republish(current.clone());
-    let (decoded, decoded_ledger) =
-        SourceBackedPublicationMetadata::decode_with_committed_rejection_diagnostics(&verified)
-            .unwrap();
-    assert_eq!(decoded.version, SOURCE_REFRESH_PUBLICATION_METADATA_VERSION);
-    assert_eq!(decoded_ledger.unwrap().len(), 1);
-    assert_eq!(decoded.receipt, receipt);
-    assert!(decoded
-        .receipt
-        .to_json()
-        .get(crate::metadata::COMMITTED_REJECTION_DIAGNOSTICS_FIELD)
-        .is_none());
-    drop(verified);
-
-    for version in [1_u64, 2, 3] {
-        let mut legacy: Value = serde_json::from_slice(&current).unwrap();
-        legacy["version"] = json!(version);
-        legacy
-            .as_object_mut()
-            .unwrap()
-            .remove(crate::metadata::COMMITTED_REJECTION_DIAGNOSTICS_FIELD);
-        if version < 3 {
-            legacy.as_object_mut().unwrap().remove("route_controls");
-        }
-        if version == 1 {
-            legacy["receipt"]
-                .as_object_mut()
-                .unwrap()
-                .remove("zero_source_authority");
-        }
-        let verified = republish(serde_json::to_vec(&legacy).unwrap());
-        let (decoded, decoded_ledger) =
-            SourceBackedPublicationMetadata::decode_with_committed_rejection_diagnostics(&verified)
-                .unwrap();
-        assert_eq!(decoded.version, version);
-        assert!(decoded_ledger.is_none());
-        drop(verified);
-    }
-
-    for mutation in ["missing", "unknown"] {
-        let mut invalid: Value = serde_json::from_slice(&current).unwrap();
-        if mutation == "missing" {
-            invalid
-                .as_object_mut()
-                .unwrap()
-                .remove(crate::metadata::COMMITTED_REJECTION_DIAGNOSTICS_FIELD);
-        } else {
-            invalid["unexpected"] = json!(true);
-        }
-        let verified = republish(serde_json::to_vec(&invalid).unwrap());
-        assert!(format!(
-            "{:#}",
-            SourceBackedPublicationMetadata::decode(&verified).unwrap_err()
-        )
-        .contains("unknown or missing fields"));
-        drop(verified);
-    }
-}
-
-#[test]
-fn persisted_metadata_rejects_malformed_route_identity() {
-    let temp = tempfile::tempdir().unwrap();
-    let generation_id = publish_pin_source(temp.path(), publication_pin_source_with_anchor(0x97));
-    let publication = test_publication(generation_id.clone());
-    let receipt = SourceBackedRefreshReceipt::from_verified_publication(
-        None,
-        generation_id.clone(),
-        &publication,
-    )
-    .unwrap();
-    let encoded = SourceBackedPublicationMetadata {
-        version: SOURCE_REFRESH_PUBLICATION_METADATA_VERSION,
-        request_id: "malformed-route-metadata".to_owned(),
-        operation: RefreshOperation::Refresh,
-        refresh_scope: SourceBackedRefreshScope::All,
-        receipt,
-        route_observations: BTreeMap::new(),
-        route_controls: BTreeMap::new(),
-    }
-    .encode()
-    .unwrap();
-    let mut persisted: Value = serde_json::from_slice(&encoded).unwrap();
-    persisted["receipt"]["route_results"] = json!({"AB".repeat(32): ["s", false]});
-
-    let writer = GenerationWriter::open(temp.path(), WriterOptions::default())
-        .unwrap()
-        .into_writer()
-        .unwrap();
-    let verified = writer
-        .republish_current_publication_metadata(
-            &generation_id,
-            serde_json::to_vec(&persisted).unwrap(),
-        )
-        .unwrap();
-    let error = SourceBackedPublicationMetadata::decode(&verified).unwrap_err();
-
-    assert!(format!("{error:#}").contains("route identity is invalid"));
+    // This unit target intentionally depends on the production index library,
+    // where the exhaustive `VerifiedIndex::open` oracle does not exist. The
+    // watch-catalog path therefore cannot compile if it becomes reachable from
+    // a deep logical open again.
+    source_backed_watch_catalog(&data_root, &discovery).unwrap();
 }
 
 #[path = "tests/execution_path.rs"]

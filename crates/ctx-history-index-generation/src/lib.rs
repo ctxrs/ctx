@@ -20,26 +20,23 @@ mod retention;
 
 #[cfg(windows)]
 pub use certification::{acquire_terminal_publication_guard, TerminalPublicationGuard};
+pub use certification::{
+    cache_recertified_physical_integrity, certify_activated_generation,
+    certify_candidate_physical_integrity, reclaim_unreferenced_certifications,
+    scrub_and_certify_physical_integrity, verify_candidate_physical_integrity_read_only,
+    verify_certified_physical_integrity, verify_or_certify_physical_integrity,
+    verify_physical_integrity_read_only, ActiveGenerationPointerFence, CertifiedPhysicalIntegrity,
+};
 #[cfg(any(test, feature = "test-support"))]
 pub use certification::{
     certification_file_for_active, MAX_CERTIFICATION_BYTES, MAX_CERTIFIED_ARTIFACTS,
-};
-pub use certification::{
-    certify_activated_generation, certify_candidate_physical_integrity,
-    reclaim_unreferenced_certifications, scrub_and_certify_physical_integrity,
-    verify_candidate_physical_integrity_read_only, verify_certified_physical_integrity,
-    verify_or_certify_physical_integrity, verify_physical_integrity_read_only,
-    ActiveGenerationPointerFence, CertifiedPhysicalIntegrity,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use clone::{
     candidate_clone_metrics, reset_candidate_clone_metrics, CandidateCloneMetrics,
     PortableCloneMetrics, PortableCloneStage, PortableCloneTestGuard, PortableCloneTestOptions,
 };
-pub use clone::{
-    create_authenticated_candidate_generation, create_authenticated_republish_candidate,
-    CandidateActivationFence, RepublishCandidate,
-};
+pub use clone::{create_authenticated_candidate_generation, CandidateActivationFence};
 #[cfg(all(
     any(test, feature = "test-support"),
     any(target_os = "linux", target_os = "macos")

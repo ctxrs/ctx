@@ -583,7 +583,6 @@ fn index_error_is_corruption(error: &IndexError) -> bool {
             | IndexError::MissingActiveGenerationPointer
             | IndexError::InvalidActiveGenerationPointer
             | IndexError::NonCanonicalCommitPayload
-            | IndexError::InvalidPublicationMetadataEncoding
             | IndexError::UnboundIndexState
             | IndexError::PinnedGenerationMismatch { .. }
             | IndexError::MissingManifest(_)
@@ -697,7 +696,6 @@ pub(super) fn new_refresh_attempt(
         certified_source_count: None,
         certified_source_bytes: None,
         receipt: None,
-        publication_receipt: None,
         route_observations: BTreeMap::new(),
         automatic_retry_checkpoints: BTreeMap::new(),
         timings: None,

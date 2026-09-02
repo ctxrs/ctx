@@ -20,7 +20,7 @@ fn core_search_consumes_the_coordinator_pin_after_active_generation_pointer_dele
     let temp = tempdir().unwrap();
     write_test_generation(temp.path());
     let requested_mode = Cell::new(None);
-    let pin = crate::semantic::pin_active_verified_generation(temp.path()).unwrap();
+    let pin = ctx_daemon_cli::pin_active_verified_generation(temp.path()).unwrap();
     let outcome = refresh_for_search_with(
         &request(RefreshArg::Off),
         RefreshArg::Off,

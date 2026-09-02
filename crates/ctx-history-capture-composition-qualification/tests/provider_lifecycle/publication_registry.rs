@@ -15,7 +15,9 @@ use ctx_history_core::{
     CoreRecord, EventIdentityInput, NativeItemKey, ScannedSourceCounts, SourceAnchor,
     SourceInventoryObservation, SourceKey, SourceObservation, TypedKey,
 };
-use ctx_history_index::{AppliedProviderRoot, IndexError, VerifiedIndex, WriterOptions};
+use ctx_history_index::{
+    AppliedProviderRoot, GenerationStateEnvelope, IndexError, VerifiedIndex, WriterOptions,
+};
 use ctx_history_provider_gemini::GEMINI_CLI_SOURCE_FORMAT;
 use tempfile::tempdir;
 
@@ -766,14 +768,14 @@ fn logical_all_publication_withdraws_removed_root_without_deleting_history() {
 
     let receipt = SourceBackedRefreshExecutor::new(current_registry, WriterOptions::default())
         .with_base_route_controls(BTreeMap::from([(work_id.clone(), b"work".to_vec())]))
-        .refresh_physical_scope_with_detailed_progress_publication_metadata_reconciliation_and_worksets(
+        .refresh_physical_scope_with_detailed_progress_generation_state_reconciliation_and_worksets(
             temp.path(),
             SourceBackedRefreshScope::exact([personal_id.clone()]),
             SourceBackedRefreshScope::All,
             SourceBackedReconciliationDemand::Exhaustive,
             BTreeMap::new(),
             |_| Ok(()),
-            |_| Ok(Vec::new()),
+            |_| GenerationStateEnvelope::new("ctx.test.empty.v1", Vec::new()),
         )
         .unwrap();
     assert!(receipt.route_controls.is_empty());
