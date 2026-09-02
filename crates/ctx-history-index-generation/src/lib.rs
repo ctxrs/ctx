@@ -55,8 +55,8 @@ pub use error::{GenerationError, Result};
 #[cfg(windows)]
 pub use generation::publish_active_generation_pointer_validated_predecessor_fence;
 pub use generation::{
-    create_candidate_generation, lexical_index_settings, load_active_generation_pointer,
-    open_slot_index, publish_active_generation_pointer,
+    create_candidate_generation, lexical_index_settings, load_active_generation_id_from_read_root,
+    load_active_generation_pointer, open_slot_index, publish_active_generation_pointer,
     publish_active_generation_pointer_validated, reclaim_inactive_generation_directories,
     slot_path, sync_directory, sync_generation, ActiveGenerationPointer, CandidateGeneration,
     GenerationSlot, PointerPublicationOutcome,
