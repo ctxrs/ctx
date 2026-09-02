@@ -10,6 +10,8 @@ use std::{
 
 use super::{bind_test_ctx_binary, ctx, TempDir};
 
+const ANALYTICS_OUTBOX_FILE: &str = "analytics-outbox-v1.json";
+
 pub(crate) struct SourceRefreshDaemon {
     child: Option<Child>,
 }
@@ -33,6 +35,26 @@ pub(crate) fn start_source_refresh_daemon(
     data_root: &Path,
     home: &Path,
     state: &Path,
+) -> SourceRefreshDaemon {
+    start_source_refresh_daemon_inner(temp, data_root, home, state, None)
+}
+
+pub(crate) fn start_source_refresh_daemon_with_analytics(
+    temp: &TempDir,
+    data_root: &Path,
+    home: &Path,
+    state: &Path,
+    endpoint: &str,
+) -> SourceRefreshDaemon {
+    start_source_refresh_daemon_inner(temp, data_root, home, state, Some(endpoint))
+}
+
+fn start_source_refresh_daemon_inner(
+    temp: &TempDir,
+    data_root: &Path,
+    home: &Path,
+    state: &Path,
+    analytics_endpoint: Option<&str>,
 ) -> SourceRefreshDaemon {
     fs::create_dir_all(data_root).unwrap();
     fs::write(
@@ -62,6 +84,11 @@ pub(crate) fn start_source_refresh_daemon(
         .env("CTX_DAEMON_MODE", "source-refresh-only")
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
+    if let Some(endpoint) = analytics_endpoint {
+        command
+            .env("CTX_ANALYTICS_ENABLED", "true")
+            .env("CTX_ANALYTICS_ENDPOINT", endpoint);
+    }
     let child = command
         .spawn()
         .unwrap_or_else(|error| panic!("start isolated source-refresh daemon: {error}"));
@@ -81,12 +108,17 @@ pub(crate) fn start_source_refresh_daemon(
                 .unwrap();
             panic!("source-refresh daemon exited before becoming ready ({exit}): {stderr}");
         }
-        let status = ctx(temp)
+        let mut status_command = ctx(temp);
+        status_command
             .args(["daemon", "status", "--format=json"])
             .env("CTX_DATA_ROOT", data_root)
             .env("HOME", home)
             .env("XDG_STATE_HOME", state)
-            .env("LOCALAPPDATA", state)
+            .env("LOCALAPPDATA", state);
+        if analytics_endpoint.is_some() {
+            status_command.env("CTX_ANALYTICS_DRY_RUN", "1");
+        }
+        let status = status_command
             .output()
             .ok()
             .filter(|output| output.status.success())
@@ -95,7 +127,8 @@ pub(crate) fn start_source_refresh_daemon(
             status["daemon"]["running"] == true
                 && status["daemon"]["core_refresh_endpoint"]["available"] == true
         }) {
-            ctx(temp)
+            let mut warm_import = ctx(temp);
+            warm_import
                 .args([
                     "import",
                     "--all",
@@ -107,9 +140,11 @@ pub(crate) fn start_source_refresh_daemon(
                 .env("CTX_DATA_ROOT", data_root)
                 .env("HOME", home)
                 .env("XDG_STATE_HOME", state)
-                .env("LOCALAPPDATA", state)
-                .assert()
-                .success();
+                .env("LOCALAPPDATA", state);
+            if analytics_endpoint.is_some() {
+                warm_import.env("CTX_ANALYTICS_DRY_RUN", "1");
+            }
+            warm_import.assert().success();
             return daemon;
         }
         assert!(
@@ -118,6 +153,53 @@ pub(crate) fn start_source_refresh_daemon(
         );
         std::thread::sleep(Duration::from_millis(25));
     }
+}
+
+/// Spawn the persistent source-refresh daemon with analytics enabled, without
+/// using a foreground status/import probe. The delivered sink itself is the
+/// readiness oracle for daemon-owned uploader tests.
+pub(crate) fn spawn_source_refresh_daemon_with_analytics(
+    temp: &TempDir,
+    data_root: &Path,
+    home: &Path,
+    state: &Path,
+    endpoint: &str,
+) -> SourceRefreshDaemon {
+    fs::create_dir_all(data_root).unwrap();
+    fs::write(
+        data_root.join("config.toml"),
+        "[daemon]\nenabled = true\nmode = \"source-refresh-only\"\n\n[search]\nsemantic = false\n",
+    )
+    .unwrap();
+    bind_test_ctx_binary(temp);
+    let prepared = ctx(temp);
+    let mut command = StdCommand::new(prepared.get_program());
+    for (name, value) in prepared.get_envs() {
+        match value {
+            Some(value) => {
+                command.env(name, value);
+            }
+            None => {
+                command.env_remove(name);
+            }
+        }
+    }
+    command
+        .args(["daemon", "run", "--force", "--loop-interval-seconds", "600"])
+        .env("CTX_DATA_ROOT", data_root)
+        .env("HOME", home)
+        .env("XDG_STATE_HOME", state)
+        .env("LOCALAPPDATA", state)
+        .env("CTX_ANALYTICS_ENABLED", "true")
+        .env("CTX_ANALYTICS_ENDPOINT", endpoint)
+        .env("CTX_UPGRADE_AUTO", "off")
+        .env("CTX_DAEMON_MODE", "source-refresh-only")
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    let child = command
+        .spawn()
+        .unwrap_or_else(|error| panic!("start analytics source-refresh daemon: {error}"));
+    SourceRefreshDaemon { child: Some(child) }
 }
 
 pub(crate) const CAPABILITY_PROPERTY_KEYS: [&str; 5] = [
@@ -129,11 +211,135 @@ pub(crate) const CAPABILITY_PROPERTY_KEYS: [&str; 5] = [
 ];
 
 pub(crate) fn read_analytics_events(path: &Path) -> Vec<Value> {
-    fs::read_to_string(path)
-        .unwrap()
-        .lines()
+    match fs::read_to_string(path) {
+        Ok(body) => parse_analytics_sink(&body),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            read_queued_analytics_events(&hermetic_temp_root(path))
+        }
+        Err(error) => panic!("read analytics sink {}: {error}", path.display()),
+    }
+}
+
+pub(crate) fn read_delivered_analytics_events(path: &Path) -> Vec<Value> {
+    let body = fs::read_to_string(path).unwrap_or_else(|error| {
+        panic!("read delivered analytics sink {}: {error}", path.display())
+    });
+    parse_analytics_sink(&body)
+}
+
+pub(crate) fn read_analytics_operation_payloads(path: &Path) -> Vec<Value> {
+    let mut payloads = match fs::read_to_string(path) {
+        Ok(body) => parse_analytics_sink(&body),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => panic!("read analytics sink {}: {error}", path.display()),
+    };
+    payloads.extend(read_queued_analytics_events(&hermetic_temp_root(path)));
+    let mut seen = BTreeSet::new();
+    payloads
+        .into_iter()
+        .filter(|payload| {
+            payload["events"].as_array().is_some_and(|events| {
+                events.iter().any(|event| {
+                    event["event_name"] == "operation_completed" && event["surface"] == "cli"
+                })
+            })
+        })
+        .filter(|payload| seen.insert(serde_json::to_string(payload).unwrap()))
+        .collect()
+}
+
+fn parse_analytics_sink(body: &str) -> Vec<Value> {
+    body.lines()
+        .filter(|line| !line.trim().is_empty())
         .map(|line| serde_json::from_str(line).unwrap())
         .collect()
+}
+
+pub(crate) fn analytics_outbox_paths(root: &Path) -> Vec<PathBuf> {
+    fn visit(directory: &Path, outboxes: &mut Vec<PathBuf>) {
+        let entries = fs::read_dir(directory).unwrap_or_else(|error| {
+            panic!(
+                "inspect hermetic analytics root {}: {error}",
+                directory.display()
+            )
+        });
+        for entry in entries {
+            let entry = entry.unwrap_or_else(|error| {
+                panic!(
+                    "inspect analytics entry under {}: {error}",
+                    directory.display()
+                )
+            });
+            let file_type = entry.file_type().unwrap_or_else(|error| {
+                panic!("inspect analytics path {}: {error}", entry.path().display())
+            });
+            if file_type.is_symlink() {
+                continue;
+            }
+            if file_type.is_dir() {
+                visit(&entry.path(), outboxes);
+            } else if file_type.is_file() && entry.file_name() == ANALYTICS_OUTBOX_FILE {
+                outboxes.push(entry.path());
+            }
+        }
+    }
+
+    let mut outboxes = Vec::new();
+    if root.is_dir() {
+        visit(root, &mut outboxes);
+    }
+    outboxes.sort();
+    outboxes
+}
+
+pub(crate) fn read_queued_analytics_events(root: &Path) -> Vec<Value> {
+    let mut payloads = Vec::new();
+    for outbox in analytics_outbox_paths(root) {
+        let state: Value =
+            serde_json::from_slice(&fs::read(&outbox).unwrap_or_else(|error| {
+                panic!("read analytics outbox {}: {error}", outbox.display())
+            }))
+            .unwrap_or_else(|error| panic!("parse analytics outbox {}: {error}", outbox.display()));
+        let entries = state["entries"]
+            .as_array()
+            .unwrap_or_else(|| panic!("analytics outbox has no entries array: {state:#}"));
+        for entry in entries {
+            let body = entry
+                .get("payload")
+                .or_else(|| entry.get("body"))
+                .unwrap_or_else(|| panic!("analytics outbox entry has no payload body: {entry:#}"));
+            let payload = match body {
+                Value::String(body) => serde_json::from_str(body).unwrap_or_else(|error| {
+                    panic!(
+                        "parse queued analytics payload in {}: {error}",
+                        outbox.display()
+                    )
+                }),
+                Value::Object(_) => body.clone(),
+                _ => panic!("analytics outbox payload is not JSON text: {entry:#}"),
+            };
+            payloads.push(payload);
+        }
+    }
+    payloads
+}
+
+fn hermetic_temp_root(path: &Path) -> PathBuf {
+    path.ancestors()
+        .find(|ancestor| {
+            ancestor
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("ctx-search-mvp-"))
+        })
+        .or_else(|| path.ancestors().find(|ancestor| ancestor.is_dir()))
+        .unwrap_or_else(|| {
+            panic!(
+                "analytics sink has no searchable hermetic root: {}",
+                path.display()
+            )
+        })
+        .to_path_buf()
 }
 
 pub(crate) fn analytics_event_properties(event: &Value) -> &serde_json::Map<String, Value> {
@@ -151,6 +357,23 @@ pub(crate) fn analytics_cli_event(event: &Value) -> &Value {
             })
         })
         .unwrap_or_else(|| panic!("analytics batch has no CLI operation event: {event:#}"))
+}
+
+pub(crate) fn analytics_operation_event_id(
+    payloads: &[Value],
+    operation: &str,
+) -> Option<uuid::Uuid> {
+    payloads
+        .iter()
+        .filter_map(|payload| payload["events"].as_array())
+        .flatten()
+        .find(|event| {
+            event["event_name"] == "operation_completed"
+                && event["surface"] == "cli"
+                && event["operation"] == operation
+        })
+        .and_then(|event| event["event_id"].as_str())
+        .and_then(|event_id| uuid::Uuid::parse_str(event_id).ok())
 }
 
 pub(crate) fn assert_operation_event(event: &Value, operation: &str, outcome: &str) {

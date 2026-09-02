@@ -350,7 +350,8 @@ pub trait CoreGenerationPublishedPort: Sync {
 pub trait DaemonObservationPort: Sync {
     fn provider_refresh_event(&self, job: &Value, successor_pending: bool)
         -> Option<PublicEventV1>;
-    fn deliver(&self, data_root: &Path, events: &[PublicEventV1]);
+    fn append(&self, data_root: &Path, events: &[PublicEventV1]);
+    fn append_and_upload(&self, data_root: &Path, events: &[PublicEventV1]);
 }
 
 pub struct DaemonServicePorts<'a, C: ?Sized, A: ?Sized, I, N: ?Sized, O: ?Sized> {

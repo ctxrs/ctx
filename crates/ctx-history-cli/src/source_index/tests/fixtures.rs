@@ -76,6 +76,13 @@ impl ctx_daemon_cli::DaemonCliHost for BuiltinSemanticTestHost {
     ) {
     }
 
+    fn upload_daemon_events(
+        &self,
+        _data_root: &Path,
+        _events: &[ctx_client_observability::analytics::PublicEventV1],
+    ) {
+    }
+
     fn fetch_to_writer(
         &self,
         _endpoint: &str,

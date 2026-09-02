@@ -131,21 +131,21 @@ fn product_telemetry(data_root: PathBuf) -> McpTelemetry {
     let enabled = initial_config
         .as_ref()
         .is_some_and(|config| config.analytics.enabled);
-    if let Some(config) = initial_config
+    if initial_config
         .as_ref()
-        .filter(|config| !config.analytics.enabled)
+        .is_some_and(|config| !config.analytics.enabled)
     {
-        crate::analytics::send_batch(&data_root, config, &[]);
+        crate::analytics::send_batch(&data_root, &[]);
     }
     McpTelemetry::start(enabled, move |events: &[PublicEventV1]| {
         let Ok(config) = config::AppConfig::load(&data_root) else {
             return Ok(());
         };
         if !config.analytics.enabled {
-            crate::analytics::send_batch(&data_root, &config, &[]);
+            crate::analytics::send_batch(&data_root, &[]);
             return Ok(());
         }
-        crate::analytics::send_batch(&data_root, &config, events);
+        crate::analytics::send_batch(&data_root, events);
         Ok(())
     })
 }

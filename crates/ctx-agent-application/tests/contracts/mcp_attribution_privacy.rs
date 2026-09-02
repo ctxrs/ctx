@@ -320,11 +320,18 @@ fn mcp_activity_is_searchable_but_stays_out_of_analytics_usage_and_diagnostics()
     );
     command_output_omits_canaries("progress diagnostics", &progress);
 
-    assert!(analytics_path.is_file(), "analytics sink was not exercised");
-    let analytics = fs::read(&analytics_path).unwrap();
-    assert!(!analytics.is_empty(), "analytics sink emitted no events");
-    assert_bytes_omit_canaries("analytics sink", &analytics);
-    let analytics_events = read_analytics_events(&analytics_path);
+    let analytics_outboxes = analytics_outbox_paths(temp.path());
+    assert!(
+        !analytics_outboxes.is_empty(),
+        "analytics outbox was not exercised"
+    );
+    for outbox in &analytics_outboxes {
+        assert_bytes_omit_canaries(
+            &format!("analytics outbox {}", outbox.display()),
+            &fs::read(outbox).unwrap(),
+        );
+    }
+    let analytics_events = read_queued_analytics_events(temp.path());
     assert!(analytics_events.len() >= 6, "{analytics_events:#?}");
     let operations = analytics_events
         .iter()

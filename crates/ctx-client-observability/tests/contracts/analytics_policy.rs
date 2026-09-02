@@ -1,5 +1,6 @@
 mod support;
 
+use std::net::TcpListener;
 use support::*;
 
 #[test]
@@ -99,6 +100,72 @@ fn analytics_config_opt_out_suppresses_delivery() {
         "disabled analytics should not create a capability marker"
     );
     assert_no_capability_state(temp.path(), &state);
+}
+
+#[test]
+fn analytics_opt_out_purges_a_backlogged_outbox_without_connecting() {
+    let temp = tempdir();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let home = temp.path().join("home");
+    let state = temp.path().join("state");
+    let data_root = data_root(&temp);
+    fs::create_dir_all(&home).unwrap();
+
+    ctx(&temp)
+        .arg("doctor")
+        .env("CTX_DATA_ROOT", &data_root)
+        .env("HOME", &home)
+        .env("XDG_STATE_HOME", &state)
+        .env("LOCALAPPDATA", &state)
+        .env("CTX_ANALYTICS_ENABLED", "true")
+        .env("CTX_ANALYTICS_ENDPOINT", &endpoint)
+        .env("CTX_UPGRADE_AUTO", "off")
+        .assert()
+        .success();
+    assert!(
+        listener
+            .accept()
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::WouldBlock),
+        "foreground analytics enqueue attempted an endpoint connection"
+    );
+    let outboxes = analytics_outbox_paths(temp.path());
+    assert_eq!(outboxes.len(), 1, "expected one backlogged outbox");
+    assert!(outboxes[0].is_file());
+    assert!(
+        analytics_operation_event_id(&read_queued_analytics_events(temp.path()), "doctor")
+            .is_some()
+    );
+
+    fs::write(
+        data_root.join("config.toml"),
+        "[analytics]\nenabled = false\n",
+    )
+    .unwrap();
+    ctx(&temp)
+        .arg("doctor")
+        .env("CTX_DATA_ROOT", &data_root)
+        .env("HOME", &home)
+        .env("XDG_STATE_HOME", &state)
+        .env("LOCALAPPDATA", &state)
+        .env("CTX_ANALYTICS_ENABLED", "true")
+        .env("CTX_ANALYTICS_ENDPOINT", &endpoint)
+        .env("CTX_UPGRADE_AUTO", "off")
+        .assert()
+        .success();
+
+    assert!(
+        listener
+            .accept()
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::WouldBlock),
+        "analytics opt-out attempted an endpoint connection"
+    );
+    assert!(
+        !outboxes[0].exists(),
+        "analytics opt-out must purge the preexisting outbox"
+    );
+    assert!(analytics_outbox_paths(temp.path()).is_empty());
 }
 
 #[test]

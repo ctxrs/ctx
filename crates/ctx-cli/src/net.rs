@@ -2,7 +2,7 @@ use std::{
     fs,
     fs::OpenOptions,
     io::{Read, Seek, Write},
-    net::Ipv4Addr,
+    net::{Ipv4Addr, SocketAddr, ToSocketAddrs as _},
     path::PathBuf,
     time::{Duration, Instant},
 };
@@ -12,13 +12,58 @@ use url::{Host, Url};
 
 use crate::analytics::AnalyticsDeliveryFailureClass;
 
-pub(crate) const TELEMETRY_HTTP_TIMEOUT: Duration = Duration::from_millis(250);
+#[cfg(test)]
+const TELEMETRY_HTTP_TIMEOUT: Duration = Duration::from_millis(250);
 pub(crate) const DAEMON_TELEMETRY_HTTP_TIMEOUT: Duration = Duration::from_secs(2);
+const TELEMETRY_MAX_RETRY_AFTER: Duration = Duration::from_secs(60 * 60);
 const MAX_ARTIFACT_REDIRECTS: usize = 5;
+
+#[derive(Clone, Copy)]
+struct DeadlineResolver {
+    timeout: Duration,
+}
+
+impl ureq::Resolver for DeadlineResolver {
+    fn resolve(&self, netloc: &str) -> std::io::Result<Vec<SocketAddr>> {
+        resolve_with_timeout(netloc, self.timeout, |netloc| {
+            netloc.to_socket_addrs().map(Iterator::collect)
+        })
+    }
+}
+
+fn resolve_with_timeout<F>(
+    netloc: &str,
+    timeout: Duration,
+    resolve: F,
+) -> std::io::Result<Vec<SocketAddr>>
+where
+    F: FnOnce(&str) -> std::io::Result<Vec<SocketAddr>> + Send + 'static,
+{
+    let netloc = netloc.to_owned();
+    let (send, receive) = std::sync::mpsc::sync_channel(1);
+    std::thread::Builder::new()
+        .name("ctx-telemetry-dns".to_owned())
+        .spawn(move || {
+            let result = resolve(&netloc);
+            let _ = send.send(result);
+        })
+        .map_err(|error| std::io::Error::other(format!("start telemetry resolver: {error}")))?;
+    receive.recv_timeout(timeout).map_err(|error| match error {
+        std::sync::mpsc::RecvTimeoutError::Timeout => std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "telemetry DNS resolution timed out",
+        ),
+        std::sync::mpsc::RecvTimeoutError::Disconnected => {
+            std::io::Error::other("telemetry DNS resolver stopped without a result")
+        }
+    })?
+}
 
 #[derive(Debug)]
 pub(crate) struct TelemetryPostError {
     class: AnalyticsDeliveryFailureClass,
+    retryable: bool,
+    retry_after: Option<Duration>,
     source: anyhow::Error,
 }
 
@@ -27,9 +72,32 @@ impl TelemetryPostError {
         self.class
     }
 
-    fn new(class: AnalyticsDeliveryFailureClass, source: impl Into<anyhow::Error>) -> Self {
+    pub(crate) fn retryable(&self) -> bool {
+        self.retryable
+    }
+
+    pub(crate) fn retry_after(&self) -> Option<Duration> {
+        self.retry_after
+    }
+
+    fn permanent(class: AnalyticsDeliveryFailureClass, source: impl Into<anyhow::Error>) -> Self {
         Self {
             class,
+            retryable: false,
+            retry_after: None,
+            source: source.into(),
+        }
+    }
+
+    fn retry(
+        class: AnalyticsDeliveryFailureClass,
+        retry_after: Option<Duration>,
+        source: impl Into<anyhow::Error>,
+    ) -> Self {
+        Self {
+            class,
+            retryable: true,
+            retry_after,
             source: source.into(),
         }
     }
@@ -57,8 +125,22 @@ pub(crate) fn post_telemetry_json_with_timeout(
     body: &[u8],
     timeout: Duration,
 ) -> std::result::Result<(), TelemetryPostError> {
+    post_telemetry_json_with_timeout_at(
+        endpoint,
+        body,
+        timeout,
+        ctx_history_core::utc_now().timestamp(),
+    )
+}
+
+fn post_telemetry_json_with_timeout_at(
+    endpoint: &str,
+    body: &[u8],
+    timeout: Duration,
+    now_epoch_seconds: i64,
+) -> std::result::Result<(), TelemetryPostError> {
     let file_path = file_url_path(endpoint).map_err(|error| {
-        TelemetryPostError::new(AnalyticsDeliveryFailureClass::Configuration, error)
+        TelemetryPostError::permanent(AnalyticsDeliveryFailureClass::Configuration, error)
     })?;
     if let Some(path) = file_path {
         let mut file = OpenOptions::new()
@@ -67,45 +149,119 @@ pub(crate) fn post_telemetry_json_with_timeout(
             .open(&path)
             .with_context(|| format!("open {}", path.display()))
             .map_err(|error| {
-                TelemetryPostError::new(AnalyticsDeliveryFailureClass::LocalIo, error)
+                TelemetryPostError::retry(AnalyticsDeliveryFailureClass::LocalIo, None, error)
             })?;
         file.write_all(body).map_err(|error| {
-            TelemetryPostError::new(AnalyticsDeliveryFailureClass::LocalIo, error)
+            TelemetryPostError::retry(AnalyticsDeliveryFailureClass::LocalIo, None, error)
         })?;
         file.write_all(b"\n").map_err(|error| {
-            TelemetryPostError::new(AnalyticsDeliveryFailureClass::LocalIo, error)
+            TelemetryPostError::retry(AnalyticsDeliveryFailureClass::LocalIo, None, error)
+        })?;
+        file.flush().map_err(|error| {
+            TelemetryPostError::retry(AnalyticsDeliveryFailureClass::LocalIo, None, error)
         })?;
         return Ok(());
     }
     require_https_or_localhost(endpoint).map_err(|error| {
-        TelemetryPostError::new(AnalyticsDeliveryFailureClass::Configuration, error)
+        TelemetryPostError::permanent(AnalyticsDeliveryFailureClass::Configuration, error)
     })?;
-    let result = ureq::post(endpoint)
+    let agent = ureq::AgentBuilder::new()
+        .redirects(0)
+        .try_proxy_from_env(false)
+        .resolver(DeadlineResolver { timeout })
+        .build();
+    let response = match agent
+        .post(endpoint)
         // ureq applies this overall deadline to connection establishment too
-        // when no separate connect timeout overrides it.
+        // and carries the same deadline into response-body reads.
         .timeout(timeout)
         .set("content-type", "application/json")
-        .send_bytes(body);
-    match result {
-        Ok(_) => Ok(()),
-        Err(error) => {
-            let class = match &error {
-                ureq::Error::Status(429, _) => AnalyticsDeliveryFailureClass::RateLimited,
-                ureq::Error::Status(status, _) if (400..500).contains(status) => {
-                    AnalyticsDeliveryFailureClass::ClientRejection
-                }
-                ureq::Error::Status(status, _) if (500..600).contains(status) => {
-                    AnalyticsDeliveryFailureClass::Server
-                }
-                ureq::Error::Status(_, _) => AnalyticsDeliveryFailureClass::Unknown,
-                ureq::Error::Transport(_) => AnalyticsDeliveryFailureClass::Transport,
-            };
-            Err(TelemetryPostError::new(
-                class,
+        .send_bytes(body)
+    {
+        Ok(response) => response,
+        Err(ureq::Error::Status(_, response)) => response,
+        Err(error @ ureq::Error::Transport(_)) => {
+            return Err(TelemetryPostError::retry(
+                AnalyticsDeliveryFailureClass::Transport,
+                None,
                 anyhow!("POST {endpoint}: {error}"),
-            ))
+            ));
+        }
+    };
+    let status = response.status();
+    let retry_after = response
+        .header("retry-after")
+        .and_then(|value| parse_retry_after(value, now_epoch_seconds));
+    if let Some(error) = telemetry_status_error(endpoint, status, retry_after) {
+        return Err(error);
+    }
+    consume_telemetry_response(response).map_err(|error| {
+        TelemetryPostError::retry(
+            AnalyticsDeliveryFailureClass::Transport,
+            retry_after,
+            anyhow!("POST {endpoint}: consume response body: {error}"),
+        )
+    })?;
+    Ok(())
+}
+
+fn telemetry_status_error(
+    endpoint: &str,
+    status: u16,
+    retry_after: Option<Duration>,
+) -> Option<TelemetryPostError> {
+    match status {
+        200..=299 => None,
+        408 => Some(TelemetryPostError::retry(
+            AnalyticsDeliveryFailureClass::Transport,
+            retry_after,
+            anyhow!("POST {endpoint}: HTTP {status}"),
+        )),
+        429 => Some(TelemetryPostError::retry(
+            AnalyticsDeliveryFailureClass::RateLimited,
+            retry_after,
+            anyhow!("POST {endpoint}: HTTP {status}"),
+        )),
+        500..=599 => Some(TelemetryPostError::retry(
+            AnalyticsDeliveryFailureClass::Server,
+            retry_after,
+            anyhow!("POST {endpoint}: HTTP {status}"),
+        )),
+        400..=499 => Some(TelemetryPostError::permanent(
+            AnalyticsDeliveryFailureClass::ClientRejection,
+            anyhow!("POST {endpoint}: HTTP {status}"),
+        )),
+        _ => Some(TelemetryPostError::permanent(
+            AnalyticsDeliveryFailureClass::Unknown,
+            anyhow!("POST {endpoint}: HTTP {status}"),
+        )),
+    }
+}
+
+fn consume_telemetry_response(response: ureq::Response) -> std::io::Result<()> {
+    let mut reader = response.into_reader();
+    let mut buffer = [0_u8; 8 * 1024];
+    loop {
+        if reader.read(&mut buffer)? == 0 {
+            return Ok(());
         }
     }
+}
+
+fn parse_retry_after(value: &str, now_epoch_seconds: i64) -> Option<Duration> {
+    let value = value.trim();
+    if let Ok(seconds) = value.parse::<u64>() {
+        return Some(Duration::from_secs(
+            seconds.min(TELEMETRY_MAX_RETRY_AFTER.as_secs()),
+        ));
+    }
+    let retry_at = chrono::DateTime::parse_from_rfc2822(value)
+        .ok()?
+        .timestamp();
+    let seconds = retry_at.saturating_sub(now_epoch_seconds).max(0) as u64;
+    Some(Duration::from_secs(
+        seconds.min(TELEMETRY_MAX_RETRY_AFTER.as_secs()),
+    ))
 }
 
 pub fn get_bytes_limited(endpoint: &str, max_bytes: usize) -> Result<Vec<u8>> {
@@ -468,9 +624,75 @@ fn is_localhost_host(host: Host<&str>) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::{net::TcpListener, sync::mpsc, thread};
+    use std::{
+        io::{Read as _, Write as _},
+        net::TcpListener,
+        sync::mpsc,
+        thread,
+    };
 
     use super::*;
+
+    pub(super) fn consume_http_request(stream: &mut std::net::TcpStream) {
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        loop {
+            let count = stream.read(&mut buffer).unwrap();
+            assert!(count != 0, "client closed before completing its request");
+            request.extend_from_slice(&buffer[..count]);
+            assert!(request.len() <= 64 * 1024, "test request exceeded bound");
+            let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n") else {
+                continue;
+            };
+            let body_start = header_end + 4;
+            let headers = std::str::from_utf8(&request[..header_end]).unwrap();
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().unwrap())
+                })
+                .unwrap_or(0);
+            if request.len() >= body_start + content_length {
+                return;
+            }
+        }
+    }
+
+    fn telemetry_response(
+        status: u16,
+        retry_after: Option<&str>,
+    ) -> std::result::Result<(), TelemetryPostError> {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let retry_after = retry_after
+            .map(|value| format!("Retry-After: {value}\r\n"))
+            .unwrap_or_default();
+        let location = if (300..400).contains(&status) {
+            "Location: http://127.0.0.1/elsewhere\r\n"
+        } else {
+            ""
+        };
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            consume_http_request(&mut stream);
+            write!(
+                stream,
+                "HTTP/1.1 {status} Test\r\nContent-Length: 0\r\n{retry_after}{location}Connection: close\r\n\r\n"
+            )
+            .unwrap();
+            stream.flush().unwrap();
+        });
+        let result = post_telemetry_json_with_timeout_at(
+            &format!("http://{address}/events"),
+            b"{}",
+            Duration::from_secs(5),
+            1_800_000_000,
+        );
+        server.join().unwrap();
+        result
+    }
 
     #[test]
     fn file_urls_must_be_absolute_local_paths() {
@@ -514,6 +736,54 @@ mod tests {
                 .class(),
             AnalyticsDeliveryFailureClass::Configuration
         );
+        assert!(!post_telemetry_json("http://example.com/events", b"{}")
+            .unwrap_err()
+            .retryable());
+    }
+
+    #[test]
+    fn telemetry_statuses_distinguish_retryable_and_permanent_rejections() {
+        assert!(telemetry_response(204, None).is_ok());
+        for (status, class) in [
+            (408, AnalyticsDeliveryFailureClass::Transport),
+            (429, AnalyticsDeliveryFailureClass::RateLimited),
+            (503, AnalyticsDeliveryFailureClass::Server),
+        ] {
+            let error = telemetry_response(status, None).unwrap_err();
+            assert_eq!(error.class(), class, "HTTP {status}");
+            assert!(error.retryable(), "HTTP {status}");
+        }
+        for status in [302, 400, 401, 422] {
+            let error = telemetry_response(status, None).unwrap_err();
+            assert!(!error.retryable(), "HTTP {status}");
+        }
+    }
+
+    #[test]
+    fn retry_after_accepts_delta_and_http_date_and_clamps_both() {
+        assert_eq!(
+            parse_retry_after("120", 1_800_000_000),
+            Some(Duration::from_secs(120))
+        );
+        assert_eq!(
+            parse_retry_after("999999999999", 1_800_000_000),
+            Some(TELEMETRY_MAX_RETRY_AFTER)
+        );
+        let retry_at = chrono::DateTime::parse_from_rfc2822("Wed, 02 Sep 2026 12:01:00 GMT")
+            .unwrap()
+            .timestamp();
+        assert_eq!(
+            parse_retry_after("Wed, 02 Sep 2026 12:01:00 GMT", retry_at - 60),
+            Some(Duration::from_secs(60))
+        );
+        assert_eq!(
+            parse_retry_after("Wed, 02 Sep 2026 12:01:00 GMT", retry_at + 1),
+            Some(Duration::ZERO)
+        );
+        assert_eq!(parse_retry_after("not-a-date", 1_800_000_000), None);
+
+        let error = telemetry_response(429, Some("120")).unwrap_err();
+        assert_eq!(error.retry_after(), Some(Duration::from_secs(120)));
     }
 
     #[test]
@@ -575,6 +845,38 @@ mod tests {
             elapsed < Duration::from_secs(1),
             "telemetry request took {elapsed:?}"
         );
+    }
+
+    #[test]
+    fn telemetry_deadline_includes_response_body_consumption() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (release_tx, release_rx) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 4096];
+            let _ = stream.read(&mut request).unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nx")
+                .unwrap();
+            stream.flush().unwrap();
+            release_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        });
+
+        let started = Instant::now();
+        let error = post_telemetry_json_with_timeout(
+            &format!("http://{address}/events"),
+            b"{}",
+            Duration::from_millis(100),
+        )
+        .unwrap_err();
+        let elapsed = started.elapsed();
+        release_tx.send(()).unwrap();
+        server.join().unwrap();
+
+        assert_eq!(error.class(), AnalyticsDeliveryFailureClass::Transport);
+        assert!(error.retryable());
+        assert!(elapsed < Duration::from_secs(1), "request took {elapsed:?}");
     }
 
     #[test]
@@ -677,3 +979,7 @@ mod tests {
         assert!(fs::read(destination).unwrap().is_empty());
     }
 }
+
+#[cfg(test)]
+#[path = "net/deadline_tests.rs"]
+mod deadline_tests;

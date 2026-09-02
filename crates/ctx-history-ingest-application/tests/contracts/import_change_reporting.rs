@@ -118,6 +118,8 @@ fn start_source_refresh_daemon(temp: &TempDir) -> SourceRefreshDaemon {
     command
         .args(["daemon", "run", "--force", "--loop-interval-seconds", "600"])
         .env("CTX_DAEMON_MODE", "source-refresh-only")
+        .env("CTX_ANALYTICS_ENABLED", "true")
+        .env("CTX_ANALYTICS_DRY_RUN", "1")
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
     let spawn_deadline = Instant::now() + Duration::from_secs(1);
@@ -235,9 +237,8 @@ fn import_codex_with_selection(temp: &TempDir, selection: &[&str]) -> Value {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        events_path.exists(),
-        "analytics sender did not create {}: {}",
-        events_path.display(),
+        !read_queued_analytics_events(temp.path()).is_empty(),
+        "analytics outbox queued no events: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     serde_json::from_slice(&output.stdout).unwrap()
@@ -369,7 +370,7 @@ fn assert_index_delta(report: &Value, sessions: i64, searchable_events: i64) {
 }
 
 fn latest_source_refresh_properties(temp: &TempDir) -> serde_json::Map<String, Value> {
-    let event = read_analytics_events(&temp.path().join("analytics.jsonl"))
+    let event = read_queued_analytics_events(temp.path())
         .last()
         .and_then(|payload| payload["events"].as_array())
         .and_then(|events| {

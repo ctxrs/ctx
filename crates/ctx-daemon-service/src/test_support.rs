@@ -75,7 +75,9 @@ impl DaemonObservationPort for TestObservation {
         ))
     }
 
-    fn deliver(&self, _data_root: &Path, _events: &[PublicEventV1]) {}
+    fn append(&self, _data_root: &Path, _events: &[PublicEventV1]) {}
+
+    fn append_and_upload(&self, _data_root: &Path, _events: &[PublicEventV1]) {}
 }
 
 impl DaemonAvailabilityPort for TestAvailability {

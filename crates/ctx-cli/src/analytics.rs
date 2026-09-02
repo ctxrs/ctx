@@ -28,41 +28,24 @@ impl Drop for DeliveryFailureOutputGuard {
     }
 }
 
-pub(crate) fn send_batch(
-    data_root: &std::path::Path,
-    config: &ctx_app_config::AppConfig,
-    events: &[PublicEventV1],
-) {
-    send_batch_with_timeout(
-        data_root,
-        config,
-        events,
-        crate::net::TELEMETRY_HTTP_TIMEOUT,
-    );
+pub(crate) fn send_batch(data_root: &std::path::Path, events: &[PublicEventV1]) {
+    report_delivery_failure(crate::observability_composition::append_analytics_batch(
+        data_root, events,
+    ));
 }
 
-pub(crate) fn send_daemon_batch(
-    data_root: &std::path::Path,
-    config: &ctx_app_config::AppConfig,
-    events: &[PublicEventV1],
-) {
-    send_batch_with_timeout(
+pub(crate) fn send_daemon_batch(data_root: &std::path::Path, events: &[PublicEventV1]) {
+    report_delivery_failure(crate::observability_composition::append_analytics_batch(
+        data_root, events,
+    ));
+    report_delivery_failure(crate::observability_composition::drain_analytics_outbox(
         data_root,
-        config,
-        events,
         crate::net::DAEMON_TELEMETRY_HTTP_TIMEOUT,
-    );
+    ));
 }
 
-fn send_batch_with_timeout(
-    data_root: &std::path::Path,
-    config: &ctx_app_config::AppConfig,
-    events: &[PublicEventV1],
-    timeout: std::time::Duration,
-) {
-    if let Err(error) = crate::observability_composition::deliver_analytics_batch(
-        data_root, config, events, timeout,
-    ) {
+fn report_delivery_failure(result: anyhow::Result<()>) {
+    if let Err(error) = result {
         let quiet = DELIVERY_FAILURE_OUTPUT_QUIET.get();
         if !quiet && std::env::var_os("CTX_ANALYTICS_DEBUG").is_some() {
             eprintln!("ctx analytics delivery failed: {error:#}");

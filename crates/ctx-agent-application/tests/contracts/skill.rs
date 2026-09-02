@@ -854,7 +854,7 @@ fn skill_remove_is_idempotent_preserves_siblings_and_keeps_telemetry_identifiers
         "keep sibling"
     );
 
-    let events = read_analytics_events(&analytics_path);
+    let events = read_queued_analytics_events(temp.path());
     let event = analytics_cli_event(events.last().unwrap());
     let properties = event["properties"].as_object().unwrap();
     assert_eq!(properties["integration_action"], "remove");

@@ -173,8 +173,12 @@ mod analytics {
 
     use ctx_client_observability::analytics::PublicEventV1;
 
-    pub fn send_batch(data_root: &Path, events: &[PublicEventV1]) {
+    pub fn append_batch(data_root: &Path, events: &[PublicEventV1]) {
         crate::composition::host().deliver_daemon_events(data_root, events);
+    }
+
+    pub fn append_and_upload_batch(data_root: &Path, events: &[PublicEventV1]) {
+        crate::composition::host().upload_daemon_events(data_root, events);
     }
 }
 

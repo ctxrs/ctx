@@ -61,7 +61,7 @@ fn capability_snapshot_is_sent_once_after_successful_delivery() {
 }
 
 #[test]
-fn capability_snapshot_durable_queue_handoff_marks_once_and_replays() {
+fn capability_snapshot_durable_queue_handoff_marks_once_and_daemon_replays() {
     let temp = tempdir();
     let delivery_dir = temp.path().join("missing-delivery-dir");
     let events_path = delivery_dir.join("analytics.jsonl");
@@ -93,10 +93,15 @@ fn capability_snapshot_durable_queue_handoff_marks_once_and_replays() {
         !claim_path.exists(),
         "accepted delivery must clear the capability claim"
     );
+    let initially_queued = read_analytics_events(&events_path);
+    assert_eq!(initially_queued.len(), 1, "{initially_queued:#?}");
+    assert_operation_event(&initially_queued[0], "doctor", "success");
+    let doctor_event_id = analytics_operation_event_id(&initially_queued, "doctor").unwrap();
+    assert_eq!(doctor_event_id.get_version_num(), 4);
 
     fs::create_dir_all(&delivery_dir).unwrap();
     ctx(&temp)
-        .arg("doctor")
+        .args(["status", "--format=json"])
         .env("CTX_DATA_ROOT", &data_root)
         .env("HOME", &home)
         .env("XDG_STATE_HOME", &state)
@@ -107,30 +112,79 @@ fn capability_snapshot_durable_queue_handoff_marks_once_and_replays() {
         .assert()
         .success();
 
-    let events = read_analytics_events(&events_path);
-    assert_eq!(
-        events.len(),
-        4,
-        "the queued event and failure observation should replay before the current event and recovery observation"
+    assert!(
+        !events_path.exists(),
+        "a second foreground command must not drain the analytics outbox"
     );
-    let replayed_properties = analytics_event_properties(&events[0]);
-    assert_capability_snapshot_is_coarse(replayed_properties);
-    assert_analytics_properties_are_allowlisted(replayed_properties);
-
+    let queued_after_reopen = read_analytics_events(&events_path);
     assert_eq!(
-        events[1]["events"][0]["event_name"],
-        "analytics_delivery_observation"
+        analytics_operation_event_id(&queued_after_reopen, "doctor"),
+        Some(doctor_event_id),
+        "the reopened outbox must retain the exact queued event ID"
     );
-
-    let current_properties = analytics_event_properties(&events[2]);
+    let status_event_id = analytics_operation_event_id(&queued_after_reopen, "status").unwrap();
+    assert_eq!(status_event_id.get_version_num(), 4);
+    let current_properties = analytics_event_properties(
+        queued_after_reopen
+            .iter()
+            .find(|payload| {
+                analytics_operation_event_id(std::slice::from_ref(*payload), "status")
+                    == Some(status_event_id)
+            })
+            .unwrap(),
+    );
     for key in CAPABILITY_PROPERTY_KEYS {
         assert!(!current_properties.contains_key(key));
     }
     assert_analytics_properties_are_allowlisted(current_properties);
-    assert_eq!(
-        events[3]["events"][0]["event_name"],
-        "analytics_delivery_observation"
+
+    let _daemon = spawn_source_refresh_daemon_with_analytics(
+        &temp,
+        &data_root,
+        &home,
+        &state,
+        &file_url(&events_path),
     );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let events = loop {
+        if events_path.exists() {
+            let body = fs::read_to_string(&events_path).unwrap();
+            let delivered = body
+                .lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .collect::<Vec<_>>();
+            if analytics_operation_event_id(&delivered, "doctor") == Some(doctor_event_id)
+                && analytics_operation_event_id(&delivered, "status") == Some(status_event_id)
+            {
+                break read_delivered_analytics_events(&events_path);
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for daemon-owned analytics delivery"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    };
+    assert_eq!(
+        analytics_operation_event_id(&events, "doctor"),
+        Some(doctor_event_id),
+        "daemon delivery must preserve the queued doctor event ID"
+    );
+    assert_eq!(
+        analytics_operation_event_id(&events, "status"),
+        Some(status_event_id),
+        "daemon delivery must preserve the queued status event ID"
+    );
+    let replayed = events
+        .iter()
+        .find(|payload| {
+            analytics_operation_event_id(std::slice::from_ref(*payload), "doctor")
+                == Some(doctor_event_id)
+        })
+        .unwrap();
+    let replayed_properties = analytics_event_properties(replayed);
+    assert_capability_snapshot_is_coarse(replayed_properties);
+    assert_analytics_properties_are_allowlisted(replayed_properties);
     assert!(marker_path.exists());
     assert!(!claim_path.exists());
 }
@@ -166,7 +220,7 @@ fn concurrent_invocations_claim_at_most_one_capability_snapshot() {
         assert!(child.wait().unwrap().success());
     }
 
-    let body = fs::read_to_string(&events_path).unwrap();
+    let body = serde_json::to_string(&read_analytics_events(&events_path)).unwrap();
     assert_eq!(body.matches("capability_snapshot_schema").count(), 1);
     assert!(expected_capability_marker_path(&home, &state).exists());
     assert!(!expected_capability_claim_path(&home, &state).exists());
@@ -362,7 +416,13 @@ fn import_and_index_emit_closed_safe_summaries() {
             .assert()
             .success();
     };
-    let _daemon = start_source_refresh_daemon(&temp, &data_root, &home, &state);
+    let _daemon = start_source_refresh_daemon_with_analytics(
+        &temp,
+        &data_root,
+        &home,
+        &state,
+        &file_url(&events_path),
+    );
     run(&[
         "import",
         "--provider",
@@ -381,7 +441,7 @@ fn import_and_index_emit_closed_safe_summaries() {
         "1",
     ]);
 
-    let events = read_analytics_events(&events_path);
+    let events = read_analytics_operation_payloads(&events_path);
     assert_eq!(events.len(), 2);
     assert_operation_event(&events[0], "import", "success");
     assert_operation_event(&events[1], "index", "success");
@@ -526,7 +586,13 @@ fn analytics_payloads_omit_sensitive_command_data() {
     let data_root = temp.path().join("ctx-data");
     let events_path = temp.path().join("analytics.jsonl");
     fs::create_dir_all(&home).unwrap();
-    let _daemon = start_source_refresh_daemon(&temp, &data_root, &home, &state);
+    let _daemon = start_source_refresh_daemon_with_analytics(
+        &temp,
+        &data_root,
+        &home,
+        &state,
+        &file_url(&events_path),
+    );
     assert!(data_root.join("search/lexical").is_dir());
     assert!(!data_root.join("work.sqlite").exists());
     let private_query = "prompt text source-body-secret /home/alice/private/acme-secret \
@@ -583,7 +649,7 @@ fn analytics_payloads_omit_sensitive_command_data() {
         .assert()
         .failure();
 
-    let events = read_analytics_events(&events_path);
+    let events = read_analytics_operation_payloads(&events_path);
     assert_eq!(events.len(), 4);
     let operations = events
         .iter()
@@ -659,7 +725,13 @@ fn search_analytics_reports_empty_source_backed_generation() {
     let data_root = temp.path().join("ctx-data");
     let events_path = temp.path().join("analytics.jsonl");
     fs::create_dir_all(&home).unwrap();
-    let _daemon = start_source_refresh_daemon(&temp, &data_root, &home, &state);
+    let _daemon = start_source_refresh_daemon_with_analytics(
+        &temp,
+        &data_root,
+        &home,
+        &state,
+        &file_url(&events_path),
+    );
 
     ctx(&temp)
         .args(["search", "activation telemetry", "--refresh", "off"])
@@ -673,7 +745,7 @@ fn search_analytics_reports_empty_source_backed_generation() {
         .assert()
         .success();
 
-    let events = read_analytics_events(&events_path);
+    let events = read_analytics_operation_payloads(&events_path);
     assert_eq!(events.len(), 1);
     assert_operation_event(&events[0], "search", "success");
     let properties = analytics_event_properties(&events[0]);
@@ -696,7 +768,13 @@ fn search_analytics_reports_existing_indexed_content() {
     let events_path = temp.path().join("analytics.jsonl");
     fs::create_dir_all(&home).unwrap();
     let fixture = provider_history_fixture("codex-sessions");
-    let _daemon = start_source_refresh_daemon(&temp, &data_root, &home, &state);
+    let _daemon = start_source_refresh_daemon_with_analytics(
+        &temp,
+        &data_root,
+        &home,
+        &state,
+        &file_url(&events_path),
+    );
 
     ctx(&temp)
         .args([
@@ -729,7 +807,7 @@ fn search_analytics_reports_existing_indexed_content() {
         .assert()
         .success();
 
-    let events = read_analytics_events(&events_path);
+    let events = read_analytics_operation_payloads(&events_path);
     assert_eq!(events.len(), 1);
     assert_operation_event(&events[0], "search", "success");
     let properties = analytics_event_properties(&events[0]);
@@ -1094,7 +1172,13 @@ fn setup_wait_analytics_reports_ready_source_epoch() {
         ),
     )
     .unwrap();
-    let _daemon = start_source_refresh_daemon(&temp, &data_root, &home, &state);
+    let _daemon = start_source_refresh_daemon_with_analytics(
+        &temp,
+        &data_root,
+        &home,
+        &state,
+        &file_url(&events_path),
+    );
 
     ctx(&temp)
         .args(["setup", "--wait", "--progress", "none"])
@@ -1108,7 +1192,7 @@ fn setup_wait_analytics_reports_ready_source_epoch() {
         .assert()
         .success();
 
-    let events = read_analytics_events(&events_path);
+    let events = read_analytics_operation_payloads(&events_path);
     assert_eq!(events.len(), 1);
     assert_operation_event(&events[0], "setup", "success");
     let completed = analytics_event_properties(&events[0]);
@@ -1129,7 +1213,13 @@ fn foreground_provider_refreshes_batch_once_per_source_backed_import() {
     let events_path = temp.path().join("analytics.jsonl");
     let fixture = provider_history_fixture("codex-sessions");
     fs::create_dir_all(&home).unwrap();
-    let _daemon = start_source_refresh_daemon(&temp, &data_root, &home, &state);
+    let _daemon = start_source_refresh_daemon_with_analytics(
+        &temp,
+        &data_root,
+        &home,
+        &state,
+        &file_url(&events_path),
+    );
 
     for _ in 0..2 {
         ctx(&temp)
@@ -1153,7 +1243,7 @@ fn foreground_provider_refreshes_batch_once_per_source_backed_import() {
             .success();
     }
 
-    let payloads = read_analytics_events(&events_path);
+    let payloads = read_analytics_operation_payloads(&events_path);
     assert_eq!(payloads.len(), 2, "each invocation must send one batch");
     for (payload, expected_change) in payloads.iter().zip(["changed", "no_op"]) {
         let expected_core_result = if expected_change == "changed" {

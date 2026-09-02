@@ -251,11 +251,18 @@ fn daemon_cli_projection_suppresses_staging_but_keeps_managed_upgrades() {
 }
 
 #[test]
-fn nonempty_daemon_observation_batch_loads_config_once() -> Result<()> {
+fn daemon_observation_delivery_rechecks_config_at_each_ownership_boundary() -> Result<()> {
     let _env_lock = ctx_app_config::TEST_LOCAL_USAGE_ENV_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let _dry_run = RestoreEnvironment::set("CTX_ANALYTICS_DRY_RUN", "1");
+    let device_root = tempfile::tempdir()?;
+    let _state = RestoreEnvironment::set("XDG_STATE_HOME", device_root.path());
+    let _home = RestoreEnvironment::set("HOME", device_root.path());
+    let _enabled = RestoreEnvironment::set("CTX_ANALYTICS_ENABLED", "true");
+    let _endpoint =
+        RestoreEnvironment::set("CTX_ANALYTICS_ENDPOINT", "http://127.0.0.1:9/telemetry");
+    let _dry_run = RestoreEnvironment::capture("CTX_ANALYTICS_DRY_RUN");
+    std::env::remove_var("CTX_ANALYTICS_DRY_RUN");
     initialize()?;
     let root = tempfile::tempdir()?;
     fs::write(
@@ -268,13 +275,17 @@ fn nonempty_daemon_observation_batch_loads_config_once() -> Result<()> {
         Duration::ZERO,
     ));
 
-    let (_, empty_loads) =
+    let (_, empty_append_loads) =
         ctx_app_config::count_app_config_loads(|| deliver_daemon_events(root.path(), &[]));
-    assert_eq!(empty_loads, 0);
+    assert_eq!(empty_append_loads, 1);
+    let (_, empty_upload_loads) = ctx_app_config::count_app_config_loads(|| {
+        ctx_daemon_cli::DaemonCliHost::upload_daemon_events(&CtxDaemonCliHost, root.path(), &[]);
+    });
+    assert_eq!(empty_upload_loads, 3);
     let (_, nonempty_loads) = ctx_app_config::count_app_config_loads(|| {
         deliver_daemon_events(root.path(), std::slice::from_ref(&event));
     });
-    assert_eq!(nonempty_loads, 1);
+    assert_eq!(nonempty_loads, 2);
     Ok(())
 }
 
