@@ -1,6 +1,29 @@
 use super::*;
 
 #[derive(Debug)]
+pub struct SourceBackedRefreshDaemonUnavailable {
+    detail: Option<String>,
+}
+
+impl SourceBackedRefreshDaemonUnavailable {
+    pub(crate) fn new(detail: Option<String>) -> Self {
+        Self { detail }
+    }
+}
+
+impl fmt::Display for SourceBackedRefreshDaemonUnavailable {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("the ctx daemon is unavailable for source-backed refresh")?;
+        if let Some(detail) = self.detail.as_deref() {
+            write!(formatter, ": {detail}")?;
+        }
+        formatter.write_str("; no foreground writer was started")
+    }
+}
+
+impl std::error::Error for SourceBackedRefreshDaemonUnavailable {}
+
+#[derive(Debug)]
 pub struct SourceBackedRefreshPendingPublication {
     request_id: String,
     request_state: String,

@@ -273,12 +273,7 @@ fn nonprivacy_deprecated_ids_are_reported_on_only_one_eligible_event() {
     fs::create_dir_all(temp.path().join(".codex").join("sessions")).unwrap();
 
     ctx(&temp)
-        .args([
-            "setup",
-            "--no-daemon",
-            "--progress",
-            "none",
-        ])
+        .args(["setup", "--no-daemon", "--progress", "none"])
         .env("CTX_DATA_ROOT", &data_root)
         .env("CTX_ANALYTICS_ENABLED", "true")
         .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))

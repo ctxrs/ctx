@@ -100,9 +100,8 @@ pub use source_backed_refresh_coordinator::{
 
 #[cfg(feature = "test-support")]
 pub mod testing {
-    pub use crate::source_backed_refresh_coordinator::{
-        recover_wait_refresh_request_for_test, SourceRefreshObservationRecoveryFailed,
-    };
+    pub use crate::source_backed_refresh_coordinator::recover_wait_refresh_request_for_test;
+    pub use ctx_daemon_refresh_client::testing::SourceRefreshObservationRecoveryFailed;
 
     pub fn write_daemon_lifecycle_status(
         data_root: &std::path::Path,

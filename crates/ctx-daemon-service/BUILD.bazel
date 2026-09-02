@@ -28,6 +28,7 @@ PROD_SRCS = glob(
 
 CTX_DAEMON_SERVICE_DEPS = [
     "//crates/ctx-client-observability:lib",
+    "//crates/ctx-daemon-refresh-client:lib",
     "//crates/ctx-daemon-runtime:lib",
     "//crates/ctx-history-capture:lib",
     "//crates/ctx-history-core:lib",
@@ -40,6 +41,7 @@ CTX_DAEMON_SERVICE_DEPS = [
 
 CTX_DAEMON_SERVICE_TEST_DEPS = [
     "//crates/ctx-client-observability:test_support_lib",
+    "//crates/ctx-daemon-refresh-client:test_support_lib",
     "//crates/ctx-daemon-runtime:lib",
     "//crates/ctx-history-capture:lib",
     "//crates/ctx-history-capture-model:lib",
@@ -57,6 +59,7 @@ CTX_DAEMON_SERVICE_UNIT_TEST_DEPS = CTX_DAEMON_SERVICE_TEST_DEPS + [
 
 CTX_DAEMON_SERVICE_QUALIFICATION_DEPS = [
     "//crates/ctx-client-observability:lib",
+    "//crates/ctx-daemon-refresh-client:lib",
     "//crates/ctx-daemon-runtime:qualification_lib",
     "//crates/ctx-history-capture:lib",
     "//crates/ctx-history-core:lib",

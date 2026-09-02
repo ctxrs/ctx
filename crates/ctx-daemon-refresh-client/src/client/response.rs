@@ -1,3 +1,5 @@
+//! Source-refresh client response validation and fallback policy.
+
 use super::*;
 
 pub(super) fn failed_refresh_response(
@@ -31,12 +33,13 @@ fn legacy_failed_refresh_response(response: &Value) -> Result<SourceBackedRefres
 }
 
 pub(super) fn daemon_unavailable_fallback(
+    host: &dyn SourceRefreshClientHost,
     data_root: &Path,
     mode: SourceBackedRefreshMode,
     error: Option<anyhow::Error>,
 ) -> Result<SourceBackedRefreshObservation> {
     if mode == SourceBackedRefreshMode::Background {
-        if let Some(pin) = pin_published_generation(data_root)? {
+        if let Some(pin) = host.pin_published_generation(data_root)? {
             return Ok(SourceBackedRefreshObservation {
                 mode,
                 status: "daemon_unavailable".to_owned(),

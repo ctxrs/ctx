@@ -275,6 +275,8 @@ pub(super) fn append_terminal_events(
 mod tests {
     use std::sync::Mutex;
 
+    use crate::analytics;
+
     use super::*;
 
     #[derive(Default)]
@@ -317,8 +319,8 @@ mod tests {
 
     fn test_run() -> DaemonRunFactsV1 {
         DaemonRunFactsV1::new(
-            crate::analytics::DaemonStartModeV1::Manual,
-            crate::analytics::DaemonSupervisorV1::User,
+            analytics::DaemonStartModeV1::Manual,
+            analytics::DaemonSupervisorV1::User,
             None,
         )
     }
