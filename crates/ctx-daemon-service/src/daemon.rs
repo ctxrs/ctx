@@ -52,8 +52,9 @@ mod watch_runtime;
 
 use automatic_upgrade::abort_prepared_automatic_upgrade;
 use config_reload::{
-    daemon_semantic_runtime_active, reload_daemon_runtime_config, DaemonConfigReloadContext,
-    DaemonConfigReloadOutcome, DaemonConfigReloadState,
+    daemon_semantic_runtime_active, daemon_semantic_runtime_requested,
+    reload_daemon_runtime_config, DaemonConfigReloadContext, DaemonConfigReloadOutcome,
+    DaemonConfigReloadState,
 };
 use lifecycle::*;
 pub(super) use source_watch::daemon_wait_duration;
@@ -68,8 +69,6 @@ use super::daemon_wakeup::DaemonFileWatcher;
 #[cfg(test)]
 use ctx_history_capture::SourceBackedWatchCatalog;
 
-#[cfg(test)]
-use config_reload::daemon_semantic_runtime_requested;
 #[cfg(test)]
 use telemetry::{
     daemon_liveness_interval, DAEMON_LIVENESS_JITTER_WINDOW, DAEMON_LIVENESS_MIN_INTERVAL,
@@ -100,6 +99,17 @@ impl DaemonIteration {
         self.provider_refresh_events = events;
         self
     }
+}
+
+fn daemon_semantic_maintenance_requested(
+    runtime: &DaemonRuntime,
+    reload: &DaemonConfigReloadState,
+) -> bool {
+    reload.status != "failed"
+        && daemon_semantic_runtime_requested(
+            &runtime.config,
+            super::query_service::daemon_query_service_transport_supported(),
+        )
 }
 
 #[derive(Default)]
@@ -629,8 +639,8 @@ where
             let events = telemetry.liveness_events(Instant::now());
             send_daemon_events(ports.observation, data_root, &events);
             let cycle_started = Instant::now();
-            let semantic_runtime_active =
-                daemon_semantic_runtime_active(&runtime, query_service.as_ref());
+            let semantic_maintenance_requested =
+                daemon_semantic_maintenance_requested(&runtime, &config_reload);
             let source_refresh = refresh_service
                 .as_ref()
                 .and(daemon_scheduler_source_refresh(&source_refresh_coordinator));
@@ -651,7 +661,7 @@ where
                 &mut runtime,
                 DaemonSchedulerCycleContext {
                     deadline: None,
-                    semantic_enabled: semantic_runtime_active,
+                    semantic_enabled: semantic_maintenance_requested,
                     query_activity: query_service
                         .as_ref()
                         .map(|service| service.activity.as_ref()),

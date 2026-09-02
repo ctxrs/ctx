@@ -7,6 +7,22 @@ use super::{
     FULL_REBUILD_STATE,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SourceBackedReconciliationBoundaryLimit {
+    Unbounded,
+    One,
+}
+
+impl SourceBackedReconciliationBoundaryLimit {
+    pub(super) fn exhausted_by(self, outcome: &SourceBackedSemanticOutcome) -> bool {
+        self == Self::One && outcome.semantic_progress_sequence().is_some()
+    }
+
+    pub(super) fn stops_after_full_rebuild(self, outcome: &SourceBackedSemanticOutcome) -> bool {
+        self == Self::Unbounded || self.exhausted_by(outcome)
+    }
+}
+
 impl SemanticVectorStore {
     /// Reconciles one pinned Core generation and reports each durable semantic
     /// boundary before continuing with later source pages. The sequence is
@@ -19,6 +35,51 @@ impl SemanticVectorStore {
         checkpoint: &mut dyn FnMut() -> Result<()>,
         progress: &mut dyn FnMut(u64) -> Result<()>,
     ) -> Result<SourceBackedSemanticOutcome> {
+        self.reconcile_source_backed_index_with_boundary_limit(
+            index,
+            builder,
+            embedder,
+            checkpoint,
+            progress,
+            SourceBackedReconciliationBoundaryLimit::Unbounded,
+        )
+    }
+
+    /// Reconciles at most one durable source-backed semantic progress boundary
+    /// for the exact pinned Core generation.
+    ///
+    /// A page or source-finalization boundary returns a successful not-ready
+    /// outcome with work remaining. A generation-acknowledgement boundary
+    /// returns a successful ready outcome. Traversal-only state changes do not
+    /// consume the boundary budget.
+    pub fn reconcile_source_backed_index_one_durable_boundary_with_checkpoint_and_progress(
+        &mut self,
+        index: &VerifiedIndex,
+        builder: &mut dyn SemanticDocumentBuilder,
+        embedder: &mut dyn SemanticBatchEmbedder,
+        checkpoint: &mut dyn FnMut() -> Result<()>,
+        progress: &mut dyn FnMut(u64) -> Result<()>,
+    ) -> Result<SourceBackedSemanticOutcome> {
+        self.reconcile_source_backed_index_with_boundary_limit(
+            index,
+            builder,
+            embedder,
+            checkpoint,
+            progress,
+            SourceBackedReconciliationBoundaryLimit::One,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)] // Authority/progress hooks and the turn budget are independent controls.
+    fn reconcile_source_backed_index_with_boundary_limit(
+        &mut self,
+        index: &VerifiedIndex,
+        builder: &mut dyn SemanticDocumentBuilder,
+        embedder: &mut dyn SemanticBatchEmbedder,
+        checkpoint: &mut dyn FnMut() -> Result<()>,
+        progress: &mut dyn FnMut(u64) -> Result<()>,
+        boundary_limit: SourceBackedReconciliationBoundaryLimit,
+    ) -> Result<SourceBackedSemanticOutcome> {
         let work_before = self.flat.work_stats();
         let generation =
             SourceBackedSemanticGeneration::from_verified_index(index, self.contract())?;
@@ -29,6 +90,7 @@ impl SemanticVectorStore {
             embedder,
             checkpoint,
             progress,
+            boundary_limit,
         )?;
         let work = self.flat.work_since(work_before);
         outcome.vectors_touched = work.vectors_touched;

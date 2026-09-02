@@ -1,9 +1,9 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, path::Path};
 
 use anyhow::Result;
 use ctx_history_index::{SemanticGenerationPolicy, SourceCoreRecordAggregate, VerifiedIndex};
 use ctx_semantic_model::SemanticModelContract;
-use rusqlite::{params, OptionalExtension, Transaction};
+use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
@@ -15,19 +15,26 @@ use super::manifest::{
     SOURCE_FRONTIER_STATE,
 };
 use super::{
-    SemanticVectorStore, SourceBackedGenerationPin, SourceBackedSemanticGeneration,
-    SourceBackedSemanticOutcome, SourceBackedSemanticSource,
+    SemanticVectorStore, SourceBackedSemanticGeneration, SourceBackedSemanticOutcome,
+    SourceBackedSemanticSource,
 };
 use crate::{
     vector_store::control::FULL_REBUILD_STATE,
     vector_store::flat_segments::{
         FlatPublicationToken, FlatPublishOutcome, FlatSourceReceipt, FlatSourceState,
+        PinnedFlatGeneration,
     },
     vector_store_schema::{semantic_owned_sidecar_result, SemanticVectorStoreError},
 };
 
 const SOURCE_RECONCILIATION_DOMAIN: &[u8] = b"ctx-semantic-source-reconciliation-v1\0";
 const RECEIPT_SET_DOMAIN: &[u8] = b"ctx-semantic-source-receipt-set-v1\0";
+
+pub enum SourceBackedGenerationPin {
+    NotReady,
+    ReadyEmpty,
+    Ready(PinnedFlatGeneration),
+}
 
 pub(super) type SourceProjectionStates = BTreeMap<String, Option<FlatSourceReceipt>>;
 
@@ -87,6 +94,75 @@ impl SourceBackedSemanticGeneration {
 }
 
 impl SemanticVectorStore {
+    pub fn source_backed_reconciliation_contract_matches_at(
+        path: &Path,
+        contract: &SemanticModelContract,
+    ) -> Result<Option<bool>> {
+        if !path.exists() {
+            return Ok(None);
+        }
+        let store = match Self::open_read_only(path, contract) {
+            Ok(Some(store)) => store,
+            Ok(None) => return Ok(Some(false)),
+            Err(error)
+                if crate::vector_store_schema::semantic_vector_failure_kind(&error)
+                    == Some(
+                        crate::vector_store_schema::SemanticVectorFailureKind::ResetRequired,
+                    ) =>
+            {
+                return Ok(Some(false));
+            }
+            Err(error) => return Err(error),
+        };
+        Ok(Some(store.source_backed_reconciliation_contract_matches()?))
+    }
+
+    pub fn open_source_backed_reconciliation_if_contract_matches_at(
+        path: &Path,
+        contract: &SemanticModelContract,
+    ) -> Result<Option<Self>> {
+        Self::open_writable_if_matching(path, contract, |store| {
+            store.source_backed_reconciliation_contract_matches()
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open_source_backed_reconciliation_if_contract_matches_after_match(
+        path: &Path,
+        contract: &SemanticModelContract,
+        matched: impl FnOnce(),
+    ) -> Result<Option<Self>> {
+        Self::open_writable_if_matching_after_match(
+            path,
+            contract,
+            |store| store.source_backed_reconciliation_contract_matches(),
+            matched,
+        )
+    }
+
+    fn source_backed_reconciliation_contract_matches(&self) -> Result<bool> {
+        match self.flat.active_stats() {
+            Ok(_) => {}
+            Err(
+                crate::vector_store::flat_segments::FlatStoreError::Corrupt(_)
+                | crate::vector_store::flat_segments::FlatStoreError::Incompatible(_)
+                | crate::vector_store::flat_segments::FlatStoreError::LegacySchema(_),
+            ) => return Ok(false),
+            Err(error) => return Err(anyhow::Error::new(error)),
+        }
+        let expected = source_contract_fingerprint(&self.contract)?;
+        let frontier: Option<SourceProjectionFrontier> =
+            maintenance_json_from_connection(&self.conn, SOURCE_FRONTIER_STATE)?;
+        let acknowledgement: Option<SourceProjectionAcknowledgement> =
+            maintenance_json_from_connection(&self.conn, SOURCE_ACKNOWLEDGEMENT_STATE)?;
+        let persisted = frontier
+            .map(|frontier| frontier.contract_fingerprint)
+            .or_else(|| {
+                acknowledgement.map(|acknowledgement| acknowledgement.contract_fingerprint)
+            });
+        Ok(persisted.as_deref() == Some(expected.as_str()))
+    }
+
     pub(crate) fn record_flat_model_contract_reset(&self) -> Result<()> {
         let transaction = self.conn.unchecked_transaction()?;
         transaction.execute(
@@ -205,24 +281,7 @@ impl SemanticVectorStore {
     where
         T: for<'de> Deserialize<'de>,
     {
-        let value = self
-            .conn
-            .query_row(
-                "SELECT value FROM semantic_maintenance_state WHERE key = ?1",
-                [key],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?;
-        value
-            .map(|value| {
-                serde_json::from_str(&value).map_err(|error| {
-                    SemanticVectorStoreError::reset_required(format!(
-                        "semantic vector store has invalid {key} state: {error}"
-                    ))
-                    .into()
-                })
-            })
-            .transpose()
+        maintenance_json_from_connection(&self.conn, key)
     }
 
     pub(super) fn store_source_frontier(&self, frontier: &SourceProjectionFrontier) -> Result<()> {
@@ -775,6 +834,29 @@ fn frontier_from_acknowledgement(
         flat_staging: None,
         semantic_progress_sequence: acknowledgement.semantic_progress_sequence,
     }
+}
+
+fn maintenance_json_from_connection<T>(conn: &Connection, key: &str) -> Result<Option<T>>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    let value = conn
+        .query_row(
+            "SELECT value FROM semantic_maintenance_state WHERE key = ?1",
+            [key],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    value
+        .map(|value| {
+            serde_json::from_str(&value).map_err(|error| {
+                SemanticVectorStoreError::reset_required(format!(
+                    "semantic vector store has invalid {key} state: {error}"
+                ))
+                .into()
+            })
+        })
+        .transpose()
 }
 
 pub(super) fn store_frontier(

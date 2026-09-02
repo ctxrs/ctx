@@ -191,6 +191,12 @@ where
     }
 }
 
+#[derive(Clone, Copy)]
+enum DaemonSemanticReconciliationBudget {
+    Drain,
+    OneDurableBoundary,
+}
+
 pub(super) fn run_daemon_semantic_job(
     data_root: &Path,
     source_generation: &PinnedSourceBackedGeneration,
@@ -199,6 +205,50 @@ pub(super) fn run_daemon_semantic_job(
     semantic_enabled: bool,
     artifact_fetcher: &dyn ArtifactFetcher,
     config: &dyn DaemonConfigPort,
+) -> Result<Value> {
+    run_daemon_semantic_job_with_budget(
+        data_root,
+        source_generation,
+        runtime,
+        deadline,
+        semantic_enabled,
+        artifact_fetcher,
+        config,
+        DaemonSemanticReconciliationBudget::Drain,
+    )
+}
+
+pub(super) fn run_daemon_semantic_job_one_durable_boundary(
+    data_root: &Path,
+    source_generation: &PinnedSourceBackedGeneration,
+    runtime: &mut DaemonRuntime,
+    deadline: Option<Instant>,
+    semantic_enabled: bool,
+    artifact_fetcher: &dyn ArtifactFetcher,
+    config: &dyn DaemonConfigPort,
+) -> Result<Value> {
+    run_daemon_semantic_job_with_budget(
+        data_root,
+        source_generation,
+        runtime,
+        deadline,
+        semantic_enabled,
+        artifact_fetcher,
+        config,
+        DaemonSemanticReconciliationBudget::OneDurableBoundary,
+    )
+}
+
+#[allow(clippy::too_many_arguments)] // Scheduler ports and reconciliation budget are independent controls.
+fn run_daemon_semantic_job_with_budget(
+    data_root: &Path,
+    source_generation: &PinnedSourceBackedGeneration,
+    runtime: &mut DaemonRuntime,
+    deadline: Option<Instant>,
+    semantic_enabled: bool,
+    artifact_fetcher: &dyn ArtifactFetcher,
+    config: &dyn DaemonConfigPort,
+    reconciliation_budget: DaemonSemanticReconciliationBudget,
 ) -> Result<Value> {
     let last_run_at_ms = utc_now().timestamp_millis();
     if !semantic_enabled {
@@ -251,12 +301,17 @@ pub(super) fn run_daemon_semantic_job(
             None,
         ));
     }
-    // An empty Core generation still needs its durable semantic acknowledgement,
-    // but has no embedding work. Admit that index publication through the same
-    // deadline and resource boundaries as ordinary daemon work, then complete
-    // it from the configuration-derived contract before resolving credentials
-    // or constructing an executor.
-    if source_eligible_events == 0 && !vector_path.exists() {
+    // A generation with no semantic-eligible events still needs its durable
+    // acknowledgement, but has no embedding work. Admit that index publication
+    // through the same deadline and resource boundaries as ordinary daemon
+    // work, then reconcile it from the configuration-derived contract before
+    // resolving credentials or constructing an executor. The vector path may
+    // already exist for the fixed built-in contract when a bounded
+    // reconciliation resumes or removes stale vectors. Existing external
+    // state is admitted only when its matching read and writable open share
+    // the writer coordination guard. Unknown or mismatched state follows the
+    // verified executor path below, so contract drift cannot race a reset.
+    if source_eligible_events == 0 {
         if let Some(deferred) = semantic_index_publication_resource_deferred(
             data_root,
             &runtime.config.semantic_executor,
@@ -266,14 +321,27 @@ pub(super) fn run_daemon_semantic_job(
                 deferred,
             ));
         }
-        let mut vector_store = SemanticVectorStore::open(&vector_path, &index_contract)?;
-        let (outcome, indexed_chunks) =
-            reconcile_empty_source_backed_semantic_page(source_generation, &mut vector_store)?;
-        return Ok(daemon_semantic_reconciliation_job(
-            last_run_at_ms,
-            outcome,
-            indexed_chunks,
-        ));
+        let executor_free_store =
+            if !vector_path.exists() || runtime.config.semantic_executor.is_builtin() {
+                Some(SemanticVectorStore::open(&vector_path, &index_contract)?)
+            } else {
+                SemanticVectorStore::open_source_backed_reconciliation_if_contract_matches_at(
+                    &vector_path,
+                    &index_contract,
+                )?
+            };
+        if let Some(mut vector_store) = executor_free_store {
+            let (outcome, indexed_chunks) = reconcile_empty_source_backed_semantic_page(
+                source_generation,
+                &mut vector_store,
+                reconciliation_budget,
+            )?;
+            return Ok(daemon_semantic_reconciliation_job(
+                last_run_at_ms,
+                outcome,
+                indexed_chunks,
+            ));
+        }
     }
 
     let executor = match runtime.semantic_executor.clone() {
@@ -392,6 +460,7 @@ pub(super) fn run_daemon_semantic_job(
         semantic_executor,
         deadline,
         &mut publish_progress,
+        reconciliation_budget,
     )?;
     Ok(daemon_semantic_reconciliation_job(
         last_run_at_ms,
@@ -467,6 +536,7 @@ fn reconcile_source_backed_semantic_page(
     executor: &dyn SemanticEmbeddingExecutor,
     deadline: Option<Instant>,
     progress: &mut dyn FnMut(u64) -> Result<()>,
+    reconciliation_budget: DaemonSemanticReconciliationBudget,
 ) -> Result<(SourceBackedSemanticOutcome, usize)> {
     let index = generation.verified_index();
     let mut builder = SourceBackedSemanticDocumentBuilder::new(index);
@@ -475,24 +545,48 @@ fn reconcile_source_backed_semantic_page(
         deadline,
         indexed_chunks: 0,
     };
-    let outcome = vector_store.reconcile_source_backed_index_with_checkpoint_and_progress(
-        index,
-        &mut builder,
-        &mut embedder,
-        &mut || Ok(()),
-        progress,
-    )?;
+    let outcome = match reconciliation_budget {
+        DaemonSemanticReconciliationBudget::Drain => vector_store
+            .reconcile_source_backed_index_with_checkpoint_and_progress(
+                index,
+                &mut builder,
+                &mut embedder,
+                &mut || Ok(()),
+                progress,
+            )?,
+        DaemonSemanticReconciliationBudget::OneDurableBoundary => vector_store
+            .reconcile_source_backed_index_one_durable_boundary_with_checkpoint_and_progress(
+                index,
+                &mut builder,
+                &mut embedder,
+                &mut || Ok(()),
+                progress,
+            )?,
+    };
     Ok((outcome, embedder.indexed_chunks))
 }
 
 fn reconcile_empty_source_backed_semantic_page(
     generation: &PinnedSourceBackedGeneration,
     vector_store: &mut SemanticVectorStore,
+    reconciliation_budget: DaemonSemanticReconciliationBudget,
 ) -> Result<(SourceBackedSemanticOutcome, usize)> {
     let index = generation.verified_index();
     let mut builder = SourceBackedSemanticDocumentBuilder::new(index);
     let mut embedder = EmptySourceSemanticEmbedder;
-    let outcome = vector_store.reconcile_source_backed_index(index, &mut builder, &mut embedder)?;
+    let outcome = match reconciliation_budget {
+        DaemonSemanticReconciliationBudget::Drain => {
+            vector_store.reconcile_source_backed_index(index, &mut builder, &mut embedder)?
+        }
+        DaemonSemanticReconciliationBudget::OneDurableBoundary => vector_store
+            .reconcile_source_backed_index_one_durable_boundary_with_checkpoint_and_progress(
+                index,
+                &mut builder,
+                &mut embedder,
+                &mut || Ok(()),
+                &mut |_| Ok(()),
+            )?,
+    };
     Ok((outcome, 0))
 }
 

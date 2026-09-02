@@ -9,11 +9,15 @@ use std::{
 use anyhow::{anyhow, Result};
 use ctx_history_capture::{DiscoveryContext, SourceBackedRefreshScope};
 use ctx_history_core::{
-    derive_event_id, derive_session_id, AgentScope, CaptureProvider, CertifiedSource, CoreRecord,
-    EventIdentityInput, EventRole, EventType, NativeItemKey, NativeSessionKey, ScannedSourceCounts,
-    SessionIdentityInput, SourceAnchor, SourceKey, SourceObservation, TypedKey,
+    derive_event_id, derive_session_id, AgentScope, CaptureProvider, CertifiedSource,
+    CoreDiscoveryExclusion, CoreRecord, EventIdentityInput, EventRole, EventType, NativeItemKey,
+    NativeSessionKey, ScannedSourceCounts, SessionIdentityInput, SourceAnchor, SourceKey,
+    SourceObservation, TypedKey,
 };
-use ctx_history_index::{CoreEventPageBudget, GenerationWriter, VerifiedIndex, WriterOptions};
+use ctx_history_index::{
+    CoreEventPageBudget, GenerationWriter, VerifiedIndex, WriterOptions,
+    MAX_SOURCE_EVENT_PAGE_ITEMS,
+};
 use ctx_history_refresh::RefreshOperation;
 use ctx_semantic_index::{
     source_backed_semantic_vector_path, SemanticDocumentBuilder, SemanticVectorStore,
@@ -52,6 +56,7 @@ use crate::{
     daemon_scheduler::record_daemon_job_retry,
     source_backed_refresh_coordinator::{
         publish_authoritative_empty_generation_for_test, source_backed_index_root,
+        PinnedSourceBackedGeneration,
     },
     test_support::{ARTIFACT, CONFIG},
     DaemonConfigSnapshot, CONFIG_FILE,
@@ -279,6 +284,111 @@ fn remote_space_drift_fails_permanently_before_store_reset() -> Result<()> {
 }
 
 #[test]
+fn zero_eligible_remote_space_drift_fails_before_store_reset() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let (endpoint, server) = contract_response_endpoint(
+        r#"{"schema_version":2,"space_id":"drifted-space","dimensions":128}"#,
+    )?;
+    let old_config = SemanticEmbeddingExecutorConfig::http(
+        &endpoint,
+        ExternalSemanticSpace::new("old-space", 64)?,
+    )?;
+    let selected_config = SemanticEmbeddingExecutorConfig::http(
+        &endpoint,
+        ExternalSemanticSpace::new("selected-space", 128)?,
+    )?;
+    let vector_path = source_backed_semantic_vector_path(temp.path());
+    let old_index_contract = semantic_index_contract(old_config.contract())?;
+    drop(SemanticVectorStore::open(
+        &vector_path,
+        &old_index_contract,
+    )?);
+    publish_authoritative_empty_generation_for_test(
+        &source_backed_index_root(temp.path()),
+        "zero-eligible-external-drift",
+        RefreshOperation::Refresh,
+        SourceBackedRefreshScope::All,
+        None,
+    )?;
+    let source_generation =
+        crate::source_backed_refresh_coordinator::pin_published_generation(temp.path())?
+            .expect("published zero-eligible Core generation");
+    let mut runtime = DaemonRuntime::default();
+    runtime.config.semantic_executor = selected_config;
+
+    let error = run_daemon_semantic_job_one_durable_boundary(
+        temp.path(),
+        &source_generation,
+        &mut runtime,
+        None,
+        true,
+        &ARTIFACT,
+        &CONFIG,
+    )
+    .expect_err("endpoint verification must fail before writable store open");
+    assert!(
+        format!("{error:#}").contains("asserted a different semantic space"),
+        "{error:#}"
+    );
+    assert!(
+        SemanticVectorStore::open_read_only(&vector_path, &old_index_contract)?.is_some(),
+        "verification failure must preserve the previous contract's store"
+    );
+    server.join().expect("contract response server panicked")?;
+    Ok(())
+}
+
+#[test]
+fn zero_eligible_external_v5_store_verifies_then_migrates() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let (endpoint, server) = contract_response_endpoint(
+        r#"{"schema_version":2,"space_id":"v5-space","dimensions":96}"#,
+    )?;
+    let selected = SemanticEmbeddingExecutorConfig::http(
+        &endpoint,
+        ExternalSemanticSpace::new("v5-space", 96)?,
+    )?;
+    let vector_path = source_backed_semantic_vector_path(temp.path());
+    let index_contract = semantic_index_contract(selected.contract())?;
+    drop(SemanticVectorStore::open(&vector_path, &index_contract)?);
+    let control = rusqlite::Connection::open(vector_path.join("state.sqlite"))?;
+    control.pragma_update(None, "user_version", 5)?;
+    drop(control);
+    publish_authoritative_empty_generation_for_test(
+        &source_backed_index_root(temp.path()),
+        "zero-eligible-external-v5",
+        RefreshOperation::Refresh,
+        SourceBackedRefreshScope::All,
+        None,
+    )?;
+    let source_generation =
+        crate::source_backed_refresh_coordinator::pin_published_generation(temp.path())?
+            .expect("published zero-eligible Core generation");
+    let mut runtime = DaemonRuntime::default();
+    runtime.config.semantic_executor = selected;
+
+    let job = run_daemon_semantic_job_one_durable_boundary(
+        temp.path(),
+        &source_generation,
+        &mut runtime,
+        None,
+        true,
+        &ARTIFACT,
+        &CONFIG,
+    )?;
+
+    assert_eq!(job["status"], "ready", "{job:#}");
+    assert!(runtime.semantic_executor.is_some());
+    let control = rusqlite::Connection::open(vector_path.join("state.sqlite"))?;
+    assert_eq!(
+        control.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))?,
+        crate::test_support::current_semantic_vector_schema_version()
+    );
+    server.join().expect("contract response server panicked")?;
+    Ok(())
+}
+
+#[test]
 fn malformed_contract_output_fails_permanently_before_store_reset() -> Result<()> {
     assert_contract_verification_failure_preserves_store(
         r#"{"schema_version":2,"space_id":17,"dimensions":"bad"}"#,
@@ -360,6 +470,134 @@ fn ready_empty_v2_generation_is_observed_without_constructing_an_executor() -> R
         store.source_backed_generation_pin_exact(&generation, 0)?,
         SourceBackedGenerationPin::ReadyEmpty
     ));
+    Ok(())
+}
+
+#[test]
+fn bounded_zero_eligible_reconciliation_advances_one_boundary_without_executor() -> Result<()> {
+    let fixture = CoreFixture::new();
+    let record_count = MAX_SOURCE_EVENT_PAGE_ITEMS + 1;
+    let mut records = Vec::with_capacity(record_count);
+    for sequence in 0..record_count as u64 {
+        let mut record = fixture.record(sequence, EventRole::User, "excluded retrieval result");
+        record.content.discovery_exclusion = Some(CoreDiscoveryExclusion::CtxRetrievalDerived);
+        record.validate_contract()?;
+        records.push(record);
+    }
+    let source_generation = PinnedSourceBackedGeneration::from_index(fixture.index(records));
+    assert_eq!(source_generation.semantic_eligible_event_count()?, 0);
+    let mut runtime = DaemonRuntime::default();
+
+    let first = run_daemon_semantic_job_one_durable_boundary(
+        fixture.temp.path(),
+        &source_generation,
+        &mut runtime,
+        None,
+        true,
+        &ARTIFACT,
+        &CONFIG,
+    )?;
+    assert_eq!(first["status"], "budget_exhausted", "{first:#}");
+    assert_eq!(first["semantic_progress_sequence"], 1, "{first:#}");
+    assert_eq!(
+        first["source_records_decoded"], MAX_SOURCE_EVENT_PAGE_ITEMS,
+        "{first:#}"
+    );
+    assert!(runtime.semantic_executor.is_none());
+
+    let second = run_daemon_semantic_job_one_durable_boundary(
+        fixture.temp.path(),
+        &source_generation,
+        &mut runtime,
+        None,
+        true,
+        &ARTIFACT,
+        &CONFIG,
+    )?;
+    assert_eq!(second["status"], "budget_exhausted", "{second:#}");
+    assert_eq!(second["semantic_progress_sequence"], 2, "{second:#}");
+    assert_eq!(second["source_records_decoded"], 1, "{second:#}");
+    assert!(runtime.semantic_executor.is_none());
+
+    let third = run_daemon_semantic_job_one_durable_boundary(
+        fixture.temp.path(),
+        &source_generation,
+        &mut runtime,
+        None,
+        true,
+        &ARTIFACT,
+        &CONFIG,
+    )?;
+    assert_eq!(third["status"], "budget_exhausted", "{third:#}");
+    assert_eq!(third["semantic_progress_sequence"], 3, "{third:#}");
+    assert_eq!(third["source_records_decoded"], 0, "{third:#}");
+    assert!(runtime.semantic_executor.is_none());
+
+    let ready = run_daemon_semantic_job_one_durable_boundary(
+        fixture.temp.path(),
+        &source_generation,
+        &mut runtime,
+        None,
+        true,
+        &ARTIFACT,
+        &CONFIG,
+    )?;
+    assert_eq!(ready["status"], "ready", "{ready:#}");
+    assert_eq!(ready["semantic_progress_sequence"], 4, "{ready:#}");
+    assert_eq!(ready["source_generation_ready"], true, "{ready:#}");
+    assert!(runtime.semantic_executor.is_none());
+    Ok(())
+}
+
+#[test]
+fn bounded_zero_eligible_external_reconciliation_resumes_without_auth() -> Result<()> {
+    let fixture = CoreFixture::new();
+    let record_count = MAX_SOURCE_EVENT_PAGE_ITEMS + 1;
+    let mut records = Vec::with_capacity(record_count);
+    for sequence in 0..record_count as u64 {
+        let mut record = fixture.record(sequence, EventRole::User, "excluded retrieval result");
+        record.content.discovery_exclusion = Some(CoreDiscoveryExclusion::CtxRetrievalDerived);
+        record.validate_contract()?;
+        records.push(record);
+    }
+    let source_generation = PinnedSourceBackedGeneration::from_index(fixture.index(records));
+    assert_eq!(source_generation.semantic_eligible_event_count()?, 0);
+    let mut runtime = DaemonRuntime::default();
+    runtime.config.semantic_executor = SemanticEmbeddingExecutorConfig::http(
+        "http://127.0.0.1:9",
+        ExternalSemanticSpace::new("zero-eligible-resume", 96)?,
+    )?;
+
+    let mut expected_sequence = 1;
+    loop {
+        let job = run_daemon_semantic_job_one_durable_boundary(
+            fixture.temp.path(),
+            &source_generation,
+            &mut runtime,
+            None,
+            true,
+            &ARTIFACT,
+            &RejectingSemanticAuthConfig,
+        )?;
+        assert_eq!(
+            job["semantic_progress_sequence"], expected_sequence,
+            "{job:#}"
+        );
+        assert!(runtime.semantic_executor.is_none());
+        if job["status"] == "ready" {
+            assert!(
+                expected_sequence > 1,
+                "the external resume path was not exercised"
+            );
+            break;
+        }
+        assert_eq!(job["status"], "budget_exhausted", "{job:#}");
+        expected_sequence += 1;
+        assert!(
+            expected_sequence <= 16,
+            "bounded reconciliation did not finish"
+        );
+    }
     Ok(())
 }
 

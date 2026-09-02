@@ -48,7 +48,7 @@ use super::{
     record_daemon_job_retry, record_source_refresh_retry, restore_daemon_consumer_retries,
     run_daemon_semantic_job_with_retry, run_pending_core_refresh, write_daemon_job_status,
     DaemonRetryBackoff, DaemonRuntime, DaemonSchedulerCycleContext, DaemonSchedulerPorts,
-    DaemonSemanticGeneration, DaemonSemanticJobPorts,
+    DaemonSemanticCatchUpBudget, DaemonSemanticGeneration, DaemonSemanticJobPorts,
 };
 
 const READINESS_QUERY: &str = "readiness-boundary-regression";
@@ -382,6 +382,7 @@ fn one_scheduler_pin_controls_worker_mutation_receipt_and_retry_accounting() {
             artifact_fetcher: &crate::test_support::ARTIFACT,
             config: &crate::test_support::CONFIG,
         },
+        DaemonSemanticCatchUpBudget::Drain,
     );
 
     assert_eq!(job["status"], "ready", "{job:#}");
@@ -776,6 +777,223 @@ fn one_core_cycle_then_scheduler_drains_semantic_consumer() {
     )
     .unwrap();
     assert!(!drained.continue_immediately);
+}
+
+#[test]
+fn queued_core_successor_waits_for_semantic_readiness_across_restart() {
+    let temp = tempfile::tempdir().unwrap();
+    let coordinator = CoreRefreshEngine::with_executor(std::sync::Arc::new(
+        |execution: SourceBackedRefreshExecution<'_>| {
+            Ok(publish_empty_authoritative_generation(&execution))
+        },
+    ));
+    coordinator.enqueue_for_test(None);
+    let mut runtime = DaemonRuntime::default();
+
+    let first_core = run_daemon_scheduler_cycle_with_activity(
+        &daemon_args(),
+        temp.path(),
+        &mut runtime,
+        None,
+        true,
+        None,
+        Some(&coordinator),
+    )
+    .unwrap();
+    assert!(first_core.did_work);
+    let first_generation = pinned_generation(temp.path());
+
+    coordinator.enqueue_for_test(Some(first_generation.clone()));
+    let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut publication_restart = DaemonRuntime::default();
+    super::restore_daemon_consumer_retries(&mut publication_restart, temp.path());
+    assert!(publication_restart.sidecar_drain.semantic_turn_pending);
+    runtime = publication_restart;
+    let semantic = {
+        let _jobs = install_jobs(
+            calls.clone(),
+            Some(json!({
+                "status": "budget_exhausted",
+                "semantic_progress_sequence": 1,
+                "source_records_decoded": 1,
+                "source_generation_ready": false,
+                "source_work_remaining": true,
+            })),
+        );
+        run_daemon_scheduler_cycle_with_activity(
+            &daemon_args(),
+            temp.path(),
+            &mut runtime,
+            None,
+            true,
+            None,
+            Some(&coordinator),
+        )
+        .unwrap()
+    };
+    assert!(semantic.continue_immediately);
+    assert_eq!(&*calls.borrow(), &["semantic_index"]);
+    assert!(
+        coordinator.has_pending_request(),
+        "one semantic turn must not consume the queued Core successor"
+    );
+    assert_eq!(pinned_generation(temp.path()), first_generation);
+    assert!(runtime.sidecar_drain.semantic_turn_pending);
+    assert_eq!(
+        runtime
+            .sidecar_drain
+            .semantic_attempted_generation
+            .as_deref(),
+        Some(first_generation.as_str())
+    );
+
+    let mut restarted_runtime = DaemonRuntime::default();
+    super::restore_daemon_consumer_retries(&mut restarted_runtime, temp.path());
+    assert!(restarted_runtime.sidecar_drain.semantic_turn_pending);
+    runtime = restarted_runtime;
+
+    let second_semantic = {
+        let _jobs = install_jobs(
+            calls.clone(),
+            Some(json!({
+                "status": "budget_exhausted",
+                "semantic_progress_sequence": 2,
+                "source_records_decoded": 1,
+                "source_generation_ready": false,
+                "source_work_remaining": true,
+            })),
+        );
+        run_daemon_scheduler_cycle_with_activity(
+            &daemon_args(),
+            temp.path(),
+            &mut runtime,
+            None,
+            true,
+            None,
+            Some(&coordinator),
+        )
+        .unwrap()
+    };
+    assert!(second_semantic.continue_immediately);
+    assert_eq!(&*calls.borrow(), &["semantic_index", "semantic_index"]);
+    assert!(coordinator.has_pending_request());
+    assert!(runtime.sidecar_drain.semantic_turn_pending);
+    assert_eq!(pinned_generation(temp.path()), first_generation);
+
+    let ready_semantic = {
+        let _jobs = install_jobs(
+            calls.clone(),
+            Some(json!({
+                "status": "ready",
+                "semantic_progress_sequence": 3,
+                "source_records_decoded": 1,
+                "source_generation_ready": true,
+                "source_work_remaining": false,
+            })),
+        );
+        run_daemon_scheduler_cycle_with_activity(
+            &daemon_args(),
+            temp.path(),
+            &mut runtime,
+            None,
+            true,
+            None,
+            Some(&coordinator),
+        )
+        .unwrap()
+    };
+    assert!(ready_semantic.continue_immediately);
+    assert_eq!(calls.borrow().len(), 3);
+    assert!(coordinator.has_pending_request());
+    assert!(!runtime.sidecar_drain.semantic_turn_pending);
+
+    let successor = run_daemon_scheduler_cycle_with_activity(
+        &daemon_args(),
+        temp.path(),
+        &mut runtime,
+        None,
+        true,
+        None,
+        Some(&coordinator),
+    )
+    .unwrap();
+    assert!(!successor.failed);
+    assert!(!coordinator.has_pending_request());
+    assert_eq!(calls.borrow().len(), 3);
+    assert_eq!(pinned_generation(temp.path()), first_generation);
+    assert!(runtime.sidecar_drain.semantic_turn_pending);
+    assert!(runtime
+        .sidecar_drain
+        .semantic_attempted_generation
+        .is_none());
+}
+
+#[test]
+fn foreground_query_skips_semantic_turn_without_blocking_core() {
+    let temp = tempfile::tempdir().unwrap();
+    let coordinator = CoreRefreshEngine::with_executor(Arc::new(
+        |execution: SourceBackedRefreshExecution<'_>| {
+            Ok(publish_empty_authoritative_generation(&execution))
+        },
+    ));
+    coordinator.enqueue_for_test(None);
+    let mut runtime = DaemonRuntime::default();
+    run_daemon_scheduler_cycle_with_activity(
+        &daemon_args(),
+        temp.path(),
+        &mut runtime,
+        None,
+        true,
+        None,
+        Some(&coordinator),
+    )
+    .unwrap();
+
+    let generation = pinned_generation(temp.path());
+    coordinator.enqueue_for_test(Some(generation));
+    let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let _jobs = install_jobs(
+        calls.clone(),
+        Some(json!({
+            "status": "budget_exhausted",
+            "semantic_progress_sequence": 1,
+            "source_generation_ready": false,
+            "source_work_remaining": true,
+        })),
+    );
+    let activity = Arc::new(crate::query_service::DaemonQueryActivity::new());
+    let request = activity.begin_request().expect("foreground query admitted");
+
+    let core = run_daemon_scheduler_cycle_with_activity(
+        &daemon_args(),
+        temp.path(),
+        &mut runtime,
+        None,
+        true,
+        Some(activity.as_ref()),
+        Some(&coordinator),
+    )
+    .unwrap();
+    assert!(!core.failed);
+    assert!(!coordinator.has_pending_request());
+    assert!(calls.borrow().is_empty());
+
+    drop(request);
+    let latest_generation = pinned_generation(temp.path());
+    coordinator.enqueue_for_test(Some(latest_generation));
+    let semantic = run_daemon_scheduler_cycle_with_activity(
+        &daemon_args(),
+        temp.path(),
+        &mut runtime,
+        None,
+        true,
+        Some(activity.as_ref()),
+        Some(&coordinator),
+    )
+    .unwrap();
+    assert!(semantic.continue_immediately);
+    assert_eq!(&*calls.borrow(), &["semantic_index"]);
+    assert!(coordinator.has_pending_request());
 }
 
 #[test]
