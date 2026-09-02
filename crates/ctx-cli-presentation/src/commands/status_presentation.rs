@@ -437,7 +437,7 @@ mod tests {
         );
         assert!(normalized.contains("Refresh ready"), "{rendered}");
         assert!(
-            normalized.contains("3 history records were excluded"),
+            normalized.contains("3 history records were skipped"),
             "{rendered}"
         );
         assert!(normalized.contains("excluded size unknown"), "{rendered}");
