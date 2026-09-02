@@ -15,14 +15,11 @@ use ctx_history_index_generation::{
     CloneTestOptions,
 };
 use ctx_history_index_generation::{
-    acquire_generation_retention_lease, certification_file_for_active, checksum_walks,
-    load_active_generation_pointer, release_generation_retention_lease,
+    certification_file_for_active, checksum_walks, load_active_generation_pointer,
     reset_physical_verification_activity, slot_path, GenerationRootTraversalStage,
     GenerationRootTraversalTestHookGuard,
 };
-use ctx_history_index_query::{
-    CoreEventPageBudget, DEFAULT_CORE_EVENT_PAGE_BUDGET, MAX_SOURCE_EVENT_PAGE_ITEMS,
-};
+use ctx_history_index_query::MAX_SOURCE_EVENT_PAGE_ITEMS;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use ctx_history_index_query::{IndexError, VerifiedIndex};
 use ctx_history_platform::platform_security::restrict_private_directory;
@@ -84,13 +81,40 @@ fn durable_exact_target_opens_after_more_than_two_publications() {
         1,
         &[(source.clone(), vec![record(&source, 1, "retained")])],
     );
-    let authority = acquire_generation_retention_lease(
-        &fixture.index_root,
+    assert_eq!(
+        load_snapshot_retention_lease(&fixture.data_root).unwrap(),
+        None
+    );
+    let authority = acquire_snapshot_retention_lease(
+        &fixture.data_root,
         &retained_id,
         "restartable_catchup",
         &"a".repeat(64),
     )
     .unwrap();
+    assert_eq!(
+        acquire_snapshot_retention_lease(
+            &fixture.data_root,
+            &retained_id,
+            "restartable_catchup",
+            &"a".repeat(64),
+        )
+        .unwrap(),
+        authority
+    );
+    assert_eq!(
+        load_snapshot_retention_lease(&fixture.data_root).unwrap(),
+        Some(authority.clone())
+    );
+    assert!(matches!(
+        acquire_snapshot_retention_lease(
+            &fixture.data_root,
+            &retained_id,
+            "restartable_catchup",
+            &"b".repeat(64),
+        ),
+        Err(SnapshotError::LeaseConflict(_))
+    ));
     for revision in 2..=5 {
         publish(
             &fixture.index_root,
@@ -125,7 +149,7 @@ fn durable_exact_target_opens_after_more_than_two_publications() {
     assert_eq!(retained.generation_id(), retained_id);
     assert_eq!(
         retained
-            .record_page(&source, None, 8, DEFAULT_CORE_EVENT_PAGE_BUDGET)
+            .record_page(&source, None, 8, DEFAULT_SNAPSHOT_PAGE_BUDGET)
             .unwrap()
             .items[0]
             .core_record
@@ -135,7 +159,12 @@ fn durable_exact_target_opens_after_more_than_two_publications() {
     );
     drop(retained);
 
-    assert!(release_generation_retention_lease(&fixture.index_root, &authority).unwrap());
+    assert!(release_snapshot_retention_lease(&fixture.data_root, &authority).unwrap());
+    assert!(!release_snapshot_retention_lease(&fixture.data_root, &authority).unwrap());
+    assert_eq!(
+        load_snapshot_retention_lease(&fixture.data_root).unwrap(),
+        None
+    );
     assert!(CoreSnapshot::open_retained(
         &fixture.data_root,
         &authority,
@@ -200,6 +229,14 @@ fn symlinked_search_component_is_rejected() {
             &generation_id,
             &SnapshotContract::current().unwrap()
         ),
+        Err(SnapshotError::UnsafePath(_))
+    ));
+    assert!(matches!(
+        load_active_generation_id(&fixture.data_root),
+        Err(SnapshotError::UnsafePath(_))
+    ));
+    assert!(matches!(
+        load_snapshot_retention_lease(&fixture.data_root),
         Err(SnapshotError::UnsafePath(_))
     ));
 }
@@ -558,7 +595,7 @@ fn manifest_delta_and_replayable_exact_json_pages_use_neutral_bounded_state() {
     assert_eq!(changes.get(&removed.identity().digest()), Some(&"removed"));
 
     let first = target
-        .record_page(&replaced, None, 1, DEFAULT_CORE_EVENT_PAGE_BUDGET)
+        .record_page(&replaced, None, 1, DEFAULT_SNAPSHOT_PAGE_BUDGET)
         .unwrap();
     assert_eq!(first.items.len(), 1);
     assert!(!first.terminal);
@@ -593,10 +630,10 @@ fn manifest_delta_and_replayable_exact_json_pages_use_neutral_bounded_state() {
     assert_eq!(cursor.generation_id(), target_id);
     assert!(cursor.source().exact_descriptor_eq(&replaced));
     let second = target
-        .record_page(&replaced, Some(&cursor), 1, DEFAULT_CORE_EVENT_PAGE_BUDGET)
+        .record_page(&replaced, Some(&cursor), 1, DEFAULT_SNAPSHOT_PAGE_BUDGET)
         .unwrap();
     let replay = target
-        .record_page(&replaced, Some(&cursor), 1, DEFAULT_CORE_EVENT_PAGE_BUDGET)
+        .record_page(&replaced, Some(&cursor), 1, DEFAULT_SNAPSHOT_PAGE_BUDGET)
         .unwrap();
     assert_eq!(second, replay);
     for item in &second.items {
@@ -620,6 +657,111 @@ fn manifest_delta_and_replayable_exact_json_pages_use_neutral_bounded_state() {
     let mut expected = expected_replacement;
     expected.sort_by_key(|record| record.event_id.digest());
     assert_eq!(observed, expected);
+}
+
+#[test]
+fn exact_record_batch_preserves_full_identity_order_totals_and_strict_bounds() {
+    let fixture = Fixture::new();
+    let source = source("exact-batch");
+    let records = vec![
+        record(&source, 1, "first"),
+        record(&source, 2, "second body"),
+        record(&source, 3, "third body is longest"),
+    ];
+    let generation_id = publish(&fixture.index_root, 1, &[(source.clone(), records.clone())]);
+    let snapshot = open(&fixture, &generation_id);
+    let expected = vec![records[2].clone(), records[0].clone(), records[1].clone()];
+    let event_ids = expected
+        .iter()
+        .map(|record| record.event_id)
+        .collect::<Vec<_>>();
+    let encoded_core_bytes = expected
+        .iter()
+        .map(|record| record.encode_stored().unwrap().len())
+        .sum::<usize>();
+    let content_bytes = expected
+        .iter()
+        .map(|record| core_content_bytes(&record.content).unwrap())
+        .sum::<usize>();
+    let maximum_record_encoded_bytes = expected
+        .iter()
+        .map(|record| record.encode_stored().unwrap().len())
+        .max()
+        .unwrap();
+    let maximum_record_content_bytes = expected
+        .iter()
+        .map(|record| core_content_bytes(&record.content).unwrap())
+        .max()
+        .unwrap();
+    let aggregate_budget = SnapshotPageBudget::new(encoded_core_bytes, content_bytes);
+    let per_record_budget =
+        SnapshotPageBudget::new(maximum_record_encoded_bytes, maximum_record_content_bytes);
+
+    let batch = snapshot
+        .core_records_by_ids(&event_ids, aggregate_budget, per_record_budget)
+        .unwrap()
+        .unwrap();
+    assert_eq!(batch.records, expected);
+    assert_eq!(batch.encoded_core_bytes, encoded_core_bytes);
+    assert_eq!(batch.content_bytes, content_bytes);
+
+    assert!(snapshot
+        .core_records_by_ids(
+            &event_ids,
+            SnapshotPageBudget::new(encoded_core_bytes - 1, content_bytes),
+            per_record_budget,
+        )
+        .unwrap()
+        .is_none());
+    assert!(snapshot
+        .core_records_by_ids(
+            &event_ids,
+            aggregate_budget,
+            SnapshotPageBudget::new(
+                maximum_record_encoded_bytes - 1,
+                maximum_record_content_bytes,
+            ),
+        )
+        .unwrap()
+        .is_none());
+
+    let missing = record(&source, 99, "not published").event_id;
+    assert!(snapshot
+        .core_records_by_ids(
+            &[event_ids[0], missing],
+            aggregate_budget,
+            per_record_budget,
+        )
+        .unwrap()
+        .is_none());
+    assert!(matches!(
+        snapshot.core_records_by_ids(
+            &[event_ids[0], event_ids[0]],
+            aggregate_budget,
+            per_record_budget,
+        ),
+        Err(SnapshotError::Bounds(_))
+    ));
+    assert!(matches!(
+        snapshot.core_records_by_ids(
+            &[records[0].session_id],
+            aggregate_budget,
+            per_record_budget,
+        ),
+        Err(SnapshotError::Bounds(_))
+    ));
+    assert!(matches!(
+        snapshot.core_records_by_ids(
+            &vec![event_ids[0]; MAX_CORE_RECORD_BATCH_ITEMS + 1],
+            aggregate_budget,
+            per_record_budget,
+        ),
+        Err(SnapshotError::Bounds(_))
+    ));
+    assert!(matches!(
+        snapshot.core_records_by_ids(&event_ids, SnapshotPageBudget::new(0, 1), per_record_budget,),
+        Err(SnapshotError::Bounds(_))
+    ));
 }
 
 #[test]
@@ -659,7 +801,7 @@ fn schema_fingerprint_certification_and_bounds_fail_with_typed_errors_without_ha
         Err(SnapshotError::Bounds(_))
     ));
     assert!(matches!(
-        snapshot.record_page(&source, None, 0, DEFAULT_CORE_EVENT_PAGE_BUDGET),
+        snapshot.record_page(&source, None, 0, DEFAULT_SNAPSHOT_PAGE_BUDGET),
         Err(SnapshotError::Bounds(_))
     ));
     assert!(matches!(
@@ -667,12 +809,12 @@ fn schema_fingerprint_certification_and_bounds_fail_with_typed_errors_without_ha
             &source,
             None,
             MAX_SOURCE_EVENT_PAGE_ITEMS + 1,
-            DEFAULT_CORE_EVENT_PAGE_BUDGET
+            DEFAULT_SNAPSHOT_PAGE_BUDGET
         ),
         Err(SnapshotError::Bounds(_))
     ));
     assert!(matches!(
-        snapshot.record_page(&source, None, 1, CoreEventPageBudget::new(0, 1)),
+        snapshot.record_page(&source, None, 1, SnapshotPageBudget::new(0, 1)),
         Err(SnapshotError::Bounds(_))
     ));
     drop(snapshot);
@@ -840,4 +982,21 @@ fn current_contract_and_path_validation_are_explicit() {
         CoreSnapshot::open("relative", &"a".repeat(64), &contract),
         Err(SnapshotError::UnsafePath(_))
     ));
+}
+
+#[test]
+fn active_generation_lookup_uses_the_core_data_root_and_reports_absence() {
+    let fixture = Fixture::new();
+    assert_eq!(load_active_generation_id(&fixture.data_root).unwrap(), None);
+
+    let first = publish(&fixture.index_root, 1, &[]);
+    assert_eq!(
+        load_active_generation_id(&fixture.data_root).unwrap(),
+        Some(first)
+    );
+    let second = publish(&fixture.index_root, 2, &[]);
+    assert_eq!(
+        load_active_generation_id(&fixture.data_root).unwrap(),
+        Some(second)
+    );
 }
