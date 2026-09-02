@@ -53,41 +53,6 @@ pub(super) fn run_report(
     )
 }
 
-fn replace_metadata_version(index_root: &Path, version: u64) -> VerifiedIndex {
-    let current = VerifiedIndex::open_pinned(index_root).unwrap();
-    let generation_id = current.generation_id().to_owned();
-    let mut metadata: Value =
-        serde_json::from_slice(current.publication_metadata().unwrap()).unwrap();
-    metadata["version"] = json!(version);
-    if version != SOURCE_REFRESH_PUBLICATION_METADATA_VERSION {
-        metadata
-            .as_object_mut()
-            .unwrap()
-            .remove("committed_rejection_diagnostics");
-    }
-    if version < 3 {
-        metadata.as_object_mut().unwrap().remove("route_controls");
-    }
-    if version == 1 {
-        metadata
-            .get_mut("receipt")
-            .and_then(Value::as_object_mut)
-            .unwrap()
-            .remove("zero_source_authority");
-    }
-    drop(current);
-    let writer = ctx_history_index::GenerationWriter::open(index_root, WriterOptions::default())
-        .unwrap()
-        .into_writer()
-        .unwrap();
-    writer
-        .republish_current_publication_metadata(
-            &generation_id,
-            serde_json::to_vec(&metadata).unwrap(),
-        )
-        .unwrap()
-}
-
 #[test]
 fn present_unsupported_only_refresh_fails_cold_and_reports_against_a_warm_generation() {
     let temp = tempfile::tempdir().unwrap();
@@ -113,26 +78,11 @@ fn present_unsupported_only_refresh_fails_cold_and_reports_against_a_warm_genera
     ));
 
     let retained_generation = publish_pin_source(&index_root, publication_pin_source());
-    let legacy_nonempty = VerifiedIndex::open_pinned(&index_root).unwrap();
-    assert!(legacy_nonempty.publication_metadata().is_none());
-    assert_eq!(
-        verify_generation_query_readiness(&legacy_nonempty).unwrap(),
-        GenerationQueryReadiness::Ready
-    );
-    verify_generation_query_authority(&legacy_nonempty).unwrap();
-    assert!(verified_generation_is_query_ready(&legacy_nonempty).unwrap());
-    drop(legacy_nonempty);
+    let retained_nonempty = VerifiedIndex::open_pinned(&index_root).unwrap();
+    assert!(SourceBackedGenerationState::decode_from_verified_index(&retained_nonempty).is_ok());
+    drop(retained_nonempty);
     let warm = run_report(&discovery, report, &data_root, &index_root).unwrap();
     assert_eq!(warm.generation_id, retained_generation);
-    let recertified = warm
-        .verified_publication
-        .as_ref()
-        .expect("legacy retained generation is recertified before finalization");
-    assert_eq!(recertified.generation_id(), retained_generation);
-    assert_eq!(
-        recertified.metadata().version,
-        SOURCE_REFRESH_PUBLICATION_METADATA_VERSION
-    );
     let [failed_route] = warm.route_results.as_slice() else {
         panic!("one failed unsupported route expected: {warm:#?}");
     };
@@ -141,44 +91,10 @@ fn present_unsupported_only_refresh_fails_cold_and_reports_against_a_warm_genera
     let retained = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert_eq!(retained.generation_id(), retained_generation);
     assert_eq!(retained.manifest().sources.len(), 1);
-    assert_eq!(
-        SourceBackedPublicationMetadata::decode(&retained)
-            .unwrap()
-            .version,
-        SOURCE_REFRESH_PUBLICATION_METADATA_VERSION
-    );
-    drop(retained);
-
-    // Hand the recertified reuse through the engine's terminal-success gate:
-    // production finalization must receive the verified authority rather than
-    // falling back to an unbound retained index.
-    let publication = Arc::new(Mutex::new(Some(warm)));
-    let returned = Arc::clone(&publication);
-    let coordinator = CoreRefreshEngine::with_executor(Arc::new(
-        move |_execution: SourceBackedRefreshExecution<'_>| {
-            returned
-                .lock()
-                .unwrap()
-                .take()
-                .ok_or_else(|| anyhow!("legacy recertification executor ran more than once"))
-        },
-    ));
-    coordinator.enqueue_periodic(&data_root).unwrap();
-    let finalized = coordinator
-        .run_next(&data_root)
-        .expect("recertified reuse finalization");
-    assert!(!finalized.failed, "{:#}", finalized.job);
-    assert_eq!(
-        coordinator
-            .pinned_core_publication()
-            .expect("upper finalization retained verified authority")
-            .generation_id(),
-        retained_generation
-    );
 }
 
 #[test]
-fn executable_empty_inventory_publishes_v2_authority_and_survives_restart() {
+fn executable_empty_inventory_publishes_typed_state_and_identical_state_reuses() {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("data");
     let index_root = source_backed_index_root(&data_root);
@@ -206,67 +122,15 @@ fn executable_empty_inventory_publishes_v2_authority_and_survives_restart() {
     assert_eq!(authority.generation_id, publication.generation_id);
 
     let restarted = VerifiedIndex::open_pinned(&index_root).unwrap();
-    assert_eq!(
-        verify_generation_query_readiness(&restarted).unwrap(),
-        GenerationQueryReadiness::Ready
-    );
-    assert!(verified_generation_is_query_ready(&restarted).unwrap());
-    verify_generation_query_authority(&restarted).unwrap();
-    let metadata = SourceBackedPublicationMetadata::decode(&restarted).unwrap();
-    assert_eq!(
-        metadata.version,
-        SOURCE_REFRESH_PUBLICATION_METADATA_VERSION
-    );
-    assert!(metadata.certifies_generation(&restarted));
+    assert!(SourceBackedGenerationState::decode_from_verified_index(&restarted).is_ok());
     drop(restarted);
 
-    let legacy = replace_metadata_version(&index_root, 1);
-    assert_eq!(
-        verify_generation_query_readiness(&legacy).unwrap(),
-        GenerationQueryReadiness::Uncertified
-    );
-    assert!(!verified_generation_is_query_ready(&legacy).unwrap());
-    assert_eq!(
-        SourceBackedPublicationMetadata::decode(&legacy)
-            .unwrap()
-            .version,
-        1
-    );
-    assert!(pin_retained_generation(&data_root, &publication.generation_id).is_err());
-    drop(legacy);
-    let recertified = run_report(&discovery, report, &data_root, &index_root).unwrap();
-    assert_eq!(recertified.generation_id, publication.generation_id);
-    let recertified = VerifiedIndex::open_pinned(&index_root).unwrap();
-    assert!(verified_generation_is_query_ready(&recertified).unwrap());
     assert!(pin_retained_generation(&data_root, &publication.generation_id).is_ok());
-    assert_eq!(
-        SourceBackedPublicationMetadata::decode(&recertified)
-            .unwrap()
-            .version,
-        SOURCE_REFRESH_PUBLICATION_METADATA_VERSION
-    );
-    drop(recertified);
-
-    let unknown = replace_metadata_version(&index_root, 99);
-    assert!(SourceBackedPublicationMetadata::decode(&unknown).is_err());
-    let neutral_detail = format!(
-        "{:#}",
-        verify_generation_query_readiness(&unknown).unwrap_err()
-    );
-    let authority_error = verify_generation_query_authority(&unknown).unwrap_err();
-    assert_eq!(
-        authority_error.error_code(),
-        "publication_authority_invalid"
-    );
-    assert!(!authority_error.retryable());
-    assert!(matches!(
-        &authority_error,
-        GenerationQueryAuthorityError::Invalid {
-            generation_id,
-            detail,
-        } if generation_id == unknown.generation_id() && detail == &neutral_detail
-    ));
-    assert!(verified_generation_is_query_ready(&unknown).is_err());
+    let reused = run_report(&discovery, report, &data_root, &index_root).unwrap();
+    assert_eq!(reused.generation_id, publication.generation_id);
+    let reused = VerifiedIndex::open_pinned(&index_root).unwrap();
+    assert!(SourceBackedGenerationState::decode_from_verified_index(&reused).is_ok());
+    assert!(pin_retained_generation(&data_root, &publication.generation_id).is_ok());
 }
 
 #[test]
@@ -292,10 +156,11 @@ fn genuinely_empty_catalog_publishes_a_verified_noop_generation() {
     assert!(publication.zero_source_authority.is_empty());
 
     let restarted = VerifiedIndex::open_pinned(&index_root).unwrap();
-    assert!(verified_generation_is_query_ready(&restarted).unwrap());
-    let metadata = SourceBackedPublicationMetadata::decode(&restarted).unwrap();
-    assert_eq!(metadata.refresh_scope, SourceBackedRefreshScope::All);
-    assert!(metadata.certifies_generation(&restarted));
+    assert!(
+        SourceBackedGenerationState::decode_from_verified_index(&restarted)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -315,10 +180,6 @@ fn confirmed_deletion_can_publish_empty_but_mixed_unavailable_cannot() {
     };
     let first = run_report(&discovery, report, &data_root, &index_root).unwrap();
     assert_eq!(first.certified_source_count, 1);
-    let legacy_nonempty = replace_metadata_version(&index_root, 1);
-    assert!(verified_generation_is_query_ready(&legacy_nonempty).unwrap());
-    drop(legacy_nonempty);
-
     fs::remove_file(source_root.join(format!("rollout-{session}.jsonl"))).unwrap();
     let deletion = run_report(
         &discovery,

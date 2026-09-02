@@ -490,14 +490,6 @@ fn classify_mcp_search_error(
         crate::commands::source_index::McpSearchError::GenerationChanged => {
             ToolBackendError::GenerationChanged
         }
-        crate::commands::source_index::McpSearchError::GenerationAuthority(error) => {
-            ToolBackendError::GenerationAuthority(StructuredToolError {
-                structured: crate::commands::source_index::generation_query_authority_error_json(
-                    &error,
-                ),
-                detail: error.to_string(),
-            })
-        }
         crate::commands::source_index::McpSearchError::Application { detail } => {
             if detail.contains("unknown provider root selector in the pinned generation")
                 || detail.contains("unknown provider root selector `")
@@ -526,14 +518,6 @@ fn classify_show_error(
     match error {
         crate::commands::source_index::ShowApplicationError::GenerationChanged => {
             ToolBackendError::GenerationChanged
-        }
-        crate::commands::source_index::ShowApplicationError::GenerationAuthority(error) => {
-            ToolBackendError::GenerationAuthority(StructuredToolError {
-                structured: crate::commands::source_index::generation_query_authority_error_json(
-                    &error,
-                ),
-                detail: error.to_string(),
-            })
         }
         crate::commands::source_index::ShowApplicationError::CursorStale { detail } => {
             ToolBackendError::Cursor {
@@ -769,21 +753,6 @@ mod tests {
                 kind: CursorFailureKind::Mismatch,
                 detail: observed,
             } if observed == detail
-        ));
-    }
-
-    #[test]
-    fn typed_search_generation_authority_maps_without_anyhow_flattening() {
-        let error = ctx_history_refresh::GenerationQueryAuthorityError::UncertifiedEmpty {
-            generation_id: "11".repeat(32),
-        };
-        let mapped = classify_mcp_search_error(
-            crate::commands::source_index::McpSearchError::GenerationAuthority(error),
-        );
-        assert!(matches!(
-            mapped,
-            ToolBackendError::GenerationAuthority(StructuredToolError { structured, .. })
-                if structured["error_code"] == "source_unavailable"
         ));
     }
 }

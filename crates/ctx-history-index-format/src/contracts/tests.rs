@@ -57,12 +57,35 @@ fn source_route_snapshot_and_generation_wire_contract_remain_stable() {
     let manifest = GenerationManifest::from_parts(Vec::new(), vec![snapshot]).unwrap();
     assert_eq!(
         serde_json::to_string(&manifest).unwrap(),
-        "{\"manifest_version\":10,\"identity_version\":1,\"core_record_version\":3,\"core_record_contract_fingerprint\":\"ebb5c9b638de184824a6ce141ebf9b70941fb293fc113d29e2851565bad4371e\",\"lexical_schema_version\":22,\"lexical_analyzer_version\":2,\"policy_schema_hash\":\"84d58ff1dbcfbf524845eea78162e013e76cc000b275393711b6617764da3ae9\",\"indexed_documents\":0,\"certified_source_bytes\":0,\"sources\":[],\"core_record_aggregates\":[],\"source_routes\":[{\"route_identity\":\"abababababababababababababababababababababababababababababababab\",\"sources\":[],\"missing\":null}],\"automatic_provider_discovery\":true,\"provider_root_config_digest\":\"4bfe780cf41a834d4bd7c58d54498cc96b6a5a1d6b20c37f212af31aaa674064\",\"provider_roots\":[]}",
+        "{\"manifest_version\":11,\"identity_version\":1,\"core_record_version\":3,\"core_record_contract_fingerprint\":\"ebb5c9b638de184824a6ce141ebf9b70941fb293fc113d29e2851565bad4371e\",\"lexical_schema_version\":22,\"lexical_analyzer_version\":2,\"policy_schema_hash\":\"84d58ff1dbcfbf524845eea78162e013e76cc000b275393711b6617764da3ae9\",\"indexed_documents\":0,\"certified_source_bytes\":0,\"sources\":[],\"core_record_aggregates\":[],\"source_routes\":[{\"route_identity\":\"abababababababababababababababababababababababababababababababab\",\"sources\":[],\"missing\":null}],\"generation_state\":{\"format\":\"ctx.generation-state.empty.v1\",\"bytes\":\"\"},\"automatic_provider_discovery\":true,\"provider_root_config_digest\":\"4bfe780cf41a834d4bd7c58d54498cc96b6a5a1d6b20c37f212af31aaa674064\",\"provider_roots\":[]}",
     );
     assert_eq!(
         manifest.generation_id().unwrap(),
-        "6bc6b9995692fe7302983e5fdf387310344a7f61ccfcc8d6755acfd0d3c4bc35"
+        "1c30f4b8de96a2294a8ef6a2d77c1168e9e5b125f202b7c1c95a6bee0e2d5c59"
     );
+}
+
+#[test]
+fn generation_state_envelope_rejects_malformed_oversize_and_noncanonical_values() {
+    use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
+
+    let manifest = GenerationManifest::from_parts(Vec::new(), Vec::new()).unwrap();
+    let mut malformed = serde_json::to_value(&manifest).unwrap();
+    malformed["generation_state"]["format"] = serde_json::json!("Invalid Format");
+    let malformed: GenerationManifest = serde_json::from_value(malformed).unwrap();
+    assert!(matches!(
+        malformed.validate_contract(),
+        Err(IndexError::InvalidGenerationStateEnvelope)
+    ));
+
+    let mut oversized = serde_json::to_value(&manifest).unwrap();
+    oversized["generation_state"]["bytes"] =
+        serde_json::json!(STANDARD_NO_PAD.encode(vec![0; MAX_GENERATION_STATE_BYTES + 1]));
+    assert!(serde_json::from_value::<GenerationManifest>(oversized).is_err());
+
+    let mut noncanonical = serde_json::to_value(manifest).unwrap();
+    noncanonical["generation_state"]["bytes"] = serde_json::json!("Zg==");
+    assert!(serde_json::from_value::<GenerationManifest>(noncanonical).is_err());
 }
 
 #[test]

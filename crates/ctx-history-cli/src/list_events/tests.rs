@@ -19,7 +19,7 @@ use serde_json::{json, Value};
 use super::*;
 use crate::{
     analytics::{RenderFormat, ShowTelemetry, TargetKind},
-    test_query_authority::{publish_empty_generation, EmptyPublicationAuthority},
+    test_query_authority::publish_empty_generation,
     ui::{RenderContext, StreamKind, TestContext},
 };
 
@@ -93,59 +93,21 @@ fn compound_invalid_list_requests_preserve_selection_cursor_limit_precedence() {
 }
 
 #[test]
-fn query_authority_list_gateway_accepts_authoritative_empty_and_rejects_invalid_empty() {
-    let authoritative = tempfile::tempdir().unwrap();
-    let generation_id = publish_empty_generation(
-        authoritative.path(),
-        EmptyPublicationAuthority::AuthoritativeCurrent,
-    );
-    let index = open_event_range_index(authoritative.path(), None).unwrap();
+fn list_gateway_opens_a_verified_empty_generation() {
+    let temp = tempfile::tempdir().unwrap();
+    let generation_id = publish_empty_generation(temp.path());
+    let index = open_event_range_index(temp.path(), None).unwrap();
     assert_eq!(index.generation_id(), generation_id);
     assert_eq!(index.document_count(), 0);
-
-    for (authority, error_code, retryable) in [
-        (
-            EmptyPublicationAuthority::Missing,
-            "source_unavailable",
-            true,
-        ),
-        (
-            EmptyPublicationAuthority::LegacyV1,
-            "source_unavailable",
-            true,
-        ),
-        (
-            EmptyPublicationAuthority::Malformed,
-            "publication_authority_invalid",
-            false,
-        ),
-        (
-            EmptyPublicationAuthority::UnknownVersion,
-            "publication_authority_invalid",
-            false,
-        ),
-    ] {
-        let temp = tempfile::tempdir().unwrap();
-        publish_empty_generation(temp.path(), authority);
-        let error = match open_event_range_index(temp.path(), None) {
-            Ok(_) => panic!("invalid empty generation must not open for list"),
-            Err(error) => error,
-        };
-        assert!(matches!(error, EventQueryError::GenerationAuthority(_)));
-        let value = event_query_error_value(&error);
-        assert_eq!(value["error_code"], error_code);
-        assert_eq!(value["retryable"], retryable);
-    }
 }
 
 #[test]
-fn query_authority_list_cursor_rechecks_the_retained_generation() {
+fn list_cursor_opens_its_exact_verified_retained_generation() {
     let temp = tempfile::tempdir().unwrap();
-    let legacy_generation =
-        publish_empty_generation(temp.path(), EmptyPublicationAuthority::LegacyV1);
+    let retained_generation = publish_empty_generation(temp.path());
     publish_fixture(temp.path(), &["active nonempty successor".to_owned()]);
     let active = open_event_range_index(temp.path(), None).unwrap();
-    assert_ne!(active.generation_id(), legacy_generation);
+    assert_ne!(active.generation_id(), retained_generation);
     let selection = all_selection(CoreEventRangeDirection::Ascending);
     let event = ctx_history_read_application::PinnedHistoryQuery::new(&active, None)
         .list_events_page(&ctx_history_read_application::ListEventsPageRequest {
@@ -162,22 +124,11 @@ fn query_authority_list_cursor_rechecks_the_retained_generation() {
         .into_iter()
         .next()
         .unwrap();
-    let cursor = selection.cursor_for(&legacy_generation, &event).unwrap();
+    let cursor = selection.cursor_for(&retained_generation, &event).unwrap();
 
-    let error = match open_event_range_index(temp.path(), Some(&cursor)) {
-        Ok(_) => panic!("uncertified retained generation must not open from a list cursor"),
-        Err(error) => error,
-    };
-    assert!(matches!(
-        error,
-        EventQueryError::GenerationAuthority(
-            ctx_history_refresh::GenerationQueryAuthorityError::UncertifiedEmpty { .. }
-        )
-    ));
-    assert_eq!(
-        event_query_error_value(&error)["error_code"],
-        "source_unavailable"
-    );
+    let retained = open_event_range_index(temp.path(), Some(&cursor)).unwrap();
+    assert_eq!(retained.generation_id(), retained_generation);
+    assert_eq!(retained.document_count(), 0);
 }
 
 fn test_source() -> SourceKey {

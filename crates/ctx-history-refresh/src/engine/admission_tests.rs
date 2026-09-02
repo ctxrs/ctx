@@ -110,30 +110,52 @@ fn queued_complete_catalog_is_readmitted_when_provider_roots_change() {
             .iter()
             .cloned()
             .collect::<Vec<_>>();
-        let commit = ctx_history_index::GenerationWriter::open(
+        let mut writer = ctx_history_index::GenerationWriter::open(
             execution.index_root,
             ctx_history_index::WriterOptions::default(),
         )?
         .into_writer()
-        .map_err(crate::committed_generation_recovery_error)?
-        .commit(|_| true)?;
-        Ok(SourceBackedRefreshPublication {
-            route_results: selected
+        .map_err(crate::committed_generation_recovery_error)?;
+        writer.set_present_source_routes(
+            selected
                 .iter()
-                .map(|route| {
-                    SourceBackedRefreshRouteResult::succeeded(route.as_str().to_owned(), true)
-                })
-                .collect(),
-            zero_source_authority: selected
+                .cloned()
+                .map(|route| ctx_history_index::SourceRouteSnapshot::present(route, Vec::new()))
+                .collect::<ctx_history_index::Result<Vec<_>>>()?,
+        )?;
+        let route_results = selected
+            .iter()
+            .map(|route| SourceBackedRefreshRouteResult::succeeded(route.as_str().to_owned(), true))
+            .collect::<Vec<_>>();
+        let zero_source_authority = selected
+            .iter()
+            .cloned()
+            .map(|route| {
+                (
+                    route,
+                    SourceBackedZeroSourceAuthorityKind::CompleteEmptyInventory,
+                )
+            })
+            .collect::<Vec<_>>();
+        let commit = tests::commit_source_backed_test_generation_with_facts(
+            writer,
+            tests::SourceBackedTestGenerationFacts {
+                explicit_source_catalog: execution.explicit_source_catalog.cloned(),
+                ..tests::SourceBackedTestGenerationFacts::default()
+            },
+        )?;
+        Ok(SourceBackedRefreshPublication {
+            route_results,
+            zero_source_authority: zero_source_authority
                 .into_iter()
-                .map(|route| SourceBackedZeroSourceAuthority {
+                .map(|(route_identity, kind)| SourceBackedZeroSourceAuthority {
                     generation_id: commit.generation_id.clone(),
-                    route_identity: route,
-                    kind: SourceBackedZeroSourceAuthorityKind::CompleteEmptyInventory,
+                    route_identity,
+                    kind,
                 })
                 .collect(),
             catalog_route_bindings: Vec::new(),
-            verified_publication: None,
+            verified_index: None,
             generation_id: commit.generation_id,
             published_explicit_source_catalog: execution.explicit_source_catalog.cloned(),
             unsupported_routes: 0,

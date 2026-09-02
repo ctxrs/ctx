@@ -59,8 +59,6 @@ pub enum ShowApplicationError {
         "History changed while ctx was opening the searchable generation. Retry the same request."
     )]
     GenerationChanged,
-    #[error(transparent)]
-    GenerationAuthority(ctx_history_refresh::GenerationQueryAuthorityError),
     #[error("{detail}")]
     CursorStale { detail: String },
     #[error("{detail}")]
@@ -107,10 +105,6 @@ impl ShowApplicationError {
             Ok(error) => return Self::from_index(error),
             Err(error) => error,
         };
-        let error = match error.downcast::<ctx_history_refresh::GenerationQueryAuthorityError>() {
-            Ok(error) => return Self::GenerationAuthority(error),
-            Err(error) => error,
-        };
         let error = match error.downcast::<ctx_history_read_application::ReadModelLimitError>() {
             Ok(error) => {
                 return Self::OutputLimit {
@@ -131,7 +125,6 @@ impl ShowApplicationError {
     fn into_cli_error(self) -> anyhow::Error {
         match self {
             Self::GenerationChanged => anyhow::Error::new(IndexError::ConcurrentGenerationChange),
-            Self::GenerationAuthority(error) => anyhow::Error::new(error),
             Self::CursorStale { .. } => {
                 anyhow::Error::new(IndexError::SessionEventCursorGenerationMismatch {
                     cursor_generation: "stale".to_owned(),

@@ -58,20 +58,7 @@ struct GenerationIntegrityCertification {
 /// transitions without another full read of the active generation.
 pub struct CertifiedPhysicalIntegrity {
     certification: GenerationIntegrityCertification,
-}
-
-impl CertifiedPhysicalIntegrity {
-    pub(crate) fn certified_artifact(
-        &self,
-        path: &Path,
-    ) -> Option<(ArtifactIdentity, [u8; 32], bool)> {
-        let path = path.to_str()?;
-        self.certification
-            .artifacts
-            .iter()
-            .find(|artifact| artifact.artifact.path == path)
-            .map(|artifact| (artifact.artifact.clone(), artifact.sha256, artifact.sealed))
-    }
+    recertified: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -284,7 +271,10 @@ pub fn verify_or_certify_physical_integrity(
     index: &tantivy::Index,
 ) -> Result<CertifiedPhysicalIntegrity> {
     if let Some(certification) = matching_certification(root, pointer, slot, index)? {
-        return Ok(CertifiedPhysicalIntegrity { certification });
+        return Ok(CertifiedPhysicalIntegrity {
+            certification,
+            recertified: false,
+        });
     }
 
     let generation_path = slot_path(root, slot);
@@ -985,6 +975,7 @@ use candidate::certification_digest_matches_slot;
 pub use candidate::{
     certify_candidate_physical_integrity, verify_candidate_physical_integrity_read_only,
 };
+pub use install::cache_recertified_physical_integrity;
 use install::{install_certification, install_certification_sidecar, CertificationInstallPolicy};
 pub use pointer_fence::ActiveGenerationPointerFence;
 #[cfg(windows)]

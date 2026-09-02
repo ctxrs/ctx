@@ -4,21 +4,6 @@ use sha2::{Digest, Sha256};
 
 use crate::{GenerationError as IndexError, Result};
 
-pub(super) fn copy_exact_authenticated_file<R: Read, W: Write>(
-    source: &mut R,
-    destination: &mut W,
-    expected_bytes: u64,
-    aggregate_allowance: u64,
-) -> Result<u64> {
-    Ok(copy_and_hash_exact_authenticated_file(
-        source,
-        destination,
-        expected_bytes,
-        aggregate_allowance,
-    )?
-    .0)
-}
-
 pub(super) fn copy_and_hash_exact_authenticated_file<R: Read, W: Write>(
     source: &mut R,
     destination: &mut W,
@@ -82,7 +67,7 @@ mod tests {
         let mut source = InfiniteReader { read_bytes: 0 };
         let mut destination = Vec::new();
         assert!(matches!(
-            copy_exact_authenticated_file(&mut source, &mut destination, 17, 17),
+            copy_and_hash_exact_authenticated_file(&mut source, &mut destination, 17, 17),
             Err(IndexError::CurrentRepublishSourceTopology(
                 "source file grew while cloning"
             ))

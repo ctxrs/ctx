@@ -10,11 +10,6 @@ filegroup(
     srcs = glob(["**"], exclude = ["BUILD.bazel"]),
 )
 
-filegroup(
-    name = "predecessor_fixture",
-    srcs = glob(["testdata/pred/**"]),
-)
-
 COMMON_RUSTC_ENV = {
     "CARGO_MANIFEST_DIR": "crates/ctx-history-index",
 }
@@ -88,7 +83,6 @@ ctx_rust_test(
         normal_dev = True,
         proc_macro_dev = True,
     ),
-    data = [":predecessor_fixture"],
     deps = all_crate_deps(
         normal = True,
         normal_dev = True,
@@ -98,34 +92,6 @@ ctx_rust_test(
         proc_macro_dev = True,
     ),
     rustc_env = COMMON_RUSTC_ENV,
-)
-
-ctx_rust_test(
-    name = "republish_fault_tests",
-    srcs = RUST_TEST_SRCS,
-    crate_name = "ctx_history_index_republish_faults",
-    crate_root = "src/lib.rs",
-    edition = crate_edition(),
-    aliases = aliases(
-        normal_dev = True,
-        proc_macro_dev = True,
-    ),
-    args = ["subprocess_"],
-    data = [":predecessor_fixture"],
-    deps = all_crate_deps(
-        normal = True,
-        normal_dev = True,
-    ) + CTX_HISTORY_INDEX_TEST_DEPS,
-    proc_macro_deps = all_crate_deps(
-        proc_macro = True,
-        proc_macro_dev = True,
-    ),
-    rustc_env = COMMON_RUSTC_ENV,
-    tags = [
-        "fault-injection",
-        "republish",
-        "safe-presubmit",
-    ],
 )
 
 ctx_rust_test(
@@ -155,45 +121,5 @@ ctx_rust_test(
     ),
     rustc_env = COMMON_RUSTC_ENV,
     tags = ["tier-nightly"],
-    timeout = "long",
-)
-
-# Raw controlled-host measurement. Pair and analyze its output outside the test;
-# this target owns no benchmark classifier, scheduler, or report format.
-ctx_rust_test(
-    name = "republish_raw_measurement",
-    srcs = RUST_TEST_SRCS,
-    crate_name = "ctx_history_index_republish_raw_measurement",
-    crate_root = "src/lib.rs",
-    edition = crate_edition(),
-    aliases = aliases(
-        normal_dev = True,
-        proc_macro_dev = True,
-    ),
-    args = [
-        "--ignored",
-        "--exact",
-        "tests::republish_qualification::controlled_host_measurement",
-        "--nocapture",
-        "--test-threads=1",
-    ],
-    deps = all_crate_deps(
-        normal = True,
-        normal_dev = True,
-    ) + CTX_HISTORY_INDEX_TEST_DEPS,
-    proc_macro_deps = all_crate_deps(
-        proc_macro = True,
-        proc_macro_dev = True,
-    ),
-    rustc_env = COMMON_RUSTC_ENV,
-    size = "large",
-    tags = [
-        "linux-only",
-        "manual",
-        "republish",
-        "no-cache",
-        "release",
-    ],
-    target_compatible_with = ["@platforms//os:linux"],
     timeout = "long",
 )

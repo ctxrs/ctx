@@ -454,26 +454,6 @@ impl CaptureLifecycleSink for TestLifecycle {
     {
         Ok(self.commit_receipt())
     }
-
-    fn commit_with_metadata<F, I, M>(
-        self,
-        _revalidate: F,
-        _revalidate_inventory: I,
-        metadata_factory: M,
-    ) -> Result<CaptureCommitOutcome<TestSnapshot, ()>>
-    where
-        F: FnMut(CaptureRevalidationTarget<'_>) -> bool,
-        I: FnMut(&CertifiedSourceInventory) -> bool,
-        M: for<'a> FnOnce(CapturePublicationContext<'a, Self::Snapshot<'a>>) -> Result<Vec<u8>>,
-    {
-        let snapshot = self.snapshot();
-        metadata_factory(CapturePublicationContext::new("test-generation", snapshot))?;
-        Ok(CaptureCommitOutcome::new(
-            self.commit_receipt(),
-            CapturePublicationDisposition::Published,
-            VerifiedCapture::new(()),
-        ))
-    }
 }
 
 macro_rules! capture_test_generation_with_resident {

@@ -32,7 +32,7 @@ pub use publication::{
 };
 
 pub use commit_contract::{
-    CommitReceipt, PublicationDisposition, PublicationMetadataContext, PublicationStage,
+    CommitReceipt, GenerationStateContext, PublicationDisposition, PublicationStage,
     PublishedGeneration, RevalidationTarget,
 };
 
@@ -44,10 +44,6 @@ pub(crate) use ctx_history_index_format::required_field;
 pub(crate) use ctx_history_index_format::{
     accumulate_core_record, core_record_accumulator_leaf, core_record_leaf, implicit_source_routes,
     source_sort_key, INDEX_MEMORY_MIN_PER_THREAD,
-};
-#[cfg(test)]
-pub(crate) use ctx_history_index_format::{
-    current_core_record_contract_fingerprint, CommitPayload, COMMIT_PAYLOAD_VERSION,
 };
 pub use ctx_history_index_format::{
     current_semantic_generation_policy, current_semantic_generation_policy_hash,
@@ -64,12 +60,15 @@ pub(crate) use ctx_history_index_format::{
 pub use ctx_history_index_format::{
     source_token, AppliedProviderRoot, AppliedProviderRootSourceMembership,
     CommittedPredecessorMigrationRecovery, ConsecutiveSourceMissingCount,
-    DetachedReleasedProviderRootAuthority, GenerationManifest, IndexError, ProviderRootDefinition,
-    ProviderRootSourceIdentity, Result, SourceCoreRecordAggregate, SourceMissingObservationPoint,
-    SourceRouteIdentity, SourceRouteMissingState, SourceRouteSnapshot, GENERATION_MANIFEST_VERSION,
-    LEXICAL_ANALYZER_VERSION, LEXICAL_SCHEMA_VERSION, LEXICAL_SEGMENT_MERGE_FAN_IN,
-    MAX_DETACHED_RELEASED_PROVIDER_ROOTS, MAX_PUBLICATION_METADATA_BYTES,
+    DetachedReleasedProviderRootAuthority, GenerationManifest, GenerationStateEnvelope, IndexError,
+    ProviderRootDefinition, ProviderRootSourceIdentity, Result, SourceCoreRecordAggregate,
+    SourceMissingObservationPoint, SourceRouteIdentity, SourceRouteMissingState,
+    SourceRouteSnapshot, GENERATION_MANIFEST_VERSION, LEXICAL_ANALYZER_VERSION,
+    LEXICAL_SCHEMA_VERSION, LEXICAL_SEGMENT_MERGE_FAN_IN, MAX_DETACHED_RELEASED_PROVIDER_ROOTS,
+    MAX_GENERATION_STATE_BYTES, MAX_GENERATION_STATE_FORMAT_BYTES,
 };
+#[cfg(test)]
+pub(crate) use ctx_history_index_format::{CommitPayload, COMMIT_PAYLOAD_VERSION};
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub mod test_support {
@@ -88,8 +87,6 @@ pub mod test_support {
         }
     }
 }
-#[cfg(test)]
-pub(crate) use ctx_history_index_generation::sha256_hex;
 pub(crate) use ctx_history_index_generation::{hex, is_generation_id, MANIFEST_DIRECTORY};
 pub use ctx_history_index_query::VerifiedIndex;
 pub use ctx_history_index_query::{
@@ -126,22 +123,17 @@ pub use preparation::{
 pub(crate) use publication::publish_active_generation_pointer;
 #[cfg(not(windows))]
 pub(crate) use publication::publish_active_generation_pointer_validated;
-#[cfg(all(test, target_os = "linux"))]
-pub(crate) use publication::republish_current_for_qualification;
 #[cfg(test)]
 pub(crate) use publication::verify_searcher;
 pub(crate) use publication::{
-    best_effort_post_republish_cleanup, canonical_commit_payload,
-    certify_candidate_physical_integrity, create_candidate_generation,
+    canonical_commit_payload, certify_candidate_physical_integrity, create_candidate_generation,
     load_active_generation_pointer, meta_generation, open_slot_index, payload_generation_id,
     prepare_successor_manifest, prime_candidate_physical_proof,
     reclaim_inactive_generation_directories, reclaim_unreferenced_certifications,
-    reclaim_unreferenced_manifests, reconcile_commit_error,
-    republish_current_with_publication_metadata, searcher_generation, sync_directory,
+    reclaim_unreferenced_manifests, reconcile_commit_error, searcher_generation, sync_directory,
     sync_generation, validate_candidate_managed_files, write_prepared_manifest,
-    ActiveGenerationPointer, CandidateActivationFence, CandidatePhysicalProof,
-    CurrentRepublishOutcome, GenerationSlot, PointerPublicationOutcome,
-    GENERATION_WRITER_LOCK_FILE, INDEX_GENERATIONS_DIRECTORY,
+    ActiveGenerationPointer, CandidateActivationFence, CandidatePhysicalProof, GenerationSlot,
+    PointerPublicationOutcome, GENERATION_WRITER_LOCK_FILE, INDEX_GENERATIONS_DIRECTORY,
 };
 #[cfg(test)]
 pub(crate) use publication::{

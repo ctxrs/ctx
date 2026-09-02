@@ -1,5 +1,8 @@
 use super::*;
 
+mod catalog_witness;
+use catalog_witness::retained_generation_state;
+
 pub(crate) struct RetainedPublishedState<'a> {
     pub(crate) journal: &'a dyn RefreshJournal,
 }
@@ -7,24 +10,13 @@ pub(crate) struct RetainedPublishedState<'a> {
 impl PublishedSourceBackedStatePort for RetainedPublishedState<'_> {
     fn open_published_state(&self, data_root: &Path) -> Result<PublishedSourceBackedState> {
         let verified_index = open_published_generation(data_root, self.journal)?;
-        let (publication_metadata, committed_rejection_diagnostics) = match verified_index
-            .as_ref()
-            .filter(|index| index.publication_metadata().is_some())
-        {
-            Some(index) => {
-                let (metadata, diagnostics) =
-                    SourceBackedPublicationMetadata::decode_with_committed_rejection_diagnostics(
-                        index,
-                    )
-                    .context("decode retained Core publication metadata")?;
-                (Some(metadata), diagnostics)
-            }
-            None => (None, None),
-        };
+        let (explicit_source_catalog, catalog_route_bindings, route_controls) =
+            retained_generation_state(verified_index.as_ref())?;
         Ok(PublishedSourceBackedState {
             verified_index,
-            publication_metadata,
-            committed_rejection_diagnostics,
+            explicit_source_catalog,
+            catalog_route_bindings,
+            route_controls,
         })
     }
 }

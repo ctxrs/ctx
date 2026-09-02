@@ -1,17 +1,7 @@
-use tantivy::Index;
-
 use crate::Result;
-
-use crate::CandidateGeneration;
 
 pub struct CandidateActivationFence {
     authentication: CandidateAuthentication,
-}
-
-pub struct RepublishCandidate {
-    directory_name: String,
-    index: Index,
-    activation_fence: CandidateActivationFence,
 }
 
 pub(super) enum CandidateAuthentication {
@@ -24,38 +14,6 @@ pub(super) enum CandidateAuthentication {
         target_os = "freebsd"
     ))]
     Portable(super::portable::CandidateGuard),
-}
-
-impl RepublishCandidate {
-    pub(super) fn new(candidate: CandidateGeneration) -> Self {
-        Self {
-            directory_name: candidate.directory_name,
-            index: candidate.index,
-            activation_fence: candidate.activation_fence,
-        }
-    }
-
-    pub fn directory_name(&self) -> &str {
-        &self.directory_name
-    }
-
-    pub fn index(&self) -> &Index {
-        &self.index
-    }
-
-    pub fn validate_binding(&self) -> Result<()> {
-        self.activation_fence.validate_binding()
-    }
-
-    pub fn discard(self) {
-        let Self {
-            index,
-            activation_fence,
-            ..
-        } = self;
-        drop(index);
-        activation_fence.discard();
-    }
 }
 
 impl CandidateActivationFence {

@@ -23,7 +23,7 @@ pub(super) fn refresh_source_backed_generation_with_detailed_progress_and_discov
         &BTreeMap<SourceRouteIdentity, Vec<u8>>,
     ),
     mut emit_progress: impl FnMut(SourceBackedDetailedRefreshProgress) -> SourceBackedRouteResult<()>,
-    mut metadata_factory: Option<&mut SourceBackedPublicationMetadataFactory<'_>>,
+    mut generation_state_factory: Option<&mut SourceBackedGenerationStateFactory<'_>>,
 ) -> SourceBackedCoordinatorResult<SourceBackedRefreshReceipt> {
     let (plan, base_route_controls) = selection;
     let SourceBackedRefreshExecutionBudget {
@@ -61,7 +61,6 @@ pub(super) fn refresh_source_backed_generation_with_detailed_progress_and_discov
     let mut record_rejections = SourceBackedRecordRejections::default();
     let mut carried_unselected_route_ids = BTreeSet::new();
 
-    let mut prepared_successful_route_outcomes = None;
     let (
         commit,
         applied_removals,
@@ -502,59 +501,56 @@ pub(super) fn refresh_source_backed_generation_with_detailed_progress_and_discov
                 certified_source_bytes: None,
             }))
             .map_err(|error| {
-                IndexError::PublicationMetadata(format!(
+                IndexError::PublicationProgress(format!(
                     "persist pre-publication progress: {error}"
                 ))
             })
         };
         let route_controls =
             successful_route_controls(registry, &successful_this_attempt, base_route_controls)?;
-        let (commit, verified_publication) = if let Some(factory) = metadata_factory.as_mut() {
-            let published = lifecycle.commit_with_metadata_and_progress(
-                &mut revalidate_source,
-                &mut revalidate_inventory,
-                |publication| {
-                    let mut live_route_controls = route_controls.clone();
-                    live_route_controls
-                        .retain(|route, _| publication.snapshot().source_route(route).is_some());
-                    let outcomes = successful_route_outcomes_for_snapshot(
-                        &selected_route_ids,
-                        &failed_routes,
-                        &logical_source_failures,
-                        &base_route_content,
-                        publication.snapshot(),
-                    );
-                    prepared_successful_route_outcomes = Some(outcomes.clone());
-                    factory(SourceBackedPublicationMetadataContext::new(
-                        publication,
-                        &selected_route_ids,
-                        &failed_routes,
-                        &logical_source_failures,
-                        &record_rejections,
-                        &outcomes,
-                        &complete_inventory_route_ids,
-                        &live_route_controls,
-                        applied_removals.len(),
-                    ))
-                },
-                &mut report_publication_stage,
-            )?;
-            let (commit, disposition, verified) = published.into_parts();
-            (
-                IndexCaptureCommitReceipt::new(commit),
-                Some(SourceBackedVerifiedPublication {
-                    disposition,
-                    verified_index: verified,
-                }),
-            )
-        } else {
-            (
-                IndexCaptureCommitReceipt::new(
-                    lifecycle.commit(&mut revalidate_source, &mut revalidate_inventory)?,
-                ),
-                None,
-            )
-        };
+        let (commit, verified_publication) =
+            if let Some(state_factory) = generation_state_factory.as_mut() {
+                let published = lifecycle.commit_with_generation_state_and_progress(
+                    &mut revalidate_source,
+                    &mut revalidate_inventory,
+                    |snapshot| {
+                        let outcomes = successful_route_outcomes_for_snapshot(
+                            &selected_route_ids,
+                            &failed_routes,
+                            &logical_source_failures,
+                            &base_route_content,
+                            &snapshot,
+                        );
+                        state_factory(SourceBackedGenerationStateContext::new(
+                            snapshot,
+                            &selected_route_ids,
+                            &failed_routes,
+                            &logical_source_failures,
+                            &record_rejections,
+                            &outcomes,
+                            &complete_inventory_route_ids,
+                            &route_controls,
+                            applied_removals.len(),
+                        ))
+                    },
+                    &mut report_publication_stage,
+                )?;
+                let (commit, disposition, verified) = published.into_parts();
+                (
+                    IndexCaptureCommitReceipt::new(commit),
+                    Some(SourceBackedVerifiedPublication {
+                        disposition,
+                        verified_index: verified,
+                    }),
+                )
+            } else {
+                (
+                    IndexCaptureCommitReceipt::new(
+                        lifecycle.commit(&mut revalidate_source, &mut revalidate_inventory)?,
+                    ),
+                    None,
+                )
+            };
         (
             commit,
             applied_removals,
@@ -570,15 +566,13 @@ pub(super) fn refresh_source_backed_generation_with_detailed_progress_and_discov
         .filter(|identity| !failed_routes.contains_key(*identity))
         .cloned()
         .collect::<BTreeSet<_>>();
-    let successful_route_outcomes = prepared_successful_route_outcomes.unwrap_or_else(|| {
-        successful_route_outcomes_for_snapshot(
-            &selected_route_ids,
-            &failed_routes,
-            &logical_source_failures,
-            &base_route_content,
-            commit.snapshot(),
-        )
-    });
+    let successful_route_outcomes = successful_route_outcomes_for_snapshot(
+        &selected_route_ids,
+        &failed_routes,
+        &logical_source_failures,
+        &base_route_content,
+        commit.snapshot(),
+    );
     let scan_stage_duration = scan_started.elapsed();
     let history_progress = attempt_history_progress.snapshot();
     let _ = report_progress(committed_progress(

@@ -21,6 +21,9 @@ use tempfile::{tempdir, TempDir};
 
 use super::*;
 
+mod generation_retention;
+mod generation_state;
+
 type SessionRelationshipKind = ProviderNativeSessionRelationship;
 type EventCopyProofKind = ProviderNativeCopyProof;
 
@@ -326,7 +329,6 @@ fn publish_unchecked_generation(
         &serde_json::to_string(&CommitPayload {
             version: COMMIT_PAYLOAD_VERSION,
             generation_id: generation_id.clone(),
-            publication_metadata: None,
         })
         .unwrap(),
     );
@@ -528,9 +530,5 @@ fn multisegment_fixture(
 }
 
 mod integrity_certification;
-mod publication_metadata;
 mod recovery;
-mod republish;
-#[cfg(target_os = "linux")]
-mod republish_qualification;
 mod writer;

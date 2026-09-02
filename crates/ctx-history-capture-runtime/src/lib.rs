@@ -343,19 +343,6 @@ pub trait CaptureLifecycleSink: Sized {
     where
         F: FnMut(CaptureRevalidationTarget<'_>) -> bool,
         I: FnMut(&CertifiedSourceInventory) -> bool;
-
-    fn commit_with_metadata<F, I, M>(
-        self,
-        revalidate: F,
-        revalidate_inventory: I,
-        metadata_factory: M,
-    ) -> Result<CaptureCommitOutcome<Self::CommittedSnapshot, Self::VerifiedPublication>, Self::Error>
-    where
-        F: FnMut(CaptureRevalidationTarget<'_>) -> bool,
-        I: FnMut(&CertifiedSourceInventory) -> bool,
-        M: for<'a> FnOnce(
-            CapturePublicationContext<'a, Self::Snapshot<'a>>,
-        ) -> Result<Vec<u8>, Self::Error>;
 }
 
 /// Move-owned facts from one capture commit, parameterized by its immutable
@@ -421,43 +408,6 @@ impl<S> std::fmt::Debug for CaptureCommitReceipt<S> {
             .field("indexed_documents", &self.indexed_documents)
             .field("certified_sources", &self.certified_sources)
             .field("certified_source_bytes", &self.certified_source_bytes)
-            .finish_non_exhaustive()
-    }
-}
-
-/// Borrowed facts available to capture metadata construction inside the
-/// publication fence.
-pub struct CapturePublicationContext<'a, S> {
-    generation_id: &'a str,
-    snapshot: S,
-}
-
-impl<'a, S> CapturePublicationContext<'a, S> {
-    pub fn new(generation_id: &'a str, snapshot: S) -> Self {
-        Self {
-            generation_id,
-            snapshot,
-        }
-    }
-
-    pub fn generation_id(&self) -> &'a str {
-        self.generation_id
-    }
-
-    pub fn snapshot(&self) -> &S {
-        &self.snapshot
-    }
-
-    pub fn into_parts(self) -> (&'a str, S) {
-        (self.generation_id, self.snapshot)
-    }
-}
-
-impl<S> std::fmt::Debug for CapturePublicationContext<'_, S> {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("CapturePublicationContext")
-            .field("generation_id", &self.generation_id)
             .finish_non_exhaustive()
     }
 }

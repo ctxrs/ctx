@@ -316,7 +316,10 @@ fn verified_publication_atomically_installs_pinned_core_receipt() {
     assert_eq!(pinned.generation_id(), run.job["published_generation"]);
     assert_eq!(
         pinned.receipt().published_generation,
-        pinned.verified_index().generation_id()
+        pinned
+            .verified_index()
+            .expect("verified Core index")
+            .generation_id()
     );
     assert!(!coordinator.has_pending_request());
 }
@@ -531,7 +534,7 @@ fn mismatched_pin_fails_without_rebinding_stale_prior_authority() {
     let prior = coordinator
         .pinned_core_publication()
         .expect("prior retained authority");
-    let stale_index = prior.verified_index_arc();
+    let stale_index = prior.verified_index().expect("prior verified index");
 
     publish_nonempty.store(true, Ordering::SeqCst);
     let queued = coordinator.enqueue_periodic(&data_root).unwrap();
@@ -683,15 +686,13 @@ fn terminal_persist_failure_retries_exact_receipt_without_reexecuting_refresh() 
     assert!(!run.failed);
     assert!(!run.did_work);
     assert!(run.terminal_persistence_pending);
-    assert_eq!(run.job["request_state"], "running");
-    assert_eq!(run.job["progress"]["phase"], "persisting_terminal");
-    assert!(run.job["last_error"]
-        .as_str()
-        .is_some_and(|error| error.contains("injected terminal persistence failure")));
+    assert_eq!(run.job["request_state"], "published");
+    assert_eq!(run.job["progress"]["phase"], "published");
+    assert!(run.job.get("last_error").is_none());
     assert_eq!(failed_callbacks.load(Ordering::SeqCst), 0);
     assert_eq!(
         coordinator.status(&request_id).unwrap()["request_state"],
-        "running"
+        "published"
     );
 
     let retry = coordinator
@@ -809,7 +810,7 @@ fn durable_terminal_coverage_failure_recovers_without_wedging_startup() {
 }
 
 #[test]
-fn terminal_persist_retry_retains_admissions_without_readmitting_routes() {
+fn terminal_persist_retry_finalizes_admissions_without_readmitting_routes() {
     let coordinator = CoreRefreshEngine::new();
     let route = route_identity(0x5a);
     coordinator.initialize_watch_route_authority([route.clone()]);
@@ -838,16 +839,13 @@ fn terminal_persist_retry_retains_admissions_without_readmitting_routes() {
             |_| Ok(()),
         )
         .unwrap();
-    assert_eq!(run.job["request_state"], "running");
+    assert_eq!(run.job["request_state"], "published");
     assert!(run.terminal_persistence_pending);
 
-    let retry_error = coordinator
+    assert!(coordinator
         .admit_refresh_scope_for_test(&request_id, &scope)
-        .unwrap_err();
-    assert!(
-        format!("{retry_error:#}").contains("already has retained route admissions"),
-        "{retry_error:#}"
-    );
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
@@ -1011,103 +1009,8 @@ fn restart_discards_incomplete_candidate_and_publishes_from_last_good() {
     );
 }
 
-pub(super) fn publish_empty_generation_with_request_metadata(
-    execution: &SourceBackedRefreshExecution<'_>,
-    route_byte: u8,
-) -> Result<SourceBackedRefreshPublication> {
-    let request_id = execution.request_id.to_owned();
-    let operation = execution.operation;
-    let scope = execution.admitted_refresh().publication_scope().clone();
-    let published =
-        ctx_history_index::GenerationWriter::open(execution.index_root, WriterOptions::default())?
-            .into_writer()
-            .map_err(crate::committed_generation_recovery_error)?
-            .commit_with_publication_metadata(
-                |_| true,
-                |context| {
-                    let mut publication =
-                        empty_test_publication(context.generation_id().to_owned());
-                    add_complete_empty_authority(&mut publication, route_identity(route_byte));
-                    let receipt = SourceBackedRefreshReceipt::from_verified_publication(
-                        None,
-                        context.generation_id().to_owned(),
-                        &publication,
-                    )
-                    .map_err(|error| IndexError::PublicationMetadata(format!("{error:#}")))?;
-                    SourceBackedPublicationMetadata {
-                        version: SOURCE_REFRESH_PUBLICATION_METADATA_VERSION,
-                        request_id: request_id.clone(),
-                        operation,
-                        refresh_scope: scope.clone(),
-                        receipt,
-                        route_observations: BTreeMap::new(),
-                        route_controls: BTreeMap::new(),
-                    }
-                    .encode()
-                },
-            )?;
-    let generation_id = published.receipt().generation_id.clone();
-    let (_, _, verified_index) = published.into_parts();
-    let mut publication = empty_test_publication(generation_id);
-    add_complete_empty_authority(&mut publication, route_identity(route_byte));
-    publication.verified_publication =
-        Some(VerifiedCorePublication::open(Arc::new(verified_index))?);
-    Ok(publication)
-}
-
 #[test]
-fn restart_after_pointer_publication_recovers_exact_receipt_without_recapture() {
-    let temp = tempfile::tempdir().unwrap();
-    let data_root = temp.path().join("data");
-    let first = CoreRefreshEngine::with_executor(Arc::new(
-        move |execution: SourceBackedRefreshExecution<'_>| {
-            let published = publish_empty_generation_with_request_metadata(&execution, 0x98)?;
-            Err(anyhow!(
-                "injected cancellation after commit {}",
-                published.generation_id
-            ))
-        },
-    ));
-    first.enqueue_periodic(&data_root).unwrap();
-    let failed = first.run_next(&data_root).expect("cancelled refresh");
-    assert!(failed.failed);
-    let committed = pin_published_generation(&data_root)
-        .unwrap()
-        .expect("atomic commit survives cancellation")
-        .generation_id()
-        .to_owned();
-    drop(first);
-
-    let executions = Arc::new(AtomicUsize::new(0));
-    let observed_executions = Arc::clone(&executions);
-    let restarted = CoreRefreshEngine::with_executor(Arc::new(
-        move |_execution: SourceBackedRefreshExecution<'_>| {
-            observed_executions.fetch_add(1, Ordering::SeqCst);
-            Err(anyhow!("recovery must not reexecute committed Core work"))
-        },
-    ));
-    assert!(!restarted
-        .recover_interrupted_publication(&data_root)
-        .unwrap());
-    assert!(!restarted.has_pending_request());
-    assert_eq!(executions.load(Ordering::SeqCst), 0);
-    let recovered = read_daemon_job_status(&daemon_source_backed_refresh_job_path(&data_root))
-        .expect("typed interrupted-publication recovery status");
-    assert_eq!(recovered["request_state"], "published");
-    assert_eq!(recovered["published_generation"], committed);
-    assert_eq!(recovered["outcome"], "completed");
-    assert!(recovered.get("receipt").is_some());
-    assert_eq!(
-        pin_published_generation(&data_root)
-            .unwrap()
-            .expect("committed Core remains readable")
-            .generation_id(),
-        committed
-    );
-}
-
-#[test]
-fn published_journal_with_incompatible_pointer_rebuilds_from_source_on_restart() {
+fn published_journal_with_incompatible_pointer_remains_terminal() {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("data");
     ctx_history_platform::platform_security::establish_private_data_root(&data_root).unwrap();
@@ -1139,31 +1042,15 @@ fn published_journal_with_incompatible_pointer_rebuilds_from_source_on_restart()
             publish_pin_fixture(&execution, false)
         },
     ));
-    assert!(restarted
+    assert!(!restarted
         .recover_interrupted_publication(&data_root)
         .unwrap());
-    let queued = read_daemon_job_status(&daemon_source_backed_refresh_job_path(&data_root))
-        .expect("durable rebuild request");
-    assert_eq!(queued["request_state"], "admission_pending");
-    assert_eq!(queued["previous_generation"], Value::Null);
-
-    let rebuilt = restarted.run_next(&data_root).expect("source rebuild");
-    assert!(!rebuilt.failed, "{:#}", rebuilt.job);
-    assert_eq!(rebuild_calls.load(Ordering::SeqCst), 1);
-    assert!(!rebuilt.job["published_generation"]
-        .as_str()
-        .unwrap()
-        .is_empty());
-    assert!(open_verified_index(&index_root).is_ok());
-    assert_eq!(
-        pin_active_verified_generation(&data_root)
-            .unwrap()
-            .verified_index()
-            .manifest()
-            .sources
-            .len(),
-        1
-    );
+    assert!(!restarted.has_pending_request());
+    assert!(restarted.pinned_core_publication().is_none());
+    assert_eq!(rebuild_calls.load(Ordering::SeqCst), 0);
+    let terminal = read_daemon_job_status(&daemon_source_backed_refresh_job_path(&data_root))
+        .expect("durable terminal request");
+    assert_eq!(terminal["request_state"], "published");
 }
 
 #[test]
@@ -1235,7 +1122,7 @@ fn first_store_artifact(root: &Path) -> Option<PathBuf> {
 }
 
 #[test]
-fn incompatible_pointer_requires_published_terminal_receipt_before_rebuild() {
+fn incompatible_pointer_still_requires_a_valid_published_terminal_receipt() {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("data");
     ctx_history_platform::platform_security::establish_private_data_root(&data_root).unwrap();
@@ -1316,7 +1203,7 @@ fn incompatible_pointer_does_not_normalize_mismatched_active_status() {
 }
 
 #[test]
-fn incompatible_pointer_rebuilds_queued_and_running_journals_preserving_successors() {
+fn incompatible_pointer_replays_queued_and_running_journals_preserving_successors() {
     for running in [false, true] {
         let temp = tempfile::tempdir().unwrap();
         let data_root = temp.path().join("data");

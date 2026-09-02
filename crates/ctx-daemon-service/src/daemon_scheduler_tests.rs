@@ -28,7 +28,8 @@ use crate::{
     daemon::{install_daemon_test_job_hooks, DaemonTestJobHooks},
     source_backed_refresh_coordinator::EventWatermark,
     source_backed_refresh_coordinator::{
-        coordinate_source_backed_refresh, publish_authoritative_empty_generation_for_test,
+        commit_source_backed_generation_for_test, coordinate_source_backed_refresh,
+        publish_authoritative_empty_generation_for_test,
         publish_authoritative_empty_generation_with_route_results_for_test,
         source_backed_index_root, CoreRefreshEngine, SourceBackedRefreshCurrent,
         SourceBackedRefreshExecution, SourceBackedRefreshMode, SourceBackedRefreshPublication,
@@ -348,9 +349,10 @@ fn publish_semantic_catch_up_generation(data_root: &Path, event_count: u64) -> S
             .unwrap(),
         )
         .unwrap();
-    let receipt = writer.commit(|_| true).unwrap();
+    let published = commit_source_backed_generation_for_test(writer).unwrap();
+    let receipt = published.receipt();
     assert_eq!(receipt.indexed_documents, event_count);
-    receipt.generation_id
+    receipt.generation_id.clone()
 }
 
 #[test]
@@ -438,7 +440,9 @@ fn publish_readiness_generation(index_root: &Path) -> SourceBackedRefreshPublica
     writer
         .certify_source(readiness_certificate(&source))
         .unwrap();
-    let receipt = writer.commit(|_| true).unwrap();
+    let (receipt, _, verified_index) = commit_source_backed_generation_for_test(writer)
+        .unwrap()
+        .into_parts();
     SourceBackedRefreshPublication {
         route_results: vec![SourceBackedRefreshRouteResult::succeeded(
             "ab".repeat(32),
@@ -446,7 +450,7 @@ fn publish_readiness_generation(index_root: &Path) -> SourceBackedRefreshPublica
         )],
         zero_source_authority: Vec::new(),
         catalog_route_bindings: Vec::new(),
-        verified_publication: None,
+        verified_index: Some(Arc::new(verified_index)),
         generation_id: receipt.generation_id,
         published_explicit_source_catalog: None,
         unsupported_routes: 0,

@@ -5,8 +5,8 @@ pub(super) fn refresh_all_provider_sources_route_local_with_reconciliation(
     discovery: &DiscoveryContext,
     report: DiscoveryReport,
     discovery_duration: StdDuration,
-    request_id: &str,
-    operation: RefreshOperation,
+    _request_id: &str,
+    _operation: RefreshOperation,
     reconciliation_demand: SourceBackedReconciliationDemand,
     exact_catalog_members: bool,
     route_worksets: &BTreeMap<SourceRouteIdentity, BTreeSet<PathBuf>>,
@@ -36,8 +36,6 @@ pub(super) fn refresh_all_provider_sources_route_local_with_reconciliation(
         previous_catalog_route_bindings,
         requested_explicit_source_catalog,
         retained_generation,
-        retained_publication_metadata,
-        retained_rejection_diagnostics,
         requested_catalog_route_bindings,
         previous_route_controls,
     } = build_merged_source_backed_registry_with_automatic_routes(
@@ -167,9 +165,6 @@ pub(super) fn refresh_all_provider_sources_route_local_with_reconciliation(
         }
         .into());
     }
-    let previous_generation = retained_generation
-        .as_ref()
-        .map(|index| index.generation_id().to_owned());
     // Observation certificates are sampled before parsing. Terminal source
     // revalidation may legitimately accept same-file JSONL growth after the
     // scanned prefix, so sampling later could certify bytes absent from this
@@ -209,9 +204,8 @@ pub(super) fn refresh_all_provider_sources_route_local_with_reconciliation(
     };
     let mut terminal_coverage_error = None;
     let mut reconciliation_required = false;
-    let mut encoded_publication_metadata = None;
     let refresh_result = executor
-        .refresh_physical_scope_with_detailed_progress_publication_metadata_reconciliation_and_worksets(
+        .refresh_physical_scope_with_detailed_progress_generation_state_reconciliation_and_worksets(
             index_root,
             physical_scope,
             publication_scope,
@@ -236,9 +230,7 @@ pub(super) fn refresh_all_provider_sources_route_local_with_reconciliation(
                     )
                 {
                     reconciliation_required = true;
-                    return Err(IndexError::PublicationMetadata(
-                        ExactMemberFallbackRequired.to_string(),
-                    ));
+                    return Err(IndexError::InvalidGenerationStateEnvelope);
                 }
                 let mut route_results = provider_route_results(
                     ProviderPublicationFacts {
@@ -256,21 +248,14 @@ pub(super) fn refresh_all_provider_sources_route_local_with_reconciliation(
                     &registry_failures,
                     &expected_selected_route_ids,
                 )
-                .map_err(|error| IndexError::PublicationMetadata(format!("{error:#}")))?;
+                .map_err(|_| IndexError::InvalidGenerationStateEnvelope)?;
                 let committed_rejection_diagnostics =
                     publication::preserve_carried_rejection_diagnostics(
-                    &mut route_results,
-                    context.snapshot(),
-                    retained_generation.as_ref(),
-                    retained_publication_metadata.as_ref(),
-                    retained_rejection_diagnostics.as_deref(),
-                )
-                    .map_err(|error| IndexError::PublicationMetadata(format!("{error:#}")))?;
-                let current = SourceBackedRefreshCurrent::from_sources(
-                    context.snapshot().sources(),
-                    context.removed_source_count(),
-                )
-                .map_err(|error| IndexError::PublicationMetadata(format!("{error:#}")))?;
+                        &mut route_results,
+                        context.snapshot(),
+                        retained_generation.as_ref(),
+                    )
+                    .map_err(|_| IndexError::InvalidGenerationStateEnvelope)?;
                 let (published_explicit_source_catalog, catalog_route_bindings) =
                     reconcile_published_catalog_witness(
                         context.snapshot(),
@@ -280,9 +265,14 @@ pub(super) fn refresh_all_provider_sources_route_local_with_reconciliation(
                         &requested_catalog_route_bindings,
                         &route_results,
                     )
-                    .map_err(|error| IndexError::PublicationMetadata(format!("{error:#}")))?;
-                let mut publication = SourceBackedRefreshPublication {
-                    generation_id: context.generation_id().to_owned(),
+                    .map_err(|_| IndexError::InvalidGenerationStateEnvelope)?;
+                let current = SourceBackedRefreshCurrent::from_sources(
+                    context.snapshot().sources(),
+                    context.removed_source_count(),
+                )
+                .map_err(|_| IndexError::InvalidGenerationStateEnvelope)?;
+                let publication = SourceBackedRefreshPublication {
+                    generation_id: String::new(),
                     published_explicit_source_catalog,
                     unsupported_routes: route_results
                         .iter()
@@ -295,53 +285,56 @@ pub(super) fn refresh_all_provider_sources_route_local_with_reconciliation(
                     zero_source_authority: Vec::new(),
                     catalog_route_bindings,
                     timings: SourceBackedRefreshTimings::default(),
-                    verified_publication: None,
+                    verified_index: None,
                 };
-                publication.zero_source_authority = match classify_inventory_disposition(
-                    &publication,
-                    &complete_inventory_route_ids,
-                    &previous_nonempty_routes,
-                    &route_less_blockers,
-                ) {
-                    SourceBackedInventoryDisposition::AuthoritativeContent => Vec::new(),
-                    SourceBackedInventoryDisposition::AuthoritativeEmpty(authority) => authority,
-                    SourceBackedInventoryDisposition::UnsupportedOrUnavailable(error) => {
-                        let detail = error.to_string();
-                        terminal_coverage_error = Some(error);
-                        return Err(IndexError::PublicationMetadata(detail));
-                    }
-                };
-                let route_observations = successful_route_outcomes
-                    .iter()
-                    .filter(|outcome| outcome.logical_source_failure_total == 0)
-                    .filter(|outcome| {
-                        context
-                            .snapshot()
-                            .source_route(&outcome.route_identity)
-                            .is_some_and(|route| !route.is_missing())
-                    })
-                    .filter_map(|outcome| {
-                        admitted_route_observations
-                            .get(&outcome.route_identity)
-                            .cloned()
-                            .map(|observation| (outcome.route_identity.clone(), observation))
-                    })
-                    .collect();
-                let encoded = encode_publication_metadata(
-                    request_id,
-                    operation,
-                    &scope,
-                    previous_generation.as_deref(),
-                    &publication,
-                    publication::PublicationMetadataEvidence {
-                        committed_rejection_diagnostics: &committed_rejection_diagnostics,
-                        route_observations,
-                        route_controls: context.route_controls().clone(),
-                    },
-                )
-                .map_err(|error| IndexError::PublicationMetadata(format!("{error:#}")))?;
-                encoded_publication_metadata = Some(encoded.metadata);
-                Ok(encoded.bytes)
+                if let SourceBackedInventoryDisposition::UnsupportedOrUnavailable(error) =
+                    classify_inventory_disposition(
+                        &publication,
+                        &complete_inventory_route_ids,
+                        &previous_nonempty_routes,
+                        &route_less_blockers,
+                    )
+                {
+                    terminal_coverage_error = Some(error);
+                    return Err(IndexError::InvalidGenerationStateEnvelope);
+                }
+                let mut route_observations = retained_generation
+                    .as_ref()
+                    .map(SourceBackedGenerationState::decode_from_verified_index)
+                    .transpose()
+                    .map_err(|_| IndexError::InvalidGenerationStateEnvelope)?
+                    .map(|state| state.route_observations().clone())
+                    .unwrap_or_default();
+                route_observations
+                    .retain(|route, _| context.snapshot().source_route(route).is_some());
+                route_observations.extend(
+                    successful_route_outcomes
+                        .iter()
+                        .filter(|outcome| outcome.logical_source_failure_total == 0)
+                        .filter(|outcome| {
+                            context
+                                .snapshot()
+                                .source_route(&outcome.route_identity)
+                                .is_some_and(|route| !route.is_missing())
+                        })
+                        .filter_map(|outcome| {
+                            admitted_route_observations
+                                .get(&outcome.route_identity)
+                                .cloned()
+                                .map(|observation| (outcome.route_identity.clone(), observation))
+                        })
+                        .collect::<BTreeMap<_, _>>(),
+                );
+                let mut route_controls = context.route_controls().clone();
+                route_controls.retain(|route, _| context.snapshot().source_route(route).is_some());
+                let state = SourceBackedGenerationState::new(
+                    publication.published_explicit_source_catalog,
+                    publication.catalog_route_bindings,
+                    route_observations,
+                    route_controls,
+                    committed_rejection_diagnostics,
+                )?;
+                state.envelope()
             },
         );
     let mut receipt = match refresh_result {
@@ -357,9 +350,12 @@ pub(super) fn refresh_all_provider_sources_route_local_with_reconciliation(
         }
     };
     let unsupported_routes = receipt.unsupported_routes.len();
-    let (disposition, verified_index) = receipt.take_verified_publication().ok_or_else(|| {
-        anyhow!("capture-owned metadata publication returned no exact verified generation")
+    let (_disposition, verified_index) = receipt.take_verified_publication().ok_or_else(|| {
+        anyhow!("capture-owned generation-state publication returned no exact verified generation")
     })?;
+    let verified_index = Arc::new(verified_index.into_inner().into_verified_index());
+    let generation_state =
+        SourceBackedGenerationState::decode_from_verified_index(&verified_index)?;
     let timings = SourceBackedRefreshTimings {
         discovery_us: nonzero_duration_micros(receipt.discovery_duration),
         scan_stage_us: nonzero_duration_micros(exclusive_scan_stage_duration(
@@ -368,22 +364,6 @@ pub(super) fn refresh_all_provider_sources_route_local_with_reconciliation(
         )),
         commit_us: nonzero_duration_micros(receipt.commit_duration),
     };
-    if disposition == CapturePublicationDisposition::Published {
-        let verified_index = Arc::new(verified_index.into_inner().into_verified_index());
-        let metadata = encoded_publication_metadata.take().ok_or_else(|| {
-            anyhow!("capture-owned publication lost its typed Core metadata result")
-        })?;
-        let mut publication = publication_from_verified_metadata(
-            request_id,
-            operation,
-            &scope,
-            timings,
-            metadata,
-            verified_index,
-        )?;
-        publication.unsupported_routes = unsupported_routes;
-        return Ok(publication);
-    }
     let current =
         SourceBackedRefreshCurrent::from_sources(&receipt.sources, receipt.removals.len())?;
     if current.source_count != receipt.certified_source_count
@@ -407,26 +387,36 @@ pub(super) fn refresh_all_provider_sources_route_local_with_reconciliation(
         &registry_failures,
         &expected_selected_route_ids,
     )?;
-    let committed_rejection_diagnostics = publication::preserve_carried_rejection_diagnostics(
+    publication::preserve_carried_rejection_diagnostics(
         &mut route_results,
         receipt.commit.snapshot(),
         retained_generation.as_ref(),
-        retained_publication_metadata.as_ref(),
-        retained_rejection_diagnostics.as_deref(),
     )?;
-    let (published_explicit_source_catalog, catalog_route_bindings) =
-        reconcile_published_catalog_witness(
-            receipt.commit.snapshot(),
-            previous_explicit_source_catalog.as_ref(),
-            &previous_catalog_route_bindings,
-            requested_explicit_source_catalog.as_ref(),
-            &requested_catalog_route_bindings,
-            &route_results,
-        )?;
+    let mut catalog_route_bindings = generation_state.catalog_route_bindings().to_vec();
+    for binding in &requested_catalog_route_bindings {
+        if !catalog_route_bindings
+            .iter()
+            .any(|retained| retained.catalog_lineage == binding.catalog_lineage)
+            && route_results.iter().any(|result| {
+                result.route_identity == binding.route_identity
+                    && matches!(
+                        result.outcome,
+                        SourceBackedRefreshRouteOutcome::Failed { .. }
+                    )
+            })
+        {
+            // Failed request evidence belongs to this response, not to the
+            // immutable generation that retained the previous authority.
+            catalog_route_bindings.push(binding.clone());
+        }
+    }
+    catalog_route_bindings.sort_by(|left, right| left.catalog_lineage.cmp(&right.catalog_lineage));
     let generation_id = std::mem::take(&mut receipt.commit.generation_id);
     let mut publication = SourceBackedRefreshPublication {
         generation_id,
-        published_explicit_source_catalog,
+        published_explicit_source_catalog: generation_state
+            .applied_explicit_source_catalog()
+            .cloned(),
         unsupported_routes,
         certified_source_count: receipt.certified_source_count,
         certified_source_bytes: receipt.certified_source_bytes,
@@ -435,7 +425,7 @@ pub(super) fn refresh_all_provider_sources_route_local_with_reconciliation(
         zero_source_authority: Vec::new(),
         catalog_route_bindings,
         timings,
-        verified_publication: None,
+        verified_index: Some(verified_index),
     };
     publication.zero_source_authority = match classify_inventory_disposition(
         &publication,
@@ -453,62 +443,6 @@ pub(super) fn refresh_all_provider_sources_route_local_with_reconciliation(
             return Err(error.into())
         }
     };
-    let verified_index = Arc::new(verified_index.into_inner().into_verified_index());
-    let route_control_changed = receipt.route_controls != previous_route_controls;
-    // The live refresh already owns both this pin and its admitted metadata.
-    // Recertify only when that already-decoded authority cannot certify the
-    // new physical generation; decoding the just-published bytes again would
-    // only repeat the restart boundary.
-    let retained_metadata_certifies = retained_publication_metadata
-        .as_ref()
-        .is_some_and(|metadata| metadata.certifies_generation(&verified_index));
-    if !retained_metadata_certifies || route_control_changed {
-        let route_observations = receipt
-            .successful_route_outcomes
-            .iter()
-            .filter(|outcome| outcome.logical_source_failure_total == 0)
-            .filter(|outcome| {
-                receipt
-                    .commit
-                    .snapshot()
-                    .source_route(&outcome.route_identity)
-                    .is_some_and(|route| !route.is_missing())
-            })
-            .filter_map(|outcome| {
-                admitted_route_observations
-                    .get(&outcome.route_identity)
-                    .cloned()
-                    .map(|observation| (outcome.route_identity.clone(), observation))
-            })
-            .collect();
-        let encoded = encode_publication_metadata(
-            request_id,
-            operation,
-            &scope,
-            previous_generation.as_deref(),
-            &publication,
-            publication::PublicationMetadataEvidence {
-                committed_rejection_diagnostics: &committed_rejection_diagnostics,
-                route_observations,
-                route_controls: receipt.route_controls.clone(),
-            },
-        )?;
-        let writer = GenerationWriter::open(index_root, WriterOptions::default())?
-            .into_writer()
-            .map_err(committed_generation_recovery_error)?;
-        let recertified =
-            Arc::new(writer.republish_current_publication_metadata(
-                &publication.generation_id,
-                encoded.bytes,
-            )?);
-        publication.verified_publication = Some(VerifiedCorePublication::bind(
-            encoded.metadata,
-            recertified,
-        )?);
-    } else if let Some(metadata) = retained_publication_metadata {
-        publication.verified_publication =
-            Some(VerifiedCorePublication::bind(metadata, verified_index)?);
-    }
     Ok(publication)
 }
 

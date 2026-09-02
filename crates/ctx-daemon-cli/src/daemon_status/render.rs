@@ -890,8 +890,7 @@ fn rejected_record_count(core_refresh: Option<&Value>) -> u64 {
             job.get("rejection_diagnostics")
                 .and_then(|diagnostics| diagnostics.get("rejected_records"))
                 .or_else(|| {
-                    job.get("request_outcome")
-                        .or_else(|| job.get("receipt"))
+                    job.get("receipt")
                         .and_then(|receipt| receipt.get("current"))
                         .and_then(|current| current.get("current_rejected_records"))
                 })
@@ -903,8 +902,7 @@ fn rejected_record_count(core_refresh: Option<&Value>) -> u64 {
 fn source_failure_count(core_refresh: Option<&Value>) -> usize {
     core_refresh
         .and_then(|job| {
-            job.get("request_outcome")
-                .or_else(|| job.get("receipt"))
+            job.get("receipt")
                 .and_then(|receipt| receipt.get("source_failure_total"))
         })
         .and_then(Value::as_u64)

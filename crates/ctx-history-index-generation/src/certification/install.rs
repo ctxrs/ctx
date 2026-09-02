@@ -1,5 +1,46 @@
 use super::*;
 
+impl CertifiedPhysicalIntegrity {
+    pub(crate) fn certified_artifact(
+        &self,
+        path: &Path,
+    ) -> Option<(ArtifactIdentity, [u8; 32], bool)> {
+        let path = path.to_str()?;
+        self.certification
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.artifact.path == path)
+            .map(|artifact| (artifact.artifact.clone(), artifact.sha256, artifact.sealed))
+    }
+}
+
+/// Best-effort durable caching after an anchored reader has completed its
+/// immutable-generation verification.
+pub fn cache_recertified_physical_integrity(
+    root: &Path,
+    pointer: &ActiveGenerationPointer,
+    slot: &GenerationSlot,
+    index: &tantivy::Index,
+    certified: &CertifiedPhysicalIntegrity,
+) -> Result<()> {
+    if !certified.recertified {
+        return Ok(());
+    }
+    // Read leases expose a descriptor-backed stable path. Reopen it outside
+    // the anchored scope so the best-effort sidecar write uses a mutable root.
+    let directory = DurableMmapDirectory::open(root).map_err(tantivy::TantivyError::from)?;
+    let root = directory.root_path();
+    install_certification_sidecar(
+        root,
+        Some(pointer),
+        None,
+        slot,
+        index,
+        &certified.certification,
+        false,
+    )
+}
+
 #[derive(Clone, Copy)]
 pub(super) struct CertificationInstallPolicy {
     allow_readonly_seal: bool,
@@ -50,10 +91,12 @@ pub(super) fn install_certification(
     }
 
     let generation_path = slot_path(root, slot);
-    ensure_real_directory(root)?;
-    ensure_real_directory(&root.join(MANIFEST_DIRECTORY))?;
-    ensure_real_directory(&root.join(INDEX_GENERATIONS_DIRECTORY))?;
-    ensure_real_directory(&generation_path)?;
+    if !crate::read_root::has_active_read_root() {
+        ensure_real_directory(root)?;
+        ensure_real_directory(&root.join(MANIFEST_DIRECTORY))?;
+        ensure_real_directory(&root.join(INDEX_GENERATIONS_DIRECTORY))?;
+        ensure_real_directory(&generation_path)?;
+    }
 
     let manifest_identity =
         capture_single_link_control(&manifest_path(root, slot.generation_id()))?;
@@ -118,7 +161,10 @@ pub(super) fn install_certification(
     if policy.require_durable_sidecar {
         sidecar_result?;
     }
-    Ok(CertifiedPhysicalIntegrity { certification })
+    Ok(CertifiedPhysicalIntegrity {
+        certification,
+        recertified: true,
+    })
 }
 
 pub(super) fn install_certification_sidecar(
@@ -164,9 +210,15 @@ pub(super) fn install_certification_sidecar(
     // verified full hash is still authoritative when setup or the sidecar
     // write fails. Once replacement succeeds, reread errors remain terminal so
     // an observed identity race cannot be mistaken for a usable cache entry.
-    if ensure_private_directory(&certification_directory).is_err()
-        || ensure_real_directory(&certification_directory).is_err()
-    {
+    if crate::read_root::has_active_read_root() {
+        // The caller caches the completed proof after leaving this anchored
+        // read scope.
+        return Ok(());
+    }
+    if ensure_private_directory(&certification_directory).is_err() {
+        return Ok(());
+    }
+    if ensure_real_directory(&certification_directory).is_err() {
         return Ok(());
     }
     let Ok(directory) = DurableMmapDirectory::open(root) else {

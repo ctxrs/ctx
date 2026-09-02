@@ -27,10 +27,7 @@ use ctx_history_index::{
     CompiledSearchFilter, EventSearchCandidate, EventSearchFilters, LexicalExecution, LexicalMode,
     SourceRouteIdentity,
 };
-use ctx_history_refresh_execution::{
-    source_backed_requested_route_observations, verify_generation_query_readiness,
-    GenerationQueryReadiness,
-};
+use ctx_history_refresh_execution::source_backed_requested_route_observations;
 
 fn complete_lexical_candidates(
     index: &VerifiedIndex,
@@ -209,7 +206,7 @@ fn test_publication(generation_id: impl Into<String>) -> SourceBackedRefreshPubl
         route_results: Vec::new(),
         zero_source_authority: Vec::new(),
         catalog_route_bindings: Vec::new(),
-        verified_publication: None,
+        verified_index: None,
         generation_id: generation_id.into(),
         published_explicit_source_catalog: None,
         unsupported_routes: 0,
@@ -383,10 +380,13 @@ fn verified_publication_is_terminal_despite_synchronous_watch_uncertainty() {
             .run_next_with_terminal_success(
                 |_, _| Ok(test_publication("stale")),
                 || Ok(Some("stale".to_owned())),
-                move |receipt| {
+                move |_, receipt| {
                     runner_preterminal.wait();
                     runner_release.wait();
-                    Ok(CoreRefreshTerminalSuccess::state_only(receipt))
+                    Ok((
+                        CoreRefreshTerminalSuccess::state_only(receipt),
+                        PostPublicationRouteCoverageFence::fail_closed(),
+                    ))
                 },
                 |_| Ok(()),
                 |_| Ok(()),
@@ -445,7 +445,8 @@ fn newer_exhaustive_marker_survives_post_publication_coverage_fence() {
                 .as_ref()
                 .expect("coordinator installed before execution")
                 .clone();
-            if executor_executions.fetch_add(1, Ordering::SeqCst) == 0 {
+            let first_execution = executor_executions.fetch_add(1, Ordering::SeqCst) == 0;
+            if first_execution {
                 coordinator.record_watch_routes_requiring_exhaustive_reconciliation(
                     [(executor_route.clone(), EventWatermark::new(1, 2))],
                     ledger_now_ms().saturating_sub(1_000),
@@ -455,7 +456,15 @@ fn newer_exhaustive_marker_survives_post_publication_coverage_fence() {
                     BTreeMap::from([(executor_route.clone(), executor_observation.clone())]),
                 );
             }
-            publish_pin_fixture(&execution, false)
+            publish_pin_fixture_with_observations(
+                &execution,
+                false,
+                first_execution
+                    .then(|| {
+                        BTreeMap::from([(executor_route.clone(), executor_observation.clone())])
+                    })
+                    .unwrap_or_default(),
+            )
         });
     let coordinator = Arc::new(CoreRefreshEngine::with_executor_and_admitted_routes(
         executor,
@@ -574,19 +583,50 @@ fn empty_test_publication(generation_id: impl Into<String>) -> SourceBackedRefre
     publication
 }
 
-fn add_complete_empty_authority(
-    publication: &mut SourceBackedRefreshPublication,
-    route: SourceRouteIdentity,
-) {
-    publication.route_results = vec![SourceBackedRefreshRouteResult::succeeded(
-        route.as_str().to_owned(),
-        true,
-    )];
-    publication.zero_source_authority = vec![SourceBackedZeroSourceAuthority {
-        generation_id: publication.generation_id.clone(),
-        route_identity: route,
-        kind: SourceBackedZeroSourceAuthorityKind::CompleteEmptyInventory,
-    }];
+fn commit_source_backed_test_generation(
+    writer: ctx_history_index::GenerationWriter,
+) -> ctx_history_index::Result<ctx_history_index::CommitReceipt> {
+    commit_source_backed_test_generation_with_facts(
+        writer,
+        SourceBackedTestGenerationFacts::default(),
+    )
+}
+
+#[derive(Clone, Default)]
+pub(super) struct SourceBackedTestGenerationFacts {
+    pub(super) explicit_source_catalog: Option<ExplicitSourceCatalogAuthority>,
+    pub(super) catalog_route_bindings: Vec<ExplicitSourceCatalogRouteBinding>,
+    pub(super) route_observations: BTreeMap<SourceRouteIdentity, String>,
+    pub(super) route_controls: BTreeMap<SourceRouteIdentity, Vec<u8>>,
+}
+
+pub(super) fn commit_source_backed_test_generation_with_facts(
+    writer: ctx_history_index::GenerationWriter,
+    facts: SourceBackedTestGenerationFacts,
+) -> ctx_history_index::Result<ctx_history_index::CommitReceipt> {
+    let state = SourceBackedGenerationState::new(
+        facts.explicit_source_catalog.clone(),
+        facts.catalog_route_bindings.clone(),
+        facts.route_observations.clone(),
+        facts.route_controls.clone(),
+        Vec::new(),
+    )?
+    .envelope()?;
+    let published =
+        writer.commit_with_generation_state(|_| true, |_| false, |_| Ok(state), |_| Ok(()))?;
+    Ok(published.into_parts().0)
+}
+
+fn empty_source_backed_test_state(
+) -> ctx_history_index::Result<ctx_history_index::GenerationStateEnvelope> {
+    SourceBackedGenerationState::new(
+        None,
+        Vec::new(),
+        BTreeMap::new(),
+        BTreeMap::new(),
+        Vec::new(),
+    )?
+    .envelope()
 }
 
 fn request_id(response: &Value) -> String {
@@ -670,36 +710,113 @@ fn physically_selected_routes(
     }
 }
 
+fn synthetic_catalog_route_bindings(
+    catalog: Option<&ExplicitSourceCatalogAuthority>,
+    routes: &BTreeSet<SourceRouteIdentity>,
+) -> Vec<ExplicitSourceCatalogRouteBinding> {
+    let Some(route) = routes.iter().next() else {
+        return Vec::new();
+    };
+    catalog
+        .into_iter()
+        .flat_map(ExplicitSourceCatalogAuthority::route_lineages)
+        .map(|catalog_lineage| ExplicitSourceCatalogRouteBinding {
+            catalog_lineage,
+            route_identity: route.as_str().to_owned(),
+        })
+        .collect()
+}
+
 fn publish_selected_routes(
     execution: &SourceBackedRefreshExecution<'_>,
     selected: &BTreeSet<SourceRouteIdentity>,
     failed_route: Option<(&SourceRouteIdentity, &'static str)>,
 ) -> Result<SourceBackedRefreshPublication> {
-    let retain_rejection_fixture = open_verified_index(execution.index_root)
-        .is_ok_and(|index| !index.manifest().sources.is_empty());
+    let retained = open_verified_index(execution.index_root).ok();
+    let retain_rejection_fixture = retained
+        .as_ref()
+        .is_some_and(|index| !index.manifest().sources.is_empty());
     let mut writer =
         ctx_history_index::GenerationWriter::open(execution.index_root, WriterOptions::default())?
             .into_writer()
             .map_err(crate::committed_generation_recovery_error)?;
-    if retain_rejection_fixture {
+    let staged_source = if retain_rejection_fixture {
         let source = publication_pin_source_with_anchor(0x93);
         writer.begin_source(source.clone())?;
         writer.add_core_record(publication_pin_record(&source))?;
         writer.certify_source(publication_rejection_certificate(&source))?;
+        Some(source)
+    } else {
+        None
+    };
+    let mut source_routes = retained
+        .as_ref()
+        .map(|index| index.manifest().source_routes().to_vec())
+        .unwrap_or_default();
+    for route in selected {
+        if source_routes
+            .iter()
+            .all(|existing| existing.route_identity() != route)
+        {
+            source_routes.push(ctx_history_index::SourceRouteSnapshot::present(
+                route.clone(),
+                Vec::new(),
+            )?);
+        }
     }
-    let commit = writer.commit(|_| true)?;
-    let mut publication = empty_test_publication(commit.generation_id.clone());
-    publication.current = SourceBackedRefreshCurrent::from_sources(&commit.manifest().sources, 0)?;
-    publication.certified_source_count = publication.current.source_count;
-    publication.certified_source_bytes = publication.current.certified_source_bytes;
-    publication.published_explicit_source_catalog = execution.explicit_source_catalog.cloned();
-    publication.route_results = selected
+    let mut all_sources = retained
+        .as_ref()
+        .into_iter()
+        .flat_map(|index| index.manifest().sources.iter())
+        .map(|source| source.observation().source().clone())
+        .collect::<Vec<_>>();
+    if let Some(source) = staged_source {
+        if !all_sources.contains(&source) {
+            all_sources.push(source);
+        }
+    }
+    let unowned_sources = all_sources
+        .into_iter()
+        .filter(|source| {
+            source_routes
+                .iter()
+                .all(|route| !route.sources().contains(source))
+        })
+        .collect::<Vec<_>>();
+    if !unowned_sources.is_empty() {
+        if let Some(route) = source_routes
+            .iter_mut()
+            .find(|route| route.missing_state().is_none())
+        {
+            let mut sources = route.sources().to_vec();
+            sources.extend(unowned_sources);
+            *route = ctx_history_index::SourceRouteSnapshot::present(
+                route.route_identity().clone(),
+                sources,
+            )?;
+        } else {
+            let route = selected
+                .iter()
+                .next()
+                .cloned()
+                .unwrap_or_else(|| SourceRouteIdentity::from_sha256("ed".repeat(32)).unwrap());
+            source_routes.push(ctx_history_index::SourceRouteSnapshot::present(
+                route,
+                unowned_sources,
+            )?);
+        }
+    }
+    let retained_route = source_routes
+        .iter()
+        .find(|route| !route.sources().is_empty())
+        .map(|route| route.route_identity().clone());
+    writer.set_present_source_routes(source_routes)?;
+    let mut route_results = selected
         .iter()
         .map(|route| SourceBackedRefreshRouteResult::succeeded(route.as_str().to_owned(), true))
-        .collect();
+        .collect::<Vec<_>>();
     if let Some((route, class)) = failed_route {
-        let result = publication
-            .route_results
+        let result = route_results
             .iter_mut()
             .find(|result| result.route_identity == route.as_str())
             .expect("failed selected route");
@@ -718,6 +835,54 @@ fn publish_selected_routes(
             detail: "fixture failure".to_owned(),
         }];
     }
+    let route_observations = source_backed_requested_route_observations(
+        execution.admitted_refresh().discovery().watch_catalog(),
+        selected,
+    )
+    .into_iter()
+    .filter_map(|(route, observation)| observation.map(|observation| (route, observation)))
+    .collect::<BTreeMap<_, _>>();
+    let catalog_route_bindings =
+        synthetic_catalog_route_bindings(execution.explicit_source_catalog, selected);
+    let zero_source_authority = retained_route
+        .is_none()
+        .then(|| {
+            route_results
+                .iter()
+                .filter(|result| result.outcome.is_success())
+                .map(|result| {
+                    (
+                        SourceRouteIdentity::from_sha256(result.route_identity.clone()).unwrap(),
+                        SourceBackedZeroSourceAuthorityKind::CompleteEmptyInventory,
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let commit = commit_source_backed_test_generation_with_facts(
+        writer,
+        SourceBackedTestGenerationFacts {
+            explicit_source_catalog: execution.explicit_source_catalog.cloned(),
+            catalog_route_bindings: catalog_route_bindings.clone(),
+            route_observations,
+            ..SourceBackedTestGenerationFacts::default()
+        },
+    )?;
+    let mut publication = empty_test_publication(commit.generation_id.clone());
+    publication.current = SourceBackedRefreshCurrent::from_sources(&commit.manifest().sources, 0)?;
+    publication.certified_source_count = publication.current.source_count;
+    publication.certified_source_bytes = publication.current.certified_source_bytes;
+    publication.published_explicit_source_catalog = execution.explicit_source_catalog.cloned();
+    publication.catalog_route_bindings = catalog_route_bindings;
+    publication.route_results = route_results;
+    publication.zero_source_authority = zero_source_authority
+        .into_iter()
+        .map(|(route_identity, kind)| SourceBackedZeroSourceAuthority {
+            generation_id: commit.generation_id.clone(),
+            route_identity,
+            kind,
+        })
+        .collect();
     Ok(publication)
 }
 
@@ -768,7 +933,9 @@ fn publish_pin_source(index_root: &Path, source: SourceKey) -> String {
     writer
         .certify_source(publication_pin_certificate(&source))
         .unwrap();
-    writer.commit(|_| true).unwrap().generation_id
+    commit_source_backed_test_generation(writer)
+        .unwrap()
+        .generation_id
 }
 
 fn publication_pin_record(source: &SourceKey) -> CoreRecord {
@@ -831,6 +998,20 @@ fn publish_pin_fixture(
     execution: &SourceBackedRefreshExecution<'_>,
     alternate_source: bool,
 ) -> Result<SourceBackedRefreshPublication> {
+    publish_pin_fixture_with_observations(execution, alternate_source, BTreeMap::new())
+}
+
+fn publish_pin_fixture_with_observations(
+    execution: &SourceBackedRefreshExecution<'_>,
+    alternate_source: bool,
+    route_observations: BTreeMap<SourceRouteIdentity, String>,
+) -> Result<SourceBackedRefreshPublication> {
+    let selected = execution
+        .admitted_refresh()
+        .exact_routes()
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
     let mut writer =
         ctx_history_index::GenerationWriter::open(execution.index_root, WriterOptions::default())?
             .into_writer()
@@ -844,7 +1025,39 @@ fn publish_pin_fixture(
     }
     writer.add_core_record(record)?;
     writer.certify_source(publication_pin_certificate(&source))?;
-    let commit = writer.commit(|_| true)?;
+    if !selected.is_empty() {
+        let owning_route = selected.iter().next().cloned();
+        writer.set_present_source_routes(
+            selected
+                .iter()
+                .cloned()
+                .map(|route| {
+                    let sources = if Some(&route) == owning_route.as_ref() {
+                        vec![source.clone()]
+                    } else {
+                        Vec::new()
+                    };
+                    ctx_history_index::SourceRouteSnapshot::present(route, sources)
+                })
+                .collect::<ctx_history_index::Result<Vec<_>>>()?,
+        )?;
+    }
+    let route_results = selected
+        .iter()
+        .map(|route| SourceBackedRefreshRouteResult::succeeded(route.as_str().to_owned(), true))
+        .collect::<Vec<_>>();
+    let catalog_route_bindings =
+        synthetic_catalog_route_bindings(execution.explicit_source_catalog, &selected);
+    let zero_source_authority = Vec::new();
+    let commit = commit_source_backed_test_generation_with_facts(
+        writer,
+        SourceBackedTestGenerationFacts {
+            explicit_source_catalog: execution.explicit_source_catalog.cloned(),
+            catalog_route_bindings: catalog_route_bindings.clone(),
+            route_observations,
+            ..SourceBackedTestGenerationFacts::default()
+        },
+    )?;
     let mut publication = test_publication(commit.generation_id);
     publication.certified_source_count = 1;
     publication.certified_source_bytes = 128;
@@ -857,13 +1070,15 @@ fn publish_pin_fixture(
         ..SourceBackedRefreshCurrent::default()
     };
     publication.published_explicit_source_catalog = execution.explicit_source_catalog.cloned();
-    let selected = match &execution.admitted_refresh().publication_scope() {
-        SourceBackedRefreshScope::All => BTreeSet::new(),
-        SourceBackedRefreshScope::Exact(routes) => routes.iter().cloned().collect(),
-    };
-    publication.route_results = selected
-        .iter()
-        .map(|route| SourceBackedRefreshRouteResult::succeeded(route.as_str().to_owned(), true))
+    publication.catalog_route_bindings = catalog_route_bindings;
+    publication.route_results = route_results;
+    publication.zero_source_authority = zero_source_authority
+        .into_iter()
+        .map(|(route_identity, kind)| SourceBackedZeroSourceAuthority {
+            generation_id: publication.generation_id.clone(),
+            route_identity,
+            kind,
+        })
         .collect();
     Ok(publication)
 }
@@ -905,14 +1120,15 @@ fn warm_dirty_route_burst_uses_one_bounded_refresh_and_publication() {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("data");
     ctx_history_platform::platform_security::establish_private_data_root(&data_root).unwrap();
-    ctx_history_index::GenerationWriter::open(
-        source_backed_index_root(&data_root),
-        WriterOptions::default(),
+    commit_source_backed_test_generation(
+        ctx_history_index::GenerationWriter::open(
+            source_backed_index_root(&data_root),
+            WriterOptions::default(),
+        )
+        .unwrap()
+        .into_writer()
+        .unwrap(),
     )
-    .unwrap()
-    .into_writer()
-    .unwrap()
-    .commit(|_| true)
     .unwrap();
     let routes = BTreeSet::from([
         route_identity(0x17),
@@ -967,96 +1183,6 @@ fn warm_dirty_route_burst_uses_one_bounded_refresh_and_publication() {
     assert!(!coordinator
         .enqueue_next_dirty_route(&data_root, u64::MAX)
         .unwrap());
-}
-
-#[test]
-fn restart_recovers_matching_running_publication_as_terminal_after_pointer_crash() {
-    let temp = tempfile::tempdir().unwrap();
-    let data_root = temp.path().join("data");
-    let committed = Arc::new(Barrier::new(2));
-    let release = Arc::new(Barrier::new(2));
-    let executor_committed = Arc::clone(&committed);
-    let executor_release = Arc::clone(&release);
-    let first = Arc::new(CoreRefreshEngine::with_executor(Arc::new(
-        move |execution: SourceBackedRefreshExecution<'_>| {
-            let publication =
-                publication_lifecycle_tests::publish_empty_generation_with_request_metadata(
-                    &execution, 0x99,
-                )?;
-            executor_committed.wait();
-            executor_release.wait();
-            Ok(publication)
-        },
-    )));
-    let request_id = "019fcaaa-0000-7000-8000-000000000691".to_owned();
-    let admitted = first
-        .handle_ipc_request(
-            &data_root,
-            &json!({
-                "schema_version": 1,
-                "op": SOURCE_REFRESH_REQUEST_OP,
-                "request_id": request_id,
-                "mode": "wait",
-                "operation": "refresh",
-                "fresh_after_admitted_snapshot": true,
-            }),
-        )
-        .unwrap()
-        .expect("active wait admission");
-    assert_eq!(admitted["request_state"], "admission_pending");
-    let runner = Arc::clone(&first);
-    let run_root = data_root.clone();
-    let run = std::thread::spawn(move || runner.run_next(&run_root).expect("active wait"));
-
-    committed.wait();
-    first.fence_watch_uncertainty(EventWatermark::new(19, 1));
-    release.wait();
-    let interrupted = run.join().unwrap();
-    assert_eq!(interrupted.job["request_state"], "published");
-    assert_eq!(interrupted.job["progress"]["phase"], "published");
-    let generation = pin_published_generation(&data_root)
-        .unwrap()
-        .expect("physical generation advanced")
-        .generation_id()
-        .to_owned();
-    assert_ne!(
-        interrupted.job["previous_generation"].as_str(),
-        Some(generation.as_str())
-    );
-    drop(first);
-
-    let executions = Arc::new(AtomicUsize::new(0));
-    let observed_executions = Arc::clone(&executions);
-    let restarted =
-        CoreRefreshEngine::with_executor(Arc::new(move |_: SourceBackedRefreshExecution<'_>| {
-            observed_executions.fetch_add(1, Ordering::SeqCst);
-            Err(anyhow!("restart recovery must remain nonterminal"))
-        }));
-    assert!(!restarted
-        .recover_interrupted_publication(&data_root)
-        .unwrap());
-    let recovered = restarted
-        .status(&request_id)
-        .expect("recovered active wait");
-    assert_eq!(recovered["request_state"], "published");
-    assert_eq!(executions.load(Ordering::SeqCst), 0);
-
-    let reconnect = restarted
-        .handle_ipc_request(
-            &data_root,
-            &json!({
-                "schema_version": 1,
-                "op": SOURCE_REFRESH_REQUEST_OP,
-                "request_id": request_id,
-                "mode": "wait",
-                "operation": "refresh",
-                "fresh_after_admitted_snapshot": true,
-            }),
-        )
-        .unwrap()
-        .expect("reconnected active wait");
-    assert_eq!(reconnect["request_id"], request_id);
-    assert_eq!(reconnect["request_state"], "published");
 }
 
 mod additional;

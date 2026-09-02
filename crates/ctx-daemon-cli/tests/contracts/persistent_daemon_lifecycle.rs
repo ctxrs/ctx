@@ -370,17 +370,13 @@ mod native {
                 .expect("failed refresh request id")
                 .to_owned();
             fs::remove_file(&fault_source).unwrap();
+            let receipt = &failed_job["receipt"];
+            assert_eq!(receipt["source_failure_total"], 1, "{failed_job:#}");
             assert_eq!(
-                failed_job["receipt"]["source_failure_total"], 0,
-                "the retained publication receipt must remain unchanged: {failed_job:#}"
-            );
-            let request_outcome = &failed_job["request_outcome"];
-            assert_eq!(request_outcome["source_failure_total"], 1, "{failed_job:#}");
-            assert_eq!(
-                request_outcome["source_failures_omitted"], 0,
+                receipt["source_failures_omitted"], 0,
                 "{failed_job:#}"
             );
-            let source_failure = request_outcome["route_results"]
+            let source_failure = receipt["route_results"]
                 .as_object()
                 .and_then(|routes| {
                     routes.values().find_map(|route| {

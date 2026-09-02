@@ -17,8 +17,7 @@ use ctx_history_core::{
 };
 
 use crate::{
-    BaseEventLookup, CaptureCommitOutcome, CaptureCommitReceipt, CaptureLifecycleOpenOutcome,
-    CaptureLifecycleSink, CapturePublicationContext, CapturePublicationDisposition,
+    BaseEventLookup, CaptureCommitReceipt, CaptureLifecycleOpenOutcome, CaptureLifecycleSink,
     CaptureRevalidationTarget, CaptureRouteRef, CaptureSourceAggregateRef, CompleteDocumentTree,
     CompleteInventoryOwner, CoreMaterialization, CorePreparationFailureKind, CorePreparationPort,
     DocumentInventoryAuthority, DocumentLeafFingerprint, DocumentRecordSpool,
@@ -30,7 +29,7 @@ use crate::{
     SourceBackedRecordRejectionClass, SourceBackedRecordRejectionDraft,
     SourceBackedRecordRejectionDrafts, SourceBackedRecordRejections, SourceBackedRouteError,
     SourceBackedRouteErrorKind, SourceBackedRouteResourceKind, SourceBackedRouteResources,
-    SourceBackedRouteResult, SourceOwner, VerifiedCapture, CORE_RECORD_BATCH_MAX_RECORDS,
+    SourceBackedRouteResult, SourceOwner, CORE_RECORD_BATCH_MAX_RECORDS,
 };
 
 use super::*;
@@ -518,31 +517,6 @@ impl CaptureLifecycleSink for FakeLifecycle {
         I: FnMut(&CertifiedSourceInventory) -> bool,
     {
         Ok(self.commit_receipt())
-    }
-
-    fn commit_with_metadata<F, I, M>(
-        self,
-        _revalidate: F,
-        _revalidate_inventory: I,
-        metadata_factory: M,
-    ) -> Result<CaptureCommitOutcome<Self::CommittedSnapshot, Self::VerifiedPublication>, Self::Error>
-    where
-        F: FnMut(CaptureRevalidationTarget<'_>) -> bool,
-        I: FnMut(&CertifiedSourceInventory) -> bool,
-        M: for<'a> FnOnce(
-            CapturePublicationContext<'a, Self::Snapshot<'a>>,
-        ) -> Result<Vec<u8>, Self::Error>,
-    {
-        let snapshot = self.snapshot();
-        metadata_factory(CapturePublicationContext::new(
-            "fake-generation",
-            snapshot.clone(),
-        ))?;
-        Ok(CaptureCommitOutcome::new(
-            self.commit_receipt(),
-            CapturePublicationDisposition::Published,
-            VerifiedCapture::new(()),
-        ))
     }
 }
 

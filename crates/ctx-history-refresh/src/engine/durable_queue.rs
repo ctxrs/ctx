@@ -310,8 +310,8 @@ fn authoritative_route_terminal_job(
 
 pub(super) fn durable_job_json(state: &CoreRefreshEngineState, request_id: &str) -> Option<Value> {
     if let Some(pending) = state.pending_terminal_persistence.as_ref() {
-        // Every ordinary writer preserves the exact terminal root until the
-        // dedicated route-finalization writer commits its markerless image.
+        // Every ordinary writer preserves the exact terminal response while
+        // its one journal write is retried in process.
         return Some(job_with_queued_successors(
             state,
             pending.terminal_job.clone(),
@@ -439,6 +439,9 @@ fn recover_pending_attempt(
         || is_root && request_state == Some("running"))
     {
         bail!("durable source refresh {role} is not queued");
+    }
+    if job.get("status").and_then(Value::as_str) != Some("running") {
+        bail!("durable source refresh {role} has mismatched status");
     }
     let request_id = job
         .get("request_id")

@@ -3,10 +3,10 @@ use std::{collections::BTreeSet, path::PathBuf, sync::Arc};
 use ctx_history_capture_model::SourceRouteIdentity;
 use ctx_history_capture_runtime::{
     BaseEventLookup, CaptureCommitOutcome, CaptureCommitReceipt, CaptureLifecycleOpenOutcome,
-    CapturePublicationContext, CapturePublicationDisposition, CaptureRevalidationTarget,
-    CoreMaterialization, CorePreparationFailureKind, CorePreparationPort, ImmutableCaptureSnapshot,
-    PresentCaptureRoute, SourceBackedCertifiedRemoval, SourceBackedLogicalSourceFailures,
-    SourceBackedRecordRejections, SourceBackedRouteResources,
+    CapturePublicationDisposition, CaptureRevalidationTarget, CoreMaterialization,
+    CorePreparationFailureKind, CorePreparationPort, ImmutableCaptureSnapshot, PresentCaptureRoute,
+    SourceBackedCertifiedRemoval, SourceBackedLogicalSourceFailures, SourceBackedRecordRejections,
+    SourceBackedRouteResources,
 };
 use ctx_history_core::{
     CaptureProvider, CertifiedSource, CertifiedSourceAppend, CertifiedSourceDeletion,
@@ -321,34 +321,6 @@ impl CaptureLifecycleSink for NoopLifecycle {
             0,
             0,
             NoopSnapshot,
-        ))
-    }
-
-    fn commit_with_metadata<F, I, M>(
-        self,
-        _revalidate: F,
-        _revalidate_inventory: I,
-        metadata_factory: M,
-    ) -> std::result::Result<
-        CaptureCommitOutcome<Self::CommittedSnapshot, Self::VerifiedPublication>,
-        Self::Error,
-    >
-    where
-        F: FnMut(CaptureRevalidationTarget<'_>) -> bool,
-        I: FnMut(&CertifiedSourceInventory) -> bool,
-        M: for<'a> FnOnce(
-            CapturePublicationContext<'a, Self::Snapshot<'a>>,
-        ) -> std::result::Result<Vec<u8>, Self::Error>,
-    {
-        let snapshot = NoopSnapshot;
-        let _ = metadata_factory(CapturePublicationContext::new(
-            "noop-generation",
-            snapshot.clone(),
-        ))?;
-        Ok(CaptureCommitOutcome::new(
-            CaptureCommitReceipt::new("noop-generation".to_owned(), 1, 0, 0, 0, snapshot),
-            CapturePublicationDisposition::Published,
-            ctx_history_capture_runtime::VerifiedCapture::new(()),
         ))
     }
 }

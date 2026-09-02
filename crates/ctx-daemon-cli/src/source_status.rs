@@ -16,7 +16,6 @@ use super::paths_status::{
     daemon_core_refresh_job_path, daemon_report_with_config, daemon_semantic_job_path,
     read_daemon_job_status,
 };
-use super::source_backed_refresh_coordinator::verified_generation_is_query_ready;
 
 const SEARCH_DIRECTORY: &str = "search";
 const LEXICAL_DIRECTORY: &str = "lexical";
@@ -204,12 +203,12 @@ fn refresh_report(job: Option<&Value>, generation_id: Option<&str>, daemon: &Val
     let request_state = job.get("request_state").and_then(Value::as_str);
     let published_generation = job.get("published_generation").and_then(Value::as_str);
     let generation_matches = generation_id.is_some() && generation_id == published_generation;
-    let request_outcome = job.get("request_outcome").or_else(|| job.get("receipt"));
-    let outcome = request_outcome
+    let receipt = job.get("receipt");
+    let outcome = receipt
         .and_then(|receipt| receipt.get("outcome"))
         .or_else(|| job.get("outcome"))
         .and_then(Value::as_str);
-    let source_failures = request_outcome
+    let source_failures = receipt
         .and_then(|receipt| receipt.get("source_failure_total"))
         .and_then(Value::as_u64)
         .unwrap_or(0);
@@ -279,12 +278,12 @@ fn refresh_report(job: Option<&Value>, generation_id: Option<&str>, daemon: &Val
         "trigger": job.get("trigger"),
         "trigger_provenance": job.get("trigger_provenance"),
         "last_error": job.get("last_error"),
-        "current": request_outcome.and_then(|receipt| receipt.get("current")),
-        "source_failure_total": request_outcome
+        "current": receipt.and_then(|receipt| receipt.get("current")),
+        "source_failure_total": receipt
             .and_then(|receipt| receipt.get("source_failure_total")),
-        "rejected_record_total": request_outcome
+        "rejected_record_total": receipt
             .and_then(|receipt| receipt.get("rejected_record_total")),
-        "diagnostics": refresh_diagnostics_report(request_outcome),
+        "diagnostics": refresh_diagnostics_report(receipt),
     }))
 }
 
@@ -423,23 +422,7 @@ fn lexical_report(
             let policy_matches = manifest.policy_schema_hash == current_policy_hash;
             let generation_matches =
                 published_generation.map(|generation| generation == index.generation_id());
-            let readiness = verified_generation_is_query_ready(&index);
-            let (status, reason, authority_error) = match readiness {
-                Ok(true) => {
-                    let (status, reason) = lexical_state(policy_matches);
-                    (status, reason, None)
-                }
-                Ok(false) => (
-                    "unavailable",
-                    Some("zero_source_publication_uncertified"),
-                    None,
-                ),
-                Err(error) => (
-                    "unavailable",
-                    Some("publication_authority_invalid"),
-                    Some(format!("{error:#}")),
-                ),
-            };
+            let (status, reason) = lexical_state(policy_matches);
             let value = compact_json(json!({
                 "status": status,
                 "reason": reason,
@@ -451,7 +434,6 @@ fn lexical_report(
                 "indexed_documents": index.document_count(),
                 "certified_sources": manifest.sources.len(),
                 "certified_source_bytes": manifest.certified_source_bytes,
-                "publication_authority_error": authority_error,
                 "manifest_version": manifest.manifest_version,
                 "identity_version": manifest.identity_version,
                 "lexical_schema_version": manifest.lexical_schema_version,

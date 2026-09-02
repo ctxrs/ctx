@@ -115,9 +115,11 @@ fn automatic_and_explicit_empty_routes_preserve_generation_bound_authority() {
         .zero_source_authority
         .iter()
         .all(|authority| authority.generation_id == publication.generation_id));
-    assert!(
-        verified_generation_is_query_ready(&VerifiedIndex::open_pinned(&index_root).unwrap())
+    assert_eq!(
+        VerifiedIndex::open_pinned(&index_root)
             .unwrap()
+            .generation_id(),
+        publication.generation_id
     );
 }
 
@@ -594,7 +596,10 @@ fn registered_codex_parent_and_exact_subdir_share_route_scoped_ownership() {
             .len(),
         1
     );
-    assert_eq!(first.generation_id, parent_generation);
+    assert_ne!(
+        first.generation_id, parent_generation,
+        "applying explicit catalog authority must change generation identity"
+    );
     drop(verified);
 
     append_codex_message(&explicit_rollout, "explicitappendafterimportmarker");

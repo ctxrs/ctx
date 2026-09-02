@@ -117,26 +117,6 @@ fn show_commands_are_typed_and_status_and_stats_are_excluded_from_local_usage() 
     }
 }
 
-#[test]
-fn query_authority_error_json_is_scoped_to_machine_search_show_and_locate() {
-    for (args, expected) in [
-        (&["search", "authority", "--format=json"][..], true),
-        (&["show", "event", "bad", "--format=json"][..], true),
-        (&["locate", "event", "bad", "--format=json"][..], true),
-        (&["search", "authority"][..], false),
-        (&["status", "--format=json"][..], false),
-    ] {
-        let cli = Cli::try_parse_from(std::iter::once("ctx").chain(args.iter().copied()))
-            .unwrap_or_else(|error| panic!("failed to parse {args:?}: {error}"));
-        let json_output = command_json_output(&cli.command);
-        assert_eq!(
-            command_uses_query_authority_error_json(&cli.command, json_output),
-            expected,
-            "{args:?}"
-        );
-    }
-}
-
 fn rendered_generic_error(error: &anyhow::Error, machine: bool, color: ColorMode) -> Vec<u8> {
     let (mut ui, _, stderr) = pipe_ui(color);
     render_generic_command_error(error, machine, &mut ui).unwrap();
@@ -384,7 +364,7 @@ fn semantic_completion_json_dispatch_covers_every_variant() {
         let detail = case.error.to_string();
         let result: Result<()> = Err(case.error.into());
         let (mut ui, stdout, stderr) = pipe_ui(ColorMode::Always);
-        let rendered = render_command_result_error(&result, true, false, true, true, &mut ui)
+        let rendered = render_command_result_error(&result, true, true, true, &mut ui)
             .unwrap_or_else(|error| panic!("{} failed to render: {error:#}", case.name))
             .unwrap_or_else(|| panic!("{} did not return a rendered error", case.name));
         assert!(rendered.is::<RenderedJsonError>(), "{}", case.name);
@@ -440,7 +420,7 @@ fn semantic_completion_human_dispatch_remains_generic() {
     };
     let result: Result<()> = Err(error.into());
     let (mut ui, stdout, stderr) = pipe_ui(ColorMode::Never);
-    let rendered = render_command_result_error(&result, false, false, false, false, &mut ui)
+    let rendered = render_command_result_error(&result, false, false, false, &mut ui)
         .unwrap()
         .expect("human error must be rendered");
     assert!(rendered.is::<RenderedCliError>());

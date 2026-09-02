@@ -31,10 +31,11 @@ pub use coverage_contract::{
     VerifiedSourceRefreshRouteBoundary,
 };
 use durable_queue::{
-    durable_job_json, finalized_job_json, install_recovered_successors, job_with_queued_successors,
+    durable_job_json, install_recovered_successors, job_with_queued_successors,
     recover_queued_root, recover_queued_successors,
 };
 use generation_authority::CoreRefreshTerminalSuccess;
+pub use generation_authority::PinnedCorePublication;
 use progress_model::{status_progress_total_sources_known, SourceBackedRefreshState};
 pub use progress_model::{SourceBackedRefreshProgress, SourceBackedRefreshStage};
 use read_model::{
@@ -121,7 +122,7 @@ pub(super) struct CoreRefreshEngineState {
     active_request_id: Option<String>,
     pending_request_ids: VecDeque<String>,
     attempts: VecDeque<SourceBackedRefreshAttempt>,
-    pinned_core_publication: Option<Arc<VerifiedCorePublication>>,
+    pinned_core_publication: Option<Arc<PinnedCorePublication>>,
     current_published_generation: Option<String>,
     dirty_routes: DirtySourceRoutes,
     known_route_ids: BTreeSet<SourceRouteIdentity>,
@@ -154,23 +155,11 @@ struct PendingTerminalPersistence {
 
 enum PendingTerminalOutcome {
     Published {
-        terminal: CoreRefreshTerminalSuccess,
         did_work: bool,
+        coverage_certificate: Option<SourceBackedRefreshCoverageCertificate>,
     },
     Failed {
         scheduler_retry: bool,
-    },
-    // The marker-bearing terminal image is already durable. Retain its exact
-    // root fields while route disposition and coverage are finalized into a
-    // second, markerless image.
-    RouteFinalization {
-        did_work: bool,
-        failed: bool,
-    },
-    FinalizationOnly {
-        did_work: bool,
-        failed: bool,
-        coverage_certificate: Option<SourceBackedRefreshCoverageCertificate>,
     },
 }
 
@@ -179,18 +168,11 @@ impl PendingTerminalPersistence {
         matches!(
             self.outcome,
             PendingTerminalOutcome::Published { did_work: true, .. }
-                | PendingTerminalOutcome::RouteFinalization { did_work: true, .. }
-                | PendingTerminalOutcome::FinalizationOnly { did_work: true, .. }
         )
     }
 
     fn failed(&self) -> bool {
-        matches!(
-            self.outcome,
-            PendingTerminalOutcome::Failed { .. }
-                | PendingTerminalOutcome::RouteFinalization { failed: true, .. }
-                | PendingTerminalOutcome::FinalizationOnly { failed: true, .. }
-        )
+        matches!(self.outcome, PendingTerminalOutcome::Failed { .. })
     }
 
     fn scheduler_retry(&self) -> bool {
@@ -201,25 +183,10 @@ impl PendingTerminalPersistence {
             }
         )
     }
-
-    fn finalization_only(&self) -> bool {
-        matches!(
-            self.outcome,
-            PendingTerminalOutcome::FinalizationOnly { .. }
-        )
-    }
-
-    fn route_finalization_in_progress(&self) -> bool {
-        matches!(
-            self.outcome,
-            PendingTerminalOutcome::RouteFinalization { .. }
-        )
-    }
 }
 
 struct RouteAdmissionFinish {
     coverage_certificate: Option<SourceBackedRefreshCoverageCertificate>,
-    durable_request_id: String,
 }
 
 impl fmt::Debug for PendingTerminalPersistence {
@@ -259,8 +226,6 @@ pub struct CoreRefreshEngine {
     admission_fence: Arc<SourceRefreshAdmissionFence>,
     pub(super) journal: Arc<dyn RefreshJournal>,
     pub(super) runtime: Arc<dyn RefreshRuntime>,
-    #[cfg(test)]
-    before_route_finalization: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 #[derive(Debug)]
@@ -392,8 +357,6 @@ impl CoreRefreshEngine {
             admission_fence,
             journal,
             runtime,
-            #[cfg(test)]
-            before_route_finalization: Mutex::new(None),
         }
     }
 

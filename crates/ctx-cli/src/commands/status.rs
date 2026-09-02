@@ -141,62 +141,14 @@ mod tests {
         crate::semantic::initialize().unwrap();
         let root = tempfile::tempdir().unwrap();
         let data_root = root.path().join("data");
-        let route_identity = "ab".repeat(32);
-        let publication = GenerationWriter::open(
-            data_root.join("search/lexical"),
-            WriterOptions::default(),
-        )
-        .unwrap()
-        .into_writer()
-        .unwrap()
-        .commit_with_publication_metadata(
-            |_| true,
-            |context| {
-                let generation_id = context.generation_id().to_owned();
-                let route = ctx_history_index::SourceRouteIdentity::from_sha256(
-                    route_identity.clone(),
-                )
-                .map_err(|error| {
-                    ctx_history_index::IndexError::PublicationMetadata(error.to_string())
-                })?;
-                let receipt = ctx_history_refresh::SourceBackedRefreshReceipt {
-                    previous_generation: None,
-                    published_generation: generation_id.clone(),
-                    generation_changed: true,
-                    published_explicit_source_catalog: None,
-                    current: ctx_history_refresh::SourceBackedRefreshCurrent::default(),
-                    route_results: vec![
-                        ctx_history_refresh::SourceBackedRefreshRouteResult::succeeded(
-                            route_identity.clone(),
-                            true,
-                        ),
-                    ],
-                    zero_source_authority: vec![
-                        ctx_history_refresh::SourceBackedZeroSourceAuthority {
-                            generation_id,
-                            route_identity: route,
-                            kind: ctx_history_refresh::SourceBackedZeroSourceAuthorityKind::CompleteEmptyInventory,
-                        },
-                    ],
-                    catalog_route_bindings: Vec::new(),
-                };
-                serde_json::to_vec(&json!({
-                    "version": ctx_history_refresh::SOURCE_REFRESH_PUBLICATION_METADATA_VERSION,
-                    "request_id": "final-status-composition",
-                    "operation": "refresh",
-                    "refresh_scope": {"kind": "all"},
-                    "receipt": receipt.to_json(),
-                    "route_observations": [null],
-                    "route_controls": {},
-                    "committed_rejection_diagnostics": {},
-                }))
-                .map_err(|error| {
-                    ctx_history_index::IndexError::PublicationMetadata(error.to_string())
-                })
-            },
-        )
-        .unwrap();
-        let generation_id = publication.receipt().generation_id.clone();
+        let publication =
+            GenerationWriter::open(data_root.join("search/lexical"), WriterOptions::default())
+                .unwrap()
+                .into_writer()
+                .unwrap()
+                .commit(|_| true)
+                .unwrap();
+        let generation_id = publication.generation_id.clone();
 
         let config = config::AppConfig::default();
         let status = status_read_model(&data_root, &config).unwrap();
