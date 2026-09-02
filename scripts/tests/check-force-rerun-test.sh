@@ -67,57 +67,32 @@ candidate_commit="$(git -C "${repo_root}" rev-parse HEAD)"
 export CTX_FAKE_BAZEL_LOG="${test_root}/fake-bazel.log"
 unset RUST_TEST_THREADS
 
-: >"${CTX_FAKE_BAZEL_LOG}"
-"${repo_root}/scripts/check.sh" --mode ci --force-rerun \
-  >"${test_root}/ci.out" 2>"${test_root}/ci.err"
-[[ "$(grep -c '^preflight=' "${CTX_FAKE_BAZEL_LOG}")" == "1" ]] \
-  || fail 'ci mode did not run exactly one local preflight'
-expected_preflight="${test_root}/expected-preflight.log"
-cat >"${expected_preflight}" <<EOF
-arg=run
-arg=//:rust_crate_size_preflight
-arg=--
-arg=--preflight
-arg=${repo_root}
-env=RUST_TEST_THREADS=
-preflight=--preflight ${repo_root}
-EOF
-head -n 7 "${CTX_FAKE_BAZEL_LOG}" >"${test_root}/actual-preflight.log"
-cmp -s "${expected_preflight}" "${test_root}/actual-preflight.log" \
-  || fail 'ci mode did not run the exact local preflight before named-mode actions'
-if grep -Fqx 'arg=query' "${CTX_FAKE_BAZEL_LOG}"; then
-  fail 'ci mode ran a redundant Bazel query'
-fi
-[[ "$(grep -c '^arg=build$' "${CTX_FAKE_BAZEL_LOG}")" == "1" ]] \
-  || fail 'ci mode did not build exactly once'
-[[ "$(grep -c '^arg=test$' "${CTX_FAKE_BAZEL_LOG}")" == "1" ]] \
-  || fail 'ci mode did not test exactly once'
-[[ "$(grep -c '^arg=--cache_test_results=no$' "${CTX_FAKE_BAZEL_LOG}")" == "1" ]] \
-  || fail 'force flag was not added exactly once'
-awk '
-  /^arg=build$/ { action = "build" }
-  /^arg=test$/ { action = "test" }
-  /^arg=--cache_test_results=no$/ {
-    if (action != "test") {
-      exit 1
-    }
-    found = 1
-  }
-  END { if (!found) exit 1 }
-' "${CTX_FAKE_BAZEL_LOG}" \
-  || fail 'force flag was attached to a non-test action'
-if grep -Eq '^arg=(clean|--expunge)$' "${CTX_FAKE_BAZEL_LOG}"; then
-  fail 'force rerun attempted to clean compilation caches'
-fi
+expected_named_mode_transcript() {
+  local mode="$1"
+  local tag_filter
+  case "${mode}" in
+    ci) tag_filter='-manual,-tier-nightly,-tier-release' ;;
+    nightly) tag_filter='-manual,-tier-release' ;;
+    release) tag_filter='-manual' ;;
+    *) fail "missing expected transcript for ${mode}" ;;
+  esac
 
-: >"${CTX_FAKE_BAZEL_LOG}"
-"${repo_root}/scripts/check.sh" --mode ci \
-  >"${test_root}/normal.out" 2>"${test_root}/normal.err"
-[[ "$(grep -c '^preflight=' "${CTX_FAKE_BAZEL_LOG}")" == "1" ]] \
-  || fail 'normal mode did not run exactly one local preflight'
-if grep -Fqx 'arg=--cache_test_results=no' "${CTX_FAKE_BAZEL_LOG}"; then
-  fail 'normal mode disabled Bazel test-result reuse'
-fi
+  if [[ "${mode}" == release ]]; then
+    printf 'arg=%s\n' run //:rust_crate_size_preflight -- --exact-candidate \
+      "${candidate_commit}" "${repo_root}"
+    printf 'env=RUST_TEST_THREADS=\n'
+    printf 'candidate=--exact-candidate %s %s\n' "${candidate_commit}" "${repo_root}"
+  else
+    printf 'arg=%s\n' run //:rust_crate_size_preflight -- --preflight "${repo_root}"
+    printf 'env=RUST_TEST_THREADS=\n'
+    printf 'preflight=--preflight %s\n' "${repo_root}"
+  fi
+  printf 'arg=%s\n' build //... --config=ci
+  printf 'env=RUST_TEST_THREADS=\n'
+  printf 'arg=%s\n' test --cache_test_results=no //... --config=test \
+    "--test_tag_filters=${tag_filter}"
+  printf 'env=RUST_TEST_THREADS=\n'
+}
 
 : >"${CTX_FAKE_BAZEL_LOG}"
 "${repo_root}/scripts/check.sh" --force-rerun -- test //:focused --config=ci \
@@ -151,57 +126,31 @@ expected_modes="$(printf '%s\n' ci nightly release)"
   || fail 'mode inventory is not the canonical three-tier taxonomy'
 
 for removed_mode in fast presubmit smoke; do
+  : >"${CTX_FAKE_BAZEL_LOG}"
   if "${repo_root}/scripts/check.sh" --mode "${removed_mode}" \
     >"${test_root}/${removed_mode}.out" 2>"${test_root}/${removed_mode}.err"; then
     fail "removed ${removed_mode} mode still succeeds"
   fi
   grep -Fq "unknown check mode: ${removed_mode}" "${test_root}/${removed_mode}.err" \
     || fail "removed ${removed_mode} mode did not fail explicitly"
-  if grep -Fq '^preflight=' "${CTX_FAKE_BAZEL_LOG}"; then
-    fail "removed ${removed_mode} mode ran preflight before mode validation"
-  fi
+  [[ ! -s "${CTX_FAKE_BAZEL_LOG}" ]] \
+    || fail "removed ${removed_mode} mode ran a command before mode validation"
 done
 
 for mode in ci nightly release; do
   : >"${CTX_FAKE_BAZEL_LOG}"
-  "${repo_root}/scripts/check.sh" --mode "${mode}" \
+  "${repo_root}/scripts/check.sh" --mode "${mode}" --force-rerun \
     >"${test_root}/${mode}.out" 2>"${test_root}/${mode}.err"
-  if [[ "${mode}" == release ]]; then
-    [[ "$(grep -c '^candidate=' "${CTX_FAKE_BAZEL_LOG}")" == "1" ]] \
-      || fail 'release mode did not run exactly one exact-candidate gate'
-    grep -Fqx "arg=--exact-candidate" "${CTX_FAKE_BAZEL_LOG}" \
-      || fail 'release mode did not select exact-candidate validation'
-    grep -Fqx "arg=${candidate_commit}" "${CTX_FAKE_BAZEL_LOG}" \
-      || fail 'release mode did not bind the checked-out commit'
-    if grep -Fqx 'arg=--preflight' "${CTX_FAKE_BAZEL_LOG}"; then
-      fail 'release mode retained integration ancestry freshness'
-    fi
-  else
-    [[ "$(grep -c '^preflight=' "${CTX_FAKE_BAZEL_LOG}")" == "1" ]] \
-      || fail "${mode} mode did not run exactly one local preflight"
-    grep -Fqx 'arg=--preflight' "${CTX_FAKE_BAZEL_LOG}" \
-      || fail "${mode} mode did not retain integration ancestry freshness"
-    if grep -Fqx 'arg=--exact-candidate' "${CTX_FAKE_BAZEL_LOG}"; then
-      fail "${mode} mode unexpectedly selected exact-candidate validation"
-    fi
-  fi
-  [[ "$(grep -c '^arg=//\.\.\.$' "${CTX_FAKE_BAZEL_LOG}")" == "2" ]] \
-    || fail "${mode} mode did not lint and test the full discovered graph"
-  case "${mode}" in
-    ci) expected_filter='-manual,-tier-nightly,-tier-release' ;;
-    nightly) expected_filter='-manual,-tier-release' ;;
-    release) expected_filter='-manual' ;;
-  esac
-  grep -Fqx "arg=--test_tag_filters=${expected_filter}" "${CTX_FAKE_BAZEL_LOG}" \
-    || fail "${mode} mode did not enforce its test-tier exceptions"
-  [[ "$(grep -c '^arg=--config=ci$' "${CTX_FAKE_BAZEL_LOG}")" == "1" ]] \
-    || fail "${mode} mode did not use the inherited lint config exactly once"
-  [[ "$(grep -c '^arg=--config=test$' "${CTX_FAKE_BAZEL_LOG}")" == "1" ]] \
-    || fail "${mode} mode did not isolate deterministic tests from lint aspects"
-  if grep -Fqx 'arg=--config=lint' "${CTX_FAKE_BAZEL_LOG}"; then
-    fail "${mode} mode applied the lint aspect explicitly"
-  fi
+  cmp -s <(expected_named_mode_transcript "${mode}") "${CTX_FAKE_BAZEL_LOG}" \
+    || fail "${mode} mode did not run the exact ordered force-rerun transcript"
 done
+
+: >"${CTX_FAKE_BAZEL_LOG}"
+"${repo_root}/scripts/check.sh" --mode ci \
+  >"${test_root}/normal.out" 2>"${test_root}/normal.err"
+if grep -Fqx 'arg=--cache_test_results=no' "${CTX_FAKE_BAZEL_LOG}"; then
+  fail 'normal mode disabled Bazel test-result reuse'
+fi
 
 if grep -Eq '^test:ci --test_env=(BUILDKITE|BUILDKITE_BUILD_ID|CI|GITHUB_ACTIONS)$' \
   "${source_root}/.bazelrc"; then
