@@ -15,9 +15,13 @@ from typing import Any
 
 DEPENDENCY_TABLES = ("dependencies", "dev-dependencies", "build-dependencies")
 TARGET_KINDS = ("bin", "test", "example", "bench")
-# These source packages have restricted Bazel visibility. Their local Cargo
-# edges must remain explicit rather than relying only on generated crate deps.
-PROTECTED_LOCAL_DEPENDENCIES = {
+VISIBILITY_RESTRICTED_LOCAL_DEPENDENCIES = {
+    "ctx-history-capture",
+    "ctx-history-index",
+    "ctx-history-index-format",
+    "ctx-history-index-generation",
+    "ctx-history-index-query",
+    "ctx-history-provider-native-jsonl",
     "ctx-history-jsonl",
     "ctx-history-source-sqlite",
 }
@@ -609,15 +613,16 @@ def local_graph(
                 has_explicit_label = any(
                     label.startswith(package_label) for label in dependency_labels
                 )
-                if target in PROTECTED_LOCAL_DEPENDENCIES and not has_explicit_label:
+                if (
+                    target in VISIBILITY_RESTRICTED_LOCAL_DEPENDENCIES
+                    and not has_explicit_label
+                ):
                     fail(
-                        f"{name} Bazel {cargo_target} must explicitly declare protected "
+                        f"{name} Bazel {cargo_target} must explicitly declare "
+                        "visibility-restricted "
                         f"Cargo path dependency {target}"
                     )
-                if (
-                    not has_explicit_label
-                    and required_flag not in dependency_flags
-                ):
+                if not has_explicit_label and required_flag not in dependency_flags:
                     fail(
                         f"{name} Bazel {cargo_target} omits Cargo path dependency {target}"
                     )

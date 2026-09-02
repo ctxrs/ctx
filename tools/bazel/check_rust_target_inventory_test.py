@@ -34,10 +34,10 @@ def module(source: str) -> ast.Module:
 
 
 class RustTargetInventoryTest(unittest.TestCase):
-    def protected_edge_fixture(
+    def local_edge_fixture(
         self,
         *,
-        direct_dependencies: str = "",
+        dependency_definition: str,
         workspace_dependencies: str = "",
         labels: tuple[str, ...] = (),
     ) -> tuple[Path, dict[str, tuple[Path, dict[str, object]]]]:
@@ -51,21 +51,42 @@ class RustTargetInventoryTest(unittest.TestCase):
         consumer = root / "consumer"
         consumer.joinpath("src").mkdir(parents=True)
         consumer.joinpath("src/lib.rs").write_text("", encoding="utf-8")
+        label_list = (
+            " + [" + ", ".join(repr(label) for label in labels) + "]"
+            if labels
+            else ""
+        )
         consumer.joinpath("BUILD.bazel").write_text(
             "rust_library(\n"
             '    name = "lib",\n'
             '    crate_root = "src/lib.rs",\n'
-            "    deps = all_crate_deps(normal = True)"
-            + (" + [" + ", ".join(repr(label) for label in labels) + "]" if labels else "")
+            "    deps = all_crate_deps(normal = True, build = True)"
+            + label_list
+            + ",\n)\n"
+            "ctx_rust_test(\n"
+            '    name = "unit_tests",\n'
+            '    crate_root = "src/lib.rs",\n'
+            "    deps = all_crate_deps(normal_dev = True)"
+            + label_list
             + ",\n)\n",
             encoding="utf-8",
         )
-        consumer_data: dict[str, object] = {"package": {"name": "consumer"}}
-        if direct_dependencies:
-            consumer_data["dependencies"] = tomllib.loads(direct_dependencies)["dependencies"]
+        consumer_data: dict[str, object] = {
+            "package": {"name": "consumer"},
+            **tomllib.loads(dependency_definition),
+        }
 
         packages: dict[str, tuple[Path, dict[str, object]]] = {"consumer": (consumer, consumer_data)}
-        for name in ("ctx-history-jsonl", "ctx-history-source-sqlite"):
+        for name in (
+            "ctx-history-capture",
+            "ctx-history-index",
+            "ctx-history-index-format",
+            "ctx-history-index-generation",
+            "ctx-history-index-query",
+            "ctx-history-provider-native-jsonl",
+            "ctx-history-jsonl",
+            "ctx-history-source-sqlite",
+        ):
             directory = root / "crates" / name
             directory.mkdir(parents=True)
             directory.joinpath("Cargo.toml").write_text(
@@ -75,47 +96,54 @@ class RustTargetInventoryTest(unittest.TestCase):
             packages[name] = (directory, {"package": {"name": name}})
         return root, packages
 
-    def test_direct_renamed_protected_edge_needs_an_explicit_bazel_label(self) -> None:
-        root, packages = self.protected_edge_fixture(
-            direct_dependencies=(
-                "[dependencies]\n"
-                'history_jsonl = { package = "ctx-history-jsonl", path = "../crates/ctx-history-jsonl" }\n'
-            ),
-        )
-        with self.assertRaisesRegex(InventoryError, "explicitly declare protected.*ctx-history-jsonl"):
-            local_graph(root, packages)
-
-    def test_workspace_inherited_renamed_protected_edge_needs_an_explicit_bazel_label(self) -> None:
-        root, packages = self.protected_edge_fixture(
-            direct_dependencies="[dependencies]\nhistory_sqlite.workspace = true\n",
+    def test_workspace_inherited_renamed_local_edge_needs_an_explicit_bazel_label(self) -> None:
+        root, packages = self.local_edge_fixture(
+            dependency_definition="[dependencies]\nhistory_sqlite.workspace = true\n",
             workspace_dependencies=(
                 "[workspace.dependencies]\n"
                 'history_sqlite = { package = "ctx-history-source-sqlite", path = "crates/ctx-history-source-sqlite" }\n'
             ),
         )
-        with self.assertRaisesRegex(InventoryError, "explicitly declare protected.*ctx-history-source-sqlite"):
+        with self.assertRaisesRegex(InventoryError, "explicitly declare.*ctx-history-source-sqlite"):
             local_graph(root, packages)
 
-    def test_renamed_protected_edges_accept_explicit_bazel_labels(self) -> None:
-        root, packages = self.protected_edge_fixture(
-            direct_dependencies=(
-                "[dependencies]\n"
-                'history_jsonl = { package = "ctx-history-jsonl", path = "../crates/ctx-history-jsonl" }\n'
-                "history_sqlite.workspace = true\n"
+    def test_local_edges_require_explicit_labels_in_every_dependency_table(self) -> None:
+        cases = (
+            (
+                "dev-dependencies",
+                "ctx-history-index",
+                "[dev-dependencies]\n"
+                'ctx-history-index = { path = "../crates/ctx-history-index" }\n',
             ),
-            workspace_dependencies=(
-                "[workspace.dependencies]\n"
-                'history_sqlite = { package = "ctx-history-source-sqlite", path = "crates/ctx-history-source-sqlite" }\n'
+            (
+                "build-dependencies",
+                "ctx-history-provider-native-jsonl",
+                "[build-dependencies]\n"
+                'ctx-history-provider-native-jsonl = { path = "../crates/ctx-history-provider-native-jsonl" }\n',
             ),
-            labels=(
-                "//crates/ctx-history-jsonl:lib",
-                "//crates/ctx-history-source-sqlite:lib",
+            (
+                "target-specific dependencies",
+                "ctx-history-index-query",
+                "[target.'cfg(unix)'.dependencies]\n"
+                'ctx-history-index-query = { path = "../crates/ctx-history-index-query" }\n',
             ),
         )
-        self.assertEqual(
-            local_graph(root, packages)["consumer"],
-            {"ctx-history-jsonl", "ctx-history-source-sqlite"},
-        )
+        for table, package, dependency_definition in cases:
+            with self.subTest(table=table, package=package):
+                root, packages = self.local_edge_fixture(
+                    dependency_definition=dependency_definition,
+                )
+                with self.assertRaisesRegex(InventoryError, f"explicitly declare.*{package}"):
+                    local_graph(root, packages)
+
+                root, packages = self.local_edge_fixture(
+                    dependency_definition=dependency_definition,
+                    labels=(f"//crates/{package}:lib",),
+                )
+                self.assertEqual(
+                    local_graph(root, packages)["consumer"],
+                    set() if table == "dev-dependencies" else {package},
+                )
 
     def test_explicit_target_does_not_hide_implicit_targets(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
