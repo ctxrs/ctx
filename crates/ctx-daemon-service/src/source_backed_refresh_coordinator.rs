@@ -470,13 +470,6 @@ pub(crate) fn pin_retained_generation(
         .map(PinnedSourceBackedGeneration)
 }
 
-fn published_refresh_receipt(
-    response: &Value,
-    pin: &PinnedSourceBackedGeneration,
-) -> Result<SourceBackedRefreshReceipt> {
-    ctx_history_refresh::published_refresh_receipt(response, &pin.0)
-}
-
 pub(super) fn source_backed_watch_catalog(
     data_root: &Path,
     config: &'static dyn crate::DaemonConfigPort,

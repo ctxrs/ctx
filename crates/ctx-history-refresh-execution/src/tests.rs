@@ -24,6 +24,7 @@ impl PublishedSourceBackedStatePort for TestPublishedState {
             return Ok(PublishedSourceBackedState {
                 verified_index: None,
                 publication_metadata: None,
+                committed_rejection_diagnostics: None,
             });
         }
         let verified_index = match VerifiedIndex::open_pinned(&index_root) {
@@ -36,14 +37,23 @@ impl PublishedSourceBackedStatePort for TestPublishedState {
             }
             Err(error) => return Err(error.into()),
         };
-        let publication_metadata = verified_index
+        let (publication_metadata, committed_rejection_diagnostics) = match verified_index
             .as_ref()
             .filter(|index| index.publication_metadata().is_some())
-            .map(SourceBackedPublicationMetadata::decode)
-            .transpose()?;
+        {
+            Some(index) => {
+                let (metadata, diagnostics) =
+                    SourceBackedPublicationMetadata::decode_with_committed_rejection_diagnostics(
+                        index,
+                    )?;
+                (Some(metadata), diagnostics)
+            }
+            None => (None, None),
+        };
         Ok(PublishedSourceBackedState {
             verified_index,
             publication_metadata,
+            committed_rejection_diagnostics,
         })
     }
 }

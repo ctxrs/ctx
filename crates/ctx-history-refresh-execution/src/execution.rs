@@ -26,6 +26,7 @@ pub(super) struct MergedSourceBackedRegistry {
     requested_explicit_source_catalog: Option<ExplicitSourceCatalogAuthority>,
     pub(super) retained_generation: Option<VerifiedIndex>,
     retained_publication_metadata: Option<SourceBackedPublicationMetadata>,
+    retained_rejection_diagnostics: Option<Vec<SourceBackedRefreshRecordRejection>>,
     pub(super) requested_catalog_route_bindings: Vec<ExplicitSourceCatalogRouteBinding>,
     previous_route_controls: BTreeMap<SourceRouteIdentity, Vec<u8>>,
 }

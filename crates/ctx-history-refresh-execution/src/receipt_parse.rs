@@ -23,8 +23,22 @@ pub fn published_refresh_receipt_for_recovery(
 pub fn published_refresh_request_outcome_for_index(
     response: &Value,
     verified_index: &VerifiedIndex,
+    publication: &SourceBackedPublicationMetadata,
 ) -> Result<SourceBackedRefreshReceipt> {
-    parse_published_refresh_request_outcome(response, Some(verified_index))
+    let status_receipt = parse_published_refresh_receipt(response, Some(verified_index))
+        .context("validate physical Core publication receipt")?;
+    if status_receipt != publication.receipt {
+        bail!("source refresh publication receipt does not match Core metadata");
+    }
+    let request_receipt =
+        parse_published_refresh_request_outcome(response, Some(verified_index), &status_receipt)?;
+    validate_published_refresh_request_outcome(
+        response,
+        &status_receipt,
+        &request_receipt,
+        Some(publication),
+    )?;
+    Ok(request_receipt)
 }
 
 /// Recovery counterpart that does not require the disposable lexical
@@ -32,21 +46,73 @@ pub fn published_refresh_request_outcome_for_index(
 #[doc(hidden)]
 pub fn published_refresh_request_outcome_for_recovery(
     response: &Value,
+    publication_receipt: &SourceBackedRefreshReceipt,
 ) -> Result<SourceBackedRefreshReceipt> {
-    parse_published_refresh_request_outcome(response, None)
+    let request_receipt =
+        parse_published_refresh_request_outcome(response, None, publication_receipt)?;
+    validate_published_refresh_request_outcome(
+        response,
+        publication_receipt,
+        &request_receipt,
+        None,
+    )?;
+    Ok(request_receipt)
 }
 
 fn parse_published_refresh_request_outcome(
     response: &Value,
     verified_index: Option<&VerifiedIndex>,
+    publication_receipt: &SourceBackedRefreshReceipt,
 ) -> Result<SourceBackedRefreshReceipt> {
-    let receipt = match response.get("request_outcome") {
+    Ok(match response.get("request_outcome") {
         Some(value) => refresh_receipt_from_json(value, verified_index)
             .context("validate daemon source refresh request outcome")?,
-        None => return parse_published_refresh_receipt(response, verified_index),
-    };
-    validate_response_receipt(response, &receipt, true)?;
-    Ok(receipt)
+        None => publication_receipt.clone(),
+    })
+}
+
+fn validate_published_refresh_request_outcome(
+    response: &Value,
+    publication_receipt: &SourceBackedRefreshReceipt,
+    request_receipt: &SourceBackedRefreshReceipt,
+    publication: Option<&SourceBackedPublicationMetadata>,
+) -> Result<()> {
+    validate_response_receipt(response, request_receipt, true)?;
+    if response.get("outcome").and_then(Value::as_str) != Some(request_receipt.terminal_outcome()) {
+        bail!("source refresh response does not match its exact outcome receipt");
+    }
+    if response.get("request_outcome").is_some() {
+        if request_receipt == publication_receipt {
+            bail!("logical source refresh redundantly stores its publication receipt");
+        }
+        if request_receipt.previous_generation.as_deref()
+            != Some(publication_receipt.published_generation.as_str())
+            || request_receipt.published_generation != publication_receipt.published_generation
+            || request_receipt.generation_changed
+        {
+            bail!("logical source refresh outcome is not an exact publication no-op");
+        }
+    } else {
+        if request_receipt != publication_receipt {
+            bail!("logical source refresh has no exact publication receipt");
+        }
+        if let Some(publication) = publication {
+            let request_id = response
+                .get("request_id")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| anyhow!("source refresh response has no request ID"))?;
+            if publication.request_id != request_id
+                || publication.operation
+                    != SourceBackedRefreshOperation::from_request_json(response)?
+                || publication.refresh_scope
+                    != refresh_scope_from_json(response.get("refresh_scope"))?
+            {
+                bail!("source refresh response does not own its Core publication metadata");
+            }
+        }
+    }
+    Ok(())
 }
 
 fn parse_published_refresh_receipt(

@@ -100,7 +100,7 @@ fn published_refresh_observation_rejects_a_contradictory_logical_request_outcome
         &source_backed_index_root(&data_root),
         "physical-publication",
         ctx_history_refresh::RefreshOperation::Refresh,
-        ctx_history_refresh::SourceBackedRefreshScope::Exact(BTreeSet::from([route])),
+        ctx_history_refresh::SourceBackedRefreshScope::Exact(BTreeSet::from([route.clone()])),
         None,
     )
     .unwrap();
@@ -111,18 +111,26 @@ fn published_refresh_observation_rejects_a_contradictory_logical_request_outcome
         .receipt()
         .clone();
     let generation = publication.generation_id;
+    let contradictory_predecessor = "11".repeat(32);
+    let mut logical_receipt = physical_receipt.clone();
+    logical_receipt.previous_generation = Some(contradictory_predecessor.clone());
+    logical_receipt.generation_changed = true;
     let response = json!({
-        "previous_generation": generation,
+        "request_id": "logical-request",
+        "operation": "refresh",
+        "refresh_scope": {"kind": "exact", "routes": [route.as_str()]},
+        "previous_generation": contradictory_predecessor,
         "published_generation": generation,
-        "generation_changed": false,
+        "generation_changed": true,
+        "outcome": "completed",
         "certified_source_count": 0,
         "certified_source_bytes": 0,
         "scanned_routes": 1,
         "unsupported_routes": 0,
         "receipt": physical_receipt.to_json(),
-        // This is a valid physical receipt, but not this logical request's
-        // retained-generation outcome.
-        "request_outcome": physical_receipt.to_json(),
+        // Both this receipt and the envelope are self-consistent, but the
+        // claimed logical transition is not a no-op on the physical authority.
+        "request_outcome": logical_receipt.to_json(),
     });
 
     let error = match published_refresh_observation(
@@ -136,8 +144,7 @@ fn published_refresh_observation_rejects_a_contradictory_logical_request_outcome
         Err(error) => error,
     };
     assert!(
-        format!("{error:#}")
-            .contains("logical request outcome does not match response identity facts"),
+        format!("{error:#}").contains("not an exact publication no-op"),
         "{error:#}"
     );
 }

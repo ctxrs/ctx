@@ -276,8 +276,7 @@ fn publication_metadata_ownership_rejects_table_driven_mismatches_for_terminal_a
                 ));
             if case == "physical_receipt_before_malformed_outcome" {
                 assert!(
-                    format!("{error:#}").contains("recover durable terminal refresh receipt")
-                        || format!("{error:#}").contains("different terminal receipt"),
+                    format!("{error:#}").contains("validate physical Core publication receipt"),
                     "physical receipt must fail before logical outcome decoding: {error:#}"
                 );
             }

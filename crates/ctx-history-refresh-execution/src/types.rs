@@ -293,6 +293,7 @@ impl fmt::Debug for SourceBackedRefreshPublication {
 pub struct PublishedSourceBackedState {
     pub verified_index: Option<VerifiedIndex>,
     pub publication_metadata: Option<SourceBackedPublicationMetadata>,
+    pub committed_rejection_diagnostics: Option<Vec<SourceBackedRefreshRecordRejection>>,
 }
 
 pub trait PublishedSourceBackedStatePort: Send + Sync {

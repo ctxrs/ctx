@@ -8,10 +8,7 @@ mod automatic_retry;
 use automatic_retry::durable_build_rearmed_automatic_retry_routes;
 pub(in crate::engine) use automatic_retry::recover_automatic_retry_checkpoints;
 mod publication_ownership;
-use publication_ownership::{
-    validate_physical_publication_metadata, validate_published_request_receipt,
-    validate_strict_publication_metadata_ownership,
-};
+use publication_ownership::validate_strict_publication_metadata_ownership;
 
 impl CoreRefreshEngine {
     pub fn recover(&self, data_root: &Path) -> Result<bool> {
@@ -76,13 +73,9 @@ impl CoreRefreshEngine {
                     {
                         bail!("durable physical publication receipt names a different generation");
                     }
-                    let request_receipt = published_refresh_request_outcome_for_recovery(&job)
-                        .context("recover exact logical source refresh outcome")?;
-                    let _ = validate_published_request_receipt(
-                        &job,
-                        &publication_receipt,
-                        request_receipt,
-                    )?;
+                    let _ =
+                        published_refresh_request_outcome_for_recovery(&job, &publication_receipt)
+                            .context("recover exact logical source refresh outcome")?;
                     let _ = recover_terminal_attempt(&job, SourceBackedRefreshState::Published)?;
                     return self.recover_published_rebuild(
                         data_root,
@@ -110,21 +103,10 @@ impl CoreRefreshEngine {
                     let authority = VerifiedCorePublication::open(Arc::clone(verified))
                         .context("decode terminal Core publication ownership metadata")?;
                     let metadata = authority.metadata();
-                    let status_receipt = published_refresh_receipt_for_index(&job, verified)
-                        .context("recover durable terminal refresh receipt")?;
-                    let durable_receipt =
-                        validate_physical_publication_metadata(metadata, Some(&status_receipt))?;
+                    let durable_receipt = authority.receipt().clone();
                     let request_receipt =
-                        published_refresh_request_outcome_for_index(&job, verified)
+                        published_refresh_request_outcome_for_index(&job, verified, metadata)
                             .context("recover exact logical source refresh outcome")?;
-                    let request_receipt = validate_published_request_receipt(
-                        &job,
-                        &durable_receipt,
-                        request_receipt,
-                    )?;
-                    if job.get("request_outcome").is_none() {
-                        validate_strict_publication_metadata_ownership(&job, metadata)?;
-                    }
                     let attempt = recover_exact_published_attempt(
                         &job,
                         metadata,
@@ -179,7 +161,7 @@ impl CoreRefreshEngine {
                 .context("recover exact terminal refresh receipt from Core publication metadata")?;
             let metadata = authority.metadata();
             validate_strict_publication_metadata_ownership(&job, metadata)?;
-            let receipt = validate_physical_publication_metadata(metadata, None)?;
+            let receipt = metadata.receipt.clone();
             let attempt =
                 recover_committed_attempt(&job, metadata, receipt.clone(), verified.as_ref())?;
             let terminal = CoreRefreshTerminalSuccess::verified(authority);

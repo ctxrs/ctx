@@ -37,6 +37,7 @@ pub(super) fn refresh_all_provider_sources_route_local_with_reconciliation(
         requested_explicit_source_catalog,
         retained_generation,
         retained_publication_metadata,
+        retained_rejection_diagnostics,
         requested_catalog_route_bindings,
         previous_route_controls,
     } = build_merged_source_backed_registry_with_automatic_routes(
@@ -261,6 +262,8 @@ pub(super) fn refresh_all_provider_sources_route_local_with_reconciliation(
                     &mut route_results,
                     context.snapshot(),
                     retained_generation.as_ref(),
+                    retained_publication_metadata.as_ref(),
+                    retained_rejection_diagnostics.as_deref(),
                 )
                     .map_err(|error| IndexError::PublicationMetadata(format!("{error:#}")))?;
                 let current = SourceBackedRefreshCurrent::from_sources(
@@ -408,6 +411,8 @@ pub(super) fn refresh_all_provider_sources_route_local_with_reconciliation(
         &mut route_results,
         receipt.commit.snapshot(),
         retained_generation.as_ref(),
+        retained_publication_metadata.as_ref(),
+        retained_rejection_diagnostics.as_deref(),
     )?;
     let (published_explicit_source_catalog, catalog_route_bindings) =
         reconcile_published_catalog_witness(

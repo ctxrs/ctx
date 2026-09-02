@@ -101,22 +101,18 @@ pub(super) fn preserve_carried_rejection_diagnostics(
     route_results: &mut [SourceBackedRefreshRouteResult],
     snapshot: &(impl ImmutableCaptureSnapshot + ?Sized),
     retained_generation: Option<&VerifiedIndex>,
+    retained_metadata: Option<&SourceBackedPublicationMetadata>,
+    retained_diagnostics: Option<&[SourceBackedRefreshRecordRejection]>,
 ) -> Result<Vec<SourceBackedRefreshRecordRejection>> {
     let authority = current_rejection_authority(snapshot)?;
-    let (previous_diagnostics, stable_sources) = match retained_generation
-        .filter(|retained| retained.publication_metadata().is_some())
-    {
-        Some(retained_generation) => {
-            let (metadata, committed_rejection_diagnostics) =
-                SourceBackedPublicationMetadata::decode_with_committed_rejection_diagnostics(
-                    retained_generation,
-                )?;
-            let previous = metadata.receipt;
+    let (previous_diagnostics, stable_sources) = match (retained_generation, retained_metadata) {
+        (Some(retained_generation), Some(metadata)) => {
+            let previous = &metadata.receipt;
             if previous.published_generation != retained_generation.generation_id() {
                 bail!("carried Core rejection diagnostics do not match the retained generation");
             }
             (
-                committed_rejection_diagnostics.unwrap_or_else(|| {
+                retained_diagnostics.map(<[_]>::to_vec).unwrap_or_else(|| {
                     previous
                         .route_results
                         .iter()
@@ -127,7 +123,7 @@ pub(super) fn preserve_carried_rejection_diagnostics(
                 stable_source_identities(snapshot, retained_generation),
             )
         }
-        None => (Vec::new(), BTreeSet::new()),
+        _ => (Vec::new(), BTreeSet::new()),
     };
     let current_diagnostics = route_results
         .iter()

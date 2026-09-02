@@ -149,7 +149,8 @@ impl SourceBackedPublicationMetadata {
         Self::decode_with_committed_rejection_diagnostics(index).map(|(metadata, _)| metadata)
     }
 
-    pub(crate) fn decode_with_committed_rejection_diagnostics(
+    #[doc(hidden)]
+    pub fn decode_with_committed_rejection_diagnostics(
         index: &VerifiedIndex,
     ) -> Result<(Self, Option<Vec<SourceBackedRefreshRecordRejection>>)> {
         let bytes = index

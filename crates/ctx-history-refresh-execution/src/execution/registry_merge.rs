@@ -31,6 +31,7 @@ pub(super) fn build_merged_source_backed_registry_with_automatic_routes(
     let PublishedSourceBackedState {
         verified_index: retained_generation,
         publication_metadata: retained_publication_metadata,
+        committed_rejection_diagnostics: retained_rejection_diagnostics,
     } = published_state.open_published_state(data_root)?;
     let previous_explicit_source_catalog = retained_publication_metadata
         .as_ref()
@@ -218,6 +219,7 @@ pub(super) fn build_merged_source_backed_registry_with_automatic_routes(
         requested_explicit_source_catalog: explicit_source_catalog.cloned(),
         retained_generation,
         retained_publication_metadata,
+        retained_rejection_diagnostics,
         requested_catalog_route_bindings,
         previous_route_controls,
     })

@@ -685,8 +685,6 @@ fn published_refresh_observation(
             "daemon published Core generation {expected}, but its retained terminal generation cannot be opened"
         )
     })?;
-    let publication_receipt = published_refresh_receipt(response, &pin)?;
-    validate_status_publication_authority(&publication_receipt, &pin)?;
     let receipt = published_request_outcome(response, &pin)?;
     let source_count = published_source_count(response, &receipt, pin.verified_index())?;
     if let Some(expected_catalog) = expected_catalog {
@@ -733,34 +731,13 @@ fn published_request_outcome(
     response: &Value,
     pin: &PinnedSourceBackedGeneration,
 ) -> Result<SourceBackedRefreshReceipt> {
-    ctx_history_refresh::published_refresh_request_outcome_for_index(response, pin.verified_index())
-}
-
-fn validate_status_publication_authority(
-    status_receipt: &SourceBackedRefreshReceipt,
-    pin: &PinnedSourceBackedGeneration,
-) -> Result<()> {
-    if pin.verified_index().publication_metadata().is_none() {
-        return missing_status_publication_authority();
-    }
     let metadata = SourceBackedPublicationMetadata::decode(pin.verified_index())
         .context("decode Core publication authority for daemon status")?;
-    if status_receipt != &metadata.receipt {
-        bail!("daemon source refresh publication receipt does not match Core metadata");
-    }
-    Ok(())
-}
-
-#[cfg(not(test))]
-fn missing_status_publication_authority() -> Result<()> {
-    bail!("active Core publication has no source-refresh metadata")
-}
-
-#[cfg(test)]
-fn missing_status_publication_authority() -> Result<()> {
-    // Protocol-state unit tests use synthetic generations without production
-    // CommitPayload metadata. Real publications always validate above.
-    Ok(())
+    ctx_history_refresh::published_refresh_request_outcome_for_index(
+        response,
+        pin.verified_index(),
+        &metadata,
+    )
 }
 
 fn should_report_progress(
