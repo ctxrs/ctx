@@ -607,7 +607,7 @@ fn scheduler_retries_post_route_finalization_once_and_notifies_generation_once()
             route_results: Vec::new(),
             zero_source_authority: Vec::new(),
             catalog_route_bindings: Vec::new(),
-            verified_index: None,
+            verified_publication: None,
         })
     });
     let terminal_failures = Arc::new(AtomicUsize::new(0));

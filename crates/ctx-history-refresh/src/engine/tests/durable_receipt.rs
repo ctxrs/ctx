@@ -63,7 +63,7 @@ fn publish_owned_pin_fixture(
                 request_id: request_id.clone(),
                 operation,
                 refresh_scope: scope.clone(),
-                receipt: receipt.to_json(),
+                receipt,
                 route_observations: BTreeMap::new(),
                 route_controls: BTreeMap::new(),
             }
@@ -196,7 +196,7 @@ fn publication_metadata_ownership_rejects_table_driven_mismatches_for_terminal_a
                         request_id: "expected-request".to_owned(),
                         operation: SourceBackedRefreshOperation::Refresh,
                         refresh_scope: SourceBackedRefreshScope::All,
-                        receipt: receipt.to_json(),
+                        receipt,
                         route_observations: BTreeMap::new(),
                         route_controls: BTreeMap::new(),
                     };
@@ -276,8 +276,7 @@ fn publication_metadata_ownership_rejects_table_driven_mismatches_for_terminal_a
                 ));
             if case == "physical_receipt_before_malformed_outcome" {
                 assert!(
-                    format!("{error:#}").contains("recover durable terminal refresh receipt")
-                        || format!("{error:#}").contains("different terminal receipt"),
+                    format!("{error:#}").contains("validate physical Core publication receipt"),
                     "physical receipt must fail before logical outcome decoding: {error:#}"
                 );
             }
@@ -722,7 +721,7 @@ fn refresh_all_to_import_exact_no_op_restart_restores_queued_successor() {
                         request_id: request_id.clone(),
                         operation,
                         refresh_scope: scope.clone(),
-                        receipt: receipt.to_json(),
+                        receipt,
                         route_observations: BTreeMap::new(),
                         route_controls: BTreeMap::new(),
                     }
@@ -1043,7 +1042,7 @@ fn pointer_crash_recovers_matching_running_publication_terminal_and_preserves_su
                                 request_id: metadata_request_id.clone(),
                                 operation: metadata_operation,
                                 refresh_scope: metadata_scope.clone(),
-                                receipt: receipt.to_json(),
+                                receipt,
                                 route_observations: BTreeMap::new(),
                                 route_controls: BTreeMap::new(),
                             }

@@ -91,6 +91,65 @@ fn live_progress_heartbeat_is_ten_hertz() {
 }
 
 #[test]
+fn published_refresh_observation_rejects_a_contradictory_logical_request_outcome() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    ctx_history_platform::platform_security::establish_private_data_root(&data_root).unwrap();
+    let route = source_count_route(1);
+    let publication = publish_authoritative_empty_generation_for_test(
+        &source_backed_index_root(&data_root),
+        "physical-publication",
+        ctx_history_refresh::RefreshOperation::Refresh,
+        ctx_history_refresh::SourceBackedRefreshScope::Exact(BTreeSet::from([route.clone()])),
+        None,
+    )
+    .unwrap();
+    let physical_receipt = publication
+        .verified_publication
+        .as_ref()
+        .unwrap()
+        .receipt()
+        .clone();
+    let generation = publication.generation_id;
+    let contradictory_predecessor = "11".repeat(32);
+    let mut logical_receipt = physical_receipt.clone();
+    logical_receipt.previous_generation = Some(contradictory_predecessor.clone());
+    logical_receipt.generation_changed = true;
+    let response = json!({
+        "request_id": "logical-request",
+        "operation": "refresh",
+        "refresh_scope": {"kind": "exact", "routes": [route.as_str()]},
+        "previous_generation": contradictory_predecessor,
+        "published_generation": generation,
+        "generation_changed": true,
+        "outcome": "completed",
+        "certified_source_count": 0,
+        "certified_source_bytes": 0,
+        "scanned_routes": 1,
+        "unsupported_routes": 0,
+        "receipt": physical_receipt.to_json(),
+        // Both this receipt and the envelope are self-consistent, but the
+        // claimed logical transition is not a no-op on the physical authority.
+        "request_outcome": logical_receipt.to_json(),
+    });
+
+    let error = match published_refresh_observation(
+        &data_root,
+        &response,
+        "logical-request".to_owned(),
+        SourceBackedRefreshMode::Wait,
+        None,
+    ) {
+        Ok(_) => panic!("contradictory logical request outcome was accepted"),
+        Err(error) => error,
+    };
+    assert!(
+        format!("{error:#}").contains("not an exact publication no-op"),
+        "{error:#}"
+    );
+}
+
+#[test]
 fn published_source_count_uses_request_routes_not_global_or_diagnostic_counts() {
     let (_temp, verified) = verified_source_count_routes(&[1, 2, 3, 4]);
     for (name, scanned_routes, unsupported_routes, route_results, global_sources, expected) in [

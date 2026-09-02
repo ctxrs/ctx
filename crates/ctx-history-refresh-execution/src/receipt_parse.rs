@@ -16,14 +16,126 @@ pub fn published_refresh_receipt_for_recovery(
     parse_published_refresh_receipt(response, None)
 }
 
+/// Parses the logical request outcome from a durable or cross-process
+/// published response. A no-op may name the retained publication in a
+/// request-scoped receipt distinct from the immutable publication receipt.
+#[doc(hidden)]
+pub fn published_refresh_request_outcome_for_index(
+    response: &Value,
+    verified_index: &VerifiedIndex,
+    publication: &SourceBackedPublicationMetadata,
+) -> Result<SourceBackedRefreshReceipt> {
+    let status_receipt = parse_published_refresh_receipt(response, Some(verified_index))
+        .context("validate physical Core publication receipt")?;
+    if status_receipt != publication.receipt {
+        bail!("source refresh publication receipt does not match Core metadata");
+    }
+    let request_receipt =
+        parse_published_refresh_request_outcome(response, Some(verified_index), &status_receipt)?;
+    validate_published_refresh_request_outcome(
+        response,
+        &status_receipt,
+        &request_receipt,
+        Some(publication),
+    )?;
+    Ok(request_receipt)
+}
+
+/// Recovery counterpart that does not require the disposable lexical
+/// generation to remain readable.
+#[doc(hidden)]
+pub fn published_refresh_request_outcome_for_recovery(
+    response: &Value,
+    publication_receipt: &SourceBackedRefreshReceipt,
+) -> Result<SourceBackedRefreshReceipt> {
+    let request_receipt =
+        parse_published_refresh_request_outcome(response, None, publication_receipt)?;
+    validate_published_refresh_request_outcome(
+        response,
+        publication_receipt,
+        &request_receipt,
+        None,
+    )?;
+    Ok(request_receipt)
+}
+
+fn parse_published_refresh_request_outcome(
+    response: &Value,
+    verified_index: Option<&VerifiedIndex>,
+    publication_receipt: &SourceBackedRefreshReceipt,
+) -> Result<SourceBackedRefreshReceipt> {
+    Ok(match response.get("request_outcome") {
+        Some(value) => refresh_receipt_from_json(value, verified_index)
+            .context("validate daemon source refresh request outcome")?,
+        None => publication_receipt.clone(),
+    })
+}
+
+fn validate_published_refresh_request_outcome(
+    response: &Value,
+    publication_receipt: &SourceBackedRefreshReceipt,
+    request_receipt: &SourceBackedRefreshReceipt,
+    publication: Option<&SourceBackedPublicationMetadata>,
+) -> Result<()> {
+    validate_response_receipt(response, request_receipt, true)?;
+    if response.get("outcome").and_then(Value::as_str) != Some(request_receipt.terminal_outcome()) {
+        bail!("source refresh response does not match its exact outcome receipt");
+    }
+    if response.get("request_outcome").is_some() {
+        if request_receipt == publication_receipt {
+            bail!("logical source refresh redundantly stores its publication receipt");
+        }
+        if request_receipt.previous_generation.as_deref()
+            != Some(publication_receipt.published_generation.as_str())
+            || request_receipt.published_generation != publication_receipt.published_generation
+            || request_receipt.generation_changed
+        {
+            bail!("logical source refresh outcome is not an exact publication no-op");
+        }
+    } else {
+        if request_receipt != publication_receipt {
+            bail!("logical source refresh has no exact publication receipt");
+        }
+        if let Some(publication) = publication {
+            let request_id = response
+                .get("request_id")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| anyhow!("source refresh response has no request ID"))?;
+            if publication.request_id != request_id
+                || publication.operation
+                    != SourceBackedRefreshOperation::from_request_json(response)?
+                || publication.refresh_scope
+                    != refresh_scope_from_json(response.get("refresh_scope"))?
+            {
+                bail!("source refresh response does not own its Core publication metadata");
+            }
+        }
+    }
+    Ok(())
+}
+
 fn parse_published_refresh_receipt(
     response: &Value,
     verified_index: Option<&VerifiedIndex>,
 ) -> Result<SourceBackedRefreshReceipt> {
-    let value = response
-        .get("receipt")
-        .and_then(Value::as_object)
-        .ok_or_else(|| anyhow!("published daemon source refresh has no terminal receipt"))?;
+    let receipt = refresh_receipt_from_json(
+        response
+            .get("receipt")
+            .ok_or_else(|| anyhow!("published daemon source refresh has no terminal receipt"))?,
+        verified_index,
+    )?;
+    validate_response_receipt(response, &receipt, false)?;
+    Ok(receipt)
+}
+
+pub(crate) fn refresh_receipt_from_json(
+    value: &Value,
+    verified_index: Option<&VerifiedIndex>,
+) -> Result<SourceBackedRefreshReceipt> {
+    let value = value.as_object().ok_or_else(|| {
+        anyhow!("published daemon source refresh terminal receipt is not an object")
+    })?;
     let previous_generation = optional_generation(value.get("previous_generation"))?;
     let published_generation = required_generation(
         value.get("published_generation"),
@@ -56,19 +168,6 @@ fn parse_published_refresh_receipt(
         sources_with_rejections: required_usize(current_value, "current_sources_with_rejections")?,
         removed_source_count: required_usize(current_value, "removed_source_count")?,
     };
-    if current.source_count
-        != required_usize_from_value(
-            response.get("certified_source_count"),
-            "certified_source_count",
-        )?
-        || current.certified_source_bytes
-            != required_u64_from_value(
-                response.get("certified_source_bytes"),
-                "certified_source_bytes",
-            )?
-    {
-        bail!("published daemon source refresh receipt does not match its certified current facts");
-    }
     let selected_route_total = required_usize(value, "selected_route_total")?;
     let successful_route_total = required_usize(value, "successful_route_total")?;
     let route_results = required_route_results(value.get("route_results"))?;
@@ -78,19 +177,11 @@ fn parse_published_refresh_receipt(
         .as_ref()
         .map(ExplicitSourceCatalogAuthority::route_lineages)
         .unwrap_or_default();
-    let catalog_route_bindings = match verified_index {
-        Some(index) => required_catalog_route_bindings(
-            value.get("catalog_route_bindings"),
-            index.manifest(),
-            &route_results,
-            &expected_catalog_lineages,
-        )?,
-        None => required_catalog_route_bindings_shape(
-            value.get("catalog_route_bindings"),
-            &route_results,
-            &expected_catalog_lineages,
-        )?,
-    };
+    let catalog_route_bindings = required_catalog_route_bindings_shape(
+        value.get("catalog_route_bindings"),
+        &route_results,
+        &expected_catalog_lineages,
+    )?;
     let actual_catalog_lineages = catalog_route_bindings
         .iter()
         .map(|binding| binding.catalog_lineage.clone())
@@ -138,49 +229,13 @@ fn parse_published_refresh_receipt(
     {
         bail!("published daemon source refresh has an invalid route-result partition");
     }
-    validate_zero_source_authority(
-        &published_generation,
-        current.source_count,
-        &route_results,
-        &zero_source_authority,
-        false,
-    )?;
-
-    let top_previous_generation = optional_generation(response.get("previous_generation"))?;
-    let top_published_generation = required_generation(
-        response.get("published_generation"),
-        "published daemon source refresh generation",
-    )?;
-    let top_generation_changed = response
-        .get("generation_changed")
-        .and_then(Value::as_bool)
-        .ok_or_else(|| anyhow!("published daemon source refresh has no generation_changed fact"))?;
     let identity_changed = previous_generation.as_deref() != Some(published_generation.as_str());
-    let request_identity_changed =
-        top_previous_generation.as_deref() != Some(top_published_generation.as_str());
-    if published_generation != top_published_generation
-        || generation_changed != identity_changed
-        || top_generation_changed != request_identity_changed
-    {
+    if generation_changed != identity_changed {
         bail!(
             "published daemon source refresh receipt has inconsistent publication identity facts"
         );
     }
-
-    if let Some(verified_index) = verified_index {
-        let manifest = verified_index.manifest();
-        let verified_current = SourceBackedRefreshCurrent::from_sources(
-            &manifest.sources,
-            current.removed_source_count,
-        )?;
-        if current != verified_current {
-            bail!(
-                "published daemon source refresh receipt does not match the verified current generation"
-            );
-        }
-    }
-
-    Ok(SourceBackedRefreshReceipt {
+    let receipt = SourceBackedRefreshReceipt {
         previous_generation,
         published_generation,
         generation_changed,
@@ -189,7 +244,60 @@ fn parse_published_refresh_receipt(
         route_results,
         zero_source_authority,
         catalog_route_bindings,
-    })
+    };
+    receipt.validate(verified_index)?;
+    Ok(receipt)
+}
+
+fn validate_response_receipt(
+    response: &Value,
+    receipt: &SourceBackedRefreshReceipt,
+    logical_request_outcome: bool,
+) -> Result<()> {
+    if receipt.current.source_count
+        != required_usize_from_value(
+            response.get("certified_source_count"),
+            "certified_source_count",
+        )?
+        || receipt.current.certified_source_bytes
+            != required_u64_from_value(
+                response.get("certified_source_bytes"),
+                "certified_source_bytes",
+            )?
+    {
+        bail!("published daemon source refresh receipt does not match its certified current facts");
+    }
+    let previous_generation = optional_generation(response.get("previous_generation"))?;
+    let published_generation = required_generation(
+        response.get("published_generation"),
+        "published daemon source refresh generation",
+    )?;
+    let generation_changed = response
+        .get("generation_changed")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| anyhow!("published daemon source refresh has no generation_changed fact"))?;
+    if generation_changed != (previous_generation.as_deref() != Some(published_generation.as_str()))
+    {
+        bail!(
+            "published daemon source refresh receipt has inconsistent publication identity facts"
+        );
+    }
+    if receipt.published_generation != published_generation {
+        bail!("published daemon source refresh receipt has an unexpected published generation");
+    }
+    // The durable receipt describes the physical publication and may retain
+    // its historical predecessor when a later logical no-op names that same
+    // publication. A distinct request outcome instead describes this request,
+    // so all of its identity facts must agree with the response envelope.
+    if logical_request_outcome
+        && (receipt.previous_generation != previous_generation
+            || receipt.generation_changed != generation_changed)
+    {
+        bail!(
+            "published daemon source refresh logical request outcome does not match response identity facts"
+        );
+    }
+    Ok(())
 }
 
 #[doc(hidden)]
@@ -497,60 +605,6 @@ fn compact_record_rejection_class(value: Option<&str>) -> Result<String> {
     .to_owned())
 }
 
-fn required_catalog_route_bindings(
-    value: Option<&Value>,
-    manifest: &GenerationManifest,
-    route_results: &[SourceBackedRefreshRouteResult],
-    expected_catalog_lineages: &BTreeSet<String>,
-) -> Result<Vec<ExplicitSourceCatalogRouteBinding>> {
-    let values = value
-        .ok_or_else(|| {
-            anyhow!("published daemon source refresh receipt has no catalog_route_bindings")
-        })?
-        .as_object()
-        .ok_or_else(|| {
-            anyhow!(
-                "published daemon source refresh receipt catalog_route_bindings must be an object"
-            )
-        })?;
-    let retained = manifest
-        .source_routes()
-        .iter()
-        .map(|route| route.route_identity().as_str())
-        .collect::<BTreeSet<_>>();
-    values
-        .iter()
-        .map(|(catalog_lineage, route_identity)| {
-            if !is_sha256_identity(catalog_lineage) {
-                bail!("published daemon source refresh catalog lineage is invalid");
-            }
-            let route_identity = route_identity.as_str().ok_or_else(|| {
-                anyhow!("published daemon source refresh catalog binding route is invalid")
-            })?;
-            let retained_witness = expected_catalog_lineages.contains(catalog_lineage)
-                && retained.contains(route_identity);
-            let transient_request_failure = !expected_catalog_lineages.contains(catalog_lineage)
-                && route_results.iter().any(|result| {
-                    result.route_identity == route_identity
-                        && matches!(
-                            result.outcome,
-                            SourceBackedRefreshRouteOutcome::Failed {
-                                carried_forward,
-                                ..
-                            } if carried_forward == retained.contains(route_identity)
-                        )
-                });
-            if !retained_witness && !transient_request_failure {
-                bail!("published daemon source refresh catalog binding is neither a retained witness nor a consistent request failure");
-            }
-            Ok(ExplicitSourceCatalogRouteBinding {
-                catalog_lineage: catalog_lineage.clone(),
-                route_identity: route_identity.to_owned(),
-            })
-        })
-        .collect()
-}
-
 fn required_catalog_route_bindings_shape(
     value: Option<&Value>,
     route_results: &[SourceBackedRefreshRouteResult],
@@ -578,23 +632,23 @@ fn required_catalog_route_bindings_shape(
             if !is_sha256_identity(route_identity) {
                 bail!("published daemon source refresh catalog binding route is invalid");
             }
-            let route_result = route_results
-                .iter()
-                .find(|result| result.route_identity == route_identity)
-                .ok_or_else(|| {
-                    anyhow!(
-                        "published daemon source refresh catalog binding route is absent from route_results"
-                    )
-                })?;
-            if !expected_catalog_lineages.contains(catalog_lineage)
-                && !matches!(
+            if !expected_catalog_lineages.contains(catalog_lineage) {
+                let route_result = route_results
+                    .iter()
+                    .find(|result| result.route_identity == route_identity)
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "published daemon source refresh unretained catalog binding route is absent from route_results"
+                        )
+                    })?;
+                if !matches!(
                     route_result.outcome,
                     SourceBackedRefreshRouteOutcome::Failed { .. }
-                )
-            {
-                bail!(
-                    "published daemon source refresh unretained catalog binding has no terminal failure"
-                );
+                ) {
+                    bail!(
+                        "published daemon source refresh unretained catalog binding has no terminal failure"
+                    );
+                }
             }
             Ok(ExplicitSourceCatalogRouteBinding {
                 catalog_lineage: catalog_lineage.clone(),

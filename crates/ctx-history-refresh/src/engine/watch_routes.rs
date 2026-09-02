@@ -153,14 +153,12 @@ impl CoreRefreshEngine {
         budget: StdDuration,
     ) {
         let authority = self.pinned_core_publication();
-        let metadata = authority.as_deref().and_then(|authority| {
-            SourceBackedPublicationMetadata::decode(authority.verified_index_ref()).ok()
-        });
+        let metadata = authority.as_deref().map(VerifiedCorePublication::metadata);
         let missing_routes = authority
             .as_deref()
             .map(|authority| {
                 authority
-                    .verified_index_ref()
+                    .verified_index()
                     .manifest()
                     .source_routes()
                     .iter()
@@ -171,14 +169,11 @@ impl CoreRefreshEngine {
             .unwrap_or_default();
         let mut dirty = startup_routes_requiring_refresh(
             catalog,
-            metadata
-                .as_ref()
-                .map(|metadata| &metadata.route_observations),
+            metadata.map(|metadata| &metadata.route_observations),
             &missing_routes,
             budget,
         );
         let route_controls = metadata
-            .as_ref()
             .map(|metadata| &metadata.route_controls)
             .cloned()
             .unwrap_or_default();

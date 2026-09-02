@@ -124,6 +124,15 @@ fn present_unsupported_only_refresh_fails_cold_and_reports_against_a_warm_genera
     drop(legacy_nonempty);
     let warm = run_report(&discovery, report, &data_root, &index_root).unwrap();
     assert_eq!(warm.generation_id, retained_generation);
+    let recertified = warm
+        .verified_publication
+        .as_ref()
+        .expect("legacy retained generation is recertified before finalization");
+    assert_eq!(recertified.generation_id(), retained_generation);
+    assert_eq!(
+        recertified.metadata().version,
+        SOURCE_REFRESH_PUBLICATION_METADATA_VERSION
+    );
     let [failed_route] = warm.route_results.as_slice() else {
         panic!("one failed unsupported route expected: {warm:#?}");
     };
@@ -132,6 +141,40 @@ fn present_unsupported_only_refresh_fails_cold_and_reports_against_a_warm_genera
     let retained = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert_eq!(retained.generation_id(), retained_generation);
     assert_eq!(retained.manifest().sources.len(), 1);
+    assert_eq!(
+        SourceBackedPublicationMetadata::decode(&retained)
+            .unwrap()
+            .version,
+        SOURCE_REFRESH_PUBLICATION_METADATA_VERSION
+    );
+    drop(retained);
+
+    // Hand the recertified reuse through the engine's terminal-success gate:
+    // production finalization must receive the verified authority rather than
+    // falling back to an unbound retained index.
+    let publication = Arc::new(Mutex::new(Some(warm)));
+    let returned = Arc::clone(&publication);
+    let coordinator = CoreRefreshEngine::with_executor(Arc::new(
+        move |_execution: SourceBackedRefreshExecution<'_>| {
+            returned
+                .lock()
+                .unwrap()
+                .take()
+                .ok_or_else(|| anyhow!("legacy recertification executor ran more than once"))
+        },
+    ));
+    coordinator.enqueue_periodic(&data_root).unwrap();
+    let finalized = coordinator
+        .run_next(&data_root)
+        .expect("recertified reuse finalization");
+    assert!(!finalized.failed, "{:#}", finalized.job);
+    assert_eq!(
+        coordinator
+            .pinned_core_publication()
+            .expect("upper finalization retained verified authority")
+            .generation_id(),
+        retained_generation
+    );
 }
 
 #[test]

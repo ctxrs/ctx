@@ -204,7 +204,7 @@ fn missing_fixture_executor(
                 .collect(),
             zero_source_authority: Vec::new(),
             catalog_route_bindings: Vec::new(),
-            verified_index: None,
+            verified_publication: None,
         })
     })
 }

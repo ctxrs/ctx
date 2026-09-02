@@ -273,7 +273,7 @@ pub struct SourceBackedRefreshPublication {
     pub route_results: Vec<SourceBackedRefreshRouteResult>,
     pub zero_source_authority: Vec<SourceBackedZeroSourceAuthority>,
     pub catalog_route_bindings: Vec<ExplicitSourceCatalogRouteBinding>,
-    pub verified_index: Option<Arc<VerifiedIndex>>,
+    pub verified_publication: Option<Arc<VerifiedCorePublication>>,
 }
 
 impl fmt::Debug for SourceBackedRefreshPublication {
@@ -282,16 +282,18 @@ impl fmt::Debug for SourceBackedRefreshPublication {
             .debug_struct("SourceBackedRefreshPublication")
             .field("generation_id", &self.generation_id)
             .field("route_results", &self.route_results)
-            .field("has_verified_index", &self.verified_index.is_some())
+            .field(
+                "has_verified_publication",
+                &self.verified_publication.is_some(),
+            )
             .finish_non_exhaustive()
     }
 }
 
 pub struct PublishedSourceBackedState {
     pub verified_index: Option<VerifiedIndex>,
-    pub explicit_source_catalog: Option<ExplicitSourceCatalogAuthority>,
-    pub catalog_route_bindings: Vec<ExplicitSourceCatalogRouteBinding>,
-    pub route_controls: BTreeMap<SourceRouteIdentity, Vec<u8>>,
+    pub publication_metadata: Option<SourceBackedPublicationMetadata>,
+    pub committed_rejection_diagnostics: Option<Vec<SourceBackedRefreshRecordRejection>>,
 }
 
 pub trait PublishedSourceBackedStatePort: Send + Sync {

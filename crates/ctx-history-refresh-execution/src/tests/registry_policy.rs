@@ -126,13 +126,15 @@ fn production_refresh_persists_both_split_publications_without_provider_roots() 
         issues: Vec::new(),
     };
     let bridge = run_report(&discovery, report(), &data_root, &index_root).unwrap();
-    let bridge_index = bridge.verified_index.as_ref().unwrap();
+    let bridge = bridge.verified_publication.as_ref().unwrap();
+    let bridge_index = bridge.verified_index();
     assert!(bridge_index.manifest().source_route(&legacy).is_some());
     let bridge_metadata = SourceBackedPublicationMetadata::decode(bridge_index).unwrap();
     assert!(bridge_metadata.route_controls.contains_key(&legacy));
 
     let successor = run_report(&discovery, report(), &data_root, &index_root).unwrap();
-    let successor_index = successor.verified_index.as_ref().unwrap();
+    let successor = successor.verified_publication.as_ref().unwrap();
+    let successor_index = successor.verified_index();
     let final_routes = successor_index
         .manifest()
         .source_routes()
@@ -192,7 +194,8 @@ fn warm_automatic_hermes_profile_rename_retires_the_old_route_and_remains_refres
     )
     .unwrap();
     let (cold_generation, legacy_metadata) = {
-        let cold_index = cold.verified_index.as_ref().unwrap();
+        let cold = cold.verified_publication.as_ref().unwrap();
+        let cold_index = cold.verified_index();
         assert!(cold_index.manifest().source_route(&alpha_route).is_some());
         let mut metadata = SourceBackedPublicationMetadata::decode(cold_index).unwrap();
         let mut legacy: serde_json::Value = serde_json::from_slice(
@@ -232,7 +235,8 @@ fn warm_automatic_hermes_profile_rename_retires_the_old_route_and_remains_refres
         issues: Vec::new(),
     };
     let warm = run_report(&discovery, warm_report(), &data_root, &index_root).unwrap();
-    let warm_index = warm.verified_index.as_ref().unwrap();
+    let warm = warm.verified_publication.as_ref().unwrap();
+    let warm_index = warm.verified_index();
     assert!(warm_index.manifest().source_route(&alpha_route).is_none());
     assert!(warm_index.manifest().source_route(&beta_route).is_some());
     let warm_metadata = SourceBackedPublicationMetadata::decode(warm_index).unwrap();
@@ -240,7 +244,8 @@ fn warm_automatic_hermes_profile_rename_retires_the_old_route_and_remains_refres
     assert!(warm_metadata.route_controls.contains_key(&beta_route));
 
     let subsequent = run_report(&discovery, warm_report(), &data_root, &index_root).unwrap();
-    let subsequent = subsequent.verified_index.as_ref().unwrap();
+    let subsequent = subsequent.verified_publication.as_ref().unwrap();
+    let subsequent = subsequent.verified_index();
     assert!(subsequent.manifest().source_route(&alpha_route).is_none());
     assert!(subsequent.manifest().source_route(&beta_route).is_some());
 }

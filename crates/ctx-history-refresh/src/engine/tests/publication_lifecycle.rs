@@ -316,10 +316,7 @@ fn verified_publication_atomically_installs_pinned_core_receipt() {
     assert_eq!(pinned.generation_id(), run.job["published_generation"]);
     assert_eq!(
         pinned.receipt().published_generation,
-        pinned
-            .verified_index()
-            .expect("verified Core index")
-            .generation_id()
+        pinned.verified_index().generation_id()
     );
     assert!(!coordinator.has_pending_request());
 }
@@ -534,7 +531,7 @@ fn mismatched_pin_fails_without_rebinding_stale_prior_authority() {
     let prior = coordinator
         .pinned_core_publication()
         .expect("prior retained authority");
-    let stale_index = prior.verified_index().expect("prior verified index");
+    let stale_index = prior.verified_index_arc();
 
     publish_nonempty.store(true, Ordering::SeqCst);
     let queued = coordinator.enqueue_periodic(&data_root).unwrap();
@@ -1042,7 +1039,7 @@ pub(super) fn publish_empty_generation_with_request_metadata(
                         request_id: request_id.clone(),
                         operation,
                         refresh_scope: scope.clone(),
-                        receipt: receipt.to_json(),
+                        receipt,
                         route_observations: BTreeMap::new(),
                         route_controls: BTreeMap::new(),
                     }
@@ -1053,7 +1050,8 @@ pub(super) fn publish_empty_generation_with_request_metadata(
     let (_, _, verified_index) = published.into_parts();
     let mut publication = empty_test_publication(generation_id);
     add_complete_empty_authority(&mut publication, route_identity(route_byte));
-    publication.verified_index = Some(Arc::new(verified_index));
+    publication.verified_publication =
+        Some(VerifiedCorePublication::open(Arc::new(verified_index))?);
     Ok(publication)
 }
 

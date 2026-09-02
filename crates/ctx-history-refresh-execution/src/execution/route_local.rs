@@ -36,6 +36,8 @@ pub(super) fn refresh_all_provider_sources_route_local_with_reconciliation(
         previous_catalog_route_bindings,
         requested_explicit_source_catalog,
         retained_generation,
+        retained_publication_metadata,
+        retained_rejection_diagnostics,
         requested_catalog_route_bindings,
         previous_route_controls,
     } = build_merged_source_backed_registry_with_automatic_routes(
@@ -207,6 +209,7 @@ pub(super) fn refresh_all_provider_sources_route_local_with_reconciliation(
     };
     let mut terminal_coverage_error = None;
     let mut reconciliation_required = false;
+    let mut encoded_publication_metadata = None;
     let refresh_result = executor
         .refresh_physical_scope_with_detailed_progress_publication_metadata_reconciliation_and_worksets(
             index_root,
@@ -259,6 +262,8 @@ pub(super) fn refresh_all_provider_sources_route_local_with_reconciliation(
                     &mut route_results,
                     context.snapshot(),
                     retained_generation.as_ref(),
+                    retained_publication_metadata.as_ref(),
+                    retained_rejection_diagnostics.as_deref(),
                 )
                     .map_err(|error| IndexError::PublicationMetadata(format!("{error:#}")))?;
                 let current = SourceBackedRefreshCurrent::from_sources(
@@ -290,7 +295,7 @@ pub(super) fn refresh_all_provider_sources_route_local_with_reconciliation(
                     zero_source_authority: Vec::new(),
                     catalog_route_bindings,
                     timings: SourceBackedRefreshTimings::default(),
-                    verified_index: None,
+                    verified_publication: None,
                 };
                 publication.zero_source_authority = match classify_inventory_disposition(
                     &publication,
@@ -322,7 +327,7 @@ pub(super) fn refresh_all_provider_sources_route_local_with_reconciliation(
                             .map(|observation| (outcome.route_identity.clone(), observation))
                     })
                     .collect();
-                encode_publication_metadata(
+                let encoded = encode_publication_metadata(
                     request_id,
                     operation,
                     &scope,
@@ -334,7 +339,9 @@ pub(super) fn refresh_all_provider_sources_route_local_with_reconciliation(
                         route_controls: context.route_controls().clone(),
                     },
                 )
-                .map_err(|error| IndexError::PublicationMetadata(format!("{error:#}")))
+                .map_err(|error| IndexError::PublicationMetadata(format!("{error:#}")))?;
+                encoded_publication_metadata = Some(encoded.metadata);
+                Ok(encoded.bytes)
             },
         );
     let mut receipt = match refresh_result {
@@ -363,11 +370,15 @@ pub(super) fn refresh_all_provider_sources_route_local_with_reconciliation(
     };
     if disposition == CapturePublicationDisposition::Published {
         let verified_index = Arc::new(verified_index.into_inner().into_verified_index());
+        let metadata = encoded_publication_metadata.take().ok_or_else(|| {
+            anyhow!("capture-owned publication lost its typed Core metadata result")
+        })?;
         let mut publication = publication_from_verified_metadata(
             request_id,
             operation,
             &scope,
             timings,
+            metadata,
             verified_index,
         )?;
         publication.unsupported_routes = unsupported_routes;
@@ -400,6 +411,8 @@ pub(super) fn refresh_all_provider_sources_route_local_with_reconciliation(
         &mut route_results,
         receipt.commit.snapshot(),
         retained_generation.as_ref(),
+        retained_publication_metadata.as_ref(),
+        retained_rejection_diagnostics.as_deref(),
     )?;
     let (published_explicit_source_catalog, catalog_route_bindings) =
         reconcile_published_catalog_witness(
@@ -422,7 +435,7 @@ pub(super) fn refresh_all_provider_sources_route_local_with_reconciliation(
         zero_source_authority: Vec::new(),
         catalog_route_bindings,
         timings,
-        verified_index: Some(Arc::new(verified_index.into_inner().into_verified_index())),
+        verified_publication: None,
     };
     publication.zero_source_authority = match classify_inventory_disposition(
         &publication,
@@ -440,17 +453,16 @@ pub(super) fn refresh_all_provider_sources_route_local_with_reconciliation(
             return Err(error.into())
         }
     };
-    let verified_index = publication
-        .verified_index
-        .as_ref()
-        .ok_or_else(|| anyhow!("reused Core refresh publication lost its exact verified pin"))?;
+    let verified_index = Arc::new(verified_index.into_inner().into_verified_index());
     let route_control_changed = receipt.route_controls != previous_route_controls;
-    if route_control_changed
-        || (publication.current.source_count == 0
-            && !verify_generation_query_readiness(verified_index)
-                .context("decode Core source-refresh publication authority")?
-                .is_ready())
-    {
+    // The live refresh already owns both this pin and its admitted metadata.
+    // Recertify only when that already-decoded authority cannot certify the
+    // new physical generation; decoding the just-published bytes again would
+    // only repeat the restart boundary.
+    let retained_metadata_certifies = retained_publication_metadata
+        .as_ref()
+        .is_some_and(|metadata| metadata.certifies_generation(&verified_index));
+    if !retained_metadata_certifies || route_control_changed {
         let route_observations = receipt
             .successful_route_outcomes
             .iter()
@@ -469,7 +481,7 @@ pub(super) fn refresh_all_provider_sources_route_local_with_reconciliation(
                     .map(|observation| (outcome.route_identity.clone(), observation))
             })
             .collect();
-        let metadata = encode_publication_metadata(
+        let encoded = encode_publication_metadata(
             request_id,
             operation,
             &scope,
@@ -484,11 +496,18 @@ pub(super) fn refresh_all_provider_sources_route_local_with_reconciliation(
         let writer = GenerationWriter::open(index_root, WriterOptions::default())?
             .into_writer()
             .map_err(committed_generation_recovery_error)?;
-        let recertified = Arc::new(
-            writer.republish_current_publication_metadata(&publication.generation_id, metadata)?,
-        );
-        validate_recertified_metadata(request_id, operation, &scope, &recertified)?;
-        publication.verified_index = Some(recertified);
+        let recertified =
+            Arc::new(writer.republish_current_publication_metadata(
+                &publication.generation_id,
+                encoded.bytes,
+            )?);
+        publication.verified_publication = Some(VerifiedCorePublication::bind(
+            encoded.metadata,
+            recertified,
+        )?);
+    } else if let Some(metadata) = retained_publication_metadata {
+        publication.verified_publication =
+            Some(VerifiedCorePublication::bind(metadata, verified_index)?);
     }
     Ok(publication)
 }

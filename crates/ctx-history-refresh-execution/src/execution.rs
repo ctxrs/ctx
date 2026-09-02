@@ -11,7 +11,7 @@ use family_fallback::{exact_member_family_fallback_required, ExactMemberFallback
 pub use publication::exclusive_scan_stage_duration;
 use publication::{
     encode_publication_metadata, provider_route_results, publication_from_verified_metadata,
-    validate_recertified_metadata, ProviderPublicationFacts,
+    ProviderPublicationFacts,
 };
 pub(super) use registry_merge::build_merged_source_backed_registry;
 use registry_merge::{
@@ -25,6 +25,8 @@ pub(super) struct MergedSourceBackedRegistry {
     previous_catalog_route_bindings: Vec<ExplicitSourceCatalogRouteBinding>,
     requested_explicit_source_catalog: Option<ExplicitSourceCatalogAuthority>,
     pub(super) retained_generation: Option<VerifiedIndex>,
+    retained_publication_metadata: Option<SourceBackedPublicationMetadata>,
+    retained_rejection_diagnostics: Option<Vec<SourceBackedRefreshRecordRejection>>,
     pub(super) requested_catalog_route_bindings: Vec<ExplicitSourceCatalogRouteBinding>,
     previous_route_controls: BTreeMap<SourceRouteIdentity, Vec<u8>>,
 }

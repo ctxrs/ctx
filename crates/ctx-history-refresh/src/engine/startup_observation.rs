@@ -166,7 +166,7 @@ mod tests {
                         )],
                         zero_source_authority: Vec::new(),
                         catalog_route_bindings: Vec::new(),
-                        verified_index: None,
+                        verified_publication: None,
                     };
                     let receipt = SourceBackedRefreshReceipt::from_verified_publication(
                         None,
@@ -179,7 +179,7 @@ mod tests {
                         request_id: "hermes-route-control-test".to_owned(),
                         operation: SourceBackedRefreshOperation::Refresh,
                         refresh_scope: SourceBackedRefreshScope::All,
-                        receipt: receipt.to_json(),
+                        receipt,
                         route_observations: BTreeMap::new(),
                         route_controls: BTreeMap::from([(request_route.clone(), revision)]),
                     }
@@ -229,7 +229,7 @@ mod tests {
                             kind: SourceBackedZeroSourceAuthorityKind::CompleteEmptyInventory,
                         }],
                         catalog_route_bindings: Vec::new(),
-                        verified_index: None,
+                        verified_publication: None,
                     };
                     let receipt = SourceBackedRefreshReceipt::from_verified_publication(
                         None,
@@ -242,7 +242,7 @@ mod tests {
                         request_id: "empty-hermes-route-control-test".to_owned(),
                         operation: SourceBackedRefreshOperation::Refresh,
                         refresh_scope: SourceBackedRefreshScope::All,
-                        receipt: receipt.to_json(),
+                        receipt,
                         route_observations: BTreeMap::new(),
                         route_controls: control
                             .map(|control| BTreeMap::from([(request_route.clone(), control)]))

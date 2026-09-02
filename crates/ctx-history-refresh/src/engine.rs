@@ -35,7 +35,6 @@ use durable_queue::{
     recover_queued_root, recover_queued_successors,
 };
 use generation_authority::CoreRefreshTerminalSuccess;
-pub use generation_authority::PinnedCorePublication;
 use progress_model::{status_progress_total_sources_known, SourceBackedRefreshState};
 pub use progress_model::{SourceBackedRefreshProgress, SourceBackedRefreshStage};
 use read_model::{
@@ -122,7 +121,7 @@ pub(super) struct CoreRefreshEngineState {
     active_request_id: Option<String>,
     pending_request_ids: VecDeque<String>,
     attempts: VecDeque<SourceBackedRefreshAttempt>,
-    pinned_core_publication: Option<Arc<PinnedCorePublication>>,
+    pinned_core_publication: Option<Arc<VerifiedCorePublication>>,
     current_published_generation: Option<String>,
     dirty_routes: DirtySourceRoutes,
     known_route_ids: BTreeSet<SourceRouteIdentity>,

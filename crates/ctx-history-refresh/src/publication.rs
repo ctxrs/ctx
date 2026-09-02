@@ -226,55 +226,19 @@ pub(super) fn verify_source_backed_publication(
             verified.generation_id()
         );
     }
-    let manifest = verified.manifest();
-    let verified_current = SourceBackedRefreshCurrent::from_sources(
-        &manifest.sources,
-        publication.current.removed_source_count,
+    // This transient result has no predecessor identity of its own. Give the
+    // typed physical receipt a no-op predecessor solely to validate every
+    // generation-bound fact through the one receipt validator.
+    let receipt = SourceBackedRefreshReceipt::from_verified_publication(
+        Some(publication.generation_id.clone()),
+        publication.generation_id.clone(),
+        publication,
     )?;
-    if verified_current != publication.current
-        || publication.certified_source_count != verified_current.source_count
-        || publication.certified_source_bytes != verified_current.certified_source_bytes
-        || manifest.indexed_documents != verified_current.indexed_documents
+    receipt.validate(Some(verified))?;
+    if publication.certified_source_count != receipt.current.source_count
+        || publication.certified_source_bytes != receipt.current.certified_source_bytes
     {
         bail!("Core refresh publication facts do not match its exact verified generation");
-    }
-    let route_rejected_record_total =
-        publication
-            .route_results
-            .iter()
-            .try_fold(0_u64, |total, result| {
-                total
-                    .checked_add(result.rejected_record_total)
-                    .ok_or_else(|| {
-                        anyhow!("Core refresh publication route rejected-record total overflow")
-                    })
-            })?;
-    if route_rejected_record_total > verified_current.rejected_records {
-        bail!("Core refresh publication route rejections exceed its exact verified generation");
-    }
-    let witness_lineages = publication
-        .published_explicit_source_catalog
-        .as_ref()
-        .map(ExplicitSourceCatalogAuthority::route_lineages)
-        .unwrap_or_default();
-    if publication.catalog_route_bindings.iter().any(|binding| {
-        if witness_lineages.contains(&binding.catalog_lineage) {
-            return SourceRouteIdentity::from_sha256(binding.route_identity.clone())
-                .ok()
-                .is_none_or(|route| manifest.source_route(&route).is_none());
-        }
-        !publication.route_results.iter().any(|result| {
-            result.route_identity == binding.route_identity
-                && matches!(
-                    result.outcome,
-                    SourceBackedRefreshRouteOutcome::Failed {
-                        carried_forward: false,
-                        ..
-                    }
-                )
-        })
-    }) {
-        bail!("Core refresh publication catalog binding has no generation-bound authority or cold request failure");
     }
     Ok(())
 }
@@ -295,14 +259,16 @@ pub fn explicit_catalog_request_is_accounted_for(
                 .iter()
                 .find(|binding| binding.catalog_lineage == *lineage)
                 .is_some_and(|binding| {
+                    // Callers admit only a publication/receipt that was
+                    // already checked against its exact manifest above (or
+                    // while decoding it). That check establishes whether a
+                    // failed route was retained, so both cold and retained
+                    // transient request failures count here.
                     route_results.iter().any(|result| {
                         result.route_identity == binding.route_identity
                             && matches!(
                                 result.outcome,
-                                SourceBackedRefreshRouteOutcome::Failed {
-                                    carried_forward: false,
-                                    ..
-                                }
+                                SourceBackedRefreshRouteOutcome::Failed { .. }
                             )
                     })
                 })
@@ -410,7 +376,7 @@ pub fn published_explicit_source_relocation_authority(
         .ok_or_else(|| anyhow!("explicit relocation requires an active Core publication"))?;
     let metadata = SourceBackedPublicationMetadata::decode(&verified)
         .context("load exact explicit relocation authority from Core publication metadata")?;
-    let receipt = published_refresh_receipt_for_index(&metadata.response_value(), &verified)?;
+    let receipt = &metadata.receipt;
     receipt
         .published_explicit_source_catalog
         .as_ref()

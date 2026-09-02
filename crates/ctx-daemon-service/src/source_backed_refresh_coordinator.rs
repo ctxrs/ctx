@@ -50,11 +50,10 @@ pub fn recover_wait_refresh_request_for_test(
 #[cfg(not(test))]
 pub(crate) use ctx_history_refresh::RefreshEngine as CoreRefreshEngine;
 pub use ctx_history_refresh::{
-    explicit_catalog_request_is_accounted_for, optional_generation,
-    published_refresh_receipt_for_index, RefreshIntent, RefreshOutcomeClass, RefreshRequest,
-    RefreshRequestState, RefreshRequestTrigger, RefreshSelection, RefreshStatus, RefreshStatusKind,
-    RefreshTerminalOutcome, SourceBackedCurrentSourceProgress, SourceBackedPublicationMetadata,
-    SourceBackedRefreshReceipt,
+    explicit_catalog_request_is_accounted_for, optional_generation, RefreshIntent,
+    RefreshOutcomeClass, RefreshRequest, RefreshRequestState, RefreshRequestTrigger,
+    RefreshSelection, RefreshStatus, RefreshStatusKind, RefreshTerminalOutcome,
+    SourceBackedCurrentSourceProgress, SourceBackedPublicationMetadata, SourceBackedRefreshReceipt,
 };
 
 #[cfg(test)]
@@ -62,7 +61,7 @@ pub(crate) use ctx_history_refresh::{
     open_verified_index, source_backed_index_root, EventWatermark, RefreshLogicalPhase,
     SourceBackedRefreshCurrent, SourceBackedRefreshExecution, SourceBackedRefreshExecutor,
     SourceBackedRefreshPublication, SourceBackedRefreshRouteResult,
-    SourceBackedRefreshSourceFailure, SourceBackedRefreshTimings,
+    SourceBackedRefreshSourceFailure, SourceBackedRefreshTimings, VerifiedCorePublication,
 };
 
 #[cfg(test)]
@@ -206,7 +205,7 @@ pub(crate) fn publish_authoritative_empty_generation_with_route_results_for_test
             })
             .collect(),
         catalog_route_bindings: Vec::new(),
-        verified_index: Some(Arc::new(verified_index)),
+        verified_publication: Some(VerifiedCorePublication::open(Arc::new(verified_index))?),
     })
 }
 
@@ -469,13 +468,6 @@ pub(crate) fn pin_retained_generation(
 ) -> Result<PinnedSourceBackedGeneration> {
     ctx_history_refresh::pin_retained_generation(data_root, generation_id)
         .map(PinnedSourceBackedGeneration)
-}
-
-fn published_refresh_receipt(
-    response: &Value,
-    pin: &PinnedSourceBackedGeneration,
-) -> Result<SourceBackedRefreshReceipt> {
-    ctx_history_refresh::published_refresh_receipt(response, &pin.0)
 }
 
 pub(super) fn source_backed_watch_catalog(

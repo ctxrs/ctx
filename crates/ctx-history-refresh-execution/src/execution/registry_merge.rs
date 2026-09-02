@@ -30,10 +30,20 @@ pub(super) fn build_merged_source_backed_registry_with_automatic_routes(
 ) -> Result<MergedSourceBackedRegistry> {
     let PublishedSourceBackedState {
         verified_index: retained_generation,
-        explicit_source_catalog: previous_explicit_source_catalog,
-        catalog_route_bindings: previous_catalog_route_bindings,
-        route_controls: previous_route_controls,
+        publication_metadata: retained_publication_metadata,
+        committed_rejection_diagnostics: retained_rejection_diagnostics,
     } = published_state.open_published_state(data_root)?;
+    let previous_explicit_source_catalog = retained_publication_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.receipt.published_explicit_source_catalog.clone());
+    let previous_catalog_route_bindings = retained_publication_metadata
+        .as_ref()
+        .map(|metadata| metadata.receipt.catalog_route_bindings.clone())
+        .unwrap_or_default();
+    let previous_route_controls = retained_publication_metadata
+        .as_ref()
+        .map(|metadata| metadata.route_controls.clone())
+        .unwrap_or_default();
     let retained_provider_roots =
         configured_retained_provider_roots(discovery, retained_generation.as_ref())?;
     let mut build = build_automatic_source_backed_registry_from_report_with_retained_roots(
@@ -208,6 +218,8 @@ pub(super) fn build_merged_source_backed_registry_with_automatic_routes(
         previous_catalog_route_bindings,
         requested_explicit_source_catalog: explicit_source_catalog.cloned(),
         retained_generation,
+        retained_publication_metadata,
+        retained_rejection_diagnostics,
         requested_catalog_route_bindings,
         previous_route_controls,
     })

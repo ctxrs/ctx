@@ -209,7 +209,7 @@ fn test_publication(generation_id: impl Into<String>) -> SourceBackedRefreshPubl
         route_results: Vec::new(),
         zero_source_authority: Vec::new(),
         catalog_route_bindings: Vec::new(),
-        verified_index: None,
+        verified_publication: None,
         generation_id: generation_id.into(),
         published_explicit_source_catalog: None,
         unsupported_routes: 0,

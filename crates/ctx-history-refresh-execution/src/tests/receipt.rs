@@ -28,6 +28,177 @@ fn terminal_receipt_fixture() -> (tempfile::TempDir, Value, VerifiedIndex) {
     (temp, response, verified)
 }
 
+fn retained_catalog_exact_receipt_fixture() -> (
+    tempfile::TempDir,
+    PathBuf,
+    Value,
+    SourceBackedRefreshReceipt,
+) {
+    let temp = tempfile::tempdir().unwrap();
+    let index_root = temp.path().join("index");
+    let first_path = temp.path().join("catalog-a");
+    let second_path = temp.path().join("catalog-b");
+    fs::create_dir_all(&first_path).unwrap();
+    fs::create_dir_all(&second_path).unwrap();
+    let second_source = provider_source_for_path(CaptureProvider::QwenCode, second_path);
+    let catalog = crate::upsert_explicit_source(&index_root, &second_source)
+        .unwrap()
+        .authority;
+    let lineages = catalog.route_lineages().into_iter().collect::<Vec<_>>();
+    assert_eq!(lineages.len(), 1);
+
+    let route_a = SourceRouteIdentity::from_sha256("a1".repeat(32)).unwrap();
+    let route_b = SourceRouteIdentity::from_sha256("b2".repeat(32)).unwrap();
+    let source_a = publication_pin_source_with_anchor(0xa1);
+    let source_b = publication_pin_source_with_anchor(0xb2);
+    let mut writer = GenerationWriter::open(&index_root, WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    for source in [&source_a, &source_b] {
+        writer.begin_source(source.clone()).unwrap();
+        writer
+            .add_core_record(publication_pin_record(source))
+            .unwrap();
+        writer
+            .certify_source(publication_pin_certificate(source))
+            .unwrap();
+    }
+    writer
+        .set_present_source_routes(vec![
+            ctx_history_index::SourceRouteSnapshot::present(route_a.clone(), vec![source_a])
+                .unwrap(),
+            ctx_history_index::SourceRouteSnapshot::present(route_b.clone(), vec![source_b])
+                .unwrap(),
+        ])
+        .unwrap();
+    let generation = writer.commit(|_| true).unwrap().generation_id;
+    let verified = VerifiedIndex::open_pinned(&index_root).unwrap();
+    let mut publication = test_publication(generation.clone());
+    publication.current =
+        SourceBackedRefreshCurrent::from_sources(&verified.manifest().sources, 0).unwrap();
+    publication.certified_source_count = publication.current.source_count;
+    publication.certified_source_bytes = publication.current.certified_source_bytes;
+    publication.published_explicit_source_catalog = Some(catalog);
+    publication.route_results = vec![SourceBackedRefreshRouteResult::succeeded(
+        route_a.as_str().to_owned(),
+        false,
+    )];
+    publication.catalog_route_bindings = vec![ExplicitSourceCatalogRouteBinding {
+        catalog_lineage: lineages[0].clone(),
+        route_identity: route_b.as_str().to_owned(),
+    }];
+    let receipt = SourceBackedRefreshReceipt::from_verified_publication(
+        Some(generation.clone()),
+        generation.clone(),
+        &publication,
+    )
+    .unwrap();
+    let response = json!({
+        "previous_generation": generation,
+        "published_generation": receipt.published_generation,
+        "generation_changed": false,
+        "certified_source_count": publication.certified_source_count,
+        "certified_source_bytes": publication.certified_source_bytes,
+        "receipt": receipt.to_json(),
+    });
+    drop(verified);
+    (temp, index_root, response, receipt)
+}
+
+#[test]
+fn exact_route_receipt_validates_retained_catalog_bindings() {
+    let (_temp, index_root, response, expected) = retained_catalog_exact_receipt_fixture();
+    let verified = VerifiedIndex::open_pinned(&index_root).unwrap();
+
+    let receipt = published_refresh_receipt_for_index(&response, &verified).unwrap();
+
+    assert_eq!(receipt, expected);
+    assert_eq!(receipt.route_results.len(), 1);
+    assert_eq!(receipt.catalog_route_bindings.len(), 1);
+
+    let mut absent_from_manifest = receipt;
+    absent_from_manifest.catalog_route_bindings[0].route_identity = "c3".repeat(32);
+    let error = absent_from_manifest.validate(Some(&verified)).unwrap_err();
+    assert!(format!("{error:#}").contains("neither a retained witness"));
+
+    let mut transient = expected;
+    transient.published_explicit_source_catalog = None;
+    transient
+        .route_results
+        .push(SourceBackedRefreshRouteResult::failed(
+            transient.catalog_route_bindings[0].route_identity.clone(),
+            "unavailable".to_owned(),
+            true,
+        ));
+    transient.validate(Some(&verified)).unwrap();
+    transient.route_results[1] = SourceBackedRefreshRouteResult::failed(
+        transient.catalog_route_bindings[0].route_identity.clone(),
+        "unavailable".to_owned(),
+        false,
+    );
+    let error = transient.validate(Some(&verified)).unwrap_err();
+    assert!(format!("{error:#}").contains("consistent request failure"));
+}
+
+#[test]
+fn retained_unselected_catalog_binding_decodes_v1_to_v4_and_recovers_receipt() {
+    let (_temp, index_root, response, receipt) = retained_catalog_exact_receipt_fixture();
+    let selected_route =
+        SourceRouteIdentity::from_sha256(receipt.route_results[0].route_identity.clone()).unwrap();
+    let current = SourceBackedPublicationMetadata {
+        version: SOURCE_REFRESH_PUBLICATION_METADATA_VERSION,
+        request_id: "retained-catalog-compatibility".to_owned(),
+        operation: RefreshOperation::Refresh,
+        refresh_scope: SourceBackedRefreshScope::exact([selected_route]),
+        receipt: receipt.clone(),
+        route_observations: BTreeMap::new(),
+        route_controls: BTreeMap::new(),
+    }
+    .encode()
+    .unwrap();
+
+    for version in [1_u64, 2, 3, 4] {
+        let mut persisted: Value = serde_json::from_slice(&current).unwrap();
+        persisted["version"] = json!(version);
+        if version < 4 {
+            persisted
+                .as_object_mut()
+                .unwrap()
+                .remove(crate::metadata::COMMITTED_REJECTION_DIAGNOSTICS_FIELD);
+        }
+        if version < 3 {
+            persisted.as_object_mut().unwrap().remove("route_controls");
+        }
+        if version == 1 {
+            persisted["receipt"]
+                .as_object_mut()
+                .unwrap()
+                .remove("zero_source_authority");
+        }
+        let writer = GenerationWriter::open(&index_root, WriterOptions::default())
+            .unwrap()
+            .into_writer()
+            .unwrap();
+        let verified = writer
+            .republish_current_publication_metadata(
+                &receipt.published_generation,
+                serde_json::to_vec(&persisted).unwrap(),
+            )
+            .unwrap();
+
+        let decoded = SourceBackedPublicationMetadata::decode(&verified).unwrap();
+        assert_eq!(decoded.version, version);
+        assert_eq!(decoded.receipt.catalog_route_bindings.len(), 1);
+        assert_eq!(decoded.receipt.route_results.len(), 1);
+        assert_eq!(
+            published_refresh_receipt_for_recovery(&response).unwrap(),
+            receipt
+        );
+        drop(verified);
+    }
+}
+
 #[test]
 fn recovery_receipt_requires_certified_current_facts() {
     let (_temp, response, _verified) = terminal_receipt_fixture();

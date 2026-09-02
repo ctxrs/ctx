@@ -446,7 +446,7 @@ fn publish_readiness_generation(index_root: &Path) -> SourceBackedRefreshPublica
         )],
         zero_source_authority: Vec::new(),
         catalog_route_bindings: Vec::new(),
-        verified_index: None,
+        verified_publication: None,
         generation_id: receipt.generation_id,
         published_explicit_source_catalog: None,
         unsupported_routes: 0,
