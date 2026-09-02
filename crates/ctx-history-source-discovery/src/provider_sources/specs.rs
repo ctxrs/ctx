@@ -2,648 +2,257 @@
 // would obscure cross-provider policy defaults and make updates harder to audit.
 use ctx_history_core::CaptureProvider;
 
-use super::types::{
-    ProviderCatalogSupport, ProviderDefaultLocation, ProviderImportSupport, ProviderSourceKind,
-    ProviderSourceSpec,
-};
-
-const CODEX_DEFAULTS: &[ProviderDefaultLocation] = &[
-    ProviderDefaultLocation {
-        path_components: &[".codex", "sessions"],
-        source_format: "codex_session_jsonl_tree",
-        source_kind: ProviderSourceKind::NativeHistory,
-    },
-    ProviderDefaultLocation {
-        path_components: &[".codex", "history.jsonl"],
-        source_format: "codex_history_jsonl",
-        source_kind: ProviderSourceKind::NativeHistory,
-    },
-];
-
-const GROK_BUILD_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
-    path_components: &[".grok", "sessions"],
-    source_format: "grok_build_session_updates_jsonl_tree",
-    source_kind: ProviderSourceKind::NativeHistory,
-}];
-
-const DEEPSEEK_HARNESS_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
-    path_components: &[".dsh", "sessions"],
-    source_format: "deepseek_harness_session_jsonl_tree",
-    source_kind: ProviderSourceKind::NativeHistory,
-}];
-
-const PI_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
-    path_components: &[".pi", "agent", "sessions"],
-    source_format: "pi_session_jsonl",
-    source_kind: ProviderSourceKind::NativeHistory,
-}];
-
-const CLAUDE_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
-    path_components: &[".claude", "projects"],
-    source_format: "claude_projects_jsonl_tree",
-    source_kind: ProviderSourceKind::NativeHistory,
-}];
-
-const OPENCODE_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
-    path_components: &[".local", "share", "opencode", "opencode.db"],
-    source_format: "opencode_sqlite",
-    source_kind: ProviderSourceKind::NativeHistory,
-}];
-
-const KILO_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
-    path_components: &[".local", "share", "kilo", "kilo.db"],
-    source_format: "kilo_sqlite",
-    source_kind: ProviderSourceKind::NativeHistory,
-}];
-
-const MIMOCODE_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
-    path_components: &[".local", "share", "mimocode", "mimocode.db"],
-    source_format: "mimocode_sqlite",
-    source_kind: ProviderSourceKind::NativeHistory,
-}];
-
-const KIRO_DEFAULTS: &[ProviderDefaultLocation] = &[
-    ProviderDefaultLocation {
-        path_components: &[".local", "share", "kiro-cli", "data.sqlite3"],
-        source_format: "kiro_cli_sqlite",
-        source_kind: ProviderSourceKind::NativeHistory,
-    },
-    ProviderDefaultLocation {
-        path_components: &["Library", "Application Support", "kiro-cli", "data.sqlite3"],
-        source_format: "kiro_cli_sqlite",
-        source_kind: ProviderSourceKind::NativeHistory,
-    },
-];
-
-const CRUSH_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
-    path_components: &[".local", "share", "crush", "crush.db"],
-    source_format: "crush_sqlite",
-    source_kind: ProviderSourceKind::NativeHistory,
-}];
-
-const GOOSE_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
-    path_components: &[".local", "share", "goose", "sessions", "sessions.db"],
-    source_format: "goose_sessions_sqlite",
-    source_kind: ProviderSourceKind::NativeHistory,
-}];
-
-const WARP_DEFAULTS: &[ProviderDefaultLocation] = &[
-    ProviderDefaultLocation {
-        path_components: &[".local", "state", "warp-terminal", "warp.sqlite"],
-        source_format: "warp_sqlite",
-        source_kind: ProviderSourceKind::NativeHistory,
-    },
-    ProviderDefaultLocation {
-        path_components: &[
-            "Library",
-            "Group Containers",
-            "2BBY89MBSN.dev.warp",
-            "Library",
-            "Application Support",
-            "dev.warp.Warp-Stable",
-            "warp.sqlite",
-        ],
-        source_format: "warp_sqlite",
-        source_kind: ProviderSourceKind::NativeHistory,
-    },
-];
-
-const LINGMA_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
-    path_components: &[
-        ".lingma",
-        "vscode",
-        "sharedClientCache",
-        "cache",
-        "db",
-        "local.db",
-    ],
-    source_format: "lingma_sqlite",
-    source_kind: ProviderSourceKind::NativeHistory,
-}];
-
-const QODER_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
-    path_components: &[".qoder", "projects"],
-    source_format: "qoder_transcript_jsonl_tree",
-    source_kind: ProviderSourceKind::NativeHistory,
-}];
-
-const ROVODEV_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
-    path_components: &[".rovodev", "sessions"],
-    source_format: "rovodev_session_json_tree",
-    source_kind: ProviderSourceKind::NativeHistory,
-}];
-
-const ANTIGRAVITY_DEFAULTS: &[ProviderDefaultLocation] = &[
-    ProviderDefaultLocation {
-        path_components: &[".gemini", "antigravity-cli", "brain"],
-        source_format: "antigravity_cli_transcript_jsonl_tree",
-        source_kind: ProviderSourceKind::NativeHistory,
-    },
-    ProviderDefaultLocation {
-        path_components: &[".gemini", "antigravity-ide", "brain"],
-        source_format: "antigravity_cli_transcript_jsonl_tree",
-        source_kind: ProviderSourceKind::NativeHistory,
-    },
-];
-
-const GEMINI_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
-    path_components: &[".gemini"],
-    source_format: "gemini_cli_chat_recording_jsonl",
-    source_kind: ProviderSourceKind::NativeHistory,
-}];
-
-const TABNINE_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
-    path_components: &[".tabnine", "agent"],
-    source_format: "tabnine_cli_chat_recording_jsonl",
-    source_kind: ProviderSourceKind::NativeHistory,
-}];
-
-const CURSOR_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
-    path_components: &[".cursor", "projects"],
-    source_format: "cursor_agent_transcript_jsonl_tree",
-    source_kind: ProviderSourceKind::NativeHistory,
-}];
-
-const ZED_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
-    path_components: &[".local", "share", "zed", "threads", "threads.db"],
-    source_format: "zed_threads_sqlite",
-    source_kind: ProviderSourceKind::NativeHistory,
-}];
-
-const COPILOT_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
-    path_components: &[".copilot", "session-state"],
-    source_format: "copilot_cli_session_events_jsonl",
-    source_kind: ProviderSourceKind::NativeHistory,
-}];
-
-const FACTORY_DROID_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
-    path_components: &[".factory", "sessions"],
-    source_format: "factory_ai_droid_sessions_jsonl",
-    source_kind: ProviderSourceKind::NativeHistory,
-}];
-
-const QWEN_CODE_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
-    path_components: &[".qwen", "projects"],
-    source_format: "qwen_code_chat_jsonl_tree",
-    source_kind: ProviderSourceKind::NativeHistory,
-}];
-
-const KIMI_CODE_CLI_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
-    path_components: &[".kimi-code"],
-    source_format: "kimi_code_cli_wire_jsonl_tree",
-    source_kind: ProviderSourceKind::NativeHistory,
-}];
-
-const AUGGIE_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
-    path_components: &[".augment", "sessions"],
-    source_format: "auggie_session_json",
-    source_kind: ProviderSourceKind::NativeHistory,
-}];
-
-const JUNIE_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
-    path_components: &[".junie", "sessions"],
-    source_format: "junie_session_events_jsonl_tree",
-    source_kind: ProviderSourceKind::NativeHistory,
-}];
-
-const FIREBENDER_DEFAULTS: &[ProviderDefaultLocation] = &[];
-
-const FORGECODE_DEFAULTS: &[ProviderDefaultLocation] = &[];
-
-const DEEPAGENTS_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
-    path_components: &[".deepagents", ".state", "sessions.db"],
-    source_format: "deepagents_sessions_sqlite",
-    source_kind: ProviderSourceKind::NativeHistory,
-}];
-
-const MISTRAL_VIBE_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
-    path_components: &[".vibe", "logs", "session"],
-    source_format: "mistral_vibe_session_jsonl_tree",
-    source_kind: ProviderSourceKind::NativeHistory,
-}];
-
-const MUX_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
-    path_components: &[".mux", "sessions"],
-    source_format: "mux_session_jsonl_tree",
-    source_kind: ProviderSourceKind::NativeHistory,
-}];
-
-const OPENCLAW_DEFAULTS: &[ProviderDefaultLocation] = &[
-    ProviderDefaultLocation {
-        path_components: &[".openclaw"],
-        source_format: "openclaw_session_jsonl_tree",
-        source_kind: ProviderSourceKind::NativeHistory,
-    },
-    ProviderDefaultLocation {
-        path_components: &[".clawdbot"],
-        source_format: "openclaw_session_jsonl_tree",
-        source_kind: ProviderSourceKind::NativeHistory,
-    },
-];
-
-const HERMES_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
-    path_components: &[".hermes", "state.db"],
-    source_format: "hermes_state_sqlite",
-    source_kind: ProviderSourceKind::NativeHistory,
-}];
-
-const NANOCLAW_DEFAULTS: &[ProviderDefaultLocation] = &[];
-
-const ASTRBOT_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
-    path_components: &[".astrbot", "data", "data_v4.db"],
-    source_format: "astrbot_data_v4_sqlite",
-    source_kind: ProviderSourceKind::NativeHistory,
-}];
-
-const SHELLEY_DEFAULTS: &[ProviderDefaultLocation] = &[];
-
-const CONTINUE_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
-    path_components: &[".continue", "sessions"],
-    source_format: "continue_cli_sessions_json",
-    source_kind: ProviderSourceKind::NativeHistory,
-}];
-
-const OPENHANDS_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
-    path_components: &[".openhands"],
-    source_format: "openhands_file_events",
-    source_kind: ProviderSourceKind::NativeHistory,
-}];
-
-const CLINE_DEFAULTS: &[ProviderDefaultLocation] = &[
-    ProviderDefaultLocation {
-        path_components: &[".cline", "data"],
-        source_format: "cline_sdk_session_store",
-        source_kind: ProviderSourceKind::NativeHistory,
-    },
-    ProviderDefaultLocation {
-        path_components: &[".cline", "data"],
-        source_format: "cline_task_directory_json",
-        source_kind: ProviderSourceKind::NativeHistory,
-    },
-    ProviderDefaultLocation {
-        path_components: &[
-            ".config",
-            "Code",
-            "User",
-            "globalStorage",
-            "saoudrizwan.claude-dev",
-        ],
-        source_format: "cline_task_directory_json",
-        source_kind: ProviderSourceKind::NativeHistory,
-    },
-    ProviderDefaultLocation {
-        path_components: &[
-            ".config",
-            "Code - Insiders",
-            "User",
-            "globalStorage",
-            "saoudrizwan.claude-dev",
-        ],
-        source_format: "cline_task_directory_json",
-        source_kind: ProviderSourceKind::NativeHistory,
-    },
-];
-
-const ROO_DEFAULTS: &[ProviderDefaultLocation] = &[
-    ProviderDefaultLocation {
-        path_components: &[
-            ".config",
-            "Code",
-            "User",
-            "globalStorage",
-            "rooveterinaryinc.roo-cline",
-        ],
-        source_format: "roo_task_directory_json",
-        source_kind: ProviderSourceKind::NativeHistory,
-    },
-    ProviderDefaultLocation {
-        path_components: &[
-            ".config",
-            "Code - Insiders",
-            "User",
-            "globalStorage",
-            "rooveterinaryinc.roo-cline",
-        ],
-        source_format: "roo_task_directory_json",
-        source_kind: ProviderSourceKind::NativeHistory,
-    },
-];
-
-const CODEBUDDY_DEFAULTS: &[ProviderDefaultLocation] = &[
-    ProviderDefaultLocation {
-        path_components: &[".codebuddy"],
-        source_format: "codebuddy_history_json",
-        source_kind: ProviderSourceKind::NativeHistory,
-    },
-    ProviderDefaultLocation {
-        path_components: &[
-            "Library",
-            "Application Support",
-            "CodeBuddyExtension",
-            "Data",
-        ],
-        source_format: "codebuddy_history_json",
-        source_kind: ProviderSourceKind::NativeHistory,
-    },
-];
-
-const FX_DEFAULTS: &[ProviderDefaultLocation] = &[ProviderDefaultLocation {
-    path_components: &[".fx", "sessions"],
-    source_format: "fx_sessions_tree",
-    source_kind: ProviderSourceKind::NativeHistory,
-}];
+use super::types::{ProviderCatalogSupport, ProviderImportSupport, ProviderSourceSpec};
 
 pub(super) const PROVIDER_SPECS: &[ProviderSourceSpec] = &[
     ProviderSourceSpec {
         provider: CaptureProvider::Codex,
-        default_locations: CODEX_DEFAULTS,
         import_support: ProviderImportSupport::Native,
         catalog_support: ProviderCatalogSupport::Native,
         unsupported_reason: None,
     },
     ProviderSourceSpec {
         provider: CaptureProvider::GrokBuild,
-        default_locations: GROK_BUILD_DEFAULTS,
         import_support: ProviderImportSupport::Native,
         catalog_support: ProviderCatalogSupport::None,
         unsupported_reason: None,
     },
     ProviderSourceSpec {
         provider: CaptureProvider::DeepSeekHarness,
-        default_locations: DEEPSEEK_HARNESS_DEFAULTS,
         import_support: ProviderImportSupport::Native,
         catalog_support: ProviderCatalogSupport::None,
         unsupported_reason: None,
     },
     ProviderSourceSpec {
         provider: CaptureProvider::Pi,
-        default_locations: PI_DEFAULTS,
         import_support: ProviderImportSupport::Native,
         catalog_support: ProviderCatalogSupport::None,
         unsupported_reason: None,
     },
     ProviderSourceSpec {
         provider: CaptureProvider::Claude,
-        default_locations: CLAUDE_DEFAULTS,
         import_support: ProviderImportSupport::Native,
         catalog_support: ProviderCatalogSupport::None,
         unsupported_reason: None,
     },
     ProviderSourceSpec {
         provider: CaptureProvider::OpenCode,
-        default_locations: OPENCODE_DEFAULTS,
         import_support: ProviderImportSupport::Native,
         catalog_support: ProviderCatalogSupport::None,
         unsupported_reason: None,
     },
     ProviderSourceSpec {
         provider: CaptureProvider::Kilo,
-        default_locations: KILO_DEFAULTS,
         import_support: ProviderImportSupport::Native,
         catalog_support: ProviderCatalogSupport::None,
         unsupported_reason: None,
     },
     ProviderSourceSpec {
         provider: CaptureProvider::MiMoCode,
-        default_locations: MIMOCODE_DEFAULTS,
         import_support: ProviderImportSupport::Native,
         catalog_support: ProviderCatalogSupport::None,
         unsupported_reason: None,
     },
     ProviderSourceSpec {
         provider: CaptureProvider::KiroCli,
-        default_locations: KIRO_DEFAULTS,
         import_support: ProviderImportSupport::Native,
         catalog_support: ProviderCatalogSupport::None,
         unsupported_reason: None,
     },
     ProviderSourceSpec {
         provider: CaptureProvider::Crush,
-        default_locations: CRUSH_DEFAULTS,
         import_support: ProviderImportSupport::Native,
         catalog_support: ProviderCatalogSupport::None,
         unsupported_reason: None,
     },
     ProviderSourceSpec {
         provider: CaptureProvider::Goose,
-        default_locations: GOOSE_DEFAULTS,
         import_support: ProviderImportSupport::Native,
         catalog_support: ProviderCatalogSupport::None,
         unsupported_reason: None,
     },
     ProviderSourceSpec {
         provider: CaptureProvider::Antigravity,
-        default_locations: ANTIGRAVITY_DEFAULTS,
         import_support: ProviderImportSupport::Native,
         catalog_support: ProviderCatalogSupport::None,
         unsupported_reason: None,
     },
     ProviderSourceSpec {
         provider: CaptureProvider::Gemini,
-        default_locations: GEMINI_DEFAULTS,
         import_support: ProviderImportSupport::Native,
         catalog_support: ProviderCatalogSupport::None,
         unsupported_reason: None,
     },
     ProviderSourceSpec {
         provider: CaptureProvider::Tabnine,
-        default_locations: TABNINE_DEFAULTS,
         import_support: ProviderImportSupport::Native,
         catalog_support: ProviderCatalogSupport::None,
         unsupported_reason: None,
     },
     ProviderSourceSpec {
         provider: CaptureProvider::Cursor,
-        default_locations: CURSOR_DEFAULTS,
         import_support: ProviderImportSupport::Native,
         catalog_support: ProviderCatalogSupport::None,
         unsupported_reason: None,
     },
     ProviderSourceSpec {
         provider: CaptureProvider::Zed,
-        default_locations: ZED_DEFAULTS,
         import_support: ProviderImportSupport::Native,
         catalog_support: ProviderCatalogSupport::None,
         unsupported_reason: None,
     },
     ProviderSourceSpec {
         provider: CaptureProvider::CopilotCli,
-        default_locations: COPILOT_DEFAULTS,
         import_support: ProviderImportSupport::Native,
         catalog_support: ProviderCatalogSupport::None,
         unsupported_reason: None,
     },
     ProviderSourceSpec {
         provider: CaptureProvider::FactoryAiDroid,
-        default_locations: FACTORY_DROID_DEFAULTS,
         import_support: ProviderImportSupport::Native,
         catalog_support: ProviderCatalogSupport::None,
         unsupported_reason: None,
     },
     ProviderSourceSpec {
         provider: CaptureProvider::QwenCode,
-        default_locations: QWEN_CODE_DEFAULTS,
         import_support: ProviderImportSupport::Native,
         catalog_support: ProviderCatalogSupport::None,
         unsupported_reason: None,
     },
     ProviderSourceSpec {
         provider: CaptureProvider::KimiCodeCli,
-        default_locations: KIMI_CODE_CLI_DEFAULTS,
         import_support: ProviderImportSupport::Native,
         catalog_support: ProviderCatalogSupport::None,
         unsupported_reason: None,
     },
     ProviderSourceSpec {
         provider: CaptureProvider::Auggie,
-        default_locations: AUGGIE_DEFAULTS,
         import_support: ProviderImportSupport::Native,
         catalog_support: ProviderCatalogSupport::None,
         unsupported_reason: None,
     },
     ProviderSourceSpec {
         provider: CaptureProvider::Junie,
-        default_locations: JUNIE_DEFAULTS,
         import_support: ProviderImportSupport::Native,
         catalog_support: ProviderCatalogSupport::None,
         unsupported_reason: None,
     },
     ProviderSourceSpec {
         provider: CaptureProvider::Firebender,
-        default_locations: FIREBENDER_DEFAULTS,
         import_support: ProviderImportSupport::Native,
         catalog_support: ProviderCatalogSupport::None,
         unsupported_reason: None,
     },
     ProviderSourceSpec {
         provider: CaptureProvider::ForgeCode,
-        default_locations: FORGECODE_DEFAULTS,
         import_support: ProviderImportSupport::Native,
         catalog_support: ProviderCatalogSupport::None,
         unsupported_reason: None,
     },
     ProviderSourceSpec {
         provider: CaptureProvider::DeepAgents,
-        default_locations: DEEPAGENTS_DEFAULTS,
         import_support: ProviderImportSupport::Native,
         catalog_support: ProviderCatalogSupport::None,
         unsupported_reason: None,
     },
     ProviderSourceSpec {
         provider: CaptureProvider::MistralVibe,
-        default_locations: MISTRAL_VIBE_DEFAULTS,
         import_support: ProviderImportSupport::Native,
         catalog_support: ProviderCatalogSupport::None,
         unsupported_reason: None,
     },
     ProviderSourceSpec {
         provider: CaptureProvider::Mux,
-        default_locations: MUX_DEFAULTS,
         import_support: ProviderImportSupport::Native,
         catalog_support: ProviderCatalogSupport::None,
         unsupported_reason: None,
     },
     ProviderSourceSpec {
         provider: CaptureProvider::RovoDev,
-        default_locations: ROVODEV_DEFAULTS,
         import_support: ProviderImportSupport::Native,
         catalog_support: ProviderCatalogSupport::None,
         unsupported_reason: None,
     },
     ProviderSourceSpec {
         provider: CaptureProvider::OpenClaw,
-        default_locations: OPENCLAW_DEFAULTS,
         import_support: ProviderImportSupport::Native,
         catalog_support: ProviderCatalogSupport::None,
         unsupported_reason: None,
     },
     ProviderSourceSpec {
         provider: CaptureProvider::Hermes,
-        default_locations: HERMES_DEFAULTS,
         import_support: ProviderImportSupport::Native,
         catalog_support: ProviderCatalogSupport::None,
         unsupported_reason: None,
     },
     ProviderSourceSpec {
         provider: CaptureProvider::NanoClaw,
-        default_locations: NANOCLAW_DEFAULTS,
         import_support: ProviderImportSupport::Native,
         catalog_support: ProviderCatalogSupport::None,
         unsupported_reason: None,
     },
     ProviderSourceSpec {
         provider: CaptureProvider::AstrBot,
-        default_locations: ASTRBOT_DEFAULTS,
         import_support: ProviderImportSupport::Native,
         catalog_support: ProviderCatalogSupport::None,
         unsupported_reason: None,
     },
     ProviderSourceSpec {
         provider: CaptureProvider::Shelley,
-        default_locations: SHELLEY_DEFAULTS,
         import_support: ProviderImportSupport::Native,
         catalog_support: ProviderCatalogSupport::None,
         unsupported_reason: None,
     },
     ProviderSourceSpec {
         provider: CaptureProvider::Continue,
-        default_locations: CONTINUE_DEFAULTS,
         import_support: ProviderImportSupport::Native,
         catalog_support: ProviderCatalogSupport::None,
         unsupported_reason: None,
     },
     ProviderSourceSpec {
         provider: CaptureProvider::OpenHands,
-        default_locations: OPENHANDS_DEFAULTS,
         import_support: ProviderImportSupport::Native,
         catalog_support: ProviderCatalogSupport::None,
         unsupported_reason: None,
     },
     ProviderSourceSpec {
         provider: CaptureProvider::Cline,
-        default_locations: CLINE_DEFAULTS,
         import_support: ProviderImportSupport::Native,
         catalog_support: ProviderCatalogSupport::None,
         unsupported_reason: None,
     },
     ProviderSourceSpec {
         provider: CaptureProvider::RooCode,
-        default_locations: ROO_DEFAULTS,
         import_support: ProviderImportSupport::Native,
         catalog_support: ProviderCatalogSupport::None,
         unsupported_reason: None,
     },
     ProviderSourceSpec {
         provider: CaptureProvider::Lingma,
-        default_locations: LINGMA_DEFAULTS,
         import_support: ProviderImportSupport::Native,
         catalog_support: ProviderCatalogSupport::None,
         unsupported_reason: None,
     },
     ProviderSourceSpec {
         provider: CaptureProvider::Qoder,
-        default_locations: QODER_DEFAULTS,
         import_support: ProviderImportSupport::Native,
         catalog_support: ProviderCatalogSupport::None,
         unsupported_reason: None,
     },
     ProviderSourceSpec {
         provider: CaptureProvider::Warp,
-        default_locations: WARP_DEFAULTS,
         import_support: ProviderImportSupport::Native,
         catalog_support: ProviderCatalogSupport::None,
         unsupported_reason: None,
     },
     ProviderSourceSpec {
         provider: CaptureProvider::CodeBuddy,
-        default_locations: CODEBUDDY_DEFAULTS,
         import_support: ProviderImportSupport::Native,
         catalog_support: ProviderCatalogSupport::None,
         unsupported_reason: None,
     },
     ProviderSourceSpec {
         provider: CaptureProvider::Fx,
-        default_locations: FX_DEFAULTS,
         import_support: ProviderImportSupport::Native,
         catalog_support: ProviderCatalogSupport::None,
         unsupported_reason: None,
