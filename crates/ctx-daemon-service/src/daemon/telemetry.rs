@@ -371,11 +371,14 @@ mod tests {
         let profile_source_descriptor = [4_u8; 32];
         let database_identity = [1_u8; 32];
         let schema_evidence = [2_u8; 32];
+        let physical_revision = [3_u8; 32];
         let control = serde_json::to_vec(&serde_json::json!({
             "kind": "hermes-route-control-v1",
-            "version": 2,
+            "version": 3,
+            "parser_revision": "hermes-source-backed-v5-optional-admission",
             "profile_source_descriptor": profile_source_descriptor,
             "database_identity": database_identity,
+            "physical_revision": physical_revision,
             "schema_evidence": schema_evidence,
             "session_rowid": 4,
             "message_rowid": 9,

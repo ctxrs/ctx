@@ -6,10 +6,9 @@ use std::{
 
 use ctx_history_capture::{
     provider_source_for_path, register_landed_source_backed_route_with_data_root,
-    CaptureDocumentSpool, SourceBackedCoordinatorError, SourceBackedProviderRegistry,
-    SourceBackedRefreshExecutor, SourceBackedRefreshScope, SourceBackedRoute,
-    SourceBackedRouteControlExpectation, SourceBackedRouteError, SourceBackedRouteErrorKind,
-    SourceBackedRouteSelection, SourceBackedSelectorAuthority,
+    CaptureDocumentSpool, SourceBackedProviderRegistry, SourceBackedRefreshExecutor,
+    SourceBackedRefreshScope, SourceBackedRoute, SourceBackedRouteControlExpectation,
+    SourceBackedRouteErrorKind, SourceBackedRouteSelection, SourceBackedSelectorAuthority,
 };
 use ctx_history_capture_composition::IndexCaptureLifecycle;
 use ctx_history_capture_runtime::{
@@ -335,7 +334,7 @@ fn create_zed_database(path: &Path, text: &str) {
 }
 
 #[test]
-fn opencode_family_changed_wal_capture_then_exact_replay_finishes_progress() {
+fn opencode_family_changed_wal_capture_then_exact_replay_skips_source_family_copy() {
     for provider in [
         CaptureProvider::OpenCode,
         CaptureProvider::Kilo,
@@ -468,38 +467,61 @@ fn assert_opencode_family_changed_wal_capture_then_exact_replay(provider: Captur
         "{provider:?}"
     );
     assert!(terminal.progress.completed_bytes.is_none(), "{provider:?}");
+    assert!(
+        updates
+            .iter()
+            .all(|update| update.current_source_progress.is_none()),
+        "unchanged {provider:?} replay unexpectedly copied or scanned its SQLite source"
+    );
 
-    if provider != CaptureProvider::OpenCode {
-        return;
-    }
-
-    let error = executor
-        .refresh_scope_with_detailed_progress(
-            &index_root,
-            SourceBackedRefreshScope::All,
-            |update| {
-                if update.current_source_progress.is_some() {
-                    return Err(SourceBackedRouteError::new(
-                        SourceBackedRouteErrorKind::ResourceUnavailable,
-                        "injected logical SQLite replay progress failure",
-                    ));
-                }
-                Ok(())
-            },
+    let source = provider_source_for_path(provider, database.clone());
+    let LogicalSqliteRoutePlan::OpenCodeFamily { adapter, .. } =
+        logical_sqlite_route_plan_scoped::<ScopedReplayBinding>(
+            source,
+            SourceBackedRouteSelection::ExplicitManual,
+            data_root.path(),
+            SourceAnchorScope::Unqualified,
         )
-        .unwrap_err();
-    assert!(matches!(
-        error,
-        SourceBackedCoordinatorError::Progress(SourceBackedRouteError {
-            kind: SourceBackedRouteErrorKind::ResourceUnavailable,
-            detail,
-        }) if detail == "injected logical SQLite replay progress failure"
-    ));
+        .unwrap()
+    else {
+        panic!("unexpected logical SQLite replay provider")
+    };
+    let duplicate_bases = vec![replay.sources[0].clone(), replay.sources[0].clone()];
+    let mut duplicate_progress = Vec::new();
+    let duplicate_tree = adapter
+        .discover_complete_with_progress(&duplicate_bases, &mut |progress| {
+            duplicate_progress.push(progress);
+            Ok(())
+        })
+        .unwrap();
+    assert!(
+        !duplicate_progress.is_empty(),
+        "multi-source {provider:?} base incorrectly used exact replay"
+    );
+    drop(duplicate_tree);
+    let mut discovery_progress = Vec::new();
+    let replay_tree = adapter
+        .discover_complete_with_progress(&replay.sources, &mut |progress| {
+            discovery_progress.push(progress);
+            Ok(())
+        })
+        .unwrap();
+    assert!(discovery_progress.is_empty(), "{provider:?}");
+    writer
+        .execute(
+            "update part set data = ?1 where id = 'part-2'",
+            params![json!({
+                "type": "text",
+                "text": format!("{} post-discovery mutation", provider.as_str())
+            })
+            .to_string()],
+        )
+        .unwrap();
+    let error = adapter.revalidate_complete(&replay_tree).unwrap_err();
     assert_eq!(
-        VerifiedIndex::open_pinned(&index_root)
-            .unwrap()
-            .generation_id(),
-        changed_generation
+        error.kind,
+        SourceBackedRouteErrorKind::SourceChanged,
+        "{provider:?}"
     );
 }
 

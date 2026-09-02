@@ -191,13 +191,38 @@ fn warm_automatic_hermes_profile_rename_retires_the_old_route_and_remains_refres
         &index_root,
     )
     .unwrap();
-    assert!(cold
-        .verified_index
-        .as_ref()
+    let (cold_generation, legacy_metadata) = {
+        let cold_index = cold.verified_index.as_ref().unwrap();
+        assert!(cold_index.manifest().source_route(&alpha_route).is_some());
+        let mut metadata = SourceBackedPublicationMetadata::decode(cold_index).unwrap();
+        let mut legacy: serde_json::Value = serde_json::from_slice(
+            metadata
+                .route_controls
+                .get(&alpha_route)
+                .expect("cold Hermes route control"),
+        )
+        .unwrap();
+        legacy["version"] = serde_json::json!(2);
+        legacy.as_object_mut().unwrap().remove("parser_revision");
+        legacy.as_object_mut().unwrap().remove("physical_revision");
+        metadata
+            .route_controls
+            .insert(alpha_route.clone(), serde_json::to_vec(&legacy).unwrap());
+        (
+            cold_index.generation_id().to_owned(),
+            metadata.encode().unwrap(),
+        )
+    };
+    drop(cold);
+    let writer = GenerationWriter::open(&index_root, WriterOptions::default())
         .unwrap()
-        .manifest()
-        .source_route(&alpha_route)
-        .is_some());
+        .into_writer()
+        .unwrap();
+    drop(
+        writer
+            .republish_current_publication_metadata(&cold_generation, legacy_metadata)
+            .unwrap(),
+    );
 
     std::fs::rename(alpha.parent().unwrap(), beta.parent().unwrap()).unwrap();
     let beta_source = provider_source_for_path(CaptureProvider::Hermes, beta);

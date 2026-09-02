@@ -158,6 +158,115 @@ fn read_values_from_connection(connection: &Connection) -> Vec<String> {
         .unwrap()
 }
 
+#[test]
+fn physical_replay_fence_unchanged_is_zero_copy() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let data_root = crate::test_support_paths::tempdir().unwrap();
+    let database = temp.path().join("provider.sqlite");
+    create_database(&database, "first");
+    let authority = retain_parent_in_data_root(data_root.path(), temp.path());
+    let fence = authority
+        .observe_replay_fence(OsStr::new("provider.sqlite"))
+        .unwrap();
+    let revision = *fence.revision();
+
+    fence.revalidate().unwrap();
+    assert_eq!(authority.snapshot_counters(), Default::default());
+    assert_eq!(staging_entries(data_root.path()), 0);
+    assert_eq!(*fence.revision(), revision);
+}
+
+#[test]
+fn physical_replay_revision_survives_move_but_old_fence_rejects_it() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let data_root = crate::test_support_paths::tempdir().unwrap();
+    let original = temp.path().join("original");
+    let moved = temp.path().join("moved");
+    fs::create_dir(&original).unwrap();
+    fs::create_dir(&moved).unwrap();
+    create_database(&original.join("provider.sqlite"), "first");
+    let original_authority = retain_parent_in_data_root(data_root.path(), &original);
+    let original_fence = original_authority
+        .observe_replay_fence(OsStr::new("provider.sqlite"))
+        .unwrap();
+    let revision = *original_fence.revision();
+
+    fs::rename(
+        original.join("provider.sqlite"),
+        moved.join("provider.sqlite"),
+    )
+    .unwrap();
+    assert!(matches!(
+        original_fence.revalidate(),
+        Err(SqliteSourceAccessError::SourceChanged)
+    ));
+
+    let moved_authority = retain_parent_in_data_root(data_root.path(), &moved);
+    let moved_fence = moved_authority
+        .observe_replay_fence(OsStr::new("provider.sqlite"))
+        .unwrap();
+    assert_eq!(*moved_fence.revision(), revision);
+    moved_fence.revalidate().unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn physical_replay_fence_rejects_committed_wal_mutation() {
+    let temp = crate::test_support_paths::tempdir().unwrap();
+    let data_root = crate::test_support_paths::tempdir().unwrap();
+    let database = temp.path().join("provider.sqlite");
+    let writer = create_persistent_wal(&database);
+    let authority = retain_parent_in_data_root(data_root.path(), temp.path());
+    let fence = authority
+        .observe_replay_fence(OsStr::new("provider.sqlite"))
+        .unwrap();
+
+    writer
+        .execute("INSERT INTO messages (body) VALUES ('later')", [])
+        .unwrap();
+
+    assert!(matches!(
+        fence.revalidate(),
+        Err(SqliteSourceAccessError::SourceChanged)
+    ));
+    assert_eq!(authority.snapshot_counters(), Default::default());
+    assert_eq!(staging_entries(data_root.path()), 0);
+}
+
+#[test]
+fn physical_replay_fence_rejects_database_leaf_and_parent_replacement() {
+    let data_root = crate::test_support_paths::tempdir().unwrap();
+    let leaf_root = crate::test_support_paths::tempdir().unwrap();
+    let database = leaf_root.path().join("provider.sqlite");
+    create_database(&database, "first");
+    let authority = retain_parent_in_data_root(data_root.path(), leaf_root.path());
+    let fence = authority
+        .observe_replay_fence(OsStr::new("provider.sqlite"))
+        .unwrap();
+    fs::rename(&database, leaf_root.path().join("retired.sqlite")).unwrap();
+    create_database(&database, "first");
+    assert!(matches!(
+        fence.revalidate(),
+        Err(SqliteSourceAccessError::SourceChanged)
+    ));
+
+    let parent_root = crate::test_support_paths::tempdir().unwrap();
+    let parent = parent_root.path().join("source");
+    fs::create_dir(&parent).unwrap();
+    create_database(&parent.join("provider.sqlite"), "first");
+    let authority = retain_parent_in_data_root(data_root.path(), &parent);
+    let fence = authority
+        .observe_replay_fence(OsStr::new("provider.sqlite"))
+        .unwrap();
+    fs::rename(&parent, parent_root.path().join("retired-source")).unwrap();
+    fs::create_dir(&parent).unwrap();
+    create_database(&parent.join("provider.sqlite"), "first");
+    assert!(matches!(
+        fence.revalidate(),
+        Err(SqliteSourceAccessError::SourceChanged)
+    ));
+}
+
 fn directory_file_bytes(path: &Path) -> BTreeMap<OsString, Vec<u8>> {
     fs::read_dir(path)
         .unwrap()
