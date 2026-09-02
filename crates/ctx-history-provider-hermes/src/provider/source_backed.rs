@@ -7,6 +7,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    ffi::OsString,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -32,7 +33,7 @@ use crate::{
         retain_sqlite_source_directory_authority, ProviderSource, SqliteArtifactKind,
         SqliteCleanupStatus, SqliteFailurePhase, SqliteSourceAccessError,
         SqliteSourceDirectoryAuthority, SqliteSourceErrorComposition, SqliteSourceEvidence,
-        SqliteSourceProgressError, SqliteSourceReadSnapshot,
+        SqliteSourceProgressError, SqliteSourceReadSnapshot, SqliteSourceReplayFence,
     },
     source_backed::{
         family::document::{DocumentAppendBase, DocumentLeafFingerprint, ObservedDocumentLeaf},
@@ -76,7 +77,8 @@ const HERMES_INCREMENTAL_FINGERPRINT_DOMAIN: &[u8] = b"ctx-hermes-incremental-se
 const HERMES_INCREMENTAL_CONTENT_DOMAIN: &[u8] = b"ctx-hermes-incremental-content-v1\0";
 const HERMES_EXACT_INTERVAL_MS: i64 = 60 * 60 * 1_000;
 const HERMES_ROUTE_CONTROL_KIND: &str = "hermes-route-control-v1";
-const HERMES_ROUTE_CONTROL_VERSION: u32 = 2;
+const HERMES_LEGACY_ROUTE_CONTROL_VERSION: u32 = 2;
+const HERMES_ROUTE_CONTROL_VERSION: u32 = 3;
 const HERMES_SESSION_DIGEST_DOMAIN: &[u8] = b"ctx-hermes-source-backed-session-v1\0";
 const HERMES_REJECTION_DIGEST_DOMAIN: &[u8] = b"ctx-hermes-source-backed-rejection-v1\0";
 
@@ -162,6 +164,28 @@ trait HermesReconciliationContext<L: CaptureLifecycleSink> {
 pub(crate) struct HermesRefreshReceipt {
     kind: String,
     version: u32,
+    parser_revision: String,
+    profile_source_descriptor: [u8; 32],
+    database_identity: [u8; 32],
+    physical_revision: [u8; 32],
+    schema_evidence: [u8; 32],
+    session_rowid: i64,
+    message_rowid: i64,
+    last_successful_exhaustive_at_ms: i64,
+    exact_due_at_ms: i64,
+    exhaustive_sequence: u64,
+    mode: String,
+    outcome: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+// The full legacy shape is intentional: retirement may only trust identities
+// extracted from an otherwise well-formed v2 receipt.
+#[allow(dead_code)]
+struct HermesLegacyRefreshReceiptV2 {
+    kind: String,
+    version: u32,
     profile_source_descriptor: [u8; 32],
     database_identity: [u8; 32],
     schema_evidence: [u8; 32],
@@ -174,12 +198,18 @@ pub(crate) struct HermesRefreshReceipt {
     outcome: String,
 }
 
+#[derive(Clone, Copy)]
+struct HermesPhysicalSourceRevision {
+    database_identity: [u8; 32],
+    physical_revision: [u8; 32],
+}
+
 fn observe_hermes_reconciliation_inventory<L: CaptureLifecycleSink>(
     candidate: &HermesSourceCandidate,
     conn: &rusqlite::Connection,
     base_route_control: Option<&[u8]>,
     requested: SourceBackedReconciliationDemand,
-    database_identity: [u8; 32],
+    physical: HermesPhysicalSourceRevision,
     now_ms: i64,
     context: &mut dyn HermesReconciliationContext<L>,
 ) -> HermesSourceBackedResult<HermesSessionInventory<L>>
@@ -194,8 +224,9 @@ where
     let forced_exhaustive = prior.as_ref().is_none_or(|receipt| {
         receipt.kind != HERMES_ROUTE_CONTROL_KIND
             || receipt.version != HERMES_ROUTE_CONTROL_VERSION
+            || receipt.parser_revision != HERMES_SOURCE_PARSER_REVISION
             || receipt.profile_source_descriptor != candidate.source.exact_descriptor_digest()
-            || receipt.database_identity != database_identity
+            || receipt.database_identity != physical.database_identity
             || receipt.schema_evidence != schema_digest
             || current_session_rowid < receipt.session_rowid
             || current_message_rowid < receipt.message_rowid
@@ -257,11 +288,25 @@ where
         }
         _ => demand.as_str().to_owned(),
     };
+    // Incremental reconciliation visits only rows beyond the prior rowid
+    // frontiers. Preserve the revision from the last exhaustive proof so an
+    // in-place edit to an older row cannot be blessed for later exact replay.
+    let physical_revision = match demand {
+        SourceBackedReconciliationDemand::Exhaustive => physical.physical_revision,
+        SourceBackedReconciliationDemand::Incremental => {
+            prior
+                .as_ref()
+                .expect("incremental Hermes receipt")
+                .physical_revision
+        }
+    };
     let receipt = HermesRefreshReceipt {
         kind: HERMES_ROUTE_CONTROL_KIND.to_owned(),
         version: HERMES_ROUTE_CONTROL_VERSION,
+        parser_revision: HERMES_SOURCE_PARSER_REVISION.to_owned(),
         profile_source_descriptor: candidate.source.exact_descriptor_digest(),
-        database_identity,
+        database_identity: physical.database_identity,
+        physical_revision,
         schema_evidence: schema_digest,
         session_rowid: inventory.max_session_rowid,
         message_rowid: inventory.max_message_rowid,
@@ -296,6 +341,7 @@ pub fn hermes_route_control_exact_due(control: &[u8], now_ms: i64) -> Option<boo
     Some(
         serde_json::from_value::<HermesRefreshReceipt>(value).map_or(true, |receipt| {
             receipt.version != HERMES_ROUTE_CONTROL_VERSION
+                || receipt.parser_revision != HERMES_SOURCE_PARSER_REVISION
                 || receipt.outcome != "successful"
                 || receipt.exact_due_at_ms <= now_ms
         }),
@@ -310,17 +356,43 @@ pub fn hermes_route_control_exact_due_for_profile(
     let receipt = hermes_refresh_receipt(Some(control))?;
     (receipt.kind == HERMES_ROUTE_CONTROL_KIND
         && receipt.version == HERMES_ROUTE_CONTROL_VERSION
+        && receipt.parser_revision == HERMES_SOURCE_PARSER_REVISION
         && receipt.outcome == "successful"
         && receipt.profile_source_descriptor == profile_source_descriptor)
         .then_some(receipt.exact_due_at_ms <= now_ms)
 }
 
 pub fn hermes_route_control_database_identity(control: &[u8]) -> Option<[u8; 32]> {
-    let receipt = hermes_refresh_receipt(Some(control))?;
-    (receipt.kind == HERMES_ROUTE_CONTROL_KIND
-        && receipt.version == HERMES_ROUTE_CONTROL_VERSION
-        && receipt.outcome == "successful")
-        .then_some(receipt.database_identity)
+    if let Some(receipt) = hermes_refresh_receipt(Some(control)) {
+        return (receipt.kind == HERMES_ROUTE_CONTROL_KIND
+            && receipt.version == HERMES_ROUTE_CONTROL_VERSION
+            && receipt.outcome == "successful")
+            .then_some(receipt.database_identity);
+    }
+    let HermesLegacyRefreshReceiptV2 {
+        kind,
+        version,
+        profile_source_descriptor: _,
+        database_identity,
+        schema_evidence: _,
+        session_rowid: _,
+        message_rowid: _,
+        last_successful_exhaustive_at_ms: _,
+        exact_due_at_ms: _,
+        exhaustive_sequence: _,
+        mode: _,
+        outcome,
+    } = serde_json::from_slice(control).ok()?;
+    (kind == HERMES_ROUTE_CONTROL_KIND
+        && version == HERMES_LEGACY_ROUTE_CONTROL_VERSION
+        && outcome == "successful")
+        .then_some(database_identity)
+}
+
+struct HermesRetainedSource {
+    source_root: ProviderSourceRoot,
+    sqlite_authority: SqliteSourceDirectoryAuthority,
+    database_leaf: OsString,
 }
 
 #[cfg(test)]
@@ -374,31 +446,19 @@ fn open_root_authorized_snapshot_with_hook_and_progress(
         SourceBackedCurrentSourceProgress,
     ) -> SourceBackedRouteResult<()>,
 ) -> HermesSourceBackedResult<(SqliteSourceDirectoryAuthority, SqliteSourceReadSnapshot)> {
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    let database_leaf =
-        path.file_name()
-            .ok_or_else(|| CaptureError::InvalidProviderTranscriptPath {
-                path: path.to_path_buf(),
-                reason: SQLITE_SOURCE_INVALID_REASON,
-            })?;
-    let admission_root = ProviderSourceRoot::open(parent)?;
-    let admission_directory = admission_root.directory()?;
-    let parent_handle = admission_directory
-        .try_clone_authority_handle()
-        .map_err(CaptureError::from)?;
-    let sqlite_authority =
-        retain_sqlite_source_directory_authority(data_root, &parent_handle, parent)?;
+    let retained = retain_root_authorized_source(data_root, path)?;
     let sqlite_snapshot = if incremental {
-        sqlite_authority.open_incremental_snapshot_with_progress(database_leaf, |progress| {
-            report_progress(sqlite_source_progress(progress))
-        })
+        retained
+            .sqlite_authority
+            .open_incremental_snapshot_with_progress(&retained.database_leaf, |progress| {
+                report_progress(sqlite_source_progress(progress))
+            })
     } else {
-        sqlite_authority.open_stable_snapshot_with_progress(database_leaf, |progress| {
-            report_progress(sqlite_source_progress(progress))
-        })
+        retained
+            .sqlite_authority
+            .open_stable_snapshot_with_progress(&retained.database_leaf, |progress| {
+                report_progress(sqlite_source_progress(progress))
+            })
     }
     .map_err(|error| match error {
         SqliteSourceProgressError::Source(error) => HermesSourceBackedError::from(error),
@@ -413,6 +473,7 @@ fn open_root_authorized_snapshot_with_hook_and_progress(
     after_authorize();
     let configure = (|| {
         sqlite_snapshot.revalidate()?;
+        retained.source_root.revalidate_same_object()?;
         let connection = sqlite_snapshot.connection()?;
         let value_limit = i32::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES)
             .map_err(|_| HermesSourceBackedError::CountOverflow)?;
@@ -431,7 +492,35 @@ fn open_root_authorized_snapshot_with_hook_and_progress(
     if let Err(error) = configure {
         return Err(abort_hermes_snapshot(sqlite_snapshot, error));
     }
-    Ok((sqlite_authority, sqlite_snapshot))
+    Ok((retained.sqlite_authority, sqlite_snapshot))
+}
+
+fn retain_root_authorized_source(
+    data_root: &Path,
+    path: &Path,
+) -> HermesSourceBackedResult<HermesRetainedSource> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let database_leaf =
+        path.file_name()
+            .ok_or_else(|| CaptureError::InvalidProviderTranscriptPath {
+                path: path.to_path_buf(),
+                reason: SQLITE_SOURCE_INVALID_REASON,
+            })?;
+    let admission_root = ProviderSourceRoot::open(parent)?;
+    let admission_directory = admission_root.directory()?;
+    let parent_handle = admission_directory
+        .try_clone_authority_handle()
+        .map_err(CaptureError::from)?;
+    let sqlite_authority =
+        retain_sqlite_source_directory_authority(data_root, &parent_handle, parent)?;
+    Ok(HermesRetainedSource {
+        source_root: admission_root,
+        sqlite_authority,
+        database_leaf: database_leaf.to_os_string(),
+    })
 }
 
 fn abort_hermes_snapshot(

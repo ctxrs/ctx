@@ -205,6 +205,70 @@ fn incremental_refresh(
         .unwrap()
 }
 
+#[test]
+fn exhaustive_noop_replays_hermes_without_snapshot_copy_or_logical_scan() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data-root");
+    let index_root = temp.path().join("index");
+    let database = temp.path().join("source/state.db");
+    let (registry, cold) = cold_fixture(&data_root, &index_root, &database);
+    reset_hermes_work_counters();
+    let mut updates = Vec::new();
+
+    let replay =
+        SourceBackedRefreshExecutor::new(registry.clone(), source_backed_refresh_writer_options())
+            .with_base_route_controls(cold.route_controls.clone())
+            .refresh_scope_with_detailed_progress_and_reconciliation(
+                &index_root,
+                SourceBackedRefreshScope::All,
+                SourceBackedReconciliationDemand::Exhaustive,
+                |update| {
+                    updates.push(update);
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+    let work = hermes_work_counters();
+    assert_eq!(work.logical_row_traversals, 0);
+    assert_eq!(work.inventory_observation_rows, 0);
+    assert!(updates
+        .iter()
+        .all(|update| update.current_source_progress.is_none()));
+    assert_eq!(updates.last().unwrap().progress.processed_bytes, 0);
+    assert_eq!(
+        certificates_by_identity(&replay),
+        certificates_by_identity(&cold)
+    );
+
+    let expected_generation = replay.commit.generation_id.clone();
+    let raced_database = database.clone();
+    set_before_hermes_snapshot_seal_hook(move || {
+        Connection::open(&raced_database)
+            .unwrap()
+            .execute(
+                "update messages set content = 'physical replay race' where id = 10",
+                [],
+            )
+            .unwrap();
+    });
+    let raced = SourceBackedRefreshExecutor::new(registry, source_backed_refresh_writer_options())
+        .with_base_route_controls(replay.route_controls.clone())
+        .refresh_scope_with_detailed_progress_and_reconciliation(
+            &index_root,
+            SourceBackedRefreshScope::All,
+            SourceBackedReconciliationDemand::Exhaustive,
+            |_| Ok(()),
+        );
+    assert!(raced.is_err());
+    assert_eq!(
+        VerifiedIndex::open_pinned(&index_root)
+            .unwrap()
+            .generation_id(),
+        expected_generation
+    );
+}
+
 fn rewritten_route_controls(
     receipt: &SourceBackedRefreshReceipt,
     rewrite: impl FnOnce(&mut serde_json::Value),
@@ -216,6 +280,145 @@ fn rewritten_route_controls(
     rewrite(&mut parsed);
     *control = serde_json::to_vec(&parsed).unwrap();
     controls
+}
+
+#[test]
+fn legacy_v2_control_forces_one_scan_then_v3_zero_copy_replay() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data-root");
+    let index_root = temp.path().join("index");
+    let database = temp.path().join("source/state.db");
+    let (registry, cold) = cold_fixture(&data_root, &index_root, &database);
+    let legacy = rewritten_route_controls(&cold, |control| {
+        let object = control.as_object_mut().unwrap();
+        object.insert("version".into(), 2.into());
+        object.remove("parser_revision");
+        object.remove("physical_revision");
+    });
+
+    reset_hermes_work_counters();
+    let migrated =
+        SourceBackedRefreshExecutor::new(registry.clone(), source_backed_refresh_writer_options())
+            .with_base_route_controls(legacy)
+            .refresh_scope_with_detailed_progress_and_reconciliation(
+                &index_root,
+                SourceBackedRefreshScope::All,
+                SourceBackedReconciliationDemand::Incremental,
+                |_| Ok(()),
+            )
+            .unwrap();
+    let migrated_control: serde_json::Value =
+        serde_json::from_slice(migrated.route_controls.values().next().unwrap()).unwrap();
+    assert_eq!(migrated_control["version"], 3);
+    assert!(migrated_control["parser_revision"].is_string());
+    assert!(migrated_control["physical_revision"].is_array());
+    let migration_work = hermes_work_counters();
+    assert_eq!(migration_work.inventory_observation_rows, 4);
+
+    reset_hermes_work_counters();
+    let replay = SourceBackedRefreshExecutor::new(registry, source_backed_refresh_writer_options())
+        .with_base_route_controls(migrated.route_controls.clone())
+        .refresh_scope_with_detailed_progress_and_reconciliation(
+            &index_root,
+            SourceBackedRefreshScope::All,
+            SourceBackedReconciliationDemand::Exhaustive,
+            |_| Ok(()),
+        )
+        .unwrap();
+    let replay_work = hermes_work_counters();
+    assert_eq!(replay_work.logical_row_traversals, 0);
+    assert_eq!(replay_work.inventory_observation_rows, 0);
+    assert_eq!(
+        certificates_by_identity(&replay),
+        certificates_by_identity(&migrated)
+    );
+}
+
+#[test]
+fn incremental_old_row_edit_forces_next_exhaustive_scan_before_replay() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data-root");
+    let index_root = temp.path().join("index");
+    let database = temp.path().join("source/state.db");
+    let (registry, cold) = cold_fixture(&data_root, &index_root, &database);
+    let cold_control: serde_json::Value =
+        serde_json::from_slice(cold.route_controls.values().next().unwrap()).unwrap();
+    let exhaustively_certified_revision = cold_control["physical_revision"].clone();
+    Connection::open(&database)
+        .unwrap()
+        .execute_batch(
+            "update messages set content = 'rewritten old row' where id = 10;
+             insert into messages (id, session_id, role, content, timestamp)
+                 values (30, 'parent-session', 'assistant',
+                         'incremental append', 1782259204.0);",
+        )
+        .unwrap();
+
+    reset_hermes_work_counters();
+    let incremental = incremental_refresh(&index_root, &registry, &cold);
+    let incremental_work = hermes_work_counters();
+    assert_eq!(incremental_work.logical_row_traversals, 1);
+    assert_eq!(incremental_work.inventory_observation_rows, 1);
+    let incremental_control: serde_json::Value =
+        serde_json::from_slice(incremental.route_controls.values().next().unwrap()).unwrap();
+    assert_eq!(
+        incremental_control["physical_revision"],
+        exhaustively_certified_revision
+    );
+    assert!(unique_search_record(&index_root, "parent stable needle")
+        .content
+        .normalized_body
+        .unwrap()
+        .contains("parent stable needle"));
+    assert!(unique_search_record(&index_root, "incremental append")
+        .content
+        .normalized_body
+        .unwrap()
+        .contains("incremental append"));
+
+    reset_hermes_work_counters();
+    let exhaustive =
+        SourceBackedRefreshExecutor::new(registry.clone(), source_backed_refresh_writer_options())
+            .with_base_route_controls(incremental.route_controls.clone())
+            .refresh_scope_with_detailed_progress_and_reconciliation(
+                &index_root,
+                SourceBackedRefreshScope::All,
+                SourceBackedReconciliationDemand::Exhaustive,
+                |_| Ok(()),
+            )
+            .unwrap();
+    let exhaustive_work = hermes_work_counters();
+    assert_eq!(exhaustive_work.inventory_observation_rows, 5);
+    assert!(exhaustive_work.logical_row_traversals > 0);
+    assert!(unique_search_record(&index_root, "rewritten old row")
+        .content
+        .normalized_body
+        .unwrap()
+        .contains("rewritten old row"));
+    let exhaustive_control: serde_json::Value =
+        serde_json::from_slice(exhaustive.route_controls.values().next().unwrap()).unwrap();
+    assert_ne!(
+        exhaustive_control["physical_revision"],
+        exhaustively_certified_revision
+    );
+
+    reset_hermes_work_counters();
+    let replay = SourceBackedRefreshExecutor::new(registry, source_backed_refresh_writer_options())
+        .with_base_route_controls(exhaustive.route_controls.clone())
+        .refresh_scope_with_detailed_progress_and_reconciliation(
+            &index_root,
+            SourceBackedRefreshScope::All,
+            SourceBackedReconciliationDemand::Exhaustive,
+            |_| Ok(()),
+        )
+        .unwrap();
+    let replay_work = hermes_work_counters();
+    assert_eq!(replay_work.logical_row_traversals, 0);
+    assert_eq!(replay_work.inventory_observation_rows, 0);
+    assert_eq!(
+        certificates_by_identity(&replay),
+        certificates_by_identity(&exhaustive)
+    );
 }
 
 #[test]

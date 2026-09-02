@@ -73,7 +73,12 @@ pub(crate) struct HermesTreeAuthority {
     publication_receipt: HermesRefreshReceipt,
     terminal_revalidate:
         Option<Box<dyn Fn() -> Result<(), SqliteSourceAccessError> + Send + Sync + 'static>>,
+    physical_replay: Option<HermesPhysicalReplay>,
     deferred_incremental: bool,
+}
+
+struct HermesPhysicalReplay {
+    fence: SqliteSourceReplayFence,
 }
 
 struct HermesCompleteReconciliationContext<'a, L: CaptureLifecycleSink> {
@@ -381,6 +386,28 @@ where
         &self,
         tree: &CompleteDocumentTree<Self::Leaf, Self::TreeAuthority>,
     ) -> SourceBackedRouteResult<[u8; 32]> {
+        if let Some(replay) = &tree.authority.physical_replay {
+            let snapshot_present = tree
+                .authority
+                .snapshot
+                .lock()
+                .map_err(|_| hermes_internal("Hermes snapshot lock was poisoned"))?
+                .is_some();
+            if !tree.leaves.is_empty() || snapshot_present {
+                return Err(hermes_internal(
+                    "exact Hermes replay retained logical snapshot work",
+                ));
+            }
+            #[cfg(any(test, feature = "test-support"))]
+            run_before_hermes_snapshot_seal_hook();
+            #[cfg(any(test, feature = "test-support"))]
+            run_after_hermes_snapshot_seal_hook();
+            replay
+                .fence
+                .revalidate()
+                .map_err(hermes_sqlite_route_error)?;
+            return Ok(tree.tree_fingerprint);
+        }
         if tree.authority.deferred_incremental {
             let snapshot_present = tree
                 .authority
@@ -432,6 +459,15 @@ where
     }
     let reconciliation_demand = context.reconciliation_demand();
     let base_route_control = context.route_control().map(<[u8]>::to_vec);
+    if reconciliation_demand == SourceBackedReconciliationDemand::Exhaustive {
+        if let Some(tree) = discover_hermes_physical_replay(
+            candidate,
+            base_route_control.as_deref(),
+            hermes_now_ms(),
+        )? {
+            return Ok(tree);
+        }
+    }
     let may_increment = reconciliation_demand == SourceBackedReconciliationDemand::Incremental
         && hermes_refresh_receipt(base_route_control.as_deref()).is_some();
     let (mut sqlite_authority, mut snapshot, mut admitted_demand) = if may_increment {
@@ -467,6 +503,7 @@ where
                         message_spool: None,
                         publication_receipt,
                         terminal_revalidate: None,
+                        physical_replay: None,
                         deferred_incremental: true,
                     },
                 ));
@@ -520,7 +557,10 @@ where
         snapshot.connection().map_err(hermes_sqlite_route_error)?,
         base_route_control.as_deref(),
         admitted_demand,
-        *opening_evidence.identity(),
+        HermesPhysicalSourceRevision {
+            database_identity: *opening_evidence.identity(),
+            physical_revision: *opening_evidence.physical_revision(),
+        },
         hermes_now_ms(),
         context,
     ) {
@@ -541,6 +581,7 @@ where
         _schema_evidence: inventory.schema_evidence,
         _sqlite_authority: Some(sqlite_authority),
         terminal_revalidate: Some(snapshot.terminal_revalidator()),
+        physical_replay: None,
         snapshot: Mutex::new(Some(snapshot)),
         message_spool: inventory.message_spool.map(Mutex::new),
         publication_receipt,
@@ -559,6 +600,96 @@ where
             authority,
         ))
     }
+}
+
+fn discover_hermes_physical_replay<L: CaptureLifecycleSink>(
+    candidate: &HermesSourceCandidate,
+    base_route_control: Option<&[u8]>,
+    now_ms: i64,
+) -> SourceBackedRouteResult<Option<CompleteDocumentTree<HermesSessionLeaf<L>, HermesTreeAuthority>>>
+where
+    L::PinnedAppendBase: Clone,
+{
+    let Some(prior) = hermes_refresh_receipt(base_route_control) else {
+        return Ok(None);
+    };
+    if prior.kind != HERMES_ROUTE_CONTROL_KIND
+        || prior.version != HERMES_ROUTE_CONTROL_VERSION
+        || prior.parser_revision != HERMES_SOURCE_PARSER_REVISION
+        || prior.outcome != "successful"
+        || prior.profile_source_descriptor != candidate.source.exact_descriptor_digest()
+    {
+        return Ok(None);
+    }
+    let retained = retain_root_authorized_source(&candidate.data_root, candidate.path())
+        .map_err(hermes_route_error)?;
+    let physical_fence = match retained
+        .sqlite_authority
+        .observe_replay_fence(&retained.database_leaf)
+    {
+        Ok(fence) => fence,
+        Err(error) if error.is_source_changed() => return Ok(None),
+        Err(error) => return Err(hermes_sqlite_route_error(error)),
+    };
+    let physical_revision = *physical_fence.revision();
+    if physical_revision != prior.physical_revision {
+        return Ok(None);
+    }
+    let publication_receipt = hermes_physical_replay_receipt(prior, now_ms);
+    let tree_fingerprint = hermes_physical_replay_tree_fingerprint(
+        &candidate.source,
+        physical_revision,
+        &publication_receipt,
+    )?;
+    Ok(Some(CompleteDocumentTree::new_partial(
+        tree_fingerprint,
+        Vec::new(),
+        HermesTreeAuthority {
+            opening_evidence: None,
+            schema: None,
+            _schema_evidence: Vec::new(),
+            _sqlite_authority: None,
+            snapshot: Mutex::new(None),
+            message_spool: None,
+            publication_receipt,
+            terminal_revalidate: None,
+            physical_replay: Some(HermesPhysicalReplay {
+                fence: physical_fence,
+            }),
+            deferred_incremental: false,
+        },
+    )))
+}
+
+fn hermes_physical_replay_receipt(
+    mut prior: HermesRefreshReceipt,
+    now_ms: i64,
+) -> HermesRefreshReceipt {
+    if prior.last_successful_exhaustive_at_ms != now_ms {
+        prior.exhaustive_sequence = prior.exhaustive_sequence.saturating_add(1);
+    }
+    prior.last_successful_exhaustive_at_ms = now_ms;
+    prior.exact_due_at_ms = now_ms.saturating_add(HERMES_EXACT_INTERVAL_MS);
+    prior.mode = "exhaustive".to_owned();
+    prior.outcome = "successful".to_owned();
+    prior
+}
+
+fn hermes_physical_replay_tree_fingerprint(
+    profile_source: &SourceKey,
+    physical_revision: [u8; 32],
+    receipt: &HermesRefreshReceipt,
+) -> SourceBackedRouteResult<[u8; 32]> {
+    let receipt = serde_json::to_vec(receipt)
+        .map_err(HermesSourceBackedError::from)
+        .map_err(hermes_route_error)?;
+    let mut digest = Sha256::new();
+    digest.update(b"ctx-hermes-exact-physical-replay-v1\0");
+    digest.update(profile_source.exact_descriptor_digest());
+    digest.update(physical_revision);
+    digest.update((receipt.len() as u64).to_be_bytes());
+    digest.update(receipt);
+    Ok(digest.finalize().into())
 }
 
 fn hermes_incremental_snapshot_unavailable(error: &HermesSourceBackedError) -> bool {

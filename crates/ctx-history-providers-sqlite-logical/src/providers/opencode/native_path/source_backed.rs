@@ -35,10 +35,10 @@ use crate::{
         },
     },
     provider_sources::{
-        retain_sqlite_source_directory_authority, sqlite_retry_decision, SqliteArtifactKind,
-        SqliteCleanupStatus, SqliteFailurePhase, SqliteLogicalSnapshot, SqliteRetryDecision,
-        SqliteSourceAccessError, SqliteSourceDirectoryAuthority, SqliteSourceErrorComposition,
-        SqliteSourceProgressError, SqliteSourceReadSnapshot, SqliteSourceTerminalFence,
+        sqlite_retry_decision, SqliteArtifactKind, SqliteCleanupStatus, SqliteFailurePhase,
+        SqliteLogicalSnapshot, SqliteRetryDecision, SqliteSourceAccessError,
+        SqliteSourceDirectoryAuthority, SqliteSourceErrorComposition, SqliteSourceProgressError,
+        SqliteSourceReadSnapshot, SqliteSourceTerminalFence,
     },
     CaptureError, MAX_PROVIDER_SQLITE_VALUE_BYTES,
 };
@@ -93,6 +93,7 @@ impl SqliteSourceErrorComposition for OpenCodeSourceBackedError {
 }
 
 mod adapter;
+mod authority;
 mod diagnostics;
 mod fingerprint;
 mod ordering;
@@ -103,6 +104,7 @@ pub use adapter::{
     adapter as source_backed_adapter, adapter_scoped as source_backed_adapter_scoped,
     OpenCodeDocumentTreeAdapter,
 };
+use authority::retain_root_authorized_source;
 use diagnostics::{
     core_projection_rejection_draft, projection_rejection_draft,
     record_local_core_projection_failure,
@@ -846,29 +848,15 @@ fn open_root_authorized_snapshot_retained_with_hook_and_progress(
     ) -> SourceBackedRouteResult<()>,
 ) -> OpenCodeSourceBackedResult<OpenCodeAuthorizedSnapshot> {
     const SOURCE_TRANSITION_ATTEMPTS: usize = 2;
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    let database_leaf =
-        path.file_name()
-            .ok_or_else(|| CaptureError::InvalidProviderTranscriptPath {
-                path: path.to_path_buf(),
-                reason: SQLITE_SOURCE_INVALID_REASON,
-            })?;
-    let source_root = ProviderSourceRoot::open(parent)?;
-    let source_directory = source_root.directory()?;
-    let parent_handle = source_directory
-        .try_clone_authority_handle()
-        .map_err(CaptureError::from)?;
-    let sqlite_authority =
-        retain_sqlite_source_directory_authority(data_root, &parent_handle, parent)?;
+    let retained = retain_root_authorized_source(data_root, path)?;
     let sqlite_snapshot = {
         let mut attempt = 0;
         loop {
-            match sqlite_authority.open_stable_snapshot_with_progress(database_leaf, |progress| {
-                report_progress(sqlite_source_progress(progress))
-            }) {
+            match retained
+                .sqlite_authority
+                .open_stable_snapshot_with_progress(&retained.database_leaf, |progress| {
+                    report_progress(sqlite_source_progress(progress))
+                }) {
                 Ok(snapshot) => break snapshot,
                 Err(SqliteSourceProgressError::Source(error))
                     if sqlite_retry_decision(&error)
@@ -896,7 +884,7 @@ fn open_root_authorized_snapshot_retained_with_hook_and_progress(
     after_authorize();
     let configure = (|| {
         sqlite_snapshot.revalidate()?;
-        source_root.revalidate_same_object()?;
+        retained.source_root.revalidate_same_object()?;
         let connection = sqlite_snapshot.connection()?;
         let value_limit = i32::try_from(MAX_PROVIDER_SQLITE_VALUE_BYTES)
             .map_err(|_| OpenCodeSourceBackedError::CountOverflow)?;
@@ -943,8 +931,8 @@ fn open_root_authorized_snapshot_retained_with_hook_and_progress(
         return Err(adapter::abort_opencode_snapshot(sqlite_snapshot, error));
     }
     Ok(OpenCodeAuthorizedSnapshot {
-        source_root,
-        sqlite_authority,
+        source_root: retained.source_root,
+        sqlite_authority: retained.sqlite_authority,
         sqlite_snapshot,
     })
 }
