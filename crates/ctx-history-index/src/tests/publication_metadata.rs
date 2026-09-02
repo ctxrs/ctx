@@ -416,41 +416,52 @@ fn retained_generation_peer_is_limited_to_the_current_pointer_pair() {
     let temp = tempdir().unwrap();
     let source = source("retained-generation-peer.jsonl");
     let first = publish_with_metadata(temp.path(), &source, 1, "first peer", b"first");
-    assert!(VerifiedIndex::open_retained_generation_peer(
-        temp.path(),
-        &first.receipt().generation_id,
-    )
-    .unwrap()
-    .is_none());
+    let mut first_reader =
+        VerifiedIndex::open_pinned_generation(temp.path(), &first.receipt().generation_id).unwrap();
+    assert!(first_reader
+        .take_retained_generation_peer_for_reader()
+        .unwrap()
+        .is_none());
+    drop(first_reader);
 
     let second = publish_with_metadata(temp.path(), &source, 2, "second peer", b"second");
-    let previous =
-        VerifiedIndex::open_retained_generation_peer(temp.path(), &second.receipt().generation_id)
-            .unwrap()
+    let mut second_reader =
+        VerifiedIndex::open_pinned_generation(temp.path(), &second.receipt().generation_id)
             .unwrap();
+    let previous = second_reader
+        .take_retained_generation_peer_for_reader()
+        .unwrap()
+        .unwrap();
     assert_eq!(previous.generation_id(), first.receipt().generation_id);
-    let active =
-        VerifiedIndex::open_retained_generation_peer(temp.path(), &first.receipt().generation_id)
-            .unwrap()
-            .unwrap();
+    let mut first_reader =
+        VerifiedIndex::open_pinned_generation(temp.path(), &first.receipt().generation_id).unwrap();
+    let active = first_reader
+        .take_retained_generation_peer_for_reader()
+        .unwrap()
+        .unwrap();
     assert_eq!(active.generation_id(), second.receipt().generation_id);
+    drop(active);
+    drop(first_reader);
+    drop(previous);
+    drop(second_reader);
 
     let third = publish_with_metadata(temp.path(), &source, 3, "third peer", b"third");
-    let error = match VerifiedIndex::open_retained_generation_peer(
-        temp.path(),
-        &first.receipt().generation_id,
-    ) {
-        Ok(_) => panic!("expired generation unexpectedly retained a peer"),
-        Err(error) => error,
-    };
+    let error =
+        match VerifiedIndex::open_pinned_generation(temp.path(), &first.receipt().generation_id) {
+            Ok(_) => panic!("expired generation unexpectedly retained a peer"),
+            Err(error) => error,
+        };
     assert!(matches!(
         error,
         IndexError::PinnedGenerationNotRetained { .. }
     ));
-    let active =
-        VerifiedIndex::open_retained_generation_peer(temp.path(), &second.receipt().generation_id)
-            .unwrap()
+    let mut second_reader =
+        VerifiedIndex::open_pinned_generation(temp.path(), &second.receipt().generation_id)
             .unwrap();
+    let active = second_reader
+        .take_retained_generation_peer_for_reader()
+        .unwrap()
+        .unwrap();
     assert_eq!(active.generation_id(), third.receipt().generation_id);
 }
 
@@ -476,25 +487,31 @@ fn one_durable_lease_retains_an_exact_old_generation_without_changing_peer_slots
         load_generation_retention_lease(temp.path()).unwrap(),
         Some(lease.clone())
     );
-    let leased =
+    let mut leased =
         VerifiedIndex::open_pinned_generation(temp.path(), &first.receipt().generation_id).unwrap();
     assert_eq!(leased.count_term("leased").unwrap(), 1);
     assert_eq!(leased.count_term("fourth").unwrap(), 0);
-    let peer =
-        VerifiedIndex::open_retained_generation_peer(temp.path(), &fourth.receipt().generation_id)
-            .unwrap()
+    assert!(leased
+        .take_retained_generation_peer_for_reader()
+        .unwrap()
+        .is_none());
+    let mut fourth_reader =
+        VerifiedIndex::open_pinned_generation(temp.path(), &fourth.receipt().generation_id)
             .unwrap();
+    let peer = fourth_reader
+        .take_retained_generation_peer_for_reader()
+        .unwrap()
+        .unwrap();
     assert_eq!(peer.generation_id(), third.receipt().generation_id);
-    assert!(matches!(
-        VerifiedIndex::open_retained_generation_peer(temp.path(), &first.receipt().generation_id,),
-        Err(IndexError::PinnedGenerationNotRetained { .. })
-    ));
     assert_eq!(generation_directories(temp.path()).len(), 3);
     assert_ne!(
         second.receipt().generation_id,
         third.receipt().generation_id
     );
 
+    drop(peer);
+    drop(fourth_reader);
+    drop(leased);
     assert!(release_generation_retention_lease(temp.path(), &lease).unwrap());
     let fifth = publish_with_metadata(temp.path(), &source, 5, "fifth", b"fifth");
     assert_ne!(

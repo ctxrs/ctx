@@ -8,7 +8,7 @@ use serde_json::Value;
 
 use super::super::{compact_presentation::generation_read, render::search_json_document};
 use super::{
-    application_search_failure, index_root, refresh_for_search, HistorySemanticPort, RefreshArg,
+    application_search_failure, refresh_for_search, HistorySemanticPort, RefreshArg,
     RefreshOutcome, SearchRefreshContext, SourceSearchRequest, SourceSearchResult,
 };
 use crate::{SearchExecutionObservation, SearchFailurePhase, SearchRefreshStatus};
@@ -91,7 +91,6 @@ pub(super) fn search_existing_generation_with_port<P: HistorySemanticPort>(
     let mut generation_port = |request: &ctx_history_read_application::GenerationReadRequest| {
         generation_read(
             index.take().expect("generation port is invoked once"),
-            &index_root(data_root),
             request,
         )
     };
