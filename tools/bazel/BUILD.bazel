@@ -72,8 +72,6 @@ exports_files([
     "release_package_audit_data.bzl",
     "release_surface_tests.bzl",
     "root_build_settings.bzl",
-    "select_affected_tests.py",
-    "select_affected_tests_test.py",
     "test_tiers.bzl",
 ])
 
