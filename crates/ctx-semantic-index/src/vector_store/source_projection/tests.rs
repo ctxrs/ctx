@@ -30,6 +30,7 @@ use super::*;
 use crate::legacy_fixed_http_semantic_model_contract;
 use crate::vector_store_search::scan_exact_generation;
 
+mod bounded_reconciliation;
 mod content;
 mod filter_accounting;
 mod generation_identity;

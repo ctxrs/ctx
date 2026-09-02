@@ -18,7 +18,7 @@ use uuid::Uuid;
 use super::control::FULL_REBUILD_STATE;
 use super::flat_segments::{
     FlatActiveEventLookup, FlatEventMetadataUpdate, FlatSourceHash, FlatSourceReceiptInput,
-    FlatSourceStageResume, PinnedFlatGeneration,
+    FlatSourceStageResume,
 };
 use super::{SemanticChunkDocument, SemanticVectorStore};
 use crate::{
@@ -47,6 +47,8 @@ use manifest::{
 };
 use outcome::merge_outcome;
 pub use outcome::SourceBackedSemanticOutcome;
+use progress::SourceBackedReconciliationBoundaryLimit;
+pub use state::SourceBackedGenerationPin;
 use state::{
     advance_frontier_progress, clear_active_source, commit_frontier_after_flat,
     source_projection_states, source_receipt_allows_vector_reuse, source_receipt_matches,
@@ -200,12 +202,6 @@ pub trait SemanticDocumentBuilder {
         -> Result<Option<SemanticEventDocument>>;
 }
 
-pub enum SourceBackedGenerationPin {
-    NotReady,
-    ReadyEmpty,
-    Ready(PinnedFlatGeneration),
-}
-
 impl SemanticVectorStore {
     pub fn reconcile_source_backed_index(
         &mut self,
@@ -250,9 +246,11 @@ impl SemanticVectorStore {
             embedder,
             &mut || Ok(()),
             &mut |_| Ok(()),
+            SourceBackedReconciliationBoundaryLimit::Unbounded,
         )
     }
 
+    #[allow(clippy::too_many_arguments)] // Authority/progress hooks and the boundary budget are independent controls.
     fn reconcile_source_backed_generation_with_checkpoint(
         &mut self,
         index: &VerifiedIndex,
@@ -261,6 +259,7 @@ impl SemanticVectorStore {
         embedder: &mut dyn SemanticBatchEmbedder,
         checkpoint: &mut dyn FnMut() -> Result<()>,
         progress: &mut dyn FnMut(u64) -> Result<()>,
+        boundary_limit: SourceBackedReconciliationBoundaryLimit,
     ) -> Result<SourceBackedSemanticOutcome> {
         validate_generation(generation)?;
         if generation.core_generation_id != index.generation_id() {
@@ -296,7 +295,9 @@ impl SemanticVectorStore {
                 if let Some(outcome) =
                     self.reconcile_pending_full_rebuild(&mut frontier, progress)?
                 {
-                    return Ok(outcome);
+                    if boundary_limit.stops_after_full_rebuild(&outcome) {
+                        return Ok(outcome);
+                    }
                 }
             }
             let mut states =
@@ -341,7 +342,11 @@ impl SemanticVectorStore {
                             )?
                         }
                     };
+                    let boundary_exhausted = boundary_limit.exhausted_by(&next);
                     merge_outcome(&mut total, next);
+                    if boundary_exhausted {
+                        return Ok(total);
+                    }
                     continue;
                 }
 
@@ -372,7 +377,11 @@ impl SemanticVectorStore {
                         return Ok(total);
                     }
                 };
+                let boundary_exhausted = boundary_limit.exhausted_by(&next);
                 merge_outcome(&mut total, next);
+                if boundary_exhausted {
+                    return Ok(total);
+                }
             }
         })();
         let end = self

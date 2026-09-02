@@ -413,6 +413,14 @@ fn flat_contract_reset_survives_both_control_handoff_crash_windows() -> Result<(
     assert!(changed.model_contract_reset_pending()?);
     drop(changed); // Crash after Flat publication and before the control handoff.
 
+    assert_eq!(
+        SemanticVectorStore::source_backed_reconciliation_contract_matches_at(
+            &fixture.semantic_path,
+            contract,
+        )?,
+        Some(false),
+        "a matching control receipt must not hide a mismatched Flat publication"
+    );
     assert!(SemanticVectorStore::open_read_only(&fixture.semantic_path, contract)?.is_none());
     let store = SemanticVectorStore::open(&fixture.semantic_path, contract)?;
     assert!(store.source_acknowledgement()?.is_none());
@@ -439,6 +447,69 @@ fn flat_contract_reset_survives_both_control_handoff_crash_windows() -> Result<(
         store.source_backed_generation_pin_exact(index.generation_id(), 3)?,
         SourceBackedGenerationPin::Ready(_)
     ));
+    Ok(())
+}
+
+#[test]
+fn matching_external_admission_excludes_contract_reset_race() -> Result<()> {
+    let fixture = Fixture::new(1)?;
+    let index = fixture.publish("external-admission-race", &[(0, bodies("first", 1))])?;
+    let endpoint = "http://127.0.0.1:43129/v1/embeddings";
+    let current = external_contract(endpoint, "space-current", 6)?;
+    let replacement = external_contract(endpoint, "space-replacement", 6)?;
+    let mut store = SemanticVectorStore::open(&fixture.semantic_path, &current)?;
+    reconcile_all(
+        &mut store,
+        &index,
+        &mut CoreBuilder::default(),
+        &mut DimensionEmbedder::new(&current),
+    )?;
+    drop(store);
+
+    let (start_reset, await_start) = std::sync::mpsc::channel();
+    let (reset_started, await_reset_started) = std::sync::mpsc::channel();
+    let (reset_finished, await_reset_finished) = std::sync::mpsc::channel();
+    let racing_path = fixture.semantic_path.clone();
+    let racing = std::thread::spawn(move || {
+        await_start.recv().expect("receive reset start");
+        let result =
+            SemanticVectorStore::open_after_private_root_ready(&racing_path, &replacement, || {
+                reset_started.send(()).expect("report reset lock attempt")
+            })
+            .map(drop);
+        reset_finished.send(result).expect("report reset result");
+    });
+
+    let admitted =
+        SemanticVectorStore::open_source_backed_reconciliation_if_contract_matches_after_match(
+            &fixture.semantic_path,
+            &current,
+            || {
+                start_reset.send(()).expect("start competing reset");
+                await_reset_started
+                    .recv()
+                    .expect("competing reset reached writer admission");
+                assert!(
+                    await_reset_finished
+                        .recv_timeout(std::time::Duration::from_millis(100))
+                        .is_err(),
+                    "a competing contract reset must wait through matching writable admission"
+                );
+            },
+        )?;
+    assert!(admitted.is_some());
+    drop(admitted);
+    await_reset_finished
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("competing reset remained blocked")?;
+    racing.join().expect("join competing reset");
+    assert_eq!(
+        SemanticVectorStore::source_backed_reconciliation_contract_matches_at(
+            &fixture.semantic_path,
+            &current,
+        )?,
+        Some(false)
+    );
     Ok(())
 }
 

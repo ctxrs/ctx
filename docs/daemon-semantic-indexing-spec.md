@@ -22,6 +22,13 @@ When auto remains effective, ctx installs or repairs supervision and starts the
 daemon; manual mode stops it and removes supervision.
 The canonical config is `[indexing] mode = "auto"|"manual"`.
 
+After an automatic Core publication, the daemon advances opted-in semantic
+indexing through bounded durable turns until that Core generation is ready
+before running an already queued Core successor. Yielding between turns keeps
+deadline, resource, and foreground-query checks active while preventing
+continuously changing Core generations from restarting semantic work forever.
+Foreground query activity and semantic deferral or failure still let Core run.
+
 Search is an interactive read path and never becomes a duplicate importer.
 Automatic background search may start or signal the persistent daemon. Manual
 background search reads the current indexes without contacting a process;
@@ -98,11 +105,17 @@ responsibility boundary is the
 [external semantic executor contract](semantic-executors.md). This document
 owns only its daemon lifecycle integration.
 
-The daemon constructs one executor per applied configuration and uses it for
-both indexing and query embedding. Endpoint identity drift fails closed without
-falling back to E5. Rerunning `ctx semantic enable --executor URL` explicitly
-accepts the current identity; if it changed, ctx wipes and rebuilds only the
-derived semantic index. Core history and lexical generations remain intact.
+The daemon constructs one executor per applied configuration and uses it when
+indexing or a query requires embeddings. A Core generation with no eligible
+semantic events can publish its semantic acknowledgement from the selected
+configuration contract without credentials or an executor. Existing external
+state is admitted this way only when its control, Flat, and source contracts
+match under the same writer lock used for writable opening; drift still
+requires endpoint verification before reset. Endpoint identity drift fails
+closed without falling back to E5. Rerunning `ctx semantic enable --executor
+URL` explicitly accepts the current identity; if it changed, ctx wipes and
+rebuilds only the derived semantic index. Core history and lexical generations
+remain intact.
 
 Built-in semantic document indexing is throttled by default. The effective
 default is `builtin_throttling = true` even when the key is absent. An operator
@@ -192,7 +205,10 @@ executor, ctx stops the old query service and releases the old executor before
 it prepares the replacement. If replacement activation fails, ctx does not
 resume or send work to the old executor; requested intent remains visible,
 while applied semantic state and runtime ownership are inactive and the
-semantic job is not reported as enabled.
+semantic job is not reported as enabled for embedding or queries. Executor-free
+maintenance may still acknowledge an exact Core generation with no eligible
+semantic events; it cannot contact the endpoint or reset mismatched external
+state.
 
 ## Foreground Progress Commands
 

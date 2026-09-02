@@ -137,6 +137,77 @@ impl SemanticVectorStore {
         Ok(store)
     }
 
+    pub(super) fn open_writable_if_matching(
+        path: &Path,
+        contract: &SemanticModelContract,
+        matches: impl FnOnce(&Self) -> Result<bool>,
+    ) -> Result<Option<Self>> {
+        Self::open_writable_if_matching_with_hook(path, contract, matches, || {})
+    }
+
+    fn open_writable_if_matching_with_hook(
+        path: &Path,
+        contract: &SemanticModelContract,
+        matches: impl FnOnce(&Self) -> Result<bool>,
+        matched: impl FnOnce(),
+    ) -> Result<Option<Self>> {
+        let path = private_fs::writable_private_root(path)?;
+        control::preflight_writable_compatibility(&path)?;
+        private_fs::create_private_dir_all(&path)?;
+        let flat_contract = flat_model_contract(contract).map_err(semantic_flat_store_error)?;
+        let (flat, coordination) = FlatSegmentStore::prepare_writable_open(&path, flat_contract)
+            .map_err(semantic_flat_store_error)?;
+        let snapshot = match Self::open_read_only(&path, contract) {
+            Ok(Some(store)) => store,
+            Ok(None) => return Ok(None),
+            Err(error)
+                if semantic_vector_failure_kind(&error)
+                    == Some(SemanticVectorFailureKind::ResetRequired) =>
+            {
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
+        if !matches(&snapshot)? {
+            return Ok(None);
+        }
+        drop(snapshot);
+        matched();
+        let conn = control::open_writable(&path)?;
+        let flat = flat
+            .finish_writable_open()
+            .map_err(semantic_flat_store_error)?;
+        let store = Self {
+            conn,
+            flat,
+            contract: contract.clone(),
+            _passive_snapshot: None,
+        };
+        if store
+            .flat
+            .model_contract_reset_pending()
+            .map_err(semantic_flat_store_error)?
+        {
+            store.record_flat_model_contract_reset()?;
+            store
+                .flat
+                .acknowledge_model_contract_reset()
+                .map_err(semantic_flat_store_error)?;
+        }
+        drop(coordination);
+        Ok(Some(store))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open_writable_if_matching_after_match(
+        path: &Path,
+        contract: &SemanticModelContract,
+        matches: impl FnOnce(&Self) -> Result<bool>,
+        matched: impl FnOnce(),
+    ) -> Result<Option<Self>> {
+        Self::open_writable_if_matching_with_hook(path, contract, matches, matched)
+    }
+
     #[cfg(test)]
     pub(crate) fn open_after_private_root_ready(
         path: &Path,

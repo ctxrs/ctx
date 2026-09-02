@@ -1,38 +1,25 @@
 #[path = "daemon_scheduler_retry_deferral.rs"]
 mod retry_deferral;
+mod semantic_fairness;
 mod semantic_progress;
 
 pub(super) use retry_deferral::DaemonConsumerRetryDeferral;
-use semantic_progress::bind_semantic_generation;
-
-#[derive(Default)]
-pub(super) struct DaemonSidecarDrain {
-    pub(super) generation: Option<String>,
-    pub(super) semantic_attempted_generation: Option<String>,
-}
+pub(super) use semantic_fairness::{
+    restore_daemon_consumer_retries, DaemonSchedulerPorts, DaemonSemanticJobPorts,
+    DaemonSidecarDrain,
+};
+use {
+    semantic_fairness::{
+        semantic_turn_continues, DaemonSemanticCatchUpBudget, DaemonSemanticGeneration,
+    },
+    semantic_progress::bind_semantic_generation,
+};
 
 pub(super) struct DaemonSchedulerCycleContext<'a> {
     pub(super) deadline: Option<Instant>,
     pub(super) semantic_enabled: bool,
     pub(super) query_activity: Option<&'a DaemonQueryActivity>,
     pub(super) source_refresh: Option<&'a CoreRefreshEngine>,
-}
-
-#[derive(Clone, Copy)]
-pub(super) struct DaemonSemanticJobPorts<'a> {
-    pub(super) artifact_fetcher: &'a dyn ctx_semantic_model::ArtifactFetcher,
-    pub(super) config: &'a dyn crate::DaemonConfigPort,
-}
-
-#[derive(Clone, Copy)]
-struct DaemonSemanticGeneration<'a> {
-    source_generation: &'a PinnedSourceBackedGeneration,
-    contract: &'a ctx_semantic_index::SemanticModelContract,
-}
-pub(super) struct DaemonSchedulerPorts<'a, N: ?Sized> {
-    pub(super) generation_published: &'a N,
-    pub(super) semantic: DaemonSemanticJobPorts<'a>,
-    pub(super) observation: &'a dyn crate::DaemonObservationPort,
 }
 
 fn immediate_follow_up(mut iteration: DaemonIteration) -> DaemonIteration {
@@ -123,6 +110,22 @@ where
         return Ok(iteration);
     }
     let query_generation = query_activity.map(|activity| activity.snapshot().1);
+    if source_refresh_requested
+        && runtime.sidecar_drain.semantic_turn_pending
+        && runtime.history_retry.ready()
+        && !daemon_foreground_query_preempts(query_activity, query_generation)
+    {
+        if let Some(iteration) = run_pending_core_semantic_catch_up(
+            data_root,
+            runtime,
+            deadline,
+            semantic_enabled,
+            semantic,
+            DaemonSemanticCatchUpBudget::OneDurableBoundary,
+        )? {
+            return Ok(iteration);
+        }
+    }
     if source_refresh_requested {
         runtime.consumer_retry_deferral.reset();
         if let Some(activity) = query_activity {
@@ -179,10 +182,13 @@ where
         deadline,
         semantic_enabled,
         semantic,
+        DaemonSemanticCatchUpBudget::Drain,
     )? {
+        runtime.sidecar_drain.semantic_turn_pending = false;
         return Ok(iteration);
     }
     if runtime.sidecar_drain.generation.take().is_some() {
+        runtime.sidecar_drain.semantic_turn_pending = false;
         return Ok(DaemonIteration::new(
             false,
             false,
@@ -223,6 +229,7 @@ fn run_pending_core_semantic_catch_up(
     deadline: Option<Instant>,
     semantic_enabled: bool,
     semantic_ports: DaemonSemanticJobPorts<'_>,
+    catch_up_budget: DaemonSemanticCatchUpBudget,
 ) -> Result<Option<DaemonIteration>> {
     if !semantic_enabled
         || !daemon_mode_runs_core_semantic_projection(runtime.config.daemon.mode)
@@ -268,7 +275,14 @@ fn run_pending_core_semantic_catch_up(
             contract: &semantic_contract,
         },
         semantic_ports,
+        catch_up_budget,
     );
+    if matches!(
+        catch_up_budget,
+        DaemonSemanticCatchUpBudget::OneDurableBoundary
+    ) {
+        runtime.sidecar_drain.semantic_turn_pending = semantic_turn_continues(&job);
+    }
     let did_work = daemon_semantic_job_did_work(&job);
     write_daemon_job_status_unless_deadline_skip(&daemon_semantic_job_path(data_root), &job)?;
     runtime.sidecar_drain.semantic_attempted_generation = Some(generation_id.to_owned());
@@ -398,7 +412,7 @@ where
         observation,
     );
     if let Some(generation) = published_generation {
-        runtime.sidecar_drain.generation = Some(generation);
+        runtime.sidecar_drain.record_core_publication(generation);
         // A successor queued behind an exact-route fence must yield to the
         // daemon loop once so pending watcher events enter the dirty-route
         // ledger before that successor is admitted.
@@ -461,7 +475,9 @@ where
     let state = daemon_core_cycle_state(&job);
     if !failed && job.get("status").and_then(Value::as_str) == Some("completed") {
         if let Some(generation) = job.get("published_generation").and_then(Value::as_str) {
-            runtime.sidecar_drain.generation = Some(generation.to_owned());
+            runtime
+                .sidecar_drain
+                .record_core_publication(generation.to_owned());
         }
         let iteration = with_provider_refresh(
             DaemonIteration::new(run.did_work, false, state),
@@ -510,7 +526,7 @@ where
     })
     .flatten();
     if let Some(generation) = published_generation {
-        runtime.sidecar_drain.generation = Some(generation);
+        runtime.sidecar_drain.record_core_publication(generation);
         Ok(immediate_follow_up(DaemonIteration::new(
             did_work, false, state,
         )))
@@ -608,29 +624,6 @@ pub(super) fn restore_daemon_source_refresh_retry(runtime: &mut DaemonRuntime, d
     runtime.history_retry.restore(finalization);
 }
 
-pub(super) fn restore_daemon_consumer_retries(runtime: &mut DaemonRuntime, data_root: &Path) {
-    let semantic = read_daemon_job_status(&daemon_semantic_job_path(data_root));
-    restore_consumer_retry(&mut runtime.semantic_retry, semantic.as_ref());
-}
-
-fn restore_consumer_retry(backoff: &mut DaemonRetryBackoff, status: Option<&Value>) {
-    backoff.restore(status);
-    let persisted_failures = status
-        .and_then(|status| status.get("consecutive_failures"))
-        .and_then(Value::as_u64)
-        .unwrap_or(0)
-        .min(u64::from(u32::MAX)) as u32;
-    if backoff.consecutive_failures == 0
-        && persisted_failures > 0
-        && status
-            .and_then(|status| status.get("retryable"))
-            .and_then(Value::as_bool)
-            == Some(true)
-    {
-        backoff.consecutive_failures = persisted_failures;
-    }
-}
-
 pub(super) fn daemon_consumer_retry_due(runtime: &DaemonRuntime) -> bool {
     runtime.semantic_retry.consecutive_failures > 0 && runtime.semantic_retry.ready()
 }
@@ -713,6 +706,7 @@ fn run_daemon_semantic_job_with_retry(
     deadline: Option<Instant>,
     generation: DaemonSemanticGeneration<'_>,
     ports: DaemonSemanticJobPorts<'_>,
+    catch_up_budget: DaemonSemanticCatchUpBudget,
 ) -> Value {
     if let Some(job) = runtime.semantic_blocked_job.as_ref() {
         return job.clone();
@@ -721,7 +715,13 @@ fn run_daemon_semantic_job_with_retry(
         let job = daemon_semantic_retry_backoff_job(data_root, &runtime.semantic_retry);
         return bind_semantic_generation(data_root, job, generation);
     }
-    let job = run_daemon_semantic_job(
+    let run = match catch_up_budget {
+        DaemonSemanticCatchUpBudget::Drain => run_daemon_semantic_job,
+        DaemonSemanticCatchUpBudget::OneDurableBoundary => {
+            run_daemon_semantic_job_one_durable_boundary
+        }
+    };
+    let job = run(
         data_root,
         generation.source_generation,
         runtime,
@@ -832,12 +832,7 @@ fn selected_semantic_contract(
         }
         return semantic_index_contract(active);
     }
-    if runtime.config.semantic_executor.is_builtin() {
-        return semantic_index_contract(runtime.config.semantic_executor.contract());
-    }
-    Err(anyhow::anyhow!(
-        "selected semantic embedding executor is not active"
-    ))
+    semantic_index_contract(runtime.config.semantic_executor.contract())
 }
 
 pub(super) fn record_daemon_job_retry(backoff: &mut DaemonRetryBackoff, mut job: Value) -> Value {
@@ -967,7 +962,7 @@ use super::{
     daemon_retry::{semantic_failure_class_from_job, DaemonRetryBackoff, SemanticFailureClass},
     daemon_worker::{
         daemon_semantic_failed_job, daemon_semantic_retry_backoff_job, run_daemon_semantic_job,
-        semantic_index_contract,
+        run_daemon_semantic_job_one_durable_boundary, semantic_index_contract,
     },
     paths_status::{
         daemon_core_refresh_job_path, daemon_semantic_job_path, read_daemon_job_status,
@@ -975,9 +970,7 @@ use super::{
     },
     query_service::DaemonQueryActivity,
     runtime_limits::DAEMON_MIN_REMAINING_FOR_JOB_SECS,
-    source_backed_refresh_coordinator::{
-        pin_published_generation, CoreRefreshEngine, PinnedSourceBackedGeneration,
-    },
+    source_backed_refresh_coordinator::{pin_published_generation, CoreRefreshEngine},
 };
 
 #[cfg(test)]
