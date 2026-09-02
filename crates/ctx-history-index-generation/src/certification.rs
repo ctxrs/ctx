@@ -725,20 +725,9 @@ fn matching_certification(
     if ensure_real_directory(&root.join(CERTIFICATION_DIRECTORY)).is_err() {
         return Ok(None);
     }
-    let Some(bytes) = read_certification(&certification_path(root, slot)) else {
+    let Some(certification) = load_structurally_valid_certification(root, slot)? else {
         return Ok(None);
     };
-    let Ok(certification) = serde_json::from_slice::<GenerationIntegrityCertification>(&bytes)
-    else {
-        return Ok(None);
-    };
-    if serde_json::to_vec(&certification)? != bytes
-        || certification.version != CERTIFICATION_VERSION
-        || certification.slot != *slot
-        || !certification_digest_matches_slot(&certification)?
-    {
-        return Ok(None);
-    }
     if load_current_pointer(root)? != *pointer {
         return Err(IndexError::ConcurrentGenerationChange);
     }
@@ -777,6 +766,100 @@ fn matching_certification(
     }
     if load_current_pointer(root)? != *pointer {
         return Err(IndexError::ConcurrentGenerationChange);
+    }
+    Ok(Some(certification))
+}
+
+/// Preserves the active sidecar across reclamation; failures retain safe hashing.
+pub(crate) fn reclaim_with_active_certification(
+    root: &Path,
+    pointer: &ActiveGenerationPointer,
+    reclaimed_directory: &str,
+    remove: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    let certification = prepare_reclaim(root, pointer, reclaimed_directory).unwrap_or_default();
+    remove()?;
+    if let Some(mut certification) = certification {
+        let _ = (|| {
+            let generation_path = slot_path(root, pointer.active());
+            for expected in &mut certification.artifacts {
+                let current = capture_artifact(
+                    root,
+                    &generation_path,
+                    Path::new(&expected.artifact.path),
+                    Some(pointer),
+                )?;
+                if current != expected.artifact
+                    && (!current
+                        .identity
+                        .same_payload_identity(&expected.artifact.identity)
+                        || current.identity.link_count().checked_add(1)
+                            != Some(expected.artifact.identity.link_count()))
+                {
+                    return Err(IndexError::ChecksumMismatch);
+                }
+                expected.artifact = current;
+            }
+            let index = crate::open_slot_index(root, pointer.active())?;
+            install_certification_sidecar(
+                root,
+                Some(pointer),
+                None,
+                pointer.active(),
+                &index,
+                &certification,
+                false,
+            )
+        })();
+    }
+    Ok(())
+}
+
+fn prepare_reclaim(
+    root: &Path,
+    pointer: &ActiveGenerationPointer,
+    reclaimed_directory: &str,
+) -> Result<Option<GenerationIntegrityCertification>> {
+    let Some(certification) = load_structurally_valid_certification(root, pointer.active())? else {
+        return Ok(None);
+    };
+    let aliases = std::iter::once(pointer.active().directory())
+        .chain(pointer.previous().map(GenerationSlot::directory))
+        .chain(std::iter::once(reclaimed_directory))
+        .map(str::to_owned)
+        .collect::<HashSet<_>>();
+    let generation_path = slot_path(root, pointer.active());
+    for expected in &certification.artifacts {
+        if capture_artifact_with_retained_aliases(
+            root,
+            &generation_path,
+            Path::new(&expected.artifact.path),
+            &aliases,
+        )? != expected.artifact
+        {
+            return Ok(None);
+        }
+    }
+    Ok(Some(certification))
+}
+
+fn load_structurally_valid_certification(
+    root: &Path,
+    slot: &GenerationSlot,
+) -> Result<Option<GenerationIntegrityCertification>> {
+    let Some(bytes) = read_certification(&certification_path(root, slot)) else {
+        return Ok(None);
+    };
+    let Ok(certification) = serde_json::from_slice::<GenerationIntegrityCertification>(&bytes)
+    else {
+        return Ok(None);
+    };
+    if serde_json::to_vec(&certification)? != bytes
+        || certification.version != CERTIFICATION_VERSION
+        || certification.slot != *slot
+        || !certification_digest_matches_slot(&certification)?
+    {
+        return Ok(None);
     }
     Ok(Some(certification))
 }
@@ -902,7 +985,7 @@ use candidate::certification_digest_matches_slot;
 pub use candidate::{
     certify_candidate_physical_integrity, verify_candidate_physical_integrity_read_only,
 };
-use install::{install_certification, CertificationInstallPolicy};
+use install::{install_certification, install_certification_sidecar, CertificationInstallPolicy};
 pub use pointer_fence::ActiveGenerationPointerFence;
 #[cfg(windows)]
 pub(crate) use pointer_fence::ValidatedPredecessorPointer;

@@ -121,7 +121,7 @@ pub(super) fn install_certification(
     Ok(CertifiedPhysicalIntegrity { certification })
 }
 
-fn install_certification_sidecar(
+pub(super) fn install_certification_sidecar(
     root: &Path,
     topology_authority: Option<&ActiveGenerationPointer>,
     predecessor_fence: Option<&ActiveGenerationPointerFence>,
