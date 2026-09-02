@@ -304,14 +304,16 @@ pub fn verify_or_certify_physical_integrity(
 }
 
 /// Verifies one immutable generation from its existing publication-time
-/// certification without hashing artifact bodies or changing durable state.
+/// certification without changing durable state.
 ///
 /// The certification remains bound to the exact slot, manifest file, artifact
 /// path set, and exact native files after the active pointer moves on. Any
 /// metadata transition invalidates the inherited SHA authority because a
 /// later link/unlink can mask an intervening same-size, restored-mtime write.
-/// Missing, malformed, stale, or otherwise unsupported certification fails
-/// closed without hashing artifact bodies.
+/// Missing, malformed, or otherwise unsupported certification fails closed.
+/// A previous generation whose artifact metadata changed while its certified
+/// successor was published is checked against its full expected digest;
+/// all other stale certifications fail closed without hashing artifact bodies.
 pub fn verify_physical_integrity_read_only(
     root: &Path,
     slot: &GenerationSlot,
@@ -370,10 +372,49 @@ pub fn verify_physical_integrity_read_only(
             &retained_alias_directories,
         )?;
         if current != expected.artifact {
-            return Err(IndexError::ChecksumMismatch);
+            return verify_certified_previous_after_publication(
+                root,
+                slot,
+                index,
+                &generation_path,
+                &current_pointer,
+            );
         }
     }
     if load_current_pointer(root)? != current_pointer {
+        return Err(IndexError::ConcurrentGenerationChange);
+    }
+    Ok(())
+}
+
+fn verify_certified_previous_after_publication(
+    root: &Path,
+    slot: &GenerationSlot,
+    index: &tantivy::Index,
+    generation_path: &Path,
+    pointer: &ActiveGenerationPointer,
+) -> Result<()> {
+    if pointer.previous() != Some(slot) {
+        return Err(IndexError::ChecksumMismatch);
+    }
+    let active_index =
+        crate::open_slot_index(root, pointer.active()).map_err(|_| IndexError::ChecksumMismatch)?;
+    verify_physical_integrity_read_only(root, pointer.active(), &active_index).map_err(
+        |error| {
+            if matches!(error, IndexError::ConcurrentGenerationChange) {
+                error
+            } else {
+                IndexError::ChecksumMismatch
+            }
+        },
+    )?;
+    crate::verify_physical_integrity(
+        index,
+        generation_path,
+        Some(pointer),
+        slot.physical_integrity_digest(),
+    )?;
+    if load_current_pointer(root)? != *pointer {
         return Err(IndexError::ConcurrentGenerationChange);
     }
     Ok(())
