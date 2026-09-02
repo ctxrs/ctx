@@ -29,8 +29,6 @@ exports_files([
     "check-history-read-application-dependency-boundary.sh",
     "check_history_application_contract_boundaries_test.py",
     "check-history-source-discovery-boundary.sh",
-    "check_history_capture_runtime_boundary.py",
-    "check_history_capture_runtime_boundary_test.py",
     "check_history_provider_runtime_boundary.py",
     "check_history_provider_runtime_boundary_test.py",
     "check_history_provider_claude_cursor_boundary.py",
@@ -80,6 +78,36 @@ exports_files([
 ])
 
 package(default_visibility = ["//visibility:public"])
+
+# Bazel visibility owns the durable capture-runtime layering rules. Cargo path
+# dependencies are mirrored into Bazel by the existing Rust target inventory,
+# so an upward edge fails during normal target analysis without a source parser.
+package_group(
+    name = "history_above_capture_runtime_consumers",
+    packages = [
+        "//...",
+        "-//crates/ctx-history-capture-runtime",
+        "-//crates/ctx-history-jsonl",
+        "-//crates/ctx-history-provider-native-jsonl",
+    ],
+)
+
+package_group(
+    name = "history_jsonl_consumers",
+    packages = [
+        "//...",
+        "-//crates/ctx-history-capture-runtime",
+    ],
+)
+
+package_group(
+    name = "history_source_sqlite_consumers",
+    packages = [
+        "//...",
+        "-//crates/ctx-history-capture-runtime",
+        "-//crates/ctx-history-jsonl",
+    ],
+)
 
 bool_flag(
     name = "windows_gnu_release",

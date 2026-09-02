@@ -3,7 +3,7 @@ load("@rules_rust//rust:defs.bzl", "rust_library")
 load("//:rust_sources.bzl", "RUST_PROD_SRC_EXCLUDES")
 load("//tools/bazel:ctx_rust.bzl", "ctx_rust_test")
 
-package(default_visibility = ["//visibility:public"])
+package(default_visibility = ["//tools/bazel:history_jsonl_consumers"])
 
 filegroup(
     name = "cargo_package_data",
