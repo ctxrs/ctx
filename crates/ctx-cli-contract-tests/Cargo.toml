@@ -25,6 +25,10 @@ name = "hosted_uninstall_fence"
 path = "tests/contracts/hosted_uninstall_fence.rs"
 
 [[test]]
+name = "managed_skill_refresh"
+path = "tests/contracts/managed_skill_refresh.rs"
+
+[[test]]
 name = "native_provider_real_shapes"
 path = "tests/contracts/native_provider_real_shapes.rs"
 

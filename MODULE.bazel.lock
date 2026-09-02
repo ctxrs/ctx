@@ -575,7 +575,7 @@
           "FILE:@@//crates/ctx-history-read-application/Cargo.toml f34a1bd70159bee58951e815600f110138f4e6d2649f683870d5e82f62e8e0ab",
           "FILE:@@//crates/ctx-terminal/Cargo.toml 313f5c2df8c96fa7384349af631e1679981cafa7a0ad378e68b931b963869b51",
           "FILE:@@//crates/ctx-history-ingest-application/Cargo.toml 0fdad960edeb31222f10d474799875b20a90e5a789989c8eebe745a8f129917a",
-          "FILE:@@//crates/ctx-cli-contract-tests/Cargo.toml a946ba841f232d82d7d65d5bbf3004b2e5f2cc9efabdd9cb1333fa1df18383c5",
+          "FILE:@@//crates/ctx-cli-contract-tests/Cargo.toml 1d7777e2c5edbb0bbe8a78f69c83aeb67a7d5a24d6dba0c04d161330afce40f8",
           "FILE:@@//crates/ctx-cli-qualification/Cargo.toml 2558dd357a1b5445d3f601cd394a4960cfa632c3770162758b27db86d3688c06",
           "FILE:@@//crates/ctx-history-capture-composition-qualification/Cargo.toml f5592cadb3de3c83311395ee8bbf924cb9ba2a1f27f90d8756609ab7faf6df9c",
           "FILE:@@//crates/ctx-history-index-qualification/Cargo.toml 5c38fb44ed3bde6c243085c9e927daab28fec34516f05545eaec25f8a6e03e14",

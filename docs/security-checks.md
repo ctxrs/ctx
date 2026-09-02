@@ -8,18 +8,27 @@ the local retrieval product.
 - `ctx setup` reads supported provider history and writes only under the
   configured ctx data root: Core/Tantivy generations, optional semantic data,
   config data, and optional persistent daemon lock/status/job state when
-  automatic autostart runs. Manual setup starts no worker.
+  automatic autostart runs. Manual setup starts no worker. As an independent
+  maintenance exception, an eligible command from a hosted-managed binary may
+  best-effort refresh an existing metadata-owned ctx skill in a recognized
+  global agent skill directory; it does not create a missing integration or
+  make an unowned copy managed.
 - `ctx sources` listing writes nothing in local-only security mode.
   `ctx sources add [--replace]` and `ctx sources remove` write only the locked,
-  durably replaced `config.toml`; they never modify provider history.
+  durably replaced `config.toml` as their core effect; the managed-skill
+  maintenance exception above may also apply. They never modify provider
+  history.
 - `ctx import` writes only under the configured ctx data root: Core generations,
   optional semantic data, config data, and optional daemon lock/status/job
-  state when a persistent daemon or finite Core worker runs.
+  state when a persistent daemon or finite Core worker runs, apart from the
+  managed-skill maintenance exception above.
 - Automatic background search and explicit search `--refresh wait` may request
   a bounded daemon-owned refresh of discovered native provider history before
   querying the active Core generation. Manual background search and
   `--refresh off` must not start or wake a process. The query process does not
-  write Core generations. In manual mode, an opted-in semantic or nonzero-weight
+  write Core generations. An eligible search may use the same hosted-managed
+  existing-skill maintenance exception; `--refresh off` may not. In manual
+  mode, an opted-in semantic or nonzero-weight
   hybrid `--refresh wait` may use the selected executor and write semantic
   projection data only after finite Core publication for the exact pinned
   generation. Without semantic opt-in, default search must not download

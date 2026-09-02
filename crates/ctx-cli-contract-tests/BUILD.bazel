@@ -119,6 +119,19 @@ ctx_cli_contract_test(
 )
 
 ctx_cli_contract_test(
+    name = "managed_skill_refresh_tests",
+    src = "tests/contracts/managed_skill_refresh.rs",
+    extra_compile_data = [
+        "//crates/ctx-agent-integrations:src/skill/testdata/legacy_skill_v0_17_0.md",
+    ],
+    tags = ["cli-contract"],
+    test_support = [
+        "base",
+        "upgrade",
+    ],
+)
+
+ctx_cli_contract_test(
     name = "test_targets_minimal_fixture",
     src = "tests/build_support/minimal.rs",
     extra_crates = ["serde_yaml"],

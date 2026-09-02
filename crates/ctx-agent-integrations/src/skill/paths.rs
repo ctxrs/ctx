@@ -20,6 +20,14 @@ pub struct PathContext {
 
 impl PathContext {
     pub fn from_env() -> Result<Self> {
+        Self::from_env_with_agent_override_policy(false)
+    }
+
+    pub fn from_env_best_effort() -> Result<Self> {
+        Self::from_env_with_agent_override_policy(true)
+    }
+
+    fn from_env_with_agent_override_policy(ignore_invalid_agent_overrides: bool) -> Result<Self> {
         let home = home_dir().context("resolve home directory")?;
         let xdg_config_home =
             non_empty_env_path("XDG_CONFIG_HOME").unwrap_or_else(|| home.join(".config"));
@@ -29,10 +37,16 @@ impl PathContext {
                 env_overrides.insert(key.to_owned(), path);
             }
         }
-        if let Some(path) = non_empty_absolute_env_path("MIMOCODE_HOME")? {
+        if let Some(path) = agent_home_override(
+            non_empty_absolute_env_path("MIMOCODE_HOME"),
+            ignore_invalid_agent_overrides,
+        )? {
             env_overrides.insert("MIMOCODE_HOME".to_owned(), path);
         }
-        if let Some(path) = absolute_env_path_if_present("GROK_HOME")? {
+        if let Some(path) = agent_home_override(
+            absolute_env_path_if_present("GROK_HOME"),
+            ignore_invalid_agent_overrides,
+        )? {
             env_overrides.insert("GROK_HOME".to_owned(), path);
         }
         if let Some(path) = non_empty_env_path("MIMOCODE_CONFIG_DIR") {
@@ -129,6 +143,16 @@ fn absolute_env_path_if_present(key: &str) -> Result<Option<PathBuf>> {
     validate_absolute_env_path(key, env::var_os(key))
 }
 
+fn agent_home_override(
+    override_path: Result<Option<PathBuf>>,
+    ignore_invalid: bool,
+) -> Result<Option<PathBuf>> {
+    match override_path {
+        Err(_) if ignore_invalid => Ok(None),
+        result => result,
+    }
+}
+
 fn validate_absolute_env_path(key: &str, value: Option<OsString>) -> Result<Option<PathBuf>> {
     let Some(value) = value else {
         return Ok(None);
@@ -208,5 +232,20 @@ mod env_path_tests {
             Some(PathBuf::from("/grok-home"))
         );
         assert_eq!(validate_absolute_env_path("GROK_HOME", None).unwrap(), None);
+    }
+
+    #[test]
+    fn best_effort_policy_ignores_only_invalid_agent_home_overrides() {
+        let invalid = || validate_absolute_env_path("GROK_HOME", Some("relative".into()));
+        assert!(agent_home_override(invalid(), false).is_err());
+        assert_eq!(agent_home_override(invalid(), true).unwrap(), None);
+        assert_eq!(
+            agent_home_override(
+                validate_absolute_env_path("GROK_HOME", Some("/grok-home".into())),
+                true,
+            )
+            .unwrap(),
+            Some(PathBuf::from("/grok-home"))
+        );
     }
 }

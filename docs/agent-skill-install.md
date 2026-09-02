@@ -23,6 +23,16 @@ installer setup was skipped, or when refreshing the skill after an upgrade:
 ctx integrations install skill
 ```
 
+A hosted-managed ctx install also refreshes existing ctx-managed global skill
+copies on the first ordinary maintenance-capable run of a new CLI version. This
+is best effort: it never creates a skill for a new agent, preserves content
+that inspection identifies as local or otherwise unowned, and never changes
+the requested command's result. If refresh cannot complete, the existing copy
+remains stale (or a migration may temporarily leave both names present). A
+later eligible run retries while ownership remains provable; an ambiguous state
+requires an explicit install. Source builds and package-manager installs do not
+perform this automatic maintenance.
+
 By default this opens a small picker in an interactive terminal, with the
 universal `~/.agents/skills/ctx` location selected plus detected
 agent-specific folders for clients that need them. Safe existing `ctx` or
@@ -80,10 +90,11 @@ writes `.ctx-skill.json` beside `SKILL.md` so ctx can distinguish managed copies
 from local edits. Without target flags, status uses the same default maintenance
 set as install, including safe existing copies in recognized folders.
 
-The 1.0 installer performs a one-way migration from the former
-`ctx-agent-history-search` directory. It removes a recognized managed copy and
-installs `ctx`; it never leaves both skills active. A locally modified former
-skill is preserved unless `--force` is provided.
+The installer performs a one-way migration from the former
+`ctx-agent-history-search` directory. It publishes `ctx` before removing a
+recognized managed legacy copy, so a cleanup failure can leave both names
+temporarily active instead of rolling back the current skill. A locally
+modified former skill is preserved unless `--force` is provided.
 
 Removal is idempotent. It removes current and stale files that valid ctx
 metadata identifies as managed. Locally modified or otherwise unowned files are
