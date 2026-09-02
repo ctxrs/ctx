@@ -133,7 +133,7 @@ fn queued_complete_catalog_is_readmitted_when_provider_roots_change() {
                 })
                 .collect(),
             catalog_route_bindings: Vec::new(),
-            verified_index: None,
+            verified_publication: None,
             generation_id: commit.generation_id,
             published_explicit_source_catalog: execution.explicit_source_catalog.cloned(),
             unsupported_routes: 0,

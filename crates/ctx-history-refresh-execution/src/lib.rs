@@ -47,8 +47,7 @@ use ctx_history_capture_model::{
 use ctx_history_capture_runtime::{CapturePublicationDisposition, ImmutableCaptureSnapshot};
 use ctx_history_core::{CaptureProvider, CertifiedSource, ScannedSourceCounts};
 use ctx_history_index::{
-    GenerationManifest, GenerationWriter, IndexError, SourceRouteIdentity, VerifiedIndex,
-    WriterOptions,
+    GenerationWriter, IndexError, SourceRouteIdentity, VerifiedIndex, WriterOptions,
 };
 use serde_json::{json, Value};
 
@@ -86,7 +85,7 @@ pub use explicit_source_path::{
 };
 pub use metadata::{
     verify_generation_query_readiness, GenerationQueryReadiness, SourceBackedPublicationMetadata,
-    SOURCE_REFRESH_PUBLICATION_METADATA_VERSION,
+    VerifiedCorePublication, SOURCE_REFRESH_PUBLICATION_METADATA_VERSION,
 };
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
@@ -95,6 +94,7 @@ pub use receipt::SourceBackedRefreshReceipt;
 pub use receipt_parse::{
     is_sha256_identity, optional_generation, parse_zero_source_authority,
     published_refresh_receipt_for_index, published_refresh_receipt_for_recovery,
+    published_refresh_request_outcome_for_index, published_refresh_request_outcome_for_recovery,
     required_generation, required_route_results, validate_zero_source_authority,
     zero_source_authority_json,
 };

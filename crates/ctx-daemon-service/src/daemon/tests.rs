@@ -406,7 +406,7 @@ impl ProviderObservationFixture {
                         true,
                     )],
                     catalog_route_bindings: Vec::new(),
-                    verified_index: None,
+                    verified_publication: None,
                 })
             });
         let fixture = Self {
@@ -1319,7 +1319,7 @@ fn source_refresh_only_and_full_modes_share_the_same_refresh_path() -> Result<()
                     route_results: Vec::new(),
                     zero_source_authority: Vec::new(),
                     catalog_route_bindings: Vec::new(),
-                    verified_index: None,
+                    verified_publication: None,
                     generation_id: receipt.generation_id,
                     published_explicit_source_catalog: execution.explicit_source_catalog.cloned(),
                     unsupported_routes: 0,
@@ -1431,7 +1431,7 @@ fn one_scheduler_cycle_publishes_core_before_consumer_jobs() -> Result<()> {
                 )],
                 zero_source_authority: Vec::new(),
                 catalog_route_bindings: Vec::new(),
-                verified_index: None,
+                verified_publication: None,
                 generation_id: receipt.generation_id,
                 published_explicit_source_catalog: execution.explicit_source_catalog.cloned(),
                 unsupported_routes: 0,

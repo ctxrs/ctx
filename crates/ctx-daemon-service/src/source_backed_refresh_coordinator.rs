@@ -50,11 +50,11 @@ pub fn recover_wait_refresh_request_for_test(
 #[cfg(not(test))]
 pub(crate) use ctx_history_refresh::RefreshEngine as CoreRefreshEngine;
 pub use ctx_history_refresh::{
-    explicit_catalog_request_is_accounted_for, optional_generation,
-    published_refresh_receipt_for_index, RefreshIntent, RefreshOutcomeClass, RefreshRequest,
-    RefreshRequestState, RefreshRequestTrigger, RefreshSelection, RefreshStatus, RefreshStatusKind,
-    RefreshTerminalOutcome, SourceBackedCurrentSourceProgress, SourceBackedPublicationMetadata,
-    SourceBackedRefreshReceipt,
+    explicit_catalog_request_is_accounted_for, optional_generation, RefreshIntent,
+    RefreshOutcomeClass, RefreshRequest, RefreshRequestState, RefreshRequestTrigger,
+    RefreshSelection, RefreshStatus, RefreshStatusKind, RefreshTerminalOutcome,
+    SourceBackedCurrentSourceProgress, SourceBackedPublicationMetadata, SourceBackedRefreshReceipt,
+    VerifiedCorePublication,
 };
 
 #[cfg(test)]
@@ -206,7 +206,7 @@ pub(crate) fn publish_authoritative_empty_generation_with_route_results_for_test
             })
             .collect(),
         catalog_route_bindings: Vec::new(),
-        verified_index: Some(Arc::new(verified_index)),
+        verified_publication: Some(VerifiedCorePublication::open(Arc::new(verified_index))?),
     })
 }
 

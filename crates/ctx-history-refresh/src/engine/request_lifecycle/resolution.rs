@@ -92,6 +92,7 @@ impl CoreRefreshEngine {
         Coverage: FnOnce(&str) -> PostPublicationRouteCoverageFence,
     {
         let executor = Arc::clone(&self.executor);
+        let verified_publication = RefCell::new(None::<Arc<VerifiedCorePublication>>);
         let verified_index = RefCell::new(None::<Arc<VerifiedIndex>>);
         let publication_probe_attempted = Cell::new(false);
         let mut run = self.run_next_with_terminal_success(
@@ -116,31 +117,47 @@ impl CoreRefreshEngine {
                     admitted,
                 )?;
                 let probe_started = StdInstant::now();
-                let pin = if let Some(pin) = publication.verified_index.take() {
-                    pin
+                let authority = if let Some(authority) = publication.verified_publication.take() {
+                    verify_source_backed_publication(&publication, authority.verified_index())?;
+                    Some(authority)
                 } else {
                     publication_probe_attempted.set(true);
-                    open_verified(&source_backed_index_root(data_root))
-                        .context("verify Core generation after publication")?
+                    let pin = open_verified(&source_backed_index_root(data_root))
+                        .context("verify Core generation after publication")?;
+                    verify_source_backed_publication(&publication, &pin)?;
+                    if pin.publication_metadata().is_some() {
+                        Some(
+                            VerifiedCorePublication::open(pin)
+                                .context("decode durable Core refresh publication authority")?,
+                        )
+                    } else {
+                        verified_index.replace(Some(pin));
+                        None
+                    }
                 };
-                let verification = verify_source_backed_publication(&publication, &pin);
                 coordinator.set_publication_probe_timing(
                     request_id,
                     nonzero_duration_micros(probe_started.elapsed()),
                 );
-                verification?;
-                if let Ok(metadata) = SourceBackedPublicationMetadata::decode(&pin) {
+                if let Some(authority) = authority.as_ref() {
+                    let metadata = authority.metadata();
                     if metadata.request_id == request_id
                         && metadata.operation == operation
                         && metadata.refresh_scope == refresh_scope
                     {
-                        coordinator.set_route_observations(request_id, metadata.route_observations);
+                        coordinator.set_route_observations(
+                            request_id,
+                            metadata.route_observations.clone(),
+                        );
                     }
                 }
-                verified_index.replace(Some(pin));
+                verified_publication.replace(authority);
                 Ok(publication)
             },
             || {
+                if let Some(authority) = verified_publication.borrow().as_ref() {
+                    return Ok(Some(authority.generation_id().to_owned()));
+                }
                 if let Some(verified) = verified_index.borrow().as_ref() {
                     return Ok(Some(verified.generation_id().to_owned()));
                 }
@@ -158,12 +175,10 @@ impl CoreRefreshEngine {
                 Ok(generation_id)
             },
             |receipt| {
-                let pin = verified_index.borrow_mut().take().ok_or_else(|| {
-                    anyhow!("verified Core publication has no exact retained generation pin")
-                })?;
-                let authority_receipt = publication_authority_receipt(&pin, receipt)?;
-                CoreRefreshTerminalSuccess::bind(authority_receipt, pin)
-                    .context("bind exact Core publication receipt and generation authority")
+                if let Some(authority) = verified_publication.borrow_mut().take() {
+                    return Ok(CoreRefreshTerminalSuccess::verified(authority));
+                }
+                missing_publication_metadata_authority(receipt, verified_index.borrow_mut().take())
             },
             |job| self.write_status(data_root, job),
             |_| Ok(()),

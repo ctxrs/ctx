@@ -733,13 +733,7 @@ fn published_request_outcome(
     response: &Value,
     pin: &PinnedSourceBackedGeneration,
 ) -> Result<SourceBackedRefreshReceipt> {
-    let Some(request_outcome) = response.get("request_outcome") else {
-        return published_refresh_receipt(response, pin);
-    };
-    let mut projected = response.clone();
-    projected["receipt"] = request_outcome.clone();
-    published_refresh_receipt(&projected, pin)
-        .context("validate daemon source refresh request outcome")
+    ctx_history_refresh::published_refresh_request_outcome_for_index(response, pin.verified_index())
 }
 
 fn validate_status_publication_authority(
@@ -751,9 +745,7 @@ fn validate_status_publication_authority(
     }
     let metadata = SourceBackedPublicationMetadata::decode(pin.verified_index())
         .context("decode Core publication authority for daemon status")?;
-    let durable_receipt =
-        published_refresh_receipt_for_index(&metadata.response_value(), pin.verified_index())?;
-    if status_receipt != &durable_receipt {
+    if status_receipt != &metadata.receipt {
         bail!("daemon source refresh publication receipt does not match Core metadata");
     }
     Ok(())

@@ -23,9 +23,7 @@ impl PublishedSourceBackedStatePort for TestPublishedState {
         if !index_root.is_dir() {
             return Ok(PublishedSourceBackedState {
                 verified_index: None,
-                explicit_source_catalog: None,
-                catalog_route_bindings: Vec::new(),
-                route_controls: BTreeMap::new(),
+                publication_metadata: None,
             });
         }
         let verified_index = match VerifiedIndex::open_pinned(&index_root) {
@@ -38,26 +36,14 @@ impl PublishedSourceBackedStatePort for TestPublishedState {
             }
             Err(error) => return Err(error.into()),
         };
-        let (explicit_source_catalog, catalog_route_bindings, route_controls) = if let Some(index) =
-            verified_index
-                .as_ref()
-                .filter(|index| index.publication_metadata().is_some())
-        {
-            let metadata = SourceBackedPublicationMetadata::decode(index)?;
-            let receipt = published_refresh_receipt_for_index(&metadata.response_value(), index)?;
-            (
-                receipt.published_explicit_source_catalog,
-                receipt.catalog_route_bindings,
-                metadata.route_controls,
-            )
-        } else {
-            (None, Vec::new(), BTreeMap::new())
-        };
+        let publication_metadata = verified_index
+            .as_ref()
+            .filter(|index| index.publication_metadata().is_some())
+            .map(SourceBackedPublicationMetadata::decode)
+            .transpose()?;
         Ok(PublishedSourceBackedState {
             verified_index,
-            explicit_source_catalog,
-            catalog_route_bindings,
-            route_controls,
+            publication_metadata,
         })
     }
 }
@@ -378,7 +364,7 @@ fn test_publication(generation_id: impl Into<String>) -> SourceBackedRefreshPubl
         route_results: Vec::new(),
         zero_source_authority: Vec::new(),
         catalog_route_bindings: Vec::new(),
-        verified_index: None,
+        verified_publication: None,
         generation_id: generation_id.into(),
         published_explicit_source_catalog: None,
         unsupported_routes: 0,
@@ -426,7 +412,7 @@ fn query_readiness_decodes_metadata_before_certifying_generation() {
         request_id: "query-readiness-metadata".to_owned(),
         operation: RefreshOperation::Refresh,
         refresh_scope: SourceBackedRefreshScope::All,
-        receipt: receipt.to_json(),
+        receipt,
         route_observations: BTreeMap::new(),
         route_controls: BTreeMap::new(),
     }
@@ -504,7 +490,7 @@ fn publication_metadata_versions_preserve_receipt_shape_and_gate_the_v4_ledger()
         request_id: "metadata-version-ledger".to_owned(),
         operation: RefreshOperation::Refresh,
         refresh_scope: SourceBackedRefreshScope::All,
-        receipt: receipt.to_json(),
+        receipt: receipt.clone(),
         route_observations: BTreeMap::new(),
         route_controls: BTreeMap::new(),
     };
@@ -527,14 +513,12 @@ fn publication_metadata_versions_preserve_receipt_shape_and_gate_the_v4_ledger()
             .unwrap();
     assert_eq!(decoded.version, SOURCE_REFRESH_PUBLICATION_METADATA_VERSION);
     assert_eq!(decoded_ledger.unwrap().len(), 1);
-    assert_eq!(decoded.response_value()["receipt"], receipt.to_json());
-    assert!(decoded.response_value()["receipt"]
+    assert_eq!(decoded.receipt, receipt);
+    assert!(decoded
+        .receipt
+        .to_json()
         .get(crate::metadata::COMMITTED_REJECTION_DIAGNOSTICS_FIELD)
         .is_none());
-    assert_eq!(
-        published_refresh_receipt_for_index(&decoded.response_value(), &verified).unwrap(),
-        receipt
-    );
     drop(verified);
 
     for version in [1_u64, 2, 3] {
@@ -598,7 +582,7 @@ fn persisted_metadata_rejects_malformed_route_identity() {
         request_id: "malformed-route-metadata".to_owned(),
         operation: RefreshOperation::Refresh,
         refresh_scope: SourceBackedRefreshScope::All,
-        receipt: receipt.to_json(),
+        receipt,
         route_observations: BTreeMap::new(),
         route_controls: BTreeMap::new(),
     }

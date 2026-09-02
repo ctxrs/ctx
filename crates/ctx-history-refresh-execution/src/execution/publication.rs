@@ -17,6 +17,11 @@ pub(super) struct PublicationMetadataEvidence<'a> {
     pub(super) route_controls: BTreeMap<SourceRouteIdentity, Vec<u8>>,
 }
 
+pub(super) struct EncodedPublicationMetadata {
+    pub(super) bytes: Vec<u8>,
+    pub(super) metadata: SourceBackedPublicationMetadata,
+}
+
 pub(super) fn encode_publication_metadata(
     request_id: &str,
     operation: RefreshOperation,
@@ -24,7 +29,7 @@ pub(super) fn encode_publication_metadata(
     previous_generation: Option<&str>,
     publication: &SourceBackedRefreshPublication,
     evidence: PublicationMetadataEvidence<'_>,
-) -> Result<Vec<u8>> {
+) -> Result<EncodedPublicationMetadata> {
     let terminal = SourceBackedRefreshReceipt::from_verified_publication(
         previous_generation.map(str::to_owned),
         publication.generation_id.clone(),
@@ -35,7 +40,7 @@ pub(super) fn encode_publication_metadata(
         request_id: request_id.to_owned(),
         operation,
         refresh_scope: scope.clone(),
-        receipt: terminal.to_json(),
+        receipt: terminal,
         route_observations: evidence.route_observations,
         route_controls: evidence.route_controls,
     };
@@ -43,7 +48,9 @@ pub(super) fn encode_publication_metadata(
     loop {
         let ledger_json = rejection_diagnostics_ledger_json(&committed_rejection_diagnostics)?;
         match metadata.encode_with_committed_rejection_diagnostics(&ledger_json) {
-            Ok(encoded) => return Ok(encoded),
+            Ok(bytes) => {
+                return Ok(EncodedPublicationMetadata { bytes, metadata });
+            }
             Err(IndexError::PublicationMetadataTooLarge { .. })
                 if committed_rejection_diagnostics.pop().is_some() => {}
             Err(error) => return Err(error.into()),
@@ -56,16 +63,16 @@ pub(super) fn publication_from_verified_metadata(
     operation: RefreshOperation,
     scope: &SourceBackedRefreshScope,
     timings: SourceBackedRefreshTimings,
+    metadata: SourceBackedPublicationMetadata,
     verified_index: Arc<VerifiedIndex>,
 ) -> Result<SourceBackedRefreshPublication> {
-    let metadata = SourceBackedPublicationMetadata::decode(&verified_index)?;
     if metadata.request_id != request_id
         || metadata.operation != operation
         || metadata.refresh_scope != *scope
     {
         bail!("published Core source-refresh metadata does not match its exact request");
     }
-    let receipt = published_refresh_receipt_for_index(&metadata.response_value(), &verified_index)?;
+    let receipt = metadata.receipt.clone();
     let unsupported_routes = receipt
         .route_results
         .iter()
@@ -82,7 +89,7 @@ pub(super) fn publication_from_verified_metadata(
         zero_source_authority: receipt.zero_source_authority,
         catalog_route_bindings: receipt.catalog_route_bindings,
         timings,
-        verified_index: Some(verified_index),
+        verified_publication: Some(VerifiedCorePublication::bind(metadata, verified_index)?),
     })
 }
 
@@ -104,10 +111,7 @@ pub(super) fn preserve_carried_rejection_diagnostics(
                 SourceBackedPublicationMetadata::decode_with_committed_rejection_diagnostics(
                     retained_generation,
                 )?;
-            let previous = published_refresh_receipt_for_index(
-                &metadata.response_value(),
-                retained_generation,
-            )?;
+            let previous = metadata.receipt;
             if previous.published_generation != retained_generation.generation_id() {
                 bail!("carried Core rejection diagnostics do not match the retained generation");
             }
@@ -361,23 +365,6 @@ fn rejection_diagnostic_identity(
         rejection.class.clone(),
         rejection.detail.clone(),
     )
-}
-
-pub(super) fn validate_recertified_metadata(
-    request_id: &str,
-    operation: RefreshOperation,
-    scope: &SourceBackedRefreshScope,
-    verified_index: &VerifiedIndex,
-) -> Result<()> {
-    let metadata = SourceBackedPublicationMetadata::decode(verified_index)?;
-    if metadata.request_id != request_id
-        || metadata.operation != operation
-        || metadata.refresh_scope != *scope
-        || !metadata.certifies_generation(verified_index)
-    {
-        bail!("recertified Core source-refresh metadata does not match its exact request");
-    }
-    Ok(())
 }
 
 pub(super) struct ProviderPublicationFacts<'a, S: ImmutableCaptureSnapshot + ?Sized> {
@@ -749,7 +736,7 @@ mod carried_rejection_tests {
             zero_source_authority: Vec::new(),
             catalog_route_bindings: Vec::new(),
             timings: SourceBackedRefreshTimings::default(),
-            verified_index: None,
+            verified_publication: None,
         };
         let encode = || {
             encode_publication_metadata(
@@ -772,8 +759,8 @@ mod carried_rejection_tests {
 
         let first = encode();
         let second = encode();
-        assert_eq!(first, second);
-        let encoded: Value = serde_json::from_slice(&first).unwrap();
+        assert_eq!(first.bytes, second.bytes);
+        let encoded: Value = serde_json::from_slice(&first.bytes).unwrap();
         let persisted = required_route_results(
             encoded.get(crate::metadata::COMMITTED_REJECTION_DIAGNOSTICS_FIELD),
         )

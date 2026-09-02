@@ -410,7 +410,7 @@ pub fn published_explicit_source_relocation_authority(
         .ok_or_else(|| anyhow!("explicit relocation requires an active Core publication"))?;
     let metadata = SourceBackedPublicationMetadata::decode(&verified)
         .context("load exact explicit relocation authority from Core publication metadata")?;
-    let receipt = published_refresh_receipt_for_index(&metadata.response_value(), &verified)?;
+    let receipt = &metadata.receipt;
     receipt
         .published_explicit_source_catalog
         .as_ref()

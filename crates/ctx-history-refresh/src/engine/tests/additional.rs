@@ -1084,7 +1084,7 @@ fn publish_selected_routes_with_request_metadata(
                 request_id: request_id.clone(),
                 operation,
                 refresh_scope: scope.clone(),
-                receipt: receipt.to_json(),
+                receipt,
                 route_observations: BTreeMap::new(),
                 route_controls: BTreeMap::new(),
             }
@@ -1102,7 +1102,8 @@ fn publish_selected_routes_with_request_metadata(
         .iter()
         .map(|route| SourceBackedRefreshRouteResult::succeeded(route.as_str().to_owned(), true))
         .collect();
-    publication.verified_index = Some(Arc::new(verified_index));
+    publication.verified_publication =
+        Some(VerifiedCorePublication::open(Arc::new(verified_index))?);
     Ok(publication)
 }
 

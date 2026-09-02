@@ -947,31 +947,28 @@ pub(in crate::engine) fn rearm_build_changed_automatic_retry_checkpoints(
     rearmed
 }
 
-fn publication_authority_receipt(
-    pin: &VerifiedIndex,
-    request_receipt: SourceBackedRefreshReceipt,
-) -> Result<SourceBackedRefreshReceipt> {
-    if pin.publication_metadata().is_none() {
-        return missing_publication_metadata_receipt(request_receipt);
-    }
-    let metadata = SourceBackedPublicationMetadata::decode(pin)
-        .context("decode durable Core refresh publication authority")?;
-    published_refresh_receipt_for_index(&metadata.response_value(), pin)
-        .context("validate durable Core refresh publication authority")
-}
-
 #[cfg(not(any(test, feature = "test-support")))]
-fn missing_publication_metadata_receipt(
+fn missing_publication_metadata_authority(
     _request_receipt: SourceBackedRefreshReceipt,
-) -> Result<SourceBackedRefreshReceipt> {
+    _verified_index: Option<Arc<VerifiedIndex>>,
+) -> Result<CoreRefreshTerminalSuccess> {
     bail!("verified Core generation has no durable source-refresh publication authority")
 }
 
 #[cfg(any(test, feature = "test-support"))]
-fn missing_publication_metadata_receipt(
+fn missing_publication_metadata_authority(
     request_receipt: SourceBackedRefreshReceipt,
-) -> Result<SourceBackedRefreshReceipt> {
+    verified_index: Option<Arc<VerifiedIndex>>,
+) -> Result<CoreRefreshTerminalSuccess> {
     // State-machine unit tests use synthetic verified indexes. Production and
     // integration-test publications must always bind Core metadata above.
-    Ok(request_receipt)
+    let Some(verified_index) = verified_index else {
+        return Ok(CoreRefreshTerminalSuccess::state_only(request_receipt));
+    };
+    Ok(CoreRefreshTerminalSuccess::verified(
+        VerifiedCorePublication::without_persisted_metadata_for_test(
+            request_receipt,
+            verified_index,
+        )?,
+    ))
 }

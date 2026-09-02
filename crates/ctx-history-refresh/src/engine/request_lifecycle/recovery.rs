@@ -9,7 +9,7 @@ use automatic_retry::durable_build_rearmed_automatic_retry_routes;
 pub(in crate::engine) use automatic_retry::recover_automatic_retry_checkpoints;
 mod publication_ownership;
 use publication_ownership::{
-    decode_published_request_receipt, validate_physical_publication_metadata,
+    validate_physical_publication_metadata, validate_published_request_receipt,
     validate_strict_publication_metadata_ownership,
 };
 
@@ -76,10 +76,12 @@ impl CoreRefreshEngine {
                     {
                         bail!("durable physical publication receipt names a different generation");
                     }
-                    let _ = decode_published_request_receipt(
+                    let request_receipt = published_refresh_request_outcome_for_recovery(&job)
+                        .context("recover exact logical source refresh outcome")?;
+                    let _ = validate_published_request_receipt(
                         &job,
                         &publication_receipt,
-                        published_refresh_receipt_for_recovery,
+                        request_receipt,
                     )?;
                     let _ = recover_terminal_attempt(&job, SourceBackedRefreshState::Published)?;
                     return self.recover_published_rebuild(
@@ -105,32 +107,33 @@ impl CoreRefreshEngine {
         if request_state == "published" {
             if let Some(verified) = verified.as_ref() {
                 if verified.publication_metadata().is_some() {
-                    let metadata = SourceBackedPublicationMetadata::decode(verified)
+                    let authority = VerifiedCorePublication::open(Arc::clone(verified))
                         .context("decode terminal Core publication ownership metadata")?;
+                    let metadata = authority.metadata();
                     let status_receipt = published_refresh_receipt_for_index(&job, verified)
                         .context("recover durable terminal refresh receipt")?;
-                    let durable_receipt = validate_physical_publication_metadata(
-                        &metadata,
-                        verified,
-                        Some(&status_receipt),
-                    )?;
+                    let durable_receipt =
+                        validate_physical_publication_metadata(metadata, Some(&status_receipt))?;
                     let request_receipt =
-                        decode_published_request_receipt(&job, &durable_receipt, |response| {
-                            published_refresh_receipt_for_index(response, verified)
-                        })?;
+                        published_refresh_request_outcome_for_index(&job, verified)
+                            .context("recover exact logical source refresh outcome")?;
+                    let request_receipt = validate_published_request_receipt(
+                        &job,
+                        &durable_receipt,
+                        request_receipt,
+                    )?;
                     if job.get("request_outcome").is_none() {
-                        validate_strict_publication_metadata_ownership(&job, &metadata)?;
+                        validate_strict_publication_metadata_ownership(&job, metadata)?;
                     }
                     let attempt = recover_exact_published_attempt(
                         &job,
-                        &metadata,
+                        metadata,
                         durable_receipt.clone(),
                         request_receipt,
                         verified,
                     )?;
                     let request_id = attempt.request_id.clone();
-                    let terminal =
-                        CoreRefreshTerminalSuccess::bind(durable_receipt, Arc::clone(verified))?;
+                    let terminal = CoreRefreshTerminalSuccess::verified(authority);
                     let has_successors = !queued_successors.is_empty();
                     self.install_published_recovery(
                         attempt,
@@ -172,14 +175,14 @@ impl CoreRefreshEngine {
                     queued_successors,
                 );
             }
-            let metadata = SourceBackedPublicationMetadata::decode(&verified)
+            let authority = VerifiedCorePublication::open(Arc::clone(&verified))
                 .context("recover exact terminal refresh receipt from Core publication metadata")?;
-            validate_strict_publication_metadata_ownership(&job, &metadata)?;
-            let receipt =
-                validate_physical_publication_metadata(&metadata, verified.as_ref(), None)?;
+            let metadata = authority.metadata();
+            validate_strict_publication_metadata_ownership(&job, metadata)?;
+            let receipt = validate_physical_publication_metadata(metadata, None)?;
             let attempt =
-                recover_committed_attempt(&job, &metadata, receipt.clone(), verified.as_ref())?;
-            let terminal = CoreRefreshTerminalSuccess::bind(receipt, Arc::clone(&verified))?;
+                recover_committed_attempt(&job, metadata, receipt.clone(), verified.as_ref())?;
+            let terminal = CoreRefreshTerminalSuccess::verified(authority);
             let has_successors = !queued_successors.is_empty();
             self.install_published_recovery(
                 attempt,

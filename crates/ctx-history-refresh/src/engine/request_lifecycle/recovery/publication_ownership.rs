@@ -21,14 +21,9 @@ pub(super) fn validate_strict_publication_metadata_ownership(
 
 pub(super) fn validate_physical_publication_metadata(
     metadata: &SourceBackedPublicationMetadata,
-    verified: &VerifiedIndex,
     status_receipt: Option<&SourceBackedRefreshReceipt>,
 ) -> Result<SourceBackedRefreshReceipt> {
-    let receipt = published_refresh_receipt_for_index(&metadata.response_value(), verified)
-        .context("decode exact Core publication receipt")?;
-    if receipt.published_generation != verified.generation_id() {
-        bail!("active Core refresh metadata names a different generation");
-    }
+    let receipt = metadata.receipt.clone();
     if let Some(publication_receipt) = status_receipt {
         if receipt != *publication_receipt {
             bail!("active Core refresh metadata has a different terminal receipt");
@@ -37,34 +32,25 @@ pub(super) fn validate_physical_publication_metadata(
     Ok(receipt)
 }
 
-pub(super) fn decode_published_request_receipt<Decode>(
+pub(super) fn validate_published_request_receipt(
     job: &Value,
     publication_receipt: &SourceBackedRefreshReceipt,
-    decode: Decode,
-) -> Result<SourceBackedRefreshReceipt>
-where
-    Decode: FnOnce(&Value) -> Result<SourceBackedRefreshReceipt>,
-{
-    let request_receipt = match job.get("request_outcome") {
-        Some(outcome) => {
-            let mut response = job.clone();
-            response["receipt"] = outcome.clone();
-            let receipt =
-                decode(&response).context("recover exact logical source refresh outcome")?;
-            if receipt == *publication_receipt {
-                bail!("durable logical source refresh redundantly stores its publication receipt");
-            }
-            if receipt.previous_generation.as_deref()
-                != Some(publication_receipt.published_generation.as_str())
-                || receipt.published_generation != publication_receipt.published_generation
-                || receipt.generation_changed
-            {
-                bail!("durable logical source refresh outcome is not an exact publication no-op");
-            }
-            receipt
+    request_receipt: SourceBackedRefreshReceipt,
+) -> Result<SourceBackedRefreshReceipt> {
+    if job.get("request_outcome").is_some() {
+        if request_receipt == *publication_receipt {
+            bail!("durable logical source refresh redundantly stores its publication receipt");
         }
-        None => publication_receipt.clone(),
-    };
+        if request_receipt.previous_generation.as_deref()
+            != Some(publication_receipt.published_generation.as_str())
+            || request_receipt.published_generation != publication_receipt.published_generation
+            || request_receipt.generation_changed
+        {
+            bail!("durable logical source refresh outcome is not an exact publication no-op");
+        }
+    } else if request_receipt != *publication_receipt {
+        bail!("durable logical source refresh has no exact publication receipt");
+    }
     validate_terminal_receipt_fields(job, &request_receipt)?;
     Ok(request_receipt)
 }
