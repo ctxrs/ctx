@@ -770,24 +770,17 @@ fn matching_certification(
     Ok(Some(certification))
 }
 
-/// Reclaims one held inactive directory and preserves the active sidecar only
-/// across that exact managed unlink. Sidecar failures are intentionally
-/// swallowed: a stale certification retains the safe foreground hash fallback.
-pub(crate) fn reclaim_with_active_certification<F>(
+/// Preserves the active sidecar across reclamation; failures retain safe hashing.
+pub(crate) fn reclaim_with_active_certification(
     root: &Path,
     pointer: &ActiveGenerationPointer,
     reclaimed_directory: &str,
-    remove: F,
-) -> Result<()>
-where
-    F: FnOnce() -> Result<()>,
-{
-    let certification = prepare_reclamation_certification(root, pointer, reclaimed_directory)
-        .ok()
-        .flatten();
+    remove: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    let certification = prepare_reclaim(root, pointer, reclaimed_directory).unwrap_or_default();
     remove()?;
     if let Some(mut certification) = certification {
-        let refreshed = (|| {
+        let _ = (|| {
             let generation_path = slot_path(root, pointer.active());
             for expected in &mut certification.artifacts {
                 let current = capture_artifact(
@@ -818,12 +811,11 @@ where
                 false,
             )
         })();
-        let _ = refreshed;
     }
     Ok(())
 }
 
-fn prepare_reclamation_certification(
+fn prepare_reclaim(
     root: &Path,
     pointer: &ActiveGenerationPointer,
     reclaimed_directory: &str,

@@ -14,6 +14,7 @@ use ctx_history_index_format::{
 #[cfg(any(test, feature = "test-support"))]
 use ctx_history_index_format::{scrub_and_certify_physical_integrity, verify_searcher};
 use ctx_history_index_generation::{
+    acquire_generation_read_lease, acquire_retained_generation_read_lease,
     load_active_generation_pointer, load_generation_retention_lease, open_slot_index,
     verify_candidate_physical_integrity_read_only, verify_physical_integrity_read_only,
     ActiveGenerationPointer, GenerationReadLease, GenerationRetentionLease, GenerationSlot,
@@ -44,6 +45,19 @@ pub struct VerifiedIndex {
     pub(crate) generation_id: String,
     pub(crate) publication_metadata: Option<Arc<[u8]>>,
     pub(crate) semantic_eligibility_postings: OnceLock<crate::SemanticEligibilityPostings>,
+    _reader_leases: Option<ReaderLeaseBundle>,
+}
+
+/// Query-reader authority for the selected generation and its one retained
+/// peer. A query reader owns this bundle for its whole lifetime.
+struct ReaderLeaseBundle {
+    target: GenerationReadLease,
+    peer: Option<GenerationReadLease>,
+}
+
+struct ReaderGenerationSelection {
+    target: GenerationSlot,
+    durable_authority: Option<GenerationRetentionLease>,
 }
 
 #[derive(Clone, Copy)]
@@ -111,7 +125,147 @@ impl VerifiedIndex {
     /// publication-time O(document-count) identity audit is not repeated for
     /// current generations.
     pub fn open_pinned(root: impl AsRef<Path>) -> Result<Self> {
-        Self::open_inner(root.as_ref(), ReopenPhysicalVerification::VerifyOrCertify)
+        Self::open_pinned_with_loader(root.as_ref(), |root| {
+            load_active_generation_pointer(root).map_err(IndexError::from)
+        })
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn open_pinned_with_pointer_loader<F>(
+        root: impl AsRef<Path>,
+        load_pointer: F,
+    ) -> Result<Self>
+    where
+        F: FnMut(&Path) -> Result<Option<ActiveGenerationPointer>>,
+    {
+        Self::open_pinned_with_loader(root.as_ref(), load_pointer)
+    }
+
+    fn open_pinned_with_loader<F>(root: &Path, mut load_pointer: F) -> Result<Self>
+    where
+        F: FnMut(&Path) -> Result<Option<ActiveGenerationPointer>>,
+    {
+        Self::open_query_reader_with_loader(
+            root,
+            &mut load_pointer,
+            |pointer, _| {
+                Ok(ReaderGenerationSelection {
+                    target: pointer.active().clone(),
+                    durable_authority: None,
+                })
+            },
+            None,
+        )
+    }
+
+    fn open_query_reader_with_loader<F, S>(
+        root: &Path,
+        load_pointer: &mut F,
+        mut select: S,
+        expected_generation_id: Option<&str>,
+    ) -> Result<Self>
+    where
+        F: FnMut(&Path) -> Result<Option<ActiveGenerationPointer>>,
+        S: FnMut(
+            &ActiveGenerationPointer,
+            Option<&GenerationRetentionLease>,
+        ) -> Result<ReaderGenerationSelection>,
+    {
+        if !root.is_dir() {
+            return Err(IndexError::MissingActiveGenerationPointer);
+        }
+        let control_directory =
+            DurableMmapDirectory::open(root).map_err(tantivy::TantivyError::from)?;
+        let root = control_directory.root_path().to_path_buf();
+
+        let first_pointer =
+            load_pointer(&root)?.ok_or(IndexError::MissingActiveGenerationPointer)?;
+        let first_result = {
+            let durable_authority = load_generation_retention_lease(&root)?;
+            select(&first_pointer, durable_authority.as_ref()).and_then(|selection| {
+                Self::open_query_reader_attempt(
+                    &root,
+                    &first_pointer,
+                    selection,
+                    expected_generation_id,
+                )
+            })
+        };
+        let observed_pointer = load_pointer(&root)?;
+        if observed_pointer.as_ref() == Some(&first_pointer) {
+            return first_result;
+        }
+
+        let retry_pointer = observed_pointer.ok_or(IndexError::MissingActiveGenerationPointer)?;
+        let retry_result = {
+            let durable_authority = load_generation_retention_lease(&root)?;
+            select(&retry_pointer, durable_authority.as_ref()).and_then(|selection| {
+                Self::open_query_reader_attempt(
+                    &root,
+                    &retry_pointer,
+                    selection,
+                    expected_generation_id,
+                )
+            })
+        };
+        if load_pointer(&root)?.as_ref() != Some(&retry_pointer) {
+            return Err(IndexError::ConcurrentGenerationChange);
+        }
+        retry_result
+    }
+
+    fn open_query_reader_attempt(
+        root: &Path,
+        pointer: &ActiveGenerationPointer,
+        selection: ReaderGenerationSelection,
+        expected_generation_id: Option<&str>,
+    ) -> Result<Self> {
+        let leases = Self::acquire_reader_leases(root, pointer, &selection)?;
+        let target = &leases.target;
+        let mut index = target
+            .with_root_access(|root| {
+                Self::open_slot(
+                    root,
+                    pointer,
+                    target.target(),
+                    ReopenPhysicalVerification::VerifyOrCertify,
+                    |actual_generation_id| match expected_generation_id {
+                        Some(expected_generation_id) => IndexError::PinnedGenerationMismatch {
+                            expected_generation_id: expected_generation_id.to_owned(),
+                            actual_generation_id,
+                        },
+                        None => IndexError::InvalidActiveGenerationPointer,
+                    },
+                )
+            })
+            .map_err(IndexError::from)??;
+        index._reader_leases = Some(leases);
+        Ok(index)
+    }
+
+    fn acquire_reader_leases(
+        root: &Path,
+        pointer: &ActiveGenerationPointer,
+        selection: &ReaderGenerationSelection,
+    ) -> Result<ReaderLeaseBundle> {
+        let target = match selection.durable_authority.as_ref() {
+            Some(authority) => acquire_retained_generation_read_lease(root, authority)?,
+            None => acquire_generation_read_lease(root, selection.target.generation_id())?,
+        };
+        let peer = if selection.target.generation_id() == pointer.active().generation_id() {
+            pointer.previous()
+        } else if pointer
+            .previous()
+            .is_some_and(|slot| slot.generation_id() == selection.target.generation_id())
+        {
+            Some(pointer.active())
+        } else {
+            None
+        };
+        let peer = peer
+            .map(|peer| acquire_generation_read_lease(root, peer.generation_id()))
+            .transpose()?;
+        Ok(ReaderLeaseBundle { target, peer })
     }
 
     /// Reopens an exact candidate from durable state before its active-pointer
@@ -155,6 +309,7 @@ impl VerifiedIndex {
             generation_id,
             publication_metadata,
             semantic_eligibility_postings: OnceLock::new(),
+            _reader_leases: None,
         })
     }
 
@@ -189,20 +344,31 @@ impl VerifiedIndex {
         root: impl AsRef<Path>,
         lease: &GenerationReadLease,
     ) -> Result<Self> {
+        Self::open_generation_read_lease_with_verification(
+            root.as_ref(),
+            lease,
+            ReopenPhysicalVerification::ReadOnly,
+        )
+    }
+
+    fn open_generation_read_lease_with_verification(
+        root: &Path,
+        lease: &GenerationReadLease,
+        physical_verification: ReopenPhysicalVerification,
+    ) -> Result<Self> {
         let control_directory =
             DurableMmapDirectory::open(root).map_err(tantivy::TantivyError::from)?;
         let root = control_directory.root_path().to_path_buf();
         if lease.root() != root {
             return Err(IndexError::InvalidGenerationRetentionLease);
         }
-
         let first_pointer = load_active_generation_pointer(&root)?
             .ok_or(IndexError::MissingActiveGenerationPointer)?;
         let first_result = Self::open_slot(
             &root,
             &first_pointer,
             lease.target(),
-            ReopenPhysicalVerification::ReadOnly,
+            physical_verification,
             |actual_generation_id| IndexError::PinnedGenerationMismatch {
                 expected_generation_id: lease.generation_id().to_owned(),
                 actual_generation_id,
@@ -218,7 +384,7 @@ impl VerifiedIndex {
             &root,
             &observed_pointer,
             lease.target(),
-            ReopenPhysicalVerification::ReadOnly,
+            physical_verification,
             |actual_generation_id| IndexError::PinnedGenerationMismatch {
                 expected_generation_id: lease.generation_id().to_owned(),
                 actual_generation_id,
@@ -230,38 +396,31 @@ impl VerifiedIndex {
         retry_result
     }
 
-    /// Opens the one other generation retained beside an already pinned
-    /// active or previous generation.
-    ///
-    /// Compact rendered references use this peer to remain unambiguous across
-    /// one publication transition. Resolution is limited to the two slots in
-    /// the active pointer, retries once if that pointer changes, and fails
-    /// closed if the caller's pinned generation is no longer retained.
-    pub fn open_retained_generation_peer(
-        root: impl AsRef<Path>,
-        pinned_generation_id: &str,
-    ) -> Result<Option<Self>> {
-        Self::open_retained_generation_peer_with_loader(
-            root.as_ref(),
-            pinned_generation_id,
-            |root| load_active_generation_pointer(root).map_err(IndexError::from),
-        )
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn open_retained_generation_peer_with_pointer_loader<F>(
-        root: impl AsRef<Path>,
-        pinned_generation_id: &str,
-        load_pointer: F,
-    ) -> Result<Option<Self>>
-    where
-        F: FnMut(&Path) -> Result<Option<ActiveGenerationPointer>>,
-    {
-        Self::open_retained_generation_peer_with_loader(
-            root.as_ref(),
-            pinned_generation_id,
-            load_pointer,
-        )
+    /// Moves this reader's already selected retained-peer lease into a peer
+    /// reader.
+    #[doc(hidden)]
+    pub fn take_retained_generation_peer_for_reader(&mut self) -> Result<Option<Self>> {
+        let Some(lease) = self
+            ._reader_leases
+            .as_mut()
+            .and_then(|leases| leases.peer.take())
+        else {
+            return Ok(None);
+        };
+        let mut peer = lease
+            .with_root_access(|root| {
+                Self::open_generation_read_lease_with_verification(
+                    root,
+                    &lease,
+                    ReopenPhysicalVerification::VerifyOrCertify,
+                )
+            })
+            .map_err(IndexError::from)??;
+        peer._reader_leases = Some(ReaderLeaseBundle {
+            target: lease,
+            peer: None,
+        });
+        Ok(Some(peer))
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -291,154 +450,41 @@ impl VerifiedIndex {
         if !is_generation_id(expected_generation_id) {
             return Err(IndexError::InvalidGenerationId);
         }
-        if !root.is_dir() {
-            return Err(IndexError::MissingActiveGenerationPointer);
-        }
-        let control_directory =
-            DurableMmapDirectory::open(root).map_err(tantivy::TantivyError::from)?;
-        let root = control_directory.root_path().to_path_buf();
-
-        let first_pointer = load_pointer(&root)?;
-        let first_lease = load_generation_retention_lease(&root)?;
-        let first_result = Self::open_expected_generation(
-            &root,
-            first_pointer.as_ref(),
-            first_lease.as_ref(),
-            expected_generation_id,
-        );
-        let observed_pointer = load_pointer(&root)?;
-        let observed_lease = load_generation_retention_lease(&root)?;
-        if observed_pointer == first_pointer && observed_lease == first_lease {
-            return first_result;
-        }
-
-        let retry_result = Self::open_expected_generation(
-            &root,
-            observed_pointer.as_ref(),
-            observed_lease.as_ref(),
-            expected_generation_id,
-        );
-        if load_pointer(&root)? != observed_pointer
-            || load_generation_retention_lease(&root)? != observed_lease
-        {
-            return Err(IndexError::ConcurrentGenerationChange);
-        }
-        retry_result
-    }
-
-    fn open_retained_generation_peer_with_loader<F>(
-        root: &Path,
-        pinned_generation_id: &str,
-        mut load_pointer: F,
-    ) -> Result<Option<Self>>
-    where
-        F: FnMut(&Path) -> Result<Option<ActiveGenerationPointer>>,
-    {
-        if !is_generation_id(pinned_generation_id) {
-            return Err(IndexError::InvalidGenerationId);
-        }
-        if !root.is_dir() {
-            return Err(IndexError::MissingActiveGenerationPointer);
-        }
-        let control_directory =
-            DurableMmapDirectory::open(root).map_err(tantivy::TantivyError::from)?;
-        let root = control_directory.root_path().to_path_buf();
-
-        let first_pointer = load_pointer(&root)?;
-        let first_result =
-            Self::open_generation_peer(&root, first_pointer.as_ref(), pinned_generation_id);
-        let observed_pointer = load_pointer(&root)?;
-        if observed_pointer == first_pointer {
-            return first_result;
-        }
-
-        let retry_result =
-            Self::open_generation_peer(&root, observed_pointer.as_ref(), pinned_generation_id);
-        if load_pointer(&root)? != observed_pointer {
-            return Err(IndexError::ConcurrentGenerationChange);
-        }
-        retry_result
-    }
-
-    fn open_generation_peer(
-        root: &Path,
-        pointer: Option<&ActiveGenerationPointer>,
-        pinned_generation_id: &str,
-    ) -> Result<Option<Self>> {
-        let pointer = pointer.ok_or(IndexError::MissingActiveGenerationPointer)?;
-        let peer = if pointer.active().generation_id() == pinned_generation_id {
-            pointer.previous()
-        } else if pointer
-            .previous()
-            .is_some_and(|slot| slot.generation_id() == pinned_generation_id)
-        {
-            Some(pointer.active())
-        } else {
-            return Err(IndexError::PinnedGenerationNotRetained {
-                expected_generation_id: pinned_generation_id.to_owned(),
-                active_generation_id: pointer.active().generation_id().to_owned(),
-                previous_generation_id: pointer
-                    .previous()
-                    .map(|slot| slot.generation_id().to_owned()),
-            });
-        };
-        let Some(peer) = peer else {
-            return Ok(None);
-        };
-        let expected_peer_generation_id = peer.generation_id().to_owned();
-        Self::open_slot(
+        Self::open_query_reader_with_loader(
             root,
-            pointer,
-            peer,
-            ReopenPhysicalVerification::VerifyOrCertify,
-            |actual_generation_id| IndexError::PinnedGenerationMismatch {
-                expected_generation_id: expected_peer_generation_id,
-                actual_generation_id,
+            &mut load_pointer,
+            |pointer, durable_authority| {
+                let (target, durable_authority) =
+                    if pointer.active().generation_id() == expected_generation_id {
+                        (pointer.active().clone(), None)
+                    } else if let Some(previous) = pointer
+                        .previous()
+                        .filter(|slot| slot.generation_id() == expected_generation_id)
+                    {
+                        (previous.clone(), None)
+                    } else if let Some(authority) = durable_authority.filter(|authority| {
+                        authority.target().generation_id() == expected_generation_id
+                    }) {
+                        (authority.target().clone(), Some(authority.clone()))
+                    } else {
+                        return Err(IndexError::PinnedGenerationNotRetained {
+                            expected_generation_id: expected_generation_id.to_owned(),
+                            active_generation_id: pointer.active().generation_id().to_owned(),
+                            previous_generation_id: pointer
+                                .previous()
+                                .map(|slot| slot.generation_id().to_owned()),
+                        });
+                    };
+                Ok(ReaderGenerationSelection {
+                    target,
+                    durable_authority,
+                })
             },
-        )
-        .map(Some)
-    }
-
-    fn open_expected_generation(
-        root: &Path,
-        pointer: Option<&ActiveGenerationPointer>,
-        lease: Option<&GenerationRetentionLease>,
-        expected_generation_id: &str,
-    ) -> Result<Self> {
-        let pointer = pointer.ok_or(IndexError::MissingActiveGenerationPointer)?;
-        let slot = if pointer.active().generation_id() == expected_generation_id {
-            pointer.active()
-        } else if let Some(previous) = pointer
-            .previous()
-            .filter(|slot| slot.generation_id() == expected_generation_id)
-        {
-            previous
-        } else if let Some(leased) = lease
-            .map(GenerationRetentionLease::target)
-            .filter(|slot| slot.generation_id() == expected_generation_id)
-        {
-            leased
-        } else {
-            return Err(IndexError::PinnedGenerationNotRetained {
-                expected_generation_id: expected_generation_id.to_owned(),
-                active_generation_id: pointer.active().generation_id().to_owned(),
-                previous_generation_id: pointer
-                    .previous()
-                    .map(|slot| slot.generation_id().to_owned()),
-            });
-        };
-        Self::open_slot(
-            root,
-            pointer,
-            slot,
-            ReopenPhysicalVerification::VerifyOrCertify,
-            |actual_generation_id| IndexError::PinnedGenerationMismatch {
-                expected_generation_id: expected_generation_id.to_owned(),
-                actual_generation_id,
-            },
+            Some(expected_generation_id),
         )
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     fn open_inner(root: &Path, physical_verification: ReopenPhysicalVerification) -> Result<Self> {
         if !root.is_dir() {
             return Err(IndexError::MissingActiveGenerationPointer);
@@ -505,6 +551,7 @@ impl VerifiedIndex {
             generation_id,
             publication_metadata,
             semantic_eligibility_postings: OnceLock::new(),
+            _reader_leases: None,
         })
     }
 
@@ -520,6 +567,7 @@ impl VerifiedIndex {
             generation_id,
             publication_metadata,
             semantic_eligibility_postings: OnceLock::new(),
+            _reader_leases: None,
         }
     }
 

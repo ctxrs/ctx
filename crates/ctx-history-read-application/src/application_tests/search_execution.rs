@@ -17,7 +17,7 @@ fn dense_limit_windows_preserve_exact_order_more_available_and_winner_only_hydra
         .result_window
         .hits
         .iter()
-        .map(|hit| hit.event.event_id)
+        .map(|hit| hit.event.event_id.as_uuid())
         .collect::<Vec<_>>();
     assert_eq!(exact_order.len(), records.len());
 
@@ -40,7 +40,7 @@ fn dense_limit_windows_preserve_exact_order_more_available_and_winner_only_hydra
                 .result_window
                 .hits
                 .iter()
-                .map(|hit| hit.event.event_id)
+                .map(|hit| hit.event.event_id.as_uuid())
                 .collect::<Vec<_>>(),
             exact_order[..limit]
         );
@@ -446,7 +446,7 @@ fn provider_root_and_group_selectors_share_one_source_predicate_across_backends(
                 .result_window
                 .hits
                 .iter()
-                .map(|hit| hit.event.event_id)
+                .map(|hit| hit.event.event_id.as_uuid())
                 .collect::<Vec<_>>();
             selected_events.sort();
             assert_eq!(selected_events, expected_events);
@@ -454,7 +454,7 @@ fn provider_root_and_group_selectors_share_one_source_predicate_across_backends(
                 .result_window
                 .hits
                 .iter()
-                .map(|hit| hit.event.session_id)
+                .map(|hit| hit.event.session_id.as_uuid())
                 .collect::<Vec<_>>();
             selected_sessions.sort();
             assert_eq!(selected_sessions, expected_sessions);

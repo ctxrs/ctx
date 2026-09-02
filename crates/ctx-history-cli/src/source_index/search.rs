@@ -799,7 +799,7 @@ pub(super) fn search_context_observation(
         .result_window
         .hits
         .iter()
-        .map(|hit| hit.event.session_id)
+        .map(|hit| hit.event.session_id.as_uuid())
         .collect::<BTreeSet<_>>();
     let mut matched_normalized_session_bytes = 0_usize;
     for session_id in session_ids {

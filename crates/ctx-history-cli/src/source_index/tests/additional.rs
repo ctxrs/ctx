@@ -62,7 +62,7 @@ fn core_search_consumes_the_coordinator_pin_after_active_generation_pointer_dele
 }
 
 #[test]
-fn two_rotations_keep_full_id_machine_reads_pinned_and_retry_compact_or_human_reads() {
+fn two_rotations_keep_machine_compact_and_human_reads_pinned() {
     let temp = tempdir().unwrap();
     write_test_generation(temp.path());
     let machine_pin = open_index(temp.path()).unwrap();
@@ -110,7 +110,7 @@ fn two_rotations_keep_full_id_machine_reads_pinned_and_retry_compact_or_human_re
     let mut compact_request = request(RefreshArg::Off);
     compact_request.session = Some(session_id.simple().to_string()[..8].to_owned());
     compact_request.events = true;
-    let compact_error = search_existing_generation(
+    let (_, compact_collection, compact_pinned) = search_existing_generation(
         &compact_request,
         compact_pin,
         temp.path(),
@@ -118,14 +118,18 @@ fn two_rotations_keep_full_id_machine_reads_pinned_and_retry_compact_or_human_re
         "existing_generation",
         1,
     )
-    .err()
-    .expect("expired compact input must request a concurrent-generation retry");
-    assert!(super::shared::is_active_generation_race(&compact_error));
+    .unwrap();
+    assert_eq!(compact_collection.result_window.hits.len(), 1);
+    assert_ne!(
+        compact_pinned.generation_id(),
+        open_index(temp.path()).unwrap().generation_id()
+    );
 
-    let human_error = generation_with_retained_peer(temp.path(), human_pin)
-        .err()
-        .expect("expired human presentation must request a concurrent-generation retry");
-    assert!(super::shared::is_active_generation_race(&human_error));
+    let human = generation_with_retained_peer(human_pin).unwrap();
+    assert_ne!(
+        human.index().generation_id(),
+        open_index(temp.path()).unwrap().generation_id()
+    );
 }
 
 #[test]
@@ -214,7 +218,7 @@ fn search_context_bytes_use_core_snippets_and_indexed_complete_session_sizes_not
         .iter()
         .map(|result| result["snippet"].as_str().unwrap().len())
         .sum::<usize>();
-    let session_id = collection.result_window.hits[0].event.session_id;
+    let session_id = collection.result_window.hits[0].event.session_id.as_uuid();
     let complete_bytes = index
         .core_events_for_session(session_id)
         .unwrap()
