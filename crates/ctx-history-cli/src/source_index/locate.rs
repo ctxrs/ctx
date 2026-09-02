@@ -16,7 +16,7 @@ use crate::{
 use super::{
     compact_presentation::generation_read,
     render::{pretty_json_stdout_bytes, render_locate_document},
-    shared::{externalize_query_error, index_root, open_index},
+    shared::{externalize_query_error, open_index},
 };
 
 pub fn run_locate(
@@ -46,7 +46,7 @@ pub fn run_locate(
         ),
     };
     let mut generation = |read: &ctx_history_read_application::GenerationReadRequest| {
-        generation_read(open_index(&data_root)?, &index_root(&data_root), read)
+        generation_read(open_index(&data_root)?, read)
     };
     let result = execute_locate(
         LocateApplicationRequest {

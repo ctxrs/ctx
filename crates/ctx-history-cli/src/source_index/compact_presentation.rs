@@ -1,20 +1,19 @@
 use std::path::Path;
 
 use anyhow::Result;
-use ctx_history_index::{IndexError, VerifiedIndex};
+use ctx_history_index::VerifiedIndex;
 use ctx_history_read_application::{
     GenerationRead, GenerationReadRequest, GenerationReadTarget, RetainedPeerRead,
 };
 use ctx_history_refresh::verify_generation_query_authority;
 
 pub(super) fn generation_read(
-    index: VerifiedIndex,
-    index_root: &Path,
+    mut index: VerifiedIndex,
     request: &GenerationReadRequest,
 ) -> Result<GenerationRead> {
     let retained_peer = match request.retained_peer {
         RetainedPeerRead::Omit => None,
-        RetainedPeerRead::IfAvailable => open_retained_peer(&index, index_root)?,
+        RetainedPeerRead::IfAvailable => open_retained_peer(&mut index)?,
     };
     Ok(GenerationRead::new(index, retained_peer))
 }
@@ -32,18 +31,11 @@ pub(crate) fn open_generation_read(
             index
         }
     };
-    generation_read(index, &root, request)
+    generation_read(index, request)
 }
 
-fn open_retained_peer(current: &VerifiedIndex, index_root: &Path) -> Result<Option<VerifiedIndex>> {
-    let retained_peer = VerifiedIndex::open_retained_generation_peer(
-        index_root,
-        current.generation_id(),
-    )
-    .map_err(|error| match error {
-        IndexError::PinnedGenerationNotRetained { .. } => IndexError::ConcurrentGenerationChange,
-        error => error,
-    })?;
+fn open_retained_peer(current: &mut VerifiedIndex) -> Result<Option<VerifiedIndex>> {
+    let retained_peer = current.take_retained_generation_peer_for_reader()?;
     if let Some(peer) = retained_peer.as_ref() {
         verify_generation_query_authority(peer).map_err(anyhow::Error::new)?;
     }

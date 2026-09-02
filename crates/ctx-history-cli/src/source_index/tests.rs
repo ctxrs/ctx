@@ -109,12 +109,10 @@ fn assert_query_authority_error(error: &anyhow::Error, expected_code: &str) {
 }
 
 fn generation_with_retained_peer(
-    data_root: &std::path::Path,
     index: ctx_history_index::VerifiedIndex,
 ) -> anyhow::Result<ctx_history_read_application::GenerationRead> {
     super::compact_presentation::generation_read(
         index,
-        &index_root(data_root),
         &ctx_history_read_application::GenerationReadRequest {
             target: ctx_history_read_application::GenerationReadTarget::Active,
             retained_peer: ctx_history_read_application::RetainedPeerRead::IfAvailable,
@@ -244,7 +242,7 @@ fn retained_compact_peer_enforces_generation_query_authority() {
     append_fixture_session(legacy_nonempty.path(), &[successor], 94);
     let current = open_index(legacy_nonempty.path()).unwrap();
     assert_ne!(current.generation_id(), peer_generation);
-    let compact = generation_with_retained_peer(legacy_nonempty.path(), current).unwrap();
+    let compact = generation_with_retained_peer(current).unwrap();
     assert!(compact.retained_peer().is_some());
     assert_eq!(
         ctx_history_read_application::CompactPresentationProjection::new(
@@ -264,7 +262,7 @@ fn retained_compact_peer_enforces_generation_query_authority() {
     write_test_generation(authoritative_empty.path());
     let current = open_index(authoritative_empty.path()).unwrap();
     assert_ne!(current.generation_id(), peer_generation);
-    generation_with_retained_peer(authoritative_empty.path(), current).unwrap();
+    generation_with_retained_peer(current).unwrap();
 
     for (authority, error_code) in [
         (EmptyPublicationAuthority::Missing, "source_unavailable"),
@@ -282,7 +280,7 @@ fn retained_compact_peer_enforces_generation_query_authority() {
         publish_empty_generation(temp.path(), authority);
         write_test_generation(temp.path());
         let current = open_index(temp.path()).unwrap();
-        let error = generation_with_retained_peer(temp.path(), current)
+        let error = generation_with_retained_peer(current)
             .err()
             .expect("invalid retained peer must fail before compact resolution");
         assert_query_authority_error(&error, error_code);
