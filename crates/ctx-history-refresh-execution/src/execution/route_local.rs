@@ -450,7 +450,10 @@ pub(super) fn refresh_all_provider_sources_route_local_with_reconciliation(
     };
     let verified_index = Arc::new(verified_index.into_inner().into_verified_index());
     let route_control_changed = receipt.route_controls != previous_route_controls;
-    if route_control_changed
+    let retained_generation_lacks_metadata =
+        retained_generation.is_some() && retained_publication_metadata.is_none();
+    if retained_generation_lacks_metadata
+        || route_control_changed
         || (publication.current.source_count == 0
             && !verify_generation_query_readiness(&verified_index)
                 .context("decode Core source-refresh publication authority")?

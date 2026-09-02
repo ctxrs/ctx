@@ -45,7 +45,7 @@ fn parse_published_refresh_request_outcome(
             .context("validate daemon source refresh request outcome")?,
         None => return parse_published_refresh_receipt(response, verified_index),
     };
-    validate_response_receipt(response, &receipt)?;
+    validate_response_receipt(response, &receipt, true)?;
     Ok(receipt)
 }
 
@@ -59,7 +59,7 @@ fn parse_published_refresh_receipt(
             .ok_or_else(|| anyhow!("published daemon source refresh has no terminal receipt"))?,
         verified_index,
     )?;
-    validate_response_receipt(response, &receipt)?;
+    validate_response_receipt(response, &receipt, false)?;
     Ok(receipt)
 }
 
@@ -183,7 +183,11 @@ pub(crate) fn refresh_receipt_from_json(
     Ok(receipt)
 }
 
-fn validate_response_receipt(response: &Value, receipt: &SourceBackedRefreshReceipt) -> Result<()> {
+fn validate_response_receipt(
+    response: &Value,
+    receipt: &SourceBackedRefreshReceipt,
+    logical_request_outcome: bool,
+) -> Result<()> {
     if receipt.current.source_count
         != required_usize_from_value(
             response.get("certified_source_count"),
@@ -206,12 +210,25 @@ fn validate_response_receipt(response: &Value, receipt: &SourceBackedRefreshRece
         .get("generation_changed")
         .and_then(Value::as_bool)
         .ok_or_else(|| anyhow!("published daemon source refresh has no generation_changed fact"))?;
-    if receipt.published_generation != published_generation
-        || generation_changed
-            != (previous_generation.as_deref() != Some(published_generation.as_str()))
+    if generation_changed != (previous_generation.as_deref() != Some(published_generation.as_str()))
     {
         bail!(
             "published daemon source refresh receipt has inconsistent publication identity facts"
+        );
+    }
+    if receipt.published_generation != published_generation {
+        bail!("published daemon source refresh receipt has an unexpected published generation");
+    }
+    // The durable receipt describes the physical publication and may retain
+    // its historical predecessor when a later logical no-op names that same
+    // publication. A distinct request outcome instead describes this request,
+    // so all of its identity facts must agree with the response envelope.
+    if logical_request_outcome
+        && (receipt.previous_generation != previous_generation
+            || receipt.generation_changed != generation_changed)
+    {
+        bail!(
+            "published daemon source refresh logical request outcome does not match response identity facts"
         );
     }
     Ok(())

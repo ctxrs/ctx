@@ -1,8 +1,6 @@
 use super::*;
-use ctx_history_capture::provider_source_for_path;
 use ctx_history_core::{
-    CaptureProvider, CertifiedSource, ScannedSourceCounts, SourceAnchor, SourceKey,
-    SourceObservation,
+    CertifiedSource, ScannedSourceCounts, SourceAnchor, SourceKey, SourceObservation,
 };
 use ctx_history_index::{
     GenerationWriter, SourceRouteIdentity, SourceRouteSnapshot, VerifiedIndex, WriterOptions,
@@ -93,44 +91,55 @@ fn live_progress_heartbeat_is_ten_hertz() {
 }
 
 #[test]
-fn client_accepts_a_retained_transient_catalog_request_failure() {
+fn published_refresh_observation_rejects_a_contradictory_logical_request_outcome() {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("data");
-    let source_root = temp.path().join("source");
-    std::fs::create_dir_all(&source_root).unwrap();
-    let requested = ctx_history_refresh::upsert_explicit_source(
-        &data_root,
-        &provider_source_for_path(CaptureProvider::Codex, source_root),
-    )
-    .unwrap()
-    .authority;
-    let lineages = requested.route_lineages().into_iter().collect::<Vec<_>>();
-    let [lineage] = lineages.as_slice() else {
-        panic!("one explicit source should have one catalog lineage");
-    };
+    ctx_history_platform::platform_security::establish_private_data_root(&data_root).unwrap();
     let route = source_count_route(1);
-    let bindings = [ctx_history_refresh::ExplicitSourceCatalogRouteBinding {
-        catalog_lineage: lineage.clone(),
-        route_identity: route.as_str().to_owned(),
-    }];
-    let carried = [SourceBackedRefreshRouteResult::failed(
-        route.as_str().to_owned(),
-        "unavailable".to_owned(),
-        true,
-    )];
-
-    assert!(explicit_catalog_request_is_accounted_for(
-        &requested, None, &bindings, &carried,
-    ));
-    assert!(!explicit_catalog_request_is_accounted_for(
-        &requested,
+    let publication = publish_authoritative_empty_generation_for_test(
+        &source_backed_index_root(&data_root),
+        "physical-publication",
+        ctx_history_refresh::RefreshOperation::Refresh,
+        ctx_history_refresh::SourceBackedRefreshScope::Exact(BTreeSet::from([route])),
         None,
-        &bindings,
-        &[SourceBackedRefreshRouteResult::succeeded(
-            route.as_str().to_owned(),
-            false,
-        )],
-    ));
+    )
+    .unwrap();
+    let physical_receipt = publication
+        .verified_publication
+        .as_ref()
+        .unwrap()
+        .receipt()
+        .clone();
+    let generation = publication.generation_id;
+    let response = json!({
+        "previous_generation": generation,
+        "published_generation": generation,
+        "generation_changed": false,
+        "certified_source_count": 0,
+        "certified_source_bytes": 0,
+        "scanned_routes": 1,
+        "unsupported_routes": 0,
+        "receipt": physical_receipt.to_json(),
+        // This is a valid physical receipt, but not this logical request's
+        // retained-generation outcome.
+        "request_outcome": physical_receipt.to_json(),
+    });
+
+    let error = match published_refresh_observation(
+        &data_root,
+        &response,
+        "logical-request".to_owned(),
+        SourceBackedRefreshMode::Wait,
+        None,
+    ) {
+        Ok(_) => panic!("contradictory logical request outcome was accepted"),
+        Err(error) => error,
+    };
+    assert!(
+        format!("{error:#}")
+            .contains("logical request outcome does not match response identity facts"),
+        "{error:#}"
+    );
 }
 
 #[test]

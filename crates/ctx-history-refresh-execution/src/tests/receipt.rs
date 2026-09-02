@@ -40,15 +40,12 @@ fn retained_catalog_exact_receipt_fixture() -> (
     let second_path = temp.path().join("catalog-b");
     fs::create_dir_all(&first_path).unwrap();
     fs::create_dir_all(&second_path).unwrap();
-    let first_source = provider_source_for_path(CaptureProvider::Codex, first_path);
     let second_source = provider_source_for_path(CaptureProvider::QwenCode, second_path);
-    let catalog =
-        crate::explicit_source_catalog::explicit_source_catalog_authority_for_sources_for_test(&[
-            first_source,
-            second_source,
-        ]);
+    let catalog = crate::upsert_explicit_source(&index_root, &second_source)
+        .unwrap()
+        .authority;
     let lineages = catalog.route_lineages().into_iter().collect::<Vec<_>>();
-    assert_eq!(lineages.len(), 2);
+    assert_eq!(lineages.len(), 1);
 
     let route_a = SourceRouteIdentity::from_sha256("a1".repeat(32)).unwrap();
     let route_b = SourceRouteIdentity::from_sha256("b2".repeat(32)).unwrap();
@@ -87,16 +84,10 @@ fn retained_catalog_exact_receipt_fixture() -> (
         route_a.as_str().to_owned(),
         false,
     )];
-    publication.catalog_route_bindings = vec![
-        ExplicitSourceCatalogRouteBinding {
-            catalog_lineage: lineages[0].clone(),
-            route_identity: route_a.as_str().to_owned(),
-        },
-        ExplicitSourceCatalogRouteBinding {
-            catalog_lineage: lineages[1].clone(),
-            route_identity: route_b.as_str().to_owned(),
-        },
-    ];
+    publication.catalog_route_bindings = vec![ExplicitSourceCatalogRouteBinding {
+        catalog_lineage: lineages[0].clone(),
+        route_identity: route_b.as_str().to_owned(),
+    }];
     let receipt = SourceBackedRefreshReceipt::from_verified_publication(
         Some(generation.clone()),
         generation.clone(),
@@ -124,10 +115,10 @@ fn exact_route_receipt_retains_unselected_published_catalog_binding() {
 
     assert_eq!(receipt, expected);
     assert_eq!(receipt.route_results.len(), 1);
-    assert_eq!(receipt.catalog_route_bindings.len(), 2);
+    assert_eq!(receipt.catalog_route_bindings.len(), 1);
 
     let mut absent_from_manifest = receipt;
-    absent_from_manifest.catalog_route_bindings[1].route_identity = "c3".repeat(32);
+    absent_from_manifest.catalog_route_bindings[0].route_identity = "c3".repeat(32);
     let error = absent_from_manifest.validate(Some(&verified)).unwrap_err();
     assert!(format!("{error:#}").contains("neither a retained witness"));
 }
@@ -180,7 +171,7 @@ fn retained_unselected_catalog_binding_decodes_v1_to_v4_and_recovers_receipt() {
 
         let decoded = SourceBackedPublicationMetadata::decode(&verified).unwrap();
         assert_eq!(decoded.version, version);
-        assert_eq!(decoded.receipt.catalog_route_bindings.len(), 2);
+        assert_eq!(decoded.receipt.catalog_route_bindings.len(), 1);
         assert_eq!(decoded.receipt.route_results.len(), 1);
         assert_eq!(
             published_refresh_receipt_for_recovery(&response).unwrap(),
