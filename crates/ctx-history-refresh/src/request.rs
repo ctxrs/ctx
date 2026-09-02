@@ -1,5 +1,7 @@
 use super::*;
 
+mod terminal_outcome;
+
 pub use ctx_history_refresh_execution::RefreshOperation;
 pub(crate) type SourceBackedRefreshOperation = RefreshOperation;
 
@@ -696,35 +698,12 @@ fn parse_terminal_outcome(value: &Value) -> Result<RefreshTerminalOutcome> {
     let affected_routes = outcome_routes(fields, "affected_routes")?;
     let retryable_routes = outcome_routes(fields, "retryable_routes")?;
     let blocked_routes = outcome_routes(fields, "blocked_routes")?;
-    if !retryable_routes.is_disjoint(&blocked_routes)
-        || !retryable_routes.is_subset(&affected_routes)
-        || !blocked_routes.is_subset(&affected_routes)
-        || (code.is_failure()
-            && retryable_routes
-                .union(&blocked_routes)
-                .ne(affected_routes.iter()))
-        || (!affected_routes.is_empty() && retryable == retryable_routes.is_empty())
-    {
-        bail!("source refresh structured outcome has inconsistent route dispositions");
-    }
     let physical_attempt_id = required_outcome_string(fields, "physical_attempt_id")?.to_owned();
     let retry_advice = match optional_outcome_string(fields, "retry_advice")? {
         Some(value) => Some(value.parse()?),
         None => None,
     };
-    if code == RefreshOutcomeCode::SourceUnclaimed
-        && (class != RefreshOutcomeClass::Coverage
-            || blocked_routes.is_empty()
-            || retry_advice
-                != Some(if retryable {
-                    RefreshRetryAdvice::RetryRetryableRoutesAndInspectBlocked
-                } else {
-                    RefreshRetryAdvice::InspectSources
-                }))
-    {
-        bail!("source refresh source-unclaimed outcome is inconsistent");
-    }
-    Ok(RefreshTerminalOutcome {
+    let outcome = RefreshTerminalOutcome {
         code,
         class,
         retryable,
@@ -736,7 +715,9 @@ fn parse_terminal_outcome(value: &Value) -> Result<RefreshTerminalOutcome> {
         published_generation: optional_outcome_string(fields, "published_generation")?,
         retry_advice,
         detail: optional_outcome_string(fields, "detail")?,
-    })
+    };
+    outcome.validate()?;
+    Ok(outcome)
 }
 
 fn required_status_string<'a>(value: &'a Value, field: &str) -> Result<&'a str> {

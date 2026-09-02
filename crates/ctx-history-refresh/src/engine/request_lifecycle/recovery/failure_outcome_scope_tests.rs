@@ -106,6 +106,39 @@ fn recovery_rejects_source_unclaimed_without_its_blocked_culprit() {
 }
 
 #[test]
+fn recovery_accepts_paused_automatic_retry_outcomes() {
+    let route = route('a');
+    for (code, class) in [
+        ("source_refresh_failed", "internal"),
+        ("all_provider_terminal_coverage_unavailable", "coverage"),
+    ] {
+        let job = json!({
+            "structured_outcome": {
+                "code": code,
+                "class": class,
+                "retryable": false,
+                "affected_routes": [route.as_str()],
+                "retryable_routes": [],
+                "blocked_routes": [route.as_str()],
+                "retry_advice": "inspect_sources"
+            }
+        });
+
+        let outcome = recover_failure_outcome(&job, &exact_scope(&route), None)
+            .unwrap()
+            .expect("paused terminal outcome");
+
+        assert!(!outcome.retryable, "{code}");
+        assert_eq!(outcome.blocked_routes, BTreeSet::from([route.clone()]));
+        assert_eq!(
+            outcome.retry_advice,
+            Some(RefreshRetryAdvice::InspectSources),
+            "{code}",
+        );
+    }
+}
+
+#[test]
 fn crash_image_failed_exhaustive_attempt_rearms_retryable_route_ownership() {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("data");

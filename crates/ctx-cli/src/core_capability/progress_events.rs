@@ -133,7 +133,7 @@ fn refresh_event_frame(
     if let Some(request_id) = status.request_id() {
         refresh["request_id"] = json!(neutral_dynamic_text(request_id));
     }
-    append_typed_status(&mut refresh, &kind);
+    append_typed_status(&mut refresh, &kind)?;
     Ok(json!({
         "event": "refresh",
         "operation": operation.name(),
@@ -145,7 +145,7 @@ fn refresh_event_frame(
     }))
 }
 
-fn append_typed_status(refresh: &mut Value, kind: &RefreshStatusKind) {
+fn append_typed_status(refresh: &mut Value, kind: &RefreshStatusKind) -> Result<()> {
     match kind {
         RefreshStatusKind::Legacy { .. } => {}
         RefreshStatusKind::BackgroundMaintenanceWake(_) => {
@@ -163,13 +163,15 @@ fn append_typed_status(refresh: &mut Value, kind: &RefreshStatusKind) {
             refresh["progress_owner_attempt_state"] =
                 json!(request_state_name(logical.progress_owner_attempt_state));
             if let Some(outcome) = logical.structured_outcome.as_ref() {
-                refresh["terminal_state"] = terminal_state(outcome);
+                refresh["terminal_state"] = terminal_state(outcome)?;
             }
         }
     }
+    Ok(())
 }
 
-fn terminal_state(outcome: &RefreshTerminalOutcome) -> Value {
+fn terminal_state(outcome: &RefreshTerminalOutcome) -> Result<Value> {
+    outcome.validate()?;
     let mut details = json!({
         "affected_routes": outcome.affected_routes.iter().map(|route| route.as_str()).collect::<Vec<_>>(),
         "blocked_routes": outcome.blocked_routes.iter().map(|route| route.as_str()).collect::<Vec<_>>(),
@@ -181,11 +183,11 @@ fn terminal_state(outcome: &RefreshTerminalOutcome) -> Value {
         "retryable_routes": outcome.retryable_routes.iter().map(|route| route.as_str()).collect::<Vec<_>>(),
     });
     remove_null_fields(&mut details);
-    json!({
+    Ok(json!({
         "details": details,
         "error_code": outcome.code.as_str(),
         "retryable": outcome.retryable,
-    })
+    }))
 }
 
 fn remove_null_fields(value: &mut Value) {

@@ -1,6 +1,6 @@
 use super::*;
 use ctx_history_index::SourceRouteIdentity;
-use ctx_history_refresh::{RefreshOutcomeClass, RefreshOutcomeCode, RefreshRetryAdvice};
+use ctx_history_refresh::{RefreshOutcomeCode, RefreshRetryAdvice};
 
 pub(super) const MAX_FAILURE_ROUTES: usize = 256;
 
@@ -55,161 +55,41 @@ fn terminal_failure_response(operation: Operation, error: &anyhow::Error) -> Opt
     }))
 }
 
-const fn valid_code_class(code: RefreshOutcomeCode, class: RefreshOutcomeClass) -> bool {
-    match code {
-        RefreshOutcomeCode::SourceUnavailable => {
-            matches!(class, RefreshOutcomeClass::Unavailable)
-        }
-        RefreshOutcomeCode::SourceChanged => matches!(class, RefreshOutcomeClass::SourceChanged),
-        RefreshOutcomeCode::MalformedSource => matches!(class, RefreshOutcomeClass::Unreadable),
-        RefreshOutcomeCode::UnsupportedSchema | RefreshOutcomeCode::IndexIncompatible => {
-            matches!(class, RefreshOutcomeClass::Incompatible)
-        }
-        RefreshOutcomeCode::SourceFailures | RefreshOutcomeCode::LogicalSourceFailures => {
-            matches!(class, RefreshOutcomeClass::Mixed)
-        }
-        RefreshOutcomeCode::SourceUnclaimed
-        | RefreshOutcomeCode::AllProviderTerminalCoverageUnavailable => {
-            matches!(class, RefreshOutcomeClass::Coverage)
-        }
-        RefreshOutcomeCode::SourceRefreshFailed | RefreshOutcomeCode::SourceRefreshInternal => {
-            matches!(class, RefreshOutcomeClass::Internal)
-        }
-        RefreshOutcomeCode::ResourceUnavailable => {
-            matches!(class, RefreshOutcomeClass::ResourceUnavailable)
-        }
-        RefreshOutcomeCode::IndexCorruption => matches!(class, RefreshOutcomeClass::Corruption),
-        RefreshOutcomeCode::SourceRefreshAdmissionFailed => {
-            matches!(class, RefreshOutcomeClass::ControlPlane)
-        }
-        RefreshOutcomeCode::Completed
-        | RefreshOutcomeCode::CompletedWithRejections
-        | RefreshOutcomeCode::CompletedWithSourceFailures
-        | RefreshOutcomeCode::CompletedWithRejectionsAndSourceFailures
-        | RefreshOutcomeCode::ExplicitSourcePathMissing => false,
-    }
+fn valid_terminal_failure(terminal: &crate::semantic::SourceBackedRefreshTerminalError) -> bool {
+    let outcome = terminal.outcome();
+    supported_failure_code(outcome.code)
+        && outcome.validate().is_ok()
+        && valid_route_set(&outcome.affected_routes)
+        && valid_route_set(&outcome.retryable_routes)
+        && valid_route_set(&outcome.blocked_routes)
+        && valid_physical_attempt_id(&outcome.physical_attempt_id)
+        && outcome
+            .retained_generation
+            .as_deref()
+            .is_none_or(valid_lower_hex)
 }
 
-const fn valid_retryability(code: RefreshOutcomeCode, retryable: bool) -> bool {
+const fn supported_failure_code(code: RefreshOutcomeCode) -> bool {
     match code {
         RefreshOutcomeCode::SourceUnavailable
         | RefreshOutcomeCode::SourceChanged
+        | RefreshOutcomeCode::MalformedSource
+        | RefreshOutcomeCode::UnsupportedSchema
+        | RefreshOutcomeCode::SourceFailures
+        | RefreshOutcomeCode::LogicalSourceFailures
+        | RefreshOutcomeCode::SourceUnclaimed
         | RefreshOutcomeCode::SourceRefreshFailed
         | RefreshOutcomeCode::SourceRefreshInternal
         | RefreshOutcomeCode::ResourceUnavailable
-        | RefreshOutcomeCode::SourceRefreshAdmissionFailed
-        | RefreshOutcomeCode::AllProviderTerminalCoverageUnavailable => retryable,
-        RefreshOutcomeCode::MalformedSource
-        | RefreshOutcomeCode::UnsupportedSchema
         | RefreshOutcomeCode::IndexIncompatible
-        | RefreshOutcomeCode::IndexCorruption => !retryable,
-        RefreshOutcomeCode::SourceFailures
-        | RefreshOutcomeCode::LogicalSourceFailures
-        | RefreshOutcomeCode::SourceUnclaimed => true,
+        | RefreshOutcomeCode::IndexCorruption
+        | RefreshOutcomeCode::SourceRefreshAdmissionFailed
+        | RefreshOutcomeCode::AllProviderTerminalCoverageUnavailable => true,
         RefreshOutcomeCode::Completed
         | RefreshOutcomeCode::CompletedWithRejections
         | RefreshOutcomeCode::CompletedWithSourceFailures
         | RefreshOutcomeCode::CompletedWithRejectionsAndSourceFailures
         | RefreshOutcomeCode::ExplicitSourcePathMissing => false,
-    }
-}
-
-const fn valid_advice(
-    code: RefreshOutcomeCode,
-    retryable: bool,
-    advice: RefreshRetryAdvice,
-) -> bool {
-    match code {
-        RefreshOutcomeCode::SourceUnavailable | RefreshOutcomeCode::SourceChanged => {
-            matches!(advice, RefreshRetryAdvice::RetryAffectedRoutes)
-        }
-        RefreshOutcomeCode::MalformedSource => {
-            matches!(advice, RefreshRetryAdvice::InspectSources)
-        }
-        RefreshOutcomeCode::UnsupportedSchema => {
-            matches!(advice, RefreshRetryAdvice::UpgradeOrReconfigure)
-        }
-        RefreshOutcomeCode::SourceFailures | RefreshOutcomeCode::LogicalSourceFailures => matches!(
-            (retryable, advice),
-            (true, RefreshRetryAdvice::RetryAffectedRoutes)
-                | (false, RefreshRetryAdvice::InspectSources)
-        ),
-        RefreshOutcomeCode::SourceUnclaimed => matches!(
-            (retryable, advice),
-            (false, RefreshRetryAdvice::InspectSources)
-                | (
-                    true,
-                    RefreshRetryAdvice::RetryRetryableRoutesAndInspectBlocked
-                )
-        ),
-        RefreshOutcomeCode::SourceRefreshFailed
-        | RefreshOutcomeCode::SourceRefreshInternal
-        | RefreshOutcomeCode::ResourceUnavailable => matches!(
-            advice,
-            RefreshRetryAdvice::RetryRequest | RefreshRetryAdvice::RetryAffectedRoutes
-        ),
-        RefreshOutcomeCode::IndexIncompatible | RefreshOutcomeCode::IndexCorruption => {
-            matches!(advice, RefreshRetryAdvice::RebuildIndex)
-        }
-        RefreshOutcomeCode::SourceRefreshAdmissionFailed => {
-            matches!(advice, RefreshRetryAdvice::RetryAdmission)
-        }
-        RefreshOutcomeCode::AllProviderTerminalCoverageUnavailable => {
-            matches!(advice, RefreshRetryAdvice::RetryRequest)
-        }
-        RefreshOutcomeCode::Completed
-        | RefreshOutcomeCode::CompletedWithRejections
-        | RefreshOutcomeCode::CompletedWithSourceFailures
-        | RefreshOutcomeCode::CompletedWithRejectionsAndSourceFailures
-        | RefreshOutcomeCode::ExplicitSourcePathMissing => false,
-    }
-}
-
-fn valid_terminal_failure(terminal: &crate::semantic::SourceBackedRefreshTerminalError) -> bool {
-    let outcome = terminal.outcome();
-    if !valid_code_class(outcome.code, outcome.class)
-        || !valid_retryability(outcome.code, outcome.retryable)
-        || !valid_route_set(&outcome.affected_routes)
-        || !valid_route_set(&outcome.retryable_routes)
-        || !valid_route_set(&outcome.blocked_routes)
-        || !valid_physical_attempt_id(&outcome.physical_attempt_id)
-        || outcome
-            .retained_generation
-            .as_deref()
-            .is_some_and(|generation| !valid_lower_hex(generation))
-        || !outcome.retryable_routes.is_subset(&outcome.affected_routes)
-        || !outcome.blocked_routes.is_subset(&outcome.affected_routes)
-        || !outcome
-            .retryable_routes
-            .is_disjoint(&outcome.blocked_routes)
-        || !is_exact_disposition(
-            &outcome.affected_routes,
-            &outcome.retryable_routes,
-            &outcome.blocked_routes,
-        )
-        || (!outcome.affected_routes.is_empty()
-            && outcome.retryable == outcome.retryable_routes.is_empty())
-        || (outcome.code == RefreshOutcomeCode::SourceUnclaimed
-            && (outcome.blocked_routes.is_empty() || outcome.retry_advice.is_none()))
-    {
-        return false;
-    }
-    outcome.retry_advice.is_none_or(|advice| {
-        retry_advice_is_retryable(advice) == outcome.retryable
-            && valid_advice(outcome.code, outcome.retryable, advice)
-    })
-}
-
-const fn retry_advice_is_retryable(advice: RefreshRetryAdvice) -> bool {
-    match advice {
-        RefreshRetryAdvice::RetryAffectedRoutes
-        | RefreshRetryAdvice::RetryRetryableRoutesAndInspectBlocked
-        | RefreshRetryAdvice::RetryRequest
-        | RefreshRetryAdvice::RetryAdmission
-        | RefreshRetryAdvice::RetryFinalization => true,
-        RefreshRetryAdvice::InspectSources
-        | RefreshRetryAdvice::UpgradeOrReconfigure
-        | RefreshRetryAdvice::RebuildIndex => false,
     }
 }
 
@@ -238,14 +118,4 @@ fn route_names(routes: &BTreeSet<SourceRouteIdentity>) -> Vec<&str> {
         .iter()
         .map(SourceRouteIdentity::as_str)
         .collect::<Vec<_>>()
-}
-
-fn is_exact_disposition(
-    affected: &BTreeSet<SourceRouteIdentity>,
-    retryable: &BTreeSet<SourceRouteIdentity>,
-    blocked: &BTreeSet<SourceRouteIdentity>,
-) -> bool {
-    affected
-        .iter()
-        .all(|route| retryable.contains(route) || blocked.contains(route))
 }

@@ -156,16 +156,7 @@ pub(super) struct SourceBackedRefreshFailureOutcome {
 
 impl SourceBackedRefreshFailureOutcome {
     pub(super) fn is_automatic_retry_eligible(&self) -> bool {
-        matches!(
-            (self.code, self.class),
-            (
-                RefreshOutcomeCode::SourceRefreshFailed,
-                RefreshOutcomeClass::Internal,
-            ) | (
-                RefreshOutcomeCode::AllProviderTerminalCoverageUnavailable,
-                RefreshOutcomeClass::Coverage,
-            )
-        )
+        RefreshTerminalOutcome::automatic_retry_disposition(self.code, self.class, false).is_some()
     }
 
     pub(super) fn pause_automatic_retry_routes(&mut self, routes: &BTreeSet<SourceRouteIdentity>) {
@@ -201,12 +192,15 @@ impl SourceBackedRefreshFailureOutcome {
     }
 
     fn refresh_automatic_retry_disposition(&mut self) {
-        self.retryable = !self.retryable_routes.is_empty();
-        self.retry_advice = Some(if self.retryable {
-            RefreshRetryAdvice::RetryAffectedRoutes
-        } else {
-            RefreshRetryAdvice::InspectSources
-        });
+        let Some((retryable, retry_advice)) = RefreshTerminalOutcome::automatic_retry_disposition(
+            self.code,
+            self.class,
+            !self.retryable_routes.is_empty(),
+        ) else {
+            return;
+        };
+        self.retryable = retryable;
+        self.retry_advice = Some(retry_advice);
     }
 
     pub(super) fn new(

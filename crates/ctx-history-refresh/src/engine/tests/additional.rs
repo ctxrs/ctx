@@ -872,6 +872,10 @@ fn automatic_terminal_coverage_retry_confirms_once_then_pauses() {
         "repeated_internal_failure"
     );
     assert_eq!(second.job["structured_outcome"]["retryable"], false);
+    assert_eq!(
+        second.job["structured_outcome"]["retry_advice"],
+        "inspect_sources"
+    );
     assert_eq!(calls.load(Ordering::SeqCst), 2);
     assert!(!coordinator.has_scheduled_route_work());
 }

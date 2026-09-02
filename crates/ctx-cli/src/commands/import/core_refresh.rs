@@ -111,6 +111,12 @@ mod tests {
     use super::*;
 
     fn terminal_status(code: &str, class: &str) -> crate::semantic::RefreshStatus {
+        let (retryable, retry_advice) = match code {
+            "completed" | "completed_with_rejections" => (false, None),
+            "explicit_source_path_missing" => (true, Some("inspect_sources")),
+            "source_unavailable" => (true, Some("retry_affected_routes")),
+            _ => panic!("unknown terminal status fixture `{code}`"),
+        };
         crate::semantic::RefreshStatus::parse_schema_v1(json!({
             "request_id": "logical-request",
             "request_state": "failed",
@@ -123,12 +129,12 @@ mod tests {
             "structured_outcome": {
                 "code": code,
                 "class": class,
-                "retryable": true,
+                "retryable": retryable,
                 "affected_routes": [],
                 "retryable_routes": [],
                 "blocked_routes": [],
                 "physical_attempt_id": "physical-attempt",
-                "retry_advice": "inspect_sources",
+                "retry_advice": retry_advice,
                 "detail": "content-bearing raw terminal detail"
             },
             "progress": {
@@ -161,7 +167,7 @@ mod tests {
         assert!(import_terminal_core_success(&terminal_status("completed", "completed")).unwrap());
         assert!(import_terminal_core_success(&terminal_status(
             "completed_with_rejections",
-            "completed"
+            "completed_with_diagnostics"
         ))
         .unwrap());
         assert!(!import_terminal_core_success(&terminal_status(
