@@ -77,7 +77,7 @@ pub(super) fn published_generation_id(
 pub(super) enum PublishedGenerationOpen {
     Missing,
     RebuildRequired,
-    Verified(VerifiedIndex),
+    Verified(Box<VerifiedIndex>),
 }
 
 pub(super) fn prepare_generation_control_state(data_root: &Path) -> Result<()> {
@@ -97,7 +97,7 @@ pub(super) fn open_published_generation(
     Ok(
         match open_published_generation_for_recovery(data_root, journal)? {
             PublishedGenerationOpen::Missing | PublishedGenerationOpen::RebuildRequired => None,
-            PublishedGenerationOpen::Verified(index) => Some(index),
+            PublishedGenerationOpen::Verified(index) => Some(*index),
         },
     )
 }
@@ -117,7 +117,7 @@ pub(super) fn open_published_generation_for_recovery(
         return Ok(PublishedGenerationOpen::Missing);
     }
     match open_verified_index(&index_root) {
-        Ok(index) => Ok(PublishedGenerationOpen::Verified(index)),
+        Ok(index) => Ok(PublishedGenerationOpen::Verified(Box::new(index))),
         Err(IndexError::MissingActiveGenerationPointer) => {
             if let Some(generation_id) = published_generation_receipt(data_root, journal)? {
                 bail!(
