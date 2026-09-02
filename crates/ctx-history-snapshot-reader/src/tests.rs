@@ -88,6 +88,34 @@ fn concurrent_publication_is_not_reported_as_corruption() {
 }
 
 #[test]
+fn retained_previous_generation_reopens_after_publication_metadata_changes() {
+    let fixture = Fixture::new();
+    let source = source("retained-previous");
+    let previous_record = record(&source, 1, "previous");
+    let previous_id = publish(
+        &fixture.index_root,
+        1,
+        &[(source.clone(), vec![previous_record.clone()])],
+    );
+    publish(
+        &fixture.index_root,
+        2,
+        &[(source.clone(), vec![record(&source, 1, "active")])],
+    );
+
+    let snapshot = CoreSnapshot::open(
+        &fixture.data_root,
+        &previous_id,
+        &SnapshotContract::current().unwrap(),
+    )
+    .unwrap();
+    let page = snapshot
+        .record_page(&source, None, 1, DEFAULT_SNAPSHOT_PAGE_BUDGET)
+        .unwrap();
+    assert_eq!(page.items[0].core_record, previous_record);
+}
+
+#[test]
 fn durable_exact_target_opens_after_more_than_two_publications() {
     let fixture = Fixture::new();
     let source = source("durable-retained");
