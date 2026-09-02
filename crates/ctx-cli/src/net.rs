@@ -2,7 +2,7 @@ use std::{
     fs,
     fs::OpenOptions,
     io::{Read, Seek, Write},
-    net::{Ipv4Addr, SocketAddr, ToSocketAddrs as _},
+    net::{SocketAddr, ToSocketAddrs as _},
     path::PathBuf,
     time::{Duration, Instant},
 };
@@ -409,8 +409,9 @@ fn get_artifact_response(
     timeout: Duration,
     started: Instant,
 ) -> Result<ureq::Response> {
-    let mut current = Url::parse(endpoint).map_err(|_| anyhow!("invalid artifact URL"))?;
-    validate_artifact_target(&current)?;
+    let authority = Url::parse(endpoint).map_err(|_| anyhow!("invalid artifact URL"))?;
+    validate_artifact_target(&authority)?;
+    let mut current = authority.clone();
     let agent = artifact_agent(timeout);
 
     for redirects in 0..=MAX_ARTIFACT_REDIRECTS {
@@ -435,7 +436,7 @@ fn get_artifact_response(
         let next = current
             .join(location)
             .map_err(|_| anyhow!("artifact redirect has an invalid Location"))?;
-        validate_artifact_redirect(&current, &next)?;
+        validate_artifact_redirect(&authority, &next)?;
         current = next;
     }
     unreachable!("bounded artifact redirect loop")
@@ -476,81 +477,28 @@ fn artifact_agent(timeout: Duration) -> ureq::Agent {
         .build()
 }
 
-fn validate_artifact_redirect(current: &Url, next: &Url) -> Result<()> {
-    if current.scheme() == "https" && next.scheme() != "https" {
+fn validate_artifact_redirect(authority: &Url, next: &Url) -> Result<()> {
+    if next.scheme() != "https" {
         return Err(anyhow!("refusing artifact redirect HTTPS downgrade"));
     }
-    validate_artifact_target(next)
+    validate_artifact_target(next)?;
+    if authority.origin() != next.origin() {
+        return Err(anyhow!("refusing artifact redirect to a different origin"));
+    }
+    Ok(())
 }
 
 fn validate_artifact_target(url: &Url) -> Result<()> {
     if !url.username().is_empty() || url.password().is_some() {
         return Err(anyhow!("artifact URL must not contain credentials"));
     }
-    let host = url
-        .host()
-        .ok_or_else(|| anyhow!("artifact URL must contain a host"))?;
+    if url.host().is_none() {
+        return Err(anyhow!("artifact URL must contain a host"));
+    }
     if url.scheme() != "https" {
         return Err(anyhow!("artifact URL must use HTTPS"));
     }
-    if !is_public_host(host) {
-        return Err(anyhow!("refusing private or local artifact network target"));
-    }
     Ok(())
-}
-
-fn is_public_host(host: Host<&str>) -> bool {
-    match host {
-        Host::Domain(domain) => {
-            let domain = domain.trim_end_matches('.').to_ascii_lowercase();
-            domain.contains('.')
-                && ![
-                    "localhost",
-                    "local",
-                    "localdomain",
-                    "internal",
-                    "home",
-                    "lan",
-                ]
-                .iter()
-                .any(|suffix| domain == *suffix || domain.ends_with(&format!(".{suffix}")))
-        }
-        Host::Ipv4(address) => is_public_ipv4(address),
-        Host::Ipv6(address) => is_public_ipv6(address),
-    }
-}
-
-fn is_public_ipv4(address: Ipv4Addr) -> bool {
-    let [first, second, third, _] = address.octets();
-    !matches!(
-        (first, second, third),
-        (0, _, _)
-            | (10, _, _)
-            | (100, 64..=127, _)
-            | (127, _, _)
-            | (169, 254, _)
-            | (172, 16..=31, _)
-            | (192, 0, 0)
-            | (192, 0, 2)
-            | (192, 168, _)
-            | (198, 18..=19, _)
-            | (198, 51, 100)
-            | (203, 0, 113)
-            | (224..=255, _, _)
-    )
-}
-
-fn is_public_ipv6(address: std::net::Ipv6Addr) -> bool {
-    let segments = address.segments();
-    !(address.is_unspecified()
-        || address.is_loopback()
-        || address.is_multicast()
-        || address.is_unique_local()
-        || address.is_unicast_link_local()
-        || address
-            .to_ipv4_mapped()
-            .is_some_and(|mapped| !is_public_ipv4(mapped))
-        || segments[0] == 0x2001 && segments[1] == 0x0db8)
 }
 
 pub(crate) fn read_limited(
@@ -787,16 +735,21 @@ mod tests {
     }
 
     #[test]
-    fn artifact_target_validation_requires_public_https() {
-        validate_artifact_target(&Url::parse("https://releases.example.com/file").unwrap())
-            .unwrap();
+    fn artifact_target_validation_requires_https_without_classifying_routing() {
         for endpoint in [
-            "http://releases.example.com/file",
+            "https://releases.example.com/file",
             "https://localhost/file",
             "https://127.0.0.1/file",
             "https://10.0.0.1/file",
             "https://198.18.0.23/file",
             "https://[::ffff:198.18.0.23]/file",
+            "https://releases.internal/file",
+        ] {
+            validate_artifact_target(&Url::parse(endpoint).unwrap())
+                .unwrap_or_else(|error| panic!("{endpoint} should use platform routing: {error}"));
+        }
+        for endpoint in [
+            "http://releases.example.com/file",
             "https://user@releases.example.com/file",
         ] {
             assert!(
@@ -804,8 +757,30 @@ mod tests {
                 "{endpoint} should be rejected"
             );
         }
+    }
+
+    #[test]
+    fn artifact_redirects_remain_on_the_signed_url_origin() {
+        let authority = Url::parse("https://releases.example.com/artifacts/ctx").unwrap();
+        for endpoint in [
+            "https://releases.example.com/artifacts/ctx-next",
+            "https://releases.example.com:443/artifacts/ctx-next",
+        ] {
+            validate_artifact_redirect(&authority, &Url::parse(endpoint).unwrap())
+                .unwrap_or_else(|error| panic!("{endpoint} should be same-origin: {error}"));
+        }
+
+        for endpoint in [
+            "https://downloads.example.com/artifacts/ctx",
+            "https://releases.example.com:444/artifacts/ctx",
+        ] {
+            let error =
+                validate_artifact_redirect(&authority, &Url::parse(endpoint).unwrap()).unwrap_err();
+            assert!(error.to_string().contains("different origin"), "{endpoint}");
+        }
+
         assert!(validate_artifact_redirect(
-            &Url::parse("https://releases.example.com/file").unwrap(),
+            &authority,
             &Url::parse("http://releases.example.com/file").unwrap(),
         )
         .is_err());
