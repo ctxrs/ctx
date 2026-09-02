@@ -1,33 +1,7 @@
 use super::*;
 
 #[derive(Default)]
-pub(super) struct TestWorkerServices {
-    pub(super) certified_repositories: HashSet<PathBuf>,
-    pub(super) full_certification_probes: usize,
-    pub(super) event_time_entries: usize,
-}
-
-impl TestWorkerServices {
-    pub(super) fn begin_source(&mut self) {
-        self.event_time_entries = 0;
-    }
-
-    pub(super) fn attribute(&mut self, repository: &Path) -> bool {
-        if self.certified_repositories.insert(repository.to_path_buf()) {
-            self.full_certification_probes = self.full_certification_probes.saturating_add(1);
-        }
-        self.event_time_entries = self.event_time_entries.saturating_add(1);
-        true
-    }
-
-    pub(super) fn full_certification_probe_count(&self) -> usize {
-        self.full_certification_probes
-    }
-
-    pub(super) fn event_time_cache_len(&self) -> usize {
-        self.event_time_entries
-    }
-}
+pub(super) struct TestWorkerServices;
 
 pub(super) struct TestJsonlRuntime;
 
@@ -37,9 +11,7 @@ impl JsonlFamilyRuntime for TestJsonlRuntime {
     type WorkerServices = TestWorkerServices;
     type RouteControl = ();
 
-    fn begin_worker_leaf(services: &mut Self::WorkerServices) {
-        services.begin_source();
-    }
+    fn begin_worker_leaf(_services: &mut Self::WorkerServices) {}
 }
 
 #[derive(Clone, Default)]

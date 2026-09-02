@@ -1,6 +1,5 @@
 use super::*;
 
-mod completion;
 mod exact_scan;
 mod execution;
 mod execution_prelude;
@@ -9,7 +8,6 @@ mod ownership;
 mod route_content;
 mod route_outcomes;
 
-use completion::run_after_successful_publication;
 use ctx_history_capture_model::{
     source_level_progress, SharedAttemptHistoryProgress, SourceRecordProgress,
 };

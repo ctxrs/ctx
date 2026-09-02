@@ -98,11 +98,6 @@ where
 
     #[cfg(test)]
     fn observe_snapshot_counters(&self, _counters: SqliteInventorySnapshotCounters) {}
-
-    #[cfg(test)]
-    fn test_leaf_execution_policy(&self) -> Option<DocumentLeafExecutionPolicy> {
-        None
-    }
 }
 
 pub(super) struct SqliteInventoryDocumentAdapter<A, L, S> {
@@ -332,20 +327,7 @@ where
     }
 
     fn leaf_execution_policy(&self) -> DocumentLeafExecutionPolicy {
-        #[cfg(test)]
-        if let Some(policy) = self.provider_adapter.test_leaf_execution_policy() {
-            return policy;
-        }
         sqlite_inventory_leaf_execution_policy(self.provider)
-    }
-
-    fn independent_leaf_source(
-        &self,
-        authority: &Self::TreeAuthority,
-        leaf: &Self::Leaf,
-    ) -> SourceBackedRouteResult<SourceKey> {
-        validate_catalog_slot(authority, leaf)?;
-        Ok(leaf.source.clone())
     }
 
     fn discover_complete(

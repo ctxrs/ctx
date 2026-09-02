@@ -11,6 +11,25 @@ mod tests {
 "#;
 
     #[test]
+    fn exact_registration_does_not_fall_back_to_a_provider_constructor() {
+        let temp = tempfile::tempdir().unwrap();
+        let data_root = temp.path().join("data");
+        let sessions = temp.path().join(".codex/sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        let mut source = provider_source_for_path(CaptureProvider::Codex, sessions);
+        source.source_format = "unknown_codex_format";
+        let mut registry = SourceBackedProviderRegistry::new();
+
+        let error = register_enabled_catalog_route(&data_root, &mut registry, source, [0; 32], &[])
+            .expect_err("an unlanded format must not inherit its provider's constructor");
+
+        assert!(format!("{error:#}").contains(
+            "codex source format `unknown_codex_format` has no landed source-backed adapter"
+        ));
+        assert_eq!(registry.routes().count(), 0);
+    }
+
+    #[test]
     fn persisted_custom_v1_authority_is_decodable_but_only_replaceable_by_v2() {
         let temp = tempfile::tempdir().unwrap();
         let data_root = temp.path().join("data");

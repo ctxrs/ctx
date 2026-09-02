@@ -22,12 +22,11 @@ use ctx_history_capture::{
     register_landed_source_backed_route_with_data_root_and_lineage,
     register_lingma_source_backed_route, register_nanoclaw_source_backed_route_with_base_sources,
     register_shelley_source_backed_route, register_warp_source_backed_route,
-    source_backed_route_constructor, source_backed_route_inventory,
     validate_provider_source_roots_outside_data_root, SourceBackedAutomaticRegistryBuild,
     SourceBackedProviderRegistry, SourceBackedProviderRouteMetadata, SourceBackedRouteConstructor,
     SourceBackedRouteError, SourceBackedRouteErrorKind, SourceBackedRouteSelection,
     SourceBackedSelectorAuthority, SourceBackedWatchCatalog, SourceBackedWatchTargetKind,
-    SqliteInventoryCoverage,
+    SqliteInventoryCoverage, LANDED_SOURCE_BACKED_ROUTES,
 };
 use ctx_history_capture_model::{
     DiscoveryReport, ProviderCatalogSupport, ProviderImportSupport, ProviderSource,
@@ -383,7 +382,7 @@ pub fn explicit_source_for_path(
         return Ok(source);
     }
     validate_enabled_source(&source)?;
-    validate_catalog_registration_support(&source)?;
+    catalog_registration_metadata(&source)?;
     Ok(source)
 }
 
@@ -392,9 +391,8 @@ pub fn upsert_explicit_source(
     source: &ProviderSource,
 ) -> Result<ExplicitSourceCatalogUpsert> {
     validate_enabled_source(source)?;
-    validate_catalog_registration_support(source)?;
+    let metadata = catalog_registration_metadata(source)?;
     validate_explicit_source_root(data_root, source)?;
-    let metadata = route_metadata(source.provider, source.source_format)?;
     let catalog_lineage = explicit_source_catalog_lineage(
         source.provider,
         metadata.certified_source_format,
@@ -428,7 +426,7 @@ pub fn relocate_explicit_source(
     relocation: ExplicitSourceRelocationAuthority,
 ) -> Result<ExplicitSourceCatalogUpsert> {
     validate_enabled_source(source)?;
-    validate_catalog_registration_support(source)?;
+    let metadata = catalog_registration_metadata(source)?;
     validate_explicit_source_root(data_root, source)?;
     if source.path == relocation.path {
         return Err(SourceBackedRouteError::new(
@@ -444,7 +442,6 @@ pub fn relocate_explicit_source(
         )
         .into());
     }
-    let metadata = route_metadata(source.provider, source.source_format)?;
     if metadata.certified_source_format != relocation.certified_source_format
         || source.provider != CaptureProvider::Custom
     {
@@ -647,13 +644,8 @@ fn register_enabled_catalog_route(
     lineage: [u8; 32],
     base_certificates: &[CertifiedSource],
 ) -> Result<()> {
-    let constructor = source_backed_route_constructor(source.provider).ok_or_else(|| {
-        anyhow!(
-            "{} has no source-backed registration constructor",
-            source.provider.as_str()
-        )
-    })?;
-    match constructor {
+    let format_route = route_metadata(source.provider, source.source_format)?;
+    match format_route.constructor {
         SourceBackedRouteConstructor::CatalogLineage => match source.provider {
             CaptureProvider::Custom => {
                 register_custom_history_source_backed_route(registry, source, lineage)?
@@ -772,7 +764,9 @@ fn register_enabled_catalog_route(
     Ok(())
 }
 
-fn validate_catalog_registration_support(source: &ProviderSource) -> Result<()> {
+fn catalog_registration_metadata(
+    source: &ProviderSource,
+) -> Result<&'static ctx_history_capture::SourceBackedProviderRouteMetadata> {
     let metadata = route_metadata(source.provider, source.source_format)?;
     if !metadata.explicit_manual {
         bail!(
@@ -788,29 +782,25 @@ fn validate_catalog_registration_support(source: &ProviderSource) -> Result<()> 
             source.source_format
         );
     }
-    match source_backed_route_constructor(source.provider) {
-        Some(SourceBackedRouteConstructor::FiniteInventory)
+    match metadata.constructor {
+        SourceBackedRouteConstructor::FiniteInventory
             if source.provider == CaptureProvider::Crush =>
         {
             bail!(
                 "crush explicit source format has no externally constructible finite-inventory adapter; no legacy import fallback was used"
             )
         }
-        Some(SourceBackedRouteConstructor::DiscoveryContext) => bail!(
+        SourceBackedRouteConstructor::DiscoveryContext => bail!(
             "{} explicit source format requires provider discovery authority and cannot be cataloged by path; no legacy import fallback was used",
             source.provider.as_str()
         ),
-        Some(SourceBackedRouteConstructor::ExactCwd)
-            if source.provider == CaptureProvider::Shelley => Ok(()),
-        Some(SourceBackedRouteConstructor::ExactCwd) => bail!(
+        SourceBackedRouteConstructor::ExactCwd
+            if source.provider == CaptureProvider::Shelley => Ok(metadata),
+        SourceBackedRouteConstructor::ExactCwd => bail!(
             "{} does not expose an explicit source-backed adapter; no legacy import fallback was used",
             source.provider.as_str()
         ),
-        Some(_) => Ok(()),
-        None => bail!(
-            "{} has no source-backed registration constructor; no legacy import fallback was used",
-            source.provider.as_str()
-        ),
+        _ => Ok(metadata),
     }
 }
 
@@ -860,7 +850,7 @@ fn route_metadata(
     if provider == CaptureProvider::Custom && source_format == RETIRED_CUSTOM_V1_SOURCE_FORMAT {
         return Ok(&RETIRED_CUSTOM_V1_ROUTE);
     }
-    source_backed_route_inventory()
+    LANDED_SOURCE_BACKED_ROUTES
         .iter()
         .find(|route| route.provider == provider && route.source_format == source_format)
         .ok_or_else(|| {
