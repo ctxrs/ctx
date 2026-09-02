@@ -132,13 +132,17 @@ pub(super) fn history_partial_cause(health: Option<&HistoryHealthReport>) -> Opt
     }
     if health.source_failures > 0 {
         causes.push(format!(
-            "{} could not be read",
-            counted(health.source_failures, "history file", "history files")
+            "{} not indexed",
+            counted(
+                health.source_failures,
+                "history file was",
+                "history files were"
+            )
         ));
     }
     if health.rejected_records > 0 {
         causes.push(format!(
-            "{} excluded",
+            "{} skipped",
             counted(
                 health.rejected_records,
                 "history record was",
@@ -247,7 +251,7 @@ mod tests {
         assert_eq!(
             history_partial_cause(Some(&health)).as_deref(),
             Some(
-                "1 provider root was only partially indexed; 1 provider root was excluded; 1 provider root could not be assessed; 2 history files could not be read; 3 history records were excluded"
+                "1 provider root was only partially indexed; 1 provider root was excluded; 1 provider root could not be assessed; 2 history files were not indexed; 3 history records were skipped"
             )
         );
         assert_eq!(
