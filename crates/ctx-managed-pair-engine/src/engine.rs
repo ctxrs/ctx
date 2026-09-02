@@ -588,7 +588,7 @@ impl ManagedPairEngine {
                 fault(slot.backup_fault());
                 layout.revalidate()?;
             }
-            for slot in Slot::ALL {
+            for slot in Slot::PUBLISH_ORDER {
                 layout.revalidate()?;
                 let expected = journal.staged[slot.index()].as_ref().ok_or_else(|| {
                     anyhow!("managed-pair journal has no staged {}", slot.label())

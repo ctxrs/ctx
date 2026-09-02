@@ -29,6 +29,8 @@ impl Slot {
     pub(super) const DATA: [Self; 3] = [Self::Core, Self::Companion, Self::Envelope];
     pub(super) const BACKUP_ORDER: [Self; 4] =
         [Self::State, Self::Core, Self::Companion, Self::Envelope];
+    pub(super) const PUBLISH_ORDER: [Self; 4] =
+        [Self::Envelope, Self::Companion, Self::Core, Self::State];
 
     pub(super) const fn index(self) -> usize {
         match self {

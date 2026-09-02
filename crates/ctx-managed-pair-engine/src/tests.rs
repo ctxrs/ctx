@@ -591,13 +591,13 @@ fn installation_root_substitution_after_lock_fails_closed() {
 fn activation_faults_roll_back_before_state_and_fix_forward_after_state() {
     let points = [
         "activating",
+        "backup_state",
         "backup_core",
         "backup_companion",
         "backup_envelope",
-        "backup_state",
-        "publish_core",
-        "publish_companion",
         "publish_envelope",
+        "publish_companion",
+        "publish_core",
         "publish_state",
     ];
     for point in points {
@@ -640,47 +640,76 @@ fn activation_faults_roll_back_before_state_and_fix_forward_after_state() {
 }
 
 #[test]
-fn activation_keeps_core_present_and_atomically_publishes_state_last() {
+fn activation_publishes_envelope_then_companion_then_core_then_state_and_receipt() {
     let fixture = Fixture::new();
     let (old_root, old_envelope, old_identity) =
         fixture.candidate("old-state-order", 1, b"old-core", b"old-companion");
-    let verifier = TestVerifier::new([(old_envelope, old_identity)]);
+    let verifier = TestVerifier::new([(old_envelope.clone(), old_identity)]);
     let engine = fixture.engine();
     activate(&engine, &old_root, &verifier);
     let old_state = fs::read(fixture.install.join(MANAGED_PAIR_STATE_RELATIVE_PATH)).unwrap();
 
     let (new_root, new_envelope, new_identity) =
         fixture.candidate("new-state-order", 2, b"new-core", b"new-companion");
-    verifier.add(new_envelope, new_identity);
+    verifier.add(new_envelope.clone(), new_identity);
     engine.stage(&new_root, &verifier).unwrap();
     let layout = Layout::open(engine.install_root(), false).unwrap();
     let journal = journal::read(&layout).unwrap().unwrap();
+    let new_state = fs::read(layout.staged(Slot::State, &journal.attempt_id)).unwrap();
+    let old_receipt_attempt_id = attempt::read_terminal(&layout).unwrap().unwrap().attempt_id;
+    let new_attempt_id = journal.attempt_id.clone();
     let observed = Mutex::new(Vec::new());
 
     commit_transaction(&engine, &layout, journal, &verifier, &|point| {
         observed.lock().unwrap().push(point.to_owned());
-        let state = fixture.install.join(MANAGED_PAIR_STATE_RELATIVE_PATH);
+        let published = match point {
+            "publish_envelope" => 1,
+            "publish_companion" => 2,
+            "publish_core" => 3,
+            "publish_state" => 4,
+            _ => 0,
+        };
+        let expected_envelope: &[u8] = if published >= 1 {
+            &new_envelope
+        } else {
+            &old_envelope
+        };
+        let expected_state: &[u8] = if published >= 4 {
+            &new_state
+        } else {
+            &old_state
+        };
         assert!(
-            fixture.install.join("bin/ctx").is_file(),
+            layout.target(Slot::Core).is_file(),
             "Core was absent at {point}"
         );
-        if point == "publish_state" {
-            assert_ne!(fs::read(state).unwrap(), old_state);
-            assert_eq!(
-                fs::read(fixture.install.join("bin/ctx")).unwrap(),
-                b"new-core"
-            );
-            assert_eq!(
-                fs::read(fixture.install.join("libexec/ctx-pro")).unwrap(),
+        assert_eq!(
+            fs::read(layout.target(Slot::Envelope)).unwrap(),
+            expected_envelope
+        );
+        assert_eq!(
+            fs::read(layout.target(Slot::Companion)).unwrap(),
+            if published >= 2 {
                 b"new-companion"
-            );
-        } else {
-            assert_eq!(
-                fs::read(state).unwrap(),
-                old_state,
-                "old acceptance state changed at {point}"
-            );
-        }
+            } else {
+                b"old-companion"
+            }
+        );
+        assert_eq!(
+            fs::read(layout.target(Slot::Core)).unwrap(),
+            if published >= 3 {
+                b"new-core"
+            } else {
+                b"old-core"
+            }
+        );
+        assert_eq!(
+            fs::read(layout.target(Slot::State)).unwrap(),
+            expected_state
+        );
+        let receipt = attempt::read_terminal(&layout).unwrap().unwrap();
+        assert_eq!(receipt.attempt_id, old_receipt_attempt_id);
+        assert_eq!(receipt.outcome, TerminalOutcome::Committed);
     })
     .unwrap();
 
@@ -692,12 +721,15 @@ fn activation_keeps_core_present_and_atomically_publishes_state_last() {
             "backup_core",
             "backup_companion",
             "backup_envelope",
-            "publish_core",
-            "publish_companion",
             "publish_envelope",
+            "publish_companion",
+            "publish_core",
             "publish_state",
         ]
     );
+    let receipt = attempt::read_terminal(&layout).unwrap().unwrap();
+    assert_eq!(receipt.attempt_id, new_attempt_id);
+    assert_eq!(receipt.outcome, TerminalOutcome::Committed);
     assert_active_bytes(&engine, b"new-core", b"new-companion");
 }
 
