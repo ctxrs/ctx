@@ -4,7 +4,8 @@ use anyhow::{anyhow, Result};
 use ctx_history_index_query::{EventSearchFilters, SearchDiversificationStatus, VerifiedIndex};
 use serde_json::{json, Value};
 
-use crate::json::{compact_json, event_copy_json, timestamp_json};
+use crate::event_read_model::EventReadView;
+use crate::json::{compact_json, event_copy_json};
 use crate::{
     NormalizedSearchQuery, SearchCollection, SearchHit, SearchPresentation, SearchRequest,
     SEARCH_SNIPPET_MAX_CHARS,
@@ -82,7 +83,7 @@ pub fn render_search_json(input: SearchJsonInput<'_>) -> Result<Value> {
         .zip(commands)
         .enumerate()
         .map(|(offset, ((hit, presentation), commands))| {
-            if presentation.event_id != hit.event.event_id {
+            if presentation.event_id != hit.event.event_id.as_uuid() {
                 return Err(anyhow!(
                     "out-of-order search presentation for event {}",
                     presentation.event_id
@@ -209,9 +210,10 @@ pub fn search_result_json(
     commands: &SearchResultCommands,
 ) -> Result<Value> {
     let (snippet, snippet_truncated) = search_snippet(presentation);
-    let event = &hit.event;
-    let event_id = event.event_id;
-    let session_id = event.session_id;
+    let view = EventReadView::new(&hit.event);
+    let event = view.event;
+    let event_id = event.event_id.as_uuid();
+    let session_id = event.session_id.as_uuid();
     let item_id = if result_scope == "session" {
         session_id
     } else {
@@ -240,26 +242,18 @@ pub fn search_result_json(
         "more_matches_in_session": (result_scope == "session")
             .then_some(hit.more_matches_in_session),
         "provider": event.provider,
-        "provider_key": event.provider_key,
-        "source_id": event.source_id,
+        "provider_key": view.provider_key,
+        "source_id": view.source_id,
         "provider_session_id": event.provider_session_id,
         "source_format": event.source_format,
-        "parent_ctx_session_id": event.parent_session_id,
-        "root_ctx_session_id": event.root_session_id,
+        "parent_ctx_session_id": event.parent_session_id.map(|id| id.as_uuid()),
+        "root_ctx_session_id": event.root_session_id.map(|id| id.as_uuid()),
         "session_relationship": event.session_relationship,
         "event_copy": event_copy_json(event.event_copy.as_ref()),
         "agent_scope": event.agent_scope,
-        "timestamp": timestamp_json(event.occurred_at_unix_ms),
+        "timestamp": view.occurred_at.as_deref(),
         "suggested_next_commands": commands.suggested_next_commands,
-        "citations": [{
-            "item_id": event_id,
-            "target_type": "event",
-            "ctx_event_id": event_id,
-            "ctx_session_id": session_id,
-            "provider": event.provider,
-            "session_id": session_id,
-            "event_seq": event.event_sequence,
-        }],
+        "citations": [view.search_citation()],
         "visibility": "local",
     })))
 }

@@ -2,14 +2,14 @@ use std::fmt;
 
 use anyhow::{anyhow, Result};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use ctx_history_core::CoreContentPolicyStatus;
 use ctx_history_index_query::{
     CopiedEventLineage, CoreEventRecord, IndexError, SessionEventCursor, SessionRecord,
 };
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-use crate::json::{compact_json, event_copy_json, timestamp_json};
+use crate::event_read_model::{EventContentPolicyView, EventReadView};
+use crate::json::{compact_json, event_copy_json};
 use crate::{copied_lineage_read_model, ShowSessionEvent};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -190,24 +190,16 @@ pub fn render_event_read_model_values(
 
 pub fn render_show_event_read_model(event: &CoreEventRecord) -> Value {
     let content = &event.core_record.content;
-    let (policy_status, policy_reason, complete) = match &content.policy_status {
-        CoreContentPolicyStatus::Selected => ("selected", None, true),
-        CoreContentPolicyStatus::Redacted { reason } => ("redacted", Some(reason.as_str()), false),
-        CoreContentPolicyStatus::Omitted { reason } => ("omitted", Some(reason.as_str()), false),
-    };
-    let (provider_key, source_id) = event
-        .custom_source_identity()
-        .map_or((None, None), |(provider_key, source_id)| {
-            (Some(provider_key), Some(source_id))
-        });
+    let view = EventReadView::new(event);
+    let policy = EventContentPolicyView::new(content);
     let mut rendered = compact_json(json!({
         "ctx_event_id": event.event_id.as_uuid(),
         "item_id": event.event_id.as_uuid(),
         "record_type": "event",
         "ctx_session_id": event.session_id.as_uuid(),
         "provider": event.provider,
-        "provider_key": provider_key,
-        "source_id": source_id,
+        "provider_key": view.provider_key,
+        "source_id": view.source_id,
         "provider_session_id": event.provider_session_id,
         "source_format": event.source_format,
         "parent_ctx_session_id": event.parent_session_id.map(|id| id.as_uuid()),
@@ -218,13 +210,13 @@ pub fn render_show_event_read_model(event: &CoreEventRecord) -> Value {
         "sequence": event.event_sequence,
         "event_type": event.event_type,
         "role": event.role,
-        "occurred_at": timestamp_json(event.occurred_at_unix_ms),
+        "occurred_at": view.occurred_at.as_deref(),
         "text": content.normalized_body.as_deref(),
         "structured_content": content.structured_content.as_ref(),
         "content": {
-            "complete": complete,
-            "policy_status": policy_status,
-            "policy_reason": policy_reason,
+            "complete": policy.complete,
+            "policy_status": policy.status,
+            "policy_reason": policy.reason,
         },
     }));
     if let Some(activity) = &content.activity {

@@ -35,8 +35,9 @@ use crate::{
     event_query_receipt, event_query_wire_request, event_window_with_lineage_read_model,
     execute_list_events_stream, execute_locate, execute_search_observed, execute_show_event,
     execute_show_session_page, execute_show_session_stream, history_health_report,
-    normalize_search_request, normalize_uuid_prefix, paginated_session_transcript_read_model,
-    plan_search, render_event_read_model, render_search_json, retain_structured_session_page,
+    locate_read_model, normalize_search_request, normalize_uuid_prefix,
+    paginated_session_transcript_read_model, plan_search, render_event_read_model,
+    render_search_json, render_show_event_read_model, retain_structured_session_page,
     ActiveSessionExclusion, CompactPresentationProjection, CompactRefResolver,
     EventContentProjection, EventWindowBudget, GenerationRead, GenerationReadPort,
     GenerationReadRequest, GenerationReadTarget, HistorySemanticBatch, HistorySemanticError,
@@ -46,12 +47,12 @@ use crate::{
     NormalizedSearchQuery, PinnedHistoryQuery, RetainedPeerRead, SearchApplicationError,
     SearchApplicationReadModelInput, SearchApplicationRequest, SearchApplicationResult,
     SearchBackend, SearchCollection, SearchDiversificationStatus, SearchExecutionResult,
-    SearchFailurePhase, SearchJsonInput, SearchPolicy, SearchRenderMetrics, SearchRequest,
-    SearchResultCommands, SemanticAvailability, SemanticReason, SessionEventMode,
-    ShowEventApplicationRequest, ShowEventRequest, ShowSessionApplicationRequest,
+    SearchFailurePhase, SearchHit, SearchJsonInput, SearchPolicy, SearchPresentation,
+    SearchRenderMetrics, SearchRequest, SearchResultCommands, SemanticAvailability, SemanticReason,
+    SessionEventMode, ShowEventApplicationRequest, ShowEventRequest, ShowSessionApplicationRequest,
     ShowSessionPageRequest, ShowSessionStreamCallback, ShowSessionStreamControl,
     ShowSessionStreamPage, ShowSessionStreamRequest, ShowSessionStreamStart,
-    StructuredOutputFormat, StructuredTranscriptMode, UuidPrefixError,
+    StructuredOutputFormat, StructuredTranscriptMode, UuidPrefixError, SEARCH_SNIPPET_MAX_CHARS,
 };
 
 struct UnusedSemanticPort;
@@ -876,11 +877,11 @@ fn rendered_semantic_result_preserves_exact_ids() {
     assert_eq!(search.collection.result_window.hits.len(), 1);
     assert_eq!(
         search.collection.result_window.hits[0].event.event_id,
-        semantic_event.event_id.as_uuid()
+        semantic_event.event_id
     );
     assert_eq!(
         search.collection.result_window.hits[0].event.session_id,
-        semantic_event.session_id.as_uuid()
+        semantic_event.session_id
     );
     assert_eq!(
         search.collection.diversification.status,

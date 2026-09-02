@@ -689,7 +689,7 @@ fn search_schema_v1_snapshot_reads_snippets_and_citations_from_core() {
         result_window: SearchResultWindow {
             limit: 1,
             hits: vec![SearchHit {
-                event: SearchEventMetadata::from(&event),
+                event: event.clone(),
                 score: 1.0,
                 more_matches_in_session: 0,
             }],
@@ -819,12 +819,12 @@ fn search_json_rank_tracks_non_monotonic_shaped_result_order() {
             limit: 2,
             hits: vec![
                 SearchHit {
-                    event: SearchEventMetadata::from(&first),
+                    event: first.clone(),
                     score: 0.25,
                     more_matches_in_session: 0,
                 },
                 SearchHit {
-                    event: SearchEventMetadata::from(&second),
+                    event: second.clone(),
                     score: 9.5,
                     more_matches_in_session: 0,
                 },
