@@ -193,11 +193,10 @@ pub(crate) fn load_active_generation_pointer_from_read_root(
     parse_active_generation_pointer(bytes).map(Some)
 }
 
-/// Loads only the active generation ID below an already opened and validated
-/// lexical root.
+/// Loads only the active generation ID below a caller-validated lexical root.
 ///
-/// This keeps callers on the handle-anchored read path without exposing the
-/// publication pointer or its physical slot details.
+/// This does not grant mutation authority or expose the publication pointer or
+/// its physical slot details.
 pub fn load_active_generation_id_from_read_root(
     root: &crate::GenerationReadRoot,
 ) -> Result<Option<String>> {

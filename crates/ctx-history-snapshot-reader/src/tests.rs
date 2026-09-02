@@ -70,6 +70,21 @@ fn concurrent_publication_is_not_reported_as_corruption() {
         ),
         SnapshotError::ConcurrentGenerationChange(_)
     ));
+    assert!(matches!(
+        map_generation_error(
+            ctx_history_index_generation::GenerationError::GenerationRetentionLeaseOwnerMismatch,
+            &"c".repeat(64),
+        ),
+        SnapshotError::LeaseConflict(_)
+    ));
+    assert!(matches!(
+        map_index_error(
+            ctx_history_index_query::IndexError::GenerationRetentionLeaseOwnerMismatch,
+            &"d".repeat(64),
+            &SnapshotContract::current().unwrap(),
+        ),
+        SnapshotError::LeaseConflict(_)
+    ));
 }
 
 #[test]
@@ -409,6 +424,14 @@ fn certificate(source: &SourceKey, revision: u8, records: usize) -> CertifiedSou
     .unwrap()
 }
 
+fn colliding_full_event_identity(event_id: StableEntityId) -> StableEntityId {
+    let mut encoded = event_id.encode_canonical().unwrap();
+    // The compact UUID is derived from the first 16 digest bytes. Change a
+    // later digest byte so this remains a contract-valid, distinct full ID.
+    encoded[3 + 16] ^= 1;
+    StableEntityId::decode_canonical(&encoded).unwrap()
+}
+
 fn publish(
     index_root: &std::path::Path,
     revision: u8,
@@ -660,7 +683,7 @@ fn manifest_delta_and_replayable_exact_json_pages_use_neutral_bounded_state() {
 }
 
 #[test]
-fn exact_record_batch_preserves_full_identity_order_totals_and_strict_bounds() {
+fn exact_record_batch_requires_full_identities_and_returns_complete_or_absent() {
     let fixture = Fixture::new();
     let source = source("exact-batch");
     let records = vec![
@@ -698,36 +721,16 @@ fn exact_record_batch_preserves_full_identity_order_totals_and_strict_bounds() {
         SnapshotPageBudget::new(maximum_record_encoded_bytes, maximum_record_content_bytes);
 
     let batch = snapshot
-        .core_records_by_ids(&event_ids, aggregate_budget, per_record_budget)
+        .core_records_by_ids_if_bounded(&event_ids, aggregate_budget, per_record_budget)
         .unwrap()
         .unwrap();
     assert_eq!(batch.records, expected);
     assert_eq!(batch.encoded_core_bytes, encoded_core_bytes);
     assert_eq!(batch.content_bytes, content_bytes);
 
-    assert!(snapshot
-        .core_records_by_ids(
-            &event_ids,
-            SnapshotPageBudget::new(encoded_core_bytes - 1, content_bytes),
-            per_record_budget,
-        )
-        .unwrap()
-        .is_none());
-    assert!(snapshot
-        .core_records_by_ids(
-            &event_ids,
-            aggregate_budget,
-            SnapshotPageBudget::new(
-                maximum_record_encoded_bytes - 1,
-                maximum_record_content_bytes,
-            ),
-        )
-        .unwrap()
-        .is_none());
-
     let missing = record(&source, 99, "not published").event_id;
     assert!(snapshot
-        .core_records_by_ids(
+        .core_records_by_ids_if_bounded(
             &[event_ids[0], missing],
             aggregate_budget,
             per_record_budget,
@@ -735,7 +738,7 @@ fn exact_record_batch_preserves_full_identity_order_totals_and_strict_bounds() {
         .unwrap()
         .is_none());
     assert!(matches!(
-        snapshot.core_records_by_ids(
+        snapshot.core_records_by_ids_if_bounded(
             &[event_ids[0], event_ids[0]],
             aggregate_budget,
             per_record_budget,
@@ -743,7 +746,7 @@ fn exact_record_batch_preserves_full_identity_order_totals_and_strict_bounds() {
         Err(SnapshotError::Bounds(_))
     ));
     assert!(matches!(
-        snapshot.core_records_by_ids(
+        snapshot.core_records_by_ids_if_bounded(
             &[records[0].session_id],
             aggregate_budget,
             per_record_budget,
@@ -751,17 +754,28 @@ fn exact_record_batch_preserves_full_identity_order_totals_and_strict_bounds() {
         Err(SnapshotError::Bounds(_))
     ));
     assert!(matches!(
-        snapshot.core_records_by_ids(
-            &vec![event_ids[0]; MAX_CORE_RECORD_BATCH_ITEMS + 1],
+        snapshot.core_records_by_ids_if_bounded(
+            &vec![event_ids[0]; MAX_EXACT_CORE_RECORD_BATCH_ITEMS + 1],
             aggregate_budget,
             per_record_budget,
         ),
         Err(SnapshotError::Bounds(_))
     ));
-    assert!(matches!(
-        snapshot.core_records_by_ids(&event_ids, SnapshotPageBudget::new(0, 1), per_record_budget,),
-        Err(SnapshotError::Bounds(_))
-    ));
+    let colliding = colliding_full_event_identity(event_ids[0]);
+    assert_ne!(colliding, event_ids[0]);
+    assert_eq!(colliding.as_uuid(), event_ids[0].as_uuid());
+    assert!(snapshot
+        .core_records_by_ids_if_bounded(&[colliding], aggregate_budget, per_record_budget)
+        .unwrap()
+        .is_none());
+    assert!(snapshot
+        .core_records_by_ids_if_bounded(
+            &[event_ids[0], colliding],
+            aggregate_budget,
+            per_record_budget,
+        )
+        .unwrap()
+        .is_none());
 }
 
 #[test]
@@ -999,4 +1013,35 @@ fn active_generation_lookup_uses_the_core_data_root_and_reports_absence() {
         load_active_generation_id(&fixture.data_root).unwrap(),
         Some(second)
     );
+}
+
+#[test]
+fn missing_root_components_are_normal_absence_for_lookup_load_and_release() {
+    let roots = tempdir().unwrap();
+    let missing_data = roots.path().join("missing-data");
+    let data_only = roots.path().join("data-only");
+    fs::create_dir(&data_only).unwrap();
+    restrict_private_directory(&data_only).unwrap();
+    let search_only = roots.path().join("search-only");
+    fs::create_dir(&search_only).unwrap();
+    restrict_private_directory(&search_only).unwrap();
+    let search = search_only.join("search");
+    fs::create_dir(&search).unwrap();
+    restrict_private_directory(&search).unwrap();
+
+    let fixture = Fixture::new();
+    let generation_id = publish(&fixture.index_root, 1, &[]);
+    let lease = acquire_snapshot_retention_lease(
+        &fixture.data_root,
+        &generation_id,
+        "restartable_catchup",
+        &"a".repeat(64),
+    )
+    .unwrap();
+
+    for root in [&missing_data, &data_only, &search_only] {
+        assert_eq!(load_active_generation_id(root).unwrap(), None);
+        assert_eq!(load_snapshot_retention_lease(root).unwrap(), None);
+        assert!(!release_snapshot_retention_lease(root, &lease).unwrap());
+    }
 }
