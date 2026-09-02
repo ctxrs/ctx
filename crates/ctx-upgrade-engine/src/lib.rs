@@ -20,6 +20,7 @@ pub use install_marker::{
 pub use upgrade::{
     active_installation_upgrade_attempt_id, current_exe_has_managed_install_marker_hint,
     current_exe_is_unmanaged, current_install_path, disable_current_man_pages,
+    ensure_hosted_transaction_inactive_under_installation_lock,
     installation_daemon_coordination_paths, installation_daemon_coordination_paths_for,
     installation_executable_path, installation_hosted_uninstall_is_active,
     installation_hosted_uninstall_is_active_for_executable,

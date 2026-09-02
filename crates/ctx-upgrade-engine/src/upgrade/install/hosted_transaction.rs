@@ -15,6 +15,7 @@ mod filesystem;
 mod managed_pair;
 mod post_exit;
 use filesystem::*;
+pub use managed_pair::ensure_hosted_transaction_inactive_under_installation_lock;
 use managed_pair::*;
 
 const SCHEMA_VERSION: u32 = 1;
@@ -229,6 +230,7 @@ fn reject_unexpected_inputs(args: &HostedTransactionArgs) -> Result<()> {
 }
 
 fn install(args: HostedTransactionArgs, install_path: PathBuf) -> Result<()> {
+    reject_managed_pair_material_for_core_only_install(&install_path)?;
     let supplied_digest = normalized_sha256(
         args.binary_sha256
             .as_deref()

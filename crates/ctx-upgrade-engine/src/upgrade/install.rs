@@ -20,6 +20,7 @@ use anyhow::Context;
 use anyhow::{bail, Result};
 
 pub use hosted_transaction::{
+    ensure_hosted_transaction_inactive_under_installation_lock,
     hosted_uninstall_is_active_for_executable as installation_hosted_uninstall_is_active_for_executable,
     installation_hosted_uninstall_is_active, run_hosted_uninstall_after_parent_exit,
     HOSTED_UNINSTALL_POST_EXIT_READY,

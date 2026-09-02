@@ -580,6 +580,30 @@ fn hosted_uninstall_refuses_a_pending_pair_upgrade() {
 }
 
 #[test]
+fn managed_pair_apply_is_fenced_while_hosted_uninstall_waits_for_parent_exit() {
+    let fixture = pair_fixture();
+    let (_helper, path, mut journal) = arm_pair_uninstall(&fixture);
+    journal.phase = Phase::Armed;
+    write_journal(&path, &journal).unwrap();
+
+    let error =
+        ensure_hosted_transaction_inactive_under_installation_lock(&fixture.install).unwrap_err();
+    assert!(format!("{error:#}").contains("finish the pending hosted installation transaction"));
+}
+
+#[test]
+fn core_only_hosted_install_refuses_managed_pair_material() {
+    let fixture = pair_fixture();
+    let error = reject_managed_pair_material_for_core_only_install(&fixture.install).unwrap_err();
+    assert!(format!("{error:#}").contains("cannot replace a managed Core+Pro pair"));
+
+    fs::remove_file(&fixture.state).unwrap();
+    fs::remove_file(&fixture.envelope).unwrap();
+    fs::remove_file(&fixture.companion).unwrap();
+    reject_managed_pair_material_for_core_only_install(&fixture.install).unwrap();
+}
+
+#[test]
 fn hosted_uninstall_refuses_substituted_pair_file_before_removing_state() {
     let fixture = pair_fixture();
     let (helper, path, mut journal) = arm_pair_uninstall(&fixture);

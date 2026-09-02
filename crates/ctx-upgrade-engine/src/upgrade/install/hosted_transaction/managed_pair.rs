@@ -12,8 +12,8 @@ use ctx_managed_pair_engine::{
 use serde_json::Value;
 
 use super::{
-    is_normalized_sha256, path_entry_exists, remove_durable, sha256_path, verify_file_digest,
-    Journal, TransactionKind, MAX_BINARY_BYTES,
+    is_normalized_sha256, journal_path, path_entry_exists, read_journal, remove_durable,
+    sha256_path, validate_journal, verify_file_digest, Journal, TransactionKind, MAX_BINARY_BYTES,
 };
 use crate::{
     install_marker::is_staging_dogfood_marker, upgrade::managed_pair::ReleaseManagedPairVerifier,
@@ -21,6 +21,39 @@ use crate::{
 
 const MAX_PAIR_ENVELOPE_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_PAIR_STATE_BYTES: u64 = 64 * 1024;
+
+/// Fails closed when the shared installation lock protects a pending hosted
+/// install or uninstall transaction. Managed-pair publication must not race a
+/// post-exit uninstall after that helper releases the lock while waiting.
+pub fn ensure_hosted_transaction_inactive_under_installation_lock(
+    install_path: &Path,
+) -> Result<()> {
+    let Some(journal) = read_journal(&journal_path(install_path))? else {
+        return Ok(());
+    };
+    validate_journal(&journal, install_path, journal.kind)?;
+    bail!("finish the pending hosted installation transaction before changing the managed pair")
+}
+
+pub(super) fn reject_managed_pair_material_for_core_only_install(
+    install_path: &Path,
+) -> Result<()> {
+    let Some((root, state_path, envelope_path, companion_path)) = managed_pair_paths(install_path)
+    else {
+        return Ok(());
+    };
+    for path in [
+        root.join(MANAGED_PAIR_ACTIVE_TRANSACTION_RELATIVE_PATH),
+        state_path,
+        envelope_path,
+        companion_path,
+    ] {
+        if path_entry_exists(&path)? {
+            bail!("Core-only hosted installation cannot replace a managed Core+Pro pair");
+        }
+    }
+    Ok(())
+}
 
 pub(super) fn snapshot_managed_pair_files(
     journal: &mut Journal,

@@ -9,6 +9,7 @@ use anyhow::{anyhow, bail, Context as _, Result};
 use ctx_companion_bridge::ReleaseChannel;
 use ctx_upgrade_engine::{
     apply_or_resume_managed_pair_under_installation_lock,
+    ensure_hosted_transaction_inactive_under_installation_lock,
     inspect_managed_pair_under_installation_lock, managed_install_path_identity_matches,
     try_acquire_managed_installation_mutation_at_root, InstallMarker, ManagedPairApplyInput,
     ManagedPairInstallationStatus, ManagedPairTarget, ManagedPairVerifier,
@@ -111,6 +112,7 @@ fn apply(request: &ApplyRequest) -> Result<()> {
     let verifier = CoreManagedPairVerifier::for_channel(channel);
     let _guard = try_acquire_managed_installation_mutation_at_root(&request.install_root)?
         .ok_or_else(|| anyhow!("managed-pair installation is busy"))?;
+    ensure_hosted_transaction_inactive_under_installation_lock(&request.destination_core())?;
     let envelope = read_bounded_regular_file(
         &request.signed_envelope,
         MAX_ENVELOPE_BYTES,

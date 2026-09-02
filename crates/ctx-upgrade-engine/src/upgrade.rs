@@ -28,7 +28,8 @@ pub use diagnostics::{
 };
 pub use install::{
     current_exe_has_managed_install_marker_hint, current_exe_is_unmanaged, current_install_path,
-    disable_current_man_pages, installation_hosted_uninstall_is_active,
+    disable_current_man_pages, ensure_hosted_transaction_inactive_under_installation_lock,
+    installation_hosted_uninstall_is_active,
     installation_hosted_uninstall_is_active_for_executable,
     invalid_install_marker_recovery_guidance, is_valid_install_attempt_id,
     managed_install_marker_for_current_exe, managed_install_path_identity_matches,
