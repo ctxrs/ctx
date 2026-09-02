@@ -391,11 +391,7 @@ pub(super) fn capture<R: JsonlFamilyRuntime>(
         sink,
         append_only_trust_allowed,
     );
-    let finish_leaf_scans = adapter
-        .finish_leaf_scans()
-        .map_err(|error| route_scan(adapter, error));
     let mut scan_result = terminal_sources?;
-    finish_leaf_scans?;
     let mut disposition_dependencies = opening
         .members()
         .iter()
@@ -881,11 +877,7 @@ fn capture_partial_members<R: JsonlFamilyRuntime>(
         sink,
         true,
     );
-    let finish_leaf_scans = adapter
-        .finish_leaf_scans()
-        .map_err(|error| route_scan(adapter, error));
     let scan_result = terminal_sources?;
-    finish_leaf_scans?;
     // A partial refresh has no complete inventory with which to delete a
     // formerly valid source. Do not carry that base after ownership becomes
     // ambiguous; let this attempt fall through to exhaustive discovery before

@@ -579,7 +579,6 @@ pub(super) fn refresh_source_backed_generation_with_detailed_progress_and_discov
             commit.snapshot(),
         )
     });
-    run_after_successful_publication(registry, &successful_route_ids);
     let scan_stage_duration = scan_started.elapsed();
     let history_progress = attempt_history_progress.snapshot();
     let _ = report_progress(committed_progress(

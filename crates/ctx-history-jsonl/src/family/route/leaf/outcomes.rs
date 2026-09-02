@@ -1,7 +1,4 @@
-use std::{
-    collections::{BTreeMap, HashMap},
-    sync::Arc,
-};
+use std::{collections::HashMap, sync::Arc};
 
 use ctx_history_capture_runtime::{
     SourceBackedRecordRejectionDrafts, SourceBackedRouteResult, SourceBackedSourceOutcome,
@@ -9,8 +6,8 @@ use ctx_history_capture_runtime::{
 use ctx_history_core::{CertifiedSource, CertifiedSourceAppend, SourceKey};
 
 use super::{
-    route_internal, route_invalid, JsonlFamilyError, JsonlFamilyLeaf, JsonlFamilyRuntime,
-    JsonlFamilyTerminalProof, JsonlFamilyWorkerContext, JsonlResult, TerminalSourceEvidence,
+    route_internal, route_invalid, JsonlFamilyError, JsonlFamilyLeaf, JsonlFamilyTerminalProof,
+    JsonlResult, TerminalSourceEvidence,
 };
 
 pub(in crate::family::route) struct PreparedLeaf<E: JsonlFamilyError> {
@@ -75,37 +72,6 @@ pub(super) fn quarantine_leaf<E: JsonlFamilyError>(
 pub(super) struct JsonlLeafJob<E: JsonlFamilyError> {
     pub(super) leaf: JsonlFamilyLeaf<E>,
     pub(super) base: Option<CertifiedSource>,
-    pub(super) context_shard: Option<u64>,
-}
-
-// Partitioned adapters receive deterministic logical cache lanes rather than
-// caches tied to the physical worker count. Source-local event-time state is
-// cleared by `begin_leaf()`, while revalidated repository certification caches
-// remain stable across worker counts and physical scheduling decisions.
-pub(super) struct JsonlFamilyWorkerContexts<R: JsonlFamilyRuntime> {
-    independent: JsonlFamilyWorkerContext<R>,
-    partition_cache_lanes: BTreeMap<u64, JsonlFamilyWorkerContext<R>>,
-}
-
-impl<R: JsonlFamilyRuntime> Default for JsonlFamilyWorkerContexts<R> {
-    fn default() -> Self {
-        Self {
-            independent: JsonlFamilyWorkerContext::default(),
-            partition_cache_lanes: BTreeMap::new(),
-        }
-    }
-}
-
-impl<R: JsonlFamilyRuntime> JsonlFamilyWorkerContexts<R> {
-    pub(super) fn for_job(
-        &mut self,
-        context_shard: Option<u64>,
-    ) -> &mut JsonlFamilyWorkerContext<R> {
-        match context_shard {
-            Some(context_shard) => self.partition_cache_lanes.entry(context_shard).or_default(),
-            None => &mut self.independent,
-        }
-    }
 }
 
 pub(super) fn reconcile_parallel_leaf_outcomes<E: JsonlFamilyError>(
