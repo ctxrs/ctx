@@ -309,7 +309,7 @@ mod tests {
         assert_eq!(event["event_origin"], shown["event_origin"]);
         assert_eq!(event["text"], shown["text"]);
         assert_eq!(
-            render_tool_text_for_test(&page),
+            render_tool_text_for_test(page),
             format!(
                 "ctx query_events\nevents: {}\ngeneration_id: {}\nterminal: true\ntruncated: false\n",
                 page["events"].as_array().unwrap().len(),
