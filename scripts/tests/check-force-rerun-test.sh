@@ -139,6 +139,12 @@ grep -Fq -- '--force-rerun disables test-result reuse' \
 grep -Fq -- 'physical Rust crate-size gate runs locally' \
   <("${repo_root}/scripts/check.sh" --help) \
   || fail 'help does not document local crate-size behavior'
+grep -Fq -- 'Independent per-package limits are 21,000' \
+  <("${repo_root}/scripts/check.sh" --help) \
+  || fail 'help does not document the independent production crate-size limit'
+grep -Fq -- 'production CLOC and 21,000 test-surface CLOC.' \
+  <("${repo_root}/scripts/check.sh" --help) \
+  || fail 'help does not document the independent test-surface limit'
 
 expected_modes="$(printf '%s\n' ci nightly release)"
 [[ "$("${repo_root}/scripts/check.sh" --list-modes)" == "${expected_modes}" ]] \

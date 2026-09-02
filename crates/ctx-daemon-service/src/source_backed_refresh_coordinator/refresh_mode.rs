@@ -6,7 +6,7 @@ pub enum SourceBackedRefreshMode {
 }
 
 impl SourceBackedRefreshMode {
-    pub(crate) fn as_str(self) -> &'static str {
+    pub(super) fn as_str(self) -> &'static str {
         match self {
             Self::Off => "off",
             Self::Background => "background",

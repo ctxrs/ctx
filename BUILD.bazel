@@ -81,7 +81,6 @@ CARGO_WORKSPACE_PACKAGE_DATA = [
     "//crates/ctx-client-observability:cargo_package_data",
     "//crates/ctx-daemon-cli:cargo_package_data",
     "//crates/ctx-daemon-application:cargo_package_data",
-    "//crates/ctx-daemon-refresh-client:cargo_package_data",
     "//crates/ctx-daemon-runtime:cargo_package_data",
     "//crates/ctx-daemon-service:cargo_package_data",
     "//crates/ctx-history-capture:cargo_package_data",
@@ -382,6 +381,7 @@ py_test(
     srcs = [
         "scripts/check-rust-crate-size.py",
         "scripts/tests/check_rust_crate_size_test.py",
+        "scripts/check-loc.py",
     ],
     deps = ["@ctx_tomli//:lib"],
     main = "scripts/tests/check_rust_crate_size_test.py",
@@ -389,7 +389,10 @@ py_test(
 
 py_binary(
     name = "rust_crate_size_preflight",
-    srcs = ["scripts/check-rust-crate-size.py"],
+    srcs = [
+        "scripts/check-rust-crate-size.py",
+        "scripts/check-loc.py",
+    ],
     deps = ["@ctx_tomli//:lib"],
     main = "scripts/check-rust-crate-size.py",
 )
@@ -1157,22 +1160,6 @@ sh_test(
 )
 
 sh_test(
-    name = "daemon_refresh_client_dependency_boundary_check",
-    srcs = ["//tools/bazel:check-daemon-refresh-client-dependency-boundary.sh"],
-    args = ["$(rootpath BUILD.bazel)"],
-    data = [
-        "BUILD.bazel",
-        "scripts/bazelw",
-    ] + CARGO_WORKSPACE_PACKAGE_DATA,
-    tags = [
-        "build-graph",
-        "exclusive",
-        "no-cache",
-        "no-sandbox",
-    ],
-)
-
-sh_test(
     name = "daemon_service_dependency_boundary_check",
     srcs = ["//tools/bazel:check-daemon-service-dependency-boundary.sh"],
     args = ["$(rootpath BUILD.bazel)"],
@@ -1425,7 +1412,6 @@ non_rust_gate(
         "//crates/ctx-client-observability:cargo_package_data",
         "//crates/ctx-daemon-cli:cargo_package_data",
         "//crates/ctx-daemon-application:cargo_package_data",
-        "//crates/ctx-daemon-refresh-client:cargo_package_data",
         "//crates/ctx-daemon-runtime:cargo_package_data",
         "//crates/ctx-daemon-service:cargo_package_data",
         "//crates/ctx-upgrade-engine:cargo_package_data",

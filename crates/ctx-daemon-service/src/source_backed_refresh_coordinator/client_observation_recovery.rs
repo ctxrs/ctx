@@ -2,7 +2,7 @@ use super::*;
 
 const REQUEST_BOUND_STATUS_RECOVERY_ATTEMPT_LIMIT: usize = 3;
 const RETAINED_REQUEST_CONTINUOUS_OUTAGE_BUDGET: StdDuration = StdDuration::from_secs(30);
-pub const DISCONNECT_POLICY: &str = "request_outcome_unknown_after_acknowledgement";
+pub(super) const DISCONNECT_POLICY: &str = "request_outcome_unknown_after_acknowledgement";
 
 #[derive(Debug)]
 pub struct SourceRefreshObservationRecoveryFailed {
@@ -23,8 +23,10 @@ impl fmt::Display for SourceRefreshObservationRecoveryFailed {
 
 impl std::error::Error for SourceRefreshObservationRecoveryFailed {}
 
-#[doc(hidden)]
-pub fn retained_request_unobservable(request_id: &str, recovery_attempts: usize) -> anyhow::Error {
+pub(super) fn retained_request_unobservable(
+    request_id: &str,
+    recovery_attempts: usize,
+) -> anyhow::Error {
     SourceRefreshObservationRecoveryFailed {
         request_id: request_id.to_owned(),
         recovery_attempts,
@@ -34,7 +36,7 @@ pub fn retained_request_unobservable(request_id: &str, recovery_attempts: usize)
 }
 
 #[cfg(test)]
-pub fn request_bound_status_with_recovery<S, R>(
+pub(super) fn request_bound_status_with_recovery<S, R>(
     request_id: &str,
     mut sleep: S,
     roundtrip: R,
@@ -70,7 +72,7 @@ where
         Ok(response) => return Ok(response),
         Err(error)
             if error
-                .downcast_ref::<SourceRefreshTransportUnavailable>()
+                .downcast_ref::<DaemonSourceRefreshServiceUnavailable>()
                 .is_some() =>
         {
             return Err(error);
@@ -91,7 +93,7 @@ where
             Ok(response) => return Ok(response),
             Err(error)
                 if error
-                    .downcast_ref::<SourceRefreshTransportUnavailable>()
+                    .downcast_ref::<DaemonSourceRefreshServiceUnavailable>()
                     .is_some() =>
             {
                 return Err(error);
@@ -107,7 +109,7 @@ where
 }
 
 #[cfg(test)]
-pub fn request_bound_status_with_outage_budget<S, N, R>(
+pub(super) fn request_bound_status_with_outage_budget<S, N, R>(
     request_id: &str,
     mut sleep: S,
     now: N,
@@ -130,8 +132,7 @@ where
     )
 }
 
-#[doc(hidden)]
-pub fn request_bound_status_with_outage_budget_cancellable<S, N, C, R>(
+pub(super) fn request_bound_status_with_outage_budget_cancellable<S, N, C, R>(
     request_id: &str,
     mut sleep: S,
     mut now: N,
@@ -175,5 +176,5 @@ where
 }
 
 #[cfg(test)]
-#[path = "observation_recovery_tests.rs"]
+#[path = "client_observation_recovery_tests.rs"]
 mod tests;

@@ -45,9 +45,9 @@ Modes:
 
 The physical Rust crate-size gate runs locally before each named mode. CI and
 nightly count the live worktree directly; release additionally verifies the
-exact clean checked-out candidate. The gate has one fixed limit and no
-checked-in size inventory, warning tier, grandfather ledger, or moving-base
-comparison.
+exact clean checked-out candidate. Independent per-package limits are 21,000
+production CLOC and 21,000 test-surface CLOC. The gate has no checked-in size
+inventory, warning tier, grandfather ledger, or moving-base comparison.
 Cargo is not invoked by these modes; Bazel is the build and test authority.
 --force-rerun disables test-result reuse without deleting compilation caches.
 USAGE

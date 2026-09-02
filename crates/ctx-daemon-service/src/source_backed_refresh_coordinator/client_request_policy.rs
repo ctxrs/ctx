@@ -1,5 +1,3 @@
-//! Final-binary policy for one source-refresh client request.
-
 use super::*;
 
 pub(super) struct SourceBackedRefreshRequestPolicy {

@@ -284,13 +284,13 @@ fn typed_service_unavailability_still_enters_daemon_recovery_immediately() {
         StdInstant::now,
         || {
             roundtrips += 1;
-            Err(SourceRefreshTransportUnavailable::new(false).into())
+            Err(DaemonSourceRefreshServiceUnavailable.into())
         },
     )
     .unwrap_err();
 
     assert_eq!(roundtrips, 1);
     assert!(error
-        .downcast_ref::<SourceRefreshTransportUnavailable>()
+        .downcast_ref::<DaemonSourceRefreshServiceUnavailable>()
         .is_some());
 }
