@@ -14,9 +14,11 @@ use ctx_history_index_format::{
 #[cfg(any(test, feature = "test-support"))]
 use ctx_history_index_format::{scrub_and_certify_physical_integrity, verify_searcher};
 use ctx_history_index_generation::{
-    load_active_generation_pointer, load_generation_retention_lease, open_slot_index,
-    verify_candidate_physical_integrity_read_only, verify_physical_integrity_read_only,
-    ActiveGenerationPointer, GenerationReadLease, GenerationRetentionLease, GenerationSlot,
+    acquire_generation_read_lease, acquire_retained_generation_read_lease,
+    load_active_generation_pointer, load_generation_retention_lease, open_slot_index, slot_path,
+    verify_candidate_physical_integrity_read_only, verify_physical_integrity,
+    verify_physical_integrity_read_only, ActiveGenerationPointer, GenerationReadLease,
+    GenerationRetentionLease, GenerationSlot,
 };
 use tantivy::{ReloadPolicy, Searcher};
 
@@ -44,6 +46,8 @@ pub struct VerifiedIndex {
     pub(crate) generation_id: String,
     pub(crate) publication_metadata: Option<Arc<[u8]>>,
     pub(crate) semantic_eligibility_postings: OnceLock<crate::SemanticEligibilityPostings>,
+    _generation_read_lease: Option<Box<GenerationReadLease>>,
+    _retained_peer_read_lease: Option<Box<GenerationReadLease>>,
 }
 
 #[derive(Clone, Copy)]
@@ -52,6 +56,17 @@ enum ReopenPhysicalVerification {
     ReadOnly,
     #[cfg(any(test, feature = "test-support"))]
     ScrubAndCertify,
+}
+
+fn generation_selection_raced(error: &IndexError) -> bool {
+    matches!(
+        error,
+        IndexError::GenerationRetentionLeaseTargetNotRetained { .. }
+    ) || matches!(
+        error,
+        IndexError::GenerationRetentionLeaseConflict { owner_kind, .. }
+            if owner_kind == "generation_reclamation"
+    )
 }
 
 impl VerifiedIndex {
@@ -111,7 +126,83 @@ impl VerifiedIndex {
     /// publication-time O(document-count) identity audit is not repeated for
     /// current generations.
     pub fn open_pinned(root: impl AsRef<Path>) -> Result<Self> {
-        Self::open_inner(root.as_ref(), ReopenPhysicalVerification::VerifyOrCertify)
+        Self::open_pinned_with_loader(root.as_ref(), |root| {
+            load_active_generation_pointer(root).map_err(IndexError::from)
+        })
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn open_pinned_with_pointer_loader<F>(
+        root: impl AsRef<Path>,
+        load_pointer: F,
+    ) -> Result<Self>
+    where
+        F: FnMut(&Path) -> Result<Option<ActiveGenerationPointer>>,
+    {
+        Self::open_pinned_with_loader(root.as_ref(), load_pointer)
+    }
+
+    fn open_pinned_with_loader<F>(root: &Path, mut load_pointer: F) -> Result<Self>
+    where
+        F: FnMut(&Path) -> Result<Option<ActiveGenerationPointer>>,
+    {
+        if !root.is_dir() {
+            return Err(IndexError::MissingActiveGenerationPointer);
+        }
+        let control_directory =
+            DurableMmapDirectory::open(root).map_err(tantivy::TantivyError::from)?;
+        let root = control_directory.root_path().to_path_buf();
+        for attempt in 0..2 {
+            let pointer = load_pointer(&root)?.ok_or(IndexError::MissingActiveGenerationPointer)?;
+            let (lease, retained_peer_lease) =
+                match Self::acquire_pointer_read_leases(&root, &pointer, pointer.active()) {
+                    Ok(leases) => leases,
+                    Err(error) if generation_selection_raced(&error) && attempt == 0 => continue,
+                    Err(error) if generation_selection_raced(&error) => {
+                        return Err(IndexError::ConcurrentGenerationChange);
+                    }
+                    Err(error) => return Err(error),
+                };
+            let opened = lease
+                .with_root_access(|root| {
+                    Self::open_slot(
+                        root,
+                        &pointer,
+                        lease.target(),
+                        ReopenPhysicalVerification::VerifyOrCertify,
+                        |_| IndexError::InvalidActiveGenerationPointer,
+                    )
+                })
+                .map_err(IndexError::from)?;
+            match opened {
+                Ok(mut index) => {
+                    index._generation_read_lease = Some(Box::new(lease));
+                    index._retained_peer_read_lease = retained_peer_lease.map(Box::new);
+                    return Ok(index);
+                }
+                Err(IndexError::ConcurrentGenerationChange) if attempt == 0 => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Err(IndexError::ConcurrentGenerationChange)
+    }
+
+    fn acquire_pointer_read_leases(
+        root: &Path,
+        pointer: &ActiveGenerationPointer,
+        target: &GenerationSlot,
+    ) -> Result<(GenerationReadLease, Option<GenerationReadLease>)> {
+        let peer = if target.generation_id() == pointer.active().generation_id() {
+            pointer.previous()
+        } else {
+            Some(pointer.active())
+        };
+        let lease = acquire_generation_read_lease(root, target.generation_id())?;
+        let retained_peer_lease = match peer {
+            Some(peer) => Some(acquire_generation_read_lease(root, peer.generation_id())?),
+            None => None,
+        };
+        Ok((lease, retained_peer_lease))
     }
 
     /// Reopens an exact candidate from durable state before its active-pointer
@@ -155,6 +246,8 @@ impl VerifiedIndex {
             generation_id,
             publication_metadata,
             semantic_eligibility_postings: OnceLock::new(),
+            _generation_read_lease: None,
+            _retained_peer_read_lease: None,
         })
     }
 
@@ -189,6 +282,39 @@ impl VerifiedIndex {
         root: impl AsRef<Path>,
         lease: &GenerationReadLease,
     ) -> Result<Self> {
+        Self::open_generation_read_lease_with_verification(
+            root.as_ref(),
+            lease,
+            ReopenPhysicalVerification::ReadOnly,
+        )
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn open_generation_read_lease_with_pointer(
+        lease: &GenerationReadLease,
+        pointer: &ActiveGenerationPointer,
+    ) -> Result<Self> {
+        lease
+            .with_root_access(|root| {
+                Self::open_slot(
+                    root,
+                    pointer,
+                    lease.target(),
+                    ReopenPhysicalVerification::VerifyOrCertify,
+                    |actual_generation_id| IndexError::PinnedGenerationMismatch {
+                        expected_generation_id: lease.generation_id().to_owned(),
+                        actual_generation_id,
+                    },
+                )
+            })
+            .map_err(IndexError::from)?
+    }
+
+    fn open_generation_read_lease_with_verification(
+        root: &Path,
+        lease: &GenerationReadLease,
+        physical_verification: ReopenPhysicalVerification,
+    ) -> Result<Self> {
         let control_directory =
             DurableMmapDirectory::open(root).map_err(tantivy::TantivyError::from)?;
         let root = control_directory.root_path().to_path_buf();
@@ -202,7 +328,7 @@ impl VerifiedIndex {
             &root,
             &first_pointer,
             lease.target(),
-            ReopenPhysicalVerification::ReadOnly,
+            physical_verification,
             |actual_generation_id| IndexError::PinnedGenerationMismatch {
                 expected_generation_id: lease.generation_id().to_owned(),
                 actual_generation_id,
@@ -218,7 +344,7 @@ impl VerifiedIndex {
             &root,
             &observed_pointer,
             lease.target(),
-            ReopenPhysicalVerification::ReadOnly,
+            physical_verification,
             |actual_generation_id| IndexError::PinnedGenerationMismatch {
                 expected_generation_id: lease.generation_id().to_owned(),
                 actual_generation_id,
@@ -246,6 +372,30 @@ impl VerifiedIndex {
             pinned_generation_id,
             |root| load_active_generation_pointer(root).map_err(IndexError::from),
         )
+    }
+
+    /// Opens the retained peer selected and leased with this reader.
+    #[doc(hidden)]
+    pub fn open_retained_generation_peer_for_reader(
+        &self,
+        root: impl AsRef<Path>,
+    ) -> Result<Option<Self>> {
+        if let Some(lease) = self._retained_peer_read_lease.as_deref() {
+            return lease
+                .with_root_access(|root| {
+                    Self::open_generation_read_lease_with_verification(
+                        root,
+                        lease,
+                        ReopenPhysicalVerification::VerifyOrCertify,
+                    )
+                })
+                .map_err(IndexError::from)?
+                .map(Some);
+        }
+        if self._generation_read_lease.is_some() {
+            return Ok(None);
+        }
+        Self::open_retained_generation_peer(root, self.generation_id())
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -427,18 +577,53 @@ impl VerifiedIndex {
                     .map(|slot| slot.generation_id().to_owned()),
             });
         };
-        Self::open_slot(
-            root,
-            pointer,
-            slot,
-            ReopenPhysicalVerification::VerifyOrCertify,
-            |actual_generation_id| IndexError::PinnedGenerationMismatch {
-                expected_generation_id: expected_generation_id.to_owned(),
-                actual_generation_id,
-            },
-        )
+        let (lease, retained_peer_lease) = if slot.generation_id()
+            == pointer.active().generation_id()
+            || pointer
+                .previous()
+                .is_some_and(|peer| peer.generation_id() == slot.generation_id())
+        {
+            match Self::acquire_pointer_read_leases(root, pointer, slot) {
+                Ok(leases) => leases,
+                Err(lease_error @ IndexError::GenerationRetentionLeaseTargetNotRetained { .. }) => {
+                    match Self::open_slot(
+                        root,
+                        pointer,
+                        slot,
+                        ReopenPhysicalVerification::VerifyOrCertify,
+                        |actual_generation_id| IndexError::PinnedGenerationMismatch {
+                            expected_generation_id: expected_generation_id.to_owned(),
+                            actual_generation_id,
+                        },
+                    ) {
+                        Err(error) => return Err(error),
+                        Ok(_) => return Err(lease_error),
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+        } else {
+            let authority = lease.ok_or(IndexError::GenerationRetentionLeaseOwnerMismatch)?;
+            (
+                acquire_retained_generation_read_lease(root, authority)?,
+                None,
+            )
+        };
+        let mut index = lease
+            .with_root_access(|root| {
+                Self::open_generation_read_lease_with_verification(
+                    root,
+                    &lease,
+                    ReopenPhysicalVerification::VerifyOrCertify,
+                )
+            })
+            .map_err(IndexError::from)??;
+        index._generation_read_lease = Some(Box::new(lease));
+        index._retained_peer_read_lease = retained_peer_lease.map(Box::new);
+        Ok(index)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     fn open_inner(root: &Path, physical_verification: ReopenPhysicalVerification) -> Result<Self> {
         if !root.is_dir() {
             return Err(IndexError::MissingActiveGenerationPointer);
@@ -488,7 +673,20 @@ impl VerifiedIndex {
         }
         match physical_verification {
             ReopenPhysicalVerification::VerifyOrCertify => {
-                verify_or_certify_physical_integrity(root, pointer, slot, &index)?;
+                match verify_or_certify_physical_integrity(root, pointer, slot, &index) {
+                    Ok(_) => {}
+                    Err(
+                        ctx_history_index_generation::GenerationError::ConcurrentGenerationChange,
+                    ) => {
+                        verify_physical_integrity(
+                            &index,
+                            &slot_path(root, slot),
+                            None,
+                            slot.physical_integrity_digest(),
+                        )?;
+                    }
+                    Err(error) => return Err(error.into()),
+                }
             }
             ReopenPhysicalVerification::ReadOnly => {
                 verify_physical_integrity_read_only(root, slot, &index)?;
@@ -505,6 +703,8 @@ impl VerifiedIndex {
             generation_id,
             publication_metadata,
             semantic_eligibility_postings: OnceLock::new(),
+            _generation_read_lease: None,
+            _retained_peer_read_lease: None,
         })
     }
 
@@ -520,6 +720,8 @@ impl VerifiedIndex {
             generation_id,
             publication_metadata,
             semantic_eligibility_postings: OnceLock::new(),
+            _generation_read_lease: None,
+            _retained_peer_read_lease: None,
         }
     }
 
@@ -590,4 +792,29 @@ pub fn reset_verified_index_publication_construction_count() {
 #[cfg(any(test, feature = "test-support"))]
 pub fn verified_index_publication_construction_count() -> usize {
     VERIFIED_INDEX_PUBLICATION_CONSTRUCTION_COUNT.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generation_reclamation_conflicts_are_selection_races() {
+        assert!(generation_selection_raced(
+            &IndexError::GenerationRetentionLeaseConflict {
+                retained_generation_id: "a".repeat(64),
+                owner_kind: "generation_reclamation".to_owned(),
+            }
+        ));
+    }
+
+    #[test]
+    fn unrelated_retention_conflicts_are_not_selection_races() {
+        assert!(!generation_selection_raced(
+            &IndexError::GenerationRetentionLeaseConflict {
+                retained_generation_id: "a".repeat(64),
+                owner_kind: "another_owner".to_owned(),
+            }
+        ));
+    }
 }

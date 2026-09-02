@@ -36,14 +36,14 @@ pub(crate) fn open_generation_read(
 }
 
 fn open_retained_peer(current: &VerifiedIndex, index_root: &Path) -> Result<Option<VerifiedIndex>> {
-    let retained_peer = VerifiedIndex::open_retained_generation_peer(
-        index_root,
-        current.generation_id(),
-    )
-    .map_err(|error| match error {
-        IndexError::PinnedGenerationNotRetained { .. } => IndexError::ConcurrentGenerationChange,
-        error => error,
-    })?;
+    let retained_peer = current
+        .open_retained_generation_peer_for_reader(index_root)
+        .map_err(|error| match error {
+            IndexError::PinnedGenerationNotRetained { .. } => {
+                IndexError::ConcurrentGenerationChange
+            }
+            error => error,
+        })?;
     if let Some(peer) = retained_peer.as_ref() {
         verify_generation_query_authority(peer).map_err(anyhow::Error::new)?;
     }

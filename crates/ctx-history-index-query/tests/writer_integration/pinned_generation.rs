@@ -201,6 +201,39 @@ fn pinned_generation_retries_once_when_the_publication_pointer_changes() {
 }
 
 #[test]
+fn active_generation_open_retries_after_selected_generation_is_evicted() {
+    let temp = tempdir().unwrap();
+    let source = source("active-selection-race.jsonl");
+    publish_pinned_test_generation(temp.path(), &source, 1, "first evidence");
+    let first_pointer = load_active_generation_pointer(temp.path())
+        .unwrap()
+        .unwrap();
+    let mut pointer_reads = 0;
+    let mut newest = None;
+
+    let index = VerifiedIndex::open_pinned_with_pointer_loader(temp.path(), |root| {
+        pointer_reads += 1;
+        if pointer_reads == 1 {
+            publish_pinned_test_generation(root, &source, 2, "second evidence");
+            newest = Some(publish_pinned_test_generation(
+                root,
+                &source,
+                3,
+                "third evidence",
+            ));
+            return Ok(Some(first_pointer.clone()));
+        }
+        load_active_generation_pointer(root)
+    })
+    .unwrap();
+
+    let newest = newest.expect("the selection hook did not publish replacements");
+    assert_eq!(pointer_reads, 2, "active selection retried more than once");
+    assert_eq!(index.generation_id(), newest.generation_id);
+    assert_eq!(index.count_term("third").unwrap(), 1);
+}
+
+#[test]
 fn retained_peer_retry_pairs_a_pinned_generation_with_the_new_active_generation() {
     let temp = tempdir().unwrap();
     let source = source("retained-peer-pointer-race.jsonl");
@@ -383,17 +416,24 @@ fn pinned_generation_real_publication_evicts_previous_and_fails_closed_with_vali
     );
     #[cfg(not(windows))]
     assert!(
-        !expected_path.exists(),
-        "the evicted generation directory was not reclaimed"
+        expected_path.exists(),
+        "the exact reader did not retain its generation"
     );
     assert!(first_reader_valid_during_reclamation);
     assert_eq!(first_reader.count_term("first").unwrap(), 1);
     assert_eq!(first_reader.count_term("second").unwrap(), 0);
     assert_eq!(first_reader.count_term("third").unwrap(), 0);
+    drop(first_reader);
+    publish_pinned_test_generation(temp.path(), &source, 4, "fourth evidence");
+    #[cfg(not(windows))]
+    assert!(
+        !expected_path.exists(),
+        "the generation was not reclaimed after its exact reader dropped"
+    );
 }
 
 #[test]
-fn open_previous_generation_decodes_core_body_after_real_reclamation() {
+fn active_reader_lease_retains_generation_until_drop() {
     const BODY: &str = "complete generation-owned body survives real reclamation";
 
     let temp = tempdir().unwrap();
@@ -402,8 +442,7 @@ fn open_previous_generation_decodes_core_body_after_real_reclamation() {
     let first = publish_pinned_test_generation(temp.path(), &source, 1, BODY);
     #[cfg(not(windows))]
     let first_path = active_generation_path(temp.path());
-    let first_reader =
-        VerifiedIndex::open_pinned_generation(temp.path(), &first.generation_id).unwrap();
+    let first_reader = VerifiedIndex::open_pinned(temp.path()).unwrap();
 
     let second = publish_pinned_test_generation(temp.path(), &source, 2, "second body");
     let pointer_with_first_retained = load_active_generation_pointer(temp.path())
@@ -434,8 +473,8 @@ fn open_previous_generation_decodes_core_body_after_real_reclamation() {
     );
     #[cfg(not(windows))]
     assert!(
-        !first_path.exists(),
-        "the evicted generation directory was not reclaimed"
+        first_path.exists(),
+        "the live reader generation was reclaimed"
     );
 
     let decoded = first_reader
@@ -459,4 +498,34 @@ fn open_previous_generation_decodes_core_body_after_real_reclamation() {
             && active_generation_id == third.generation_id
             && previous_generation_id == second.generation_id
     ));
+
+    drop(first_reader);
+    publish_pinned_test_generation(temp.path(), &source, 4, "fourth body");
+    #[cfg(not(windows))]
+    assert!(
+        !first_path.exists(),
+        "the dropped reader generation was not reclaimed"
+    );
+}
+
+#[test]
+fn leased_reader_survives_a_stale_verification_pointer_after_two_publications() {
+    let temp = tempdir().unwrap();
+    let source = source("leased-verification-pointer-race.jsonl");
+    let first = publish_pinned_test_generation(temp.path(), &source, 1, "first evidence");
+    let first_pointer = load_active_generation_pointer(temp.path())
+        .unwrap()
+        .unwrap();
+    let lease = ctx_history_index_generation::acquire_generation_read_lease(
+        temp.path(),
+        &first.generation_id,
+    )
+    .unwrap();
+    publish_pinned_test_generation(temp.path(), &source, 2, "second evidence");
+    publish_pinned_test_generation(temp.path(), &source, 3, "third evidence");
+
+    let index =
+        VerifiedIndex::open_generation_read_lease_with_pointer(&lease, &first_pointer).unwrap();
+    assert_eq!(index.generation_id(), first.generation_id);
+    assert_eq!(index.count_term("first").unwrap(), 1);
 }
