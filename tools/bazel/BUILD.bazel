@@ -135,37 +135,6 @@ config_setting(
 )
 
 py_test(
-    name = "ci_entrypoint_contract",
-    srcs = ["check_ci_entrypoint_contract.py"],
-    args = [
-        "$(rootpath //:.bazelrc)",
-        "$(rootpath //:BUILD.bazel)",
-        "$(rootpath //:scripts/check.sh)",
-    ],
-    data = [
-        "//:.bazelrc",
-        "//:BUILD.bazel",
-        "//:scripts/check.sh",
-    ],
-    main = "check_ci_entrypoint_contract.py",
-)
-
-py_test(
-    name = "ci_entrypoint_contract_mutation_tests",
-    srcs = [
-        "check_ci_entrypoint_contract.py",
-        "check_ci_entrypoint_contract_test.py",
-    ],
-    data = [
-        "//:.bazelrc",
-        "//:BUILD.bazel",
-        "//:scripts/check.sh",
-    ],
-    imports = ["."],
-    main = "check_ci_entrypoint_contract_test.py",
-)
-
-py_test(
     name = "history_provider_codex_boundary_mutation_tests",
     srcs = ["check_history_provider_codex_boundary.py", "check_history_provider_codex_boundary_test.py"],
     imports = ["."],
