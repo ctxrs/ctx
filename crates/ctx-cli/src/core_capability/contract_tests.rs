@@ -810,7 +810,6 @@ fn protocol_stream_orders_progress_before_the_single_terminal_response() {
         "data_root": root.path(),
         "operation": "CoreSetup",
         "options": {
-            "catalog_only": false,
             "defer_fresh_empty_wait": false,
             "no_daemon": false,
             "notice_lines": [],
@@ -1408,7 +1407,6 @@ fn managed_waited_refresh_failure_is_not_reported_as_setup_success() {
 #[test]
 fn managed_setup_presentation_options_are_closed_and_bounded() {
     let options = json!({
-        "catalog_only": false,
         "defer_fresh_empty_wait": true,
         "no_daemon": false,
         "notice_lines": ["approved line", "", "https://companion.example.test/opaque"],
@@ -1460,7 +1458,6 @@ fn managed_setup_presentation_options_are_closed_and_bounded() {
     assert!(parse_options(Operation::CoreSetup, &invalid).is_err());
 
     let mut oversized = json!({
-        "catalog_only": false,
         "defer_fresh_empty_wait": true,
         "no_daemon": false,
         "notice_lines": ["x".repeat(513)],

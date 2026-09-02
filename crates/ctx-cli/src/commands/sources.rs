@@ -19,7 +19,7 @@ pub(crate) fn run_sources(
             ui,
         );
     };
-    if args.provider.is_some() || args.all || args.show_missing {
+    if args.provider.is_some() || args.all {
         anyhow::bail!("source listing filters cannot be combined with add or remove");
     }
     let operation = match &command {

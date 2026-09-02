@@ -528,7 +528,7 @@ class SmallQueryShowPerformanceTest(unittest.TestCase):
             fixture_path, fixture_bytes = write_codex_fixture(home)
             env = isolated_env(root, home)
             run_checked(
-                ["setup", "--catalog-only", "--no-daemon", "--progress", "none"],
+                ["setup", "--no-daemon", "--progress", "none"],
                 env,
                 root,
             )
@@ -983,7 +983,7 @@ class TopProviderColdRefreshPerformanceTest(unittest.TestCase):
             self.assertLessEqual(corpus.fixture_bytes, 64 * 1024 * 1024)
             env = isolated_env(root, home)
             run_checked(
-                ["setup", "--catalog-only", "--no-daemon", "--progress", "none"],
+                ["setup", "--no-daemon", "--progress", "none"],
                 env,
                 root,
             )

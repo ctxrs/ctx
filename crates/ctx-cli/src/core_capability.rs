@@ -48,10 +48,10 @@ const POST_EXIT_UNINSTALL_INVOCATION: &str = "--ctx-core-managed-pair-uninstall-
 const MAX_FRAME_BYTES: usize = 64 * 1024;
 const MAX_RESPONSE_BYTES: usize = 48 * 1024;
 #[cfg(test)]
-const API_INVENTORY: &str = r#"{"event_frames":{"Refresh":{"current_source_progress_keys":["logical_certified_bytes","logical_rows_scanned","snapshot_bytes_completed","snapshot_bytes_total","snapshot_pages_completed","snapshot_pages_total","stage"],"frame_keys":["event","operation","protocol_version","refresh","schema_version","sequence","type"],"refresh_keys":["completed_bytes","completed_records","completed_sources","current_source","current_source_progress","elapsed_millis","estimated_remaining_millis","logical_phase","maintenance_wake","phase","physical_attempt_id","physical_attempt_state","processed_bytes","processed_messages","processed_sessions","processed_tool_calls","progress_owner_attempt_state","progress_owner_request_id","providers","request_id","request_state","terminal_state","total_sources","total_sources_known","whole_run_stage"],"terminal_state_details_keys":["affected_routes","blocked_routes","class","physical_attempt_id","published_generation","retained_generation","retry_advice","retryable_routes"],"terminal_state_keys":["details","error_code","retryable"]}},"operations":{"CoreDoctor":{"request_keys":[],"response_keys":["facts"]},"CoreSetup":{"request_keys":["catalog_only","defer_fresh_empty_wait","no_daemon","notice_lines","progress","semantic","wait"],"request_values":{"progress":["auto","events","json","none","plain"]},"response_keys":["facts","generation_id"]},"CoreStatus":{"request_keys":["usage"],"response_keys":["facts"]},"LocalUsageSummary":{"request_keys":[],"response_keys":["facts"]},"ManagedPairAbort":{"request_keys":["attempt_id"],"response_keys":["aborted"]},"ManagedPairBegin":{"request_keys":[],"response_keys":["attempt_id","candidate_root"]},"ManagedPairStage":{"request_keys":["attempt_id"],"response_keys":["attempt_id","release_name","rollback_generation","status"]},"ManagedPairStatus":{"request_keys":["attempt_id"],"response_keys":["status"]},"ManagedPairUninstall":{"request_keys":[],"response_keys":["attempt_id","cleanup_mode","status"]},"RefreshAndWait":{"optional_request_keys":["progress"],"request_keys":[],"request_values":{"progress":["events"]},"response_keys":["facts","generation_id"]},"WakeRefresh":{"request_keys":[],"response_keys":["accepted","analytics_enabled"]}},"protocol":"ctx-core-capability","schema_version":1,"terminal_failure":{"classes":["control_plane","corruption","coverage","incompatible","internal","mixed","resource_unavailable","source_changed","unavailable","unreadable"],"details_keys":["affected_routes","blocked_routes","class","physical_attempt_id","retained_generation","retry_advice","retryable_routes"],"error_codes":["all_provider_terminal_coverage_unavailable","index_corruption","index_incompatible","logical_source_failures","malformed_source","resource_unavailable","source_changed","source_failures","source_refresh_admission_failed","source_refresh_failed","source_refresh_internal","source_unavailable","source_unclaimed","unsupported_schema"],"response_keys":["details","error_code","ok","operation","protocol_version","retryable","schema_version"],"retry_advice":["inspect_sources","rebuild_index","retry_admission","retry_affected_routes","retry_finalization","retry_request","retry_retryable_routes_and_inspect_blocked","upgrade_or_reconfigure"]}}"#;
+const API_INVENTORY: &str = r#"{"event_frames":{"Refresh":{"current_source_progress_keys":["logical_certified_bytes","logical_rows_scanned","snapshot_bytes_completed","snapshot_bytes_total","snapshot_pages_completed","snapshot_pages_total","stage"],"frame_keys":["event","operation","protocol_version","refresh","schema_version","sequence","type"],"refresh_keys":["completed_bytes","completed_records","completed_sources","current_source","current_source_progress","elapsed_millis","estimated_remaining_millis","logical_phase","maintenance_wake","phase","physical_attempt_id","physical_attempt_state","processed_bytes","processed_messages","processed_sessions","processed_tool_calls","progress_owner_attempt_state","progress_owner_request_id","providers","request_id","request_state","terminal_state","total_sources","total_sources_known","whole_run_stage"],"terminal_state_details_keys":["affected_routes","blocked_routes","class","physical_attempt_id","published_generation","retained_generation","retry_advice","retryable_routes"],"terminal_state_keys":["details","error_code","retryable"]}},"operations":{"CoreDoctor":{"request_keys":[],"response_keys":["facts"]},"CoreSetup":{"request_keys":["defer_fresh_empty_wait","no_daemon","notice_lines","progress","semantic","wait"],"request_values":{"progress":["auto","events","json","none","plain"]},"response_keys":["facts","generation_id"]},"CoreStatus":{"request_keys":["usage"],"response_keys":["facts"]},"LocalUsageSummary":{"request_keys":[],"response_keys":["facts"]},"ManagedPairAbort":{"request_keys":["attempt_id"],"response_keys":["aborted"]},"ManagedPairBegin":{"request_keys":[],"response_keys":["attempt_id","candidate_root"]},"ManagedPairStage":{"request_keys":["attempt_id"],"response_keys":["attempt_id","release_name","rollback_generation","status"]},"ManagedPairStatus":{"request_keys":["attempt_id"],"response_keys":["status"]},"ManagedPairUninstall":{"request_keys":[],"response_keys":["attempt_id","cleanup_mode","status"]},"RefreshAndWait":{"optional_request_keys":["progress"],"request_keys":[],"request_values":{"progress":["events"]},"response_keys":["facts","generation_id"]},"WakeRefresh":{"request_keys":[],"response_keys":["accepted","analytics_enabled"]}},"protocol":"ctx-core-capability","schema_version":1,"terminal_failure":{"classes":["control_plane","corruption","coverage","incompatible","internal","mixed","resource_unavailable","source_changed","unavailable","unreadable"],"details_keys":["affected_routes","blocked_routes","class","physical_attempt_id","retained_generation","retry_advice","retryable_routes"],"error_codes":["all_provider_terminal_coverage_unavailable","index_corruption","index_incompatible","logical_source_failures","malformed_source","resource_unavailable","source_changed","source_failures","source_refresh_admission_failed","source_refresh_failed","source_refresh_internal","source_unavailable","source_unclaimed","unsupported_schema"],"response_keys":["details","error_code","ok","operation","protocol_version","retryable","schema_version"],"retry_advice":["inspect_sources","rebuild_index","retry_admission","retry_affected_routes","retry_finalization","retry_request","retry_retryable_routes_and_inspect_blocked","upgrade_or_reconfigure"]}}"#;
 #[cfg(test)]
 pub(crate) const API_FINGERPRINT: &str =
-    "73e1caffd18462f24f16bfedf99581b4d3062a22e2ecfbd00110cd61fbd66352";
+    "826e3b4feecae5bca9c82d686af8e4ec2ffbfea1516b3952e8bc262cf9611b05";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Operation {
@@ -217,7 +217,6 @@ enum Options {
 }
 
 struct CoreSetupOptions {
-    catalog_only: bool,
     defer_fresh_empty_wait: bool,
     no_daemon: bool,
     notice_lines: Vec<String>,
@@ -440,7 +439,6 @@ fn core_setup_facts(
     events: &mut dyn CapabilityEventSink,
 ) -> Result<Value> {
     let CoreSetupOptions {
-        catalog_only,
         defer_fresh_empty_wait,
         no_daemon,
         notice_lines,
@@ -487,7 +485,6 @@ fn core_setup_facts(
     let source_epoch = crate::semantic::source_epoch_status_report(data_root, &config)?;
     bounded_setup_facts(
         json!({
-            "deprecated_catalog_only_ignored": catalog_only,
             "daemon_requested": daemon_requested,
             "refresh_request": refresh_request,
             "semantic_enabled": config.semantic_search_enabled(),
@@ -568,7 +565,6 @@ fn parse_options(operation: Operation, value: &Value) -> Result<Options> {
     }
     let expected: &[&str] = match operation {
         Operation::CoreSetup => &[
-            "catalog_only",
             "defer_fresh_empty_wait",
             "no_daemon",
             "notice_lines",
@@ -590,7 +586,6 @@ fn parse_options(operation: Operation, value: &Value) -> Result<Options> {
     exact_keys(object.keys().map(String::as_str), expected.iter().copied())?;
     match operation {
         Operation::CoreSetup => Ok(Options::Setup(CoreSetupOptions {
-            catalog_only: required_bool(object, "catalog_only")?,
             defer_fresh_empty_wait: required_bool(object, "defer_fresh_empty_wait")?,
             no_daemon: required_bool(object, "no_daemon")?,
             notice_lines: setup_notice_lines(object)?,

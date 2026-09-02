@@ -38,7 +38,6 @@ Writes local storage and returns schema version 2:
 - `semantic`;
 - `daemon`;
 - `daemon_autostart`;
-- `deprecated_catalog_only_ignored`;
 - `source_rebuild_required`;
 
 In automatic indexing mode, human and machine-readable setup both health-check
@@ -73,9 +72,7 @@ Setup does not perform a foreground provider import. `--wait` waits for the
 daemon-owned Core refresh; without it, setup requests a background Core
 refresh. When that first request finds zero sources and no prior publication,
 setup attaches long enough to certify a verified empty Core generation instead
-of returning an uncertified pending state. The deprecated `--catalog-only` flag
-is reported by `deprecated_catalog_only_ignored` and does not change the
-persistent lifecycle.
+of returning an uncertified pending state.
 Use `ctx status --format json` for complete process, supervisor, and applied
 configuration health.
 

@@ -191,7 +191,6 @@ class SourceFamilyColdRefreshPerformanceTest(unittest.TestCase):
                     run_checked(
                         [
                             "setup",
-                            "--catalog-only",
                             "--no-daemon",
                             "--progress",
                             "none",

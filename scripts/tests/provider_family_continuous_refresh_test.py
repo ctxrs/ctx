@@ -267,7 +267,7 @@ class ProviderFamilyContinuousRefreshTest(unittest.TestCase):
                 try:
                     env = isolated_env(root, home)
                     run_checked(
-                        ["setup", "--catalog-only", "--no-daemon", "--progress", "none"],
+                        ["setup", "--no-daemon", "--progress", "none"],
                         env,
                         root,
                     )

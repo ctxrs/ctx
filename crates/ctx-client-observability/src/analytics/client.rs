@@ -138,7 +138,6 @@ impl SetupMode {
 
 #[derive(Debug)]
 pub struct SetupTelemetry {
-    pub catalog_only: bool,
     pub no_daemon: bool,
     pub wait: bool,
     pub progress_mode: ProgressMode,
@@ -254,7 +253,6 @@ pub struct IndexTelemetry {
 #[derive(Debug)]
 pub struct SourcesTelemetry {
     pub all: bool,
-    pub show_missing: bool,
     pub provider_filter: Option<CaptureProvider>,
     pub providers_detected: Option<CountBucket>,
     pub providers_existing: Option<CountBucket>,

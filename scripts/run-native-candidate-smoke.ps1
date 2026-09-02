@@ -805,7 +805,7 @@ try {
         [void](Invoke-Ctx @("pro", "--help"))
     }
 
-    [void](Invoke-Ctx @("setup", "--catalog-only", "--no-daemon", "--progress", "none"))
+    [void](Invoke-Ctx @("setup", "--no-daemon", "--progress", "none"))
     $importArguments = @(
         "import", "--input-format", "ctx-history-jsonl-v2", "--path", $Fixture,
         "--no-daemon", "--format=json", "--progress", "none"

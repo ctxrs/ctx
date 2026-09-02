@@ -432,12 +432,7 @@ fn public_subcommand_help_is_golden_enough_for_session_retrieval() {
     for (command, required) in [
         (
             "setup",
-            vec![
-                "Usage: ctx setup",
-                "--catalog-only",
-                "Deprecated and ignored; setup follows its normal refresh lifecycle",
-                "--format <FORMAT>",
-            ],
+            vec!["Usage: ctx setup", "--no-daemon", "--format <FORMAT>"],
         ),
         (
             "semantic",
@@ -593,6 +588,27 @@ fn public_subcommand_help_is_golden_enough_for_session_retrieval() {
         if command == "setup" {
             assert!(!help.contains("--semantic"), "{help}");
         }
+    }
+}
+
+#[test]
+fn removed_compatibility_flags_use_clap_unknown_argument_errors() {
+    let temp = tempdir();
+    for (command, flag) in [
+        ("setup", "--catalog-only"),
+        ("setup", "--no-import"),
+        ("import", "--partial"),
+        ("sources", "--show-missing"),
+    ] {
+        ctx(&temp)
+            .args([command, flag])
+            .assert()
+            .failure()
+            .code(2)
+            .stderr(predicate::str::contains(format!(
+                "unexpected argument '{flag}' found"
+            )))
+            .stderr(predicate::str::contains("Usage:"));
     }
 }
 

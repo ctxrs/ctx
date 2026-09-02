@@ -19,8 +19,7 @@ ctx-created document chunks documented below.
   transcript formats, and in automatic indexing mode can start persistent
   background indexing. Manual indexing runs no persistent or background daemon.
   `ctx setup --no-daemon` is the one-run daemon-autostart opt-out. Output format
-  does not change setup autostart behavior. The deprecated `--catalog-only` flag
-  is ignored and does not change setup behavior.
+  does not change setup autostart behavior.
 - `ctx sources` reports known local provider history paths, including whether a
   native source is currently importable.
 - `ctx sources add [--replace]` and `ctx sources remove` safely edit named

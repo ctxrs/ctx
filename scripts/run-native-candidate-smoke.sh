@@ -346,7 +346,7 @@ if [ "${pair_mode}" = true ]; then
 fi
 
 run_bounded "${root}/setup.out" "${root}/setup.err" \
-  ctx setup --catalog-only --no-daemon --progress none || {
+  ctx setup --no-daemon --progress none || {
   cat "${root}/setup.err" >&2
   exit 1
 }

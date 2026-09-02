@@ -114,10 +114,6 @@ pub(crate) fn run_setup(
             &supervisor,
         ),
     );
-    output_fields.insert(
-        "deprecated_catalog_only_ignored".to_owned(),
-        json!(args.catalog_only),
-    );
     output_fields.insert("network_required".to_owned(), json!(false));
     output_fields.insert("repo_writes".to_owned(), json!(false));
 

@@ -310,7 +310,6 @@ fn insert_client_operation_properties(
 ) {
     match operation {
         CliOperation::Setup(value) => {
-            insert_bool(properties, "catalog_only", value.catalog_only);
             insert_bool(properties, "no_daemon", value.no_daemon);
             insert_bool(properties, "wait", value.wait);
             insert_str(properties, "progress_mode", value.progress_mode.as_str());
@@ -399,7 +398,6 @@ fn insert_client_operation_properties(
         }
         CliOperation::Sources(value) => {
             insert_bool(properties, "all_sources", value.all);
-            insert_bool(properties, "show_missing", value.show_missing);
             insert_optional_provider(properties, "provider_filter", value.provider_filter);
             insert_optional_count(
                 properties,

@@ -25,12 +25,6 @@ pub(crate) fn run_import(
     ui: &mut Ui,
 ) -> Result<()> {
     let json = args.format.is_json();
-    let machine_output = json || args.progress == crate::progress::ProgressArg::Json;
-    if args.partial && !machine_output {
-        let document =
-            ctx_cli_presentation::commands::render_partial_deprecation(ui.stderr_context());
-        ui.write_stderr(&document)?;
-    }
     let request = import_request(&args);
     provider_refreshes.start_timing();
     let mut host =
@@ -182,7 +176,6 @@ fn import_request(args: &ImportArgs) -> ctx_history_cli::ImportRequest {
             .map(|_| ctx_history_cli::ImportFormat::CtxHistoryJsonlV2),
         all: args.all,
         resume: args.resume,
-        partial: args.partial,
         no_daemon: args.no_daemon,
         format: if args.format.is_json() {
             ctx_history_cli::OutputFormat::Json

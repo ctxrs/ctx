@@ -187,8 +187,7 @@ The exact words can change, but the output must communicate:
 
 `ctx setup --format json` reports the same counts/status as structured fields;
 output format does not change daemon-autostart behavior. `ctx setup --no-daemon`
-is the one-run daemon-autostart opt-out. The deprecated `--catalog-only` flag is
-ignored and does not change setup behavior.
+is the one-run daemon-autostart opt-out.
 
 The long-lived daemon reloads effective daemon and semantic configuration
 between maintenance cycles. A later supported semantic opt-in plus repeat setup
@@ -276,7 +275,7 @@ The setup command owns:
 - creating the data root/config/store
 - source discovery and scanning
 - persistent daemon autostart only in automatic mode and unless explicitly
-  disabled with `--no-daemon`; the deprecated `--catalog-only` flag is ignored
+  disabled with `--no-daemon`
 - printing initial background indexing estimates and status commands
 - queueing model acquisition for the daemon without downloading in the setup
   process
