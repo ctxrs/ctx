@@ -38,14 +38,6 @@ const DIRECT_OUTPUT_BOUNDARIES: &[(&str, &[(&str, usize)])] = &[
     ),
     ("crates/ctx-cli/src/companion.rs", &[("stderr()", 3)]),
     (
-        "crates/ctx-cli/src/core_capability.rs",
-        &[("eprintln!", 2), ("stdout()", 1)],
-    ),
-    (
-        "crates/ctx-cli/src/core_capability/managed_pair_apply.rs",
-        &[("stdout()", 1)],
-    ),
-    (
         "crates/ctx-cli/src/dispatch.rs",
         &[("eprintln!", 2), ("stdout()", 1), ("stderr()", 1)],
     ),
@@ -487,11 +479,11 @@ fn forbidden_direct_output_mutations_are_detected() {
     );
     assert_eq!(
         direct_output_counts("std::io::stdout();"),
-        approved_direct_output_counts("crates/ctx-cli/src/core_capability/managed_pair_apply.rs")
+        approved_direct_output_counts("crates/ctx-cli/src/mcp.rs")
     );
     assert_ne!(
         direct_output_counts("std::io::stdout(); std::io::stdout();"),
-        approved_direct_output_counts("crates/ctx-cli/src/core_capability/managed_pair_apply.rs"),
+        approved_direct_output_counts("crates/ctx-cli/src/mcp.rs"),
         "an additional call inside an approved path must be rejected"
     );
 }

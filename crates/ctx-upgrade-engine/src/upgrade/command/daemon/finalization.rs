@@ -59,9 +59,7 @@ where
             started.elapsed(),
         );
     }
-    for warning in warnings {
-        eprintln!("warning: {warning}");
-    }
+    observer.observe_automatic_warnings(data_root, current, &warnings);
     Ok(())
 }
 
@@ -95,18 +93,22 @@ where
     drop(lock);
     let restart = handoff.resume_with(install_path);
     if committed {
+        let mut warnings = Vec::new();
         let automatic = match terminal {
             Ok(automatic) => automatic,
             Err(error) => {
-                eprintln!(
-                    "warning: ctx upgrade is applied, but applied-state recovery is pending: {error:#}"
-                );
+                warnings.push(format!(
+                    "ctx upgrade is applied, but applied-state recovery is pending: {error:#}"
+                ));
                 observe_without_retry_evidence
             }
         };
         if let Err(error) = restart {
-            eprintln!("warning: ctx upgrade is applied, but daemon restart is pending: {error:#}");
+            warnings.push(format!(
+                "ctx upgrade is applied, but daemon restart is pending: {error:#}"
+            ));
         }
+        observer.observe_automatic_warnings(data_root, current, &warnings);
         if automatic {
             send_daemon_upgrade_terminal(
                 observer,

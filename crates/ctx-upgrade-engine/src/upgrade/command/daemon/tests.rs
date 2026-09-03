@@ -14,6 +14,12 @@ use std::{fs, os::unix::fs::PermissionsExt as _, sync::Mutex};
 
 static APPLIED_STATE_WRITE_ENV_LOCK: Mutex<()> = Mutex::new(());
 
+#[derive(Default)]
+struct RecordingObserver {
+    terminals: Mutex<Vec<(String, UpgradeTerminalStatus, bool)>>,
+    warnings: Mutex<Vec<String>>,
+}
+
 impl AutomaticUpgradePolicySnapshot for () {
     fn daemon_maintenance_enabled(&self) -> bool {
         true
@@ -32,14 +38,18 @@ impl AutomaticUpgradePolicySnapshot for () {
     }
 }
 
-impl UpgradeObserver<()> for Mutex<Vec<(String, UpgradeTerminalStatus, bool)>> {
+impl UpgradeObserver<()> for RecordingObserver {
+    fn observe_automatic_warnings(&self, _data_root: &Path, _policy: &(), warnings: &[String]) {
+        self.warnings.lock().unwrap().extend_from_slice(warnings);
+    }
+
     fn observe_automatic_terminal(
         &self,
         _data_root: &Path,
         _policy: &(),
         observation: AutomaticUpgradeObservation<'_>,
     ) {
-        self.lock().unwrap().push((
+        self.terminals.lock().unwrap().push((
             observation.attempt_id.to_owned(),
             observation.status,
             observation.applied,
@@ -168,7 +178,7 @@ fn post_apply_state_and_restart_faults_recover_one_truthful_applied_event() {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let (_temp, data_root, install, lock, attempt, plan) = automatic_fixture(true);
-    let observer = Mutex::new(Vec::new());
+    let observer = RecordingObserver::default();
     let fault_key = "CTX_UPGRADE_FAIL_APPLIED_STATE_WRITE_FOR_TESTS";
     let previous_fault = std::env::var_os(fault_key);
     std::env::set_var(fault_key, attempt.id());
@@ -189,7 +199,7 @@ fn post_apply_state_and_restart_faults_recover_one_truthful_applied_event() {
         Some(value) => std::env::set_var(fault_key, value),
         None => std::env::remove_var(fault_key),
     }
-    assert!(observer.lock().unwrap().is_empty());
+    assert!(observer.terminals.lock().unwrap().is_empty());
     assert_eq!(state_value(&install)["status"], "applying");
 
     let installation = InstallationLock::try_acquire(&install).unwrap().unwrap();
@@ -212,12 +222,20 @@ fn post_apply_state_and_restart_faults_recover_one_truthful_applied_event() {
     .unwrap();
 
     assert_eq!(
-        *observer.lock().unwrap(),
+        *observer.terminals.lock().unwrap(),
         [(
             attempt.id().to_owned(),
             UpgradeTerminalStatus::Applied,
             true
         )]
+    );
+    assert_eq!(
+        *observer.warnings.lock().unwrap(),
+        [
+            "ctx upgrade is applied, but applied-state finalization is pending: injected applied-state write failure",
+            "ctx upgrade is applied, but daemon restart is pending: injected daemon restart failure",
+            "ctx upgrade is applied, but daemon restart is pending: injected recovery restart failure",
+        ]
     );
     let state = state_value(&install);
     assert_eq!(state["status"], "applied");
@@ -232,7 +250,7 @@ fn generic_committed_recovery_state_fault_emits_one_truthful_applied_event() {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let (_temp, data_root, install, lock, attempt, _plan) = automatic_fixture(false);
-    let observer = Mutex::new(Vec::new());
+    let observer = RecordingObserver::default();
     let fault_key = "CTX_UPGRADE_FAIL_APPLIED_STATE_WRITE_FOR_TESTS";
     let previous_fault = std::env::var_os(fault_key);
     std::env::set_var(fault_key, attempt.id());
@@ -256,12 +274,19 @@ fn generic_committed_recovery_state_fault_emits_one_truthful_applied_event() {
         None => std::env::remove_var(fault_key),
     }
     assert_eq!(
-        *observer.lock().unwrap(),
+        *observer.terminals.lock().unwrap(),
         [(
             attempt.id().to_owned(),
             UpgradeTerminalStatus::Applied,
             true
         )]
+    );
+    assert_eq!(
+        *observer.warnings.lock().unwrap(),
+        [
+            "ctx upgrade is applied, but applied-state recovery is pending: injected applied-state write failure",
+            "ctx upgrade is applied, but daemon restart is pending: injected daemon restart failure",
+        ]
     );
     let state = state_value(&install);
     assert_eq!(state["status"], "applying");

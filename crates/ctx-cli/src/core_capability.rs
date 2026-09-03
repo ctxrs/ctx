@@ -109,10 +109,12 @@ pub(crate) fn intercept(arguments: &[std::ffi::OsString]) -> Option<ExitCode> {
         .get(1)
         .is_some_and(|value| value == MANAGED_PAIR_APPLY_INVOCATION)
     {
-        return Some(match managed_pair_apply::run(arguments) {
+        let result =
+            crate::output::with_stdout_writer(|writer| managed_pair_apply::run(arguments, writer));
+        return Some(match result {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
-                eprintln!("{error:#}");
+                crate::output::write_stderr_line(format_args!("{error:#}"));
                 ExitCode::FAILURE
             }
         });
@@ -122,10 +124,13 @@ pub(crate) fn intercept(arguments: &[std::ffi::OsString]) -> Option<ExitCode> {
         .get(1)
         .is_some_and(|value| value == MANAGED_PAIR_RECONCILE_INVOCATION)
     {
-        return Some(match managed_pair_reconcile::run(arguments) {
+        let result = crate::output::with_stdout_writer(|writer| {
+            managed_pair_reconcile::run(arguments, writer)
+        });
+        return Some(match result {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
-                eprintln!("{error:#}");
+                crate::output::write_stderr_line(format_args!("{error:#}"));
                 ExitCode::FAILURE
             }
         });
@@ -137,7 +142,7 @@ pub(crate) fn intercept(arguments: &[std::ffi::OsString]) -> Option<ExitCode> {
         return Some(match run_hosted_uninstall_post_exit(arguments) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
-                eprintln!("{error:#}");
+                crate::output::write_stderr_line(format_args!("{error:#}"));
                 ExitCode::FAILURE
             }
         });
@@ -169,7 +174,9 @@ fn capability_exit_code(result: Result<()>) -> ExitCode {
 }
 
 fn run() -> Result<()> {
-    run_with_protocol_io(std::io::stdin().lock(), std::io::stdout().lock(), execute)
+    crate::output::with_stdout_writer(|writer| {
+        run_with_protocol_io(std::io::stdin().lock(), writer, execute)
+    })
 }
 
 fn run_with_protocol_io(

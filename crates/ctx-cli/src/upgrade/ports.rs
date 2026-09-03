@@ -279,6 +279,31 @@ impl AutomaticUpgradePolicyProvider for CliAutomaticUpgradePolicy {
 pub(crate) struct CliUpgradeObserver;
 
 impl UpgradeObserver<ctx_daemon_cli::DaemonConfigSnapshot> for CliUpgradeObserver {
+    fn observe_automatic_warnings(
+        &self,
+        _data_root: &Path,
+        _config: &ctx_daemon_cli::DaemonConfigSnapshot,
+        warnings: &[String],
+    ) {
+        let mut ui = crate::ui::Ui::stdio(crate::ui::ColorMode::Auto);
+        for warning in warnings {
+            let document = crate::ui::diagnostic(
+                ui.stderr_context(),
+                crate::ui::Diagnostic {
+                    level: crate::ui::DiagnosticLevel::Warning,
+                    summary: warning,
+                    detail: None,
+                    fields: &[],
+                    action: None,
+                },
+            );
+            if ui.write_stderr(&document).is_err() {
+                return;
+            }
+        }
+        let _ = ui.flush();
+    }
+
     fn observe_automatic_terminal(
         &self,
         data_root: &Path,
