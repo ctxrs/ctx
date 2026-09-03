@@ -4,12 +4,8 @@ load("//tools/bazel:binary_contracts.bzl", "ctx_binary_contract_test")
 
 _CONTRACT_SUPPORT_SRCS = [
     "tests/support/mod.rs",
-    "tests/support/analytics.rs",
-    "tests/support/assertions.rs",
-    "tests/support/history_plugins.rs",
-    "tests/support/mcp.rs",
     "tests/support/native_fixtures.rs",
-    "tests/support/runner.rs",
+    "//crates/ctx-cli-contract-tests:contract_support_base",
 ]
 
 _CONTRACT_SUPPORT_DEPS = [

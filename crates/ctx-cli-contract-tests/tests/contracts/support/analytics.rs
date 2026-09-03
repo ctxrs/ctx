@@ -36,7 +36,7 @@ pub(crate) fn start_source_refresh_daemon(
     home: &Path,
     state: &Path,
 ) -> SourceRefreshDaemon {
-    start_source_refresh_daemon_inner(temp, data_root, home, state, None)
+    start_source_refresh_daemon_inner(temp, data_root, home, state, None, None)
 }
 
 pub(crate) fn start_source_refresh_daemon_with_analytics(
@@ -46,7 +46,25 @@ pub(crate) fn start_source_refresh_daemon_with_analytics(
     state: &Path,
     endpoint: &str,
 ) -> SourceRefreshDaemon {
-    start_source_refresh_daemon_inner(temp, data_root, home, state, Some(endpoint))
+    start_source_refresh_daemon_inner(temp, data_root, home, state, Some(endpoint), None)
+}
+
+pub(crate) fn start_source_refresh_daemon_with_provider_env(
+    temp: &TempDir,
+    data_root: &Path,
+    home: &Path,
+    state: &Path,
+    env_name: &str,
+    env_value: &Path,
+) -> SourceRefreshDaemon {
+    start_source_refresh_daemon_inner(
+        temp,
+        data_root,
+        home,
+        state,
+        None,
+        Some((env_name, env_value)),
+    )
 }
 
 fn start_source_refresh_daemon_inner(
@@ -55,6 +73,7 @@ fn start_source_refresh_daemon_inner(
     home: &Path,
     state: &Path,
     analytics_endpoint: Option<&str>,
+    provider_env: Option<(&str, &Path)>,
 ) -> SourceRefreshDaemon {
     fs::create_dir_all(data_root).unwrap();
     fs::write(
@@ -88,6 +107,9 @@ fn start_source_refresh_daemon_inner(
         command
             .env("CTX_ANALYTICS_ENABLED", "true")
             .env("CTX_ANALYTICS_ENDPOINT", endpoint);
+    }
+    if let Some((name, value)) = provider_env {
+        command.env(name, value);
     }
     let child = command
         .spawn()

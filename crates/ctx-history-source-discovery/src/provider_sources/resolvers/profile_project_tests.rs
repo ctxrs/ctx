@@ -5,29 +5,11 @@ use super::super::super::{
 };
 use std::fs;
 
+use super::super::test_support::{
+    assert_automatic_role, provider_source_for_path, resolve_provider as report, tempdir,
+    write_fixture as write,
+};
 use super::*;
-
-fn discover_provider_sources_for_provider_with_context(
-    context: &DiscoveryContext,
-    provider: CaptureProvider,
-) -> DiscoveryReport {
-    crate::provider_sources::discover_provider_sources_for_provider_with_context(
-        &crate::provider_sources::TEST_PROVIDER_PROBES,
-        context,
-        provider,
-    )
-}
-
-fn provider_source_for_path(
-    provider: CaptureProvider,
-    path: PathBuf,
-) -> crate::provider_sources::ProviderSource {
-    crate::provider_sources::provider_source_for_path(
-        &crate::provider_sources::TEST_PROVIDER_PROBES,
-        provider,
-        path,
-    )
-}
 
 fn provider_source_for_path_with_data_root(
     provider: CaptureProvider,
@@ -41,10 +23,6 @@ fn provider_source_for_path_with_data_root(
         data_root,
     )
 }
-fn tempdir() -> tempfile::TempDir {
-    crate::test_support_paths::tempdir().expect("resolver fixture tempdir")
-}
-
 fn context(home: &Path, cwd: &Path) -> DiscoveryContext {
     DiscoveryContext::new(
         home,
@@ -64,23 +42,6 @@ fn windows_context(home: &Path, cwd: &Path, local_data: &Path) -> DiscoveryConte
             ..DiscoveryPlatformDirs::default()
         },
     )
-}
-
-fn write(path: &Path, body: impl AsRef<[u8]>) {
-    fs::create_dir_all(path.parent().expect("fixture parent")).unwrap();
-    fs::write(path, body).unwrap();
-}
-
-fn assert_automatic_role(source: &crate::provider_sources::ProviderSource, components: &[&[u8]]) {
-    let expected =
-        ctx_history_capture_model::ProviderRouteRole::from_dynamic(components.iter().copied())
-            .expect("expected test role should be bounded");
-    assert_eq!(
-        source.route_provenance.automatic_route_role(),
-        Some(&expected),
-        "unexpected route role for {}",
-        source.path.display()
-    );
 }
 
 fn write_openclaw_v17(path: &Path, owner: &str) {
@@ -183,10 +144,6 @@ fn write_nanoclaw_launchd_plist(home: &Path, project: &Path) -> PathBuf {
         ),
     );
     plist
-}
-
-fn report(context: &DiscoveryContext, provider: CaptureProvider) -> DiscoveryReport {
-    discover_provider_sources_for_provider_with_context(context, provider)
 }
 
 #[test]

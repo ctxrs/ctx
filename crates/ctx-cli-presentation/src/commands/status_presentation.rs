@@ -271,27 +271,15 @@ mod tests {
     use ctx_history_read_application::{
         HistoryDataCoverage, HistoryHealthReport, HistoryRootCoverage,
     };
-    use std::io::Write as _;
-    use unicode_width::UnicodeWidthStr as _;
 
     use super::*;
-    use crate::ui::{ColorMode, StreamKind, TestContext};
+    use crate::{
+        test_support::{assert_fits, strip_ansi},
+        ui::{ColorMode, StreamKind, TestContext},
+    };
 
     fn context(width: usize, color: ColorMode) -> RenderContext {
         RenderContext::for_test(TestContext::tty(StreamKind::Stdout, width).color(color))
-    }
-
-    fn assert_fits(document: &Document, context: &RenderContext) {
-        let width = context.content_width().unwrap_or(1);
-        for line in document.render_plain().lines() {
-            assert!(line.width() <= width, "{line:?} exceeded {width} columns");
-        }
-    }
-
-    fn strip_ansi(rendered: &str) -> String {
-        let mut stream = anstream::StripStream::new(Vec::new());
-        stream.write_all(rendered.as_bytes()).unwrap();
-        String::from_utf8(stream.into_inner()).unwrap()
     }
 
     fn status_report(initialized: bool, lexical: &str, refresh: &str) -> Value {

@@ -1,8 +1,3 @@
-use std::{
-    io,
-    sync::{Arc, Mutex},
-};
-
 use serde_json::json;
 
 use super::{
@@ -10,27 +5,8 @@ use super::{
     IndexWaitArgs, IndexWaitHumanOutput, IndexWatchOutput,
 };
 use crate::output::JsonOutputFormat;
+use crate::test_support::SharedWriter;
 use crate::ui::{ColorMode, RenderContext, StreamKind, TestContext, Ui};
-
-#[derive(Clone, Default)]
-struct SharedWriter(Arc<Mutex<Vec<u8>>>);
-
-impl SharedWriter {
-    fn text(&self) -> String {
-        String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
-    }
-}
-
-impl io::Write for SharedWriter {
-    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(buffer);
-        Ok(buffer.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
 
 fn readiness(
     refresh_status: &str,
