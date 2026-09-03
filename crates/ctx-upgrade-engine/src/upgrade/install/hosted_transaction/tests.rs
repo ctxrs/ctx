@@ -3,10 +3,20 @@ use ctx_managed_pair_engine::{
     MANAGED_PAIR_ACTIVE_TRANSACTION_RELATIVE_PATH, MANAGED_PAIR_ENVELOPE_RELATIVE_PATH,
     MANAGED_PAIR_STATE_RELATIVE_PATH,
 };
-use std::{fs, os::unix::fs::PermissionsExt as _};
+use std::{fs, os::unix::fs::PermissionsExt as _, process::Command, time::Duration};
+
+use crate::upgrade::{
+    download::DownloadedArtifact,
+    install::InstallFingerprint,
+    managed_pair::{apply_prepared_install, ManagedPairMode, PreparedCoreArtifact},
+    metadata::ReleaseMetadata,
+    state::{begin_manual_attempt_locked, UpgradeLock},
+    UpgradePlan, TEST_RELEASE_PROCESS, TEST_SEMANTIC_LAYOUT,
+};
 
 const OLD_OWNERSHIP: &[u8] = b"CTX_INSTALL_INTEGRATIONS_V1\nrecords_sha256\told\n";
 const NEW_OWNERSHIP: &[u8] = b"CTX_INSTALL_INTEGRATIONS_V1\nrecords_sha256\tnew\n";
+const SELF_UPGRADE_CHILD_TARGET_ENV: &str = "CTX_SELF_UPGRADE_FENCE_CHILD_TARGET";
 
 #[derive(Clone)]
 struct TestPairVerifier {
@@ -232,6 +242,72 @@ fn arm_pair_uninstall(fixture: &PairFixture) -> (PathBuf, PathBuf, Journal) {
     let path = journal_path(&fixture.install);
     write_initial_journal(&path, &journal).unwrap();
     (helper, path, journal)
+}
+
+fn ordinary_upgrade_plan(install: &Path, next_core: &[u8]) -> UpgradePlan {
+    let artifact_sha256 = sha256_hex(next_core);
+    UpgradePlan {
+        current_version: "1.0.0".to_owned(),
+        latest_version: "1.1.0".to_owned(),
+        channel: "stable".to_owned(),
+        platform: platform_key().unwrap().to_owned(),
+        metadata_url: "https://cli.ctx.rs/releases/stable/metadata".to_owned(),
+        artifact_url: "https://cli.ctx.rs/releases/1.1.0/ctx".to_owned(),
+        artifact_sha256: artifact_sha256.clone(),
+        install_path: install.to_owned(),
+        install_fingerprint: InstallFingerprint {
+            binary_sha256: sha256_hex(&fs::read(install).unwrap()),
+            marker_sha256: sha256_hex(&fs::read(install_marker_path(install)).unwrap()),
+        },
+        update_available: true,
+        managed: true,
+        warnings: Vec::new(),
+        managed_pair_release: None,
+        metadata: ReleaseMetadata {
+            version: "1.1.0".to_owned(),
+            base_url: "https://cli.ctx.rs/releases/1.1.0".to_owned(),
+            artifact: "ctx".to_owned(),
+            sha256: artifact_sha256,
+            source_commit: None,
+            published_at: None,
+            self_upgrade_allowed: true,
+            auto_upgrade_allowed: true,
+            store_schema_version: None,
+            managed_pair: None,
+            onnxruntime: None,
+            semantic: None,
+        },
+        semantic_provisioning: None,
+    }
+}
+
+fn create_crash_before_pending_candidate(fixture: &PairFixture) -> PathBuf {
+    let candidate = fixture.root.join("share/ctx/.managed-pair-apply-v1");
+    for directory in [
+        candidate.clone(),
+        candidate.join("bin"),
+        candidate.join("libexec"),
+        candidate.join("share"),
+        candidate.join("share/ctx"),
+    ] {
+        fs::create_dir(&directory).unwrap();
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    for (source, destination) in [
+        (&fixture.install, candidate.join("bin/ctx")),
+        (
+            &install_marker_path(&fixture.install),
+            candidate.join("bin/ctx.install.json"),
+        ),
+        (&fixture.companion, candidate.join("libexec/ctx-pro")),
+        (
+            &fixture.envelope,
+            candidate.join(MANAGED_PAIR_ENVELOPE_RELATIVE_PATH),
+        ),
+    ] {
+        fs::copy(source, destination).unwrap();
+    }
+    candidate
 }
 
 fn assert_installed(install: &Path, ownership_body: &[u8], point: &str) {
@@ -580,15 +656,100 @@ fn hosted_uninstall_refuses_a_pending_pair_upgrade() {
 }
 
 #[test]
-fn managed_pair_apply_is_fenced_while_hosted_uninstall_waits_for_parent_exit() {
+fn ordinary_self_upgrade_is_fenced_while_hosted_uninstall_waits_for_parent_exit() {
     let fixture = pair_fixture();
-    let (_helper, path, mut journal) = arm_pair_uninstall(&fixture);
-    journal.phase = Phase::Armed;
-    write_journal(&path, &journal).unwrap();
+    let (_helper, path, journal) = arm_pair_uninstall(&fixture);
+    let core_before = fs::read(&fixture.install).unwrap();
+    let marker_before = fs::read(install_marker_path(&fixture.install)).unwrap();
 
-    let error =
-        ensure_hosted_transaction_inactive_under_installation_lock(&fixture.install).unwrap_err();
+    let status = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "upgrade::install::hosted_transaction::tests::ordinary_self_upgrade_child_probe",
+        ])
+        .env(SELF_UPGRADE_CHILD_TARGET_ENV, &fixture.install)
+        .env("CTX_UPGRADE_TEST_TARGET", &fixture.install)
+        .status()
+        .unwrap();
+
+    assert!(status.success());
+    assert_eq!(fs::read(&fixture.install).unwrap(), core_before);
+    assert_eq!(
+        fs::read(install_marker_path(&fixture.install)).unwrap(),
+        marker_before
+    );
+    assert_eq!(read_journal(&path).unwrap().unwrap().phase, Phase::Armed);
+    assert_eq!(journal.phase, Phase::Armed);
+}
+
+#[test]
+fn ordinary_self_upgrade_child_probe() -> Result<()> {
+    let Some(install) = std::env::var_os(SELF_UPGRADE_CHILD_TARGET_ENV) else {
+        return Ok(());
+    };
+    let install = PathBuf::from(install);
+    let data_root = install
+        .parent()
+        .and_then(Path::parent)
+        .unwrap()
+        .join("upgrade-data");
+    fs::create_dir(&data_root)?;
+    fs::set_permissions(&data_root, fs::Permissions::from_mode(0o700))?;
+    let next_core = b"ordinary self-upgrade Core";
+    let plan = ordinary_upgrade_plan(&install, next_core);
+    let lock = UpgradeLock::acquire(&data_root)?;
+    let attempt = begin_manual_attempt_locked(&data_root, &lock, "manual_apply")?;
+    let mut core = PreparedCoreArtifact::Legacy(DownloadedArtifact::from_bytes(
+        &data_root,
+        next_core,
+        MAX_BINARY_BYTES,
+        "ordinary self-upgrade Core",
+    )?);
+    let mut before_publish_called = false;
+    let error = apply_prepared_install(
+        &TEST_RELEASE_PROCESS,
+        &TEST_SEMANTIC_LAYOUT,
+        &lock,
+        &plan,
+        &ManagedPairMode::CoreOnly,
+        &mut core,
+        None,
+        &mut [],
+        &data_root,
+        &attempt,
+        Duration::from_secs(3600),
+        None,
+        &mut || {
+            before_publish_called = true;
+            Ok(())
+        },
+    )
+    .unwrap_err();
+
     assert!(format!("{error:#}").contains("finish the pending hosted installation transaction"));
+    assert!(!before_publish_called);
+    Ok(())
+}
+
+#[test]
+fn hosted_uninstall_cleans_candidate_orphaned_before_pending_publication() {
+    let fixture = pair_fixture();
+    let orphan = create_crash_before_pending_candidate(&fixture);
+    assert!(orphan.is_dir());
+    assert!(!fixture
+        .root
+        .join(MANAGED_PAIR_ACTIVE_TRANSACTION_RELATIVE_PATH)
+        .exists());
+
+    let (helper, path, mut journal) = arm_pair_uninstall(&fixture);
+    assert!(!orphan.exists());
+    complete_uninstall_commit(&helper, &path, &mut journal, &mut |_| Ok(())).unwrap();
+    remove_journal(&path).unwrap();
+
+    assert!(!fixture.install.exists());
+    assert!(!fixture.state.exists());
+    assert!(!fixture.envelope.exists());
+    assert!(!fixture.companion.exists());
 }
 
 #[test]

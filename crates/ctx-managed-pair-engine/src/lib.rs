@@ -12,6 +12,7 @@ mod fix_forward;
 
 pub use fix_forward::{
     apply_or_resume_managed_pair_under_installation_lock,
+    cleanup_orphaned_managed_pair_candidate_under_installation_lock,
     inspect_managed_pair_under_installation_lock,
     resume_pending_managed_pair_under_installation_lock,
     stage_managed_pair_under_installation_lock, ManagedPairApplyInput, ManagedPairApplyOutcome,

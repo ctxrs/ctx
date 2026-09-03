@@ -5,6 +5,7 @@ use std::{
 
 use anyhow::{anyhow, bail, Context, Result};
 use ctx_managed_pair_engine::{
+    cleanup_orphaned_managed_pair_candidate_under_installation_lock,
     inspect_managed_pair_under_installation_lock, ManagedPairInstallationStatus,
     ManagedPairVerifier, MANAGED_PAIR_ACTIVE_TRANSACTION_RELATIVE_PATH,
     MANAGED_PAIR_ENVELOPE_RELATIVE_PATH, MANAGED_PAIR_STATE_RELATIVE_PATH,
@@ -23,7 +24,7 @@ const MAX_PAIR_ENVELOPE_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_PAIR_STATE_BYTES: u64 = 64 * 1024;
 
 /// Fails closed when the shared installation lock protects a pending hosted
-/// install or uninstall transaction. Managed-pair publication must not race a
+/// install or uninstall transaction. Installation publication must not race a
 /// post-exit uninstall after that helper releases the lock while waiting.
 pub fn ensure_hosted_transaction_inactive_under_installation_lock(
     install_path: &Path,
@@ -32,7 +33,7 @@ pub fn ensure_hosted_transaction_inactive_under_installation_lock(
         return Ok(());
     };
     validate_journal(&journal, install_path, journal.kind)?;
-    bail!("finish the pending hosted installation transaction before changing the managed pair")
+    bail!("finish the pending hosted installation transaction before changing the installation")
 }
 
 pub(super) fn reject_managed_pair_material_for_core_only_install(
@@ -64,6 +65,7 @@ pub(super) fn snapshot_managed_pair_files(
     else {
         return Ok(());
     };
+    cleanup_orphaned_managed_pair_candidate_under_installation_lock(&install_root)?;
     if path_entry_exists(&install_root.join(MANAGED_PAIR_ACTIVE_TRANSACTION_RELATIVE_PATH))? {
         bail!("finish the pending managed-pair upgrade before uninstalling")
     }

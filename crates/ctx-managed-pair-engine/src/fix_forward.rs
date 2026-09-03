@@ -228,6 +228,27 @@ pub fn inspect_managed_pair_under_installation_lock(
     }
 }
 
+/// Removes an apply candidate left before its pending record was published.
+/// A published managed-pair transaction retains ownership of its candidate.
+/// The caller must hold the canonical installation lock.
+pub fn cleanup_orphaned_managed_pair_candidate_under_installation_lock(
+    install_root: &Path,
+) -> Result<()> {
+    filesystem::validate_absolute_root(install_root, "managed-pair install root")?;
+    let candidate_root = filesystem::apply_candidate_root(install_root);
+    match candidate_root.symlink_metadata() {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error).context("inspect managed-pair apply candidate"),
+    }
+    let layout = Layout::open(install_root, false)?;
+    if read_pending(&layout)?.is_none() {
+        cleanup_pre_pending_attempt(&layout)?;
+        layout.revalidate()?;
+    }
+    Ok(())
+}
+
 /// Retains a verified candidate and publishes the minimal pending record, but
 /// does not replace any fixed slot. Windows callers use the returned retained
 /// Core as their post-exit continuation. The caller must hold the canonical

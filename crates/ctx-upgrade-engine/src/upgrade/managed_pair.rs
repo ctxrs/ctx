@@ -538,6 +538,7 @@ pub(super) fn apply_prepared_install(
     before_publish: &mut dyn FnMut() -> Result<()>,
 ) -> Result<ApplyResult> {
     let installation_lock = upgrade_lock.installation();
+    install::ensure_hosted_transaction_inactive_under_installation_lock(&plan.install_path)?;
     match core {
         PreparedCoreArtifact::Legacy(artifact) => install::apply_artifact(
             process,
