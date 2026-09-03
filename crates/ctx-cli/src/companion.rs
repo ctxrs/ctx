@@ -377,13 +377,14 @@ fn mcp_limits() -> Result<BridgeLimits, CompanionRouteError> {
 
 fn paid_family_arguments(arguments: &[OsString]) -> Option<Vec<OsString>> {
     let explicit_pro = has_explicit_pro_selector(arguments);
+    let mut router_selector_index = None;
     let mut index = 1;
     while let Some(argument) = arguments.get(index) {
         if is_global_help_or_version(argument) {
             return arguments[1..index]
                 .iter()
                 .any(|candidate| candidate == "--pro")
-                .then(|| arguments[1..].to_vec());
+                .then(|| forwarded_paid_arguments(arguments, router_selector_index));
         }
         if argument == "--" {
             index += 1;
@@ -391,6 +392,11 @@ fn paid_family_arguments(arguments: &[OsString]) -> Option<Vec<OsString>> {
         }
         if argument == "--data-root" || argument == "--color" {
             index = index.saturating_add(2);
+            continue;
+        }
+        if argument == "--pro" {
+            router_selector_index.get_or_insert(index);
+            index += 1;
             continue;
         }
         if argument == "--quiet"
@@ -405,7 +411,7 @@ fn paid_family_arguments(arguments: &[OsString]) -> Option<Vec<OsString>> {
                 .iter()
                 .any(|family| argument == family)
         {
-            return Some(arguments[1..].to_vec());
+            return Some(forwarded_paid_arguments(arguments, router_selector_index));
         }
         if argument == "help"
             && arguments.get(index + 1).is_some_and(|candidate| {
@@ -430,19 +436,30 @@ fn paid_family_arguments(arguments: &[OsString]) -> Option<Vec<OsString>> {
                 })
             })
         {
-            return Some(arguments[1..].to_vec());
+            return Some(forwarded_paid_arguments(arguments, router_selector_index));
         }
         return None;
     }
     if explicit_pro {
-        return Some(arguments[1..].to_vec());
+        return Some(forwarded_paid_arguments(arguments, router_selector_index));
     }
     arguments.get(index).and_then(|argument| {
         ["pro", "blame", "referral"]
             .iter()
             .any(|family| argument == family)
-            .then(|| arguments[1..].to_vec())
+            .then(|| forwarded_paid_arguments(arguments, router_selector_index))
     })
+}
+
+fn forwarded_paid_arguments(
+    arguments: &[OsString],
+    router_selector_index: Option<usize>,
+) -> Vec<OsString> {
+    let mut forwarded = arguments[1..].to_vec();
+    if let Some(index) = router_selector_index {
+        forwarded.remove(index - 1);
+    }
+    forwarded
 }
 
 /// Resolves only the public wrapper facts needed to persist a completed Blame

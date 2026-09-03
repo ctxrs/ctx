@@ -67,19 +67,22 @@ fn paid_cli_environment(forwards_core_setup: bool) -> CompanionEnvironment {
 }
 
 #[test]
-fn paid_gate_forwards_the_original_arguments_without_paid_parsing() {
-    let arguments = [
-        OsString::from("ctx"),
-        OsString::from("--data-root"),
-        OsString::from("opaque-root"),
-        OsString::from("blame"),
-        OsString::from("--private-option"),
-        OsString::from("opaque-value"),
-    ];
-    assert_eq!(
-        paid_family_arguments(&arguments),
-        Some(arguments[1..].to_vec())
-    );
+fn paid_gate_forwards_ordinary_paid_families_without_parsing() {
+    for family in ["pro", "blame", "referral"] {
+        let arguments = [
+            OsString::from("ctx"),
+            OsString::from("--data-root"),
+            OsString::from("opaque-root"),
+            OsString::from(family),
+            OsString::from("--private-option"),
+            OsString::from("opaque-value"),
+        ];
+        assert_eq!(
+            paid_family_arguments(&arguments),
+            Some(arguments[1..].to_vec()),
+            "{family}"
+        );
+    }
 }
 
 #[test]
@@ -100,12 +103,38 @@ fn core_routes_never_enter_the_companion_gate() {
 }
 
 #[test]
-fn explicit_pro_selector_routes_setup_and_other_core_families() {
+fn router_owned_pro_selector_is_removed_before_companion_forwarding() {
+    for (arguments, expected) in [
+        (
+            vec!["ctx", "--pro", "status", "--format", "json"],
+            vec!["status", "--format", "json"],
+        ),
+        (
+            vec!["ctx", "--data-root", "opaque-root", "--pro", "status"],
+            vec!["--data-root", "opaque-root", "status"],
+        ),
+        (vec!["ctx", "--pro", "setup"], vec!["setup"]),
+        (vec!["ctx", "--pro", "pro"], vec!["pro"]),
+        (vec!["ctx", "--pro", "blame"], vec!["blame"]),
+        (vec!["ctx", "--pro", "referral"], vec!["referral"]),
+        (vec!["ctx", "--pro", "--help"], vec!["--help"]),
+    ] {
+        let arguments = arguments
+            .into_iter()
+            .map(OsString::from)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            paid_family_arguments(&arguments),
+            Some(expected.into_iter().map(OsString::from).collect())
+        );
+    }
+}
+
+#[test]
+fn command_owned_setup_pro_is_preserved() {
     for arguments in [
-        vec!["ctx", "--pro", "setup"],
-        vec!["ctx", "setup", "--pro"],
-        vec!["ctx", "--pro", "status"],
-        vec!["ctx", "--pro", "--help"],
+        vec!["ctx", "setup", "--pro", "--format", "json"],
+        vec!["ctx", "--data-root", "opaque-root", "setup", "--pro"],
         vec!["ctx", "help", "setup", "--pro"],
     ] {
         let arguments = arguments
