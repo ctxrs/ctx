@@ -20,8 +20,11 @@ use ctx_managed_pair_engine::{
     stage_managed_pair_under_installation_lock, ManagedPairStageOutcome,
 };
 
-#[cfg(any(windows, test))]
-use super::state::validate_managed_pair_helper_file;
+#[cfg(windows)]
+use super::state::{
+    acquire_managed_pair_helper_recovery_lock, managed_pair_helper_recovery_hint,
+    update_managed_pair_helper_parent_locked,
+};
 use super::{
     command::RELEASE_ARTIFACT_TIMEOUT,
     download::DownloadedArtifact,
@@ -35,12 +38,9 @@ use super::{
     DaemonUpgradeLease, DaemonUpgradePort, ReleaseProcessPort, ReleaseTransport,
     SemanticLayoutPort, UpgradeEngine, UpgradePlan,
 };
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 use super::{
-    state::{
-        acquire_managed_pair_helper_recovery_lock, managed_pair_helper_recovery_hint,
-        update_managed_pair_helper_parent_locked, ManagedPairRecovery,
-    },
+    state::{validate_managed_pair_helper_file, ManagedPairRecovery},
     DaemonRestart,
 };
 
@@ -183,26 +183,24 @@ pub(super) fn run_windows_helper<D: DaemonUpgradePort + ?Sized>(
         });
     match publication {
         Ok(true) => {
-            reconcile_replacement_terminal_locked(
-                &lock,
-                attempt_id,
-                true,
-                None,
-                recovery.interval,
+            finish_windows_managed_pair_helper_recovery(
+                daemon, &recovery, lock, attempt_id, restart, true, None,
             )?;
-            daemon.complete_replacement_handoff(
-                &recovery.data_root,
-                &recovery.install_path,
-                attempt_id,
-                restart,
-            )?;
-            drop(lock);
-            let _ = daemon.finish_replacement_handoff(&recovery.data_root, attempt_id);
             Ok(Some(()))
         }
-        Ok(false) => Err(anyhow!(
-            "pending managed-pair recovery disappeared before publication"
-        )),
+        Ok(false) => {
+            let error = anyhow!("pending managed-pair recovery disappeared before publication");
+            finish_windows_managed_pair_helper_recovery(
+                daemon,
+                &recovery,
+                lock,
+                attempt_id,
+                restart,
+                false,
+                Some("managed-pair recovery record disappeared before publication"),
+            )?;
+            Err(error)
+        }
         Err(error) => {
             let restart_error = daemon
                 .complete_replacement_handoff(
@@ -221,6 +219,34 @@ pub(super) fn run_windows_helper<D: DaemonUpgradePort + ?Sized>(
             }
         }
     }
+}
+
+#[cfg(any(windows, test))]
+fn finish_windows_managed_pair_helper_recovery<D: DaemonUpgradePort + ?Sized>(
+    daemon: &D,
+    recovery: &ManagedPairRecovery,
+    lock: UpgradeLock,
+    attempt_id: &str,
+    restart: Option<DaemonRestart<'_>>,
+    applied: bool,
+    warning_or_error: Option<&str>,
+) -> Result<()> {
+    reconcile_replacement_terminal_locked(
+        &lock,
+        attempt_id,
+        applied,
+        warning_or_error,
+        recovery.interval,
+    )?;
+    daemon.complete_replacement_handoff(
+        &recovery.data_root,
+        &recovery.install_path,
+        attempt_id,
+        restart,
+    )?;
+    drop(lock);
+    let _ = daemon.finish_replacement_handoff(&recovery.data_root, attempt_id);
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -715,7 +741,9 @@ fn engine_identity(identity: &SignedManagedPairIdentity) -> Result<VerifiedManag
 mod tests {
     use std::{collections::BTreeMap, fs, io::Write as _, sync::Mutex, time::Duration};
 
-    use ctx_history_platform::platform_security::restrict_private_directory;
+    use ctx_history_platform::platform_security::{
+        restrict_private_directory, restrict_private_file,
+    };
     use serde_json::json;
     use sha2::{Digest as _, Sha256};
     use tempfile::tempdir;
@@ -725,6 +753,96 @@ mod tests {
         install::{install_marker_path, InstallFingerprint},
         metadata::{ManagedPairReleaseMetadata, ReleaseMetadata},
     };
+
+    struct RecordingLease;
+
+    impl DaemonUpgradeLease for RecordingLease {
+        fn wait_for_installation_quiescence(&self) -> Result<()> {
+            Ok(())
+        }
+
+        fn replacement_restart(&self) -> Option<DaemonRestart<'_>> {
+            None
+        }
+
+        fn resume_with(self, _executable: &Path) -> Result<()> {
+            Ok(())
+        }
+
+        fn transfer_to_replacement_helper(self, _helper_pid: u32) -> Result<()> {
+            Ok(())
+        }
+
+        fn release_for_current_format_reexec(self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingDaemon {
+        calls: Mutex<Vec<&'static str>>,
+    }
+
+    impl DaemonUpgradePort for RecordingDaemon {
+        type Lease = RecordingLease;
+
+        fn begin(&self, _data_root: &Path, _attempt_id: &str) -> Result<Self::Lease> {
+            Ok(RecordingLease)
+        }
+
+        fn begin_legacy(
+            &self,
+            _data_root: &Path,
+            _attempt_id: &str,
+            _target: &Path,
+        ) -> Result<Self::Lease> {
+            Ok(RecordingLease)
+        }
+
+        fn begin_current(
+            &self,
+            _data_root: &Path,
+            _attempt_id: &str,
+            _restart_trigger: &str,
+            _loop_interval_seconds: Option<u64>,
+        ) -> Result<Self::Lease> {
+            Ok(RecordingLease)
+        }
+
+        fn mark_replacement_helper_handoff(
+            &self,
+            _data_root: &Path,
+            _attempt_id: &str,
+            _helper_pid: u32,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn replacement_helper_owns_handoff(
+            &self,
+            _data_root: &Path,
+            _attempt_id: &str,
+            _helper_pid: u32,
+        ) -> bool {
+            false
+        }
+
+        fn complete_replacement_handoff(
+            &self,
+            _data_root: &Path,
+            _executable: &Path,
+            _attempt_id: &str,
+            _restart: Option<DaemonRestart<'_>>,
+        ) -> Result<()> {
+            self.calls.lock().unwrap().push("complete");
+            Ok(())
+        }
+
+        fn finish_replacement_handoff(&self, _data_root: &Path, _attempt_id: &str) -> Result<()> {
+            self.calls.lock().unwrap().push("finish");
+            Ok(())
+        }
+    }
 
     struct FixtureVerifier(VerifiedManagedPairIdentity);
 
@@ -807,6 +925,7 @@ mod tests {
         restrict_private_directory(&bin)?;
         let core_path = bin.join(if cfg!(windows) { "ctx.exe" } else { "ctx" });
         fs::write(&core_path, b"old-core")?;
+        restrict_private_file(&core_path)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
@@ -994,6 +1113,65 @@ mod tests {
         assert_eq!(
             fs::read(fixture.path().join("libexec").join(companion_name))?,
             companion
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn missing_pending_record_after_windows_scheduler_publication_records_terminal_failure_and_resumes_daemon_handoff(
+    ) -> Result<()> {
+        let fixture = tempdir()?;
+        restrict_private_directory(fixture.path())?;
+        let data_root = fixture.path().join("data");
+        fs::create_dir(&data_root)?;
+        restrict_private_directory(&data_root)?;
+        let install_path = fixture.path().join("ctx");
+        fs::write(&install_path, b"core")?;
+        let installation = InstallationLock::try_acquire(&install_path)?
+            .ok_or_else(|| anyhow!("test installation lock is unavailable"))?;
+        let lock = UpgradeLock::from_installation_for_test(install_path.clone(), installation);
+        let recovery = ManagedPairRecovery {
+            attempt_id: "recovery-boundary".to_owned(),
+            data_root: data_root.clone(),
+            install_path: install_path.clone(),
+            channel: "stable".to_owned(),
+            interval: Duration::from_secs(60),
+            automatic: false,
+            restart_trigger: Some("managed_pair_maintenance".to_owned()),
+            restart_interval_seconds: Some(60),
+            core_sha256: digest(b"core"),
+            envelope_sha256: digest(b"envelope"),
+            #[cfg(windows)]
+            helper_path: None,
+            #[cfg(windows)]
+            helper_parent_pid: None,
+        };
+        let daemon = RecordingDaemon::default();
+
+        finish_windows_managed_pair_helper_recovery(
+            &daemon,
+            &recovery,
+            lock,
+            &recovery.attempt_id,
+            Some(DaemonRestart {
+                trigger: "managed_pair_maintenance",
+                loop_interval_seconds: Some(60),
+            }),
+            false,
+            Some("managed-pair recovery record disappeared before publication"),
+        )?;
+
+        let state: serde_json::Value = serde_json::from_slice(&fs::read(
+            install_path.with_file_name(".ctx.upgrade-state.json"),
+        )?)?;
+        assert_eq!(state["status"], "error");
+        assert_eq!(
+            state["error"],
+            "managed-pair recovery record disappeared before publication"
+        );
+        assert_eq!(
+            daemon.calls.lock().unwrap().as_slice(),
+            ["complete", "finish"]
         );
         Ok(())
     }

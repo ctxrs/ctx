@@ -88,6 +88,9 @@ fn windows_hosted_journal_accepts_ordinary_install_and_ownership_marker_paths() 
         ownership_path: Some(ownership_path),
         ownership_sha256: Some(ownership_sha256),
         ownership_body: Some(ownership_body),
+        managed_pair_state_sha256: None,
+        managed_pair_envelope_sha256: None,
+        managed_pair_companion_sha256: None,
         phase: Phase::Prepared,
         binding_sha256: String::new(),
     };

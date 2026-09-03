@@ -73,6 +73,34 @@ function Get-Sha256([string]$Path) {
     return (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToLowerInvariant()
 }
 
+# The hidden Core managed-pair entrypoint verifies this exact protected DACL for
+# every fresh install directory and input. Keep the PowerShell boundary aligned
+# with that authority instead of relying on inherited ACLs from a temp root.
+function Set-ManagedPairPrivateAcl(
+    [string]$Path,
+    [bool]$Directory
+) {
+    $item = Get-Item -LiteralPath $Path -Force
+    if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        Fail "managed-pair private path must not be a reparse point: $Path"
+    }
+    if ($Directory -ne $item.PSIsContainer) {
+        Fail "managed-pair private path has an unexpected type: $Path"
+    }
+    $userSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $inheritance = if ($Directory) { "OICI" } else { "" }
+    $aces = @("(A;$inheritance;FA;;;$userSid)")
+    if ($userSid -cne "S-1-5-18") {
+        $aces += "(A;$inheritance;FA;;;SY)"
+    }
+    $acl = Get-Acl -LiteralPath $Path
+    $acl.SetSecurityDescriptorSddlForm(
+        "D:P" + ($aces -join ""),
+        [System.Security.AccessControl.AccessControlSections]::Access
+    )
+    Set-Acl -LiteralPath $Path -AclObject $acl
+}
+
 function Get-ReleaseArtifact(
     [string]$Url,
     [string]$Name,
@@ -451,6 +479,7 @@ if (-not [string]::IsNullOrWhiteSpace($ArtifactDir)) {
 
 $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("ctx-install-" + [System.Guid]::NewGuid().ToString("n"))
 New-Item -ItemType Directory -Path $tempRoot | Out-Null
+Set-ManagedPairPrivateAcl -Path $tempRoot -Directory $true
 
 try {
     $metadataFile = Join-Path $tempRoot "metadata.env"
@@ -649,6 +678,9 @@ try {
         if ($actualCompanionChecksum -cne $pairCompanionChecksum.ToLowerInvariant()) {
             Fail "checksum mismatch for $companionArtifact`: expected $pairCompanionChecksum, got $actualCompanionChecksum"
         }
+        foreach ($pairInput in @($pairEnvelopePath, $downloadPath, $companionDownloadPath)) {
+            Set-ManagedPairPrivateAcl -Path $pairInput -Directory $false
+        }
     } else {
         Get-ReleaseArtifact -Url $artifactUrl -Name $artifact -Destination $downloadPath
         $actualChecksum = Get-Sha256 $downloadPath
@@ -694,6 +726,9 @@ try {
     New-Item -ItemType Directory -Path $installRoot -Force | Out-Null
     New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
     if (-not [string]::IsNullOrWhiteSpace($pairEnvelopeArtifact)) {
+        Set-ManagedPairPrivateAcl -Path $markerSourcePath -Directory $false
+        Set-ManagedPairPrivateAcl -Path $installRoot -Directory $true
+        Set-ManagedPairPrivateAcl -Path $BinDir -Directory $true
         $pairResult = Invoke-ManagedPairApply $downloadPath @(
             "--ctx-core-managed-pair-apply-v1", $installRoot, "-",
             $pairEnvelopePath, $downloadPath, $companionDownloadPath, $markerSourcePath)

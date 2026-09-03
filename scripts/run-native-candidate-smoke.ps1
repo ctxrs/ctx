@@ -14,6 +14,35 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+# Core verifies the exact protected current-user/SYSTEM DACL before it accepts
+# managed-pair paths. The smoke copies supplied artifacts into this private
+# root so it proves the real hidden apply path without mutating its caller's
+# candidate files.
+function Set-ManagedPairPrivateAcl(
+    [string]$Path,
+    [bool]$Directory
+) {
+    $item = Get-Item -LiteralPath $Path -Force
+    if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        Fail "managed-pair private path must not be a reparse point: $Path"
+    }
+    if ($Directory -ne $item.PSIsContainer) {
+        Fail "managed-pair private path has an unexpected type: $Path"
+    }
+    $userSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $inheritance = if ($Directory) { "OICI" } else { "" }
+    $aces = @("(A;$inheritance;FA;;;$userSid)")
+    if ($userSid -cne "S-1-5-18") {
+        $aces += "(A;$inheritance;FA;;;SY)"
+    }
+    $acl = Get-Acl -LiteralPath $Path
+    $acl.SetSecurityDescriptorSddlForm(
+        "D:P" + ($aces -join ""),
+        [System.Security.AccessControl.AccessControlSections]::Access
+    )
+    Set-Acl -LiteralPath $Path -AclObject $acl
+}
+
 # ProcessStartInfo cannot establish a Job Object before the child executes.
 # Start suspended so every descendant is born inside this invocation's job.
 if ($null -eq ("CtxNativeOwnedProcess" -as [type])) {
@@ -532,6 +561,8 @@ Remove-Item -LiteralPath $ResultPath -Force -ErrorAction SilentlyContinue
 $resultTemp = "$ResultPath.tmp.$PID"
 
 $root = Join-Path ([System.IO.Path]::GetTempPath()) ("ctx-native-candidate-smoke-" + [Guid]::NewGuid().ToString("n"))
+New-Item -ItemType Directory -Path $root | Out-Null
+Set-ManagedPairPrivateAcl -Path $root -Directory $true
 $profile = Join-Path $root "profile"
 $dataRoot = Join-Path $root "data"
 $configRoot = Join-Path $root "config"
@@ -549,7 +580,21 @@ if ($pairMode) {
     $installedBinary = Join-Path $installRoot "bin\ctx.exe"
     $installedMarker = "$installedBinary.install.json"
     $markerSource = Join-Path $root "ctx.install.json"
+    $pairInputRoot = Join-Path $root "managed-pair-input"
+    $pairCoreInput = Join-Path $pairInputRoot "ctx.exe"
+    $pairCompanionInput = Join-Path $pairInputRoot "ctx-pro.exe"
+    $pairEnvelopeInput = Join-Path $pairInputRoot "managed-pair-envelope.json"
     New-Item -ItemType Directory -Path (Join-Path $installRoot "bin") -Force | Out-Null
+    New-Item -ItemType Directory -Path $pairInputRoot | Out-Null
+    Set-ManagedPairPrivateAcl -Path $installRoot -Directory $true
+    Set-ManagedPairPrivateAcl -Path (Join-Path $installRoot "bin") -Directory $true
+    Set-ManagedPairPrivateAcl -Path $pairInputRoot -Directory $true
+    Copy-Item -LiteralPath $Binary -Destination $pairCoreInput
+    Copy-Item -LiteralPath $Companion -Destination $pairCompanionInput
+    Copy-Item -LiteralPath $PairEnvelope -Destination $pairEnvelopeInput
+    foreach ($pairInput in @($pairCoreInput, $pairCompanionInput, $pairEnvelopeInput)) {
+        Set-ManagedPairPrivateAcl -Path $pairInput -Directory $false
+    }
     $marker = [ordered]@{
         schema_version = 1
         manager = "ctx-hosted-installer"
@@ -565,6 +610,7 @@ if ($pairMode) {
         installed_at = "1970-01-01T00:00:00Z"
     }
     [IO.File]::WriteAllText($markerSource, ($marker | ConvertTo-Json -Compress), [Text.UTF8Encoding]::new($false))
+    Set-ManagedPairPrivateAcl -Path $markerSource -Directory $false
 }
 
 $savedLocation = (Get-Location).Path
@@ -813,7 +859,7 @@ try {
     if ($pairMode) {
         $pairApply = Invoke-CtxRaw @(
             "--ctx-core-managed-pair-apply-v1", $installRoot, "-",
-            $PairEnvelope, $Binary, $Companion, $markerSource)
+            $pairEnvelopeInput, $pairCoreInput, $pairCompanionInput, $markerSource)
         if ($pairApply.ExitCode -ne 0) {
             Fail ("candidate Core could not apply the signed managed pair: " + $pairApply.Stderr.Trim())
         }

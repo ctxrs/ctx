@@ -1,5 +1,6 @@
 use super::*;
 use ctx_managed_pair_engine::{
+    stage_managed_pair_under_installation_lock, ManagedPairApplyInput, ManagedPairStageOutcome,
     MANAGED_PAIR_ACTIVE_TRANSACTION_RELATIVE_PATH, MANAGED_PAIR_ENVELOPE_RELATIVE_PATH,
     MANAGED_PAIR_STATE_RELATIVE_PATH,
 };
@@ -637,14 +638,61 @@ fn hosted_uninstall_removes_only_the_exact_authenticated_pair_files() {
 
 #[test]
 fn hosted_uninstall_refuses_a_pending_pair_upgrade() {
+    use ctx_managed_pair_engine::{ManagedPairComponentIdentity, VerifiedManagedPairIdentity};
+
     let fixture = pair_fixture();
+    let candidate_root = fixture.root.join("next-pair");
+    fs::create_dir(&candidate_root).unwrap();
+    fs::set_permissions(&candidate_root, fs::Permissions::from_mode(0o700)).unwrap();
+    let candidate = |name: &str| candidate_root.join(name);
+    let core = candidate("ctx");
+    let companion = candidate("ctx-pro");
+    let envelope = candidate("managed-pair-envelope.json");
+    let marker_source = candidate("ctx.install.json");
+    let next_core = b"next paired ctx";
+    let next_companion = b"next paired ctx-pro";
+    fs::write(&core, next_core).unwrap();
+    fs::write(&companion, next_companion).unwrap();
+    fs::write(&envelope, &fixture.verifier.envelope).unwrap();
     fs::write(
-        fixture
-            .root
-            .join(MANAGED_PAIR_ACTIVE_TRANSACTION_RELATIVE_PATH),
-        b"pending",
+        &marker_source,
+        marker(&fixture.install, &sha256_hex(next_core)),
     )
     .unwrap();
+    for path in [&core, &companion, &envelope, &marker_source] {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    let staged_verifier = TestPairVerifier {
+        envelope: fixture.verifier.envelope.clone(),
+        identity: VerifiedManagedPairIdentity::new(
+            "test-release-next",
+            fixture.verifier.identity.target(),
+            fixture.verifier.identity.rollback_generation() + 1,
+            "b".repeat(64),
+            ManagedPairComponentIdentity::new(sha256_hex(next_core), next_core.len() as u64)
+                .unwrap(),
+            ManagedPairComponentIdentity::new(
+                sha256_hex(next_companion),
+                next_companion.len() as u64,
+            )
+            .unwrap(),
+        )
+        .unwrap(),
+    };
+    let staged = stage_managed_pair_under_installation_lock(
+        &fixture.root,
+        &ManagedPairApplyInput::new(&envelope, &core, &companion, &marker_source),
+        &staged_verifier,
+    )
+    .unwrap();
+    assert!(matches!(staged, ManagedPairStageOutcome::Staged { .. }));
+    let pending = fixture
+        .root
+        .join(MANAGED_PAIR_ACTIVE_TRANSACTION_RELATIVE_PATH);
+    let owned_candidate = fixture.root.join("share/ctx/.managed-pair-apply-v1");
+    let pending_before = fs::read(&pending).unwrap();
+    let candidate_core_before = fs::read(owned_candidate.join("bin/ctx")).unwrap();
 
     let error = new_uninstall_journal_with_optional_verifier(
         &fixture.install,
@@ -653,6 +701,11 @@ fn hosted_uninstall_refuses_a_pending_pair_upgrade() {
     )
     .unwrap_err();
     assert!(format!("{error:#}").contains("finish the pending managed-pair upgrade"));
+    assert_eq!(fs::read(&pending).unwrap(), pending_before);
+    assert_eq!(
+        fs::read(owned_candidate.join("bin/ctx")).unwrap(),
+        candidate_core_before
+    );
 }
 
 #[test]

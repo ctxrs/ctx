@@ -832,6 +832,17 @@ pub(super) struct UpgradeLock {
 }
 
 impl UpgradeLock {
+    #[cfg(test)]
+    pub(super) fn from_installation_for_test(
+        install_path: PathBuf,
+        installation: InstallationLock,
+    ) -> Self {
+        Self {
+            install_path,
+            installation,
+        }
+    }
+
     pub(super) fn acquire(_data_root: &Path) -> Result<Self> {
         let install_path = super::install::current_install_path()?;
         let installation = InstallationLock::try_acquire(&install_path)?.ok_or_else(|| {
