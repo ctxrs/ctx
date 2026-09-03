@@ -1189,41 +1189,9 @@ fn durable_recovery_preserves_intent_separately_from_physical_scope() {
     assert_eq!(recovered.intent, attempt.intent);
     assert_eq!(recovered.refresh_scope, scope);
 
-    let mut legacy = job.clone();
-    legacy.as_object_mut().unwrap().remove("refresh_intent");
-    legacy["refresh_selector"] = json!({ "kind": "automatic_provider", "provider": "codex" });
-    let recovered_legacy = recover_queued_root(&legacy, None).unwrap();
-    assert_eq!(
-        recovered_legacy.intent,
-        RefreshIntent::SelectedImport(RefreshSelection::Provider(CaptureProvider::Codex))
-    );
-    assert_eq!(recovered_legacy.refresh_scope, attempt.refresh_scope);
-
-    let legacy_authority = crate::explicit_source_catalog_authority_for_test(1);
-    let mut legacy_explicit = new_refresh_attempt(
-        None,
-        SourceRefreshRuntimeMetadata {
-            operation: SourceBackedRefreshOperation::Import,
-            daemon_mode: "full".to_owned(),
-            trigger: "import",
-            trigger_provenance: "explicit_source_catalog",
-        },
-        RefreshIntent::SelectedImport(RefreshSelection::ExactSource(legacy_authority.clone())),
-        SourceBackedRefreshScope::All,
-    )
-    .job_json();
-    legacy_explicit
-        .as_object_mut()
-        .unwrap()
-        .remove("refresh_intent");
-    legacy_explicit["requested_explicit_source_catalog"] = legacy_authority.to_json();
-    let recovered_explicit = recover_queued_root(&legacy_explicit, None).unwrap();
-    assert_eq!(
-        recovered_explicit.intent,
-        RefreshIntent::SelectedImport(RefreshSelection::ExactSource(
-            crate::explicit_source_catalog_authority_for_test(1),
-        ))
-    );
+    let mut missing = job.clone();
+    missing.as_object_mut().unwrap().remove("refresh_intent");
+    assert!(recover_queued_root(&missing, None).is_err());
 
     let mut malformed = job.clone();
     malformed["refresh_intent"] = json!({

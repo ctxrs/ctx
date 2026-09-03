@@ -693,108 +693,25 @@ pub(super) fn recover_reconciliation_demand(
 pub(super) fn recover_refresh_intent(
     job: &Value,
     operation: SourceBackedRefreshOperation,
-    allow_legacy_terminal_catalog_omission: bool,
-    ignore_obsolete_root_catalog: bool,
 ) -> Result<RefreshIntent> {
-    if let Some(value) = job.get("refresh_intent") {
-        let intent = RefreshIntent::from_json(value)?;
-        if intent.operation() != operation {
-            bail!("durable source refresh intent disagrees with its operation");
-        }
-        if let Some(legacy_catalog) = job
-            .get("requested_explicit_source_catalog")
-            .filter(|value| !value.is_null())
-            .map(ExplicitSourceCatalogAuthority::from_json)
-            .transpose()?
-        {
-            if intent.explicit_source_authority() != Some(&legacy_catalog) {
-                bail!("durable source refresh intent disagrees with its legacy exact-source authority");
-            }
-        }
-        return Ok(intent);
+    let intent = RefreshIntent::from_json(
+        job.get("refresh_intent")
+            .ok_or_else(|| anyhow!("durable source refresh intent is missing"))?,
+    )?;
+    if intent.operation() != operation {
+        bail!("durable source refresh intent disagrees with its operation");
     }
-
-    // One isolated decoder for pre-canonical durable jobs. Legacy fields are
-    // normalized immediately and never enter scheduling or execution as an
-    // independent request representation.
-    // Pre-overlay periodic roots can carry obsolete catalog-shaped data. It
-    // was never request authority for refresh operations, so retain that
-    // compatibility without weakening import or successor validation.
-    let explicit_catalog = if ignore_obsolete_root_catalog
-        && operation == SourceBackedRefreshOperation::Refresh
-        && job.get("refresh_selector").is_none()
+    if let Some(catalog) = job
+        .get("requested_explicit_source_catalog")
+        .filter(|value| !value.is_null())
+        .map(ExplicitSourceCatalogAuthority::from_json)
+        .transpose()?
     {
-        None
-    } else {
-        job.get("requested_explicit_source_catalog")
-            .filter(|value| !value.is_null())
-            .map(ExplicitSourceCatalogAuthority::from_json)
-            .transpose()?
-    };
-    let explicit_catalog = explicit_catalog.as_ref();
-    let has_explicit_catalog = explicit_catalog.is_some();
-    let fresh = job
-        .get("fresh_after_admitted_snapshot")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let Some(selector) = job.get("refresh_selector") else {
-        return match (operation, explicit_catalog) {
-            (SourceBackedRefreshOperation::Refresh, Some(_)) => {
-                bail!("durable refresh carries legacy explicit source authority")
-            }
-            (SourceBackedRefreshOperation::Import, Some(authority)) => Ok(
-                RefreshIntent::SelectedImport(RefreshSelection::ExactSource(authority.clone())),
-            ),
-            (SourceBackedRefreshOperation::Import, None)
-                if !allow_legacy_terminal_catalog_omission =>
-            {
-                bail!("durable import source refresh has no explicit source authority")
-            }
-            (_, None) if fresh || operation == SourceBackedRefreshOperation::Import => {
-                Ok(RefreshIntent::SelectedImport(RefreshSelection::All))
-            }
-            (_, None) => Ok(RefreshIntent::AutomaticMaintenance),
-        };
-    };
-    let fields = selector
-        .as_object()
-        .ok_or_else(|| anyhow!("durable source refresh selector is not an object"))?;
-    match fields.get("kind").and_then(Value::as_str) {
-        Some("all_automatic") if fields.len() == 1 => match explicit_catalog {
-            Some(authority) if operation == SourceBackedRefreshOperation::Import => Ok(
-                RefreshIntent::SelectedImport(RefreshSelection::ExactSource(authority.clone())),
-            ),
-            Some(_) => bail!("durable refresh carries explicit source authority"),
-            None if fresh => Ok(RefreshIntent::SelectedImport(RefreshSelection::All)),
-            None => Ok(RefreshIntent::AutomaticMaintenance),
-        },
-        Some("automatic_provider") if fields.len() == 2 && !has_explicit_catalog => {
-            let provider = fields
-                .get("provider")
-                .and_then(Value::as_str)
-                .ok_or_else(|| anyhow!("durable provider selector has no provider"))?
-                .parse()
-                .context("parse durable provider selector")?;
-            if provider == CaptureProvider::Unknown {
-                bail!("durable provider selector has an unknown provider");
-            }
-            Ok(RefreshIntent::SelectedImport(RefreshSelection::Provider(
-                provider,
-            )))
+        if intent.explicit_source_authority() != Some(&catalog) {
+            bail!("durable source refresh intent disagrees with its exact-source authority");
         }
-        Some("explicit_catalog") if fields.len() == 1 => Ok(RefreshIntent::SelectedImport(
-            RefreshSelection::ExactSource(
-                explicit_catalog
-                    .cloned()
-                    .ok_or_else(|| anyhow!("durable exact-source refresh has no authority"))?,
-            ),
-        )),
-        Some("automatic_provider") if has_explicit_catalog => {
-            bail!("durable provider selector carries explicit source authority")
-        }
-        Some(kind) => bail!("durable source refresh selector `{kind}` is malformed"),
-        None => bail!("durable source refresh selector kind is missing"),
     }
+    Ok(intent)
 }
 
 pub(super) fn recover_admission_durability(job: &Value, context: &str) -> Result<bool> {

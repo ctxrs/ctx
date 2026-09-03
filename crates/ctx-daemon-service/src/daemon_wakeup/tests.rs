@@ -761,8 +761,10 @@ fn callback_channel_overflow_leaves_terminal_owner_and_queues_distinct_maintenan
                 "op": "source_refresh_request",
                 "request_id": request_id,
                 "mode": "wait",
-                "operation": "refresh",
-                "fresh_after_admitted_snapshot": true,
+                "refresh_intent": {
+                    "kind": "selected_import",
+                    "selection": {"kind": "all"},
+                },
             }),
         )?
         .expect("wait admission");

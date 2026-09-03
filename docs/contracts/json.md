@@ -287,6 +287,14 @@ nullable may be omitted when unavailable:
 therefore report history refresh as confirming, paused, or partially paused
 without reporting the daemon process itself as stopped.
 
+Its schema-1 request/status projection still emits
+`coalesced_into_request_id: null` and `coalesced_logical_demands: 0` after
+cross-request-ID coalescing was removed. Those keys may disappear only in an
+explicit successor schema after schema 1 is outside the supported client floor.
+`request_fingerprint` is not a compatibility placeholder: explicit stable
+request IDs still use it to reject a conflicting payload. No successor schema
+or calendar sunset is scheduled.
+
 `config_reload.status` is `applied`, `pending`, `failed`,
 `activation_failed`, or `unknown`. `requested` reflects the current effective
 daemon/semantic configuration read by the status command. `applied` is the last

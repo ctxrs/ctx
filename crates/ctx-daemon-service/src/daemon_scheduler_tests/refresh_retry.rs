@@ -340,8 +340,10 @@ fn terminal_admission_fence_failure_releases_root_before_exact_dirty_route_runs(
                 "op": "source_refresh_request",
                 "request_id": request_id,
                 "mode": "wait",
-                "operation": "refresh",
-                "fresh_after_admitted_snapshot": true,
+                "refresh_intent": {
+                    "kind": "selected_import",
+                    "selection": {"kind": "all"},
+                },
             }),
         )
         .unwrap()
@@ -450,8 +452,10 @@ fn persistent_admission_status_failure_uses_scheduler_backoff() {
                 "op": "source_refresh_request",
                 "request_id": request_id,
                 "mode": "wait",
-                "operation": "refresh",
-                "fresh_after_admitted_snapshot": true,
+                "refresh_intent": {
+                    "kind": "selected_import",
+                    "selection": {"kind": "all"},
+                },
             }),
         )
         .unwrap()

@@ -196,6 +196,17 @@ missing selection, or widen selected work. Interrupted requests persist their
 logical intent and are re-admitted through the same resolver before execution,
 so missing or changed selected routes fail closed.
 
+The pre-canonical durable selector/catalog decoder and matching daemon IPC
+adapter existed only between v0.25.0 and v1.0.0 and were never part of a
+supported release, so current readers require canonical `refresh_intent`.
+Schema-1 jobs and status still retain released physical-attempt, coalescing, and
+legacy terminal fields. Those fields can be removed only after a successor
+schema is released and schema 1 is outside the supported upgrade floor; neither
+that release nor a date has been assigned. The removed publication-metadata
+version-1-through-version-4 decoder likewise has no release support floor
+because those formats were never released and immutable generations now own
+the state.
+
 Request receipts describe only the routes and rejections observed by that
 request. Generation metadata separately describes the complete retained
 publication. A selected no-op can therefore report its own rejection outcome
