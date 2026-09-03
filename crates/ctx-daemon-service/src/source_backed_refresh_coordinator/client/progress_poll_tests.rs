@@ -5,6 +5,7 @@ use ctx_history_core::{
 use ctx_history_index::{
     GenerationWriter, SourceRouteIdentity, SourceRouteSnapshot, VerifiedIndex, WriterOptions,
 };
+use ctx_history_refresh::{RefreshOutcomeCode, RefreshRetryAdvice};
 
 fn source_count_route(byte: u8) -> SourceRouteIdentity {
     SourceRouteIdentity::from_sha256(format!("{byte:02x}").repeat(32)).unwrap()
@@ -286,24 +287,43 @@ fn structured_terminal_error_preserves_engine_route_dispositions() {
     let terminal = error
         .downcast_ref::<SourceBackedRefreshTerminalError>()
         .expect("typed terminal error");
+    let outcome = terminal.outcome();
 
-    assert_eq!(terminal.code, "source_failures");
-    assert_eq!(terminal.class, "mixed");
-    assert!(terminal.retryable);
-    assert_eq!(terminal.affected_routes.len(), 2);
-    assert_eq!(terminal.retryable_routes, vec!["a1".repeat(32)]);
-    assert_eq!(terminal.blocked_routes, vec!["a2".repeat(32)]);
+    assert_eq!(outcome.code, RefreshOutcomeCode::SourceFailures);
+    assert_eq!(outcome.class, RefreshOutcomeClass::Mixed);
+    assert!(outcome.retryable);
+    assert_eq!(outcome.affected_routes.len(), 2);
     assert_eq!(
-        terminal.physical_attempt_id,
+        outcome.retryable_routes,
+        BTreeSet::from([SourceRouteIdentity::from_sha256("a1".repeat(32)).unwrap()])
+    );
+    assert_eq!(
+        outcome.blocked_routes,
+        BTreeSet::from([SourceRouteIdentity::from_sha256("a2".repeat(32)).unwrap()])
+    );
+    assert_eq!(
+        outcome.physical_attempt_id,
         Uuid::from_u128(0x294_0101).to_string()
     );
     assert_eq!(
-        terminal.retained_generation.as_deref(),
+        outcome.retained_generation.as_deref(),
         Some("b1".repeat(32).as_str())
     );
     assert_eq!(
-        terminal.retry_advice.as_deref(),
-        Some("retry_affected_routes")
+        outcome.retry_advice,
+        Some(RefreshRetryAdvice::RetryAffectedRoutes)
+    );
+    assert_eq!(
+        terminal.to_string(),
+        format!(
+            "daemon-owned source-backed refresh failed (code=source_failures, class=mixed, retryable=true, attempt={}, affected_routes={:?}, retryable_routes={:?}, blocked_routes={:?}, retained_generation={:?}, retry_advice={:?}): typed mixed route outcome",
+            Uuid::from_u128(0x294_0101),
+            vec!["a1".repeat(32), "a2".repeat(32)],
+            vec!["a1".repeat(32)],
+            vec!["a2".repeat(32)],
+            Some("b1".repeat(32)),
+            Some("retry_affected_routes"),
+        )
     );
 }
 
@@ -324,11 +344,15 @@ fn explicit_path_disappearance_code_survives_the_daemon_boundary() {
     let terminal = error
         .downcast_ref::<SourceBackedRefreshTerminalError>()
         .expect("typed terminal error");
+    let outcome = terminal.outcome();
 
-    assert_eq!(terminal.code, "explicit_source_path_missing");
-    assert_eq!(terminal.class, "unavailable");
-    assert!(terminal.retryable);
-    assert_eq!(terminal.retry_advice.as_deref(), Some("inspect_sources"));
+    assert_eq!(outcome.code, RefreshOutcomeCode::ExplicitSourcePathMissing);
+    assert_eq!(outcome.class, RefreshOutcomeClass::Unavailable);
+    assert!(outcome.retryable);
+    assert_eq!(
+        outcome.retry_advice,
+        Some(RefreshRetryAdvice::InspectSources)
+    );
 }
 
 #[test]
@@ -346,15 +370,22 @@ fn source_unclaimed_terminal_error_preserves_the_culprit_and_retryable_peer() {
     let terminal = error
         .downcast_ref::<SourceBackedRefreshTerminalError>()
         .expect("typed terminal error");
+    let outcome = terminal.outcome();
 
-    assert_eq!(terminal.code, "source_unclaimed");
-    assert_eq!(terminal.class, "coverage");
-    assert!(terminal.retryable);
-    assert_eq!(terminal.retryable_routes, vec!["a1".repeat(32)]);
-    assert_eq!(terminal.blocked_routes, vec!["a2".repeat(32)]);
+    assert_eq!(outcome.code, RefreshOutcomeCode::SourceUnclaimed);
+    assert_eq!(outcome.class, RefreshOutcomeClass::Coverage);
+    assert!(outcome.retryable);
     assert_eq!(
-        terminal.retry_advice.as_deref(),
-        Some("retry_retryable_routes_and_inspect_blocked")
+        outcome.retryable_routes,
+        BTreeSet::from([SourceRouteIdentity::from_sha256("a1".repeat(32)).unwrap()])
+    );
+    assert_eq!(
+        outcome.blocked_routes,
+        BTreeSet::from([SourceRouteIdentity::from_sha256("a2".repeat(32)).unwrap()])
+    );
+    assert_eq!(
+        outcome.retry_advice,
+        Some(RefreshRetryAdvice::RetryRetryableRoutesAndInspectBlocked)
     );
 }
 

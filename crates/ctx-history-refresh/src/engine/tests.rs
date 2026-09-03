@@ -110,6 +110,35 @@ fn read_model_source_count_uses_request_routes_not_global_or_diagnostic_counts()
 }
 
 #[test]
+fn diagnostic_text_cannot_override_the_typed_terminal_outcome() {
+    let mut attempt = new_refresh_attempt(
+        None,
+        SourceRefreshRuntimeMetadata::periodic(),
+        RefreshIntent::AutomaticMaintenance,
+        SourceBackedRefreshScope::All,
+    );
+    attempt.state = SourceBackedRefreshState::Failed;
+    attempt.failure_outcome = Some(SourceBackedRefreshFailureOutcome::new(
+        RefreshOutcomeCode::SourceRefreshFailed,
+        RefreshOutcomeClass::Internal,
+        true,
+        BTreeSet::new(),
+        Some(RefreshRetryAdvice::RetryRequest),
+    ));
+    attempt.last_error = Some(format!(
+        "diagnostic mentions {} but is not classification authority",
+        RefreshOutcomeCode::AllProviderTerminalCoverageUnavailable.as_str()
+    ));
+
+    let job = attempt.job_json();
+
+    assert_eq!(job["error_code"], "source_refresh_failed");
+    assert_eq!(job["reason"], "internal");
+    assert_eq!(job["structured_outcome"]["code"], "source_refresh_failed");
+    assert_eq!(job["structured_outcome"]["class"], "internal");
+}
+
+#[test]
 fn active_status_overlays_worker_facts_and_snapshots_them_on_failure() {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("data");

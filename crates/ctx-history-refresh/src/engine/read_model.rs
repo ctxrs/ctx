@@ -156,16 +156,7 @@ pub(super) struct SourceBackedRefreshFailureOutcome {
 
 impl SourceBackedRefreshFailureOutcome {
     pub(super) fn is_automatic_retry_eligible(&self) -> bool {
-        matches!(
-            (self.code, self.class),
-            (
-                RefreshOutcomeCode::SourceRefreshFailed,
-                RefreshOutcomeClass::Internal,
-            ) | (
-                RefreshOutcomeCode::AllProviderTerminalCoverageUnavailable,
-                RefreshOutcomeClass::Coverage,
-            )
-        )
+        RefreshTerminalOutcome::automatic_retry_disposition(self.code, self.class, false).is_some()
     }
 
     pub(super) fn pause_automatic_retry_routes(&mut self, routes: &BTreeSet<SourceRouteIdentity>) {
@@ -201,12 +192,15 @@ impl SourceBackedRefreshFailureOutcome {
     }
 
     fn refresh_automatic_retry_disposition(&mut self) {
-        self.retryable = !self.retryable_routes.is_empty();
-        self.retry_advice = Some(if self.retryable {
-            RefreshRetryAdvice::RetryAffectedRoutes
-        } else {
-            RefreshRetryAdvice::InspectSources
-        });
+        let Some((retryable, retry_advice)) = RefreshTerminalOutcome::automatic_retry_disposition(
+            self.code,
+            self.class,
+            !self.retryable_routes.is_empty(),
+        ) else {
+            return;
+        };
+        self.retryable = retryable;
+        self.retry_advice = Some(retry_advice);
     }
 
     pub(super) fn new(
@@ -438,24 +432,19 @@ impl SourceBackedRefreshAttempt {
     }
 
     fn failure_code(&self) -> Option<&'static str> {
-        self.last_error
-            .as_deref()
-            .filter(|error| error.contains(TERMINAL_COVERAGE_ERROR_CODE))
-            .map(|_| TERMINAL_COVERAGE_ERROR_CODE)
-            .or_else(|| {
-                self.failure_outcome
-                    .as_ref()
-                    .map(|outcome| outcome.code.as_str())
-            })
+        self.failure_outcome
+            .as_ref()
+            .map(|outcome| outcome.code.as_str())
     }
 
     fn failure_reason(&self) -> Option<&'static str> {
-        if self.failure_code() == Some(TERMINAL_COVERAGE_ERROR_CODE) {
-            return Some("provider_terminal_coverage_unavailable");
-        }
-        self.failure_outcome
-            .as_ref()
-            .map(|outcome| outcome.class.as_str())
+        self.failure_outcome.as_ref().map(|outcome| {
+            if outcome.code == RefreshOutcomeCode::AllProviderTerminalCoverageUnavailable {
+                "provider_terminal_coverage_unavailable"
+            } else {
+                outcome.class.as_str()
+            }
+        })
     }
 
     fn request_generation_changed(&self) -> Option<bool> {

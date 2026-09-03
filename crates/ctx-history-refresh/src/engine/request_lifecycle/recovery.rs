@@ -428,14 +428,6 @@ fn recover_failure_outcome(
         bail!("durable terminal source refresh outcome has invalid `code`");
     }
     let class: RefreshOutcomeClass = required_outcome_text(fields, "class")?.parse()?;
-    if matches!(
-        class,
-        RefreshOutcomeClass::Completed
-            | RefreshOutcomeClass::CompletedWithRetryableFailures
-            | RefreshOutcomeClass::CompletedWithDiagnostics
-    ) {
-        bail!("durable terminal source refresh outcome has invalid `class`");
-    }
     let retryable = fields
         .get("retryable")
         .and_then(Value::as_bool)
@@ -469,48 +461,32 @@ fn recover_failure_outcome(
         .get("blocked_routes")
         .map(|_| recover_outcome_routes(fields, "blocked_routes"))
         .transpose()?;
-    if code == RefreshOutcomeCode::SourceUnclaimed
-        && (class != RefreshOutcomeClass::Coverage
-            || blocked_routes.as_ref().is_none_or(BTreeSet::is_empty)
-            || retry_advice
-                != Some(if retryable {
-                    RefreshRetryAdvice::RetryRetryableRoutesAndInspectBlocked
-                } else {
-                    RefreshRetryAdvice::InspectSources
-                }))
-    {
-        bail!("durable terminal source refresh source-unclaimed outcome is inconsistent");
-    }
-    match (retryable_routes, blocked_routes) {
-        (Some(retryable_routes), Some(blocked_routes)) => {
-            if !retryable_routes.is_disjoint(&blocked_routes)
-                || retryable_routes
-                    .union(&blocked_routes)
-                    .ne(affected_routes.iter())
-                || (!affected_routes.is_empty() && retryable == retryable_routes.is_empty())
-            {
-                bail!("durable terminal source refresh outcome has inconsistent route disposition");
-            }
-            Ok(Some(
-                SourceBackedRefreshFailureOutcome::with_route_dispositions(
-                    code,
-                    class,
-                    retryable,
-                    retryable_routes,
-                    blocked_routes,
-                    retry_advice,
-                ),
-            ))
-        }
-        (None, None) => Ok(Some(SourceBackedRefreshFailureOutcome::new(
+    let (retryable_routes, blocked_routes) = match (retryable_routes, blocked_routes) {
+        (Some(retryable_routes), Some(blocked_routes)) => (retryable_routes, blocked_routes),
+        (None, None) if retryable => (affected_routes.clone(), BTreeSet::new()),
+        (None, None) => (BTreeSet::new(), affected_routes.clone()),
+        _ => bail!("durable terminal source refresh outcome has incomplete route disposition"),
+    };
+    RefreshTerminalOutcome::validate_components(
+        code,
+        class,
+        retryable,
+        &affected_routes,
+        &retryable_routes,
+        &blocked_routes,
+        retry_advice,
+    )
+    .context("validate durable terminal source refresh outcome")?;
+    Ok(Some(
+        SourceBackedRefreshFailureOutcome::with_route_dispositions(
             code,
             class,
             retryable,
-            affected_routes,
+            retryable_routes,
+            blocked_routes,
             retry_advice,
-        ))),
-        _ => bail!("durable terminal source refresh outcome has incomplete route disposition"),
-    }
+        ),
+    ))
 }
 
 fn recover_outcome_routes(

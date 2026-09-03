@@ -79,10 +79,11 @@ pub fn reject_blocking_automatic_registry_issues(
     } else {
         format!("; {omitted} additional systemic safety issue(s) omitted")
     };
-    Err(anyhow!(
-        "{TERMINAL_COVERAGE_ERROR_CODE}: capture automatic registry has {blocker_count} systemic safety issue(s): {}{omitted}",
+    Err(ZeroSourcePublicationBlocked::new(format!(
+        "capture automatic registry has {blocker_count} systemic safety issue(s): {}{omitted}",
         blocker_details.join("; ")
     ))
+    .into())
 }
 
 #[doc(hidden)]

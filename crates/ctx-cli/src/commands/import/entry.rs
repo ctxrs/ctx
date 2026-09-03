@@ -107,10 +107,11 @@ fn record_terminal_import_failure(
     }) else {
         return false;
     };
+    let outcome = terminal.outcome();
     provider_refreshes.record_terminal_core_failure(
         ProviderRefreshTrigger::Import,
-        terminal.code.parse().ok(),
-        terminal.retryable,
+        Some(outcome.code),
+        outcome.retryable,
     );
     true
 }

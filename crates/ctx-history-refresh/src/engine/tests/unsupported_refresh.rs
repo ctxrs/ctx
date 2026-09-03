@@ -210,7 +210,8 @@ fn confirmed_deletion_can_publish_empty_but_mixed_unavailable_cannot() {
         &index_root,
     )
     .unwrap_err();
-    assert!(format!("{mixed_error:#}").contains(TERMINAL_COVERAGE_ERROR_CODE));
+    assert!(format!("{mixed_error:#}")
+        .contains(RefreshOutcomeCode::AllProviderTerminalCoverageUnavailable.as_str()));
     assert_eq!(
         VerifiedIndex::open_pinned(&index_root)
             .unwrap()

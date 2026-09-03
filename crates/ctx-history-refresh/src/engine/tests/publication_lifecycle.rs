@@ -791,7 +791,10 @@ fn durable_terminal_coverage_failure_recovers_without_wedging_startup() {
         .expect("terminal coverage failure");
     assert!(failed.failed);
     assert_eq!(failed.job["request_state"], "failed");
-    assert_eq!(failed.job["failure_type"], TERMINAL_COVERAGE_ERROR_CODE);
+    assert_eq!(
+        failed.job["failure_type"],
+        RefreshOutcomeCode::AllProviderTerminalCoverageUnavailable.as_str()
+    );
     drop(coordinator);
 
     let restarted = CoreRefreshEngine::with_executor(Arc::new(
