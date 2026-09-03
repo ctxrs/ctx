@@ -578,23 +578,23 @@ fn required_catalog_route_bindings_shape(
             if !is_sha256_identity(route_identity) {
                 bail!("published daemon source refresh catalog binding route is invalid");
             }
-            let route_result = route_results
-                .iter()
-                .find(|result| result.route_identity == route_identity)
-                .ok_or_else(|| {
-                    anyhow!(
-                        "published daemon source refresh catalog binding route is absent from route_results"
-                    )
-                })?;
-            if !expected_catalog_lineages.contains(catalog_lineage)
-                && !matches!(
+            if !expected_catalog_lineages.contains(catalog_lineage) {
+                let route_result = route_results
+                    .iter()
+                    .find(|result| result.route_identity == route_identity)
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "published daemon source refresh catalog binding route is absent from route_results"
+                        )
+                    })?;
+                if !matches!(
                     route_result.outcome,
                     SourceBackedRefreshRouteOutcome::Failed { .. }
-                )
-            {
-                bail!(
-                    "published daemon source refresh unretained catalog binding has no terminal failure"
-                );
+                ) {
+                    bail!(
+                        "published daemon source refresh unretained catalog binding has no terminal failure"
+                    );
+                }
             }
             Ok(ExplicitSourceCatalogRouteBinding {
                 catalog_lineage: catalog_lineage.clone(),
