@@ -3,6 +3,7 @@ mod support;
 #[cfg(unix)]
 mod unix {
     use std::{
+        collections::BTreeMap,
         fs,
         os::unix::{ffi::OsStrExt as _, fs::PermissionsExt as _},
         path::{Path, PathBuf},
@@ -16,6 +17,7 @@ mod unix {
 
     const FIXTURE_TARGET_VERSION: &str = "9.9.9";
     const FIXTURE_QUIESCENCE_TIMEOUT: Duration = Duration::from_secs(45);
+    const TERMINAL_UPGRADE_OBSERVATION_TIMEOUT: Duration = Duration::from_secs(45);
 
     fn installation_sibling(binary: &Path, suffix: &str) -> PathBuf {
         let name = binary
@@ -449,6 +451,54 @@ mod unix {
         unsafe {
             libc::kill(pid as libc::pid_t, libc::SIGTERM);
         }
+    }
+
+    fn stop_and_reap_daemon(pid: u32) {
+        stop_daemon(pid);
+        wait_for(
+            "replacement daemon reaping",
+            TERMINAL_UPGRADE_OBSERVATION_TIMEOUT,
+            || !process_is_running(pid),
+        );
+    }
+
+    fn terminal_upgrade_events_for_attempt(
+        events_path: &Path,
+        analytics_root: &Path,
+        attempt_id: &str,
+    ) -> Vec<Value> {
+        let mut payloads = if events_path.exists() {
+            read_delivered_analytics_events(events_path)
+        } else {
+            Vec::new()
+        };
+        // The analytics outbox is the durable publication state while delivery
+        // races with the replacement daemon's startup.
+        payloads.extend(read_queued_analytics_events(analytics_root));
+
+        let mut events_by_id = BTreeMap::new();
+        for payload in payloads {
+            let Some(events) = payload["events"].as_array() else {
+                continue;
+            };
+            for event in events {
+                if event["event_name"] != "operation_completed"
+                    || event["surface"] != "cli"
+                    || event["operation"] != "upgrade"
+                    || event["outcome"] != "success"
+                    || event["properties"]["upgrade_attempt_id"] != attempt_id
+                {
+                    continue;
+                }
+                let event_id = event["event_id"]
+                    .as_str()
+                    .expect("matching terminal upgrade event missing event_id");
+                events_by_id
+                    .entry(event_id.to_owned())
+                    .or_insert_with(|| event.clone());
+            }
+        }
+        events_by_id.into_values().collect()
     }
 
     fn seed_authoritative_codex_source(home: &Path) {
@@ -1299,7 +1349,7 @@ mod unix {
 
     #[test]
     fn daemon_reports_one_terminal_upgrade_event_after_durable_state() {
-        let temp = tempdir();
+        let temp = daemon_test_root();
         let mut release = fake_release(&temp, FIXTURE_TARGET_VERSION);
         let binary = managed_hook_candidate(&temp, "ia_daemon_telemetry");
         patch_release_artifact_with_next_ctx(&mut release, &binary, FIXTURE_TARGET_VERSION);
@@ -1310,38 +1360,84 @@ mod unix {
         fs::create_dir(&home).unwrap();
         seed_authoritative_codex_source(&home);
 
-        let output = managed_daemon(&temp, &release, &binary)
+        let mut command = managed_daemon(&temp, &release, &binary);
+        command
             .env("CTX_DATA_ROOT", &data_root)
             .env("HOME", &home)
             .env("XDG_STATE_HOME", &state_root)
             .env("LOCALAPPDATA", &state_root)
             .env_remove("CTX_ANALYTICS_ENABLED")
             .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
-            .env("CTX_DAEMON_AUTOSTART_OFF", "1")
-            .output()
-            .unwrap();
-        assert!(output.status.success(), "{output:?}");
-        assert!(
-            events_path.exists(),
-            "daemon emitted no telemetry file; stderr={}",
-            String::from_utf8_lossy(&output.stderr)
+            .env_remove("CTX_DAEMON_AUTOSTART_OFF");
+        let mut original_daemon = spawn_persistent_daemon(&command);
+        let original_pid = original_daemon.id();
+        let mut state = None;
+        let mut replacement_pid = None;
+        wait_for(
+            "durable applied upgrade state",
+            TERMINAL_UPGRADE_OBSERVATION_TIMEOUT,
+            || {
+                let Ok(bytes) = fs::read(scheduler_state_path(&binary)) else {
+                    return false;
+                };
+                let Ok(observed_state) = serde_json::from_slice::<Value>(&bytes) else {
+                    return false;
+                };
+                if observed_state["status"] != "applied"
+                    || observed_state["attempt_id"].as_str().is_none()
+                {
+                    return false;
+                }
+                state = Some(observed_state);
+                true
+            },
         );
+        wait_for(
+            "replacement daemon",
+            TERMINAL_UPGRADE_OBSERVATION_TIMEOUT,
+            || {
+                replacement_pid = running_daemon_pid(&data_root, Some(original_pid));
+                replacement_pid.is_some()
+            },
+        );
+        wait_for(
+            "replacement terminal upgrade event",
+            TERMINAL_UPGRADE_OBSERVATION_TIMEOUT,
+            || {
+                let attempt_id = state.as_ref().unwrap()["attempt_id"].as_str().unwrap();
+                !terminal_upgrade_events_for_attempt(&events_path, temp.path(), attempt_id)
+                    .is_empty()
+            },
+        );
+        let mut original_status = None;
+        wait_for(
+            "original daemon exit after replacement",
+            TERMINAL_UPGRADE_OBSERVATION_TIMEOUT,
+            || {
+                original_status = original_daemon.try_wait().unwrap();
+                original_status.is_some()
+            },
+        );
+        assert!(original_status.unwrap().success());
+        stop_and_reap_daemon(replacement_pid.unwrap());
 
-        let state: Value =
-            serde_json::from_slice(&fs::read(scheduler_state_path(&binary)).unwrap()).unwrap();
-        assert_eq!(state["status"], "applied");
-        let events = read_analytics_events(&events_path);
-        let upgrades = events
-            .iter()
-            .filter(|batch| {
-                batch["events"].as_array().is_some_and(|events| {
-                    events.iter().any(|event| event["operation"] == "upgrade")
-                })
-            })
-            .collect::<Vec<_>>();
+        let state = state.unwrap();
+        let upgrades = terminal_upgrade_events_for_attempt(
+            &events_path,
+            temp.path(),
+            state["attempt_id"].as_str().unwrap(),
+        );
         assert_eq!(upgrades.len(), 1);
-        assert_operation_event(upgrades[0], "upgrade", "success");
-        let properties = analytics_event_properties(upgrades[0]);
+        let event = &upgrades[0];
+        assert_eq!(event["event_name"], "operation_completed");
+        assert_eq!(event["event_version"], 1);
+        assert_eq!(event["surface"], "cli");
+        assert_eq!(event["operation"], "upgrade");
+        assert_eq!(event["outcome"], "success");
+        assert!(event["event_id"].as_str().is_some_and(|value| {
+            uuid::Uuid::parse_str(value).is_ok_and(|id| id.get_version_num() == 4)
+        }));
+        let properties = event["properties"].as_object().unwrap();
         assert_eq!(properties["upgrade_mode"], "auto");
         assert_eq!(properties["upgrade_status"], "applied");
         assert_eq!(properties["upgrade_applied"], true);
