@@ -69,27 +69,27 @@ impl fmt::Display for SourceBackedRefreshTerminalError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let outcome = self.outcome();
         let affected_routes = outcome
-            .affected_routes
+            .affected_routes()
             .iter()
             .map(|route| route.as_str())
             .collect::<Vec<_>>();
         let retryable_routes = outcome
-            .retryable_routes
+            .retryable_routes()
             .iter()
             .map(|route| route.as_str())
             .collect::<Vec<_>>();
         let blocked_routes = outcome
-            .blocked_routes
+            .blocked_routes()
             .iter()
             .map(|route| route.as_str())
             .collect::<Vec<_>>();
         write!(
             formatter,
             "daemon-owned source-backed refresh failed (code={}, class={}, retryable={}, attempt={}",
-            outcome.code.as_str(),
-            outcome.class.as_str(),
-            outcome.retryable,
-            outcome.physical_attempt_id
+            outcome.code().as_str(),
+            outcome.class().as_str(),
+            outcome.retryable(),
+            outcome.physical_attempt_id()
         )?;
         write!(
             formatter,
@@ -99,10 +99,10 @@ impl fmt::Display for SourceBackedRefreshTerminalError {
         write!(
             formatter,
             ", retained_generation={:?}, retry_advice={:?})",
-            outcome.retained_generation,
-            outcome.retry_advice.map(|advice| advice.as_str())
+            outcome.retained_generation(),
+            outcome.retry_advice().map(|advice| advice.as_str())
         )?;
-        if let Some(detail) = outcome.detail.as_deref() {
+        if let Some(detail) = outcome.detail() {
             write!(formatter, ": {detail}")?;
         }
         Ok(())
@@ -119,18 +119,18 @@ impl std::error::Error for SourceBackedRefreshTerminalError {
 
 impl From<RefreshTerminalOutcome> for SourceBackedRefreshTerminalError {
     fn from(outcome: RefreshTerminalOutcome) -> Self {
-        let capture_error = match outcome.class {
+        let capture_error = match outcome.class() {
             RefreshOutcomeClass::Incompatible => Some(CaptureError::UnsupportedSchema(
                 outcome
-                    .detail
-                    .clone()
-                    .unwrap_or_else(|| outcome.code.as_str().to_owned()),
+                    .detail()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| outcome.code().as_str().to_owned()),
             )),
             RefreshOutcomeClass::Unreadable => Some(CaptureError::InvalidPayload(
                 outcome
-                    .detail
-                    .clone()
-                    .unwrap_or_else(|| outcome.code.as_str().to_owned()),
+                    .detail()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| outcome.code().as_str().to_owned()),
             )),
             _ => None,
         };

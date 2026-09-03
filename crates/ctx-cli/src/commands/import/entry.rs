@@ -110,8 +110,8 @@ fn record_terminal_import_failure(
     let outcome = terminal.outcome();
     provider_refreshes.record_terminal_core_failure(
         ProviderRefreshTrigger::Import,
-        Some(outcome.code),
-        outcome.retryable,
+        Some(outcome.code()),
+        outcome.retryable(),
     );
     true
 }
@@ -232,7 +232,7 @@ fn record_application_facts(
 mod tests {
     use std::collections::BTreeSet;
 
-    use ctx_history_refresh::{RefreshOutcomeClass, RefreshOutcomeCode, RefreshTerminalOutcome};
+    use ctx_history_refresh::{RefreshOutcomeCode, RefreshTerminalOutcome};
 
     use crate::analytics::{
         Outcome, ProviderCoreResult, ProviderRefreshFailureScope, ProviderRefreshFailureType,
@@ -241,24 +241,22 @@ mod tests {
 
     use super::*;
 
-    fn terminal_error(
-        code: RefreshOutcomeCode,
-        class: RefreshOutcomeClass,
-        retryable: bool,
-    ) -> anyhow::Error {
-        crate::semantic::SourceBackedRefreshTerminalError::from(RefreshTerminalOutcome {
-            code,
-            class,
-            retryable,
-            affected_routes: BTreeSet::new(),
-            retryable_routes: BTreeSet::new(),
-            blocked_routes: BTreeSet::new(),
-            physical_attempt_id: "physical-attempt".to_owned(),
-            retained_generation: None,
-            published_generation: None,
-            retry_advice: None,
-            detail: Some("content-bearing raw terminal detail".to_owned()),
-        })
+    fn terminal_error(code: RefreshOutcomeCode, retryable: bool) -> anyhow::Error {
+        crate::semantic::SourceBackedRefreshTerminalError::from(
+            RefreshTerminalOutcome::new(
+                code,
+                retryable,
+                BTreeSet::new(),
+                BTreeSet::new(),
+                BTreeSet::new(),
+                uuid::Uuid::nil().to_string(),
+                None,
+                None,
+                None,
+                Some("content-bearing raw terminal detail".to_owned()),
+            )
+            .unwrap(),
+        )
         .into()
     }
 
@@ -275,11 +273,7 @@ mod tests {
 
     #[test]
     fn explicit_import_terminal_failure_emits_one_cli_owned_bounded_event() {
-        let error = terminal_error(
-            RefreshOutcomeCode::MalformedSource,
-            RefreshOutcomeClass::Unreadable,
-            false,
-        );
+        let error = terminal_error(RefreshOutcomeCode::MalformedSource, false);
         let mut collector = ProviderRefreshCollector::default();
 
         assert!(record_terminal_import_failure(&mut collector, &error));
@@ -307,11 +301,7 @@ mod tests {
 
     #[test]
     fn automatic_import_terminal_failure_emits_one_retryable_unknown_source_event() {
-        let error = terminal_error(
-            RefreshOutcomeCode::SourceFailures,
-            RefreshOutcomeClass::Mixed,
-            true,
-        );
+        let error = terminal_error(RefreshOutcomeCode::SourceFailures, true);
         let mut collector = ProviderRefreshCollector::default();
 
         assert!(record_terminal_import_failure(&mut collector, &error));

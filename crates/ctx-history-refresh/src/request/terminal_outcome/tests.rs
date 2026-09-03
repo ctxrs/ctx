@@ -1,75 +1,105 @@
 use super::*;
 
-fn nonretryable_outcome(
-    code: RefreshOutcomeCode,
-    class: RefreshOutcomeClass,
-) -> RefreshTerminalOutcome {
-    let route = SourceRouteIdentity::from_sha256("ab".repeat(32)).unwrap();
-    RefreshTerminalOutcome {
+fn route(byte: &str) -> SourceRouteIdentity {
+    SourceRouteIdentity::from_sha256(byte.repeat(32)).unwrap()
+}
+
+fn paused(code: RefreshOutcomeCode) -> Result<RefreshTerminalOutcome> {
+    RefreshTerminalOutcome::with_uniform_route_disposition(
         code,
-        class,
-        retryable: false,
-        affected_routes: BTreeSet::from([route.clone()]),
-        retryable_routes: BTreeSet::new(),
-        blocked_routes: BTreeSet::from([route]),
-        physical_attempt_id: "physical-attempt".to_owned(),
-        retained_generation: None,
-        published_generation: None,
-        retry_advice: Some(RefreshRetryAdvice::InspectSources),
-        detail: None,
+        false,
+        BTreeSet::from([route("ab")]),
+        uuid::Uuid::nil().to_string(),
+        None,
+        None,
+        Some(RefreshRetryAdvice::InspectSources),
+        None,
+    )
+}
+
+#[test]
+fn paused_automatic_terminal_outcomes_and_aggregate_schema_advice_are_valid() {
+    assert!(paused(RefreshOutcomeCode::SourceRefreshFailed).is_ok());
+    assert!(paused(RefreshOutcomeCode::AllProviderTerminalCoverageUnavailable).is_ok());
+    for advice in [
+        RefreshRetryAdvice::InspectSources,
+        RefreshRetryAdvice::UpgradeOrReconfigure,
+    ] {
+        assert!(RefreshTerminalOutcome::with_uniform_route_disposition(
+            RefreshOutcomeCode::UnsupportedSchema,
+            false,
+            BTreeSet::from([route("ab")]),
+            uuid::Uuid::nil().to_string(),
+            None,
+            None,
+            Some(advice),
+            None,
+        )
+        .is_ok());
     }
 }
 
 #[test]
-fn automatic_retry_pause_contract_is_closed() {
-    for (code, class) in [
-        (
-            RefreshOutcomeCode::SourceRefreshFailed,
-            RefreshOutcomeClass::Internal,
-        ),
-        (
-            RefreshOutcomeCode::AllProviderTerminalCoverageUnavailable,
-            RefreshOutcomeClass::Coverage,
-        ),
-    ] {
-        assert_eq!(
-            RefreshTerminalOutcome::automatic_retry_disposition(code, class, false),
-            Some((false, RefreshRetryAdvice::InspectSources)),
-        );
-        assert_eq!(
-            RefreshTerminalOutcome::automatic_retry_disposition(code, class, true),
-            Some((true, RefreshRetryAdvice::RetryAffectedRoutes)),
-        );
-        assert!(nonretryable_outcome(code, class).validate().is_ok());
-    }
-
-    assert_eq!(
-        RefreshTerminalOutcome::automatic_retry_disposition(
-            RefreshOutcomeCode::SourceRefreshInternal,
-            RefreshOutcomeClass::Internal,
-            false,
-        ),
+fn retry_route_moves_ignore_empty_and_unrelated_sets() {
+    let affected = route("ab");
+    let unrelated = BTreeSet::from([route("cd")]);
+    let mut outcome = RefreshTerminalOutcome::with_uniform_route_disposition(
+        RefreshOutcomeCode::SourceRefreshFailed,
+        true,
+        BTreeSet::from([affected.clone()]),
+        uuid::Uuid::nil().to_string(),
         None,
-    );
-    assert!(nonretryable_outcome(
-        RefreshOutcomeCode::SourceRefreshInternal,
-        RefreshOutcomeClass::Internal,
+        None,
+        Some(RefreshRetryAdvice::RetryAffectedRoutes),
+        None,
     )
-    .validate()
+    .unwrap();
+
+    let retryable = outcome.clone();
+    outcome.pause_automatic_retry_routes(&BTreeSet::new());
+    outcome.pause_automatic_retry_routes(&unrelated);
+    assert_eq!(outcome, retryable);
+
+    outcome.pause_automatic_retry_routes(&BTreeSet::from([affected]));
+    let paused = outcome.clone();
+    outcome.rearm_automatic_retry_routes(&BTreeSet::new());
+    outcome.rearm_automatic_retry_routes(&unrelated);
+    assert_eq!(outcome, paused);
+}
+
+#[test]
+fn completed_outcomes_reject_failure_facts_at_the_boundary() {
+    assert!(RefreshTerminalOutcome::new(
+        RefreshOutcomeCode::Completed,
+        false,
+        BTreeSet::from([route("ab")]),
+        BTreeSet::new(),
+        BTreeSet::from([route("ab")]),
+        uuid::Uuid::nil().to_string(),
+        None,
+        Some("generation".to_owned()),
+        Some(RefreshRetryAdvice::InspectSources),
+        Some("not a completed outcome".to_owned()),
+    )
     .is_err());
 }
 
 #[test]
-fn unsupported_schema_accepts_direct_and_aggregate_advice() {
-    let mut outcome = nonretryable_outcome(
-        RefreshOutcomeCode::UnsupportedSchema,
-        RefreshOutcomeClass::Incompatible,
+fn successful_outcomes_require_a_published_generation() {
+    let error = RefreshTerminalOutcome::with_uniform_route_disposition(
+        RefreshOutcomeCode::Completed,
+        false,
+        BTreeSet::new(),
+        uuid::Uuid::nil().to_string(),
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        "successful source refresh outcome has no published generation"
     );
-    for advice in [
-        RefreshRetryAdvice::UpgradeOrReconfigure,
-        RefreshRetryAdvice::InspectSources,
-    ] {
-        outcome.retry_advice = Some(advice);
-        assert!(outcome.validate().is_ok(), "{advice:?}");
-    }
 }

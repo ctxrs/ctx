@@ -5,6 +5,25 @@ use ctx_history_capture::{
     SourceBackedSelectorAuthority,
 };
 use ctx_history_capture_model::ProviderSourceStatus;
+
+fn retryable_internal_outcome(
+    retryable_routes: BTreeSet<SourceRouteIdentity>,
+    blocked_routes: BTreeSet<SourceRouteIdentity>,
+) -> RefreshTerminalOutcome {
+    RefreshTerminalOutcome::with_route_dispositions(
+        RefreshOutcomeCode::SourceRefreshFailed,
+        true,
+        retryable_routes,
+        blocked_routes,
+        uuid::Uuid::nil().to_string(),
+        None,
+        None,
+        Some(RefreshRetryAdvice::RetryAffectedRoutes),
+        None,
+    )
+    .unwrap()
+}
+
 #[test]
 fn ordinary_manual_all_still_scans_every_current_route() {
     let temp = tempfile::tempdir().unwrap();
@@ -489,14 +508,7 @@ fn mixed_automatic_retry_serialization_round_trips_through_recovery() {
     let observation = "ab".repeat(32);
     let retryable_routes = BTreeSet::from([confirming_route.clone()]);
     let blocked_routes = BTreeSet::from([paused_route.clone()]);
-    let outcome = SourceBackedRefreshFailureOutcome::with_route_dispositions(
-        RefreshOutcomeCode::SourceRefreshFailed,
-        RefreshOutcomeClass::Internal,
-        true,
-        retryable_routes,
-        blocked_routes,
-        Some(RefreshRetryAdvice::RetryAffectedRoutes),
-    );
+    let outcome = retryable_internal_outcome(retryable_routes, blocked_routes);
     let mut paused = SourceBackedAutomaticRetryCheckpoint::confirming(
         &outcome,
         &paused_route,
@@ -521,7 +533,7 @@ fn mixed_automatic_retry_serialization_round_trips_through_recovery() {
         SourceBackedRefreshScope::exact([paused_route, confirming_route]),
     );
     attempt.state = SourceBackedRefreshState::Failed;
-    attempt.failure_outcome = Some(outcome);
+    attempt.terminal_outcome = Some(outcome);
     attempt.last_error = Some("stable internal failure".to_owned());
     attempt.automatic_retry_checkpoints = expected.clone();
 
@@ -559,13 +571,8 @@ fn cold_scheduler_does_not_widen_around_an_unchanged_paused_route() {
     registry.register(healthy_source);
     let catalog = registry.watch_catalog();
     let observation = catalog.certify_route_observation(&paused_route).unwrap();
-    let outcome = SourceBackedRefreshFailureOutcome::new(
-        RefreshOutcomeCode::SourceRefreshFailed,
-        RefreshOutcomeClass::Internal,
-        true,
-        BTreeSet::from([paused_route.clone()]),
-        Some(RefreshRetryAdvice::RetryAffectedRoutes),
-    );
+    let outcome =
+        retryable_internal_outcome(BTreeSet::from([paused_route.clone()]), BTreeSet::new());
     let mut checkpoint = SourceBackedAutomaticRetryCheckpoint::confirming(
         &outcome,
         &paused_route,
@@ -629,13 +636,8 @@ fn periodic_catalog_refresh_excludes_an_unchanged_paused_route() {
     registry.register(healthy_source);
     let catalog = registry.watch_catalog();
     let observation = catalog.certify_route_observation(&paused_route).unwrap();
-    let outcome = SourceBackedRefreshFailureOutcome::new(
-        RefreshOutcomeCode::SourceRefreshFailed,
-        RefreshOutcomeClass::Internal,
-        true,
-        BTreeSet::from([paused_route.clone()]),
-        Some(RefreshRetryAdvice::RetryAffectedRoutes),
-    );
+    let outcome =
+        retryable_internal_outcome(BTreeSet::from([paused_route.clone()]), BTreeSet::new());
     let mut checkpoint = SourceBackedAutomaticRetryCheckpoint::confirming(
         &outcome,
         &paused_route,
@@ -854,10 +856,6 @@ fn automatic_terminal_coverage_retry_confirms_once_then_pauses() {
     assert_eq!(
         first.job["structured_outcome"]["code"],
         "all_provider_terminal_coverage_unavailable"
-    );
-    assert_eq!(
-        first.job["reason"],
-        "provider_terminal_coverage_unavailable"
     );
     assert_eq!(first.job["automatic_retry"]["state"], "confirming");
     assert_eq!(

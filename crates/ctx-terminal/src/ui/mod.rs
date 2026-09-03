@@ -20,7 +20,7 @@ pub use components::{
     Outcome, OutcomeState, Progress, RefreshCurrentSourceProgress,
     RefreshCurrentSourceProgressStage, RefreshLogicalPhase, RefreshLogicalStatus, RefreshProgress,
     RefreshProgressSnapshot, RefreshRequestState, RefreshStatusKind, RefreshStructuredOutcome,
-    RefreshWholeRunStage, Table,
+    RefreshTerminalPresentation, RefreshWholeRunStage, Table,
 };
 pub use context::{ColorMode, RenderContext, StreamKind, TestContext};
 pub use document::{sanitize_untrusted_history_body_for_terminal, Document, Line, Span};

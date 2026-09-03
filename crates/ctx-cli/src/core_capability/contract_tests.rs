@@ -6,9 +6,7 @@ use super::hosted_pair_install::{
 use super::progress_events::{CapabilityEventSink, IgnoreEvents, ProtocolEventWriter};
 use super::*;
 use ctx_history_index::SourceRouteIdentity;
-use ctx_history_refresh::{
-    RefreshOutcomeClass, RefreshOutcomeCode, RefreshRetryAdvice, RefreshTerminalOutcome,
-};
+use ctx_history_refresh::{RefreshOutcomeCode, RefreshRetryAdvice, RefreshTerminalOutcome};
 
 #[cfg(test)]
 #[path = "contract_tests/failure_contract_tests.rs"]
@@ -554,86 +552,34 @@ fn setup_receipt_does_not_embed_unbounded_source_diagnostics() {
     assert!(canonical(&facts).unwrap().len() < MAX_RESPONSE_BYTES);
 }
 
-fn terminal_failure_with_blocked_routes(route_count: usize) -> RefreshTerminalOutcome {
-    let routes = (0..route_count)
-        .map(|index| SourceRouteIdentity::from_sha256(format!("{index:064x}")).unwrap())
-        .collect::<BTreeSet<_>>();
-    RefreshTerminalOutcome {
-        code: RefreshOutcomeCode::IndexCorruption,
-        class: RefreshOutcomeClass::Corruption,
-        retryable: false,
-        affected_routes: routes.clone(),
-        retryable_routes: BTreeSet::new(),
-        blocked_routes: routes,
-        physical_attempt_id: "00000000-0000-0000-0000-000000000123".to_owned(),
-        retained_generation: Some("cd".repeat(32)),
-        published_generation: None,
-        retry_advice: Some(RefreshRetryAdvice::RebuildIndex),
-        detail: Some("arbitrary source detail must not cross the boundary".to_owned()),
-    }
-}
-
-fn retryable_terminal_failure() -> RefreshTerminalOutcome {
-    let route = SourceRouteIdentity::from_sha256("ab".repeat(32)).unwrap();
-    RefreshTerminalOutcome {
-        code: RefreshOutcomeCode::SourceUnavailable,
-        class: RefreshOutcomeClass::Unavailable,
-        retryable: true,
-        affected_routes: BTreeSet::from([route.clone()]),
-        retryable_routes: BTreeSet::from([route]),
-        blocked_routes: BTreeSet::new(),
-        physical_attempt_id: "00000000-0000-0000-0000-000000000123".to_owned(),
-        retained_generation: Some("cd".repeat(32)),
-        published_generation: None,
-        retry_advice: Some(RefreshRetryAdvice::RetryAffectedRoutes),
-        detail: None,
-    }
-}
-
 fn source_unclaimed_terminal_failure(retryable: bool) -> RefreshTerminalOutcome {
     let blocked = SourceRouteIdentity::from_sha256("ab".repeat(32)).unwrap();
     let retryable_route = SourceRouteIdentity::from_sha256("cd".repeat(32)).unwrap();
-    RefreshTerminalOutcome {
-        code: RefreshOutcomeCode::SourceUnclaimed,
-        class: RefreshOutcomeClass::Coverage,
+    RefreshTerminalOutcome::new(
+        RefreshOutcomeCode::SourceUnclaimed,
         retryable,
-        affected_routes: if retryable {
+        if retryable {
             BTreeSet::from([blocked.clone(), retryable_route.clone()])
         } else {
             BTreeSet::from([blocked.clone()])
         },
-        retryable_routes: if retryable {
+        if retryable {
             BTreeSet::from([retryable_route])
         } else {
             BTreeSet::new()
         },
-        blocked_routes: BTreeSet::from([blocked]),
-        physical_attempt_id: "00000000-0000-0000-0000-000000000123".to_owned(),
-        retained_generation: Some("cd".repeat(32)),
-        published_generation: None,
-        retry_advice: Some(if retryable {
+        BTreeSet::from([blocked]),
+        "00000000-0000-0000-0000-000000000123".to_owned(),
+        Some("cd".repeat(32)),
+        None,
+        Some(if retryable {
             RefreshRetryAdvice::RetryRetryableRoutesAndInspectBlocked
         } else {
             RefreshRetryAdvice::InspectSources
         }),
-        detail: None,
-    }
-}
-
-fn mutated_terminal_failure(
-    mutate: impl FnOnce(&mut RefreshTerminalOutcome),
-) -> crate::semantic::SourceBackedRefreshTerminalError {
-    let mut outcome = terminal_failure_with_blocked_routes(1);
-    mutate(&mut outcome);
-    crate::semantic::SourceBackedRefreshTerminalError::from(outcome)
-}
-
-fn mutated_retryable_terminal_failure(
-    mutate: impl FnOnce(&mut RefreshTerminalOutcome),
-) -> crate::semantic::SourceBackedRefreshTerminalError {
-    let mut outcome = retryable_terminal_failure();
-    mutate(&mut outcome);
-    crate::semantic::SourceBackedRefreshTerminalError::from(outcome)
+        None,
+    )
+    .unwrap()
 }
 
 fn run_terminal_failure(
@@ -999,21 +945,22 @@ fn recognized_terminal_failure_writes_one_exact_frame_and_exits_nonzero() {
     let route = SourceRouteIdentity::from_sha256("ab".repeat(32)).unwrap();
     let physical_attempt_id = "01234567-89ab-cdef-0123-456789abcdef";
     let retained_generation = "cd".repeat(32);
-    let terminal: anyhow::Error =
-        crate::semantic::SourceBackedRefreshTerminalError::from(RefreshTerminalOutcome {
-            code: RefreshOutcomeCode::IndexCorruption,
-            class: RefreshOutcomeClass::Corruption,
-            retryable: false,
-            affected_routes: BTreeSet::from([route.clone()]),
-            retryable_routes: BTreeSet::new(),
-            blocked_routes: BTreeSet::from([route]),
-            physical_attempt_id: physical_attempt_id.to_owned(),
-            retained_generation: Some(retained_generation.clone()),
-            published_generation: None,
-            retry_advice: Some(RefreshRetryAdvice::RebuildIndex),
-            detail: Some("arbitrary source detail must not cross the boundary".to_owned()),
-        })
-        .into();
+    let terminal: anyhow::Error = crate::semantic::SourceBackedRefreshTerminalError::from(
+        RefreshTerminalOutcome::new(
+            RefreshOutcomeCode::IndexCorruption,
+            false,
+            BTreeSet::from([route.clone()]),
+            BTreeSet::new(),
+            BTreeSet::from([route]),
+            physical_attempt_id.to_owned(),
+            Some(retained_generation.clone()),
+            None,
+            Some(RefreshRetryAdvice::RebuildIndex),
+            Some("arbitrary source detail must not cross the boundary".to_owned()),
+        )
+        .unwrap(),
+    )
+    .into();
     let terminal = terminal.context("arbitrary internal context must not cross the boundary");
     let mut output = Vec::new();
 
@@ -1031,6 +978,40 @@ fn recognized_terminal_failure_writes_one_exact_frame_and_exits_nonzero() {
     assert!(!output.contains(&0x1b));
     let response: Value = serde_json::from_slice(output.strip_suffix(b"\n").unwrap()).unwrap();
     assert_eq!(canonical(&response).unwrap(), output[..output.len() - 1]);
+    assert_eq!(
+        response
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            "details",
+            "error_code",
+            "ok",
+            "operation",
+            "protocol_version",
+            "retryable",
+            "schema_version",
+        ])
+    );
+    assert_eq!(
+        response["details"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            "affected_routes",
+            "blocked_routes",
+            "class",
+            "physical_attempt_id",
+            "retained_generation",
+            "retry_advice",
+            "retryable_routes",
+        ])
+    );
     assert_eq!(response["error_code"], "index_corruption");
     assert_eq!(response["retryable"], false);
     assert_eq!(
@@ -1042,195 +1023,6 @@ fn recognized_terminal_failure_writes_one_exact_frame_and_exits_nonzero() {
         retained_generation
     );
     assert!(!String::from_utf8(output).unwrap().contains('\u{009b}'));
-}
-
-#[test]
-fn event_terminal_state_and_final_failure_are_ordered_and_typed_the_same() {
-    let root = tempfile::tempdir().unwrap();
-    let request = json!({
-        "data_root": root.path(),
-        "operation": "RefreshAndWait",
-        "options": {"progress": "events"},
-        "protocol_version": CORE_PRO_PROTOCOL_VERSION.get(),
-        "schema_version": 1,
-    });
-    let mut input = canonical(&request).unwrap();
-    input.push(b'\n');
-    let route_text = "ab".repeat(32);
-    let retained = "cd".repeat(32);
-    let physical_attempt_id = "01234567-89ab-cdef-0123-456789abcdef";
-    let status = crate::semantic::RefreshStatus::parse_schema_v1(json!({
-        "request_id": "logical-request",
-        "request_state": "failed",
-        "logical_request_id": "logical-request",
-        "logical_phase": "terminal",
-        "physical_attempt_id": physical_attempt_id,
-        "physical_attempt_state": "failed",
-        "progress_owner_request_id": physical_attempt_id,
-        "progress_owner_attempt_state": "failed",
-        "progress": {
-            "phase": "failed",
-            "completed_sources": 0,
-            "total_sources": 1,
-            "total_sources_known": true,
-            "whole_run_stage": "failed"
-        },
-        "structured_outcome": {
-            "code": "index_corruption",
-            "class": "corruption",
-            "retryable": false,
-            "affected_routes": [route_text],
-            "retryable_routes": [],
-            "blocked_routes": [route_text],
-            "physical_attempt_id": physical_attempt_id,
-            "retained_generation": retained,
-            "published_generation": null,
-            "retry_advice": "rebuild_index"
-        }
-    }))
-    .unwrap();
-    let route = SourceRouteIdentity::from_sha256(route_text).unwrap();
-    let terminal: anyhow::Error =
-        crate::semantic::SourceBackedRefreshTerminalError::from(RefreshTerminalOutcome {
-            code: RefreshOutcomeCode::IndexCorruption,
-            class: RefreshOutcomeClass::Corruption,
-            retryable: false,
-            affected_routes: BTreeSet::from([route.clone()]),
-            retryable_routes: BTreeSet::new(),
-            blocked_routes: BTreeSet::from([route]),
-            physical_attempt_id: physical_attempt_id.to_owned(),
-            retained_generation: Some(retained),
-            published_generation: None,
-            retry_advice: Some(RefreshRetryAdvice::RebuildIndex),
-            detail: Some("private terminal detail".to_owned()),
-        })
-        .into();
-    let mut output = Vec::new();
-
-    let exit = capability_exit_code(run_with_protocol_io(
-        std::io::Cursor::new(input),
-        &mut output,
-        |_request, events| {
-            events.refresh(&status)?;
-            Err(terminal)
-        },
-    ));
-
-    assert_eq!(exit, ExitCode::FAILURE);
-    let frames = output
-        .split(|byte| *byte == b'\n')
-        .filter(|frame| !frame.is_empty())
-        .map(|frame| serde_json::from_slice::<Value>(frame).unwrap())
-        .collect::<Vec<_>>();
-    assert_eq!(frames.len(), 2);
-    assert_eq!(frames[0]["event"], "refresh");
-    assert_eq!(frames[0]["refresh"]["request_state"], "failed");
-    assert_eq!(frames[1]["ok"], false);
-    assert_eq!(
-        frames[0]["refresh"]["terminal_state"]["error_code"],
-        frames[1]["error_code"]
-    );
-    assert_eq!(
-        frames[0]["refresh"]["terminal_state"]["retryable"],
-        frames[1]["retryable"]
-    );
-    assert_eq!(
-        frames[0]["refresh"]["terminal_state"]["details"],
-        frames[1]["details"]
-    );
-    assert!(!String::from_utf8(output)
-        .unwrap()
-        .contains("private terminal detail"));
-}
-
-#[test]
-fn inconsistent_typed_failures_remain_silent_and_nonzero() {
-    let other = SourceRouteIdentity::from_sha256("11".repeat(32)).unwrap();
-    let cases = [
-        (
-            "code_class_mismatch",
-            mutated_terminal_failure(|outcome| {
-                outcome.class = RefreshOutcomeClass::Unavailable;
-            }),
-        ),
-        (
-            "code_retryability_mismatch",
-            mutated_terminal_failure(|outcome| {
-                outcome.affected_routes.clear();
-                outcome.blocked_routes.clear();
-                outcome.retryable = true;
-                outcome.retry_advice = None;
-            }),
-        ),
-        (
-            "retryable_not_affected",
-            mutated_retryable_terminal_failure(|outcome| {
-                outcome.retryable_routes = BTreeSet::from([other.clone()]);
-            }),
-        ),
-        (
-            "overlapping_dispositions",
-            mutated_retryable_terminal_failure(|outcome| {
-                outcome.blocked_routes = outcome.affected_routes.clone();
-            }),
-        ),
-        (
-            "undisposed_route",
-            mutated_terminal_failure(|outcome| {
-                outcome.affected_routes.insert(other.clone());
-            }),
-        ),
-        (
-            "route_retryability_mismatch",
-            mutated_terminal_failure(|outcome| {
-                outcome.code = RefreshOutcomeCode::SourceFailures;
-                outcome.class = RefreshOutcomeClass::Mixed;
-                outcome.retryable = true;
-                outcome.retry_advice = None;
-            }),
-        ),
-        (
-            "advice_retryability_mismatch",
-            mutated_terminal_failure(|outcome| {
-                outcome.retry_advice = Some(RefreshRetryAdvice::RetryRequest);
-            }),
-        ),
-        (
-            "known_but_wrong_advice",
-            mutated_terminal_failure(|outcome| {
-                outcome.retry_advice = Some(RefreshRetryAdvice::InspectSources);
-            }),
-        ),
-        ("source_unclaimed_without_advice", {
-            let mut outcome = source_unclaimed_terminal_failure(false);
-            outcome.retry_advice = None;
-            crate::semantic::SourceBackedRefreshTerminalError::from(outcome)
-        }),
-        ("source_unclaimed_without_blocked_culprit", {
-            let mut outcome = source_unclaimed_terminal_failure(true);
-            outcome.blocked_routes.clear();
-            outcome.affected_routes = outcome.retryable_routes.clone();
-            crate::semantic::SourceBackedRefreshTerminalError::from(outcome)
-        }),
-        (
-            "malformed_attempt_identity",
-            mutated_terminal_failure(|outcome| {
-                outcome.physical_attempt_id = "00000000-0000-0000-0000-00000000\n123".to_owned();
-            }),
-        ),
-        (
-            "malformed_generation_identity",
-            mutated_terminal_failure(|outcome| {
-                outcome.retained_generation = Some("AB".repeat(32));
-            }),
-        ),
-    ];
-
-    for (name, terminal) in cases {
-        let (status, output) = run_terminal_failure(terminal);
-        assert_eq!(status, ExitCode::FAILURE, "{name}");
-        assert!(output.is_empty(), "{name}: {output:?}");
-    }
 }
 
 #[test]

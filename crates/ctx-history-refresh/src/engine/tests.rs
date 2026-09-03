@@ -118,13 +118,19 @@ fn diagnostic_text_cannot_override_the_typed_terminal_outcome() {
         SourceBackedRefreshScope::All,
     );
     attempt.state = SourceBackedRefreshState::Failed;
-    attempt.failure_outcome = Some(SourceBackedRefreshFailureOutcome::new(
-        RefreshOutcomeCode::SourceRefreshFailed,
-        RefreshOutcomeClass::Internal,
-        true,
-        BTreeSet::new(),
-        Some(RefreshRetryAdvice::RetryRequest),
-    ));
+    attempt.terminal_outcome = Some(
+        RefreshTerminalOutcome::with_uniform_route_disposition(
+            RefreshOutcomeCode::SourceRefreshFailed,
+            true,
+            BTreeSet::new(),
+            uuid::Uuid::nil().to_string(),
+            None,
+            None,
+            Some(RefreshRetryAdvice::RetryRequest),
+            None,
+        )
+        .unwrap(),
+    );
     attempt.last_error = Some(format!(
         "diagnostic mentions {} but is not classification authority",
         RefreshOutcomeCode::AllProviderTerminalCoverageUnavailable.as_str()

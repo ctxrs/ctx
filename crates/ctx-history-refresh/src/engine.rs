@@ -40,7 +40,7 @@ use progress_model::{status_progress_total_sources_known, SourceBackedRefreshSta
 pub use progress_model::{SourceBackedRefreshProgress, SourceBackedRefreshStage};
 use read_model::{
     projected_job_json, projected_status_json, SourceBackedAutomaticRetryCheckpoint,
-    SourceBackedRefreshAttempt, SourceBackedRefreshFailureOutcome,
+    SourceBackedRefreshAttempt,
 };
 use runtime_metadata::{canonical_daemon_mode, SourceRefreshRuntimeMetadata};
 pub use runtime_metadata::{RefreshRuntime, RefreshRuntimeMetadata};
