@@ -171,7 +171,7 @@ impl CoreRefreshEngine {
             "owner": "daemon",
             "request_id": request_id,
             "logical_request_id": request_id,
-            "request_state": "queued",
+            "request_state": SourceBackedRefreshState::Queued.as_str(),
             "logical_phase": "waiting",
             "previous_generation": published_generation.clone(),
             "published_generation": published_generation,

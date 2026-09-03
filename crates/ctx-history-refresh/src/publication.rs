@@ -231,7 +231,9 @@ fn published_generation_receipt(
     let Some(job) = journal.load(data_root)? else {
         return Ok(None);
     };
-    if job.get("request_state").and_then(Value::as_str) != Some("published") {
+    if job.get("request_state").and_then(Value::as_str)
+        != Some(RefreshRequestState::Published.as_str())
+    {
         return Ok(None);
     }
     Ok(job

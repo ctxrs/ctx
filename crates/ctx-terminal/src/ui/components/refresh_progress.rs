@@ -212,6 +212,7 @@ impl RefreshProgressSnapshot {
     }
 }
 
+/// Terminal-neutral presentation projection of engine refresh request state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RefreshRequestState {
     AdmissionPending,

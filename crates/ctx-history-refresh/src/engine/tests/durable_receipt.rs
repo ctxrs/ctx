@@ -36,6 +36,24 @@ fn publish_synthetic_terminal(
 }
 
 #[test]
+fn unknown_top_level_request_state_is_ignored_for_recovery() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    ctx_history_platform::platform_security::establish_private_data_root(&data_root).unwrap();
+    write_daemon_job_status(
+        &daemon_source_backed_refresh_job_path(&data_root),
+        &json!({ "request_state": "unknown" }),
+    )
+    .unwrap();
+
+    let restarted = test_refresh_engine();
+    assert!(!restarted
+        .recover_interrupted_publication(&data_root)
+        .unwrap());
+    assert!(!restarted.has_pending_request());
+}
+
+#[test]
 fn published_terminal_without_generation_recovers_from_the_journal() {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("data");

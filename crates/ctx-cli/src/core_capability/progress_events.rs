@@ -2,8 +2,7 @@ use std::io::Write;
 
 use anyhow::Result;
 use ctx_history_refresh::{
-    RefreshLogicalPhase, RefreshRequestState, RefreshStatus, RefreshStatusKind,
-    RefreshTerminalOutcome,
+    RefreshLogicalPhase, RefreshStatus, RefreshStatusKind, RefreshTerminalOutcome,
 };
 use serde_json::{json, Value};
 
@@ -125,7 +124,7 @@ fn refresh_event_frame(
         "processed_sessions": progress.processed_sessions,
         "processed_tool_calls": progress.processed_tool_calls,
         "providers": progress.providers.iter().map(|provider| neutral_dynamic_text(provider)).collect::<Vec<_>>(),
-        "request_state": request_state_name(kind.request_state()),
+        "request_state": kind.request_state().as_str(),
         "total_sources": u64::try_from(progress.total_sources)?,
         "total_sources_known": status.total_sources_known()?,
         "whole_run_stage": status.whole_run_stage()?.as_str(),
@@ -156,12 +155,11 @@ fn append_typed_status(refresh: &mut Value, kind: &RefreshStatusKind) {
             refresh["logical_phase"] = json!(logical_phase_name(logical.logical_phase));
             refresh["physical_attempt_id"] =
                 json!(neutral_dynamic_text(&logical.physical_attempt_id));
-            refresh["physical_attempt_state"] =
-                json!(request_state_name(logical.physical_attempt_state));
+            refresh["physical_attempt_state"] = json!(logical.physical_attempt_state.as_str());
             refresh["progress_owner_request_id"] =
                 json!(neutral_dynamic_text(&logical.progress_owner_request_id));
             refresh["progress_owner_attempt_state"] =
-                json!(request_state_name(logical.progress_owner_attempt_state));
+                json!(logical.progress_owner_attempt_state.as_str());
             if let Some(outcome) = logical.structured_outcome.as_ref() {
                 refresh["terminal_state"] = terminal_state(outcome);
             }
@@ -195,16 +193,6 @@ pub(super) fn terminal_details(outcome: &RefreshTerminalOutcome) -> Value {
 fn remove_null_fields(value: &mut Value) {
     if let Value::Object(fields) = value {
         fields.retain(|_, value| !value.is_null());
-    }
-}
-
-fn request_state_name(state: RefreshRequestState) -> &'static str {
-    match state {
-        RefreshRequestState::AdmissionPending => "admission_pending",
-        RefreshRequestState::Queued => "queued",
-        RefreshRequestState::Running => "running",
-        RefreshRequestState::Published => "published",
-        RefreshRequestState::Failed => "failed",
     }
 }
 

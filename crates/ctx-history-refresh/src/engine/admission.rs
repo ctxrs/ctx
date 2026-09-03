@@ -112,7 +112,7 @@ impl CoreRefreshEngine {
             }
         };
         let response_barrier = (response.get("request_state").and_then(Value::as_str)
-            == Some("admission_pending"))
+            == Some(SourceBackedRefreshState::AdmissionPending.as_str()))
         .then(|| {
             response
                 .get("request_id")
