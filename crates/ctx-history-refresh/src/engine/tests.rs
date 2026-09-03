@@ -459,11 +459,11 @@ fn newer_exhaustive_marker_survives_post_publication_coverage_fence() {
             publish_pin_fixture_with_observations(
                 &execution,
                 false,
-                first_execution
-                    .then(|| {
-                        BTreeMap::from([(executor_route.clone(), executor_observation.clone())])
-                    })
-                    .unwrap_or_default(),
+                if first_execution {
+                    BTreeMap::from([(executor_route.clone(), executor_observation.clone())])
+                } else {
+                    BTreeMap::new()
+                },
             )
         });
     let coordinator = Arc::new(CoreRefreshEngine::with_executor_and_admitted_routes(
@@ -844,21 +844,20 @@ fn publish_selected_routes(
     .collect::<BTreeMap<_, _>>();
     let catalog_route_bindings =
         synthetic_catalog_route_bindings(execution.explicit_source_catalog, selected);
-    let zero_source_authority = retained_route
-        .is_none()
-        .then(|| {
-            route_results
-                .iter()
-                .filter(|result| result.outcome.is_success())
-                .map(|result| {
-                    (
-                        SourceRouteIdentity::from_sha256(result.route_identity.clone()).unwrap(),
-                        SourceBackedZeroSourceAuthorityKind::CompleteEmptyInventory,
-                    )
-                })
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+    let zero_source_authority = if retained_route.is_none() {
+        route_results
+            .iter()
+            .filter(|result| result.outcome.is_success())
+            .map(|result| {
+                (
+                    SourceRouteIdentity::from_sha256(result.route_identity.clone()).unwrap(),
+                    SourceBackedZeroSourceAuthorityKind::CompleteEmptyInventory,
+                )
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
     let commit = commit_source_backed_test_generation_with_facts(
         writer,
         SourceBackedTestGenerationFacts {
