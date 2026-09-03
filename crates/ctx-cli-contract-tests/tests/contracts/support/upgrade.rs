@@ -584,7 +584,11 @@ fn write_fake_runtime_archive(artifact: &Path, library: &str, version: &str, mod
         ),
         (
             format!("lib/{library}"),
-            b"fake onnxruntime shared library\n".to_vec(),
+            if mode == "replacement" {
+                b"corrected fake onnxruntime shared library\n".to_vec()
+            } else {
+                b"fake onnxruntime shared library\n".to_vec()
+            },
         ),
     ];
     for (name, contents) in files {

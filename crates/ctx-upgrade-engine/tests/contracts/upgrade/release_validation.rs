@@ -236,6 +236,44 @@ fn semantic_enabled_same_version_upgrade_repairs_missing_legacy_runtime() {
 
 #[cfg(unix)]
 #[test]
+fn semantic_enabled_same_version_upgrade_replaces_changed_runtime_bytes() {
+    let temp = tempdir();
+    let release = fake_legacy_release(&temp, env!("CARGO_PKG_VERSION"));
+    let mut runtime = add_fake_release_runtime(&temp, &release);
+    let cli_before = fs::read(&release.target).unwrap();
+
+    let installed = json_output(
+        fake_release_env(ctx(&temp).args(["upgrade", "--format=json"]), &release)
+            .env("CTX_SEARCH_SEMANTIC", "true"),
+    );
+    assert_eq!(installed["status"], "applied", "{installed:#}");
+    let original_sha = runtime.artifact_sha.clone();
+
+    rewrite_fake_runtime_archive(&release, &mut runtime, "replacement");
+    assert_ne!(runtime.artifact_sha, original_sha);
+
+    let replaced = json_output(
+        fake_release_env(ctx(&temp).args(["upgrade", "--format=json"]), &release)
+            .env("CTX_SEARCH_SEMANTIC", "true"),
+    );
+    assert_eq!(replaced["status"], "applied", "{replaced:#}");
+    assert_eq!(fs::read(&release.target).unwrap(), cli_before);
+
+    let manifest: Value =
+        serde_json::from_slice(&fs::read(runtime.target.join("ctx-runtime-install.json")).unwrap())
+            .unwrap();
+    assert_eq!(manifest["version"], runtime.version);
+    assert_eq!(manifest["sha256"], runtime.artifact_sha);
+
+    let repeated = json_output(
+        fake_release_env(ctx(&temp).args(["upgrade", "--format=json"]), &release)
+            .env("CTX_SEARCH_SEMANTIC", "true"),
+    );
+    assert_eq!(repeated["status"], "up_to_date", "{repeated:#}");
+}
+
+#[cfg(unix)]
+#[test]
 fn interrupted_same_version_runtime_repair_recovers_without_replacing_ctx() {
     let temp = tempdir();
     let release = fake_legacy_release(&temp, env!("CARGO_PKG_VERSION"));
