@@ -661,9 +661,17 @@ fn validate_identity(journal: &InstallTransactionJournal) -> Result<()> {
 
 #[cfg(windows)]
 fn validate_windows_private_root(path: &Path, label: &str) -> Result<()> {
+    use super::super::path_identity::windows_disk_path_identity;
+
     let canonical = fs::canonicalize(path)
         .with_context(|| format!("canonicalize {label} {}", path.display()))?;
-    if canonical != path {
+    if !matches!(
+        (
+            windows_disk_path_identity(path),
+            windows_disk_path_identity(&canonical)
+        ),
+        (Some(path), Some(canonical)) if path == canonical
+    ) {
         return Err(anyhow!("{label} is not canonical: {}", path.display()));
     }
     ctx_history_platform::platform_security::verify_private_directory(path)

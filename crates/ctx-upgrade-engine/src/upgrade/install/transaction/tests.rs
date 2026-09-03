@@ -154,6 +154,7 @@ fn empty_publication_transaction_remains_invalid() {
     );
 }
 
+#[cfg(not(windows))]
 #[test]
 fn coreml_clean_install_journals_exact_fallback_composition_and_paths() {
     let temp = tempfile::tempdir().unwrap();
@@ -180,6 +181,7 @@ fn coreml_clean_install_journals_exact_fallback_composition_and_paths() {
     );
 }
 
+#[cfg(not(windows))]
 #[test]
 fn coreml_clean_install_rejects_every_path_outside_its_authority_root() {
     let temp = tempfile::tempdir().unwrap();

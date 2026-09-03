@@ -46,18 +46,23 @@ pub(crate) fn remove_apply_candidate(layout: &Layout) -> Result<()> {
             None => {}
         }
     }
-    candidate
-        .share_directory
-        .remove_directory(OsStr::new("ctx"))?;
-    candidate
-        .root_directory
-        .remove_directory(OsStr::new("share"))?;
-    candidate
-        .root_directory
-        .remove_directory(OsStr::new("libexec"))?;
-    candidate
-        .root_directory
-        .remove_directory(OsStr::new("bin"))?;
+    let Layout {
+        root_directory,
+        bin_directory,
+        libexec_directory,
+        share_directory,
+        ctx_directory,
+        ..
+    } = candidate;
+    drop(ctx_directory);
+    share_directory.remove_directory(OsStr::new("ctx"))?;
+    drop(share_directory);
+    drop(libexec_directory);
+    drop(bin_directory);
+    root_directory.remove_directory(OsStr::new("share"))?;
+    root_directory.remove_directory(OsStr::new("libexec"))?;
+    root_directory.remove_directory(OsStr::new("bin"))?;
+    drop(root_directory);
     layout
         .ctx_directory
         .remove_directory(OsStr::new(APPLY_CANDIDATE_DIRECTORY))?;
