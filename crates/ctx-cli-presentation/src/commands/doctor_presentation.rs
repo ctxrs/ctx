@@ -265,16 +265,16 @@ fn humanize_doctor_finding(finding: &str) -> HumanDoctorFinding {
 
 #[cfg(test)]
 mod ui_tests {
-    use std::io::Write as _;
-
     use ctx_history_read_application::{
         HistoryDataCoverage, HistoryHealthReport, HistoryRootCoverage,
     };
     use serde_json::json;
-    use unicode_width::UnicodeWidthStr as _;
 
     use super::*;
-    use crate::ui::{ColorMode, StreamKind, TestContext};
+    use crate::{
+        test_support::{assert_fits, strip_ansi},
+        ui::{ColorMode, StreamKind, TestContext},
+    };
 
     fn context_with_color(width: usize, color: ColorMode) -> RenderContext {
         RenderContext::for_test(TestContext::tty(StreamKind::Stdout, width).color(color))
@@ -303,19 +303,6 @@ mod ui_tests {
             source_failures: 0,
             rejected_records: 0,
         }
-    }
-
-    fn assert_fits(document: &Document, context: &RenderContext) {
-        let width = context.content_width().unwrap_or(1);
-        for line in document.render_plain().lines() {
-            assert!(line.width() <= width, "{line:?} exceeded {width} columns");
-        }
-    }
-
-    fn strip_ansi(rendered: &str) -> String {
-        let mut stream = anstream::StripStream::new(Vec::new());
-        stream.write_all(rendered.as_bytes()).unwrap();
-        String::from_utf8(stream.into_inner()).unwrap()
     }
 
     #[test]

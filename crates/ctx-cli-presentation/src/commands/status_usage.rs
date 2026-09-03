@@ -205,10 +205,11 @@ fn usage_failure_title(mode: UsageStatusMode) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Write as _;
-
     use super::*;
-    use crate::ui::{ColorMode, StreamKind, TestContext};
+    use crate::{
+        test_support::strip_ansi,
+        ui::{ColorMode, StreamKind, TestContext},
+    };
 
     fn context(width: usize, color: ColorMode) -> RenderContext {
         RenderContext::for_test(TestContext::tty(StreamKind::Stdout, width).color(color))
@@ -216,12 +217,6 @@ mod tests {
 
     fn action(fields: Value) -> Map<String, Value> {
         fields.as_object().cloned().unwrap()
-    }
-
-    fn strip_ansi(rendered: &str) -> String {
-        let mut stream = anstream::StripStream::new(Vec::new());
-        stream.write_all(rendered.as_bytes()).unwrap();
-        String::from_utf8(stream.into_inner()).unwrap()
     }
 
     #[test]

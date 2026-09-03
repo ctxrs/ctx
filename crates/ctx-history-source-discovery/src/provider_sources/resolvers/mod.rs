@@ -35,6 +35,8 @@ mod manual_unsupported;
 mod platform;
 mod profile_project;
 mod simple;
+#[cfg(test)]
+mod test_support;
 
 pub use config_project::{
     resolve_crush_released_project_inventories, resolve_crush_released_project_inventory,
