@@ -237,6 +237,8 @@ pub struct AutomaticUpgradeObservation<'a> {
 }
 
 pub trait UpgradeObserver<S: AutomaticUpgradePolicySnapshot> {
+    fn observe_automatic_warnings(&self, _data_root: &Path, _policy: &S, _warnings: &[String]) {}
+
     fn observe_automatic_terminal(
         &self,
         data_root: &Path,

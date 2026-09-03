@@ -97,13 +97,13 @@ pub(super) fn managed_core_destination(install_root: &Path) -> PathBuf {
     install_root.join(executable)
 }
 
-pub(super) fn run(arguments: &[std::ffi::OsString]) -> Result<()> {
+pub(super) fn run(arguments: &[std::ffi::OsString], writer: impl std::io::Write) -> Result<()> {
     let request = ApplyRequest::parse(arguments)?;
     request.require_running_core(
         &std::env::current_exe().context("resolve running managed-pair candidate Core")?,
     )?;
     apply(&request)?;
-    write_response_frame(std::io::stdout().lock(), SUCCESS_RECEIPT)
+    write_response_frame(writer, SUCCESS_RECEIPT)
 }
 
 fn apply(request: &ApplyRequest) -> Result<()> {

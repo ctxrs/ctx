@@ -24,7 +24,7 @@ pub(super) const fn success_receipt() -> &'static [u8] {
     SUCCESS_RECEIPT
 }
 
-pub(super) fn run(arguments: &[std::ffi::OsString]) -> Result<()> {
+pub(super) fn run(arguments: &[std::ffi::OsString], writer: impl std::io::Write) -> Result<()> {
     if arguments.len() != ARGUMENT_COUNT || arguments[3] != OsStr::new("-") {
         bail!("invalid managed-pair reconciliation invocation");
     }
@@ -67,5 +67,5 @@ pub(super) fn run(arguments: &[std::ffi::OsString]) -> Result<()> {
         bail!("managed-pair reconciliation requires an installed signed pair");
     }
     reconcile_managed_pair_integration_under_installation_lock(&install_root, &integration)?;
-    write_response_frame(std::io::stdout().lock(), success_receipt())
+    write_response_frame(writer, success_receipt())
 }
