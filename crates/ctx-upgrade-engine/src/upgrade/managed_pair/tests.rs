@@ -101,17 +101,17 @@ impl DaemonUpgradePort for RecordingDaemon {
     }
 }
 
-struct FixtureVerifier(VerifiedManagedPairIdentity);
+struct FixtureVerifier(BTreeMap<Vec<u8>, VerifiedManagedPairIdentity>);
 
 impl ManagedPairVerifier for FixtureVerifier {
     fn verify_signed_envelope(
         &self,
         signed_envelope: &[u8],
     ) -> Result<VerifiedManagedPairIdentity> {
-        if signed_envelope != b"signed-envelope" {
-            bail!("unexpected envelope")
-        }
-        Ok(self.0.clone())
+        self.0
+            .get(signed_envelope)
+            .cloned()
+            .ok_or_else(|| anyhow!("unexpected envelope"))
     }
 }
 
@@ -169,7 +169,7 @@ fn current_target() -> ManagedPairTarget {
 }
 
 #[test]
-fn one_pair_fixture_drives_download_marker_and_apply_without_legacy_core() -> Result<()> {
+fn managed_pair_apply_binds_resumed_candidate_to_requested_identity() -> Result<()> {
     let release_verifier = ReleaseManagedPairVerifier::for_channel("stable")?;
     assert!(release_verifier
         .verify_signed_envelope(b"not-a-signed-envelope")
@@ -205,11 +205,16 @@ fn one_pair_fixture_drives_download_marker_and_apply_without_legacy_core() -> Re
             "man_pages": {"status": "installed"},
         }))?,
     )?;
+    restrict_private_file(&marker_path)?;
 
     let next_core = b"next-core";
     let companion = b"next-companion";
     let core_sha = digest(next_core);
     let companion_sha = digest(companion);
+    let requested_core = b"requested-core";
+    let requested_companion = b"requested-companion";
+    let requested_core_sha = digest(requested_core);
+    let requested_companion_sha = digest(requested_companion);
     let plan = UpgradePlan {
         current_version: "1.0.0".to_owned(),
         latest_version: "1.1.0".to_owned(),
@@ -249,14 +254,29 @@ fn one_pair_fixture_drives_download_marker_and_apply_without_legacy_core() -> Re
         },
         semantic_provisioning: None,
     };
-    let verifier = FixtureVerifier(VerifiedManagedPairIdentity::new(
+    let applied_identity = VerifiedManagedPairIdentity::new(
         "ctx-1.1.0",
         current_target(),
         2,
         "3".repeat(64),
         ManagedPairComponentIdentity::new(&core_sha, next_core.len() as u64)?,
         ManagedPairComponentIdentity::new(&companion_sha, companion.len() as u64)?,
-    )?);
+    )?;
+    let requested_identity = VerifiedManagedPairIdentity::new(
+        "ctx-1.2.0",
+        current_target(),
+        3,
+        "4".repeat(64),
+        ManagedPairComponentIdentity::new(&requested_core_sha, requested_core.len() as u64)?,
+        ManagedPairComponentIdentity::new(
+            &requested_companion_sha,
+            requested_companion.len() as u64,
+        )?,
+    )?;
+    let verifier = FixtureVerifier(BTreeMap::from([
+        (b"signed-envelope".to_vec(), applied_identity),
+        (b"requested-envelope".to_vec(), requested_identity),
+    ]));
     let mut staging_plan = plan.clone();
     staging_plan.channel = "staging".to_owned();
     let staging_marker: serde_json::Value = serde_json::from_slice(
@@ -269,6 +289,15 @@ fn one_pair_fixture_drives_download_marker_and_apply_without_legacy_core() -> Re
             ("pair-envelope".to_owned(), b"signed-envelope".to_vec()),
             ("pair-core".to_owned(), next_core.to_vec()),
             ("pair-companion".to_owned(), companion.to_vec()),
+            (
+                "requested-envelope".to_owned(),
+                b"requested-envelope".to_vec(),
+            ),
+            ("requested-core".to_owned(), requested_core.to_vec()),
+            (
+                "requested-companion".to_owned(),
+                requested_companion.to_vec(),
+            ),
             ("legacy-core".to_owned(), b"must-not-download".to_vec()),
         ]),
         downloads: Mutex::new(Vec::new()),
@@ -358,6 +387,31 @@ fn one_pair_fixture_drives_download_marker_and_apply_without_legacy_core() -> Re
     let staged =
         stage_managed_pair_under_installation_lock(fixture.path(), &repair.input()?, &verifier)?;
     assert!(matches!(staged, ManagedPairStageOutcome::Staged { .. }));
+    let mut requested_plan = repair_plan.clone();
+    requested_plan.latest_version = "1.2.0".to_owned();
+    requested_plan.artifact_sha256 = requested_core_sha.clone();
+    requested_plan.update_available = true;
+    requested_plan.managed_pair_release = Some(ManagedPairReleaseMetadata {
+        envelope_url: "requested-envelope".to_owned(),
+        core_object_url: "requested-core".to_owned(),
+        core_sha256: requested_core_sha,
+        companion_object_url: "requested-companion".to_owned(),
+        companion_sha256: requested_companion_sha,
+    });
+    requested_plan.metadata.version = "1.2.0".to_owned();
+    requested_plan.metadata.sha256 = requested_plan.artifact_sha256.clone();
+    let mut requested =
+        ManagedPairDownloads::download(&transport, fixture.path(), &requested_plan, &verifier)?;
+    let error = requested
+        .apply_under_installation_lock(&lock, fixture.path(), &verifier)
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("did not apply the requested signed candidate"),
+        "{error:#}"
+    );
+    assert_eq!(fs::read(&core_path)?, next_core);
     assert!(!resume_or_confirm_pending_with_verifier(
         &core_path,
         &core_sha,
