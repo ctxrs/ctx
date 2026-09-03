@@ -571,7 +571,26 @@ pub(super) fn verify_content(
 }
 
 pub(super) fn protect_regular(entry: &Entry, executable: bool, label: &str) -> Result<()> {
+    #[cfg(windows)]
+    let file = {
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_GENERIC_READ, FILE_SHARE_READ, READ_CONTROL, SYNCHRONIZE, WRITE_DAC,
+        };
+
+        entry
+            .directory
+            .open_relative(
+                &entry.name,
+                FILE_GENERIC_READ | READ_CONTROL | WRITE_DAC | SYNCHRONIZE,
+                FILE_SHARE_READ,
+                windows_sys::Wdk::Storage::FileSystem::FILE_OPEN,
+            )
+            .with_context(|| format!("open mutable {label} {}", entry.display()))?
+    };
+    #[cfg(not(windows))]
     let file = open_owner_regular(entry, label)?;
+    // Reject hard links before changing their shared security descriptor.
+    validate_open_owner_regular(entry, &file, label)?;
     protect_file_handle(&file, executable)?;
     validate_open_owner_regular(entry, &file, label)
 }

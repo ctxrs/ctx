@@ -210,6 +210,7 @@ fn valid_marker_uses_the_canonical_executable_path() -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 #[test]
 fn upgraded_marker_preserves_validated_owned_extensions() -> Result<()> {
     let fixture = tempdir()?;

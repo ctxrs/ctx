@@ -280,6 +280,10 @@ fn apply_marker_requires_managed_pair_provenance() {
 #[test]
 fn canonical_root_lock_contends_and_persists() {
     let fixture = ArgFixture::new();
+    ctx_history_platform::platform_security::restrict_private_directory(
+        &fixture.install.join("bin"),
+    )
+    .unwrap();
     let first = try_acquire_managed_installation_mutation_at_root(&fixture.install)
         .unwrap()
         .unwrap();

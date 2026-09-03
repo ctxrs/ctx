@@ -90,8 +90,11 @@ pub(super) fn durable_rename(
         mem::size_of,
         os::windows::{ffi::OsStrExt as _, io::AsRawHandle as _},
     };
-    use windows_sys::Win32::Storage::FileSystem::{
-        FileRenameInfo, SetFileInformationByHandle, FILE_RENAME_INFO,
+    use windows_sys::{
+        Wdk::Storage::FileSystem::{
+            FileRenameInformation, NtSetInformationFile, FILE_RENAME_INFORMATION,
+        },
+        Win32::{Foundation::RtlNtStatusToDosError, System::IO::IO_STATUS_BLOCK},
     };
 
     let file = open_owner_regular_for_delete(source, label)?;
@@ -105,14 +108,15 @@ pub(super) fn durable_rename(
         .checked_mul(size_of::<u16>())
         .ok_or_else(|| anyhow!("managed-pair target name is too long"))?;
     // Windows documents FileNameLength without the terminator, while the
-    // FILE_RENAME_INFO buffer itself must include its trailing WCHAR storage.
+    // FILE_RENAME_INFORMATION buffer itself must include its trailing WCHAR
+    // storage.
     // The zero-filled tail therefore supplies the required terminator.
-    let total_bytes = size_of::<FILE_RENAME_INFO>()
+    let total_bytes = size_of::<FILE_RENAME_INFORMATION>()
         .checked_add(name_bytes)
         .ok_or_else(|| anyhow!("managed-pair rename buffer is too large"))?;
     let words = total_bytes.div_ceil(size_of::<usize>());
     let mut buffer = vec![0_usize; words];
-    let information = buffer.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+    let information = buffer.as_mut_ptr().cast::<FILE_RENAME_INFORMATION>();
     unsafe {
         (*information).Anonymous.ReplaceIfExists = replace;
         (*information).RootDirectory = target.directory.file.as_raw_handle().cast();
@@ -123,18 +127,22 @@ pub(super) fn durable_rename(
             name.len(),
         );
     }
-    if unsafe {
-        SetFileInformationByHandle(
+    let mut status_block = IO_STATUS_BLOCK::default();
+    let status = unsafe {
+        NtSetInformationFile(
             file.as_raw_handle().cast(),
-            FileRenameInfo,
+            &mut status_block,
             information.cast(),
             u32::try_from(total_bytes)?,
+            FileRenameInformation,
         )
-    } == 0
-    {
-        return Err(std::io::Error::last_os_error()).context("rename managed-pair file by handle");
+    };
+    if status < 0 {
+        return Err(std::io::Error::from_raw_os_error(
+            unsafe { RtlNtStatusToDosError(status) } as i32,
+        ))
+        .context("rename managed-pair file by handle");
     }
-    file.sync_all()?;
     Ok(())
 }
 
@@ -149,6 +157,7 @@ pub(crate) fn durable_replace(
     require_stamp(source, expected, max, label)?;
     durable_rename(source, target, expected, label, true)?;
     require_stamp(target, expected, max, label)
+        .with_context(|| format!("revalidate renamed managed-pair {label}"))
 }
 
 #[cfg(unix)]

@@ -47,6 +47,7 @@ fn fresh_root_and_installed_executable_share_the_persistent_lock() -> Result<()>
     let fixture = tempdir()?;
     let bin = fixture.path().join("bin");
     fs::create_dir(&bin)?;
+    ctx_history_platform::platform_security::restrict_private_directory(&bin)?;
 
     let root_lock =
         InstallationLock::try_acquire_at_root(fixture.path())?.expect("fresh root lock");
@@ -86,7 +87,7 @@ fn windows_candidate_contends_with_base_version_lock() -> Result<()> {
 
     assert_eq!(
         installation_lock_path(&canonical_executable(&executable)?)?,
-        base_lock_path
+        fs::canonicalize(&base_lock_path)?
     );
     assert!(
         InstallationLock::try_acquire(&executable)?.is_none(),
