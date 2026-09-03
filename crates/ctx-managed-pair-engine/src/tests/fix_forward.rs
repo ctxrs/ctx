@@ -272,6 +272,42 @@ fn rollback_and_changed_same_generation_are_rejected() {
     assert_active(&fixture, &current, &verifier);
 }
 
+#[test]
+fn damaged_generation_witnesses_do_not_allow_rollback() {
+    let fixture = Fixture::new();
+    let current = fixture.candidate("current", 10, b"current-core", b"current-pro", b"marker");
+    let older = fixture.candidate("older", 9, b"older-core", b"older-pro", b"marker");
+    let verifier = TestVerifier::new([
+        (current.envelope.clone(), current.identity.clone()),
+        (older.envelope.clone(), older.identity.clone()),
+    ]);
+    apply(&fixture, &current, &verifier);
+
+    let layout = filesystem::Layout::open(&fixture.install, false).unwrap();
+    fs::write(layout.target(filesystem::Slot::State), b"not-state").unwrap();
+    fs::write(layout.target(filesystem::Slot::Envelope), b"not-envelope").unwrap();
+    let error = under_installation_lock(&fixture.install, || {
+        apply_or_resume_managed_pair_under_installation_lock(
+            &fixture.install,
+            &input(&older),
+            &verifier,
+        )
+        .unwrap_err()
+    });
+
+    assert!(error
+        .to_string()
+        .contains("no valid rollback-generation witness"));
+    assert_eq!(
+        fs::read(layout.target(filesystem::Slot::Core)).unwrap(),
+        current.core
+    );
+    assert_eq!(
+        fs::read(layout.target(filesystem::Slot::Companion)).unwrap(),
+        current.companion
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn rejects_unsafe_input_and_fixed_paths() {

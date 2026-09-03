@@ -203,13 +203,7 @@ pub fn inspect_managed_pair_under_installation_lock(
 ) -> Result<ManagedPairInstallationStatus> {
     filesystem::validate_absolute_root(install_root, "managed-pair install root")?;
     let layout = Layout::open(install_root, true)?;
-    let mut pair_file_present = false;
-    for slot in [Slot::Envelope, Slot::Companion, Slot::State] {
-        pair_file_present |=
-            filesystem::stamp_optional(&layout.target(slot), super::max_bytes(slot), slot.label())?
-                .is_some();
-    }
-    if !pair_file_present {
+    if !managed_pair_evidence_present(&layout)? {
         return Ok(ManagedPairInstallationStatus::Absent);
     }
     for slot in Slot::ALL {
@@ -562,6 +556,9 @@ fn candidate_is_current(
     layout.revalidate()?;
     let state = read_valid_state(layout)?;
     let installed_envelope = read_verified_envelope(layout, verifier)?;
+    if state.is_none() && installed_envelope.is_none() && managed_pair_evidence_present(layout)? {
+        bail!("managed-pair installation has no valid rollback-generation witness");
+    }
 
     if let Some(state) = &state {
         enforce_rollback(
@@ -605,6 +602,17 @@ fn candidate_is_current(
         Slot::Core.label(),
     )?;
     Ok(state_matches && envelope_matches && companion_matches && marker_matches && core_matches)
+}
+
+fn managed_pair_evidence_present(layout: &Layout) -> Result<bool> {
+    for slot in [Slot::Envelope, Slot::Companion, Slot::State] {
+        if filesystem::stamp_optional(&layout.target(slot), super::max_bytes(slot), slot.label())?
+            .is_some()
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn read_valid_state(layout: &Layout) -> Result<Option<ManagedPairState>> {
