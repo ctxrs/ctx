@@ -151,7 +151,11 @@ pub fn acquire_generation_retention_lease(
 pub fn load_generation_retention_lease(
     root: impl AsRef<Path>,
 ) -> Result<Option<GenerationRetentionLease>> {
-    let path = lease_path(root.as_ref());
+    let root = root.as_ref();
+    if let Some(opened) = crate::read_root::registered_read_directory(root)? {
+        return load_generation_retention_lease_from_opened_root(&opened);
+    }
+    let path = lease_path(root);
     let metadata = match fs::symlink_metadata(&path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -177,7 +181,7 @@ pub fn load_generation_retention_lease(
         return Err(IndexError::InvalidGenerationRetentionLease);
     }
     lease.validate()?;
-    let target = slot_path(root.as_ref(), lease.target());
+    let target = slot_path(root, lease.target());
     let target_metadata =
         fs::symlink_metadata(target).map_err(|_| IndexError::InvalidGenerationRetentionLease)?;
     if !target_metadata.is_dir() || target_metadata.file_type().is_symlink() {
@@ -188,6 +192,12 @@ pub fn load_generation_retention_lease(
 
 fn load_generation_retention_lease_from_read_root(
     root: &GenerationReadRoot,
+) -> Result<Option<GenerationRetentionLease>> {
+    load_generation_retention_lease_from_opened_root(root.opened())
+}
+
+fn load_generation_retention_lease_from_opened_root(
+    root: &crate::read_root::OpenedDirectory,
 ) -> Result<Option<GenerationRetentionLease>> {
     let file = match root.open_file(Path::new(GENERATION_RETENTION_LEASE_FILE)) {
         Ok(file) => file,
@@ -213,8 +223,7 @@ fn load_generation_retention_lease_from_read_root(
         return Err(IndexError::InvalidGenerationRetentionLease);
     }
     lease.validate()?;
-    root.opened()
-        .open_directory(&Path::new(INDEX_GENERATIONS_DIRECTORY).join(lease.target().directory()))
+    root.open_directory(&Path::new(INDEX_GENERATIONS_DIRECTORY).join(lease.target().directory()))
         .map_err(|_| IndexError::InvalidGenerationRetentionLease)?;
     Ok(Some(lease))
 }

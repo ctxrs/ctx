@@ -311,7 +311,7 @@ fn recover_terminal_attempt(
             "commit_payload",
         ],
     )?;
-    let intent = recover_refresh_intent(job, operation, true, false)
+    let intent = recover_refresh_intent(job, operation)
         .context("recover durable terminal source refresh intent")?;
     let previous_generation = optional_generation(job.get("previous_generation"))?;
     let mut attempt = new_refresh_attempt(

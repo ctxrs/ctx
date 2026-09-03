@@ -1139,9 +1139,10 @@ fn manual_all_request_without_catalog(coordinator: &CoreRefreshEngine, data_root
                 "op": SOURCE_REFRESH_REQUEST_OP,
                 "request_id": Uuid::now_v7().to_string(),
                 "mode": "wait",
-                "operation": "import",
-                "refresh_selector": {"kind": "all_automatic"},
-                "fresh_after_admitted_snapshot": true,
+                "refresh_intent": {
+                    "kind": "selected_import",
+                    "selection": {"kind": "all"},
+                },
             }),
             observations,
         )

@@ -196,6 +196,33 @@ missing selection, or widen selected work. Interrupted requests persist their
 logical intent and are re-admitted through the same resolver before execution,
 so missing or changed selected routes fail closed.
 
+Every v1.0.0-through-v1.3.1 binary carried the pre-canonical durable
+selector/catalog decoder and matching daemon IPC adapter. In those same
+released tags, however, daemon clients and durable job writers emitted canonical
+`refresh_intent`, and request fingerprints were computed from that canonical
+intent plus its trigger. No supported release producer emitted the retired
+request shape or a fingerprint of that shape. Current readers therefore require
+canonical `refresh_intent`; removing the old decoder does not discard a released
+producer format.
+
+Schema-1 jobs and status still retain released physical-attempt, coalescing, and
+legacy terminal fields. Those fields can be removed only after a successor
+schema is released and schema 1 is outside the supported upgrade floor; neither
+that release nor a date has been assigned.
+
+Publication metadata has a different release history. v1.0.0 through v1.1.1
+wrote metadata version 3, while v1.2.0 through v1.3.1 wrote version 4. Those
+released generations used manifest version 8 or 10 and commit payload version
+2; the current format uses manifest version 11 and commit payload version 3.
+Core is disposable derived storage, so an unsupported predecessor generation
+remains opaque and authoritative while ctx rebuilds a complete current
+candidate from provider sources, verifies it, and atomically replaces the old
+generation. The upgrade path neither migrates the predecessor nor decodes its
+old metadata; when required source history is unavailable, ctx reports it as
+unavailable instead of recovering content from the predecessor. The version-3
+and version-4 metadata decoder therefore remains deleted under the documented
+source-authoritative rebuild policy, not because those formats were unreleased.
+
 Request receipts describe only the routes and rejections observed by that
 request. Generation metadata separately describes the complete retained
 publication. A selected no-op can therefore report its own rejection outcome

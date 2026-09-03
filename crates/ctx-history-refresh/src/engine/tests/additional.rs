@@ -1287,8 +1287,13 @@ fn differing_catalog_authority_queues_one_successor_behind_a_running_refresh() {
                     "op": SOURCE_REFRESH_REQUEST_OP,
                     "request_id": logical_request_id,
                     "mode": "wait",
-                    "operation": "import",
-                    "explicit_source_catalog": authority.to_json(),
+                    "refresh_intent": {
+                        "kind": "selected_import",
+                        "selection": {
+                            "kind": "exact_source",
+                            "authority": authority.to_json(),
+                        },
+                    },
                 }),
             )
             .unwrap()
@@ -1377,8 +1382,13 @@ fn active_and_pending_refreshes_are_bounded_with_a_typed_busy_response() {
                     "schema_version": 1,
                     "op": SOURCE_REFRESH_REQUEST_OP,
                     "mode": "wait",
-                    "operation": "import",
-                    "explicit_source_catalog": authority.to_json(),
+                    "refresh_intent": {
+                        "kind": "selected_import",
+                        "selection": {
+                            "kind": "exact_source",
+                            "authority": authority.to_json(),
+                        },
+                    },
                 }),
             )
             .unwrap()

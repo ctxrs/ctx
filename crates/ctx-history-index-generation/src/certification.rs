@@ -349,31 +349,28 @@ pub fn verify_physical_integrity_read_only(
         return Err(IndexError::ChecksumMismatch);
     }
     let current_pointer = load_current_pointer(root)?;
-    let retained_alias_directories = std::iter::once(current_pointer.active().directory())
-        .chain(current_pointer.previous().map(GenerationSlot::directory))
-        .chain(std::iter::once(slot.directory()))
-        .map(str::to_owned)
-        .collect::<HashSet<_>>();
+    let pointer_fence = ActiveGenerationPointerFence::capture(root, Some(&current_pointer))?;
+    let alias_authority = CertificationAliasAuthority::capture(root, &pointer_fence, slot)?;
     for expected in &certification.artifacts {
         let current = capture_artifact_with_retained_aliases(
             root,
             &generation_path,
             Path::new(&expected.artifact.path),
-            &retained_alias_directories,
+            alias_authority.directories(),
         )?;
         if current != expected.artifact {
-            return verify_certified_previous_after_publication(
+            verify_certified_previous_after_publication(
                 root,
                 slot,
                 index,
                 &generation_path,
                 &current_pointer,
-            );
+            )?;
+            alias_authority.validate(root, &pointer_fence)?;
+            return Ok(());
         }
     }
-    if load_current_pointer(root)? != current_pointer {
-        return Err(IndexError::ConcurrentGenerationChange);
-    }
+    alias_authority.validate(root, &pointer_fence)?;
     Ok(())
 }
 
@@ -971,7 +968,7 @@ mod candidate;
 mod install;
 mod pointer_fence;
 mod sidecar;
-use candidate::certification_digest_matches_slot;
+use candidate::{certification_digest_matches_slot, CertificationAliasAuthority};
 pub use candidate::{
     certify_candidate_physical_integrity, verify_candidate_physical_integrity_read_only,
 };

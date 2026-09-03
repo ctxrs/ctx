@@ -256,7 +256,7 @@ fn concurrent_refresh_request_uses_active_generation_without_reopening_inflight_
             &json!({
                 "op": SOURCE_REFRESH_REQUEST_OP,
                 "mode": "wait",
-                "operation": "refresh",
+                "refresh_intent": {"kind": "automatic_maintenance"},
             }),
         )
         .unwrap()
@@ -281,8 +281,13 @@ fn selected_import_requests_remain_distinct_before_execution() {
                     "op": SOURCE_REFRESH_REQUEST_OP,
                     "request_id": request_id,
                     "mode": "wait",
-                    "operation": "import",
-                    "explicit_source_catalog": authority.to_json(),
+                    "refresh_intent": {
+                        "kind": "selected_import",
+                        "selection": {
+                            "kind": "exact_source",
+                            "authority": authority.to_json(),
+                        },
+                    },
                 }),
             )
             .unwrap()

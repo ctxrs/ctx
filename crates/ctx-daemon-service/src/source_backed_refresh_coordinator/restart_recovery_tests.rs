@@ -110,8 +110,13 @@ fn interrupted_wait_request_keeps_exact_identity_across_restart() {
             &json!({
                 "op": SOURCE_REFRESH_REQUEST_OP,
                 "mode": "wait",
-                "operation": "import",
-                "explicit_source_catalog": authority.to_json(),
+                "refresh_intent": {
+                    "kind": "selected_import",
+                    "selection": {
+                        "kind": "exact_source",
+                        "authority": authority.to_json(),
+                    },
+                },
             }),
         )
         .unwrap()

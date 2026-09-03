@@ -453,7 +453,7 @@ fn recover_pending_attempt(
         .ok_or_else(|| anyhow!("durable source refresh {role} has no request ID"))?;
     let operation = SourceBackedRefreshOperation::from_request_json(job)
         .with_context(|| format!("recover durable source refresh {role} operation"))?;
-    let intent = recover_refresh_intent(job, operation, false, is_root)
+    let intent = recover_refresh_intent(job, operation)
         .with_context(|| format!("recover durable source refresh {role} intent"))?;
     let daemon_mode = job
         .get("daemon_mode")

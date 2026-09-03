@@ -240,30 +240,51 @@ fn read_only_certification_rejects_restored_metadata_byte_mutation() {
 
 #[cfg(unix)]
 #[test]
-fn read_only_certification_rejects_unretained_alias_and_restored_metadata_mutation() {
+fn read_only_certification_rejects_unretained_alias_in_rebuilt_certification() {
     use std::os::unix::fs::MetadataExt as _;
 
     let fixture = read_only_certification_fixture();
+    let root = fixture.root();
     let artifact_path = fixture.artifact_path();
-    let attacker_generation = generation(fixture.root(), 'd');
+    fs::remove_file(certification_path(root, &fixture.slot)).unwrap();
+    let attacker_generation = generation(root, 'd');
     let external_alias = attacker_generation.join(&fixture.relative_artifact_path);
     fs::create_dir_all(external_alias.parent().unwrap()).unwrap();
     fs::hard_link(&artifact_path, &external_alias).unwrap();
+    let pointer = load_current_pointer(root).unwrap();
+    let generation_path = slot_path(root, &fixture.slot);
+    let audit = physical_integrity_audit(&fixture.index, &generation_path, Some(&pointer)).unwrap();
+    install_certification(
+        root,
+        Some(&pointer),
+        None,
+        &fixture.slot,
+        &fixture.index,
+        &audit,
+        CertificationInstallPolicy::ACTIVE_CACHE,
+    )
+    .unwrap();
+    let certification: GenerationIntegrityCertification = serde_json::from_slice(
+        &read_certification(&certification_path(root, &fixture.slot)).unwrap(),
+    )
+    .unwrap();
+    let certified_artifact = certification
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.artifact.path == fixture.relative_artifact_path.to_str().unwrap())
+        .unwrap();
     assert_eq!(
-        fs::metadata(&artifact_path).unwrap().nlink(),
+        certified_artifact.artifact.identity.link_count(),
         fixture.certified_artifact.identity.link_count() + 1
     );
-
-    let (before, after) = mutate_same_length_and_restore_metadata(&artifact_path);
-    assert_eq!(after.len(), before.len());
-    assert_eq!(after.modified().unwrap(), before.modified().unwrap());
-    assert_eq!(after.mode(), before.mode());
-    assert!(after.permissions().readonly());
-    assert_eq!(after.nlink(), before.nlink());
+    assert_eq!(
+        fs::metadata(&artifact_path).unwrap().nlink(),
+        certified_artifact.artifact.identity.link_count()
+    );
 
     crate::reset_physical_verification_activity();
     assert!(matches!(
-        verify_physical_integrity_read_only(fixture.root(), &fixture.slot, &fixture.index),
+        verify_physical_integrity_read_only(root, &fixture.slot, &fixture.index),
         Err(IndexError::ChecksumMismatch)
     ));
     assert_eq!(crate::checksum_walks(), 0);

@@ -1032,7 +1032,7 @@ fn query_service_coalesces_source_refresh_requests_on_one_daemon_ticket() -> Res
                 "schema_version": 1,
                 "op": "source_refresh_request",
                 "mode": "wait",
-                "operation": "refresh",
+                "refresh_intent": {"kind": "automatic_maintenance"},
             })),
             StdDuration::from_secs(1),
             64 * 1024,

@@ -909,7 +909,7 @@ fn forced_watcher_recovery_adds_no_scans_after_startup_reconciliation() -> Resul
                     "schema_version": 1,
                     "op": "source_refresh_request",
                     "mode": "background",
-                    "operation": "refresh",
+                    "refresh_intent": {"kind": "automatic_maintenance"},
                 }),
             )?
             .expect("background maintenance wake");
