@@ -715,7 +715,7 @@ fn published_refresh_observation(
         .ok_or_else(|| anyhow!("published daemon source refresh has no scanned route count"))?;
     Ok(SourceBackedRefreshObservation {
         mode,
-        status: "published".to_owned(),
+        status: RefreshRequestState::Published.as_str().to_owned(),
         request_id: Some(request_id),
         daemon_available: true,
         source_count,

@@ -385,14 +385,11 @@ pub(super) fn recover_queued_successors(job: &Value) -> Result<Vec<SourceBackedR
     let successors = successors
         .as_array()
         .ok_or_else(|| anyhow!("durable source refresh successors must be an array"))?;
-    let root_state = job
-        .get("request_state")
+    job.get("request_state")
         .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("durable source refresh job has no request state"))?;
-    match root_state {
-        "admission_pending" | "queued" | "running" | "failed" | "published" => {}
-        _ => bail!("durable source refresh job has an invalid request state"),
-    }
+        .ok_or_else(|| anyhow!("durable source refresh job has no request state"))?
+        .parse::<SourceBackedRefreshState>()
+        .map_err(|_| anyhow!("durable source refresh job has an invalid request state"))?;
     if successors.len().saturating_add(1) > SOURCE_REFRESH_ACTIVE_PENDING_LIMIT {
         bail!("durable source refresh successor queue exceeds its bounded capacity");
     }
@@ -434,9 +431,15 @@ fn recover_pending_attempt(
     role: &str,
     is_root: bool,
 ) -> Result<SourceBackedRefreshAttempt> {
-    let request_state = job.get("request_state").and_then(Value::as_str);
-    if !(matches!(request_state, Some("admission_pending" | "queued"))
-        || is_root && request_state == Some("running"))
+    let request_state = job
+        .get("request_state")
+        .and_then(Value::as_str)
+        // Preserve the bounded not-queued error for missing or unknown states.
+        .and_then(|state| state.parse::<SourceBackedRefreshState>().ok());
+    if !(matches!(
+        request_state,
+        Some(SourceBackedRefreshState::AdmissionPending | SourceBackedRefreshState::Queued)
+    ) || is_root && request_state == Some(SourceBackedRefreshState::Running))
     {
         bail!("durable source refresh {role} is not queued");
     }
@@ -489,7 +492,7 @@ fn recover_pending_attempt(
     attempt.request_id = request_id.to_owned();
     attempt.reconciliation_demand = recover_reconciliation_demand(job, operation)?;
     let _legacy_physical_attempt_id = optional_pending_string(job, "physical_attempt_id")?;
-    attempt.state = if request_state == Some("admission_pending") {
+    attempt.state = if request_state == Some(SourceBackedRefreshState::AdmissionPending) {
         SourceBackedRefreshState::AdmissionPending
     } else {
         SourceBackedRefreshState::Queued
@@ -590,7 +593,7 @@ pub(super) fn install_recovered_successors(
 }
 
 #[cfg(test)]
-mod cadence_tests {
+mod tests {
     use super::*;
 
     #[test]
@@ -616,5 +619,20 @@ mod cadence_tests {
             "request-a",
             started + DURABLE_PROGRESS_PERSIST_INTERVAL,
         ));
+    }
+
+    #[test]
+    fn malformed_successor_state_keeps_bounded_recovery_error() {
+        let job = json!({
+            "request_state": SourceBackedRefreshState::Queued.as_str(),
+            "request_id": "root",
+            "queued_successors": [{ "request_state": "unknown" }],
+        });
+
+        let error = recover_queued_successors(&job).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "durable source refresh successor is not queued"
+        );
     }
 }

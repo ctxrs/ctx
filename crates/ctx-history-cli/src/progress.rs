@@ -347,6 +347,15 @@ mod tests {
     }
 
     #[test]
+    fn terminal_projection_preserves_all_engine_request_state_names() {
+        use EngineRequestState::*;
+
+        for state in [AdmissionPending, Queued, Running, Published, Failed] {
+            assert_eq!(presentation_request_state(state).as_str(), state.as_str());
+        }
+    }
+
+    #[test]
     fn provider_names_use_products_and_preserve_unknown_fallbacks() {
         for (provider, expected) in [
             ("claude", "Claude Code"),

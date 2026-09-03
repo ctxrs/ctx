@@ -31,9 +31,10 @@ impl CoreRefreshEngine {
         let request_state = job
             .get("request_state")
             .and_then(Value::as_str)
-            .unwrap_or("unknown");
+            // Unknown top-level states remain non-recoverable, not errors.
+            .and_then(|state| state.parse::<SourceBackedRefreshState>().ok());
 
-        if request_state == "published" {
+        if request_state == Some(SourceBackedRefreshState::Published) {
             let attempt = recover_published_attempt(&job)?;
             let receipt = attempt
                 .receipt
@@ -62,9 +63,9 @@ impl CoreRefreshEngine {
             return Ok(has_successors);
         }
 
-        let interrupted_running = request_state == "running";
+        let interrupted_running = request_state == Some(SourceBackedRefreshState::Running);
 
-        if request_state == "failed" {
+        if request_state == Some(SourceBackedRefreshState::Failed) {
             let terminal_progress_needs_normalization = job
                 .get("progress")
                 .and_then(Value::as_object)
@@ -134,7 +135,7 @@ impl CoreRefreshEngine {
             return Ok(has_successors);
         }
 
-        if !matches!(request_state, "admission_pending" | "queued" | "running") {
+        if !request_state.is_some_and(SourceBackedRefreshState::is_active) {
             if let Some(verified) = verified {
                 self.lock_state().current_published_generation =
                     Some(verified.generation_id().to_owned());
@@ -233,7 +234,11 @@ fn require_scoped_rehydration(attempt: &mut SourceBackedRefreshAttempt) -> Resul
 }
 
 fn recover_published_attempt(job: &Value) -> Result<SourceBackedRefreshAttempt> {
-    require_terminal_state(job, "published", "completed")?;
+    require_terminal_state(
+        job,
+        SourceBackedRefreshState::Published.as_str(),
+        "completed",
+    )?;
     let receipt = published_refresh_receipt_for_recovery(job)
         .context("recover durable terminal source refresh receipt")?;
     validate_terminal_receipt_fields(job, &receipt)?;
@@ -266,7 +271,7 @@ fn validate_terminal_receipt_fields(
 }
 
 fn recover_failed_attempt(job: &Value) -> Result<SourceBackedRefreshAttempt> {
-    require_terminal_state(job, "failed", "failed")?;
+    require_terminal_state(job, SourceBackedRefreshState::Failed.as_str(), "failed")?;
     if job.get("receipt").is_some() {
         bail!("durable failed source refresh unexpectedly contains a terminal receipt");
     }

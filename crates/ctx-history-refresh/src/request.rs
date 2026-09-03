@@ -244,16 +244,14 @@ mod refresh_request_state_tests {
 
     #[test]
     fn wire_names_and_lifecycle_partitions_are_canonical() {
+        use RefreshRequestState::*;
+
         let cases = [
-            (
-                RefreshRequestState::AdmissionPending,
-                "admission_pending",
-                true,
-            ),
-            (RefreshRequestState::Queued, "queued", true),
-            (RefreshRequestState::Running, "running", true),
-            (RefreshRequestState::Published, "published", false),
-            (RefreshRequestState::Failed, "failed", false),
+            (AdmissionPending, "admission_pending", true),
+            (Queued, "queued", true),
+            (Running, "running", true),
+            (Published, "published", false),
+            (Failed, "failed", false),
         ];
 
         for (state, wire_name, active) in cases {
