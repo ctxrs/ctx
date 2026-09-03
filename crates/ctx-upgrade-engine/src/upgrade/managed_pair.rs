@@ -364,6 +364,7 @@ impl ManagedPairVerifier for ReleaseManagedPairVerifier {
 
 /// The four retained inputs shared by foreground and automatic pair apply.
 pub(super) struct ManagedPairDownloads {
+    identity: VerifiedManagedPairIdentity,
     envelope: DownloadedArtifact,
     core: DownloadedArtifact,
     companion: DownloadedArtifact,
@@ -429,6 +430,7 @@ impl ManagedPairDownloads {
             "managed Core install marker",
         )?;
         Ok(Self {
+            identity,
             envelope,
             core,
             companion,
@@ -448,7 +450,12 @@ impl ManagedPairDownloads {
             self.companion.retained_path()?.to_path_buf(),
             self.marker.retained_path()?.to_path_buf(),
         );
-        apply_or_resume_managed_pair_under_installation_lock(install_root, &input, verifier)
+        let outcome =
+            apply_or_resume_managed_pair_under_installation_lock(install_root, &input, verifier)?;
+        if outcome.identity() != &self.identity {
+            bail!("managed-pair publication did not apply the requested signed candidate");
+        }
+        Ok(outcome)
     }
 
     pub(super) fn apply_plan_under_installation_lock(
