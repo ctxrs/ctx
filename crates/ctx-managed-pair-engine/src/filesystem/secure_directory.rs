@@ -156,44 +156,6 @@ impl SecureDirectory {
         })
     }
 
-    #[cfg(windows)]
-    pub(super) fn guard_path_identity(&self, path: &Path) -> Result<File> {
-        use std::os::windows::fs::{MetadataExt as _, OpenOptionsExt as _};
-        use windows_sys::Win32::Storage::FileSystem::{
-            FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-            FILE_GENERIC_READ, FILE_SHARE_READ, FILE_SHARE_WRITE, READ_CONTROL,
-        };
-
-        let mut options = OpenOptions::new();
-        options
-            .access_mode(FILE_GENERIC_READ | READ_CONTROL)
-            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
-            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
-        let guard = options.open(path).with_context(|| {
-            format!(
-                "open non-delete-sharing managed-pair root {}",
-                path.display()
-            )
-        })?;
-        let metadata = guard.metadata()?;
-        if !metadata.is_dir() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-            bail!(
-                "managed-pair installation root is not a no-follow directory: {}",
-                path.display()
-            );
-        }
-        ctx_history_platform::platform_security::verify_private_directory_handle(&guard)?;
-        let expected = file_information(&self.file, "managed-pair installation root")?;
-        let actual = file_information(&guard, "managed-pair guarded installation root")?;
-        if expected.0 != actual.0 || expected.1 != actual.1 {
-            bail!(
-                "managed-pair installation root changed before it could be guarded: {}",
-                path.display()
-            );
-        }
-        Ok(guard)
-    }
-
     #[cfg(not(any(unix, windows)))]
     pub(super) fn open(_path: &Path) -> Result<Self> {
         bail!("managed-pair directories are unsupported on this platform")
@@ -338,44 +300,6 @@ impl SecureDirectory {
             FILE_SHARE_READ,
             windows_sys::Wdk::Storage::FileSystem::FILE_CREATE,
         )
-    }
-
-    #[cfg(windows)]
-    pub(super) fn open_lock(&self, name: &OsStr, _path: &Path) -> Result<File> {
-        use windows_sys::Win32::Storage::FileSystem::{
-            FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_READ, FILE_SHARE_WRITE, READ_CONTROL,
-            SYNCHRONIZE,
-        };
-        self.open_relative(
-            name,
-            FILE_GENERIC_READ | FILE_GENERIC_WRITE | READ_CONTROL | SYNCHRONIZE,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
-            windows_sys::Wdk::Storage::FileSystem::FILE_OPEN,
-        )
-    }
-
-    #[cfg(unix)]
-    pub(super) fn open_lock(&self, name: &OsStr, path: &Path) -> Result<File> {
-        self.open_file(name, path)
-    }
-
-    #[cfg(windows)]
-    pub(super) fn create_lock(&self, name: &OsStr, _path: &Path) -> Result<File> {
-        use windows_sys::Win32::Storage::FileSystem::{
-            FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_READ, FILE_SHARE_WRITE, READ_CONTROL,
-            SYNCHRONIZE, WRITE_DAC,
-        };
-        self.open_relative(
-            name,
-            FILE_GENERIC_READ | FILE_GENERIC_WRITE | READ_CONTROL | WRITE_DAC | SYNCHRONIZE,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
-            windows_sys::Wdk::Storage::FileSystem::FILE_CREATE,
-        )
-    }
-
-    #[cfg(unix)]
-    pub(super) fn create_lock(&self, name: &OsStr, path: &Path) -> Result<File> {
-        self.create_new(name, path, false)
     }
 
     #[cfg(unix)]

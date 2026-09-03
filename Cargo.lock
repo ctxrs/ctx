@@ -1690,6 +1690,7 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "chrono",
+ "ctx-companion-bridge",
  "ctx-history-core",
  "ctx-history-platform",
  "ctx-managed-pair-engine",

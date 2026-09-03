@@ -7,9 +7,9 @@ use std::{
 use anyhow::Result;
 use tempfile::tempdir;
 
-#[cfg(windows)]
-use super::lock::canonical_recovery_executable;
 use super::lock::{canonical_executable, installation_lock_path, InstallationLock};
+#[cfg(windows)]
+use super::lock::{canonical_recovery_executable, OwnerFileLock};
 
 const CHILD_TARGET_ENV: &str = "CTX_INSTALL_LOCK_CHILD_TARGET";
 
@@ -39,6 +39,85 @@ fn different_data_roots_contend_on_the_same_executable_lock() -> Result<()> {
     );
     drop(first);
     assert!(InstallationLock::try_acquire(&executable)?.is_some());
+    Ok(())
+}
+
+#[test]
+fn fresh_root_and_installed_executable_share_the_persistent_lock() -> Result<()> {
+    let fixture = tempdir()?;
+    let bin = fixture.path().join("bin");
+    fs::create_dir(&bin)?;
+
+    let root_lock =
+        InstallationLock::try_acquire_at_root(fixture.path())?.expect("fresh root lock");
+    let lock_path = bin.join(if cfg!(windows) {
+        ".ctx.exe.install.lock"
+    } else {
+        ".ctx.install.lock"
+    });
+    assert!(
+        lock_path.is_file(),
+        "fresh acquisition must persist the lock"
+    );
+
+    let executable = bin.join(if cfg!(windows) { "ctx.exe" } else { "ctx" });
+    fs::write(&executable, b"newly installed ctx")?;
+    assert_eq!(installation_lock_path(&executable)?, lock_path);
+    assert!(
+        InstallationLock::try_acquire(&executable)?.is_none(),
+        "the installed Core must contend with the fresh bootstrap owner"
+    );
+    drop(root_lock);
+
+    let executable_lock = InstallationLock::try_acquire(&executable)?.expect("executable lock");
+    assert!(InstallationLock::try_acquire_at_root(fixture.path())?.is_none());
+    drop(executable_lock);
+    assert!(lock_path.is_file(), "the canonical lock is never unlinked");
+    Ok(())
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_candidate_contends_with_base_version_lock() -> Result<()> {
+    let fixture = tempdir()?;
+    let executable = executable_copy(fixture.path())?;
+    let base_lock_path = fixture.path().join("bin").join(".ctx.exe.install.lock");
+    let base_lock = OwnerFileLock::try_acquire(&base_lock_path)?.expect("base version lock");
+
+    assert_eq!(
+        installation_lock_path(&canonical_executable(&executable)?)?,
+        base_lock_path
+    );
+    assert!(
+        InstallationLock::try_acquire(&executable)?.is_none(),
+        "the candidate must contend with the base version Windows lock"
+    );
+
+    drop(base_lock);
+    assert!(InstallationLock::try_acquire(&executable)?.is_some());
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn fresh_root_lock_rejects_aliased_or_non_owner_safe_bin() -> Result<()> {
+    use std::os::unix::fs::{symlink, PermissionsExt as _};
+
+    let fixture = tempdir()?;
+    let real = fixture.path().join("real");
+    fs::create_dir(&real)?;
+    fs::create_dir(real.join("bin"))?;
+    let alias = fixture.path().join("alias");
+    symlink(&real, &alias)?;
+    assert!(InstallationLock::try_acquire_at_root(&alias).is_err());
+
+    fs::set_permissions(&real, fs::Permissions::from_mode(0o777))?;
+    assert!(
+        InstallationLock::try_acquire_at_root(&real)?.is_some(),
+        "the lock does not impose private-data-root permissions on the parent"
+    );
+    fs::set_permissions(real.join("bin"), fs::Permissions::from_mode(0o777))?;
+    assert!(InstallationLock::try_acquire_at_root(&real).is_err());
     Ok(())
 }
 

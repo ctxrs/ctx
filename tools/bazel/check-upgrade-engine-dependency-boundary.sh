@@ -24,6 +24,7 @@ query() {
 for target in lib test_support_lib qualification_lib; do
   expected="${tmp}/${target}-expected.txt"
   printf '%s\n' \
+    '//crates/ctx-companion-bridge:lib' \
     '//crates/ctx-history-core:lib' \
     '//crates/ctx-history-platform:lib' \
     '//crates/ctx-managed-pair-engine:lib' \

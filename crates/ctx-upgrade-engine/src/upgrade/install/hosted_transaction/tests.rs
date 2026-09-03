@@ -1,8 +1,139 @@
 use super::*;
-use std::{fs, os::unix::fs::PermissionsExt as _};
+use ctx_managed_pair_engine::{
+    stage_managed_pair_under_installation_lock, ManagedPairApplyInput, ManagedPairStageOutcome,
+    MANAGED_PAIR_ACTIVE_TRANSACTION_RELATIVE_PATH, MANAGED_PAIR_ENVELOPE_RELATIVE_PATH,
+    MANAGED_PAIR_STATE_RELATIVE_PATH,
+};
+use std::{fs, os::unix::fs::PermissionsExt as _, process::Command, time::Duration};
+
+use crate::upgrade::{
+    download::DownloadedArtifact,
+    install::InstallFingerprint,
+    managed_pair::{apply_prepared_install, ManagedPairMode, PreparedCoreArtifact},
+    metadata::ReleaseMetadata,
+    state::{begin_manual_attempt_locked, UpgradeLock},
+    UpgradePlan, TEST_RELEASE_PROCESS, TEST_SEMANTIC_LAYOUT,
+};
 
 const OLD_OWNERSHIP: &[u8] = b"CTX_INSTALL_INTEGRATIONS_V1\nrecords_sha256\told\n";
 const NEW_OWNERSHIP: &[u8] = b"CTX_INSTALL_INTEGRATIONS_V1\nrecords_sha256\tnew\n";
+const SELF_UPGRADE_CHILD_TARGET_ENV: &str = "CTX_SELF_UPGRADE_FENCE_CHILD_TARGET";
+
+#[derive(Clone)]
+struct TestPairVerifier {
+    envelope: Vec<u8>,
+    identity: ctx_managed_pair_engine::VerifiedManagedPairIdentity,
+}
+
+impl ManagedPairVerifier for TestPairVerifier {
+    fn verify_signed_envelope(
+        &self,
+        signed_envelope: &[u8],
+    ) -> Result<ctx_managed_pair_engine::VerifiedManagedPairIdentity> {
+        if signed_envelope != self.envelope {
+            bail!("test managed-pair envelope is not authenticated");
+        }
+        Ok(self.identity.clone())
+    }
+}
+
+struct PairFixture {
+    _temp: tempfile::TempDir,
+    root: PathBuf,
+    install: PathBuf,
+    source: PathBuf,
+    state: PathBuf,
+    envelope: PathBuf,
+    companion: PathBuf,
+    verifier: TestPairVerifier,
+}
+
+fn pair_fixture() -> PairFixture {
+    use ctx_managed_pair_engine::{
+        ManagedPairComponentIdentity, ManagedPairTarget, VerifiedManagedPairIdentity,
+    };
+
+    let temp = tempfile::tempdir().unwrap();
+    fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let root = temp.path().join("install");
+    for directory in [
+        root.clone(),
+        root.join("bin"),
+        root.join("libexec"),
+        root.join("share"),
+        root.join("share/ctx"),
+    ] {
+        fs::create_dir(&directory).unwrap();
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let core_bytes = b"paired ctx";
+    let companion_bytes = b"paired ctx-pro";
+    let envelope_bytes = b"authenticated test envelope\n";
+    let install = root.join("bin/ctx");
+    let source = temp.path().join("source-ctx");
+    let companion = root.join("libexec/ctx-pro");
+    let envelope = root.join(MANAGED_PAIR_ENVELOPE_RELATIVE_PATH);
+    let state = root.join(MANAGED_PAIR_STATE_RELATIVE_PATH);
+    fs::write(&install, core_bytes).unwrap();
+    fs::write(&source, core_bytes).unwrap();
+    fs::write(&companion, companion_bytes).unwrap();
+    fs::write(&envelope, envelope_bytes).unwrap();
+    fs::set_permissions(&install, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::set_permissions(&source, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::set_permissions(&companion, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let target = match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("linux", "aarch64") => ManagedPairTarget::LinuxArm64,
+        ("linux", "x86_64") => ManagedPairTarget::LinuxX64,
+        ("macos", "aarch64") => ManagedPairTarget::MacosArm64,
+        ("macos", "x86_64") => ManagedPairTarget::MacosX64,
+        (os, arch) => panic!("unsupported pair-test target {os}-{arch}"),
+    };
+    let identity = VerifiedManagedPairIdentity::new(
+        "test-release",
+        target,
+        1,
+        "a".repeat(64),
+        ManagedPairComponentIdentity::new(
+            sha256_hex(core_bytes),
+            u64::try_from(core_bytes.len()).unwrap(),
+        )
+        .unwrap(),
+        ManagedPairComponentIdentity::new(
+            sha256_hex(companion_bytes),
+            u64::try_from(companion_bytes.len()).unwrap(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let state_body = serde_json::to_vec_pretty(&json!({
+        "contract": "ctx-managed-pair-state",
+        "schema_version": 1,
+        "identity": identity,
+        "envelope_sha256": sha256_hex(envelope_bytes),
+        "envelope_size_bytes": envelope_bytes.len(),
+    }))
+    .unwrap();
+    fs::write(&state, state_body).unwrap();
+    fs::write(
+        install_marker_path(&install),
+        paired_marker(&install, &sha256_hex(core_bytes)),
+    )
+    .unwrap();
+    PairFixture {
+        _temp: temp,
+        root,
+        install,
+        source,
+        state,
+        envelope,
+        companion,
+        verifier: TestPairVerifier {
+            envelope: envelope_bytes.to_vec(),
+            identity,
+        },
+    }
+}
 
 fn fixture() -> (tempfile::TempDir, PathBuf, String, PathBuf) {
     let temp = tempfile::tempdir().unwrap();
@@ -29,6 +160,15 @@ fn marker(install: &Path, digest: &str) -> String {
     }))
     .unwrap()
         + "\n"
+}
+
+fn paired_marker(install: &Path, digest: &str) -> String {
+    let mut value: Value = serde_json::from_str(&marker(install, digest)).unwrap();
+    value
+        .as_object_mut()
+        .unwrap()
+        .insert("managed_pair".to_owned(), Value::Bool(true));
+    serde_json::to_string_pretty(&value).unwrap() + "\n"
 }
 
 fn owned_install_journal(
@@ -68,6 +208,9 @@ fn owned_install_journal(
         ownership_path: Some(owned_path),
         ownership_sha256: Some(ownership_sha256),
         ownership_body: Some(ownership_body.to_vec()),
+        managed_pair_state_sha256: None,
+        managed_pair_envelope_sha256: None,
+        managed_pair_companion_sha256: None,
         phase: Phase::Prepared,
         binding_sha256: String::new(),
     };
@@ -92,6 +235,89 @@ fn arm_uninstall(install: &Path, source: &Path) -> (PathBuf, PathBuf, Journal) {
     let path = journal_path(install);
     write_initial_journal(&path, &journal).unwrap();
     (helper, path, journal)
+}
+
+fn arm_pair_uninstall(fixture: &PairFixture) -> (PathBuf, PathBuf, Journal) {
+    let helper = uninstall_helper_path(&fixture.install);
+    fs::copy(&fixture.source, &helper).unwrap();
+    fs::set_permissions(&helper, fs::Permissions::from_mode(0o700)).unwrap();
+    let mut journal = new_uninstall_journal_with_optional_verifier(
+        &fixture.install,
+        "ia_87654321",
+        Some(&fixture.verifier),
+    )
+    .unwrap();
+    verify_recorded_pair_files(&journal, true).unwrap();
+    journal.phase = Phase::Armed;
+    let path = journal_path(&fixture.install);
+    write_initial_journal(&path, &journal).unwrap();
+    (helper, path, journal)
+}
+
+fn ordinary_upgrade_plan(install: &Path, next_core: &[u8]) -> UpgradePlan {
+    let artifact_sha256 = sha256_hex(next_core);
+    UpgradePlan {
+        current_version: "1.0.0".to_owned(),
+        latest_version: "1.1.0".to_owned(),
+        channel: "stable".to_owned(),
+        platform: platform_key().unwrap().to_owned(),
+        metadata_url: "https://cli.ctx.rs/releases/stable/metadata".to_owned(),
+        artifact_url: "https://cli.ctx.rs/releases/1.1.0/ctx".to_owned(),
+        artifact_sha256: artifact_sha256.clone(),
+        install_path: install.to_owned(),
+        install_fingerprint: InstallFingerprint {
+            binary_sha256: sha256_hex(&fs::read(install).unwrap()),
+            marker_sha256: sha256_hex(&fs::read(install_marker_path(install)).unwrap()),
+        },
+        update_available: true,
+        managed: true,
+        warnings: Vec::new(),
+        managed_pair_release: None,
+        metadata: ReleaseMetadata {
+            version: "1.1.0".to_owned(),
+            base_url: "https://cli.ctx.rs/releases/1.1.0".to_owned(),
+            artifact: "ctx".to_owned(),
+            sha256: artifact_sha256,
+            source_commit: None,
+            published_at: None,
+            self_upgrade_allowed: true,
+            auto_upgrade_allowed: true,
+            store_schema_version: None,
+            managed_pair: None,
+            onnxruntime: None,
+            semantic: None,
+        },
+        semantic_provisioning: None,
+    }
+}
+
+fn create_crash_before_pending_candidate(fixture: &PairFixture) -> PathBuf {
+    let candidate = fixture.root.join("share/ctx/.managed-pair-apply-v1");
+    for directory in [
+        candidate.clone(),
+        candidate.join("bin"),
+        candidate.join("libexec"),
+        candidate.join("share"),
+        candidate.join("share/ctx"),
+    ] {
+        fs::create_dir(&directory).unwrap();
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    for (source, destination) in [
+        (&fixture.install, candidate.join("bin/ctx")),
+        (
+            &install_marker_path(&fixture.install),
+            candidate.join("bin/ctx.install.json"),
+        ),
+        (&fixture.companion, candidate.join("libexec/ctx-pro")),
+        (
+            &fixture.envelope,
+            candidate.join(MANAGED_PAIR_ENVELOPE_RELATIVE_PATH),
+        ),
+    ] {
+        fs::copy(source, destination).unwrap();
+    }
+    candidate
 }
 
 fn assert_installed(install: &Path, ownership_body: &[u8], point: &str) {
@@ -212,6 +438,27 @@ fn hosted_uninstall_helper_uses_the_installation_admission_fence() {
 }
 
 #[test]
+fn fresh_uninstall_discards_the_previous_windows_style_helper() {
+    let (_temp, install, digest, source) = fixture();
+    fs::copy(&source, &install).unwrap();
+    fs::write(install_marker_path(&install), marker(&install, &digest)).unwrap();
+    let helper = uninstall_helper_path(&install);
+    fs::write(&helper, b"older installed Core").unwrap();
+
+    let journal = new_uninstall_journal(&install, "ia_87654321").unwrap();
+    begin_fresh_uninstall(&journal_path(&install), &journal, &helper).unwrap();
+    stage_file(&install, &helper, true).unwrap();
+
+    verify_file_digest(
+        &helper,
+        &journal.binary_sha256,
+        MAX_BINARY_BYTES,
+        "replacement hosted uninstall helper",
+    )
+    .unwrap();
+}
+
+#[test]
 fn hosted_journal_rejects_cross_kind_phases() {
     let (_temp, install, digest, _source) = fixture();
     let mut journal = owned_install_journal(&install, &digest, NEW_OWNERSHIP, "ia_12345678");
@@ -243,6 +490,9 @@ fn journal_binding_rejects_path_and_digest_changes() {
         ownership_path: None,
         ownership_sha256: None,
         ownership_body: None,
+        managed_pair_state_sha256: None,
+        managed_pair_envelope_sha256: None,
+        managed_pair_companion_sha256: None,
         phase: Phase::Prepared,
         binding_sha256: String::new(),
     };
@@ -363,6 +613,306 @@ fn install_uninstall_fault_matrix_reinstalls_new_integration_body() {
             owned_install_journal(&install, &digest, NEW_OWNERSHIP, "ia_23456789");
         commit_install(&source, &mut reinstalled);
         assert_installed(&install, NEW_OWNERSHIP, point);
+    }
+}
+
+#[test]
+fn hosted_uninstall_removes_only_the_exact_authenticated_pair_files() {
+    let fixture = pair_fixture();
+    let unrelated_share = fixture.root.join("share/ctx/user-owned.json");
+    let unrelated_libexec = fixture.root.join("libexec/user-helper");
+    fs::write(&unrelated_share, b"keep share").unwrap();
+    fs::write(&unrelated_libexec, b"keep libexec").unwrap();
+    let (helper, path, mut journal) = arm_pair_uninstall(&fixture);
+
+    complete_uninstall_commit(&helper, &path, &mut journal, &mut |_| Ok(())).unwrap();
+    remove_journal(&path).unwrap();
+
+    for removed in [
+        fixture.state,
+        fixture.envelope,
+        fixture.companion,
+        fixture.install.clone(),
+        install_marker_path(&fixture.install),
+    ] {
+        assert!(
+            !removed.exists(),
+            "retained managed file {}",
+            removed.display()
+        );
+    }
+    assert_eq!(fs::read(unrelated_share).unwrap(), b"keep share");
+    assert_eq!(fs::read(unrelated_libexec).unwrap(), b"keep libexec");
+}
+
+#[test]
+fn hosted_uninstall_refuses_a_pending_pair_upgrade() {
+    use ctx_managed_pair_engine::{ManagedPairComponentIdentity, VerifiedManagedPairIdentity};
+
+    let fixture = pair_fixture();
+    let candidate_root = fixture.root.join("next-pair");
+    fs::create_dir(&candidate_root).unwrap();
+    fs::set_permissions(&candidate_root, fs::Permissions::from_mode(0o700)).unwrap();
+    let candidate = |name: &str| candidate_root.join(name);
+    let core = candidate("ctx");
+    let companion = candidate("ctx-pro");
+    let envelope = candidate("managed-pair-envelope.json");
+    let marker_source = candidate("ctx.install.json");
+    let next_core = b"next paired ctx";
+    let next_companion = b"next paired ctx-pro";
+    fs::write(&core, next_core).unwrap();
+    fs::write(&companion, next_companion).unwrap();
+    fs::write(&envelope, &fixture.verifier.envelope).unwrap();
+    fs::write(
+        &marker_source,
+        marker(&fixture.install, &sha256_hex(next_core)),
+    )
+    .unwrap();
+    for path in [&core, &companion, &envelope, &marker_source] {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    let staged_verifier = TestPairVerifier {
+        envelope: fixture.verifier.envelope.clone(),
+        identity: VerifiedManagedPairIdentity::new(
+            "test-release-next",
+            fixture.verifier.identity.target(),
+            fixture.verifier.identity.rollback_generation() + 1,
+            "b".repeat(64),
+            ManagedPairComponentIdentity::new(sha256_hex(next_core), next_core.len() as u64)
+                .unwrap(),
+            ManagedPairComponentIdentity::new(
+                sha256_hex(next_companion),
+                next_companion.len() as u64,
+            )
+            .unwrap(),
+        )
+        .unwrap(),
+    };
+    let staged = stage_managed_pair_under_installation_lock(
+        &fixture.root,
+        &ManagedPairApplyInput::new(&envelope, &core, &companion, &marker_source),
+        &staged_verifier,
+    )
+    .unwrap();
+    assert!(matches!(staged, ManagedPairStageOutcome::Staged { .. }));
+    let pending = fixture
+        .root
+        .join(MANAGED_PAIR_ACTIVE_TRANSACTION_RELATIVE_PATH);
+    let owned_candidate = fixture.root.join("share/ctx/.managed-pair-apply-v1");
+    let pending_before = fs::read(&pending).unwrap();
+    let candidate_core_before = fs::read(owned_candidate.join("bin/ctx")).unwrap();
+
+    let error = new_uninstall_journal_with_optional_verifier(
+        &fixture.install,
+        "ia_87654321",
+        Some(&fixture.verifier),
+    )
+    .unwrap_err();
+    assert!(format!("{error:#}").contains("finish the pending managed-pair upgrade"));
+    assert_eq!(fs::read(&pending).unwrap(), pending_before);
+    assert_eq!(
+        fs::read(owned_candidate.join("bin/ctx")).unwrap(),
+        candidate_core_before
+    );
+}
+
+#[test]
+fn ordinary_self_upgrade_is_fenced_while_hosted_uninstall_waits_for_parent_exit() {
+    let fixture = pair_fixture();
+    let (_helper, path, journal) = arm_pair_uninstall(&fixture);
+    let core_before = fs::read(&fixture.install).unwrap();
+    let marker_before = fs::read(install_marker_path(&fixture.install)).unwrap();
+
+    let status = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "upgrade::install::hosted_transaction::tests::ordinary_self_upgrade_child_probe",
+        ])
+        .env(SELF_UPGRADE_CHILD_TARGET_ENV, &fixture.install)
+        .env("CTX_UPGRADE_TEST_TARGET", &fixture.install)
+        .status()
+        .unwrap();
+
+    assert!(status.success());
+    assert_eq!(fs::read(&fixture.install).unwrap(), core_before);
+    assert_eq!(
+        fs::read(install_marker_path(&fixture.install)).unwrap(),
+        marker_before
+    );
+    assert_eq!(read_journal(&path).unwrap().unwrap().phase, Phase::Armed);
+    assert_eq!(journal.phase, Phase::Armed);
+}
+
+#[test]
+fn ordinary_self_upgrade_child_probe() -> Result<()> {
+    let Some(install) = std::env::var_os(SELF_UPGRADE_CHILD_TARGET_ENV) else {
+        return Ok(());
+    };
+    let install = PathBuf::from(install);
+    let data_root = install
+        .parent()
+        .and_then(Path::parent)
+        .unwrap()
+        .join("upgrade-data");
+    fs::create_dir(&data_root)?;
+    fs::set_permissions(&data_root, fs::Permissions::from_mode(0o700))?;
+    let next_core = b"ordinary self-upgrade Core";
+    let plan = ordinary_upgrade_plan(&install, next_core);
+    let lock = UpgradeLock::acquire(&data_root)?;
+    let attempt = begin_manual_attempt_locked(&data_root, &lock, "manual_apply")?;
+    let mut core = PreparedCoreArtifact::Legacy(DownloadedArtifact::from_bytes(
+        &data_root,
+        next_core,
+        MAX_BINARY_BYTES,
+        "ordinary self-upgrade Core",
+    )?);
+    let mut before_publish_called = false;
+    let error = apply_prepared_install(
+        &TEST_RELEASE_PROCESS,
+        &TEST_SEMANTIC_LAYOUT,
+        &lock,
+        &plan,
+        &ManagedPairMode::CoreOnly,
+        &mut core,
+        None,
+        &mut [],
+        &data_root,
+        &attempt,
+        Duration::from_secs(3600),
+        None,
+        &mut || {
+            before_publish_called = true;
+            Ok(())
+        },
+    )
+    .unwrap_err();
+
+    assert!(format!("{error:#}").contains("finish the pending hosted installation transaction"));
+    assert!(!before_publish_called);
+    Ok(())
+}
+
+#[test]
+fn hosted_uninstall_cleans_candidate_orphaned_before_pending_publication() {
+    let fixture = pair_fixture();
+    let orphan = create_crash_before_pending_candidate(&fixture);
+    assert!(orphan.is_dir());
+    assert!(!fixture
+        .root
+        .join(MANAGED_PAIR_ACTIVE_TRANSACTION_RELATIVE_PATH)
+        .exists());
+
+    let (helper, path, mut journal) = arm_pair_uninstall(&fixture);
+    assert!(!orphan.exists());
+    complete_uninstall_commit(&helper, &path, &mut journal, &mut |_| Ok(())).unwrap();
+    remove_journal(&path).unwrap();
+
+    assert!(!fixture.install.exists());
+    assert!(!fixture.state.exists());
+    assert!(!fixture.envelope.exists());
+    assert!(!fixture.companion.exists());
+}
+
+#[test]
+fn core_only_hosted_install_refuses_managed_pair_material() {
+    let fixture = pair_fixture();
+    let error = reject_managed_pair_material_for_core_only_install(&fixture.install).unwrap_err();
+    assert!(format!("{error:#}").contains("cannot replace a managed Core+Pro pair"));
+
+    fs::remove_file(&fixture.state).unwrap();
+    fs::remove_file(&fixture.envelope).unwrap();
+    fs::remove_file(&fixture.companion).unwrap();
+    let error = reject_managed_pair_material_for_core_only_install(&fixture.install).unwrap_err();
+    assert!(format!("{error:#}").contains("cannot replace a managed Core+Pro pair"));
+
+    fs::write(
+        install_marker_path(&fixture.install),
+        marker(&fixture.install, &sha256_hex(b"paired ctx")),
+    )
+    .unwrap();
+    reject_managed_pair_material_for_core_only_install(&fixture.install).unwrap();
+}
+
+#[test]
+fn hosted_uninstall_refuses_substituted_pair_file_before_removing_state() {
+    let fixture = pair_fixture();
+    let (helper, path, mut journal) = arm_pair_uninstall(&fixture);
+    fs::write(&fixture.companion, b"substituted companion").unwrap();
+
+    let error =
+        complete_uninstall_commit(&helper, &path, &mut journal, &mut |_| Ok(())).unwrap_err();
+    assert!(
+        format!("{error:#}").contains("refusing substituted managed-pair companion"),
+        "{error:#}"
+    );
+    assert!(fixture.state.exists());
+    assert!(fixture.envelope.exists());
+    assert_eq!(
+        fs::read(&fixture.companion).unwrap(),
+        b"substituted companion"
+    );
+    assert!(fixture.install.exists());
+    assert!(path.exists());
+}
+
+#[test]
+fn hosted_uninstall_refuses_symlinked_pair_file_before_removing_state() {
+    let fixture = pair_fixture();
+    let (helper, path, mut journal) = arm_pair_uninstall(&fixture);
+    let moved = fixture.root.join("libexec/original-companion");
+    fs::rename(&fixture.companion, &moved).unwrap();
+    std::os::unix::fs::symlink(&moved, &fixture.companion).unwrap();
+
+    assert!(complete_uninstall_commit(&helper, &path, &mut journal, &mut |_| Ok(())).is_err());
+    assert!(fixture.state.exists());
+    assert!(fs::symlink_metadata(&fixture.companion)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert!(fixture.install.exists());
+}
+
+#[test]
+fn authenticated_pair_uninstall_retries_every_pair_removal_boundary() {
+    const POINTS: &[&str] = &[
+        "removing_pair_state",
+        "pair_state_removed",
+        "removing_pair_envelope",
+        "pair_envelope_removed",
+        "removing_pair_companion",
+        "pair_companion_removed",
+    ];
+    for point in POINTS {
+        let fixture = pair_fixture();
+        let (helper, path, mut journal) = arm_pair_uninstall(&fixture);
+        let mut injected = false;
+        let error = complete_uninstall_commit(&helper, &path, &mut journal, &mut |observed| {
+            if !injected && observed == *point {
+                injected = true;
+                bail!("injected interruption after {observed}");
+            }
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("injected interruption"),
+            "{point}"
+        );
+        if *point == "pair_state_removed" {
+            assert!(!fixture.state.exists());
+            assert!(fixture.envelope.exists());
+            assert!(fixture.companion.exists());
+            assert!(fixture.install.exists());
+        }
+
+        let mut recovered = read_journal(&path).unwrap().unwrap();
+        complete_uninstall_commit(&helper, &path, &mut recovered, &mut |_| Ok(())).unwrap();
+        remove_journal(&path).unwrap();
+        assert!(!fixture.state.exists(), "{point}");
+        assert!(!fixture.envelope.exists(), "{point}");
+        assert!(!fixture.companion.exists(), "{point}");
+        assert!(!fixture.install.exists(), "{point}");
     }
 }
 

@@ -48,6 +48,24 @@ pub(super) struct OnnxRuntimeMetadata {
 }
 
 #[derive(Debug, Clone)]
+pub(super) struct ManagedPairMetadata {
+    envelope: String,
+    core_object: String,
+    core_sha256: String,
+    companion_object: String,
+    companion_sha256: String,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct ManagedPairReleaseMetadata {
+    pub(super) envelope_url: String,
+    pub(super) core_object_url: String,
+    pub(super) core_sha256: String,
+    pub(super) companion_object_url: String,
+    pub(super) companion_sha256: String,
+}
+
+#[derive(Debug, Clone)]
 pub(super) struct ReleaseMetadata {
     pub(super) version: String,
     pub(super) base_url: String,
@@ -58,6 +76,7 @@ pub(super) struct ReleaseMetadata {
     pub(super) self_upgrade_allowed: bool,
     pub(super) auto_upgrade_allowed: bool,
     pub(super) store_schema_version: Option<String>,
+    pub(super) managed_pair: Option<ManagedPairMetadata>,
     pub(super) onnxruntime: Option<OnnxRuntimeMetadata>,
     pub(super) semantic: Option<semantic::SemanticReleaseMetadata>,
 }
@@ -112,6 +131,7 @@ pub(super) fn parse_release_metadata(
     let sha256 = value(&format!("CTX_RELEASE_SHA256_{platform_key}"))
         .ok_or_else(|| anyhow!("metadata missing checksum for {platform}"))?;
     validate_sha256(&sha256)?;
+    let managed_pair = parse_managed_pair_metadata(&metadata, platform, &platform_key)?;
     let onnxruntime = if metadata
         .keys()
         .any(|key| key.starts_with(ONNXRUNTIME_METADATA_PREFIX))
@@ -159,9 +179,81 @@ pub(super) fn parse_release_metadata(
         self_upgrade_allowed: metadata_bool(&metadata, "CTX_RELEASE_SELF_UPGRADE_ALLOWED", false)?,
         auto_upgrade_allowed: metadata_bool(&metadata, "CTX_RELEASE_AUTO_UPGRADE_ALLOWED", false)?,
         store_schema_version: value("CTX_RELEASE_STORE_SCHEMA_VERSION"),
+        managed_pair,
         onnxruntime,
         semantic,
     })
+}
+
+fn parse_managed_pair_metadata(
+    metadata: &BTreeMap<String, String>,
+    platform: &str,
+    platform_key: &str,
+) -> Result<Option<ManagedPairMetadata>> {
+    let envelope_key = format!("CTX_RELEASE_MANAGED_PAIR_ENVELOPE_{platform_key}");
+    let core_object_key = format!("CTX_RELEASE_MANAGED_PAIR_CORE_OBJECT_{platform_key}");
+    let core_sha256_key = format!("CTX_RELEASE_MANAGED_PAIR_CORE_SHA256_{platform_key}");
+    let companion_object_key = format!("CTX_RELEASE_MANAGED_PAIR_COMPANION_OBJECT_{platform_key}");
+    let companion_sha256_key = format!("CTX_RELEASE_MANAGED_PAIR_COMPANION_SHA256_{platform_key}");
+
+    let envelope = metadata_value(metadata, &envelope_key);
+    let core_object = metadata_value(metadata, &core_object_key);
+    let core_sha256 = metadata_value(metadata, &core_sha256_key);
+    let companion_object = metadata_value(metadata, &companion_object_key);
+    let companion_sha256 = metadata_value(metadata, &companion_sha256_key);
+    if envelope.is_none()
+        && core_object.is_none()
+        && core_sha256.is_none()
+        && companion_object.is_none()
+        && companion_sha256.is_none()
+    {
+        return Ok(None);
+    }
+
+    let missing = [
+        (&envelope_key, envelope.is_none()),
+        (&core_object_key, core_object.is_none()),
+        (&core_sha256_key, core_sha256.is_none()),
+        (&companion_object_key, companion_object.is_none()),
+        (&companion_sha256_key, companion_sha256.is_none()),
+    ]
+    .into_iter()
+    .find_map(|(key, missing)| missing.then_some(key));
+    if let Some(key) = missing {
+        return Err(anyhow!(
+            "managed-pair metadata for {platform} is partial; missing {key}"
+        ));
+    }
+
+    let (
+        Some(envelope),
+        Some(core_object),
+        Some(core_sha256),
+        Some(companion_object),
+        Some(companion_sha256),
+    ) = (
+        envelope,
+        core_object,
+        core_sha256,
+        companion_object,
+        companion_sha256,
+    )
+    else {
+        return Err(anyhow!("managed-pair metadata for {platform} is partial"));
+    };
+    validate_artifact_name(&envelope)?;
+    validate_sha256(&core_sha256)?;
+    validate_sha256(&companion_sha256)?;
+    validate_managed_pair_object_key(&core_object, &core_sha256)?;
+    validate_managed_pair_object_key(&companion_object, &companion_sha256)?;
+
+    Ok(Some(ManagedPairMetadata {
+        envelope,
+        core_object,
+        core_sha256,
+        companion_object,
+        companion_sha256,
+    }))
 }
 
 fn parse_metadata_map(text: &str) -> Result<BTreeMap<String, String>> {
@@ -234,14 +326,42 @@ fn public_key_der() -> Result<Vec<u8>> {
 }
 
 pub(super) fn validate_artifact_url(base_url: &str, artifact: &str) -> Result<()> {
+    validate_artifact_base_url(base_url)?;
+    validate_artifact_name(artifact)
+}
+
+pub(super) fn project_managed_pair_release(
+    base_url: &str,
+    managed_pair: Option<&ManagedPairMetadata>,
+) -> Result<Option<ManagedPairReleaseMetadata>> {
+    let Some(managed_pair) = managed_pair else {
+        return Ok(None);
+    };
+    validate_artifact_url(base_url, &managed_pair.envelope)?;
+    validate_managed_pair_object_key(&managed_pair.core_object, &managed_pair.core_sha256)?;
+    validate_managed_pair_object_key(
+        &managed_pair.companion_object,
+        &managed_pair.companion_sha256,
+    )?;
+    let base_url = base_url.trim_end_matches('/');
+    Ok(Some(ManagedPairReleaseMetadata {
+        envelope_url: format!("{base_url}/{}", managed_pair.envelope),
+        core_object_url: format!("{base_url}/{}", managed_pair.core_object),
+        core_sha256: managed_pair.core_sha256.clone(),
+        companion_object_url: format!("{base_url}/{}", managed_pair.companion_object),
+        companion_sha256: managed_pair.companion_sha256.clone(),
+    }))
+}
+
+fn validate_artifact_base_url(base_url: &str) -> Result<()> {
     #[cfg(ctx_release_qualification)]
     if qualification_artifact_base(base_url) {
-        return validate_artifact_name(artifact);
+        return Ok(());
     }
     if !is_production_artifact_base(base_url) {
         return Err(anyhow!("metadata base URL must be HTTPS"));
     }
-    validate_artifact_name(artifact)
+    Ok(())
 }
 
 fn is_production_artifact_base(base_url: &str) -> bool {
@@ -296,6 +416,40 @@ pub(super) fn validate_artifact_name(artifact: &str) -> Result<()> {
         || artifact.contains('\r')
     {
         return Err(anyhow!("unsafe artifact name: {artifact}"));
+    }
+    Ok(())
+}
+
+fn validate_managed_pair_object_key(object_key: &str, expected_sha256: &str) -> Result<()> {
+    let mut components = object_key.split('/');
+    let (Some("sha256"), Some(digest), Some(filename), None) = (
+        components.next(),
+        components.next(),
+        components.next(),
+        components.next(),
+    ) else {
+        return Err(anyhow!("unsafe managed-pair object key: {object_key}"));
+    };
+    if validate_sha256(digest).is_err() || digest.bytes().any(|byte| byte.is_ascii_uppercase()) {
+        return Err(anyhow!("unsafe managed-pair object key: {object_key}"));
+    }
+    validate_artifact_name(filename)
+        .map_err(|_| anyhow!("unsafe managed-pair object key: {object_key}"))?;
+    if filename.len() > 128
+        || !filename
+            .as_bytes()
+            .first()
+            .is_some_and(|byte| byte.is_ascii_alphanumeric())
+        || !filename
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'+' | b'-'))
+    {
+        return Err(anyhow!("unsafe managed-pair object key: {object_key}"));
+    }
+    if digest != expected_sha256 {
+        return Err(anyhow!(
+            "managed-pair object key digest does not match its signed SHA-256"
+        ));
     }
     Ok(())
 }

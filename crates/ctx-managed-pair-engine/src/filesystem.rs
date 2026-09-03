@@ -8,11 +8,11 @@ use std::{
 };
 
 use anyhow::{anyhow, bail, Context, Result};
-use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
 use super::{
-    ManagedPairComponentIdentity, MANAGED_PAIR_ENVELOPE_RELATIVE_PATH,
+    ManagedPairComponentIdentity, MANAGED_CORE_INSTALL_MARKER_RELATIVE_PATH,
+    MANAGED_PAIR_ACTIVE_TRANSACTION_RELATIVE_PATH, MANAGED_PAIR_ENVELOPE_RELATIVE_PATH,
     MANAGED_PAIR_STATE_RELATIVE_PATH,
 };
 
@@ -20,51 +20,27 @@ use super::{
 pub(super) enum Slot {
     Core,
     Companion,
+    Marker,
     Envelope,
     State,
 }
 
 impl Slot {
-    pub(super) const ALL: [Self; 4] = [Self::Core, Self::Companion, Self::Envelope, Self::State];
-    pub(super) const DATA: [Self; 3] = [Self::Core, Self::Companion, Self::Envelope];
-    pub(super) const BACKUP_ORDER: [Self; 4] =
-        [Self::State, Self::Core, Self::Companion, Self::Envelope];
-    pub(super) const PUBLISH_ORDER: [Self; 4] =
-        [Self::Envelope, Self::Companion, Self::Core, Self::State];
-
-    pub(super) const fn index(self) -> usize {
-        match self {
-            Self::Core => 0,
-            Self::Companion => 1,
-            Self::Envelope => 2,
-            Self::State => 3,
-        }
-    }
+    pub(super) const ALL: [Self; 5] = [
+        Self::Core,
+        Self::Companion,
+        Self::Marker,
+        Self::Envelope,
+        Self::State,
+    ];
 
     pub(super) const fn label(self) -> &'static str {
         match self {
             Self::Core => "managed-pair Core component",
             Self::Companion => "managed-pair companion component",
+            Self::Marker => "managed Core install marker",
             Self::Envelope => "managed-pair signed envelope",
             Self::State => "managed-pair state marker",
-        }
-    }
-
-    pub(super) const fn backup_fault(self) -> &'static str {
-        match self {
-            Self::Core => "backup_core",
-            Self::Companion => "backup_companion",
-            Self::Envelope => "backup_envelope",
-            Self::State => "backup_state",
-        }
-    }
-
-    pub(super) const fn publish_fault(self) -> &'static str {
-        match self {
-            Self::Core => "publish_core",
-            Self::Companion => "publish_companion",
-            Self::Envelope => "publish_envelope",
-            Self::State => "publish_state",
         }
     }
 
@@ -74,6 +50,7 @@ impl Slot {
             Self::Core => "bin/ctx",
             Self::Companion if cfg!(windows) => "libexec/ctx-pro.exe",
             Self::Companion => "libexec/ctx-pro",
+            Self::Marker => MANAGED_CORE_INSTALL_MARKER_RELATIVE_PATH,
             Self::Envelope => MANAGED_PAIR_ENVELOPE_RELATIVE_PATH,
             Self::State => MANAGED_PAIR_STATE_RELATIVE_PATH,
         }
@@ -135,6 +112,10 @@ impl Deref for Entry {
 }
 
 impl Layout {
+    pub(super) fn root(&self) -> &Path {
+        &self.root
+    }
+
     pub(super) fn open(root: &Path, create: bool) -> Result<Self> {
         validate_absolute_root(root, "managed-pair install root")?;
         if create {
@@ -187,16 +168,11 @@ impl Layout {
         Ok(layout)
     }
 
-    fn open_candidate_attempt(&self, attempt_id: &str) -> Result<(Self, SecureDirectory)> {
-        if !super::journal::valid_attempt_id(attempt_id) {
-            bail!("managed-pair attempt ID is invalid");
-        }
-        let base = self
+    pub(super) fn open_apply_candidate(&self) -> Result<Self> {
+        let root_directory = self
             .ctx_directory
-            .open_child_directory(OsStr::new(".managed-pair-candidates"))?;
-        let root_directory = base.open_child_directory(OsStr::new(attempt_id))?;
-        let root = candidate_root(&self.root, attempt_id)?;
-        Ok((Self::bind_from_root(&root, root_directory)?, base))
+            .open_child_directory(OsStr::new(candidate::APPLY_CANDIDATE_DIRECTORY))?;
+        Self::bind_from_root(&candidate::apply_candidate_root(&self.root), root_directory)
     }
 
     pub(super) fn revalidate(&self) -> Result<()> {
@@ -214,7 +190,7 @@ impl Layout {
 
     pub(super) fn target(&self, slot: Slot) -> Entry {
         let directory = match slot {
-            Slot::Core => Arc::clone(&self.bin_directory),
+            Slot::Core | Slot::Marker => Arc::clone(&self.bin_directory),
             Slot::Companion => Arc::clone(&self.libexec_directory),
             Slot::Envelope | Slot::State => Arc::clone(&self.ctx_directory),
         };
@@ -223,101 +199,39 @@ impl Layout {
     }
 
     pub(super) fn staged(&self, slot: Slot, attempt_id: &str) -> Entry {
-        transaction_sibling(&self.target(slot), attempt_id, "new")
+        candidate::transaction_sibling(&self.target(slot), attempt_id)
     }
 
-    pub(super) fn backup(&self, slot: Slot, attempt_id: &str) -> Entry {
-        transaction_sibling(&self.target(slot), attempt_id, "old")
-    }
-
-    pub(super) fn journal(&self) -> Entry {
+    pub(super) fn active_transaction(&self) -> Entry {
         Entry::new(
             self.root
-                .join("share/ctx/.managed-pair-transaction-v1.json"),
-            Arc::clone(&self.ctx_directory),
+                .join(MANAGED_PAIR_ACTIVE_TRANSACTION_RELATIVE_PATH),
+            Arc::clone(&self.bin_directory),
         )
-        .expect("fixed managed-pair journal has a file name")
+        .expect("fixed ctx active transaction has a file name")
     }
 
-    pub(super) fn journal_temporary(&self) -> Entry {
-        Entry::new(
-            self.root.join("share/ctx/.managed-pair-transaction-v1.tmp"),
-            Arc::clone(&self.ctx_directory),
-        )
-        .expect("fixed managed-pair temporary journal has a file name")
+    pub(super) fn active_transaction_temporary(&self) -> Entry {
+        self.active_transaction()
+            .sibling(OsString::from(".ctx.upgrade-install-transaction.json.tmp"))
     }
 
-    pub(super) fn lock(&self) -> Entry {
-        Entry::new(
-            self.root.join(".managed-pair-transaction-v1.lock"),
-            Arc::clone(&self.root_directory),
-        )
-        .expect("fixed managed-pair lock has a file name")
-    }
-
-    pub(super) fn uninstall_journal(&self) -> Entry {
-        Entry::new(
-            self.root.join("share/ctx/.managed-pair-uninstall-v1.json"),
-            Arc::clone(&self.ctx_directory),
-        )
-        .expect("fixed managed-pair uninstall journal has a file name")
-    }
-
-    pub(super) fn uninstall_journal_temporary(&self) -> Entry {
-        Entry::new(
-            self.root.join("share/ctx/.managed-pair-uninstall-v1.tmp"),
-            Arc::clone(&self.ctx_directory),
-        )
-        .expect("fixed managed-pair uninstall temporary has a file name")
-    }
-
-    pub(super) fn begin_record(&self) -> Entry {
-        Entry::new(
-            self.root.join("share/ctx/.managed-pair-begin-v1.json"),
-            Arc::clone(&self.ctx_directory),
-        )
-        .expect("fixed managed-pair begin record has a file name")
-    }
-
-    pub(super) fn terminal_receipt(&self) -> Entry {
-        Entry::new(
-            self.root
-                .join("share/ctx/.managed-pair-last-attempt-v1.json"),
-            Arc::clone(&self.ctx_directory),
-        )
-        .expect("fixed managed-pair receipt has a file name")
-    }
-
-    pub(super) fn terminal_receipt_temporary(&self) -> Entry {
-        Entry::new(
-            self.root
-                .join("share/ctx/.managed-pair-last-attempt-v1.tmp"),
-            Arc::clone(&self.ctx_directory),
-        )
-        .expect("fixed managed-pair receipt temporary has a file name")
-    }
-
-    pub(super) fn remove_empty_candidate_base(&self) -> Result<()> {
-        match self
-            .ctx_directory
-            .remove_directory(OsStr::new(".managed-pair-candidates"))
-        {
-            Ok(()) => self.ctx_directory.sync(),
-            Err(error) if is_not_found(&error) => Ok(()),
-            Err(error) => Err(error).context("remove empty managed-pair candidate base"),
-        }
+    pub(super) fn root_binding(&self) -> Result<(u64, u64)> {
+        let (device, file, _) = file_information(
+            &self.root_directory.file,
+            "managed-pair retained candidate directory",
+        )?;
+        Ok((device, file))
     }
 }
 
 mod candidate;
 
-use candidate::transaction_sibling;
 pub(super) use candidate::{
-    candidate_exists, candidate_root, create_candidate, legacy_journal_present, remove_candidate,
+    apply_candidate_exists, apply_candidate_root, create_apply_candidate, remove_apply_candidate,
 };
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct FileStamp {
     pub(super) device: u64,
     pub(super) file: u64,
@@ -339,6 +253,16 @@ pub(super) fn validate_absolute_root(path: &Path, label: &str) -> Result<()> {
         bail!("{label} must be a safe absolute path: {}", path.display());
     }
     Ok(())
+}
+
+pub(super) fn external_entry(path: &Path, label: &str) -> Result<Entry> {
+    validate_absolute_root(path, label)?;
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .ok_or_else(|| anyhow!("{label} has no parent directory"))?;
+    let directory = Arc::new(SecureDirectory::open(parent)?);
+    Entry::new(path.to_path_buf(), directory)
 }
 
 fn ensure_directory(path: &Path) -> Result<()> {
@@ -379,51 +303,6 @@ fn protect_directory(path: &Path) -> Result<()> {
     #[cfg(windows)]
     ctx_history_platform::platform_security::restrict_private_directory(path)?;
     Ok(())
-}
-
-pub(super) struct TransactionLock {
-    _file: File,
-    #[cfg(windows)]
-    _root_guard: File,
-}
-
-pub(super) fn acquire_lock(layout: &Layout) -> Result<TransactionLock> {
-    use fs2::FileExt as _;
-
-    layout.revalidate()?;
-    let entry = layout.lock();
-    let file = match open_owner_lock(&entry, "managed-pair transaction lock") {
-        Ok(file) => file,
-        Err(error) if is_not_found(&error) => {
-            let file = entry.directory.create_lock(&entry.name, entry.path())?;
-            protect_file_handle(&file, false)?;
-            file.sync_all()?;
-            entry.directory.sync()?;
-            file
-        }
-        Err(error) => return Err(error),
-    };
-    file.lock_exclusive()
-        .context("lock managed-pair installation transaction")?;
-    require_open_named_identity(&entry, &file, "managed-pair transaction lock")?;
-    #[cfg(windows)]
-    let root_guard = layout
-        .root_directory
-        .guard_path_identity(&layout.root)
-        .context("retain stable managed-pair installation authority")?;
-    layout.revalidate()?;
-    Ok(TransactionLock {
-        _file: file,
-        #[cfg(windows)]
-        _root_guard: root_guard,
-    })
-}
-
-fn is_not_found(error: &anyhow::Error) -> bool {
-    error
-        .chain()
-        .find_map(|cause| cause.downcast_ref::<std::io::Error>())
-        .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound)
 }
 
 pub(super) fn read_regular(entry: &Entry, max: u64, label: &str) -> Result<ObservedFile> {
@@ -574,15 +453,15 @@ pub(super) fn copy_exact(
             }
             total = total
                 .checked_add(u64::try_from(count)?)
-                .ok_or_else(|| anyhow!("{label} backup size overflow"))?;
+                .ok_or_else(|| anyhow!("{label} copy size overflow"))?;
             if total > expected.size_bytes || total > max {
-                bail!("{label} changed while its rollback backup was copied");
+                bail!("{label} changed while its exact copy was made");
             }
             hasher.update(&buffer[..count]);
             target_file.write_all(&buffer[..count])?;
         }
         if total != expected.size_bytes || format!("{:x}", hasher.finalize()) != expected.sha256 {
-            bail!("{label} changed while its rollback backup was copied");
+            bail!("{label} changed while its exact copy was made");
         }
         target_file.sync_all()?;
         Ok(())
@@ -595,11 +474,11 @@ pub(super) fn copy_exact(
     drop(target_file);
     sync_parent(target)?;
     require_stamp(source, expected, max, label)?;
-    let backup = observe_regular(target, max, label, false, false)?.stamp;
-    if backup.size_bytes != expected.size_bytes || backup.sha256 != expected.sha256 {
-        bail!("{label} rollback backup does not match the original bytes");
+    let copied = observe_regular(target, max, label, false, false)?.stamp;
+    if copied.size_bytes != expected.size_bytes || copied.sha256 != expected.sha256 {
+        bail!("copied {label} does not match the source bytes");
     }
-    Ok(backup)
+    Ok(copied)
 }
 
 pub(super) fn write_new(
@@ -683,6 +562,12 @@ pub(super) fn verify_content(
     Ok(())
 }
 
+pub(super) fn protect_regular(entry: &Entry, executable: bool, label: &str) -> Result<()> {
+    let file = open_owner_regular(entry, label)?;
+    protect_file_handle(&file, executable)?;
+    validate_open_owner_regular(entry, &file, label)
+}
+
 pub(super) fn stamp_optional(entry: &Entry, max: u64, label: &str) -> Result<Option<FileStamp>> {
     stamp_optional_impl(entry, max, label, false)
 }
@@ -735,33 +620,6 @@ pub(super) fn require_absent(entry: &Entry, label: &str) -> Result<()> {
         bail!("unexpected {label} exists at {}", entry.display());
     }
     Ok(())
-}
-
-pub(super) fn rename_exact(
-    source: &Entry,
-    target: &Entry,
-    expected: &FileStamp,
-    max: u64,
-    label: &str,
-) -> Result<()> {
-    require_stamp(source, expected, max, label)?;
-    if target
-        .directory
-        .entry_metadata(&target.name, target.path())?
-        .is_some()
-    {
-        bail!("unexpected {label} exists at {}", target.display());
-    }
-    require_stamp(source, expected, max, label)?;
-    durable_rename(source, target, expected, label, false).with_context(|| {
-        format!(
-            "rename {label} {} to {}",
-            source.display(),
-            target.display()
-        )
-    })?;
-    require_stamp(target, expected, max, label)?;
-    target.directory.sync()
 }
 
 pub(super) fn remove_if_exact(
@@ -837,15 +695,6 @@ fn open_owner_regular(entry: &Entry, label: &str) -> Result<File> {
     let file = entry
         .directory
         .open_file(&entry.name, entry.path())
-        .with_context(|| format!("open {label} {}", entry.display()))?;
-    validate_open_owner_regular(entry, &file, label)?;
-    Ok(file)
-}
-
-fn open_owner_lock(entry: &Entry, label: &str) -> Result<File> {
-    let file = entry
-        .directory
-        .open_lock(&entry.name, entry.path())
         .with_context(|| format!("open {label} {}", entry.display()))?;
     validate_open_owner_regular(entry, &file, label)?;
     Ok(file)
@@ -957,18 +806,6 @@ fn require_file_identity(file: &File, expected: &FileStamp, label: &str) -> Resu
     Ok(())
 }
 
-fn require_open_named_identity(entry: &Entry, file: &File, label: &str) -> Result<()> {
-    let (device, identity, _) = file_information(file, label)?;
-    let named = entry
-        .directory
-        .entry_metadata(&entry.name, entry.path())?
-        .ok_or_else(|| anyhow!("{label} disappeared while being locked"))?;
-    if !named.is_file || named.is_symlink || named.device != device || named.file != identity {
-        bail!("{label} pathname changed while being locked");
-    }
-    Ok(())
-}
-
 fn file_name<'a>(path: &'a Path, label: &str) -> Result<&'a OsStr> {
     path.file_name()
         .filter(|name| !name.is_empty())
@@ -981,9 +818,5 @@ mod secure_directory;
 pub(super) use platform::durable_replace;
 #[cfg(windows)]
 use platform::windows_file_information;
-#[cfg(windows)]
-pub(super) use platform::{current_process_creation_identity, wait_for_parent_exit};
-use platform::{durable_rename, file_information, sync_parent};
-#[cfg(all(test, windows))]
-pub(super) use platform::{process_creation_identity_for_test, wait_for_parent_exit_for_test};
+use platform::{file_information, sync_parent};
 use secure_directory::SecureDirectory;

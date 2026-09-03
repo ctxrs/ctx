@@ -39,10 +39,10 @@ const DIRECT_OUTPUT_BOUNDARIES: &[(&str, &[(&str, usize)])] = &[
     ("crates/ctx-cli/src/companion.rs", &[("stderr()", 3)]),
     (
         "crates/ctx-cli/src/core_capability.rs",
-        &[("eprintln!", 1), ("stdout()", 1)],
+        &[("eprintln!", 2), ("stdout()", 1)],
     ),
     (
-        "crates/ctx-cli/src/core_capability/hosted_pair_install.rs",
+        "crates/ctx-cli/src/core_capability/managed_pair_apply.rs",
         &[("stdout()", 1)],
     ),
     (
@@ -72,6 +72,10 @@ const DIRECT_OUTPUT_BOUNDARIES: &[(&str, &[(&str, usize)])] = &[
     (
         "crates/ctx-upgrade-engine/src/upgrade/install/hosted_transaction.rs",
         &[("println!", 2)],
+    ),
+    (
+        "crates/ctx-upgrade-engine/src/upgrade/install/hosted_transaction/post_exit.rs",
+        &[("stderr()", 1)],
     ),
     (
         "crates/ctx-upgrade-engine/src/upgrade/install/transaction/windows/helper.rs",
@@ -483,11 +487,11 @@ fn forbidden_direct_output_mutations_are_detected() {
     );
     assert_eq!(
         direct_output_counts("std::io::stdout();"),
-        approved_direct_output_counts("crates/ctx-cli/src/core_capability/hosted_pair_install.rs")
+        approved_direct_output_counts("crates/ctx-cli/src/core_capability/managed_pair_apply.rs")
     );
     assert_ne!(
         direct_output_counts("std::io::stdout(); std::io::stdout();"),
-        approved_direct_output_counts("crates/ctx-cli/src/core_capability/hosted_pair_install.rs"),
+        approved_direct_output_counts("crates/ctx-cli/src/core_capability/managed_pair_apply.rs"),
         "an additional call inside an approved path must be rejected"
     );
 }

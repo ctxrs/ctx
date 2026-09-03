@@ -143,18 +143,6 @@ fetch_managed_object() {
   cp "${source}" "${dest}"
 }
 
-json_value() {
-  python3 -I - "$1" "$2" <<'PY'
-import json, sys
-value = json.load(open(sys.argv[1], encoding="utf-8"))
-for component in sys.argv[2].split("."):
-    value = value[component]
-if not isinstance(value, (str, int)):
-    raise SystemExit("managed-pair plan field is not scalar")
-print(value)
-PY
-}
-
 read_metadata_source() {
   local source="$1"
   local dest="$2"
@@ -204,6 +192,22 @@ validate_safe_value() {
       fail "unsafe ${name}: ${value}"
       ;;
   esac
+}
+
+validate_managed_object_key() {
+  local label="$1"
+  local object_key="$2"
+  local checksum_value="$3"
+  local key_digest
+
+  [[ "${object_key}" =~ ^sha256/[0-9a-fA-F]{64}/[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$ ]] || \
+    fail "${label} object key is malformed: ${object_key}"
+  [[ "${checksum_value}" =~ ^[0-9a-fA-F]{64}$ ]] || \
+    fail "${label} checksum is not a SHA-256 hex digest"
+  key_digest="${object_key#sha256/}"
+  key_digest="${key_digest%%/*}"
+  [[ "$(lowercase "${key_digest}")" == "$(lowercase "${checksum_value}")" ]] || \
+    fail "${label} object key does not match its checksum"
 }
 
 sha256_file() {
@@ -430,23 +434,30 @@ configure_path_if_needed() {
 
 write_install_marker() {
   local marker_path="$1"
-  local metadata_url="$2"
-  local source_commit="$3"
-  local published_at="$4"
+  local manager="$2"
+  local metadata_trust="$3"
+  local staging_dogfood="$4"
+  local managed_pair="${5:-false}"
+  local managed_pair_field=""
   local installed_at
   installed_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  if [[ "${managed_pair}" == true ]]; then
+    managed_pair_field='  "managed_pair": true,'
+  fi
 
   cat > "${marker_path}.$$" <<EOF
 {
   "schema_version": 1,
-  "manager": "ctx-explicit-metadata-installer",
+  "manager": "$(json_escape "${manager}")",
   "metadata_trust": "$(json_escape "${metadata_trust}")",
   "install_path": "$(json_escape "${install_path}")",
   "platform": "$(json_escape "${platform}")",
   "channel": "$(json_escape "${channel}")",
   "version": "$(json_escape "${version}")",
   "sha256": "$(json_escape "${actual_checksum}")",
-  "metadata_url": "$(json_escape "${metadata_url}")",
+  "staging_dogfood": ${staging_dogfood},
+${managed_pair_field}
+  "metadata_url": "$(json_escape "${metadata_source}")",
   "artifact_url": "$(json_escape "${artifact_url}")",
   "source_commit": "$(json_escape "${source_commit}")",
   "published_at": "$(json_escape "${published_at}")",
@@ -698,6 +709,10 @@ version="$(metadata_value "${metadata_file}" CTX_RELEASE_VERSION)" || fail "meta
 base_url="$(metadata_value "${metadata_file}" CTX_RELEASE_BASE_URL)" || fail "metadata missing CTX_RELEASE_BASE_URL"
 platform_key="${platform//-/_}"
 pair_envelope_artifact="$(metadata_value_optional "${metadata_file}" "CTX_RELEASE_MANAGED_PAIR_ENVELOPE_${platform_key}")"
+pair_core_object_key="$(metadata_value_optional "${metadata_file}" "CTX_RELEASE_MANAGED_PAIR_CORE_OBJECT_${platform_key}")"
+pair_core_checksum="$(metadata_value_optional "${metadata_file}" "CTX_RELEASE_MANAGED_PAIR_CORE_SHA256_${platform_key}")"
+pair_companion_object_key="$(metadata_value_optional "${metadata_file}" "CTX_RELEASE_MANAGED_PAIR_COMPANION_OBJECT_${platform_key}")"
+pair_companion_checksum="$(metadata_value_optional "${metadata_file}" "CTX_RELEASE_MANAGED_PAIR_COMPANION_SHA256_${platform_key}")"
 metadata_trust="explicit-unsigned"
 artifact="$(metadata_value_optional "${metadata_file}" "CTX_RELEASE_ARTIFACT_${platform_key}")"
 checksum="$(metadata_value_optional "${metadata_file}" "CTX_RELEASE_SHA256_${platform_key}")"
@@ -713,6 +728,8 @@ fi
 [[ "${schema_version}" == "1" ]] || fail "unsupported metadata schema: ${schema_version}"
 [[ "${base_url}" == https://* ]] || fail "metadata base URL must be HTTPS"
 if [[ -z "${pair_envelope_artifact}" ]]; then
+  [[ -z "${pair_core_object_key}${pair_core_checksum}${pair_companion_object_key}${pair_companion_checksum}" ]] || \
+    fail "managed-pair component metadata is present without an envelope"
   [[ -n "${artifact}" ]] || fail "metadata missing artifact for ${platform}"
   [[ "${checksum}" =~ ^[0-9a-fA-F]{64}$ ]] || fail "checksum for ${platform} is not a SHA-256 hex digest"
   [[ "${checksum}" != "0000000000000000000000000000000000000000000000000000000000000000" ]] || fail "checksum for ${platform} is a placeholder"
@@ -720,7 +737,11 @@ if [[ -z "${pair_envelope_artifact}" ]]; then
 else
   metadata_trust="signed-managed-pair-v1"
   validate_safe_value "managed-pair envelope name" "${pair_envelope_artifact}"
-  command -v python3 >/dev/null 2>&1 || fail "python3 is required to verify signed managed-pair metadata"
+  validate_managed_object_key "managed-pair Core" "${pair_core_object_key}" "${pair_core_checksum}"
+  validate_managed_object_key "managed-pair companion" "${pair_companion_object_key}" "${pair_companion_checksum}"
+  [[ -n "${checksum}" ]] || fail "metadata missing checksum for ${platform}"
+  [[ "$(lowercase "${pair_core_checksum}")" == "$(lowercase "${checksum}")" ]] || \
+    fail "managed-pair Core checksum differs from release metadata"
 fi
 if [[ -n "${runtime_artifact}" || -n "${runtime_checksum}" ]]; then
   [[ -n "${runtime_artifact}" ]] || fail "metadata missing ONNX Runtime artifact for ${platform}"
@@ -735,13 +756,7 @@ artifact_url=""
 download_path=""
 companion_download_path=""
 pair_envelope_path=""
-pair_plan=""
-pair_target=""
 install_name="ctx"
-case "${platform}" in
-  linux-aarch64) pair_target="linux-arm64" ;;
-  *) pair_target="${platform}" ;;
-esac
 case "${artifact:-}" in
   *.exe)
     install_name="ctx.exe"
@@ -753,16 +768,11 @@ if [[ -n "${pair_envelope_artifact}" ]]; then
   [[ "$(basename "${bin_dir%/}")" == "bin" ]] || \
     fail "signed managed-pair installation requires --bin-dir to name <install-root>/bin"
   pair_envelope_path="${tmp_dir}/${pair_envelope_artifact}"
-  pair_plan="${tmp_dir}/managed-pair-plan.json"
   fetch_artifact "${base_url%/}/${pair_envelope_artifact}" "${pair_envelope_artifact}" "${pair_envelope_path}"
-  python3 -I "${script_dir}/install-managed-pair.py" inspect \
-    --envelope "${pair_envelope_path}" --target "${pair_target}" --output "${pair_plan}"
-  artifact="$(json_value "${pair_plan}" core.artifact_name)"
-  checksum="$(json_value "${pair_plan}" core.sha256)"
-  core_object_key="$(json_value "${pair_plan}" core.object_key)"
-  companion_artifact="$(json_value "${pair_plan}" companion.artifact_name)"
-  companion_object_key="$(json_value "${pair_plan}" companion.object_key)"
-  artifact_url="${base_url%/}/${core_object_key}"
+  artifact="${pair_core_object_key##*/}"
+  checksum="${pair_core_checksum}"
+  companion_artifact="${pair_companion_object_key##*/}"
+  artifact_url="${base_url%/}/${pair_core_object_key}"
   download_path="${tmp_dir}/${artifact}"
   companion_download_path="${tmp_dir}/${companion_artifact}"
 fi
@@ -862,15 +872,37 @@ if ((dry_run)); then
 fi
 
 if [[ -n "${pair_envelope_artifact}" ]]; then
-  fetch_managed_object "${core_object_key}" "${download_path}"
-  fetch_managed_object "${companion_object_key}" "${companion_download_path}"
-  python3 -I "${script_dir}/install-managed-pair.py" install \
-    --envelope "${pair_envelope_path}" \
-    --core "${download_path}" \
-    --companion "${companion_download_path}" \
-    --install-root "${install_root}" \
-    --target "${pair_target}" >/dev/null
-  actual_checksum="$(sha256_file "${install_path}")"
+  fetch_managed_object "${pair_core_object_key}" "${download_path}"
+  fetch_managed_object "${pair_companion_object_key}" "${companion_download_path}"
+  actual_checksum="$(sha256_file "${download_path}")"
+  actual_companion_checksum="$(sha256_file "${companion_download_path}")"
+  [[ "$(lowercase "${actual_checksum}")" == "$(lowercase "${pair_core_checksum}")" ]] || \
+    fail "checksum mismatch for ${artifact}: expected ${pair_core_checksum}, got ${actual_checksum}"
+  [[ "$(lowercase "${actual_companion_checksum}")" == "$(lowercase "${pair_companion_checksum}")" ]] || \
+    fail "checksum mismatch for ${companion_artifact}: expected ${pair_companion_checksum}, got ${actual_companion_checksum}"
+  chmod 0700 "${download_path}"
+  pair_marker_path="${tmp_dir}/ctx.install.json"
+  staging_dogfood=false
+  if [[ "${channel}" == "staging" ]]; then
+    staging_dogfood=true
+  fi
+  write_install_marker "${pair_marker_path}" "ctx-hosted-installer" \
+    "${metadata_trust}" "${staging_dogfood}" true
+  mkdir -p "${install_root}" "${bin_dir}"
+  pair_receipt="${tmp_dir}/managed-pair-apply.json"
+  pair_stderr="${tmp_dir}/managed-pair-apply.err"
+  if ! "${download_path}" --ctx-core-managed-pair-apply-v1 \
+    "${install_root}" - "${pair_envelope_path}" "${download_path}" \
+    "${companion_download_path}" "${pair_marker_path}" \
+    >"${pair_receipt}" 2>"${pair_stderr}"; then
+    cat "${pair_stderr}" >&2
+    fail "candidate Core could not apply the signed managed pair"
+  fi
+  if [[ -s "${pair_stderr}" ]] || ! printf '%s\n' \
+    '{"schema_version":1,"command":"managed_pair_apply","ok":true,"status":"committed"}' \
+    | cmp -s - "${pair_receipt}"; then
+    fail "candidate Core returned an invalid managed-pair apply receipt"
+  fi
 else
   artifact_url="${base_url%/}/${artifact}"
   download_path="${tmp_dir}/${artifact}"
@@ -881,9 +913,9 @@ else
   fi
   mkdir -p "${bin_dir}"
   install -m 0755 "${download_path}" "${install_path}"
+  write_install_marker "${install_path}.install.json" \
+    "ctx-explicit-metadata-installer" "${metadata_trust}" false false
 fi
-
-write_install_marker "${install_path}.install.json" "${metadata_source}" "${source_commit}" "${published_at}"
 
 if ((install_runtime)) && [[ -n "${runtime_artifact}" ]]; then
   install_runtime_asset "${runtime_artifact}" "${runtime_checksum}" "${runtime_version}"

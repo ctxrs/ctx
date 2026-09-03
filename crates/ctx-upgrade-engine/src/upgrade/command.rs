@@ -15,24 +15,33 @@ use ctx_history_platform::platform_security::{
 use super::download::DownloadedArtifact;
 use super::install::managed_install_marker_for_current_exe;
 use super::install::{
-    absent_install_marker_error, apply_artifact, capture_install_snapshot,
-    classify_repair_requirements, current_exe_is_unmanaged, current_install_path, pending_recovery,
-    recover_interrupted_install, remove_terminal_recovery, ApplyResult, InstallRecovery,
-    ManagedInstallMarker, PendingRecovery, TerminalRecovery,
+    absent_install_marker_error, capture_install_snapshot, classify_repair_requirements,
+    current_exe_is_unmanaged, current_install_path, pending_recovery, recover_interrupted_install,
+    remove_terminal_recovery, ApplyResult, InstallRecovery, ManagedInstallMarker, PendingRecovery,
+    TerminalRecovery,
 };
 #[cfg(unix)]
 use super::install::{
     reexec_current_format_recovery, CurrentFormatRecoveryReexec, RECOVERY_REEXEC_ENV,
 };
+use super::managed_pair::{
+    apply_prepared_install, download_core_artifact, inspect_plan_under_installation_lock,
+    recover_foreground_before_generic, resume_or_confirm_pending_under_installation_lock,
+    ForegroundManagedPairRecovery, ManagedPairMode, PreparedCoreArtifact,
+};
+#[cfg(windows)]
+use super::managed_pair::{run_windows_helper, schedule_existing_windows_helper};
 use super::metadata::{
-    metadata_signature_url, metadata_url, parse_release_metadata, validate_artifact_url,
-    verify_metadata_signature,
+    metadata_signature_url, metadata_url, parse_release_metadata, project_managed_pair_release,
+    validate_artifact_url, verify_metadata_signature,
 };
 use super::state::{
     automatic_recovery_channel_locked, begin_automatic_attempt_locked, begin_manual_attempt_locked,
-    begin_recovery_attempt_locked, reconcile_replacement_terminal_locked,
-    try_acquire_automatic_upgrade, write_state_checked_locked, write_state_error_locked,
-    write_state_phase_locked, AutomaticUpgradeLease, UpgradeAttempt, UpgradeLock,
+    begin_recovery_attempt_locked, managed_pair_recovery_hint, managed_pair_recovery_locked,
+    reconcile_replacement_terminal_locked, try_acquire_automatic_upgrade,
+    try_acquire_managed_pair_recovery_lock, write_state_checked_locked, write_state_error_locked,
+    write_state_phase_locked, AutomaticUpgradeLease, ManagedPairRecovery, UpgradeAttempt,
+    UpgradeLock,
 };
 use super::{
     automatic_upgrade_check_due, env_flag, platform_key, version_gt, AutomaticUpgradeObservation,
@@ -49,12 +58,11 @@ use daemon::{finish_automatic_upgrade, prepare_automatic_upgrade};
 
 const RELEASE_METADATA_MAX_BYTES: usize = 1024 * 1024;
 const RELEASE_METADATA_SIGNATURE_MAX_BYTES: usize = 64 * 1024;
-const RELEASE_ARTIFACT_MAX_BYTES: usize = 128 * 1024 * 1024;
 const RELEASE_ONNXRUNTIME_ARTIFACT_MAX_BYTES: usize = 1024 * 1024 * 1024;
 const SEMANTIC_MODEL_ARCHIVE_MAX_BYTES: u64 = 768 * 1024 * 1024;
 const SEMANTIC_CPU_ARCHIVE_MAX_BYTES: u64 = 256 * 1024 * 1024;
 const SEMANTIC_ACCELERATOR_ARCHIVE_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
-const RELEASE_ARTIFACT_TIMEOUT: Duration = Duration::from_secs(20 * 60);
+pub(super) const RELEASE_ARTIFACT_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 const CURRENT_FORMAT_ROLLBACK_DETAIL: &str =
     "schema-2 interrupted ctx installation was rolled back to its identity-validated current-format executable; recovery must fix forward";
 
@@ -166,6 +174,9 @@ impl<D: DaemonUpgradePort + ?Sized> UpgradeEngine<'_, D> {
         attempt_id: &str,
         parent_pid: u32,
     ) -> Result<()> {
+        if run_windows_helper(self.daemon, install_path, attempt_id, parent_pid)?.is_some() {
+            return Ok(());
+        }
         match super::install::run_replacement_helper(
             self.semantic_layout,
             self.daemon,
@@ -281,6 +292,7 @@ fn check_upgrade<D: DaemonUpgradePort + ?Sized>(
     channel_override: Option<&str>,
     command: &'static str,
 ) -> Result<UpgradeOutcome> {
+    let _ = recover_foreground_before_generic(engine, true)?;
     if let Some(recovery) = pending_recovery(data_root, engine.semantic_layout)? {
         if let Some(terminal) = recovery.terminal.as_ref() {
             let lock = UpgradeLock::acquire_terminal_recovery(&recovery, engine.semantic_layout)?;
@@ -421,6 +433,25 @@ fn apply_upgrade<D: DaemonUpgradePort + ?Sized>(
     channel_override: Option<&str>,
     dry_run: bool,
 ) -> Result<UpgradeOutcome> {
+    match recover_foreground_before_generic(engine, false)? {
+        ForegroundManagedPairRecovery::None | ForegroundManagedPairRecovery::Recovered => {}
+        #[cfg(windows)]
+        ForegroundManagedPairRecovery::Scheduled {
+            attempt_id,
+            helper_pid: _,
+        } => {
+            return Ok(UpgradeOutcome {
+                command: "upgrade",
+                status: "scheduled",
+                message: "rescheduled interrupted signed managed Core/companion replacement; it will finish after this process exits".to_owned(),
+                plan: None,
+                applied: false,
+                dry_run: false,
+                warnings: Vec::new(),
+                attempt_id: Some(attempt_id),
+            });
+        }
+    }
     if let Some(recovery) = pending_recovery(data_root, engine.semantic_layout)? {
         if let Some(terminal) = recovery.terminal.as_ref() {
             let lock = UpgradeLock::acquire_terminal_recovery(&recovery, engine.semantic_layout)?;
@@ -546,13 +577,15 @@ fn apply_upgrade<D: DaemonUpgradePort + ?Sized>(
     let attempt = begin_manual_attempt_locked(data_root, &upgrade_lock, "manual_apply")?;
     let result = (|| -> Result<UpgradeOutcome> {
         let plan = build_upgrade_plan(engine, policy, channel_override, true)?;
+        let pair_mode = inspect_plan_under_installation_lock(&plan, upgrade_lock.installation())?;
         let repairs = classify_repair_requirements(
             engine.semantic_layout,
             &plan,
             data_root,
             policy.semantic_enabled,
         )?;
-        if !plan.update_available && !repairs.any() {
+        let pair_apply_required = pair_mode.pair_apply_required(&plan);
+        if !plan.update_available && !pair_apply_required && !repairs.any() {
             write_state_checked_locked(
                 data_root,
                 &upgrade_lock,
@@ -597,6 +630,11 @@ fn apply_upgrade<D: DaemonUpgradePort + ?Sized>(
                         "ctx {} would upgrade to {}.",
                         plan.current_version, plan.latest_version
                     )
+                } else if pair_apply_required {
+                    format!(
+                        "ctx {} would repair its signed managed Core/companion installation.",
+                        plan.current_version
+                    )
                 } else if repairs.legacy_runtime {
                     format!(
                         "ctx {} would repair its signed legacy ONNX Runtime installation.",
@@ -615,21 +653,8 @@ fn apply_upgrade<D: DaemonUpgradePort + ?Sized>(
                 attempt_id: Some(attempt.id().to_owned()),
             });
         }
-        let mut artifact = if plan.update_available {
-            Some(
-                DownloadedArtifact::download_verified(
-                    engine.transport,
-                    data_root,
-                    &plan.artifact_url,
-                    &plan.artifact_sha256,
-                    RELEASE_ARTIFACT_MAX_BYTES as u64,
-                    RELEASE_ARTIFACT_TIMEOUT,
-                )
-                .with_context(|| format!("download {}", plan.artifact_url))?,
-            )
-        } else {
-            None
-        };
+        let mut core_artifact =
+            download_core_artifact(engine.transport, data_root, &plan, &pair_mode)?;
         // Supplementary runtime metadata is optional for Core-only releases.
         // Preserve or repair the legacy runtime only when signed metadata
         // actually carries that runtime contract.
@@ -682,16 +707,18 @@ fn apply_upgrade<D: DaemonUpgradePort + ?Sized>(
         let daemon_handoff = engine.daemon.begin(data_root, attempt.id())?;
         let daemon_restart = daemon_handoff.replacement_restart();
         let mut before_publish = || Ok(());
-        let apply_result = match apply_artifact(
+        let apply_result = match apply_prepared_install(
             engine.process,
             engine.semantic_layout,
-            upgrade_lock.installation(),
+            &upgrade_lock,
             &plan,
-            artifact.as_mut(),
+            &pair_mode,
+            &mut core_artifact,
             runtime_artifact.as_mut(),
             &mut semantic_artifacts,
             data_root,
-            attempt.id(),
+            &attempt,
+            policy.interval,
             daemon_restart.map(|restart| (restart.trigger, restart.loop_interval_seconds)),
             &mut before_publish,
         ) {
@@ -729,6 +756,9 @@ fn apply_upgrade<D: DaemonUpgradePort + ?Sized>(
                     plan.latest_version,
                     plan.install_path.display()
                 )
+            } else if pair_apply_required {
+                "scheduled signed managed Core/companion repair; replacement will finish after this process exits"
+                    .to_owned()
             } else if repairs.legacy_runtime {
                 "scheduled signed legacy ONNX Runtime repair; replacement will finish after this process exits"
                     .to_owned()
@@ -773,6 +803,11 @@ fn apply_upgrade<D: DaemonUpgradePort + ?Sized>(
                 plan.current_version,
                 plan.latest_version,
                 plan.install_path.display()
+            )
+        } else if pair_apply_required {
+            format!(
+                "repaired signed managed Core/companion installation for ctx {}",
+                plan.current_version
             )
         } else if repairs.legacy_runtime {
             format!(
@@ -876,6 +911,8 @@ fn build_upgrade_plan<D: DaemonUpgradePort + ?Sized>(
         metadata.artifact
     );
     validate_artifact_url(&metadata.base_url, &metadata.artifact)?;
+    let managed_pair_release =
+        project_managed_pair_release(&metadata.base_url, metadata.managed_pair.as_ref())?;
     if let Some(runtime) = &metadata.onnxruntime {
         validate_artifact_url(&metadata.base_url, &runtime.artifact)?;
     }
@@ -908,6 +945,7 @@ fn build_upgrade_plan<D: DaemonUpgradePort + ?Sized>(
         update_available,
         managed,
         warnings,
+        managed_pair_release,
         metadata,
         semantic_provisioning,
     })
