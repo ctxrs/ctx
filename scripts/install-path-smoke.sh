@@ -223,6 +223,8 @@ grep -F '"manager": "ctx-hosted-installer"' \
   "${pair_install_root}/bin/ctx.install.json" >/dev/null
 grep -F '"staging_dogfood": true' \
   "${pair_install_root}/bin/ctx.install.json" >/dev/null
+grep -F '"managed_pair": true' \
+  "${pair_install_root}/bin/ctx.install.json" >/dev/null
 if CTX_FAKE_MANAGED_PAIR_EXTRA_OUTPUT=1 \
   HOME="${tmp_dir}/pair-home" PATH="/usr/bin:/bin" \
   bash "${repo_root}/scripts/dev-install-from-metadata.sh" \
@@ -341,6 +343,7 @@ runtime_install_path="${runtime_dir}/onnxruntime/1.27.0/linux-x64"
 test -f "${runtime_install_path}/lib/libonnxruntime.so"
 grep -Fx '1.27.0' "${runtime_install_path}/VERSION_NUMBER" >/dev/null
 grep -F '"manager": "ctx-explicit-metadata-installer"' "${runtime_bin}/ctx.install.json" >/dev/null
+! grep -Fq '"managed_pair"' "${runtime_bin}/ctx.install.json"
 grep -F '"metadata_trust": "explicit-unsigned"' "${runtime_install_path}/ctx-runtime-install.json" >/dev/null
 
 expect_runtime_rejected() {

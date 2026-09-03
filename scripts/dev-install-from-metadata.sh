@@ -437,8 +437,13 @@ write_install_marker() {
   local manager="$2"
   local metadata_trust="$3"
   local staging_dogfood="$4"
+  local managed_pair="${5:-false}"
+  local managed_pair_field=""
   local installed_at
   installed_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  if [[ "${managed_pair}" == true ]]; then
+    managed_pair_field='  "managed_pair": true,'
+  fi
 
   cat > "${marker_path}.$$" <<EOF
 {
@@ -451,6 +456,7 @@ write_install_marker() {
   "version": "$(json_escape "${version}")",
   "sha256": "$(json_escape "${actual_checksum}")",
   "staging_dogfood": ${staging_dogfood},
+${managed_pair_field}
   "metadata_url": "$(json_escape "${metadata_source}")",
   "artifact_url": "$(json_escape "${artifact_url}")",
   "source_commit": "$(json_escape "${source_commit}")",
@@ -881,7 +887,7 @@ if [[ -n "${pair_envelope_artifact}" ]]; then
     staging_dogfood=true
   fi
   write_install_marker "${pair_marker_path}" "ctx-hosted-installer" \
-    "${metadata_trust}" "${staging_dogfood}"
+    "${metadata_trust}" "${staging_dogfood}" true
   mkdir -p "${install_root}" "${bin_dir}"
   pair_receipt="${tmp_dir}/managed-pair-apply.json"
   pair_stderr="${tmp_dir}/managed-pair-apply.err"
@@ -908,7 +914,7 @@ else
   mkdir -p "${bin_dir}"
   install -m 0755 "${download_path}" "${install_path}"
   write_install_marker "${install_path}.install.json" \
-    "ctx-explicit-metadata-installer" "${metadata_trust}" false
+    "ctx-explicit-metadata-installer" "${metadata_trust}" false false
 fi
 
 if ((install_runtime)) && [[ -n "${runtime_artifact}" ]]; then

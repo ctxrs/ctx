@@ -172,6 +172,7 @@ if ($pairMode) {
     $marker = [ordered]@{
         schema_version = 1
         manager = "ctx-hosted-installer"
+        managed_pair = $true
         install_attempt_id = "ia_native_smoke_$PID"
         install_path = $installedBinary
         platform = "windows-x64"

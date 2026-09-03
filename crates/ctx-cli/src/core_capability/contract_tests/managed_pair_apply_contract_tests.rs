@@ -50,6 +50,7 @@ fn marker_bytes(install_root: &std::path::Path, core: &[u8]) -> Vec<u8> {
     serde_json::to_vec(&json!({
         "schema_version": 1,
         "manager": "ctx-hosted-installer",
+        "managed_pair": true,
         "install_path": managed_core_destination(install_root),
         "platform": marker_platform(),
         "channel": "stable",
@@ -246,6 +247,20 @@ fn marker_binds_the_destination_channel_platform_digest_and_candidate_version() 
         marker_channel(&read_install_marker(&fixture.marker).unwrap()).unwrap(),
         ctx_companion_bridge::ReleaseChannel::Staging
     );
+}
+
+#[test]
+fn apply_marker_requires_managed_pair_provenance() {
+    let fixture = ArgFixture::new();
+    let mut marker: Value =
+        serde_json::from_slice(&marker_bytes(&fixture.install, b"candidate-core")).unwrap();
+    marker.as_object_mut().unwrap().remove("managed_pair");
+    fs::write(&fixture.marker, serde_json::to_vec(&marker).unwrap()).unwrap();
+    assert!(read_install_marker(&fixture.marker).is_err());
+
+    marker["managed_pair"] = Value::Bool(false);
+    fs::write(&fixture.marker, serde_json::to_vec(&marker).unwrap()).unwrap();
+    assert!(read_install_marker(&fixture.marker).is_err());
 }
 
 #[test]

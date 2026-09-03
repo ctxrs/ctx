@@ -715,6 +715,9 @@ try {
         published_at = $publishedAt
         installed_at = ([DateTime]::UtcNow.ToString("o"))
     }
+    if (-not [string]::IsNullOrWhiteSpace($pairEnvelopeArtifact)) {
+        $marker["managed_pair"] = $true
+    }
     $markerJson = $marker | ConvertTo-Json -Depth 4
     $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
     [System.IO.File]::WriteAllText(

@@ -203,7 +203,7 @@ if [ "${pair_mode}" = true ]; then
   binary_sha256="$(sha256_file "${binary}")"
   mkdir -p "${candidate_dir}"
   cat > "${marker_source}" <<EOF
-{"schema_version":1,"manager":"ctx-hosted-installer","install_attempt_id":"ia_native_smoke_$$","install_path":"$(json_escape "${candidate_dir}/ctx")","platform":"${pair_platform}","channel":"${pair_channel}","version":"$(json_escape "${expected_version}")","sha256":"${binary_sha256}","staging_dogfood":${staging_dogfood},"metadata_url":"native-candidate-smoke","artifact_url":"native-candidate-smoke","installed_at":"1970-01-01T00:00:00Z"}
+{"schema_version":1,"manager":"ctx-hosted-installer","managed_pair":true,"install_attempt_id":"ia_native_smoke_$$","install_path":"$(json_escape "${candidate_dir}/ctx")","platform":"${pair_platform}","channel":"${pair_channel}","version":"$(json_escape "${expected_version}")","sha256":"${binary_sha256}","staging_dogfood":${staging_dogfood},"metadata_url":"native-candidate-smoke","artifact_url":"native-candidate-smoke","installed_at":"1970-01-01T00:00:00Z"}
 EOF
 else
   candidate_binary="${candidate_dir}/${binary##*/}"

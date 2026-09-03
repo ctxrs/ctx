@@ -144,6 +144,7 @@ pub(super) fn read_install_marker(path: &Path) -> Result<InstallMarker> {
         serde_json::from_slice(&bytes).context("parse managed Core install marker")?;
     if value.get("schema_version").and_then(Value::as_u64) != Some(1)
         || value.get("manager").and_then(Value::as_str) != Some("ctx-hosted-installer")
+        || value.get("managed_pair").and_then(Value::as_bool) != Some(true)
     {
         bail!("managed Core install marker schema is invalid");
     }
