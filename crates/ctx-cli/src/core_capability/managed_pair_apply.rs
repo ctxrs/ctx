@@ -243,7 +243,7 @@ fn read_bounded_regular_file(path: &Path, maximum: u64, label: &str) -> Result<V
     fs::read(path).with_context(|| format!("read {label}"))
 }
 
-fn normalized_absolute_path(value: &OsStr, label: &str) -> Result<PathBuf> {
+pub(super) fn normalized_absolute_path(value: &OsStr, label: &str) -> Result<PathBuf> {
     if value.as_encoded_bytes().len() > MAX_PATH_BYTES || value.as_encoded_bytes().contains(&0) {
         bail!("managed-pair {label} path exceeds its bound");
     }
@@ -263,7 +263,7 @@ fn normalized_absolute_path(value: &OsStr, label: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn require_directory(path: &Path, label: &str) -> Result<()> {
+pub(super) fn require_directory(path: &Path, label: &str) -> Result<()> {
     let metadata = fs::symlink_metadata(path).with_context(|| format!("inspect {label}"))?;
     if !metadata.is_dir() || metadata.file_type().is_symlink() {
         bail!("managed-pair {label} must be a directory");
@@ -271,7 +271,7 @@ fn require_directory(path: &Path, label: &str) -> Result<()> {
     Ok(())
 }
 
-fn require_regular_file(path: &Path, label: &str) -> Result<()> {
+pub(super) fn require_regular_file(path: &Path, label: &str) -> Result<()> {
     let metadata = fs::symlink_metadata(path).with_context(|| format!("inspect {label}"))?;
     if !metadata.is_file() || metadata.file_type().is_symlink() {
         bail!("managed-pair {label} must be a regular file");

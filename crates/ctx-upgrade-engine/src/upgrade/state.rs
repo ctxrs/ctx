@@ -520,10 +520,7 @@ pub(super) fn write_state_checked_locked(
     {
         return Err(anyhow!("injected upgrade state write failure"));
     }
-    if crate::upgrade::test_harness_enabled()
-        && status == "applied"
-        && super::env_flag("CTX_UPGRADE_FAIL_APPLIED_STATE_WRITE_FOR_TESTS")
-    {
+    if status == "applied" && applied_state_write_failure_injected(attempt.id()) {
         return Err(anyhow!("injected applied-state write failure"));
     }
     let mut state = read_state_object(&lock.install_path);
@@ -566,6 +563,9 @@ pub(super) fn reconcile_replacement_terminal_locked(
     warning_or_error: Option<&str>,
     interval: Duration,
 ) -> Result<bool> {
+    if applied && applied_state_write_failure_injected(attempt_id) {
+        return Err(anyhow!("injected applied-state write failure"));
+    }
     let mut state = read_state_object(&lock.install_path);
     let automatic = state.attempt_id.as_deref() == Some(attempt_id)
         && state
@@ -583,6 +583,12 @@ pub(super) fn reconcile_replacement_terminal_locked(
     };
     if applied {
         state.terminal(&attempt, "applied", interval, now_unix_s());
+        if let Some(latest) = state.plan.get("latest_version").cloned() {
+            state.plan.insert("current_version".to_owned(), latest);
+        }
+        state
+            .plan
+            .insert("update_available".to_owned(), Value::Bool(false));
         if let Some(warning) = warning_or_error {
             state.plan.insert("warning".to_owned(), json!(warning));
         }
@@ -595,6 +601,16 @@ pub(super) fn reconcile_replacement_terminal_locked(
     }
     write_state_object_locked(lock, state)?;
     Ok(automatic)
+}
+
+fn applied_state_write_failure_injected(attempt_id: &str) -> bool {
+    crate::upgrade::test_harness_enabled()
+        && std::env::var("CTX_UPGRADE_FAIL_APPLIED_STATE_WRITE_FOR_TESTS").is_ok_and(|value| {
+            value == attempt_id
+                || (!value.starts_with("ua_")
+                    && !["", "0", "false", "no", "off"]
+                        .contains(&value.trim().to_ascii_lowercase().as_str()))
+        })
 }
 
 fn write_plan(state: &mut UpgradeState, plan: &UpgradePlan, applied: bool) {

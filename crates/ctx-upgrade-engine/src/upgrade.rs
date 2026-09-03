@@ -26,6 +26,8 @@ pub use command::{PreparedAutomaticUpgrade, UpgradeOutcome};
 pub use diagnostics::{
     managed_install_executable, upgrade_diagnostics, ManagedInstallDiagnostic, UpgradeDiagnostics,
 };
+#[cfg(unix)]
+pub use install::reconcile_managed_pair_integration_under_installation_lock;
 pub use install::{
     current_exe_has_managed_install_marker_hint, current_exe_is_unmanaged, current_install_path,
     disable_current_man_pages, ensure_hosted_transaction_inactive_under_installation_lock,

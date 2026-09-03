@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 
 mod filesystem;
 mod fix_forward;
+#[cfg(unix)]
+mod reconciliation;
 
 pub use fix_forward::{
     apply_or_resume_managed_pair_under_installation_lock,
@@ -18,6 +20,11 @@ pub use fix_forward::{
     resume_pending_managed_pair_under_installation_lock,
     stage_managed_pair_under_installation_lock, ManagedPairApplyInput, ManagedPairApplyOutcome,
     ManagedPairInstallationStatus, ManagedPairStageOutcome,
+};
+#[cfg(unix)]
+pub use reconciliation::{
+    publish_managed_pair_integration_generation_under_installation_lock,
+    remove_managed_pair_integration_binding_under_installation_lock,
 };
 
 pub const MANAGED_PAIR_ENVELOPE_RELATIVE_PATH: &str = "share/ctx/managed-pair-envelope.json";
@@ -38,6 +45,8 @@ const MAX_COMPONENT_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_ENVELOPE_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_MARKER_BYTES: u64 = 64 * 1024;
 const MAX_STATE_BYTES: u64 = 64 * 1024;
+#[cfg(unix)]
+const MAX_INTEGRATION_BYTES: u64 = 1024 * 1024;
 
 /// The fixed release target returned by a trusted signed-envelope verifier.
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -288,6 +297,8 @@ fn max_bytes(slot: filesystem::Slot) -> u64 {
     match slot {
         filesystem::Slot::Core | filesystem::Slot::Companion => MAX_COMPONENT_BYTES,
         filesystem::Slot::Marker => MAX_MARKER_BYTES,
+        #[cfg(unix)]
+        filesystem::Slot::Integration => MAX_INTEGRATION_BYTES,
         filesystem::Slot::Envelope => MAX_ENVELOPE_BYTES,
         filesystem::Slot::State => MAX_STATE_BYTES,
     }

@@ -23,6 +23,8 @@ pub(super) enum Slot {
     Marker,
     Envelope,
     State,
+    #[cfg(unix)]
+    Integration,
 }
 
 impl Slot {
@@ -41,6 +43,8 @@ impl Slot {
             Self::Marker => "managed Core install marker",
             Self::Envelope => "managed-pair signed envelope",
             Self::State => "managed-pair state marker",
+            #[cfg(unix)]
+            Self::Integration => "managed integration ownership",
         }
     }
 
@@ -53,6 +57,8 @@ impl Slot {
             Self::Marker => MANAGED_CORE_INSTALL_MARKER_RELATIVE_PATH,
             Self::Envelope => MANAGED_PAIR_ENVELOPE_RELATIVE_PATH,
             Self::State => MANAGED_PAIR_STATE_RELATIVE_PATH,
+            #[cfg(unix)]
+            Self::Integration => "bin/ctx.install-integrations",
         }
     }
 }
@@ -84,7 +90,7 @@ impl Entry {
         })
     }
 
-    fn sibling(&self, name: OsString) -> Self {
+    pub(super) fn sibling(&self, name: OsString) -> Self {
         Self {
             path: self.path.with_file_name(&name),
             name,
@@ -191,6 +197,8 @@ impl Layout {
     pub(super) fn target(&self, slot: Slot) -> Entry {
         let directory = match slot {
             Slot::Core | Slot::Marker => Arc::clone(&self.bin_directory),
+            #[cfg(unix)]
+            Slot::Integration => Arc::clone(&self.bin_directory),
             Slot::Companion => Arc::clone(&self.libexec_directory),
             Slot::Envelope | Slot::State => Arc::clone(&self.ctx_directory),
         };
@@ -570,6 +578,14 @@ pub(super) fn protect_regular(entry: &Entry, executable: bool, label: &str) -> R
 
 pub(super) fn stamp_optional(entry: &Entry, max: u64, label: &str) -> Result<Option<FileStamp>> {
     stamp_optional_impl(entry, max, label, false)
+}
+
+pub(super) fn stamp_temporary_optional(
+    entry: &Entry,
+    max: u64,
+    label: &str,
+) -> Result<Option<FileStamp>> {
+    stamp_optional_impl(entry, max, label, true)
 }
 
 fn stamp_optional_impl(

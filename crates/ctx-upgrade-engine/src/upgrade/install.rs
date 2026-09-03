@@ -38,6 +38,8 @@ pub(in crate::upgrade) use marker::classify_install_marker_at;
 pub(in crate::upgrade) use marker::install_marker_path;
 pub(in crate::upgrade) use marker::installation_is_unmanaged_at;
 pub use marker::is_valid_install_attempt_id;
+#[cfg(unix)]
+pub use marker::reconcile_managed_pair_integration_under_installation_lock;
 pub(super) use marker::InstallFingerprint;
 pub use marker::{
     current_exe_has_managed_install_marker_hint, current_exe_is_unmanaged, current_install_path,

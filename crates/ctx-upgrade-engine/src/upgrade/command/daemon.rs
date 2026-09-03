@@ -2,6 +2,9 @@
 
 use super::*;
 
+mod finalization;
+use finalization::{finalize_automatic_applied, finalize_automatic_recovery};
+
 /// Downloaded and verified automatic-upgrade inputs held under the one
 /// installation lease. The daemon keeps serving while these are staged, then
 /// drains its services before handing the value to
@@ -518,33 +521,22 @@ where
                             return Err(with_automatic_cleanup_errors(error, None, restart_error));
                         }
                     };
-                    reconcile_replacement_terminal_locked(
-                        &lock,
+                    return finalize_automatic_recovery(
+                        lock,
+                        &recovery.data_root,
+                        &recovery.install_path,
                         &recovery.attempt_id,
+                        recovery.interval,
                         applied,
                         (!applied).then_some(
                             "managed-pair recovery record disappeared before publication",
                         ),
-                        recovery.interval,
-                    )?;
-                    drop(lock);
-                    let resumed = handoff.resume_with(&recovery.install_path);
-                    send_daemon_upgrade_terminal(
+                        false,
+                        handoff,
                         observer,
-                        &recovery.data_root,
                         &current,
-                        None,
-                        &recovery.attempt_id,
-                        if applied {
-                            UpgradeTerminalStatus::Applied
-                        } else {
-                            UpgradeTerminalStatus::Failed
-                        },
-                        applied,
-                        (!applied).then_some(UpgradeFailureKind::ApplyFailed),
-                        started.elapsed(),
+                        started,
                     );
-                    return resumed;
                 }
             }
             PreparedAutomaticUpgradeKind::Recover {
@@ -634,48 +626,20 @@ where
                         &recovery.install_path,
                         anyhow!("interrupted ctx installation recovery disappeared while owned"),
                     ),
-                    InstallRecovery::Recovered { committed } => {
-                        let detail = (!committed).then_some(CURRENT_FORMAT_ROLLBACK_DETAIL);
-                        let automatic = match reconcile_replacement_terminal_locked(
-                            &lock,
-                            &recovery.attempt_id,
-                            committed,
-                            detail,
-                            interval,
-                        ) {
-                            Ok(automatic) => automatic,
-                            Err(error) => {
-                                return fail_automatic_before_apply(
-                                    &recovery.data_root,
-                                    lock,
-                                    attempt,
-                                    handoff,
-                                    &recovery.install_path,
-                                    error,
-                                );
-                            }
-                        };
-                        drop(lock);
-                        let resumed = handoff.resume_with(&recovery.install_path);
-                        if automatic {
-                            send_daemon_upgrade_terminal(
-                                observer,
-                                &recovery.data_root,
-                                &current,
-                                None,
-                                &recovery.attempt_id,
-                                if committed {
-                                    UpgradeTerminalStatus::Applied
-                                } else {
-                                    UpgradeTerminalStatus::Failed
-                                },
-                                committed,
-                                (!committed).then_some(UpgradeFailureKind::ApplyFailed),
-                                started.elapsed(),
-                            );
-                        }
-                        resumed
-                    }
+                    InstallRecovery::Recovered { committed } => finalize_automatic_recovery(
+                        lock,
+                        &recovery.data_root,
+                        &recovery.install_path,
+                        &recovery.attempt_id,
+                        interval,
+                        committed,
+                        (!committed).then_some(CURRENT_FORMAT_ROLLBACK_DETAIL),
+                        true,
+                        handoff,
+                        observer,
+                        &current,
+                        started,
+                    ),
                     #[cfg(windows)]
                     InstallRecovery::Scheduled { helper_pid, .. } => {
                         handoff.transfer_to_replacement_helper(helper_pid)
@@ -809,38 +773,18 @@ where
             handoff.transfer_to_replacement_helper(helper_pid)?;
             Ok(())
         }
-        Ok(result) => {
-            let mut warnings = plan.warnings.clone();
-            if let Some(warning) = result.cleanup_warning() {
-                warnings.push(warning.to_owned());
-            }
-            if let Err(error) =
-                write_state_checked_locked(&data_root, &lock, &attempt, &plan, "applied", interval)
-            {
-                return fail_automatic_before_apply(
-                    &data_root,
-                    lock,
-                    attempt,
-                    handoff,
-                    &plan.install_path,
-                    error,
-                );
-            }
-            drop(lock);
-            let restart = handoff.resume_with(&plan.install_path);
-            send_daemon_upgrade_terminal(
-                observer,
-                &data_root,
-                &current,
-                Some(&plan),
-                attempt.id(),
-                UpgradeTerminalStatus::Applied,
-                true,
-                None,
-                started.elapsed(),
-            );
-            restart
-        }
+        Ok(result) => finalize_automatic_applied(
+            &data_root,
+            interval,
+            started,
+            lock,
+            &attempt,
+            &plan,
+            &current,
+            observer,
+            handoff,
+            result.cleanup_warning(),
+        ),
         Err(error) => {
             let durable = matches!(
                 write_state_error_locked(
@@ -954,3 +898,6 @@ fn send_daemon_upgrade_terminal<S, O>(
         },
     );
 }
+
+#[cfg(test)]
+mod tests;
