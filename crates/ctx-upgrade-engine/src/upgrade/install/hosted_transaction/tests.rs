@@ -117,7 +117,7 @@ fn pair_fixture() -> PairFixture {
     fs::write(&state, state_body).unwrap();
     fs::write(
         install_marker_path(&install),
-        marker(&install, &sha256_hex(core_bytes)),
+        paired_marker(&install, &sha256_hex(core_bytes)),
     )
     .unwrap();
     PairFixture {
@@ -160,6 +160,15 @@ fn marker(install: &Path, digest: &str) -> String {
     }))
     .unwrap()
         + "\n"
+}
+
+fn paired_marker(install: &Path, digest: &str) -> String {
+    let mut value: Value = serde_json::from_str(&marker(install, digest)).unwrap();
+    value
+        .as_object_mut()
+        .unwrap()
+        .insert("managed_pair".to_owned(), Value::Bool(true));
+    serde_json::to_string_pretty(&value).unwrap() + "\n"
 }
 
 fn owned_install_journal(
@@ -814,6 +823,14 @@ fn core_only_hosted_install_refuses_managed_pair_material() {
     fs::remove_file(&fixture.state).unwrap();
     fs::remove_file(&fixture.envelope).unwrap();
     fs::remove_file(&fixture.companion).unwrap();
+    let error = reject_managed_pair_material_for_core_only_install(&fixture.install).unwrap_err();
+    assert!(format!("{error:#}").contains("cannot replace a managed Core+Pro pair"));
+
+    fs::write(
+        install_marker_path(&fixture.install),
+        marker(&fixture.install, &sha256_hex(b"paired ctx")),
+    )
+    .unwrap();
     reject_managed_pair_material_for_core_only_install(&fixture.install).unwrap();
 }
 

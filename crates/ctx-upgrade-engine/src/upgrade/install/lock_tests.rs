@@ -7,9 +7,9 @@ use std::{
 use anyhow::Result;
 use tempfile::tempdir;
 
-#[cfg(windows)]
-use super::lock::canonical_recovery_executable;
 use super::lock::{canonical_executable, installation_lock_path, InstallationLock};
+#[cfg(windows)]
+use super::lock::{canonical_recovery_executable, OwnerFileLock};
 
 const CHILD_TARGET_ENV: &str = "CTX_INSTALL_LOCK_CHILD_TARGET";
 
@@ -50,7 +50,11 @@ fn fresh_root_and_installed_executable_share_the_persistent_lock() -> Result<()>
 
     let root_lock =
         InstallationLock::try_acquire_at_root(fixture.path())?.expect("fresh root lock");
-    let lock_path = bin.join(".ctx.install.lock");
+    let lock_path = bin.join(if cfg!(windows) {
+        ".ctx.exe.install.lock"
+    } else {
+        ".ctx.install.lock"
+    });
     assert!(
         lock_path.is_file(),
         "fresh acquisition must persist the lock"
@@ -69,6 +73,28 @@ fn fresh_root_and_installed_executable_share_the_persistent_lock() -> Result<()>
     assert!(InstallationLock::try_acquire_at_root(fixture.path())?.is_none());
     drop(executable_lock);
     assert!(lock_path.is_file(), "the canonical lock is never unlinked");
+    Ok(())
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_candidate_contends_with_base_version_lock() -> Result<()> {
+    let fixture = tempdir()?;
+    let executable = executable_copy(fixture.path())?;
+    let base_lock_path = fixture.path().join("bin").join(".ctx.exe.install.lock");
+    let base_lock = OwnerFileLock::try_acquire(&base_lock_path)?.expect("base version lock");
+
+    assert_eq!(
+        installation_lock_path(&canonical_executable(&executable)?)?,
+        base_lock_path
+    );
+    assert!(
+        InstallationLock::try_acquire(&executable)?.is_none(),
+        "the candidate must contend with the base version Windows lock"
+    );
+
+    drop(base_lock);
+    assert!(InstallationLock::try_acquire(&executable)?.is_some());
     Ok(())
 }
 

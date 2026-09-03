@@ -263,6 +263,7 @@ fn one_pair_fixture_drives_download_marker_and_apply_without_legacy_core() -> Re
         &install::install_marker_bytes(&marker_path, &staging_plan, None)?,
     )?;
     assert_eq!(staging_marker["staging_dogfood"], true);
+    assert_eq!(staging_marker["managed_pair"], true);
     let transport = FixtureTransport {
         bytes: BTreeMap::from([
             ("pair-envelope".to_owned(), b"signed-envelope".to_vec()),

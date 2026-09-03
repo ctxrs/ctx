@@ -80,8 +80,8 @@ pub fn try_acquire_managed_installation_mutation(
 /// Tries to serialize fresh managed-install publication before Core exists.
 ///
 /// `install_root` must already contain a canonical, owner-safe `bin`
-/// directory. This acquires the same persistent `bin/.ctx.install.lock` used
-/// by executable-based upgrades; it does not create a bootstrap-only lock.
+/// directory. This acquires the same platform-specific persistent lock used by
+/// executable-based upgrades; it does not create a bootstrap-only lock.
 pub fn try_acquire_managed_installation_mutation_at_root(
     install_root: &Path,
 ) -> Result<Option<ManagedInstallationMutationGuard>> {

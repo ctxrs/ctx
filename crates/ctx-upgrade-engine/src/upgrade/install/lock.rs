@@ -8,11 +8,10 @@ use std::{
 use std::ffi::OsStr;
 
 use anyhow::{anyhow, bail, Context, Result};
+use ctx_managed_pair_engine::MANAGED_PAIR_INSTALLATION_LOCK_RELATIVE_PATH;
 
 #[cfg(windows)]
 use super::path_identity::windows_disk_path_identity;
-
-const INSTALLATION_LOCK_FILE: &str = ".ctx.install.lock";
 
 /// A process-owned lock for mutations of one installed executable.
 ///
@@ -54,7 +53,7 @@ impl InstallationLock {
 
     pub(in crate::upgrade) fn try_acquire_at_root(install_root: &Path) -> Result<Option<Self>> {
         let (root, bin) = canonical_owner_safe_install_directories(install_root)?;
-        let path = bin.join(INSTALLATION_LOCK_FILE);
+        let path = root.join(MANAGED_PAIR_INSTALLATION_LOCK_RELATIVE_PATH);
         let Some(owner) = OwnerFileLock::try_acquire(&path)? else {
             return Ok(None);
         };
@@ -448,7 +447,11 @@ pub(super) fn installation_lock_path(executable: &Path) -> Result<PathBuf> {
         .file_name()
         .filter(|name| !name.is_empty())
         .ok_or_else(|| anyhow!("ctx executable has no file name: {}", executable.display()))?;
-    Ok(executable.with_file_name(INSTALLATION_LOCK_FILE))
+    let lock_file = Path::new(MANAGED_PAIR_INSTALLATION_LOCK_RELATIVE_PATH)
+        .file_name()
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| anyhow!("ctx installation lock path has no file name"))?;
+    Ok(executable.with_file_name(lock_file))
 }
 
 fn open_lock_file(path: &Path) -> Result<File> {

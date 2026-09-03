@@ -14,6 +14,7 @@ pub use fix_forward::{
     apply_or_resume_managed_pair_under_installation_lock,
     cleanup_orphaned_managed_pair_candidate_under_installation_lock,
     inspect_managed_pair_under_installation_lock,
+    managed_pair_evidence_present_under_installation_lock,
     resume_pending_managed_pair_under_installation_lock,
     stage_managed_pair_under_installation_lock, ManagedPairApplyInput, ManagedPairApplyOutcome,
     ManagedPairInstallationStatus, ManagedPairStageOutcome,
@@ -25,7 +26,10 @@ pub const MANAGED_PAIR_STATE_RELATIVE_PATH: &str = "share/ctx/managed-pair-state
 pub const MANAGED_CORE_INSTALL_MARKER_RELATIVE_PATH: &str = "bin/ctx.install.json";
 #[cfg(windows)]
 pub const MANAGED_CORE_INSTALL_MARKER_RELATIVE_PATH: &str = "bin/ctx.exe.install.json";
+#[cfg(not(windows))]
 pub const MANAGED_PAIR_INSTALLATION_LOCK_RELATIVE_PATH: &str = "bin/.ctx.install.lock";
+#[cfg(windows)]
+pub const MANAGED_PAIR_INSTALLATION_LOCK_RELATIVE_PATH: &str = "bin/.ctx.exe.install.lock";
 pub const MANAGED_PAIR_ACTIVE_TRANSACTION_RELATIVE_PATH: &str =
     "bin/.ctx.upgrade-install-transaction.json";
 

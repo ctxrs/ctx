@@ -278,7 +278,10 @@ pub(in crate::upgrade) fn install_marker_bytes(
     plan: &UpgradePlan,
     install_attribution: Option<&ActiveInstallAttribution>,
 ) -> Result<Vec<u8>> {
-    let body = install_marker_value(existing_marker_path, plan, install_attribution)?;
+    let mut body = install_marker_value(existing_marker_path, plan, install_attribution)?;
+    body.as_object_mut()
+        .expect("install marker is an object")
+        .insert("managed_pair".to_owned(), Value::Bool(true));
     serde_json::to_vec_pretty(&body).context("serialize managed Core install marker")
 }
 

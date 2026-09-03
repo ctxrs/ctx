@@ -184,8 +184,8 @@ impl PendingApply {
 /// and coordination path. If a pending attempt exists, `input` is not consulted:
 /// recovery re-verifies and publishes only the retained same-filesystem copy.
 /// The caller must hold the live exclusive OS lock at
-/// `<install_root>/bin/.ctx.install.lock` for the complete call. The kernel does
-/// not acquire or reacquire that lock.
+/// [`crate::MANAGED_PAIR_INSTALLATION_LOCK_RELATIVE_PATH`] for the complete
+/// call. The kernel does not acquire or reacquire that lock.
 pub fn apply_or_resume_managed_pair_under_installation_lock(
     install_root: &Path,
     input: &ManagedPairApplyInput,
@@ -220,6 +220,16 @@ pub fn inspect_managed_pair_under_installation_lock(
         }),
         Err(_) => Ok(ManagedPairInstallationStatus::RepairRequired),
     }
+}
+
+/// Reports whether the fixed installation still carries evidence that Core
+/// owns a managed pair. The marker contributes only a fail-closed provenance
+/// bit; rollback generation remains authoritative in signed pair material.
+/// The caller must hold the canonical installation lock.
+pub fn managed_pair_evidence_present_under_installation_lock(install_root: &Path) -> Result<bool> {
+    filesystem::validate_absolute_root(install_root, "managed-pair install root")?;
+    let layout = Layout::open(install_root, true)?;
+    managed_pair_evidence_present(&layout)
 }
 
 /// Removes an apply candidate left before its pending record was published.
@@ -612,7 +622,25 @@ fn managed_pair_evidence_present(layout: &Layout) -> Result<bool> {
             return Ok(true);
         }
     }
-    Ok(false)
+    marker_declares_managed_pair(layout)
+}
+
+fn marker_declares_managed_pair(layout: &Layout) -> Result<bool> {
+    let Some(marker) = read_optional(
+        &layout.target(Slot::Marker),
+        MAX_MARKER_BYTES,
+        Slot::Marker.label(),
+    )?
+    else {
+        return Ok(false);
+    };
+    let Ok(marker) = serde_json::from_slice::<Value>(&marker.bytes) else {
+        return Ok(false);
+    };
+    Ok(
+        marker.get("manager").and_then(Value::as_str) == Some("ctx-hosted-installer")
+            && marker.get("managed_pair").and_then(Value::as_bool) == Some(true),
+    )
 }
 
 fn read_valid_state(layout: &Layout) -> Result<Option<ManagedPairState>> {

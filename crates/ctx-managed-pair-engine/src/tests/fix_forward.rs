@@ -308,6 +308,45 @@ fn damaged_generation_witnesses_do_not_allow_rollback() {
     );
 }
 
+#[test]
+fn paired_marker_without_pair_files_does_not_allow_rollback() {
+    let fixture = Fixture::new();
+    let marker = br#"{"manager":"ctx-hosted-installer","managed_pair":true}"#;
+    let current = fixture.candidate("current", 10, b"current-core", b"current-pro", marker);
+    let older = fixture.candidate("older", 9, b"older-core", b"older-pro", marker);
+    let verifier = TestVerifier::new([
+        (current.envelope.clone(), current.identity.clone()),
+        (older.envelope.clone(), older.identity.clone()),
+    ]);
+    apply(&fixture, &current, &verifier);
+
+    let layout = filesystem::Layout::open(&fixture.install, false).unwrap();
+    for slot in [
+        filesystem::Slot::State,
+        filesystem::Slot::Envelope,
+        filesystem::Slot::Companion,
+    ] {
+        fs::remove_file(layout.target(slot)).unwrap();
+    }
+    let error = under_installation_lock(&fixture.install, || {
+        apply_or_resume_managed_pair_under_installation_lock(
+            &fixture.install,
+            &input(&older),
+            &verifier,
+        )
+        .unwrap_err()
+    });
+
+    assert!(error
+        .to_string()
+        .contains("no valid rollback-generation witness"));
+    assert_eq!(
+        fs::read(layout.target(filesystem::Slot::Core)).unwrap(),
+        current.core
+    );
+    assert!(!layout.target(filesystem::Slot::Companion).exists());
+}
+
 #[cfg(unix)]
 #[test]
 fn rejects_unsafe_input_and_fixed_paths() {
