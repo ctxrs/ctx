@@ -493,37 +493,12 @@ py_test(
 )
 
 py_test(
-    name = "rust_toolchain_pin_check",
-    srcs = ["//tools/bazel:check_rust_toolchain_pins.py"],
-    main = "//tools/bazel:check_rust_toolchain_pins.py",
-    args = [
-        "$(rootpath MODULE.bazel)",
-        "$(rootpath contracts/release-targets-v1.json)",
-        "$(rootpath //tools/bazel/patches:rules-rust-windows-gnu-dlltool-path.patch)",
-        "$(rootpath //tools/bazel/patches:rules-rust-windows-cargo-runfiles.patch)",
-    ],
-    data = [
-        "MODULE.bazel",
-        "contracts/release-targets-v1.json",
-        "//tools/bazel/patches:rules-rust-windows-cargo-runfiles.patch",
-        "//tools/bazel/patches:rules-rust-windows-gnu-dlltool-path.patch",
-    ],
-)
-
-py_test(
-    name = "rust_toolchain_pin_mutation_tests",
-    srcs = [
-        "//tools/bazel:check_rust_toolchain_pins.py",
-        "//tools/bazel:check_rust_toolchain_pins_test.py",
-    ],
-    data = [
-        "MODULE.bazel",
-        "contracts/release-targets-v1.json",
-        "//tools/bazel/patches:rules-rust-windows-cargo-runfiles.patch",
-        "//tools/bazel/patches:rules-rust-windows-gnu-dlltool-path.patch",
-    ],
-    imports = ["tools/bazel"],
-    main = "//tools/bazel:check_rust_toolchain_pins_test.py",
+    name = "rust_toolchain_module_policy",
+    srcs = ["//tools/bazel:check_rust_toolchain_module_policy.py"],
+    main = "//tools/bazel:check_rust_toolchain_module_policy.py",
+    args = ["$(rootpath MODULE.bazel)"],
+    data = ["MODULE.bazel"],
+    tags = ["build-graph", "rust"],
 )
 
 py_test(
