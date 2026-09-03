@@ -1,12 +1,14 @@
 use super::*;
 
-pub(super) fn retained_generation_state(
-    retained_generation: Option<&VerifiedIndex>,
-) -> Result<(
+pub(super) type RetainedGenerationState = (
     Option<ExplicitSourceCatalogAuthority>,
     Vec<ExplicitSourceCatalogRouteBinding>,
     BTreeMap<SourceRouteIdentity, Vec<u8>>,
-)> {
+);
+
+pub(super) fn retained_generation_state(
+    retained_generation: Option<&VerifiedIndex>,
+) -> Result<RetainedGenerationState> {
     let Some(generation) = retained_generation else {
         return Ok((None, Vec::new(), BTreeMap::new()));
     };
