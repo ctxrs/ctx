@@ -8,7 +8,7 @@ use std::{fs, os::unix::fs::PermissionsExt as _, process::Command, time::Duratio
 
 use crate::upgrade::{
     download::DownloadedArtifact,
-    install::InstallFingerprint,
+    install::{InstallFingerprint, InstallationLock},
     managed_pair::{apply_prepared_install, ManagedPairMode, PreparedCoreArtifact},
     metadata::ReleaseMetadata,
     state::{begin_manual_attempt_locked, UpgradeLock},
@@ -17,6 +17,7 @@ use crate::upgrade::{
 
 const OLD_OWNERSHIP: &[u8] = b"CTX_INSTALL_INTEGRATIONS_V1\nrecords_sha256\told\n";
 const NEW_OWNERSHIP: &[u8] = b"CTX_INSTALL_INTEGRATIONS_V1\nrecords_sha256\tnew\n";
+const THIRD_OWNERSHIP: &[u8] = b"CTX_INSTALL_INTEGRATIONS_V1\nrecords_sha256\tthird\n";
 const SELF_UPGRADE_CHILD_TARGET_ENV: &str = "CTX_SELF_UPGRADE_FENCE_CHILD_TARGET";
 
 #[derive(Clone)]
@@ -118,6 +119,11 @@ fn pair_fixture() -> PairFixture {
     fs::write(
         install_marker_path(&install),
         paired_marker(&install, &sha256_hex(core_bytes)),
+    )
+    .unwrap();
+    fs::set_permissions(
+        install_marker_path(&install),
+        fs::Permissions::from_mode(0o600),
     )
     .unwrap();
     PairFixture {
@@ -252,6 +258,112 @@ fn arm_pair_uninstall(fixture: &PairFixture) -> (PathBuf, PathBuf, Journal) {
     let path = journal_path(&fixture.install);
     write_initial_journal(&path, &journal).unwrap();
     (helper, path, journal)
+}
+
+#[test]
+fn integration_reconciliation_crash_retries_and_uninstalls_from_one_marker_authority() {
+    let fixture = pair_fixture();
+    let old_source = fixture.root.join("old-integrations");
+    let new_source = fixture.root.join("new-integrations");
+    fs::write(&old_source, OLD_OWNERSHIP).unwrap();
+    fs::write(&new_source, NEW_OWNERSHIP).unwrap();
+
+    let installation = InstallationLock::try_acquire(&fixture.install)
+        .unwrap()
+        .unwrap();
+    super::super::marker::reconcile_managed_pair_integration_under_installation_lock(
+        &fixture.root,
+        &old_source,
+    )
+    .unwrap();
+    drop(installation);
+    let marker_path = install_marker_path(&fixture.install);
+    let old_marker = fs::read(&marker_path).unwrap();
+    let old_value: Value = serde_json::from_slice(&old_marker).unwrap();
+    let old_generation = PathBuf::from(old_value["integrations_path"].as_str().unwrap());
+    assert_eq!(fs::read(&old_generation).unwrap(), OLD_OWNERSHIP);
+    let new_generation = fixture.root.join(format!(
+        "bin/ctx.install-integrations.{}",
+        sha256_hex(NEW_OWNERSHIP)
+    ));
+
+    let mut stale = old_value.clone();
+    stale["sha256"] = json!("0".repeat(64));
+    fs::write(&marker_path, serde_json::to_vec_pretty(&stale).unwrap()).unwrap();
+    let installation = InstallationLock::try_acquire(&fixture.install)
+        .unwrap()
+        .unwrap();
+    let stale_error =
+        super::super::marker::reconcile_managed_pair_integration_under_installation_lock(
+            &fixture.root,
+            &new_source,
+        )
+        .unwrap_err();
+    drop(installation);
+    assert!(stale_error.to_string().contains("hash mismatch"));
+    assert!(!new_generation.exists());
+    fs::write(&marker_path, &old_marker).unwrap();
+
+    let installation = InstallationLock::try_acquire(&fixture.install)
+        .unwrap()
+        .unwrap();
+    let error = super::super::marker::reconcile_managed_pair_integration_with_fault(
+        &fixture.root,
+        &new_source,
+        &mut || bail!("injected after generation publication"),
+    )
+    .unwrap_err();
+    drop(installation);
+    assert!(error.to_string().contains("injected after generation"));
+    assert_eq!(fs::read(&marker_path).unwrap(), old_marker);
+    assert_eq!(fs::read(&old_generation).unwrap(), OLD_OWNERSHIP);
+    assert_eq!(fs::read(&new_generation).unwrap(), NEW_OWNERSHIP);
+
+    let installation = InstallationLock::try_acquire(&fixture.install)
+        .unwrap()
+        .unwrap();
+    super::super::marker::reconcile_managed_pair_integration_under_installation_lock(
+        &fixture.root,
+        &new_source,
+    )
+    .unwrap();
+    drop(installation);
+    let new_value: Value = serde_json::from_slice(&fs::read(&marker_path).unwrap()).unwrap();
+    let mut expected = old_value;
+    expected["integrations_path"] = json!(new_generation);
+    expected["integrations_sha256"] = json!(sha256_hex(NEW_OWNERSHIP));
+    assert_eq!(new_value, expected);
+    assert!(!old_generation.exists());
+
+    let third_source = fixture.root.join("third-integrations");
+    fs::write(&third_source, THIRD_OWNERSHIP).unwrap();
+    let installation = InstallationLock::try_acquire(&fixture.install)
+        .unwrap()
+        .unwrap();
+    super::super::marker::reconcile_managed_pair_integration_under_installation_lock(
+        &fixture.root,
+        &third_source,
+    )
+    .unwrap();
+    drop(installation);
+    let third_marker: Value = serde_json::from_slice(&fs::read(&marker_path).unwrap()).unwrap();
+    let third_generation = PathBuf::from(third_marker["integrations_path"].as_str().unwrap());
+    assert_eq!(fs::read(&third_generation).unwrap(), THIRD_OWNERSHIP);
+    assert!(!new_generation.exists());
+
+    let (helper, path, mut uninstall) = arm_pair_uninstall(&fixture);
+    complete_uninstall_commit(&helper, &path, &mut uninstall, &mut |_| Ok(())).unwrap();
+    remove_journal(&path).unwrap();
+    assert!(!third_generation.exists());
+    assert!(!marker_path.exists());
+    assert!(!fixture.install.exists());
+    assert!(fs::read_dir(fixture.root.join("bin"))
+        .unwrap()
+        .all(|entry| !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with("ctx.install-integrations.")));
 }
 
 fn ordinary_upgrade_plan(install: &Path, next_core: &[u8]) -> UpgradePlan {

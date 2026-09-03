@@ -17,6 +17,8 @@ pub use ctx_managed_pair_engine::{
 pub use install_marker::{
     current_exe_install_marker, current_exe_is_staging_dogfood, ActiveInstallAttribution,
 };
+#[cfg(unix)]
+pub use upgrade::reconcile_managed_pair_integration_under_installation_lock;
 pub use upgrade::{
     active_installation_upgrade_attempt_id, current_exe_has_managed_install_marker_hint,
     current_exe_is_unmanaged, current_install_path, disable_current_man_pages,

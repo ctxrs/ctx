@@ -727,28 +727,7 @@ fn validate_helper_caller(current: &Path, journal: &Journal) -> Result<()> {
     )
 }
 
-fn verify_recorded_ownership(journal: &Journal) -> Result<()> {
-    if let (Some(path), Some(digest)) = (
-        journal.ownership_path.as_ref(),
-        journal.ownership_sha256.as_ref(),
-    ) {
-        verify_file_digest(
-            path,
-            digest,
-            MAX_OWNERSHIP_BYTES,
-            "managed integration ownership",
-        )
-        .with_context(|| {
-            format!(
-                "integration ownership at {} changed; restore the transaction-owned sidecar or move the changed file aside, then retry hosted uninstall",
-                path.display()
-            )
-        })?;
-    }
-    Ok(())
-}
-
-fn read_recorded_ownership(
+pub(super) fn read_recorded_ownership(
     marker: &str,
     install_path: &Path,
 ) -> Result<Option<(PathBuf, String, Vec<u8>)>> {
@@ -759,12 +738,13 @@ fn read_recorded_ownership(
     ) {
         (None, None) => Ok(None),
         (Some(Value::String(path)), Some(Value::String(digest))) => {
-            let expected_path = ownership_path(install_path);
-            if !managed_install_path_identity_matches(&expected_path, Path::new(path))
-                || !is_normalized_sha256(digest)
-            {
+            if !is_normalized_sha256(digest) {
                 bail!("managed marker has invalid integration ownership identity");
             }
+            let expected_path = recorded_ownership_path(install_path, Path::new(path), digest)
+                .ok_or_else(|| {
+                    anyhow!("managed marker has invalid integration ownership identity")
+                })?;
             let body = read_bounded(
                 &expected_path,
                 MAX_OWNERSHIP_BYTES,
@@ -904,9 +884,12 @@ fn validate_journal(journal: &Journal, install_path: &Path, kind: TransactionKin
     ) {
         (None, None, None) => {}
         (Some(path), Some(digest), Some(body))
-            if path == &ownership_path(install_path)
-                && normalized_sha256(digest)? == *digest
-                && sha256_hex(body) == *digest => {}
+            if normalized_sha256(digest)? == *digest
+                && sha256_hex(body) == *digest
+                && (path == &ownership_path(install_path)
+                    || (kind == TransactionKind::Uninstall
+                        && recorded_ownership_path(install_path, path, digest).as_ref()
+                            == Some(path))) => {}
         _ => bail!("hosted transaction journal ownership identity is invalid"),
     }
     let marker: Value = serde_json::from_str(&journal.marker_body)?;

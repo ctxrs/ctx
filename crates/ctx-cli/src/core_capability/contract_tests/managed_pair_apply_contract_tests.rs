@@ -133,6 +133,8 @@ impl ArgFixture {
 #[test]
 fn only_the_exact_apply_argv_is_intercepted() {
     assert!(intercept(&["ctx".into(), MANAGED_PAIR_APPLY_INVOCATION.into()]).is_some());
+    #[cfg(unix)]
+    assert!(intercept(&["ctx".into(), MANAGED_PAIR_RECONCILE_INVOCATION.into(),]).is_some());
     for removed in [
         "--ctx-core-hosted-pair-install-v1",
         "--ctx-core-managed-pair-swap-v1",
@@ -142,6 +144,18 @@ fn only_the_exact_apply_argv_is_intercepted() {
     }
     assert!(intercept(&["ctx".into(), "--ctx-core-managed-pair-apply-v1=x".into(),]).is_none());
     assert!(intercept(&["ctx".into(), INVOCATION.into()]).is_some());
+}
+
+#[cfg(unix)]
+#[test]
+fn reconciliation_receipt_is_the_exact_bounded_typed_json_object() {
+    let expected = br#"{"schema_version":1,"command":"managed_pair_reconcile_integration","ok":true,"status":"committed"}"#;
+    let receipt = super::super::managed_pair_reconcile::success_receipt();
+    assert_eq!(receipt, expected);
+    assert!(receipt.len() < MAX_RESPONSE_BYTES);
+    let mut stdout = Vec::new();
+    write_response_frame(&mut stdout, receipt).unwrap();
+    assert_eq!(stdout, [expected.as_slice(), b"\n"].concat());
 }
 
 #[test]

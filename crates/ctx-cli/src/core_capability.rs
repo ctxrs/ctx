@@ -25,6 +25,8 @@ use sha2::{Digest as _, Sha256};
 
 mod failure;
 mod managed_pair_apply;
+#[cfg(unix)]
+mod managed_pair_reconcile;
 mod progress_events;
 mod setup_options;
 mod setup_refresh;
@@ -42,6 +44,8 @@ use setup_refresh::{
 
 const INVOCATION: &str = "--ctx-core-capability-v1";
 const MANAGED_PAIR_APPLY_INVOCATION: &str = "--ctx-core-managed-pair-apply-v1";
+#[cfg(unix)]
+const MANAGED_PAIR_RECONCILE_INVOCATION: &str = "--ctx-core-managed-pair-reconcile-integration-v1";
 const HOSTED_UNINSTALL_POST_EXIT_INVOCATION: &str = "--ctx-core-hosted-uninstall-after-parent-v1";
 const DISABLE_MAN_PAGES_INVOCATION: &str = "--ctx-core-disable-managed-man-pages-v1";
 const MAX_FRAME_BYTES: usize = 64 * 1024;
@@ -106,6 +110,19 @@ pub(crate) fn intercept(arguments: &[std::ffi::OsString]) -> Option<ExitCode> {
         .is_some_and(|value| value == MANAGED_PAIR_APPLY_INVOCATION)
     {
         return Some(match managed_pair_apply::run(arguments) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("{error:#}");
+                ExitCode::FAILURE
+            }
+        });
+    }
+    #[cfg(unix)]
+    if arguments
+        .get(1)
+        .is_some_and(|value| value == MANAGED_PAIR_RECONCILE_INVOCATION)
+    {
+        return Some(match managed_pair_reconcile::run(arguments) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
                 eprintln!("{error:#}");

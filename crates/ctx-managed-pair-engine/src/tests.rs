@@ -236,6 +236,8 @@ fn assert_cleanup(fixture: &Fixture, attempt_id: &str) {
 }
 
 mod fix_forward;
+#[cfg(unix)]
+mod reconciliation;
 
 #[test]
 fn managed_core_marker_uses_the_platform_install_marker_name() {

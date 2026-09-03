@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use ctx_history_core::utc_now;
 use serde_json::{json, Value};
 
@@ -107,7 +107,15 @@ fn read_install_marker_at(path: &Path) -> Result<Option<InstallMarker>> {
     let Some(bytes) = read_install_marker_bytes(&marker_path)? else {
         return Ok(None);
     };
-    let value: Value = serde_json::from_slice(&bytes)
+    parse_install_marker(path, &marker_path, &bytes).map(|(marker, _)| Some(marker))
+}
+
+fn parse_install_marker(
+    path: &Path,
+    marker_path: &Path,
+    bytes: &[u8],
+) -> Result<(InstallMarker, Value)> {
+    let value: Value = serde_json::from_slice(bytes)
         .with_context(|| format!("parse ctx install marker {}", marker_path.display()))?;
     let manager = value
         .get("manager")
@@ -134,14 +142,17 @@ fn read_install_marker_at(path: &Path) -> Result<Option<InstallMarker>> {
             path.display()
         ));
     }
-    Ok(Some(InstallMarker {
-        install_path: certified_path,
-        platform: string_field(&value, "platform")?,
-        channel: string_field(&value, "channel")?,
-        version: string_field(&value, "version")?,
-        sha256: string_field(&value, "sha256")?,
-        staging_dogfood: is_staging_dogfood_marker(&value),
-    }))
+    Ok((
+        InstallMarker {
+            install_path: certified_path,
+            platform: string_field(&value, "platform")?,
+            channel: string_field(&value, "channel")?,
+            version: string_field(&value, "version")?,
+            sha256: string_field(&value, "sha256")?,
+            staging_dogfood: is_staging_dogfood_marker(&value),
+        },
+        value,
+    ))
 }
 
 pub(in crate::upgrade) fn install_marker_for_plan(
@@ -263,6 +274,70 @@ fn verify_install_marker(marker: &InstallMarker, platform: &str) -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
+pub fn reconcile_managed_pair_integration_under_installation_lock(
+    install_root: &Path,
+    integration_source: &Path,
+) -> Result<()> {
+    reconcile_managed_pair_integration_impl(install_root, integration_source, &mut || Ok(()))
+}
+
+#[cfg(all(test, unix))]
+pub(in crate::upgrade) fn reconcile_managed_pair_integration_with_fault(
+    install_root: &Path,
+    integration_source: &Path,
+    fault: &mut dyn FnMut() -> Result<()>,
+) -> Result<()> {
+    reconcile_managed_pair_integration_impl(install_root, integration_source, fault)
+}
+
+#[cfg(unix)]
+fn reconcile_managed_pair_integration_impl(
+    install_root: &Path,
+    integration_source: &Path,
+    fault: &mut dyn FnMut() -> Result<()>,
+) -> Result<()> {
+    let install_path = install_root.join("bin/ctx");
+    let marker_path = install_marker_path(&install_path);
+    let previous = read_install_marker_bytes(&marker_path)?
+        .ok_or_else(|| anyhow!("managed Core install marker disappeared"))?;
+    let (marker, mut value) = parse_install_marker(&install_path, &marker_path, &previous)?;
+    verify_install_marker(&marker, platform_key()?)?;
+    let previous_text = std::str::from_utf8(&previous)
+        .context("decode managed Core install marker integration ownership")?;
+    let previous_ownership =
+        super::hosted_transaction::read_recorded_ownership(previous_text, &install_path)?;
+
+    let (generation, digest) =
+        ctx_managed_pair_engine::publish_managed_pair_integration_generation_under_installation_lock(
+            install_root,
+            integration_source,
+        )?;
+    fault()?;
+    if read_install_marker_bytes(&marker_path)?.as_deref() != Some(previous.as_slice()) {
+        bail!("managed Core install marker changed during integration reconciliation");
+    }
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("managed Core install marker is not an object"))?;
+    object.insert(
+        "integrations_path".to_owned(),
+        Value::String(generation.to_string_lossy().into_owned()),
+    );
+    object.insert("integrations_sha256".to_owned(), Value::String(digest));
+    atomic_write_json(&marker_path, &value)?;
+    if let Some((prior_path, prior_digest, _)) = previous_ownership {
+        if prior_path != generation {
+            ctx_managed_pair_engine::remove_managed_pair_integration_binding_under_installation_lock(
+                install_root,
+                &prior_path,
+                &prior_digest,
+            )?;
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn write_install_marker_to(
     marker_path: &Path,
     existing_marker_path: &Path,
@@ -318,15 +393,20 @@ fn install_marker_value(
         }
     }
     // The runtime owns this receipt and upgrades replace the marker atomically.
-    // Preserve only man-page ownership; integration ownership follows its
-    // pre-existing installer transaction path.
-    preserve_man_pages_from_existing_marker(&mut body, existing_marker_path)?;
+    // Keep the validated prior integration binding authoritative until Unix
+    // reconciliation publishes and binds its replacement.
+    preserve_owned_extensions_from_existing_marker(
+        &mut body,
+        existing_marker_path,
+        &plan.install_path,
+    )?;
     Ok(body)
 }
 
-pub(super) fn preserve_man_pages_from_existing_marker(
+pub(super) fn preserve_owned_extensions_from_existing_marker(
     body: &mut Value,
     existing_marker_path: &Path,
+    install_path: &Path,
 ) -> Result<()> {
     let bytes = read_install_marker_bytes(existing_marker_path)?
         .ok_or_else(|| anyhow!("existing managed install marker disappeared"))?;
@@ -336,6 +416,18 @@ pub(super) fn preserve_man_pages_from_existing_marker(
         if let Some(value) = previous.get("man_pages") {
             object.insert("man_pages".to_owned(), value.clone());
         }
+    }
+    let previous_text =
+        std::str::from_utf8(&bytes).context("decode existing managed integration ownership")?;
+    if let Some((path, digest, _)) =
+        super::hosted_transaction::read_recorded_ownership(previous_text, install_path)?
+    {
+        let object = body.as_object_mut().expect("install marker is an object");
+        object.insert(
+            "integrations_path".to_owned(),
+            Value::String(path.to_string_lossy().into_owned()),
+        );
+        object.insert("integrations_sha256".to_owned(), Value::String(digest));
     }
     Ok(())
 }

@@ -1,5 +1,4 @@
 use super::*;
-
 fn daemon_due_hint_install(temp: &tempfile::TempDir) -> PathBuf {
     let install = temp.path().join("ctx");
     fs::write(&install, b"test executable").unwrap();

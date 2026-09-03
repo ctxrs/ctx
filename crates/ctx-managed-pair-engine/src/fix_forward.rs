@@ -117,13 +117,13 @@ impl ManagedPairApplyOutcome {
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-struct ContentIdentity {
-    sha256: String,
-    size_bytes: u64,
+pub(super) struct ContentIdentity {
+    pub(super) sha256: String,
+    pub(super) size_bytes: u64,
 }
 
 impl ContentIdentity {
-    fn from_observed(observed: &ObservedFile) -> Self {
+    pub(super) fn from_observed(observed: &ObservedFile) -> Self {
         Self {
             sha256: observed.stamp.sha256.clone(),
             size_bytes: observed.stamp.size_bytes,
@@ -144,7 +144,7 @@ impl ContentIdentity {
         })
     }
 
-    fn matches(&self, stamp: &FileStamp) -> bool {
+    pub(super) fn matches(&self, stamp: &FileStamp) -> bool {
         self.size_bytes == stamp.size_bytes && self.sha256 == stamp.sha256
     }
 
