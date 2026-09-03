@@ -2,6 +2,8 @@ use super::*;
 
 mod terminal_outcome;
 
+pub use terminal_outcome::RefreshTerminalOutcome;
+
 pub use ctx_history_refresh_execution::RefreshOperation;
 pub(crate) type SourceBackedRefreshOperation = RefreshOperation;
 
@@ -64,6 +66,49 @@ impl RefreshOutcomeCode {
                 | Self::CompletedWithSourceFailures
                 | Self::CompletedWithRejectionsAndSourceFailures
         )
+    }
+
+    pub const fn class(self, retryable: bool) -> RefreshOutcomeClass {
+        match self {
+            Self::Completed => RefreshOutcomeClass::Completed,
+            Self::CompletedWithRejections
+            | Self::CompletedWithSourceFailures
+            | Self::CompletedWithRejectionsAndSourceFailures => {
+                if retryable {
+                    RefreshOutcomeClass::CompletedWithRetryableFailures
+                } else {
+                    RefreshOutcomeClass::CompletedWithDiagnostics
+                }
+            }
+            Self::SourceUnavailable | Self::ExplicitSourcePathMissing => {
+                RefreshOutcomeClass::Unavailable
+            }
+            Self::SourceChanged => RefreshOutcomeClass::SourceChanged,
+            Self::MalformedSource => RefreshOutcomeClass::Unreadable,
+            Self::UnsupportedSchema | Self::IndexIncompatible => RefreshOutcomeClass::Incompatible,
+            Self::SourceFailures | Self::LogicalSourceFailures => RefreshOutcomeClass::Mixed,
+            Self::SourceUnclaimed | Self::AllProviderTerminalCoverageUnavailable => {
+                RefreshOutcomeClass::Coverage
+            }
+            Self::SourceRefreshFailed | Self::SourceRefreshInternal => {
+                RefreshOutcomeClass::Internal
+            }
+            Self::ResourceUnavailable => RefreshOutcomeClass::ResourceUnavailable,
+            Self::IndexCorruption => RefreshOutcomeClass::Corruption,
+            Self::SourceRefreshAdmissionFailed => RefreshOutcomeClass::ControlPlane,
+        }
+    }
+
+    pub(crate) fn from_receipt(receipt: &SourceBackedRefreshReceipt) -> Self {
+        match (
+            receipt.source_failure_total() != 0,
+            receipt.rejected_record_total() != 0,
+        ) {
+            (false, false) => Self::Completed,
+            (false, true) => Self::CompletedWithRejections,
+            (true, false) => Self::CompletedWithSourceFailures,
+            (true, true) => Self::CompletedWithRejectionsAndSourceFailures,
+        }
     }
 
     /// Returns the bounded observability classification owned by the Core
@@ -203,21 +248,6 @@ impl std::str::FromStr for RefreshLogicalPhase {
             _ => bail!("source refresh response has invalid logical phase"),
         }
     }
-}
-
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub struct RefreshTerminalOutcome {
-    pub code: RefreshOutcomeCode,
-    pub class: RefreshOutcomeClass,
-    pub retryable: bool,
-    pub affected_routes: BTreeSet<SourceRouteIdentity>,
-    pub retryable_routes: BTreeSet<SourceRouteIdentity>,
-    pub blocked_routes: BTreeSet<SourceRouteIdentity>,
-    pub physical_attempt_id: String,
-    pub retained_generation: Option<String>,
-    pub published_generation: Option<String>,
-    pub retry_advice: Option<RefreshRetryAdvice>,
-    pub detail: Option<String>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -615,11 +645,21 @@ impl RefreshStatus {
         if request_state.is_terminal() != structured_outcome.is_some() {
             bail!("source refresh terminal state has no structured outcome");
         }
-        if structured_outcome
-            .as_ref()
-            .is_some_and(|outcome| outcome.physical_attempt_id != physical_attempt_id)
-        {
-            bail!("source refresh outcome names a different physical attempt");
+        if let Some(outcome) = structured_outcome.as_ref() {
+            if outcome.physical_attempt_id() != physical_attempt_id {
+                bail!("source refresh outcome names a different physical attempt");
+            }
+            if request_state == RefreshRequestState::Published {
+                if outcome.code().is_failure() {
+                    bail!("published source refresh has a failure outcome");
+                }
+                let published_generation = optional_status_string(fields, "published_generation")?;
+                if published_generation.as_deref() != outcome.published_generation() {
+                    bail!("published source refresh generation disagrees with its outcome");
+                }
+            } else if request_state == RefreshRequestState::Failed && !outcome.code().is_failure() {
+                bail!("failed source refresh has a nonfailure outcome");
+            }
         }
         Ok(RefreshStatusKind::Logical(RefreshLogicalStatus {
             request_state,
@@ -703,20 +743,19 @@ fn parse_terminal_outcome(value: &Value) -> Result<RefreshTerminalOutcome> {
         Some(value) => Some(value.parse()?),
         None => None,
     };
-    let outcome = RefreshTerminalOutcome {
+    let outcome = RefreshTerminalOutcome::new(
         code,
-        class,
         retryable,
         affected_routes,
         retryable_routes,
         blocked_routes,
         physical_attempt_id,
-        retained_generation: optional_outcome_string(fields, "retained_generation")?,
-        published_generation: optional_outcome_string(fields, "published_generation")?,
+        optional_outcome_string(fields, "retained_generation")?,
+        optional_outcome_string(fields, "published_generation")?,
         retry_advice,
-        detail: optional_outcome_string(fields, "detail")?,
-    };
-    outcome.validate()?;
+        optional_outcome_string(fields, "detail")?,
+    )?;
+    outcome.validate_declared_class(class)?;
     Ok(outcome)
 }
 

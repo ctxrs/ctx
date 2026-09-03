@@ -77,11 +77,11 @@ impl CoreRefreshEngine {
                 .transpose()?
                 .unwrap_or_default();
             let recovery_rearmed_routes = failed
-                .failure_outcome
+                .terminal_outcome
                 .as_ref()
                 .map(|outcome| {
                     durable_blocked_routes
-                        .difference(&outcome.blocked_routes)
+                        .difference(outcome.blocked_routes())
                         .cloned()
                         .collect::<BTreeSet<_>>()
                 })
@@ -89,10 +89,10 @@ impl CoreRefreshEngine {
             let failed_request_id = failed.request_id.clone();
             let failed_intent = failed.intent.clone();
             let failed_reconciliation_demand = failed.reconciliation_demand;
-            let failure_route_dispositions = failed.failure_outcome.as_ref().map(|outcome| {
+            let failure_route_dispositions = failed.terminal_outcome.as_ref().map(|outcome| {
                 (
-                    outcome.retryable_routes.clone(),
-                    outcome.blocked_routes.clone(),
+                    outcome.retryable_routes().clone(),
+                    outcome.blocked_routes().clone(),
                 )
             });
             {
@@ -242,7 +242,7 @@ fn recover_published_attempt(job: &Value) -> Result<SourceBackedRefreshAttempt> 
     attempt.published_generation = Some(receipt.published_generation.clone());
     attempt.receipt = Some(receipt);
     attempt.failure_type = None;
-    attempt.failure_outcome = None;
+    attempt.terminal_outcome = None;
     attempt.last_error = None;
     Ok(attempt)
 }
@@ -357,26 +357,33 @@ fn recover_terminal_attempt(
     attempt.timings = timings;
     attempt.publication_probe_us = publication_probe_us;
     attempt.failure_type = recover_optional_failure_type(job)?;
-    attempt.failure_outcome = if state == SourceBackedRefreshState::Failed {
-        recover_failure_outcome(job, &attempt.refresh_scope, attempt.failure_type)?
+    attempt.last_error = optional_string(job, "last_error")?;
+    attempt.terminal_outcome = if state == SourceBackedRefreshState::Failed {
+        recover_failure_outcome(
+            job,
+            &attempt.refresh_scope,
+            attempt.failure_type,
+            &attempt.request_id,
+            attempt.published_generation.clone(),
+            attempt.last_error.clone(),
+        )?
     } else {
         None
     };
-    attempt.last_error = optional_string(job, "last_error")?;
     attempt.automatic_retry_checkpoints = recover_automatic_retry_checkpoints(job)?;
     if let Some(outcome) = attempt
-        .failure_outcome
+        .terminal_outcome
         .as_ref()
         .filter(|outcome| outcome.is_automatic_retry_eligible())
     {
         for (route, checkpoint) in &attempt.automatic_retry_checkpoints {
-            if !outcome.affected_routes.contains(route) {
+            if !outcome.affected_routes().contains(route) {
                 continue;
             }
             let disposition_matches = if checkpoint.is_paused() {
-                outcome.blocked_routes.contains(route)
+                outcome.blocked_routes().contains(route)
             } else {
-                outcome.retryable_routes.contains(route)
+                outcome.retryable_routes().contains(route)
             };
             if !disposition_matches {
                 bail!("durable source refresh automatic retry disposition is inconsistent");
@@ -384,12 +391,12 @@ fn recover_terminal_attempt(
         }
     }
     let checkpointless_pauses = attempt
-        .failure_outcome
+        .terminal_outcome
         .as_ref()
         .filter(|outcome| outcome.is_automatic_retry_eligible())
         .map(|outcome| {
             outcome
-                .blocked_routes
+                .blocked_routes()
                 .iter()
                 .filter(|route| {
                     !attempt
@@ -401,7 +408,7 @@ fn recover_terminal_attempt(
                 .collect::<BTreeSet<_>>()
         })
         .unwrap_or_default();
-    if let Some(outcome) = attempt.failure_outcome.as_mut() {
+    if let Some(outcome) = attempt.terminal_outcome.as_mut() {
         outcome.rearm_automatic_retry_routes(&checkpointless_pauses);
     }
     rearm_build_changed_automatic_retry_checkpoints(&mut attempt);
@@ -414,11 +421,22 @@ fn recover_failure_outcome(
     job: &Value,
     scope: &SourceBackedRefreshScope,
     legacy_failure_type: Option<SourceBackedRefreshFailureType>,
-) -> Result<Option<SourceBackedRefreshFailureOutcome>> {
+    physical_attempt_id: &str,
+    retained_generation: Option<String>,
+    detail: Option<String>,
+) -> Result<Option<RefreshTerminalOutcome>> {
     let Some(value) = job.get("structured_outcome") else {
-        return Ok(
-            legacy_failure_type.map(|failure_type| legacy_failure_outcome(failure_type, scope))
-        );
+        return legacy_failure_type
+            .map(|failure_type| {
+                legacy_failure_outcome(
+                    failure_type,
+                    scope,
+                    physical_attempt_id,
+                    retained_generation,
+                    detail,
+                )
+            })
+            .transpose();
     };
     let fields = value
         .as_object()
@@ -467,26 +485,25 @@ fn recover_failure_outcome(
         (None, None) => (BTreeSet::new(), affected_routes.clone()),
         _ => bail!("durable terminal source refresh outcome has incomplete route disposition"),
     };
-    RefreshTerminalOutcome::validate_components(
+    let outcome_attempt_id = required_outcome_text(fields, "physical_attempt_id")?;
+    if outcome_attempt_id != physical_attempt_id {
+        bail!("durable terminal source refresh outcome names a different physical attempt");
+    }
+    let outcome = RefreshTerminalOutcome::new(
         code,
-        class,
         retryable,
-        &affected_routes,
-        &retryable_routes,
-        &blocked_routes,
+        affected_routes,
+        retryable_routes,
+        blocked_routes,
+        outcome_attempt_id.to_owned(),
+        optional_outcome_text(fields, "retained_generation")?,
+        optional_outcome_text(fields, "published_generation")?,
         retry_advice,
+        optional_outcome_text(fields, "detail")?,
     )
     .context("validate durable terminal source refresh outcome")?;
-    Ok(Some(
-        SourceBackedRefreshFailureOutcome::with_route_dispositions(
-            code,
-            class,
-            retryable,
-            retryable_routes,
-            blocked_routes,
-            retry_advice,
-        ),
-    ))
+    outcome.validate_declared_class(class)?;
+    Ok(Some(outcome))
 }
 
 fn recover_outcome_routes(
@@ -528,52 +545,53 @@ fn required_outcome_text<'a>(
         .ok_or_else(|| anyhow!("durable terminal source refresh outcome has invalid `{field}`"))
 }
 
+fn optional_outcome_text(
+    fields: &serde_json::Map<String, Value>,
+    field: &str,
+) -> Result<Option<String>> {
+    match fields.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) if !value.is_empty() => Ok(Some(value.clone())),
+        _ => bail!("durable terminal source refresh outcome has invalid `{field}`"),
+    }
+}
+
 fn legacy_failure_outcome(
     failure_type: SourceBackedRefreshFailureType,
     scope: &SourceBackedRefreshScope,
-) -> SourceBackedRefreshFailureOutcome {
-    let (class, retryable, retry_advice) = match failure_type {
-        SourceBackedRefreshFailureType::UnsupportedSchema => (
-            RefreshOutcomeClass::Incompatible,
-            false,
-            RefreshRetryAdvice::UpgradeOrReconfigure,
-        ),
-        SourceBackedRefreshFailureType::MalformedSource => (
-            RefreshOutcomeClass::Unreadable,
-            false,
-            RefreshRetryAdvice::InspectSources,
-        ),
-        SourceBackedRefreshFailureType::SourceUnavailable => (
-            RefreshOutcomeClass::Unavailable,
-            true,
-            RefreshRetryAdvice::RetryAffectedRoutes,
-        ),
-        SourceBackedRefreshFailureType::SourceChanged => (
-            RefreshOutcomeClass::SourceChanged,
-            true,
-            RefreshRetryAdvice::RetryAffectedRoutes,
-        ),
-        SourceBackedRefreshFailureType::SourceFailures => (
-            RefreshOutcomeClass::Mixed,
-            true,
-            RefreshRetryAdvice::RetryAffectedRoutes,
-        ),
-        SourceBackedRefreshFailureType::AllProviderTerminalCoverageUnavailable => (
-            RefreshOutcomeClass::Coverage,
-            true,
-            RefreshRetryAdvice::RetryRequest,
-        ),
+    physical_attempt_id: &str,
+    retained_generation: Option<String>,
+    detail: Option<String>,
+) -> Result<RefreshTerminalOutcome> {
+    let (retryable, retry_advice) = match failure_type {
+        SourceBackedRefreshFailureType::UnsupportedSchema => {
+            (false, RefreshRetryAdvice::UpgradeOrReconfigure)
+        }
+        SourceBackedRefreshFailureType::MalformedSource => {
+            (false, RefreshRetryAdvice::InspectSources)
+        }
+        SourceBackedRefreshFailureType::SourceUnavailable
+        | SourceBackedRefreshFailureType::SourceChanged
+        | SourceBackedRefreshFailureType::SourceFailures => {
+            (true, RefreshRetryAdvice::RetryAffectedRoutes)
+        }
+        SourceBackedRefreshFailureType::AllProviderTerminalCoverageUnavailable => {
+            (true, RefreshRetryAdvice::RetryRequest)
+        }
     };
     let affected_routes = match scope {
         SourceBackedRefreshScope::All => BTreeSet::new(),
         SourceBackedRefreshScope::Exact(routes) => routes.clone(),
     };
-    SourceBackedRefreshFailureOutcome::new(
+    RefreshTerminalOutcome::with_uniform_route_disposition(
         failure_type.outcome_code(),
-        class,
         retryable,
         affected_routes,
+        physical_attempt_id.to_owned(),
+        retained_generation,
+        None,
         Some(retry_advice),
+        detail,
     )
 }
 

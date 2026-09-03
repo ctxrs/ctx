@@ -11,7 +11,8 @@ use ctx_history_refresh::{
 use ctx_terminal::{
     RefreshCurrentSourceProgress, RefreshCurrentSourceProgressStage, RefreshLogicalPhase,
     RefreshLogicalStatus, RefreshProgress, RefreshProgressSnapshot, RefreshRequestState,
-    RefreshStatusKind, RefreshStructuredOutcome, RefreshWholeRunStage, Ui,
+    RefreshStatusKind, RefreshStructuredOutcome, RefreshTerminalPresentation, RefreshWholeRunStage,
+    Ui,
 };
 
 pub use ctx_terminal::{format_bytes, format_count, ProgressWriterError};
@@ -136,33 +137,41 @@ pub fn presentation_snapshot(status: &RefreshStatus) -> anyhow::Result<RefreshPr
                 logical.progress_owner_attempt_state,
             ),
             structured_outcome: logical.structured_outcome.map(|outcome| {
+                let presentation = match outcome.code() {
+                    code if code.is_failure() => RefreshTerminalPresentation::Failed,
+                    ctx_history_refresh::RefreshOutcomeCode::Completed
+                    | ctx_history_refresh::RefreshOutcomeCode::CompletedWithRejections => {
+                        RefreshTerminalPresentation::Complete
+                    }
+                    _ => RefreshTerminalPresentation::CompleteWithIssues,
+                };
                 Box::new(RefreshStructuredOutcome {
-                    code: outcome.code.as_str().to_owned(),
-                    class: outcome.class.as_str().to_owned(),
-                    retryable: outcome.retryable,
+                    code: outcome.code().as_str().to_owned(),
+                    class: outcome.class().as_str().to_owned(),
+                    retryable: outcome.retryable(),
                     affected_routes: outcome
-                        .affected_routes
+                        .affected_routes()
                         .iter()
                         .map(|route| route.as_str().to_owned())
                         .collect(),
                     retryable_routes: outcome
-                        .retryable_routes
+                        .retryable_routes()
                         .iter()
                         .map(|route| route.as_str().to_owned())
                         .collect(),
                     blocked_routes: outcome
-                        .blocked_routes
+                        .blocked_routes()
                         .iter()
                         .map(|route| route.as_str().to_owned())
                         .collect(),
-                    physical_attempt_id: outcome.physical_attempt_id,
-                    retained_generation: outcome.retained_generation,
-                    published_generation: outcome.published_generation,
+                    physical_attempt_id: outcome.physical_attempt_id().to_owned(),
+                    retained_generation: outcome.retained_generation().map(str::to_owned),
+                    published_generation: outcome.published_generation().map(str::to_owned),
                     retry_advice: outcome
-                        .retry_advice
+                        .retry_advice()
                         .map(|advice| advice.as_str().to_owned()),
-                    detail: outcome.detail,
-                    failure: outcome.code.is_failure(),
+                    detail: outcome.detail().map(str::to_owned),
+                    presentation,
                 })
             }),
         }),

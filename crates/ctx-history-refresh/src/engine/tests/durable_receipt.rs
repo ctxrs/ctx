@@ -167,6 +167,14 @@ fn lone_failed_terminal_recovers_without_reenqueue() {
         .expect("failed terminal");
     assert!(failed.failed);
     assert!(!failed.terminal_persistence_pending);
+    let status_path = daemon_source_backed_refresh_job_path(&data_root);
+    let mut legacy_failure = read_daemon_job_status(&status_path).unwrap();
+    legacy_failure
+        .as_object_mut()
+        .unwrap()
+        .remove("structured_outcome");
+    legacy_failure["failure_type"] = json!("source_failures");
+    write_daemon_job_status(&status_path, &legacy_failure).unwrap();
     drop(first);
 
     let restarted = test_refresh_engine();
@@ -178,6 +186,14 @@ fn lone_failed_terminal_recovers_without_reenqueue() {
     assert_eq!(recovered["request_id"], request_id);
     assert_eq!(recovered["request_state"], "failed");
     assert_eq!(recovered["last_error"], "exact lone terminal failure");
+    assert_eq!(
+        recovered["structured_outcome"]["detail"],
+        "exact lone terminal failure"
+    );
+    let kind = recovered.kind().unwrap();
+    let outcome = kind.terminal_outcome().unwrap();
+    assert_eq!(outcome.code(), RefreshOutcomeCode::SourceFailures);
+    assert_eq!(outcome.detail(), Some("exact lone terminal failure"));
 }
 
 #[test]

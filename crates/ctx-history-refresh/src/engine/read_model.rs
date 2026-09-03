@@ -27,7 +27,7 @@ pub(super) struct SourceBackedAutomaticRetryCheckpoint {
 
 impl SourceBackedAutomaticRetryCheckpoint {
     pub(super) fn confirming(
-        outcome: &SourceBackedRefreshFailureOutcome,
+        outcome: &RefreshTerminalOutcome,
         route: &SourceRouteIdentity,
         source_observation: &str,
         terminal_error: &str,
@@ -74,7 +74,7 @@ impl SourceBackedAutomaticRetryCheckpoint {
 }
 
 fn automatic_retry_failure_fingerprint(
-    outcome: &SourceBackedRefreshFailureOutcome,
+    outcome: &RefreshTerminalOutcome,
     route: &SourceRouteIdentity,
     source_observation: &str,
     build_version: &str,
@@ -82,8 +82,8 @@ fn automatic_retry_failure_fingerprint(
 ) -> String {
     let mut digest = Sha256::new();
     for (label, value) in [
-        ("code", outcome.code.as_str().as_bytes()),
-        ("class", outcome.class.as_str().as_bytes()),
+        ("code", outcome.code().as_str().as_bytes()),
+        ("class", outcome.class().as_str().as_bytes()),
         ("route", route.as_str().as_bytes()),
         ("source_observation", source_observation.as_bytes()),
         ("build_version", build_version.as_bytes()),
@@ -143,138 +143,6 @@ fn automatic_retry_json(
         "resume_on": ["source_change", "ctx_upgrade", "manual_import"],
     }))
 }
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub(super) struct SourceBackedRefreshFailureOutcome {
-    pub(super) code: RefreshOutcomeCode,
-    pub(super) class: RefreshOutcomeClass,
-    pub(super) retryable: bool,
-    pub(super) affected_routes: BTreeSet<SourceRouteIdentity>,
-    pub(super) retryable_routes: BTreeSet<SourceRouteIdentity>,
-    pub(super) blocked_routes: BTreeSet<SourceRouteIdentity>,
-    pub(super) retry_advice: Option<RefreshRetryAdvice>,
-}
-
-impl SourceBackedRefreshFailureOutcome {
-    pub(super) fn is_automatic_retry_eligible(&self) -> bool {
-        RefreshTerminalOutcome::automatic_retry_disposition(self.code, self.class, false).is_some()
-    }
-
-    pub(super) fn pause_automatic_retry_routes(&mut self, routes: &BTreeSet<SourceRouteIdentity>) {
-        if !self.is_automatic_retry_eligible() {
-            return;
-        }
-        let mut changed = false;
-        for route in routes {
-            if self.retryable_routes.remove(route) {
-                self.blocked_routes.insert(route.clone());
-                changed = true;
-            }
-        }
-        if changed {
-            self.refresh_automatic_retry_disposition();
-        }
-    }
-
-    pub(super) fn rearm_automatic_retry_routes(&mut self, routes: &BTreeSet<SourceRouteIdentity>) {
-        if !self.is_automatic_retry_eligible() {
-            return;
-        }
-        let mut changed = false;
-        for route in routes {
-            if self.blocked_routes.remove(route) {
-                self.retryable_routes.insert(route.clone());
-                changed = true;
-            }
-        }
-        if changed {
-            self.refresh_automatic_retry_disposition();
-        }
-    }
-
-    fn refresh_automatic_retry_disposition(&mut self) {
-        let Some((retryable, retry_advice)) = RefreshTerminalOutcome::automatic_retry_disposition(
-            self.code,
-            self.class,
-            !self.retryable_routes.is_empty(),
-        ) else {
-            return;
-        };
-        self.retryable = retryable;
-        self.retry_advice = Some(retry_advice);
-    }
-
-    pub(super) fn new(
-        code: RefreshOutcomeCode,
-        class: RefreshOutcomeClass,
-        retryable: bool,
-        affected_routes: BTreeSet<SourceRouteIdentity>,
-        retry_advice: Option<RefreshRetryAdvice>,
-    ) -> Self {
-        let (retryable_routes, blocked_routes) = if retryable {
-            (affected_routes.clone(), BTreeSet::new())
-        } else {
-            (BTreeSet::new(), affected_routes.clone())
-        };
-        Self::with_route_dispositions(
-            code,
-            class,
-            retryable,
-            retryable_routes,
-            blocked_routes,
-            retry_advice,
-        )
-    }
-
-    pub(super) fn with_route_dispositions(
-        code: RefreshOutcomeCode,
-        class: RefreshOutcomeClass,
-        retryable: bool,
-        retryable_routes: BTreeSet<SourceRouteIdentity>,
-        blocked_routes: BTreeSet<SourceRouteIdentity>,
-        retry_advice: Option<RefreshRetryAdvice>,
-    ) -> Self {
-        let affected_routes = retryable_routes.union(&blocked_routes).cloned().collect();
-        Self {
-            code,
-            class,
-            retryable,
-            affected_routes,
-            retryable_routes,
-            blocked_routes,
-            retry_advice,
-        }
-    }
-
-    fn to_json(
-        &self,
-        physical_attempt_id: &str,
-        retained_generation: Option<&str>,
-        detail: Option<&str>,
-    ) -> Value {
-        compact_json(json!({
-            "code": self.code.as_str(),
-            "class": self.class.as_str(),
-            "retryable": self.retryable,
-            "affected_routes": self.affected_routes
-                .iter()
-                .map(SourceRouteIdentity::as_str)
-                .collect::<Vec<_>>(),
-            "retryable_routes": self.retryable_routes
-                .iter()
-                .map(SourceRouteIdentity::as_str)
-                .collect::<Vec<_>>(),
-            "blocked_routes": self.blocked_routes
-                .iter()
-                .map(SourceRouteIdentity::as_str)
-                .collect::<Vec<_>>(),
-            "physical_attempt_id": physical_attempt_id,
-            "retained_generation": retained_generation,
-            "retry_advice": self.retry_advice.map(RefreshRetryAdvice::as_str),
-            "detail": detail,
-        }))
-    }
-}
-
 /// Exact vocabulary of the durable legacy `failure_type` field.
 ///
 /// Structured outcomes use the broader `RefreshOutcomeCode`; keeping this
@@ -372,7 +240,9 @@ pub(super) struct SourceBackedRefreshAttempt {
     pub(super) trigger: &'static str,
     pub(super) trigger_provenance: &'static str,
     pub(super) failure_type: Option<SourceBackedRefreshFailureType>,
-    pub(super) failure_outcome: Option<SourceBackedRefreshFailureOutcome>,
+    /// Canonical terminal outcome for failures. Published attempts retain only
+    /// their typed receipt and project a success outcome from it at read time.
+    pub(super) terminal_outcome: Option<RefreshTerminalOutcome>,
     pub(super) last_error: Option<String>,
 }
 
@@ -432,17 +302,17 @@ impl SourceBackedRefreshAttempt {
     }
 
     fn failure_code(&self) -> Option<&'static str> {
-        self.failure_outcome
+        self.terminal_outcome
             .as_ref()
-            .map(|outcome| outcome.code.as_str())
+            .map(|outcome| outcome.code().as_str())
     }
 
     fn failure_reason(&self) -> Option<&'static str> {
-        self.failure_outcome.as_ref().map(|outcome| {
-            if outcome.code == RefreshOutcomeCode::AllProviderTerminalCoverageUnavailable {
+        self.terminal_outcome.as_ref().map(|outcome| {
+            if outcome.code() == RefreshOutcomeCode::AllProviderTerminalCoverageUnavailable {
                 "provider_terminal_coverage_unavailable"
             } else {
-                outcome.class.as_str()
+                outcome.class().as_str()
             }
         })
     }
@@ -468,53 +338,19 @@ impl SourceBackedRefreshAttempt {
     }
 
     fn structured_outcome_json(&self) -> Option<Value> {
-        if let Some(receipt) = self.receipt.as_ref() {
-            let code = receipt.terminal_outcome();
-            let (retryable_routes, blocked_routes) = receipt.route_retry_dispositions();
-            let retryable = !retryable_routes.is_empty();
-            let affected_routes = receipt
-                .route_results
-                .iter()
-                .filter(|result| {
-                    result.outcome.is_failure()
-                        || result.source_failure_total != 0
-                        || result.rejected_record_total != 0
-                })
-                .map(|result| result.route_identity.as_str())
-                .collect::<Vec<_>>();
-            return Some(compact_json(json!({
-                "code": code,
-                "class": if retryable {
-                    "completed_with_retryable_failures"
-                } else if code == "completed" {
-                    "completed"
-                } else {
-                    "completed_with_diagnostics"
-                },
-                "retryable": retryable,
-                "affected_routes": affected_routes,
-                "retryable_routes": retryable_routes
-                    .iter()
-                    .map(SourceRouteIdentity::as_str)
-                    .collect::<Vec<_>>(),
-                "blocked_routes": blocked_routes
-                    .iter()
-                    .map(SourceRouteIdentity::as_str)
-                    .collect::<Vec<_>>(),
-                "physical_attempt_id": self.physical_attempt_id(),
-                "retained_generation": (code != "completed" || !receipt.generation_changed)
-                    .then_some(receipt.published_generation.as_str()),
-                "published_generation": receipt.published_generation,
-                "retry_advice": retryable.then_some("retry_affected_routes"),
-            })));
+        match self.state {
+            SourceBackedRefreshState::Published => self.receipt.as_ref().map(|receipt| {
+                RefreshTerminalOutcome::from_published_receipt(receipt, self.physical_attempt_id())
+                    .to_json()
+            }),
+            SourceBackedRefreshState::Failed => self
+                .terminal_outcome
+                .as_ref()
+                .map(RefreshTerminalOutcome::to_json),
+            SourceBackedRefreshState::AdmissionPending
+            | SourceBackedRefreshState::Queued
+            | SourceBackedRefreshState::Running => None,
         }
-        self.failure_outcome.as_ref().map(|outcome| {
-            outcome.to_json(
-                self.physical_attempt_id(),
-                self.published_generation.as_deref(),
-                self.last_error.as_deref(),
-            )
-        })
     }
 
     fn apply_base_read_fields(&self, mut value: Value) -> Value {

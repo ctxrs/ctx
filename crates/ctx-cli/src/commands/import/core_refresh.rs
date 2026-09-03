@@ -84,7 +84,7 @@ fn import_terminal_core_success(status: &crate::semantic::RefreshStatus) -> Resu
     Ok(status
         .kind()?
         .terminal_outcome()
-        .is_some_and(|outcome| !outcome.code.is_failure()))
+        .is_some_and(|outcome| !outcome.code().is_failure()))
 }
 
 /// The import application turns this one Core terminal outcome into its
@@ -93,14 +93,14 @@ fn import_rerenders_terminal_missing_path(status: &crate::semantic::RefreshStatu
     Ok(status
         .kind()?
         .terminal_outcome()
-        .is_some_and(|outcome| outcome.code == RefreshOutcomeCode::ExplicitSourcePathMissing))
+        .is_some_and(|outcome| outcome.code() == RefreshOutcomeCode::ExplicitSourcePathMissing))
 }
 
 pub(super) fn is_terminal_missing_import_path(error: &anyhow::Error) -> bool {
     error
         .chain()
         .find_map(|cause| cause.downcast_ref::<crate::semantic::SourceBackedRefreshTerminalError>())
-        .map(|terminal| terminal.outcome().code)
+        .map(|terminal| terminal.outcome().code())
         == Some(RefreshOutcomeCode::ExplicitSourcePathMissing)
 }
 
@@ -111,21 +111,26 @@ mod tests {
     use super::*;
 
     fn terminal_status(code: &str, class: &str) -> crate::semantic::RefreshStatus {
+        let published = matches!(code, "completed" | "completed_with_rejections");
+        let request_state = if published { "published" } else { "failed" };
+        let published_generation = published.then_some("generation");
         let (retryable, retry_advice) = match code {
             "completed" | "completed_with_rejections" => (false, None),
             "explicit_source_path_missing" => (true, Some("inspect_sources")),
             "source_unavailable" => (true, Some("retry_affected_routes")),
             _ => panic!("unknown terminal status fixture `{code}`"),
         };
+        let detail = (code != "completed").then_some("content-bearing raw terminal detail");
         crate::semantic::RefreshStatus::parse_schema_v1(json!({
             "request_id": "logical-request",
-            "request_state": "failed",
+            "request_state": request_state,
             "logical_request_id": "logical-request",
             "logical_phase": "terminal",
             "physical_attempt_id": "physical-attempt",
-            "physical_attempt_state": "failed",
+            "physical_attempt_state": request_state,
             "progress_owner_request_id": "physical-attempt",
-            "progress_owner_attempt_state": "failed",
+            "progress_owner_attempt_state": request_state,
+            "published_generation": published_generation,
             "structured_outcome": {
                 "code": code,
                 "class": class,
@@ -134,16 +139,16 @@ mod tests {
                 "retryable_routes": [],
                 "blocked_routes": [],
                 "physical_attempt_id": "physical-attempt",
+                "published_generation": published_generation,
                 "retry_advice": retry_advice,
-                "detail": "content-bearing raw terminal detail"
+                "detail": detail
             },
             "progress": {
-                "phase": "failed",
+                "phase": request_state,
                 "completed_sources": 0,
                 "total_sources": 1,
                 "total_sources_known": true
-            },
-            "whole_run_stage": "failed"
+            }
         }))
         .unwrap()
     }

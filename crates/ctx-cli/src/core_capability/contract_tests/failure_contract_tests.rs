@@ -37,18 +37,16 @@ fn source_unclaimed_failure_writes_the_singleton_and_mixed_contracts() {
 
 #[test]
 fn paused_failure_raw_wire_matches_progress_and_final_response() {
-    for (wire_code, code, wire_class, class) in [
+    for (wire_code, code, wire_class) in [
         (
             "source_refresh_failed",
             RefreshOutcomeCode::SourceRefreshFailed,
             "internal",
-            RefreshOutcomeClass::Internal,
         ),
         (
             "all_provider_terminal_coverage_unavailable",
             RefreshOutcomeCode::AllProviderTerminalCoverageUnavailable,
             "coverage",
-            RefreshOutcomeClass::Coverage,
         ),
     ] {
         let root = tempfile::tempdir().unwrap();
@@ -97,21 +95,22 @@ fn paused_failure_raw_wire_matches_progress_and_final_response() {
         }))
         .unwrap();
         let route = SourceRouteIdentity::from_sha256(route_text).unwrap();
-        let terminal: anyhow::Error =
-            crate::semantic::SourceBackedRefreshTerminalError::from(RefreshTerminalOutcome {
+        let terminal: anyhow::Error = crate::semantic::SourceBackedRefreshTerminalError::from(
+            RefreshTerminalOutcome::new(
                 code,
-                class,
-                retryable: false,
-                affected_routes: BTreeSet::from([route.clone()]),
-                retryable_routes: BTreeSet::new(),
-                blocked_routes: BTreeSet::from([route]),
-                physical_attempt_id: physical_attempt_id.to_owned(),
-                retained_generation: Some(retained),
-                published_generation: None,
-                retry_advice: Some(RefreshRetryAdvice::InspectSources),
-                detail: Some(private_detail.clone()),
-            })
-            .into();
+                false,
+                BTreeSet::from([route.clone()]),
+                BTreeSet::new(),
+                BTreeSet::from([route]),
+                physical_attempt_id.to_owned(),
+                Some(retained),
+                None,
+                Some(RefreshRetryAdvice::InspectSources),
+                Some(private_detail.clone()),
+            )
+            .unwrap(),
+        )
+        .into();
         let mut output = Vec::new();
 
         let exit = capability_exit_code(run_with_protocol_io(
@@ -143,37 +142,4 @@ fn paused_failure_raw_wire_matches_progress_and_final_response() {
         assert_eq!(frames[1]["retryable"], false);
         assert!(!String::from_utf8(output).unwrap().contains(&private_detail));
     }
-}
-
-#[test]
-fn maximum_valid_failure_frame_writes_and_route_cap_fails_closed() {
-    let (status, output) = run_terminal_failure(
-        terminal_failure_with_blocked_routes(failure::MAX_FAILURE_ROUTES).into(),
-    );
-    assert_eq!(status, ExitCode::FAILURE);
-    assert_eq!(output.last(), Some(&b'\n'));
-    assert_eq!(output.iter().filter(|byte| **byte == b'\n').count(), 1);
-    let frame = &output[..output.len() - 1];
-    assert!(frame.len() <= MAX_RESPONSE_BYTES);
-    let response: Value = serde_json::from_slice(frame).unwrap();
-    assert_eq!(
-        response["details"]["affected_routes"]
-            .as_array()
-            .unwrap()
-            .len(),
-        failure::MAX_FAILURE_ROUTES
-    );
-    assert_eq!(
-        response["details"]["blocked_routes"]
-            .as_array()
-            .unwrap()
-            .len(),
-        failure::MAX_FAILURE_ROUTES
-    );
-
-    let (status, output) = run_terminal_failure(
-        terminal_failure_with_blocked_routes(failure::MAX_FAILURE_ROUTES + 1).into(),
-    );
-    assert_eq!(status, ExitCode::FAILURE);
-    assert!(output.is_empty());
 }

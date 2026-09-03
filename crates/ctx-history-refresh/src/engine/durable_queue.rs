@@ -130,9 +130,9 @@ impl CoreRefreshEngine {
         let attempt = find_attempt(&state, request_id)
             .ok_or_else(|| anyhow!("source refresh request `{request_id}` is unknown"))?;
         let retry_admission = attempt.state == SourceBackedRefreshState::Failed
-            && attempt.failure_outcome.as_ref().is_some_and(|outcome| {
-                outcome.code == RefreshOutcomeCode::SourceRefreshAdmissionFailed
-                    && outcome.retry_advice == Some(RefreshRetryAdvice::RetryAdmission)
+            && attempt.terminal_outcome.as_ref().is_some_and(|outcome| {
+                outcome.code() == RefreshOutcomeCode::SourceRefreshAdmissionFailed
+                    && outcome.retry_advice() == Some(RefreshRetryAdvice::RetryAdmission)
             });
         if !retry_admission {
             bail!("source refresh request `{request_id}` has no terminal retry-admission handoff");
@@ -301,8 +301,8 @@ fn authoritative_route_terminal_job(
     request_id: &str,
 ) -> Option<Value> {
     let attempt = find_attempt(state, request_id)?;
-    let outcome = attempt.failure_outcome.as_ref()?;
-    if outcome.affected_routes.is_empty() {
+    let outcome = attempt.terminal_outcome.as_ref()?;
+    if outcome.affected_routes().is_empty() {
         return None;
     }
     durable_job_json(state, request_id)

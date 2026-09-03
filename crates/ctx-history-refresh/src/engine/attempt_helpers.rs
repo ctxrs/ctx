@@ -89,17 +89,21 @@ pub(super) fn source_backed_refresh_error_summary(error: &anyhow::Error) -> Stri
 pub(super) fn source_backed_refresh_failure_outcome(
     error: &anyhow::Error,
     attempted_routes: &BTreeSet<SourceRouteIdentity>,
-) -> SourceBackedRefreshFailureOutcome {
+    physical_attempt_id: &str,
+) -> Result<RefreshTerminalOutcome> {
     if error
         .chain()
         .any(|cause| cause.downcast_ref::<ExplicitSourcePathMissing>().is_some())
     {
-        return SourceBackedRefreshFailureOutcome::new(
+        return RefreshTerminalOutcome::with_uniform_route_disposition(
             RefreshOutcomeCode::ExplicitSourcePathMissing,
-            RefreshOutcomeClass::Unavailable,
             true,
             attempted_routes.clone(),
+            physical_attempt_id.to_owned(),
+            None,
+            None,
             Some(RefreshRetryAdvice::InspectSources),
+            None,
         );
     }
     if let Some(registration_failures) = error
@@ -115,12 +119,15 @@ pub(super) fn source_backed_refresh_failure_outcome(
             .iter()
             .any(|failure| failure.kind() == SourceBackedRouteErrorKind::Internal)
         {
-            return SourceBackedRefreshFailureOutcome::new(
+            return RefreshTerminalOutcome::with_uniform_route_disposition(
                 RefreshOutcomeCode::SourceRefreshFailed,
-                RefreshOutcomeClass::Internal,
                 true,
                 affected_routes,
+                physical_attempt_id.to_owned(),
+                None,
+                None,
                 Some(RefreshRetryAdvice::RetryRequest),
+                None,
             );
         }
         let (retryable_routes, blocked_routes): (BTreeSet<_>, BTreeSet<_>) = failures
@@ -142,37 +149,19 @@ pub(super) fn source_backed_refresh_failure_outcome(
             .any(|failure| failure.kind() == SourceBackedRouteErrorKind::ResourceUnavailable);
         let first_kind = failures[0].kind();
         let homogeneous = failures.iter().all(|failure| failure.kind() == first_kind);
-        let (code, class) = if resource_unavailable {
-            (
-                RefreshOutcomeCode::ResourceUnavailable,
-                RefreshOutcomeClass::ResourceUnavailable,
-            )
+        let code = if resource_unavailable {
+            RefreshOutcomeCode::ResourceUnavailable
         } else if homogeneous {
             match first_kind {
-                SourceBackedRouteErrorKind::Unavailable => (
-                    RefreshOutcomeCode::SourceUnavailable,
-                    RefreshOutcomeClass::Unavailable,
-                ),
-                SourceBackedRouteErrorKind::SourceChanged => (
-                    RefreshOutcomeCode::SourceChanged,
-                    RefreshOutcomeClass::SourceChanged,
-                ),
-                SourceBackedRouteErrorKind::InvalidSource => (
-                    RefreshOutcomeCode::MalformedSource,
-                    RefreshOutcomeClass::Unreadable,
-                ),
-                SourceBackedRouteErrorKind::Unsupported => (
-                    RefreshOutcomeCode::UnsupportedSchema,
-                    RefreshOutcomeClass::Incompatible,
-                ),
+                SourceBackedRouteErrorKind::Unavailable => RefreshOutcomeCode::SourceUnavailable,
+                SourceBackedRouteErrorKind::SourceChanged => RefreshOutcomeCode::SourceChanged,
+                SourceBackedRouteErrorKind::InvalidSource => RefreshOutcomeCode::MalformedSource,
+                SourceBackedRouteErrorKind::Unsupported => RefreshOutcomeCode::UnsupportedSchema,
                 SourceBackedRouteErrorKind::ResourceUnavailable
                 | SourceBackedRouteErrorKind::Internal => unreachable!(),
             }
         } else {
-            (
-                RefreshOutcomeCode::SourceFailures,
-                RefreshOutcomeClass::Mixed,
-            )
+            RefreshOutcomeCode::SourceFailures
         };
         let retryable = !retryable_routes.is_empty();
         let retry_advice = if retryable {
@@ -182,13 +171,16 @@ pub(super) fn source_backed_refresh_failure_outcome(
         } else {
             RefreshRetryAdvice::InspectSources
         };
-        return SourceBackedRefreshFailureOutcome::with_route_dispositions(
+        return RefreshTerminalOutcome::with_route_dispositions(
             code,
-            class,
             retryable,
             retryable_routes,
             blocked_routes,
+            physical_attempt_id.to_owned(),
+            None,
+            None,
             Some(retry_advice),
+            None,
         );
     }
     if error.chain().any(|cause| {
@@ -196,12 +188,15 @@ pub(super) fn source_backed_refresh_failure_outcome(
             .downcast_ref::<ZeroSourcePublicationBlocked>()
             .is_some()
     }) {
-        return SourceBackedRefreshFailureOutcome::new(
+        return RefreshTerminalOutcome::with_uniform_route_disposition(
             RefreshOutcomeCode::AllProviderTerminalCoverageUnavailable,
-            RefreshOutcomeClass::Coverage,
             true,
             attempted_routes.clone(),
+            physical_attempt_id.to_owned(),
+            None,
+            None,
             Some(RefreshRetryAdvice::RetryRequest),
+            None,
         );
     }
     if let Some(failed_routes) = error.chain().find_map(|cause| {
@@ -221,27 +216,9 @@ pub(super) fn source_backed_refresh_failure_outcome(
         .into_iter()
         .filter(|class| failed_routes.class_total(*class) != 0)
         .collect::<Vec<_>>();
-        let (code, class) = match classes.as_slice() {
-            [SourceBackedSourceFailureClass::Unavailable] => (
-                RefreshOutcomeCode::SourceUnavailable,
-                RefreshOutcomeClass::Unavailable,
-            ),
-            [SourceBackedSourceFailureClass::SourceChanged] => (
-                RefreshOutcomeCode::SourceChanged,
-                RefreshOutcomeClass::SourceChanged,
-            ),
-            [SourceBackedSourceFailureClass::Unreadable] => (
-                RefreshOutcomeCode::MalformedSource,
-                RefreshOutcomeClass::Unreadable,
-            ),
-            [SourceBackedSourceFailureClass::Incompatible] => (
-                RefreshOutcomeCode::UnsupportedSchema,
-                RefreshOutcomeClass::Incompatible,
-            ),
-            _ => (
-                RefreshOutcomeCode::SourceFailures,
-                RefreshOutcomeClass::Mixed,
-            ),
+        let code = match classes.as_slice() {
+            [class] => source_failure_code(*class),
+            _ => RefreshOutcomeCode::SourceFailures,
         };
         let retryable = classes.iter().any(|class| {
             matches!(
@@ -262,17 +239,20 @@ pub(super) fn source_backed_refresh_failure_outcome(
         });
         let (retryable_routes, blocked_routes) =
             authoritative_route_dispositions(attempted_routes, known, retryable);
-        return SourceBackedRefreshFailureOutcome::with_route_dispositions(
+        return RefreshTerminalOutcome::with_route_dispositions(
             code,
-            class,
             retryable,
             retryable_routes,
             blocked_routes,
+            physical_attempt_id.to_owned(),
+            None,
+            None,
             Some(if retryable {
                 RefreshRetryAdvice::RetryAffectedRoutes
             } else {
                 RefreshRetryAdvice::InspectSources
             }),
+            None,
         );
     }
 
@@ -307,13 +287,10 @@ pub(super) fn source_backed_refresh_failure_outcome(
                         | SourceBackedSourceFailureClass::SourceChanged
                 )
             });
-        let (code, class) = if diagnostics_complete && retained_classes.len() == 1 {
-            source_failure_code_and_class(retained_classes[0])
+        let code = if diagnostics_complete && retained_classes.len() == 1 {
+            source_failure_code(retained_classes[0])
         } else {
-            (
-                RefreshOutcomeCode::LogicalSourceFailures,
-                RefreshOutcomeClass::Mixed,
-            )
+            RefreshOutcomeCode::LogicalSourceFailures
         };
         let known = failed_sources.failures().iter().map(|failure| {
             (
@@ -327,17 +304,20 @@ pub(super) fn source_backed_refresh_failure_outcome(
         });
         let (retryable_routes, blocked_routes) =
             authoritative_route_dispositions(attempted_routes, known, retryable);
-        return SourceBackedRefreshFailureOutcome::with_route_dispositions(
+        return RefreshTerminalOutcome::with_route_dispositions(
             code,
-            class,
             retryable,
             retryable_routes,
             blocked_routes,
+            physical_attempt_id.to_owned(),
+            None,
+            None,
             Some(if retryable {
                 RefreshRetryAdvice::RetryAffectedRoutes
             } else {
                 RefreshRetryAdvice::InspectSources
             }),
+            None,
         );
     }
 
@@ -345,50 +325,47 @@ pub(super) fn source_backed_refresh_failure_outcome(
         .chain()
         .find_map(|cause| cause.downcast_ref::<SourceBackedRouteError>())
     {
-        let (code, class, retryable, retry_advice) = match route_error.kind {
+        let (code, retryable, retry_advice) = match route_error.kind {
             SourceBackedRouteErrorKind::Unavailable => (
                 RefreshOutcomeCode::SourceUnavailable,
-                RefreshOutcomeClass::Unavailable,
                 true,
                 RefreshRetryAdvice::RetryAffectedRoutes,
             ),
             SourceBackedRouteErrorKind::SourceChanged => (
                 RefreshOutcomeCode::SourceChanged,
-                RefreshOutcomeClass::SourceChanged,
                 true,
                 RefreshRetryAdvice::RetryAffectedRoutes,
             ),
             SourceBackedRouteErrorKind::InvalidSource => (
                 RefreshOutcomeCode::MalformedSource,
-                RefreshOutcomeClass::Unreadable,
                 false,
                 RefreshRetryAdvice::InspectSources,
             ),
             SourceBackedRouteErrorKind::Unsupported => (
                 RefreshOutcomeCode::UnsupportedSchema,
-                RefreshOutcomeClass::Incompatible,
                 false,
                 RefreshRetryAdvice::UpgradeOrReconfigure,
             ),
             SourceBackedRouteErrorKind::ResourceUnavailable => (
                 RefreshOutcomeCode::ResourceUnavailable,
-                RefreshOutcomeClass::ResourceUnavailable,
                 true,
                 RefreshRetryAdvice::RetryAffectedRoutes,
             ),
             SourceBackedRouteErrorKind::Internal => (
                 RefreshOutcomeCode::SourceRefreshFailed,
-                RefreshOutcomeClass::Internal,
                 true,
                 RefreshRetryAdvice::RetryRequest,
             ),
         };
-        return SourceBackedRefreshFailureOutcome::new(
+        return RefreshTerminalOutcome::with_uniform_route_disposition(
             code,
-            class,
             retryable,
             attempted_routes.clone(),
+            physical_attempt_id.to_owned(),
+            None,
+            None,
             Some(retry_advice),
+            None,
         );
     }
 
@@ -396,10 +373,9 @@ pub(super) fn source_backed_refresh_failure_outcome(
         .chain()
         .find_map(|cause| cause.downcast_ref::<IndexError>())
     {
-        let (code, class, retryable, retry_advice) = match index_error {
+        let (code, retryable, retry_advice) = match index_error {
             IndexError::SourceInvalidated(_) | IndexError::CompleteInventoryInvalidated { .. } => (
                 RefreshOutcomeCode::SourceChanged,
-                RefreshOutcomeClass::SourceChanged,
                 true,
                 RefreshRetryAdvice::RetryAffectedRoutes,
             ),
@@ -407,35 +383,34 @@ pub(super) fn source_backed_refresh_failure_outcome(
             | IndexError::IndexMemoryTooSmall { .. }
             | IndexError::VerificationScratchLimitExceeded { .. } => (
                 RefreshOutcomeCode::ResourceUnavailable,
-                RefreshOutcomeClass::ResourceUnavailable,
                 true,
                 RefreshRetryAdvice::RetryRequest,
             ),
             corruption if index_error_is_corruption(corruption) => (
                 RefreshOutcomeCode::IndexCorruption,
-                RefreshOutcomeClass::Corruption,
                 false,
                 RefreshRetryAdvice::RebuildIndex,
             ),
             incompatible if generation_incompatibility_requires_rebuild(incompatible) => (
                 RefreshOutcomeCode::IndexIncompatible,
-                RefreshOutcomeClass::Incompatible,
                 false,
                 RefreshRetryAdvice::RebuildIndex,
             ),
             _ => (
                 RefreshOutcomeCode::SourceRefreshFailed,
-                RefreshOutcomeClass::Internal,
                 true,
                 RefreshRetryAdvice::RetryRequest,
             ),
         };
-        return SourceBackedRefreshFailureOutcome::new(
+        return RefreshTerminalOutcome::with_uniform_route_disposition(
             code,
-            class,
             retryable,
             attempted_routes.clone(),
+            physical_attempt_id.to_owned(),
+            None,
+            None,
             Some(retry_advice),
+            None,
         );
     }
 
@@ -468,65 +443,70 @@ pub(super) fn source_backed_refresh_failure_outcome(
             let (retryable_routes, blocked_routes) =
                 authoritative_route_dispositions(attempted_routes, known, true);
             let retryable = !retryable_routes.is_empty();
-            return SourceBackedRefreshFailureOutcome::with_route_dispositions(
+            return RefreshTerminalOutcome::with_route_dispositions(
                 RefreshOutcomeCode::SourceUnclaimed,
-                RefreshOutcomeClass::Coverage,
                 retryable,
                 retryable_routes,
                 blocked_routes,
+                physical_attempt_id.to_owned(),
+                None,
+                None,
                 Some(if retryable {
                     RefreshRetryAdvice::RetryRetryableRoutesAndInspectBlocked
                 } else {
                     RefreshRetryAdvice::InspectSources
                 }),
+                None,
             );
         }
-        let (code, class, retryable, retry_advice) = match coordinator_error {
+        let (code, retryable, retry_advice) = match coordinator_error {
             SourceBackedCoordinatorError::Index(error) if index_error_is_corruption(error) => (
                 RefreshOutcomeCode::IndexCorruption,
-                RefreshOutcomeClass::Corruption,
                 false,
                 RefreshRetryAdvice::RebuildIndex,
             ),
             SourceBackedCoordinatorError::UnavailableRoute { .. } => (
                 RefreshOutcomeCode::SourceUnavailable,
-                RefreshOutcomeClass::Unavailable,
                 true,
                 RefreshRetryAdvice::RetryAffectedRoutes,
             ),
             SourceBackedCoordinatorError::InvalidRoute { .. }
             | SourceBackedCoordinatorError::InvalidRefreshScope { .. } => (
                 RefreshOutcomeCode::UnsupportedSchema,
-                RefreshOutcomeClass::Incompatible,
                 false,
                 RefreshRetryAdvice::UpgradeOrReconfigure,
             ),
             _ => (
                 RefreshOutcomeCode::SourceRefreshFailed,
-                RefreshOutcomeClass::Internal,
                 true,
                 RefreshRetryAdvice::RetryRequest,
             ),
         };
-        return SourceBackedRefreshFailureOutcome::new(
+        return RefreshTerminalOutcome::with_uniform_route_disposition(
             code,
-            class,
             retryable,
             attempted_routes.clone(),
+            physical_attempt_id.to_owned(),
+            None,
+            None,
             Some(retry_advice),
+            None,
         );
     }
 
-    SourceBackedRefreshFailureOutcome::new(
+    RefreshTerminalOutcome::with_uniform_route_disposition(
         RefreshOutcomeCode::SourceRefreshFailed,
-        RefreshOutcomeClass::Internal,
         true,
         attempted_routes.clone(),
+        physical_attempt_id.to_owned(),
+        None,
+        None,
         Some(if attempted_routes.is_empty() {
             RefreshRetryAdvice::RetryRequest
         } else {
             RefreshRetryAdvice::RetryAffectedRoutes
         }),
+        None,
     )
 }
 
@@ -553,26 +533,12 @@ fn source_failure_class_is_retryable(class: SourceBackedSourceFailureClass) -> b
     )
 }
 
-fn source_failure_code_and_class(
-    class: SourceBackedSourceFailureClass,
-) -> (RefreshOutcomeCode, RefreshOutcomeClass) {
+fn source_failure_code(class: SourceBackedSourceFailureClass) -> RefreshOutcomeCode {
     match class {
-        SourceBackedSourceFailureClass::Unavailable => (
-            RefreshOutcomeCode::SourceUnavailable,
-            RefreshOutcomeClass::Unavailable,
-        ),
-        SourceBackedSourceFailureClass::SourceChanged => (
-            RefreshOutcomeCode::SourceChanged,
-            RefreshOutcomeClass::SourceChanged,
-        ),
-        SourceBackedSourceFailureClass::Unreadable => (
-            RefreshOutcomeCode::MalformedSource,
-            RefreshOutcomeClass::Unreadable,
-        ),
-        SourceBackedSourceFailureClass::Incompatible => (
-            RefreshOutcomeCode::UnsupportedSchema,
-            RefreshOutcomeClass::Incompatible,
-        ),
+        SourceBackedSourceFailureClass::Unavailable => RefreshOutcomeCode::SourceUnavailable,
+        SourceBackedSourceFailureClass::SourceChanged => RefreshOutcomeCode::SourceChanged,
+        SourceBackedSourceFailureClass::Unreadable => RefreshOutcomeCode::MalformedSource,
+        SourceBackedSourceFailureClass::Incompatible => RefreshOutcomeCode::UnsupportedSchema,
     }
 }
 
@@ -704,7 +670,7 @@ pub(super) fn new_refresh_attempt(
         trigger: metadata.trigger,
         trigger_provenance: metadata.trigger_provenance,
         failure_type: None,
-        failure_outcome: None,
+        terminal_outcome: None,
         last_error: None,
     }
 }

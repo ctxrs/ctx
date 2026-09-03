@@ -49,7 +49,7 @@ fn terminal_status(
     state: RefreshRequestState,
     code: &str,
     class: &str,
-    failure: bool,
+    presentation: RefreshTerminalPresentation,
 ) -> RefreshProgressSnapshot {
     RefreshProgressSnapshot::new(
         Some("logical-request".to_owned()),
@@ -72,7 +72,7 @@ fn terminal_status(
                 published_generation: None,
                 retry_advice: None,
                 detail: None,
-                failure,
+                presentation,
             })),
         }),
         RefreshProgress {
@@ -309,7 +309,7 @@ fn presentation_eta_honors_usefulness_floor_and_terminal_state() {
         RefreshRequestState::Published,
         "completed",
         "completed",
-        false,
+        RefreshTerminalPresentation::Complete,
     );
     terminal.progress.elapsed_millis = Some(1_000);
     terminal.progress.estimated_remaining_millis = Some(2_100);
@@ -327,7 +327,7 @@ fn setup_terminal_reconciles_empty_refresh_counters_with_committed_history() {
         RefreshRequestState::Published,
         "completed",
         "completed",
-        false,
+        RefreshTerminalPresentation::Complete,
     );
     terminal.set_presentation_agent_histories(Some(vec!["Codex".to_owned()]));
     terminal.set_terminal_history_totals(2, 5, 1, 2_346);
@@ -416,7 +416,7 @@ fn terminal_state_ignores_stale_activity_and_preserves_authoritative_counters() 
         RefreshRequestState::Published,
         "completed",
         "completed",
-        false,
+        RefreshTerminalPresentation::Complete,
     );
     snapshot.progress.current_source_progress = Some(RefreshCurrentSourceProgress {
         stage: RefreshCurrentSourceProgressStage::IndexWriting,
@@ -490,7 +490,7 @@ fn setup_terminal_omits_stale_estimated_remaining_row() {
         RefreshRequestState::Published,
         "completed",
         "completed",
-        false,
+        RefreshTerminalPresentation::Complete,
     );
     snapshot.progress.estimated_remaining_millis = Some(5_000);
     snapshot.set_presentation_agent_histories(Some(vec!["Codex".to_owned()]));
@@ -539,26 +539,33 @@ fn structured_terminal_outcome_alone_decides_done() {
             RefreshRequestState::Published,
             "completed",
             "completed",
-            false,
+            RefreshTerminalPresentation::Complete,
             "History refresh complete",
         ),
         (
             RefreshRequestState::Published,
             "completed_with_rejections",
             "completed_with_diagnostics",
-            false,
+            RefreshTerminalPresentation::Complete,
             "History refresh complete",
+        ),
+        (
+            RefreshRequestState::Published,
+            "completed_with_source_failures",
+            "completed_with_diagnostics",
+            RefreshTerminalPresentation::CompleteWithIssues,
+            "History refresh complete with issues",
         ),
         (
             RefreshRequestState::Failed,
             "source_refresh_failed",
             "internal",
-            true,
+            RefreshTerminalPresentation::Failed,
             "History refresh failed",
         ),
     ];
-    for (state, code, class, failure, label) in cases {
-        let snapshot = terminal_status(state, code, class, failure);
+    for (state, code, class, presentation, label) in cases {
+        let snapshot = terminal_status(state, code, class, presentation);
         assert!(snapshot.is_terminal());
         assert_eq!(machine_refresh_label(&snapshot), label);
     }

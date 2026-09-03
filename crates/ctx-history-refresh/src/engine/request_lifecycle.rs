@@ -501,7 +501,17 @@ impl CoreRefreshEngine {
         let execution_failure_outcome = execution
             .as_ref()
             .err()
-            .map(|error| source_backed_refresh_failure_outcome(error, &attempted_routes));
+            .map(|error| {
+                source_backed_refresh_failure_outcome(error, &attempted_routes, &request_id)
+            })
+            .transpose()
+            .ok()?;
+        let verification_failure_outcome = source_backed_refresh_failure_outcome(
+            &anyhow!("terminal source refresh verification failed"),
+            &attempted_routes,
+            &request_id,
+        )
+        .ok()?;
         let observed_generation = probe();
         let (verified, observed_for_status) = match (execution, observed_generation) {
             (Ok(publication), Ok(Some(observed))) if publication.generation_id == observed => {
@@ -629,7 +639,7 @@ impl CoreRefreshEngine {
                     attempt.receipt = Some(receipt.clone());
                     attempt.timings = Some(publication.timings);
                     attempt.failure_type = None;
-                    attempt.failure_outcome = None;
+                    attempt.terminal_outcome = None;
                     attempt.last_error = None;
                     attempt.published_generation != previous_generation
                 };
@@ -657,6 +667,10 @@ impl CoreRefreshEngine {
                 (false, did_work, finish.coverage_certificate, terminal_job)
             }
             Err(error) => {
+                let terminal_outcome = execution_failure_outcome
+                    .unwrap_or(verification_failure_outcome)
+                    .with_failure_context(observed_for_status.clone(), Some(error.clone()))
+                    .ok()?;
                 {
                     let attempt = find_attempt_mut(&mut state, &request_id)?;
                     attempt.finished_at_ms = Some(utc_now().timestamp_millis());
@@ -671,13 +685,7 @@ impl CoreRefreshEngine {
                     attempt.state = SourceBackedRefreshState::Failed;
                     attempt.progress.phase = "failed".to_owned();
                     attempt.failure_type = execution_failure_type;
-                    attempt.failure_outcome =
-                        Some(execution_failure_outcome.unwrap_or_else(|| {
-                            source_backed_refresh_failure_outcome(
-                                &anyhow!("terminal source refresh verification failed"),
-                                &attempted_routes,
-                            )
-                        }));
+                    attempt.terminal_outcome = Some(terminal_outcome);
                     attempt.last_error = Some(error);
                 }
                 update_automatic_retry_after_failure(&mut state, &request_id);
@@ -780,7 +788,7 @@ fn update_automatic_retry_after_publication(state: &mut CoreRefreshEngineState, 
 fn update_automatic_retry_after_failure(state: &mut CoreRefreshEngineState, request_id: &str) {
     let Some((outcome, observations, terminal_error)) =
         find_attempt(state, request_id).and_then(|attempt| {
-            let outcome = attempt.failure_outcome.as_ref()?;
+            let outcome = attempt.terminal_outcome.as_ref()?;
             Some((
                 outcome.clone(),
                 attempt.route_observations.clone(),
@@ -793,7 +801,7 @@ fn update_automatic_retry_after_failure(state: &mut CoreRefreshEngineState, requ
 
     let mut newly_paused = BTreeSet::new();
     if outcome.is_automatic_retry_eligible() {
-        for route in &outcome.retryable_routes {
+        for route in outcome.retryable_routes() {
             let Some(observation) = observations.get(route) else {
                 continue;
             };
@@ -823,7 +831,7 @@ fn update_automatic_retry_after_failure(state: &mut CoreRefreshEngineState, requ
 
     let checkpoints = state.automatic_retry_checkpoints.clone();
     if let Some(attempt) = find_attempt_mut(state, request_id) {
-        if let Some(outcome) = attempt.failure_outcome.as_mut() {
+        if let Some(outcome) = attempt.terminal_outcome.as_mut() {
             outcome.pause_automatic_retry_routes(&newly_paused);
         }
         attempt.automatic_retry_checkpoints = checkpoints;
@@ -842,7 +850,7 @@ pub(in crate::engine) fn rearm_build_changed_automatic_retry_checkpoints(
     for route in &rearmed {
         attempt.automatic_retry_checkpoints.remove(route);
     }
-    if let Some(outcome) = attempt.failure_outcome.as_mut() {
+    if let Some(outcome) = attempt.terminal_outcome.as_mut() {
         outcome.rearm_automatic_retry_routes(&rearmed);
     }
     rearmed

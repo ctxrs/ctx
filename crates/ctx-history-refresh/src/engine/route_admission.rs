@@ -228,18 +228,20 @@ impl CoreRefreshEngine {
             if terminal_failed {
                 let blocked = attempt
                     .as_ref()
-                    .and_then(|attempt| attempt.failure_outcome.as_ref())
-                    .is_some_and(|outcome| outcome.blocked_routes.contains(admission.route()));
+                    .and_then(|attempt| attempt.terminal_outcome.as_ref())
+                    .is_some_and(|outcome| outcome.blocked_routes().contains(admission.route()));
                 if blocked {
                     state.route_retry_intents.remove(admission.route());
                     let actually_paused = state.dirty_routes.permanent_failure(&admission);
                     let automatic_pause = attempt.as_ref().is_some_and(|attempt| {
-                        attempt.failure_outcome.as_ref().is_some_and(
-                            SourceBackedRefreshFailureOutcome::is_automatic_retry_eligible,
-                        ) && attempt
-                            .automatic_retry_checkpoints
-                            .get(admission.route())
-                            .is_some_and(SourceBackedAutomaticRetryCheckpoint::is_paused)
+                        attempt
+                            .terminal_outcome
+                            .as_ref()
+                            .is_some_and(RefreshTerminalOutcome::is_automatic_retry_eligible)
+                            && attempt
+                                .automatic_retry_checkpoints
+                                .get(admission.route())
+                                .is_some_and(SourceBackedAutomaticRetryCheckpoint::is_paused)
                     });
                     if automatic_pause && !actually_paused {
                         stale_automatic_pauses.insert(admission.route().clone());
@@ -363,7 +365,7 @@ impl CoreRefreshEngine {
             }
             let checkpoints = state.automatic_retry_checkpoints.clone();
             if let Some(attempt) = find_attempt_mut(state, request_id) {
-                if let Some(outcome) = attempt.failure_outcome.as_mut() {
+                if let Some(outcome) = attempt.terminal_outcome.as_mut() {
                     outcome.rearm_automatic_retry_routes(&stale_automatic_pauses);
                 }
                 attempt.automatic_retry_checkpoints = checkpoints;
@@ -375,8 +377,8 @@ impl CoreRefreshEngine {
         {
             if attempt
                 .as_ref()
-                .and_then(|attempt| attempt.failure_outcome.as_ref())
-                .is_some_and(|outcome| !outcome.affected_routes.is_empty())
+                .and_then(|attempt| attempt.terminal_outcome.as_ref())
+                .is_some_and(|outcome| !outcome.affected_routes().is_empty())
                 && state.pending_scheduler_retry_root_id.as_deref() == Some(request_id)
             {
                 state.pending_scheduler_retry_root_id = None;
