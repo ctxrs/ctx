@@ -460,14 +460,14 @@ fn coordinate_source_backed_refresh_with_policy(
         let Some(pin) = pin_published_generation(data_root)? else {
             return Err(SourceBackedRefreshPendingPublication::new(
                 request_id,
-                refresh_request_state_name(request_state).to_owned(),
+                request_state.as_str().to_owned(),
                 source_count,
             )
             .into());
         };
         return Ok(SourceBackedRefreshObservation {
             mode,
-            status: refresh_request_state_name(request_state).to_owned(),
+            status: request_state.as_str().to_owned(),
             request_id: Some(request_id),
             daemon_available: true,
             source_count,
@@ -833,16 +833,6 @@ fn response_request_id(response: &Value, label: &str) -> Result<String> {
 #[cfg(test)]
 fn source_refresh_protocol_state(response: &Value) -> Result<RefreshRequestState> {
     Ok(source_refresh_protocol_status(response)?.request_state())
-}
-
-fn refresh_request_state_name(state: RefreshRequestState) -> &'static str {
-    match state {
-        RefreshRequestState::AdmissionPending => "admission_pending",
-        RefreshRequestState::Queued => "queued",
-        RefreshRequestState::Running => "running",
-        RefreshRequestState::Published => "published",
-        RefreshRequestState::Failed => "failed",
-    }
 }
 
 fn source_refresh_protocol_status(response: &Value) -> Result<RefreshStatusKind> {

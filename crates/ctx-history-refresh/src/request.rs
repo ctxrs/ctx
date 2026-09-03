@@ -204,6 +204,20 @@ pub enum RefreshRequestState {
 }
 
 impl RefreshRequestState {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::AdmissionPending => "admission_pending",
+            Self::Queued => "queued",
+            Self::Running => "running",
+            Self::Published => "published",
+            Self::Failed => "failed",
+        }
+    }
+
+    pub const fn is_active(self) -> bool {
+        matches!(self, Self::AdmissionPending | Self::Queued | Self::Running)
+    }
+
     pub const fn is_terminal(self) -> bool {
         matches!(self, Self::Published | Self::Failed)
     }
@@ -220,6 +234,33 @@ impl std::str::FromStr for RefreshRequestState {
             "published" => Ok(Self::Published),
             "failed" => Ok(Self::Failed),
             _ => bail!("source refresh response has unknown typed state `{value}`"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod refresh_request_state_tests {
+    use super::RefreshRequestState;
+
+    #[test]
+    fn wire_names_and_lifecycle_partitions_are_canonical() {
+        let cases = [
+            (
+                RefreshRequestState::AdmissionPending,
+                "admission_pending",
+                true,
+            ),
+            (RefreshRequestState::Queued, "queued", true),
+            (RefreshRequestState::Running, "running", true),
+            (RefreshRequestState::Published, "published", false),
+            (RefreshRequestState::Failed, "failed", false),
+        ];
+
+        for (state, wire_name, active) in cases {
+            assert_eq!(state.as_str(), wire_name);
+            assert_eq!(wire_name.parse::<RefreshRequestState>().unwrap(), state);
+            assert_eq!(state.is_active(), active);
+            assert_eq!(state.is_terminal(), !active);
         }
     }
 }
