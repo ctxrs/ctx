@@ -31,7 +31,14 @@ runtime_archive=""
 coreml_archive=""
 runtime_platform=""
 runtime_version="1.27.0"
-timeout_seconds="${CTX_SEMANTIC_SMOKE_TIMEOUT_SECONDS:-900}"
+timeout_max_seconds=900
+if [[ "${CTX_SEMANTIC_SMOKE_TIMEOUT_SECONDS+x}" == "x" ]]; then
+  timeout_seconds="${CTX_SEMANTIC_SMOKE_TIMEOUT_SECONDS}"
+  timeout_source="CTX_SEMANTIC_SMOKE_TIMEOUT_SECONDS"
+else
+  timeout_seconds=900
+  timeout_source="--timeout-seconds"
+fi
 keep_root=0
 coreml_mode=0
 require_authoritative=0
@@ -67,6 +74,7 @@ while (($# > 0)); do
     --timeout-seconds)
       shift
       timeout_seconds="${1:-}"
+      timeout_source="--timeout-seconds"
       ;;
     --keep-root)
       keep_root=1
@@ -91,8 +99,16 @@ if [[ -z "${runtime_platform}" ]]; then
   echo "error: --runtime-platform is required" >&2
   exit 2
 fi
-if [[ ! "${timeout_seconds}" =~ ^[0-9]+$ ]] || ((timeout_seconds < 30)); then
-  echo "error: --timeout-seconds must be an integer >= 30" >&2
+timeout_is_valid=1
+if [[ ! "${timeout_seconds}" =~ ^[1-9][0-9]*$ ]]; then
+  timeout_is_valid=0
+elif ((${#timeout_seconds} > 3)); then
+  timeout_is_valid=0
+elif ((timeout_seconds < 30 || timeout_seconds > timeout_max_seconds)); then
+  timeout_is_valid=0
+fi
+if [[ "${timeout_is_valid}" != "1" ]]; then
+  echo "error: ${timeout_source} must be a canonical integer between 30 and 900 seconds" >&2
   exit 2
 fi
 
@@ -187,16 +203,68 @@ fi
 unset LD_LIBRARY_PATH DYLD_LIBRARY_PATH LD_PRELOAD DYLD_INSERT_LIBRARIES \
   DYLD_FORCE_FLAT_NAMESPACE DYLD_FALLBACK_LIBRARY_PATH
 
+nanoseconds_per_second=1000000000
+monotonic_ns() {
+  python3 -I -c 'import time; print(time.monotonic_ns())'
+}
+
+deadline_after_seconds() {
+  local duration_seconds="$1"
+  local maximum_deadline_ns="${2:-}"
+  local now_ns
+  local result_ns
+
+  now_ns="$(monotonic_ns)"
+  if [[ ! "${now_ns}" =~ ^[1-9][0-9]*$ ]] || ((${#now_ns} > 18)); then
+    echo "error: monotonic clock returned an invalid value" >&2
+    return 1
+  fi
+  result_ns=$((now_ns + duration_seconds * nanoseconds_per_second))
+  if [[ -n "${maximum_deadline_ns}" ]] && ((result_ns > maximum_deadline_ns)); then
+    result_ns="${maximum_deadline_ns}"
+  fi
+  printf '%s\n' "${result_ns}"
+}
+
+remaining_ns() {
+  local deadline_ns="$1"
+  local now_ns
+
+  now_ns="$(monotonic_ns)"
+  if [[ ! "${now_ns}" =~ ^[1-9][0-9]*$ ]] || ((${#now_ns} > 18)); then
+    echo "error: monotonic clock returned an invalid value" >&2
+    return 1
+  fi
+  if ((now_ns >= deadline_ns)); then
+    printf '0\n'
+  else
+    printf '%s\n' "$((deadline_ns - now_ns))"
+  fi
+}
+
+decimal_seconds_from_ns() {
+  local duration_ns="$1"
+  printf '%d.%09d\n' \
+    "$((duration_ns / nanoseconds_per_second))" \
+    "$((duration_ns % nanoseconds_per_second))"
+}
+
 run_bounded() {
-  local limit_seconds="$1"
+  local deadline_ns="$1"
   shift
-  python3 -I - "${limit_seconds}" "$@" <<'PY'
+  python3 -I - "${deadline_ns}" "$@" <<'PY'
 import subprocess
 import os
 import re
 import sys
+import time
 
-limit = int(sys.argv[1])
+deadline_ns = int(sys.argv[1])
+remaining_ns = deadline_ns - time.monotonic_ns()
+if remaining_ns <= 0:
+    print("error: smoke command exceeded monotonic deadline", file=sys.stderr)
+    raise SystemExit(124)
+limit = remaining_ns / 1_000_000_000
 command = sys.argv[2:]
 pass_fds = set()
 for argument in command:
@@ -212,7 +280,7 @@ try:
         pass_fds=tuple(sorted(pass_fds)),
     )
 except subprocess.TimeoutExpired:
-    print(f"error: smoke command exceeded {limit} seconds", file=sys.stderr)
+    print("error: smoke command exceeded monotonic deadline", file=sys.stderr)
     raise SystemExit(124)
 raise SystemExit(result.returncode)
 PY
@@ -310,7 +378,8 @@ fi
   echo "error: ctx binary is not executable: ${ctx_source}" >&2
   exit 1
 }
-ctx_version="$(run_bounded 30 "${ctx_source}" --version | awk 'NR == 1 { print $2 }')"
+version_deadline_ns="$(deadline_after_seconds 30)"
+ctx_version="$(run_bounded "${version_deadline_ns}" "${ctx_source}" --version | awk 'NR == 1 { print $2 }')"
 [[ -n "${ctx_version}" ]] || {
   echo "error: could not determine ctx version from ${ctx_source}" >&2
   exit 1
@@ -539,8 +608,16 @@ else
   ctx_env+=(CTX_INTERNAL_SEMANTIC_BACKEND=cpu)
 fi
 
+deadline_ns="$(deadline_after_seconds "${timeout_seconds}")"
 run_ctx() {
-  run_bounded 30 "${ctx_env[@]}" "${ctx_bin}" --data-root "${data_root}" "$@"
+  local operation_remaining_ns
+  operation_remaining_ns="$(remaining_ns "${deadline_ns}")"
+  if ((operation_remaining_ns <= 0)); then
+    echo "error: semantic smoke exceeded ${timeout_seconds} seconds" >&2
+    return 124
+  fi
+  run_bounded "${deadline_ns}" \
+    "${ctx_env[@]}" "${ctx_bin}" --data-root "${data_root}" "$@"
 }
 
 printf 'ctx semantic smoke: isolated_home=%s\n' "${smoke_home}"
@@ -609,9 +686,13 @@ if endpoint.get("transport") not in {"unix", "windows_named_pipe"}:
 PY
 }
 
-startup_deadline=$((SECONDS + 30))
+startup_deadline_ns="$(deadline_after_seconds 30 "${deadline_ns}")"
 daemon_started=0
-while ((SECONDS < startup_deadline)); do
+while :; do
+  startup_remaining_ns="$(remaining_ns "${startup_deadline_ns}")"
+  if ((startup_remaining_ns <= 0)); then
+    break
+  fi
   if ! kill -0 "${daemon_pid}" >/dev/null 2>&1; then
     echo "ctx semantic smoke: daemon exited before source-refresh admission" >&2
     cat "${daemon_log}" >&2 || true
@@ -622,8 +703,20 @@ while ((SECONDS < startup_deadline)); do
     daemon_startup_matches; then
     daemon_started=1
     break
+  else
+    startup_status=$?
+    if [[ "${startup_status}" == "124" ]]; then
+      cat "${daemon_startup_error}" >&2 2>/dev/null || true
+      exit 124
+    fi
   fi
-  sleep 0.1
+  startup_remaining_ns="$(remaining_ns "${startup_deadline_ns}")"
+  if ((startup_remaining_ns <= 0)); then
+    break
+  elif ((startup_remaining_ns > 100000000)); then
+    startup_remaining_ns=100000000
+  fi
+  sleep "$(decimal_seconds_from_ns "${startup_remaining_ns}")"
 done
 if [[ "${daemon_started}" != "1" ]]; then
   echo "ctx semantic smoke: daemon did not expose its source-refresh endpoint" >&2
@@ -633,10 +726,8 @@ if [[ "${daemon_started}" != "1" ]]; then
   exit 1
 fi
 
-run_bounded "${timeout_seconds}" "${ctx_env[@]}" "${ctx_bin}" --data-root "${data_root}" \
-  import --no-daemon --input-format ctx-history-jsonl-v2 --path "${fixture_path}" >/dev/null
+run_ctx import --no-daemon --input-format ctx-history-jsonl-v2 --path "${fixture_path}" >/dev/null
 
-deadline=$((SECONDS + timeout_seconds))
 last_output=""
 last_search_error=""
 last_status_output=""
@@ -721,7 +812,11 @@ if not any(marker in text for result in results for text in strings(result)):
 PY
 }
 
-while ((SECONDS < deadline)); do
+while :; do
+  operation_remaining_ns="$(remaining_ns "${deadline_ns}")"
+  if ((operation_remaining_ns <= 0)); then
+    break
+  fi
   if ! kill -0 "${daemon_pid}" >/dev/null 2>&1; then
     echo "ctx semantic smoke: daemon exited before search succeeded" >&2
     cat "${daemon_log}" >&2 || true
@@ -740,6 +835,12 @@ while ((SECONDS < deadline)); do
         cat "${daemon_status_json}" >&2 || true
         exit 1
       fi
+    fi
+  else
+    status_check=$?
+    if [[ "${status_check}" == "124" ]]; then
+      cat "${daemon_status_error}" >&2 2>/dev/null || true
+      exit 124
     fi
   fi
 
@@ -760,7 +861,10 @@ while ((SECONDS < deadline)); do
         exit 0
       else
         status_check=$?
-        if [[ "${status_check}" == "2" ]]; then
+        if [[ "${status_check}" == "124" ]]; then
+          cat "${daemon_status_error}" >&2 2>/dev/null || true
+          exit 124
+        elif [[ "${status_check}" == "2" ]]; then
           cat "${daemon_status_json}" >&2 || true
           exit 1
         fi
@@ -773,11 +877,23 @@ while ((SECONDS < deadline)); do
       fi
     fi
   else
+    search_status=$?
+    if [[ "${search_status}" == "124" ]]; then
+      cat "${search_error}" >&2 2>/dev/null || true
+      exit 124
+    fi
     last_output="$(cat "${search_json}" 2>/dev/null || true)"
     last_search_error="$(cat "${search_error}" 2>/dev/null || true)"
   fi
 
-  sleep 5
+  operation_remaining_ns="$(remaining_ns "${deadline_ns}")"
+  if ((operation_remaining_ns <= 0)); then
+    break
+  fi
+  if ((operation_remaining_ns > 5000000000)); then
+    operation_remaining_ns=5000000000
+  fi
+  sleep "$(decimal_seconds_from_ns "${operation_remaining_ns}")"
 done
 
 echo "ctx semantic smoke failed: semantic search did not find fixture before timeout" >&2
