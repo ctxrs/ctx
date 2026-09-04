@@ -286,6 +286,13 @@ pub fn restrict_private_file_handle(handle: &std::fs::File) -> io::Result<()> {
     }
 }
 
+/// Applies and verifies the private Windows directory policy through an
+/// already-open handle without changing ownership.
+#[cfg(windows)]
+pub fn restrict_private_directory_handle(handle: &std::fs::File) -> io::Result<()> {
+    windows_acl::restrict_private_directory_handle(handle)
+}
+
 /// Applies and verifies owner-only executable-file permissions.
 pub fn restrict_private_executable(path: &Path) -> io::Result<()> {
     #[cfg(unix)]

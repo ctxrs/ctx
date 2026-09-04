@@ -88,7 +88,6 @@ pub mod test_support {
     }
 }
 pub(crate) use ctx_history_index_generation::{hex, is_generation_id, MANIFEST_DIRECTORY};
-pub use ctx_history_index_query::VerifiedIndex;
 pub use ctx_history_index_query::{
     AgentScope, CompiledSearchFilter, CopiedEventLineage, CopiedEventLineageOccurrence,
     CopiedEventLineagePolicy, CopiedEventLineageRelationshipCount, CopiedEventLineageResolution,
@@ -107,6 +106,7 @@ pub use ctx_history_index_query::{
     MAX_SESSION_EVENT_COORDINATE_PREFIX_ITEMS, MAX_SESSION_EVENT_COORDINATE_WINDOW_ITEMS,
     MAX_SESSION_EVENT_PAGE_ITEMS, MAX_SOURCE_EVENT_PAGE_ITEMS, SHOW_COPIED_EVENT_LINEAGE_POLICY,
 };
+pub use ctx_history_index_query::{VerifiedGenerationSnapshot, VerifiedIndex};
 pub(crate) use identity::{
     prior_session_identity_facts, register_compact_identity, BaseWitnessSource,
 };

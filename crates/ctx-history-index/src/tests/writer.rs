@@ -79,6 +79,129 @@ fn commit_binds_manifest_and_searchable_documents() {
 }
 
 #[test]
+fn checked_writer_open_requires_the_exact_captured_base_generation() {
+    let temp = tempdir().unwrap();
+    let source = source("expected-writer-base.jsonl");
+
+    let cold = GenerationWriter::open_with_expected_base_generation(
+        temp.path(),
+        WriterOptions::default(),
+        None,
+    )
+    .unwrap()
+    .into_writer()
+    .unwrap();
+    assert_eq!(cold.base_generation_id(), None);
+    drop(cold);
+
+    let mut first_writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    first_writer.begin_source(source.clone()).unwrap();
+    first_writer
+        .add_core_record(document(&source, 1, "first base"))
+        .unwrap();
+    first_writer
+        .certify_source(certificate(&source, 1, 1))
+        .unwrap();
+    let first = first_writer.commit(|_| true).unwrap();
+
+    assert!(matches!(
+        GenerationWriter::open_with_expected_base_generation(
+            temp.path(),
+            WriterOptions::default(),
+            None,
+        ),
+        Err(IndexError::ConcurrentGenerationChange)
+    ));
+    let matching = GenerationWriter::open_with_expected_base_generation(
+        temp.path(),
+        WriterOptions::default(),
+        Some(&first.generation_id),
+    )
+    .unwrap()
+    .into_writer()
+    .unwrap();
+    assert_eq!(
+        matching.base_generation_id(),
+        Some(first.generation_id.as_str())
+    );
+    drop(matching);
+
+    let mut second_writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    second_writer.begin_source(source.clone()).unwrap();
+    second_writer
+        .add_core_record(document(&source, 2, "second base"))
+        .unwrap();
+    second_writer
+        .certify_source(certificate(&source, 2, 1))
+        .unwrap();
+    let second = second_writer.commit(|_| true).unwrap();
+
+    assert!(matches!(
+        GenerationWriter::open_with_expected_base_generation(
+            temp.path(),
+            WriterOptions::default(),
+            Some(&first.generation_id),
+        ),
+        Err(IndexError::ConcurrentGenerationChange)
+    ));
+    assert!(matches!(
+        GenerationWriter::open_with_expected_base_generation(
+            temp.path(),
+            WriterOptions::default(),
+            Some("not-a-generation-id"),
+        ),
+        Err(IndexError::InvalidGenerationId)
+    ));
+
+    let standalone = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    assert_eq!(
+        standalone.base_generation_id(),
+        Some(second.generation_id.as_str())
+    );
+    drop(standalone);
+
+    let pointer = load_active_generation_pointer(temp.path())
+        .unwrap()
+        .unwrap();
+    let unsupported_pointer = serde_json::json!({
+        "version": 1,
+        "active": {
+            "generation_id": pointer.active().generation_id(),
+            "directory": pointer.active().directory(),
+        },
+        "previous": null,
+    });
+    fs::write(
+        temp.path().join("active-generation.json"),
+        serde_json::to_vec(&unsupported_pointer).unwrap(),
+    )
+    .unwrap();
+    assert!(matches!(
+        GenerationWriter::open_with_expected_base_generation(
+            temp.path(),
+            WriterOptions::default(),
+            None,
+        ),
+        Err(IndexError::ConcurrentGenerationChange)
+    ));
+
+    let rebuild = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    assert_eq!(rebuild.base_generation_id(), None);
+}
+
+#[test]
 fn prepared_core_draft_retries_final_encoding_under_a_caller_permit() {
     let temp = tempdir().unwrap();
     let source = source("bounded-materialization.jsonl");

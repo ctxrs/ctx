@@ -463,7 +463,10 @@ fn windows_validation_failure_after_terminal_seal_keeps_predecessor() {
         )
         .unwrap();
     let error = append.commit(|_| true).unwrap_err();
-    assert!(matches!(error, IndexError::ChecksumMismatch));
+    assert!(
+        matches!(&error, IndexError::ManifestDigestMismatch { .. }),
+        "terminal manifest mutation must fail with ManifestDigestMismatch, got {error:?}"
+    );
     let predecessor = VerifiedIndex::open_pinned(temp.path()).unwrap();
     assert_eq!(predecessor.generation_id(), baseline.generation_id);
     assert_eq!(predecessor.count_term("body").unwrap(), 1);

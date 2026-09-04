@@ -74,7 +74,7 @@ impl ExplicitSourceCatalogAuthority {
     pub(crate) fn register_routes_after_discovery_merge(
         &self,
         data_root: &Path,
-        base_generation: Option<&VerifiedIndex>,
+        base_generation: Option<&VerifiedGenerationSnapshot>,
         build: &mut SourceBackedAutomaticRegistryBuild,
     ) -> Result<Vec<ExplicitSourceCatalogRouteBinding>> {
         let snapshot = self.snapshot();

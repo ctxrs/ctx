@@ -16,7 +16,7 @@ use route_controls::successful_route_controls;
 pub(super) fn refresh_source_backed_generation_with_detailed_progress_and_discovery_timing(
     index_root: impl AsRef<Path>,
     registry: &SourceBackedProviderRegistry,
-    writer_options: WriterOptions,
+    writer_open: SourceBackedWriterOpen<'_>,
     execution: SourceBackedRefreshExecutionBudget,
     selection: (
         SourceBackedRefreshPlan,
@@ -25,6 +25,10 @@ pub(super) fn refresh_source_backed_generation_with_detailed_progress_and_discov
     mut emit_progress: impl FnMut(SourceBackedDetailedRefreshProgress) -> SourceBackedRouteResult<()>,
     mut generation_state_factory: Option<&mut SourceBackedGenerationStateFactory<'_>>,
 ) -> SourceBackedCoordinatorResult<SourceBackedRefreshReceipt> {
+    let SourceBackedWriterOpen {
+        options: writer_options,
+        base_generation_expectation,
+    } = writer_open;
     let (plan, base_route_controls) = selection;
     let SourceBackedRefreshExecutionBudget {
         discovery_duration,
@@ -70,7 +74,18 @@ pub(super) fn refresh_source_backed_generation_with_detailed_progress_and_discov
         mut route_controls,
         verified_publication,
     ) = {
-        let open = IndexCaptureLifecycle::open(index_root, writer_options)?;
+        let open = match base_generation_expectation {
+            SourceBackedBaseGenerationExpectation::Unchecked => {
+                IndexCaptureLifecycle::open(index_root, writer_options)?
+            }
+            SourceBackedBaseGenerationExpectation::Exact(expected) => {
+                IndexCaptureLifecycle::open_with_expected_base_generation(
+                    index_root,
+                    writer_options,
+                    expected,
+                )?
+            }
+        };
         let mut lifecycle = match open {
             CaptureLifecycleOpenOutcome::Ready(lifecycle) => lifecycle,
             CaptureLifecycleOpenOutcome::RecoveryRequired { recovery } => {

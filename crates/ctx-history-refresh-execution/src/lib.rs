@@ -49,7 +49,8 @@ use ctx_history_core::{CaptureProvider, CertifiedSource, ScannedSourceCounts};
 #[cfg(test)]
 use ctx_history_index::GenerationWriter;
 use ctx_history_index::{
-    GenerationManifest, IndexError, SourceRouteIdentity, VerifiedIndex, WriterOptions,
+    GenerationManifest, IndexError, SourceRouteIdentity, VerifiedGenerationSnapshot, VerifiedIndex,
+    WriterOptions,
 };
 use serde_json::{json, Value};
 
@@ -105,10 +106,11 @@ pub use route_result::{
     SourceBackedRefreshSourceFailure,
 };
 pub use types::{
-    nonzero_duration_micros, AdmittedRefresh, AdmittedRefreshCoverage, PublishedSourceBackedState,
-    PublishedSourceBackedStatePort, RefreshOperation, SourceBackedAdmittedDiscovery,
-    SourceBackedCurrentSourceProgress, SourceBackedCurrentSourceProgressStage,
-    SourceBackedExactScanProgress, SourceBackedRefreshExecution, SourceBackedRefreshProgressUpdate,
+    nonzero_duration_micros, AdmittedRefresh, AdmittedRefreshCoverage,
+    PublishedSourceBackedGeneration, PublishedSourceBackedState, PublishedSourceBackedStatePort,
+    RefreshOperation, SourceBackedAdmittedDiscovery, SourceBackedCurrentSourceProgress,
+    SourceBackedCurrentSourceProgressStage, SourceBackedExactScanProgress,
+    SourceBackedRefreshExecution, SourceBackedRefreshProgressUpdate,
     SourceBackedRefreshPublication, SourceBackedRefreshTimings, SourceBackedRefreshWorkset,
     SourceBackedZeroSourceAuthority, SourceBackedZeroSourceAuthorityKind,
 };
@@ -263,7 +265,7 @@ pub fn source_backed_watch_catalog(
         .context("validate provider roots before deriving source watch catalog")?;
     let index_root = source_backed_index_root(data_root);
     let retained_generation = match VerifiedIndex::open_pinned(&index_root) {
-        Ok(index) => Some(index),
+        Ok(index) => Some(index.into_generation_snapshot()),
         Err(IndexError::MissingActiveGenerationPointer) => None,
         Err(error) => return Err(error.into()),
     };
@@ -281,7 +283,7 @@ pub fn source_backed_watch_catalog(
 
 fn configured_retained_provider_roots(
     discovery: &DiscoveryContext,
-    retained_generation: Option<&VerifiedIndex>,
+    retained_generation: Option<&VerifiedGenerationSnapshot>,
 ) -> Result<BTreeMap<String, RetainedProviderRootAuthority>> {
     let roots = discovery.configured_provider_roots();
     let mut root_ids = BTreeSet::new();

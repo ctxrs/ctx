@@ -502,6 +502,47 @@ fn active_reader_lease_retains_generation_until_drop() {
 }
 
 #[test]
+fn generation_snapshot_releases_handles_before_lease_and_reclaims_retired_generation() {
+    let temp = tempdir().unwrap();
+    let source = source("metadata-snapshot-reclamation.jsonl");
+    let first = publish_pinned_test_generation(temp.path(), &source, 1, "first body");
+    let first_path = active_generation_path(temp.path());
+    let reader = VerifiedIndex::open_pinned(temp.path()).unwrap();
+    let shared_manifest = Arc::clone(reader.test_shared_manifest());
+    let snapshot = reader.into_generation_snapshot();
+
+    assert_eq!(snapshot.generation_id(), first.generation_id);
+    assert!(Arc::ptr_eq(
+        &shared_manifest,
+        snapshot.test_shared_manifest()
+    ));
+    drop(shared_manifest);
+
+    let second = publish_pinned_test_generation(temp.path(), &source, 2, "second body");
+    let third = publish_pinned_test_generation(temp.path(), &source, 3, "third body");
+    let fourth = publish_pinned_test_generation(temp.path(), &source, 4, "fourth body");
+    let pointer = load_active_generation_pointer(temp.path())
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(pointer.active().generation_id(), fourth.generation_id);
+    assert_eq!(
+        pointer.previous().unwrap().generation_id(),
+        third.generation_id
+    );
+    assert_ne!(second.generation_id, first.generation_id);
+    assert!(
+        !first_path.exists(),
+        "snapshot conversion left a protected handle live after releasing its target lease"
+    );
+    assert_eq!(
+        snapshot.manifest().generation_id().unwrap(),
+        first.generation_id
+    );
+    assert_eq!(snapshot.manifest().sources.len(), 1);
+}
+
+#[test]
 fn reader_owned_peer_lease_survives_parent_drop_after_integrity_verification() {
     let temp = tempdir().unwrap();
     let source = source("leased-verification-pointer-race.jsonl");

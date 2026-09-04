@@ -49,11 +49,58 @@ pub struct VerifiedIndex {
     _reader_leases: Option<ReaderLeaseBundle>,
 }
 
+/// Metadata-only authority for one fully verified generation.
+///
+/// Unlike [`VerifiedIndex`], this snapshot owns no Tantivy searcher or
+/// generation read lease. It keeps the exact generation identity and the
+/// already decoded immutable manifest available to refresh orchestration.
+#[derive(Clone)]
+pub struct VerifiedGenerationSnapshot {
+    generation_id: String,
+    manifest: Arc<GenerationManifest>,
+}
+
+impl VerifiedGenerationSnapshot {
+    pub fn generation_id(&self) -> &str {
+        &self.generation_id
+    }
+
+    pub fn manifest(&self) -> &GenerationManifest {
+        &self.manifest
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn test_shared_manifest(&self) -> &Arc<GenerationManifest> {
+        &self.manifest
+    }
+}
+
 /// Query-reader authority for the selected generation and its one retained
 /// peer. A query reader owns this bundle for its whole lifetime.
 struct ReaderLeaseBundle {
     target: GenerationReadLease,
     peer: Option<GenerationReadLease>,
+}
+
+// Keep the target reclamation lease alive until every generation-backed
+// resource and peer authority has completed destruction. Explicit `drop`
+// calls make this independent of struct field declaration order.
+fn drop_generation_backed_resources_before_target_lease<
+    TantivyResources,
+    SemanticResources,
+    PeerLease,
+    TargetLease,
+>(
+    tantivy_resources: TantivyResources,
+    semantic_resources: SemanticResources,
+    peer_lease: PeerLease,
+    target_lease: TargetLease,
+) {
+    drop(tantivy_resources);
+    drop(semantic_resources);
+    drop(peer_lease);
+    drop(target_lease);
 }
 
 struct ReaderGenerationSelection {
@@ -602,6 +649,34 @@ impl VerifiedIndex {
         &self.generation_id
     }
 
+    /// Consumes this verified reader and retains only generation metadata.
+    ///
+    /// Reader leases and Tantivy handles are dropped before the snapshot is
+    /// returned, so a subsequent writer open cannot overlap their FD lifetime.
+    pub fn into_generation_snapshot(self) -> VerifiedGenerationSnapshot {
+        let Self {
+            searcher,
+            manifest,
+            generation_id,
+            semantic_eligibility_postings,
+            _reader_leases,
+        } = self;
+        let (peer_lease, target_lease) = match _reader_leases {
+            Some(ReaderLeaseBundle { target, peer }) => (peer, Some(target)),
+            None => (None, None),
+        };
+        drop_generation_backed_resources_before_target_lease(
+            searcher,
+            semantic_eligibility_postings,
+            peer_lease,
+            target_lease,
+        );
+        VerifiedGenerationSnapshot {
+            generation_id,
+            manifest,
+        }
+    }
+
     pub fn manifest(&self) -> &GenerationManifest {
         &self.manifest
     }
@@ -659,4 +734,47 @@ pub fn reset_verified_index_publication_construction_count() {
 #[cfg(any(test, feature = "test-support"))]
 pub fn verified_index_publication_construction_count() -> usize {
     VERIFIED_INDEX_PUBLICATION_CONSTRUCTION_COUNT.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+mod drop_order_tests {
+    use super::drop_generation_backed_resources_before_target_lease;
+    use std::cell::RefCell;
+
+    struct DropTrace<'a> {
+        events: &'a RefCell<Vec<&'static str>>,
+        event: &'static str,
+    }
+
+    impl Drop for DropTrace<'_> {
+        fn drop(&mut self) {
+            self.events.borrow_mut().push(self.event);
+        }
+    }
+
+    #[test]
+    fn target_lease_drops_after_all_generation_backed_resources() {
+        let events = RefCell::new(Vec::new());
+        let traced = |event| DropTrace {
+            events: &events,
+            event,
+        };
+
+        drop_generation_backed_resources_before_target_lease(
+            traced("tantivy searcher and mappings"),
+            traced("semantic postings"),
+            Some(traced("peer lease")),
+            Some(traced("target lease")),
+        );
+
+        assert_eq!(
+            *events.borrow(),
+            [
+                "tantivy searcher and mappings",
+                "semantic postings",
+                "peer lease",
+                "target lease",
+            ]
+        );
+    }
 }

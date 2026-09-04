@@ -36,6 +36,7 @@ pub(super) fn refresh_all_provider_sources_route_local_with_reconciliation(
         previous_catalog_route_bindings,
         requested_explicit_source_catalog,
         retained_generation,
+        exact_base_generation,
         requested_catalog_route_bindings,
         previous_route_controls,
     } = build_merged_source_backed_registry_with_automatic_routes(
@@ -205,11 +206,13 @@ pub(super) fn refresh_all_provider_sources_route_local_with_reconciliation(
     let mut terminal_coverage_error = None;
     let mut reconciliation_required = false;
     let refresh_result = executor
-        .refresh_physical_scope_with_detailed_progress_generation_state_reconciliation_and_worksets(
+        .refresh_physical_scope_with_detailed_progress_and_base_generation_expectation(
             index_root,
             physical_scope,
             publication_scope,
             reconciliation_demand,
+            retained_generation.as_ref(),
+            exact_base_generation,
             route_worksets.clone(),
             &mut report_attempt_progress,
             |context| {
@@ -300,7 +303,9 @@ pub(super) fn refresh_all_provider_sources_route_local_with_reconciliation(
                 }
                 let mut route_observations = retained_generation
                     .as_ref()
-                    .map(SourceBackedGenerationState::decode_from_verified_index)
+                    .map(|generation| {
+                        SourceBackedGenerationState::decode_from_manifest(generation.manifest())
+                    })
                     .transpose()
                     .map_err(|_| IndexError::InvalidGenerationStateEnvelope)?
                     .map(|state| state.route_observations().clone())
@@ -448,7 +453,7 @@ pub(super) fn refresh_all_provider_sources_route_local_with_reconciliation(
 
 fn register_automatic_hermes_profile_rename_retirements(
     build: &mut ctx_history_capture::SourceBackedAutomaticRegistryBuild,
-    retained_generation: Option<&VerifiedIndex>,
+    retained_generation: Option<&VerifiedGenerationSnapshot>,
     previous_catalog_route_bindings: &[ExplicitSourceCatalogRouteBinding],
     previous_route_controls: &BTreeMap<SourceRouteIdentity, Vec<u8>>,
 ) -> Result<()> {

@@ -230,10 +230,28 @@ fn warm_automatic_hermes_profile_rename_retires_the_old_route_and_remains_refres
     assert!(!warm_state.route_controls().contains_key(&alpha_route));
     assert!(warm_state.route_controls().contains_key(&beta_route));
 
+    let warm_snapshot = VerifiedIndex::open_pinned(&index_root)
+        .unwrap()
+        .into_generation_snapshot();
+    assert_eq!(warm_snapshot.generation_id(), warm_index.generation_id());
+    let manifest_state =
+        SourceBackedGenerationState::decode_from_manifest(warm_snapshot.manifest()).unwrap();
+    assert_eq!(manifest_state.route_controls(), warm_state.route_controls());
+    assert_eq!(
+        manifest_state.route_observations(),
+        warm_state.route_observations()
+    );
+    assert_eq!(
+        manifest_state.catalog_route_bindings(),
+        warm_state.catalog_route_bindings()
+    );
+
     let subsequent = run_report(&discovery, warm_report(), &data_root, &index_root).unwrap();
+    assert_eq!(subsequent.generation_id, warm.generation_id);
     let subsequent = subsequent.verified_index.as_ref().unwrap();
     assert!(subsequent.manifest().source_route(&alpha_route).is_none());
     assert!(subsequent.manifest().source_route(&beta_route).is_some());
+    assert!(warm_index.manifest().source_route(&beta_route).is_some());
 }
 
 fn registry_policy_automatic_route_identity(source: &ProviderSource) -> SourceRouteIdentity {
@@ -448,7 +466,9 @@ fn distinct_nanoclaw_registry_failures_match_retained_automatic_routes() {
     }
     writer.set_present_source_routes(retained_routes).unwrap();
     writer.commit(|_| true).unwrap();
-    let retained = VerifiedIndex::open_pinned(&index_root).unwrap();
+    let retained = VerifiedIndex::open_pinned(&index_root)
+        .unwrap()
+        .into_generation_snapshot();
 
     let issues = sources.map(|source| SourceBackedAutomaticRegistryIssue::Unavailable {
         source,

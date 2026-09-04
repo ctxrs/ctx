@@ -89,7 +89,7 @@ pub fn reject_blocking_automatic_registry_issues(
 #[doc(hidden)]
 pub fn automatic_registry_route_failures(
     issues: &[SourceBackedAutomaticRegistryIssue],
-    retained_generation: Option<&VerifiedIndex>,
+    retained_generation: Option<&VerifiedGenerationSnapshot>,
 ) -> Result<Vec<ctx_history_capture::SourceBackedFailedRoute>> {
     let mut failures = BTreeMap::new();
     for issue in issues {

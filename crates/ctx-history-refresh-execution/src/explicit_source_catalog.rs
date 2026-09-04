@@ -33,7 +33,7 @@ use ctx_history_capture_model::{
     ProviderSourceKind, ProviderSourceStatus,
 };
 use ctx_history_core::{CaptureProvider, CertifiedSource, SourceAnchor, TypedKey};
-use ctx_history_index::VerifiedIndex;
+use ctx_history_index::VerifiedGenerationSnapshot;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -516,7 +516,7 @@ fn validate_explicit_source_catalog_snapshot_roots(
 
 fn register_explicit_source_catalog_snapshot_routes(
     data_root: &Path,
-    base_generation: Option<&VerifiedIndex>,
+    base_generation: Option<&VerifiedGenerationSnapshot>,
     build: &mut SourceBackedAutomaticRegistryBuild,
     snapshot: &ExplicitSourceCatalogSnapshot,
 ) -> Result<Vec<ExplicitSourceCatalogRouteBinding>> {

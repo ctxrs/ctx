@@ -1,5 +1,10 @@
 use super::*;
 
+enum BaseGenerationExpectation<'a> {
+    Unchecked,
+    Exact(Option<&'a str>),
+}
+
 impl GenerationWriter {
     /// Captures an exact event-identity lookup pinned to this writer's base generation.
     pub fn base_event_identity_lookup(&self) -> BaseEventIdentityLookup {
@@ -16,6 +21,34 @@ impl GenerationWriter {
     pub fn open(
         root: impl AsRef<Path>,
         options: WriterOptions,
+    ) -> Result<GenerationWriterOpenOutcome> {
+        Self::open_inner(root, options, BaseGenerationExpectation::Unchecked)
+    }
+
+    /// Opens a writer only when the publication authority still names the
+    /// exact generation observed by the caller.
+    ///
+    /// `None` means that no compatible active publication was observed. The
+    /// ordinary [`Self::open`] API deliberately remains unchecked.
+    pub fn open_with_expected_base_generation(
+        root: impl AsRef<Path>,
+        options: WriterOptions,
+        expected_generation_id: Option<&str>,
+    ) -> Result<GenerationWriterOpenOutcome> {
+        if expected_generation_id.is_some_and(|generation_id| !is_generation_id(generation_id)) {
+            return Err(IndexError::InvalidGenerationId);
+        }
+        Self::open_inner(
+            root,
+            options,
+            BaseGenerationExpectation::Exact(expected_generation_id),
+        )
+    }
+
+    fn open_inner(
+        root: impl AsRef<Path>,
+        options: WriterOptions,
+        base_generation_expectation: BaseGenerationExpectation<'_>,
     ) -> Result<GenerationWriterOpenOutcome> {
         ctx_history_platform::raise_open_file_soft_limit();
         let indexer_threads = options.indexer_threads.clamp(1, 8);
@@ -52,12 +85,24 @@ impl GenerationWriter {
         )?;
         ctx_history_index_format::clear_manifest_cache_for_root(&root)?;
 
-        let (active_authority, mut pointer_requires_rebuild) =
+        let (active_authority, mut pointer_requires_rebuild, incompatible_active_present) =
             match load_active_publication_authority(&root) {
-                Ok(pointer) => (pointer, false),
-                Err(error) if generation_incompatibility_requires_rebuild(&error) => (None, true),
+                Ok(pointer) => (pointer, false, false),
+                Err(error) if generation_incompatibility_requires_rebuild(&error) => {
+                    (None, true, true)
+                }
                 Err(error) => return Err(error),
             };
+        if let BaseGenerationExpectation::Exact(expected_generation_id) =
+            base_generation_expectation
+        {
+            let active_generation_id = active_authority
+                .as_ref()
+                .map(|authority| authority.pointer().active().generation_id());
+            if incompatible_active_present || expected_generation_id != active_generation_id {
+                return Err(IndexError::ConcurrentGenerationChange);
+            }
+        }
         if !pointer_requires_rebuild {
             if let Some(authority) = active_authority.as_ref() {
                 let schema_check = open_slot_index(&root, authority.pointer().active())
