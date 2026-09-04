@@ -539,8 +539,15 @@ else
   ctx_env+=(CTX_INTERNAL_SEMANTIC_BACKEND=cpu)
 fi
 
+deadline=$((SECONDS + timeout_seconds))
 run_ctx() {
-  run_bounded 30 "${ctx_env[@]}" "${ctx_bin}" --data-root "${data_root}" "$@"
+  local remaining_seconds=$((deadline - SECONDS))
+  if ((remaining_seconds <= 0)); then
+    echo "error: semantic smoke exceeded ${timeout_seconds} seconds" >&2
+    return 124
+  fi
+  run_bounded "${remaining_seconds}" \
+    "${ctx_env[@]}" "${ctx_bin}" --data-root "${data_root}" "$@"
 }
 
 printf 'ctx semantic smoke: isolated_home=%s\n' "${smoke_home}"
@@ -610,6 +617,9 @@ PY
 }
 
 startup_deadline=$((SECONDS + 30))
+if ((startup_deadline > deadline)); then
+  startup_deadline="${deadline}"
+fi
 daemon_started=0
 while ((SECONDS < startup_deadline)); do
   if ! kill -0 "${daemon_pid}" >/dev/null 2>&1; then
@@ -622,6 +632,12 @@ while ((SECONDS < startup_deadline)); do
     daemon_startup_matches; then
     daemon_started=1
     break
+  else
+    startup_status=$?
+    if [[ "${startup_status}" == "124" ]]; then
+      cat "${daemon_startup_error}" >&2 2>/dev/null || true
+      exit 124
+    fi
   fi
   sleep 0.1
 done
@@ -635,7 +651,6 @@ fi
 
 run_ctx import --no-daemon --input-format ctx-history-jsonl-v2 --path "${fixture_path}" >/dev/null
 
-deadline=$((SECONDS + timeout_seconds))
 last_output=""
 last_search_error=""
 last_status_output=""
@@ -740,6 +755,12 @@ while ((SECONDS < deadline)); do
         exit 1
       fi
     fi
+  else
+    status_check=$?
+    if [[ "${status_check}" == "124" ]]; then
+      cat "${daemon_status_error}" >&2 2>/dev/null || true
+      exit 124
+    fi
   fi
 
   if [[ "${daemon_status_ready}" == "1" ]] && \
@@ -759,7 +780,10 @@ while ((SECONDS < deadline)); do
         exit 0
       else
         status_check=$?
-        if [[ "${status_check}" == "2" ]]; then
+        if [[ "${status_check}" == "124" ]]; then
+          cat "${daemon_status_error}" >&2 2>/dev/null || true
+          exit 124
+        elif [[ "${status_check}" == "2" ]]; then
           cat "${daemon_status_json}" >&2 || true
           exit 1
         fi
@@ -772,11 +796,24 @@ while ((SECONDS < deadline)); do
       fi
     fi
   else
+    search_status=$?
+    if [[ "${search_status}" == "124" ]]; then
+      cat "${search_error}" >&2 2>/dev/null || true
+      exit 124
+    fi
     last_output="$(cat "${search_json}" 2>/dev/null || true)"
     last_search_error="$(cat "${search_error}" 2>/dev/null || true)"
   fi
 
-  sleep 5
+  remaining_before_retry=$((deadline - SECONDS))
+  if ((remaining_before_retry <= 0)); then
+    break
+  fi
+  retry_delay=5
+  if ((retry_delay > remaining_before_retry)); then
+    retry_delay="${remaining_before_retry}"
+  fi
+  sleep "${retry_delay}"
 done
 
 echo "ctx semantic smoke failed: semantic search did not find fixture before timeout" >&2

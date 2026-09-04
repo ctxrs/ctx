@@ -156,6 +156,41 @@ EOF
 chmod 0755 "${release_root}/scripts/public-cli-host-runtime-evidence.sh"
 smoke="${release_root}/scripts/smoke-daemon-semantic-release.sh"
 runtime_authority="${release_root}/scripts/public-cli-runtime-authority.sh"
+real_python3="$(command -v python3)"
+bounded_python_dir="${tmp}/bounded-python"
+mkdir -p "${bounded_python_dir}"
+cat > "${bounded_python_dir}/python3" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "\${1:-}" == "-I" && "\${2:-}" == "-" && "\${3:-}" =~ ^[0-9]+$ ]]; then
+  bounded_command=""
+  for argument in "\${@:4}"; do
+    case "\${argument}" in
+      import|daemon|search)
+        bounded_command="\${argument}"
+        break
+        ;;
+    esac
+  done
+  if [[ -n "\${bounded_command}" && -n "\${CTX_TEST_BOUNDED_LOG:-}" ]]; then
+    printf '%s\t%s\n' "\${bounded_command}" "\${3}" >> "\${CTX_TEST_BOUNDED_LOG}"
+    if [[ "\${CTX_TEST_BOUNDED_MODE:-}" == "record" && \
+          ! -e "\${CTX_TEST_BOUNDED_DELAY_MARKER:?}" ]]; then
+      touch "\${CTX_TEST_BOUNDED_DELAY_MARKER}"
+      sleep 2
+    elif [[ "\${CTX_TEST_BOUNDED_MODE:-}" == "timeout-search" && \
+            "\${bounded_command}" == "search" && \
+            ! -e "\${CTX_TEST_BOUNDED_TIMEOUT_MARKER:?}" ]]; then
+      touch "\${CTX_TEST_BOUNDED_TIMEOUT_MARKER}"
+      printf 'error: smoke command exceeded %s seconds\n' "\${3}" >&2
+      exit 124
+    fi
+  fi
+fi
+exec "${real_python3}" "\$@"
+EOF
+chmod 0755 "${bounded_python_dir}/python3"
 
 expect_runtime_authority() {
   local name="$1"
@@ -645,23 +680,81 @@ else
   shasum -a 256 "${runtime_archive}" | awk '{ print $1 }' > "${runtime_archive}.sha256"
 fi
 
-if ! "${smoke}" \
+bounded_deadline_log="${tmp}/bounded-deadline.log"
+if ! PATH="${bounded_python_dir}:${PATH}" \
+  CTX_TEST_BOUNDED_LOG="${bounded_deadline_log}" \
+  CTX_TEST_BOUNDED_MODE=record \
+  CTX_TEST_BOUNDED_DELAY_MARKER="${tmp}/bounded-delay-complete" \
+  "${smoke}" \
   --runtime-archive "${runtime_archive}" \
   --runtime-platform linux-x64 \
   --ctx "${cpu_ctx}" \
   --data-root "${tmp}/onnx-runs" \
   --require-authoritative \
-  --timeout-seconds 30 \
+  --timeout-seconds 300 \
   > "${tmp}/onnx.out" 2> "${tmp}/onnx.err"; then
   cat "${tmp}/onnx.out" >&2
   cat "${tmp}/onnx.err" >&2
   exit 1
 fi
 grep -Fq 'ctx semantic smoke ok:' "${tmp}/onnx.out"
+mapfile -t bounded_limits < <(cut -f2 "${bounded_deadline_log}")
+if ((${#bounded_limits[@]} < 4)); then
+  printf 'semantic smoke did not bound every expected ctx operation\n' >&2
+  cat "${bounded_deadline_log}" >&2
+  exit 1
+fi
+for bounded_limit in "${bounded_limits[@]}"; do
+  if [[ ! "${bounded_limit}" =~ ^[0-9]+$ ]] || \
+    ((bounded_limit <= 30 || bounded_limit > 300)); then
+    printf 'ctx operation ignored the remaining smoke budget: %s\n' \
+      "${bounded_limit}" >&2
+    exit 1
+  fi
+done
+last_bounded_index=$((${#bounded_limits[@]} - 1))
+if ((bounded_limits[last_bounded_index] >= bounded_limits[0])); then
+  printf 'ctx operation bounds did not consume the whole-smoke deadline\n' >&2
+  cat "${bounded_deadline_log}" >&2
+  exit 1
+fi
 if find "${tmp}/onnx-runs" -name packaged-runtime-proof.txt -print -quit | grep -q .; then
   printf 'semantic smoke emitted a retired proof artifact\n' >&2
   exit 1
 fi
+
+bounded_timeout_log="${tmp}/bounded-timeout.log"
+set +e
+PATH="${bounded_python_dir}:${PATH}" \
+CTX_TEST_BOUNDED_LOG="${bounded_timeout_log}" \
+CTX_TEST_BOUNDED_MODE=timeout-search \
+CTX_TEST_BOUNDED_TIMEOUT_MARKER="${tmp}/bounded-timeout-complete" \
+  "${smoke}" \
+  --runtime-archive "${runtime_archive}" \
+  --runtime-platform linux-x64 \
+  --ctx "${cpu_ctx}" \
+  --data-root "${tmp}/bounded-timeout-runs" \
+  --require-authoritative \
+  --timeout-seconds 300 \
+  > "${tmp}/bounded-timeout.out" 2> "${tmp}/bounded-timeout.err"
+bounded_timeout_status=$?
+set -e
+if [[ "${bounded_timeout_status}" != "124" ]]; then
+  printf 'semantic smoke did not propagate bounded ctx timeout: %s\n' \
+    "${bounded_timeout_status}" >&2
+  cat "${tmp}/bounded-timeout.err" >&2
+  exit 1
+fi
+bounded_timeout_limit="$(awk -F '\t' '$1 == "search" { print $2; exit }' \
+  "${bounded_timeout_log}")"
+if [[ ! "${bounded_timeout_limit}" =~ ^[0-9]+$ ]] || \
+  ((bounded_timeout_limit <= 30 || bounded_timeout_limit > 300)); then
+  printf 'semantic smoke timeout was not constrained by its remaining budget: %s\n' \
+    "${bounded_timeout_limit}" >&2
+  exit 1
+fi
+grep -Fq -- "error: smoke command exceeded ${bounded_timeout_limit} seconds" \
+  "${tmp}/bounded-timeout.err"
 
 candidate="${tmp}/nested-inputs"
 mkdir "${candidate}"
