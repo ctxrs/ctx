@@ -1,3 +1,42 @@
+fn run_live_test_owned_daemon_until(
+    description: &str,
+    temp: &tempfile::TempDir,
+    command: &assert_cmd::Command,
+    mut condition: impl FnMut() -> bool,
+) -> std::process::Output {
+    let mut child = spawn_persistent_daemon(command);
+    let deadline = Instant::now() + Duration::from_secs(45);
+    loop {
+        if condition() {
+            break;
+        }
+        if child.try_wait().unwrap().is_some() {
+            let output = child.wait_with_output().unwrap();
+            panic!(
+                "daemon exited before {description}: status={} stderr={}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        if Instant::now() >= deadline {
+            let output = stop_persistent_daemon(child);
+            panic!(
+                "timed out waiting for {description}: stderr={}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    stop_test_owned_daemon_for_binary(
+        temp,
+        &data_root(temp),
+        Path::new(command.get_program()),
+        Some(child.id()),
+    )
+    .unwrap_or_else(|error| panic!("stop observed test-owned daemon: {error}"));
+    child.wait_with_output().unwrap()
+}
+
 #[test]
 fn corrupt_marker_keeps_persistent_daemon_automatic_scheduler_dormant() {
     let temp = tempdir();
@@ -7,8 +46,9 @@ fn corrupt_marker_keeps_persistent_daemon_automatic_scheduler_dormant() {
     let daemon_root = data_root(&temp);
     let mut ready_at = None;
 
-    let output = run_daemon_until(
+    let output = run_live_test_owned_daemon_until(
         "corrupt-marker daemon observation",
+        &temp,
         &managed_daemon(&temp, &release, &binary),
         || {
             if running_daemon_pid(&daemon_root, None).is_some() {
@@ -38,8 +78,9 @@ fn hash_mismatched_marker_keeps_persistent_daemon_automatic_scheduler_dormant() 
     let daemon_root = data_root(&temp);
     let mut ready_at = None;
 
-    let output = run_daemon_until(
+    let output = run_live_test_owned_daemon_until(
         "hash-mismatched-marker daemon observation",
+        &temp,
         &managed_daemon(&temp, &release, &binary),
         || {
             if running_daemon_pid(&daemon_root, None).is_some() {

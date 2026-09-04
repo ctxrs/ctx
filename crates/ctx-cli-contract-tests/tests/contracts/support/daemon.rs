@@ -663,6 +663,15 @@ fn stop_test_owned_daemon(
     expected_pid: Option<u32>,
 ) -> Result<(), String> {
     let binary = test_binary_copy_path(temp);
+    stop_test_owned_daemon_for_binary(temp, daemon_data_root, &binary, expected_pid)
+}
+
+pub(crate) fn stop_test_owned_daemon_for_binary(
+    temp: &TempDir,
+    daemon_data_root: &Path,
+    binary: &Path,
+    expected_pid: Option<u32>,
+) -> Result<(), String> {
     if !binary.is_file() {
         if expected_pid.is_some() {
             return Err("cannot attribute replacement daemon without its test binary".into());
@@ -674,7 +683,7 @@ fn stop_test_owned_daemon(
         if expected_pid.is_some() {
             return Err("cannot attribute replacement daemon without an active lock".into());
         }
-        return remove_released_test_daemon_artifacts(daemon_data_root, &binary);
+        return remove_released_test_daemon_artifacts(daemon_data_root, binary);
     };
     if let Some(expected_pid) = expected_pid {
         if expected_pid != initial.pid {
@@ -682,17 +691,17 @@ fn stop_test_owned_daemon(
                 "observed replacement pid {expected_pid} does not match test daemon lock {initial:?}"
             ));
         }
-        verify_live_daemon_identity(daemon_data_root, &binary, &initial)?;
+        verify_live_daemon_identity(daemon_data_root, binary, &initial)?;
     } else if process_is_running(initial.pid) {
-        verify_live_daemon_identity(daemon_data_root, &binary, &initial)?;
-    } else if !same_file(&initial.binary, &binary)? {
+        verify_live_daemon_identity(daemon_data_root, binary, &initial)?;
+    } else if !same_file(&initial.binary, binary)? {
         return Err(format!(
             "daemon lock binary {} is not the test copy {}",
             initial.binary.display(),
             binary.display()
         ));
     }
-    let mut prepared = ctx_from_binary(temp, &binary);
+    let mut prepared = ctx_from_binary(temp, binary);
     prepared
         .env("CTX_DATA_ROOT", daemon_data_root)
         .env("CTX_DAEMON_AUTOSTART_OFF", "1")
@@ -712,11 +721,11 @@ fn stop_test_owned_daemon(
         if wait_for_process_exit(initial.pid, cooperative_wait) {
             return assert_daemon_released(daemon_data_root, &initial);
         }
-        verify_live_daemon_identity(daemon_data_root, &binary, &initial)?;
+        verify_live_daemon_identity(daemon_data_root, binary, &initial)?;
         terminate_process(initial.pid, false)
             .map_err(|error| format!("terminate verified test daemon {}: {error}", initial.pid))?;
         if !wait_for_process_exit(initial.pid, Duration::from_secs(1)) {
-            verify_live_daemon_identity(daemon_data_root, &binary, &initial)?;
+            verify_live_daemon_identity(daemon_data_root, binary, &initial)?;
             terminate_process(initial.pid, true).map_err(|error| {
                 format!(
                     "force-terminate verified test daemon {}: {error}",
