@@ -633,7 +633,8 @@ if [[ "${daemon_started}" != "1" ]]; then
   exit 1
 fi
 
-run_ctx import --no-daemon --input-format ctx-history-jsonl-v2 --path "${fixture_path}" >/dev/null
+run_bounded "${timeout_seconds}" "${ctx_env[@]}" "${ctx_bin}" --data-root "${data_root}" \
+  import --no-daemon --input-format ctx-history-jsonl-v2 --path "${fixture_path}" >/dev/null
 
 deadline=$((SECONDS + timeout_seconds))
 last_output=""

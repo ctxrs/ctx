@@ -340,6 +340,10 @@ case "${command}" in
     esac
     grep -Eo 'ctx-release-semantic-smoke-[0-9a-f]+' "${fixture}" | head -1 \
       > "${data_root}/fake-marker"
+    if [[ -n "${CTX_TEST_IMPORT_DELAY_SECONDS:-}" ]]; then
+      [[ "${CTX_TEST_IMPORT_DELAY_SECONDS}" =~ ^[0-9]+$ ]]
+      exec sleep "${CTX_TEST_IMPORT_DELAY_SECONDS}"
+    fi
     ;;
   daemon)
     subcommand="${1:-}"
@@ -351,6 +355,9 @@ case "${command}" in
           exit 1
         }
         printf '%s\n' "$$" > "${data_root}/fake-daemon-pid"
+        if [[ -n "${CTX_TEST_DAEMON_PID_LOG:-}" ]]; then
+          printf '%s\n' "$$" > "${CTX_TEST_DAEMON_PID_LOG}"
+        fi
         mkdir -p "${data_root}/daemon"
         printf '{"schema_version":1,"pid":%s,"transport":"unix","path":"/tmp/fake-ctx-semantic-smoke.sock","token":"0123456789abcdef0123456789abcdef"}\n' "$$" \
           > "${data_root}/daemon/source-refresh-endpoint.json"
@@ -388,6 +395,58 @@ esac
 EOF
 chmod 755 "${fake_ctx}"
 fake_ctx="$(cd -- "$(dirname -- "${fake_ctx}")" && pwd -P)/$(basename -- "${fake_ctx}")"
+
+# Scale only the harness's 30-second minimum and short command bounds so the
+# import timeout contract executes quickly without adding a production seam.
+scaled_smoke="${release_root}/scripts/smoke-daemon-semantic-release-scaled-test.sh"
+sed \
+  -e 's/timeout_seconds < 30/timeout_seconds < 1/' \
+  -e 's/run_bounded 30/run_bounded 1/g' \
+  "${smoke}" > "${scaled_smoke}"
+chmod 0755 "${scaled_smoke}"
+scaled_smoke_args=(
+  --coreml
+  --runtime-platform macos-arm64
+  --coreml-archive "${coreml_archive}"
+  --ctx "${fake_ctx}"
+)
+
+slow_import_parent="${tmp}/slow-import-runs"
+mkdir -p "${slow_import_parent}"
+if ! CTX_TEST_RUNTIME_EVIDENCE=macos-arm64-native-virtualized \
+  CTX_TEST_COREML_BIND_LOG="${tmp}/slow-import-coreml-bind.log" \
+  CTX_TEST_IMPORT_DELAY_SECONDS=2 \
+  "${scaled_smoke}" "${scaled_smoke_args[@]}" \
+    --data-root "${slow_import_parent}" \
+    --timeout-seconds 5 \
+    > "${tmp}/slow-import.out" 2> "${tmp}/slow-import.err"; then
+  cat "${tmp}/slow-import.out" >&2
+  cat "${tmp}/slow-import.err" >&2
+  exit 1
+fi
+grep -Fq 'ctx semantic smoke ok:' "${tmp}/slow-import.out"
+
+timed_out_import_parent="${tmp}/timed-out-import-runs"
+timed_out_import_pid="${tmp}/timed-out-import-daemon.pid"
+mkdir -p "${timed_out_import_parent}"
+if CTX_TEST_RUNTIME_EVIDENCE=macos-arm64-native-virtualized \
+  CTX_TEST_COREML_BIND_LOG="${tmp}/timed-out-import-coreml-bind.log" \
+  CTX_TEST_IMPORT_DELAY_SECONDS=4 \
+  CTX_TEST_DAEMON_PID_LOG="${timed_out_import_pid}" \
+  "${scaled_smoke}" "${scaled_smoke_args[@]}" \
+    --data-root "${timed_out_import_parent}" \
+    --timeout-seconds 1 \
+    > "${tmp}/timed-out-import.out" 2> "${tmp}/timed-out-import.err"; then
+  printf 'semantic smoke unexpectedly accepted a timed-out import\n' >&2
+  exit 1
+else
+  timed_out_import_status=$?
+fi
+[[ "${timed_out_import_status}" == "124" ]]
+grep -Fq 'error: smoke command exceeded 1 seconds' \
+  "${tmp}/timed-out-import.err"
+! kill -0 "$(cat "${timed_out_import_pid}")" >/dev/null 2>&1
+test -z "$(find "${timed_out_import_parent}" -mindepth 1 -print -quit)"
 
 expect_usage_failure() {
   local name="$1"
