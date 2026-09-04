@@ -33,10 +33,16 @@ fn legacy_failed_refresh_response(response: &Value) -> Result<SourceBackedRefres
 pub(super) fn daemon_unavailable_fallback(
     data_root: &Path,
     mode: SourceBackedRefreshMode,
+    retain_peer: bool,
     error: Option<anyhow::Error>,
 ) -> Result<SourceBackedRefreshObservation> {
     if mode == SourceBackedRefreshMode::Background {
-        if let Some(pin) = pin_published_generation(data_root)? {
+        let pin = if retain_peer {
+            pin_published_generation_with_retained_peer(data_root)?
+        } else {
+            pin_published_generation(data_root)?
+        };
+        if let Some(pin) = pin {
             return Ok(SourceBackedRefreshObservation {
                 mode,
                 status: "daemon_unavailable".to_owned(),

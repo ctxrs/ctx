@@ -20,7 +20,9 @@ use crate::{
     config,
     local_usage::{CliUsage, ResultObservationAction, SearchContextObservation},
     output::JsonOutputFormat,
-    semantic::coordinate_source_backed_refresh,
+    semantic::{
+        coordinate_source_backed_refresh, coordinate_source_backed_refresh_with_retained_peer,
+    },
     ui::{
         canonical_human_output_bytes, diagnostic, Action, Diagnostic, DiagnosticLevel, Document,
         RenderContext, Ui,
@@ -29,8 +31,8 @@ use crate::{
 };
 use ctx_daemon_cli::{
     wait_for_daemon_query_service_cancellable, wait_for_daemon_semantic_generation,
-    PinnedSourceBackedGeneration, SourceBackedRefreshDaemonUnavailable, SourceBackedRefreshMode,
-    SourceBackedRefreshObservation,
+    wait_for_daemon_semantic_generation_with_retained_peer, PinnedSourceBackedGeneration,
+    SourceBackedRefreshDaemonUnavailable, SourceBackedRefreshMode, SourceBackedRefreshObservation,
 };
 
 use super::{
@@ -40,7 +42,7 @@ use super::{
         render_active_generation_race, ActiveGenerationRaceCommand,
     },
 };
-use ctx_history_read_application::SearchBackend;
+use ctx_history_read_application::{RetainedPeerRead, SearchBackend};
 
 pub(in crate::source_index) use hydration::SearchPresentation;
 use observation::{
@@ -60,7 +62,7 @@ use test_support::collect_search_hits_with_port;
 #[cfg(test)]
 pub(super) use test_support::{
     collect_search_hits_with_backend, collect_search_hits_with_backend_using,
-    search_existing_generation,
+    search_existing_generation, search_existing_generation_with_compact_projection,
 };
 
 const MAX_USAGE_CONTEXT_EVENTS_PER_SESSION: usize = 256;
@@ -401,6 +403,8 @@ fn run_search_inner<P: HistorySemanticPort>(
     let compact_projection = compact_search_projection(json_output, verbose);
     let plan = ctx_history_read_application::plan_search(request, policy)?;
     let request = plan.request();
+    let retained_peer =
+        ctx_history_read_application::retained_peer_read_for_search(request, compact_projection);
     let requested_backend = request.backend.unwrap_or(policy.default_backend);
     observation.backend_requested = Some(requested_backend);
     let semantic_weight = request.semantic_weight;
@@ -413,13 +417,28 @@ fn run_search_inner<P: HistorySemanticPort>(
     if should_wait_for_daemon_query_service(refresh_mode, config.daemon.enabled) && needs_semantic {
         let _ = wait_for_daemon_query_service_cancellable(&data_root, Duration::from_secs(3))?;
     }
-    let mut refresh = observed_refresh_for_search(request, refresh_mode, &data_root, observation)?;
+    let mut refresh = observed_refresh_for_search(
+        request,
+        refresh_mode,
+        &data_root,
+        retained_peer,
+        observation,
+    )?;
     if refresh_mode == RefreshArg::Wait && config.daemon.enabled && needs_semantic {
-        refresh.pin = wait_for_daemon_semantic_generation(
-            &data_root,
-            refresh.pin,
-            SEMANTIC_GENERATION_WAIT_TIMEOUT,
-        )?;
+        refresh.pin = match retained_peer {
+            RetainedPeerRead::Omit => wait_for_daemon_semantic_generation(
+                &data_root,
+                refresh.pin,
+                SEMANTIC_GENERATION_WAIT_TIMEOUT,
+            )?,
+            RetainedPeerRead::IfAvailable => {
+                wait_for_daemon_semantic_generation_with_retained_peer(
+                    &data_root,
+                    refresh.pin,
+                    SEMANTIC_GENERATION_WAIT_TIMEOUT,
+                )?
+            }
+        };
     }
     let search_result = search_pinned_generation(
         plan,
@@ -721,8 +740,15 @@ fn mcp_search_inner<P: HistorySemanticPort>(
     let plan = ctx_history_read_application::plan_search(request, policy)?;
     let requested_backend = plan.request().backend.unwrap_or(policy.default_backend);
     observation.backend_requested = Some(requested_backend);
-    let refresh =
-        observed_refresh_for_search(plan.request(), RefreshArg::Off, data_root, observation)?;
+    let retained_peer =
+        ctx_history_read_application::retained_peer_read_for_search(plan.request(), true);
+    let refresh = observed_refresh_for_search(
+        plan.request(),
+        RefreshArg::Off,
+        data_root,
+        retained_peer,
+        observation,
+    )?;
     let result = search_pinned_generation(
         plan,
         data_root,
@@ -813,13 +839,22 @@ pub(super) fn refresh_for_search(
     request: &SourceSearchRequest,
     refresh: RefreshArg,
     data_root: &Path,
+    retained_peer: RetainedPeerRead,
 ) -> SourceSearchResult<RefreshOutcome> {
-    refresh_for_search_with(
-        request,
-        refresh,
-        data_root,
-        coordinate_source_backed_refresh,
-    )
+    match retained_peer {
+        RetainedPeerRead::Omit => refresh_for_search_with(
+            request,
+            refresh,
+            data_root,
+            coordinate_source_backed_refresh,
+        ),
+        RetainedPeerRead::IfAvailable => refresh_for_search_with(
+            request,
+            refresh,
+            data_root,
+            coordinate_source_backed_refresh_with_retained_peer,
+        ),
+    }
 }
 
 pub(super) fn refresh_for_search_with<Coordinate>(

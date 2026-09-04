@@ -88,9 +88,10 @@ pub use journal::{DurableAdmissionPersistence, RefreshJournal};
 pub use publication::count_verified_index_opens;
 pub use publication::{
     explicit_catalog_request_is_accounted_for, open_verified_index, pin_active_verified_generation,
-    pin_published_generation, pin_retained_generation,
-    published_explicit_source_relocation_authority, published_refresh_receipt,
-    MissingActiveGeneration, PinnedSourceBackedGeneration,
+    pin_active_verified_generation_with_retained_peer, pin_published_generation,
+    pin_published_generation_with_retained_peer, pin_retained_generation,
+    pin_retained_generation_with_retained_peer, published_explicit_source_relocation_authority,
+    published_refresh_receipt, MissingActiveGeneration, PinnedSourceBackedGeneration,
 };
 pub use request::{
     AdmissionResponseBarrier, RefreshAdmission, RefreshIntent, RefreshLogicalPhase,

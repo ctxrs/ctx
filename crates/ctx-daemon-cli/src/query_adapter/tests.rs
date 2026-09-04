@@ -35,6 +35,7 @@ use super::*;
 
 mod cancellation;
 mod passive_v2;
+mod retained_peer;
 
 fn semantic_tempdir() -> Result<tempfile::TempDir> {
     let temporary = tempfile::tempdir()?;

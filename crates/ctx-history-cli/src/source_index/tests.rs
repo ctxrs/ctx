@@ -1,4 +1,5 @@
 mod activity;
+mod compact_authority;
 mod semantic_fallback;
 mod show_lineage;
 
@@ -23,7 +24,8 @@ use ctx_history_core::{
     CoreContentPolicyStatus, CoreRecord, EventIdentityInput, LiteralFactKind, NativeItemKey,
     NativeSessionKey, ProviderDeclaredFact, ProviderNativeCopyProof, ProviderNativeEventCopy,
     ProviderNativeSessionRelationship, ScannedSourceCounts, SessionIdentityInput, SourceAnchor,
-    SourceKey, SourceObservation, TypedKey, CORE_ACTIVITY_REVISION, MAX_CORE_CONTENT_BYTES,
+    SourceKey, SourceObservation, StableEntityId, TypedKey, CORE_ACTIVITY_REVISION,
+    MAX_CORE_CONTENT_BYTES,
 };
 use ctx_history_index::{
     CompiledSearchFilter, EventSearchCandidate, EventSearchFilters, GenerationWriter, IndexError,
@@ -48,8 +50,9 @@ use super::{
         render_show_document, search_json, SEARCH_SNIPPET_MAX_BYTES, SEARCH_SNIPPET_MAX_CHARS,
     },
     search::{
-        resolve_source_search_backend, semantic_reason_code, NormalizedSearchQuery,
-        SearchCollection, SearchEventMetadata, SearchHit, SearchPresentation, SearchResultWindow,
+        resolve_source_search_backend, search_existing_generation_with_compact_projection,
+        semantic_reason_code, NormalizedSearchQuery, SearchCollection, SearchEventMetadata,
+        SearchHit, SearchPresentation, SearchResultWindow,
     },
     show::{
         canonical_show_output_bytes, event_window_value, mcp_show_event, mcp_show_session,
