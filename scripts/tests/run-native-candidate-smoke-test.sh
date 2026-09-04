@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 077
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 smoke="${repo_root}/scripts/run-native-candidate-smoke.sh"
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/ctx-native-smoke-test.XXXXXX")"
+chmod 0700 "${tmp}"
+chmod u-s,g-s,o-t "${tmp}"
 
 cleanup_survivor_fixture() {
   local survivor_pids
@@ -112,12 +115,19 @@ test -n "${HOME:-}"
 test -n "${XDG_CONFIG_HOME:-}"
 test -n "${XDG_CACHE_HOME:-}"
 test "${HOME}" != "${ORIGINAL_HOME:-not-in-clean-env}"
-if data_root_mode="$(stat -c '%a' "${CTX_DATA_ROOT}" 2>/dev/null)"; then
-  :
-else
-  data_root_mode="$(stat -f '%Lp' "${CTX_DATA_ROOT}")"
-fi
-test "${data_root_mode}" = 700
+for private_dir in "${CTX_DATA_ROOT%/*}" "${CTX_DATA_ROOT}" "${HOME}" \
+  "${XDG_CONFIG_HOME}" "${XDG_CACHE_HOME}" "${XDG_STATE_HOME}" "${TMPDIR}" "${PWD}"; do
+  if private_mode="$(stat -c '%a' "${private_dir}" 2>/dev/null)"; then
+    :
+  else
+    private_mode="$(stat -f '%Lp' "${private_dir}")"
+  fi
+  if test "${private_mode}" != 700; then
+    printf 'private candidate directory is mode %s, not 700: %s\n' \
+      "${private_mode}" "${private_dir}" >&2
+    exit 1
+  fi
+done
 
 case "${0##*/}" in
   *ctx-hang*)
@@ -149,6 +159,13 @@ case " $* " in
     test "${CTX_DAEMON_ENABLED:-}" = 1
     printf '%s\n' 'semantic-only search will not initialize or download intfloat/multilingual-e5-small during search' >&2
     exit 1
+    ;;
+  *" daemon run "*)
+    test "${CTX_ANALYTICS_ENABLED+x}" != x
+    test "${CTX_UPGRADE_AUTO:-}" = off
+    test "${CTX_DAEMON_ENABLED:-}" = true
+    test "${CTX_DAEMON_MODE:-}" = source-refresh-only
+    test "${CTX_SEARCH_SEMANTIC:-}" = 0
     ;;
   *" status --format json "*)
     test -z "${CTX_SEARCH_SEMANTIC:-}"
@@ -208,7 +225,20 @@ case "${1:-}" in
   status)
     if test "${CTX_ANALYTICS_ENABLED+x}" != x; then
       analytics_path="${CTX_ANALYTICS_ENDPOINT#file://}"
-      printf '%s\n' '{"events":[{"event_name":"operation_completed"}]}' > "${analytics_path}"
+      analytics_payload='{"events":[{"event_name":"operation_completed","event_version":1,"surface":"cli","operation":"status","outcome":"success","event_id":"11111111-1111-4111-8111-111111111111"}]}'
+      case "${0##*/}" in
+        *foreground-analytics*)
+          printf '%s\n' "${analytics_payload}" > "${analytics_path}"
+          ;;
+        *)
+          analytics_outbox="${XDG_STATE_HOME}/ctx/analytics-outbox-v1.json"
+          mkdir -p "${analytics_outbox%/*}"
+          chmod 0700 "${analytics_outbox%/*}"
+          printf '%s\n' '{"schema_version":2,"entries":[{"schema_version":2,"entry_id":"22222222-2222-4222-8222-222222222222","endpoint_fingerprint":"fixture","queued_at_epoch_seconds":1800000000,"attempts":0,"next_attempt_at_epoch_seconds":0,"kind":"ordinary","payload":"{\"events\":[{\"event_name\":\"operation_completed\",\"event_version\":1,\"surface\":\"cli\",\"operation\":\"status\",\"outcome\":\"success\",\"event_id\":\"11111111-1111-4111-8111-111111111111\"}]}"}],"retry_attempts":0,"dropped":0,"failure_sequence":0,"last_failure_class":null,"observation_due":false}' \
+            > "${analytics_outbox}"
+          chmod 0600 "${analytics_outbox}"
+          ;;
+      esac
       upgrade_auto=off
       upgrade_enabled=false
       if test -f "$0.install.json"; then
@@ -268,6 +298,21 @@ JSON
 JSON
     fi
     ;;
+  daemon)
+    test "${2:-}" = run
+    analytics_outbox="${XDG_STATE_HOME}/ctx/analytics-outbox-v1.json"
+    test -s "${analytics_outbox}"
+    trap 'exit 0' 1 2 15
+    case "${0##*/}" in
+      *no-analytics-delivery*) ;;
+      *)
+        analytics_path="${CTX_ANALYTICS_ENDPOINT#file://}"
+        printf '%s\n' '{"events":[{"event_name":"operation_completed","event_version":1,"surface":"cli","operation":"status","outcome":"success","event_id":"11111111-1111-4111-8111-111111111111"}]}' \
+          > "${analytics_path}"
+        ;;
+    esac
+    while :; do sleep 1; done
+    ;;
   --survivor-child)
     sleep 30
     ;;
@@ -296,6 +341,47 @@ make_fake "${fake}"
 result="${tmp}/result.json"
 "${smoke}" "${fake}" "${tmp}/fixture.jsonl" 0.25.0 "${result}" >/dev/null
 assert_passed_result "${result}"
+
+setgid_tmp="${tmp}/setgid-task-parent"
+mkdir -p "${setgid_tmp}"
+chmod 2700 "${setgid_tmp}"
+setgid_result="${tmp}/setgid-result.json"
+TMPDIR="${setgid_tmp}" "${smoke}" \
+  "${fake}" "${tmp}/fixture.jsonl" 0.25.0 "${setgid_result}" >/dev/null
+assert_passed_result "${setgid_result}"
+
+foreground_analytics_fake="${tmp}/ctx-foreground-analytics"
+make_fake "${foreground_analytics_fake}"
+foreground_analytics_result="${tmp}/foreground-analytics-result.json"
+if "${smoke}" "${foreground_analytics_fake}" "${tmp}/fixture.jsonl" 0.25.0 \
+  "${foreground_analytics_result}" >"${tmp}/foreground-analytics.out" \
+  2>"${tmp}/foreground-analytics.err"; then
+  printf 'candidate smoke accepted foreground analytics delivery\n' >&2
+  exit 1
+fi
+grep -Fq 'foreground CLI delivered analytics before daemon ownership' \
+  "${tmp}/foreground-analytics.err"
+test ! -e "${foreground_analytics_result}"
+
+no_analytics_delivery_fake="${tmp}/ctx-no-analytics-delivery"
+make_fake "${no_analytics_delivery_fake}"
+no_analytics_delivery_result="${tmp}/no-analytics-delivery-result.json"
+started="$(date +%s)"
+if CTX_NATIVE_CANDIDATE_COMMAND_TIMEOUT_SECONDS=1 "${smoke}" \
+  "${no_analytics_delivery_fake}" "${tmp}/fixture.jsonl" 0.25.0 \
+  "${no_analytics_delivery_result}" >"${tmp}/no-analytics-delivery.out" \
+  2>"${tmp}/no-analytics-delivery.err"; then
+  printf 'candidate smoke accepted an analytics daemon that did not deliver\n' >&2
+  exit 1
+fi
+elapsed="$(( $(date +%s) - started ))"
+[[ "${elapsed}" -lt 10 ]] || {
+  printf 'candidate analytics delivery timeout was not bounded: %ss\n' "${elapsed}" >&2
+  exit 1
+}
+grep -Fq 'daemon did not deliver queued status analytics within 1 seconds' \
+  "${tmp}/no-analytics-delivery.err"
+test ! -e "${no_analytics_delivery_result}"
 
 ctx_v1_parent="${tmp}/ctx-v1-parent"
 mkdir -p "${ctx_v1_parent}"
