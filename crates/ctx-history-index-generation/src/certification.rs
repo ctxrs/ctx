@@ -757,79 +757,6 @@ fn matching_certification(
     Ok(Some(certification))
 }
 
-/// Preserves the active sidecar across reclamation; failures retain safe hashing.
-pub(crate) fn reclaim_with_active_certification(
-    root: &Path,
-    pointer: &ActiveGenerationPointer,
-    reclaimed_directory: &str,
-    remove: impl FnOnce() -> Result<()>,
-) -> Result<()> {
-    let certification = prepare_reclaim(root, pointer, reclaimed_directory).unwrap_or_default();
-    remove()?;
-    if let Some(mut certification) = certification {
-        let _ = (|| {
-            let generation_path = slot_path(root, pointer.active());
-            for expected in &mut certification.artifacts {
-                let current = capture_artifact(
-                    root,
-                    &generation_path,
-                    Path::new(&expected.artifact.path),
-                    Some(pointer),
-                )?;
-                if current != expected.artifact
-                    && (!current
-                        .identity
-                        .same_payload_identity(&expected.artifact.identity)
-                        || current.identity.link_count().checked_add(1)
-                            != Some(expected.artifact.identity.link_count()))
-                {
-                    return Err(IndexError::ChecksumMismatch);
-                }
-                expected.artifact = current;
-            }
-            let index = crate::open_slot_index(root, pointer.active())?;
-            install_certification_sidecar(
-                root,
-                Some(pointer),
-                None,
-                pointer.active(),
-                &index,
-                &certification,
-                false,
-            )
-        })();
-    }
-    Ok(())
-}
-
-fn prepare_reclaim(
-    root: &Path,
-    pointer: &ActiveGenerationPointer,
-    reclaimed_directory: &str,
-) -> Result<Option<GenerationIntegrityCertification>> {
-    let Some(certification) = load_structurally_valid_certification(root, pointer.active())? else {
-        return Ok(None);
-    };
-    let aliases = std::iter::once(pointer.active().directory())
-        .chain(pointer.previous().map(GenerationSlot::directory))
-        .chain(std::iter::once(reclaimed_directory))
-        .map(str::to_owned)
-        .collect::<HashSet<_>>();
-    let generation_path = slot_path(root, pointer.active());
-    for expected in &certification.artifacts {
-        if capture_artifact_with_retained_aliases(
-            root,
-            &generation_path,
-            Path::new(&expected.artifact.path),
-            &aliases,
-        )? != expected.artifact
-        {
-            return Ok(None);
-        }
-    }
-    Ok(Some(certification))
-}
-
 fn load_structurally_valid_certification(
     root: &Path,
     slot: &GenerationSlot,
@@ -862,7 +789,7 @@ pub fn verify_certified_physical_integrity(
     slot: &GenerationSlot,
     certified: &CertifiedPhysicalIntegrity,
     candidate_audit: Option<&PhysicalIntegrityAudit>,
-) -> Result<()> {
+) -> Result<Option<CertifiedPhysicalIntegrity>> {
     let certification = &certified.certification;
     if certification.slot != *slot {
         return Err(IndexError::ConcurrentGenerationChange);
@@ -881,7 +808,10 @@ pub fn verify_certified_physical_integrity(
         return Err(IndexError::ConcurrentGenerationChange);
     }
 
-    for expected in &certification.artifacts {
+    let mut refreshed = certification.clone();
+    let mut refresh_is_complete = true;
+    let mut identity_changed = false;
+    for expected in &mut refreshed.artifacts {
         let current = capture_artifact(
             root,
             &generation_path,
@@ -902,7 +832,9 @@ pub fn verify_certified_physical_integrity(
         }
         let Some(candidate_file) = candidate_file else {
             // This segment is absent from the candidate and therefore cannot
-            // be used as an exhaustive-verification exclusion.
+            // be used as an exhaustive-verification exclusion or to refresh
+            // a changed predecessor identity.
+            refresh_is_complete &= current == expected.artifact;
             continue;
         };
         if candidate_file.sha256 != expected.sha256 {
@@ -914,11 +846,18 @@ pub fn verify_certified_physical_integrity(
         {
             return Err(IndexError::ChecksumMismatch);
         }
+        identity_changed |= current != expected.artifact;
+        expected.artifact = current;
     }
     if load_current_pointer(root)? != *pointer {
         return Err(IndexError::ConcurrentGenerationChange);
     }
-    Ok(())
+    Ok(
+        (refresh_is_complete && identity_changed).then_some(CertifiedPhysicalIntegrity {
+            certification: refreshed,
+            recertified: true,
+        }),
+    )
 }
 
 fn load_current_pointer(root: &Path) -> Result<ActiveGenerationPointer> {
@@ -967,6 +906,7 @@ pub(crate) use artifact_io::{
 mod candidate;
 mod install;
 mod pointer_fence;
+mod reclaim;
 mod sidecar;
 use candidate::{certification_digest_matches_slot, CertificationAliasAuthority};
 pub use candidate::{
@@ -977,6 +917,7 @@ use install::{install_certification, install_certification_sidecar, Certificatio
 pub use pointer_fence::ActiveGenerationPointerFence;
 #[cfg(windows)]
 pub(crate) use pointer_fence::ValidatedPredecessorPointer;
+pub(crate) use reclaim::reclaim_with_pointer_certifications;
 
 #[cfg(any(test, feature = "test-support"))]
 pub use sidecar::certification_file_for_active;

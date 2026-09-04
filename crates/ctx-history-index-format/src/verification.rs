@@ -357,6 +357,7 @@ impl VerifiedPublication {
 pub struct VerifiedCandidatePublication {
     publication: VerifiedPublication,
     physical_integrity_audit: PhysicalIntegrityAudit,
+    predecessor_physical_integrity: Option<CertifiedPhysicalIntegrity>,
 }
 
 impl VerifiedCandidatePublication {
@@ -368,6 +369,11 @@ impl VerifiedCandidatePublication {
     #[doc(hidden)]
     pub fn physical_integrity_audit(&self) -> &PhysicalIntegrityAudit {
         &self.physical_integrity_audit
+    }
+
+    #[doc(hidden)]
+    pub fn predecessor_physical_integrity(&self) -> Option<&CertifiedPhysicalIntegrity> {
+        self.predecessor_physical_integrity.as_ref()
     }
 
     #[doc(hidden)]
@@ -486,7 +492,7 @@ where
         candidate_physical_proof,
     )
     .map_err(|error| CandidatePublicationVerificationError::Candidate(error.into()))?;
-    if let Some(base) = base {
+    let predecessor_physical_integrity = if let Some(base) = base {
         let (root, pointer, slot) = base_authority.ok_or({
             CandidatePublicationVerificationError::Candidate(IndexError::WriterInvariant(
                 "incremental candidate verification lacks active base authority",
@@ -499,8 +505,10 @@ where
             base,
             Some(&physical_integrity_audit),
         )
-        .map_err(CandidatePublicationVerificationError::Reusable)?;
-    }
+        .map_err(CandidatePublicationVerificationError::Reusable)?
+    } else {
+        None
+    };
     report_logical_verification().map_err(CandidatePublicationVerificationError::Candidate)?;
     verify_publication_candidate(&searcher, &manifest, base.map(PinnedPublication::searcher))
         .map_err(CandidatePublicationVerificationError::Candidate)?;
@@ -511,6 +519,7 @@ where
             generation_id,
         },
         physical_integrity_audit,
+        predecessor_physical_integrity,
     })
 }
 
@@ -531,7 +540,7 @@ pub fn verify_pinned_publication_authority(
     slot: &GenerationSlot,
     publication: &PinnedPublication,
     candidate_audit: Option<&PhysicalIntegrityAudit>,
-) -> std::result::Result<(), ReusablePublicationError> {
+) -> std::result::Result<Option<CertifiedPhysicalIntegrity>, ReusablePublicationError> {
     if slot.generation_id() != publication.generation_id {
         return Err(ReusablePublicationError::Binding(
             IndexError::ConcurrentGenerationChange,
