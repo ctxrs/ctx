@@ -607,7 +607,7 @@ try {
         $statusValue.semantic.reason -cne "semantic_disabled") {
         Fail "native candidate does not report semantic search as disabled by default"
     }
-    if ($statusValue.semantic.embed_policy.source -ceq "unsupported") {
+    if ($status -match '"source"\s*:\s*"unsupported"') {
         Fail "native candidate unexpectedly reports semantic search as unsupported"
     }
     if (Test-Path -LiteralPath $analyticsDefaultEvents) {

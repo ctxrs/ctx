@@ -105,7 +105,12 @@ if not "%CTX_SEARCH_SEMANTIC%"=="" exit /b 89
 if /I "%~n0"=="ctx-foreground-analytics" goto foreground_delivery
 if not exist "%XDG_STATE_HOME%\ctx" mkdir "%XDG_STATE_HOME%\ctx"
 > "%XDG_STATE_HOME%\ctx\analytics-outbox-v1.json" echo {"schema_version":2,"entries":[{"schema_version":2,"entry_id":"22222222-2222-4222-8222-222222222222","endpoint_fingerprint":"fixture","queued_at_epoch_seconds":1800000000,"attempts":0,"next_attempt_at_epoch_seconds":0,"kind":"ordinary","payload":"{\"events\":[{\"event_name\":\"operation_completed\",\"event_version\":1,\"surface\":\"cli\",\"operation\":\"status\",\"outcome\":\"success\",\"event_id\":\"11111111-1111-4111-8111-111111111111\"}]}"}],"retry_attempts":0,"dropped":0,"failure_sequence":0,"last_failure_class":null,"observation_due":false}
+if /I "%~n0"=="ctx-no-embed-policy" goto status_without_embed_policy
 echo {"read_only":true,"daemon":{"enabled":true},"upgrade":{"auto":"off","auto_enabled":false},"semantic":{"config_source":"default","enabled":false,"reason":"semantic_disabled","embed_policy":{"source":"dynamic_quiet"}}}
+exit /b 0
+
+:status_without_embed_policy
+echo {"read_only":true,"daemon":{"enabled":true},"upgrade":{"auto":"off","auto_enabled":false},"semantic":{"config_source":"default","enabled":false,"reason":"semantic_disabled"}}
 exit /b 0
 
 :foreground_delivery
@@ -162,6 +167,15 @@ exit /b %errorlevel%
         if ($parsed.steps.$key -ne "passed") {
             throw "candidate smoke step did not pass: $key"
         }
+    }
+
+    $noEmbedPolicyFake = Join-Path $root "ctx-no-embed-policy.cmd"
+    Copy-Item -LiteralPath $fake -Destination $noEmbedPolicyFake
+    $noEmbedPolicyResult = Join-Path $root "no-embed-policy-result.json"
+    & $smoke -Binary $noEmbedPolicyFake -Fixture $fixture `
+        -ExpectedVersion 0.25.0 -ResultPath $noEmbedPolicyResult | Out-Null
+    if ((Get-Content -LiteralPath $noEmbedPolicyResult -Raw | ConvertFrom-Json).status -ne "passed") {
+        throw "candidate smoke rejected an omitted optional semantic embed policy"
     }
 
     $foregroundAnalyticsFake = Join-Path $root "ctx-foreground-analytics.cmd"
