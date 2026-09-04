@@ -188,7 +188,7 @@ for platform in linux-x64 linux-aarch64 macos-arm64 macos-x64 windows-x64; do
   [[ "${platform}" == "linux-x64" ]] && binary="ctx"
   [[ "${platform}" == "windows-x64" ]] && binary="ctx.exe"
   mkdir -p "${proof_root}/${platform}"
-  printf '%s\n' '{"kind":"ctx-native-candidate-smoke","schema_version":1,"status":"passed"}' \
+  printf '%s\n' '{"kind":"ctx-native-candidate-smoke","schema_version":1,"status":"passed","steps":{"version":"passed","setup":"passed","import":"passed","search":"passed","read_only":"passed","released_defaults":"passed","explicit_opt_outs":"passed","semantic_offline_fail_closed":"passed"}}' \
     > "${proof_root}/${platform}/candidate-smoke.json"
   CTX_NATIVE_PROOF_ARTIFACT="${matrix}/${binary}" \
     "${real_python3}" -I "${source_root}/scripts/native-execution-proof.py" create \

@@ -144,6 +144,10 @@ $cacheRoot = Join-Path $root "cache"
 $stateRoot = Join-Path $root "state"
 $tmpRoot = Join-Path $root "tmp"
 $workRoot = Join-Path $root "work"
+$analyticsDefaultEvents = Join-Path $root "analytics-default.jsonl"
+$analyticsOptOutEvents = Join-Path $root "analytics-opt-out.jsonl"
+$analyticsDefaultEndpoint = ([System.Uri]::new($analyticsDefaultEvents)).AbsoluteUri
+$analyticsOptOutEndpoint = ([System.Uri]::new($analyticsOptOutEvents)).AbsoluteUri
 foreach ($path in @($profile, $dataRoot, $configRoot, $cacheRoot, $stateRoot, $tmpRoot, $workRoot)) {
     New-Item -ItemType Directory -Path $path -Force | Out-Null
 }
@@ -213,10 +217,12 @@ $isolation = [ordered]@{
     TMP = $tmpRoot
     CTX_DATA_ROOT = $dataRoot
     CTX_ANALYTICS_ENABLED = "false"
+    CTX_ANALYTICS_ENDPOINT = $analyticsDefaultEndpoint
     CTX_UPGRADE_AUTO = "off"
     CTX_DAEMON_AUTOSTART_OFF = "1"
     CTX_DAEMON_AUTOSTART_LOOP_INTERVAL_SECONDS = "1"
     CTX_DAEMON_ENABLED = "false"
+    CTX_DAEMON_MODE = "source-refresh-only"
     CTX_SEARCH_SEMANTIC = "0"
     CTX_SEMANTIC_CACHE_DIR = (Join-Path $root "semantic-cache")
     HF_HOME = (Join-Path $root "huggingface")
@@ -277,7 +283,10 @@ function Wait-TaskUntil(
     }
 }
 
-function Invoke-CtxRaw([string[]]$Arguments) {
+function Invoke-CtxRaw(
+    [string[]]$Arguments,
+    [string]$CompletionPath = ""
+) {
     $start = New-Object System.Diagnostics.ProcessStartInfo
     $start.UseShellExecute = $false
     $start.RedirectStandardOutput = $true
@@ -315,7 +324,22 @@ function Invoke-CtxRaw([string[]]$Arguments) {
         $timeoutPhase = $null
         $rootExitCode = $null
         $cleanupAfterExit = $false
-        if (-not (Wait-ProcessUntil $process $commandClock $timeoutMilliseconds)) {
+        if (-not [string]::IsNullOrWhiteSpace($CompletionPath)) {
+            while ((Get-RemainingMilliseconds $commandClock $timeoutMilliseconds) -gt 0) {
+                $completion = Get-Item -LiteralPath $CompletionPath -ErrorAction SilentlyContinue
+                if ($null -ne $completion -and $completion.Length -gt 0) {
+                    $cleanupAfterExit = $true
+                    break
+                }
+                if ($process.HasExited) {
+                    break
+                }
+                Start-Sleep -Milliseconds 100
+            }
+            if (-not $cleanupAfterExit) {
+                $timeoutPhase = "analytics delivery"
+            }
+        } elseif (-not (Wait-ProcessUntil $process $commandClock $timeoutMilliseconds)) {
             $timeoutPhase = "process exit"
         } else {
             # Preserve the root result before terminating any descendants that
@@ -424,6 +448,33 @@ function Invoke-Ctx([string[]]$Arguments) {
     return $result.Text
 }
 
+function Get-StatusAnalyticsEventId([string]$Path, [bool]$Outbox) {
+    try {
+        if ($Outbox) {
+            $document = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+            if ($document.schema_version -ne 2) { throw "unexpected outbox schema" }
+            $payloads = @($document.entries | Where-Object { $_.kind -ceq "ordinary" } |
+                ForEach-Object { $_.payload | ConvertFrom-Json })
+        } else {
+            $payloads = @(Get-Content -LiteralPath $Path |
+                Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+                ForEach-Object { $_ | ConvertFrom-Json })
+        }
+        $ids = @($payloads.events | Where-Object {
+            $_.event_name -ceq "operation_completed" -and $_.event_version -eq 1 -and
+            $_.surface -ceq "cli" -and $_.operation -ceq "status" -and
+            $_.outcome -ceq "success"
+        } | ForEach-Object { [string]$_.event_id })
+    } catch {
+        Fail "candidate produced malformed analytics evidence"
+    }
+    if ($ids.Count -ne 1 -or $ids[0] -cnotmatch
+        '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$') {
+        Fail "analytics evidence does not contain exactly one status UUIDv4"
+    }
+    return $ids[0]
+}
+
 try {
     foreach ($name in $isolation.Keys) {
         $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, "Process")
@@ -517,28 +568,98 @@ try {
         }
     }
 
-    $env:CTX_SEARCH_SEMANTIC = $null
+    # Empty-config foreground work must append durably without delivery. The
+    # isolated daemon then owns bounded delivery to this local file endpoint.
+    $env:CTX_ANALYTICS_ENABLED = $null
+    $env:CTX_UPGRADE_AUTO = $null
     $env:CTX_DAEMON_ENABLED = $null
+    $env:CTX_SEARCH_SEMANTIC = $null
     try {
         $status = Invoke-Ctx @("status", "--format=json")
     } finally {
+        $env:CTX_ANALYTICS_ENABLED = "false"
+        $env:CTX_UPGRADE_AUTO = "off"
         $env:CTX_SEARCH_SEMANTIC = "0"
         $env:CTX_DAEMON_ENABLED = "false"
     }
-    if ($status -notmatch '"read_only"\s*:\s*true') {
+    try {
+        $statusValue = $status | ConvertFrom-Json
+    } catch {
+        Fail "read-only status command returned malformed JSON"
+    }
+    if ($statusValue.read_only -ne $true) {
         Fail "read-only status command returned an unexpected payload"
     }
+    if ($statusValue.daemon.enabled -ne $true) {
+        Fail "candidate does not report daemon maintenance as enabled by default"
+    }
     if ($pairMode -and
-        ($status -notmatch '"auto"\s*:\s*"apply"' -or
-         $status -notmatch '"auto_enabled"\s*:\s*true')) {
+        ($statusValue.upgrade.auto -cne "apply" -or
+         $statusValue.upgrade.auto_enabled -ne $true)) {
         Fail "candidate does not enable managed auto-upgrade by default"
     }
-    if ($status -notmatch '"config_source"\s*:\s*"default"' -or
-        $status -notmatch '"reason"\s*:\s*"semantic_disabled"') {
+    if (-not $pairMode -and
+        ($statusValue.upgrade.auto -cne "off" -or
+         $statusValue.upgrade.auto_enabled -ne $false)) {
+        Fail "candidate does not disable auto-upgrade in the unmanaged validation layout"
+    }
+    if ($statusValue.semantic.config_source -cne "default" -or
+        $statusValue.semantic.reason -cne "semantic_disabled") {
         Fail "native candidate does not report semantic search as disabled by default"
     }
-    if ($status -match '"source"\s*:\s*"unsupported"') {
+    if ($statusValue.semantic.embed_policy.source -ceq "unsupported") {
         Fail "native candidate unexpectedly reports semantic search as unsupported"
+    }
+    if (Test-Path -LiteralPath $analyticsDefaultEvents) {
+        Fail "foreground CLI delivered analytics before daemon ownership"
+    }
+    $analyticsOutboxes = @(Get-ChildItem -LiteralPath $root -Recurse -File |
+        Where-Object { $_.Name -ceq "analytics-outbox-v1.json" })
+    if ($analyticsOutboxes.Count -ne 1) {
+        Fail "candidate did not create exactly one durable analytics outbox"
+    }
+    $analyticsOutboxBeforeDaemon = Join-Path $root "analytics-outbox-before-daemon.json"
+    Copy-Item -LiteralPath $analyticsOutboxes[0].FullName -Destination $analyticsOutboxBeforeDaemon
+
+    $env:CTX_ANALYTICS_ENABLED = $null
+    $env:CTX_UPGRADE_AUTO = "off"
+    $env:CTX_DAEMON_ENABLED = "true"
+    $env:CTX_DAEMON_MODE = "source-refresh-only"
+    $env:CTX_SEARCH_SEMANTIC = "0"
+    try {
+        [void](Invoke-CtxRaw @(
+            "daemon", "run", "--force", "--loop-interval-seconds", "600", "--format", "json"
+        ) $analyticsDefaultEvents)
+    } finally {
+        $env:CTX_ANALYTICS_ENABLED = "false"
+        $env:CTX_UPGRADE_AUTO = "off"
+        $env:CTX_DAEMON_ENABLED = "false"
+    }
+
+    $queuedStatusId = Get-StatusAnalyticsEventId $analyticsOutboxBeforeDaemon $true
+    $deliveredStatusId = Get-StatusAnalyticsEventId $analyticsDefaultEvents $false
+    if ($queuedStatusId -cne $deliveredStatusId) {
+        Fail "daemon did not deliver the queued status analytics UUID"
+    }
+
+    $env:CTX_ANALYTICS_ENDPOINT = $analyticsOptOutEndpoint
+    $optOutStatus = Invoke-Ctx @("status", "--format=json")
+    try {
+        $optOutStatusValue = $optOutStatus | ConvertFrom-Json
+    } catch {
+        Fail "explicit opt-out status returned malformed JSON"
+    } finally {
+        $env:CTX_ANALYTICS_ENDPOINT = $analyticsDefaultEndpoint
+    }
+    if ($optOutStatusValue.daemon.enabled -ne $false) {
+        Fail "candidate daemon opt-out did not override the released default"
+    }
+    if ($optOutStatusValue.upgrade.auto -cne "off" -or
+        $optOutStatusValue.upgrade.auto_enabled -ne $false) {
+        Fail "candidate upgrade opt-out did not override the released default"
+    }
+    if (Test-Path -LiteralPath $analyticsOptOutEvents) {
+        Fail "candidate analytics opt-out did not override the released default"
     }
 
     # Semantic search is supported but opt-in. Without a provisioned model, an
@@ -585,6 +706,8 @@ try {
         import = "passed"
         search = "passed"
         read_only = "passed"
+        released_defaults = "passed"
+        explicit_opt_outs = "passed"
         semantic_offline_fail_closed = "passed"
     }
     if ($pairMode) {
@@ -596,6 +719,8 @@ try {
             import = "passed"
             search = "passed"
             read_only = "passed"
+            released_defaults = "passed"
+            explicit_opt_outs = "passed"
             semantic_offline_fail_closed = "passed"
         }
     }
