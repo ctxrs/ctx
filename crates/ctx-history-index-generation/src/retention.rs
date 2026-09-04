@@ -867,4 +867,73 @@ mod tests {
         assert!(!certification_path(root.path(), &old).exists());
         assert!(root.path().join(read_lease::COORDINATOR_FILE).is_file());
     }
+
+    #[test]
+    fn durable_release_respects_cross_process_reader_then_later_reclaims() {
+        let root = tempdir().unwrap();
+        let old = create_slot(root.path(), 'd');
+        publish_active_generation_pointer(
+            root.path(),
+            &ActiveGenerationPointer::new(old.clone(), None).unwrap(),
+        )
+        .unwrap();
+        let durable = acquire_generation_retention_lease(
+            root.path(),
+            old.generation_id(),
+            "pro_core_finalization",
+            &"e".repeat(64),
+        )
+        .unwrap();
+
+        let marker = root.path().join("durable-release-child-ready");
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("retention::tests::generation_read_lease_crash_child")
+            .arg("--nocapture")
+            .env(CHILD_ROOT, root.path())
+            .env(CHILD_GENERATION, old.generation_id())
+            .env(CHILD_MARKER, &marker)
+            .spawn()
+            .unwrap();
+        for _ in 0..250 {
+            if marker.is_file() {
+                break;
+            }
+            assert!(
+                child.try_wait().unwrap().is_none(),
+                "lease child exited early"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            marker.is_file(),
+            "lease child did not acquire its shared lock"
+        );
+
+        let previous = create_slot(root.path(), 'e');
+        let active = create_slot(root.path(), 'f');
+        let pointer = ActiveGenerationPointer::new(active.clone(), Some(previous.clone())).unwrap();
+        publish_active_generation_pointer(root.path(), &pointer).unwrap();
+
+        assert!(release_generation_retention_lease(root.path(), &durable).unwrap());
+        assert!(load_generation_retention_lease(root.path())
+            .unwrap()
+            .is_none());
+        assert!(slot_path(root.path(), &old).is_dir());
+        assert!(manifest_path(root.path(), old.generation_id()).is_file());
+        assert!(certification_path(root.path(), &old).is_file());
+
+        child.kill().unwrap();
+        child.wait().unwrap();
+        let retained = vec![
+            active.generation_id().to_owned(),
+            previous.generation_id().to_owned(),
+        ];
+        reclaim_inactive_generation_directories(root.path(), Some(&pointer), None).unwrap();
+        reclaim_unreferenced_manifests(root.path(), &retained).unwrap();
+        reclaim_unreferenced_certifications(root.path(), Some(&pointer), None).unwrap();
+        assert!(!slot_path(root.path(), &old).exists());
+        assert!(!manifest_path(root.path(), old.generation_id()).exists());
+        assert!(!certification_path(root.path(), &old).exists());
+    }
 }
