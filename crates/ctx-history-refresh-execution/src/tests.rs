@@ -22,25 +22,35 @@ impl PublishedSourceBackedStatePort for TestPublishedState {
         let index_root = source_backed_index_root(data_root);
         if !index_root.is_dir() {
             return Ok(PublishedSourceBackedState {
-                verified_index: None,
+                generation: PublishedSourceBackedGeneration::Missing,
                 explicit_source_catalog: None,
                 catalog_route_bindings: Vec::new(),
                 route_controls: BTreeMap::new(),
             });
         }
-        let verified_index = match VerifiedIndex::open_pinned(&index_root) {
-            Ok(index) => Some(index),
-            Err(IndexError::MissingActiveGenerationPointer) => None,
+        let generation = match VerifiedIndex::open_pinned(&index_root) {
+            Ok(index) => {
+                PublishedSourceBackedGeneration::Verified(index.into_generation_snapshot())
+            }
+            Err(IndexError::MissingActiveGenerationPointer) => {
+                PublishedSourceBackedGeneration::Missing
+            }
             Err(error)
                 if ctx_history_index::generation_incompatibility_requires_rebuild(&error) =>
             {
-                None
+                PublishedSourceBackedGeneration::RebuildRequired
             }
             Err(error) => return Err(error.into()),
         };
+        let verified_generation = match &generation {
+            PublishedSourceBackedGeneration::Verified(generation) => Some(generation),
+            PublishedSourceBackedGeneration::Missing
+            | PublishedSourceBackedGeneration::RebuildRequired => None,
+        };
         let (explicit_source_catalog, catalog_route_bindings, route_controls) =
-            if let Some(index) = verified_index.as_ref() {
-                let state = SourceBackedGenerationState::decode_from_verified_index(index)?;
+            if let Some(generation) = verified_generation.as_ref() {
+                let state =
+                    SourceBackedGenerationState::decode_from_manifest(generation.manifest())?;
                 (
                     state.applied_explicit_source_catalog().cloned(),
                     state.catalog_route_bindings().to_vec(),
@@ -50,10 +60,25 @@ impl PublishedSourceBackedStatePort for TestPublishedState {
                 (None, Vec::new(), BTreeMap::new())
             };
         Ok(PublishedSourceBackedState {
-            verified_index,
+            generation,
             explicit_source_catalog,
             catalog_route_bindings,
             route_controls,
+        })
+    }
+}
+
+struct FixedPublishedState {
+    verified_generation: VerifiedGenerationSnapshot,
+}
+
+impl PublishedSourceBackedStatePort for FixedPublishedState {
+    fn open_published_state(&self, _data_root: &Path) -> Result<PublishedSourceBackedState> {
+        Ok(PublishedSourceBackedState {
+            generation: PublishedSourceBackedGeneration::Verified(self.verified_generation.clone()),
+            explicit_source_catalog: None,
+            catalog_route_bindings: Vec::new(),
+            route_controls: BTreeMap::new(),
         })
     }
 }
@@ -352,6 +377,59 @@ fn publish_pin_source(index_root: &Path, source: SourceKey) -> String {
         .certify_source(publication_pin_certificate(&source))
         .unwrap();
     writer.commit(|_| true).unwrap().generation_id
+}
+
+#[test]
+fn route_local_rejects_a_stale_verified_generation_before_staging() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    let index_root = temp.path().join("index");
+    let (_, _, discovery) = discovery_fixture(temp.path());
+    let first = publish_pin_source(&index_root, publication_pin_source_with_anchor(0x91));
+    let verified_generation = VerifiedIndex::open_pinned(&index_root)
+        .unwrap()
+        .into_generation_snapshot();
+    assert_eq!(verified_generation.generation_id(), first);
+    let second = publish_pin_source(&index_root, publication_pin_source_with_anchor(0x93));
+    assert_ne!(second, first);
+    let published_state = FixedPublishedState {
+        verified_generation,
+    };
+    let mut progress =
+        |_: CaptureSourceBackedDetailedRefreshProgress| Ok::<(), SourceBackedRouteError>(());
+
+    let error = refresh_all_provider_sources_route_local(
+        &discovery,
+        DiscoveryReport::default(),
+        StdDuration::ZERO,
+        "stale-generation-test",
+        RefreshOperation::Refresh,
+        &data_root,
+        &index_root,
+        None,
+        SourceBackedRefreshScope::All,
+        &published_state,
+        &mut progress,
+    )
+    .unwrap_err();
+
+    assert!(
+        error.chain().any(|cause| {
+            matches!(
+                cause.downcast_ref::<SourceBackedCoordinatorError>(),
+                Some(SourceBackedCoordinatorError::Index(
+                    IndexError::ConcurrentGenerationChange
+                ))
+            )
+        }),
+        "{error:#}"
+    );
+    assert_eq!(
+        VerifiedIndex::open_pinned(&index_root)
+            .unwrap()
+            .generation_id(),
+        second
+    );
 }
 
 fn test_publication(generation_id: impl Into<String>) -> SourceBackedRefreshPublication {

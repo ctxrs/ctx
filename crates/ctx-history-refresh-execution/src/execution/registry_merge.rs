@@ -29,11 +29,16 @@ pub(super) fn build_merged_source_backed_registry_with_automatic_routes(
     published_state: &dyn PublishedSourceBackedStatePort,
 ) -> Result<MergedSourceBackedRegistry> {
     let PublishedSourceBackedState {
-        verified_index: retained_generation,
+        generation: published_generation,
         explicit_source_catalog: previous_explicit_source_catalog,
         catalog_route_bindings: previous_catalog_route_bindings,
         route_controls: previous_route_controls,
     } = published_state.open_published_state(data_root)?;
+    let (retained_generation, exact_base_generation) = match published_generation {
+        PublishedSourceBackedGeneration::Missing => (None, true),
+        PublishedSourceBackedGeneration::RebuildRequired => (None, false),
+        PublishedSourceBackedGeneration::Verified(generation) => (Some(generation), true),
+    };
     let retained_provider_roots =
         configured_retained_provider_roots(discovery, retained_generation.as_ref())?;
     let mut build = build_automatic_source_backed_registry_from_report_with_retained_roots(
@@ -208,6 +213,7 @@ pub(super) fn build_merged_source_backed_registry_with_automatic_routes(
         previous_catalog_route_bindings,
         requested_explicit_source_catalog: explicit_source_catalog.cloned(),
         retained_generation,
+        exact_base_generation,
         requested_catalog_route_bindings,
         previous_route_controls,
     })
@@ -217,7 +223,7 @@ pub(super) fn provider_root_publication_scope(
     requested: &SourceBackedRefreshScope,
     physical: &SourceBackedRefreshScope,
     registry: &ctx_history_capture::SourceBackedProviderRegistry,
-    retained: Option<&VerifiedIndex>,
+    retained: Option<&VerifiedGenerationSnapshot>,
 ) -> SourceBackedRefreshScope {
     let changed = matches!(requested, SourceBackedRefreshScope::All)
         && retained.zip(registry.applied_provider_roots()).is_some_and(

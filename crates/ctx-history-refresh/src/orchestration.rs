@@ -1,4 +1,6 @@
 use super::*;
+use crate::publication::{open_published_generation_for_recovery, PublishedGenerationOpen};
+use ctx_history_refresh_execution::PublishedSourceBackedGeneration;
 
 mod catalog_witness;
 use catalog_witness::retained_generation_state;
@@ -9,11 +11,24 @@ pub(crate) struct RetainedPublishedState<'a> {
 
 impl PublishedSourceBackedStatePort for RetainedPublishedState<'_> {
     fn open_published_state(&self, data_root: &Path) -> Result<PublishedSourceBackedState> {
-        let verified_index = open_published_generation(data_root, self.journal)?;
+        let generation = match open_published_generation_for_recovery(data_root, self.journal)? {
+            PublishedGenerationOpen::Missing => PublishedSourceBackedGeneration::Missing,
+            PublishedGenerationOpen::RebuildRequired => {
+                PublishedSourceBackedGeneration::RebuildRequired
+            }
+            PublishedGenerationOpen::Verified(index) => {
+                PublishedSourceBackedGeneration::Verified((*index).into_generation_snapshot())
+            }
+        };
+        let verified_generation = match &generation {
+            PublishedSourceBackedGeneration::Verified(generation) => Some(generation),
+            PublishedSourceBackedGeneration::Missing
+            | PublishedSourceBackedGeneration::RebuildRequired => None,
+        };
         let (explicit_source_catalog, catalog_route_bindings, route_controls) =
-            retained_generation_state(verified_index.as_ref())?;
+            retained_generation_state(verified_generation)?;
         Ok(PublishedSourceBackedState {
-            verified_index,
+            generation,
             explicit_source_catalog,
             catalog_route_bindings,
             route_controls,

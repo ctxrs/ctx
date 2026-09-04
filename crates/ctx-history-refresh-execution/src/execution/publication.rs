@@ -18,13 +18,13 @@ pub fn exclusive_scan_stage_duration(
 pub(super) fn preserve_carried_rejection_diagnostics(
     route_results: &mut [SourceBackedRefreshRouteResult],
     snapshot: &(impl ImmutableCaptureSnapshot + ?Sized),
-    retained_generation: Option<&VerifiedIndex>,
+    retained_generation: Option<&VerifiedGenerationSnapshot>,
 ) -> Result<Vec<SourceBackedRefreshRecordRejection>> {
     let authority = current_rejection_authority(snapshot)?;
     let (previous_diagnostics, stable_sources) = match retained_generation {
         Some(retained_generation) => {
             let state =
-                SourceBackedGenerationState::decode_from_verified_index(retained_generation)?;
+                SourceBackedGenerationState::decode_from_manifest(retained_generation.manifest())?;
             (
                 state.committed_rejection_diagnostics().to_vec(),
                 stable_source_identities(snapshot, retained_generation),
@@ -112,7 +112,7 @@ fn current_rejection_authority(
 
 fn stable_source_identities(
     snapshot: &(impl ImmutableCaptureSnapshot + ?Sized),
-    retained_generation: &VerifiedIndex,
+    retained_generation: &VerifiedGenerationSnapshot,
 ) -> BTreeSet<String> {
     let retained_certificates = retained_generation
         .manifest()

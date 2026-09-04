@@ -14,7 +14,8 @@ use ctx_history_index::{
     GenerationBaseCertifiedSource, GenerationManifest, GenerationStateEnvelope, GenerationWriter,
     GenerationWriterOpenOutcome, IndexError, PreparedCoreRecord, PreparedCoreRecordDraft,
     PreparedCoreRecordMaterialization, PublicationDisposition, PublicationStage,
-    PublishedGeneration, RevalidationTarget, SourceRouteSnapshot, VerifiedIndex, WriterOptions,
+    PublishedGeneration, RevalidationTarget, SourceRouteSnapshot, VerifiedGenerationSnapshot,
+    VerifiedIndex, WriterOptions,
 };
 use std::{collections::BTreeSet, path::Path, sync::Arc};
 use uuid::Uuid;
@@ -154,6 +155,41 @@ pub const fn automatic_route_deletion_missing_observations_for_test() -> u32 {
 #[repr(transparent)]
 pub struct IndexCaptureLifecycle(GenerationWriter);
 
+impl IndexCaptureLifecycle {
+    pub(crate) fn open_with_expected_base_generation(
+        root: &Path,
+        options: WriterOptions,
+        expected_base_generation: Option<&VerifiedGenerationSnapshot>,
+    ) -> IndexCaptureResult<CaptureLifecycleOpenOutcome<Self>> {
+        capture_lifecycle_open_outcome(GenerationWriter::open_with_expected_base_generation(
+            root,
+            options,
+            expected_base_generation.map(VerifiedGenerationSnapshot::generation_id),
+        )?)
+    }
+}
+
+fn capture_lifecycle_open_outcome(
+    outcome: GenerationWriterOpenOutcome,
+) -> IndexCaptureResult<CaptureLifecycleOpenOutcome<IndexCaptureLifecycle>> {
+    Ok(match outcome {
+        GenerationWriterOpenOutcome::Ready(writer) => {
+            CaptureLifecycleOpenOutcome::Ready(IndexCaptureLifecycle(writer))
+        }
+        GenerationWriterOpenOutcome::RecoveredCommittedMigration { writer, .. } => {
+            CaptureLifecycleOpenOutcome::Ready(IndexCaptureLifecycle(writer))
+        }
+        GenerationWriterOpenOutcome::CommittedMigrationRecoveryRequired { recovery } => {
+            CaptureLifecycleOpenOutcome::RecoveryRequired {
+                recovery: CaptureLifecycleRecovery::new(
+                    recovery.generation_id().to_owned(),
+                    recovery.detail().to_owned(),
+                ),
+            }
+        }
+    })
+}
+
 impl CaptureLifecycleSink for IndexCaptureLifecycle {
     type Error = IndexError;
     type OpenOptions = WriterOptions;
@@ -172,22 +208,7 @@ impl CaptureLifecycleSink for IndexCaptureLifecycle {
         root: &Path,
         options: Self::OpenOptions,
     ) -> IndexCaptureResult<CaptureLifecycleOpenOutcome<Self>> {
-        Ok(match GenerationWriter::open(root, options)? {
-            GenerationWriterOpenOutcome::Ready(writer) => {
-                CaptureLifecycleOpenOutcome::Ready(Self(writer))
-            }
-            GenerationWriterOpenOutcome::RecoveredCommittedMigration { writer, .. } => {
-                CaptureLifecycleOpenOutcome::Ready(Self(writer))
-            }
-            GenerationWriterOpenOutcome::CommittedMigrationRecoveryRequired { recovery } => {
-                CaptureLifecycleOpenOutcome::RecoveryRequired {
-                    recovery: CaptureLifecycleRecovery::new(
-                        recovery.generation_id().to_owned(),
-                        recovery.detail().to_owned(),
-                    ),
-                }
-            }
-        })
+        capture_lifecycle_open_outcome(GenerationWriter::open(root, options)?)
     }
 
     fn base_snapshot(&self) -> Option<Self::Snapshot<'_>> {
