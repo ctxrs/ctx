@@ -228,8 +228,16 @@ fn load_generation_retention_lease_from_opened_root(
     Ok(Some(lease))
 }
 
-/// Releases exactly the observed owner under the publication lock. The next
-/// writer open/publication performs ordinary bounded reclamation.
+/// Releases exactly the observed owner under the publication lock, then makes
+/// a best-effort pass over the now-unretained physical state before releasing
+/// that lock.
+///
+/// Removing the durable lease is the authoritative operation. Reclamation is
+/// deliberately best effort: a crash or reclaim error after the durable
+/// removal can leave obsolete bytes for a later writer, but must not turn a
+/// successful owner release into an ambiguous retry or retain authority that
+/// was already removed. Every reclamation primitive independently fences live
+/// process readers with its generation lock.
 pub fn release_generation_retention_lease(
     root: impl AsRef<Path>,
     expected: &GenerationRetentionLease,
@@ -251,7 +259,25 @@ pub fn release_generation_retention_lease(
         return Err(IndexError::GenerationRetentionLeaseOwnerMismatch);
     }
     remove_lease_file(&root)?;
+    reclaim_unretained_generation_state_with_writer_lock_held(&root);
     Ok(true)
+}
+
+/// Reclaims generation data that is no longer rooted by the active/previous
+/// pointer pair or the sole durable lease. The caller already holds the
+/// generation writer lock.
+fn reclaim_unretained_generation_state_with_writer_lock_held(root: &Path) {
+    let Ok(pointer) = load_active_generation_pointer(root) else {
+        return;
+    };
+    let retained_generation_ids = pointer
+        .iter()
+        .flat_map(|pointer| std::iter::once(pointer.active()).chain(pointer.previous()))
+        .map(|slot| slot.generation_id().to_owned())
+        .collect::<Vec<_>>();
+    let _ = crate::reclaim_inactive_generation_directories(root, pointer.as_ref(), None);
+    let _ = crate::reclaim_unreferenced_manifests(root, &retained_generation_ids);
+    let _ = crate::reclaim_unreferenced_certifications(root, pointer.as_ref(), None);
 }
 
 fn canonical_index_root(root: &Path) -> Result<PathBuf> {

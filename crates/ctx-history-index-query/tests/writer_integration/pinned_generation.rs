@@ -559,10 +559,16 @@ fn reader_owned_peer_lease_survives_parent_drop_after_integrity_verification() {
             .join(INDEX_GENERATIONS_DIRECTORY)
             .join(pointer.previous().unwrap().directory())
     };
-    let mut reader =
-        VerifiedIndex::open_pinned_generation(temp.path(), &second.generation_id).unwrap();
-    let mut second_reader =
-        VerifiedIndex::open_pinned_generation(temp.path(), &second.generation_id).unwrap();
+    let mut reader = VerifiedIndex::open_pinned_generation_with_retained_peer(
+        temp.path(),
+        &second.generation_id,
+    )
+    .unwrap();
+    let mut second_reader = VerifiedIndex::open_pinned_generation_with_retained_peer(
+        temp.path(),
+        &second.generation_id,
+    )
+    .unwrap();
     let cached_peer = second_reader
         .take_retained_generation_peer_for_reader()
         .unwrap()
@@ -572,8 +578,11 @@ fn reader_owned_peer_lease_survives_parent_drop_after_integrity_verification() {
     // Make the checksum-walk assertions independent of a matching prior cache.
     assert!(first_certification.is_file());
     fs::remove_file(first_certification).unwrap();
-    let mut second_reader =
-        VerifiedIndex::open_pinned_generation(temp.path(), &second.generation_id).unwrap();
+    let mut second_reader = VerifiedIndex::open_pinned_generation_with_retained_peer(
+        temp.path(),
+        &second.generation_id,
+    )
+    .unwrap();
 
     reset_physical_verification_activity();
     let peer = reader
@@ -623,8 +632,11 @@ fn reader_owned_peer_rejects_corrupt_physical_integrity() {
     let source = source("leased-verification-corrupt-peer.jsonl");
     let _first = publish_pinned_test_generation(temp.path(), &source, 1, "first evidence");
     let second = publish_pinned_test_generation(temp.path(), &source, 2, "second evidence");
-    let mut reader =
-        VerifiedIndex::open_pinned_generation(temp.path(), &second.generation_id).unwrap();
+    let mut reader = VerifiedIndex::open_pinned_generation_with_retained_peer(
+        temp.path(),
+        &second.generation_id,
+    )
+    .unwrap();
     let pointer = load_active_generation_pointer(temp.path())
         .unwrap()
         .unwrap();

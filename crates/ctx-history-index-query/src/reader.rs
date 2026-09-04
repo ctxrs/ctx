@@ -76,8 +76,8 @@ impl VerifiedGenerationSnapshot {
     }
 }
 
-/// Query-reader authority for the selected generation and its one retained
-/// peer. A query reader owns this bundle for its whole lifetime.
+/// Query-reader authority for the selected generation and, only when the
+/// caller explicitly requested a stable pair, its one retained peer.
 struct ReaderLeaseBundle {
     target: GenerationReadLease,
     peer: Option<GenerationReadLease>,
@@ -173,9 +173,26 @@ impl VerifiedIndex {
     /// publication-time O(document-count) identity audit is not repeated for
     /// current generations.
     pub fn open_pinned(root: impl AsRef<Path>) -> Result<Self> {
-        Self::open_pinned_with_loader(root.as_ref(), |root| {
-            load_active_generation_pointer(root).map_err(IndexError::from)
-        })
+        Self::open_pinned_with_peer(root, false)
+    }
+
+    /// Opens the active generation and retains its current pointer peer for
+    /// the reader lifetime when one is available.
+    ///
+    /// Callers that present compact-generation references must use this paired
+    /// open instead of acquiring an ordinary reader and asking for a peer
+    /// later. Acquiring both locks from one observed pointer preserves a
+    /// stable active/previous pair across concurrent publication.
+    pub fn open_pinned_with_retained_peer(root: impl AsRef<Path>) -> Result<Self> {
+        Self::open_pinned_with_peer(root, true)
+    }
+
+    fn open_pinned_with_peer(root: impl AsRef<Path>, retain_peer: bool) -> Result<Self> {
+        Self::open_pinned_with_loader(
+            root.as_ref(),
+            |root| load_active_generation_pointer(root).map_err(IndexError::from),
+            retain_peer,
+        )
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -186,10 +203,14 @@ impl VerifiedIndex {
     where
         F: FnMut(&Path) -> Result<Option<ActiveGenerationPointer>>,
     {
-        Self::open_pinned_with_loader(root.as_ref(), load_pointer)
+        Self::open_pinned_with_loader(root.as_ref(), load_pointer, false)
     }
 
-    fn open_pinned_with_loader<F>(root: &Path, mut load_pointer: F) -> Result<Self>
+    fn open_pinned_with_loader<F>(
+        root: &Path,
+        mut load_pointer: F,
+        retain_peer: bool,
+    ) -> Result<Self>
     where
         F: FnMut(&Path) -> Result<Option<ActiveGenerationPointer>>,
     {
@@ -203,6 +224,7 @@ impl VerifiedIndex {
                 })
             },
             None,
+            retain_peer,
         )
     }
 
@@ -211,6 +233,7 @@ impl VerifiedIndex {
         load_pointer: &mut F,
         mut select: S,
         expected_generation_id: Option<&str>,
+        retain_peer: bool,
     ) -> Result<Self>
     where
         F: FnMut(&Path) -> Result<Option<ActiveGenerationPointer>>,
@@ -236,6 +259,7 @@ impl VerifiedIndex {
                     &first_pointer,
                     selection,
                     expected_generation_id,
+                    retain_peer,
                 )
             })
         };
@@ -253,6 +277,7 @@ impl VerifiedIndex {
                     &retry_pointer,
                     selection,
                     expected_generation_id,
+                    retain_peer,
                 )
             })
         };
@@ -267,8 +292,9 @@ impl VerifiedIndex {
         pointer: &ActiveGenerationPointer,
         selection: ReaderGenerationSelection,
         expected_generation_id: Option<&str>,
+        retain_peer: bool,
     ) -> Result<Self> {
-        let leases = Self::acquire_reader_leases(root, pointer, &selection)?;
+        let leases = Self::acquire_reader_leases(root, pointer, &selection, retain_peer)?;
         let target = &leases.target;
         let (mut index, recertified) = target
             .with_root_access(|root| {
@@ -304,22 +330,26 @@ impl VerifiedIndex {
         root: &Path,
         pointer: &ActiveGenerationPointer,
         selection: &ReaderGenerationSelection,
+        retain_peer: bool,
     ) -> Result<ReaderLeaseBundle> {
         let target = match selection.durable_authority.as_ref() {
             Some(authority) => acquire_retained_generation_read_lease(root, authority)?,
             None => acquire_generation_read_lease(root, selection.target.generation_id())?,
         };
-        let peer = if selection.target.generation_id() == pointer.active().generation_id() {
-            pointer.previous()
-        } else if pointer
-            .previous()
-            .is_some_and(|slot| slot.generation_id() == selection.target.generation_id())
-        {
-            Some(pointer.active())
-        } else {
-            None
-        };
-        let peer = peer
+        let peer = retain_peer
+            .then(|| {
+                if selection.target.generation_id() == pointer.active().generation_id() {
+                    pointer.previous()
+                } else if pointer
+                    .previous()
+                    .is_some_and(|slot| slot.generation_id() == selection.target.generation_id())
+                {
+                    Some(pointer.active())
+                } else {
+                    None
+                }
+            })
+            .flatten()
             .map(|peer| acquire_generation_read_lease(root, peer.generation_id()))
             .transpose()?;
         Ok(ReaderLeaseBundle { target, peer })
@@ -385,9 +415,29 @@ impl VerifiedIndex {
         root: impl AsRef<Path>,
         expected_generation_id: &str,
     ) -> Result<Self> {
-        Self::open_pinned_generation_with_loader(root.as_ref(), expected_generation_id, |root| {
-            load_active_generation_pointer(root).map_err(IndexError::from)
-        })
+        Self::open_pinned_generation_with_peer(root, expected_generation_id, false)
+    }
+
+    /// Opens exactly the requested retained generation and its current pointer
+    /// peer as one stable reader pair when available.
+    pub fn open_pinned_generation_with_retained_peer(
+        root: impl AsRef<Path>,
+        expected_generation_id: &str,
+    ) -> Result<Self> {
+        Self::open_pinned_generation_with_peer(root, expected_generation_id, true)
+    }
+
+    fn open_pinned_generation_with_peer(
+        root: impl AsRef<Path>,
+        expected_generation_id: &str,
+        retain_peer: bool,
+    ) -> Result<Self> {
+        Self::open_pinned_generation_with_loader(
+            root.as_ref(),
+            expected_generation_id,
+            |root| load_active_generation_pointer(root).map_err(IndexError::from),
+            retain_peer,
+        )
     }
 
     /// Opens exactly the generation held by a process-scoped read lease using
@@ -506,6 +556,7 @@ impl VerifiedIndex {
             root.as_ref(),
             expected_generation_id,
             load_pointer,
+            false,
         )
     }
 
@@ -513,6 +564,7 @@ impl VerifiedIndex {
         root: &Path,
         expected_generation_id: &str,
         mut load_pointer: F,
+        retain_peer: bool,
     ) -> Result<Self>
     where
         F: FnMut(&Path) -> Result<Option<ActiveGenerationPointer>>,
@@ -551,6 +603,7 @@ impl VerifiedIndex {
                 })
             },
             Some(expected_generation_id),
+            retain_peer,
         )
     }
 

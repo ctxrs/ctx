@@ -209,7 +209,8 @@ fn retained_compact_peer_opens_its_exact_verified_generation() {
         "legacy nonempty retained peer successor",
     );
     append_fixture_session(nonempty.path(), &[successor], 94);
-    let current = open_index(nonempty.path()).unwrap();
+    let current =
+        VerifiedIndex::open_pinned_with_retained_peer(index_root(nonempty.path())).unwrap();
     assert_ne!(current.generation_id(), peer_generation);
     let compact = generation_with_retained_peer(current).unwrap();
     assert!(compact.retained_peer().is_some());
@@ -226,7 +227,7 @@ fn retained_compact_peer_opens_its_exact_verified_generation() {
     let temp = tempdir().unwrap();
     let peer_generation = publish_empty_generation(temp.path());
     write_test_generation(temp.path());
-    let current = open_index(temp.path()).unwrap();
+    let current = VerifiedIndex::open_pinned_with_retained_peer(index_root(temp.path())).unwrap();
     assert_ne!(current.generation_id(), peer_generation);
     let compact = generation_with_retained_peer(current).unwrap();
     assert_eq!(

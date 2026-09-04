@@ -1,6 +1,7 @@
 use std::{
     fs,
     path::{Path, PathBuf},
+    time::Instant,
 };
 
 use ctx_history_index_generation::acquire_retained_generation_read_lease;
@@ -26,7 +27,8 @@ fn retained_generation_peer_is_limited_to_the_current_pointer_pair() {
     let source = source("retained-generation-peer.jsonl");
     let first = publish(temp.path(), &source, 1, "first peer");
     let mut first_reader =
-        VerifiedIndex::open_pinned_generation(temp.path(), &first.generation_id).unwrap();
+        VerifiedIndex::open_pinned_generation_with_retained_peer(temp.path(), &first.generation_id)
+            .unwrap();
     assert!(first_reader
         .take_retained_generation_peer_for_reader()
         .unwrap()
@@ -34,15 +36,19 @@ fn retained_generation_peer_is_limited_to_the_current_pointer_pair() {
     drop(first_reader);
 
     let second = publish(temp.path(), &source, 2, "second peer");
-    let mut second_reader =
-        VerifiedIndex::open_pinned_generation(temp.path(), &second.generation_id).unwrap();
+    let mut second_reader = VerifiedIndex::open_pinned_generation_with_retained_peer(
+        temp.path(),
+        &second.generation_id,
+    )
+    .unwrap();
     let previous = second_reader
         .take_retained_generation_peer_for_reader()
         .unwrap()
         .unwrap();
     assert_eq!(previous.generation_id(), first.generation_id);
     let mut first_reader =
-        VerifiedIndex::open_pinned_generation(temp.path(), &first.generation_id).unwrap();
+        VerifiedIndex::open_pinned_generation_with_retained_peer(temp.path(), &first.generation_id)
+            .unwrap();
     let active = first_reader
         .take_retained_generation_peer_for_reader()
         .unwrap()
@@ -55,8 +61,11 @@ fn retained_generation_peer_is_limited_to_the_current_pointer_pair() {
         VerifiedIndex::open_pinned_generation(temp.path(), &first.generation_id),
         Err(IndexError::PinnedGenerationNotRetained { .. })
     ));
-    let mut second_reader =
-        VerifiedIndex::open_pinned_generation(temp.path(), &second.generation_id).unwrap();
+    let mut second_reader = VerifiedIndex::open_pinned_generation_with_retained_peer(
+        temp.path(),
+        &second.generation_id,
+    )
+    .unwrap();
     let active = second_reader
         .take_retained_generation_peer_for_reader()
         .unwrap()
@@ -94,20 +103,33 @@ fn one_durable_lease_retains_an_exact_old_generation_without_changing_peer_slots
         .take_retained_generation_peer_for_reader()
         .unwrap()
         .is_none());
-    let mut fourth_reader =
+    let fourth_reader =
         VerifiedIndex::open_pinned_generation(temp.path(), &fourth.generation_id).unwrap();
-    let peer = fourth_reader
-        .take_retained_generation_peer_for_reader()
-        .unwrap()
-        .unwrap();
-    assert_eq!(peer.generation_id(), third.generation_id);
     assert_eq!(generation_directories(temp.path()).len(), 3);
     assert_ne!(second.generation_id, third.generation_id);
 
-    drop((peer, fourth_reader, leased));
+    drop((fourth_reader, leased));
+    let allocated_before_release = allocated_bytes(temp.path());
+    let release_started = Instant::now();
     assert!(release_generation_retention_lease(temp.path(), &lease).unwrap());
-    let fifth = publish(temp.path(), &source, 5, "fifth");
-    assert_ne!(fifth.generation_id, fourth.generation_id);
+    let release_elapsed = release_started.elapsed();
+    let allocated_after_release = allocated_bytes(temp.path());
+    eprintln!(
+        "immediate durable-lease reclamation: allocated_bytes_before={allocated_before_release} allocated_bytes_after={allocated_after_release} elapsed_ms={}",
+        release_elapsed.as_millis(),
+    );
+    #[cfg(unix)]
+    assert!(allocated_after_release < allocated_before_release);
+    assert_eq!(generation_directories(temp.path()).len(), 2);
+    let pointer = load_active_generation_pointer(temp.path())
+        .unwrap()
+        .unwrap();
+    for generation_id in [
+        pointer.active().generation_id(),
+        pointer.previous().unwrap().generation_id(),
+    ] {
+        assert!(VerifiedIndex::open_pinned_generation(temp.path(), generation_id).is_ok());
+    }
     assert!(matches!(
         VerifiedIndex::open_pinned_generation(temp.path(), &first.generation_id),
         Err(IndexError::PinnedGenerationNotRetained { .. })
@@ -145,6 +167,7 @@ fn candidate_certification_accepts_aliases_held_by_a_process_reader() {
     );
     let process_lease = acquire_retained_generation_read_lease(temp.path(), &lease).unwrap();
     assert!(release_generation_retention_lease(temp.path(), &lease).unwrap());
+    assert_eq!(generation_directories(temp.path()).len(), 3);
 
     publish(
         temp.path(),
@@ -161,6 +184,44 @@ fn candidate_certification_accepts_aliases_held_by_a_process_reader() {
         "fifth",
     );
     assert_eq!(generation_directories(temp.path()).len(), 2);
+}
+
+#[test]
+fn ordinary_reader_does_not_retain_the_previous_generation() {
+    let temp = tempdir().unwrap();
+    let source = source("ordinary-reader-does-not-retain-previous.jsonl");
+    let first = publish(temp.path(), &source, 1, "first ordinary reader");
+    let second = publish(temp.path(), &source, 2, "second ordinary reader");
+    let first_path = temp.path().join(INDEX_GENERATIONS_DIRECTORY).join(
+        load_active_generation_pointer(temp.path())
+            .unwrap()
+            .unwrap()
+            .previous()
+            .unwrap()
+            .directory(),
+    );
+    let mut ordinary = VerifiedIndex::open_pinned(temp.path()).unwrap();
+    assert!(ordinary
+        .take_retained_generation_peer_for_reader()
+        .unwrap()
+        .is_none());
+
+    let third = publish(temp.path(), &source, 3, "third ordinary reader");
+
+    assert_eq!(ordinary.generation_id(), second.generation_id);
+    assert_eq!(ordinary.count_term("second").unwrap(), 1);
+    assert!(!first_path.exists());
+    assert!(matches!(
+        VerifiedIndex::open_pinned_generation(temp.path(), &first.generation_id),
+        Err(IndexError::PinnedGenerationNotRetained { .. })
+    ));
+    assert_eq!(ordinary.generation_id(), second.generation_id);
+    assert_eq!(
+        third.generation_id,
+        VerifiedIndex::open_pinned(temp.path())
+            .unwrap()
+            .generation_id()
+    );
 }
 
 #[test]
@@ -232,4 +293,34 @@ fn generation_directories(root: &Path) -> Vec<PathBuf> {
         .collect::<Vec<_>>();
     directories.sort();
     directories
+}
+
+#[cfg(unix)]
+fn allocated_bytes(root: &Path) -> u64 {
+    use std::{collections::HashSet, os::unix::fs::MetadataExt as _};
+
+    fn walk(root: &Path, seen: &mut HashSet<(u64, u64)>) -> u64 {
+        let metadata = fs::symlink_metadata(root).unwrap();
+        let identity = (metadata.dev(), metadata.ino());
+        let own_blocks = seen
+            .insert(identity)
+            .then_some(metadata.blocks().saturating_mul(512))
+            .unwrap_or_default();
+        if !metadata.is_dir() {
+            return own_blocks;
+        }
+        own_blocks.saturating_add(
+            fs::read_dir(root)
+                .unwrap()
+                .map(|entry| walk(&entry.unwrap().path(), seen))
+                .sum(),
+        )
+    }
+
+    walk(root, &mut HashSet::new())
+}
+
+#[cfg(not(unix))]
+fn allocated_bytes(_root: &Path) -> u64 {
+    0
 }
