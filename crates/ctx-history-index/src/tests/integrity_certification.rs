@@ -596,7 +596,7 @@ fn append_reports_nonreflink_fallback_without_faking_hardlink_availability() {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn managed_three_generation_reclamation_preserves_active_certification() {
+fn managed_three_generation_reclamation_preserves_retained_certifications() {
     let (temp, source, _) = published_fixture("managed-reclamation-certification.jsonl");
     let first_directory = active_generation_path(temp.path());
     let guard = CloneTestHookGuard::set(
@@ -607,7 +607,7 @@ fn managed_three_generation_reclamation_preserves_active_certification() {
         |_, _| Ok(()),
     );
 
-    append_record(temp.path(), &source, 2).unwrap();
+    let second = append_record(temp.path(), &source, 2).unwrap();
     append_record(temp.path(), &source, 3).unwrap();
     let metrics = crate::publication::candidate_clone_metrics();
     drop(guard);
@@ -618,7 +618,13 @@ fn managed_three_generation_reclamation_preserves_active_certification() {
         "the third publication must reclaim its unretained first generation"
     );
     crate::publication::reset_verification_activity();
-    drop(VerifiedIndex::open_pinned(temp.path()).unwrap());
+    let mut active = VerifiedIndex::open_pinned(temp.path()).unwrap();
+    let previous = active
+        .take_retained_generation_peer_for_reader()
+        .unwrap()
+        .expect("the active generation did not retain its predecessor");
+    assert_eq!(previous.generation_id(), second.generation_id);
+    drop((previous, active));
     assert_eq!(crate::publication::verification_activity().0, 0);
     assert_eq!(crate::publication::hashed_artifact_bytes(), 0);
 }

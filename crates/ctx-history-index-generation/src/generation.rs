@@ -437,7 +437,7 @@ fn remove_reclaimed_generation_directory(
         pointer,
         candidate.path().file_name().and_then(|name| name.to_str()),
     ) {
-        return crate::certification::reclaim_with_active_certification(
+        return crate::certification::reclaim_with_pointer_certifications(
             root, pointer, directory, remove,
         );
     }

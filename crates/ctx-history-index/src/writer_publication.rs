@@ -573,6 +573,19 @@ impl GenerationWriter {
         if let Some(hook) = self.after_pointer_switch.take() {
             hook(&candidate_path);
         }
+        if let (Some(previous), Some(base), Some(certified)) = (
+            next_pointer.previous(),
+            self.base_publication.as_ref(),
+            verified.publication.predecessor_physical_integrity(),
+        ) {
+            let _ = ctx_history_index_generation::cache_recertified_physical_integrity(
+                &root,
+                &next_pointer,
+                previous,
+                base.searcher().index(),
+                certified,
+            );
+        }
         // The durable pointer is authoritative now. Writer open retries every
         // cleanup below, so treat each attempt independently and never turn a
         // published generation into a failed refresh because reclamation was
