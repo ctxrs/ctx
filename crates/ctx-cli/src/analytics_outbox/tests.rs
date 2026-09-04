@@ -558,6 +558,30 @@ fn unsafe_state_path_still_fails_closed() {
     assert!(AnalyticsOutbox::open_at(path, NOW).is_err());
 }
 
+#[cfg(windows)]
+#[test]
+fn windows_lock_handle_hardens_its_acl() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("outbox.lock");
+
+    let lock = open_lock_file(&path).unwrap();
+
+    verify_private_file(&path).unwrap();
+    drop(lock);
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_temporary_handle_hardens_its_acl_before_publish() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("outbox.json");
+
+    write_private_file_durably(&path, b"{}\n").unwrap();
+
+    assert_eq!(fs::read(&path).unwrap(), b"{}\n");
+    verify_private_file(&path).unwrap();
+}
+
 #[cfg(unix)]
 #[test]
 fn unsafe_state_permissions_still_fail_closed() {

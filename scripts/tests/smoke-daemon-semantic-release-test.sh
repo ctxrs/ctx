@@ -455,6 +455,8 @@ grep -Fq -- \
   "${tmp}/non-authoritative.err"
 
 run_parent="${tmp}/runs"
+mkdir -p "${run_parent}"
+chmod 02700 "${run_parent}"
 coreml_bind_log="${tmp}/coreml-bind.log"
 CTX_TEST_RUNTIME_EVIDENCE=macos-arm64-native-virtualized \
 CTX_TEST_COREML_BIND_LOG="${coreml_bind_log}" "${smoke}" \
@@ -482,13 +484,16 @@ grep -Fq -- \
   'archive_sha256=25fbf333d1e72f5c075973ef968dfa1446459f61f3ac63ef3690d9865435af17' \
   "${tmp}/coreml.out"
 [[ ! -e "${run_root}/data/runtime/onnxruntime" ]]
-python3 -I - "${run_root}/installed/bin" <<'PY'
+python3 -I - "${run_root}" "${run_root}/installed/bin" <<'PY'
 import os
 import stat
 import sys
 
-path = sys.argv[1]
-mode = stat.S_IMODE(os.stat(path).st_mode)
+run_root, executable_directory = sys.argv[1:]
+mode = stat.S_IMODE(os.stat(run_root).st_mode)
+if mode != 0o700:
+    raise SystemExit(f"semantic smoke run root mode is not canonical: {mode:o}")
+mode = stat.S_IMODE(os.stat(executable_directory).st_mode)
 if mode & 0o022:
     raise SystemExit(f"semantic smoke executable directory is not owner-safe: {mode:o}")
 PY
@@ -589,16 +594,51 @@ artifact.with_name(f"{artifact.name}.build-info.json").write_text(
 )
 PY
 
-runtime_payload="${tmp}/runtime-payload"
+runtime_parent="${tmp}/runtime-parent"
+mkdir -p "${runtime_parent}"
+chmod 02700 "${runtime_parent}"
+runtime_payload="${runtime_parent}/runtime-payload"
 mkdir -p "${runtime_payload}/lib"
+python3 -I - "${runtime_payload}/lib" <<'PY'
+import os
+import stat
+import sys
+
+mode = stat.S_IMODE(os.stat(sys.argv[1]).st_mode)
+if not mode & stat.S_ISGID:
+    raise SystemExit(f"semantic archive fixture did not inherit setgid: {mode:o}")
+PY
 printf 'license\n' > "${runtime_payload}/LICENSE"
 printf 'notices\n' > "${runtime_payload}/ThirdPartyNotices.txt"
 printf '1.27.0\n' > "${runtime_payload}/VERSION_NUMBER"
 printf 'synthetic-commit\n' > "${runtime_payload}/GIT_COMMIT_ID"
 printf 'synthetic runtime\n' > "${runtime_payload}/lib/libonnxruntime.so"
+chmod 00644 \
+  "${runtime_payload}/LICENSE" \
+  "${runtime_payload}/ThirdPartyNotices.txt" \
+  "${runtime_payload}/VERSION_NUMBER" \
+  "${runtime_payload}/GIT_COMMIT_ID"
+chmod 00755 "${runtime_payload}/lib" "${runtime_payload}/lib/libonnxruntime.so"
 runtime_archive="${tmp}/ctx-onnxruntime-linux-x64.tar.gz"
 tar --no-recursion -C "${runtime_payload}" -czf "${runtime_archive}" \
   LICENSE ThirdPartyNotices.txt VERSION_NUMBER GIT_COMMIT_ID lib lib/libonnxruntime.so
+python3 -I - "${runtime_archive}" <<'PY'
+import sys
+import tarfile
+
+expected = {
+    "LICENSE": 0o644,
+    "ThirdPartyNotices.txt": 0o644,
+    "VERSION_NUMBER": 0o644,
+    "GIT_COMMIT_ID": 0o644,
+    "lib": 0o755,
+    "lib/libonnxruntime.so": 0o755,
+}
+with tarfile.open(sys.argv[1], "r:gz") as bundle:
+    actual = {member.name: member.mode for member in bundle.getmembers()}
+if actual != expected:
+    raise SystemExit(f"semantic runtime archive modes are not canonical: {actual!r}")
+PY
 if command -v sha256sum >/dev/null 2>&1; then
   sha256sum "${runtime_archive}" | awk '{ print $1 }' > "${runtime_archive}.sha256"
 else

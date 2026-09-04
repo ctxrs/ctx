@@ -7,6 +7,7 @@ test_root="$(mktemp -d "${TMPDIR:-/tmp}/ctx-macos-signing-test.XXXXXX")"
 trap 'rm -rf "${test_root}"' EXIT
 fake_bin="${test_root}/bin"
 mkdir -p "${fake_bin}" "${test_root}/tmp"
+chmod 02700 "${test_root}/tmp"
 
 fail() {
   printf 'macOS signing contract test failed: %s\n' "$*" >&2
@@ -27,6 +28,8 @@ case "${1:-}" in
       shift
     done
     [[ -n "${output}" ]]
+    [[ "$(stat -c '%a' "$(dirname "${output}")" 2>/dev/null || \
+      stat -f '%Lp' "$(dirname "${output}")")" == "700" ]]
     printf '%s\n' 'fake certificate or key' >"${output}"
     ;;
   dgst)

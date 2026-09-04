@@ -340,6 +340,7 @@ rm -f "${submit_json}" "${submit_stderr}" "${log_json}" "${log_stderr}" \
 
 umask 077
 secret_root="$(mktemp -d "${TMPDIR:-/tmp}/ctx-macos-signing.XXXXXX")"
+chmod 00700 "${secret_root}"
 cleanup() {
   rm -rf "${secret_root}" >/dev/null 2>&1 || true
 }

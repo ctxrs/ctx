@@ -1,6 +1,7 @@
 use super::*;
 use ctx_history_index_generation::{
-    checksum_walks, hashed_artifact_bytes, reset_physical_verification_activity,
+    certification_file_for_active, checksum_walks, hashed_artifact_bytes,
+    reset_physical_verification_activity,
 };
 
 fn publish_pinned_test_generation(
@@ -547,6 +548,7 @@ fn reader_owned_peer_lease_survives_parent_drop_after_integrity_verification() {
     let temp = tempdir().unwrap();
     let source = source("leased-verification-pointer-race.jsonl");
     let first = publish_pinned_test_generation(temp.path(), &source, 1, "first evidence");
+    let first_certification = certification_file_for_active(temp.path()).unwrap();
     let second = publish_pinned_test_generation(temp.path(), &source, 2, "second evidence");
     #[cfg(not(windows))]
     let first_path = {
@@ -559,6 +561,17 @@ fn reader_owned_peer_lease_survives_parent_drop_after_integrity_verification() {
     };
     let mut reader =
         VerifiedIndex::open_pinned_generation(temp.path(), &second.generation_id).unwrap();
+    let mut second_reader =
+        VerifiedIndex::open_pinned_generation(temp.path(), &second.generation_id).unwrap();
+    let cached_peer = second_reader
+        .take_retained_generation_peer_for_reader()
+        .unwrap()
+        .expect("the cache-warming peer was not retained");
+    assert_eq!(cached_peer.generation_id(), first.generation_id);
+    drop((cached_peer, second_reader));
+    // Make the checksum-walk assertions independent of a matching prior cache.
+    assert!(first_certification.is_file());
+    fs::remove_file(first_certification).unwrap();
     let mut second_reader =
         VerifiedIndex::open_pinned_generation(temp.path(), &second.generation_id).unwrap();
 

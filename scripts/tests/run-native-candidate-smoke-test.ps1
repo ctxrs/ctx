@@ -13,7 +13,7 @@ if ($smokeSource -notmatch [regex]::Escape("--ctx-core-managed-pair-apply-v1") -
     $installerSource -notmatch [regex]::Escape('$markerPath = "$installPath.install.json"')) {
     throw "Windows candidate smoke does not use the single Core managed-pair authority"
 }
-$root = Join-Path ([System.IO.Path]::GetTempPath()) ("ctx-native-smoke-test-" + [Guid]::NewGuid().ToString("n"))
+$root = Join-Path ([System.IO.Path]::GetTempPath()) ("ctx native smoke test " + [Guid]::NewGuid().ToString("n"))
 New-Item -ItemType Directory -Path $root | Out-Null
 $savedCI = $env:CI
 $env:CI = "true"
@@ -21,6 +21,15 @@ $unrelated = $null
 $unrelatedLauncher = $null
 $pipeHolderPidPath = $null
 $unrelatedPidPath = $null
+$deprecatedControlNames = @(
+    "CTX_ANALYTICS_OFF",
+    "CTX_DISABLE_ANALYTICS",
+    "CTX_INSTALL_DIAGNOSTICS_OFF",
+    "CTX_DAEMON_OFF",
+    "CTX_DISABLE_DAEMON",
+    "CTX_UPGRADE_OFF",
+    "CTX_DISABLE_AUTO_UPGRADE"
+)
 $testEnvironmentNames = @(
     "CTX_NATIVE_CANDIDATE_TEST_PIPE_HOLDER",
     "CTX_NATIVE_CANDIDATE_TEST_PIPE_HOLDER_PID",
@@ -28,24 +37,42 @@ $testEnvironmentNames = @(
     "CTX_NATIVE_CANDIDATE_TEST_BINARY",
     "CTX_NATIVE_CANDIDATE_TEST_UNRELATED_PID",
     "CTX_NATIVE_CANDIDATE_TEST_ROOT_EXIT_CODE",
+    "CTX_NATIVE_CANDIDATE_TEST_ANALYTICS_DAEMON_PID",
     "CTX_NATIVE_CANDIDATE_COMMAND_TIMEOUT_SECONDS",
     "CTX_FAKE_MANAGED_PAIR_EXTRA_OUTPUT"
+) + $deprecatedControlNames + @(
+    "TEMP",
+    "TMP"
 )
 $savedTestEnvironment = @{}
 foreach ($name in $testEnvironmentNames) {
     $savedTestEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, "Process")
 }
+$env:TEMP = $root
+$env:TMP = $root
+foreach ($name in $deprecatedControlNames) {
+    [Environment]::SetEnvironmentVariable($name, "1", "Process")
+}
 
 try {
     $fake = Join-Path $root "ctx.cmd"
-    @'
+@'
 @echo off
-if not "%CTX_ANALYTICS_ENABLED%"=="false" exit /b 91
-if not "%CTX_UPGRADE_AUTO%"=="off" exit /b 92
-if not "%CTX_DAEMON_AUTOSTART_OFF%"=="1" exit /b 93
 if "%HOME%"=="" exit /b 94
 if "%USERPROFILE%"=="" exit /b 95
 if not "%CI%"=="" exit /b 97
+if not "%CTX_DAEMON_AUTOSTART_OFF%"=="1" exit /b 93
+if defined CTX_ANALYTICS_OFF exit /b 84
+if defined CTX_DISABLE_ANALYTICS exit /b 84
+if defined CTX_INSTALL_DIAGNOSTICS_OFF exit /b 84
+if defined CTX_DAEMON_OFF exit /b 84
+if defined CTX_DISABLE_DAEMON exit /b 84
+if defined CTX_UPGRADE_OFF exit /b 84
+if defined CTX_DISABLE_AUTO_UPGRADE exit /b 84
+if /I "%1"=="status" goto status
+if /I "%1"=="daemon" goto daemon
+if not "%CTX_ANALYTICS_ENABLED%"=="false" exit /b 91
+if not "%CTX_UPGRADE_AUTO%"=="off" exit /b 92
 set "CTX_FAKE_VERSION=0.25.0"
 if /I "%~n0"=="ctx-v1" set "CTX_FAKE_VERSION=1.0.0"
 echo %* | findstr /c:"--backend semantic" >nul
@@ -81,13 +108,55 @@ if "%1"=="search" (
   echo {"retrieval":{"requested_mode":"lexical","effective_mode":"lexical"},"results":[{"text":"Add a parser test."}]}
   exit /b 0
 )
-if "%1"=="status" (
-  if not "%CTX_SEARCH_SEMANTIC%"=="" exit /b 89
-  if not "%CTX_DAEMON_ENABLED%"=="" exit /b 90
-  echo {"read_only":true,"semantic":{"config_source":"default","enabled":false,"reason":"semantic_disabled","embed_policy":{"source":"dynamic_quiet"}}}
-  exit /b 0
-)
 exit /b 99
+
+:status
+if "%CTX_ANALYTICS_ENABLED%"=="" goto status_default
+if not "%CTX_ANALYTICS_ENABLED%"=="false" exit /b 91
+if not "%CTX_UPGRADE_AUTO%"=="off" exit /b 92
+if not "%CTX_DAEMON_ENABLED%"=="false" exit /b 90
+echo {"read_only":true,"daemon":{"enabled":false},"upgrade":{"auto":"off","auto_enabled":false},"semantic":{"config_source":"default","enabled":false,"reason":"semantic_disabled","embed_policy":{"source":"dynamic_quiet"}}}
+exit /b 0
+
+:status_default
+if not "%CTX_UPGRADE_AUTO%"=="" exit /b 92
+if not "%CTX_DAEMON_ENABLED%"=="" exit /b 90
+if not "%CTX_SEARCH_SEMANTIC%"=="" exit /b 89
+if /I "%~n0"=="ctx-foreground-analytics" goto foreground_delivery
+if /I "%LOCALAPPDATA%"=="%CTX_DATA_ROOT%" exit /b 85
+if not exist "%LOCALAPPDATA%\ctx" mkdir "%LOCALAPPDATA%\ctx"
+> "%LOCALAPPDATA%\ctx\analytics-outbox-v1.json" echo {"schema_version":2,"entries":[{"schema_version":2,"entry_id":"22222222-2222-4222-8222-222222222222","endpoint_fingerprint":"fixture","queued_at_epoch_seconds":1800000000,"attempts":0,"next_attempt_at_epoch_seconds":0,"kind":"ordinary","payload":"{\"events\":[{\"event_name\":\"operation_completed\",\"event_version\":1,\"surface\":\"cli\",\"operation\":\"status\",\"outcome\":\"success\",\"event_id\":\"11111111-1111-4111-8111-111111111111\"}]}"}],"retry_attempts":0,"dropped":0,"failure_sequence":0,"last_failure_class":null,"observation_due":false}
+if /I "%~n0"=="ctx-no-embed-policy" goto status_without_embed_policy
+echo {"read_only":true,"daemon":{"enabled":true},"upgrade":{"auto":"off","auto_enabled":false},"semantic":{"config_source":"default","enabled":false,"reason":"semantic_disabled","embed_policy":{"source":"dynamic_quiet"}}}
+exit /b 0
+
+:status_without_embed_policy
+echo {"read_only":true,"daemon":{"enabled":true},"upgrade":{"auto":"off","auto_enabled":false},"semantic":{"config_source":"default","enabled":false,"reason":"semantic_disabled"}}
+exit /b 0
+
+:foreground_delivery
+call :write_analytics || exit /b 86
+echo {"read_only":true,"daemon":{"enabled":true},"upgrade":{"auto":"off","auto_enabled":false},"semantic":{"config_source":"default","enabled":false,"reason":"semantic_disabled","embed_policy":{"source":"dynamic_quiet"}}}
+exit /b 0
+
+:daemon
+if not "%2"=="run" exit /b 88
+if not "%CTX_ANALYTICS_ENABLED%"=="" exit /b 91
+if not "%CTX_UPGRADE_AUTO%"=="off" exit /b 92
+if not "%CTX_DAEMON_ENABLED%"=="true" exit /b 90
+if not "%CTX_DAEMON_MODE%"=="source-refresh-only" exit /b 87
+if not "%CTX_SEARCH_SEMANTIC%"=="0" exit /b 96
+if /I "%~n0"=="ctx-no-analytics-delivery" goto daemon_wait
+call :write_analytics || exit /b 86
+:daemon_wait
+if not "%CTX_NATIVE_CANDIDATE_TEST_ANALYTICS_DAEMON_PID%"=="" powershell.exe -NoLogo -NoProfile -NonInteractive -Command "[IO.File]::WriteAllText($env:CTX_NATIVE_CANDIDATE_TEST_ANALYTICS_DAEMON_PID, [string]$PID); Start-Sleep -Seconds 30"
+ping -n 30 127.0.0.1 >nul
+exit /b 0
+
+:write_analytics
+set "CTX_FAKE_ANALYTICS_PAYLOAD={"events":[{"event_name":"operation_completed","event_version":1,"surface":"cli","operation":"status","outcome":"success","event_id":"11111111-1111-4111-8111-111111111111"}]}"
+powershell.exe -NoLogo -NoProfile -NonInteractive -Command "[IO.File]::WriteAllText(([Uri]$env:CTX_ANALYTICS_ENDPOINT).LocalPath, $env:CTX_FAKE_ANALYTICS_PAYLOAD + [Environment]::NewLine)"
+exit /b %errorlevel%
 '@ | Set-Content -LiteralPath $fake -Encoding Ascii
 
     $fixture = Join-Path $root "fixture.jsonl"
@@ -112,13 +181,73 @@ exit /b 99
         throw "candidate smoke result contains unexpected top-level keys"
     }
     $stepKeys = @($parsed.steps.PSObject.Properties.Name)
-    if (($stepKeys -join ",") -ne "version,setup,import,search,read_only,semantic_offline_fail_closed") {
+    if (($stepKeys -join ",") -ne "version,setup,import,search,read_only,released_defaults,explicit_opt_outs,semantic_offline_fail_closed") {
         throw "candidate smoke result contains unexpected step keys"
     }
     foreach ($key in $stepKeys) {
         if ($parsed.steps.$key -ne "passed") {
             throw "candidate smoke step did not pass: $key"
         }
+    }
+
+    $noEmbedPolicyFake = Join-Path $root "ctx-no-embed-policy.cmd"
+    Copy-Item -LiteralPath $fake -Destination $noEmbedPolicyFake
+    $noEmbedPolicyResult = Join-Path $root "no-embed-policy-result.json"
+    & $smoke -Binary $noEmbedPolicyFake -Fixture $fixture `
+        -ExpectedVersion 0.25.0 -ResultPath $noEmbedPolicyResult | Out-Null
+    if ((Get-Content -LiteralPath $noEmbedPolicyResult -Raw | ConvertFrom-Json).status -ne "passed") {
+        throw "candidate smoke rejected an omitted optional semantic embed policy"
+    }
+
+    $foregroundAnalyticsFake = Join-Path $root "ctx-foreground-analytics.cmd"
+    Copy-Item -LiteralPath $fake -Destination $foregroundAnalyticsFake
+    $foregroundAnalyticsResult = Join-Path $root "foreground-analytics-result.json"
+    try {
+        & $smoke -Binary $foregroundAnalyticsFake -Fixture $fixture `
+            -ExpectedVersion 0.25.0 -ResultPath $foregroundAnalyticsResult 2>$null | Out-Null
+        throw "candidate smoke accepted foreground analytics delivery"
+    } catch {
+        if ($_.Exception.Message -notmatch "foreground CLI delivered analytics before daemon ownership") {
+            throw
+        }
+    }
+    if (Test-Path -LiteralPath $foregroundAnalyticsResult) {
+        throw "candidate smoke wrote evidence after foreground analytics delivery"
+    }
+
+    $noAnalyticsDeliveryFake = Join-Path $root "ctx-no-analytics-delivery.cmd"
+    Copy-Item -LiteralPath $fake -Destination $noAnalyticsDeliveryFake
+    $noAnalyticsDeliveryResult = Join-Path $root "no-analytics-delivery-result.json"
+    $analyticsDaemonPidPath = Join-Path $root "analytics-daemon.pid"
+    $savedTimeout = $env:CTX_NATIVE_CANDIDATE_COMMAND_TIMEOUT_SECONDS
+    $env:CTX_NATIVE_CANDIDATE_COMMAND_TIMEOUT_SECONDS = "3"
+    $env:CTX_NATIVE_CANDIDATE_TEST_ANALYTICS_DAEMON_PID = $analyticsDaemonPidPath
+    $started = Get-Date
+    try {
+        & $smoke -Binary $noAnalyticsDeliveryFake -Fixture $fixture `
+            -ExpectedVersion 0.25.0 -ResultPath $noAnalyticsDeliveryResult 2>$null | Out-Null
+        throw "candidate smoke accepted an analytics daemon that did not deliver"
+    } catch {
+        if ($_.Exception.Message -notmatch
+            "exceeded 3 seconds during analytics delivery; owned tree termination completed; final drain completed") {
+            throw
+        }
+    } finally {
+        $env:CTX_NATIVE_CANDIDATE_COMMAND_TIMEOUT_SECONDS = $savedTimeout
+        $env:CTX_NATIVE_CANDIDATE_TEST_ANALYTICS_DAEMON_PID = $null
+    }
+    if (((Get-Date) - $started).TotalSeconds -ge 10) {
+        throw "candidate analytics delivery timeout was not bounded"
+    }
+    if (Test-Path -LiteralPath $noAnalyticsDeliveryResult) {
+        throw "candidate smoke wrote evidence after analytics delivery timeout"
+    }
+    if (-not (Test-Path -LiteralPath $analyticsDaemonPidPath -PathType Leaf)) {
+        throw "analytics daemon survivor fixture did not start"
+    }
+    $analyticsDaemonPid = [int](Get-Content -LiteralPath $analyticsDaemonPidPath -Raw)
+    if ($null -ne (Get-Process -Id $analyticsDaemonPid -ErrorAction SilentlyContinue)) {
+        throw "candidate smoke left the timed-out analytics daemon tree running"
     }
 
     $freshEpochFake = Join-Path $root "ctx-v1.cmd"
@@ -135,10 +264,23 @@ exit /b 99
 using System;
 using System.IO;
 using System.Text;
+using System.Threading;
 
 public static class CtxManagedPairFake {
+    private const string AnalyticsPayload = "{\"events\":[{\"event_name\":\"operation_completed\",\"event_version\":1,\"surface\":\"cli\",\"operation\":\"status\",\"outcome\":\"success\",\"event_id\":\"11111111-1111-4111-8111-111111111111\"}]}";
+
     private static bool Has(string[] args, string value) {
         return Array.IndexOf(args, value) >= 0;
+    }
+
+    private static void WriteOutbox() {
+        string root = Path.Combine(Environment.GetEnvironmentVariable("LOCALAPPDATA"), "ctx");
+        Directory.CreateDirectory(root);
+        File.WriteAllText(Path.Combine(root, "analytics-outbox-v1.json"), "{\"schema_version\":2,\"entries\":[{\"kind\":\"ordinary\",\"payload\":" + Quote(AnalyticsPayload) + "}]}");
+    }
+
+    private static string Quote(string value) {
+        return "\"" + value.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\"";
     }
 
     public static int Main(string[] args) {
@@ -181,8 +323,19 @@ public static class CtxManagedPairFake {
             Console.WriteLine("{\"retrieval\":{\"requested_mode\":\"lexical\",\"effective_mode\":\"lexical\"},\"results\":[{\"text\":\"Add a parser test.\"}]}");
             return 0;
         }
+        if (args.Length > 1 && args[0] == "daemon" && args[1] == "run") {
+            File.WriteAllText(new Uri(Environment.GetEnvironmentVariable("CTX_ANALYTICS_ENDPOINT")).LocalPath, AnalyticsPayload + Environment.NewLine);
+            Thread.Sleep(30000);
+            return 0;
+        }
         if (args.Length > 0 && args[0] == "status") {
-            Console.WriteLine("{\"read_only\":true,\"managed_upgrade\":{\"auto\":\"apply\",\"auto_enabled\":true},\"semantic\":{\"config_source\":\"default\",\"reason\":\"semantic_disabled\"}}");
+            if (Environment.GetEnvironmentVariable("CTX_ANALYTICS_ENABLED") == null) {
+                if (Environment.GetEnvironmentVariable("CTX_DAEMON_AUTOSTART_OFF") != "1") return 97;
+                WriteOutbox();
+                Console.WriteLine("{\"read_only\":true,\"daemon\":{\"enabled\":true},\"upgrade\":{\"auto\":\"apply\",\"auto_enabled\":true},\"semantic\":{\"config_source\":\"default\",\"reason\":\"semantic_disabled\",\"embed_policy\":{\"source\":\"dynamic_quiet\"}}}");
+            } else {
+                Console.WriteLine("{\"read_only\":true,\"daemon\":{\"enabled\":false},\"upgrade\":{\"auto\":\"off\",\"auto_enabled\":false},\"semantic\":{\"config_source\":\"default\",\"reason\":\"semantic_disabled\",\"embed_policy\":{\"source\":\"dynamic_quiet\"}}}");
+            }
             return 0;
         }
         return 99;
@@ -293,6 +446,8 @@ using System.IO;
 using System.Threading;
 
 public static class CtxPipeOwner {
+    private const string AnalyticsPayload = "{\"events\":[{\"event_name\":\"operation_completed\",\"event_version\":1,\"surface\":\"cli\",\"operation\":\"status\",\"outcome\":\"success\",\"event_id\":\"11111111-1111-4111-8111-111111111111\"}]}";
+
     private static bool HasArgument(string[] args, string expected) {
         foreach (string arg in args) {
             if (String.Equals(arg, expected, StringComparison.OrdinalIgnoreCase)) {
@@ -308,8 +463,10 @@ public static class CtxPipeOwner {
             Thread.Sleep(30000);
             return 0;
         }
-        if (Environment.GetEnvironmentVariable("CTX_ANALYTICS_ENABLED") != "false") return 91;
-        if (Environment.GetEnvironmentVariable("CTX_UPGRADE_AUTO") != "off") return 92;
+        if (mode != "status" && mode != "daemon" &&
+            Environment.GetEnvironmentVariable("CTX_ANALYTICS_ENABLED") != "false") return 91;
+        if (mode != "status" && mode != "daemon" &&
+            Environment.GetEnvironmentVariable("CTX_UPGRADE_AUTO") != "off") return 92;
         if (Environment.GetEnvironmentVariable("CTX_DAEMON_AUTOSTART_OFF") != "1") return 93;
         if (String.IsNullOrEmpty(Environment.GetEnvironmentVariable("HOME"))) return 94;
         if (String.IsNullOrEmpty(Environment.GetEnvironmentVariable("USERPROFILE"))) return 95;
@@ -355,10 +512,20 @@ public static class CtxPipeOwner {
             Console.WriteLine("{\"retrieval\":{\"requested_mode\":\"lexical\",\"effective_mode\":\"lexical\"},\"results\":[{\"text\":\"Add a parser test.\"}]}");
             return 0;
         }
+        if (mode == "daemon") {
+            File.WriteAllText(new Uri(Environment.GetEnvironmentVariable("CTX_ANALYTICS_ENDPOINT")).LocalPath, AnalyticsPayload + Environment.NewLine);
+            Thread.Sleep(30000);
+            return 0;
+        }
         if (mode == "status") {
-            if (Environment.GetEnvironmentVariable("CTX_SEARCH_SEMANTIC") != null) return 89;
-            if (Environment.GetEnvironmentVariable("CTX_DAEMON_ENABLED") != null) return 90;
-            Console.WriteLine("{\"read_only\":true,\"semantic\":{\"config_source\":\"default\",\"enabled\":false,\"reason\":\"semantic_disabled\",\"embed_policy\":{\"source\":\"dynamic_quiet\"}}}");
+            if (Environment.GetEnvironmentVariable("CTX_ANALYTICS_ENABLED") == null) {
+                string state = Path.Combine(Environment.GetEnvironmentVariable("LOCALAPPDATA"), "ctx");
+                Directory.CreateDirectory(state);
+                File.WriteAllText(Path.Combine(state, "analytics-outbox-v1.json"), "{\"schema_version\":2,\"entries\":[{\"kind\":\"ordinary\",\"payload\":\"{\\\"events\\\":[{\\\"event_name\\\":\\\"operation_completed\\\",\\\"event_version\\\":1,\\\"surface\\\":\\\"cli\\\",\\\"operation\\\":\\\"status\\\",\\\"outcome\\\":\\\"success\\\",\\\"event_id\\\":\\\"11111111-1111-4111-8111-111111111111\\\"}]}\"}]}");
+                Console.WriteLine("{\"read_only\":true,\"daemon\":{\"enabled\":true},\"upgrade\":{\"auto\":\"off\",\"auto_enabled\":false},\"semantic\":{\"config_source\":\"default\",\"reason\":\"semantic_disabled\",\"embed_policy\":{\"source\":\"dynamic_quiet\"}}}");
+            } else {
+                Console.WriteLine("{\"read_only\":true,\"daemon\":{\"enabled\":false},\"upgrade\":{\"auto\":\"off\",\"auto_enabled\":false},\"semantic\":{\"config_source\":\"default\",\"reason\":\"semantic_disabled\",\"embed_policy\":{\"source\":\"dynamic_quiet\"}}}");
+            }
             return 0;
         }
         return 99;

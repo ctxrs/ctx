@@ -259,7 +259,7 @@ if [[ -n "${data_root_parent}" ]]; then
 else
   run_root="$(mktemp -d "${TMPDIR:-/tmp}/ctx-semantic-smoke.XXXXXX")"
 fi
-chmod 700 "${run_root}"
+chmod 00700 "${run_root}"
 run_root="$(cd -- "${run_root}" && pwd -P)"
 data_root="${run_root}/data"
 mkdir -p -- "${data_root}"
