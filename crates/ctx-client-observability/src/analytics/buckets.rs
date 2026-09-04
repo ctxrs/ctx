@@ -102,6 +102,81 @@ pub fn bytes_bucket(bytes: u64) -> BytesBucket {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StorageBytesBucket {
+    Zero,
+    UnderOneHundredMb,
+    OneHundredMbToOneGb,
+    OneToFiveGb,
+    FiveToTenGb,
+    TenToTwentyFiveGb,
+    TwentyFiveToFiftyGb,
+    FiftyToOneHundredGb,
+    OneHundredToTwoHundredFiftyGb,
+    TwoHundredFiftyToFiveHundredGb,
+    FiveHundredGbToOneTb,
+    OneToTwoTb,
+    TwoToFiveTb,
+    AtLeastFiveTb,
+}
+
+impl StorageBytesBucket {
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            Self::Zero => "0",
+            Self::UnderOneHundredMb => "lt_100mb",
+            Self::OneHundredMbToOneGb => "100mb-1gb",
+            Self::OneToFiveGb => "1gb-5gb",
+            Self::FiveToTenGb => "5gb-10gb",
+            Self::TenToTwentyFiveGb => "10gb-25gb",
+            Self::TwentyFiveToFiftyGb => "25gb-50gb",
+            Self::FiftyToOneHundredGb => "50gb-100gb",
+            Self::OneHundredToTwoHundredFiftyGb => "100gb-250gb",
+            Self::TwoHundredFiftyToFiveHundredGb => "250gb-500gb",
+            Self::FiveHundredGbToOneTb => "500gb-1tb",
+            Self::OneToTwoTb => "1tb-2tb",
+            Self::TwoToFiveTb => "2tb-5tb",
+            Self::AtLeastFiveTb => "5tb+",
+        }
+    }
+}
+
+pub fn storage_bytes_bucket(bytes: u64) -> StorageBytesBucket {
+    const MIB: u64 = 1024 * 1024;
+    const GIB: u64 = 1024 * MIB;
+    const TIB: u64 = 1024 * GIB;
+
+    if bytes == 0 {
+        StorageBytesBucket::Zero
+    } else if bytes < 100 * MIB {
+        StorageBytesBucket::UnderOneHundredMb
+    } else if bytes < GIB {
+        StorageBytesBucket::OneHundredMbToOneGb
+    } else if bytes < 5 * GIB {
+        StorageBytesBucket::OneToFiveGb
+    } else if bytes < 10 * GIB {
+        StorageBytesBucket::FiveToTenGb
+    } else if bytes < 25 * GIB {
+        StorageBytesBucket::TenToTwentyFiveGb
+    } else if bytes < 50 * GIB {
+        StorageBytesBucket::TwentyFiveToFiftyGb
+    } else if bytes < 100 * GIB {
+        StorageBytesBucket::FiftyToOneHundredGb
+    } else if bytes < 250 * GIB {
+        StorageBytesBucket::OneHundredToTwoHundredFiftyGb
+    } else if bytes < 500 * GIB {
+        StorageBytesBucket::TwoHundredFiftyToFiveHundredGb
+    } else if bytes < TIB {
+        StorageBytesBucket::FiveHundredGbToOneTb
+    } else if bytes < 2 * TIB {
+        StorageBytesBucket::OneToTwoTb
+    } else if bytes < 5 * TIB {
+        StorageBytesBucket::TwoToFiveTb
+    } else {
+        StorageBytesBucket::AtLeastFiveTb
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TextLengthBucket {
     Zero,
     OneToTwenty,

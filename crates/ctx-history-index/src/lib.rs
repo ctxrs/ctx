@@ -15,7 +15,10 @@ mod writer_publication;
 mod writer_routes;
 mod writer_support;
 
-pub use ctx_history_index_generation::durable_atomic_replace_file;
+pub use ctx_history_index_generation::{
+    active_generation_storage_metadata, durable_atomic_replace_file,
+    ActiveGenerationStorageMetadata,
+};
 
 /// Repairs legacy generation control permissions before a mutating refresh
 /// captures immutable file identities.

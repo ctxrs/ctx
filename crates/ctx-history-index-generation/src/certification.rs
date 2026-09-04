@@ -61,6 +61,24 @@ pub struct CertifiedPhysicalIntegrity {
     recertified: bool,
 }
 
+/// Content-free storage metadata authenticated by the current active pointer's
+/// publication-time physical certification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveGenerationStorageMetadata {
+    generation_id: String,
+    logical_bytes: u64,
+}
+
+impl ActiveGenerationStorageMetadata {
+    pub fn generation_id(&self) -> &str {
+        &self.generation_id
+    }
+
+    pub fn logical_bytes(&self) -> u64 {
+        self.logical_bytes
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CertifiedArtifact {
@@ -291,6 +309,43 @@ pub fn verify_or_certify_physical_integrity(
         &audit,
         CertificationInstallPolicy::ACTIVE_CACHE,
     )
+}
+
+/// Reads only the bounded certification and authenticated artifact metadata.
+/// It never hashes artifact bodies or scans a generation directory.
+pub fn active_generation_storage_metadata(
+    root: &Path,
+) -> Result<Option<ActiveGenerationStorageMetadata>> {
+    let Some(pointer) = load_active_generation_pointer(root)? else {
+        return Ok(None);
+    };
+    ensure_real_directory(root)?;
+    ensure_real_directory(&root.join(MANIFEST_DIRECTORY))?;
+    ensure_real_directory(&root.join(INDEX_GENERATIONS_DIRECTORY))?;
+    ensure_real_directory(&root.join(CERTIFICATION_DIRECTORY))?;
+    let slot = pointer.active();
+    let certification =
+        load_structurally_valid_certification(root, slot)?.ok_or(IndexError::ChecksumMismatch)?;
+    if capture_single_link_control(&manifest_path(root, slot.generation_id()))?
+        != certification.manifest_identity
+    {
+        return Err(IndexError::ChecksumMismatch);
+    }
+    let logical_bytes = certification
+        .artifacts
+        .iter()
+        .try_fold(0_u64, |total, artifact| {
+            total
+                .checked_add(artifact.artifact.identity.length())
+                .ok_or(IndexError::CountOverflow)
+        })?;
+    if load_active_generation_pointer(root)?.as_ref() != Some(&pointer) {
+        return Err(IndexError::ConcurrentGenerationChange);
+    }
+    Ok(Some(ActiveGenerationStorageMetadata {
+        generation_id: slot.generation_id().to_owned(),
+        logical_bytes,
+    }))
 }
 
 /// Verifies one immutable generation from its existing publication-time

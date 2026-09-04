@@ -581,11 +581,14 @@ fn liveness_is_jittered_daily_and_never_a_loop_heartbeat() {
     let started = Instant::now();
     let mut telemetry = DaemonTelemetry::new(manual_run(), started, 0);
     assert!(telemetry
-        .liveness_events(started + StdDuration::from_secs(5))
+        .liveness_events(started + StdDuration::from_secs(5), None)
         .is_empty());
     let due = started + DAEMON_LIVENESS_MIN_INTERVAL;
-    assert_eq!(runtime_names(&telemetry.liveness_events(due)), ["liveness"]);
-    assert!(telemetry.liveness_events(due).is_empty());
+    assert_eq!(
+        runtime_names(&telemetry.liveness_events(due, None)),
+        ["liveness"]
+    );
+    assert!(telemetry.liveness_events(due, None).is_empty());
 }
 
 #[test]
