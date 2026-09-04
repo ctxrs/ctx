@@ -241,12 +241,21 @@ fn semantic_enabled_same_version_upgrade_replaces_changed_runtime_bytes() {
     let release = fake_legacy_release(&temp, env!("CARGO_PKG_VERSION"));
     let mut runtime = add_fake_release_runtime(&temp, &release);
     let cli_before = fs::read(&release.target).unwrap();
+    let runtime_library = runtime.target.join("lib").join(if cfg!(target_os = "macos") {
+        "libonnxruntime.dylib"
+    } else {
+        "libonnxruntime.so"
+    });
 
     let installed = json_output(
         fake_release_env(ctx(&temp).args(["upgrade", "--format=json"]), &release)
             .env("CTX_SEARCH_SEMANTIC", "true"),
     );
     assert_eq!(installed["status"], "applied", "{installed:#}");
+    assert_eq!(
+        fs::read(&runtime_library).unwrap(),
+        b"fake onnxruntime shared library\n"
+    );
     let original_sha = runtime.artifact_sha.clone();
 
     rewrite_fake_runtime_archive(&release, &mut runtime, "replacement");
@@ -258,6 +267,10 @@ fn semantic_enabled_same_version_upgrade_replaces_changed_runtime_bytes() {
     );
     assert_eq!(replaced["status"], "applied", "{replaced:#}");
     assert_eq!(fs::read(&release.target).unwrap(), cli_before);
+    assert_eq!(
+        fs::read(&runtime_library).unwrap(),
+        b"corrected fake onnxruntime shared library\n"
+    );
 
     let manifest: Value =
         serde_json::from_slice(&fs::read(runtime.target.join("ctx-runtime-install.json")).unwrap())
