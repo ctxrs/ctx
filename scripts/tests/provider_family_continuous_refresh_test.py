@@ -3,11 +3,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 import json
 import os
 from pathlib import Path
 import sys
 import tempfile
+import threading
 import time
 import unittest
 
@@ -39,6 +41,117 @@ MAX_OPEN_FD_DELTA = 96
 MAX_INCREMENTAL_SEGMENT_OVERHEAD_BYTES = 256 * 1024
 MUTATION_CADENCE_SECONDS = 0.1
 STARTUP_REFRESH_QUIET_SECONDS = 2.5
+FD_SAMPLE_INTERVAL_SECONDS = 0.005
+
+
+class ContinuousFdSampler:
+    def __init__(
+        self,
+        sample: Callable[[], int],
+        interval_seconds: float = FD_SAMPLE_INTERVAL_SECONDS,
+    ) -> None:
+        self._sample = sample
+        self._interval_seconds = interval_seconds
+        self._stop = threading.Event()
+        self._ready = threading.Event()
+        self._peak: int | None = None
+        self._failure: Exception | None = None
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        if self._thread is not None:
+            raise RuntimeError("continuous FD sampler already started")
+        self._thread = threading.Thread(
+            target=self._sample_until_stopped,
+            name="ctx-continuous-fd-sampler",
+            daemon=True,
+        )
+        self._thread.start()
+        if not self._ready.wait(COMMAND_TIMEOUT_SECONDS):
+            self._stop.set()
+            self._join()
+            raise AssertionError("continuous FD sampler did not produce its first sample")
+        if self._failure is not None:
+            self._join()
+            self._raise_failure()
+
+    def stop(self) -> int:
+        if self._thread is None:
+            raise RuntimeError("continuous FD sampler was not started")
+        self._stop.set()
+        self._join()
+        self._raise_failure()
+        if self._peak is None:
+            raise AssertionError("continuous FD sampler stopped without a sample")
+        return self._peak
+
+    def _join(self) -> None:
+        assert self._thread is not None
+        self._thread.join(COMMAND_TIMEOUT_SECONDS)
+        if self._thread.is_alive():
+            raise AssertionError("continuous FD sampler did not stop")
+
+    def _raise_failure(self) -> None:
+        if self._failure is not None:
+            raise RuntimeError("continuous FD sampler failed") from self._failure
+
+    def _sample_until_stopped(self) -> None:
+        try:
+            while not self._stop.is_set():
+                observed = self._sample()
+                self._peak = observed if self._peak is None else max(self._peak, observed)
+                self._ready.set()
+                self._stop.wait(self._interval_seconds)
+        except Exception as error:  # sampler failures must fail the qualification
+            self._failure = error
+            self._ready.set()
+
+
+class ContinuousFdSamplerTest(unittest.TestCase):
+    def test_records_a_peak_before_search_polling_begins(self) -> None:
+        sample_count = 0
+        pre_search_peak_sampled = threading.Event()
+        search_polling_started = threading.Event()
+
+        def sample() -> int:
+            nonlocal sample_count
+            sample_count += 1
+            if sample_count == 1:
+                return 11
+            if not search_polling_started.is_set():
+                pre_search_peak_sampled.set()
+                return 107
+            return 11
+
+        sampler = ContinuousFdSampler(sample)
+        sampler.start()
+        self.assertTrue(
+            pre_search_peak_sampled.wait(COMMAND_TIMEOUT_SECONDS),
+            "sampler did not observe the synchronized pre-search phase",
+        )
+        search_polling_started.set()
+
+        self.assertEqual(sampler.stop(), 107)
+
+    def test_propagates_sampling_failures_after_joining(self) -> None:
+        sample_count = 0
+        failure_sampled = threading.Event()
+
+        def sample() -> int:
+            nonlocal sample_count
+            sample_count += 1
+            if sample_count == 1:
+                return 11
+            failure_sampled.set()
+            raise OSError("injected sampler failure")
+
+        sampler = ContinuousFdSampler(sample)
+        sampler.start()
+        self.assertTrue(failure_sampled.wait(COMMAND_TIMEOUT_SECONDS))
+        with self.assertRaisesRegex(RuntimeError, "continuous FD sampler failed"):
+            sampler.stop()
+        assert sampler._thread is not None
+        self.assertFalse(sampler._thread.is_alive())
 
 
 def continuous_mutation_count() -> int:
@@ -282,22 +395,17 @@ class ProviderFamilyContinuousRefreshTest(unittest.TestCase):
                             corpus.cold_query, corpus, env, root, daemon.pid, resources
                         )
                         cold = refresh_snapshot(cold_search, root, env)
-                        if corpus.family == SQLITE_WAL_FAMILY:
-                            # SQLite online backup can produce delayed native
-                            # watcher observations. A valid scheduler batch for
-                            # those routes is unrelated to the next controlled
-                            # fixture mutation, so establish a quiet terminal
-                            # baseline before making the exact one-route causal
-                            # assertion below.
-                            cold_search, cold = (
-                                self.wait_for_isolated_continuous_baseline(
-                                    corpus, env, root, daemon.pid, resources
-                                )
+                        cold_search, cold = (
+                            self.wait_for_isolated_continuous_baseline(
+                                corpus, env, root, daemon.pid, resources
                             )
+                        )
                         self.assert_counts(cold, corpus, [])
                         self.assert_result(cold_search, corpus, corpus.cold_body, env, root)
                         mutations: list[FamilyMutation] = []
                         previous = cold
+                        resources["baseline_open_fds"] = linux_open_fd_count(daemon.pid)
+                        resources["peak_open_fds"] = resources["baseline_open_fds"]
                         for iteration in range(1, mutation_count + 1):
                             time.sleep(MUTATION_CADENCE_SECONDS)
                             if corpus.family == SQLITE_WAL_FAMILY:
@@ -312,51 +420,67 @@ class ProviderFamilyContinuousRefreshTest(unittest.TestCase):
                                     )
                                 )
                                 self.assert_counts(previous, corpus, mutations)
-                            source_before = immutable_tree_snapshot(corpus.source_root)
-                            mutation = corpus.continuous_mutation(iteration)
-                            mutations.append(mutation)
-                            source_after_mutation = immutable_tree_snapshot(corpus.source_root)
-                            self.assertNotEqual(source_after_mutation, source_before)
-
-                            search = self.wait_for_searchable(
-                                mutation.query,
-                                corpus,
-                                env,
-                                root,
-                                daemon.pid,
-                                resources,
+                            fd_sampler = ContinuousFdSampler(
+                                lambda: linux_open_fd_count(daemon.pid)
                             )
-                            snapshot = refresh_snapshot(search, root, env)
-                            self.assertEqual(
-                                immutable_tree_snapshot(corpus.source_root),
-                                source_after_mutation,
-                                "the provider source changed after the controlled "
-                                "harness mutation",
-                            )
-                            self.assert_counts(snapshot, corpus, mutations)
-                            self.assert_incremental_watcher_job(
-                                snapshot, previous, env, corpus
-                            )
-                            self.assert_result(search, corpus, mutation.body, env, root)
-                            if mutation.previous_query is not None:
-                                self.assert_absent(
-                                    mutation.previous_query, corpus, env, root
+                            fd_sampler.start()
+                            try:
+                                source_before = immutable_tree_snapshot(corpus.source_root)
+                                mutation = corpus.continuous_mutation(iteration)
+                                mutations.append(mutation)
+                                source_after_mutation = immutable_tree_snapshot(
+                                    corpus.source_root
                                 )
-                            self.assertGreaterEqual(len(snapshot.manifest_names), 1)
-                            self.assertLessEqual(
-                                len(snapshot.manifest_names),
-                                len(cold.manifest_names) + iteration,
-                            )
-                            self.assertLessEqual(
-                                len(snapshot.segments), len(cold.segments) + iteration
-                            )
-                            storage_limit = cold.index_bytes + sum(
-                                item.storage_payload_bytes
-                                + MAX_INCREMENTAL_SEGMENT_OVERHEAD_BYTES
-                                for item in mutations
-                            )
-                            self.assertLessEqual(snapshot.index_bytes, storage_limit)
-                            previous = snapshot
+                                self.assertNotEqual(
+                                    source_after_mutation, source_before
+                                )
+
+                                search = self.wait_for_searchable(
+                                    mutation.query,
+                                    corpus,
+                                    env,
+                                    root,
+                                    daemon.pid,
+                                    resources,
+                                )
+                                snapshot = refresh_snapshot(search, root, env)
+                                self.assertEqual(
+                                    immutable_tree_snapshot(corpus.source_root),
+                                    source_after_mutation,
+                                    "the provider source changed after the controlled "
+                                    "harness mutation",
+                                )
+                                self.assert_counts(snapshot, corpus, mutations)
+                                self.assert_incremental_watcher_job(
+                                    snapshot, previous, env, corpus
+                                )
+                                self.assert_result(
+                                    search, corpus, mutation.body, env, root
+                                )
+                                if mutation.previous_query is not None:
+                                    self.assert_absent(
+                                        mutation.previous_query, corpus, env, root
+                                    )
+                                self.assertGreaterEqual(len(snapshot.manifest_names), 1)
+                                self.assertLessEqual(
+                                    len(snapshot.manifest_names),
+                                    len(cold.manifest_names) + iteration,
+                                )
+                                self.assertLessEqual(
+                                    len(snapshot.segments),
+                                    len(cold.segments) + iteration,
+                                )
+                                storage_limit = cold.index_bytes + sum(
+                                    item.storage_payload_bytes
+                                    + MAX_INCREMENTAL_SEGMENT_OVERHEAD_BYTES
+                                    for item in mutations
+                                )
+                                self.assertLessEqual(snapshot.index_bytes, storage_limit)
+                                previous = snapshot
+                            finally:
+                                resources["peak_open_fds"] = max(
+                                    resources["peak_open_fds"], fd_sampler.stop()
+                                )
 
                         self.assertLessEqual(
                             resources["peak_open_fds"]
@@ -370,6 +494,8 @@ class ProviderFamilyContinuousRefreshTest(unittest.TestCase):
                             "provider-family continuous refresh:"
                             f" provider={corpus.provider}"
                             f" mutations={mutation_count}"
+                            f" baseline_open_fds={resources['baseline_open_fds']}"
+                            f" peak_open_fds={resources['peak_open_fds']}"
                             f" peak_fd_delta="
                             f"{resources['peak_open_fds'] - resources['baseline_open_fds']}"
                             f" peak_rss_bytes={resources['peak_rss_bytes']}"
