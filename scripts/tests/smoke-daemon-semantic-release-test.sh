@@ -342,8 +342,7 @@ case "${command}" in
       > "${data_root}/fake-marker"
     if [[ -n "${CTX_TEST_IMPORT_DELAY_SECONDS:-}" ]]; then
       [[ "${CTX_TEST_IMPORT_DELAY_SECONDS}" =~ ^[0-9]+$ ]]
-      import_delay_deadline=$((SECONDS + CTX_TEST_IMPORT_DELAY_SECONDS))
-      while ((SECONDS < import_delay_deadline)); do :; done
+      exec sleep "${CTX_TEST_IMPORT_DELAY_SECONDS}"
     fi
     ;;
   daemon)
@@ -416,7 +415,7 @@ slow_import_parent="${tmp}/slow-import-runs"
 mkdir -p "${slow_import_parent}"
 if ! CTX_TEST_RUNTIME_EVIDENCE=macos-arm64-native-virtualized \
   CTX_TEST_COREML_BIND_LOG="${tmp}/slow-import-coreml-bind.log" \
-  CTX_TEST_IMPORT_DELAY_SECONDS=4 \
+  CTX_TEST_IMPORT_DELAY_SECONDS=2 \
   "${scaled_smoke}" "${scaled_smoke_args[@]}" \
     --data-root "${slow_import_parent}" \
     --timeout-seconds 5 \
