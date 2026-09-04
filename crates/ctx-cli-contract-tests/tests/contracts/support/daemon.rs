@@ -9,7 +9,10 @@ use std::{
 };
 use tempfile::TempDir;
 
-#[cfg(unix)]
+#[cfg(all(
+    unix,
+    any(all(test, not(ctx_cli_bazel_test)), ctx_cli_test_support_upgrade)
+))]
 use super::analytics_outbox_paths;
 use super::runner::{
     ctx, ctx_from_binary, data_root, json_output, tempdir, test_binary_copy_path,
@@ -20,13 +23,19 @@ const DAEMON_DISABLE_REAP_TIMEOUT: Duration = Duration::from_secs(1);
 const DAEMON_STOP_TIMEOUT: Duration = Duration::from_secs(5);
 const DAEMON_STOP_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
-#[cfg(unix)]
+#[cfg(all(
+    unix,
+    any(all(test, not(ctx_cli_bazel_test)), ctx_cli_test_support_upgrade)
+))]
 pub(crate) struct TerminalUpgradeObservation {
     pub(crate) state: Value,
     pub(crate) events: Vec<Value>,
 }
 
-#[cfg(unix)]
+#[cfg(all(
+    unix,
+    any(all(test, not(ctx_cli_bazel_test)), ctx_cli_test_support_upgrade)
+))]
 impl TerminalUpgradeObservation {
     pub(crate) fn assert_applied_auto_upgrade(self) {
         assert_eq!(self.events.len(), 1);
@@ -97,7 +106,10 @@ impl DaemonTestRoot {
         &self.daemon_data_root
     }
 
-    #[cfg(unix)]
+    #[cfg(all(
+        unix,
+        any(all(test, not(ctx_cli_bazel_test)), ctx_cli_test_support_upgrade)
+    ))]
     pub(crate) fn observe_terminal_upgrade_handoff(
         &self,
         child: Child,
@@ -185,13 +197,19 @@ pub(crate) fn daemon_test_root_with_data_root(name: &str) -> DaemonTestRoot {
     DaemonTestRoot::with_data_root_name(name)
 }
 
-#[cfg(unix)]
+#[cfg(all(
+    unix,
+    any(all(test, not(ctx_cli_bazel_test)), ctx_cli_test_support_upgrade)
+))]
 struct TestOwnedDaemonChild<'a> {
     root: &'a DaemonTestRoot,
     child: Option<Child>,
 }
 
-#[cfg(unix)]
+#[cfg(all(
+    unix,
+    any(all(test, not(ctx_cli_bazel_test)), ctx_cli_test_support_upgrade)
+))]
 impl<'a> TestOwnedDaemonChild<'a> {
     fn new(root: &'a DaemonTestRoot, child: Child) -> Self {
         Self {
@@ -217,7 +235,10 @@ impl<'a> TestOwnedDaemonChild<'a> {
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(
+    unix,
+    any(all(test, not(ctx_cli_bazel_test)), ctx_cli_test_support_upgrade)
+))]
 impl Drop for TestOwnedDaemonChild<'_> {
     fn drop(&mut self) {
         let Some(mut child) = self.child.take() else {
@@ -248,13 +269,19 @@ impl Drop for TestOwnedDaemonChild<'_> {
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(
+    unix,
+    any(all(test, not(ctx_cli_bazel_test)), ctx_cli_test_support_upgrade)
+))]
 fn read_applied_upgrade_state(path: &Path) -> Option<Value> {
     let state: Value = serde_json::from_slice(&fs::read(path).ok()?).ok()?;
     (state["status"] == "applied" && state["attempt_id"].as_str().is_some()).then_some(state)
 }
 
-#[cfg(unix)]
+#[cfg(all(
+    unix,
+    any(all(test, not(ctx_cli_bazel_test)), ctx_cli_test_support_upgrade)
+))]
 fn running_replacement_daemon_pid(root: &Path, original_pid: u32) -> Option<u32> {
     let status: Value =
         serde_json::from_slice(&fs::read(root.join("daemon/status.json")).ok()?).ok()?;
@@ -264,14 +291,20 @@ fn running_replacement_daemon_pid(root: &Path, original_pid: u32) -> Option<u32>
     (status["status"] == "running" && pid != original_pid).then_some(pid)
 }
 
-#[cfg(unix)]
+#[cfg(all(
+    unix,
+    any(all(test, not(ctx_cli_bazel_test)), ctx_cli_test_support_upgrade)
+))]
 #[derive(Clone)]
 struct ObservedAnalyticsPayload {
     raw: Option<Vec<u8>>,
     value: Value,
 }
 
-#[cfg(unix)]
+#[cfg(all(
+    unix,
+    any(all(test, not(ctx_cli_bazel_test)), ctx_cli_test_support_upgrade)
+))]
 fn delivered_payloads(events_path: &Path) -> Result<Option<Vec<ObservedAnalyticsPayload>>, String> {
     let bytes = match fs::read(events_path) {
         Ok(bytes) => bytes,
@@ -302,7 +335,10 @@ fn delivered_payloads(events_path: &Path) -> Result<Option<Vec<ObservedAnalytics
         .map(Some)
 }
 
-#[cfg(unix)]
+#[cfg(all(
+    unix,
+    any(all(test, not(ctx_cli_bazel_test)), ctx_cli_test_support_upgrade)
+))]
 fn queued_payloads(analytics_root: &Path) -> Result<Vec<ObservedAnalyticsPayload>, String> {
     let mut payloads = Vec::new();
     for outbox in analytics_outbox_paths(analytics_root) {
@@ -352,7 +388,10 @@ fn queued_payloads(analytics_root: &Path) -> Result<Vec<ObservedAnalyticsPayload
     Ok(payloads)
 }
 
-#[cfg(unix)]
+#[cfg(all(
+    unix,
+    any(all(test, not(ctx_cli_bazel_test)), ctx_cli_test_support_upgrade)
+))]
 fn matching_terminal_events(
     payloads: Vec<ObservedAnalyticsPayload>,
     attempt_id: &str,
@@ -379,7 +418,10 @@ fn matching_terminal_events(
     Ok(matches)
 }
 
-#[cfg(unix)]
+#[cfg(all(
+    unix,
+    any(all(test, not(ctx_cli_bazel_test)), ctx_cli_test_support_upgrade)
+))]
 fn terminal_upgrade_event(
     events_path: &Path,
     analytics_root: &Path,
@@ -419,7 +461,10 @@ fn terminal_upgrade_event(
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(
+    unix,
+    any(all(test, not(ctx_cli_bazel_test)), ctx_cli_test_support_upgrade)
+))]
 pub(crate) fn assert_terminal_upgrade_raw_overlap_contract() {
     const ATTEMPT_ID: &str = "attempt-1";
     const DELIVERED: &[u8] = br#"{"events":[{"event_id":"event-1","event_name":"operation_completed","surface":"cli","operation":"upgrade","properties":{"upgrade_attempt_id":"attempt-1"}}]}"#;
