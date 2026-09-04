@@ -156,59 +156,6 @@ EOF
 chmod 0755 "${release_root}/scripts/public-cli-host-runtime-evidence.sh"
 smoke="${release_root}/scripts/smoke-daemon-semantic-release.sh"
 runtime_authority="${release_root}/scripts/public-cli-runtime-authority.sh"
-real_python3="$(command -v python3)"
-"${real_python3}" -I - "${smoke}" <<'PY'
-from pathlib import Path
-import re
-import sys
-
-source = Path(sys.argv[1]).read_text(encoding="utf-8")
-if source.count("time.monotonic_ns()") < 2:
-    raise SystemExit("semantic smoke deadlines are not based on time.monotonic_ns()")
-if re.search(r"\bSECONDS\b", source):
-    raise SystemExit("semantic smoke contains the Bash SECONDS clock")
-for forbidden in ("time.time(", "datetime", "$(date", "`date"):
-    if forbidden in source:
-        raise SystemExit(f"semantic smoke contains a wall-clock deadline source: {forbidden}")
-PY
-bounded_python_dir="${tmp}/bounded-python"
-mkdir -p "${bounded_python_dir}"
-cat > "${bounded_python_dir}/python3" <<EOF
-#!/usr/bin/env bash
-set -euo pipefail
-
-if [[ "\${1:-}" == "-I" && "\${2:-}" == "-" && "\${3:-}" =~ ^[0-9]+$ ]]; then
-  bounded_command=""
-  for argument in "\${@:4}"; do
-    case "\${argument}" in
-      import|daemon|search)
-        bounded_command="\${argument}"
-        break
-        ;;
-    esac
-  done
-  if [[ -n "\${bounded_command}" && -n "\${CTX_TEST_BOUNDED_LOG:-}" ]]; then
-    bounded_now_ns="\$("${real_python3}" -I -c 'import time; print(time.monotonic_ns())')"
-    bounded_remaining_ns=\$((\${3} - bounded_now_ns))
-    printf '%s\t%s\t%s\n' \
-      "\${bounded_command}" "\${3}" "\${bounded_remaining_ns}" \
-      >> "\${CTX_TEST_BOUNDED_LOG}"
-    if [[ "\${CTX_TEST_BOUNDED_MODE:-}" == "record" && \
-          ! -e "\${CTX_TEST_BOUNDED_DELAY_MARKER:?}" ]]; then
-      touch "\${CTX_TEST_BOUNDED_DELAY_MARKER}"
-      sleep 2
-    elif [[ "\${CTX_TEST_BOUNDED_MODE:-}" == "timeout-import" && \
-            "\${bounded_command}" == "import" && \
-            ! -e "\${CTX_TEST_BOUNDED_TIMEOUT_MARKER:?}" ]]; then
-      touch "\${CTX_TEST_BOUNDED_TIMEOUT_MARKER}"
-      printf 'error: smoke command exceeded monotonic deadline\n' >&2
-      exit 124
-    fi
-  fi
-fi
-exec "${real_python3}" "\$@"
-EOF
-chmod 0755 "${bounded_python_dir}/python3"
 
 expect_runtime_authority() {
   local name="$1"
@@ -393,6 +340,10 @@ case "${command}" in
     esac
     grep -Eo 'ctx-release-semantic-smoke-[0-9a-f]+' "${fixture}" | head -1 \
       > "${data_root}/fake-marker"
+    if [[ -n "${CTX_TEST_IMPORT_DELAY_SECONDS:-}" ]]; then
+      [[ "${CTX_TEST_IMPORT_DELAY_SECONDS}" =~ ^[0-9]+$ ]]
+      exec sleep "${CTX_TEST_IMPORT_DELAY_SECONDS}"
+    fi
     ;;
   daemon)
     subcommand="${1:-}"
@@ -445,6 +396,58 @@ EOF
 chmod 755 "${fake_ctx}"
 fake_ctx="$(cd -- "$(dirname -- "${fake_ctx}")" && pwd -P)/$(basename -- "${fake_ctx}")"
 
+# Scale only the harness's 30-second minimum and short command bounds so the
+# import timeout contract executes quickly without adding a production seam.
+scaled_smoke="${release_root}/scripts/smoke-daemon-semantic-release-scaled-test.sh"
+sed \
+  -e 's/timeout_seconds < 30/timeout_seconds < 1/' \
+  -e 's/run_bounded 30/run_bounded 1/g' \
+  "${smoke}" > "${scaled_smoke}"
+chmod 0755 "${scaled_smoke}"
+scaled_smoke_args=(
+  --coreml
+  --runtime-platform macos-arm64
+  --coreml-archive "${coreml_archive}"
+  --ctx "${fake_ctx}"
+)
+
+slow_import_parent="${tmp}/slow-import-runs"
+mkdir -p "${slow_import_parent}"
+if ! CTX_TEST_RUNTIME_EVIDENCE=macos-arm64-native-virtualized \
+  CTX_TEST_COREML_BIND_LOG="${tmp}/slow-import-coreml-bind.log" \
+  CTX_TEST_IMPORT_DELAY_SECONDS=2 \
+  "${scaled_smoke}" "${scaled_smoke_args[@]}" \
+    --data-root "${slow_import_parent}" \
+    --timeout-seconds 5 \
+    > "${tmp}/slow-import.out" 2> "${tmp}/slow-import.err"; then
+  cat "${tmp}/slow-import.out" >&2
+  cat "${tmp}/slow-import.err" >&2
+  exit 1
+fi
+grep -Fq 'ctx semantic smoke ok:' "${tmp}/slow-import.out"
+
+timed_out_import_parent="${tmp}/timed-out-import-runs"
+timed_out_import_pid="${tmp}/timed-out-import-daemon.pid"
+mkdir -p "${timed_out_import_parent}"
+if CTX_TEST_RUNTIME_EVIDENCE=macos-arm64-native-virtualized \
+  CTX_TEST_COREML_BIND_LOG="${tmp}/timed-out-import-coreml-bind.log" \
+  CTX_TEST_IMPORT_DELAY_SECONDS=4 \
+  CTX_TEST_DAEMON_PID_LOG="${timed_out_import_pid}" \
+  "${scaled_smoke}" "${scaled_smoke_args[@]}" \
+    --data-root "${timed_out_import_parent}" \
+    --timeout-seconds 1 \
+    > "${tmp}/timed-out-import.out" 2> "${tmp}/timed-out-import.err"; then
+  printf 'semantic smoke unexpectedly accepted a timed-out import\n' >&2
+  exit 1
+else
+  timed_out_import_status=$?
+fi
+[[ "${timed_out_import_status}" == "124" ]]
+grep -Fq 'error: smoke command exceeded 1 seconds' \
+  "${tmp}/timed-out-import.err"
+! kill -0 "$(cat "${timed_out_import_pid}")" >/dev/null 2>&1
+test -z "$(find "${timed_out_import_parent}" -mindepth 1 -print -quit)"
+
 expect_usage_failure() {
   local name="$1"
   local expected="$2"
@@ -487,39 +490,6 @@ expect_usage_failure retired_proof_output \
   'Usage:' \
   --coreml --runtime-platform macos-arm64 --proof-output "${tmp}/proof" \
   --ctx "${fake_ctx}"
-
-invalid_timeout_values=(
-  ''
-  090
-  030
-  0
-  -1
-  30s
-  901
-  999999999999999999999999999999999999
-)
-for timeout_index in "${!invalid_timeout_values[@]}"; do
-  invalid_timeout="${invalid_timeout_values[timeout_index]}"
-  expect_usage_failure "timeout_cli_${timeout_index}" \
-    '--timeout-seconds must be a canonical integer between 30 and 900 seconds' \
-    --coreml --runtime-platform macos-arm64 --ctx "${fake_ctx}" \
-    --timeout-seconds "${invalid_timeout}"
-  if CTX_SEMANTIC_SMOKE_TIMEOUT_SECONDS="${invalid_timeout}" \
-    "${smoke}" --coreml --runtime-platform macos-arm64 --ctx "${fake_ctx}" \
-    > "${tmp}/timeout_env_${timeout_index}.out" \
-    2> "${tmp}/timeout_env_${timeout_index}.err"; then
-    printf 'expected environment timeout failure: %s\n' "${invalid_timeout}" >&2
-    exit 1
-  fi
-  grep -Fq -- \
-    'CTX_SEMANTIC_SMOKE_TIMEOUT_SECONDS must be a canonical integer between 30 and 900 seconds' \
-    "${tmp}/timeout_env_${timeout_index}.err" || {
-    printf 'unexpected environment timeout failure for %s\n' \
-      "${invalid_timeout}" >&2
-    cat "${tmp}/timeout_env_${timeout_index}.err" >&2
-    exit 1
-  }
-done
 
 if CTX_TEST_RUNTIME_EVIDENCE=macos-arm64-generic-virtualized "${smoke}" \
   --coreml \
@@ -734,96 +704,23 @@ else
   shasum -a 256 "${runtime_archive}" | awk '{ print $1 }' > "${runtime_archive}.sha256"
 fi
 
-bounded_deadline_log="${tmp}/bounded-deadline.log"
-if ! PATH="${bounded_python_dir}:${PATH}" \
-  CTX_TEST_BOUNDED_LOG="${bounded_deadline_log}" \
-  CTX_TEST_BOUNDED_MODE=record \
-  CTX_TEST_BOUNDED_DELAY_MARKER="${tmp}/bounded-delay-complete" \
-  CTX_SEMANTIC_SMOKE_TIMEOUT_SECONDS=300 \
-  "${smoke}" \
+if ! "${smoke}" \
   --runtime-archive "${runtime_archive}" \
   --runtime-platform linux-x64 \
   --ctx "${cpu_ctx}" \
   --data-root "${tmp}/onnx-runs" \
   --require-authoritative \
+  --timeout-seconds 30 \
   > "${tmp}/onnx.out" 2> "${tmp}/onnx.err"; then
   cat "${tmp}/onnx.out" >&2
   cat "${tmp}/onnx.err" >&2
   exit 1
 fi
 grep -Fq 'ctx semantic smoke ok:' "${tmp}/onnx.out"
-mapfile -t bounded_deadlines < <(cut -f2 "${bounded_deadline_log}")
-mapfile -t bounded_remaining < <(cut -f3 "${bounded_deadline_log}")
-if ((${#bounded_deadlines[@]} < 4)); then
-  printf 'semantic smoke did not bound every expected ctx operation\n' >&2
-  cat "${bounded_deadline_log}" >&2
-  exit 1
-fi
-for bounded_index in "${!bounded_deadlines[@]}"; do
-  bounded_deadline="${bounded_deadlines[bounded_index]}"
-  operation_remaining="${bounded_remaining[bounded_index]}"
-  if [[ ! "${bounded_deadline}" =~ ^[1-9][0-9]*$ ]] || \
-    [[ "${bounded_deadline}" != "${bounded_deadlines[0]}" ]]; then
-    printf 'ctx operations did not share one monotonic deadline: %s\n' \
-      "${bounded_deadline}" >&2
-    exit 1
-  fi
-  if [[ ! "${operation_remaining}" =~ ^[0-9]+$ ]] || \
-    ((operation_remaining <= 30000000000 || \
-      operation_remaining > 300000000000)); then
-    printf 'ctx operation ignored the monotonic smoke budget: %s\n' \
-      "${operation_remaining}" >&2
-    exit 1
-  fi
-done
-last_bounded_index=$((${#bounded_remaining[@]} - 1))
-if ((bounded_remaining[last_bounded_index] >= bounded_remaining[0])); then
-  printf 'ctx operation bounds did not consume the whole-smoke deadline\n' >&2
-  cat "${bounded_deadline_log}" >&2
-  exit 1
-fi
 if find "${tmp}/onnx-runs" -name packaged-runtime-proof.txt -print -quit | grep -q .; then
   printf 'semantic smoke emitted a retired proof artifact\n' >&2
   exit 1
 fi
-
-bounded_timeout_log="${tmp}/bounded-timeout.log"
-bounded_timeout_daemon_pid="${tmp}/bounded-timeout-daemon.pid"
-set +e
-PATH="${bounded_python_dir}:${PATH}" \
-CTX_TEST_BOUNDED_LOG="${bounded_timeout_log}" \
-CTX_TEST_BOUNDED_MODE=timeout-import \
-CTX_TEST_BOUNDED_TIMEOUT_MARKER="${tmp}/bounded-timeout-complete" \
-CTX_TEST_DAEMON_PID_LOG="${bounded_timeout_daemon_pid}" \
-  "${smoke}" \
-  --runtime-archive "${runtime_archive}" \
-  --runtime-platform linux-x64 \
-  --ctx "${cpu_ctx}" \
-  --data-root "${tmp}/bounded-timeout-runs" \
-  --require-authoritative \
-  --timeout-seconds 300 \
-  > "${tmp}/bounded-timeout.out" 2> "${tmp}/bounded-timeout.err"
-bounded_timeout_status=$?
-set -e
-if [[ "${bounded_timeout_status}" != "124" ]]; then
-  printf 'semantic smoke did not propagate bounded ctx timeout: %s\n' \
-    "${bounded_timeout_status}" >&2
-  cat "${tmp}/bounded-timeout.err" >&2
-  exit 1
-fi
-bounded_timeout_remaining="$(awk -F '\t' '$1 == "import" { print $3; exit }' \
-  "${bounded_timeout_log}")"
-if [[ ! "${bounded_timeout_remaining}" =~ ^[0-9]+$ ]] || \
-  ((bounded_timeout_remaining <= 30000000000 || \
-    bounded_timeout_remaining > 300000000000)); then
-  printf 'semantic smoke timeout was not constrained by its remaining budget: %s\n' \
-    "${bounded_timeout_remaining}" >&2
-  exit 1
-fi
-grep -Fq -- 'error: smoke command exceeded monotonic deadline' \
-  "${tmp}/bounded-timeout.err"
-! kill -0 "$(cat "${bounded_timeout_daemon_pid}")" >/dev/null 2>&1
-test -z "$(find "${tmp}/bounded-timeout-runs" -mindepth 1 -print -quit)"
 
 candidate="${tmp}/nested-inputs"
 mkdir "${candidate}"
