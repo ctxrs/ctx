@@ -331,23 +331,14 @@ pub fn active_generation_storage_metadata(
     {
         return Err(IndexError::ChecksumMismatch);
     }
-    let generation_path = slot_path(root, slot);
-    ensure_real_directory(&generation_path)?;
-    let mut logical_bytes = 0_u64;
-    for expected in &certification.artifacts {
-        let current = capture_artifact(
-            root,
-            &generation_path,
-            Path::new(&expected.artifact.path),
-            Some(&pointer),
-        )?;
-        if current != expected.artifact {
-            return Err(IndexError::ChecksumMismatch);
-        }
-        logical_bytes = logical_bytes
-            .checked_add(expected.artifact.identity.length())
-            .ok_or(IndexError::CountOverflow)?;
-    }
+    let logical_bytes = certification
+        .artifacts
+        .iter()
+        .try_fold(0_u64, |total, artifact| {
+            total
+                .checked_add(artifact.artifact.identity.length())
+                .ok_or(IndexError::CountOverflow)
+        })?;
     if load_active_generation_pointer(root)?.as_ref() != Some(&pointer) {
         return Err(IndexError::ConcurrentGenerationChange);
     }

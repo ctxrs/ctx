@@ -513,7 +513,8 @@ where
                 .unwrap_or(None);
         }
         if lifecycle_ready {
-            let storage = storage_telemetry::collect(
+            let storage = storage_telemetry::collect_if_enabled(
+                observation,
                 data_root,
                 runtime.source_refresh_coordinator.as_deref(),
             );
@@ -646,7 +647,8 @@ where
             let storage = telemetry
                 .liveness_due(liveness_now)
                 .then(|| {
-                    storage_telemetry::collect(
+                    storage_telemetry::collect_if_enabled(
+                        observation,
                         data_root,
                         runtime.source_refresh_coordinator.as_deref(),
                     )

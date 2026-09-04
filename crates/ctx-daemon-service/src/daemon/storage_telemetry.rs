@@ -4,11 +4,28 @@ use ctx_client_observability::analytics::DaemonStorageFactsV1;
 use ctx_history_refresh::source_backed_index_root;
 
 use super::CoreRefreshEngine;
+use crate::DaemonObservationPort;
 
-pub(super) fn collect(
+pub(super) fn collect_if_enabled(
+    observation: &dyn DaemonObservationPort,
     data_root: &Path,
     refresh: Option<&CoreRefreshEngine>,
 ) -> Option<DaemonStorageFactsV1> {
+    collect_if_enabled_with(observation, data_root, || collect(data_root, refresh))
+}
+
+fn collect_if_enabled_with<T>(
+    observation: &dyn DaemonObservationPort,
+    data_root: &Path,
+    collect: impl FnOnce() -> Option<T>,
+) -> Option<T> {
+    observation
+        .analytics_enabled(data_root)
+        .then(collect)
+        .flatten()
+}
+
+fn collect(data_root: &Path, refresh: Option<&CoreRefreshEngine>) -> Option<DaemonStorageFactsV1> {
     DaemonStorageFactsV1::from_exact(
         filesystem_storage(data_root),
         active_core_storage(data_root, refresh),
@@ -17,10 +34,8 @@ pub(super) fn collect(
 
 fn filesystem_storage(data_root: &Path) -> Option<(u64, u64)> {
     filesystem_storage_with(data_root, |path| {
-        Some((
-            fs2::total_space(path).ok()?,
-            fs2::available_space(path).ok()?,
-        ))
+        let stats = fs2::statvfs(path).ok()?;
+        Some((stats.total_space(), stats.available_space()))
     })
 }
 
@@ -57,7 +72,46 @@ fn active_core_storage(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use ctx_client_observability::analytics::PublicEventV1;
+    use serde_json::Value;
+
     use super::*;
+
+    struct PolicyObservation(bool);
+
+    impl DaemonObservationPort for PolicyObservation {
+        fn analytics_enabled(&self, _data_root: &Path) -> bool {
+            self.0
+        }
+
+        fn provider_refresh_event(
+            &self,
+            _job: &Value,
+            _successor_pending: bool,
+        ) -> Option<PublicEventV1> {
+            None
+        }
+
+        fn append(&self, _data_root: &Path, _events: &[PublicEventV1]) {}
+
+        fn append_and_upload(&self, _data_root: &Path, _events: &[PublicEventV1]) {}
+    }
+
+    #[test]
+    fn disabled_analytics_skips_storage_collection() {
+        let root = tempfile::tempdir().unwrap();
+        let calls = AtomicUsize::new(0);
+
+        let result = collect_if_enabled_with(&PolicyObservation(false), root.path(), || {
+            calls.fetch_add(1, Ordering::Relaxed);
+            Some(())
+        });
+
+        assert_eq!(result, None);
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+    }
 
     #[test]
     fn filesystem_probe_failure_omits_the_group() {

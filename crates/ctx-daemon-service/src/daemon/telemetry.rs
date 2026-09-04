@@ -307,6 +307,10 @@ mod tests {
     }
 
     impl DaemonObservationPort for RecordingObservation {
+        fn analytics_enabled(&self, _data_root: &Path) -> bool {
+            true
+        }
+
         fn provider_refresh_event(
             &self,
             _job: &serde_json::Value,

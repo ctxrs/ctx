@@ -117,6 +117,11 @@ fn active_storage_metadata_sums_only_certified_artifacts_without_hashing() {
         .iter()
         .map(|artifact| artifact.artifact.identity.length())
         .sum::<u64>();
+    let alias_entries = std::rc::Rc::new(std::cell::Cell::new(0_usize));
+    let observed_alias_entries = std::rc::Rc::clone(&alias_entries);
+    let _alias_hook = AliasEntryTestHookGuard::install(move |_| {
+        observed_alias_entries.set(observed_alias_entries.get().saturating_add(1));
+    });
 
     crate::reset_physical_verification_activity();
     let actual = active_generation_storage_metadata(fixture.root())
@@ -127,6 +132,7 @@ fn active_storage_metadata_sums_only_certified_artifacts_without_hashing() {
     assert_eq!(actual.logical_bytes(), expected);
     assert_eq!(crate::checksum_walks(), 0);
     assert_eq!(crate::hashed_artifact_bytes(), 0);
+    assert_eq!(alias_entries.get(), 0);
 }
 
 #[test]

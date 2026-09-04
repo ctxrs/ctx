@@ -348,6 +348,8 @@ pub trait CoreGenerationPublishedPort: Sync {
 }
 
 pub trait DaemonObservationPort: Sync {
+    /// Effective consent decision used before collecting optional observations.
+    fn analytics_enabled(&self, data_root: &Path) -> bool;
     fn provider_refresh_event(&self, job: &Value, successor_pending: bool)
         -> Option<PublicEventV1>;
     fn append(&self, data_root: &Path, events: &[PublicEventV1]);

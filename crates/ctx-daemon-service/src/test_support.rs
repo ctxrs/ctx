@@ -61,6 +61,10 @@ pub(crate) struct TestAvailability;
 pub(crate) struct TestObservation;
 
 impl DaemonObservationPort for TestObservation {
+    fn analytics_enabled(&self, _data_root: &Path) -> bool {
+        true
+    }
+
     fn provider_refresh_event(
         &self,
         _job: &Value,
