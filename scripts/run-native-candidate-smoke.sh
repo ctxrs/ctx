@@ -134,6 +134,70 @@ root="$(mktemp -d "${TMPDIR:-/tmp}/ctx-native-candidate-smoke.XXXXXX")"
 # before passing its descendants to ctx's no-follow directory traversal.
 root="$(CDPATH= cd -- "${root}" && pwd -P)"
 make_private_directories "${root}"
+analytics_daemon_pid=""
+process_ids_for_binary() {
+  [ -n "${candidate_binary:-}" ] || return 0
+
+  candidate_process_snapshot="${root}/candidate-processes.snapshot"
+  ps -axo pid=,command= > "${candidate_process_snapshot}" 2>/dev/null || return 0
+  awk -v executable="${candidate_binary}" '
+    {
+      pid = $1
+      sub(/^[[:space:]]*[0-9]+[[:space:]]+/, "", $0)
+      start = index($0, executable)
+      after = start + length(executable)
+      if (start > 0 \
+          && (start == 1 || substr($0, start - 1, 1) == " ") \
+          && (after > length($0) || substr($0, after, 1) == " ")) {
+        print pid
+      }
+    }
+  ' "${candidate_process_snapshot}" | LC_ALL=C sort -n
+}
+
+candidate_pid_reapable() {
+  candidate_pid_state="$(
+    ps -o stat= -p "$1" 2>/dev/null | awk 'NR == 1 { print $1 }'
+  )"
+  case "${candidate_pid_state}" in
+    ''|Z*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+terminate_and_reap_analytics_daemon() {
+  known_analytics_pid="${analytics_daemon_pid:-}"
+  [ -n "${known_analytics_pid}" ] || return 0
+  analytics_daemon_pid=""
+
+  if ! candidate_pid_reapable "${known_analytics_pid}"; then
+    kill -TERM "${known_analytics_pid}" 2>/dev/null || true
+  fi
+  termination_waited=0
+  while ! candidate_pid_reapable "${known_analytics_pid}" \
+    && [ "${termination_waited}" -lt 3 ]; do
+    sleep 1
+    termination_waited=$((termination_waited + 1))
+  done
+
+  if ! candidate_pid_reapable "${known_analytics_pid}"; then
+    kill -KILL "${known_analytics_pid}" 2>/dev/null || true
+  fi
+  termination_waited=0
+  while ! candidate_pid_reapable "${known_analytics_pid}" \
+    && [ "${termination_waited}" -lt 2 ]; do
+    sleep 1
+    termination_waited=$((termination_waited + 1))
+  done
+
+  if ! candidate_pid_reapable "${known_analytics_pid}"; then
+    printf 'candidate cleanup could not terminate analytics daemon PID: %s\n' \
+      "${known_analytics_pid}" >&2
+    return 1
+  fi
+  wait "${known_analytics_pid}" 2>/dev/null || true
+}
+
 cleanup_candidate_processes() {
   [ -n "${candidate_binary:-}" ] || return 0
 
@@ -162,11 +226,17 @@ cleanup_candidate_processes() {
     "${cleanup_pids}" >&2
   return 1
 }
+cleanup_analytics_processes() {
+  analytics_cleanup_status=0
+  terminate_and_reap_analytics_daemon || analytics_cleanup_status=1
+  cleanup_candidate_processes || analytics_cleanup_status=1
+  return "${analytics_cleanup_status}"
+}
 cleanup() {
   cleanup_status=$?
   trap - 0
   trap '' 1 2 15
-  if ! cleanup_candidate_processes; then
+  if ! cleanup_analytics_processes; then
     printf 'candidate smoke retained private root for survivor diagnosis: %s\n' \
       "${root}" >&2
     rm -f "${result_tmp}" "${result_path}" || true
@@ -241,7 +311,7 @@ fi
 # analytics and upgrades below. The released-default probes instead redirect
 # analytics to an isolated file and use status, which cannot schedule work.
 clean_env() {
-  env -i \
+  exec env -i \
     PATH="${PATH:-/usr/bin:/bin}" \
     HOME="${profile}" \
     USER="${USER:-ctx-smoke}" \
@@ -369,13 +439,6 @@ if [ "${pair_mode}" = true ]; then
     exit 1
   fi
 fi
-
-process_ids_for_binary() {
-  ps -axo pid=,command= 2>/dev/null \
-    | awk -v executable="${candidate_binary}" \
-      '$2 == executable || $3 == executable { print $1 }' \
-    | LC_ALL=C sort -n
-}
 
 baseline_processes="${root}/baseline-processes"
 final_processes="${root}/final-processes"
@@ -572,11 +635,10 @@ if [ ! -s "${analytics_default_events}" ]; then
     "${command_timeout_seconds}" >&2
   exit 1
 fi
-if ! cleanup_candidate_processes; then
-  printf 'candidate analytics daemon did not stop after bounded delivery\n' >&2
+if ! cleanup_analytics_processes; then
+  printf 'candidate analytics daemon did not stop and reap after bounded delivery\n' >&2
   exit 1
 fi
-wait "${analytics_daemon_pid}" 2>/dev/null || true
 if ! python3 -I - "${analytics_outbox_before}" \
   "${analytics_default_events}" <<'PY'
 import json

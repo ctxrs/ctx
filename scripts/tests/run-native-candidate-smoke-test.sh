@@ -82,9 +82,37 @@ snapshot_tree() {
 }
 
 process_ids_for_command_path() {
-  ps -axo pid=,command= 2>/dev/null \
-    | awk -v executable="$1" '$2 == executable || $3 == executable { print $1 }' \
-    | LC_ALL=C sort -n
+  ps -axo pid=,command= > "${tmp}/processes.snapshot" 2>/dev/null
+  awk -v executable="$1" '
+    {
+      pid = $1
+      sub(/^[[:space:]]*[0-9]+[[:space:]]+/, "", $0)
+      start = index($0, executable)
+      after = start + length(executable)
+      if (start > 0 \
+          && (start == 1 || substr($0, start - 1, 1) == " ") \
+          && (after > length($0) || substr($0, after, 1) == " ")) {
+        print pid
+      }
+    }
+  ' "${tmp}/processes.snapshot" | LC_ALL=C sort -n
+}
+
+assert_no_candidate_processes_in_tmpdir() {
+  local candidate_root_fragment="$1"
+  local remaining
+  ps -axo pid=,command= > "${tmp}/processes.snapshot" 2>/dev/null
+  remaining="$(
+    awk -v fragment="${candidate_root_fragment}" \
+      'index($0, fragment) { print $1 }' "${tmp}/processes.snapshot" \
+      | LC_ALL=C sort -n
+  )"
+  if [[ -n "${remaining}" ]]; then
+    kill -KILL ${remaining} 2>/dev/null || true
+    printf 'candidate smoke left space-path processes running: %s\n' \
+      "${remaining}" >&2
+    exit 1
+  fi
 }
 
 cat > "${fake_template}" <<'EOF'
@@ -302,10 +330,13 @@ JSON
     test "${2:-}" = run
     analytics_outbox="${XDG_STATE_HOME}/ctx/analytics-outbox-v1.json"
     test -s "${analytics_outbox}"
-    trap 'exit 0' 1 2 15
     case "${0##*/}" in
-      *no-analytics-delivery*) ;;
+      *no-analytics-delivery*)
+        trap '' 1 2 15
+        while :; do :; done
+        ;;
       *)
+        trap 'exit 0' 1 2 15
         analytics_path="${CTX_ANALYTICS_ENDPOINT#file://}"
         printf '%s\n' '{"events":[{"event_name":"operation_completed","event_version":1,"surface":"cli","operation":"status","outcome":"success","event_id":"11111111-1111-4111-8111-111111111111"}]}' \
           > "${analytics_path}"
@@ -342,13 +373,15 @@ result="${tmp}/result.json"
 "${smoke}" "${fake}" "${tmp}/fixture.jsonl" 0.25.0 "${result}" >/dev/null
 assert_passed_result "${result}"
 
-setgid_tmp="${tmp}/setgid-task-parent"
-mkdir -p "${setgid_tmp}"
-chmod 2700 "${setgid_tmp}"
-setgid_result="${tmp}/setgid-result.json"
-TMPDIR="${setgid_tmp}" "${smoke}" \
-  "${fake}" "${tmp}/fixture.jsonl" 0.25.0 "${setgid_result}" >/dev/null
-assert_passed_result "${setgid_result}"
+space_tmp="${tmp}/setgid task parent"
+mkdir -p "${space_tmp}"
+chmod 2700 "${space_tmp}"
+space_result="${tmp}/space-result.json"
+TMPDIR="${space_tmp}" "${smoke}" \
+  "${fake}" "${tmp}/fixture.jsonl" 0.25.0 "${space_result}" >/dev/null
+assert_passed_result "${space_result}"
+assert_no_candidate_processes_in_tmpdir \
+  "${space_tmp}/ctx-native-candidate-smoke."
 
 foreground_analytics_fake="${tmp}/ctx-foreground-analytics"
 make_fake "${foreground_analytics_fake}"
@@ -367,7 +400,8 @@ no_analytics_delivery_fake="${tmp}/ctx-no-analytics-delivery"
 make_fake "${no_analytics_delivery_fake}"
 no_analytics_delivery_result="${tmp}/no-analytics-delivery-result.json"
 started="$(date +%s)"
-if CTX_NATIVE_CANDIDATE_COMMAND_TIMEOUT_SECONDS=1 "${smoke}" \
+if TMPDIR="${space_tmp}" CTX_NATIVE_CANDIDATE_COMMAND_TIMEOUT_SECONDS=1 \
+  "${smoke}" \
   "${no_analytics_delivery_fake}" "${tmp}/fixture.jsonl" 0.25.0 \
   "${no_analytics_delivery_result}" >"${tmp}/no-analytics-delivery.out" \
   2>"${tmp}/no-analytics-delivery.err"; then
@@ -382,6 +416,8 @@ elapsed="$(( $(date +%s) - started ))"
 grep -Fq 'daemon did not deliver queued status analytics within 1 seconds' \
   "${tmp}/no-analytics-delivery.err"
 test ! -e "${no_analytics_delivery_result}"
+assert_no_candidate_processes_in_tmpdir \
+  "${space_tmp}/ctx-native-candidate-smoke."
 
 ctx_v1_parent="${tmp}/ctx-v1-parent"
 mkdir -p "${ctx_v1_parent}"
