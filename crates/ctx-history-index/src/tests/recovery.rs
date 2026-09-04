@@ -308,11 +308,8 @@ fn terminal_activation_fence_rejects_candidate_manifest_replacement() {
 
     let error = candidate.commit(|_| true).unwrap_err();
     assert!(
-        matches!(
-            error,
-            IndexError::ChecksumMismatch | IndexError::ManifestDigestMismatch { .. }
-        ),
-        "{error:?}"
+        matches!(&error, IndexError::ManifestDigestMismatch { .. }),
+        "candidate manifest replacement must fail with ManifestDigestMismatch, got {error:?}"
     );
     assert_eq!(
         fs::read(temp.path().join("active-generation.json")).unwrap(),
