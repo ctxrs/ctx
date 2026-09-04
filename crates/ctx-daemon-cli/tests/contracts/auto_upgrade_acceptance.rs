@@ -16,6 +16,7 @@ mod unix {
 
     const FIXTURE_TARGET_VERSION: &str = "9.9.9";
     const FIXTURE_QUIESCENCE_TIMEOUT: Duration = Duration::from_secs(45);
+    const TERMINAL_UPGRADE_OBSERVATION_TIMEOUT: Duration = Duration::from_secs(45);
 
     fn installation_sibling(binary: &Path, suffix: &str) -> PathBuf {
         let name = binary
@@ -1298,57 +1299,52 @@ mod unix {
     }
 
     #[test]
+    #[ignore = "spawned only by the bounded disable-command contract"]
+    fn bounded_disable_stall_fixture() {
+        std::thread::sleep(Duration::from_secs(30));
+    }
+
+    #[test]
+    fn review_guard_disable_timeout_contract() {
+        assert_bounded_disable_command_timeout("unix::bounded_disable_stall_fixture");
+    }
+
+    #[test]
+    fn review_guard_raw_overlap_contract() {
+        assert_terminal_upgrade_raw_overlap_contract();
+    }
+
+    #[test]
     fn daemon_reports_one_terminal_upgrade_event_after_durable_state() {
-        let temp = tempdir();
+        let temp = daemon_test_root_with_data_root("data");
         let mut release = fake_release(&temp, FIXTURE_TARGET_VERSION);
-        let binary = managed_hook_candidate(&temp, "ia_daemon_telemetry");
+        // Keep the managed executable at the identity checked by
+        // DaemonTestRoot's panic-safe process guard.
+        let binary = managed_bound_hook_candidate(&temp, "ia_daemon_telemetry");
         patch_release_artifact_with_next_ctx(&mut release, &binary, FIXTURE_TARGET_VERSION);
         let events_path = temp.path().join("analytics.jsonl");
-        let data_root = temp.path().join("data");
+        let data_root = temp.daemon_data_root();
         let home = temp.path().join("home");
         let state_root = temp.path().join("state");
         fs::create_dir(&home).unwrap();
         seed_authoritative_codex_source(&home);
 
-        let output = managed_daemon(&temp, &release, &binary)
-            .env("CTX_DATA_ROOT", &data_root)
+        let mut command = managed_daemon(&temp, &release, &binary);
+        command
+            .env("CTX_DATA_ROOT", data_root)
             .env("HOME", &home)
             .env("XDG_STATE_HOME", &state_root)
             .env("LOCALAPPDATA", &state_root)
             .env_remove("CTX_ANALYTICS_ENABLED")
             .env("CTX_ANALYTICS_ENDPOINT", file_url(&events_path))
-            .env("CTX_DAEMON_AUTOSTART_OFF", "1")
-            .output()
-            .unwrap();
-        assert!(output.status.success(), "{output:?}");
-        assert!(
-            events_path.exists(),
-            "daemon emitted no telemetry file; stderr={}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-
-        let state: Value =
-            serde_json::from_slice(&fs::read(scheduler_state_path(&binary)).unwrap()).unwrap();
-        assert_eq!(state["status"], "applied");
-        let events = read_analytics_events(&events_path);
-        let upgrades = events
-            .iter()
-            .filter(|batch| {
-                batch["events"].as_array().is_some_and(|events| {
-                    events.iter().any(|event| event["operation"] == "upgrade")
-                })
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(upgrades.len(), 1);
-        assert_operation_event(upgrades[0], "upgrade", "success");
-        let properties = analytics_event_properties(upgrades[0]);
-        assert_eq!(properties["upgrade_mode"], "auto");
-        assert_eq!(properties["upgrade_status"], "applied");
-        assert_eq!(properties["upgrade_applied"], true);
-        assert_eq!(
-            properties["upgrade_attempt_id"],
-            state["attempt_id"].as_str().unwrap()
-        );
+            .env_remove("CTX_DAEMON_AUTOSTART_OFF");
+        temp.observe_terminal_upgrade_handoff(
+            spawn_persistent_daemon(&command),
+            &scheduler_state_path(&binary),
+            &events_path,
+            TERMINAL_UPGRADE_OBSERVATION_TIMEOUT,
+        )
+        .assert_applied_auto_upgrade();
     }
 
     #[test]
