@@ -241,11 +241,14 @@ fn semantic_enabled_same_version_upgrade_replaces_changed_runtime_bytes() {
     let release = fake_legacy_release(&temp, env!("CARGO_PKG_VERSION"));
     let mut runtime = add_fake_release_runtime(&temp, &release);
     let cli_before = fs::read(&release.target).unwrap();
-    let runtime_library = runtime.target.join("lib").join(if cfg!(target_os = "macos") {
-        "libonnxruntime.dylib"
-    } else {
-        "libonnxruntime.so"
-    });
+    let runtime_library = runtime
+        .target
+        .join("lib")
+        .join(if cfg!(target_os = "macos") {
+            "libonnxruntime.dylib"
+        } else {
+            "libonnxruntime.so"
+        });
 
     let installed = json_output(
         fake_release_env(ctx(&temp).args(["upgrade", "--format=json"]), &release)
