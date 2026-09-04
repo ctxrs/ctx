@@ -293,7 +293,10 @@ pub use ctx_semantic_index::SemanticNotReady;
 #[allow(unused_imports)]
 pub use runtime_limits::SEMANTIC_WORKER_BATCH_MAX;
 mod query_adapter;
-pub use query_adapter::{wait_for_daemon_semantic_generation, SemanticQueryAdapter};
+pub use query_adapter::{
+    wait_for_daemon_semantic_generation, wait_for_daemon_semantic_generation_with_retained_peer,
+    SemanticQueryAdapter,
+};
 mod semantic_completion;
 pub use semantic_completion::{
     complete_semantic_generation_foreground,
@@ -317,7 +320,9 @@ mod source_backed_refresh_coordinator;
 pub use source_backed_refresh_coordinator::{
     coordinate_import_source_backed_refresh_with_progress,
     coordinate_setup_source_backed_refresh_with_progress, coordinate_source_backed_refresh,
-    coordinate_source_backed_refresh_with_progress, pin_active_verified_generation,
+    coordinate_source_backed_refresh_with_progress,
+    coordinate_source_backed_refresh_with_retained_peer, pin_active_verified_generation,
+    pin_active_verified_generation_with_retained_peer,
     published_explicit_source_relocation_authority, PinnedSourceBackedGeneration, RefreshStatus,
     SourceBackedRefreshDaemonUnavailable, SourceBackedRefreshMode, SourceBackedRefreshObservation,
     SourceBackedRefreshPendingPublication, SourceBackedRefreshTerminalError,

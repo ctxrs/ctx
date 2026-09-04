@@ -52,6 +52,39 @@ pub(in crate::source_index) fn search_existing_generation(
     .map_err(SourceSearchFailure::into_anyhow)
 }
 
+pub(in crate::source_index) fn search_existing_generation_with_compact_projection(
+    request: &SourceSearchRequest,
+    index: VerifiedIndex,
+    data_root: &Path,
+) -> Result<(Value, Value, VerifiedIndex)> {
+    let policy = ctx_history_read_application::SearchPolicy {
+        default_backend: request.backend.unwrap_or(SearchBackend::Lexical),
+        semantic: SemanticAvailability::Available,
+    };
+    let plan = ctx_history_read_application::plan_search(request.clone(), policy)
+        .map_err(SourceSearchFailure::from)
+        .map_err(SourceSearchFailure::into_anyhow)?;
+    let mut observation = initial_search_observation();
+    let (value, application) = search_existing_generation_with_port(
+        plan,
+        index,
+        data_root,
+        SearchRefreshContext {
+            mode: RefreshArg::Off,
+            status: "existing_generation",
+            source_count: 1,
+        },
+        true,
+        &crate::semantic::SemanticQueryAdapter::new(data_root),
+        None,
+        &mut observation,
+    )
+    .map_err(SourceSearchFailure::into_anyhow)?;
+    let compact = application.project_read_model(&value)?;
+    let (_, index) = application.into_parts();
+    Ok((value, compact, index))
+}
+
 pub(in crate::source_index) fn collect_search_hits_with_backend(
     request: &SourceSearchRequest,
     data_root: &Path,
@@ -82,7 +115,15 @@ pub(super) fn collect_search_hits_with_port<P: HistorySemanticPort>(
     let plan = ctx_history_read_application::plan_search(planned, policy)
         .map_err(SourceSearchFailure::from)
         .map_err(SourceSearchFailure::into_anyhow)?;
-    let index = VerifiedIndex::open_pinned(index_root(data_root))?;
+    let index =
+        match ctx_history_read_application::retained_peer_read_for_search(plan.request(), false) {
+            ctx_history_read_application::RetainedPeerRead::Omit => {
+                VerifiedIndex::open_pinned(index_root(data_root))?
+            }
+            ctx_history_read_application::RetainedPeerRead::IfAvailable => {
+                VerifiedIndex::open_pinned_with_retained_peer(index_root(data_root))?
+            }
+        };
     let mut observation = initial_search_observation();
     let (_, application) = search_existing_generation_with_port(
         plan,

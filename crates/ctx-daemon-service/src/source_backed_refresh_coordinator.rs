@@ -412,7 +412,8 @@ impl CoreRefreshEngine {
 pub use client::{
     coordinate_import_source_backed_refresh_with_progress,
     coordinate_setup_source_backed_refresh_with_progress, coordinate_source_backed_refresh,
-    coordinate_source_backed_refresh_with_progress, SourceBackedRefreshDaemonUnavailable,
+    coordinate_source_backed_refresh_with_progress,
+    coordinate_source_backed_refresh_with_retained_peer, SourceBackedRefreshDaemonUnavailable,
     SourceBackedRefreshObservation, SourceBackedRefreshPendingPublication,
     SourceBackedRefreshTerminalError,
 };
@@ -458,8 +459,24 @@ pub(crate) fn pin_published_generation(
     Ok(ctx_history_refresh::pin_published_generation(data_root)?.map(PinnedSourceBackedGeneration))
 }
 
+pub(crate) fn pin_published_generation_with_retained_peer(
+    data_root: &Path,
+) -> Result<Option<PinnedSourceBackedGeneration>> {
+    Ok(
+        ctx_history_refresh::pin_published_generation_with_retained_peer(data_root)?
+            .map(PinnedSourceBackedGeneration),
+    )
+}
+
 pub fn pin_active_verified_generation(data_root: &Path) -> Result<PinnedSourceBackedGeneration> {
     ctx_history_refresh::pin_active_verified_generation(data_root).map(PinnedSourceBackedGeneration)
+}
+
+pub fn pin_active_verified_generation_with_retained_peer(
+    data_root: &Path,
+) -> Result<PinnedSourceBackedGeneration> {
+    ctx_history_refresh::pin_active_verified_generation_with_retained_peer(data_root)
+        .map(PinnedSourceBackedGeneration)
 }
 
 pub(crate) fn pin_retained_generation(
@@ -467,6 +484,14 @@ pub(crate) fn pin_retained_generation(
     generation_id: &str,
 ) -> Result<PinnedSourceBackedGeneration> {
     ctx_history_refresh::pin_retained_generation(data_root, generation_id)
+        .map(PinnedSourceBackedGeneration)
+}
+
+pub(crate) fn pin_retained_generation_with_retained_peer(
+    data_root: &Path,
+    generation_id: &str,
+) -> Result<PinnedSourceBackedGeneration> {
+    ctx_history_refresh::pin_retained_generation_with_retained_peer(data_root, generation_id)
         .map(PinnedSourceBackedGeneration)
 }
 

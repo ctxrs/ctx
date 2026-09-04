@@ -67,6 +67,25 @@ pub fn wait_for_daemon_semantic_generation(
     )
 }
 
+/// Preserves compact-reference authority when semantic coverage supersedes a
+/// generation. The supplied pin must already own its requested peer; every
+/// replacement captures a new pair, while an unchanged generation keeps the
+/// original pair.
+pub fn wait_for_daemon_semantic_generation_with_retained_peer(
+    data_root: &Path,
+    pin: PinnedSourceBackedGeneration,
+    timeout: StdDuration,
+) -> Result<PinnedSourceBackedGeneration> {
+    wait_for_daemon_semantic_generation_with(
+        data_root,
+        pin,
+        timeout,
+        || crate::pin_active_verified_generation_with_retained_peer(data_root),
+        super::finite_worker_owner::checkpoint,
+        thread::sleep,
+    )
+}
+
 fn wait_for_daemon_semantic_generation_with<Repin, Checkpoint, Pause>(
     data_root: &Path,
     mut pin: PinnedSourceBackedGeneration,

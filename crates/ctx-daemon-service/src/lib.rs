@@ -91,7 +91,9 @@ pub use semantic_completion::{
 pub use source_backed_refresh_coordinator::{
     coordinate_import_source_backed_refresh_with_progress,
     coordinate_setup_source_backed_refresh_with_progress, coordinate_source_backed_refresh,
-    coordinate_source_backed_refresh_with_progress, pin_active_verified_generation,
+    coordinate_source_backed_refresh_with_progress,
+    coordinate_source_backed_refresh_with_retained_peer, pin_active_verified_generation,
+    pin_active_verified_generation_with_retained_peer,
     published_explicit_source_relocation_authority, PinnedSourceBackedGeneration, RefreshSelection,
     RefreshStatus, SourceBackedCurrentSourceProgress, SourceBackedRefreshDaemonUnavailable,
     SourceBackedRefreshMode, SourceBackedRefreshObservation, SourceBackedRefreshPendingPublication,

@@ -5,8 +5,13 @@ fn refresh_off_uses_the_existing_generation_without_activation() {
     let temp = tempdir().unwrap();
     write_test_generation(temp.path());
 
-    let outcome =
-        refresh_for_search(&request(RefreshArg::Off), RefreshArg::Off, temp.path()).unwrap();
+    let outcome = refresh_for_search(
+        &request(RefreshArg::Off),
+        RefreshArg::Off,
+        temp.path(),
+        ctx_history_read_application::RetainedPeerRead::Omit,
+    )
+    .unwrap();
 
     assert_eq!(outcome.status, "existing_generation");
     assert_eq!(
@@ -66,8 +71,9 @@ fn two_rotations_keep_machine_compact_and_human_reads_pinned() {
     let temp = tempdir().unwrap();
     write_test_generation(temp.path());
     let machine_pin = open_index(temp.path()).unwrap();
-    let compact_pin = open_index(temp.path()).unwrap();
-    let human_pin = open_index(temp.path()).unwrap();
+    let compact_pin =
+        VerifiedIndex::open_pinned_with_retained_peer(index_root(temp.path())).unwrap();
+    let human_pin = VerifiedIndex::open_pinned_with_retained_peer(index_root(temp.path())).unwrap();
     let session_id = machine_pin
         .sessions_by_provider_session_id(TEST_SESSION_ID, Some("codex"), None, None)
         .unwrap()[0]

@@ -23,10 +23,18 @@ pub(crate) fn open_generation_read(
 ) -> Result<GenerationRead> {
     let root = super::shared::index_root(data_root);
     let index = match &request.target {
-        GenerationReadTarget::Active => super::shared::open_index(data_root)?,
-        GenerationReadTarget::Exact(generation_id) => {
-            VerifiedIndex::open_pinned_generation(&root, generation_id)?
-        }
+        GenerationReadTarget::Active => match request.retained_peer {
+            RetainedPeerRead::Omit => super::shared::open_index(data_root)?,
+            RetainedPeerRead::IfAvailable => {
+                super::shared::open_index_with_retained_peer(data_root)?
+            }
+        },
+        GenerationReadTarget::Exact(generation_id) => match request.retained_peer {
+            RetainedPeerRead::Omit => VerifiedIndex::open_pinned_generation(&root, generation_id)?,
+            RetainedPeerRead::IfAvailable => {
+                VerifiedIndex::open_pinned_generation_with_retained_peer(&root, generation_id)?
+            }
+        },
     };
     generation_read(index, request)
 }

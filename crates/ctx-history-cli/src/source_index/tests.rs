@@ -1,4 +1,5 @@
 mod activity;
+mod compact_authority;
 mod semantic_fallback;
 mod show_lineage;
 
@@ -23,7 +24,8 @@ use ctx_history_core::{
     CoreContentPolicyStatus, CoreRecord, EventIdentityInput, LiteralFactKind, NativeItemKey,
     NativeSessionKey, ProviderDeclaredFact, ProviderNativeCopyProof, ProviderNativeEventCopy,
     ProviderNativeSessionRelationship, ScannedSourceCounts, SessionIdentityInput, SourceAnchor,
-    SourceKey, SourceObservation, TypedKey, CORE_ACTIVITY_REVISION, MAX_CORE_CONTENT_BYTES,
+    SourceKey, SourceObservation, StableEntityId, TypedKey, CORE_ACTIVITY_REVISION,
+    MAX_CORE_CONTENT_BYTES,
 };
 use ctx_history_index::{
     CompiledSearchFilter, EventSearchCandidate, EventSearchFilters, GenerationWriter, IndexError,
@@ -48,8 +50,9 @@ use super::{
         render_show_document, search_json, SEARCH_SNIPPET_MAX_BYTES, SEARCH_SNIPPET_MAX_CHARS,
     },
     search::{
-        resolve_source_search_backend, semantic_reason_code, NormalizedSearchQuery,
-        SearchCollection, SearchEventMetadata, SearchHit, SearchPresentation, SearchResultWindow,
+        resolve_source_search_backend, search_existing_generation_with_compact_projection,
+        semantic_reason_code, NormalizedSearchQuery, SearchCollection, SearchEventMetadata,
+        SearchHit, SearchPresentation, SearchResultWindow,
     },
     show::{
         canonical_show_output_bytes, event_window_value, mcp_show_event, mcp_show_session,
@@ -209,7 +212,8 @@ fn retained_compact_peer_opens_its_exact_verified_generation() {
         "legacy nonempty retained peer successor",
     );
     append_fixture_session(nonempty.path(), &[successor], 94);
-    let current = open_index(nonempty.path()).unwrap();
+    let current =
+        VerifiedIndex::open_pinned_with_retained_peer(index_root(nonempty.path())).unwrap();
     assert_ne!(current.generation_id(), peer_generation);
     let compact = generation_with_retained_peer(current).unwrap();
     assert!(compact.retained_peer().is_some());
@@ -226,7 +230,7 @@ fn retained_compact_peer_opens_its_exact_verified_generation() {
     let temp = tempdir().unwrap();
     let peer_generation = publish_empty_generation(temp.path());
     write_test_generation(temp.path());
-    let current = open_index(temp.path()).unwrap();
+    let current = VerifiedIndex::open_pinned_with_retained_peer(index_root(temp.path())).unwrap();
     assert_ne!(current.generation_id(), peer_generation);
     let compact = generation_with_retained_peer(current).unwrap();
     assert_eq!(

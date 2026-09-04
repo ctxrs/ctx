@@ -84,6 +84,7 @@ fn background_maintenance_wake_is_accepted_through_client_and_coordinator() -> R
             trigger: RefreshRequestTrigger::Search,
             allow_daemon_autostart: false,
         },
+        false,
         None,
     )?;
 
@@ -331,6 +332,7 @@ fn background_lost_ack_terminal_replay_is_not_reported_as_pending() -> Result<()
             trigger: RefreshRequestTrigger::Search,
             allow_daemon_autostart: false,
         },
+        false,
         None,
     ) {
         Ok(_) => panic!("terminal failed replay must remain a failure"),
@@ -497,6 +499,7 @@ fn autostarted_wait_acknowledgement_then_restart_unknown_is_not_replayed() -> Re
             trigger: RefreshRequestTrigger::Search,
             allow_daemon_autostart: true,
         },
+        false,
         None,
     ) {
         Ok(_) => {

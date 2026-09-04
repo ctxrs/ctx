@@ -186,6 +186,7 @@ fn missing_endpoint_before_any_roundtrip_remains_genuinely_unavailable() {
     let Err(error) = daemon_unavailable_fallback(
         Path::new("unused-for-wait-mode"),
         SourceBackedRefreshMode::Wait,
+        false,
         None,
     ) else {
         panic!("wait mode must reject a genuinely missing daemon endpoint");

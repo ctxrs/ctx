@@ -197,6 +197,90 @@ fn fixture_core_event(event: &EventRecord, body: impl Into<String>) -> CoreEvent
     }
 }
 
+fn stable_id_with_compact_prefix(
+    identity: StableEntityId,
+    prefix: [u8; 4],
+    discriminator: u8,
+) -> StableEntityId {
+    const DIGEST_OFFSET: usize = 3;
+    const UUID_OFFSET: usize = StableEntityId::CANONICAL_LEN - 16;
+
+    let mut encoded = identity.encode_canonical().unwrap();
+    encoded[DIGEST_OFFSET..DIGEST_OFFSET + prefix.len()].copy_from_slice(&prefix);
+    encoded[DIGEST_OFFSET + prefix.len()] = discriminator;
+    let mut uuid = [0_u8; 16];
+    uuid.copy_from_slice(&encoded[DIGEST_OFFSET..DIGEST_OFFSET + 16]);
+    uuid[6] = 0x80 | (uuid[6] & 0x0f);
+    uuid[8] = 0x80 | (uuid[8] & 0x3f);
+    encoded[UUID_OFFSET..].copy_from_slice(&uuid);
+    StableEntityId::decode_canonical(&encoded).unwrap()
+}
+
+fn force_compact_identity_prefix(event: &mut CoreEventRecord, prefix: [u8; 4], discriminator: u8) {
+    let event_id = stable_id_with_compact_prefix(event.event.event_id, prefix, discriminator);
+    let session_id = stable_id_with_compact_prefix(
+        event.event.session_id,
+        prefix,
+        discriminator.wrapping_add(1),
+    );
+    event.event.event_id = event_id;
+    event.event.session_id = session_id;
+    event.core_record.event_id = event_id;
+    event.core_record.session_id = session_id;
+    event.core_record.validate_contract().unwrap();
+}
+
+fn compact_collision_pair(data_root: &Path, body: &str) -> (CoreEventRecord, CoreEventRecord) {
+    const PREFIX: [u8; 4] = [0xca, 0xfe, 0xba, 0xbe];
+
+    let mut retained = fixture_core_event(
+        &fixture_event(CaptureProvider::Codex, "codex_session_jsonl", 89, 1),
+        "retained compact-prefix collider",
+    );
+    force_compact_identity_prefix(&mut retained, PREFIX, 0x10);
+    append_fixture_session(data_root, std::slice::from_ref(&retained), 89);
+
+    let mut active = fixture_core_event(
+        &fixture_event(CaptureProvider::Codex, "codex_session_jsonl", 89, 2),
+        body,
+    );
+    force_compact_identity_prefix(&mut active, PREFIX, 0x20);
+    append_fixture_session(data_root, std::slice::from_ref(&active), 90);
+
+    assert_eq!(
+        &retained.event.event_id.as_uuid().simple().to_string()[..8],
+        &active.event.event_id.as_uuid().simple().to_string()[..8]
+    );
+    assert_eq!(
+        &retained.event.session_id.as_uuid().simple().to_string()[..8],
+        &active.event.session_id.as_uuid().simple().to_string()[..8]
+    );
+    assert_ne!(retained.event.event_id, active.event.event_id);
+    assert_ne!(retained.event.session_id, active.event.session_id);
+    let mut current = VerifiedIndex::open_pinned_with_retained_peer(index_root(data_root)).unwrap();
+    let previous = current
+        .take_retained_generation_peer_for_reader()
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        current.event_ids_by_id_prefix("cafebabe").unwrap(),
+        vec![active.event.event_id.as_uuid()]
+    );
+    assert_eq!(
+        previous.event_ids_by_id_prefix("cafebabe").unwrap(),
+        vec![retained.event.event_id.as_uuid()]
+    );
+    assert_eq!(
+        current.session_ids_by_id_prefix("cafebabe").unwrap(),
+        vec![active.event.session_id.as_uuid()]
+    );
+    assert_eq!(
+        previous.session_ids_by_id_prefix("cafebabe").unwrap(),
+        vec![retained.event.session_id.as_uuid()]
+    );
+    (retained, active)
+}
+
 fn mcp_fixture_show_event(root: &Path, event: &CoreEventRecord) -> Value {
     mcp_show_event(
         root,

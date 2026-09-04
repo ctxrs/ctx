@@ -207,7 +207,17 @@ pub fn coordinate_source_backed_refresh(
     data_root: &Path,
     mode: SourceBackedRefreshMode,
 ) -> Result<SourceBackedRefreshObservation> {
-    coordinate_source_backed_refresh_inner(availability, data_root, mode, None)
+    coordinate_source_backed_refresh_inner(availability, data_root, mode, false, None)
+}
+
+/// Coordinates source-backed refresh and atomically pins the returned
+/// generation together with its retained pointer peer when one is available.
+pub fn coordinate_source_backed_refresh_with_retained_peer(
+    availability: &dyn crate::DaemonAvailabilityPort,
+    data_root: &Path,
+    mode: SourceBackedRefreshMode,
+) -> Result<SourceBackedRefreshObservation> {
+    coordinate_source_backed_refresh_inner(availability, data_root, mode, true, None)
 }
 
 pub fn coordinate_source_backed_refresh_with_progress(
@@ -216,7 +226,13 @@ pub fn coordinate_source_backed_refresh_with_progress(
     mode: SourceBackedRefreshMode,
     report_progress: &mut dyn FnMut(&RefreshStatus) -> Result<()>,
 ) -> Result<SourceBackedRefreshObservation> {
-    coordinate_source_backed_refresh_inner(availability, data_root, mode, Some(report_progress))
+    coordinate_source_backed_refresh_inner(
+        availability,
+        data_root,
+        mode,
+        false,
+        Some(report_progress),
+    )
 }
 
 pub fn coordinate_setup_source_backed_refresh_with_progress(
@@ -230,6 +246,7 @@ pub fn coordinate_setup_source_backed_refresh_with_progress(
         data_root,
         mode,
         RefreshRequestTrigger::Setup,
+        false,
         Some(report_progress),
     )
 }
@@ -238,6 +255,7 @@ fn coordinate_source_backed_refresh_inner(
     availability: &dyn crate::DaemonAvailabilityPort,
     data_root: &Path,
     mode: SourceBackedRefreshMode,
+    retain_peer: bool,
     report_progress: Option<SourceBackedRefreshProgressReporter<'_>>,
 ) -> Result<SourceBackedRefreshObservation> {
     coordinate_source_backed_refresh_inner_with_trigger(
@@ -245,6 +263,7 @@ fn coordinate_source_backed_refresh_inner(
         data_root,
         mode,
         RefreshRequestTrigger::Search,
+        retain_peer,
         report_progress,
     )
 }
@@ -254,6 +273,7 @@ fn coordinate_source_backed_refresh_inner_with_trigger(
     data_root: &Path,
     mode: SourceBackedRefreshMode,
     trigger: RefreshRequestTrigger,
+    retain_peer: bool,
     report_progress: Option<SourceBackedRefreshProgressReporter<'_>>,
 ) -> Result<SourceBackedRefreshObservation> {
     coordinate_source_backed_refresh_with_policy(
@@ -261,6 +281,7 @@ fn coordinate_source_backed_refresh_inner_with_trigger(
         data_root,
         mode,
         SourceBackedRefreshRequestPolicy::refresh(trigger),
+        retain_peer,
         report_progress,
     )
 }
@@ -296,6 +317,7 @@ fn coordinate_import_source_backed_refresh_inner(
         data_root,
         mode,
         SourceBackedRefreshRequestPolicy::import(selection, allow_daemon_autostart),
+        false,
         report_progress,
     )
 }
@@ -305,6 +327,7 @@ fn coordinate_source_backed_refresh_with_policy(
     data_root: &Path,
     mode: SourceBackedRefreshMode,
     policy: SourceBackedRefreshRequestPolicy,
+    retain_peer: bool,
     report_progress: Option<SourceBackedRefreshProgressReporter<'_>>,
 ) -> Result<SourceBackedRefreshObservation> {
     let SourceBackedRefreshRequestPolicy {
@@ -317,7 +340,11 @@ fn coordinate_source_backed_refresh_with_policy(
         if intent.operation() == ctx_history_refresh::RefreshOperation::Import {
             bail!("explicit source catalog imports require daemon refresh mode `wait`");
         }
-        let pin = pin_active_verified_generation(data_root)?;
+        let pin = if retain_peer {
+            pin_active_verified_generation_with_retained_peer(data_root)?
+        } else {
+            pin_active_verified_generation(data_root)?
+        };
         return Ok(SourceBackedRefreshObservation {
             mode,
             status: "off".to_owned(),
@@ -350,7 +377,7 @@ fn coordinate_source_backed_refresh_with_policy(
             .context("start or recover daemon before source-backed refresh")?
             == crate::DaemonAvailability::Disabled
     {
-        return daemon_unavailable_fallback(data_root, mode, None);
+        return daemon_unavailable_fallback(data_root, mode, retain_peer, None);
     }
     // Availability may synchronously launch and retain a finite worker. Catch
     // an interrupt from that work before admission can reach IPC.
@@ -387,7 +414,7 @@ fn coordinate_source_backed_refresh_with_policy(
             {
                 None
             }
-            Ok(None) => return daemon_unavailable_fallback(data_root, mode, None),
+            Ok(None) => return daemon_unavailable_fallback(data_root, mode, retain_peer, None),
             Err(error)
                 if error
                     .downcast_ref::<DaemonSourceRefreshServiceUnavailable>()
@@ -403,7 +430,7 @@ fn coordinate_source_backed_refresh_with_policy(
                     .downcast_ref::<DaemonSourceRefreshServiceUnavailable>()
                     .is_some() =>
             {
-                return daemon_unavailable_fallback(data_root, mode, Some(error));
+                return daemon_unavailable_fallback(data_root, mode, retain_peer, Some(error));
             }
             Err(error) => return Err(error),
         };
@@ -418,7 +445,7 @@ fn coordinate_source_backed_refresh_with_policy(
             .context("recover daemon after source refresh endpoint retirement")?
             == crate::DaemonAvailability::Disabled
         {
-            return daemon_unavailable_fallback(data_root, mode, retirement_error);
+            return daemon_unavailable_fallback(data_root, mode, retain_peer, retirement_error);
         }
         availability.checkpoint()?;
     };
@@ -447,6 +474,7 @@ fn coordinate_source_backed_refresh_with_policy(
                     request_id,
                     mode,
                     intent.explicit_source_authority(),
+                    retain_peer,
                 );
             }
             RefreshRequestState::Failed => {
@@ -457,7 +485,12 @@ fn coordinate_source_backed_refresh_with_policy(
             | RefreshRequestState::Running => {}
         }
         let source_count = response_source_count(&response);
-        let Some(pin) = pin_published_generation(data_root)? else {
+        let pin = if retain_peer {
+            pin_published_generation_with_retained_peer(data_root)?
+        } else {
+            pin_published_generation(data_root)?
+        };
+        let Some(pin) = pin else {
             return Err(SourceBackedRefreshPendingPublication::new(
                 request_id,
                 request_state.as_str().to_owned(),
@@ -488,6 +521,7 @@ fn coordinate_source_backed_refresh_with_policy(
             intent,
             trigger,
             allow_daemon_autostart,
+            retain_peer,
             report_progress,
         },
     )
@@ -524,6 +558,7 @@ pub(super) fn wait_for_published_generation(
                 ctx_history_refresh::RefreshOperation::Import => RefreshRequestTrigger::Import,
             },
             allow_daemon_autostart,
+            retain_peer: false,
             report_progress: None,
         },
     )
@@ -534,6 +569,7 @@ struct PublishedGenerationWait<'progress> {
     intent: RefreshIntent,
     trigger: RefreshRequestTrigger,
     allow_daemon_autostart: bool,
+    retain_peer: bool,
     report_progress: Option<SourceBackedRefreshProgressReporter<'progress>>,
 }
 
@@ -548,6 +584,7 @@ fn wait_for_published_generation_inner(
         intent,
         trigger,
         allow_daemon_autostart,
+        retain_peer,
         mut report_progress,
     } = wait;
     let mut last_reported_status = None;
@@ -655,6 +692,7 @@ fn wait_for_published_generation_inner(
                     request_id,
                     mode,
                     intent.explicit_source_authority(),
+                    retain_peer,
                 );
             }
             RefreshRequestState::Failed => {
@@ -675,12 +713,18 @@ fn published_refresh_observation(
     request_id: String,
     mode: SourceBackedRefreshMode,
     expected_catalog: Option<&ExplicitSourceCatalogAuthority>,
+    retain_peer: bool,
 ) -> Result<SourceBackedRefreshObservation> {
     let expected = response
         .get("published_generation")
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("published daemon source refresh has no generation ID"))?;
-    let pin = pin_retained_generation(data_root, expected).with_context(|| {
+    let pin = if retain_peer {
+        pin_retained_generation_with_retained_peer(data_root, expected)
+    } else {
+        pin_retained_generation(data_root, expected)
+    }
+    .with_context(|| {
         format!(
             "daemon published Core generation {expected}, but its retained terminal generation cannot be opened"
         )

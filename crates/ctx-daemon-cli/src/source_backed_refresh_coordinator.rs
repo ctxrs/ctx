@@ -6,10 +6,10 @@ use ctx_history_refresh::RefreshSelection;
 use super::daemon_service_ports::AVAILABILITY;
 
 pub use ctx_daemon_service::{
-    pin_active_verified_generation, published_explicit_source_relocation_authority,
-    PinnedSourceBackedGeneration, RefreshStatus, SourceBackedRefreshDaemonUnavailable,
-    SourceBackedRefreshMode, SourceBackedRefreshObservation, SourceBackedRefreshPendingPublication,
-    SourceBackedRefreshTerminalError,
+    pin_active_verified_generation, pin_active_verified_generation_with_retained_peer,
+    published_explicit_source_relocation_authority, PinnedSourceBackedGeneration, RefreshStatus,
+    SourceBackedRefreshDaemonUnavailable, SourceBackedRefreshMode, SourceBackedRefreshObservation,
+    SourceBackedRefreshPendingPublication, SourceBackedRefreshTerminalError,
 };
 pub use ctx_history_refresh::open_verified_index;
 
@@ -18,6 +18,17 @@ pub fn coordinate_source_backed_refresh(
     mode: SourceBackedRefreshMode,
 ) -> Result<SourceBackedRefreshObservation> {
     ctx_daemon_service::coordinate_source_backed_refresh(&AVAILABILITY, data_root, mode)
+}
+
+pub fn coordinate_source_backed_refresh_with_retained_peer(
+    data_root: &Path,
+    mode: SourceBackedRefreshMode,
+) -> Result<SourceBackedRefreshObservation> {
+    ctx_daemon_service::coordinate_source_backed_refresh_with_retained_peer(
+        &AVAILABILITY,
+        data_root,
+        mode,
+    )
 }
 
 pub fn coordinate_source_backed_refresh_with_progress(

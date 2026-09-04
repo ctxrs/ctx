@@ -11,13 +11,24 @@ thread_local! {
 }
 
 pub fn open_verified_index(index_root: &Path) -> std::result::Result<VerifiedIndex, IndexError> {
+    open_verified_index_with_peer(index_root, false)
+}
+
+fn open_verified_index_with_peer(
+    index_root: &Path,
+    retain_peer: bool,
+) -> std::result::Result<VerifiedIndex, IndexError> {
     #[cfg(any(test, feature = "test-support"))]
     VERIFIED_INDEX_OPEN_COUNT.with(|count| {
         if let Some(current) = count.get() {
             count.set(Some(current.saturating_add(1)));
         }
     });
-    VerifiedIndex::open_pinned(index_root)
+    if retain_peer {
+        VerifiedIndex::open_pinned_with_retained_peer(index_root)
+    } else {
+        VerifiedIndex::open_pinned(index_root)
+    }
 }
 
 /// The refresh authority has no active verified Core generation to pin.
@@ -40,6 +51,7 @@ impl std::error::Error for MissingActiveGeneration {}
 fn open_retained_verified_index(
     index_root: &Path,
     generation_id: &str,
+    retain_peer: bool,
 ) -> std::result::Result<VerifiedIndex, IndexError> {
     #[cfg(any(test, feature = "test-support"))]
     VERIFIED_INDEX_OPEN_COUNT.with(|count| {
@@ -47,7 +59,11 @@ fn open_retained_verified_index(
             count.set(Some(current.saturating_add(1)));
         }
     });
-    VerifiedIndex::open_pinned_generation(index_root, generation_id)
+    if retain_peer {
+        VerifiedIndex::open_pinned_generation_with_retained_peer(index_root, generation_id)
+    } else {
+        VerifiedIndex::open_pinned_generation(index_root, generation_id)
+    }
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -335,8 +351,22 @@ pub fn published_explicit_source_relocation_authority(
 }
 
 pub fn pin_published_generation(data_root: &Path) -> Result<Option<PinnedSourceBackedGeneration>> {
+    pin_published_generation_with_peer(data_root, false)
+}
+
+/// Pins the published target and its optional pointer peer in one verified open.
+pub fn pin_published_generation_with_retained_peer(
+    data_root: &Path,
+) -> Result<Option<PinnedSourceBackedGeneration>> {
+    pin_published_generation_with_peer(data_root, true)
+}
+
+fn pin_published_generation_with_peer(
+    data_root: &Path,
+    retain_peer: bool,
+) -> Result<Option<PinnedSourceBackedGeneration>> {
     let index_root = source_backed_index_root(data_root);
-    match open_verified_index(&index_root) {
+    match open_verified_index_with_peer(&index_root, retain_peer) {
         Ok(index) => Ok(Some(PinnedSourceBackedGeneration { index })),
         Err(IndexError::MissingActiveGenerationPointer) => Ok(None),
         Err(error) => Err(error).context("open active verified Core generation"),
@@ -347,19 +377,50 @@ pub fn pin_retained_generation(
     data_root: &Path,
     generation_id: &str,
 ) -> Result<PinnedSourceBackedGeneration> {
+    pin_retained_generation_with_peer(data_root, generation_id, false)
+}
+
+/// Pins the exact retained target and its optional pointer peer in one verified open.
+pub fn pin_retained_generation_with_retained_peer(
+    data_root: &Path,
+    generation_id: &str,
+) -> Result<PinnedSourceBackedGeneration> {
+    pin_retained_generation_with_peer(data_root, generation_id, true)
+}
+
+fn pin_retained_generation_with_peer(
+    data_root: &Path,
+    generation_id: &str,
+    retain_peer: bool,
+) -> Result<PinnedSourceBackedGeneration> {
     let index_root = source_backed_index_root(data_root);
-    let index = open_retained_verified_index(&index_root, generation_id).with_context(|| {
-        format!(
-            "open retained Core generation {generation_id} from {}",
-            index_root.display()
-        )
-    })?;
+    let index = open_retained_verified_index(&index_root, generation_id, retain_peer)
+        .with_context(|| {
+            format!(
+                "open retained Core generation {generation_id} from {}",
+                index_root.display()
+            )
+        })?;
     Ok(PinnedSourceBackedGeneration { index })
 }
 
 pub fn pin_active_verified_generation(data_root: &Path) -> Result<PinnedSourceBackedGeneration> {
+    pin_active_verified_generation_with_peer(data_root, false)
+}
+
+/// Pins the active target and its optional pointer peer in one verified open.
+pub fn pin_active_verified_generation_with_retained_peer(
+    data_root: &Path,
+) -> Result<PinnedSourceBackedGeneration> {
+    pin_active_verified_generation_with_peer(data_root, true)
+}
+
+fn pin_active_verified_generation_with_peer(
+    data_root: &Path,
+    retain_peer: bool,
+) -> Result<PinnedSourceBackedGeneration> {
     let index_root = source_backed_index_root(data_root);
-    let index = match open_verified_index(&index_root) {
+    let index = match open_verified_index_with_peer(&index_root, retain_peer) {
         Ok(index) => index,
         Err(IndexError::MissingActiveGenerationPointer) => {
             return Err(anyhow::Error::new(MissingActiveGeneration));

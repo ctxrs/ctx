@@ -426,6 +426,67 @@ fn terminal_generation_can_be_pinned_after_one_successor_advances_active() {
 }
 
 #[test]
+fn publication_readers_acquire_retained_peers_only_on_explicit_request() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    let index_root = source_backed_index_root(&data_root);
+    let first = publish_pin_source(&index_root, publication_pin_source());
+    let second = publish_pin_source(&index_root, publication_pin_source_with_anchor(0x93));
+    let mut ordinary = crate::pin_active_verified_generation(&data_root)
+        .unwrap()
+        .into_index();
+    assert!(ordinary
+        .take_retained_generation_peer_for_reader()
+        .unwrap()
+        .is_none());
+    let mut ordinary = crate::pin_published_generation(&data_root)
+        .unwrap()
+        .unwrap()
+        .into_index();
+    assert!(ordinary
+        .take_retained_generation_peer_for_reader()
+        .unwrap()
+        .is_none());
+    let mut ordinary = crate::pin_retained_generation(&data_root, &first)
+        .unwrap()
+        .into_index();
+    assert!(ordinary
+        .take_retained_generation_peer_for_reader()
+        .unwrap()
+        .is_none());
+
+    let (paired, opens) = crate::count_verified_index_opens(|| {
+        [
+            crate::pin_active_verified_generation_with_retained_peer(&data_root).unwrap(),
+            crate::pin_published_generation_with_retained_peer(&data_root)
+                .unwrap()
+                .unwrap(),
+            crate::pin_retained_generation_with_retained_peer(&data_root, &first).unwrap(),
+        ]
+    });
+    assert_eq!(
+        opens, 3,
+        "pair acquisition must not repin after an ordinary open"
+    );
+    for (pin, (expected_target, expected_peer)) in
+        paired
+            .into_iter()
+            .zip([(&second, &first), (&second, &first), (&first, &second)])
+    {
+        let mut index = pin.into_index();
+        assert_eq!(index.generation_id(), expected_target);
+        assert_eq!(
+            index
+                .take_retained_generation_peer_for_reader()
+                .unwrap()
+                .unwrap()
+                .generation_id(),
+            expected_peer
+        );
+    }
+}
+
+#[test]
 fn cold_dirty_routes_are_published_in_one_all_route_generation() {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("data");

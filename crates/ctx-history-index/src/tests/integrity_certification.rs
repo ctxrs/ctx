@@ -621,7 +621,7 @@ fn managed_three_generation_reclamation_preserves_retained_certifications() {
         "the third publication must reclaim its unretained first generation"
     );
     crate::publication::reset_verification_activity();
-    let mut active = VerifiedIndex::open_pinned(temp.path()).unwrap();
+    let mut active = VerifiedIndex::open_pinned_with_retained_peer(temp.path()).unwrap();
     let previous = active
         .take_retained_generation_peer_for_reader()
         .unwrap()

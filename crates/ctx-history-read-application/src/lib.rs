@@ -28,9 +28,10 @@ mod show_read_model;
 mod application_tests;
 
 pub use application::{
-    execute_search_observed, plan_search, ObservedSearchApplicationError, PinnedHistoryQuery,
-    PlannedSearch, SearchApplicationError, SearchApplicationReadModelInput,
-    SearchApplicationRequest, SearchApplicationResult, SearchQueryResult,
+    execute_search_observed, plan_search, retained_peer_read_for_search,
+    ObservedSearchApplicationError, PinnedHistoryQuery, PlannedSearch, SearchApplicationError,
+    SearchApplicationReadModelInput, SearchApplicationRequest, SearchApplicationResult,
+    SearchQueryResult,
 };
 pub use compact_presentation::{
     normalize_uuid_prefix, reference_needs_retained_peer, CompactPresentationProjection,

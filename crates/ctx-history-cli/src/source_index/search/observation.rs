@@ -2,7 +2,7 @@ use std::{path::Path, time::Instant};
 
 use ctx_history_index::VerifiedIndex;
 use ctx_history_read_application::{
-    SearchCollection, SearchFailurePhase as ApplicationFailurePhase,
+    RetainedPeerRead, SearchCollection, SearchFailurePhase as ApplicationFailurePhase,
 };
 use serde_json::Value;
 
@@ -33,11 +33,12 @@ pub(super) fn observed_refresh_for_search(
     request: &SourceSearchRequest,
     mode: RefreshArg,
     data_root: &Path,
+    retained_peer: RetainedPeerRead,
     observation: &mut SearchExecutionObservation,
 ) -> SourceSearchResult<RefreshOutcome> {
     observation.failure_phase = Some(SearchFailurePhase::Refresh);
     let started = Instant::now();
-    let result = refresh_for_search(request, mode, data_root);
+    let result = refresh_for_search(request, mode, data_root, retained_peer);
     observation.refresh_duration = Some(started.elapsed());
     match result {
         Ok(refresh) => {
