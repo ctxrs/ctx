@@ -6,8 +6,8 @@ use std::{
 use crate::{
     analytics::{
         count_bucket, DaemonBackoffV1, DaemonCycleFactsV1, DaemonCycleResultV1, DaemonCycleStateV1,
-        DaemonRunFactsV1, DaemonRuntimeObservationV1, DaemonRuntimeSnapshotV1, Outcome,
-        PublicEventV1, RuntimeObservationV1,
+        DaemonRunFactsV1, DaemonRuntimeObservationV1, DaemonRuntimeSnapshotV1,
+        DaemonStorageFactsV1, Outcome, PublicEventV1, RuntimeObservationV1,
     },
     DaemonObservationPort,
 };
@@ -49,10 +49,15 @@ impl DaemonTelemetry {
         }
     }
 
-    pub(super) fn ready_events(&self, recovered: bool, now: Instant) -> Vec<PublicEventV1> {
+    pub(super) fn ready_events(
+        &self,
+        recovered: bool,
+        now: Instant,
+        storage: Option<DaemonStorageFactsV1>,
+    ) -> Vec<PublicEventV1> {
         let elapsed = now.saturating_duration_since(self.started);
         let mut events = vec![runtime_event(
-            DaemonRuntimeObservationV1::ready(self.run),
+            DaemonRuntimeObservationV1::ready_with_storage(self.run, storage),
             Outcome::Success,
             elapsed,
         )];
@@ -125,14 +130,22 @@ impl DaemonTelemetry {
         events
     }
 
-    pub(super) fn liveness_events(&mut self, now: Instant) -> Vec<PublicEventV1> {
+    pub(super) fn liveness_due(&self, now: Instant) -> bool {
+        now >= self.next_liveness
+    }
+
+    pub(super) fn liveness_events(
+        &mut self,
+        now: Instant,
+        storage: Option<DaemonStorageFactsV1>,
+    ) -> Vec<PublicEventV1> {
         if now < self.next_liveness {
             return Vec::new();
         }
         let mut events = Vec::new();
         self.flush_pending_idle(&mut events);
         events.push(runtime_event(
-            DaemonRuntimeObservationV1::liveness(self.snapshot()),
+            DaemonRuntimeObservationV1::liveness_with_storage(self.snapshot(), storage),
             Outcome::Success,
             now.saturating_duration_since(self.started),
         ));
@@ -339,11 +352,42 @@ mod tests {
         let observation = RecordingObservation::default();
         let started = Instant::now();
         let telemetry = DaemonTelemetry::new(test_run(), started, 0);
-        let events = telemetry.ready_events(false, started);
+        let events = telemetry.ready_events(false, started, None);
 
         deliver_active(&observation, Path::new("test-root"), false, &events);
 
         assert_eq!(observation.deliveries(), [(1, false)]);
+    }
+
+    #[test]
+    fn ready_and_liveness_include_storage_without_copying_it_to_recovery() {
+        let started = Instant::now();
+        let mut telemetry = DaemonTelemetry::new(test_run(), started, 0);
+        let storage =
+            analytics::DaemonStorageFactsV1::from_exact(Some((1024, 512)), Some((256, 128)));
+        let events = telemetry.ready_events(true, started, storage);
+        assert_eq!(events.len(), 2);
+        let PublicEventV1::RuntimeObservation(ready) = &events[0] else {
+            panic!("ready event has wrong family");
+        };
+        let mut ready_properties = serde_json::Map::new();
+        ready.kind.insert_properties(&mut ready_properties);
+        assert!(ready_properties.contains_key("filesystem_total_bytes_bucket"));
+        let PublicEventV1::RuntimeObservation(recovered) = &events[1] else {
+            panic!("recovered event has wrong family");
+        };
+        let mut recovered_properties = serde_json::Map::new();
+        recovered.kind.insert_properties(&mut recovered_properties);
+        assert!(!recovered_properties.contains_key("filesystem_total_bytes_bucket"));
+
+        let due = started + DAEMON_LIVENESS_MIN_INTERVAL;
+        let liveness = telemetry.liveness_events(due, storage);
+        let PublicEventV1::RuntimeObservation(liveness) = &liveness[0] else {
+            panic!("liveness event has wrong family");
+        };
+        let mut liveness_properties = serde_json::Map::new();
+        liveness.kind.insert_properties(&mut liveness_properties);
+        assert!(liveness_properties.contains_key("core_active_logical_bytes_bucket"));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use serde_json::{Map, Value};
 
-use super::CountBucket;
+use super::{CountBucket, DaemonStorageFactsV1};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DaemonStartModeV1 {
@@ -266,12 +266,12 @@ impl DaemonRuntimeKindV1 {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DaemonRuntimePayloadV1 {
-    Ready(DaemonRunFactsV1),
+    Ready(DaemonRunFactsV1, Option<DaemonStorageFactsV1>),
     Stopped(DaemonRuntimeSnapshotV1),
     Recovered(DaemonRuntimeSnapshotV1),
     Failed(DaemonRuntimeSnapshotV1),
     Cycle(DaemonCycleFactsV1),
-    Liveness(DaemonRuntimeSnapshotV1),
+    Liveness(DaemonRuntimeSnapshotV1, Option<DaemonStorageFactsV1>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -279,7 +279,14 @@ pub struct DaemonRuntimeObservationV1(DaemonRuntimePayloadV1);
 
 impl DaemonRuntimeObservationV1 {
     pub fn ready(run: DaemonRunFactsV1) -> Self {
-        Self(DaemonRuntimePayloadV1::Ready(run))
+        Self(DaemonRuntimePayloadV1::Ready(run, None))
+    }
+
+    pub fn ready_with_storage(
+        run: DaemonRunFactsV1,
+        storage: Option<DaemonStorageFactsV1>,
+    ) -> Self {
+        Self(DaemonRuntimePayloadV1::Ready(run, storage))
     }
 
     pub fn stopped(snapshot: DaemonRuntimeSnapshotV1) -> Self {
@@ -299,28 +306,45 @@ impl DaemonRuntimeObservationV1 {
     }
 
     pub fn liveness(snapshot: DaemonRuntimeSnapshotV1) -> Self {
-        Self(DaemonRuntimePayloadV1::Liveness(snapshot))
+        Self(DaemonRuntimePayloadV1::Liveness(snapshot, None))
+    }
+
+    pub fn liveness_with_storage(
+        snapshot: DaemonRuntimeSnapshotV1,
+        storage: Option<DaemonStorageFactsV1>,
+    ) -> Self {
+        Self(DaemonRuntimePayloadV1::Liveness(snapshot, storage))
     }
 
     pub fn name(self) -> &'static str {
         match self.0 {
-            DaemonRuntimePayloadV1::Ready(_) => DaemonRuntimeKindV1::Ready.as_str(),
+            DaemonRuntimePayloadV1::Ready(_, _) => DaemonRuntimeKindV1::Ready.as_str(),
             DaemonRuntimePayloadV1::Stopped(_) => DaemonRuntimeKindV1::Stopped.as_str(),
             DaemonRuntimePayloadV1::Recovered(_) => DaemonRuntimeKindV1::Recovered.as_str(),
             DaemonRuntimePayloadV1::Failed(_) => DaemonRuntimeKindV1::Failed.as_str(),
             DaemonRuntimePayloadV1::Cycle(_) => DaemonRuntimeKindV1::Cycle.as_str(),
-            DaemonRuntimePayloadV1::Liveness(_) => DaemonRuntimeKindV1::Liveness.as_str(),
+            DaemonRuntimePayloadV1::Liveness(_, _) => DaemonRuntimeKindV1::Liveness.as_str(),
         }
     }
 
     pub fn insert_properties(self, properties: &mut Map<String, Value>) {
         match self.0 {
-            DaemonRuntimePayloadV1::Ready(run) => insert_run_properties(properties, run),
+            DaemonRuntimePayloadV1::Ready(run, storage) => {
+                insert_run_properties(properties, run);
+                if let Some(storage) = storage {
+                    storage.insert_properties(properties);
+                }
+            }
             DaemonRuntimePayloadV1::Stopped(snapshot)
             | DaemonRuntimePayloadV1::Recovered(snapshot)
-            | DaemonRuntimePayloadV1::Failed(snapshot)
-            | DaemonRuntimePayloadV1::Liveness(snapshot) => {
+            | DaemonRuntimePayloadV1::Failed(snapshot) => {
                 insert_snapshot_properties(properties, snapshot)
+            }
+            DaemonRuntimePayloadV1::Liveness(snapshot, storage) => {
+                insert_snapshot_properties(properties, snapshot);
+                if let Some(storage) = storage {
+                    storage.insert_properties(properties);
+                }
             }
             DaemonRuntimePayloadV1::Cycle(cycle) => {
                 insert_run_properties(properties, cycle.run);

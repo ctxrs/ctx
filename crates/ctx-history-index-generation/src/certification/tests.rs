@@ -106,6 +106,38 @@ fn candidate_certification_rejects_a_slot_with_a_different_physical_digest() {
 }
 
 #[cfg(unix)]
+#[test]
+fn active_storage_metadata_sums_only_certified_artifacts_without_hashing() {
+    let fixture = read_only_certification_fixture();
+    let certification = read_certification(&certification_path(fixture.root(), &fixture.slot))
+        .and_then(|bytes| serde_json::from_slice::<GenerationIntegrityCertification>(&bytes).ok())
+        .unwrap();
+    let expected = certification
+        .artifacts
+        .iter()
+        .map(|artifact| artifact.artifact.identity.length())
+        .sum::<u64>();
+
+    crate::reset_physical_verification_activity();
+    let actual = active_generation_storage_metadata(fixture.root())
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(actual.generation_id(), fixture.slot.generation_id());
+    assert_eq!(actual.logical_bytes(), expected);
+    assert_eq!(crate::checksum_walks(), 0);
+    assert_eq!(crate::hashed_artifact_bytes(), 0);
+}
+
+#[test]
+fn active_storage_metadata_is_absent_without_a_generation() {
+    let root = tempfile::tempdir().unwrap();
+    assert!(active_generation_storage_metadata(root.path())
+        .unwrap()
+        .is_none());
+}
+
+#[cfg(unix)]
 fn mutate_same_length_and_restore_metadata(path: &Path) -> (Metadata, Metadata) {
     use std::{io::Write as _, os::unix::fs::PermissionsExt as _};
 

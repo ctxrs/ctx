@@ -47,6 +47,7 @@ mod automatic_upgrade;
 mod config_reload;
 mod lifecycle;
 mod source_watch;
+mod storage_telemetry;
 mod telemetry;
 mod watch_runtime;
 
@@ -512,7 +513,11 @@ where
                 .unwrap_or(None);
         }
         if lifecycle_ready {
-            let events = telemetry.ready_events(recovered_previous_run, Instant::now());
+            let storage = storage_telemetry::collect(
+                data_root,
+                runtime.source_refresh_coordinator.as_deref(),
+            );
+            let events = telemetry.ready_events(recovered_previous_run, Instant::now(), storage);
             let uploader_enabled = !finite_worker && runtime.config.daemon.enabled;
             telemetry::deliver_active(observation, data_root, uploader_enabled, &events);
         }
@@ -637,7 +642,17 @@ where
             {
                 break;
             }
-            let events = telemetry.liveness_events(Instant::now());
+            let liveness_now = Instant::now();
+            let storage = telemetry
+                .liveness_due(liveness_now)
+                .then(|| {
+                    storage_telemetry::collect(
+                        data_root,
+                        runtime.source_refresh_coordinator.as_deref(),
+                    )
+                })
+                .flatten();
+            let events = telemetry.liveness_events(liveness_now, storage);
             let uploader_enabled = !finite_worker && runtime.config.daemon.enabled;
             telemetry::deliver_active(observation, data_root, uploader_enabled, &events);
             let cycle_started = Instant::now();
@@ -955,22 +970,6 @@ where
         )?;
     }
     Ok(())
-}
-
-fn publish_lifecycle_ready<I: DaemonInstallationPort>(
-    data_root: &Path,
-    lifecycle: &DaemonLifecycleState,
-    installation: &I,
-    acknowledge_restart_requests: bool,
-) -> Result<bool> {
-    let _transition = ctx_daemon_runtime::DaemonLifecycleTransitionLock::acquire(data_root)?;
-    if installation.upgrade_handoff_blocks_current_process(data_root) || !lifecycle.mark_ready() {
-        return Ok(false);
-    }
-    if acknowledge_restart_requests {
-        installation.acknowledge_restart_requests(data_root);
-    }
-    Ok(true)
 }
 
 fn recover_source_refresh_before_ipc(
