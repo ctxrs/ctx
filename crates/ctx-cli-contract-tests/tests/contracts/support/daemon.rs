@@ -392,10 +392,16 @@ fn queued_payloads(analytics_root: &Path) -> Result<Vec<ObservedAnalyticsPayload
     unix,
     any(all(test, not(ctx_cli_bazel_test)), ctx_cli_test_support_upgrade)
 ))]
+type TerminalEventRecord = (String, Option<Vec<u8>>, Value);
+
+#[cfg(all(
+    unix,
+    any(all(test, not(ctx_cli_bazel_test)), ctx_cli_test_support_upgrade)
+))]
 fn matching_terminal_events(
     payloads: Vec<ObservedAnalyticsPayload>,
     attempt_id: &str,
-) -> Result<Vec<(String, Option<Vec<u8>>, Value)>, String> {
+) -> Result<Vec<TerminalEventRecord>, String> {
     let mut matches = Vec::new();
     for payload in payloads {
         let Some(events) = payload.value["events"].as_array() else {
