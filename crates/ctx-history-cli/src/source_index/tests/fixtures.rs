@@ -216,11 +216,7 @@ fn stable_id_with_compact_prefix(
     StableEntityId::decode_canonical(&encoded).unwrap()
 }
 
-fn force_compact_identity_prefix(
-    event: &mut CoreEventRecord,
-    prefix: [u8; 4],
-    discriminator: u8,
-) {
+fn force_compact_identity_prefix(event: &mut CoreEventRecord, prefix: [u8; 4], discriminator: u8) {
     let event_id = stable_id_with_compact_prefix(event.event.event_id, prefix, discriminator);
     let session_id = stable_id_with_compact_prefix(
         event.event.session_id,
@@ -262,11 +258,26 @@ fn compact_collision_pair(data_root: &Path, body: &str) -> (CoreEventRecord, Cor
     assert_ne!(retained.event.event_id, active.event.event_id);
     assert_ne!(retained.event.session_id, active.event.session_id);
     let mut current = VerifiedIndex::open_pinned_with_retained_peer(index_root(data_root)).unwrap();
-    let previous = current.take_retained_generation_peer_for_reader().unwrap().unwrap();
-    assert_eq!(current.event_ids_by_id_prefix("cafebabe").unwrap(), vec![active.event.event_id.as_uuid()]);
-    assert_eq!(previous.event_ids_by_id_prefix("cafebabe").unwrap(), vec![retained.event.event_id.as_uuid()]);
-    assert_eq!(current.session_ids_by_id_prefix("cafebabe").unwrap(), vec![active.event.session_id.as_uuid()]);
-    assert_eq!(previous.session_ids_by_id_prefix("cafebabe").unwrap(), vec![retained.event.session_id.as_uuid()]);
+    let previous = current
+        .take_retained_generation_peer_for_reader()
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        current.event_ids_by_id_prefix("cafebabe").unwrap(),
+        vec![active.event.event_id.as_uuid()]
+    );
+    assert_eq!(
+        previous.event_ids_by_id_prefix("cafebabe").unwrap(),
+        vec![retained.event.event_id.as_uuid()]
+    );
+    assert_eq!(
+        current.session_ids_by_id_prefix("cafebabe").unwrap(),
+        vec![active.event.session_id.as_uuid()]
+    );
+    assert_eq!(
+        previous.session_ids_by_id_prefix("cafebabe").unwrap(),
+        vec![retained.event.session_id.as_uuid()]
+    );
     (retained, active)
 }
 
