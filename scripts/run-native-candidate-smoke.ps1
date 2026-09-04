@@ -204,11 +204,20 @@ if (-not [int]::TryParse($timeoutText, [ref]$timeoutSeconds) -or
     $timeoutSeconds -lt 1 -or $timeoutSeconds -gt 900) {
     Fail "timeout must be a whole number of seconds between 1 and 900"
 }
+$deprecatedControlNames = @(
+    "ANALYTICS_OFF",
+    "DISABLE_ANALYTICS",
+    "INSTALL_DIAGNOSTICS_OFF",
+    "DAEMON_OFF",
+    "DISABLE_DAEMON",
+    "UPGRADE_OFF",
+    "DISABLE_AUTO_UPGRADE"
+) | ForEach-Object { "CTX_$_" }
 $isolation = [ordered]@{
     HOME = $profile
     USERPROFILE = $profile
     APPDATA = $configRoot
-    LOCALAPPDATA = $dataRoot
+    LOCALAPPDATA = $stateRoot
     XDG_CONFIG_HOME = $configRoot
     XDG_CACHE_HOME = $cacheRoot
     XDG_DATA_HOME = (Join-Path $root "xdg-data")
@@ -242,6 +251,9 @@ $isolation = [ordered]@{
     MIMOCODE_DISABLE_CHANNEL_DB = "1"
     FORGE_CONFIG = (Join-Path $profile "forge.json")
     VIBE_HOME = (Join-Path $profile ".vibe")
+}
+foreach ($name in $deprecatedControlNames) {
+    $isolation[$name] = $null
 }
 
 function Get-RemainingMilliseconds(
@@ -478,7 +490,7 @@ function Get-StatusAnalyticsEventId([string]$Path, [bool]$Outbox) {
 try {
     foreach ($name in $isolation.Keys) {
         $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, "Process")
-        [Environment]::SetEnvironmentVariable($name, [string]$isolation[$name], "Process")
+        [Environment]::SetEnvironmentVariable($name, $isolation[$name], "Process")
     }
     Set-Location -LiteralPath $workRoot
 

@@ -21,6 +21,15 @@ $unrelated = $null
 $unrelatedLauncher = $null
 $pipeHolderPidPath = $null
 $unrelatedPidPath = $null
+$deprecatedControlNames = @(
+    "CTX_ANALYTICS_OFF",
+    "CTX_DISABLE_ANALYTICS",
+    "CTX_INSTALL_DIAGNOSTICS_OFF",
+    "CTX_DAEMON_OFF",
+    "CTX_DISABLE_DAEMON",
+    "CTX_UPGRADE_OFF",
+    "CTX_DISABLE_AUTO_UPGRADE"
+)
 $testEnvironmentNames = @(
     "CTX_NATIVE_CANDIDATE_TEST_PIPE_HOLDER",
     "CTX_NATIVE_CANDIDATE_TEST_PIPE_HOLDER_PID",
@@ -30,7 +39,8 @@ $testEnvironmentNames = @(
     "CTX_NATIVE_CANDIDATE_TEST_ROOT_EXIT_CODE",
     "CTX_NATIVE_CANDIDATE_TEST_ANALYTICS_DAEMON_PID",
     "CTX_NATIVE_CANDIDATE_COMMAND_TIMEOUT_SECONDS",
-    "CTX_FAKE_MANAGED_PAIR_EXTRA_OUTPUT",
+    "CTX_FAKE_MANAGED_PAIR_EXTRA_OUTPUT"
+) + $deprecatedControlNames + @(
     "TEMP",
     "TMP"
 )
@@ -40,6 +50,9 @@ foreach ($name in $testEnvironmentNames) {
 }
 $env:TEMP = $root
 $env:TMP = $root
+foreach ($name in $deprecatedControlNames) {
+    [Environment]::SetEnvironmentVariable($name, "1", "Process")
+}
 
 try {
     $fake = Join-Path $root "ctx.cmd"
@@ -49,6 +62,13 @@ if "%HOME%"=="" exit /b 94
 if "%USERPROFILE%"=="" exit /b 95
 if not "%CI%"=="" exit /b 97
 if not "%CTX_DAEMON_AUTOSTART_OFF%"=="1" exit /b 93
+if defined CTX_ANALYTICS_OFF exit /b 84
+if defined CTX_DISABLE_ANALYTICS exit /b 84
+if defined CTX_INSTALL_DIAGNOSTICS_OFF exit /b 84
+if defined CTX_DAEMON_OFF exit /b 84
+if defined CTX_DISABLE_DAEMON exit /b 84
+if defined CTX_UPGRADE_OFF exit /b 84
+if defined CTX_DISABLE_AUTO_UPGRADE exit /b 84
 if /I "%1"=="status" goto status
 if /I "%1"=="daemon" goto daemon
 if not "%CTX_ANALYTICS_ENABLED%"=="false" exit /b 91
@@ -103,8 +123,9 @@ if not "%CTX_UPGRADE_AUTO%"=="" exit /b 92
 if not "%CTX_DAEMON_ENABLED%"=="" exit /b 90
 if not "%CTX_SEARCH_SEMANTIC%"=="" exit /b 89
 if /I "%~n0"=="ctx-foreground-analytics" goto foreground_delivery
-if not exist "%XDG_STATE_HOME%\ctx" mkdir "%XDG_STATE_HOME%\ctx"
-> "%XDG_STATE_HOME%\ctx\analytics-outbox-v1.json" echo {"schema_version":2,"entries":[{"schema_version":2,"entry_id":"22222222-2222-4222-8222-222222222222","endpoint_fingerprint":"fixture","queued_at_epoch_seconds":1800000000,"attempts":0,"next_attempt_at_epoch_seconds":0,"kind":"ordinary","payload":"{\"events\":[{\"event_name\":\"operation_completed\",\"event_version\":1,\"surface\":\"cli\",\"operation\":\"status\",\"outcome\":\"success\",\"event_id\":\"11111111-1111-4111-8111-111111111111\"}]}"}],"retry_attempts":0,"dropped":0,"failure_sequence":0,"last_failure_class":null,"observation_due":false}
+if /I "%LOCALAPPDATA%"=="%CTX_DATA_ROOT%" exit /b 85
+if not exist "%LOCALAPPDATA%\ctx" mkdir "%LOCALAPPDATA%\ctx"
+> "%LOCALAPPDATA%\ctx\analytics-outbox-v1.json" echo {"schema_version":2,"entries":[{"schema_version":2,"entry_id":"22222222-2222-4222-8222-222222222222","endpoint_fingerprint":"fixture","queued_at_epoch_seconds":1800000000,"attempts":0,"next_attempt_at_epoch_seconds":0,"kind":"ordinary","payload":"{\"events\":[{\"event_name\":\"operation_completed\",\"event_version\":1,\"surface\":\"cli\",\"operation\":\"status\",\"outcome\":\"success\",\"event_id\":\"11111111-1111-4111-8111-111111111111\"}]}"}],"retry_attempts":0,"dropped":0,"failure_sequence":0,"last_failure_class":null,"observation_due":false}
 if /I "%~n0"=="ctx-no-embed-policy" goto status_without_embed_policy
 echo {"read_only":true,"daemon":{"enabled":true},"upgrade":{"auto":"off","auto_enabled":false},"semantic":{"config_source":"default","enabled":false,"reason":"semantic_disabled","embed_policy":{"source":"dynamic_quiet"}}}
 exit /b 0
@@ -253,7 +274,7 @@ public static class CtxManagedPairFake {
     }
 
     private static void WriteOutbox() {
-        string root = Path.Combine(Environment.GetEnvironmentVariable("XDG_STATE_HOME"), "ctx");
+        string root = Path.Combine(Environment.GetEnvironmentVariable("LOCALAPPDATA"), "ctx");
         Directory.CreateDirectory(root);
         File.WriteAllText(Path.Combine(root, "analytics-outbox-v1.json"), "{\"schema_version\":2,\"entries\":[{\"kind\":\"ordinary\",\"payload\":" + Quote(AnalyticsPayload) + "}]}");
     }
@@ -498,7 +519,7 @@ public static class CtxPipeOwner {
         }
         if (mode == "status") {
             if (Environment.GetEnvironmentVariable("CTX_ANALYTICS_ENABLED") == null) {
-                string state = Path.Combine(Environment.GetEnvironmentVariable("XDG_STATE_HOME"), "ctx");
+                string state = Path.Combine(Environment.GetEnvironmentVariable("LOCALAPPDATA"), "ctx");
                 Directory.CreateDirectory(state);
                 File.WriteAllText(Path.Combine(state, "analytics-outbox-v1.json"), "{\"schema_version\":2,\"entries\":[{\"kind\":\"ordinary\",\"payload\":\"{\\\"events\\\":[{\\\"event_name\\\":\\\"operation_completed\\\",\\\"event_version\\\":1,\\\"surface\\\":\\\"cli\\\",\\\"operation\\\":\\\"status\\\",\\\"outcome\\\":\\\"success\\\",\\\"event_id\\\":\\\"11111111-1111-4111-8111-111111111111\\\"}]}\"}]}");
                 Console.WriteLine("{\"read_only\":true,\"daemon\":{\"enabled\":true},\"upgrade\":{\"auto\":\"off\",\"auto_enabled\":false},\"semantic\":{\"config_source\":\"default\",\"reason\":\"semantic_disabled\",\"embed_policy\":{\"source\":\"dynamic_quiet\"}}}");
