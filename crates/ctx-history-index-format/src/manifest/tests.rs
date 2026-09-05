@@ -9,6 +9,138 @@ use ctx_history_core::{
     SourceObservation, TypedKey,
 };
 
+fn released_v2_payload(metadata_json: &str) -> String {
+    format!(
+        r#"{{"version":2,"generation_id":"{}","publication_metadata":{metadata_json}}}"#,
+        "a".repeat(64)
+    )
+}
+
+#[test]
+fn released_v2_envelopes_are_typed_incompatible() {
+    // Literal envelopes reproduce the released writer's field order and null
+    // handling, independently of either current or historical serializers.
+    for metadata in [
+        "null".to_owned(),
+        r#""""#.to_owned(),
+        r#""AQID""#.to_owned(),
+        format!("\"{}\"", "AAAA".repeat(64)),
+        format!("\"{}\"", "AAAA".repeat(16 * 1024)),
+    ] {
+        let encoded = released_v2_payload(&metadata);
+        assert!(matches!(
+            decode_commit_payload(&encoded),
+            Err(IndexError::UnsupportedCommitPayload(2))
+        ));
+    }
+    let encoded = released_v2_payload(&format!("\"{}\"", "AAAA".repeat(64)));
+    assert!(encoded.len() > 256);
+}
+
+#[test]
+fn malformed_v2_envelopes_do_not_gain_rebuild_classification() {
+    let canonical = released_v2_payload("null");
+    for encoded in [
+        released_v2_payload("42"),
+        released_v2_payload("{}"),
+        released_v2_payload("[]"),
+        canonical.replace("\"version\":2", "\"version\":2,\"version\":3"),
+        canonical.replace("\"publication_metadata\":null", "\"unknown\":null"),
+        canonical.replace(
+            "\"publication_metadata\":null",
+            "\"publication_metadata\":null,\"publication_metadata\":null",
+        ),
+        canonical.replace(&"a".repeat(64), &"z".repeat(64)),
+        format!("{canonical}{{}}"),
+        canonical[..canonical.len() - 1].to_owned(),
+    ] {
+        assert!(
+            matches!(decode_commit_payload(&encoded), Err(IndexError::Json(_))),
+            "unexpected classification for {encoded}"
+        );
+    }
+}
+
+#[test]
+fn oversized_v2_envelopes_keep_the_size_error() {
+    // One byte beyond the old base64 budget still fits the envelope budget.
+    // Beyond either bound, this is not a recognized released envelope.
+    for metadata_bytes in [64 * 1024 + 1, 64 * 1024 + 256] {
+        let encoded = released_v2_payload(&format!("\"{}\"", "A".repeat(metadata_bytes)));
+        assert!(matches!(
+            decode_commit_payload(&encoded),
+            Err(IndexError::CommitPayloadTooLarge { actual, maximum: 256 })
+                if actual == encoded.len()
+        ));
+    }
+}
+
+#[test]
+fn current_commit_payload_stays_strict_and_canonical() {
+    let generation_id = "a".repeat(64);
+    let canonical = format!(r#"{{"version":3,"generation_id":"{generation_id}"}}"#);
+    assert_eq!(
+        decode_commit_payload(&canonical).unwrap().generation_id,
+        generation_id
+    );
+    assert_eq!(canonical_commit_payload(&generation_id).unwrap(), canonical);
+
+    for encoded in [
+        format!(" {canonical}"),
+        format!("{canonical}\n"),
+        format!(r#"{{"generation_id":"{generation_id}","version":3}}"#),
+    ] {
+        assert!(matches!(
+            decode_commit_payload(&encoded),
+            Err(IndexError::NonCanonicalCommitPayload)
+        ));
+    }
+    assert!(matches!(
+        decode_commit_payload(&canonical.replace(&generation_id, &"z".repeat(64))),
+        Err(IndexError::InvalidGenerationId)
+    ));
+}
+
+#[test]
+fn malformed_current_and_unknown_envelopes_stay_json_errors() {
+    let canonical = format!(r#"{{"version":3,"generation_id":"{}"}}"#, "a".repeat(64));
+    for encoded in [
+        "{".to_owned(),
+        canonical.replace("\"version\":3", "\"version\":\"3\""),
+        canonical.replace("\"version\":3", "\"version\":null"),
+        canonical.replace("\"version\":3,", ""),
+        canonical.replace("\"version\":3", "\"version\":3,\"version\":2"),
+        canonical.replace("\"version\":3", "\"version\":3,\"unknown\":true"),
+        format!("{canonical}{{}}"),
+        released_v2_payload("null").replace("\"version\":2", "\"version\":3"),
+        released_v2_payload("null").replace("\"version\":2", "\"version\":4"),
+    ] {
+        assert!(
+            matches!(decode_commit_payload(&encoded), Err(IndexError::Json(_))),
+            "unexpected classification for {encoded}"
+        );
+    }
+}
+
+#[test]
+fn oversized_current_payloads_keep_the_256_byte_limit() {
+    let canonical = format!(r#"{{"version":3,"generation_id":"{}"}}"#, "a".repeat(64));
+    for total_bytes in [257, 64 * 1024 + 256, 64 * 1024 + 257] {
+        let encoded = format!("{canonical}{}", " ".repeat(total_bytes - canonical.len()));
+        assert!(matches!(
+            decode_commit_payload(&encoded),
+            Err(IndexError::CommitPayloadTooLarge { actual, maximum: 256 })
+                if actual == total_bytes
+        ));
+    }
+    let encoded = released_v2_payload(&format!("\"{}\"", "AAAA".repeat(64)))
+        .replace("\"version\":2", "\"version\":3");
+    assert!(matches!(
+        decode_commit_payload(&encoded),
+        Err(IndexError::CommitPayloadTooLarge { maximum: 256, .. })
+    ));
+}
+
 fn route(byte: &str) -> SourceRouteIdentity {
     SourceRouteIdentity::from_sha256(byte.repeat(64)).unwrap()
 }

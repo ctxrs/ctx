@@ -545,7 +545,7 @@ fn stale_schema_manifest_fails_closed_at_generation_boundary() {
     ));
 }
 
-fn assert_active_meta_incompatibility_is_rebuilt(
+pub(super) fn assert_active_meta_incompatibility_is_rebuilt(
     source_name: &str,
     mutate_meta: impl FnOnce(&mut serde_json::Value),
     assert_incompatibility: impl FnOnce(&IndexError),
