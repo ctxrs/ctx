@@ -40,6 +40,10 @@ Writes local storage and returns schema version 2:
 - `daemon_autostart`;
 - `source_rebuild_required`;
 
+The `deprecated_catalog_only_ignored` field remains present for schema-2
+compatibility and is always `false`, because the ignored `--catalog-only` option
+has been removed.
+
 In automatic indexing mode, human and machine-readable setup both health-check
 and recover the persistent daemon before returning. In manual mode, setup does
 not start a persistent or finite worker.
