@@ -151,6 +151,7 @@ where
             {
                 return Ok(None);
             }
+            crate::upgrade::managed_pair::preflight_recovery(&recovery, lock.installation())?;
             let attempt = begin_recovery_attempt_locked(&lock, &attempt_id, "automatic")?;
             return Ok(Some(PreparedAutomaticUpgrade(
                 PreparedAutomaticUpgradeKind::ManagedPairRecover {

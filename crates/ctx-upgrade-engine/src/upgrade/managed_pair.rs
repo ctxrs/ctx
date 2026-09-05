@@ -11,6 +11,7 @@ use ctx_companion_bridge::{
 use ctx_managed_pair_engine::{
     apply_or_resume_managed_pair_under_installation_lock,
     inspect_managed_pair_under_installation_lock,
+    preflight_pending_managed_pair_under_installation_lock,
     resume_pending_managed_pair_under_installation_lock, ManagedPairApplyInput,
     ManagedPairApplyOutcome, ManagedPairComponentIdentity, ManagedPairInstallationStatus,
     ManagedPairTarget, ManagedPairVerifier, VerifiedManagedPairIdentity,
@@ -75,6 +76,7 @@ pub(super) fn recover_foreground_before_generic<D: DaemonUpgradePort + ?Sized>(
 
     let lock = acquire_managed_pair_recovery_lock(&attempt_id)?;
     let recovery = managed_pair_recovery_locked(&lock, &attempt_id)?;
+    preflight_recovery(&recovery, lock.installation())?;
     let attempt = begin_recovery_attempt_locked(&lock, &attempt_id, "manual_recovery")?;
     #[cfg(not(windows))]
     let _ = &attempt;
@@ -315,6 +317,22 @@ pub(super) fn inspect_plan_under_installation_lock(
     })
 }
 
+pub(super) fn preflight_recovery(
+    recovery: &super::state::ManagedPairRecovery,
+    _installation_lock: &InstallationLock,
+) -> Result<()> {
+    let Some(root) = install_root_for_executable(&recovery.install_path) else {
+        return Ok(());
+    };
+    let verifier = ReleaseManagedPairVerifier::for_channel(&recovery.channel)?;
+    preflight_pending_managed_pair_under_installation_lock(
+        &root,
+        &recovery.core_sha256,
+        &recovery.envelope_sha256,
+        &verifier,
+    )
+}
+
 pub(super) fn resume_or_confirm_pending_under_installation_lock(
     install_path: &Path,
     channel: &str,
@@ -342,6 +360,12 @@ fn resume_or_confirm_pending_with_verifier(
     let Some(install_root) = install_root_for_executable(install_path) else {
         return Ok(false);
     };
+    preflight_pending_managed_pair_under_installation_lock(
+        &install_root,
+        expected_core_sha256,
+        expected_envelope_sha256,
+        verifier,
+    )?;
     let _ = resume_pending_managed_pair_under_installation_lock(&install_root, verifier)?;
     Ok(matches!(
         inspect_managed_pair_under_installation_lock(&install_root, verifier)?,
@@ -356,6 +380,10 @@ impl ManagedPairVerifier for ReleaseManagedPairVerifier {
         &self,
         signed_envelope: &[u8],
     ) -> Result<VerifiedManagedPairIdentity> {
+        #[cfg(test)]
+        if let Some(result) = tests::verify_fixture(self.expectations.channel(), signed_envelope) {
+            return result;
+        }
         let identity = verify_signed_managed_pair_envelope(&self.expectations, signed_envelope)
             .map_err(|error| anyhow!(error.to_string()))?;
         engine_identity(&identity)
@@ -677,7 +705,7 @@ pub(super) fn apply_prepared_install(
     }
 }
 
-fn install_root_for_executable(install_path: &Path) -> Option<PathBuf> {
+pub(super) fn install_root_for_executable(install_path: &Path) -> Option<PathBuf> {
     let bin = install_path
         .parent()
         .filter(|path| path.file_name().is_some_and(|name| name == "bin"))
@@ -745,4 +773,4 @@ fn engine_identity(identity: &SignedManagedPairIdentity) -> Result<VerifiedManag
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

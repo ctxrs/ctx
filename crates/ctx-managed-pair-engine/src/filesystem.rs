@@ -10,6 +10,8 @@ use std::{
 use anyhow::{anyhow, bail, Context, Result};
 use sha2::{Digest as _, Sha256};
 
+pub(super) use secure_directory::RemovalIo;
+
 use super::{
     ManagedPairComponentIdentity, MANAGED_CORE_INSTALL_MARKER_RELATIVE_PATH,
     MANAGED_PAIR_ACTIVE_TRANSACTION_RELATIVE_PATH, MANAGED_PAIR_ENVELOPE_RELATIVE_PATH,
@@ -750,7 +752,8 @@ fn remove_entry_exact(entry: &Entry, expected: &FileStamp, label: &str) -> Resul
         )
     } == 0
     {
-        return Err(std::io::Error::last_os_error()).context("unlink managed-pair file by handle");
+        return Err(RemovalIo(std::io::Error::last_os_error()))
+            .context("unlink managed-pair file by handle");
     }
     Ok(())
 }
