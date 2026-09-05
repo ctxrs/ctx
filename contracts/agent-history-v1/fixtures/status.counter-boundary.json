@@ -8,7 +8,6 @@
   },
   "status": {
     "initialized": true,
-    "localOnly": true,
     "dataRoot": "/tmp/ctx-sdk-fixture",
     "indexedItems": 9007199254740991,
     "indexedSessions": 9007199254740991,

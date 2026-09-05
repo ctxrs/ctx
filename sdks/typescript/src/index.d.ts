@@ -179,7 +179,6 @@ export interface Freshness {
 
 export interface AgentHistoryStatus {
   initialized: boolean;
-  localOnly: boolean;
   readOnly?: boolean;
   dataRoot?: string | null;
   /** Exact operational counter in the inclusive range 0..Number.MAX_SAFE_INTEGER. */

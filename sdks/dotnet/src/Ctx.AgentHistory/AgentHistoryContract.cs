@@ -22,7 +22,8 @@ internal static class AgentHistoryContract
     public static void EnsureSupportedSchema(JsonObject raw, string operation)
     {
         var schema = JsonHelpers.GetInt(raw, "schema_version") ?? JsonHelpers.GetInt(raw, "schemaVersion");
-        if (schema is not null && schema != 1 && schema != 2)
+        if (schema is not null && schema != 1 && schema != 2
+            && !(schema == 3 && operation is "status" or "init"))
         {
             throw new CtxAgentHistoryProtocolException(
                 $"unsupported ctx schema version {schema}",
@@ -42,7 +43,6 @@ internal static class AgentHistoryContract
         {
             ["initialized"] = JsonHelpers.GetBool(current, "initialized")
                 ?? !string.IsNullOrWhiteSpace(JsonHelpers.GetString(lexical ?? new JsonObject(), "generationId")),
-            ["localOnly"] = true
         };
         foreach (var key in new[]
         {

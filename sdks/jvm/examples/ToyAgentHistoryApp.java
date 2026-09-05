@@ -34,9 +34,8 @@ public final class ToyAgentHistoryApp {
 
         FakeAgentHistoryTransport() {
             responses.put("status", "{"
-                    + "\"schema_version\":1,"
+                    + "\"schema_version\":3,"
                     + "\"initialized\":true,"
-                    + "\"local_only\":true,"
                     + "\"indexed_items\":1,"
                     + "\"indexed_sources\":1"
                     + "}");

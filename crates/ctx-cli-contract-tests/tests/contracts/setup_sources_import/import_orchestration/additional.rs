@@ -703,7 +703,7 @@ fn fresh_setup_publishes_provider_sources_to_core() {
 
     let setup = ready_setup(&temp);
 
-    assert_eq!(setup["schema_version"], 2, "{setup:#}");
+    assert_eq!(setup["schema_version"], 3, "{setup:#}");
     assert_eq!(setup["mode"], "ready", "{setup:#}");
     assert_eq!(setup["history_epoch"]["status"], "ready", "{setup:#}");
     assert_eq!(setup["lexical"]["status"], "ready", "{setup:#}");
@@ -739,7 +739,7 @@ fn mixed_setup_publishes_each_provider_once() {
     let _daemon = start_full_source_refresh_daemon(&temp);
 
     let setup = ready_setup(&temp);
-    assert_eq!(setup["schema_version"], 2, "{setup:#}");
+    assert_eq!(setup["schema_version"], 3, "{setup:#}");
     assert_eq!(setup["mode"], "ready", "{setup:#}");
     assert_eq!(setup["refresh_request"]["status"], "published", "{setup:#}");
     assert_eq!(setup["refresh_request"]["source_count"], 2, "{setup:#}");

@@ -771,9 +771,10 @@ fn status_missing_source_epoch_is_read_only_and_does_not_initialize_files() {
             .args(["status", "--format=json"])
             .env("CTX_DATA_ROOT", &data_root),
     );
-    assert_eq!(status["schema_version"], 2);
+    assert_eq!(status["schema_version"], 3);
     assert_eq!(status["initialized"], false);
-    assert_eq!(status["local_only"], true);
+    assert!(status.get("local_only").is_none());
+    assert!(status.get("localOnly").is_none());
     assert_eq!(status["read_only"], true);
     assert_eq!(status["history_epoch"]["status"], "unavailable");
     assert_eq!(
@@ -851,7 +852,9 @@ fn setup_wait_publishes_setup_status_contract() {
 
     let setup =
         json_output(ctx(&temp).args(["setup", "--wait", "--format=json", "--progress", "none"]));
-    assert_eq!(setup["schema_version"], 2, "{setup:#}");
+    assert_eq!(setup["schema_version"], 3, "{setup:#}");
+    assert!(setup.get("local_only").is_none());
+    assert!(setup.get("localOnly").is_none());
     assert_eq!(setup["deprecated_catalog_only_ignored"], false, "{setup:#}");
     assert!(setup.get("read_only").is_none(), "{setup:#}");
     assert_eq!(setup["mode"], "ready", "{setup:#}");
@@ -911,7 +914,9 @@ fn quiet_setup_suppresses_success_output_but_not_json() {
     let temp = daemon_test_root();
     let setup =
         json_output(ctx(&temp).args(["--quiet", "setup", "--format=json", "--progress", "none"]));
-    assert_eq!(setup["schema_version"], 2);
+    assert_eq!(setup["schema_version"], 3);
+    assert!(setup.get("local_only").is_none());
+    assert!(setup.get("localOnly").is_none());
     assert_eq!(setup["deprecated_catalog_only_ignored"], false, "{setup:#}");
 }
 
@@ -945,7 +950,7 @@ fn quiet_status_suppresses_success_output_but_not_json() {
         .stdout(predicate::str::contains("History status: failed"));
 
     let status = json_output(ctx(&temp).args(["--quiet", "status", "--format=json"]));
-    assert_eq!(status["schema_version"], 2);
+    assert_eq!(status["schema_version"], 3);
     assert_eq!(status["initialized"], false);
     assert!(status["inventory_source_bytes"].is_null());
     assert!(status["lexical_index_estimate_seconds"].is_null());
@@ -957,7 +962,9 @@ fn setup_background_refresh_and_wait_publish_the_same_codex_source() {
     write_codex_setup_session(&temp);
 
     let setup = json_output(ctx(&temp).args(["setup", "--format=json", "--progress", "none"]));
-    assert_eq!(setup["schema_version"], 2, "{setup:#}");
+    assert_eq!(setup["schema_version"], 3, "{setup:#}");
+    assert!(setup.get("local_only").is_none());
+    assert!(setup.get("localOnly").is_none());
     assert_eq!(setup["daemon_autostart"]["requested"], true, "{setup:#}");
     assert!(
         matches!(
@@ -1043,7 +1050,9 @@ fn setup_no_daemon_is_one_run_opt_out_and_keeps_semantic_disabled() {
         "--progress",
         "none",
     ]));
-    assert_eq!(setup["schema_version"], 2, "{setup:#}");
+    assert_eq!(setup["schema_version"], 3, "{setup:#}");
+    assert!(setup.get("local_only").is_none());
+    assert!(setup.get("localOnly").is_none());
     assert_eq!(setup["deprecated_catalog_only_ignored"], false, "{setup:#}");
     assert!(setup.get("background_indexing").is_none(), "{setup:#}");
     assert_eq!(
@@ -1131,7 +1140,9 @@ fn setup_all_invalid_source_publishes_a_verified_empty_generation() {
 
     let setup =
         json_output(ctx(&temp).args(["setup", "--wait", "--format=json", "--progress", "none"]));
-    assert_eq!(setup["schema_version"], 2, "{setup:#}");
+    assert_eq!(setup["schema_version"], 3, "{setup:#}");
+    assert!(setup.get("local_only").is_none());
+    assert!(setup.get("localOnly").is_none());
     assert_eq!(setup["mode"], "ready", "{setup:#}");
     assert_eq!(setup["lexical"]["certified_sources"], 1, "{setup:#}");
     assert_eq!(setup["lexical"]["indexed_documents"], 0, "{setup:#}");

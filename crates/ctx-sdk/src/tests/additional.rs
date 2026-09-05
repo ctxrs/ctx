@@ -438,7 +438,10 @@ fn init_normalizes_real_setup_json_into_status_contract() {
     assert_eq!(envelope.operation, AgentHistoryOperation::Init);
     let status = envelope.status.unwrap();
     assert!(status.initialized);
-    assert!(status.local_only);
+    assert!(serde_json::to_value(&status)
+        .unwrap()
+        .get("localOnly")
+        .is_none());
     assert_eq!(status.data_root.as_deref(), Some("/tmp/ctx"));
     assert_eq!(status.indexed_items, Some(2_147_483_648));
     assert_eq!(status.indexed_sessions, Some(2_147_483_649));
@@ -533,7 +536,10 @@ printf '%s\n' '{"initialized":true,"local_only":true}'
     });
 
     let status = client.status().unwrap().status.unwrap();
-    assert!(status.local_only);
+    assert!(serde_json::to_value(&status)
+        .unwrap()
+        .get("localOnly")
+        .is_none());
 }
 
 #[test]
@@ -796,7 +802,10 @@ exit 2
     let status = client.status().unwrap();
     let status_body = status.status.unwrap();
     assert!(status_body.initialized);
-    assert!(status_body.local_only);
+    assert!(serde_json::to_value(&status_body)
+        .unwrap()
+        .get("localOnly")
+        .is_none());
     assert_eq!(
         status_body.data_root.as_deref(),
         Some(data_root.to_string_lossy().as_ref())

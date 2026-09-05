@@ -68,7 +68,6 @@ function mockResponse(args) {
   if (command === "status") {
     return {
       initialized: true,
-      local_only: true,
       data_root: "/tmp/ctx-sdk-dogfood",
       indexed_items: 1,
       indexed_sources: 1,

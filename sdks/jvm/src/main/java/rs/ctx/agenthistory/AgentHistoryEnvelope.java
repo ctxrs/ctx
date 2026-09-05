@@ -18,6 +18,10 @@ public class AgentHistoryEnvelope {
     private final Map<String, Object> envelope;
 
     AgentHistoryEnvelope(Map<String, Object> canonical) {
+        if ("status".equals(canonical.get("operation")) || "init".equals(canonical.get("operation"))) {
+            canonical = new LinkedHashMap<>(canonical);
+            canonical.put("status", StatusRecord.withoutLocality(AgentHistoryValue.objectAt(canonical, "status")));
+        }
         this.contractVersion = AgentHistoryValue.string(canonical.get("contractVersion"));
         Integer version = AgentHistoryValue.integer(canonical.get("schemaVersion"));
         this.schemaVersion = version == null ? SCHEMA_VERSION : version.intValue();
@@ -144,7 +148,6 @@ public class AgentHistoryEnvelope {
             status.put("initialized", Boolean.valueOf(
                     lexical != null && AgentHistoryValue.string(lexical.get("generationId")) != null));
         }
-        status.put("localOnly", Boolean.TRUE);
         return status;
     }
 

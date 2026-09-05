@@ -49,6 +49,7 @@ internal static class Program
         var tests = new (string Name, Func<Task> Body)[]
         {
             ("preserves current payloads and producer errors", CurrentPayloadsAndProducerErrors),
+            ("removes generic status locality and accepts status schema three", DropsGenericStatusLocality),
             ("wraps status as agent-history-v1", WrapsStatus),
             ("filters status to the current readiness contract", FiltersStatusFields),
             ("preserves legitimate source semantics", PreservesLegitimateSourceSemantics),
@@ -563,6 +564,36 @@ internal static class Program
         }
     }
 
+    private static async Task DropsGenericStatusLocality()
+    {
+        foreach (var flags in new[] { "", ",\"local_only\":true", ",\"localOnly\":false", ",\"local_only\":null,\"localOnly\":\"legacy\"" })
+        {
+            foreach (var schema in new[] { 2, 3 })
+            {
+                var wire = "{\"schema_version\":" + schema
+                    + ",\"initialized\":true,\"semantic\":{\"local_only\":false,\"diagnostics\":{\"localOnly\":null}}"
+                    + flags + "}";
+                var client = new AgentHistoryClient(new RecordingTransport(wire));
+                var status = await client.StatusAsync();
+                var init = await client.InitAsync();
+                foreach (var output in new[] { status.ToJsonObject()["status"]!.AsObject(),
+                    status.Status.ToJsonObject(), init.ToJsonObject()["status"]!.AsObject(), init.Status.ToJsonObject() })
+                {
+                    Equal(false, output.ContainsKey("localOnly"));
+                    Equal(false, output.ContainsKey("local_only"));
+                    Equal(true, output["initialized"]!.GetValue<bool>());
+                    Equal(false, output["semantic"]!["localOnly"]!.GetValue<bool>());
+                    Equal(true, output["semantic"]!["diagnostics"]!.AsObject().ContainsKey("localOnly"));
+                    Equal(true, output["semantic"]!["diagnostics"]!["localOnly"] is null);
+                }
+            }
+        }
+        var unsupported = new AgentHistoryClient(new RecordingTransport("""{"schema_version":3,"sources":[]}"""));
+        await ThrowsAsync<CtxAgentHistoryProtocolException>(() => unsupported.SourcesAsync());
+        var fallback = await new AgentHistoryClient(new RecordingTransport("{}")).StatusAsync();
+        Equal("{\"initialized\":false}", fallback.Status.ToJsonObject().ToJsonString());
+    }
+
     private static async Task NormalizesSetupInitStatus()
     {
         var transport = new RecordingTransport("""{"schema_version":2,"initialized":true,"data_root":"/tmp/ctx","mode":"ready","indexed_items":9007199254740991,"indexed_sessions":9007199254740991,"indexed_events":9007199254740991,"indexed_sources":9007199254740991,"lexical":{"status":"ready","generation_id":"gen-64"},"refresh":{"status":"ready","generation_id":"gen-64"},"network_required":false}""");
@@ -572,7 +603,8 @@ internal static class Program
 
         Equal("init", response.Operation);
         Equal(true, response.Status.Initialized);
-        Equal(true, response.Status.LocalOnly);
+        Equal(false, response.Status.ToJsonObject().ContainsKey("localOnly"));
+        Equal(false, response.Status.ToJsonObject().ContainsKey("local_only"));
         Equal(9007199254740991UL, response.Status.IndexedItems ?? 0UL);
         Equal(9007199254740991UL, response.Status.IndexedSessions ?? 0UL);
         Equal(9007199254740991UL, response.Status.IndexedEvents ?? 0UL);

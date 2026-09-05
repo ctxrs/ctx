@@ -726,7 +726,6 @@ fn normalize_status(raw: &Value) -> Result<AgentHistoryStatus, AgentHistoryError
                 .is_some(),
         )
     });
-    status.insert("localOnly".to_owned(), Value::Bool(true));
     decode_payload(Value::Object(status), "status")
 }
 

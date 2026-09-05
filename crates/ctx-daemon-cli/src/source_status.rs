@@ -111,7 +111,7 @@ pub fn source_epoch_status_report(
         .transpose()?;
 
     let mut report = compact_json(json!({
-        "schema_version": 2,
+        "schema_version": 3,
         "initialized": initialized,
         "data_root": data_root,
         "config_path": data_root.join(ctx_app_config::CONFIG_FILE),
@@ -125,7 +125,6 @@ pub fn source_epoch_status_report(
         "indexed_sessions": indexed_sessions,
         "indexed_events": indexed_events,
         "indexed_sources": indexed_sources,
-        "local_only": true,
         "read_only": true,
     }));
     if config.semantic_builtin_throttling_effective().is_none() {
