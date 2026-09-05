@@ -6,15 +6,15 @@ use std::{
 };
 
 use anyhow::{bail, Context, Result};
-use ctx_history_capture::{
-    provider_paths_equivalent, ProviderRootDefinition, ProviderRootKind,
-    MAX_CONFIGURED_PROVIDER_ROOTS,
+use ctx_history_capture_model::{
+    ProviderRootDefinition, ProviderRootKind, MAX_CONFIGURED_PROVIDER_ROOTS,
 };
 use ctx_history_core::{parse_capture_provider_name, CaptureProvider};
 use ctx_history_platform::platform_security::{
     establish_private_data_root, validate_provider_source_outside_data_root,
     verify_private_directory,
 };
+use ctx_history_source_discovery::provider_paths_equivalent;
 
 mod durable_write;
 mod mutation;

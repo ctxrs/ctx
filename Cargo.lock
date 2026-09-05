@@ -655,9 +655,10 @@ name = "ctx-app-config"
 version = "1.3.2"
 dependencies = [
  "anyhow",
- "ctx-history-capture",
+ "ctx-history-capture-model",
  "ctx-history-core",
  "ctx-history-platform",
+ "ctx-history-source-discovery",
  "ctx-semantic-model",
  "fs2",
  "libc",
