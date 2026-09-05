@@ -236,15 +236,16 @@ fn render_show_jsonl(value: &Value) -> Result<String> {
         .iter()
         .map(|event| {
             if value["target"] == "session" {
-                serde_json::to_string(&compact_json(json!({
+                let mut line = compact_json(json!({
                     "schema_version": 1,
                     "payload_type": "session_transcript_event",
                     "mode": value["mode"],
                     "ctx_session_id": value["ctx_session_id"],
                     "provider": value["provider"],
                     "provider_session_id": value["provider_session_id"],
-                    "event": event,
-                })))
+                }));
+                line["event"] = event.clone();
+                serde_json::to_string(&line)
             } else {
                 serde_json::to_string(event)
             }
