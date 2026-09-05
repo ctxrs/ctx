@@ -1,6 +1,6 @@
 use std::{
     fs::File,
-    io::{BufRead, BufReader},
+    io::{BufRead, BufReader, Read},
     path::Path,
 };
 
@@ -100,14 +100,25 @@ fn validate_provider_owned_source(
             source_path.display()
         )
     })?;
-    let mut reader = BufReader::new(file);
+    validate_header(source, source_path, BufReader::new(file))
+}
+
+fn validate_header(
+    source: &HistorySourcePluginSource,
+    source_path: &Path,
+    mut reader: impl BufRead,
+) -> Result<()> {
     let mut total_bytes = 0_usize;
     let mut manifest_seen = false;
     let mut source_seen = false;
     let mut line = Vec::new();
     for line_number in 1..=MAX_HEADER_RECORDS {
         line.clear();
+        let remaining = (MAX_HEADER_BYTES - total_bytes).min(MAX_HEADER_LINE_BYTES);
+        // Read one sentinel byte to detect overflow without draining the source.
         let bytes = reader
+            .by_ref()
+            .take((remaining + 1) as u64)
             .read_until(b'\n', &mut line)
             .with_context(|| format!("read {}", source_path.display()))?;
         if bytes == 0 {
@@ -182,7 +193,7 @@ mod tests {
 
     use super::*;
 
-    fn source(path: PathBuf) -> HistorySourcePluginSource {
+    pub(super) fn source(path: PathBuf) -> HistorySourcePluginSource {
         HistorySourcePluginSource {
             plugin_name: "example".to_owned(),
             plugin_display_name: None,
@@ -309,3 +320,9 @@ mod tests {
         assert!(prepare_source_backed_history_source(matched, false).is_ok());
     }
 }
+
+#[cfg(test)]
+mod header_tests;
+
+#[cfg(test)]
+mod import_tests;
