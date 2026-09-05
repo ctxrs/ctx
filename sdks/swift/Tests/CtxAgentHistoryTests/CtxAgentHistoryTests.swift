@@ -21,7 +21,12 @@ final class CtxAgentHistoryTests: XCTestCase {
                 XCTAssertEqual(output["initialized"], .bool(true))
                 let key = index == 2 ? "local_only" : "localOnly"
                 XCTAssertEqual(output["semantic"]?[key], .bool(false))
-                XCTAssertEqual(output["semantic"]?["diagnostics"]?["localOnly"], .null)
+                // Raw status keeps its existing null omission; direct Codable retains explicit null.
+                if index == 2 {
+                    XCTAssertEqual(output["semantic"]?["diagnostics"]?["localOnly"], .null)
+                } else {
+                    XCTAssertNil(output["semantic"]?["diagnostics"]?["localOnly"])
+                }
             }
         }
         let runner = CapturingRunner { _ in CommandResult(stdout: "{}") }
