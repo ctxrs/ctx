@@ -87,8 +87,6 @@ Important reusable records:
   `structuredContent` and activity capture values are opaque JSON: keys,
   explicit nulls, arrays, and distinct snake/camel spellings remain unchanged.
   An absent `structuredContent` differs from a present JSON null.
-  Swift retains [compatibility limitations](../../sdks/swift/README.md#compatibility-limitations)
-  for `activity` and `structuredContent` preservation.
 - `McpToolCall`: projection-independent MCP server/tool attribution.
 - `McpExchange`: optional content-governed invocation/response capture. Its
   closed camelCase envelope retains JSON arguments and response payloads as JSON
@@ -108,7 +106,6 @@ Important reusable records:
   and preserve `retryable`. Language-specific broad SDK codes remain separate
   from the producer's code. Non-JSON diagnostics use the process-error fallback;
   adapters do not retry automatically.
-  Swift retains the [legacy producer-error behavior](../../sdks/swift/README.md#compatibility-limitations).
 
 ## CLI Adapter Mapping
 
@@ -123,9 +120,8 @@ them into `agent-history-v1` wrappers:
 - `ctx show event ... --format json`
 - `ctx show session ... --format json`
 
-Rust, TypeScript, Python, Go, JVM and .NET adapters place a supplied query after
-`--`, with all options before it. Swift retains
-[legacy search argument construction](../../sdks/swift/README.md#compatibility-limitations).
+Rust, TypeScript, Python, Go, JVM, Swift and .NET adapters place a supplied query
+after `--`, with all options before it.
 
 This mapping is an adapter detail. SDK consumers should depend on
 `agent-history-v1`, not on CLI rendering or SQLite storage.
