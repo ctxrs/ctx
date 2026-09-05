@@ -3,6 +3,9 @@ use super::*;
 #[path = "lexical_segment_boundaries.rs"]
 mod segment_boundaries;
 
+#[path = "lexical_selective.rs"]
+mod selective;
+
 fn publish_records(temp: &TempDir, source: &SourceKey, records: Vec<CoreRecord>) -> VerifiedIndex {
     let document_count = u64::try_from(records.len()).unwrap();
     let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
@@ -32,6 +35,7 @@ fn publish_records_in_one_segment(
     drop(searcher);
     let directory = DurableMmapDirectory::open(active_generation_path(temp.path())).unwrap();
     let tantivy_index = Index::open(directory).unwrap();
+    let mut sessions = HashSet::new();
     publish_unchecked_generation(
         temp.path(),
         &tantivy_index,
@@ -39,15 +43,15 @@ fn publish_records_in_one_segment(
         std::slice::from_ref(source),
         records
             .into_iter()
-            .enumerate()
-            .map(|(index, record)| {
+            .map(|record| {
+                let first_in_session = sessions.insert(record.session_id);
                 let authority = ctx_history_index_format::SessionAuthorityKey::exact(
                     record.session_id,
                     record.source.identity(),
                 )
                 .unwrap();
                 let mut document = indexed_document(record);
-                if index == 0 {
+                if first_in_session {
                     let fields = fields_from_schema(&lexical_schema()).unwrap();
                     document.add_bytes(fields.session_authority, authority.as_bytes());
                 }
@@ -1004,7 +1008,11 @@ fn manual_executor_charges_each_material_budget_before_work() {
     budget.maximum_candidate_docs = 0;
     let batch = run(budget);
     assert_exhausted_at(&batch, LexicalWorkCounter::CandidateDocs, 0, 0);
-    assert_eq!(batch.counters.filter_probes, 0);
+    assert!(
+        batch.counters.filter_probes > 0,
+        "positive intersection is separately metered"
+    );
+    assert_eq!(batch.counters.retained_candidates, 0);
 
     let mut budget = ctx_history_index_query::LEXICAL_WORK_BUDGET_V1;
     budget.maximum_filter_probes = 0;

@@ -118,6 +118,7 @@ pub const MAX_LEXICAL_QUERY_RESULTS: usize = 4_096;
 pub struct LexicalWorkBudget {
     pub maximum_segments: u64,
     pub maximum_candidate_docs: u64,
+    /// Body cursor movements, including positive-filter seeks and advances.
     pub maximum_body_posting_advances: u64,
     pub maximum_exact_filter_terms: u64,
     pub maximum_filter_input_bytes: u64,
@@ -166,6 +167,7 @@ pub const LEXICAL_WORK_BUDGET_V1: LexicalWorkBudget = LexicalWorkBudget {
 pub struct LexicalWorkCounters {
     pub segments: u64,
     pub candidate_docs: u64,
+    /// Body cursor movements, including positive-filter seeks and advances.
     pub body_posting_advances: u64,
     pub analyzed_tokens: u64,
     pub exact_filter_terms: u64,

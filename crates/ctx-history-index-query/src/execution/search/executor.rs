@@ -114,7 +114,8 @@ impl VerifiedIndex {
     /// filter.
     ///
     /// Segments are visited by ascending immutable Tantivy segment ID. Within
-    /// each segment, body postings are merged by ascending document ID, so an
+    /// each segment, body postings intersect required positive groups in
+    /// ascending document ID. Skipped intervals provably cannot match; an
     /// incomplete result describes one deterministic fully examined prefix.
     pub fn execute_lexical(
         &self,
@@ -210,6 +211,38 @@ impl VerifiedIndex {
             match mode {
                 LexicalMode::Search(_) => {
                     while let Some(doc) = next_body_doc(&prepared.body_postings) {
+                        let deleted = reader.is_deleted(doc);
+                        if !deleted {
+                            let Some(next) = prepared.filters.next_required_doc(
+                                doc,
+                                &mut meter,
+                                &prepared.context,
+                            ) else {
+                                break 'segments;
+                            };
+                            if next == TERMINATED {
+                                break;
+                            }
+                            if next != doc {
+                                // Only a required positive group proves this
+                                // interval cannot match. Charge every body seek
+                                // just like an advance, before moving its cursor.
+                                for postings in prepared.body_postings.iter_mut().flatten() {
+                                    if postings.doc() < next {
+                                        if !meter.charge(
+                                            LexicalWorkCounter::BodyPostingAdvances,
+                                            1,
+                                            Some(&prepared.context),
+                                            Some(next),
+                                        ) {
+                                            break 'segments;
+                                        }
+                                        postings.seek(next);
+                                    }
+                                }
+                                continue;
+                            }
+                        }
                         if !meter.charge(
                             LexicalWorkCounter::CandidateDocs,
                             1,
@@ -230,7 +263,7 @@ impl VerifiedIndex {
                                     .term_freq();
                             }
                         }
-                        if !reader.is_deleted(doc) {
+                        if !deleted {
                             let outcome = self.examine_manual_candidate(
                                 &mut prepared,
                                 doc,
@@ -279,6 +312,16 @@ impl VerifiedIndex {
                             break 'segments;
                         }
                         if reader.is_deleted(doc) {
+                            continue;
+                        }
+                        let Some(next) =
+                            prepared
+                                .filters
+                                .next_required_doc(doc, &mut meter, &prepared.context)
+                        else {
+                            break 'segments;
+                        };
+                        if next != doc {
                             continue;
                         }
                         let outcome = self.examine_manual_candidate(
@@ -496,7 +539,9 @@ impl VerifiedIndex {
         meter: &mut LexicalWorkMeter,
     ) -> Result<CandidateExamination> {
         let Some(matches_exact_filters) =
-            prepared.filters.accepts(doc, meter, &prepared.context)?
+            prepared
+                .filters
+                .accepts_remaining(doc, meter, &prepared.context)?
         else {
             return Ok(CandidateExamination::Exhausted);
         };
