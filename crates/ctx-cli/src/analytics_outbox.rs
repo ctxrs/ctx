@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashSet},
     fs,
     io::{Read as _, Write as _},
     path::{Path, PathBuf},
@@ -17,8 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 
-const RELEASED_OUTBOX_SCHEMA_VERSION: u16 = 1;
-const OUTBOX_SCHEMA_VERSION: u16 = 2;
+const OUTBOX_SCHEMA_VERSION: u16 = 3;
 const OUTBOX_MAX_BYTES: u64 = 2 * 1024 * 1024;
 const OUTBOX_MAX_BODY_BYTES: usize = 512 * 1024;
 const OUTBOX_MAX_ENTRIES: usize = 128;
@@ -41,6 +40,7 @@ enum OutboxEntryKind {
 struct OutboxEntry {
     schema_version: u16,
     entry_id: String,
+    data_root_id: String,
     endpoint_fingerprint: String,
     queued_at_epoch_seconds: i64,
     attempts: u16,
@@ -54,6 +54,12 @@ struct OutboxEntry {
 struct OutboxState {
     schema_version: u16,
     entries: Vec<OutboxEntry>,
+    roots: BTreeMap<String, RootDeliveryState>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RootDeliveryState {
     retry_attempts: u64,
     dropped: u64,
     failure_sequence: u64,
@@ -61,55 +67,10 @@ struct OutboxState {
     observation_due: bool,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ReleasedOutboxEntryV1 {
-    schema_version: u16,
-    endpoint_fingerprint: String,
-    queued_at_epoch_seconds: i64,
-    attempts: u16,
-    payload: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ReleasedOutboxStateV1 {
-    schema_version: u16,
-    entries: Vec<ReleasedOutboxEntryV1>,
-    retry_attempts: u64,
-    dropped: u64,
-    failure_sequence: u64,
-    last_failure_class: Option<AnalyticsDeliveryFailureClass>,
-}
-
-impl OutboxState {
-    fn empty() -> Self {
-        Self {
-            schema_version: OUTBOX_SCHEMA_VERSION,
-            entries: Vec::new(),
-            retry_attempts: 0,
-            dropped: 0,
-            failure_sequence: 0,
-            last_failure_class: None,
-            observation_due: false,
-        }
-    }
-
-    fn recovered() -> Self {
-        Self {
-            dropped: 1,
-            failure_sequence: 1,
-            last_failure_class: Some(AnalyticsDeliveryFailureClass::LocalIo),
-            ..Self::empty()
-        }
-    }
-
+impl RootDeliveryState {
     fn record_failure(&mut self, class: AnalyticsDeliveryFailureClass) {
         self.failure_sequence = self.failure_sequence.saturating_add(1);
         self.last_failure_class = Some(class);
-        // A later success must precede any observation that includes this
-        // failure. This also coalesces an interrupted recovery with the next
-        // one instead of reporting a failure as though it had recovered.
         self.observation_due = false;
     }
 
@@ -118,21 +79,49 @@ impl OutboxState {
         self.record_failure(class);
     }
 
+    fn has_counters(&self) -> bool {
+        self.retry_attempts != 0 || self.dropped != 0 || self.last_failure_class.is_some()
+    }
+}
+
+impl OutboxState {
+    fn empty() -> Self {
+        Self {
+            schema_version: OUTBOX_SCHEMA_VERSION,
+            entries: Vec::new(),
+            roots: BTreeMap::new(),
+        }
+    }
+
+    fn root(&self, data_root_id: &str) -> RootDeliveryState {
+        self.roots.get(data_root_id).copied().unwrap_or_default()
+    }
+
+    fn root_mut(&mut self, data_root_id: &str) -> &mut RootDeliveryState {
+        self.roots.entry(data_root_id.to_owned()).or_default()
+    }
+
+    fn recovered(data_root_id: &str) -> Self {
+        let mut state = Self::empty();
+        state
+            .root_mut(data_root_id)
+            .record_ordinary_drop(AnalyticsDeliveryFailureClass::LocalIo);
+        state
+    }
+
     fn prune_expired(&mut self, now_epoch_seconds: i64) -> bool {
         let cutoff = now_epoch_seconds.saturating_sub(OUTBOX_MAX_AGE_SECONDS);
-        let mut ordinary_dropped = 0_u64;
         let before = self.entries.len();
         self.entries.retain(|entry| {
             let keep = entry.queued_at_epoch_seconds >= cutoff;
             if !keep && entry.kind == OutboxEntryKind::Ordinary {
-                ordinary_dropped = ordinary_dropped.saturating_add(1);
+                self.roots
+                    .entry(entry.data_root_id.clone())
+                    .or_default()
+                    .record_ordinary_drop(AnalyticsDeliveryFailureClass::LocalIo);
             }
             keep
         });
-        if ordinary_dropped != 0 {
-            self.dropped = self.dropped.saturating_add(ordinary_dropped);
-            self.record_failure(AnalyticsDeliveryFailureClass::LocalIo);
-        }
         self.entries.len() != before
     }
 
@@ -140,19 +129,43 @@ impl OutboxState {
         let latest_retry = now_epoch_seconds.saturating_add(RETRY_MAX_SECONDS as i64);
         let mut normalized = false;
         for entry in &mut self.entries {
-            if entry.queued_at_epoch_seconds > now_epoch_seconds {
-                entry.queued_at_epoch_seconds = now_epoch_seconds;
+            let changed = entry.queued_at_epoch_seconds > now_epoch_seconds
+                || entry.next_attempt_at_epoch_seconds > latest_retry;
+            entry.queued_at_epoch_seconds = entry.queued_at_epoch_seconds.min(now_epoch_seconds);
+            entry.next_attempt_at_epoch_seconds =
+                entry.next_attempt_at_epoch_seconds.min(latest_retry);
+            if changed {
+                self.roots
+                    .entry(entry.data_root_id.clone())
+                    .or_default()
+                    .record_failure(AnalyticsDeliveryFailureClass::LocalIo);
                 normalized = true;
             }
-            if entry.next_attempt_at_epoch_seconds > latest_retry {
-                entry.next_attempt_at_epoch_seconds = latest_retry;
-                normalized = true;
-            }
-        }
-        if normalized {
-            self.record_failure(AnalyticsDeliveryFailureClass::LocalIo);
         }
         normalized
+    }
+
+    fn trim_root_metadata(&mut self) {
+        let queued_roots: HashSet<_> = self
+            .entries
+            .iter()
+            .map(|entry| entry.data_root_id.as_str())
+            .collect();
+        self.roots
+            .retain(|id, state| queued_roots.contains(id.as_str()) || state.has_counters());
+        // Every root with entries retains its counters. Counter-only records
+        // are best effort and cannot turn root churn into unbounded storage.
+        let excess = self.roots.len().saturating_sub(OUTBOX_MAX_ENTRIES);
+        let evicted: Vec<_> = self
+            .roots
+            .keys()
+            .filter(|id| !queued_roots.contains(id.as_str()))
+            .take(excess)
+            .cloned()
+            .collect();
+        for id in evicted {
+            self.roots.remove(&id);
+        }
     }
 
     fn enforce_bounds(&mut self) -> Result<()> {
@@ -160,6 +173,7 @@ impl OutboxState {
             self.drop_oldest_for_bound();
         }
         loop {
+            self.trim_root_metadata();
             let body = serde_json::to_vec(self).context("serialize analytics outbox")?;
             if body.len() as u64 <= OUTBOX_MAX_BYTES {
                 return Ok(());
@@ -174,7 +188,8 @@ impl OutboxState {
     fn drop_oldest_for_bound(&mut self) {
         let entry = self.entries.remove(0);
         if entry.kind == OutboxEntryKind::Ordinary {
-            self.record_ordinary_drop(AnalyticsDeliveryFailureClass::LocalIo);
+            self.root_mut(&entry.data_root_id)
+                .record_ordinary_drop(AnalyticsDeliveryFailureClass::LocalIo);
         }
     }
 }
@@ -192,6 +207,7 @@ enum StoredOutbox {
 }
 
 pub(crate) struct OutboxObservation {
+    data_root_id: String,
     pub(crate) event: AnalyticsDeliveryObservationV1,
     retry_attempts: u64,
     dropped: u64,
@@ -201,6 +217,7 @@ pub(crate) struct OutboxObservation {
 #[derive(Debug, Clone)]
 pub(crate) struct SnapshotEntry {
     entry_id: String,
+    data_root_id: String,
     endpoint_fingerprint: String,
     payload: String,
     attempts: u16,
@@ -214,6 +231,7 @@ impl SnapshotEntry {
 
     fn matches(&self, entry: &OutboxEntry) -> bool {
         entry.entry_id == self.entry_id
+            && entry.data_root_id == self.data_root_id
             && entry.endpoint_fingerprint == self.endpoint_fingerprint
             && entry.payload == self.payload
             && entry.attempts == self.attempts
@@ -235,6 +253,7 @@ pub(crate) enum DeliveryDisposition {
 
 pub(crate) struct AnalyticsOutbox {
     path: PathBuf,
+    data_root_id: String,
 }
 
 pub(crate) struct UploaderLease {
@@ -242,17 +261,21 @@ pub(crate) struct UploaderLease {
 }
 
 impl AnalyticsOutbox {
-    pub(crate) fn open(path: PathBuf) -> Result<Self> {
-        Self::open_at(path, utc_now().timestamp())
+    pub(crate) fn open(path: PathBuf, data_root_id: &str) -> Result<Self> {
+        Self::open_at(path, data_root_id, utc_now().timestamp())
     }
 
-    fn open_at(path: PathBuf, now_epoch_seconds: i64) -> Result<Self> {
+    fn open_at(path: PathBuf, data_root_id: &str, now_epoch_seconds: i64) -> Result<Self> {
+        validate_root_id(data_root_id)?;
         let parent = path
             .parent()
             .context("analytics outbox path has no parent")?
             .to_path_buf();
         fs::create_dir_all(&parent).context("create analytics outbox directory")?;
-        let outbox = Self { path };
+        let outbox = Self {
+            path,
+            data_root_id: data_root_id.to_owned(),
+        };
         let _lock = OutboxLock::acquire(&outbox.state_lock_path())?;
         if cleanup_orphan_temps(&parent)? {
             sync_parent(&parent)?;
@@ -264,7 +287,7 @@ impl AnalyticsOutbox {
         Ok(outbox)
     }
 
-    pub(crate) fn purge(path: &Path) -> Result<()> {
+    pub(crate) fn purge(path: &Path, data_root_id: Option<&str>) -> Result<()> {
         let Some(parent) = path.parent() else {
             bail!("analytics outbox path has no parent");
         };
@@ -276,6 +299,20 @@ impl AnalyticsOutbox {
         }
         let _lock = OutboxLock::acquire(&path.with_extension("lock"))?;
         let mut changed = cleanup_orphan_temps(parent)?;
+        if let StoredOutbox::State(mut state, _) = read_state(path)? {
+            if validate_state(&state).is_ok() {
+                state
+                    .entries
+                    .retain(|entry| Some(entry.data_root_id.as_str()) != data_root_id);
+                if let Some(id) = data_root_id {
+                    state.roots.remove(id);
+                }
+                if !state.entries.is_empty() || !state.roots.is_empty() {
+                    let body = serde_json::to_vec(&state).context("serialize analytics outbox")?;
+                    return write_private_file_durably(path, &body);
+                }
+            }
+        }
         match fs::remove_file(path) {
             Ok(()) => changed = true,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -306,13 +343,16 @@ impl AnalyticsOutbox {
         if body.len() > OUTBOX_MAX_BODY_BYTES {
             loaded
                 .state
+                .root_mut(&self.data_root_id)
                 .record_ordinary_drop(AnalyticsDeliveryFailureClass::LocalIo);
+            loaded.state.enforce_bounds()?;
             self.persist(&loaded.state)?;
             bail!("analytics payload exceeds the outbox body bound");
         }
         loaded.state.entries.push(OutboxEntry {
             schema_version: OUTBOX_SCHEMA_VERSION,
             entry_id: uuid::Uuid::new_v4().to_string(),
+            data_root_id: self.data_root_id.clone(),
             endpoint_fingerprint: endpoint_fingerprint(endpoint),
             queued_at_epoch_seconds: now_epoch_seconds,
             attempts: 0,
@@ -340,12 +380,14 @@ impl AnalyticsOutbox {
             .entries
             .iter()
             .filter(|entry| {
-                entry.endpoint_fingerprint == fingerprint
+                entry.data_root_id == self.data_root_id
+                    && entry.endpoint_fingerprint == fingerprint
                     && entry.next_attempt_at_epoch_seconds <= now_epoch_seconds
             })
             .take(OUTBOX_MAX_FLUSH_PER_CALL)
             .map(|entry| SnapshotEntry {
                 entry_id: entry.entry_id.clone(),
+                data_root_id: entry.data_root_id.clone(),
                 endpoint_fingerprint: entry.endpoint_fingerprint.clone(),
                 payload: entry.payload.clone(),
                 attempts: entry.attempts,
@@ -362,6 +404,9 @@ impl AnalyticsOutbox {
     }
 
     pub(crate) fn contains_snapshot(&self, snapshot: &SnapshotEntry) -> Result<bool> {
+        if snapshot.data_root_id != self.data_root_id {
+            return Ok(false);
+        }
         let _lock = OutboxLock::acquire(&self.state_lock_path())?;
         let loaded = self.load_normalized(utc_now().timestamp())?;
         if loaded.dirty {
@@ -389,6 +434,9 @@ impl AnalyticsOutbox {
             return Ok(());
         }
         for (snapshot, disposition) in attempts {
+            if snapshot.data_root_id != self.data_root_id {
+                bail!("analytics snapshot belongs to another data root");
+            }
             let Some(index) = loaded
                 .state
                 .entries
@@ -404,18 +452,16 @@ impl AnalyticsOutbox {
             match *disposition {
                 DeliveryDisposition::Accepted => {
                     let accepted = loaded.state.entries.remove(index);
-                    if accepted.kind == OutboxEntryKind::Ordinary
-                        && (loaded.state.retry_attempts != 0
-                            || loaded.state.dropped != 0
-                            || loaded.state.last_failure_class.is_some())
-                    {
-                        loaded.state.observation_due = true;
+                    let root = loaded.state.root_mut(&self.data_root_id);
+                    if accepted.kind == OutboxEntryKind::Ordinary && root.has_counters() {
+                        root.observation_due = true;
                     }
                 }
                 DeliveryDisposition::Retry { class, retry_after } => {
                     if snapshot.kind == OutboxEntryKind::Ordinary {
-                        loaded.state.retry_attempts = loaded.state.retry_attempts.saturating_add(1);
-                        loaded.state.record_failure(class);
+                        let root = loaded.state.root_mut(&self.data_root_id);
+                        root.retry_attempts = root.retry_attempts.saturating_add(1);
+                        root.record_failure(class);
                     }
                     let entry = &mut loaded.state.entries[index];
                     entry.attempts = entry.attempts.saturating_add(1);
@@ -426,7 +472,10 @@ impl AnalyticsOutbox {
                 DeliveryDisposition::Permanent { class } => {
                     let rejected = loaded.state.entries.remove(index);
                     if rejected.kind == OutboxEntryKind::Ordinary {
-                        loaded.state.record_ordinary_drop(class);
+                        loaded
+                            .state
+                            .root_mut(&self.data_root_id)
+                            .record_ordinary_drop(class);
                     }
                 }
             }
@@ -442,29 +491,29 @@ impl AnalyticsOutbox {
     fn pending_observation_at(&self, now_epoch_seconds: i64) -> Result<Option<OutboxObservation>> {
         let _lock = OutboxLock::acquire(&self.state_lock_path())?;
         let mut loaded = self.load_normalized(now_epoch_seconds)?;
-        let health_pending = loaded
-            .state
-            .entries
-            .iter()
-            .any(|entry| entry.kind == OutboxEntryKind::DeliveryObservation);
-        let has_counters = loaded.state.retry_attempts != 0
-            || loaded.state.dropped != 0
-            || loaded.state.last_failure_class.is_some();
-        if loaded.state.observation_due && !has_counters {
-            loaded.state.observation_due = false;
+        let health_pending = loaded.state.entries.iter().any(|entry| {
+            entry.data_root_id == self.data_root_id
+                && entry.kind == OutboxEntryKind::DeliveryObservation
+        });
+        let root = loaded.state.root(&self.data_root_id);
+        let has_counters = root.has_counters();
+        if root.observation_due && !has_counters {
+            loaded.state.root_mut(&self.data_root_id).observation_due = false;
             loaded.dirty = true;
         }
         if loaded.dirty {
             self.persist(&loaded.state)?;
         }
-        if !loaded.state.observation_due || health_pending || !has_counters {
+        if !root.observation_due || health_pending || !has_counters {
             return Ok(None);
         }
         let oldest_age_seconds = loaded
             .state
             .entries
             .iter()
-            .filter(|entry| entry.kind == OutboxEntryKind::Ordinary)
+            .filter(|entry| {
+                entry.data_root_id == self.data_root_id && entry.kind == OutboxEntryKind::Ordinary
+            })
             .map(|entry| {
                 now_epoch_seconds
                     .saturating_sub(entry.queued_at_epoch_seconds)
@@ -473,24 +522,26 @@ impl AnalyticsOutbox {
             .max()
             .unwrap_or(0);
         Ok(Some(OutboxObservation {
+            data_root_id: self.data_root_id.clone(),
             event: AnalyticsDeliveryObservationV1::new(
                 loaded
                     .state
                     .entries
                     .iter()
-                    .filter(|entry| entry.kind == OutboxEntryKind::Ordinary)
+                    .filter(|entry| {
+                        entry.data_root_id == self.data_root_id
+                            && entry.kind == OutboxEntryKind::Ordinary
+                    })
                     .count() as u64,
-                loaded.state.retry_attempts,
-                loaded.state.dropped,
+                root.retry_attempts,
+                root.dropped,
                 Duration::from_secs(oldest_age_seconds),
-                loaded
-                    .state
-                    .last_failure_class
+                root.last_failure_class
                     .unwrap_or(AnalyticsDeliveryFailureClass::None),
             ),
-            retry_attempts: loaded.state.retry_attempts,
-            dropped: loaded.state.dropped,
-            failure_sequence: loaded.state.failure_sequence,
+            retry_attempts: root.retry_attempts,
+            dropped: root.dropped,
+            failure_sequence: root.failure_sequence,
         }))
     }
 
@@ -510,29 +561,31 @@ impl AnalyticsOutbox {
         observation: &OutboxObservation,
         now_epoch_seconds: i64,
     ) -> Result<()> {
+        if observation.data_root_id != self.data_root_id {
+            bail!("analytics observation belongs to another data root");
+        }
         let payload = validate_payload(body)?;
         if body.len() > OUTBOX_MAX_BODY_BYTES {
             bail!("analytics delivery observation exceeds the outbox body bound");
         }
         let _lock = OutboxLock::acquire(&self.state_lock_path())?;
         let mut loaded = self.load_normalized(now_epoch_seconds)?;
-        if !loaded.state.observation_due
-            || loaded
-                .state
-                .entries
-                .iter()
-                .any(|entry| entry.kind == OutboxEntryKind::DeliveryObservation)
+        let root = loaded.state.root(&self.data_root_id);
+        if !root.observation_due
+            || loaded.state.entries.iter().any(|entry| {
+                entry.data_root_id == self.data_root_id
+                    && entry.kind == OutboxEntryKind::DeliveryObservation
+            })
         {
             return Ok(());
         }
-        if loaded.state.retry_attempts < observation.retry_attempts
-            || loaded.state.dropped < observation.dropped
-        {
+        if root.retry_attempts < observation.retry_attempts || root.dropped < observation.dropped {
             bail!("analytics delivery observation is stale");
         }
         loaded.state.entries.push(OutboxEntry {
             schema_version: OUTBOX_SCHEMA_VERSION,
             entry_id: uuid::Uuid::new_v4().to_string(),
+            data_root_id: self.data_root_id.clone(),
             endpoint_fingerprint: endpoint_fingerprint(endpoint),
             queued_at_epoch_seconds: now_epoch_seconds,
             attempts: 0,
@@ -540,20 +593,22 @@ impl AnalyticsOutbox {
             kind: OutboxEntryKind::DeliveryObservation,
             payload,
         });
-        loaded.state.retry_attempts = loaded
-            .state
+        let root = loaded.state.root_mut(&self.data_root_id);
+        root.retry_attempts = root
             .retry_attempts
             .saturating_sub(observation.retry_attempts);
-        loaded.state.dropped = loaded.state.dropped.saturating_sub(observation.dropped);
-        if loaded.state.failure_sequence == observation.failure_sequence {
-            loaded.state.last_failure_class = None;
-            loaded.state.observation_due = false;
+        root.dropped = root.dropped.saturating_sub(observation.dropped);
+        if root.failure_sequence == observation.failure_sequence {
+            root.last_failure_class = None;
+            root.observation_due = false;
         } else {
-            loaded.state.observation_due = true;
+            root.observation_due = true;
         }
         loaded.state.enforce_bounds()?;
-        if loaded.state.failure_sequence != observation.failure_sequence {
-            loaded.state.observation_due = true;
+        if let Some(root) = loaded.state.roots.get_mut(&self.data_root_id) {
+            if root.failure_sequence != observation.failure_sequence {
+                root.observation_due = true;
+            }
         }
         self.persist(&loaded.state)
     }
@@ -565,11 +620,11 @@ impl AnalyticsOutbox {
     fn load_normalized(&self, now_epoch_seconds: i64) -> Result<LoadedState> {
         let (mut state, mut dirty, missing) = match read_state(&self.path)? {
             StoredOutbox::Missing => (OutboxState::empty(), false, true),
-            StoredOutbox::Corrupt => (OutboxState::recovered(), true, false),
+            StoredOutbox::Corrupt => (OutboxState::recovered(&self.data_root_id), true, false),
             StoredOutbox::State(state, migrated) => (state, migrated, false),
         };
         if validate_state(&state).is_err() {
-            state = OutboxState::recovered();
+            state = OutboxState::recovered(&self.data_root_id);
             dirty = true;
         }
         if state.normalize_timestamps(now_epoch_seconds) {
@@ -637,10 +692,19 @@ fn validate_state(state: &OutboxState) -> Result<()> {
         bail!("analytics outbox exceeds its entry bound");
     }
     let mut ids = HashSet::with_capacity(state.entries.len());
-    let mut health_entries = 0_usize;
+    if state.roots.len() > OUTBOX_MAX_ENTRIES {
+        bail!("analytics outbox exceeds its root metadata bound");
+    }
+    for id in state.roots.keys() {
+        validate_root_id(id)?;
+    }
+    let mut health_roots = HashSet::new();
     for entry in &state.entries {
-        if entry.kind == OutboxEntryKind::DeliveryObservation {
-            health_entries = health_entries.saturating_add(1);
+        validate_root_id(&entry.data_root_id)?;
+        if entry.kind == OutboxEntryKind::DeliveryObservation
+            && !health_roots.insert(&entry.data_root_id)
+        {
+            bail!("analytics outbox contains multiple delivery observations for a root");
         }
         if entry.schema_version != OUTBOX_SCHEMA_VERSION
             || uuid::Uuid::parse_str(&entry.entry_id).is_err()
@@ -655,9 +719,6 @@ fn validate_state(state: &OutboxState) -> Result<()> {
         {
             bail!("analytics outbox entry is invalid");
         }
-    }
-    if health_entries > 1 {
-        bail!("analytics outbox contains multiple delivery observations");
     }
     Ok(())
 }
@@ -696,46 +757,19 @@ fn read_state(path: &Path) -> Result<StoredOutbox> {
         Some(OUTBOX_SCHEMA_VERSION) => Ok(serde_json::from_value(value)
             .map(|state| StoredOutbox::State(state, false))
             .unwrap_or(StoredOutbox::Corrupt)),
-        Some(RELEASED_OUTBOX_SCHEMA_VERSION) => Ok(serde_json::from_value(value)
-            .ok()
-            .and_then(migrate_released_v1)
-            .map(|state| StoredOutbox::State(state, true))
-            .unwrap_or(StoredOutbox::Corrupt)),
+        // Older shared entries and counters have no consent owner. Do not
+        // infer ownership from their payloads or replay them under this root.
+        Some(1 | 2) => Ok(StoredOutbox::State(OutboxState::empty(), true)),
         _ => Ok(StoredOutbox::Corrupt),
     }
 }
 
-fn migrate_released_v1(released: ReleasedOutboxStateV1) -> Option<OutboxState> {
-    if released.schema_version != RELEASED_OUTBOX_SCHEMA_VERSION
-        || released
-            .entries
-            .iter()
-            .any(|entry| entry.schema_version != RELEASED_OUTBOX_SCHEMA_VERSION)
-    {
-        return None;
+fn validate_root_id(id: &str) -> Result<()> {
+    let parsed = uuid::Uuid::parse_str(id).context("parse analytics root identity")?;
+    if parsed.is_nil() || parsed.to_string() != id {
+        bail!("analytics root identity is invalid");
     }
-    Some(OutboxState {
-        schema_version: OUTBOX_SCHEMA_VERSION,
-        entries: released
-            .entries
-            .into_iter()
-            .map(|entry| OutboxEntry {
-                schema_version: OUTBOX_SCHEMA_VERSION,
-                entry_id: uuid::Uuid::new_v4().to_string(),
-                endpoint_fingerprint: entry.endpoint_fingerprint,
-                queued_at_epoch_seconds: entry.queued_at_epoch_seconds,
-                attempts: entry.attempts,
-                next_attempt_at_epoch_seconds: 0,
-                kind: OutboxEntryKind::Ordinary,
-                payload: entry.payload,
-            })
-            .collect(),
-        retry_attempts: released.retry_attempts,
-        dropped: released.dropped,
-        failure_sequence: released.failure_sequence,
-        last_failure_class: released.last_failure_class,
-        observation_due: false,
-    })
+    Ok(())
 }
 
 struct OutboxLock(fs::File);
