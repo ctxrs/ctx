@@ -448,12 +448,71 @@ fn refresh_report_preserves_automatic_retry_and_projects_its_attention_state() {
             "automatic_retry": automatic_retry,
         });
 
-        let report = refresh_report(Some(&job), Some("generation-1"), &json!({"running": true}));
+        let report = refresh_report(
+            Some(&job),
+            Some("generation-1"),
+            &json!({"enabled": true, "running": true}),
+        );
 
         assert_eq!(report["status"], expected_status, "state={state}");
         assert_eq!(report["reason"], expected_reason, "state={state}");
         assert_eq!(report["structured_outcome"], structured_outcome);
         assert_eq!(report["automatic_retry"], automatic_retry);
+    }
+}
+
+#[test]
+fn retained_retry_checkpoint_follows_current_policy_and_runtime_ownership() {
+    for checkpoint in ["confirming", "paused", "mixed"] {
+        let mut job = json!({
+            "request_state": "failed",
+            "last_error": "retained failure",
+            "automatic_retry": {"state": checkpoint, "routes": {}},
+        });
+        for (enabled, running, request_state, expected_status, expected_reason) in [
+            (
+                false,
+                false,
+                "failed",
+                "partial",
+                "refresh_requires_explicit_request",
+            ),
+            (
+                false,
+                true,
+                "failed",
+                "partial",
+                "refresh_requires_explicit_request",
+            ),
+            (false, true, "running", "pending", "core_refresh_pending"),
+            (
+                false,
+                true,
+                "admission_pending",
+                "pending",
+                "core_refresh_pending",
+            ),
+            (false, true, "queued", "pending", "core_refresh_pending"),
+            (
+                true,
+                false,
+                "failed",
+                "partial",
+                "automatic_retry_daemon_unavailable",
+            ),
+        ] {
+            job["request_state"] = json!(request_state);
+            let report = refresh_report(
+                Some(&job),
+                Some("generation-1"),
+                &json!({"enabled": enabled, "running": running}),
+            );
+            assert_eq!(report["status"], expected_status, "{report:#}");
+            assert_eq!(report["reason"], expected_reason, "{report:#}");
+            assert_eq!(report["automatic_retry"], job["automatic_retry"]);
+            assert_eq!(report["last_error"], job["last_error"]);
+            assert_eq!(report["request_state"], job["request_state"]);
+        }
     }
 }
 
@@ -480,7 +539,11 @@ fn paused_route_does_not_claim_an_unrelated_active_refresh_is_fully_paused() {
         "automatic_retry": automatic_retry,
     });
 
-    let report = refresh_report(Some(&job), Some("generation-1"), &json!({"running": true}));
+    let report = refresh_report(
+        Some(&job),
+        Some("generation-1"),
+        &json!({"enabled": true, "running": true}),
+    );
 
     assert_eq!(report["status"], "partial");
     assert_eq!(report["reason"], "automatic_retry_partially_paused");

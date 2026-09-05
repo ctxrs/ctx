@@ -229,7 +229,23 @@ fn refresh_report(job: Option<&Value>, generation_id: Option<&str>, daemon: &Val
         .get("automatic_retry")
         .and_then(|automatic_retry| automatic_retry.get("state"))
         .and_then(Value::as_str);
+    let daemon_enabled = daemon.get("enabled").and_then(Value::as_bool) == Some(true);
+    let daemon_running = daemon.get("running").and_then(Value::as_bool) == Some(true);
     let (status, reason) = match automatic_retry_state {
+        Some("confirming" | "paused" | "mixed") if !daemon_enabled || !daemon_running => {
+            if daemon_running
+                && matches!(
+                    request_state,
+                    Some("admission_pending" | "queued" | "running")
+                )
+            {
+                ("pending", Some("core_refresh_pending"))
+            } else if daemon_enabled {
+                ("partial", Some("automatic_retry_daemon_unavailable"))
+            } else {
+                ("partial", Some("refresh_requires_explicit_request"))
+            }
+        }
         Some("confirming") => ("pending", Some("automatic_retry_confirming")),
         Some("paused") if current_internal_failure_is_fully_paused(job) => {
             ("paused", Some("automatic_retry_paused"))
