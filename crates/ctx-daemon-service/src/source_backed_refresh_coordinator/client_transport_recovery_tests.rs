@@ -617,6 +617,22 @@ fn foreground_unknown_recovery_is_bounded_and_rejects_mismatched_identity() -> R
         Some(("retryable", json!(true))),
         Some(("retryable", Value::Null)),
         Some(("error_code", Value::Null)),
+        Some((
+            "admission_durability",
+            json!("replacement_visible_or_indeterminate"),
+        )),
+        Some((
+            "admission_acknowledgement",
+            json!("retained_after_durability_error"),
+        )),
+        Some(("receipt", json!({}))),
+        Some(("receipt", Value::Null)),
+        Some(("published_generation", json!("generation"))),
+        Some(("previous_generation", json!("previous"))),
+        Some(("generation_changed", json!(false))),
+        Some(("outcome", json!("published"))),
+        Some(("structured_outcome", json!({}))),
+        Some(("finished_at_ms", json!(123))),
     ] {
         let malformed = mutation.is_some();
         let data_root = short_data_root()?;
@@ -630,7 +646,8 @@ fn foreground_unknown_recovery_is_bounded_and_rejects_mismatched_identity() -> R
                     let mut response = json!({"ok":false,"owner":"daemon","request_id":id,
                         "request_state":"request_unknown","error_code":"source_refresh_request_unknown",
                         "reason":"request_not_retained_after_restart","retryable":false,"schema_version":1,
-                        "error":"arbitrary human text cannot authorize recovery"});
+                        "error":"arbitrary human text cannot authorize recovery",
+                        "diagnostic_extension":"informational"});
                     if let Some((field, value)) = &mutation {
                         response[*field] = value.clone();
                     }
@@ -885,6 +902,14 @@ fn optional_background_rejects_malformed_or_indeterminate_admission_denials() ->
         ("active_pending_requests", json!(7)),
         ("max_active_pending_requests", Value::Null),
         ("error_code", json!("source_refresh_admission_unconfirmed")),
+        ("receipt", json!({})),
+        ("receipt", Value::Null),
+        ("published_generation", json!("generation")),
+        ("previous_generation", json!("previous")),
+        ("generation_changed", json!(false)),
+        ("outcome", json!("published")),
+        ("structured_outcome", json!({})),
+        ("finished_at_ms", json!(123)),
     ] {
         let mut response = queue_full_response_for_test();
         response[field] = value;
@@ -900,6 +925,16 @@ fn optional_background_rejects_malformed_or_indeterminate_admission_denials() ->
             "{field}: {response}"
         );
     }
+    let mut extended = queue_full_response_for_test();
+    extended["diagnostic_extension"] = json!("informational");
+    assert!(background_admission_rejected_fallback(
+        data_root.path(),
+        SourceBackedRefreshMode::Background,
+        &RefreshIntent::AutomaticMaintenance,
+        false,
+        &extended,
+    )?
+    .is_some());
     assert!(background_admission_rejected_fallback(
         data_root.path(),
         SourceBackedRefreshMode::Background,

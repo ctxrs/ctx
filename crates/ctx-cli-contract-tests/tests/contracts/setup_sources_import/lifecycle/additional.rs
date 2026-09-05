@@ -99,7 +99,6 @@ fn operational_systemd_installer_style_setup_verifies_an_empty_noop_core() {
         fs::read_to_string(temp.path().join("fake-systemd-daemon.stderr")).unwrap_or_default(),
     );
     let setup: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(setup["mode"], "ready", "{setup:#}");
     assert_eq!(setup["daemon_autostart"]["status"], "verified", "{setup:#}");
     assert_eq!(setup["daemon_autostart"]["persistent"], true, "{setup:#}");
     assert_eq!(
@@ -176,7 +175,6 @@ fn hosted_setup_recovers_when_the_new_systemd_service_first_exits_cleanly() {
         fs::read_to_string(temp.path().join("fake-systemd-daemon.stderr")).unwrap_or_default(),
     );
     let setup: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(setup["mode"], "ready", "{setup:#}");
     assert_eq!(setup["daemon_autostart"]["status"], "verified", "{setup:#}");
     assert_eq!(setup["daemon_autostart"]["persistent"], true, "{setup:#}");
     assert_eq!(
@@ -214,7 +212,6 @@ fn unavailable_systemd_installer_style_setup_starts_a_persistent_fallback() {
         .env("PATH", &path)
         .env_remove("CTX_DAEMON_AUTOSTART_OFF");
     let setup = json_output(setup_command.args(["setup", "--format=json", "--progress", "none"]));
-    assert_eq!(setup["mode"], "ready", "{setup:#}");
     assert_eq!(setup["daemon_autostart"]["status"], "degraded", "{setup:#}");
     assert_eq!(setup["daemon_autostart"]["persistent"], true, "{setup:#}");
     assert!(

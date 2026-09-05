@@ -923,6 +923,7 @@ pub(super) fn source_refresh_request_is_unknown(
             == Some(SOURCE_REFRESH_UNKNOWN_REQUEST_STATE)
         && response.get("reason").and_then(Value::as_str)
             == Some("request_not_retained_after_restart")
+        && !has_retained_request_authority(response)
         // The missing outcome itself is not retryable. This exact typed
         // response authorizes one same-request readmission; text does not.
         && response.get("retryable").and_then(Value::as_bool) == Some(false);

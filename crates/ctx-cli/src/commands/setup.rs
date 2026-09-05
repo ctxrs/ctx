@@ -220,7 +220,14 @@ fn setup_mode(
         "ready" if refresh_health_status == "ready" => "ready",
         "pending" => "pending",
         "stale" => "stale",
-        _ if refresh_status == "pending" => "pending",
+        _ if refresh_status == "pending"
+            || (refresh_health_status == "pending"
+                && refresh_status
+                    .parse::<ctx_history_refresh::RefreshRequestState>()
+                    .is_ok_and(ctx_history_refresh::RefreshRequestState::is_active)) =>
+        {
+            "pending"
+        }
         _ => "unavailable",
     }
 }
@@ -411,6 +418,22 @@ mod tests {
             "unavailable"
         );
         assert_eq!(setup_mode("ready", "published", "stale"), "unavailable");
+    }
+
+    #[test]
+    fn admitted_background_refresh_preserves_the_source_health_snapshot() {
+        for state in ["admission_pending", "queued", "running"] {
+            assert_eq!(setup_mode("ready", state, "pending"), "pending");
+            assert_eq!(setup_mode("ready", state, "ready"), "ready");
+            assert_eq!(setup_mode("unavailable", state, "pending"), "pending");
+            assert_eq!(setup_mode("stale", state, "pending"), "stale");
+            for health in ["partial", "stale", "unavailable"] {
+                assert_eq!(setup_mode("ready", state, health), "unavailable");
+            }
+        }
+        for state in ["published", "failed", "admission_rejected", "unknown"] {
+            assert_eq!(setup_mode("ready", state, "pending"), "unavailable");
+        }
     }
 
     #[test]

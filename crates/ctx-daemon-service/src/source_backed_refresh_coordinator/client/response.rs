@@ -60,6 +60,24 @@ pub(super) fn daemon_unavailable_fallback(
     Err(SourceBackedRefreshDaemonUnavailable::new(error.map(|error| format!("{error:#}"))).into())
 }
 
+// Both rejection and forgotten-result recovery must exclude contradictory
+// retained request authority. Informational extension fields remain allowed.
+pub(super) fn has_retained_request_authority(response: &Value) -> bool {
+    [
+        "admission_durability",
+        "admission_acknowledgement",
+        "receipt",
+        "published_generation",
+        "previous_generation",
+        "generation_changed",
+        "outcome",
+        "structured_outcome",
+        "finished_at_ms",
+    ]
+    .iter()
+    .any(|field| response.get(field).is_some())
+}
+
 pub(super) fn background_admission_rejected_fallback(
     data_root: &Path,
     mode: SourceBackedRefreshMode,
@@ -80,8 +98,7 @@ pub(super) fn background_admission_rejected_fallback(
         && response.get("retryable").and_then(Value::as_bool) == Some(true)
         && response.get("request_id").is_none()
         && response.get("request_state").is_none()
-        && response.get("admission_durability").is_none()
-        && response.get("admission_acknowledgement").is_none()
+        && !has_retained_request_authority(response)
         && response
             .get("active_pending_requests")
             .and_then(Value::as_u64)

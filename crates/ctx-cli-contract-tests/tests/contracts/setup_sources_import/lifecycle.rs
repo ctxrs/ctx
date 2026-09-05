@@ -1162,12 +1162,29 @@ fn validate_empty_catalog_refresh_request(refresh_request: &Value) -> Result<(),
     }
 }
 
+fn validate_empty_catalog_setup_mode(setup: &Value) -> Result<(), &'static str> {
+    validate_empty_catalog_refresh_request(&setup["refresh_request"])?;
+    match setup["refresh"]["status"].as_str() {
+        Some("ready") if setup["mode"] == "ready" => Ok(()),
+        Some("pending")
+            if setup["mode"] == "pending"
+                && setup["refresh"]["reason"] == "core_refresh_pending"
+                && matches!(
+                    setup["refresh_request"]["status"].as_str(),
+                    Some("admission_pending" | "queued" | "running")
+                ) =>
+        {
+            Ok(())
+        }
+        _ => Err("empty-catalog setup mode must match its captured refresh health"),
+    }
+}
+
 fn assert_empty_catalog_default_background_setup(setup: &Value) {
-    assert_eq!(setup["mode"], "ready", "{setup:#}");
     assert_eq!(setup["lexical"]["status"], "ready", "{setup:#}");
     assert_eq!(setup["lexical"]["certified_sources"], 0, "{setup:#}");
     assert_eq!(setup["lexical"]["indexed_documents"], 0, "{setup:#}");
-    if let Err(error) = validate_empty_catalog_refresh_request(&setup["refresh_request"]) {
+    if let Err(error) = validate_empty_catalog_setup_mode(setup) {
         panic!("{error}: {setup:#}");
     }
 }
@@ -1203,6 +1220,31 @@ fn empty_catalog_default_background_oracle_is_status_sensitive() {
         "receipt": null,
     }))
     .is_err());
+}
+
+#[test]
+fn empty_catalog_setup_mode_oracle_rejects_premature_readiness() {
+    for state in ["admission_pending", "queued", "running"] {
+        let mut setup = json!({
+            "mode":"pending",
+            "refresh":{"status":"pending","reason":"core_refresh_pending"},
+            "refresh_request":{"status":state,"source_count":0,"receipt":null},
+        });
+        assert_eq!(validate_empty_catalog_setup_mode(&setup), Ok(()));
+        setup["mode"] = json!("ready");
+        assert!(validate_empty_catalog_setup_mode(&setup).is_err());
+        setup["refresh"]["status"] = json!("ready");
+        assert_eq!(validate_empty_catalog_setup_mode(&setup), Ok(()));
+        setup["refresh_request"]["receipt"] = json!({
+            "selected_route_total":0,"successful_route_total":0,"source_failure_total":0,
+        });
+        assert!(validate_empty_catalog_setup_mode(&setup).is_err());
+        setup["refresh_request"]["status"] = json!("published");
+        assert_eq!(validate_empty_catalog_setup_mode(&setup), Ok(()));
+        setup["mode"] = json!("pending");
+        setup["refresh"]["status"] = json!("pending");
+        assert!(validate_empty_catalog_setup_mode(&setup).is_err());
+    }
 }
 
 #[path = "lifecycle/additional.rs"]

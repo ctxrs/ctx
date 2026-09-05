@@ -21,7 +21,7 @@ impl RefreshJournal for AdmissionJournal {
 
 struct DiscoveredRuntime {
     discovery: ctx_history_capture::DiscoveryContext,
-    after_capture: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    after_capture: Mutex<Option<LateAdmission>>,
     captures: std::sync::atomic::AtomicUsize,
 }
 impl RefreshRuntime for DiscoveredRuntime {
@@ -39,8 +39,55 @@ impl RefreshRuntime for DiscoveredRuntime {
         self.captures
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if let Some(hook) = self.after_capture.lock().unwrap().take() {
-            hook();
+            hook.run();
         }
+    }
+}
+
+struct LateAdmission {
+    engine: std::sync::Weak<CoreRefreshEngine>,
+    data_root: std::path::PathBuf,
+    source_path: std::path::PathBuf,
+    routes: BTreeSet<ctx_history_index::SourceRouteIdentity>,
+    request_id: String,
+    append: bool,
+}
+impl LateAdmission {
+    fn run(self) {
+        let engine = self.engine.upgrade().expect("capture owner remains alive");
+        if self.append {
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&self.source_path)
+                .unwrap();
+            writeln!(file, "{}", json!({"timestamp":"2026-07-30T12:00:02Z","type":"response_item",
+                "payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"late source content must have its own newer generation"}]}})).unwrap();
+        }
+        if self.append {
+            engine.record_watch_routes_requiring_exhaustive_reconciliation(
+                self.routes
+                    .iter()
+                    .cloned()
+                    .map(|route| (route, EventWatermark::new(10_000, 1))),
+                10_000,
+            );
+            assert!(self
+                .routes
+                .is_subset(&engine.scheduled_route_ids_for_test()));
+        }
+        // Existing runtime boundary always runs after real capture returns,
+        // including catalogs with no bounded watcher-observation tokens.
+        let response = engine
+            .handle_ipc_request(
+                &self.data_root,
+                &json!({
+                    "op":SOURCE_REFRESH_REQUEST_OP,"mode":"background","trigger":"search",
+                    "request_id":self.request_id,"refresh_intent":{"kind":"automatic_maintenance"},
+                }),
+            )
+            .unwrap()
+            .expect("late actual admission");
+        assert_eq!(response["ok"], true);
     }
 }
 
@@ -322,44 +369,14 @@ fn assert_late_publication(append: bool) -> Result<()> {
         assert_eq!(response["ok"], true);
     }
     while engine.prepare_next_pending_admission(data_root.path())? {}
-    let hook_engine = engine.clone();
-    let hook_root = data_root.path().to_owned();
-    let hook_source = source_path.clone();
-    let hook_late_id = late_id.clone();
-    let hook_routes = fixture_routes.clone();
-    *fixture.runtime.after_capture.lock().unwrap() = Some(Box::new(move || {
-        if append {
-            let mut file = std::fs::OpenOptions::new()
-                .append(true)
-                .open(&hook_source)
-                .unwrap();
-            writeln!(file, "{}", json!({"timestamp":"2026-07-30T12:00:02Z","type":"response_item",
-                "payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"late source content must have its own newer generation"}]}})).unwrap();
-        }
-        if append {
-            hook_engine.record_watch_routes_requiring_exhaustive_reconciliation(
-                hook_routes
-                    .iter()
-                    .cloned()
-                    .map(|route| (route, EventWatermark::new(10_000, 1))),
-                10_000,
-            );
-            assert!(hook_routes.is_subset(&hook_engine.scheduled_route_ids_for_test()));
-        }
-        // Existing runtime boundary always runs after real capture returns,
-        // including catalogs with no bounded watcher-observation tokens.
-        let response = hook_engine
-            .handle_ipc_request(
-                &hook_root,
-                &json!({
-                    "op":SOURCE_REFRESH_REQUEST_OP,"mode":"background","trigger":"search",
-                    "request_id":hook_late_id,"refresh_intent":{"kind":"automatic_maintenance"},
-                }),
-            )
-            .unwrap()
-            .expect("late actual admission");
-        assert_eq!(response["ok"], true);
-    }));
+    *fixture.runtime.after_capture.lock().unwrap() = Some(LateAdmission {
+        engine: Arc::downgrade(engine),
+        data_root: data_root.path().to_owned(),
+        source_path: source_path.clone(),
+        routes: fixture_routes.clone(),
+        request_id: late_id.clone(),
+        append,
+    });
     let first = engine
         .run_next(data_root.path())
         .context("first real publication")?;
