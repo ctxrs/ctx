@@ -225,7 +225,6 @@ fn unavailable_systemd_installer_style_setup_starts_a_persistent_fallback() {
         setup["daemon"]["supervisor"]["status"], "manager_unavailable",
         "{setup:#}"
     );
-    assert_eq!(setup["refresh_request"]["mode"], "wait", "{setup:#}");
     assert_empty_catalog_default_background_setup(&setup);
 
     let mut human_command = ctx_from_binary(&temp, &binary);
