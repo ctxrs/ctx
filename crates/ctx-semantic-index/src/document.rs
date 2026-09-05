@@ -7,7 +7,7 @@ pub struct SemanticEventDocument {
     pub(crate) event_id: Uuid,
     pub(crate) session_id: Option<Uuid>,
     pub(crate) seq: u64,
-    /// Activity time used to order semantic documents, including a paired assistant reply.
+    /// Activity time used to order semantic documents, including paired assistant replies.
     pub(crate) occurred_at_ms: i64,
     pub(crate) event_type: EventType,
     pub(crate) role: Option<EventRole>,
