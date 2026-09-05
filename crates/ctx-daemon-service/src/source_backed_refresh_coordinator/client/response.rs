@@ -60,6 +60,76 @@ pub(super) fn daemon_unavailable_fallback(
     Err(SourceBackedRefreshDaemonUnavailable::new(error.map(|error| format!("{error:#}"))).into())
 }
 
+// Both rejection and forgotten-result recovery must exclude contradictory
+// retained request authority. Informational extension fields remain allowed.
+pub(super) fn has_retained_request_authority(response: &Value) -> bool {
+    [
+        "admission_durability",
+        "admission_acknowledgement",
+        "receipt",
+        "published_generation",
+        "previous_generation",
+        "generation_changed",
+        "outcome",
+        "structured_outcome",
+        "finished_at_ms",
+    ]
+    .iter()
+    .any(|field| response.get(field).is_some())
+}
+
+pub(super) fn background_admission_rejected_fallback(
+    data_root: &Path,
+    mode: SourceBackedRefreshMode,
+    intent: &RefreshIntent,
+    retain_peer: bool,
+    response: &Value,
+) -> Result<Option<SourceBackedRefreshObservation>> {
+    // Only an explicit rejection can skip optional refresh. An uncertain
+    // acknowledgement may already own durable work and is not a rejection.
+    let rejected = mode == SourceBackedRefreshMode::Background
+        && *intent == RefreshIntent::AutomaticMaintenance
+        && response.get("ok").and_then(Value::as_bool) == Some(false)
+        && response.get("schema_version").and_then(Value::as_u64) == Some(1)
+        && response.get("owner").and_then(Value::as_str) == Some("daemon")
+        && response.get("status").and_then(Value::as_str) == Some("busy")
+        && response.get("error_code").and_then(Value::as_str) == Some("source_refresh_queue_full")
+        && response.get("reason").and_then(Value::as_str) == Some("queue_full")
+        && response.get("retryable").and_then(Value::as_bool) == Some(true)
+        && response.get("request_id").is_none()
+        && response.get("request_state").is_none()
+        && !has_retained_request_authority(response)
+        && response
+            .get("active_pending_requests")
+            .and_then(Value::as_u64)
+            .zip(
+                response
+                    .get("max_active_pending_requests")
+                    .and_then(Value::as_u64),
+            )
+            .is_some_and(|(active, limit)| limit > 0 && active == limit);
+    if !rejected {
+        return Ok(None);
+    }
+    let pin = if retain_peer {
+        pin_published_generation_with_retained_peer(data_root)?
+    } else {
+        pin_published_generation(data_root)?
+    };
+    Ok(pin.map(|pin| SourceBackedRefreshObservation {
+        mode,
+        status: "admission_rejected".to_owned(),
+        request_id: None,
+        daemon_available: true,
+        source_count: 0,
+        request_previous_generation: None,
+        request_generation_changed: false,
+        scanned_routes: None,
+        receipt: None,
+        pin,
+    }))
+}
+
 pub(super) fn validate_daemon_refresh_response(response: &Value) -> Result<()> {
     if response.get("ok").and_then(Value::as_bool) == Some(true) {
         return Ok(());

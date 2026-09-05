@@ -1,7 +1,9 @@
 use super::*;
 mod admission_scope;
+mod queued_batch;
 mod recovery;
 mod resolution;
+use queued_batch::QueuedRefreshBatch;
 pub(in crate::engine) use recovery::recover_automatic_retry_checkpoints;
 
 impl CoreRefreshEngine {
@@ -305,7 +307,7 @@ impl CoreRefreshEngine {
             return projected_status_json(state, &existing.request_id)
                 .ok_or_else(|| anyhow!("existing source refresh request disappeared"));
         }
-        if intent == RefreshIntent::AutomaticMaintenance {
+        if logical_request_id.is_none() && intent == RefreshIntent::AutomaticMaintenance {
             let coalesced_request_id = state
                 .active_request_id
                 .iter()
@@ -366,7 +368,7 @@ impl CoreRefreshEngine {
         execute: Execute,
         probe: Probe,
         terminal: Terminal,
-        published: Published,
+        mut published: Published,
         failed: Failed,
     ) -> Option<SourceBackedRefreshRun>
     where
@@ -379,7 +381,7 @@ impl CoreRefreshEngine {
             CoreRefreshTerminalSuccess,
             PostPublicationRouteCoverageFence,
         )>,
-        Published: FnOnce(&Value) -> Result<()>,
+        Published: FnMut(&Value) -> Result<()>,
         Failed: FnOnce(&str) -> Result<()>,
     {
         let mut state = self.lock_state();
@@ -453,9 +455,10 @@ impl CoreRefreshEngine {
         }
         drop(state);
 
-        let (request_id, previous_generation, requested_catalog, refresh_scope) = {
+        let (request_id, previous_generation, requested_catalog, refresh_scope, queued_batch) = {
             let mut state = self.lock_state();
             let request_id = state.active_request_id.clone()?;
+            let queued_batch = QueuedRefreshBatch::snapshot(&state, &request_id);
             let attempt = find_attempt_mut(&mut state, &request_id)?;
             if attempt.state != SourceBackedRefreshState::Queued {
                 return None;
@@ -472,6 +475,7 @@ impl CoreRefreshEngine {
                 attempt.previous_generation.clone(),
                 attempt.requested_explicit_source_catalog().cloned(),
                 attempt.refresh_scope.clone(),
+                queued_batch,
             )
         };
 
@@ -532,10 +536,13 @@ impl CoreRefreshEngine {
                 };
                 (verified, Some(observed))
             }
-            (Ok(publication), Ok(observed)) => (Err(format!(
-                "source-backed refresh returned generation {}, but the verified published generation is {observed:?}",
-                publication.generation_id
-            )), observed),
+            (Ok(publication), Ok(observed)) => (
+                Err(format!(
+                    "source-backed refresh returned generation {}, but the verified published generation is {observed:?}",
+                    publication.generation_id
+                )),
+                observed,
+            ),
             (Ok(publication), Err(error)) => (
                 Err(format!(
                     "source-backed refresh returned generation {}, but publication verification failed: {error:#}",
@@ -546,10 +553,13 @@ impl CoreRefreshEngine {
             (Err(error), Ok(observed)) => {
                 (Err(source_backed_refresh_error_summary(&error)), observed)
             }
-            (Err(error), Err(probe_error)) => (Err(format!(
-                "{}; verifying the retained generation also failed: {probe_error:#}",
-                source_backed_refresh_error_summary(&error)
-            )), None),
+            (Err(error), Err(probe_error)) => (
+                Err(format!(
+                    "{}; verifying the retained generation also failed: {probe_error:#}",
+                    source_backed_refresh_error_summary(&error)
+                )),
+                None,
+            ),
         };
         let verified = match verified {
             Ok((observed, publication)) => {
@@ -614,8 +624,11 @@ impl CoreRefreshEngine {
             attempt.attempt_history_progress = None;
         }
         let mut terminal_persistence_pending = false;
-        let (failed_run, did_work, coverage_certificate, terminal_job) = match verified {
+        let mut covered_batch = None;
+        let (failed_run, did_work, mut coverage_certificate, mut terminal_job) = match verified {
             Ok((observed, publication, receipt, terminal, coverage_fence)) => {
+                covered_batch = queued_batch
+                    .and_then(|batch| batch.bind_capture(&state, &request_id, &terminal));
                 let request_source_count = terminal.request_source_count(&receipt);
                 let did_work = {
                     let attempt = find_attempt_mut(&mut state, &request_id)?;
@@ -714,6 +727,19 @@ impl CoreRefreshEngine {
                 .and_then(|attempt| attempt.published_generation.clone())
                 .or(observed_for_status);
             advance_after_terminal_attempt(&mut state, &request_id, published_generation);
+            if let Some(batch) = covered_batch {
+                if let Some(run) = batch.publish_covered_members(
+                    &mut state,
+                    &request_id,
+                    coverage_certificate.as_ref(),
+                    did_work,
+                    &mut published,
+                ) {
+                    terminal_job = run.job;
+                    coverage_certificate = run.coverage_certificate;
+                    terminal_persistence_pending = run.terminal_persistence_pending;
+                }
+            }
         }
         trim_terminal_attempt_history(&mut state);
         drop(state);
@@ -740,7 +766,7 @@ impl CoreRefreshEngine {
     where
         Execute: FnOnce(&str, &Self) -> Result<SourceBackedRefreshPublication>,
         Probe: FnOnce() -> Result<Option<String>>,
-        Published: FnOnce(&Value) -> Result<()>,
+        Published: FnMut(&Value) -> Result<()>,
         Failed: FnOnce(&str) -> Result<()>,
     {
         let run = self.run_next_with_terminal_success(

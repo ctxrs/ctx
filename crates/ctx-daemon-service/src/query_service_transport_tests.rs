@@ -1022,7 +1022,7 @@ fn semantic_query_protocol_rejects_incompatible_requests_before_model_access() -
 
 #[cfg(any(unix, windows))]
 #[test]
-fn query_service_coalesces_source_refresh_requests_on_one_daemon_ticket() -> Result<()> {
+fn query_service_retains_distinct_source_refresh_requests_on_one_daemon() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let (service, source_refresh) = start_test_source_refresh_service(temp.path())?;
     let request = || {
@@ -1040,20 +1040,24 @@ fn query_service_coalesces_source_refresh_requests_on_one_daemon_ticket() -> Res
     };
 
     let first = request()?.expect("first source refresh response");
-    let second = request()?.expect("coalesced source refresh response");
+    let second = request()?.expect("second source refresh response");
 
     assert_eq!(first["request_state"], "admission_pending");
     assert_eq!(second["request_state"], "admission_pending");
-    assert_eq!(first["request_id"], second["request_id"]);
+    assert_ne!(first["request_id"], second["request_id"]);
     assert_eq!(first["coalesced_requests"], 0);
-    assert_eq!(second["coalesced_requests"], 1);
+    assert_eq!(second["coalesced_requests"], 0);
     assert!(source_refresh.has_pending_request());
     let job = read_daemon_job_status(&daemon_source_backed_refresh_job_path(temp.path()))
         .expect("admission-pending source refresh job status");
     assert_eq!(job["owner"], "daemon");
     assert_eq!(job["request_state"], "admission_pending");
     assert_eq!(job["request_id"], first["request_id"]);
-    assert_eq!(job["coalesced_requests"], 1);
+    assert_eq!(job["coalesced_requests"], 0);
+    assert_eq!(
+        job["queued_successors"][0]["request_id"],
+        second["request_id"]
+    );
     drop(service);
     Ok(())
 }

@@ -25,6 +25,7 @@ fn search_refresh_status(status: &str) -> SearchRefreshStatus {
         "existing_generation" => SearchRefreshStatus::ExistingGeneration,
         "daemon_background" => SearchRefreshStatus::DaemonBackground,
         "daemon_unavailable" => SearchRefreshStatus::DaemonUnavailable,
+        "admission_rejected" => SearchRefreshStatus::Failed,
         _ => SearchRefreshStatus::Completed,
     }
 }
@@ -129,4 +130,25 @@ pub(super) fn search_existing_generation_with_port<P: HistorySemanticPort>(
     )?;
     observation.failure_phase = None;
     Ok((value, result))
+}
+
+#[cfg(test)]
+mod admission_rejected_tests {
+    use super::*;
+
+    #[test]
+    fn rejected_optional_admission_is_failed_refresh_not_completed_telemetry() {
+        assert_eq!(
+            search_refresh_status("admission_rejected"),
+            SearchRefreshStatus::Failed
+        );
+        assert_eq!(
+            search_refresh_status("daemon_background"),
+            SearchRefreshStatus::DaemonBackground
+        );
+        assert_eq!(
+            search_refresh_status("completed"),
+            SearchRefreshStatus::Completed
+        );
+    }
 }

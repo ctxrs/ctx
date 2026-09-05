@@ -70,8 +70,7 @@ const SEMANTIC_GENERATION_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 type RefreshArg = RefreshMode;
 pub(super) const MISSING_INDEX_ERROR: &str =
     "the Core index does not exist; retry with daemon refresh enabled";
-const QUEUED_WITHOUT_GENERATION_ERROR: &str =
-    "daemon source refresh was queued but no published generation exists; retry with --refresh wait";
+const QUEUED_WITHOUT_GENERATION_ERROR: &str = "daemon source refresh was queued but no published generation exists; retry with --refresh wait";
 
 #[derive(Debug)]
 pub(super) enum SourceSearchFailure {
@@ -882,6 +881,9 @@ where
     }
     let status = match mode {
         SourceBackedRefreshMode::Off => "existing_generation",
+        SourceBackedRefreshMode::Background if observation.status == "admission_rejected" => {
+            "admission_rejected"
+        }
         SourceBackedRefreshMode::Background if observation.daemon_available => "daemon_background",
         SourceBackedRefreshMode::Background => "daemon_unavailable",
         SourceBackedRefreshMode::Wait => "completed",
@@ -948,3 +950,6 @@ pub(super) fn collect_search_hits_with_semantic_availability(
         &crate::semantic::SemanticQueryAdapter::new(data_root),
     )
 }
+
+#[cfg(test)]
+mod admission_rejected_tests;
