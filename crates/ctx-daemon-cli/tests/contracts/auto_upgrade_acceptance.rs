@@ -945,10 +945,13 @@ mod unix {
             "status",
             "--format=json",
         ]));
-        assert_eq!(stale["daemon"]["running"], false);
-        assert_eq!(stale["daemon"]["status"], "stale_lock");
-        assert_eq!(stale["daemon"]["recoverable"], true);
-        assert_eq!(stale["daemon"]["reason"], "daemon_owner_identity_mismatch");
+        assert_eq!(stale["daemon"]["running"], false, "{stale:#}");
+        assert_eq!(stale["daemon"]["status"], "stale_lock", "{stale:#}");
+        assert_eq!(stale["daemon"]["recoverable"], true, "{stale:#}");
+        assert_eq!(
+            stale["daemon"]["reason"], "daemon_owner_identity_mismatch",
+            "{stale:#}"
+        );
 
         let rejected = ctx_from_binary(&temp, &target)
             .args(["daemon", "enable", "--format=json"])
