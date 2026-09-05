@@ -245,10 +245,11 @@ impl DirectJsonlProjector {
                 .content
                 .as_deref()
                 .filter(|content| !content.trim().is_empty());
-            let retain_contentless_completion = matches!(
-                self.provider,
-                CaptureProvider::CopilotCli | CaptureProvider::GrokBuild
-            ) && subrecord.call_id.is_some();
+            // Qoder's None also represents unknown result shapes with no selected
+            // content. Preserve that abstention until its parser distinguishes them.
+            let retain_contentless_completion = content.is_none()
+                && (self.provider != CaptureProvider::Qoder || subrecord.content.is_some())
+                && admit_optional_provider_call_id(subrecord.call_id.map(str::to_owned)).is_some();
             let contentless_grok_completion =
                 self.provider == CaptureProvider::GrokBuild && content.is_none();
             if content.is_none() && !retain_contentless_completion {
@@ -304,7 +305,11 @@ fn native_result_activity(
     else {
         return Ok(None);
     };
-    let text = if subrecord.content.is_some() {
+    let text = if subrecord
+        .content
+        .as_deref()
+        .is_some_and(|text| !text.trim().is_empty())
+    {
         ActivityTextCapture::NormalizedBody
     } else {
         ActivityTextCapture::Absent
@@ -481,11 +486,6 @@ fn direct_event(
     {
         lexical_text = event_type.as_str().to_owned();
     }
-    if result.is_some() && lexical_text.trim().is_empty() {
-        return Err(CaptureError::InvalidPayload(
-            "direct JSONL result record has no meaningful selected content".to_owned(),
-        ));
-    }
     let positional_event_index = direct_jsonl_event_sequence(raw_ordinal, sub_ordinal)?;
     let native_record_id = direct_jsonl_native_event_identity(provider, value);
     let stable_retry_discriminator = match provider {
@@ -553,15 +553,6 @@ fn direct_event(
 
 fn direct_jsonl_event_sequence(raw_ordinal: u64, sub_ordinal: u32) -> Result<u64> {
     const SUBRECORD_STRIDE: u64 = 65_536;
-    const SUBRECORD_SEQUENCE_BASE: u64 = 1_u64 << 62;
-
-    if sub_ordinal == 0 {
-        return i64::try_from(raw_ordinal)
-            .map(|_| raw_ordinal)
-            .map_err(|_| {
-                CaptureError::SystemInvariant("direct JSONL provider event sequence overflowed")
-            });
-    }
     let sub_ordinal = u64::from(sub_ordinal);
     if sub_ordinal >= SUBRECORD_STRIDE {
         return Err(CaptureError::SystemInvariant(
@@ -571,8 +562,7 @@ fn direct_jsonl_event_sequence(raw_ordinal: u64, sub_ordinal: u32) -> Result<u64
     raw_ordinal
         .checked_mul(SUBRECORD_STRIDE)
         .and_then(|index| index.checked_add(sub_ordinal))
-        .filter(|index| *index < SUBRECORD_SEQUENCE_BASE)
-        .map(|index| index | SUBRECORD_SEQUENCE_BASE)
+        .filter(|index| *index <= i64::MAX as u64)
         .ok_or(CaptureError::SystemInvariant(
             "direct JSONL provider event sequence overflowed",
         ))
@@ -701,10 +691,10 @@ mod event_sequence_tests {
         let second = direct_jsonl_event_sequence(2, 0).unwrap();
         let second_result = direct_jsonl_event_sequence(2, 1).unwrap();
 
-        assert!(first < second);
-        assert!(second < first_result);
+        assert!(first < first_result);
         assert!(first_result < last_first_result);
-        assert!(last_first_result < second_result);
+        assert!(last_first_result < second);
+        assert!(second < second_result);
         assert!(second_result <= i64::MAX as u64);
     }
 
@@ -712,6 +702,12 @@ mod event_sequence_tests {
     fn direct_jsonl_event_sequence_rejects_unrepresentable_coordinates() {
         assert!(direct_jsonl_event_sequence(1, u32::from(u16::MAX) + 1).is_err());
         assert!(direct_jsonl_event_sequence(i64::MAX as u64 + 1, 0).is_err());
-        assert!(direct_jsonl_event_sequence((1_u64 << 46) + 1, 1).is_err());
+        let maximum_ordinal = (i64::MAX as u64) / 65_536;
+        assert_eq!(
+            direct_jsonl_event_sequence(maximum_ordinal, u16::MAX.into()).unwrap(),
+            i64::MAX as u64
+        );
+        assert!(direct_jsonl_event_sequence(maximum_ordinal + 1, 0).is_err());
+        assert!(direct_jsonl_event_sequence(u64::MAX, 1).is_err());
     }
 }

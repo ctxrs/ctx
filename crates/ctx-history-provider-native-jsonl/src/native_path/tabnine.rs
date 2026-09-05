@@ -3,7 +3,7 @@ use serde_json::Value;
 
 use crate::{NativeJsonlRuntime, TABNINE_CLI_SOURCE_FORMAT};
 
-const PARSER_REVISION: &str = "direct-native-jsonl-parser-v6-optional-activity-admission";
+const PARSER_REVISION: &str = "direct-native-jsonl-parser-v7-record-admission-order";
 
 pub const fn tabnine_source_backed_adapter<R: NativeJsonlRuntime>(
 ) -> super::DirectJsonlFamilyAdapter<R> {

@@ -10,12 +10,12 @@ use serde_json::{value::RawValue, Map, Number, Value};
 use crate::{NativeJsonlRuntime, COPILOT_CLI_SOURCE_FORMAT};
 
 pub(super) const COPILOT_DIRECT_NATIVE_JSONL_PARSER_REVISION: &str =
-    "copilot-cli-direct-native-jsonl-v8-optional-activity-admission";
+    "copilot-cli-direct-native-jsonl-v9-record-admission-order";
 
 const COPILOT_EVENT_TYPE_MAX_BYTES: usize = 64;
 const COPILOT_CALL_ID_MAX_BYTES: usize = 64 * 1024;
 const COPILOT_ACTIVITY_COMPONENT_MAX_BYTES: usize = 64 * 1024;
-const PARSER_REVISION: &str = "direct-native-jsonl-parser-v6-optional-activity-admission";
+const PARSER_REVISION: &str = "direct-native-jsonl-parser-v7-record-admission-order";
 
 pub const fn copilot_source_backed_adapter<R: NativeJsonlRuntime>(
 ) -> super::DirectJsonlFamilyAdapter<R> {
