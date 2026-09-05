@@ -777,70 +777,70 @@ fn publish_exact(
     source: Option<(&Entry, &FileStamp)>,
     derived_bytes: Option<&[u8]>,
 ) -> Result<()> {
+    let label = slot.label();
     let executable = matches!(slot, Slot::Core | Slot::Companion);
     let max = super::max_bytes(slot);
     let target = layout.target(slot);
     let temporary = layout.staged(slot, &pending.attempt_id);
-    if content_matches(&target, expected, max, slot.label())? {
-        filesystem::protect_regular(&target, executable, slot.label())?;
-        remove_matching_temporary(&temporary, expected, max, slot.label())?;
+    let mut temporary_stamp = filesystem::stamp_temporary_optional(
+        &temporary,
+        max,
+        &format!("{label} publication temporary"),
+    )?;
+    if let Some(stamp) = temporary_stamp
+        .as_ref()
+        .filter(|stamp| !expected.matches(stamp))
+    {
+        let is_prefix = match (source, derived_bytes) {
+            (Some((source, source_stamp)), None) => {
+                filesystem::matches_source_prefix(source, source_stamp, stamp, label)?
+            }
+            (None, Some(bytes)) if stamp.size_bytes < expected.size_bytes => {
+                let prefix_len = usize::try_from(stamp.size_bytes)?;
+                bytes
+                    .get(..prefix_len)
+                    .is_some_and(|prefix| format!("{:x}", Sha256::digest(prefix)) == stamp.sha256)
+            }
+            _ => false,
+        };
+        if !is_prefix {
+            bail!("managed-pair {label} publication temporary changed");
+        }
+        // Only the fixed pending attempt's safe, uniquely linked partial copy
+        // may be discarded. Retained signed inputs were verified before entry.
+        filesystem::remove_temporary_exact(&temporary, stamp, max, label)?;
+        temporary_stamp = None;
+    }
+    if content_matches(&target, expected, max, label)? {
+        filesystem::protect_regular(&target, executable, label)?;
+        if let Some(stamp) = temporary_stamp {
+            filesystem::remove_if_exact(&temporary, &stamp, max, label)?;
+        }
         return Ok(());
     }
 
-    let temporary_stamp = match filesystem::stamp_optional(
-        &temporary,
-        max,
-        &format!("{} publication temporary", slot.label()),
-    )? {
+    let temporary_stamp = match temporary_stamp {
         Some(stamp) => {
-            if !expected.matches(&stamp) {
-                bail!(
-                    "managed-pair {} publication temporary changed",
-                    slot.label()
-                );
-            }
-            filesystem::protect_regular(&temporary, executable, slot.label())?;
+            filesystem::protect_regular(&temporary, executable, label)?;
             stamp
         }
         None => match (source, derived_bytes) {
-            (Some((source, source_stamp)), None) => filesystem::copy_exact(
-                source,
-                &temporary,
-                source_stamp,
-                max,
-                executable,
-                slot.label(),
-            )?,
-            (None, Some(bytes)) => {
-                filesystem::write_new(&temporary, bytes, executable, slot.label())?
+            (Some((source, source_stamp)), None) => {
+                filesystem::copy_exact(source, &temporary, source_stamp, max, executable, label)?
             }
+            (None, Some(bytes)) => filesystem::write_new(&temporary, bytes, executable, label)?,
             _ => bail!("managed-pair publication source is invalid"),
         },
     };
     // This rejects symlink, reparse-point, and hardlink targets immediately
     // before the handle-relative atomic replacement.
-    let _ = filesystem::stamp_optional(&target, max, slot.label())?;
-    filesystem::durable_replace(&temporary, &target, &temporary_stamp, max, slot.label())?;
-    filesystem::protect_regular(&target, executable, slot.label())?;
-    if !content_matches(&target, expected, max, slot.label())? {
-        bail!("published managed-pair {} changed", slot.label());
+    let _ = filesystem::stamp_optional(&target, max, label)?;
+    filesystem::durable_replace(&temporary, &target, &temporary_stamp, max, label)?;
+    filesystem::protect_regular(&target, executable, label)?;
+    if !content_matches(&target, expected, max, label)? {
+        bail!("published managed-pair {label} changed");
     }
     layout.revalidate()
-}
-
-fn remove_matching_temporary(
-    temporary: &Entry,
-    expected: &ContentIdentity,
-    max: u64,
-    label: &str,
-) -> Result<()> {
-    let Some(stamp) = filesystem::stamp_optional(temporary, max, label)? else {
-        return Ok(());
-    };
-    if !expected.matches(&stamp) {
-        bail!("managed-pair {label} publication temporary changed");
-    }
-    filesystem::remove_if_exact(temporary, &stamp, max, label)
 }
 
 fn write_pending(layout: &Layout, pending: &PendingApply) -> Result<()> {

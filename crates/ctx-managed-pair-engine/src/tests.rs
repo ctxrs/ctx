@@ -236,6 +236,7 @@ fn assert_cleanup(fixture: &Fixture, attempt_id: &str) {
 }
 
 mod fix_forward;
+mod partial_copy;
 #[cfg(unix)]
 mod reconciliation;
 
