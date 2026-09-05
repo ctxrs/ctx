@@ -544,6 +544,9 @@ fn explicit_pro_selector_index(arguments: &[OsString]) -> Option<usize> {
             break;
         }
         if argument == "--data-root" || argument == "--color" {
+            if arguments.get(index + 1).is_some_and(|value| value == "--") {
+                break;
+            }
             index = index.saturating_add(2);
             continue;
         }
