@@ -296,7 +296,10 @@ fn fresh_home_search_mvp_flow() {
     assert!(verbose_search.contains("Retrieval score"));
     assert!(verbose_search.contains(" show session "));
     assert!(verbose_search.contains(" show event "));
-    assert!(verbose_search.contains(" search onboarding --session"));
+    assert!(
+        verbose_search.contains(&format!(" search --session {ctx_session_id} -- onboarding")),
+        "{verbose_search}"
+    );
     assert!(!human_search.contains("work_record"));
     assert!(!human_search.contains("history_record"));
 
