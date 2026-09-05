@@ -186,6 +186,18 @@ fn pro_values_and_delimited_arguments_do_not_select_a_companion_route() {
 fn removing_a_router_selector_preserves_command_arguments() {
     for (arguments, expected) in [
         (
+            vec!["ctx", "--pro", "--pro", "status"],
+            vec!["--pro", "status"],
+        ),
+        (
+            vec!["ctx", "status", "--pro", "--pro"],
+            vec!["status", "--pro"],
+        ),
+        (
+            vec!["ctx", "--pro", "status", "--pro"],
+            vec!["status", "--pro"],
+        ),
+        (
             vec!["ctx", "--data-root", "--pro", "--pro", "status"],
             vec!["--data-root", "--pro", "status"],
         ),
