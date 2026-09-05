@@ -45,6 +45,33 @@ pub fn render_status_human(
     let last_verified_searchable = matches!(lexical_status, "ready" | "stale");
     let (state, title, detail) = match health {
         StatusHealth::Healthy => (OutcomeState::Success, "ctx is healthy", None),
+        _ if matches!(
+            report["refresh"]["reason"].as_str(),
+            Some("refresh_requires_explicit_request" | "automatic_retry_daemon_unavailable")
+        ) =>
+        {
+            (
+                if last_verified_searchable {
+                    OutcomeState::Warning
+                } else {
+                    OutcomeState::Error
+                },
+                "ctx needs attention",
+                Some(format!(
+                    "{} {}",
+                    if report["refresh"]["reason"] == "refresh_requires_explicit_request" {
+                        "History refresh needs an explicit request."
+                    } else {
+                        "Automatic history refresh is waiting for a running daemon."
+                    },
+                    if last_verified_searchable {
+                        "The last verified history remains searchable."
+                    } else {
+                        "No verified history is searchable yet."
+                    },
+                )),
+            )
+        }
         _ if automatic_retry_pause == Some("paused") => (
             if last_verified_searchable {
                 OutcomeState::Warning
@@ -649,7 +676,10 @@ mod tests {
                 let rendered = document.render_plain();
                 let normalized = rendered.split_whitespace().collect::<Vec<_>>().join(" ");
 
-                assert!(rendered.starts_with("! ctx needs attention\n"), "{rendered}");
+                assert!(
+                    rendered.starts_with("! ctx needs attention\n"),
+                    "{rendered}"
+                );
                 assert!(normalized.contains(expected_detail), "{rendered}");
                 assert!(normalized.contains("Refresh"), "{rendered}");
                 assert!(normalized.contains(refresh_status), "{rendered}");
@@ -661,7 +691,11 @@ mod tests {
                     normalized.contains("Hint: Retry after fixing the source or updating ctx."),
                     "{rendered}"
                 );
-                assert_eq!(rendered.matches("ctx import --all").count(), 1, "{rendered}");
+                assert_eq!(
+                    rendered.matches("ctx import --all").count(),
+                    1,
+                    "{rendered}"
+                );
                 assert!(!rendered.contains("--no-daemon"), "{rendered}");
                 assert!(!rendered.contains("/tmp/private/source"), "{rendered}");
                 assert!(!rendered.contains(&"dd".repeat(32)), "{rendered}");
@@ -719,6 +753,65 @@ mod tests {
             !rendered.contains("history refresh is paused"),
             "{rendered}"
         );
+    }
+
+    #[test]
+    fn retained_retry_checkpoint_does_not_promise_unscheduled_work() {
+        for (reason, status, expected_detail, expected_action) in [
+            (
+                "refresh_requires_explicit_request",
+                "partial",
+                "History refresh needs an explicit request.",
+                "ctx import --all",
+            ),
+            (
+                "automatic_retry_daemon_unavailable",
+                "partial",
+                "Automatic history refresh is waiting for a running daemon.",
+                "ctx import --all",
+            ),
+            (
+                "core_refresh_pending",
+                "pending",
+                "1 history service is catching up",
+                "ctx index watch",
+            ),
+        ] {
+            for checkpoint in ["confirming", "paused", "mixed"] {
+                let mut report = status_report(true, "ready", status);
+                report["daemon"] = json!({
+                    "enabled": reason == "automatic_retry_daemon_unavailable",
+                    "running": status == "pending",
+                    "status": if status == "pending" { "running" } else { "stopped" },
+                });
+                report["refresh"]["reason"] = json!(reason);
+                // The projection can retain a terminal root while an admitted
+                // successor runs. Historical fields must not override its advice.
+                report["refresh"]["request_state"] = json!("published");
+                report["refresh"]["last_error"] = json!("retained failure");
+                report["refresh"]["automatic_retry"] = json!({"state": checkpoint});
+                for width in [32, 48, 80, 120] {
+                    let render_context = context(width, ColorMode::Never);
+                    let document = render_report(&render_context, &report);
+                    let rendered = document.render_plain();
+                    let normalized = rendered.split_whitespace().collect::<Vec<_>>().join(" ");
+                    assert!(normalized.contains(expected_detail), "{rendered}");
+                    assert!(rendered.contains(expected_action), "{rendered}");
+                    assert!(!rendered.contains("will retry"), "{rendered}");
+                    assert!(!rendered.contains("An automatic retry will"), "{rendered}");
+                    assert!(
+                        !rendered.contains("history refresh is paused"),
+                        "{rendered}"
+                    );
+                    if status == "partial" {
+                        assert!(!rendered.contains("ctx index watch"), "{rendered}");
+                    } else {
+                        assert!(!rendered.contains("ctx import --all"), "{rendered}");
+                    }
+                    assert_fits(&document, &render_context);
+                }
+            }
+        }
     }
 
     #[test]
