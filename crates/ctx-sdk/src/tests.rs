@@ -64,9 +64,10 @@ fn generic_status_omits_retired_flags_without_changing_nested_semantics() {
             raw["schema_version"] = json!(2);
             raw["lexical"] = json!({"generation_id": "ready"});
             raw["semantic"] = json!({"local_only": false, "diagnostics": {"localOnly": null}});
-            let output =
-                serde_json::to_value(normalize(operation.clone(), BackendInfo::local(None), raw).unwrap())
-                    .unwrap();
+            let output = serde_json::to_value(
+                normalize(operation.clone(), BackendInfo::local(None), raw).unwrap(),
+            )
+            .unwrap();
             let status = &output["status"];
             assert!(status.get("localOnly").is_none(), "{status}");
             assert!(status.get("local_only").is_none(), "{status}");
