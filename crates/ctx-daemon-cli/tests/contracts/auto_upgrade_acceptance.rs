@@ -99,6 +99,45 @@ mod unix {
         child.wait_with_output().unwrap()
     }
 
+    struct PausedDaemonOwner(Option<Child>);
+
+    impl PausedDaemonOwner {
+        fn pause(child: Child) -> Self {
+            let mut paused = Self(Some(child));
+            let pid = paused.0.as_ref().unwrap().id() as libc::pid_t;
+            assert_eq!(unsafe { libc::kill(pid, libc::SIGSTOP) }, 0);
+            wait_for("test-owned daemon pause", Duration::from_secs(5), || {
+                let mut status = 0;
+                let observed =
+                    unsafe { libc::waitpid(pid, &mut status, libc::WUNTRACED | libc::WNOHANG) };
+                if observed == pid && !libc::WIFSTOPPED(status) {
+                    paused.0.take();
+                    panic!("test-owned daemon exited before its pause: {status}");
+                }
+                observed == pid && libc::WIFSTOPPED(status)
+            });
+            paused
+        }
+
+        fn is_alive(&mut self) -> bool {
+            if self.0.as_mut().unwrap().try_wait().unwrap().is_some() {
+                self.0.take();
+                false
+            } else {
+                true
+            }
+        }
+    }
+
+    impl Drop for PausedDaemonOwner {
+        fn drop(&mut self) {
+            if let Some(child) = self.0.take() {
+                unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGCONT) };
+                stop_persistent_daemon(child);
+            }
+        }
+    }
+
     fn run_daemon_until(
         description: &str,
         command: &assert_cmd::Command,
@@ -904,6 +943,11 @@ mod unix {
             serde_json::from_slice(&fs::read(root.join("daemon/daemon.lock")).unwrap()).unwrap();
         assert!(lock["binary_sha256"].as_str().is_some());
 
+        // Hold the current owner alive while its executable is replaced. Without
+        // this fixture pause, its health loop can discover the deleted image and
+        // exit before another command observes the ambiguous live owner.
+        let mut old_daemon = PausedDaemonOwner::pause(old_daemon);
+
         // The ordinary harness and automatic-upgrade fixture are distinct
         // current images. Replacing one with the other must not authorize
         // signaling the still-running owner of the deleted executable.
@@ -964,10 +1008,10 @@ mod unix {
             "{rejected:?}"
         );
         assert!(
-            process_is_running(old_pid),
+            old_daemon.is_alive(),
             "ambiguous deleted-inode owner was signaled"
         );
-        stop_persistent_daemon(old_daemon);
+        drop(old_daemon);
         assert!(!process_is_running(old_pid));
 
         ctx_from_binary(&temp, &target)
