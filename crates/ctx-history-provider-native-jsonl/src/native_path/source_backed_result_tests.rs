@@ -129,7 +129,7 @@ fn native_subrecord_index(record: &CoreRecord) -> u64 {
     *index
 }
 
-fn project_all(provider: CaptureProvider, values: &[Value]) -> (Vec<CoreRecord>, u64) {
+fn test_projector(provider: CaptureProvider) -> DirectJsonlFamilyProjector<NativeJsonlTestRuntime> {
     let adapter = adapter(provider);
     let session = session(provider);
     let source_path = "direct-jsonl-identity-contract.jsonl";
@@ -145,7 +145,7 @@ fn project_all(provider: CaptureProvider, values: &[Value]) -> (Vec<CoreRecord>,
         Some(session.clone()),
     )
     .unwrap();
-    let mut projector = DirectJsonlFamilyProjector {
+    DirectJsonlFamilyProjector {
         adapter,
         fallback_identities: fallback_identities(adapter, &source, session_id),
         source,
@@ -157,7 +157,11 @@ fn project_all(provider: CaptureProvider, values: &[Value]) -> (Vec<CoreRecord>,
         accepted_event_ids: HashSet::new(),
         append_base_event_lookup: None,
         source_selector: source_path.to_owned(),
-    };
+    }
+}
+
+fn project_all(provider: CaptureProvider, values: &[Value]) -> (Vec<CoreRecord>, u64) {
+    let mut projector = test_projector(provider);
     let mut records = Vec::new();
     let mut worker = JsonlFamilyWorkerContext::default();
     for (ordinal, value) in values.iter().enumerate() {
@@ -186,6 +190,123 @@ fn event_ids_by_body(records: &[CoreRecord]) -> BTreeMap<String, String> {
             )
         })
         .collect()
+}
+
+#[test]
+fn provider_event_key_bounds_reject_only_the_bad_physical_record() {
+    let message = |id: &str, body: &str| json!({"type": "message", "id": id, "role": "assistant", "content": body});
+    // Composite tag/count (5), UTF-8 tag/length (9), and ordinal tag/value (9).
+    let maximum_native_id = 65_536 - 23;
+    for bytes in [maximum_native_id + 1, 65_536, 65_537] {
+        let (records, rejected) = project_all(
+            CaptureProvider::FactoryAiDroid,
+            &[
+                message("before", "before"),
+                message(&"x".repeat(bytes), "bad"),
+                message("after", "after"),
+            ],
+        );
+        assert_eq!(rejected, 1);
+        assert_eq!(
+            records
+                .iter()
+                .map(|record| record.content.normalized_body.as_deref().unwrap())
+                .collect::<Vec<_>>(),
+            ["before", "after"]
+        );
+    }
+    let (records, rejected) = project_all(
+        CaptureProvider::FactoryAiDroid,
+        &[message(&"x".repeat(maximum_native_id), "boundary")],
+    );
+    assert_eq!(rejected, 0);
+    assert_eq!(records.len(), 1);
+}
+
+#[test]
+fn bad_keys_do_not_accept_ids_and_sink_failures_remain_fatal() {
+    let mut projector = test_projector(CaptureProvider::FactoryAiDroid);
+    let mut worker = JsonlFamilyWorkerContext::default();
+    let bad =
+        serde_json::to_vec(&json!({"type": "message", "id": "x".repeat(65_537), "content": "bad"}))
+            .unwrap();
+    JsonlFamilyProjector::project(
+        &mut projector,
+        JsonlRecordRef::for_test(&bad, 0),
+        &mut worker,
+        &mut |_| panic!("invalid key reached sink"),
+    )
+    .unwrap();
+    assert_eq!(projector.rejected_records(), 1);
+    assert!(projector.accepted_event_ids.is_empty());
+
+    let multi = serde_json::to_vec(&json!({
+        "type": "message", "id": "shared", "parentId": "shared", "role": "user",
+        "content": [
+            {"type": "tool_result", "tool_use_id": "good", "content": "first"},
+            {"type": "tool_result", "tool_use_id": "x".repeat(65_537), "content": "second"}
+        ]
+    }))
+    .unwrap();
+    JsonlFamilyProjector::project(
+        &mut projector,
+        JsonlRecordRef::for_test(&multi, 1),
+        &mut worker,
+        &mut |_| panic!("partially valid record reached sink"),
+    )
+    .unwrap();
+    assert_eq!(projector.rejected_records(), 2);
+    assert!(projector.accepted_event_ids.is_empty());
+
+    let mut projector = test_projector(CaptureProvider::FactoryAiDroid);
+    let valid =
+        serde_json::to_vec(&json!({"type": "message", "id": "valid", "content": "valid"})).unwrap();
+    let result = JsonlFamilyProjector::project(
+        &mut projector,
+        JsonlRecordRef::for_test(&valid, 0),
+        &mut worker,
+        &mut |_| Err(CaptureError::SystemInvariant("injected sink failure")),
+    );
+    assert!(matches!(
+        result,
+        Err(CaptureError::SystemInvariant("injected sink failure"))
+    ));
+    assert_eq!(projector.rejected_records(), 0);
+}
+
+#[test]
+fn recognized_empty_droid_completions_preserve_literal_evidence_without_a_body() {
+    use ctx_history_core::ActivityTextCapture;
+    for content in [json!(""), json!(" \n\t"), json!(null)] {
+        let value = json!({"type": "message", "id": "result", "role": "user", "content": [{"type": "tool_result", "tool_use_id": "call", "content": content, "is_error": false}]});
+        let (records, rejected) = project(CaptureProvider::FactoryAiDroid, &value);
+        assert_eq!(rejected, 0);
+        assert_eq!(records.len(), 1);
+        let record = &records[0];
+        assert_eq!(record.content.normalized_body, None);
+        assert_eq!(record.content.structured_content.as_ref(), Some(&value));
+        let activity = record.content.activity.as_ref().unwrap();
+        assert_eq!(
+            activity.provider_call_id,
+            Some(TypedKey::utf8("call").unwrap())
+        );
+        assert_eq!(
+            activity.result.as_ref().unwrap().text,
+            ActivityTextCapture::Absent
+        );
+        assert_eq!(activity.result.as_ref().unwrap().status, None);
+    }
+    for result in [
+        json!({"type": "tool_result", "content": ""}),
+        json!({"type": "tool_result", "tool_use_id": "call", "content": "", "redacted": true}),
+    ] {
+        let (records, rejected) = project(
+            CaptureProvider::FactoryAiDroid,
+            &json!({"type": "message", "id": "result", "role": "user", "content": [result]}),
+        );
+        assert_eq!(rejected, 0);
+        assert!(records.is_empty());
+    }
 }
 
 #[test]
@@ -283,7 +404,7 @@ fn direct_provider_revision_matrix_matches_the_neutral_projection_and_identity_i
     let parser_cases = [
         (
             CaptureProvider::Antigravity,
-            "direct-native-jsonl-parser-v6-optional-activity-admission",
+            "direct-native-jsonl-parser-v7-record-admission-order",
         ),
         (
             CaptureProvider::CopilotCli,
@@ -291,23 +412,23 @@ fn direct_provider_revision_matrix_matches_the_neutral_projection_and_identity_i
         ),
         (
             CaptureProvider::FactoryAiDroid,
-            "direct-native-jsonl-parser-v6-optional-activity-admission",
+            "direct-native-jsonl-parser-v7-record-admission-order",
         ),
         (
             CaptureProvider::GrokBuild,
-            "direct-native-jsonl-parser-v8-grok-closed-content-admission",
+            "direct-native-jsonl-parser-v9-record-admission-order",
         ),
         (
             CaptureProvider::Qoder,
-            "direct-native-jsonl-parser-v6-optional-activity-admission",
+            "direct-native-jsonl-parser-v7-record-admission-order",
         ),
         (
             CaptureProvider::QwenCode,
-            "direct-native-jsonl-parser-v6-optional-activity-admission",
+            "direct-native-jsonl-parser-v7-record-admission-order",
         ),
         (
             CaptureProvider::Tabnine,
-            "direct-native-jsonl-parser-v6-optional-activity-admission",
+            "direct-native-jsonl-parser-v7-record-admission-order",
         ),
     ];
     for (provider, parser_revision) in parser_cases {
@@ -447,7 +568,7 @@ fn copilot_replay_preserves_current_revision_ids_and_records() {
         "c1ebd99c-7338-859b-891d-1c7e04d9ae9d",
         "5ff93a01-4aa3-82f8-8d9e-784490016567",
         "8d4627ce-c12c-8d64-af2d-d85ac722121f",
-        "242c534cc04212dd8babe58be9810c1c91b3bced3be22056c3bc1ff66e3e9739",
+        "f6a71b5c32b37c914988ac58609a52a5d16e291dd048c9e3145147039b3273bf",
     )];
 
     for (provider, value, event_id, session_id, source_id, record_leaf) in cases {
@@ -456,10 +577,8 @@ fn copilot_replay_preserves_current_revision_ids_and_records() {
             CaptureProvider::CopilotCli => {
                 super::copilot::COPILOT_DIRECT_NATIVE_JSONL_PARSER_REVISION
             }
-            CaptureProvider::GrokBuild => {
-                "direct-native-jsonl-parser-v8-grok-closed-content-admission"
-            }
-            _ => "direct-native-jsonl-parser-v6-optional-activity-admission",
+            CaptureProvider::GrokBuild => "direct-native-jsonl-parser-v9-record-admission-order",
+            _ => "direct-native-jsonl-parser-v7-record-admission-order",
         };
         assert_eq!(
             JsonlFamilyAdapter::parser_revision(&adapter),
@@ -485,6 +604,15 @@ fn copilot_replay_preserves_current_revision_ids_and_records() {
             core_record_leaf_sha256(record).unwrap(),
             record_leaf,
             "{provider:?}"
+        );
+        // The pinned IDs above do not rotate. Only the recorded parser revision
+        // changes this ordinal-zero record's released leaf digest.
+        let mut released = record.clone();
+        released.parser_revision =
+            "copilot-cli-direct-native-jsonl-v8-optional-activity-admission".to_owned();
+        assert_eq!(
+            core_record_leaf_sha256(&released).unwrap(),
+            "242c534cc04212dd8babe58be9810c1c91b3bced3be22056c3bc1ff66e3e9739"
         );
     }
 }
@@ -868,6 +996,39 @@ fn supported_family_members_retain_complete_result_bodies_in_core() {
             None,
             "{provider:?}"
         );
+        if provider != CaptureProvider::CopilotCli {
+            let content_path = if provider == CaptureProvider::Tabnine {
+                "/toolCalls/0/result/content"
+            } else {
+                "/message/content/0/content"
+            };
+            for empty in [json!(""), json!(" \n\t"), json!(null)] {
+                let qoder_unresolved_null = provider == CaptureProvider::Qoder && empty.is_null();
+                let mut empty_result = value.clone();
+                *empty_result.pointer_mut(content_path).unwrap() = empty;
+                let (records, rejected) = project(provider, &empty_result);
+                assert_eq!(rejected, 0, "{provider:?}");
+                if qoder_unresolved_null {
+                    assert!(records.is_empty());
+                    continue;
+                }
+                assert_eq!(records.len(), 1, "{provider:?}");
+                assert_eq!(records[0].content.normalized_body, None, "{provider:?}");
+                assert_eq!(
+                    records[0].content.structured_content.as_ref(),
+                    Some(&empty_result)
+                );
+                assert_eq!(
+                    records[0]
+                        .content
+                        .activity
+                        .as_ref()
+                        .unwrap()
+                        .provider_call_id,
+                    Some(TypedKey::utf8(expected_call_id).unwrap())
+                );
+            }
+        }
     }
 }
 

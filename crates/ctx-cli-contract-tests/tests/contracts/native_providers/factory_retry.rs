@@ -65,11 +65,16 @@ fn import_factory_result(temp: &TempDir, path: &str) -> Value {
 }
 
 fn import_factory(temp: &TempDir, path: &str) -> Value {
+    import_factory_with_rejections(temp, path, 0)
+}
+
+fn import_factory_with_rejections(temp: &TempDir, path: &str, rejected_records: u64) -> Value {
     let imported = import_factory_result(temp, path);
-    assert_explicit_source_publication(
+    assert_explicit_source_publication_with_rejections(
         &imported,
         "factory_ai_droid",
         "factory_ai_droid_sessions_jsonl",
+        rejected_records,
     );
     imported
 }
@@ -91,6 +96,231 @@ fn factory_record_ids(temp: &TempDir) -> BTreeSet<(String, String)> {
         .into_iter()
         .map(|record| (record.session_id.to_string(), record.event_id.to_string()))
         .collect()
+}
+
+#[test]
+fn factory_droid_import_preserves_result_order_and_record_local_rejections() {
+    let temp = tempdir();
+    let root = temp.path().join("droid-order/sessions/project");
+    fs::create_dir_all(&root).unwrap();
+    let file = root.join("ordered.jsonl");
+    let path = root.parent().unwrap().to_str().unwrap();
+    let message = |id: &str, body: &str| {
+        json!({
+            "type": "message", "id": id, "role": "assistant", "content": body
+        })
+    };
+    let mut result = factory_result(
+        "result",
+        None,
+        &[("call-one", "result one"), ("call-two", "result two")],
+    );
+    // A non-result block leaves the first retained result at native index one.
+    result["message"]["content"]
+        .as_array_mut()
+        .unwrap()
+        .insert(0, json!({"type": "text", "text": "context"}));
+    let initial = vec![
+        factory_header("ordered"),
+        message("before", "before"),
+        result,
+        message("after", "after"),
+    ];
+    write_jsonl(&file, &initial);
+    let _daemon = start_isolated_provider_daemon(&temp);
+    let cold = import_factory(&temp, path);
+    assert_eq!(cold["totals"]["current_rejected_records"], 0);
+    let ids = factory_event_ids(&temp);
+    let session = provider_core_records(&data_root(&temp), "factory_ai_droid")[0]
+        .session_id
+        .as_uuid()
+        .to_string();
+    let shown = json_output(ctx(&temp).args([
+        "show",
+        "session",
+        &session,
+        "--mode",
+        "log",
+        "--format=json",
+    ]));
+    let bodies = shown["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|event| event["text"].as_str())
+        .filter(|text| *text != "notice")
+        .collect::<Vec<_>>();
+    assert_eq!(bodies, ["before", "result one", "result two", "after"]);
+    let window = json_output(ctx(&temp).args([
+        "show",
+        "event",
+        &ids["result one"],
+        "--window",
+        "1",
+        "--format=json",
+    ]));
+    assert_eq!(
+        window["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|event| event["text"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["before", "result one", "result two"]
+    );
+
+    let noop = import_factory(&temp, path);
+    assert_noop_publication(&noop);
+    assert_eq!(factory_event_ids(&temp), ids);
+    let mut appended = fs::OpenOptions::new().append(true).open(&file).unwrap();
+    writeln!(
+        appended,
+        "{}",
+        message(&"x".repeat(65_537), "invalid identity")
+    )
+    .unwrap();
+    writeln!(appended, "{}", message("tail", "valid tail")).unwrap();
+    drop(appended);
+    let append = import_factory_with_rejections(&temp, path, 1);
+    assert_eq!(
+        append["totals"]["current_rejected_records"], 1,
+        "{append:#}"
+    );
+    let appended_ids = factory_event_ids(&temp);
+    assert!(appended_ids.contains_key("valid tail"));
+    assert!(!appended_ids.contains_key("invalid identity"));
+    for (body, id) in &ids {
+        assert_eq!(appended_ids[body], *id);
+    }
+    let repeat = import_factory_with_rejections(&temp, path, 1);
+    assert_eq!(
+        repeat["totals"]["current_rejected_records"], 1,
+        "{repeat:#}"
+    );
+    assert_noop_publication(&repeat);
+    assert_eq!(factory_event_ids(&temp), appended_ids);
+
+    // Replace the source with the same valid records around a malformed key.
+    let mut rewritten = initial;
+    rewritten.insert(2, message(&"y".repeat(65_536), "composite key overflow"));
+    rewritten.push(message("tail", "valid tail"));
+    write_jsonl(&file, &rewritten);
+    let replacement = import_factory_with_rejections(&temp, path, 1);
+    assert_eq!(
+        replacement["totals"]["current_rejected_records"], 1,
+        "{replacement:#}"
+    );
+    assert_eq!(factory_event_ids(&temp), appended_ids);
+    let search = json_output(ctx(&temp).args([
+        "search",
+        "valid tail",
+        "--provider",
+        "factory-ai-droid",
+        "--refresh",
+        "off",
+        "--format=json",
+    ]));
+    assert!(!search["results"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn factory_droid_empty_completion_is_stored_and_showable() {
+    let temp = tempdir();
+    let root = temp.path().join("droid-empty/sessions/project");
+    fs::create_dir_all(&root).unwrap();
+    let file = root.join("empty.jsonl");
+    let path = root.parent().unwrap().to_str().unwrap();
+    let result = factory_result("empty-result", None, &[("call-empty", "")]);
+    write_jsonl(&file, &[factory_header("empty"), result.clone()]);
+    let _daemon = start_isolated_provider_daemon(&temp);
+    let cold = import_factory(&temp, path);
+    assert_eq!(cold["totals"]["current_rejected_records"], 0);
+    let records = provider_core_records(&data_root(&temp), "factory_ai_droid");
+    let stored = records
+        .iter()
+        .find(|record| record.event_type == "tool_output")
+        .unwrap();
+    assert_eq!(stored.content.normalized_body, None);
+    assert_eq!(stored.content.structured_content.as_ref(), Some(&result));
+    let id = stored.event_id.as_uuid().to_string();
+    let shown = json_output(ctx(&temp).args(["show", "event", &id, "--format=json"]));
+    assert!(shown["event"].get("text").is_none());
+    assert_eq!(shown["event"]["structured_content"], result);
+    assert_eq!(shown["event"]["content"]["complete"], true);
+    assert_eq!(
+        shown["event"]["activity"]["provider_call_id"],
+        json!({"Utf8": "call-empty"})
+    );
+    let noop = import_factory(&temp, path);
+    assert_noop_publication(&noop);
+    assert_eq!(
+        factory_record_ids(&temp),
+        records
+            .iter()
+            .map(|record| (record.session_id.to_string(), record.event_id.to_string()))
+            .collect()
+    );
+}
+
+#[test]
+fn factory_droid_invalid_optional_parent_preserves_child_history() {
+    let temp = tempdir();
+    let root = temp.path().join("droid-parent/sessions/project");
+    fs::create_dir_all(&root).unwrap();
+    let cases = [
+        ("self-child", "parent", "self-child".to_owned()),
+        ("large-child", "parent", "x".repeat(65_537)),
+        (
+            "encoded-bound-child",
+            "callingSessionId",
+            "x".repeat(65_536),
+        ),
+        ("unresolved-child", "parent", "unresolved-parent".to_owned()),
+    ];
+    for (child, field, parent) in &cases {
+        let mut header = factory_header(child);
+        header[*field] = json!(parent);
+        write_jsonl(
+            &root.join(format!("{child}.jsonl")),
+            &[
+                header,
+                json!({"type": "message", "id": format!("{child}-message"), "role": "assistant", "content": format!("retained {child}")}),
+            ],
+        );
+    }
+    let _daemon = start_isolated_provider_daemon(&temp);
+    let path = root.parent().unwrap().to_str().unwrap();
+    let cold = import_factory(&temp, path);
+    assert_eq!(cold["totals"]["current_rejected_records"], 0, "{cold:#}");
+    let records = provider_core_records(&data_root(&temp), "factory_ai_droid");
+    assert_eq!(records.len(), 8);
+    for (child, _, _) in &cases {
+        let record = records
+            .iter()
+            .find(|record| {
+                record.content.normalized_body.as_deref() == Some(&format!("retained {child}"))
+            })
+            .unwrap();
+        assert_eq!(
+            record.parent_session_id.is_some(),
+            *child == "unresolved-child"
+        );
+        assert_eq!(
+            record.session_relationship.is_some(),
+            *child == "unresolved-child"
+        );
+        let shown = json_output(ctx(&temp).args([
+            "show",
+            "event",
+            &record.event_id.as_uuid().to_string(),
+            "--format=json",
+        ]));
+        assert_eq!(shown["event"]["text"], format!("retained {child}"));
+    }
+    let ids = factory_record_ids(&temp);
+    let noop = import_factory(&temp, path);
+    assert_noop_publication(&noop);
+    assert_eq!(factory_record_ids(&temp), ids);
 }
 
 #[test]
