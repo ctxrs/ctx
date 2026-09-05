@@ -180,6 +180,7 @@ fn terminal_status_persistence_failure_replays_same_request_after_process_loss()
         .to_owned();
     fixture.restore_journal();
     let request_id = fixture.request_id.clone();
+    let replay_request_id = request_id.clone();
     // Retain the filesystem, but discard all in-memory terminal retry state.
     let TerminalPersistenceFixture {
         temp: _temp,
@@ -203,6 +204,15 @@ fn terminal_status_persistence_failure_replays_same_request_after_process_loss()
     assert!(restarted
         .recover_interrupted_publication(&data_root)
         .unwrap());
+    assert_eq!(
+        restarted.status(&replay_request_id).unwrap()["request_state"],
+        "admission_pending"
+    );
+    // Recovery re-admits the retained request. Reuse the fixture's bounded
+    // admission instead of discovering providers through the shared test config.
+    restarted
+        .complete_pending_admission_for_test(&data_root, &replay_request_id, BTreeMap::new())
+        .unwrap();
     let replay = restarted.run_next(&data_root).unwrap();
     assert!(!replay.failed, "{:#}", replay.job);
     assert!(!replay.terminal_persistence_pending);
