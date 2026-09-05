@@ -40,7 +40,10 @@ func normalizePayload(op Operation, payload []byte) ([]byte, error) {
 		"operation":       operation,
 		"backend":         map[string]any{"kind": "local"},
 	}
-	camel := camelize(raw)
+	camel := raw
+	if operation != "showEvent" && operation != "showSession" {
+		camel = camelize(raw)
+	}
 
 	switch operation {
 	case "status":
@@ -78,7 +81,9 @@ func normalizeEventPayload(operation string, value any) (any, error) {
 	}
 	out := make(map[string]any, len(object))
 	for key, nested := range object {
-		out[key] = nested
+		if key != "event" && key != "events" {
+			out[snakeToCamel(key)] = camelize(nested)
+		}
 	}
 	if operation == "showEvent" {
 		if event, exists := object["event"]; exists {
@@ -142,7 +147,14 @@ func normalizeEventRecord(value any) (any, error) {
 		if snakeToCamel(key) == "mcpExchange" {
 			return nil, fmt.Errorf("event member %q collides with canonical mcpExchange", key)
 		}
-		out[key] = nested
+		canonical := snakeToCamel(key)
+		if canonical == "configPath" || canonical == "itemType" || canonical == "payloadType" || canonical == "recordType" {
+			continue
+		}
+		if key == "content" || key == "citations" {
+			nested = camelize(nested)
+		}
+		out[canonical] = nested
 	}
 	if hasSnake || hasCamel {
 		call := snake
@@ -176,10 +188,6 @@ func normalizeEventRecord(value any) (any, error) {
 	}
 	return out, nil
 }
-
-type opaqueCapturedJSON struct{ value any }
-
-func (value opaqueCapturedJSON) MarshalJSON() ([]byte, error) { return json.Marshal(value.value) }
 
 func normalizeMCPExchange(value any) (map[string]any, error) {
 	exchange, err := normalizeClosedMCPObject(value, "exchange", map[string]string{
@@ -294,7 +302,6 @@ func normalizeMCPCapture(value any, context string, argumentsCapture, textCaptur
 				return nil, fmt.Errorf("present MCP invocation arguments must be a JSON object")
 			}
 		}
-		capture["value"] = opaqueCapturedJSON{value: capture["value"]}
 	case "normalized_body":
 		if !textCapture {
 			return nil, fmt.Errorf("%s cannot use normalized_body", context)

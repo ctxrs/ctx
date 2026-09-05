@@ -384,6 +384,7 @@ type Event struct {
 	Text              string               `json:"text,omitempty"`
 	MCPToolCall       *MCPToolCall         `json:"mcpToolCall,omitempty"`
 	MCPExchange       *MCPExchange         `json:"mcpExchange,omitempty"`
+	Activity          json.RawMessage      `json:"activity,omitempty"`
 	StructuredContent json.RawMessage      `json:"structuredContent,omitempty"`
 	Content           *CoreContentMetadata `json:"content,omitempty"`
 	Citations         []Citation           `json:"citations,omitempty"`

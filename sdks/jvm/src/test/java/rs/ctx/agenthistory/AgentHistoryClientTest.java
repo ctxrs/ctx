@@ -22,6 +22,7 @@ public final class AgentHistoryClientTest {
     private static final String PROCESS_FIXTURE_PIPE_RELEASE = "CTX_MCP289_JVM_PROCESS_FIXTURE_PIPE_RELEASE";
 
     public static void main(String[] args) throws Exception {
+        currentOpaquePayloadsAndProducerErrors();
         wrapsRawStatusAsTypedEnvelope();
         normalizesSetupJsonAsInitStatus();
         rejectsStatusCountersOutsideExactCrossSDKDomain();
@@ -52,6 +53,48 @@ public final class AgentHistoryClientTest {
         localCliDeadlineOwnsPipeDescendantsAndForcesCleanup();
         searchRequiresIntent();
         hostedIsExplicitlyUnsupported();
+    }
+
+    private static void currentOpaquePayloadsAndProducerErrors() throws Exception {
+        Map<String, Object> event = Json.parseObject(readFixture("cli/opaque-event.json"));
+        for (int variant = 0; variant < 3; variant++) {
+            Map<String, Object> current = new LinkedHashMap<>(event);
+            if (variant == 1) current.put("structured_content", null);
+            if (variant == 2) current.remove("structured_content");
+            String eventJson = readFixture("cli/opaque-event.json");
+            if (variant != 0) {
+                // Keep activity exact; replace only the structured-content member by slicing at its known fixture boundary.
+                int start = eventJson.indexOf("  \"structured_content\":");
+                int end = eventJson.indexOf("  \"activity\":", start);
+                eventJson = eventJson.substring(0, start) + (variant == 1 ? "  \"structured_content\": null,\n" : "") + eventJson.substring(end);
+            }
+            String wire = "{\"event\":" + eventJson + ",\"events\":[" + eventJson + "],\"session\":{}}";
+            AgentHistoryClient client = AgentHistoryClient.withTransport(new FakeTransport("local-cli", wire));
+            Map<String, Object> actual = client.showEvent("event-1").getEvent().getEvent().asMap();
+            assertEquals(event.get("activity"), actual.get("activity"));
+            assertEquals(current.containsKey("structured_content"), actual.containsKey("structuredContent"));
+            assertEquals(current.get("structured_content"), actual.get("structuredContent"));
+            actual = client.showSession("session-1").getSession().getEvents().get(0).asMap();
+            assertEquals(event.get("activity"), actual.get("activity"));
+            assertEquals(current.get("structured_content"), actual.get("structuredContent"));
+        }
+        for (String query : List.of("--help", "--refresh=off", "-needle", "two words", "a'雪")) {
+            CommandRequest[] request = new CommandRequest[1];
+            LocalCliConfig config = LocalCliConfig.builder().runner(r -> { request[0] = r; return new CommandResult("{\"results\":[]}", "", 0); }).build();
+            AgentHistoryClient client = AgentHistoryClient.local(config);
+            client.search(query);
+            List<String> args = request[0].args();
+            assertEquals(List.of("--", query), args.subList(args.size()-2, args.size()));
+        }
+        for (boolean retryable : new boolean[]{false, true}) {
+            String stderr = "{\"error_code\":\"generation_changed\",\"failure_kind\":\"active_generation_race\",\"retryable\":" + retryable + "}";
+            AgentHistoryClient client = AgentHistoryClient.local(LocalCliConfig.builder().runner(r -> new CommandResult("", stderr, 1)).build());
+            try { client.showEvent("event-1"); throw new AssertionError("expected producer failure"); }
+            catch (CtxAgentHistoryException error) {
+                assertEquals(retryable, error.retryable());
+                assertEquals(Json.parseObject(stderr), error.details().get("producerError"));
+            }
+        }
     }
 
     private static void localCliForcesAnalyticsOffAfterAmbientAndUserEnvironment() {
@@ -918,7 +961,9 @@ public final class AgentHistoryClientTest {
                 .refresh("off"));
 
         assertEquals("search", transport.lastOperation.name());
-        assertContainsInOrder(transport.lastOperation.args(), "search", "agent history", "--format=json");
+        assertContainsInOrder(transport.lastOperation.args(), "search", "--format=json");
+        List<String> args = transport.lastOperation.args();
+        assertEquals(List.of("--", "agent history"), args.subList(args.size() - 2, args.size()));
         assertContainsInOrder(transport.lastOperation.args(), "--limit", "5");
         assertContainsInOrder(transport.lastOperation.args(), "--backend", "hybrid");
         assertContainsInOrder(transport.lastOperation.args(), "--semantic-weight", "0.35");

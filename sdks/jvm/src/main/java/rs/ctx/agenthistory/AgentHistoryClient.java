@@ -93,9 +93,6 @@ public class AgentHistoryClient {
         requireCompatibleSearchFilters(safe);
         List<String> args = new ArrayList<>();
         args.add("search");
-        if (safe.query() != null && !safe.query().isEmpty()) {
-            args.add(safe.query());
-        }
         args.add("--format=json");
         if (safe.limit() != null) {
             args.add("--limit");
@@ -107,8 +104,7 @@ public class AgentHistoryClient {
             args.add(String.valueOf(safe.semanticWeight()));
         }
         for (String term : safe.terms()) {
-            args.add("--term");
-            args.add(term);
+            add(args, "--term", term);
         }
         add(args, "--provider", safe.provider());
         add(args, "--workspace", safe.workspace());
@@ -123,6 +119,7 @@ public class AgentHistoryClient {
         if (safe.primaryOnly()) args.add("--primary-only");
         if (safe.events()) args.add("--events");
         if (safe.includeCurrentSession()) args.add("--include-current-session");
+        if (safe.query() != null && !safe.query().isEmpty()) { args.add("--"); args.add(safe.query()); }
         return new SearchResponse(executeEnvelope("search", args));
     }
 
@@ -239,8 +236,8 @@ public class AgentHistoryClient {
 
     private static void add(List<String> args, String flag, String value) {
         if (value != null && !value.isEmpty()) {
-            args.add(flag);
-            args.add(value);
+            if (value.startsWith("-")) args.add(flag + "=" + value);
+            else { args.add(flag); args.add(value); }
         }
     }
 

@@ -656,7 +656,11 @@ struct AgentHistoryEventWire {
         skip_serializing_if = "Option::is_none"
     )]
     mcp_exchange: Option<McpExchange>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present_json",
+        skip_serializing_if = "Option::is_none"
+    )]
     structured_content: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     content: Option<CoreContentMetadata>,
@@ -664,6 +668,12 @@ struct AgentHistoryEventWire {
     citations: Vec<Citation>,
     #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
     extra: JsonObject,
+}
+
+fn deserialize_present_json<'de, D: serde::Deserializer<'de>>(
+    decoder: D,
+) -> Result<Option<Value>, D::Error> {
+    Value::deserialize(decoder).map(Some)
 }
 
 impl AgentHistoryEvent {
@@ -869,6 +879,17 @@ pub fn camelize_object_keys(value: &Value) -> Value {
         }
         _ => value.clone(),
     }
+}
+
+/// Converts only the ctx-owned outer keys, leaving values opaque.
+pub fn camelize_envelope_keys(object: &Map<String, Value>) -> Map<String, Value> {
+    object
+        .iter()
+        .filter_map(|(key, value)| {
+            let key = snake_to_camel(key);
+            (!omitted_public_key(&key)).then(|| (key, value.clone()))
+        })
+        .collect()
 }
 
 fn omitted_public_key(key: &str) -> bool {

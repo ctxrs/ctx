@@ -1,37 +1,41 @@
 package ctxagenthistory
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // ErrorKind classifies SDK and adapter failures.
 type ErrorKind string
 
 const (
-	ErrorKindInvalidArgument       ErrorKind = "invalid_request"
-	ErrorKindNotFound              ErrorKind = "not_found"
-	ErrorKindNotInitialized        ErrorKind = "not_initialized"
-	ErrorKindCommandFailed         ErrorKind = "adapter_error"
-	ErrorKindDecode                ErrorKind = "decode_error"
-	ErrorKindTimeout               ErrorKind = "timeout"
-	ErrorKindCancelled             ErrorKind = "cancelled"
-	ErrorKindUnavailable           ErrorKind = "backend_unavailable"
-	ErrorKindHostedNotImplemented  ErrorKind = "not_supported"
-	ErrorKindUnknown               ErrorKind = "unknown"
-	ErrorKindUnsupportedSchema     ErrorKind = "unsupported_schema"
-	ErrorKindTransportUnavailable  ErrorKind = "transport_unavailable"
+	ErrorKindInvalidArgument      ErrorKind = "invalid_request"
+	ErrorKindNotFound             ErrorKind = "not_found"
+	ErrorKindNotInitialized       ErrorKind = "not_initialized"
+	ErrorKindCommandFailed        ErrorKind = "adapter_error"
+	ErrorKindDecode               ErrorKind = "decode_error"
+	ErrorKindTimeout              ErrorKind = "timeout"
+	ErrorKindCancelled            ErrorKind = "cancelled"
+	ErrorKindUnavailable          ErrorKind = "backend_unavailable"
+	ErrorKindHostedNotImplemented ErrorKind = "not_supported"
+	ErrorKindUnknown              ErrorKind = "unknown"
+	ErrorKindUnsupportedSchema    ErrorKind = "unsupported_schema"
+	ErrorKindTransportUnavailable ErrorKind = "transport_unavailable"
 )
 
 // Error is the structured error returned by the SDK.
 type Error struct {
-	Kind     ErrorKind
-	Message  string
-	Command  []string
-	ExitCode int
-	Stdout   string
-	Stderr   string
-	Err      error
+	Retryable bool
+	Details   map[string]any
+	Kind      ErrorKind
+	Message   string
+	Command   []string
+	ExitCode  int
+	Stdout    string
+	Stderr    string
+	Err       error
 }
 
 func (e *Error) Error() string {
@@ -81,7 +85,22 @@ func commandError(command []string, exitCode int, stdout, stderr string, err err
 	} else if err != nil {
 		message = fmt.Sprintf("%s: %s", message, err.Error())
 	}
+	var producer map[string]any
+	var details map[string]any
+	retryable := false
+	decoder := json.NewDecoder(strings.NewReader(stderr))
+	decoder.UseNumber()
+	if rejectDuplicateJSONMembers([]byte(stderr)) == nil && decoder.Decode(&producer) == nil {
+		code, codeOK := producer["error_code"].(string)
+		retry, retryOK := producer["retryable"].(bool)
+		_, hasRetry := producer["retryable"]
+		if codeOK && code != "" && (!hasRetry || retryOK) {
+			details = map[string]any{"producerError": producer}
+			retryable = retry
+		}
+	}
 	return &Error{
+		Retryable: retryable, Details: details,
 		Kind:     ErrorKindCommandFailed,
 		Message:  message,
 		Command:  append([]string(nil), command...),

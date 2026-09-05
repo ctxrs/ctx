@@ -273,7 +273,6 @@ test("builds search flags and normalizes nested CLI search output", async () => 
     "--data-root",
     "/tmp/ctx-sdk-test",
     "search",
-    "retry handling",
     "--term",
     "timeout",
     "--term",
@@ -302,6 +301,8 @@ test("builds search flags and normalizes nested CLI search output", async () => 
     "off",
     "--include-current-session",
     "--format=json",
+    "--",
+    "retry handling",
   ]);
 });
 

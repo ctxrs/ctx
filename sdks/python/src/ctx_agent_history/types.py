@@ -281,6 +281,7 @@ class Event(TypedDict, total=False):
     text: Optional[str]
     mcpToolCall: McpToolCall
     mcpExchange: McpExchange
+    activity: Any
     structuredContent: Any
     content: CoreContentMetadata
     citations: list[Citation]

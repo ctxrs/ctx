@@ -219,13 +219,15 @@ def _normalize_event_record(value: Any) -> Any:
                 details={"member": key},
             )
 
-    normalized = _camelize_public(
-        {
-            key: nested
-            for key, nested in value.items()
-            if key not in wire_keys and key not in exchange_wire_keys
-        }
-    )
+    normalized = {
+        _snake_to_camel(key): (
+            _camelize_public(nested) if key in {"content", "citations"} else nested
+        )
+        for key, nested in value.items()
+        if key not in wire_keys and key not in exchange_wire_keys
+        and key not in {"schema_version", "target", "item_type", "itemType",
+                        "payload_type", "payloadType", "record_type", "recordType"}
+    }
     if wire_keys:
         normalized["mcpToolCall"] = _validate_mcp_tool_call(value[wire_keys[0]])
     if exchange_wire_keys:

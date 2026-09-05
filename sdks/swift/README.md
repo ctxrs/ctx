@@ -66,10 +66,25 @@ completeness and selected/redacted/omitted policy metadata. `text` is the sole
 body, and per-event source paths, cursors, source locations, and previews are
 not exposed.
 
+## Compatibility limitations
+
+The Swift package retains three limitations relative to the shared contract:
+
+- Event normalization can rewrite keys within `structuredContent` and discard
+  explicit nulls. `AgentHistoryEventRecord` does not expose `activity`.
+- CLI failures retain standard process diagnostics but do not preserve the
+  producer JSON object under `details.producerError` or its `retryable` value.
+- Search argument construction does not separate a query with `--`; queries
+  beginning with a hyphen can be parsed as options.
+
+The corresponding Swift fixes are deferred. The preservation, producer-error
+and literal-query fixes in Rust, TypeScript, Python, Go, JVM and .NET do not
+establish Swift conformance.
+
 ## Local CLI Adapter
 
-`AgentHistoryClient.local(...)` shells out to a local `ctx` binary and never performs
-network calls:
+`AgentHistoryClient.local(...)` invokes a local `ctx` binary. The CLI honors
+explicitly configured external semantic execution:
 
 ```swift
 let client = AgentHistoryClient.local(

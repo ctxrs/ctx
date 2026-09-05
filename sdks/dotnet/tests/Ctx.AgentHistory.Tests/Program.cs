@@ -17,6 +17,11 @@ internal static class Program
 
     private static async Task<int> Main(string[] args)
     {
+        if (Environment.GetEnvironmentVariable("CTX_SDK_TEST_PRODUCER_ERROR") is { } producerError)
+        {
+            Console.Error.Write(producerError);
+            return 1;
+        }
         if (Environment.GetEnvironmentVariable(ProcessFixtureMode) is { } processFixture)
         {
             return await RunMcp289ProcessFixture(processFixture);
@@ -43,6 +48,7 @@ internal static class Program
 
         var tests = new (string Name, Func<Task> Body)[]
         {
+            ("preserves current payloads and producer errors", CurrentPayloadsAndProducerErrors),
             ("wraps status as agent-history-v1", WrapsStatus),
             ("filters status to the current readiness contract", FiltersStatusFields),
             ("preserves legitimate source semantics", PreservesLegitimateSourceSemantics),
@@ -92,6 +98,45 @@ internal static class Program
         }
 
         return failures == 0 ? 0 : 1;
+    }
+
+    private static async Task CurrentPayloadsAndProducerErrors()
+    {
+        var fixture = JsonNode.Parse(File.ReadAllText(Path.Combine(FindFixtures(), "cli/opaque-event.json")))!.AsObject();
+        for (int variant = 0; variant < 3; variant++)
+        {
+            var current = fixture.DeepClone().AsObject();
+            if (variant == 1) current["structured_content"] = null;
+            if (variant == 2) current.Remove("structured_content");
+            var raw = new JsonObject { ["event"] = current.DeepClone(), ["events"] = new JsonArray(current.DeepClone()), ["session"] = new JsonObject() };
+            var client = ClientFor(raw);
+            var single = (await client.ShowEventAsync("event-1")).Event.Event!.ToJsonObject();
+            var session = (await client.ShowSessionAsync("session-1")).Session.Events[0].ToJsonObject();
+            foreach (var actual in new[] { single, session })
+            {
+                True(JsonNode.DeepEquals(actual["activity"], fixture["activity"]), "activity changed");
+                Equal(current.ContainsKey("structured_content"), actual.ContainsKey("structuredContent"));
+                True(JsonNode.DeepEquals(actual["structuredContent"], current["structured_content"]), "structured content changed");
+            }
+        }
+        foreach (var query in new[] { "--help", "--refresh=off", "-needle", "two words", "a'雪" })
+        {
+            var transport = new RecordingTransport("{\"results\":[]}");
+            await new AgentHistoryClient(transport).SearchAsync(new SearchOptions { Query = query });
+            True(transport.Calls[0].TakeLast(2).SequenceEqual(new[] { "--", query }), "unsafe argv");
+        }
+        foreach (var producer in JsonNode.Parse(File.ReadAllText(Path.Combine(FindFixtures(), "cli/producer-errors.json")))!.AsArray())
+        {
+            var adapter = new LocalCliAdapter(new LocalAgentHistoryConfig {
+                CtxBinary = TestExecutable(), Environment = new Dictionary<string, string?> { ["CTX_SDK_TEST_PRODUCER_ERROR"] = producer!.ToJsonString() }
+            });
+            try { await new AgentHistoryClient(adapter).ShowEventAsync("event-1"); throw new Exception("expected producer failure"); }
+            catch (CtxAgentHistoryCliException error)
+            {
+                Equal(producer!["retryable"]!.GetValue<bool>(), error.Retryable);
+                True(JsonNode.DeepEquals(producer, error.Details["producerError"]), "producer detail changed");
+            }
+        }
     }
 
     private static async Task<int> RunMcp289ProcessFixture(string mode)
@@ -633,7 +678,7 @@ internal static class Program
             IncludeCurrentSession = true
         });
 
-        Equal("search retry --term timeout --term backoff --limit 5 --backend hybrid --semantic-weight 0.35 --provider codex --workspace ctx --since 30d --primary-only --event-type message --file src/lib.rs --session session-1 --events --refresh off --include-current-session --format=json", Join(transport.Calls[0]));
+        Equal("search --term timeout --term backoff --limit 5 --backend hybrid --semantic-weight 0.35 --provider codex --workspace ctx --since 30d --primary-only --event-type message --file src/lib.rs --session session-1 --events --refresh off --include-current-session --format=json -- retry", Join(transport.Calls[0]));
         Equal("search", response.Operation);
         Equal("retry", response.Search.Query ?? "");
         Equal("off", response.Search.Freshness!.Mode ?? "");

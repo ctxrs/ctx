@@ -234,10 +234,13 @@ internal static class AgentHistoryContract
             {
                 throw InvalidMcpExchangeWire($"outer member {pair.Key} collides with canonical mcpExchange");
             }
-            outer[pair.Key] = JsonHelpers.Clone(pair.Value);
+            var key = SnakeToCamel(pair.Key);
+            if (key is "schemaVersion" or "contractVersion" or "operation" or "backend" or "target" or "itemType" or "payloadType" or "recordType") continue;
+            outer[key] = pair.Key is "content" or "citations"
+                ? CamelizePublic(pair.Value) : JsonHelpers.Clone(pair.Value);
         }
 
-        var normalized = (JsonObject)CamelizePublic(outer)!;
+        var normalized = outer;
         if (hasSnake || hasCamel)
         {
             normalized["mcpToolCall"] = McpToolCall.FromJson(hasSnake ? snake : camel).ToJsonObject();

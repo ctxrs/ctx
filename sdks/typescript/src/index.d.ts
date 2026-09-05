@@ -354,6 +354,7 @@ export interface AgentHistoryEvent {
   text?: string | null;
   mcpToolCall?: McpToolCall;
   mcpExchange?: McpExchange;
+  activity?: JsonValue;
   structuredContent?: JsonValue;
   content?: CoreContentMetadata;
   citations?: Citation[];
@@ -469,8 +470,9 @@ export interface VersionInfo {
 
 export declare class CtxError extends Error {
   code: string;
+  retryable: boolean;
   details?: unknown;
-  constructor(message: string, options?: { code?: string; details?: unknown; cause?: unknown });
+  constructor(message: string, options?: { code?: string; retryable?: boolean; details?: unknown; cause?: unknown });
 }
 
 export declare class CtxCliError extends CtxError {

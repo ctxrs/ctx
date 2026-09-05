@@ -621,7 +621,7 @@ fn search_schema_v1_snapshot_reads_snippets_and_citations_from_core() {
         &EventSearchFilters::default(),
         &[fixture_search_presentation(
             &collection.result_window.hits[0].event,
-            core_event,
+            core_event.clone(),
             false,
         )],
         "existing_generation",
@@ -693,10 +693,62 @@ fn search_schema_v1_snapshot_reads_snippets_and_citations_from_core() {
     assert_eq!(
         result["suggested_next_commands"][2],
         format!(
-            r#"ctx --data-root '/tmp/ctx root/owner'\''s history' search 'primary query' --term='term with spaces' --session {}"#,
+            r#"ctx --data-root '/tmp/ctx root/owner'\''s history' search --session {} --term='term with spaces' -- 'primary query'"#,
             result["ctx_session_id"].as_str().unwrap()
         )
     );
+    for query in ["--help", "--refresh=off", "-needle", "two words", "a'雪"] {
+        source_request.query = query.to_owned();
+        let value = search_json(
+            &source_request,
+            follow_up_root,
+            &index,
+            &collection,
+            &EventSearchFilters::default(),
+            &[fixture_search_presentation(
+                &collection.result_window.hits[0].event,
+                core_event.clone(),
+                false,
+            )],
+            "existing_generation",
+            1,
+            std::time::Duration::ZERO,
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            // Execute the generated POSIX command with a test-only ctx function.
+            // NUL-delimited argv preserves spaces and apostrophes without calling ctx.
+            let command = value["results"][0]["suggested_next_commands"][2]
+                .as_str()
+                .unwrap();
+            let output = std::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg(format!(r#"ctx() {{ printf '%s\0' "$@"; }}; {command}"#))
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            let argv = String::from_utf8(output.stdout).unwrap();
+            assert_eq!(
+                argv.strip_suffix('\0')
+                    .unwrap()
+                    .split('\0')
+                    .collect::<Vec<_>>(),
+                [
+                    "--data-root",
+                    follow_up_root.to_str().unwrap(),
+                    "search",
+                    "--session",
+                    result["ctx_session_id"].as_str().unwrap(),
+                    "--term=term with spaces",
+                    "--",
+                    query,
+                ]
+            );
+        }
+        #[cfg(not(unix))]
+        let _ = value;
+    }
 }
 
 #[test]

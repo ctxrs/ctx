@@ -611,7 +611,6 @@ exit 2
         argv,
         vec![
             "search",
-            "agent history",
             "--limit",
             "7",
             "--backend",
@@ -624,6 +623,8 @@ exit 2
             "--refresh",
             "off",
             "--format=json",
+            "--",
+            "agent history",
         ]
     );
 
@@ -642,7 +643,6 @@ exit 2
         argv.lines().collect::<Vec<_>>(),
         vec![
             "search",
-            "agent history",
             "--limit",
             "4",
             "--event-type",
@@ -650,6 +650,8 @@ exit 2
             "--refresh",
             "wait",
             "--format=json",
+            "--",
+            "agent history",
         ]
     );
 }

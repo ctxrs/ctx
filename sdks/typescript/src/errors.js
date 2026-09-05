@@ -4,6 +4,7 @@ export class CtxError extends Error {
     this.name = "CtxError";
     this.code = options.code ?? "CTX_ERROR";
     this.details = options.details;
+    this.retryable = options.retryable ?? false;
   }
 }
 
@@ -11,6 +12,7 @@ export class CtxCliError extends CtxError {
   constructor(message, options = {}) {
     super(message, {
       code: options.code ?? "CTX_CLI_ERROR",
+      retryable: options.retryable,
       details: {
         command: options.command,
         args: options.args,
@@ -69,6 +71,7 @@ export class CtxTimeoutError extends CtxError {
   constructor(message, options = {}) {
     super(message, {
       code: options.code ?? "timeout",
+      retryable: true,
       details: options.details,
       cause: options.cause,
     });
