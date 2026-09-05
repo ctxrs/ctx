@@ -621,7 +621,7 @@ fn search_schema_v1_snapshot_reads_snippets_and_citations_from_core() {
         &EventSearchFilters::default(),
         &[fixture_search_presentation(
             &collection.result_window.hits[0].event,
-            core_event,
+            core_event.clone(),
             false,
         )],
         "existing_generation",
@@ -693,10 +693,37 @@ fn search_schema_v1_snapshot_reads_snippets_and_citations_from_core() {
     assert_eq!(
         result["suggested_next_commands"][2],
         format!(
-            r#"ctx --data-root '/tmp/ctx root/owner'\''s history' search 'primary query' --term='term with spaces' --session {}"#,
+            r#"ctx --data-root '/tmp/ctx root/owner'\''s history' search --session {} --term='term with spaces' -- 'primary query'"#,
             result["ctx_session_id"].as_str().unwrap()
         )
     );
+    for query in ["--help", "--refresh=off", "-needle"] {
+        source_request.query = query.to_owned();
+        let value = search_json(
+            &source_request,
+            follow_up_root,
+            &index,
+            &collection,
+            &EventSearchFilters::default(),
+            &[fixture_search_presentation(
+                &collection.result_window.hits[0].event,
+                core_event.clone(),
+                false,
+            )],
+            "existing_generation",
+            1,
+            std::time::Duration::ZERO,
+        )
+        .unwrap();
+        assert_eq!(
+            value["results"][0]["suggested_next_commands"][2],
+            format!(
+                r#"ctx --data-root '/tmp/ctx root/owner'\''s history' search --session {} --term='term with spaces' -- {}"#,
+                result["ctx_session_id"].as_str().unwrap(),
+                query,
+            )
+        );
+    }
 }
 
 #[test]

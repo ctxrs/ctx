@@ -10,7 +10,7 @@ use std::{
     time::Duration,
 };
 
-use ctx_protocol::{camel_alias_object, camelize_object_keys, JsonObject};
+use ctx_protocol::{camel_alias_object, camelize_envelope_keys, camelize_object_keys, JsonObject};
 pub use ctx_protocol::{
     AgentHistoryEnvelope, AgentHistoryErrorBody, AgentHistoryErrorCode, AgentHistoryEvent,
     AgentHistoryOperation, AgentHistoryStatus, BackendInfo, BackendKind, CoreContentMetadata,
@@ -26,7 +26,9 @@ use serde_json::{json, Map, Value};
 use thiserror::Error;
 
 mod exact_json;
+mod producer_error;
 mod subprocess;
+use producer_error::{cli_failure, structured_producer_error};
 
 #[cfg(test)]
 use exact_json::decode_json_value_exact;
@@ -321,12 +323,8 @@ impl AgentHistoryClient {
         }
         let mut owned = Vec::<String>::new();
         owned.push("search".to_owned());
-        if let Some(query) = options.query {
-            owned.push(query);
-        }
         for term in options.terms {
-            owned.push("--term".to_owned());
-            owned.push(term);
+            push_opt(&mut owned, "--term", Some(term));
         }
         owned.extend(["--limit".to_owned(), options.limit.to_string()]);
         push_opt(&mut owned, "--backend", options.backend);
@@ -362,6 +360,9 @@ impl AgentHistoryClient {
             owned.push("--include-current-session".to_owned());
         }
         owned.push("--format=json".to_owned());
+        if let Some(query) = options.query {
+            owned.extend(["--".to_owned(), query]);
+        }
         self.local_json_owned(AgentHistoryOperation::Search, owned)
     }
 
@@ -488,8 +489,12 @@ impl AgentHistoryClient {
 
 fn push_opt(args: &mut Vec<String>, name: &str, value: Option<String>) {
     if let Some(value) = value {
-        args.push(name.to_owned());
-        args.push(value);
+        if value.starts_with('-') {
+            args.push(format!("{name}={value}"));
+        } else {
+            args.push(name.to_owned());
+            args.push(value);
+        }
     }
 }
 
@@ -586,11 +591,7 @@ fn run_ctx_mcp_show_session(
     let output = collect_ctx_mcp_output(child, stdin_bytes, config.timeout)?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(AgentHistoryError::new(
-            classify_stderr(&stderr),
-            stderr.trim().to_owned(),
-            false,
-        ));
+        return Err(cli_failure(&stderr));
     }
     let response = output.tool_response.ok_or_else(|| {
         AgentHistoryError::new(
@@ -619,6 +620,9 @@ fn run_ctx_mcp_show_session(
             .get("structuredContent")
             .cloned()
             .unwrap_or(Value::Null);
+        if let Some(error) = structured_producer_error(&structured) {
+            return Err(error);
+        }
         let message = structured
             .get("error")
             .and_then(Value::as_str)
@@ -768,13 +772,13 @@ fn normalize_event(raw: &Value) -> Result<EventResult, AgentHistoryError> {
 fn normalize_session(raw: &Value) -> Result<SessionResult, AgentHistoryError> {
     let events = normalize_event_records(raw.get("events").unwrap_or(&Value::Null))?;
     let value = json!({
-        "session": raw.get("session").cloned(),
+        "session": raw.get("session").map(camelize_object_keys),
         "events": events,
         "mode": raw.get("mode").cloned(),
         "format": raw.get("format").cloned(),
-        "pagination": raw.get("pagination").cloned()
+        "pagination": raw.get("pagination").map(camelize_object_keys)
     });
-    decode_payload(camelize_object_keys(&value), "session")
+    decode_payload(value, "session")
 }
 
 fn normalize_event_records(raw: &Value) -> Result<Value, AgentHistoryError> {
@@ -812,11 +816,12 @@ fn normalize_event_record(raw: &Value) -> Result<Value, AgentHistoryError> {
     outer.remove("mcpToolCall");
     outer.remove("mcp_exchange");
     outer.remove("mcpExchange");
-    let Value::Object(mut normalized) = camelize_object_keys(&Value::Object(outer)) else {
-        return Err(invalid_mcp_wire(
-            "event normalization did not produce an object",
-        ));
-    };
+    let mut normalized = camelize_envelope_keys(&outer);
+    for key in ["content", "citations"] {
+        if let Some(value) = normalized.get_mut(key) {
+            *value = camelize_object_keys(value);
+        }
+    }
     if normalized.contains_key("mcpToolCall") {
         return Err(invalid_mcp_wire(
             "outer member collides with the canonical mcpToolCall key",

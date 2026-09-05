@@ -64,8 +64,10 @@ sessions, events, and provider-owned session IDs. For Codex,
 
 Shown events can include full-content `activity` with exact typed provider call
 identity, invocation and/or result channels, and literal provider facts. It is
-an additive event field; keys inside captured JSON arguments and structured
-results remain unchanged. See
+an additive event field carried with its original versioned inner field names;
+keys inside captured JSON arguments and structured results remain unchanged.
+`structuredContent` also preserves exact JSON, including an explicit null
+that is distinct from an absent field. See
 [`mcp-exchange-capture.md`](mcp-exchange-capture.md).
 
 ## Local and hosted backends
@@ -76,6 +78,10 @@ upload transcripts on its own. The local CLI stays on-machine with the built-in
 executor, but a search can use the network and send raw query text and eligible
 ctx-created document chunks when the data root has an explicitly selected
 external semantic executor.
+
+Typed CLI/MCP errors preserve retryability and the original producer diagnostic
+under `details.producerError`; the SDK does not retry automatically. Literal
+search queries, including `--help`, are passed as query data after CLI options.
 
 Hosted client configuration is reserved for future ctx service support. Until a
 hosted service exists, hosted operations fail before network I/O with a

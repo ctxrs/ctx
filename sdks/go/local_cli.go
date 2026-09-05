@@ -76,7 +76,7 @@ func (a *LocalCLIAdapter) Do(ctx context.Context, op Operation) ([]byte, error) 
 	}
 	env = append(env, analyticsEnabledEnvironment+"=false")
 	result := a.runner.Run(ctx, a.path, args, env)
-	if result.Err != nil {
+	if result.Err != nil || result.ExitCode != 0 {
 		kind := ErrorKindCommandFailed
 		if errors.Is(result.Err, context.DeadlineExceeded) {
 			kind = ErrorKindTimeout
@@ -87,6 +87,7 @@ func (a *LocalCLIAdapter) Do(ctx context.Context, op Operation) ([]byte, error) 
 		}
 		err := commandError(append([]string{a.path}, args...), result.ExitCode, string(result.Stdout), string(result.Stderr), result.Err)
 		err.Kind = kind
+        if kind == ErrorKindTimeout { err.Retryable = true }
 		return nil, err
 	}
 	stdout := bytes.TrimSpace(result.Stdout)

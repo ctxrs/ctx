@@ -423,13 +423,14 @@ class LocalCliAdapterTests(unittest.TestCase):
             [
                 "search",
                 "--format=json",
-                "semantic override",
                 "--backend",
                 "hybrid",
                 "--semantic-weight",
                 "0.8",
                 "--refresh",
                 "off",
+                "--",
+                "semantic override",
             ],
         )
 

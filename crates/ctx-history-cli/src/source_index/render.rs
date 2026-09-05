@@ -153,7 +153,7 @@ fn search_result_commands(
             }
             if !query_arguments.is_empty() {
                 suggested_next_commands.push(format!(
-                    "{command_prefix} search {query_arguments} --session {session_id}"
+                    "{command_prefix} search --session {session_id} {query_arguments}"
                 ));
             }
             ctx_history_read_application::SearchResultCommands {
@@ -186,11 +186,11 @@ fn semantic_fallback_detail(
 
 fn search_query_command_arguments(query: &NormalizedSearchQuery) -> String {
     let mut arguments = Vec::new();
-    if let Some(positional) = query.positional() {
-        arguments.push(shell_quote_arg(positional));
-    }
     for term in query.terms() {
         arguments.push(format!("--term={}", shell_quote_arg(term)));
+    }
+    if let Some(positional) = query.positional() {
+        arguments.push(format!("-- {}", shell_quote_arg(positional)));
     }
     arguments.join(" ")
 }

@@ -272,6 +272,9 @@
         "text": { "type": ["string", "null"] },
         "mcpToolCall": { "$ref": "#/$defs/mcpToolCall" },
         "mcpExchange": { "$ref": "#/$defs/mcpExchange" },
+        "activity": {
+          "description": "Optional versioned Core activity JSON. Preserve its original inner keys and captured values, including explicit nulls."
+        },
         "structuredContent": {
           "description": "Optional Core structured content. Any JSON value, including null, is preserved without a narrowed SDK-specific schema."
         },

@@ -80,6 +80,11 @@ Important reusable records:
 - `CoreContentMetadata`: whether a shown event has complete Core content, the
   selected/redacted/omitted policy status, and an optional policy reason. `text`
   is the only textual body; there is no alternate `preview` body.
+- Shown events retain `activity` as the versioned, literal Core JSON envelope,
+  including its original inner field names and typed provider call identity.
+  `structuredContent` and activity capture values are opaque JSON: keys,
+  explicit nulls, arrays, and distinct snake/camel spellings remain unchanged.
+  An absent `structuredContent` differs from a present JSON null.
 - `McpToolCall`: projection-independent MCP server/tool attribution.
 - `McpExchange`: optional content-governed invocation/response capture. Its
   closed camelCase envelope retains JSON arguments and response payloads as JSON
@@ -94,7 +99,11 @@ Important reusable records:
   when Core retained the provider-owned session identity. For Codex, this is
   the resume UUID used by Codex tooling.
 - Structured error: `code`, `message`, `retryable`, optional `details`, and
-  optional `cause`.
+  optional `cause`. CLI/MCP producer errors retain their original object in
+  `details.producerError`, including `error_code`, `failure_kind`, and `detail`,
+  and preserve `retryable`. Language-specific broad SDK codes remain separate
+  from the producer's code. Non-JSON diagnostics use the process-error fallback;
+  adapters do not retry automatically.
 
 ## CLI Adapter Mapping
 

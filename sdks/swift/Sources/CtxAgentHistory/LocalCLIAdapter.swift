@@ -179,15 +179,19 @@ public struct LocalCLIAdapter: Sendable {
         let stdout = String(data: result.stdout, encoding: .utf8) ?? ""
         let stderr = String(data: result.stderr, encoding: .utf8) ?? ""
         let firstStderrLine = stderr.split(whereSeparator: \.isNewline).first.map(String.init)
+        var producer = try? JSONDecoder().decode(JSONValue.self, from: result.stderr)
+        if producer?["error_code"]?.stringValue?.isEmpty != false ||
+            (producer?["retryable"] != nil && producer?["retryable"]?.boolValue == nil) { producer = nil }
+        var details: [String: JSONValue] = [
+            "command": .array(([ctxPath] + arguments).map { .string($0) }),
+            "exitCode": .number(Decimal(result.exitCode)), "stdout": .string(stdout), "stderr": .string(stderr)
+        ]
+        details["producerError"] = producer
         return CtxAgentHistorySDKError(
             code: .adapterError,
             message: firstStderrLine.map { "ctx command failed: \($0)" } ?? "ctx command failed",
-            details: .object([
-                "command": .array(([ctxPath] + arguments).map { .string($0) }),
-                "exitCode": .number(Decimal(result.exitCode)),
-                "stdout": .string(stdout),
-                "stderr": .string(stderr)
-            ]),
+            retryable: producer?["retryable"]?.boolValue ?? false,
+            details: .object(details),
             command: [ctxPath] + arguments,
             exitCode: Int(result.exitCode),
             stdout: stdout,

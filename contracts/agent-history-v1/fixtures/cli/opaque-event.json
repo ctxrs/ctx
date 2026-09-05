@@ -1,0 +1,93 @@
+{
+  "ctx_event_id": "event-1",
+  "ctx_session_id": "session-1",
+  "text": "body",
+  "structured_content": {
+    "customer_id": 7,
+    "customerId": 9,
+    "target": "orders",
+    "optional": null,
+    "schema_version": "api-v2",
+    "record_type": "audit",
+    "config_path": "settings.json",
+    "__proto__": {
+      "literal_key": true
+    },
+    "items": [
+      null,
+      {
+        "snake_key": null
+      },
+      "雪"
+    ]
+  },
+  "activity": {
+    "revision": 1,
+    "provider_call_id": {
+      "Utf8": "call-1"
+    },
+    "invocation": {
+      "tool": "lookup",
+      "arguments": {
+        "capture_status": "present",
+        "value": {
+          "customer_id": 7,
+          "customerId": 9,
+          "target": "orders",
+          "optional": null,
+          "schema_version": "api-v2",
+          "record_type": "audit",
+          "config_path": "settings.json",
+          "__proto__": {
+            "literal_key": true
+          },
+          "items": [
+            null,
+            {
+              "snake_key": null
+            },
+            "雪"
+          ]
+        }
+      }
+    },
+    "result": {
+      "status": "ok",
+      "text": {
+        "capture_status": "absent"
+      },
+      "structured_content": {
+        "capture_status": "present",
+        "value": {
+          "customer_id": 7,
+          "customerId": 9,
+          "target": "orders",
+          "optional": null,
+          "schema_version": "api-v2",
+          "record_type": "audit",
+          "config_path": "settings.json",
+          "__proto__": {
+            "literal_key": true
+          },
+          "items": [
+            null,
+            {
+              "snake_key": null
+            },
+            "雪"
+          ]
+        }
+      }
+    },
+    "facts": [
+      {
+        "kind": "provider_disposition",
+        "value": "literal"
+      }
+    ]
+  },
+  "content": {
+    "complete": true,
+    "policy_status": "selected"
+  }
+}

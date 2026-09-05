@@ -503,3 +503,23 @@ fn camelizes_private_cli_keys_recursively() {
     assert_eq!(camel["results"][0]["citations"][0]["targetType"], "event");
     assert_eq!(camel["results"][0]["sourceFormat"], "codex_session_jsonl");
 }
+
+#[test]
+fn event_structured_json_preserves_present_null() {
+    for source in [
+        serde_json::json!({"structuredContent":null}),
+        serde_json::json!({}),
+    ] {
+        let event: AgentHistoryEvent = serde_json::from_value(source.clone()).unwrap();
+        assert_eq!(
+            event.structured_content.as_ref(),
+            source.get("structuredContent")
+        );
+        assert_eq!(
+            serde_json::to_value(event)
+                .unwrap()
+                .get("structuredContent"),
+            source.get("structuredContent")
+        );
+    }
+}

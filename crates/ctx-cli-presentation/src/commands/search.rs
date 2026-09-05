@@ -369,6 +369,28 @@ mod tests {
         search: SearchArgs,
     }
 
+    #[test]
+    fn literal_query_terminator_preserves_configured_search_options() {
+        for query in ["--help", "--refresh=off", "-needle", "two words", "a'雪"] {
+            let parsed = TestCli::try_parse_from([
+                "ctx",
+                "--session",
+                "session-1",
+                "--refresh",
+                "off",
+                "--term=--help",
+                "--",
+                query,
+            ])
+            .unwrap()
+            .search;
+            assert_eq!(parsed.query.as_deref(), Some(query));
+            assert_eq!(parsed.session.as_deref(), Some("session-1"));
+            assert_eq!(parsed.term, ["--help"]);
+            assert!(matches!(parsed.refresh, CliRefreshArg::Off));
+        }
+    }
+
     fn telemetry() -> SearchTelemetry {
         SearchTelemetry {
             has_query: true,

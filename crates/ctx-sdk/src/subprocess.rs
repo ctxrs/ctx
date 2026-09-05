@@ -12,9 +12,7 @@ use std::os::windows::process::CommandExt as _;
 
 use serde_json::Value;
 
-use super::{
-    classify_stderr, exact_json::parse_json_value_exact, AgentHistoryError, AgentHistoryErrorCode,
-};
+use super::{exact_json::parse_json_value_exact, AgentHistoryError, AgentHistoryErrorCode};
 
 #[cfg(windows)]
 mod windows;
@@ -186,11 +184,7 @@ pub(super) fn collect_ctx_json(
     };
     if !status.success() {
         let stderr = String::from_utf8_lossy(&stderr);
-        return Err(AgentHistoryError::new(
-            classify_stderr(&stderr),
-            stderr.trim().to_owned(),
-            false,
-        ));
+        return Err(super::cli_failure(&stderr));
     }
 
     match stdout.map_err(|_| {

@@ -116,11 +116,9 @@ export class LocalAgentHistoryClient {
         : { ...queryOrOptions };
     validateSearchOptions(options);
     const args = ["search"];
-    if (options.query) {
-      args.push(options.query);
-    }
     appendSearchArgs(args, options);
     args.push("--format=json");
+    if (options.query !== undefined && options.query !== null) args.push("--", options.query);
     return this.#agentHistoryJson("search", args);
   }
 
@@ -557,10 +555,15 @@ function normalizeEventRecord(value) {
         member: key,
       });
     }
-    outer[key] = item;
+    const camelKey = snakeToCamel(key);
+    if (["configPath", "itemType", "payloadType", "recordType"].includes(camelKey)) continue;
+    Object.defineProperty(outer, camelKey, {
+      value: ["content", "citations"].includes(key) ? camelizeKeys(item) : item,
+      enumerable: true, writable: true, configurable: true,
+    });
   }
 
-  const event = camelizeKeys(outer);
+  const event = outer;
   if (hasSnake || hasCamel) {
     event.mcpToolCall = validateMcpToolCall(
       hasSnake ? value.mcp_tool_call : value.mcpToolCall,
@@ -888,7 +891,14 @@ function snakeToCamel(value) {
 
 
 function cliError(message, result) {
+  let producer;
+  try { producer = JSON.parse(result.stderr); } catch { /* Plain diagnostic fallback. */ }
+  if (!producer || typeof producer !== "object" || Array.isArray(producer) ||
+      typeof producer.error_code !== "string" || !producer.error_code ||
+      (producer.retryable !== undefined && typeof producer.retryable !== "boolean")) producer = undefined;
   return new CtxCliError(message, {
+    retryable: producer?.retryable ?? false,
+    details: producer ? { producerError: producer } : undefined,
     command: result.command,
     args: result.args,
     exitCode: result.exitCode,

@@ -2,6 +2,8 @@ package ctxagenthistory
 
 import (
 	"errors"
+ "encoding/json"
+ "strings"
 	"fmt"
 )
 
@@ -25,6 +27,8 @@ const (
 
 // Error is the structured error returned by the SDK.
 type Error struct {
+	Retryable bool
+    Details map[string]any
 	Kind     ErrorKind
 	Message  string
 	Command  []string
@@ -81,7 +85,22 @@ func commandError(command []string, exitCode int, stdout, stderr string, err err
 	} else if err != nil {
 		message = fmt.Sprintf("%s: %s", message, err.Error())
 	}
-	return &Error{
+    var producer map[string]any
+    var details map[string]any
+    retryable := false
+    decoder := json.NewDecoder(strings.NewReader(stderr))
+    decoder.UseNumber()
+    if rejectDuplicateJSONMembers([]byte(stderr)) == nil && decoder.Decode(&producer) == nil {
+        code, codeOK := producer["error_code"].(string)
+        retry, retryOK := producer["retryable"].(bool)
+        _, hasRetry := producer["retryable"]
+        if codeOK && code != "" && (!hasRetry || retryOK) {
+            details = map[string]any{"producerError": producer}
+            retryable = retry
+        }
+    }
+    return &Error{
+        Retryable: retryable, Details: details,
 		Kind:     ErrorKindCommandFailed,
 		Message:  message,
 		Command:  append([]string(nil), command...),

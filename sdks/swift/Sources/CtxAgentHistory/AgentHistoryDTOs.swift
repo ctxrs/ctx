@@ -510,6 +510,7 @@ public struct AgentHistoryEventRecord: Codable, Equatable, Sendable {
     public var text: String?
     public var mcpToolCall: AgentHistoryMCPToolCall?
     public var mcpExchange: AgentHistoryMCPExchange?
+    public var activity: JSONValue?
     public var structuredContent: JSONValue?
     public var content: CoreContentMetadata?
     public var citations: [AgentHistoryCitation]?
@@ -527,6 +528,7 @@ public struct AgentHistoryEventRecord: Codable, Equatable, Sendable {
         text: String? = nil,
         mcpToolCall: AgentHistoryMCPToolCall? = nil,
         mcpExchange: AgentHistoryMCPExchange? = nil,
+        activity: JSONValue? = nil,
         structuredContent: JSONValue? = nil,
         content: CoreContentMetadata? = nil,
         citations: [AgentHistoryCitation]? = nil
@@ -543,6 +545,7 @@ public struct AgentHistoryEventRecord: Codable, Equatable, Sendable {
         self.text = text
         self.mcpToolCall = mcpToolCall
         self.mcpExchange = mcpExchange
+        self.activity = activity
         self.structuredContent = structuredContent
         self.content = content
         self.citations = citations
@@ -561,6 +564,7 @@ public struct AgentHistoryEventRecord: Codable, Equatable, Sendable {
         case text
         case mcpToolCall
         case mcpExchange
+        case activity
         case structuredContent
         case content
         case citations
@@ -584,7 +588,10 @@ public struct AgentHistoryEventRecord: Codable, Equatable, Sendable {
         mcpExchange = container.contains(.mcpExchange)
             ? try container.decode(AgentHistoryMCPExchange.self, forKey: .mcpExchange)
             : nil
-        structuredContent = try container.decodeIfPresent(JSONValue.self, forKey: .structuredContent)
+        activity = container.contains(.activity)
+            ? try container.decode(JSONValue.self, forKey: .activity) : nil
+        structuredContent = container.contains(.structuredContent)
+            ? try container.decode(JSONValue.self, forKey: .structuredContent) : nil
         content = try container.decodeIfPresent(CoreContentMetadata.self, forKey: .content)
         citations = try container.decodeIfPresent([AgentHistoryCitation].self, forKey: .citations)
         try Self.validateNormalizedResponseBody(text: text, exchange: mcpExchange, codingPath: decoder.codingPath)
@@ -605,6 +612,7 @@ public struct AgentHistoryEventRecord: Codable, Equatable, Sendable {
         try container.encodeIfPresent(text, forKey: .text)
         try container.encodeIfPresent(mcpToolCall, forKey: .mcpToolCall)
         try container.encodeIfPresent(mcpExchange, forKey: .mcpExchange)
+        try container.encodeIfPresent(activity, forKey: .activity)
         try container.encodeIfPresent(structuredContent, forKey: .structuredContent)
         try container.encodeIfPresent(content, forKey: .content)
         try container.encodeIfPresent(citations, forKey: .citations)

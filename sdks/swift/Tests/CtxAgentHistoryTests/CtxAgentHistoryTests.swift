@@ -2,6 +2,43 @@ import XCTest
 @testable import CtxAgentHistory
 
 final class CtxAgentHistoryTests: XCTestCase {
+    func testCurrentOpaquePayloadsAndRetryErrors() throws {
+        let fixtureURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("contracts/agent-history-v1/fixtures/cli/opaque-event.json")
+        let event = try JSONDecoder().decode(JSONValue.self, from: Data(contentsOf: fixtureURL))
+        for content in [event["structured_content"], JSONValue.null, nil] {
+            var current = try XCTUnwrap(event.objectValue)
+            current["structured_content"] = content
+            let raw = JSONValue.object(["event": .object(current), "events": .array([.object(current)]), "session": .object([:])])
+            let bytes = try JSONEncoder().encode(raw)
+            let client = AgentHistoryClient(adapter: LocalCLIAdapter(runner: CapturingRunner { _ in CommandResult(stdout: bytes) }))
+            let single = try XCTUnwrap(client.showEvent("event-1").event.event)
+            let session = try XCTUnwrap(client.showSession("session-1").session.events.first)
+            for actual in [single, session] {
+                XCTAssertEqual(actual.activity, event["activity"])
+                XCTAssertEqual(actual.structuredContent, content)
+                let encoded = try JSONDecoder().decode(JSONValue.self, from: JSONEncoder().encode(actual))
+                XCTAssertEqual(encoded["structuredContent"], content)
+            }
+        }
+        for query in ["--help", "--refresh=off", "-needle", "two words", "a'雪"] {
+            let runner = CapturingRunner { _ in CommandResult(stdout: #"{"results":[]}"#) }
+            _ = try AgentHistoryClient(adapter: LocalCLIAdapter(runner: runner)).search(query)
+            XCTAssertEqual(Array(try XCTUnwrap(runner.requests.last).arguments.suffix(2)), ["--", query])
+        }
+        for retryable in [false, true] {
+            let stderr = "{\"error_code\":\"generation_changed\",\"retryable\":\(retryable)}"
+            let client = AgentHistoryClient(adapter: LocalCLIAdapter(runner: CapturingRunner { _ in CommandResult(stdout: "", stderr: stderr, exitCode: 1) }))
+            XCTAssertThrowsError(try client.showEvent("event-1")) { error in
+                let typed = error as? CtxAgentHistorySDKError
+                XCTAssertEqual(typed?.retryable, retryable)
+                XCTAssertEqual(typed?.details?["producerError"]?["error_code"], .string("generation_changed"))
+            }
+        }
+    }
+
     func testForcesAnalyticsOffAfterAmbientAndUserEnvironmentMerging() throws {
         #if !os(macOS)
         throw XCTSkip("Darwin process-group execution is macOS-only")
@@ -150,7 +187,7 @@ final class CtxAgentHistoryTests: XCTestCase {
             runner.requests[0].arguments,
             [
                 "--data-root", "/tmp/ctx-sdk-test",
-                "search", "retry handling",
+                "search",
                 "--term", "timeout",
                 "--term", "backoff",
                 "--limit", "5",
@@ -166,7 +203,7 @@ final class CtxAgentHistoryTests: XCTestCase {
                 "--events",
                 "--refresh", "off",
                 "--include-current-session",
-                "--format=json"
+                "--format=json", "--", "retry handling"
             ]
         )
     }
@@ -194,9 +231,9 @@ final class CtxAgentHistoryTests: XCTestCase {
             runner.requests[0].arguments,
             [
                 "--data-root", "/tmp/ctx-sdk-test",
-                "search", "agent history",
+                "search",
                 "--content-scope", "calls",
-                "--format=json"
+                "--format=json", "--", "agent history"
             ]
         )
         XCTAssertEqual(
@@ -247,7 +284,7 @@ final class CtxAgentHistoryTests: XCTestCase {
             switch Array(request.arguments.dropFirst(2).prefix(2)) {
             case ["status", "--format=json"]:
                 return CommandResult(stdout: Self.statusJSON)
-            case ["search", "local agent history"]:
+            case ["search", "--format=json"]:
                 return CommandResult(stdout: Self.searchJSON)
             case ["show", "event"]:
                 return CommandResult(stdout: Self.eventJSON)
