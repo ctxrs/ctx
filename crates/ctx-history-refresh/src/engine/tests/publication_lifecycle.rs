@@ -729,6 +729,16 @@ fn failed_post_commit_probe_is_not_reopened_in_the_same_cycle() {
 fn terminal_persist_failure_retries_exact_receipt_without_reexecuting_refresh() {
     let coordinator = CoreRefreshEngine::new();
     let failed_callbacks = AtomicUsize::new(0);
+    let earlier = coordinator.enqueue(None);
+    let earlier_id = request_id(&earlier);
+    coordinator
+        .run_next_with(
+            |_, _| Ok(test_publication("generation-a")),
+            || Ok(Some("generation-a".to_owned())),
+            |_| Ok(()),
+            |_| Ok(()),
+        )
+        .unwrap();
     let request = coordinator.enqueue(Some("generation-a".to_owned()));
     let request_id = request_id(&request);
 
@@ -751,16 +761,46 @@ fn terminal_persist_failure_retries_exact_receipt_without_reexecuting_refresh() 
     assert_eq!(run.job["progress"]["phase"], "published");
     assert!(run.job.get("last_error").is_none());
     assert_eq!(failed_callbacks.load(Ordering::SeqCst), 0);
+    let pending = coordinator.status(&request_id).unwrap();
+    assert_eq!(pending["request_state"], "running");
+    assert_eq!(pending["progress"]["phase"], "persisting_terminal");
+    assert_eq!(pending["published_generation"], "generation-b");
+    assert!(pending.get("receipt").is_none());
+    assert!(pending.get("structured_outcome").is_none());
+    assert!(!RefreshStatus::parse_schema_v1(pending.clone())
+        .unwrap()
+        .kind()
+        .unwrap()
+        .request_state()
+        .is_terminal());
     assert_eq!(
-        coordinator.status(&request_id).unwrap()["request_state"],
+        coordinator.status(&earlier_id).unwrap()["request_state"],
         "published"
     );
+    assert!(coordinator.status("unknown-request").is_none());
+
+    let still_pending = coordinator
+        .run_next_with(
+            |_, _| panic!("terminal persistence retry must not execute capture"),
+            || panic!("terminal persistence retry must not reopen Core"),
+            |job| {
+                assert_eq!(job, &run.job);
+                Err(anyhow!("terminal persistence is still unavailable"))
+            },
+            |_| Ok(()),
+        )
+        .unwrap();
+    assert!(still_pending.terminal_persistence_pending);
+    assert_eq!(coordinator.status(&request_id).unwrap(), pending);
 
     let retry = coordinator
         .run_next_with(
             |_, _| panic!("terminal persistence retry must not execute capture"),
             || panic!("terminal persistence retry must not reopen Core"),
-            |_| Ok(()),
+            |job| {
+                assert_eq!(job, &run.job);
+                Ok(())
+            },
             |_| Ok(()),
         )
         .expect("terminal persistence retry");
@@ -771,6 +811,9 @@ fn terminal_persist_failure_retries_exact_receipt_without_reexecuting_refresh() 
     assert_eq!(retry.job["request_state"], "published");
     assert!(retry.job.get("failure_type").is_none());
     assert!(retry.job.get("last_error").is_none());
+    let published = coordinator.status(&request_id).unwrap();
+    assert_eq!(published["request_state"], "published");
+    assert_eq!(published["receipt"], run.job["receipt"]);
 }
 
 #[test]
@@ -791,6 +834,27 @@ fn failed_terminal_persistence_retries_and_survives_restart_without_recapture() 
     assert!(first.failed);
     assert!(first.terminal_persistence_pending);
     assert!(coordinator.has_pending_request());
+    let request_id = first.job["request_id"].as_str().unwrap();
+    let pending = coordinator.status(request_id).unwrap();
+    assert_eq!(pending["request_state"], "running");
+    assert_eq!(pending["progress"]["phase"], "persisting_terminal");
+    for field in [
+        "structured_outcome",
+        "last_error",
+        "failure_type",
+        "finished_at_ms",
+    ] {
+        assert!(
+            pending.get(field).is_none(),
+            "premature terminal field {field}"
+        );
+    }
+    assert!(!RefreshStatus::parse_schema_v1(pending)
+        .unwrap()
+        .kind()
+        .unwrap()
+        .request_state()
+        .is_terminal());
 
     let status_path = daemon_source_backed_refresh_job_path(&data_root);
     let retry = coordinator
@@ -805,6 +869,10 @@ fn failed_terminal_persistence_retries_and_survives_restart_without_recapture() 
     assert!(!retry.terminal_persistence_pending);
     assert!(!coordinator.has_pending_request());
     assert_eq!(retry.job["request_state"], "failed");
+    assert_eq!(
+        coordinator.status(request_id).unwrap()["request_state"],
+        "failed"
+    );
     assert!(retry.job["last_error"]
         .as_str()
         .is_some_and(|error| error.contains("typed provider refresh failure")));
