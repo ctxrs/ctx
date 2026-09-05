@@ -127,11 +127,6 @@ pub(super) fn classify_repair_requirements(
     })
 }
 
-#[cfg(unix)]
-pub(in crate::upgrade) fn discard_legacy_previous_binary(install_path: &Path) -> Result<()> {
-    transaction::discard_legacy_previous_binary(install_path)
-}
-
 /// The installed executable and marker observed under the executable-scoped
 /// lock while a plan is built.  The installed marker version, not this
 /// process's compile-time version, is the authority for update decisions.

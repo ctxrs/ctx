@@ -13,7 +13,6 @@ mod command;
 mod diagnostics;
 mod download;
 mod install;
-mod legacy_automatic;
 mod managed_pair;
 mod metadata;
 #[cfg(test)]
@@ -152,13 +151,6 @@ pub trait DaemonUpgradePort: Send + Sync {
 
     fn begin(&self, data_root: &Path, attempt_id: &str) -> Result<Self::Lease>;
 
-    fn begin_legacy(
-        &self,
-        data_root: &Path,
-        attempt_id: &str,
-        target: &Path,
-    ) -> Result<Self::Lease>;
-
     fn begin_current(
         &self,
         data_root: &Path,
@@ -173,13 +165,6 @@ pub trait DaemonUpgradePort: Send + Sync {
         attempt_id: &str,
         helper_pid: u32,
     ) -> Result<()>;
-
-    fn replacement_helper_owns_handoff(
-        &self,
-        data_root: &Path,
-        attempt_id: &str,
-        helper_pid: u32,
-    ) -> bool;
 
     fn complete_replacement_handoff(
         &self,
@@ -277,10 +262,6 @@ impl<'a, D: DaemonUpgradePort + ?Sized> UpgradeEngine<'a, D> {
             semantic_layout,
             daemon,
         }
-    }
-
-    pub fn run_legacy_automatic_bridge(&self) -> Result<bool> {
-        legacy_automatic::run_legacy_automatic_upgrade_bridge(self.daemon)
     }
 }
 

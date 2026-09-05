@@ -78,11 +78,10 @@ ignored-paths = [
     "crates/ctx-history-refresh/src/explicit_source_catalog/codex_union.rs",
     "crates/ctx-upgrade-engine/tests/contracts/support.rs",
     "crates/ctx-upgrade-engine/tests/contracts/upgrade.rs",
-    "crates/ctx-upgrade-engine/tests/fixtures/v025_upgrade_fixture.rs",
 ]
 
 [workspace.package]
-version = "1.3.2"
+version = "1.3.3"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/ctxrs/ctx"

@@ -126,17 +126,11 @@ impl DaemonUpgradePort for Arc<Trace> {
         self.calls.lock().unwrap().push("begin");
         Ok(self.clone())
     }
-    fn begin_legacy(&self, _: &Path, _: &str, _: &Path) -> Result<Self> {
-        Err(anyhow!("unexpected legacy dispatch"))
-    }
     fn begin_current(&self, _: &Path, _: &str, _: &str, _: Option<u64>) -> Result<Self> {
         unreachable!()
     }
     fn mark_replacement_helper_handoff(&self, _: &Path, _: &str, _: u32) -> Result<()> {
         unreachable!()
-    }
-    fn replacement_helper_owns_handoff(&self, _: &Path, _: &str, _: u32) -> bool {
-        false
     }
     fn complete_replacement_handoff(
         &self,

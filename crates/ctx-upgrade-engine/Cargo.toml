@@ -9,10 +9,6 @@ homepage.workspace = true
 rust-version.workspace = true
 publish = false
 
-[package.metadata.cargo-shear]
-# The Bazel-only v0.25 upgrade fixture consumes this dependency.
-ignored = ["fs2"]
-
 [features]
 test-support = []
 
@@ -24,7 +20,6 @@ ctx-companion-bridge = { path = "../ctx-companion-bridge" }
 ctx-history-core = { path = "../ctx-history-core" }
 ctx-history-platform = { path = "../ctx-history-platform" }
 ctx-managed-pair-engine = { path = "../ctx-managed-pair-engine" }
-fs2 = "0.4.3"
 ring.workspace = true
 semver.workspace = true
 serde.workspace = true

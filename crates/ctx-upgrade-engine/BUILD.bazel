@@ -2,7 +2,7 @@ load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_deps", "crate_edi
 load("@rules_rust//rust:defs.bzl", "rust_library")
 load("//:rust_sources.bzl", "RUST_PROD_SRC_EXCLUDES")
 load("//tools/bazel:binary_contracts.bzl", "ctx_binary_contract_test")
-load("//tools/bazel:ctx_rust.bzl", "ctx_rust_binary", "ctx_rust_test")
+load("//tools/bazel:ctx_rust.bzl", "ctx_rust_test")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -102,19 +102,6 @@ ctx_rust_test(
     rustc_env_files = ["test-harness.env"],
     rustc_flags = CTX_UPGRADE_ENGINE_RUSTC_FLAGS,
     tags = ["exclusive"],
-)
-
-ctx_rust_binary(
-    name = "ctx_v025_upgrade_fixture",
-    testonly = True,
-    srcs = ["tests/fixtures/v025_upgrade_fixture.rs"],
-    crate_name = "ctx_v025_upgrade_fixture",
-    crate_root = "tests/fixtures/v025_upgrade_fixture.rs",
-    edition = crate_edition(),
-    aliases = aliases(),
-    deps = all_crate_deps(normal = True),
-    proc_macro_deps = all_crate_deps(proc_macro = True),
-    rustc_env_files = ["//crates/ctx-cli:cargo_toml_env_vars"],
 )
 
 ctx_binary_contract_test(

@@ -35,8 +35,6 @@ windows-sys = { version = "0.61", features = [
   "Win32_System_IO",
   "Win32_System_Console",
   "Win32_System_Pipes",
-  "Win32_System_ProcessStatus",
-  "Win32_System_RestartManager",
   "Win32_System_Threading",
 ] }
 

@@ -4,8 +4,7 @@ pub(super) use ctx_daemon_runtime::terminate_identity_verified_residual_daemon;
 #[cfg(windows)]
 use ctx_daemon_runtime::wait_for_released_residual_daemon;
 use ctx_daemon_runtime::{
-    daemon_upgrade_handoff_path, daemon_upgrade_restart_request_root,
-    terminate_identity_verified_legacy_daemon, DaemonLifecycleControlLock,
+    daemon_upgrade_handoff_path, daemon_upgrade_restart_request_root, DaemonLifecycleControlLock,
     DaemonLifecycleTransitionLock,
 };
 
@@ -152,7 +151,6 @@ struct DaemonUpgradeHandoffInput {
     handoff_id: String,
     expected_process: ExpectedProcessIdentity,
     persisted_restart_label: Option<String>,
-    allow_cooperative_grace: bool,
     handoff_path: PathBuf,
     restart_request_root: PathBuf,
     cooperative_stop: Box<dyn CooperativeStopPort>,
@@ -162,7 +160,6 @@ fn normalize_daemon_upgrade_handoff_input(
     data_root: &Path,
     upgrade_attempt_id: &str,
     expected_executable: &Path,
-    allow_cooperative_grace: bool,
 ) -> Result<DaemonUpgradeHandoffInput> {
     if !ctx_upgrade_engine::is_valid_upgrade_attempt_id(upgrade_attempt_id) {
         return Err(anyhow!(
@@ -177,7 +174,6 @@ fn normalize_daemon_upgrade_handoff_input(
         },
         persisted_restart_label: daemon_restart_trigger(data_root)
             .map(|trigger| trigger.as_str().to_owned()),
-        allow_cooperative_grace,
         handoff_path: daemon_upgrade_handoff_path(data_root),
         restart_request_root: daemon_upgrade_restart_request_root(data_root),
         cooperative_stop: Box::new(LifecycleCooperativeStopPort {
@@ -376,21 +372,6 @@ pub fn begin_daemon_upgrade_handoff(
         data_root,
         upgrade_attempt_id,
         &expected_executable,
-        true,
-    )?;
-    begin_daemon_upgrade_handoff_with(input)
-}
-
-pub fn begin_legacy_daemon_upgrade_handoff(
-    data_root: &Path,
-    upgrade_attempt_id: &str,
-    expected_executable: &Path,
-) -> Result<DaemonUpgradeHandoff> {
-    let input = normalize_daemon_upgrade_handoff_input(
-        data_root,
-        upgrade_attempt_id,
-        expected_executable,
-        false,
     )?;
     begin_daemon_upgrade_handoff_with(input)
 }
@@ -403,7 +384,6 @@ fn begin_daemon_upgrade_handoff_with(
         handoff_id,
         expected_process,
         persisted_restart_label,
-        allow_cooperative_grace,
         handoff_path,
         restart_request_root,
         mut cooperative_stop,
@@ -437,28 +417,16 @@ fn begin_daemon_upgrade_handoff_with(
         persisted_restart_label,
         persisted_loop_interval_seconds: None,
     };
-    if !allow_cooperative_grace && daemon_lock_is_active(&data_root) {
-        terminate_identity_verified_legacy_daemon(&data_root, &expected_process.executable)
-            .context("stop identity-verified legacy ctx daemon before automatic upgrade")?;
-    }
     let deadline = Instant::now() + DAEMON_UPGRADE_STOP_TIMEOUT;
     while daemon_lock_is_active(&data_root) {
         if Instant::now() >= deadline {
             #[cfg(any(unix, windows))]
             {
-                if allow_cooperative_grace {
-                    terminate_identity_verified_residual_daemon(
-                        &data_root,
-                        &expected_process.executable,
-                    )
-                    .context("stop residual ctx daemon before upgrade")?;
-                } else {
-                    terminate_identity_verified_legacy_daemon(
-                        &data_root,
-                        &expected_process.executable,
-                    )
-                    .context("stop residual legacy ctx daemon before automatic upgrade")?;
-                }
+                terminate_identity_verified_residual_daemon(
+                    &data_root,
+                    &expected_process.executable,
+                )
+                .context("stop residual ctx daemon before upgrade")?;
                 break;
             }
             #[cfg(not(any(unix, windows)))]
@@ -733,22 +701,6 @@ pub fn complete_replacement_daemon_handoff(
 #[cfg_attr(not(windows), allow(dead_code))]
 pub fn finish_replacement_daemon_handoff(data_root: &Path, handoff_id: &str) -> Result<()> {
     ctx_daemon_runtime::finish_replacement_daemon_handoff(data_root, handoff_id)
-}
-
-pub fn replacement_helper_owns_daemon_handoff(
-    data_root: &Path,
-    handoff_id: &str,
-    helper_pid: u32,
-) -> bool {
-    read_daemon_upgrade_handoff(data_root).is_some_and(|value| {
-        value.get("handoff_id").and_then(Value::as_str) == Some(handoff_id)
-            && value.get("phase").and_then(Value::as_str) == Some("scheduled")
-            && value
-                .get("helper_pid")
-                .and_then(Value::as_u64)
-                .and_then(|pid| u32::try_from(pid).ok())
-                == Some(helper_pid)
-    })
 }
 
 pub(super) fn write_daemon_upgrade_handoff(

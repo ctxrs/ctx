@@ -235,14 +235,6 @@
         "CTX_UPGRADE_OFF",
         "CTX_DISABLE_AUTO_UPGRADE"
       ]
-    },
-    {
-      "path": "scripts/test-windows-legacy-daemon-takeover.ps1",
-      "purpose": "Exercise deprecated upgrade opt-outs while verifying legacy Windows daemon takeover.",
-      "controls": [
-        "CTX_UPGRADE_OFF",
-        "CTX_DISABLE_AUTO_UPGRADE"
-      ]
     }
   ]
 }

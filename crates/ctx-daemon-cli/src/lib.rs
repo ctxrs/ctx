@@ -338,10 +338,9 @@ mod daemon_autostart;
 pub use daemon_autostart::{
     autostart_daemon_and_wait, autostart_daemon_for_setup_and_wait,
     begin_current_daemon_upgrade_handoff, begin_daemon_upgrade_handoff,
-    begin_legacy_daemon_upgrade_handoff, complete_replacement_daemon_handoff,
-    daemon_autostart_suppression_reason, finish_replacement_daemon_handoff,
-    mark_replacement_helper_handoff, maybe_autostart_daemon, observe_daemon_for_setup_and_wait,
-    replacement_helper_owns_daemon_handoff, restart_daemon_with_current_environment_and_wait,
+    complete_replacement_daemon_handoff, daemon_autostart_suppression_reason,
+    finish_replacement_daemon_handoff, mark_replacement_helper_handoff, maybe_autostart_daemon,
+    observe_daemon_for_setup_and_wait, restart_daemon_with_current_environment_and_wait,
     DaemonHandoff, DaemonSetupHandoff, DaemonUpgradeHandoff,
 };
 

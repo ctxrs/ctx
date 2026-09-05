@@ -89,15 +89,6 @@ impl DaemonUpgradePort for RecordingDaemon {
         Ok(RecordingLease)
     }
 
-    fn begin_legacy(
-        &self,
-        _data_root: &Path,
-        _attempt_id: &str,
-        _target: &Path,
-    ) -> Result<Self::Lease> {
-        Ok(RecordingLease)
-    }
-
     fn begin_current(
         &self,
         _data_root: &Path,
@@ -115,15 +106,6 @@ impl DaemonUpgradePort for RecordingDaemon {
         _helper_pid: u32,
     ) -> Result<()> {
         Ok(())
-    }
-
-    fn replacement_helper_owns_handoff(
-        &self,
-        _data_root: &Path,
-        _attempt_id: &str,
-        _helper_pid: u32,
-    ) -> bool {
-        false
     }
 
     fn complete_replacement_handoff(

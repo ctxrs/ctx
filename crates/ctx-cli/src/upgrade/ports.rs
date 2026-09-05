@@ -193,17 +193,6 @@ impl DaemonUpgradePort for CliDaemonUpgrade {
         ))
     }
 
-    fn begin_legacy(
-        &self,
-        data_root: &Path,
-        attempt_id: &str,
-        target: &Path,
-    ) -> Result<Self::Lease> {
-        Ok(CliDaemonUpgradeLease(
-            crate::semantic::begin_legacy_daemon_upgrade_handoff(data_root, attempt_id, target)?,
-        ))
-    }
-
     fn begin_current(
         &self,
         data_root: &Path,
@@ -235,15 +224,6 @@ impl DaemonUpgradePort for CliDaemonUpgrade {
         helper_pid: u32,
     ) -> Result<()> {
         crate::semantic::mark_replacement_helper_handoff(data_root, attempt_id, helper_pid)
-    }
-
-    fn replacement_helper_owns_handoff(
-        &self,
-        data_root: &Path,
-        attempt_id: &str,
-        helper_pid: u32,
-    ) -> bool {
-        crate::semantic::replacement_helper_owns_daemon_handoff(data_root, attempt_id, helper_pid)
     }
 
     fn complete_replacement_handoff(
