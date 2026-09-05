@@ -182,6 +182,42 @@ fn partial_publication_preserves_unrelated_or_unsafe_temporaries() {
 }
 
 #[test]
+fn partial_publication_preserves_unrelated_state_temporary() {
+    for target_current in [false, true] {
+        let fixture = Fixture::new();
+        let candidate = fixture.candidate("state-negative", 1, b"core", b"pro", b"marker");
+        let verifier =
+            TestVerifier::new([(candidate.envelope.clone(), candidate.identity.clone())]);
+        let attempt = pending_after_publication(&fixture, &candidate, &verifier);
+        let layout = filesystem::Layout::open(&fixture.install, false).unwrap();
+        let target = layout.target(filesystem::Slot::State);
+        let installed = fs::read(&target).unwrap();
+        let temporary = layout.staged(filesystem::Slot::State, &attempt);
+        let unrelated = b"other";
+        assert!(unrelated.len() < installed.len());
+        assert!(!installed.starts_with(unrelated));
+        write_private(&temporary, unrelated);
+        if !target_current {
+            fs::remove_file(&target).unwrap();
+        }
+        let pending_path = layout.active_transaction();
+        let pending = fs::read(&pending_path).unwrap();
+
+        let error = under_installation_lock(&fixture.install, || {
+            resume_pending_managed_pair_under_installation_lock(&fixture.install, &verifier)
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("publication temporary changed"));
+        assert_eq!(fs::read(&temporary).unwrap(), unrelated);
+        assert_eq!(fs::read(&pending_path).unwrap(), pending);
+        assert_eq!(target.exists(), target_current);
+        if target_current {
+            assert_eq!(fs::read(&target).unwrap(), installed);
+        }
+    }
+}
+
+#[test]
 fn partial_publication_requires_verified_retained_source_before_removal() {
     for corrupt in [
         filesystem::Slot::Envelope,
