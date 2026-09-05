@@ -28,6 +28,7 @@ for target in lib test_support_lib qualification_lib; do
     '//crates/ctx-history-core:lib' \
     '//crates/ctx-history-platform:lib' \
     '//crates/ctx-managed-pair-engine:lib' \
+    '//crates/ctx-terminal:lib' \
     "//crates/ctx-upgrade-engine:${target}" >"${expected}"
   query "kind(\"rust_library rule\", deps(//crates/ctx-upgrade-engine:${target})) intersect //crates/..." \
     | LC_ALL=C sort -u >"${tmp}/${target}-actual.txt"

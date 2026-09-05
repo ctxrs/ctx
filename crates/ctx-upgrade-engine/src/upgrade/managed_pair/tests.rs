@@ -11,6 +11,48 @@ use crate::upgrade::{
     metadata::{ManagedPairReleaseMetadata, ReleaseMetadata},
 };
 
+thread_local! {
+    static DISPATCH_VERIFIER: std::cell::RefCell<Option<(ReleaseChannel, Vec<u8>, VerifiedManagedPairIdentity)>> = const { std::cell::RefCell::new(None) };
+}
+
+pub(in crate::upgrade) fn with_fixture_verifier<T>(
+    channel: ReleaseChannel,
+    envelope: Vec<u8>,
+    identity: VerifiedManagedPairIdentity,
+    operation: impl FnOnce() -> T,
+) -> T {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            DISPATCH_VERIFIER.with(|slot| {
+                slot.replace(None);
+            });
+        }
+    }
+    DISPATCH_VERIFIER.with(|slot| {
+        assert!(slot.replace(Some((channel, envelope, identity))).is_none());
+    });
+    let _reset = Reset;
+    operation()
+}
+
+pub(super) fn verify_fixture(
+    channel: ReleaseChannel,
+    bytes: &[u8],
+) -> Option<Result<VerifiedManagedPairIdentity>> {
+    DISPATCH_VERIFIER.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .map(|(expected_channel, envelope, identity)| {
+                if channel != *expected_channel || bytes != envelope {
+                    Err(anyhow!("fixture envelope/channel rejected"))
+                } else {
+                    Ok(identity.clone())
+                }
+            })
+    })
+}
+
 struct RecordingLease;
 
 impl DaemonUpgradeLease for RecordingLease {

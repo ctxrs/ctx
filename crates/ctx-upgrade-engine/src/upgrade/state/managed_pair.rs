@@ -52,11 +52,21 @@ pub(in crate::upgrade) fn recovery_hint() -> Result<Option<String>> {
     let Some(state) = read_state_object_bounded(&install_path) else {
         return Ok(None);
     };
-    Ok((is_active_upgrade_status(&state.status)
-        && state.plan.get(ATTEMPT_KEY) == Some(&Value::Bool(true)))
+    Ok((state.plan.get(ATTEMPT_KEY) == Some(&Value::Bool(true))
+        && recovery_is_pending(&state, &install_path)?)
     .then_some(state.attempt_id)
     .flatten()
     .filter(|attempt_id| is_valid_upgrade_attempt_id(attempt_id)))
+}
+
+fn recovery_is_pending(state: &UpgradeState, install_path: &Path) -> Result<bool> {
+    if is_active_upgrade_status(&state.status) {
+        return Ok(true);
+    }
+    let Some(root) = crate::upgrade::managed_pair::install_root_for_executable(install_path) else {
+        return Ok(false);
+    };
+    ctx_managed_pair_engine::pending_managed_pair_hint(&root)
 }
 
 pub(in crate::upgrade) fn recovery_locked(
@@ -151,9 +161,9 @@ fn recovery_from_state(
     install_path_identity: &Path,
     expected_attempt_id: &str,
 ) -> Result<ManagedPairRecovery> {
-    if !is_active_upgrade_status(&state.status)
-        || state.attempt_id.as_deref() != Some(expected_attempt_id)
+    if state.attempt_id.as_deref() != Some(expected_attempt_id)
         || state.plan.get(ATTEMPT_KEY) != Some(&Value::Bool(true))
+        || !recovery_is_pending(state, install_path_identity)?
     {
         return Err(anyhow!(
             "pending managed-pair upgrade does not match its scheduler state"
@@ -425,3 +435,6 @@ fn set_optional_string(plan: &mut Map<String, Value>, key: &str, value: Option<&
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

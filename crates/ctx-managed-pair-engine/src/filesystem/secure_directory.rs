@@ -9,6 +9,22 @@ use anyhow::{anyhow, bail, Context as _, Result};
 #[cfg(windows)]
 use super::windows_file_information;
 use super::{file_information, validate_absolute_root};
+
+/// Marks only a failed removal syscall or directory sync, never inspection.
+#[derive(Debug)]
+pub(crate) struct RemovalIo(pub(crate) std::io::Error);
+
+impl std::fmt::Display for RemovalIo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.0, f)
+    }
+}
+
+impl std::error::Error for RemovalIo {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.0)
+    }
+}
 #[cfg(windows)]
 use std::fs::OpenOptions;
 
@@ -380,7 +396,8 @@ impl SecureDirectory {
         let name = CString::new(name.as_bytes())
             .map_err(|_| anyhow!("managed-pair file name contains a NUL"))?;
         if unsafe { libc::unlinkat(self.file.as_raw_fd(), name.as_ptr(), 0) } != 0 {
-            return Err(std::io::Error::last_os_error()).context("unlink managed-pair file");
+            return Err(RemovalIo(std::io::Error::last_os_error()))
+                .context("unlink managed-pair file");
         }
         Ok(())
     }
@@ -409,7 +426,7 @@ impl SecureDirectory {
             )
         } == 0
         {
-            return Err(std::io::Error::last_os_error())
+            return Err(RemovalIo(std::io::Error::last_os_error()))
                 .context("unlink untrusted managed-pair file by handle");
         }
         Ok(())
@@ -425,7 +442,7 @@ impl SecureDirectory {
             .map_err(|_| anyhow!("managed-pair directory name contains a NUL"))?;
         if unsafe { libc::unlinkat(self.file.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR) } != 0
         {
-            return Err(std::io::Error::last_os_error())
+            return Err(RemovalIo(std::io::Error::last_os_error()))
                 .context("remove managed-pair directory relative to retained parent");
         }
         Ok(())
@@ -456,7 +473,7 @@ impl SecureDirectory {
             )
         } == 0
         {
-            return Err(std::io::Error::last_os_error())
+            return Err(RemovalIo(std::io::Error::last_os_error()))
                 .context("remove managed-pair directory by retained parent handle");
         }
         Ok(())
@@ -559,7 +576,7 @@ impl SecureDirectory {
 
     pub(super) fn sync(&self) -> Result<()> {
         #[cfg(unix)]
-        self.file.sync_all()?;
+        self.file.sync_all().map_err(RemovalIo)?;
         Ok(())
     }
 }

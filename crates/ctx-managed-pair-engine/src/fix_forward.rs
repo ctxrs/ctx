@@ -15,6 +15,11 @@ use super::{
 const PENDING_SCHEMA: &str = "ctx-managed-pair-apply-v1";
 const MAX_PENDING_BYTES: u64 = 16 * 1024;
 
+mod recovery;
+pub use recovery::{
+    pending_managed_pair_hint, preflight_pending_managed_pair_under_installation_lock,
+};
+
 /// Already-downloaded inputs for one signed managed-pair candidate.
 ///
 /// Every path must be absolute and identify an owner-safe, unique regular file.
@@ -363,13 +368,7 @@ fn resume_with_fault(
         &retained.marker_identity,
     )?;
     publish_candidate(&layout, &pending, &retained, fault)?;
-    let (active, _) = super::validate_active(&layout, verifier)?;
-    if active != retained.identity {
-        bail!("published managed pair does not match the retained signed candidate");
-    }
-    remove_pending(&layout, &pending)?;
-    filesystem::remove_apply_candidate(&layout)?;
-    layout.revalidate()?;
+    recovery::finish_publication(&layout, &pending, &retained, verifier)?;
 
     let outcome = if resumed {
         ManagedPairApplyOutcome::Resumed {

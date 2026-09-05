@@ -235,6 +235,7 @@ fn assert_cleanup(fixture: &Fixture, attempt_id: &str) {
         .is_file());
 }
 
+mod completion;
 mod fix_forward;
 mod partial_copy;
 #[cfg(unix)]
