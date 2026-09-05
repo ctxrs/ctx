@@ -33,8 +33,9 @@ source-location objects, and preview bodies are not exposed.
 
 All data responses extend `AgentHistoryEnvelope`, with `contractVersion`,
 `schemaVersion`, `operation`, backend metadata, `asMap()`, and operation payload
-access. Local mode shells out to the `ctx` CLI and performs no network calls or
-provider API calls.
+access. Local mode invokes the `ctx` CLI. The CLI honors explicitly configured
+external semantic execution, which can send bounded semantic text to the
+selected executor. See [SDK locality](../../docs/sdks.md#local-and-hosted-backends).
 
 The local adapter currently supports POSIX systems with either `setsid` or
 `bash` available for race-free process-group ownership (including standard

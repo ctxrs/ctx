@@ -6,8 +6,9 @@ than a mirror of ctx storage internals.
 
 The contract supports two backends:
 
-- `local`: shells out to a local `ctx` CLI and never performs network calls,
-  provider API calls, or transcript uploads.
+- `local`: invokes a local `ctx` CLI. The CLI honors explicitly configured
+  external semantic execution, which can send bounded query text and document
+  chunks to the selected executor.
 - `hosted`: reserved for a future hosted ctx API. Current SDKs accept hosted
   configuration but return a structured `not_supported` error for operations.
 
@@ -39,8 +40,9 @@ All operations return JSON objects with `contractVersion: "agent-history-v1"` an
 
 ## Privacy
 
-Local mode is local-first. SDKs must not make network calls in local mode and
-must not upload transcript content. CLI stderr progress can contain local paths
+The local SDK adapter invokes `ctx`; it makes no provider API calls or transcript
+uploads of its own. The CLI honors explicitly configured external semantic
+execution. CLI stderr progress can contain local paths
 and is not included in successful SDK responses unless a language exposes it as
 debug metadata outside this contract.
 
