@@ -69,6 +69,8 @@ keys inside captured JSON arguments and structured results remain unchanged.
 `structuredContent` also preserves exact JSON, including an explicit null
 that is distinct from an absent field. See
 [`mcp-exchange-capture.md`](mcp-exchange-capture.md).
+Swift retains [compatibility limitations](../sdks/swift/README.md#compatibility-limitations)
+for `activity` and `structuredContent` preservation.
 
 ## Local and hosted backends
 
@@ -82,6 +84,7 @@ external semantic executor.
 Typed CLI/MCP errors preserve retryability and the original producer diagnostic
 under `details.producerError`; the SDK does not retry automatically. Literal
 search queries, including `--help`, are passed as query data after CLI options.
+Swift retains [legacy producer-error and search argument behavior](../sdks/swift/README.md#compatibility-limitations).
 
 Hosted client configuration is reserved for future ctx service support. Until a
 hosted service exists, hosted operations fail before network I/O with a

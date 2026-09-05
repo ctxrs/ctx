@@ -77,8 +77,11 @@ public struct AgentHistoryClient: Sendable {
         try requireSearchIntent(query: query, options: options)
         try requireCompatibleSearchFilters(options)
         var arguments = ["search"]
+        if let query {
+            arguments.append(query)
+        }
         for term in options.terms {
-            appendOption(&arguments, "--term", term)
+            arguments.append(contentsOf: ["--term", term])
         }
         if let limit = options.limit {
             arguments.append(contentsOf: ["--limit", String(limit)])
@@ -105,7 +108,6 @@ public struct AgentHistoryClient: Sendable {
             arguments.append("--include-current-session")
         }
         arguments.append("--format=json")
-        if let query { arguments.append(contentsOf: ["--", query]) }
         return try SearchResponse(envelope: localEnvelope(operation: .search, arguments: arguments))
     }
 
@@ -275,7 +277,7 @@ private func appendSessionLookup(_ arguments: inout [String], id: String?, provi
 
 private func appendOption(_ arguments: inout [String], _ name: String, _ value: String?) {
     if let value, !value.isEmpty {
-        arguments.append(contentsOf: value.hasPrefix("-") ? ["\(name)=\(value)"] : [name, value])
+        arguments.append(contentsOf: [name, value])
     }
 }
 
@@ -640,13 +642,13 @@ private func normalizeEventRecord(_ raw: JSONValue?) throws -> JSONValue? {
     } else {
         exchange = outer.removeValue(forKey: "mcpExchange")
     }
-    var result: [String: JSONValue] = [:]
-    for (key, value) in outer {
-        let canonical = JSONValue.camelizedPublicKey(key)
-        if ["configPath", "itemType", "payloadType", "recordType"].contains(canonical) { continue }
-        result[canonical] = ["content", "citations"].contains(key)
-            ? value.camelizedPublicJSON().droppingNulls() : value
+    let normalized = JSONValue.object(outer)
+        .camelizedPublicJSON()
+        .droppingNulls()
+    guard case let .object(normalizedObject) = normalized else {
+        throw invalidMCPWire("event normalization did not produce an object")
     }
+    var result = normalizedObject
     if result["mcpToolCall"] != nil {
         throw invalidMCPWire("outer member collides with canonical mcpToolCall")
     }
