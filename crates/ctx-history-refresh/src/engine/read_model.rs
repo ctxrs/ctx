@@ -509,7 +509,48 @@ pub(super) fn projected_status_json(
     request_id: &str,
 ) -> Option<Value> {
     let attempt = find_attempt(state, request_id)?;
-    Some(apply_read_projection(attempt, attempt.to_json(), false))
+    let mut status = apply_read_projection(attempt, attempt.to_json(), false);
+    if state
+        .pending_terminal_persistence
+        .as_ref()
+        .is_some_and(|pending| pending.request_id == request_id)
+    {
+        // The generation is queryable, but the request result is not durable
+        // yet. Keep the exact terminal job internal to the existing retry.
+        let fields = status.as_object_mut()?;
+        for field in [
+            "request_state",
+            "physical_attempt_state",
+            "progress_owner_attempt_state",
+        ] {
+            fields.insert(
+                field.to_owned(),
+                json!(SourceBackedRefreshState::Running.as_str()),
+            );
+        }
+        fields.insert("logical_phase".to_owned(), json!("direct"));
+        for field in [
+            "finished_at_ms",
+            "receipt",
+            "outcome",
+            "structured_outcome",
+            "generation_changed",
+            "failure_type",
+            "error_code",
+            "reason",
+            "last_error",
+            "automatic_retry",
+        ] {
+            fields.remove(field);
+        }
+        let mut progress = attempt.live_progress();
+        progress.phase = "persisting_terminal".to_owned();
+        fields.insert(
+            "progress".to_owned(),
+            progress.to_json_with_total_known(attempt.progress_total_sources_known, None),
+        );
+    }
+    Some(status)
 }
 
 pub(super) fn projected_job_json(

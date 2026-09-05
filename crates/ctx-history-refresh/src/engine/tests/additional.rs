@@ -1221,17 +1221,24 @@ fn newer_event_during_confirmation_attempt_is_not_paused_by_stale_admission() {
     let stale = running.join().unwrap();
     assert!(stale.terminal_persistence_pending, "{:#}", stale.job);
     assert_eq!(journal.terminal_store_count(), 2);
-    let terminal = coordinator
+    let pending = coordinator
         .status(stale.job["request_id"].as_str().unwrap())
         .unwrap();
-    assert_eq!(terminal["structured_outcome"]["retryable"], true);
-    assert!(terminal.get("automatic_retry").is_none());
+    assert_eq!(pending["request_state"], "running");
+    assert!(pending.get("structured_outcome").is_none());
+    assert_eq!(stale.job["structured_outcome"]["retryable"], true);
+    assert!(pending.get("automatic_retry").is_none());
     assert!(!coordinator.route_is_permanently_blocked_for_test(&route));
     let persisted = coordinator
         .run_next(&data_root)
         .expect("retry terminal persistence");
     assert!(!persisted.terminal_persistence_pending);
     assert_eq!(persisted.job["request_state"], "failed");
+    let terminal = coordinator
+        .status(stale.job["request_id"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(terminal["structured_outcome"]["retryable"], true);
+    assert!(terminal.get("automatic_retry").is_none());
     assert_eq!(journal.terminal_store_count(), 3);
     drop(coordinator);
 

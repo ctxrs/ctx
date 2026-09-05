@@ -4,6 +4,9 @@ use ctx_client_observability::analytics::PublicEventV1;
 #[path = "refresh_retry/durable_retry.rs"]
 mod durable_retry;
 
+#[path = "refresh_retry/terminal_status.rs"]
+mod terminal_status;
+
 fn enqueue_synthetic_refresh_successor(
     coordinator: &CoreRefreshEngine,
     data_root: &Path,
