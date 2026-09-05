@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { createLocalAgentHistoryClient } from "../src/index.js";
 
-const fixture = async (name) => JSON.parse(await readFile(new URL(`../../../../contracts/agent-history-v1/fixtures/cli/${name}`, import.meta.url), "utf8"));
+const fixture = async (name) => JSON.parse(await readFile(new URL(`../../../contracts/agent-history-v1/fixtures/cli/${name}`, import.meta.url), "utf8"));
 
 test("current event and session preserve exact opaque JSON and presence", async () => {
   const event = await fixture("opaque-event.json");

@@ -961,7 +961,8 @@ public final class AgentHistoryClientTest {
                 .refresh("off"));
 
         assertEquals("search", transport.lastOperation.name());
-        assertContainsInOrder(transport.lastOperation.args(), "search", "--format=json", "--", "agent history");
+        assertContainsInOrder(transport.lastOperation.args(), "search", "--format=json");
+        assertContainsInOrder(transport.lastOperation.args(), "--format=json", "--", "agent history");
         assertContainsInOrder(transport.lastOperation.args(), "--limit", "5");
         assertContainsInOrder(transport.lastOperation.args(), "--backend", "hybrid");
         assertContainsInOrder(transport.lastOperation.args(), "--semantic-weight", "0.35");
