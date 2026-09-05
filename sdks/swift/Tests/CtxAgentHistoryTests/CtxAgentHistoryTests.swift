@@ -8,7 +8,11 @@ final class CtxAgentHistoryTests: XCTestCase {
         for flags in variants {
             var raw = flags
             raw["initialized"] = .bool(true)
-            raw["semantic"] = .object(["local_only": .bool(false), "diagnostics": .object(["localOnly": .null])])
+            raw["semantic"] = .object([
+                "local_only": .bool(false),
+                "executor": .object(["kind": .string("http"), "scope": .string("loopback"),
+                                     "content_leaves_machine": .bool(false)])
+            ])
             let bytes = try JSONEncoder().encode(JSONValue.object(raw))
             let runner = CapturingRunner { _ in CommandResult(stdout: bytes) }
             let client = AgentHistoryClient(adapter: LocalCLIAdapter(runner: runner))
@@ -21,12 +25,10 @@ final class CtxAgentHistoryTests: XCTestCase {
                 XCTAssertEqual(output["initialized"], .bool(true))
                 let key = index == 2 ? "local_only" : "localOnly"
                 XCTAssertEqual(output["semantic"]?[key], .bool(false))
-                // Raw status keeps its existing null omission; direct Codable retains explicit null.
-                if index == 2 {
-                    XCTAssertEqual(output["semantic"]?["diagnostics"]?["localOnly"], .null)
-                } else {
-                    XCTAssertNil(output["semantic"]?["diagnostics"]?["localOnly"])
-                }
+                XCTAssertEqual(output["semantic"]?["executor"]?["kind"], .string("http"))
+                XCTAssertEqual(output["semantic"]?["executor"]?["scope"], .string("loopback"))
+                let boundaryKey = index == 2 ? "content_leaves_machine" : "contentLeavesMachine"
+                XCTAssertEqual(output["semantic"]?["executor"]?[boundaryKey], .bool(false))
             }
         }
         let runner = CapturingRunner { _ in CommandResult(stdout: "{}") }
