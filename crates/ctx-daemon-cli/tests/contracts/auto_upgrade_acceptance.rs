@@ -4,7 +4,7 @@ mod support;
 mod unix {
     use std::{
         fs,
-        os::unix::ffi::OsStrExt as _,
+        os::unix::{ffi::OsStrExt as _, fs::PermissionsExt as _},
         path::{Path, PathBuf},
         process::{Child, Command as StdCommand, Stdio},
         time::{Duration, Instant},
@@ -910,6 +910,13 @@ mod unix {
         let staged = target.with_extension("new");
         let replacement = assert_cmd::Command::cargo_bin("ctx").unwrap();
         fs::copy(replacement.get_program(), &staged).unwrap();
+        // Bazel's executable is read-only; strip needs to write this private copy.
+        let permissions = fs::metadata(&staged).unwrap().permissions();
+        fs::set_permissions(
+            &staged,
+            fs::Permissions::from_mode(permissions.mode() | 0o200),
+        )
+        .unwrap();
         ensure_managed_test_binary_is_bounded(&staged);
         assert_ne!(
             sha256_hex(&fs::read(&target).unwrap()),
