@@ -438,6 +438,74 @@ fn semantic_pairing_rejects_excluded_anchor_and_skips_excluded_assistant_content
 }
 
 #[test]
+fn semantic_pairing_collects_assistants_in_order_under_one_aggregate_budget() {
+    let temp = tempdir().unwrap();
+    let source = source("semantic-pairing-all-assistants.jsonl");
+    let user = document(&source, 1, "Run check A");
+    let mut first_assistant = document(&source, 2, "The amber falcon owns relay 47");
+    first_assistant.role = Some("assistant".to_owned());
+    let mut final_assistant = document(&source, 3, "Done");
+    final_assistant.role = Some("assistant".to_owned());
+    let next_user = document(&source, 4, "Continue");
+    let first_encoded_bytes = first_assistant.encode_stored().unwrap().len();
+
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    writer.begin_source(source.clone()).unwrap();
+    for record in [
+        user.clone(),
+        first_assistant.clone(),
+        final_assistant.clone(),
+        next_user,
+    ] {
+        writer.add_core_record(record).unwrap();
+    }
+    writer.certify_source(certificate(&source, 1, 4)).unwrap();
+    writer.commit(|_| true).unwrap();
+
+    let index = VerifiedIndex::open_pinned(temp.path()).unwrap();
+    let anchor = index
+        .core_event_by_id(user.event_id.as_uuid())
+        .unwrap()
+        .unwrap();
+    let assistants = index
+        .semantic_lite_turn_assistants(&anchor, 4, DEFAULT_CORE_EVENT_PAGE_BUDGET)
+        .unwrap();
+    assert_eq!(
+        assistants,
+        vec![
+            (
+                "The amber falcon owns relay 47".to_owned(),
+                first_assistant.occurred_at_unix_ms.unwrap(),
+            ),
+            (
+                "Done".to_owned(),
+                final_assistant.occurred_at_unix_ms.unwrap(),
+            ),
+        ]
+    );
+
+    ctx_history_index_query::reset_stored_core_event_record_materializations();
+    let bounded = index
+        .semantic_lite_turn_assistants(
+            &anchor,
+            4,
+            CoreEventPageBudget::new(
+                first_encoded_bytes,
+                DEFAULT_CORE_EVENT_PAGE_BUDGET.maximum_content_bytes,
+            ),
+        )
+        .unwrap();
+    assert_eq!(bounded, vec![assistants[0].clone()]);
+    assert_eq!(
+        ctx_history_index_query::stored_core_event_record_materializations(),
+        1
+    );
+}
+
+#[test]
 fn semantic_pairing_preserves_copied_assistant_content() {
     let temp = tempdir().unwrap();
     let source = source("semantic-pairing-copied-assistant.jsonl");

@@ -16,7 +16,7 @@ pub const LEXICAL_TOKENIZER_REVISION: u32 = 2;
 pub const SOURCE_EVENT_PROJECTOR_REVISION: u32 = 9;
 pub const LEXICAL_INDEXED_BODY_LIMIT: LexicalIndexedBodyLimit =
     LexicalIndexedBodyLimit::ProviderValidatedFullText;
-pub const SEMANTIC_ELIGIBILITY_REVISION: u32 = 6;
+pub const SEMANTIC_ELIGIBILITY_REVISION: u32 = 7;
 pub const SEMANTIC_CHUNKING_REVISION: u32 = 1;
 pub const SEMANTIC_CHUNK_TARGET_CHARS: usize = 1_200;
 pub const SEMANTIC_CHUNK_OVERLAP_CHARS: usize = 200;
@@ -358,7 +358,7 @@ mod tests {
 
     #[test]
     fn semantic_policy_persisted_bytes_and_model_authority_are_frozen() {
-        const EXPECTED: &str = "{\"eligibility_revision\":6,\"candidate_event_classes\":[\"message\"],\"candidate_roles\":[\"user\"],\"core_content_filter\":\"policy_selected_complete_content_and_bounded_literal_facts_v3\",\"provider_native_event_copy\":\"include_all_occurrences_direct_copy_neutral_v1\",\"chunking_revision\":1,\"chunk_target_chars\":1200,\"chunk_overlap_chars\":200,\"source_max_chars\":65536,\"embedding\":{\"contract_revision\":2,\"model\":\"intfloat/multilingual-e5-small\",\"model_revision\":\"614241f622f53c4eeff9890bdc4f31cfecc418b3\",\"dimensions\":384,\"normalization\":\"l2\"}}";
+        const EXPECTED: &str = "{\"eligibility_revision\":7,\"candidate_event_classes\":[\"message\"],\"candidate_roles\":[\"user\"],\"core_content_filter\":\"policy_selected_complete_content_and_bounded_literal_facts_v3\",\"provider_native_event_copy\":\"include_all_occurrences_direct_copy_neutral_v1\",\"chunking_revision\":1,\"chunk_target_chars\":1200,\"chunk_overlap_chars\":200,\"source_max_chars\":65536,\"embedding\":{\"contract_revision\":2,\"model\":\"intfloat/multilingual-e5-small\",\"model_revision\":\"614241f622f53c4eeff9890bdc4f31cfecc418b3\",\"dimensions\":384,\"normalization\":\"l2\"}}";
         let policy = current_semantic_generation_policy();
         let contract = ctx_semantic_model::semantic_model_contract();
         let persisted = serde_json::to_string(&policy).unwrap();
@@ -367,7 +367,7 @@ mod tests {
         assert_eq!(persisted, EXPECTED);
         assert_eq!(
             policy.canonical_sha256().unwrap(),
-            "e8d31418a1da20200d75580348b8b2e7ee4f97c58f34a46900fc6d87daa83ccf"
+            "220389b1dc0a79ab29121a99e15eeb208fac117b038bb5d11b037fee3dd79ce7"
         );
         assert_eq!(
             policy.embedding.contract_revision,

@@ -37,8 +37,8 @@ impl<'a> SourceBackedSemanticDocumentBuilder<'a> {
         }
     }
 
-    fn paired_assistant(&self, anchor: &CoreEventRecord) -> Result<Option<(String, i64)>> {
-        Ok(self.index.semantic_lite_turn_assistant(
+    fn paired_assistants(&self, anchor: &CoreEventRecord) -> Result<Vec<(String, i64)>> {
+        Ok(self.index.semantic_lite_turn_assistants(
             anchor,
             self.pairing_page_records,
             self.pairing_budget,
@@ -58,7 +58,7 @@ impl SemanticDocumentBuilder for SourceBackedSemanticDocumentBuilder<'_> {
         let mut sections = vec![format!("user:\n{}", user_text.trim())];
         let mut occurred_at_ms = record.occurred_at_unix_ms.unwrap_or_default();
         if !semantic_core_content_is_control(&sections[0]) {
-            if let Some((assistant_text, assistant_at_ms)) = self.paired_assistant(record)? {
+            for (assistant_text, assistant_at_ms) in self.paired_assistants(record)? {
                 sections.push(format!("assistant:\n{}", assistant_text.trim()));
                 occurred_at_ms = occurred_at_ms.max(assistant_at_ms);
             }
