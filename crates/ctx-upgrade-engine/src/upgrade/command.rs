@@ -577,259 +577,15 @@ fn apply_upgrade<D: DaemonUpgradePort + ?Sized>(
     let attempt = begin_manual_attempt_locked(data_root, &upgrade_lock, "manual_apply")?;
     let result = (|| -> Result<UpgradeOutcome> {
         let plan = build_upgrade_plan(engine, policy, channel_override, true)?;
-        let pair_mode = inspect_plan_under_installation_lock(&plan, upgrade_lock.installation())?;
-        let repairs = classify_repair_requirements(
-            engine.semantic_layout,
-            &plan,
+        apply_planned_upgrade(
+            engine,
             data_root,
-            policy.semantic_enabled,
-        )?;
-        let pair_apply_required = pair_mode.pair_apply_required(&plan);
-        if !plan.update_available && !pair_apply_required && !repairs.any() {
-            write_state_checked_locked(
-                data_root,
-                &upgrade_lock,
-                &attempt,
-                &plan,
-                "up_to_date",
-                policy.interval,
-            )?;
-            let warnings = plan.warnings.clone();
-            return Ok(UpgradeOutcome {
-                command: "upgrade",
-                status: "up_to_date",
-                message: format!("ctx {} is already installed.", plan.current_version),
-                plan: Some(plan),
-                applied: false,
-                dry_run,
-                warnings,
-                attempt_id: Some(attempt.id().to_owned()),
-            });
-        }
-        if plan.update_available && !plan.metadata.self_upgrade_allowed {
-            return Err(anyhow!(
-                "release {} does not allow self-upgrade",
-                plan.latest_version
-            ));
-        }
-        if dry_run {
-            write_state_checked_locked(
-                data_root,
-                &upgrade_lock,
-                &attempt,
-                &plan,
-                "dry_run",
-                policy.interval,
-            )?;
-            let warnings = plan.warnings.clone();
-            return Ok(UpgradeOutcome {
-                command: "upgrade",
-                status: "dry_run",
-                message: if plan.update_available {
-                    format!(
-                        "ctx {} would upgrade to {}.",
-                        plan.current_version, plan.latest_version
-                    )
-                } else if pair_apply_required {
-                    format!(
-                        "ctx {} would repair its signed managed Core/companion installation.",
-                        plan.current_version
-                    )
-                } else if repairs.legacy_runtime {
-                    format!(
-                        "ctx {} would repair its signed legacy ONNX Runtime installation.",
-                        plan.current_version
-                    )
-                } else {
-                    format!(
-                        "ctx {} would provision signed Semantic model and runtime assets.",
-                        plan.current_version
-                    )
-                },
-                plan: Some(plan),
-                applied: false,
-                dry_run: true,
-                warnings,
-                attempt_id: Some(attempt.id().to_owned()),
-            });
-        }
-        let mut core_artifact =
-            download_core_artifact(engine.transport, data_root, &plan, &pair_mode)?;
-        // Supplementary runtime metadata is optional for Core-only releases.
-        // Preserve or repair the legacy runtime only when signed metadata
-        // actually carries that runtime contract.
-        let mut runtime_artifact = if (plan.update_available || repairs.legacy_runtime)
-            && plan.semantic_provisioning.is_none()
-        {
-            match (
-                plan.metadata.onnxruntime.as_ref(),
-                plan.onnxruntime_artifact_url(),
-            ) {
-                (Some(runtime), Some(runtime_url)) => Some(
-                    DownloadedArtifact::download_or_reuse_verified(
-                        engine.transport,
-                        data_root,
-                        &runtime_url,
-                        &runtime.sha256,
-                        RELEASE_ONNXRUNTIME_ARTIFACT_MAX_BYTES as u64,
-                        RELEASE_ARTIFACT_TIMEOUT,
-                    )
-                    .with_context(|| format!("download or reuse {runtime_url}"))?,
-                ),
-                (None, None) => None,
-                _ => return Err(anyhow!("incomplete ONNX Runtime upgrade plan")),
-            }
-        } else {
-            None
-        };
-        let mut semantic_artifacts = Vec::new();
-        if repairs.catalog {
-            let provisioning = plan
-                .semantic_provisioning
-                .as_ref()
-                .ok_or_else(|| anyhow!("Semantic repair has no signed provisioning plan"))?;
-            for asset in &provisioning.assets {
-                let url = plan.semantic_artifact_url(&asset.metadata.artifact);
-                semantic_artifacts.push(
-                    DownloadedArtifact::download_or_reuse_verified(
-                        engine.transport,
-                        data_root,
-                        &url,
-                        &asset.metadata.archive_sha256,
-                        semantic_archive_download_limit(&asset.metadata)?,
-                        RELEASE_ARTIFACT_TIMEOUT,
-                    )
-                    .with_context(|| format!("download or reuse {url}"))?,
-                );
-            }
-        }
-        write_state_phase_locked(&upgrade_lock, &attempt, "quiescing")?;
-        let daemon_handoff = engine.daemon.begin(data_root, attempt.id())?;
-        let daemon_restart = daemon_handoff.replacement_restart();
-        let mut before_publish = || Ok(());
-        let apply_result = match apply_prepared_install(
-            engine.process,
-            engine.semantic_layout,
-            &upgrade_lock,
-            &plan,
-            &pair_mode,
-            &mut core_artifact,
-            runtime_artifact.as_mut(),
-            &mut semantic_artifacts,
-            data_root,
-            &attempt,
-            policy.interval,
-            daemon_restart.map(|restart| (restart.trigger, restart.loop_interval_seconds)),
-            &mut before_publish,
-        ) {
-            Ok(result) => result,
-            Err(error) => {
-                let restart = daemon_handoff.resume_with(&plan.install_path);
-                return match restart {
-                    Ok(()) => Err(error),
-                    Err(restart_error) => Err(error.context(format!(
-                        "also failed to resume daemon lifecycle after upgrade failure: {restart_error:#}"
-                    ))),
-                };
-            }
-        };
-        let mut warnings = plan.warnings.clone();
-        if let ApplyResult::Scheduled { helper_pid } = apply_result {
-            if let Err(error) = daemon_handoff.transfer_to_replacement_helper(helper_pid) {
-                warnings.push(format!(
-                    "replacement helper is ready, but daemon handoff bookkeeping remains pending: {error:#}"
-                ));
-            }
-            record_post_apply_state(
-                data_root,
-                &upgrade_lock,
-                &attempt,
-                &plan,
-                "scheduled",
-                policy.interval,
-                &mut warnings,
-            );
-            let message = if plan.update_available {
-                format!(
-                    "scheduled ctx {} -> {} at {}; replacement will finish after this process exits",
-                    plan.current_version,
-                    plan.latest_version,
-                    plan.install_path.display()
-                )
-            } else if pair_apply_required {
-                "scheduled signed managed Core/companion repair; replacement will finish after this process exits"
-                    .to_owned()
-            } else if repairs.legacy_runtime {
-                "scheduled signed legacy ONNX Runtime repair; replacement will finish after this process exits"
-                    .to_owned()
-            } else {
-                "scheduled signed Semantic asset repair; replacement will finish after this process exits"
-                    .to_owned()
-            };
-            return Ok(UpgradeOutcome {
-                command: "upgrade",
-                status: "scheduled",
-                message,
-                plan: Some(plan),
-                applied: false,
-                dry_run: false,
-                warnings,
-                attempt_id: Some(attempt.id().to_owned()),
-            });
-        }
-        if let Some(warning) = apply_result.cleanup_warning() {
-            warnings.push(warning.to_owned());
-        }
-        record_post_apply_state(
-            data_root,
+            policy,
+            dry_run,
             &upgrade_lock,
             &attempt,
-            &plan,
-            "applied",
-            policy.interval,
-            &mut warnings,
-        );
-        // Filesystem publication is the commit point.  A daemon restart is a
-        // follow-up operation: report it for retry, but never turn a committed
-        // upgrade into scheduler failure/backoff.
-        if let Err(error) = daemon_handoff.resume_with(&plan.install_path) {
-            warnings.push(format!(
-                "ctx upgrade applied, but daemon restart is pending: {error:#}"
-            ));
-        }
-        let message = if plan.update_available {
-            format!(
-                "upgraded ctx {} -> {} at {}",
-                plan.current_version,
-                plan.latest_version,
-                plan.install_path.display()
-            )
-        } else if pair_apply_required {
-            format!(
-                "repaired signed managed Core/companion installation for ctx {}",
-                plan.current_version
-            )
-        } else if repairs.legacy_runtime {
-            format!(
-                "repaired signed legacy ONNX Runtime installation for ctx {}",
-                plan.current_version
-            )
-        } else {
-            format!(
-                "provisioned signed Semantic model and runtime assets for ctx {}",
-                plan.current_version
-            )
-        };
-        Ok(UpgradeOutcome {
-            command: "upgrade",
-            status: "applied",
-            message,
-            plan: Some(plan),
-            applied: true,
-            dry_run: false,
-            warnings,
-            attempt_id: Some(attempt.id().to_owned()),
-        })
+            plan,
+        )
     })();
     if let Err(error) = &result {
         let _ = write_state_error_locked(
@@ -841,6 +597,271 @@ fn apply_upgrade<D: DaemonUpgradePort + ?Sized>(
         );
     }
     result
+}
+
+// The plan has already authenticated hosted ownership and release metadata.
+// Keep staging, daemon handoff and publication together under the same lock.
+fn apply_planned_upgrade<D: DaemonUpgradePort + ?Sized>(
+    engine: &UpgradeEngine<'_, D>,
+    data_root: &Path,
+    policy: UpgradePolicy<'_>,
+    dry_run: bool,
+    upgrade_lock: &UpgradeLock,
+    attempt: &UpgradeAttempt,
+    plan: UpgradePlan,
+) -> Result<UpgradeOutcome> {
+    let pair_mode = inspect_plan_under_installation_lock(&plan, upgrade_lock.installation())?;
+    let repairs = classify_repair_requirements(
+        engine.semantic_layout,
+        &plan,
+        data_root,
+        policy.semantic_enabled,
+    )?;
+    let pair_apply_required = pair_mode.pair_apply_required(&plan);
+    if !plan.update_available && !pair_apply_required && !repairs.any() {
+        write_state_checked_locked(
+            data_root,
+            upgrade_lock,
+            attempt,
+            &plan,
+            "up_to_date",
+            policy.interval,
+        )?;
+        let warnings = plan.warnings.clone();
+        return Ok(UpgradeOutcome {
+            command: "upgrade",
+            status: "up_to_date",
+            message: format!("ctx {} is already installed.", plan.current_version),
+            plan: Some(plan),
+            applied: false,
+            dry_run,
+            warnings,
+            attempt_id: Some(attempt.id().to_owned()),
+        });
+    }
+    if plan.update_available && !plan.metadata.self_upgrade_allowed {
+        return Err(anyhow!(
+            "release {} does not allow self-upgrade",
+            plan.latest_version
+        ));
+    }
+    if dry_run {
+        write_state_checked_locked(
+            data_root,
+            upgrade_lock,
+            attempt,
+            &plan,
+            "dry_run",
+            policy.interval,
+        )?;
+        let warnings = plan.warnings.clone();
+        return Ok(UpgradeOutcome {
+            command: "upgrade",
+            status: "dry_run",
+            message: if plan.update_available {
+                format!(
+                    "ctx {} would upgrade to {}.",
+                    plan.current_version, plan.latest_version
+                )
+            } else if pair_apply_required {
+                format!(
+                    "ctx {} would repair its signed managed Core/companion installation.",
+                    plan.current_version
+                )
+            } else if repairs.legacy_runtime {
+                format!(
+                    "ctx {} would repair its signed legacy ONNX Runtime installation.",
+                    plan.current_version
+                )
+            } else {
+                format!(
+                    "ctx {} would provision signed Semantic model and runtime assets.",
+                    plan.current_version
+                )
+            },
+            plan: Some(plan),
+            applied: false,
+            dry_run: true,
+            warnings,
+            attempt_id: Some(attempt.id().to_owned()),
+        });
+    }
+    let mut core_artifact = download_core_artifact(engine.transport, data_root, &plan, &pair_mode)?;
+    // Supplementary runtime metadata is optional for Core-only releases.
+    // Preserve or repair the legacy runtime only when signed metadata
+    // actually carries that runtime contract.
+    let mut runtime_artifact = if (plan.update_available || repairs.legacy_runtime)
+        && plan.semantic_provisioning.is_none()
+    {
+        match (
+            plan.metadata.onnxruntime.as_ref(),
+            plan.onnxruntime_artifact_url(),
+        ) {
+            (Some(runtime), Some(runtime_url)) => Some(
+                DownloadedArtifact::download_or_reuse_verified(
+                    engine.transport,
+                    data_root,
+                    &runtime_url,
+                    &runtime.sha256,
+                    RELEASE_ONNXRUNTIME_ARTIFACT_MAX_BYTES as u64,
+                    RELEASE_ARTIFACT_TIMEOUT,
+                )
+                .with_context(|| format!("download or reuse {runtime_url}"))?,
+            ),
+            (None, None) => None,
+            _ => return Err(anyhow!("incomplete ONNX Runtime upgrade plan")),
+        }
+    } else {
+        None
+    };
+    let mut semantic_artifacts = Vec::new();
+    if repairs.catalog {
+        let provisioning = plan
+            .semantic_provisioning
+            .as_ref()
+            .ok_or_else(|| anyhow!("Semantic repair has no signed provisioning plan"))?;
+        for asset in &provisioning.assets {
+            let url = plan.semantic_artifact_url(&asset.metadata.artifact);
+            semantic_artifacts.push(
+                DownloadedArtifact::download_or_reuse_verified(
+                    engine.transport,
+                    data_root,
+                    &url,
+                    &asset.metadata.archive_sha256,
+                    semantic_archive_download_limit(&asset.metadata)?,
+                    RELEASE_ARTIFACT_TIMEOUT,
+                )
+                .with_context(|| format!("download or reuse {url}"))?,
+            );
+        }
+    }
+    write_state_phase_locked(upgrade_lock, attempt, "quiescing")?;
+    let daemon_handoff = engine.daemon.begin(data_root, attempt.id())?;
+    let daemon_restart = daemon_handoff.replacement_restart();
+    let mut before_publish = || Ok(());
+    let apply_result = match apply_prepared_install(
+        engine.process,
+        engine.semantic_layout,
+        upgrade_lock,
+        &plan,
+        &pair_mode,
+        &mut core_artifact,
+        runtime_artifact.as_mut(),
+        &mut semantic_artifacts,
+        data_root,
+        attempt,
+        policy.interval,
+        daemon_restart.map(|restart| (restart.trigger, restart.loop_interval_seconds)),
+        &mut before_publish,
+    ) {
+        Ok(result) => result,
+        Err(error) => {
+            let restart = daemon_handoff.resume_with(&plan.install_path);
+            return match restart {
+                Ok(()) => Err(error),
+                Err(restart_error) => Err(error.context(format!(
+                    "also failed to resume daemon lifecycle after upgrade failure: {restart_error:#}"
+                ))),
+            };
+        }
+    };
+    let mut warnings = plan.warnings.clone();
+    if let ApplyResult::Scheduled { helper_pid } = apply_result {
+        if let Err(error) = daemon_handoff.transfer_to_replacement_helper(helper_pid) {
+            warnings.push(format!(
+                "replacement helper is ready, but daemon handoff bookkeeping remains pending: {error:#}"
+            ));
+        }
+        record_post_apply_state(
+            data_root,
+            upgrade_lock,
+            attempt,
+            &plan,
+            "scheduled",
+            policy.interval,
+            &mut warnings,
+        );
+        let message = if plan.update_available {
+            format!(
+                "scheduled ctx {} -> {} at {}; replacement will finish after this process exits",
+                plan.current_version,
+                plan.latest_version,
+                plan.install_path.display()
+            )
+        } else if pair_apply_required {
+            "scheduled signed managed Core/companion repair; replacement will finish after this process exits"
+                .to_owned()
+        } else if repairs.legacy_runtime {
+            "scheduled signed legacy ONNX Runtime repair; replacement will finish after this process exits"
+                .to_owned()
+        } else {
+            "scheduled signed Semantic asset repair; replacement will finish after this process exits"
+                .to_owned()
+        };
+        return Ok(UpgradeOutcome {
+            command: "upgrade",
+            status: "scheduled",
+            message,
+            plan: Some(plan),
+            applied: false,
+            dry_run: false,
+            warnings,
+            attempt_id: Some(attempt.id().to_owned()),
+        });
+    }
+    if let Some(warning) = apply_result.cleanup_warning() {
+        warnings.push(warning.to_owned());
+    }
+    record_post_apply_state(
+        data_root,
+        upgrade_lock,
+        attempt,
+        &plan,
+        "applied",
+        policy.interval,
+        &mut warnings,
+    );
+    // Filesystem publication is the commit point.  A daemon restart is a
+    // follow-up operation: report it for retry, but never turn a committed
+    // upgrade into scheduler failure/backoff.
+    if let Err(error) = daemon_handoff.resume_with(&plan.install_path) {
+        warnings.push(format!(
+            "ctx upgrade applied, but daemon restart is pending: {error:#}"
+        ));
+    }
+    let message = if plan.update_available {
+        format!(
+            "upgraded ctx {} -> {} at {}",
+            plan.current_version,
+            plan.latest_version,
+            plan.install_path.display()
+        )
+    } else if pair_apply_required {
+        format!(
+            "repaired signed managed Core/companion installation for ctx {}",
+            plan.current_version
+        )
+    } else if repairs.legacy_runtime {
+        format!(
+            "repaired signed legacy ONNX Runtime installation for ctx {}",
+            plan.current_version
+        )
+    } else {
+        format!(
+            "provisioned signed Semantic model and runtime assets for ctx {}",
+            plan.current_version
+        )
+    };
+    Ok(UpgradeOutcome {
+        command: "upgrade",
+        status: "applied",
+        message,
+        plan: Some(plan),
+        applied: true,
+        dry_run: false,
+        warnings,
+        attempt_id: Some(attempt.id().to_owned()),
+    })
 }
 
 fn record_post_apply_state(
@@ -950,3 +971,7 @@ fn build_upgrade_plan<D: DaemonUpgradePort + ?Sized>(
         semantic_provisioning,
     })
 }
+
+#[cfg(all(test, unix))]
+#[path = "command/first_pair_tests.rs"]
+mod first_pair_tests;

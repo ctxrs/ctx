@@ -297,7 +297,7 @@ impl ReleaseManagedPairVerifier {
 
 pub(super) fn inspect_plan_under_installation_lock(
     plan: &UpgradePlan,
-    _installation_lock: &InstallationLock,
+    installation_lock: &InstallationLock,
 ) -> Result<ManagedPairMode> {
     let Some(install_root) = install_root_for_executable(&plan.install_path) else {
         return Ok(ManagedPairMode::CoreOnly);
@@ -305,7 +305,33 @@ pub(super) fn inspect_plan_under_installation_lock(
     let verifier = ReleaseManagedPairVerifier::for_channel(&plan.channel)?;
     let status = inspect_managed_pair_under_installation_lock(&install_root, &verifier)?;
     Ok(match status {
-        ManagedPairInstallationStatus::Absent => ManagedPairMode::CoreOnly,
+        ManagedPairInstallationStatus::Absent => {
+            // Hosted installations predating the paired distribution have no
+            // pair evidence yet. Complete their first pair through the same
+            // verified download, daemon handoff and publication owner as repair.
+            // A source/unmanaged plan or a Core-only release grants no such work.
+            if !plan.managed || plan.managed_pair_release.is_none() {
+                return Ok(ManagedPairMode::CoreOnly);
+            }
+            install::revalidate_plan_snapshot_under_installation_lock(plan, installation_lock)?;
+            let current = super::version::parse_semver(&plan.current_version)?;
+            let latest = super::version::parse_semver(&plan.latest_version)?;
+            if !latest.cmp_precedence(&current).is_gt()
+                && plan.latest_version != plan.current_version
+            {
+                bail!("managed-pair completion requires a newer release or the exact installed Core version");
+            }
+            if !plan.metadata.self_upgrade_allowed {
+                bail!(
+                    "release {} does not allow self-upgrade",
+                    plan.latest_version
+                );
+            }
+            ManagedPairMode::Paired {
+                install_root,
+                repair_required: true,
+            }
+        }
         ManagedPairInstallationStatus::Healthy { .. } => ManagedPairMode::Paired {
             install_root,
             repair_required: false,

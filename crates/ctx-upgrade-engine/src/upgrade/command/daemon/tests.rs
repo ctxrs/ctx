@@ -294,3 +294,5 @@ fn generic_committed_recovery_state_fault_emits_one_truthful_applied_event() {
     assert_eq!(state["latest_version"], "1.1.0");
     assert_eq!(state["update_available"], true);
 }
+
+mod first_pair;
