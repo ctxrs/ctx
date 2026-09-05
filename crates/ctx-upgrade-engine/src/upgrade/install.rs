@@ -33,8 +33,6 @@ pub use managed_man::{
     disable_current_man_pages, reconcile_current_man_pages, ManagedManBundle, ManagedManPage,
 };
 pub(in crate::upgrade) use marker::absent_install_marker_error;
-#[cfg(test)]
-pub(in crate::upgrade) use marker::classify_install_marker_at;
 pub(in crate::upgrade) use marker::install_marker_path;
 pub(in crate::upgrade) use marker::installation_is_unmanaged_at;
 pub use marker::is_valid_install_attempt_id;
