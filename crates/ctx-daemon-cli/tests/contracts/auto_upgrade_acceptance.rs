@@ -910,7 +910,7 @@ mod unix {
     }
 
     #[test]
-    fn status_and_autostart_fail_closed_for_deleted_owner_image() {
+    fn status_and_autostart_fail_closed_for_unverifiable_deleted_owner_image() {
         let temp = daemon_test_root();
         let target = managed_bound_hook_candidate(&temp, "ia_stale_owner_original");
         let root = data_root(&temp);
@@ -949,7 +949,7 @@ mod unix {
         let mut old_daemon = PausedDaemonOwner::pause(old_daemon);
 
         // The ordinary harness and automatic-upgrade fixture are distinct
-        // current images. Replacing one with the other must not authorize
+        // current images. The conflicting digest below must not authorize
         // signaling the still-running owner of the deleted executable.
         let staged = target.with_extension("new");
         let replacement = assert_cmd::Command::cargo_bin("ctx").unwrap();
@@ -981,6 +981,18 @@ mod unix {
                 "installed_at": "2026-07-30T00:00:00Z",
             }))
             .unwrap(),
+        )
+        .unwrap();
+
+        // A valid current digest can authorize handoff of a deleted image via
+        // the retained process identity. Make that identity unverifiable here:
+        // the lock has a conflicting digest while its guard is still held by
+        // the paused original process.
+        let mut conflicting_lock = lock;
+        conflicting_lock["binary_sha256"] = Value::String("0".repeat(64));
+        fs::write(
+            root.join("daemon/daemon.lock"),
+            serde_json::to_vec(&conflicting_lock).unwrap(),
         )
         .unwrap();
 
