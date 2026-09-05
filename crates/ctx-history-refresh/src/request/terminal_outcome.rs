@@ -311,7 +311,8 @@ fn validate_components(
         || !retryable_routes.is_disjoint(blocked_routes)
         || !retryable_routes.is_subset(affected_routes)
         || !blocked_routes.is_subset(affected_routes)
-        || (code.is_failure()
+        // Rejection-only routes are affected diagnostics without a retry disposition.
+        || ((code.is_failure() || code == RefreshOutcomeCode::CompletedWithSourceFailures)
             && retryable_routes
                 .union(blocked_routes)
                 .ne(affected_routes.iter()))

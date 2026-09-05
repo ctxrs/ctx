@@ -103,3 +103,149 @@ fn successful_outcomes_require_a_published_generation() {
         "successful source refresh outcome has no published generation"
     );
 }
+
+#[test]
+fn partial_source_failures_reject_an_affected_route_without_a_disposition() {
+    for retryable in [false, true] {
+        let assigned = BTreeSet::from([route("ab")]);
+        let (retryable_routes, blocked_routes) = if retryable {
+            (assigned, BTreeSet::new())
+        } else {
+            (BTreeSet::new(), assigned)
+        };
+        let error = RefreshTerminalOutcome::new(
+            RefreshOutcomeCode::CompletedWithSourceFailures,
+            retryable,
+            BTreeSet::from([route("ab"), route("cd")]),
+            retryable_routes,
+            blocked_routes,
+            "attempt".to_owned(),
+            Some("generation".to_owned()),
+            Some("generation".to_owned()),
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "source refresh structured outcome has inconsistent route dispositions"
+        );
+    }
+}
+
+fn published_partial_outcome(
+    rejections: bool,
+    retryable: bool,
+    blocked: bool,
+) -> RefreshTerminalOutcome {
+    let mut results = Vec::new();
+    for (identity, present, retryable) in [("ab", retryable, true), ("cd", blocked, false)] {
+        if present {
+            let mut result = SourceBackedRefreshRouteResult::succeeded(
+                route(identity).as_str().to_owned(),
+                true,
+            );
+            result.source_failure_total = 1;
+            result.source_retryable_failure_total = usize::from(retryable);
+            results.push(result);
+        }
+    }
+    if rejections {
+        let mut result =
+            SourceBackedRefreshRouteResult::succeeded(route("ef").as_str().to_owned(), true);
+        result.rejected_record_total = 1;
+        results.push(result);
+    }
+    let publication = SourceBackedRefreshPublication {
+        generation_id: "generation".to_owned(),
+        published_explicit_source_catalog: None,
+        unsupported_routes: 0,
+        certified_source_count: 0,
+        certified_source_bytes: 0,
+        current: SourceBackedRefreshCurrent {
+            rejected_records: u64::from(rejections),
+            sources_with_rejections: usize::from(rejections),
+            ..SourceBackedRefreshCurrent::default()
+        },
+        timings: SourceBackedRefreshTimings::default(),
+        route_results: results,
+        zero_source_authority: Vec::new(),
+        catalog_route_bindings: Vec::new(),
+        verified_index: None,
+    };
+    let receipt = SourceBackedRefreshReceipt::from_verified_publication(
+        None,
+        "generation".to_owned(),
+        &publication,
+    )
+    .unwrap();
+    RefreshTerminalOutcome::from_published_receipt(&receipt, "attempt")
+}
+
+fn published_status(outcome: &RefreshTerminalOutcome) -> Value {
+    json!({
+        "request_id": "request",
+        "logical_request_id": "request",
+        "request_state": "published",
+        "logical_phase": "terminal",
+        "physical_attempt_id": "attempt",
+        "physical_attempt_state": "published",
+        "progress_owner_request_id": "request",
+        "progress_owner_attempt_state": "published",
+        "published_generation": "generation",
+        "structured_outcome": outcome.to_json(),
+        "progress": {"phase": "published", "completed_sources": 0, "total_sources": 0},
+    })
+}
+
+#[test]
+fn published_partial_outcomes_keep_complete_and_diagnostic_only_routes() {
+    use RefreshOutcomeCode::*;
+    for (rejections, retryable, blocked, code) in [
+        (false, false, false, Completed),
+        (false, true, false, CompletedWithSourceFailures),
+        (false, false, true, CompletedWithSourceFailures),
+        (false, true, true, CompletedWithSourceFailures),
+        (true, false, false, CompletedWithRejections),
+        (true, true, true, CompletedWithRejectionsAndSourceFailures),
+    ] {
+        let outcome = published_partial_outcome(rejections, retryable, blocked);
+        assert_eq!(outcome.code(), code);
+        assert_eq!(outcome.retryable(), retryable);
+        assert_eq!(
+            outcome.retryable_routes(),
+            &if retryable {
+                BTreeSet::from([route("ab")])
+            } else {
+                BTreeSet::new()
+            }
+        );
+        assert_eq!(
+            outcome.blocked_routes(),
+            &if blocked {
+                BTreeSet::from([route("cd")])
+            } else {
+                BTreeSet::new()
+            }
+        );
+        assert_eq!(outcome.affected_routes().contains(&route("ef")), rejections);
+        let status = RefreshStatus::parse_schema_v1(published_status(&outcome)).unwrap();
+        let RefreshStatusKind::Logical(logical) = status.kind().unwrap() else {
+            panic!("expected logical published status");
+        };
+        assert_eq!(logical.structured_outcome, Some(outcome));
+    }
+}
+
+#[test]
+fn partial_source_failure_status_rejects_incomplete_dispositions() {
+    let outcome = published_partial_outcome(false, true, true);
+    let mut fields = published_status(&outcome);
+    RefreshStatus::parse_schema_v1(fields.clone()).unwrap();
+    fields["structured_outcome"]["blocked_routes"] = json!([]);
+    let error = RefreshStatus::parse_schema_v1(fields).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "source refresh structured outcome has inconsistent route dispositions"
+    );
+}
