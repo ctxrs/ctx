@@ -376,15 +376,14 @@ fn mcp_limits() -> Result<BridgeLimits, CompanionRouteError> {
 }
 
 fn paid_family_arguments(arguments: &[OsString]) -> Option<Vec<OsString>> {
-    let explicit_pro = has_explicit_pro_selector(arguments);
-    let mut router_selector_index = None;
+    let mut router_selector_index = explicit_pro_selector_index(arguments);
+    let explicit_pro = router_selector_index.is_some();
     let mut index = 1;
     while let Some(argument) = arguments.get(index) {
         if is_global_help_or_version(argument) {
-            return arguments[1..index]
-                .iter()
-                .any(|candidate| candidate == "--pro")
-                .then(|| forwarded_paid_arguments(arguments, router_selector_index));
+            return router_selector_index
+                .filter(|selector| *selector < index)
+                .map(|selector| forwarded_paid_arguments(arguments, Some(selector)));
         }
         if argument == "--" {
             index += 1;
@@ -395,7 +394,6 @@ fn paid_family_arguments(arguments: &[OsString]) -> Option<Vec<OsString>> {
             continue;
         }
         if argument == "--pro" {
-            router_selector_index.get_or_insert(index);
             index += 1;
             continue;
         }
@@ -406,6 +404,19 @@ fn paid_family_arguments(arguments: &[OsString]) -> Option<Vec<OsString>> {
             index += 1;
             continue;
         }
+        let family = if argument == "help" {
+            arguments.get(index + 1)
+        } else {
+            Some(argument)
+        };
+        // Only Core-named routes consume a trailing router selector. Setup
+        // owns its trailing --pro flag; paid-family arguments remain opaque.
+        if !matches!(
+            family.and_then(|value| value.to_str()),
+            Some("status" | "doctor" | "upgrade" | "uninstall")
+        ) {
+            router_selector_index = router_selector_index.filter(|selector| *selector < index);
+        }
         if explicit_pro
             || ["pro", "blame", "referral"]
                 .iter()
@@ -415,25 +426,9 @@ fn paid_family_arguments(arguments: &[OsString]) -> Option<Vec<OsString>> {
         }
         if argument == "help"
             && arguments.get(index + 1).is_some_and(|candidate| {
-                [
-                    "pro",
-                    "blame",
-                    "referral",
-                    "setup",
-                    "status",
-                    "doctor",
-                    "upgrade",
-                    "uninstall",
-                ]
-                .iter()
-                .any(|family| {
-                    candidate == family
-                        && (explicit_pro
-                            || !matches!(
-                                *family,
-                                "setup" | "status" | "doctor" | "upgrade" | "uninstall"
-                            ))
-                })
+                ["pro", "blame", "referral"]
+                    .iter()
+                    .any(|family| candidate == family)
             })
         {
             return Some(forwarded_paid_arguments(arguments, router_selector_index));
@@ -542,12 +537,22 @@ fn has_attached_color_value(value: &OsStr) -> bool {
     value.as_encoded_bytes().starts_with(b"--color=")
 }
 
-fn has_explicit_pro_selector(arguments: &[OsString]) -> bool {
-    arguments
-        .iter()
-        .skip(1)
-        .take_while(|argument| argument.as_os_str() != OsStr::new("--"))
-        .any(|argument| argument == "--pro")
+fn explicit_pro_selector_index(arguments: &[OsString]) -> Option<usize> {
+    let mut index = 1;
+    while let Some(argument) = arguments.get(index) {
+        if argument == "--" {
+            break;
+        }
+        if argument == "--data-root" || argument == "--color" {
+            index = index.saturating_add(2);
+            continue;
+        }
+        if argument == "--pro" {
+            return Some(index);
+        }
+        index += 1;
+    }
+    None
 }
 
 fn is_global_help_or_version(value: &OsStr) -> bool {

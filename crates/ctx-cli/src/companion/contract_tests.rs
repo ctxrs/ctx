@@ -131,6 +131,94 @@ fn router_owned_pro_selector_is_removed_before_companion_forwarding() {
 }
 
 #[test]
+fn core_route_pro_selector_is_removed_after_the_command() {
+    for family in ["status", "doctor", "upgrade", "uninstall"] {
+        for (arguments, expected) in [
+            (
+                vec!["ctx", family, "--pro", "--format", "json"],
+                vec![family, "--format", "json"],
+            ),
+            (vec!["ctx", "help", family, "--pro"], vec!["help", family]),
+            (
+                vec!["ctx", family, "--data-root", "--pro", "--pro"],
+                vec![family, "--data-root", "--pro"],
+            ),
+            (
+                vec!["ctx", family, "--pro", "--", "--pro"],
+                vec![family, "--", "--pro"],
+            ),
+        ] {
+            let arguments = arguments
+                .into_iter()
+                .map(OsString::from)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                paid_family_arguments(&arguments),
+                Some(expected.into_iter().map(OsString::from).collect()),
+                "{arguments:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn pro_values_and_delimited_arguments_do_not_select_a_companion_route() {
+    for arguments in [
+        vec!["ctx", "--data-root", "--pro", "status"],
+        vec!["ctx", "status", "--data-root", "--pro"],
+        vec!["ctx", "--color", "--pro", "status"],
+        vec!["ctx", "status", "--color", "--pro"],
+        vec!["ctx", "--data-root=--pro", "status"],
+        vec!["ctx", "--data-root", "--pro", "--help"],
+        vec!["ctx", "--help", "status", "--pro"],
+        vec!["ctx", "status", "--", "--pro"],
+        vec!["ctx", "--", "status", "--pro"],
+    ] {
+        let arguments = arguments
+            .into_iter()
+            .map(OsString::from)
+            .collect::<Vec<_>>();
+        assert!(paid_family_arguments(&arguments).is_none(), "{arguments:?}");
+    }
+}
+
+#[test]
+fn removing_a_router_selector_preserves_command_arguments() {
+    for (arguments, expected) in [
+        (
+            vec!["ctx", "--data-root", "--pro", "--pro", "status"],
+            vec!["--data-root", "--pro", "status"],
+        ),
+        (
+            vec!["ctx", "--pro", "status", "--color", "--pro"],
+            vec!["status", "--color", "--pro"],
+        ),
+        (
+            vec!["ctx", "--pro", "setup", "--pro"],
+            vec!["setup", "--pro"],
+        ),
+        (
+            vec!["ctx", "--pro", "--", "status", "--pro"],
+            vec!["--", "status", "--pro"],
+        ),
+        (
+            vec!["ctx", "pro", "--private-option", "--pro"],
+            vec!["pro", "--private-option", "--pro"],
+        ),
+    ] {
+        let arguments = arguments
+            .into_iter()
+            .map(OsString::from)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            paid_family_arguments(&arguments),
+            Some(expected.into_iter().map(OsString::from).collect()),
+            "{arguments:?}"
+        );
+    }
+}
+
+#[test]
 fn command_owned_setup_pro_is_preserved() {
     for arguments in [
         vec!["ctx", "setup", "--pro", "--format", "json"],
@@ -843,6 +931,22 @@ fn opaque_paid_arguments_are_preserved_byte_for_byte() {
     assert_eq!(
         forwarded[1].as_os_str().as_bytes(),
         opaque.as_os_str().as_bytes()
+    );
+
+    let arguments = [
+        OsString::from("ctx"),
+        OsString::from("status"),
+        OsString::from("--data-root"),
+        opaque.clone(),
+        OsString::from("--pro"),
+    ];
+    assert_eq!(
+        paid_family_arguments(&arguments),
+        Some(vec![
+            OsString::from("status"),
+            OsString::from("--data-root"),
+            opaque
+        ])
     );
 }
 

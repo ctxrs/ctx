@@ -852,10 +852,7 @@ fn setup_wait_publishes_setup_status_contract() {
     let setup =
         json_output(ctx(&temp).args(["setup", "--wait", "--format=json", "--progress", "none"]));
     assert_eq!(setup["schema_version"], 2, "{setup:#}");
-    assert!(
-        setup.get("deprecated_catalog_only_ignored").is_none(),
-        "{setup:#}"
-    );
+    assert_eq!(setup["deprecated_catalog_only_ignored"], false, "{setup:#}");
     assert!(setup.get("read_only").is_none(), "{setup:#}");
     assert_eq!(setup["mode"], "ready", "{setup:#}");
     assert_eq!(setup["lexical"]["certified_sources"], 1, "{setup:#}");
@@ -915,7 +912,7 @@ fn quiet_setup_suppresses_success_output_but_not_json() {
     let setup =
         json_output(ctx(&temp).args(["--quiet", "setup", "--format=json", "--progress", "none"]));
     assert_eq!(setup["schema_version"], 2);
-    assert!(setup.get("deprecated_catalog_only_ignored").is_none());
+    assert_eq!(setup["deprecated_catalog_only_ignored"], false, "{setup:#}");
 }
 
 #[test]
@@ -1047,6 +1044,7 @@ fn setup_no_daemon_is_one_run_opt_out_and_keeps_semantic_disabled() {
         "none",
     ]));
     assert_eq!(setup["schema_version"], 2, "{setup:#}");
+    assert_eq!(setup["deprecated_catalog_only_ignored"], false, "{setup:#}");
     assert!(setup.get("background_indexing").is_none(), "{setup:#}");
     assert_eq!(
         setup["daemon_autostart"]["status"], "not_requested",
