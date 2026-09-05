@@ -14,6 +14,10 @@ public abstract record AgentHistoryResponse
         ContractVersion = JsonHelpers.GetString(envelope, "contractVersion") ?? CtxAgentHistoryVersions.ContractVersion;
         SchemaVersion = JsonHelpers.GetInt(envelope, "schemaVersion") ?? CtxAgentHistoryVersions.SchemaVersion;
         Operation = JsonHelpers.GetString(envelope, "operation") ?? "";
+        if (Operation is "status" or "init" && _json["status"] is JsonObject status)
+        {
+            _json["status"] = AgentHistoryStatus.WithoutLocality(status);
+        }
         Backend = AgentHistoryBackend.FromJson(envelope["backend"] as JsonObject);
     }
 
@@ -130,9 +134,8 @@ public sealed record AgentHistoryStatus
 
     private AgentHistoryStatus(JsonObject json)
     {
-        _json = JsonHelpers.CloneObject(json);
+        _json = WithoutLocality(json);
         Initialized = JsonHelpers.GetBool(json, "initialized") ?? false;
-        LocalOnly = JsonHelpers.GetBool(json, "localOnly") ?? true;
         ReadOnly = JsonHelpers.GetBool(json, "readOnly");
         DataRoot = JsonHelpers.GetString(json, "dataRoot");
         IndexedItems = JsonHelpers.GetUInt64(json, "indexedItems");
@@ -147,7 +150,6 @@ public sealed record AgentHistoryStatus
     }
 
     public bool Initialized { get; }
-    public bool LocalOnly { get; }
     public bool? ReadOnly { get; }
     public string? DataRoot { get; }
     public ulong? IndexedItems { get; }
@@ -161,6 +163,14 @@ public sealed record AgentHistoryStatus
     public JsonObject Daemon { get; }
 
     public JsonObject ToJsonObject() => JsonHelpers.CloneObject(_json);
+
+    internal static JsonObject WithoutLocality(JsonObject json)
+    {
+        var status = JsonHelpers.CloneObject(json);
+        status.Remove("localOnly");
+        status.Remove("local_only");
+        return status;
+    }
 
     internal static AgentHistoryStatus FromJson(JsonObject? json) => new(json ?? new JsonObject());
 }

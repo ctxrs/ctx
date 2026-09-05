@@ -2,6 +2,34 @@ import XCTest
 @testable import CtxAgentHistory
 
 final class CtxAgentHistoryTests: XCTestCase {
+    func testStatusDropsRetiredLocalityFromRawAndCanonicalValues() throws {
+        let variants: [[String: JSONValue]] = [[:], ["local_only": .bool(true)],
+            ["localOnly": .bool(false)], ["local_only": .null, "localOnly": .string("legacy")]]
+        for flags in variants {
+            var raw = flags
+            raw["initialized"] = .bool(true)
+            raw["semantic"] = .object(["local_only": .bool(false), "diagnostics": .object(["localOnly": .null])])
+            let bytes = try JSONEncoder().encode(JSONValue.object(raw))
+            let runner = CapturingRunner { _ in CommandResult(stdout: bytes) }
+            let client = AgentHistoryClient(adapter: LocalCLIAdapter(runner: runner))
+            let direct = try JSONDecoder().decode(AgentHistoryStatus.self, from: bytes)
+            let statuses = [try client.status().status, try client.initialize().status, direct]
+            for (index, status) in statuses.enumerated() {
+                let output = try JSONDecoder().decode(JSONValue.self, from: JSONEncoder().encode(status))
+                XCTAssertNil(output["localOnly"])
+                XCTAssertNil(output["local_only"])
+                XCTAssertEqual(output["initialized"], .bool(true))
+                let key = index == 2 ? "local_only" : "localOnly"
+                XCTAssertEqual(output["semantic"]?[key], .bool(false))
+                XCTAssertEqual(output["semantic"]?["diagnostics"]?["localOnly"], .null)
+            }
+        }
+        let runner = CapturingRunner { _ in CommandResult(stdout: "{}") }
+        let status = try AgentHistoryClient(adapter: LocalCLIAdapter(runner: runner)).status().status
+        let output = try JSONDecoder().decode(JSONValue.self, from: JSONEncoder().encode(status))
+        XCTAssertEqual(output, .object(["initialized": .bool(false)]))
+    }
+
     func testPreservesOpaqueEventPayloadsAndExplicitNulls() throws {
         let fixtureURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
@@ -187,7 +215,6 @@ final class CtxAgentHistoryTests: XCTestCase {
 
         let invalid = AgentHistoryStatus(
             initialized: true,
-            localOnly: true,
             indexedItems: maximum + 2
         )
         XCTAssertThrowsError(try JSONEncoder().encode(invalid))

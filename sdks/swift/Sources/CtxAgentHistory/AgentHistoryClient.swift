@@ -507,13 +507,12 @@ private func backendWithRawDataRoot(_ backend: AgentHistoryBackend, _ raw: JSONV
 
 private func normalizeStatus(_ raw: JSONValue) throws -> JSONValue {
     guard case let .object(current) = raw.camelizedPublicJSON().droppingNulls() else {
-        return .object(["initialized": .bool(false), "localOnly": .bool(true)])
+        return .object(["initialized": .bool(false)])
     }
     let initialized = current["initialized"]
         ?? .bool(current["lexical"]?["generationId"]?.stringValue != nil)
     var status: [String: JSONValue] = [
         "initialized": initialized,
-        "localOnly": .bool(true)
     ]
     for key in [
         "dataRoot", "readOnly", "indexedItems", "indexedSessions", "indexedEvents",

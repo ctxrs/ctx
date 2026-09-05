@@ -52,7 +52,9 @@ fn installer_style_setup_succeeds_with_a_genuinely_empty_source_catalog() {
     let temp = daemon_test_root();
 
     let setup = json_output(ctx(&temp).args(["setup", "--format=json", "--progress", "none"]));
-    assert_eq!(setup["schema_version"], 2, "{setup:#}");
+    assert_eq!(setup["schema_version"], 3, "{setup:#}");
+    assert!(setup.get("local_only").is_none());
+    assert!(setup.get("localOnly").is_none());
     assert_empty_catalog_default_background_setup(&setup);
 
     let status = json_output(ctx(&temp).args(["status", "--format=json"]));
@@ -299,7 +301,9 @@ fn machine_readable_setup_uses_v2_top_level_persistent_daemon_contract() {
     let temp = daemon_test_root();
 
     let setup = json_output(ctx(&temp).args(["setup", "--format=json", "--progress", "none"]));
-    assert_eq!(setup["schema_version"], 2, "{setup:#}");
+    assert_eq!(setup["schema_version"], 3, "{setup:#}");
+    assert!(setup.get("local_only").is_none());
+    assert!(setup.get("localOnly").is_none());
     assert!(setup.get("background_indexing").is_none(), "{setup:#}");
     assert_eq!(setup["daemon_autostart"]["status"], "degraded", "{setup:#}");
     assert_eq!(setup["daemon_autostart"]["requested"], true, "{setup:#}");
@@ -358,7 +362,7 @@ fn setup_wait_progress_json_uses_stderr_and_keeps_final_json_on_stdout() {
         .clone();
 
     let stdout: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(stdout["schema_version"], 2, "{stdout:#}");
+    assert_eq!(stdout["schema_version"], 3, "{stdout:#}");
     let events = String::from_utf8(output.stderr)
         .unwrap()
         .lines()
@@ -759,7 +763,9 @@ fn clean_multisource_setup_imports_hermes_and_preserves_source_bytes() {
         .to_owned();
     let status = wait_for_core_generation(&temp, &generation);
 
-    assert_eq!(setup["schema_version"], 2, "{setup:#}");
+    assert_eq!(setup["schema_version"], 3, "{setup:#}");
+    assert!(setup.get("local_only").is_none());
+    assert!(setup.get("localOnly").is_none());
     assert_eq!(setup["mode"], "ready", "{setup:#}");
     assert_eq!(status["lexical"]["generation_id"], generation, "{status:#}");
     assert!(status.get("relational").is_none(), "{status:#}");

@@ -56,7 +56,6 @@ class Freshness(TypedDict, total=False):
 
 class _StatusRequired(TypedDict):
     initialized: bool
-    localOnly: bool
 
 
 class Status(_StatusRequired, total=False):

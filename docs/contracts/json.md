@@ -7,7 +7,10 @@ a user reviews it.
 Command result JSON uses `schema_version: 1` except for
 `ctx setup --format json`, `ctx stats --format json`,
 `ctx import --format json`, `ctx search --format json`,
-`ctx status --format json`, `ctx daemon status`, and MCP `status`.
+`ctx status --format json` (including usage controls and errors), all `ctx index`
+JSON modes, `ctx daemon status`, `ctx daemon enable`, `ctx daemon disable`, and
+MCP `status`. Generic daemon command JSON uses version 2; uninstall-quiescence
+receipts retain their separate schema.
 Progress-event JSON is stderr progress output and does not include
 `schema_version`.
 
@@ -24,7 +27,7 @@ ctx setup --format json
 ctx setup --format json --no-daemon
 ```
 
-Writes local storage and returns schema version 2:
+Writes local storage and returns schema version 3:
 
 - `schema_version`;
 - `data_root`;
@@ -88,7 +91,7 @@ ctx status --format json
 
 Reads local storage state and returns:
 
-- `schema_version: 2`;
+- `schema_version: 3`;
 - `initialized`;
 - `data_root`;
 - `config_path`;
@@ -105,12 +108,17 @@ Reads local storage state and returns:
 - `upgrade`;
 - compact `local_usage` health (`enabled`, state, and a content-free error when
   unavailable), without aggregates, estimates, or operation details;
-- `local_only: true`;
 - `read_only: true`.
 
 For status, `read_only: true` means the command does not mutate canonical
 history or Core search generations. Usage control modes return a separate
-action-focused JSON shape with `read_only: false` and do not read Core status.
+action-focused JSON shape with `schema_version: 2` and `read_only: false`, and
+do not read Core status. Generic status configuration errors also use version 2.
+
+Status and setup version 3, and usage/error, index, and daemon command version 2,
+remove the generic `local_only` property. Callers must update version checks and
+stop requiring or reading that property. Semantic executor diagnostics,
+standalone stats, and uninstall receipts retain their separate locality fields.
 
 `history_epoch` and `lexical` identify the verified searchable Core generation.
 `refresh` reports the latest observed daemon-owned refresh request and its exact
@@ -214,8 +222,8 @@ ctx index wait --format json
 ```
 
 `ctx index --format json` returns the one-shot readiness snapshot. Each watch
-line uses the same read-only shape: `schema_version`, `initialized`, `indexing`,
-`lexical`, `refresh`, `semantic`, `daemon`, `local_only`, and `read_only`.
+line uses the same read-only shape: `schema_version: 2`, `initialized`, `indexing`,
+`lexical`, `refresh`, `semantic`, `daemon`, and `read_only`.
 `indexing.mode` is `auto` or `manual`. Lexical counts and certified source bytes
 describe the currently verified generation. Refresh progress contains only
 values reported by the active refresh job; no synthetic work units, failure
@@ -223,8 +231,8 @@ counts, rates, or remaining time are added. The one-shot and watch snapshots
 preserve `refresh.structured_outcome` and `refresh.automatic_retry` with the
 same shapes and status meanings as `ctx status --format json`.
 
-`ctx index mode --format json` returns `schema_version`, `indexing.mode`,
-`config_path`, `local_only`, and `read_only: true`. Supplying `auto` or `manual`
+`ctx index mode --format json` returns `schema_version: 2`, `indexing.mode`,
+`config_path`, and `read_only: true`. Supplying `auto` or `manual`
 persists the mode and returns `read_only: false` plus
 `indexing.requested_mode`, `indexing.overridden`, `daemon.running`, optional
 `daemon.pid`, `daemon.persistent`, and `daemon.supervisor`. `overridden` is true
@@ -234,8 +242,8 @@ installs or repairs supervision and starts the persistent daemon; manual mode
 stops it and removes persistent supervision. Explicit import and search
 `--refresh wait` can still use finite workers.
 
-Wait returns one object with `schema_version`, `status` (`ready`, `blocked`, or
-`timeout`), `selection`, the final `readiness` snapshot, `local_only`, and
+Wait returns one object with `schema_version: 2`, `status` (`ready`, `blocked`, or
+`timeout`), `selection`, the final `readiness` snapshot, and
 `read_only`. Use `ctx status --format json` for the complete health contract,
 including daemon and supervisor diagnostics.
 

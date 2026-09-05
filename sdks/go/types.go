@@ -138,7 +138,6 @@ type StatusResponse struct {
 // StatusRecord describes local index state.
 type StatusRecord struct {
 	Initialized     bool   `json:"initialized"`
-	LocalOnly       bool   `json:"localOnly"`
 	ReadOnly        bool   `json:"readOnly,omitempty"`
 	DataRoot        string `json:"dataRoot,omitempty"`
 	IndexedItems    uint64 `json:"indexedItems,omitempty"`

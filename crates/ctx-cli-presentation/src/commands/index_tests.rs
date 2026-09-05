@@ -14,7 +14,7 @@ fn readiness(
     daemon_running: bool,
 ) -> serde_json::Value {
     let mut status = json!({
-        "schema_version": 1,
+        "schema_version": 2,
         "initialized": true,
         "lexical": {
             "status": "ready",
@@ -67,7 +67,6 @@ fn readiness(
             "running": daemon_running,
             "jobs": {"semantic_index": {"status": "disabled"}},
         },
-        "local_only": true,
         "read_only": true,
     });
     if refresh_status != "ready" {

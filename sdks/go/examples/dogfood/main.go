@@ -130,7 +130,6 @@ func (fakeTransport) Do(_ context.Context, op ctxagenthistory.Operation) ([]byte
 	case "status", "init":
 		envelope["status"] = map[string]any{
 			"initialized":  true,
-			"localOnly":    true,
 			"dataRoot":     "/tmp/ctx-sdk-dogfood",
 			"indexedItems": 1,
 		}

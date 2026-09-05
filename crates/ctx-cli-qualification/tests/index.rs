@@ -98,13 +98,18 @@ fn index_status_and_mode_have_one_coherent_public_surface() {
     let temp = daemon_test_root();
 
     let status = json_output(ctx(&temp).args(["index", "--format=json"]));
+    assert_eq!(status["schema_version"], 2);
     assert_eq!(status["indexing"]["mode"], "auto");
-    assert_eq!(status["local_only"], true);
+    assert!(status.get("local_only").is_none());
+    assert!(status.get("localOnly").is_none());
     assert_eq!(status["read_only"], true);
 
     let default_mode = json_output(ctx(&temp).args(["index", "--format=json", "mode"]));
     assert_eq!(default_mode["indexing"]["mode"], "auto");
     assert_eq!(default_mode["read_only"], true);
+    assert_eq!(default_mode["schema_version"], 2);
+    assert!(default_mode.get("local_only").is_none());
+    assert!(default_mode.get("localOnly").is_none());
     assert!(!data_root(&temp).join("config.toml").exists());
 
     let manual = json_output(ctx(&temp).args(["index", "mode", "manual", "--format=json"]));
@@ -117,6 +122,22 @@ fn index_status_and_mode_have_one_coherent_public_surface() {
     let current = json_output(ctx(&temp).args(["index", "mode", "--format=json"]));
     assert_eq!(current["indexing"]["mode"], "manual");
     assert_eq!(current["read_only"], true);
+}
+
+#[test]
+fn generic_daemon_receipts_omit_locality() {
+    let temp = daemon_test_root();
+    for command in ["status", "enable", "disable"] {
+        // The fixture owns this override: test each receipt without installing supervision.
+        let output = json_output(
+            ctx(&temp)
+                .args(["daemon", command, "--format=json"])
+                .env("CTX_DAEMON_ENABLED", "false"),
+        );
+        assert_eq!(output["schema_version"], 2, "{output}");
+        assert!(output.get("local_only").is_none(), "{output}");
+        assert!(output.get("localOnly").is_none(), "{output}");
+    }
 }
 
 #[test]
@@ -399,7 +420,7 @@ fn index_wait_lexical_reports_ready_after_import() {
         "--interval-seconds",
         "1",
     ]));
-    assert_eq!(wait["schema_version"], 1);
+    assert_eq!(wait["schema_version"], 2);
     assert_eq!(wait["status"], "ready");
     assert_eq!(wait["selection"]["lexical"], true);
     assert_eq!(wait["selection"]["semantic"], false);
@@ -410,7 +431,8 @@ fn index_wait_lexical_reports_ready_after_import() {
             .unwrap()
             > 0
     );
-    assert_eq!(wait["local_only"], true);
+    assert!(wait.get("local_only").is_none());
+    assert!(wait.get("localOnly").is_none());
     assert_eq!(wait["read_only"], true);
 }
 
@@ -556,7 +578,7 @@ fn index_wait_default_skips_semantic_when_disabled_after_import() {
         "--interval-seconds",
         "1",
     ]));
-    assert_eq!(wait["schema_version"], 1);
+    assert_eq!(wait["schema_version"], 2);
     assert_eq!(wait["status"], "ready");
     assert_eq!(wait["selection"]["lexical"], true);
     assert_eq!(wait["selection"]["semantic"], false);
@@ -613,7 +635,7 @@ fn index_wait_semantic_stays_strict_when_semantic_is_disabled() {
         .clone();
     let stdout: Value = serde_json::from_slice(&output.stdout).unwrap();
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert_eq!(stdout["schema_version"], 1);
+    assert_eq!(stdout["schema_version"], 2);
     assert_eq!(stdout["status"], "blocked");
     assert_eq!(stdout["selection"]["lexical"], false);
     assert_eq!(stdout["selection"]["semantic"], true);
@@ -643,7 +665,7 @@ fn index_wait_all_stays_strict_when_semantic_is_disabled() {
         .clone();
     let stdout: Value = serde_json::from_slice(&output.stdout).unwrap();
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert_eq!(stdout["schema_version"], 1);
+    assert_eq!(stdout["schema_version"], 2);
     assert_eq!(stdout["status"], "blocked");
     assert_eq!(stdout["selection"]["lexical"], true);
     assert_eq!(stdout["selection"]["semantic"], true);

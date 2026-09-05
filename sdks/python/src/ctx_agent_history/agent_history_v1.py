@@ -56,7 +56,13 @@ def envelope(operation: str, backend: Mapping[str, Any], **payload: Any) -> Json
             }
         )
     )
+    if operation in ("status", "init") and isinstance(result.get("status"), Mapping):
+        result["status"] = without_status_locality(result["status"])
     return result
+
+
+def without_status_locality(status: Mapping[str, Any]) -> Status:
+    return cast(Status, {key: value for key, value in status.items() if key not in ("localOnly", "local_only")})
 
 
 def normalize_status(raw: Mapping[str, Any]) -> Status:
@@ -73,7 +79,6 @@ def normalize_status(raw: Mapping[str, Any]) -> Status:
         _drop_none(
             {
                 "initialized": initialized,
-                "localOnly": True,
                 **{
                     key: current.get(key)
                     for key in (

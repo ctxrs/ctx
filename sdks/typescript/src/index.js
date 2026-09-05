@@ -841,7 +841,6 @@ function normalizeStatus(raw) {
     }
   }
   status.initialized ??= typeof current.lexical?.generationId === "string";
-  status.localOnly = true;
   return status;
 }
 

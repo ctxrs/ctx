@@ -23,6 +23,7 @@ public final class AgentHistoryClientTest {
 
     public static void main(String[] args) throws Exception {
         currentOpaquePayloadsAndProducerErrors();
+        dropsGenericStatusLocality();
         wrapsRawStatusAsTypedEnvelope();
         normalizesSetupJsonAsInitStatus();
         rejectsStatusCountersOutsideExactCrossSDKDomain();
@@ -53,6 +54,33 @@ public final class AgentHistoryClientTest {
         localCliDeadlineOwnsPipeDescendantsAndForcesCleanup();
         searchRequiresIntent();
         hostedIsExplicitlyUnsupported();
+    }
+
+    private static void dropsGenericStatusLocality() {
+        for (String flags : List.of("", ",\"local_only\":true", ",\"localOnly\":false",
+                ",\"local_only\":null,\"localOnly\":\"legacy\"")) {
+            String status = "{\"initialized\":true,\"semantic\":{\"local_only\":false,\"diagnostics\":{\"localOnly\":null}}" + flags + "}";
+            for (String operation : List.of("status", "init")) {
+                for (boolean canonical : List.of(false, true)) {
+                    String wire = canonical ? "{\"contractVersion\":\"agent-history-v1\",\"schemaVersion\":1,\"operation\":\""
+                            + operation + "\",\"status\":" + status + ",\"futureField\":{\"local_only\":\"kept\"}}" : status;
+                    AgentHistoryClient client = AgentHistoryClient.withTransport(new FakeTransport("local-cli", wire));
+                    AgentHistoryEnvelope response = "status".equals(operation) ? client.status() : client.init();
+                    Map<String, Object> output = AgentHistoryValue.objectAt(response.asMap(), "status");
+                    StatusRecord typed = StatusRecord.from(response.payload("status"));
+                    for (Map<String, Object> fields : List.of(output, typed.asMap())) {
+                        assertEquals(false, fields.containsKey("localOnly"));
+                        assertEquals(false, fields.containsKey("local_only"));
+                        Map<String, Object> semantic = AgentHistoryValue.objectAt(fields, "semantic");
+                        assertEquals(Boolean.FALSE, semantic.get(canonical ? "local_only" : "localOnly"));
+                        assertEquals(Json.parseObject("{\"localOnly\":null}"), semantic.get("diagnostics"));
+                    }
+                    if (canonical) assertEquals(Map.of("local_only", "kept"), response.payload("futureField"));
+                }
+            }
+        }
+        AgentHistoryClient fallback = AgentHistoryClient.withTransport(new FakeTransport("local-cli", "{}"));
+        assertEquals(Map.of("initialized", Boolean.FALSE), fallback.status().getStatus().asMap());
     }
 
     private static void currentOpaquePayloadsAndProducerErrors() throws Exception {
@@ -527,7 +555,8 @@ public final class AgentHistoryClientTest {
 
         assertEquals("init", response.operation());
         assertEquals(Boolean.TRUE, response.getStatus().getInitialized());
-        assertEquals(Boolean.TRUE, response.getStatus().getLocalOnly());
+        assertEquals(false, response.getStatus().asMap().containsKey("localOnly"));
+        assertEquals(false, response.getStatus().asMap().containsKey("local_only"));
         assertEquals(Long.valueOf(StatusRecord.MAX_SAFE_COUNTER), response.getStatus().getIndexedItems());
         assertEquals(Long.valueOf(StatusRecord.MAX_SAFE_COUNTER), response.getStatus().getIndexedSessions());
         assertEquals(Long.valueOf(StatusRecord.MAX_SAFE_COUNTER), response.getStatus().getIndexedEvents());
@@ -576,7 +605,8 @@ public final class AgentHistoryClientTest {
         assertEquals("status", response.operation());
         assertEquals("local", response.getBackend().getKind());
         assertEquals(Boolean.TRUE, response.getStatus().getInitialized());
-        assertEquals(Boolean.TRUE, response.getStatus().getLocalOnly());
+        assertEquals(false, response.getStatus().asMap().containsKey("localOnly"));
+        assertEquals(false, response.getStatus().asMap().containsKey("local_only"));
         assertEquals(Long.valueOf(2), response.getStatus().getIndexedItems());
         assertEquals(Long.valueOf(2), AgentHistoryValue.longValue(response.asMap().get("status") instanceof Map
                 ? ((Map<?, ?>) response.asMap().get("status")).get("indexedItems")

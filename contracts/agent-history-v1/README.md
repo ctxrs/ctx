@@ -21,7 +21,23 @@ release tooling, or raw Rust crate shapes as their public API.
 - Current schema version: `1`
 - SDKs expose their own SDK version separately from `contractVersion`.
 - Unknown JSON fields are additive and must be ignored or preserved.
-- Required fields can only change in a future contract id.
+- Required fields normally change only in a future contract id. The removal
+  below is a breaking exception while this in-repo SDK contract is experimental.
+
+The generic status property `localOnly` has been removed from all seven SDKs,
+including `status()` and `init()` responses. Callers must remove reads,
+constructor arguments, and required-field checks for this property. The contract
+id remains `agent-history-v1` and `schemaVersion` remains `1`; this change is not
+backward compatible with callers that require the old property. SDK normalizers
+also discard top-level `localOnly` and `local_only` from older status payloads.
+Nested semantic diagnostics and opaque event data remain intact.
+
+CLI status and setup JSON now use `schema_version: 3`; generic usage/error,
+index, and daemon command envelopes use `schema_version: 2`. Readers that check
+these versions must update their accepted versions and stop requiring the
+removed generic field. Semantic-only execution diagnostics, standalone stats,
+uninstall receipts, and stored visibility/sync values have separate contracts
+and retain their locality fields.
 
 ## Public Operations
 

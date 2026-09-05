@@ -45,10 +45,9 @@
     },
     "status": {
       "type": "object",
-      "required": ["initialized", "localOnly"],
+      "required": ["initialized"],
       "properties": {
         "initialized": { "type": "boolean" },
-        "localOnly": { "type": "boolean" },
         "readOnly": { "type": "boolean" },
         "dataRoot": { "type": ["string", "null"] },
         "indexedItems": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },

@@ -22,6 +22,13 @@ func normalizePayload(op Operation, payload []byte) ([]byte, error) {
 	}
 	if object, ok := raw.(map[string]any); ok {
 		if _, hasContractVersion := object["contractVersion"]; hasContractVersion {
+			if op.Name == "status" || op.Name == "init" {
+				if status, ok := object["status"].(map[string]any); ok {
+					delete(status, "localOnly")
+					delete(status, "local_only")
+					return json.Marshal(object)
+				}
+			}
 			return payload, nil
 		}
 	}
@@ -521,7 +528,7 @@ func scanExactJSONValue(decoder *json.Decoder) error {
 
 func normalizeStatus(value any) map[string]any {
 	status, _ := value.(map[string]any)
-	out := map[string]any{"localOnly": true}
+	out := map[string]any{}
 	for _, key := range []string{
 		"dataRoot", "indexedItems", "indexedSessions", "indexedEvents", "indexedSources",
 		"historyEpoch", "lexical", "refresh", "semantic", "daemon", "readOnly",

@@ -52,6 +52,37 @@ fn run_json_shell(body: &str, timeout: Duration) -> Result<Value, AgentHistoryEr
 }
 
 #[test]
+fn generic_status_omits_retired_flags_without_changing_nested_semantics() {
+    for operation in [AgentHistoryOperation::Status, AgentHistoryOperation::Init] {
+        for flags in [
+            json!({}),
+            json!({"local_only": true}),
+            json!({"localOnly": false}),
+            json!({"local_only": null, "localOnly": "legacy"}),
+        ] {
+            let mut raw = flags;
+            raw["schema_version"] = json!(2);
+            raw["lexical"] = json!({"generation_id": "ready"});
+            raw["semantic"] = json!({"local_only": false, "diagnostics": {"localOnly": null}});
+            let output =
+                serde_json::to_value(normalize(operation.clone(), BackendInfo::local(None), raw).unwrap())
+                    .unwrap();
+            let status = &output["status"];
+            assert!(status.get("localOnly").is_none(), "{status}");
+            assert!(status.get("local_only").is_none(), "{status}");
+            assert_eq!(status["initialized"], true);
+            assert_eq!(status["semantic"]["localOnly"], false);
+            assert_eq!(
+                status["semantic"]["diagnostics"].get("localOnly"),
+                Some(&Value::Null)
+            );
+        }
+    }
+    let fallback = serde_json::to_value(normalize_status(&json!({})).unwrap()).unwrap();
+    assert_eq!(fallback, json!({"initialized": false}));
+}
+
+#[test]
 fn reads_shared_search_fixture() {
     let value: AgentHistoryEnvelope = serde_json::from_str(include_str!(
         "../../../contracts/agent-history-v1/fixtures/search.results.json"

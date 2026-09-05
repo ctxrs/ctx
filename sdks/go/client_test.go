@@ -13,6 +13,39 @@ import (
 	"testing"
 )
 
+func TestStatusDropsRetiredRootKeysFromRawAndCanonicalPayloads(t *testing.T) {
+	for _, flags := range []string{``, `,"local_only":true`, `,"localOnly":false`, `,"local_only":null,"localOnly":"legacy"`} {
+		for _, operation := range []string{"status", "init"} {
+			for _, canonical := range []bool{false, true} {
+				wire := `{"initialized":true,"semantic":{"local_only":false,"diagnostics":{"localOnly":null}}` + flags + `}`
+				if canonical {
+					wire = `{"contractVersion":"agent-history-v1","schemaVersion":1,"operation":"` + operation + `","status":` + wire + `,"futureField":{"local_only":"kept"}}`
+				}
+				payload, err := normalizePayload(Operation{Name: operation}, []byte(wire))
+				if err != nil { t.Fatal(err) }
+				var response map[string]any
+				if err := json.Unmarshal(payload, &response); err != nil { t.Fatal(err) }
+				status := response["status"].(map[string]any)
+				for _, key := range []string{"localOnly", "local_only"} {
+					if _, exists := status[key]; exists { t.Fatalf("retired status key %s in %s", key, payload) }
+				}
+				semantic := status["semantic"].(map[string]any)
+				key := "localOnly"
+				if canonical { key = "local_only" }
+				if value, exists := semantic[key]; !exists || value != false { t.Fatalf("nested semantics lost: %s", payload) }
+				if !reflect.DeepEqual(semantic["diagnostics"], map[string]any{"localOnly": nil}) { t.Fatalf("nested null lost: %s", payload) }
+				if canonical && !reflect.DeepEqual(response["futureField"], map[string]any{"local_only": "kept"}) { t.Fatalf("extension lost: %s", payload) }
+			}
+		}
+	}
+	client := NewClient(WithTransport(fakeTransport{response: `{}`}))
+	response, err := client.Status(context.Background())
+	if err != nil { t.Fatal(err) }
+	payload, err := json.Marshal(response.Status)
+	if err != nil { t.Fatal(err) }
+	if string(payload) != `{"initialized":false}` { t.Fatalf("fallback status: %s", payload) }
+}
+
 func TestStatusDecodesAgentHistoryV1(t *testing.T) {
 	client := NewClient(WithTransport(fakeTransport{
 		response: `{
@@ -38,7 +71,7 @@ func TestStatusDecodesAgentHistoryV1(t *testing.T) {
 	}
 	if !status.Status.Initialized || status.Status.IndexedItems != 7 ||
 		status.Status.IndexedSessions != 3 || status.Status.IndexedEvents != 4 ||
-		status.Status.Lexical["generationId"] != "gen-7" || !status.Status.LocalOnly {
+		status.Status.Lexical["generationId"] != "gen-7" {
 		t.Fatalf("unexpected status: %+v", status)
 	}
 }
