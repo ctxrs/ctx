@@ -164,11 +164,19 @@ func (c *Client) Search(ctx context.Context, opts SearchOptions) (*SearchRespons
 		args = append(args, "--limit", strconv.Itoa(opts.Limit))
 	}
 	for _, term := range opts.Terms {
-		if strings.HasPrefix(term, "-") { args = append(args, "--term="+term) } else { args = append(args, "--term", term) }
+		if strings.HasPrefix(term, "-") {
+			args = append(args, "--term="+term)
+		} else {
+			args = append(args, "--term", term)
+		}
 	}
 	appendStringFlag := func(name, value string) {
 		if value != "" {
-			if strings.HasPrefix(value, "-") { args = append(args, name+"="+value) } else { args = append(args, name, value) }
+			if strings.HasPrefix(value, "-") {
+				args = append(args, name+"="+value)
+			} else {
+				args = append(args, name, value)
+			}
 		}
 	}
 	appendStringFlag("--backend", opts.Backend)
@@ -192,7 +200,9 @@ func (c *Client) Search(ctx context.Context, opts SearchOptions) (*SearchRespons
 	if opts.IncludeCurrentSession {
 		args = append(args, "--include-current-session")
 	}
-	if opts.Query != "" { args = append(args, "--", opts.Query) }
+	if opts.Query != "" {
+		args = append(args, "--", opts.Query)
+	}
 	var out SearchResponse
 	if err := c.do(ctx, Operation{Name: "search", Args: args}, &out); err != nil {
 		return nil, err

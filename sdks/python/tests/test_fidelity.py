@@ -8,6 +8,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from ctx_agent_history import AgentHistoryClient
 from ctx_agent_history.errors import CtxAgentHistoryCliError
+from ctx_agent_history._subprocess import run_local_cli
 
 FIXTURES = Path(__file__).resolve().parents[3] / "contracts/agent-history-v1/fixtures/cli"
 
@@ -42,16 +43,22 @@ class FidelityTests(unittest.TestCase):
                 self.assertIn("--term=--help", args)
 
     def test_producer_errors(self):
-        for producer in json.loads((FIXTURES / "producer-errors.json").read_text()):
-            result = subprocess.CompletedProcess([], 1, stdout="", stderr=json.dumps(producer))
-            with mock.patch("ctx_agent_history.transport.run_local_cli", return_value=result):
+        producers = json.loads((FIXTURES / "producer-errors.json").read_text())
+        for producer in [*producers, None]:
+            stderr = json.dumps(producer) if producer is not None else "not JSON"
+
+            def failing_process(command, **options):
+                return run_local_cli(
+                    [sys.executable, "-c", "import sys; sys.stderr.write(sys.argv[1]); sys.exit(1)", stderr],
+                    **options,
+                )
+
+            with mock.patch("ctx_agent_history.transport.run_local_cli", side_effect=failing_process):
                 with self.assertRaises(CtxAgentHistoryCliError) as caught:
                     AgentHistoryClient.local().show_event("event-1")
-            self.assertEqual(caught.exception.retryable, producer["retryable"])
-            self.assertEqual(caught.exception.details["producerError"], producer)
-        result = subprocess.CompletedProcess([], 1, stdout="", stderr="not JSON")
-        with mock.patch("ctx_agent_history.transport.run_local_cli", return_value=result):
-            with self.assertRaises(CtxAgentHistoryCliError) as caught:
-                AgentHistoryClient.local().show_event("event-1")
-        self.assertFalse(caught.exception.retryable)
-        self.assertEqual(caught.exception.stderr, "not JSON")
+            if producer is not None:
+                self.assertEqual(caught.exception.retryable, producer["retryable"])
+                self.assertEqual(caught.exception.details["producerError"], producer)
+            else:
+                self.assertFalse(caught.exception.retryable)
+                self.assertEqual(caught.exception.stderr, stderr)

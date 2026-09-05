@@ -147,7 +147,7 @@ func TestSearchBuildsAgentHistoryV1Operation(t *testing.T) {
 		"--primary-only",
 		"--events",
 		"--include-current-session",
-        "--", "panic",
+		"--", "panic",
 	}
 	if !reflect.DeepEqual(transport.op.Args, want) {
 		t.Fatalf("args mismatch\nwant: %#v\n got: %#v", want, transport.op.Args)
@@ -1117,53 +1117,80 @@ func environmentValue(values []string, name string) (string, bool) {
 	return value, found
 }
 
-
 func TestCurrentOpaquePayloadsThroughClient(t *testing.T) {
-    encoded, err := os.ReadFile("../../contracts/agent-history-v1/fixtures/cli/opaque-event.json")
-    if err != nil { t.Fatal(err) }
-    var fixture map[string]json.RawMessage
-    if err := json.Unmarshal(encoded, &fixture); err != nil { t.Fatal(err) }
-    for _, content := range []json.RawMessage{fixture["structured_content"], json.RawMessage("null"), nil} {
-        event := make(map[string]json.RawMessage)
-        for key, value := range fixture { event[key] = value }
-        delete(event, "structured_content")
-        if content != nil { event["structured_content"] = content }
-        raw, _ := json.Marshal(map[string]any{"event":event,"events":[]any{event},"session":map[string]any{"ctx_session_id":"session-1"}})
-        client := NewClient(WithTransport(fakeTransport{response:string(raw)}))
-        single, err := client.ShowEvent(context.Background(), ShowEventOptions{ID:"event-1"})
-        if err != nil { t.Fatal(err) }
-        session, err := client.ShowSession(context.Background(), ShowSessionOptions{ID:"session-1"})
-        if err != nil { t.Fatal(err) }
-        for _, actual := range []*Event{single.Event.Event, &session.Session.Events[0]} {
-            var want, got any
-            json.Unmarshal(fixture["activity"], &want); json.Unmarshal(actual.Activity, &got)
-            if !reflect.DeepEqual(want, got) { t.Fatalf("activity changed: %s", actual.Activity) }
-            if (content == nil) != (actual.StructuredContent == nil) { t.Fatal("content presence changed") }
-            want, got = nil, nil
-            json.Unmarshal(content, &want); json.Unmarshal(actual.StructuredContent, &got)
-            if !reflect.DeepEqual(want, got) { t.Fatalf("content changed: %s", actual.StructuredContent) }
-        }
-    }
+	encoded, err := os.ReadFile("../../contracts/agent-history-v1/fixtures/cli/opaque-event.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fixture map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &fixture); err != nil {
+		t.Fatal(err)
+	}
+	for _, content := range []json.RawMessage{fixture["structured_content"], json.RawMessage("null"), nil} {
+		event := make(map[string]json.RawMessage)
+		for key, value := range fixture {
+			event[key] = value
+		}
+		delete(event, "structured_content")
+		if content != nil {
+			event["structured_content"] = content
+		}
+		raw, _ := json.Marshal(map[string]any{"event": event, "events": []any{event}, "session": map[string]any{"ctx_session_id": "session-1"}})
+		client := NewClient(WithTransport(fakeTransport{response: string(raw)}))
+		single, err := client.ShowEvent(context.Background(), ShowEventOptions{ID: "event-1"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		session, err := client.ShowSession(context.Background(), ShowSessionOptions{ID: "session-1"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, actual := range []*Event{single.Event.Event, &session.Session.Events[0]} {
+			var want, got any
+			json.Unmarshal(fixture["activity"], &want)
+			json.Unmarshal(actual.Activity, &got)
+			if !reflect.DeepEqual(want, got) {
+				t.Fatalf("activity changed: %s", actual.Activity)
+			}
+			if (content == nil) != (actual.StructuredContent == nil) {
+				t.Fatal("content presence changed")
+			}
+			want, got = nil, nil
+			json.Unmarshal(content, &want)
+			json.Unmarshal(actual.StructuredContent, &got)
+			if !reflect.DeepEqual(want, got) {
+				t.Fatalf("content changed: %s", actual.StructuredContent)
+			}
+		}
+	}
 }
 
 func TestProducerErrorsAndLiteralQueries(t *testing.T) {
-    encoded, err := os.ReadFile("../../contracts/agent-history-v1/fixtures/cli/producer-errors.json")
-    if err != nil { t.Fatal(err) }
-    var failures []map[string]any
-    json.Unmarshal(encoded, &failures)
-    for _, producer := range failures {
-        payload, _ := json.Marshal(producer)
-        adapter := NewLocalCLIAdapter()
-        adapter.runner = fakeRunner{result: commandResult{ExitCode:1, Stderr:payload}}
-        _, err := NewClient(WithTransport(adapter)).ShowEvent(context.Background(), ShowEventOptions{ID:"event-1"})
-        var typed *Error
-        if !errors.As(err, &typed) || typed.Retryable != producer["retryable"].(bool) || !reflect.DeepEqual(typed.Details["producerError"], producer) { t.Fatalf("producer error changed: %#v", err) }
-    }
-    for _, query := range []string{"--help", "--refresh=off", "-needle", "two words", "a'雪"} {
-        transport := &recordingTransport{response:`{"results":[]}`}
-        _, err := NewClient(WithTransport(transport)).Search(context.Background(), SearchOptions{Query:query, Terms:[]string{"--help"}})
-        if err != nil { t.Fatal(err) }
-        args := transport.op.Args
-        if !reflect.DeepEqual(args[len(args)-2:], []string{"--", query}) || !contains(args, "--term=--help") { t.Fatalf("unsafe argv: %#v", args) }
-    }
+	encoded, err := os.ReadFile("../../contracts/agent-history-v1/fixtures/cli/producer-errors.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var failures []map[string]any
+	json.Unmarshal(encoded, &failures)
+	for _, producer := range failures {
+		payload, _ := json.Marshal(producer)
+		adapter := NewLocalCLIAdapter()
+		adapter.runner = fakeRunner{result: commandResult{ExitCode: 1, Stderr: payload}}
+		_, err := NewClient(WithTransport(adapter)).ShowEvent(context.Background(), ShowEventOptions{ID: "event-1"})
+		var typed *Error
+		if !errors.As(err, &typed) || typed.Retryable != producer["retryable"].(bool) || !reflect.DeepEqual(typed.Details["producerError"], producer) {
+			t.Fatalf("producer error changed: %#v", err)
+		}
+	}
+	for _, query := range []string{"--help", "--refresh=off", "-needle", "two words", "a'雪"} {
+		transport := &recordingTransport{response: `{"results":[]}`}
+		_, err := NewClient(WithTransport(transport)).Search(context.Background(), SearchOptions{Query: query, Terms: []string{"--help"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		args := transport.op.Args
+		if !reflect.DeepEqual(args[len(args)-2:], []string{"--", query}) || !contains(args, "--term=--help") {
+			t.Fatalf("unsafe argv: %#v", args)
+		}
+	}
 }

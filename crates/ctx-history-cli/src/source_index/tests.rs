@@ -720,7 +720,11 @@ fn search_schema_v1_snapshot_reads_snippets_and_citations_from_core() {
             format!(
                 r#"ctx --data-root '/tmp/ctx root/owner'\''s history' search --session {} --term='term with spaces' -- {}"#,
                 result["ctx_session_id"].as_str().unwrap(),
-                query,
+                if query.contains('=') {
+                    format!("'{query}'")
+                } else {
+                    query.to_owned()
+                },
             )
         );
     }

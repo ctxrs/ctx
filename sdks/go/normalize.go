@@ -40,10 +40,10 @@ func normalizePayload(op Operation, payload []byte) ([]byte, error) {
 		"operation":       operation,
 		"backend":         map[string]any{"kind": "local"},
 	}
-    camel := raw
-    if operation != "showEvent" && operation != "showSession" {
-        camel = camelize(raw)
-    }
+	camel := raw
+	if operation != "showEvent" && operation != "showSession" {
+		camel = camelize(raw)
+	}
 
 	switch operation {
 	case "status":
@@ -81,11 +81,11 @@ func normalizeEventPayload(operation string, value any) (any, error) {
 	}
 	out := make(map[string]any, len(object))
 	for key, nested := range object {
-        if key != "event" && key != "events" {
-            out[snakeToCamel(key)] = camelize(nested)
-        }
-    }
-    if operation == "showEvent" {
+		if key != "event" && key != "events" {
+			out[snakeToCamel(key)] = camelize(nested)
+		}
+	}
+	if operation == "showEvent" {
 		if event, exists := object["event"]; exists {
 			normalized, err := normalizeEventRecord(event)
 			if err != nil {
@@ -147,12 +147,16 @@ func normalizeEventRecord(value any) (any, error) {
 		if snakeToCamel(key) == "mcpExchange" {
 			return nil, fmt.Errorf("event member %q collides with canonical mcpExchange", key)
 		}
-        canonical := snakeToCamel(key)
-        if canonical == "configPath" || canonical == "itemType" || canonical == "payloadType" || canonical == "recordType" { continue }
-        if key == "content" || key == "citations" { nested = camelize(nested) }
-        out[canonical] = nested
-    }
-    if hasSnake || hasCamel {
+		canonical := snakeToCamel(key)
+		if canonical == "configPath" || canonical == "itemType" || canonical == "payloadType" || canonical == "recordType" {
+			continue
+		}
+		if key == "content" || key == "citations" {
+			nested = camelize(nested)
+		}
+		out[canonical] = nested
+	}
+	if hasSnake || hasCamel {
 		call := snake
 		if hasCamel {
 			call = camel
