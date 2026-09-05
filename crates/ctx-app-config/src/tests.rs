@@ -1184,9 +1184,8 @@ group = "work"
 
 #[test]
 fn hand_edited_provider_roots_accept_the_cli_provider_vocabulary() {
-    use ctx_history_capture::{
-        configured_root_capabilities, ConfiguredRootPathKind, ProviderRootKind,
-    };
+    use ctx_history_capture_model::ProviderRootKind;
+    use ctx_history_source_discovery::{configured_root_capabilities, ConfiguredRootPathKind};
 
     for capability in configured_root_capabilities()
         .iter()
@@ -1265,7 +1264,7 @@ fn rejects_invalid_provider_root_config_as_one_atomic_config() {
     let provider_path = provider_home.path().display().to_string();
     let oversized_path = provider_home
         .path()
-        .join("x".repeat(ctx_history_capture::MAX_PROVIDER_ROOT_ENCODED_PATH_BYTES + 1));
+        .join("x".repeat(ctx_history_capture_model::MAX_PROVIDER_ROOT_ENCODED_PATH_BYTES + 1));
     let cases = [
         (
             format!(

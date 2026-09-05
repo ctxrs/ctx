@@ -1,12 +1,14 @@
 use std::{fs, path::Path};
 
 use anyhow::{bail, Context, Result};
-use ctx_history_capture::{
-    configured_root_capabilities, configured_root_capability, provider_root_path_within_limit,
-    ConfiguredRootPathKind, ProviderRootKind, MAX_PROVIDER_ROOT_ENCODED_PATH_BYTES,
+use ctx_history_capture_model::{
+    provider_root_path_within_limit, ProviderRootKind, MAX_PROVIDER_ROOT_ENCODED_PATH_BYTES,
     MAX_PROVIDER_ROOT_SELECTOR_BYTES,
 };
 use ctx_history_core::CaptureProvider;
+use ctx_history_source_discovery::{
+    configured_root_capabilities, configured_root_capability, ConfiguredRootPathKind,
+};
 
 pub(super) fn validate_provider_root_support(provider: CaptureProvider) -> Result<()> {
     if configured_root_capability(provider).is_some_and(|capability| capability.state.is_enabled())

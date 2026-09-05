@@ -27,16 +27,18 @@ PROD_SRCS = glob(
 )
 
 CTX_APP_CONFIG_DEPS = [
-    "//crates/ctx-history-capture:lib",
+    "//crates/ctx-history-capture-model:lib",
     "//crates/ctx-history-core:lib",
     "//crates/ctx-history-platform:lib",
+    "//crates/ctx-history-source-discovery:lib",
     "//crates/ctx-semantic-model:lib",
 ]
 
 CTX_APP_CONFIG_TEST_SUPPORT_DEPS = [
-    "//crates/ctx-history-capture:lib",
+    "//crates/ctx-history-capture-model:lib",
     "//crates/ctx-history-core:lib",
     "//crates/ctx-history-platform:lib",
+    "//crates/ctx-history-source-discovery:lib",
     "//crates/ctx-semantic-model:test_support_lib",
 ]
 
