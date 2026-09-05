@@ -5,6 +5,8 @@ use ctx_client_observability::analytics::CountBucket;
 use super::*;
 
 const ENDPOINT: &str = "https://cli.ctx.rs/functions/v1/analytics";
+const ROOT: &str = "00000000-0000-4000-8000-000000000002";
+const OTHER_ROOT: &str = "00000000-0000-4000-8000-000000000003";
 const NOW: i64 = 1_800_000_000;
 
 fn body(event_id: &str) -> Vec<u8> {
@@ -23,11 +25,11 @@ fn event_id(index: usize) -> String {
 fn test_outbox() -> (tempfile::TempDir, PathBuf, AnalyticsOutbox) {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("outbox.json");
-    let outbox = AnalyticsOutbox::open_at(path.clone(), NOW).unwrap();
+    let outbox = AnalyticsOutbox::open_at(path.clone(), ROOT, NOW).unwrap();
     (root, path, outbox)
 }
 
-fn read_v2(path: &Path) -> OutboxState {
+fn read_current(path: &Path) -> OutboxState {
     serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
 }
 
@@ -39,37 +41,49 @@ fn retry(class: AnalyticsDeliveryFailureClass) -> DeliveryDisposition {
 }
 
 #[test]
-fn released_v1_migrates_without_changing_payload_or_endpoint_fingerprint() {
+fn legacy_shared_bodies_and_counters_are_discarded_without_guessing_ownership() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("outbox.json");
-    let payload = "{ \"events\" : [{\"event_id\":\"preserved\"}] }";
-    let fingerprint = endpoint_fingerprint(ENDPOINT);
-    let released = serde_json::json!({
-        "schema_version": 1,
-        "entries": [{
-            "schema_version": 1,
-            "endpoint_fingerprint": fingerprint,
+    for version in [1, 2] {
+        let mut entry = serde_json::json!({
+            "schema_version": version,
+            "endpoint_fingerprint": endpoint_fingerprint(ENDPOINT),
             "queued_at_epoch_seconds": NOW,
             "attempts": 3,
-            "payload": payload,
-        }],
-        "retry_attempts": 7,
-        "dropped": 2,
-        "failure_sequence": 4,
-        "last_failure_class": "transport",
-    });
-    write_private_file_durably(&path, &serde_json::to_vec(&released).unwrap()).unwrap();
+            "payload": String::from_utf8(body(&event_id(1))).unwrap(),
+        });
+        let mut state = serde_json::json!({
+            "schema_version": version, "entries": [], "retry_attempts": 7,
+            "dropped": 2, "failure_sequence": 4, "last_failure_class": "transport",
+        });
+        if version == 2 {
+            entry["entry_id"] = event_id(1).into();
+            entry["next_attempt_at_epoch_seconds"] = 0.into();
+            entry["kind"] = "ordinary".into();
+            state["observation_due"] = true.into();
+        }
+        state["entries"] = serde_json::json!([entry]);
+        write_private_file_durably(&path, &serde_json::to_vec(&state).unwrap()).unwrap();
+        let outbox = AnalyticsOutbox::open_at(path.clone(), ROOT, NOW).unwrap();
+        assert!(outbox.snapshot_at(ENDPOINT, NOW).unwrap().is_empty());
+        assert!(outbox.pending_observation_at(NOW).unwrap().is_none());
+        assert!(read_current(&path).roots.is_empty());
+        outbox
+            .append_at(ENDPOINT, &body(&event_id(2)), NOW)
+            .unwrap();
+        let snapshot = outbox.snapshot_at(ENDPOINT, NOW).unwrap();
+        outbox
+            .reconcile_at(&[(snapshot[0].clone(), DeliveryDisposition::Accepted)], NOW)
+            .unwrap();
+        assert!(outbox.pending_observation_at(NOW).unwrap().is_none());
 
-    let outbox = AnalyticsOutbox::open_at(path.clone(), NOW).unwrap();
-    let state = read_v2(&path);
-    let snapshot = outbox.snapshot_at(ENDPOINT, NOW).unwrap();
-
-    assert_eq!(state.schema_version, OUTBOX_SCHEMA_VERSION);
-    assert_eq!(state.entries[0].payload, payload);
-    assert_eq!(state.entries[0].endpoint_fingerprint, fingerprint);
-    assert_eq!(state.entries[0].attempts, 3);
-    assert_eq!(snapshot[0].payload(), payload.as_bytes());
-    assert!(uuid::Uuid::parse_str(&snapshot[0].entry_id).is_ok());
+        write_private_file_durably(&path, &serde_json::to_vec(&state).unwrap()).unwrap();
+        AnalyticsOutbox::purge(&path, None).unwrap();
+        assert!(
+            !path.exists(),
+            "opt-out without an identity also discards legacy state"
+        );
+    }
 }
 
 #[test]
@@ -84,7 +98,7 @@ fn snapshot_releases_state_lock_and_uploader_lease_does_not_block_foreground_app
 
     let (sent, received) = mpsc::channel();
     let writer = thread::spawn(move || {
-        let concurrent = AnalyticsOutbox::open_at(path, NOW).unwrap();
+        let concurrent = AnalyticsOutbox::open_at(path, ROOT, NOW).unwrap();
         concurrent
             .append_at(ENDPOINT, &body(&event_id(2)), NOW)
             .unwrap();
@@ -101,7 +115,7 @@ fn snapshot_releases_state_lock_and_uploader_lease_does_not_block_foreground_app
 #[test]
 fn uploader_mutex_is_device_global_and_nonblocking() {
     let (_root, path, first) = test_outbox();
-    let second = AnalyticsOutbox::open_at(path, NOW).unwrap();
+    let second = AnalyticsOutbox::open_at(path, ROOT, NOW).unwrap();
     let lease = first.try_begin_upload().unwrap().unwrap();
     assert!(second.try_begin_upload().unwrap().is_none());
     drop(lease);
@@ -116,7 +130,7 @@ fn restart_replays_the_same_outbox_id_payload_and_event_id() {
     let before = outbox.snapshot_at(ENDPOINT, NOW).unwrap().remove(0);
     drop(outbox);
 
-    let reopened = AnalyticsOutbox::open_at(path, NOW + 1).unwrap();
+    let reopened = AnalyticsOutbox::open_at(path, ROOT, NOW + 1).unwrap();
     let after = reopened.snapshot_at(ENDPOINT, NOW + 1).unwrap().remove(0);
 
     assert_eq!(after.entry_id, before.entry_id);
@@ -132,7 +146,7 @@ fn crash_after_server_acceptance_replays_instead_of_guessing() {
     let accepted_but_unreconciled = outbox.snapshot_at(ENDPOINT, NOW).unwrap().remove(0);
     drop(outbox);
 
-    let reopened = AnalyticsOutbox::open_at(path, NOW + 1).unwrap();
+    let reopened = AnalyticsOutbox::open_at(path, ROOT, NOW + 1).unwrap();
     let replay = reopened.snapshot_at(ENDPOINT, NOW + 1).unwrap().remove(0);
 
     assert_eq!(replay.entry_id, accepted_but_unreconciled.entry_id);
@@ -186,13 +200,13 @@ fn retry_is_retained_with_backoff_while_permanent_rejection_is_dropped() {
         )
         .unwrap();
 
-    let state = read_v2(&path);
+    let state = read_current(&path);
     assert_eq!(state.entries.len(), 1);
     assert_eq!(state.entries[0].entry_id, snapshot[0].entry_id);
     assert_eq!(state.entries[0].attempts, 1);
     assert!(state.entries[0].next_attempt_at_epoch_seconds > NOW);
-    assert_eq!(state.retry_attempts, 1);
-    assert_eq!(state.dropped, 1);
+    assert_eq!(state.root(ROOT).retry_attempts, 1);
+    assert_eq!(state.root(ROOT).dropped, 1);
     assert!(outbox.snapshot_at(ENDPOINT, NOW).unwrap().is_empty());
 }
 
@@ -223,14 +237,14 @@ fn expired_entries_are_dropped_at_the_clock_seam() {
     drop(outbox);
 
     let reopened =
-        AnalyticsOutbox::open_at(path.clone(), NOW + OUTBOX_MAX_AGE_SECONDS + 1).unwrap();
-    let state = read_v2(&path);
+        AnalyticsOutbox::open_at(path.clone(), ROOT, NOW + OUTBOX_MAX_AGE_SECONDS + 1).unwrap();
+    let state = read_current(&path);
 
     assert!(reopened
         .snapshot_at(ENDPOINT, NOW + OUTBOX_MAX_AGE_SECONDS + 1)
         .unwrap()
         .is_empty());
-    assert_eq!(state.dropped, 1);
+    assert_eq!(state.root(ROOT).dropped, 1);
 }
 
 #[test]
@@ -240,6 +254,7 @@ fn corrupted_future_timestamps_are_bounded_and_cannot_evade_expiry() {
     state.entries.push(OutboxEntry {
         schema_version: OUTBOX_SCHEMA_VERSION,
         entry_id: uuid::Uuid::new_v4().to_string(),
+        data_root_id: ROOT.to_owned(),
         endpoint_fingerprint: endpoint_fingerprint(ENDPOINT),
         queued_at_epoch_seconds: i64::MAX,
         attempts: 1,
@@ -250,20 +265,21 @@ fn corrupted_future_timestamps_are_bounded_and_cannot_evade_expiry() {
     outbox.persist(&state).unwrap();
     drop(outbox);
 
-    let normalized = AnalyticsOutbox::open_at(path.clone(), NOW).unwrap();
-    let state = read_v2(&path);
+    let normalized = AnalyticsOutbox::open_at(path.clone(), ROOT, NOW).unwrap();
+    let state = read_current(&path);
     assert_eq!(state.entries[0].queued_at_epoch_seconds, NOW);
     assert_eq!(
         state.entries[0].next_attempt_at_epoch_seconds,
         NOW + RETRY_MAX_SECONDS as i64
     );
     assert_eq!(
-        state.last_failure_class,
+        state.root(ROOT).last_failure_class,
         Some(AnalyticsDeliveryFailureClass::LocalIo)
     );
     drop(normalized);
 
-    let expired = AnalyticsOutbox::open_at(path.clone(), NOW + OUTBOX_MAX_AGE_SECONDS + 1).unwrap();
+    let expired =
+        AnalyticsOutbox::open_at(path.clone(), ROOT, NOW + OUTBOX_MAX_AGE_SECONDS + 1).unwrap();
     assert!(expired
         .snapshot_at(ENDPOINT, NOW + OUTBOX_MAX_AGE_SECONDS + 1)
         .unwrap()
@@ -276,13 +292,13 @@ fn corrupt_private_state_recovers_and_reports_one_safe_drop() {
     let path = root.path().join("outbox.json");
     write_private_file_durably(&path, b"not-json").unwrap();
 
-    let outbox = AnalyticsOutbox::open_at(path.clone(), NOW).unwrap();
-    let state = read_v2(&path);
+    let outbox = AnalyticsOutbox::open_at(path.clone(), ROOT, NOW).unwrap();
+    let state = read_current(&path);
 
     assert!(state.entries.is_empty());
-    assert_eq!(state.dropped, 1);
+    assert_eq!(state.root(ROOT).dropped, 1);
     assert_eq!(
-        state.last_failure_class,
+        state.root(ROOT).last_failure_class,
         Some(AnalyticsDeliveryFailureClass::LocalIo)
     );
     assert!(outbox.pending_observation_at(NOW).unwrap().is_none());
@@ -296,6 +312,7 @@ fn count_and_total_byte_bounds_drop_oldest_entries() {
         state.entries.push(OutboxEntry {
             schema_version: OUTBOX_SCHEMA_VERSION,
             entry_id: uuid::Uuid::new_v4().to_string(),
+            data_root_id: ROOT.to_owned(),
             endpoint_fingerprint: endpoint_fingerprint(ENDPOINT),
             queued_at_epoch_seconds: NOW,
             attempts: 0,
@@ -309,17 +326,17 @@ fn count_and_total_byte_bounds_drop_oldest_entries() {
     outbox
         .append_at(ENDPOINT, &body(&event_id(999)), NOW)
         .unwrap();
-    let bounded = read_v2(&path);
+    let bounded = read_current(&path);
     assert_eq!(bounded.entries.len(), OUTBOX_MAX_ENTRIES);
     assert!(!bounded.entries.iter().any(|entry| entry.entry_id == oldest));
-    assert_eq!(bounded.dropped, 1);
+    assert_eq!(bounded.root(ROOT).dropped, 1);
 
     let large = serde_json::to_vec(&serde_json::json!({"padding": "x".repeat(400_000)})).unwrap();
     for _ in 0..6 {
         outbox.append_at(ENDPOINT, &large, NOW).unwrap();
     }
     assert!(fs::metadata(&path).unwrap().len() <= OUTBOX_MAX_BYTES);
-    assert!(read_v2(&path).entries.len() <= OUTBOX_MAX_ENTRIES);
+    assert!(read_current(&path).entries.len() <= OUTBOX_MAX_ENTRIES);
 }
 
 #[test]
@@ -330,9 +347,9 @@ fn per_entry_bound_is_enforced_and_counted() {
     }))
     .unwrap();
     assert!(outbox.append_at(ENDPOINT, &oversized, NOW).is_err());
-    let state = read_v2(&path);
+    let state = read_current(&path);
     assert!(state.entries.is_empty());
-    assert_eq!(state.dropped, 1);
+    assert_eq!(state.root(ROOT).dropped, 1);
 }
 
 #[test]
@@ -376,7 +393,7 @@ fn health_is_created_only_after_retry_recovery_and_never_recurses() {
         .unwrap();
     assert!(outbox.pending_observation_at(NOW).unwrap().is_none());
 
-    let retry_at = read_v2(&path).entries[0].next_attempt_at_epoch_seconds;
+    let retry_at = read_current(&path).entries[0].next_attempt_at_epoch_seconds;
     let recovered = outbox.snapshot_at(ENDPOINT, retry_at).unwrap().remove(0);
     outbox
         .reconcile_at(&[(recovered, DeliveryDisposition::Accepted)], retry_at)
@@ -403,10 +420,10 @@ fn health_is_created_only_after_retry_recovery_and_never_recurses() {
         )
         .unwrap();
 
-    let state = read_v2(&path);
-    assert_eq!(state.retry_attempts, 0);
-    assert_eq!(state.dropped, 0);
-    assert!(!state.observation_due);
+    let state = read_current(&path);
+    assert_eq!(state.root(ROOT).retry_attempts, 0);
+    assert_eq!(state.root(ROOT).dropped, 0);
+    assert!(!state.root(ROOT).observation_due);
     assert!(outbox.pending_observation_at(retry_at).unwrap().is_none());
 
     let health_retry_at = state.entries[0].next_attempt_at_epoch_seconds;
@@ -425,11 +442,11 @@ fn health_is_created_only_after_retry_recovery_and_never_recurses() {
             health_retry_at,
         )
         .unwrap();
-    let state = read_v2(&path);
+    let state = read_current(&path);
     assert!(state.entries.is_empty());
-    assert_eq!(state.retry_attempts, 0);
-    assert_eq!(state.dropped, 0);
-    assert!(!state.observation_due);
+    assert_eq!(state.root(ROOT).retry_attempts, 0);
+    assert_eq!(state.root(ROOT).dropped, 0);
+    assert!(!state.root(ROOT).observation_due);
 }
 
 #[test]
@@ -482,7 +499,7 @@ fn a_later_failure_defers_coalesced_health_until_another_success() {
         .unwrap();
     assert!(outbox.pending_observation_at(NOW).unwrap().is_none());
 
-    let retry_at = read_v2(&path).entries[0].next_attempt_at_epoch_seconds;
+    let retry_at = read_current(&path).entries[0].next_attempt_at_epoch_seconds;
     let recovered = outbox.snapshot_at(ENDPOINT, retry_at).unwrap().remove(0);
     outbox
         .reconcile_at(&[(recovered, DeliveryDisposition::Accepted)], retry_at)
@@ -494,15 +511,15 @@ fn a_later_failure_defers_coalesced_health_until_another_success() {
 fn purge_removes_payload_and_does_not_create_missing_state() {
     let root = tempfile::tempdir().unwrap();
     let missing = root.path().join("missing").join("outbox.json");
-    AnalyticsOutbox::purge(&missing).unwrap();
+    AnalyticsOutbox::purge(&missing, None).unwrap();
     assert!(!missing.parent().unwrap().exists());
 
     let path = root.path().join("outbox.json");
-    let outbox = AnalyticsOutbox::open_at(path.clone(), NOW).unwrap();
+    let outbox = AnalyticsOutbox::open_at(path.clone(), ROOT, NOW).unwrap();
     outbox
         .append_at(ENDPOINT, &body(&event_id(1)), NOW)
         .unwrap();
-    AnalyticsOutbox::purge(&path).unwrap();
+    AnalyticsOutbox::purge(&path, Some(ROOT)).unwrap();
     assert!(!path.exists());
 }
 
@@ -516,7 +533,7 @@ fn open_and_purge_reclaim_crash_orphaned_temporary_payloads() {
     ));
     fs::write(&orphan, body(&event_id(1))).unwrap();
 
-    let outbox = AnalyticsOutbox::open_at(path.clone(), NOW).unwrap();
+    let outbox = AnalyticsOutbox::open_at(path.clone(), ROOT, NOW).unwrap();
     assert!(!orphan.exists());
     outbox
         .append_at(ENDPOINT, &body(&event_id(2)), NOW)
@@ -527,7 +544,7 @@ fn open_and_purge_reclaim_crash_orphaned_temporary_payloads() {
     ));
     fs::write(&orphan, body(&event_id(3))).unwrap();
 
-    AnalyticsOutbox::purge(&path).unwrap();
+    AnalyticsOutbox::purge(&path, Some(ROOT)).unwrap();
 
     assert!(!path.exists());
     assert!(!orphan.exists());
@@ -540,7 +557,7 @@ fn purge_wins_over_in_flight_reconciliation() {
         .append_at(ENDPOINT, &body(&event_id(1)), NOW)
         .unwrap();
     let snapshot = outbox.snapshot_at(ENDPOINT, NOW).unwrap().remove(0);
-    AnalyticsOutbox::purge(&path).unwrap();
+    AnalyticsOutbox::purge(&path, Some(ROOT)).unwrap();
     assert!(!outbox.contains_snapshot(&snapshot).unwrap());
 
     outbox
@@ -555,7 +572,7 @@ fn unsafe_state_path_still_fails_closed() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("outbox.json");
     fs::create_dir(&path).unwrap();
-    assert!(AnalyticsOutbox::open_at(path, NOW).is_err());
+    assert!(AnalyticsOutbox::open_at(path, ROOT, NOW).is_err());
 }
 
 #[cfg(windows)]
@@ -591,5 +608,260 @@ fn unsafe_state_permissions_still_fail_closed() {
     let path = root.path().join("outbox.json");
     write_private_file_durably(&path, b"not-json").unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
-    assert!(AnalyticsOutbox::open_at(path, NOW).is_err());
+    assert!(AnalyticsOutbox::open_at(path, ROOT, NOW).is_err());
+}
+
+#[test]
+fn root_scope_owns_snapshots_purge_reconciliation_and_recovery_counters() {
+    let (_dir, path, a) = test_outbox();
+    let b = AnalyticsOutbox::open_at(path.clone(), OTHER_ROOT, NOW).unwrap();
+    a.append_at(ENDPOINT, &body(&event_id(1)), NOW).unwrap();
+    b.append_at(ENDPOINT, &body(&event_id(2)), NOW).unwrap();
+    let a_snapshot = a.snapshot_at(ENDPOINT, NOW).unwrap().remove(0);
+    let b_snapshot = b.snapshot_at(ENDPOINT, NOW).unwrap().remove(0);
+    assert_eq!(a_snapshot.payload(), body(&event_id(1)));
+    assert_eq!(b_snapshot.payload(), body(&event_id(2)));
+    assert!(!b.contains_snapshot(&a_snapshot).unwrap());
+    assert!(b
+        .reconcile_at(&[(a_snapshot.clone(), DeliveryDisposition::Accepted)], NOW)
+        .is_err());
+
+    a.reconcile_at(
+        &[(a_snapshot, retry(AnalyticsDeliveryFailureClass::Transport))],
+        NOW,
+    )
+    .unwrap();
+    b.reconcile_at(&[(b_snapshot, DeliveryDisposition::Accepted)], NOW)
+        .unwrap();
+    assert!(
+        b.pending_observation_at(NOW).unwrap().is_none(),
+        "B must not recover A's retry"
+    );
+    let retry_at = read_current(&path).entries[0].next_attempt_at_epoch_seconds;
+    let a_retry = a.snapshot_at(ENDPOINT, retry_at).unwrap().remove(0);
+    a.reconcile_at(&[(a_retry, DeliveryDisposition::Accepted)], retry_at)
+        .unwrap();
+    let health = a.pending_observation_at(retry_at).unwrap().unwrap();
+    assert_eq!(health.event.retry_attempts, CountBucket::One);
+    assert!(b
+        .queue_observation_at(ENDPOINT, &body(&event_id(3)), &health, retry_at)
+        .is_err());
+    a.queue_observation_at(ENDPOINT, &body(&event_id(3)), &health, retry_at)
+        .unwrap();
+    b.append_at(ENDPOINT, &body(&event_id(4)), retry_at)
+        .unwrap();
+    let before_b = b.snapshot_at(ENDPOINT, retry_at).unwrap().remove(0);
+    let before_a = a.snapshot_at(ENDPOINT, retry_at).unwrap().remove(0);
+
+    AnalyticsOutbox::purge(&path, Some(ROOT)).unwrap();
+    a.reconcile_at(
+        &[(before_a, retry(AnalyticsDeliveryFailureClass::Transport))],
+        retry_at,
+    )
+    .unwrap();
+    assert!(a.snapshot_at(ENDPOINT, retry_at).unwrap().is_empty());
+    let after_b = b.snapshot_at(ENDPOINT, retry_at).unwrap().remove(0);
+    assert_eq!(before_b.entry_id, after_b.entry_id);
+    assert_eq!(before_b.payload(), after_b.payload());
+    assert!(!read_current(&path).roots.contains_key(ROOT));
+
+    let before = fs::read(&path).unwrap();
+    AnalyticsOutbox::purge(&path, None).unwrap();
+    assert_eq!(
+        before,
+        fs::read(&path).unwrap(),
+        "an absent identity owns no current entries"
+    );
+}
+
+#[test]
+fn aggregate_bounds_and_counter_cardinality_hold_across_root_churn() {
+    let (_dir, path, a) = test_outbox();
+    let b = AnalyticsOutbox::open_at(path.clone(), OTHER_ROOT, NOW).unwrap();
+    for index in 0..OUTBOX_MAX_ENTRIES {
+        a.append_at(ENDPOINT, &body(&event_id(index)), NOW).unwrap();
+    }
+    b.append_at(ENDPOINT, &body(&event_id(999)), NOW).unwrap();
+    let state = read_current(&path);
+    assert_eq!(
+        state.entries.len(),
+        128,
+        "entry bound is aggregate, not per root"
+    );
+    assert_eq!(state.root(ROOT).dropped, 1);
+    assert_eq!(state.root(OTHER_ROOT).dropped, 0);
+    assert!(!state
+        .entries
+        .iter()
+        .any(|entry| entry.payload == String::from_utf8(body(&event_id(0))).unwrap()));
+
+    let large = serde_json::to_vec(&serde_json::json!({"padding": "x".repeat(400_000)})).unwrap();
+    for outbox in [&a, &b, &a, &b, &a, &b] {
+        outbox.append_at(ENDPOINT, &large, NOW).unwrap();
+        assert!(fs::metadata(&path).unwrap().len() <= 2 * 1024 * 1024);
+    }
+    assert!(read_current(&path).root(ROOT).dropped > 1);
+
+    // Failed oversized appends create only counters, so no queued-entry bound
+    // can incidentally bound this path. Preserve counters for queued roots.
+    let oversized =
+        serde_json::to_vec(&serde_json::json!({"padding": "x".repeat(OUTBOX_MAX_BODY_BYTES)}))
+            .unwrap();
+    let a_drops = read_current(&path).root(ROOT).dropped;
+    for index in 1000..(1000 + 2 * OUTBOX_MAX_ENTRIES) {
+        let id = event_id(index);
+        let outbox = AnalyticsOutbox::open_at(path.clone(), &id, NOW).unwrap();
+        assert!(outbox.append_at(ENDPOINT, &oversized, NOW).is_err());
+        let state = read_current(&path);
+        assert!(
+            state.roots.len() <= 128,
+            "counter-only root records grew without bound"
+        );
+        assert!(state.entries.len() <= 128);
+        assert!(fs::metadata(&path).unwrap().len() <= 2 * 1024 * 1024);
+        assert_eq!(state.root(ROOT).dropped, a_drops);
+        validate_state(&state).unwrap();
+    }
+    assert_eq!(read_current(&path).roots.len(), 128);
+}
+
+#[test]
+fn expiration_and_recovery_observations_remain_owned_by_each_root() {
+    let (_dir, path, a) = test_outbox();
+    let b = AnalyticsOutbox::open_at(path.clone(), OTHER_ROOT, NOW).unwrap();
+    a.append_at(ENDPOINT, &body(&event_id(1)), NOW).unwrap();
+    b.append_at(ENDPOINT, &body(&event_id(2)), NOW + 1).unwrap();
+    let after_expiry = NOW + OUTBOX_MAX_AGE_SECONDS + 1;
+    assert_eq!(b.snapshot_at(ENDPOINT, after_expiry).unwrap().len(), 1);
+    assert!(a.snapshot_at(ENDPOINT, after_expiry).unwrap().is_empty());
+    assert_eq!(read_current(&path).root(ROOT).dropped, 1);
+    assert_eq!(read_current(&path).root(OTHER_ROOT).dropped, 0);
+
+    for outbox in [&a, &b] {
+        outbox
+            .append_at(ENDPOINT, &body(&event_id(3)), after_expiry)
+            .unwrap();
+        let snapshot = outbox.snapshot_at(ENDPOINT, after_expiry).unwrap();
+        outbox
+            .reconcile_at(
+                &[(
+                    snapshot[0].clone(),
+                    DeliveryDisposition::Permanent {
+                        class: AnalyticsDeliveryFailureClass::ClientRejection,
+                    },
+                )],
+                after_expiry,
+            )
+            .unwrap();
+        outbox
+            .append_at(ENDPOINT, &body(&event_id(4)), after_expiry)
+            .unwrap();
+        let snapshot = outbox.snapshot_at(ENDPOINT, after_expiry).unwrap();
+        outbox
+            .reconcile_at(
+                &[(snapshot[0].clone(), DeliveryDisposition::Accepted)],
+                after_expiry,
+            )
+            .unwrap();
+        let observation = outbox
+            .pending_observation_at(after_expiry)
+            .unwrap()
+            .unwrap();
+        outbox
+            .queue_observation_at(ENDPOINT, &body(&event_id(5)), &observation, after_expiry)
+            .unwrap();
+    }
+    let state = read_current(&path);
+    validate_state(&state).unwrap();
+    assert_eq!(
+        state
+            .entries
+            .iter()
+            .filter(|entry| entry.kind == OutboxEntryKind::DeliveryObservation)
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn full_queued_owner_capacity_preserves_surviving_counters_after_sole_entry_eviction() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("outbox.json");
+    let owners = (1..=129).map(event_id).collect::<Vec<_>>();
+    let check_bounds = || {
+        let state = read_current(&path);
+        assert!(state.entries.len() <= 128);
+        assert!(state.roots.len() <= 128);
+        assert!(fs::metadata(&path).unwrap().len() <= 2 * 1024 * 1024);
+        validate_state(&state).unwrap();
+    };
+    for (index, owner) in owners.iter().take(128).enumerate() {
+        let outbox = AnalyticsOutbox::open_at(path.clone(), owner, NOW).unwrap();
+        outbox
+            .append_at(ENDPOINT, &body(&event_id(1000 + index)), NOW)
+            .unwrap();
+        check_bounds();
+        let snapshot = outbox.snapshot_at(ENDPOINT, NOW).unwrap().remove(0);
+        outbox
+            .reconcile_at(
+                &[(snapshot, retry(AnalyticsDeliveryFailureClass::Transport))],
+                NOW,
+            )
+            .unwrap();
+        check_bounds();
+    }
+    let full = read_current(&path);
+    assert_eq!(full.entries.len(), 128);
+    assert_eq!(full.roots.len(), 128);
+    let last = AnalyticsOutbox::open_at(path.clone(), &owners[128], NOW).unwrap();
+    last.append_at(ENDPOINT, &body(&event_id(2000)), NOW)
+        .unwrap();
+    check_bounds();
+    let state = read_current(&path);
+    assert!(!state
+        .entries
+        .iter()
+        .any(|entry| entry.data_root_id == owners[0]));
+    assert_eq!(state.root(&owners[128]).retry_attempts, 0);
+    assert_eq!(state.root(&owners[128]).dropped, 0);
+    let snapshot = last.snapshot_at(ENDPOINT, NOW).unwrap().remove(0);
+    last.reconcile_at(
+        &[(snapshot, retry(AnalyticsDeliveryFailureClass::Transport))],
+        NOW,
+    )
+    .unwrap();
+    check_bounds();
+    for owner in owners.iter().skip(1) {
+        let reopened = AnalyticsOutbox::open_at(path.clone(), owner, NOW).unwrap();
+        check_bounds();
+        let state = read_current(&path);
+        let counters = state.root(owner);
+        assert_eq!(
+            counters.retry_attempts, 1,
+            "surviving owner's retry count changed"
+        );
+        assert_eq!(counters.dropped, 0, "evicted owner's drop was reassigned");
+        assert_eq!(counters.failure_sequence, 1);
+        assert_eq!(
+            counters.last_failure_class,
+            Some(AnalyticsDeliveryFailureClass::Transport)
+        );
+        assert!(!counters.observation_due);
+        assert_eq!(
+            state
+                .entries
+                .iter()
+                .filter(|entry| &entry.data_root_id == owner)
+                .count(),
+            1
+        );
+        drop(reopened);
+    }
+    let state = read_current(&path);
+    assert_eq!(state.entries.len(), 128);
+    assert_eq!(state.roots.len(), 128);
+    assert!(
+        !state.roots.contains_key(&owners[0]),
+        "the evicted sole-entry owner's counter-only record can be discarded"
+    );
 }
