@@ -8,8 +8,6 @@ mod response;
 mod types;
 #[cfg(feature = "test-support")]
 pub use observation_recovery::SourceRefreshObservationRecoveryFailed;
-#[cfg(test)]
-use observation_recovery::DISCONNECT_POLICY;
 use observation_recovery::{
     request_bound_status_with_outage_budget_cancellable, retained_request_unobservable,
 };
@@ -159,7 +157,7 @@ where
                 .downcast_ref::<DaemonSourceRefreshServiceUnavailable>()
                 .is_some() =>
         {
-            return Err(error)
+            return Err(error);
         }
         Err(error) => return Err(error),
     }
@@ -449,15 +447,14 @@ fn coordinate_source_backed_refresh_with_policy(
         }
         availability.checkpoint()?;
     };
+    if let Some(observation) =
+        background_admission_rejected_fallback(data_root, mode, &intent, retain_peer, &response)?
+    {
+        return Ok(observation);
+    }
     validate_daemon_refresh_response(&response)?;
-    let accepted_request_id = response_request_id(&response, "daemon source refresh response")?;
-    let request_id = if intent.is_selected_import() {
-        validate_source_refresh_status_response_authority(&response, &logical_request_id)?;
-        logical_request_id
-    } else {
-        validate_source_refresh_status_response_authority(&response, &accepted_request_id)?;
-        accepted_request_id
-    };
+    validate_source_refresh_status_response_authority(&response, &logical_request_id)?;
+    let request_id = logical_request_id;
     let protocol = source_refresh_protocol_status(&response)?;
 
     if mode == SourceBackedRefreshMode::Background {
@@ -576,7 +573,7 @@ struct PublishedGenerationWait<'progress> {
 fn wait_for_published_generation_inner(
     availability: &dyn crate::DaemonAvailabilityPort,
     data_root: &Path,
-    mut request_id: String,
+    request_id: String,
     wait: PublishedGenerationWait<'_>,
 ) -> Result<SourceBackedRefreshObservation> {
     let PublishedGenerationWait {
@@ -587,6 +584,8 @@ fn wait_for_published_generation_inner(
         retain_peer,
         mut report_progress,
     } = wait;
+    let mut owner_recovery_attempted = false;
+    let mut forgotten_request_replayed = false;
     let mut last_reported_status = None;
     let mut last_reported_at = None;
     loop {
@@ -613,11 +612,15 @@ fn wait_for_published_generation_inner(
         ) {
             Ok(Some(response)) => response,
             Ok(None) => {
-                if !allow_daemon_autostart {
-                    return Err(retained_request_unobservable(&request_id, 0));
+                if !allow_daemon_autostart || owner_recovery_attempted {
+                    return Err(retained_request_unobservable(
+                        &request_id,
+                        usize::from(owner_recovery_attempted),
+                    ));
                 }
+                owner_recovery_attempted = true;
                 availability.checkpoint()?;
-                request_id = recover_wait_refresh_request(
+                recover_wait_refresh_request(
                     availability,
                     data_root,
                     &request_id,
@@ -634,11 +637,15 @@ fn wait_for_published_generation_inner(
                     .downcast_ref::<DaemonSourceRefreshServiceUnavailable>()
                     .is_some() =>
             {
-                if !allow_daemon_autostart {
-                    return Err(retained_request_unobservable(&request_id, 0));
+                if !allow_daemon_autostart || owner_recovery_attempted {
+                    return Err(retained_request_unobservable(
+                        &request_id,
+                        usize::from(owner_recovery_attempted),
+                    ));
                 }
+                owner_recovery_attempted = true;
                 availability.checkpoint()?;
-                request_id = recover_wait_refresh_request(
+                recover_wait_refresh_request(
                     availability,
                     data_root,
                     &request_id,
@@ -653,16 +660,25 @@ fn wait_for_published_generation_inner(
                 continue;
             }
             Err(error) => {
-                return Err(error.context("wait for daemon-owned source-backed refresh publication"))
+                return Err(
+                    error.context("wait for daemon-owned source-backed refresh publication")
+                );
             }
         };
         availability.checkpoint()?;
         if source_refresh_request_is_unknown(&response, &request_id)? {
-            // Reaching this wait loop means the client already received an
-            // admission acknowledgement. A subsequent typed unknown response
-            // cannot safely distinguish a lost retained request from daemon
-            // state loss, so never replay equivalent work under its UUID.
-            return Err(retained_request_unobservable(&request_id, 0));
+            if forgotten_request_replayed {
+                return Err(retained_request_unobservable(&request_id, 1));
+            }
+            forgotten_request_replayed = true;
+            enqueue_equivalent_wait_refresh_request(
+                availability,
+                data_root,
+                &request_id,
+                intent.clone(),
+                trigger,
+            )?;
+            continue;
         }
         validate_source_refresh_status_response_authority(&response, &request_id)?;
         validate_daemon_refresh_response(&response)?;
@@ -808,11 +824,8 @@ pub(super) fn recover_wait_refresh_request(
             bail!("daemon was disabled while waiting for source refresh");
         }
         availability.checkpoint()?;
-        // The acknowledged request may be a command waiter coalesced onto a
-        // periodic/search attempt. Restarting and immediately re-submitting
-        // the command payload under that physical ID would be a genuine
-        // idempotency conflict. Re-observe the durable ID; a typed unknown
-        // after acknowledgement is terminal and must not re-admit it.
+        // Restore observation first. Only a typed matching-ID unknown
+        // response authorizes readmission with the original request authority.
         Ok(request_id.to_owned())
     })();
     recovery.map_err(|error| {
@@ -826,36 +839,34 @@ pub(super) fn recover_wait_refresh_request(
     })
 }
 
-#[cfg(test)]
 fn enqueue_equivalent_wait_refresh_request(
+    availability: &dyn crate::DaemonAvailabilityPort,
     data_root: &Path,
     request_id: &str,
     intent: RefreshIntent,
     trigger: RefreshRequestTrigger,
 ) -> Result<String> {
-    let selected_import = intent.is_selected_import();
     let canonical_request = RefreshRequest::new(request_id.to_owned(), intent, trigger);
     let request = wait_authority_request_json(SourceBackedRefreshMode::Wait, &canonical_request)?;
-    let response = request_admission_with_recovery(request_id, std::thread::sleep, || {
-        daemon_source_refresh_request(
-            data_root,
-            request.clone(),
-            SOURCE_REFRESH_IPC_TIMEOUT,
-            SOURCE_REFRESH_RESPONSE_MAX_BYTES,
-        )
-    })?
-    .ok_or_else(|| retained_request_unobservable(request_id, 0))?;
+    let response = request_admission_with_recovery_cancellable(
+        request_id,
+        |duration| availability.pause(duration),
+        || availability.checkpoint(),
+        || {
+            daemon_source_refresh_request_with_cancellation(
+                availability,
+                data_root,
+                request.clone(),
+                SOURCE_REFRESH_IPC_TIMEOUT,
+                SOURCE_REFRESH_RESPONSE_MAX_BYTES,
+            )
+        },
+    )?
+    .ok_or_else(|| retained_request_unobservable(request_id, 1))?;
     validate_daemon_refresh_response(&response)?;
-    let accepted_request_id = response_request_id(&response, "daemon source refresh response")?;
-    let request_id = if selected_import {
-        validate_source_refresh_status_response_authority(&response, request_id)?;
-        request_id.to_owned()
-    } else {
-        validate_source_refresh_status_response_authority(&response, &accepted_request_id)?;
-        accepted_request_id
-    };
+    validate_source_refresh_status_response_authority(&response, request_id)?;
     source_refresh_protocol_state(&response)?;
-    Ok(request_id)
+    Ok(request_id.to_owned())
 }
 
 fn wait_authority_request_json(
@@ -865,16 +876,6 @@ fn wait_authority_request_json(
     SourceBackedRefreshRequest::new(mode, request).to_json()
 }
 
-fn response_request_id(response: &Value, label: &str) -> Result<String> {
-    response
-        .get("request_id")
-        .and_then(Value::as_str)
-        .filter(|request_id| !request_id.is_empty())
-        .map(str::to_owned)
-        .ok_or_else(|| anyhow!("{label} has no request ID"))
-}
-
-#[cfg(test)]
 fn source_refresh_protocol_state(response: &Value) -> Result<RefreshRequestState> {
     Ok(source_refresh_protocol_status(response)?.request_state())
 }
@@ -920,10 +921,10 @@ pub(super) fn source_refresh_request_is_unknown(
         && response.get("request_id").and_then(Value::as_str) == Some(expected_request_id)
         && response.get("request_state").and_then(Value::as_str)
             == Some(SOURCE_REFRESH_UNKNOWN_REQUEST_STATE)
-        // `request_not_retained_after_restart` is terminal from the
-        // requester's perspective: the original outcome cannot be observed
-        // and an equivalent enqueue would be new work.  Keep this strict so
-        // a malformed or pre-contract response cannot trigger recovery.
+        && response.get("reason").and_then(Value::as_str)
+            == Some("request_not_retained_after_restart")
+        // The missing outcome itself is not retryable. This exact typed
+        // response authorizes one same-request readmission; text does not.
         && response.get("retryable").and_then(Value::as_bool) == Some(false);
     if exact {
         Ok(true)

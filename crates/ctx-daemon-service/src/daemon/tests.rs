@@ -905,18 +905,11 @@ fn forced_watcher_recovery_adds_no_scans_after_startup_reconciliation() -> Resul
     assert!(!coordinator.has_scheduled_route_work());
     assert!(!coordinator.enqueue_next_dirty_route(&fixture.data_root, u64::MAX)?);
     for _ in 0..3 {
-        let response = coordinator
-            .handle_ipc_request(
-                &fixture.data_root,
-                &json!({
-                    "schema_version": 1,
-                    "op": "source_refresh_request",
-                    "mode": "background",
-                    "refresh_intent": {"kind": "automatic_maintenance"},
-                }),
-            )?
-            .expect("background maintenance wake");
-        assert_eq!(response["maintenance_wake"], true);
+        // Internal maintenance notification stays lightweight. Caller-bearing
+        // background IPC now owns durable admission and is covered separately.
+        let response =
+            coordinator.maintenance_wake(&fixture.data_root, uuid::Uuid::now_v7().to_string())?;
+        assert_eq!(response.schema_v1_fields()["maintenance_wake"], true);
         assert!(!coordinator.has_pending_request());
     }
     assert_eq!(

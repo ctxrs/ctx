@@ -1,5 +1,6 @@
 use super::*;
 use sha2::{Digest as _, Sha256};
+mod queued_admission;
 mod state_helpers;
 use state_helpers::*;
 #[derive(Clone)]
@@ -674,32 +675,6 @@ impl CoreRefreshEngine {
         })
     }
 
-    fn claim_active_pending_admission(&self) -> Option<PendingAdmissionClaim> {
-        let mut state = self.lock_state();
-        if state.watch_uncertain_through.is_some() {
-            return None;
-        }
-        let request_id = state.active_request_id.clone()?;
-        let attempt = find_attempt(&state, &request_id)?;
-        if attempt.state != SourceBackedRefreshState::AdmissionPending
-            || state.unacknowledged_admissions.contains_key(&request_id)
-            || state.admission_resolutions_in_flight.contains(&request_id)
-        {
-            return None;
-        }
-        let claim = PendingAdmissionClaim {
-            request_id: request_id.clone(),
-            intent: attempt.intent.clone(),
-            persisted_scope: attempt.refresh_scope.clone(),
-            watch_catalog_revision: state.watch_catalog_revision,
-            route_event_watermarks: state.route_event_watermarks.clone(),
-        };
-        state
-            .admission_resolutions_in_flight
-            .insert(request_id.clone());
-        Some(claim)
-    }
-
     #[cfg(any(test, feature = "test-support"))]
     fn claim_next_pending_admission(&self) -> Option<PendingAdmissionClaim> {
         let mut state = self.lock_state();
@@ -784,6 +759,11 @@ impl CoreRefreshEngine {
                 Ok(None)
             }
             Err(error) => {
+                if state.active_request_id.as_deref() != Some(claim.request_id.as_str()) {
+                    // A speculative batch peer still owns a queued turn. Its
+                    // normal active resolution owns failure and retry handoff.
+                    return Ok(None);
+                }
                 self.persist_failed_admission(data_root, &mut state, &claim.request_id, error)
             }
         }

@@ -67,6 +67,14 @@ pub(super) enum CoreRefreshTerminalSuccess {
 }
 
 impl CoreRefreshTerminalSuccess {
+    pub(super) fn receipt(&self) -> &SourceBackedRefreshReceipt {
+        match self {
+            Self::Verified(authority) => &authority.receipt,
+            #[cfg(any(test, feature = "test-support"))]
+            Self::StateOnly(receipt) => receipt,
+        }
+    }
+
     pub(super) fn bind(
         receipt: SourceBackedRefreshReceipt,
         verified_index: Arc<VerifiedIndex>,

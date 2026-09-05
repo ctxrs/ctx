@@ -27,6 +27,7 @@ impl CoreRefreshEngine {
         if self.active_request_admission_pending() {
             return None;
         }
+        self.prepare_queued_batch_admissions(data_root);
         self.run_next_with_verified_index_opener(data_root, |index_root| {
             Ok(Arc::new(open_verified_index(index_root)?))
         })

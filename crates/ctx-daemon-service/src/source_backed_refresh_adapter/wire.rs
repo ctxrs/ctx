@@ -27,21 +27,24 @@ pub(crate) fn handle_ipc_request(
 ) -> Result<Option<WireResponse>> {
     match request.get("op").and_then(Value::as_str) {
         Some(SOURCE_REFRESH_REQUEST_OP) => {
-            let response = match refresh_action(request)? {
-                WireRefreshAction::MaintenanceWake { request_id } => WireResponse {
-                    value: render_status(&engine.maintenance_wake(data_root, request_id)?),
-                    response_barrier: None,
-                },
-                WireRefreshAction::Submit(request) => {
-                    let admission = engine.submit(data_root, request)?;
-                    let (status, response_barrier) = admission.into_parts();
-                    WireResponse {
-                        value: render_status(&status),
-                        response_barrier,
-                    }
-                }
-            };
-            Ok(Some(response))
+            let admission = engine.submit(data_root, refresh_request(request)?)?;
+            let (status, response_barrier) = admission.into_parts();
+            let mut value = render_status(&status);
+            if value.get("admission_durability").is_some() {
+                // A retained replacement may survive restart, but it has not
+                // confirmed durability. Preserve its ID and response barrier
+                // without acknowledging successful admission to the caller.
+                value["ok"] = json!(false);
+                value["error_code"] = json!("source_refresh_admission_unconfirmed");
+                value["retryable"] = json!(true);
+                value["error"] = json!(
+                    "source refresh admission durability is unconfirmed; retry the same request ID"
+                );
+            }
+            Ok(Some(WireResponse {
+                value,
+                response_barrier,
+            }))
         }
         Some(SOURCE_REFRESH_STATUS_OP) => {
             let request_id = request
@@ -115,13 +118,7 @@ pub(crate) fn handle_ipc_request_for_test(
     Ok(Some(value))
 }
 
-#[derive(Debug)]
-enum WireRefreshAction {
-    MaintenanceWake { request_id: String },
-    Submit(RefreshRequest),
-}
-
-fn refresh_action(request: &Value) -> Result<WireRefreshAction> {
+fn refresh_request(request: &Value) -> Result<RefreshRequest> {
     let mode = request.get("mode").and_then(Value::as_str).unwrap_or("");
     if !matches!(mode, "background" | "wait") {
         return Err(anyhow!("invalid daemon source refresh mode `{mode}`"));
@@ -174,15 +171,12 @@ fn refresh_action(request: &Value) -> Result<WireRefreshAction> {
         None => Uuid::now_v7().to_string(),
         Some(_) => bail!("daemon source refresh logical request ID is invalid"),
     };
-    if mode == "background" {
-        if intent != RefreshIntent::AutomaticMaintenance {
-            bail!("selected import requires daemon refresh mode `wait`");
-        }
-        return Ok(WireRefreshAction::MaintenanceWake { request_id });
+    if mode == "background" && intent != RefreshIntent::AutomaticMaintenance {
+        bail!("selected import requires daemon refresh mode `wait`");
     }
-    Ok(WireRefreshAction::Submit(RefreshRequest::new(
-        request_id, intent, trigger,
-    )))
+    // Every IPC caller gets a durable identity. ID-less scheduler wakes use
+    // the engine's internal enqueue path and do not cross this boundary.
+    Ok(RefreshRequest::new(request_id, intent, trigger))
 }
 
 fn render_status(status: &RefreshStatus) -> Value {
@@ -198,9 +192,8 @@ fn unknown_refresh_request_response(request_id: &str) -> Value {
         "request_state": "request_unknown",
         "error_code": "source_refresh_request_unknown",
         "reason": "request_not_retained_after_restart",
-        // This request's durable terminal outcome is no longer observable
-        // after a daemon restart.  Re-enqueuing equivalent work would create
-        // a new request, not recover this one.
+        // The old outcome is no longer observable. This exact typed response
+        // lets a waiter readmit its original request once under the same ID.
         "retryable": false,
         "error": "source refresh request outcome is no longer observable after daemon restart",
     }))
@@ -209,6 +202,7 @@ fn unknown_refresh_request_response(request_id: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ctx_history_refresh::RefreshJournal;
 
     #[test]
     fn refresh_request_requires_a_canonical_intent() {
@@ -304,9 +298,9 @@ mod tests {
     }
 
     #[test]
-    fn background_wire_request_decodes_as_maintenance_wake() {
+    fn background_wire_request_decodes_as_durable_submission() {
         let request_id = "019fcaaa-0000-7000-8000-000000000513";
-        let action = refresh_action(&json!({
+        let action = refresh_request(&json!({
             "op": SOURCE_REFRESH_REQUEST_OP,
             "request_id": request_id,
             "mode": "background",
@@ -315,17 +309,14 @@ mod tests {
         }))
         .unwrap();
 
-        assert!(matches!(
-            action,
-            WireRefreshAction::MaintenanceWake {
-                request_id: decoded
-            } if decoded == request_id
-        ));
+        assert_eq!(action.request_id(), request_id);
+        assert_eq!(action.intent(), &RefreshIntent::AutomaticMaintenance);
+        assert_eq!(action.trigger(), RefreshRequestTrigger::Search);
     }
 
     #[test]
     fn canonical_request_rejects_retired_physical_scope() {
-        let error = refresh_action(&json!({
+        let error = refresh_request(&json!({
             "op": SOURCE_REFRESH_REQUEST_OP,
             "mode": "wait",
             "refresh_intent": {"kind": "automatic_maintenance"},
@@ -337,5 +328,129 @@ mod tests {
         .unwrap_err();
 
         assert!(format!("{error:#}").contains("carries retired `refresh_scope`"));
+    }
+
+    fn background_request(request_id: &str) -> Value {
+        json!({
+            "op": SOURCE_REFRESH_REQUEST_OP,
+            "request_id": request_id,
+            "mode": "background",
+            "trigger": "search",
+            "refresh_intent": {"kind": "automatic_maintenance"},
+        })
+    }
+
+    #[test]
+    fn background_acknowledgement_is_durable_before_response_and_duplicate_survives_restart() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = super::super::refresh_engine(&crate::test_support::CONFIG);
+        let id = "019fcaaa-0000-7000-8000-000000000514";
+        let request = background_request(id);
+        let journal = super::super::journal::DaemonRefreshJournal;
+
+        let first = handle_ipc_request(&engine, temp.path(), &request)
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.value["ok"], true);
+        assert_eq!(first.value["request_id"], id);
+        assert_eq!(first.value["request_state"], "admission_pending");
+        let durable = journal.load(temp.path()).unwrap().unwrap();
+        assert_eq!(durable["request_id"], id);
+        assert!(durable.get("admission_durability").is_none());
+        assert!(!engine.prepare_next_pending_admission(temp.path()).unwrap());
+
+        let duplicate = handle_ipc_request(&engine, temp.path(), &request)
+            .unwrap()
+            .unwrap();
+        assert_eq!(duplicate.value, first.value);
+        assert_eq!(journal.load(temp.path()).unwrap(), Some(durable.clone()));
+        first.response_barrier.unwrap().release(&engine);
+        assert!(!engine.prepare_next_pending_admission(temp.path()).unwrap());
+        duplicate.response_barrier.unwrap().release(&engine);
+        drop(engine);
+
+        let restarted = super::super::refresh_engine(&crate::test_support::CONFIG);
+        assert!(restarted
+            .recover_interrupted_publication(temp.path())
+            .unwrap());
+        let response = handle_ipc_request(&restarted, temp.path(), &request)
+            .unwrap()
+            .unwrap();
+        assert_eq!(response.value["ok"], true);
+        assert_eq!(response.value["request_id"], id);
+        assert_eq!(
+            response.value["requested_at_ms"],
+            durable["requested_at_ms"]
+        );
+        assert_eq!(response.value["coalesced_requests"], 0);
+        response.response_barrier.unwrap().release(&restarted);
+    }
+
+    struct AdmissionFaultJournal(std::sync::atomic::AtomicU8);
+
+    impl ctx_history_refresh::RefreshJournal for AdmissionFaultJournal {
+        fn load(&self, root: &Path) -> Result<Option<Value>> {
+            super::super::journal::DaemonRefreshJournal.load(root)
+        }
+
+        fn store(&self, root: &Path, value: &Value) -> Result<()> {
+            super::super::journal::DaemonRefreshJournal.store(root, value)
+        }
+
+        fn store_before_ack(
+            &self,
+            root: &Path,
+            value: &Value,
+        ) -> ctx_history_refresh::DurableAdmissionPersistence {
+            use ctx_history_refresh::DurableAdmissionPersistence as Persistence;
+            let fault = self.0.swap(0, std::sync::atomic::Ordering::SeqCst);
+            if fault == 1 {
+                return Persistence::Failed(anyhow!("injected pre-replacement failure"));
+            }
+            let result = super::super::journal::DaemonRefreshJournal.store_before_ack(root, value);
+            if fault == 2 && matches!(result, Persistence::Confirmed) {
+                return Persistence::Retained(anyhow!("injected durability uncertainty"));
+            }
+            result
+        }
+    }
+
+    #[test]
+    fn background_failed_or_indeterminate_persistence_is_not_successfully_acknowledged() {
+        use std::sync::{atomic::AtomicU8, Arc};
+        for fault in [1, 2] {
+            let temp = tempfile::tempdir().unwrap();
+            let engine = RefreshEngine::new(
+                Arc::new(AdmissionFaultJournal(AtomicU8::new(fault))),
+                Arc::new(super::super::runtime::DaemonRefreshRuntime::new(
+                    &crate::test_support::CONFIG,
+                )),
+            );
+            let id = "019fcaaa-0000-7000-8000-000000000515";
+            let request = background_request(id);
+            let first = handle_ipc_request(&engine, temp.path(), &request);
+            if fault == 1 {
+                assert!(first.is_err());
+                assert!(engine.status(id).is_none());
+            } else {
+                let first = first.unwrap().unwrap();
+                assert_eq!(first.value["ok"], false);
+                assert_eq!(first.value["retryable"], true);
+                assert_eq!(first.value["request_id"], id);
+                assert_eq!(
+                    first.value["error_code"],
+                    "source_refresh_admission_unconfirmed"
+                );
+                assert!(engine.status(id).is_some());
+                first.response_barrier.unwrap().release(&engine);
+            }
+            let replay = handle_ipc_request(&engine, temp.path(), &request)
+                .unwrap()
+                .unwrap();
+            assert_eq!(replay.value["ok"], true);
+            assert_eq!(replay.value["request_id"], id);
+            assert!(replay.value.get("admission_durability").is_none());
+            replay.response_barrier.unwrap().release(&engine);
+        }
     }
 }

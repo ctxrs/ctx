@@ -31,7 +31,7 @@ fn enqueue_ordinary_attempt(
 }
 
 #[test]
-fn setup_refresh_claims_periodic_and_search_attempts_without_ordinary_overwrite() {
+fn setup_refresh_retains_its_identity_beside_internal_maintenance() {
     for ordinary in ["periodic", "search"] {
         let temp = tempfile::tempdir().unwrap();
         let data_root = temp.path().join("data");
@@ -40,14 +40,12 @@ fn setup_refresh_claims_periodic_and_search_attempts_without_ordinary_overwrite(
         let initial = enqueue_ordinary_attempt(&coordinator, &data_root, ordinary);
         let physical_request_id = request_id(&initial);
 
-        let claimed = coordinator
-            .submit(
-                &data_root,
-                command_refresh_submission(RefreshRequestTrigger::Setup, false),
-            )
-            .unwrap();
-        assert_eq!(claimed.status()["request_id"], physical_request_id);
-        let claimed = status_value(&coordinator, &physical_request_id);
+        let setup = command_refresh_submission(RefreshRequestTrigger::Setup, false);
+        let setup_id = setup.request_id().to_owned();
+        let claimed = coordinator.submit(&data_root, setup).unwrap();
+        assert_eq!(claimed.status()["request_id"], setup_id);
+        assert_ne!(setup_id, physical_request_id);
+        let claimed = status_value(&coordinator, &setup_id);
         assert_eq!(claimed["operation"], "refresh");
         assert_eq!(claimed["trigger"], "setup");
         assert_eq!(claimed["trigger_provenance"], "setup_command");
@@ -59,7 +57,7 @@ fn setup_refresh_claims_periodic_and_search_attempts_without_ordinary_overwrite(
                 command_refresh_submission(RefreshRequestTrigger::Search, false),
             )
             .unwrap();
-        let retained = status_value(&coordinator, &physical_request_id);
+        let retained = status_value(&coordinator, &setup_id);
         assert_eq!(retained["trigger"], "setup");
         assert_eq!(retained["trigger_provenance"], "setup_command");
     }
@@ -250,7 +248,7 @@ fn concurrent_refresh_request_uses_active_generation_without_reopening_inflight_
     std::fs::create_dir_all(&inactive).unwrap();
     std::fs::write(inactive.join("meta.json"), b"in-flight metadata").unwrap();
 
-    let coalesced = coordinator
+    let admitted = coordinator
         .handle_ipc_request(
             temp.path(),
             &json!({
@@ -260,10 +258,13 @@ fn concurrent_refresh_request_uses_active_generation_without_reopening_inflight_
             }),
         )
         .unwrap()
-        .expect("coalesced refresh response");
-    assert_eq!(coalesced["request_id"], request["request_id"]);
-    assert_eq!(coalesced["coalesced_requests"], 1);
+        .expect("distinct refresh response");
+    assert_ne!(admitted["request_id"], request["request_id"]);
+    assert_eq!(admitted["coalesced_requests"], 0);
 }
+
+#[path = "queued_batch.rs"]
+mod queued_batch_tests;
 
 #[test]
 fn selected_import_requests_remain_distinct_before_execution() {
