@@ -779,7 +779,16 @@ mod tests {
         ] {
             for checkpoint in ["confirming", "paused", "mixed"] {
                 let mut report = status_report(true, "ready", status);
+                report["daemon"] = json!({
+                    "enabled": reason == "automatic_retry_daemon_unavailable",
+                    "running": status == "pending",
+                    "status": if status == "pending" { "running" } else { "stopped" },
+                });
                 report["refresh"]["reason"] = json!(reason);
+                // The projection can retain a terminal root while an admitted
+                // successor runs. Historical fields must not override its advice.
+                report["refresh"]["request_state"] = json!("published");
+                report["refresh"]["last_error"] = json!("retained failure");
                 report["refresh"]["automatic_retry"] = json!({"state": checkpoint});
                 for width in [32, 48, 80, 120] {
                     let render_context = context(width, ColorMode::Never);
@@ -796,6 +805,8 @@ mod tests {
                     );
                     if status == "partial" {
                         assert!(!rendered.contains("ctx index watch"), "{rendered}");
+                    } else {
+                        assert!(!rendered.contains("ctx import --all"), "{rendered}");
                     }
                     assert_fits(&document, &render_context);
                 }

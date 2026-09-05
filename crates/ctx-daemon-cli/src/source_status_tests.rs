@@ -517,6 +517,50 @@ fn retained_retry_checkpoint_follows_current_policy_and_runtime_ownership() {
 }
 
 #[test]
+fn retained_retry_checkpoint_terminal_root_keeps_admitted_successors_pending() {
+    for checkpoint in ["confirming", "paused", "mixed"] {
+        for terminal in ["published", "failed"] {
+            for successor_state in ["admission_pending", "queued", "failed"] {
+                let job = json!({
+                    "request_id": "019fcaaa-0000-7000-8000-000000000321",
+                    "request_state": terminal,
+                    "published_generation": "generation-1",
+                    "last_error": "retained failure",
+                    "automatic_retry": {"state": checkpoint, "routes": {}},
+                    "queued_successors": [{
+                        "request_id": "019fcaaa-0000-7000-8000-000000000322",
+                        "request_state": successor_state,
+                        "trigger": "import",
+                        "refresh_intent": {
+                            "kind": "selected_import",
+                            "selection": {"kind": "all"},
+                        },
+                    }],
+                });
+                for running in [true, false] {
+                    let report = refresh_report(
+                        Some(&job),
+                        Some("generation-1"),
+                        &json!({"enabled": false, "running": running}),
+                    );
+                    let (status, reason) = if running && successor_state != "failed" {
+                        ("pending", "core_refresh_pending")
+                    } else {
+                        ("partial", "refresh_requires_explicit_request")
+                    };
+                    assert_eq!(report["status"], status, "{job:#}: {report:#}");
+                    assert_eq!(report["reason"], reason, "{job:#}: {report:#}");
+                    assert_eq!(report["request_id"], job["request_id"]);
+                    assert_eq!(report["request_state"], job["request_state"]);
+                    assert_eq!(report["automatic_retry"], job["automatic_retry"]);
+                    assert_eq!(report["last_error"], job["last_error"]);
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn paused_route_does_not_claim_an_unrelated_active_refresh_is_fully_paused() {
     let route = "aa".repeat(32);
     let automatic_retry = json!({

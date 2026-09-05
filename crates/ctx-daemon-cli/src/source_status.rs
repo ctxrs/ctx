@@ -234,10 +234,22 @@ fn refresh_report(job: Option<&Value>, generation_id: Option<&str>, daemon: &Val
     let (status, reason) = match automatic_retry_state {
         Some("confirming" | "paused" | "mixed") if !daemon_enabled || !daemon_running => {
             if daemon_running
-                && matches!(
+                && (matches!(
                     request_state,
                     Some("admission_pending" | "queued" | "running")
-                )
+                ) || job
+                    .get("queued_successors")
+                    .and_then(Value::as_array)
+                    .is_some_and(|successors| {
+                        // Terminal roots retain admitted successors until the
+                        // finite owner advances; the root alone is historical.
+                        successors.iter().any(|successor| {
+                            matches!(
+                                successor.get("request_state").and_then(Value::as_str),
+                                Some("admission_pending" | "queued")
+                            )
+                        })
+                    }))
             {
                 ("pending", Some("core_refresh_pending"))
             } else if daemon_enabled {
