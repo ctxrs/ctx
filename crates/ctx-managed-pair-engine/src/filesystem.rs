@@ -489,6 +489,35 @@ pub(super) fn copy_exact(
     Ok(copied)
 }
 
+/// Compare an incomplete copy with a prefix of its already verified source.
+/// This is bounded by the observed temporary length and never collects payloads.
+pub(super) fn matches_source_prefix(
+    source: &Entry,
+    expected: &FileStamp,
+    prefix: &FileStamp,
+    label: &str,
+) -> Result<bool> {
+    if prefix.size_bytes >= expected.size_bytes {
+        return Ok(false);
+    }
+    let file = open_owner_regular(source, label)?;
+    require_file_identity(&file, expected, label)?;
+    let mut limited = file.take(prefix.size_bytes);
+    let mut hasher = Sha256::new();
+    let mut total = 0_u64;
+    let mut buffer = [0_u8; 128 * 1024];
+    loop {
+        let count = limited.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        total += u64::try_from(count)?;
+        hasher.update(&buffer[..count]);
+    }
+    require_named_identity(source, expected, label)?;
+    Ok(total == prefix.size_bytes && format!("{:x}", hasher.finalize()) == prefix.sha256)
+}
+
 pub(super) fn write_new(
     entry: &Entry,
     bytes: &[u8],
