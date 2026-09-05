@@ -86,7 +86,12 @@ pub(super) fn metadata_url(channel: &str) -> String {
     if let Some(url) = qualification_env("CTX_RELEASE_METADATA_URL") {
         return url;
     }
-    format!("{RELEASE_METADATA_BASE_URL}/releases/{channel}/ctx-release-metadata.env")
+    let base_url = if channel == "stable" {
+        "https://cli.ctx.rs/functions/v2"
+    } else {
+        RELEASE_METADATA_BASE_URL
+    };
+    format!("{base_url}/releases/{channel}/ctx-release-metadata.env")
 }
 
 pub(super) fn metadata_signature_url(metadata_url: &str) -> String {
@@ -626,11 +631,20 @@ CTX_RELEASE_SHA256_linux_x64={}
 
         assert_eq!(
             metadata,
-            "https://cli.ctx.rs/functions/v1/releases/stable/ctx-release-metadata.env"
+            "https://cli.ctx.rs/functions/v2/releases/stable/ctx-release-metadata.env"
         );
         assert_eq!(
             metadata_signature_url(&metadata),
-            "https://cli.ctx.rs/functions/v1/releases/stable/ctx-release-metadata.env.sig"
+            "https://cli.ctx.rs/functions/v2/releases/stable/ctx-release-metadata.env.sig"
+        );
+        let staging_metadata = metadata_url("staging");
+        assert_eq!(
+            staging_metadata,
+            "https://cli.ctx.rs/functions/v1/releases/staging/ctx-release-metadata.env"
+        );
+        assert_eq!(
+            metadata_signature_url(&staging_metadata),
+            "https://cli.ctx.rs/functions/v1/releases/staging/ctx-release-metadata.env.sig"
         );
         let key = public_key_der().expect("decode embedded production release key");
         assert_eq!(
