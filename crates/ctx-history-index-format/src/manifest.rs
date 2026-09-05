@@ -23,6 +23,9 @@ use crate::{
 use ctx_history_core::CertifiedSource;
 
 const MAX_COMMIT_PAYLOAD_BYTES: usize = 256;
+// Payload v2 carried up to 48 KiB of opaque metadata encoded as base64.
+const MAX_RELEASED_V2_METADATA_ENCODED_BYTES: usize = 64 * 1024;
+const MAX_RELEASED_V2_COMMIT_PAYLOAD_BYTES: usize = MAX_RELEASED_V2_METADATA_ENCODED_BYTES + 256;
 const MANIFEST_FLAT_DELTA_STORAGE: &str = "ctx-manifest-flat-delta-v1";
 const MANIFEST_FLAT_DELTA_PREFIX: &[u8] = br#"{"storage_format":"ctx-manifest-flat-delta-v1","#;
 const MAX_MANIFEST_DELTA_CHANGES: usize = 64;
@@ -150,6 +153,16 @@ struct BorrowedCommitPayload<'a> {
     version: u32,
     #[serde(borrow)]
     generation_id: &'a str,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BorrowedReleasedV2CommitPayload<'a> {
+    version: u32,
+    #[serde(borrow)]
+    generation_id: &'a str,
+    #[serde(borrow)]
+    publication_metadata: Option<&'a str>,
 }
 
 #[derive(Debug)]
@@ -393,6 +406,9 @@ pub fn canonical_commit_payload(generation_id: &str) -> Result<String> {
 }
 
 fn decode_commit_payload(encoded: &str) -> Result<DecodedCommitPayload> {
+    if is_released_v2_commit_payload(encoded) {
+        return Err(IndexError::UnsupportedCommitPayload(2));
+    }
     if encoded.len() > MAX_COMMIT_PAYLOAD_BYTES {
         return Err(IndexError::CommitPayloadTooLarge {
             actual: encoded.len(),
@@ -412,6 +428,24 @@ fn decode_commit_payload(encoded: &str) -> Result<DecodedCommitPayload> {
     Ok(DecodedCommitPayload {
         generation_id: payload.generation_id.to_owned(),
     })
+}
+
+fn is_released_v2_commit_payload(encoded: &str) -> bool {
+    // Only recognize the released v2 envelope for source rebuild. Its
+    // removed metadata stays opaque, and current payload validation is unchanged.
+    if encoded.len() > MAX_RELEASED_V2_COMMIT_PAYLOAD_BYTES
+        || !encoded.starts_with(r#"{"version":2,"#)
+    {
+        return false;
+    }
+    let Ok(payload) = serde_json::from_str::<BorrowedReleasedV2CommitPayload<'_>>(encoded) else {
+        return false;
+    };
+    payload.version == 2
+        && is_generation_id(payload.generation_id)
+        && payload
+            .publication_metadata
+            .is_none_or(|metadata| metadata.len() <= MAX_RELEASED_V2_METADATA_ENCODED_BYTES)
 }
 
 pub fn reconcile_commit_error(
