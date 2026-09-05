@@ -65,11 +65,16 @@ fn import_factory_result(temp: &TempDir, path: &str) -> Value {
 }
 
 fn import_factory(temp: &TempDir, path: &str) -> Value {
+    import_factory_with_rejections(temp, path, 0)
+}
+
+fn import_factory_with_rejections(temp: &TempDir, path: &str, rejected_records: u64) -> Value {
     let imported = import_factory_result(temp, path);
-    assert_explicit_source_publication(
+    assert_explicit_source_publication_with_rejections(
         &imported,
         "factory_ai_droid",
         "factory_ai_droid_sessions_jsonl",
+        rejected_records,
     );
     imported
 }
@@ -176,7 +181,7 @@ fn factory_droid_import_preserves_result_order_and_record_local_rejections() {
     .unwrap();
     writeln!(appended, "{}", message("tail", "valid tail")).unwrap();
     drop(appended);
-    let append = import_factory(&temp, path);
+    let append = import_factory_with_rejections(&temp, path, 1);
     assert_eq!(
         append["totals"]["current_rejected_records"], 1,
         "{append:#}"
@@ -187,7 +192,7 @@ fn factory_droid_import_preserves_result_order_and_record_local_rejections() {
     for (body, id) in &ids {
         assert_eq!(appended_ids[body], *id);
     }
-    let repeat = import_factory(&temp, path);
+    let repeat = import_factory_with_rejections(&temp, path, 1);
     assert_eq!(
         repeat["totals"]["current_rejected_records"], 1,
         "{repeat:#}"
@@ -200,7 +205,7 @@ fn factory_droid_import_preserves_result_order_and_record_local_rejections() {
     rewritten.insert(2, message(&"y".repeat(65_536), "composite key overflow"));
     rewritten.push(message("tail", "valid tail"));
     write_jsonl(&file, &rewritten);
-    let replacement = import_factory(&temp, path);
+    let replacement = import_factory_with_rejections(&temp, path, 1);
     assert_eq!(
         replacement["totals"]["current_rejected_records"], 1,
         "{replacement:#}"
