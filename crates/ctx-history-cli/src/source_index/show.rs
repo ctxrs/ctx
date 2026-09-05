@@ -548,7 +548,7 @@ impl<'a> SessionStreamRenderer<'a> {
                 fragment
             }
             OutputFormat::Jsonl => {
-                let line = compact_json(json!({
+                let mut line = compact_json(json!({
                     "schema_version": 1,
                     "payload_type": "session_transcript_event",
                     "mode": self.metadata["mode"],
@@ -557,8 +557,8 @@ impl<'a> SessionStreamRenderer<'a> {
                     "provider_key": self.metadata["provider_key"],
                     "source_id": self.metadata["source_id"],
                     "provider_session_id": self.metadata["provider_session_id"],
-                    "event": value,
                 }));
+                line["event"] = value;
                 let mut fragment = serde_json::to_vec(&line)?;
                 fragment.push(b'\n');
                 fragment

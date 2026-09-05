@@ -212,13 +212,15 @@ pub fn render_show_event_read_model(event: &CoreEventRecord) -> Value {
         "role": event.role,
         "occurred_at": view.occurred_at.as_deref(),
         "text": content.normalized_body.as_deref(),
-        "structured_content": content.structured_content.as_ref(),
         "content": {
             "complete": policy.complete,
             "policy_status": policy.status,
             "policy_reason": policy.reason,
         },
     }));
+    if let Some(structured_content) = &content.structured_content {
+        rendered["structured_content"] = structured_content.clone();
+    }
     if let Some(activity) = &content.activity {
         rendered["activity"] = json!(activity);
     }
