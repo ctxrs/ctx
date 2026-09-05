@@ -151,7 +151,7 @@ mod native {
 
         fn setup_wait(&self) -> String {
             let setup = self.json(&["setup", "--wait", "--format=json", "--progress", "none"]);
-            assert_eq!(setup["schema_version"], 2, "{setup:#}");
+            assert_eq!(setup["schema_version"], 3, "{setup:#}");
             assert_eq!(setup["mode"], "ready", "{setup:#}");
             setup["lexical"]["generation_id"]
                 .as_str()

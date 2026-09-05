@@ -26,7 +26,7 @@ fn fresh_home_search_mvp_flow() {
     );
 
     let setup_json = json_output(ctx(&temp).args(["setup", "--format=json"]));
-    assert_eq!(setup_json["schema_version"], 2);
+    assert_eq!(setup_json["schema_version"], 3);
     assert_eq!(setup_json["network_required"], false);
     assert_eq!(setup_json["repo_writes"], false);
     assert!(
@@ -337,7 +337,7 @@ fn fresh_home_search_mvp_flow() {
     );
 
     let status = json_output(ctx(&temp).args(["status", "--format=json"]));
-    assert_eq!(status["schema_version"], 2);
+    assert_eq!(status["schema_version"], 3);
     assert!(status["indexed_items"].as_u64().unwrap() > 0);
     assert_eq!(status["semantic"]["status"], "disabled");
     assert_eq!(status["semantic"]["reason"], "semantic_disabled");

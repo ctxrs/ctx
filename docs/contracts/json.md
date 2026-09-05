@@ -1399,7 +1399,9 @@ Citations can include:
 ctx doctor --format json
 ```
 
-Reads local storage and returns findings:
+Reads local storage and returns findings. The outer `schema_version` remains 1.
+Its `source_epoch` contains the status report at schema version 3, without the
+removed generic `local_only` property.
 
 - `schema_version`;
 - `ok`;
