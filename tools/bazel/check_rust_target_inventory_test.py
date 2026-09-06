@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 
 import ast
+import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import tomllib
 import unittest
@@ -31,6 +33,174 @@ except ModuleNotFoundError:
 
 def module(source: str) -> ast.Module:
     return ast.parse(source)
+
+
+class ExecutableOwnershipTest(unittest.TestCase):
+    """Exercise Git discovery, Cargo parsing and BUILD ownership via the CLI."""
+
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        directory = Path(temporary.name)
+        self.root = directory / "repo"
+        self.root.mkdir()
+        home = directory / "home"
+        home.mkdir()
+        self.environment = {
+            key: value for key, value in os.environ.items()
+            if not key.startswith("GIT_") and key not in {"PYTHONPATH", "PYTHONHOME"}
+        }
+        self.environment.update(
+            HOME=str(home),
+            XDG_CONFIG_HOME=str(home),
+            GIT_CONFIG_NOSYSTEM="1",
+            GIT_CONFIG_GLOBAL=os.devnull,
+            GIT_CEILING_DIRECTORIES=str(directory),
+        )
+        subprocess.run(
+            ["git", "init", "-q", str(self.root)],
+            env=self.environment, check=True,
+        )
+        (self.root / "Cargo.toml").write_text(
+            '[workspace]\nmembers = ["fixture"]\n', encoding="utf-8"
+        )
+        (self.root / "BUILD.bazel").write_text("# workspace\n", encoding="utf-8")
+        self.package = self.root / "fixture"
+        self.package.mkdir()
+
+    def check_target(
+        self, kind: str, build: str, *, harness: bool | None = None,
+        implicit: bool = False,
+    ) -> subprocess.CompletedProcess[str]:
+        for previous in ("tests/entry.rs", "src/bin/entry.rs"):
+            (self.package / previous).unlink(missing_ok=True)
+        path = {"test": "tests/entry.rs", "bin": "src/bin/entry.rs"}[kind]
+        source = self.package / path
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text(
+            "fn main() {}\n" if kind == "bin" or harness is False
+            else "#[test] fn entry() {}\n", encoding="utf-8",
+        )
+        manifest = '[package]\nname = "fixture"\nversion = "0.1.0"\n'
+        if not implicit:
+            manifest += f'[[{kind}]]\nname = "entry"\npath = "{path}"\n'
+            if harness is not None:
+                manifest += f"harness = {str(harness).lower()}\n"
+        (self.package / "Cargo.toml").write_text(manifest, encoding="utf-8")
+        (self.package / "BUILD.bazel").write_text(
+            'filegroup(name = "cargo_package_data", srcs = glob(["**"]))\n'
+            + build.replace("ENTRY", path), encoding="utf-8",
+        )
+        return subprocess.run(
+            [sys.executable, str(Path(__file__).with_name("check_rust_target_inventory.py"))],
+            cwd=self.root, env=self.environment, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=10,
+        )
+
+    def assert_owned(self, result: subprocess.CompletedProcess[str]) -> None:
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout,
+            "live Cargo/Bazel ownership covers 1 Cargo targets and "
+            "0 local edges across 1 discovered packages\n",
+        )
+
+    def assert_unowned(self, result: subprocess.CompletedProcess[str], kind: str) -> None:
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn(f"Cargo target is not owned by Bazel: {kind}:entry", result.stderr)
+
+    def test_compile_only_rules_cannot_own_executables(self) -> None:
+        for kind in ("test", "bin"):
+            for implicit in (False, True):
+                for rule in ("rust_library", "rust_proc_macro"):
+                    with self.subTest(kind=kind, implicit=implicit, rule=rule):
+                        self.assert_unowned(self.check_target(
+                            kind, f'{rule}(name = "entry", crate_root = "ENTRY")',
+                            implicit=implicit,
+                        ), kind)
+
+    def test_binary_rules_own_bins(self) -> None:
+        for rule in ("rust_binary", "ctx_rust_binary"):
+            for implicit in (False, True):
+                with self.subTest(rule=rule, implicit=implicit):
+                    self.assert_owned(self.check_target(
+                        "bin", f'{rule}(name = "entry", crate_root = "ENTRY")',
+                        implicit=implicit,
+                    ))
+
+    def test_tests_require_test_execution_even_without_libtest(self) -> None:
+        for rule in ("rust_binary", "ctx_rust_binary"):
+            for harness in (True, False):
+                with self.subTest(rule=rule, harness=harness):
+                    self.assert_unowned(self.check_target(
+                        "test", f'{rule}(name = "entry", crate_root = "ENTRY")',
+                        harness=harness,
+                    ), "test")
+
+    def test_test_rules_preserve_cargo_harness_mode(self) -> None:
+        for rule in ("rust_test", "ctx_rust_test"):
+            for harness in (True, False):
+                for bazel_harness in (True, False):
+                    with self.subTest(rule=rule, harness=harness, bazel_harness=bazel_harness):
+                        result = self.check_target(
+                            "test", f'{rule}(name = "entry", crate_root = "ENTRY", '
+                            f'use_libtest_harness = {bazel_harness})', harness=harness,
+                        )
+                        if harness == bazel_harness:
+                            self.assert_owned(result)
+                        else:
+                            self.assert_unowned(result, "test")
+
+    def test_default_harness_and_differently_named_test_owner(self) -> None:
+        for rule in ("rust_test", "ctx_rust_test"):
+            for implicit in (False, True):
+                with self.subTest(rule=rule, implicit=implicit):
+                    self.assert_owned(self.check_target(
+                        "test", 'rust_library(name = "entry", srcs = ["ENTRY"])\n'
+                        f'{rule}(name = "entry_test", crate_root = "ENTRY")',
+                        implicit=implicit,
+                    ))
+
+    def test_existing_binary_contract_macros_are_tests(self) -> None:
+        # Each macro forwards src to ctx_rust_test through binary_contracts.bzl.
+        for rule in (
+            "ctx_binary_contract_test", "ctx_cli_contract_test", "ctx_cli_integration_test",
+            "agent_application_binary_contract", "daemon_cli_binary_contract",
+            "history_ingest_binary_contract", "history_read_binary_contract",
+            "observability_binary_contract",
+        ):
+            for kind, harness in (("test", True), ("test", False), ("bin", None)):
+                with self.subTest(rule=rule, kind=kind, harness=harness):
+                    result = self.check_target(
+                        kind, f'{rule}(name = "entry", src = "ENTRY")', harness=harness,
+                    )
+                    if kind == "test" and harness:
+                        self.assert_owned(result)
+                    else:
+                        self.assert_unowned(result, kind)
+
+    def test_rule_name_shape_does_not_establish_executable_ownership(self) -> None:
+        for rule in ("rust_unrecognized", "unknown_contract_test", "unknown_binary_contract"):
+            with self.subTest(rule=rule):
+                self.assert_unowned(self.check_target(
+                    "test", f'{rule}(name = "entry", srcs = ["ENTRY"])',
+                ), "test")
+
+    def test_test_rule_cannot_own_a_binary(self) -> None:
+        for rule in ("rust_test", "ctx_rust_test"):
+            with self.subTest(rule=rule):
+                self.assert_unowned(self.check_target(
+                    "bin", f'{rule}(name = "entry", crate_root = "ENTRY")',
+                ), "bin")
+
+    def test_executable_rule_still_needs_the_source(self) -> None:
+        for kind, rule in (("test", "ctx_rust_test"), ("bin", "ctx_rust_binary")):
+            for attributes in ('crate_root = "other.rs"', 'data = ["ENTRY"]',
+                               'srcs = glob(["**/*.rs"], exclude = ["ENTRY"])'):
+                with self.subTest(kind=kind, attributes=attributes):
+                    self.assert_unowned(self.check_target(
+                        kind, f'{rule}(name = "entry", {attributes})',
+                    ), kind)
 
 
 class RustTargetInventoryTest(unittest.TestCase):
