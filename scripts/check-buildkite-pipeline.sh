@@ -117,6 +117,52 @@ github_release_condition = (
     '(build.branch == "main" || build.branch == "release/1.3.2") && build.pull_request.id == null'
 )
 
+
+def validate_release_truth_table(condition: str, required_flags: tuple[str, ...]) -> None:
+    flags = ("CTX_PUBLIC_CLI_ARTIFACT_MATRIX", "CTX_PUBLIC_CLI_NATIVE_SMOKE_MATRIX",
+             "CTX_PUBLIC_SEMANTIC_ASSET_MATRIX")
+    for branch in ("main", "release/1.3.2", "task", "release/1.3.20",
+                   "release/1.3.3", "release/1.3.2/extra"):
+        for pull_request in (False, True):
+            for mask in range(8):
+                enabled = {flag for index, flag in enumerate(flags) if mask & (1 << index)}
+                expression = condition.replace('build.branch == "main"', str(branch == "main"))
+                expression = expression.replace('build.branch == "release/1.3.2"',
+                                                str(branch == "release/1.3.2"))
+                expression = expression.replace("build.pull_request.id == null", str(not pull_request))
+                for flag in flags:
+                    expression = expression.replace(f'build.env("{flag}") == "1"', str(flag in enabled))
+                expression = expression.replace("&&", "and").replace("||", "or")
+                # Only closed boolean expressions are evaluated, never pipeline commands.
+                if not re.fullmatch(r"(?:True|False|and|or|[ ()])+", expression):
+                    fail("release condition contains an unsupported predicate")
+                expected = (branch in ("main", "release/1.3.2") and not pull_request
+                            and all(flag in enabled for flag in required_flags))
+                if eval(expression, {"__builtins__": {}}) != expected:
+                    fail("release condition changed its branch, pull-request, or matrix-flag boundary")
+
+
+for condition, required_flags in (
+    (core_release_condition, ("CTX_PUBLIC_CLI_ARTIFACT_MATRIX",)),
+    (core_native_condition, ("CTX_PUBLIC_CLI_ARTIFACT_MATRIX", "CTX_PUBLIC_CLI_NATIVE_SMOKE_MATRIX")),
+    (semantic_condition, ("CTX_PUBLIC_SEMANTIC_ASSET_MATRIX",)),
+    (github_release_condition, ("CTX_PUBLIC_CLI_ARTIFACT_MATRIX", "CTX_PUBLIC_CLI_NATIVE_SMOKE_MATRIX",
+                                "CTX_PUBLIC_SEMANTIC_ASSET_MATRIX")),
+):
+    validate_release_truth_table(condition, required_flags)
+    for broken in (
+        condition.replace(" && build.pull_request.id == null", ""),
+        condition.replace('(build.branch == "main" || build.branch == "release/1.3.2")',
+                          'build.branch == "main" || build.branch == "release/1.3.2"'),
+        condition.replace(f'build.env("{required_flags[0]}") == "1" && ', ""),
+    ):
+        try:
+            validate_release_truth_table(broken, required_flags)
+        except SystemExit:
+            pass
+        else:
+            fail("release condition accepted a missing PR, grouping, or required-flag guard")
+
 for key, mode, condition in (
     ("public-smoke", "ci", ordinary_condition),
     ("public-nightly", "nightly", nightly_condition),
