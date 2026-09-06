@@ -109,6 +109,7 @@ def validate_linux_route(source: str) -> None:
     require(
         top_level_commands(source)
         == [
+            "preflight_release_branch_version",
             "init_buildkite_job_tool_env",
             "preflight_release_test_authority",
             "require_preinstalled_tools",
@@ -174,6 +175,19 @@ def main() -> None:
         open(path, encoding="utf-8").read() for path in sys.argv[1:]
     ]
     validate(public_ci, sdk_runner)
+
+    for name, replacement in (
+        ("release source preflight removed", "init_buildkite_job_tool_env\n"),
+        ("release source preflight delayed until after setup",
+         "init_buildkite_job_tool_env\npreflight_release_branch_version\n"),
+    ):
+        expect_rejection(
+            name,
+            replace_once(public_ci,
+                         "preflight_release_branch_version\ninit_buildkite_job_tool_env\n",
+                         replacement),
+            sdk_runner,
+        )
 
     expect_rejection(
         "worker provisioning restored",
