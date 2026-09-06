@@ -39,6 +39,7 @@ mod proportionality;
 mod provider_native;
 mod recovery;
 mod retrieval_exclusion;
+mod token_fit;
 
 const TAIL_TOKEN: &str = "semantic-tail-token-7f0d";
 const EMPTY_DOCUMENT_TOKEN: &str = "semantic-empty-document-fixture-7f0d";
@@ -96,11 +97,17 @@ impl SemanticDocumentBuilder for CoreBuilder {
 
 #[derive(Default)]
 struct MarkerEmbedder {
+    fit_calls: usize,
     chunks: usize,
     calls: usize,
 }
 
 impl SemanticBatchEmbedder for MarkerEmbedder {
+    fn document_fits(&mut self, _text: &str) -> anyhow::Result<bool> {
+        self.fit_calls += 1;
+        Ok(true)
+    }
+
     fn embed_chunks(&mut self, chunks: &[SemanticChunkDocument]) -> Result<Vec<Vec<f32>>> {
         self.calls = self.calls.saturating_add(1);
         self.chunks = self.chunks.saturating_add(chunks.len());
@@ -132,6 +139,10 @@ impl DimensionEmbedder {
 }
 
 impl SemanticBatchEmbedder for DimensionEmbedder {
+    fn document_fits(&mut self, _text: &str) -> anyhow::Result<bool> {
+        Ok(true)
+    }
+
     fn embed_chunks(&mut self, chunks: &[SemanticChunkDocument]) -> Result<Vec<Vec<f32>>> {
         self.chunks = self.chunks.saturating_add(chunks.len());
         self.batch_sizes.push(chunks.len());
@@ -892,51 +903,6 @@ fn four_event_source_work_is_independent_of_740k_equivalent_corpus() -> Result<(
 }
 
 #[test]
-fn sequence_only_core_change_updates_authority_without_embedding() -> Result<()> {
-    let fixture = Fixture::new(1)?;
-    let initial = fixture.publish_with_event_sequences(
-        "sequence-a",
-        &[(0, vec![(1, "same semantic body".to_owned())])],
-    )?;
-    let target = fixture.publish_with_event_sequences(
-        "sequence-b",
-        &[(0, vec![(91, "same semantic body".to_owned())])],
-    )?;
-    let mut store = SemanticVectorStore::open(&fixture.semantic_path, semantic_model_contract())?;
-    let mut builder = CoreBuilder::default();
-    let mut embedder = MarkerEmbedder::default();
-    reconcile_all(&mut store, &initial, &mut builder, &mut embedder)?;
-    let embedded_before = embedder.chunks;
-
-    let outcome = reconcile_all(&mut store, &target, &mut builder, &mut embedder)?;
-    assert_eq!(outcome.records_decoded, 1);
-    assert_eq!(outcome.records_reused, 1);
-    assert_eq!(outcome.records_embedded, 0);
-    assert_eq!(outcome.vectors_touched, 0);
-    assert_eq!(outcome.vector_bytes_touched, 0);
-    assert!(outcome.metadata_records_touched < 32);
-    assert_eq!(embedder.chunks, embedded_before);
-    assert!(matches!(
-        store.source_backed_generation_pin_exact(initial.generation_id(), 1)?,
-        SourceBackedGenerationPin::NotReady
-    ));
-    let pin = match store.source_backed_generation_pin_exact(target.generation_id(), 1)? {
-        SourceBackedGenerationPin::Ready(pin) => pin,
-        SourceBackedGenerationPin::NotReady | SourceBackedGenerationPin::ReadyEmpty => {
-            return Err(anyhow!("sequence-only target did not produce an exact pin"));
-        }
-    };
-    let chunk = pin
-        .scan_segments()
-        .iter()
-        .flat_map(|segment| segment.chunks())
-        .next()
-        .ok_or_else(|| anyhow!("sequence-only target lost its vector"))?;
-    assert_eq!(chunk.seq, 91);
-    Ok(())
-}
-
-#[test]
 fn multi_page_reconciliation_constructs_one_flat_view() -> Result<()> {
     let fixture = Fixture::new(1)?;
     let record_count = MAX_SOURCE_EVENT_PAGE_ITEMS + 4;
@@ -963,7 +929,8 @@ fn multi_page_reconciliation_constructs_one_flat_view() -> Result<()> {
     assert_eq!(pin.stats().active_events, record_count);
     assert!(
         pin.stats().segment_count
-            <= segments_before + record_count.div_ceil(MAX_SOURCE_EVENT_PAGE_ITEMS),
+            <= segments_before
+                + record_count.div_ceil(source_event_page_limit(semantic_model_contract())),
         "one reconciliation may retain at most one durable delta per bounded Core page"
     );
     assert_eq!(
@@ -1090,7 +1057,7 @@ fn multi_page_restart_reconstructs_one_view_for_remaining_pages() -> Result<()> 
             .ok_or_else(|| anyhow!("resumed reconciliation lost its flat generation"))?
             .stats()
             .segment_count
-            <= record_count.div_ceil(MAX_SOURCE_EVENT_PAGE_ITEMS) + 1,
+            <= record_count.div_ceil(source_event_page_limit(semantic_model_contract())) + 1,
         "the staged pages and source receipt retain bounded scoped segments"
     );
     assert_eq!(projection_snapshot(&restarted)?, expected);

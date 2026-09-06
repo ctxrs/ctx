@@ -92,6 +92,10 @@ impl DaemonConfigPort for RejectingSemanticAuthConfig {
 }
 
 impl SemanticBatchEmbedder for RejectingEmptySemanticEmbedder {
+    fn document_fits(&mut self, _text: &str) -> Result<bool> {
+        anyhow::bail!("unexpected semantic input assessment")
+    }
+
     fn embed_chunks(&mut self, _chunks: &[SemanticChunkDocument]) -> Result<Vec<Vec<f32>>> {
         panic!("an empty semantic generation must not request embeddings")
     }
@@ -112,6 +116,10 @@ fn acknowledge_empty_semantic_generation(
 }
 
 impl SemanticEmbeddingExecutor for RecordingSemanticExecutor {
+    fn document_fits(&self, _text: &str) -> Result<bool> {
+        Ok(true)
+    }
+
     fn contract(&self) -> &SemanticModelContract {
         &self.contract
     }
@@ -476,7 +484,10 @@ fn ready_empty_v2_generation_is_observed_without_constructing_an_executor() -> R
 #[test]
 fn bounded_zero_eligible_reconciliation_advances_one_boundary_without_executor() -> Result<()> {
     let fixture = CoreFixture::new();
-    let record_count = MAX_SOURCE_EVENT_PAGE_ITEMS + 1;
+    // The semantic page budget is512; the Core reader's larger maximum is
+    // not the selected semantic work-unit size.
+    const SEMANTIC_PAGE_RECORDS: usize = 512;
+    let record_count = SEMANTIC_PAGE_RECORDS + 1;
     let mut records = Vec::with_capacity(record_count);
     for sequence in 0..record_count as u64 {
         let mut record = fixture.record(sequence, EventRole::User, "excluded retrieval result");
@@ -500,7 +511,7 @@ fn bounded_zero_eligible_reconciliation_advances_one_boundary_without_executor()
     assert_eq!(first["status"], "budget_exhausted", "{first:#}");
     assert_eq!(first["semantic_progress_sequence"], 1, "{first:#}");
     assert_eq!(
-        first["source_records_decoded"], MAX_SOURCE_EVENT_PAGE_ITEMS,
+        first["source_records_decoded"], SEMANTIC_PAGE_RECORDS,
         "{first:#}"
     );
     assert!(runtime.semantic_executor.is_none());

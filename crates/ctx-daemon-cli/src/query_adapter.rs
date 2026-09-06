@@ -352,6 +352,11 @@ struct PassiveSemanticExecutorUnavailable {
 }
 
 impl SemanticBatchEmbedder for ForegroundSemanticEmbedder<'_> {
+    fn document_fits(&mut self, text: &str) -> Result<bool> {
+        ensure_foreground_executor(self.executor)?;
+        self.executor.executor().document_fits(text)
+    }
+
     fn embed_chunks(&mut self, chunks: &[SemanticChunkDocument]) -> Result<Vec<Vec<f32>>> {
         ensure_foreground_executor(self.executor)?;
         let texts = chunks
@@ -494,6 +499,10 @@ fn reconcile_foreground_source_backed_semantic_with_checkpoint(
 struct EmptyForegroundSemanticEmbedder;
 
 impl SemanticBatchEmbedder for EmptyForegroundSemanticEmbedder {
+    fn document_fits(&mut self, _text: &str) -> Result<bool> {
+        anyhow::bail!("unexpected semantic input assessment")
+    }
+
     fn embed_chunks(&mut self, _chunks: &[SemanticChunkDocument]) -> Result<Vec<Vec<f32>>> {
         anyhow::bail!("zero-eligible semantic reconciliation requested embeddings")
     }

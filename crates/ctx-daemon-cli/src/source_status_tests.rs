@@ -107,6 +107,10 @@ impl SemanticDocumentBuilder for StatusSemanticBuilder {
 struct StatusSemanticEmbedder;
 
 impl SemanticBatchEmbedder for StatusSemanticEmbedder {
+    fn document_fits(&mut self, _text: &str) -> anyhow::Result<bool> {
+        Ok(true)
+    }
+
     fn embed_chunks(&mut self, chunks: &[SemanticChunkDocument]) -> anyhow::Result<Vec<Vec<f32>>> {
         Ok(chunks
             .iter()

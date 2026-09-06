@@ -42,6 +42,9 @@ impl SharedSemanticRuntime {
                 .embed_prepared_documents(batch.clone());
             let batch_embeddings = match first {
                 Ok(embeddings) => embeddings,
+                Err(error) if error.is::<super::input_fit::SemanticDocumentInputTooLarge>() => {
+                    return Err(error);
+                }
                 Err(first_error) => {
                     let runtime = embedder
                         .as_ref()
@@ -53,15 +56,23 @@ impl SharedSemanticRuntime {
                     let mut replacement = reacquire_semantic_embedder(config, &runtime).context(
                         "reinitialize semantic embedder after document inference failure",
                     )?;
-                    let retry = replacement
-                        .embed_prepared_documents(batch)
-                        .with_context(|| {
-                        format!(
-                            "semantic document inference failed twice; first failure: {first_error:#}"
-                        )
-                    })?;
-                    *embedder = Some(replacement);
-                    retry
+                    match replacement.embed_prepared_documents(batch) {
+                        Err(error)
+                            if error.is::<super::input_fit::SemanticDocumentInputTooLarge>() =>
+                        {
+                            // Only the replacement's input budget rejected this plan.
+                            // Keep the healthy runtime for the next fitting document.
+                            *embedder = Some(replacement);
+                            return Err(error);
+                        }
+                        retry => {
+                            let embeddings = retry.with_context(|| {
+                                format!("semantic document inference failed twice; first failure: {first_error:#}")
+                            })?;
+                            *embedder = Some(replacement);
+                            embeddings
+                        }
+                    }
                 }
             };
             let quiet_policy = embedder

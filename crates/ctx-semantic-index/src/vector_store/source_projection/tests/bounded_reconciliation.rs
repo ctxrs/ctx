@@ -30,7 +30,7 @@ fn empty_full_rebuild_transition_continues_to_a_sequenced_boundary() -> Result<(
 #[test]
 fn one_durable_boundary_per_call_resumes_a_multi_page_source() -> Result<()> {
     let fixture = Fixture::new(1)?;
-    let record_count = MAX_SOURCE_EVENT_PAGE_ITEMS + 1;
+    let record_count = source_event_page_limit(semantic_model_contract()) + 1;
     let index = fixture.publish(
         "bounded-multi-page",
         &[(0, bodies("bounded", record_count))],
@@ -54,8 +54,14 @@ fn one_durable_boundary_per_call_resumes_a_multi_page_source() -> Result<()> {
     assert!(!first.ready());
     assert!(first.work_remaining());
     assert_eq!(first.semantic_progress_sequence(), Some(1));
-    assert_eq!(first.records_decoded(), MAX_SOURCE_EVENT_PAGE_ITEMS);
-    assert_eq!(builder.calls.len(), MAX_SOURCE_EVENT_PAGE_ITEMS);
+    assert_eq!(
+        first.records_decoded(),
+        source_event_page_limit(semantic_model_contract())
+    );
+    assert_eq!(
+        builder.calls.len(),
+        source_event_page_limit(semantic_model_contract())
+    );
     assert_eq!(sequences, vec![1]);
 
     let second = store
@@ -116,7 +122,7 @@ fn one_durable_boundary_per_call_resumes_a_multi_page_source() -> Result<()> {
 #[test]
 fn ordinary_reconciliation_still_drains_a_multi_page_source() -> Result<()> {
     let fixture = Fixture::new(1)?;
-    let record_count = MAX_SOURCE_EVENT_PAGE_ITEMS + 1;
+    let record_count = source_event_page_limit(semantic_model_contract()) + 1;
     let index = fixture.publish(
         "ordinary-multi-page",
         &[(0, bodies("ordinary", record_count))],

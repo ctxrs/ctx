@@ -831,6 +831,13 @@ impl SemanticEmbeddingExecutor for HttpSemanticEmbeddingExecutor {
         &self.contract
     }
 
+    fn document_fits(&self, _text: &str) -> Result<bool> {
+        // Both accepted opaque spaces and retained V1 HTTP own preprocessing.
+        // This check neither sends text nor loads a local E5 tokenizer.
+        self.fail_if_permanently_failed()?;
+        Ok(true)
+    }
+
     fn embed_query(&self, query: PreparedSemanticQuery) -> Result<Vec<f32>> {
         self.fail_if_permanently_failed()?;
         ensure_prepared_contract(query.contract_fingerprint(), self.contract())?;

@@ -342,6 +342,17 @@ impl CoreMlE5Embedder {
         Ok(embeddings)
     }
 
+    pub(super) fn document_fits(&self, prepared: &str) -> Result<bool> {
+        if self.tokenizer.get_truncation().map(|p| p.max_length) != Some(self.sequence_length) {
+            return Err(anyhow!("Core ML tokenizer has an unexpected input limit"));
+        }
+        let encoding = self
+            .tokenizer
+            .encode(prepared, true)
+            .map_err(|error| anyhow!("assess Core ML document input: {error}"))?;
+        Ok(encoding.get_overflowing().is_empty())
+    }
+
     pub(super) fn embed_batch(
         &self,
         model: &coreml_native::Model,

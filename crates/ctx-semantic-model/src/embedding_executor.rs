@@ -265,6 +265,11 @@ impl SemanticEmbeddingExecutorConfig {
 pub trait SemanticEmbeddingExecutor: Send + Sync {
     fn contract(&self) -> &SemanticModelContract;
 
+    /// Checks the complete document input before its source span is finalized.
+    /// `text` is raw ctx header/body text; the executor owns model preparation.
+    /// Endpoint-owned executors impose no local tokenizer policy.
+    fn document_fits(&self, text: &str) -> Result<bool>;
+
     fn embed_query(&self, query: PreparedSemanticQuery) -> Result<Vec<f32>>;
 
     /// Embeds one atomic document page.
@@ -317,6 +322,21 @@ impl BuiltinSemanticEmbeddingExecutor {
 impl SemanticEmbeddingExecutor for BuiltinSemanticEmbeddingExecutor {
     fn contract(&self) -> &SemanticModelContract {
         self.contract()
+    }
+
+    fn document_fits(&self, text: &str) -> Result<bool> {
+        #[cfg(ctx_semantic_fastembed)]
+        {
+            self.runtime
+                .document_fits(&self.contract.document_text(text))
+        }
+        #[cfg(not(ctx_semantic_fastembed))]
+        {
+            let _ = text;
+            Err(anyhow!(
+                "semantic embedding model {SEMANTIC_MODEL_ID} is not supported on this platform"
+            ))
+        }
     }
 
     fn embed_query(&self, query: PreparedSemanticQuery) -> Result<Vec<f32>> {
@@ -520,6 +540,10 @@ mod tests {
     }
 
     impl SemanticEmbeddingExecutor for TestExecutor {
+        fn document_fits(&self, _text: &str) -> Result<bool> {
+            Ok(true)
+        }
+
         fn contract(&self) -> &SemanticModelContract {
             &self.contract
         }
