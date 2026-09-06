@@ -535,6 +535,7 @@ py_test(
 py_test(
     name = "performance_sanity_tests",
     srcs = [
+        "scripts/tests/performance_cold_start_test.py",
         "scripts/tests/performance_family_fixtures.py",
         "scripts/tests/performance_family_runtime_test.py",
         "scripts/tests/performance_sanity_test.py",
