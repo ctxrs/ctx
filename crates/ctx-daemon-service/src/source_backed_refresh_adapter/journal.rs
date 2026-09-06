@@ -1,16 +1,22 @@
-use std::path::Path;
+use std::{
+    path::{Path, PathBuf},
+    sync::Mutex,
+};
 
 use anyhow::Result;
 use ctx_history_refresh::{DurableAdmissionPersistence, RefreshJournal};
 use serde_json::Value;
 
 use crate::paths_status::{
+    create_private_dir_all_before_ack, daemon_jobs_path, daemon_root_path,
     daemon_source_backed_refresh_job_path, read_daemon_job_status, read_daemon_job_status_strict,
     sync_private_file_parent, write_daemon_job_status,
 };
 
 #[derive(Debug, Default)]
-pub(crate) struct DaemonRefreshJournal;
+pub(crate) struct DaemonRefreshJournal {
+    initialized_root: Mutex<Option<PathBuf>>,
+}
 
 impl RefreshJournal for DaemonRefreshJournal {
     fn load(&self, data_root: &Path) -> Result<Option<Value>> {
@@ -22,8 +28,46 @@ impl RefreshJournal for DaemonRefreshJournal {
     }
 
     fn store_before_ack(&self, data_root: &Path, value: &Value) -> DurableAdmissionPersistence {
+        self.store_with_parent_sync(data_root, value, sync_private_file_parent)
+    }
+}
+
+impl DaemonRefreshJournal {
+    fn initialize(&self, data_root: &Path) -> Result<()> {
+        let data_root = std::path::absolute(data_root)?;
+        let mut initialized = self
+            .initialized_root
+            .lock()
+            .map_err(|_| anyhow::anyhow!("refresh journal initialization lock poisoned"))?;
+        if initialized.as_ref() == Some(&data_root) {
+            return Ok(());
+        }
+        // The platform directory owner confirms cold-created ancestor links
+        // before descent. Confirm our three existing boundaries too, including
+        // retries after another creator or a failed initialization. Remember
+        // success only after all of them complete; no per-progress flush.
+        for directory in [
+            &data_root,
+            &daemon_root_path(&data_root),
+            &daemon_jobs_path(&data_root),
+        ] {
+            create_private_dir_all_before_ack(directory)?;
+        }
+        *initialized = Some(data_root);
+        Ok(())
+    }
+
+    fn store_with_parent_sync(
+        &self,
+        data_root: &Path,
+        value: &Value,
+        sync_parent: impl FnOnce(&Path) -> Result<()>,
+    ) -> DurableAdmissionPersistence {
         let path = daemon_source_backed_refresh_job_path(data_root);
-        if let Err(error) = write_daemon_job_status(&path, value) {
+        if let Err(error) = self
+            .initialize(data_root)
+            .and_then(|()| write_daemon_job_status(&path, value))
+        {
             return if error
                 .downcast_ref::<crate::paths_status::PrivateJsonReplacementError>()
                 .is_some()
@@ -34,7 +78,7 @@ impl RefreshJournal for DaemonRefreshJournal {
                 DurableAdmissionPersistence::Failed(error)
             };
         }
-        match sync_private_file_parent(&path) {
+        match sync_parent(&path) {
             Ok(()) => DurableAdmissionPersistence::Confirmed,
             Err(error) => DurableAdmissionPersistence::Retained(error),
         }
@@ -50,7 +94,7 @@ mod tests {
     fn authoritative_load_distinguishes_absence_from_decode_and_read_errors() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let path = daemon_source_backed_refresh_job_path(temp.path());
-        let journal = DaemonRefreshJournal;
+        let journal = DaemonRefreshJournal::default();
         assert_eq!(journal.load(temp.path())?, None);
 
         fs::create_dir_all(path.parent().unwrap())?;
@@ -83,7 +127,7 @@ mod tests {
     #[test]
     fn authoritative_load_preserves_valid_json_without_new_schema_policy() -> Result<()> {
         let temp = tempfile::tempdir()?;
-        let journal = DaemonRefreshJournal;
+        let journal = DaemonRefreshJournal::default();
         // The engine, not this persistence adapter, owns parsed-state policy.
         let value = serde_json::json!({"request_state": "unknown", "retained": null});
         journal.store(temp.path(), &value)?;
@@ -91,3 +135,6 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod terminal_durability_tests;

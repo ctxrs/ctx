@@ -40,7 +40,21 @@ impl CoreRefreshEngine {
     }
 
     pub(super) fn write_status(&self, data_root: &Path, job: &Value) -> Result<()> {
-        self.journal.store(data_root, job)
+        let terminal = job
+            .get("request_state")
+            .and_then(Value::as_str)
+            .and_then(|state| state.parse::<SourceBackedRefreshState>().ok())
+            .is_some_and(SourceBackedRefreshState::is_terminal);
+        if !terminal {
+            return self.journal.store(data_root, job);
+        }
+        // A later overlay replaces terminal authority too. Reuse the existing
+        // durable writer, but retained/indeterminate is not terminal success.
+        match self.journal.store_before_ack(data_root, job) {
+            DurableAdmissionPersistence::Confirmed => Ok(()),
+            DurableAdmissionPersistence::Retained(error)
+            | DurableAdmissionPersistence::Failed(error) => Err(error),
+        }
     }
 
     pub(super) fn write_durable_admission_status(

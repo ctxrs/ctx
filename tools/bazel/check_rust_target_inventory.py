@@ -15,6 +15,18 @@ from typing import Any
 
 DEPENDENCY_TABLES = ("dependencies", "dev-dependencies", "build-dependencies")
 TARGET_KINDS = ("bin", "test", "example", "bench")
+# These src-based macros forward to ctx_rust_test with its default harness:
+# tools/bazel/binary_contracts.bzl and the owning crates' test_targets.bzl.
+LIBTEST_CONTRACT_RULES = {
+    "ctx_binary_contract_test",
+    "ctx_cli_contract_test",
+    "ctx_cli_integration_test",
+    "agent_application_binary_contract",
+    "daemon_cli_binary_contract",
+    "history_ingest_binary_contract",
+    "history_read_binary_contract",
+    "observability_binary_contract",
+}
 VISIBILITY_RESTRICTED_LOCAL_LABELS = {
     "ctx-history-jsonl": {
         "//crates/ctx-history-jsonl:lib",
@@ -468,8 +480,14 @@ def assert_target_ownership(
             if expected_name is not None
             else []
         )
+        owning_rules = [
+            rule for rule in owning_rules if rule_executes_target(rule[0], target, data)
+        ]
         if not owning_rules and target.startswith(("test:", "example:", "bench:")):
-            owning_rules = rust_rules_for_target(modules, path)
+            owning_rules = [
+                rule for rule in rust_rules_for_target(modules, path)
+                if rule_executes_target(rule[0], target, data)
+            ]
         owned = bool(owning_rules)
         if target == "custom-build:build-script-build":
             workspace_path = (package_dir.relative_to(root) / relative).as_posix()
@@ -479,6 +497,32 @@ def assert_target_ownership(
         if not owned:
             fail(f"{package_name} Cargo target is not owned by Bazel: {target} ({path})")
     return len(targets)
+
+
+def rule_executes_target(node: ast.Call, target: str, data: dict[str, Any]) -> bool:
+    kind, name = target.split(":", 1)
+    function = call_name(node)
+    if kind == "bin":
+        return function in {"rust_binary", "ctx_rust_binary"}
+    if kind != "test":
+        return True
+
+    harness = next(
+        (item.get("harness", True) for item in explicit_targets(data, "test")
+         if item.get("name") == name),
+        True,
+    )
+    if function in LIBTEST_CONTRACT_RULES:
+        return harness is True
+    if function not in {"rust_test", "ctx_rust_test"}:
+        return False
+    # A harness=false Cargo test still needs a Bazel test action. A binary alone
+    # only builds it, and the default libtest harness would replace its main.
+    bazel_harness = next(
+        (keyword.value for keyword in node.keywords if keyword.arg == "use_libtest_harness"),
+        ast.Constant(value=True),
+    )
+    return isinstance(bazel_harness, ast.Constant) and bazel_harness.value is harness
 
 
 def dependency_entries(data: dict[str, Any]) -> list[tuple[str, str, Any]]:
