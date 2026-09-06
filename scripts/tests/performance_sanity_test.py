@@ -33,11 +33,13 @@ from performance_sanity_support import (
     run_json,
     run_json_timed,
     run_refresh_measured,
+    start_cold_daemon,
     start_daemon,
     stop_daemon,
     task_binary,
 )
 from performance_family_runtime_test import SourceFamilyColdRefreshPerformanceTest
+from performance_cold_start_test import ColdStartupOwnershipTest
 
 
 EVENT_COUNT = 64
@@ -788,6 +790,7 @@ class TopProviderColdRefreshPerformanceTest(unittest.TestCase):
         root: Path,
         env: dict[str, str],
         corpus: RepresentativeCorpus,
+        cold_status: dict[str, object],
     ) -> RefreshSnapshot:
         self.assertEqual(
             search["freshness"],
@@ -797,7 +800,7 @@ class TopProviderColdRefreshPerformanceTest(unittest.TestCase):
                 "status": "completed",
             },
         )
-        snapshot = refresh_snapshot(search, root, env)
+        snapshot = refresh_snapshot(search, root, env, cold_status=cold_status)
         status = snapshot.status
         job = snapshot.job
         self.assertEqual(job["status"], "completed")
@@ -808,6 +811,7 @@ class TopProviderColdRefreshPerformanceTest(unittest.TestCase):
         self.assertEqual(progress["total_sources_known"], True)
         self.assertEqual(progress["completed_sources"], progress["total_sources"])
         self.assertTrue(job["generation_changed"])
+        self.assertIsNone(snapshot.previous_generation)
         self.assertEqual(job["certified_source_count"], corpus.source_count)
         self.assertEqual(job["certified_source_bytes"], corpus.fixture_bytes)
         expected_current = {
@@ -987,11 +991,16 @@ class TopProviderColdRefreshPerformanceTest(unittest.TestCase):
                 env,
                 root,
             )
-            daemon, daemon_stdout, daemon_stderr = start_daemon(
-                root, env, daemon_affinity
+            daemon, daemon_stdout, daemon_stderr, cold, cold_status = start_cold_daemon(
+                root, env, daemon_affinity,
+                timeout_seconds=(
+                    SERIAL_CONTROL_TIMEOUT_SECONDS
+                    if force_single_cpu
+                    else COMMAND_TIMEOUT_SECONDS
+                ),
             )
             try:
-                cold = run_refresh_measured(
+                search = run_json(
                     [
                         "search",
                         TOP_PROVIDER_QUERY,
@@ -1003,15 +1012,9 @@ class TopProviderColdRefreshPerformanceTest(unittest.TestCase):
                     ],
                     env,
                     root,
-                    daemon.pid,
-                    timeout_seconds=(
-                        SERIAL_CONTROL_TIMEOUT_SECONDS
-                        if force_single_cpu
-                        else COMMAND_TIMEOUT_SECONDS
-                    ),
                 )
                 snapshot = self.assert_representative_refresh(
-                    cold.packet, root, env, corpus
+                    search, root, env, corpus, cold_status
                 )
                 if verify_core_content:
                     self.assert_complete_core_content(root, env, corpus)
