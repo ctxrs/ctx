@@ -180,6 +180,8 @@ class HistoryCliBoundaryMutations(unittest.TestCase):
             ('["//crates/ctx-terminal:lib"]', "inventory drifted"),
             ('["//crates/ctx-semantic-index:lib", "//crates/ctx-agent-application:lib"]', "inventory drifted"),
             ('["//crates/ctx-semantic-index:lib", "//crates/ctx-semantic-index:lib"]', "duplicate labels"),
+            ('["//crates/ctx-semantic-index:lib"] + ["//crates/ctx-agent-application:lib"]', "standalone literal string list"),
+            ('["//crates/ctx-semantic-index:lib"] if True else ["//crates/ctx-agent-application:lib"]', "standalone literal string list"),
         ):
             with self.subTest(value=value):
                 self.reset()

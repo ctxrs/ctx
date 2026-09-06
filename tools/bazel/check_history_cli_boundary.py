@@ -364,6 +364,15 @@ def _assignment(tokens: Sequence[Token], name: str, package: str) -> list[list[T
             elif value_token.value == "]":
                 depth -= 1
                 if depth == 0:
+                    following = value[end + 1:]
+                    # Do not authenticate only the first list of a composed
+                    # assignment. A literal must end before the next statement.
+                    if following and not (
+                        len(following) >= 2
+                        and following[0].kind == "identifier"
+                        and following[1].value in {"=", "("}
+                    ):
+                        raise BoundaryError(f"{package} Bazel {name} inventory drifted: must be a standalone literal string list")
                     values.append(value[:end + 1])
                     break
         else:
