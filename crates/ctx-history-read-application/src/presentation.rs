@@ -14,6 +14,9 @@ use ctx_history_index_query::LEXICAL_QUERY_LIMITS;
 use unicode_segmentation::{GraphemeCursor, UnicodeSegmentation as _};
 
 mod hydration;
+mod semantic_passage;
+pub(crate) use semantic_passage::semantic_passage_presentation;
+pub use semantic_passage::{SearchPassageCitation, SearchPassagePresentation};
 
 pub(crate) use hydration::hydrate_ranked_search_collection;
 #[cfg(test)]

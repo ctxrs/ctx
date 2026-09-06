@@ -242,6 +242,7 @@ fn semantic_and_hybrid_recall_filtered_copy_with_absent_ancestor_end_to_end() {
         .unwrap()
         .is_none());
     let candidate = |record: &CoreRecord, score| EventSearchCandidate {
+        semantic_evidence: None,
         event: ctx_history_index_query::RankedEventRef::from(
             &index
                 .event_by_id(record.event_id.as_uuid())
@@ -656,11 +657,13 @@ fn event_projections_share_published_custom_metadata_and_absent_semantics() {
 
     let search = crate::search_result_json(
         &SearchHit {
+            semantic_evidence: None,
             event: event.event.clone(),
             score: 0.75,
             more_matches_in_session: 0,
         },
         &SearchPresentation {
+            semantic_passage: None,
             event_id,
             snippet: "fixture projection body".to_owned(),
             snippet_truncated: false,

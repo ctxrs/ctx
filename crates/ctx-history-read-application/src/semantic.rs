@@ -127,6 +127,17 @@ impl HistorySemanticError {
 }
 
 pub trait HistorySemanticQuery {
+    /// Verify and resolve one final winner, using this query's captured authority.
+    fn resolve_passage(
+        &mut self,
+        _event: &ctx_history_index_query::RankedEventRef,
+        _evidence: &ctx_history_index_query::SemanticSearchEvidence,
+    ) -> Result<ctx_history_index_query::SemanticPassageSource, HistorySemanticError> {
+        Err(HistorySemanticError::failed(
+            "semantic passage resolver is unavailable",
+        ))
+    }
+
     /// Prepare one normalized alternative in caller order.
     ///
     /// Implementations retain the resulting vector on the query session so a

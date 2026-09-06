@@ -1,6 +1,7 @@
 mod activity;
 mod compact_authority;
 mod semantic_fallback;
+mod semantic_passage;
 mod show_lineage;
 
 use std::{
@@ -586,9 +587,11 @@ fn search_schema_v1_snapshot_reads_snippets_and_citations_from_core() {
     source_request.terms = vec!["term with spaces".to_owned()];
     source_request.limit = 1;
     let collection = SearchCollection {
+        semantic_presentations: Vec::new(),
         result_window: SearchResultWindow {
             limit: 1,
             hits: vec![SearchHit {
+                semantic_evidence: None,
                 event: event.clone(),
                 score: 1.0,
                 more_matches_in_session: 0,
@@ -767,15 +770,18 @@ fn search_json_rank_tracks_non_monotonic_shaped_result_order() {
     let mut source_request = request(RefreshArg::Off);
     source_request.limit = 2;
     let collection = SearchCollection {
+        semantic_presentations: Vec::new(),
         result_window: SearchResultWindow {
             limit: 2,
             hits: vec![
                 SearchHit {
+                    semantic_evidence: None,
                     event: first.clone(),
                     score: 0.25,
                     more_matches_in_session: 0,
                 },
                 SearchHit {
+                    semantic_evidence: None,
                     event: second.clone(),
                     score: 9.5,
                     more_matches_in_session: 0,

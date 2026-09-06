@@ -305,6 +305,13 @@ fn semantic_candidates_with_embedding(
         candidates.push(EventSearchCandidate {
             event: record,
             score: hit.similarity,
+            semantic_evidence: Some(ctx_history_index::SemanticSearchEvidence {
+                core_generation_id: index.generation_id().to_owned(),
+                source_text_hash: hit.source_text_hash,
+                query_ordinal: hit.query_ordinal,
+                start_char: hit.start_char,
+                end_char: hit.end_char,
+            }),
         });
     }
     candidates.truncate(candidate_limit);

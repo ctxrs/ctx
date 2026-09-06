@@ -984,6 +984,7 @@ dependencies = [
  "ctx-history-platform",
  "ctx-history-read-application",
  "ctx-history-refresh",
+ "ctx-semantic-index",
  "ctx-terminal",
  "rusqlite",
  "serde_json",

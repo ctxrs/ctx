@@ -158,6 +158,9 @@ pub type SearchExecutionResult<T> = std::result::Result<T, SearchExecutionError>
 
 #[derive(Debug)]
 pub struct SearchCollection<Event = SearchEventMetadata> {
+    /// Bounded semantic presentations resolved after final selection, before the
+    /// semantic query session releases its captured contract and pin.
+    pub semantic_presentations: Vec<crate::SearchPresentation>,
     pub result_window: SearchResultWindow<Event>,
     pub candidate_pool: usize,
     pub candidate_pool_truncated: bool,
@@ -204,6 +207,7 @@ pub struct SemanticFallbackDiagnostics {
 
 #[derive(Debug, Clone)]
 pub struct SearchHit<Event = SearchEventMetadata> {
+    pub semantic_evidence: Option<ctx_history_index_query::SemanticSearchEvidence>,
     pub event: Event,
     pub score: f32,
     pub more_matches_in_session: usize,
@@ -510,6 +514,7 @@ where
         result_window.more_available = true;
     }
     Ok(SearchCollection {
+        semantic_presentations: Vec::new(),
         result_window,
         candidate_pool,
         candidate_pool_truncated,
@@ -528,6 +533,7 @@ where
 
 fn empty_lexical_collection(limit: usize, work: SearchWorkReceipt) -> RankedSearchCollection {
     SearchCollection {
+        semantic_presentations: Vec::new(),
         result_window: SearchResultWindow {
             limit,
             hits: Vec::new(),

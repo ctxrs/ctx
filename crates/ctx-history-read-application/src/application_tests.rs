@@ -849,6 +849,7 @@ fn rendered_semantic_result_preserves_exact_ids() {
         .unwrap()
         .unwrap();
     let semantic = FixedSemanticPort(vec![EventSearchCandidate {
+        semantic_evidence: None,
         event: RankedEventRef::from(&candidate),
         score: 1.0,
     }]);

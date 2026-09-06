@@ -368,6 +368,15 @@ the same result metadata and citations plus:
 - `result_window`, with `limit`, `returned`, and `more_available`;
 - independent candidate-pool truncation metadata.
 
+When semantic evidence supplies a snippet, `semantic_passage` records its Core
+generation, source hash, and winning composite `source_char_range`. The hash
+binds the model-prepared document and semantic policy, not just the raw body.
+Nested `citations` identify the contributing messages; their
+`normalized_body_char_range` values describe the displayed excerpt after
+clipping. Both ranges are half-open Unicode scalar offsets, not byte offsets.
+Result IDs and the top-level citation retain the turn's anchor. Human `Passage`
+rows identify each contributing message's role and ctx event reference.
+
 Human localization is presentation-only. JSON result timestamps and
 `generated_at` remain the exact UTC RFC 3339 millisecond values used by the
 machine contract, filters, storage, and indexing.

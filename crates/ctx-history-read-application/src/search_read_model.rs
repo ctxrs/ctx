@@ -235,6 +235,18 @@ pub fn search_result_json(
         "snippet": snippet,
         "snippet_truncated": snippet_truncated,
         "snippet_max_chars": SEARCH_SNIPPET_MAX_CHARS,
+        "semantic_passage": presentation.semantic_passage.as_ref().filter(|passage| !passage.citations.is_empty()).map(|passage| json!({
+            "core_generation_id": passage.evidence.core_generation_id,
+            "source_text_hash": passage.evidence.source_text_hash,
+            "query_ordinal": passage.evidence.query_ordinal,
+            "source_char_range": [passage.evidence.start_char, passage.evidence.end_char],
+            "citations": passage.citations.iter().map(|citation| {
+                let mut value = EventReadView::new(&citation.event).search_citation();
+                value["role"] = json!(citation.event.role);
+                value["normalized_body_char_range"] = json!([citation.content_char_range.start, citation.content_char_range.end]);
+                value
+            }).collect::<Vec<_>>(),
+        })),
         "rank": rank,
         "retrieval_score": hit.score,
         "result_scope": result_scope,

@@ -51,7 +51,7 @@ impl VerifiedIndex {
         anchor: &CoreEventRecord,
         page_items: usize,
         pairing_budget: CoreEventPageBudget,
-    ) -> Result<Option<(String, i64)>> {
+    ) -> Result<Option<SemanticTurnAssistant>> {
         if !(1..=MAX_SEMANTIC_PAIRING_PAGE_ITEMS).contains(&page_items) {
             return Err(IndexError::InvalidSessionEventCoordinateLimit {
                 requested: page_items,
@@ -155,10 +155,14 @@ impl VerifiedIndex {
                 }
                 let text = assistant.core_record.content.meaningful_text().trim();
                 if !text.is_empty() {
-                    latest_assistant = Some((
-                        text.to_owned(),
-                        assistant.occurred_at_unix_ms.unwrap_or_default(),
-                    ));
+                    let body = assistant.core_record.content.meaningful_text();
+                    latest_assistant = Some(SemanticTurnAssistant {
+                        event: assistant.event,
+                        text: text.to_owned(),
+                        content_start_char: body[..body.len() - body.trim_start().len()]
+                            .chars()
+                            .count(),
+                    });
                 }
             }
         }

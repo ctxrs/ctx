@@ -84,7 +84,7 @@ ctx_rust_test(
     crate_root = "src/lib.rs",
     edition = crate_edition(),
     aliases = aliases(normal_dev = True, proc_macro_dev = True),
-    deps = all_crate_deps(normal = True, normal_dev = True) + HISTORY_CLI_DEPS,
+    deps = all_crate_deps(normal = True, normal_dev = True) + HISTORY_CLI_DEPS + ["//crates/ctx-semantic-index:lib"],
     proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
     compile_data = glob(["src/source_index/render/goldens/*.txt"]),
     rustc_env = COMMON_RUSTC_ENV,

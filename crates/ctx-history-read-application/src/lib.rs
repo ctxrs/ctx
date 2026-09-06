@@ -74,10 +74,11 @@ pub use locate::{
     LocateApplicationResult, LocateRequest, LocateResult,
 };
 pub use presentation::{
-    search_snippet_fragment, SearchPresentation, SearchPresentationHydrationBudget,
-    SearchPresentationRetentionBudgetExceeded, MAX_SEARCH_RESULTS,
-    SEARCH_PRESENTATION_HYDRATION_BUDGET, SEARCH_PRESENTATION_MAX_RETAINED_SNIPPET_BYTES,
-    SEARCH_SNIPPET_MAX_BYTES, SEARCH_SNIPPET_MAX_CHARS,
+    search_snippet_fragment, SearchPassageCitation, SearchPassagePresentation, SearchPresentation,
+    SearchPresentationHydrationBudget, SearchPresentationRetentionBudgetExceeded,
+    MAX_SEARCH_RESULTS, SEARCH_PRESENTATION_HYDRATION_BUDGET,
+    SEARCH_PRESENTATION_MAX_RETAINED_SNIPPET_BYTES, SEARCH_SNIPPET_MAX_BYTES,
+    SEARCH_SNIPPET_MAX_CHARS,
 };
 pub use search::{
     normalize_search_request, resolve_search_backend, unsupported_semantic_scope,

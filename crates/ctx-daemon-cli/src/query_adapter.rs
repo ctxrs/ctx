@@ -755,6 +755,17 @@ fn ensure_foreground_executor(executor: &SemanticEmbeddingExecutorHandle) -> Res
 }
 
 impl HistorySemanticQuery for SemanticQuerySession<'_> {
+    fn resolve_passage(
+        &mut self,
+        event: &ctx_history_index::RankedEventRef,
+        evidence: &ctx_history_index::SemanticSearchEvidence,
+    ) -> std::result::Result<ctx_history_index::SemanticPassageSource, HistorySemanticError> {
+        self.pin
+            .resolve_passage(self.index, &self.contract, event, evidence)
+            .map_err(SemanticQueryError::from)
+            .map_err(HistorySemanticError::from)
+    }
+
     fn prepare_alternative(
         &mut self,
         query: &str,

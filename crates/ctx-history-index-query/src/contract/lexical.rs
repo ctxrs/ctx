@@ -299,6 +299,7 @@ pub struct LexicalSearchCandidate {
 impl From<LexicalSearchCandidate> for EventSearchCandidate {
     fn from(candidate: LexicalSearchCandidate) -> Self {
         Self {
+            semantic_evidence: None,
             event: candidate.event,
             score: candidate.score,
         }

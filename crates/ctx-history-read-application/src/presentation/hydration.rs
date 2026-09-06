@@ -22,8 +22,9 @@ pub const SEARCH_PRESENTATION_MAX_RETAINED_SNIPPET_BYTES: usize =
     MAX_SEARCH_RESULTS * SEARCH_SNIPPET_MAX_BYTES;
 
 /// Bounded query result state derived from one complete stored Core record.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchPresentation {
+    pub semantic_passage: Option<super::SearchPassagePresentation>,
     pub event_id: Uuid,
     pub snippet: String,
     pub snippet_truncated: bool,
@@ -62,6 +63,7 @@ pub(crate) fn hydrate_ranked_search_collection_with_budget(
     budget: SearchPresentationHydrationBudget,
 ) -> Result<(SearchCollection, Vec<SearchPresentation>)> {
     let RankedSearchCollection {
+        semantic_presentations,
         result_window,
         candidate_pool,
         candidate_pool_truncated,
@@ -76,6 +78,10 @@ pub(crate) fn hydrate_ranked_search_collection_with_budget(
         work,
         stop_reason,
     } = collection;
+    let mut semantic_presentations = semantic_presentations
+        .into_iter()
+        .map(|presentation| (presentation.event_id, presentation))
+        .collect::<std::collections::BTreeMap<_, _>>();
     if result_window.hits.len() > MAX_SEARCH_RESULTS {
         return Err(anyhow!(
             "search presentation cannot hydrate more than {MAX_SEARCH_RESULTS} hits"
@@ -123,8 +129,28 @@ pub(crate) fn hydrate_ranked_search_collection_with_budget(
             .next()
             .transpose()?
             .ok_or_else(|| anyhow!("pinned Core lookup omitted search event {event_id}"))?;
-        let (event, presentation, snippet_bytes) =
+        let (event, ordinary_presentation, _) =
             ranked_search_projection(record, &hit.event, &query_terms, filter)?;
+        let presentation = match (
+            hit.semantic_evidence.as_ref(),
+            semantic_presentations.remove(&event_id),
+        ) {
+            (None, None) => ordinary_presentation,
+            (Some(evidence), Some(presentation))
+                if presentation
+                    .semantic_passage
+                    .as_ref()
+                    .is_some_and(|passage| &passage.evidence == evidence) =>
+            {
+                presentation
+            }
+            _ => {
+                return Err(anyhow!(
+                    "semantic presentation does not match its selected winner"
+                ))
+            }
+        };
+        let snippet_bytes = presentation.snippet.len();
         let next_retained_snippet_bytes = retained_snippet_bytes
             .checked_add(snippet_bytes)
             .ok_or_else(|| {
@@ -139,19 +165,21 @@ pub(crate) fn hydrate_ranked_search_collection_with_budget(
         }
         retained_snippet_bytes = next_retained_snippet_bytes;
         hits.push(SearchHit {
+            semantic_evidence: hit.semantic_evidence,
             event,
             score: hit.score,
             more_matches_in_session: hit.more_matches_in_session,
         });
         presentations.push(presentation);
     }
-    if records.next().transpose()?.is_some() {
+    if records.next().transpose()?.is_some() || !semantic_presentations.is_empty() {
         return Err(anyhow!(
             "pinned Core lookup returned more search records than requested"
         ));
     }
     Ok((
         SearchCollection {
+            semantic_presentations: Vec::new(),
             result_window: SearchResultWindow {
                 limit: result_window.limit,
                 hits,
@@ -214,6 +242,7 @@ fn ranked_search_projection(
     Ok((
         event,
         SearchPresentation {
+            semantic_passage: None,
             event_id: expected.event_id,
             snippet,
             snippet_truncated,

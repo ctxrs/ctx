@@ -257,14 +257,17 @@ fn semantic_and_hybrid_share_coalesced_family_shaping_and_remain_indeterminate()
         .unwrap();
     let semantic_candidates = vec![
         EventSearchCandidate {
+            semantic_evidence: None,
             event: RankedEventRef::from(&child_absent),
             score: 100.0,
         },
         EventSearchCandidate {
+            semantic_evidence: None,
             event: RankedEventRef::from(&sibling),
             score: 90.0,
         },
         EventSearchCandidate {
+            semantic_evidence: None,
             event: RankedEventRef::from(&independent),
             score: 80.0,
         },
@@ -322,6 +325,7 @@ fn grouped_search_decodes_only_final_winners_for_every_backend() {
                 .unwrap()
                 .unwrap();
             EventSearchCandidate {
+                semantic_evidence: None,
                 event: RankedEventRef::from(&event),
                 score: (records.len() - position) as f32,
             }
@@ -376,6 +380,7 @@ fn provider_root_and_group_selectors_share_one_source_predicate_across_backends(
     let semantic_candidates = [(4, 400.0), (1, 300.0), (2, 200.0), (3, 100.0)]
         .into_iter()
         .map(|(record, score)| EventSearchCandidate {
+            semantic_evidence: None,
             event: RankedEventRef::from(
                 &index
                     .event_by_id(records[record].event_id.as_uuid())

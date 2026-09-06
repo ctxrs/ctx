@@ -306,6 +306,7 @@ fn fixture_search_presentation(
         .expect("search fixture needs normalized body")
         .clone();
     SearchPresentation {
+        semantic_passage: None,
         event_id: event.event_id.as_uuid(),
         snippet,
         snippet_truncated,
