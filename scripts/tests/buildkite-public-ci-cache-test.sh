@@ -126,4 +126,56 @@ fi
 grep -Fq 'release test temporary path escaped task-local bind' "${test_root}/outside.err" \
   || fail 'outside release test TMPDIR did not explain the task-bind boundary'
 
+printf '[workspace.package]\nversion = "1.3.2"\n' > "${checkout}/Cargo.toml"
+for mode_spelling in joined separate; do
+  if [[ "${mode_spelling}" == joined ]]; then
+    probe_args=(--mode=release)
+  else
+    probe_args=(--mode release)
+  fi
+  output="$(run_probe BUILDKITE_BRANCH=release/1.3.2)"
+  grep -Fqx 'Buildkite release branch: release/1.3.2, source version: 1.3.2' <<<"${output}" \
+    || fail 'fixed release branch did not check the source version'
+  grep -Fqx "Buildkite release Bazel test TMPDIR: ${expected_release_tmp}" <<<"${output}" \
+    || fail 'fixed release branch lost the task-local temporary root'
+done
+
+probe_args=(--mode=release)
+case_number=0
+for manifest in \
+  $'[workspace.package]\nversion = "1.3.3"' \
+  $'[workspace.package]\nversion = "1.3.2-rc.1"' \
+  $'[workspace.package]\nversion = "1.3.2 "' \
+  $'[workspace.package]\nversion = 132' \
+  $'[workspace.package]\nname = "ctx"' \
+  $'[workspace]\npackage = "1.3.2"' \
+  $'[workspace.package]\nversion = "1.3.2"\nversion = "1.3.3"' \
+  $'[workspace.package]\nversion = "1.3.2' \
+  missing-file; do
+  case_number=$((case_number + 1))
+  printf '%s\n' "${manifest}" > "${checkout}/Cargo.toml"
+  if [[ "${manifest}" == missing-file ]]; then rm -- "${checkout}/Cargo.toml"; fi
+  uncreated_tool_root="${runner_task_root}/rejected-version-${case_number}"
+  status=0
+  run_probe BUILDKITE_BRANCH=release/1.3.2 CTX_RELEASE_VERSION=1.3.2 \
+    "CTX_PUBLIC_CI_TOOL_ROOT=${uncreated_tool_root}" \
+    >"${test_root}/version.out" 2>"${test_root}/version.err" || status=$?
+  [[ "${status}" == 1 ]] || fail 'invalid release source version did not exit one'
+  grep -Fqx 'Buildkite release/1.3.2 requires checked-out workspace version 1.3.2' \
+    "${test_root}/version.err" || fail 'source version rejection did not explain the boundary'
+  [[ ! -e "${uncreated_tool_root}" && ! -s "${test_root}/version.out" ]] \
+    || fail 'source version rejection occurred after tool setup'
+done
+
+printf '[workspace.package]\nversion = "1.3.3"\n' > "${checkout}/Cargo.toml"
+output="$(run_probe BUILDKITE_BRANCH=main)"
+grep -Fqx "Buildkite release Bazel test TMPDIR: ${expected_release_tmp}" <<<"${output}" \
+  || fail 'main release behavior changed'
+for mode in ci nightly; do
+  probe_args=(--mode="${mode}")
+  output="$(run_probe BUILDKITE_BRANCH=release/1.3.2)"
+  grep -Fq 'repository_cache=' <<<"${output}" \
+    || fail 'ordinary CI or nightly acquired the release-only version restriction'
+done
+
 printf 'Buildkite public CI cache test ok: repository contents resolve outside checkout\n'

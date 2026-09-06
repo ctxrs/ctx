@@ -99,22 +99,22 @@ nightly_condition = (
 )
 core_release_condition = (
     'build.env("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") == "1" && '
-    'build.branch == "main" && build.pull_request.id == null'
+    '(build.branch == "main" || build.branch == "release/1.3.2") && build.pull_request.id == null'
 )
 core_native_condition = (
     'build.env("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") == "1" && '
     'build.env("CTX_PUBLIC_CLI_NATIVE_SMOKE_MATRIX") == "1" && '
-    'build.branch == "main" && build.pull_request.id == null'
+    '(build.branch == "main" || build.branch == "release/1.3.2") && build.pull_request.id == null'
 )
 semantic_condition = (
     'build.env("CTX_PUBLIC_SEMANTIC_ASSET_MATRIX") == "1" && '
-    'build.branch == "main" && build.pull_request.id == null'
+    '(build.branch == "main" || build.branch == "release/1.3.2") && build.pull_request.id == null'
 )
 github_release_condition = (
     'build.env("CTX_PUBLIC_CLI_ARTIFACT_MATRIX") == "1" && '
     'build.env("CTX_PUBLIC_CLI_NATIVE_SMOKE_MATRIX") == "1" && '
     'build.env("CTX_PUBLIC_SEMANTIC_ASSET_MATRIX") == "1" && '
-    'build.branch == "main" && build.pull_request.id == null'
+    '(build.branch == "main" || build.branch == "release/1.3.2") && build.pull_request.id == null'
 )
 
 for key, mode, condition in (

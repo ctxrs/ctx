@@ -23,6 +23,28 @@ for (( index = 0; index < "${#check_args[@]}"; index++ )); do
   fi
 done
 
+preflight_release_branch_version() {
+  if (( release_mode == 0 )) || [[ "${BUILDKITE_BRANCH:-}" != release/1.3.2 ]]; then
+    return 0
+  fi
+
+  python3 - "${repo_root}/Cargo.toml" <<'PY'
+import pathlib
+import sys
+import tomllib
+
+message = "Buildkite release/1.3.2 requires checked-out workspace version 1.3.2"
+try:
+    manifest = tomllib.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+    version = manifest["workspace"]["package"]["version"]
+except (OSError, UnicodeError, tomllib.TOMLDecodeError, KeyError, TypeError):
+    raise SystemExit(message) from None
+if version != "1.3.2":
+    raise SystemExit(message)
+print("Buildkite release branch: release/1.3.2, source version: 1.3.2")
+PY
+}
+
 init_buildkite_job_tool_env() {
   if [[ -z "${BUILDKITE_JOB_ID:-}" ]]; then
     return 0
@@ -208,6 +230,7 @@ print_tool_versions() {
   zip --version
 }
 
+preflight_release_branch_version
 init_buildkite_job_tool_env
 preflight_release_test_authority
 require_preinstalled_tools
