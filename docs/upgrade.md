@@ -66,8 +66,17 @@ authority, config, and process overrides.
 
 If a diagnostic says another `ctx` shadows the managed executable on `PATH`,
 put the managed install directory before the reported shadowing directory and
-restart the shell. On POSIX shells, `command -v -a ctx` shows the resolution
-order; in PowerShell, use `Get-Command ctx -All`.
+restart the shell. In a POSIX shell, `command -v ctx` shows the selected command.
+In Bash or Zsh, `type -a ctx` lists all matches; in PowerShell, use
+`Get-Command ctx -All`.
+
+After a failed download or interrupted managed install, keep the installed
+files and marker in place, address the reported network, disk-space, or
+permission problem, and rerun the same installer. If the installer says the
+binary was installed but setup did not finish, retry `ctx setup` instead.
+A Pro activation warning does not mean the installed companion is missing;
+follow the reported `ctx pro` action. A version check alone does not establish
+that setup completed.
 
 An absent install marker is normal for a source build or package-manager
 install and leaves ctx unmanaged. The hosted installer will not silently adopt
@@ -114,10 +123,12 @@ Manual `ctx upgrade` verifies signed release metadata, explicit self-upgrade
 policy, artifact SHA-256, the current managed install marker, and the staged
 binary's `ctx --version` output before replacing the installed binary.
 
-The production binary fixes release metadata under
-`https://cli.ctx.rs/functions/v1/releases/<channel>/`, derives the detached
-signature URL from that metadata URL, verifies with its embedded release public
-key, and accepts artifact URLs only under the compiled
+Each released binary selects its compiled release feed. Use `ctx upgrade check`
+to inspect the release available to your installed version; changing a URL is
+not a supported way to bypass an upgrade refusal. The binary derives the
+detached signature URL from its metadata URL, verifies
+with its embedded release public key, and accepts artifact URLs only under the
+compiled
 `https://cli.ctx.rs/storage/v1/object/public/releases/artifacts/` authority.
 Config files and process environment variables cannot replace those origins or
 the verification key. A key or authority change therefore requires a new ctx
