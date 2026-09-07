@@ -161,8 +161,7 @@ fn active_daemon_work_exits_within_the_process_signal_deadline() {
             None,
         );
         let marker_result = wait_for_marker(&blocked, "daemon active refresh cycle");
-        let _ = refresh_wait.kill();
-        let _ = refresh_wait.wait_with_output();
+        refresh_wait.terminate().expect("cancel and reap refresh wait");
         marker_result.unwrap_or_else(|error| panic!("{error}"));
         assert_eq!(snapshot_file(&pointer_path), retained_pointer);
 
