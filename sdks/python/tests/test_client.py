@@ -40,32 +40,19 @@ import dogfood_local
 
 
 class LocalCliAdapterTests(unittest.TestCase):
-    def test_status_removes_both_generic_spellings_and_preserves_nested_values(self) -> None:
-        for flags in ({}, {"local_only": True}, {"localOnly": False}, {"local_only": None, "localOnly": "legacy"}):
-            raw = {"schema_version": 2, **flags, "lexical": {"generation_id": "ready"},
-                   "semantic": {"local_only": False, "diagnostics": {"localOnly": "nested"}}}
-            completed = subprocess.CompletedProcess([], 0, stdout=json.dumps(raw), stderr="")
-            with mock.patch("ctx_agent_history.transport.run_local_cli", return_value=completed):
-                client = AgentHistoryClient.local(ctx_binary="ctx")
-                for response in (client.status(), client.init()):
-                    self.assertNotIn("localOnly", response["status"])
-                    self.assertNotIn("local_only", response["status"])
-                    self.assertTrue(response["status"]["initialized"])
-                    self.assertEqual(response["status"]["semantic"], {"localOnly": False, "diagnostics": {"localOnly": "nested"}})
-            canonical = {"contractVersion": "agent-history-v1", "schemaVersion": 1,
-                         "status": {"initialized": True, **flags, "semantic": raw["semantic"]},
-                         "futureEnvelopeField": {"local_only": "kept"}}
-            transport = mock.Mock()
-            transport.status.return_value = canonical
-            transport.init.return_value = canonical
-            client = AgentHistoryClient(transport)
+    def test_legacy_status_marker_does_not_overwrite_semantic_diagnostics(self) -> None:
+        raw = {"schema_version": 2, "local_only": True,
+               "lexical": {"generation_id": "ready"},
+               "semantic": {"local_only": False, "diagnostics": {"localOnly": "nested"}}}
+        completed = subprocess.CompletedProcess([], 0, stdout=json.dumps(raw), stderr="")
+        with mock.patch("ctx_agent_history.transport.run_local_cli", return_value=completed):
+            client = AgentHistoryClient.local(ctx_binary="ctx")
             for response in (client.status(), client.init()):
-                self.assertNotIn("localOnly", response["status"])
-                self.assertNotIn("local_only", response["status"])
-                self.assertEqual(response["status"]["semantic"], raw["semantic"])
-                self.assertEqual(response["futureEnvelopeField"], {"local_only": "kept"})
-                self.assertEqual(canonical["status"], {"initialized": True, **flags, "semantic": raw["semantic"]})
-        self.assertEqual(normalize_status({}), {"initialized": False})
+                self.assertEqual(response["schemaVersion"], 1)
+                self.assertTrue(response["status"]["localOnly"])
+                self.assertEqual(response["status"]["semantic"],
+                                 {"localOnly": False, "diagnostics": {"localOnly": "nested"}})
+        self.assertEqual(normalize_status({}), {"initialized": False, "localOnly": True})
 
     def test_sources_and_import_preserve_legitimate_nested_source_semantics(self) -> None:
         acquisition = {
@@ -336,8 +323,7 @@ class LocalCliAdapterTests(unittest.TestCase):
         self.assertEqual(result["operation"], "status")
         self.assertEqual(result["backend"], {"kind": "local", "dataRoot": "/tmp/ctx-data"})
         self.assertTrue(result["status"]["initialized"])
-        self.assertNotIn("localOnly", result["status"])
-        self.assertNotIn("local_only", result["status"])
+        self.assertTrue(result["status"]["localOnly"])
         self.assertEqual(result["status"]["lexical"]["generationId"], "gen-1")
         self.assertNotIn("futureField", result["status"])
 
@@ -925,7 +911,7 @@ def assert_agent_history_v1_envelope(test: unittest.TestCase, payload: object) -
     test.assertIsInstance(value, list if operation == "sources" else dict)
 
     if operation in {"status", "init"}:
-        _assert_required_keys(test, value, {"initialized"})
+        _assert_required_keys(test, value, {"initialized", "localOnly"})
     elif operation == "sources":
         for source in value:
             _assert_required_keys(test, source, {"provider", "path", "status", "importable"})

@@ -76,11 +76,12 @@ fn index_mode_report(
     update: Option<ctx_daemon_cli::IndexingModeUpdate>,
 ) -> Value {
     let mut report = json!({
-        "schema_version": 2,
+        "schema_version": 1,
         "indexing": {
             "mode": mode,
         },
         "config_path": data_root.join(CONFIG_FILE),
+        "local_only": true,
         "read_only": update.is_none(),
     });
     if let Some(requested_mode) = requested_mode {
@@ -106,7 +107,7 @@ fn index_readiness_snapshot(data_root: &Path) -> Result<Value> {
     let semantic_flat = &source_semantic["flat_f32"];
     let source_daemon = &source.report["daemon"];
     Ok(compact_json(json!({
-        "schema_version": 2,
+        "schema_version": 1,
         "initialized": source.initialized,
         "indexing": {
             "mode": config.indexing.mode.as_str(),
@@ -154,6 +155,7 @@ fn index_readiness_snapshot(data_root: &Path) -> Result<Value> {
                 "semantic_index": source_daemon.get("jobs").and_then(|jobs| jobs.get("semantic_index")),
             },
         },
+        "local_only": true,
         "read_only": true,
     })))
 }

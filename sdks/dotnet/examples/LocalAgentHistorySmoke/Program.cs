@@ -106,7 +106,7 @@ internal sealed class FakeAgentHistoryTransport : IAgentHistoryTransport
     private static JsonObject Status()
     {
         var payload = Base();
-        payload["schema_version"] = 3;
+        payload["local_only"] = true;
         payload["data_root"] = DataRoot;
         payload["indexed_items"] = 1;
         payload["indexed_sources"] = 1;

@@ -10,27 +10,23 @@ fn fixture_root() -> PathBuf {
 }
 
 #[test]
-fn generic_status_discards_retired_extensions_only_at_status_root() {
-    for flags in [
-        serde_json::json!({"localOnly": true, "local_only": false}),
-        serde_json::json!({}),
-        serde_json::json!({"localOnly": null, "local_only": "legacy"}),
-    ] {
-        let mut raw = flags;
-        raw["initialized"] = Value::Bool(true);
-        raw["semantic"] = serde_json::json!({"local_only": false, "localOnly": null});
-        raw["futureField"] = serde_json::json!({"local_only": "kept"});
-        let mut status: AgentHistoryStatus = serde_json::from_value(raw.clone()).unwrap();
-        assert!(!status.extra.contains_key("localOnly"));
-        assert!(!status.extra.contains_key("local_only"));
-        // Public extension maps must not reintroduce either removed spelling on encode.
-        status.extra.insert("localOnly".into(), Value::Bool(true));
-        status.extra.insert("local_only".into(), Value::Null);
-        let output = serde_json::to_value(status).unwrap();
-        assert!(output.get("localOnly").is_none(), "{output}");
-        assert!(output.get("local_only").is_none(), "{output}");
-        assert_eq!(output["semantic"], raw["semantic"]);
-        assert_eq!(output["futureField"], raw["futureField"]);
+fn status_retains_required_legacy_field_and_independent_semantic_diagnostics() {
+    let raw = serde_json::json!({
+        "initialized": true,
+        "localOnly": true,
+        "semantic": {"local_only": false, "executor": {"kind": "http"}},
+        "futureField": {"localOnly": null}
+    });
+    let status: AgentHistoryStatus = serde_json::from_value(raw.clone()).unwrap();
+    assert!(status.local_only);
+    assert_eq!(serde_json::to_value(status).unwrap(), raw);
+    let mut missing = raw.clone();
+    missing.as_object_mut().unwrap().remove("localOnly");
+    assert!(serde_json::from_value::<AgentHistoryStatus>(missing).is_err());
+    for invalid in [Value::Null, Value::String("true".into())] {
+        let mut wrong_type = raw.clone();
+        wrong_type["localOnly"] = invalid;
+        assert!(serde_json::from_value::<AgentHistoryStatus>(wrong_type).is_err());
     }
 }
 
@@ -141,6 +137,7 @@ fn preserves_additive_fields() {
         "operation": "status",
         "status": {
             "initialized": true,
+            "localOnly": true,
             "futureField": {"enabled": true}
         },
         "futureEnvelopeField": "kept"
@@ -457,6 +454,7 @@ fn mcp_exchange_direct_decode_rejects_duplicate_captured_json_and_bad_event_text
 fn status_counters_accept_the_exact_cross_sdk_maximum() {
     let status: AgentHistoryStatus = serde_json::from_value(serde_json::json!({
         "initialized": true,
+        "localOnly": true,
         "indexedItems": MAX_SAFE_STATUS_COUNTER,
         "indexedSessions": MAX_SAFE_STATUS_COUNTER,
         "indexedEvents": MAX_SAFE_STATUS_COUNTER,
@@ -476,6 +474,7 @@ fn status_counters_reject_values_above_the_exact_cross_sdk_maximum() {
     for rejected in [MAX_SAFE_STATUS_COUNTER + 2, u64::MAX] {
         let error = serde_json::from_value::<AgentHistoryStatus>(serde_json::json!({
             "initialized": true,
+            "localOnly": true,
             "indexedItems": rejected
         }))
         .unwrap_err();
@@ -486,7 +485,8 @@ fn status_counters_reject_values_above_the_exact_cross_sdk_maximum() {
     }
 
     let mut status: AgentHistoryStatus = serde_json::from_value(serde_json::json!({
-        "initialized": true
+        "initialized": true,
+        "localOnly": true
     }))
     .unwrap();
     status.indexed_items = Some(MAX_SAFE_STATUS_COUNTER + 2);

@@ -52,35 +52,29 @@ fn run_json_shell(body: &str, timeout: Duration) -> Result<Value, AgentHistoryEr
 }
 
 #[test]
-fn generic_status_omits_retired_flags_without_changing_nested_semantics() {
+fn status_and_init_keep_legacy_contract_without_rewriting_semantic_privacy() {
+    let raw = json!({
+        "schema_version": 2,
+        "lexical": {"generation_id": "ready"},
+        "local_only": true,
+        "semantic": {"local_only": false, "diagnostics": {"localOnly": null}}
+    });
     for operation in [AgentHistoryOperation::Status, AgentHistoryOperation::Init] {
-        for flags in [
-            json!({}),
-            json!({"local_only": true}),
-            json!({"localOnly": false}),
-            json!({"local_only": null, "localOnly": "legacy"}),
-        ] {
-            let mut raw = flags;
-            raw["schema_version"] = json!(2);
-            raw["lexical"] = json!({"generation_id": "ready"});
-            raw["semantic"] = json!({"local_only": false, "diagnostics": {"localOnly": null}});
-            let output = serde_json::to_value(
-                normalize(operation.clone(), BackendInfo::local(None), raw).unwrap(),
-            )
-            .unwrap();
-            let status = &output["status"];
-            assert!(status.get("localOnly").is_none(), "{status}");
-            assert!(status.get("local_only").is_none(), "{status}");
-            assert_eq!(status["initialized"], true);
-            assert_eq!(status["semantic"]["localOnly"], false);
-            assert_eq!(
-                status["semantic"]["diagnostics"].get("localOnly"),
-                Some(&Value::Null)
-            );
-        }
+        let output = serde_json::to_value(
+            normalize(operation, BackendInfo::local(None), raw.clone()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(output["contractVersion"], "agent-history-v1");
+        assert_eq!(output["schemaVersion"], 1);
+        assert_eq!(output["status"]["localOnly"], true);
+        assert_eq!(output["status"]["semantic"]["localOnly"], false);
+        assert_eq!(
+            output["status"]["semantic"]["diagnostics"].get("localOnly"),
+            Some(&Value::Null)
+        );
     }
     let fallback = serde_json::to_value(normalize_status(&json!({})).unwrap()).unwrap();
-    assert_eq!(fallback, json!({"initialized": false}));
+    assert_eq!(fallback, json!({"initialized": false, "localOnly": true}));
 }
 
 #[test]

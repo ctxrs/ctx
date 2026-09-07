@@ -38,19 +38,16 @@ function mockClient(handler) {
   return { client, calls };
 }
 
-test("removes generic status locality from old CLI values and fallback status", async () => {
-  for (const flags of [{}, { local_only: true }, { localOnly: false }, { local_only: null, localOnly: "legacy" }]) {
-    const raw = { schema_version: 2, ...flags, lexical: { generation_id: "ready" },
-      semantic: { local_only: false, diagnostics: { localOnly: null } } };
-    const { client } = mockClient(() => ({ stdout: JSON.stringify(raw) }));
-    for (const response of [await client.status(), await client.init()]) {
-      assert.equal(Object.hasOwn(response.status, "localOnly"), false);
-      assert.equal(Object.hasOwn(response.status, "local_only"), false);
-      assert.equal(response.status.initialized, true);
-      assert.deepEqual(response.status.semantic, { localOnly: false, diagnostics: { localOnly: null } });
-    }
+test("retains the v1 status field without overwriting nested semantic diagnostics", async () => {
+  const raw = { schema_version: 2, local_only: true, lexical: { generation_id: "ready" },
+    semantic: { local_only: false, diagnostics: { localOnly: null } } };
+  const { client } = mockClient(() => ({ stdout: JSON.stringify(raw) }));
+  for (const response of [await client.status(), await client.init()]) {
+    assert.equal(response.schemaVersion, 1);
+    assert.equal(response.status.localOnly, true);
+    assert.deepEqual(response.status.semantic, { localOnly: false, diagnostics: { localOnly: null } });
   }
-  assert.deepEqual(toAgentHistoryEnvelope("status", {}).status, { initialized: false });
+  assert.deepEqual(toAgentHistoryEnvelope("status", {}).status, { initialized: false, localOnly: true });
 });
 
 test("wraps status, init, sources, import, and sync CLI commands", async () => {
@@ -1055,8 +1052,7 @@ function assertFixturePayload(entry, fixture) {
     case "status":
     case "init":
       assert.equal(typeof fixture.status.initialized, "boolean", `${entry} status.initialized`);
-      assert.equal(Object.hasOwn(fixture.status, "localOnly"), false, `${entry} status.localOnly`);
-      assert.equal(Object.hasOwn(fixture.status, "local_only"), false, `${entry} status.local_only`);
+      assert.equal(typeof fixture.status.localOnly, "boolean", `${entry} status.localOnly`);
       break;
     case "sources":
       assert.ok(Array.isArray(fixture.sources), `${entry} sources`);

@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Mapping, Optional, Sequence, Union
 
-from .agent_history_v1 import without_status_locality
 from .config import HostedConfig, LocalConfig
 from .transport import (
     AgentHistoryTransport,
@@ -92,12 +91,10 @@ class AgentHistoryClient:
         return self._transport
 
     def status(self) -> StatusResponse:
-        response = self._transport.status()
-        return {**response, "status": without_status_locality(response["status"])}
+        return self._transport.status()
 
     def init(self, *, progress: Optional[str] = None) -> InitResponse:
-        response = self._transport.init(progress=progress)
-        return {**response, "status": without_status_locality(response["status"])}
+        return self._transport.init(progress=progress)
 
     def sources(self) -> SourcesResponse:
         return self._transport.sources()

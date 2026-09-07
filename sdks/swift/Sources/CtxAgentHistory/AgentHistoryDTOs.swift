@@ -4,6 +4,8 @@ public struct AgentHistoryStatus: Codable, Equatable, Sendable {
     public static let maximumExactCounter = 9_007_199_254_740_991
 
     public var initialized: Bool
+    /// Deprecated compatibility marker, not a network/privacy guarantee.
+    public var localOnly: Bool
     public var readOnly: Bool?
     public var dataRoot: String?
     public var indexedItems: Int?
@@ -18,6 +20,7 @@ public struct AgentHistoryStatus: Codable, Equatable, Sendable {
 
     public init(
         initialized: Bool,
+        localOnly: Bool,
         readOnly: Bool? = nil,
         dataRoot: String? = nil,
         indexedItems: Int? = nil,
@@ -31,6 +34,7 @@ public struct AgentHistoryStatus: Codable, Equatable, Sendable {
         daemon: JSONValue? = nil
     ) {
         self.initialized = initialized
+        self.localOnly = localOnly
         self.readOnly = readOnly
         self.dataRoot = dataRoot
         self.indexedItems = indexedItems
@@ -46,6 +50,7 @@ public struct AgentHistoryStatus: Codable, Equatable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case initialized
+        case localOnly
         case readOnly
         case dataRoot
         case indexedItems
@@ -62,6 +67,7 @@ public struct AgentHistoryStatus: Codable, Equatable, Sendable {
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         initialized = try container.decode(Bool.self, forKey: .initialized)
+        localOnly = try container.decode(Bool.self, forKey: .localOnly)
         readOnly = try container.decodeIfPresent(Bool.self, forKey: .readOnly)
         dataRoot = try container.decodeIfPresent(String.self, forKey: .dataRoot)
         indexedItems = try Self.decodeCounter(.indexedItems, from: container)
@@ -78,6 +84,7 @@ public struct AgentHistoryStatus: Codable, Equatable, Sendable {
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(initialized, forKey: .initialized)
+        try container.encode(localOnly, forKey: .localOnly)
         try container.encodeIfPresent(readOnly, forKey: .readOnly)
         try container.encodeIfPresent(dataRoot, forKey: .dataRoot)
         try Self.encodeCounter(indexedItems, forKey: .indexedItems, to: &container)

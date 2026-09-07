@@ -56,6 +56,8 @@ class Freshness(TypedDict, total=False):
 
 class _StatusRequired(TypedDict):
     initialized: bool
+    # Deprecated compatibility marker, not a network/privacy guarantee.
+    localOnly: bool
 
 
 class Status(_StatusRequired, total=False):

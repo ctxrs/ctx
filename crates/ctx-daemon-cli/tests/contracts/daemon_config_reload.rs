@@ -61,7 +61,6 @@ mod unix {
                 "daemon exited unexpectedly"
             );
         }
-
     }
 
     impl Drop for DaemonGuard {
@@ -329,7 +328,7 @@ mod unix {
 
         write_config(&temp, true);
         let setup = run_supported_setup(&temp, &binary);
-        assert_eq!(setup["schema_version"], 3);
+        assert_eq!(setup["schema_version"], 2);
         assert_eq!(setup["daemon_autostart"]["status"], "degraded");
         assert_eq!(setup["daemon_autostart"]["pid"], original_pid);
 

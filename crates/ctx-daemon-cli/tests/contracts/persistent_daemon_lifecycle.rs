@@ -94,13 +94,11 @@ mod native {
 
         fn spawn(&self, args: &[&str], input: Option<&[u8]>) -> CapturedChild {
             let mut command = self.std_command();
-            command
-                .args(args)
-                .stdin(if input.is_some() {
-                    Stdio::piped()
-                } else {
-                    Stdio::null()
-                });
+            command.args(args).stdin(if input.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            });
             let mut child = CapturedChild::spawn(&mut command, self.temp.path())
                 .unwrap_or_else(|error| panic!("spawn ctx {:?}: {error}", args));
             if let Some(input) = input {
@@ -147,7 +145,7 @@ mod native {
 
         fn setup_wait(&self) -> String {
             let setup = self.json(&["setup", "--wait", "--format=json", "--progress", "none"]);
-            assert_eq!(setup["schema_version"], 3, "{setup:#}");
+            assert_eq!(setup["schema_version"], 2, "{setup:#}");
             assert_eq!(setup["mode"], "ready", "{setup:#}");
             setup["lexical"]["generation_id"]
                 .as_str()
@@ -368,10 +366,7 @@ mod native {
             fs::remove_file(&fault_source).unwrap();
             let receipt = &failed_job["receipt"];
             assert_eq!(receipt["source_failure_total"], 1, "{failed_job:#}");
-            assert_eq!(
-                receipt["source_failures_omitted"], 0,
-                "{failed_job:#}"
-            );
+            assert_eq!(receipt["source_failures_omitted"], 0, "{failed_job:#}");
             let source_failure = receipt["route_results"]
                 .as_object()
                 .and_then(|routes| {

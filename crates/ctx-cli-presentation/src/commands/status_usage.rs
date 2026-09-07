@@ -23,28 +23,31 @@ pub fn compact_usage_health_json(report: &UsageReport) -> Value {
 
 pub fn malformed_status_config_json() -> Value {
     json!({
-        "schema_version": 2,
+        "schema_version": 1,
         "local_usage": compact_usage_health_json(&local_usage::UsageReport::config_error()),
+        "local_only": true,
         "read_only": true,
     })
 }
 
 pub fn removed_cloud_config_json() -> Value {
     json!({
-        "schema_version": 2,
+        "schema_version": 1,
         "error": {
             "code": "removed_config_key",
             "config_key": "cloud.mode",
             "message": "cloud history configuration is no longer supported",
         },
+        "local_only": true,
         "read_only": true,
     })
 }
 
 pub fn usage_action_json(action: &Map<String, Value>) -> Value {
     json!({
-        "schema_version": 2,
+        "schema_version": 1,
         "local_usage_action": action,
+        "local_only": true,
         "read_only": false,
     })
 }
@@ -55,7 +58,7 @@ pub fn usage_action_error_json(
     message: &'static str,
 ) -> Value {
     json!({
-        "schema_version": 2,
+        "schema_version": 1,
         "local_usage_action": {
             "action": mode.as_str(),
             "ok": false,
@@ -64,6 +67,7 @@ pub fn usage_action_error_json(
                 "message": message,
             },
         },
+        "local_only": true,
         "read_only": false,
     })
 }
@@ -216,17 +220,15 @@ mod tests {
     }
 
     #[test]
-    fn generic_status_usage_and_error_producers_omit_locality() {
-        let outputs = [
+    fn generic_usage_and_errors_keep_the_released_envelope() {
+        for output in [
             malformed_status_config_json(),
             removed_cloud_config_json(),
             usage_action_json(&action(json!({"action": "enable", "ok": true}))),
             usage_action_error_json(UsageStatusMode::Enable, "config_error", "invalid config"),
-        ];
-        for output in outputs {
-            assert!(output.get("local_only").is_none(), "{output}");
-            assert!(output.get("localOnly").is_none(), "{output}");
-            assert_eq!(output["schema_version"], 2);
+        ] {
+            assert_eq!(output["schema_version"], 1);
+            assert_eq!(output["local_only"], true);
             assert!(output["read_only"].is_boolean());
         }
         assert_eq!(
@@ -325,7 +327,7 @@ mod tests {
         assert_eq!(
             malformed_status_config_json(),
             json!({
-                "schema_version": 2,
+                "schema_version": 1,
                 "local_usage": {
                     "schema_version": 3,
                     "enabled": false,
@@ -337,6 +339,7 @@ mod tests {
                         "message": "local usage configuration could not be read",
                     },
                 },
+                "local_only": true,
                 "read_only": true,
             })
         );
@@ -372,7 +375,7 @@ mod tests {
         assert_eq!(
             usage_action_json(&success),
             json!({
-                "schema_version": 2,
+                "schema_version": 1,
                 "local_usage_action": {
                     "action": "enable",
                     "ok": true,
@@ -380,6 +383,7 @@ mod tests {
                     "effective_enabled": true,
                     "environment_override": "none",
                 },
+                "local_only": true,
                 "read_only": false,
             })
         );
@@ -390,7 +394,7 @@ mod tests {
                 "local usage could not be reset",
             ),
             json!({
-                "schema_version": 2,
+                "schema_version": 1,
                 "local_usage_action": {
                     "action": "reset",
                     "ok": false,
@@ -399,6 +403,7 @@ mod tests {
                         "message": "local usage could not be reset",
                     },
                 },
+                "local_only": true,
                 "read_only": false,
             })
         );
