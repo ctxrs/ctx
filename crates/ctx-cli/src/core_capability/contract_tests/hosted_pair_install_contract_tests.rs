@@ -71,6 +71,17 @@ impl Fixture {
             "man_pages":null,"extension":{"retained":true}});
         fs::write(&marker, serde_json::to_vec(&value).unwrap()).unwrap();
         fs::write(&current_marker, serde_json::to_vec(&value).unwrap()).unwrap();
+        #[cfg(windows)]
+        {
+            use ctx_history_platform::platform_security::{
+                restrict_private_directory, restrict_private_file,
+            };
+            // Match the released script: only installed bin/Core/marker are
+            // protected. Download inputs and the root above bin are inherited.
+            restrict_private_directory(core.parent().unwrap()).unwrap();
+            restrict_private_file(&core).unwrap();
+            restrict_private_file(&current_marker).unwrap();
+        }
         let identity = VerifiedManagedPairIdentity::new(
             "bridge",
             target,
@@ -180,8 +191,64 @@ fn installed_core_completion_and_reinstall_use_existing_kernel() {
                 .unwrap()
                 .file_name()
                 .to_string_lossy()
-                .starts_with(".ctx-hosted-marker-"))
+                .starts_with(".ctx-hosted-inputs-"))
     );
+}
+
+#[cfg(windows)]
+#[test]
+fn released_windows_downloads_remain_inherited_while_kernel_inputs_are_private() {
+    use ctx_history_platform::platform_security::{verify_private_directory, verify_private_file};
+    let f = Fixture::new();
+    let root = f.core.parent().unwrap().parent().unwrap();
+    assert!(verify_private_directory(root).is_err());
+    assert!(verify_private_directory(f.marker.parent().unwrap()).is_err());
+    for input in [&f.envelope, &f.candidate, &f.companion, &f.marker] {
+        assert!(verify_private_file(input).is_err());
+    }
+    assert_eq!(f.complete().unwrap(), f.verifier.0);
+    assert!(verify_private_directory(root).is_ok());
+    assert!(verify_private_directory(f.marker.parent().unwrap()).is_err());
+    for input in [&f.envelope, &f.candidate, &f.companion, &f.marker] {
+        assert!(verify_private_file(input).is_err());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn released_completion_stages_inputs_without_relaxing_kernel_source_checks() {
+    use ctx_upgrade_engine::{
+        ManagedPairApplyInput, apply_or_resume_managed_pair_under_installation_lock,
+    };
+    use std::os::unix::fs::PermissionsExt as _;
+    let f = Fixture::new();
+    let root = f.core.parent().unwrap().parent().unwrap();
+    let download = f.marker.parent().unwrap();
+    fs::set_permissions(download, fs::Permissions::from_mode(0o777)).unwrap();
+    {
+        let _guard = try_acquire_managed_installation_mutation_at_root(root)
+            .unwrap()
+            .unwrap();
+        let input = ManagedPairApplyInput::new(
+            f.envelope.clone(),
+            f.candidate.clone(),
+            f.companion.clone(),
+            f.marker.clone(),
+        );
+        assert!(
+            apply_or_resume_managed_pair_under_installation_lock(root, &input, &f.verifier)
+                .is_err()
+        );
+    }
+    assert_eq!(f.complete().unwrap(), f.verifier.0);
+    assert_eq!(
+        fs::metadata(download).unwrap().permissions().mode() & 0o777,
+        0o777
+    );
+    assert_eq!(fs::read(&f.envelope).unwrap(), b"fixture-envelope");
+    assert_eq!(fs::read(&f.candidate).unwrap(), b"signed-core");
+    assert_eq!(fs::read(&f.companion).unwrap(), b"signed-companion");
+    assert_eq!(fs::read_dir(download).unwrap().count(), 4);
 }
 
 #[test]
@@ -190,6 +257,8 @@ fn installed_identity_channel_signature_and_marker_fail_closed_before_publicatio
         "installed",
         "candidate",
         "companion",
+        "candidate-digest",
+        "companion-digest",
         "envelope",
         "channel",
         "path",
@@ -201,6 +270,8 @@ fn installed_identity_channel_signature_and_marker_fail_closed_before_publicatio
             "installed" => fs::write(&f.core, b"wrong-core").unwrap(),
             "candidate" => fs::write(&f.candidate, b"wrong-core").unwrap(),
             "companion" => fs::write(&f.companion, b"wrong-companion").unwrap(),
+            "candidate-digest" => fs::write(&f.candidate, b"wrong--core").unwrap(),
+            "companion-digest" => fs::write(&f.companion, b"wrong--companion").unwrap(),
             "envelope" => fs::write(&f.envelope, b"not-signed").unwrap(),
             "channel" => f.change_marker("channel", json!("staging")),
             "path" => f.change_marker("install_path", json!(f.candidate)),
@@ -209,6 +280,11 @@ fn installed_identity_channel_signature_and_marker_fail_closed_before_publicatio
             _ => unreachable!(),
         }
         assert!(f.complete().is_err(), "{fault}");
+        assert_eq!(
+            fs::read_dir(f.marker.parent().unwrap()).unwrap().count(),
+            4,
+            "{fault} cleanup"
+        );
         assert!(
             !f.core
                 .parent()
