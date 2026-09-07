@@ -263,6 +263,7 @@ ctx_rust_test(
         proc_macro_dev = True,
     ),
     compile_data = CTX_CLI_TEST_COMPILE_DATA + [
+        "//:scripts/tests/native-candidate-outbox.json",
         "//crates/ctx-upgrade-engine:cargo_package_data",
     ],
     data = ctx_cli_test_data() + [":ctx"],

@@ -647,7 +647,7 @@ import sys
 import uuid
 
 outbox = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-if outbox.get("schema_version") != 2 or not isinstance(outbox.get("entries"), list):
+if outbox.get("schema_version") != 3 or not isinstance(outbox.get("entries"), list):
     raise SystemExit("analytics outbox has an unexpected schema")
 queued = [
     json.loads(entry["payload"])

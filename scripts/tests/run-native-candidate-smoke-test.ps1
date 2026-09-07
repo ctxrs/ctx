@@ -6,6 +6,9 @@ $smoke = Join-Path $repoRoot "scripts\run-native-candidate-smoke.ps1"
 $installer = Join-Path $repoRoot "scripts\install.ps1"
 $smokeSource = [IO.File]::ReadAllText($smoke)
 $installerSource = [IO.File]::ReadAllText($installer)
+$outboxJson = [IO.File]::ReadAllText((Join-Path $PSScriptRoot "native-candidate-outbox.json")).Trim()
+$analyticsPayload = ($outboxJson | ConvertFrom-Json).entries[0].payload
+$outboxCSharp = $outboxJson.Replace('\', '\\').Replace('"', '\"')
 if ($smokeSource -notmatch [regex]::Escape("--ctx-core-managed-pair-apply-v1") -or
     $smokeSource -notmatch [regex]::Escape('ctx.exe.install.json') -or
     $smokeSource -notmatch [regex]::Escape('[Text.Encoding]::UTF8.GetByteCount($pairApply.Stdout) -ne 83') -or
@@ -56,7 +59,7 @@ foreach ($name in $deprecatedControlNames) {
 
 try {
     $fake = Join-Path $root "ctx.cmd"
-@'
+    $fakeTemplate = @'
 @echo off
 if "%HOME%"=="" exit /b 94
 if "%USERPROFILE%"=="" exit /b 95
@@ -125,7 +128,7 @@ if not "%CTX_SEARCH_SEMANTIC%"=="" exit /b 89
 if /I "%~n0"=="ctx-foreground-analytics" goto foreground_delivery
 if /I "%LOCALAPPDATA%"=="%CTX_DATA_ROOT%" exit /b 85
 if not exist "%LOCALAPPDATA%\ctx" mkdir "%LOCALAPPDATA%\ctx"
-> "%LOCALAPPDATA%\ctx\analytics-outbox-v1.json" echo {"schema_version":2,"entries":[{"schema_version":2,"entry_id":"22222222-2222-4222-8222-222222222222","endpoint_fingerprint":"fixture","queued_at_epoch_seconds":1800000000,"attempts":0,"next_attempt_at_epoch_seconds":0,"kind":"ordinary","payload":"{\"events\":[{\"event_name\":\"operation_completed\",\"event_version\":1,\"surface\":\"cli\",\"operation\":\"status\",\"outcome\":\"success\",\"event_id\":\"11111111-1111-4111-8111-111111111111\"}]}"}],"retry_attempts":0,"dropped":0,"failure_sequence":0,"last_failure_class":null,"observation_due":false}
+> "%LOCALAPPDATA%\ctx\analytics-outbox-v1.json" echo @ANALYTICS_OUTBOX@
 if /I "%~n0"=="ctx-no-embed-policy" goto status_without_embed_policy
 echo {"read_only":true,"daemon":{"enabled":true},"upgrade":{"auto":"off","auto_enabled":false},"semantic":{"config_source":"default","enabled":false,"reason":"semantic_disabled","embed_policy":{"source":"dynamic_quiet"}}}
 exit /b 0
@@ -154,10 +157,15 @@ ping -n 30 127.0.0.1 >nul
 exit /b 0
 
 :write_analytics
-set "CTX_FAKE_ANALYTICS_PAYLOAD={"events":[{"event_name":"operation_completed","event_version":1,"surface":"cli","operation":"status","outcome":"success","event_id":"11111111-1111-4111-8111-111111111111"}]}"
+set "CTX_FAKE_ANALYTICS_PAYLOAD=@ANALYTICS_PAYLOAD@"
 powershell.exe -NoLogo -NoProfile -NonInteractive -Command "[IO.File]::WriteAllText(([Uri]$env:CTX_ANALYTICS_ENDPOINT).LocalPath, $env:CTX_FAKE_ANALYTICS_PAYLOAD + [Environment]::NewLine)"
 exit /b %errorlevel%
-'@ | Set-Content -LiteralPath $fake -Encoding Ascii
+'@
+    function Write-AnalyticsFake([string]$Path, [string]$Outbox, [string]$Payload) {
+        $fakeTemplate.Replace("@ANALYTICS_OUTBOX@", $Outbox).Replace(
+            "@ANALYTICS_PAYLOAD@", $Payload) | Set-Content -LiteralPath $Path -Encoding Ascii
+    }
+    Write-AnalyticsFake $fake $outboxJson $analyticsPayload
 
     $fixture = Join-Path $root "fixture.jsonl"
     '{"record_type":"manifest","schema_version":"ctx-history-jsonl-v2"}' |
@@ -188,6 +196,46 @@ exit /b %errorlevel%
         if ($parsed.steps.$key -ne "passed") {
             throw "candidate smoke step did not pass: $key"
         }
+    }
+
+    foreach ($case in @("legacy", "malformed-entries", "event-mismatch", "duplicate-delivery", "non-v4", "wrong-operation")) {
+        $outbox = $outboxJson | ConvertFrom-Json
+        $payload = $analyticsPayload | ConvertFrom-Json
+        $expectedFailure = "analytics evidence does not contain exactly one status UUIDv4"
+        switch ($case) {
+            "legacy" {
+                $outbox.schema_version = 2
+                $outbox.entries[0].schema_version = 2
+                $expectedFailure = "candidate produced malformed analytics evidence"
+            }
+            "malformed-entries" {
+                $outbox.entries = @{}
+                $expectedFailure = "candidate produced malformed analytics evidence"
+            }
+            "event-mismatch" {
+                $payload.events[0].event_id = "33333333-3333-4333-8333-333333333333"
+                $expectedFailure = "daemon did not deliver the queued status analytics UUID"
+            }
+            "duplicate-delivery" { $payload.events = @($payload.events[0], $payload.events[0]) }
+            "non-v4" {
+                $payload.events[0].event_id = "11111111-1111-1111-8111-111111111111"
+                $outbox.entries[0].payload = $payload | ConvertTo-Json -Depth 10 -Compress
+            }
+            "wrong-operation" {
+                $payload.events[0].operation = "search"
+                $outbox.entries[0].payload = $payload | ConvertTo-Json -Depth 10 -Compress
+            }
+        }
+        $negativeFake = Join-Path $root "ctx-$case.cmd"
+        $negativeResult = Join-Path $root "$case-result.json"
+        Write-AnalyticsFake $negativeFake ($outbox | ConvertTo-Json -Depth 10 -Compress) ($payload | ConvertTo-Json -Depth 10 -Compress)
+        try {
+            & $smoke -Binary $negativeFake -Fixture $fixture -ExpectedVersion 0.25.0 -ResultPath $negativeResult 2>$null | Out-Null
+            throw "candidate smoke accepted invalid analytics: $case"
+        } catch {
+            if ($_.Exception.Message -notmatch [regex]::Escape($expectedFailure)) { throw }
+        }
+        if (Test-Path -LiteralPath $negativeResult) { throw "candidate smoke wrote evidence for $case" }
     }
 
     $noEmbedPolicyFake = Join-Path $root "ctx-no-embed-policy.cmd"
@@ -276,11 +324,7 @@ public static class CtxManagedPairFake {
     private static void WriteOutbox() {
         string root = Path.Combine(Environment.GetEnvironmentVariable("LOCALAPPDATA"), "ctx");
         Directory.CreateDirectory(root);
-        File.WriteAllText(Path.Combine(root, "analytics-outbox-v1.json"), "{\"schema_version\":2,\"entries\":[{\"kind\":\"ordinary\",\"payload\":" + Quote(AnalyticsPayload) + "}]}");
-    }
-
-    private static string Quote(string value) {
-        return "\"" + value.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\"";
+        File.WriteAllText(Path.Combine(root, "analytics-outbox-v1.json"), "@ANALYTICS_OUTBOX@");
     }
 
     public static int Main(string[] args) {
@@ -342,6 +386,7 @@ public static class CtxManagedPairFake {
     }
 }
 '@
+    $pairFakeSource = $pairFakeSource.Replace("@ANALYTICS_OUTBOX@", $outboxCSharp)
     Add-Type -TypeDefinition $pairFakeSource -OutputAssembly $pairFake -OutputType ConsoleApplication
     $pairCompanion = Join-Path $root "ctx-pro.exe"
     $pairEnvelope = Join-Path $root "managed-pair-envelope.json"
@@ -521,7 +566,7 @@ public static class CtxPipeOwner {
             if (Environment.GetEnvironmentVariable("CTX_ANALYTICS_ENABLED") == null) {
                 string state = Path.Combine(Environment.GetEnvironmentVariable("LOCALAPPDATA"), "ctx");
                 Directory.CreateDirectory(state);
-                File.WriteAllText(Path.Combine(state, "analytics-outbox-v1.json"), "{\"schema_version\":2,\"entries\":[{\"kind\":\"ordinary\",\"payload\":\"{\\\"events\\\":[{\\\"event_name\\\":\\\"operation_completed\\\",\\\"event_version\\\":1,\\\"surface\\\":\\\"cli\\\",\\\"operation\\\":\\\"status\\\",\\\"outcome\\\":\\\"success\\\",\\\"event_id\\\":\\\"11111111-1111-4111-8111-111111111111\\\"}]}\"}]}");
+                File.WriteAllText(Path.Combine(state, "analytics-outbox-v1.json"), "@ANALYTICS_OUTBOX@");
                 Console.WriteLine("{\"read_only\":true,\"daemon\":{\"enabled\":true},\"upgrade\":{\"auto\":\"off\",\"auto_enabled\":false},\"semantic\":{\"config_source\":\"default\",\"reason\":\"semantic_disabled\",\"embed_policy\":{\"source\":\"dynamic_quiet\"}}}");
             } else {
                 Console.WriteLine("{\"read_only\":true,\"daemon\":{\"enabled\":false},\"upgrade\":{\"auto\":\"off\",\"auto_enabled\":false},\"semantic\":{\"config_source\":\"default\",\"reason\":\"semantic_disabled\",\"embed_policy\":{\"source\":\"dynamic_quiet\"}}}");
@@ -532,6 +577,7 @@ public static class CtxPipeOwner {
     }
 }
 '@
+    $pipeOwnerSource = $pipeOwnerSource.Replace("@ANALYTICS_OUTBOX@", $outboxCSharp)
     Add-Type -TypeDefinition $pipeOwnerSource -Language CSharp `
         -OutputAssembly $pipeOwner -OutputType ConsoleApplication
 
