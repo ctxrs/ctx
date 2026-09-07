@@ -346,7 +346,7 @@ mod tests {
         let engine = super::super::refresh_engine(&crate::test_support::CONFIG);
         let id = "019fcaaa-0000-7000-8000-000000000514";
         let request = background_request(id);
-        let journal = super::super::journal::DaemonRefreshJournal;
+        let journal = super::super::journal::DaemonRefreshJournal::default();
 
         let first = handle_ipc_request(&engine, temp.path(), &request)
             .unwrap()
@@ -390,11 +390,11 @@ mod tests {
 
     impl ctx_history_refresh::RefreshJournal for AdmissionFaultJournal {
         fn load(&self, root: &Path) -> Result<Option<Value>> {
-            super::super::journal::DaemonRefreshJournal.load(root)
+            super::super::journal::DaemonRefreshJournal::default().load(root)
         }
 
         fn store(&self, root: &Path, value: &Value) -> Result<()> {
-            super::super::journal::DaemonRefreshJournal.store(root, value)
+            super::super::journal::DaemonRefreshJournal::default().store(root, value)
         }
 
         fn store_before_ack(
@@ -407,7 +407,8 @@ mod tests {
             if fault == 1 {
                 return Persistence::Failed(anyhow!("injected pre-replacement failure"));
             }
-            let result = super::super::journal::DaemonRefreshJournal.store_before_ack(root, value);
+            let result = super::super::journal::DaemonRefreshJournal::default()
+                .store_before_ack(root, value);
             if fault == 2 && matches!(result, Persistence::Confirmed) {
                 return Persistence::Retained(anyhow!("injected durability uncertainty"));
             }

@@ -308,14 +308,14 @@ impl CoreRefreshEngine {
 
     pub(crate) fn with_config(config: &'static dyn crate::DaemonConfigPort) -> Self {
         Self(ctx_history_refresh::RefreshEngine::new(
-            Arc::new(DaemonRefreshJournal),
+            Arc::new(DaemonRefreshJournal::default()),
             Arc::new(CliTestRefreshRuntime { config }),
         ))
     }
 
     pub(crate) fn with_executor(executor: Arc<dyn SourceBackedRefreshExecutor>) -> Self {
         Self(ctx_history_refresh::RefreshEngine::with_executor(
-            Arc::new(DaemonRefreshJournal),
+            Arc::new(DaemonRefreshJournal::default()),
             Arc::new(CliTestRefreshRuntime {
                 config: &crate::test_support::CONFIG,
             }),
@@ -370,7 +370,7 @@ impl CoreRefreshEngine {
         );
         Self(
             ctx_history_refresh::RefreshEngine::with_admission_fence_for_test(
-                Arc::new(DaemonRefreshJournal),
+                Arc::new(DaemonRefreshJournal::default()),
                 Arc::new(CliTestRefreshRuntime {
                     config: &crate::test_support::CONFIG,
                 }),
@@ -517,7 +517,7 @@ pub fn published_explicit_source_relocation_authority(
     ctx_history_refresh::published_explicit_source_relocation_authority(
         data_root,
         old_path,
-        &DaemonRefreshJournal,
+        &DaemonRefreshJournal::default(),
     )
 }
 

@@ -90,6 +90,11 @@ fn walk_private_directory_nofollow(
     };
     let mut created_private_ancestor = false;
     let mut saw_component = false;
+    let mut containing_directory: Option<File> = None;
+    let mut current_link_confirmed = false;
+    // Generic private scratch/staging creation has no persistence contract.
+    // Root establishment owns the cold ancestry needed by durable consumers.
+    let confirm_created_links = matches!(existing_final, ExistingFinalPolicy::EstablishExact);
 
     while let Some(component) = components.next() {
         let Component::Normal(name) = component else {
@@ -97,7 +102,19 @@ fn walk_private_directory_nofollow(
         };
         saw_component = true;
         let is_final = components.peek().is_none();
-        let (next, created, raced_existing) = open_or_create_directory(&current, name)?;
+        let (next, created, raced_existing) =
+            open_or_create_directory_after_missing(&current, name, || {
+                // An interrupted creator can leave its last directory visible
+                // before syncing its link. Repair that deepest existing prefix
+                // before extending it; earlier links precede descent below.
+                if confirm_created_links && !current_link_confirmed {
+                    if let Some(parent) = containing_directory.as_ref() {
+                        current.sync_all()?;
+                        parent.sync_all()?;
+                    }
+                }
+                Ok(())
+            })?;
         if created {
             clear_extended_acl(&next)?;
             verify_exact_private_directory(&next.metadata()?)?;
@@ -111,6 +128,14 @@ fn walk_private_directory_nofollow(
         } else if created_private_ancestor || raced_existing {
             verify_owner_only_directory(&next.metadata()?)?;
         }
+        if confirm_created_links && (created || raced_existing) {
+            // Confirm private metadata and the new name before descending.
+            // A concurrent creator's visible name carries the same obligation.
+            next.sync_all()?;
+            current.sync_all()?;
+        }
+        current_link_confirmed = created || raced_existing;
+        containing_directory = Some(current);
         current = next;
     }
 
@@ -217,10 +242,6 @@ pub(super) fn verify_no_extended_acl(file: &File) -> io::Result<()> {
 #[cfg(not(target_os = "macos"))]
 pub(super) fn verify_no_extended_acl(_file: &File) -> io::Result<()> {
     Ok(())
-}
-
-fn open_or_create_directory(parent: &File, name: &OsStr) -> io::Result<(File, bool, bool)> {
-    open_or_create_directory_after_missing(parent, name, || Ok(()))
 }
 
 fn open_or_create_directory_after_missing(

@@ -4,16 +4,17 @@ use ctx_history_refresh::{DurableAdmissionPersistence, RefreshJournal, RefreshRu
 #[derive(Default)]
 struct AdmissionJournal {
     writes: Mutex<Vec<Value>>,
+    inner: DaemonRefreshJournal,
 }
 impl RefreshJournal for AdmissionJournal {
     fn load(&self, root: &Path) -> Result<Option<Value>> {
-        DaemonRefreshJournal.load(root)
+        self.inner.load(root)
     }
     fn store(&self, root: &Path, value: &Value) -> Result<()> {
-        DaemonRefreshJournal.store(root, value)
+        self.inner.store(root, value)
     }
     fn store_before_ack(&self, root: &Path, value: &Value) -> DurableAdmissionPersistence {
-        let outcome = DaemonRefreshJournal.store_before_ack(root, value);
+        let outcome = self.inner.store_before_ack(root, value);
         self.writes.lock().unwrap().push(value.clone());
         outcome
     }
@@ -295,7 +296,17 @@ fn assert_burst(background: bool) -> Result<()> {
     assert_eq!(accepted.len(), 8);
     assert_eq!(rejected, if background { 8 } else { 0 });
     assert_eq!(
-        fixture.journal.writes.lock().unwrap().len(),
+        fixture
+            .journal
+            .writes
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|job| matches!(
+                job["request_state"].as_str(),
+                Some("admission_pending" | "queued")
+            ))
+            .count(),
         16,
         "two writes per admission"
     );
@@ -325,6 +336,26 @@ fn assert_burst(background: bool) -> Result<()> {
         1,
         "eight callers share one physical capture"
     );
+    let writes = fixture.journal.writes.lock().unwrap();
+    assert_eq!(
+        writes
+            .iter()
+            .filter(|job| job["request_state"] == "published")
+            .count(),
+        8
+    );
+    assert_eq!(
+        writes.len(),
+        24,
+        "sixteen admission and eight terminal durable writes"
+    );
+    let bytes: usize = writes
+        .iter()
+        .map(|job| serde_json::to_vec_pretty(job).unwrap().len() + 1)
+        .sum();
+    eprintln!("terminal_durability shared_capture=1 caller_ids=8 admission_writes=16 terminal_writes=8 durable_serialized_bytes={bytes}");
+    drop(writes);
+
     assert!(!fixture.engine.has_pending_request());
     let runs = runs.lock().unwrap();
     assert_eq!(runs.len(), 1);
@@ -471,7 +502,7 @@ fn background_marker_recovery_progresses_without_caller_replay() -> Result<()> {
     drop(fixture.engine);
     // Restore the actual first persisted image to exercise restart before the
     // marker-clear write. This is journal recovery, not power-loss simulation.
-    DaemonRefreshJournal.store(fixture.data_root.path(), &marker)?;
+    DaemonRefreshJournal::default().store(fixture.data_root.path(), &marker)?;
     let restarted = CoreRefreshEngine(ctx_history_refresh::RefreshEngine::new(
         fixture.journal.clone(),
         fixture.runtime.clone(),
