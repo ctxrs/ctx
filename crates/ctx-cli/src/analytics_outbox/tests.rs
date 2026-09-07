@@ -41,6 +41,36 @@ fn retry(class: AnalyticsDeliveryFailureClass) -> DeliveryDisposition {
 }
 
 #[test]
+fn native_smoke_fixture_matches_real_persisted_outbox() {
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../../../scripts/tests/native-candidate-outbox.json"
+    ))
+    .unwrap();
+    let expected: OutboxState = serde_json::from_value(fixture.clone()).unwrap();
+    validate_state(&expected).unwrap();
+    assert_eq!(fixture["schema_version"], 3);
+    assert_eq!(expected.entries.len(), 1);
+
+    let (_root, path, outbox) = test_outbox();
+    outbox
+        .append_at(ENDPOINT, expected.entries[0].payload.as_bytes(), NOW)
+        .unwrap();
+    let mut actual: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    let generated_id = actual["entries"][0]["entry_id"].as_str().unwrap();
+    let generated_id = uuid::Uuid::parse_str(generated_id).unwrap();
+    assert_eq!(generated_id.get_version_num(), 4);
+    // Only the generated queue identity varies; compare the entire serialized
+    // shape, consent owner, endpoint fingerprint, payload and initial counters.
+    actual["entries"][0]["entry_id"] = fixture["entries"][0]["entry_id"].clone();
+    assert_eq!(actual, fixture);
+    for version in [1, 2] {
+        let mut legacy = serde_json::to_value(&expected).unwrap();
+        legacy["schema_version"] = version.into();
+        assert!(validate_state(&serde_json::from_value(legacy).unwrap()).is_err());
+    }
+}
+
+#[test]
 fn legacy_shared_bodies_and_counters_are_discarded_without_guessing_ownership() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("outbox.json");

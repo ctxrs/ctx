@@ -31,7 +31,37 @@ trap cleanup_test EXIT
 fake_template="${tmp}/ctx.template"
 make_fake() {
   local destination="$1"
-  cp "${fake_template}" "${destination}"
+  python3 -I - "${fake_template}" \
+    "${repo_root}/scripts/tests/native-candidate-outbox.json" \
+    "${destination}" "${2:-current}" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+outbox = json.loads(Path(sys.argv[2]).read_text())
+payload = json.loads(outbox["entries"][0]["payload"])
+case = sys.argv[4]
+if case == "legacy":
+    outbox["schema_version"] = outbox["entries"][0]["schema_version"] = 2
+elif case == "malformed-entries":
+    outbox["entries"] = {}
+elif case == "event-mismatch":
+    payload["events"][0]["event_id"] = "33333333-3333-4333-8333-333333333333"
+elif case == "duplicate-delivery":
+    payload["events"] *= 2
+elif case == "non-v4":
+    payload["events"][0]["event_id"] = "11111111-1111-1111-8111-111111111111"
+    outbox["entries"][0]["payload"] = json.dumps(payload)
+elif case == "wrong-operation":
+    payload["events"][0]["operation"] = "search"
+    outbox["entries"][0]["payload"] = json.dumps(payload)
+elif case != "current":
+    raise SystemExit("unknown analytics fixture case")
+source = Path(sys.argv[1]).read_text()
+source = source.replace("@ANALYTICS_OUTBOX@", json.dumps(outbox))
+source = source.replace("@ANALYTICS_PAYLOAD@", json.dumps(payload))
+Path(sys.argv[3]).write_text(source)
+PY
   chmod +x "${destination}"
 }
 
@@ -253,7 +283,7 @@ case "${1:-}" in
   status)
     if test "${CTX_ANALYTICS_ENABLED+x}" != x; then
       analytics_path="${CTX_ANALYTICS_ENDPOINT#file://}"
-      analytics_payload='{"events":[{"event_name":"operation_completed","event_version":1,"surface":"cli","operation":"status","outcome":"success","event_id":"11111111-1111-4111-8111-111111111111"}]}'
+      analytics_payload='@ANALYTICS_PAYLOAD@'
       case "${0##*/}" in
         *foreground-analytics*)
           printf '%s\n' "${analytics_payload}" > "${analytics_path}"
@@ -262,7 +292,7 @@ case "${1:-}" in
           analytics_outbox="${XDG_STATE_HOME}/ctx/analytics-outbox-v1.json"
           mkdir -p "${analytics_outbox%/*}"
           chmod 0700 "${analytics_outbox%/*}"
-          printf '%s\n' '{"schema_version":2,"entries":[{"schema_version":2,"entry_id":"22222222-2222-4222-8222-222222222222","endpoint_fingerprint":"fixture","queued_at_epoch_seconds":1800000000,"attempts":0,"next_attempt_at_epoch_seconds":0,"kind":"ordinary","payload":"{\"events\":[{\"event_name\":\"operation_completed\",\"event_version\":1,\"surface\":\"cli\",\"operation\":\"status\",\"outcome\":\"success\",\"event_id\":\"11111111-1111-4111-8111-111111111111\"}]}"}],"retry_attempts":0,"dropped":0,"failure_sequence":0,"last_failure_class":null,"observation_due":false}' \
+          printf '%s\n' '@ANALYTICS_OUTBOX@' \
             > "${analytics_outbox}"
           chmod 0600 "${analytics_outbox}"
           ;;
@@ -338,7 +368,7 @@ JSON
       *)
         trap 'exit 0' 1 2 15
         analytics_path="${CTX_ANALYTICS_ENDPOINT#file://}"
-        printf '%s\n' '{"events":[{"event_name":"operation_completed","event_version":1,"surface":"cli","operation":"status","outcome":"success","event_id":"11111111-1111-4111-8111-111111111111"}]}' \
+        printf '%s\n' '@ANALYTICS_PAYLOAD@' \
           > "${analytics_path}"
         ;;
     esac
@@ -372,6 +402,20 @@ make_fake "${fake}"
 result="${tmp}/result.json"
 "${smoke}" "${fake}" "${tmp}/fixture.jsonl" 0.25.0 "${result}" >/dev/null
 assert_passed_result "${result}"
+
+for analytics_case in legacy malformed-entries event-mismatch duplicate-delivery non-v4 wrong-operation; do
+  negative_fake="${tmp}/ctx-${analytics_case}"
+  make_fake "${negative_fake}" "${analytics_case}"
+  negative_result="${tmp}/${analytics_case}-result.json"
+  if "${smoke}" "${negative_fake}" "${tmp}/fixture.jsonl" 0.25.0 \
+    "${negative_result}" >"${tmp}/${analytics_case}.out" 2>"${tmp}/${analytics_case}.err"; then
+    printf 'candidate smoke accepted invalid analytics: %s\n' "${analytics_case}" >&2
+    exit 1
+  fi
+  grep -Fq 'candidate did not preserve exact status analytics across daemon delivery' \
+    "${tmp}/${analytics_case}.err"
+  test ! -e "${negative_result}"
+done
 
 space_tmp="${tmp}/setgid task parent"
 mkdir -p "${space_tmp}"

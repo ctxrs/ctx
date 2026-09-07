@@ -464,7 +464,7 @@ function Get-StatusAnalyticsEventId([string]$Path, [bool]$Outbox) {
     try {
         if ($Outbox) {
             $document = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
-            if ($document.schema_version -ne 2) { throw "unexpected outbox schema" }
+            if ($document.schema_version -ne 3) { throw "unexpected outbox schema" }
             $payloads = @($document.entries | Where-Object { $_.kind -ceq "ordinary" } |
                 ForEach-Object { $_.payload | ConvertFrom-Json })
         } else {

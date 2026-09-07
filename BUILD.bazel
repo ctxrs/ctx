@@ -25,6 +25,7 @@ exports_files([
     "contracts/ctx-managed-pair-release-authority-v1.json",
     "contracts/ctx-managed-pair-state-v1.schema.json",
     "scripts/check.sh",
+    "scripts/tests/native-candidate-outbox.json",
 ])
 
 root_build_settings()
