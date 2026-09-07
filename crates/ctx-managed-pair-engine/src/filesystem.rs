@@ -236,6 +236,8 @@ impl Layout {
 }
 
 mod candidate;
+#[cfg(windows)]
+pub(crate) mod released_permissions;
 
 pub(super) use candidate::{
     apply_candidate_exists, apply_candidate_root, create_apply_candidate, remove_apply_candidate,

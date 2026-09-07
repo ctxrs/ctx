@@ -142,13 +142,14 @@ pub(super) fn apply_under_installation_lock(
         // The released entry is only a completion path for this already
         // installed signed Core, never permission to replace another version.
         verify_component(installed_core, identity.core(), "installed Core")?;
-        // Released Windows scripts protect bin and its installed leaves, but
-        // leave the enclosing installation root with inherited permissions.
-        // Adapt that existing root only after certifying this installed Core;
-        // the shared kernel still verifies every destination and private ACL.
+        // Released Windows installers leave the root and an existing pair's
+        // descendants with inherited ACLs. Adapt only the fixed destination
+        // slots after certifying this Core; the kernel still owns validation,
+        // rollback protection, and publication.
         #[cfg(windows)]
-        ctx_history_platform::platform_security::restrict_private_directory(&request.install_root)
-            .context("protect released hosted installation root")?;
+        ctx_upgrade_engine::protect_released_managed_pair_under_installation_lock(
+            &request.install_root,
+        )?;
     }
 
     apply_or_resume_managed_pair_under_installation_lock(

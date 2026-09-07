@@ -12,6 +12,8 @@ mod fix_forward;
 #[cfg(unix)]
 mod reconciliation;
 
+#[cfg(windows)]
+pub use filesystem::released_permissions::protect_released_managed_pair_under_installation_lock;
 pub use fix_forward::{
     apply_or_resume_managed_pair_under_installation_lock,
     cleanup_orphaned_managed_pair_candidate_under_installation_lock,

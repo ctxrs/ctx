@@ -113,6 +113,32 @@ impl Fixture {
         ]
         .into()
     }
+    #[cfg(windows)]
+    fn create_released_pair(&self) -> [PathBuf; 3] {
+        let root = self.core.parent().unwrap().parent().unwrap();
+        fs::create_dir_all(root.join("libexec")).unwrap();
+        fs::create_dir_all(root.join("share/ctx")).unwrap();
+        let paths = [
+            root.join("libexec/ctx-pro.exe"),
+            root.join(ctx_upgrade_engine::MANAGED_PAIR_ENVELOPE_RELATIVE_PATH),
+            root.join(ctx_upgrade_engine::MANAGED_PAIR_STATE_RELATIVE_PATH),
+        ];
+        // Match 1.3.1 hosted_pair_receipt/stage_hosted_bytes: ordinary directory
+        // and file creation, schema-1 pair state, no DACL protection.
+        fs::write(&paths[0], b"signed-companion").unwrap();
+        fs::write(&paths[1], b"fixture-envelope").unwrap();
+        fs::write(
+            &paths[2],
+            serde_json::to_vec(&json!({
+                "contract":"ctx-managed-pair-state", "schema_version":1,
+                "identity":self.verifier.0, "envelope_sha256":hash(b"fixture-envelope"),
+                "envelope_size_bytes":b"fixture-envelope".len(),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        paths
+    }
     fn complete(&self) -> anyhow::Result<VerifiedManagedPairIdentity> {
         hosted::complete(
             &hosted::parse(&self.arguments(), &self.core)?,
@@ -211,6 +237,80 @@ fn released_windows_downloads_remain_inherited_while_kernel_inputs_are_private()
     assert!(verify_private_directory(f.marker.parent().unwrap()).is_err());
     for input in [&f.envelope, &f.candidate, &f.companion, &f.marker] {
         assert!(verify_private_file(input).is_err());
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn released_windows_existing_pair_permissions_are_adapted_without_losing_state() {
+    use ctx_history_platform::platform_security::{verify_private_directory, verify_private_file};
+    let f = Fixture::new();
+    let paths = f.create_released_pair();
+    let root = f.core.parent().unwrap().parent().unwrap();
+    for relative in ["libexec", "share", "share/ctx"] {
+        assert!(verify_private_directory(&root.join(relative)).is_err());
+    }
+    for path in &paths {
+        assert!(verify_private_file(path).is_err());
+    }
+    let unrelated = root.join("share/ctx/unrelated.json");
+    fs::write(&unrelated, b"not managed").unwrap();
+    assert_eq!(f.complete().unwrap(), f.verifier.0);
+    assert_eq!(f.complete().unwrap(), f.verifier.0);
+    for relative in ["libexec", "share", "share/ctx"] {
+        assert!(verify_private_directory(&root.join(relative)).is_ok());
+    }
+    for path in &paths {
+        assert!(verify_private_file(path).is_ok());
+    }
+    assert_eq!(fs::read(&paths[0]).unwrap(), b"signed-companion");
+    assert_eq!(fs::read(&paths[1]).unwrap(), b"fixture-envelope");
+    let state: Value = serde_json::from_slice(&fs::read(&paths[2]).unwrap()).unwrap();
+    assert_eq!(
+        state["identity"],
+        serde_json::to_value(&f.verifier.0).unwrap()
+    );
+    assert!(verify_private_file(&unrelated).is_err());
+    assert_eq!(fs::read(&unrelated).unwrap(), b"not managed");
+}
+
+#[cfg(windows)]
+#[test]
+fn released_windows_existing_pair_keeps_rollback_witness() {
+    let mut f = Fixture::new();
+    let paths = f.create_released_pair();
+    let previous: Vec<_> = paths.iter().map(|path| fs::read(path).unwrap()).collect();
+    f.verifier.0 = VerifiedManagedPairIdentity::new(
+        "older",
+        f.verifier.0.target(),
+        3,
+        hash(b"older"),
+        f.verifier.0.core().clone(),
+        f.verifier.0.companion().clone(),
+    )
+    .unwrap();
+    let error = f.complete().unwrap_err();
+    assert!(format!("{error:#}").contains("rollback generation"));
+    for (path, expected) in paths.iter().zip(previous) {
+        assert_eq!(fs::read(path).unwrap(), expected);
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn released_windows_existing_pair_rejects_hard_links_before_acl_changes() {
+    use ctx_history_platform::platform_security::verify_private_file;
+    for index in 0..3 {
+        let f = Fixture::new();
+        let paths = f.create_released_pair();
+        let outside = f.marker.parent().unwrap().join("outside-linked-file");
+        fs::hard_link(&paths[index], &outside).unwrap();
+        let original = fs::read(&outside).unwrap();
+        assert!(verify_private_file(&outside).is_err());
+        let error = f.complete().unwrap_err();
+        assert!(format!("{error:#}").contains("unique no-follow Windows file"));
+        assert!(verify_private_file(&outside).is_err());
+        assert_eq!(fs::read(&outside).unwrap(), original);
     }
 }
 

@@ -3,6 +3,8 @@
 mod install_marker;
 mod upgrade;
 
+#[cfg(windows)]
+pub use ctx_managed_pair_engine::protect_released_managed_pair_under_installation_lock;
 pub use ctx_managed_pair_engine::{
     apply_or_resume_managed_pair_under_installation_lock,
     inspect_managed_pair_under_installation_lock,
