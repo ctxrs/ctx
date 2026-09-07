@@ -30,6 +30,10 @@ mod native {
 
     static TEST_SERIAL: Mutex<()> = Mutex::new(());
 
+    #[path = "../persistent_daemon_lifecycle/capture.rs"]
+    mod capture;
+    use capture::CapturedChild;
+
     struct Harness {
         temp: TempDir,
         binary: PathBuf,
@@ -88,7 +92,7 @@ mod native {
             command
         }
 
-        fn spawn(&self, args: &[&str], input: Option<&[u8]>) -> Child {
+        fn spawn(&self, args: &[&str], input: Option<&[u8]>) -> CapturedChild {
             let mut command = self.std_command();
             command
                 .args(args)
@@ -96,19 +100,11 @@ mod native {
                     Stdio::piped()
                 } else {
                     Stdio::null()
-                })
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped());
-            let mut child = command
-                .spawn()
+                });
+            let mut child = CapturedChild::spawn(&mut command, self.temp.path())
                 .unwrap_or_else(|error| panic!("spawn ctx {:?}: {error}", args));
             if let Some(input) = input {
-                child
-                    .stdin
-                    .take()
-                    .expect("piped ctx stdin")
-                    .write_all(input)
-                    .expect("write ctx stdin");
+                child.write_input(input).expect("write ctx stdin");
             }
             child
         }
@@ -940,31 +936,10 @@ mod native {
         })
     }
 
-    fn wait_for_output(mut child: Child, timeout: Duration, args: &[&str]) -> Output {
-        let deadline = Instant::now() + timeout;
-        loop {
-            match child.try_wait() {
-                Ok(Some(_)) => return child.wait_with_output().expect("collect ctx output"),
-                Ok(None) if Instant::now() < deadline => {
-                    thread::sleep(Duration::from_millis(20));
-                }
-                Ok(None) => {
-                    let pid = child.id();
-                    let _ = child.kill();
-                    let output = child
-                        .wait_with_output()
-                        .expect("collect timed-out ctx output");
-                    panic!(
-                        "ctx {:?} pid {pid} exceeded {:?}:\nstdout:\n{}\nstderr:\n{}",
-                        args,
-                        timeout,
-                        String::from_utf8_lossy(&output.stdout),
-                        String::from_utf8_lossy(&output.stderr)
-                    );
-                }
-                Err(error) => panic!("poll ctx {:?}: {error}", args),
-            }
-        }
+    fn wait_for_output(child: CapturedChild, timeout: Duration, args: &[&str]) -> Output {
+        child
+            .output(timeout)
+            .unwrap_or_else(|error| panic!("ctx {:?}: {error}", args))
     }
 
     fn wait_for_output_best_effort(mut child: Child, timeout: Duration) -> Option<Output> {

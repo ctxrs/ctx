@@ -216,6 +216,8 @@ daemon_cli_binary_contract(
     },
     extra_srcs = [
         "tests/contracts/native/process_control.rs",
+        "tests/contracts/persistent_daemon_lifecycle/capture.rs",
+        "tests/contracts/persistent_daemon_lifecycle/capture_tests.rs",
         "tests/contracts/persistent_daemon_lifecycle/lifecycle_regressions.rs",
     ],
     tags = [
