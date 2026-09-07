@@ -8,25 +8,25 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context as _, Result, anyhow, bail};
+use anyhow::{anyhow, bail, Context as _, Result};
 use ctx_history_platform::platform_security::{
     create_private_directory_all, create_private_file_new,
 };
 use ctx_upgrade_engine::{
-    ManagedPairVerifier, VerifiedManagedPairIdentity, current_install_path,
-    managed_install_path_identity_matches, try_acquire_managed_installation_mutation_at_root,
+    current_install_path, managed_install_path_identity_matches,
+    try_acquire_managed_installation_mutation_at_root, ManagedPairVerifier,
+    VerifiedManagedPairIdentity,
 };
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use super::{
-    CoreManagedPairVerifier,
     managed_pair_apply::{
-        ApplyRequest, apply_under_installation_lock, managed_core_destination, marker_channel,
+        apply_under_installation_lock, managed_core_destination, marker_channel,
         normalized_absolute_path, read_bounded_regular_file, read_install_marker,
         read_released_install_marker, require_directory, require_regular_file,
-        validate_install_marker,
+        validate_install_marker, ApplyRequest,
     },
-    write_response_frame,
+    write_response_frame, CoreManagedPairVerifier,
 };
 
 const MAX_MARKER_BYTES: u64 = 64 * 1024;

@@ -5,20 +5,20 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-use anyhow::{Context as _, Result, anyhow, bail};
+use anyhow::{anyhow, bail, Context as _, Result};
 use ctx_companion_bridge::ReleaseChannel;
 use ctx_upgrade_engine::{
-    InstallMarker, MANAGED_CORE_INSTALL_MARKER_RELATIVE_PATH, ManagedPairApplyInput,
-    ManagedPairInstallationStatus, ManagedPairTarget, ManagedPairVerifier,
-    VerifiedManagedPairIdentity, apply_or_resume_managed_pair_under_installation_lock,
+    apply_or_resume_managed_pair_under_installation_lock,
     ensure_hosted_transaction_inactive_under_installation_lock,
     inspect_managed_pair_under_installation_lock, managed_install_path_identity_matches,
-    try_acquire_managed_installation_mutation_at_root,
+    try_acquire_managed_installation_mutation_at_root, InstallMarker, ManagedPairApplyInput,
+    ManagedPairInstallationStatus, ManagedPairTarget, ManagedPairVerifier,
+    VerifiedManagedPairIdentity, MANAGED_CORE_INSTALL_MARKER_RELATIVE_PATH,
 };
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 
-use super::{CoreManagedPairVerifier, write_response_frame};
+use super::{write_response_frame, CoreManagedPairVerifier};
 
 const ARGUMENT_COUNT: usize = 8;
 pub(super) const MAX_PATH_BYTES: usize = 16 * 1024;

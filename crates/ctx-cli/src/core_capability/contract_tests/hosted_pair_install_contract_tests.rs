@@ -1,10 +1,10 @@
 use std::{ffi::OsString, fs, path::PathBuf};
 
 use ctx_upgrade_engine::{
-    ManagedPairComponentIdentity, ManagedPairTarget, ManagedPairVerifier,
-    VerifiedManagedPairIdentity, try_acquire_managed_installation_mutation_at_root,
+    try_acquire_managed_installation_mutation_at_root, ManagedPairComponentIdentity,
+    ManagedPairTarget, ManagedPairVerifier, VerifiedManagedPairIdentity,
 };
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use sha2::{Digest as _, Sha256};
 
 use super::super::{hosted_pair_install as hosted, managed_pair_apply};
@@ -210,15 +210,13 @@ fn installed_core_completion_and_reinstall_use_existing_kernel() {
         json!({"schema_version":1,"command":"hosted_managed_pair_install",
         "status":"committed","release_name":"bridge","rollback_generation":4})
     );
-    assert!(
-        !fs::read_dir(f.marker.parent().unwrap())
+    assert!(!fs::read_dir(f.marker.parent().unwrap())
+        .unwrap()
+        .any(|entry| entry
             .unwrap()
-            .any(|entry| entry
-                .unwrap()
-                .file_name()
-                .to_string_lossy()
-                .starts_with(".ctx-hosted-inputs-"))
-    );
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".ctx-hosted-inputs-")));
 }
 
 #[cfg(windows)]
@@ -318,7 +316,7 @@ fn released_windows_existing_pair_rejects_hard_links_before_acl_changes() {
 #[test]
 fn released_completion_stages_inputs_without_relaxing_kernel_source_checks() {
     use ctx_upgrade_engine::{
-        ManagedPairApplyInput, apply_or_resume_managed_pair_under_installation_lock,
+        apply_or_resume_managed_pair_under_installation_lock, ManagedPairApplyInput,
     };
     use std::os::unix::fs::PermissionsExt as _;
     let f = Fixture::new();
@@ -385,24 +383,22 @@ fn installed_identity_channel_signature_and_marker_fail_closed_before_publicatio
             4,
             "{fault} cleanup"
         );
-        assert!(
-            !f.core
-                .parent()
-                .unwrap()
-                .parent()
-                .unwrap()
-                .join("libexec/ctx-pro")
-                .exists()
-        );
-        assert!(
-            !f.core
-                .parent()
-                .unwrap()
-                .parent()
-                .unwrap()
-                .join("libexec/ctx-pro.exe")
-                .exists()
-        );
+        assert!(!f
+            .core
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("libexec/ctx-pro")
+            .exists());
+        assert!(!f
+            .core
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("libexec/ctx-pro.exe")
+            .exists());
     }
 }
 

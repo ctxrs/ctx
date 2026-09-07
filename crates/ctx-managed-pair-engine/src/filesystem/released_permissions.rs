@@ -2,7 +2,7 @@
 
 use std::{fs, os::windows::fs::MetadataExt as _, path::Path};
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{bail, Context as _, Result};
 use ctx_history_platform::platform_security::{
     restrict_private_directory, restrict_private_file_handle,
 };
@@ -12,8 +12,8 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 
 use super::{
-    Entry, Layout, Slot, validate_absolute_root, validate_open_owner_regular,
-    windows_file_information,
+    validate_absolute_root, validate_open_owner_regular, windows_file_information, Entry, Layout,
+    Slot,
 };
 
 /// Protects only the fixed paths left with inherited ACLs by released Windows

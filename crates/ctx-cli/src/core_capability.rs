@@ -111,9 +111,8 @@ pub(crate) fn intercept(arguments: &[std::ffi::OsString]) -> Option<ExitCode> {
         .get(1)
         .is_some_and(|value| value == HOSTED_PAIR_INSTALL_INVOCATION)
     {
-        let result = crate::output::with_stdout_writer(|writer| {
-            hosted_pair_install::run(arguments, writer)
-        });
+        let result =
+            crate::output::with_stdout_writer(|writer| hosted_pair_install::run(arguments, writer));
         return Some(match result {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
