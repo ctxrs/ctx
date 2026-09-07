@@ -14,9 +14,9 @@ Progress-event JSON is stderr progress output and does not include
 In 1.3.2, status/setup JSON retains schema version 2; generic usage/error,
 index, and daemon command JSON retains version 1. The generic `local_only`
 field is deprecated but remains for existing readers. It is a legacy marker,
-not a guarantee that configured semantic execution or optional analytics makes
-no network requests. Use the operation-specific diagnostics and network
-configuration instead. This does not change nested semantic locality fields.
+not a guarantee of offline execution. Use the operation-specific diagnostics
+and [network configuration](../storage.md) instead. This does not change nested
+semantic locality fields.
 
 All machine timestamp fields remain exact UTC RFC 3339 values with their
 contracted millisecond precision. The OS-local, no-millisecond presentation
