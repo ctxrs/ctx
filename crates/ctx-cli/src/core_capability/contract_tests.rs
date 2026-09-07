@@ -12,6 +12,10 @@ mod failure_contract_tests;
 #[path = "contract_tests/managed_pair_apply_contract_tests.rs"]
 mod managed_pair_apply_contract_tests;
 
+#[cfg(test)]
+#[path = "contract_tests/hosted_pair_install_contract_tests.rs"]
+mod hosted_pair_install_contract_tests;
+
 #[test]
 fn fingerprint_is_the_sha256_of_the_canonical_inventory() {
     assert_eq!(

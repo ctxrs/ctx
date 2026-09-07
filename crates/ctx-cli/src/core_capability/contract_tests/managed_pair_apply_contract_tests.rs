@@ -133,10 +133,10 @@ impl ArgFixture {
 #[test]
 fn only_the_exact_apply_argv_is_intercepted() {
     assert!(intercept(&["ctx".into(), MANAGED_PAIR_APPLY_INVOCATION.into()]).is_some());
+    assert!(intercept(&["ctx".into(), HOSTED_PAIR_INSTALL_INVOCATION.into()]).is_some());
     #[cfg(unix)]
     assert!(intercept(&["ctx".into(), MANAGED_PAIR_RECONCILE_INVOCATION.into(),]).is_some());
     for removed in [
-        "--ctx-core-hosted-pair-install-v1",
         "--ctx-core-managed-pair-swap-v1",
         "--ctx-core-managed-pair-uninstall-v1",
     ] {

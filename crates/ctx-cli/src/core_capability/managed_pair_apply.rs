@@ -5,20 +5,20 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-use anyhow::{anyhow, bail, Context as _, Result};
+use anyhow::{Context as _, Result, anyhow, bail};
 use ctx_companion_bridge::ReleaseChannel;
 use ctx_upgrade_engine::{
-    apply_or_resume_managed_pair_under_installation_lock,
+    InstallMarker, MANAGED_CORE_INSTALL_MARKER_RELATIVE_PATH, ManagedPairApplyInput,
+    ManagedPairInstallationStatus, ManagedPairTarget, ManagedPairVerifier,
+    VerifiedManagedPairIdentity, apply_or_resume_managed_pair_under_installation_lock,
     ensure_hosted_transaction_inactive_under_installation_lock,
     inspect_managed_pair_under_installation_lock, managed_install_path_identity_matches,
-    try_acquire_managed_installation_mutation_at_root, InstallMarker, ManagedPairApplyInput,
-    ManagedPairInstallationStatus, ManagedPairTarget, ManagedPairVerifier,
-    VerifiedManagedPairIdentity, MANAGED_CORE_INSTALL_MARKER_RELATIVE_PATH,
+    try_acquire_managed_installation_mutation_at_root,
 };
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 
-use super::{write_response_frame, CoreManagedPairVerifier};
+use super::{CoreManagedPairVerifier, write_response_frame};
 
 const ARGUMENT_COUNT: usize = 8;
 pub(super) const MAX_PATH_BYTES: usize = 16 * 1024;
@@ -29,11 +29,11 @@ const SUCCESS_RECEIPT: &[u8] =
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ApplyRequest {
-    install_root: PathBuf,
-    signed_envelope: PathBuf,
-    core: PathBuf,
-    companion: PathBuf,
-    install_marker: PathBuf,
+    pub(super) install_root: PathBuf,
+    pub(super) signed_envelope: PathBuf,
+    pub(super) core: PathBuf,
+    pub(super) companion: PathBuf,
+    pub(super) install_marker: PathBuf,
 }
 
 impl ApplyRequest {
@@ -112,6 +112,18 @@ fn apply(request: &ApplyRequest) -> Result<()> {
     let verifier = CoreManagedPairVerifier::for_channel(channel);
     let _guard = try_acquire_managed_installation_mutation_at_root(&request.install_root)?
         .ok_or_else(|| anyhow!("managed-pair installation is busy"))?;
+    apply_under_installation_lock(request, &marker, channel, &verifier, None).map(drop)
+}
+
+/// Both fixed entry points share the same verification and transaction owner.
+/// The caller holds the installation lock for this entire function.
+pub(super) fn apply_under_installation_lock(
+    request: &ApplyRequest,
+    marker: &InstallMarker,
+    channel: ReleaseChannel,
+    verifier: &dyn ManagedPairVerifier,
+    installed_core: Option<&Path>,
+) -> Result<VerifiedManagedPairIdentity> {
     ensure_hosted_transaction_inactive_under_installation_lock(&request.destination_core())?;
     let envelope = read_bounded_regular_file(
         &request.signed_envelope,
@@ -122,29 +134,50 @@ fn apply(request: &ApplyRequest) -> Result<()> {
     let identity = verifier.verify_signed_envelope(&envelope)?;
     verify_component(&request.core, identity.core(), "Core")?;
     verify_component(&request.companion, identity.companion(), "companion")?;
-    validate_install_marker(request, &marker, channel, &identity)?;
+    validate_install_marker(request, marker, channel, &identity)?;
+    if let Some(installed_core) = installed_core {
+        if !managed_install_path_identity_matches(installed_core, &request.destination_core()) {
+            bail!("hosted pair installation must run from the installed Core");
+        }
+        // The released entry is only a completion path for this already
+        // installed signed Core, never permission to replace another version.
+        verify_component(installed_core, identity.core(), "installed Core")?;
+    }
 
     apply_or_resume_managed_pair_under_installation_lock(
         &request.install_root,
         &request.kernel_input(),
-        &verifier,
+        verifier,
     )?;
-    match inspect_managed_pair_under_installation_lock(&request.install_root, &verifier)? {
+    match inspect_managed_pair_under_installation_lock(&request.install_root, verifier)? {
         ManagedPairInstallationStatus::Healthy {
             identity: active,
             envelope_sha256: active_envelope,
-        } if active == identity && active_envelope.eq_ignore_ascii_case(&envelope_sha256) => Ok(()),
+        } if active == identity && active_envelope.eq_ignore_ascii_case(&envelope_sha256) => {
+            Ok(identity)
+        }
         _ => bail!("published managed pair does not match the requested signed candidate"),
     }
 }
 
 pub(super) fn read_install_marker(path: &Path) -> Result<InstallMarker> {
+    read_marker(path, true)
+}
+
+pub(super) fn read_released_install_marker(path: &Path) -> Result<InstallMarker> {
+    read_marker(path, false)
+}
+
+fn read_marker(path: &Path, require_pair_flag: bool) -> Result<InstallMarker> {
     let bytes = read_bounded_regular_file(path, MAX_MARKER_BYTES, "install marker")?;
     let value: Value =
         serde_json::from_slice(&bytes).context("parse managed Core install marker")?;
     if value.get("schema_version").and_then(Value::as_u64) != Some(1)
         || value.get("manager").and_then(Value::as_str) != Some("ctx-hosted-installer")
-        || value.get("managed_pair").and_then(Value::as_bool) != Some(true)
+        || (require_pair_flag && value.get("managed_pair").and_then(Value::as_bool) != Some(true))
+        || value
+            .get("managed_pair")
+            .is_some_and(|flag| flag.as_bool() != Some(true))
     {
         bail!("managed Core install marker schema is invalid");
     }
@@ -231,7 +264,7 @@ fn sha256_file(path: &Path) -> Result<String> {
     Ok(format!("{:x}", digest.finalize()))
 }
 
-fn read_bounded_regular_file(path: &Path, maximum: u64, label: &str) -> Result<Vec<u8>> {
+pub(super) fn read_bounded_regular_file(path: &Path, maximum: u64, label: &str) -> Result<Vec<u8>> {
     let metadata = fs::symlink_metadata(path).with_context(|| format!("inspect {label}"))?;
     if !metadata.is_file()
         || metadata.file_type().is_symlink()

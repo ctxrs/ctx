@@ -24,6 +24,7 @@ use serde_json::{json, Value};
 use sha2::{Digest as _, Sha256};
 
 mod failure;
+mod hosted_pair_install;
 mod managed_pair_apply;
 #[cfg(unix)]
 mod managed_pair_reconcile;
@@ -44,6 +45,7 @@ use setup_refresh::{
 
 const INVOCATION: &str = "--ctx-core-capability-v1";
 const MANAGED_PAIR_APPLY_INVOCATION: &str = "--ctx-core-managed-pair-apply-v1";
+const HOSTED_PAIR_INSTALL_INVOCATION: &str = "--ctx-core-hosted-pair-install-v1";
 #[cfg(unix)]
 const MANAGED_PAIR_RECONCILE_INVOCATION: &str = "--ctx-core-managed-pair-reconcile-integration-v1";
 const HOSTED_UNINSTALL_POST_EXIT_INVOCATION: &str = "--ctx-core-hosted-uninstall-after-parent-v1";
@@ -103,6 +105,21 @@ pub(crate) fn intercept(arguments: &[std::ffi::OsString]) -> Option<ExitCode> {
             ExitCode::SUCCESS
         } else {
             ExitCode::FAILURE
+        });
+    }
+    if arguments
+        .get(1)
+        .is_some_and(|value| value == HOSTED_PAIR_INSTALL_INVOCATION)
+    {
+        let result = crate::output::with_stdout_writer(|writer| {
+            hosted_pair_install::run(arguments, writer)
+        });
+        return Some(match result {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                crate::output::write_stderr_line(format_args!("{error:#}"));
+                ExitCode::FAILURE
+            }
         });
     }
     if arguments
