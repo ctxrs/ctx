@@ -739,7 +739,9 @@ impl GenerationWriter {
         {
             document.add_session_authority(self.fields);
         }
-        self.writer_mut()?.add_document(document)?;
+        self.writer_mut()?.add_document(document).map_err(|error| {
+            writer_publication::observe_candidate_failure(&self.root, error.into())
+        })?;
         if first_for_candidate {
             self.changed_sessions.insert(session_uuid, merged);
             if let Some(checkpoint) = self.active_source_route_stage.as_mut() {

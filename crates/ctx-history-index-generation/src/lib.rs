@@ -6,6 +6,7 @@
 
 mod certification;
 mod clone;
+pub use clone::observed_low_candidate_space;
 mod durable_directory;
 mod error;
 mod generation;

@@ -40,6 +40,29 @@ const REPUBLISH_HEADROOM_RESERVE_BYTES: u64 = 16 * 1024 * 1024;
 const MANAGED_FILE: &str = ".managed.json";
 const TANTIVY_LOCK_FILES: [&str; 2] = [".tantivy-meta.lock", ".tantivy-writer.lock"];
 
+/// Observe this candidate volume using the same platform probe as clone admission.
+pub(crate) fn candidate_available_bytes(root: &Path) -> Result<u64> {
+    #[cfg(any(test, feature = "test-support"))]
+    if portable::forced_for_test() {
+        return portable::candidate_available_bytes(root);
+    }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        unix::candidate_available_bytes(root)
+    }
+    #[cfg(any(target_os = "windows", target_os = "freebsd"))]
+    {
+        portable::candidate_available_bytes(root)
+    }
+}
+
+/// Diagnostic observation only; failure to sample must preserve the original error.
+pub fn observed_low_candidate_space(root: &Path) -> Option<u64> {
+    candidate_available_bytes(root)
+        .ok()
+        .filter(|available| *available < REPUBLISH_HEADROOM_RESERVE_BYTES)
+}
+
 pub fn create_authenticated_candidate_generation(
     root: &Path,
     predecessor_pointer: &ActiveGenerationPointer,

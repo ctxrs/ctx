@@ -38,6 +38,11 @@ use crate::{
 };
 pub(super) use guard::CandidateGuard;
 
+pub(super) fn candidate_available_bytes(root: &Path) -> Result<u64> {
+    let directory = BoundDirectory::open_path(root)?;
+    available_bytes(&directory.file, false)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct FileIdentity {
     device: u64,

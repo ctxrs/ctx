@@ -135,6 +135,14 @@ pub enum IndexError {
     )]
     CurrentRepublishInsufficientHeadroom { required: u64, available: u64 },
     #[error(
+        "indexing failed with {available} bytes observed free on the index volume; free space and retry; underlying error: {cause}"
+    )]
+    CandidateFailureWithLowSpace {
+        available: u64,
+        #[source]
+        cause: Box<IndexError>,
+    },
+    #[error(
         "Core record revisions do not match the active generation policy: normalization {normalization}/{expected_normalization}, content {content}/{expected_content}"
     )]
     CoreRecordPolicyRevisionMismatch {

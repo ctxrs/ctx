@@ -18,6 +18,11 @@ use crate::{
     GenerationError as IndexError, Result, INDEX_GENERATIONS_DIRECTORY,
 };
 
+pub(super) fn candidate_available_bytes(root: &Path) -> Result<u64> {
+    let directory = BoundDirectory::open_path(root)?;
+    available_bytes(&directory, false)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EntryKind {
     Regular,

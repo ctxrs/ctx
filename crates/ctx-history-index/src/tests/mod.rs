@@ -87,7 +87,7 @@ fn source_for_provider(provider: &str, source_format: &str, name: &str) -> Sourc
     .unwrap()
 }
 
-fn certificate(source: &SourceKey, revision: u8, documents: u64) -> CertifiedSource {
+pub(super) fn certificate(source: &SourceKey, revision: u8, documents: u64) -> CertifiedSource {
     let opening =
         SourceObservation::new(source.clone(), "regular-file-v1", vec![revision]).unwrap();
     CertifiedSource::certify(

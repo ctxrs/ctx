@@ -7,6 +7,22 @@ use ctx_history_index_format::{
 };
 use std::collections::BTreeMap;
 
+#[cfg(test)]
+#[path = "writer_publication_tests.rs"]
+mod tests;
+
+pub(super) fn observe_candidate_failure(root: &Path, error: IndexError) -> IndexError {
+    if matches!(error, IndexError::Tantivy(_)) {
+        if let Some(available) = ctx_history_index_generation::observed_low_candidate_space(root) {
+            return IndexError::CandidateFailureWithLowSpace {
+                available,
+                cause: Box::new(error),
+            };
+        }
+    }
+    error
+}
+
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static BASE_MANIFEST_SOURCE_MATERIALIZATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
@@ -339,7 +355,8 @@ impl GenerationWriter {
             .ok_or(IndexError::WriterInvariant(
                 "mutating commit is missing its lazy writer",
             ))?
-            .prepare_commit()?;
+            .prepare_commit()
+            .map_err(|error| observe_candidate_failure(&root, error.into()))?;
         for pending in self.pending.values() {
             let certificate = pending.certificate.as_ref().ok_or_else(|| {
                 IndexError::SourceNotCertified(pending.source.identity().to_string())
@@ -383,7 +400,10 @@ impl GenerationWriter {
             }
         };
         if let Err(error) = write_prepared_manifest(&root, &prepared_manifest) {
-            let _ = prepared.abort();
+            // Keep the original writer: abort() replaces it and would lose the
+            // handle needed to establish completion of its existing merge work.
+            drop(prepared);
+            self.discard_after_manifest_failure();
             return Err(error);
         }
         prepared.set_payload(&payload);
@@ -407,7 +427,9 @@ impl GenerationWriter {
         let writer = self.writer.take().ok_or(IndexError::WriterInvariant(
             "candidate commit is missing its lazy writer",
         ))?;
-        writer.wait_merging_threads()?;
+        writer
+            .wait_merging_threads()
+            .map_err(|error| observe_candidate_failure(&root, error.into()))?;
         let (opstamp, reconciled_commit_error) = match commit_result {
             Ok(opstamp) => (opstamp, None),
             Err(error) => {
@@ -805,6 +827,26 @@ impl GenerationWriter {
                     "candidate generation directory is missing",
                 ))?;
         Ok(self.root.join(INDEX_GENERATIONS_DIRECTORY).join(directory))
+    }
+
+    // Called only before candidate commit/pointer publication, with no prepared
+    // borrow remaining. Failure to establish quiescence leaves safe residue.
+    fn discard_after_manifest_failure(mut self) {
+        let Some(writer) = self.writer.take() else {
+            return;
+        };
+        if writer.wait_merging_threads().is_err() {
+            return;
+        }
+        let fence = self.candidate_activation_fence.take();
+        let writer_lock = self.preflight_lock.take();
+        drop(self);
+        if writer_lock.is_some() {
+            if let Some(fence) = fence {
+                fence.discard();
+            }
+        }
+        drop(writer_lock);
     }
 
     fn discard_candidate(&mut self) -> Result<()> {

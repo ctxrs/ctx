@@ -145,6 +145,26 @@ fn diagnostic_text_cannot_override_the_typed_terminal_outcome() {
 }
 
 #[test]
+fn observed_low_space_is_a_retryable_resource_failure() {
+    let error = anyhow::Error::new(IndexError::CandidateFailureWithLowSpace {
+        available: 0,
+        cause: Box::new(IndexError::WriterInvariant("original worker failure")),
+    });
+    let outcome = source_backed_refresh_failure_outcome(
+        &error,
+        &BTreeSet::new(),
+        &uuid::Uuid::nil().to_string(),
+    )
+    .unwrap();
+    assert_eq!(outcome.code(), RefreshOutcomeCode::ResourceUnavailable);
+    assert!(outcome.retryable());
+    assert_eq!(
+        outcome.retry_advice(),
+        Some(RefreshRetryAdvice::RetryRequest)
+    );
+}
+
+#[test]
 fn active_status_overlays_worker_facts_and_snapshots_them_on_failure() {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("data");
