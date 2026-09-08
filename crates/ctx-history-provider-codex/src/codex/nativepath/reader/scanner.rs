@@ -11,7 +11,11 @@ impl CodexNativeScanner {
                 path: source.source_path.clone(),
             })
         })?;
-        let core_source = codex_source_key_in_root(source.source_root_lineage, native_session_id)?;
+        let core_source = codex_source_key_for_path(
+            source.source_root_lineage,
+            native_session_id,
+            &source.source_path,
+        )?;
         let core_session_id = codex_session_identity(&core_source, native_session_id)?;
         Ok(Self {
             source,

@@ -436,6 +436,16 @@ pub(crate) fn codex_canonical_session_id_from_path(path: &Path) -> Option<String
     Some(tail.to_owned())
 }
 
+/// A revert keeps its thread owner but has a separate provider rollout ID.
+/// Raw and compressed representations intentionally produce the same ID.
+pub(crate) fn codex_revert_rollout_id<'a>(path: &'a Path, owner: &str) -> Option<&'a str> {
+    let (prefix, rollout) = codex_session_file_stem(path)?.rsplit_once('_')?;
+    (rollout.len() == 36
+        && codex_uuid_suffix(prefix.as_bytes()) == Some(owner)
+        && codex_uuid_suffix(rollout.as_bytes()) == Some(rollout))
+    .then_some(rollout)
+}
+
 fn codex_uuid_suffix(bytes: &[u8]) -> Option<&str> {
     let tail = bytes.get(bytes.len().checked_sub(36)?..)?;
     tail.iter()

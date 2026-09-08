@@ -6,6 +6,7 @@ use std::{
     time::Duration,
 };
 
+use crate::test_support_paths::tempdir;
 use ctx_history_capture_model::{
     provider_source_config_digest, ProviderRootDefinition, ProviderRouteRole,
     ProviderSourceRouteProvenance, SourceRouteIdentity,
@@ -17,7 +18,6 @@ use ctx_history_core::{
 };
 use ctx_history_index::{AppliedProviderRoot, IndexError, VerifiedIndex, WriterOptions};
 use ctx_history_provider_gemini::GEMINI_CLI_SOURCE_FORMAT;
-use tempfile::tempdir;
 
 fn fixture_route(
     provider: CaptureProvider,
