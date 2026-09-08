@@ -6,9 +6,61 @@ pub(super) fn config() -> Config {
     Config::default().with_event_kinds(EventKindMask::CORE | EventKindMask::ACCESS_CLOSE)
 }
 
+/// Preserve native notifications and cover macOS's already-dirty open files.
+/// Polling reads metadata only, never provider bodies or symlink descendants.
+pub(super) struct ReliableWatcher {
+    native: notify::RecommendedWatcher,
+    #[cfg(target_os = "macos")]
+    metadata: super::metadata_poll::MetadataWatcher,
+}
+
+impl ReliableWatcher {
+    pub(super) fn new(
+        handler: impl Fn(notify::Result<notify::Event>) + Send + Sync + 'static,
+    ) -> notify::Result<Self> {
+        use notify::Watcher;
+        let handler = std::sync::Arc::new(handler);
+        let native_handler = std::sync::Arc::clone(&handler);
+        let native = notify::RecommendedWatcher::new(move |event| native_handler(event), config())?;
+        #[cfg(target_os = "macos")]
+        let metadata = super::metadata_poll::MetadataWatcher::new(handler)?;
+        Ok(Self {
+            native,
+            #[cfg(target_os = "macos")]
+            metadata,
+        })
+    }
+
+    pub(super) fn watch(
+        &mut self,
+        path: &std::path::Path,
+        mode: notify::RecursiveMode,
+    ) -> notify::Result<()> {
+        use notify::Watcher;
+        self.native.watch(path, mode)?;
+        #[cfg(target_os = "macos")]
+        if let Err(error) = self.metadata.watch(path, mode) {
+            let _ = self.native.unwatch(path);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    pub(super) fn unwatch(&mut self, path: &std::path::Path) -> notify::Result<()> {
+        use notify::Watcher;
+        let native = self.native.unwatch(path);
+        #[cfg(target_os = "macos")]
+        {
+            return native.and(self.metadata.unwatch(path));
+        }
+        #[cfg(not(target_os = "macos"))]
+        native
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     use std::{
         collections::BTreeMap,
         sync::{mpsc, Arc},
@@ -16,14 +68,14 @@ mod tests {
     };
 
     use super::*;
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     use crate::{watch::WatchWatermark, CoalescingWakePayload, NativeFileWatcher};
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[derive(Clone, Debug, Default, Eq, PartialEq)]
     struct TestPayload(Option<WatchWatermark>);
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     impl CoalescingWakePayload for TestPayload {
         fn is_empty(&self) -> bool {
             self.0.is_none()
@@ -84,5 +136,58 @@ mod tests {
             ignored_rx.recv_timeout(Duration::from_millis(250)),
             Err(mpsc::RecvTimeoutError::Timeout)
         ));
+    }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn open_writer_append_wakes_native_watch() {
+        use std::io::Write;
+        let temp = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
+        let source = temp.path().join("active.jsonl");
+        std::fs::write(&source, b"first\n").unwrap();
+        let mut writer = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&source)
+            .unwrap();
+        writer.write_all(b"already-open-and-dirty\n").unwrap();
+        writer.flush().unwrap();
+        let (tx, rx) = mpsc::channel();
+        let mut watcher = NativeFileWatcher::start(
+            "ctx-open-writer-test",
+            Arc::new(|_| false),
+            Arc::new(move |event, watermark| {
+                if let Ok(event) = event {
+                    let _ = tx.send(event.paths);
+                }
+                TestPayload(Some(watermark))
+            }),
+            Arc::new(|_| {}),
+            Arc::new(|w| TestPayload(Some(w))),
+            Arc::new(|_| {}),
+            Arc::new(|_| {}),
+        )
+        .unwrap();
+        watcher
+            .reconcile_paths(BTreeMap::from([(temp.path().to_path_buf(), true)]), false)
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(250));
+        writer.write_all(b"second\n").unwrap();
+        writer.flush().unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(8);
+        let mut observed = false;
+        while let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) {
+            match rx.recv_timeout(remaining) {
+                Ok(paths) if paths.contains(&source) => {
+                    observed = true;
+                    break;
+                }
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+        assert!(
+            observed,
+            "an append must wake refresh before the writer closes its file"
+        );
+        drop(writer);
     }
 }

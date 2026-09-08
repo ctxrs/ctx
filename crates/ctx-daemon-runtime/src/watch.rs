@@ -12,12 +12,22 @@ use std::{
 use anyhow::{Context, Result};
 use notify::{
     event::{AccessKind, AccessMode, CreateKind, MetadataKind, ModifyKind, RemoveKind},
-    Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
+    Event, EventKind, RecursiveMode,
 };
 
 use crate::CoalescingWakePayload;
 mod callback_injection;
+#[cfg(target_os = "macos")]
+mod metadata_poll;
 mod native_subscription;
+
+pub const fn native_watch_backend() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "notify_recommended_with_metadata_poll"
+    } else {
+        "notify_recommended"
+    }
+}
 
 pub const WATCH_EVENT_QUEUE_CAPACITY: usize = 256;
 pub const WATCH_DEBOUNCE_QUIET: Duration = Duration::from_millis(250);
@@ -190,7 +200,7 @@ impl RawWatchIngress {
 }
 
 pub struct NativeFileWatcher {
-    watcher: RecommendedWatcher,
+    watcher: native_subscription::ReliableWatcher,
     watched: BTreeMap<PathBuf, bool>,
     counters: Arc<Mutex<NativeWatcherCounters>>,
     sender: mpsc::SyncSender<WatchMessage>,
@@ -482,28 +492,25 @@ fn native_file_watcher(
     callback_sequence: &Arc<AtomicU64>,
     ignore_event: &IgnoreEvent,
     overflow_fence: &OverflowFence,
-) -> Result<RecommendedWatcher> {
+) -> Result<native_subscription::ReliableWatcher> {
     let sender = sender.clone();
     let ingress = Arc::clone(ingress);
     let accepting_events = Arc::clone(accepting_events);
     let sequence = Arc::clone(callback_sequence);
     let ignore_event = Arc::clone(ignore_event);
     let overflow_fence = Arc::clone(overflow_fence);
-    RecommendedWatcher::new(
-        move |event: notify::Result<Event>| {
-            forward_native_watch_event(
-                &sender,
-                &ingress,
-                &accepting_events,
-                watcher_epoch,
-                &sequence,
-                &ignore_event,
-                &overflow_fence,
-                normalize_native_watch_event(event),
-            );
-        },
-        native_subscription::config(),
-    )
+    native_subscription::ReliableWatcher::new(move |event: notify::Result<Event>| {
+        forward_native_watch_event(
+            &sender,
+            &ingress,
+            &accepting_events,
+            watcher_epoch,
+            &sequence,
+            &ignore_event,
+            &overflow_fence,
+            normalize_native_watch_event(event),
+        );
+    })
     .context("start native filesystem watcher")
 }
 
