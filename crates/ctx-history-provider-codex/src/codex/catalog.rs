@@ -98,7 +98,8 @@ fn catalog_codex_session_opened(
         .and_then(Value::as_str);
     let history_base_thread_id = payload
         .and_then(|payload| payload.pointer("/history_base/thread_id"))
-        .and_then(Value::as_str);
+        .and_then(Value::as_str)
+        .filter(|id| payload.and_then(|p| p.get("id")).and_then(Value::as_str) != Some(*id));
     let external_session_id = payload
         .and_then(|payload| payload.get("id"))
         .and_then(Value::as_str)
@@ -278,6 +279,7 @@ fn codex_session_meta_identity(value: &Value) -> Option<CodexSessionMetaIdentity
         .and_then(Value::as_str);
     let source = payload.get("source").cloned().unwrap_or(Value::Null);
     let (parent_native_session_id, session_relationship) = codex_session_relationship(
+        &native_session_id,
         &source,
         parent_thread_id,
         forked_from_id,
@@ -337,6 +339,7 @@ pub(crate) fn codex_parent_session_id(source: &Value) -> Option<String> {
 }
 
 pub(crate) fn codex_session_relationship(
+    native_session_id: &str,
     source: &Value,
     parent_thread_id: Option<&str>,
     forked_from_id: Option<&str>,
@@ -349,8 +352,11 @@ pub(crate) fn codex_session_relationship(
     let forked_parent = forked_from_id
         .filter(|id| !id.trim().is_empty())
         .map(str::to_owned);
+    // A reverted/paginated rollout can continue its own thread history.
+    // That history boundary is not a parent relationship. Explicit parent and
+    // fork fields retain their existing cycle/conflict validation.
     let history_parent = history_base_thread_id
-        .filter(|id| !id.trim().is_empty())
+        .filter(|id| !id.trim().is_empty() && *id != native_session_id)
         .map(str::to_owned);
     let delegated_parent = match (source_parent, direct_parent) {
         (Some(source_parent), Some(direct_parent)) if source_parent != direct_parent => {
@@ -532,6 +538,30 @@ mod tests {
         assert_eq!(
             codex_canonical_session_id_from_path(&canonical).as_deref(),
             Some(thread_id)
+        );
+    }
+    #[test]
+    fn same_thread_history_base_is_not_a_parent_cycle() {
+        let value = json!({"type":"session_meta","payload":{
+            "id":"thread-owner", "session_id":"thread-owner",
+            "timestamp":"2026-08-19T12:00:00Z", "source":"vscode",
+            "history_mode":"paginated", "history_base":{"thread_id":"thread-owner"}
+        }});
+        let identity = codex_session_meta_identity(&value).unwrap();
+        assert_eq!(identity.parent_native_session_id, None);
+        assert_eq!(
+            identity.session_relationship,
+            Some(ProviderNativeSessionRelationship::Root)
+        );
+        assert_eq!(select_codex_session_meta_owner(&[identity], None), Some(0));
+        let mut different = value.clone();
+        different["payload"]["history_base"]["thread_id"] = json!("parent");
+        assert_eq!(
+            codex_session_meta_identity(&different)
+                .unwrap()
+                .parent_native_session_id
+                .as_deref(),
+            Some("parent")
         );
     }
 }
