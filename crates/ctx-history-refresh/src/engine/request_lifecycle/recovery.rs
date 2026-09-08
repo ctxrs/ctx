@@ -89,7 +89,7 @@ impl CoreRefreshEngine {
                         &build_rearmed_routes,
                     );
                 }
-                "queued" | "running" => {
+                "admission_pending" | "queued" | "running" => {
                     require_active_state(&job, request_state)?;
                     return self.recover_published_rebuild(
                         data_root,
@@ -861,7 +861,7 @@ fn require_terminal_state(job: &Value, request_state: &str, status: &str) -> Res
 }
 
 fn require_active_state(job: &Value, request_state: &str) -> Result<()> {
-    if !matches!(request_state, "queued" | "running")
+    if !matches!(request_state, "admission_pending" | "queued" | "running")
         || job.get("request_state").and_then(Value::as_str) != Some(request_state)
         || job.get("status").and_then(Value::as_str) != Some("running")
     {

@@ -165,7 +165,9 @@ pub(super) fn goose_schema_version(conn: &Connection) -> Result<Option<i64>> {
         .map_err(CaptureError::from)
 }
 
-const GOOSE_NATIVE_SCHEMA_VERSION: i64 = 15;
+// Schema 9 has the same native message identity and required columns.
+// Later session metadata is already selected through optional-column fallbacks.
+const GOOSE_NATIVE_SCHEMA_VERSIONS: [i64; 2] = [9, 15];
 const GOOSE_CAPABILITY_DIGEST_DOMAIN: &[u8] = b"ctx-goose-nativepath-capability-v1\0";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -194,7 +196,7 @@ impl GooseNativeSchema {
                 "Goose NativePath requires the schema_version table".to_owned(),
             )
         })?;
-        if schema_version != GOOSE_NATIVE_SCHEMA_VERSION {
+        if !GOOSE_NATIVE_SCHEMA_VERSIONS.contains(&schema_version) {
             let unsupported = u32::try_from(schema_version).map_err(|_| {
                 CaptureError::InvalidPayload(format!(
                     "Goose NativePath schema version {schema_version} is outside the supported version domain"

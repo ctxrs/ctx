@@ -33,7 +33,7 @@ pub(crate) const SOURCE_FORMAT: &str = "codex_history_jsonl";
 const PATH_KIND: &str = "Codex prompt-history JSONL";
 const SOURCE_SCHEMA_VARIANT: &str = "codex-prompt-history-jsonl-v1";
 const SOURCE_IDENTITY_VERSION: u32 = 1;
-const PARSER_REVISION: &str = "codex-prompt-history-shared-jsonl-v4";
+const PARSER_REVISION: &str = "codex-prompt-history-shared-jsonl-v5";
 const SESSION_KEY_NAMESPACE: &str = "codex.prompt-history.session";
 const EVENT_POSITION_KIND: &str = "codex.prompt-history.raw-ordinal";
 const LOGICAL_SESSION_KIND: &str = "codex-prompt-history-session";
@@ -190,10 +190,6 @@ impl<B: ProviderRuntimeBinding> CodexPromptHistoryProjector<B> {
             binding: PhantomData,
         })
     }
-
-    fn reject(&mut self) {
-        self.rejected_records = self.rejected_records.saturating_add(1);
-    }
 }
 
 impl<B: ProviderRuntimeBinding> JsonlFamilyProjector for CodexPromptHistoryProjector<B> {
@@ -205,33 +201,7 @@ impl<B: ProviderRuntimeBinding> JsonlFamilyProjector for CodexPromptHistoryProje
         _worker: &mut JsonlFamilyWorkerContext<B>,
         emit: &mut dyn FnMut(CoreRecord) -> crate::Result<()>,
     ) -> crate::Result<()> {
-        if record.oversized() {
-            self.reject();
-            return Ok(());
-        }
-        if record.bytes().iter().all(u8::is_ascii_whitespace) {
-            return Ok(());
-        }
-        let line = match serde_json::from_slice::<PromptLine>(record.bytes()) {
-            Ok(line)
-                if !line.session_id.trim().is_empty()
-                    && chrono::DateTime::from_timestamp(line.ts, 0).is_some() =>
-            {
-                line
-            }
-            _ => {
-                self.reject();
-                return Ok(());
-            }
-        };
-        let projected = core_record(&self.source, line, record.evidence().physical_ordinal())
-            .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
-        if retained_record_bytes(&projected) > MAX_RETAINED_RECORD_BYTES {
-            return Err(CaptureError::InvalidPayload(
-                CodexPromptHistorySourceBackedErrorV0::RecordTooLarge.to_string(),
-            ));
-        }
-        emit(projected)
+        project_prompt_record(&self.source, &mut self.rejected_records, record, emit)
     }
 
     fn rejected_records(&self) -> u64 {
@@ -239,9 +209,82 @@ impl<B: ProviderRuntimeBinding> JsonlFamilyProjector for CodexPromptHistoryProje
     }
 }
 
+fn project_prompt_record(
+    source: &SourceKey,
+    rejected_records: &mut u64,
+    record: JsonlRecordRef<'_>,
+    emit: &mut dyn FnMut(CoreRecord) -> crate::Result<()>,
+) -> crate::Result<()> {
+    if record.oversized() {
+        *rejected_records = rejected_records.saturating_add(1);
+        return Ok(());
+    }
+    if record.bytes().iter().all(u8::is_ascii_whitespace) {
+        return Ok(());
+    }
+    let line = match serde_json::from_slice::<PromptLine>(record.bytes()) {
+        Ok(line)
+            if !line.session_id.trim().is_empty()
+                && chrono::DateTime::from_timestamp(line.ts, 0).is_some() =>
+        {
+            line
+        }
+        _ => {
+            *rejected_records = rejected_records.saturating_add(1);
+            return Ok(());
+        }
+    };
+    let projected = core_record(source, line, record.evidence().physical_ordinal())
+        .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
+    if retained_record_bytes(&projected) > MAX_RETAINED_RECORD_BYTES {
+        // A bounded record rejection must not discard valid neighboring prompts.
+        *rejected_records = rejected_records.saturating_add(1);
+        return Ok(());
+    }
+    emit(projected)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retained_record_limit_rejects_one_prompt_and_preserves_valid_peers() {
+        let source =
+            CodexPromptHistorySourceBackedInputV0::explicit("/tmp/codex/history.jsonl", [0x42; 32])
+                .source_key()
+                .unwrap();
+        let oversized = serde_json::json!({"session_id":"oversized", "ts":2,
+            "text":"x".repeat(MAX_RETAINED_RECORD_BYTES)})
+        .to_string();
+        let rows = [
+            br#"{"session_id":"before","ts":1,"text":"before"}"#.as_slice(),
+            oversized.as_bytes(),
+            br#"{"session_id":"after","ts":3,"text":"after"}"#.as_slice(),
+        ];
+        let mut rejected = 0;
+        let mut projected = Vec::new();
+        for (ordinal, row) in rows.into_iter().enumerate() {
+            project_prompt_record(
+                &source,
+                &mut rejected,
+                JsonlRecordRef::for_test(row, ordinal as u64),
+                &mut |record| {
+                    projected.push(record);
+                    Ok(())
+                },
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            projected
+                .iter()
+                .map(|r| r.content.meaningful_text())
+                .collect::<Vec<_>>(),
+            ["before", "after"]
+        );
+        assert_eq!(rejected, 1);
+    }
 
     #[test]
     fn named_root_lineage_remains_the_root_singleton_catalog_anchor() {

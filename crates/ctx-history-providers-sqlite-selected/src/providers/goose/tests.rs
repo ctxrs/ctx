@@ -368,3 +368,41 @@ fn missing_and_colliding_message_ids_do_not_invent_copy_authority() {
 }
 
 mod source_backed;
+
+#[test]
+fn schema_nine_preserves_native_message_identity_without_new_optional_columns() {
+    let connection = Connection::open_in_memory().unwrap();
+    connection
+        .execute_batch(
+            "create table sessions (id text primary key);
+         create table messages (id integer primary key, message_id text,
+             session_id text not null, role text not null, content_json text not null);
+         create table schema_version (version integer not null);
+         insert into schema_version values (9);
+         insert into sessions values ('session-9');
+         insert into messages values (1, 'message-9', 'session-9', 'user',
+             '[{\"type\":\"text\",\"text\":\"schema nine message\"}]');",
+        )
+        .unwrap();
+    let schema = GooseNativeSchema::probe(&connection).unwrap();
+    let rows = goose_fetch_native_message_page(
+        &connection,
+        &schema,
+        GooseNativeRowKeyset::Unstarted,
+        GooseNativePageLimits::default(),
+    )
+    .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert!(!rows[0].identity_degraded);
+    assert_eq!(
+        rows[0].provider_message_identity.as_deref(),
+        Some("message-9")
+    );
+    connection
+        .execute("update schema_version set version = 14", [])
+        .unwrap();
+    assert!(matches!(
+        GooseNativeSchema::probe(&connection),
+        Err(crate::CaptureError::UnsupportedSchemaVersion(14))
+    ));
+}
