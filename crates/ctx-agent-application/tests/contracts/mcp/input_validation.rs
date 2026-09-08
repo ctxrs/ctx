@@ -210,7 +210,7 @@ fn mcp_tool_input_validation_returns_stable_invalid_request_and_server_recovers(
 
     let recovered = &responses[cases.len() + 2]["result"];
     assert!(recovered["isError"].is_null());
-    assert_eq!(recovered["structuredContent"]["schema_version"], 2);
+    assert_eq!(recovered["structuredContent"]["schema_version"], 3);
     assert_eq!(recovered["structuredContent"]["read_only"], true);
 }
 

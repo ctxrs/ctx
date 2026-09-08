@@ -366,7 +366,7 @@ fn semantic_pairing_many_user_turns_uses_bounded_direct_session_pages() {
             )
             .unwrap()
             .unwrap();
-        assert_eq!(paired.0, format!("answer {turn}"));
+        assert_eq!(paired.text, format!("answer {turn}"));
     }
     let term_visits = ctx_history_index_query::session_event_order_term_visits();
     assert!(
@@ -417,8 +417,12 @@ fn semantic_pairing_rejects_excluded_anchor_and_skips_excluded_assistant_content
         .semantic_lite_turn_assistant(&anchor, 4, DEFAULT_CORE_EVENT_PAGE_BUDGET)
         .unwrap()
         .unwrap();
-    assert_eq!(paired.0, "ordinary assistant answer");
-    assert_eq!(paired.1, ordinary_assistant.occurred_at_unix_ms.unwrap());
+    assert_eq!(paired.text, "ordinary assistant answer");
+    assert_eq!(paired.event.event_id, ordinary_assistant.event_id);
+    assert_eq!(
+        paired.event.occurred_at_unix_ms.unwrap_or_default(),
+        ordinary_assistant.occurred_at_unix_ms.unwrap()
+    );
 
     let excluded_anchor = index
         .core_event_by_id(excluded_anchor.event_id.as_uuid())
@@ -503,8 +507,12 @@ fn semantic_pairing_preserves_copied_assistant_content() {
         .unwrap()
         .unwrap();
 
-    assert_eq!(paired.0, "copied answer must pair");
-    assert_eq!(paired.1, copied_assistant.occurred_at_unix_ms.unwrap());
+    assert_eq!(paired.text, "copied answer must pair");
+    assert_eq!(paired.event.event_id, copied_assistant.event_id);
+    assert_eq!(
+        paired.event.occurred_at_unix_ms.unwrap_or_default(),
+        copied_assistant.occurred_at_unix_ms.unwrap()
+    );
     assert_eq!(
         index
             .core_record_by_id(copied_assistant.event_id.as_uuid())
@@ -555,8 +563,11 @@ fn semantic_pairing_crosses_more_than_sixty_four_tool_events_body_free() {
         .unwrap()
         .unwrap();
 
-    assert_eq!(paired.0, "answer beyond old window");
-    assert_eq!(paired.1, assistant.occurred_at_unix_ms.unwrap());
+    assert_eq!(paired.text, "answer beyond old window");
+    assert_eq!(
+        paired.event.occurred_at_unix_ms.unwrap_or_default(),
+        assistant.occurred_at_unix_ms.unwrap()
+    );
     assert_eq!(
         ctx_history_index_query::stored_core_event_record_materializations(),
         1,
@@ -678,7 +689,13 @@ fn semantic_pairing_many_segments_merges_each_order_term_once_across_pages_and_r
             .unwrap()
             .unwrap();
 
-        assert_eq!(paired, expected_latest);
+        assert_eq!(
+            (
+                paired.text,
+                paired.event.occurred_at_unix_ms.unwrap_or_default()
+            ),
+            expected_latest
+        );
         assert_eq!(
             ctx_history_index_query::stored_core_event_record_materializations(),
             ASSISTANT_EVENTS,

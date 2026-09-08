@@ -269,6 +269,33 @@ fn all_rejected_plugin_fails_even_when_unrelated_history_is_retained() {
 }
 
 #[test]
+fn oversized_plugin_header_is_rejected_without_core_publication() {
+    let temp = tempdir();
+    let (manifest_dir, source_path) = write_durable_plugin(&temp);
+    fs::write(&source_path, vec![b' '; 2 * 1024 * 1024]).unwrap();
+
+    let error = failure_stderr(
+        ctx(&temp).timeout(Duration::from_secs(20)).args([
+            "import",
+            "--history-source-manifest",
+            manifest_dir
+                .join("ctx-history-plugin.json")
+                .to_str()
+                .unwrap(),
+            "--no-daemon",
+            "--progress",
+            "none",
+        ]),
+    );
+    assert!(
+        error.contains("header exceeds the bounded validation window"),
+        "{error}"
+    );
+    assert!(!data_root(&temp).join("search/lexical").exists());
+    assert_eq!(fs::metadata(source_path).unwrap().len(), 2 * 1024 * 1024);
+}
+
+#[test]
 fn durable_plugin_manifest_rejects_command_runtime_options() {
     let temp = tempdir();
     let (manifest_dir, _) = write_durable_plugin(&temp);

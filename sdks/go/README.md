@@ -3,7 +3,10 @@
 Experimental Go SDK for the local `ctx` agent-history-v1 JSON contract.
 
 The SDK has no third-party dependencies and defaults to the local `ctx` CLI. It
-does not require network access or API keys.
+does not require network access or API keys with built-in semantic execution.
+The CLI honors explicitly configured external semantic execution, which can send
+bounded semantic text to the selected executor. See
+[SDK locality](../../docs/sdks.md#local-and-hosted-backends).
 
 ```go
 package main

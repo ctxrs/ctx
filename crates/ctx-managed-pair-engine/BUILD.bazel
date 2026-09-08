@@ -23,6 +23,7 @@ PROD_SRCS = glob(
 
 CTX_MANAGED_PAIR_ENGINE_DEPS = [
     "//crates/ctx-history-platform:lib",
+    "//crates/ctx-terminal:lib",
 ]
 
 rust_library(

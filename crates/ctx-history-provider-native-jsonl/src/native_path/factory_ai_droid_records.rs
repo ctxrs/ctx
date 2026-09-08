@@ -56,6 +56,13 @@ pub(crate) fn factory_droid_session_relationships(
     } else {
         Some(AgentScope::Primary)
     };
+    // A malformed optional parent must not invalidate the child's own records.
+    let parent = parent.filter(|parent| {
+        parent != native_session_id
+            && ctx_history_core::TypedKey::utf8(parent.as_str())
+                .and_then(|key| key.validate_contract())
+                .is_ok()
+    });
     let relationship = parent
         .as_ref()
         .map(|_| ProviderNativeSessionRelationship::Delegated);

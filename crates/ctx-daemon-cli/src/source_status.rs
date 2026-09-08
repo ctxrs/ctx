@@ -16,7 +16,6 @@ use super::paths_status::{
     daemon_core_refresh_job_path, daemon_report_with_config, daemon_semantic_job_path,
     read_daemon_job_status,
 };
-use super::source_backed_refresh_coordinator::verified_generation_is_query_ready;
 
 const SEARCH_DIRECTORY: &str = "search";
 const LEXICAL_DIRECTORY: &str = "lexical";
@@ -112,7 +111,7 @@ pub fn source_epoch_status_report(
         .transpose()?;
 
     let mut report = compact_json(json!({
-        "schema_version": 2,
+        "schema_version": 3,
         "initialized": initialized,
         "data_root": data_root,
         "config_path": data_root.join(ctx_app_config::CONFIG_FILE),
@@ -126,7 +125,6 @@ pub fn source_epoch_status_report(
         "indexed_sessions": indexed_sessions,
         "indexed_events": indexed_events,
         "indexed_sources": indexed_sources,
-        "local_only": true,
         "read_only": true,
     }));
     if config.semantic_builtin_throttling_effective().is_none() {
@@ -204,12 +202,12 @@ fn refresh_report(job: Option<&Value>, generation_id: Option<&str>, daemon: &Val
     let request_state = job.get("request_state").and_then(Value::as_str);
     let published_generation = job.get("published_generation").and_then(Value::as_str);
     let generation_matches = generation_id.is_some() && generation_id == published_generation;
-    let request_outcome = job.get("request_outcome").or_else(|| job.get("receipt"));
-    let outcome = request_outcome
+    let receipt = job.get("receipt");
+    let outcome = receipt
         .and_then(|receipt| receipt.get("outcome"))
         .or_else(|| job.get("outcome"))
         .and_then(Value::as_str);
-    let source_failures = request_outcome
+    let source_failures = receipt
         .and_then(|receipt| receipt.get("source_failure_total"))
         .and_then(Value::as_u64)
         .unwrap_or(0);
@@ -230,7 +228,35 @@ fn refresh_report(job: Option<&Value>, generation_id: Option<&str>, daemon: &Val
         .get("automatic_retry")
         .and_then(|automatic_retry| automatic_retry.get("state"))
         .and_then(Value::as_str);
+    let daemon_enabled = daemon.get("enabled").and_then(Value::as_bool) == Some(true);
+    let daemon_running = daemon.get("running").and_then(Value::as_bool) == Some(true);
     let (status, reason) = match automatic_retry_state {
+        Some("confirming" | "paused" | "mixed") if !daemon_enabled || !daemon_running => {
+            if daemon_running
+                && (matches!(
+                    request_state,
+                    Some("admission_pending" | "queued" | "running")
+                ) || job
+                    .get("queued_successors")
+                    .and_then(Value::as_array)
+                    .is_some_and(|successors| {
+                        // Terminal roots retain admitted successors until the
+                        // finite owner advances; the root alone is historical.
+                        successors.iter().any(|successor| {
+                            matches!(
+                                successor.get("request_state").and_then(Value::as_str),
+                                Some("admission_pending" | "queued")
+                            )
+                        })
+                    }))
+            {
+                ("pending", Some("core_refresh_pending"))
+            } else if daemon_enabled {
+                ("partial", Some("automatic_retry_daemon_unavailable"))
+            } else {
+                ("partial", Some("refresh_requires_explicit_request"))
+            }
+        }
         Some("confirming") => ("pending", Some("automatic_retry_confirming")),
         Some("paused") if current_internal_failure_is_fully_paused(job) => {
             ("paused", Some("automatic_retry_paused"))
@@ -279,12 +305,12 @@ fn refresh_report(job: Option<&Value>, generation_id: Option<&str>, daemon: &Val
         "trigger": job.get("trigger"),
         "trigger_provenance": job.get("trigger_provenance"),
         "last_error": job.get("last_error"),
-        "current": request_outcome.and_then(|receipt| receipt.get("current")),
-        "source_failure_total": request_outcome
+        "current": receipt.and_then(|receipt| receipt.get("current")),
+        "source_failure_total": receipt
             .and_then(|receipt| receipt.get("source_failure_total")),
-        "rejected_record_total": request_outcome
+        "rejected_record_total": receipt
             .and_then(|receipt| receipt.get("rejected_record_total")),
-        "diagnostics": refresh_diagnostics_report(request_outcome),
+        "diagnostics": refresh_diagnostics_report(receipt),
     }))
 }
 
@@ -423,23 +449,7 @@ fn lexical_report(
             let policy_matches = manifest.policy_schema_hash == current_policy_hash;
             let generation_matches =
                 published_generation.map(|generation| generation == index.generation_id());
-            let readiness = verified_generation_is_query_ready(&index);
-            let (status, reason, authority_error) = match readiness {
-                Ok(true) => {
-                    let (status, reason) = lexical_state(policy_matches);
-                    (status, reason, None)
-                }
-                Ok(false) => (
-                    "unavailable",
-                    Some("zero_source_publication_uncertified"),
-                    None,
-                ),
-                Err(error) => (
-                    "unavailable",
-                    Some("publication_authority_invalid"),
-                    Some(format!("{error:#}")),
-                ),
-            };
+            let (status, reason) = lexical_state(policy_matches);
             let value = compact_json(json!({
                 "status": status,
                 "reason": reason,
@@ -451,7 +461,6 @@ fn lexical_report(
                 "indexed_documents": index.document_count(),
                 "certified_sources": manifest.sources.len(),
                 "certified_source_bytes": manifest.certified_source_bytes,
-                "publication_authority_error": authority_error,
                 "manifest_version": manifest.manifest_version,
                 "identity_version": manifest.identity_version,
                 "lexical_schema_version": manifest.lexical_schema_version,

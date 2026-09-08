@@ -5,6 +5,25 @@ use ctx_history_capture::{
     SourceBackedSelectorAuthority,
 };
 use ctx_history_capture_model::ProviderSourceStatus;
+
+fn retryable_internal_outcome(
+    retryable_routes: BTreeSet<SourceRouteIdentity>,
+    blocked_routes: BTreeSet<SourceRouteIdentity>,
+) -> RefreshTerminalOutcome {
+    RefreshTerminalOutcome::with_route_dispositions(
+        RefreshOutcomeCode::SourceRefreshFailed,
+        true,
+        retryable_routes,
+        blocked_routes,
+        uuid::Uuid::nil().to_string(),
+        None,
+        None,
+        Some(RefreshRetryAdvice::RetryAffectedRoutes),
+        None,
+    )
+    .unwrap()
+}
+
 #[test]
 fn ordinary_manual_all_still_scans_every_current_route() {
     let temp = tempfile::tempdir().unwrap();
@@ -79,13 +98,13 @@ fn exact_route_event_during_execution_creates_one_successor_and_noop_ack_cleans_
                 executor_entered.wait();
                 executor_release.wait();
             }
-            let commit = ctx_history_index::GenerationWriter::open(
+            let writer = ctx_history_index::GenerationWriter::open(
                 execution.index_root,
                 WriterOptions::default(),
             )?
             .into_writer()
-            .map_err(crate::committed_generation_recovery_error)?
-            .commit(|_| true)?;
+            .map_err(crate::committed_generation_recovery_error)?;
+            let commit = commit_source_backed_test_generation(writer)?;
             let mut publication = empty_test_publication(commit.generation_id);
             publication.published_explicit_source_catalog =
                 execution.explicit_source_catalog.cloned();
@@ -141,13 +160,13 @@ fn route_failure_executor(
     class: &'static str,
 ) -> Arc<dyn SourceBackedRefreshExecutor> {
     Arc::new(move |execution: SourceBackedRefreshExecution<'_>| {
-        let commit = ctx_history_index::GenerationWriter::open(
+        let writer = ctx_history_index::GenerationWriter::open(
             execution.index_root,
             WriterOptions::default(),
         )?
         .into_writer()
-        .map_err(crate::committed_generation_recovery_error)?
-        .commit(|_| true)?;
+        .map_err(crate::committed_generation_recovery_error)?;
+        let commit = commit_source_backed_test_generation(writer)?;
         let mut publication = empty_test_publication(commit.generation_id);
         publication.published_explicit_source_catalog = execution.explicit_source_catalog.cloned();
         let mut result = SourceBackedRefreshRouteResult::failed(
@@ -232,13 +251,13 @@ fn successful_partial_publication_retains_mixed_route_retry_dispositions() {
     let executor_blocked_route = blocked_route.clone();
     let executor: Arc<dyn SourceBackedRefreshExecutor> =
         Arc::new(move |execution: SourceBackedRefreshExecution<'_>| {
-            let commit = ctx_history_index::GenerationWriter::open(
+            let writer = ctx_history_index::GenerationWriter::open(
                 execution.index_root,
                 WriterOptions::default(),
             )?
             .into_writer()
-            .map_err(crate::committed_generation_recovery_error)?
-            .commit(|_| true)?;
+            .map_err(crate::committed_generation_recovery_error)?;
+            let commit = commit_source_backed_test_generation(writer)?;
             let mut publication = empty_test_publication(commit.generation_id);
             publication.route_results = [
                 (&executor_retryable_route, "unavailable"),
@@ -320,13 +339,13 @@ fn bounded_nonretryable_partial_publication_does_not_schedule_route_retry() {
     let executor_route = route.clone();
     let executor: Arc<dyn SourceBackedRefreshExecutor> =
         Arc::new(move |execution: SourceBackedRefreshExecution<'_>| {
-            let commit = ctx_history_index::GenerationWriter::open(
+            let writer = ctx_history_index::GenerationWriter::open(
                 execution.index_root,
                 WriterOptions::default(),
             )?
             .into_writer()
-            .map_err(crate::committed_generation_recovery_error)?
-            .commit(|_| true)?;
+            .map_err(crate::committed_generation_recovery_error)?;
+            let commit = commit_source_backed_test_generation(writer)?;
             let mut publication = empty_test_publication(commit.generation_id);
             let mut result = SourceBackedRefreshRouteResult::succeeded(
                 executor_route.as_str().to_owned(),
@@ -489,14 +508,7 @@ fn mixed_automatic_retry_serialization_round_trips_through_recovery() {
     let observation = "ab".repeat(32);
     let retryable_routes = BTreeSet::from([confirming_route.clone()]);
     let blocked_routes = BTreeSet::from([paused_route.clone()]);
-    let outcome = SourceBackedRefreshFailureOutcome::with_route_dispositions(
-        RefreshOutcomeCode::SourceRefreshFailed,
-        RefreshOutcomeClass::Internal,
-        true,
-        retryable_routes,
-        blocked_routes,
-        Some(RefreshRetryAdvice::RetryAffectedRoutes),
-    );
+    let outcome = retryable_internal_outcome(retryable_routes, blocked_routes);
     let mut paused = SourceBackedAutomaticRetryCheckpoint::confirming(
         &outcome,
         &paused_route,
@@ -521,7 +533,7 @@ fn mixed_automatic_retry_serialization_round_trips_through_recovery() {
         SourceBackedRefreshScope::exact([paused_route, confirming_route]),
     );
     attempt.state = SourceBackedRefreshState::Failed;
-    attempt.failure_outcome = Some(outcome);
+    attempt.terminal_outcome = Some(outcome);
     attempt.last_error = Some("stable internal failure".to_owned());
     attempt.automatic_retry_checkpoints = expected.clone();
 
@@ -559,13 +571,8 @@ fn cold_scheduler_does_not_widen_around_an_unchanged_paused_route() {
     registry.register(healthy_source);
     let catalog = registry.watch_catalog();
     let observation = catalog.certify_route_observation(&paused_route).unwrap();
-    let outcome = SourceBackedRefreshFailureOutcome::new(
-        RefreshOutcomeCode::SourceRefreshFailed,
-        RefreshOutcomeClass::Internal,
-        true,
-        BTreeSet::from([paused_route.clone()]),
-        Some(RefreshRetryAdvice::RetryAffectedRoutes),
-    );
+    let outcome =
+        retryable_internal_outcome(BTreeSet::from([paused_route.clone()]), BTreeSet::new());
     let mut checkpoint = SourceBackedAutomaticRetryCheckpoint::confirming(
         &outcome,
         &paused_route,
@@ -629,13 +636,8 @@ fn periodic_catalog_refresh_excludes_an_unchanged_paused_route() {
     registry.register(healthy_source);
     let catalog = registry.watch_catalog();
     let observation = catalog.certify_route_observation(&paused_route).unwrap();
-    let outcome = SourceBackedRefreshFailureOutcome::new(
-        RefreshOutcomeCode::SourceRefreshFailed,
-        RefreshOutcomeClass::Internal,
-        true,
-        BTreeSet::from([paused_route.clone()]),
-        Some(RefreshRetryAdvice::RetryAffectedRoutes),
-    );
+    let outcome =
+        retryable_internal_outcome(BTreeSet::from([paused_route.clone()]), BTreeSet::new());
     let mut checkpoint = SourceBackedAutomaticRetryCheckpoint::confirming(
         &outcome,
         &paused_route,
@@ -868,6 +870,10 @@ fn automatic_terminal_coverage_retry_confirms_once_then_pauses() {
         "repeated_internal_failure"
     );
     assert_eq!(second.job["structured_outcome"]["retryable"], false);
+    assert_eq!(
+        second.job["structured_outcome"]["retry_advice"],
+        "inspect_sources"
+    );
     assert_eq!(calls.load(Ordering::SeqCst), 2);
     assert!(!coordinator.has_scheduled_route_work());
 }
@@ -1033,63 +1039,30 @@ fn selective_automatic_retry_executor(
         if selected.contains(&paused_route) {
             return Err(anyhow!("stable internal refresh fixture failure"));
         }
-        publish_selected_routes_with_request_metadata(&execution, &selected)
+        publish_selected_routes_generation(&execution, &selected)
     })
 }
 
-fn publish_selected_routes_with_request_metadata(
+fn publish_selected_routes_generation(
     execution: &SourceBackedRefreshExecution<'_>,
     selected: &BTreeSet<SourceRouteIdentity>,
 ) -> Result<SourceBackedRefreshPublication> {
-    let request_id = execution.request_id.to_owned();
-    let operation = execution.operation;
-    let scope = execution.admitted_refresh().publication_scope().clone();
-    let previous_generation = open_verified_index(execution.index_root)
-        .ok()
-        .map(|index| index.generation_id().to_owned());
-    let metadata_routes = selected.clone();
+    let has_previous_generation = open_verified_index(execution.index_root).is_ok();
     let mut writer =
         ctx_history_index::GenerationWriter::open(execution.index_root, WriterOptions::default())?
             .into_writer()
             .map_err(crate::committed_generation_recovery_error)?;
-    if previous_generation.is_some() {
+    if has_previous_generation {
         let source = publication_pin_source_with_anchor(0x93);
         writer.begin_source(source.clone())?;
         writer.add_core_record(publication_pin_record(&source))?;
         writer.certify_source(publication_rejection_certificate(&source))?;
     }
-    let published = writer.commit_with_publication_metadata(
+    let published = writer.commit_with_generation_state(
         |_| true,
-        move |context| {
-            let mut publication = empty_test_publication(context.generation_id().to_owned());
-            publication.current =
-                SourceBackedRefreshCurrent::from_sources(&context.manifest().sources, 0)
-                    .map_err(|error| IndexError::PublicationMetadata(format!("{error:#}")))?;
-            publication.certified_source_count = publication.current.source_count;
-            publication.certified_source_bytes = publication.current.certified_source_bytes;
-            publication.route_results = metadata_routes
-                .iter()
-                .map(|route| {
-                    SourceBackedRefreshRouteResult::succeeded(route.as_str().to_owned(), true)
-                })
-                .collect();
-            let receipt = SourceBackedRefreshReceipt::from_verified_publication(
-                previous_generation.clone(),
-                context.generation_id().to_owned(),
-                &publication,
-            )
-            .map_err(|error| IndexError::PublicationMetadata(format!("{error:#}")))?;
-            SourceBackedPublicationMetadata {
-                version: SOURCE_REFRESH_PUBLICATION_METADATA_VERSION,
-                request_id: request_id.clone(),
-                operation,
-                refresh_scope: scope.clone(),
-                receipt: receipt.to_json(),
-                route_observations: BTreeMap::new(),
-                route_controls: BTreeMap::new(),
-            }
-            .encode()
-        },
+        |_| false,
+        |_| empty_source_backed_test_state(),
+        |_| Ok(()),
     )?;
     let generation_id = published.receipt().generation_id.clone();
     let (_, _, verified_index) = published.into_parts();
@@ -1211,7 +1184,7 @@ fn newer_event_during_confirmation_attempt_is_not_paused_by_stale_admission() {
         &source_backed_index_root(&data_root),
         publication_pin_source(),
     );
-    let journal = Arc::new(TestFailTerminalStoreJournal::failing_on(4));
+    let journal = Arc::new(TestFailTerminalStoreJournal::failing_on(2));
     let coordinator = CoreRefreshEngine::with_journal_executor_and_admitted_routes(
         Arc::clone(&journal) as Arc<dyn RefreshJournal>,
         executor,
@@ -1247,17 +1220,26 @@ fn newer_event_during_confirmation_attempt_is_not_paused_by_stale_admission() {
     release_tx.send(()).expect("release confirmation attempt");
     let stale = running.join().unwrap();
     assert!(stale.terminal_persistence_pending, "{:#}", stale.job);
-    assert_eq!(journal.terminal_store_count(), 4);
+    assert_eq!(journal.terminal_store_count(), 2);
+    let pending = coordinator
+        .status(stale.job["request_id"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(pending["request_state"], "running");
+    assert!(pending.get("structured_outcome").is_none());
+    assert_eq!(stale.job["structured_outcome"]["retryable"], true);
+    assert!(pending.get("automatic_retry").is_none());
+    assert!(!coordinator.route_is_permanently_blocked_for_test(&route));
+    let persisted = coordinator
+        .run_next(&data_root)
+        .expect("retry terminal persistence");
+    assert!(!persisted.terminal_persistence_pending);
+    assert_eq!(persisted.job["request_state"], "failed");
     let terminal = coordinator
         .status(stale.job["request_id"].as_str().unwrap())
         .unwrap();
     assert_eq!(terminal["structured_outcome"]["retryable"], true);
     assert!(terminal.get("automatic_retry").is_none());
-    assert!(!coordinator.route_is_permanently_blocked_for_test(&route));
-    let durable = read_daemon_job_status(&daemon_source_backed_refresh_job_path(&data_root))
-        .expect("pre-finalization crash image");
-    assert_eq!(durable["route_finalization_pending"], true);
-    assert_eq!(durable["automatic_retry"]["state"], "paused");
+    assert_eq!(journal.terminal_store_count(), 3);
     drop(coordinator);
 
     let restarted = CoreRefreshEngine::with_executor_and_admitted_routes(
@@ -1280,11 +1262,8 @@ fn newer_event_during_confirmation_attempt_is_not_paused_by_stale_admission() {
     assert_eq!(
         calls.load(Ordering::SeqCst),
         2,
-        "recovery must not recapture"
+        "persisted terminal recovery must not recapture"
     );
-    let normalized = read_daemon_job_status(&daemon_source_backed_refresh_job_path(&data_root))
-        .expect("normalized finalization image");
-    assert!(normalized.get("route_finalization_pending").is_none());
 }
 
 #[test]
@@ -1315,8 +1294,13 @@ fn differing_catalog_authority_queues_one_successor_behind_a_running_refresh() {
                     "op": SOURCE_REFRESH_REQUEST_OP,
                     "request_id": logical_request_id,
                     "mode": "wait",
-                    "operation": "import",
-                    "explicit_source_catalog": authority.to_json(),
+                    "refresh_intent": {
+                        "kind": "selected_import",
+                        "selection": {
+                            "kind": "exact_source",
+                            "authority": authority.to_json(),
+                        },
+                    },
                 }),
             )
             .unwrap()
@@ -1405,8 +1389,13 @@ fn active_and_pending_refreshes_are_bounded_with_a_typed_busy_response() {
                     "schema_version": 1,
                     "op": SOURCE_REFRESH_REQUEST_OP,
                     "mode": "wait",
-                    "operation": "import",
-                    "explicit_source_catalog": authority.to_json(),
+                    "refresh_intent": {
+                        "kind": "selected_import",
+                        "selection": {
+                            "kind": "exact_source",
+                            "authority": authority.to_json(),
+                        },
+                    },
                 }),
             )
             .unwrap()

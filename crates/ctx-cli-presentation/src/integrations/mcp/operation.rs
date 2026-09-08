@@ -332,10 +332,11 @@ fn mcp_status_target_detail(result: &McpStatusResult) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Write as _;
-
     use super::*;
-    use crate::ui::{ColorMode, StreamKind, TestContext, Token};
+    use crate::{
+        test_support::strip_ansi,
+        ui::{ColorMode, StreamKind, TestContext, Token},
+    };
     use ctx_agent_integrations::mcp_config::{install_target, status_target, McpAgentArg};
 
     const PRODUCT: ProductIdentity<'static> = ProductIdentity {
@@ -345,12 +346,6 @@ mod tests {
 
     fn render_context(width: usize, color: ColorMode) -> RenderContext {
         RenderContext::for_test(TestContext::tty(StreamKind::Stdout, width).color(color))
-    }
-
-    fn strip_ansi(rendered: &str) -> String {
-        let mut stream = anstream::StripStream::new(Vec::new());
-        stream.write_all(rendered.as_bytes()).unwrap();
-        String::from_utf8(stream.into_inner()).unwrap()
     }
 
     fn semantic_command(document: &Document) -> String {

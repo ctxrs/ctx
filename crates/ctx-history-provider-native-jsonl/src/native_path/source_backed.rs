@@ -45,6 +45,10 @@ const DIRECT_JSONL_SOURCE_IDENTITY_VERSION: u32 = 1;
 const DIRECT_JSONL_MAX_DIRECTORY_DEPTH: usize = 128;
 const DIRECT_JSONL_EVENT_IDENTITY_REVISION: &str = "direct-jsonl-content-occurrence-v2";
 
+#[path = "source_backed_identity.rs"]
+mod identity;
+use identity::{native_event_key, validate_provider_event_key};
+
 #[derive(Debug, Error)]
 enum DirectJsonlAdapterError {
     #[error(transparent)]
@@ -711,6 +715,14 @@ impl<R: NativeJsonlRuntime> JsonlFamilyProjector for DirectJsonlFamilyProjector<
             return Err(capture_error(DirectJsonlAdapterError::CountMismatch));
         }
         let mut records = Vec::with_capacity(projected.events.len());
+        // Admit every subrecord's provider key before assigning fallback occurrences
+        // or accepting IDs from any part of this physical record.
+        for event in &projected.events {
+            if let Err(error) = validate_provider_event_key(event) {
+                self.reject_record(event.raw_ordinal, error.to_string())?;
+                return Ok(());
+            }
+        }
         for event in projected.events {
             records.push(
                 project_event(
@@ -820,16 +832,7 @@ fn project_event<R: NativeJsonlRuntime>(
         native_item_key: &native_item_key,
         subrecord_selector: subrecord_selector.as_ref(),
     })?;
-    let native_subrecord_key = match &event.stable_retry_discriminator {
-        Some(DirectJsonlRetryDiscriminator::FactoryDroidToolResult { tool_use_id }) => {
-            TypedKey::composite(vec![
-                TypedKey::utf8("factory-ai-droid.retry-tool-result")?,
-                TypedKey::utf8(tool_use_id)?,
-            ])?
-        }
-        None => TypedKey::U64(u64::from(event.sub_ordinal)),
-    };
-    let native_event_key = TypedKey::composite(vec![native_record_key, native_subrecord_key])?;
+    let native_event_key = native_event_key(&event, native_record_key)?;
     let parent_session_id = session
         .parent_provider_session_id
         .as_deref()

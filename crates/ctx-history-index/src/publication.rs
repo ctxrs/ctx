@@ -1,54 +1,44 @@
 mod generation;
-mod republish;
 mod retention;
 
 pub(crate) use ctx_history_index_format::{
-    canonical_commit_payload, load_publication_for_metas, meta_generation, payload_generation_id,
-    prepare_successor_manifest, reconcile_commit_error, searcher_generation, write_manifest,
-    write_prepared_manifest,
+    canonical_commit_payload, meta_generation, payload_generation_id, prepare_successor_manifest,
+    reconcile_commit_error, searcher_generation, write_prepared_manifest,
 };
 #[cfg(test)]
-pub(crate) use ctx_history_index_format::{verify_publication_candidate, verify_searcher};
+pub(crate) use ctx_history_index_format::{
+    load_publication_for_metas, verify_publication_candidate, verify_searcher, write_manifest,
+};
 #[cfg(test)]
 pub(crate) use ctx_history_index_generation::manifest_path;
 #[cfg(test)]
 pub(crate) use ctx_history_index_generation::physical_integrity_digest;
 pub(crate) use ctx_history_index_generation::sync_directory;
+pub(crate) use ctx_history_index_generation::validate_candidate_managed_files;
 pub(crate) use ctx_history_index_generation::{
     certify_candidate_physical_integrity, reclaim_unreferenced_certifications,
     reclaim_unreferenced_manifests,
 };
 pub(crate) use ctx_history_index_generation::{
-    physical_integrity_audit, validate_candidate_managed_files, verify_physical_integrity,
-    PhysicalIntegrityAudit,
-};
-pub(crate) use ctx_history_index_generation::{
     prime_candidate_physical_proof, CandidateActivationFence, CandidatePhysicalProof,
+};
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+pub(crate) use ctx_history_index_generation::{CloneStage, CloneTestHookGuard, CloneTestOptions};
+#[cfg(test)]
+pub(crate) use ctx_history_index_generation::{
+    PortableCloneStage, PortableCloneTestGuard, PortableCloneTestOptions,
 };
 #[cfg(not(windows))]
 pub(crate) use generation::publish_active_generation_pointer_validated;
 pub(crate) use generation::{
-    create_candidate_generation, lexical_index_settings, load_active_generation_pointer,
-    open_slot_index, publish_active_generation_pointer, reclaim_inactive_generation_directories,
-    slot_path, sync_generation, ActiveGenerationPointer, GenerationSlot, PointerPublicationOutcome,
-    INDEX_GENERATIONS_DIRECTORY,
+    create_candidate_generation, load_active_generation_pointer, open_slot_index,
+    reclaim_inactive_generation_directories, sync_generation, ActiveGenerationPointer,
+    GenerationSlot, PointerPublicationOutcome, INDEX_GENERATIONS_DIRECTORY,
 };
 #[cfg(test)]
-pub(crate) use generation::{ReclamationStage, ReclamationTestHookGuard};
-pub(crate) use republish::{
-    best_effort_post_republish_cleanup, republish_current_with_publication_metadata,
-    CurrentRepublishOutcome,
-};
-#[cfg(test)]
-pub(crate) use republish::{
-    republish_current_for_qualification, PointerReconciliationTestHookGuard, RepublishRecovery,
-    RepublishStage, RepublishTestHookGuard,
-};
-#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
-pub(crate) use republish::{CloneMetrics, CloneStage, CloneTestHookGuard, CloneTestOptions};
-#[cfg(test)]
-pub(crate) use republish::{
-    PortableCloneMetrics, PortableCloneStage, PortableCloneTestGuard, PortableCloneTestOptions,
+pub(crate) use generation::{
+    lexical_index_settings, publish_active_generation_pointer, slot_path, ReclamationStage,
+    ReclamationTestHookGuard,
 };
 pub(crate) use retention::GENERATION_WRITER_LOCK_FILE;
 pub use retention::{

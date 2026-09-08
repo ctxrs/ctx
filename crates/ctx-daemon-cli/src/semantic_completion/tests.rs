@@ -807,6 +807,10 @@ impl SemanticDocumentBuilder for RejectingEmptySemanticPorts {
 }
 
 impl SemanticBatchEmbedder for RejectingEmptySemanticPorts {
+    fn document_fits(&mut self, _text: &str) -> Result<bool> {
+        anyhow::bail!("unexpected semantic input assessment")
+    }
+
     fn embed_chunks(&mut self, _chunks: &[SemanticChunkDocument]) -> Result<Vec<Vec<f32>>> {
         panic!("empty generation must not request embeddings")
     }

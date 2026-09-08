@@ -1,33 +1,7 @@
 use super::*;
 
 #[derive(Default)]
-pub(super) struct TestWorkerServices {
-    pub(super) certified_repositories: HashSet<PathBuf>,
-    pub(super) full_certification_probes: usize,
-    pub(super) event_time_entries: usize,
-}
-
-impl TestWorkerServices {
-    pub(super) fn begin_source(&mut self) {
-        self.event_time_entries = 0;
-    }
-
-    pub(super) fn attribute(&mut self, repository: &Path) -> bool {
-        if self.certified_repositories.insert(repository.to_path_buf()) {
-            self.full_certification_probes = self.full_certification_probes.saturating_add(1);
-        }
-        self.event_time_entries = self.event_time_entries.saturating_add(1);
-        true
-    }
-
-    pub(super) fn full_certification_probe_count(&self) -> usize {
-        self.full_certification_probes
-    }
-
-    pub(super) fn event_time_cache_len(&self) -> usize {
-        self.event_time_entries
-    }
-}
+pub(super) struct TestWorkerServices;
 
 pub(super) struct TestJsonlRuntime;
 
@@ -37,9 +11,7 @@ impl JsonlFamilyRuntime for TestJsonlRuntime {
     type WorkerServices = TestWorkerServices;
     type RouteControl = ();
 
-    fn begin_worker_leaf(services: &mut Self::WorkerServices) {
-        services.begin_source();
-    }
+    fn begin_worker_leaf(_services: &mut Self::WorkerServices) {}
 }
 
 #[derive(Clone, Default)]
@@ -481,26 +453,6 @@ impl CaptureLifecycleSink for TestLifecycle {
         I: FnMut(&CertifiedSourceInventory) -> bool,
     {
         Ok(self.commit_receipt())
-    }
-
-    fn commit_with_metadata<F, I, M>(
-        self,
-        _revalidate: F,
-        _revalidate_inventory: I,
-        metadata_factory: M,
-    ) -> Result<CaptureCommitOutcome<TestSnapshot, ()>>
-    where
-        F: FnMut(CaptureRevalidationTarget<'_>) -> bool,
-        I: FnMut(&CertifiedSourceInventory) -> bool,
-        M: for<'a> FnOnce(CapturePublicationContext<'a, Self::Snapshot<'a>>) -> Result<Vec<u8>>,
-    {
-        let snapshot = self.snapshot();
-        metadata_factory(CapturePublicationContext::new("test-generation", snapshot))?;
-        Ok(CaptureCommitOutcome::new(
-            self.commit_receipt(),
-            CapturePublicationDisposition::Published,
-            VerifiedCapture::new(()),
-        ))
     }
 }
 

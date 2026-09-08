@@ -24,7 +24,6 @@ query() {
 expected_direct="${tmp}/expected-direct.txt"
 printf '%s\n' \
   '//crates/ctx-client-observability:lib' \
-  '//crates/ctx-daemon-refresh-client:lib' \
   '//crates/ctx-daemon-runtime:lib' \
   '//crates/ctx-daemon-service:lib' \
   '//crates/ctx-history-capture:lib' \
@@ -44,7 +43,6 @@ fi
 expected_qualification="${tmp}/expected-qualification.txt"
 printf '%s\n' \
   '//crates/ctx-client-observability:lib' \
-  '//crates/ctx-daemon-refresh-client:lib' \
   '//crates/ctx-daemon-runtime:qualification_lib' \
   '//crates/ctx-daemon-service:qualification_lib' \
   '//crates/ctx-history-capture:lib' \
@@ -64,7 +62,6 @@ fi
 expected_test_support="${tmp}/expected-test-support.txt"
 printf '%s\n' \
   '//crates/ctx-client-observability:test_support_lib' \
-  '//crates/ctx-daemon-refresh-client:test_support_lib' \
   '//crates/ctx-daemon-runtime:lib' \
   '//crates/ctx-daemon-service:test_support_lib' \
   '//crates/ctx-history-capture-model:lib' \
@@ -153,7 +150,6 @@ for target in targets.values():
 
 allowed_internal = {
     "ctx-client-observability",
-    "ctx-daemon-refresh-client",
     "ctx-daemon-runtime",
     "ctx-history-capture",
     "ctx-history-core",
@@ -181,7 +177,6 @@ if dependencies != allowed:
     )
 expected_dev = {
     "ctx-client-observability",
-    "ctx-daemon-refresh-client",
     "ctx-history-capture-model",
     "ctx-history-platform",
     "ctx-history-refresh",
@@ -196,7 +191,7 @@ if actual_dev != expected_dev:
         "ctx-daemon-service dev dependency inventory differs: "
         f"missing={sorted(expected_dev - actual_dev)} extra={sorted(actual_dev - expected_dev)}"
     )
-if manifest.get("features") != {"test-support": ["ctx-daemon-refresh-client/test-support"]}:
+if manifest.get("features") != {"test-support": []}:
     raise SystemExit("ctx-daemon-service feature inventory differs")
 
 reverse = []

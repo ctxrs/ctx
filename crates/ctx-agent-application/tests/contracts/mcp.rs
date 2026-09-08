@@ -277,7 +277,9 @@ fn mcp_startup_health_checks_enabled_daemon_before_status_and_tools_list() {
         })
     );
     let status = &responses[2]["result"]["structuredContent"];
-    assert_eq!(status["schema_version"], 2);
+    assert_eq!(status["schema_version"], 3);
+    assert!(status.get("local_only").is_none());
+    assert!(status.get("localOnly").is_none());
     let initialized = status["initialized"].as_bool().expect("initialized flag");
     assert!(
         status["indexed_sessions"].is_null() || status["indexed_sessions"] == 0,
@@ -320,6 +322,9 @@ fn mcp_startup_health_checks_enabled_daemon_before_status_and_tools_list() {
     assert_eq!(status["daemon"]["core_refresh_endpoint"]["available"], true);
     assert_eq!(status["daemon"]["start_mode"], "auto");
     assert_eq!(status["daemon"]["supervisor"]["status"], "fallback");
+    assert!(!responses[2]["result"]["content"]
+        .to_string()
+        .contains("local_only:"));
     let initialized_text = format!("initialized: {initialized}");
     assert_useful_mcp_text(
         &responses[2]["result"],
@@ -330,7 +335,6 @@ fn mcp_startup_health_checks_enabled_daemon_before_status_and_tools_list() {
             "lexical: status=",
             "source_refresh: status=",
             "read_only: true",
-            "local_only: true",
             "semantic: status=disabled",
             "flat_f32: status=",
             "semantic_path:",

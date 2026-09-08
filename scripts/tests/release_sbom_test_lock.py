@@ -236,20 +236,10 @@ def synthetic_lock_text() -> str:
             ("ctx-history-core",),
         ),
         package(
-            "ctx-daemon-refresh-client",
-            "0.26.0",
-            (
-                "ctx-history-capture",
-                "ctx-history-index",
-                "ctx-history-refresh",
-            ),
-        ),
-        package(
             "ctx-daemon-service",
             "1.0.0",
             (
                 "ctx-client-observability",
-                "ctx-daemon-refresh-client",
                 "ctx-daemon-runtime 1.0.0",
                 "ctx-history-core",
                 "ctx-history-index",

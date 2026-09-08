@@ -122,6 +122,7 @@ notary_submit="${evidence_dir}/ctx-onnxruntime-${platform}.notary-submit.json"
 
 umask 077
 work_dir="$(mktemp -d "${TMPDIR:-/tmp}/ctx-macos-runtime-attestation.XXXXXX")"
+chmod 00700 "${work_dir}"
 complete=0
 cleanup() {
   rm -rf "${work_dir}" >/dev/null 2>&1 || true

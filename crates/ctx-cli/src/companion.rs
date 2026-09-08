@@ -11,9 +11,9 @@ use ctx_client_observability::local_usage::{self, CompletedOperation, Surface};
 use ctx_companion_bridge::{
     BridgeError, BridgeLimits, CancellationToken, CliRequest, CompanionBridge,
     CompanionEnvironment, EnvironmentKey, ExitClass, InstalledCompanion, LimitConfiguration,
-    MaintenanceRequest, ManagedPairExpectations, McpRequest, ProtocolVersion, ReleaseChannel,
-    TerminationReason, MAX_ADMISSION_WAIT, MAX_ARGUMENTS, MAX_CAPTURED_WALL_TIME,
-    MAX_CONCURRENT_PROCESSES, MAX_CONTROL_BYTES, MAX_ENVIRONMENT_ENTRIES, MAX_STDERR_BYTES,
+    MaintenanceRequest, McpRequest, ProtocolVersion, TerminationReason, MAX_ADMISSION_WAIT,
+    MAX_ARGUMENTS, MAX_CAPTURED_WALL_TIME, MAX_CONCURRENT_PROCESSES, MAX_CONTROL_BYTES,
+    MAX_ENVIRONMENT_ENTRIES, MAX_STDERR_BYTES,
 };
 use serde_json::{json, Value};
 
@@ -70,15 +70,6 @@ enum CompanionLaunchError {
         reason: &'static str,
     },
     Unavailable,
-}
-
-impl CompanionRouteError {
-    pub(crate) const fn code(self) -> &'static str {
-        match self {
-            Self::Unavailable => "companion_unavailable",
-            Self::Incompatible => "companion_incompatible",
-        }
-    }
 }
 
 impl CompanionLaunchError {
@@ -369,28 +360,6 @@ fn source_override_path(pro: PathBuf) -> Result<PathBuf, CompanionLaunchError> {
     Ok(pro)
 }
 
-pub(crate) fn managed_pair_expectations() -> Result<ManagedPairExpectations, CompanionRouteError> {
-    let marker = match ctx_upgrade_engine::managed_install_marker_for_current_exe()
-        .map_err(|_| CompanionRouteError::Unavailable)?
-    {
-        ctx_upgrade_engine::ManagedInstallMarker::Valid(marker) => marker,
-        ctx_upgrade_engine::ManagedInstallMarker::Absent => {
-            return Err(CompanionRouteError::Unavailable)
-        }
-        ctx_upgrade_engine::ManagedInstallMarker::Invalid { .. } => {
-            return Err(CompanionRouteError::Incompatible)
-        }
-    };
-    let channel = if marker.staging_dogfood {
-        ReleaseChannel::Staging
-    } else if marker.channel == "stable" {
-        ReleaseChannel::Stable
-    } else {
-        return Err(CompanionRouteError::Incompatible);
-    };
-    Ok(ManagedPairExpectations::new(channel))
-}
-
 fn mcp_limits() -> Result<BridgeLimits, CompanionRouteError> {
     BridgeLimits::new(LimitConfiguration {
         control_bytes: MAX_CONTROL_BYTES,
@@ -407,14 +376,14 @@ fn mcp_limits() -> Result<BridgeLimits, CompanionRouteError> {
 }
 
 fn paid_family_arguments(arguments: &[OsString]) -> Option<Vec<OsString>> {
-    let explicit_pro = has_explicit_pro_selector(arguments);
+    let mut router_selector_index = explicit_pro_selector_index(arguments);
+    let explicit_pro = router_selector_index.is_some();
     let mut index = 1;
     while let Some(argument) = arguments.get(index) {
         if is_global_help_or_version(argument) {
-            return arguments[1..index]
-                .iter()
-                .any(|candidate| candidate == "--pro")
-                .then(|| arguments[1..].to_vec());
+            return router_selector_index
+                .filter(|selector| *selector < index)
+                .map(|selector| forwarded_paid_arguments(arguments, Some(selector)));
         }
         if argument == "--" {
             index += 1;
@@ -424,6 +393,10 @@ fn paid_family_arguments(arguments: &[OsString]) -> Option<Vec<OsString>> {
             index = index.saturating_add(2);
             continue;
         }
+        if argument == "--pro" {
+            index += 1;
+            continue;
+        }
         if argument == "--quiet"
             || has_attached_global_value(argument)
             || starts_with_dash(argument)
@@ -431,49 +404,57 @@ fn paid_family_arguments(arguments: &[OsString]) -> Option<Vec<OsString>> {
             index += 1;
             continue;
         }
+        let family = if argument == "help" {
+            arguments.get(index + 1)
+        } else {
+            Some(argument)
+        };
+        // Only Core-named routes consume a trailing router selector. Setup
+        // owns its trailing --pro flag; paid-family arguments remain opaque.
+        if !matches!(
+            family.and_then(|value| value.to_str()),
+            Some("status" | "doctor" | "upgrade" | "uninstall")
+        ) {
+            router_selector_index = router_selector_index.filter(|selector| *selector < index);
+        }
         if explicit_pro
             || ["pro", "blame", "referral"]
                 .iter()
                 .any(|family| argument == family)
         {
-            return Some(arguments[1..].to_vec());
+            return Some(forwarded_paid_arguments(arguments, router_selector_index));
         }
         if argument == "help"
             && arguments.get(index + 1).is_some_and(|candidate| {
-                [
-                    "pro",
-                    "blame",
-                    "referral",
-                    "setup",
-                    "status",
-                    "doctor",
-                    "upgrade",
-                    "uninstall",
-                ]
-                .iter()
-                .any(|family| {
-                    candidate == family
-                        && (explicit_pro
-                            || !matches!(
-                                *family,
-                                "setup" | "status" | "doctor" | "upgrade" | "uninstall"
-                            ))
-                })
+                ["pro", "blame", "referral"]
+                    .iter()
+                    .any(|family| candidate == family)
             })
         {
-            return Some(arguments[1..].to_vec());
+            return Some(forwarded_paid_arguments(arguments, router_selector_index));
         }
         return None;
     }
     if explicit_pro {
-        return Some(arguments[1..].to_vec());
+        return Some(forwarded_paid_arguments(arguments, router_selector_index));
     }
     arguments.get(index).and_then(|argument| {
         ["pro", "blame", "referral"]
             .iter()
             .any(|family| argument == family)
-            .then(|| arguments[1..].to_vec())
+            .then(|| forwarded_paid_arguments(arguments, router_selector_index))
     })
+}
+
+fn forwarded_paid_arguments(
+    arguments: &[OsString],
+    router_selector_index: Option<usize>,
+) -> Vec<OsString> {
+    let mut forwarded = arguments[1..].to_vec();
+    if let Some(index) = router_selector_index {
+        forwarded.remove(index - 1);
+    }
+    forwarded
 }
 
 /// Resolves only the public wrapper facts needed to persist a completed Blame
@@ -556,12 +537,25 @@ fn has_attached_color_value(value: &OsStr) -> bool {
     value.as_encoded_bytes().starts_with(b"--color=")
 }
 
-fn has_explicit_pro_selector(arguments: &[OsString]) -> bool {
-    arguments
-        .iter()
-        .skip(1)
-        .take_while(|argument| argument.as_os_str() != OsStr::new("--"))
-        .any(|argument| argument == "--pro")
+fn explicit_pro_selector_index(arguments: &[OsString]) -> Option<usize> {
+    let mut index = 1;
+    while let Some(argument) = arguments.get(index) {
+        if argument == "--" {
+            break;
+        }
+        if argument == "--data-root" || argument == "--color" {
+            if arguments.get(index + 1).is_some_and(|value| value == "--") {
+                break;
+            }
+            index = index.saturating_add(2);
+            continue;
+        }
+        if argument == "--pro" {
+            return Some(index);
+        }
+        index += 1;
+    }
+    None
 }
 
 fn is_global_help_or_version(value: &OsStr) -> bool {

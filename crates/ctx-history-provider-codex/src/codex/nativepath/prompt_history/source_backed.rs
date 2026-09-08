@@ -7,23 +7,26 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
+use ctx_history_capture_runtime::SourceBackedRecordRejectionDrafts;
 use ctx_history_core::{
     CaptureProvider, CoreRecord, CoreRecordError, ProjectionContractError, SourceAnchor, SourceKey,
 };
+use ctx_history_jsonl::JsonlRecordRejections;
 use thiserror::Error;
 
 use super::super::absolute_lexical_path;
 use super::PromptLine;
+use crate::MAX_PROVIDER_JSONL_LINE_BYTES;
 use crate::provider::source_backed::ProviderRuntimeBinding;
 use crate::{
+    CaptureError,
     common::io::OpenedProviderSourceFile,
     provider::source_backed::family::jsonl::{
-        jsonl_single_file_inventory, JsonlFamilyAdapter, JsonlFamilyAppendMode,
-        JsonlFamilyInventory, JsonlFamilyInventoryMode, JsonlFamilyLeaf, JsonlFamilyProjector,
-        JsonlFamilyRootMissingMode, JsonlFamilyWorkerContext, JsonlOversizedRecordPolicy,
-        JsonlRecordRef,
+        JsonlFamilyAdapter, JsonlFamilyAppendMode, JsonlFamilyInventory, JsonlFamilyInventoryMode,
+        JsonlFamilyLeaf, JsonlFamilyProjector, JsonlFamilyRootMissingMode,
+        JsonlFamilyWorkerContext, JsonlOversizedRecordPolicy, JsonlRecordRef,
+        jsonl_single_file_inventory,
     },
-    CaptureError,
 };
 
 mod projection;
@@ -33,7 +36,7 @@ pub(crate) const SOURCE_FORMAT: &str = "codex_history_jsonl";
 const PATH_KIND: &str = "Codex prompt-history JSONL";
 const SOURCE_SCHEMA_VARIANT: &str = "codex-prompt-history-jsonl-v1";
 const SOURCE_IDENTITY_VERSION: u32 = 1;
-const PARSER_REVISION: &str = "codex-prompt-history-shared-jsonl-v5";
+const PARSER_REVISION: &str = "codex-prompt-history-shared-jsonl-v6";
 const SESSION_KEY_NAMESPACE: &str = "codex.prompt-history.session";
 const EVENT_POSITION_KIND: &str = "codex.prompt-history.raw-ordinal";
 const LOGICAL_SESSION_KIND: &str = "codex-prompt-history-session";
@@ -167,7 +170,11 @@ impl<B: ProviderRuntimeBinding> JsonlFamilyAdapter for CodexPromptHistoryJsonlFa
         }
         Ok(Box::new(CodexPromptHistoryProjector {
             source: self.source.clone(),
-            rejected_records: 0,
+            rejections: JsonlRecordRejections::new(
+                self.source.clone(),
+                CaptureProvider::Codex,
+                leaf.source_path().display().to_string(),
+            ),
             binding: PhantomData,
         }))
     }
@@ -175,7 +182,7 @@ impl<B: ProviderRuntimeBinding> JsonlFamilyAdapter for CodexPromptHistoryJsonlFa
 
 pub struct CodexPromptHistoryProjector<B: ProviderRuntimeBinding> {
     source: SourceKey,
-    rejected_records: u64,
+    rejections: JsonlRecordRejections,
     pub binding: PhantomData<fn() -> B>,
 }
 
@@ -184,9 +191,14 @@ impl<B: ProviderRuntimeBinding> CodexPromptHistoryProjector<B> {
     pub fn for_test(
         input: CodexPromptHistorySourceBackedInputV0,
     ) -> CodexPromptHistorySourceBackedResultV0<Self> {
+        let source = input.source_key()?;
         Ok(Self {
-            source: input.source_key()?,
-            rejected_records: 0,
+            source: source.clone(),
+            rejections: JsonlRecordRejections::new(
+                source,
+                CaptureProvider::Codex,
+                input.path.display().to_string(),
+            ),
             binding: PhantomData,
         })
     }
@@ -201,44 +213,61 @@ impl<B: ProviderRuntimeBinding> JsonlFamilyProjector for CodexPromptHistoryProje
         _worker: &mut JsonlFamilyWorkerContext<B>,
         emit: &mut dyn FnMut(CoreRecord) -> crate::Result<()>,
     ) -> crate::Result<()> {
-        project_prompt_record(&self.source, &mut self.rejected_records, record, emit)
+        project_prompt_record(&self.source, &mut self.rejections, record, emit)
     }
 
     fn rejected_records(&self) -> u64 {
-        self.rejected_records
+        self.rejections.count()
+    }
+
+    fn take_record_rejections(&mut self) -> SourceBackedRecordRejectionDrafts {
+        self.rejections.take_drafts()
     }
 }
 
 fn project_prompt_record(
     source: &SourceKey,
-    rejected_records: &mut u64,
+    rejections: &mut JsonlRecordRejections,
     record: JsonlRecordRef<'_>,
     emit: &mut dyn FnMut(CoreRecord) -> crate::Result<()>,
 ) -> crate::Result<()> {
     if record.oversized() {
-        *rejected_records = rejected_records.saturating_add(1);
+        rejections.malformed(
+            record,
+            format!(
+                "Codex prompt-history record exceeds the {MAX_PROVIDER_JSONL_LINE_BYTES} byte limit"
+            ),
+        );
         return Ok(());
     }
     if record.bytes().iter().all(u8::is_ascii_whitespace) {
         return Ok(());
     }
     let line = match serde_json::from_slice::<PromptLine>(record.bytes()) {
-        Ok(line)
-            if !line.session_id.trim().is_empty()
-                && chrono::DateTime::from_timestamp(line.ts, 0).is_some() =>
-        {
-            line
+        Ok(line) if line.session_id.trim().is_empty() => {
+            rejections.malformed(record, "Codex prompt-history session_id is empty");
+            return Ok(());
         }
-        _ => {
-            *rejected_records = rejected_records.saturating_add(1);
+        Ok(line) if chrono::DateTime::from_timestamp(line.ts, 0).is_none() => {
+            rejections.malformed(record, "Codex prompt-history timestamp is out of range");
+            return Ok(());
+        }
+        Ok(line) => line,
+        Err(error) => {
+            rejections.malformed(
+                record,
+                format!("malformed Codex prompt-history JSONL: {error}"),
+            );
             return Ok(());
         }
     };
     let projected = core_record(source, line, record.evidence().physical_ordinal())
         .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
     if retained_record_bytes(&projected) > MAX_RETAINED_RECORD_BYTES {
-        // A bounded record rejection must not discard valid neighboring prompts.
-        *rejected_records = rejected_records.saturating_add(1);
+        rejections.malformed(
+            record,
+            CodexPromptHistorySourceBackedErrorV0::RecordTooLarge.to_string(),
+        );
         return Ok(());
     }
     emit(projected)
@@ -247,6 +276,7 @@ fn project_prompt_record(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ctx_history_capture_runtime::MAX_RECORDED_SOURCE_BACKED_RECORD_REJECTIONS;
 
     #[test]
     fn retained_record_limit_rejects_one_prompt_and_preserves_valid_peers() {
@@ -262,7 +292,11 @@ mod tests {
             oversized.as_bytes(),
             br#"{"session_id":"after","ts":3,"text":"after"}"#.as_slice(),
         ];
-        let mut rejected = 0;
+        let mut rejected = JsonlRecordRejections::new(
+            source.clone(),
+            CaptureProvider::Codex,
+            "/tmp/codex/history.jsonl".to_owned(),
+        );
         let mut projected = Vec::new();
         for (ordinal, row) in rows.into_iter().enumerate() {
             project_prompt_record(
@@ -283,7 +317,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["before", "after"]
         );
-        assert_eq!(rejected, 1);
+        assert_eq!(rejected.count(), 1);
     }
 
     #[test]
@@ -316,5 +350,102 @@ mod tests {
             source.identity().encode_canonical().unwrap(),
             released.identity().encode_canonical().unwrap()
         );
+    }
+
+    #[test]
+    fn malformed_records_keep_valid_peers_and_report_exact_locations_and_reasons() {
+        let input =
+            CodexPromptHistorySourceBackedInputV0::explicit("/tmp/codex/history.jsonl", [0x2a; 32]);
+        let source = input.source_key().unwrap();
+        let mut rejections = JsonlRecordRejections::new(
+            source.clone(),
+            CaptureProvider::Codex,
+            input.path.display().to_string(),
+        );
+        let rows: [&[u8]; 5] = [
+            br#"{"session_id":"before","ts":1,"text":"before"}"#,
+            br#"{"#,
+            br#"[]"#,
+            br#"{"session_id":" ","ts":2,"text":"empty identity"}"#,
+            br#"{"session_id":"after","ts":3,"text":"after"}"#,
+        ];
+        let mut projected = Vec::new();
+        for (ordinal, row) in rows.into_iter().enumerate() {
+            project_prompt_record(
+                &source,
+                &mut rejections,
+                JsonlRecordRef::for_test(row, ordinal as u64),
+                &mut |record| {
+                    projected.push(record);
+                    Ok(())
+                },
+            )
+            .unwrap();
+        }
+
+        assert_eq!(
+            projected
+                .iter()
+                .map(|record| record.content.meaningful_text())
+                .collect::<Vec<_>>(),
+            ["before", "after"]
+        );
+        assert_eq!(rejections.count(), 3);
+        let (drafts, omitted) = rejections.take_drafts().into_parts();
+        assert_eq!(omitted, 0);
+        assert_eq!(
+            drafts
+                .iter()
+                .map(|draft| draft.line_number)
+                .collect::<Vec<_>>(),
+            [2, 3, 4]
+        );
+        assert!(
+            drafts[0]
+                .detail
+                .contains("malformed Codex prompt-history JSONL")
+        );
+        assert!(
+            drafts[1]
+                .detail
+                .contains("malformed Codex prompt-history JSONL")
+        );
+        assert_eq!(drafts[2].detail, "Codex prompt-history session_id is empty");
+    }
+
+    #[test]
+    fn all_invalid_records_keep_an_exact_count_with_bounded_details() {
+        let source = CodexPromptHistorySourceBackedInputV0::explicit(
+            "/tmp/codex/all-invalid.jsonl",
+            [0x31; 32],
+        )
+        .source_key()
+        .unwrap();
+        let mut rejections = JsonlRecordRejections::new(
+            source.clone(),
+            CaptureProvider::Codex,
+            "/tmp/codex/all-invalid.jsonl",
+        );
+        let rejected = MAX_RECORDED_SOURCE_BACKED_RECORD_REJECTIONS + 1;
+        let mut projected = Vec::new();
+        for ordinal in 0..rejected {
+            project_prompt_record(
+                &source,
+                &mut rejections,
+                JsonlRecordRef::for_test(b"{", ordinal as u64),
+                &mut |record| {
+                    projected.push(record);
+                    Ok(())
+                },
+            )
+            .unwrap();
+        }
+
+        assert!(projected.is_empty());
+        assert_eq!(rejections.count(), rejected as u64);
+        let (drafts, omitted) = rejections.take_drafts().into_parts();
+        assert_eq!(drafts.len(), MAX_RECORDED_SOURCE_BACKED_RECORD_REJECTIONS);
+        assert_eq!(omitted, 1);
+        assert_eq!(drafts.len() + omitted, rejected);
     }
 }

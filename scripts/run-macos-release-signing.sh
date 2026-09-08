@@ -157,7 +157,7 @@ fi
 
 umask 077
 secret_root="$(mktemp -d "${TMPDIR:-/tmp}/ctx-macos-signing-launcher.XXXXXX")"
-chmod 0700 "${secret_root}"
+chmod 00700 "${secret_root}"
 cleanup() {
   rm -rf "${secret_root}" >/dev/null 2>&1 || true
 }

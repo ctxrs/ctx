@@ -14,7 +14,6 @@ pub type RevalidationCallback = dyn for<'a> Fn(SourceBackedRevalidationTarget<'a
     + Sync;
 pub type CompleteInventoryRevalidationCallback =
     dyn Fn(&CertifiedSourceInventory) -> SourceBackedRouteResult<bool> + Send + Sync;
-pub type SuccessfulPublicationCallback = dyn Fn() + Send + Sync;
 pub type RoutePublicationRevalidationCallback = dyn Fn() -> bool + Send + Sync;
 pub type RoutePublicationControlCallback =
     dyn Fn() -> SourceBackedRouteResult<Option<Vec<u8>>> + Send + Sync;
@@ -33,7 +32,6 @@ pub struct SourceBackedRouteDriver<L: CaptureLifecycleSink, C> {
     pub owns_source: Arc<SourcePredicate>,
     pub revalidate: Arc<RevalidationCallback>,
     pub revalidate_complete_inventory: Option<Arc<CompleteInventoryRevalidationCallback>>,
-    pub after_successful_publication: Option<Arc<SuccessfulPublicationCallback>>,
     pub revalidate_at_publication: Option<Arc<RoutePublicationRevalidationCallback>>,
     pub publication_control: Option<Arc<RoutePublicationControlCallback>>,
     pub watch_targets: Option<Arc<WatchTargetsCallback>>,
@@ -48,7 +46,6 @@ impl<L: CaptureLifecycleSink, C: Clone> Clone for SourceBackedRouteDriver<L, C> 
             owns_source: Arc::clone(&self.owns_source),
             revalidate: Arc::clone(&self.revalidate),
             revalidate_complete_inventory: self.revalidate_complete_inventory.clone(),
-            after_successful_publication: self.after_successful_publication.clone(),
             revalidate_at_publication: self.revalidate_at_publication.clone(),
             publication_control: self.publication_control.clone(),
             watch_targets: self.watch_targets.clone(),
@@ -100,7 +97,6 @@ impl<L: CaptureLifecycleSink, C> SourceBackedRouteDriver<L, C> {
             owns_source: Arc::new(owns_source),
             revalidate: Arc::new(revalidate),
             revalidate_complete_inventory: None,
-            after_successful_publication: None,
             revalidate_at_publication: None,
             publication_control: None,
             watch_targets: None,
@@ -155,18 +151,6 @@ impl<L: CaptureLifecycleSink, C> SourceBackedRouteDriver<L, C> {
         self
     }
 
-    /// Installs best-effort work that may run only after atomic publication.
-    ///
-    /// The callback cannot affect the committed generation and must suppress
-    /// its own cache or observation failures.
-    pub fn with_successful_publication(
-        mut self,
-        after_publication: impl Fn() + Send + Sync + 'static,
-    ) -> Self {
-        self.after_successful_publication = Some(Arc::new(after_publication));
-        self
-    }
-
     pub fn scan(
         &self,
         sink: &mut SourceBackedGenerationSink<'_, L>,
@@ -214,12 +198,6 @@ impl<L: CaptureLifecycleSink, C> SourceBackedRouteDriver<L, C> {
 
     pub fn uses_parallel_leaf_workers(&self) -> bool {
         self.uses_parallel_leaf_workers
-    }
-
-    pub fn after_successful_publication(&self) {
-        if let Some(after_publication) = self.after_successful_publication.as_ref() {
-            after_publication();
-        }
     }
 
     pub fn scan_callback(&self) -> Arc<SourceBackedScanCallback<L>> {

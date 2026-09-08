@@ -151,7 +151,11 @@ pub fn acquire_generation_retention_lease(
 pub fn load_generation_retention_lease(
     root: impl AsRef<Path>,
 ) -> Result<Option<GenerationRetentionLease>> {
-    let path = lease_path(root.as_ref());
+    let root = root.as_ref();
+    if let Some(opened) = crate::read_root::registered_read_directory(root)? {
+        return load_generation_retention_lease_from_opened_root(&opened);
+    }
+    let path = lease_path(root);
     let metadata = match fs::symlink_metadata(&path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -177,7 +181,7 @@ pub fn load_generation_retention_lease(
         return Err(IndexError::InvalidGenerationRetentionLease);
     }
     lease.validate()?;
-    let target = slot_path(root.as_ref(), lease.target());
+    let target = slot_path(root, lease.target());
     let target_metadata =
         fs::symlink_metadata(target).map_err(|_| IndexError::InvalidGenerationRetentionLease)?;
     if !target_metadata.is_dir() || target_metadata.file_type().is_symlink() {
@@ -188,6 +192,12 @@ pub fn load_generation_retention_lease(
 
 fn load_generation_retention_lease_from_read_root(
     root: &GenerationReadRoot,
+) -> Result<Option<GenerationRetentionLease>> {
+    load_generation_retention_lease_from_opened_root(root.opened())
+}
+
+fn load_generation_retention_lease_from_opened_root(
+    root: &crate::read_root::OpenedDirectory,
 ) -> Result<Option<GenerationRetentionLease>> {
     let file = match root.open_file(Path::new(GENERATION_RETENTION_LEASE_FILE)) {
         Ok(file) => file,
@@ -213,14 +223,21 @@ fn load_generation_retention_lease_from_read_root(
         return Err(IndexError::InvalidGenerationRetentionLease);
     }
     lease.validate()?;
-    root.opened()
-        .open_directory(&Path::new(INDEX_GENERATIONS_DIRECTORY).join(lease.target().directory()))
+    root.open_directory(&Path::new(INDEX_GENERATIONS_DIRECTORY).join(lease.target().directory()))
         .map_err(|_| IndexError::InvalidGenerationRetentionLease)?;
     Ok(Some(lease))
 }
 
-/// Releases exactly the observed owner under the publication lock. The next
-/// writer open/publication performs ordinary bounded reclamation.
+/// Releases exactly the observed owner under the publication lock, then makes
+/// a best-effort pass over the now-unretained physical state before releasing
+/// that lock.
+///
+/// Removing the durable lease is the authoritative operation. Reclamation is
+/// deliberately best effort: a crash or reclaim error after the durable
+/// removal can leave obsolete bytes for a later writer, but must not turn a
+/// successful owner release into an ambiguous retry or retain authority that
+/// was already removed. Every reclamation primitive independently fences live
+/// process readers with its generation lock.
 pub fn release_generation_retention_lease(
     root: impl AsRef<Path>,
     expected: &GenerationRetentionLease,
@@ -242,7 +259,25 @@ pub fn release_generation_retention_lease(
         return Err(IndexError::GenerationRetentionLeaseOwnerMismatch);
     }
     remove_lease_file(&root)?;
+    reclaim_unretained_generation_state_with_writer_lock_held(&root);
     Ok(true)
+}
+
+/// Reclaims generation data that is no longer rooted by the active/previous
+/// pointer pair or the sole durable lease. The caller already holds the
+/// generation writer lock.
+fn reclaim_unretained_generation_state_with_writer_lock_held(root: &Path) {
+    let Ok(pointer) = load_active_generation_pointer(root) else {
+        return;
+    };
+    let retained_generation_ids = pointer
+        .iter()
+        .flat_map(|pointer| std::iter::once(pointer.active()).chain(pointer.previous()))
+        .map(|slot| slot.generation_id().to_owned())
+        .collect::<Vec<_>>();
+    let _ = crate::reclaim_inactive_generation_directories(root, pointer.as_ref(), None);
+    let _ = crate::reclaim_unreferenced_manifests(root, &retained_generation_ids);
+    let _ = crate::reclaim_unreferenced_certifications(root, pointer.as_ref(), None);
 }
 
 fn canonical_index_root(root: &Path) -> Result<PathBuf> {
@@ -831,5 +866,74 @@ mod tests {
         assert!(!manifest_path(root.path(), old.generation_id()).exists());
         assert!(!certification_path(root.path(), &old).exists());
         assert!(root.path().join(read_lease::COORDINATOR_FILE).is_file());
+    }
+
+    #[test]
+    fn durable_release_respects_cross_process_reader_then_later_reclaims() {
+        let root = tempdir().unwrap();
+        let old = create_slot(root.path(), 'd');
+        publish_active_generation_pointer(
+            root.path(),
+            &ActiveGenerationPointer::new(old.clone(), None).unwrap(),
+        )
+        .unwrap();
+        let durable = acquire_generation_retention_lease(
+            root.path(),
+            old.generation_id(),
+            "pro_core_finalization",
+            &"e".repeat(64),
+        )
+        .unwrap();
+
+        let marker = root.path().join("durable-release-child-ready");
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("retention::tests::generation_read_lease_crash_child")
+            .arg("--nocapture")
+            .env(CHILD_ROOT, root.path())
+            .env(CHILD_GENERATION, old.generation_id())
+            .env(CHILD_MARKER, &marker)
+            .spawn()
+            .unwrap();
+        for _ in 0..250 {
+            if marker.is_file() {
+                break;
+            }
+            assert!(
+                child.try_wait().unwrap().is_none(),
+                "lease child exited early"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            marker.is_file(),
+            "lease child did not acquire its shared lock"
+        );
+
+        let previous = create_slot(root.path(), 'e');
+        let active = create_slot(root.path(), 'f');
+        let pointer = ActiveGenerationPointer::new(active.clone(), Some(previous.clone())).unwrap();
+        publish_active_generation_pointer(root.path(), &pointer).unwrap();
+
+        assert!(release_generation_retention_lease(root.path(), &durable).unwrap());
+        assert!(load_generation_retention_lease(root.path())
+            .unwrap()
+            .is_none());
+        assert!(slot_path(root.path(), &old).is_dir());
+        assert!(manifest_path(root.path(), old.generation_id()).is_file());
+        assert!(certification_path(root.path(), &old).is_file());
+
+        child.kill().unwrap();
+        child.wait().unwrap();
+        let retained = vec![
+            active.generation_id().to_owned(),
+            previous.generation_id().to_owned(),
+        ];
+        reclaim_inactive_generation_directories(root.path(), Some(&pointer), None).unwrap();
+        reclaim_unreferenced_manifests(root.path(), &retained).unwrap();
+        reclaim_unreferenced_certifications(root.path(), Some(&pointer), None).unwrap();
+        assert!(!slot_path(root.path(), &old).exists());
+        assert!(!manifest_path(root.path(), old.generation_id()).exists());
+        assert!(!certification_path(root.path(), &old).exists());
     }
 }

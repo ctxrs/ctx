@@ -35,6 +35,7 @@ use super::*;
 
 mod cancellation;
 mod passive_v2;
+mod retained_peer;
 
 fn semantic_tempdir() -> Result<tempfile::TempDir> {
     let temporary = tempfile::tempdir()?;
@@ -158,6 +159,10 @@ impl SemanticDocumentBuilder for RejectingSemanticPorts {
 }
 
 impl SemanticBatchEmbedder for RejectingSemanticPorts {
+    fn document_fits(&mut self, _text: &str) -> Result<bool> {
+        anyhow::bail!("unexpected semantic input assessment")
+    }
+
     fn embed_chunks(&mut self, _chunks: &[SemanticChunkDocument]) -> Result<Vec<Vec<f32>>> {
         Err(anyhow!(
             "empty semantic fixture unexpectedly requested embeddings"
@@ -794,6 +799,10 @@ struct FixtureSemanticEmbedder {
 }
 
 impl SemanticBatchEmbedder for FixtureSemanticEmbedder {
+    fn document_fits(&mut self, _text: &str) -> anyhow::Result<bool> {
+        Ok(true)
+    }
+
     fn embed_chunks(&mut self, chunks: &[SemanticChunkDocument]) -> Result<Vec<Vec<f32>>> {
         Ok(chunks
             .iter()

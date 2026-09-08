@@ -10,7 +10,7 @@ rust-version.workspace = true
 publish = false
 
 [features]
-test-support = ["ctx-daemon-refresh-client/test-support"]
+test-support = []
 
 [dependencies]
 anyhow.workspace = true
@@ -20,7 +20,6 @@ rusqlite.workspace = true
 serde_json.workspace = true
 uuid.workspace = true
 ctx-client-observability = { path = "../ctx-client-observability" }
-ctx-daemon-refresh-client = { path = "../ctx-daemon-refresh-client" }
 ctx-daemon-runtime = { path = "../ctx-daemon-runtime" }
 ctx-history-capture = { path = "../ctx-history-capture" }
 ctx-history-core = { path = "../ctx-history-core" }
@@ -45,4 +44,3 @@ ctx-history-refresh = { path = "../ctx-history-refresh", features = ["test-suppo
 ctx-semantic-index = { path = "../ctx-semantic-index", features = ["test-support"] }
 ctx-semantic-model = { path = "../ctx-semantic-model", features = ["test-support"] }
 ctx-upgrade-engine = { path = "../ctx-upgrade-engine", features = ["test-support"] }
-ctx-daemon-refresh-client = { path = "../ctx-daemon-refresh-client", features = ["test-support"] }

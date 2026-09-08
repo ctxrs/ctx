@@ -504,27 +504,6 @@ impl SemanticEmbeddingBackend {
             .ok_or_else(|| anyhow!("semantic query embedding was empty"))
     }
 
-    pub(super) fn embed_prepared_documents(
-        &mut self,
-        documents: Vec<String>,
-        batch_size: usize,
-    ) -> Result<Vec<Vec<f32>>> {
-        let expected = documents.len();
-        if expected == 0 {
-            return Ok(Vec::new());
-        }
-        let raw = match self {
-            Self::Ort { model, .. } => {
-                model.embed(documents, Some(batch_size)).with_context(|| {
-                    format!("embed documents with semantic model {SEMANTIC_MODEL_ID}")
-                })?
-            }
-            #[cfg(target_os = "macos")]
-            Self::CoreMl(model) => model.embed_documents(documents)?,
-        };
-        normalize_and_validate_embeddings(raw, expected)
-    }
-
     pub(super) fn kind(&self) -> SemanticBackendKind {
         match self {
             Self::Ort { kind, .. } => *kind,
@@ -960,6 +939,8 @@ use coreml::{
 #[cfg(all(test, ctx_semantic_fastembed))]
 pub(super) use coreml::{pad_texts_to_exact_batch, semantic_fixed_shape_from_values};
 mod cache;
+#[cfg(ctx_semantic_fastembed)]
+mod input_fit;
 mod onnx;
 mod passive;
 mod windows_ml;

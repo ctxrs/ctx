@@ -22,8 +22,9 @@ let results = client.search(SearchOptions {
 
 ## Backends
 
-- Local backend: shells out to `ctx` JSON commands and never performs network
-  calls or provider API calls.
+- Local backend: invokes `ctx` JSON commands. The CLI honors explicitly
+  configured external semantic execution, which can send bounded semantic text
+  to the selected executor. See [SDK locality](../../docs/sdks.md#local-and-hosted-backends).
 - Hosted backend: Hosted SDK placeholders are deprecated and will be removed in
   the next breaking SDK revision; hosted operations remain unsupported. Valid
   operations continue to return a structured `not_supported` error.

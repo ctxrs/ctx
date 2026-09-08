@@ -426,6 +426,67 @@ fn terminal_generation_can_be_pinned_after_one_successor_advances_active() {
 }
 
 #[test]
+fn publication_readers_acquire_retained_peers_only_on_explicit_request() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    let index_root = source_backed_index_root(&data_root);
+    let first = publish_pin_source(&index_root, publication_pin_source());
+    let second = publish_pin_source(&index_root, publication_pin_source_with_anchor(0x93));
+    let mut ordinary = crate::pin_active_verified_generation(&data_root)
+        .unwrap()
+        .into_index();
+    assert!(ordinary
+        .take_retained_generation_peer_for_reader()
+        .unwrap()
+        .is_none());
+    let mut ordinary = crate::pin_published_generation(&data_root)
+        .unwrap()
+        .unwrap()
+        .into_index();
+    assert!(ordinary
+        .take_retained_generation_peer_for_reader()
+        .unwrap()
+        .is_none());
+    let mut ordinary = crate::pin_retained_generation(&data_root, &first)
+        .unwrap()
+        .into_index();
+    assert!(ordinary
+        .take_retained_generation_peer_for_reader()
+        .unwrap()
+        .is_none());
+
+    let (paired, opens) = crate::count_verified_index_opens(|| {
+        [
+            crate::pin_active_verified_generation_with_retained_peer(&data_root).unwrap(),
+            crate::pin_published_generation_with_retained_peer(&data_root)
+                .unwrap()
+                .unwrap(),
+            crate::pin_retained_generation_with_retained_peer(&data_root, &first).unwrap(),
+        ]
+    });
+    assert_eq!(
+        opens, 3,
+        "pair acquisition must not repin after an ordinary open"
+    );
+    for (pin, (expected_target, expected_peer)) in
+        paired
+            .into_iter()
+            .zip([(&second, &first), (&second, &first), (&first, &second)])
+    {
+        let mut index = pin.into_index();
+        assert_eq!(index.generation_id(), expected_target);
+        assert_eq!(
+            index
+                .take_retained_generation_peer_for_reader()
+                .unwrap()
+                .unwrap()
+                .generation_id(),
+            expected_peer
+        );
+    }
+}
+
+#[test]
 fn cold_dirty_routes_are_published_in_one_all_route_generation() {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("data");
@@ -668,6 +729,16 @@ fn failed_post_commit_probe_is_not_reopened_in_the_same_cycle() {
 fn terminal_persist_failure_retries_exact_receipt_without_reexecuting_refresh() {
     let coordinator = CoreRefreshEngine::new();
     let failed_callbacks = AtomicUsize::new(0);
+    let earlier = coordinator.enqueue(None);
+    let earlier_id = request_id(&earlier);
+    coordinator
+        .run_next_with(
+            |_, _| Ok(test_publication("generation-a")),
+            || Ok(Some("generation-a".to_owned())),
+            |_| Ok(()),
+            |_| Ok(()),
+        )
+        .unwrap();
     let request = coordinator.enqueue(Some("generation-a".to_owned()));
     let request_id = request_id(&request);
 
@@ -686,22 +757,50 @@ fn terminal_persist_failure_retries_exact_receipt_without_reexecuting_refresh() 
     assert!(!run.failed);
     assert!(!run.did_work);
     assert!(run.terminal_persistence_pending);
-    assert_eq!(run.job["request_state"], "running");
-    assert_eq!(run.job["progress"]["phase"], "persisting_terminal");
-    assert!(run.job["last_error"]
-        .as_str()
-        .is_some_and(|error| error.contains("injected terminal persistence failure")));
+    assert_eq!(run.job["request_state"], "published");
+    assert_eq!(run.job["progress"]["phase"], "published");
+    assert!(run.job.get("last_error").is_none());
     assert_eq!(failed_callbacks.load(Ordering::SeqCst), 0);
+    let pending = coordinator.status(&request_id).unwrap();
+    assert_eq!(pending["request_state"], "running");
+    assert_eq!(pending["progress"]["phase"], "persisting_terminal");
+    assert_eq!(pending["published_generation"], "generation-b");
+    assert!(pending.get("receipt").is_none());
+    assert!(pending.get("structured_outcome").is_none());
+    assert!(!RefreshStatus::parse_schema_v1(pending.clone())
+        .unwrap()
+        .kind()
+        .unwrap()
+        .request_state()
+        .is_terminal());
     assert_eq!(
-        coordinator.status(&request_id).unwrap()["request_state"],
-        "running"
+        coordinator.status(&earlier_id).unwrap()["request_state"],
+        "published"
     );
+    assert!(coordinator.status("unknown-request").is_none());
+
+    let still_pending = coordinator
+        .run_next_with(
+            |_, _| panic!("terminal persistence retry must not execute capture"),
+            || panic!("terminal persistence retry must not reopen Core"),
+            |job| {
+                assert_eq!(job, &run.job);
+                Err(anyhow!("terminal persistence is still unavailable"))
+            },
+            |_| Ok(()),
+        )
+        .unwrap();
+    assert!(still_pending.terminal_persistence_pending);
+    assert_eq!(coordinator.status(&request_id).unwrap(), pending);
 
     let retry = coordinator
         .run_next_with(
             |_, _| panic!("terminal persistence retry must not execute capture"),
             || panic!("terminal persistence retry must not reopen Core"),
-            |_| Ok(()),
+            |job| {
+                assert_eq!(job, &run.job);
+                Ok(())
+            },
             |_| Ok(()),
         )
         .expect("terminal persistence retry");
@@ -712,6 +811,9 @@ fn terminal_persist_failure_retries_exact_receipt_without_reexecuting_refresh() 
     assert_eq!(retry.job["request_state"], "published");
     assert!(retry.job.get("failure_type").is_none());
     assert!(retry.job.get("last_error").is_none());
+    let published = coordinator.status(&request_id).unwrap();
+    assert_eq!(published["request_state"], "published");
+    assert_eq!(published["receipt"], run.job["receipt"]);
 }
 
 #[test]
@@ -732,6 +834,27 @@ fn failed_terminal_persistence_retries_and_survives_restart_without_recapture() 
     assert!(first.failed);
     assert!(first.terminal_persistence_pending);
     assert!(coordinator.has_pending_request());
+    let request_id = first.job["request_id"].as_str().unwrap();
+    let pending = coordinator.status(request_id).unwrap();
+    assert_eq!(pending["request_state"], "running");
+    assert_eq!(pending["progress"]["phase"], "persisting_terminal");
+    for field in [
+        "structured_outcome",
+        "last_error",
+        "failure_type",
+        "finished_at_ms",
+    ] {
+        assert!(
+            pending.get(field).is_none(),
+            "premature terminal field {field}"
+        );
+    }
+    assert!(!RefreshStatus::parse_schema_v1(pending)
+        .unwrap()
+        .kind()
+        .unwrap()
+        .request_state()
+        .is_terminal());
 
     let status_path = daemon_source_backed_refresh_job_path(&data_root);
     let retry = coordinator
@@ -746,6 +869,10 @@ fn failed_terminal_persistence_retries_and_survives_restart_without_recapture() 
     assert!(!retry.terminal_persistence_pending);
     assert!(!coordinator.has_pending_request());
     assert_eq!(retry.job["request_state"], "failed");
+    assert_eq!(
+        coordinator.status(request_id).unwrap()["request_state"],
+        "failed"
+    );
     assert!(retry.job["last_error"]
         .as_str()
         .is_some_and(|error| error.contains("typed provider refresh failure")));
@@ -793,7 +920,10 @@ fn durable_terminal_coverage_failure_recovers_without_wedging_startup() {
         .expect("terminal coverage failure");
     assert!(failed.failed);
     assert_eq!(failed.job["request_state"], "failed");
-    assert_eq!(failed.job["failure_type"], TERMINAL_COVERAGE_ERROR_CODE);
+    assert_eq!(
+        failed.job["failure_type"],
+        RefreshOutcomeCode::AllProviderTerminalCoverageUnavailable.as_str()
+    );
     drop(coordinator);
 
     let restarted = CoreRefreshEngine::with_executor(Arc::new(
@@ -812,7 +942,7 @@ fn durable_terminal_coverage_failure_recovers_without_wedging_startup() {
 }
 
 #[test]
-fn terminal_persist_retry_retains_admissions_without_readmitting_routes() {
+fn terminal_persist_retry_finalizes_admissions_without_readmitting_routes() {
     let coordinator = CoreRefreshEngine::new();
     let route = route_identity(0x5a);
     coordinator.initialize_watch_route_authority([route.clone()]);
@@ -841,16 +971,13 @@ fn terminal_persist_retry_retains_admissions_without_readmitting_routes() {
             |_| Ok(()),
         )
         .unwrap();
-    assert_eq!(run.job["request_state"], "running");
+    assert_eq!(run.job["request_state"], "published");
     assert!(run.terminal_persistence_pending);
 
-    let retry_error = coordinator
+    assert!(coordinator
         .admit_refresh_scope_for_test(&request_id, &scope)
-        .unwrap_err();
-    assert!(
-        format!("{retry_error:#}").contains("already has retained route admissions"),
-        "{retry_error:#}"
-    );
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
@@ -1014,102 +1141,8 @@ fn restart_discards_incomplete_candidate_and_publishes_from_last_good() {
     );
 }
 
-pub(super) fn publish_empty_generation_with_request_metadata(
-    execution: &SourceBackedRefreshExecution<'_>,
-    route_byte: u8,
-) -> Result<SourceBackedRefreshPublication> {
-    let request_id = execution.request_id.to_owned();
-    let operation = execution.operation;
-    let scope = execution.admitted_refresh().publication_scope().clone();
-    let published =
-        ctx_history_index::GenerationWriter::open(execution.index_root, WriterOptions::default())?
-            .into_writer()
-            .map_err(crate::committed_generation_recovery_error)?
-            .commit_with_publication_metadata(
-                |_| true,
-                |context| {
-                    let mut publication =
-                        empty_test_publication(context.generation_id().to_owned());
-                    add_complete_empty_authority(&mut publication, route_identity(route_byte));
-                    let receipt = SourceBackedRefreshReceipt::from_verified_publication(
-                        None,
-                        context.generation_id().to_owned(),
-                        &publication,
-                    )
-                    .map_err(|error| IndexError::PublicationMetadata(format!("{error:#}")))?;
-                    SourceBackedPublicationMetadata {
-                        version: SOURCE_REFRESH_PUBLICATION_METADATA_VERSION,
-                        request_id: request_id.clone(),
-                        operation,
-                        refresh_scope: scope.clone(),
-                        receipt: receipt.to_json(),
-                        route_observations: BTreeMap::new(),
-                        route_controls: BTreeMap::new(),
-                    }
-                    .encode()
-                },
-            )?;
-    let generation_id = published.receipt().generation_id.clone();
-    let (_, _, verified_index) = published.into_parts();
-    let mut publication = empty_test_publication(generation_id);
-    add_complete_empty_authority(&mut publication, route_identity(route_byte));
-    publication.verified_index = Some(Arc::new(verified_index));
-    Ok(publication)
-}
-
 #[test]
-fn restart_after_pointer_publication_recovers_exact_receipt_without_recapture() {
-    let temp = tempfile::tempdir().unwrap();
-    let data_root = temp.path().join("data");
-    let first = CoreRefreshEngine::with_executor(Arc::new(
-        move |execution: SourceBackedRefreshExecution<'_>| {
-            let published = publish_empty_generation_with_request_metadata(&execution, 0x98)?;
-            Err(anyhow!(
-                "injected cancellation after commit {}",
-                published.generation_id
-            ))
-        },
-    ));
-    first.enqueue_periodic(&data_root).unwrap();
-    let failed = first.run_next(&data_root).expect("cancelled refresh");
-    assert!(failed.failed);
-    let committed = pin_published_generation(&data_root)
-        .unwrap()
-        .expect("atomic commit survives cancellation")
-        .generation_id()
-        .to_owned();
-    drop(first);
-
-    let executions = Arc::new(AtomicUsize::new(0));
-    let observed_executions = Arc::clone(&executions);
-    let restarted = CoreRefreshEngine::with_executor(Arc::new(
-        move |_execution: SourceBackedRefreshExecution<'_>| {
-            observed_executions.fetch_add(1, Ordering::SeqCst);
-            Err(anyhow!("recovery must not reexecute committed Core work"))
-        },
-    ));
-    assert!(!restarted
-        .recover_interrupted_publication(&data_root)
-        .unwrap());
-    assert!(!restarted.has_pending_request());
-    assert_eq!(executions.load(Ordering::SeqCst), 0);
-    let recovered = read_daemon_job_status(&daemon_source_backed_refresh_job_path(&data_root))
-        .expect("typed interrupted-publication recovery status");
-    assert_eq!(recovered["request_state"], "published");
-    assert_eq!(recovered["published_generation"], committed);
-    assert_eq!(recovered["outcome"], "completed");
-    assert!(recovered.get("receipt").is_some());
-    assert_eq!(
-        pin_published_generation(&data_root)
-            .unwrap()
-            .expect("committed Core remains readable")
-            .generation_id(),
-        committed
-    );
-}
-
-#[test]
-fn published_journal_with_incompatible_pointer_rebuilds_from_source_on_restart() {
+fn published_journal_with_incompatible_pointer_remains_terminal() {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("data");
     ctx_history_platform::platform_security::establish_private_data_root(&data_root).unwrap();
@@ -1141,31 +1174,15 @@ fn published_journal_with_incompatible_pointer_rebuilds_from_source_on_restart()
             publish_pin_fixture(&execution, false)
         },
     ));
-    assert!(restarted
+    assert!(!restarted
         .recover_interrupted_publication(&data_root)
         .unwrap());
-    let queued = read_daemon_job_status(&daemon_source_backed_refresh_job_path(&data_root))
-        .expect("durable rebuild request");
-    assert_eq!(queued["request_state"], "admission_pending");
-    assert_eq!(queued["previous_generation"], Value::Null);
-
-    let rebuilt = restarted.run_next(&data_root).expect("source rebuild");
-    assert!(!rebuilt.failed, "{:#}", rebuilt.job);
-    assert_eq!(rebuild_calls.load(Ordering::SeqCst), 1);
-    assert!(!rebuilt.job["published_generation"]
-        .as_str()
-        .unwrap()
-        .is_empty());
-    assert!(open_verified_index(&index_root).is_ok());
-    assert_eq!(
-        pin_active_verified_generation(&data_root)
-            .unwrap()
-            .verified_index()
-            .manifest()
-            .sources
-            .len(),
-        1
-    );
+    assert!(!restarted.has_pending_request());
+    assert!(restarted.pinned_core_publication().is_none());
+    assert_eq!(rebuild_calls.load(Ordering::SeqCst), 0);
+    let terminal = read_daemon_job_status(&daemon_source_backed_refresh_job_path(&data_root))
+        .expect("durable terminal request");
+    assert_eq!(terminal["request_state"], "published");
 }
 
 #[test]
@@ -1237,7 +1254,7 @@ fn first_store_artifact(root: &Path) -> Option<PathBuf> {
 }
 
 #[test]
-fn incompatible_pointer_requires_published_terminal_receipt_before_rebuild() {
+fn incompatible_pointer_still_requires_a_valid_published_terminal_receipt() {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("data");
     ctx_history_platform::platform_security::establish_private_data_root(&data_root).unwrap();

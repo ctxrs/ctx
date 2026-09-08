@@ -14,6 +14,7 @@ pub(super) fn semantic_source_text(text: &str) -> String {
     text.chars().take(SEMANTIC_SOURCE_MAX_CHARS).collect()
 }
 
+#[cfg(test)]
 pub(super) fn semantic_chunks_for_document(
     doc: &SemanticEventDocument,
     source_text: &str,
@@ -36,6 +37,9 @@ pub(super) fn semantic_chunks_for_document(
         )
         .collect()
 }
+
+mod token_fit;
+pub(super) use token_fit::semantic_chunks_for_document_with_fit;
 
 pub(super) fn semantic_document_hash(
     model_contract: &SemanticModelContract,
@@ -137,6 +141,7 @@ pub(super) fn semantic_header_value(value: &str, max_chars: usize) -> String {
     output
 }
 
+#[cfg(test)]
 pub(super) fn semantic_text_chunks(text: &str) -> Vec<(usize, usize, String)> {
     let chars = text.chars().collect::<Vec<_>>();
     if chars.is_empty() {

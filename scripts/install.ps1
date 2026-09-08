@@ -73,6 +73,34 @@ function Get-Sha256([string]$Path) {
     return (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToLowerInvariant()
 }
 
+# The hidden Core managed-pair entrypoint verifies this exact protected DACL for
+# every fresh install directory and input. Keep the PowerShell boundary aligned
+# with that authority instead of relying on inherited ACLs from a temp root.
+function Set-ManagedPairPrivateAcl(
+    [string]$Path,
+    [bool]$Directory
+) {
+    $item = Get-Item -LiteralPath $Path -Force
+    if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        Fail "managed-pair private path must not be a reparse point: $Path"
+    }
+    if ($Directory -ne $item.PSIsContainer) {
+        Fail "managed-pair private path has an unexpected type: $Path"
+    }
+    $userSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $inheritance = if ($Directory) { "OICI" } else { "" }
+    $aces = @("(A;$inheritance;FA;;;$userSid)")
+    if ($userSid -cne "S-1-5-18") {
+        $aces += "(A;$inheritance;FA;;;SY)"
+    }
+    $acl = Get-Acl -LiteralPath $Path
+    $acl.SetSecurityDescriptorSddlForm(
+        "D:P" + ($aces -join ""),
+        [System.Security.AccessControl.AccessControlSections]::Access
+    )
+    Set-Acl -LiteralPath $Path -AclObject $acl
+}
+
 function Get-ReleaseArtifact(
     [string]$Url,
     [string]$Name,
@@ -97,21 +125,70 @@ function Get-ReleaseArtifact(
     Copy-Item -LiteralPath $source -Destination $Destination -Force
 }
 
-function Invoke-ManagedPairHelper([string[]]$Arguments) {
-    $helper = Join-Path $PSScriptRoot "install-managed-pair.py"
-    if (-not (Test-Path -LiteralPath $helper -PathType Leaf)) {
-        Fail "managed-pair installer helper is unavailable: $helper"
+function Get-ManagedPairObjectName(
+    [string]$ObjectKey,
+    [string]$ExpectedChecksum,
+    [string]$Label
+) {
+    if ($ObjectKey -cnotmatch '^sha256/([0-9a-fA-F]{64})/([A-Za-z0-9][A-Za-z0-9._+-]{0,127})$') {
+        Fail "$Label object key is malformed: $ObjectKey"
     }
-    $python = Get-Command python3 -ErrorAction SilentlyContinue
-    if ($null -eq $python) {
-        $python = Get-Command python -ErrorAction SilentlyContinue
+    $keyChecksum = $Matches[1].ToLowerInvariant()
+    $objectName = $Matches[2]
+    if ($ExpectedChecksum -notmatch '^[0-9a-fA-F]{64}$' -or
+        $keyChecksum -cne $ExpectedChecksum.ToLowerInvariant()) {
+        Fail "$Label object key does not match its checksum"
     }
-    if ($null -eq $python) {
-        Fail "Python 3 is required to verify signed managed-pair metadata"
+    return $objectName
+}
+
+function ConvertTo-NativeArgument([string]$Value) {
+    if ($Value.Length -gt 0 -and $Value -notmatch '[\s"]') {
+        return $Value
     }
-    & $python.Source -I $helper @Arguments
-    if ($LASTEXITCODE -ne 0) {
-        Fail "signed managed-pair verification or installation failed"
+    $quoted = New-Object System.Text.StringBuilder
+    [void]$quoted.Append('"')
+    $backslashes = 0
+    foreach ($character in $Value.ToCharArray()) {
+        if ($character -eq '\') {
+            $backslashes++
+        } elseif ($character -eq '"') {
+            [void]$quoted.Append(('\' * (($backslashes * 2) + 1)))
+            [void]$quoted.Append('"')
+            $backslashes = 0
+        } else {
+            [void]$quoted.Append(('\' * $backslashes))
+            [void]$quoted.Append($character)
+            $backslashes = 0
+        }
+    }
+    [void]$quoted.Append(('\' * ($backslashes * 2)))
+    [void]$quoted.Append('"')
+    return $quoted.ToString()
+}
+
+function Invoke-ManagedPairApply([string]$Core, [string[]]$Arguments) {
+    $start = New-Object System.Diagnostics.ProcessStartInfo
+    $start.FileName = $Core
+    $start.Arguments = ($Arguments | ForEach-Object { ConvertTo-NativeArgument $_ }) -join " "
+    $start.UseShellExecute = $false
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    $start.CreateNoWindow = $true
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $start
+    try {
+        [void]$process.Start()
+        $stdout = $process.StandardOutput.ReadToEndAsync()
+        $stderr = $process.StandardError.ReadToEndAsync()
+        $process.WaitForExit()
+        return [pscustomobject]@{
+            ExitCode = $process.ExitCode
+            Stdout = $stdout.GetAwaiter().GetResult()
+            Stderr = $stderr.GetAwaiter().GetResult()
+        }
+    } finally {
+        $process.Dispose()
     }
 }
 
@@ -402,6 +479,7 @@ if (-not [string]::IsNullOrWhiteSpace($ArtifactDir)) {
 
 $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("ctx-install-" + [System.Guid]::NewGuid().ToString("n"))
 New-Item -ItemType Directory -Path $tempRoot | Out-Null
+Set-ManagedPairPrivateAcl -Path $tempRoot -Directory $true
 
 try {
     $metadataFile = Join-Path $tempRoot "metadata.env"
@@ -416,6 +494,10 @@ try {
     $version = Get-MetadataValue $metadataValues "CTX_RELEASE_VERSION"
     $baseUrl = Get-MetadataValue $metadataValues "CTX_RELEASE_BASE_URL"
     $pairEnvelopeArtifact = Get-MetadataValueOrDefault $metadataValues "CTX_RELEASE_MANAGED_PAIR_ENVELOPE_windows_x64" ""
+    $pairCoreObjectKey = Get-MetadataValueOrDefault $metadataValues "CTX_RELEASE_MANAGED_PAIR_CORE_OBJECT_windows_x64" ""
+    $pairCoreChecksum = Get-MetadataValueOrDefault $metadataValues "CTX_RELEASE_MANAGED_PAIR_CORE_SHA256_windows_x64" ""
+    $pairCompanionObjectKey = Get-MetadataValueOrDefault $metadataValues "CTX_RELEASE_MANAGED_PAIR_COMPANION_OBJECT_windows_x64" ""
+    $pairCompanionChecksum = Get-MetadataValueOrDefault $metadataValues "CTX_RELEASE_MANAGED_PAIR_COMPANION_SHA256_windows_x64" ""
     $artifact = Get-MetadataValueOrDefault $metadataValues "CTX_RELEASE_ARTIFACT_windows_x64" ""
     $checksum = Get-MetadataValueOrDefault $metadataValues "CTX_RELEASE_SHA256_windows_x64" ""
     $runtimeArtifact = Get-MetadataValueOrDefault $metadataValues "CTX_RELEASE_ONNXRUNTIME_ARTIFACT_windows_x64" ""
@@ -433,6 +515,12 @@ try {
     }
     $metadataTrust = "explicit-unsigned"
     if ([string]::IsNullOrWhiteSpace($pairEnvelopeArtifact)) {
+        if (-not [string]::IsNullOrWhiteSpace(
+            $pairCoreObjectKey + $pairCoreChecksum +
+            $pairCompanionObjectKey + $pairCompanionChecksum
+        )) {
+            Fail "managed-pair component metadata is present without an envelope"
+        }
         if ([string]::IsNullOrWhiteSpace($artifact)) {
             Fail "metadata missing artifact for windows-x64"
         }
@@ -445,6 +533,14 @@ try {
         Assert-SafeArtifactName $artifact
     } else {
         Assert-SafeArtifactName $pairEnvelopeArtifact
+        $pairCoreName = Get-ManagedPairObjectName `
+            $pairCoreObjectKey $pairCoreChecksum "managed-pair Core"
+        $pairCompanionName = Get-ManagedPairObjectName `
+            $pairCompanionObjectKey $pairCompanionChecksum "managed-pair companion"
+        if ($checksum -notmatch '^[0-9a-fA-F]{64}$' -or
+            $pairCoreChecksum.ToLowerInvariant() -cne $checksum.ToLowerInvariant()) {
+            Fail "managed-pair Core checksum differs from release metadata"
+        }
         $metadataTrust = "signed-managed-pair-v1"
     }
     if (-not [string]::IsNullOrWhiteSpace($runtimeArtifact) -or -not [string]::IsNullOrWhiteSpace($runtimeChecksum)) {
@@ -475,29 +571,16 @@ try {
             Fail "signed managed-pair installation requires -BinDir to name <install-root>\bin"
         }
         $pairEnvelopePath = Join-Path $tempRoot $pairEnvelopeArtifact
-        $pairPlanPath = Join-Path $tempRoot "managed-pair-plan.json"
         Get-ReleaseArtifact `
             -Url ($baseUrl.TrimEnd("/") + "/" + $pairEnvelopeArtifact) `
             -Name $pairEnvelopeArtifact `
             -Destination $pairEnvelopePath
-        Invoke-ManagedPairHelper @(
-            "inspect", "--envelope", $pairEnvelopePath,
-            "--target", "windows-x64", "--output", $pairPlanPath
-        )
-        $pairPlan = Get-Content -LiteralPath $pairPlanPath -Raw | ConvertFrom-Json
-        $artifact = [string]$pairPlan.core.artifact_name
-        $checksum = [string]$pairPlan.core.sha256
-        $coreObjectKey = [string]$pairPlan.core.object_key
-        $companionArtifact = [string]$pairPlan.companion.artifact_name
-        $companionObjectKey = [string]$pairPlan.companion.object_key
-        foreach ($objectKey in @($coreObjectKey, $companionObjectKey)) {
-            if ($objectKey -notmatch '^sha256/[0-9a-f]{64}/[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$') {
-                Fail "signed managed-pair object key is malformed: $objectKey"
-            }
-        }
-        $artifactUrl = $baseUrl.TrimEnd("/") + "/" + $coreObjectKey
-        $downloadPath = Join-Path $tempRoot $artifact
-        $companionDownloadPath = Join-Path $tempRoot $companionArtifact
+        $artifact = $pairCoreName
+        $checksum = $pairCoreChecksum
+        $companionArtifact = $pairCompanionName
+        $artifactUrl = $baseUrl.TrimEnd("/") + "/" + $pairCoreObjectKey
+        $downloadPath = Join-Path $tempRoot $pairCoreName
+        $companionDownloadPath = Join-Path $tempRoot $pairCompanionName
     } else {
         $artifactUrl = $baseUrl.TrimEnd("/") + "/" + $artifact
         $downloadPath = Join-Path $tempRoot $artifact
@@ -582,46 +665,88 @@ try {
     }
 
     if (-not [string]::IsNullOrWhiteSpace($pairEnvelopeArtifact)) {
-        Get-ReleaseArtifact -Url $artifactUrl -Name $coreObjectKey -Destination $downloadPath
+        Get-ReleaseArtifact -Url $artifactUrl -Name $pairCoreObjectKey -Destination $downloadPath
         Get-ReleaseArtifact `
-            -Url ($baseUrl.TrimEnd("/") + "/" + $companionObjectKey) `
-            -Name $companionObjectKey `
+            -Url ($baseUrl.TrimEnd("/") + "/" + $pairCompanionObjectKey) `
+            -Name $pairCompanionObjectKey `
             -Destination $companionDownloadPath
-        Invoke-ManagedPairHelper @(
-            "install", "--envelope", $pairEnvelopePath,
-            "--core", $downloadPath, "--companion", $companionDownloadPath,
-            "--install-root", $installRoot, "--target", "windows-x64"
-        ) | Out-Null
-        $actualChecksum = Get-Sha256 $installPath
+        $actualChecksum = Get-Sha256 $downloadPath
+        $actualCompanionChecksum = Get-Sha256 $companionDownloadPath
+        if ($actualChecksum -cne $pairCoreChecksum.ToLowerInvariant()) {
+            Fail "checksum mismatch for $artifact`: expected $pairCoreChecksum, got $actualChecksum"
+        }
+        if ($actualCompanionChecksum -cne $pairCompanionChecksum.ToLowerInvariant()) {
+            Fail "checksum mismatch for $companionArtifact`: expected $pairCompanionChecksum, got $actualCompanionChecksum"
+        }
+        foreach ($pairInput in @($pairEnvelopePath, $downloadPath, $companionDownloadPath)) {
+            Set-ManagedPairPrivateAcl -Path $pairInput -Directory $false
+        }
     } else {
         Get-ReleaseArtifact -Url $artifactUrl -Name $artifact -Destination $downloadPath
         $actualChecksum = Get-Sha256 $downloadPath
         if ($actualChecksum -ne $checksum.ToLowerInvariant()) {
             Fail "checksum mismatch for $artifact`: expected $checksum, got $actualChecksum"
         }
-        New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
-        Copy-Item -LiteralPath $downloadPath -Destination $installPath -Force
     }
 
     $markerPath = "$installPath.install.json"
+    $markerSourcePath = Join-Path $tempRoot "ctx.install.json"
+    $markerManager = if ([string]::IsNullOrWhiteSpace($pairEnvelopeArtifact)) {
+        "ctx-explicit-metadata-installer"
+    } else {
+        "ctx-hosted-installer"
+    }
     $marker = [ordered]@{
         schema_version = 1
-        manager = "ctx-explicit-metadata-installer"
+        manager = $markerManager
         metadata_trust = $metadataTrust
         install_path = $installPath
         platform = $Platform
         channel = $channel
         version = $version
         sha256 = $actualChecksum
+        staging_dogfood = (
+            -not [string]::IsNullOrWhiteSpace($pairEnvelopeArtifact) -and
+            $channel -ceq "staging"
+        )
         metadata_url = $Metadata
         artifact_url = $artifactUrl
         source_commit = $sourceCommit
         published_at = $publishedAt
         installed_at = ([DateTime]::UtcNow.ToString("o"))
     }
+    if (-not [string]::IsNullOrWhiteSpace($pairEnvelopeArtifact)) {
+        $marker["managed_pair"] = $true
+    }
     $markerJson = $marker | ConvertTo-Json -Depth 4
     $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
-    [System.IO.File]::WriteAllText($markerPath, $markerJson + [Environment]::NewLine, $utf8NoBom)
+    [System.IO.File]::WriteAllText(
+        $markerSourcePath,
+        $markerJson + [Environment]::NewLine,
+        $utf8NoBom
+    )
+
+    New-Item -ItemType Directory -Path $installRoot -Force | Out-Null
+    New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
+    if (-not [string]::IsNullOrWhiteSpace($pairEnvelopeArtifact)) {
+        Set-ManagedPairPrivateAcl -Path $markerSourcePath -Directory $false
+        Set-ManagedPairPrivateAcl -Path $installRoot -Directory $true
+        Set-ManagedPairPrivateAcl -Path $BinDir -Directory $true
+        $pairResult = Invoke-ManagedPairApply $downloadPath @(
+            "--ctx-core-managed-pair-apply-v1", $installRoot, "-",
+            $pairEnvelopePath, $downloadPath, $companionDownloadPath, $markerSourcePath)
+        if ($pairResult.ExitCode -ne 0) {
+            Fail ("candidate Core could not apply the signed managed pair: " + $pairResult.Stderr.Trim())
+        }
+        $expectedReceipt = '{"schema_version":1,"command":"managed_pair_apply","ok":true,"status":"committed"}' + "`n"
+        if ([Text.Encoding]::UTF8.GetByteCount($pairResult.Stdout) -ne 83 -or
+            $pairResult.Stdout -cne $expectedReceipt -or $pairResult.Stderr.Length -ne 0) {
+            Fail "candidate Core returned an invalid managed-pair apply receipt"
+        }
+    } else {
+        Copy-Item -LiteralPath $downloadPath -Destination $installPath -Force
+        Copy-Item -LiteralPath $markerSourcePath -Destination $markerPath -Force
+    }
     Write-Host ""
     Write-Host "Installed ctx binary."
 

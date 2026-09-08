@@ -1,8 +1,4 @@
-use std::{
-    fs,
-    path::Path,
-    sync::atomic::{AtomicUsize, Ordering},
-};
+use std::{fs, path::Path};
 
 use ctx_history_capture::{
     provider_source_for_path, register_landed_source_backed_route_with_data_root,
@@ -12,8 +8,7 @@ use ctx_history_capture::{
 };
 use ctx_history_capture_composition::IndexCaptureLifecycle;
 use ctx_history_capture_runtime::{
-    replacement_document_tree_driver, CapturePublicationDisposition, DocumentInventoryAuthority,
-    ReplacementDocumentTree,
+    replacement_document_tree_driver, DocumentInventoryAuthority, ReplacementDocumentTree,
 };
 use ctx_history_core::{CaptureProvider, SourceAnchorScope};
 use ctx_history_index::{
@@ -69,12 +64,11 @@ fn assert_scoped_replay_lifecycle(
         scoped_registry(provider, &database, data_root.path(), scope_a),
         WriterOptions::default(),
     );
-    let mut cold = executor_a
-        .refresh_scope_with_detailed_progress_and_publication_metadata(
+    let cold = executor_a
+        .refresh_scope_with_detailed_progress(
             &index_root,
             SourceBackedRefreshScope::All,
             |_| Ok(()),
-            |_| Ok(b"logical-sqlite-scoped-replay-v1".to_vec()),
         )
         .unwrap();
     assert_eq!(cold.sources.len(), 1);
@@ -82,9 +76,7 @@ fn assert_scoped_replay_lifecycle(
     let source_a = cold.sources[0].observation().source().clone();
     let replay_fingerprint_a = cold.sources[0].frontier().unwrap().checkpoint().clone();
     let cold_generation = cold.commit.generation_id.clone();
-    let (cold_disposition, cold_pin) = cold.take_verified_publication().unwrap();
-    assert_eq!(cold_disposition, CapturePublicationDisposition::Published);
-    let cold_index = cold_pin.into_inner().into_verified_index();
+    let cold_index = VerifiedIndex::open_pinned(&index_root).unwrap();
     let event_a = only_matching_event(&cold_index, marker);
     assert!(event_a.source.exact_descriptor_eq(&source_a));
 
@@ -92,12 +84,11 @@ fn assert_scoped_replay_lifecycle(
         scoped_registry(provider, &database, data_root.path(), scope_b),
         WriterOptions::default(),
     );
-    let mut rebound = executor_b
-        .refresh_scope_with_detailed_progress_and_publication_metadata(
+    let rebound = executor_b
+        .refresh_scope_with_detailed_progress(
             &index_root,
             SourceBackedRefreshScope::All,
             |_| Ok(()),
-            |_| Ok(b"logical-sqlite-scoped-replay-v1".to_vec()),
         )
         .unwrap();
     assert_eq!(rebound.sources.len(), 1);
@@ -110,12 +101,7 @@ fn assert_scoped_replay_lifecycle(
         &replay_fingerprint_a
     );
     let rebound_generation = rebound.commit.generation_id.clone();
-    let (rebound_disposition, rebound_pin) = rebound.take_verified_publication().unwrap();
-    assert_eq!(
-        rebound_disposition,
-        CapturePublicationDisposition::Published
-    );
-    let rebound_index = rebound_pin.into_inner().into_verified_index();
+    let rebound_index = VerifiedIndex::open_pinned(&index_root).unwrap();
     let event_b = only_matching_event(&rebound_index, marker);
     assert!(event_b.source.exact_descriptor_eq(&source_b));
     assert_ne!(event_b.session_id, event_a.session_id);
@@ -125,12 +111,11 @@ fn assert_scoped_replay_lifecycle(
         .unwrap()
         .is_none());
 
-    let mut replay = executor_b
-        .refresh_scope_with_detailed_progress_and_publication_metadata(
+    let replay = executor_b
+        .refresh_scope_with_detailed_progress(
             &index_root,
             SourceBackedRefreshScope::All,
             |_| Ok(()),
-            |_| Ok(b"unexpected-same-scope-publication".to_vec()),
         )
         .unwrap();
     assert_eq!(replay.commit.generation_id, rebound_generation);
@@ -139,10 +124,6 @@ fn assert_scoped_replay_lifecycle(
         .observation()
         .source()
         .exact_descriptor_eq(&source_b));
-    assert_eq!(
-        replay.take_verified_publication().unwrap().0,
-        CapturePublicationDisposition::Reused
-    );
 }
 
 fn scoped_registry(
@@ -363,40 +344,26 @@ fn assert_opencode_family_changed_wal_capture_then_exact_replay(provider: Captur
     )
     .unwrap();
     let executor = SourceBackedRefreshExecutor::new(registry, WriterOptions::default());
-    let metadata_calls = AtomicUsize::new(0);
 
-    let mut cold = executor
-        .refresh_scope_with_detailed_progress_and_publication_metadata(
+    let cold = executor
+        .refresh_scope_with_detailed_progress(
             &index_root,
             SourceBackedRefreshScope::All,
             |_| Ok(()),
-            |_| {
-                metadata_calls.fetch_add(1, Ordering::SeqCst);
-                Ok(b"logical-sqlite-replay-v1".to_vec())
-            },
         )
         .unwrap();
     let cold_generation = cold.commit.generation_id.clone();
     assert_eq!(cold.successful_route_outcomes.len(), 1, "{provider:?}");
     assert!(cold.successful_route_outcomes[0].changed, "{provider:?}");
-    assert_eq!(
-        cold.take_verified_publication().unwrap().0,
-        CapturePublicationDisposition::Published,
-        "{provider:?}"
-    );
 
     let changed_marker = format!("{} logical SQLite changed WAL capture", provider.as_str());
     append_opencode_message(&writer, &changed_marker);
     assert_active_wal(&database);
-    let mut changed = executor
-        .refresh_scope_with_detailed_progress_and_publication_metadata(
+    let changed = executor
+        .refresh_scope_with_detailed_progress(
             &index_root,
             SourceBackedRefreshScope::All,
             |_| Ok(()),
-            |_| {
-                metadata_calls.fetch_add(1, Ordering::SeqCst);
-                Ok(b"logical-sqlite-replay-v2".to_vec())
-            },
         )
         .unwrap();
     assert_eq!(changed.successful_route_outcomes.len(), 1, "{provider:?}");
@@ -413,29 +380,19 @@ fn assert_opencode_family_changed_wal_capture_then_exact_replay(provider: Captur
     );
     let changed_generation = changed.commit.generation_id.clone();
     let changed_opstamp = changed.commit.opstamp;
-    let (changed_disposition, changed_pin) = changed.take_verified_publication().unwrap();
-    assert_eq!(
-        changed_disposition,
-        CapturePublicationDisposition::Published,
-        "{provider:?}"
-    );
-    let changed_index = changed_pin.into_inner().into_verified_index();
+    let changed_index = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert!(
         !matching_events(&changed_index, &changed_marker).is_empty(),
         "{provider:?}"
     );
     let mut updates = Vec::new();
-    let mut replay = executor
-        .refresh_scope_with_detailed_progress_and_publication_metadata(
+    let replay = executor
+        .refresh_scope_with_detailed_progress(
             &index_root,
             SourceBackedRefreshScope::All,
             |update| {
                 updates.push(update);
                 Ok(())
-            },
-            |_| {
-                metadata_calls.fetch_add(1, Ordering::SeqCst);
-                Ok(b"unexpected-replay-metadata".to_vec())
             },
         )
         .unwrap();
@@ -444,16 +401,9 @@ fn assert_opencode_family_changed_wal_capture_then_exact_replay(provider: Captur
         "{provider:?}"
     );
     assert_eq!(replay.commit.opstamp, changed_opstamp, "{provider:?}");
-    assert_eq!(metadata_calls.load(Ordering::SeqCst), 2, "{provider:?}");
     assert_eq!(replay.successful_route_outcomes.len(), 1, "{provider:?}");
     assert!(!replay.successful_route_outcomes[0].changed, "{provider:?}");
-    let (replay_disposition, replay_pin) = replay.take_verified_publication().unwrap();
-    assert_eq!(
-        replay_disposition,
-        CapturePublicationDisposition::Reused,
-        "{provider:?}"
-    );
-    let replay_index = replay_pin.into_inner().into_verified_index();
+    let replay_index = VerifiedIndex::open_pinned(&index_root).unwrap();
     assert!(
         !matching_events(&replay_index, &changed_marker).is_empty(),
         "{provider:?}"

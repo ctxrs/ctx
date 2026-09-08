@@ -161,10 +161,13 @@ fn render_remove_failures(
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, io::Write as _};
+    use std::fs;
 
     use super::*;
-    use crate::ui::{ColorMode, StreamKind, TestContext, Token};
+    use crate::{
+        test_support::strip_ansi,
+        ui::{ColorMode, StreamKind, TestContext, Token},
+    };
     use ctx_agent_integrations::skill::{
         install_target, remove_target, single_target, PathContext, SkillAgentArg,
     };
@@ -187,12 +190,6 @@ mod tests {
             .map(|span| span.content())
             .collect::<Vec<_>>()
             .join(" ")
-    }
-
-    fn strip_ansi(rendered: &str) -> String {
-        let mut stream = anstream::StripStream::new(Vec::new());
-        stream.write_all(rendered.as_bytes()).unwrap();
-        String::from_utf8(stream.into_inner()).unwrap()
     }
 
     #[test]

@@ -179,7 +179,6 @@ export interface Freshness {
 
 export interface AgentHistoryStatus {
   initialized: boolean;
-  localOnly: boolean;
   readOnly?: boolean;
   dataRoot?: string | null;
   /** Exact operational counter in the inclusive range 0..Number.MAX_SAFE_INTEGER. */
@@ -354,6 +353,7 @@ export interface AgentHistoryEvent {
   text?: string | null;
   mcpToolCall?: McpToolCall;
   mcpExchange?: McpExchange;
+  activity?: JsonValue;
   structuredContent?: JsonValue;
   content?: CoreContentMetadata;
   citations?: Citation[];
@@ -469,8 +469,9 @@ export interface VersionInfo {
 
 export declare class CtxError extends Error {
   code: string;
+  retryable: boolean;
   details?: unknown;
-  constructor(message: string, options?: { code?: string; details?: unknown; cause?: unknown });
+  constructor(message: string, options?: { code?: string; retryable?: boolean; details?: unknown; cause?: unknown });
 }
 
 export declare class CtxCliError extends CtxError {

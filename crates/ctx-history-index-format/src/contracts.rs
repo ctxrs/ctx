@@ -20,19 +20,22 @@ use crate::{
 };
 
 mod digest;
+mod generation_state;
 mod provider_root;
 use digest::{decode_sha256_hex, is_sha256_hex};
+pub use generation_state::{
+    GenerationStateEnvelope, MAX_GENERATION_STATE_BYTES, MAX_GENERATION_STATE_FORMAT_BYTES,
+};
 pub use provider_root::{
     AppliedProviderRoot, AppliedProviderRootSourceMembership, DetachedReleasedProviderRootAuthority,
 };
 
-pub const GENERATION_MANIFEST_VERSION: u32 = 10;
+pub const GENERATION_MANIFEST_VERSION: u32 = 11;
 pub const LEXICAL_SCHEMA_VERSION: u32 = LEXICAL_SCHEMA_REVISION;
 pub const LEXICAL_ANALYZER_VERSION: u32 = LEXICAL_TOKENIZER_REVISION;
-pub const MAX_PUBLICATION_METADATA_BYTES: usize = 48 * 1024;
 pub const MAX_DETACHED_RELEASED_PROVIDER_ROOTS: usize = MAX_CONFIGURED_PROVIDER_ROOTS;
 
-pub const COMMIT_PAYLOAD_VERSION: u32 = 2;
+pub const COMMIT_PAYLOAD_VERSION: u32 = 3;
 pub const INDEX_MEMORY_MIN_PER_THREAD: usize = 15_000_000;
 pub const MAX_DOCUMENT_METADATA_BYTES: usize = 64 * 1024;
 
@@ -100,12 +103,12 @@ pub enum IndexError {
     NonCanonicalCommitPayload,
     #[error("lexical commit payload is too large: {actual} bytes, maximum {maximum}")]
     CommitPayloadTooLarge { actual: usize, maximum: usize },
-    #[error("opaque publication metadata is not canonical unpadded base64")]
-    InvalidPublicationMetadataEncoding,
-    #[error("opaque publication metadata is too large: {actual} bytes, maximum {maximum}")]
-    PublicationMetadataTooLarge { actual: usize, maximum: usize },
-    #[error("opaque publication metadata construction failed: {0}")]
-    PublicationMetadata(String),
+    #[error("generation-owned state envelope is malformed or non-canonical")]
+    InvalidGenerationStateEnvelope,
+    #[error("generation-owned state is too large: {actual} bytes, maximum {maximum}")]
+    GenerationStateTooLarge { actual: usize, maximum: usize },
+    #[error("publication progress callback failed: {0}")]
+    PublicationProgress(String),
     #[error("unsupported generation manifest version {0}")]
     UnsupportedManifest(u32),
     #[error(
@@ -131,6 +134,14 @@ pub enum IndexError {
         "current publication republish needs {required} bytes of headroom, but only {available} are available"
     )]
     CurrentRepublishInsufficientHeadroom { required: u64, available: u64 },
+    #[error(
+        "indexing failed with {available} bytes observed free on the index volume; free space and retry; underlying error: {cause}"
+    )]
+    CandidateFailureWithLowSpace {
+        available: u64,
+        #[source]
+        cause: Box<IndexError>,
+    },
     #[error(
         "Core record revisions do not match the active generation policy: normalization {normalization}/{expected_normalization}, content {content}/{expected_content}"
     )]
@@ -825,6 +836,8 @@ pub struct GenerationManifest {
     pub sources: Vec<CertifiedSource>,
     pub core_record_aggregates: Vec<SourceCoreRecordAggregate>,
     source_routes: Vec<SourceRouteSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    generation_state: Option<GenerationStateEnvelope>,
     automatic_provider_discovery: bool,
     provider_root_config_digest: String,
     provider_roots: Vec<AppliedProviderRoot>,
@@ -922,5 +935,4 @@ mod tests;
 pub struct CommitPayload {
     pub version: u32,
     pub generation_id: String,
-    pub publication_metadata: Option<String>,
 }

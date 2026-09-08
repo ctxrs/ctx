@@ -13,11 +13,17 @@ pub(crate) use std::{
 };
 pub(crate) use tempfile::{Builder, TempDir};
 
+#[path = "../../../ctx-cli-contract-tests/tests/contracts/support/assertions.rs"]
 mod assertions;
+#[path = "../../../ctx-cli-contract-tests/tests/contracts/support/daemon.rs"]
 mod daemon;
+#[path = "../../../ctx-cli-contract-tests/tests/contracts/support/fixtures.rs"]
 mod fixtures;
+#[path = "../../../ctx-agent-application/tests/contracts/support/mcp.rs"]
 mod mcp;
+#[path = "../../../ctx-cli-contract-tests/tests/contracts/support/native_fixtures.rs"]
 mod native_fixtures;
+#[path = "../../../ctx-cli-contract-tests/tests/contracts/support/runner.rs"]
 mod runner;
 
 pub(crate) use assertions::*;

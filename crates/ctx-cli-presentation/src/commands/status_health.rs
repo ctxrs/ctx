@@ -71,7 +71,12 @@ pub(super) fn status_next_command(
     pending: usize,
     unhealthy: usize,
 ) -> Option<&'static str> {
-    if automatic_retry_pause(report).is_some() {
+    if automatic_retry_pause(report).is_some()
+        || matches!(
+            report["refresh"]["reason"].as_str(),
+            Some("refresh_requires_explicit_request" | "automatic_retry_daemon_unavailable")
+        )
+    {
         return Some("ctx import --all");
     }
     match health {
@@ -89,10 +94,14 @@ pub(super) fn status_next_command(
 }
 
 pub(super) fn automatic_retry_state(report: &Value) -> Option<&str> {
-    report["refresh"]
-        .pointer("/automatic_retry/state")
-        .and_then(Value::as_str)
-        .filter(|state| matches!(*state, "confirming" | "paused" | "mixed"))
+    // Current scheduling is projected by the refresh owner. The retained
+    // checkpoint is diagnostic history and cannot promise new work by itself.
+    match report["refresh"]["reason"].as_str() {
+        Some("automatic_retry_confirming") => Some("confirming"),
+        Some("automatic_retry_paused") => Some("paused"),
+        Some("automatic_retry_partially_paused") => Some("mixed"),
+        _ => None,
+    }
 }
 
 pub(super) fn automatic_retry_pause(report: &Value) -> Option<&str> {

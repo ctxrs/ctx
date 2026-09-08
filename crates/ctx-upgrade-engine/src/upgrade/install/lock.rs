@@ -1,5 +1,4 @@
 use std::{
-    ffi::OsString,
     fs::{self, File, OpenOptions},
     io,
     path::{Component, Path, PathBuf},
@@ -9,6 +8,7 @@ use std::{
 use std::ffi::OsStr;
 
 use anyhow::{anyhow, bail, Context, Result};
+use ctx_managed_pair_engine::MANAGED_PAIR_INSTALLATION_LOCK_RELATIVE_PATH;
 
 #[cfg(windows)]
 use super::path_identity::windows_disk_path_identity;
@@ -51,6 +51,23 @@ impl InstallationLock {
         Self::try_acquire_inner(executable, true)
     }
 
+    pub(in crate::upgrade) fn try_acquire_at_root(install_root: &Path) -> Result<Option<Self>> {
+        let (root, bin) = canonical_owner_safe_install_directories(install_root)?;
+        let path = root.join(MANAGED_PAIR_INSTALLATION_LOCK_RELATIVE_PATH);
+        let Some(owner) = OwnerFileLock::try_acquire(&path)? else {
+            return Ok(None);
+        };
+        let (current_root, current_bin) = canonical_owner_safe_install_directories(install_root)?;
+        if current_root != root || current_bin != bin {
+            bail!(
+                "ctx installation root changed while acquiring its installation lock: expected {}, found {}",
+                root.display(),
+                current_root.display()
+            );
+        }
+        Ok(Some(Self { _owner: owner }))
+    }
+
     fn try_acquire_inner(executable: &Path, allow_recovery_hardlink: bool) -> Result<Option<Self>> {
         let executable = executable_lock_identity(executable, allow_recovery_hardlink)?;
         validate_lock_executable(&executable, allow_recovery_hardlink)?;
@@ -61,6 +78,99 @@ impl InstallationLock {
         revalidate_locked_executable(&executable, allow_recovery_hardlink)?;
         Ok(Some(Self { _owner: owner }))
     }
+}
+
+fn canonical_owner_safe_install_directories(install_root: &Path) -> Result<(PathBuf, PathBuf)> {
+    validate_absolute_path(install_root, "ctx installation root")?;
+    let root = fs::canonicalize(install_root).with_context(|| {
+        format!(
+            "canonicalize ctx installation root {}",
+            install_root.display()
+        )
+    })?;
+    validate_absolute_path(&root, "canonical ctx installation root")?;
+    if !installation_root_path_is_canonical(install_root, &root) {
+        bail!(
+            "ctx installation root is not canonical: {}",
+            install_root.display()
+        );
+    }
+    validate_plain_directory(&root, "ctx installation root")?;
+    let bin = root.join("bin");
+    let canonical_bin = fs::canonicalize(&bin)
+        .with_context(|| format!("canonicalize ctx managed bin directory {}", bin.display()))?;
+    if canonical_bin != bin {
+        bail!(
+            "ctx managed bin directory is not canonical: {}",
+            bin.display()
+        );
+    }
+    validate_owner_safe_directory(&bin, "ctx managed bin directory")?;
+    Ok((root, bin))
+}
+
+fn validate_plain_directory(path: &Path, label: &str) -> Result<()> {
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("inspect {label} {}", path.display()))?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        bail!("{label} is not a plain directory: {}", path.display());
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt as _;
+        use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            bail!("{label} is a reparse point: {}", path.display());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn installation_root_path_is_canonical(supplied: &Path, canonical: &Path) -> bool {
+    supplied == canonical
+}
+
+#[cfg(windows)]
+fn installation_root_path_is_canonical(supplied: &Path, canonical: &Path) -> bool {
+    matches!(
+        (
+            windows_disk_path_identity(supplied),
+            windows_disk_path_identity(canonical)
+        ),
+        (Some(supplied), Some(canonical)) if supplied == canonical
+    )
+}
+
+#[cfg(unix)]
+fn validate_owner_safe_directory(path: &Path, label: &str) -> Result<()> {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("inspect {label} {}", path.display()))?;
+    if !metadata.is_dir()
+        || metadata.file_type().is_symlink()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.permissions().mode() & 0o022 != 0
+    {
+        bail!("{label} is not owner-safe: {}", path.display());
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn validate_owner_safe_directory(path: &Path, label: &str) -> Result<()> {
+    ctx_history_platform::platform_security::verify_private_directory(path)
+        .with_context(|| format!("verify owner-safe {label} {}", path.display()))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn validate_owner_safe_directory(path: &Path, label: &str) -> Result<()> {
+    bail!(
+        "{label} ownership validation is unsupported on this platform: {}",
+        path.display()
+    )
 }
 
 fn executable_lock_identity(path: &Path, _recovery: bool) -> Result<PathBuf> {
@@ -333,14 +443,15 @@ fn validate_absolute_path(path: &Path, label: &str) -> Result<()> {
 }
 
 pub(super) fn installation_lock_path(executable: &Path) -> Result<PathBuf> {
-    let file_name = executable
+    executable
         .file_name()
         .filter(|name| !name.is_empty())
         .ok_or_else(|| anyhow!("ctx executable has no file name: {}", executable.display()))?;
-    let mut lock_name = OsString::from(".");
-    lock_name.push(file_name);
-    lock_name.push(".install.lock");
-    Ok(executable.with_file_name(lock_name))
+    let lock_file = Path::new(MANAGED_PAIR_INSTALLATION_LOCK_RELATIVE_PATH)
+        .file_name()
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| anyhow!("ctx installation lock path has no file name"))?;
+    Ok(executable.with_file_name(lock_file))
 }
 
 fn open_lock_file(path: &Path) -> Result<File> {

@@ -208,6 +208,9 @@ pub(super) fn restrict_private_file(path: &Path) -> io::Result<()> {
     restrict(path, ObjectKind::File)
 }
 
+pub(super) fn restrict_private_directory_handle(handle: &File) -> io::Result<()> {
+    restrict_handle(handle, ObjectKind::Directory)
+}
 pub(super) fn restrict_private_file_handle(handle: &File) -> io::Result<()> {
     restrict_handle(handle, ObjectKind::File)
 }
@@ -282,9 +285,8 @@ fn restrict_handle_with_identities(
 ) -> io::Result<()> {
     verify_handle_admissible_owner(handle, identities)?;
     let mut acl = private_acl(identities, kind)?;
-    // SAFETY: the retained handle owns WRITE_DAC and was verified as a regular
-    // object. The ACL remains live for this synchronous call. SetSecurityInfo
-    // receives no owner SID and therefore cannot transfer ownership.
+    // SAFETY: the verified handle owns WRITE_DAC; the ACL remains live for this
+    // call, which receives no owner SID and therefore cannot transfer ownership.
     let result = unsafe {
         SetSecurityInfo(
             handle.as_raw_handle().cast(),
@@ -318,8 +320,7 @@ fn verify_handle_admissible_owner(handle: &File, identities: &PrivateIdentities)
 }
 
 fn verify_admissible_owner(owner: PSID, identities: &PrivateIdentities) -> io::Result<()> {
-    // SAFETY: all SIDs remain backed by live security descriptors or token
-    // information buffers for these comparisons.
+    // SAFETY: all SIDs remain backed by live descriptors or token buffers.
     if unsafe { EqualSid(owner, identities.user_sid()) } != 0
         || unsafe { EqualSid(owner, identities.token_owner_sid()) } != 0
     {
@@ -623,8 +624,7 @@ fn private_security_descriptor(
     {
         return Err(last_error());
     }
-    // Prevent creation from merging inherited permissive entries.
-    // SAFETY: descriptor is initialized and remains live.
+    // SAFETY: the live descriptor is protected from merging inherited entries.
     if unsafe {
         SetSecurityDescriptorControl(
             (&raw mut descriptor).cast(),

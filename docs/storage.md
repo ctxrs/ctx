@@ -196,6 +196,33 @@ missing selection, or widen selected work. Interrupted requests persist their
 logical intent and are re-admitted through the same resolver before execution,
 so missing or changed selected routes fail closed.
 
+Every v1.0.0-through-v1.3.1 binary carried the pre-canonical durable
+selector/catalog decoder and matching daemon IPC adapter. In those same
+released tags, however, daemon clients and durable job writers emitted canonical
+`refresh_intent`, and request fingerprints were computed from that canonical
+intent plus its trigger. No supported release producer emitted the retired
+request shape or a fingerprint of that shape. Current readers therefore require
+canonical `refresh_intent`; removing the old decoder does not discard a released
+producer format.
+
+Schema-1 jobs and status still retain released physical-attempt, coalescing, and
+legacy terminal fields. Those fields can be removed only after a successor
+schema is released and schema 1 is outside the supported upgrade floor; neither
+that release nor a date has been assigned.
+
+Publication metadata has a different release history. v1.0.0 through v1.1.1
+wrote metadata version 3, while v1.2.0 through v1.3.1 wrote version 4. Those
+released generations used manifest version 8 or 10 and commit payload version
+2; the current format uses manifest version 11 and commit payload version 3.
+Core is disposable derived storage, so an unsupported predecessor generation
+remains opaque and authoritative while ctx rebuilds a complete current
+candidate from provider sources, verifies it, and atomically replaces the old
+generation. The upgrade path neither migrates the predecessor nor decodes its
+old metadata; when required source history is unavailable, ctx reports it as
+unavailable instead of recovering content from the predecessor. The version-3
+and version-4 metadata decoder therefore remains deleted under the documented
+source-authoritative rebuild policy, not because those formats were unreleased.
+
 Request receipts describe only the routes and rejections observed by that
 request. Generation metadata separately describes the complete retained
 publication. A selected no-op can therefore report its own rejection outcome
@@ -933,8 +960,12 @@ content-free batch body, and durably append that body to
 `analytics-outbox-v1.json` in the same OS user-state directory. The file is
 owner-private, is never stored under the ctx data root, and contains no response
 body or raw error. It stores a one-way endpoint fingerprint plus queue time and
-attempt bookkeeping so a payload is not replayed to a different endpoint. If
-the persistent daemon is disabled or absent, entries remain local until a later
+attempt bookkeeping so a payload is not replayed to a different endpoint. Each
+entry belongs to the existing random data-root identifier. Enqueue, delivery,
+purge, and delivery counters use that same owner: an enabled root cannot upload
+another root's entries. Older shared outboxes without this ownership are
+discarded, including their counters, rather than replayed under another root's
+consent. If the persistent daemon is disabled or absent, entries remain local until a later
 daemon run delivers them or the bounds below expire them.
 
 The enabled persistent daemon is the sole telemetry network uploader. It drains
@@ -949,12 +980,16 @@ exponential backoff with jitter. A valid bounded `Retry-After` can extend the
 delay. Other permanent HTTP rejections are dropped, and daemon shutdown appends
 its terminal event without starting another request.
 
-Delivery retry, drop, age, and failure counters are coalesced into one closed
+Each root's delivery retry, drop, age, and failure counters are coalesced into
+one closed
 `analytics_delivery_observation@1` only after an ordinary payload is accepted.
 Failure to deliver that health event never recursively creates another health
-event. The outbox is bounded to 128 entries, 2 MiB total, 512 KiB per batch, and
-30 days. Oldest entries are dropped when a bound is reached. If this
-owner-private file is malformed or oversized, ctx replaces it with an empty
+event. Across all roots, the shared outbox is bounded to 128 entries, 2 MiB
+total, 512 KiB per batch, and 30 days. Oldest entries are dropped when a bound
+is reached, with drops charged to their owning root. At most 128 root counter
+records are retained; under metadata capacity pressure, counter-only records
+may be discarded while counters for roots with queued entries are preserved. If
+this owner-private file is malformed or oversized, ctx replaces it with an empty
 valid outbox and reports one `local_io` drop after delivery recovers. Unsafe
 paths, links, and permissions still fail closed instead of being replaced.
 
@@ -978,8 +1013,15 @@ export CTX_ANALYTICS_ENABLED=false
 
 Either explicit opt-out disables CLI analytics. A config opt-out wins over
 `CTX_ANALYTICS_ENABLED=true` and over an endpoint override. The next ctx process
-that opens analytics state removes any existing analytics outbox without
-creating an analytics identity or making a telemetry request.
+that opens analytics state removes that root's queued entries and counters
+when the original root identity is still readable, without creating an analytics
+identity or making a telemetry request. If that identity is missing, invalid,
+or replaced, entries whose owner cannot be identified remain subject to the
+normal bounded expiry and eviction. They are never reassigned to another
+identity. Other roots' permitted entries remain queued. Before each request,
+ctx checks that the current root identity still matches the captured owner;
+a missing, invalid, or different identity stops further delivery. An opt-out
+cannot recall a request already sent.
 
 ### Installer diagnostics
 

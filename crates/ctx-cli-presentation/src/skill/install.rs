@@ -285,11 +285,10 @@ fn render_status_results(
 
 #[cfg(test)]
 mod render_tests {
-    use std::io::Write as _;
-
     use super::*;
     use crate::{
         skill::agents::SkillAgentArg,
+        test_support::strip_ansi,
         ui::{ColorMode, StreamKind, TestContext, Token},
     };
     use ctx_agent_integrations::skill::{
@@ -303,12 +302,6 @@ mod render_tests {
 
     fn render_context(width: usize, color: ColorMode) -> RenderContext {
         RenderContext::for_test(TestContext::tty(StreamKind::Stdout, width).color(color))
-    }
-
-    fn strip_ansi(rendered: &str) -> String {
-        let mut stream = anstream::StripStream::new(Vec::new());
-        stream.write_all(rendered.as_bytes()).unwrap();
-        String::from_utf8(stream.into_inner()).unwrap()
     }
 
     fn semantic_command(document: &Document) -> String {

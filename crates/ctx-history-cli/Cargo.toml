@@ -30,6 +30,7 @@ unicode-segmentation.workspace = true
 unicode-width.workspace = true
 
 [dev-dependencies]
+ctx-semantic-index = { path = "../ctx-semantic-index" }
 anstream.workspace = true
 tempfile.workspace = true
 

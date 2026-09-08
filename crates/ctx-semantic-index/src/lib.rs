@@ -10,6 +10,7 @@ mod json;
 mod private_fs;
 mod query_index;
 mod source_document;
+mod source_passage;
 mod vector_store;
 mod vector_store_schema;
 mod vector_store_search;

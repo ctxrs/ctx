@@ -57,6 +57,27 @@ identity, ctx stops semantic indexing and querying until the user reruns
 deletes and rebuilds only the derived semantic index. Imported history and the
 lexical index remain intact.
 
+## Built-in document coverage
+
+The built-in executor checks each complete document input, including the derived
+metadata header, passage prefix and special tokens, against its loaded
+tokenizer's 512-token limit. It retains the existing 1,200-character windows and
+200-character overlap when they fit. Otherwise it shortens optional repeated
+metadata and tests smaller body windows. Stored spans retain their original
+source coordinates and cover the body within the existing 65,536-character
+source cap. Original Core records are unchanged.
+
+Planning has finite input, trial and chunk limits. If no fitting window can be
+established within those limits, semantic work returns an input-budget failure
+without acknowledging that page as complete; lexical search remains available.
+The backend checks inputs again before inference, including after runtime
+recovery. This changes the built-in semantic chunking policy and rebuilds its derived
+semantic vectors without reimporting history or rebuilding the lexical index.
+Query truncation is unchanged. HTTP executors retain their endpoint-owned
+preprocessing and chunking policy; ctx does not impose the built-in tokenizer on
+V2 spaces. Switching between retained fixed-E5 HTTP and built-in execution
+rebuilds semantic vectors because their document chunk policies now differ.
+
 ## Built-in indexing throttling
 
 The built-in executor deliberately paces semantic document indexing by

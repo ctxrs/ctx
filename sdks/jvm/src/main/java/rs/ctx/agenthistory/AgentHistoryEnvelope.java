@@ -18,6 +18,10 @@ public class AgentHistoryEnvelope {
     private final Map<String, Object> envelope;
 
     AgentHistoryEnvelope(Map<String, Object> canonical) {
+        if ("status".equals(canonical.get("operation")) || "init".equals(canonical.get("operation"))) {
+            canonical = new LinkedHashMap<>(canonical);
+            canonical.put("status", StatusRecord.withoutLocality(AgentHistoryValue.objectAt(canonical, "status")));
+        }
         this.contractVersion = AgentHistoryValue.string(canonical.get("contractVersion"));
         Integer version = AgentHistoryValue.integer(canonical.get("schemaVersion"));
         this.schemaVersion = version == null ? SCHEMA_VERSION : version.intValue();
@@ -94,7 +98,8 @@ public class AgentHistoryEnvelope {
         if ("showEvent".equals(operation) || "showSession".equals(operation)) {
             normalizable = normalizeEventPayload(operation, raw);
         }
-        Map<String, Object> camel = new LinkedHashMap<>(AgentHistoryValue.camelizeObject(normalizable));
+        Map<String, Object> camel = new LinkedHashMap<>(
+                normalizable == raw ? AgentHistoryValue.camelizeObject(raw) : normalizable);
         Map<String, Object> fields = new LinkedHashMap<>();
         switch (operation) {
             case "status":
@@ -143,7 +148,6 @@ public class AgentHistoryEnvelope {
             status.put("initialized", Boolean.valueOf(
                     lexical != null && AgentHistoryValue.string(lexical.get("generationId")) != null));
         }
-        status.put("localOnly", Boolean.TRUE);
         return status;
     }
 
@@ -185,7 +189,12 @@ public class AgentHistoryEnvelope {
     private static Map<String, Object> normalizeEventPayload(
             String operation,
             Map<String, Object> raw) {
-        Map<String, Object> out = new LinkedHashMap<>(raw);
+        Map<String, Object> out = new LinkedHashMap<>();
+        for (Map.Entry<String, Object> entry : raw.entrySet()) {
+            if (!"event".equals(entry.getKey()) && !"events".equals(entry.getKey())) {
+                out.put(AgentHistoryValue.snakeToCamel(entry.getKey()), AgentHistoryValue.camelize(entry.getValue()));
+            }
+        }
         if ("showEvent".equals(operation) && raw.containsKey("event")) {
             out.put("event", normalizeEventRecord(raw.get("event")));
         }
@@ -236,7 +245,10 @@ public class AgentHistoryEnvelope {
                 throw invalidMcpExchangeWire(
                         "outer member " + key + " collides with canonical mcpExchange");
             }
-            out.put(key, entry.getValue());
+            String canonical = AgentHistoryValue.snakeToCamel(key);
+            if (java.util.Arrays.asList("configPath", "itemType", "payloadType", "recordType").contains(canonical)) continue;
+            out.put(canonical, "content".equals(key) || "citations".equals(key)
+                    ? AgentHistoryValue.camelize(entry.getValue()) : AgentHistoryValue.copy(entry.getValue()));
         }
         if (hasSnake || hasCamel) {
             Object call = hasSnake ? event.get("mcp_tool_call") : event.get("mcpToolCall");
@@ -248,7 +260,7 @@ public class AgentHistoryEnvelope {
                     : event.get("mcpExchange");
             out.put(
                     "mcpExchange",
-                    AgentHistoryValue.opaqueJson(McpExchange.normalizeWire(exchange)));
+                    McpExchange.normalizeWire(exchange));
         }
         return out;
     }

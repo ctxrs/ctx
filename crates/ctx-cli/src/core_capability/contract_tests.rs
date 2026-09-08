@@ -1,22 +1,16 @@
 // Contract tests for the fixed Core capability protocol.
-use super::hosted_pair_install::{
-    acquire_hosted_install_lock, hosted_source_path, replace_hosted_file, stage_hosted_bytes,
-    stage_hosted_file_if_changed, HostedPairPublication,
-};
 use super::progress_events::{CapabilityEventSink, IgnoreEvents, ProtocolEventWriter};
 use super::*;
 use ctx_history_index::SourceRouteIdentity;
-use ctx_history_refresh::{
-    RefreshOutcomeClass, RefreshOutcomeCode, RefreshRetryAdvice, RefreshTerminalOutcome,
-};
+use ctx_history_refresh::{RefreshOutcomeCode, RefreshRetryAdvice, RefreshTerminalOutcome};
 
 #[cfg(test)]
 #[path = "contract_tests/failure_contract_tests.rs"]
 mod failure_contract_tests;
 
 #[cfg(test)]
-#[path = "contract_tests/hosted_marker_contract_tests.rs"]
-mod hosted_marker_contract_tests;
+#[path = "contract_tests/managed_pair_apply_contract_tests.rs"]
+mod managed_pair_apply_contract_tests;
 
 #[test]
 fn fingerprint_is_the_sha256_of_the_canonical_inventory() {
@@ -146,377 +140,6 @@ fn duplicates_and_multiframe_input_fail_closed() {
 }
 
 #[test]
-fn only_the_exact_hidden_argv_is_intercepted() {
-    assert!(intercept(&["ctx".into(), INVOCATION.into()]).is_some());
-    assert!(intercept(&["ctx".into(), "--ctx-core-capability-v1=x".into()]).is_none());
-    assert!(intercept(&["ctx".into(), "--ctx-core-hosted-pair-install-v1=x".into()]).is_none());
-    assert!(intercept(&[
-        "ctx".into(),
-        "--ctx-core-disable-managed-man-pages-v1=x".into()
-    ])
-    .is_none());
-}
-
-#[test]
-fn hosted_pair_sources_must_be_absolute_regular_files() {
-    assert!(hosted_source_path(std::ffi::OsStr::new("relative"), "test").is_err());
-    let root = tempfile::tempdir().unwrap();
-    let file = root.path().join("artifact");
-    std::fs::write(&file, b"artifact").unwrap();
-    assert_eq!(hosted_source_path(file.as_os_str(), "test").unwrap(), file);
-}
-
-#[test]
-fn hosted_pair_replacement_is_atomic_and_idempotently_repairable() {
-    let root = tempfile::tempdir().unwrap();
-    let target = root.path().join("libexec/ctx-pro");
-    std::fs::create_dir_all(target.parent().unwrap()).unwrap();
-    std::fs::write(&target, b"old-pro").unwrap();
-
-    let abandoned = stage_hosted_bytes(b"abandoned", &target, 0o755, "test Pro").unwrap();
-    let restaged = stage_hosted_bytes(b"protocol-v3-pro", &target, 0o755, "test Pro").unwrap();
-    assert_eq!(abandoned, restaged);
-    replace_hosted_file(&restaged, &target, "test Pro").unwrap();
-
-    for _ in 0..2 {
-        let staged = stage_hosted_bytes(b"protocol-v3-pro", &target, 0o755, "test Pro").unwrap();
-        replace_hosted_file(&staged, &target, "test Pro").unwrap();
-        assert_eq!(std::fs::read(&target).unwrap(), b"protocol-v3-pro");
-        assert!(!staged.exists());
-    }
-}
-
-#[test]
-fn hosted_pair_exact_core_reinstall_preserves_the_running_inode() {
-    let root = tempfile::tempdir().unwrap();
-    let candidate = root.path().join("candidate-ctx");
-    let installed = root.path().join("bin/ctx");
-    let installed_envelope = root.path().join("share/ctx/envelope.json");
-    let installed_companion = root.path().join("libexec/ctx-pro");
-    let installed_marker = root.path().join("bin/ctx.install.json");
-    let installed_receipt = root.path().join("share/ctx/receipt.json");
-    std::fs::create_dir_all(installed.parent().unwrap()).unwrap();
-    std::fs::create_dir_all(installed_envelope.parent().unwrap()).unwrap();
-    std::fs::create_dir_all(installed_companion.parent().unwrap()).unwrap();
-    std::fs::write(&candidate, b"exact-signed-core").unwrap();
-    std::fs::write(&installed, b"exact-signed-core").unwrap();
-    let digest = format!("{:x}", Sha256::digest(b"exact-signed-core"));
-    #[cfg(unix)]
-    let inode_before = {
-        use std::os::unix::fs::MetadataExt as _;
-        std::fs::metadata(&installed).unwrap().ino()
-    };
-
-    let staged_core = stage_hosted_file_if_changed(
-        &candidate,
-        &installed,
-        b"exact-signed-core".len() as u64,
-        &digest,
-        0o755,
-        "Core artifact",
-    )
-    .unwrap();
-    let staged_envelope = stage_hosted_bytes(
-        b"new-envelope",
-        &installed_envelope,
-        0o600,
-        "signed envelope",
-    )
-    .unwrap();
-    let staged_companion = stage_hosted_bytes(
-        b"new-pro",
-        &installed_companion,
-        0o755,
-        "companion artifact",
-    )
-    .unwrap();
-    let staged_marker =
-        stage_hosted_bytes(b"new-marker", &installed_marker, 0o600, "install marker").unwrap();
-    let staged_receipt =
-        stage_hosted_bytes(b"new-receipt", &installed_receipt, 0o600, "install receipt").unwrap();
-
-    HostedPairPublication {
-        staged_envelope: &staged_envelope,
-        installed_envelope: &installed_envelope,
-        staged_companion: Some(&staged_companion),
-        installed_companion: &installed_companion,
-        staged_core: staged_core.as_deref(),
-        installed_core: &installed,
-        staged_marker: &staged_marker,
-        installed_marker: &installed_marker,
-        staged_receipt: &staged_receipt,
-        installed_receipt: &installed_receipt,
-    }
-    .publish()
-    .unwrap();
-
-    assert!(staged_core.is_none());
-    assert_eq!(std::fs::read(&installed).unwrap(), b"exact-signed-core");
-    assert_eq!(std::fs::read(installed_envelope).unwrap(), b"new-envelope");
-    assert_eq!(std::fs::read(installed_companion).unwrap(), b"new-pro");
-    assert_eq!(std::fs::read(installed_marker).unwrap(), b"new-marker");
-    assert_eq!(std::fs::read(installed_receipt).unwrap(), b"new-receipt");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
-        let metadata = std::fs::metadata(&installed).unwrap();
-        assert_eq!(metadata.ino(), inode_before);
-        assert_eq!(metadata.permissions().mode() & 0o7777, 0o755);
-    }
-}
-
-#[cfg(unix)]
-#[test]
-fn hosted_pair_exact_hardlinked_companion_is_replaced_not_reused() {
-    use std::os::unix::fs::MetadataExt as _;
-
-    let root = tempfile::tempdir().unwrap();
-    let candidate = root.path().join("candidate-ctx-pro");
-    let installed = root.path().join("libexec/ctx-pro");
-    let alias = root.path().join("hardlink-alias");
-    std::fs::create_dir_all(installed.parent().unwrap()).unwrap();
-    std::fs::write(&candidate, b"exact-signed-companion").unwrap();
-    std::fs::write(&installed, b"exact-signed-companion").unwrap();
-    std::fs::hard_link(&installed, &alias).unwrap();
-    let old_inode = std::fs::metadata(&installed).unwrap().ino();
-    let digest = format!("{:x}", Sha256::digest(b"exact-signed-companion"));
-
-    let staged = stage_hosted_file_if_changed(
-        &candidate,
-        &installed,
-        b"exact-signed-companion".len() as u64,
-        &digest,
-        0o755,
-        "companion artifact",
-    )
-    .unwrap()
-    .expect("hardlinked artifact must be staged for replacement");
-    replace_hosted_file(&staged, &installed, "companion artifact").unwrap();
-
-    let installed_metadata = std::fs::metadata(&installed).unwrap();
-    assert_ne!(installed_metadata.ino(), old_inode);
-    assert_eq!(installed_metadata.nlink(), 1);
-    assert_eq!(std::fs::metadata(&alias).unwrap().ino(), old_inode);
-}
-
-#[test]
-fn hosted_pair_changed_core_is_staged_for_atomic_publication() {
-    let root = tempfile::tempdir().unwrap();
-    let candidate = root.path().join("candidate-ctx");
-    let installed = root.path().join("bin/ctx");
-    std::fs::create_dir_all(installed.parent().unwrap()).unwrap();
-    std::fs::write(&candidate, b"same-size-core-B").unwrap();
-    std::fs::write(&installed, b"same-size-core-A").unwrap();
-    let digest = format!("{:x}", Sha256::digest(b"same-size-core-B"));
-
-    let staged = stage_hosted_file_if_changed(
-        &candidate,
-        &installed,
-        b"same-size-core-B".len() as u64,
-        &digest,
-        0o755,
-        "Core artifact",
-    )
-    .unwrap()
-    .unwrap();
-
-    assert_eq!(std::fs::read(&installed).unwrap(), b"same-size-core-A");
-    assert_eq!(std::fs::read(staged).unwrap(), b"same-size-core-B");
-}
-
-#[test]
-fn hosted_pair_exact_companion_reinstall_preserves_the_running_inode() {
-    let root = tempfile::tempdir().unwrap();
-    let candidate = root.path().join("candidate-ctx-pro");
-    let installed = root.path().join("libexec/ctx-pro");
-    std::fs::create_dir_all(installed.parent().unwrap()).unwrap();
-    std::fs::write(&candidate, b"exact-signed-companion").unwrap();
-    std::fs::write(&installed, b"exact-signed-companion").unwrap();
-    let digest = format!("{:x}", Sha256::digest(b"exact-signed-companion"));
-    #[cfg(unix)]
-    let inode_before = {
-        use std::os::unix::fs::MetadataExt as _;
-        std::fs::metadata(&installed).unwrap().ino()
-    };
-
-    let staged = stage_hosted_file_if_changed(
-        &candidate,
-        &installed,
-        b"exact-signed-companion".len() as u64,
-        &digest,
-        0o755,
-        "companion artifact",
-    )
-    .unwrap();
-
-    assert!(staged.is_none());
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt as _;
-        assert_eq!(std::fs::metadata(&installed).unwrap().ino(), inode_before);
-    }
-}
-
-#[test]
-fn hosted_pair_exact_reinstall_failure_preserves_publication_prefix_and_receipt_last() {
-    let root = tempfile::tempdir().unwrap();
-    let candidate = root.path().join("candidate-ctx");
-    let installed = root.path().join("bin/ctx");
-    let installed_envelope = root.path().join("share/ctx/envelope.json");
-    let installed_companion = root.path().join("libexec/ctx-pro");
-    let installed_marker = root.path().join("bin/ctx.install.json");
-    let installed_receipt = root.path().join("share/ctx/receipt.json");
-    std::fs::create_dir_all(installed.parent().unwrap()).unwrap();
-    std::fs::create_dir_all(installed_envelope.parent().unwrap()).unwrap();
-    std::fs::create_dir_all(installed_companion.parent().unwrap()).unwrap();
-    std::fs::write(&candidate, b"exact-signed-core").unwrap();
-    std::fs::write(&installed, b"exact-signed-core").unwrap();
-    std::fs::write(&installed_envelope, b"old-envelope").unwrap();
-    std::fs::write(&installed_companion, b"old-pro").unwrap();
-    std::fs::create_dir(&installed_marker).unwrap();
-    std::fs::write(&installed_receipt, b"old-receipt").unwrap();
-    let digest = format!("{:x}", Sha256::digest(b"exact-signed-core"));
-    #[cfg(unix)]
-    let inode_before = {
-        use std::os::unix::fs::MetadataExt as _;
-        std::fs::metadata(&installed).unwrap().ino()
-    };
-
-    let staged_core = stage_hosted_file_if_changed(
-        &candidate,
-        &installed,
-        b"exact-signed-core".len() as u64,
-        &digest,
-        0o755,
-        "Core artifact",
-    )
-    .unwrap();
-    let staged_envelope = stage_hosted_bytes(
-        b"new-envelope",
-        &installed_envelope,
-        0o600,
-        "signed envelope",
-    )
-    .unwrap();
-    let staged_companion = stage_hosted_bytes(
-        b"new-pro",
-        &installed_companion,
-        0o755,
-        "companion artifact",
-    )
-    .unwrap();
-    let staged_marker =
-        stage_hosted_bytes(b"new-marker", &installed_marker, 0o600, "install marker").unwrap();
-    let staged_receipt =
-        stage_hosted_bytes(b"new-receipt", &installed_receipt, 0o600, "install receipt").unwrap();
-
-    assert!(HostedPairPublication {
-        staged_envelope: &staged_envelope,
-        installed_envelope: &installed_envelope,
-        staged_companion: Some(&staged_companion),
-        installed_companion: &installed_companion,
-        staged_core: staged_core.as_deref(),
-        installed_core: &installed,
-        staged_marker: &staged_marker,
-        installed_marker: &installed_marker,
-        staged_receipt: &staged_receipt,
-        installed_receipt: &installed_receipt,
-    }
-    .publish()
-    .is_err());
-
-    assert_eq!(std::fs::read(installed_envelope).unwrap(), b"new-envelope");
-    assert_eq!(std::fs::read(installed_companion).unwrap(), b"new-pro");
-    assert_eq!(std::fs::read(&installed).unwrap(), b"exact-signed-core");
-    assert!(installed_marker.is_dir());
-    assert_eq!(std::fs::read(installed_receipt).unwrap(), b"old-receipt");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt as _;
-        assert_eq!(std::fs::metadata(&installed).unwrap().ino(), inode_before);
-    }
-}
-
-#[test]
-fn hosted_pair_exact_reinstall_publishes_rollback_watermark_before_companion() {
-    let root = tempfile::tempdir().unwrap();
-    let installed = root.path().join("bin/ctx");
-    let installed_envelope = root.path().join("share/ctx/envelope.json");
-    let installed_companion = root.path().join("libexec/ctx-pro");
-    let installed_marker = root.path().join("bin/ctx.install.json");
-    let installed_receipt = root.path().join("share/ctx/receipt.json");
-    std::fs::create_dir_all(installed.parent().unwrap()).unwrap();
-    std::fs::create_dir_all(installed_envelope.parent().unwrap()).unwrap();
-    std::fs::create_dir_all(installed_companion.parent().unwrap()).unwrap();
-    std::fs::write(&installed, b"exact-signed-core").unwrap();
-    std::fs::write(&installed_envelope, b"old-envelope").unwrap();
-    std::fs::create_dir(&installed_companion).unwrap();
-    std::fs::write(&installed_marker, b"old-marker").unwrap();
-    std::fs::write(&installed_receipt, b"old-receipt").unwrap();
-    #[cfg(unix)]
-    let inode_before = {
-        use std::os::unix::fs::MetadataExt as _;
-        std::fs::metadata(&installed).unwrap().ino()
-    };
-
-    let staged_envelope = stage_hosted_bytes(
-        b"new-envelope",
-        &installed_envelope,
-        0o600,
-        "signed envelope",
-    )
-    .unwrap();
-    let staged_companion = stage_hosted_bytes(
-        b"new-pro",
-        &installed_companion,
-        0o755,
-        "companion artifact",
-    )
-    .unwrap();
-    let staged_marker =
-        stage_hosted_bytes(b"new-marker", &installed_marker, 0o600, "install marker").unwrap();
-    let staged_receipt =
-        stage_hosted_bytes(b"new-receipt", &installed_receipt, 0o600, "install receipt").unwrap();
-
-    assert!(HostedPairPublication {
-        staged_envelope: &staged_envelope,
-        installed_envelope: &installed_envelope,
-        staged_companion: Some(&staged_companion),
-        installed_companion: &installed_companion,
-        staged_core: None,
-        installed_core: &installed,
-        staged_marker: &staged_marker,
-        installed_marker: &installed_marker,
-        staged_receipt: &staged_receipt,
-        installed_receipt: &installed_receipt,
-    }
-    .publish()
-    .is_err());
-
-    assert_eq!(std::fs::read(installed_envelope).unwrap(), b"new-envelope");
-    assert!(installed_companion.is_dir());
-    assert_eq!(std::fs::read(&installed).unwrap(), b"exact-signed-core");
-    assert_eq!(std::fs::read(installed_marker).unwrap(), b"old-marker");
-    assert_eq!(std::fs::read(installed_receipt).unwrap(), b"old-receipt");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt as _;
-        assert_eq!(std::fs::metadata(&installed).unwrap().ino(), inode_before);
-    }
-}
-
-#[test]
-fn hosted_pair_installation_is_serialized_without_persistent_lock_state() {
-    let root = tempfile::tempdir().unwrap();
-    let executable = root.path().join("ctx");
-    std::fs::write(&executable, b"ctx").unwrap();
-    let first = acquire_hosted_install_lock(&executable).unwrap();
-    assert!(acquire_hosted_install_lock(&executable).is_err());
-    drop(first);
-    assert!(acquire_hosted_install_lock(&executable).is_ok());
-}
-
-#[test]
 fn capability_response_is_one_exact_flushed_json_frame() {
     let mut output = Vec::new();
     write_response_frame(&mut output, br#"{"ok":true}"#).unwrap();
@@ -554,90 +177,34 @@ fn setup_receipt_does_not_embed_unbounded_source_diagnostics() {
     assert!(canonical(&facts).unwrap().len() < MAX_RESPONSE_BYTES);
 }
 
-fn terminal_failure_with_blocked_routes(
-    route_count: usize,
-) -> crate::semantic::SourceBackedRefreshTerminalError {
-    let routes = (0..route_count)
-        .map(|index| SourceRouteIdentity::from_sha256(format!("{index:064x}")).unwrap())
-        .collect::<BTreeSet<_>>();
-    crate::semantic::SourceBackedRefreshTerminalError::from(RefreshTerminalOutcome {
-        code: RefreshOutcomeCode::IndexCorruption,
-        class: RefreshOutcomeClass::Corruption,
-        retryable: false,
-        affected_routes: routes.clone(),
-        retryable_routes: BTreeSet::new(),
-        blocked_routes: routes,
-        physical_attempt_id: "00000000-0000-0000-0000-000000000123".to_owned(),
-        retained_generation: Some("cd".repeat(32)),
-        published_generation: None,
-        retry_advice: Some(RefreshRetryAdvice::RebuildIndex),
-        detail: Some("arbitrary source detail must not cross the boundary".to_owned()),
-    })
-}
-
-fn retryable_terminal_failure() -> crate::semantic::SourceBackedRefreshTerminalError {
-    let route = SourceRouteIdentity::from_sha256("ab".repeat(32)).unwrap();
-    crate::semantic::SourceBackedRefreshTerminalError::from(RefreshTerminalOutcome {
-        code: RefreshOutcomeCode::SourceUnavailable,
-        class: RefreshOutcomeClass::Unavailable,
-        retryable: true,
-        affected_routes: BTreeSet::from([route.clone()]),
-        retryable_routes: BTreeSet::from([route]),
-        blocked_routes: BTreeSet::new(),
-        physical_attempt_id: "00000000-0000-0000-0000-000000000123".to_owned(),
-        retained_generation: Some("cd".repeat(32)),
-        published_generation: None,
-        retry_advice: Some(RefreshRetryAdvice::RetryAffectedRoutes),
-        detail: None,
-    })
-}
-
-fn source_unclaimed_terminal_failure(
-    retryable: bool,
-) -> crate::semantic::SourceBackedRefreshTerminalError {
+fn source_unclaimed_terminal_failure(retryable: bool) -> RefreshTerminalOutcome {
     let blocked = SourceRouteIdentity::from_sha256("ab".repeat(32)).unwrap();
     let retryable_route = SourceRouteIdentity::from_sha256("cd".repeat(32)).unwrap();
-    crate::semantic::SourceBackedRefreshTerminalError::from(RefreshTerminalOutcome {
-        code: RefreshOutcomeCode::SourceUnclaimed,
-        class: RefreshOutcomeClass::Coverage,
+    RefreshTerminalOutcome::new(
+        RefreshOutcomeCode::SourceUnclaimed,
         retryable,
-        affected_routes: if retryable {
+        if retryable {
             BTreeSet::from([blocked.clone(), retryable_route.clone()])
         } else {
             BTreeSet::from([blocked.clone()])
         },
-        retryable_routes: if retryable {
+        if retryable {
             BTreeSet::from([retryable_route])
         } else {
             BTreeSet::new()
         },
-        blocked_routes: BTreeSet::from([blocked]),
-        physical_attempt_id: "00000000-0000-0000-0000-000000000123".to_owned(),
-        retained_generation: Some("cd".repeat(32)),
-        published_generation: None,
-        retry_advice: Some(if retryable {
+        BTreeSet::from([blocked]),
+        "00000000-0000-0000-0000-000000000123".to_owned(),
+        Some("cd".repeat(32)),
+        None,
+        Some(if retryable {
             RefreshRetryAdvice::RetryRetryableRoutesAndInspectBlocked
         } else {
             RefreshRetryAdvice::InspectSources
         }),
-        detail: None,
-    })
-}
-
-fn mutated_terminal_failure(
-    mutate: impl FnOnce(&mut crate::semantic::SourceBackedRefreshTerminalError),
-) -> crate::semantic::SourceBackedRefreshTerminalError {
-    let mut terminal = terminal_failure_with_blocked_routes(1);
-    mutate(&mut terminal);
-    terminal
-}
-
-fn mutated_retryable_terminal_failure(
-    mutate: impl FnOnce(&mut crate::semantic::SourceBackedRefreshTerminalError),
-) -> crate::semantic::SourceBackedRefreshTerminalError {
-    let mut terminal = retryable_terminal_failure();
-    mutate(&mut terminal);
-    terminal
+        None,
+    )
+    .unwrap()
 }
 
 fn run_terminal_failure(
@@ -1003,21 +570,22 @@ fn recognized_terminal_failure_writes_one_exact_frame_and_exits_nonzero() {
     let route = SourceRouteIdentity::from_sha256("ab".repeat(32)).unwrap();
     let physical_attempt_id = "01234567-89ab-cdef-0123-456789abcdef";
     let retained_generation = "cd".repeat(32);
-    let terminal: anyhow::Error =
-        crate::semantic::SourceBackedRefreshTerminalError::from(RefreshTerminalOutcome {
-            code: RefreshOutcomeCode::IndexCorruption,
-            class: RefreshOutcomeClass::Corruption,
-            retryable: false,
-            affected_routes: BTreeSet::from([route.clone()]),
-            retryable_routes: BTreeSet::new(),
-            blocked_routes: BTreeSet::from([route]),
-            physical_attempt_id: physical_attempt_id.to_owned(),
-            retained_generation: Some(retained_generation.clone()),
-            published_generation: None,
-            retry_advice: Some(RefreshRetryAdvice::RebuildIndex),
-            detail: Some("arbitrary source detail must not cross the boundary".to_owned()),
-        })
-        .into();
+    let terminal: anyhow::Error = crate::semantic::SourceBackedRefreshTerminalError::from(
+        RefreshTerminalOutcome::new(
+            RefreshOutcomeCode::IndexCorruption,
+            false,
+            BTreeSet::from([route.clone()]),
+            BTreeSet::new(),
+            BTreeSet::from([route]),
+            physical_attempt_id.to_owned(),
+            Some(retained_generation.clone()),
+            None,
+            Some(RefreshRetryAdvice::RebuildIndex),
+            Some("arbitrary source detail must not cross the boundary".to_owned()),
+        )
+        .unwrap(),
+    )
+    .into();
     let terminal = terminal.context("arbitrary internal context must not cross the boundary");
     let mut output = Vec::new();
 
@@ -1035,6 +603,40 @@ fn recognized_terminal_failure_writes_one_exact_frame_and_exits_nonzero() {
     assert!(!output.contains(&0x1b));
     let response: Value = serde_json::from_slice(output.strip_suffix(b"\n").unwrap()).unwrap();
     assert_eq!(canonical(&response).unwrap(), output[..output.len() - 1]);
+    assert_eq!(
+        response
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            "details",
+            "error_code",
+            "ok",
+            "operation",
+            "protocol_version",
+            "retryable",
+            "schema_version",
+        ])
+    );
+    assert_eq!(
+        response["details"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            "affected_routes",
+            "blocked_routes",
+            "class",
+            "physical_attempt_id",
+            "retained_generation",
+            "retry_advice",
+            "retryable_routes",
+        ])
+    );
     assert_eq!(response["error_code"], "index_corruption");
     assert_eq!(response["retryable"], false);
     assert_eq!(
@@ -1046,230 +648,6 @@ fn recognized_terminal_failure_writes_one_exact_frame_and_exits_nonzero() {
         retained_generation
     );
     assert!(!String::from_utf8(output).unwrap().contains('\u{009b}'));
-}
-
-#[test]
-fn event_terminal_state_and_final_failure_are_ordered_and_typed_the_same() {
-    let root = tempfile::tempdir().unwrap();
-    let request = json!({
-        "data_root": root.path(),
-        "operation": "RefreshAndWait",
-        "options": {"progress": "events"},
-        "protocol_version": CORE_PRO_PROTOCOL_VERSION.get(),
-        "schema_version": 1,
-    });
-    let mut input = canonical(&request).unwrap();
-    input.push(b'\n');
-    let route_text = "ab".repeat(32);
-    let retained = "cd".repeat(32);
-    let physical_attempt_id = "01234567-89ab-cdef-0123-456789abcdef";
-    let status = crate::semantic::RefreshStatus::parse_schema_v1(json!({
-        "request_id": "logical-request",
-        "request_state": "failed",
-        "logical_request_id": "logical-request",
-        "logical_phase": "terminal",
-        "physical_attempt_id": physical_attempt_id,
-        "physical_attempt_state": "failed",
-        "progress_owner_request_id": physical_attempt_id,
-        "progress_owner_attempt_state": "failed",
-        "progress": {
-            "phase": "failed",
-            "completed_sources": 0,
-            "total_sources": 1,
-            "total_sources_known": true,
-            "whole_run_stage": "failed"
-        },
-        "structured_outcome": {
-            "code": "index_corruption",
-            "class": "corruption",
-            "retryable": false,
-            "affected_routes": [route_text],
-            "retryable_routes": [],
-            "blocked_routes": [route_text],
-            "physical_attempt_id": physical_attempt_id,
-            "retained_generation": retained,
-            "published_generation": null,
-            "retry_advice": "rebuild_index"
-        }
-    }))
-    .unwrap();
-    let route = SourceRouteIdentity::from_sha256(route_text).unwrap();
-    let terminal: anyhow::Error =
-        crate::semantic::SourceBackedRefreshTerminalError::from(RefreshTerminalOutcome {
-            code: RefreshOutcomeCode::IndexCorruption,
-            class: RefreshOutcomeClass::Corruption,
-            retryable: false,
-            affected_routes: BTreeSet::from([route.clone()]),
-            retryable_routes: BTreeSet::new(),
-            blocked_routes: BTreeSet::from([route]),
-            physical_attempt_id: physical_attempt_id.to_owned(),
-            retained_generation: Some(retained),
-            published_generation: None,
-            retry_advice: Some(RefreshRetryAdvice::RebuildIndex),
-            detail: Some("private terminal detail".to_owned()),
-        })
-        .into();
-    let mut output = Vec::new();
-
-    let exit = capability_exit_code(run_with_protocol_io(
-        std::io::Cursor::new(input),
-        &mut output,
-        |_request, events| {
-            events.refresh(&status)?;
-            Err(terminal)
-        },
-    ));
-
-    assert_eq!(exit, ExitCode::FAILURE);
-    let frames = output
-        .split(|byte| *byte == b'\n')
-        .filter(|frame| !frame.is_empty())
-        .map(|frame| serde_json::from_slice::<Value>(frame).unwrap())
-        .collect::<Vec<_>>();
-    assert_eq!(frames.len(), 2);
-    assert_eq!(frames[0]["event"], "refresh");
-    assert_eq!(frames[0]["refresh"]["request_state"], "failed");
-    assert_eq!(frames[1]["ok"], false);
-    assert_eq!(
-        frames[0]["refresh"]["terminal_state"]["error_code"],
-        frames[1]["error_code"]
-    );
-    assert_eq!(
-        frames[0]["refresh"]["terminal_state"]["retryable"],
-        frames[1]["retryable"]
-    );
-    assert_eq!(
-        frames[0]["refresh"]["terminal_state"]["details"],
-        frames[1]["details"]
-    );
-    assert!(!String::from_utf8(output)
-        .unwrap()
-        .contains("private terminal detail"));
-}
-
-#[test]
-fn malformed_typed_failures_remain_silent_and_nonzero() {
-    let route = "00".repeat(32);
-    let other = "11".repeat(32);
-    let upper = "22".repeat(32);
-    let cases = [
-        (
-            "unknown_code",
-            mutated_terminal_failure(|terminal| terminal.code = "future_failure".to_owned()),
-        ),
-        (
-            "unknown_class",
-            mutated_terminal_failure(|terminal| terminal.class = "future_class".to_owned()),
-        ),
-        (
-            "code_class_mismatch",
-            mutated_terminal_failure(|terminal| terminal.class = "unavailable".to_owned()),
-        ),
-        (
-            "code_retryability_mismatch",
-            mutated_terminal_failure(|terminal| {
-                terminal.affected_routes.clear();
-                terminal.blocked_routes.clear();
-                terminal.retryable = true;
-                terminal.retry_advice = None;
-            }),
-        ),
-        (
-            "malformed_route",
-            mutated_terminal_failure(|terminal| {
-                terminal.affected_routes = vec!["AB".repeat(32)];
-                terminal.blocked_routes = terminal.affected_routes.clone();
-            }),
-        ),
-        (
-            "duplicate_route",
-            mutated_terminal_failure(|terminal| {
-                terminal.affected_routes = vec![route.clone(), route.clone()];
-                terminal.blocked_routes = terminal.affected_routes.clone();
-            }),
-        ),
-        (
-            "unsorted_routes",
-            mutated_terminal_failure(|terminal| {
-                terminal.affected_routes = vec![upper.clone(), other.clone()];
-                terminal.blocked_routes = terminal.affected_routes.clone();
-            }),
-        ),
-        (
-            "retryable_not_affected",
-            mutated_retryable_terminal_failure(|terminal| {
-                terminal.retryable_routes = vec![other.clone()];
-            }),
-        ),
-        (
-            "overlapping_dispositions",
-            mutated_retryable_terminal_failure(|terminal| {
-                terminal.blocked_routes = terminal.affected_routes.clone();
-            }),
-        ),
-        (
-            "undisposed_route",
-            mutated_terminal_failure(|terminal| {
-                terminal.affected_routes.push(other.clone());
-            }),
-        ),
-        (
-            "route_retryability_mismatch",
-            mutated_terminal_failure(|terminal| {
-                terminal.code = "source_failures".to_owned();
-                terminal.class = "mixed".to_owned();
-                terminal.retryable = true;
-                terminal.retry_advice = None;
-            }),
-        ),
-        (
-            "unknown_advice",
-            mutated_terminal_failure(|terminal| {
-                terminal.retry_advice = Some("try_magic".to_owned());
-            }),
-        ),
-        (
-            "advice_retryability_mismatch",
-            mutated_terminal_failure(|terminal| {
-                terminal.retry_advice = Some("retry_request".to_owned());
-            }),
-        ),
-        (
-            "known_but_wrong_advice",
-            mutated_terminal_failure(|terminal| {
-                terminal.retry_advice = Some("inspect_sources".to_owned());
-            }),
-        ),
-        ("source_unclaimed_without_advice", {
-            let mut terminal = source_unclaimed_terminal_failure(false);
-            terminal.retry_advice = None;
-            terminal
-        }),
-        ("source_unclaimed_without_blocked_culprit", {
-            let mut terminal = source_unclaimed_terminal_failure(true);
-            terminal.blocked_routes.clear();
-            terminal.affected_routes = terminal.retryable_routes.clone();
-            terminal
-        }),
-        (
-            "malformed_attempt_identity",
-            mutated_terminal_failure(|terminal| {
-                terminal.physical_attempt_id = "00000000-0000-0000-0000-00000000\n123".to_owned();
-            }),
-        ),
-        (
-            "malformed_generation_identity",
-            mutated_terminal_failure(|terminal| {
-                terminal.retained_generation = Some("AB".repeat(32));
-            }),
-        ),
-    ];
-
-    for (name, terminal) in cases {
-        let (status, output) = run_terminal_failure(terminal);
-        assert_eq!(status, ExitCode::FAILURE, "{name}");
-        assert!(output.is_empty(), "{name}: {output:?}");
-    }
 }
 
 #[test]

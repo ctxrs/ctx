@@ -149,9 +149,8 @@ fn provider_root_replace_adds_an_absent_name_and_remove_rejects_a_missing_name()
 
 #[test]
 fn provider_root_cli_mutation_uses_every_enabled_capability_path_kind() {
-    use ctx_history_capture::{
-        configured_root_capabilities, ConfiguredRootPathKind, ProviderRootKind,
-    };
+    use ctx_history_capture_model::ProviderRootKind;
+    use ctx_history_source_discovery::{configured_root_capabilities, ConfiguredRootPathKind};
 
     for capability in configured_root_capabilities()
         .iter()
@@ -285,7 +284,7 @@ fn provider_root_replace_revalidates_a_concurrent_config_edit_after_locking() {
 
 #[test]
 fn openhands_root_kind_is_required_replaced_atomically_and_rejects_overlap() {
-    use ctx_history_capture::ProviderRootKind;
+    use ctx_history_capture_model::ProviderRootKind;
 
     let data_root = tempfile::tempdir().unwrap();
     let fixture = tempfile::tempdir().unwrap();

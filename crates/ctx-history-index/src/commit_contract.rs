@@ -93,30 +93,18 @@ pub enum PublicationDisposition {
     Reused,
 }
 
-/// Final logical publication facts available to an opaque metadata factory.
+/// Final draft logical manifest available before reuse and identity planning.
 ///
-/// The logical manifest and persisted descriptor generation ID are complete
-/// and deterministic. A compact descriptor's ID need not equal the canonical
-/// full-manifest ID obtained from [`GenerationManifest::generation_id`]. Core
-/// invokes the factory inside the publication fence, then terminally
-/// revalidates every source and inventory before binding the returned bytes to
-/// a pointer-advancing commit.
+/// A producer returns the generation-owned state that replaces the draft's
+/// inherited state before exact-replay reuse or generation-ID calculation.
 #[derive(Debug, Clone, Copy)]
-pub struct PublicationMetadataContext<'a> {
-    generation_id: &'a str,
+pub struct GenerationStateContext<'a> {
     manifest: &'a GenerationManifest,
 }
 
-impl<'a> PublicationMetadataContext<'a> {
-    pub(crate) fn new(generation_id: &'a str, manifest: &'a GenerationManifest) -> Self {
-        Self {
-            generation_id,
-            manifest,
-        }
-    }
-
-    pub fn generation_id(self) -> &'a str {
-        self.generation_id
+impl<'a> GenerationStateContext<'a> {
+    pub(crate) fn new(manifest: &'a GenerationManifest) -> Self {
+        Self { manifest }
     }
 
     pub fn manifest(self) -> &'a GenerationManifest {

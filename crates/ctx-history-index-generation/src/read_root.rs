@@ -247,6 +247,10 @@ pub(crate) fn registered_read_directory(path: &Path) -> io::Result<Option<Arc<Op
     root.open_directory(relative).map(Arc::new).map(Some)
 }
 
+pub(crate) fn has_active_read_root() -> bool {
+    ACTIVE_READ_ROOTS.with(|roots| !roots.borrow().is_empty())
+}
+
 pub(crate) fn read_registered_file(root: &Path, relative: &Path) -> io::Result<Option<Vec<u8>>> {
     let Some(root) = registered_read_directory(root)? else {
         return Ok(None);

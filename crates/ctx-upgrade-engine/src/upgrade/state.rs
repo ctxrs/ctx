@@ -25,6 +25,22 @@ use super::{
     SemanticLayoutPort, UpgradePlan,
 };
 
+mod managed_pair;
+#[cfg(any(windows, test))]
+pub(super) use managed_pair::validate_helper_file as validate_managed_pair_helper_file;
+#[cfg(windows)]
+pub(super) use managed_pair::{
+    acquire_helper_recovery_lock as acquire_managed_pair_helper_recovery_lock,
+    helper_recovery_hint as managed_pair_helper_recovery_hint,
+    update_helper_parent_locked as update_managed_pair_helper_parent_locked,
+};
+pub(super) use managed_pair::{
+    acquire_recovery_lock as acquire_managed_pair_recovery_lock,
+    recovery_hint as managed_pair_recovery_hint, recovery_locked as managed_pair_recovery_locked,
+    try_acquire_recovery_lock as try_acquire_managed_pair_recovery_lock,
+    write_attempt_locked as write_managed_pair_attempt_locked, ManagedPairRecovery,
+};
+
 pub const STATE_FILE: &str = "upgrade-state.json";
 pub const STATE_SCHEMA_VERSION: u64 = 1;
 const DAEMON_QUIESCENCE_LOCK_FILE: &str = "daemon-quiescence.lock";
@@ -34,7 +50,6 @@ const INITIAL_FAILURE_BACKOFF: Duration = Duration::from_secs(60);
 const MAX_FAILURE_BACKOFF: Duration = Duration::from_secs(6 * 60 * 60);
 const DUE_HINT_STATE_MAX_BYTES: u64 = 64 * 1024;
 const DUE_HINT_RECENT_ATTEMPT_GRACE: Duration = Duration::from_secs(30 * 60);
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct UpgradeAttempt {
     id: String,
@@ -123,6 +138,7 @@ impl UpgradeState {
         self.last_attempt_at = Some(utc_now());
         self.last_attempt_finished_at = None;
         self.error = None;
+        managed_pair::clear_attempt(&mut self.plan);
         attempt
     }
 
@@ -504,10 +520,7 @@ pub(super) fn write_state_checked_locked(
     {
         return Err(anyhow!("injected upgrade state write failure"));
     }
-    if crate::upgrade::test_harness_enabled()
-        && status == "applied"
-        && super::env_flag("CTX_UPGRADE_FAIL_APPLIED_STATE_WRITE_FOR_TESTS")
-    {
+    if status == "applied" && applied_state_write_failure_injected(attempt.id()) {
         return Err(anyhow!("injected applied-state write failure"));
     }
     let mut state = read_state_object(&lock.install_path);
@@ -550,6 +563,9 @@ pub(super) fn reconcile_replacement_terminal_locked(
     warning_or_error: Option<&str>,
     interval: Duration,
 ) -> Result<bool> {
+    if applied && applied_state_write_failure_injected(attempt_id) {
+        return Err(anyhow!("injected applied-state write failure"));
+    }
     let mut state = read_state_object(&lock.install_path);
     let automatic = state.attempt_id.as_deref() == Some(attempt_id)
         && state
@@ -567,6 +583,12 @@ pub(super) fn reconcile_replacement_terminal_locked(
     };
     if applied {
         state.terminal(&attempt, "applied", interval, now_unix_s());
+        if let Some(latest) = state.plan.get("latest_version").cloned() {
+            state.plan.insert("current_version".to_owned(), latest);
+        }
+        state
+            .plan
+            .insert("update_available".to_owned(), Value::Bool(false));
         if let Some(warning) = warning_or_error {
             state.plan.insert("warning".to_owned(), json!(warning));
         }
@@ -579,6 +601,16 @@ pub(super) fn reconcile_replacement_terminal_locked(
     }
     write_state_object_locked(lock, state)?;
     Ok(automatic)
+}
+
+fn applied_state_write_failure_injected(attempt_id: &str) -> bool {
+    crate::upgrade::test_harness_enabled()
+        && std::env::var("CTX_UPGRADE_FAIL_APPLIED_STATE_WRITE_FOR_TESTS").is_ok_and(|value| {
+            value == attempt_id
+                || (!value.starts_with("ua_")
+                    && !["", "0", "false", "no", "off"]
+                        .contains(&value.trim().to_ascii_lowercase().as_str()))
+        })
 }
 
 fn write_plan(state: &mut UpgradeState, plan: &UpgradePlan, applied: bool) {
@@ -816,6 +848,17 @@ pub(super) struct UpgradeLock {
 }
 
 impl UpgradeLock {
+    #[cfg(test)]
+    pub(super) fn from_installation_for_test(
+        install_path: PathBuf,
+        installation: InstallationLock,
+    ) -> Self {
+        Self {
+            install_path,
+            installation,
+        }
+    }
+
     pub(super) fn acquire(_data_root: &Path) -> Result<Self> {
         let install_path = super::install::current_install_path()?;
         let installation = InstallationLock::try_acquire(&install_path)?.ok_or_else(|| {

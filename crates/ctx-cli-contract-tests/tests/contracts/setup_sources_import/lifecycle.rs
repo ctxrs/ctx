@@ -771,9 +771,10 @@ fn status_missing_source_epoch_is_read_only_and_does_not_initialize_files() {
             .args(["status", "--format=json"])
             .env("CTX_DATA_ROOT", &data_root),
     );
-    assert_eq!(status["schema_version"], 2);
+    assert_eq!(status["schema_version"], 3);
     assert_eq!(status["initialized"], false);
-    assert_eq!(status["local_only"], true);
+    assert!(status.get("local_only").is_none());
+    assert!(status.get("localOnly").is_none());
     assert_eq!(status["read_only"], true);
     assert_eq!(status["history_epoch"]["status"], "unavailable");
     assert_eq!(
@@ -851,11 +852,10 @@ fn setup_wait_publishes_setup_status_contract() {
 
     let setup =
         json_output(ctx(&temp).args(["setup", "--wait", "--format=json", "--progress", "none"]));
-    assert_eq!(setup["schema_version"], 2, "{setup:#}");
-    assert!(
-        setup.get("deprecated_catalog_only_ignored").is_none(),
-        "{setup:#}"
-    );
+    assert_eq!(setup["schema_version"], 3, "{setup:#}");
+    assert!(setup.get("local_only").is_none());
+    assert!(setup.get("localOnly").is_none());
+    assert_eq!(setup["deprecated_catalog_only_ignored"], false, "{setup:#}");
     assert!(setup.get("read_only").is_none(), "{setup:#}");
     assert_eq!(setup["mode"], "ready", "{setup:#}");
     assert_eq!(setup["lexical"]["certified_sources"], 1, "{setup:#}");
@@ -914,8 +914,10 @@ fn quiet_setup_suppresses_success_output_but_not_json() {
     let temp = daemon_test_root();
     let setup =
         json_output(ctx(&temp).args(["--quiet", "setup", "--format=json", "--progress", "none"]));
-    assert_eq!(setup["schema_version"], 2);
-    assert!(setup.get("deprecated_catalog_only_ignored").is_none());
+    assert_eq!(setup["schema_version"], 3);
+    assert!(setup.get("local_only").is_none());
+    assert!(setup.get("localOnly").is_none());
+    assert_eq!(setup["deprecated_catalog_only_ignored"], false, "{setup:#}");
 }
 
 #[test]
@@ -948,7 +950,7 @@ fn quiet_status_suppresses_success_output_but_not_json() {
         .stdout(predicate::str::contains("History status: failed"));
 
     let status = json_output(ctx(&temp).args(["--quiet", "status", "--format=json"]));
-    assert_eq!(status["schema_version"], 2);
+    assert_eq!(status["schema_version"], 3);
     assert_eq!(status["initialized"], false);
     assert!(status["inventory_source_bytes"].is_null());
     assert!(status["lexical_index_estimate_seconds"].is_null());
@@ -960,7 +962,9 @@ fn setup_background_refresh_and_wait_publish_the_same_codex_source() {
     write_codex_setup_session(&temp);
 
     let setup = json_output(ctx(&temp).args(["setup", "--format=json", "--progress", "none"]));
-    assert_eq!(setup["schema_version"], 2, "{setup:#}");
+    assert_eq!(setup["schema_version"], 3, "{setup:#}");
+    assert!(setup.get("local_only").is_none());
+    assert!(setup.get("localOnly").is_none());
     assert_eq!(setup["daemon_autostart"]["requested"], true, "{setup:#}");
     assert!(
         matches!(
@@ -1046,7 +1050,10 @@ fn setup_no_daemon_is_one_run_opt_out_and_keeps_semantic_disabled() {
         "--progress",
         "none",
     ]));
-    assert_eq!(setup["schema_version"], 2, "{setup:#}");
+    assert_eq!(setup["schema_version"], 3, "{setup:#}");
+    assert!(setup.get("local_only").is_none());
+    assert!(setup.get("localOnly").is_none());
+    assert_eq!(setup["deprecated_catalog_only_ignored"], false, "{setup:#}");
     assert!(setup.get("background_indexing").is_none(), "{setup:#}");
     assert_eq!(
         setup["daemon_autostart"]["status"], "not_requested",
@@ -1133,7 +1140,9 @@ fn setup_all_invalid_source_publishes_a_verified_empty_generation() {
 
     let setup =
         json_output(ctx(&temp).args(["setup", "--wait", "--format=json", "--progress", "none"]));
-    assert_eq!(setup["schema_version"], 2, "{setup:#}");
+    assert_eq!(setup["schema_version"], 3, "{setup:#}");
+    assert!(setup.get("local_only").is_none());
+    assert!(setup.get("localOnly").is_none());
     assert_eq!(setup["mode"], "ready", "{setup:#}");
     assert_eq!(setup["lexical"]["certified_sources"], 1, "{setup:#}");
     assert_eq!(setup["lexical"]["indexed_documents"], 0, "{setup:#}");
@@ -1164,12 +1173,29 @@ fn validate_empty_catalog_refresh_request(refresh_request: &Value) -> Result<(),
     }
 }
 
+fn validate_empty_catalog_setup_mode(setup: &Value) -> Result<(), &'static str> {
+    validate_empty_catalog_refresh_request(&setup["refresh_request"])?;
+    match setup["refresh"]["status"].as_str() {
+        Some("ready") if setup["mode"] == "ready" => Ok(()),
+        Some("pending")
+            if setup["mode"] == "pending"
+                && setup["refresh"]["reason"] == "core_refresh_pending"
+                && matches!(
+                    setup["refresh_request"]["status"].as_str(),
+                    Some("admission_pending" | "queued" | "running")
+                ) =>
+        {
+            Ok(())
+        }
+        _ => Err("empty-catalog setup mode must match its captured refresh health"),
+    }
+}
+
 fn assert_empty_catalog_default_background_setup(setup: &Value) {
-    assert_eq!(setup["mode"], "ready", "{setup:#}");
     assert_eq!(setup["lexical"]["status"], "ready", "{setup:#}");
     assert_eq!(setup["lexical"]["certified_sources"], 0, "{setup:#}");
     assert_eq!(setup["lexical"]["indexed_documents"], 0, "{setup:#}");
-    if let Err(error) = validate_empty_catalog_refresh_request(&setup["refresh_request"]) {
+    if let Err(error) = validate_empty_catalog_setup_mode(setup) {
         panic!("{error}: {setup:#}");
     }
 }
@@ -1205,6 +1231,31 @@ fn empty_catalog_default_background_oracle_is_status_sensitive() {
         "receipt": null,
     }))
     .is_err());
+}
+
+#[test]
+fn empty_catalog_setup_mode_oracle_rejects_premature_readiness() {
+    for state in ["admission_pending", "queued", "running"] {
+        let mut setup = json!({
+            "mode":"pending",
+            "refresh":{"status":"pending","reason":"core_refresh_pending"},
+            "refresh_request":{"status":state,"source_count":0,"receipt":null},
+        });
+        assert_eq!(validate_empty_catalog_setup_mode(&setup), Ok(()));
+        setup["mode"] = json!("ready");
+        assert!(validate_empty_catalog_setup_mode(&setup).is_err());
+        setup["refresh"]["status"] = json!("ready");
+        assert_eq!(validate_empty_catalog_setup_mode(&setup), Ok(()));
+        setup["refresh_request"]["receipt"] = json!({
+            "selected_route_total":0,"successful_route_total":0,"source_failure_total":0,
+        });
+        assert!(validate_empty_catalog_setup_mode(&setup).is_err());
+        setup["refresh_request"]["status"] = json!("published");
+        assert_eq!(validate_empty_catalog_setup_mode(&setup), Ok(()));
+        setup["mode"] = json!("pending");
+        setup["refresh"]["status"] = json!("pending");
+        assert!(validate_empty_catalog_setup_mode(&setup).is_err());
+    }
 }
 
 #[path = "lifecycle/additional.rs"]

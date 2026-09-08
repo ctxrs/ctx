@@ -866,7 +866,7 @@ fn record_source_refresh_retry(
     let status = RefreshStatus::classify_schema_v1(&job)?;
     if status
         .terminal_outcome()
-        .and_then(|outcome| outcome.retry_advice)
+        .and_then(|outcome| outcome.retry_advice())
         == Some(RefreshRetryAdvice::RetryAdmission)
     {
         let request_id = job

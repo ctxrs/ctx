@@ -201,14 +201,12 @@ impl<W: Write> Write for MeasuredWriter<W> {
 
 fn write_stream(stream: StreamKind, arguments: fmt::Arguments<'_>, newline: bool) {
     let result = match stream {
-        StreamKind::Stdout => {
-            let stdout = io::stdout();
-            let mut writer = MeasuredWriter::current(stdout.lock(), stream);
+        StreamKind::Stdout => with_stdout_writer(|writer| {
             writer
                 .write_fmt(arguments)
                 .and_then(|()| newline.then(|| writer.write_all(b"\n")).transpose())
                 .map(|_| ())
-        }
+        }),
         StreamKind::Stderr => {
             let stderr = io::stderr();
             let mut writer = MeasuredWriter::current(stderr.lock(), stream);
@@ -231,6 +229,12 @@ pub fn write_stdout_line(arguments: fmt::Arguments<'_>) {
 
 pub fn write_stderr_line(arguments: fmt::Arguments<'_>) {
     write_stream(StreamKind::Stderr, arguments, true);
+}
+
+pub fn with_stdout_writer<T>(operation: impl FnOnce(&mut dyn Write) -> T) -> T {
+    let stdout = io::stdout();
+    let mut writer = MeasuredWriter::current(stdout.lock(), StreamKind::Stdout);
+    operation(&mut writer)
 }
 
 pub fn stderr_writer() -> impl Write {

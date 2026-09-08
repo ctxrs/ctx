@@ -434,16 +434,20 @@ fn task_json_cli_imports_cline_and_roo_and_searches() {
             .any(|source| source.provider() == "cline"),
         "Roo publication dropped the Cline source: {imported:#}"
     );
-    let publication_metadata: Value = serde_json::from_slice(
-        retained
-            .publication_metadata()
-            .expect("Roo publication must retain source-refresh authority"),
-    )
-    .unwrap();
+    let generation_state =
+        ctx_history_refresh_execution::SourceBackedGenerationState::decode_from_verified_index(
+            &retained,
+        )
+        .expect("Roo publication must retain source-refresh authority");
     let expected_lineage = cline_catalog_lineage.as_str().unwrap();
+    let retained_binding = generation_state
+        .catalog_route_bindings()
+        .iter()
+        .find(|binding| binding.catalog_lineage == expected_lineage)
+        .expect("Roo publication must retain the Cline catalog-lineage route binding");
     assert_eq!(
-        publication_metadata["receipt"]["catalog_route_bindings"][expected_lineage],
-        cline_route_identity,
+        retained_binding.route_identity,
+        cline_route_identity.as_str().unwrap(),
         "Roo publication changed the Cline catalog-lineage route binding"
     );
 

@@ -89,7 +89,7 @@ fn copied_event_show_list_and_search_metadata_preserve_direct_claims() {
     let listed =
         crate::list_events::render_event(&copied, crate::list_events::EventContentProjection::Full)
             .unwrap();
-    let search = SearchEventMetadata::from(&copied.event);
+    let search = copied.event.clone();
 
     for value in [&shown, &listed] {
         assert_eq!(value["session_relationship"], "forked");

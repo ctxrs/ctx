@@ -13,8 +13,10 @@ mod command;
 mod diagnostics;
 mod download;
 mod install;
-mod legacy_automatic;
+mod managed_pair;
 mod metadata;
+#[cfg(test)]
+mod metadata_tests;
 mod state;
 mod version;
 mod version_probe;
@@ -23,16 +25,20 @@ pub use command::{PreparedAutomaticUpgrade, UpgradeOutcome};
 pub use diagnostics::{
     managed_install_executable, upgrade_diagnostics, ManagedInstallDiagnostic, UpgradeDiagnostics,
 };
+#[cfg(unix)]
+pub use install::reconcile_managed_pair_integration_under_installation_lock;
 pub use install::{
     current_exe_has_managed_install_marker_hint, current_exe_is_unmanaged, current_install_path,
-    disable_current_man_pages, installation_hosted_uninstall_is_active,
+    disable_current_man_pages, ensure_hosted_transaction_inactive_under_installation_lock,
+    installation_hosted_uninstall_is_active,
     installation_hosted_uninstall_is_active_for_executable,
     invalid_install_marker_recovery_guidance, is_valid_install_attempt_id,
     managed_install_marker_for_current_exe, managed_install_path_identity_matches,
-    reconcile_current_man_pages, run_hosted_transaction, try_acquire_managed_installation_mutation,
+    reconcile_current_man_pages, run_hosted_transaction, run_hosted_uninstall_after_parent_exit,
+    try_acquire_managed_installation_mutation, try_acquire_managed_installation_mutation_at_root,
     unmanaged_install_conversion_guidance, HostedTransactionAction, HostedTransactionArgs,
     InstallMarker, ManagedInstallMarker, ManagedInstallationMutationGuard, ManagedManBundle,
-    ManagedManPage,
+    ManagedManPage, HOSTED_UNINSTALL_POST_EXIT_READY,
 };
 use state::automatic_upgrade_check_due;
 pub use state::{
@@ -145,13 +151,6 @@ pub trait DaemonUpgradePort: Send + Sync {
 
     fn begin(&self, data_root: &Path, attempt_id: &str) -> Result<Self::Lease>;
 
-    fn begin_legacy(
-        &self,
-        data_root: &Path,
-        attempt_id: &str,
-        target: &Path,
-    ) -> Result<Self::Lease>;
-
     fn begin_current(
         &self,
         data_root: &Path,
@@ -166,13 +165,6 @@ pub trait DaemonUpgradePort: Send + Sync {
         attempt_id: &str,
         helper_pid: u32,
     ) -> Result<()>;
-
-    fn replacement_helper_owns_handoff(
-        &self,
-        data_root: &Path,
-        attempt_id: &str,
-        helper_pid: u32,
-    ) -> bool;
 
     fn complete_replacement_handoff(
         &self,
@@ -230,6 +222,8 @@ pub struct AutomaticUpgradeObservation<'a> {
 }
 
 pub trait UpgradeObserver<S: AutomaticUpgradePolicySnapshot> {
+    fn observe_automatic_warnings(&self, _data_root: &Path, _policy: &S, _warnings: &[String]) {}
+
     fn observe_automatic_terminal(
         &self,
         data_root: &Path,
@@ -269,10 +263,6 @@ impl<'a, D: DaemonUpgradePort + ?Sized> UpgradeEngine<'a, D> {
             daemon,
         }
     }
-
-    pub fn run_legacy_automatic_bridge(&self) -> Result<bool> {
-        legacy_automatic::run_legacy_automatic_upgrade_bridge(self.daemon)
-    }
 }
 
 impl ProductBuildIdentity {
@@ -300,6 +290,7 @@ pub struct UpgradePlan {
     update_available: bool,
     managed: bool,
     warnings: Vec<String>,
+    managed_pair_release: Option<metadata::ManagedPairReleaseMetadata>,
     metadata: metadata::ReleaseMetadata,
     semantic_provisioning: Option<metadata::SelectedSemanticProvisioning>,
 }
@@ -361,6 +352,36 @@ impl UpgradePlan {
 
     pub fn warnings(&self) -> &[String] {
         &self.warnings
+    }
+
+    pub fn managed_pair_envelope_url(&self) -> Option<&str> {
+        self.managed_pair_release
+            .as_ref()
+            .map(|release| release.envelope_url.as_str())
+    }
+
+    pub fn managed_pair_core_object_url(&self) -> Option<&str> {
+        self.managed_pair_release
+            .as_ref()
+            .map(|release| release.core_object_url.as_str())
+    }
+
+    pub fn managed_pair_core_sha256(&self) -> Option<&str> {
+        self.managed_pair_release
+            .as_ref()
+            .map(|release| release.core_sha256.as_str())
+    }
+
+    pub fn managed_pair_companion_object_url(&self) -> Option<&str> {
+        self.managed_pair_release
+            .as_ref()
+            .map(|release| release.companion_object_url.as_str())
+    }
+
+    pub fn managed_pair_companion_sha256(&self) -> Option<&str> {
+        self.managed_pair_release
+            .as_ref()
+            .map(|release| release.companion_sha256.as_str())
     }
 
     pub fn self_upgrade_allowed(&self) -> bool {

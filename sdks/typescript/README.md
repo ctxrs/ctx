@@ -2,7 +2,9 @@
 
 Experimental in-repo TypeScript/JavaScript client for the `agent-history-v1` ctx API.
 The SDK currently talks to a local `ctx` CLI binary and does not require network
-access or API keys.
+access or API keys with built-in semantic execution. The CLI honors explicitly
+configured external semantic execution, which can send bounded semantic text to
+the selected executor. See [SDK locality](../../docs/sdks.md#local-and-hosted-backends).
 
 ```js
 import { createLocalAgentHistoryClient } from "@ctx/agent-history";

@@ -7,7 +7,9 @@ use std::{
 use anyhow::{anyhow, bail, Context, Result};
 use uuid::Uuid;
 
-use super::{Journal, JOURNAL_SUFFIX, MAX_BINARY_BYTES};
+use super::{Journal, JOURNAL_SUFFIX, MAX_BINARY_BYTES, MAX_OWNERSHIP_BYTES};
+#[cfg(unix)]
+use crate::upgrade::install::managed_install_path_identity_matches;
 #[cfg(windows)]
 use crate::upgrade::install::{
     lock::validate_windows_path_leaf, path_identity::windows_disk_path_identity,
@@ -126,6 +128,49 @@ pub(super) fn ownership_path(install_path: &Path) -> PathBuf {
     let mut name = install_path.file_name().unwrap_or_default().to_os_string();
     name.push(".install-integrations");
     install_path.with_file_name(name)
+}
+
+pub(super) fn recorded_ownership_path(
+    install_path: &Path,
+    claimed: &Path,
+    digest: &str,
+) -> Option<PathBuf> {
+    let fixed = ownership_path(install_path);
+    if super::managed_install_path_identity_matches(&fixed, claimed) {
+        return Some(fixed);
+    }
+    #[cfg(unix)]
+    {
+        let mut name = fixed.file_name()?.to_os_string();
+        name.push(".");
+        name.push(digest);
+        let generation = fixed.with_file_name(name);
+        if managed_install_path_identity_matches(&generation, claimed) {
+            return Some(generation);
+        }
+    }
+    None
+}
+
+pub(super) fn verify_recorded_ownership(journal: &Journal) -> Result<()> {
+    if let (Some(path), Some(digest)) = (
+        journal.ownership_path.as_ref(),
+        journal.ownership_sha256.as_ref(),
+    ) {
+        verify_file_digest(
+            path,
+            digest,
+            MAX_OWNERSHIP_BYTES,
+            "managed integration ownership",
+        )
+        .with_context(|| {
+            format!(
+                "integration ownership at {} changed; restore the transaction-owned sidecar or move the changed file aside, then retry hosted uninstall",
+                path.display()
+            )
+        })?;
+    }
+    Ok(())
 }
 
 pub(in crate::upgrade) fn uninstall_helper_path(install_path: &Path) -> PathBuf {

@@ -18,7 +18,6 @@ pub use search::{
     validate_explicit_semantic_scope, McpSearchError, McpSearchExecutionFailure,
     SourceSearchRequest,
 };
-pub use shared::generation_query_authority_error_json;
 pub use show::{
     mcp_show_event_application, mcp_show_session_application, run_show, ShowApplicationError,
 };

@@ -18,15 +18,14 @@ use crate::family::JsonlRecordRejections;
 use ctx_history_capture_model::AttemptHistoryProgress;
 use ctx_history_capture_model::SourceRouteIdentity;
 use ctx_history_capture_runtime::{
-    BaseEventLookup, CaptureCommitOutcome, CaptureCommitReceipt, CaptureLifecycleOpenOutcome,
-    CaptureLifecycleSink, CapturePublicationContext, CapturePublicationDisposition,
+    BaseEventLookup, CaptureCommitReceipt, CaptureLifecycleOpenOutcome, CaptureLifecycleSink,
     CaptureRevalidationTarget, CaptureRouteRef, CaptureSourceAggregateRef, CoreMaterialization,
     CorePreparationFailureKind, CorePreparationPort, ImmutableCaptureSnapshot, PresentCaptureRoute,
     SourceBackedCertifiedRemoval, SourceBackedGenerationSink as RuntimeSourceBackedGenerationSink,
     SourceBackedLogicalSourceFailures, SourceBackedReconciliationDemand,
     SourceBackedRecordRejectionClass, SourceBackedRecordRejectionDrafts,
     SourceBackedRecordRejections, SourceBackedRevalidationTarget, SourceBackedRouteResources,
-    SourceOwner, VerifiedCapture,
+    SourceOwner,
 };
 use ctx_history_core::{
     derive_event_id, derive_session_id, CertifiedSourceAppend, CertifiedSourceDeletion, CoreRecord,

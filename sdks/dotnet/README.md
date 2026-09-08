@@ -2,8 +2,9 @@
 
 Experimental C# SDK for the `agent-history-v1` ctx contract. The SDK is local-first by
 default: it shells out to the `ctx` CLI, reads JSON from stdout, and wraps the
-result in agent-history-v1 envelopes. Local mode does not make network calls or upload
-transcripts.
+result in agent-history-v1 envelopes. The CLI honors explicitly configured
+external semantic execution, which can send bounded semantic text to the
+selected executor. See [SDK locality](../../docs/sdks.md#local-and-hosted-backends).
 
 `AgentHistoryClient.Hosted(HostedAgentHistoryConfig)` is a hosted SDK placeholder.
 Hosted SDK placeholders are deprecated and will be removed in the next breaking SDK

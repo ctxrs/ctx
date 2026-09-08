@@ -351,7 +351,6 @@ pub struct Freshness {
 #[serde(rename_all = "camelCase")]
 pub struct AgentHistoryStatus {
     pub initialized: bool,
-    pub local_only: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub read_only: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -394,8 +393,35 @@ pub struct AgentHistoryStatus {
     pub semantic: Option<JsonObject>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub daemon: Option<JsonObject>,
-    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(
+        flatten,
+        default,
+        deserialize_with = "deserialize_status_extensions",
+        serialize_with = "serialize_status_extensions",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
     pub extra: JsonObject,
+}
+
+fn deserialize_status_extensions<'de, D>(deserializer: D) -> Result<JsonObject, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let mut extensions = JsonObject::deserialize(deserializer)?;
+    extensions.remove("localOnly");
+    extensions.remove("local_only");
+    Ok(extensions)
+}
+
+fn serialize_status_extensions<S>(extensions: &JsonObject, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    serializer.collect_map(
+        extensions
+            .iter()
+            .filter(|(key, _)| !matches!(key.as_str(), "localOnly" | "local_only")),
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -656,7 +682,11 @@ struct AgentHistoryEventWire {
         skip_serializing_if = "Option::is_none"
     )]
     mcp_exchange: Option<McpExchange>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present_json",
+        skip_serializing_if = "Option::is_none"
+    )]
     structured_content: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     content: Option<CoreContentMetadata>,
@@ -664,6 +694,12 @@ struct AgentHistoryEventWire {
     citations: Vec<Citation>,
     #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
     extra: JsonObject,
+}
+
+fn deserialize_present_json<'de, D: serde::Deserializer<'de>>(
+    decoder: D,
+) -> Result<Option<Value>, D::Error> {
+    Value::deserialize(decoder).map(Some)
 }
 
 impl AgentHistoryEvent {
@@ -869,6 +905,17 @@ pub fn camelize_object_keys(value: &Value) -> Value {
         }
         _ => value.clone(),
     }
+}
+
+/// Converts only the ctx-owned outer keys, leaving values opaque.
+pub fn camelize_envelope_keys(object: &Map<String, Value>) -> Map<String, Value> {
+    object
+        .iter()
+        .filter_map(|(key, value)| {
+            let key = snake_to_camel(key);
+            (!omitted_public_key(&key)).then(|| (key, value.clone()))
+        })
+        .collect()
 }
 
 fn omitted_public_key(key: &str) -> bool {

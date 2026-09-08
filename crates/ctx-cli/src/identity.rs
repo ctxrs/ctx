@@ -36,7 +36,6 @@ pub(crate) fn installation_id(data_root: &Path) -> Result<String> {
 }
 
 /// Loads the root identity without creating it or the data root.
-#[cfg(test)]
 pub(crate) fn existing_installation_id(data_root: &Path) -> Result<Option<String>> {
     access_installation_id(data_root, false)
 }

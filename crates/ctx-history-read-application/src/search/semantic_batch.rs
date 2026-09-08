@@ -53,16 +53,50 @@ where
             )
         }
     };
-    finish_prepared_semantic_search(
+    let mut collection = finish_prepared_semantic_search(
         request,
         index,
         filter,
         requested_backend,
         &queries,
         batch,
-        semantic_query_diagnostics,
+        semantic_query_diagnostics.clone(),
         tracker,
-    )
+    )?;
+    let mut retained_bytes = 0usize;
+    for hit in &collection.result_window.hits {
+        if let Some(evidence) = &hit.semantic_evidence {
+            let source = match semantic_query.resolve_passage(&hit.event, evidence) {
+                Ok(source) => source,
+                Err(error) => {
+                    return semantic_retrieval_failure(
+                        request,
+                        index,
+                        filter,
+                        requested_backend,
+                        error,
+                        semantic_query_diagnostics,
+                        tracker,
+                    )
+                }
+            };
+            let query = queries
+                .get(evidence.query_ordinal)
+                .ok_or_else(|| anyhow!("semantic winner has no query alternative"))?;
+            let presentation = crate::presentation::semantic_passage_presentation(
+                hit.event.event_id,
+                evidence.clone(),
+                source,
+                query,
+            );
+            retained_bytes += presentation.snippet.len();
+            if retained_bytes > crate::SEARCH_PRESENTATION_MAX_RETAINED_SNIPPET_BYTES {
+                return Err(anyhow!("semantic passages exceed Search retention bound").into());
+            }
+            collection.semantic_presentations.push(presentation);
+        }
+    }
+    Ok(collection)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -163,6 +197,7 @@ fn finish_prepared_semantic_search(
         |coordinates| index.session_grouping_claims_for_search(coordinates),
     )?;
     Ok(SearchCollection {
+        semantic_presentations: Vec::new(),
         result_window,
         candidate_pool,
         candidate_pool_truncated,

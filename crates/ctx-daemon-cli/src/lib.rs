@@ -293,7 +293,10 @@ pub use ctx_semantic_index::SemanticNotReady;
 #[allow(unused_imports)]
 pub use runtime_limits::SEMANTIC_WORKER_BATCH_MAX;
 mod query_adapter;
-pub use query_adapter::{wait_for_daemon_semantic_generation, SemanticQueryAdapter};
+pub use query_adapter::{
+    wait_for_daemon_semantic_generation, wait_for_daemon_semantic_generation_with_retained_peer,
+    SemanticQueryAdapter,
+};
 mod semantic_completion;
 pub use semantic_completion::{
     complete_semantic_generation_foreground,
@@ -317,7 +320,9 @@ mod source_backed_refresh_coordinator;
 pub use source_backed_refresh_coordinator::{
     coordinate_import_source_backed_refresh_with_progress,
     coordinate_setup_source_backed_refresh_with_progress, coordinate_source_backed_refresh,
-    coordinate_source_backed_refresh_with_progress, pin_active_verified_generation,
+    coordinate_source_backed_refresh_with_progress,
+    coordinate_source_backed_refresh_with_retained_peer, pin_active_verified_generation,
+    pin_active_verified_generation_with_retained_peer,
     published_explicit_source_relocation_authority, PinnedSourceBackedGeneration, RefreshStatus,
     SourceBackedRefreshDaemonUnavailable, SourceBackedRefreshMode, SourceBackedRefreshObservation,
     SourceBackedRefreshPendingPublication, SourceBackedRefreshTerminalError,
@@ -333,10 +338,9 @@ mod daemon_autostart;
 pub use daemon_autostart::{
     autostart_daemon_and_wait, autostart_daemon_for_setup_and_wait,
     begin_current_daemon_upgrade_handoff, begin_daemon_upgrade_handoff,
-    begin_legacy_daemon_upgrade_handoff, complete_replacement_daemon_handoff,
-    daemon_autostart_suppression_reason, finish_replacement_daemon_handoff,
-    mark_replacement_helper_handoff, maybe_autostart_daemon, observe_daemon_for_setup_and_wait,
-    replacement_helper_owns_daemon_handoff, restart_daemon_with_current_environment_and_wait,
+    complete_replacement_daemon_handoff, daemon_autostart_suppression_reason,
+    finish_replacement_daemon_handoff, mark_replacement_helper_handoff, maybe_autostart_daemon,
+    observe_daemon_for_setup_and_wait, restart_daemon_with_current_environment_and_wait,
     DaemonHandoff, DaemonSetupHandoff, DaemonUpgradeHandoff,
 };
 

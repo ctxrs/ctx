@@ -153,8 +153,9 @@ impl CoreRefreshEngine {
         budget: StdDuration,
     ) {
         let authority = self.pinned_core_publication();
-        let metadata = authority.as_deref().and_then(|authority| {
-            SourceBackedPublicationMetadata::decode(authority.verified_index_ref()).ok()
+        let generation_state = authority.as_deref().and_then(|authority| {
+            SourceBackedGenerationState::decode_from_verified_index(authority.verified_index_ref())
+                .ok()
         });
         let missing_routes = authority
             .as_deref()
@@ -171,15 +172,15 @@ impl CoreRefreshEngine {
             .unwrap_or_default();
         let mut dirty = startup_routes_requiring_refresh(
             catalog,
-            metadata
+            generation_state
                 .as_ref()
-                .map(|metadata| &metadata.route_observations),
+                .map(SourceBackedGenerationState::route_observations),
             &missing_routes,
             budget,
         );
-        let route_controls = metadata
+        let route_controls = generation_state
             .as_ref()
-            .map(|metadata| &metadata.route_controls)
+            .map(SourceBackedGenerationState::route_controls)
             .cloned()
             .unwrap_or_default();
         let controlled_routes = catalog

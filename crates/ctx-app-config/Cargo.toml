@@ -14,9 +14,10 @@ test-support = []
 
 [dependencies]
 anyhow.workspace = true
-ctx-history-capture = { path = "../ctx-history-capture" }
+ctx-history-capture-model = { path = "../ctx-history-capture-model" }
 ctx-history-core = { path = "../ctx-history-core" }
 ctx-history-platform = { path = "../ctx-history-platform" }
+ctx-history-source-discovery = { path = "../ctx-history-source-discovery" }
 ctx-semantic-model = { path = "../ctx-semantic-model" }
 fs2 = "0.4.3"
 toml_edit = "0.22"

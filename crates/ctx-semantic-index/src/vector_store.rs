@@ -2,13 +2,9 @@ pub(super) struct SemanticVectorHit {
     pub(super) event_id: Uuid,
     pub(super) event_identity_digest: [u8; 32],
     pub(super) similarity: f32,
-    #[cfg_attr(not(test), expect(dead_code))]
     pub(super) query_ordinal: usize,
-    #[cfg_attr(not(test), expect(dead_code))]
     pub(super) source_text_hash: String,
-    #[expect(dead_code)]
     pub(super) start_char: usize,
-    #[expect(dead_code)]
     pub(super) end_char: usize,
 }
 

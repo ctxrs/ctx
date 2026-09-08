@@ -9,8 +9,7 @@ pub use state::*;
 #[cfg(windows)]
 pub use termination::wait_for_released_residual_daemon;
 pub use termination::{
-    terminate_identity_verified_legacy_daemon, terminate_identity_verified_residual_daemon,
-    terminate_identity_verified_residual_daemon_owner,
+    terminate_identity_verified_residual_daemon, terminate_identity_verified_residual_daemon_owner,
 };
 
 pub const DAEMON_UPGRADE_RESTART_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);

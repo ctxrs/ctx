@@ -524,7 +524,7 @@ mod cancellation_tests {
 
     #[test]
     fn cancellation_during_response_wait_preserves_submission_evidence() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = tempfile::tempdir_in("/tmp").unwrap();
         let socket = temp.path().join("ipc.sock");
         let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
         let cancelled = Arc::new(AtomicBool::new(false));

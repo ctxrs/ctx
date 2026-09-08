@@ -17,10 +17,7 @@ fn high_odd_dimension_external_projection_preserves_full_ordinary_batches() -> R
         .max_inputs_per_request();
     assert_eq!(page_limit, 64);
     assert_eq!(source_event_page_limit(&contract), page_limit);
-    assert_eq!(
-        source_event_page_limit(semantic_model_contract()),
-        MAX_SOURCE_EVENT_PAGE_ITEMS
-    );
+    assert_eq!(source_event_page_limit(semantic_model_contract()), 512);
     let record_count = page_limit + 1;
     let index = fixture.publish(
         "external-high-dimension-pages",
@@ -126,6 +123,10 @@ impl InterruptingDimensionEmbedder {
 }
 
 impl SemanticBatchEmbedder for InterruptingDimensionEmbedder {
+    fn document_fits(&mut self, _text: &str) -> anyhow::Result<bool> {
+        Ok(true)
+    }
+
     fn embed_chunks(&mut self, chunks: &[SemanticChunkDocument]) -> Result<Vec<Vec<f32>>> {
         self.calls = self.calls.saturating_add(1);
         self.requested_batch_sizes.push(chunks.len());
@@ -654,7 +655,7 @@ fn fixed_e5_http_migrates_legacy_receipts_without_reembedding_across_restart() -
     );
     let legacy = SourceBackedSemanticGeneration::from_verified_index_with_authority(
         &index,
-        current_semantic_generation_policy(),
+        semantic_generation_policy(model_contract),
         legacy_descriptor.to_owned(),
     )?;
     let current = SourceBackedSemanticGeneration::from_verified_index(&index, model_contract)?;

@@ -73,6 +73,38 @@ fn recovery_receipt_catalog_binding_requires_a_receipt_route_and_terminal_failur
 }
 
 #[test]
+fn recovery_receipt_accepts_a_published_catalog_binding_retained_outside_the_request() {
+    let (temp, mut response, _verified) = terminal_receipt_fixture();
+    let data_root = temp.path().join("data");
+    let source_path = temp.path().join("session.jsonl");
+    fs::write(
+        &source_path,
+        br#"{"timestamp":"2026-09-03T12:00:00Z","type":"session_meta","payload":{"id":"01a06800-0000-7000-8000-000000000001","cwd":"/workspace","source":"cli"}}
+"#,
+    )
+    .unwrap();
+    let source = provider_source_for_path(CaptureProvider::Codex, source_path);
+    let request = upsert_explicit_source(&data_root, &source).unwrap();
+    let lineage = request.catalog_lineage_hex();
+    let route = "59".repeat(32);
+    response["receipt"]["published_explicit_source_catalog"] = request.authority.to_json();
+    response["receipt"]["catalog_route_bindings"] = json!({
+        (lineage.clone()): route.clone()
+    });
+
+    let receipt = published_refresh_receipt_for_recovery(&response)
+        .expect("a published catalog may retain a route outside the current request partition");
+
+    assert_eq!(
+        receipt.catalog_route_bindings,
+        vec![ExplicitSourceCatalogRouteBinding {
+            catalog_lineage: lineage,
+            route_identity: route,
+        }]
+    );
+}
+
+#[test]
 fn verified_receipt_keeps_retryable_binding_for_a_retained_route_failure() {
     let (_temp, _response, verified) = terminal_receipt_fixture();
     let route = verified.manifest().source_routes()[0]

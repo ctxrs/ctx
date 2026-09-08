@@ -58,7 +58,6 @@ fn provider_source_for_path_with_optional_data_root(
 ) -> ProviderSource {
     let unknown_spec = ProviderSourceSpec {
         provider,
-        default_locations: &[],
         import_support: ProviderImportSupport::Unsupported,
         catalog_support: ProviderCatalogSupport::None,
         unsupported_reason: Some("provider is not registered for native local-history import"),

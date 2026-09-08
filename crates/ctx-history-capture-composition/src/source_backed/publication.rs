@@ -1,6 +1,5 @@
 use super::*;
 
-mod completion;
 mod exact_scan;
 mod execution;
 mod execution_prelude;
@@ -9,7 +8,6 @@ mod ownership;
 mod route_content;
 mod route_outcomes;
 
-use completion::run_after_successful_publication;
 use ctx_history_capture_model::{
     source_level_progress, SharedAttemptHistoryProgress, SourceRecordProgress,
 };
@@ -27,7 +25,7 @@ use execution_prelude::{
 #[cfg(test)]
 pub use model::assert_carried_route_failure;
 pub use model::{
-    SourceBackedPublicationMetadataContext, SourceBackedRefreshReceipt,
+    SourceBackedGenerationStateContext, SourceBackedRefreshReceipt,
     SourceBackedSuccessfulRouteOutcome,
 };
 use model::{SourceBackedRefreshPlan, SourceBackedVerifiedPublication};
@@ -39,11 +37,43 @@ use route_outcomes::successful_route_outcomes_for_snapshot;
 /// writes are throttled separately by the refresh engine.
 const SOURCE_RECORD_PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 
-type SourceBackedPublicationMetadataFactory<'factory> =
+type SourceBackedGenerationStateFactory<'factory> =
     dyn for<'context> FnMut(
-            SourceBackedPublicationMetadataContext<'context>,
-        ) -> ctx_history_index::Result<Vec<u8>>
+            SourceBackedGenerationStateContext<'context>,
+        )
+            -> ctx_history_index::Result<ctx_history_index::GenerationStateEnvelope>
         + 'factory;
+
+enum SourceBackedBaseGenerationExpectation<'a> {
+    Unchecked,
+    Exact(Option<&'a ctx_history_index::VerifiedGenerationSnapshot>),
+}
+
+struct SourceBackedWriterOpen<'a> {
+    options: WriterOptions,
+    base_generation_expectation: SourceBackedBaseGenerationExpectation<'a>,
+}
+
+impl SourceBackedWriterOpen<'_> {
+    fn unchecked(options: WriterOptions) -> Self {
+        Self {
+            options,
+            base_generation_expectation: SourceBackedBaseGenerationExpectation::Unchecked,
+        }
+    }
+}
+
+impl<'a> SourceBackedWriterOpen<'a> {
+    fn exact(
+        options: WriterOptions,
+        expected: Option<&'a ctx_history_index::VerifiedGenerationSnapshot>,
+    ) -> Self {
+        Self {
+            options,
+            base_generation_expectation: SourceBackedBaseGenerationExpectation::Exact(expected),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 struct SourceBackedRefreshExecutionBudget {
@@ -161,7 +191,7 @@ impl SourceBackedRefreshExecutor {
         refresh_source_backed_generation_with_detailed_progress_and_discovery_timing(
             index_root,
             &self.registry,
-            self.writer_options.clone(),
+            SourceBackedWriterOpen::unchecked(self.writer_options.clone()),
             SourceBackedRefreshExecutionBudget::new(self.discovery_duration, self.work_budget),
             (
                 SourceBackedRefreshPlan::isolate(SourceBackedRefreshScope::All),
@@ -185,7 +215,7 @@ impl SourceBackedRefreshExecutor {
         refresh_source_backed_generation_with_detailed_progress_and_discovery_timing(
             index_root,
             &self.registry,
-            self.writer_options.clone(),
+            SourceBackedWriterOpen::unchecked(self.writer_options.clone()),
             SourceBackedRefreshExecutionBudget::new(self.discovery_duration, self.work_budget),
             (
                 SourceBackedRefreshPlan::isolate(SourceBackedRefreshScope::All),
@@ -206,7 +236,7 @@ impl SourceBackedRefreshExecutor {
         refresh_source_backed_generation_with_detailed_progress_and_discovery_timing(
             index_root,
             &self.registry,
-            self.writer_options.clone(),
+            SourceBackedWriterOpen::unchecked(self.writer_options.clone()),
             SourceBackedRefreshExecutionBudget::new(self.discovery_duration, self.work_budget),
             (
                 SourceBackedRefreshPlan::isolate(scope),
@@ -231,7 +261,7 @@ impl SourceBackedRefreshExecutor {
         refresh_source_backed_generation_with_detailed_progress_and_discovery_timing(
             index_root,
             &self.registry,
-            self.writer_options.clone(),
+            SourceBackedWriterOpen::unchecked(self.writer_options.clone()),
             SourceBackedRefreshExecutionBudget::new(self.discovery_duration, self.work_budget),
             (
                 SourceBackedRefreshPlan::isolate(scope),
@@ -252,7 +282,7 @@ impl SourceBackedRefreshExecutor {
         refresh_source_backed_generation_with_detailed_progress_and_discovery_timing(
             index_root,
             &self.registry,
-            self.writer_options.clone(),
+            SourceBackedWriterOpen::unchecked(self.writer_options.clone()),
             SourceBackedRefreshExecutionBudget::new(self.discovery_duration, self.work_budget),
             (
                 SourceBackedRefreshPlan::isolate(scope)
@@ -264,71 +294,8 @@ impl SourceBackedRefreshExecutor {
         )
     }
 
-    /// Publishes one scope with control-plane metadata bound into the same
-    /// opaque Core commit payload. The factory runs only for a pointer-
-    /// advancing generation; exact reuse retains the active metadata.
-    pub fn refresh_scope_with_detailed_progress_and_publication_metadata(
-        &self,
-        index_root: impl AsRef<Path>,
-        scope: SourceBackedRefreshScope,
-        report_progress: impl FnMut(SourceBackedDetailedRefreshProgress) -> SourceBackedRouteResult<()>,
-        metadata_factory: impl for<'a> FnMut(
-            SourceBackedPublicationMetadataContext<'a>,
-        ) -> ctx_history_index::Result<Vec<u8>>,
-    ) -> SourceBackedCoordinatorResult<SourceBackedRefreshReceipt> {
-        self.refresh_scope_with_detailed_progress_publication_metadata_and_reconciliation(
-            index_root,
-            scope,
-            SourceBackedReconciliationDemand::Exhaustive,
-            report_progress,
-            metadata_factory,
-        )
-    }
-
-    pub fn refresh_scope_with_detailed_progress_publication_metadata_and_reconciliation(
-        &self,
-        index_root: impl AsRef<Path>,
-        scope: SourceBackedRefreshScope,
-        reconciliation_demand: SourceBackedReconciliationDemand,
-        report_progress: impl FnMut(SourceBackedDetailedRefreshProgress) -> SourceBackedRouteResult<()>,
-        metadata_factory: impl for<'a> FnMut(
-            SourceBackedPublicationMetadataContext<'a>,
-        ) -> ctx_history_index::Result<Vec<u8>>,
-    ) -> SourceBackedCoordinatorResult<SourceBackedRefreshReceipt> {
-        self.refresh_scope_with_detailed_progress_publication_metadata_reconciliation_and_worksets(
-            index_root,
-            scope,
-            reconciliation_demand,
-            BTreeMap::new(),
-            report_progress,
-            metadata_factory,
-        )
-    }
-
-    pub fn refresh_scope_with_detailed_progress_publication_metadata_reconciliation_and_worksets(
-        &self,
-        index_root: impl AsRef<Path>,
-        scope: SourceBackedRefreshScope,
-        reconciliation_demand: SourceBackedReconciliationDemand,
-        route_worksets: BTreeMap<SourceRouteIdentity, BTreeSet<PathBuf>>,
-        report_progress: impl FnMut(SourceBackedDetailedRefreshProgress) -> SourceBackedRouteResult<()>,
-        metadata_factory: impl for<'a> FnMut(
-            SourceBackedPublicationMetadataContext<'a>,
-        ) -> ctx_history_index::Result<Vec<u8>>,
-    ) -> SourceBackedCoordinatorResult<SourceBackedRefreshReceipt> {
-        self.refresh_physical_scope_with_detailed_progress_publication_metadata_reconciliation_and_worksets(
-            index_root,
-            scope.clone(),
-            scope,
-            reconciliation_demand,
-            route_worksets,
-            report_progress,
-            metadata_factory,
-        )
-    }
-
     #[allow(clippy::too_many_arguments)]
-    pub fn refresh_physical_scope_with_detailed_progress_publication_metadata_reconciliation_and_worksets(
+    pub fn refresh_physical_scope_with_detailed_progress_generation_state_reconciliation_and_worksets(
         &self,
         index_root: impl AsRef<Path>,
         physical_scope: SourceBackedRefreshScope,
@@ -336,14 +303,16 @@ impl SourceBackedRefreshExecutor {
         reconciliation_demand: SourceBackedReconciliationDemand,
         route_worksets: BTreeMap<SourceRouteIdentity, BTreeSet<PathBuf>>,
         report_progress: impl FnMut(SourceBackedDetailedRefreshProgress) -> SourceBackedRouteResult<()>,
-        mut metadata_factory: impl for<'a> FnMut(
-            SourceBackedPublicationMetadataContext<'a>,
-        ) -> ctx_history_index::Result<Vec<u8>>,
+        mut generation_state_factory: impl for<'a> FnMut(
+            SourceBackedGenerationStateContext<'a>,
+        ) -> ctx_history_index::Result<
+            ctx_history_index::GenerationStateEnvelope,
+        >,
     ) -> SourceBackedCoordinatorResult<SourceBackedRefreshReceipt> {
         refresh_source_backed_generation_with_detailed_progress_and_discovery_timing(
             index_root,
             &self.registry,
-            self.writer_options.clone(),
+            SourceBackedWriterOpen::unchecked(self.writer_options.clone()),
             SourceBackedRefreshExecutionBudget::new(self.discovery_duration, self.work_budget),
             (
                 SourceBackedRefreshPlan::isolate(physical_scope)
@@ -354,7 +323,48 @@ impl SourceBackedRefreshExecutor {
                 &self.base_route_controls,
             ),
             report_progress,
-            Some(&mut metadata_factory),
+            Some(&mut generation_state_factory),
+        )
+    }
+
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn refresh_physical_scope_with_detailed_progress_and_base_generation_expectation(
+        &self,
+        index_root: impl AsRef<Path>,
+        physical_scope: SourceBackedRefreshScope,
+        publication_scope: SourceBackedRefreshScope,
+        reconciliation_demand: SourceBackedReconciliationDemand,
+        expected_base_generation: Option<&ctx_history_index::VerifiedGenerationSnapshot>,
+        exact_base_generation: bool,
+        route_worksets: BTreeMap<SourceRouteIdentity, BTreeSet<PathBuf>>,
+        report_progress: impl FnMut(SourceBackedDetailedRefreshProgress) -> SourceBackedRouteResult<()>,
+        mut generation_state_factory: impl for<'a> FnMut(
+            SourceBackedGenerationStateContext<'a>,
+        ) -> ctx_history_index::Result<
+            ctx_history_index::GenerationStateEnvelope,
+        >,
+    ) -> SourceBackedCoordinatorResult<SourceBackedRefreshReceipt> {
+        let writer_open = if exact_base_generation {
+            SourceBackedWriterOpen::exact(self.writer_options.clone(), expected_base_generation)
+        } else {
+            SourceBackedWriterOpen::unchecked(self.writer_options.clone())
+        };
+        refresh_source_backed_generation_with_detailed_progress_and_discovery_timing(
+            index_root,
+            &self.registry,
+            writer_open,
+            SourceBackedRefreshExecutionBudget::new(self.discovery_duration, self.work_budget),
+            (
+                SourceBackedRefreshPlan::isolate(physical_scope)
+                    .with_publication_scope(publication_scope)
+                    .with_reconciliation_demand(reconciliation_demand)
+                    .with_route_worksets(route_worksets)
+                    .with_attempt_history_progress(self.attempt_history_progress.clone()),
+                &self.base_route_controls,
+            ),
+            report_progress,
+            Some(&mut generation_state_factory),
         )
     }
 }
@@ -379,7 +389,7 @@ pub(crate) fn refresh_source_backed_generation_with_work_budget_for_test(
     refresh_source_backed_generation_with_detailed_progress_and_discovery_timing(
         index_root,
         registry,
-        writer_options,
+        SourceBackedWriterOpen::unchecked(writer_options),
         SourceBackedRefreshExecutionBudget::new(Duration::ZERO, work_budget),
         (
             SourceBackedRefreshPlan::isolate(SourceBackedRefreshScope::All),
@@ -402,7 +412,7 @@ pub(crate) fn refresh_source_backed_generation_with_resource_limits_for_test(
     refresh_source_backed_generation_with_detailed_progress_and_discovery_timing(
         index_root,
         registry,
-        writer_options,
+        SourceBackedWriterOpen::unchecked(writer_options),
         SourceBackedRefreshExecutionBudget::new(Duration::ZERO, work_budget),
         (
             SourceBackedRefreshPlan::isolate(SourceBackedRefreshScope::All)
@@ -425,7 +435,7 @@ pub fn refresh_source_backed_generation_with_progress(
     refresh_source_backed_generation_with_detailed_progress_and_discovery_timing(
         index_root,
         registry,
-        writer_options,
+        SourceBackedWriterOpen::unchecked(writer_options),
         SourceBackedRefreshExecutionBudget::new(Duration::ZERO, work_budget),
         (
             SourceBackedRefreshPlan::isolate(SourceBackedRefreshScope::All),
@@ -451,7 +461,7 @@ pub fn refresh_source_backed_generation_with_detailed_progress(
     refresh_source_backed_generation_with_detailed_progress_and_discovery_timing(
         index_root,
         registry,
-        writer_options,
+        SourceBackedWriterOpen::unchecked(writer_options),
         SourceBackedRefreshExecutionBudget::new(Duration::ZERO, work_budget),
         (
             SourceBackedRefreshPlan::isolate(SourceBackedRefreshScope::All),
@@ -472,7 +482,7 @@ pub fn refresh_source_backed_generation_for_routes(
     refresh_source_backed_generation_with_detailed_progress_and_discovery_timing(
         index_root,
         registry,
-        writer_options,
+        SourceBackedWriterOpen::unchecked(writer_options),
         SourceBackedRefreshExecutionBudget::new(Duration::ZERO, work_budget),
         (
             SourceBackedRefreshPlan::isolate(SourceBackedRefreshScope::exact(route_identities)),

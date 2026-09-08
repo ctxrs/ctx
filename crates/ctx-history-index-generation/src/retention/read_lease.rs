@@ -13,8 +13,10 @@ use sha2::{Digest as _, Sha256};
 
 use super::{load_generation_retention_lease_from_read_root, GenerationRetentionLease};
 use crate::{
-    is_generation_id, read_root::DirectoryIdentity, sha256_hex, GenerationError as IndexError,
-    GenerationReadRoot, GenerationSlot, Result, INDEX_GENERATIONS_DIRECTORY, MANIFEST_DIRECTORY,
+    is_generation_id,
+    read_root::{DirectoryIdentity, OpenedDirectory},
+    sha256_hex, GenerationError as IndexError, GenerationReadRoot, GenerationSlot, Result,
+    INDEX_GENERATIONS_DIRECTORY, MANIFEST_DIRECTORY,
 };
 
 mod platform;
@@ -230,8 +232,10 @@ pub(crate) fn acquire_existing_generation_directory_read_authority(
     if !GenerationSlot::names_are_valid(&"0".repeat(64), directory) {
         return Err(IndexError::InvalidActiveGenerationPointer);
     }
-    let root = GenerationReadRoot::open_index_root(root)?;
-    let coordinator = coordinator(&root, true)?;
+    let coordinator = match crate::read_root::registered_read_directory(root)? {
+        Some(opened) => coordinator_for_opened(opened.registry_identity(), &opened, true)?,
+        None => coordinator(&GenerationReadRoot::open_index_root(root)?, true)?,
+    };
     let keys = directory_keys(directory);
     if let Some(uncontended) =
         RangeLeaseGuard::try_exclusive(Arc::clone(&coordinator), keys.clone())?
@@ -417,6 +421,14 @@ static COORDINATORS: OnceLock<Mutex<CoordinatorRegistry>> = OnceLock::new();
 static COORDINATOR_REGISTRY_PROCESS_ID: AtomicU32 = AtomicU32::new(0);
 
 fn coordinator(root: &GenerationReadRoot, create: bool) -> Result<Arc<LeaseCoordinator>> {
+    coordinator_for_opened(root.identity(), root.opened(), create)
+}
+
+fn coordinator_for_opened(
+    root_identity: DirectoryIdentity,
+    root: &OpenedDirectory,
+    create: bool,
+) -> Result<Arc<LeaseCoordinator>> {
     let process_id = std::process::id();
     let registry = COORDINATORS.get_or_init(|| Mutex::new(CoordinatorRegistry::new(process_id)));
     let registered_process_id = COORDINATOR_REGISTRY_PROCESS_ID.load(Ordering::Acquire);
@@ -438,7 +450,7 @@ fn coordinator(root: &GenerationReadRoot, create: bool) -> Result<Arc<LeaseCoord
 
     if let Some(existing) = registry
         .coordinators
-        .get(&root.identity())
+        .get(&root_identity)
         .and_then(Weak::upgrade)
     {
         drop(registry);
@@ -447,7 +459,7 @@ fn coordinator(root: &GenerationReadRoot, create: bool) -> Result<Arc<LeaseCoord
     }
 
     let opened = platform::OpenedCoordinator::open(
-        root.opened(),
+        root,
         COORDINATOR_FILE,
         COORDINATOR_INITIALIZATION_FILE,
         COORDINATOR_MAGIC,
@@ -461,7 +473,7 @@ fn coordinator(root: &GenerationReadRoot, create: bool) -> Result<Arc<LeaseCoord
     });
     registry
         .coordinators
-        .insert(root.identity(), Arc::downgrade(&coordinator));
+        .insert(root_identity, Arc::downgrade(&coordinator));
     drop(registry);
     coordinator.verify_binding()?;
     Ok(coordinator)

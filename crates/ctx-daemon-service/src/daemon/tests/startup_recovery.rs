@@ -1,6 +1,109 @@
 use super::*;
 use crate::compact_json;
 
+#[test]
+fn journal_read_failure_blocks_startup_and_preserves_accepted_queue() -> Result<()> {
+    for unreadable in [false, true] {
+        let temp = tempfile::tempdir()?;
+        let data_root = temp.path().join("data");
+        ctx_history_platform::platform_security::establish_private_data_root(&data_root)?;
+        let journal_path = daemon_core_refresh_job_path(&data_root);
+        let interrupted = CoreRefreshEngine::new();
+        let mut accepted = Vec::new();
+        for request_id in [
+            "019fcaaa-0000-7000-8000-000000000319",
+            "019fcaaa-0000-7000-8000-000000000320",
+        ] {
+            let response = interrupted
+                .handle_ipc_request(
+                    &data_root,
+                    &json!({
+                        "op": "source_refresh_request",
+                        "request_id": request_id,
+                        "mode": "wait",
+                        "refresh_intent": {
+                            "kind": "selected_import",
+                            "selection": {"kind": "all"},
+                        },
+                    }),
+                )?
+                .expect("durable import admission");
+            assert_eq!(response["request_id"], request_id);
+            accepted.push(response);
+        }
+        let original = fs::read(&journal_path)?;
+        let durable: Value = serde_json::from_slice(&original)?;
+        assert_eq!(durable["request_id"], accepted[0]["request_id"]);
+        assert_eq!(
+            durable["queued_successors"][0]["request_id"],
+            accepted[1]["request_id"]
+        );
+        drop(interrupted);
+
+        let retained_path = journal_path.with_extension("retained");
+        if unreadable {
+            fs::rename(&journal_path, &retained_path)?;
+            // A directory gives a real read error even under privileged test runners.
+            fs::create_dir(&journal_path)?;
+        } else {
+            fs::write(&journal_path, b"{\"request_id\":")?;
+        }
+        let mut runtime = DaemonRuntime::default();
+        let result = recover_source_refresh_coordinator_before_ipc(
+            &mut runtime,
+            &data_root,
+            &crate::test_support::CONFIG,
+        );
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("unknown journal authority must block startup"),
+        };
+        assert!(
+            error.to_string().contains("before daemon readiness"),
+            "{error:#}"
+        );
+        assert!(runtime.source_refresh_coordinator.is_none());
+        assert!(
+            !daemon_service_endpoint_path(&data_root, DaemonIpcService::SourceRefresh).exists()
+        );
+        if unreadable {
+            assert!(journal_path.is_dir());
+            assert_eq!(fs::read(&retained_path)?, original);
+            fs::remove_dir(&journal_path)?;
+            fs::rename(&retained_path, &journal_path)?;
+        } else {
+            assert_eq!(fs::read(&journal_path)?, b"{\"request_id\":");
+            // Simulate operator restoration; startup itself must not repair unknown bytes.
+            fs::write(&journal_path, &original)?;
+        }
+
+        let recovered = recover_source_refresh_coordinator_before_ipc(
+            &mut runtime,
+            &data_root,
+            &crate::test_support::CONFIG,
+        )?;
+        for acknowledgement in accepted {
+            let request_id = acknowledgement["request_id"].as_str().unwrap();
+            let status = recovered
+                .status(request_id)
+                .expect("accepted identity recovered");
+            assert_eq!(status["request_id"], acknowledgement["request_id"]);
+            assert_eq!(
+                status["requested_at_ms"],
+                acknowledgement["requested_at_ms"]
+            );
+            assert_eq!(status["request_state"], "admission_pending");
+        }
+        let restored = read_daemon_job_status(&journal_path).expect("restored queue");
+        assert_eq!(restored["request_id"], durable["request_id"]);
+        assert_eq!(
+            restored["queued_successors"][0]["request_id"],
+            durable["queued_successors"][0]["request_id"]
+        );
+    }
+    Ok(())
+}
+
 #[cfg(any(unix, windows))]
 #[test]
 fn interrupted_queue_is_recovered_before_endpoint_accepts_a_new_admission() -> Result<()> {

@@ -115,6 +115,7 @@ fn candidate_from_source(
         role: Some("assistant".to_owned()),
     };
     EventSearchCandidate {
+        semantic_evidence: None,
         score,
         event: RankedEventRef::from(&event),
     }

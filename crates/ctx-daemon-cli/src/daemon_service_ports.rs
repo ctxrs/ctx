@@ -282,6 +282,13 @@ impl CoreGenerationPublishedPort for CliCoreGenerationPublishedPort {
 pub(crate) struct CliDaemonObservationPort;
 
 impl DaemonObservationPort for CliDaemonObservationPort {
+    fn analytics_enabled(&self, data_root: &Path) -> bool {
+        ctx_app_config::AppConfig::load(data_root).is_ok_and(|config| {
+            config.analytics.enabled
+                && ctx_app_config::normalized_analytics_environment_override() != Some(false)
+        })
+    }
+
     fn provider_refresh_event(
         &self,
         job: &serde_json::Value,

@@ -171,7 +171,7 @@ impl CoreRefreshEngine {
             "owner": "daemon",
             "request_id": request_id,
             "logical_request_id": request_id,
-            "request_state": "queued",
+            "request_state": SourceBackedRefreshState::Queued.as_str(),
             "logical_phase": "waiting",
             "previous_generation": published_generation.clone(),
             "published_generation": published_generation,
@@ -188,80 +188,7 @@ impl CoreRefreshEngine {
         })))
     }
 
-    pub(super) fn finish_route_admissions(
-        &self,
-        request_id: &str,
-        publication_ready: bool,
-        post_publication_fence: Option<&PostPublicationRouteCoverageFence>,
-    ) -> RouteAdmissionFinish {
-        let mut state = self.lock_state();
-        let finish = Self::finish_route_admissions_locked(
-            &mut state,
-            request_id,
-            publication_ready,
-            post_publication_fence,
-        );
-        if state
-            .pending_terminal_persistence
-            .as_ref()
-            .is_some_and(|pending| {
-                pending.request_id == request_id && pending.route_finalization_in_progress()
-            })
-        {
-            state.pending_terminal_persistence = None;
-        }
-        finish
-    }
-
-    pub(super) fn finish_route_admissions_and_persist(
-        &self,
-        data_root: &Path,
-        request_id: &str,
-        publication_ready: bool,
-        post_publication_fence: Option<&PostPublicationRouteCoverageFence>,
-    ) -> Result<(RouteAdmissionFinish, Value)> {
-        let mut state = self.lock_state();
-        let finish = Self::finish_route_admissions_locked(
-            &mut state,
-            request_id,
-            publication_ready,
-            post_publication_fence,
-        );
-        let job = finalized_job_json(&state, &finish.durable_request_id).ok_or_else(|| {
-            anyhow!(
-                "source refresh request `{}` disappeared during route finalization",
-                finish.durable_request_id
-            )
-        })?;
-        if let Err(error) = self.write_status(data_root, &job) {
-            let failed = find_attempt(&state, request_id)
-                .is_some_and(|attempt| attempt.state == SourceBackedRefreshState::Failed);
-            let did_work =
-                !failed && job.get("generation_changed").and_then(Value::as_bool) == Some(true);
-            state.pending_terminal_persistence = Some(PendingTerminalPersistence {
-                request_id: finish.durable_request_id.clone(),
-                terminal_job: job,
-                outcome: PendingTerminalOutcome::FinalizationOnly {
-                    did_work,
-                    failed,
-                    coverage_certificate: finish.coverage_certificate.clone(),
-                },
-            });
-            return Err(error);
-        }
-        if state
-            .pending_terminal_persistence
-            .as_ref()
-            .is_some_and(|pending| {
-                pending.request_id == request_id && pending.route_finalization_in_progress()
-            })
-        {
-            state.pending_terminal_persistence = None;
-        }
-        Ok((finish, job))
-    }
-
-    fn finish_route_admissions_locked(
+    pub(super) fn finish_route_admissions_locked(
         state: &mut CoreRefreshEngineState,
         request_id: &str,
         publication_ready: bool,
@@ -301,18 +228,20 @@ impl CoreRefreshEngine {
             if terminal_failed {
                 let blocked = attempt
                     .as_ref()
-                    .and_then(|attempt| attempt.failure_outcome.as_ref())
-                    .is_some_and(|outcome| outcome.blocked_routes.contains(admission.route()));
+                    .and_then(|attempt| attempt.terminal_outcome.as_ref())
+                    .is_some_and(|outcome| outcome.blocked_routes().contains(admission.route()));
                 if blocked {
                     state.route_retry_intents.remove(admission.route());
                     let actually_paused = state.dirty_routes.permanent_failure(&admission);
                     let automatic_pause = attempt.as_ref().is_some_and(|attempt| {
-                        attempt.failure_outcome.as_ref().is_some_and(
-                            SourceBackedRefreshFailureOutcome::is_automatic_retry_eligible,
-                        ) && attempt
-                            .automatic_retry_checkpoints
-                            .get(admission.route())
-                            .is_some_and(SourceBackedAutomaticRetryCheckpoint::is_paused)
+                        attempt
+                            .terminal_outcome
+                            .as_ref()
+                            .is_some_and(RefreshTerminalOutcome::is_automatic_retry_eligible)
+                            && attempt
+                                .automatic_retry_checkpoints
+                                .get(admission.route())
+                                .is_some_and(SourceBackedAutomaticRetryCheckpoint::is_paused)
                     });
                     if automatic_pause && !actually_paused {
                         stale_automatic_pauses.insert(admission.route().clone());
@@ -436,7 +365,7 @@ impl CoreRefreshEngine {
             }
             let checkpoints = state.automatic_retry_checkpoints.clone();
             if let Some(attempt) = find_attempt_mut(state, request_id) {
-                if let Some(outcome) = attempt.failure_outcome.as_mut() {
+                if let Some(outcome) = attempt.terminal_outcome.as_mut() {
                     outcome.rearm_automatic_retry_routes(&stale_automatic_pauses);
                 }
                 attempt.automatic_retry_checkpoints = checkpoints;
@@ -448,15 +377,14 @@ impl CoreRefreshEngine {
         {
             if attempt
                 .as_ref()
-                .and_then(|attempt| attempt.failure_outcome.as_ref())
-                .is_some_and(|outcome| !outcome.affected_routes.is_empty())
+                .and_then(|attempt| attempt.terminal_outcome.as_ref())
+                .is_some_and(|outcome| !outcome.affected_routes().is_empty())
                 && state.pending_scheduler_retry_root_id.as_deref() == Some(request_id)
             {
                 state.pending_scheduler_retry_root_id = None;
             }
             return RouteAdmissionFinish {
                 coverage_certificate: None,
-                durable_request_id: request_id.to_owned(),
             };
         }
         let coverage_certificate = attempt
@@ -472,7 +400,6 @@ impl CoreRefreshEngine {
             });
         RouteAdmissionFinish {
             coverage_certificate,
-            durable_request_id: request_id.to_owned(),
         }
     }
 

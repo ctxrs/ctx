@@ -222,12 +222,14 @@ fn binary_publication_retains_the_fingerprint_revalidation_exemption() {
 #[test]
 fn failed_replace_repairs_missing_executable_before_any_wait() {
     let temp = tempfile::tempdir().unwrap();
+    ctx_history_platform::platform_security::restrict_private_directory(temp.path()).unwrap();
     let target = temp.path().join("ctx");
-    let staged = temp.path().join("ctx.new");
-    let backup = temp.path().join("ctx.backup");
+    let staged = temp.path().join(".ctx-upgrade-attempt.new");
+    let backup = journal::transaction_backup_path(&target, "attempt", "binary");
     fs::write(&target, b"old").unwrap();
     fs::write(&staged, b"new").unwrap();
     fs::write(&backup, b"old").unwrap();
+    ctx_history_platform::platform_security::restrict_private_file(&backup).unwrap();
     let path = path_record(
         "ctx binary",
         &staged,
@@ -235,7 +237,15 @@ fn failed_replace_repairs_missing_executable_before_any_wait() {
         &backup,
         JournalPathState::BackedUp,
     );
-    let mut transaction = transaction(temp.path(), vec![path.clone()]);
+    let marker_target = crate::upgrade::install::install_marker_path(&target);
+    let marker_path = path_record(
+        "ctx install marker",
+        &temp.path().join(".ctx-upgrade-attempt.install.json.new"),
+        &marker_target,
+        &journal::transaction_backup_path(&marker_target, "attempt", "marker"),
+        JournalPathState::Staged,
+    );
+    let mut transaction = transaction(temp.path(), vec![path.clone(), marker_path]);
     let waits = Cell::new(0);
     let error = layout::replace_binary_with_repair(
         &mut transaction,
@@ -248,7 +258,10 @@ fn failed_replace_repairs_missing_executable_before_any_wait() {
         || waits.set(waits.get() + 1),
     )
     .unwrap_err();
-    assert!(format!("{error:#}").contains("injected"));
+    assert!(
+        format!("{error:#}").contains("injected"),
+        "unexpected replacement error: {error:#}"
+    );
     assert_eq!(waits.get(), 0);
     assert_eq!(fs::read(&target).unwrap(), b"old");
     assert_eq!(transaction.paths[0].state, JournalPathState::Staged);

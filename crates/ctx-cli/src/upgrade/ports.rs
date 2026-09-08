@@ -193,17 +193,6 @@ impl DaemonUpgradePort for CliDaemonUpgrade {
         ))
     }
 
-    fn begin_legacy(
-        &self,
-        data_root: &Path,
-        attempt_id: &str,
-        target: &Path,
-    ) -> Result<Self::Lease> {
-        Ok(CliDaemonUpgradeLease(
-            crate::semantic::begin_legacy_daemon_upgrade_handoff(data_root, attempt_id, target)?,
-        ))
-    }
-
     fn begin_current(
         &self,
         data_root: &Path,
@@ -235,15 +224,6 @@ impl DaemonUpgradePort for CliDaemonUpgrade {
         helper_pid: u32,
     ) -> Result<()> {
         crate::semantic::mark_replacement_helper_handoff(data_root, attempt_id, helper_pid)
-    }
-
-    fn replacement_helper_owns_handoff(
-        &self,
-        data_root: &Path,
-        attempt_id: &str,
-        helper_pid: u32,
-    ) -> bool {
-        crate::semantic::replacement_helper_owns_daemon_handoff(data_root, attempt_id, helper_pid)
     }
 
     fn complete_replacement_handoff(
@@ -279,6 +259,31 @@ impl AutomaticUpgradePolicyProvider for CliAutomaticUpgradePolicy {
 pub(crate) struct CliUpgradeObserver;
 
 impl UpgradeObserver<ctx_daemon_cli::DaemonConfigSnapshot> for CliUpgradeObserver {
+    fn observe_automatic_warnings(
+        &self,
+        _data_root: &Path,
+        _config: &ctx_daemon_cli::DaemonConfigSnapshot,
+        warnings: &[String],
+    ) {
+        let mut ui = crate::ui::Ui::stdio(crate::ui::ColorMode::Auto);
+        for warning in warnings {
+            let document = crate::ui::diagnostic(
+                ui.stderr_context(),
+                crate::ui::Diagnostic {
+                    level: crate::ui::DiagnosticLevel::Warning,
+                    summary: warning,
+                    detail: None,
+                    fields: &[],
+                    action: None,
+                },
+            );
+            if ui.write_stderr(&document).is_err() {
+                return;
+            }
+        }
+        let _ = ui.flush();
+    }
+
     fn observe_automatic_terminal(
         &self,
         data_root: &Path,

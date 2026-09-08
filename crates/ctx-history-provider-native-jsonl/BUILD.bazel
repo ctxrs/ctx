@@ -42,8 +42,10 @@ rust_library(
     deps = all_crate_deps(normal = True) + NATIVE_JSONL_DEPS,
     proc_macro_deps = all_crate_deps(proc_macro = True),
     rustc_env = COMMON_RUSTC_ENV,
+    visibility = ["//crates/ctx-history-capture-composition:__pkg__"],
 )
 
+# Test feature access remains outside the production graph by construction.
 rust_library(
     name = "test_support_lib",
     testonly = True,
@@ -55,6 +57,10 @@ rust_library(
     deps = all_crate_deps(normal = True, normal_dev = True) + NATIVE_JSONL_TEST_DEPS,
     proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
     rustc_env = COMMON_RUSTC_ENV,
+    visibility = [
+        "//crates/ctx-history-capture-composition:__pkg__",
+        "//crates/ctx-history-capture-composition-qualification:__pkg__",
+    ],
 )
 
 ctx_rust_test(

@@ -635,7 +635,11 @@ where
     if physical_revision != prior.physical_revision {
         return Ok(None);
     }
-    let publication_receipt = hermes_physical_replay_receipt(prior, now_ms);
+    let publication_receipt = if prior.exact_due_at_ms <= now_ms {
+        hermes_advanced_exact_receipt(prior, now_ms)
+    } else {
+        prior
+    };
     let tree_fingerprint = hermes_physical_replay_tree_fingerprint(
         &candidate.source,
         physical_revision,
@@ -661,7 +665,7 @@ where
     )))
 }
 
-fn hermes_physical_replay_receipt(
+fn hermes_advanced_exact_receipt(
     mut prior: HermesRefreshReceipt,
     now_ms: i64,
 ) -> HermesRefreshReceipt {
@@ -832,6 +836,37 @@ mod route_tests {
     use super::*;
     use crate::provider_sources::SqliteRetryDecision;
     use rusqlite::ffi;
+
+    #[test]
+    fn successful_overdue_exact_check_advances_the_next_deadline() {
+        let prior = HermesRefreshReceipt {
+            kind: HERMES_ROUTE_CONTROL_KIND.to_owned(),
+            version: HERMES_ROUTE_CONTROL_VERSION,
+            parser_revision: HERMES_SOURCE_PARSER_REVISION.to_owned(),
+            profile_source_descriptor: [1; 32],
+            database_identity: [2; 32],
+            physical_revision: [3; 32],
+            schema_evidence: [4; 32],
+            session_rowid: 5,
+            message_rowid: 6,
+            last_successful_exhaustive_at_ms: 100,
+            exact_due_at_ms: 200,
+            exhaustive_sequence: 1,
+            mode: "incremental".to_owned(),
+            outcome: "successful".to_owned(),
+        };
+        let now_ms = 300;
+
+        let advanced = hermes_advanced_exact_receipt(prior, now_ms);
+        let control = serde_json::to_vec(&advanced).unwrap();
+
+        assert_eq!(advanced.last_successful_exhaustive_at_ms, now_ms);
+        assert_eq!(advanced.exhaustive_sequence, 2);
+        assert_eq!(
+            hermes_route_control_exact_due(&control, now_ms),
+            Some(false)
+        );
+    }
 
     #[test]
     fn real_hermes_projection_full_failure_is_systemic() {

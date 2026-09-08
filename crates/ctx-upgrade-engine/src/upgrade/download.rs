@@ -29,6 +29,35 @@ pub(super) struct DownloadedArtifact {
 }
 
 impl DownloadedArtifact {
+    pub(super) fn from_bytes(
+        managed_root: &Path,
+        bytes: &[u8],
+        max_bytes: u64,
+        label: &str,
+    ) -> Result<Self> {
+        let byte_len = u64::try_from(bytes.len())?;
+        if byte_len == 0 || byte_len > max_bytes {
+            return Err(anyhow!("{label} size is outside its bound"));
+        }
+        let downloads = prepare_download_directory(managed_root)?;
+        let (path, mut file) = create_download_file(&downloads)?;
+        let identity = file_identity(&file)?;
+        file.write_all(bytes)
+            .with_context(|| format!("write staged {label}"))?;
+        file.sync_all()
+            .with_context(|| format!("sync staged {label}"))?;
+        let mut artifact = Self {
+            path,
+            file: Some(file),
+            identity,
+            byte_len,
+            sha256: format!("{:x}", Sha256::digest(bytes)),
+            remove_on_drop: true,
+        };
+        artifact.verify_unchanged()?;
+        Ok(artifact)
+    }
+
     pub(super) fn download_verified(
         transport: &dyn ReleaseTransport,
         managed_root: &Path,
@@ -114,7 +143,6 @@ impl DownloadedArtifact {
         self.byte_len
     }
 
-    #[cfg(test)]
     pub(super) fn sha256(&self) -> &str {
         &self.sha256
     }
@@ -176,6 +204,11 @@ impl DownloadedArtifact {
             "verified artifact",
         )
         .map(|_| ())
+    }
+
+    pub(super) fn retained_path(&mut self) -> Result<&Path> {
+        self.verify_unchanged()?;
+        Ok(&self.path)
     }
 
     fn verify_path_identity(&self) -> Result<()> {

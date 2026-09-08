@@ -2,7 +2,6 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
 use ctx_history_index::{IndexError, VerifiedIndex};
-use ctx_history_refresh::{verify_generation_query_authority, GenerationQueryAuthorityError};
 use serde_json::{json, Value};
 
 use crate::ui::{diagnostic, Action, Diagnostic, DiagnosticLevel, Field, RenderContext, Ui};
@@ -256,16 +255,6 @@ pub(crate) fn active_generation_race_error_json() -> Value {
     })
 }
 
-pub fn generation_query_authority_error_json(error: &GenerationQueryAuthorityError) -> Value {
-    let detail = error.to_string();
-    json!({
-        "error": detail.clone(),
-        "error_code": error.error_code(),
-        "detail": detail,
-        "retryable": error.retryable(),
-    })
-}
-
 pub(super) fn render_missing_lookup(
     context: &RenderContext,
     missing: &MissingLookupError,
@@ -298,8 +287,20 @@ pub(super) fn render_missing_lookup(
 }
 
 pub(super) fn open_index(data_root: &Path) -> Result<VerifiedIndex> {
+    open_index_with(data_root, false)
+}
+
+pub(super) fn open_index_with_retained_peer(data_root: &Path) -> Result<VerifiedIndex> {
+    open_index_with(data_root, true)
+}
+
+fn open_index_with(data_root: &Path, retain_peer: bool) -> Result<VerifiedIndex> {
     let root = index_root(data_root);
-    let index = match VerifiedIndex::open_pinned(&root) {
+    let index = match if retain_peer {
+        VerifiedIndex::open_pinned_with_retained_peer(&root)
+    } else {
+        VerifiedIndex::open_pinned(&root)
+    } {
         Ok(index) => index,
         Err(ctx_history_index::IndexError::MissingActiveGenerationPointer) => {
             return Err(anyhow!(
@@ -311,7 +312,6 @@ pub(super) fn open_index(data_root: &Path) -> Result<VerifiedIndex> {
                 .with_context(|| format!("open verified Core index {}", root.display()));
         }
     };
-    verify_generation_query_authority(&index).map_err(anyhow::Error::new)?;
     Ok(index)
 }
 

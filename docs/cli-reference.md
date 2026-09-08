@@ -744,7 +744,12 @@ ctx search "incident follow-up" --source-group work
 
 `search` defaults to `--refresh background`, which serves the published
 Tantivy generation. In automatic indexing mode it may start or wake the
-persistent daemon for lexical publication and optional semantic catch-up. In
+persistent daemon for lexical publication and optional semantic catch-up.
+Each accepted refresh keeps its own durable request ID. If the automatic
+refresh queue is full, background search can still read an existing generation;
+JSON freshness reports `admission_rejected` with no accepted request ID or
+publication receipt. This does not apply to `--refresh wait`, explicit import,
+or a search with no readable generation: those requests fail on overload. In
 manual mode, background refresh uses only the last published generation and
 does not contact, start, or wake a ctx daemon or worker; there is no hidden foreground
 bootstrap or importer. A direct CLI semantic or hybrid query may read an

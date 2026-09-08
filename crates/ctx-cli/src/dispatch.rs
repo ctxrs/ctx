@@ -165,9 +165,6 @@ fn render_unhandled_command_error(error: &anyhow::Error) -> Result<()> {
 
 pub(crate) fn run_cli() -> Result<()> {
     semantic::initialize()?;
-    if upgrade::ports::engine().run_legacy_automatic_bridge()? {
-        return Ok(());
-    }
     let started = Instant::now();
     let output_measurement = OutputMeasurement::start();
     let cli = parse_cli_from(env::args_os())?;
@@ -180,8 +177,6 @@ pub(crate) fn run_cli() -> Result<()> {
     }
     let json_output = command_json_output(&cli.command);
     let machine_output = command_machine_readable_output(&cli.command, json_output);
-    let query_authority_error_json =
-        command_uses_query_authority_error_json(&cli.command, json_output);
     let _analytics_delivery_failure_output =
         analytics::quiet_delivery_failure_output(machine_output);
     let deprecated_controls = DeprecatedControls::detect();
@@ -455,7 +450,6 @@ pub(crate) fn run_cli() -> Result<()> {
     let (rendered_error, search_error_render_failure) = match render_command_result_error(
         &result,
         json_output,
-        query_authority_error_json,
         machine_output,
         search_operation,
         &mut ui,
@@ -546,7 +540,6 @@ fn command_uses_foreground_finite_wait(command: &CommandRoot) -> bool {
 fn render_command_result_error(
     result: &Result<()>,
     json_output: bool,
-    query_authority_error_json: bool,
     machine_output: bool,
     search_operation: bool,
     ui: &mut Ui,
@@ -561,21 +554,7 @@ fn render_command_result_error(
         if error.is::<RenderedJsonError>() || error.is::<RenderedCliError>() {
             Some(RenderedCliError.into())
         } else if json_output {
-            if let Some(authority_error) = error
-                .downcast_ref::<ctx_history_refresh::GenerationQueryAuthorityError>()
-                .filter(|_| query_authority_error_json)
-            {
-                write_machine_error(
-                    search_operation,
-                    ui,
-                    &serde_json::to_string(
-                        &crate::commands::source_index::generation_query_authority_error_json(
-                            authority_error,
-                        ),
-                    )?,
-                )?;
-                Some(RenderedJsonError.into())
-            } else if let Some(error) =
+            if let Some(error) =
                 error.downcast_ref::<presentation_limit::PresentationOutputLimitError>()
             {
                 write_machine_error(
@@ -723,14 +702,6 @@ fn command_json_output(command: &CommandRoot) -> bool {
         CommandRoot::Upgrade(args) => args.json_output(),
         CommandRoot::Doctor(args) => args.format.is_json(),
     }
-}
-
-fn command_uses_query_authority_error_json(command: &CommandRoot, json_output: bool) -> bool {
-    json_output
-        && matches!(
-            command,
-            CommandRoot::Search(_) | CommandRoot::Show(_) | CommandRoot::Locate(_)
-        )
 }
 
 fn show_json_output(args: &ShowArgs) -> bool {

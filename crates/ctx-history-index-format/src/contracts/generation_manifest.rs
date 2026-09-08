@@ -149,6 +149,7 @@ impl GenerationManifest {
             sources,
             core_record_aggregates,
             source_routes,
+            generation_state: Some(GenerationStateEnvelope::empty()),
             automatic_provider_discovery,
             provider_root_config_digest,
             provider_roots,
@@ -160,6 +161,19 @@ impl GenerationManifest {
 
     pub fn generation_id(&self) -> Result<String> {
         Ok(sha256_hex(&serde_json::to_vec(self)?))
+    }
+
+    pub fn generation_state(&self) -> Option<&GenerationStateEnvelope> {
+        self.generation_state.as_ref()
+    }
+
+    pub fn with_generation_state(
+        mut self,
+        generation_state: GenerationStateEnvelope,
+    ) -> Result<Self> {
+        generation_state.validate_contract()?;
+        self.generation_state = Some(generation_state);
+        Ok(self)
     }
 
     /// Compares the complete logical snapshot independently of its persisted
@@ -183,6 +197,7 @@ impl GenerationManifest {
                 .iter()
                 .zip(&other.source_routes)
                 .all(|(left, right)| left.exact_snapshot_eq(right))
+            && self.generation_state == other.generation_state
             && self.automatic_provider_discovery == other.automatic_provider_discovery
             && self.provider_root_config_digest == other.provider_root_config_digest
             && self.provider_roots == other.provider_roots
@@ -252,6 +267,7 @@ impl GenerationManifest {
             sources,
             core_record_aggregates: aggregates,
             source_routes: self.source_routes.clone(),
+            generation_state: self.generation_state.clone(),
             automatic_provider_discovery: self.automatic_provider_discovery,
             provider_root_config_digest: self.provider_root_config_digest.clone(),
             provider_roots: self.provider_roots.clone(),
@@ -343,6 +359,10 @@ impl GenerationManifest {
     }
 
     pub(crate) fn validate_contract(&self) -> Result<()> {
+        self.generation_state
+            .as_ref()
+            .ok_or(IndexError::InvalidGenerationStateEnvelope)?
+            .validate_contract()?;
         if self.sources.windows(2).any(|pair| {
             source_sort_key(pair[0].observation().source())
                 >= source_sort_key(pair[1].observation().source())

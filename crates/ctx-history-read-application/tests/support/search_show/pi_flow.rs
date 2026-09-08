@@ -77,7 +77,6 @@ fn publish_pi_v10_predecessor(data_root: &Path) -> String {
 
     let legacy = ctx_history_index::VerifiedIndex::open_pinned(&index_root).unwrap();
     assert_eq!(legacy.generation_id(), legacy_generation);
-    assert!(legacy.publication_metadata().is_none());
     assert_eq!(pi_parser_revision(data_root), PI_V10_PARSER_REVISION);
     for record in provider_core_records(data_root, "pi") {
         assert_eq!(record.parent_session_id, None);
@@ -86,26 +85,6 @@ fn publish_pi_v10_predecessor(data_root: &Path) -> String {
         assert_eq!(record.agent_scope, None);
     }
 
-    let job = json!({
-        "schema_version": 1,
-        "owner": "daemon",
-        "request_id": "legacy-pi-v10-publication",
-        "request_state": "published",
-        "status": "completed",
-        "operation": "refresh",
-        "previous_generation": null,
-        "published_generation": legacy_generation.clone(),
-        "refresh_scope": { "kind": "all" },
-        "daemon_mode": "full",
-        "trigger": "periodic",
-        "trigger_provenance": "daemon_scheduler",
-    });
-    assert!(job.get("queued_successors").is_none());
-    fs::write(
-        data_root.join("daemon/jobs/core-refresh.json"),
-        serde_json::to_vec(&job).unwrap(),
-    )
-    .unwrap();
     legacy_generation
 }
 

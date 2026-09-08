@@ -125,6 +125,22 @@ pub(super) fn daemon_automatic_recovery_allowed(
         )
 }
 
+pub(super) fn publish_lifecycle_ready<I: DaemonInstallationPort>(
+    data_root: &Path,
+    lifecycle: &DaemonLifecycleState,
+    installation: &I,
+    acknowledge_restart_requests: bool,
+) -> Result<bool> {
+    let _transition = ctx_daemon_runtime::DaemonLifecycleTransitionLock::acquire(data_root)?;
+    if installation.upgrade_handoff_blocks_current_process(data_root) || !lifecycle.mark_ready() {
+        return Ok(false);
+    }
+    if acknowledge_restart_requests {
+        installation.acknowledge_restart_requests(data_root);
+    }
+    Ok(true)
+}
+
 #[cfg(any(test, feature = "test-support"))]
 pub(super) fn fail_daemon_before_ready_for_test(data_root: &Path) -> Result<()> {
     if data_root

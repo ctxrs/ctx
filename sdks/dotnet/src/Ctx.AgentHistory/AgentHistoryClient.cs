@@ -73,10 +73,6 @@ public sealed class AgentHistoryClient
         RequireSearchIntent(options);
         RequireCompatibleSearchFilters(options);
         var args = new List<string> { "search" };
-        if (!string.IsNullOrWhiteSpace(options.Query))
-        {
-            args.Add(options.Query);
-        }
         foreach (var term in options.Terms ?? [])
         {
             AddOption(args, "--term", term);
@@ -112,6 +108,7 @@ public sealed class AgentHistoryClient
         }
         args.Add("--format=json");
 
+        if (options.Query is not null) { args.Add("--"); args.Add(options.Query); }
         var raw = await InvokeAsync("search", args, cancellationToken).ConfigureAwait(false);
         var envelope = AgentHistoryContract.Envelope("search", _transport.Backend(raw), "search", AgentHistoryContract.NormalizeSearch(raw));
         return new SearchResponse(envelope);
@@ -272,8 +269,8 @@ public sealed class AgentHistoryClient
     {
         if (!string.IsNullOrWhiteSpace(value))
         {
-            args.Add(flag);
-            args.Add(value);
+            if (value.StartsWith("-", StringComparison.Ordinal)) args.Add($"{flag}={value}");
+            else { args.Add(flag); args.Add(value); }
         }
     }
 

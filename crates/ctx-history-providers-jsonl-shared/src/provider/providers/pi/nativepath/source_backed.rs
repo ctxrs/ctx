@@ -10,6 +10,10 @@ use std::{
 
 use crate::{provider::source_backed::IndexBaseEventLookup, JsonlProviderRuntime};
 use chrono::{DateTime, Utc};
+use ctx_history_capture_runtime::{
+    SourceBackedRecordRejectionClass, SourceBackedRecordRejectionDraft,
+    SourceBackedRecordRejectionDrafts,
+};
 use ctx_history_core::{
     admit_optional_metadata_text, admit_optional_provider_call_id, admit_provider_declared_fact,
     derive_event_id, derive_native_session_id, ActivityInvocation, ActivityJsonCapture,
@@ -18,6 +22,7 @@ use ctx_history_core::{
     ProviderNativeSessionRelationship, SourceAnchorScope, SourceKey, StableEntityId, TypedKey,
     CORE_ACTIVITY_REVISION, MAX_CORE_CONTENT_BYTES,
 };
+use ctx_history_jsonl::JsonlRecordRejections;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -122,6 +127,7 @@ struct CachedBinding {
     observation: JsonlFileObservation,
     binding: Binding,
     identity_probe: crate::provider::source_backed::family::jsonl::JsonlProbe,
+    leading_rejections: SourceBackedRecordRejectionDrafts,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -144,8 +150,10 @@ struct DiscoveredPiSource {
     path: PathBuf,
     relative_path: PathBuf,
     observation: JsonlFileObservation,
+    source: SourceKey,
     binding: Binding,
     identity_probe: crate::provider::source_backed::family::jsonl::JsonlProbe,
+    leading_rejections: SourceBackedRecordRejectionDrafts,
 }
 
 impl<R: JsonlProviderRuntime> JsonlFamilyAdapter for PiJsonlAdapter<R> {
@@ -213,12 +221,14 @@ impl<R: JsonlProviderRuntime> JsonlFamilyAdapter for PiJsonlAdapter<R> {
             let relative_path = relative_to_authority(&authority, &path)?;
             let opened = Arc::new(authority.open_file(&relative_path)?);
             let observation = observe_opened_file(&path, opened.as_ref())?;
-            let (binding, identity_probe) = match previous.get(&path) {
-                Some(cached) if cached.observation == observation => {
-                    (cached.binding.clone(), cached.identity_probe.clone())
-                }
+            let (binding, identity_probe, leading_rejections) = match previous.get(&path) {
+                Some(cached) if cached.observation == observation => (
+                    cached.binding.clone(),
+                    cached.identity_probe.clone(),
+                    cached.leading_rejections.clone(),
+                ),
                 _ => {
-                    let mut leading_rejected_records = 0_u64;
+                    let mut leading_rejection_details = Vec::new();
                     let (binding, probe) = probe_records_until(
                         &path,
                         &opened,
@@ -228,15 +238,19 @@ impl<R: JsonlProviderRuntime> JsonlFamilyAdapter for PiJsonlAdapter<R> {
                                 parse_header_binding(record, self.source_anchor_scope)?
                             else {
                                 if !is_omp_title_slot(record) {
-                                    leading_rejected_records = leading_rejected_records
-                                        .checked_add(1)
-                                        .ok_or(CaptureError::SystemInvariant(
-                                            "Pi identity rejection count overflowed",
-                                        ))?;
+                                    leading_rejection_details.push((
+                                        record.evidence().physical_ordinal().saturating_add(1),
+                                        leading_rejection_detail(record),
+                                    ));
                                 }
                                 return Ok(None);
                             };
-                            binding.leading_rejected_records = leading_rejected_records;
+                            binding.leading_rejected_records =
+                                u64::try_from(leading_rejection_details.len()).map_err(|_| {
+                                    CaptureError::SystemInvariant(
+                                        "Pi identity rejection count does not fit u64",
+                                    )
+                                })?;
                             Ok(Some(binding))
                         },
                     )?
@@ -246,15 +260,22 @@ impl<R: JsonlProviderRuntime> JsonlFamilyAdapter for PiJsonlAdapter<R> {
                                 .to_owned(),
                         )
                     })?;
-                    (binding, probe)
+                    let source =
+                        source_key_scoped(&binding.native_session_id, self.source_anchor_scope)?;
+                    let leading_rejections =
+                        pi_leading_rejection_drafts(&source, &path, leading_rejection_details)?;
+                    (binding, probe, leading_rejections)
                 }
             };
+            let source = source_key_scoped(&binding.native_session_id, self.source_anchor_scope)?;
             discovered.push(DiscoveredPiSource {
                 path,
                 relative_path,
                 observation,
+                source,
                 binding,
                 identity_probe,
+                leading_rejections,
             });
         }
         let mut sources = HashMap::<[u8; 32], JsonlFileObservation>::new();
@@ -264,10 +285,11 @@ impl<R: JsonlProviderRuntime> JsonlFamilyAdapter for PiJsonlAdapter<R> {
                 path,
                 relative_path,
                 observation,
+                source,
                 binding,
                 identity_probe,
+                leading_rejections,
             } = discovered;
-            let source = source_key_scoped(&binding.native_session_id, self.source_anchor_scope)?;
             let source_digest = source.exact_descriptor_digest();
             if let Some(selected) = sources.get(&source_digest) {
                 if selected == &observation {
@@ -277,6 +299,7 @@ impl<R: JsonlProviderRuntime> JsonlFamilyAdapter for PiJsonlAdapter<R> {
                             observation,
                             binding,
                             identity_probe,
+                            leading_rejections,
                         },
                     );
                     continue;
@@ -292,6 +315,7 @@ impl<R: JsonlProviderRuntime> JsonlFamilyAdapter for PiJsonlAdapter<R> {
                     observation,
                     binding: binding.clone(),
                     identity_probe: identity_probe.clone(),
+                    leading_rejections,
                 },
             );
             let binding_key = TypedKey::bytes(serde_json::to_vec(&binding)?).map_err(contract)?;
@@ -343,6 +367,24 @@ impl<R: JsonlProviderRuntime> JsonlFamilyAdapter for PiJsonlAdapter<R> {
             ));
         }
         let binding = decode_binding(leaf)?;
+        let leading_rejections = if binding.leading_rejected_records == 0 {
+            SourceBackedRecordRejectionDrafts::default()
+        } else {
+            self.bindings
+                .lock()
+                .map_err(|_| contract("Pi binding catalog lock was poisoned"))?
+                .get(leaf.source_path())
+                .ok_or(CaptureError::SystemInvariant(
+                    "Pi leading rejection diagnostics are unavailable",
+                ))?
+                .leading_rejections
+                .clone()
+        };
+        ensure_rejection_count(
+            &leading_rejections,
+            binding.leading_rejected_records,
+            "Pi leading rejection diagnostics disagree with their count",
+        )?;
         let session_id = session_identity(leaf.source(), &binding.native_session_id)?;
         Ok(Box::new(PiProjector::<R> {
             source: leaf.source().clone(),
@@ -357,7 +399,12 @@ impl<R: JsonlProviderRuntime> JsonlFamilyAdapter for PiJsonlAdapter<R> {
                 mode.into(),
                 base_event_lookup,
             )?,
-            rejected_records: 0,
+            leading_rejections,
+            rejections: JsonlRecordRejections::new(
+                leaf.source().clone(),
+                CaptureProvider::Pi,
+                leaf.source_path().display().to_string(),
+            ),
         }))
     }
 }
@@ -367,7 +414,8 @@ struct PiProjector<R: JsonlProviderRuntime> {
     binding: Binding,
     session_id: StableEntityId,
     fallback_identities: FallbackEventIdentityState<R>,
-    rejected_records: u64,
+    leading_rejections: SourceBackedRecordRejectionDrafts,
+    rejections: JsonlRecordRejections,
 }
 
 impl<R: JsonlProviderRuntime> JsonlFamilyProjector for PiProjector<R> {
@@ -379,19 +427,11 @@ impl<R: JsonlProviderRuntime> JsonlFamilyProjector for PiProjector<R> {
         _worker: &mut JsonlFamilyWorkerContext<R>,
         emit: &mut dyn FnMut(CoreRecord) -> Result<()>,
     ) -> Result<()> {
-        let evidence = record.evidence();
-        let bytes = record.bytes();
-        if bytes.iter().all(u8::is_ascii_whitespace) {
-            return Ok(());
-        }
-        let Ok(value) = serde_json::from_slice::<Value>(bytes) else {
-            self.reject_record()?;
+        let Some(value) = parse_pi_event_record(&mut self.rejections, record) else {
             return Ok(());
         };
-        if value.get("type").and_then(Value::as_str) == Some("title") {
-            self.reject_record()?;
-            return Ok(());
-        }
+        let evidence = record.evidence();
+        let bytes = record.bytes();
         if value.get("type").and_then(Value::as_str) == Some("session") {
             return Err(CaptureError::InvalidPayload(
                 "Pi source contains more than one session header".to_owned(),
@@ -493,7 +533,13 @@ impl<R: JsonlProviderRuntime> JsonlFamilyProjector for PiProjector<R> {
     }
 
     fn rejected_records(&self) -> u64 {
-        self.rejected_records
+        self.rejections.count()
+    }
+
+    fn take_record_rejections(&mut self) -> SourceBackedRecordRejectionDrafts {
+        let mut rejections = std::mem::take(&mut self.leading_rejections);
+        rejections.merge(self.rejections.take_drafts());
+        rejections
     }
 
     fn finish(&mut self) -> Result<()> {
@@ -501,16 +547,70 @@ impl<R: JsonlProviderRuntime> JsonlFamilyProjector for PiProjector<R> {
     }
 }
 
-impl<R: JsonlProviderRuntime> PiProjector<R> {
-    fn reject_record(&mut self) -> Result<()> {
-        self.rejected_records =
-            self.rejected_records
-                .checked_add(1)
-                .ok_or(CaptureError::SystemInvariant(
-                    "Pi projection rejection count overflowed",
-                ))?;
-        Ok(())
+fn parse_pi_event_record(
+    rejections: &mut JsonlRecordRejections,
+    record: JsonlRecordRef<'_>,
+) -> Option<Value> {
+    if record.bytes().iter().all(u8::is_ascii_whitespace) {
+        return None;
     }
+    let value = match serde_json::from_slice::<Value>(record.bytes()) {
+        Ok(value) => value,
+        Err(error) => {
+            rejections.malformed(record, format!("malformed Pi JSONL: {error}"));
+            return None;
+        }
+    };
+    if value.get("type").and_then(Value::as_str) == Some("title") {
+        rejections.malformed(record, "Pi title record appears after the session header");
+        return None;
+    }
+    Some(value)
+}
+
+fn leading_rejection_detail(record: JsonlRecordRef<'_>) -> String {
+    match serde_json::from_slice::<Value>(record.bytes()) {
+        Err(error) => format!("malformed Pi JSONL before the session header: {error}"),
+        Ok(value) if value.get("type").and_then(Value::as_str) == Some("session") => {
+            "Pi session header is malformed".to_owned()
+        }
+        Ok(_) => "Pi record appears before the required session header".to_owned(),
+    }
+}
+
+fn pi_leading_rejection_drafts(
+    source: &SourceKey,
+    path: &Path,
+    details: Vec<(u64, String)>,
+) -> Result<SourceBackedRecordRejectionDrafts> {
+    let mut rejections = SourceBackedRecordRejectionDrafts::default();
+    let source_selector = path.display().to_string();
+    for (line_number, detail) in details {
+        rejections.record(SourceBackedRecordRejectionDraft {
+            source: source.clone(),
+            provider: CaptureProvider::Pi,
+            source_selector: source_selector.clone(),
+            line_number,
+            payload_type: None,
+            class: SourceBackedRecordRejectionClass::MalformedRecord,
+            detail,
+        });
+    }
+    Ok(rejections)
+}
+
+fn ensure_rejection_count(
+    rejections: &SourceBackedRecordRejectionDrafts,
+    expected: u64,
+    mismatch: &'static str,
+) -> Result<()> {
+    let (recorded, omitted) = rejections.clone().into_parts();
+    let observed = u64::try_from(recorded.len().saturating_add(omitted))
+        .map_err(|_| CaptureError::SystemInvariant(mismatch))?;
+    if observed != expected {
+        return Err(CaptureError::SystemInvariant(mismatch));
+    }
+    Ok(())
 }
 
 fn fallback_fingerprint(bytes: &[u8]) -> Result<TypedKey> {
@@ -794,195 +894,7 @@ fn contract(error: impl std::fmt::Display) -> CaptureError {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
+mod rejection_tests;
 
-    #[test]
-    fn source_and_related_session_identities_are_root_scoped() {
-        let released = source_key("same-session").unwrap();
-        let compatibility =
-            source_key_scoped("same-session", SourceAnchorScope::Unqualified).unwrap();
-        let first = source_key_scoped("same-session", SourceAnchorScope::Lineage([1; 32])).unwrap();
-        let second =
-            source_key_scoped("same-session", SourceAnchorScope::Lineage([2; 32])).unwrap();
-
-        assert!(released.exact_descriptor_eq(&compatibility));
-        assert_ne!(first.identity(), second.identity());
-        assert_ne!(
-            session_identity_for_native("parent", SourceAnchorScope::Lineage([1; 32])).unwrap(),
-            session_identity_for_native("parent", SourceAnchorScope::Lineage([2; 32])).unwrap()
-        );
-    }
-
-    #[test]
-    fn omp_title_slot_is_ignored_only_at_the_first_physical_record() {
-        let title = br#"{"type":"title","v":1,"title":"fixture","updatedAt":"2026-08-20T15:12:20.989Z","pad":""}"#;
-
-        assert!(is_omp_title_slot(JsonlRecordRef::for_test(title, 0)));
-        assert!(!is_omp_title_slot(JsonlRecordRef::for_test(title, 1)));
-    }
-
-    #[test]
-    fn malformed_omp_title_slots_remain_rejected() {
-        for title in [
-            br#"{"type":"title","v":2,"title":"fixture","updatedAt":"2026-08-20T15:12:20.989Z","pad":""}"#.as_slice(),
-            br#"{"type":"title","v":1,"title":"fixture","updatedAt":"2026-08-20T15:12:20.989Z"}"#.as_slice(),
-            br#"{"type":"title","v":1,"title":"fixture","updatedAt":"2026-08-20T15:12:20.989Z","pad":"","source":"other"}"#.as_slice(),
-        ] {
-            assert!(!is_omp_title_slot(JsonlRecordRef::for_test(title, 0)));
-        }
-    }
-
-    #[test]
-    fn omp_path_parent_uses_only_the_native_filename_claim() {
-        assert_eq!(
-            omp_parent_native_session_id(
-                r"C:\Users\ctx\.omp\agent\sessions\2026-09-01T00-00-00-000Z_parent.jsonl"
-                    .to_owned()
-            ),
-            Some("parent".to_owned())
-        );
-        assert_eq!(
-            omp_parent_native_session_id("opaque-parent-id".to_owned()),
-            Some("opaque-parent-id".to_owned())
-        );
-        assert_eq!(
-            omp_parent_native_session_id("/tmp/not-an-omp-session.jsonl".to_owned()),
-            None
-        );
-        assert_eq!(
-            omp_session_id_from_path("/tmp/2026-09-01T00-00-00-000Z_parent_with_underscores.jsonl"),
-            Some("parent_with_underscores")
-        );
-        assert_eq!(
-            omp_session_id_from_path(
-                r"C:\Users\ctx\.omp\agent\sessions\2026-09-01T00-00-00-000Z_parent.jsonl"
-            ),
-            Some("parent")
-        );
-        for malformed in [
-            "/tmp/parent.jsonl",
-            "/tmp/2026-09-01T00-00-00-000Z_.jsonl",
-            "/tmp/2026-09-01T00-00-00-000Z_parent.jsonl.bak",
-            "/tmp/not-a-timestamp_parent.jsonl",
-        ] {
-            assert_eq!(omp_session_id_from_path(malformed), None);
-        }
-    }
-
-    #[test]
-    fn unlinked_output_withholds_result_but_preserves_literal_facts() {
-        let message = serde_json::json!({
-            "type": "bashExecution",
-            "output": "future output",
-        });
-        let facts = vec![ProviderDeclaredFact {
-            kind: LiteralFactKind::Command,
-            value: "printf future".to_owned(),
-        }];
-
-        let activity = pi_activity(
-            &message,
-            EventType::CommandOutput,
-            "future output",
-            facts.clone(),
-        )
-        .unwrap()
-        .unwrap();
-
-        assert!(activity.provider_call_id.is_none());
-        assert!(activity.invocation.is_none());
-        assert!(activity.result.is_none());
-        assert_eq!(activity.facts, facts);
-    }
-
-    #[test]
-    fn exact_call_id_retains_linked_output_result() {
-        let message = serde_json::json!({
-            "type": "toolResult",
-            "toolCallId": "pi-call-1",
-            "content": "provider output",
-        });
-
-        let activity = pi_activity(
-            &message,
-            EventType::ToolOutput,
-            "provider output",
-            Vec::new(),
-        )
-        .unwrap()
-        .unwrap();
-
-        assert_eq!(
-            activity.provider_call_id,
-            Some(TypedKey::utf8("pi-call-1").unwrap())
-        );
-        assert!(activity.invocation.is_none());
-        assert!(activity.result.is_some());
-    }
-
-    #[test]
-    fn unadmitted_optional_linkage_does_not_emit_empty_activity() {
-        let oversized = "x".repeat(64 * 1024 + 1);
-        let output = serde_json::json!({"toolCallId": oversized});
-        assert_eq!(
-            pi_activity(&output, EventType::ToolOutput, "output", Vec::new()).unwrap(),
-            None
-        );
-
-        let call = serde_json::json!({
-            "toolCallId": "pi-call-1",
-            "toolName": oversized,
-        });
-        assert_eq!(
-            pi_activity(&call, EventType::ToolCall, "call", Vec::new()).unwrap(),
-            None
-        );
-    }
-
-    #[test]
-    fn provider_output_is_projected_without_adjudicating_success() {
-        let successful_tool = serde_json::json!({
-            "type": "message",
-            "message": {
-                "role": "toolResult",
-                "toolCallId": "pi-call-success",
-                "content": "done",
-                "isError": false,
-            },
-        });
-        assert_eq!(
-            projected_body(&successful_tool, EventType::ToolOutput),
-            "done"
-        );
-
-        let successful_command = serde_json::json!({
-            "type": "message",
-            "message": {
-                "role": "bashExecution",
-                "command": "true",
-                "output": "done",
-                "exitCode": 0,
-                "cancelled": false,
-            },
-        });
-        assert_eq!(
-            projected_body(&successful_command, EventType::CommandOutput),
-            "done"
-        );
-
-        let failed_tool = serde_json::json!({
-            "type": "message",
-            "message": {
-                "role": "toolResult",
-                "toolCallId": "pi-call-failed",
-                "content": "failure details",
-                "isError": true,
-            },
-        });
-        assert_eq!(
-            projected_body(&failed_tool, EventType::ToolOutput),
-            "failure details"
-        );
-    }
-}
+#[cfg(test)]
+mod tests;

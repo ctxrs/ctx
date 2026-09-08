@@ -259,7 +259,7 @@ if [[ -n "${data_root_parent}" ]]; then
 else
   run_root="$(mktemp -d "${TMPDIR:-/tmp}/ctx-semantic-smoke.XXXXXX")"
 fi
-chmod 700 "${run_root}"
+chmod 00700 "${run_root}"
 run_root="$(cd -- "${run_root}" && pwd -P)"
 data_root="${run_root}/data"
 mkdir -p -- "${data_root}"
@@ -633,7 +633,8 @@ if [[ "${daemon_started}" != "1" ]]; then
   exit 1
 fi
 
-run_ctx import --no-daemon --input-format ctx-history-jsonl-v2 --path "${fixture_path}" >/dev/null
+run_bounded "${timeout_seconds}" "${ctx_env[@]}" "${ctx_bin}" --data-root "${data_root}" \
+  import --no-daemon --input-format ctx-history-jsonl-v2 --path "${fixture_path}" >/dev/null
 
 deadline=$((SECONDS + timeout_seconds))
 last_output=""

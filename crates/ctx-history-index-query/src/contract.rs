@@ -768,6 +768,42 @@ impl RankedEventRef {
 pub struct EventSearchCandidate {
     pub event: RankedEventRef,
     pub score: f32,
+    pub semantic_evidence: Option<SemanticSearchEvidence>,
+}
+
+/// Exact winning chunk in the semantic source, before presentation clipping.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SemanticSearchEvidence {
+    pub core_generation_id: String,
+    pub source_text_hash: String,
+    pub query_ordinal: usize,
+    pub start_char: usize,
+    pub end_char: usize,
+}
+
+/// The pairing owner's selected assistant and its trimmed normalized content.
+pub struct SemanticTurnAssistant {
+    pub event: EventRecord,
+    pub text: String,
+    pub content_start_char: usize,
+}
+
+/// One verified winning source window. Complete text is retained only until
+/// presentation can authenticate grapheme boundaries across the indexing cap.
+/// Bodies are released after that one result's bounded excerpt is constructed.
+pub struct SemanticPassageSource {
+    pub text: String,
+    pub byte_range: std::ops::Range<usize>,
+    pub truncated: bool,
+    pub members: Vec<SemanticPassageMember>,
+}
+
+pub struct SemanticPassageMember {
+    pub event: EventRecord,
+    /// Byte range within the bounded source text, excluding role labels.
+    pub byte_range: std::ops::Range<usize>,
+    /// Unicode scalar offset in this member's complete normalized Core body.
+    pub content_start_char: usize,
 }
 
 /// Exact, content-free work performed by one low-level candidate query.

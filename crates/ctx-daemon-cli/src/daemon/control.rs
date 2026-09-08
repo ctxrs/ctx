@@ -61,9 +61,8 @@ pub(super) fn run_daemon_status(
         super::super::paths_status::daemon_report_with_application(application, &data_root, true);
     if args.format.is_json() {
         print_json(json!({
-            "schema_version": 1,
+            "schema_version": 2,
             "daemon": daemon,
-            "local_only": true,
         }))?;
     } else {
         let document =
@@ -89,14 +88,13 @@ pub(super) fn run_daemon_enabled_update(
     let config_path = data_root.join(CONFIG_FILE);
     if args.format.is_json() {
         print_json(json!({
-            "schema_version": 1,
+            "schema_version": 2,
             "daemon_enabled": effective_enabled,
             "running": running,
             "pid": pid,
             "persistent": persistent,
             "supervisor": supervisor,
             "config_path": config_path,
-            "local_only": true,
         }))?;
     } else if effective_enabled {
         let document = render_daemon_enable_receipt(

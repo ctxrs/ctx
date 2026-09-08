@@ -316,8 +316,27 @@ where
         mode,
         outcome: "successful".to_owned(),
     };
-    inventory.publication_receipt = Some(receipt);
+    inventory.publication_receipt = Some(
+        prior
+            .filter(|prior| {
+                hermes_durable_receipt_eq(prior, &receipt) && prior.exact_due_at_ms > now_ms
+            })
+            .unwrap_or(receipt),
+    );
     Ok(inventory)
+}
+
+fn hermes_durable_receipt_eq(prior: &HermesRefreshReceipt, current: &HermesRefreshReceipt) -> bool {
+    prior.kind == current.kind
+        && prior.version == current.version
+        && prior.parser_revision == current.parser_revision
+        && prior.profile_source_descriptor == current.profile_source_descriptor
+        && prior.database_identity == current.database_identity
+        && prior.physical_revision == current.physical_revision
+        && prior.schema_evidence == current.schema_evidence
+        && prior.session_rowid == current.session_rowid
+        && prior.message_rowid == current.message_rowid
+        && prior.outcome == "successful"
 }
 
 fn hermes_refresh_receipt(control: Option<&[u8]>) -> Option<HermesRefreshReceipt> {

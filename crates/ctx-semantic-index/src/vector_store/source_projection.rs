@@ -22,7 +22,9 @@ use super::flat_segments::{
 };
 use super::{SemanticChunkDocument, SemanticVectorStore};
 use crate::{
-    indexing::{semantic_chunks_for_document, semantic_document_hash, semantic_source_text},
+    indexing::{
+        semantic_chunks_for_document_with_fit, semantic_document_hash, semantic_source_text,
+    },
     vector_store_schema::SemanticVectorStoreError,
     SemanticEventDocument,
 };
@@ -35,15 +37,15 @@ mod state;
 
 pub use embedding::SemanticBatchEmbedder;
 use embedding::{
-    embed_chunks_in_bounded_batches, external_embedding_chunk_limit, source_event_page_limit,
-    ResolvedSourceDocument, SourceProjectionWorkers,
+    embed_chunks_in_bounded_batches, source_event_page_limit, ResolvedSourceDocument,
+    SourceProjectionWorkers,
 };
 #[cfg(test)]
 use manifest::SOURCE_CONTRACT_VERSION;
 use manifest::{
     source_contract_fingerprint, source_contract_fingerprint_with_authority, validate_generation,
-    validate_page, validate_resolved_document, SourceProjectionFrontier, SourceTraversalPhase,
-    SOURCE_INPUT_LEXICAL_SCHEMA_VERSION,
+    validate_page, validate_resolved_document, validate_stored_event, SourceProjectionFrontier,
+    SourceTraversalPhase, SOURCE_INPUT_LEXICAL_SCHEMA_VERSION,
 };
 use outcome::merge_outcome;
 pub use outcome::SourceBackedSemanticOutcome;
@@ -501,7 +503,7 @@ impl SemanticVectorStore {
         progress: &mut dyn FnMut(u64) -> Result<()>,
     ) -> Result<SourceBackedSemanticOutcome> {
         let model_contract = self.contract().clone();
-        let embedding_chunk_limit = external_embedding_chunk_limit(&model_contract);
+        let embedding_chunk_limit = source_event_page_limit(&model_contract);
         let after = frontier
             .after_identity
             .as_deref()
@@ -562,6 +564,22 @@ impl SemanticVectorStore {
                 ..SourceBackedSemanticOutcome::default()
             });
         }
+        // Read the same bounded page's existing authority before planning. A
+        // policy-compatible unchanged document needs no tokenizer or model load.
+        let eligible_event_ids = page
+            .records
+            .iter()
+            .filter(|record| generation.includes(record))
+            .map(|record| record.event_id.as_uuid())
+            .collect::<Vec<_>>();
+        let existing_events = self
+            .flat
+            .source_reconciliation_events(&eligible_event_ids)
+            .map_err(anyhow::Error::new)?
+            .into_iter()
+            .zip(eligible_event_ids)
+            .filter_map(|(event, event_id)| event.map(|event| (event_id, event)))
+            .collect::<HashMap<_, _>>();
         let mut outcome = SourceBackedSemanticOutcome {
             records_decoded,
             record_bytes_decoded,
@@ -580,12 +598,17 @@ impl SemanticVectorStore {
                 processed_page_records = processed_page_records.saturating_add(1);
                 continue;
             }
-            // Stop on a record boundary once this external work unit has filled
+            // Stop on a record boundary once this work unit has filled
             // its embedding budget. A first record is always admitted below so
             // one valid document that expands past the limit still progresses.
-            if embedding_chunk_limit.is_some_and(|limit| projected_chunks >= limit) {
+            if projected_chunks >= embedding_chunk_limit {
                 break;
             }
+            validate_stored_event(
+                record,
+                source,
+                existing_events.get(&record.event_id.as_uuid()),
+            )?;
             let next_semantic_records = semantic_records.checked_add(1).ok_or_else(|| {
                 SemanticVectorStoreError::reset_required(
                     "source-backed semantic candidate count overflowed",
@@ -623,8 +646,21 @@ impl SemanticVectorStore {
                 &source_text,
                 &frontier.semantic_policy_fingerprint,
             );
-            let chunks = semantic_chunks_for_document(&document, &source_text, &source_text_sha256);
-            if chunks.is_empty() {
+            let reusable = frontier.vector_reuse_allowed
+                && existing_events
+                    .get(&record.event_id.as_uuid())
+                    .is_some_and(|event| event.source_text_hash.to_hex() == source_text_sha256);
+            let chunks = if reusable {
+                Vec::new()
+            } else {
+                semantic_chunks_for_document_with_fit(
+                    &document,
+                    &source_text,
+                    &source_text_sha256,
+                    &mut |text| workers.embedder.document_fits(text),
+                )?
+            };
+            if !reusable && chunks.is_empty() {
                 return Err(anyhow!(
                     "Core semantic projection produced an empty document for {}",
                     record.event_id
@@ -635,9 +671,7 @@ impl SemanticVectorStore {
                     "source-backed semantic embedding chunk count overflowed",
                 )
             })?;
-            if projected_chunks != 0
-                && embedding_chunk_limit.is_some_and(|limit| generated_chunks > limit)
-            {
+            if projected_chunks != 0 && generated_chunks > embedding_chunk_limit {
                 break;
             }
             projected_chunks = generated_chunks;
@@ -673,40 +707,6 @@ impl SemanticVectorStore {
                 "source-backed semantic source page count disagrees with its Core aggregate",
             )
             .into());
-        }
-        let eligible_event_ids = page
-            .records
-            .iter()
-            .filter(|record| generation.includes(record))
-            .map(|record| record.event_id.as_uuid())
-            .collect::<Vec<_>>();
-        let existing_events = self
-            .flat
-            .source_reconciliation_events(&eligible_event_ids)
-            .map_err(anyhow::Error::new)?
-            .into_iter()
-            .zip(eligible_event_ids)
-            .filter_map(|(event, event_id)| event.map(|event| (event_id, event)))
-            .collect::<HashMap<_, _>>();
-        for record in page
-            .records
-            .iter()
-            .filter(|record| generation.includes(record))
-        {
-            let stable_identity = record.event_id.encode_canonical()?;
-            let stable_identity_hash = Sha256::digest(stable_identity);
-            if let Some(prior) = existing_events.get(&record.event_id.as_uuid()) {
-                if (prior.stable_identity_hash != [0; 32]
-                    && prior.stable_identity_hash != stable_identity_hash.as_slice())
-                    || prior.source_identity_digest != source.aggregate.source_identity_digest()
-                {
-                    return Err(SemanticVectorStoreError::storage_conflict(format!(
-                        "source-backed semantic compact identity collision at {}",
-                        record.event_id.as_uuid()
-                    ))
-                    .into());
-                }
-            }
         }
         let existing_lookup = FlatActiveEventLookup::from_events(
             page.records
@@ -780,7 +780,7 @@ impl SemanticVectorStore {
                 workers.embedder,
                 pending_chunks,
                 model_contract.dimensions(),
-                embedding_chunk_limit,
+                Some(embedding_chunk_limit),
             )?;
             outcome.records_embedded = outcome.records_embedded.saturating_add(pending_documents);
         }

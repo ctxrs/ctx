@@ -15,9 +15,11 @@ use ctx_history_core::{
     CertifiedSource, CoreDiscoveryExclusion, ProviderNativeSessionRelationship, SourceFrontier,
     TypedKey,
 };
-use ctx_history_index::{GenerationWriter, RevalidationTarget, WriterOptions};
+use ctx_history_index::{
+    GenerationStateEnvelope, GenerationWriter, RevalidationTarget, WriterOptions,
+};
 
-const CURRENT_PARSER_REVISION: &str = "codex-nativepath-core-activity-v10-item-completed-plan";
+const CURRENT_PARSER_REVISION: &str = "codex-nativepath-core-activity-v11-item-call-identity";
 
 #[path = "codex_child_independence/quarantine.rs"]
 mod quarantine;
@@ -60,13 +62,14 @@ fn incremental_refresh_member(
 ) -> SourceBackedRefreshReceipt {
     SourceBackedRefreshExecutor::new(registry.clone(), writer_options())
         .with_base_route_controls(base.route_controls.clone())
-        .refresh_scope_with_detailed_progress_publication_metadata_reconciliation_and_worksets(
+        .refresh_physical_scope_with_detailed_progress_generation_state_reconciliation_and_worksets(
             index_root,
+            SourceBackedRefreshScope::All,
             SourceBackedRefreshScope::All,
             SourceBackedReconciliationDemand::Incremental,
             BTreeMap::from([(route_identity(registry, root), BTreeSet::from([member]))]),
             |_| Ok(()),
-            |_| Ok(Vec::new()),
+            |_| GenerationStateEnvelope::new("ctx.test.empty.v1", Vec::new()),
         )
         .unwrap()
 }

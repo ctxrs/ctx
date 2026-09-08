@@ -7,10 +7,10 @@ use ctx_semantic_model::SemanticModelContract;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::{SourceBackedSemanticGeneration, SourceBackedSemanticPage};
+use super::{SourceBackedSemanticGeneration, SourceBackedSemanticPage, SourceBackedSemanticSource};
 use crate::{
     vector_store::flat_segments::{
-        FlatPublicationToken, FlatSourceStagingToken, PinnedFlatGeneration,
+        FlatActiveEvent, FlatPublicationToken, FlatSourceStagingToken, PinnedFlatGeneration,
     },
     SemanticEventDocument,
 };
@@ -185,6 +185,29 @@ pub(super) fn validate_page(
             ));
         }
         previous = Some(encoded.to_vec());
+    }
+    Ok(())
+}
+
+// Validate stored identity before its hash can avoid model work.
+pub(super) fn validate_stored_event(
+    record: &CoreEventRecord,
+    source: &SourceBackedSemanticSource,
+    prior: Option<&FlatActiveEvent>,
+) -> Result<()> {
+    let stable_identity = record.event_id.encode_canonical()?;
+    let stable_identity_hash = Sha256::digest(stable_identity);
+    if let Some(prior) = prior {
+        if (prior.stable_identity_hash != [0; 32]
+            && prior.stable_identity_hash != stable_identity_hash.as_slice())
+            || prior.source_identity_digest != source.aggregate.source_identity_digest()
+        {
+            return Err(super::SemanticVectorStoreError::storage_conflict(format!(
+                "source-backed semantic compact identity collision at {}",
+                record.event_id.as_uuid()
+            ))
+            .into());
+        }
     }
     Ok(())
 }

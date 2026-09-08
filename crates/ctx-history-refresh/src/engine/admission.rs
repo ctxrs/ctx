@@ -1,9 +1,8 @@
 use super::*;
 use sha2::{Digest as _, Sha256};
-
+mod queued_admission;
 mod state_helpers;
 use state_helpers::*;
-
 #[derive(Clone)]
 struct PendingAdmissionClaim {
     request_id: String,
@@ -12,13 +11,11 @@ struct PendingAdmissionClaim {
     watch_catalog_revision: u64,
     route_event_watermarks: BTreeMap<SourceRouteIdentity, EventWatermark>,
 }
-
 pub(super) struct AdmissionObservationFence {
     watch_catalog_revision: u64,
     route_event_watermarks: BTreeMap<SourceRouteIdentity, Option<EventWatermark>>,
     route_observations: BTreeMap<SourceRouteIdentity, String>,
 }
-
 impl AdmissionObservationFence {
     pub(super) fn still_matches(&self, state: &CoreRefreshEngineState) -> bool {
         self.watch_catalog_revision == state.watch_catalog_revision
@@ -116,7 +113,7 @@ impl CoreRefreshEngine {
             }
         };
         let response_barrier = (response.get("request_state").and_then(Value::as_str)
-            == Some("admission_pending"))
+            == Some(SourceBackedRefreshState::AdmissionPending.as_str()))
         .then(|| {
             response
                 .get("request_id")
@@ -675,34 +672,7 @@ impl CoreRefreshEngine {
             terminal_persistence_pending: true,
             scope,
             coverage_certificate: None,
-            route_finalization_performed: false,
         })
-    }
-
-    fn claim_active_pending_admission(&self) -> Option<PendingAdmissionClaim> {
-        let mut state = self.lock_state();
-        if state.watch_uncertain_through.is_some() {
-            return None;
-        }
-        let request_id = state.active_request_id.clone()?;
-        let attempt = find_attempt(&state, &request_id)?;
-        if attempt.state != SourceBackedRefreshState::AdmissionPending
-            || state.unacknowledged_admissions.contains_key(&request_id)
-            || state.admission_resolutions_in_flight.contains(&request_id)
-        {
-            return None;
-        }
-        let claim = PendingAdmissionClaim {
-            request_id: request_id.clone(),
-            intent: attempt.intent.clone(),
-            persisted_scope: attempt.refresh_scope.clone(),
-            watch_catalog_revision: state.watch_catalog_revision,
-            route_event_watermarks: state.route_event_watermarks.clone(),
-        };
-        state
-            .admission_resolutions_in_flight
-            .insert(request_id.clone());
-        Some(claim)
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -789,6 +759,11 @@ impl CoreRefreshEngine {
                 Ok(None)
             }
             Err(error) => {
+                if state.active_request_id.as_deref() != Some(claim.request_id.as_str()) {
+                    // A speculative batch peer still owns a queued turn. Its
+                    // normal active resolution owns failure and retry handoff.
+                    return Ok(None);
+                }
                 self.persist_failed_admission(data_root, &mut state, &claim.request_id, error)
             }
         }
@@ -883,26 +858,38 @@ impl CoreRefreshEngine {
                 SourceBackedRefreshScope::Exact(routes) => Some(routes.clone()),
             })
             .unwrap_or_default();
-        let failure_type = source_backed_refresh_failure_type(&error);
-        let classified_outcome = source_backed_refresh_failure_outcome(&error, &attempted_routes);
-        let failure_outcome = if classified_outcome.code == RefreshOutcomeCode::SourceRefreshFailed
-            && classified_outcome.class == RefreshOutcomeClass::Internal
-        {
-            SourceBackedRefreshFailureOutcome::new(
-                RefreshOutcomeCode::SourceRefreshAdmissionFailed,
-                RefreshOutcomeClass::ControlPlane,
-                true,
-                BTreeSet::new(),
-                Some(RefreshRetryAdvice::RetryAdmission),
-            )
-        } else {
-            classified_outcome
-        };
-        let retry_admission = failure_outcome.code
+        let classified_outcome =
+            source_backed_refresh_failure_outcome(&error, &attempted_routes, request_id)?;
+        let failure_outcome =
+            if classified_outcome.code() == RefreshOutcomeCode::SourceRefreshFailed {
+                RefreshTerminalOutcome::with_uniform_route_disposition(
+                    RefreshOutcomeCode::SourceRefreshAdmissionFailed,
+                    true,
+                    BTreeSet::new(),
+                    request_id.to_owned(),
+                    None,
+                    None,
+                    Some(RefreshRetryAdvice::RetryAdmission),
+                    None,
+                )?
+            } else {
+                classified_outcome
+            };
+        let retained_generation = find_attempt(state, request_id).and_then(|attempt| {
+            attempt
+                .published_generation
+                .clone()
+                .or_else(|| attempt.previous_generation.clone())
+        });
+        let failure_outcome = failure_outcome.with_failure_context(
+            retained_generation,
+            Some(format!("source refresh admission fence failed: {error:#}")),
+        )?;
+        let retry_admission = failure_outcome.code()
             == RefreshOutcomeCode::SourceRefreshAdmissionFailed
-            && failure_outcome.retry_advice == Some(RefreshRetryAdvice::RetryAdmission);
-        let retryable_routes = failure_outcome.retryable_routes.clone();
-        let blocked_routes = failure_outcome.blocked_routes.clone();
+            && failure_outcome.retry_advice() == Some(RefreshRetryAdvice::RetryAdmission);
+        let retryable_routes = failure_outcome.retryable_routes().clone();
+        let blocked_routes = failure_outcome.blocked_routes().clone();
         let (scope, last_error) = {
             let attempt = find_attempt_mut(state, request_id)
                 .ok_or_else(|| anyhow!("source refresh request `{request_id}` is unknown"))?;
@@ -910,8 +897,8 @@ impl CoreRefreshEngine {
             attempt.state = SourceBackedRefreshState::Failed;
             attempt.finished_at_ms = Some(utc_now().timestamp_millis());
             attempt.progress.phase = "failed".to_owned();
-            attempt.failure_type = failure_type;
-            attempt.failure_outcome = Some(failure_outcome);
+            attempt.failure_type = source_backed_refresh_failure_type(&error);
+            attempt.terminal_outcome = Some(failure_outcome);
             attempt.last_error = Some(last_error.clone());
             (attempt.refresh_scope.clone(), last_error)
         };
@@ -942,7 +929,6 @@ impl CoreRefreshEngine {
             terminal_persistence_pending: false,
             scope,
             coverage_certificate: None,
-            route_finalization_performed: false,
         }))
     }
 

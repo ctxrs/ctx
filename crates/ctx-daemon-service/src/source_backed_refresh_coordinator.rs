@@ -1,31 +1,36 @@
 #[cfg(test)]
 use std::{collections::BTreeSet, sync::Arc};
-use std::{path::Path, time::Duration as StdDuration};
-
-use anyhow::Result;
-#[cfg(test)]
-use anyhow::{anyhow, Context};
-use ctx_daemon_refresh_client::{
-    SourceRefreshClientHost, SourceRefreshDaemonAvailability, SourceRefreshDaemonDemand,
-    SourceRefreshTransportUnavailable,
+use std::{
+    fmt,
+    path::Path,
+    time::{Duration as StdDuration, Instant as StdInstant},
 };
+
+use anyhow::{anyhow, bail, Context, Result};
+use ctx_history_capture::CaptureError;
 use ctx_history_refresh::RefreshRuntime;
-#[cfg(test)]
-use serde_json::json;
-use serde_json::Value;
+use serde_json::{json, Value};
+use uuid::Uuid;
 
-#[cfg(test)]
-use ctx_history_refresh::ExplicitSourceCatalogAuthority;
-use ctx_history_refresh::ExplicitSourceRelocationAuthority;
+use ctx_history_refresh::{ExplicitSourceCatalogAuthority, ExplicitSourceRelocationAuthority};
 
-#[cfg(test)]
 use crate::compact_json;
 
 #[cfg(test)]
 use super::query_service::daemon_source_refresh_request;
-use super::source_backed_refresh_adapter::{
-    journal::DaemonRefreshJournal, runtime::DaemonRefreshRuntime,
+use super::{
+    query_service::{
+        daemon_source_refresh_request_with_cancellation, DaemonSourceRefreshServiceUnavailable,
+    },
+    source_backed_refresh_adapter::{journal::DaemonRefreshJournal, runtime::DaemonRefreshRuntime},
 };
+
+mod client;
+mod refresh_mode;
+mod request;
+
+#[cfg(feature = "test-support")]
+pub use client::SourceRefreshObservationRecoveryFailed;
 
 #[cfg(feature = "test-support")]
 pub fn recover_wait_refresh_request_for_test(
@@ -33,8 +38,8 @@ pub fn recover_wait_refresh_request_for_test(
     data_root: &Path,
     request_id: &str,
 ) -> Result<String> {
-    ctx_daemon_refresh_client::testing::recover_wait_refresh_request(
-        &ServiceRefreshClientHost(availability),
+    client::recover_wait_refresh_request(
+        availability,
         data_root,
         request_id,
         ctx_history_refresh::RefreshRequestTrigger::Search,
@@ -44,11 +49,16 @@ pub fn recover_wait_refresh_request_for_test(
 
 #[cfg(not(test))]
 pub(crate) use ctx_history_refresh::RefreshEngine as CoreRefreshEngine;
-pub use ctx_history_refresh::{RefreshSelection, RefreshStatus, SourceBackedCurrentSourceProgress};
+pub use ctx_history_refresh::{
+    explicit_catalog_request_is_accounted_for, optional_generation, RefreshIntent,
+    RefreshOutcomeClass, RefreshRequest, RefreshRequestState, RefreshRequestTrigger,
+    RefreshSelection, RefreshStatus, RefreshStatusKind, RefreshTerminalOutcome,
+    SourceBackedCurrentSourceProgress, SourceBackedRefreshReceipt,
+};
 
 #[cfg(test)]
 pub(crate) use ctx_history_refresh::{
-    open_verified_index, source_backed_index_root, EventWatermark, SourceBackedRefreshCurrent,
+    source_backed_index_root, EventWatermark, RefreshLogicalPhase, SourceBackedRefreshCurrent,
     SourceBackedRefreshExecution, SourceBackedRefreshExecutor, SourceBackedRefreshPublication,
     SourceBackedRefreshRouteResult, SourceBackedRefreshSourceFailure, SourceBackedRefreshTimings,
 };
@@ -72,22 +82,43 @@ pub(crate) fn publish_authoritative_empty_generation_for_test(
 }
 
 #[cfg(test)]
+pub(crate) fn commit_source_backed_generation_for_test(
+    writer: ctx_history_index::GenerationWriter,
+) -> ctx_history_index::Result<ctx_history_index::PublishedGeneration> {
+    writer.commit_with_generation_state(
+        |_| true,
+        |_| true,
+        |_| {
+            ctx_history_refresh::SourceBackedGenerationState::new(
+                None,
+                Vec::new(),
+                Default::default(),
+                Default::default(),
+                Vec::new(),
+            )?
+            .envelope()
+        },
+        |_| Ok(()),
+    )
+}
+
+#[cfg(test)]
 pub(crate) fn publish_authoritative_empty_generation_with_route_results_for_test(
     index_root: &Path,
-    request_id: &str,
-    operation: ctx_history_refresh::RefreshOperation,
+    _request_id: &str,
+    _operation: ctx_history_refresh::RefreshOperation,
     scope: ctx_history_capture::SourceBackedRefreshScope,
     published_explicit_source_catalog: Option<ExplicitSourceCatalogAuthority>,
     route_results: Option<Vec<SourceBackedRefreshRouteResult>>,
 ) -> Result<SourceBackedRefreshPublication> {
-    use ctx_history_index::{GenerationWriter, IndexError, SourceRouteIdentity, WriterOptions};
+    use ctx_history_index::{
+        GenerationWriter, SourceRouteIdentity, SourceRouteSnapshot, WriterOptions,
+    };
     use ctx_history_refresh::{
+        ExplicitSourceCatalogRouteBinding, SourceBackedGenerationState,
         SourceBackedZeroSourceAuthority, SourceBackedZeroSourceAuthorityKind,
     };
 
-    let previous_generation = open_verified_index(index_root)
-        .ok()
-        .map(|index| index.generation_id().to_owned());
     let selected_routes = match &scope {
         ctx_history_capture::SourceBackedRefreshScope::All => {
             vec![SourceRouteIdentity::from_sha256("ab".repeat(32))?]
@@ -122,58 +153,42 @@ pub(crate) fn publish_authoritative_empty_generation_with_route_results_for_test
             "authoritative-empty test fixture contains a duplicate route"
         ));
     }
-    let refresh_scope = match &scope {
-        ctx_history_capture::SourceBackedRefreshScope::All => json!({"kind": "all"}),
-        ctx_history_capture::SourceBackedRefreshScope::Exact(routes) => json!({
-            "kind": "exact",
-            "routes": routes.iter().map(SourceRouteIdentity::as_str).collect::<Vec<_>>(),
-        }),
-    };
-    let metadata_previous_generation = previous_generation.clone();
-    let metadata_route_results = route_results.clone();
-    let metadata_authority_routes = authority_routes.clone();
-    let metadata_catalog = published_explicit_source_catalog.clone();
-    let request_id = request_id.to_owned();
-    let published = GenerationWriter::open(index_root, WriterOptions::default())?
+    let binding_route = authority_routes
+        .first()
+        .ok_or_else(|| anyhow!("authoritative-empty test fixture has no route"))?;
+    let catalog_route_bindings = published_explicit_source_catalog
+        .as_ref()
+        .into_iter()
+        .flat_map(ExplicitSourceCatalogAuthority::route_lineages)
+        .map(|catalog_lineage| ExplicitSourceCatalogRouteBinding {
+            catalog_lineage,
+            route_identity: binding_route.as_str().to_owned(),
+        })
+        .collect::<Vec<_>>();
+    let generation_state = SourceBackedGenerationState::new(
+        published_explicit_source_catalog.clone(),
+        catalog_route_bindings.clone(),
+        Default::default(),
+        Default::default(),
+        Vec::new(),
+    )?
+    .envelope()?;
+    let mut writer = GenerationWriter::open(index_root, WriterOptions::default())?
         .into_writer()
-        .map_err(crate::committed_generation_recovery_error)?
-        .commit_with_publication_metadata(
-            |_| true,
-            move |context| {
-                let generation_id = context.generation_id().to_owned();
-                let generation_changed =
-                    metadata_previous_generation.as_deref() != Some(generation_id.as_str());
-                let receipt = SourceBackedRefreshReceipt {
-                    previous_generation: metadata_previous_generation.clone(),
-                    published_generation: generation_id.clone(),
-                    generation_changed,
-                    published_explicit_source_catalog: metadata_catalog.clone(),
-                    current: SourceBackedRefreshCurrent::default(),
-                    route_results: metadata_route_results.clone(),
-                    zero_source_authority: metadata_authority_routes
-                        .iter()
-                        .cloned()
-                        .map(|route_identity| SourceBackedZeroSourceAuthority {
-                            generation_id: generation_id.clone(),
-                            route_identity,
-                            kind: SourceBackedZeroSourceAuthorityKind::CompleteEmptyInventory,
-                        })
-                        .collect(),
-                    catalog_route_bindings: Vec::new(),
-                };
-                serde_json::to_vec(&json!({
-                    "version": ctx_history_refresh::SOURCE_REFRESH_PUBLICATION_METADATA_VERSION,
-                    "request_id": request_id,
-                    "operation": operation.as_str(),
-                    "refresh_scope": refresh_scope,
-                    "receipt": receipt.to_json(),
-                    "route_observations": vec![Value::Null; metadata_authority_routes.len()],
-                    "route_controls": {},
-                    "committed_rejection_diagnostics": {},
-                }))
-                .map_err(|error| IndexError::PublicationMetadata(error.to_string()))
-            },
-        )?;
+        .map_err(crate::committed_generation_recovery_error)?;
+    writer.set_present_source_routes(
+        authority_routes
+            .iter()
+            .cloned()
+            .map(|route| SourceRouteSnapshot::present(route, Vec::new()))
+            .collect::<ctx_history_index::Result<Vec<_>>>()?,
+    )?;
+    let published = writer.commit_with_generation_state(
+        |_| true,
+        |_| false,
+        |_| Ok(generation_state),
+        |_| Ok(()),
+    )?;
     let generation_id = published.receipt().generation_id.clone();
     let (_, _, verified_index) = published.into_parts();
     Ok(SourceBackedRefreshPublication {
@@ -193,7 +208,7 @@ pub(crate) fn publish_authoritative_empty_generation_with_route_results_for_test
                 kind: SourceBackedZeroSourceAuthorityKind::CompleteEmptyInventory,
             })
             .collect(),
-        catalog_route_bindings: Vec::new(),
+        catalog_route_bindings,
         verified_index: Some(Arc::new(verified_index)),
     })
 }
@@ -293,14 +308,14 @@ impl CoreRefreshEngine {
 
     pub(crate) fn with_config(config: &'static dyn crate::DaemonConfigPort) -> Self {
         Self(ctx_history_refresh::RefreshEngine::new(
-            Arc::new(DaemonRefreshJournal),
+            Arc::new(DaemonRefreshJournal::default()),
             Arc::new(CliTestRefreshRuntime { config }),
         ))
     }
 
     pub(crate) fn with_executor(executor: Arc<dyn SourceBackedRefreshExecutor>) -> Self {
         Self(ctx_history_refresh::RefreshEngine::with_executor(
-            Arc::new(DaemonRefreshJournal),
+            Arc::new(DaemonRefreshJournal::default()),
             Arc::new(CliTestRefreshRuntime {
                 config: &crate::test_support::CONFIG,
             }),
@@ -355,7 +370,7 @@ impl CoreRefreshEngine {
         );
         Self(
             ctx_history_refresh::RefreshEngine::with_admission_fence_for_test(
-                Arc::new(DaemonRefreshJournal),
+                Arc::new(DaemonRefreshJournal::default()),
                 Arc::new(CliTestRefreshRuntime {
                     config: &crate::test_support::CONFIG,
                 }),
@@ -393,193 +408,75 @@ impl CoreRefreshEngine {
     }
 }
 
-pub use ctx_daemon_refresh_client::{
-    PinnedSourceBackedGeneration, SourceBackedRefreshDaemonUnavailable, SourceBackedRefreshMode,
+#[allow(unused_imports)] // Stable typed terminal outcome for command/API integrations.
+pub use client::{
+    coordinate_import_source_backed_refresh_with_progress,
+    coordinate_setup_source_backed_refresh_with_progress, coordinate_source_backed_refresh,
+    coordinate_source_backed_refresh_with_progress,
+    coordinate_source_backed_refresh_with_retained_peer, SourceBackedRefreshDaemonUnavailable,
     SourceBackedRefreshObservation, SourceBackedRefreshPendingPublication,
     SourceBackedRefreshTerminalError,
 };
+pub use refresh_mode::SourceBackedRefreshMode;
+use request::SourceBackedRefreshRequest;
 
-#[cfg(test)]
-use ctx_history_refresh::SourceBackedRefreshReceipt;
+const SOURCE_REFRESH_REQUEST_OP: &str = "source_refresh_request";
+const SOURCE_REFRESH_STATUS_OP: &str = "source_refresh_status";
+const SOURCE_REFRESH_UNKNOWN_REQUEST_STATE: &str = "request_unknown";
+const SOURCE_REFRESH_UNKNOWN_REQUEST_ERROR_CODE: &str = "source_refresh_request_unknown";
+const SOURCE_REFRESH_POLL_INTERVAL: StdDuration = StdDuration::from_millis(50);
+const SOURCE_REFRESH_IPC_TIMEOUT: StdDuration = StdDuration::from_secs(2);
+const SOURCE_REFRESH_RESPONSE_MAX_BYTES: u64 = 64 * 1024;
 
-struct ServiceRefreshClientHost<'a>(&'a dyn crate::DaemonAvailabilityPort);
+pub struct PinnedSourceBackedGeneration(ctx_history_refresh::PinnedSourceBackedGeneration);
 
-impl SourceRefreshClientHost for ServiceRefreshClientHost<'_> {
-    fn ensure_available(
-        &self,
-        data_root: &Path,
-        trigger: ctx_history_refresh::RefreshRequestTrigger,
-        demand: SourceRefreshDaemonDemand,
-    ) -> Result<SourceRefreshDaemonAvailability> {
-        let trigger = match trigger {
-            ctx_history_refresh::RefreshRequestTrigger::Setup => crate::DaemonTrigger::Setup,
-            ctx_history_refresh::RefreshRequestTrigger::Search => crate::DaemonTrigger::Search,
-            ctx_history_refresh::RefreshRequestTrigger::Import => crate::DaemonTrigger::Import,
-        };
-        let demand = match demand {
-            SourceRefreshDaemonDemand::Background => crate::DaemonAvailabilityDemand::Background,
-            SourceRefreshDaemonDemand::ExplicitWait => {
-                crate::DaemonAvailabilityDemand::ExplicitWait
-            }
-        };
-        match self.0.ensure_available(data_root, trigger, demand)? {
-            crate::DaemonAvailability::Available => Ok(SourceRefreshDaemonAvailability::Available),
-            crate::DaemonAvailability::Disabled => Ok(SourceRefreshDaemonAvailability::Disabled),
-        }
+impl PinnedSourceBackedGeneration {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn from_index(index: ctx_history_index::VerifiedIndex) -> Self {
+        Self(ctx_history_refresh::PinnedSourceBackedGeneration::from_index(index))
     }
 
-    fn checkpoint(&self) -> Result<()> {
-        self.0.checkpoint()
+    pub fn generation_id(&self) -> &str {
+        self.0.generation_id()
     }
 
-    fn interrupted(&self, error: &anyhow::Error) -> bool {
-        self.0.interrupted(error)
+    pub fn semantic_eligible_event_count(&self) -> Result<u64> {
+        self.0.semantic_eligible_event_count()
     }
 
-    fn pause(&self, duration: StdDuration) -> Result<()> {
-        self.0.pause(duration)
+    pub fn verified_index(&self) -> &ctx_history_index::VerifiedIndex {
+        self.0.verified_index()
     }
 
-    fn source_refresh_request(
-        &self,
-        data_root: &Path,
-        request: Value,
-        timeout: StdDuration,
-        max_response_bytes: u64,
-    ) -> Result<Option<Value>> {
-        super::query_service::daemon_source_refresh_request_with_cancellation(
-            self.0,
-            data_root,
-            request,
-            timeout,
-            max_response_bytes,
-        )
-        .map_err(|error| {
-            let request_may_have_been_submitted = super::query_service::DaemonSourceRefreshServiceUnavailable::request_may_have_been_submitted(&error);
-            if request_may_have_been_submitted || error
-                .downcast_ref::<super::query_service::DaemonSourceRefreshServiceUnavailable>()
-                .is_some()
-            {
-                SourceRefreshTransportUnavailable::new(request_may_have_been_submitted).into()
-            } else {
-                error
-            }
-        })
+    pub fn into_index(self) -> ctx_history_index::VerifiedIndex {
+        self.0.into_index()
     }
-
-    fn pin_published_generation(
-        &self,
-        data_root: &Path,
-    ) -> Result<Option<PinnedSourceBackedGeneration>> {
-        pin_published_generation(data_root)
-    }
-
-    fn pin_active_verified_generation(
-        &self,
-        data_root: &Path,
-    ) -> Result<PinnedSourceBackedGeneration> {
-        pin_active_verified_generation(data_root)
-    }
-
-    fn pin_retained_generation(
-        &self,
-        data_root: &Path,
-        generation_id: &str,
-    ) -> Result<PinnedSourceBackedGeneration> {
-        pin_retained_generation(data_root, generation_id)
-    }
-}
-
-pub fn coordinate_source_backed_refresh(
-    availability: &dyn crate::DaemonAvailabilityPort,
-    data_root: &Path,
-    mode: SourceBackedRefreshMode,
-) -> Result<SourceBackedRefreshObservation> {
-    ctx_daemon_refresh_client::coordinate_source_backed_refresh(
-        &ServiceRefreshClientHost(availability),
-        data_root,
-        mode,
-    )
-}
-
-pub fn coordinate_source_backed_refresh_with_progress(
-    availability: &dyn crate::DaemonAvailabilityPort,
-    data_root: &Path,
-    mode: SourceBackedRefreshMode,
-    report_progress: &mut dyn FnMut(&RefreshStatus) -> Result<()>,
-) -> Result<SourceBackedRefreshObservation> {
-    ctx_daemon_refresh_client::coordinate_source_backed_refresh_with_progress(
-        &ServiceRefreshClientHost(availability),
-        data_root,
-        mode,
-        report_progress,
-    )
-}
-
-pub fn coordinate_setup_source_backed_refresh_with_progress(
-    availability: &dyn crate::DaemonAvailabilityPort,
-    data_root: &Path,
-    mode: SourceBackedRefreshMode,
-    report_progress: &mut dyn FnMut(&RefreshStatus) -> Result<()>,
-) -> Result<SourceBackedRefreshObservation> {
-    ctx_daemon_refresh_client::coordinate_setup_source_backed_refresh_with_progress(
-        &ServiceRefreshClientHost(availability),
-        data_root,
-        mode,
-        report_progress,
-    )
-}
-
-pub fn coordinate_import_source_backed_refresh_with_progress(
-    availability: &dyn crate::DaemonAvailabilityPort,
-    data_root: &Path,
-    mode: SourceBackedRefreshMode,
-    selection: RefreshSelection,
-    allow_daemon_autostart: bool,
-    report_progress: &mut dyn FnMut(&RefreshStatus) -> Result<()>,
-) -> Result<SourceBackedRefreshObservation> {
-    ctx_daemon_refresh_client::coordinate_import_source_backed_refresh_with_progress(
-        &ServiceRefreshClientHost(availability),
-        data_root,
-        mode,
-        selection,
-        allow_daemon_autostart,
-        report_progress,
-    )
-}
-
-#[cfg(test)]
-fn wait_for_published_generation(
-    data_root: &Path,
-    request_id: String,
-    mode: SourceBackedRefreshMode,
-    operation: ctx_history_refresh::RefreshOperation,
-    expected_catalog: Option<&ExplicitSourceCatalogAuthority>,
-    allow_daemon_autostart: bool,
-) -> Result<SourceBackedRefreshObservation> {
-    ctx_daemon_refresh_client::testing::wait_for_published_generation(
-        &ServiceRefreshClientHost(&crate::test_support::AVAILABILITY),
-        data_root,
-        request_id,
-        mode,
-        operation,
-        expected_catalog,
-        allow_daemon_autostart,
-    )
 }
 
 pub(crate) fn pin_published_generation(
     data_root: &Path,
 ) -> Result<Option<PinnedSourceBackedGeneration>> {
+    Ok(ctx_history_refresh::pin_published_generation(data_root)?.map(PinnedSourceBackedGeneration))
+}
+
+pub(crate) fn pin_published_generation_with_retained_peer(
+    data_root: &Path,
+) -> Result<Option<PinnedSourceBackedGeneration>> {
     Ok(
-        ctx_history_refresh::pin_published_generation(data_root, &DaemonRefreshJournal)?
-            .map(PinnedSourceBackedGeneration::from_refresh_pin),
+        ctx_history_refresh::pin_published_generation_with_retained_peer(data_root)?
+            .map(PinnedSourceBackedGeneration),
     )
 }
 
 pub fn pin_active_verified_generation(data_root: &Path) -> Result<PinnedSourceBackedGeneration> {
-    ctx_history_refresh::pin_active_verified_generation(data_root, &DaemonRefreshJournal)
-        .map(PinnedSourceBackedGeneration::from_refresh_pin)
+    ctx_history_refresh::pin_active_verified_generation(data_root).map(PinnedSourceBackedGeneration)
+}
+
+pub fn pin_active_verified_generation_with_retained_peer(
+    data_root: &Path,
+) -> Result<PinnedSourceBackedGeneration> {
+    ctx_history_refresh::pin_active_verified_generation_with_retained_peer(data_root)
+        .map(PinnedSourceBackedGeneration)
 }
 
 pub(crate) fn pin_retained_generation(
@@ -587,7 +484,22 @@ pub(crate) fn pin_retained_generation(
     generation_id: &str,
 ) -> Result<PinnedSourceBackedGeneration> {
     ctx_history_refresh::pin_retained_generation(data_root, generation_id)
-        .map(PinnedSourceBackedGeneration::from_refresh_pin)
+        .map(PinnedSourceBackedGeneration)
+}
+
+pub(crate) fn pin_retained_generation_with_retained_peer(
+    data_root: &Path,
+    generation_id: &str,
+) -> Result<PinnedSourceBackedGeneration> {
+    ctx_history_refresh::pin_retained_generation_with_retained_peer(data_root, generation_id)
+        .map(PinnedSourceBackedGeneration)
+}
+
+fn published_refresh_receipt(
+    response: &Value,
+    pin: &PinnedSourceBackedGeneration,
+) -> Result<SourceBackedRefreshReceipt> {
+    ctx_history_refresh::published_refresh_receipt(response, &pin.0)
 }
 
 pub(super) fn source_backed_watch_catalog(
@@ -605,14 +517,10 @@ pub fn published_explicit_source_relocation_authority(
     ctx_history_refresh::published_explicit_source_relocation_authority(
         data_root,
         old_path,
-        &DaemonRefreshJournal,
+        &DaemonRefreshJournal::default(),
     )
 }
 
 #[cfg(test)]
 #[path = "source_backed_refresh_coordinator/restart_recovery_tests.rs"]
 mod restart_recovery_tests;
-
-#[cfg(all(test, unix))]
-#[path = "source_backed_refresh_coordinator/client_transport_recovery_tests.rs"]
-mod client_transport_recovery_tests;

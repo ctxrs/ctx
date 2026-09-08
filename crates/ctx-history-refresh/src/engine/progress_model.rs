@@ -46,30 +46,7 @@ impl SourceBackedRefreshStage {
     }
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub(super) enum SourceBackedRefreshState {
-    AdmissionPending,
-    Queued,
-    Running,
-    Published,
-    Failed,
-}
-
-impl SourceBackedRefreshState {
-    pub(super) fn as_str(self) -> &'static str {
-        match self {
-            Self::AdmissionPending => "admission_pending",
-            Self::Queued => "queued",
-            Self::Running => "running",
-            Self::Published => "published",
-            Self::Failed => "failed",
-        }
-    }
-
-    pub(super) fn is_active(self) -> bool {
-        matches!(self, Self::AdmissionPending | Self::Queued | Self::Running)
-    }
-}
+pub(super) type SourceBackedRefreshState = RefreshRequestState;
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct SourceBackedRefreshProgress {
     pub phase: String,

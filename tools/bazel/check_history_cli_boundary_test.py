@@ -117,6 +117,159 @@ class HistoryCliBoundaryMutations(unittest.TestCase):
     def test_clean_head_passes(self) -> None:
         self.validate()
 
+    def test_semantic_cargo_dependency_resolves_in_dev_scope(self) -> None:
+        for kind in ("renamed", "workspace"):
+            with self.subTest(kind=kind):
+                self.reset()
+                dependency = 'semantic_alias = { package = "ctx-semantic-index", path = "../ctx-semantic-index" }\n'
+                if kind == "workspace":
+                    self.replace(self.root / "Cargo.toml", "[patch.crates-io]", dependency + "[patch.crates-io]")
+                    dependency = "semantic_alias.workspace = true\n"
+                self.replace(
+                    self.history_cargo,
+                    'ctx-semantic-index = { path = "../ctx-semantic-index" }\n',
+                    dependency,
+                )
+                self.validate()
+
+    def test_semantic_cargo_dependency_cannot_move_out_of_dev_scope(self) -> None:
+        for kind in ("direct", "renamed", "workspace"):
+            for table in (
+                "dependencies",
+                "build-dependencies",
+                "target.'cfg(unix)'.dependencies",
+                "target.'cfg(unix)'.build-dependencies",
+                "target.'cfg(unix)'.dev-dependencies",
+            ):
+                with self.subTest(kind=kind, table=table):
+                    self.reset()
+                    original = 'ctx-semantic-index = { path = "../ctx-semantic-index" }\n'
+                    dependency = original
+                    if kind != "direct":
+                        dependency = 'semantic_alias = { package = "ctx-semantic-index", path = "../ctx-semantic-index" }\n'
+                    if kind == "workspace":
+                        self.replace(self.root / "Cargo.toml", "[patch.crates-io]", dependency + "[patch.crates-io]")
+                        dependency = "semantic_alias.workspace = true\n"
+                    self.replace(self.history_cargo, original, "")
+                    if table == "dependencies":
+                        self.replace(self.history_cargo, "[dependencies]\n", "[dependencies]\n" + dependency)
+                    else:
+                        self.history_cargo.write_text(
+                            self.history_cargo.read_text(encoding="utf-8") + f"\n[{table}]\n" + dependency,
+                            encoding="utf-8",
+                        )
+                    with self.assertRaisesRegex(BoundaryError, "ctx-semantic-index must appear exactly once in dev-dependencies"):
+                        self.validate()
+
+    def test_semantic_cargo_dependency_is_required_and_unique(self) -> None:
+        original = 'ctx-semantic-index = { path = "../ctx-semantic-index" }\n'
+        for replacement in (
+            "",
+            original + 'semantic_alias = { package = "ctx-semantic-index", path = "../ctx-semantic-index" }\n',
+        ):
+            with self.subTest(replacement=replacement):
+                self.reset()
+                self.replace(self.history_cargo, original, replacement)
+                with self.assertRaisesRegex(BoundaryError, "ctx-semantic-index must appear exactly once in dev-dependencies"):
+                    self.validate()
+
+    def test_unit_test_dependency_inventory_is_exact(self) -> None:
+        original = 'HISTORY_CLI_UNIT_TEST_DEPS = [\n    "//crates/ctx-semantic-index:lib",\n]'
+        for value, error in (
+            ("[]", "inventory drifted"),
+            ('["//crates/ctx-terminal:lib"]', "inventory drifted"),
+            ('["//crates/ctx-semantic-index:lib", "//crates/ctx-agent-application:lib"]', "inventory drifted"),
+            ('["//crates/ctx-semantic-index:lib", "//crates/ctx-semantic-index:lib"]', "duplicate labels"),
+            ('["//crates/ctx-semantic-index:lib"] + ["//crates/ctx-agent-application:lib"]', "standalone literal string list"),
+            ('["//crates/ctx-semantic-index:lib"] if True else ["//crates/ctx-agent-application:lib"]', "standalone literal string list"),
+        ):
+            with self.subTest(value=value):
+                self.reset()
+                self.replace(self.history_build, original, "HISTORY_CLI_UNIT_TEST_DEPS = " + value)
+                with self.assertRaisesRegex(BoundaryError, "HISTORY_CLI_UNIT_TEST_DEPS.*" + error):
+                    self.validate()
+
+    def test_unit_test_dependency_inventory_cannot_be_loaded_rebound_or_copied(self) -> None:
+        original = 'HISTORY_CLI_UNIT_TEST_DEPS = [\n    "//crates/ctx-semantic-index:lib",\n]'
+        cases = (
+            (
+                '"aliases", "all_crate_deps", "crate_edition")',
+                '"aliases", "all_crate_deps", "crate_edition", "HISTORY_CLI_UNIT_TEST_DEPS")',
+                "must be a local literal",
+            ),
+            (original, original + '\nHISTORY_CLI_UNIT_TEST_DEPS = []', "inventory drifted"),
+            (original, 'HISTORY_CLI_UNIT_TEST_DEPS = OTHER_TEST_DEPS\nOTHER_TEST_DEPS = ["//crates/ctx-semantic-index:lib"]', "must be a literal string list"),
+            (original, original + '\nCOPIED_DEPS = HISTORY_CLI_UNIT_TEST_DEPS', "may only be assigned"),
+            (original, original + '\nHISTORY_CLI_UNIT_TEST_DEPS.append("//crates/ctx-agent-application:lib")', "unsupported rule or macro"),
+        )
+        for before, after, error in cases:
+            with self.subTest(after=after):
+                self.reset()
+                self.replace(self.history_build, before, after)
+                with self.assertRaisesRegex(BoundaryError, error):
+                    self.validate()
+
+    def test_unit_test_dependency_cannot_feed_other_targets(self) -> None:
+        unit_deps = "deps = all_crate_deps(normal = True, normal_dev = True) + HISTORY_CLI_DEPS"
+        for before, after, error, move in (
+            (
+                "deps = all_crate_deps(normal = True) + HISTORY_CLI_DEPS,",
+                "deps = all_crate_deps(normal = True) + HISTORY_CLI_DEPS + HISTORY_CLI_UNIT_TEST_DEPS,",
+                "rust_library deps must be exactly",
+                True,
+            ),
+            (
+                "deps = all_crate_deps(normal = True) + HISTORY_CLI_TEST_SUPPORT_DEPS,",
+                "deps = all_crate_deps(normal = True) + HISTORY_CLI_TEST_SUPPORT_DEPS + HISTORY_CLI_UNIT_TEST_DEPS,",
+                "rust_library deps must be exactly",
+                True,
+            ),
+            (
+                unit_deps + " + [",
+                unit_deps + " + HISTORY_CLI_UNIT_TEST_DEPS + [",
+                "may only be assigned and used by its reviewed targets",
+                False,
+            ),
+        ):
+            with self.subTest(after=after):
+                self.reset()
+                if move:
+                    # Preserve the use count so the library's exact expression
+                    # must reject the otherwise valid inventory.
+                    self.replace(self.history_build, unit_deps + " + HISTORY_CLI_UNIT_TEST_DEPS,", unit_deps + ",")
+                self.replace(self.history_build, before, after)
+                with self.assertRaisesRegex(BoundaryError, error):
+                    self.validate()
+
+    def test_unit_test_dependency_cannot_enter_proc_macros_or_arbitrary_suffixes(self) -> None:
+        for before, after, error in (
+            (
+                "proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),",
+                'proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True) + ["//crates/ctx-semantic-index:lib"],',
+                "proc_macro_deps must be exactly",
+            ),
+            (
+                "+ HISTORY_CLI_DEPS + HISTORY_CLI_UNIT_TEST_DEPS,",
+                '+ HISTORY_CLI_DEPS + HISTORY_CLI_UNIT_TEST_DEPS + ["//crates/ctx-agent-application:lib"],',
+                "ctx_rust_test deps must be exactly",
+            ),
+            (
+                "+ HISTORY_CLI_DEPS + HISTORY_CLI_UNIT_TEST_DEPS,",
+                "+ HISTORY_CLI_UNIT_TEST_DEPS + HISTORY_CLI_DEPS,",
+                "ctx_rust_test deps must be exactly",
+            ),
+            (
+                "+ HISTORY_CLI_DEPS + [\n",
+                '+ HISTORY_CLI_DEPS + ["//crates/ctx-semantic-index:lib"] + [\n',
+                "request_parity_tests deps must be exactly",
+            ),
+        ):
+            with self.subTest(after=after):
+                self.reset()
+                self.replace(self.history_build, before, after)
+                with self.assertRaisesRegex(BoundaryError, error):
+                    self.validate()
+
     def test_renamed_workspace_and_target_cargo_dependencies_fail_closed(self) -> None:
         cases = (
             (

@@ -411,7 +411,6 @@ fn publish_unchecked_generation(
         &serde_json::to_string(&CommitPayload {
             version: COMMIT_PAYLOAD_VERSION,
             generation_id: generation_id.clone(),
-            publication_metadata: None,
         })
         .unwrap(),
     );

@@ -101,11 +101,11 @@ fn failed_provider_refresh_event(
         return None;
     };
     let outcome = logical.structured_outcome?;
-    if !outcome.code.is_failure() {
+    if !outcome.code().is_failure() {
         return None;
     }
-    let retained_previous_generation = outcome.retained_generation.is_some();
-    let (failure_scope, failure_type) = terminal_failure(outcome.code);
+    let retained_previous_generation = outcome.retained_generation().is_some();
+    let (failure_scope, failure_type) = terminal_failure(outcome.code());
     let counts = provider
         .map(|_| ProviderRefreshCountsV1::sparse(None, progress_u64(job, "processed_bytes")));
     Some(PublicEventV1::ProviderRefreshCompleted(
@@ -121,9 +121,9 @@ fn failed_provider_refresh_event(
                 core_result: ProviderCoreResult::Failure,
                 failure_scope,
                 failure_type,
-                failure_code: terminal_failure_code(outcome.code),
-                retryable: outcome.retryable,
-                work_remaining: successor_pending || outcome.retryable,
+                failure_code: terminal_failure_code(outcome.code()),
+                retryable: outcome.retryable(),
+                work_remaining: successor_pending || outcome.retryable(),
                 counts,
             },
         )

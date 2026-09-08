@@ -9,6 +9,22 @@ use anyhow::{anyhow, bail, Context as _, Result};
 #[cfg(windows)]
 use super::windows_file_information;
 use super::{file_information, validate_absolute_root};
+
+/// Marks only a failed removal syscall or directory sync, never inspection.
+#[derive(Debug)]
+pub(crate) struct RemovalIo(pub(crate) std::io::Error);
+
+impl std::fmt::Display for RemovalIo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.0, f)
+    }
+}
+
+impl std::error::Error for RemovalIo {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.0)
+    }
+}
 #[cfg(windows)]
 use std::fs::OpenOptions;
 
@@ -154,44 +170,6 @@ impl SecureDirectory {
             file,
             _ancestors: handles,
         })
-    }
-
-    #[cfg(windows)]
-    pub(super) fn guard_path_identity(&self, path: &Path) -> Result<File> {
-        use std::os::windows::fs::{MetadataExt as _, OpenOptionsExt as _};
-        use windows_sys::Win32::Storage::FileSystem::{
-            FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-            FILE_GENERIC_READ, FILE_SHARE_READ, FILE_SHARE_WRITE, READ_CONTROL,
-        };
-
-        let mut options = OpenOptions::new();
-        options
-            .access_mode(FILE_GENERIC_READ | READ_CONTROL)
-            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
-            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
-        let guard = options.open(path).with_context(|| {
-            format!(
-                "open non-delete-sharing managed-pair root {}",
-                path.display()
-            )
-        })?;
-        let metadata = guard.metadata()?;
-        if !metadata.is_dir() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-            bail!(
-                "managed-pair installation root is not a no-follow directory: {}",
-                path.display()
-            );
-        }
-        ctx_history_platform::platform_security::verify_private_directory_handle(&guard)?;
-        let expected = file_information(&self.file, "managed-pair installation root")?;
-        let actual = file_information(&guard, "managed-pair guarded installation root")?;
-        if expected.0 != actual.0 || expected.1 != actual.1 {
-            bail!(
-                "managed-pair installation root changed before it could be guarded: {}",
-                path.display()
-            );
-        }
-        Ok(guard)
     }
 
     #[cfg(not(any(unix, windows)))]
@@ -340,44 +318,6 @@ impl SecureDirectory {
         )
     }
 
-    #[cfg(windows)]
-    pub(super) fn open_lock(&self, name: &OsStr, _path: &Path) -> Result<File> {
-        use windows_sys::Win32::Storage::FileSystem::{
-            FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_READ, FILE_SHARE_WRITE, READ_CONTROL,
-            SYNCHRONIZE,
-        };
-        self.open_relative(
-            name,
-            FILE_GENERIC_READ | FILE_GENERIC_WRITE | READ_CONTROL | SYNCHRONIZE,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
-            windows_sys::Wdk::Storage::FileSystem::FILE_OPEN,
-        )
-    }
-
-    #[cfg(unix)]
-    pub(super) fn open_lock(&self, name: &OsStr, path: &Path) -> Result<File> {
-        self.open_file(name, path)
-    }
-
-    #[cfg(windows)]
-    pub(super) fn create_lock(&self, name: &OsStr, _path: &Path) -> Result<File> {
-        use windows_sys::Win32::Storage::FileSystem::{
-            FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_READ, FILE_SHARE_WRITE, READ_CONTROL,
-            SYNCHRONIZE, WRITE_DAC,
-        };
-        self.open_relative(
-            name,
-            FILE_GENERIC_READ | FILE_GENERIC_WRITE | READ_CONTROL | WRITE_DAC | SYNCHRONIZE,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
-            windows_sys::Wdk::Storage::FileSystem::FILE_CREATE,
-        )
-    }
-
-    #[cfg(unix)]
-    pub(super) fn create_lock(&self, name: &OsStr, path: &Path) -> Result<File> {
-        self.create_new(name, path, false)
-    }
-
     #[cfg(unix)]
     #[allow(clippy::unnecessary_cast)]
     pub(super) fn entry_metadata(
@@ -456,7 +396,8 @@ impl SecureDirectory {
         let name = CString::new(name.as_bytes())
             .map_err(|_| anyhow!("managed-pair file name contains a NUL"))?;
         if unsafe { libc::unlinkat(self.file.as_raw_fd(), name.as_ptr(), 0) } != 0 {
-            return Err(std::io::Error::last_os_error()).context("unlink managed-pair file");
+            return Err(RemovalIo(std::io::Error::last_os_error()))
+                .context("unlink managed-pair file");
         }
         Ok(())
     }
@@ -485,7 +426,7 @@ impl SecureDirectory {
             )
         } == 0
         {
-            return Err(std::io::Error::last_os_error())
+            return Err(RemovalIo(std::io::Error::last_os_error()))
                 .context("unlink untrusted managed-pair file by handle");
         }
         Ok(())
@@ -501,7 +442,7 @@ impl SecureDirectory {
             .map_err(|_| anyhow!("managed-pair directory name contains a NUL"))?;
         if unsafe { libc::unlinkat(self.file.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR) } != 0
         {
-            return Err(std::io::Error::last_os_error())
+            return Err(RemovalIo(std::io::Error::last_os_error()))
                 .context("remove managed-pair directory relative to retained parent");
         }
         Ok(())
@@ -532,7 +473,7 @@ impl SecureDirectory {
             )
         } == 0
         {
-            return Err(std::io::Error::last_os_error())
+            return Err(RemovalIo(std::io::Error::last_os_error()))
                 .context("remove managed-pair directory by retained parent handle");
         }
         Ok(())
@@ -635,7 +576,7 @@ impl SecureDirectory {
 
     pub(super) fn sync(&self) -> Result<()> {
         #[cfg(unix)]
-        self.file.sync_all()?;
+        self.file.sync_all().map_err(RemovalIo)?;
         Ok(())
     }
 }

@@ -100,9 +100,6 @@ fn neutral_commit_debug_does_not_require_a_debug_verified_pin() {
     assert_eq!(disposition, CapturePublicationDisposition::Reused);
     assert_eq!(receipt.into_parts().0, "generation");
     let _opaque = verified.into_inner();
-
-    let context = CapturePublicationContext::new("generation", ());
-    assert_eq!(context.into_parts().0, "generation");
 }
 
 #[test]

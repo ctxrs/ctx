@@ -291,6 +291,36 @@ fn route_bytes(registry: &SourceBackedProviderRegistry) -> Vec<RouteBytes> {
     routes
 }
 
+fn normalized_route_controls(route_controls: &BTreeMap<SourceRouteIdentity, Vec<u8>>) -> Vec<u8> {
+    const HERMES_EXACT_INTERVAL_MS: i64 = 60 * 60 * 1_000;
+
+    let normalized = route_controls
+        .iter()
+        .map(|(route, control)| {
+            let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(control) else {
+                return (route.clone(), control.clone());
+            };
+            if value.get("kind").and_then(serde_json::Value::as_str)
+                != Some("hermes-route-control-v1")
+            {
+                return (route.clone(), control.clone());
+            }
+            let object = value.as_object_mut().unwrap();
+            let last_exact = object["last_successful_exhaustive_at_ms"].as_i64().unwrap();
+            let exact_due = object["exact_due_at_ms"].as_i64().unwrap();
+            let exact_interval = exact_due.checked_sub(last_exact).unwrap();
+            assert_eq!(
+                exact_interval, HERMES_EXACT_INTERVAL_MS,
+                "Hermes route {route:?} must retain its one-hour exact interval"
+            );
+            object.insert("last_successful_exhaustive_at_ms".to_owned(), 0.into());
+            object.insert("exact_due_at_ms".to_owned(), exact_interval.into());
+            (route.clone(), serde_json::to_vec(&value).unwrap())
+        })
+        .collect::<BTreeMap<_, _>>();
+    serde_json::to_vec(&normalized).unwrap()
+}
+
 fn publication_bytes(
     index_root: &Path,
     registry: &SourceBackedProviderRegistry,
@@ -318,7 +348,7 @@ fn publication_bytes(
     sources.sort();
     let aggregates = serde_json::to_vec(&manifest.core_record_aggregates).unwrap();
     let source_routes = serde_json::to_vec(manifest.source_routes()).unwrap();
-    let route_controls = serde_json::to_vec(&receipt.route_controls).unwrap();
+    let route_controls = normalized_route_controls(&receipt.route_controls);
     let mut records = search_event_candidates(&index, marker, 32)
         .into_iter()
         .filter_map(|candidate| {
@@ -997,16 +1027,16 @@ fn matching_released_roots_reproduce_automatic_authority_and_record_bytes() {
                 automatic_routes,
                 "{provider} automatic={automatic_enabled} route authority"
             );
-            assert_eq!(
-                publication_bytes(
+            assert_publication_bytes_eq(
+                &publication_bytes(
                     &temp
                         .path()
                         .join(format!("configured-index-{automatic_enabled}")),
                     &configured.registry,
                     fixture.marker,
                 ),
-                automatic_publication,
-                "{provider} automatic={automatic_enabled} source/session/event bytes"
+                &automatic_publication,
+                &format!("{provider} automatic={automatic_enabled}"),
             );
         }
     }

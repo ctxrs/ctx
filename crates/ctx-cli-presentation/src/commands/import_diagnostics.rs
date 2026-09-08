@@ -140,16 +140,11 @@ fn push_escaped_character(rendered: &mut String, character: char) {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Write as _;
-
     use super::*;
-    use crate::ui::{ColorMode, StreamKind, TestContext};
-
-    fn strip_ansi(rendered: &str) -> String {
-        let mut stream = anstream::StripStream::new(Vec::new());
-        stream.write_all(rendered.as_bytes()).unwrap();
-        String::from_utf8(stream.into_inner()).unwrap()
-    }
+    use crate::{
+        test_support::strip_ansi,
+        ui::{ColorMode, StreamKind, TestContext},
+    };
 
     #[test]
     fn missing_import_path_is_a_separate_exact_field_at_all_contract_widths() {

@@ -56,7 +56,13 @@ def envelope(operation: str, backend: Mapping[str, Any], **payload: Any) -> Json
             }
         )
     )
+    if operation in ("status", "init") and isinstance(result.get("status"), Mapping):
+        result["status"] = without_status_locality(result["status"])
     return result
+
+
+def without_status_locality(status: Mapping[str, Any]) -> Status:
+    return cast(Status, {key: value for key, value in status.items() if key not in ("localOnly", "local_only")})
 
 
 def normalize_status(raw: Mapping[str, Any]) -> Status:
@@ -73,7 +79,6 @@ def normalize_status(raw: Mapping[str, Any]) -> Status:
         _drop_none(
             {
                 "initialized": initialized,
-                "localOnly": True,
                 **{
                     key: current.get(key)
                     for key in (
@@ -219,13 +224,15 @@ def _normalize_event_record(value: Any) -> Any:
                 details={"member": key},
             )
 
-    normalized = _camelize_public(
-        {
-            key: nested
-            for key, nested in value.items()
-            if key not in wire_keys and key not in exchange_wire_keys
-        }
-    )
+    normalized = {
+        _snake_to_camel(key): (
+            _camelize_public(nested) if key in {"content", "citations"} else nested
+        )
+        for key, nested in value.items()
+        if key not in wire_keys and key not in exchange_wire_keys
+        and key not in {"schema_version", "target", "item_type", "itemType",
+                        "payload_type", "payloadType", "record_type", "recordType"}
+    }
     if wire_keys:
         normalized["mcpToolCall"] = _validate_mcp_tool_call(value[wire_keys[0]])
     if exchange_wire_keys:

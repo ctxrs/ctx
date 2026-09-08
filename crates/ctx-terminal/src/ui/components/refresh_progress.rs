@@ -212,6 +212,7 @@ impl RefreshProgressSnapshot {
     }
 }
 
+/// Terminal-neutral presentation projection of engine refresh request state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RefreshRequestState {
     AdmissionPending,
@@ -294,13 +295,16 @@ pub struct RefreshStructuredOutcome {
     pub published_generation: Option<String>,
     pub retry_advice: Option<String>,
     pub detail: Option<String>,
-    pub failure: bool,
+    pub presentation: RefreshTerminalPresentation,
 }
-impl RefreshStructuredOutcome {
-    fn is_failure(&self) -> bool {
-        self.failure
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefreshTerminalPresentation {
+    Complete,
+    CompleteWithIssues,
+    Failed,
+}
 
+impl RefreshStructuredOutcome {
     fn to_json(&self) -> Value {
         let mut value = json!({
             "code": self.code,
@@ -727,17 +731,12 @@ fn terminal_label(logical: &RefreshLogicalStatus) -> &'static str {
     logical
         .structured_outcome
         .as_ref()
-        .map(|outcome| {
-            if outcome.is_failure() {
-                "History refresh failed"
-            } else if matches!(
-                outcome.code.as_str(),
-                "completed" | "completed_with_rejections"
-            ) {
-                "History refresh complete"
-            } else {
+        .map(|outcome| match outcome.presentation {
+            RefreshTerminalPresentation::Complete => "History refresh complete",
+            RefreshTerminalPresentation::CompleteWithIssues => {
                 "History refresh complete with issues"
             }
+            RefreshTerminalPresentation::Failed => "History refresh failed",
         })
         .unwrap_or("History refresh complete")
 }

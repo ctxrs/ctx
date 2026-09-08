@@ -1,5 +1,8 @@
 use std::fs;
 
+use super::super::test_support::{
+    assert_automatic_role, provider_source_for_path, source_paths, tempdir, write_fixture,
+};
 use super::*;
 
 fn resolve(context: &DiscoveryContext, spec: &ProviderSourceSpec) -> DiscoveryReport {
@@ -10,23 +13,8 @@ fn resolve(context: &DiscoveryContext, spec: &ProviderSourceSpec) -> DiscoveryRe
     )
 }
 
-fn provider_source_for_path(
-    provider: CaptureProvider,
-    path: PathBuf,
-) -> crate::provider_sources::ProviderSource {
-    crate::provider_sources::provider_source_for_path(
-        &crate::provider_sources::TEST_PROVIDER_PROBES,
-        provider,
-        path,
-    )
-}
 use crate::provider_sources::context::DiscoveryPlatformDirs;
 use crate::ProviderSourceStatus;
-
-fn tempdir() -> tempfile::TempDir {
-    crate::test_support_paths::tempdir()
-        .expect("system temporary directory should support resolver fixtures")
-}
 
 fn context(home: &Path, cwd: &Path) -> DiscoveryContext {
     DiscoveryContext::new(
@@ -50,32 +38,11 @@ fn spec(provider: CaptureProvider) -> &'static ProviderSourceSpec {
 }
 
 fn write(path: &Path, body: &str) {
-    fs::create_dir_all(path.parent().expect("fixture path has a parent")).unwrap();
-    fs::write(path, body).unwrap();
-}
-
-fn assert_automatic_role(source: &crate::provider_sources::ProviderSource, components: &[&[u8]]) {
-    let expected =
-        ctx_history_capture_model::ProviderRouteRole::from_dynamic(components.iter().copied())
-            .expect("expected test role should be bounded");
-    assert_eq!(
-        source.route_provenance.automatic_route_role(),
-        Some(&expected),
-        "unexpected route role for {}",
-        source.path.display()
-    );
+    write_fixture(path, body);
 }
 
 fn touch(path: &Path) {
     write(path, "");
-}
-
-fn source_paths(report: &DiscoveryReport) -> Vec<PathBuf> {
-    report
-        .sources
-        .iter()
-        .map(|source| source.path.clone())
-        .collect()
 }
 
 #[test]

@@ -10,10 +10,9 @@ ctx emits only five durable, content-free event families:
 
 On the wire, each family is represented by `event_name` plus
 `event_version: 1`. Producers use closed enums and typed payloads; arbitrary
-property maps are not part of the producer API. The first four fixtures show
-valid batch event envelopes, not an exhaustive list of every operation-specific
-property. The `install_stage@1` fixture is the exact standalone hosted endpoint
-body.
+property maps are not part of the producer API. The batch fixtures show valid
+event envelopes, not an exhaustive list of every operation-specific property.
+The `install_stage@1` fixture is the exact standalone hosted endpoint body.
 
 Every batch event has a UUIDv4 `event_id`, a minute-rounded `occurred_at`, a
 closed `surface`, a closed `outcome`, and a coarse `duration_bucket`.
@@ -60,7 +59,38 @@ multi-provider refresh never copies one aggregate duration into every provider
 event. Daemon terminals may additionally report only whether a successor is
 pending and, for failures, whether the previous generation was retained.
 `runtime_observation@1` is reserved for low-frequency lifecycle and liveness
-observations. `analytics_delivery_observation@1` carries exactly bucketed queue
+observations. Daemon `ready` and jittered 23–24-hour `liveness` observations may
+carry one best-effort storage sidecar. No other runtime operation carries it,
+and collection failure omits the affected group without changing daemon,
+refresh, publication, or delivery behavior.
+
+The filesystem group is all-or-none:
+`filesystem_total_bytes_bucket`, `filesystem_available_bytes_bucket`, and
+`filesystem_available_fraction_bucket`. Available bytes are bytes available to
+the caller on the filesystem containing the data root. The Core group contains
+`core_active_logical_bytes_bucket` and
+`core_certified_source_bytes_bucket`; it also contains
+`core_logical_amplification_bucket` when certified source bytes are nonzero.
+Active logical bytes are the checked sum of the current active generation's
+authenticated Tantivy `meta.json` and active artifact lengths. Managed
+bookkeeping, inactive generations, semantic indexes, and physical allocation
+are excluded. When both available filesystem bytes and a nonzero active Core
+size are known, `filesystem_available_to_active_core_ratio_bucket` describes
+capacity for one additional active-Core-sized logical generation. It is not a
+migration-success prediction. Exact byte and ratio values remain local.
+
+Storage byte buckets use binary units and lower-inclusive, upper-exclusive
+boundaries: `0`, `lt_100mb`, `100mb-1gb`, `1gb-5gb`, `5gb-10gb`,
+`10gb-25gb`, `25gb-50gb`, `50gb-100gb`, `100gb-250gb`, `250gb-500gb`,
+`500gb-1tb`, `1tb-2tb`, `2tb-5tb`, and `5tb+`. Available-fraction buckets are
+`0`, `lt_5pct`, `5pct-10pct`, `10pct-20pct`, `20pct-40pct`, `40pct-60pct`,
+and `60pct+`. Core logical-amplification buckets are `lt_0_10x`,
+`0_10x-0_25x`, `0_25x-0_35x`, `0_35x-0_50x`, `0_50x-1x`, `1x-2x`, and
+`2x+`. Available-to-active-Core buckets are `lt_0_5x`, `0_5x-1x`,
+`1x-1_25x`, `1_25x-2x`, `2x-4x`, and `4x+`. Exact boundaries enter the
+higher bucket.
+
+`analytics_delivery_observation@1` carries exactly bucketed queue
 depth, retry attempts, dropped count, oldest queued age, and one closed failure
 class. It never contains an endpoint, response, request body, or raw error.
 `install_stage@1` is produced only by the hosted shell and

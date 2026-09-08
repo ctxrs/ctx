@@ -137,7 +137,7 @@ where
             return Ok(daemon_semantic_model_acquisition_error(
                 last_run_at_ms,
                 error,
-            ))
+            ));
         }
     };
     let mut acquire_cpu_fallback = Some(acquire_cpu_fallback);
@@ -163,7 +163,7 @@ where
                         return Ok(daemon_semantic_model_acquisition_error(
                             last_run_at_ms,
                             error,
-                        ))
+                        ));
                     }
                 };
             }
@@ -637,12 +637,20 @@ struct RuntimeSourceSemanticEmbedder<'a> {
 struct EmptySourceSemanticEmbedder;
 
 impl SemanticBatchEmbedder for EmptySourceSemanticEmbedder {
+    fn document_fits(&mut self, _text: &str) -> Result<bool> {
+        anyhow::bail!("unexpected semantic input assessment")
+    }
+
     fn embed_chunks(&mut self, _chunks: &[SemanticChunkDocument]) -> Result<Vec<Vec<f32>>> {
         anyhow::bail!("zero-eligible semantic reconciliation requested embeddings")
     }
 }
 
 impl SemanticBatchEmbedder for RuntimeSourceSemanticEmbedder<'_> {
+    fn document_fits(&mut self, text: &str) -> Result<bool> {
+        self.executor.document_fits(text)
+    }
+
     fn embed_chunks(&mut self, chunks: &[SemanticChunkDocument]) -> Result<Vec<Vec<f32>>> {
         let texts = chunks
             .iter()

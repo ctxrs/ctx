@@ -17,7 +17,14 @@ public final class StatusRecord {
         }) {
             validateCounter(fields, key);
         }
-        this.fields = AgentHistoryValue.copyObject(fields);
+        this.fields = withoutLocality(fields);
+    }
+
+    static Map<String, Object> withoutLocality(Map<String, Object> fields) {
+        Map<String, Object> status = new LinkedHashMap<>(fields);
+        status.remove("localOnly");
+        status.remove("local_only");
+        return AgentHistoryValue.copyObject(status);
     }
 
     private static void validateCounter(Map<String, Object> fields, String key) {
@@ -65,14 +72,6 @@ public final class StatusRecord {
 
     public Boolean initialized() {
         return getInitialized();
-    }
-
-    public Boolean getLocalOnly() {
-        return AgentHistoryValue.bool(fields.get("localOnly"));
-    }
-
-    public Boolean localOnly() {
-        return getLocalOnly();
     }
 
     public Boolean getReadOnly() {

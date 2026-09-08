@@ -58,19 +58,24 @@ struct GenerationIntegrityCertification {
 /// transitions without another full read of the active generation.
 pub struct CertifiedPhysicalIntegrity {
     certification: GenerationIntegrityCertification,
+    recertified: bool,
 }
 
-impl CertifiedPhysicalIntegrity {
-    pub(crate) fn certified_artifact(
-        &self,
-        path: &Path,
-    ) -> Option<(ArtifactIdentity, [u8; 32], bool)> {
-        let path = path.to_str()?;
-        self.certification
-            .artifacts
-            .iter()
-            .find(|artifact| artifact.artifact.path == path)
-            .map(|artifact| (artifact.artifact.clone(), artifact.sha256, artifact.sealed))
+/// Content-free storage metadata authenticated by the current active pointer's
+/// publication-time physical certification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveGenerationStorageMetadata {
+    generation_id: String,
+    logical_bytes: u64,
+}
+
+impl ActiveGenerationStorageMetadata {
+    pub fn generation_id(&self) -> &str {
+        &self.generation_id
+    }
+
+    pub fn logical_bytes(&self) -> u64 {
+        self.logical_bytes
     }
 }
 
@@ -284,7 +289,10 @@ pub fn verify_or_certify_physical_integrity(
     index: &tantivy::Index,
 ) -> Result<CertifiedPhysicalIntegrity> {
     if let Some(certification) = matching_certification(root, pointer, slot, index)? {
-        return Ok(CertifiedPhysicalIntegrity { certification });
+        return Ok(CertifiedPhysicalIntegrity {
+            certification,
+            recertified: false,
+        });
     }
 
     let generation_path = slot_path(root, slot);
@@ -301,6 +309,43 @@ pub fn verify_or_certify_physical_integrity(
         &audit,
         CertificationInstallPolicy::ACTIVE_CACHE,
     )
+}
+
+/// Reads only the bounded certification and authenticated artifact metadata.
+/// It never hashes artifact bodies or scans a generation directory.
+pub fn active_generation_storage_metadata(
+    root: &Path,
+) -> Result<Option<ActiveGenerationStorageMetadata>> {
+    let Some(pointer) = load_active_generation_pointer(root)? else {
+        return Ok(None);
+    };
+    ensure_real_directory(root)?;
+    ensure_real_directory(&root.join(MANIFEST_DIRECTORY))?;
+    ensure_real_directory(&root.join(INDEX_GENERATIONS_DIRECTORY))?;
+    ensure_real_directory(&root.join(CERTIFICATION_DIRECTORY))?;
+    let slot = pointer.active();
+    let certification =
+        load_structurally_valid_certification(root, slot)?.ok_or(IndexError::ChecksumMismatch)?;
+    if capture_single_link_control(&manifest_path(root, slot.generation_id()))?
+        != certification.manifest_identity
+    {
+        return Err(IndexError::ChecksumMismatch);
+    }
+    let logical_bytes = certification
+        .artifacts
+        .iter()
+        .try_fold(0_u64, |total, artifact| {
+            total
+                .checked_add(artifact.artifact.identity.length())
+                .ok_or(IndexError::CountOverflow)
+        })?;
+    if load_active_generation_pointer(root)?.as_ref() != Some(&pointer) {
+        return Err(IndexError::ConcurrentGenerationChange);
+    }
+    Ok(Some(ActiveGenerationStorageMetadata {
+        generation_id: slot.generation_id().to_owned(),
+        logical_bytes,
+    }))
 }
 
 /// Verifies one immutable generation from its existing publication-time
@@ -359,31 +404,28 @@ pub fn verify_physical_integrity_read_only(
         return Err(IndexError::ChecksumMismatch);
     }
     let current_pointer = load_current_pointer(root)?;
-    let retained_alias_directories = std::iter::once(current_pointer.active().directory())
-        .chain(current_pointer.previous().map(GenerationSlot::directory))
-        .chain(std::iter::once(slot.directory()))
-        .map(str::to_owned)
-        .collect::<HashSet<_>>();
+    let pointer_fence = ActiveGenerationPointerFence::capture(root, Some(&current_pointer))?;
+    let alias_authority = CertificationAliasAuthority::capture(root, &pointer_fence, slot)?;
     for expected in &certification.artifacts {
         let current = capture_artifact_with_retained_aliases(
             root,
             &generation_path,
             Path::new(&expected.artifact.path),
-            &retained_alias_directories,
+            alias_authority.directories(),
         )?;
         if current != expected.artifact {
-            return verify_certified_previous_after_publication(
+            verify_certified_previous_after_publication(
                 root,
                 slot,
                 index,
                 &generation_path,
                 &current_pointer,
-            );
+            )?;
+            alias_authority.validate(root, &pointer_fence)?;
+            return Ok(());
         }
     }
-    if load_current_pointer(root)? != current_pointer {
-        return Err(IndexError::ConcurrentGenerationChange);
-    }
+    alias_authority.validate(root, &pointer_fence)?;
     Ok(())
 }
 
@@ -725,20 +767,9 @@ fn matching_certification(
     if ensure_real_directory(&root.join(CERTIFICATION_DIRECTORY)).is_err() {
         return Ok(None);
     }
-    let Some(bytes) = read_certification(&certification_path(root, slot)) else {
+    let Some(certification) = load_structurally_valid_certification(root, slot)? else {
         return Ok(None);
     };
-    let Ok(certification) = serde_json::from_slice::<GenerationIntegrityCertification>(&bytes)
-    else {
-        return Ok(None);
-    };
-    if serde_json::to_vec(&certification)? != bytes
-        || certification.version != CERTIFICATION_VERSION
-        || certification.slot != *slot
-        || !certification_digest_matches_slot(&certification)?
-    {
-        return Ok(None);
-    }
     if load_current_pointer(root)? != *pointer {
         return Err(IndexError::ConcurrentGenerationChange);
     }
@@ -781,6 +812,27 @@ fn matching_certification(
     Ok(Some(certification))
 }
 
+fn load_structurally_valid_certification(
+    root: &Path,
+    slot: &GenerationSlot,
+) -> Result<Option<GenerationIntegrityCertification>> {
+    let Some(bytes) = read_certification(&certification_path(root, slot)) else {
+        return Ok(None);
+    };
+    let Ok(certification) = serde_json::from_slice::<GenerationIntegrityCertification>(&bytes)
+    else {
+        return Ok(None);
+    };
+    if serde_json::to_vec(&certification)? != bytes
+        || certification.version != CERTIFICATION_VERSION
+        || certification.slot != *slot
+        || !certification_digest_matches_slot(&certification)?
+    {
+        return Ok(None);
+    }
+    Ok(Some(certification))
+}
+
 /// Revalidates one in-memory expected-SHA proof immediately before a writer
 /// relies on retained base artifacts. Exact identities take the metadata-only
 /// fast path. A managed hard-link transition is accepted only when the
@@ -792,7 +844,7 @@ pub fn verify_certified_physical_integrity(
     slot: &GenerationSlot,
     certified: &CertifiedPhysicalIntegrity,
     candidate_audit: Option<&PhysicalIntegrityAudit>,
-) -> Result<()> {
+) -> Result<Option<CertifiedPhysicalIntegrity>> {
     let certification = &certified.certification;
     if certification.slot != *slot {
         return Err(IndexError::ConcurrentGenerationChange);
@@ -811,7 +863,10 @@ pub fn verify_certified_physical_integrity(
         return Err(IndexError::ConcurrentGenerationChange);
     }
 
-    for expected in &certification.artifacts {
+    let mut refreshed = certification.clone();
+    let mut refresh_is_complete = true;
+    let mut identity_changed = false;
+    for expected in &mut refreshed.artifacts {
         let current = capture_artifact(
             root,
             &generation_path,
@@ -832,7 +887,9 @@ pub fn verify_certified_physical_integrity(
         }
         let Some(candidate_file) = candidate_file else {
             // This segment is absent from the candidate and therefore cannot
-            // be used as an exhaustive-verification exclusion.
+            // be used as an exhaustive-verification exclusion or to refresh
+            // a changed predecessor identity.
+            refresh_is_complete &= current == expected.artifact;
             continue;
         };
         if candidate_file.sha256 != expected.sha256 {
@@ -844,11 +901,18 @@ pub fn verify_certified_physical_integrity(
         {
             return Err(IndexError::ChecksumMismatch);
         }
+        identity_changed |= current != expected.artifact;
+        expected.artifact = current;
     }
     if load_current_pointer(root)? != *pointer {
         return Err(IndexError::ConcurrentGenerationChange);
     }
-    Ok(())
+    Ok(
+        (refresh_is_complete && identity_changed).then_some(CertifiedPhysicalIntegrity {
+            certification: refreshed,
+            recertified: true,
+        }),
+    )
 }
 
 fn load_current_pointer(root: &Path) -> Result<ActiveGenerationPointer> {
@@ -897,15 +961,18 @@ pub(crate) use artifact_io::{
 mod candidate;
 mod install;
 mod pointer_fence;
+mod reclaim;
 mod sidecar;
-use candidate::certification_digest_matches_slot;
+use candidate::{certification_digest_matches_slot, CertificationAliasAuthority};
 pub use candidate::{
     certify_candidate_physical_integrity, verify_candidate_physical_integrity_read_only,
 };
-use install::{install_certification, CertificationInstallPolicy};
+pub use install::cache_recertified_physical_integrity;
+use install::{install_certification, install_certification_sidecar, CertificationInstallPolicy};
 pub use pointer_fence::ActiveGenerationPointerFence;
 #[cfg(windows)]
 pub(crate) use pointer_fence::ValidatedPredecessorPointer;
+pub(crate) use reclaim::reclaim_with_pointer_certifications;
 
 #[cfg(any(test, feature = "test-support"))]
 pub use sidecar::certification_file_for_active;

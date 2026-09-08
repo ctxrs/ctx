@@ -11,65 +11,25 @@ thread_local! {
 }
 
 pub fn open_verified_index(index_root: &Path) -> std::result::Result<VerifiedIndex, IndexError> {
+    open_verified_index_with_peer(index_root, false)
+}
+
+fn open_verified_index_with_peer(
+    index_root: &Path,
+    retain_peer: bool,
+) -> std::result::Result<VerifiedIndex, IndexError> {
     #[cfg(any(test, feature = "test-support"))]
     VERIFIED_INDEX_OPEN_COUNT.with(|count| {
         if let Some(current) = count.get() {
             count.set(Some(current.saturating_add(1)));
         }
     });
-    VerifiedIndex::open_pinned(index_root)
-}
-
-/// A verified Core generation that cannot be admitted at the public query
-/// boundary because its source-refresh publication authority is absent or
-/// invalid.
-#[derive(Debug)]
-pub enum GenerationQueryAuthorityError {
-    UncertifiedEmpty {
-        generation_id: String,
-    },
-    Invalid {
-        generation_id: String,
-        detail: String,
-    },
-}
-
-impl GenerationQueryAuthorityError {
-    pub const fn error_code(&self) -> &'static str {
-        match self {
-            Self::UncertifiedEmpty { .. } => "source_unavailable",
-            Self::Invalid { .. } => "publication_authority_invalid",
-        }
-    }
-
-    pub const fn retryable(&self) -> bool {
-        matches!(self, Self::UncertifiedEmpty { .. })
-    }
-
-    const fn is_uncertified_empty(&self) -> bool {
-        matches!(self, Self::UncertifiedEmpty { .. })
+    if retain_peer {
+        VerifiedIndex::open_pinned_with_retained_peer(index_root)
+    } else {
+        VerifiedIndex::open_pinned(index_root)
     }
 }
-
-impl fmt::Display for GenerationQueryAuthorityError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::UncertifiedEmpty { generation_id } => write!(
-                formatter,
-                "Core generation {generation_id} is empty without certified zero-source publication authority"
-            ),
-            Self::Invalid {
-                generation_id,
-                detail,
-            } => write!(
-                formatter,
-                "Core generation {generation_id} has invalid source-refresh publication authority: {detail}"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for GenerationQueryAuthorityError {}
 
 /// The refresh authority has no active verified Core generation to pin.
 ///
@@ -86,39 +46,12 @@ impl fmt::Display for MissingActiveGeneration {
 
 impl std::error::Error for MissingActiveGeneration {}
 
-/// Applies the one generation-bound publication-authority check shared by all
-/// public Core query openers. Physical verification alone is insufficient for
-/// an empty generation because absence must be certified by refresh metadata.
-pub fn verify_generation_query_authority(
-    index: &VerifiedIndex,
-) -> std::result::Result<(), GenerationQueryAuthorityError> {
-    let generation_id = index.generation_id().to_owned();
-    match verify_generation_query_readiness(index) {
-        Ok(GenerationQueryReadiness::Ready) => Ok(()),
-        Ok(GenerationQueryReadiness::Uncertified) => {
-            Err(GenerationQueryAuthorityError::UncertifiedEmpty { generation_id })
-        }
-        Err(error) => Err(GenerationQueryAuthorityError::Invalid {
-            generation_id,
-            detail: format!("{error:#}"),
-        }),
-    }
-}
-
 /// Evaluates query readiness from the committed generation and its opaque
 /// refresh metadata, independently of any later mutable refresh attempt.
-pub fn verified_generation_is_query_ready(index: &VerifiedIndex) -> Result<bool> {
-    match verify_generation_query_authority(index) {
-        Ok(()) => Ok(true),
-        Err(error) if error.is_uncertified_empty() => Ok(false),
-        Err(error) => Err(anyhow::Error::new(error))
-            .context("decode Core source-refresh publication authority"),
-    }
-}
-
 fn open_retained_verified_index(
     index_root: &Path,
     generation_id: &str,
+    retain_peer: bool,
 ) -> std::result::Result<VerifiedIndex, IndexError> {
     #[cfg(any(test, feature = "test-support"))]
     VERIFIED_INDEX_OPEN_COUNT.with(|count| {
@@ -126,7 +59,11 @@ fn open_retained_verified_index(
             count.set(Some(current.saturating_add(1)));
         }
     });
-    VerifiedIndex::open_pinned_generation(index_root, generation_id)
+    if retain_peer {
+        VerifiedIndex::open_pinned_generation_with_retained_peer(index_root, generation_id)
+    } else {
+        VerifiedIndex::open_pinned_generation(index_root, generation_id)
+    }
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -156,7 +93,7 @@ pub(super) fn published_generation_id(
 pub(super) enum PublishedGenerationOpen {
     Missing,
     RebuildRequired,
-    Verified(VerifiedIndex),
+    Verified(Box<VerifiedIndex>),
 }
 
 pub(super) fn prepare_generation_control_state(data_root: &Path) -> Result<()> {
@@ -176,7 +113,7 @@ pub(super) fn open_published_generation(
     Ok(
         match open_published_generation_for_recovery(data_root, journal)? {
             PublishedGenerationOpen::Missing | PublishedGenerationOpen::RebuildRequired => None,
-            PublishedGenerationOpen::Verified(index) => Some(index),
+            PublishedGenerationOpen::Verified(index) => Some(*index),
         },
     )
 }
@@ -196,7 +133,7 @@ pub(super) fn open_published_generation_for_recovery(
         return Ok(PublishedGenerationOpen::Missing);
     }
     match open_verified_index(&index_root) {
-        Ok(index) => Ok(PublishedGenerationOpen::Verified(index)),
+        Ok(index) => Ok(PublishedGenerationOpen::Verified(Box::new(index))),
         Err(IndexError::MissingActiveGenerationPointer) => {
             if let Some(generation_id) = published_generation_receipt(data_root, journal)? {
                 bail!(
@@ -267,14 +204,11 @@ pub(super) fn verify_source_backed_publication(
             result.route_identity == binding.route_identity
                 && matches!(
                     result.outcome,
-                    SourceBackedRefreshRouteOutcome::Failed {
-                        carried_forward: false,
-                        ..
-                    }
+                    SourceBackedRefreshRouteOutcome::Failed { .. }
                 )
         })
     }) {
-        bail!("Core refresh publication catalog binding has no generation-bound authority or cold request failure");
+        bail!("Core refresh publication catalog binding has no generation-bound authority or failed request evidence");
     }
     Ok(())
 }
@@ -299,10 +233,7 @@ pub fn explicit_catalog_request_is_accounted_for(
                         result.route_identity == binding.route_identity
                             && matches!(
                                 result.outcome,
-                                SourceBackedRefreshRouteOutcome::Failed {
-                                    carried_forward: false,
-                                    ..
-                                }
+                                SourceBackedRefreshRouteOutcome::Failed { .. }
                             )
                     })
                 })
@@ -316,7 +247,9 @@ fn published_generation_receipt(
     let Some(job) = journal.load(data_root)? else {
         return Ok(None);
     };
-    if job.get("request_state").and_then(Value::as_str) != Some("published") {
+    if job.get("request_state").and_then(Value::as_str)
+        != Some(RefreshRequestState::Published.as_str())
+    {
         return Ok(None);
     }
     Ok(job
@@ -408,54 +341,98 @@ pub fn published_explicit_source_relocation_authority(
 ) -> Result<Option<ExplicitSourceRelocationAuthority>> {
     let verified = open_published_generation(data_root, journal)?
         .ok_or_else(|| anyhow!("explicit relocation requires an active Core publication"))?;
-    let metadata = SourceBackedPublicationMetadata::decode(&verified)
-        .context("load exact explicit relocation authority from Core publication metadata")?;
-    let receipt = published_refresh_receipt_for_index(&metadata.response_value(), &verified)?;
-    receipt
-        .published_explicit_source_catalog
-        .as_ref()
-        .map(|catalog| catalog.relocation_authority(old_path, &receipt.catalog_route_bindings))
+    let state = SourceBackedGenerationState::decode_from_verified_index(&verified)
+        .context("load exact explicit relocation authority from Core generation state")?;
+    state
+        .applied_explicit_source_catalog()
+        .map(|catalog| catalog.relocation_authority(old_path, state.catalog_route_bindings()))
         .transpose()
         .map(Option::flatten)
 }
 
-pub fn pin_published_generation(
+pub fn pin_published_generation(data_root: &Path) -> Result<Option<PinnedSourceBackedGeneration>> {
+    pin_published_generation_with_peer(data_root, false)
+}
+
+/// Pins the published target and its optional pointer peer in one verified open.
+pub fn pin_published_generation_with_retained_peer(
     data_root: &Path,
-    journal: &dyn RefreshJournal,
 ) -> Result<Option<PinnedSourceBackedGeneration>> {
-    let Some(index) = open_published_generation(data_root, journal)? else {
-        return Ok(None);
-    };
-    match verify_generation_query_authority(&index) {
-        Ok(()) => {}
-        Err(error) if error.is_uncertified_empty() => return Ok(None),
-        Err(error) => return Err(anyhow::Error::new(error)),
+    pin_published_generation_with_peer(data_root, true)
+}
+
+fn pin_published_generation_with_peer(
+    data_root: &Path,
+    retain_peer: bool,
+) -> Result<Option<PinnedSourceBackedGeneration>> {
+    let index_root = source_backed_index_root(data_root);
+    match open_verified_index_with_peer(&index_root, retain_peer) {
+        Ok(index) => Ok(Some(PinnedSourceBackedGeneration { index })),
+        Err(IndexError::MissingActiveGenerationPointer) => Ok(None),
+        Err(error) => Err(error).context("open active verified Core generation"),
     }
-    Ok(Some(PinnedSourceBackedGeneration { index }))
 }
 
 pub fn pin_retained_generation(
     data_root: &Path,
     generation_id: &str,
 ) -> Result<PinnedSourceBackedGeneration> {
+    pin_retained_generation_with_peer(data_root, generation_id, false)
+}
+
+/// Pins the exact retained target and its optional pointer peer in one verified open.
+pub fn pin_retained_generation_with_retained_peer(
+    data_root: &Path,
+    generation_id: &str,
+) -> Result<PinnedSourceBackedGeneration> {
+    pin_retained_generation_with_peer(data_root, generation_id, true)
+}
+
+fn pin_retained_generation_with_peer(
+    data_root: &Path,
+    generation_id: &str,
+    retain_peer: bool,
+) -> Result<PinnedSourceBackedGeneration> {
     let index_root = source_backed_index_root(data_root);
-    let index = open_retained_verified_index(&index_root, generation_id).with_context(|| {
-        format!(
-            "open retained Core generation {generation_id} from {}",
-            index_root.display()
-        )
-    })?;
-    verify_generation_query_authority(&index).map_err(anyhow::Error::new)?;
+    let index = open_retained_verified_index(&index_root, generation_id, retain_peer)
+        .with_context(|| {
+            format!(
+                "open retained Core generation {generation_id} from {}",
+                index_root.display()
+            )
+        })?;
     Ok(PinnedSourceBackedGeneration { index })
 }
 
-pub fn pin_active_verified_generation(
+pub fn pin_active_verified_generation(data_root: &Path) -> Result<PinnedSourceBackedGeneration> {
+    pin_active_verified_generation_with_peer(data_root, false)
+}
+
+/// Pins the active target and its optional pointer peer in one verified open.
+pub fn pin_active_verified_generation_with_retained_peer(
     data_root: &Path,
-    journal: &dyn RefreshJournal,
 ) -> Result<PinnedSourceBackedGeneration> {
-    let index = open_published_generation(data_root, journal)
-        .context("source_unavailable: verify active Core generation")?
-        .ok_or_else(|| anyhow::Error::new(MissingActiveGeneration))?;
-    verify_generation_query_authority(&index).map_err(anyhow::Error::new)?;
+    pin_active_verified_generation_with_peer(data_root, true)
+}
+
+fn pin_active_verified_generation_with_peer(
+    data_root: &Path,
+    retain_peer: bool,
+) -> Result<PinnedSourceBackedGeneration> {
+    let index_root = source_backed_index_root(data_root);
+    let index = match open_verified_index_with_peer(&index_root, retain_peer) {
+        Ok(index) => index,
+        Err(IndexError::MissingActiveGenerationPointer) => {
+            return Err(anyhow::Error::new(MissingActiveGeneration));
+        }
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "source_unavailable: open verified Core index {}",
+                    index_root.display()
+                )
+            });
+        }
+    };
     Ok(PinnedSourceBackedGeneration { index })
 }

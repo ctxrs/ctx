@@ -179,11 +179,9 @@ daemon_cli_binary_contract(
     ],
     extra_data = [
         "//crates/ctx-cli:ctx_auto_upgrade_acceptance_fixture",
-        "//crates/ctx-upgrade-engine:ctx_v025_upgrade_fixture",
     ],
     extra_env = {
         "CTX_AUTO_UPGRADE_ACCEPTANCE_FIXTURE": "$(rootpath //crates/ctx-cli:ctx_auto_upgrade_acceptance_fixture)",
-        "CTX_V025_UPGRADE_FIXTURE": "$(rootpath //crates/ctx-upgrade-engine:ctx_v025_upgrade_fixture)",
         "RUST_TEST_THREADS": "1",
     },
     fixtures = True,
@@ -218,6 +216,8 @@ daemon_cli_binary_contract(
     },
     extra_srcs = [
         "tests/contracts/native/process_control.rs",
+        "tests/contracts/persistent_daemon_lifecycle/capture.rs",
+        "tests/contracts/persistent_daemon_lifecycle/capture_tests.rs",
         "tests/contracts/persistent_daemon_lifecycle/lifecycle_regressions.rs",
     ],
     tags = [

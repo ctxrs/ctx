@@ -79,16 +79,17 @@ pub fn reject_blocking_automatic_registry_issues(
     } else {
         format!("; {omitted} additional systemic safety issue(s) omitted")
     };
-    Err(anyhow!(
-        "{TERMINAL_COVERAGE_ERROR_CODE}: capture automatic registry has {blocker_count} systemic safety issue(s): {}{omitted}",
+    Err(ZeroSourcePublicationBlocked::new(format!(
+        "capture automatic registry has {blocker_count} systemic safety issue(s): {}{omitted}",
         blocker_details.join("; ")
     ))
+    .into())
 }
 
 #[doc(hidden)]
 pub fn automatic_registry_route_failures(
     issues: &[SourceBackedAutomaticRegistryIssue],
-    retained_generation: Option<&VerifiedIndex>,
+    retained_generation: Option<&VerifiedGenerationSnapshot>,
 ) -> Result<Vec<ctx_history_capture::SourceBackedFailedRoute>> {
     let mut failures = BTreeMap::new();
     for issue in issues {

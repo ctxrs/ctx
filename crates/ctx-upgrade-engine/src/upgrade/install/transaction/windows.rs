@@ -382,7 +382,7 @@ fn restart_daemon<D: crate::upgrade::DaemonUpgradePort + ?Sized>(
 }
 
 #[cfg(windows)]
-fn helper_path(install_path: &Path, attempt_id: &str) -> Result<PathBuf> {
+pub(in crate::upgrade) fn helper_path(install_path: &Path, attempt_id: &str) -> Result<PathBuf> {
     let parent = install_path
         .parent()
         .ok_or_else(|| anyhow!("ctx install path has no parent"))?;
@@ -391,6 +391,49 @@ fn helper_path(install_path: &Path, attempt_id: &str) -> Result<PathBuf> {
         .and_then(|name| name.to_str())
         .ok_or_else(|| anyhow!("ctx install path has no file name"))?;
     Ok(parent.join(format!(".{name}.ctx-upgrade-{attempt_id}.helper.exe")))
+}
+
+#[cfg(windows)]
+pub(in crate::upgrade) fn prepare_managed_pair_helper(
+    source: &Path,
+    install_path: &Path,
+    attempt_id: &str,
+) -> Result<PathBuf> {
+    helper::prepare_managed_pair(source, install_path, attempt_id)
+}
+
+#[cfg(windows)]
+pub(in crate::upgrade) fn spawn_managed_pair_helper(
+    process: &dyn ReleaseProcessPort,
+    helper_path: &Path,
+    data_root: &Path,
+    install_path: &Path,
+    attempt_id: &str,
+    parent_pid: u32,
+) -> Result<u32> {
+    helper::spawn_managed_pair(
+        process,
+        helper_path,
+        data_root,
+        install_path,
+        attempt_id,
+        parent_pid,
+    )
+}
+
+#[cfg(windows)]
+pub(in crate::upgrade) fn open_managed_pair_parent(
+    parent_pid: u32,
+) -> Result<helper::ParentProcess> {
+    helper::ParentProcess::open(parent_pid)
+}
+
+#[cfg(windows)]
+pub(in crate::upgrade) fn write_managed_pair_helper_ready(
+    attempt_id: &str,
+    helper_pid: u32,
+) -> Result<()> {
+    helper::write_ready(attempt_id, helper_pid)
 }
 
 #[cfg(windows)]

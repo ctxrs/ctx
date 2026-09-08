@@ -66,10 +66,16 @@ completeness and selected/redacted/omitted policy metadata. `text` is the sole
 body, and per-event source paths, cursors, source locations, and previews are
 not exposed.
 
+`AgentHistoryEventRecord.activity` and `structuredContent` preserve opaque JSON,
+including original keys and explicit nulls. A missing field remains distinct
+from a present JSON null. CLI errors retain the producer object in
+`details.producerError` and use its Boolean `retryable` value when supplied.
+Search queries are passed literally after all options and `--`.
+
 ## Local CLI Adapter
 
-`AgentHistoryClient.local(...)` shells out to a local `ctx` binary and never performs
-network calls:
+`AgentHistoryClient.local(...)` invokes a local `ctx` binary. The CLI honors
+explicitly configured external semantic execution:
 
 ```swift
 let client = AgentHistoryClient.local(

@@ -1,7 +1,7 @@
-use ctx_history_core::CoreContentPolicyStatus;
+use ctx_history_core::{CoreContent, CoreContentPolicyStatus};
 use ctx_history_index_query::{
     CoreEventRangeDirection, CoreEventRangeDomain, CoreEventRangeScope, CoreEventRangeSelection,
-    CoreEventRecord, VerifiedIndex,
+    CoreEventRecord, EventRecord, VerifiedIndex,
 };
 use serde::Serialize;
 use serde_json::{json, Map, Value};
@@ -15,6 +15,85 @@ pub const EVENT_QUERY_PAGE_BYTES: usize = 1024 * 1024;
 /// Keep a fixed envelope allowance while retaining a deterministic upper bound.
 pub const MAX_EVENT_QUERY_WIRE_RECORD_BYTES: usize =
     ctx_history_core::MAX_ENCODED_CORE_RECORD_BYTES * 6 + 1024 * 1024;
+
+pub(crate) struct EventReadView<'a> {
+    pub event: &'a EventRecord,
+    pub provider_key: Option<&'a str>,
+    pub source_id: Option<&'a str>,
+    pub occurred_at: Option<String>,
+}
+
+impl<'a> EventReadView<'a> {
+    pub fn new(event: &'a EventRecord) -> Self {
+        let (provider_key, source_id) = event
+            .custom_source_identity()
+            .map_or((None, None), |(provider_key, source_id)| {
+                (Some(provider_key), Some(source_id))
+            });
+        Self {
+            event,
+            provider_key,
+            source_id,
+            occurred_at: timestamp_json(event.occurred_at_unix_ms),
+        }
+    }
+
+    pub fn search_citation(&self) -> Value {
+        let event = self.event;
+        json!({
+            "item_id": event.event_id.as_uuid(),
+            "target_type": "event",
+            "ctx_event_id": event.event_id.as_uuid(),
+            "ctx_session_id": event.session_id.as_uuid(),
+            "provider": event.provider,
+            // Preserve Search's released compatibility mapping to the ctx session ID.
+            "session_id": event.session_id.as_uuid(),
+            "event_seq": event.event_sequence,
+        })
+    }
+
+    pub fn event_query_citation(&self) -> Value {
+        let event = self.event;
+        json!({
+            "target_type": "event",
+            "ctx_event_id": event.event_id.as_uuid(),
+            "ctx_session_id": event.session_id.as_uuid(),
+            "label": event.event_type,
+            "time": self.occurred_at.as_deref(),
+            "provider": event.provider,
+            // Preserve event enumeration's provider-session compatibility mapping.
+            "session_id": event.provider_session_id,
+            "event_seq": event.event_sequence,
+        })
+    }
+}
+
+pub(crate) struct EventContentPolicyView<'a> {
+    pub complete: bool,
+    pub revision: u32,
+    pub status: &'static str,
+    pub reason: Option<&'a str>,
+}
+
+impl<'a> EventContentPolicyView<'a> {
+    pub fn new(content: &'a CoreContent) -> Self {
+        let (status, reason, complete) = match &content.policy_status {
+            CoreContentPolicyStatus::Selected => ("selected", None, true),
+            CoreContentPolicyStatus::Redacted { reason } => {
+                ("redacted", Some(reason.as_str()), false)
+            }
+            CoreContentPolicyStatus::Omitted { reason } => {
+                ("omitted", Some(reason.as_str()), false)
+            }
+        };
+        Self {
+            complete,
+            revision: content.policy_revision,
+            status,
+            reason,
+        }
+    }
+}
 
 /// Stored Core is already JSON escaped. Reserving seven eighths of the MCP
 /// envelope covers event projection, receipt fields, and JSON-RPC framing
@@ -340,11 +419,8 @@ pub fn render_event_read_model(
 ) -> serde_json::Result<Value> {
     let record = &event.core_record;
     let content = &record.content;
-    let (policy_status, policy_reason, complete) = match &content.policy_status {
-        CoreContentPolicyStatus::Selected => ("selected", None, true),
-        CoreContentPolicyStatus::Redacted { reason } => ("redacted", Some(reason.as_str()), false),
-        CoreContentPolicyStatus::Omitted { reason } => ("omitted", Some(reason.as_str()), false),
-    };
+    let view = EventReadView::new(event);
+    let policy = EventContentPolicyView::new(content);
     let text = (projection != EventContentProjection::None)
         .then_some(content.normalized_body.as_ref())
         .flatten();
@@ -354,12 +430,6 @@ pub fn render_event_read_model(
     let activity = (projection == EventContentProjection::Full)
         .then_some(content.activity.as_ref())
         .flatten();
-    let (provider_key, source_id) = event
-        .custom_source_identity()
-        .map_or((None, None), |(provider_key, source_id)| {
-            (Some(provider_key), Some(source_id))
-        });
-    let occurred_at = timestamp_json(event.occurred_at_unix_ms);
     let mut rendered = json!({
         "schema_version": EVENT_QUERY_SCHEMA_VERSION,
         "record_version": record.record_version,
@@ -370,12 +440,12 @@ pub fn render_event_read_model(
         "root_ctx_session_id": event.root_session_id.map(|id| id.as_uuid()),
         "session_relationship": event.session_relationship,
         "event_copy": event_copy_json(event.event_copy.as_ref()),
-        "occurred_at": occurred_at,
+        "occurred_at": view.occurred_at.as_deref(),
         "occurred_at_ms": event.occurred_at_unix_ms,
         "sequence": event.event_sequence,
         "provider": event.provider,
-        "provider_key": provider_key,
-        "source_id": source_id,
+        "provider_key": view.provider_key,
+        "source_id": view.source_id,
         "source_format": event.source_format,
         "source": event.source,
         "provider_session_id": event.provider_session_id,
@@ -388,21 +458,12 @@ pub fn render_event_read_model(
         "text": text,
         "structured_content": structured_content,
         "content": {
-            "complete": complete,
-            "policy_revision": content.policy_revision,
-            "policy_status": policy_status,
-            "policy_reason": policy_reason,
+            "complete": policy.complete,
+            "policy_revision": policy.revision,
+            "policy_status": policy.status,
+            "policy_reason": policy.reason,
         },
-        "citations": [{
-            "target_type": "event",
-            "ctx_event_id": event.event_id.as_uuid(),
-            "ctx_session_id": event.session_id.as_uuid(),
-            "label": event.event_type,
-            "time": occurred_at,
-            "provider": event.provider,
-            "session_id": event.provider_session_id,
-            "event_seq": event.event_sequence,
-        }],
+        "citations": [view.event_query_citation()],
         "content_projection": projection.as_str(),
     });
     if let Some(activity) = activity {

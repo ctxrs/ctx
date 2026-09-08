@@ -222,7 +222,17 @@ public sealed class LocalCliAdapter : IAgentHistoryTransport
         if (process.ExitCode != 0)
         {
             var outText = Encoding.UTF8.GetString(stdoutBytes);
-            throw new CtxAgentHistoryCliException("ctx CLI command failed", command, process.ExitCode, outText, errText);
+            JsonObject? producer = null;
+            try
+            {
+                if (JsonNode.Parse(errText) is JsonObject candidate
+                    && candidate["error_code"] is JsonValue code && code.TryGetValue<string>(out var codeText) && codeText.Length > 0
+                    && (!candidate.ContainsKey("retryable") || candidate["retryable"] is JsonValue retry && retry.TryGetValue<bool>(out _)))
+                    producer = candidate;
+            }
+            catch (JsonException) { }
+            throw new CtxAgentHistoryCliException("ctx CLI command failed", command, process.ExitCode, outText, errText,
+                retryable: JsonHelpers.GetBool(producer ?? new JsonObject(), "retryable") ?? false, producerError: producer);
         }
         if (stdoutCapture.Truncated)
         {

@@ -68,15 +68,15 @@ function mockResponse(args) {
   if (command === "status") {
     return {
       initialized: true,
-      local_only: true,
       data_root: "/tmp/ctx-sdk-dogfood",
       indexed_items: 1,
       indexed_sources: 1,
     };
   }
   if (command === "search") {
+    const terminator = args.indexOf("--");
     return {
-      query: args[1] ?? null,
+      query: terminator < 0 ? null : args[terminator + 1] ?? null,
       generated_at: "2026-07-01T12:00:00Z",
       freshness: { mode: "off", status: "skipped", source_count: 0, totals: {} },
       results: [

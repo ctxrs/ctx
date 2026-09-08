@@ -114,10 +114,13 @@ Manual `ctx upgrade` verifies signed release metadata, explicit self-upgrade
 policy, artifact SHA-256, the current managed install marker, and the staged
 binary's `ctx --version` output before replacing the installed binary.
 
-The production binary fixes release metadata under
-`https://cli.ctx.rs/functions/v1/releases/<channel>/`, derives the detached
-signature URL from that metadata URL, verifies with its embedded release public
-key, and accepts artifact URLs only under the compiled
+The production binary reads stable release metadata from
+`https://cli.ctx.rs/functions/v2/releases/stable/ctx-release-metadata.env`.
+Staging retains
+`https://cli.ctx.rs/functions/v1/releases/staging/ctx-release-metadata.env`.
+The binary derives the detached signature URL from that metadata URL, verifies
+with its embedded release public key, and accepts artifact URLs only under the
+compiled
 `https://cli.ctx.rs/storage/v1/object/public/releases/artifacts/` authority.
 Config files and process environment variables cannot replace those origins or
 the verification key. A key or authority change therefore requires a new ctx

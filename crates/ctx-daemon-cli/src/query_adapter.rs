@@ -67,6 +67,25 @@ pub fn wait_for_daemon_semantic_generation(
     )
 }
 
+/// Preserves compact-reference authority when semantic coverage supersedes a
+/// generation. The supplied pin must already own its requested peer; every
+/// replacement captures a new pair, while an unchanged generation keeps the
+/// original pair.
+pub fn wait_for_daemon_semantic_generation_with_retained_peer(
+    data_root: &Path,
+    pin: PinnedSourceBackedGeneration,
+    timeout: StdDuration,
+) -> Result<PinnedSourceBackedGeneration> {
+    wait_for_daemon_semantic_generation_with(
+        data_root,
+        pin,
+        timeout,
+        || crate::pin_active_verified_generation_with_retained_peer(data_root),
+        super::finite_worker_owner::checkpoint,
+        thread::sleep,
+    )
+}
+
 fn wait_for_daemon_semantic_generation_with<Repin, Checkpoint, Pause>(
     data_root: &Path,
     mut pin: PinnedSourceBackedGeneration,
@@ -333,6 +352,11 @@ struct PassiveSemanticExecutorUnavailable {
 }
 
 impl SemanticBatchEmbedder for ForegroundSemanticEmbedder<'_> {
+    fn document_fits(&mut self, text: &str) -> Result<bool> {
+        ensure_foreground_executor(self.executor)?;
+        self.executor.executor().document_fits(text)
+    }
+
     fn embed_chunks(&mut self, chunks: &[SemanticChunkDocument]) -> Result<Vec<Vec<f32>>> {
         ensure_foreground_executor(self.executor)?;
         let texts = chunks
@@ -475,6 +499,10 @@ fn reconcile_foreground_source_backed_semantic_with_checkpoint(
 struct EmptyForegroundSemanticEmbedder;
 
 impl SemanticBatchEmbedder for EmptyForegroundSemanticEmbedder {
+    fn document_fits(&mut self, _text: &str) -> Result<bool> {
+        anyhow::bail!("unexpected semantic input assessment")
+    }
+
     fn embed_chunks(&mut self, _chunks: &[SemanticChunkDocument]) -> Result<Vec<Vec<f32>>> {
         anyhow::bail!("zero-eligible semantic reconciliation requested embeddings")
     }
@@ -727,6 +755,17 @@ fn ensure_foreground_executor(executor: &SemanticEmbeddingExecutorHandle) -> Res
 }
 
 impl HistorySemanticQuery for SemanticQuerySession<'_> {
+    fn resolve_passage(
+        &mut self,
+        event: &ctx_history_index::RankedEventRef,
+        evidence: &ctx_history_index::SemanticSearchEvidence,
+    ) -> std::result::Result<ctx_history_index::SemanticPassageSource, HistorySemanticError> {
+        self.pin
+            .resolve_passage(self.index, &self.contract, event, evidence)
+            .map_err(SemanticQueryError::from)
+            .map_err(HistorySemanticError::from)
+    }
+
     fn prepare_alternative(
         &mut self,
         query: &str,

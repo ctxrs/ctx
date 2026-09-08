@@ -18,6 +18,18 @@ PLATFORMS = {
     "macos-x64",
     "windows-x64",
 }
+REQUIRED_SMOKE_STEPS = frozenset(
+    {
+        "version",
+        "setup",
+        "import",
+        "search",
+        "read_only",
+        "released_defaults",
+        "explicit_opt_outs",
+        "semantic_offline_fail_closed",
+    }
+)
 
 
 def regular(path: Path, label: str, maximum: int) -> bytes:
@@ -46,6 +58,11 @@ def load_passed_smoke(path: Path) -> tuple[bytes, str]:
         or value.get("status") != "passed"
     ):
         raise ValueError("native smoke result is not passed")
+    steps = value.get("steps")
+    if not isinstance(steps, dict) or any(
+        steps.get(step) != "passed" for step in REQUIRED_SMOKE_STEPS
+    ):
+        raise ValueError("native smoke result is missing required passed steps")
     return payload, hashlib.sha256(payload).hexdigest()
 
 

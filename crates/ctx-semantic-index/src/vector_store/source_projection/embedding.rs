@@ -1,6 +1,10 @@
 use super::*;
 
 pub trait SemanticBatchEmbedder {
+    /// Assesses raw ctx header/body text with the selected executor's preparation.
+    /// It must not publish vectors or mutate source progress.
+    fn document_fits(&mut self, text: &str) -> Result<bool>;
+
     fn embed_chunks(&mut self, chunks: &[SemanticChunkDocument]) -> Result<Vec<Vec<f32>>>;
 }
 
@@ -26,8 +30,10 @@ pub(super) fn external_embedding_chunk_limit(
         .map(|space| space.max_inputs_per_request())
 }
 
+const DEFAULT_EMBEDDING_PAGE_CHUNKS: usize = 512;
+
 pub(super) fn source_event_page_limit(model_contract: &SemanticModelContract) -> usize {
-    external_embedding_chunk_limit(model_contract).unwrap_or(MAX_SOURCE_EVENT_PAGE_ITEMS)
+    external_embedding_chunk_limit(model_contract).unwrap_or(DEFAULT_EMBEDDING_PAGE_CHUNKS)
 }
 
 pub(super) fn embed_chunks_in_bounded_batches(

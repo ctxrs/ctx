@@ -40,6 +40,30 @@ fn buckets_cover_boundaries() {
     ] {
         assert_eq!(bytes_bucket(value), expected);
     }
+    const MIB: u64 = 1024 * 1024;
+    const GIB: u64 = 1024 * MIB;
+    const TIB: u64 = 1024 * GIB;
+    for (value, expected) in [
+        (0, StorageBytesBucket::Zero),
+        (1, StorageBytesBucket::UnderOneHundredMb),
+        (100 * MIB, StorageBytesBucket::OneHundredMbToOneGb),
+        (GIB, StorageBytesBucket::OneToFiveGb),
+        (5 * GIB, StorageBytesBucket::FiveToTenGb),
+        (10 * GIB, StorageBytesBucket::TenToTwentyFiveGb),
+        (25 * GIB, StorageBytesBucket::TwentyFiveToFiftyGb),
+        (50 * GIB, StorageBytesBucket::FiftyToOneHundredGb),
+        (100 * GIB, StorageBytesBucket::OneHundredToTwoHundredFiftyGb),
+        (
+            250 * GIB,
+            StorageBytesBucket::TwoHundredFiftyToFiveHundredGb,
+        ),
+        (500 * GIB, StorageBytesBucket::FiveHundredGbToOneTb),
+        (TIB, StorageBytesBucket::OneToTwoTb),
+        (2 * TIB, StorageBytesBucket::TwoToFiveTb),
+        (5 * TIB, StorageBytesBucket::AtLeastFiveTb),
+    ] {
+        assert_eq!(storage_bytes_bucket(value), expected);
+    }
     assert_eq!(text_length_bucket(501), TextLengthBucket::OverFiveHundred);
     for (millis, expected) in [
         (0, DurationBucket::UnderOneHundredMs),
@@ -100,6 +124,38 @@ fn runtime_observation_has_typed_constructor_seams() {
     assert_eq!(daemon["operation"], "ready");
     assert_eq!(mcp["surface"], "mcp");
     assert_eq!(mcp["operation"], "stopped");
+}
+
+#[test]
+fn storage_sidecar_is_limited_to_daemon_ready_and_liveness() {
+    let run = DaemonRunFactsV1::new(DaemonStartModeV1::Manual, DaemonSupervisorV1::User, None);
+    let snapshot = DaemonRuntimeSnapshotV1::new(run, DaemonCycleStateV1::unknown());
+    let storage = DaemonStorageFactsV1::from_exact(Some((1024, 512)), Some((256, 128)));
+    let mut ready = serde_json::Map::new();
+    DaemonRuntimeObservationV1::ready_with_storage(run, storage).insert_properties(&mut ready);
+    let mut liveness = serde_json::Map::new();
+    DaemonRuntimeObservationV1::liveness_with_storage(snapshot, storage)
+        .insert_properties(&mut liveness);
+    assert!(ready.contains_key("filesystem_total_bytes_bucket"));
+    assert!(liveness.contains_key("core_active_logical_bytes_bucket"));
+
+    for observation in [
+        DaemonRuntimeObservationV1::stopped(snapshot),
+        DaemonRuntimeObservationV1::recovered(snapshot),
+        DaemonRuntimeObservationV1::failed(snapshot),
+        DaemonRuntimeObservationV1::cycle(DaemonCycleFactsV1::new(
+            run,
+            DaemonCycleResultV1::NoWork,
+            CountBucket::One,
+            DaemonCycleStateV1::unknown(),
+        )),
+    ] {
+        let mut properties = serde_json::Map::new();
+        observation.insert_properties(&mut properties);
+        assert!(properties
+            .keys()
+            .all(|key| !key.starts_with("filesystem_") && !key.starts_with("core_")));
+    }
 }
 
 #[test]
@@ -242,6 +298,26 @@ fn durable_family_serialization_matches_public_goldens() {
             )),
             include_str!(
                 "../../../../contracts/telemetry-v1/fixtures/runtime_observation.valid.json"
+            ),
+        ),
+        (
+            PublicEventV1::RuntimeObservation(RuntimeObservationV1::daemon(
+                DaemonRuntimeObservationV1::ready_with_storage(
+                    DaemonRunFactsV1::new(
+                        DaemonStartModeV1::Auto,
+                        DaemonSupervisorV1::CliAutostart,
+                        Some(DaemonTriggerV1::Search),
+                    ),
+                    DaemonStorageFactsV1::from_exact(
+                        Some((1024_u64.pow(4), 250 * 1024_u64.pow(3))),
+                        Some((5 * 1024_u64.pow(3), 20 * 1024_u64.pow(3))),
+                    ),
+                ),
+                Outcome::Success,
+                Duration::from_secs(1),
+            )),
+            include_str!(
+                "../../../../contracts/telemetry-v1/fixtures/runtime_observation_storage.valid.json"
             ),
         ),
     ];

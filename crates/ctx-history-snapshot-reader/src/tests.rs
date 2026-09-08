@@ -88,7 +88,7 @@ fn concurrent_publication_is_not_reported_as_corruption() {
 }
 
 #[test]
-fn retained_previous_generation_reopens_after_publication_metadata_changes() {
+fn retained_previous_generation_reopens_after_generation_state_changes() {
     let fixture = Fixture::new();
     let source = source("retained-previous");
     let previous_record = record(&source, 1, "previous");
@@ -923,6 +923,70 @@ fn overlapping_readers_retain_a_real_generation_until_the_last_close() {
             .unwrap(),
     );
     assert!(!first_path.exists());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn active_snapshot_opens_while_an_older_reader_retains_reused_artifacts() {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let _clone = CloneTestHookGuard::set(
+        CloneTestOptions {
+            force_reflink_fallback: true,
+            ..CloneTestOptions::default()
+        },
+        |_, _| Ok(()),
+    );
+    let fixture = Fixture::new();
+    let first_source = source("retained-alias-active-open-first");
+    let first_id = publish(
+        &fixture.index_root,
+        1,
+        &[(
+            first_source.clone(),
+            vec![record(&first_source, 1, "first")],
+        )],
+    );
+    let first = open(&fixture, &first_id);
+    let second_source = source("retained-alias-active-open-second");
+    publish(
+        &fixture.index_root,
+        2,
+        &[(
+            second_source.clone(),
+            vec![record(&second_source, 1, "second")],
+        )],
+    );
+    let third_source = source("retained-alias-active-open-third");
+    let active_id = publish(
+        &fixture.index_root,
+        3,
+        &[(
+            third_source.clone(),
+            vec![record(&third_source, 1, "third")],
+        )],
+    );
+    let active_slot = load_active_generation_pointer(&fixture.index_root)
+        .unwrap()
+        .unwrap()
+        .active()
+        .clone();
+    let active_path = slot_path(&fixture.index_root, &active_slot);
+    let active_index = open_slot_index(&fixture.index_root, &active_slot).unwrap();
+    assert!(
+        active_index_files(&active_index)
+            .unwrap()
+            .iter()
+            .any(|path| {
+                fs::metadata(active_path.join(path)).is_ok_and(|metadata| metadata.nlink() >= 3)
+            }),
+        "fixture did not retain a reused artifact across all three generations"
+    );
+
+    let active = open(&fixture, &active_id);
+    assert_eq!(active.generation_id(), active_id);
+    drop(active);
+    drop(first);
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]

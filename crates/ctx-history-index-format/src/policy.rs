@@ -17,7 +17,7 @@ pub const SOURCE_EVENT_PROJECTOR_REVISION: u32 = 9;
 pub const LEXICAL_INDEXED_BODY_LIMIT: LexicalIndexedBodyLimit =
     LexicalIndexedBodyLimit::ProviderValidatedFullText;
 pub const SEMANTIC_ELIGIBILITY_REVISION: u32 = 6;
-pub const SEMANTIC_CHUNKING_REVISION: u32 = 1;
+pub const SEMANTIC_CHUNKING_REVISION: u32 = 2;
 pub const SEMANTIC_CHUNK_TARGET_CHARS: usize = 1_200;
 pub const SEMANTIC_CHUNK_OVERLAP_CHARS: usize = 200;
 pub const SEMANTIC_SOURCE_MAX_CHARS: usize = 64 * 1024;
@@ -242,7 +242,13 @@ pub fn semantic_generation_policy(
             SemanticCoreContentFilter::PolicySelectedCompleteContentAndBoundedLiteralFactsV3,
         provider_native_event_copy:
             SemanticEventCopyFilter::IncludeAllOccurrencesDirectCopyNeutralV1,
-        chunking_revision: SEMANTIC_CHUNKING_REVISION,
+        // HTTP keeps its historical endpoint-owned chunk inputs. Its receipt
+        // must not certify local tokenizer-fitted spans, even for fixed-E5 V1.
+        chunking_revision: if model_contract.external_http_endpoint().is_some() {
+            1
+        } else {
+            SEMANTIC_CHUNKING_REVISION
+        },
         chunk_target_chars: SEMANTIC_CHUNK_TARGET_CHARS as u32,
         chunk_overlap_chars: SEMANTIC_CHUNK_OVERLAP_CHARS as u32,
         source_max_chars: SEMANTIC_SOURCE_MAX_CHARS as u32,
@@ -358,7 +364,7 @@ mod tests {
 
     #[test]
     fn semantic_policy_persisted_bytes_and_model_authority_are_frozen() {
-        const EXPECTED: &str = "{\"eligibility_revision\":6,\"candidate_event_classes\":[\"message\"],\"candidate_roles\":[\"user\"],\"core_content_filter\":\"policy_selected_complete_content_and_bounded_literal_facts_v3\",\"provider_native_event_copy\":\"include_all_occurrences_direct_copy_neutral_v1\",\"chunking_revision\":1,\"chunk_target_chars\":1200,\"chunk_overlap_chars\":200,\"source_max_chars\":65536,\"embedding\":{\"contract_revision\":2,\"model\":\"intfloat/multilingual-e5-small\",\"model_revision\":\"614241f622f53c4eeff9890bdc4f31cfecc418b3\",\"dimensions\":384,\"normalization\":\"l2\"}}";
+        const EXPECTED: &str = "{\"eligibility_revision\":6,\"candidate_event_classes\":[\"message\"],\"candidate_roles\":[\"user\"],\"core_content_filter\":\"policy_selected_complete_content_and_bounded_literal_facts_v3\",\"provider_native_event_copy\":\"include_all_occurrences_direct_copy_neutral_v1\",\"chunking_revision\":2,\"chunk_target_chars\":1200,\"chunk_overlap_chars\":200,\"source_max_chars\":65536,\"embedding\":{\"contract_revision\":2,\"model\":\"intfloat/multilingual-e5-small\",\"model_revision\":\"614241f622f53c4eeff9890bdc4f31cfecc418b3\",\"dimensions\":384,\"normalization\":\"l2\"}}";
         let policy = current_semantic_generation_policy();
         let contract = ctx_semantic_model::semantic_model_contract();
         let persisted = serde_json::to_string(&policy).unwrap();
@@ -367,7 +373,7 @@ mod tests {
         assert_eq!(persisted, EXPECTED);
         assert_eq!(
             policy.canonical_sha256().unwrap(),
-            "e8d31418a1da20200d75580348b8b2e7ee4f97c58f34a46900fc6d87daa83ccf"
+            "d161ce104fc4b705c68ccc1aafd60f80e1254b166c4a79128e3a3aa2cb954baf"
         );
         assert_eq!(
             policy.embedding.contract_revision,
