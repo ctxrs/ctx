@@ -131,9 +131,10 @@ Each stable release also publishes `SHA256SUMS` and the dynamic ONNX Runtime
 dependency used by the built-in semantic executor:
 `ctx-onnxruntime-<platform>.tar.gz` on Unix-like platforms and
 `ctx-onnxruntime-windows-x64.zip` on Windows. The official installer reads
-signed release metadata and installs the matching runtime automatically; direct
-unmanaged installs should follow the release notes for runtime sidecar
-placement.
+signed release metadata and installs the matching runtime automatically. A
+direct-release install has no installer, so it must provision that runtime
+itself. Until it does, the built-in executor has no ONNX Runtime to load and
+`ctx semantic status` reports `failed` with the loader's reason.
 
 The hosted installer and managed-upgrade path verify signed ctx release
 metadata. Beginning with ctx 0.25.0, official macOS CLI binaries and the
@@ -187,6 +188,95 @@ For example:
 https://github.com/ctxrs/ctx/releases/download/v0.26.0/ctx-linux-x64
 https://github.com/ctxrs/ctx/releases/download/v0.26.0/SHA256SUMS
 ```
+
+### Provision The CPU Runtime
+
+The CPU ONNX Runtime is the baseline. The built-in executor cannot embed
+anything without it, so a direct-release install provisions it first. Which
+runtime an archive carries is read from the archive itself, so no backend has
+to be named:
+
+```bash
+scripts/build-onnxruntime-sidecar.sh linux-x64
+ctx semantic runtime install \
+  --archive target/public-cli-artifacts/ctx-onnxruntime-linux-x64.tar.zst \
+  --sha256 "$(cat target/public-cli-artifacts/ctx-onnxruntime-linux-x64.tar.zst.sha256)"
+ctx semantic enable
+```
+
+The published `ctx-onnxruntime-<platform>` release asset is the same archive,
+so `--archive` also accepts a downloaded one. The installed layout is the one
+the loader searches:
+
+```text
+${CTX_RUNTIME_DIR:-<data-root>/runtime}/onnxruntime/1.27.0/linux-x64/lib/libonnxruntime.so
+```
+
+Unpacking that asset by hand into the same layout still loads, and
+`CTX_ONNXRUNTIME_DYLIB` still points the loader at an absolute library path.
+What an install adds is verification: with no environment override set, a
+digest-verified install is preferred over a plain unpacked layout.
+
+Use `--backend cpu` on `ctx semantic runtime status` to report exactly this
+runtime; a bare `ctx semantic runtime status` reports every backend this build
+can install locally, plus whether this machine has an accelerator it could use.
+
+`ctx-onnxruntime-windows-x64.zip` is a zip. `ctx semantic runtime install`
+reads `.tar.zst` archives only, so Windows CPU runtimes remain hosted-installer
+only; a direct-release install on Windows unpacks that zip into the layout
+above by hand. macOS ships `.tar.zst` and installs normally. Core ML on macOS
+is a separate path: it is an execution provider of the CPU runtime supplied by
+the OS, not an installable accelerator sidecar, so macOS has no accelerator
+backend to provision.
+
+### Provision A CUDA Runtime For GPU Semantic Search
+
+GPU execution is an opt-in addition on top of the CPU runtime. `ctx semantic
+runtime status` says so directly on a machine with an NVIDIA GPU: it reports the
+detected accelerator and, until its runtime is installed, the install step. The
+CUDA runtime is not a published release asset; build it from the pinned public
+inputs and install it with the digest it produced:
+
+```bash
+scripts/build-onnxruntime-sidecar.sh linux-x64-cuda12
+ctx semantic runtime install \
+  --archive target/public-cli-artifacts/ctx-onnxruntime-linux-x64-cuda12.tar.zst \
+  --sha256 "$(cat target/public-cli-artifacts/ctx-onnxruntime-linux-x64-cuda12.tar.zst.sha256)"
+ctx semantic enable
+```
+
+```text
+${CTX_RUNTIME_DIR:-<data-root>/runtime}/onnxruntime/1.27.0/linux-x64-cuda12/lib/libonnxruntime.so
+```
+
+The build writes the archive plus `<archive>.sha256` and `<archive>.asset.json`
+into `target/public-cli-artifacts` by default. `--sha256` is optional when
+`<archive>.sha256` sits next to the archive; ctx reads it from there. For every
+backend, ctx verifies the archive digest, then reads which runtime the archive
+carries by matching its files against the runtime contract compiled into the
+binary, then verifies the size and SHA-256 of every extracted file against that
+contract, and records the install as `manager: ctx-local-operator` with
+`metadata_trust: operator-pinned-digest`. Nothing is installed from bytes it
+cannot verify, and the backend is never taken from the archive's name or from
+the `.asset.json` sidecar, neither of which the digest covers. Passing
+`--backend` asserts the expected runtime instead of selecting one: a mismatch
+fails naming both the requested and the detected runtime.
+
+`ctx semantic runtime status` reports each installed runtime, its trust tier,
+and its file count. `CTX_ONNXRUNTIME_DYLIB`, `ORT_DYLIB_PATH`, and
+`CTX_ONNXRUNTIME_DIR` cannot select an accelerator runtime: it is loaded only
+from a provisioned runtime root carrying its `ctx-runtime-install.json`
+manifest.
+
+The CUDA package carries its pinned CUDA 12 and cuDNN user-space libraries. The
+NVIDIA driver stays host-provided, so the host still needs a driver new enough
+for CUDA 12. WSL2 is supported: ctx detects the GPU through `/dev/dxg` and the
+WSL driver libraries under `/usr/lib/wsl/lib`, which the Windows host driver
+provides. Without a usable GPU, semantic search stays on the CPU runtime.
+
+Windows ML is the Windows accelerator backend. Its sidecar is a zip too, so it
+is hosted-installer only; `ctx semantic runtime install` refuses it naming that
+installer.
 
 ## Direct GitHub Download
 

@@ -210,6 +210,64 @@ generation's semantic projection. Plain enablement in manual mode records the
 opt-in without changing mode or the current executor selection; wait requires
 auto mode.
 
+`status` is `failed` with the last background iteration's `reason` whenever the
+persisted semantic job recorded a run error, even while the aggregated job
+status is still `pending`. Human output then shows that error text. This
+replaces reporting `pending` while a model or runtime load failure stayed
+hidden in the daemon's job record.
+
+The ONNX Runtime is provisioned by its own operations:
+
+```bash
+ctx semantic runtime install --archive <path> --format json
+ctx semantic runtime install --archive <path> --sha256 <hex> --format json
+ctx semantic runtime status --format json
+ctx semantic runtime status --backend cuda --format json
+```
+
+Both return `schema_version: 1`, `operation` (`runtime_install` or
+`runtime_status`), the `runtime_root` ctx acted on (`CTX_RUNTIME_DIR` when set,
+otherwise `<data-root>/runtime`), `detected_accelerator`, and `read_only`, which
+is `false` for install and `true` for status.
+
+`detected_accelerator` is the accelerator this host could execute on — `cuda`,
+`windowsml`, or null when none is detected or the platform has none. It is a
+host fact independent of what is installed, present in both the single-backend
+and multi-backend shapes, and never `cpu`. Core ML reports null: it is an
+execution provider of the OS-supplied CPU runtime, not an installable sidecar.
+
+`runtime_install` and `runtime_status --backend <name>` describe one backend and
+add `backend` (`cpu`, `cuda`, or `windowsml`), `installed`, and
+`locally_installable`. For an install, `backend` is the runtime ctx resolved
+from the archive's own contents: every sidecar names its own files, so the
+archive identifies itself after its pinned digest verifies. `--backend` does not
+select a runtime; it asserts one, and a mismatch fails naming both the requested
+and the detected runtime. `runtime_status` for a backend with no verified
+install returns `installed: false` and no `runtime` object.
+`locally_installable` is `false` for a backend this build cannot provision from
+a local archive — every Windows sidecar is a zip — so `installed: false` there
+is a hosted-installer boundary rather than a missing install step.
+
+`runtime_status` without `--backend` describes every backend this build can
+install locally and replaces the single `backend`/`installed` pair with
+`runtimes`, an array in display order (CPU first) whose entries each carry
+`backend`, `installed`, and, when installed, `runtime`. Every listed backend is
+locally installable by construction, so the entries omit
+`locally_installable`. A build that installs no runtime locally returns
+`runtimes: []`. Multi-backend status publishes no top-level `backend` or
+`installed`, because neither can stand for several backends at once.
+
+Wherever a backend is installed, its `runtime` reports the verified install:
+`backend`, `platform` (the published platform directory, such as `linux-x64` or
+`linux-x64-cuda12`), `version`, `root` (the installed runtime directory),
+`library` (the exact library path the loader validates), `archive_sha256`,
+`manager`, `metadata_trust`, `files` (the number of verified files), and
+`identity` (the loader's artifact identity string). `manager`/`metadata_trust`
+is `ctx-local-operator`/`operator-pinned-digest` for an operator install and
+`ctx-hosted-installer`/`signed-release-metadata` for a hosted-installer
+install; no other pairing is accepted. Both operations are credential-free and
+report no token, URL credential, or environment value.
+
 ## Index Readiness
 
 ```bash

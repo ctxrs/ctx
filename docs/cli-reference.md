@@ -55,6 +55,10 @@ ctx semantic enable --executor https://embeddings.example.test/ctx
 ctx semantic enable --wait
 ctx semantic status
 ctx semantic disable
+ctx semantic runtime status
+ctx semantic runtime status --backend cuda
+ctx semantic runtime install --archive ARCHIVE
+ctx semantic runtime install --archive ARCHIVE --sha256 HEX
 ctx daemon run
 ```
 
@@ -148,6 +152,22 @@ ctx daemon run
   `semantic status` reports configured and effective throttling. See
   [Semantic Embedding Executors](semantic-executors.md) for the V2 protocol and
   retained fixed-E5 V1 compatibility.
+- `semantic runtime status` reports the ONNX Runtimes this build can install
+  locally, marking each installed or absent; `--backend cpu|cuda|windowsml`
+  reports exactly one. It also reports the accelerator this machine could use:
+  when one is detected and its runtime is absent, status names the install step,
+  and when it is present, status says GPU execution is available. A machine with
+  no accelerator is told nothing about GPUs. `semantic runtime install`
+  provisions one runtime from a digest-pinned archive. Which runtime that is
+  comes from the archive itself — every sidecar names its own files — so
+  `--backend` is only an optional assertion that fails a mismatch naming both
+  the requested and the detected runtime. `--sha256` defaults to the adjacent
+  `<archive>.sha256` file and `--force` replaces an existing install of the same
+  version. ctx verifies the archive digest and every extracted file against the
+  runtime contract compiled into the binary. Backends published as zip sidecars,
+  including every Windows one, are hosted-installer only and are refused with
+  that installer named. Direct-release installs need this to run semantic search
+  at all; see [Package Managers And Unmanaged Installs](unmanaged-installs.md).
 - `daemon run` is an advanced command that runs persistent local maintenance in
   the foreground and blocks until stopped. It does not change the configured
   indexing mode. In manual mode, pass `--force` to run it explicitly. Each pass

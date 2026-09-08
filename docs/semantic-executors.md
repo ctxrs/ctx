@@ -57,6 +57,57 @@ identity, ctx stops semantic indexing and querying until the user reruns
 deletes and rebuilds only the derived semantic index. Imported history and the
 lexical index remain intact.
 
+## Built-in ONNX Runtime
+
+The built-in executor runs on the CPU ONNX Runtime, and on an accelerator
+runtime when one is provisioned for the platform.
+`ctx semantic runtime install` provisions either from a digest-pinned archive:
+
+```sh
+ctx semantic runtime status
+ctx semantic runtime install --archive ctx-onnxruntime-linux-x64.tar.zst
+ctx semantic runtime install --archive ctx-onnxruntime-linux-x64-cuda12.tar.zst
+```
+
+The archive decides which runtime is installed. Every sidecar names its own
+files, so ctx reads the backend out of the archive's contents — after the pinned
+digest verifies, and never from the file name or the `.asset.json` sidecar,
+which the digest does not cover. `--backend cpu|cuda|windowsml` is an optional
+assertion: it fails a mismatch naming both the requested and the detected
+runtime rather than selecting anything. Each supported platform publishes at
+most one accelerator backend: `cuda` on Linux x86_64 and `windowsml` on Windows
+x64. Backends whose sidecar is a zip — every Windows one — are hosted-installer
+only, and asking `ctx semantic runtime install` for one fails naming that
+installer instead of writing an unloadable runtime.
+
+`ctx semantic runtime status` without `--backend` reports every backend this
+build can install locally, marking each installed or absent; with `--backend`
+it reports exactly that one. Either way it also reports which accelerator this
+machine could use, so a GPU host is told to install the accelerator runtime
+instead of silently embedding on the CPU, and is told GPU execution is
+available once that runtime is present. A host with no accelerator is told
+nothing about GPUs.
+
+An install verifies the archive against `--sha256` — defaulting to the adjacent
+`<archive>.sha256` file — then verifies the size and SHA-256 of every extracted
+file against the runtime contract compiled into the binary, and records the
+result as `manager: ctx-local-operator` with
+`metadata_trust: operator-pinned-digest`. Runtimes installed by the hosted
+installer instead carry `manager: ctx-hosted-installer` with
+`metadata_trust: signed-release-metadata`. Those two pairings are the only ones
+the loader accepts; a manifest mixing them is rejected.
+
+`CTX_ONNXRUNTIME_DYLIB`, `ORT_DYLIB_PATH`, and `CTX_ONNXRUNTIME_DIR` remain
+supported explicit CPU overrides and keep exclusive priority: when one is set,
+the loader uses that source alone and does not fall back. With none set, the
+loader prefers a provisioned CPU runtime whose `ctx-runtime-install.json`
+manifest validates against the runtime contract, and still loads a plain
+unpacked sidecar layout when no verified install is present. An accelerator
+runtime is never selected by an environment variable: it resolves exclusively
+from a provisioned runtime root under `${CTX_RUNTIME_DIR:-<data-root>/runtime}`
+whose manifest validates against that contract. Direct-release installs
+provision both themselves; see [Unmanaged Installs](unmanaged-installs.md).
+
 ## Built-in document coverage
 
 The built-in executor checks each complete document input, including the derived
