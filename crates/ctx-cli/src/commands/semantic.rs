@@ -1,10 +1,17 @@
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use ctx_cli_presentation::commands::{
-    render_semantic_disabled, render_semantic_status, SemanticArgs, SemanticCommand,
+    render_semantic_disabled, render_semantic_runtime_install, render_semantic_runtime_status,
+    render_semantic_status, SemanticArgs, SemanticCommand, SemanticRuntimeBackendArg,
+    SemanticRuntimeCommand,
 };
 use ctx_history_cli::HistoryConfigPort;
+use ctx_semantic_model::{
+    detected_accelerator_backend, install_operator_runtime, installed_runtime_report,
+    supported_local_runtime_backends, SemanticRuntimeBackend, SemanticRuntimeInstall,
+    SemanticRuntimeReport,
+};
 use serde_json::{json, Value};
 
 use crate::{
@@ -104,7 +111,205 @@ pub(crate) fn run_semantic(
                 Ok(())
             }
         }
+        SemanticCommand::Runtime(args) => match args.command {
+            SemanticRuntimeCommand::Install(args) => {
+                let runtime_root = selected_runtime_root(&data_root)?;
+                let expected_archive_sha256 =
+                    expected_archive_sha256(args.sha256.as_deref(), &args.archive)?;
+                let installed = install_operator_runtime(&SemanticRuntimeInstall {
+                    archive: &args.archive,
+                    expected_archive_sha256: &expected_archive_sha256,
+                    runtime_root: &runtime_root,
+                    backend: args.backend.map(runtime_backend),
+                    replace_existing: args.force,
+                })?;
+                // The archive decided which runtime this was, so the report
+                // names the resolved backend rather than a requested one.
+                let report = single_runtime_report(
+                    "runtime_install",
+                    false,
+                    installed.backend,
+                    &runtime_root,
+                    Some(&installed),
+                );
+                if args.format.is_json() {
+                    print_json(report)
+                } else if !quiet {
+                    ui.write_stdout(&render_semantic_runtime_install(
+                        ui.stdout_context(),
+                        &report,
+                    ))?;
+                    Ok(())
+                } else {
+                    Ok(())
+                }
+            }
+            SemanticRuntimeCommand::Status(args) => {
+                let runtime_root = selected_runtime_root(&data_root)?;
+                let report = match args.backend {
+                    Some(requested) => {
+                        let backend = runtime_backend(requested);
+                        let installed = installed_runtime_report(&runtime_root, backend)?;
+                        single_runtime_report(
+                            "runtime_status",
+                            true,
+                            backend,
+                            &runtime_root,
+                            installed.as_ref(),
+                        )
+                    }
+                    None => every_runtime_report(&runtime_root)?,
+                };
+                if args.format.is_json() {
+                    print_json(report)
+                } else if !quiet {
+                    ui.write_stdout(&render_semantic_runtime_status(
+                        ui.stdout_context(),
+                        &report,
+                    ))?;
+                    Ok(())
+                } else {
+                    Ok(())
+                }
+            }
+        },
     }
+}
+
+/// Runtime root shared by the operator installer and the runtime loader.
+/// `CTX_RUNTIME_DIR` overrides the data-root default and must be absolute so a
+/// provisioned runtime is never bound to a process working directory.
+fn selected_runtime_root(data_root: &Path) -> Result<PathBuf> {
+    let (source, root) = match std::env::var_os("CTX_RUNTIME_DIR") {
+        Some(value) => ("CTX_RUNTIME_DIR", PathBuf::from(value)),
+        None => ("selected ctx data root", data_root.join("runtime")),
+    };
+    if root.as_os_str().is_empty()
+        || root
+            .to_str()
+            .is_some_and(|value| value.trim().is_empty() || value.trim() != value)
+    {
+        bail!("{source} must not be empty or whitespace-padded");
+    }
+    if !root.is_absolute() {
+        bail!("{source} must be an absolute path");
+    }
+    Ok(root)
+}
+
+/// Expected archive digest for an operator install. Release sidecars publish
+/// `<archive>.sha256`, so the common case needs no retyped digest; an absent
+/// sidecar and no `--sha256` is refused rather than installing unverified bytes.
+fn expected_archive_sha256(explicit: Option<&str>, archive: &Path) -> Result<String> {
+    if let Some(digest) = explicit {
+        return Ok(digest.trim().to_ascii_lowercase());
+    }
+    let mut sidecar = archive.as_os_str().to_owned();
+    sidecar.push(".sha256");
+    let sidecar = PathBuf::from(sidecar);
+    let recorded = match std::fs::read_to_string(&sidecar) {
+        Ok(recorded) => recorded,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            bail!(
+                "--sha256 was not given and no checksum file exists at {}; pass --sha256 <digest> or place the published checksum file next to the archive",
+                sidecar.display()
+            )
+        }
+        Err(error) => {
+            return Err(error).with_context(|| format!("read {}", sidecar.display()));
+        }
+    };
+    let digest = recorded.split_whitespace().next().ok_or_else(|| {
+        anyhow!(
+            "{} records no checksum; pass --sha256 <digest> instead",
+            sidecar.display()
+        )
+    })?;
+    Ok(digest.to_ascii_lowercase())
+}
+
+/// Translates one `--backend` value. The core installer owns which backends
+/// this build can provision locally and which runtime an archive carries, so
+/// the CLI only translates the value instead of restating either policy.
+fn runtime_backend(requested: SemanticRuntimeBackendArg) -> SemanticRuntimeBackend {
+    match requested {
+        SemanticRuntimeBackendArg::Cpu => SemanticRuntimeBackend::Cpu,
+        SemanticRuntimeBackendArg::Cuda => SemanticRuntimeBackend::Cuda,
+        SemanticRuntimeBackendArg::WindowsMl => SemanticRuntimeBackend::WindowsMl,
+    }
+}
+
+/// Credential-free report for one backend. `backend` and `runtime_root`
+/// describe the runtime ctx acted on; the nested `runtime` object appears
+/// only when a verified install is present. `locally_installable` distinguishes
+/// a backend that is merely absent from one this build cannot provision from a
+/// local archive at all, so a report of the second never reads as a missing
+/// install step. `detected_accelerator` is the host fact, independent of what
+/// is installed, and is null when this machine has no accelerator to use.
+fn single_runtime_report(
+    operation: &str,
+    read_only: bool,
+    backend: SemanticRuntimeBackend,
+    runtime_root: &Path,
+    installed: Option<&SemanticRuntimeReport>,
+) -> Value {
+    let mut report = json!({
+        "schema_version": 1,
+        "operation": operation,
+        "backend": backend.as_str(),
+        "detected_accelerator": detected_accelerator_backend().map(SemanticRuntimeBackend::as_str),
+        "runtime_root": runtime_root.display().to_string(),
+        "installed": installed.is_some(),
+        "locally_installable": supported_local_runtime_backends().contains(&backend),
+        "read_only": read_only,
+    });
+    if let Some(installed) = installed {
+        report["runtime"] = installed_runtime_value(installed);
+    }
+    report
+}
+
+/// Credential-free report across every backend this build can install locally.
+/// Per-backend facts stay in an array so no single `installed`/`runtime` pair
+/// has to stand for several backends at once. `detected_accelerator` stays
+/// top-level: it describes the host, not any one backend, and is the same fact
+/// the single-backend shape reports.
+fn every_runtime_report(runtime_root: &Path) -> Result<Value> {
+    let mut runtimes = Vec::with_capacity(supported_local_runtime_backends().len());
+    for backend in supported_local_runtime_backends() {
+        let installed = installed_runtime_report(runtime_root, *backend)?;
+        let mut entry = json!({
+            "backend": backend.as_str(),
+            "installed": installed.is_some(),
+        });
+        if let Some(installed) = installed.as_ref() {
+            entry["runtime"] = installed_runtime_value(installed);
+        }
+        runtimes.push(entry);
+    }
+    Ok(json!({
+        "schema_version": 1,
+        "operation": "runtime_status",
+        "runtime_root": runtime_root.display().to_string(),
+        "detected_accelerator": detected_accelerator_backend().map(SemanticRuntimeBackend::as_str),
+        "read_only": true,
+        "runtimes": runtimes,
+    }))
+}
+
+fn installed_runtime_value(installed: &SemanticRuntimeReport) -> Value {
+    json!({
+        "backend": installed.backend.as_str(),
+        "platform": installed.platform,
+        "version": installed.version,
+        "root": installed.root.display().to_string(),
+        "library": installed.library.display().to_string(),
+        "archive_sha256": installed.archive_sha256,
+        "manager": installed.manager,
+        "metadata_trust": installed.metadata_trust,
+        "files": installed.files,
+        "identity": installed.identity,
+    })
 }
 
 fn semantic_mutation_requires_daemon_restart(
@@ -286,6 +491,20 @@ fn semantic_lifecycle_state(
                 .unwrap_or_else(|| json!("daemon_semantic_job_failed"));
             return (json!("failed"), reason);
         }
+        // The aggregated job status stays `pending` while the daemon runs with
+        // semantic enabled but no active runtime, so a persisted run error is
+        // the only evidence that the last iteration failed. Reporting `pending`
+        // here hid actionable model, runtime, and provisioning failures behind
+        // ordinary background progress.
+        if daemon_semantic_run_error(daemon_semantic).is_some() {
+            let reason = daemon_semantic
+                .and_then(|job| job.get("last_run_reason"))
+                .filter(|reason| reason.as_str().is_some_and(|reason| !reason.is_empty()))
+                .or_else(|| daemon_semantic.and_then(|job| job.get("reason")))
+                .cloned()
+                .unwrap_or_else(|| json!("daemon_semantic_job_failed"));
+            return (json!("failed"), reason);
+        }
         let source_pending = semantic.get("status").and_then(Value::as_str) == Some("pending");
         let daemon_running = daemon
             .get("running")
@@ -299,6 +518,16 @@ fn semantic_lifecycle_state(
         semantic.get("status").cloned().unwrap_or(Value::Null),
         semantic.get("reason").cloned().unwrap_or(Value::Null),
     )
+}
+
+/// Persisted error text from the last semantic job iteration. Successful runs
+/// and resource deferrals omit it, so a non-empty value means the last run
+/// failed. This matches how `ctx daemon status` classifies job failure.
+fn daemon_semantic_run_error(job: Option<&Value>) -> Option<&str> {
+    job.and_then(|job| job.get("last_error"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|error| !error.is_empty())
 }
 
 fn render_report(report: Value, json: bool, quiet: bool, ui: &mut Ui) -> Result<()> {
@@ -363,6 +592,50 @@ mod tests {
 
         assert_eq!(status, "failed");
         assert_eq!(reason, "model_checksum_mismatch");
+    }
+
+    #[test]
+    fn lifecycle_reports_a_persisted_model_load_failure_instead_of_pending() {
+        let mut config = config::AppConfig::default();
+        config.search.semantic = Some(true);
+        let semantic = json!({"enabled": true, "status": "pending"});
+        let daemon = json!({"running": true});
+        // The runtime never activated, so the aggregated job keeps reporting
+        // pending while the persisted iteration result holds the real failure.
+        let job = json!({
+            "status": "pending",
+            "reason": "semantic_runtime_inactive",
+            "last_run_status": "skipped",
+            "last_run_reason": "model_load_failed",
+            "last_error": "no ONNX Runtime dynamic library candidates were found for linux-x64",
+            "failure_class": "retryable",
+        });
+
+        let (status, reason) = semantic_lifecycle_state(&semantic, &daemon, Some(&job), &config);
+
+        assert_eq!(status, "failed");
+        assert_eq!(reason, "model_load_failed");
+    }
+
+    #[test]
+    fn lifecycle_keeps_resource_deferred_work_pending() {
+        let mut config = config::AppConfig::default();
+        config.search.semantic = Some(true);
+        let semantic = json!({"enabled": true, "status": "pending", "reason": "flat_f32_projection_missing"});
+        let daemon = json!({"running": true});
+        // Deferrals persist no error text, so they remain ordinary progress.
+        let job = json!({
+            "status": "pending",
+            "reason": "semantic_runtime_inactive",
+            "last_run_status": "resource_deferred",
+            "last_run_reason": "memory_pressure",
+            "failure_class": "resource_pressure",
+        });
+
+        let (status, reason) = semantic_lifecycle_state(&semantic, &daemon, Some(&job), &config);
+
+        assert_eq!(status, "pending");
+        assert_eq!(reason, "flat_f32_projection_missing");
     }
 
     #[test]
@@ -527,6 +800,242 @@ mod tests {
             std::fs::read_to_string(temp.path().join(config::CONFIG_FILE))
                 .unwrap()
                 .contains("builtin_throttling = false")
+        );
+    }
+
+    fn runtime_report_fixture(
+        backend: SemanticRuntimeBackend,
+        platform: &str,
+    ) -> SemanticRuntimeReport {
+        SemanticRuntimeReport {
+            backend,
+            platform: platform.to_owned(),
+            version: "1.27.0".to_owned(),
+            root: PathBuf::from(format!("/data/runtime/onnxruntime/1.27.0/{platform}")),
+            library: PathBuf::from(format!(
+                "/data/runtime/onnxruntime/1.27.0/{platform}/lib/libonnxruntime.so"
+            )),
+            archive_sha256: "a".repeat(64),
+            manager: "ctx-local-operator",
+            metadata_trust: "operator-pinned-digest",
+            files: 5,
+            identity: format!("onnxruntime|platform={platform}"),
+        }
+    }
+
+    #[test]
+    fn runtime_install_report_publishes_the_verified_runtime_facts() {
+        let installed = runtime_report_fixture(SemanticRuntimeBackend::Cpu, "linux-x64");
+
+        let report = single_runtime_report(
+            "runtime_install",
+            false,
+            SemanticRuntimeBackend::Cpu,
+            Path::new("/data/runtime"),
+            Some(&installed),
+        );
+
+        assert_eq!(report["schema_version"], 1);
+        assert_eq!(report["operation"], "runtime_install");
+        assert_eq!(report["backend"], "cpu");
+        assert_eq!(report["runtime_root"], "/data/runtime");
+        assert_eq!(report["installed"], true);
+        assert_eq!(report["read_only"], false);
+        assert_eq!(report["runtime"]["backend"], "cpu");
+        assert_eq!(report["runtime"]["platform"], "linux-x64");
+        assert_eq!(report["runtime"]["version"], "1.27.0");
+        assert_eq!(
+            report["runtime"]["root"],
+            "/data/runtime/onnxruntime/1.27.0/linux-x64"
+        );
+        assert_eq!(
+            report["runtime"]["library"],
+            "/data/runtime/onnxruntime/1.27.0/linux-x64/lib/libonnxruntime.so"
+        );
+        assert_eq!(report["runtime"]["archive_sha256"], "a".repeat(64));
+        assert_eq!(report["runtime"]["manager"], "ctx-local-operator");
+        assert_eq!(
+            report["runtime"]["metadata_trust"],
+            "operator-pinned-digest"
+        );
+        assert_eq!(report["runtime"]["files"], 5);
+        assert_eq!(
+            report["runtime"]["identity"],
+            "onnxruntime|platform=linux-x64"
+        );
+    }
+
+    #[test]
+    fn accelerator_install_report_names_the_accelerator_backend() {
+        let installed = runtime_report_fixture(SemanticRuntimeBackend::Cuda, "linux-x64-cuda12");
+
+        let report = single_runtime_report(
+            "runtime_install",
+            false,
+            SemanticRuntimeBackend::Cuda,
+            Path::new("/data/runtime"),
+            Some(&installed),
+        );
+
+        assert_eq!(report["backend"], "cuda");
+        assert_eq!(report["runtime"]["platform"], "linux-x64-cuda12");
+    }
+
+    #[test]
+    fn runtime_status_report_omits_the_runtime_object_when_nothing_is_installed() {
+        let report = single_runtime_report(
+            "runtime_status",
+            true,
+            SemanticRuntimeBackend::Cpu,
+            Path::new("/data/runtime"),
+            None,
+        );
+
+        assert_eq!(report["operation"], "runtime_status");
+        assert_eq!(report["backend"], "cpu");
+        assert_eq!(report["installed"], false);
+        assert_eq!(report["read_only"], true);
+        assert!(report.get("runtime").is_none(), "{report}");
+    }
+
+    #[test]
+    fn status_marks_a_backend_no_build_can_install_from_a_local_archive() {
+        // The Windows ML sidecar is a zip, so the hosted installer owns it on
+        // every platform and status must not read as a missing install step.
+        let report = single_runtime_report(
+            "runtime_status",
+            true,
+            SemanticRuntimeBackend::WindowsMl,
+            Path::new("/data/runtime"),
+            None,
+        );
+
+        assert_eq!(report["backend"], "windowsml");
+        assert_eq!(report["installed"], false);
+        assert_eq!(report["locally_installable"], false);
+    }
+
+    #[test]
+    fn every_backend_status_reports_one_entry_per_locally_installable_backend() {
+        let temp = tempfile::tempdir().unwrap();
+
+        let report = every_runtime_report(temp.path()).unwrap();
+
+        assert_eq!(report["schema_version"], 1);
+        assert_eq!(report["operation"], "runtime_status");
+        assert_eq!(report["runtime_root"], temp.path().display().to_string());
+        assert_eq!(report["read_only"], true);
+        // One `installed`/`backend` pair cannot stand for several backends, so
+        // multi-backend status must not publish an ambiguous one.
+        assert!(report.get("installed").is_none(), "{report}");
+        assert!(report.get("backend").is_none(), "{report}");
+        let runtimes = report["runtimes"].as_array().unwrap();
+        assert_eq!(
+            runtimes
+                .iter()
+                .map(|entry| entry["backend"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            supported_local_runtime_backends()
+                .iter()
+                .map(|backend| backend.as_str())
+                .collect::<Vec<_>>()
+        );
+        for entry in runtimes {
+            assert_eq!(entry["installed"], false, "{entry}");
+            assert!(entry.get("runtime").is_none(), "{entry}");
+        }
+    }
+
+    #[test]
+    fn both_status_shapes_publish_the_hosts_detected_accelerator() {
+        let temp = tempfile::tempdir().unwrap();
+
+        let every = every_runtime_report(temp.path()).unwrap();
+        let single = single_runtime_report(
+            "runtime_status",
+            true,
+            SemanticRuntimeBackend::Cpu,
+            temp.path(),
+            None,
+        );
+
+        // The detected accelerator is a host fact, so both shapes must carry
+        // the same answer; a status that reported it in only one shape would
+        // make the guidance depend on which command was typed.
+        let detected = &every["detected_accelerator"];
+        assert_eq!(&single["detected_accelerator"], detected, "{every}");
+        assert!(
+            detected.is_null() || detected.as_str().is_some_and(|backend| backend != "cpu"),
+            "the CPU runtime is not an accelerator: {every}"
+        );
+    }
+
+    #[test]
+    fn missing_checksum_sidecar_refuses_to_install_unverified_bytes() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive = temp.path().join("ctx-onnxruntime-linux-x64-cuda12.tar.zst");
+        std::fs::write(&archive, b"archive").unwrap();
+
+        let error = expected_archive_sha256(None, &archive).unwrap_err();
+
+        let error = error.to_string();
+        assert!(error.contains("--sha256"), "{error}");
+        assert!(
+            error.contains("ctx-onnxruntime-linux-x64-cuda12.tar.zst.sha256"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn checksum_sidecar_supplies_the_expected_digest() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive = temp.path().join("runtime.tar.zst");
+        std::fs::write(&archive, b"archive").unwrap();
+        let digest = "B".repeat(64);
+        std::fs::write(
+            temp.path().join("runtime.tar.zst.sha256"),
+            format!("{digest}  runtime.tar.zst\n"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            expected_archive_sha256(None, &archive).unwrap(),
+            "b".repeat(64)
+        );
+        assert_eq!(
+            expected_archive_sha256(Some("  C0FFEE  "), &archive).unwrap(),
+            "c0ffee"
+        );
+    }
+
+    #[test]
+    fn runtime_root_defaults_to_the_data_root_and_rejects_a_relative_override() {
+        let _override = TestEnvRestore::capture("CTX_RUNTIME_DIR");
+        std::env::remove_var("CTX_RUNTIME_DIR");
+        assert_eq!(
+            selected_runtime_root(Path::new("/data")).unwrap(),
+            PathBuf::from("/data/runtime")
+        );
+
+        std::env::set_var("CTX_RUNTIME_DIR", "relative/runtime");
+        let error = selected_runtime_root(Path::new("/data"))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, "CTX_RUNTIME_DIR must be an absolute path");
+
+        std::env::set_var("CTX_RUNTIME_DIR", " /tmp/ctx-runtime");
+        let error = selected_runtime_root(Path::new("/data"))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            "CTX_RUNTIME_DIR must not be empty or whitespace-padded"
+        );
+
+        std::env::set_var("CTX_RUNTIME_DIR", "/tmp/ctx-runtime");
+        assert_eq!(
+            selected_runtime_root(Path::new("/data")).unwrap(),
+            PathBuf::from("/tmp/ctx-runtime")
         );
     }
 }

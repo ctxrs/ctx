@@ -24,6 +24,7 @@ ureq-semantic.workspace = true
 url.workspace = true
 uuid.workspace = true
 xz2.workspace = true
+zstd.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true

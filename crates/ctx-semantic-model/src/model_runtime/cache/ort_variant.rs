@@ -8,7 +8,7 @@ pub(crate) fn semantic_ort_cache_snapshot(
         return semantic_cpu_cache_snapshot(cache_dir);
     }
     let mut repairable_error = None;
-    for model_root in semantic_model_cache_roots(cache_dir) {
+    for model_root in semantic_ort_model_cache_roots(cache_dir, variant) {
         let snapshot = model_root.join("snapshots").join(SEMANTIC_MODEL_REVISION);
         match fs::metadata(&snapshot) {
             Ok(metadata) if metadata.is_dir() => {
@@ -47,7 +47,10 @@ pub(crate) fn semantic_ort_cache_snapshot(
     }))
 }
 
-fn verify_semantic_ort_snapshot(snapshot: &Path, variant: SemanticOrtModelVariant) -> Result<()> {
+pub(super) fn verify_semantic_ort_snapshot(
+    snapshot: &Path,
+    variant: SemanticOrtModelVariant,
+) -> Result<()> {
     for expected in variant.required_files() {
         verify_semantic_cpu_file(&snapshot.join(expected.path), expected)?;
     }

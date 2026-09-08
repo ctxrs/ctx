@@ -23,6 +23,8 @@ pub enum CliOperation {
     SemanticEnable,
     SemanticStatus,
     SemanticDisable,
+    SemanticRuntimeInstall,
+    SemanticRuntimeStatus,
     Status(StatusTelemetry),
     Stats,
     Index(IndexTelemetry),
@@ -53,6 +55,8 @@ impl CliOperation {
             Self::SemanticEnable => "semantic_enable",
             Self::SemanticStatus => "semantic_status",
             Self::SemanticDisable => "semantic_disable",
+            Self::SemanticRuntimeInstall => "semantic_runtime_install",
+            Self::SemanticRuntimeStatus => "semantic_runtime_status",
             Self::Status(_) => "status",
             Self::Stats => "stats",
             Self::Index(_) => "index",
@@ -80,6 +84,8 @@ impl CliOperation {
                 | Self::SemanticEnable
                 | Self::SemanticStatus
                 | Self::SemanticDisable
+                | Self::SemanticRuntimeInstall
+                | Self::SemanticRuntimeStatus
                 | Self::Status(_)
                 | Self::Index(_)
                 | Self::Sources(_)
@@ -98,7 +104,11 @@ impl CliOperation {
     pub const fn local_usage_operation(&self) -> Option<LocalUsageOperation> {
         match self {
             Self::Setup(_) => Some(LocalUsageOperation::Setup),
-            Self::SemanticEnable | Self::SemanticStatus | Self::SemanticDisable => None,
+            Self::SemanticEnable
+            | Self::SemanticStatus
+            | Self::SemanticDisable
+            | Self::SemanticRuntimeInstall
+            | Self::SemanticRuntimeStatus => None,
             Self::Status(_) | Self::Stats => None,
             Self::Index(_) => Some(LocalUsageOperation::Index),
             Self::Sources(_) => Some(LocalUsageOperation::Sources),

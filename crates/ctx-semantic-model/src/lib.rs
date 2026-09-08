@@ -58,10 +58,13 @@ pub use model_contract::{
 #[doc(hidden)]
 pub use model_runtime::SemanticRuntimeBusyGuard;
 pub use model_runtime::{
-    prepare_platform_semantic_acceleration, semantic_native_accelerator_target,
-    semantic_query_service_supported, SemanticDaemonCpuFallbackRequired,
+    detected_accelerator_backend, identify_runtime_archive, install_operator_runtime,
+    installed_runtime_report, prepare_platform_semantic_acceleration,
+    semantic_native_accelerator_target, semantic_query_service_supported,
+    supported_local_runtime_backends, SemanticDaemonCpuFallbackRequired,
     SemanticDaemonModelAcquisition, SemanticEmbeddingRuntimeInfo, SemanticNativeAcceleratorTarget,
-    SemanticPassiveConfigurationError, SemanticPassiveLoadUnavailable, SharedSemanticRuntime,
+    SemanticPassiveConfigurationError, SemanticPassiveLoadUnavailable, SemanticRuntimeBackend,
+    SemanticRuntimeInstall, SemanticRuntimeReport, SharedSemanticRuntime,
 };
 pub use resource_policy::{
     semantic_model_load_resource_facts, SemanticModelLoadResourceFacts, SemanticQuietPolicy,

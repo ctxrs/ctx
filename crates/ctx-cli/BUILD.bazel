@@ -94,6 +94,7 @@ CTX_CLI_DEPS = [
     "//crates/ctx-history-index:lib",
     "//crates/ctx-history-read-application:lib",
     "//crates/ctx-history-refresh:lib",
+    "//crates/ctx-semantic-model:lib",
     "//crates/ctx-terminal:lib",
     "//crates/ctx-upgrade-engine:lib",
 ]
@@ -138,6 +139,7 @@ CTX_CLI_QUALIFICATION_DEPS = [
     "//crates/ctx-history-index:lib",
     "//crates/ctx-history-read-application:lib",
     "//crates/ctx-history-refresh:lib",
+    "//crates/ctx-semantic-model:lib",
     "//crates/ctx-terminal:lib",
     "//crates/ctx-upgrade-engine:qualification_lib",
 ]

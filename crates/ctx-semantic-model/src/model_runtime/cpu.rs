@@ -117,7 +117,10 @@ pub(crate) fn acquire_cpu_model_for_daemon(
             SemanticModelAcquisitionSource::Cache
         }
         Err(error) if semantic_cpu_cache_repairable(&error) => {
-            replace_cpu_model_cache_from_pinned_revision(cache_dir)?;
+            replace_ort_model_cache_from_pinned_revision(
+                cache_dir,
+                SemanticOrtModelVariant::CpuFp32,
+            )?;
             SemanticModelAcquisitionSource::Download
         }
         Err(error) => return Err(error),
@@ -143,20 +146,21 @@ pub(crate) fn acquire_accelerator_model_for_daemon(
         }
         _ => return Err(anyhow!("requested backend is not an ORT accelerator")),
     };
-    semantic_ort_cache_snapshot(cache_dir, SemanticOrtModelVariant::for_backend(kind)).map_err(
-        |error| -> anyhow::Error {
-            SemanticProvisioningRequired {
-                asset: "intfloat/multilingual-e5-small@614241f",
-                detail: error.to_string(),
-            }
-            .into()
-        },
-    )?;
+    let variant = SemanticOrtModelVariant::for_backend(kind);
+    let model_source = match semantic_ort_cache_snapshot(cache_dir, variant) {
+        Ok(_) => SemanticModelAcquisitionSource::Cache,
+        Err(error) if semantic_cpu_cache_repairable(&error) => {
+            // A missing or damaged accelerator snapshot is provisionable from
+            // the pinned revision; only integrity failures after download stay
+            // permanent, which `replace_ort_model_cache_from_pinned_revision`
+            // reports with the typed error the daemon classifies.
+            replace_ort_model_cache_from_pinned_revision(cache_dir, variant)?;
+            SemanticModelAcquisitionSource::Download
+        }
+        Err(error) => return Err(error),
+    };
     match installed_accelerator_runtime_identity(config.paths(), flavor)? {
-        Some(_) => Ok(SemanticDaemonModelAcquisition::new(
-            backend,
-            SemanticModelAcquisitionSource::Cache,
-        )),
+        Some(_) => Ok(SemanticDaemonModelAcquisition::new(backend, model_source)),
         None => Err(SemanticProvisioningRequired {
             asset: flavor.asset_name(),
             detail: "verified accelerator runtime is not installed".to_owned(),
@@ -574,7 +578,7 @@ use super::{
         installed_accelerator_runtime_identity, revalidate_loaded_accelerator_runtime,
         OnnxRuntimeFlavor,
     },
-    read_semantic_ort_model_file, replace_cpu_model_cache_from_pinned_revision,
+    read_semantic_ort_model_file, replace_ort_model_cache_from_pinned_revision,
     semantic_cpu_cache_repairable, semantic_cpu_cache_snapshot, semantic_ort_cache_snapshot,
     windows_ml, SemanticDaemonCpuFallbackRequired, SemanticDaemonModelAcquisition,
     SemanticEmbedder, SemanticEmbeddingBackend, SemanticModelAcquisitionBackend,

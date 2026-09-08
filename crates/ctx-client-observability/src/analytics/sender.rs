@@ -358,7 +358,9 @@ fn insert_client_operation_properties(
         }
         CliOperation::SemanticEnable
         | CliOperation::SemanticStatus
-        | CliOperation::SemanticDisable => {}
+        | CliOperation::SemanticDisable
+        | CliOperation::SemanticRuntimeInstall
+        | CliOperation::SemanticRuntimeStatus => {}
         CliOperation::Status(value) => {
             insert_optional_bool(properties, "initialized", value.initialized);
             insert_optional_count(properties, "indexed_items_bucket", value.indexed_items);

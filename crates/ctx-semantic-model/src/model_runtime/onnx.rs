@@ -3,7 +3,11 @@ use std::{
     sync::{Mutex, OnceLock},
 };
 
-#[cfg(any(all(target_os = "linux", target_arch = "x86_64"), test))]
+#[cfg(any(
+    all(target_os = "linux", target_arch = "x86_64"),
+    ctx_semantic_fastembed,
+    test
+))]
 use std::fs;
 
 use crate::configuration::{SemanticModelPaths, SemanticOnnxRuntimePaths};
@@ -11,6 +15,12 @@ use anyhow::{anyhow, Context, Result};
 
 #[cfg(ctx_semantic_fastembed)]
 mod cuda_dependencies;
+mod local_install;
+pub use local_install::{
+    detected_accelerator_backend, identify_runtime_archive, install_operator_runtime,
+    installed_runtime_report, supported_local_runtime_backends, SemanticRuntimeBackend,
+    SemanticRuntimeInstall, SemanticRuntimeReport,
+};
 #[cfg(ctx_semantic_fastembed)]
 mod verified_runtime;
 #[cfg(ctx_semantic_fastembed)]
@@ -18,7 +28,10 @@ pub(super) use verified_runtime::{
     installed_accelerator_runtime_identity, revalidate_loaded_accelerator_runtime,
 };
 #[cfg(ctx_semantic_fastembed)]
-use verified_runtime::{validate_runtime_candidate, verified_accelerator_runtime_candidates};
+use verified_runtime::{
+    runtime_install_claim, validate_runtime_candidate, verified_runtime_candidates,
+    RuntimeInstallClaim, RUNTIME_INSTALL_MANIFEST,
+};
 
 #[cfg(ctx_semantic_fastembed)]
 pub(super) const SEMANTIC_ONNXRUNTIME_VERSION: &str = "1.27.0";
@@ -32,6 +45,21 @@ pub(super) const SEMANTIC_ONNXRUNTIME_DYLIB: &str = "libonnxruntime.dylib";
     not(target_os = "macos")
 ))]
 pub(super) const SEMANTIC_ONNXRUNTIME_DYLIB: &str = "libonnxruntime.so";
+
+/// The CPU library as the sidecar, its manifest, and the file contract spell
+/// it. Kept beside the bare library name because the contract needs a `'static`
+/// path and `concat!` cannot join a `const`; the two are asserted equal in
+/// `cpu_runtime_contract_mirrors_the_published_sidecar`.
+#[cfg(all(ctx_semantic_fastembed, target_os = "windows"))]
+pub(super) const SEMANTIC_ONNXRUNTIME_LIB_ENTRY: &str = "lib/onnxruntime.dll";
+#[cfg(all(ctx_semantic_fastembed, target_os = "macos"))]
+pub(super) const SEMANTIC_ONNXRUNTIME_LIB_ENTRY: &str = "lib/libonnxruntime.dylib";
+#[cfg(all(
+    ctx_semantic_fastembed,
+    not(target_os = "windows"),
+    not(target_os = "macos")
+))]
+pub(super) const SEMANTIC_ONNXRUNTIME_LIB_ENTRY: &str = "lib/libonnxruntime.so";
 
 #[cfg(ctx_semantic_fastembed)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -162,12 +190,9 @@ pub(super) fn ensure_semantic_onnxruntime_loaded(paths: &SemanticModelPaths) -> 
         }
         return Ok(runtime.path.clone());
     }
-    let path = load_semantic_onnxruntime(paths.model_cache_dir(), paths.onnx_runtime())?;
-    let _ = LOADED_RUNTIME.set(LoadedOnnxRuntime {
-        path: path.clone(),
-        artifact_identity: format!("legacy-cpu|path={}", path.display()),
-        flavor: OnnxRuntimeFlavor::Cpu,
-    });
+    let runtime = load_semantic_onnxruntime(paths.model_cache_dir(), paths.onnx_runtime())?;
+    let path = runtime.path.clone();
+    let _ = LOADED_RUNTIME.set(runtime);
     Ok(path)
 }
 
@@ -226,37 +251,69 @@ fn same_verified_runtime(
 pub(super) fn load_semantic_onnxruntime(
     model_cache_dir: &Path,
     paths: &SemanticOnnxRuntimePaths,
-) -> Result<PathBuf> {
+) -> Result<LoadedOnnxRuntime> {
+    load_semantic_onnxruntime_with(model_cache_dir, paths, open_semantic_onnxruntime)
+}
+
+/// Split from `load_semantic_onnxruntime` so the candidate order, the
+/// fall-through rules, and the identity each layout records stay testable
+/// without initializing ORT, whose dynamic load is process-global and is only
+/// attempted once per process.
+#[cfg(ctx_semantic_fastembed)]
+fn load_semantic_onnxruntime_with(
+    model_cache_dir: &Path,
+    paths: &SemanticOnnxRuntimePaths,
+    open: impl Fn(&str, &Path) -> Result<(), String>,
+) -> Result<LoadedOnnxRuntime> {
     let mut failures = Vec::new();
+    if let Some((path, identity)) = preferred_verified_cpu_runtime(paths)? {
+        match open(VERIFIED_RUNTIME_SOURCE, &path) {
+            Ok(()) => {
+                let reloaded = validate_runtime_candidate(&path, OnnxRuntimeFlavor::Cpu)
+                    .context("revalidate the verified CPU runtime after dynamic load")?;
+                if reloaded != identity {
+                    return Err(anyhow!(
+                        "verified CPU runtime identity changed during dynamic load"
+                    ));
+                }
+                return Ok(LoadedOnnxRuntime {
+                    path,
+                    artifact_identity: identity,
+                    flavor: OnnxRuntimeFlavor::Cpu,
+                });
+            }
+            Err(failure) => failures.push(failure),
+        }
+    }
     for candidate in semantic_onnxruntime_load_candidates(model_cache_dir, paths) {
         if !candidate.try_even_if_missing && !candidate.path.exists() {
             continue;
         }
-        #[cfg(target_os = "windows")]
-        if let Err(error) = preload_windows_onnxruntime(&candidate.path) {
-            failures.push(format!(
-                "{} {}: {error:#}",
-                candidate.source,
-                candidate.path.display()
-            ));
-            continue;
-        }
-        match ort::init_from(&candidate.path) {
-            Ok(builder) => {
-                let _ = builder.commit();
-                return Ok(candidate.path);
+        match open(candidate.source, &candidate.path) {
+            Ok(()) => {
+                // A plain layout carries no provenance to report: it is the
+                // hand-extracted or explicit-metadata install ctx has always
+                // accepted, so its identity stays the library path.
+                let artifact_identity = format!("legacy-cpu|path={}", candidate.path.display());
+                return Ok(LoadedOnnxRuntime {
+                    path: candidate.path,
+                    artifact_identity,
+                    flavor: OnnxRuntimeFlavor::Cpu,
+                });
             }
-            Err(error) => failures.push(format_runtime_load_failure(
-                candidate.source,
-                &candidate.path,
-                &error,
-            )),
+            Err(failure) => failures.push(failure),
         }
     }
     let detail = if failures.is_empty() {
+        // The direct-library variables only ever select a CPU runtime: the
+        // accelerator loader searches runtime roots for a canonical layout and
+        // validates an installer manifest, so advertising them without that
+        // distinction sent GPU installs after an unreachable fix.
         format!(
-            "no ONNX Runtime dynamic library candidates were found for {}; set an absolute path with CTX_ONNXRUNTIME_DYLIB, ORT_DYLIB_PATH, CTX_ONNXRUNTIME_DIR, CTX_ONNXRUNTIME_CACHE_DIR, or CTX_RUNTIME_DIR",
-            semantic_onnxruntime_platform_dir()
+            "no ONNX Runtime dynamic library candidates were found for {platform}; install the ONNX Runtime {version} CPU sidecar with `ctx semantic runtime install`, place it under <runtime-root>/onnxruntime/{version}/{platform}/lib, or set an absolute CPU library path with CTX_ONNXRUNTIME_DYLIB, ORT_DYLIB_PATH, or CTX_ONNXRUNTIME_DIR. Those three variables select a CPU runtime only; an accelerator runtime loads exclusively from an installer-provisioned runtime directory carrying its {manifest} manifest, searched under CTX_RUNTIME_DIR or CTX_ONNXRUNTIME_CACHE_DIR",
+            platform = semantic_onnxruntime_platform_dir(),
+            version = SEMANTIC_ONNXRUNTIME_VERSION,
+            manifest = RUNTIME_INSTALL_MANIFEST,
         )
     } else {
         format!(
@@ -267,13 +324,83 @@ pub(super) fn load_semantic_onnxruntime(
     Err(anyhow!(detail))
 }
 
+/// Failure label for the verified CPU install, distinct from the plain
+/// candidate sources so a load report says which layout was rejected.
+#[cfg(ctx_semantic_fastembed)]
+const VERIFIED_RUNTIME_SOURCE: &str = "ctx_verified_runtime";
+
+/// The direct-library variables are the operator's own choice of file, so any
+/// one of them suppresses every other candidate.
+#[cfg(ctx_semantic_fastembed)]
+fn explicit_runtime_source(paths: &SemanticOnnxRuntimePaths) -> Option<&'static str> {
+    if paths.ctx_dylib.is_some() {
+        Some("ctx_env_dylib")
+    } else if paths.ort_dylib.is_some() {
+        Some("ort_env_dylib")
+    } else if paths.ctx_dir.is_some() {
+        Some("ctx_env_dir")
+    } else {
+        None
+    }
+}
+
+/// Opens a candidate exactly the way this loader always has, so a verified
+/// install and a plain one fail with the same detail.
+#[cfg(ctx_semantic_fastembed)]
+fn open_semantic_onnxruntime(source: &str, path: &Path) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    if let Err(error) = preload_windows_onnxruntime(path) {
+        return Err(format!("{source} {}: {error:#}", path.display()));
+    }
+    match ort::init_from(path) {
+        Ok(builder) => {
+            // Losing the commit race is not a load failure for the CPU runtime:
+            // this loader has always reported the library it opened.
+            let _ = builder.commit();
+            Ok(())
+        }
+        Err(error) => Err(format_runtime_load_failure(source, path, &error)),
+    }
+}
+
+/// The verified CPU install the loader must prefer, with the identity to report
+/// for it, or `None` when the loader falls through to the plain candidate walk.
+///
+/// An explicit library or directory selection stays exclusive: the operator
+/// named the file to open, so ctx must not quietly prefer another install. A
+/// runtime directory with no installer manifest is left to the plain walk as
+/// well, because hand-extracted sidecars predate local install and have to keep
+/// loading. A directory whose manifest claims ctx's own provenance and then
+/// fails validation is tamper evidence, so it fails the load outright instead of
+/// being skipped quietly.
+#[cfg(ctx_semantic_fastembed)]
+fn preferred_verified_cpu_runtime(
+    paths: &SemanticOnnxRuntimePaths,
+) -> Result<Option<(PathBuf, String)>> {
+    if explicit_runtime_source(paths).is_some() {
+        return Ok(None);
+    }
+    for path in verified_runtime_candidates(paths, OnnxRuntimeFlavor::Cpu)? {
+        let Some(root) = path.parent().and_then(Path::parent) else {
+            continue;
+        };
+        if runtime_install_claim(root) != RuntimeInstallClaim::CtxProvenance {
+            continue;
+        }
+        let identity = validate_runtime_candidate(&path, OnnxRuntimeFlavor::Cpu)
+            .with_context(|| format!("validate the installed CPU runtime {}", root.display()))?;
+        return Ok(Some((path, identity)));
+    }
+    Ok(None)
+}
+
 #[cfg(ctx_semantic_fastembed)]
 fn load_verified_accelerator_runtime(
     paths: &SemanticModelPaths,
     flavor: OnnxRuntimeFlavor,
 ) -> Result<LoadedOnnxRuntime> {
     let mut failures = Vec::new();
-    for path in verified_accelerator_runtime_candidates(paths, flavor)? {
+    for path in verified_runtime_candidates(paths.onnx_runtime(), flavor)? {
         if !path.exists() {
             continue;
         }
@@ -350,6 +477,7 @@ pub(crate) fn load_missing_semantic_onnxruntime_for_test(
         &SemanticOnnxRuntimePaths::new(model_cache_dir.join("semantic-runtime"))
             .with_ctx_dylib(Some(missing_dylib.to_path_buf())),
     )
+    .map(|runtime| runtime.path)
 }
 
 #[cfg(all(ctx_semantic_fastembed, target_os = "windows"))]
@@ -379,16 +507,7 @@ pub(super) fn semantic_onnxruntime_load_candidates(
     paths: &SemanticOnnxRuntimePaths,
 ) -> Vec<SemanticOnnxRuntimeCandidate> {
     let mut candidates = semantic_onnxruntime_candidates(model_cache_dir, paths);
-    let explicit_source = if paths.ctx_dylib.is_some() {
-        Some("ctx_env_dylib")
-    } else if paths.ort_dylib.is_some() {
-        Some("ort_env_dylib")
-    } else if paths.ctx_dir.is_some() {
-        Some("ctx_env_dir")
-    } else {
-        None
-    };
-    if let Some(source) = explicit_source {
+    if let Some(source) = explicit_runtime_source(paths) {
         candidates.retain(|candidate| candidate.source == source);
     }
     candidates
@@ -965,5 +1084,279 @@ mod ort_runtime_tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(25));
         }
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    fn stage_cpu_runtime_files(runtime_root: &Path) -> (PathBuf, Vec<serde_json::Value>) {
+        use sha2::Digest as _;
+
+        let root = runtime_root
+            .join("onnxruntime")
+            .join(SEMANTIC_ONNXRUNTIME_VERSION)
+            .join(semantic_onnxruntime_platform_dir());
+        fs::create_dir_all(root.join("lib")).unwrap();
+        ctx_history_platform::platform_security::restrict_private_directory(&root).unwrap();
+        let mut records = Vec::new();
+        for relative in verified_runtime::expected_runtime_files(OnnxRuntimeFlavor::Cpu) {
+            let bytes = format!("ctx-cpu-runtime::{relative}").into_bytes();
+            fs::write(root.join(relative), &bytes).unwrap();
+            records.push(serde_json::json!({
+                "path": relative,
+                "size": bytes.len(),
+                "sha256": format!("{:x}", sha2::Sha256::digest(&bytes)),
+            }));
+        }
+        (root, records)
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    fn verified_cpu_manifest(records: &[serde_json::Value]) -> serde_json::Value {
+        serde_json::json!({
+            "schema_version": 1,
+            "manager": "ctx-local-operator",
+            "metadata_trust": "operator-pinned-digest",
+            "runtime": "onnxruntime",
+            "platform": semantic_onnxruntime_platform_dir(),
+            "version": SEMANTIC_ONNXRUNTIME_VERSION,
+            "sha256": "e".repeat(64),
+            "artifact_url": "file:///tmp/ctx-onnxruntime-linux-x64.tar.zst",
+            "installed_at": "2026-09-08T00:00:00Z",
+            "files": records,
+        })
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    fn write_cpu_manifest(root: &Path, manifest: &serde_json::Value) {
+        fs::write(
+            root.join(RUNTIME_INSTALL_MANIFEST),
+            serde_json::to_vec(manifest).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    fn cpu_runtime_paths(runtime_root: PathBuf) -> SemanticOnnxRuntimePaths {
+        SemanticOnnxRuntimePaths {
+            cache_dir: Some(runtime_root),
+            ..SemanticOnnxRuntimePaths::default()
+        }
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn verified_cpu_install_is_preferred_and_carries_its_provenance() {
+        let temporary = tempfile::tempdir().unwrap();
+        let runtime_root = temporary.path().join("runtime");
+        let (root, records) = stage_cpu_runtime_files(&runtime_root);
+        write_cpu_manifest(&root, &verified_cpu_manifest(&records));
+        let paths = cpu_runtime_paths(runtime_root);
+
+        let (library, identity) = preferred_verified_cpu_runtime(&paths)
+            .unwrap()
+            .expect("the verified CPU install must be selected");
+        assert_eq!(library, root.join("lib").join(SEMANTIC_ONNXRUNTIME_DYLIB));
+        assert!(
+            identity.starts_with("onnxruntime|platform=linux-x64|version=1.27.0|"),
+            "{identity}"
+        );
+        assert!(
+            identity.contains("manager=ctx-local-operator|metadata_trust=operator-pinned-digest"),
+            "{identity}"
+        );
+        assert_ne!(identity, format!("legacy-cpu|path={}", library.display()));
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn plain_cpu_layouts_keep_loading_without_a_verified_manifest() {
+        let temporary = tempfile::tempdir().unwrap();
+        let runtime_root = temporary.path().join("runtime");
+        let (root, _) = stage_cpu_runtime_files(&runtime_root);
+        let library = root.join("lib").join(SEMANTIC_ONNXRUNTIME_DYLIB);
+        let paths = cpu_runtime_paths(runtime_root);
+        let model_cache = test_absolute_path("model-cache");
+
+        assert!(preferred_verified_cpu_runtime(&paths).unwrap().is_none());
+
+        // The direct-release installers write a manifest of their own that
+        // claims no ctx provenance and carries no per-file records. Those
+        // installs must keep loading exactly as they always have.
+        write_cpu_manifest(&root, &explicit_metadata_manifest());
+        assert!(preferred_verified_cpu_runtime(&paths).unwrap().is_none());
+
+        let candidates = semantic_onnxruntime_load_candidates(&model_cache, &paths);
+        let plain = candidates
+            .iter()
+            .find(|candidate| candidate.path == library)
+            .expect("the plain cache layout stays a candidate");
+        assert_eq!(plain.source, "ctx_runtime_cache");
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn tampered_verified_cpu_manifest_fails_the_load_instead_of_falling_back() {
+        let temporary = tempfile::tempdir().unwrap();
+        let runtime_root = temporary.path().join("runtime");
+        let (root, mut records) = stage_cpu_runtime_files(&runtime_root);
+        records[0]["sha256"] = serde_json::json!("a".repeat(64));
+        write_cpu_manifest(&root, &verified_cpu_manifest(&records));
+        let paths = cpu_runtime_paths(runtime_root);
+
+        let selection = preferred_verified_cpu_runtime(&paths).unwrap_err();
+        let selection = format!("{selection:#}");
+        assert!(
+            selection.contains("validate the installed CPU runtime"),
+            "{selection}"
+        );
+        assert!(selection.contains("SHA-256 does not match"), "{selection}");
+
+        let load = load_semantic_onnxruntime(&test_absolute_path("model-cache"), &paths)
+            .expect_err("tamper evidence must not fall back to the plain layout");
+        let load = format!("{load:#}");
+        assert!(
+            load.contains("validate the installed CPU runtime"),
+            "{load}"
+        );
+        assert!(
+            !load.contains("failed to load ONNX Runtime dynamic library"),
+            "{load}"
+        );
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn explicit_dylib_selection_still_wins_over_a_verified_install() {
+        let temporary = tempfile::tempdir().unwrap();
+        let runtime_root = temporary.path().join("runtime");
+        let (root, records) = stage_cpu_runtime_files(&runtime_root);
+        write_cpu_manifest(&root, &verified_cpu_manifest(&records));
+        let verified = root.join("lib").join(SEMANTIC_ONNXRUNTIME_DYLIB);
+        let explicit = temporary
+            .path()
+            .join("explicit")
+            .join(SEMANTIC_ONNXRUNTIME_DYLIB);
+        let paths = SemanticOnnxRuntimePaths {
+            ctx_dylib: Some(explicit.clone()),
+            ..cpu_runtime_paths(runtime_root)
+        };
+
+        // The verified install is present and would otherwise be preferred, so
+        // this proves the explicit selection stays exclusive.
+        assert!(preferred_verified_cpu_runtime(&paths).unwrap().is_none());
+        let candidates =
+            semantic_onnxruntime_load_candidates(&test_absolute_path("model-cache"), &paths);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].path, explicit);
+        assert_ne!(candidates[0].path, verified);
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn a_verified_cpu_install_is_never_accepted_as_the_cuda_runtime() {
+        let temporary = tempfile::tempdir().unwrap();
+        let runtime_root = temporary.path().join("runtime");
+        let (root, records) = stage_cpu_runtime_files(&runtime_root);
+        write_cpu_manifest(&root, &verified_cpu_manifest(&records));
+        let library = root.join("lib").join(SEMANTIC_ONNXRUNTIME_DYLIB);
+        let paths = cpu_runtime_paths(runtime_root.clone());
+
+        let error = validate_runtime_candidate(&library, OnnxRuntimeFlavor::Cuda)
+            .expect_err("a CPU install must not satisfy the CUDA contract")
+            .to_string();
+        assert!(error.contains("linux-x64-cuda12"), "{error}");
+        let expected = runtime_root
+            .join("onnxruntime")
+            .join(SEMANTIC_ONNXRUNTIME_VERSION)
+            .join("linux-x64-cuda12")
+            .join("lib")
+            .join(SEMANTIC_ONNXRUNTIME_DYLIB);
+        let cuda = verified_runtime_candidates(&paths, OnnxRuntimeFlavor::Cuda).unwrap();
+        assert_eq!(cuda, [expected]);
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    fn explicit_metadata_manifest() -> serde_json::Value {
+        // Exactly what scripts/dev-install-from-metadata.sh and
+        // scripts/install.ps1 write next to a direct-release CPU sidecar: a
+        // manager ctx does not verify and no per-file records at all.
+        serde_json::json!({
+            "schema_version": 1,
+            "manager": "ctx-explicit-metadata-installer",
+            "metadata_trust": "explicit-unsigned",
+            "runtime": "onnxruntime",
+            "platform": "linux-x64",
+            "version": SEMANTIC_ONNXRUNTIME_VERSION,
+            "sha256": "f".repeat(64),
+            "artifact_url": "https://cli.ctx.rs/ctx-onnxruntime-linux-x64.tar.gz",
+            "installed_at": "2026-09-08T00:00:00Z",
+        })
+    }
+
+    /// A recorded load must name the layout it came from: a verified install
+    /// reports its manifest provenance, and everything else keeps the bare path
+    /// identity ctx has always reported. The opener is injected because ORT's
+    /// dynamic load is process-global and attempted only once per process.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn each_cpu_layout_records_its_own_artifact_identity() {
+        let temporary = tempfile::tempdir().unwrap();
+        let runtime_root = temporary.path().join("runtime");
+        let (root, records) = stage_cpu_runtime_files(&runtime_root);
+        let library = root.join("lib").join(SEMANTIC_ONNXRUNTIME_DYLIB);
+        let model_cache = test_absolute_path("model-cache");
+        let opened = std::cell::RefCell::new(Vec::new());
+        let open = |source: &str, path: &Path| -> Result<(), String> {
+            opened
+                .borrow_mut()
+                .push((source.to_owned(), path.to_path_buf()));
+            Ok(())
+        };
+
+        write_cpu_manifest(&root, &verified_cpu_manifest(&records));
+        let paths = cpu_runtime_paths(runtime_root.clone());
+        let verified = load_semantic_onnxruntime_with(&model_cache, &paths, &open).unwrap();
+        assert_eq!(verified.path, library);
+        assert!(
+            verified
+                .artifact_identity
+                .contains("manager=ctx-local-operator|metadata_trust=operator-pinned-digest"),
+            "{}",
+            verified.artifact_identity
+        );
+        assert_eq!(
+            opened.take(),
+            vec![("ctx_verified_runtime".to_owned(), library.clone())]
+        );
+
+        // A direct-release install carries an installer manifest ctx does not
+        // verify, so it keeps loading with the identity it always reported.
+        write_cpu_manifest(&root, &explicit_metadata_manifest());
+        let plain = load_semantic_onnxruntime_with(&model_cache, &paths, &open).unwrap();
+        assert_eq!(plain.path, library);
+        assert_eq!(
+            plain.artifact_identity,
+            format!("legacy-cpu|path={}", library.display())
+        );
+        assert_eq!(
+            opened.take(),
+            vec![("ctx_runtime_cache".to_owned(), library.clone())]
+        );
+
+        // An explicit selection stays exclusive even with a verified install
+        // in the same runtime root.
+        write_cpu_manifest(&root, &verified_cpu_manifest(&records));
+        let explicit = temporary.path().join(SEMANTIC_ONNXRUNTIME_DYLIB);
+        fs::write(&explicit, b"ctx-cpu-runtime::explicit").unwrap();
+        let selected = SemanticOnnxRuntimePaths {
+            ctx_dylib: Some(explicit.clone()),
+            ..cpu_runtime_paths(runtime_root)
+        };
+        let chosen = load_semantic_onnxruntime_with(&model_cache, &selected, &open).unwrap();
+        assert_eq!(chosen.path, explicit);
+        assert_eq!(
+            chosen.artifact_identity,
+            format!("legacy-cpu|path={}", explicit.display())
+        );
+        assert_eq!(opened.take(), vec![("ctx_env_dylib".to_owned(), explicit)]);
     }
 }

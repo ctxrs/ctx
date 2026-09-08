@@ -25,7 +25,9 @@ pub use list::{ListArgs, ListEventsArgs, ListTarget};
 pub use locate::{LocateArgs, LocateTarget};
 pub use search::{CliRefreshArg, ContentScopeArg, SearchArgs, SearchBackendArg};
 pub use semantic::{
-    render_semantic_disabled, render_semantic_status, SemanticArgs, SemanticCommand,
+    render_semantic_disabled, render_semantic_runtime_install, render_semantic_runtime_status,
+    render_semantic_status, SemanticArgs, SemanticCommand, SemanticRuntimeBackendArg,
+    SemanticRuntimeCommand,
 };
 pub use setup::{render_setup_human, SetupArgs, SetupDaemonState};
 pub use show::{ShowArgs, ShowEventArgs, ShowSessionArgs, ShowTarget};

@@ -198,7 +198,7 @@ fn is_derivative_refresh_finding(finding: &str) -> bool {
     .contains(&finding)
 }
 
-fn bounded_terminal_detail(detail: &str) -> String {
+pub(super) fn bounded_terminal_detail(detail: &str) -> String {
     let escaped = Span::text(detail).content().to_owned();
     if escaped.len() <= MAX_REFRESH_ERROR_BYTES {
         return escaped;

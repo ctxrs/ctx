@@ -8,6 +8,11 @@ pub const SEMANTIC_MODEL_KEY: &str = "e5-small-v1:mean-pool:l2:query-passage";
 pub const SEMANTIC_MODEL_ID: &str = "intfloat/multilingual-e5-small";
 pub const SEMANTIC_MODEL_REVISION: &str = "614241f622f53c4eeff9890bdc4f31cfecc418b3";
 pub const SEMANTIC_MODEL_CONTRACT_VERSION: u32 = 2;
+/// Upstream publishes the O4/FP16 graph as `onnx/model_O4.onnx`, while ctx
+/// stores every ORT variant's graph at the single contract path
+/// `onnx/model.onnx`. The download path and the cached path therefore differ
+/// for this variant only; see `SemanticOrtModelVariant::pinned_source_path`.
+const SEMANTIC_ACCELERATOR_ONNX_UPSTREAM_PATH: &str = "onnx/model_O4.onnx";
 const SEMANTIC_ACCELERATOR_ONNX_MODEL_FILE: SemanticModelFile = SemanticModelFile::new(
     "onnx/model.onnx",
     235_052_531,
@@ -635,6 +640,26 @@ impl SemanticOrtModelVariant {
             Self::AcceleratorO4Fp16 => SEMANTIC_ACCELERATOR_ONNX_MODEL_FILE,
         };
         std::iter::once(model).chain(SEMANTIC_REQUIRED_MODEL_FILES[1..].iter().copied())
+    }
+
+    /// Resolve the upstream repository path that provides `contract_path` for
+    /// this variant. Resolution goes through `required_files` so a path outside
+    /// the pinned contract is a hard error rather than an unverified download.
+    pub(crate) fn pinned_source_path(self, contract_path: &str) -> Result<&'static str> {
+        let file = self
+            .required_files()
+            .find(|file| file.path == contract_path)
+            .ok_or_else(|| {
+                anyhow!(
+                    "semantic model file {contract_path:?} is not in the pinned {} contract",
+                    self.as_str()
+                )
+            })?;
+        if self == Self::AcceleratorO4Fp16 && file.path == SEMANTIC_ACCELERATOR_ONNX_MODEL_FILE.path
+        {
+            return Ok(SEMANTIC_ACCELERATOR_ONNX_UPSTREAM_PATH);
+        }
+        Ok(file.path)
     }
 
     pub fn as_str(self) -> &'static str {

@@ -51,6 +51,7 @@ ctx-history-ingest-application = { path = "../ctx-history-ingest-application" }
 ctx-history-index = { path = "../ctx-history-index" }
 ctx-history-read-application = { path = "../ctx-history-read-application" }
 ctx-history-refresh = { path = "../ctx-history-refresh" }
+ctx-semantic-model = { path = "../ctx-semantic-model" }
 ctx-terminal = { path = "../ctx-terminal" }
 ctx-upgrade-engine = { path = "../ctx-upgrade-engine" }
 

@@ -91,7 +91,7 @@ fn semantic_ort_model_cache_snapshot_dir(
     if cache_dir.as_os_str().is_empty() {
         return None;
     }
-    for model_root in cache_paths::semantic_model_cache_roots(cache_dir) {
+    for model_root in cache_paths::semantic_ort_model_cache_roots(cache_dir, variant) {
         if let Some(snapshot) = semantic_ort_model_snapshot_from_root(&model_root, variant) {
             return Some(snapshot);
         }

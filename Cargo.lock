@@ -591,6 +591,7 @@ dependencies = [
  "ctx-history-platform",
  "ctx-history-read-application",
  "ctx-history-refresh",
+ "ctx-semantic-model",
  "ctx-terminal",
  "ctx-upgrade-engine",
  "fs2",
@@ -1666,6 +1667,7 @@ dependencies = [
  "uuid",
  "windows-sys 0.61.2",
  "xz2",
+ "zstd",
 ]
 
 [[package]]

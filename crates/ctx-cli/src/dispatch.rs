@@ -796,6 +796,16 @@ pub(crate) fn command_operation_descriptor(command: &CommandRoot) -> OperationDe
             ctx_cli_presentation::commands::SemanticCommand::Disable(_) => {
                 CliOperation::SemanticDisable
             }
+            ctx_cli_presentation::commands::SemanticCommand::Runtime(args) => {
+                match &args.command {
+                    ctx_cli_presentation::commands::SemanticRuntimeCommand::Install(_) => {
+                        CliOperation::SemanticRuntimeInstall
+                    }
+                    ctx_cli_presentation::commands::SemanticRuntimeCommand::Status(_) => {
+                        CliOperation::SemanticRuntimeStatus
+                    }
+                }
+            }
         },
         CommandRoot::Status(_) => CliOperation::Status(StatusTelemetry::default()),
         CommandRoot::Stats(_) => CliOperation::Stats,

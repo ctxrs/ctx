@@ -5,35 +5,48 @@ use std::{
 };
 
 use anyhow::{anyhow, Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::{cuda_dependencies, LoadedOnnxRuntime, OnnxRuntimeFlavor, SEMANTIC_ONNXRUNTIME_DYLIB};
-use crate::configuration::SemanticModelPaths;
+use super::{
+    cuda_dependencies, LoadedOnnxRuntime, OnnxRuntimeFlavor, SEMANTIC_ONNXRUNTIME_DYLIB,
+    SEMANTIC_ONNXRUNTIME_LIB_ENTRY,
+};
+use crate::configuration::{SemanticModelPaths, SemanticOnnxRuntimePaths};
 
-const RUNTIME_INSTALL_MANIFEST: &str = "ctx-runtime-install.json";
+pub(super) const RUNTIME_INSTALL_MANIFEST: &str = "ctx-runtime-install.json";
 
-#[derive(Debug, Clone, Deserialize)]
+/// Provenance tiers ctx accepts for an installed runtime. The
+/// manager and the metadata trust are validated as a pair: a hosted install
+/// carries release-signed metadata, a local operator install carries a digest
+/// the operator pinned by hand. Mixing them would let an unsigned local tree
+/// claim release provenance.
+pub(super) const HOSTED_INSTALLER_MANAGER: &str = "ctx-hosted-installer";
+pub(super) const HOSTED_INSTALLER_METADATA_TRUST: &str = "signed-release-metadata";
+pub(super) const LOCAL_OPERATOR_MANAGER: &str = "ctx-local-operator";
+pub(super) const LOCAL_OPERATOR_METADATA_TRUST: &str = "operator-pinned-digest";
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct RuntimeInstallManifest {
-    schema_version: u32,
-    manager: String,
-    metadata_trust: String,
-    runtime: String,
-    platform: String,
-    version: String,
-    sha256: String,
-    artifact_url: String,
-    installed_at: String,
-    files: Vec<RuntimeFile>,
+pub(super) struct RuntimeInstallManifest {
+    pub(super) schema_version: u32,
+    pub(super) manager: String,
+    pub(super) metadata_trust: String,
+    pub(super) runtime: String,
+    pub(super) platform: String,
+    pub(super) version: String,
+    pub(super) sha256: String,
+    pub(super) artifact_url: String,
+    pub(super) installed_at: String,
+    pub(super) files: Vec<RuntimeFile>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct RuntimeFile {
-    path: String,
-    size: u64,
-    sha256: String,
+pub(super) struct RuntimeFile {
+    pub(super) path: String,
+    pub(super) size: u64,
+    pub(super) sha256: String,
 }
 
 pub(in crate::model_runtime) fn installed_accelerator_runtime_identity(
@@ -41,7 +54,7 @@ pub(in crate::model_runtime) fn installed_accelerator_runtime_identity(
     flavor: OnnxRuntimeFlavor,
 ) -> Result<Option<String>> {
     let mut first_error = None;
-    for path in verified_accelerator_runtime_candidates(paths, flavor)? {
+    for path in verified_runtime_candidates(paths.onnx_runtime(), flavor)? {
         if !path.exists() {
             continue;
         }
@@ -76,15 +89,14 @@ pub(in crate::model_runtime) fn revalidate_loaded_accelerator_runtime(
     Ok(())
 }
 
-pub(super) fn verified_accelerator_runtime_candidates(
-    paths: &SemanticModelPaths,
+/// Every flavor, the CPU runtime included, is provisioned into the same
+/// `<root>/onnxruntime/<version>/<platform>/lib/<library>` layout, so one walk
+/// serves the accelerator loader and the CPU loader alike.
+pub(super) fn verified_runtime_candidates(
+    runtime_paths: &SemanticOnnxRuntimePaths,
     flavor: OnnxRuntimeFlavor,
 ) -> Result<Vec<PathBuf>> {
-    if flavor == OnnxRuntimeFlavor::Cpu {
-        return Err(anyhow!("CPU runtime is not an accelerator candidate"));
-    }
     let mut roots = Vec::new();
-    let runtime_paths = paths.onnx_runtime();
     if let Some(root) = runtime_paths.cache_dir.as_ref() {
         roots.push(root.clone());
     }
@@ -133,15 +145,20 @@ pub(super) fn validate_runtime_candidate(path: &Path, flavor: OnnxRuntimeFlavor)
         .ok_or_else(|| anyhow!("runtime lib directory has no parent"))?;
     ctx_history_platform::platform_security::verify_private_directory(root)
         .with_context(|| format!("verify private runtime directory {}", root.display()))?;
-    let manifest_path = root.join(RUNTIME_INSTALL_MANIFEST);
-    let bytes = read_runtime_file_nofollow(&manifest_path, 16 * 1024)
-        .with_context(|| format!("read runtime manifest {}", manifest_path.display()))?;
-    let manifest: RuntimeInstallManifest =
-        serde_json::from_slice(&bytes).context("parse runtime installer manifest")?;
+    let manifest = read_runtime_install_manifest(root)?;
     let expected_platform = flavor.platform_dir()?;
+    if !matches!(
+        (manifest.manager.as_str(), manifest.metadata_trust.as_str()),
+        (HOSTED_INSTALLER_MANAGER, HOSTED_INSTALLER_METADATA_TRUST)
+            | (LOCAL_OPERATOR_MANAGER, LOCAL_OPERATOR_METADATA_TRUST)
+    ) {
+        return Err(anyhow!(
+            "runtime installer manifest pairs manager {:?} with metadata trust {:?}; ctx accepts only {HOSTED_INSTALLER_MANAGER} with {HOSTED_INSTALLER_METADATA_TRUST} or {LOCAL_OPERATOR_MANAGER} with {LOCAL_OPERATOR_METADATA_TRUST}",
+            manifest.manager,
+            manifest.metadata_trust,
+        ));
+    }
     if manifest.schema_version != 1
-        || manifest.manager != "ctx-hosted-installer"
-        || manifest.metadata_trust != "signed-release-metadata"
         || manifest.runtime != flavor.runtime_name()
         || manifest.platform != expected_platform
         || manifest.version != flavor.version()
@@ -150,7 +167,7 @@ pub(super) fn validate_runtime_candidate(path: &Path, flavor: OnnxRuntimeFlavor)
         || manifest.installed_at.trim().is_empty()
     {
         return Err(anyhow!(
-            "runtime installer manifest does not match the signed {expected_platform} {} contract",
+            "runtime installer manifest does not match the verified {expected_platform} {} contract",
             flavor.runtime_name()
         ));
     }
@@ -175,12 +192,73 @@ pub(super) fn validate_runtime_candidate(path: &Path, flavor: OnnxRuntimeFlavor)
     ))
 }
 
+pub(super) fn read_runtime_install_manifest(root: &Path) -> Result<RuntimeInstallManifest> {
+    let manifest_path = root.join(RUNTIME_INSTALL_MANIFEST);
+    let bytes = read_runtime_file_nofollow(&manifest_path, 16 * 1024)
+        .with_context(|| format!("read runtime manifest {}", manifest_path.display()))?;
+    serde_json::from_slice(&bytes).context("parse runtime installer manifest")
+}
+
+/// How a runtime directory presents its provenance before verification.
+///
+/// The direct-release installers (`scripts/dev-install-from-metadata.sh`,
+/// `scripts/install.ps1`) write a `ctx-runtime-install.json` of their own that
+/// names neither accepted tier and carries no per-file records at all, and the
+/// CPU loader has always loaded those installs. So only a manifest that claims
+/// ctx's own provenance is held to the verified contract: anything else stays
+/// invisible to verification rather than becoming a load failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RuntimeInstallClaim {
+    /// No manifest: a hand-extracted or pre-manifest sidecar.
+    Absent,
+    /// A manifest from an installer whose provenance ctx does not verify.
+    Unverified,
+    /// A manifest claiming hosted-installer or local-operator provenance, which
+    /// must then satisfy `validate_runtime_candidate` in full.
+    CtxProvenance,
+}
+
+/// Deliberately loose: this only reads the provenance claim, so a manifest ctx
+/// did not write is classified instead of failing to deserialize.
+#[derive(Deserialize)]
+struct RuntimeProvenanceClaim {
+    #[serde(default)]
+    manager: String,
+    #[serde(default)]
+    metadata_trust: String,
+}
+
+pub(super) fn runtime_install_claim(root: &Path) -> RuntimeInstallClaim {
+    let manifest_path = root.join(RUNTIME_INSTALL_MANIFEST);
+    if fs::symlink_metadata(&manifest_path).is_err() {
+        return RuntimeInstallClaim::Absent;
+    }
+    let Ok(bytes) = read_runtime_file_nofollow(&manifest_path, 16 * 1024) else {
+        return RuntimeInstallClaim::Unverified;
+    };
+    let Ok(claim) = serde_json::from_slice::<RuntimeProvenanceClaim>(&bytes) else {
+        return RuntimeInstallClaim::Unverified;
+    };
+    if matches!(
+        claim.manager.as_str(),
+        HOSTED_INSTALLER_MANAGER | LOCAL_OPERATOR_MANAGER
+    ) || matches!(
+        claim.metadata_trust.as_str(),
+        HOSTED_INSTALLER_METADATA_TRUST | LOCAL_OPERATOR_METADATA_TRUST
+    ) {
+        // Half a claim still counts: a manifest that names one side of a tier
+        // and not the other is exactly the mixed pair the validator rejects.
+        return RuntimeInstallClaim::CtxProvenance;
+    }
+    RuntimeInstallClaim::Unverified
+}
+
 fn validate_installed_runtime_files(
     root: &Path,
     flavor: OnnxRuntimeFlavor,
     declared: &[RuntimeFile],
 ) -> Result<()> {
-    let mut expected = expected_accelerator_runtime_files(flavor);
+    let mut expected = expected_runtime_files(flavor);
     expected.sort_unstable();
     let mut declared_paths = declared
         .iter()
@@ -225,8 +303,21 @@ fn validate_installed_runtime_files(
     Ok(())
 }
 
-fn expected_accelerator_runtime_files(flavor: OnnxRuntimeFlavor) -> Vec<&'static str> {
+/// The in-binary file contract for every runtime flavor.
+///
+/// The CPU list mirrors `CPU_RUNTIME_FILES` in
+/// `scripts/semantic_release_assets/contracts.py` plus the one platform library
+/// the sidecar builder places under `lib/`, so the published sidecar and this
+/// allowlist have to be changed together.
+pub(super) fn expected_runtime_files(flavor: OnnxRuntimeFlavor) -> Vec<&'static str> {
     match flavor {
+        OnnxRuntimeFlavor::Cpu => vec![
+            "GIT_COMMIT_ID",
+            "LICENSE",
+            "ThirdPartyNotices.txt",
+            "VERSION_NUMBER",
+            SEMANTIC_ONNXRUNTIME_LIB_ENTRY,
+        ],
         OnnxRuntimeFlavor::WindowsMl => vec![
             "LICENSE",
             "ThirdPartyNotices.txt",
@@ -248,7 +339,6 @@ fn expected_accelerator_runtime_files(flavor: OnnxRuntimeFlavor) -> Vec<&'static
             files.extend(cuda_dependencies::FILES.iter().copied());
             files
         }
-        OnnxRuntimeFlavor::Cpu => Vec::new(),
     }
 }
 
@@ -282,14 +372,14 @@ fn collect_runtime_files(root: &Path, directory: &Path, files: &mut Vec<String>)
     Ok(())
 }
 
-fn is_sha256(value: &str) -> bool {
+pub(super) fn is_sha256(value: &str) -> bool {
     value.len() == 64
         && value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-fn is_safe_relative_file(path: &str) -> bool {
+pub(super) fn is_safe_relative_file(path: &str) -> bool {
     !path.is_empty()
         && !path.starts_with('/')
         && !path.contains('\\')
@@ -341,7 +431,7 @@ fn open_runtime_file_nofollow(path: &Path) -> std::io::Result<fs::File> {
     fs::File::open(path)
 }
 
-fn sha256_runtime_file(path: &Path) -> Result<String> {
+pub(super) fn sha256_runtime_file(path: &Path) -> Result<String> {
     let mut file = open_runtime_file_nofollow(path)?;
     let mut hasher = Sha256::new();
     let mut buffer = [0_u8; 128 * 1024];
@@ -380,11 +470,11 @@ mod tests {
             OnnxRuntimeFlavor::WindowsMl.asset_name(),
             "ctx-windowsml-windows-x64.zip"
         );
-        let cuda = expected_accelerator_runtime_files(OnnxRuntimeFlavor::Cuda);
+        let cuda = expected_runtime_files(OnnxRuntimeFlavor::Cuda);
         assert!(cuda.contains(&"lib/libonnxruntime_providers_cuda.so"));
         assert!(cuda.contains(&"lib/libcudnn.so.9"));
         assert!(cuda.contains(&"NVIDIA-CUDA-LICENSE.txt"));
-        let windows = expected_accelerator_runtime_files(OnnxRuntimeFlavor::WindowsMl);
+        let windows = expected_runtime_files(OnnxRuntimeFlavor::WindowsMl);
         assert_eq!(
             windows,
             [
@@ -416,7 +506,7 @@ mod tests {
         let root = temporary.path();
         ctx_history_platform::platform_security::restrict_private_directory(root).unwrap();
         let mut files = Vec::new();
-        for relative in expected_accelerator_runtime_files(OnnxRuntimeFlavor::Cuda) {
+        for relative in expected_runtime_files(OnnxRuntimeFlavor::Cuda) {
             let path = root.join(relative);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             let bytes = relative.as_bytes();
@@ -460,5 +550,169 @@ mod tests {
                 .to_string()
                 .contains("size/type")
         );
+    }
+
+    #[test]
+    fn cpu_runtime_contract_mirrors_the_published_sidecar() {
+        assert_eq!(OnnxRuntimeFlavor::Cpu.version(), "1.27.0");
+        assert_eq!(OnnxRuntimeFlavor::Cpu.runtime_name(), "onnxruntime");
+        let library = format!("lib/{SEMANTIC_ONNXRUNTIME_DYLIB}");
+        assert_eq!(SEMANTIC_ONNXRUNTIME_LIB_ENTRY, library);
+        assert_eq!(
+            expected_runtime_files(OnnxRuntimeFlavor::Cpu),
+            [
+                "GIT_COMMIT_ID",
+                "LICENSE",
+                "ThirdPartyNotices.txt",
+                "VERSION_NUMBER",
+                library.as_str(),
+            ]
+        );
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn verified_cpu_runtime_manifest_is_exact_and_tamper_evident() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        ctx_history_platform::platform_security::restrict_private_directory(root).unwrap();
+        let mut records = Vec::new();
+        for relative in expected_runtime_files(OnnxRuntimeFlavor::Cpu) {
+            let path = root.join(relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let bytes = format!("ctx-cpu-runtime::{relative}").into_bytes();
+            fs::write(&path, &bytes).unwrap();
+            records.push(serde_json::json!({
+                "path": relative,
+                "size": bytes.len(),
+                "sha256": format!("{:x}", Sha256::digest(&bytes)),
+            }));
+        }
+        let manifest = serde_json::json!({
+            "schema_version": 1,
+            "manager": LOCAL_OPERATOR_MANAGER,
+            "metadata_trust": LOCAL_OPERATOR_METADATA_TRUST,
+            "runtime": "onnxruntime",
+            "platform": OnnxRuntimeFlavor::Cpu.platform_dir().unwrap(),
+            "version": "1.27.0",
+            "sha256": "b".repeat(64),
+            "artifact_url": "file:///tmp/ctx-onnxruntime-linux-x64.tar.zst",
+            "installed_at": "2026-09-08T00:00:00Z",
+            "files": records,
+        });
+        let write = |value: &serde_json::Value| {
+            fs::write(
+                root.join(RUNTIME_INSTALL_MANIFEST),
+                serde_json::to_vec(value).unwrap(),
+            )
+            .unwrap();
+        };
+        let library = root.join(SEMANTIC_ONNXRUNTIME_LIB_ENTRY);
+        let reject = |value: &serde_json::Value, needle: &str| {
+            write(value);
+            let error = validate_runtime_candidate(&library, OnnxRuntimeFlavor::Cpu)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(needle), "{error}");
+        };
+
+        write(&manifest);
+        let identity = validate_runtime_candidate(&library, OnnxRuntimeFlavor::Cpu).unwrap();
+        assert!(
+            identity.starts_with("onnxruntime|platform=linux-x64|version=1.27.0|"),
+            "{identity}"
+        );
+        assert!(
+            identity.contains("manager=ctx-local-operator|metadata_trust=operator-pinned-digest"),
+            "{identity}"
+        );
+        assert_eq!(
+            runtime_install_claim(root),
+            RuntimeInstallClaim::CtxProvenance
+        );
+
+        let mut wrong_hash = manifest.clone();
+        wrong_hash["files"][0]["sha256"] = serde_json::json!("c".repeat(64));
+        reject(&wrong_hash, "SHA-256 does not match verified manifest");
+
+        let mut wrong_size = manifest.clone();
+        wrong_size["files"][0]["size"] = serde_json::json!(4096);
+        reject(&wrong_size, "size/type does not match verified manifest");
+
+        let mut extra_file = manifest.clone();
+        extra_file["files"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "path": "EXTRA",
+                "size": 3,
+                "sha256": format!("{:x}", Sha256::digest(b"abc")),
+            }));
+        reject(&extra_file, "file allowlist does not match");
+
+        let mut missing_file = manifest.clone();
+        missing_file["files"].as_array_mut().unwrap().pop();
+        reject(&missing_file, "file allowlist does not match");
+
+        for (manager, metadata_trust) in [
+            (LOCAL_OPERATOR_MANAGER, HOSTED_INSTALLER_METADATA_TRUST),
+            (HOSTED_INSTALLER_MANAGER, LOCAL_OPERATOR_METADATA_TRUST),
+        ] {
+            let mut mixed = manifest.clone();
+            mixed["manager"] = serde_json::json!(manager);
+            mixed["metadata_trust"] = serde_json::json!(metadata_trust);
+            reject(&mixed, "pairs manager");
+            // Half a tier is still a claim on ctx provenance, so the loader has
+            // to hold it to the contract instead of ignoring the manifest.
+            assert_eq!(
+                runtime_install_claim(root),
+                RuntimeInstallClaim::CtxProvenance
+            );
+        }
+
+        write(&manifest);
+        let stray = root.join("STRAY");
+        fs::write(&stray, b"stray").unwrap();
+        let error = validate_runtime_candidate(&library, OnnxRuntimeFlavor::Cpu)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("missing or unexpected files"), "{error}");
+        fs::remove_file(&stray).unwrap();
+
+        fs::write(&library, b"tampered").unwrap();
+        let error = validate_runtime_candidate(&library, OnnxRuntimeFlavor::Cpu)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("size/type"), "{error}");
+    }
+
+    /// The direct-release installers write their own manifest with a manager ctx
+    /// does not verify and no per-file records; classifying it as verified would
+    /// turn every existing CPU install into a load failure.
+    #[test]
+    fn explicit_metadata_installer_manifest_is_not_a_ctx_provenance_claim() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        assert_eq!(runtime_install_claim(root), RuntimeInstallClaim::Absent);
+        fs::write(
+            root.join(RUNTIME_INSTALL_MANIFEST),
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version": 1,
+                "manager": "ctx-explicit-metadata-installer",
+                "metadata_trust": "explicit-unsigned",
+                "runtime": "onnxruntime",
+                "platform": "linux-x64",
+                "version": "1.27.0",
+                "sha256": "d".repeat(64),
+                "artifact_url": "https://cli.ctx.rs/ctx-onnxruntime-linux-x64.tar.gz",
+                "installed_at": "2026-09-08T00:00:00Z",
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(runtime_install_claim(root), RuntimeInstallClaim::Unverified);
+
+        fs::write(root.join(RUNTIME_INSTALL_MANIFEST), b"{not-json").unwrap();
+        assert_eq!(runtime_install_claim(root), RuntimeInstallClaim::Unverified);
     }
 }

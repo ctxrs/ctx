@@ -23,13 +23,16 @@ use uuid::Uuid;
 mod ort_variant;
 #[cfg(ctx_semantic_fastembed)]
 pub(crate) use ort_variant::{read_semantic_ort_model_file, semantic_ort_cache_snapshot};
+#[cfg(ctx_semantic_fastembed)]
+use ort_variant::verify_semantic_ort_snapshot;
 
 #[cfg(all(test, ctx_semantic_fastembed))]
-use super::semantic_model_acquisition_integrity_error;
+use super::{cache_paths::SEMANTIC_HF_MODEL_CACHE_DIR, semantic_model_acquisition_integrity_error};
 #[cfg(ctx_semantic_fastembed)]
 use super::{
     cache_paths::{
-        semantic_model_cache_roots, SEMANTIC_HF_MODEL_CACHE_DIR, SEMANTIC_MANAGED_MODEL_CACHE_DIR,
+        semantic_model_cache_roots, semantic_ort_model_cache_dir, semantic_ort_model_cache_roots,
+        semantic_ort_published_model_root, SEMANTIC_MANAGED_MODEL_CACHE_DIR,
     },
     SemanticCpuModelCacheMissing, SemanticCpuModelIntegrityError, SemanticModelFile,
     SemanticOrtModelVariant, SEMANTIC_MODEL_ID, SEMANTIC_MODEL_REVISION,
@@ -156,7 +159,10 @@ fn verify_semantic_cpu_file(path: &Path, expected: SemanticModelFile) -> Result<
 }
 
 #[cfg(ctx_semantic_fastembed)]
-pub(crate) fn replace_cpu_model_cache_from_pinned_revision(cache_dir: &Path) -> Result<PathBuf> {
+pub(crate) fn replace_ort_model_cache_from_pinned_revision(
+    cache_dir: &Path,
+    variant: SemanticOrtModelVariant,
+) -> Result<PathBuf> {
     use hf_hub::{api::sync::ApiBuilder, Repo, RepoType};
 
     let managed_root = cache_dir.join(SEMANTIC_MANAGED_MODEL_CACHE_DIR);
@@ -164,7 +170,7 @@ pub(crate) fn replace_cpu_model_cache_from_pinned_revision(cache_dir: &Path) -> 
         .with_context(|| format!("create semantic model cache {}", managed_root.display()))?;
     let _lock = lock_semantic_model_acquisition(&managed_root)?;
 
-    match semantic_cpu_cache_snapshot(cache_dir) {
+    match semantic_ort_cache_snapshot(cache_dir, variant) {
         Ok(snapshot) => {
             let _ = cleanup_semantic_cpu_download_cache(&managed_root.join("download-cache"));
             return Ok(snapshot);
@@ -174,7 +180,8 @@ pub(crate) fn replace_cpu_model_cache_from_pinned_revision(cache_dir: &Path) -> 
     }
 
     let download_cache = managed_root.join("download-cache");
-    let model_root = managed_root.join(SEMANTIC_HF_MODEL_CACHE_DIR);
+    let model_dir = semantic_ort_model_cache_dir(variant);
+    let model_root = semantic_ort_published_model_root(cache_dir, variant);
     let mut verified_staging_root = None;
     for attempt in 0..2 {
         if attempt > 0 {
@@ -191,18 +198,17 @@ pub(crate) fn replace_cpu_model_cache_from_pinned_revision(cache_dir: &Path) -> 
             RepoType::Model,
             SEMANTIC_MODEL_REVISION.to_owned(),
         ));
-        let staging_root = managed_root.join(format!(
-            ".{SEMANTIC_HF_MODEL_CACHE_DIR}.staging-{}",
-            Uuid::new_v4().simple()
-        ));
+        let staging_root =
+            managed_root.join(format!(".{model_dir}.staging-{}", Uuid::new_v4().simple()));
         let staging_snapshot = staging_root.join("snapshots").join(SEMANTIC_MODEL_REVISION);
         let staged = (|| -> Result<()> {
-            for expected in SEMANTIC_REQUIRED_MODEL_FILES {
-                let downloaded = repo.download(expected.path).with_context(|| {
-                    format!(
-                        "download {SEMANTIC_MODEL_ID}@{SEMANTIC_MODEL_REVISION}/{}",
-                        expected.path
-                    )
+            for expected in variant.required_files() {
+                // Upstream publishes the accelerator graph under a different
+                // name than the single contract path ctx caches it at, so the
+                // download path and the staged path are resolved separately.
+                let source = variant.pinned_source_path(expected.path)?;
+                let downloaded = repo.download(source).with_context(|| {
+                    format!("download {SEMANTIC_MODEL_ID}@{SEMANTIC_MODEL_REVISION}/{source}")
                 })?;
                 let destination = staging_snapshot.join(expected.path);
                 if let Some(parent) = destination.parent() {
@@ -215,9 +221,10 @@ pub(crate) fn replace_cpu_model_cache_from_pinned_revision(cache_dir: &Path) -> 
                 }
                 stage_semantic_cpu_model_file(&downloaded, &download_cache, &destination)?;
             }
-            verify_semantic_cpu_snapshot(&staging_snapshot).with_context(|| {
+            verify_semantic_ort_snapshot(&staging_snapshot, variant).with_context(|| {
                 format!(
-                    "downloaded semantic CPU model failed verification in {}",
+                    "downloaded semantic {} model failed verification in {}",
+                    variant.as_str(),
                     staging_snapshot.display()
                 )
             })
@@ -237,7 +244,10 @@ pub(crate) fn replace_cpu_model_cache_from_pinned_revision(cache_dir: &Path) -> 
         }
     }
     let staging_root = verified_staging_root.ok_or_else(|| {
-        anyhow!("semantic CPU model download did not produce a verified snapshot")
+        anyhow!(
+            "semantic {} model download did not produce a verified snapshot",
+            variant.as_str()
+        )
     })?;
 
     if let Err(error) = publish_semantic_cpu_model_root(&staging_root, &model_root, &_lock) {
@@ -603,10 +613,14 @@ fn publish_semantic_cpu_model_root(
     let managed_root = model_root
         .parent()
         .ok_or_else(|| anyhow!("semantic model root has no parent"))?;
-    let backup_root = managed_root.join(format!(
-        ".{SEMANTIC_HF_MODEL_CACHE_DIR}.backup-{}",
-        Uuid::new_v4().simple()
-    ));
+    // Name the backup after the root being replaced so concurrent publications
+    // of different model variants cannot reclaim each other's backup.
+    let model_dir = model_root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow!("semantic model root has no directory name"))?;
+    let backup_root =
+        managed_root.join(format!(".{model_dir}.backup-{}", Uuid::new_v4().simple()));
     let had_previous = model_root.exists();
     if had_previous {
         fs::rename(model_root, &backup_root).with_context(|| {

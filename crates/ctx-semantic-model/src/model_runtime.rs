@@ -947,12 +947,17 @@ mod windows_ml;
 #[cfg(ctx_semantic_fastembed)]
 pub(super) use cache::{
     maybe_cleanup_semantic_cpu_download_cache_after_cached_acquisition,
-    read_semantic_ort_model_file, replace_cpu_model_cache_from_pinned_revision,
+    read_semantic_ort_model_file, replace_ort_model_cache_from_pinned_revision,
     semantic_cpu_cache_repairable, semantic_cpu_cache_snapshot, semantic_ort_cache_snapshot,
 };
 #[allow(unused_imports)]
 #[cfg(all(any(test, feature = "test-support"), ctx_semantic_fastembed))]
 pub(crate) use onnx::load_missing_semantic_onnxruntime_for_test;
+pub use onnx::{
+    detected_accelerator_backend, identify_runtime_archive, install_operator_runtime,
+    installed_runtime_report, supported_local_runtime_backends, SemanticRuntimeBackend,
+    SemanticRuntimeInstall, SemanticRuntimeReport,
+};
 pub use passive::{SemanticPassiveConfigurationError, SemanticPassiveLoadUnavailable};
 
 #[cfg(not(ctx_semantic_fastembed))]

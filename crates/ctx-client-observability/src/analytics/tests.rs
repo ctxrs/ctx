@@ -92,6 +92,11 @@ fn semantic_lifecycle_operations_emit_closed_client_analytics_names() {
         (CliOperation::SemanticEnable, "semantic_enable"),
         (CliOperation::SemanticStatus, "semantic_status"),
         (CliOperation::SemanticDisable, "semantic_disable"),
+        (
+            CliOperation::SemanticRuntimeInstall,
+            "semantic_runtime_install",
+        ),
+        (CliOperation::SemanticRuntimeStatus, "semantic_runtime_status"),
     ] {
         assert!(operation.emits_client_analytics());
         assert_eq!(operation.analytics_name(), expected);
