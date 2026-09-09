@@ -19,7 +19,7 @@ func TestStatusDropsRetiredRootKeysFromRawAndCanonicalPayloads(t *testing.T) {
 			for _, canonical := range []bool{false, true} {
 				wire := `{"initialized":true,"semantic":{"local_only":false,"diagnostics":{"localOnly":null}}` + flags + `}`
 				if canonical {
-					wire = `{"contractVersion":"agent-history-v1","schemaVersion":1,"operation":"` + operation + `","status":` + wire + `,"futureField":{"local_only":"kept"}}`
+					wire = `{"contractVersion":"agent-history-v2","schemaVersion":1,"operation":"` + operation + `","status":` + wire + `,"futureField":{"local_only":"kept"}}`
 				}
 				payload, err := normalizePayload(Operation{Name: operation}, []byte(wire))
 				if err != nil { t.Fatal(err) }
@@ -46,7 +46,7 @@ func TestStatusDropsRetiredRootKeysFromRawAndCanonicalPayloads(t *testing.T) {
 	if string(payload) != `{"initialized":false}` { t.Fatalf("fallback status: %s", payload) }
 }
 
-func TestStatusDecodesAgentHistoryV1(t *testing.T) {
+func TestStatusDecodesAgentHistoryV2(t *testing.T) {
 	client := NewClient(WithTransport(fakeTransport{
 		response: `{
 			"schema_version": 1,
@@ -118,7 +118,7 @@ func TestStatusRejectsCountersOutsideExactCrossSDKDomain(t *testing.T) {
 	}
 }
 
-func TestSearchBuildsAgentHistoryV1Operation(t *testing.T) {
+func TestSearchBuildsAgentHistoryV2Operation(t *testing.T) {
 	transport := &recordingTransport{response: `{
 		"schema_version": 1,
 		"query": "panic",
@@ -394,7 +394,7 @@ func TestRejectsWrongCanonicalEnvelope(t *testing.T) {
 	}
 
 	client = NewClient(WithTransport(fakeTransport{response: `{
-		"contractVersion": "agent-history-v1",
+		"contractVersion": "agent-history-v2",
 		"schemaVersion": 1,
 		"operation": "search",
 		"backend": {"kind": "local"},
@@ -720,7 +720,7 @@ func TestCanonicalFixturesExposeTypedFields(t *testing.T) {
 }
 
 func TestRawMCPToolCallDuplicateMembersAreRejected(t *testing.T) {
-	fixtureRoot := filepath.Clean("../../contracts/agent-history-v1/fixtures/adversarial")
+	fixtureRoot := filepath.Clean("../../contracts/agent-history-v2/fixtures/adversarial")
 	for _, name := range []string{
 		"duplicate-event-mcp-tool-call-snake.json",
 		"duplicate-event-mcp-tool-call-camel.json",
@@ -979,10 +979,10 @@ func TestMCPUnmarshalJSONReceiverReuseClearsAbsentFields(t *testing.T) {
 }
 
 func TestContractFixturesIfPresent(t *testing.T) {
-	fixtureRoot := filepath.Clean("../../contracts/agent-history-v1/fixtures")
+	fixtureRoot := filepath.Clean("../../contracts/agent-history-v2/fixtures")
 	entries, err := os.ReadDir(fixtureRoot)
 	if errors.Is(err, os.ErrNotExist) {
-		t.Skip("agent-history-v1 fixtures are not present yet")
+		t.Skip("agent-history-v2 fixtures are not present yet")
 	}
 	if err != nil {
 		t.Fatalf("read fixture root: %v", err)
@@ -1010,7 +1010,7 @@ func TestContractFixturesIfPresent(t *testing.T) {
 		assertFixtureDecodes(t, path, operationFromFilename(entry.Name()), data)
 	}
 	if !seen {
-		t.Skip("agent-history-v1 fixture directory is present but empty")
+		t.Skip("agent-history-v2 fixture directory is present but empty")
 	}
 }
 
@@ -1053,9 +1053,9 @@ func assertFixtureDecodes(t *testing.T, path, operation string, data []byte) {
 
 func readFixture[T any](t *testing.T, name string) T {
 	t.Helper()
-	data, err := os.ReadFile(filepath.Join("../../contracts/agent-history-v1/fixtures", name))
+	data, err := os.ReadFile(filepath.Join("../../contracts/agent-history-v2/fixtures", name))
 	if errors.Is(err, os.ErrNotExist) {
-		t.Skip("agent-history-v1 fixtures are not present yet")
+		t.Skip("agent-history-v2 fixtures are not present yet")
 	}
 	if err != nil {
 		t.Fatalf("read fixture %s: %v", name, err)
@@ -1151,7 +1151,7 @@ func environmentValue(values []string, name string) (string, bool) {
 }
 
 func TestCurrentOpaquePayloadsThroughClient(t *testing.T) {
-	encoded, err := os.ReadFile("../../contracts/agent-history-v1/fixtures/cli/opaque-event.json")
+	encoded, err := os.ReadFile("../../contracts/agent-history-v2/fixtures/cli/opaque-event.json")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1199,7 +1199,7 @@ func TestCurrentOpaquePayloadsThroughClient(t *testing.T) {
 }
 
 func TestProducerErrorsAndLiteralQueries(t *testing.T) {
-	encoded, err := os.ReadFile("../../contracts/agent-history-v1/fixtures/cli/producer-errors.json")
+	encoded, err := os.ReadFile("../../contracts/agent-history-v2/fixtures/cli/producer-errors.json")
 	if err != nil {
 		t.Fatal(err)
 	}

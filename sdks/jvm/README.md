@@ -1,6 +1,6 @@
 # ctx JVM SDK
 
-Experimental in-repo JVM SDK for the ctx `agent-history-v1` contract.
+Experimental in-repo JVM SDK for the ctx `agent-history-v2` contract.
 
 This SDK is not published to Maven Central or any package registry. It is plain
 Java source for now so Java and Kotlin callers can evaluate the API without a

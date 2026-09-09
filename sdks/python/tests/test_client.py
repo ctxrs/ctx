@@ -26,7 +26,7 @@ from ctx_agent_history import (
 )
 from ctx_agent_history.errors import CtxAgentHistoryCliError, CtxAgentHistoryProtocolError
 from ctx_agent_history.errors import CtxAgentHistoryTimeoutError, CtxAgentHistoryValidationError
-from ctx_agent_history.agent_history_v1 import normalize_event, normalize_import, normalize_sources, normalize_status
+from ctx_agent_history.agent_history_v2 import normalize_event, normalize_import, normalize_sources, normalize_status
 from ctx_agent_history.transport import HostedAdapter, LocalCliAdapter
 from ctx_agent_history.types import (
     AgentHistoryErrorCode,
@@ -52,7 +52,7 @@ class LocalCliAdapterTests(unittest.TestCase):
                     self.assertNotIn("local_only", response["status"])
                     self.assertTrue(response["status"]["initialized"])
                     self.assertEqual(response["status"]["semantic"], {"localOnly": False, "diagnostics": {"localOnly": "nested"}})
-            canonical = {"contractVersion": "agent-history-v1", "schemaVersion": 1,
+            canonical = {"contractVersion": "agent-history-v2", "schemaVersion": 1,
                          "status": {"initialized": True, **flags, "semantic": raw["semantic"]},
                          "futureEnvelopeField": {"local_only": "kept"}}
             transport = mock.Mock()
@@ -177,7 +177,7 @@ class LocalCliAdapterTests(unittest.TestCase):
         fixture_dir = (
             Path(__file__).resolve().parents[3]
             / "contracts"
-            / "agent-history-v1"
+            / "agent-history-v2"
             / "fixtures"
             / "adversarial"
         )
@@ -254,7 +254,7 @@ class LocalCliAdapterTests(unittest.TestCase):
         fixture_root = (
             Path(__file__).resolve().parents[3]
             / "contracts"
-            / "agent-history-v1"
+            / "agent-history-v2"
             / "fixtures"
         )
         fixture = json.loads(
@@ -331,7 +331,7 @@ class LocalCliAdapterTests(unittest.TestCase):
 
             result = client.status()
 
-        self.assertEqual(result["contractVersion"], "agent-history-v1")
+        self.assertEqual(result["contractVersion"], "agent-history-v2")
         self.assertEqual(result["schemaVersion"], 1)
         self.assertEqual(result["operation"], "status")
         self.assertEqual(result["backend"], {"kind": "local", "dataRoot": "/tmp/ctx-data"})
@@ -702,7 +702,7 @@ class LocalCliAdapterTests(unittest.TestCase):
         self.assertIsNone(client.version().ctx_version)
         self.assertEqual(client.version().transport, "hosted")
 
-    def test_agent_history_v1_error_codes_are_all_represented(self) -> None:
+    def test_agent_history_v2_error_codes_are_all_represented(self) -> None:
         codes = {
             "invalid_request",
             "not_found",
@@ -720,22 +720,22 @@ class LocalCliAdapterTests(unittest.TestCase):
 
 
 class ContractFixtureSmokeTests(unittest.TestCase):
-    def test_agent_history_v1_fixtures_conform_to_operation_envelopes(self) -> None:
+    def test_agent_history_v2_fixtures_conform_to_operation_envelopes(self) -> None:
         root = Path(__file__).resolve().parents[3]
-        fixture_dir = root / "contracts" / "agent-history-v1" / "fixtures"
+        fixture_dir = root / "contracts" / "agent-history-v2" / "fixtures"
         fixtures = sorted(fixture_dir.glob("*.json")) if fixture_dir.exists() else []
         if not fixtures:
-            self.skipTest("contracts/agent-history-v1/fixtures has no JSON fixtures yet")
+            self.skipTest("contracts/agent-history-v2/fixtures has no JSON fixtures yet")
 
         for fixture in fixtures:
             with self.subTest(fixture=fixture.name):
                 with fixture.open("r", encoding="utf-8") as handle:
                     payload = json.load(handle)
-                assert_agent_history_v1_envelope(self, payload)
+                assert_agent_history_v2_envelope(self, payload)
 
     def test_old_and_new_event_fixtures_expose_optional_mcp_tool_call(self) -> None:
         root = Path(__file__).resolve().parents[3]
-        fixture_dir = root / "contracts" / "agent-history-v1" / "fixtures"
+        fixture_dir = root / "contracts" / "agent-history-v2" / "fixtures"
         old = json.loads((fixture_dir / "show-event.window.json").read_text(encoding="utf-8"))
         new = json.loads((fixture_dir / "show-event.mcp-tool-call.json").read_text(encoding="utf-8"))
 
@@ -907,12 +907,12 @@ def _fake_ctx_script(
     )
 
 
-def assert_agent_history_v1_envelope(test: unittest.TestCase, payload: object) -> None:
+def assert_agent_history_v2_envelope(test: unittest.TestCase, payload: object) -> None:
     test.assertIsInstance(payload, dict)
     if not isinstance(payload, dict):
         return
 
-    test.assertEqual(payload["contractVersion"], "agent-history-v1")
+    test.assertEqual(payload["contractVersion"], "agent-history-v2")
     test.assertEqual(payload["schemaVersion"], 1)
     operation = payload["operation"]
     test.assertIn(operation, EXPECTED_PAYLOAD_KEYS)

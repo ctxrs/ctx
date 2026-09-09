@@ -135,12 +135,12 @@ func normalizeEventRecord(value any) (any, error) {
 	snake, hasSnake := event["mcp_tool_call"]
 	camel, hasCamel := event["mcpToolCall"]
 	if hasSnake && hasCamel {
-		return nil, fmt.Errorf("agent-history-v1 MCP tool call has duplicate outer wire aliases")
+		return nil, fmt.Errorf("agent-history-v2 MCP tool call has duplicate outer wire aliases")
 	}
 	snakeExchange, hasSnakeExchange := event["mcp_exchange"]
 	camelExchange, hasCamelExchange := event["mcpExchange"]
 	if hasSnakeExchange && hasCamelExchange {
-		return nil, fmt.Errorf("agent-history-v1 MCP exchange has duplicate outer wire aliases")
+		return nil, fmt.Errorf("agent-history-v2 MCP exchange has duplicate outer wire aliases")
 	}
 
 	out := make(map[string]any, len(event))

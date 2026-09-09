@@ -2,7 +2,7 @@ using System.Text.Json.Nodes;
 
 namespace Ctx.AgentHistory;
 
-/// <summary>Client for the experimental ctx agent-history-v1 API.</summary>
+/// <summary>Client for the experimental ctx agent-history-v2 API.</summary>
 public sealed class AgentHistoryClient
 {
     private readonly IAgentHistoryTransport _transport;

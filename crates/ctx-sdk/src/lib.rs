@@ -1,7 +1,7 @@
 //! Experimental in-repo Rust SDK for ctx agent history.
 //!
 //! This SDK is intentionally not published. The local backend shells out to the
-//! `ctx` CLI and adapts its private JSON into the public `agent-history-v1` envelope.
+//! `ctx` CLI and adapts its private JSON into the public `agent-history-v2` envelope.
 
 use std::{
     collections::BTreeMap,
@@ -689,7 +689,7 @@ fn decode_payload<T: DeserializeOwned>(
     serde_json::from_value(value).map_err(|err| {
         AgentHistoryError::new(
             AgentHistoryErrorCode::DecodeError,
-            format!("failed to decode agent-history-v1 {payload} payload"),
+            format!("failed to decode agent-history-v2 {payload} payload"),
             false,
         )
         .with_cause(err.to_string())
@@ -950,7 +950,7 @@ fn normalize_closed_mcp_exchange_object(
 fn invalid_mcp_wire(message: &str) -> AgentHistoryError {
     AgentHistoryError::new(
         AgentHistoryErrorCode::DecodeError,
-        format!("agent-history-v1 MCP tool call {message}"),
+        format!("agent-history-v2 MCP tool call {message}"),
         false,
     )
 }
@@ -958,14 +958,14 @@ fn invalid_mcp_wire(message: &str) -> AgentHistoryError {
 fn invalid_mcp_exchange_wire(message: &str) -> AgentHistoryError {
     AgentHistoryError::new(
         AgentHistoryErrorCode::DecodeError,
-        format!("agent-history-v1 MCP exchange {message}"),
+        format!("agent-history-v2 MCP exchange {message}"),
         false,
     )
 }
 
 pub fn fixture_path(name: impl AsRef<Path>) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../contracts/agent-history-v1/fixtures")
+        .join("../../contracts/agent-history-v2/fixtures")
         .join(name)
 }
 

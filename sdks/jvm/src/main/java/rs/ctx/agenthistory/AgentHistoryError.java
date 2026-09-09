@@ -2,7 +2,7 @@ package rs.ctx.agenthistory;
 
 import java.util.Map;
 
-/** agent-history-v1 structured error payload. */
+/** agent-history-v2 structured error payload. */
 public final class AgentHistoryError {
     private final Map<String, Object> fields;
 

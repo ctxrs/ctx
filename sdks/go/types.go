@@ -18,7 +18,7 @@ const MaxSafeInteger uint64 = (1 << 53) - 1
 // Object stores JSON sub-documents whose shape can grow across ctx releases.
 type Object map[string]any
 
-// OperationName identifies a agent-history-v1 operation.
+// OperationName identifies a agent-history-v2 operation.
 type OperationName string
 
 const (
@@ -105,7 +105,7 @@ const (
 	CoreContentPolicyStatusOmitted  CoreContentPolicyStatus = "omitted"
 )
 
-// Envelope contains the fields common to every agent-history-v1 response.
+// Envelope contains the fields common to every agent-history-v2 response.
 type Envelope struct {
 	ContractVersion string        `json:"contractVersion"`
 	SchemaVersion   int           `json:"schemaVersion"`
@@ -120,7 +120,7 @@ type Backend struct {
 	BaseURL  string      `json:"baseUrl,omitempty"`
 }
 
-// AgentHistoryError is the agent-history-v1 error shape.
+// AgentHistoryError is the agent-history-v2 error shape.
 type AgentHistoryError struct {
 	Code      ErrorKind `json:"code"`
 	Message   string    `json:"message"`
@@ -369,7 +369,7 @@ type SessionRecord struct {
 	Visibility        string `json:"visibility,omitempty"`
 }
 
-// Event is the agent-history-v1 event shape.
+// Event is the agent-history-v2 event shape.
 type Event struct {
 	CtxEventID        string               `json:"ctxEventId,omitempty"`
 	CtxSessionID      string               `json:"ctxSessionId,omitempty"`
@@ -801,7 +801,7 @@ type CoreContentMetadata struct {
 	PolicyReason *string                 `json:"policyReason,omitempty"`
 }
 
-// ErrorResponse is the agent-history-v1 structured error envelope.
+// ErrorResponse is the agent-history-v2 structured error envelope.
 type ErrorResponse struct {
 	Envelope
 	Error AgentHistoryError `json:"error"`

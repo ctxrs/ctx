@@ -88,7 +88,7 @@ public final class McpToolCall {
         Map<String, Object> details = new LinkedHashMap<>();
         details.put("field", field == null ? "mcpToolCall" : "mcpToolCall." + field);
         return new CtxAgentHistoryException.Protocol(
-                "agent-history-v1 MCP tool call " + message,
+                "agent-history-v2 MCP tool call " + message,
                 details,
                 cause);
     }

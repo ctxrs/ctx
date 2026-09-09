@@ -1,11 +1,11 @@
-"""Public agent-history-v1 client."""
+"""Public agent-history-v2 client."""
 
 from __future__ import annotations
 
 from pathlib import Path
 from typing import Mapping, Optional, Sequence, Union
 
-from .agent_history_v1 import without_status_locality
+from .agent_history_v2 import without_status_locality
 from .config import HostedConfig, LocalConfig
 from .transport import (
     AgentHistoryTransport,
@@ -33,10 +33,10 @@ Pathish = Union[str, Path]
 
 
 class AgentHistoryClient:
-    """Client for the ctx agent-history-v1 API.
+    """Client for the ctx agent-history-v2 API.
 
     The default transport is local and executes the ctx CLI. Data methods
-    return agent-history-v1 envelope dictionaries unless noted otherwise.
+    return agent-history-v2 envelope dictionaries unless noted otherwise.
     """
 
     def __init__(self, transport: AgentHistoryTransport):

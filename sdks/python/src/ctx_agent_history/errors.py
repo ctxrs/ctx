@@ -76,7 +76,7 @@ class CtxAgentHistoryCliError(CtxAgentHistoryError):
 
 
 class CtxAgentHistoryProtocolError(CtxAgentHistoryError):
-    """Raised when ctx does not return the expected agent-history-v1 JSON."""
+    """Raised when ctx does not return the expected agent-history-v2 JSON."""
 
     def __init__(
         self,

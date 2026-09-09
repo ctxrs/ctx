@@ -1,6 +1,6 @@
-# ctx Agent History Contract v1
+# ctx Agent History Contract v2
 
-`agent-history-v1` is the experimental in-repo SDK contract for embedding ctx as
+`agent-history-v2` is the experimental in-repo SDK contract for embedding ctx as
 agent history search infrastructure. It is intentionally product-shaped rather
 than a mirror of ctx storage internals.
 
@@ -17,20 +17,29 @@ release tooling, or raw Rust crate shapes as their public API.
 
 ## Versioning
 
-- Contract id: `agent-history-v1`
-- Current schema version: `1`
+- Contract id: `agent-history-v2`
+- Current schema version: `1` within the v2 contract
 - SDKs expose their own SDK version separately from `contractVersion`.
 - Unknown JSON fields are additive and must be ignored or preserved.
-- Required fields normally change only in a future contract id. The removal
-  below is a breaking exception while this in-repo SDK contract is experimental.
+- Breaking changes use a new contract id.
 
-The generic status property `localOnly` has been removed from all seven SDKs,
-including `status()` and `init()` responses. Callers must remove reads,
-constructor arguments, and required-field checks for this property. The contract
-id remains `agent-history-v1` and `schemaVersion` remains `1`; this change is not
-backward compatible with callers that require the old property. SDK normalizers
-also discard top-level `localOnly` and `local_only` from older status payloads.
-Nested semantic diagnostics and opaque event data remain intact.
+## Migrating from v1
+
+ctx 1.4.0 uses `agent-history-v2`. ctx 1.3.2 retains `agent-history-v1`, including
+its deprecated status locality property.
+
+In v2, the generic status property `localOnly` is removed from all seven SDKs,
+including `status()` and `init()` responses. Remove reads, constructor arguments,
+and required-field checks for this property. Check for
+`contractVersion: "agent-history-v2"` and `schemaVersion: 1`. Update references to
+`AGENT_HISTORY_V1_VERSION` to `AGENT_HISTORY_V2_VERSION` in TypeScript and Swift;
+Python imports of `ctx_agent_history.agent_history_v1` move to
+`ctx_agent_history.agent_history_v2`.
+
+SDK normalizers discard top-level `localOnly` and `local_only` from older CLI
+status payloads. Nested semantic diagnostics and opaque event data remain intact.
+The generic flag could not describe an explicitly configured external semantic
+executor, which can receive bounded query text and document chunks.
 
 CLI status and setup JSON now use `schema_version: 3`; generic usage/error,
 index, and daemon command envelopes use `schema_version: 2`. Readers that check
@@ -41,7 +50,7 @@ and retain their locality fields.
 
 ## Public Operations
 
-All operations return JSON objects with `contractVersion: "agent-history-v1"` and
+All operations return JSON objects with `contractVersion: "agent-history-v2"` and
 `schemaVersion: 1`, or raise/return a structured SDK error.
 
 | Operation | Purpose |
@@ -126,7 +135,7 @@ Important reusable records:
 ## CLI Adapter Mapping
 
 Current SDK local adapters call these private CLI JSON commands and normalize
-them into `agent-history-v1` wrappers:
+them into `agent-history-v2` wrappers:
 
 - `ctx status --format json`
 - `ctx setup --format json`
@@ -140,7 +149,7 @@ Rust, TypeScript, Python, Go, JVM, Swift and .NET adapters place a supplied quer
 after `--`, with all options before it.
 
 This mapping is an adapter detail. SDK consumers should depend on
-`agent-history-v1`, not on CLI rendering or SQLite storage.
+`agent-history-v2`, not on CLI rendering or SQLite storage.
 
 Local CLI output can include absolute diagnostic paths such as `vectorPath`,
 `lockPath`, or `statusPath` inside extensible semantic/daemon/retrieval objects.

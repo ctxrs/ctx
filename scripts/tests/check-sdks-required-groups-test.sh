@@ -17,7 +17,7 @@ make_fixture() {
   mkdir -p \
     "${fixture}/bin" \
     "${fixture}/scripts" \
-    "${fixture}/contracts/agent-history-v1" \
+    "${fixture}/contracts/agent-history-v2" \
     "${fixture}/crates/ctx-protocol" \
     "${fixture}/crates/ctx-sdk" \
     "${fixture}/sdks/dotnet/src/Ctx.AgentHistory" \

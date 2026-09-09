@@ -1,6 +1,6 @@
 package rs.ctx.agenthistory;
 
-/** Transport for agent-history-v1 operations. */
+/** Transport for agent-history-v2 operations. */
 public interface AgentHistoryTransport {
     String name();
 

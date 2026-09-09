@@ -2,7 +2,7 @@ package ctxagenthistory
 
 import "context"
 
-// HostedConfig reserves the hosted agent-history-v1 configuration surface.
+// HostedConfig reserves the hosted agent-history-v2 configuration surface.
 //
 // Deprecated: Hosted SDK placeholders are deprecated and will be removed in
 // the next breaking SDK revision; hosted operations remain unsupported.

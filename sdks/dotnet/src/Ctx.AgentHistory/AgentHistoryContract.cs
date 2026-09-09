@@ -255,12 +255,12 @@ internal static class AgentHistoryContract
 
     private static CtxAgentHistoryProtocolException InvalidMcpWire(string message) =>
         new(
-            $"agent-history-v1 MCP tool call {message}",
+            $"agent-history-v2 MCP tool call {message}",
             new JsonObject { ["field"] = "mcpToolCall" });
 
     private static CtxAgentHistoryProtocolException InvalidMcpExchangeWire(string message) =>
         new(
-            $"agent-history-v1 MCP exchange {message}",
+            $"agent-history-v2 MCP exchange {message}",
             new JsonObject { ["field"] = "mcpExchange" });
 
     public static JsonNode? CamelizePublic(JsonNode? value)

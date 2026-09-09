@@ -1,23 +1,23 @@
 {
-  "contractVersion": "agent-history-v1",
+  "contractVersion": "agent-history-v2",
   "schemaVersion": 1,
-  "operation": "sync",
+  "operation": "import",
   "backend": {
     "kind": "local",
     "dataRoot": "/tmp/ctx-sdk-fixture"
   },
   "import": {
-    "resume": true,
-    "resumeMode": "incremental",
+    "resume": false,
+    "resumeMode": "normal_scan",
     "totals": {
       "sourceFiles": 1,
       "sourceBytes": 2048,
       "importedSources": 1,
       "failedSources": 0,
-      "importedSessions": 0,
-      "importedEvents": 1,
-      "importedEdges": 0,
-      "skipped": 1,
+      "importedSessions": 1,
+      "importedEvents": 2,
+      "importedEdges": 1,
+      "skipped": 0,
       "failed": 0
     },
     "sources": []

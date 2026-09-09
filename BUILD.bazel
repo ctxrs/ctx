@@ -177,7 +177,7 @@ REAL_HARNESS_DATA = NON_RUST_GATE_DATA + ["//crates/ctx-cli:ctx"]
 
 filegroup(
     name = "agent_history_contract_fixtures",
-    srcs = glob(["contracts/agent-history-v1/fixtures/**/*.json"]),
+    srcs = glob(["contracts/agent-history-v2/fixtures/**/*.json"]),
     visibility = ["//visibility:public"],
 )
 

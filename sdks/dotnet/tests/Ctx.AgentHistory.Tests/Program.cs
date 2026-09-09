@@ -50,7 +50,7 @@ internal static class Program
         {
             ("preserves current payloads and producer errors", CurrentPayloadsAndProducerErrors),
             ("removes generic status locality and accepts status schema three", DropsGenericStatusLocality),
-            ("wraps status as agent-history-v1", WrapsStatus),
+            ("wraps status as agent-history-v2", WrapsStatus),
             ("filters status to the current readiness contract", FiltersStatusFields),
             ("preserves legitimate source semantics", PreservesLegitimateSourceSemantics),
             ("builds local CLI operation arguments", BuildsOperationArguments),
@@ -77,9 +77,9 @@ internal static class Program
             ("rejects raw MCP contract violations", RejectsRawMcpContractViolations),
             ("strictly decodes spawned stdout UTF-8", StrictlyDecodesSpawnedStdoutUtf8),
             ("reports versioning metadata", ReportsVersioning),
-            ("uses agent-history-v1 error codes", UsesAgentHistoryV1ErrorCodes),
+            ("uses agent-history-v2 error codes", UsesAgentHistoryV2ErrorCodes),
             ("raises structured hosted placeholder errors", HostedPlaceholderError),
-            ("loads shared agent-history-v1 fixtures", LoadsSharedFixtures)
+            ("loads shared agent-history-v2 fixtures", LoadsSharedFixtures)
         };
 
         var failures = 0;
@@ -628,14 +628,14 @@ internal static class Program
 
         var status = await client.StatusAsync();
 
-        Equal("agent-history-v1", status.ContractVersion);
+        Equal("agent-history-v2", status.ContractVersion);
         Equal("status", status.Operation);
         Equal("local", status.Backend.Kind);
         Equal(true, status.Status.Initialized);
         Equal(4UL, status.Status.IndexedItems ?? 0UL);
 
         var envelope = status.ToJsonObject();
-        Equal("agent-history-v1", envelope["contractVersion"]!.GetValue<string>());
+        Equal("agent-history-v2", envelope["contractVersion"]!.GetValue<string>());
         Equal(4UL, envelope["status"]!["indexedItems"]!.GetValue<ulong>());
     }
 
@@ -1230,7 +1230,7 @@ internal static class Program
         Equal(false, obsolete.IsError);
     }
 
-    private static Task UsesAgentHistoryV1ErrorCodes()
+    private static Task UsesAgentHistoryV2ErrorCodes()
     {
         Equal("invalid_request", new CtxAgentHistoryValidationException("bad").Code);
         Equal("decode_error", new CtxAgentHistoryProtocolException("bad").Code);
@@ -1250,7 +1250,7 @@ internal static class Program
             seen++;
             var node = JsonNode.Parse(File.ReadAllText(path))?.AsObject()
                 ?? throw new InvalidOperationException($"{path} did not contain a JSON object");
-            Equal("agent-history-v1", node["contractVersion"]!.GetValue<string>());
+            Equal("agent-history-v2", node["contractVersion"]!.GetValue<string>());
             Equal(1, node["schemaVersion"]!.GetValue<int>());
             var operation = node["operation"]!.GetValue<string>();
             switch (operation)
@@ -1305,7 +1305,7 @@ internal static class Program
                     throw new InvalidOperationException($"unknown fixture operation {operation} in {path}");
             }
         }
-        True(seen > 0, "expected shared agent-history-v1 fixtures");
+        True(seen > 0, "expected shared agent-history-v2 fixtures");
     }
 
     private static AgentHistoryClient ClientFor(JsonNode? payload)
@@ -1325,7 +1325,7 @@ internal static class Program
             var dir = new DirectoryInfo(start);
             while (dir is not null)
             {
-                var candidate = Path.Combine(dir.FullName, "contracts", "agent-history-v1", "fixtures");
+                var candidate = Path.Combine(dir.FullName, "contracts", "agent-history-v2", "fixtures");
                 if (Directory.Exists(candidate))
                 {
                     return candidate;
@@ -1333,7 +1333,7 @@ internal static class Program
                 dir = dir.Parent;
             }
         }
-        throw new DirectoryNotFoundException("contracts/agent-history-v1/fixtures");
+        throw new DirectoryNotFoundException("contracts/agent-history-v2/fixtures");
     }
 
     private static string Join(IReadOnlyList<string> values) => string.Join(" ", values);

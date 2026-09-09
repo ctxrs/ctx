@@ -1,4 +1,4 @@
-"""Experimental Python SDK for the ctx agent-history-v1 API."""
+"""Experimental Python SDK for the ctx agent-history-v2 API."""
 
 from .client import AgentHistoryClient
 from .config import HostedConfig, LocalConfig
