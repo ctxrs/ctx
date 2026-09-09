@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate the shared agent-history-v1 golden fixtures without third-party packages."""
+"""Validate the shared agent-history-v2 golden fixtures without third-party packages."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CONTRACT = ROOT / "contracts" / "agent-history-v1"
+CONTRACT = ROOT / "contracts" / "agent-history-v2"
 FIXTURES = CONTRACT / "fixtures"
 ADVERSARIAL_FIXTURES = FIXTURES / "adversarial"
 
@@ -248,7 +248,7 @@ def json_type_matches(value, expected: str) -> bool:
 def validate_fixture(path: Path, schema: dict) -> None:
     data = load_json_exact(path)
     validate_schema(data, schema, schema, str(path))
-    require(data.get("contractVersion") == "agent-history-v1", f"{path}: bad contractVersion")
+    require(data.get("contractVersion") == "agent-history-v2", f"{path}: bad contractVersion")
     require(data.get("schemaVersion") == 1, f"{path}: bad schemaVersion")
     operation = data.get("operation")
     require(operation in VALID_OPERATIONS, f"{path}: bad operation {operation!r}")
@@ -634,7 +634,7 @@ def main() -> int:
     adversarial_count = validate_adversarial_mcp_fixtures(schema)
     sdk_count = validate_seven_sdk_rejection_wiring()
     print(
-        f"validated {len(fixture_paths)} agent-history-v1 fixtures "
+        f"validated {len(fixture_paths)} agent-history-v2 fixtures "
         f"and {adversarial_count} adversarial MCP fixtures; "
         f"required outer-alias rejection in {sdk_count} SDKs"
     )

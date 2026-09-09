@@ -1,5 +1,5 @@
 {
-  "contractVersion": "agent-history-v1",
+  "contractVersion": "agent-history-v2",
   "schemaVersion": 1,
   "operation": "error",
   "backend": {
@@ -7,11 +7,11 @@
     "dataRoot": "/tmp/ctx-sdk-fixture"
   },
   "error": {
-    "code": "timeout",
-    "message": "ctx agent history operation timed out",
-    "retryable": true,
+    "code": "not_found",
+    "message": "agent history item was not found",
+    "retryable": false,
     "details": {
-      "timeoutMs": 1000
+      "operation": "showEvent"
     },
     "cause": null
   }

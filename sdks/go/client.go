@@ -14,12 +14,12 @@ type Operation struct {
 	Args []string
 }
 
-// Transport executes agent-history-v1 operations and returns JSON stdout.
+// Transport executes agent-history-v2 operations and returns JSON stdout.
 type Transport interface {
 	Do(ctx context.Context, op Operation) ([]byte, error)
 }
 
-// Client is a agent-history-v1 ctx client.
+// Client is a agent-history-v2 ctx client.
 type Client struct {
 	transport Transport
 }
@@ -34,7 +34,7 @@ func WithTransport(transport Transport) Option {
 	}
 }
 
-// NewClient creates a agent-history-v1 client. By default it uses the local ctx CLI.
+// NewClient creates a agent-history-v2 client. By default it uses the local ctx CLI.
 func NewClient(options ...Option) *Client {
 	client := &Client{transport: NewLocalCLIAdapter()}
 	for _, option := range options {
@@ -43,7 +43,7 @@ func NewClient(options ...Option) *Client {
 	return client
 }
 
-// NewLocalClient creates a agent-history-v1 client backed by the local ctx CLI.
+// NewLocalClient creates a agent-history-v2 client backed by the local ctx CLI.
 func NewLocalClient(options ...LocalCLIOption) *Client {
 	return NewClient(WithTransport(NewLocalCLIAdapter(options...)))
 }
@@ -140,7 +140,7 @@ func (c *Client) Import(ctx context.Context, opts ImportOptions) (*ImportRespons
 	return &out, nil
 }
 
-// Sync is an alias for Import in agent-history-v1. ctx writes and refreshes the local index.
+// Sync is an alias for Import in agent-history-v2. ctx writes and refreshes the local index.
 func (c *Client) Sync(ctx context.Context, opts ImportOptions) (*ImportResponse, error) {
 	args := []string{"import", "--format=json", "--progress", "none"}
 	args = appendImportOptions(args, opts)

@@ -1,9 +1,9 @@
 # ctx Python SDK
 
-Experimental Python SDK for the local ctx `agent-history-v1` API.
+Experimental Python SDK for the local ctx `agent-history-v2` API.
 
 The SDK is intentionally small and network-free by default. It wraps local
-`ctx` CLI JSON and normalizes it into the shared `agent-history-v1` contract.
+`ctx` CLI JSON and normalizes it into the shared `agent-history-v2` contract.
 Hosted configuration types remain as compatibility placeholders. Hosted SDK
 placeholders are deprecated and will be removed in the next breaking SDK
 revision; hosted operations remain unsupported.
@@ -34,7 +34,7 @@ for hit in response["search"].get("results", []):
 
 ## API
 
-The public methods mirror the agent-history-v1 client surface:
+The public methods mirror the agent-history-v2 client surface:
 
 - `status()`
 - `init()` for `ctx setup --format json`
@@ -51,14 +51,14 @@ sessions without a root claim remain their own groups. Primary evidence is
 slightly preferred only near ties; stronger child evidence can win. Pass
 `primary_only=True` only for a deliberately primary-only search.
 
-Every operation returns a dictionary with `contractVersion: "agent-history-v1"`,
+Every operation returns a dictionary with `contractVersion: "agent-history-v2"`,
 `schemaVersion: 1`, `operation`, `backend`, and an operation-specific payload
 such as `status`, `sources`, `import`, `search`, `event`, or `session`.
 
 The package includes PEP 561 type metadata and exports operation-specific
 `TypedDict` envelopes such as `StatusResponse`, `SearchResponse`,
 `ShowEventResponse`, and `ShowSessionResponse`. These are hand-written to
-match the shared `agent-history-v1` contract while keeping runtime dependencies empty.
+match the shared `agent-history-v2` contract while keeping runtime dependencies empty.
 
 Search hits, shown events, and `SessionSummary` expose `provider`,
 `providerSessionId`, and `sourceFormat`; for Codex, `providerSessionId` is the
@@ -66,7 +66,7 @@ resume UUID. Event `content` is typed completeness/policy metadata and `text` is
 the only body. Per-event source paths, cursors, source locations, and `preview`
 are not part of the SDK contract.
 
-`sync()` is an alias for import because the current local agent-history-v1
+`sync()` is an alias for import because the current local agent-history-v2
 implementation syncs by importing local provider history into the ctx index.
 
 ## Errors
@@ -121,5 +121,5 @@ python3 -m unittest discover -s tests
 
 The native tests use fake local CLI scripts and do not require network access,
 API keys, or a populated ctx index. If shared contract fixtures are later added
-under `contracts/agent-history-v1/fixtures`, the fixture smoke test will consume them
+under `contracts/agent-history-v2/fixtures`, the fixture smoke test will consume them
 automatically.

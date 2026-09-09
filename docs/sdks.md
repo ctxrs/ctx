@@ -3,7 +3,7 @@
 ctx includes experimental in-repo SDKs for using agent history search from
 tools, scripts, editors, and services.
 
-The SDKs all target the same `agent-history-v1` contract. They are thin clients
+The SDKs all target the same `agent-history-v2` contract. They are thin clients
 over agent-history search primitives, not wrappers around provider-native
 storage schemas, migrations, release tooling, or internal Rust crate shapes.
 
@@ -28,7 +28,11 @@ NuGet, or Go module tag releases yet. Use the source checkout directly.
 | Swift | `sdks/swift` |
 | .NET / C# | `sdks/dotnet` |
 
-Shared contract files live under `contracts/agent-history-v1`.
+Shared contract files live under `contracts/agent-history-v2`.
+
+ctx 1.4.0 moves the SDK contract from `agent-history-v1` to `agent-history-v2`.
+The generic status property `localOnly` is removed; update contract checks and
+callers as described in the [v1 migration guide](../contracts/agent-history-v2/README.md#migrating-from-v1).
 
 ## API shape
 
@@ -51,7 +55,7 @@ Primary evidence is slightly preferred only when nearly as relevant; stronger
 child evidence can win. The language-specific `primaryOnly`,
 `primary_only`, or `PrimaryOnly` option is the sole narrow-scope override.
 
-Responses include the common `agent-history-v1` envelope fields:
+Responses include the common `agent-history-v2` envelope fields:
 
 - `contractVersion`
 - `schemaVersion`
@@ -75,7 +79,7 @@ for `activity` and `structuredContent` preservation.
 ## Local and hosted backends
 
 Local clients execute the local `ctx` CLI and adapt its JSON into the public
-`agent-history-v1` contract. The SDK adapter does not call provider APIs or
+`agent-history-v2` contract. The SDK adapter does not call provider APIs or
 upload transcripts on its own. The local CLI stays on-machine with the built-in
 executor, but a search can use the network and send raw query text and eligible
 ctx-created document chunks when the data root has an explicitly selected
@@ -147,6 +151,6 @@ CTX_SDK_STRICT_TOOLCHAINS=1 ./scripts/check-sdks.sh
 
 ## Related docs
 
-- [`contracts/agent-history-v1/README.md`](../contracts/agent-history-v1/README.md)
+- [`contracts/agent-history-v2/README.md`](../contracts/agent-history-v2/README.md)
 - [`docs/sdk-production-readiness.md`](sdk-production-readiness.md)
 - [`docs/agent-skill-install.md`](agent-skill-install.md)

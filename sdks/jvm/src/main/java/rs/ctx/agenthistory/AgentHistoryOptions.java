@@ -5,7 +5,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
-/** Typed builders for agent-history-v1 operations. */
+/** Typed builders for agent-history-v2 operations. */
 public final class AgentHistoryOptions {
     private AgentHistoryOptions() {}
 

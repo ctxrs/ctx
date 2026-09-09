@@ -1136,7 +1136,7 @@ Ready coverage therefore satisfies
 `candidate_items = searchable_items + filtered_items` and
 `searchable_items = embedded_items`.
 
-The SDK `agent-history-v1` contract keeps schema version 1 and normalizes the
+The SDK `agent-history-v2` contract keeps schema version 1 and normalizes the
 resolved filter as `search.filters.contentScope`, with the same exact four
 values. The filters object remains extensible, so SDK consumers must continue
 to tolerate additive filter fields. The contract camel-cases the same
@@ -1145,7 +1145,7 @@ on). SDK contract
 search results expose retrieval at the top level of `search`; TypeScript and
 Python type the core retrieval/coverage fields, while Go, .NET, JVM, and Swift
 preserve retrieval as camel-cased JSON values. Per-hit retrieval details are not
-part of v1 unless a future CLI JSON shape emits them. Local diagnostic path
+part of the SDK contract unless a future CLI JSON shape emits them. Local diagnostic path
 fields such as `vector_path`/`vectorPath` can still appear as additive JSON from
 the local CLI adapter, but they are intentionally not stable SDK fields.
 

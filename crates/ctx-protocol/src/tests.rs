@@ -6,7 +6,7 @@ use std::{
 use super::*;
 
 fn fixture_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contracts/agent-history-v1/fixtures")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contracts/agent-history-v2/fixtures")
 }
 
 #[test]
@@ -130,13 +130,13 @@ fn parses_all_shared_fixtures_into_typed_envelopes() {
         }
         seen += 1;
     }
-    assert!(seen > 0, "expected shared agent-history-v1 fixtures");
+    assert!(seen > 0, "expected shared agent-history-v2 fixtures");
 }
 
 #[test]
 fn preserves_additive_fields() {
     let fixture = r#"{
-        "contractVersion": "agent-history-v1",
+        "contractVersion": "agent-history-v2",
         "schemaVersion": 1,
         "operation": "status",
         "status": {
