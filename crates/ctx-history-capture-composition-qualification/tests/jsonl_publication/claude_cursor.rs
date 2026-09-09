@@ -20,8 +20,8 @@ use crate::{
 };
 
 const CURSOR_SOURCE_FORMAT: &str = "cursor_agent_transcript_jsonl_tree";
-const CURSOR_PARSER_REVISION: &str = "cursor-shared-jsonl-core-activity-v2-top-level-role";
-const PRIOR_CURSOR_PARSER_REVISION: &str = "cursor-shared-jsonl-core-activity-v2-record-rejections";
+const CURSOR_PARSER_REVISION: &str = "cursor-shared-jsonl-core-activity-v3-turn-timestamp";
+const PRIOR_CURSOR_PARSER_REVISION: &str = "cursor-shared-jsonl-core-activity-v2-top-level-role";
 
 fn writer_options() -> WriterOptions {
     WriterOptions {
