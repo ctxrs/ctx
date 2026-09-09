@@ -399,12 +399,6 @@ Import {
   Name: ole32.dll
 }
 Import {
-  Name: psapi.dll
-}
-Import {
-  Name: rstrtmgr.dll
-}
-Import {
   Name: shell32.dll
 }
 Import {
@@ -657,7 +651,8 @@ mutate_and_fail windows_missing_high_entropy_va windows-x64 "${windows}" \
 mutate_and_fail windows_subsystem windows-x64 "${windows}" 's/IMAGE_SUBSYSTEM_WINDOWS_CUI/IMAGE_SUBSYSTEM_WINDOWS_GUI/'
 mutate_and_fail windows_version windows-x64 "${windows}" 's/MajorOperatingSystemVersion: 10/MajorOperatingSystemVersion: 11/'
 mutate_and_fail windows_subsystem_version windows-x64 "${windows}" 's/MajorSubsystemVersion: 6/MajorSubsystemVersion: 11/'
-mutate_and_fail windows_missing_restart_manager windows-x64 "${windows}" '/Name: rstrtmgr.dll/d'
+mutate_and_fail windows_retired_restart_manager windows-x64 "${windows}" 's/Name: shell32.dll/Name: shell32.dll\nName: rstrtmgr.dll/'
+mutate_and_fail windows_retired_process_status windows-x64 "${windows}" 's/Name: shell32.dll/Name: shell32.dll\nName: psapi.dll/'
 mutate_and_fail windows_crypt32_sibling windows-x64 "${windows}" 's/crypt32.dll/cryptnet.dll/'
 mutate_and_fail windows_dll windows-x64 "${windows}" 's/ws2_32.dll/winhttp.dll/'
 mutate_and_fail windows_static_symbols windows-x64 "${windows}" 's/Import {/Symbols [\n  Symbol {\n    Name: main (1)\n  }\n]\nImport {/'
