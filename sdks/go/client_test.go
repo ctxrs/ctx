@@ -383,7 +383,7 @@ func TestShowEventValidatesRequiredEventID(t *testing.T) {
 
 func TestRejectsWrongCanonicalEnvelope(t *testing.T) {
 	client := NewClient(WithTransport(fakeTransport{response: `{
-		"contractVersion": "agent-history-v2",
+		"contractVersion": "unsupported-contract",
 		"schemaVersion": 1,
 		"operation": "status",
 		"backend": {"kind": "local"},

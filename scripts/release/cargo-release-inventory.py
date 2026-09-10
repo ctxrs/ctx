@@ -15,6 +15,10 @@ import subprocess
 import sys
 from typing import Any
 
+sys.dont_write_bytecode = True
+sys.path.insert(0, os.fspath(Path(__file__).resolve().parent))
+import notify_source
+
 
 NOTICE_NAMES = re.compile(r"^(?:authors|copying|licen[cs]e|notice|unlicense)", re.I)
 REQUIRED_TANTIVY_FEATURES = {
@@ -34,7 +38,7 @@ def canonical(value: object) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n"
 
 
-def run_metadata(repo: Path, target: str) -> dict[str, Any]:
+def run_metadata(repo: Path, target: str, patched_notify: Path | None = None) -> dict[str, Any]:
     result = subprocess.run(
         [
             "cargo",
@@ -44,6 +48,8 @@ def run_metadata(repo: Path, target: str) -> dict[str, Any]:
             "1",
             "--filter-platform",
             target,
+            *(["--config", os.fspath(patched_notify.parent / "config.toml")]
+              if patched_notify is not None else []),
         ],
         cwd=repo,
         check=False,
@@ -58,6 +64,8 @@ def run_metadata(repo: Path, target: str) -> dict[str, Any]:
         raise ValueError("cargo metadata returned malformed JSON") from error
     if not isinstance(value, dict) or not isinstance(value.get("packages"), list):
         raise ValueError("cargo metadata returned an invalid package graph")
+    if patched_notify is not None:
+        notify_source.bind_metadata(value, patched_notify)
     return value
 
 
@@ -221,10 +229,11 @@ def main() -> int:
     parser.add_argument("--target-output", required=True, type=Path)
     parser.add_argument("--materials-output", required=True, type=Path)
     parser.add_argument("--material-root", required=True, type=Path)
+    parser.add_argument("--notify-source", type=Path)
     args = parser.parse_args()
     try:
         repo = args.repo.resolve(strict=True)
-        metadata = run_metadata(repo, args.target)
+        metadata = run_metadata(repo, args.target, args.notify_source)
         selected = selected_package_ids(metadata)
         packages = [item for item in metadata["packages"] if item["id"] in selected]
         package_records = sorted([
@@ -244,6 +253,8 @@ def main() -> int:
             "packages": package_records,
             "features": feature_records,
         }
+        if "source_patches" in metadata:
+            target_document["source_patches"] = metadata["source_patches"]
         material_records = sorted([
             {
                 "kind": "main",
