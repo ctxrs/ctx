@@ -66,8 +66,17 @@ authority, config, and process overrides.
 
 If a diagnostic says another `ctx` shadows the managed executable on `PATH`,
 put the managed install directory before the reported shadowing directory and
-restart the shell. On POSIX shells, `command -v -a ctx` shows the resolution
-order; in PowerShell, use `Get-Command ctx -All`.
+restart the shell. In a POSIX shell, `command -v ctx` shows the selected command.
+In Bash or Zsh, `type -a ctx` lists all matches; in PowerShell, use
+`Get-Command ctx -All`.
+
+After a failed download or interrupted managed install, keep the installed
+files and marker in place, address the reported network, disk-space, or
+permission problem, and rerun the same installer. If the installer says the
+binary was installed but setup did not finish, retry `ctx setup` instead.
+A Pro activation warning does not mean the installed companion is missing;
+follow the reported `ctx pro` action. A version check alone does not establish
+that setup completed.
 
 An absent install marker is normal for a source build or package-manager
 install and leaves ctx unmanaged. The hosted installer will not silently adopt

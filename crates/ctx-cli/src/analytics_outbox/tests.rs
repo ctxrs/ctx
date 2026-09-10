@@ -480,6 +480,74 @@ fn health_is_created_only_after_retry_recovery_and_never_recurses() {
 }
 
 #[test]
+fn partial_recovery_reports_when_the_remaining_queue_drains() {
+    let (_dir, path, outbox) = test_outbox();
+    for index in 1..=2 {
+        outbox
+            .append_at(ENDPOINT, &body(&event_id(index)), NOW)
+            .unwrap();
+    }
+    let first = outbox.snapshot_at(ENDPOINT, NOW).unwrap().remove(0);
+    outbox
+        .reconcile_at(
+            &[(first, retry(AnalyticsDeliveryFailureClass::Transport))],
+            NOW,
+        )
+        .unwrap();
+    // The failed entry is delayed; a later ordinary request succeeds first.
+    let second = outbox.snapshot_at(ENDPOINT, NOW).unwrap().remove(0);
+    outbox
+        .reconcile_at(&[(second, DeliveryDisposition::Accepted)], NOW)
+        .unwrap();
+    let partial = outbox.pending_observation_at(NOW).unwrap().unwrap();
+    assert_eq!(partial.event.queued, CountBucket::One);
+    outbox
+        .queue_observation_at(ENDPOINT, &body(&event_id(3)), &partial, NOW)
+        .unwrap();
+    let health = outbox.snapshot_at(ENDPOINT, NOW).unwrap().remove(0);
+    assert_eq!(health.kind, OutboxEntryKind::DeliveryObservation);
+    outbox
+        .reconcile_at(&[(health, DeliveryDisposition::Accepted)], NOW)
+        .unwrap();
+    assert!(
+        outbox.pending_observation_at(NOW).unwrap().is_none(),
+        "the retry is still queued"
+    );
+    drop(outbox);
+
+    let retry_at = read_current(&path).entries[0].next_attempt_at_epoch_seconds;
+    let outbox = AnalyticsOutbox::open_at(path.clone(), ROOT, retry_at).unwrap();
+    let last = outbox.snapshot_at(ENDPOINT, retry_at).unwrap().remove(0);
+    outbox
+        .reconcile_at(&[(last, DeliveryDisposition::Accepted)], retry_at)
+        .unwrap();
+    drop(outbox);
+    let outbox = AnalyticsOutbox::open_at(path.clone(), ROOT, retry_at).unwrap();
+    let recovered = outbox
+        .pending_observation_at(retry_at)
+        .unwrap()
+        .expect("a reported backlog needs a recovery report after its last retry succeeds");
+    assert_eq!(recovered.event.queued, CountBucket::Zero);
+    assert_eq!(recovered.event.dropped, CountBucket::Zero);
+    assert_eq!(
+        recovered.event.failure_class,
+        AnalyticsDeliveryFailureClass::None
+    );
+    outbox
+        .queue_observation_at(ENDPOINT, &body(&event_id(4)), &recovered, retry_at)
+        .unwrap();
+    let health = outbox.snapshot_at(ENDPOINT, retry_at).unwrap().remove(0);
+    outbox
+        .reconcile_at(&[(health, DeliveryDisposition::Accepted)], retry_at)
+        .unwrap();
+    assert!(
+        outbox.pending_observation_at(retry_at).unwrap().is_none(),
+        "recovery must not recurse"
+    );
+    assert!(read_current(&path).roots.is_empty());
+}
+
+#[test]
 fn local_drops_wait_for_a_later_success_before_health_is_due() {
     let (_root, _path, outbox) = test_outbox();
     let oversized = serde_json::to_vec(&serde_json::json!({
