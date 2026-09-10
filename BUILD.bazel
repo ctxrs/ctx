@@ -812,6 +812,7 @@ py_test(
     srcs = [
         "scripts/check-public-cli-build-info.py",
         "scripts/release/cargo-release-inventory.py",
+        "scripts/release/notify_source.py",
         "scripts/release/linux-factory-build-info.py",
         "scripts/release/resolve-cargo-zigbuild.py",
         "scripts/release/release_bundle.py",
@@ -831,6 +832,26 @@ py_test(
     ],
     main = "scripts/tests/linux-release-factory-test.py",
     tags = ["release-gate"],
+    target_compatible_with = ["@platforms//os:linux"],
+)
+
+py_test(
+    name = "notify_source_tests",
+    srcs = [
+        "scripts/release/cargo-release-inventory.py",
+        "scripts/release/notify_source.py",
+        "scripts/tests/notify-source-test.py",
+    ],
+    args = ["$(rootpath @ctx_notify_archive//file)"],
+    data = [
+        "Cargo.lock",
+        "MODULE.bazel",
+        "scripts/release/build-public-candidate-on-linux.sh",
+        "//tools/bazel/patches:notify-fsevents-stop.patch",
+        "@ctx_notify_archive//file",
+    ],
+    imports = ["scripts/release"],
+    main = "scripts/tests/notify-source-test.py",
     target_compatible_with = ["@platforms//os:linux"],
 )
 
