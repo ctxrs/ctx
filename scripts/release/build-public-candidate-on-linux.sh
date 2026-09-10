@@ -346,7 +346,11 @@ fi
 mkdir -p "$(dirname "${output_dir}")"
 [[ ! -e "${output_dir}" ]] || die "output directory already exists: ${output_dir}"
 stage_dir="$(mktemp -d "${TMPDIR:-/tmp}/ctx-linux-release-factory.XXXXXX")"
+pids=()
 cleanup() {
+  # Other targets can still be reading shared inputs after one build fails.
+  local pid
+  for pid in "${pids[@]}"; do wait "$pid" || true; done
   rm -rf "${stage_dir:-}" "${sdk_cleanup:-}" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
@@ -394,6 +398,8 @@ build_target() {
     notify_args=(--config "${stage_dir}/notify/config.toml")
   fi
   build_env=(
+    # Build locked lzma sources; the host library can exceed the target ABI.
+    "LZMA_API_STATIC=1"
     "CARGO_TARGET_DIR=${target_dir}"
     "CTX_RELEASE_BUILD_SOURCE_COMMIT=${source_commit}"
     "CTX_RELEASE_BUILD_CARGO_LOCK_SHA256=${cargo_lock_sha256}"
@@ -421,7 +427,6 @@ build_target() {
     printf 'not run on this host: %s\n' "${platform}" >"${artifact_stage}/${binary}.version"
   fi
 }
-pids=()
 for target_id in "${target_ids[@]}"; do
   build_target "${target_id}" &
   pids+=("$!")

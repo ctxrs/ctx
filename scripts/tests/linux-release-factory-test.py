@@ -39,6 +39,33 @@ sealer = load(SEALER, "seal_linux_factory_candidate")
 
 
 class LinuxReleaseFactoryTest(unittest.TestCase):
+    def test_factory_builds_pinned_lzma_instead_of_host_library(self) -> None:
+        source = (ROOT / "scripts/release/build-public-candidate-on-linux.sh").read_text()
+        start = source.index("build_target()")
+        build = source[start : source.index("\nfor target_id in", start)]
+        self.assertIn('"LZMA_API_STATIC=1"', build)
+
+    def test_cleanup_waits_for_started_builds_and_preserves_failure(self) -> None:
+        source = (ROOT / "scripts/release/build-public-candidate-on-linux.sh").read_text()
+        cleanup = source[source.index("cleanup() {") : source.index("trap cleanup EXIT")]
+        with tempfile.TemporaryDirectory() as directory:
+            script = '''set -euo pipefail
+stage_dir="$1/stage"
+sdk_cleanup="$1/sdk"
+mkdir "$stage_dir" "$sdk_cleanup"
+touch "$stage_dir/config.toml"
+'''+ cleanup + '''trap cleanup EXIT
+(sleep 0.2; test -f "$stage_dir/config.toml"; touch "$1/worker-finished") &
+pids=("$!")
+exit 23
+'''
+            result = subprocess.run(["bash", "-c", script, "test", directory],
+                                    capture_output=True, text=True, timeout=5)
+            self.assertEqual(result.returncode, 23, result.stderr)
+            self.assertTrue((Path(directory) / "worker-finished").is_file())
+            self.assertFalse((Path(directory) / "stage").exists())
+            self.assertFalse((Path(directory) / "sdk").exists())
+
     def test_selected_graph_uses_only_reachable_packages(self) -> None:
         metadata = {
             "packages": [
