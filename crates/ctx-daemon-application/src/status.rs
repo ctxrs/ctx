@@ -261,6 +261,18 @@ impl DaemonStatusPreparation<'_> {
         let endpoint = daemon_core_refresh_endpoint_report(self.host, self.data_root);
         let supervisor = supervisor::daemon_supervisor_report(self.host, self.data_root);
         let wakeup = daemon_wakeup_report(self.data_root);
+        // Diagnostic only: an old scheduler heartbeat does not revoke live
+        // lock ownership or authorize killing a slow worker.
+        let heartbeat_age_ms = self.status_value.as_ref().and_then(|value| {
+            if !self.running || json_u32(value, "pid") != self.pid {
+                return None;
+            }
+            let heartbeat = json_i64(value, "heartbeat_at_ms").filter(|time| *time > 0)?;
+            let age = ctx_history_core::utc_now()
+                .timestamp_millis()
+                .checked_sub(heartbeat)?;
+            (age >= 0).then_some(age)
+        });
         DaemonStatusSnapshot {
             value: compact_json(json!({
                 "status": self.status,
@@ -283,6 +295,8 @@ impl DaemonStatusPreparation<'_> {
                 "live_pid": self.running.then_some(self.pid).flatten(),
                 "started_at_ms": self.status_value.as_ref().and_then(|value| json_i64(value, "started_at_ms")),
                 "heartbeat_at_ms": self.status_value.as_ref().and_then(|value| json_i64(value, "heartbeat_at_ms")),
+                "heartbeat_age_ms": heartbeat_age_ms,
+                "heartbeat_stale": heartbeat_age_ms.map(|age| age > crate::lifecycle::DAEMON_SETUP_HANDOFF_MAX_HEARTBEAT_AGE_MS),
                 "finished_at_ms": self.status_value.as_ref().and_then(|value| json_i64(value, "finished_at_ms")),
                 "start_mode": self.start_mode,
                 "trigger_command": self.trigger_command,
@@ -346,6 +360,33 @@ mod tests {
 
     use super::*;
     use crate::{DaemonApplication, TestHost};
+
+    #[test]
+    fn stale_heartbeat_is_reported_without_revoking_live_ownership() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let _lock = DaemonLock::acquire(temp.path())?.expect("daemon lock");
+        let now = ctx_history_core::utc_now().timestamp_millis();
+        for (heartbeat, pid, expected) in [
+            (now - 62 * 60 * 60 * 1000, process::id(), Some(true)),
+            (now, process::id(), Some(false)),
+            (0, process::id(), None),
+            (now + 60 * 60 * 1000, process::id(), None),
+            (now - 62 * 60 * 60 * 1000, process::id() + 1, None),
+        ] {
+            write_private_json_file(
+                &daemon_status_path(temp.path()),
+                &json!({
+                    "status": "running", "pid": pid, "heartbeat_at_ms": heartbeat,
+                }),
+            )?;
+            let daemon = report(temp.path(), true, None);
+            assert_eq!(daemon["heartbeat_stale"].as_bool(), expected, "{daemon}");
+            assert_eq!(daemon["status"], "running");
+            assert_eq!(daemon["running"], true);
+            assert_eq!(daemon["recoverable"], false);
+        }
+        Ok(())
+    }
 
     fn write_lifecycle_status(
         data_root: &Path,

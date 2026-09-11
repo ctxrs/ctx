@@ -78,7 +78,9 @@ pub(crate) fn render_daemon_status_human(
         .get("last_error")
         .and_then(Value::as_str)
         .is_some_and(|error| !error.is_empty());
-    let service_issue = config_issue || supervisor_issue.is_some() || daemon_error;
+    let heartbeat_stale = daemon.get("heartbeat_stale").and_then(Value::as_bool) == Some(true);
+    let service_issue =
+        config_issue || supervisor_issue.is_some() || daemon_error || heartbeat_stale;
     let service_failed =
         recoverable || matches!(status, "failed" | "stale_lock") || (!running && enabled);
 
@@ -110,6 +112,11 @@ pub(crate) fn render_daemon_status_human(
 
     let (outcome_state, title, detail) = match presentation {
         DaemonPresentation::Healthy => (OutcomeState::Success, "Daemon is healthy", None),
+        DaemonPresentation::Partial if heartbeat_stale => (
+            OutcomeState::Warning,
+            "Daemon is running; heartbeat is stale",
+            Some("Work may be stalled. Live ownership is retained; a stale heartbeat alone does not prove the process is dead."),
+        ),
         DaemonPresentation::Partial if history_paused => (
             OutcomeState::Warning,
             "Daemon is running; history refresh is paused",
@@ -198,6 +205,12 @@ pub(crate) fn render_daemon_status_human(
     let (service_state, service_token) = service_state(enabled, running, recoverable, status);
     let mut service = vec![state_field("Status", service_state, service_token)];
     let mut service_details = Vec::new();
+    if heartbeat_stale {
+        service.push(state_field("Heartbeat", "stale", Token::Warning));
+        if let Some(age) = daemon.get("heartbeat_age_ms").and_then(Value::as_u64) {
+            service_details.push(("Last heartbeat", format!("{} seconds ago", age / 1000)));
+        }
+    }
     if let Some(mode) = daemon
         .get("mode")
         .and_then(Value::as_str)

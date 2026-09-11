@@ -16,14 +16,22 @@ pub enum DoctorSearchAvailability {
     Unavailable,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct DoctorRefreshFailure<'a> {
-    pub detail: &'a str,
+#[derive(Debug, Clone)]
+pub struct DoctorRefreshFailure {
+    pub detail: String,
     pub search: DoctorSearchAvailability,
+    pub partial: bool,
 }
 
 pub fn source_epoch_findings(report: &Value, semantic_required: bool) -> Vec<String> {
     let mut findings = Vec::new();
+    if report
+        .pointer("/daemon/heartbeat_stale")
+        .and_then(Value::as_bool)
+        == Some(true)
+    {
+        findings.push("daemon is running (heartbeat_stale)".to_owned());
+    }
     for (name, required) in [
         ("history_epoch", true),
         ("lexical", true),
@@ -54,7 +62,7 @@ pub fn render_doctor_human(
     context: &RenderContext,
     findings: &[String],
     coverage: Option<&HistoryHealthReport>,
-    refresh_failure: Option<DoctorRefreshFailure<'_>>,
+    refresh_failure: Option<DoctorRefreshFailure>,
 ) -> Document {
     let refresh_failed = findings.iter().any(|finding| {
         finding.contains("(source_refresh_failed)") || finding.contains("(core_refresh_failed)")
@@ -62,14 +70,20 @@ pub fn render_doctor_human(
     let mut human_findings = findings
         .iter()
         .filter(|finding| !refresh_failed || !is_derivative_refresh_finding(finding))
+        .filter(|finding| refresh_failure.is_none() || !finding.starts_with("refresh is "))
         .map(|finding| humanize_doctor_finding(finding))
         .collect::<Vec<_>>();
-    if let Some(failure) = refresh_failure {
+    if let Some(failure) = refresh_failure.as_ref() {
         human_findings.insert(
             0,
             HumanDoctorFinding {
-                summary: "History refresh failed".to_owned(),
-                detail: Some(bounded_terminal_detail(failure.detail)),
+                summary: if failure.partial {
+                    "History refresh is partial"
+                } else {
+                    "History refresh failed"
+                }
+                .to_owned(),
+                detail: Some(bounded_terminal_detail(&failure.detail)),
             },
         );
     } else if refresh_failed {
@@ -108,7 +122,7 @@ pub fn render_doctor_human(
             detail: None,
         },
     );
-    if let Some(failure) = refresh_failure {
+    if let Some(failure) = refresh_failure.as_ref() {
         document.push_blank();
         document.append(section(
             "Search",
@@ -152,7 +166,15 @@ pub fn render_doctor_human(
         .is_some_and(|roots| roots.partial > 0 || roots.excluded > 0 || roots.unknown > 0);
     let coverage_has_refresh_issues = coverage
         .is_some_and(|coverage| coverage.source_failures > 0 || coverage.rejected_records > 0);
-    let (text, command) = if refresh_failure.is_some() {
+    let (text, command) = if findings
+        .iter()
+        .any(|finding| finding.contains("(heartbeat_stale)"))
+    {
+        (
+            "Inspect the daemon and retained work before retrying.",
+            "ctx daemon status",
+        )
+    } else if refresh_failure.is_some() {
         (
             "Fix the refresh error above, then retry.",
             "ctx import --all",
@@ -203,11 +225,17 @@ fn bounded_terminal_detail(detail: &str) -> String {
     if escaped.len() <= MAX_REFRESH_ERROR_BYTES {
         return escaped;
     }
-    let mut end = MAX_REFRESH_ERROR_BYTES - 3;
+    // Keep both the provider/context and the actionable cause at the tail of
+    // an error chain. Long paths must not hide required/available resources.
+    let mut end = (MAX_REFRESH_ERROR_BYTES - 3) / 2;
     while !escaped.is_char_boundary(end) {
         end -= 1;
     }
-    format!("{}...", &escaped[..end])
+    let mut tail = escaped.len() - (MAX_REFRESH_ERROR_BYTES - 3 - end);
+    while !escaped.is_char_boundary(tail) {
+        tail += 1;
+    }
+    format!("{}...{}", &escaped[..end], &escaped[tail..])
 }
 
 struct HumanDoctorFinding {
@@ -232,6 +260,7 @@ fn humanize_doctor_finding(finding: &str) -> HumanDoctorFinding {
         };
     };
     let label = match component {
+        "daemon" => "Daemon",
         "history_epoch" => "History",
         "lexical" => "Search index",
         "catalog" => "History source catalog",
@@ -244,12 +273,14 @@ fn humanize_doctor_finding(finding: &str) -> HumanDoctorFinding {
             }
         }
     };
-    let summary = match state {
-        "pending" => format!("{label} is still preparing"),
-        "unavailable" => format!("{label} is unavailable"),
-        other => format!("{label} is {}", other.replace('_', " ")),
+    let summary = match (state, reason) {
+        (_, "heartbeat_stale") => "Daemon heartbeat is stale".to_owned(),
+        ("pending", _) => format!("{label} is still preparing"),
+        ("unavailable", _) => format!("{label} is unavailable"),
+        (other, _) => format!("{label} is {}", other.replace('_', " ")),
     };
     let detail = match reason {
+        "heartbeat_stale" => "The process is still running, but its heartbeat has not advanced. Work may be stalled; this does not prove the process is dead.",
         "catalog_publication_pending" => "Required local data is still being prepared.",
         "daemon_unavailable" => "The background history refresh service is not available.",
         "source_refresh_failed" | "core_refresh_failed" | "lexical_generation_unavailable" => {
@@ -311,6 +342,23 @@ mod ui_tests {
             render_doctor_human(&context(80), &[], None, None).render_plain(),
             "✓ No problems found\n"
         );
+    }
+
+    #[test]
+    fn doctor_reports_stale_heartbeat_as_observation_not_process_death() {
+        let report = json!({
+            "history_epoch": {"status": "ready"},
+            "lexical": {"status": "ready"},
+            "catalog": {"status": "ready"},
+            "refresh": {"status": "ready"},
+            "daemon": {"running": true, "heartbeat_stale": true},
+        });
+        let findings = source_epoch_findings(&report, false);
+        assert_eq!(findings, ["daemon is running (heartbeat_stale)"]);
+        let rendered = render_doctor_human(&context(120), &findings, None, None).render_plain();
+        assert!(rendered.contains("Daemon heartbeat is stale"), "{rendered}");
+        assert!(rendered.contains("ctx daemon status"), "{rendered}");
+        assert!(!rendered.contains("No problems found"), "{rendered}");
     }
 
     #[test]
@@ -426,8 +474,10 @@ mod ui_tests {
                 &findings,
                 None,
                 Some(DoctorRefreshFailure {
-                    detail: "Claude transcript repeats a stable event identity at lines 1 and 2",
+                    detail: "Claude transcript repeats a stable event identity at lines 1 and 2"
+                        .to_owned(),
                     search,
+                    partial: false,
                 }),
             )
             .render_plain();
@@ -446,7 +496,8 @@ mod ui_tests {
         assert!(bounded.len() <= MAX_REFRESH_ERROR_BYTES);
         assert!(bounded.len() > MAX_REFRESH_ERROR_BYTES - 5);
         assert!(bounded.starts_with("start\\n\\x1b[31m"), "{bounded:?}");
-        assert!(bounded.ends_with("..."), "{bounded:?}");
+        assert!(bounded.contains("..."), "{bounded:?}");
+        assert!(bounded.ends_with("tail"), "{bounded:?}");
         assert!(!bounded.contains('\n'));
         assert!(!bounded.contains('\u{1b}'));
     }
