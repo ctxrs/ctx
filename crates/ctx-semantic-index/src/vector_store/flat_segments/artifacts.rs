@@ -2,6 +2,39 @@ use super::*;
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+#[cfg(test)]
+thread_local! {
+    static TEST_MANIFEST_BYTE_LIMIT: std::cell::Cell<u64> = const {
+        std::cell::Cell::new(MAX_MANIFEST_BYTES)
+    };
+}
+
+fn manifest_byte_limit() -> u64 {
+    #[cfg(test)]
+    {
+        TEST_MANIFEST_BYTE_LIMIT.with(std::cell::Cell::get)
+    }
+    #[cfg(not(test))]
+    {
+        MAX_MANIFEST_BYTES
+    }
+}
+
+#[cfg(test)]
+impl FlatSegmentStore {
+    pub(crate) fn with_test_manifest_byte_limit<T>(limit: u64, run: impl FnOnce() -> T) -> T {
+        assert!(limit > 0 && limit <= MAX_MANIFEST_BYTES);
+        struct Reset(u64);
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                TEST_MANIFEST_BYTE_LIMIT.with(|limit| limit.set(self.0));
+            }
+        }
+        let _reset = Reset(TEST_MANIFEST_BYTE_LIMIT.with(|value| value.replace(limit)));
+        run()
+    }
+}
+
 pub(super) fn load_and_validate_segment(
     root: &Path,
     contract: &FlatModelContract,
@@ -215,7 +248,7 @@ pub(super) fn prepare_manifest(manifest: Manifest) -> FlatResult<PreparedManifes
         manifest_sha256: digest.clone(),
     };
     let bytes = serde_json::to_vec(&envelope)?;
-    if bytes.len() as u64 > MAX_MANIFEST_BYTES {
+    if bytes.len() as u64 > manifest_byte_limit() {
         return Err(FlatStoreError::InvalidInput(
             "manifest exceeds the safe size limit; compact first".to_owned(),
         ));
