@@ -6,6 +6,63 @@ pub(super) fn config() -> Config {
     Config::default().with_event_kinds(EventKindMask::CORE | EventKindMask::ACCESS_CLOSE)
 }
 
+/// Preserve native notifications and cover macOS's already-dirty open files.
+/// Polling reads metadata only, never provider bodies or symlink descendants.
+pub(super) struct ReliableWatcher {
+    native: notify::RecommendedWatcher,
+    #[cfg(target_os = "macos")]
+    metadata: super::metadata_poll::MetadataWatcher,
+}
+
+impl ReliableWatcher {
+    pub(super) fn new(
+        handler: impl Fn(notify::Result<notify::Event>) + Send + Sync + 'static,
+    ) -> notify::Result<Self> {
+        use notify::Watcher;
+        let handler = std::sync::Arc::new(handler);
+        let native_handler = std::sync::Arc::clone(&handler);
+        let native = notify::RecommendedWatcher::new(move |event| native_handler(event), config())?;
+        #[cfg(target_os = "macos")]
+        let metadata = super::metadata_poll::MetadataWatcher::new(handler)?;
+        Ok(Self {
+            native,
+            #[cfg(target_os = "macos")]
+            metadata,
+        })
+    }
+
+    pub(super) fn watch(
+        &mut self,
+        path: &std::path::Path,
+        mode: notify::RecursiveMode,
+    ) -> notify::Result<()> {
+        use notify::Watcher;
+        self.native.watch(path, mode)?;
+        #[cfg(target_os = "macos")]
+        if let Err(error) = self.metadata.watch(path, mode) {
+            let _ = self.native.unwatch(path);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    pub(super) fn unwatch(&mut self, path: &std::path::Path) -> notify::Result<()> {
+        use notify::Watcher;
+        let native = self.native.unwatch(path);
+        #[cfg(target_os = "macos")]
+        {
+            return native.and(self.metadata.unwatch(path));
+        }
+        #[cfg(not(target_os = "macos"))]
+        native
+    }
+
+    pub(super) fn stop(&mut self) {
+        #[cfg(target_os = "macos")]
+        self.metadata.stop();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
