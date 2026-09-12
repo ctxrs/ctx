@@ -8,6 +8,9 @@ use ctx_history_capture_model::time::parse_rfc3339_utc;
 
 use super::parser::{CursorSafePart, CursorSanitizedRecord};
 
+#[cfg(test)]
+mod timestamp_tests;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub(crate) struct CursorNativeOrder {
     pub(crate) semantic_ordinal: u64,
@@ -179,15 +182,24 @@ impl CursorTimestampState {
     }
 
     pub(super) fn apply(&mut self, events: &mut [CursorNativeEvent]) -> serde_json::Result<()> {
-        if let Some(occurred_at) = events.iter().find_map(|event| {
-            event
-                .occurred_at
-                .or_else(|| embedded_cursor_timestamp(event))
-        }) {
-            self.0 = Some(occurred_at);
+        if events.iter().any(|event| event.role == EventRole::User) {
+            self.0 = events.iter().find_map(|event| {
+                (event.role == EventRole::User)
+                    .then(|| {
+                        event
+                            .occurred_at
+                            .or_else(|| embedded_cursor_timestamp(event))
+                    })
+                    .flatten()
+            });
         }
         for event in events {
-            if event.occurred_at.is_none() {
+            if event.occurred_at.is_none()
+                && matches!(
+                    event.role,
+                    EventRole::User | EventRole::Assistant | EventRole::Tool
+                )
+            {
                 event.occurred_at = self.0;
                 event.provider_event_hash = cursor_logical_event_hash(
                     event.event_type,
@@ -202,6 +214,9 @@ impl CursorTimestampState {
 }
 
 fn embedded_cursor_timestamp(event: &CursorNativeEvent) -> Option<DateTime<Utc>> {
+    if event.role != EventRole::User {
+        return None;
+    }
     let CursorEventBody::Text { text } = &event.body else {
         return None;
     };
@@ -215,8 +230,12 @@ fn embedded_cursor_timestamp(event: &CursorNativeEvent) -> Option<DateTime<Utc>>
         .get(1..)?
         .split_once(':')
         .map_or((offset.get(1..)?, "0"), |parts| parts);
-    let seconds = hours.parse::<i32>().ok()?.checked_mul(3_600)?
-        + minutes.parse::<i32>().ok()?.checked_mul(60)?;
+    let hours = hours.parse::<u8>().ok()?;
+    let minutes = minutes.parse::<u8>().ok()?;
+    if hours > 23 || minutes > 59 {
+        return None;
+    }
+    let seconds = i32::from(hours) * 3_600 + i32::from(minutes) * 60;
     let seconds = match offset.as_bytes().first()? {
         b'+' => seconds,
         b'-' => -seconds,
