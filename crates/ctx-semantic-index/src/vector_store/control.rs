@@ -10,9 +10,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, Transactio
 use url::Url;
 
 use crate::{
-    private_fs::{
-        create_private_dir_all, secure_private_file_permissions, secure_semantic_vector_permissions,
-    },
+    private_fs::{create_private_dir_all, secure_semantic_vector_permissions},
     vector_store_schema::SemanticVectorStoreError,
 };
 
@@ -44,7 +42,6 @@ pub(crate) fn open_writable(root: &Path) -> Result<Connection> {
         PRAGMA secure_delete = ON;
         "#,
     )?;
-    secure_private_file_permissions(&path)?;
     secure_semantic_vector_permissions(&path)?;
     Ok(connection)
 }
@@ -429,6 +426,64 @@ mod tests {
         "semantic_index_stats",
         "semantic_maintenance_state",
     ];
+
+    #[cfg(unix)]
+    #[test]
+    fn writable_reopen_preserves_sqlite_shared_memory_lock() -> Result<()> {
+        use std::os::fd::AsRawFd as _;
+
+        const CHILD_ENV: &str = "CTX_TEST_SEMANTIC_SHM_LOCK_PATH";
+        if let Some(path) = std::env::var_os(CHILD_ENV) {
+            let file = fs::File::open(path)?;
+            // Query from a separate process: F_GETLK ignores the caller's own
+            // locks. SQLite's Unix WAL deadman-switch byte is offset 128.
+            let mut lock: libc::flock = unsafe { std::mem::zeroed() };
+            lock.l_type = libc::F_WRLCK as _;
+            lock.l_whence = libc::SEEK_SET as _;
+            lock.l_start = 128;
+            lock.l_len = 1;
+            let result = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETLK, &mut lock) };
+            if result == -1 {
+                return Err(std::io::Error::last_os_error().into());
+            }
+            assert_eq!(
+                lock.l_type,
+                libc::F_RDLCK as libc::c_short,
+                "live SQLite connection lost its WAL shared-memory lock"
+            );
+            return Ok(());
+        }
+
+        let temporary = tempfile::tempdir()?;
+        let connection = open_writable(temporary.path())?;
+        connection.execute(
+            "INSERT INTO semantic_maintenance_state(key, value) VALUES ('probe', '1')",
+            [],
+        )?;
+        let assert_lock_held = || -> Result<()> {
+            let output = std::process::Command::new(std::env::current_exe()?)
+                .args([
+                    "--exact",
+                    "vector_store::control::tests::writable_reopen_preserves_sqlite_shared_memory_lock",
+                    "--nocapture",
+                ])
+                .env(CHILD_ENV, temporary.path().join("state.sqlite-shm"))
+                .output()?;
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            Ok(())
+        };
+        assert_lock_held()?;
+        let second_connection = open_writable(temporary.path())?;
+        assert_lock_held()?;
+        drop(second_connection);
+        drop(connection);
+        Ok(())
+    }
 
     fn user_tables(connection: &Connection) -> Result<Vec<String>> {
         let mut statement = connection.prepare(

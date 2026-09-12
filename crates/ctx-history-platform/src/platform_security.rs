@@ -11,6 +11,8 @@ use std::fs;
 mod path_overlap;
 #[cfg(unix)]
 mod unix_private_directory;
+#[cfg(unix)]
+mod unix_private_file;
 #[cfg(windows)]
 mod windows_acl;
 
@@ -201,6 +203,23 @@ pub fn restrict_private_file(path: &Path) -> io::Result<()> {
             io::ErrorKind::Unsupported,
             "private file policy is unavailable on this platform",
         ))
+    }
+}
+
+/// Restricts a stable file pathname without closing a regular-file descriptor.
+///
+/// Use for SQLite database families or other files with live POSIX record
+/// locks: closing an unrelated descriptor would release this process's locks.
+/// Unlike the handle-bound helper, concurrent pathname replacement fails
+/// closed. Owner, regular-file, no-follow and private-policy checks remain.
+pub fn restrict_private_file_preserving_locks(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        unix_private_file::restrict(path)
+    }
+    #[cfg(not(unix))]
+    {
+        restrict_private_file(path)
     }
 }
 
@@ -539,6 +558,9 @@ mod unix_tests {
         symlink(&target, &link)?;
 
         assert!(ensure_private_file(&link).is_err());
+        assert!(restrict_private_file(&link).is_err());
+        assert!(verify_private_file(&link).is_err());
+        assert!(restrict_private_file_preserving_locks(&link).is_err());
         assert_eq!(fs::metadata(&target)?.permissions().mode() & 0o777, 0o644);
 
         let directory = parent.path().join("directory");
@@ -565,6 +587,55 @@ mod unix_tests {
         Ok(())
     }
 
+    #[test]
+    fn pathname_file_policy_preserves_posix_record_locks() -> io::Result<()> {
+        use std::os::fd::AsRawFd as _;
+
+        const CHILD_ENV: &str = "CTX_TEST_FILE_POLICY_LOCK_PATH";
+        if let Some(path) = std::env::var_os(CHILD_ENV) {
+            let file = fs::File::open(path)?;
+            let mut lock: libc::flock = unsafe { std::mem::zeroed() };
+            lock.l_type = libc::F_WRLCK as _;
+            lock.l_whence = libc::SEEK_SET as _;
+            lock.l_len = 1;
+            if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETLK, &mut lock) } == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            assert_eq!(lock.l_type, libc::F_WRLCK as libc::c_short);
+            return Ok(());
+        }
+
+        let parent = tempfile::tempdir()?;
+        let target = parent.path().join("locked-state");
+        let file = create_private_file_new(&target)?;
+        let mut lock: libc::flock = unsafe { std::mem::zeroed() };
+        lock.l_type = libc::F_WRLCK as _;
+        lock.l_whence = libc::SEEK_SET as _;
+        lock.l_len = 1;
+        if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETLK, &lock) } == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        for _ in 0..2 {
+            restrict_private_file_preserving_locks(&target)?;
+            verify_private_file_handle(&file)?;
+            let output = std::process::Command::new(std::env::current_exe()?)
+                .args([
+                    "--exact",
+                    "platform_security::unix_tests::pathname_file_policy_preserves_posix_record_locks",
+                    "--nocapture",
+                ])
+                .env(CHILD_ENV, &target)
+                .output()?;
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        Ok(())
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn private_file_without_extended_acl_is_valid() -> io::Result<()> {
@@ -574,6 +645,35 @@ mod unix_tests {
 
         restrict_private_file(&target)?;
         verify_private_file(&target)
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn pathname_private_file_repairs_acl_without_following_links() -> io::Result<()> {
+        use std::{os::unix::fs::symlink, process::Command};
+
+        let parent = tempfile::tempdir()?;
+        let target = parent.path().join("private-state");
+        let link = parent.path().join("link");
+        drop(create_private_file_new(&target)?);
+        let user = Command::new("/usr/bin/id").arg("-un").output()?;
+        assert!(user.status.success());
+        let user = String::from_utf8_lossy(&user.stdout);
+        assert!(Command::new("/bin/chmod")
+            .args(["+a", &format!("{} allow read", user.trim())])
+            .arg(&target)
+            .status()?
+            .success());
+        assert!(verify_private_file(&target).is_err());
+        symlink(&target, &link)?;
+        assert!(restrict_private_file_preserving_locks(&link).is_err());
+        assert!(verify_private_file(&target).is_err());
+
+        restrict_private_file_preserving_locks(&target)?;
+
+        verify_private_file(&target)?;
+        assert_eq!(fs::metadata(&target)?.permissions().mode() & 0o777, 0o600);
+        Ok(())
     }
 }
 
