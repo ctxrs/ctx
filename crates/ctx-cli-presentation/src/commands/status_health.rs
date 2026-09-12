@@ -40,6 +40,7 @@ pub(super) fn actionable_service_issue_count(
 fn daemon_needs_attention(daemon: &Value) -> bool {
     let status = component_status(daemon);
     daemon.get("recoverable").and_then(Value::as_bool) == Some(true)
+        || daemon.get("heartbeat_stale").and_then(Value::as_bool) == Some(true)
         || matches!(status, "failed" | "stale_lock" | "unavailable")
         || (daemon.get("enabled").and_then(Value::as_bool) == Some(true)
             && daemon.get("running").and_then(Value::as_bool) != Some(true)

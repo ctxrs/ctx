@@ -281,6 +281,10 @@ nullable may be omitted when unavailable:
 - `running`;
 - `pid`, nullable/omitted;
 - `started_at_ms`, `heartbeat_at_ms`, and `finished_at_ms`, nullable/omitted;
+- `heartbeat_age_ms` and `heartbeat_stale`, omitted unless a non-future
+  heartbeat belongs to the live daemon PID. Stale means older than 30 seconds;
+  it is a progress warning, not proof of process death or permission to replace
+  a live owner;
 - `last_error`, nullable/omitted;
 - `start_mode`, nullable/omitted, currently `auto` for setup/import/search/semantic
   process starts or `manual` for explicit daemon runs;

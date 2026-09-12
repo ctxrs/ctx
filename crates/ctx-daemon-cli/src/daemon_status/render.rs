@@ -2,6 +2,8 @@ use std::path::Path;
 
 use serde_json::Value;
 
+use super::{job_error, job_status};
+
 use ctx_terminal::{
     fields, format_bytes, format_count, hint, outcome, section, Action, Document, Field, Hint,
     Outcome, OutcomeState, RenderContext, Token,
@@ -78,7 +80,9 @@ pub(crate) fn render_daemon_status_human(
         .get("last_error")
         .and_then(Value::as_str)
         .is_some_and(|error| !error.is_empty());
-    let service_issue = config_issue || supervisor_issue.is_some() || daemon_error;
+    let heartbeat_stale = daemon.get("heartbeat_stale").and_then(Value::as_bool) == Some(true);
+    let service_issue =
+        config_issue || supervisor_issue.is_some() || daemon_error || heartbeat_stale;
     let service_failed =
         recoverable || matches!(status, "failed" | "stale_lock") || (!running && enabled);
 
@@ -110,6 +114,11 @@ pub(crate) fn render_daemon_status_human(
 
     let (outcome_state, title, detail) = match presentation {
         DaemonPresentation::Healthy => (OutcomeState::Success, "Daemon is healthy", None),
+        DaemonPresentation::Partial if heartbeat_stale => (
+            OutcomeState::Warning,
+            "Daemon is running; heartbeat is stale",
+            Some("Work may be stalled. Live ownership is retained; a stale heartbeat alone does not prove the process is dead."),
+        ),
         DaemonPresentation::Partial if history_paused => (
             OutcomeState::Warning,
             "Daemon is running; history refresh is paused",
@@ -198,6 +207,12 @@ pub(crate) fn render_daemon_status_human(
     let (service_state, service_token) = service_state(enabled, running, recoverable, status);
     let mut service = vec![state_field("Status", service_state, service_token)];
     let mut service_details = Vec::new();
+    if heartbeat_stale {
+        service.push(state_field("Heartbeat", "stale", Token::Warning));
+        if let Some(age) = daemon.get("heartbeat_age_ms").and_then(Value::as_u64) {
+            service_details.push(("Last heartbeat", format!("{} seconds ago", age / 1000)));
+        }
+    }
     if let Some(mode) = daemon
         .get("mode")
         .and_then(Value::as_str)
@@ -821,12 +836,6 @@ fn recovery_action(
     None
 }
 
-fn job_status(job: Option<&Value>) -> &str {
-    job.and_then(|job| job.get("status"))
-        .and_then(Value::as_str)
-        .unwrap_or("unknown")
-}
-
 fn job_automatic_retry_state(job: Option<&Value>) -> Option<&str> {
     job.and_then(|job| job.pointer("/automatic_retry/state"))
         .and_then(Value::as_str)
@@ -876,12 +885,6 @@ fn job_catching_up(job: Option<&Value>) -> bool {
             .and_then(|job| job.get("reason"))
             .and_then(Value::as_str)
             == Some("retry_backoff"))
-}
-
-fn job_error(job: Option<&Value>) -> Option<&str> {
-    job.and_then(|job| job.get("last_error"))
-        .and_then(Value::as_str)
-        .filter(|error| !error.is_empty())
 }
 
 fn rejected_record_count(core_refresh: Option<&Value>) -> u64 {

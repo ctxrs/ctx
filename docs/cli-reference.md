@@ -105,6 +105,9 @@ ctx daemon run
   success. Use `status --format json` when scripts need the actual state.
 - `doctor` turns source-epoch, refresh, semantic, and daemon problems into a
   focused recovery action. It does not repeat the normal status inventory.
+  Partial refresh findings include bounded provider error details, including
+  resource shortages. Status and doctor warn when a live daemon's heartbeat
+  is stale without treating its process as dead.
 - `index` prints a one-shot indexing status view. It is the focused view of the
   current indexing mode, lexical publication, refresh progress, semantic
   coverage, and background process state. Use `--format json` for the
@@ -601,6 +604,13 @@ publication and the worker exits after admitted Core work is terminal and IPC
 is quiescent. `import --no-daemon` never starts or restarts a process and
 therefore requires an already-running endpoint. Import never falls back to a
 foreground writer.
+
+Import and search `--refresh wait` stop waiting after five minutes without
+observable request progress. Elapsed-time counters alone do not extend this
+wait. The command reports an unknown outcome, not a successful publication or
+worker failure: the admitted request stays retained and may finish later.
+Inspect `ctx daemon status` and `ctx index` before retrying. Work that continues
+to report progress can run longer than five minutes.
 
 ## Paid Companion Routes
 

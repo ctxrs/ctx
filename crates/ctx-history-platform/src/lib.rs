@@ -17,7 +17,7 @@ mod process_resources;
 pub use paths::{
     config_path, default_data_root, device_path, history_dir, logs_dir, managed_data_root,
 };
-pub use process_resources::raise_open_file_soft_limit;
+pub use process_resources::{open_file_limit_hint, raise_open_file_soft_limit};
 
 #[cfg(test)]
 mod tests;

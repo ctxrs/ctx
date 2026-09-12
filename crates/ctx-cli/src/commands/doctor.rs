@@ -57,15 +57,43 @@ pub(crate) fn run_doctor(
 
 fn human_refresh_failure(
     report: &Value,
-) -> Option<ctx_cli_presentation::commands::DoctorRefreshFailure<'_>> {
+) -> Option<ctx_cli_presentation::commands::DoctorRefreshFailure> {
     let refresh = report.get("refresh")?;
-    if refresh.get("reason").and_then(Value::as_str) != Some("core_refresh_failed") {
+    let partial = matches!(
+        refresh.get("status").and_then(Value::as_str),
+        Some("partial" | "paused")
+    );
+    let detail = if refresh.get("reason").and_then(Value::as_str) == Some("core_refresh_failed") {
+        refresh
+            .get("last_error")
+            .and_then(Value::as_str)
+            .filter(|detail| !detail.is_empty())?
+            .to_owned()
+    } else if partial {
+        let failures = refresh
+            .pointer("/diagnostics/source_failures")?
+            .as_array()?;
+        let details = failures
+            .iter()
+            .filter_map(|failure| {
+                let detail = failure
+                    .get("detail")
+                    .and_then(Value::as_str)
+                    .filter(|detail| !detail.is_empty())?;
+                Some(match failure.get("provider").and_then(Value::as_str) {
+                    Some(provider) => format!("{provider}: {detail}"),
+                    None => detail.to_owned(),
+                })
+            })
+            .take(3)
+            .collect::<Vec<_>>();
+        if details.is_empty() {
+            return None;
+        }
+        details.join("; ")
+    } else {
         return None;
-    }
-    let detail = refresh
-        .get("last_error")
-        .and_then(Value::as_str)
-        .filter(|detail| !detail.is_empty())?;
+    };
     let search = match report
         .get("lexical")
         .and_then(|lexical| lexical.get("status"))
@@ -76,7 +104,11 @@ fn human_refresh_failure(
         }
         _ => ctx_cli_presentation::commands::DoctorSearchAvailability::Unavailable,
     };
-    Some(ctx_cli_presentation::commands::DoctorRefreshFailure { detail, search })
+    Some(ctx_cli_presentation::commands::DoctorRefreshFailure {
+        detail,
+        search,
+        partial,
+    })
 }
 
 pub(crate) fn doctor_facts(data_root: &std::path::Path) -> Result<Value> {
@@ -151,6 +183,43 @@ mod tests {
             json!({"lexical": {"status": "ready"}, "refresh": {"reason": "daemon_unavailable", "last_error": "noise"}}),
         ] {
             assert!(human_refresh_failure(&report).is_none());
+        }
+    }
+
+    #[test]
+    fn human_partial_refresh_preserves_actionable_provider_failure() {
+        for detail in [
+            "provider SQLite scratch has insufficient free-space headroom: required 16019288989, available 7329218560",
+            "open provider snapshot: Too many open files (os error 24)",
+        ] {
+            let report = json!({
+                "history_epoch": {"status": "ready"},
+                "lexical": {"status": "ready"},
+                "catalog": {"status": "ready"},
+                "refresh": {
+                    "status": "partial",
+                    "reason": "completed_with_source_failures",
+                    "diagnostics": {
+                        "source_failures": [{"provider": "cursor", "detail": detail}]
+                    }
+                }
+            });
+            let failure = human_refresh_failure(&report).expect("partial failure detail");
+            assert!(failure.detail.contains("cursor"));
+            assert!(failure.detail.contains(detail));
+            assert_eq!(failure.search, DoctorSearchAvailability::Available);
+            let findings = ctx_cli_presentation::commands::source_epoch_findings(&report, false);
+            let context = crate::ui::RenderContext::for_test(crate::ui::TestContext::tty(
+                crate::ui::StreamKind::Stdout, 120,
+            ));
+            let rendered = ctx_cli_presentation::commands::render_doctor_human(
+                &context, &findings, None, Some(failure),
+            ).render_plain();
+            let text = rendered.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert!(text.contains(detail), "{rendered}");
+            assert!(text.contains("History refresh is partial"), "{rendered}");
+            assert!(!text.contains("The component is not ready"), "{rendered}");
+            assert!(text.contains("ctx import --all"), "{rendered}");
         }
     }
 }

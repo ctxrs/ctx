@@ -210,7 +210,11 @@ pub fn render_status_human(
 
     let daemon = &report["daemon"];
     let daemon_status = if daemon.get("running").and_then(Value::as_bool) == Some(true) {
-        "running".to_owned()
+        if daemon.get("heartbeat_stale").and_then(Value::as_bool) == Some(true) {
+            "running; heartbeat is stale".to_owned()
+        } else {
+            "running".to_owned()
+        }
     } else {
         component_display(daemon)
     };
@@ -500,6 +504,19 @@ mod tests {
 
     #[test]
     fn actionable_daemon_or_semantic_state_prevents_a_healthy_headline() {
+        let mut stale_heartbeat = status_report(true, "ready", "ready");
+        stale_heartbeat["daemon"]["heartbeat_stale"] = json!(true);
+        let rendered =
+            render_report(&context(80, ColorMode::Never), &stale_heartbeat).render_plain();
+        assert!(
+            rendered.starts_with("! ctx needs attention\n"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("running; heartbeat is stale"),
+            "{rendered}"
+        );
+
         let mut daemon_failed = status_report(true, "ready", "ready");
         daemon_failed["daemon"] = json!({
             "status": "failed",
