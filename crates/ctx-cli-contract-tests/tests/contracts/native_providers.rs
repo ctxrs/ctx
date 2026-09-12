@@ -15,6 +15,62 @@ mod workspace_sources;
 use provider_daemon::*;
 
 #[test]
+fn provider_index_open_retries_publication_contention() {
+    let temp = tempdir();
+    let root = data_root(&temp);
+    let generation = initialize_generation_only_core(&root);
+    let mut attempts = 0;
+    let index = open_provider_index_with(
+        || {
+            attempts += 1;
+            if attempts == 1 {
+                Err(ctx_history_index::IndexError::ConcurrentGenerationChange)
+            } else {
+                VerifiedIndex::open_pinned(root.join("search/lexical"))
+            }
+        },
+        Instant::now() + Duration::from_secs(1),
+    )
+    .unwrap();
+    assert_eq!(attempts, 2);
+    assert_eq!(index.generation_id(), generation);
+}
+
+#[test]
+fn provider_index_open_does_not_retry_corruption() {
+    let mut attempts = 0;
+    let result = open_provider_index_with(
+        || {
+            attempts += 1;
+            Err(ctx_history_index::IndexError::ChecksumMismatch)
+        },
+        Instant::now() + Duration::from_secs(1),
+    );
+    assert!(matches!(
+        result,
+        Err(ctx_history_index::IndexError::ChecksumMismatch)
+    ));
+    assert_eq!(attempts, 1);
+}
+
+#[test]
+fn provider_index_open_stops_at_contention_deadline() {
+    let mut attempts = 0;
+    let result = open_provider_index_with(
+        || {
+            attempts += 1;
+            Err(ctx_history_index::IndexError::ConcurrentGenerationChange)
+        },
+        Instant::now(),
+    );
+    assert!(matches!(
+        result,
+        Err(ctx_history_index::IndexError::ConcurrentGenerationChange)
+    ));
+    assert_eq!(attempts, 1);
+}
+
+#[test]
 fn qwen_kimi_mistral_mux_and_qoder_default_sources_import_search_and_reimport() {
     let temp = tempdir();
     copy_dir_all(
