@@ -9,7 +9,7 @@ use ctx_history_capture_model::{
 };
 use ctx_history_core::{CaptureProvider, CoreRecord, LiteralFactKind, SourceAnchor, SourceKey};
 use ctx_history_index::{AppliedProviderRoot, VerifiedIndex};
-use tempfile::tempdir;
+use test_support_paths::tempdir;
 
 #[path = "support/lexical.rs"]
 mod lexical_test_support;
@@ -146,6 +146,14 @@ mod test_support_paths {
     }
 
     pub(crate) fn capture_repo_root() -> PathBuf {
+        // Bazel exposes fixture data through runfiles without the Cargo workspace.
+        if let Ok(runfiles) = std::env::var("TEST_SRCDIR") {
+            let workspace = std::env::var("TEST_WORKSPACE").unwrap_or_else(|_| "_main".to_owned());
+            let root = PathBuf::from(runfiles).join(workspace);
+            if root.join("tests/fixtures/provider-history").is_dir() {
+                return root;
+            }
+        }
         let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         if manifest.is_absolute() {
             return repo_root_from_manifest(manifest);

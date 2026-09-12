@@ -380,9 +380,24 @@ fn certificate_for(index: &VerifiedIndex, native_session_id: &str) -> CertifiedS
 }
 
 fn source_native_session_id(source: &SourceKey) -> Option<&str> {
-    let SourceAnchor::ProviderNative { key, .. } = source.anchor() else {
+    let SourceAnchor::ProviderNative { namespace, key } = source.anchor() else {
         return None;
     };
+    if namespace == "codex.rollout" {
+        let key = match key {
+            TypedKey::Composite(parts) if matches!(parts.first(), Some(TypedKey::Bytes(_))) => {
+                parts.last()?
+            }
+            key => key,
+        };
+        return match key {
+            TypedKey::Composite(parts) => match parts.first()? {
+                TypedKey::Utf8(owner) => Some(owner.as_str()),
+                _ => None,
+            },
+            _ => None,
+        };
+    }
     match key {
         TypedKey::Utf8(value) => Some(value),
         TypedKey::Composite(parts) => parts.last().and_then(|part| match part {
@@ -754,3 +769,67 @@ mod continuous_append;
 mod lifecycle;
 #[path = "codex_child_independence/repository.rs"]
 mod repository;
+
+#[test]
+fn reverted_rollouts_keep_distinct_content_and_coalesce_only_compressed_copies() {
+    let temp = tempdir().unwrap();
+    let sessions = temp.path().join("sessions");
+    let index_root = temp.path().join("index");
+    fs::create_dir_all(&sessions).unwrap();
+    let owner = "019fb000-0000-7000-8000-0000000000b1";
+    write_session(
+        &sessions,
+        owner,
+        ProviderNativeSessionRelationship::Root,
+        None,
+        [message("originalrolloutunique")],
+    );
+    for (rollout, marker) in [
+        ("019fb000-0000-7000-8000-0000000000b2", "firstrevertunique"),
+        ("019fb000-0000-7000-8000-0000000000b3", "secondrevertunique"),
+    ] {
+        let mut meta = session_meta(owner, ProviderNativeSessionRelationship::Root, None);
+        meta["payload"]["history_mode"] = serde_json::json!("paginated");
+        meta["payload"]["history_base"] = serde_json::json!({"thread_id":owner});
+        let bytes = jsonl_bytes([meta, message(marker)]);
+        let path = sessions.join(format!("rollout-{owner}_{rollout}.jsonl"));
+        fs::write(&path, &bytes).unwrap();
+        fs::write(
+            path.with_extension("jsonl.zst"),
+            zstd::stream::encode_all(bytes.as_slice(), 1).unwrap(),
+        )
+        .unwrap();
+    }
+    let registry = register_tree(&[&sessions]);
+    let cold = refresh_source_backed_generation(&index_root, &registry, writer_options()).unwrap();
+    assert!(cold.failed_routes.is_empty());
+    assert!(cold.logical_source_failures.is_empty());
+    let index = VerifiedIndex::open_pinned(&index_root).unwrap();
+    for marker in [
+        "originalrolloutunique",
+        "firstrevertunique",
+        "secondrevertunique",
+    ] {
+        assert_eq!(
+            search_event_candidates(&index, marker, 8).len(),
+            1,
+            "{marker}"
+        );
+    }
+    let generation = index.generation_id().to_owned();
+    drop(index);
+    let (noop, _) = incremental_refresh(&index_root, &registry, &cold);
+    assert!(noop.failed_routes.is_empty());
+    assert_eq!(noop.commit.generation_id, generation);
+    let first = sessions.join(format!(
+        "rollout-{owner}_019fb000-0000-7000-8000-0000000000b2.jsonl"
+    ));
+    append_event(&first, message("revertappendunique"));
+    let appended = incremental_refresh_member(&index_root, &registry, &noop, &sessions, first);
+    assert!(appended.failed_routes.is_empty());
+    let index = VerifiedIndex::open_pinned(&index_root).unwrap();
+    assert_eq!(
+        search_event_candidates(&index, "revertappendunique", 8).len(),
+        1
+    );
+}

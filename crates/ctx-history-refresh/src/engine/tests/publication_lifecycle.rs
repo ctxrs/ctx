@@ -1335,8 +1335,8 @@ fn incompatible_pointer_does_not_normalize_mismatched_active_status() {
 }
 
 #[test]
-fn incompatible_pointer_replays_queued_and_running_journals_preserving_successors() {
-    for running in [false, true] {
+fn incompatible_pointer_rebuilds_active_journals_preserving_successors() {
+    for request_state in ["admission_pending", "queued", "running"] {
         let temp = tempfile::tempdir().unwrap();
         let data_root = temp.path().join("data");
         ctx_history_platform::platform_security::establish_private_data_root(&data_root).unwrap();
@@ -1378,11 +1378,9 @@ fn incompatible_pointer_replays_queued_and_running_journals_preserving_successor
 
         let status_path = daemon_source_backed_refresh_job_path(&data_root);
         let mut queued = read_daemon_job_status(&status_path).expect("queued journal");
-        if running {
-            queued["request_state"] = Value::String("running".to_owned());
-            queued["status"] = Value::String("running".to_owned());
-            write_daemon_job_status(&status_path, &queued).unwrap();
-        }
+        queued["request_state"] = Value::String(request_state.to_owned());
+        queued["status"] = Value::String("running".to_owned());
+        write_daemon_job_status(&status_path, &queued).unwrap();
 
         let rebuild_calls = Arc::new(AtomicUsize::new(0));
         let observed_calls = Arc::clone(&rebuild_calls);

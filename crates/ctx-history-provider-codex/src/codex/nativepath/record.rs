@@ -681,6 +681,7 @@ pub(super) fn parse_session_meta(line: &[u8]) -> Option<CodexSessionRow> {
         .or(envelope.timestamp.as_deref())
         .and_then(parse_rfc3339_utc)?;
     let (parent_native_session_id, session_relationship) = codex_session_relationship(
+        &native_session_id,
         &payload.source,
         payload.parent_thread_id.as_deref(),
         payload.forked_from_id.as_deref(),
@@ -808,4 +809,19 @@ fn parse_after_selector_ambiguity(line: &[u8]) -> Option<CodexDecodedEnvelope> {
     };
     let payload = object.remove("payload")?;
     Some(CodexDecodedEnvelope { timestamp, payload })
+}
+
+#[cfg(test)]
+mod same_thread_history_tests {
+    use super::*;
+    #[test]
+    fn paginated_revert_keeps_the_thread_owner_without_a_self_parent() {
+        let row = parse_session_meta(br#"{"type":"session_meta","payload":{"id":"thread-owner","session_id":"thread-owner","timestamp":"2026-08-19T12:00:00Z","source":"vscode","history_mode":"paginated","history_base":{"thread_id":"thread-owner"}}}"#).unwrap();
+        assert_eq!(row.native_session_id, "thread-owner");
+        assert_eq!(row.parent_native_session_id, None);
+        assert_eq!(
+            row.session_relationship,
+            Some(ctx_history_core::ProviderNativeSessionRelationship::Root)
+        );
+    }
 }

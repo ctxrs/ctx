@@ -679,10 +679,9 @@ impl<B: ProviderRuntimeBinding> JsonlFamilyAdapter for CodexSessionJsonlFamilyAd
                     )?
                 {
                     let source_root_lineage = self.generation.source_root_lineage();
-                    observation.bind_source_hint(
-                        path,
-                        codex_source_key_in_root(source_root_lineage, &native_session_id)?,
-                    );
+                    let source_key =
+                        codex_source_key_for_path(source_root_lineage, &native_session_id, &path)?;
+                    observation.bind_source_hint(path, source_key);
                 }
             }
             Ok(observation)
