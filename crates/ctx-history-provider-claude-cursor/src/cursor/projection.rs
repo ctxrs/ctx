@@ -1,12 +1,15 @@
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, FixedOffset, NaiveDateTime, TimeZone, Utc};
 use ctx_history_core::ProviderDeclaredFact;
-use ctx_history_core::{EventRole, EventType};
+use ctx_history_core::{EventRole, EventType, TypedKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use ctx_history_capture_model::time::parse_rfc3339_utc;
 
 use super::parser::{CursorSafePart, CursorSanitizedRecord};
+
+#[cfg(test)]
+mod timestamp_tests;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub(crate) struct CursorNativeOrder {
@@ -157,6 +160,91 @@ pub(super) fn project_cursor_record(
             })
         })
         .collect()
+}
+
+#[derive(Default)]
+pub(super) struct CursorTimestampState(Option<DateTime<Utc>>);
+
+impl CursorTimestampState {
+    /// Resumes the carried turn timestamp across an append boundary. The
+    /// shared family supplies provider state only when resuming a certified
+    /// prefix, so a cold or replacement scan always starts empty.
+    pub(super) fn resume(checkpoint: Option<&TypedKey>) -> Self {
+        Self(match checkpoint {
+            Some(TypedKey::I64(unix_ms)) => DateTime::from_timestamp_millis(*unix_ms),
+            _ => None,
+        })
+    }
+
+    pub(super) fn checkpoint(&self) -> Option<TypedKey> {
+        self.0
+            .map(|carried| TypedKey::I64(carried.timestamp_millis()))
+    }
+
+    pub(super) fn apply(&mut self, events: &mut [CursorNativeEvent]) -> serde_json::Result<()> {
+        if events.iter().any(|event| event.role == EventRole::User) {
+            self.0 = events.iter().find_map(|event| {
+                (event.role == EventRole::User)
+                    .then(|| {
+                        event
+                            .occurred_at
+                            .or_else(|| embedded_cursor_timestamp(event))
+                    })
+                    .flatten()
+            });
+        }
+        for event in events {
+            if event.occurred_at.is_none()
+                && matches!(
+                    event.role,
+                    EventRole::User | EventRole::Assistant | EventRole::Tool
+                )
+            {
+                event.occurred_at = self.0;
+                event.provider_event_hash = cursor_logical_event_hash(
+                    event.event_type,
+                    event.role,
+                    event.occurred_at.map(|value| value.timestamp_millis()),
+                    &event.body,
+                )?;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn embedded_cursor_timestamp(event: &CursorNativeEvent) -> Option<DateTime<Utc>> {
+    if event.role != EventRole::User {
+        return None;
+    }
+    let CursorEventBody::Text { text } = &event.body else {
+        return None;
+    };
+    let raw = text
+        .strip_prefix("<timestamp>")?
+        .split_once("</timestamp>")?
+        .0;
+    let (local, offset) = raw.strip_suffix(')')?.rsplit_once(" (UTC")?;
+    let local = NaiveDateTime::parse_from_str(local, "%A, %b %-d, %Y, %-I:%M %p").ok()?;
+    let (hours, minutes) = offset
+        .get(1..)?
+        .split_once(':')
+        .map_or((offset.get(1..)?, "0"), |parts| parts);
+    let hours = hours.parse::<u8>().ok()?;
+    let minutes = minutes.parse::<u8>().ok()?;
+    if hours > 23 || minutes > 59 {
+        return None;
+    }
+    let seconds = i32::from(hours) * 3_600 + i32::from(minutes) * 60;
+    let seconds = match offset.as_bytes().first()? {
+        b'+' => seconds,
+        b'-' => -seconds,
+        _ => return None,
+    };
+    FixedOffset::east_opt(seconds)?
+        .from_local_datetime(&local)
+        .single()
+        .map(|value| value.with_timezone(&Utc))
 }
 
 fn cursor_logical_event_hash(
