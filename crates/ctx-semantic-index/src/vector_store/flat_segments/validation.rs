@@ -282,14 +282,19 @@ pub(super) fn validate_manifest(
     filename_generation: u64,
     filename_digest: &str,
 ) -> FlatResult<()> {
-    if envelope.manifest.schema_version < MANIFEST_SCHEMA_VERSION {
+    if envelope.manifest.schema_version < INLINE_MANIFEST_SCHEMA_VERSION {
         return Err(FlatStoreError::LegacySchema(
             envelope.manifest.schema_version,
         ));
     }
     if envelope.format != STORE_FORMAT
         || envelope.envelope_version != MANIFEST_ENVELOPE_VERSION
-        || envelope.manifest.schema_version != MANIFEST_SCHEMA_VERSION
+        || !matches!(
+            envelope.manifest.schema_version,
+            INLINE_MANIFEST_SCHEMA_VERSION | MANIFEST_SCHEMA_VERSION
+        )
+        || (envelope.manifest.schema_version == INLINE_MANIFEST_SCHEMA_VERSION
+            && !envelope.manifest.catalog_pages.is_empty())
     {
         return Err(FlatStoreError::Incompatible(
             "manifest format or schema version is unsupported".to_owned(),
@@ -298,7 +303,7 @@ pub(super) fn validate_manifest(
     validate_model_contract(&envelope.manifest.model).map_err(|error| {
         FlatStoreError::Corrupt(format!("manifest has an invalid model contract: {error}"))
     })?;
-    let manifest_bytes = serde_json::to_vec(&envelope.manifest)?;
+    let manifest_bytes = manifest_storage_bytes(&envelope.manifest)?;
     let actual_digest = encode_hex(Sha256::digest(&manifest_bytes).as_slice());
     if envelope.manifest_sha256 != actual_digest || filename_digest != actual_digest {
         return Err(FlatStoreError::Corrupt(

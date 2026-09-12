@@ -52,20 +52,44 @@ fn assert_semantic_query(pin: &PinnedFlatGeneration, expected_events: usize) -> 
     Ok(())
 }
 
-fn assert_manifest_bound(root: &Path) -> Result<()> {
-    let mut manifests = 0;
+fn assert_manifest_bound(root: &Path) -> Result<HashSet<String>> {
+    let mut manifests = Vec::new();
     for entry in fs::read_dir(root.join("flat_manifests"))? {
         let path = entry?.path();
         if path
             .extension()
             .is_some_and(|extension| extension == "json")
         {
-            manifests += 1;
-            assert!(fs::metadata(path)?.len() <= MANIFEST_BUDGET);
+            assert!(fs::metadata(&path)?.len() <= MANIFEST_BUDGET);
+            manifests.push(path);
         }
     }
-    assert!(manifests > 0);
-    Ok(())
+    manifests.sort();
+    let active = manifests.last().ok_or_else(|| anyhow!("no manifest"))?;
+    let envelope: serde_json::Value = serde_json::from_slice(&fs::read(active)?)?;
+    let pages = envelope["manifest"]["catalog_pages"]
+        .as_array()
+        .ok_or_else(|| anyhow!("manifest did not publish catalog pages"))?;
+    assert!(pages.len() > 1);
+    for entry in fs::read_dir(root.join("flat_segments"))? {
+        let entry = entry?;
+        if entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with("flat-catalog-")
+        {
+            assert!(entry.metadata()?.len() <= MANIFEST_BUDGET);
+        }
+    }
+    pages
+        .iter()
+        .map(|page| {
+            page["sha256"]
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| anyhow!("catalog page has no digest"))
+        })
+        .collect()
 }
 
 #[test]
@@ -80,7 +104,7 @@ fn bounded_manifest_backfill_and_incremental_generations_remain_queryable() -> R
         drain_bounded_maintenance(&mut store, &initial)?;
         let retained = ready_pin(&store, &initial, SOURCE_COUNT)?;
         assert_semantic_query(&retained, SOURCE_COUNT)?;
-        assert_manifest_bound(&fixture.semantic_path)?;
+        let mut prior_pages = assert_manifest_bound(&fixture.semantic_path)?;
 
         for revision in 1..=6 {
             specs[0].1.push(format!("incremental document {revision}"));
@@ -90,7 +114,14 @@ fn bounded_manifest_backfill_and_incremental_generations_remain_queryable() -> R
                 &ready_pin(&store, &target, SOURCE_COUNT + revision)?,
                 SOURCE_COUNT + revision,
             )?;
-            assert_manifest_bound(&fixture.semantic_path)?;
+            let pages = assert_manifest_bound(&fixture.semantic_path)?;
+            assert_eq!(prior_pages.len(), pages.len());
+            assert_eq!(
+                prior_pages.difference(&pages).count(),
+                1,
+                "changing one source rewrote unrelated catalog pages"
+            );
+            prior_pages = pages;
             assert_semantic_query(&retained, SOURCE_COUNT)?;
             drop(store);
             store = open_store(&fixture.semantic_path)?;
