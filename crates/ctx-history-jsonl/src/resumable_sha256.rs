@@ -116,7 +116,7 @@ impl JsonlResumableSha256 {
         tail[padded_len - 8..padded_len].copy_from_slice(&bit_length.to_be_bytes());
         compress_blocks(&mut state, &tail[..padded_len]);
         let mut digest = [0_u8; 32];
-        for (encoded, word) in digest.chunks_exact_mut(4).zip(state) {
+        for (encoded, word) in digest.as_chunks_mut::<4>().0.iter_mut().zip(state) {
             encoded.copy_from_slice(&word.to_be_bytes());
         }
         digest
