@@ -277,7 +277,9 @@ fn test_tls_server_config() -> Arc<rustls::ServerConfig> {
 fn decode_hex(hex: &str) -> Vec<u8> {
     assert_eq!(hex.len() % 2, 0);
     hex.as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| {
             let digits = std::str::from_utf8(pair).unwrap();
             u8::from_str_radix(digits, 16).unwrap()

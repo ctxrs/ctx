@@ -9,7 +9,7 @@ pub(super) fn goose_logical_row_digest(values: &[NativeSqliteValue]) -> Result<[
     let digest = sqlite_logical_record_digest(values);
     let bytes = digest.as_str().as_bytes();
     let mut decoded = [0_u8; 32];
-    for (index, pair) in bytes.chunks_exact(2).enumerate() {
+    for (index, pair) in bytes.as_chunks::<2>().0.iter().enumerate() {
         decoded[index] = decode_hex_nibble(pair[0])
             .and_then(|high| decode_hex_nibble(pair[1]).map(|low| (high << 4) | low))
             .ok_or_else(|| {

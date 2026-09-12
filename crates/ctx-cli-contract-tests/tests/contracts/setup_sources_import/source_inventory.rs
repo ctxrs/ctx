@@ -1029,7 +1029,7 @@ fn nanoclaw_test_sha1_slug(input: &[u8]) -> String {
         0x1032_5476_u32,
         0xc3d2_e1f0_u32,
     ];
-    for chunk in message.chunks_exact(64) {
+    for chunk in message.as_chunks::<64>().0 {
         let mut words = [0_u32; 80];
         for (index, word) in words.iter_mut().take(16).enumerate() {
             let start = index * 4;

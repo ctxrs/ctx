@@ -902,7 +902,9 @@ pub fn decode_supervisor_text(bytes: &[u8]) -> String {
         let units = bytes
             .strip_prefix(&[0xff, 0xfe])
             .unwrap_or(bytes)
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
             .collect::<Vec<_>>();
         String::from_utf16_lossy(&units)

@@ -92,7 +92,7 @@ pub(super) fn validate_vector_payload(
             FlatStoreError::Corrupt("vector payload is shorter than declared".to_owned())
         })?;
         let mut norm_squared = 0.0_f64;
-        for value in row[..vector_bytes].chunks_exact(4) {
+        for value in row[..vector_bytes].as_chunks::<4>().0.iter() {
             let value = f32::from_le_bytes([value[0], value[1], value[2], value[3]]);
             if !value.is_finite() {
                 return Err(FlatStoreError::Corrupt(format!(

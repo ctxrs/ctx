@@ -503,7 +503,7 @@ fn foreground_client_ids_survive_admission_and_status_beside_periodic_work() -> 
     }
     assert_eq!(exchanges.len(), 4);
     let mut ids = BTreeSet::new();
-    for pair in exchanges.chunks_exact(2) {
+    for pair in exchanges.as_chunks::<2>().0 {
         let (admission, accepted) = &pair[0];
         let (status_request, status) = &pair[1];
         assert_eq!(admission["op"], SOURCE_REFRESH_REQUEST_OP);

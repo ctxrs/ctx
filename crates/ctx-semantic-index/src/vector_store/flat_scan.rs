@@ -721,7 +721,7 @@ impl ExactFlatF32Scan<'static> {
             });
         }
         let mut decoded = Vec::with_capacity(config.dimensions);
-        for bytes in query.chunks_exact(std::mem::size_of::<f32>()) {
+        for bytes in query.as_chunks::<{ std::mem::size_of::<f32>() }>().0 {
             decoded.push(f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]));
         }
         Self::from_queries(vec![Cow::Owned(decoded)], config)

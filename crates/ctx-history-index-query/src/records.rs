@@ -121,7 +121,10 @@ fn indexed_source_owner_digest(segment: &tantivy::SegmentReader, doc: DocId) -> 
         ));
     }
     let mut digest = [0_u8; 32];
-    for (target, pair) in digest.iter_mut().zip(token.as_bytes().chunks_exact(2)) {
+    for (target, pair) in digest
+        .iter_mut()
+        .zip(token.as_bytes().as_chunks::<2>().0.iter())
+    {
         let high = lowercase_hex_nibble(pair[0]).ok_or(IndexError::InvalidStoredDocumentField(
             SEARCH_REF_SOURCE_KEY_FIELD,
         ))?;

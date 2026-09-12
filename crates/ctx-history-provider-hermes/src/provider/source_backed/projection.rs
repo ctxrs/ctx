@@ -427,7 +427,7 @@ pub(super) fn decode_sha256(value: &str) -> HermesSourceBackedResult<[u8; 32]> {
         return Err(HermesSourceBackedError::InvalidLogicalDigest);
     }
     let mut digest = [0_u8; 32];
-    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+    for (index, pair) in value.as_bytes().as_chunks::<2>().0.iter().enumerate() {
         let high = decode_hex_nibble(pair[0])?;
         let low = decode_hex_nibble(pair[1])?;
         digest[index] = (high << 4) | low;

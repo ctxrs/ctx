@@ -572,12 +572,7 @@ fn is_localhost_host(host: Host<&str>) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        io::{Read as _, Write as _},
-        net::TcpListener,
-        sync::mpsc,
-        thread,
-    };
+    use std::{net::TcpListener, sync::mpsc, thread};
 
     use super::*;
 

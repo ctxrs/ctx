@@ -182,7 +182,9 @@ fn index_capture_lifecycle_runs_complete_neutral_exchange() {
     assert_eq!(aggregate_identity.len(), 64);
     for (encoded, expected) in aggregate_identity
         .as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .zip(source_identity.digest())
     {
         assert_eq!(

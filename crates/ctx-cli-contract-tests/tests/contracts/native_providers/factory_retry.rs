@@ -1,7 +1,4 @@
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    io::Write as _,
-};
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::*;
 

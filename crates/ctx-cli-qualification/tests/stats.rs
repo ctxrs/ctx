@@ -3,7 +3,6 @@ mod support;
 
 use std::fs;
 
-use predicates::prelude::*;
 use rusqlite::Connection;
 use serde_json::Value;
 use support::*;
