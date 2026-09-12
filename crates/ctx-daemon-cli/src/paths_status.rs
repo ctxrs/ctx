@@ -162,14 +162,23 @@ fn daemon_semantic_job_report(
     let last_run_reason = status_value
         .as_ref()
         .and_then(|value| json_string(value, "reason"));
+    let run_failed = enabled
+        && (matches!(last_run_status.as_deref(), Some("failed" | "unavailable"))
+            || status_value
+                .as_ref()
+                .and_then(|value| value.get("last_error"))
+                .and_then(Value::as_str)
+                .is_some_and(|error| !error.trim().is_empty()));
     let status = if activation_failed || reload_failed {
         "failed"
-    } else if reload_pending
-        || (context.daemon_running && enabled && !context.semantic_runtime_active)
-    {
+    } else if reload_pending {
         "pending"
     } else if disabled {
         "disabled"
+    } else if run_failed {
+        "failed"
+    } else if context.daemon_running && enabled && !context.semantic_runtime_active {
+        "pending"
     } else {
         last_run_status.as_deref().unwrap_or("unknown")
     };
@@ -179,6 +188,10 @@ fn daemon_semantic_job_report(
         Some("daemon_config_reload_failed".to_owned())
     } else if reload_pending {
         Some("daemon_config_reload_pending".to_owned())
+    } else if run_failed {
+        last_run_reason
+            .clone()
+            .or_else(|| Some("daemon_semantic_job_failed".to_owned()))
     } else if context.daemon_running && enabled && !context.semantic_runtime_active {
         Some("semantic_runtime_inactive".to_owned())
     } else if disabled {

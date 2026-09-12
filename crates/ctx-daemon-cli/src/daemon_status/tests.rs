@@ -13,6 +13,23 @@ fn context(width: usize) -> RenderContext {
     RenderContext::for_test(TestContext::tty(StreamKind::Stdout, width).color(ColorMode::Never))
 }
 
+#[test]
+fn stale_heartbeat_warns_without_claiming_the_live_daemon_is_dead() {
+    let mut daemon = running_report();
+    daemon["heartbeat_stale"] = json!(true);
+    daemon["heartbeat_age_ms"] = json!(223_200_000);
+    let rendered =
+        render_daemon_status_human(&context(120), DaemonStatusView::daemon_only(&daemon))
+            .render_plain();
+    assert!(
+        rendered.contains("Daemon is running; heartbeat is stale"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("223200 seconds ago"), "{rendered}");
+    assert!(!rendered.contains("Daemon is healthy"), "{rendered}");
+    assert!(!rendered.contains("Restarting it is safe"), "{rendered}");
+}
+
 fn styled_context(width: usize) -> RenderContext {
     RenderContext::for_test(TestContext::tty(StreamKind::Stdout, width).color(ColorMode::Always))
 }

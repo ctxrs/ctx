@@ -44,13 +44,14 @@ pub use clone::{create_authenticated_candidate_generation, CandidateActivationFe
     any(target_os = "linux", target_os = "macos")
 ))]
 pub use clone::{CloneMetrics, CloneStage, CloneTestHookGuard, CloneTestOptions};
+pub use ctx_history_platform::open_file_limit_hint;
 pub use durable_directory::{
     durable_atomic_replace_file, reclaim_abandoned_atomic_writes, DurableAtomicWriteOutcome,
     DurableMmapDirectory,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use durable_directory::{AtomicWriteStage, AtomicWriteTestHookGuard};
-pub use error::{GenerationError, Result};
+pub use error::{tantivy_file_limit_hint, GenerationError, Result};
 #[cfg(windows)]
 pub use generation::publish_active_generation_pointer_validated_predecessor_fence;
 pub use generation::{

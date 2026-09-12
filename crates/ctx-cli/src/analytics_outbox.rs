@@ -8,7 +8,7 @@ use std::{
 
 use anyhow::{bail, Context as _, Result};
 use ctx_client_observability::analytics::{
-    AnalyticsDeliveryFailureClass, AnalyticsDeliveryObservationV1,
+    AnalyticsDeliveryFailureClass, AnalyticsDeliveryObservationV1, CountBucket,
 };
 use ctx_history_core::utc_now;
 use ctx_history_platform::platform_security::{restrict_private_file_handle, verify_private_file};
@@ -151,8 +151,9 @@ impl OutboxState {
             .iter()
             .map(|entry| entry.data_root_id.as_str())
             .collect();
-        self.roots
-            .retain(|id, state| queued_roots.contains(id.as_str()) || state.has_counters());
+        self.roots.retain(|id, state| {
+            queued_roots.contains(id.as_str()) || state.has_counters() || state.observation_due
+        });
         // Every root with entries retains its counters. Counter-only records
         // are best effort and cannot turn root churn into unbounded storage.
         let excess = self.roots.len().saturating_sub(OUTBOX_MAX_ENTRIES);
@@ -490,21 +491,24 @@ impl AnalyticsOutbox {
 
     fn pending_observation_at(&self, now_epoch_seconds: i64) -> Result<Option<OutboxObservation>> {
         let _lock = OutboxLock::acquire(&self.state_lock_path())?;
-        let mut loaded = self.load_normalized(now_epoch_seconds)?;
+        let loaded = self.load_normalized(now_epoch_seconds)?;
         let health_pending = loaded.state.entries.iter().any(|entry| {
             entry.data_root_id == self.data_root_id
                 && entry.kind == OutboxEntryKind::DeliveryObservation
         });
         let root = loaded.state.root(&self.data_root_id);
-        let has_counters = root.has_counters();
-        if root.observation_due && !has_counters {
-            loaded.state.root_mut(&self.data_root_id).observation_due = false;
-            loaded.dirty = true;
-        }
         if loaded.dirty {
             self.persist(&loaded.state)?;
         }
-        if !root.observation_due || health_pending || !has_counters {
+        let queued = loaded
+            .state
+            .entries
+            .iter()
+            .filter(|entry| {
+                entry.data_root_id == self.data_root_id && entry.kind == OutboxEntryKind::Ordinary
+            })
+            .count() as u64;
+        if !root.observation_due || health_pending || (!root.has_counters() && queued != 0) {
             return Ok(None);
         }
         let oldest_age_seconds = loaded
@@ -524,15 +528,7 @@ impl AnalyticsOutbox {
         Ok(Some(OutboxObservation {
             data_root_id: self.data_root_id.clone(),
             event: AnalyticsDeliveryObservationV1::new(
-                loaded
-                    .state
-                    .entries
-                    .iter()
-                    .filter(|entry| {
-                        entry.data_root_id == self.data_root_id
-                            && entry.kind == OutboxEntryKind::Ordinary
-                    })
-                    .count() as u64,
+                queued,
                 root.retry_attempts,
                 root.dropped,
                 Duration::from_secs(oldest_age_seconds),
@@ -600,7 +596,8 @@ impl AnalyticsOutbox {
         root.dropped = root.dropped.saturating_sub(observation.dropped);
         if root.failure_sequence == observation.failure_sequence {
             root.last_failure_class = None;
-            root.observation_due = false;
+            // A partial recovery still owes a zero-queue report when the rest drains.
+            root.observation_due = observation.event.queued != CountBucket::Zero;
         } else {
             root.observation_due = true;
         }

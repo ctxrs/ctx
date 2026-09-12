@@ -1,5 +1,5 @@
 {
-  "contractVersion": "agent-history-v1",
+  "contractVersion": "agent-history-v2",
   "schemaVersion": 1,
   "operation": "showSession",
   "backend": {

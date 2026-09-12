@@ -92,6 +92,25 @@ pub fn source_epoch_status_report(
     let daemon = source_daemon_report(data_root, config);
     let catalog = catalog_report(admitted_generation_id.as_deref(), admitted_index);
     let mut semantic = semantic_report(data_root, config, admitted_index);
+    // Projection readiness and a background failure are independent facts.
+    // Keep the projection inventory, but do not call a failed startup progress.
+    if semantic.get("enabled").and_then(Value::as_bool) == Some(true) {
+        if let Some(job) = daemon.pointer("/jobs/semantic_index").filter(|job| {
+            matches!(
+                job.get("status").and_then(Value::as_str),
+                Some("failed" | "unavailable")
+            )
+        }) {
+            semantic["status"] = json!("unavailable");
+            semantic["reason"] = job
+                .get("reason")
+                .cloned()
+                .unwrap_or_else(|| json!("daemon_semantic_job_failed"));
+            if let Some(error) = job.get("last_error") {
+                semantic["last_error"] = error.clone();
+            }
+        }
+    }
     attach_catch_up_status(
         &mut semantic,
         read_daemon_job_status(&daemon_semantic_job_path(data_root)),

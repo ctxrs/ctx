@@ -91,6 +91,8 @@ impl DurableAtomicWriteOutcome {
 
 impl DurableMmapDirectory {
     pub fn open(directory_path: impl AsRef<Path>) -> Result<Self, OpenDirectoryError> {
+        // Readers and recovery processes may never construct a writer.
+        ctx_history_platform::raise_open_file_soft_limit();
         let directory_path = directory_path.as_ref();
         if let Some(opened) =
             crate::read_root::registered_read_directory(directory_path).map_err(|error| {

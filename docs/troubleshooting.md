@@ -10,7 +10,8 @@ automatically, so open a new terminal or run:
 
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
-ctx status
+command -v ctx
+ctx --version
 ```
 
 On Windows, the hosted installer places `ctx.exe` in `$HOME\.local\bin` by
@@ -20,11 +21,56 @@ or run:
 
 ```powershell
 $env:Path = "$HOME\.local\bin;$env:Path"
-ctx status
+Get-Command ctx -All
+ctx --version
 ```
 
 If you installed with `--no-modify-path`, `-NoModifyPath`, or
 `CTX_INSTALL_NO_MODIFY_PATH=1`, add the install directory to `PATH` yourself.
+If you chose a custom directory, substitute that path in these examples.
+The Unix example applies to POSIX shells, Bash, and Zsh; in Fish use
+`fish_add_path "$HOME/.local/bin"`. To find other installations in Bash or
+Zsh, run `type -a ctx` and put the intended directory first.
+
+## Installation Or Setup Did Not Finish
+
+Keep the reported error and selected release version. For a failed download,
+check network access; for a write failure, check free space and permissions on
+the install directory. Rerun the same hosted installer after correcting the
+problem. Do not delete the data root or edit the managed marker to force a
+retry.
+
+If installation succeeded but setup failed, run `ctx setup`, then `ctx status`.
+An optional man-page or skill warning is separate from installation failure;
+follow the warning's repair command. Skipping or failing Pro activation does
+not remove the installed companion or prevent use of Core search.
+
+For an unmanaged executable or mismatched marker, follow the
+[upgrade recovery instructions](upgrade.md#fix-upgrade-diagnostics) before
+moving any files.
+
+## Uninstall The Managed CLI
+
+On macOS or Linux, choose one:
+
+```bash
+curl -fsSL https://ctx.rs/uninstall | sh -s -- --keep-data
+curl -fsSL https://ctx.rs/uninstall | sh -s -- --delete-data
+```
+
+On Windows, keep local Pro data with:
+
+```powershell
+$uninstall = [scriptblock]::Create((irm https://ctx.rs/uninstall.ps1))
+& $uninstall -KeepData -NonInteractive
+```
+
+Use `-DeleteData` instead of `-KeepData` to delete local Pro data. Both choices
+preserve Core history in the selected `CTX_DATA_ROOT` (default `~/.ctx`). The
+uninstaller removes verified installer-owned files and preserves modified or
+unowned files. Windows skill copies require separate removal. For an unmanaged
+install, use its package manager or the
+[manual lifecycle handoff](unmanaged-installs.md#binary-lifecycle-handoff).
 
 ## No Sources Found
 
@@ -112,8 +158,9 @@ ctx upgrade check
 
 Self-upgrade requires an official installer-managed binary and matching
 `ctx.install.json` sidecar. Source builds, `cargo install`, copied binaries,
-package-manager installs, and binaries whose SHA-256 no longer matches the
-sidecar are intentionally unmanaged.
+and package-manager installs are unmanaged. A binary whose SHA-256 no longer
+matches its sidecar is an inconsistent managed install; see
+[upgrade recovery](upgrade.md#fix-upgrade-diagnostics).
 
 Automatic upgrade is on by default for an official installer-managed binary.
 Auto indexing with the full daemon profile uses the persistent daemon for

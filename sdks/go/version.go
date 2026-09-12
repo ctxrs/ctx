@@ -7,9 +7,9 @@ import (
 
 const (
 	// APIVersion identifies the ctx agent history contract implemented by this SDK.
-	APIVersion = "agent-history-v1"
+	APIVersion = "agent-history-v2"
 
-	// SchemaVersion is the JSON schema version emitted by ctx agent-history-v1 commands.
+	// SchemaVersion is the JSON schema version emitted by ctx agent-history-v2 commands.
 	SchemaVersion = 1
 
 	// SDKVersion is the experimental Go SDK version.

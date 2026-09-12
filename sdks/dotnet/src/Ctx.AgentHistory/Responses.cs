@@ -3,7 +3,7 @@ using System.Text.Json.Nodes;
 
 namespace Ctx.AgentHistory;
 
-/// <summary>Common metadata carried by every agent-history-v1 response envelope.</summary>
+/// <summary>Common metadata carried by every agent-history-v2 response envelope.</summary>
 public abstract record AgentHistoryResponse
 {
     private readonly JsonObject _json;
@@ -636,7 +636,7 @@ public sealed record McpToolCall
         string? field = null,
         Exception? exception = null) =>
         new(
-            $"agent-history-v1 MCP tool call {message}",
+            $"agent-history-v2 MCP tool call {message}",
             new JsonObject
             {
                 ["field"] = field is null ? "mcpToolCall" : $"mcpToolCall.{field}",

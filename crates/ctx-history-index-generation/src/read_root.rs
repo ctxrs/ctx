@@ -39,6 +39,7 @@ pub struct GenerationReadRoot {
 impl GenerationReadRoot {
     /// Opens and validates one lexical generation root component by component.
     pub fn open_index_root(root: impl AsRef<Path>) -> Result<Self> {
+        ctx_history_platform::raise_open_file_soft_limit();
         let root = normalized_absolute(root.as_ref())?;
         let opened =
             OpenedDirectory::open_absolute(&root).map_err(map_unavailable_generation_root)?;
@@ -51,6 +52,7 @@ impl GenerationReadRoot {
     /// Opens `data_root/search/lexical` relative to retained, verified parent
     /// handles and rejects links/reparse points at every pathname component.
     pub fn open_data_root(data_root: impl AsRef<Path>) -> Result<Self> {
+        ctx_history_platform::raise_open_file_soft_limit();
         let data_root = normalized_absolute(data_root.as_ref())?;
         let data =
             OpenedDirectory::open_absolute(&data_root).map_err(map_unavailable_generation_root)?;
@@ -136,6 +138,10 @@ fn normalized_absolute(path: &Path) -> Result<PathBuf> {
 }
 
 fn map_unavailable_generation_root(error: io::Error) -> GenerationError {
+    #[cfg(unix)]
+    if matches!(error.raw_os_error(), Some(libc::EMFILE | libc::ENFILE)) {
+        return GenerationError::Io(error);
+    }
     match error.kind() {
         io::ErrorKind::NotFound => GenerationError::MissingActiveGenerationPointer,
         _ => GenerationError::InvalidGenerationRetentionLease,

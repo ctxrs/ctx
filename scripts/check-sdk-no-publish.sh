@@ -61,7 +61,7 @@ while IFS= read -r -d '' discovered_file; do
   file="${discovered_file#./}"
   case "$file" in
     scripts/check-sdk-no-publish.sh | \
-      contracts/agent-history-v1/README.md | \
+      contracts/agent-history-v2/README.md | \
       docs/sdk-production-readiness.md | \
       sdks/*/README.md | \
       crates/ctx-sdk/README.md)

@@ -12,8 +12,9 @@ categories = ["command-line-utilities", "development-tools"]
 keywords = ["agent", "cli", "search"]
 
 [package.metadata.cargo-shear]
-# Bazel-only final-binary contracts consume these dev dependencies.
-ignored = ["assert_cmd", "predicates"]
+# Integration tests import shared contract modules outside this package, which
+# cargo-shear does not follow. Cargo needs their test-only dependencies too.
+ignored = ["assert_cmd", "base64", "flate2", "predicates", "ring", "rusqlite", "tar"]
 
 [[bin]]
 name = "ctx"
@@ -62,11 +63,16 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Securit
 
 [dev-dependencies]
 assert_cmd.workspace = true
+base64.workspace = true
 ctx-app-config = { path = "../ctx-app-config", features = ["test-support"] }
 ctx-client-observability = { path = "../ctx-client-observability", features = ["test-support"] }
 ctx-daemon-cli = { path = "../ctx-daemon-cli", features = ["test-support"] }
 ctx-upgrade-engine = { path = "../ctx-upgrade-engine", features = ["test-support"] }
 ctx-history-refresh = { path = "../ctx-history-refresh", features = ["test-support"] }
+flate2 = "1"
 predicates.workspace = true
 proptest.workspace = true
+ring.workspace = true
+rusqlite.workspace = true
+tar.workspace = true
 tempfile.workspace = true

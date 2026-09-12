@@ -10,7 +10,7 @@ from ctx_agent_history import AgentHistoryClient
 from ctx_agent_history.errors import CtxAgentHistoryCliError
 from ctx_agent_history._subprocess import run_local_cli
 
-FIXTURES = Path(__file__).resolve().parents[3] / "contracts/agent-history-v1/fixtures/cli"
+FIXTURES = Path(__file__).resolve().parents[3] / "contracts/agent-history-v2/fixtures/cli"
 
 
 class FidelityTests(unittest.TestCase):

@@ -330,7 +330,7 @@ private func decodeTyped<T: Decodable>(_ value: JSONValue, as type: T.Type, cont
     } catch {
         throw CtxAgentHistorySDKError(
             code: .decodeError,
-            message: "ctx returned a \(context) payload that does not match agent-history-v1",
+            message: "ctx returned a \(context) payload that does not match agent-history-v2",
             details: .object(["payload": value]),
             cause: String(describing: error)
         )
@@ -690,7 +690,7 @@ private func normalizeSession(_ raw: JSONValue) throws -> JSONValue {
 private func invalidMCPWire(_ message: String) -> CtxAgentHistorySDKError {
     CtxAgentHistorySDKError(
         code: .decodeError,
-        message: "agent-history-v1 MCP tool call \(message)",
+        message: "agent-history-v2 MCP tool call \(message)",
         details: .object(["field": .string("mcpToolCall")])
     )
 }
@@ -698,7 +698,7 @@ private func invalidMCPWire(_ message: String) -> CtxAgentHistorySDKError {
 private func invalidMCPExchangeWire(_ message: String) -> CtxAgentHistorySDKError {
     CtxAgentHistorySDKError(
         code: .decodeError,
-        message: "agent-history-v1 MCP exchange \(message)",
+        message: "agent-history-v2 MCP exchange \(message)",
         details: .object(["field": .string("mcpExchange")])
     )
 }

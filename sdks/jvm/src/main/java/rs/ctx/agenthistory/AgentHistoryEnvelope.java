@@ -5,9 +5,9 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
-/** Canonical agent-history-v1 envelope shared by all typed responses. */
+/** Canonical agent-history-v2 envelope shared by all typed responses. */
 public class AgentHistoryEnvelope {
-    public static final String CONTRACT_VERSION = "agent-history-v1";
+    public static final String CONTRACT_VERSION = "agent-history-v2";
     public static final int SCHEMA_VERSION = 1;
 
     private final String contractVersion;
@@ -269,7 +269,7 @@ public class AgentHistoryEnvelope {
         Map<String, Object> details = new LinkedHashMap<>();
         details.put("field", "mcpToolCall");
         return new CtxAgentHistoryException.Protocol(
-                "agent-history-v1 MCP tool call " + message,
+                "agent-history-v2 MCP tool call " + message,
                 details,
                 null);
     }
@@ -278,7 +278,7 @@ public class AgentHistoryEnvelope {
         Map<String, Object> details = new LinkedHashMap<>();
         details.put("field", "mcpExchange");
         return new CtxAgentHistoryException.Protocol(
-                "agent-history-v1 MCP exchange " + message,
+                "agent-history-v2 MCP exchange " + message,
                 details,
                 null);
     }

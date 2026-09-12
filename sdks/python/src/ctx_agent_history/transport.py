@@ -1,4 +1,4 @@
-"""Transport implementations for agent-history-v1."""
+"""Transport implementations for agent-history-v2."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from .errors import (
     CtxAgentHistoryValidationError,
     HostedTransportNotImplementedError,
 )
-from .agent_history_v1 import (
+from .agent_history_v2 import (
     envelope,
     hosted_backend,
     local_backend,
@@ -159,7 +159,7 @@ class AgentHistoryTransport(Protocol):
 
 
 class LocalCliAdapter:
-    """agent-history-v1 transport backed by the local ctx CLI."""
+    """agent-history-v2 transport backed by the local ctx CLI."""
 
     name = "local-cli"
 

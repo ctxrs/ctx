@@ -41,7 +41,7 @@ final class CtxAgentHistoryTests: XCTestCase {
         let fixtureURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent()
-            .appendingPathComponent("contracts/agent-history-v1/fixtures/cli/opaque-event.json")
+            .appendingPathComponent("contracts/agent-history-v2/fixtures/cli/opaque-event.json")
         let event = try JSONDecoder().decode(JSONValue.self, from: Data(contentsOf: fixtureURL))
         let values: [JSONValue?] = [
             event["structured_content"], .array([.null, .object(["snake_key": .bool(false)])]),
@@ -455,11 +455,11 @@ final class CtxAgentHistoryTests: XCTestCase {
         let version = try client.version()
 
         XCTAssertEqual(version.schemaVersion, 1)
-        XCTAssertEqual(version.apiVersion, AGENT_HISTORY_V1_VERSION)
+        XCTAssertEqual(version.apiVersion, AGENT_HISTORY_V2_VERSION)
         XCTAssertEqual(version.sdkVersion, CTX_AGENT_HISTORY_SWIFT_SDK_VERSION)
         XCTAssertEqual(version.adapter, "local-cli")
         XCTAssertEqual(version.ctxVersion, "1.2.3")
-        XCTAssertEqual(try client.versioning()["api_version"]?.stringValue, AGENT_HISTORY_V1_VERSION)
+        XCTAssertEqual(try client.versioning()["api_version"]?.stringValue, AGENT_HISTORY_V2_VERSION)
     }
 
     func testStructuredErrors() throws {
@@ -614,7 +614,7 @@ final class CtxAgentHistoryTests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .appendingPathComponent(
-                "contracts/agent-history-v1/fixtures/adversarial",
+                "contracts/agent-history-v2/fixtures/adversarial",
                 isDirectory: true
             )
         for name in [
@@ -665,7 +665,7 @@ final class CtxAgentHistoryTests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-            .appendingPathComponent("contracts/agent-history-v1/fixtures/show-event.mcp-tool-call.json")
+            .appendingPathComponent("contracts/agent-history-v2/fixtures/show-event.mcp-tool-call.json")
         let fixtureData = try Data(contentsOf: fixtureURL)
         let envelope = try JSONDecoder().decode(AgentHistoryEnvelope.self, from: fixtureData)
         let selected = try XCTUnwrap(envelope.event?.event)
@@ -771,7 +771,7 @@ final class CtxAgentHistoryTests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .appendingPathComponent(
-                "contracts/agent-history-v1/fixtures/adversarial",
+                "contracts/agent-history-v2/fixtures/adversarial",
                 isDirectory: true
             )
         for name in [
@@ -849,7 +849,7 @@ final class CtxAgentHistoryTests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-            .appendingPathComponent("contracts/agent-history-v1/fixtures", isDirectory: true)
+            .appendingPathComponent("contracts/agent-history-v2/fixtures", isDirectory: true)
         let fixtureURLs = try FileManager.default
             .contentsOfDirectory(at: fixturesDirectory, includingPropertiesForKeys: nil)
             .filter { $0.pathExtension == "json" }
@@ -857,7 +857,7 @@ final class CtxAgentHistoryTests: XCTestCase {
 
         for url in fixtureURLs {
             let envelope = try decoder.decode(AgentHistoryEnvelope.self, from: Data(contentsOf: url))
-            XCTAssertEqual(envelope.contractVersion, AGENT_HISTORY_V1_VERSION, url.lastPathComponent)
+            XCTAssertEqual(envelope.contractVersion, AGENT_HISTORY_V2_VERSION, url.lastPathComponent)
             XCTAssertEqual(envelope.schemaVersion, 1, url.lastPathComponent)
             switch envelope.operation {
             case .status:

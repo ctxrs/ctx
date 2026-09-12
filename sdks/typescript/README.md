@@ -1,6 +1,6 @@
 # ctx TypeScript SDK
 
-Experimental in-repo TypeScript/JavaScript client for the `agent-history-v1` ctx API.
+Experimental in-repo TypeScript/JavaScript client for the `agent-history-v2` ctx API.
 The SDK currently talks to a local `ctx` CLI binary and does not require network
 access or API keys with built-in semantic execution. The CLI honors explicitly
 configured external semantic execution, which can send bounded semantic text to
@@ -36,7 +36,7 @@ sessions without a root claim remain their own groups. Primary evidence is
 slightly preferred only near ties; stronger child evidence can win. Set
 `primaryOnly: true` only for a deliberately primary-only search.
 
-All data methods return a `agent-history-v1` envelope with `contractVersion`,
+All data methods return a `agent-history-v2` envelope with `contractVersion`,
 `schemaVersion`, `operation`, and an operation-specific field such as `status`,
 `search`, `event`, or `session`. TypeScript consumers get operation-specific return
 types discriminated by `operation`; CLI JSON remains an adapter detail.
@@ -110,5 +110,5 @@ npm test --prefix sdks/typescript
 ```
 
 Tests use Node's built-in test runner, mocked CLI runners, the dogfood example,
-shared `contracts/agent-history-v1/fixtures`, and a strict handwritten declaration
+shared `contracts/agent-history-v2/fixtures`, and a strict handwritten declaration
 typecheck.

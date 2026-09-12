@@ -236,6 +236,14 @@ without changing generation-wide totals or the daemon's global watch catalog.
 - `usage.sqlite` contains only the bounded content-free aggregates documented
   above. It is product state, not history or search authority.
 
+Flat-F32 manifest schema 5 keeps source receipts and segment descriptors in
+immutable, checksummed catalog pages. The root manifest and each page retain
+the 16 MiB safety bound; adding sources no longer appends all their metadata to
+one root file. Unchanged pages are reused. New pages are synced before the root
+is published, and existing readers retain their pinned generation. Schema-4
+inline manifests remain readable and upgrade on the next publication without
+rebuilding their vectors. Older clients cannot read schema-5 manifests.
+
 A selected Core event may carry content-governed `activity` with exact typed
 provider call identity, invocation and/or result channels, and ordered literal
 provider facts. Present arguments and structured results are complete decoded

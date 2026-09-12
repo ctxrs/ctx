@@ -1,6 +1,6 @@
 # ctx Go SDK
 
-Experimental Go SDK for the local `ctx` agent-history-v1 JSON contract.
+Experimental Go SDK for the local `ctx` agent-history-v2 JSON contract.
 
 The SDK has no third-party dependencies and defaults to the local `ctx` CLI. It
 does not require network access or API keys with built-in semantic execution.
@@ -32,7 +32,7 @@ func main() {
 
 ## API
 
-The public client mirrors agent-history-v1 operations:
+The public client mirrors agent-history-v2 operations:
 
 - `Status(ctx)`
 - `Init(ctx, InitOptions)`
@@ -67,7 +67,7 @@ client := ctxagenthistory.NewLocalClient(
 The adapter runs JSON-producing CLI commands such as `ctx status --format json`,
 `ctx search <query>|--term <term>|--file <path> --format json`, and
 `ctx show event --format json`, then normalizes CLI JSON into
-`agent-history-v1` wrappers with `contractVersion` and `schemaVersion`.
+`agent-history-v2` wrappers with `contractVersion` and `schemaVersion`.
 
 Search hits, shown events, and `SessionRecord` expose provider identity,
 including `ProviderSessionID` and `SourceFormat`; for Codex,

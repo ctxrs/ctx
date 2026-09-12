@@ -1,4 +1,4 @@
-"""Normalization helpers for the agent-history-v1 contract."""
+"""Normalization helpers for the agent-history-v2 contract."""
 
 from __future__ import annotations
 
@@ -425,7 +425,7 @@ def _mcp_exchange_error(
     if details:
         error_details.update(details)
     return CtxAgentHistoryProtocolError(
-        f"agent-history-v1 MCP exchange {message}", details=error_details, cause=cause
+        f"agent-history-v2 MCP exchange {message}", details=error_details, cause=cause
     )
 
 
@@ -470,7 +470,7 @@ def _mcp_tool_call_error(
     if details:
         error_details.update(details)
     return CtxAgentHistoryProtocolError(
-        f"agent-history-v1 MCP tool call {message}",
+        f"agent-history-v2 MCP tool call {message}",
         details=error_details,
         cause=cause,
     )

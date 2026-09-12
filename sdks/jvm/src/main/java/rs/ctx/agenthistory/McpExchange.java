@@ -494,7 +494,7 @@ public final class McpExchange {
         Map<String, Object> details = new LinkedHashMap<>();
         details.put("field", "mcpExchange");
         return new CtxAgentHistoryException.Protocol(
-                "agent-history-v1 MCP exchange " + message,
+                "agent-history-v2 MCP exchange " + message,
                 details,
                 cause);
     }

@@ -1,7 +1,7 @@
 package rs.ctx.agenthistory;
 
 /**
- * Placeholder configuration for a future hosted agent-history-v1 backend.
+ * Placeholder configuration for a future hosted agent-history-v2 backend.
  *
  * @deprecated Hosted SDK placeholders are deprecated and will be removed in the next breaking SDK
  *     revision; hosted operations remain unsupported.

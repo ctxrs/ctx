@@ -54,6 +54,7 @@ base64.workspace = true
 chrono.workspace = true
 ctx-history-core = { path = "../ctx-history-core" }
 ctx-history-index = { path = "../ctx-history-index" }
+ctx-history-refresh-execution = { path = "../ctx-history-refresh-execution" }
 flate2 = "1"
 fs2 = "0.4.3"
 libc.workspace = true

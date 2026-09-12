@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Experimental in-repo TypeScript/JavaScript SDK for the ctx agent-history-v1 API.",
+  "description": "Experimental in-repo TypeScript/JavaScript SDK for the ctx agent-history-v2 API.",
   "files": [
     "src"
   ],

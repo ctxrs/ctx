@@ -1,6 +1,6 @@
 # ctx Agent History Swift SDK
 
-Experimental Swift SDK for the local ctx `agent-history-v1` API.
+Experimental Swift SDK for the local ctx `agent-history-v2` API.
 
 This package is intended for local development from this repository only. It has
 no registry publishing configuration and no external package dependencies.
@@ -38,7 +38,7 @@ print(results.search.results.map(\.snippet))
 
 ## API
 
-The public client mirrors the `agent-history-v1` operations:
+The public client mirrors the `agent-history-v2` operations:
 
 - `status()`
 - `initialize()`
@@ -56,7 +56,7 @@ sessions without a root claim remain their own groups. Primary evidence is
 slightly preferred only near ties; stronger child evidence can win. Set
 `primaryOnly: true` only for a deliberately primary-only search.
 
-Swift reserves `init` for initializers, so the agent-history-v1 `init` operation is
+Swift reserves `init` for initializers, so the agent-history-v2 `init` operation is
 exposed as `initialize()`. Returned envelopes still use `operation: "init"`.
 
 Search hits, shown events, and `AgentHistorySessionSummary` expose provider
@@ -116,7 +116,7 @@ local CLI failures.
 
 ## Fixtures
 
-The XCTest suite decodes all JSON files in `contracts/agent-history-v1/fixtures` through
+The XCTest suite decodes all JSON files in `contracts/agent-history-v2/fixtures` through
 the Swift envelope model. Run tests from this repository checkout so the shared
 contract fixture directory is available.
 

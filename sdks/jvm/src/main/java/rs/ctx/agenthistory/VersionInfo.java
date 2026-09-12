@@ -5,7 +5,7 @@ import java.util.Map;
 
 /** Version metadata for the experimental JVM SDK and selected transport. */
 public final class VersionInfo {
-    public static final String CONTRACT_VERSION = "agent-history-v1";
+    public static final String CONTRACT_VERSION = "agent-history-v2";
     public static final int SCHEMA_VERSION = 1;
     public static final String SDK_VERSION = "0.1.0-experimental";
 

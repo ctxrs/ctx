@@ -26,7 +26,7 @@ export {
   CtxValidationError,
 };
 
-export const AGENT_HISTORY_V1_VERSION = "agent-history-v1";
+export const AGENT_HISTORY_V2_VERSION = "agent-history-v2";
 export const SDK_VERSION = "0.0.0";
 
 export class LocalCliAdapter {
@@ -150,7 +150,7 @@ export class LocalAgentHistoryClient {
     const raw = result.stdout.trim();
     return {
       schema_version: 1,
-      api_version: AGENT_HISTORY_V1_VERSION,
+      api_version: AGENT_HISTORY_V2_VERSION,
       sdk_version: SDK_VERSION,
       adapter: "local-cli",
       ctx_version: parseCtxVersion(raw),
@@ -426,7 +426,7 @@ export class HostedAgentHistoryClient {
   version() {
     return Promise.resolve({
       schema_version: 1,
-      api_version: AGENT_HISTORY_V1_VERSION,
+      api_version: AGENT_HISTORY_V2_VERSION,
       sdk_version: SDK_VERSION,
       adapter: "hosted-placeholder",
       hosted: false,
@@ -456,7 +456,7 @@ export function createAgentHistoryClient(options = {}) {
 function hostedUnsupported() {
   return Promise.reject(
     new CtxUnsupportedError(
-      "The hosted agent-history-v1 transport is reserved for future ctx service support. Use the local CLI adapter today.",
+      "The hosted agent-history-v2 transport is reserved for future ctx service support. Use the local CLI adapter today.",
       { details: { adapter: "hosted-placeholder" } },
     ),
   );
@@ -464,7 +464,7 @@ function hostedUnsupported() {
 
 export function toAgentHistoryEnvelope(operation, source, backend = undefined) {
   const envelope = {
-    contractVersion: AGENT_HISTORY_V1_VERSION,
+    contractVersion: AGENT_HISTORY_V2_VERSION,
     schemaVersion: 1,
     operation,
     ...(backend ? { backend } : {}),
@@ -503,7 +503,7 @@ export function toAgentHistoryEnvelope(operation, source, backend = undefined) {
       };
       break;
     default:
-      throw new CtxValidationError(`unsupported agent-history-v1 operation: ${operation}`, {
+      throw new CtxValidationError(`unsupported agent-history-v2 operation: ${operation}`, {
         details: { operation },
       });
   }
@@ -751,7 +751,7 @@ function validateMcpSafeInteger(value, field) {
 }
 
 function invalidMcpExchange(message, details = {}) {
-  return new CtxParseError(`agent-history-v1 MCP exchange ${message}`, {
+  return new CtxParseError(`agent-history-v2 MCP exchange ${message}`, {
     details: { field: "mcpExchange", ...details },
   });
 }
@@ -811,7 +811,7 @@ function validateMcpToolCallComponent(value, field) {
 }
 
 function invalidMcpToolCall(message, details = {}) {
-  return new CtxParseError(`agent-history-v1 MCP tool call ${message}`, {
+  return new CtxParseError(`agent-history-v2 MCP tool call ${message}`, {
     details: { field: "mcpToolCall", ...details },
   });
 }

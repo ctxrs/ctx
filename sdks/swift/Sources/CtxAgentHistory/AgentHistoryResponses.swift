@@ -94,6 +94,6 @@ public struct ShowSessionResponse: Equatable, Sendable {
 private func missingPayload(_ payload: String, operation: AgentHistoryOperation) -> CtxAgentHistorySDKError {
     CtxAgentHistorySDKError(
         code: .decodeError,
-        message: "agent-history-v1 \(operation.rawValue) response did not contain \(payload) payload"
+        message: "agent-history-v2 \(operation.rawValue) response did not contain \(payload) payload"
     )
 }

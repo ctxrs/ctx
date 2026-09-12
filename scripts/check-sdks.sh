@@ -248,7 +248,7 @@ if contains_group "${selected_groups}" typescript; then
       sdks/typescript/test \
       "${typescript_root}/sdks/typescript/"
     cp -R \
-      contracts/agent-history-v1 \
+      contracts/agent-history-v2 \
       "${typescript_root}/contracts/"
     run npm --version
     if [[ -f sdks/typescript/package-lock.json ]]; then

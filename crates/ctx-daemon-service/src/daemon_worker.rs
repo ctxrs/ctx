@@ -103,14 +103,9 @@ fn daemon_semantic_model_startup_failure(
     message: String,
     failure_class: super::daemon_retry::SemanticFailureClass,
 ) -> Value {
-    let status = if failure_class.blocks_until_restart() {
-        "failed"
-    } else {
-        "skipped"
-    };
     annotate_semantic_failure(
         daemon_semantic_job_json(
-            status,
+            "failed",
             Some(failure_code),
             last_run_at_ms,
             None,

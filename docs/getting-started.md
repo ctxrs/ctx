@@ -9,8 +9,17 @@ it repeats work.
 curl -fsSL https://ctx.rs/install | sh
 ```
 
-The Unix installer requires `curl` and OpenSSL to verify signed release
-metadata. On Windows, use `irm https://ctx.rs/install.ps1 | iex`.
+The Unix installer requires `curl`, OpenSSL, and standard shell utilities, plus
+network access to download signed releases and a writable install directory.
+Hosted binaries support Linux x64 and ARM64, macOS Intel and Apple silicon,
+and Windows x64. On Windows, use PowerShell 5.1 or PowerShell 7:
+
+```powershell
+irm https://ctx.rs/install.ps1 | iex
+```
+
+The Windows installer uses built-in .NET signature verification; OpenSSL is
+not required there.
 
 On Unix, the installer places `ctx` in `${CTX_BIN_DIR:-$HOME/.local/bin}`. If
 that directory is not already on `PATH`, the installer adds an idempotent ctx
@@ -21,6 +30,13 @@ updates the current PowerShell session. Use `sh -s -- --no-modify-path` on Unix,
 `-NoModifyPath` on Windows, or set `CTX_INSTALL_NO_MODIFY_PATH=1` when you want
 to manage `PATH` yourself.
 
+For a custom location, set `CTX_BIN_DIR` on Unix or pass `-BinDir` to the
+PowerShell installer. Use an absolute path ending in `bin`, such as
+`$HOME/ctx tools/bin`, so the companion can be installed beside it under
+`libexec`. Quote paths containing spaces. Open a new terminal after installation
+and check `ctx --version`; see [PATH troubleshooting](troubleshooting.md#ctx-command-not-found-after-install)
+if it selects a different installation.
+
 The install script installs `ctx`, runs the bundled agent-history skill
 installer, and runs `ctx setup` so discovered local history is inventoried and
 indexing begins. Automatic indexing is the default, so ctx keeps native history
@@ -29,7 +45,7 @@ catch-up remains disabled unless semantic search is explicitly enabled. The
 skill installer opens an agent picker when interactive;
 otherwise it installs the universal `~/.agents/skills` copy plus detected
 agent-specific folders for tools that need them. Use `sh -s -- --no-setup` on
-Unix, or set `CTX_INSTALL_NO_SETUP=1` on Windows, for install-only CI or
+Unix, or `-NoSetup` on Windows, for install-only CI or
 packaging flows. Install-only mode also skips skill setup unless you explicitly
 pass a skill option.
 
@@ -295,11 +311,15 @@ supported machine-readable retrieval API for scripts and exact field
 extraction. It contains cited snippets and source metadata, but it is retrieved
 source material rather than generated analysis.
 
-## 7. Optional Paid Companion
+## 7. Optional Pro Activation
 
-Official managed ctx installations may include a separately signed private
-companion. Core-only installation channels retain all OSS setup, import, search,
-and show commands. Paid routes return a typed companion-unavailable failure when
+Official managed ctx installations include a separately signed private
+companion. Installing it does not by itself activate Pro access. An eligible
+fresh interactive install can start a trial during setup; use `--no-pro-trial`
+on Unix, `-NoProTrial` on Windows, or `CTX_INSTALL_NO_PRO_TRIAL=1` to skip trial
+activation while still installing the pair. Core-only installation channels
+retain all OSS setup, import, search, and show commands. Paid routes return a
+typed companion-unavailable failure when
 the companion is absent. See [ctx Pro](managed-companion.md).
 ## 8. Built-In Docs And Upgrades
 

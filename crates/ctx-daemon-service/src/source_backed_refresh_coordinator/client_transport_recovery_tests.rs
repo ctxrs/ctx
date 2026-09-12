@@ -17,6 +17,9 @@ use crate::SharedSemanticRuntime;
 
 const TEST_ENDPOINT_TOKEN: &str = "0123456789abcdef0123456789abcdef";
 
+#[path = "client_stalled_wait_tests.rs"]
+mod stalled_wait_tests;
+
 #[derive(Default)]
 struct RecordingAvailability(Mutex<Vec<(crate::DaemonTrigger, crate::DaemonAvailabilityDemand)>>);
 

@@ -2,7 +2,7 @@ use super::*;
 
 fn event_fixture() -> Value {
     serde_json::from_str(include_str!(
-        "../../../../contracts/agent-history-v1/fixtures/cli/opaque-event.json"
+        "../../../../contracts/agent-history-v2/fixtures/cli/opaque-event.json"
     ))
     .unwrap()
 }
@@ -77,7 +77,7 @@ fn current_payloads_survive_complete_and_paged_public_operations() {
 #[test]
 fn typed_errors_survive_cli_and_mcp() {
     let errors: Vec<Value> = serde_json::from_str(include_str!(
-        "../../../../contracts/agent-history-v1/fixtures/cli/producer-errors.json"
+        "../../../../contracts/agent-history-v2/fixtures/cli/producer-errors.json"
     ))
     .unwrap();
     let temp = tempfile::tempdir().unwrap();

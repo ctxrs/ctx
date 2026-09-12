@@ -254,6 +254,12 @@ and daemon fields below describe `ctx status --format json`, not index
 snapshots.
 
 `semantic.status` is `disabled`, `pending`, `ready`, or `unavailable`.
+When enabled, a failed background semantic job makes this status `unavailable`
+with the job's `reason` and optional `semantic.last_error`. A pending configuration
+reload takes precedence over a previous job failure; resource-pressure deferral
+without an error remains pending. The retained `semantic.flat_f32` inventory
+below describes projection state separately from the background failure, and
+lexical readiness is unchanged.
 `semantic.flat_f32` reports the source-backed projection and can include its
 `status`, `reason`, `path`, Core and flat generation identity, semantic document
 count, projected and intentionally filtered document counts, active
@@ -281,6 +287,10 @@ nullable may be omitted when unavailable:
 - `running`;
 - `pid`, nullable/omitted;
 - `started_at_ms`, `heartbeat_at_ms`, and `finished_at_ms`, nullable/omitted;
+- `heartbeat_age_ms` and `heartbeat_stale`, omitted unless a non-future
+  heartbeat belongs to the live daemon PID. Stale means older than 30 seconds;
+  it is a progress warning, not proof of process death or permission to replace
+  a live owner;
 - `last_error`, nullable/omitted;
 - `start_mode`, nullable/omitted, currently `auto` for setup/import/search/semantic
   process starts or `manual` for explicit daemon runs;
@@ -1136,7 +1146,7 @@ Ready coverage therefore satisfies
 `candidate_items = searchable_items + filtered_items` and
 `searchable_items = embedded_items`.
 
-The SDK `agent-history-v1` contract keeps schema version 1 and normalizes the
+The SDK `agent-history-v2` contract keeps schema version 1 and normalizes the
 resolved filter as `search.filters.contentScope`, with the same exact four
 values. The filters object remains extensible, so SDK consumers must continue
 to tolerate additive filter fields. The contract camel-cases the same
@@ -1145,7 +1155,7 @@ on). SDK contract
 search results expose retrieval at the top level of `search`; TypeScript and
 Python type the core retrieval/coverage fields, while Go, .NET, JVM, and Swift
 preserve retrieval as camel-cased JSON values. Per-hit retrieval details are not
-part of v1 unless a future CLI JSON shape emits them. Local diagnostic path
+part of the SDK contract unless a future CLI JSON shape emits them. Local diagnostic path
 fields such as `vector_path`/`vectorPath` can still appear as additive JSON from
 the local CLI adapter, but they are intentionally not stable SDK fields.
 

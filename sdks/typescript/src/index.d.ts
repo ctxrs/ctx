@@ -1,4 +1,4 @@
-export declare const AGENT_HISTORY_V1_VERSION = "agent-history-v1";
+export declare const AGENT_HISTORY_V2_VERSION = "agent-history-v2";
 export declare const SDK_VERSION = "0.0.0";
 
 export type Provider =
@@ -405,7 +405,7 @@ export interface AgentHistoryErrorRecord {
 }
 
 export interface AgentHistoryEnvelopeBase<TOperation extends AgentHistoryOperation> {
-  contractVersion: typeof AGENT_HISTORY_V1_VERSION;
+  contractVersion: typeof AGENT_HISTORY_V2_VERSION;
   schemaVersion: 1;
   operation: TOperation;
   backend?: AgentHistoryBackend;
@@ -460,7 +460,7 @@ export type AgentHistoryEnvelope = AgentHistoryEnvelopeByOperation[AgentHistoryO
 
 export interface VersionInfo {
   schema_version: 1;
-  api_version: typeof AGENT_HISTORY_V1_VERSION;
+  api_version: typeof AGENT_HISTORY_V2_VERSION;
   sdk_version: typeof SDK_VERSION;
   adapter: "local-cli" | "hosted-placeholder";
   ctx_version?: string;

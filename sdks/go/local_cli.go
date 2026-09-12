@@ -10,7 +10,7 @@ import (
 
 const analyticsEnabledEnvironment = "CTX_ANALYTICS_ENABLED"
 
-// LocalCLIAdapter executes agent-history-v1 operations through the local ctx binary.
+// LocalCLIAdapter executes agent-history-v2 operations through the local ctx binary.
 type LocalCLIAdapter struct {
 	path     string
 	dataRoot string

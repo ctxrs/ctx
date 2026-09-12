@@ -574,6 +574,8 @@ check_windows() {
 
   # The locked platform TLS verifier uses the native Windows certificate store,
   # which imports crypt32.dll. Keep every DLL exact so unrelated imports fail.
+  # Current releases no longer import the retired pre-bridge Process Status
+  # and Restart Manager helpers (psapi.dll and rstrtmgr.dll).
   assert_exact_lines "PE imported DLLs" "$(pe_imports)" "advapi32.dll
 api-ms-win-crt-environment-l1-1-0.dll
 api-ms-win-crt-heap-l1-1-0.dll
@@ -591,8 +593,6 @@ crypt32.dll
 kernel32.dll
 ntdll.dll
 ole32.dll
-psapi.dll
-rstrtmgr.dll
 shell32.dll
 userenv.dll
 ws2_32.dll"

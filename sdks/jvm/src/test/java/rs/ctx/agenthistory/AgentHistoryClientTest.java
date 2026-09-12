@@ -62,7 +62,7 @@ public final class AgentHistoryClientTest {
             String status = "{\"initialized\":true,\"semantic\":{\"local_only\":false,\"diagnostics\":{\"localOnly\":null}}" + flags + "}";
             for (String operation : List.of("status", "init")) {
                 for (boolean canonical : List.of(false, true)) {
-                    String wire = canonical ? "{\"contractVersion\":\"agent-history-v1\",\"schemaVersion\":1,\"operation\":\""
+                    String wire = canonical ? "{\"contractVersion\":\"agent-history-v2\",\"schemaVersion\":1,\"operation\":\""
                             + operation + "\",\"status\":" + status + ",\"futureField\":{\"local_only\":\"kept\"}}" : status;
                     AgentHistoryClient client = AgentHistoryClient.withTransport(new FakeTransport("local-cli", wire));
                     AgentHistoryEnvelope response = "status".equals(operation) ? client.status() : client.init();
@@ -600,7 +600,7 @@ public final class AgentHistoryClientTest {
 
         StatusResponse response = client.status();
 
-        assertEquals("agent-history-v1", response.contractVersion());
+        assertEquals("agent-history-v2", response.contractVersion());
         assertEquals(Integer.valueOf(1), Integer.valueOf(response.schemaVersion()));
         assertEquals("status", response.operation());
         assertEquals("local", response.getBackend().getKind());
@@ -921,7 +921,7 @@ public final class AgentHistoryClientTest {
     }
 
     private static void decodesAllCanonicalFixturesThroughTypedResponses() throws Exception {
-        java.nio.file.Path root = Paths.get("../../contracts/agent-history-v1/fixtures");
+        java.nio.file.Path root = Paths.get("../../contracts/agent-history-v2/fixtures");
         try (java.util.stream.Stream<java.nio.file.Path> paths = Files.list(root)) {
             paths
                     .filter(path -> path.getFileName().toString().endsWith(".json"))
@@ -1096,13 +1096,13 @@ public final class AgentHistoryClientTest {
     }
 
     private static String readFixture(String name) throws Exception {
-        byte[] bytes = Files.readAllBytes(Paths.get("../../contracts/agent-history-v1/fixtures", name));
+        byte[] bytes = Files.readAllBytes(Paths.get("../../contracts/agent-history-v2/fixtures", name));
         return new String(bytes, StandardCharsets.UTF_8);
     }
 
     private static String readAdversarialFixture(String name) throws Exception {
         byte[] bytes = Files.readAllBytes(Paths.get(
-                "../../contracts/agent-history-v1/fixtures/adversarial", name));
+                "../../contracts/agent-history-v2/fixtures/adversarial", name));
         return new String(bytes, StandardCharsets.UTF_8);
     }
 

@@ -1,4 +1,4 @@
-"""Typed agent-history-v1 envelope shapes exposed by the Python SDK."""
+"""Typed agent-history-v2 envelope shapes exposed by the Python SDK."""
 
 from __future__ import annotations
 
@@ -337,7 +337,7 @@ class AgentHistoryErrorPayload(_AgentHistoryErrorRequired, total=False):
 StatusResponse = TypedDict(
     "StatusResponse",
     {
-        "contractVersion": Literal["agent-history-v1"],
+        "contractVersion": Literal["agent-history-v2"],
         "schemaVersion": Literal[1],
         "operation": Literal["status"],
         "backend": Backend,
@@ -347,7 +347,7 @@ StatusResponse = TypedDict(
 InitResponse = TypedDict(
     "InitResponse",
     {
-        "contractVersion": Literal["agent-history-v1"],
+        "contractVersion": Literal["agent-history-v2"],
         "schemaVersion": Literal[1],
         "operation": Literal["init"],
         "backend": Backend,
@@ -357,7 +357,7 @@ InitResponse = TypedDict(
 SourcesResponse = TypedDict(
     "SourcesResponse",
     {
-        "contractVersion": Literal["agent-history-v1"],
+        "contractVersion": Literal["agent-history-v2"],
         "schemaVersion": Literal[1],
         "operation": Literal["sources"],
         "backend": Backend,
@@ -367,7 +367,7 @@ SourcesResponse = TypedDict(
 ImportResponse = TypedDict(
     "ImportResponse",
     {
-        "contractVersion": Literal["agent-history-v1"],
+        "contractVersion": Literal["agent-history-v2"],
         "schemaVersion": Literal[1],
         "operation": Literal["import"],
         "backend": Backend,
@@ -377,7 +377,7 @@ ImportResponse = TypedDict(
 SyncResponse = TypedDict(
     "SyncResponse",
     {
-        "contractVersion": Literal["agent-history-v1"],
+        "contractVersion": Literal["agent-history-v2"],
         "schemaVersion": Literal[1],
         "operation": Literal["sync"],
         "backend": Backend,
@@ -387,7 +387,7 @@ SyncResponse = TypedDict(
 SearchResponse = TypedDict(
     "SearchResponse",
     {
-        "contractVersion": Literal["agent-history-v1"],
+        "contractVersion": Literal["agent-history-v2"],
         "schemaVersion": Literal[1],
         "operation": Literal["search"],
         "backend": Backend,
@@ -397,7 +397,7 @@ SearchResponse = TypedDict(
 ShowEventResponse = TypedDict(
     "ShowEventResponse",
     {
-        "contractVersion": Literal["agent-history-v1"],
+        "contractVersion": Literal["agent-history-v2"],
         "schemaVersion": Literal[1],
         "operation": Literal["showEvent"],
         "backend": Backend,
@@ -407,7 +407,7 @@ ShowEventResponse = TypedDict(
 ShowSessionResponse = TypedDict(
     "ShowSessionResponse",
     {
-        "contractVersion": Literal["agent-history-v1"],
+        "contractVersion": Literal["agent-history-v2"],
         "schemaVersion": Literal[1],
         "operation": Literal["showSession"],
         "backend": Backend,
@@ -417,7 +417,7 @@ ShowSessionResponse = TypedDict(
 ErrorResponse = TypedDict(
     "ErrorResponse",
     {
-        "contractVersion": Literal["agent-history-v1"],
+        "contractVersion": Literal["agent-history-v2"],
         "schemaVersion": Literal[1],
         "operation": Literal["error"],
         "backend": Backend,

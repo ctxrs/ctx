@@ -23,6 +23,8 @@ use super::*;
 
 mod generation_retention;
 mod generation_state;
+#[cfg(unix)]
+mod reader_resources;
 
 type SessionRelationshipKind = ProviderNativeSessionRelationship;
 type EventCopyProofKind = ProviderNativeCopyProof;

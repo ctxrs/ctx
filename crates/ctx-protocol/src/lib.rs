@@ -1,4 +1,4 @@
-//! Experimental `agent-history-v1` contract types shared by in-repo ctx SDKs.
+//! Experimental `agent-history-v2` contract types shared by in-repo ctx SDKs.
 //!
 //! These types describe the SDK product contract. They are not SQLite schema
 //! types and are not a promise to preserve current CLI JSON internals.
@@ -9,7 +9,7 @@ use serde::de::{self, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value};
 
-pub const CONTRACT_VERSION: &str = "agent-history-v1";
+pub const CONTRACT_VERSION: &str = "agent-history-v2";
 pub const SCHEMA_VERSION: u16 = 1;
 pub const MAX_SAFE_INTEGER: u64 = (1_u64 << 53) - 1;
 pub const MAX_SAFE_STATUS_COUNTER: u64 = MAX_SAFE_INTEGER;
@@ -206,7 +206,7 @@ impl<'de> Visitor<'de> for ExactJsonValueVisitor {
     }
 }
 
-/// Extensible JSON object used where `agent-history-v1` intentionally leaves room for
+/// Extensible JSON object used where `agent-history-v2` intentionally leaves room for
 /// backend-specific additive fields.
 pub type JsonObject = BTreeMap<String, Value>;
 
@@ -888,7 +888,7 @@ pub fn camel_alias_object(value: &Value, aliases: &[(&str, &str)]) -> Value {
 }
 
 /// Recursively converts snake_case object keys from private CLI JSON into the
-/// camelCase keys used by the public `agent-history-v1` contract.
+/// camelCase keys used by the public `agent-history-v2` contract.
 pub fn camelize_object_keys(value: &Value) -> Value {
     match value {
         Value::Array(items) => Value::Array(items.iter().map(camelize_object_keys).collect()),

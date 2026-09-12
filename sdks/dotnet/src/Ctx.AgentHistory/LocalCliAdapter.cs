@@ -6,7 +6,7 @@ using System.Text.Json.Nodes;
 
 namespace Ctx.AgentHistory;
 
-/// <summary>Local-only agent-history-v1 transport backed by the ctx CLI.</summary>
+/// <summary>Local-only agent-history-v2 transport backed by the ctx CLI.</summary>
 public sealed class LocalCliAdapter : IAgentHistoryTransport
 {
     private const string AnalyticsEnabledEnvironment = "CTX_ANALYTICS_ENABLED";
