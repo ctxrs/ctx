@@ -235,8 +235,11 @@ impl CodexGenerationNormalizationCoordinatorV0 {
                         super::catalog::discover_codex_deferred_session_tree_inventory_v0(roots)?;
                     for (source, source_key, native_session_id) in &mut inventory.sources {
                         source.source_root_lineage = *source_root_lineage;
-                        *source_key =
-                            codex_source_key_in_root(*source_root_lineage, native_session_id)?;
+                        *source_key = codex_source_key_for_path(
+                            *source_root_lineage,
+                            native_session_id,
+                            &source.source_path,
+                        )?;
                     }
                     for rejected in &mut inventory.rejected_leaves {
                         rejected.source_root_lineage = *source_root_lineage;
@@ -252,8 +255,11 @@ impl CodexGenerationNormalizationCoordinatorV0 {
                             .max_by_key(|(root, _)| root.components().count())
                         {
                             source.source_root_lineage = *source_root_lineage;
-                            *source_key =
-                                codex_source_key_in_root(*source_root_lineage, native_session_id)?;
+                            *source_key = codex_source_key_for_path(
+                                *source_root_lineage,
+                                native_session_id,
+                                &source.source_path,
+                            )?;
                         }
                     }
                     (plan.is_none(), plan.into_iter().collect(), Vec::new())

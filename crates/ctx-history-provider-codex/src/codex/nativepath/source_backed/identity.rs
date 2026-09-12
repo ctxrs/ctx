@@ -178,6 +178,31 @@ pub(in crate::codex::nativepath) fn codex_source_key_in_root(
     )?)
 }
 
+pub(in crate::codex::nativepath) fn codex_source_key_for_path(
+    source_root_lineage: Option<[u8; 32]>,
+    native_session_id: &str,
+    path: &Path,
+) -> CodexSourceBackedResultV0<SourceKey> {
+    let Some(rollout_id) = crate::codex::catalog::codex_revert_rollout_id(path, native_session_id)
+    else {
+        return codex_source_key_in_root(source_root_lineage, native_session_id);
+    };
+    let scope =
+        source_root_lineage.map_or(SourceAnchorScope::Unqualified, SourceAnchorScope::Lineage);
+    Ok(SourceKey::derive_provider_native_scoped(
+        CaptureProvider::Codex.as_str(),
+        CODEX_SESSION_SOURCE_FORMAT,
+        CODEX_SOURCE_SCHEMA_VARIANT,
+        1,
+        "codex.rollout",
+        TypedKey::composite(vec![
+            TypedKey::utf8(native_session_id)?,
+            TypedKey::utf8(rollout_id)?,
+        ])?,
+        scope,
+    )?)
+}
+
 pub(in crate::codex::nativepath) fn codex_session_identity(
     source: &SourceKey,
     native_session_id: &str,

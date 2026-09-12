@@ -199,6 +199,7 @@ fn foreground_semantic_sigint_exits_130_without_terminal_success_or_daemon_colla
         &fixture,
         "foreground semantic cancellation must not finish a terminal import response",
     );
+    let stderr_path = temp.path().join("semantic-import.stderr");
 
     let prepared = ctx(&temp);
     let mut command = StdCommand::new(prepared.get_program());
@@ -225,7 +226,8 @@ fn foreground_semantic_sigint_exits_130_without_terminal_success_or_daemon_colla
             "json",
         ])
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        // Capture progress without an unread pipe blocking the client before SIGINT.
+        .stderr(fs::File::create(&stderr_path).unwrap());
     configure_interruptible_client(&mut command);
     let mut client = SourceRefreshDaemon {
         child: Some(command.spawn().expect("start foreground semantic import")),
@@ -254,7 +256,7 @@ fn foreground_semantic_sigint_exits_130_without_terminal_success_or_daemon_colla
         "stdout={}",
         String::from_utf8_lossy(&output.stdout)
     );
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = fs::read_to_string(stderr_path).unwrap();
     assert!(
         !stderr.contains("History refresh complete"),
         "stderr={stderr}"
@@ -287,6 +289,7 @@ fn full_daemon_semantic_observation_sigint_exits_130_without_stopping_or_orphani
         &fixture,
         "automatic full daemon semantic observation survives client cancellation",
     );
+    let stderr_path = temp.path().join("semantic-import.stderr");
 
     let prepared = ctx(&temp);
     let mut command = StdCommand::new(prepared.get_program());
@@ -312,7 +315,8 @@ fn full_daemon_semantic_observation_sigint_exits_130_without_stopping_or_orphani
             "json",
         ])
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        // Capture progress without an unread pipe blocking the client before SIGINT.
+        .stderr(fs::File::create(&stderr_path).unwrap());
     configure_interruptible_client(&mut command);
     let mut client = SourceRefreshDaemon {
         child: Some(
@@ -344,7 +348,7 @@ fn full_daemon_semantic_observation_sigint_exits_130_without_stopping_or_orphani
         "stdout={}",
         String::from_utf8_lossy(&output.stdout)
     );
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = fs::read_to_string(stderr_path).unwrap();
     assert!(
         !stderr.contains("History refresh complete"),
         "stderr={stderr}"

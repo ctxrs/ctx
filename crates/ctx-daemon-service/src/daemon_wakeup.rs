@@ -479,7 +479,7 @@ impl DaemonFileWatcher {
         let value = compact_json(json!({
             "schema_version": 1,
             "status": status,
-            "backend": "notify_recommended",
+            "backend": ctx_daemon_runtime::native_watch_backend(),
             "idle_strategy": "blocking",
             "watched_roots": runtime.watched_roots,
             "catalog_routes": self.authority.read()
@@ -531,7 +531,7 @@ pub(super) fn write_degraded_wakeup_receipt(data_root: &Path, error: &anyhow::Er
         &compact_json(json!({
             "schema_version": 1,
             "status": "degraded",
-            "backend": "notify_recommended",
+            "backend": ctx_daemon_runtime::native_watch_backend(),
             "idle_strategy": "blocking_safety_reconciliation",
             "watched_roots": 0,
             "last_error": format!("{error:#}"),

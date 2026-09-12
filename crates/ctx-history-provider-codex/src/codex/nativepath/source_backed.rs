@@ -100,7 +100,7 @@ pub use catalog::{
 };
 pub use generation::{CodexGenerationNormalizationCoordinatorV0, CodexGenerationRouteV0};
 pub(in crate::codex::nativepath) use identity::{
-    codex_core_record, codex_session_identity, codex_source_key_in_root, CodexEventIdentityStateV0,
+    codex_core_record, codex_session_identity, codex_source_key_for_path, CodexEventIdentityStateV0,
 };
 pub use jsonl_family::CodexSessionJsonlFamilyAdapterV0;
 

@@ -448,17 +448,13 @@ where
         );
     };
     let Some(run) = coordinator.run_next(data_root) else {
-        return finish_core_refresh(
-            data_root,
-            runtime,
-            Some(coordinator),
-            core_refresh_failed_job(
-                data_root,
-                "daemon Core refresh engine has no admitted request".to_owned(),
-            ),
+        // Pending demand may still be behind its acknowledgement or admission
+        // fence. No runnable work is not a failure and must not create backoff.
+        return Ok(DaemonIteration::new(
             false,
-            generation_published,
-        );
+            false,
+            DaemonCycleStateV1::unknown(),
+        ));
     };
     let terminal_persistence_pending = run.terminal_persistence_pending;
     let job = record_source_refresh_retry(
