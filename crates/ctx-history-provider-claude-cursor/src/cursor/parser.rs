@@ -709,6 +709,7 @@ mod tests {
         project_cursor_jsonl_record, project_cursor_jsonl_record_with_rejection,
         CursorJsonlRecordOutcome, CursorRejectionKind, MAX_CURSOR_CONTENT_BLOCKS,
     };
+    use crate::cursor::projection::CursorTimestampState;
 
     fn cursor_record_outcome(record: &[u8]) -> CursorJsonlRecordOutcome {
         project_cursor_jsonl_record_with_rejection(record, 0, 0, 0, record.len() as u64)
@@ -915,6 +916,87 @@ mod tests {
         ] {
             assert_unsupported_shape(label, record);
         }
+    }
+
+    #[test]
+    fn cursor_embedded_turn_timestamp_applies_to_following_messages() {
+        let user = br#"{"role":"user","message":{"content":[{"type":"text","text":"<timestamp>Thursday, Jul 30, 2026, 11:38 AM (UTC-7)</timestamp>\n<user_query>question</user_query>"}]}}"#;
+        let assistant =
+            br#"{"role":"assistant","message":{"content":[{"type":"text","text":"answer"}]}}"#;
+        let mut timestamps = CursorTimestampState::default();
+        let mut user_events = project_cursor_jsonl_record(user, 0, 0, 0, user.len() as u64)
+            .unwrap()
+            .unwrap();
+        timestamps.apply(&mut user_events).unwrap();
+        let mut assistant_events =
+            project_cursor_jsonl_record(assistant, 1, 1, 0, assistant.len() as u64)
+                .unwrap()
+                .unwrap();
+        timestamps.apply(&mut assistant_events).unwrap();
+
+        let expected = "2026-07-30T18:38:00+00:00";
+        assert_eq!(user_events[0].occurred_at.unwrap().to_rfc3339(), expected);
+        assert_eq!(
+            assistant_events[0].occurred_at.unwrap().to_rfc3339(),
+            expected
+        );
+    }
+
+    #[test]
+    fn cursor_turn_timestamp_resumes_across_an_append_boundary() {
+        let user = br#"{"role":"user","message":{"content":[{"type":"text","text":"<timestamp>Thursday, Jul 30, 2026, 11:38 AM (UTC-7)</timestamp>\n<user_query>question</user_query>"}]}}"#;
+        let appended =
+            br#"{"role":"assistant","message":{"content":[{"type":"text","text":"appended"}]}}"#;
+        let mut certified = CursorTimestampState::default();
+        let mut prefix = project_cursor_jsonl_record(user, 0, 0, 0, user.len() as u64)
+            .unwrap()
+            .unwrap();
+        certified.apply(&mut prefix).unwrap();
+
+        // The next capture resumes the certified prefix, so the appended tail
+        // never re-reads the turn envelope that dated it.
+        let mut resumed = CursorTimestampState::resume(certified.checkpoint().as_ref());
+        let mut tail = project_cursor_jsonl_record(appended, 1, 1, 0, appended.len() as u64)
+            .unwrap()
+            .unwrap();
+        resumed.apply(&mut tail).unwrap();
+
+        assert_eq!(
+            tail[0].occurred_at.unwrap().to_rfc3339(),
+            "2026-07-30T18:38:00+00:00"
+        );
+        assert_eq!(certified.checkpoint(), resumed.checkpoint());
+    }
+
+    #[test]
+    fn cursor_records_without_a_turn_envelope_stay_undated() {
+        // Transcripts predating Cursor's turn envelope carry no in-band time.
+        let user = br#"{"role":"user","message":{"content":[{"type":"text","text":"<user_query>older format</user_query>"}]}}"#;
+        let assistant =
+            br#"{"role":"assistant","message":{"content":[{"type":"text","text":"answer"}]}}"#;
+        let mut timestamps = CursorTimestampState::default();
+        for record in [user.as_slice(), assistant.as_slice()] {
+            let mut events = project_cursor_jsonl_record(record, 0, 0, 0, record.len() as u64)
+                .unwrap()
+                .unwrap();
+            let identities: Vec<_> = events
+                .iter()
+                .map(|event| event.provider_event_hash)
+                .collect();
+            timestamps.apply(&mut events).unwrap();
+
+            assert!(events.iter().all(|event| event.occurred_at.is_none()));
+            // Undated records must keep the identity they had before the
+            // turn timestamp existed.
+            assert_eq!(
+                events
+                    .iter()
+                    .map(|event| event.provider_event_hash)
+                    .collect::<Vec<_>>(),
+                identities
+            );
+        }
+        assert!(timestamps.checkpoint().is_none());
     }
 
     #[test]
