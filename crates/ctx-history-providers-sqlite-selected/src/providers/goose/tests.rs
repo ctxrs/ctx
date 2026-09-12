@@ -268,6 +268,20 @@ fn scan_only_output(content: Value) -> super::stream::GooseScannedMessage {
 }
 
 fn scan_only_output_raw(content: &str) -> super::stream::GooseScannedMessage {
+    let connection = native_message_connection(content, 15);
+    let schema = GooseNativeSchema::probe(&connection).unwrap();
+    let mut rows = goose_fetch_native_message_page(
+        &connection,
+        &schema,
+        GooseNativeRowKeyset::Unstarted,
+        GooseNativePageLimits::default(),
+    )
+    .unwrap();
+    assert_eq!(rows.len(), 1);
+    rows.remove(0)
+}
+
+fn native_message_connection(content: &str, schema_version: i64) -> Connection {
     let connection = Connection::open_in_memory().unwrap();
     connection
         .execute_batch(
@@ -280,9 +294,11 @@ fn scan_only_output_raw(content: &str) -> super::stream::GooseScannedMessage {
                  content_json text not null
              );
              create table schema_version (version integer not null);
-             insert into schema_version values (15);
              insert into sessions values ('session-1');",
         )
+        .unwrap();
+    connection
+        .execute("insert into schema_version values (?1)", [schema_version])
         .unwrap();
     connection
         .execute(
@@ -291,16 +307,45 @@ fn scan_only_output_raw(content: &str) -> super::stream::GooseScannedMessage {
             [content],
         )
         .unwrap();
-    let schema = GooseNativeSchema::probe(&connection).unwrap();
-    let mut rows = goose_fetch_native_message_page(
-        &connection,
-        &schema,
-        GooseNativeRowKeyset::Unstarted,
-        GooseNativePageLimits::default(),
-    )
-    .unwrap();
-    assert_eq!(rows.len(), 1);
-    rows.remove(0)
+    connection
+}
+
+#[test]
+fn supported_schema_versions_preserve_message_identity_and_readability() {
+    for version in [9, 15, 16] {
+        let connection = native_message_connection("[]", version);
+        let schema = GooseNativeSchema::probe(&connection).unwrap();
+        let rows = goose_fetch_native_message_page(
+            &connection,
+            &schema,
+            GooseNativeRowKeyset::Unstarted,
+            GooseNativePageLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(schema.schema_version, version);
+        assert_eq!(rows.len(), 1);
+        assert!(!rows[0].identity_degraded);
+        assert_eq!(
+            rows[0].provider_message_identity.as_deref(),
+            Some("message-1")
+        );
+
+        connection
+            .execute_batch("alter table messages drop column message_id")
+            .unwrap();
+        assert!(GooseNativeSchema::probe(&connection).is_err());
+    }
+}
+
+#[test]
+fn unrecognized_schema_versions_remain_rejected() {
+    for version in [-1, 0, 8, 10, 14, 17, i64::MAX] {
+        let connection = native_message_connection("[]", version);
+        assert!(
+            GooseNativeSchema::probe(&connection).is_err(),
+            "schema {version}"
+        );
+    }
 }
 
 #[test]

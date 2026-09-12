@@ -8,7 +8,7 @@ pub(super) fn config() -> Config {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     use std::{
         collections::BTreeMap,
         sync::{mpsc, Arc},
@@ -16,14 +16,17 @@ mod tests {
     };
 
     use super::*;
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     use crate::{watch::WatchWatermark, CoalescingWakePayload, NativeFileWatcher};
 
-    #[cfg(target_os = "linux")]
+    #[cfg(target_os = "macos")]
+    mod open_writer;
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[derive(Clone, Debug, Default, Eq, PartialEq)]
     struct TestPayload(Option<WatchWatermark>);
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     impl CoalescingWakePayload for TestPayload {
         fn is_empty(&self) -> bool {
             self.0.is_none()
