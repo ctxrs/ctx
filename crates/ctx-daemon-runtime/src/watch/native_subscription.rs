@@ -51,7 +51,7 @@ impl ReliableWatcher {
         let native = self.native.unwatch(path);
         #[cfg(target_os = "macos")]
         {
-            return native.and(self.metadata.unwatch(path));
+            native.and(self.metadata.unwatch(path))
         }
         #[cfg(not(target_os = "macos"))]
         native
