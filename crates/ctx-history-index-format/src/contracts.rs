@@ -60,7 +60,7 @@ pub type Result<T> = std::result::Result<T, IndexError>;
 
 #[derive(Debug, Error)]
 pub enum IndexError {
-    #[error(transparent)]
+    #[error("{0}{}", ctx_history_index_generation::open_file_limit_hint(.0))]
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
@@ -68,7 +68,7 @@ pub enum IndexError {
     ProjectionContract(#[from] ProjectionContractError),
     #[error(transparent)]
     CoreRecord(#[from] CoreRecordError),
-    #[error(transparent)]
+    #[error("{0}{}", ctx_history_index_generation::tantivy_file_limit_hint(.0))]
     Tantivy(#[from] tantivy::TantivyError),
     #[error("the lexical index has no ctx generation payload")]
     MissingCommitPayload,

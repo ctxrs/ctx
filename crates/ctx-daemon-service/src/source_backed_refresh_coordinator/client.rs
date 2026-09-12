@@ -2,6 +2,7 @@ use super::*;
 
 #[path = "client_observation_recovery.rs"]
 mod observation_recovery;
+mod progress_deadline;
 #[path = "client_request_policy.rs"]
 mod request_policy;
 mod response;
@@ -521,6 +522,7 @@ fn coordinate_source_backed_refresh_with_policy(
             retain_peer,
             report_progress,
         },
+        StdInstant::now,
     )
 }
 
@@ -558,6 +560,7 @@ pub(super) fn wait_for_published_generation(
             retain_peer: false,
             report_progress: None,
         },
+        StdInstant::now,
     )
 }
 
@@ -575,6 +578,7 @@ fn wait_for_published_generation_inner(
     data_root: &Path,
     request_id: String,
     wait: PublishedGenerationWait<'_>,
+    mut now: impl FnMut() -> StdInstant,
 ) -> Result<SourceBackedRefreshObservation> {
     let PublishedGenerationWait {
         mode,
@@ -588,6 +592,7 @@ fn wait_for_published_generation_inner(
     let mut forgotten_request_replayed = false;
     let mut last_reported_status = None;
     let mut last_reported_at = None;
+    let mut progress_deadline = progress_deadline::ProgressDeadline::default();
     loop {
         availability.checkpoint()?;
         let status_request = compact_json(json!({
@@ -717,6 +722,7 @@ fn wait_for_published_generation_inner(
             RefreshRequestState::AdmissionPending
             | RefreshRequestState::Queued
             | RefreshRequestState::Running => {
+                progress_deadline.observe(&status, now())?;
                 availability.pause(SOURCE_REFRESH_POLL_INTERVAL)?;
             }
         }

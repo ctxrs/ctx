@@ -108,6 +108,9 @@ ctx daemon run
   A recorded Semantic startup failure is reported as a failure, not preparation;
   `ctx semantic status` shows the bounded background error. Resource-pressure
   deferrals remain pending, and a Semantic failure does not invalidate keyword search.
+  Partial refresh findings include bounded provider error details, including
+  resource shortages. Status and doctor warn when a live daemon's heartbeat
+  is stale without treating its process as dead.
 - `index` prints a one-shot indexing status view. It is the focused view of the
   current indexing mode, lexical publication, refresh progress, semantic
   coverage, and background process state. Use `--format json` for the
@@ -604,6 +607,13 @@ publication and the worker exits after admitted Core work is terminal and IPC
 is quiescent. `import --no-daemon` never starts or restarts a process and
 therefore requires an already-running endpoint. Import never falls back to a
 foreground writer.
+
+Import and search `--refresh wait` stop waiting after five minutes without
+observable request progress. Elapsed-time counters alone do not extend this
+wait. The command reports an unknown outcome, not a successful publication or
+worker failure: the admitted request stays retained and may finish later.
+Inspect `ctx daemon status` and `ctx index` before retrying. Work that continues
+to report progress can run longer than five minutes.
 
 ## Paid Companion Routes
 
