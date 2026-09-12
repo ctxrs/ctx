@@ -10,7 +10,7 @@ exact bytes afterwards.
 ## Inputs
 
 - A clean checkout at the requested source commit.
-- Rust 1.97.1 with the five release targets installed.
+- Rust 1.98.1 with the five release targets installed.
 - A complete macOS SDK directory or archive supplied with `--macos-sdk` or
   `CTX_MACOS_SDK_ROOT`. The SDK is an unredistributed private build input.
 - Offline OSV scanner/database inputs in official mode.

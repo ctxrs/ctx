@@ -350,7 +350,7 @@ repository = "https://example.invalid/{name}"
                     "platform": platform,
                     "target": target,
                     "source": {"commit": COMMIT, "clean": True},
-                    "rust_version": "rustc 1.97.1 (test 2026-07-14)",
+                    "rust_version": "rustc 1.98.1 (test 2026-07-14)",
                     "builder": {
                         "base_image": {"actual": "sha256:" + "b" * 64},
                         "image_id": "sha256:" + "c" * 64,

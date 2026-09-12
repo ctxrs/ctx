@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-readonly RUST_VERSION="1.97.1"
+readonly RUST_VERSION="1.98.1"
 readonly RUST_COMMIT="8bab26f4f68e0e26f0bb7960be334d5b520ea452"
 readonly ZIG_VERSION="0.15.2"
 readonly ZIG_SHA256="02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239"
