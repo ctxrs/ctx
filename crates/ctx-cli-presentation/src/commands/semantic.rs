@@ -6,6 +6,8 @@ use crate::ui::{
     fields, outcome, section, Document, Field, Line, Outcome, OutcomeState, Span, Token,
 };
 
+use super::doctor_presentation::bounded_terminal_detail;
+
 #[derive(Debug, Args)]
 pub struct SemanticArgs {
     #[command(subcommand)]
@@ -100,6 +102,13 @@ pub fn render_semantic_status(context: &crate::ui::RenderContext, report: &Value
                 Some("Background maintenance has not reported a ready index yet."),
             ),
         }
+    };
+    // Surface the persisted background failure text so a missing ONNX Runtime,
+    // model, or provisioning error is visible instead of only a state word.
+    let background_error = semantic_background_error(report);
+    let detail = match background_error.as_deref() {
+        Some(error) if matches!(status, "failed" | "unavailable") => Some(error),
+        _ => detail,
     };
     let mut document = outcome(
         context,
@@ -262,12 +271,56 @@ fn str_at<'a>(report: &'a Value, pointer: &str, fallback: &'a str) -> &'a str {
         .unwrap_or(fallback)
 }
 
+/// Persisted error text from the last background semantic iteration, bounded
+/// for terminal rendering. Successful runs and resource deferrals omit it.
+fn semantic_background_error(report: &Value) -> Option<String> {
+    report
+        .pointer("/daemon/semantic_index/last_error")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|error| !error.is_empty())
+        .map(bounded_terminal_detail)
+}
+
 #[cfg(test)]
 mod tests {
     use ctx_terminal::{RenderContext, StreamKind, TestContext};
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn failed_status_shows_the_background_runtime_error() {
+        let rendered = render_semantic_status(
+            &context(),
+            &json!({
+                "enabled": true,
+                "status": "failed",
+                "reason": "model_load_failed",
+                "indexing": {"mode": "auto"},
+                "daemon": {
+                    "status": "running",
+                    "semantic_index": {
+                        "status": "pending",
+                        "last_run_status": "skipped",
+                        "last_run_reason": "model_load_failed",
+                        "last_error": "no ONNX Runtime dynamic library candidates were found for linux-x64; set an absolute path with CTX_ONNXRUNTIME_DYLIB",
+                    },
+                },
+            }),
+        )
+        .render_plain();
+
+        assert!(
+            rendered.contains("Semantic search needs attention"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("no ONNX Runtime dynamic library candidates were found"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("model_load_failed"), "{rendered}");
+    }
 
     fn context() -> RenderContext {
         RenderContext::for_test(TestContext::pipe(StreamKind::Stdout))

@@ -13,6 +13,42 @@ use ctx_semantic_index::{
 };
 use ctx_semantic_model::SEMANTIC_DIMENSIONS;
 
+#[test]
+fn source_status_reports_semantic_startup_failure_without_losing_lexical_readiness() {
+    let (_temp, data_root, _) = core_publication_fixture();
+    fs::write(
+        data_root.join(ctx_app_config::CONFIG_FILE),
+        "[daemon]\nenabled = true\n\n[search]\nsemantic = true\n",
+    )
+    .unwrap();
+    let config = crate::composition::load_runtime_config(&data_root).unwrap();
+    let detail = "failed to load ONNX Runtime: library is missing";
+    super::super::paths_status::write_daemon_job_status(
+        &daemon_semantic_job_path(&data_root),
+        &json!({
+            "status": "skipped", "reason": "model_load_failed",
+            "last_error": detail, "failure_class": "retryable", "retryable": true,
+        }),
+    )
+    .unwrap();
+
+    let report = source_epoch_status_report(&data_root, &config)
+        .unwrap()
+        .report;
+    assert_eq!(report["lexical"]["status"], "ready", "{report:#}");
+    assert_eq!(
+        report["daemon"]["jobs"]["semantic_index"]["status"],
+        "failed"
+    );
+    assert_eq!(report["semantic"]["status"], "unavailable");
+    assert_eq!(report["semantic"]["reason"], "model_load_failed");
+    assert_eq!(report["semantic"]["last_error"], detail);
+    assert_eq!(
+        report["semantic"]["flat_f32"]["reason"],
+        "projection_missing"
+    );
+}
+
 fn core_publication_fixture() -> (tempfile::TempDir, std::path::PathBuf, String) {
     let temp = tempfile::tempdir().unwrap();
     let data_root = temp.path().join("data");

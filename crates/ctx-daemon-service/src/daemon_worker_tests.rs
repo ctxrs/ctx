@@ -781,7 +781,7 @@ fn daemon_acquisition_failure_is_explicit_retryable_and_fail_closed() -> Result<
     let DaemonSemanticModelStartup::Finished(job) = startup else {
         panic!("failed acquisition must stop daemon model startup");
     };
-    assert_eq!(job["status"], "skipped");
+    assert_eq!(job["status"], "failed");
     assert_eq!(job["reason"], "model_acquisition_failed");
 
     let mut backoff = DaemonRetryBackoff::default();
@@ -907,7 +907,7 @@ fn verified_cache_missing_runtime_reports_model_load_failed() -> Result<()> {
     let DaemonSemanticModelStartup::Finished(job) = startup else {
         panic!("missing ONNX Runtime must stop daemon model startup");
     };
-    assert_eq!(job["status"], "skipped");
+    assert_eq!(job["status"], "failed");
     assert_eq!(job["reason"], "model_load_failed");
     assert_eq!(job["failure_class"], "retryable");
     assert!(job["last_error"]

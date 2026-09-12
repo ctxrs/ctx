@@ -105,6 +105,9 @@ ctx daemon run
   success. Use `status --format json` when scripts need the actual state.
 - `doctor` turns source-epoch, refresh, semantic, and daemon problems into a
   focused recovery action. It does not repeat the normal status inventory.
+  A recorded Semantic startup failure is reported as a failure, not preparation;
+  `ctx semantic status` shows the bounded background error. Resource-pressure
+  deferrals remain pending, and a Semantic failure does not invalidate keyword search.
 - `index` prints a one-shot indexing status view. It is the focused view of the
   current indexing mode, lexical publication, refresh progress, semantic
   coverage, and background process state. Use `--format json` for the
