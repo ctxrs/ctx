@@ -1,11 +1,11 @@
-use ctx_history_index::{CoreRecord, GenerationWriter, VerifiedIndex, WriterOptions};
+use ctx_history_index::{CoreRecord, GenerationWriter, IndexError, VerifiedIndex, WriterOptions};
 use rusqlite::Connection;
 use serde_json::json;
 use std::{
     collections::BTreeSet,
     fs,
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 pub(crate) fn provider_history_fixture(name: &str) -> String {
@@ -131,7 +131,11 @@ pub(crate) fn write_codex_message_fixture(root: &Path, session_id: &str, message
 }
 
 pub(crate) fn provider_core_records(data_root: &Path, provider: &str) -> Vec<CoreRecord> {
-    let index = VerifiedIndex::open_pinned(data_root.join("search/lexical")).unwrap();
+    let index = open_provider_index_with(
+        || VerifiedIndex::open_pinned(data_root.join("search/lexical")),
+        Instant::now() + Duration::from_secs(10),
+    )
+    .unwrap();
     let sources = index
         .manifest()
         .sources
@@ -155,6 +159,25 @@ pub(crate) fn provider_core_records(data_root: &Path, provider: &str) -> Vec<Cor
         }
     }
     records
+}
+
+pub(crate) fn open_provider_index_with(
+    mut open: impl FnMut() -> Result<VerifiedIndex, IndexError>,
+    deadline: Instant,
+) -> Result<VerifiedIndex, IndexError> {
+    loop {
+        match open() {
+            // A test-owned daemon may publish again after the import receipt.
+            // Wait only for that contention; preserve every other read error.
+            Err(IndexError::ConcurrentGenerationChange) if Instant::now() < deadline => {
+                std::thread::sleep(
+                    Duration::from_millis(25)
+                        .min(deadline.saturating_duration_since(Instant::now())),
+                );
+            }
+            result => return result,
+        }
+    }
 }
 
 pub(crate) fn provider_core_counts(data_root: &Path, provider: &str) -> (usize, usize) {
