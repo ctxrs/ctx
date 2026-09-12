@@ -18,6 +18,7 @@ use uuid::Uuid;
 
 mod artifacts;
 mod catalog;
+mod catalog_pages;
 #[cfg(any(test, feature = "test-support"))]
 mod legacy_fixture;
 mod locking;
@@ -34,6 +35,7 @@ pub(crate) use legacy_fixture::seed_filter_unaware_manifest;
 
 use artifacts::*;
 use catalog::*;
+use catalog_pages::*;
 pub(crate) use locking::FlatStoreCoordinationGuard;
 use locking::{open_lock, FileLock};
 use manifest::*;

@@ -34,6 +34,7 @@ mod bounded_reconciliation;
 mod content;
 mod filter_accounting;
 mod generation_identity;
+mod manifest_budget;
 mod policy_rebuild;
 mod proportionality;
 mod provider_native;
