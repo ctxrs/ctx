@@ -266,7 +266,7 @@ ctx_rust_test(
         "//:scripts/tests/native-candidate-outbox.json",
         "//crates/ctx-upgrade-engine:cargo_package_data",
     ],
-    data = ctx_cli_test_data() + [":ctx"],
+    data = ctx_cli_test_data(),
     deps = all_crate_deps(
         normal = True,
         normal_dev = True,
@@ -278,9 +278,6 @@ ctx_rust_test(
     rustc_env = COMMON_RUSTC_ENV,
     rustc_env_files = [":cargo_toml_env_vars"],
     rustc_flags = CTX_CLI_RUSTC_FLAGS,
-    env = {
-        "CARGO_BIN_EXE_ctx": "$(rootpath :ctx)",
-    },
     tags = ["exclusive"],
 )
 
@@ -306,6 +303,17 @@ ctx_cli_integration_test(
     src = "tests/cloud_removed.rs",
     extra_data = ["//:cloud_removed_build_inputs"],
     tags = ["privacy", "security"],
+)
+
+ctx_cli_integration_test(
+    name = "companion_usage_tests",
+    src = "tests/companion_usage.rs",
+    extra_crates = ["tempfile"],
+    extra_deps = [
+        "//crates/ctx-client-observability:lib",
+        "//crates/ctx-history-platform:lib",
+    ],
+    test_support = [],
 )
 
 test_suite(
