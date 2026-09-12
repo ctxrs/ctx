@@ -394,8 +394,22 @@ fn projector_preserves_prompt_identity_and_rejections() {
     assert_eq!(record.role.as_deref(), Some("user"));
     assert!(record.validate_contract().is_ok());
     assert_eq!(
-        format!("{:x}", Sha256::digest(record.encode_stored().unwrap())),
+        record.parser_revision,
+        "codex-prompt-history-shared-jsonl-v6"
+    );
+    // The parser revision changes, but every previously stored prompt field stays identical.
+    let mut prior_revision = record.clone();
+    prior_revision.parser_revision = "codex-prompt-history-shared-jsonl-v4".to_owned();
+    assert_eq!(
+        format!(
+            "{:x}",
+            Sha256::digest(prior_revision.encode_stored().unwrap())
+        ),
         "cf0c1b68ee1596cbb20215b77fed1bbb59c1ec8259cd723008523e7c57f0cdde"
+    );
+    assert_eq!(
+        format!("{:x}", Sha256::digest(record.encode_stored().unwrap())),
+        "2ab5dafb0d2090df4972dfc429c08b67588a03d143ca91dc3b66d393b80801b4"
     );
 
     for invalid in [
