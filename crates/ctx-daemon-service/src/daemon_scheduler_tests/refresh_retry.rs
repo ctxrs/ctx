@@ -56,6 +56,62 @@ fn run_source_refresh_cycle(
 }
 
 #[test]
+fn pending_admission_response_does_not_create_a_refresh_failure_or_retry_delay() {
+    for mode in [DaemonMode::Full, DaemonMode::SourceRefreshOnly] {
+        let temp = tempfile::tempdir().unwrap();
+        let data_root = temp.path().join("data");
+        ctx_history_platform::platform_security::establish_private_data_root(&data_root).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let execution_calls = Arc::clone(&calls);
+        let coordinator = CoreRefreshEngine::with_executor(Arc::new(
+            move |execution: SourceBackedRefreshExecution<'_>| {
+                execution_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(publish_empty_authoritative_generation(&execution))
+            },
+        ));
+        let request_id = uuid::Uuid::now_v7().to_string();
+        let admission = coordinator
+            .submit(
+                &data_root,
+                ctx_history_refresh::RefreshRequest::automatic(
+                    request_id.clone(),
+                    ctx_history_refresh::RefreshRequestTrigger::Import,
+                ),
+            )
+            .unwrap();
+        let before = read_daemon_job_status(&daemon_core_refresh_job_path(&data_root)).unwrap();
+        let mut runtime = DaemonRuntime::default();
+        runtime.config.daemon.mode = mode;
+        let waiting = run_source_refresh_cycle(&data_root, &mut runtime, &coordinator);
+        assert!(
+            !waiting.failed,
+            "pending acknowledgement is not a refresh failure"
+        );
+        assert!(!waiting.did_work);
+        assert_eq!(runtime.history_retry.consecutive_failures, 0);
+        assert!(runtime.history_retry.ready());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            read_daemon_job_status(&daemon_core_refresh_job_path(&data_root)).unwrap(),
+            before,
+            "a scheduler wait must preserve the engine's durable admission"
+        );
+        admission.into_parts().1.unwrap().release(&coordinator);
+        coordinator
+            .complete_pending_admission_for_test(&data_root, &request_id, BTreeMap::new())
+            .unwrap();
+        let published = run_source_refresh_cycle(&data_root, &mut runtime, &coordinator);
+        assert!(!published.failed);
+        assert!(published.did_work);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            coordinator.status_for_test(&request_id).unwrap()["request_state"],
+            "published"
+        );
+    }
+}
+
+#[test]
 fn hot_route_failure_retries_exact_after_cooldown_while_blocked_route_stays_idle() {
     for (byte, kind, retryable) in [
         (0xa1, SourceBackedRouteErrorKind::SourceChanged, true),

@@ -2,7 +2,11 @@ use super::*;
 use std::sync::atomic::AtomicUsize;
 
 fn private_data_root() -> (tempfile::TempDir, PathBuf) {
-    let temp = tempfile::tempdir().expect("temporary data root");
+    // Provider admission rejects symlinked roots; canonicalize macOS temporary paths.
+    let base = std::env::temp_dir()
+        .canonicalize()
+        .expect("canonical temp root");
+    let temp = tempfile::tempdir_in(base).expect("temporary data root");
     let data_root = temp.path().join("data");
     ctx_history_platform::platform_security::establish_private_data_root(&data_root)
         .expect("private data root");

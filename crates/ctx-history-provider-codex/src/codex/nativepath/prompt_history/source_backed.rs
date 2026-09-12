@@ -36,7 +36,7 @@ pub(crate) const SOURCE_FORMAT: &str = "codex_history_jsonl";
 const PATH_KIND: &str = "Codex prompt-history JSONL";
 const SOURCE_SCHEMA_VARIANT: &str = "codex-prompt-history-jsonl-v1";
 const SOURCE_IDENTITY_VERSION: u32 = 1;
-const PARSER_REVISION: &str = "codex-prompt-history-shared-jsonl-v4";
+const PARSER_REVISION: &str = "codex-prompt-history-shared-jsonl-v6";
 const SESSION_KEY_NAMESPACE: &str = "codex.prompt-history.session";
 const EVENT_POSITION_KIND: &str = "codex.prompt-history.raw-ordinal";
 const LOGICAL_SESSION_KIND: &str = "codex-prompt-history-session";
@@ -264,9 +264,11 @@ fn project_prompt_record(
     let projected = core_record(source, line, record.evidence().physical_ordinal())
         .map_err(|error| CaptureError::InvalidPayload(error.to_string()))?;
     if retained_record_bytes(&projected) > MAX_RETAINED_RECORD_BYTES {
-        return Err(CaptureError::InvalidPayload(
+        rejections.malformed(
+            record,
             CodexPromptHistorySourceBackedErrorV0::RecordTooLarge.to_string(),
-        ));
+        );
+        return Ok(());
     }
     emit(projected)
 }
@@ -275,6 +277,48 @@ fn project_prompt_record(
 mod tests {
     use super::*;
     use ctx_history_capture_runtime::MAX_RECORDED_SOURCE_BACKED_RECORD_REJECTIONS;
+
+    #[test]
+    fn retained_record_limit_rejects_one_prompt_and_preserves_valid_peers() {
+        let source =
+            CodexPromptHistorySourceBackedInputV0::explicit("/tmp/codex/history.jsonl", [0x42; 32])
+                .source_key()
+                .unwrap();
+        let oversized = serde_json::json!({"session_id":"oversized", "ts":2,
+            "text":"x".repeat(MAX_RETAINED_RECORD_BYTES)})
+        .to_string();
+        let rows = [
+            br#"{"session_id":"before","ts":1,"text":"before"}"#.as_slice(),
+            oversized.as_bytes(),
+            br#"{"session_id":"after","ts":3,"text":"after"}"#.as_slice(),
+        ];
+        let mut rejected = JsonlRecordRejections::new(
+            source.clone(),
+            CaptureProvider::Codex,
+            "/tmp/codex/history.jsonl".to_owned(),
+        );
+        let mut projected = Vec::new();
+        for (ordinal, row) in rows.into_iter().enumerate() {
+            project_prompt_record(
+                &source,
+                &mut rejected,
+                JsonlRecordRef::for_test(row, ordinal as u64),
+                &mut |record| {
+                    projected.push(record);
+                    Ok(())
+                },
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            projected
+                .iter()
+                .map(|r| r.content.meaningful_text())
+                .collect::<Vec<_>>(),
+            ["before", "after"]
+        );
+        assert_eq!(rejected.count(), 1);
+    }
 
     #[test]
     fn named_root_lineage_remains_the_root_singleton_catalog_anchor() {

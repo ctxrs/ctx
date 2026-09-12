@@ -198,6 +198,10 @@ fn test_provider_sqlite_data_root() -> &'static std::path::Path {
 #[cfg(test)]
 mod test_support_paths {
     pub(crate) fn tempdir() -> std::io::Result<tempfile::TempDir> {
-        tempfile::Builder::new().prefix("ctx-test-").tempdir()
+        // SQLite's no-follow snapshot open rejects macOS's /var alias.
+        let base = std::env::temp_dir().canonicalize()?;
+        tempfile::Builder::new()
+            .prefix("ctx-test-")
+            .tempdir_in(base)
     }
 }
