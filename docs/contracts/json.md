@@ -254,6 +254,12 @@ and daemon fields below describe `ctx status --format json`, not index
 snapshots.
 
 `semantic.status` is `disabled`, `pending`, `ready`, or `unavailable`.
+When enabled, a failed background semantic job makes this status `unavailable`
+with the job's `reason` and optional `semantic.last_error`. A pending configuration
+reload takes precedence over a previous job failure; resource-pressure deferral
+without an error remains pending. The retained `semantic.flat_f32` inventory
+below describes projection state separately from the background failure, and
+lexical readiness is unchanged.
 `semantic.flat_f32` reports the source-backed projection and can include its
 `status`, `reason`, `path`, Core and flat generation identity, semantic document
 count, projected and intentionally filtered document counts, active
