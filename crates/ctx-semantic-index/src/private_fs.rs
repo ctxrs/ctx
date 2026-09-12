@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 #[cfg(not(windows))]
 use ctx_history_platform::platform_security::ensure_private_directory;
-use ctx_history_platform::platform_security::restrict_private_file;
+use ctx_history_platform::platform_security::restrict_private_file_preserving_locks;
 
 /// Resolves only the existing parent prefix used by ordinary writable opens.
 /// Missing components and the final semantic root remain unresolved so the
@@ -46,12 +46,6 @@ pub(crate) fn create_private_dir_all(path: &Path) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn secure_private_file_permissions(path: &Path) -> Result<()> {
-    restrict_private_file(path)
-        .with_context(|| format!("secure private file {}", path.display()))?;
-    Ok(())
-}
-
 pub(crate) fn secure_semantic_vector_permissions(path: &Path) -> Result<()> {
     for candidate in [
         path.to_path_buf(),
@@ -59,7 +53,7 @@ pub(crate) fn secure_semantic_vector_permissions(path: &Path) -> Result<()> {
         PathBuf::from(format!("{}-shm", path.display())),
     ] {
         if candidate.exists() {
-            restrict_private_file(&candidate)
+            restrict_private_file_preserving_locks(&candidate)
                 .with_context(|| format!("secure semantic vector file {}", candidate.display()))?;
         }
     }
