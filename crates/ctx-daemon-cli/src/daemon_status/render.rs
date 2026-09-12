@@ -2,6 +2,8 @@ use std::path::Path;
 
 use serde_json::Value;
 
+use super::{job_error, job_status};
+
 use ctx_terminal::{
     fields, format_bytes, format_count, hint, outcome, section, Action, Document, Field, Hint,
     Outcome, OutcomeState, RenderContext, Token,
@@ -834,12 +836,6 @@ fn recovery_action(
     None
 }
 
-fn job_status(job: Option<&Value>) -> &str {
-    job.and_then(|job| job.get("status"))
-        .and_then(Value::as_str)
-        .unwrap_or("unknown")
-}
-
 fn job_automatic_retry_state(job: Option<&Value>) -> Option<&str> {
     job.and_then(|job| job.pointer("/automatic_retry/state"))
         .and_then(Value::as_str)
@@ -889,12 +885,6 @@ fn job_catching_up(job: Option<&Value>) -> bool {
             .and_then(|job| job.get("reason"))
             .and_then(Value::as_str)
             == Some("retry_backoff"))
-}
-
-fn job_error(job: Option<&Value>) -> Option<&str> {
-    job.and_then(|job| job.get("last_error"))
-        .and_then(Value::as_str)
-        .filter(|error| !error.is_empty())
 }
 
 fn rejected_record_count(core_refresh: Option<&Value>) -> u64 {
