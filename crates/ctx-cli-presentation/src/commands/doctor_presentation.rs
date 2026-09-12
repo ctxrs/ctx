@@ -191,6 +191,14 @@ pub fn render_doctor_human(
         .any(|finding| finding.contains("generation_not_published"))
     {
         ("Publish the first verified history index.", "ctx setup")
+    } else if findings
+        .iter()
+        .any(|finding| finding.starts_with("semantic is unavailable"))
+    {
+        (
+            "Inspect the semantic failure and its error detail.",
+            "ctx semantic status",
+        )
     } else if findings.iter().any(|finding| finding.contains(" pending ")) {
         ("Wait for history indexing to finish.", "ctx index watch")
     } else if findings.iter().any(|finding| finding.contains("upgrade")) {
@@ -220,7 +228,7 @@ fn is_derivative_refresh_finding(finding: &str) -> bool {
     .contains(&finding)
 }
 
-fn bounded_terminal_detail(detail: &str) -> String {
+pub(super) fn bounded_terminal_detail(detail: &str) -> String {
     let escaped = Span::text(detail).content().to_owned();
     if escaped.len() <= MAX_REFRESH_ERROR_BYTES {
         return escaped;
@@ -280,6 +288,10 @@ fn humanize_doctor_finding(finding: &str) -> HumanDoctorFinding {
         (other, _) => format!("{label} is {}", other.replace('_', " ")),
     };
     let detail = match reason {
+        "model_load_failed"
+        | "model_acquisition_failed"
+        | "model_integrity_failed"
+        | "daemon_semantic_job_failed" => "The last semantic background operation failed.",
         "heartbeat_stale" => "The process is still running, but its heartbeat has not advanced. Work may be stalled; this does not prove the process is dead.",
         "catalog_publication_pending" => "Required local data is still being prepared.",
         "daemon_unavailable" => "The background history refresh service is not available.",
@@ -302,6 +314,29 @@ mod ui_tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn doctor_does_not_call_semantic_startup_failure_preparation() {
+        let report = json!({
+            "history_epoch": {"status": "ready"},
+            "lexical": {"status": "ready"},
+            "catalog": {"status": "ready"},
+            "refresh": {"status": "ready"},
+            "semantic": {"enabled": true, "status": "unavailable", "reason": "model_load_failed"},
+        });
+        let findings = source_epoch_findings(&report, true);
+        let rendered = render_doctor_human(&context(120), &findings, None, None).render_plain();
+        assert!(
+            rendered.contains("Semantic search is unavailable"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("last semantic background operation failed"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("ctx semantic status"), "{rendered}");
+        assert!(!rendered.contains("preparing"), "{rendered}");
+    }
     use crate::{
         test_support::{assert_fits, strip_ansi},
         ui::{ColorMode, StreamKind, TestContext},

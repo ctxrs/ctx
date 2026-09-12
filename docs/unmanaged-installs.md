@@ -127,13 +127,14 @@ Stable releases publish prebuilt binaries on GitHub Releases:
 | macOS Intel | `ctx-macos-x64` |
 | Windows x64 | `ctx-windows-x64.exe` |
 
-Each stable release also publishes `SHA256SUMS` and the dynamic ONNX Runtime
-dependency used by the built-in semantic executor:
+Releases also publish `SHA256SUMS`. The built-in semantic executor's dynamic
+ONNX Runtime dependency is distributed separately; CPU sidecars are named
 `ctx-onnxruntime-<platform>.tar.gz` on Unix-like platforms and
-`ctx-onnxruntime-windows-x64.zip` on Windows. The official installer reads
-signed release metadata and installs the matching runtime automatically; direct
-unmanaged installs should follow the release notes for runtime sidecar
-placement.
+`ctx-onnxruntime-windows-x64.zip` on Windows. Accelerator bundles are selected
+through signed release metadata and are not the CPU sidecars. Downloading the
+CLI alone does not install either dependency. See
+[built-in Semantic runtime installation](#built-in-semantic-runtime-installation)
+below before enabling the built-in executor on a direct-release install.
 
 The hosted installer and managed-upgrade path verify signed ctx release
 metadata. Beginning with ctx 0.25.0, official macOS CLI binaries and the
@@ -215,6 +216,42 @@ install -m 0755 ctx-macos-arm64 ~/.local/bin/ctx
 
 For Windows x64, download `ctx-windows-x64.exe` and `SHA256SUMS`, verify the
 file hash, then place it on `Path` as `ctx.exe`.
+
+## Built-in Semantic Runtime Installation
+
+`ctx semantic enable` enables background model acquisition and indexing; it
+does not install a missing native runtime into an unmanaged installation.
+Missing-runtime or model-load failures appear in `ctx semantic status` with
+their background error. They are not ordinary preparation. Resource-pressure
+deferrals can still be pending, and keyword search remains available.
+
+The supported way to provision the complete CUDA runtime is a hosted managed
+installation. First complete the handoff and executable-removal steps in
+[conversion](#convert-an-unmanaged-install-to-a-managed-install), then opt in to
+Semantic when running the installer:
+
+```bash
+curl -fsSL https://ctx.rs/install | CTX_INSTALL_SEMANTIC=1 sh
+ctx semantic status
+```
+
+On Linux x64 with a detected supported NVIDIA accelerator, the managed
+installation selects the CUDA bundle from signed release metadata. It installs
+the matching ONNX Runtime, CUDA/cuDNN dependencies, and `ctx-runtime-install.json`
+together. The loader expects
+`onnxruntime/<version>/linux-x64-cuda12/lib/libonnxruntime.so` under the selected
+runtime root and checks the installation manifest, exact file inventory, sizes,
+and hashes. Do not manufacture that manifest or combine files from different
+runtime bundles.
+
+`CTX_ONNXRUNTIME_DYLIB` and `ORT_DYLIB_PATH` are direct CPU-runtime overrides;
+they do not provision or authorize the CUDA bundle. There is no manual CUDA
+archive-install command. If managed installation cannot obtain or verify the
+required assets, retain the reported installation error and run `ctx doctor`;
+waiting for model indexing or changing a library path does not repair that
+provisioning failure. An explicitly selected
+[HTTP embedding executor](semantic-executors.md#select-an-executor) does not use
+the built-in native runtime.
 
 ## mise
 
