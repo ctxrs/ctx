@@ -151,7 +151,7 @@ exit 23
         factory_inputs = json.loads(
             (ROOT / "contracts" / "release-factory-inputs-v1.json").read_text()
         )
-        for value in ("1.97.1", "0.15.2", "0.23.0", "0.29.0", "2.0.1"):
+        for value in ("1.98.1", "0.15.2", "0.23.0", "0.29.0", "2.0.1"):
             self.assertIn(value, source)
         self.assertIn("--diagnostic-unsigned", source)
         self.assertIn("official release requires", source)

@@ -4,7 +4,7 @@ env:
   RUST_TEST_THREADS: "2"
   CTX_BOOTSTRAP_BAZELISK: "1"
   CTX_BAZELISK_VERSION: "v1.29.0"
-  CTX_RUST_TOOLCHAIN: "1.97.1"
+  CTX_RUST_TOOLCHAIN: "1.98.1"
 
 steps:
   - label: ":bazel: public smoke gate"

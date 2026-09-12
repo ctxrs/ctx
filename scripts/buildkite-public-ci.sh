@@ -6,7 +6,7 @@ cd "${repo_root}"
 
 export CTX_BOOTSTRAP_BAZELISK="${CTX_BOOTSTRAP_BAZELISK:-1}"
 export CTX_BAZELISK_VERSION="${CTX_BAZELISK_VERSION:-v1.29.0}"
-export CTX_RUST_TOOLCHAIN="${CTX_RUST_TOOLCHAIN:-1.97.1}"
+export CTX_RUST_TOOLCHAIN="${CTX_RUST_TOOLCHAIN:-1.98.1}"
 
 check_args=("$@")
 if (( "${#check_args[@]}" == 0 )); then
