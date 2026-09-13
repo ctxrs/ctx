@@ -7,9 +7,9 @@
       "package": "paste",
       "version": "1.0.15",
       "lockfile": "Cargo.lock",
-      "rationale": "Informational unmaintained-only advisory for a build-time proc macro used directly by tokenizers 0.22.2; paste is not linked into or callable by the release binary, has no normal dependencies, and contains no unsafe blocks. macro_rules_attribute was upgraded to 0.2.3 to replace its independent paste edge with pastey. Re-evaluated 2026-08-09: the current fastembed 5.17.2 lock and published fastembed 5.17.4 both require tokenizers 0.22.2, while published tokenizers 0.23.1 still requires paste. No published maintained dependency path removes the residual without replacing or forking the embedding stack. Re-evaluate the upstream tokenizers migration before expiry.",
+      "rationale": "Re-evaluated 2026-09-13: RUSTSEC-2024-0436 is an unmaintained-only advisory for paste 1.0.15, a build-time proc macro used by tokenizers 0.22.2 through fastembed 5.17.2. The checksum-verified crate has no normal dependencies or unsafe blocks and is not linked into or callable by the release binary. macro_rules_attribute 0.2.3 uses pastey, leaving tokenizers as the only paste edge. Published tokenizers 0.23.2 still requires paste ^1.0.14; fastembed 6.1.0 requires tokenizers ^0.23.2, so upgrading does not remove it. Accept only this exact locked finding through 2026-09-20. Re-evaluate upstream migration before expiry; remove the exception when a compatible maintained path is available.",
       "owner": "ctx-release-security",
-      "expires": "2026-09-12"
+      "expires": "2026-09-20"
     },
     {
       "advisory_id": "RUSTSEC-2026-0253",
@@ -17,9 +17,9 @@
       "package": "lru",
       "version": "0.16.4",
       "lockfile": "Cargo.lock",
-      "rationale": "The advisory requires LruCache::pop to unwind while dropping a key with a panicking Drop implementation. The only release-closure use is Tantivy 0.26.1's document-store cache, which instantiates LruCache<usize, OwnedBytes>, calls get/put/len but not pop, and uses usize keys that have no Drop implementation. Upstream Tantivy merged its lru 0.18.2 bump in quickwit-oss/tantivy#3034 on 2026-08-06, but has not published a release containing it. Re-evaluate and remove this exception as soon as that Tantivy release is available.",
+      "rationale": "Re-evaluated 2026-09-13: RUSTSEC-2026-0253 requires LruCache::pop to unwind while dropping a key with a panicking Drop implementation. The only locked release use is Tantivy 0.26.1's document-store cache, LruCache<usize, OwnedBytes>, which calls get/put/len but not pop. The cache field is not exposed to callers, and usize keys cannot run a panicking Drop. The checksum-verified lru 0.16.4 source has the reported unsafe ordering, but this call/key combination does not reach it. Published Tantivy 0.26.2 still requires lru ^0.16.3; patched lru >=0.18.2 is outside that requirement. Accept only this exact locked finding through 2026-09-20; remove the exception when a compatible Tantivy release adopts patched lru.",
       "owner": "ctx-release-security",
-      "expires": "2026-09-12"
+      "expires": "2026-09-20"
     }
   ]
 }
