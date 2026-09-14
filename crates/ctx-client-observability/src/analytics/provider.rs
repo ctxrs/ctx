@@ -1,6 +1,9 @@
 #[cfg(any(test, feature = "test-support"))]
 use std::time::Duration;
 
+mod diagnostics;
+pub use diagnostics::*;
+
 use ctx_history_core::CaptureProvider;
 
 #[cfg(any(test, feature = "test-support"))]
@@ -263,6 +266,8 @@ pub struct ProviderRefreshCompletedV1 {
     pub foreground: Option<ForegroundProviderRefreshV1>,
     pub terminal_health: Option<ProviderRefreshTerminalHealthV1>,
     pub failure_diagnostic: Option<(ProviderRefreshFailureStage, ProviderRefreshFailureKind)>,
+    pub coverage_reason: Option<ProviderRefreshCoverageReason>,
+    pub source_failure_class: Option<ProviderRefreshSourceFailureClass>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -313,6 +318,8 @@ impl ProviderRefreshCompletedV1 {
             foreground: None,
             terminal_health: None,
             failure_diagnostic: None,
+            coverage_reason: None,
+            source_failure_class: None,
         }
     }
 
@@ -329,6 +336,8 @@ impl ProviderRefreshCompletedV1 {
             foreground: Some(foreground),
             terminal_health: None,
             failure_diagnostic: None,
+            coverage_reason: None,
+            source_failure_class: None,
         }
     }
 
@@ -353,6 +362,8 @@ impl ProviderRefreshCompletedV1 {
             foreground: Some(foreground),
             terminal_health: None,
             failure_diagnostic: None,
+            coverage_reason: None,
+            source_failure_class: None,
         }
     }
 
@@ -369,6 +380,19 @@ impl ProviderRefreshCompletedV1 {
         diagnostic: Option<(ProviderRefreshFailureStage, ProviderRefreshFailureKind)>,
     ) -> Self {
         self.failure_diagnostic = diagnostic;
+        self
+    }
+
+    pub fn with_coverage_reason(mut self, reason: Option<ProviderRefreshCoverageReason>) -> Self {
+        self.coverage_reason = reason;
+        self
+    }
+
+    pub fn with_source_failure_class(
+        mut self,
+        class: Option<ProviderRefreshSourceFailureClass>,
+    ) -> Self {
+        self.source_failure_class = class;
         self
     }
 }

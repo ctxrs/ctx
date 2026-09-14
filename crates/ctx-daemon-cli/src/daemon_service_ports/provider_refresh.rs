@@ -1,5 +1,8 @@
 use std::time::Duration;
 
+mod diagnostics;
+use diagnostics::{coverage_reason, source_failure_class};
+
 use ctx_history_core::CaptureProvider;
 use ctx_history_refresh::{
     published_refresh_receipt_for_recovery, RefreshFailureKind, RefreshFailureStage,
@@ -11,9 +14,10 @@ use serde_json::Value;
 use ctx_client_observability::analytics::{
     duration_bucket, DurationBucket, ForegroundProviderRefreshV1, Outcome, ProviderCoreResult,
     ProviderRefreshChange, ProviderRefreshCompletedV1, ProviderRefreshCountsV1,
-    ProviderRefreshFailureCode, ProviderRefreshFailureKind, ProviderRefreshFailureScope,
-    ProviderRefreshFailureStage, ProviderRefreshFailureType, ProviderRefreshResult,
-    ProviderRefreshTerminalHealthV1, ProviderRefreshTrigger, PublicEventV1, Surface,
+    ProviderRefreshCoverageReason, ProviderRefreshFailureCode, ProviderRefreshFailureKind,
+    ProviderRefreshFailureScope, ProviderRefreshFailureStage, ProviderRefreshFailureType,
+    ProviderRefreshResult, ProviderRefreshSourceFailureClass, ProviderRefreshTerminalHealthV1,
+    ProviderRefreshTrigger, PublicEventV1, Surface,
 };
 
 pub(super) fn provider_refresh_event(
@@ -86,7 +90,8 @@ pub(super) fn provider_refresh_event(
             counts,
         },
     )
-    .with_terminal_health(refresh_terminal_health(successor_pending, None));
+    .with_terminal_health(refresh_terminal_health(successor_pending, None))
+    .with_source_failure_class(source_failure_class(&receipt));
     Some(PublicEventV1::ProviderRefreshCompleted(event))
 }
 fn failed_provider_refresh_event(
@@ -131,7 +136,8 @@ fn failed_provider_refresh_event(
             successor_pending,
             Some(retained_previous_generation),
         ))
-        .with_failure_diagnostic(refresh_failure_diagnostic(job)),
+        .with_failure_diagnostic(refresh_failure_diagnostic(job))
+        .with_coverage_reason(coverage_reason(job, outcome.code())),
     ))
 }
 
@@ -231,32 +237,15 @@ fn completed_failure(
 fn homogeneous_source_failure_type(
     receipt: &SourceBackedRefreshReceipt,
 ) -> ProviderRefreshFailureType {
-    let mut classes = Vec::new();
-    for route in &receipt.route_results {
-        if route.source_failures.len() == route.source_failure_total {
-            classes.extend(
-                route
-                    .source_failures
-                    .iter()
-                    .map(|failure| failure.class.as_str()),
-            );
-        } else if route.source_failure_total == 1 && route.source_failures.is_empty() {
-            let Some(class) = route.outcome.failure_class() else {
-                return ProviderRefreshFailureType::Unknown;
-            };
-            classes.push(class);
-        } else {
-            return ProviderRefreshFailureType::Unknown;
+    match source_failure_class(receipt) {
+        Some(ProviderRefreshSourceFailureClass::Incompatible) => {
+            ProviderRefreshFailureType::UnsupportedSchema
         }
-    }
-    classes.sort_unstable();
-    classes.dedup();
-    match classes.as_slice() {
-        ["incompatible"] => ProviderRefreshFailureType::UnsupportedSchema,
-        ["unreadable"] => ProviderRefreshFailureType::MalformedSource,
-        [_] => ProviderRefreshFailureType::Unknown,
-        [] => ProviderRefreshFailureType::Unknown,
-        _ => ProviderRefreshFailureType::Mixed,
+        Some(ProviderRefreshSourceFailureClass::Unreadable) => {
+            ProviderRefreshFailureType::MalformedSource
+        }
+        Some(ProviderRefreshSourceFailureClass::Mixed) => ProviderRefreshFailureType::Mixed,
+        _ => ProviderRefreshFailureType::Unknown,
     }
 }
 
@@ -583,5 +572,58 @@ mod tests {
     #[test]
     fn cli_owned_import_is_not_duplicated_by_daemon() {
         assert!(provider_refresh_event(&completed_job("import", None, true), false).is_none());
+    }
+
+    #[test]
+    fn partial_refresh_preserves_only_complete_source_failure_classes() {
+        for classes in [
+            vec!["unavailable"],
+            vec!["source_changed"],
+            vec!["unreadable"],
+            vec!["incompatible"],
+            vec!["unavailable", "incompatible"],
+        ] {
+            let mut job = completed_job("periodic", Some("generation-a"), true);
+            let mut receipt = published_refresh_receipt_for_recovery(&job).unwrap();
+            receipt.current.rejected_records = 0;
+            receipt.route_results = classes
+                .iter()
+                .enumerate()
+                .map(|(i, class)| {
+                    SourceBackedRefreshRouteResult::failed(
+                        format!("{i:064x}"),
+                        (*class).to_owned(),
+                        true,
+                    )
+                })
+                .collect();
+            job["receipt"] = receipt.to_json();
+            job["structured_outcome"]["retryable"] = json!(true);
+            job["last_error"] = json!("/private/path secret source_changed");
+            job["refresh_source_failure_class"] = json!("incompatible");
+            let event = refresh(provider_refresh_event(&job, false).unwrap());
+            assert!(!format!("{event:?}").contains("secret"));
+            assert!(!format!("{event:?}").contains("/private/"));
+            assert_eq!(
+                event.source_failure_class.unwrap().as_str(),
+                if classes.len() == 1 {
+                    classes[0]
+                } else {
+                    "mixed"
+                }
+            );
+            let facts = event.foreground.unwrap();
+            assert_eq!(facts.refresh_result, ProviderRefreshResult::Partial);
+            assert!(facts.retryable && facts.work_remaining);
+
+            // More failures than retained details must not be classified from the prefix.
+            let route = &mut receipt.route_results[0];
+            route.source_failure_total = 2;
+            route.source_retryable_failure_total *= 2;
+            job["receipt"] = receipt.to_json();
+            assert!(refresh(provider_refresh_event(&job, false).unwrap())
+                .source_failure_class
+                .is_none());
+        }
     }
 }

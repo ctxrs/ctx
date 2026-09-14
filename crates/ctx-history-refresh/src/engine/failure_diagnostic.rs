@@ -5,6 +5,7 @@ use super::*;
 pub(super) struct RefreshFailureDiagnostic {
     pub(super) stage: RefreshFailureStage,
     pub(super) kind: RefreshFailureKind,
+    pub(super) coverage_reason: Option<ZeroSourcePublicationBlockReason>,
 }
 
 impl RefreshFailureDiagnostic {
@@ -31,7 +32,18 @@ impl RefreshFailureDiagnostic {
                 RefreshFailureKind::Unknown
             }
         });
-        Self { stage, kind }
+        let coverage_reason = error.and_then(|error| {
+            error.chain().find_map(|cause| {
+                cause
+                    .downcast_ref::<ZeroSourcePublicationBlocked>()
+                    .and_then(|error| error.reason())
+            })
+        });
+        Self {
+            stage,
+            kind,
+            coverage_reason,
+        }
     }
 
     // Missing, partial, and future diagnostic pairs must not block recovery.
@@ -39,6 +51,10 @@ impl RefreshFailureDiagnostic {
         Some(Self {
             stage: job.get("refresh_failure_stage")?.as_str()?.parse().ok()?,
             kind: job.get("refresh_failure_kind")?.as_str()?.parse().ok()?,
+            coverage_reason: job
+                .get("refresh_coverage_reason")
+                .and_then(Value::as_str)
+                .and_then(ZeroSourcePublicationBlockReason::parse),
         })
     }
 }

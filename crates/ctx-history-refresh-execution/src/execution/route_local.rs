@@ -497,6 +497,9 @@ fn register_automatic_hermes_profile_rename_retirements(
     Ok(())
 }
 
+#[cfg(test)]
+mod coverage_diagnostic_tests;
+
 fn classify_inventory_disposition(
     publication: &SourceBackedRefreshPublication,
     complete_inventory_routes: &BTreeSet<SourceRouteIdentity>,
@@ -521,7 +524,8 @@ fn classify_inventory_disposition(
             return SourceBackedInventoryDisposition::AuthoritativeEmpty(Vec::new());
         }
         return SourceBackedInventoryDisposition::UnsupportedOrUnavailable(
-            ZeroSourcePublicationBlocked::new(
+            ZeroSourcePublicationBlocked::with_reason(
+                ZeroSourcePublicationBlockReason::MissingTerminalAuthority,
                 "zero-source publication has no terminal route authority for retained or discovered routes",
             ),
         );
@@ -540,16 +544,20 @@ fn classify_inventory_disposition(
                 .map(|failure| format!(": {}", failure.detail))
                 .unwrap_or_default();
             return SourceBackedInventoryDisposition::UnsupportedOrUnavailable(
-                ZeroSourcePublicationBlocked::new(format!(
-                    "zero-source publication route {} did not complete authoritatively{}",
-                    result.route_identity, source_detail,
-                )),
+                ZeroSourcePublicationBlocked::with_reason(
+                    ZeroSourcePublicationBlockReason::RouteFailed,
+                    format!(
+                        "zero-source publication route {} did not complete authoritatively{}",
+                        result.route_identity, source_detail,
+                    ),
+                ),
             );
         }
         let Ok(route_identity) = SourceRouteIdentity::from_sha256(result.route_identity.clone())
         else {
             return SourceBackedInventoryDisposition::UnsupportedOrUnavailable(
-                ZeroSourcePublicationBlocked::new(
+                ZeroSourcePublicationBlocked::with_reason(
+                    ZeroSourcePublicationBlockReason::InvalidRouteIdentity,
                     "zero-source publication contains an invalid route identity",
                 ),
             );
@@ -569,7 +577,7 @@ fn classify_inventory_disposition(
             });
         let Some(kind) = kind else {
             return SourceBackedInventoryDisposition::UnsupportedOrUnavailable(
-                ZeroSourcePublicationBlocked::new(format!(
+                ZeroSourcePublicationBlocked::with_reason(ZeroSourcePublicationBlockReason::MissingEmptyAuthority, format!(
                     "zero-source publication route {} has neither a complete empty inventory nor confirmed deletion",
                     route_identity.as_str(),
                 )),

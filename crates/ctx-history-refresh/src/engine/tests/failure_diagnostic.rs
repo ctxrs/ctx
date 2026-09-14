@@ -147,3 +147,75 @@ fn diagnostic_pair(job: &Value) -> Value {
         job.get("refresh_failure_kind")
     ])
 }
+
+#[test]
+fn coverage_reason_survives_terminal_persistence_and_restart_without_changing_policy() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_root = temp.path().join("data");
+    let coordinator = CoreRefreshEngine::new();
+    let request_id = request_id(&coordinator.enqueue(None));
+    let first = coordinator
+        .run_next_with(
+            |_, _| {
+                Err(ZeroSourcePublicationBlocked::with_reason(
+                    ZeroSourcePublicationBlockReason::MissingTerminalAuthority,
+                    "private source path token=secret",
+                )
+                .into())
+            },
+            || Ok(None),
+            |_| Err(anyhow!("terminal persistence unavailable")),
+            |_| Ok(()),
+        )
+        .unwrap();
+    assert!(first.terminal_persistence_pending);
+    assert_eq!(
+        first.job["refresh_coverage_reason"],
+        "missing_terminal_authority"
+    );
+    assert!(coordinator
+        .status(&request_id)
+        .unwrap()
+        .get("refresh_coverage_reason")
+        .is_none());
+    let retry = coordinator
+        .run_next_with(
+            |_, _| panic!("must not recapture"),
+            || panic!("must not probe"),
+            |_| Ok(()),
+            |_| Ok(()),
+        )
+        .unwrap();
+    assert_eq!(
+        retry.job["refresh_coverage_reason"],
+        "missing_terminal_authority"
+    );
+    for reason in [
+        Some(json!("missing_terminal_authority")),
+        None,
+        Some(json!("/private/future")),
+        Some(json!(null)),
+    ] {
+        let mut job = retry.job.clone();
+        job.as_object_mut()
+            .unwrap()
+            .remove("refresh_coverage_reason");
+        if let Some(reason) = &reason {
+            job["refresh_coverage_reason"] = reason.clone();
+        }
+        write_daemon_job_status(&daemon_source_backed_refresh_job_path(&data_root), &job).unwrap();
+        let recovered = CoreRefreshEngine::new();
+        assert!(!recovered.recover(&data_root).unwrap());
+        let status = recovered.status(&request_id).unwrap();
+        assert_eq!(
+            status["structured_outcome"],
+            retry.job["structured_outcome"]
+        );
+        assert_eq!(
+            status.get("refresh_coverage_reason"),
+            reason
+                .as_ref()
+                .filter(|value| **value == json!("missing_terminal_authority"))
+        );
+    }
+}

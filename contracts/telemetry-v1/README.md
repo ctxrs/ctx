@@ -65,6 +65,19 @@ the optional pair `refresh_failure_stage` (`admission`, `execution`,
 known pair. These content-free diagnostics do not change the terminal outcome
 or retry policy and do not identify a provider or copy error text.
 
+Coverage failures with code `all_provider_terminal_coverage_unavailable` and a
+known stage/provider-kind pair may additionally carry `refresh_coverage_reason`:
+`catalog_unavailable`, `unsafe_root`, `missing_terminal_authority`, `route_failed`,
+`invalid_route_identity`, or `missing_empty_authority`. This comes from the typed
+publication blocker, never from parsing local error text. Older jobs omit it.
+
+Successful daemon partial refreshes with source or mixed failure scope may carry
+`refresh_source_failure_class`: `unavailable`, `source_changed`, `unreadable`,
+`incompatible`, or `mixed`. This describes only source failures, not rejected
+records. It is omitted when bounded source diagnostics cannot account for every
+source failure. Neither optional field includes a source identity, path, raw
+error, or exact count, and neither changes publication, retry, or retention.
+
 `runtime_observation@1` is reserved for low-frequency lifecycle and liveness
 observations. Daemon `ready` and jittered 23–24-hour `liveness` observations may
 carry one best-effort storage sidecar. No other runtime operation carries it,

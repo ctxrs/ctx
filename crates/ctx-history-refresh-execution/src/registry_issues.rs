@@ -14,12 +14,15 @@ impl RouteLessRegistryBlockers {
         } else {
             format!("; {omitted} additional route-less blocker(s) omitted")
         };
-        ZeroSourcePublicationBlocked::new(format!(
+        ZeroSourcePublicationBlocked::with_reason(
+            ZeroSourcePublicationBlockReason::CatalogUnavailable,
+            format!(
             "zero-source publication has {} unsupported or unavailable catalog blocker(s): {}{}",
             self.total,
             self.details.join("; "),
             omitted,
-        ))
+        ),
+        )
     }
 }
 
@@ -79,10 +82,13 @@ pub fn reject_blocking_automatic_registry_issues(
     } else {
         format!("; {omitted} additional systemic safety issue(s) omitted")
     };
-    Err(ZeroSourcePublicationBlocked::new(format!(
-        "capture automatic registry has {blocker_count} systemic safety issue(s): {}{omitted}",
-        blocker_details.join("; ")
-    ))
+    Err(ZeroSourcePublicationBlocked::with_reason(
+        ZeroSourcePublicationBlockReason::UnsafeRoot,
+        format!(
+            "capture automatic registry has {blocker_count} systemic safety issue(s): {}{omitted}",
+            blocker_details.join("; ")
+        ),
+    )
     .into())
 }
 
