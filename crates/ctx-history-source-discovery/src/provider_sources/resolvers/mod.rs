@@ -83,7 +83,7 @@ pub fn path_presence(path: &Path) -> PathPresence {
     match source_path_kind(path) {
         Ok(_) => PathPresence::Present,
         Err(SourcePathError::Missing) => PathPresence::Missing,
-        Err(SourcePathError::Unsupported) => PathPresence::Unsupported,
+        Err(SourcePathError::Unsupported(_)) => PathPresence::Unsupported,
         Err(SourcePathError::Unavailable(kind)) => PathPresence::Unknown(kind),
     }
 }

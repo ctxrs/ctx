@@ -24,6 +24,65 @@ fn fixed_limits_match_the_reviewed_discovery_contract() {
     assert_eq!(MAX_RENDERED_DIAGNOSTIC_BYTES, 512);
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn rejected_filesystems_keep_their_reason_across_root_selection() {
+    use crate::provider_sources::{
+        discover_provider_sources_for_provider_with_context, provider_source_for_path,
+        DiscoveryContext, DiscoveryPlatform, DiscoveryPlatformDirs, ProviderSourceStatus,
+        TEST_PROVIDER_PROBES,
+    };
+    use ctx_history_capture_model::ProviderRootDefinition;
+    use ctx_history_core::CaptureProvider;
+
+    let temp = tempdir();
+    let base = DiscoveryContext::new(
+        temp.path().to_path_buf(),
+        temp.path().to_path_buf(),
+        DiscoveryPlatform::Linux,
+        DiscoveryPlatformDirs::default(),
+    );
+    let reason = "provider source roots require a qualified local Linux filesystem";
+    for (provider, variable) in [
+        (CaptureProvider::Codex, "CODEX_HOME"),
+        (CaptureProvider::OpenCode, "OPENCODE_DB"),
+    ] {
+        let report = discover_provider_sources_for_provider_with_context(
+            &TEST_PROVIDER_PROBES,
+            &base.clone().with_env(variable, "/proc"),
+            provider,
+        );
+        assert!(report.sources.is_empty(), "{report:?}");
+        assert_eq!(report.issues.len(), 1, "{report:?}");
+        assert_eq!(report.issues[0].reason, reason);
+    }
+    let configured = base
+        .with_automatic_provider_discovery(false)
+        .with_configured_provider_roots(vec![ProviderRootDefinition {
+            id: "unsupported".to_owned(),
+            provider: CaptureProvider::Codex,
+            path: PathBuf::from("/proc"),
+            group: None,
+            kind: None,
+        }]);
+    let report = discover_provider_sources_for_provider_with_context(
+        &TEST_PROVIDER_PROBES,
+        &configured,
+        CaptureProvider::Codex,
+    );
+    assert!(report.sources.is_empty(), "{report:?}");
+    assert_eq!(report.issues.len(), 1, "{report:?}");
+    assert_eq!(report.issues[0].reason, reason);
+
+    let explicit = provider_source_for_path(
+        &TEST_PROVIDER_PROBES,
+        CaptureProvider::Codex,
+        PathBuf::from("/proc"),
+    );
+    assert_eq!(explicit.status, ProviderSourceStatus::Unsupported);
+    assert_eq!(explicit.unsupported_reason, Some(reason));
+}
+
 #[test]
 fn structured_helpers_require_exact_scalar_and_list_shapes() {
     let document = SelectorDocument::Structured(serde_json::json!({

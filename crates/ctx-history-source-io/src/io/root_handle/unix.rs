@@ -420,10 +420,13 @@ fn linux_filesystem_is_qualified(filesystem_type: i64) -> bool {
     const XFS_SUPER_MAGIC: i64 = 0x5846_5342;
     const BTRFS_SUPER_MAGIC: i64 = 0x9123_683E;
     const F2FS_SUPER_MAGIC: i64 = 0xF2F5_2010;
+    // tmpfs is kernel-local and provides nanosecond change timestamps, as
+    // required by the metadata-only ordinary-file change token.
+    const TMPFS_MAGIC: i64 = 0x0102_1994;
 
     matches!(
         filesystem_type,
-        EXT_SUPER_MAGIC | XFS_SUPER_MAGIC | BTRFS_SUPER_MAGIC | F2FS_SUPER_MAGIC
+        EXT_SUPER_MAGIC | XFS_SUPER_MAGIC | BTRFS_SUPER_MAGIC | F2FS_SUPER_MAGIC | TMPFS_MAGIC
     )
 }
 
@@ -512,6 +515,12 @@ mod tests {
                 "provider source paths must be regular files or directories"
             )
         ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn filesystem_policy_accepts_tmpfs_source_roots() {
+        assert!(super::linux_filesystem_is_qualified(0x0102_1994));
     }
 
     #[cfg(target_os = "linux")]
