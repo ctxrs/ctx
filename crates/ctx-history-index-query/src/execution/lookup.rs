@@ -41,17 +41,17 @@ impl VerifiedIndex {
     }
 
     /// Streams forward from one semantic user anchor until the next user and
-    /// returns all nonempty, discovery-eligible assistant text in that turn.
+    /// returns the latest nonempty assistant text in that turn.
     ///
     /// Session coordinates are sought directly in fixed-size term pages. Tool
     /// records remain metadata-only, assistant Core bodies are decoded one at
-    /// a time, and the byte budget applies across the complete turn.
-    pub fn semantic_lite_turn_assistants(
+    /// a time, and no session-wide collector or retained session cache is used.
+    pub fn semantic_lite_turn_assistant(
         &self,
         anchor: &CoreEventRecord,
         page_items: usize,
         pairing_budget: CoreEventPageBudget,
-    ) -> Result<Vec<SemanticTurnAssistant>> {
+    ) -> Result<Option<SemanticTurnAssistant>> {
         if !(1..=MAX_SEMANTIC_PAIRING_PAGE_ITEMS).contains(&page_items) {
             return Err(IndexError::InvalidSessionEventCoordinateLimit {
                 requested: page_items,
@@ -101,8 +101,7 @@ impl VerifiedIndex {
             .collect::<std::io::Result<Vec<_>>>()?;
         let mut merged = TermMerger::new(streams);
 
-        let mut assistant_messages = Vec::new();
-        let mut remaining_budget = pairing_budget;
+        let mut latest_assistant = None;
         loop {
             let candidates = session_event_address_page(
                 session_id,
@@ -112,7 +111,7 @@ impl VerifiedIndex {
                 segments,
             )?;
             if candidates.is_empty() {
-                return Ok(assistant_messages);
+                return Ok(latest_assistant);
             }
 
             for candidate in candidates {
@@ -152,27 +151,20 @@ impl VerifiedIndex {
                     continue;
                 }
                 if has_term(fields.role, "user")? {
-                    return Ok(assistant_messages);
+                    return Ok(latest_assistant);
                 }
                 if !has_term(fields.role, "assistant")? {
                     continue;
-                }
-                if remaining_budget.maximum_encoded_core_bytes == 0
-                    || remaining_budget.maximum_content_bytes == 0
-                {
-                    return Ok(assistant_messages);
                 }
 
                 let Some(batch) = self.core_events_by_ids_with_strict_budget(
                     &[event.event_id],
                     1,
-                    remaining_budget,
+                    pairing_budget,
                 )?
                 else {
-                    return Ok(assistant_messages);
+                    return Ok(None);
                 };
-                remaining_budget.maximum_encoded_core_bytes -= batch.encoded_core_bytes;
-                remaining_budget.maximum_content_bytes -= batch.content_bytes;
                 let assistant = batch.items.into_iter().next().ok_or(
                     IndexError::InvalidStoredDocumentField(SESSION_EVENT_ORDER_FIELD),
                 )?;
@@ -192,7 +184,7 @@ impl VerifiedIndex {
                 let text = assistant.core_record.content.meaningful_text().trim();
                 if !text.is_empty() {
                     let body = assistant.core_record.content.meaningful_text();
-                    assistant_messages.push(SemanticTurnAssistant {
+                    latest_assistant = Some(SemanticTurnAssistant {
                         event: assistant.event,
                         text: text.to_owned(),
                         content_start_char: body[..body.len() - body.trim_start().len()]

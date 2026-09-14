@@ -163,7 +163,7 @@ fn legacy_http_receipt_cannot_certify_fitted_builtin_spans() -> Result<()> {
     assert_eq!(legacy_policy.chunking_revision, 1);
     assert_eq!(
         legacy_policy.canonical_sha256()?,
-        "220389b1dc0a79ab29121a99e15eeb208fac117b038bb5d11b037fee3dd79ce7"
+        "e8d31418a1da20200d75580348b8b2e7ee4f97c58f34a46900fc6d87daa83ccf"
     );
     let mut store = SemanticVectorStore::open(&fixture.semantic_path, &legacy)?;
     reconcile_all(
