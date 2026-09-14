@@ -363,6 +363,9 @@ fn recover_terminal_attempt(
     attempt.publication_probe_us = publication_probe_us;
     attempt.failure_type = recover_optional_failure_type(job)?;
     attempt.last_error = optional_string(job, "last_error")?;
+    // Optional diagnostics never make an otherwise recoverable journal fail.
+    // Re-parse the closed vocabulary instead of carrying arbitrary local text.
+    attempt.failure_diagnostic = RefreshFailureDiagnostic::from_job(job);
     attempt.terminal_outcome = if state == SourceBackedRefreshState::Failed {
         recover_failure_outcome(
             job,

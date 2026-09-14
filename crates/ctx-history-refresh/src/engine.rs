@@ -8,6 +8,7 @@ mod admission_tests;
 mod attempt_helpers;
 mod coverage_contract;
 mod durable_queue;
+mod failure_diagnostic;
 mod generation_authority;
 mod generation_observation;
 mod progress_model;
@@ -22,6 +23,7 @@ mod test_support;
 mod tests;
 mod watch_routes;
 mod whole_run_eta;
+use crate::RefreshFailureStage as FailureStage;
 use attempt_helpers::*;
 use coverage_contract::{
     PostPublicationRouteCoverageFence, SourceBackedRefreshRouteCoverageCertificate,
@@ -34,6 +36,7 @@ use durable_queue::{
     durable_job_json, install_recovered_successors, job_with_queued_successors,
     recover_queued_root, recover_queued_successors,
 };
+use failure_diagnostic::RefreshFailureDiagnostic;
 use generation_authority::CoreRefreshTerminalSuccess;
 pub use generation_authority::PinnedCorePublication;
 use progress_model::{status_progress_total_sources_known, SourceBackedRefreshState};

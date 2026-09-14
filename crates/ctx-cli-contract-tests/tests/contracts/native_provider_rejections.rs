@@ -441,6 +441,58 @@ fn unsafe_default_source_is_rejected_before_inventory() {
 }
 
 #[cfg(unix)]
+#[test]
+fn doctor_reports_a_rejected_root_before_an_import_is_attempted() {
+    let temp = daemon_test_root();
+    let path = write_codex_message_fixture(
+        &temp.path().join("explicit-history"),
+        "root-health",
+        "previously indexed history",
+    );
+    json_output(ctx(&temp).args([
+        "import",
+        "--provider",
+        "codex",
+        "--path",
+        path.to_str().unwrap(),
+        "--format=json",
+        "--progress",
+        "none",
+    ]));
+    json_output(ctx(&temp).args(["daemon", "disable", "--format=json"]));
+    let before = json_output(ctx(&temp).args(["doctor", "--format=json"]));
+    assert_eq!(before["ok"], true, "{before:#}");
+
+    write_symlinked_claude_inventory_source(&temp);
+
+    let doctor = json_output(ctx(&temp).args(["doctor", "--format=json"]));
+    assert_eq!(doctor["ok"], false, "{doctor:#}");
+    assert!(
+        doctor["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|finding| {
+                finding
+                    .as_str()
+                    .is_some_and(|text| text.contains("source discovery"))
+            }),
+        "{doctor:#}"
+    );
+    ctx(&temp)
+        .arg("doctor")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("ctx found 1 issue"))
+        .stdout(predicate::str::contains("History coverage is partial"));
+    ctx(&temp)
+        .arg("status")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("ctx needs attention"));
+}
+
+#[cfg(unix)]
 fn write_symlinked_claude_inventory_source(temp: &TempDir) {
     let target = temp.path().join("claude-projects-target");
     fs::create_dir_all(&target).unwrap();

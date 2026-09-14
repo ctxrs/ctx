@@ -673,6 +673,7 @@ pub(super) fn new_refresh_attempt(
         failure_type: None,
         terminal_outcome: None,
         last_error: None,
+        failure_diagnostic: None,
     }
 }
 

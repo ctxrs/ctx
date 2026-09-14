@@ -18,6 +18,10 @@ use sha2::{Digest, Sha256};
 
 use super::{AuthorityOpenError, DirectoryEntryVisitError};
 
+#[cfg(target_os = "linux")]
+#[path = "ecryptfs.rs"]
+mod ecryptfs;
+
 #[cfg(any(target_os = "macos", target_os = "freebsd"))]
 use std::mem::size_of;
 
@@ -83,6 +87,10 @@ pub(super) fn normalize_authority_path(path: &Path) -> PathBuf {
 }
 
 pub(super) fn open_absolute(path: &Path) -> Result<OpenedPath, AuthorityOpenError> {
+    classify_opened(open_absolute_handle(path)?)
+}
+
+fn open_absolute_handle(path: &Path) -> Result<File, AuthorityOpenError> {
     let mut components = path.components().peekable();
     if !matches!(components.next(), Some(Component::RootDir)) {
         return Err(AuthorityOpenError::Rejected(
@@ -94,7 +102,6 @@ pub(super) fn open_absolute(path: &Path) -> Result<OpenedPath, AuthorityOpenErro
         OsStr::new("/"),
         Some(ExpectedType::Directory),
     )?;
-    let mut saw_component = false;
     while let Some(component) = components.next() {
         let Component::Normal(name) = component else {
             if matches!(component, Component::CurDir) {
@@ -104,14 +111,10 @@ pub(super) fn open_absolute(path: &Path) -> Result<OpenedPath, AuthorityOpenErro
                 "Unix provider source paths contain an unsupported component",
             ));
         };
-        saw_component = true;
         let expected = components.peek().map(|_| ExpectedType::Directory);
         current = open_component(current.as_raw_fd(), name, expected)?;
     }
-    if !saw_component {
-        return classify_opened(current);
-    }
-    classify_opened(current)
+    Ok(current)
 }
 
 pub(super) fn open_child(
@@ -373,14 +376,19 @@ fn classify_opened(file: File) -> Result<OpenedPath, AuthorityOpenError> {
 }
 
 #[cfg(target_os = "linux")]
-fn filesystem_identity(file: &File) -> Result<FilesystemIdentity, AuthorityOpenError> {
+fn filesystem_stat(file: &File) -> io::Result<libc::statfs> {
     let mut filesystem = MaybeUninit::<libc::statfs>::zeroed();
     if unsafe { libc::fstatfs(file.as_raw_fd(), filesystem.as_mut_ptr()) } != 0 {
-        return Err(io::Error::last_os_error().into());
+        return Err(io::Error::last_os_error());
     }
-    let filesystem = unsafe { filesystem.assume_init() };
+    Ok(unsafe { filesystem.assume_init() })
+}
+
+#[cfg(target_os = "linux")]
+fn filesystem_identity(file: &File) -> Result<FilesystemIdentity, AuthorityOpenError> {
+    let filesystem = filesystem_stat(file)?;
     let filesystem_type = filesystem.f_type;
-    if !linux_filesystem_is_qualified(filesystem_type) {
+    if filesystem_type != ecryptfs::SUPER_MAGIC && !linux_filesystem_is_qualified(filesystem_type) {
         return Err(AuthorityOpenError::Rejected(
             "provider source roots require a qualified local Linux filesystem",
         ));
@@ -407,6 +415,9 @@ fn filesystem_identity(file: &File) -> Result<FilesystemIdentity, AuthorityOpenE
         return Err(AuthorityOpenError::Rejected(
             "Linux mount identity is unavailable for provider source authority",
         ));
+    }
+    if filesystem_type == ecryptfs::SUPER_MAGIC {
+        ecryptfs::qualify_backing(&filesystem, statx.stx_mnt_id)?;
     }
     Ok(FilesystemIdentity {
         filesystem_type,
@@ -521,6 +532,12 @@ mod tests {
     #[test]
     fn filesystem_policy_accepts_tmpfs_source_roots() {
         assert!(super::linux_filesystem_is_qualified(0x0102_1994));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn filesystem_policy_requires_backing_check_for_ecryptfs() {
+        assert!(!super::linux_filesystem_is_qualified(0xF15F));
     }
 
     #[cfg(target_os = "linux")]

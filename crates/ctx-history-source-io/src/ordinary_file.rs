@@ -490,6 +490,17 @@ mod tests {
         let path = temp.path().join("source.jsonl");
         let source = vec![b'a'; 128 * 1024];
         std::fs::write(&path, source).unwrap();
+        // Use an exactly restorable mtime even on eCryptfs, which truncates
+        // explicitly set mtimes to seconds while retaining subsecond ctime.
+        File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(
+                std::fs::FileTimes::new()
+                    .set_modified(UNIX_EPOCH + Duration::from_secs(1_700_000_000)),
+            )
+            .unwrap();
         let original_modified = std::fs::metadata(&path).unwrap().modified().unwrap();
         let first = observe_ordinary_file(&path).unwrap();
 

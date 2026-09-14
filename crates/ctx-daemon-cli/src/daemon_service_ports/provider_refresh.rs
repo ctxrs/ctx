@@ -2,18 +2,18 @@ use std::time::Duration;
 
 use ctx_history_core::CaptureProvider;
 use ctx_history_refresh::{
-    published_refresh_receipt_for_recovery, RefreshOutcomeCode, RefreshStatus, RefreshStatusKind,
-    RefreshTerminalFailureScope, RefreshTerminalFailureType, SourceBackedRefreshProgress,
-    SourceBackedRefreshReceipt,
+    published_refresh_receipt_for_recovery, RefreshFailureKind, RefreshFailureStage,
+    RefreshOutcomeCode, RefreshStatus, RefreshStatusKind, RefreshTerminalFailureScope,
+    RefreshTerminalFailureType, SourceBackedRefreshProgress, SourceBackedRefreshReceipt,
 };
 use serde_json::Value;
 
 use ctx_client_observability::analytics::{
     duration_bucket, DurationBucket, ForegroundProviderRefreshV1, Outcome, ProviderCoreResult,
     ProviderRefreshChange, ProviderRefreshCompletedV1, ProviderRefreshCountsV1,
-    ProviderRefreshFailureCode, ProviderRefreshFailureScope, ProviderRefreshFailureType,
-    ProviderRefreshResult, ProviderRefreshTerminalHealthV1, ProviderRefreshTrigger, PublicEventV1,
-    Surface,
+    ProviderRefreshFailureCode, ProviderRefreshFailureKind, ProviderRefreshFailureScope,
+    ProviderRefreshFailureStage, ProviderRefreshFailureType, ProviderRefreshResult,
+    ProviderRefreshTerminalHealthV1, ProviderRefreshTrigger, PublicEventV1, Surface,
 };
 
 pub(super) fn provider_refresh_event(
@@ -130,7 +130,30 @@ fn failed_provider_refresh_event(
         .with_terminal_health(refresh_terminal_health(
             successor_pending,
             Some(retained_previous_generation),
-        )),
+        ))
+        .with_failure_diagnostic(refresh_failure_diagnostic(job)),
+    ))
+}
+
+fn refresh_failure_diagnostic(
+    job: &Value,
+) -> Option<(ProviderRefreshFailureStage, ProviderRefreshFailureKind)> {
+    // Legacy, partial, or unknown pairs are unobserved, never guessed from text.
+    let stage = job.get("refresh_failure_stage")?.as_str()?.parse().ok()?;
+    let kind = job.get("refresh_failure_kind")?.as_str()?.parse().ok()?;
+    Some((
+        match stage {
+            RefreshFailureStage::Admission => ProviderRefreshFailureStage::Admission,
+            RefreshFailureStage::Execution => ProviderRefreshFailureStage::Execution,
+            RefreshFailureStage::Verification => ProviderRefreshFailureStage::Verification,
+            RefreshFailureStage::Finalization => ProviderRefreshFailureStage::Finalization,
+        },
+        match kind {
+            RefreshFailureKind::Io => ProviderRefreshFailureKind::Io,
+            RefreshFailureKind::Index => ProviderRefreshFailureKind::Index,
+            RefreshFailureKind::Provider => ProviderRefreshFailureKind::Provider,
+            RefreshFailureKind::Unknown => ProviderRefreshFailureKind::Unknown,
+        },
     ))
 }
 
@@ -500,7 +523,47 @@ mod tests {
             },
         });
 
-        let event = refresh(provider_refresh_event(&job, true).expect("failed refresh event"));
+        let original = refresh(provider_refresh_event(&job, true).expect("failed refresh event"));
+        assert_eq!(original.failure_diagnostic, None);
+        let mut diagnosed_job = job.clone();
+        diagnosed_job["refresh_failure_stage"] = json!("execution");
+        diagnosed_job["refresh_failure_kind"] = json!("provider");
+        diagnosed_job["last_error"] = json!("io claude /private/history token=secret");
+        let mut diagnosed = refresh(provider_refresh_event(&diagnosed_job, true).unwrap());
+        assert_eq!(
+            diagnosed.failure_diagnostic.take(),
+            Some((
+                ProviderRefreshFailureStage::Execution,
+                ProviderRefreshFailureKind::Provider
+            )),
+        );
+        assert_eq!(
+            format!("{diagnosed:?}"),
+            format!("{original:?}"),
+            "diagnostics must not override provider, outcome, or retry policy",
+        );
+        for pair in [
+            json!([null, null]),
+            json!(["execution", null]),
+            json!([null, "io"]),
+            json!(["future", "io"]),
+            json!(["execution", "private text"]),
+        ] {
+            diagnosed_job["refresh_failure_stage"] = pair[0].clone();
+            diagnosed_job["refresh_failure_kind"] = pair[1].clone();
+            assert_eq!(
+                refresh(provider_refresh_event(&diagnosed_job, true).unwrap()).failure_diagnostic,
+                None
+            );
+        }
+        let mut success = completed_job("periodic", None, true);
+        success["refresh_failure_stage"] = json!("execution");
+        success["refresh_failure_kind"] = json!("provider");
+        assert_eq!(
+            refresh(provider_refresh_event(&success, false).unwrap()).failure_diagnostic,
+            None
+        );
+        let event = original;
         let facts = event.foreground.expect("refresh facts");
 
         assert_eq!(event.outcome, Outcome::Failure);
