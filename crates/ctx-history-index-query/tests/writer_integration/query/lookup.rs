@@ -359,13 +359,12 @@ fn semantic_pairing_many_user_turns_uses_bounded_direct_session_pages() {
     for anchor in &anchors {
         let turn = (anchor.event_sequence - 1) / 2;
         let paired = index
-            .semantic_lite_turn_assistants(
+            .semantic_lite_turn_assistant(
                 anchor,
                 PAIRING_PAGE_ITEMS,
                 DEFAULT_CORE_EVENT_PAGE_BUDGET,
             )
             .unwrap()
-            .pop()
             .unwrap();
         assert_eq!(paired.text, format!("answer {turn}"));
     }
@@ -415,9 +414,8 @@ fn semantic_pairing_rejects_excluded_anchor_and_skips_excluded_assistant_content
         .unwrap()
         .unwrap();
     let paired = index
-        .semantic_lite_turn_assistants(&anchor, 4, DEFAULT_CORE_EVENT_PAGE_BUDGET)
+        .semantic_lite_turn_assistant(&anchor, 4, DEFAULT_CORE_EVENT_PAGE_BUDGET)
         .unwrap()
-        .pop()
         .unwrap();
     assert_eq!(paired.text, "ordinary assistant answer");
     assert_eq!(paired.event.event_id, ordinary_assistant.event_id);
@@ -431,7 +429,7 @@ fn semantic_pairing_rejects_excluded_anchor_and_skips_excluded_assistant_content
         .unwrap()
         .unwrap();
     assert!(matches!(
-        index.semantic_lite_turn_assistants(&excluded_anchor, 4, DEFAULT_CORE_EVENT_PAGE_BUDGET),
+        index.semantic_lite_turn_assistant(&excluded_anchor, 4, DEFAULT_CORE_EVENT_PAGE_BUDGET),
         Err(IndexError::InvalidStoredDocumentField(_))
     ));
     assert_eq!(
@@ -441,102 +439,6 @@ fn semantic_pairing_rejects_excluded_anchor_and_skips_excluded_assistant_content
             .unwrap(),
         excluded_assistant
     );
-}
-
-#[test]
-fn semantic_pairing_collects_assistants_in_order_under_one_aggregate_budget() {
-    let temp = tempdir().unwrap();
-    let source = source("semantic-pairing-all-assistants.jsonl");
-    let user = document(&source, 1, "Run check A");
-    let mut first_assistant = document(&source, 2, "The amber falcon owns relay 47");
-    first_assistant.role = Some("assistant".to_owned());
-    let mut final_assistant = document(&source, 3, "Done");
-    final_assistant.role = Some("assistant".to_owned());
-    let next_user = document(&source, 4, "Continue");
-    let first_encoded_bytes = first_assistant.encode_stored().unwrap().len();
-
-    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
-        .unwrap()
-        .into_writer()
-        .unwrap();
-    writer.begin_source(source.clone()).unwrap();
-    for record in [
-        user.clone(),
-        first_assistant.clone(),
-        final_assistant.clone(),
-        next_user,
-    ] {
-        writer.add_core_record(record).unwrap();
-    }
-    writer.certify_source(certificate(&source, 1, 4)).unwrap();
-    writer.commit(|_| true).unwrap();
-
-    let index = VerifiedIndex::open_pinned(temp.path()).unwrap();
-    let anchor = index
-        .core_event_by_id(user.event_id.as_uuid())
-        .unwrap()
-        .unwrap();
-    let assistants = index
-        .semantic_lite_turn_assistants(&anchor, 4, DEFAULT_CORE_EVENT_PAGE_BUDGET)
-        .unwrap();
-    assert_eq!(
-        assistants
-            .iter()
-            .map(|assistant| (
-                assistant.text.clone(),
-                assistant.event.occurred_at_unix_ms.unwrap(),
-            ))
-            .collect::<Vec<_>>(),
-        vec![
-            (
-                "The amber falcon owns relay 47".to_owned(),
-                first_assistant.occurred_at_unix_ms.unwrap(),
-            ),
-            (
-                "Done".to_owned(),
-                final_assistant.occurred_at_unix_ms.unwrap(),
-            ),
-        ]
-    );
-
-    let content_bytes = first_assistant.content.meaningful_text().len();
-    let total_encoded_bytes = first_encoded_bytes + final_assistant.encode_stored().unwrap().len();
-    let total_content_bytes = content_bytes + final_assistant.content.meaningful_text().len();
-    let full = DEFAULT_CORE_EVENT_PAGE_BUDGET;
-    for (encoded_limit, content_limit, count) in [
-        (first_encoded_bytes, full.maximum_content_bytes, 1),
-        (full.maximum_encoded_core_bytes, content_bytes, 1),
-        (first_encoded_bytes - 1, full.maximum_content_bytes, 0),
-        (full.maximum_encoded_core_bytes, content_bytes - 1, 0),
-        (total_encoded_bytes, total_content_bytes, 2),
-        (total_encoded_bytes - 1, full.maximum_content_bytes, 1),
-        (full.maximum_encoded_core_bytes, total_content_bytes - 1, 1),
-    ] {
-        ctx_history_index_query::reset_core_record_decodes();
-        ctx_history_index_query::reset_stored_event_record_materializations();
-        ctx_history_index_query::reset_stored_core_event_record_materializations();
-        let bounded = index
-            .semantic_lite_turn_assistants(
-                &anchor,
-                1,
-                CoreEventPageBudget::new(encoded_limit, content_limit),
-            )
-            .unwrap();
-        assert_eq!(bounded.len(), count);
-        for (actual, expected) in bounded.iter().zip(&assistants) {
-            assert_eq!(actual.text, expected.text);
-            assert_eq!(actual.event.event_id, expected.event.event_id);
-        }
-        assert_eq!(ctx_history_index_query::core_record_decodes(), count);
-        assert_eq!(
-            ctx_history_index_query::stored_event_record_materializations(),
-            0
-        );
-        assert_eq!(
-            ctx_history_index_query::stored_core_event_record_materializations(),
-            count
-        );
-    }
 }
 
 #[test]
@@ -601,9 +503,8 @@ fn semantic_pairing_preserves_copied_assistant_content() {
         .unwrap()
         .unwrap();
     let paired = index
-        .semantic_lite_turn_assistants(&anchor, 4, DEFAULT_CORE_EVENT_PAGE_BUDGET)
+        .semantic_lite_turn_assistant(&anchor, 4, DEFAULT_CORE_EVENT_PAGE_BUDGET)
         .unwrap()
-        .pop()
         .unwrap();
 
     assert_eq!(paired.text, "copied answer must pair");
@@ -667,7 +568,7 @@ fn semantic_pairing_crosses_more_than_sixty_four_tool_events_body_free() {
     ctx_history_index_query::reset_stored_core_event_record_materializations();
     ctx_history_index_query::reset_session_event_order_term_visits();
     let paired = index
-        .semantic_lite_turn_assistants(
+        .semantic_lite_turn_assistant(
             &anchor,
             64,
             CoreEventPageBudget::new(
@@ -676,7 +577,6 @@ fn semantic_pairing_crosses_more_than_sixty_four_tool_events_body_free() {
             ),
         )
         .unwrap()
-        .pop()
         .unwrap();
 
     assert_eq!(paired.text, "answer beyond old window");
@@ -808,9 +708,8 @@ fn semantic_pairing_many_segments_merges_each_order_term_once_across_pages_and_r
         ctx_history_index_query::reset_stored_core_event_record_materializations();
         ctx_history_index_query::reset_session_event_order_term_visits();
         let paired = index
-            .semantic_lite_turn_assistants(&anchor, PAGE_ITEMS, DEFAULT_CORE_EVENT_PAGE_BUDGET)
+            .semantic_lite_turn_assistant(&anchor, PAGE_ITEMS, DEFAULT_CORE_EVENT_PAGE_BUDGET)
             .unwrap()
-            .pop()
             .unwrap();
 
         assert_eq!(
@@ -850,6 +749,77 @@ fn semantic_pairing_many_segments_merges_each_order_term_once_across_pages_and_r
     drop(first_pin);
     let reopened = VerifiedIndex::open_pinned(temp.path()).unwrap();
     assert_traversal(&reopened);
+}
+
+#[test]
+fn semantic_pairing_keeps_only_final_answer_with_pre_decode_per_record_limits() {
+    let temp = tempdir().unwrap();
+    let source = source("final-only-semantic-turn.jsonl");
+    let user = document(&source, 1, "question");
+    let mut intermediate = document(&source, 2, &"intermediate explanation ".repeat(32));
+    intermediate.role = Some("assistant".to_owned());
+    let mut final_answer = document(&source, 3, "final answer");
+    final_answer.role = Some("assistant".to_owned());
+    let next_user = document(&source, 4, "next question");
+    let encoded_limit = intermediate.encode_stored().unwrap().len();
+    let content_limit = intermediate.content.meaningful_text().len();
+    assert!(encoded_limit > final_answer.encode_stored().unwrap().len());
+    assert!(content_limit > final_answer.content.meaningful_text().len());
+
+    let mut writer = GenerationWriter::open(temp.path(), WriterOptions::default())
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    writer.begin_source(source.clone()).unwrap();
+    for record in [user.clone(), intermediate, final_answer.clone(), next_user] {
+        writer.add_core_record(record).unwrap();
+    }
+    writer.certify_source(certificate(&source, 1, 4)).unwrap();
+    writer.commit(|_| true).unwrap();
+
+    let index = VerifiedIndex::open(temp.path()).unwrap();
+    let anchor = index
+        .core_event_by_id(user.event_id.as_uuid())
+        .unwrap()
+        .unwrap();
+    for page_items in [1, 4] {
+        ctx_history_index_query::reset_core_record_decodes();
+        ctx_history_index_query::reset_stored_event_record_materializations();
+        let paired = index
+            .semantic_lite_turn_assistant(
+                &anchor,
+                page_items,
+                CoreEventPageBudget::new(encoded_limit, content_limit),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(paired.text, "final answer");
+        assert_eq!(paired.event.event_id, final_answer.event_id);
+        assert_eq!(ctx_history_index_query::core_record_decodes(), 2);
+        assert_eq!(
+            ctx_history_index_query::stored_event_record_materializations(),
+            0
+        );
+    }
+
+    // Each limit is checked before decoding even the first assistant. Limits
+    // apply to each record, not an accumulated prefix that could omit the final.
+    for budget in [
+        CoreEventPageBudget::new(encoded_limit - 1, content_limit),
+        CoreEventPageBudget::new(encoded_limit, content_limit - 1),
+    ] {
+        ctx_history_index_query::reset_core_record_decodes();
+        ctx_history_index_query::reset_stored_event_record_materializations();
+        assert!(index
+            .semantic_lite_turn_assistant(&anchor, 1, budget)
+            .unwrap()
+            .is_none());
+        assert_eq!(ctx_history_index_query::core_record_decodes(), 0);
+        assert_eq!(
+            ctx_history_index_query::stored_event_record_materializations(),
+            0
+        );
+    }
 }
 
 #[test]

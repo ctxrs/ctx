@@ -39,8 +39,8 @@ impl<'a> SourceBackedSemanticDocumentBuilder<'a> {
         }
     }
 
-    fn paired_assistants(&self, anchor: &CoreEventRecord) -> Result<Vec<SemanticTurnAssistant>> {
-        Ok(self.index.semantic_lite_turn_assistants(
+    fn paired_assistant(&self, anchor: &CoreEventRecord) -> Result<Option<SemanticTurnAssistant>> {
+        Ok(self.index.semantic_lite_turn_assistant(
             anchor,
             self.pairing_page_records,
             self.pairing_budget,
@@ -65,12 +65,10 @@ impl<'a> SourceBackedSemanticDocumentBuilder<'a> {
         }];
         let mut occurred_at_ms = record.occurred_at_unix_ms.unwrap_or_default();
         if !semantic_core_content_is_control(&sections[0]) {
-            let mut source_chars = sections[0].chars().count();
-            for assistant in self.paired_assistants(record)? {
-                let start = source_chars + 2 + "assistant:\n".len();
-                source_chars = start + assistant.text.chars().count();
+            if let Some(assistant) = self.paired_assistant(record)? {
+                let start = sections[0].chars().count() + 2 + "assistant:\n".len();
                 members.push(SourceMember {
-                    source_range: start..source_chars,
+                    source_range: start..start + assistant.text.chars().count(),
                     content_start_char: assistant.content_start_char,
                     event: assistant.event.clone(),
                 });

@@ -34,7 +34,6 @@ mod bounded_reconciliation;
 mod content;
 mod filter_accounting;
 mod generation_identity;
-mod lite_turn;
 mod manifest_budget;
 mod policy_rebuild;
 mod proportionality;
@@ -435,7 +434,7 @@ fn reconcile_generation(
     store: &mut SemanticVectorStore,
     index: &VerifiedIndex,
     generation: &SourceBackedSemanticGeneration,
-    builder: &mut dyn SemanticDocumentBuilder,
+    builder: &mut CoreBuilder,
     embedder: &mut dyn SemanticBatchEmbedder,
 ) -> Result<SourceBackedSemanticOutcome> {
     let mut total = SourceBackedSemanticOutcome::default();
