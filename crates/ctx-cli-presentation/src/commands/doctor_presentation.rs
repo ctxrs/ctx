@@ -164,8 +164,7 @@ pub fn render_doctor_human(
     let coverage_has_root_issues = coverage
         .and_then(|coverage| coverage.provider_roots)
         .is_some_and(|roots| roots.partial > 0 || roots.excluded > 0 || roots.unknown > 0);
-    let coverage_has_refresh_issues = coverage
-        .is_some_and(|coverage| coverage.source_failures > 0 || coverage.rejected_records > 0);
+    let coverage_has_refresh_issues = coverage.is_some_and(|coverage| coverage.source_failures > 0);
     let (text, command) = if findings
         .iter()
         .any(|finding| finding.contains("(heartbeat_stale)"))
@@ -181,6 +180,11 @@ pub fn render_doctor_human(
         )
     } else if refresh_failed || coverage_has_refresh_issues {
         ("Re-run the bounded history refresh.", "ctx import --all")
+    } else if coverage.is_some_and(|coverage| coverage.rejected_records > 0) {
+        (
+            "Inspect rejected-record diagnostics; retrying unchanged input may not help.",
+            "ctx doctor --format json",
+        )
     } else if coverage_has_root_issues {
         (
             "Inspect every provider location and its import status.",
@@ -434,6 +438,25 @@ mod ui_tests {
             source_epoch_findings(&failures, false),
             vec!["refresh is partial (completed_with_source_failures)"],
         );
+    }
+
+    #[test]
+    fn rejected_records_do_not_recommend_repeating_unchanged_input() {
+        let coverage = HistoryHealthReport {
+            rejected_records: 10,
+            ..HistoryHealthReport::default()
+        };
+        for width in [32, 80, 120] {
+            let context = context(width);
+            let document = render_doctor_human(&context, &[], Some(&coverage), None);
+            let rendered = document.render_plain();
+            let text = rendered.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert!(text.contains("History coverage is partial"), "{rendered}");
+            assert!(text.contains("rejected-record diagnostics"), "{rendered}");
+            assert!(text.contains("ctx doctor --format json"), "{rendered}");
+            assert!(!text.contains("ctx import --all"), "{rendered}");
+            assert_fits(&document, &context);
+        }
     }
 
     #[test]
