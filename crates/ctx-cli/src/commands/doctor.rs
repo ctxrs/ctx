@@ -10,6 +10,9 @@ use crate::ui::Ui;
 use crate::DoctorArgs;
 use ctx_app_config::AppConfig;
 
+const SOURCE_DISCOVERY_FINDING: &str =
+    "provider source discovery is incomplete; run `ctx sources --all` for details";
+
 pub(crate) fn run_doctor(
     args: DoctorArgs,
     data_root: PathBuf,
@@ -17,7 +20,7 @@ pub(crate) fn run_doctor(
     ui: &mut Ui,
 ) -> Result<()> {
     let json_output = args.format.is_json();
-    let mut model = doctor_read_model(&data_root)?;
+    let model = doctor_read_model(&data_root)?;
     let findings = model.facts["findings"]
         .as_array()
         .into_iter()
@@ -30,11 +33,11 @@ pub(crate) fn run_doctor(
         telemetry.healthy = Some(findings.is_empty());
         print_json(model.facts)?;
     } else {
-        super::history_health::reconcile_history_inventory(
-            &mut model.health,
-            &data_root,
-            &model.config,
-        )?;
+        // Human presentation already renders the inventory's coverage finding.
+        let findings = findings
+            .into_iter()
+            .filter(|finding| finding != SOURCE_DISCOVERY_FINDING)
+            .collect::<Vec<_>>();
         let coverage_issue = model
             .health
             .as_ref()
@@ -118,7 +121,6 @@ pub(crate) fn doctor_facts(data_root: &std::path::Path) -> Result<Value> {
 struct DoctorReadModel {
     facts: Value,
     health: Option<ctx_history_read_application::HistoryHealthReport>,
-    config: AppConfig,
 }
 
 fn doctor_read_model(data_root: &std::path::Path) -> Result<DoctorReadModel> {
@@ -127,11 +129,19 @@ fn doctor_read_model(data_root: &std::path::Path) -> Result<DoctorReadModel> {
         findings.push(format!("data root does not exist: {}", data_root.display()));
     }
     let config = AppConfig::load(data_root)?;
-    let source = source_epoch_status_report(data_root, &config)?;
+    let mut source = source_epoch_status_report(data_root, &config)?;
+    super::history_health::reconcile_history_inventory(&mut source.health, data_root, &config)?;
     findings.extend(ctx_cli_presentation::commands::source_epoch_findings(
         &source.report,
         config.semantic_search_enabled(),
     ));
+    if source.health.as_ref().is_some_and(|health| {
+        health
+            .provider_roots
+            .is_some_and(|roots| roots.partial > 0 || roots.excluded > 0 || roots.unknown > 0)
+    }) {
+        findings.push(SOURCE_DISCOVERY_FINDING.to_owned());
+    }
     let daemon = source.report["daemon"].clone();
     let upgrade_diagnostics = crate::upgrade::upgrade_diagnostics(&config);
     findings.extend(upgrade_diagnostics.findings);
@@ -147,7 +157,6 @@ fn doctor_read_model(data_root: &std::path::Path) -> Result<DoctorReadModel> {
     Ok(DoctorReadModel {
         facts,
         health: source.health,
-        config,
     })
 }
 

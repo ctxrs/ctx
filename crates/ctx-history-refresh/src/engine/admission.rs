@@ -900,6 +900,10 @@ impl CoreRefreshEngine {
             attempt.failure_type = source_backed_refresh_failure_type(&error);
             attempt.terminal_outcome = Some(failure_outcome);
             attempt.last_error = Some(last_error.clone());
+            attempt.failure_diagnostic = Some(RefreshFailureDiagnostic::new(
+                FailureStage::Admission,
+                Some(&error),
+            ));
             (attempt.refresh_scope.clone(), last_error)
         };
         let job = durable_job_json(state, request_id)

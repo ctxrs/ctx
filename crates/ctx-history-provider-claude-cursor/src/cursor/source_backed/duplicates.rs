@@ -12,8 +12,9 @@ use ctx_history_source_io::MAX_PROVIDER_JSONL_LINE_BYTES;
 use sha2::Digest;
 
 use super::super::{
-    layout::CursorTranscriptPath, parser::project_cursor_jsonl_record,
-    projection::CursorNativeEvent,
+    layout::CursorTranscriptPath,
+    parser::project_cursor_jsonl_record,
+    projection::{CursorNativeEvent, CursorTimestampState},
 };
 #[cfg(any(test, feature = "test-support"))]
 use super::CURSOR_SIGNATURE_RECORDS;
@@ -195,6 +196,7 @@ fn visit_cursor_events(
     let mut physical_ordinal = 0_u64;
     let mut offset = 0_u64;
     let frozen_len = source.len();
+    let mut timestamps = CursorTimestampState::default();
     while offset < frozen_len {
         let record = read_bounded_record_unhashed(
             &mut reader,
@@ -217,7 +219,7 @@ fn visit_cursor_events(
             && line.len() <= MAX_PROVIDER_JSONL_LINE_BYTES
             && !line.is_empty()
         {
-            if let Some(events) = project_cursor_jsonl_record(
+            if let Some(mut events) = project_cursor_jsonl_record(
                 &line,
                 physical_ordinal,
                 physical_ordinal,
@@ -226,6 +228,7 @@ fn visit_cursor_events(
                     CaptureError::InvalidPayload("Cursor line length exceeds u64".to_owned())
                 })?,
             )? {
+                timestamps.apply(&mut events)?;
                 for event in events {
                     visit(event)?;
                 }

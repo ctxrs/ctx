@@ -288,7 +288,7 @@ impl LocalToolBackend {
             ToolEventContent::None => EventContentProjection::None,
         };
         let wire = EventQueryWireRequest::from_selection(&selection, content, limit);
-        let record_bytes = mcp_event_query_core_record_bytes(request.output_limit_bytes);
+        let record_bytes = mcp_event_query_core_record_bytes(request.output_limit_bytes, content);
         let strict_budget =
             CoreEventPageBudget::new(record_bytes, record_bytes.min(MAX_CORE_CONTENT_BYTES));
         event_range_page_value(

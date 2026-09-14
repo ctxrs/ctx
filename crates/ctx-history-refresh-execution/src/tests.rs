@@ -432,7 +432,7 @@ fn route_local_rejects_a_stale_verified_generation_before_staging() {
     );
 }
 
-fn test_publication(generation_id: impl Into<String>) -> SourceBackedRefreshPublication {
+pub(crate) fn test_publication(generation_id: impl Into<String>) -> SourceBackedRefreshPublication {
     SourceBackedRefreshPublication {
         route_results: Vec::new(),
         zero_source_authority: Vec::new(),

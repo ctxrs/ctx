@@ -1,4 +1,5 @@
 mod catalog_witness;
+mod coverage_reason;
 mod current_state;
 mod execution;
 mod explicit_source_catalog;
@@ -55,6 +56,7 @@ use ctx_history_index::{
 use serde_json::{json, Value};
 
 use catalog_witness::reconcile_published_catalog_witness;
+pub use coverage_reason::ZeroSourcePublicationBlockReason;
 pub use ctx_history_capture::{SourceBackedReconciliationDemand, SourceBackedRefreshScope};
 pub use current_state::SourceBackedRefreshCurrent;
 #[doc(hidden)]
@@ -125,6 +127,7 @@ const TERMINAL_COVERAGE_ERROR_CODE: &str = "all_provider_terminal_coverage_unava
 #[derive(Debug)]
 pub struct ZeroSourcePublicationBlocked {
     detail: String,
+    reason: Option<ZeroSourcePublicationBlockReason>,
 }
 
 impl ZeroSourcePublicationBlocked {
@@ -132,7 +135,22 @@ impl ZeroSourcePublicationBlocked {
     pub fn new(detail: impl Into<String>) -> Self {
         Self {
             detail: detail.into(),
+            reason: None,
         }
+    }
+
+    pub fn with_reason(
+        reason: ZeroSourcePublicationBlockReason,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self {
+            detail: detail.into(),
+            reason: Some(reason),
+        }
+    }
+
+    pub fn reason(&self) -> Option<ZeroSourcePublicationBlockReason> {
+        self.reason
     }
 }
 

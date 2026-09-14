@@ -304,6 +304,13 @@ fn only_unscopable_registry_safety_issues_block_globally() {
         .downcast_ref::<ZeroSourcePublicationBlocked>()
         .is_some());
     assert!(format!("{error:#}").contains("injected unsafe root overlap"));
+    assert_eq!(
+        error
+            .downcast_ref::<ZeroSourcePublicationBlocked>()
+            .unwrap()
+            .reason(),
+        Some(ZeroSourcePublicationBlockReason::UnsafeRoot)
+    );
 
     let configured_conflict = SourceBackedAutomaticRegistryIssue::Discovery(DiscoveryIssue {
         provider: CaptureProvider::Claude,
@@ -316,6 +323,13 @@ fn only_unscopable_registry_safety_issues_block_globally() {
         .downcast_ref::<ZeroSourcePublicationBlocked>()
         .is_some());
     assert!(format!("{error:#}").contains("injected configured root conflict"));
+    assert_eq!(
+        error
+            .downcast_ref::<ZeroSourcePublicationBlocked>()
+            .unwrap()
+            .reason(),
+        Some(ZeroSourcePublicationBlockReason::UnsafeRoot)
+    );
 }
 
 #[test]

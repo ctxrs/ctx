@@ -75,7 +75,8 @@ pub use ctx_history_refresh_execution::{
     SourceBackedRefreshRecordRejection, SourceBackedRefreshRouteOutcome,
     SourceBackedRefreshRouteResult, SourceBackedRefreshSourceFailure, SourceBackedRefreshTimings,
     SourceBackedRefreshWorkset, SourceBackedZeroSourceAuthority,
-    SourceBackedZeroSourceAuthorityKind, ZeroSourcePublicationBlocked,
+    SourceBackedZeroSourceAuthorityKind, ZeroSourcePublicationBlockReason,
+    ZeroSourcePublicationBlocked,
 };
 pub use engine::{
     CoreRefreshEngine as RefreshEngine, PinnedCorePublication, RefreshRuntime,
@@ -94,10 +95,10 @@ pub use publication::{
     published_refresh_receipt, MissingActiveGeneration, PinnedSourceBackedGeneration,
 };
 pub use request::{
-    AdmissionResponseBarrier, RefreshAdmission, RefreshIntent, RefreshLogicalPhase,
-    RefreshLogicalStatus, RefreshMaintenanceWakeStatus, RefreshOperation, RefreshOutcomeClass,
-    RefreshOutcomeCode, RefreshRequest, RefreshRequestState, RefreshRequestTrigger,
-    RefreshRetryAdvice, RefreshSelection, RefreshStatus, RefreshStatusKind,
+    AdmissionResponseBarrier, RefreshAdmission, RefreshFailureKind, RefreshFailureStage,
+    RefreshIntent, RefreshLogicalPhase, RefreshLogicalStatus, RefreshMaintenanceWakeStatus,
+    RefreshOperation, RefreshOutcomeClass, RefreshOutcomeCode, RefreshRequest, RefreshRequestState,
+    RefreshRequestTrigger, RefreshRetryAdvice, RefreshSelection, RefreshStatus, RefreshStatusKind,
     RefreshTerminalFailureScope, RefreshTerminalFailureType, RefreshTerminalOutcome,
 };
 pub use route_ledger::EventWatermark;

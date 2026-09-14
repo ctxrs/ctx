@@ -244,6 +244,7 @@ pub(super) struct SourceBackedRefreshAttempt {
     /// their typed receipt and project a success outcome from it at read time.
     pub(super) terminal_outcome: Option<RefreshTerminalOutcome>,
     pub(super) last_error: Option<String>,
+    pub(super) failure_diagnostic: Option<RefreshFailureDiagnostic>,
 }
 
 impl SourceBackedRefreshAttempt {
@@ -357,6 +358,21 @@ impl SourceBackedRefreshAttempt {
         let Some(fields) = value.as_object_mut() else {
             return value;
         };
+        if self.state == SourceBackedRefreshState::Failed {
+            if let Some(diagnostic) = &self.failure_diagnostic {
+                fields.insert(
+                    "refresh_failure_stage".to_owned(),
+                    json!(diagnostic.stage.as_str()),
+                );
+                fields.insert(
+                    "refresh_failure_kind".to_owned(),
+                    json!(diagnostic.kind.as_str()),
+                );
+                if let Some(reason) = diagnostic.coverage_reason {
+                    fields.insert("refresh_coverage_reason".to_owned(), json!(reason.as_str()));
+                }
+            }
+        }
         fields.insert("logical_request_id".to_owned(), json!(self.request_id));
         fields.insert(
             "logical_phase".to_owned(),
@@ -539,6 +555,9 @@ pub(super) fn projected_status_json(
             "error_code",
             "reason",
             "last_error",
+            "refresh_failure_stage",
+            "refresh_failure_kind",
+            "refresh_coverage_reason",
             "automatic_retry",
         ] {
             fields.remove(field);

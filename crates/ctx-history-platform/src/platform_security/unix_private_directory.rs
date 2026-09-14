@@ -203,9 +203,14 @@ pub(super) fn clear_extended_acl(_directory: &File) -> io::Result<()> {
 
 #[cfg(target_os = "macos")]
 pub(super) fn verify_no_extended_acl(file: &File) -> io::Result<()> {
+    let acl = unsafe { acl_get_fd_np(file.as_raw_fd(), ACL_TYPE_EXTENDED) };
+    verify_empty_acl(acl)
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn verify_empty_acl(acl: Acl) -> io::Result<()> {
     const ACL_FIRST_ENTRY: libc::c_int = 0;
 
-    let acl = unsafe { acl_get_fd_np(file.as_raw_fd(), ACL_TYPE_EXTENDED) };
     if acl.is_null() {
         let error = io::Error::last_os_error();
         // Darwin reports ENOENT when a regular file has no extended ACL.

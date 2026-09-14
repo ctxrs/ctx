@@ -25,7 +25,7 @@ use super::{
     parser::{
         project_cursor_jsonl_record_with_rejection, CursorJsonlRecordOutcome, CursorRejectionKind,
     },
-    projection::{CursorEventBody, CursorNativeEvent},
+    projection::{CursorEventBody, CursorNativeEvent, CursorTimestampState},
 };
 use crate::CURSOR_AGENT_TRANSCRIPT_SOURCE_FORMAT;
 use ctx_history_jsonl::{
@@ -53,7 +53,7 @@ const NATIVE_EVENT_LOGICAL_KIND: &str = "cursor.logical-event-v3";
 const LOGICAL_SESSION_KIND: &str = "cursor-session";
 const LOGICAL_EVENT_KIND: &str = "cursor-event";
 const SOURCE_SCHEMA_VARIANT: &str = "cursor-agent-transcript-jsonl-v1";
-const PARSER_REVISION: &str = "cursor-shared-jsonl-core-activity-v2-top-level-role";
+const PARSER_REVISION: &str = "cursor-shared-jsonl-core-activity-v3-turn-timestamp";
 const EVENT_SEQUENCE_PARTS: u64 = u16::MAX as u64 + 1;
 
 mod binding;
@@ -319,7 +319,7 @@ where
         leaf: &ProviderJsonlLeaf,
         source_file: Arc<OpenedProviderSourceFile>,
         _imported_at: DateTime<Utc>,
-        _checkpoint: Option<&TypedKey>,
+        checkpoint: Option<&TypedKey>,
         base_event_lookup: Option<ProviderBaseEventLookup<B>>,
         mode: JsonlFamilyProjectionMode,
     ) -> Result<Box<dyn JsonlFamilyProjector<Runtime = ProviderJsonlRuntime<B>>>> {
@@ -335,6 +335,7 @@ where
             source: leaf.source().clone(),
             native_session_id: binding.native_session_id,
             session_id,
+            timestamps: CursorTimestampState::resume(checkpoint),
             event_identities: match (mode, base_event_lookup) {
                 (JsonlFamilyProjectionMode::CertifiedAppend, Some(base_lookup)) => {
                     JsonlOrderedAppendOccurrenceState::for_append(base_lookup)
@@ -380,6 +381,7 @@ struct CursorProjector<B: ProviderRuntimeBinding> {
     source: SourceKey,
     native_session_id: String,
     session_id: StableEntityId,
+    timestamps: CursorTimestampState,
     event_identities:
         JsonlOrderedAppendOccurrenceState<CursorLogicalEventIdentity, ProviderBaseEventLookup<B>>,
     rejections: JsonlRecordRejections,
@@ -434,6 +436,7 @@ where
     }
 
     fn retry_replacement(&mut self) {
+        self.timestamps = CursorTimestampState::default();
         self.event_identities = JsonlOrderedAppendOccurrenceState::default();
     }
 
@@ -454,7 +457,7 @@ where
             return Ok(());
         }
         let evidence = record.evidence();
-        let events = match project_cursor_jsonl_record_with_rejection(
+        let mut events = match project_cursor_jsonl_record_with_rejection(
             record.bytes(),
             evidence.physical_ordinal(),
             evidence.physical_ordinal(),
@@ -468,6 +471,7 @@ where
                 return Ok(());
             }
         };
+        self.timestamps.apply(&mut events)?;
         for event in events {
             let duplicate_occurrence = next_event_occurrence::<B>(
                 &event,
@@ -495,7 +499,7 @@ where
     }
 
     fn provider_checkpoint(&self) -> Result<Option<TypedKey>> {
-        Ok(None)
+        Ok(self.timestamps.checkpoint())
     }
 
     fn rejected_records(&self) -> u64 {

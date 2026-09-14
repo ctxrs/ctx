@@ -642,6 +642,96 @@ fn full_projection_admits_a_valid_oversized_singleton_under_the_wire_cap() {
 #[derive(Clone, Default)]
 struct SharedBytes(Arc<Mutex<Vec<u8>>>);
 
+#[test]
+fn mcp_metadata_pages_advance_past_content_larger_than_the_response_cap() {
+    const RESPONSE_CAP: usize = 8 * 1024 * 1024;
+    let temp = tempfile::tempdir().unwrap();
+    let body = "\0".repeat(1_400_000);
+    assert!(
+        test_record(&test_source(), 1, &body)
+            .encode_stored()
+            .unwrap()
+            .len()
+            > RESPONSE_CAP
+    );
+    publish_fixture(
+        temp.path(),
+        &["before".to_owned(), body, "after".to_owned()],
+    );
+    for direction in [
+        CoreEventRangeDirection::Ascending,
+        CoreEventRangeDirection::Descending,
+    ] {
+        for providers in [vec![], vec!["codex".to_owned()]] {
+            let selected = CoreEventRangeSelection::all(CoreEventRangeFilters {
+                direction,
+                providers,
+                ..CoreEventRangeFilters::default()
+            })
+            .unwrap();
+            let wire =
+                EventQueryWireRequest::from_selection(&selected, EventContentProjection::None, 100);
+            let record_bytes = mcp_event_query_core_record_bytes(RESPONSE_CAP, wire.content);
+            let budget = CoreEventPageBudget::new(
+                record_bytes,
+                record_bytes.min(ctx_history_core::MAX_CORE_CONTENT_BYTES),
+            );
+            let mut cursor = None;
+            let mut sequences = Vec::new();
+            for _ in 0..3 {
+                let page = event_range_page_value(
+                    temp.path(),
+                    &selected,
+                    cursor.as_ref(),
+                    &wire,
+                    Some(budget),
+                )
+                .unwrap();
+                assert!(serde_json::to_vec(&page).unwrap().len() < RESPONSE_CAP);
+                let events = page["events"].as_array().unwrap();
+                assert_eq!(events.len(), 1);
+                let event = &events[0];
+                assert!(event["text"].is_null());
+                assert!(event["structured_content"].is_null());
+                assert!(event.get("activity").is_none());
+                assert_eq!(event["provider_session_id"], "provider-session");
+                assert_eq!(event["parser_revision"], "event-query-test-v1");
+                assert_eq!(event["content"]["policy_status"], "selected");
+                assert_eq!(event["content"]["complete"], true);
+                sequences.push(event["sequence"].as_u64().unwrap());
+                let next = page["next_cursor"]
+                    .as_str()
+                    .map(|value| decode_cursor(value).unwrap());
+                assert_eq!(page["terminal"], next.is_none());
+                if next.is_none() {
+                    break;
+                }
+                assert_ne!(next, cursor);
+                cursor = next;
+            }
+            let expected = match direction {
+                CoreEventRangeDirection::Ascending => [0, 1, 2],
+                CoreEventRangeDirection::Descending => [2, 1, 0],
+            };
+            assert_eq!(sequences, expected);
+            for projection in [EventContentProjection::Full, EventContentProjection::Text] {
+                let wire = EventQueryWireRequest::from_selection(&selected, projection, 100);
+                let record_bytes = mcp_event_query_core_record_bytes(RESPONSE_CAP, projection);
+                let budget = CoreEventPageBudget::new(
+                    record_bytes,
+                    record_bytes.min(ctx_history_core::MAX_CORE_CONTENT_BYTES),
+                );
+                assert!(matches!(
+                    event_range_page_value(temp.path(), &selected, None, &wire, Some(budget)),
+                    Err(EventQueryError::Range(
+                        CoreEventRangeError::RecordExceedsStrictBudget { .. }
+                    ))
+                ));
+            }
+        }
+    }
+}
+
 impl SharedBytes {
     fn bytes(&self) -> Vec<u8> {
         self.0.lock().unwrap().clone()

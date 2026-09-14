@@ -17,6 +17,7 @@ use super::{verify_supported_schema, UsageStoreError, MAX_DATABASE_BYTES, PAGE_S
 
 const MAX_FAMILY_BYTES: u64 = 8 * 1024 * 1024;
 
+#[cfg(any(test, not(unix)))]
 pub(super) fn protect_sqlite_files(path: &Path) -> Result<(), UsageStoreError> {
     protect_sqlite_member(path)?;
     for suffix in ["-wal", "-shm"] {
@@ -62,6 +63,15 @@ struct GuardedMember {
 }
 
 impl GuardedMember {
+    #[cfg(unix)]
+    fn retained(file: File) -> Self {
+        Self {
+            file,
+            len: 0,
+            modified: None,
+        }
+    }
+
     fn from_file(file: File) -> Result<Self, UsageStoreError> {
         verify_private_file_handle(&file)?;
         verify_file_owner(&file)?;
@@ -87,6 +97,15 @@ impl GuardedMember {
         }
         Ok(())
     }
+
+    #[cfg(unix)]
+    fn protect(&self, path: &Path) -> Result<(), UsageStoreError> {
+        verify_same_file(path, &self.file)?;
+        verify_file_owner(&self.file)?;
+        verify_single_link(&self.file)?;
+        restrict_private_file_handle(&self.file)?;
+        self.recheck(path, false)
+    }
 }
 
 pub(super) struct FamilyGuard {
@@ -106,6 +125,62 @@ impl FamilyGuard {
 
     pub(super) fn main_file(&self) -> &File {
         &self.main.file
+    }
+
+    pub(super) fn admit_created_auxiliaries(&mut self, path: &Path) -> Result<(), UsageStoreError> {
+        #[cfg(unix)]
+        {
+            for (slot, suffix) in [(&mut self.wal, "-wal"), (&mut self.shm, "-shm")] {
+                if slot.is_some() {
+                    continue;
+                }
+                let auxiliary = auxiliary_path(path, suffix);
+                match auxiliary.symlink_metadata() {
+                    Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+                        // Adopt the handle before any fallible validation. The
+                        // owning WritableStore closes SQLite before this family,
+                        // including when validation fails.
+                        *slot = Some(GuardedMember::retained(open_nofollow(&auxiliary, true)?));
+                    }
+                    Ok(_) => return Err(UsageStoreError::SchemaIdentity),
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            self.protect(path)
+        }
+        #[cfg(not(unix))]
+        {
+            protect_sqlite_files(path)?;
+            *self = preflight_existing_family(path, true)?;
+            Ok(())
+        }
+    }
+
+    pub(super) fn protect(&self, path: &Path) -> Result<(), UsageStoreError> {
+        #[cfg(unix)]
+        {
+            self.main.protect(path)?;
+            for (member, suffix) in [(&self.wal, "-wal"), (&self.shm, "-shm")] {
+                if let Some(member) = member {
+                    member.protect(&auxiliary_path(path, suffix))?;
+                }
+            }
+            self.recheck(path)
+        }
+        #[cfg(not(unix))]
+        protect_sqlite_files(path)
+    }
+
+    pub(super) fn before_commit(&self, path: &Path) -> Result<Option<Self>, UsageStoreError> {
+        self.recheck(path)?;
+        // Windows handle locks survive independent descriptor closes; retain
+        // its fresh no-reparse admission through commit. On Unix, rechecking
+        // the already-retained family preserves SQLite's process-owned locks.
+        #[cfg(not(unix))]
+        return preflight_existing_family(path, true).map(Some);
+        #[cfg(unix)]
+        Ok(None)
     }
 
     pub(super) fn recheck(&self, path: &Path) -> Result<(), UsageStoreError> {
@@ -273,6 +348,7 @@ pub(super) fn deserialize_read_only(image: Vec<u8>) -> Result<Connection, UsageS
     Ok(conn)
 }
 
+#[cfg(any(test, not(unix)))]
 fn protect_sqlite_member(path: &Path) -> Result<(), UsageStoreError> {
     let file = open_nofollow(path, false)?;
     restrict_private_file_handle(&file)?;
@@ -331,6 +407,21 @@ pub(super) fn verify_metadata_owner(metadata: &fs::Metadata) -> Result<(), Usage
 }
 
 pub(super) fn verify_same_file(path: &Path, file: &File) -> Result<(), UsageStoreError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        let named = path.symlink_metadata()?;
+        let retained = file.metadata()?;
+        if !named.is_file()
+            || named.file_type().is_symlink()
+            || !retained.is_file()
+            || named.dev() != retained.dev()
+            || named.ino() != retained.ino()
+        {
+            return Err(UsageStoreError::SchemaIdentity);
+        }
+    }
+    #[cfg(not(unix))]
     drop(reopen_same_file(path, file)?);
     Ok(())
 }

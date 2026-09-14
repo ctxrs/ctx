@@ -434,6 +434,8 @@ fn internal_registration_failure_uses_admission_retry_handoff() {
 
     assert!(run.failed, "{:#}", run.job);
     assert_eq!(run.job["error_code"], "source_refresh_admission_failed");
+    assert_eq!(run.job["refresh_failure_stage"], "admission");
+    assert_eq!(run.job["refresh_failure_kind"], "provider");
     assert_eq!(run.job["reason"], "control_plane");
     assert_eq!(run.job["structured_outcome"]["retryable"], true);
     assert_eq!(

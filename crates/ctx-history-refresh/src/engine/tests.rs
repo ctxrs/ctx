@@ -1245,6 +1245,9 @@ mod additional;
 #[path = "tests/execution_persistence.rs"]
 mod execution_persistence;
 
+#[path = "tests/failure_diagnostic.rs"]
+mod failure_diagnostic_tests;
+
 #[path = "tests/receipt.rs"]
 mod receipt_tests;
 
